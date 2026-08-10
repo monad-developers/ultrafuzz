@@ -13,8 +13,7 @@ import {
   MAX_GENERATED_TEST_COMPANION_BYTES,
   MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES
 } from "./artifact-limits.js";
-import { readRegularFileSnapshot } from "./schema-registry.js";
-import { assertNoSymlinkComponents } from "./safe-paths.js";
+import { readSinglyLinkedRegularFileSnapshotInside } from "./safe-paths.js";
 
 export const SEMANTIC_GATE_SCOPES = ["document", "filesystem", "cross-artifact", "git", "runtime-state"] as const;
 
@@ -105,7 +104,6 @@ export interface SemanticAggregationSourceEntryContext {
   sha256: string;
   bytes: Uint8Array;
   language?: string;
-  framework?: string;
   description?: string;
   provenance?: Readonly<Record<string, unknown>>;
 }
@@ -119,6 +117,7 @@ export interface SemanticAggregationSourceBundleContext {
   sourceManifestRelativePath: string;
   sourceManifestSha256: string;
   sourceRunId: string;
+  framework: string;
   entries: readonly SemanticAggregationSourceEntryContext[];
 }
 
@@ -712,6 +711,7 @@ function aggregationAuthenticatedReconciliationIssues(
       source_manifest_relative_path: bundle.sourceManifestRelativePath,
       source_manifest_sha256: bundle.sourceManifestSha256,
       source_run_id: bundle.sourceRunId,
+      framework: bundle.framework,
       generated_test_count: generatedTestCount,
       support_file_count: supportFileCount
     };
@@ -854,6 +854,7 @@ function aggregationBundleSummaryProjection(row: unknown): Readonly<Record<strin
     "source_manifest_relative_path",
     "source_manifest_sha256",
     "source_run_id",
+    "framework",
     "generated_test_count",
     "support_file_count"
   ]);
@@ -876,7 +877,6 @@ function aggregationExpectedEntryProjection(
     size_bytes: entry.sizeBytes,
     sha256: entry.sha256,
     ...(entry.language === undefined ? {} : { language: entry.language }),
-    ...(entry.framework === undefined ? {} : { framework: entry.framework }),
     ...(entry.description === undefined ? {} : { description: entry.description }),
     ...(entry.provenance === undefined ? {} : { provenance: entry.provenance })
   };
@@ -896,7 +896,6 @@ function aggregationSourceEntryProjection(row: unknown): Readonly<Record<string,
     "size_bytes",
     "sha256",
     "language",
-    "framework",
     "description",
     "provenance"
   ]);
@@ -967,51 +966,11 @@ function aggregationDestinationIssuesForRow(
 }
 
 function readStableAggregationDestination(root: string, filePath: string, expectedBytes: number): Buffer {
-  assertNoSymlinkComponents(root, filePath, "aggregation destination");
-  const descriptor = fs.openSync(
-    filePath,
-    fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0)
-  );
-  try {
-    const before = fs.fstatSync(descriptor, { bigint: true });
-    if (!before.isFile() || before.nlink !== 1n || before.size !== BigInt(expectedBytes)) {
-      throw new Error("destination is not a singly linked regular file with the declared size");
-    }
-    const chunks: Buffer[] = [];
-    let offset = 0;
-    for (;;) {
-      const remaining = expectedBytes + 1 - offset;
-      if (remaining <= 0) throw new Error("destination grew beyond the declared size");
-      const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, remaining));
-      const count = fs.readSync(descriptor, chunk, 0, chunk.length, offset);
-      if (count === 0) break;
-      offset += count;
-      chunks.push(chunk.subarray(0, count));
-    }
-    const after = fs.fstatSync(descriptor, { bigint: true });
-    const atPath = fs.lstatSync(filePath, { bigint: true });
-    if (
-      before.dev !== after.dev ||
-      before.ino !== after.ino ||
-      before.size !== after.size ||
-      before.mtimeNs !== after.mtimeNs ||
-      before.ctimeNs !== after.ctimeNs ||
-      after.dev !== atPath.dev ||
-      after.ino !== atPath.ino ||
-      after.nlink !== 1n ||
-      atPath.nlink !== 1n ||
-      atPath.isSymbolicLink() ||
-      !atPath.isFile() ||
-      offset !== expectedBytes
-    ) {
-      throw new Error("destination changed while it was authenticated");
-    }
-    assertNoSymlinkComponents(root, filePath, "aggregation destination");
-    if (fs.realpathSync(filePath) !== filePath) throw new Error("destination resolves through a path alias");
-    return Buffer.concat(chunks, offset);
-  } finally {
-    fs.closeSync(descriptor);
+  const bytes = readSinglyLinkedRegularFileSnapshotInside(root, filePath, expectedBytes, "aggregation destination");
+  if (bytes.byteLength !== expectedBytes) {
+    throw new Error("destination size differs from the authenticated source size");
   }
+  return bytes;
 }
 
 function aggregationSourceEntryIssues(document: unknown): SemanticGateIssue[] {
@@ -2534,8 +2493,16 @@ function generatedTestFileIntegrityIssues(document: unknown, context: SemanticGa
     } catch {
       // Reported below as missing or nonregular.
     }
-    if (filePath === undefined || stats === undefined || !stats.isFile() || stats.isSymbolicLink()) {
-      statIssues.push(issue(`${rowPath}.path`, `${label} is missing or nonregular: ${JSON.stringify(relativePath)}`));
+    if (
+      filePath === undefined ||
+      stats === undefined ||
+      !stats.isFile() ||
+      stats.isSymbolicLink() ||
+      stats.nlink !== 1
+    ) {
+      statIssues.push(
+        issue(`${rowPath}.path`, `${label} is missing, hard-linked, or nonregular: ${JSON.stringify(relativePath)}`)
+      );
       continue;
     }
     if (stats.size === 0) {
@@ -2563,7 +2530,12 @@ function generatedTestFileIntegrityIssues(document: unknown, context: SemanticGa
   for (const { row, rowPath, label, relativePath, filePath } of preflighted) {
     let contents: Buffer;
     try {
-      contents = readRegularFileSnapshot(filePath, MAX_GENERATED_TEST_COMPANION_BYTES);
+      contents = readSinglyLinkedRegularFileSnapshotInside(
+        root,
+        filePath,
+        MAX_GENERATED_TEST_COMPANION_BYTES,
+        `${label} ${JSON.stringify(relativePath)}`
+      );
     } catch {
       issues.push(
         issue(

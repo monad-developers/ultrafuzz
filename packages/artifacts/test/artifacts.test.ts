@@ -35,12 +35,18 @@ import {
   verifyArtifactManifestPrerequisites,
   writeArtifact,
   writeArtifactManifest,
-  writeGeneratedTestManifest,
+  writeGeneratedTestManifest as writeGeneratedTestManifestWithFramework,
   writeRunState
 } from "../src/index.js";
 
 function tempProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-artifacts-"));
+}
+
+function writeGeneratedTestManifest(
+  input: Omit<Parameters<typeof writeGeneratedTestManifestWithFramework>[0], "framework">
+): ReturnType<typeof writeGeneratedTestManifestWithFramework> {
+  return writeGeneratedTestManifestWithFramework({ ...input, framework: "foundry" });
 }
 
 function errnoError(code: string): NodeJS.ErrnoException {
@@ -936,21 +942,20 @@ test("generated-test manifests persist explicit generated files with provenance"
       {
         path: "generated-tests/Invariant.t.sol",
         content: generatedContents,
-        language: "solidity",
-        framework: "foundry"
+        language: "solidity"
       }
     ],
     supportFiles: [
       {
         path: "generated-tests/helpers/InvariantFixture.sol",
         content: supportContents,
-        language: "solidity",
-        framework: "foundry"
+        language: "solidity"
       }
     ]
   });
 
   assert.equal(manifest.schema_version, GENERATED_TESTS_SCHEMA_VERSION);
+  assert.equal(manifest.framework, "foundry");
   assert.equal(manifest.generated_tests.length, 1);
   assert.equal(manifest.generated_tests[0]!.path, "generated-tests/Invariant.t.sol");
   assert.equal(manifest.generated_tests[0]!.size_bytes, Buffer.byteLength(generatedContents));

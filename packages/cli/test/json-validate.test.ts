@@ -215,6 +215,7 @@ test("json validate enforces generated-test bundle array and support coupling wi
       schema_version: "ultrafuzz.generated-tests.v3",
       run_id: "run-1",
       node_id: "strategy-a",
+      framework: "foundry",
       generated_tests: [generatedEntry],
       support_files: [] as Array<typeof supportEntry>
     };

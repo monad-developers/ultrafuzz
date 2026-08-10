@@ -1015,6 +1015,7 @@ test("generated Smithers fails closed on schema-valid document semantic violatio
       schema_version: "ultrafuzz.generated-tests.v3",
       run_id: "run-one",
       node_id: "node-one",
+      framework: "foundry",
       generated_tests: [generatedTestEntry("generated-tests/Duplicate.t.sol", "duplicate\n")],
       support_files: [generatedTestEntry("generated-tests/Duplicate.t.sol", "duplicate\n")]
     };
@@ -1049,6 +1050,7 @@ test("generated Smithers rejects non-UTF-8 generated-test support companions", (
       schema_version: "ultrafuzz.generated-tests.v3",
       run_id: "run-one",
       node_id: "node-one",
+      framework: "foundry",
       generated_tests: [generatedTestEntry("generated-tests/Replay.t.sol", replayContents)],
       support_files: [generatedTestEntry("generated-tests/fixture.dat", supportContents)]
     };
@@ -1082,6 +1084,7 @@ test("generated Smithers binds generated-test manifests to the current run and l
         schema_version: "ultrafuzz.generated-tests.v3",
         run_id: "run-one",
         node_id: "node-one",
+        framework: "foundry",
         generated_tests: [],
         support_files: [],
         [field]: value
@@ -2600,6 +2603,7 @@ test("generated Smithers dependency verification fails closed before descendant 
           ? {
               run_id: "run-one",
               node_id: "generated-tests-fanin",
+              framework: "foundry",
               generated_tests: [generatedTestEntry("generated-tests/Property.t.sol", "contract Property {}\n")],
               support_files: [generatedTestEntry("generated-tests/PropertyHelper.sol", "library PropertyHelper {}\n")]
             }
@@ -2725,6 +2729,7 @@ test("generated Smithers dependency verification fails closed before descendant 
       schema_version: "ultrafuzz.generated-tests.v3",
       run_id: "run-one",
       node_id: "generated-tests-fanin",
+      framework: "foundry",
       generated_tests: [generatedTestEntry("generated-tests/Property.t.sol", propertyContents)],
       support_files: [generatedTestEntry("generated-tests/PropertyHelper.sol", propertyHelperContents)]
     })}\n`

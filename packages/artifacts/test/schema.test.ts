@@ -1261,13 +1261,13 @@ test("generated test manifest runtime and exported schemas enforce the same safe
     schema_version: GENERATED_TESTS_SCHEMA_VERSION,
     run_id: "run-1",
     node_id: "strategy-a",
+    framework: "foundry",
     generated_tests: [
       {
         path: "generated-tests/Invariant.t.sol",
         size_bytes: 1,
         sha256: "a".repeat(64),
         language: "solidity",
-        framework: "foundry",
         description: "Focused invariant replay"
       }
     ],
@@ -1282,6 +1282,24 @@ test("generated test manifest runtime and exported schemas enforce the same safe
   const missingSupportFiles = structuredClone(manifest) as Record<string, unknown>;
   delete missingSupportFiles.support_files;
   assert.equal(validateGeneratedTestManifestSchema(missingSupportFiles).ok, false);
+  const missingFramework = structuredClone(manifest) as Record<string, unknown>;
+  delete missingFramework.framework;
+  assert.equal(validateGeneratedTestManifestSchema(missingFramework).ok, false);
+  for (const framework of ["foundry/hardhat", " foundry", "fuzz🚀", "a".repeat(129)]) {
+    assert.equal(validateGeneratedTestManifestSchema({ ...manifest, framework }).ok, false, framework);
+    assert.equal(
+      validateArtifactContract("ultrafuzz/generated-tests@3", JSON.stringify({ ...manifest, framework })).ok,
+      false,
+      framework
+    );
+  }
+  assert.equal(
+    validateGeneratedTestManifestSchema({
+      ...manifest,
+      generated_tests: [{ ...manifest.generated_tests[0]!, framework: "hardhat" }]
+    }).ok,
+    false
+  );
   const supportManifest = {
     ...manifest,
     support_files: [
@@ -1316,6 +1334,7 @@ test("generated test manifest runtime and exported schemas enforce the same safe
     schema_version: GENERATED_TESTS_SCHEMA_VERSION,
     run_id: "run-1",
     node_id: "strategy-a",
+    framework: "foundry",
     support_files: [],
     test_files: [{ path: "generated-tests/Invariant.t.sol" }]
   };
@@ -1353,6 +1372,7 @@ test("generated-test file-directory path conflicts remain explicit document sema
     schema_version: GENERATED_TESTS_SCHEMA_VERSION,
     run_id: "run-1",
     node_id: "strategy-a",
+    framework: "foundry",
     generated_tests: [
       {
         path: "generated-tests/Replay.t.sol",
@@ -1391,6 +1411,7 @@ test("present generated-test aggregation provenance cannot be an empty object", 
         source_manifest_relative_path: "generated-tests.json",
         source_manifest_sha256: "b".repeat(64),
         source_run_id: "run-1",
+        framework: "foundry",
         generated_test_count: 1,
         support_file_count: 0,
         disposition: "copied"
@@ -1670,6 +1691,7 @@ test("aggregation skips require a typed source kind and attempt identity", () =>
         source_manifest_relative_path: "generated-tests.json",
         source_manifest_sha256: "b".repeat(64),
         source_run_id: "run-1",
+        framework: "foundry",
         generated_test_count: 1,
         support_file_count: 0,
         disposition: "skipped",

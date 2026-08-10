@@ -335,6 +335,7 @@ function appendOutputContract(rendered: string, input: PromptRenderInput, curren
                 schema_version: "ultrafuzz.generated-tests.v3",
                 run_id: input.run.id,
                 node_id: input.node.logicalId,
+                framework: "foundry",
                 generated_tests: [],
                 support_files: []
               })

@@ -120,6 +120,12 @@
       "maxLength": 4096,
       "pattern": "^(?!\\.{1,2}(?:\\/|$))[A-Za-z0-9._@+-]{1,128}(?:\\/(?!\\.{1,2}(?:\\/|$))[A-Za-z0-9._@+-]{1,128}){0,63}(?![\\s\\S])"
     },
+    "generatedTestFramework": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$"
+    },
     "aggregationReason": {
       "type": "string",
       "minLength": 1,
@@ -155,6 +161,9 @@
         "source_run_id": {
           "$ref": "#/$defs/aggregationId"
         },
+        "framework": {
+          "$ref": "#/$defs/generatedTestFramework"
+        },
         "generated_test_count": {
           "type": "integer",
           "minimum": 0,
@@ -182,6 +191,7 @@
         "source_manifest_relative_path",
         "source_manifest_sha256",
         "source_run_id",
+        "framework",
         "generated_test_count",
         "support_file_count",
         "disposition"
@@ -266,11 +276,6 @@
           "pattern": "^[a-f0-9]{64}$"
         },
         "language": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 16384
-        },
-        "framework": {
           "type": "string",
           "minLength": 1,
           "maxLength": 16384
@@ -426,11 +431,6 @@
           "pattern": "^[a-f0-9]{64}$"
         },
         "language": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 16384
-        },
-        "framework": {
           "type": "string",
           "minLength": 1,
           "maxLength": 16384

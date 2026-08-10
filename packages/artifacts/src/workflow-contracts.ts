@@ -13,6 +13,7 @@ import {
 } from "./artifact-limits.js";
 import {
   generatedTestEntrySchema,
+  generatedTestFrameworkSchema,
   generatedTestPathSchema,
   generatedTestProvenanceSchema
 } from "./generated-test-schema.js";
@@ -1410,7 +1411,6 @@ const aggregationFileSchema = z
     size_bytes: generatedTestEntrySchema.shape.size_bytes,
     sha256: generatedTestEntrySchema.shape.sha256,
     language: generatedTestEntrySchema.shape.language,
-    framework: generatedTestEntrySchema.shape.framework,
     description: generatedTestEntrySchema.shape.description,
     provenance: generatedTestProvenanceSchema.optional()
   })
@@ -1431,7 +1431,6 @@ const skippedAggregationFileSchema = z
     size_bytes: generatedTestEntrySchema.shape.size_bytes,
     sha256: generatedTestEntrySchema.shape.sha256,
     language: generatedTestEntrySchema.shape.language,
-    framework: generatedTestEntrySchema.shape.framework,
     description: generatedTestEntrySchema.shape.description,
     provenance: generatedTestProvenanceSchema.optional(),
     reason: aggregationReason
@@ -1448,6 +1447,7 @@ const aggregationSourceBundleSchema = z
     source_manifest_relative_path: aggregationSafeRelativePath,
     source_manifest_sha256: sha256,
     source_run_id: aggregationId,
+    framework: generatedTestFrameworkSchema,
     generated_test_count: nonNegativeInteger.max(MAX_GENERATED_TEST_BUNDLE_ENTRIES),
     support_file_count: nonNegativeInteger.max(MAX_GENERATED_TEST_BUNDLE_ENTRIES),
     disposition: z.enum(["empty", "copied", "skipped"]),

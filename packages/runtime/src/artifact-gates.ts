@@ -20,6 +20,7 @@ import {
   readArtifactManifest,
   readJsonFile,
   readRegularFileSnapshot,
+  readSinglyLinkedRegularFileSnapshotInside,
   readRunState,
   parseStrictJsonBytes,
   redactValue,
@@ -1538,7 +1539,15 @@ function verifyRequiredArtifactShape(
   node: PlannedGraphNode,
   attemptId: string
 ): RuntimeDiagnostic[] {
-  const artifactBytes = readRegularFileSnapshot(absolutePath, MAX_ARTIFACT_SNAPSHOT_BYTES);
+  const artifactBytes =
+    output.contract === "ultrafuzz/generated-tests@3"
+      ? readSinglyLinkedRegularFileSnapshotInside(
+          artifactDir,
+          absolutePath,
+          MAX_ARTIFACT_SNAPSHOT_BYTES,
+          "generated-test manifest"
+        )
+      : readRegularFileSnapshot(absolutePath, MAX_ARTIFACT_SNAPSHOT_BYTES);
   const schemaDiagnostics = verifyRequiredArtifactSchemaBinding(absolutePath, output, artifactBytes);
   if (schemaDiagnostics.some((diagnostic) => diagnostic.severity === "error")) return schemaDiagnostics;
   const binding = artifactContractSchemaBinding(output.contract);

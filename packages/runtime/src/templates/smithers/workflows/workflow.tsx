@@ -217,7 +217,6 @@ type AuthenticatedAggregationSourceEntry = {
   sha256: string;
   bytes: Buffer;
   language?: string;
-  framework?: string;
   description?: string;
   provenance?: Readonly<Record<string, unknown>>;
 };
@@ -231,6 +230,7 @@ type AuthenticatedAggregationSourceBundle = {
   sourceManifestRelativePath: string;
   sourceManifestSha256: string;
   sourceRunId: string;
+  framework: string;
   entries: readonly AuthenticatedAggregationSourceEntry[];
 };
 
@@ -2253,12 +2253,12 @@ function assertVerifiedDependency(
         const manifest = validation.value as {
           run_id: string;
           node_id: string;
+          framework: string;
           generated_tests: Array<{
             path: string;
             size_bytes: number;
             sha256: string;
             language?: string;
-            framework?: string;
             description?: string;
             provenance?: Readonly<Record<string, unknown>>;
           }>;
@@ -2267,7 +2267,6 @@ function assertVerifiedDependency(
             size_bytes: number;
             sha256: string;
             language?: string;
-            framework?: string;
             description?: string;
             provenance?: Readonly<Record<string, unknown>>;
           }>;
@@ -2299,7 +2298,6 @@ function assertVerifiedDependency(
             sha256: candidate.sha256,
             bytes: Buffer.from(companion.contents),
             ...(candidate.language === undefined ? {} : { language: candidate.language }),
-            ...(candidate.framework === undefined ? {} : { framework: candidate.framework }),
             ...(candidate.description === undefined ? {} : { description: candidate.description }),
             ...(candidate.provenance === undefined ? {} : { provenance: Object.freeze({ ...candidate.provenance }) })
           });
@@ -2317,6 +2315,7 @@ function assertVerifiedDependency(
             sourceManifestRelativePath: entry.path,
             sourceManifestSha256: artifactSha,
             sourceRunId: manifest.run_id,
+            framework: manifest.framework,
             entries: Object.freeze(authenticatedEntries)
           })
         );
@@ -4964,7 +4963,6 @@ function verifyGeneratedTestFiles(artifactDir: string, value: unknown): Array<{ 
       size_bytes: number;
       sha256: string;
       language?: string;
-      framework?: string;
       description?: string;
       provenance?: Readonly<Record<string, unknown>>;
     }>;
@@ -4973,7 +4971,6 @@ function verifyGeneratedTestFiles(artifactDir: string, value: unknown): Array<{ 
       size_bytes: number;
       sha256: string;
       language?: string;
-      framework?: string;
       description?: string;
       provenance?: Readonly<Record<string, unknown>>;
     }>;

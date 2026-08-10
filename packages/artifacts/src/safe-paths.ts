@@ -135,6 +135,48 @@ export function assertRegularFileInside(root: string, filePath: string, label = 
   assertRealPathInside(rootAbsolute, fileAbsolute, label);
 }
 
+/**
+ * Capture one immutable, singly linked regular file without accepting lexical
+ * aliases, symlink components, hard links, or an inode swap at its pathname.
+ */
+export function readSinglyLinkedRegularFileSnapshotInside(
+  root: string,
+  filePath: string,
+  maxBytes: number,
+  label = "file path"
+): Buffer {
+  const rootAbsolute = path.resolve(root);
+  const fileAbsolute = path.resolve(filePath);
+  assertPathInside(rootAbsolute, fileAbsolute, label);
+  assertNoSymlinkComponents(rootAbsolute, fileAbsolute, label);
+  if (fs.realpathSync(rootAbsolute) !== rootAbsolute) {
+    throw new ArtifactPathError("path-alias", `${label} root must be canonical: ${rootAbsolute}`);
+  }
+  assertRegularFileInside(rootAbsolute, fileAbsolute, label);
+  const before = fs.lstatSync(fileAbsolute, { bigint: true });
+  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n) {
+    throw new ArtifactPathError("hard-link", `${label} must be a singly linked regular file: ${fileAbsolute}`);
+  }
+  const bytes = readRegularFileSnapshot(fileAbsolute, maxBytes);
+  const after = fs.lstatSync(fileAbsolute, { bigint: true });
+  assertNoSymlinkComponents(rootAbsolute, fileAbsolute, label);
+  if (
+    !after.isFile() ||
+    after.isSymbolicLink() ||
+    after.nlink !== 1n ||
+    before.dev !== after.dev ||
+    before.ino !== after.ino ||
+    before.size !== after.size ||
+    before.mtimeNs !== after.mtimeNs ||
+    before.ctimeNs !== after.ctimeNs ||
+    after.size !== BigInt(bytes.byteLength) ||
+    fs.realpathSync(fileAbsolute) !== fileAbsolute
+  ) {
+    throw new ArtifactPathError("changed-file", `${label} changed while it was captured: ${fileAbsolute}`);
+  }
+  return bytes;
+}
+
 export function ensureSafeDirectory(root: string, relativePath = "."): string {
   const rootAbsolute = path.resolve(root);
   const directory =

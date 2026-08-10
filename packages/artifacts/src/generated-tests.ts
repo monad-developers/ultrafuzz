@@ -11,6 +11,7 @@ import {
 import {
   GENERATED_TESTS_DIR,
   generatedTestEntriesSchema,
+  generatedTestFrameworkSchema,
   generatedTestProvenanceSchema
 } from "./generated-test-schema.js";
 import { validateRegisteredJsonSchema } from "./json-schema-validator.js";
@@ -22,12 +23,12 @@ import {
   ensureSafeDirectory,
   normalizeSafeRelativePath,
   prepareSafeFilePath,
+  readSinglyLinkedRegularFileSnapshotInside,
   safeResolveInside,
   sha256Bytes,
   writeFileDurable,
   writeJsonDurable
 } from "./safe-paths.js";
-import { readRegularFileSnapshot } from "./schema-registry.js";
 import { validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 import { parseStrictJsonBytes } from "./strict-json.js";
 
@@ -37,8 +38,10 @@ export const GENERATED_TESTS_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:ge
 
 export {
   GENERATED_TESTS_DIR,
+  GENERATED_TEST_FRAMEWORK_PATTERN,
   GENERATED_TEST_MANIFEST_PATH_PATTERN,
   generatedTestEntrySchema,
+  generatedTestFrameworkSchema,
   generatedTestPathSchema,
   generatedTestProvenanceSchema
 } from "./generated-test-schema.js";
@@ -60,7 +63,6 @@ export interface GeneratedTestInput {
   path: string;
   content?: string | Uint8Array;
   language?: string;
-  framework?: string;
   description?: string;
   provenance?: GeneratedTestProvenance;
 }
@@ -71,7 +73,6 @@ export interface GeneratedTestEntry {
   sha256: string;
   provenance?: GeneratedTestProvenance;
   language?: string;
-  framework?: string;
   description?: string;
 }
 
@@ -79,6 +80,7 @@ export interface GeneratedTestManifest {
   schema_version: typeof GENERATED_TESTS_SCHEMA_VERSION;
   run_id: string;
   node_id: string;
+  framework: string;
   generated_tests: GeneratedTestEntry[];
   support_files: GeneratedTestEntry[];
   provenance?: GeneratedTestProvenance;
@@ -91,6 +93,7 @@ export const generatedTestManifestSchema = z
     schema_version: z.literal(GENERATED_TESTS_SCHEMA_VERSION),
     run_id: nonEmptyString,
     node_id: nonEmptyString,
+    framework: generatedTestFrameworkSchema,
     generated_tests: generatedTestEntriesSchema,
     support_files: generatedTestEntriesSchema,
     provenance: generatedTestProvenanceSchema.optional()
@@ -180,6 +183,7 @@ export function assertGeneratedTestBundleResourceBounds(manifest: GeneratedTestM
 export function writeGeneratedTestManifest(input: {
   layout: RunLayout;
   nodeId: string;
+  framework: string;
   tests: GeneratedTestInput[];
   supportFiles: GeneratedTestInput[];
   provenance?: GeneratedTestProvenance;
@@ -200,6 +204,7 @@ export function writeGeneratedTestManifest(input: {
     schema_version: GENERATED_TESTS_SCHEMA_VERSION,
     run_id: input.layout.runId,
     node_id: input.nodeId,
+    framework: input.framework,
     generated_tests,
     support_files,
     provenance
@@ -210,9 +215,12 @@ export function writeGeneratedTestManifest(input: {
 }
 
 export function readGeneratedTestManifest(layout: RunLayout, nodeId: string): GeneratedTestManifest {
-  const manifestPath = path.join(getNodeArtifactDir(layout, nodeId), GENERATED_TESTS_MANIFEST);
+  const nodeDir = getNodeArtifactDir(layout, nodeId);
+  const manifestPath = path.join(nodeDir, GENERATED_TESTS_MANIFEST);
   return assertGeneratedTestManifestSchema(
-    parseStrictJsonBytes(readRegularFileSnapshot(manifestPath, 64 * 1024 * 1024))
+    parseStrictJsonBytes(
+      readSinglyLinkedRegularFileSnapshotInside(nodeDir, manifestPath, 64 * 1024 * 1024, "generated tests manifest")
+    )
   );
 }
 
@@ -229,7 +237,12 @@ function writeGeneratedTestEntry(
     writeFileDurable(absolutePath, input.content);
   }
   assertRegularFileInside(generatedTestsRoot, absolutePath, "generated test file");
-  const contents = readRegularFileSnapshot(absolutePath, MAX_GENERATED_TEST_COMPANION_BYTES);
+  const contents = readSinglyLinkedRegularFileSnapshotInside(
+    generatedTestsRoot,
+    absolutePath,
+    MAX_GENERATED_TEST_COMPANION_BYTES,
+    "generated test file"
+  );
   if (contents.length === 0) {
     throw new Error(`generated test file must be non-empty: ${absolutePath}`);
   }
@@ -259,9 +272,6 @@ function generatedTestEntryFromSnapshot(
   if (input.language !== undefined) {
     entry.language = input.language;
   }
-  if (input.framework !== undefined) {
-    entry.framework = input.framework;
-  }
   if (input.description !== undefined) {
     entry.description = input.description;
   }
@@ -272,6 +282,7 @@ function preflightGeneratedTestInputShapes(
   input: {
     layout: RunLayout;
     nodeId: string;
+    framework: string;
     tests: readonly GeneratedTestInput[];
     supportFiles: readonly GeneratedTestInput[];
   },
@@ -324,6 +335,7 @@ function preflightGeneratedTestInputShapes(
     schema_version: GENERATED_TESTS_SCHEMA_VERSION,
     run_id: input.layout.runId,
     node_id: input.nodeId,
+    framework: input.framework,
     generated_tests: tests.map((entry) =>
       generatedTestEntryFromSnapshot(
         canonicalGeneratedTestRelativePath(entry.path, "generated test path"),
@@ -385,7 +397,12 @@ function preflightGeneratedTestFiles(
     }
   }
   for (const { label, manifestPath, absolutePath } of existingFiles) {
-    const contents = readRegularFileSnapshot(absolutePath, MAX_GENERATED_TEST_COMPANION_BYTES);
+    const contents = readSinglyLinkedRegularFileSnapshotInside(
+      generatedTestsRoot,
+      absolutePath,
+      MAX_GENERATED_TEST_COMPANION_BYTES,
+      `${label} file`
+    );
     if (contents.length === 0) {
       throw new Error(`${label} file must be non-empty: ${manifestPath}`);
     }
@@ -416,6 +433,9 @@ function assertGeneratedTestDestinationCanBeReplaced(filePath: string): void {
   }
   if (!fileStats.isFile()) {
     throw new ArtifactPathError("not-file", `generated-test bundle destination must be a regular file: ${filePath}`);
+  }
+  if (fileStats.nlink !== 1) {
+    throw new ArtifactPathError("hard-link", `generated-test bundle destination must be singly linked: ${filePath}`);
   }
 }
 

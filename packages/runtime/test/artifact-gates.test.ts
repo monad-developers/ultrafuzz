@@ -305,6 +305,7 @@ test("required artifact gate validates generated-test manifest shape and listed 
       schema_version: "ultrafuzz.generated-tests.v3",
       run_id: "run-1",
       node_id: "strategy-a",
+      framework: "foundry",
       support_files: [],
       test_files: [{ path: "generated-tests/Invariant.t.sol" }]
     }),
@@ -323,6 +324,7 @@ test("required artifact gate validates generated-test manifest shape and listed 
         schema_version: "ultrafuzz.generated-tests.v3",
         run_id: "run-1",
         node_id: "strategy-a",
+        framework: "foundry",
         generated_tests: [],
         support_files: [supportEntry]
       }
@@ -333,6 +335,7 @@ test("required artifact gate validates generated-test manifest shape and listed 
         schema_version: "ultrafuzz.generated-tests.v3",
         run_id: "run-1",
         node_id: "strategy-a",
+        framework: "foundry",
         generated_tests: [generatedEntry, structuredClone(generatedEntry)],
         support_files: []
       }
@@ -343,6 +346,7 @@ test("required artifact gate validates generated-test manifest shape and listed 
         schema_version: "ultrafuzz.generated-tests.v3",
         run_id: "run-1",
         node_id: "strategy-a",
+        framework: "foundry",
         generated_tests: [generatedEntry],
         support_files: [supportEntry, structuredClone(supportEntry)]
       }
@@ -363,6 +367,7 @@ test("required artifact gate validates generated-test manifest shape and listed 
     schema_version: "ultrafuzz.generated-tests.v3",
     run_id: "run-1",
     node_id: "strategy-a",
+    framework: "foundry",
     generated_tests: Array.from({ length: 5 }, (_, index) => ({
       path: `generated-tests/Oversized-${index}.sol`,
       size_bytes: 16 * 1024 * 1024,
@@ -389,6 +394,7 @@ test("required artifact gate validates generated-test manifest shape and listed 
       schema_version: "ultrafuzz.generated-tests.v3",
       run_id: "run-1",
       node_id: "strategy-a",
+      framework: "foundry",
       generated_tests: [generatedEntry],
       support_files: []
     }),
@@ -425,6 +431,7 @@ test("required artifact gate validates generated-test manifest shape and listed 
         schema_version: "ultrafuzz.generated-tests.v3",
         run_id: "run-1",
         node_id: "strategy-a",
+        framework: "foundry",
         generated_tests,
         support_files: []
       }),
@@ -451,6 +458,7 @@ test("required artifact gate validates generated-test manifest shape and listed 
         schema_version: "ultrafuzz.generated-tests.v3",
         run_id: "run-1",
         node_id: "strategy-a",
+        framework: "foundry",
         generated_tests: [generatedEntry],
         support_files: [],
         [field]: value
@@ -478,6 +486,7 @@ test("required artifact gate validates generated-test manifest shape and listed 
       schema_version: "ultrafuzz.generated-tests.v3",
       run_id: "run-1",
       node_id: "strategy-a",
+      framework: "foundry",
       generated_tests: [generatedEntry],
       support_files: [manifestEntry("generated-tests/InvariantFixture.sol", binarySupportContents)]
     }),
@@ -501,6 +510,7 @@ test("required artifact gate validates generated-test manifest shape and listed 
       schema_version: "ultrafuzz.generated-tests.v3",
       run_id: "run-1",
       node_id: "strategy-a",
+      framework: "foundry",
       generated_tests: [generatedEntry],
       support_files: [manifestEntry("generated-tests/InvariantFixture.sol", supportContents)]
     }),

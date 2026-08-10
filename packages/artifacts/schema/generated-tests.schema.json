@@ -14,6 +14,9 @@
       "type": "string",
       "minLength": 1
     },
+    "framework": {
+      "$ref": "#/$defs/generatedTestFramework"
+    },
     "generated_tests": {
       "maxItems": 1024,
       "type": "array",
@@ -34,7 +37,7 @@
       "$ref": "#/$defs/generatedTestProvenance"
     }
   },
-  "required": ["schema_version", "run_id", "node_id", "generated_tests", "support_files"],
+  "required": ["schema_version", "run_id", "node_id", "framework", "generated_tests", "support_files"],
   "additionalProperties": false,
   "$id": "urn:ultrafuzz:schema:artifacts:generated-tests:3",
   "title": "Ultrafuzz generated tests manifest",
@@ -61,6 +64,12 @@
     }
   ],
   "$defs": {
+    "generatedTestFramework": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$"
+    },
     "generatedTestEntry": {
       "type": "object",
       "properties": {
@@ -80,11 +89,6 @@
           "$ref": "#/$defs/generatedTestProvenance"
         },
         "language": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 16384
-        },
-        "framework": {
           "type": "string",
           "minLength": 1,
           "maxLength": 16384

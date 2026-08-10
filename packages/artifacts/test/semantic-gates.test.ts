@@ -1165,6 +1165,7 @@ test("every contextual registration executes real positive and negative checks",
       source_manifest_relative_path: "generated-tests.json",
       source_manifest_sha256: aggregationManifestDigest,
       source_run_id: "run-a",
+      framework: "foundry",
       generated_test_count: 1,
       support_file_count: 0,
       disposition: "copied"
@@ -1244,6 +1245,7 @@ test("every contextual registration executes real positive and negative checks",
                 sourceManifestRelativePath: "generated-tests.json",
                 sourceManifestSha256: aggregationManifestDigest,
                 sourceRunId: "run-a",
+                framework: "foundry",
                 entries: [
                   {
                     kind: "generated-test",

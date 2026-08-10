@@ -159,7 +159,7 @@ describe("prompt rendering", () => {
     }
     expect(result.renderedMarkdown).toContain("generated-tests.schema.json");
     expect(result.renderedMarkdown).toContain(
-      '{"schema_version":"ultrafuzz.generated-tests.v3","run_id":"run-1","node_id":"boundary-tests","generated_tests":[],"support_files":[]}'
+      '{"schema_version":"ultrafuzz.generated-tests.v3","run_id":"run-1","node_id":"boundary-tests","framework":"foundry","generated_tests":[],"support_files":[]}'
     );
     expect(result.renderedMarkdown).not.toContain('"node_id":"<node-id>"');
     expect(result.renderedMarkdown).toContain("## Generated-test Bundle Instructions");

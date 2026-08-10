@@ -3,21 +3,24 @@ import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 import {
+  ARTIFACT_MANIFEST_FILE,
   ARTIFACT_VERIFICATION_SCHEMA_VERSION,
   MAX_GENERATED_TEST_COMPANION_BYTES,
   assertArtifactVerificationMarkerSemantics,
   assertGeneratedTestManifestSemantics,
   assertNoSymlinkComponents,
   assertPathInside,
-  assertRegularFileInside,
   artifactContractDefinition,
   artifactContractSchemaBinding,
   parseStrictJsonBytes,
   readPlannedGraphDocument,
-  readRegularFileSnapshot,
+  readSinglyLinkedRegularFileSnapshotInside,
   safeResolveInside,
   validateArtifactContractBytes,
+  validateArtifactManifest,
   validateArtifactVerificationMarker,
+  verifyArtifactManifestPrerequisites,
+  type ArtifactManifest,
   type ArtifactVerificationMarker,
   type GeneratedTestEntry,
   type GeneratedTestManifest,
@@ -30,6 +33,20 @@ import {
 
 const MAX_AGGREGATION_AUTHORITY_BYTES = 64 * 1024 * 1024;
 const VERIFICATION_MARKER_DIRECTORY = ".ultrafuzz-verification";
+
+interface AuthenticatedPublicationSnapshot {
+  path: string;
+  absolutePath: string;
+  bytes: Buffer;
+  sha256: string;
+}
+
+interface AuthenticatedProducerAuthority {
+  marker: ArtifactVerificationMarker;
+  artifactManifest: ArtifactManifest;
+  artifactManifestBytes: Buffer;
+  publications: ReadonlyMap<string, AuthenticatedPublicationSnapshot>;
+}
 
 /**
  * Build the aggregation gate's immutable source authority from the planned
@@ -56,21 +73,28 @@ export function authenticatedAggregationSemanticContext(input: {
         attempt.attemptId,
         "generated-test aggregation source artifact directory"
       );
-      const marker = authenticatedProducerMarker(input.layout, producer, attempt.attemptId, artifactRoot);
-      const publications = new Map(marker.publications.map((publication) => [publication.path, publication.sha256]));
+      const authority = authenticatedProducerAuthority(
+        input.layout,
+        graph.nodes,
+        producer,
+        attempt.attemptId,
+        attempt.attemptIndex,
+        artifactRoot
+      );
       for (const output of generatedOutputs) {
-        const markerArtifact = marker.artifacts.find((artifact) => artifact.path === output.path);
+        const markerArtifact = authority.marker.artifacts.find((artifact) => artifact.path === output.path);
         if (markerArtifact === undefined) {
           throw new Error(`verified producer ${attempt.attemptId} omits generated-test output ${output.path}`);
         }
-        const manifestPath = safeResolveInside(artifactRoot, output.path, "generated-test aggregation source manifest");
-        assertRegularFileInside(artifactRoot, manifestPath, "generated-test aggregation source manifest");
-        const manifestBytes = readRegularFileSnapshot(manifestPath, MAX_AGGREGATION_AUTHORITY_BYTES);
-        const manifestSha256 = digest(manifestBytes);
-        if (markerArtifact.sha256 !== manifestSha256 || publications.get(output.path) !== manifestSha256) {
+        const manifestSnapshot = authority.publications.get(output.path);
+        if (manifestSnapshot === undefined || markerArtifact.sha256 !== manifestSnapshot.sha256) {
           throw new Error(`verified generated-test manifest publication changed ${attempt.attemptId}/${output.path}`);
         }
-        const validation = validateArtifactContractBytes("ultrafuzz/generated-tests@3", manifestBytes, manifestPath);
+        const validation = validateArtifactContractBytes(
+          "ultrafuzz/generated-tests@3",
+          manifestSnapshot.bytes,
+          manifestSnapshot.absolutePath
+        );
         if (!validation.ok || validation.value === undefined) {
           throw new Error(`verified generated-test manifest is no longer valid ${attempt.attemptId}/${output.path}`);
         }
@@ -81,11 +105,9 @@ export function authenticatedAggregationSemanticContext(input: {
         }
         const entries = [
           ...manifest.generated_tests.map((entry) =>
-            authenticatedEntry("generated-test", entry, artifactRoot, publications)
+            authenticatedEntry("generated-test", entry, authority.publications)
           ),
-          ...manifest.support_files.map((entry) =>
-            authenticatedEntry("support-file", entry, artifactRoot, publications)
-          )
+          ...manifest.support_files.map((entry) => authenticatedEntry("support-file", entry, authority.publications))
         ];
         sourceBundles.push(
           Object.freeze({
@@ -93,10 +115,11 @@ export function authenticatedAggregationSemanticContext(input: {
             nodeId: manifest.node_id,
             sourceAttemptId: attempt.attemptId,
             attemptIndex: attempt.attemptIndex,
-            sourceManifestPath: manifestPath,
+            sourceManifestPath: manifestSnapshot.absolutePath,
             sourceManifestRelativePath: output.path,
-            sourceManifestSha256: manifestSha256,
+            sourceManifestSha256: manifestSnapshot.sha256,
             sourceRunId: manifest.run_id,
+            framework: manifest.framework,
             entries: Object.freeze(entries)
           })
         );
@@ -142,18 +165,25 @@ function plannedAttempts(node: PlannedGraphNodeDocument): Array<{ attemptId: str
   }));
 }
 
-function authenticatedProducerMarker(
+function authenticatedProducerAuthority(
   layout: RunLayout,
+  nodes: readonly PlannedGraphNodeDocument[],
   producer: PlannedGraphNodeDocument,
   attemptId: string,
+  attemptIndex: number,
   artifactRoot: string
-): ArtifactVerificationMarker {
+): AuthenticatedProducerAuthority {
   const markerRoot = path.resolve(layout.root, VERIFICATION_MARKER_DIRECTORY);
   assertPathInside(layout.root, markerRoot, "artifact verification marker root");
   assertNoSymlinkComponents(layout.root, markerRoot, "artifact verification marker root");
   const markerPath = safeResolveInside(markerRoot, `${attemptId}.json`, "artifact verification marker");
-  assertRegularFileInside(markerRoot, markerPath, "artifact verification marker");
-  const parsed = parseStrictJsonBytes(readRegularFileSnapshot(markerPath, MAX_AGGREGATION_AUTHORITY_BYTES));
+  const markerBytes = readSinglyLinkedRegularFileSnapshotInside(
+    markerRoot,
+    markerPath,
+    MAX_AGGREGATION_AUTHORITY_BYTES,
+    "artifact verification marker"
+  );
+  const parsed = parseStrictJsonBytes(markerBytes);
   const shape = validateArtifactVerificationMarker(parsed);
   if (!shape.ok) throw new Error(`artifact verification marker is invalid for ${attemptId}`);
   const marker = parsed as ArtifactVerificationMarker;
@@ -169,6 +199,79 @@ function authenticatedProducerMarker(
   const markerArtifacts = new Map(marker.artifacts.map((artifact) => [artifact.path, artifact]));
   if (markerArtifacts.size !== marker.artifacts.length)
     throw new Error(`artifact verification marker repeats ${attemptId}`);
+
+  const artifactManifestPath = safeResolveInside(artifactRoot, ARTIFACT_MANIFEST_FILE, "producer artifact manifest");
+  const artifactManifestBytes = readSinglyLinkedRegularFileSnapshotInside(
+    artifactRoot,
+    artifactManifestPath,
+    MAX_AGGREGATION_AUTHORITY_BYTES,
+    "producer artifact manifest"
+  );
+  const artifactManifestValue = parseStrictJsonBytes(artifactManifestBytes);
+  const artifactManifestShape = validateArtifactManifest(artifactManifestValue);
+  if (!artifactManifestShape.ok) throw new Error(`producer artifact manifest is invalid for ${attemptId}`);
+  const artifactManifest = artifactManifestValue as ArtifactManifest;
+  const provenanceMetadata = artifactManifest.provenance.metadata as { concrete_node_id?: string } | undefined;
+  if (
+    artifactManifest.run_id !== layout.runId ||
+    artifactManifest.node_id !== attemptId ||
+    artifactManifest.producer_node_id !== attemptId ||
+    artifactManifest.provenance.producer_node_id !== attemptId ||
+    artifactManifest.provenance.run_id !== layout.runId ||
+    artifactManifest.provenance.logical_node_id !== producer.logical_id ||
+    artifactManifest.provenance.attempt_index !== attemptIndex ||
+    provenanceMetadata?.concrete_node_id !== producer.id ||
+    !isDeepStrictEqual(artifactManifest.output_contracts, producer.outputs)
+  ) {
+    throw new Error(`producer artifact manifest identity changed for ${attemptId}`);
+  }
+  const expectedPrerequisites = producer.depends_on
+    .flatMap((dependencyId) => {
+      const dependency = nodes.find((candidate) => candidate.id === dependencyId);
+      if (dependency === undefined)
+        throw new Error(`producer dependency is absent from the planned graph: ${dependencyId}`);
+      return plannedAttempts(dependency).map((attempt) => attempt.attemptId);
+    })
+    .sort();
+  const actualPrerequisites = artifactManifest.prerequisite_manifests.map((entry) => entry.node_id).sort();
+  if (!isDeepStrictEqual(actualPrerequisites, expectedPrerequisites)) {
+    throw new Error(`producer artifact manifest prerequisite set changed for ${attemptId}`);
+  }
+  const prerequisiteGate = verifyArtifactManifestPrerequisites(layout, attemptId);
+  if (!prerequisiteGate.ok) {
+    throw new Error(`producer artifact manifest prerequisite bytes changed for ${attemptId}`);
+  }
+
+  const manifestFiles = new Map(artifactManifest.files.map((entry) => [entry.path, entry]));
+  const markerPublications = new Map(marker.publications.map((entry) => [entry.path, entry]));
+  if (
+    manifestFiles.size !== artifactManifest.files.length ||
+    markerPublications.size !== marker.publications.length ||
+    manifestFiles.size !== markerPublications.size ||
+    [...manifestFiles.keys()].some((relativePath) => !markerPublications.has(relativePath))
+  ) {
+    throw new Error(`producer artifact manifest and verifier publication sets differ for ${attemptId}`);
+  }
+  const publications = new Map<string, AuthenticatedPublicationSnapshot>();
+  for (const [relativePath, publication] of markerPublications) {
+    const manifestFile = manifestFiles.get(relativePath)!;
+    const absolutePath = safeResolveInside(artifactRoot, relativePath, "verified producer publication");
+    const bytes = readSinglyLinkedRegularFileSnapshotInside(
+      artifactRoot,
+      absolutePath,
+      MAX_AGGREGATION_AUTHORITY_BYTES,
+      `verified producer publication ${relativePath}`
+    );
+    const sha256 = digest(bytes);
+    if (
+      publication.sha256 !== sha256 ||
+      manifestFile.sha256 !== sha256 ||
+      manifestFile.size_bytes !== bytes.byteLength
+    ) {
+      throw new Error(`verified producer publication changed ${attemptId}/${relativePath}`);
+    }
+    publications.set(relativePath, Object.freeze({ path: relativePath, absolutePath, bytes, sha256 }));
+  }
   for (const output of producer.outputs) {
     const artifact = markerArtifacts.get(output.path);
     const expectedBinding = artifactContractSchemaBinding(output.contract);
@@ -208,42 +311,41 @@ function authenticatedProducerMarker(
     ) {
       throw new Error(`artifact verification marker output binding changed ${attemptId}/${output.path}`);
     }
-    const artifactPath = safeResolveInside(artifactRoot, output.path, "verified producer output");
-    assertRegularFileInside(artifactRoot, artifactPath, "verified producer output");
-    const bytes = readRegularFileSnapshot(artifactPath, MAX_AGGREGATION_AUTHORITY_BYTES);
-    const sha256 = digest(bytes);
-    if (
-      artifact.sha256 !== sha256 ||
-      !marker.publications.some((entry) => entry.path === output.path && entry.sha256 === sha256)
-    ) {
+    const publication = publications.get(output.path);
+    if (publication === undefined || artifact.sha256 !== publication.sha256) {
       throw new Error(`verified producer output publication changed ${attemptId}/${output.path}`);
     }
   }
-  return marker;
+  return Object.freeze({
+    marker,
+    artifactManifest,
+    artifactManifestBytes: Buffer.from(artifactManifestBytes),
+    publications
+  });
 }
 
 function authenticatedEntry(
   kind: "generated-test" | "support-file",
   entry: GeneratedTestEntry,
-  artifactRoot: string,
-  publications: ReadonlyMap<string, string>
+  publications: ReadonlyMap<string, AuthenticatedPublicationSnapshot>
 ): SemanticAggregationSourceEntryContext {
-  const artifactPath = safeResolveInside(artifactRoot, entry.path, "generated-test aggregation source companion");
-  assertRegularFileInside(artifactRoot, artifactPath, "generated-test aggregation source companion");
-  const bytes = readRegularFileSnapshot(artifactPath, MAX_GENERATED_TEST_COMPANION_BYTES);
-  const sha256 = digest(bytes);
-  if (bytes.length !== entry.size_bytes || sha256 !== entry.sha256 || publications.get(entry.path) !== sha256) {
+  const publication = publications.get(entry.path);
+  if (
+    publication === undefined ||
+    publication.bytes.length > MAX_GENERATED_TEST_COMPANION_BYTES ||
+    publication.bytes.length !== entry.size_bytes ||
+    publication.sha256 !== entry.sha256
+  ) {
     throw new Error(`verified generated-test companion publication changed ${entry.path}`);
   }
   return Object.freeze({
     kind,
-    sourceArtifactPath: artifactPath,
+    sourceArtifactPath: publication.absolutePath,
     sourceRelativePath: entry.path,
     sizeBytes: entry.size_bytes,
     sha256: entry.sha256,
-    bytes: Buffer.from(bytes),
+    bytes: Buffer.from(publication.bytes),
     ...(entry.language === undefined ? {} : { language: entry.language }),
-    ...(entry.framework === undefined ? {} : { framework: entry.framework }),
     ...(entry.description === undefined ? {} : { description: entry.description }),
     ...(entry.provenance === undefined ? {} : { provenance: Object.freeze({ ...entry.provenance }) })
   });

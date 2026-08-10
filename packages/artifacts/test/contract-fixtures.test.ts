@@ -759,6 +759,7 @@ test("portable generated-test paths and implementation selection uniqueness agre
     schema_version: "ultrafuzz.generated-tests.v3",
     run_id: "run-1",
     node_id: "node-1",
+    framework: "foundry",
     generated_tests: [{ path: "generated-tests/nested/Invariant.t.sol", size_bytes: 1, sha256: "a".repeat(64) }],
     support_files: []
   };

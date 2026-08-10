@@ -12,6 +12,7 @@ import {
 export const GENERATED_TESTS_DIR = "generated-tests";
 const GENERATED_TEST_PATH_SEGMENT_PATTERN = "[A-Za-z0-9][A-Za-z0-9._-]{0,127}";
 export const GENERATED_TEST_MANIFEST_PATH_PATTERN = `^generated-tests/${GENERATED_TEST_PATH_SEGMENT_PATTERN}(?:/${GENERATED_TEST_PATH_SEGMENT_PATTERN}){0,${MAX_GENERATED_TEST_PATH_SEGMENTS - 2}}(?![\\s\\S])`;
+export const GENERATED_TEST_FRAMEWORK_PATTERN = "^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$";
 
 const nonEmptyString = z.string().min(1);
 const nonNegativeInteger = z.number().int().nonnegative();
@@ -50,6 +51,15 @@ export const generatedTestPathSchema = z
   })
   .meta({ id: "generatedTestPath" });
 
+export const generatedTestFrameworkSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(new RegExp(GENERATED_TEST_FRAMEWORK_PATTERN, "u"), {
+    message: "framework must be one canonical ASCII framework identifier"
+  })
+  .meta({ id: "generatedTestFramework" });
+
 export const generatedTestEntrySchema = z
   .strictObject({
     path: generatedTestPathSchema,
@@ -57,7 +67,6 @@ export const generatedTestEntrySchema = z
     sha256: z.string().regex(/^[a-f0-9]{64}$/u),
     provenance: generatedTestProvenanceSchema.optional(),
     language: generatedTestMetadataString.optional(),
-    framework: generatedTestMetadataString.optional(),
     description: generatedTestMetadataString.optional()
   })
   .meta({ id: "generatedTestEntry" });

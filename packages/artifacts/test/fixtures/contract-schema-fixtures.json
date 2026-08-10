@@ -502,6 +502,7 @@
       "schema_version": "ultrafuzz.generated-tests.v3",
       "run_id": "x",
       "node_id": "x",
+      "framework": "foundry",
       "generated_tests": [],
       "support_files": []
     },
@@ -509,6 +510,7 @@
       "schema_version": "ultrafuzz.generated-tests.v3",
       "run_id": "x",
       "node_id": "x",
+      "framework": "foundry",
       "generated_tests": [],
       "support_files": [],
       "__unexpected_fixture_field": true
