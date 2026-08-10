@@ -266,10 +266,16 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "property-source-join"
   ]),
   "property-campaign.schema.json": artifact(
-    "ultrafuzz/property-campaign@2",
+    "ultrafuzz/property-campaign@3",
     "propertyCampaignJsonSchema",
     "propertyCampaignSchema",
-    ["property-campaign-failure-id-uniqueness"]
+    [
+      "property-campaign-coverage-metric-uniqueness",
+      "property-campaign-failure-id-uniqueness",
+      "property-campaign-property-result-id-uniqueness",
+      "property-campaign-document-coherence",
+      "property-campaign-context-joins"
+    ]
   ),
   "property-lens.schema.json": artifact(
     "ultrafuzz/property-lens@2",

@@ -1709,7 +1709,7 @@ function semanticTriagedFindings(layout: RunLayout): unknown | undefined {
 }
 
 function semanticCampaignArtifacts(artifactDir: string, node: PlannedGraphNode): SemanticArtifactSetContext {
-  const campaignOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/property-campaign@2");
+  const campaignOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/property-campaign@3");
   const findingOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/findings@2");
   const campaigns: PropertyCampaignArtifact[] = [];
   const findings: Array<Readonly<Record<string, unknown>>> = [];
@@ -1717,7 +1717,7 @@ function semanticCampaignArtifacts(artifactDir: string, node: PlannedGraphNode):
     const artifactPath = safeResolveInside(artifactDir, output.path, "campaign semantic context");
     assertRegularFileInside(artifactDir, artifactPath, "campaign semantic context");
     const parsed = validatePropertyCampaignSchema(
-      readStrictContractDocument(artifactPath, "ultrafuzz/property-campaign@2"),
+      readStrictContractDocument(artifactPath, "ultrafuzz/property-campaign@3"),
       artifactPath
     );
     if (!parsed.ok || parsed.value === undefined) {

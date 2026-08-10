@@ -32,11 +32,17 @@ export interface SemanticPropertyLensContext {
 }
 
 export interface SemanticArtifactSetContext {
+  campaignPlan?: unknown;
+  campaignPlanPath?: string;
+  campaignSummary?: unknown;
+  campaignSummaryPath?: string;
   campaigns?: readonly unknown[];
   findings?: readonly unknown[];
+  findingsPath?: string;
   propertyCatalog?: unknown;
   propertyLenses?: readonly SemanticPropertyLensContext[];
   implementedProperties?: unknown;
+  implementedPropertiesPath?: string;
   triagedFindings?: unknown;
 }
 
@@ -59,6 +65,7 @@ export interface SemanticRuntimeStateContext {
 export interface SemanticArtifactIdentityContext {
   runId: string;
   nodeId: string;
+  artifactPath?: string;
 }
 
 export interface SemanticUsageLedgerContext {
@@ -2147,6 +2154,354 @@ function campaignSummaryCountIssues(document: unknown, context: SemanticGateCont
   );
 }
 
+function propertyCampaignDocumentIssues(document: unknown): SemanticGateIssue[] {
+  const issues: SemanticGateIssue[] = [];
+  const execution = at(document, ["execution"]);
+  const startedAt = stringField(execution, "started_at");
+  const finishedAt = stringField(execution, "finished_at");
+  const deadline = stringField(execution, "deadline");
+  if (startedAt !== undefined && finishedAt !== undefined && Date.parse(startedAt) > Date.parse(finishedAt)) {
+    issues.push(issue("$.execution.started_at", "Campaign execution cannot start after it finishes"));
+  }
+  if (finishedAt !== undefined && deadline !== undefined && Date.parse(finishedAt) > Date.parse(deadline)) {
+    issues.push(issue("$.execution.finished_at", "Campaign execution must finish no later than its deadline"));
+  }
+
+  const metrics = arrayAt(document, ["coverage", "metrics"]);
+  const metricNames = new Set(metrics.flatMap((metric) => stringField(metric, "name") ?? ""));
+  const failures = arrayAt(document, ["failures"]);
+  const failuresById = new Map(
+    failures.flatMap((failure) => {
+      const id = stringField(failure, "id");
+      return id === undefined ? [] : [[id, failure] as const];
+    })
+  );
+  const propertyResults = arrayAt(document, ["property_results"]);
+
+  if (booleanField(execution, "usable_results") === false && failures.length > 0) {
+    issues.push(issue("$.failures", "A campaign without usable results cannot publish observed failures"));
+  }
+
+  for (const [resultIndex, result] of propertyResults.entries()) {
+    const propertyId = stringField(result, "property_id");
+    if (propertyId === undefined) continue;
+    const resultPath = `$.property_results[${resultIndex}]`;
+    const actualFailureIds = stringArray(at(result, ["failure_ids"]));
+    const expectedFailureIds = failures.flatMap((failure) =>
+      stringArray(at(failure, ["property_ids"])).includes(propertyId) ? (stringField(failure, "id") ?? []) : []
+    );
+    if (!sameStringSet(actualFailureIds, expectedFailureIds)) {
+      issues.push(
+        issue(
+          `${resultPath}.failure_ids`,
+          "Property result failure_ids must exactly equal the failures that name this property"
+        )
+      );
+    }
+    const status = stringField(result, "status");
+    if (expectedFailureIds.length > 0 !== (status === "failed")) {
+      issues.push(
+        issue(
+          `${resultPath}.status`,
+          expectedFailureIds.length > 0
+            ? "A property named by a campaign failure must have failed status"
+            : "A failed property result requires a campaign failure that names the property"
+        )
+      );
+    }
+    if (status === "passed" && stringField(execution, "status") !== "complete") {
+      issues.push(issue(`${resultPath}.status`, "Only a complete campaign may mark a property passed"));
+    }
+    for (const [metricIndex, metricName] of stringArray(at(result, ["coverage_metric_names"])).entries()) {
+      if (!metricNames.has(metricName)) {
+        issues.push(
+          issue(
+            `${resultPath}.coverage_metric_names[${metricIndex}]`,
+            `Property result references unknown coverage metric ${JSON.stringify(metricName)}`
+          )
+        );
+      }
+    }
+    for (const [failureIndex, failureId] of actualFailureIds.entries()) {
+      if (!failuresById.has(failureId)) {
+        issues.push(
+          issue(
+            `${resultPath}.failure_ids[${failureIndex}]`,
+            `Property result references unknown campaign failure ${JSON.stringify(failureId)}`
+          )
+        );
+      }
+    }
+  }
+  return issues;
+}
+
+function propertyCampaignContextJoinIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
+  const artifactSet = context.artifactSet!;
+  const plan = artifactSet.campaignPlan;
+  const implementation = artifactSet.implementedProperties;
+  const findings = artifactSet.findings!;
+  const summary = artifactSet.campaignSummary;
+  const issues: SemanticGateIssue[] = [];
+  const compare = (pathValue: string, actual: unknown, expected: unknown, message: string): void => {
+    if (!isDeepStrictEqual(actual, expected)) issues.push(issue(pathValue, message));
+  };
+
+  compare(
+    "$.campaign_plan_ref",
+    stringField(document, "campaign_plan_ref"),
+    artifactSet.campaignPlanPath,
+    "Campaign plan reference does not name the authenticated sibling plan"
+  );
+  compare(
+    "$.implemented_properties_ref",
+    stringField(document, "implemented_properties_ref"),
+    artifactSet.implementedPropertiesPath,
+    "Implemented-properties reference does not name the authenticated implementation handoff"
+  );
+  compare(
+    "$.findings_ref",
+    stringField(document, "findings_ref"),
+    artifactSet.findingsPath,
+    "Findings reference does not name the authenticated sibling findings"
+  );
+  compare(
+    "$.campaign_summary_ref",
+    stringField(document, "campaign_summary_ref"),
+    artifactSet.campaignSummaryPath,
+    "Campaign summary reference does not name the authenticated sibling summary"
+  );
+
+  compare(
+    "$.fuzzer_backend",
+    stringField(document, "fuzzer_backend"),
+    stringField(at(plan, ["backend"]), "name"),
+    "Campaign backend does not match the authenticated plan"
+  );
+  compare(
+    "$.backend_version",
+    isRecord(document) ? document.backend_version : undefined,
+    isRecord(at(plan, ["backend"])) ? at(plan, ["backend", "version"]) : undefined,
+    "Campaign backend version does not match the authenticated plan"
+  );
+  compare(
+    "$.execution.workers",
+    numberField(at(document, ["execution"]), "workers"),
+    numberField(plan, "workers"),
+    "Campaign workers do not match the authenticated plan"
+  );
+  compare(
+    "$.execution.deadline",
+    stringField(at(document, ["execution"]), "deadline"),
+    stringField(plan, "deadline"),
+    "Campaign deadline does not match the authenticated plan"
+  );
+  compare("$.paths", at(document, ["paths"]), at(plan, ["paths"]), "Campaign paths do not match the plan");
+  const campaignCommands = arrayAt(plan, ["command_plan"]).filter((row) => stringField(row, "phase") === "campaign");
+  if (campaignCommands.length !== 1) {
+    issues.push(issue("$.execution.command", "Authenticated plan must contain exactly one campaign command"));
+  } else {
+    compare(
+      "$.execution.command",
+      stringField(at(document, ["execution"]), "command"),
+      stringField(campaignCommands[0], "command"),
+      "Campaign command does not match the authenticated plan"
+    );
+  }
+
+  const implementedIds = arrayAt(implementation, ["properties"]).flatMap((record) =>
+    stringField(record, "status") === "implemented" ? (stringField(record, "property_id") ?? []) : []
+  );
+  const resultIds = arrayAt(document, ["property_results"]).flatMap(
+    (result) => stringField(result, "property_id") ?? []
+  );
+  if (!sameStringSet(resultIds, implementedIds)) {
+    issues.push(
+      issue(
+        "$.property_results",
+        "Property results must contain exactly one record for every implemented property and no other property"
+      )
+    );
+  }
+
+  const backend = stringField(document, "fuzzer_backend");
+  const failures = arrayAt(document, ["failures"]);
+  const propertyFailures = new Map(
+    failures.flatMap((failure) => {
+      if (!isRecord(failure)) return [];
+      const id = stringField(failure, "id");
+      return id === undefined || stringArray(at(failure, ["property_ids"])).length === 0
+        ? []
+        : [[id, failure] as const];
+    })
+  );
+  const claimed = new Map<string, number>();
+  for (const [findingIndex, finding] of findings.entries()) {
+    const propertyIds = stringArray(at(finding, ["property_ids"]));
+    const contributions = arrayAt(finding, ["contributing_backend_failures"]);
+    if (propertyIds.length === 0 && contributions.length === 0) continue;
+    if (contributions.length === 0) {
+      issues.push(
+        issue(
+          `$.findings_ref#${findingIndex}`,
+          `Property-derived finding ${JSON.stringify(stringField(finding, "id"))} has no backend failure contributions`
+        )
+      );
+      continue;
+    }
+    const resolved: Readonly<Record<string, unknown>>[] = [];
+    for (const [contributionIndex, contribution] of contributions.entries()) {
+      const failureId =
+        typeof contribution === "string"
+          ? contribution
+          : stringField(contribution, "fuzzer_backend") === backend
+            ? stringField(contribution, "failure_id")
+            : undefined;
+      const failure = failureId === undefined ? undefined : propertyFailures.get(failureId);
+      if (failure === undefined) {
+        issues.push(
+          issue(
+            `$.findings_ref#${findingIndex}.contributing_backend_failures[${contributionIndex}]`,
+            "Finding contribution does not name a property-derived failure from this backend record"
+          )
+        );
+        continue;
+      }
+      resolved.push(failure);
+      claimed.set(failureId!, (claimed.get(failureId!) ?? 0) + 1);
+    }
+    const findingId = stringField(finding, "id");
+    if (!resolved.some((failure) => stringField(failure, "id") === findingId)) {
+      issues.push(
+        issue(
+          `$.findings_ref#${findingIndex}.id`,
+          "Property-derived finding ID must equal one of its contributing campaign failure IDs"
+        )
+      );
+    }
+    const contributedPropertyIds = resolved.flatMap((failure) => stringArray(at(failure, ["property_ids"])));
+    if (!sameStringSet(propertyIds, contributedPropertyIds)) {
+      issues.push(
+        issue(
+          `$.findings_ref#${findingIndex}.property_ids`,
+          "Finding property_ids must exactly equal the union from its contributing campaign failures"
+        )
+      );
+    }
+    if (numberField(at(finding, ["deduplication"]), "pre_dedup_count") !== contributions.length) {
+      issues.push(
+        issue(
+          `$.findings_ref#${findingIndex}.deduplication.pre_dedup_count`,
+          "Finding pre-deduplication count must equal its contribution count"
+        )
+      );
+    }
+  }
+  for (const failureId of propertyFailures.keys()) {
+    if (claimed.get(failureId) !== 1) {
+      issues.push(
+        issue(
+          "$.failures",
+          `Property-derived campaign failure ${JSON.stringify(failureId)} must be claimed by exactly one finding`
+        )
+      );
+    }
+  }
+
+  const summaryOutcome =
+    stringField(at(document, ["execution"]), "status") === "complete"
+      ? "complete"
+      : booleanField(at(document, ["execution"]), "usable_results") === true
+        ? "partial"
+        : "blocked";
+  compare(
+    "$.campaign_summary_ref#outcome",
+    stringField(summary, "outcome"),
+    summaryOutcome,
+    "Campaign summary outcome does not match execution usability"
+  );
+  compare(
+    "$.campaign_summary_ref#campaign_plan_ref",
+    stringField(summary, "campaign_plan_ref"),
+    artifactSet.campaignPlanPath,
+    "Campaign summary plan reference does not match the authenticated plan"
+  );
+  if (
+    !sameStringSet(
+      stringArray(at(summary, ["implemented_property_suite_refs"])),
+      artifactSet.implementedPropertiesPath === undefined ? [] : [artifactSet.implementedPropertiesPath]
+    )
+  ) {
+    issues.push(
+      issue(
+        "$.campaign_summary_ref#implemented_property_suite_refs",
+        "Campaign summary implementation references do not match the authenticated handoff"
+      )
+    );
+  }
+  const backendRows = arrayAt(summary, ["backend_results"]);
+  if (backendRows.length !== 1) {
+    issues.push(
+      issue("$.campaign_summary_ref#backend_results", "Campaign summary must contain exactly one backend row")
+    );
+  } else {
+    const backendRow = backendRows[0];
+    compare(
+      "$.campaign_summary_ref#backend_results[0].fuzzer_backend",
+      stringField(backendRow, "fuzzer_backend"),
+      backend,
+      "Campaign summary backend does not match the result record"
+    );
+    compare(
+      "$.campaign_summary_ref#backend_results[0].status",
+      stringField(backendRow, "status"),
+      stringField(at(document, ["execution"]), "status"),
+      "Campaign summary backend status does not match execution status"
+    );
+    compare(
+      "$.campaign_summary_ref#backend_results[0].result_ref",
+      stringField(backendRow, "result_ref"),
+      context.artifactIdentity!.artifactPath,
+      "Campaign summary backend result reference does not name this authenticated record"
+    );
+  }
+  const findingIds = findings.flatMap((finding) => stringField(finding, "id") ?? []);
+  if (!sameStringSet(stringArray(at(summary, ["finding_refs"])), findingIds)) {
+    issues.push(
+      issue("$.campaign_summary_ref#finding_refs", "Campaign summary finding references must equal sibling finding IDs")
+    );
+  }
+  const reproducerRows = arrayAt(summary, ["reproducer_refs"]);
+  const reproducerFindingIds = reproducerRows.flatMap((row) => stringField(row, "finding_id") ?? []);
+  if (!sameStringSet(reproducerFindingIds, findingIds) || reproducerRows.length !== findingIds.length) {
+    issues.push(
+      issue(
+        "$.campaign_summary_ref#reproducer_refs",
+        "Campaign summary must contain exactly one reproducer row for every sibling finding"
+      )
+    );
+  }
+  for (const [rowIndex, row] of reproducerRows.entries()) {
+    const findingId = stringField(row, "finding_id");
+    const failure =
+      findingId === undefined ? undefined : failures.find((entry) => stringField(entry, "id") === findingId);
+    if (failure === undefined) continue;
+    compare(
+      `$.campaign_summary_ref#reproducer_refs[${rowIndex}].path`,
+      isRecord(row) ? row.path : undefined,
+      isRecord(failure) ? failure.deterministic_reproducer_ref : undefined,
+      "Campaign summary reproducer path does not match the representative failure"
+    );
+    compare(
+      `$.campaign_summary_ref#reproducer_refs[${rowIndex}].blocker`,
+      isRecord(row) ? row.blocker : undefined,
+      isRecord(failure) ? failure.reproduction_blocker : undefined,
+      "Campaign summary reproducer blocker does not match the representative failure"
+    );
+  }
+  return issues;
+}
+
 function implementedSelectionJoinIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
   const selectedIds = stringArray(at(document, ["selection", "property_ids"]));
   const recordIds = arrayAt(document, ["properties"]).flatMap((row) => stringField(row, "property_id") ?? "");
@@ -2697,8 +3052,30 @@ const gateSpecifications = {
   "planned-graph-output-path-uniqueness": documentGate(plannedOutputPathIssues),
   "planned-graph-workflow-node-join": documentGate(plannedWorkflowJoinIssues),
   "planned-graph-workflow-task-uniqueness": documentGate(plannedWorkflowTaskIssues),
+  "property-campaign-coverage-metric-uniqueness": documentGate(
+    uniqueFieldGate([["coverage", "metrics"]], "name", "property campaign coverage metric")
+  ),
   "property-campaign-failure-id-uniqueness": documentGate(
     uniqueFieldGate([["failures"]], "id", "property campaign failure ID")
+  ),
+  "property-campaign-property-result-id-uniqueness": documentGate(
+    uniqueFieldGate([["property_results"]], "property_id", "property campaign result property ID")
+  ),
+  "property-campaign-document-coherence": documentGate(propertyCampaignDocumentIssues),
+  "property-campaign-context-joins": contextualGate(
+    "cross-artifact",
+    [
+      "artifactIdentity.artifactPath",
+      "artifactSet.campaignPlan",
+      "artifactSet.campaignPlanPath",
+      "artifactSet.campaignSummary",
+      "artifactSet.campaignSummaryPath",
+      "artifactSet.findings",
+      "artifactSet.findingsPath",
+      "artifactSet.implementedProperties",
+      "artifactSet.implementedPropertiesPath"
+    ],
+    propertyCampaignContextJoinIssues
   ),
   "property-id-uniqueness": documentGate(uniqueFieldGate([["properties"]], "id", "property ID")),
   "property-lens-id-uniqueness": documentGate(uniqueFieldGate([["properties"]], "id", "property lens ID")),

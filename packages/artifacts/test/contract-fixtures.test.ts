@@ -72,6 +72,7 @@ const removedContractIds = [
   "ultrafuzz/json-object@1",
   "ultrafuzz/properties@1",
   "ultrafuzz/property-campaign@1",
+  "ultrafuzz/property-campaign@2",
   "ultrafuzz/property-lens@1",
   "ultrafuzz/reference-expectations@1",
   "ultrafuzz/report@1"

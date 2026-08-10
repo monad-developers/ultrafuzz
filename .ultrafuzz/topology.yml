@@ -690,7 +690,7 @@ nodes:
       - path: campaign-summary.json
         contract: ultrafuzz/campaign-summary@2
       - path: recon-fuzzer-results.json
-        contract: ultrafuzz/property-campaign@2
+        contract: ultrafuzz/property-campaign@3
       - path: generated-tests.json
         contract: ultrafuzz/generated-tests@2
       - path: findings.json

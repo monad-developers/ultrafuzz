@@ -4309,7 +4309,7 @@ function siblingCampaignSemanticArtifacts(
     if (snapshot === undefined) {
       throw new Error(`artifact-contract failure: verified sibling output is unavailable ${output.path}`);
     }
-    if (output.contract === "ultrafuzz/property-campaign@2") campaigns.push(snapshot.value);
+    if (output.contract === "ultrafuzz/property-campaign@3") campaigns.push(snapshot.value);
     if (output.contract === "ultrafuzz/findings@2") {
       if (!Array.isArray(snapshot.value)) {
         throw new Error(`artifact-contract failure: verified finding sibling is not an array ${output.path}`);

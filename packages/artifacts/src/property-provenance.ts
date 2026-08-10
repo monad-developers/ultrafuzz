@@ -11,12 +11,12 @@ import {
 export const PROPERTIES_SCHEMA_VERSION = "ultrafuzz.properties.v2" as const;
 export const PROPERTY_LENS_SCHEMA_VERSION = "ultrafuzz.property-lens.v2" as const;
 export const IMPLEMENTED_PROPERTIES_SCHEMA_VERSION = "ultrafuzz.implemented-properties.v3" as const;
-export const PROPERTY_CAMPAIGN_SCHEMA_VERSION = "ultrafuzz.property-campaign.v2" as const;
+export const PROPERTY_CAMPAIGN_SCHEMA_VERSION = "ultrafuzz.property-campaign.v3" as const;
 export const REFERENCE_EXPECTATIONS_SCHEMA_VERSION = "ultrafuzz.reference-expectations.v2" as const;
 export const PROPERTIES_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:properties:2" as const;
 export const PROPERTY_LENS_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:property-lens:2" as const;
 export const IMPLEMENTED_PROPERTIES_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:implemented-properties:3" as const;
-export const PROPERTY_CAMPAIGN_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:property-campaign:2" as const;
+export const PROPERTY_CAMPAIGN_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:property-campaign:3" as const;
 export const REFERENCE_EXPECTATIONS_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:reference-expectations:2" as const;
 
 const nonEmptyString = z.string().min(1);
@@ -153,35 +153,114 @@ export interface PropertyImplementationCoverageDerivationOptions {
   configPath?: string;
 }
 
+export const PROPERTY_CAMPAIGN_EXECUTION_STATUSES = [
+  "complete",
+  "partial",
+  "blocked",
+  "failed",
+  "timed-out",
+  "unavailable"
+] as const;
+export const PROPERTY_CAMPAIGN_FAILURE_CATEGORIES = [
+  "backend-unavailable",
+  "validation-failed",
+  "smoke-failed",
+  "launch-failed",
+  "process-failed",
+  "deadline-exceeded",
+  "result-invalid",
+  "budget-exhausted",
+  "other"
+] as const;
+export const PROPERTY_CAMPAIGN_FAILURE_STATUSES = ["reproduced", "blocked-unreproduced"] as const;
+export const PROPERTY_CAMPAIGN_PROPERTY_RESULT_STATUSES = ["passed", "failed", "inconclusive", "not-executed"] as const;
+export const PROPERTY_CAMPAIGN_COVERAGE_STATUSES = ["reported", "unavailable"] as const;
+export const PROPERTY_CAMPAIGN_COVERAGE_UNITS = [
+  "count",
+  "ratio",
+  "percent",
+  "seconds",
+  "bytes",
+  "executions-per-second"
+] as const;
+
+export type PropertyCampaignExecutionStatus = (typeof PROPERTY_CAMPAIGN_EXECUTION_STATUSES)[number];
+export type PropertyCampaignFailureCategory = (typeof PROPERTY_CAMPAIGN_FAILURE_CATEGORIES)[number];
+export type PropertyCampaignFailureStatus = (typeof PROPERTY_CAMPAIGN_FAILURE_STATUSES)[number];
+export type PropertyCampaignPropertyResultStatus = (typeof PROPERTY_CAMPAIGN_PROPERTY_RESULT_STATUSES)[number];
+export type PropertyCampaignCoverageStatus = (typeof PROPERTY_CAMPAIGN_COVERAGE_STATUSES)[number];
+export type PropertyCampaignCoverageUnit = (typeof PROPERTY_CAMPAIGN_COVERAGE_UNITS)[number];
+
+export interface PropertyCampaignExecutionFailure {
+  category: PropertyCampaignFailureCategory;
+  summary: string;
+}
+
+export interface PropertyCampaignExecution {
+  status: PropertyCampaignExecutionStatus;
+  usable_results: boolean;
+  command: string;
+  config_path: string | null;
+  workers: number;
+  started_at: string | null;
+  finished_at: string;
+  deadline: string;
+  exit_code: number | null;
+  failure: PropertyCampaignExecutionFailure | null;
+}
+
+export interface PropertyCampaignCoverageMetric {
+  name: string;
+  value: number;
+  unit: PropertyCampaignCoverageUnit;
+  source_ref: string;
+}
+
+export interface PropertyCampaignCoverage {
+  status: PropertyCampaignCoverageStatus;
+  metrics: PropertyCampaignCoverageMetric[];
+  unavailable_reason: string | null;
+}
+
+export interface PropertyCampaignPropertyResult {
+  property_id: string;
+  status: PropertyCampaignPropertyResultStatus;
+  failure_ids: string[];
+  coverage_metric_names: string[];
+  evidence_refs: string[];
+  reason: string | null;
+}
+
 export interface PropertyCampaignFailure {
   id: string;
-  status: string;
-  property_ids?: string[];
-  entrypoint?: string;
-  sequence?: string[];
-  precondition_evidence?: string[];
-  raw_reproducer_ref?: string;
+  status: PropertyCampaignFailureStatus;
+  property_ids: string[];
+  entrypoint: string | null;
+  sequence: string[];
+  precondition_evidence: string[];
+  raw_reproducer_ref: string;
+  deterministic_reproducer_ref: string | null;
+  reproduction_blocker: string | null;
 }
 
 export interface PropertyCampaignArtifact {
   schema_version: typeof PROPERTY_CAMPAIGN_SCHEMA_VERSION;
-  fuzzer_backend?: string;
-  backend_version?: string | null;
-  command?: string;
-  config_path?: string | null;
-  workers?: number;
-  started_at?: string;
-  finished_at?: string;
-  terminal_status?: "complete" | "partial" | "blocked" | "failed" | "timed-out" | "unavailable";
-  exit_code?: number | null;
-  failure_category?: string | null;
-  paths?: {
+  campaign_plan_ref: string;
+  implemented_properties_ref: string;
+  findings_ref: string;
+  campaign_summary_ref: string;
+  fuzzer_backend: string;
+  backend_version: string | null;
+  execution: PropertyCampaignExecution;
+  paths: {
     corpus: string;
     cache: string;
     log: string;
     raw_results: string;
     reproducers: string;
   };
+  coverage: PropertyCampaignCoverage;
+  property_results: PropertyCampaignPropertyResult[];
   failures: PropertyCampaignFailure[];
 }
 
@@ -475,38 +554,401 @@ export const implementedPropertiesSchema = z
     }
   });
 
-const propertyCampaignFailureSchema = z.strictObject({
-  id: nonEmptyString,
-  status: nonEmptyString,
-  property_ids: propertyIdsSchema.optional(),
-  entrypoint: nonEmptyString.optional(),
-  sequence: z.array(nonEmptyString).optional(),
-  precondition_evidence: z.array(nonEmptyString).optional(),
-  raw_reproducer_ref: nonEmptyString.optional()
+const propertyCampaignExecutionFailureSchema = z.strictObject({
+  category: z.enum(PROPERTY_CAMPAIGN_FAILURE_CATEGORIES),
+  summary: nonEmptyString
 });
+
+const propertyCampaignExecutionSchema = z
+  .strictObject({
+    status: z.enum(PROPERTY_CAMPAIGN_EXECUTION_STATUSES),
+    usable_results: z.boolean(),
+    command: nonEmptyString,
+    config_path: nonEmptyString.nullable(),
+    workers: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    started_at: canonicalTimestampSchema.nullable(),
+    finished_at: canonicalTimestampSchema,
+    deadline: canonicalTimestampSchema,
+    exit_code: z.number().int().min(Number.MIN_SAFE_INTEGER).max(Number.MAX_SAFE_INTEGER).nullable(),
+    failure: propertyCampaignExecutionFailureSchema.nullable()
+  })
+  .meta({
+    allOf: [
+      {
+        if: { properties: { status: { const: "complete" } }, required: ["status"] },
+        then: {
+          properties: {
+            usable_results: { const: true },
+            started_at: { type: "string" },
+            exit_code: { const: 0 },
+            failure: { type: "null" }
+          }
+        }
+      },
+      {
+        if: { properties: { status: { const: "partial" } }, required: ["status"] },
+        then: {
+          properties: {
+            usable_results: { const: true },
+            started_at: { type: "string" },
+            failure: { type: "object" }
+          }
+        }
+      },
+      {
+        if: { properties: { status: { const: "blocked" } }, required: ["status"] },
+        then: {
+          properties: {
+            usable_results: { const: false },
+            started_at: { type: "null" },
+            exit_code: { type: "null" },
+            failure: { type: "object" }
+          }
+        }
+      },
+      {
+        if: { properties: { status: { const: "failed" } }, required: ["status"] },
+        then: { properties: { usable_results: { const: false }, failure: { type: "object" } } }
+      },
+      {
+        if: { properties: { status: { const: "timed-out" } }, required: ["status"] },
+        then: {
+          properties: {
+            started_at: { type: "string" },
+            exit_code: { type: "null" },
+            failure: {
+              type: "object",
+              properties: { category: { const: "deadline-exceeded" } },
+              required: ["category"]
+            }
+          }
+        }
+      },
+      {
+        if: { properties: { status: { const: "unavailable" } }, required: ["status"] },
+        then: {
+          properties: {
+            usable_results: { const: false },
+            started_at: { type: "null" },
+            exit_code: { type: "null" },
+            failure: {
+              type: "object",
+              properties: { category: { const: "backend-unavailable" } },
+              required: ["category"]
+            }
+          }
+        }
+      }
+    ]
+  })
+  .superRefine((execution, context) => {
+    const requireFailure = (): void => {
+      if (execution.failure === null) {
+        context.addIssue({
+          code: "custom",
+          path: ["failure"],
+          message: `${execution.status} execution requires failure evidence`
+        });
+      }
+    };
+    if (execution.status === "complete") {
+      if (!execution.usable_results)
+        context.addIssue({
+          code: "custom",
+          path: ["usable_results"],
+          message: "complete execution has usable results"
+        });
+      if (execution.started_at === null)
+        context.addIssue({ code: "custom", path: ["started_at"], message: "complete execution requires a start time" });
+      if (execution.exit_code !== 0)
+        context.addIssue({ code: "custom", path: ["exit_code"], message: "complete execution requires exit code 0" });
+      if (execution.failure !== null)
+        context.addIssue({
+          code: "custom",
+          path: ["failure"],
+          message: "complete execution cannot carry failure evidence"
+        });
+    } else if (execution.status === "partial") {
+      if (!execution.usable_results)
+        context.addIssue({ code: "custom", path: ["usable_results"], message: "partial execution has usable results" });
+      if (execution.started_at === null)
+        context.addIssue({ code: "custom", path: ["started_at"], message: "partial execution requires a start time" });
+      requireFailure();
+    } else if (execution.status === "blocked") {
+      if (execution.usable_results)
+        context.addIssue({
+          code: "custom",
+          path: ["usable_results"],
+          message: "blocked execution cannot have usable results"
+        });
+      if (execution.started_at !== null)
+        context.addIssue({
+          code: "custom",
+          path: ["started_at"],
+          message: "blocked execution cannot have a start time"
+        });
+      if (execution.exit_code !== null)
+        context.addIssue({
+          code: "custom",
+          path: ["exit_code"],
+          message: "blocked execution cannot have an exit code"
+        });
+      requireFailure();
+    } else if (execution.status === "failed") {
+      if (execution.usable_results)
+        context.addIssue({
+          code: "custom",
+          path: ["usable_results"],
+          message: "failed execution cannot have usable results"
+        });
+      requireFailure();
+    } else if (execution.status === "timed-out") {
+      if (execution.started_at === null)
+        context.addIssue({
+          code: "custom",
+          path: ["started_at"],
+          message: "timed-out execution requires a start time"
+        });
+      if (execution.exit_code !== null)
+        context.addIssue({
+          code: "custom",
+          path: ["exit_code"],
+          message: "timed-out execution cannot claim an exit code"
+        });
+      if (execution.failure?.category !== "deadline-exceeded")
+        context.addIssue({
+          code: "custom",
+          path: ["failure", "category"],
+          message: "timed-out execution requires deadline-exceeded failure evidence"
+        });
+    } else {
+      if (execution.usable_results)
+        context.addIssue({
+          code: "custom",
+          path: ["usable_results"],
+          message: "unavailable execution cannot have usable results"
+        });
+      if (execution.started_at !== null)
+        context.addIssue({
+          code: "custom",
+          path: ["started_at"],
+          message: "unavailable execution cannot have a start time"
+        });
+      if (execution.exit_code !== null)
+        context.addIssue({
+          code: "custom",
+          path: ["exit_code"],
+          message: "unavailable execution cannot have an exit code"
+        });
+      if (execution.failure?.category !== "backend-unavailable")
+        context.addIssue({
+          code: "custom",
+          path: ["failure", "category"],
+          message: "unavailable execution requires backend-unavailable failure evidence"
+        });
+    }
+  });
+
+const propertyCampaignCoverageMetricSchema = z.strictObject({
+  name: nonEmptyString,
+  value: z.number().nonnegative(),
+  unit: z.enum(PROPERTY_CAMPAIGN_COVERAGE_UNITS),
+  source_ref: nonEmptyString
+});
+
+const propertyCampaignCoverageSchema = z
+  .strictObject({
+    status: z.enum(PROPERTY_CAMPAIGN_COVERAGE_STATUSES),
+    metrics: z.array(propertyCampaignCoverageMetricSchema),
+    unavailable_reason: nonEmptyString.nullable()
+  })
+  .meta({
+    allOf: [
+      {
+        if: { properties: { status: { const: "reported" } }, required: ["status"] },
+        then: { properties: { metrics: { type: "array", minItems: 1 }, unavailable_reason: { type: "null" } } }
+      },
+      {
+        if: { properties: { status: { const: "unavailable" } }, required: ["status"] },
+        then: {
+          properties: {
+            metrics: { type: "array", maxItems: 0 },
+            unavailable_reason: { type: "string", minLength: 1 }
+          }
+        }
+      }
+    ]
+  })
+  .superRefine((coverage, context) => {
+    if (coverage.status === "reported") {
+      if (coverage.metrics.length === 0)
+        context.addIssue({ code: "custom", path: ["metrics"], message: "reported coverage requires metrics" });
+      if (coverage.unavailable_reason !== null)
+        context.addIssue({
+          code: "custom",
+          path: ["unavailable_reason"],
+          message: "reported coverage cannot have an unavailable reason"
+        });
+    } else {
+      if (coverage.metrics.length !== 0)
+        context.addIssue({ code: "custom", path: ["metrics"], message: "unavailable coverage cannot carry metrics" });
+      if (coverage.unavailable_reason === null)
+        context.addIssue({
+          code: "custom",
+          path: ["unavailable_reason"],
+          message: "unavailable coverage requires a reason"
+        });
+    }
+  });
+
+const propertyCampaignPropertyResultSchema = z
+  .strictObject({
+    property_id: nonEmptyString,
+    status: z.enum(PROPERTY_CAMPAIGN_PROPERTY_RESULT_STATUSES),
+    failure_ids: uniqueNonEmptyStringArray,
+    coverage_metric_names: uniqueNonEmptyStringArray,
+    evidence_refs: uniqueNonEmptyStringArray,
+    reason: nonEmptyString.nullable()
+  })
+  .meta({
+    allOf: [
+      {
+        if: { properties: { status: { const: "failed" } }, required: ["status"] },
+        then: { properties: { failure_ids: { type: "array", minItems: 1 }, reason: { type: "null" } } }
+      },
+      {
+        if: { properties: { status: { enum: ["passed"] } }, required: ["status"] },
+        then: { properties: { failure_ids: { type: "array", maxItems: 0 }, reason: { type: "null" } } }
+      },
+      {
+        if: { properties: { status: { enum: ["inconclusive", "not-executed"] } }, required: ["status"] },
+        then: {
+          properties: {
+            failure_ids: { type: "array", maxItems: 0 },
+            reason: { type: "string", minLength: 1 }
+          }
+        }
+      }
+    ]
+  })
+  .superRefine((result, context) => {
+    if (result.status === "failed") {
+      if (result.failure_ids.length === 0)
+        context.addIssue({
+          code: "custom",
+          path: ["failure_ids"],
+          message: "failed property result requires failure IDs"
+        });
+      if (result.reason !== null)
+        context.addIssue({ code: "custom", path: ["reason"], message: "failed property result cannot carry a reason" });
+    } else if (result.status === "passed") {
+      if (result.failure_ids.length !== 0)
+        context.addIssue({
+          code: "custom",
+          path: ["failure_ids"],
+          message: "passed property result cannot carry failure IDs"
+        });
+      if (result.reason !== null)
+        context.addIssue({ code: "custom", path: ["reason"], message: "passed property result cannot carry a reason" });
+    } else {
+      if (result.failure_ids.length !== 0)
+        context.addIssue({
+          code: "custom",
+          path: ["failure_ids"],
+          message: `${result.status} property result cannot carry failure IDs`
+        });
+      if (result.reason === null)
+        context.addIssue({
+          code: "custom",
+          path: ["reason"],
+          message: `${result.status} property result requires a reason`
+        });
+    }
+  });
+
+const propertyCampaignFailureSchema = z
+  .strictObject({
+    id: nonEmptyString,
+    status: z.enum(PROPERTY_CAMPAIGN_FAILURE_STATUSES),
+    property_ids: uniqueNonEmptyStringArray,
+    entrypoint: nonEmptyString.nullable(),
+    sequence: z.array(nonEmptyString),
+    precondition_evidence: z.array(nonEmptyString),
+    raw_reproducer_ref: nonEmptyString,
+    deterministic_reproducer_ref: nonEmptyString.nullable(),
+    reproduction_blocker: nonEmptyString.nullable()
+  })
+  .meta({
+    allOf: [
+      {
+        if: { properties: { status: { const: "reproduced" } }, required: ["status"] },
+        then: {
+          properties: {
+            deterministic_reproducer_ref: { type: "string", minLength: 1 },
+            reproduction_blocker: { type: "null" }
+          }
+        }
+      },
+      {
+        if: { properties: { status: { const: "blocked-unreproduced" } }, required: ["status"] },
+        then: {
+          properties: {
+            deterministic_reproducer_ref: { type: "null" },
+            reproduction_blocker: { type: "string", minLength: 1 }
+          }
+        }
+      }
+    ]
+  })
+  .superRefine((failure, context) => {
+    if (failure.status === "reproduced") {
+      if (failure.deterministic_reproducer_ref === null)
+        context.addIssue({
+          code: "custom",
+          path: ["deterministic_reproducer_ref"],
+          message: "reproduced failure requires a deterministic reproducer"
+        });
+      if (failure.reproduction_blocker !== null)
+        context.addIssue({
+          code: "custom",
+          path: ["reproduction_blocker"],
+          message: "reproduced failure cannot carry a blocker"
+        });
+    } else {
+      if (failure.deterministic_reproducer_ref !== null)
+        context.addIssue({
+          code: "custom",
+          path: ["deterministic_reproducer_ref"],
+          message: "blocked failure cannot claim a deterministic reproducer"
+        });
+      if (failure.reproduction_blocker === null)
+        context.addIssue({
+          code: "custom",
+          path: ["reproduction_blocker"],
+          message: "blocked failure requires a reproduction blocker"
+        });
+    }
+  });
 
 export const propertyCampaignSchema = z
   .strictObject({
     schema_version: z.literal(PROPERTY_CAMPAIGN_SCHEMA_VERSION),
-    fuzzer_backend: nonEmptyString.optional(),
-    backend_version: nonEmptyString.nullable().optional(),
-    command: nonEmptyString.optional(),
-    config_path: nonEmptyString.nullable().optional(),
-    workers: z.number().int().positive().optional(),
-    started_at: canonicalTimestampSchema.optional(),
-    finished_at: canonicalTimestampSchema.optional(),
-    terminal_status: z.enum(["complete", "partial", "blocked", "failed", "timed-out", "unavailable"]).optional(),
-    exit_code: z.number().int().nullable().optional(),
-    failure_category: nonEmptyString.nullable().optional(),
-    paths: z
-      .strictObject({
-        corpus: nonEmptyString,
-        cache: nonEmptyString,
-        log: nonEmptyString,
-        raw_results: nonEmptyString,
-        reproducers: nonEmptyString
-      })
-      .optional(),
+    campaign_plan_ref: nonEmptyString,
+    implemented_properties_ref: nonEmptyString,
+    findings_ref: nonEmptyString,
+    campaign_summary_ref: nonEmptyString,
+    fuzzer_backend: nonEmptyString,
+    backend_version: nonEmptyString.nullable(),
+    execution: propertyCampaignExecutionSchema,
+    paths: z.strictObject({
+      corpus: nonEmptyString,
+      cache: nonEmptyString,
+      log: nonEmptyString,
+      raw_results: nonEmptyString,
+      reproducers: nonEmptyString
+    }),
+    coverage: propertyCampaignCoverageSchema,
+    property_results: z.array(propertyCampaignPropertyResultSchema),
     failures: z.array(propertyCampaignFailureSchema)
   })
   .meta({

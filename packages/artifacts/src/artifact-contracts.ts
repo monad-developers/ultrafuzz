@@ -69,10 +69,12 @@ const existingJsonContracts = {
     schemaFile: "properties.schema.json",
     validEmptyExample: '{"schema_version":"ultrafuzz.properties.v2","properties":[]}'
   },
-  "ultrafuzz/property-campaign@2": {
-    description: "A strict backend campaign record and its typed failures.",
+  "ultrafuzz/property-campaign@3": {
+    description:
+      "A strict backend campaign record with planned identity, status-coupled execution, coverage, exact per-property results, and typed failures.",
     schemaFile: "property-campaign.schema.json",
-    validEmptyExample: '{"schema_version":"ultrafuzz.property-campaign.v2","failures":[]}'
+    validEmptyExample:
+      '{"schema_version":"ultrafuzz.property-campaign.v3","campaign_plan_ref":"campaign-plan.json","implemented_properties_ref":"implemented-properties.json","findings_ref":"findings.json","campaign_summary_ref":"campaign-summary.json","fuzzer_backend":"recon","backend_version":null,"execution":{"status":"unavailable","usable_results":false,"command":"recon fuzz .","config_path":null,"workers":1,"started_at":null,"finished_at":"2026-01-01T00:00:00Z","deadline":"2026-01-01T00:00:00Z","exit_code":null,"failure":{"category":"backend-unavailable","summary":"Recon is unavailable."}},"paths":{"corpus":"backends/recon-fuzzer/corpus","cache":"backends/recon-fuzzer/cache","log":"backends/recon-fuzzer/run.log","raw_results":"backends/recon-fuzzer/results.json","reproducers":"backends/recon-fuzzer/reproducers"},"coverage":{"status":"unavailable","metrics":[],"unavailable_reason":"The backend did not start."},"property_results":[],"failures":[]}'
   },
   "ultrafuzz/property-lens@2": {
     description: "A strict typed property-lens catalog.",

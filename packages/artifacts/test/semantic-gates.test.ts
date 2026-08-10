@@ -684,9 +684,43 @@ const fixtures = {
       ]
     }
   },
+  "property-campaign-coverage-metric-uniqueness": {
+    positive: { coverage: { metrics: [{ name: "branches" }] } },
+    negative: { coverage: { metrics: [{ name: "branches" }, { name: "branches" }] } }
+  },
   "property-campaign-failure-id-uniqueness": {
     positive: { failures: [{ id: "a" }] },
     negative: { failures: [{ id: "a" }, { id: "a" }] }
+  },
+  "property-campaign-property-result-id-uniqueness": {
+    positive: { property_results: [{ property_id: "a" }] },
+    negative: { property_results: [{ property_id: "a" }, { property_id: "a" }] }
+  },
+  "property-campaign-document-coherence": {
+    positive: {
+      execution: {
+        status: "complete",
+        usable_results: true,
+        started_at: "2026-01-01T00:00:00Z",
+        finished_at: "2026-01-01T00:00:01Z",
+        deadline: "2026-01-01T00:00:02Z"
+      },
+      coverage: { metrics: [] },
+      property_results: [],
+      failures: []
+    },
+    negative: {
+      execution: {
+        status: "complete",
+        usable_results: true,
+        started_at: "2026-01-01T00:00:02Z",
+        finished_at: "2026-01-01T00:00:01Z",
+        deadline: "2026-01-01T00:00:00Z"
+      },
+      coverage: { metrics: [] },
+      property_results: [],
+      failures: []
+    }
   },
   "property-id-uniqueness": {
     positive: { properties: [{ id: "a" }] },
@@ -1148,6 +1182,80 @@ test("every contextual registration executes real positive and negative checks",
         positive: { failure_counts: { pre_deduplication: 1, post_deduplication: 1 } },
         negative: { failure_counts: { pre_deduplication: 2, post_deduplication: 1 } },
         context: { artifactSet: { campaigns: [{ failures: [{}] }], findings: [{}] } }
+      },
+      "property-campaign-context-joins": {
+        positive: {
+          campaign_plan_ref: "campaign-plan.json",
+          implemented_properties_ref: "implemented-properties.json",
+          findings_ref: "findings.json",
+          campaign_summary_ref: "campaign-summary.json",
+          fuzzer_backend: "recon",
+          backend_version: null,
+          execution: {
+            status: "complete",
+            usable_results: true,
+            command: "recon fuzz .",
+            workers: 1,
+            deadline: "2026-01-01T00:01:00Z"
+          },
+          paths: {},
+          property_results: [],
+          failures: []
+        },
+        negative: {
+          campaign_plan_ref: "campaign-plan.json",
+          implemented_properties_ref: "implemented-properties.json",
+          findings_ref: "findings.json",
+          campaign_summary_ref: "campaign-summary.json",
+          fuzzer_backend: "medusa",
+          backend_version: null,
+          execution: {
+            status: "complete",
+            usable_results: true,
+            command: "recon fuzz .",
+            workers: 1,
+            deadline: "2026-01-01T00:01:00Z"
+          },
+          paths: {},
+          property_results: [],
+          failures: []
+        },
+        context: {
+          artifactIdentity: {
+            runId: "run",
+            nodeId: "stateful-invariant-campaign",
+            artifactPath: "recon-fuzzer-results.json"
+          },
+          artifactSet: {
+            campaignPlanPath: "campaign-plan.json",
+            campaignPlan: {
+              backend: { name: "recon", version: null },
+              workers: 1,
+              deadline: "2026-01-01T00:01:00Z",
+              command_plan: [{ phase: "campaign", command: "recon fuzz ." }],
+              paths: {}
+            },
+            implementedPropertiesPath: "implemented-properties.json",
+            implementedProperties: { properties: [] },
+            findingsPath: "findings.json",
+            findings: [],
+            campaignSummaryPath: "campaign-summary.json",
+            campaignSummary: {
+              outcome: "complete",
+              campaign_plan_ref: "campaign-plan.json",
+              implemented_property_suite_refs: ["implemented-properties.json"],
+              backend_results: [
+                {
+                  fuzzer_backend: "recon",
+                  status: "complete",
+                  result_ref: "recon-fuzzer-results.json"
+                }
+              ],
+              finding_refs: [],
+              reproducer_refs: []
+            }
+          }
+        }
       },
       "generated-test-current-identity": {
         positive: { run_id: "run-current", node_id: "strategy-current" },

@@ -194,6 +194,7 @@ test("artifact contract registry exposes only current typed contracts", () => {
     "ultrafuzz/implemented-properties@2",
     "ultrafuzz/properties@1",
     "ultrafuzz/property-campaign@1",
+    "ultrafuzz/property-campaign@2",
     "ultrafuzz/property-lens@1",
     "ultrafuzz/reference-expectations@1",
     "ultrafuzz/report@1"
@@ -527,24 +528,70 @@ test("property implementation and campaign schemas retain canonical references",
     ]
   };
   assert.equal(validateImplementedPropertiesSchema(implemented).ok, true);
+  const campaign = {
+    schema_version: PROPERTY_CAMPAIGN_SCHEMA_VERSION,
+    campaign_plan_ref: "invariant-campaign-plan.json",
+    implemented_properties_ref: "implemented-properties.json",
+    findings_ref: "findings.json",
+    campaign_summary_ref: "campaign-summary.json",
+    fuzzer_backend: "recon",
+    backend_version: "0.1.0",
+    execution: {
+      status: "complete",
+      usable_results: true,
+      command: "recon fuzz .",
+      config_path: "recon.config.json",
+      workers: 1,
+      started_at: "2026-01-01T00:00:00Z",
+      finished_at: "2026-01-01T00:05:00Z",
+      deadline: "2026-01-01T00:10:00Z",
+      exit_code: 0,
+      failure: null
+    },
+    paths: {
+      corpus: "backends/recon-fuzzer/corpus",
+      cache: "backends/recon-fuzzer/cache",
+      log: "backends/recon-fuzzer/run.log",
+      raw_results: "backends/recon-fuzzer/results.json",
+      reproducers: "backends/recon-fuzzer/reproducers"
+    },
+    coverage: {
+      status: "reported",
+      metrics: [{ name: "runs", value: 10, unit: "count", source_ref: "backends/recon-fuzzer/results.json" }],
+      unavailable_reason: null
+    },
+    property_results: [
+      {
+        property_id: "property-1",
+        status: "failed",
+        failure_ids: ["failure-1"],
+        coverage_metric_names: ["runs"],
+        evidence_refs: ["backends/recon-fuzzer/results.json"],
+        reason: null
+      }
+    ],
+    failures: [
+      {
+        id: "failure-1",
+        status: "reproduced",
+        property_ids: ["property-1"],
+        entrypoint: "handler.deposit(uint256)",
+        sequence: ["deposit(1)"],
+        precondition_evidence: ["balance was nonzero"],
+        raw_reproducer_ref: "backends/recon-fuzzer/results.json",
+        deterministic_reproducer_ref: "backends/recon-fuzzer/reproducers/failure-1.t.sol",
+        reproduction_blocker: null
+      }
+    ]
+  };
+  assert.equal(validatePropertyCampaignSchema(campaign).ok, true);
   assert.equal(
     validatePropertyCampaignSchema({
-      schema_version: PROPERTY_CAMPAIGN_SCHEMA_VERSION,
-      fuzzer_backend: "recon",
-      failures: [{ id: "failure-1", status: "reproduced", property_ids: ["property-1"] }]
-    }).ok,
-    true
-  );
-  assert.equal(
-    validatePropertyCampaignSchema({
-      schema_version: PROPERTY_CAMPAIGN_SCHEMA_VERSION,
-      failures: [
-        { id: "failure-1", status: "reproduced", property_ids: ["property-1", "property-1"] },
-        { id: "failure-1", status: "reproduced" }
-      ]
+      ...campaign,
+      failures: [{ ...campaign.failures[0], property_ids: ["property-1", "property-1"] }]
     }).ok,
     false,
-    "campaign failure IDs and property references must be unambiguous"
+    "campaign property references must be unambiguous"
   );
 });
 
