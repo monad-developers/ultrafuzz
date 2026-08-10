@@ -589,9 +589,20 @@ describe("prompt semantic anchors", () => {
     expect(aggregate).toContain("existing pytest, Ape, Brownie, or other native test root");
     expect(aggregate).toContain("never flatten files or overwrite one entry with another");
     expect(aggregate).toContain("Do not copy unknown manifest\nentry fields");
-    expect(aggregate).toContain("required `kind`\n  (`generated-test` or `support-file`)");
+    expect(aggregate).toContain(
+      "`source_bundles`: one record for every listed `generated-tests.json`, including\n  empty manifests"
+    );
+    expect(aggregate).toContain("exact source artifact-directory basename as\n  `source_attempt_id`");
+    expect(aggregate).toContain("`source_manifest_sha256`");
+    expect(aggregate).toContain("positive `size_bytes`");
+    expect(aggregate).toContain("lowercase `sha256`");
+    expect(aggregate).toContain("plus required `kind` (`generated-test` or `support-file`)");
     expect(aggregate).toContain("Every considered source entry appears exactly once");
-    expect(aggregate).toContain("plus skipped `generated-test`\nrows");
+    expect(aggregate).toContain(
+      "A bundle is atomic: `copied` means all of its generated tests and\nsupport files appear once"
+    );
+    expect(aggregate).toContain("`empty`\nmeans both source counts are zero");
+    expect(aggregate).not.toContain("`bytes`");
     expect(aggregate).not.toContain("source_manifest_entry");
     expect(aggregate).not.toContain("collect generated Foundry `.t.sol` files");
   });

@@ -65,10 +65,7 @@
       "type": "object",
       "properties": {
         "path": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 4096,
-          "pattern": "^generated-tests\\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}(?:\\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}){0,62}(?![\\s\\S])"
+          "$ref": "#/$defs/generatedTestPath"
         },
         "size_bytes": {
           "type": "integer",
@@ -84,34 +81,46 @@
         },
         "language": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "maxLength": 16384
         },
         "framework": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "maxLength": 16384
         },
         "description": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "maxLength": 16384
         }
       },
       "required": ["path", "size_bytes", "sha256"],
       "additionalProperties": false
+    },
+    "generatedTestPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^generated-tests\\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}(?:\\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}){0,62}(?![\\s\\S])"
     },
     "generatedTestProvenance": {
       "type": "object",
       "properties": {
         "producer_node_id": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "maxLength": 4096
         },
         "run_id": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "maxLength": 4096
         },
         "logical_node_id": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "maxLength": 4096
         },
         "attempt_index": {
           "type": "integer",
@@ -125,11 +134,13 @@
         },
         "model_id": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "maxLength": 4096
         },
         "model": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "maxLength": 4096
         },
         "model_index": {
           "type": "integer",
@@ -138,23 +149,28 @@
         },
         "agent_ref": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "maxLength": 4096
         },
         "workflow_run_id": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "maxLength": 4096
         },
         "workflow_task_id": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "maxLength": 4096
         },
         "source_run_id": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "maxLength": 4096
         },
         "origin": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "maxLength": 4096
         }
       },
       "additionalProperties": false,

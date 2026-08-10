@@ -1,4 +1,5 @@
 export * from "./artifact-gates.js";
+export * from "./aggregation-semantic-context.js";
 export * from "./audit-contracts.js";
 export * from "./clean.js";
 export * from "./doctor.js";

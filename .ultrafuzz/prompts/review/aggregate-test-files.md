@@ -193,15 +193,37 @@ Save the aggregation manifest to {{artifact_path}}/aggregation.json as JSON with
 - `copied_generated_tests`: number of framework-native test files copied into the workspace
 - `source_support_files`: total number of manifest `support_files` entries considered, or `0`
 - `copied_support_files`: number of explicitly manifested native support files copied into the workspace, or `0`
-- `files`: array of copied native test records with `strategy`, `node_id`, `attempt_index`, `source_manifest_path`, `source_artifact_path`, `source_relative_path`, `destination_path`, `destination_relative_path`, `bytes`, and preserved `language`, `framework`, `description`, and `provenance` fields when present
-- `support_files`: array of explicitly manifested native support-file records with the same attribution, path-safety, framework, and provenance fields as `files`, or `[]`
-- `skipped_files`: array of skipped file records with required `kind`
-  (`generated-test` or `support-file`), `strategy`, `node_id`, `attempt_index`,
-  `source_manifest_path`, `source_relative_path`, and `reason`, or `[]`
+- `source_bundles`: one record for every listed `generated-tests.json`, including
+  empty manifests. Each record requires the source manifest's logical
+  `strategy`/`node_id`, exact source artifact-directory basename as
+  `source_attempt_id`, exact `attempt_index`, absolute `source_manifest_path`,
+  artifact-relative `source_manifest_relative_path`, lowercase digest of the
+  exact manifest bytes as `source_manifest_sha256`, manifest `run_id` as
+  `source_run_id`, exact `generated_test_count` and `support_file_count`, and a
+  `disposition` of `empty`, `copied`, or `skipped`. A `skipped` bundle requires
+  one non-empty `reason`; `empty` and `copied` bundles must omit `reason`.
+- `files`: copied runnable-test rows. Every row requires `strategy`, `node_id`,
+  `source_attempt_id`, `attempt_index`, `source_manifest_path`,
+  `source_manifest_relative_path`, `source_manifest_sha256`, absolute
+  `source_artifact_path`, `source_relative_path`, positive `size_bytes`,
+  lowercase `sha256`, absolute `destination_path`, and workspace-relative
+  `destination_relative_path`. Preserve `language`, `framework`, `description`,
+  and `provenance` exactly when the source entry contains them; omit each field
+  when the source entry omits it.
+- `support_files`: copied support-file rows with the same exact source,
+  destination, digest, size, and optional metadata fields as `files`, or `[]`.
+- `skipped_files`: skipped source rows with the same exact source identity,
+  source artifact path, digest, size, and optional metadata fields as copied
+  rows, plus required `kind` (`generated-test` or `support-file`) and non-empty
+  `reason`; skipped rows have no destination fields.
 
-Every considered source entry appears exactly once across its copied array or
-`skipped_files`; do not duplicate an entry to satisfy accounting. Therefore
-`source_generated_tests` equals `files.length` plus skipped `generated-test`
-rows, and `source_support_files` equals `support_files.length` plus skipped
-`support-file` rows. The copied counts equal their corresponding copied-array
-lengths.
+Every considered source entry appears exactly once across its typed copied
+array or `skipped_files`; do not omit, fabricate, duplicate, or swap the kind
+of an entry. A bundle is atomic: `copied` means all of its generated tests and
+support files appear once in their copied arrays and none are skipped;
+`skipped` means all appear once in `skipped_files` and none are copied; `empty`
+means both source counts are zero and no row refers to the bundle.
+`source_generated_tests` and `source_support_files` equal the sums of the
+corresponding `source_bundles` counts. The copied counts equal their
+corresponding copied-array lengths. Keep all four arrays whole-item unique and
+keep source identities unique across the copied/skipped union.

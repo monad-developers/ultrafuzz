@@ -55,7 +55,14 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "ultrafuzz/aggregation-manifest@1",
     "aggregationManifestJsonSchema",
     "aggregationManifestSchema",
-    ["aggregation-destination-path-uniqueness", "aggregation-source-entry-uniqueness", "aggregation-count-coupling"]
+    [
+      "aggregation-destination-path-uniqueness",
+      "aggregation-source-entry-uniqueness",
+      "aggregation-source-bundle-reconciliation",
+      "aggregation-resource-bounds",
+      "aggregation-count-coupling",
+      "aggregation-authenticated-source-destination-reconciliation"
+    ]
   ),
   "analysis-bundle.schema.json": runtime("analysisBundleManifestJsonSchema", "analysisBundleManifestSchema", [
     "analysis-bundle-path-order",

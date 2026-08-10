@@ -6,12 +6,15 @@ import { isDeepStrictEqual } from "node:util";
 import { artifactContractDefinition, artifactContractSchemaBinding } from "./artifact-contracts.js";
 import { ARTIFACT_SCHEMA_METADATA, type ArtifactSchemaFilename } from "./artifact-schema-metadata.js";
 import {
+  MAX_AGGREGATION_DECLARED_BYTES,
+  MAX_AGGREGATION_SOURCE_ENTRIES,
   MAX_GENERATED_TEST_BUNDLE_BYTES,
   MAX_GENERATED_TEST_BUNDLE_ENTRIES,
   MAX_GENERATED_TEST_COMPANION_BYTES,
   MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES
 } from "./artifact-limits.js";
 import { readRegularFileSnapshot } from "./schema-registry.js";
+import { assertNoSymlinkComponents } from "./safe-paths.js";
 
 export const SEMANTIC_GATE_SCOPES = ["document", "filesystem", "cross-artifact", "git", "runtime-state"] as const;
 
@@ -94,6 +97,38 @@ export interface SemanticAnalysisBundleContext {
   manifest: unknown;
 }
 
+export interface SemanticAggregationSourceEntryContext {
+  kind: "generated-test" | "support-file";
+  sourceArtifactPath: string;
+  sourceRelativePath: string;
+  sizeBytes: number;
+  sha256: string;
+  bytes: Uint8Array;
+  language?: string;
+  framework?: string;
+  description?: string;
+  provenance?: Readonly<Record<string, unknown>>;
+}
+
+export interface SemanticAggregationSourceBundleContext {
+  strategy: string;
+  nodeId: string;
+  sourceAttemptId: string;
+  attemptIndex: number;
+  sourceManifestPath: string;
+  sourceManifestRelativePath: string;
+  sourceManifestSha256: string;
+  sourceRunId: string;
+  entries: readonly SemanticAggregationSourceEntryContext[];
+}
+
+export interface SemanticAggregationContext {
+  /** Canonical absolute workspace directory that owns every copied destination. */
+  workspaceRoot: string;
+  /** Immutable generated-test bundles authenticated by the host before gate execution. */
+  sourceBundles: readonly SemanticAggregationSourceBundleContext[];
+}
+
 /**
  * Host facts available to contextual semantic gates. Every field is read-only;
  * gate execution never writes an artifact, repository, ledger, or filesystem.
@@ -110,6 +145,7 @@ export interface SemanticGateContext {
   eventLog?: SemanticEventLogContext;
   validatorPreflight?: SemanticValidatorPreflightContext;
   analysisBundle?: SemanticAnalysisBundleContext;
+  aggregation?: SemanticAggregationContext;
 }
 
 export interface SemanticGateExecutionRequest {
@@ -448,20 +484,534 @@ function aggregationDestinationIssues(document: unknown): SemanticGateIssue[] {
 
 function aggregationCountIssues(document: unknown): SemanticGateIssue[] {
   if (!isRecord(document)) return [];
-  const skippedFiles = arrayAt(document, ["skipped_files"]);
-  const skippedGeneratedTests = skippedFiles.filter((row) => stringField(row, "kind") === "generated-test").length;
-  const skippedSupportFiles = skippedFiles.filter((row) => stringField(row, "kind") === "support-file").length;
+  const sourceBundles = arrayAt(document, ["source_bundles"]);
   const expected: Readonly<Record<string, number>> = {
     copied_generated_tests: arrayAt(document, ["files"]).length,
     copied_support_files: arrayAt(document, ["support_files"]).length,
-    source_generated_tests: arrayAt(document, ["files"]).length + skippedGeneratedTests,
-    source_support_files: arrayAt(document, ["support_files"]).length + skippedSupportFiles
+    source_generated_tests: sourceBundles.reduce<number>(
+      (total, bundle) => total + (numberField(bundle, "generated_test_count") ?? 0),
+      0
+    ),
+    source_support_files: sourceBundles.reduce<number>(
+      (total, bundle) => total + (numberField(bundle, "support_file_count") ?? 0),
+      0
+    )
   };
   return Object.entries(expected).flatMap(([field, count]) =>
     numberField(document, field) === count
       ? []
       : [issue(`$.${field}`, `${field} must equal its copied and typed-skipped source population (${count})`)]
   );
+}
+
+function aggregationBundleIdentity(row: unknown): string | undefined {
+  const strategy = stringField(row, "strategy");
+  const nodeId = stringField(row, "node_id");
+  const sourceAttemptId = stringField(row, "source_attempt_id");
+  const attemptIndex = numberField(row, "attempt_index");
+  const manifestPath = stringField(row, "source_manifest_path");
+  const manifestRelativePath = stringField(row, "source_manifest_relative_path");
+  const manifestSha256 = stringField(row, "source_manifest_sha256");
+  if (
+    strategy === undefined ||
+    nodeId === undefined ||
+    sourceAttemptId === undefined ||
+    attemptIndex === undefined ||
+    manifestPath === undefined ||
+    manifestRelativePath === undefined ||
+    manifestSha256 === undefined
+  ) {
+    return undefined;
+  }
+  return JSON.stringify([
+    strategy,
+    nodeId,
+    sourceAttemptId,
+    attemptIndex,
+    manifestPath,
+    manifestRelativePath,
+    manifestSha256
+  ]);
+}
+
+function aggregationBundleIssues(document: unknown): SemanticGateIssue[] {
+  const bundles = arrayAt(document, ["source_bundles"]);
+  const rows = [
+    ...arrayAt(document, ["files"]).map((row, index) => ({
+      row,
+      path: `$.files[${index}]`,
+      kind: "generated-test" as const,
+      disposition: "copied" as const
+    })),
+    ...arrayAt(document, ["support_files"]).map((row, index) => ({
+      row,
+      path: `$.support_files[${index}]`,
+      kind: "support-file" as const,
+      disposition: "copied" as const
+    })),
+    ...arrayAt(document, ["skipped_files"]).map((row, index) => ({
+      row,
+      path: `$.skipped_files[${index}]`,
+      kind: stringField(row, "kind"),
+      disposition: "skipped" as const
+    }))
+  ];
+  const issues: SemanticGateIssue[] = [];
+  const bundlesByIdentity = new Map<string, { bundle: unknown; index: number }>();
+  const rowsByIdentity = new Map<string, typeof rows>();
+
+  for (const [index, bundle] of bundles.entries()) {
+    const identity = aggregationBundleIdentity(bundle);
+    if (identity === undefined) continue;
+    if (bundlesByIdentity.has(identity)) {
+      issues.push(issue(`$.source_bundles[${index}]`, `Duplicate aggregation source bundle ${identity}`));
+      continue;
+    }
+    bundlesByIdentity.set(identity, { bundle, index });
+  }
+  for (const row of rows) {
+    const identity = aggregationBundleIdentity(row.row);
+    if (identity === undefined) continue;
+    if (!bundlesByIdentity.has(identity)) {
+      issues.push(issue(row.path, `Aggregation row does not identify a declared source bundle ${identity}`));
+      continue;
+    }
+    const matching = rowsByIdentity.get(identity) ?? [];
+    matching.push(row);
+    rowsByIdentity.set(identity, matching);
+  }
+
+  for (const [identity, { bundle, index }] of bundlesByIdentity) {
+    const matching = rowsByIdentity.get(identity) ?? [];
+    const copiedGenerated = matching.filter(
+      (row) => row.disposition === "copied" && row.kind === "generated-test"
+    ).length;
+    const copiedSupport = matching.filter((row) => row.disposition === "copied" && row.kind === "support-file").length;
+    const skippedGenerated = matching.filter(
+      (row) => row.disposition === "skipped" && row.kind === "generated-test"
+    ).length;
+    const skippedSupport = matching.filter(
+      (row) => row.disposition === "skipped" && row.kind === "support-file"
+    ).length;
+    const expectedGenerated = numberField(bundle, "generated_test_count");
+    const expectedSupport = numberField(bundle, "support_file_count");
+    const disposition = stringField(bundle, "disposition");
+    if (expectedGenerated === undefined || expectedSupport === undefined || disposition === undefined) continue;
+    const total = expectedGenerated + expectedSupport;
+    const bundlePath = `$.source_bundles[${index}]`;
+
+    if (disposition === "empty") {
+      if (total !== 0 || matching.length !== 0) {
+        issues.push(issue(bundlePath, `Empty source bundle ${identity} must have zero members and no file rows`));
+      }
+      continue;
+    }
+    if (total === 0) {
+      issues.push(
+        issue(bundlePath, `Non-empty disposition ${JSON.stringify(disposition)} cannot describe an empty bundle`)
+      );
+      continue;
+    }
+    if (disposition === "copied") {
+      if (
+        copiedGenerated !== expectedGenerated ||
+        copiedSupport !== expectedSupport ||
+        skippedGenerated !== 0 ||
+        skippedSupport !== 0
+      ) {
+        issues.push(issue(bundlePath, `Copied source bundle ${identity} must copy every member exactly once`));
+      }
+    } else if (disposition === "skipped") {
+      if (
+        skippedGenerated !== expectedGenerated ||
+        skippedSupport !== expectedSupport ||
+        copiedGenerated !== 0 ||
+        copiedSupport !== 0
+      ) {
+        issues.push(issue(bundlePath, `Skipped source bundle ${identity} must skip every member and copy none`));
+      }
+    }
+  }
+  return issues;
+}
+
+function aggregationResourceIssues(document: unknown): SemanticGateIssue[] {
+  const bundles = arrayAt(document, ["source_bundles"]);
+  const rows = [
+    ...arrayAt(document, ["files"]),
+    ...arrayAt(document, ["support_files"]),
+    ...arrayAt(document, ["skipped_files"])
+  ];
+  const issues: SemanticGateIssue[] = [];
+  const declaredSourceEntries = bundles.reduce<number>(
+    (total, bundle) =>
+      total + (numberField(bundle, "generated_test_count") ?? 0) + (numberField(bundle, "support_file_count") ?? 0),
+    0
+  );
+  if (declaredSourceEntries > MAX_AGGREGATION_SOURCE_ENTRIES) {
+    issues.push(
+      issue(
+        "$.source_bundles",
+        `Aggregation source bundles exceed the ${MAX_AGGREGATION_SOURCE_ENTRIES}-entry combined limit`
+      )
+    );
+  }
+  for (const [index, bundle] of bundles.entries()) {
+    const entries =
+      (numberField(bundle, "generated_test_count") ?? 0) + (numberField(bundle, "support_file_count") ?? 0);
+    if (entries > MAX_GENERATED_TEST_BUNDLE_ENTRIES) {
+      issues.push(
+        issue(
+          `$.source_bundles[${index}]`,
+          `Aggregation source bundle exceeds the ${MAX_GENERATED_TEST_BUNDLE_ENTRIES}-entry generated-test bundle limit`
+        )
+      );
+    }
+  }
+  if (rows.length > MAX_AGGREGATION_SOURCE_ENTRIES) {
+    issues.push(issue("$", `Aggregation rows exceed the ${MAX_AGGREGATION_SOURCE_ENTRIES}-entry combined limit`));
+  }
+  const declaredBytes = rows.reduce<number>((total, row) => total + (numberField(row, "size_bytes") ?? 0), 0);
+  if (declaredBytes > MAX_AGGREGATION_DECLARED_BYTES) {
+    issues.push(
+      issue("$", `Aggregation rows exceed the ${MAX_AGGREGATION_DECLARED_BYTES}-byte combined declared-size limit`)
+    );
+  }
+  return issues;
+}
+
+function aggregationAuthenticatedReconciliationIssues(
+  document: unknown,
+  context: SemanticGateContext
+): SemanticGateIssue[] {
+  const aggregation = context.aggregation!;
+  const issues: SemanticGateIssue[] = [];
+  const expectedBundles = new Map<
+    string,
+    { bundle: SemanticAggregationSourceBundleContext; summary: Readonly<Record<string, unknown>> }
+  >();
+  const expectedEntries = new Map<
+    string,
+    { bundle: SemanticAggregationSourceBundleContext; entry: SemanticAggregationSourceEntryContext }
+  >();
+
+  for (const bundle of aggregation.sourceBundles) {
+    const bundleKey = aggregationContextBundleKey(bundle.sourceAttemptId, bundle.sourceManifestRelativePath);
+    if (expectedBundles.has(bundleKey)) {
+      issues.push(issue("$", `Trusted aggregation context repeats source bundle ${bundleKey}`));
+      continue;
+    }
+    const generatedTestCount = bundle.entries.filter((entry) => entry.kind === "generated-test").length;
+    const supportFileCount = bundle.entries.filter((entry) => entry.kind === "support-file").length;
+    const summary = {
+      strategy: bundle.strategy,
+      node_id: bundle.nodeId,
+      source_attempt_id: bundle.sourceAttemptId,
+      attempt_index: bundle.attemptIndex,
+      source_manifest_path: bundle.sourceManifestPath,
+      source_manifest_relative_path: bundle.sourceManifestRelativePath,
+      source_manifest_sha256: bundle.sourceManifestSha256,
+      source_run_id: bundle.sourceRunId,
+      generated_test_count: generatedTestCount,
+      support_file_count: supportFileCount
+    };
+    expectedBundles.set(bundleKey, { bundle, summary });
+    for (const entry of bundle.entries) {
+      const entryKey = aggregationContextEntryKey(
+        bundle.sourceAttemptId,
+        bundle.sourceManifestRelativePath,
+        entry.sourceRelativePath
+      );
+      if (expectedEntries.has(entryKey)) {
+        issues.push(issue("$", `Trusted aggregation context repeats source entry ${entryKey}`));
+        continue;
+      }
+      const bytes = Buffer.from(entry.bytes);
+      if (
+        bytes.length !== entry.sizeBytes ||
+        crypto.createHash("sha256").update(bytes).digest("hex") !== entry.sha256
+      ) {
+        issues.push(issue("$", `Trusted aggregation source snapshot disagrees with declared bytes ${entryKey}`));
+      }
+      expectedEntries.set(entryKey, { bundle, entry });
+    }
+  }
+
+  const actualBundles = new Map<string, { row: unknown; index: number }>();
+  for (const [index, row] of arrayAt(document, ["source_bundles"]).entries()) {
+    const sourceAttemptId = stringField(row, "source_attempt_id");
+    const manifestRelativePath = stringField(row, "source_manifest_relative_path");
+    if (sourceAttemptId === undefined || manifestRelativePath === undefined) continue;
+    const key = aggregationContextBundleKey(sourceAttemptId, manifestRelativePath);
+    if (actualBundles.has(key)) {
+      issues.push(issue(`$.source_bundles[${index}]`, `Aggregation manifest repeats source bundle ${key}`));
+      continue;
+    }
+    actualBundles.set(key, { row, index });
+    const expected = expectedBundles.get(key);
+    if (expected === undefined) {
+      issues.push(issue(`$.source_bundles[${index}]`, `Aggregation manifest fabricates source bundle ${key}`));
+      continue;
+    }
+    if (!isDeepStrictEqual(aggregationBundleSummaryProjection(row), expected.summary)) {
+      issues.push(
+        issue(`$.source_bundles[${index}]`, `Aggregation source bundle attribution does not match authority ${key}`)
+      );
+    }
+  }
+  for (const key of expectedBundles.keys()) {
+    if (!actualBundles.has(key)) {
+      issues.push(issue("$.source_bundles", `Aggregation manifest omits authenticated source bundle ${key}`));
+    }
+  }
+
+  const actualEntries = new Set<string>();
+  const rows = [
+    ...arrayAt(document, ["files"]).map((row, index) => ({
+      row,
+      path: `$.files[${index}]`,
+      kind: "generated-test" as const,
+      disposition: "copied" as const
+    })),
+    ...arrayAt(document, ["support_files"]).map((row, index) => ({
+      row,
+      path: `$.support_files[${index}]`,
+      kind: "support-file" as const,
+      disposition: "copied" as const
+    })),
+    ...arrayAt(document, ["skipped_files"]).map((row, index) => ({
+      row,
+      path: `$.skipped_files[${index}]`,
+      kind: stringField(row, "kind"),
+      disposition: "skipped" as const
+    }))
+  ];
+  const workspaceRoot = canonicalAggregationWorkspaceRoot(aggregation.workspaceRoot, issues);
+  for (const row of rows) {
+    const sourceAttemptId = stringField(row.row, "source_attempt_id");
+    const manifestRelativePath = stringField(row.row, "source_manifest_relative_path");
+    const sourceRelativePath = stringField(row.row, "source_relative_path");
+    if (sourceAttemptId === undefined || manifestRelativePath === undefined || sourceRelativePath === undefined) {
+      continue;
+    }
+    const key = aggregationContextEntryKey(sourceAttemptId, manifestRelativePath, sourceRelativePath);
+    if (actualEntries.has(key)) {
+      issues.push(issue(row.path, `Aggregation manifest duplicates authenticated source entry ${key}`));
+      continue;
+    }
+    actualEntries.add(key);
+    const expected = expectedEntries.get(key);
+    if (expected === undefined) {
+      issues.push(issue(row.path, `Aggregation manifest fabricates source entry ${key}`));
+      continue;
+    }
+    if (row.kind !== expected.entry.kind) {
+      issues.push(issue(row.path, `Aggregation source entry has the wrong typed kind ${key}`));
+    }
+    const expectedProjection = aggregationExpectedEntryProjection(expected.bundle, expected.entry);
+    if (!isDeepStrictEqual(aggregationSourceEntryProjection(row.row), expectedProjection)) {
+      issues.push(issue(row.path, `Aggregation source entry attribution or metadata does not match authority ${key}`));
+    }
+    const actualBundle = actualBundles.get(
+      aggregationContextBundleKey(expected.bundle.sourceAttemptId, expected.bundle.sourceManifestRelativePath)
+    )?.row;
+    if (row.disposition === "skipped") {
+      const bundleReason = stringField(actualBundle, "reason");
+      if (stringField(row.row, "reason") !== bundleReason) {
+        issues.push(issue(`${row.path}.reason`, `Skipped source entry reason must equal its bundle reason ${key}`));
+      }
+    } else if (workspaceRoot !== undefined) {
+      issues.push(...aggregationDestinationIssuesForRow(row.row, row.path, expected.entry, workspaceRoot));
+    }
+  }
+  for (const key of expectedEntries.keys()) {
+    if (!actualEntries.has(key)) {
+      issues.push(issue("$", `Aggregation manifest omits authenticated source entry ${key}`));
+    }
+  }
+  return issues;
+}
+
+function aggregationContextBundleKey(sourceAttemptId: string, manifestRelativePath: string): string {
+  return JSON.stringify([sourceAttemptId, manifestRelativePath]);
+}
+
+function aggregationContextEntryKey(
+  sourceAttemptId: string,
+  manifestRelativePath: string,
+  sourceRelativePath: string
+): string {
+  return JSON.stringify([sourceAttemptId, manifestRelativePath, sourceRelativePath]);
+}
+
+function aggregationBundleSummaryProjection(row: unknown): Readonly<Record<string, unknown>> {
+  return objectProjection(row, [
+    "strategy",
+    "node_id",
+    "source_attempt_id",
+    "attempt_index",
+    "source_manifest_path",
+    "source_manifest_relative_path",
+    "source_manifest_sha256",
+    "source_run_id",
+    "generated_test_count",
+    "support_file_count"
+  ]);
+}
+
+function aggregationExpectedEntryProjection(
+  bundle: SemanticAggregationSourceBundleContext,
+  entry: SemanticAggregationSourceEntryContext
+): Readonly<Record<string, unknown>> {
+  return {
+    strategy: bundle.strategy,
+    node_id: bundle.nodeId,
+    source_attempt_id: bundle.sourceAttemptId,
+    attempt_index: bundle.attemptIndex,
+    source_manifest_path: bundle.sourceManifestPath,
+    source_manifest_relative_path: bundle.sourceManifestRelativePath,
+    source_manifest_sha256: bundle.sourceManifestSha256,
+    source_artifact_path: entry.sourceArtifactPath,
+    source_relative_path: entry.sourceRelativePath,
+    size_bytes: entry.sizeBytes,
+    sha256: entry.sha256,
+    ...(entry.language === undefined ? {} : { language: entry.language }),
+    ...(entry.framework === undefined ? {} : { framework: entry.framework }),
+    ...(entry.description === undefined ? {} : { description: entry.description }),
+    ...(entry.provenance === undefined ? {} : { provenance: entry.provenance })
+  };
+}
+
+function aggregationSourceEntryProjection(row: unknown): Readonly<Record<string, unknown>> {
+  return objectProjection(row, [
+    "strategy",
+    "node_id",
+    "source_attempt_id",
+    "attempt_index",
+    "source_manifest_path",
+    "source_manifest_relative_path",
+    "source_manifest_sha256",
+    "source_artifact_path",
+    "source_relative_path",
+    "size_bytes",
+    "sha256",
+    "language",
+    "framework",
+    "description",
+    "provenance"
+  ]);
+}
+
+function objectProjection(row: unknown, fields: readonly string[]): Readonly<Record<string, unknown>> {
+  if (!isRecord(row)) return {};
+  return Object.fromEntries(fields.filter((field) => Object.hasOwn(row, field)).map((field) => [field, row[field]]));
+}
+
+function canonicalAggregationWorkspaceRoot(configuredRoot: string, issues: SemanticGateIssue[]): string | undefined {
+  const root = path.resolve(configuredRoot);
+  try {
+    const stat = fs.lstatSync(root);
+    if (!path.isAbsolute(configuredRoot) || configuredRoot !== root || stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new Error("workspace root is not an absolute canonical directory");
+    }
+    if (fs.realpathSync(root) !== root) throw new Error("workspace root resolves through a path alias");
+    return root;
+  } catch (error) {
+    issues.push(
+      issue("$", `Trusted aggregation workspace is unsafe: ${error instanceof Error ? error.message : String(error)}`)
+    );
+    return undefined;
+  }
+}
+
+function aggregationDestinationIssuesForRow(
+  row: unknown,
+  rowPath: string,
+  source: SemanticAggregationSourceEntryContext,
+  workspaceRoot: string
+): SemanticGateIssue[] {
+  const relativePath = stringField(row, "destination_relative_path");
+  const declaredPath = stringField(row, "destination_path");
+  if (relativePath === undefined || declaredPath === undefined) return [];
+  const destination = path.resolve(workspaceRoot, ...relativePath.split("/"));
+  if (
+    destination === workspaceRoot ||
+    !destination.startsWith(`${workspaceRoot}${path.sep}`) ||
+    !path.isAbsolute(declaredPath) ||
+    declaredPath !== destination
+  ) {
+    return [
+      issue(
+        `${rowPath}.destination_path`,
+        "Aggregation destination must exactly resolve from destination_relative_path under the task workspace"
+      )
+    ];
+  }
+  try {
+    const bytes = readStableAggregationDestination(workspaceRoot, destination, source.sizeBytes);
+    if (!bytes.equals(Buffer.from(source.bytes))) {
+      throw new Error("destination bytes differ from the authenticated source snapshot");
+    }
+    if (crypto.createHash("sha256").update(bytes).digest("hex") !== source.sha256) {
+      throw new Error("destination digest differs from the authenticated source digest");
+    }
+    return [];
+  } catch (error) {
+    return [
+      issue(
+        `${rowPath}.destination_path`,
+        `Aggregation destination is not a stable singly linked copy: ${error instanceof Error ? error.message : String(error)}`
+      )
+    ];
+  }
+}
+
+function readStableAggregationDestination(root: string, filePath: string, expectedBytes: number): Buffer {
+  assertNoSymlinkComponents(root, filePath, "aggregation destination");
+  const descriptor = fs.openSync(
+    filePath,
+    fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0)
+  );
+  try {
+    const before = fs.fstatSync(descriptor, { bigint: true });
+    if (!before.isFile() || before.nlink !== 1n || before.size !== BigInt(expectedBytes)) {
+      throw new Error("destination is not a singly linked regular file with the declared size");
+    }
+    const chunks: Buffer[] = [];
+    let offset = 0;
+    for (;;) {
+      const remaining = expectedBytes + 1 - offset;
+      if (remaining <= 0) throw new Error("destination grew beyond the declared size");
+      const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, remaining));
+      const count = fs.readSync(descriptor, chunk, 0, chunk.length, offset);
+      if (count === 0) break;
+      offset += count;
+      chunks.push(chunk.subarray(0, count));
+    }
+    const after = fs.fstatSync(descriptor, { bigint: true });
+    const atPath = fs.lstatSync(filePath, { bigint: true });
+    if (
+      before.dev !== after.dev ||
+      before.ino !== after.ino ||
+      before.size !== after.size ||
+      before.mtimeNs !== after.mtimeNs ||
+      before.ctimeNs !== after.ctimeNs ||
+      after.dev !== atPath.dev ||
+      after.ino !== atPath.ino ||
+      after.nlink !== 1n ||
+      atPath.nlink !== 1n ||
+      atPath.isSymbolicLink() ||
+      !atPath.isFile() ||
+      offset !== expectedBytes
+    ) {
+      throw new Error("destination changed while it was authenticated");
+    }
+    assertNoSymlinkComponents(root, filePath, "aggregation destination");
+    if (fs.realpathSync(filePath) !== filePath) throw new Error("destination resolves through a path alias");
+    return Buffer.concat(chunks, offset);
+  } finally {
+    fs.closeSync(descriptor);
+  }
 }
 
 function aggregationSourceEntryIssues(document: unknown): SemanticGateIssue[] {
@@ -481,22 +1031,20 @@ function aggregationSourceEntryIssues(document: unknown): SemanticGateIssue[] {
   const seen = new Set<string>();
   const issues: SemanticGateIssue[] = [];
   for (const entry of rows) {
-    const strategy = stringField(entry.row, "strategy");
-    const nodeId = stringField(entry.row, "node_id");
-    const attemptIndex = numberField(entry.row, "attempt_index");
-    const manifestPath = stringField(entry.row, "source_manifest_path");
+    const sourceAttemptId = stringField(entry.row, "source_attempt_id");
+    const manifestRelativePath = stringField(entry.row, "source_manifest_relative_path");
+    const manifestSha256 = stringField(entry.row, "source_manifest_sha256");
     const relativePath = stringField(entry.row, "source_relative_path");
     if (
       entry.kind === undefined ||
-      strategy === undefined ||
-      nodeId === undefined ||
-      attemptIndex === undefined ||
-      manifestPath === undefined ||
+      sourceAttemptId === undefined ||
+      manifestRelativePath === undefined ||
+      manifestSha256 === undefined ||
       relativePath === undefined
     ) {
       continue;
     }
-    const identity = JSON.stringify([entry.kind, strategy, nodeId, attemptIndex, manifestPath, relativePath]);
+    const identity = JSON.stringify([entry.kind, sourceAttemptId, manifestRelativePath, manifestSha256, relativePath]);
     if (seen.has(identity)) {
       issues.push(issue(entry.path, `Duplicate aggregation source entry ${identity}`));
     }
@@ -2596,6 +3144,13 @@ const gateSpecifications = {
   "agent-source-proof-dependency-lineage": documentGate(agentSourceProofDependencyIssues),
   "agent-source-proof-ref-uniqueness": documentGate(uniqueFieldGate([["refs"]], "name", "source proof ref name")),
   "aggregation-count-coupling": documentGate(aggregationCountIssues),
+  "aggregation-source-bundle-reconciliation": documentGate(aggregationBundleIssues),
+  "aggregation-resource-bounds": documentGate(aggregationResourceIssues),
+  "aggregation-authenticated-source-destination-reconciliation": contextualGate(
+    "cross-artifact",
+    ["aggregation.workspaceRoot", "aggregation.sourceBundles"],
+    aggregationAuthenticatedReconciliationIssues
+  ),
   "aggregation-destination-path-uniqueness": documentGate(aggregationDestinationIssues),
   "aggregation-source-entry-uniqueness": documentGate(aggregationSourceEntryIssues),
   "analysis-bundle-file-digest": contextualGate("filesystem", ["filesystem.rootDirectory"], (document, context) =>

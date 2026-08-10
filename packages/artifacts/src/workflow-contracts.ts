@@ -2,8 +2,23 @@ import { z } from "zod/v4";
 
 import { findingLifecycleSchema, findingSchema, findingStrategyHitSchema } from "./findings-schema.js";
 import { FINDING_SEVERITIES, TRIAGE_CLASSIFICATIONS } from "./findings.js";
+import {
+  MAX_AGGREGATION_ABSOLUTE_PATH_CHARS,
+  MAX_AGGREGATION_REASON_CHARS,
+  MAX_AGGREGATION_SOURCE_BUNDLES,
+  MAX_AGGREGATION_SOURCE_ENTRIES,
+  MAX_GENERATED_TEST_BUNDLE_ENTRIES,
+  MAX_GENERATED_TEST_PATH_BYTES,
+  MAX_GENERATED_TEST_PATH_SEGMENTS
+} from "./artifact-limits.js";
+import {
+  generatedTestEntrySchema,
+  generatedTestPathSchema,
+  generatedTestProvenanceSchema
+} from "./generated-test-schema.js";
 import { canonicalTimestampSchema } from "./portable-json-primitives.js";
 import { PROPERTY_PRIORITIES } from "./property-provenance.js";
+import { SAFE_ID_PATTERN } from "./safe-paths.js";
 import { validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 
 const nonEmptyString = z.string().min(1);
@@ -20,6 +35,35 @@ const uniqueStrings = (minimum = 0) =>
     .meta({ uniqueItems: true })
     .refine((values) => new Set(values).size === values.length, { message: "Values must be unique" });
 const stringList = z.array(nonEmptyString);
+
+function canonicalJsonValueKey(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map((entry) => canonicalJsonValueKey(entry)).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJsonValueKey(entry)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "undefined";
+}
+
+function uniqueJsonValues<T extends z.ZodType>(item: T, maximum: number): z.ZodArray<T> {
+  return z
+    .array(item)
+    .max(maximum)
+    .meta({ uniqueItems: true })
+    .superRefine((values, context) => {
+      const seen = new Set<string>();
+      for (const [index, value] of values.entries()) {
+        const key = canonicalJsonValueKey(value);
+        if (seen.has(key)) {
+          context.addIssue({ code: "custom", message: "Array entries must be unique", path: [index] });
+        }
+        seen.add(key);
+      }
+    }) as z.ZodArray<T>;
+}
 
 function withDocumentMetadata<T extends z.ZodType>(schema: T, slug: string, version: number, title: string): T {
   return schema.meta({
@@ -1329,63 +1373,126 @@ export const findingLifecycleLedgerSchema = withDocumentMetadata(
   "Ultrafuzz finding lifecycle ledger"
 );
 
-const aggregationProvenanceSchema = z
-  .strictObject({
-    producer_node_id: nonEmptyString.optional(),
-    run_id: nonEmptyString.optional(),
-    logical_node_id: nonEmptyString.optional(),
-    attempt_index: nonNegativeInteger.optional(),
-    loop_index: nonNegativeInteger.optional(),
-    model_id: nonEmptyString.optional(),
-    model: nonEmptyString.optional(),
-    model_index: nonNegativeInteger.optional(),
-    agent_ref: nonEmptyString.optional(),
-    workflow_run_id: nonEmptyString.optional(),
-    workflow_task_id: nonEmptyString.optional(),
-    source_run_id: nonEmptyString.optional(),
-    origin: nonEmptyString.optional()
-  })
-  .meta({ minProperties: 1 })
-  .refine((provenance) => Object.keys(provenance).length > 0, {
-    message: "Present aggregation provenance must contain at least one typed field"
-  });
+const aggregationId = z.string().min(1).max(128).regex(SAFE_ID_PATTERN).meta({ id: "aggregationId" });
+const aggregationCount = nonNegativeInteger.max(MAX_AGGREGATION_SOURCE_ENTRIES);
+const aggregationAbsolutePath = z
+  .string()
+  .min(1)
+  .max(MAX_AGGREGATION_ABSOLUTE_PATH_CHARS)
+  .meta({ id: "aggregationAbsolutePath" });
+const aggregationReason = z.string().min(1).max(MAX_AGGREGATION_REASON_CHARS).meta({ id: "aggregationReason" });
+const aggregationSafePathSegmentPattern = "(?!\\.{1,2}(?:/|$))[A-Za-z0-9._@+-]{1,128}";
+const aggregationSafeRelativePath = z
+  .string()
+  .min(1)
+  .max(MAX_GENERATED_TEST_PATH_BYTES)
+  .regex(
+    new RegExp(
+      `^${aggregationSafePathSegmentPattern}(?:/${aggregationSafePathSegmentPattern}){0,${MAX_GENERATED_TEST_PATH_SEGMENTS - 1}}(?![\\s\\S])`,
+      "u"
+    )
+  )
+  .meta({ id: "aggregationSafeRelativePath" });
 
-const aggregationFileSchema = z.strictObject({
-  strategy: nonEmptyString,
-  node_id: nonEmptyString,
-  attempt_index: nonNegativeInteger,
-  source_manifest_path: nonEmptyString,
-  source_artifact_path: nonEmptyString,
-  source_relative_path: nonEmptyString,
-  destination_path: nonEmptyString,
-  destination_relative_path: nonEmptyString,
-  bytes: nonNegativeInteger,
-  language: nonEmptyString.optional(),
-  framework: nonEmptyString.optional(),
-  description: nonEmptyString.optional(),
-  provenance: aggregationProvenanceSchema.optional()
-});
+const aggregationFileSchema = z
+  .strictObject({
+    strategy: aggregationId,
+    node_id: aggregationId,
+    source_attempt_id: aggregationId,
+    attempt_index: nonNegativeInteger,
+    source_manifest_path: aggregationAbsolutePath,
+    source_manifest_relative_path: aggregationSafeRelativePath,
+    source_manifest_sha256: sha256,
+    source_artifact_path: aggregationAbsolutePath,
+    source_relative_path: generatedTestPathSchema,
+    destination_path: aggregationAbsolutePath,
+    destination_relative_path: aggregationSafeRelativePath,
+    size_bytes: generatedTestEntrySchema.shape.size_bytes,
+    sha256: generatedTestEntrySchema.shape.sha256,
+    language: generatedTestEntrySchema.shape.language,
+    framework: generatedTestEntrySchema.shape.framework,
+    description: generatedTestEntrySchema.shape.description,
+    provenance: generatedTestProvenanceSchema.optional()
+  })
+  .meta({ id: "aggregationFile" });
+
+const skippedAggregationFileSchema = z
+  .strictObject({
+    kind: z.enum(["generated-test", "support-file"]),
+    strategy: aggregationId,
+    node_id: aggregationId,
+    source_attempt_id: aggregationId,
+    attempt_index: nonNegativeInteger,
+    source_manifest_path: aggregationAbsolutePath,
+    source_manifest_relative_path: aggregationSafeRelativePath,
+    source_manifest_sha256: sha256,
+    source_artifact_path: aggregationAbsolutePath,
+    source_relative_path: generatedTestPathSchema,
+    size_bytes: generatedTestEntrySchema.shape.size_bytes,
+    sha256: generatedTestEntrySchema.shape.sha256,
+    language: generatedTestEntrySchema.shape.language,
+    framework: generatedTestEntrySchema.shape.framework,
+    description: generatedTestEntrySchema.shape.description,
+    provenance: generatedTestProvenanceSchema.optional(),
+    reason: aggregationReason
+  })
+  .meta({ id: "skippedAggregationFile" });
+
+const aggregationSourceBundleSchema = z
+  .strictObject({
+    strategy: aggregationId,
+    node_id: aggregationId,
+    source_attempt_id: aggregationId,
+    attempt_index: nonNegativeInteger,
+    source_manifest_path: aggregationAbsolutePath,
+    source_manifest_relative_path: aggregationSafeRelativePath,
+    source_manifest_sha256: sha256,
+    source_run_id: aggregationId,
+    generated_test_count: nonNegativeInteger.max(MAX_GENERATED_TEST_BUNDLE_ENTRIES),
+    support_file_count: nonNegativeInteger.max(MAX_GENERATED_TEST_BUNDLE_ENTRIES),
+    disposition: z.enum(["empty", "copied", "skipped"]),
+    reason: aggregationReason.optional()
+  })
+  .meta({
+    id: "aggregationSourceBundle",
+    allOf: [
+      {
+        if: { type: "object", properties: { disposition: { const: "skipped" } }, required: ["disposition"] },
+        then: { type: "object", properties: { reason: true }, required: ["reason"] },
+        else: {
+          not: {
+            type: "object",
+            properties: { reason: true },
+            required: ["reason"]
+          }
+        }
+      }
+    ]
+  })
+  .superRefine((bundle, context) => {
+    if (bundle.disposition === "skipped" && bundle.reason === undefined) {
+      context.addIssue({ code: "custom", message: "Skipped source bundles require a reason", path: ["reason"] });
+    }
+    if (bundle.disposition !== "skipped" && bundle.reason !== undefined) {
+      context.addIssue({
+        code: "custom",
+        message: "Only skipped source bundles may declare a reason",
+        path: ["reason"]
+      });
+    }
+  });
 
 export const aggregationManifestSchema = withDocumentMetadata(
   z.strictObject({
     schema_version: z.literal(AGGREGATION_MANIFEST_SCHEMA_VERSION),
-    source_generated_tests: nonNegativeInteger,
-    copied_generated_tests: nonNegativeInteger,
-    source_support_files: nonNegativeInteger,
-    copied_support_files: nonNegativeInteger,
-    files: z.array(aggregationFileSchema),
-    support_files: z.array(aggregationFileSchema),
-    skipped_files: z.array(
-      z.strictObject({
-        kind: z.enum(["generated-test", "support-file"]),
-        strategy: nonEmptyString,
-        node_id: nonEmptyString,
-        attempt_index: nonNegativeInteger,
-        source_manifest_path: nonEmptyString,
-        source_relative_path: nonEmptyString,
-        reason: nonEmptyString
-      })
-    )
+    source_generated_tests: aggregationCount,
+    copied_generated_tests: aggregationCount,
+    source_support_files: aggregationCount,
+    copied_support_files: aggregationCount,
+    source_bundles: uniqueJsonValues(aggregationSourceBundleSchema, MAX_AGGREGATION_SOURCE_BUNDLES),
+    files: uniqueJsonValues(aggregationFileSchema, MAX_AGGREGATION_SOURCE_ENTRIES),
+    support_files: uniqueJsonValues(aggregationFileSchema, MAX_AGGREGATION_SOURCE_ENTRIES),
+    skipped_files: uniqueJsonValues(skippedAggregationFileSchema, MAX_AGGREGATION_SOURCE_ENTRIES)
   }),
   "aggregation-manifest",
   1,
@@ -1686,6 +1793,7 @@ export const WORKFLOW_VALID_EMPTY_EXAMPLES: Partial<Record<WorkflowContractId, s
     copied_generated_tests: 0,
     source_support_files: 0,
     copied_support_files: 0,
+    source_bundles: [],
     files: [],
     support_files: [],
     skipped_files: []

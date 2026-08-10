@@ -6,10 +6,13 @@ import { z } from "zod/v4";
 import {
   MAX_GENERATED_TEST_BUNDLE_BYTES,
   MAX_GENERATED_TEST_BUNDLE_ENTRIES,
-  MAX_GENERATED_TEST_COMPANION_BYTES,
-  MAX_GENERATED_TEST_PATH_BYTES,
-  MAX_GENERATED_TEST_PATH_SEGMENTS
+  MAX_GENERATED_TEST_COMPANION_BYTES
 } from "./artifact-limits.js";
+import {
+  GENERATED_TESTS_DIR,
+  generatedTestEntriesSchema,
+  generatedTestProvenanceSchema
+} from "./generated-test-schema.js";
 import { validateRegisteredJsonSchema } from "./json-schema-validator.js";
 import { normalizeArtifactProvenance, type ArtifactProvenance } from "./manifests.js";
 import { getNodeArtifactDir, type RunLayout } from "./run-layout.js";
@@ -29,18 +32,25 @@ import { validateWithZod, type SchemaValidationResult } from "./schema-validatio
 import { parseStrictJsonBytes } from "./strict-json.js";
 
 export const GENERATED_TESTS_SCHEMA_VERSION = "ultrafuzz.generated-tests.v3" as const;
-export const GENERATED_TESTS_DIR = "generated-tests";
 export const GENERATED_TESTS_MANIFEST = "generated-tests.json";
 export const GENERATED_TESTS_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:generated-tests:3" as const;
-const GENERATED_TEST_PATH_SEGMENT_PATTERN = "[A-Za-z0-9][A-Za-z0-9._-]{0,127}";
-export const GENERATED_TEST_MANIFEST_PATH_PATTERN = `^generated-tests/${GENERATED_TEST_PATH_SEGMENT_PATTERN}(?:/${GENERATED_TEST_PATH_SEGMENT_PATTERN}){0,${MAX_GENERATED_TEST_PATH_SEGMENTS - 2}}(?![\\s\\S])`;
+
+export {
+  GENERATED_TESTS_DIR,
+  GENERATED_TEST_MANIFEST_PATH_PATTERN,
+  generatedTestEntrySchema,
+  generatedTestPathSchema,
+  generatedTestProvenanceSchema
+} from "./generated-test-schema.js";
 
 export {
   MAX_GENERATED_TEST_BUNDLE_BYTES,
   MAX_GENERATED_TEST_BUNDLE_ENTRIES,
   MAX_GENERATED_TEST_COMPANION_BYTES,
+  MAX_GENERATED_TEST_METADATA_CHARS,
   MAX_GENERATED_TEST_PATH_BYTES,
-  MAX_GENERATED_TEST_PATH_SEGMENTS
+  MAX_GENERATED_TEST_PATH_SEGMENTS,
+  MAX_GENERATED_TEST_PROVENANCE_VALUE_CHARS
 } from "./artifact-limits.js";
 
 export type GeneratedTestProvenance = Partial<Omit<ArtifactProvenance, "metadata">>;
@@ -75,69 +85,6 @@ export interface GeneratedTestManifest {
 }
 
 const nonEmptyString = z.string().min(1);
-const nonNegativeInteger = z.number().int().nonnegative();
-const generatedTestFileSize = nonNegativeInteger.min(1).max(MAX_GENERATED_TEST_COMPANION_BYTES);
-const generatedTestManifestPathPattern = new RegExp(GENERATED_TEST_MANIFEST_PATH_PATTERN, "u");
-
-export const generatedTestProvenanceSchema = z
-  .strictObject({
-    producer_node_id: nonEmptyString.optional(),
-    run_id: nonEmptyString.optional(),
-    logical_node_id: nonEmptyString.optional(),
-    attempt_index: nonNegativeInteger.optional(),
-    loop_index: nonNegativeInteger.optional(),
-    model_id: nonEmptyString.optional(),
-    model: nonEmptyString.optional(),
-    model_index: nonNegativeInteger.optional(),
-    agent_ref: nonEmptyString.optional(),
-    workflow_run_id: nonEmptyString.optional(),
-    workflow_task_id: nonEmptyString.optional(),
-    source_run_id: nonEmptyString.optional(),
-    origin: nonEmptyString.optional()
-  })
-  .meta({ id: "generatedTestProvenance", minProperties: 1 })
-  .refine((provenance) => Object.keys(provenance).length > 0, {
-    message: "Present generated-test provenance must contain at least one typed field"
-  });
-
-const generatedTestPathSchema = z
-  .string()
-  .min(1)
-  .max(MAX_GENERATED_TEST_PATH_BYTES)
-  .regex(generatedTestManifestPathPattern, {
-    message: `path must use the ${GENERATED_TESTS_DIR}/<file> prefix, contain at most ${MAX_GENERATED_TEST_PATH_SEGMENTS} segments, and stay inside that directory`
-  });
-
-export const generatedTestEntrySchema = z
-  .strictObject({
-    path: generatedTestPathSchema,
-    size_bytes: generatedTestFileSize,
-    sha256: z.string().regex(/^[a-f0-9]{64}$/u),
-    provenance: generatedTestProvenanceSchema.optional(),
-    language: nonEmptyString.optional(),
-    framework: nonEmptyString.optional(),
-    description: nonEmptyString.optional()
-  })
-  .meta({ id: "generatedTestEntry" });
-
-const generatedTestEntriesSchema = z
-  .array(generatedTestEntrySchema)
-  .max(MAX_GENERATED_TEST_BUNDLE_ENTRIES)
-  .meta({ uniqueItems: true })
-  .superRefine((entries, context) => {
-    const seen = new Set<string>();
-    for (const [index, entry] of entries.entries()) {
-      const key = canonicalJsonValueKey(entry);
-      if (seen.has(key)) {
-        context.addIssue({
-          code: "custom",
-          message: "Generated-test manifest entries must be unique within each array",
-          path: [index]
-        });
-      }
-      seen.add(key);
-    }
-  });
 
 export const generatedTestManifestSchema = z
   .strictObject({
@@ -228,20 +175,6 @@ export function assertGeneratedTestBundleResourceBounds(manifest: GeneratedTestM
       `generated tests manifest exceeds the ${MAX_GENERATED_TEST_BUNDLE_BYTES}-byte combined bundle limit`
     );
   }
-}
-
-function canonicalJsonValueKey(value: unknown): string {
-  if (Array.isArray(value)) {
-    return `[${value.map((entry) => canonicalJsonValueKey(entry)).join(",")}]`;
-  }
-  if (typeof value === "object" && value !== null) {
-    return `{${Object.entries(value)
-      .filter(([, entry]) => entry !== undefined)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJsonValueKey(entry)}`)
-      .join(",")}}`;
-  }
-  return JSON.stringify(value) ?? "undefined";
 }
 
 export function writeGeneratedTestManifest(input: {

@@ -1381,17 +1381,36 @@ test("present generated-test aggregation provenance cannot be an empty object", 
     copied_generated_tests: 1,
     source_support_files: 0,
     copied_support_files: 0,
+    source_bundles: [
+      {
+        strategy: "boundary-tests",
+        node_id: "boundary-tests--attempt-0",
+        source_attempt_id: "boundary-tests--attempt-0--model-0",
+        attempt_index: 0,
+        source_manifest_path: "/run/artifacts/boundary-tests--attempt-0--model-0/generated-tests.json",
+        source_manifest_relative_path: "generated-tests.json",
+        source_manifest_sha256: "b".repeat(64),
+        source_run_id: "run-1",
+        generated_test_count: 1,
+        support_file_count: 0,
+        disposition: "copied"
+      }
+    ],
     files: [
       {
         strategy: "boundary-tests",
-        node_id: "boundary-tests",
+        node_id: "boundary-tests--attempt-0",
+        source_attempt_id: "boundary-tests--attempt-0--model-0",
         attempt_index: 0,
-        source_manifest_path: "generated-tests.json",
-        source_artifact_path: "generated-tests/Boundary.t.sol",
+        source_manifest_path: "/run/artifacts/boundary-tests--attempt-0--model-0/generated-tests.json",
+        source_manifest_relative_path: "generated-tests.json",
+        source_manifest_sha256: "b".repeat(64),
+        source_artifact_path: "/run/artifacts/boundary-tests--attempt-0--model-0/generated-tests/Boundary.t.sol",
         source_relative_path: "generated-tests/Boundary.t.sol",
-        destination_path: "test/Boundary.t.sol",
+        destination_path: "/run/workspaces/aggregate/test/Boundary.t.sol",
         destination_relative_path: "test/Boundary.t.sol",
-        bytes: 1,
+        size_bytes: 1,
+        sha256: "a".repeat(64),
         provenance: {}
       }
     ],
@@ -1641,16 +1660,38 @@ test("aggregation skips require a typed source kind and attempt identity", () =>
     copied_generated_tests: 0,
     source_support_files: 0,
     copied_support_files: 0,
+    source_bundles: [
+      {
+        strategy: "boundary-tests",
+        node_id: "boundary-tests--attempt-0",
+        source_attempt_id: "boundary-tests--attempt-0--model-0",
+        attempt_index: 0,
+        source_manifest_path: "/run/artifacts/boundary-tests--attempt-0--model-0/generated-tests.json",
+        source_manifest_relative_path: "generated-tests.json",
+        source_manifest_sha256: "b".repeat(64),
+        source_run_id: "run-1",
+        generated_test_count: 1,
+        support_file_count: 0,
+        disposition: "skipped",
+        reason: "framework could not be determined"
+      }
+    ],
     files: [],
     support_files: [],
     skipped_files: [
       {
         kind: "generated-test",
         strategy: "boundary-tests",
-        node_id: "boundary-tests",
+        node_id: "boundary-tests--attempt-0",
+        source_attempt_id: "boundary-tests--attempt-0--model-0",
         attempt_index: 0,
-        source_manifest_path: "generated-tests.json",
+        source_manifest_path: "/run/artifacts/boundary-tests--attempt-0--model-0/generated-tests.json",
+        source_manifest_relative_path: "generated-tests.json",
+        source_manifest_sha256: "b".repeat(64),
+        source_artifact_path: "/run/artifacts/boundary-tests--attempt-0--model-0/generated-tests/Boundary.t.sol",
         source_relative_path: "generated-tests/Boundary.t.sol",
+        size_bytes: 1,
+        sha256: "a".repeat(64),
         reason: "framework could not be determined"
       }
     ]

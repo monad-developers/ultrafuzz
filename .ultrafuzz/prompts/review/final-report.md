@@ -45,10 +45,14 @@ Aggregation manifest:
 
 `aggregation.json` is a JSON object, not a top-level array. It contains copied
 generated test metadata under `files` and may contain support-file metadata
-under `support_files`. Use `files[]` when matching generated or copied test
-destinations. Preserve and use each record's `language`, `framework`,
-and `provenance` when present. Do not iterate over the whole object as an array
-because that will walk scalar summary fields.
+under `support_files`; `source_bundles` is the complete authenticated producer
+summary, including empty or wholly skipped bundles. Use `files[]` when matching
+generated or copied test destinations. Copied rows use exact `size_bytes` and
+`sha256` fields and bind their source with `source_attempt_id`,
+`source_manifest_relative_path`, and `source_manifest_sha256`. Preserve and use
+each record's `language`, `framework`, and `provenance` when present. Do not
+iterate over the whole object as an array because that will walk scalar summary
+fields.
 
 Severity-classified findings:
 `{{artifact_path:severity-classification}}/severity-classified-findings.json`

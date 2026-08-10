@@ -256,6 +256,71 @@ describe("prompt rendering", () => {
     }
   });
 
+  it("renders the authenticated aggregation bundle contract and validation command", () => {
+    const topologyPath = fileURLToPath(new URL("../../../.ultrafuzz/topology.yml", import.meta.url));
+    const topology = YAML.parse(readFileSync(topologyPath, "utf8")) as {
+      nodes: Array<{
+        id: string;
+        prompt?: string;
+        depends_on?: string[];
+        outputs?: Array<{ path: string; contract: string; primary?: boolean }>;
+      }>;
+    };
+    const promptByPath = new Map(loadBuiltInPromptAssets().map((asset) => [asset.relativePath, asset.markdown]));
+    const aggregate = topology.nodes.find((node) => node.id === "aggregate-test-files");
+    expect(aggregate?.prompt).toBe("review/aggregate-test-files.md");
+    const root = path.join(os.tmpdir(), "ultrafuzz-aggregation-prompt");
+    const runArtifacts = path.join(root, "runs", "aggregation-render", "artifacts");
+    const artifactDir = path.join(runArtifacts, "aggregate-test-files");
+    const workspacePath = path.join(root, "workspaces", "aggregate-test-files");
+    const logicalNodes = topology.nodes.map((node) => ({
+      id: node.id,
+      dependsOn: node.depends_on ?? [],
+      artifactDir: path.join(runArtifacts, node.id),
+      outputs: (node.outputs ?? []).map((output, index) => ({
+        path: output.path,
+        contract: output.contract,
+        primary: output.primary ?? index === 0,
+        description: `${output.contract} production output.`,
+        ...(node.id === "aggregate-test-files" && output.path === "aggregation.json"
+          ? { schemaFile: "aggregation-manifest.schema.json" }
+          : {})
+      }))
+    }));
+    const rendered = renderPrompt({
+      prompt: promptByPath.get(aggregate!.prompt!)!,
+      graph: { logicalNodes },
+      node: {
+        logicalId: aggregate!.id,
+        concreteId: aggregate!.id,
+        artifactDir,
+        workspacePath,
+        repoPath: path.join(root, "repo"),
+        attemptIndex: 0,
+        loopIndex: 0,
+        loopCount: 1
+      },
+      run: {
+        id: "aggregation-render",
+        artifactsDir: runArtifacts,
+        metadataPath: path.join(root, "runs", "aggregation-render", "run.json")
+      },
+      outputs: {
+        findingsPath: path.join(artifactDir, "findings.json"),
+        patchPath: path.join(artifactDir, "patch.diff")
+      }
+    }).renderedMarkdown;
+
+    expect(rendered).toContain("`source_bundles`: one record for every listed `generated-tests.json`");
+    expect(rendered).toContain("`source_attempt_id`");
+    expect(rendered).toContain("`source_manifest_sha256`");
+    expect(rendered).toContain("positive `size_bytes`");
+    expect(rendered).toContain("A bundle is atomic");
+    expect(rendered).toContain(
+      `Validation command: \`ultrafuzz json validate --schema '${path.join(workspacePath, ".ultrafuzz", "schemas", "aggregation-manifest.schema.json")}' --file '${path.join(artifactDir, "aggregation.json")}'\``
+    );
+  });
+
   it("omits the schema pointer when no output ships a schema", () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
     tmpDirs.push(tmp);

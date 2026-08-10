@@ -183,18 +183,18 @@ const fixtures = {
       copied_generated_tests: 1,
       source_support_files: 2,
       copied_support_files: 1,
+      source_bundles: [{ generated_test_count: 2, support_file_count: 2 }],
       files: [{}],
-      support_files: [{}],
-      skipped_files: [{ kind: "generated-test" }, { kind: "support-file" }]
+      support_files: [{}]
     },
     negative: {
       source_generated_tests: 3,
       copied_generated_tests: 1,
       source_support_files: 2,
       copied_support_files: 1,
+      source_bundles: [{ generated_test_count: 2, support_file_count: 2 }],
       files: [{}],
-      support_files: [{}],
-      skipped_files: [{ kind: "generated-test" }, { kind: "support-file" }]
+      support_files: [{}]
     }
   },
   "aggregation-destination-path-uniqueness": {
@@ -211,10 +211,9 @@ const fixtures = {
     positive: {
       files: [
         {
-          strategy: "a",
-          node_id: "node-a",
-          attempt_index: 0,
-          source_manifest_path: "generated-tests.json",
+          source_attempt_id: "attempt-a",
+          source_manifest_relative_path: "generated-tests.json",
+          source_manifest_sha256: "a".repeat(64),
           source_relative_path: "generated-tests/a.t.sol"
         }
       ],
@@ -224,10 +223,9 @@ const fixtures = {
     negative: {
       files: [
         {
-          strategy: "a",
-          node_id: "node-a",
-          attempt_index: 0,
-          source_manifest_path: "generated-tests.json",
+          source_attempt_id: "attempt-a",
+          source_manifest_relative_path: "generated-tests.json",
+          source_manifest_sha256: "a".repeat(64),
           source_relative_path: "generated-tests/a.t.sol"
         }
       ],
@@ -235,13 +233,86 @@ const fixtures = {
       skipped_files: [
         {
           kind: "generated-test",
-          strategy: "a",
-          node_id: "node-a",
-          attempt_index: 0,
-          source_manifest_path: "generated-tests.json",
+          source_attempt_id: "attempt-a",
+          source_manifest_relative_path: "generated-tests.json",
+          source_manifest_sha256: "a".repeat(64),
           source_relative_path: "generated-tests/a.t.sol"
         }
       ]
+    }
+  },
+  "aggregation-source-bundle-reconciliation": {
+    positive: {
+      source_bundles: [
+        {
+          strategy: "strategy-a",
+          node_id: "node-a",
+          source_attempt_id: "attempt-a",
+          attempt_index: 0,
+          source_manifest_path: "/artifacts/attempt-a/generated-tests.json",
+          source_manifest_relative_path: "generated-tests.json",
+          source_manifest_sha256: "a".repeat(64),
+          generated_test_count: 1,
+          support_file_count: 0,
+          disposition: "copied"
+        }
+      ],
+      files: [
+        {
+          strategy: "strategy-a",
+          node_id: "node-a",
+          source_attempt_id: "attempt-a",
+          attempt_index: 0,
+          source_manifest_path: "/artifacts/attempt-a/generated-tests.json",
+          source_manifest_relative_path: "generated-tests.json",
+          source_manifest_sha256: "a".repeat(64)
+        }
+      ],
+      support_files: [],
+      skipped_files: []
+    },
+    negative: {
+      source_bundles: [
+        {
+          strategy: "strategy-a",
+          node_id: "node-a",
+          source_attempt_id: "attempt-a",
+          attempt_index: 0,
+          source_manifest_path: "/artifacts/attempt-a/generated-tests.json",
+          source_manifest_relative_path: "generated-tests.json",
+          source_manifest_sha256: "a".repeat(64),
+          generated_test_count: 1,
+          support_file_count: 0,
+          disposition: "skipped"
+        }
+      ],
+      files: [
+        {
+          strategy: "strategy-a",
+          node_id: "node-a",
+          source_attempt_id: "attempt-a",
+          attempt_index: 0,
+          source_manifest_path: "/artifacts/attempt-a/generated-tests.json",
+          source_manifest_relative_path: "generated-tests.json",
+          source_manifest_sha256: "a".repeat(64)
+        }
+      ],
+      support_files: [],
+      skipped_files: []
+    }
+  },
+  "aggregation-resource-bounds": {
+    positive: {
+      source_bundles: [{ generated_test_count: 1, support_file_count: 0 }],
+      files: [{ size_bytes: 1 }],
+      support_files: [],
+      skipped_files: []
+    },
+    negative: {
+      source_bundles: [{ generated_test_count: 1_024, support_file_count: 1 }],
+      files: [],
+      support_files: [],
+      skipped_files: []
     }
   },
   "analysis-bundle-accounting-reconciliation": {
@@ -1079,8 +1150,40 @@ test("every contextual registration executes real positive and negative checks",
     fs.writeFileSync(path.join(root, "generated-tests", "test.sol"), "test\n");
     fs.writeFileSync(path.join(root, "generated-tests", "helper.sol"), "helper\n");
     fs.writeFileSync(path.join(root, "generated-tests", "binary.dat"), Buffer.from([0xff]));
+    fs.writeFileSync(path.join(root, "copied.sol"), "test\n");
     const digest = crypto.createHash("sha256").update("artifact\n").digest("hex");
     const contentDigest = crypto.createHash("sha256").update("snapshot", "utf8").digest("hex");
+    const aggregationSourceBytes = Buffer.from("test\n", "utf8");
+    const aggregationSourceDigest = crypto.createHash("sha256").update(aggregationSourceBytes).digest("hex");
+    const aggregationManifestDigest = "a".repeat(64);
+    const aggregationBundleSummary = {
+      strategy: "strategy-a",
+      node_id: "strategy-a",
+      source_attempt_id: "attempt-a",
+      attempt_index: 0,
+      source_manifest_path: path.join(root, "source", "generated-tests.json"),
+      source_manifest_relative_path: "generated-tests.json",
+      source_manifest_sha256: aggregationManifestDigest,
+      source_run_id: "run-a",
+      generated_test_count: 1,
+      support_file_count: 0,
+      disposition: "copied"
+    };
+    const aggregationCopiedRow = {
+      strategy: "strategy-a",
+      node_id: "strategy-a",
+      source_attempt_id: "attempt-a",
+      attempt_index: 0,
+      source_manifest_path: path.join(root, "source", "generated-tests.json"),
+      source_manifest_relative_path: "generated-tests.json",
+      source_manifest_sha256: aggregationManifestDigest,
+      source_artifact_path: path.join(root, "source", "generated-tests", "test.sol"),
+      source_relative_path: "generated-tests/test.sol",
+      destination_path: path.join(root, "copied.sol"),
+      destination_relative_path: "copied.sol",
+      size_bytes: aggregationSourceBytes.length,
+      sha256: aggregationSourceDigest
+    };
     const contextFixtures: Record<
       Exclude<SemanticGateName, keyof typeof fixtures>,
       { positive: unknown; negative: unknown; context: SemanticGateContext }
@@ -1114,6 +1217,47 @@ test("every contextual registration executes real positive and negative checks",
           ]
         },
         context: { analysisBundle: { manifest: { files: [] } } }
+      },
+      "aggregation-authenticated-source-destination-reconciliation": {
+        positive: {
+          source_bundles: [aggregationBundleSummary],
+          files: [aggregationCopiedRow],
+          support_files: [],
+          skipped_files: []
+        },
+        negative: {
+          source_bundles: [aggregationBundleSummary],
+          files: [{ ...aggregationCopiedRow, strategy: "fabricated-strategy" }],
+          support_files: [],
+          skipped_files: []
+        },
+        context: {
+          aggregation: {
+            workspaceRoot: root,
+            sourceBundles: [
+              {
+                strategy: "strategy-a",
+                nodeId: "strategy-a",
+                sourceAttemptId: "attempt-a",
+                attemptIndex: 0,
+                sourceManifestPath: path.join(root, "source", "generated-tests.json"),
+                sourceManifestRelativePath: "generated-tests.json",
+                sourceManifestSha256: aggregationManifestDigest,
+                sourceRunId: "run-a",
+                entries: [
+                  {
+                    kind: "generated-test",
+                    sourceArtifactPath: path.join(root, "source", "generated-tests", "test.sol"),
+                    sourceRelativePath: "generated-tests/test.sol",
+                    sizeBytes: aggregationSourceBytes.length,
+                    sha256: aggregationSourceDigest,
+                    bytes: aggregationSourceBytes
+                  }
+                ]
+              }
+            ]
+          }
+        }
       },
       "artifact-manifest-file-digest": {
         positive: { files: [{ path: "artifact.json", sha256: digest, size_bytes: 9 }] },

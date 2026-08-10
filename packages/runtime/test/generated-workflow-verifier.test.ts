@@ -2520,7 +2520,11 @@ test("generated Smithers dependency verification fails closed before descendant 
     {
       attemptId: "generated-tests-fanin",
       artifactDir: generatedDependency,
-      metadata: { node: { logicalNodeId: "generated-tests-fanin" } },
+      metadata: {
+        node: { logicalNodeId: "generated-tests-fanin" },
+        run: { ultrafuzzRunId: "run-one" },
+        loop: { attemptIndex: 0 }
+      },
       outputs: [
         {
           path: "generated-tests.json",
@@ -2594,6 +2598,8 @@ test("generated Smithers dependency verification fails closed before descendant 
       value:
         contract === "ultrafuzz/generated-tests@3"
           ? {
+              run_id: "run-one",
+              node_id: "generated-tests-fanin",
               generated_tests: [generatedTestEntry("generated-tests/Property.t.sol", "contract Property {}\n")],
               support_files: [generatedTestEntry("generated-tests/PropertyHelper.sol", "library PropertyHelper {}\n")]
             }

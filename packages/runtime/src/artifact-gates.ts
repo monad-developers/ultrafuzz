@@ -58,6 +58,7 @@ import {
   type WorkspacePatchManifest
 } from "@ultrafuzz/artifacts";
 
+import { authenticatedAggregationSemanticContext } from "./aggregation-semantic-context.js";
 import { runtimeSemanticGateDiagnostics } from "./semantic-gates.js";
 import { WORKSPACE_PATCH_BASELINE_JSON_SCHEMA_ID } from "./runtime-contracts.js";
 import { parseRuntimeDocumentBytes } from "./runtime-document-codec.js";
@@ -1667,10 +1668,19 @@ function semanticGateContextForArtifact(input: {
     input.schemaFilename === "workspace-patch.schema.json"
       ? workspacePatchGitContext(input.layout, input.artifactDir, input.attemptId)
       : undefined;
+  const aggregation =
+    input.schemaFilename === "aggregation-manifest.schema.json"
+      ? authenticatedAggregationSemanticContext({
+          layout: input.layout,
+          node: input.node,
+          attemptId: input.attemptId
+        })
+      : undefined;
   return {
     ...context,
     ...(artifactSet === undefined ? {} : { artifactSet }),
-    ...(git === undefined ? {} : { git })
+    ...(git === undefined ? {} : { git }),
+    ...(aggregation === undefined ? {} : { aggregation })
   };
 }
 
