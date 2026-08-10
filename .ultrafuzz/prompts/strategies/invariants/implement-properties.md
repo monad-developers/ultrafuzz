@@ -185,6 +185,11 @@ Write a generated-test manifest to:
 
 {{artifact_dir}}/generated-tests.json
 
+List independently runnable tests and reproducers in `generated_tests`. List
+every imported non-runnable invariant/helper implementation, mock, fixture,
+script, or data dependency in `support_files`; do not misclassify those support
+files as runnable tests.
+
 Write structured findings to:
 
 {{output_findings_path}}

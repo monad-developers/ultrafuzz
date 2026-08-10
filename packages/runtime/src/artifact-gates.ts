@@ -22,6 +22,7 @@ import {
   PROPERTIES_SCHEMA_VERSION,
   readArtifactManifest,
   readRegularFileSnapshot,
+  readSinglyLinkedRegularFileSnapshotInside,
   readRunState,
   parseStrictJsonBytes,
   redactValue,
@@ -64,6 +65,7 @@ import {
   type WorkspacePatchManifest
 } from "@ultrafuzz/artifacts";
 
+import { authenticatedAggregationSemanticContext } from "./aggregation-semantic-context.js";
 import { runtimeSemanticGateDiagnostics } from "./semantic-gates.js";
 import {
   declaredAncestorOutputsByContract,
@@ -2017,7 +2019,15 @@ function verifyRequiredArtifactShape(
   attemptAuthority?: ArtifactGateAttemptAuthority,
   authenticated?: AuthenticatedArtifactGateSnapshots
 ): RuntimeDiagnostic[] {
-  const artifactBytes = readCurrentArtifactSnapshot(artifactDir, absolutePath, authenticated);
+  const artifactBytes =
+    authenticated === undefined && output.contract === "ultrafuzz/generated-tests@3"
+      ? readSinglyLinkedRegularFileSnapshotInside(
+          artifactDir,
+          absolutePath,
+          MAX_ARTIFACT_SNAPSHOT_BYTES,
+          "generated-test manifest"
+        )
+      : readCurrentArtifactSnapshot(artifactDir, absolutePath, authenticated);
   if (artifactBytes === undefined) throw new Error(`required artifact snapshot is unavailable: ${output.path}`);
   const schemaDiagnostics = verifyRequiredArtifactSchemaBinding(absolutePath, output, artifactBytes);
   if (schemaDiagnostics.some((diagnostic) => diagnostic.severity === "error")) return schemaDiagnostics;
@@ -2075,7 +2085,7 @@ function verifyRequiredArtifactShape(
     }
     return diagnostics;
   }
-  if (!contract.ok || String(output.contract) !== "ultrafuzz/generated-tests@2") {
+  if (!contract.ok || String(output.contract) !== "ultrafuzz/generated-tests@3") {
     return diagnostics;
   }
 
@@ -2090,29 +2100,34 @@ function verifyRequiredArtifactShape(
     }));
   }
 
-  for (const [index, entry] of parsed.value.generated_tests.entries()) {
-    try {
-      const generatedPath = safeResolveInside(artifactDir, entry.path, "generated test manifest entry");
-      const generatedBytes = readCurrentArtifactSnapshot(artifactDir, generatedPath, authenticated);
-      if (generatedBytes === undefined) {
-        diagnostics.push({
-          code: "GENERATED_TEST_FILE_MISSING",
-          message: `generated test manifest entry ${entry.path} was not produced`,
-          severity: "error",
-          source: "generated-tests",
-          path: `${absolutePath}#$.generated_tests[${index}].path`
-        });
-      } else if (generatedBytes.byteLength === 0) {
-        diagnostics.push({
-          code: "GENERATED_TEST_FILE_EMPTY",
-          message: `generated test manifest entry ${entry.path} is empty`,
-          severity: "error",
-          source: "generated-tests",
-          path: `${absolutePath}#$.generated_tests[${index}].path`
-        });
+  for (const [field, label, entries] of [
+    ["generated_tests", "generated test", parsed.value.generated_tests],
+    ["support_files", "generated-test support file", parsed.value.support_files]
+  ] as const) {
+    for (const [index, entry] of entries.entries()) {
+      try {
+        const generatedPath = safeResolveInside(artifactDir, entry.path, `${label} manifest entry`);
+        const generatedBytes = readCurrentArtifactSnapshot(artifactDir, generatedPath, authenticated);
+        if (generatedBytes === undefined) {
+          diagnostics.push({
+            code: "GENERATED_TEST_FILE_MISSING",
+            message: `${label} manifest entry ${entry.path} was not produced`,
+            severity: "error",
+            source: "generated-tests",
+            path: `${absolutePath}#$.${field}[${index}].path`
+          });
+        } else if (generatedBytes.byteLength === 0) {
+          diagnostics.push({
+            code: "GENERATED_TEST_FILE_EMPTY",
+            message: `${label} manifest entry ${entry.path} is empty`,
+            severity: "error",
+            source: "generated-tests",
+            path: `${absolutePath}#$.${field}[${index}].path`
+          });
+        }
+      } catch (error) {
+        diagnostics.push(diagnosticFromError(error, "generated-tests", "GENERATED_TEST_FILE_INVALID"));
       }
-    } catch (error) {
-      diagnostics.push(diagnosticFromError(error, "generated-tests", "GENERATED_TEST_FILE_INVALID"));
     }
   }
 
@@ -2144,10 +2159,19 @@ function semanticGateContextForArtifact(input: {
     input.schemaFilename === "workspace-patch.schema.json"
       ? workspacePatchGitContext(input.layout, input.artifactDir, input.attemptId, input.authenticated)
       : undefined;
+  const aggregation =
+    input.schemaFilename === "aggregation-manifest.schema.json"
+      ? authenticatedAggregationSemanticContext({
+          layout: input.layout,
+          node: input.node,
+          attemptId: input.attemptId
+        })
+      : undefined;
   return {
     ...context,
     ...(artifactSet === undefined ? {} : { artifactSet }),
-    ...(git === undefined ? {} : { git })
+    ...(git === undefined ? {} : { git }),
+    ...(aggregation === undefined ? {} : { aggregation })
   };
 }
 

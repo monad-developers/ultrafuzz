@@ -848,7 +848,7 @@ function plannedNode(paths: string[]): PlannedGraphNode {
         outputPath === "workspace-patch.json"
           ? "ultrafuzz/workspace-patch@1"
           : outputPath === "generated-tests.json"
-            ? "ultrafuzz/generated-tests@2"
+            ? "ultrafuzz/generated-tests@3"
             : outputPath === "findings.json"
               ? "ultrafuzz/findings@2"
               : outputPath === "properties.json"
@@ -887,13 +887,22 @@ test("required artifact gate validates generated-test manifest shape and listed 
   const artifactDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
   const manifestPath = path.join(artifactDir, "generated-tests.json");
   const node = plannedNode(["generated-tests.json"]);
+  const generatedContents = "contract InvariantTest {}\n";
+  const manifestEntry = (entryPath: string, contents: string | Buffer) => ({
+    path: entryPath,
+    size_bytes: Buffer.byteLength(contents),
+    sha256: createHash("sha256").update(contents).digest("hex")
+  });
+  const generatedEntry = manifestEntry("generated-tests/Invariant.t.sol", generatedContents);
 
   fs.writeFileSync(
     manifestPath,
     JSON.stringify({
-      schema_version: "ultrafuzz.generated-tests.v2",
+      schema_version: "ultrafuzz.generated-tests.v3",
       run_id: "run-1",
       node_id: "strategy-a",
+      framework: "foundry",
+      support_files: [],
       test_files: [{ path: "generated-tests/Invariant.t.sol" }]
     }),
     "utf8"
@@ -903,13 +912,87 @@ test("required artifact gate validates generated-test manifest shape and listed 
   assert.equal(legacy.ok, false);
   assert.ok(legacy.diagnostics.some((diagnostic) => diagnostic.code === "JSON_SCHEMA_VIOLATION"));
 
+  const supportEntry = manifestEntry("generated-tests/InvariantFixture.sol", "library InvariantFixture {}\n");
+  for (const [name, invalidManifest] of [
+    [
+      "support-without-test",
+      {
+        schema_version: "ultrafuzz.generated-tests.v3",
+        run_id: "run-1",
+        node_id: "strategy-a",
+        framework: "foundry",
+        generated_tests: [],
+        support_files: [supportEntry]
+      }
+    ],
+    [
+      "duplicate-generated-test",
+      {
+        schema_version: "ultrafuzz.generated-tests.v3",
+        run_id: "run-1",
+        node_id: "strategy-a",
+        framework: "foundry",
+        generated_tests: [generatedEntry, structuredClone(generatedEntry)],
+        support_files: []
+      }
+    ],
+    [
+      "duplicate-support-file",
+      {
+        schema_version: "ultrafuzz.generated-tests.v3",
+        run_id: "run-1",
+        node_id: "strategy-a",
+        framework: "foundry",
+        generated_tests: [generatedEntry],
+        support_files: [supportEntry, structuredClone(supportEntry)]
+      }
+    ]
+  ] as const) {
+    const bytes = Buffer.from(JSON.stringify(invalidManifest), "utf8");
+    fs.writeFileSync(manifestPath, bytes);
+    const invalid = verifyRequiredArtifactsForAttempt(layout, node, "strategy-a");
+    assert.equal(invalid.ok, false, name);
+    assert.ok(
+      invalid.diagnostics.some((diagnostic) => diagnostic.code === "JSON_SCHEMA_VIOLATION"),
+      `${name}: ${JSON.stringify(invalid.diagnostics)}`
+    );
+    assert.deepEqual(fs.readFileSync(manifestPath), bytes, `${name}: host validation must not rewrite the manifest`);
+  }
+
+  const oversizedDeclaredManifest = {
+    schema_version: "ultrafuzz.generated-tests.v3",
+    run_id: "run-1",
+    node_id: "strategy-a",
+    framework: "foundry",
+    generated_tests: Array.from({ length: 5 }, (_, index) => ({
+      path: `generated-tests/Oversized-${index}.sol`,
+      size_bytes: 16 * 1024 * 1024,
+      sha256: index.toString(16).padStart(64, "0")
+    })),
+    support_files: []
+  };
+  const oversizedDeclaredBytes = Buffer.from(JSON.stringify(oversizedDeclaredManifest), "utf8");
+  fs.writeFileSync(manifestPath, oversizedDeclaredBytes);
+  const oversizedDeclared = verifyRequiredArtifactsForAttempt(layout, node, "strategy-a");
+  assert.equal(oversizedDeclared.ok, false);
+  assert.ok(
+    oversizedDeclared.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
+        diagnostic.details?.gate === "generated-test-bundle-resource-bounds"
+    )
+  );
+  assert.deepEqual(fs.readFileSync(manifestPath), oversizedDeclaredBytes);
+
   fs.writeFileSync(
     manifestPath,
     JSON.stringify({
-      schema_version: "ultrafuzz.generated-tests.v2",
+      schema_version: "ultrafuzz.generated-tests.v3",
       run_id: "run-1",
       node_id: "strategy-a",
-      generated_tests: [{ path: "generated-tests/Invariant.t.sol" }]
+      framework: "foundry",
+      generated_tests: [generatedEntry],
+      support_files: []
     }),
     "utf8"
   );
@@ -920,7 +1003,8 @@ test("required artifact gate validates generated-test manifest shape and listed 
   assert.ok(
     missingFile.diagnostics.some(
       (diagnostic) =>
-        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" && diagnostic.details?.gate === "generated-test-path-exists"
+        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
+        diagnostic.details?.gate === "generated-test-file-integrity"
     )
   );
 
@@ -931,7 +1015,34 @@ test("required artifact gate validates generated-test manifest shape and listed 
   assert.equal(emptyFile.ok, false);
   assert.ok(emptyFile.diagnostics.some((diagnostic) => diagnostic.code === "GENERATED_TEST_FILE_EMPTY"));
 
-  fs.writeFileSync(path.join(artifactDir, "generated-tests", "Invariant.t.sol"), "contract InvariantTest {}\n", "utf8");
+  fs.writeFileSync(path.join(artifactDir, "generated-tests", "Invariant.t.sol"), generatedContents, "utf8");
+
+  for (const generated_tests of [
+    [{ ...generatedEntry, size_bytes: generatedEntry.size_bytes + 1 }],
+    [{ ...generatedEntry, sha256: "0".repeat(64) }]
+  ]) {
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        schema_version: "ultrafuzz.generated-tests.v3",
+        run_id: "run-1",
+        node_id: "strategy-a",
+        framework: "foundry",
+        generated_tests,
+        support_files: []
+      }),
+      "utf8"
+    );
+    const mismatchedIntegrity = verifyRequiredArtifactsForAttempt(layout, node, "strategy-a");
+    assert.equal(mismatchedIntegrity.ok, false);
+    assert.ok(
+      mismatchedIntegrity.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
+          diagnostic.details?.gate === "generated-test-file-integrity"
+      )
+    );
+  }
 
   for (const [field, value] of [
     ["run_id", "run-foreign"],
@@ -940,10 +1051,12 @@ test("required artifact gate validates generated-test manifest shape and listed 
     fs.writeFileSync(
       manifestPath,
       JSON.stringify({
-        schema_version: "ultrafuzz.generated-tests.v2",
+        schema_version: "ultrafuzz.generated-tests.v3",
         run_id: "run-1",
         node_id: "strategy-a",
-        generated_tests: [{ path: "generated-tests/Invariant.t.sol" }],
+        framework: "foundry",
+        generated_tests: [generatedEntry],
+        support_files: [],
         [field]: value
       }),
       "utf8"
@@ -960,13 +1073,42 @@ test("required artifact gate validates generated-test manifest shape and listed 
     );
   }
 
+  const supportPath = path.join(artifactDir, "generated-tests", "InvariantFixture.sol");
+  const binarySupportContents = Buffer.from([0xff]);
+  fs.writeFileSync(supportPath, binarySupportContents);
   fs.writeFileSync(
     manifestPath,
     JSON.stringify({
-      schema_version: "ultrafuzz.generated-tests.v2",
+      schema_version: "ultrafuzz.generated-tests.v3",
       run_id: "run-1",
       node_id: "strategy-a",
-      generated_tests: [{ path: "generated-tests/Invariant.t.sol" }]
+      framework: "foundry",
+      generated_tests: [generatedEntry],
+      support_files: [manifestEntry("generated-tests/InvariantFixture.sol", binarySupportContents)]
+    }),
+    "utf8"
+  );
+  const binarySupport = verifyRequiredArtifactsForAttempt(layout, node, "strategy-a");
+  assert.equal(binarySupport.ok, false);
+  assert.ok(
+    binarySupport.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
+        diagnostic.details?.gate === "generated-test-file-integrity"
+    )
+  );
+  const supportContents = "library InvariantFixture {}\n";
+  fs.writeFileSync(supportPath, supportContents, "utf8");
+
+  fs.writeFileSync(
+    manifestPath,
+    JSON.stringify({
+      schema_version: "ultrafuzz.generated-tests.v3",
+      run_id: "run-1",
+      node_id: "strategy-a",
+      framework: "foundry",
+      generated_tests: [generatedEntry],
+      support_files: [manifestEntry("generated-tests/InvariantFixture.sol", supportContents)]
     }),
     "utf8"
   );
@@ -974,6 +1116,91 @@ test("required artifact gate validates generated-test manifest shape and listed 
   const valid = verifyRequiredArtifactsForAttempt(layout, node, "strategy-a");
   assert.deepEqual(valid.diagnostics, []);
   assert.equal(valid.ok, true);
+});
+
+test("required artifact gate rejects hard-linked generated-test manifests and companions without mutation", async (t) => {
+  const createFixture = (runId: string) => {
+    const projectRoot = tempProject();
+    const layout = createRunLayout({ projectRoot, runId });
+    const artifactDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
+    const generatedTestsDirectory = path.join(artifactDir, "generated-tests");
+    fs.mkdirSync(generatedTestsDirectory);
+    const companionContents = Buffer.from("contract InvariantTest {}\n", "utf8");
+    const companionPath = path.join(generatedTestsDirectory, "Invariant.t.sol");
+    fs.writeFileSync(companionPath, companionContents);
+    const manifestPath = path.join(artifactDir, "generated-tests.json");
+    const manifestBytes = Buffer.from(
+      `${JSON.stringify({
+        schema_version: "ultrafuzz.generated-tests.v3",
+        run_id: runId,
+        node_id: "strategy-a",
+        framework: "foundry",
+        generated_tests: [
+          {
+            path: "generated-tests/Invariant.t.sol",
+            size_bytes: companionContents.byteLength,
+            sha256: createHash("sha256").update(companionContents).digest("hex")
+          }
+        ],
+        support_files: []
+      })}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(manifestPath, manifestBytes);
+    return {
+      projectRoot,
+      layout,
+      node: plannedNode(["generated-tests.json"]),
+      manifestPath,
+      manifestBytes,
+      companionPath,
+      companionContents
+    };
+  };
+
+  await t.test("manifest", () => {
+    const fixture = createFixture("run-hardlinked-generated-manifest");
+    const aliasPath = path.join(fixture.projectRoot, "generated-tests.alias.json");
+    fs.linkSync(fixture.manifestPath, aliasPath);
+    const inode = fs.lstatSync(fixture.manifestPath).ino;
+
+    const result = verifyRequiredArtifactsForAttempt(fixture.layout, fixture.node, "strategy-a");
+
+    assert.equal(result.ok, false);
+    assert.ok(
+      result.diagnostics.some(
+        (diagnostic) => diagnostic.code === "hard-link" && /singly linked regular file/u.test(diagnostic.message)
+      ),
+      JSON.stringify(result.diagnostics)
+    );
+    assert.deepEqual(fs.readFileSync(fixture.manifestPath), fixture.manifestBytes);
+    assert.deepEqual(fs.readFileSync(aliasPath), fixture.manifestBytes);
+    assert.equal(fs.lstatSync(fixture.manifestPath).ino, inode);
+    assert.equal(fs.lstatSync(fixture.manifestPath).nlink, 2);
+  });
+
+  await t.test("companion", () => {
+    const fixture = createFixture("run-hardlinked-generated-companion");
+    const aliasPath = path.join(fixture.projectRoot, "Invariant.alias.t.sol");
+    fs.linkSync(fixture.companionPath, aliasPath);
+    const inode = fs.lstatSync(fixture.companionPath).ino;
+
+    const result = verifyRequiredArtifactsForAttempt(fixture.layout, fixture.node, "strategy-a");
+
+    assert.equal(result.ok, false);
+    assert.ok(
+      result.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
+          diagnostic.details?.gate === "generated-test-file-integrity" &&
+          /hard-linked/u.test(diagnostic.message)
+      )
+    );
+    assert.deepEqual(fs.readFileSync(fixture.companionPath), fixture.companionContents);
+    assert.deepEqual(fs.readFileSync(aliasPath), fixture.companionContents);
+    assert.equal(fs.lstatSync(fixture.companionPath).ino, inode);
+    assert.equal(fs.lstatSync(fixture.companionPath).nlink, 2);
+  });
 });
 
 test("workspace patch exclusions pass the contract gate but surface a durable warning", () => {

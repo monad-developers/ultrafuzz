@@ -66,7 +66,7 @@ nodes:
         contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@2
+        contract: ultrafuzz/generated-tests@3
   - id: external-dependency-boundaries
     kind: agentic
     prompt: smoke/smoke-strategy.md
@@ -78,7 +78,7 @@ nodes:
         contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@2
+        contract: ultrafuzz/generated-tests@3
   - id: externalized-state-accounting
     kind: agentic
     prompt: smoke/smoke-strategy.md
@@ -90,7 +90,7 @@ nodes:
         contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@2
+        contract: ultrafuzz/generated-tests@3
   - id: lifecycle-view-boundaries
     kind: agentic
     prompt: smoke/smoke-strategy.md
@@ -102,7 +102,7 @@ nodes:
         contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@2
+        contract: ultrafuzz/generated-tests@3
   - id: dedupe-findings
     kind: agentic
     prompt: smoke/smoke-dedupe-findings.md

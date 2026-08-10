@@ -92,5 +92,7 @@ an empty JSON array only when no production-bug reds are confirmed.
 
 Also write `{{artifact_path}}/generated-tests.json` using the standard
 generated-test manifest contract. Include repaired or preserved replay tests
-that should be aggregated downstream, and use an empty `generated_tests` array
-when this node produced no generated or repaired test files.
+that should be aggregated downstream in `generated_tests`, and include each
+imported non-runnable helper, mock, fixture, script, or data dependency in
+`support_files`. Use both arrays empty when this node produced no generated or
+repaired test files.

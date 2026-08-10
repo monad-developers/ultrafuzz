@@ -5,17 +5,7 @@
 /** @jsxImportSource smithers-orchestrator */
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import {
-  existsSync,
-  lstatSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  realpathSync,
-  rmSync,
-  statSync,
-  writeFileSync
-} from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
@@ -43,6 +33,9 @@ const {
   invariantPinnedSourceRefExists,
   materializePromptSchemas,
   IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
+  MAX_GENERATED_TEST_BUNDLE_BYTES,
+  MAX_GENERATED_TEST_BUNDLE_ENTRIES,
+  MAX_GENERATED_TEST_COMPANION_BYTES,
   INVARIANT_SUITE_MANIFEST_SCHEMA_VERSION,
   normalizeNodeAttemptFailureMessage,
   parseInvariantSuiteManifestBytes,
@@ -199,7 +192,7 @@ const verificationOutput = z.strictObject({
 const ARTIFACT_VERIFICATION_SCHEMA_VERSION = "ultrafuzz.artifact-verification.v2";
 const ARTIFACT_VERIFICATION_DIRECTORY = ".ultrafuzz-verification";
 const MAX_VERIFIED_ARTIFACT_BYTES = 64 * 1024 * 1024;
-const MAX_VERIFIED_COMPANION_BYTES = 16 * 1024 * 1024;
+const MAX_VERIFIED_COMPANION_BYTES = MAX_GENERATED_TEST_COMPANION_BYTES;
 const MAX_PRE_AGENT_EVIDENCE_BYTES = 128 * 1024 * 1024;
 const unreachableCommitCountCommand =
   'set -euo pipefail; git fsck --connectivity-only --unreachable --no-reflogs --no-progress 2>&1 | awk \'$1 == "unreachable" && $2 == "commit" { count++ } END { print count + 0 }\'';
@@ -236,6 +229,33 @@ const taskSpecs = serializedTaskSpecs.map((task) => {
     artifactDir: path.resolve(process.cwd(), task.artifactDir)
   };
 });
+
+type AuthenticatedAggregationSourceEntry = {
+  kind: "generated-test" | "support-file";
+  sourceArtifactPath: string;
+  sourceRelativePath: string;
+  sizeBytes: number;
+  sha256: string;
+  bytes: Buffer;
+  language?: string;
+  description?: string;
+  provenance?: Readonly<Record<string, unknown>>;
+};
+
+type AuthenticatedAggregationSourceBundle = {
+  strategy: string;
+  nodeId: string;
+  sourceAttemptId: string;
+  attemptIndex: number;
+  sourceManifestPath: string;
+  sourceManifestRelativePath: string;
+  sourceManifestSha256: string;
+  sourceRunId: string;
+  framework: string;
+  entries: readonly AuthenticatedAggregationSourceEntry[];
+};
+
+const authenticatedAggregationSourcesByTask = new Map<string, readonly AuthenticatedAggregationSourceBundle[]>();
 
 type AdmittedWorkflowControls = {
   loadedWorkflowPath: string;
@@ -784,7 +804,7 @@ function resetTaskArtifactsForRetry(task: (typeof taskSpecs)[number]): void {
   }
   resetTaskArtifactContents(path.join(artifactsParent, task.attemptId), task.attemptId, "mirror");
 
-  if (task.outputs.some((output) => output.contract === "ultrafuzz/generated-tests@2")) {
+  if (task.outputs.some((output) => output.contract === "ultrafuzz/generated-tests@3")) {
     for (const testRoot of invariantTestRoots(workspaceRoot)) {
       const foundryParentCandidate = path.resolve(workspaceRoot, testRoot, "foundry");
       if (!isStrictlyInsideDirectory(workspaceRoot, foundryParentCandidate)) {
@@ -795,9 +815,8 @@ function resetTaskArtifactsForRetry(task: (typeof taskSpecs)[number]): void {
       if (!isStrictlyInsideDirectory(workspaceRoot, foundryParent)) {
         throw new Error(`artifact-contract failure: unsafe generated test parent ${task.attemptId}`);
       }
-      // Every directory the companion lookup accepts must be cleared, or the
-      // previous attempt's test survives in the one this reset skipped and the
-      // next attempt publishes it as its own.
+      // Clear both task identities so a retry cannot accidentally carry a
+      // previous attempt's workspace test into its newly declared artifacts.
       for (const nodeId of generatedTestNodeIds(task)) {
         resetTaskArtifactContents(path.join(foundryParent, nodeId), nodeId, "generated-test");
       }
@@ -2105,6 +2124,7 @@ function assertTaskInputs(task: (typeof taskSpecs)[number], workspaceRoot: strin
   if (task.promptPath !== undefined) {
     assertRegularFileInside(path.dirname(task.promptPath), task.promptPath, "rendered task prompt");
   }
+  const aggregationSources: AuthenticatedAggregationSourceBundle[] = [];
   for (const dependency of task.dependencyArtifactDirs) {
     let stat;
     try {
@@ -2130,16 +2150,22 @@ function assertTaskInputs(task: (typeof taskSpecs)[number], workspaceRoot: strin
     // therefore have no success marker; only agentic task dependencies need
     // this explicit verifier boundary.
     if (taskSpecs.some((candidate) => candidate.attemptId === path.basename(dependency))) {
-      assertVerifiedDependency(task, dependency);
+      aggregationSources.push(...assertVerifiedDependency(task, dependency).generatedTestBundles);
     }
   }
+  aggregationSources.sort(
+    (left, right) =>
+      left.sourceAttemptId.localeCompare(right.sourceAttemptId) ||
+      left.sourceManifestRelativePath.localeCompare(right.sourceManifestRelativePath)
+  );
+  authenticatedAggregationSourcesByTask.set(task.attemptId, Object.freeze(aggregationSources));
 }
 
 function assertVerifiedDependency(
   task: (typeof taskSpecs)[number],
   dependency: string,
   capturedArtifact?: Readonly<{ relativePath: string; bytes: Buffer }>
-): void {
+): { generatedTestBundles: readonly AuthenticatedAggregationSourceBundle[] } {
   try {
     const dependencyAttemptId = path.basename(dependency);
     const dependencyTask = taskSpecs.find((candidate) => candidate.attemptId === dependencyAttemptId);
@@ -2193,6 +2219,7 @@ function assertVerifiedDependency(
     let capturedArtifactAuthenticated = capturedArtifact === undefined;
     const declaredArtifactShas = new Map<string, string>();
     const expectedPublicationShas = new Map<string, string>();
+    const generatedTestBundles: AuthenticatedAggregationSourceBundle[] = [];
     for (const artifact of marker.artifacts) {
       if (
         typeof artifact !== "object" ||
@@ -2290,10 +2317,76 @@ function assertVerifiedDependency(
       }
       declaredArtifactShas.set(entry.path, entry.sha256);
       rememberExpectedVerifiedPublication(expectedPublicationShas, entry.path, artifactSnapshot.bytes);
-      if (entry.contract === "ultrafuzz/generated-tests@2") {
-        for (const companion of verifyGeneratedTestFiles(dependency, validation.value)) {
+      if (entry.contract === "ultrafuzz/generated-tests@3") {
+        const manifest = validation.value as {
+          run_id: string;
+          node_id: string;
+          framework: string;
+          generated_tests: Array<{
+            path: string;
+            size_bytes: number;
+            sha256: string;
+            language?: string;
+            description?: string;
+            provenance?: Readonly<Record<string, unknown>>;
+          }>;
+          support_files: Array<{
+            path: string;
+            size_bytes: number;
+            sha256: string;
+            language?: string;
+            description?: string;
+            provenance?: Readonly<Record<string, unknown>>;
+          }>;
+        };
+        if (
+          manifest.run_id !== dependencyTask.metadata.run.ultrafuzzRunId ||
+          manifest.node_id !== dependencyTask.metadata.node.logicalNodeId
+        ) {
+          throw new Error(`verified generated-test manifest identity changed ${entry.path}`);
+        }
+        const companions = verifyGeneratedTestFiles(dependency, validation.value);
+        for (const companion of companions) {
           rememberExpectedVerifiedPublication(expectedPublicationShas, companion.path, companion.contents);
         }
+        const companionsByPath = new Map(companions.map((companion) => [companion.path, companion]));
+        const authenticatedEntries = [
+          ...manifest.generated_tests.map((candidate) => ({ kind: "generated-test" as const, candidate })),
+          ...manifest.support_files.map((candidate) => ({ kind: "support-file" as const, candidate }))
+        ].map(({ kind, candidate }) => {
+          const companion = companionsByPath.get(candidate.path);
+          if (companion === undefined) {
+            throw new Error(`verified generated-test companion is missing ${candidate.path}`);
+          }
+          return Object.freeze({
+            kind,
+            sourceArtifactPath: path.resolve(dependency, companion.path),
+            sourceRelativePath: companion.path,
+            sizeBytes: candidate.size_bytes,
+            sha256: candidate.sha256,
+            bytes: Buffer.from(companion.contents),
+            ...(candidate.language === undefined ? {} : { language: candidate.language }),
+            ...(candidate.description === undefined ? {} : { description: candidate.description }),
+            ...(candidate.provenance === undefined ? {} : { provenance: Object.freeze({ ...candidate.provenance }) })
+          });
+        });
+        if (companionsByPath.size !== authenticatedEntries.length) {
+          throw new Error(`verified generated-test companion set changed ${entry.path}`);
+        }
+        generatedTestBundles.push(
+          Object.freeze({
+            strategy: dependencyTask.metadata.node.logicalNodeId,
+            nodeId: manifest.node_id,
+            sourceAttemptId: dependencyAttemptId,
+            attemptIndex: dependencyTask.metadata.loop.attemptIndex,
+            sourceManifestPath: artifactPath,
+            sourceManifestRelativePath: entry.path,
+            sourceManifestSha256: artifactSha,
+            sourceRunId: manifest.run_id,
+            framework: manifest.framework,
+            entries: Object.freeze(authenticatedEntries)
+          })
+        );
       }
     }
     if (seenPaths.size !== expectedArtifacts.size) {
@@ -2352,6 +2445,7 @@ function assertVerifiedDependency(
         throw new Error(`verification marker publication digest does not match verified output ${expectedPath}`);
       }
     }
+    return { generatedTestBundles: Object.freeze(generatedTestBundles) };
   } catch (error) {
     throw new Error(
       `artifact-contract failure: artifact dependency has not passed verification ${path.basename(dependency)} for ${task.attemptId}`,
@@ -2476,125 +2570,9 @@ function preservePinnedSourceProof(task: (typeof taskSpecs)[number]): void {
   writeFileDurable(proofPath, proofContents);
 }
 
-function materializeGeneratedTestCompanions(
-  task: (typeof taskSpecs)[number],
-  capturedOutputs: readonly CapturedTaskOutput[] = []
-): void {
-  const workspaceRoot = realpathSync(task.workspacePath);
-
-  for (const output of task.outputs) {
-    if (output.contract !== "ultrafuzz/generated-tests@2") {
-      continue;
-    }
-    const captured = capturedOutputs.find((entry) => entry.output.path === output.path);
-    if (captured === undefined) continue;
-    let contents: string;
-    try {
-      parseStrictJsonSnapshot(captured.file, `artifact-contract failure: output ${output.path}`);
-      contents = decodeStrictUtf8Snapshot(captured.file, `artifact-contract failure: output ${output.path}`);
-    } catch {
-      // The final verifier reports the typed output failure without creating a
-      // companion from an ambiguous manifest.
-      continue;
-    }
-    const validation = validateArtifactContract(output.contract, contents, output.path);
-    if (!validation.ok) continue;
-    const entries = (validation.value as { generated_tests?: Array<{ path?: string }> }).generated_tests ?? [];
-    for (const entry of entries) {
-      materializeGeneratedTestCompanion(
-        workspaceRoot,
-        captured.artifactRoot,
-        generatedTestNodeIds(task),
-        entry.path ?? ""
-      );
-    }
-  }
-}
-
-/**
- * Directory names an agent may have used for its generated tests, most
- * authoritative first.
- *
- * `strategy_attempt_test_dir` (`packages/prompts/src/render.ts`) mandates
- * `<workspace>/test/foundry/<LOGICAL node id>/`, and the retry reset below
- * clears that same logical directory. Only this lookup used the CONCRETE node
- * id, so on any node the topology expands (`loops > 1`, model fan-out) the one
- * directory the prompt named was never searched and an obedient agent's test
- * failed the contract as missing. Both ids are accepted: the logical id is what
- * the prompt promises, and the concrete id stays valid for a run that used it.
- */
+/** Directory names whose task-owned generated-test work must be cleared before a retry. */
 function generatedTestNodeIds(task: (typeof taskSpecs)[number]): string[] {
   return [...new Set([task.metadata.node.logicalNodeId, task.metadata.node.concreteNodeId])];
-}
-
-function materializeGeneratedTestCompanion(
-  workspaceRoot: string,
-  artifactRoot: string,
-  nodeIds: readonly string[],
-  relativePath: string
-): void {
-  const generatedPrefix = "generated-tests/";
-  if (!relativePath.startsWith(generatedPrefix) || relativePath.length === generatedPrefix.length) {
-    throw new Error(`artifact-contract failure: unsafe generated test path ${relativePath}`);
-  }
-  const artifactPath = path.resolve(artifactRoot, relativePath);
-  if (!isStrictlyInsideDirectory(artifactRoot, artifactPath)) {
-    throw new Error(`artifact-contract failure: unsafe generated test path ${relativePath}`);
-  }
-  if (existsSync(artifactPath)) {
-    resolveNonEmptyRegularArtifactFile(
-      artifactRoot,
-      artifactPath,
-      `artifact-contract failure: generated test file is missing ${relativePath}`,
-      `artifact-contract failure: generated test file is empty ${relativePath}`
-    );
-    return;
-  }
-
-  const workspaceRelativePath = relativePath.slice(generatedPrefix.length);
-  const sourceCandidates = [
-    ...new Set(
-      INVARIANT_TEST_ROOT_NAMES.flatMap((testRoot) => [
-        path.resolve(workspaceRoot, testRoot, "foundry", workspaceRelativePath),
-        ...nodeIds.map((nodeId) => path.resolve(workspaceRoot, testRoot, "foundry", nodeId, workspaceRelativePath))
-      ])
-    )
-  ];
-  const existingCandidates = sourceCandidates.filter((candidate) => existsSync(candidate));
-  const sourceCandidate = existingCandidates[0] ?? sourceCandidates[0];
-  if (!isStrictlyInsideDirectory(workspaceRoot, sourceCandidate)) {
-    throw new Error(`artifact-contract failure: unsafe generated test source ${relativePath}`);
-  }
-  const missingSource = `artifact-contract failure: generated test file is missing ${relativePath}`;
-  const sourceSnapshots = (existingCandidates.length === 0 ? [sourceCandidate] : existingCandidates).map(
-    (candidate) => {
-      const snapshot = readBoundedRegularArtifactSnapshot(
-        workspaceRoot,
-        candidate,
-        missingSource,
-        MAX_VERIFIED_COMPANION_BYTES,
-        true
-      );
-      decodeStrictUtf8Snapshot(snapshot, `artifact-contract failure: generated test source ${relativePath}`);
-      return snapshot;
-    }
-  );
-  const source = sourceSnapshots[0];
-  if (source === undefined) throw new Error(missingSource);
-  for (const candidate of sourceSnapshots.slice(1)) {
-    if (!candidate.bytes.equals(source.bytes)) {
-      throw new Error(`artifact-contract failure: generated test sources conflict ${relativePath}`);
-    }
-  }
-
-  const artifactParent = path.dirname(artifactPath);
-  mkdirSync(artifactParent, { recursive: true });
-  const resolvedParent = realpathSync(artifactParent);
-  if (!isStrictlyInsideDirectory(artifactRoot, resolvedParent)) {
-    throw new Error(`artifact-contract failure: unsafe generated test parent ${relativePath}`);
-  }
-  const anchoredArtifactPath = path.join(resolvedParent, path.basename(artifactPath));
-  writeFileSync(anchoredArtifactPath, source.bytes, { flag: "wx", mode: 0o600 });
 }
 
 /**
@@ -4502,6 +4480,10 @@ function semanticGateContextForVerifiedOutput(
     triagedFindings?: unknown;
   };
   git?: ReturnType<typeof deriveWorkspacePatchGitFacts>;
+  aggregation?: {
+    workspaceRoot: string;
+    sourceBundles: readonly AuthenticatedAggregationSourceBundle[];
+  };
 } {
   const snapshot = verifiedOutputs.get(output.path);
   if (snapshot === undefined) {
@@ -4553,6 +4535,14 @@ function semanticGateContextForVerifiedOutput(
   } else if (output.schemaFile === "workspace-patch.schema.json") {
     const git = workspacePatchSemanticGitContext(task, verifiedOutputs);
     if (git !== undefined) context.git = git;
+  } else if (output.schemaFile === "aggregation-manifest.schema.json") {
+    const sourceBundles = authenticatedAggregationSourcesByTask.get(task.attemptId);
+    if (sourceBundles !== undefined) {
+      context.aggregation = {
+        workspaceRoot: realpathSync(task.workspacePath),
+        sourceBundles
+      };
+    }
   }
   return context;
 }
@@ -4628,11 +4618,9 @@ function verifyArtifacts(
   const capturedOutputs = capturedTaskOutputs ?? captureTaskOutputs(task);
   const { artifacts, verifiedOutputs } = validateCapturedTaskOutputs(task, capturedOutputs);
 
-  // Generated test files are runtime-owned companions. Materialize them only
-  // after every declared output has passed immutable strict JSON/Ajv shape
-  // validation, because the filesystem semantic gate must inspect the exact
-  // artifact root that will be handed off.
-  materializeGeneratedTestCompanions(task, capturedOutputs);
+  // Generated-test companions are agent-owned outputs. Verification reads the
+  // exact declared files in the artifact root and never searches the workspace,
+  // infers a source, or repairs an incomplete handoff after the agent exits.
   verifyOutputSemanticGates(task, verifiedOutputs);
 
   // These companions are not semantic inputs, so keep their durable creation
@@ -4648,7 +4636,7 @@ function verifyArtifacts(
       throw new Error(`artifact-contract failure: verified output is unavailable ${output.path}`);
     }
     rememberVerifiedPublication(publications, output.path, verified.file.bytes);
-    if (output.contract === "ultrafuzz/generated-tests@2") {
+    if (output.contract === "ultrafuzz/generated-tests@3") {
       for (const companion of verifyGeneratedTestFiles(verified.artifactRoot, verified.value)) {
         rememberVerifiedPublication(publications, companion.path, companion.contents);
       }
@@ -5103,26 +5091,85 @@ function writeArtifactVerificationMarker(
 }
 
 function verifyGeneratedTestFiles(artifactDir: string, value: unknown): Array<{ path: string; contents: Buffer }> {
-  const entries = (value as { generated_tests?: Array<{ path?: string }> }).generated_tests ?? [];
+  const manifest = value as {
+    generated_tests: Array<{
+      path: string;
+      size_bytes: number;
+      sha256: string;
+      language?: string;
+      description?: string;
+      provenance?: Readonly<Record<string, unknown>>;
+    }>;
+    support_files: Array<{
+      path: string;
+      size_bytes: number;
+      sha256: string;
+      language?: string;
+      description?: string;
+      provenance?: Readonly<Record<string, unknown>>;
+    }>;
+  };
+  const entries = [
+    ...manifest.generated_tests.map((entry) => ({ kind: "generated-test" as const, entry })),
+    ...manifest.support_files.map((entry) => ({ kind: "support-file" as const, entry }))
+  ];
+  if (entries.length > MAX_GENERATED_TEST_BUNDLE_ENTRIES) {
+    throw new Error(
+      `artifact-contract failure: generated-test manifest exceeds the ${MAX_GENERATED_TEST_BUNDLE_ENTRIES}-entry combined bundle limit`
+    );
+  }
+  const declaredBytes = entries.reduce((total, candidate) => total + candidate.entry.size_bytes, 0);
+  if (declaredBytes > MAX_GENERATED_TEST_BUNDLE_BYTES) {
+    throw new Error(
+      `artifact-contract failure: generated-test manifest exceeds the ${MAX_GENERATED_TEST_BUNDLE_BYTES}-byte combined declared-size limit`
+    );
+  }
   const paths = new Set<string>();
-  return entries.map((entry) => {
-    const relativePath = entry.path ?? "";
+  const preflighted = entries.map(({ kind, entry }) => {
+    const relativePath = entry.path;
     if (paths.has(relativePath)) {
-      throw new Error(`artifact-contract failure: duplicate generated test path ${relativePath}`);
+      throw new Error(`artifact-contract failure: duplicate generated-test bundle path ${relativePath}`);
     }
     paths.add(relativePath);
     const artifactPath = path.resolve(artifactDir, relativePath);
     if (!isStrictlyInsideDirectory(artifactDir, artifactPath)) {
-      throw new Error(`artifact-contract failure: unsafe generated test path ${relativePath}`);
+      throw new Error(`artifact-contract failure: unsafe generated-test bundle path ${relativePath}`);
     }
+    const failureMessage = `artifact-contract failure: generated-test bundle file is missing ${relativePath}`;
+    const resolvedPath = resolveRegularArtifactFile(artifactDir, artifactPath, failureMessage);
+    return { kind, entry, relativePath, artifactPath: resolvedPath, stats: statSync(resolvedPath) };
+  });
+  const actualBytes = preflighted.reduce((total, companion) => total + companion.stats.size, 0);
+  if (actualBytes > MAX_GENERATED_TEST_BUNDLE_BYTES) {
+    throw new Error(
+      `artifact-contract failure: generated-test companions exceed the ${MAX_GENERATED_TEST_BUNDLE_BYTES}-byte combined bundle limit`
+    );
+  }
+  for (const companion of preflighted) {
+    if (companion.stats.size === 0) {
+      throw new Error(`artifact-contract failure: generated-test bundle file is empty ${companion.relativePath}`);
+    }
+    if (companion.stats.size > MAX_GENERATED_TEST_COMPANION_BYTES) {
+      throw new Error(
+        `artifact-contract failure: generated-test bundle file exceeds the ${MAX_GENERATED_TEST_COMPANION_BYTES}-byte companion limit ${companion.relativePath}`
+      );
+    }
+  }
+  return preflighted.map(({ entry, relativePath, artifactPath }) => {
     const snapshot = readBoundedRegularArtifactSnapshot(
       artifactDir,
       artifactPath,
-      `artifact-contract failure: generated test file is missing ${relativePath}`,
-      MAX_VERIFIED_COMPANION_BYTES,
+      `artifact-contract failure: generated-test bundle file is missing ${relativePath}`,
+      MAX_GENERATED_TEST_COMPANION_BYTES,
       true
     );
-    decodeStrictUtf8Snapshot(snapshot, `artifact-contract failure: generated test file ${relativePath}`);
+    decodeStrictUtf8Snapshot(snapshot, `artifact-contract failure: generated-test bundle file ${relativePath}`);
+    if (snapshot.bytes.length !== entry.size_bytes) {
+      throw new Error(`artifact-contract failure: generated-test bundle file size does not match ${relativePath}`);
+    }
+    if (createHash("sha256").update(snapshot.bytes).digest("hex") !== entry.sha256) {
+      throw new Error(`artifact-contract failure: generated-test bundle file digest does not match ${relativePath}`);
+    }
     return { path: relativePath, contents: snapshot.bytes };
   });
 }

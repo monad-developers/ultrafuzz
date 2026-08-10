@@ -68,5 +68,7 @@ Write {{artifact_path}}/reference-harness.json with this JSON shape:
 
 Also write `{{artifact_path}}/generated-tests.json` using the standard
 generated-test manifest contract. Include every authored `.t.sol` reference or
-harness test file in `generated_tests`, and use an empty `generated_tests` array
+harness test file in `generated_tests`. Include every imported non-runnable
+helper library, mock, fixture, deployment script, or data file in
+`support_files`; never classify one as a runnable test. Use both arrays empty
 only if no test file was authored.

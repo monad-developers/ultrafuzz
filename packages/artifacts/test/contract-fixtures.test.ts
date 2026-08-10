@@ -66,6 +66,7 @@ const removedContractIds = [
   "ultrafuzz/campaign-summary@1",
   "ultrafuzz/findings@1",
   "ultrafuzz/generated-tests@1",
+  "ultrafuzz/generated-tests@2",
   "ultrafuzz/implemented-properties@1",
   "ultrafuzz/implemented-properties@2",
   "ultrafuzz/json-array@1",
@@ -755,12 +756,28 @@ test("portable generated-test paths and implementation selection uniqueness agre
     generatedEntry.zodParser
   ] as ZodLikeParser;
   const generated = {
-    schema_version: "ultrafuzz.generated-tests.v2",
+    schema_version: "ultrafuzz.generated-tests.v3",
     run_id: "run-1",
     node_id: "node-1",
-    generated_tests: [{ path: "generated-tests/nested/Invariant.t.sol" }]
+    framework: "foundry",
+    generated_tests: [{ path: "generated-tests/nested/Invariant.t.sol", size_bytes: 1, sha256: "a".repeat(64) }],
+    support_files: []
   };
   assertParity(generatedEntry.id, generatedParser, generated, true, "generated-tests:path:safe");
+  const maxLengthPath = `generated-tests/${[...Array.from({ length: 31 }, () => "a".repeat(128)), "b".repeat(81)].join(
+    "/"
+  )}`;
+  assert.equal(maxLengthPath.length, 4_096);
+  for (const [label, candidatePath, expected] of [
+    ["maximum-path-bytes", maxLengthPath, true],
+    ["excess-path-bytes", `${maxLengthPath}b`, false],
+    ["maximum-path-segments", `generated-tests/${Array.from({ length: 63 }, () => "a").join("/")}`, true],
+    ["excess-path-segments", `generated-tests/${Array.from({ length: 64 }, () => "a").join("/")}`, false]
+  ] as const) {
+    const candidate = structuredClone(generated);
+    candidate.generated_tests[0]!.path = candidatePath;
+    assertParity(generatedEntry.id, generatedParser, candidate, expected, `generated-tests:path:${label}`);
+  }
   for (const [label, unsafePath] of [
     ["wrong-root", "tests/Invariant.t.sol"],
     ["traversal", "generated-tests/../Invariant.t.sol"],
@@ -772,6 +789,71 @@ test("portable generated-test paths and implementation selection uniqueness agre
     candidate.generated_tests[0]!.path = unsafePath;
     assertParity(generatedEntry.id, generatedParser, candidate, false, `generated-tests:path:${label}`);
   }
+
+  const supportEntry = {
+    path: "generated-tests/nested/InvariantFixture.sol",
+    size_bytes: 1,
+    sha256: "b".repeat(64)
+  };
+  assertParity(
+    generatedEntry.id,
+    generatedParser,
+    { ...generated, support_files: [supportEntry] },
+    true,
+    "generated-tests:distinct-support-file"
+  );
+  assertParity(
+    generatedEntry.id,
+    generatedParser,
+    {
+      ...generated,
+      generated_tests: [generated.generated_tests[0], structuredClone(generated.generated_tests[0])]
+    },
+    false,
+    "generated-tests:duplicate-generated-test-entry"
+  );
+  assertParity(
+    generatedEntry.id,
+    generatedParser,
+    {
+      ...generated,
+      support_files: [supportEntry, { sha256: "b".repeat(64), size_bytes: 1, path: supportEntry.path }]
+    },
+    false,
+    "generated-tests:duplicate-support-file-entry"
+  );
+  assertParity(
+    generatedEntry.id,
+    generatedParser,
+    { ...generated, generated_tests: [], support_files: [supportEntry] },
+    false,
+    "generated-tests:support-requires-runnable-test"
+  );
+  const boundedEntries = Array.from({ length: 1_024 }, (_, index) => ({
+    path: `generated-tests/bounded-${index}.sol`,
+    size_bytes: 1,
+    sha256: index.toString(16).padStart(64, "0")
+  }));
+  assertParity(
+    generatedEntry.id,
+    generatedParser,
+    { ...generated, generated_tests: boundedEntries },
+    true,
+    "generated-tests:maximum-array-items"
+  );
+  assertParity(
+    generatedEntry.id,
+    generatedParser,
+    {
+      ...generated,
+      generated_tests: [
+        ...boundedEntries,
+        { path: "generated-tests/excess.sol", size_bytes: 1, sha256: "f".repeat(64) }
+      ]
+    },
+    false,
+    "generated-tests:excess-array-items"
+  );
 
   const implementedEntry = artifactSchemaRegistry().find(
     (candidate) => candidate.filename === "implemented-properties.schema.json"

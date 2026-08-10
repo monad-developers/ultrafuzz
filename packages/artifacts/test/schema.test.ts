@@ -35,6 +35,7 @@ import {
   artifactContractDefinition,
   artifactContractSchemaBinding,
   createInitialRunState,
+  assertGeneratedTestManifestSchema,
   assertPlannedGraph,
   assertPlannedGraphSemantics,
   derivePropertyImplementationCoverage,
@@ -1411,29 +1412,81 @@ test("generated test manifest runtime and exported schemas enforce the same safe
     schema_version: GENERATED_TESTS_SCHEMA_VERSION,
     run_id: "run-1",
     node_id: "strategy-a",
+    framework: "foundry",
     generated_tests: [
       {
         path: "generated-tests/Invariant.t.sol",
+        size_bytes: 1,
+        sha256: "a".repeat(64),
         language: "solidity",
-        framework: "foundry",
         description: "Focused invariant replay"
       }
-    ]
+    ],
+    support_files: []
   };
 
   assert.equal(validateGeneratedTestManifestSchema(manifest).ok, true);
+  assert.equal(
+    validateGeneratedTestManifestSchema({ ...manifest, schema_version: "ultrafuzz.generated-tests.v2" }).ok,
+    false
+  );
+  const missingSupportFiles = structuredClone(manifest) as Record<string, unknown>;
+  delete missingSupportFiles.support_files;
+  assert.equal(validateGeneratedTestManifestSchema(missingSupportFiles).ok, false);
+  const missingFramework = structuredClone(manifest) as Record<string, unknown>;
+  delete missingFramework.framework;
+  assert.equal(validateGeneratedTestManifestSchema(missingFramework).ok, false);
+  for (const framework of ["foundry/hardhat", " foundry", "fuzz🚀", "a".repeat(129)]) {
+    assert.equal(validateGeneratedTestManifestSchema({ ...manifest, framework }).ok, false, framework);
+    assert.equal(
+      validateArtifactContract("ultrafuzz/generated-tests@3", JSON.stringify({ ...manifest, framework })).ok,
+      false,
+      framework
+    );
+  }
+  assert.equal(
+    validateGeneratedTestManifestSchema({
+      ...manifest,
+      generated_tests: [{ ...manifest.generated_tests[0]!, framework: "hardhat" }]
+    }).ok,
+    false
+  );
+  const supportManifest = {
+    ...manifest,
+    support_files: [
+      {
+        path: "generated-tests/InvariantFixture.sol",
+        size_bytes: 1,
+        sha256: "b".repeat(64)
+      }
+    ]
+  };
+  assert.equal(validateGeneratedTestManifestSchema(supportManifest).ok, true);
+  assert.equal(validateArtifactContract("ultrafuzz/generated-tests@3", JSON.stringify(supportManifest)).ok, true);
+  for (const generated_tests of [
+    [{ path: "generated-tests/Invariant.t.sol", sha256: "a".repeat(64) }],
+    [{ path: "generated-tests/Invariant.t.sol", size_bytes: 1 }],
+    [{ path: "generated-tests/Invariant.t.sol", size_bytes: 0, sha256: "a".repeat(64) }],
+    [{ path: "generated-tests/Invariant.t.sol", size_bytes: 16 * 1024 * 1024 + 1, sha256: "a".repeat(64) }]
+  ]) {
+    const candidate = { ...manifest, generated_tests };
+    assert.equal(validateGeneratedTestManifestSchema(candidate).ok, false);
+    assert.equal(validateArtifactContract("ultrafuzz/generated-tests@3", JSON.stringify(candidate)).ok, false);
+  }
   for (const candidate of [
     { ...manifest, provenance: {} },
     { ...manifest, generated_tests: [{ ...manifest.generated_tests[0]!, provenance: {} }] }
   ]) {
     assert.equal(validateGeneratedTestManifestSchema(candidate).ok, false);
-    assert.equal(validateArtifactContract("ultrafuzz/generated-tests@2", JSON.stringify(candidate)).ok, false);
+    assert.equal(validateArtifactContract("ultrafuzz/generated-tests@3", JSON.stringify(candidate)).ok, false);
   }
 
   const noncanonical = {
     schema_version: GENERATED_TESTS_SCHEMA_VERSION,
     run_id: "run-1",
     node_id: "strategy-a",
+    framework: "foundry",
+    support_files: [],
     test_files: [{ path: "generated-tests/Invariant.t.sol" }]
   };
   const invalid = validateGeneratedTestManifestSchema(noncanonical);
@@ -1465,6 +1518,33 @@ test("generated test manifest runtime and exported schemas enforce the same safe
   }
 });
 
+test("generated-test file-directory path conflicts remain explicit document semantics", () => {
+  const manifest = {
+    schema_version: GENERATED_TESTS_SCHEMA_VERSION,
+    run_id: "run-1",
+    node_id: "strategy-a",
+    framework: "foundry",
+    generated_tests: [
+      {
+        path: "generated-tests/Replay.t.sol",
+        size_bytes: 1,
+        sha256: "a".repeat(64)
+      }
+    ],
+    support_files: [
+      {
+        path: "generated-tests/Replay.t.sol/InvariantFixture.sol",
+        size_bytes: 1,
+        sha256: "b".repeat(64)
+      }
+    ]
+  };
+
+  assert.equal(validateGeneratedTestManifestSchema(manifest).ok, true);
+  assert.equal(validateArtifactContract("ultrafuzz/generated-tests@3", JSON.stringify(manifest)).ok, true);
+  assert.throws(() => assertGeneratedTestManifestSchema(manifest), /conflicts with file path/u);
+});
+
 test("present generated-test aggregation provenance cannot be an empty object", () => {
   const manifest = {
     schema_version: "ultrafuzz.aggregation-manifest.v1",
@@ -1472,17 +1552,37 @@ test("present generated-test aggregation provenance cannot be an empty object", 
     copied_generated_tests: 1,
     source_support_files: 0,
     copied_support_files: 0,
+    source_bundles: [
+      {
+        strategy: "boundary-tests",
+        node_id: "boundary-tests--attempt-0",
+        source_attempt_id: "boundary-tests--attempt-0--model-0",
+        attempt_index: 0,
+        source_manifest_path: "/run/artifacts/boundary-tests--attempt-0--model-0/generated-tests.json",
+        source_manifest_relative_path: "generated-tests.json",
+        source_manifest_sha256: "b".repeat(64),
+        source_run_id: "run-1",
+        framework: "foundry",
+        generated_test_count: 1,
+        support_file_count: 0,
+        disposition: "copied"
+      }
+    ],
     files: [
       {
         strategy: "boundary-tests",
-        node_id: "boundary-tests",
+        node_id: "boundary-tests--attempt-0",
+        source_attempt_id: "boundary-tests--attempt-0--model-0",
         attempt_index: 0,
-        source_manifest_path: "generated-tests.json",
-        source_artifact_path: "generated-tests/Boundary.t.sol",
+        source_manifest_path: "/run/artifacts/boundary-tests--attempt-0--model-0/generated-tests.json",
+        source_manifest_relative_path: "generated-tests.json",
+        source_manifest_sha256: "b".repeat(64),
+        source_artifact_path: "/run/artifacts/boundary-tests--attempt-0--model-0/generated-tests/Boundary.t.sol",
         source_relative_path: "generated-tests/Boundary.t.sol",
-        destination_path: "test/Boundary.t.sol",
+        destination_path: "/run/workspaces/aggregate/test/Boundary.t.sol",
         destination_relative_path: "test/Boundary.t.sol",
-        bytes: 1,
+        size_bytes: 1,
+        sha256: "a".repeat(64),
         provenance: {}
       }
     ],
@@ -1732,17 +1832,40 @@ test("aggregation skips require a typed source kind and attempt identity", () =>
     copied_generated_tests: 0,
     source_support_files: 0,
     copied_support_files: 0,
+    source_bundles: [
+      {
+        strategy: "boundary-tests",
+        node_id: "boundary-tests--attempt-0",
+        source_attempt_id: "boundary-tests--attempt-0--model-0",
+        attempt_index: 0,
+        source_manifest_path: "/run/artifacts/boundary-tests--attempt-0--model-0/generated-tests.json",
+        source_manifest_relative_path: "generated-tests.json",
+        source_manifest_sha256: "b".repeat(64),
+        source_run_id: "run-1",
+        framework: "foundry",
+        generated_test_count: 1,
+        support_file_count: 0,
+        disposition: "skipped",
+        reason: "declared framework is incompatible with the checked-in test stack"
+      }
+    ],
     files: [],
     support_files: [],
     skipped_files: [
       {
         kind: "generated-test",
         strategy: "boundary-tests",
-        node_id: "boundary-tests",
+        node_id: "boundary-tests--attempt-0",
+        source_attempt_id: "boundary-tests--attempt-0--model-0",
         attempt_index: 0,
-        source_manifest_path: "generated-tests.json",
+        source_manifest_path: "/run/artifacts/boundary-tests--attempt-0--model-0/generated-tests.json",
+        source_manifest_relative_path: "generated-tests.json",
+        source_manifest_sha256: "b".repeat(64),
+        source_artifact_path: "/run/artifacts/boundary-tests--attempt-0--model-0/generated-tests/Boundary.t.sol",
         source_relative_path: "generated-tests/Boundary.t.sol",
-        reason: "framework could not be determined"
+        size_bytes: 1,
+        sha256: "a".repeat(64),
+        reason: "declared framework is incompatible with the checked-in test stack"
       }
     ]
   };

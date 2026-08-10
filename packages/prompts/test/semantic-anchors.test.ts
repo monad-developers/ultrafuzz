@@ -465,15 +465,16 @@ describe("prompt semantic anchors", () => {
     expect(dynamic).toContain("A strategy ID cannot be both selected and rejected");
   });
 
-  it("keeps generated-test manifests on the canonical generated_tests contract", () => {
+  it("keeps generated-test manifests on the canonical generated/support bundle contract", () => {
     const aggregate = prompt("review/aggregate-test-files.md");
+    const dedupe = prompt("review/dedupe-findings.md");
     const dynamic = prompt("strategies/dynamic-strategy-generator.md");
     const templatePath = fileURLToPath(
       new URL("../../../.ultrafuzz/prompts/_templates/output-contract/generated-tests.mdx", import.meta.url)
     );
     const topologyPath = fileURLToPath(new URL("../../../.ultrafuzz/topology.yml", import.meta.url));
     const topology = YAML.parse(readFileSync(topologyPath, "utf8")) as {
-      nodes: { id: string; outputs?: Array<{ path: string }> }[];
+      nodes: { id: string; outputs?: Array<{ path: string; contract: string }> }[];
     };
     const requiredArtifactsById = new Map(
       topology.nodes.map((node) => [node.id, (node.outputs ?? []).map((output) => output.path)])
@@ -481,22 +482,40 @@ describe("prompt semantic anchors", () => {
     const promptCorpus = loadBuiltInPromptAssets()
       .map((asset) => asset.markdown)
       .join("\n");
-    const manifestSources = new Set([
-      ...generatedTestManifestSources(aggregate),
-      ...generatedTestManifestSources(dynamic)
-    ]);
+    const aggregateManifestSources = new Set(generatedTestManifestSources(aggregate));
+    const generatedTestProducers = new Set(
+      topology.nodes
+        .filter((node) => node.outputs?.some((output) => output.contract === "ultrafuzz/generated-tests@3"))
+        .map((node) => node.id)
+    );
 
     expect(readFileSync(templatePath, "utf8")).toContain("generated_tests");
-    expect(aggregate).toContain("manifest `generated_tests` entries");
-    expect(dynamic).toContain("Use the exact `ultrafuzz.generated-tests.v2` manifest shape");
+    expect(readFileSync(templatePath, "utf8")).toContain("support_files");
+    expect(readFileSync(templatePath, "utf8")).toContain("must be strict UTF-8 text");
+    expect(readFileSync(templatePath, "utf8")).toContain("exact positive `size_bytes`");
+    expect(aggregate).toContain("required `generated_tests`\nand `support_files` arrays together");
+    expect(aggregate).toMatch(/Require both\s+`size_bytes` and `sha256` to be present/u);
+    expect(dedupe).toContain("exact `ultrafuzz.generated-tests.v3` shape");
+    expect(dedupe).toMatch(/required `generated_tests` and\s+`support_files` arrays/u);
+    expect(dedupe).toContain("exact positive `size_bytes`");
+    expect(dynamic).toContain("Use the exact `ultrafuzz.generated-tests.v3` manifest shape");
+    expect(dynamic).toContain("one required root-level\n`framework`");
+    expect(dynamic).toContain("remain present when both arrays\nare empty");
+    expect(dynamic).toContain("Never mix frameworks in one bundle");
+    expect(dynamic).toContain("never list a non-runnable support file as a generated test");
     expect(dynamic).toContain("`path` with the\n`generated-tests/<file>` prefix");
     expect(dynamic).toContain("they are not generated-test\nmanifest fields");
+    expect(dynamic).not.toContain("only `language`, `framework`, `description`");
     expect(dynamic).not.toContain("strategy id, source path, destination intent, and\nvalidation status");
     expect(`${readFileSync(templatePath, "utf8")}\n${promptCorpus}`).not.toContain("test_files");
     expect(readFileSync(topologyPath, "utf8")).toMatch(
       /id: reference-harness-author[\s\S]*outputs:[\s\S]*path: generated-tests\.json/u
     );
-    for (const sourceId of manifestSources) {
+    expect([...aggregateManifestSources].sort()).toEqual([...generatedTestProducers].sort());
+    for (const sourceId of new Set([
+      ...generatedTestManifestSources(aggregate),
+      ...generatedTestManifestSources(dynamic)
+    ])) {
       expect(requiredArtifactsById.get(sourceId), sourceId).toContain("generated-tests.json");
     }
   });
@@ -543,13 +562,18 @@ describe("prompt semantic anchors", () => {
     expect(dedupe).toContain("For Hardhat");
     expect(dedupe).toContain("For Vyper");
     expect(dedupe).toContain("For mixed repositories");
-    expect(dedupe).toMatch(/manifest\s+`framework` and `language`/u);
+    expect(dedupe).toContain("one required root-level `framework`");
+    expect(dedupe).toContain("remain present on an empty bundle");
+    expect(dedupe).toContain("never appear on\nan individual entry");
+    expect(dedupe).toContain("Do not infer,\nsynthesize, normalize, or convert a missing or mismatched framework");
     expect(dedupe).toContain("Strategy workspaces are isolated from this node");
-    expect(dedupe).toContain("copy only its exact byte-for-byte canonical");
-    expect(dedupe).toContain("under the existing native test root in\n`{{workspace_path}}`");
+    expect(dedupe).toMatch(/copy\s+every exact byte-for-byte canonical companion/u);
+    expect(dedupe).toContain("Do not execute a `support_files` entry");
+    expect(dedupe).toMatch(/blocked without\s+partially copying the bundle/u);
+    expect(dedupe).toMatch(/under the existing\s+native test root in `\{\{workspace_path\}\}`/u);
     expect(dedupe).toContain("normalized relative POSIX");
-    expect(dedupe).toContain("every symlink even when its\ntarget remains inside the artifact directory");
-    expect(dedupe).toContain("Never search a strategy workspace");
+    expect(dedupe).toMatch(/every symlink even\s+when its target remains inside the artifact directory/u);
+    expect(dedupe).toMatch(/Never search a\s+strategy workspace/u);
     expect(dedupe).toContain("Never install, fetch, restore, or update dependencies during dedupe");
     expect(dedupe).not.toContain("restore project-pinned dependencies first");
     expect(dedupe).not.toContain("Dependency hydration used only");
@@ -559,20 +583,37 @@ describe("prompt semantic anchors", () => {
     const aggregate = prompt("review/aggregate-test-files.md");
 
     expect(aggregate).toContain("canonical generated-test companions");
-    expect(aggregate).toContain("`generated_tests` array as the source of truth");
+    expect(aggregate).toContain("required `generated_tests`\nand `support_files` arrays together");
     expect(aggregate).toContain("exact byte-for-byte companion");
+    expect(aggregate).toContain("strict UTF-8 text regular file");
+    expect(aggregate).toContain("Treat each accepted\nmanifest as one atomic bundle");
     expect(aggregate).toContain("normalized relative POSIX");
-    expect(aggregate).toContain("every symlink even when its target remains\ninside the artifact directory");
+    expect(aggregate).toMatch(/every symlink even when its target remains inside\s+the artifact directory/u);
     expect(aggregate).toContain("Foundry `.t.sol`");
-    expect(aggregate).toContain("Hardhat `.js`, `.cjs`, `.mjs`, `.ts`, `.cts`, or `.mts`");
+    expect(aggregate).toMatch(/Hardhat `.js`, `.cjs`, `.mjs`, `.ts`, `.cts`, or `.mts`/u);
     expect(aggregate).toContain("existing native Python test `.py` files");
+    expect(aggregate).toContain("root-level `framework` on every manifest, including an empty manifest");
+    expect(aggregate).toMatch(/Never infer, synthesize, normalize, or\s+convert a missing or mismatched framework/u);
+    expect(aggregate).toContain("Preserve the manifest's one `framework` only on its `source_bundles` record");
+    expect(aggregate).toContain("copied and skipped entry rows must not repeat `framework`");
     expect(aggregate).toContain("repository's existing JavaScript or TypeScript test root");
     expect(aggregate).toContain("existing pytest, Ape, Brownie, or other native test root");
-    expect(aggregate).toContain("never overwrite one entry with another");
-    expect(aggregate).toContain("Do not copy unknown manifest\nentry fields");
-    expect(aggregate).toContain("required `kind`\n  (`generated-test` or `support-file`)");
+    expect(aggregate).toContain("never flatten files or overwrite one entry with another");
+    expect(aggregate).toMatch(/Do\s+not copy unknown manifest entry fields/u);
+    expect(aggregate).toContain(
+      "`source_bundles`: one record for every listed `generated-tests.json`, including\n  empty manifests"
+    );
+    expect(aggregate).toContain("exact source artifact-directory basename as\n  `source_attempt_id`");
+    expect(aggregate).toContain("`source_manifest_sha256`");
+    expect(aggregate).toContain("positive `size_bytes`");
+    expect(aggregate).toContain("lowercase `sha256`");
+    expect(aggregate).toContain("plus required `kind` (`generated-test` or `support-file`)");
     expect(aggregate).toContain("Every considered source entry appears exactly once");
-    expect(aggregate).toContain("plus skipped `generated-test`\nrows");
+    expect(aggregate).toContain(
+      "A bundle is atomic: `copied` means all of its generated tests and\nsupport files appear once"
+    );
+    expect(aggregate).toContain("`empty`\nmeans both source counts are zero");
+    expect(aggregate).not.toContain("`bytes`");
     expect(aggregate).not.toContain("source_manifest_entry");
     expect(aggregate).not.toContain("collect generated Foundry `.t.sol` files");
   });
@@ -588,6 +629,8 @@ describe("prompt semantic anchors", () => {
     expect(report).toContain("`javascript` or `typescript` for Hardhat");
     expect(report).toContain("`python` (or `vyper`");
     expect(report).toContain("Never translate a JavaScript, TypeScript");
+    expect(report).toContain("Framework is a\nrequired whole-bundle identity on the matching `source_bundles` record");
+    expect(report).toContain("never infer a framework from a file\nextension");
     expect(report).toContain("report must be self-sufficient");
     expect(report).toContain("Stop and report an invalid\nupstream artifact");
     expect(report).not.toContain("generated Solidity PoCs");

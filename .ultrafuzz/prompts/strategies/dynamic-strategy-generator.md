@@ -215,14 +215,25 @@ Write generated-test manifest details to:
 
 {{artifact_dir}}/generated-tests.json
 
-Use the exact `ultrafuzz.generated-tests.v2` manifest shape: top-level
-`schema_version`, current `run_id`, current `node_id`, and `generated_tests`.
-Each generated-test row must contain `path` with the
-`generated-tests/<file>` prefix and may contain only `size_bytes`, `sha256`,
-`language`, `framework`, `description`, and the documented closed `provenance`
-fields. Keep strategy IDs, destination intent, and validation status in
+Use the exact `ultrafuzz.generated-tests.v3` manifest shape: top-level
+`schema_version`, current `run_id`, current `node_id`, one required root-level
+`framework`, `generated_tests`, and `support_files`. `framework` must match
+`^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$`, identify the one checked-in native
+framework used by the whole atomic bundle, and remain present when both arrays
+are empty. Never mix frameworks in one bundle or put `framework` on an
+individual entry. Put independently runnable tests in `generated_tests` and
+any imported helpers, mocks, fixtures, scripts, or data dependencies in
+`support_files`; never list a non-runnable support file as a generated test.
+Every row in either array must contain `path` with the
+`generated-tests/<file>` prefix, exact positive `size_bytes`, and exact lowercase
+`sha256`; it may otherwise contain only `language`, `description`, and the
+documented closed `provenance` fields. Keep strategy IDs, destination
+intent, and validation status in
 `selected-strategies.json` and `provenance.json`; they are not generated-test
-manifest fields. Use an empty `generated_tests` array when no file was produced.
+manifest fields. Keep paths unique across both arrays, and never emit support
+files without at least one runnable generated test. No file path may be the
+slash-delimited prefix of another path. Use both arrays empty when no runnable
+test was produced, while retaining the required bundle framework.
 
 Write findings to {{output_findings_path}}. Use an empty JSON array when no
 finding is confirmed or no generated strategy is actionable. Each finding must

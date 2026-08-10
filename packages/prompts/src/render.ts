@@ -310,6 +310,18 @@ function appendOutputContract(rendered: string, input: PromptRenderInput, curren
   }
 
   const schemaDirectory = taskSchemaDirectory(input);
+  const generatedTestsOutput = outputs.find((output) => output.contract === "ultrafuzz/generated-tests@3");
+  const generatedTestsGuidance =
+    generatedTestsOutput === undefined
+      ? ""
+      : renderOutputContractTemplate("generated-tests.mdx", {
+          strategy_attempt_test_dir: markdownCodeSpan(strategyAttemptTestDirectory(input)),
+          generated_tests_dir: markdownCodeSpan(path.join(input.node.artifactDir, "generated-tests")),
+          generated_tests_manifest_path: markdownCodeSpan(path.join(input.node.artifactDir, generatedTestsOutput.path)),
+          generated_tests_schema_version: markdownCodeSpan("ultrafuzz.generated-tests.v3"),
+          run_id: markdownCodeSpan(input.run.id),
+          logical_node_id: markdownCodeSpan(input.node.logicalId)
+        });
   const schemaGuidance = outputs.some((output) => output.schemaFile !== undefined)
     ? `Where an entry above names a schema to validate against, that file is an orchestrator-supplied JSON Schema under ${markdownCodeSpan(schemaDirectory)}. Read it before authoring the artifact. It is the authority on field names, types, and required fields; prefer it over any example when they disagree.\n\n`
     : "";
@@ -317,18 +329,13 @@ function appendOutputContract(rendered: string, input: PromptRenderInput, curren
     schema_guidance: schemaGuidance,
     artifact_contracts: outputs
       .map((output) => {
-        const contextualEmptyExample =
-          output.contract === "ultrafuzz/generated-tests@2"
-            ? JSON.stringify({
-                schema_version: "ultrafuzz.generated-tests.v2",
-                run_id: input.run.id,
-                node_id: input.node.logicalId,
-                generated_tests: []
-              })
-            : output.validEmptyExample;
-        const validEmptyExample = contextualEmptyExample === "" ? "<empty file>" : contextualEmptyExample;
+        const validEmptyExample = output.validEmptyExample === "" ? "<empty file>" : output.validEmptyExample;
         const empty =
-          validEmptyExample === undefined ? "Empty output is not valid." : `Valid empty form: \`${validEmptyExample}\``;
+          output.contract === "ultrafuzz/generated-tests@3"
+            ? "Valid empty bundle: `generated_tests` and `support_files` are both `[]`; the exact checked-in native bundle `framework` remains required."
+            : validEmptyExample === undefined
+              ? "Empty output is not valid."
+              : `Valid empty form: \`${validEmptyExample}\``;
         return [
           `- Path: \`${path.join(input.node.artifactDir, output.path)}\`${output.primary ? " (primary)" : ""}`,
           `  Contract: \`${output.contract}\``,
@@ -350,7 +357,7 @@ function appendOutputContract(rendered: string, input: PromptRenderInput, curren
       .join("\n")
   });
 
-  return `${rendered.trimEnd()}\n\n${contract.trimEnd()}\n`;
+  return `${rendered.trimEnd()}\n\n${generatedTestsGuidance === "" ? "" : `${generatedTestsGuidance.trimEnd()}\n\n`}${contract.trimEnd()}\n`;
 }
 
 function validationCommand(schemaPath: string, artifactPath: string): string {
@@ -803,6 +810,10 @@ function taskSchemaDirectory(input: PromptRenderInput): string {
   return path.join(input.node.workspacePath, ".ultrafuzz", "schemas");
 }
 
+function strategyAttemptTestDirectory(input: PromptRenderInput): string {
+  return path.join(input.node.workspacePath, "test", "foundry", input.node.logicalId);
+}
+
 function buildVariableContext(input: PromptRenderInput): Record<string, string> {
   return {
     repo_path: input.node.repoPath,
@@ -825,7 +836,7 @@ function buildVariableContext(input: PromptRenderInput): Record<string, string> 
     invariant_property_priorities: input.resolvedConfig?.invariantPropertyPriorities?.join(", ") ?? "",
     invariant_testing_smoke_timeout: String(input.resolvedConfig?.invariantTestingSmokeTimeout ?? ""),
     invariant_testing_fuzzer_timeout: String(input.resolvedConfig?.invariantTestingFuzzerTimeout ?? ""),
-    strategy_attempt_test_dir: path.join(input.node.workspacePath, "test", "foundry", input.node.logicalId),
+    strategy_attempt_test_dir: strategyAttemptTestDirectory(input),
     ...Object.fromEntries(Object.entries(input.variables ?? {}).map(([key, value]) => [key, String(value)]))
   };
 }

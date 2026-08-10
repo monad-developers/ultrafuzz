@@ -5357,12 +5357,9 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
     workflowSource,
     /function finalizeAndVerifyArtifacts[\s\S]*?prepareArtifactMirror\(task, \{[\s\S]*?pinnedSubmodules: "verify"/u
   );
-  assert.match(workflowSource, /materializeGeneratedTestCompanions\(task, capturedOutputs\)/);
-  assert.match(workflowSource, /INVARIANT_TEST_ROOT_NAMES\.flatMap\(\(testRoot\) => \[/);
-  assert.match(workflowSource, /path\.resolve\(workspaceRoot, testRoot, "foundry", workspaceRelativePath\)/);
-  assert.match(
+  assert.doesNotMatch(
     workflowSource,
-    /nodeIds\.map\(\(nodeId\) => path\.resolve\(workspaceRoot, testRoot, "foundry", nodeId, workspaceRelativePath\)\)/
+    /materializeGeneratedTestCompanion|const workspaceRelativePath = relativePath\.slice/
   );
   assert.match(workflowSource, /generatedTestNodeIds\(task\)/);
   assert.doesNotMatch(workflowSource, /typeof entry === "string" \? \{ path: entry \}/u);

@@ -1900,7 +1900,7 @@ test("#212 retry cleanup resets generated tests under the repository's plural te
       "contract CryticTester { /* recon */ }\n",
       "utf8"
     );
-    handlers.outputs = [{ path: "generated-tests/CryticTester.sol", contract: "ultrafuzz/generated-tests@2" }];
+    handlers.outputs = [{ path: "generated-tests/CryticTester.sol", contract: "ultrafuzz/generated-tests@3" }];
 
     const resetGeneratedTestRoots: string[] = [];
     const helpers = loadWorkflowHelpers([...RETRY_HELPERS], state, {

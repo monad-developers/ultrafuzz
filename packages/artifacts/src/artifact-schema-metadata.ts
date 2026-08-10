@@ -55,7 +55,14 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "ultrafuzz/aggregation-manifest@1",
     "aggregationManifestJsonSchema",
     "aggregationManifestSchema",
-    ["aggregation-destination-path-uniqueness", "aggregation-source-entry-uniqueness", "aggregation-count-coupling"]
+    [
+      "aggregation-destination-path-uniqueness",
+      "aggregation-source-entry-uniqueness",
+      "aggregation-source-bundle-reconciliation",
+      "aggregation-resource-bounds",
+      "aggregation-count-coupling",
+      "aggregation-authenticated-source-destination-reconciliation"
+    ]
   ),
   "analysis-bundle.schema.json": runtime("analysisBundleManifestJsonSchema", "analysisBundleManifestSchema", [
     "analysis-bundle-path-order",
@@ -213,10 +220,16 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "findings-id-uniqueness"
   ]),
   "generated-tests.schema.json": artifact(
-    "ultrafuzz/generated-tests@2",
+    "ultrafuzz/generated-tests@3",
     "generatedTestsJsonSchema",
     "generatedTestManifestSchema",
-    ["generated-test-path-uniqueness", "generated-test-current-identity", "generated-test-path-exists"]
+    [
+      "generated-test-bundle-resource-bounds",
+      "generated-test-bundle-path-uniqueness",
+      "generated-test-support-requires-test",
+      "generated-test-current-identity",
+      "generated-test-file-integrity"
+    ]
   ),
   "harness-repairs.schema.json": artifact(
     "ultrafuzz/harness-repairs@1",

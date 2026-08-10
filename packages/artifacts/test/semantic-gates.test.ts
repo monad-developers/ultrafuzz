@@ -11,6 +11,7 @@ import {
   SEMANTIC_GATE_SCOPES,
   artifactContractDefinition,
   executeOfflineSchemaSemanticGates,
+  executeSchemaSemanticGates,
   executeSemanticGate,
   semanticGateRegistration,
   type SemanticGateContext,
@@ -183,18 +184,18 @@ const fixtures = {
       copied_generated_tests: 1,
       source_support_files: 2,
       copied_support_files: 1,
+      source_bundles: [{ generated_test_count: 2, support_file_count: 2 }],
       files: [{}],
-      support_files: [{}],
-      skipped_files: [{ kind: "generated-test" }, { kind: "support-file" }]
+      support_files: [{}]
     },
     negative: {
       source_generated_tests: 3,
       copied_generated_tests: 1,
       source_support_files: 2,
       copied_support_files: 1,
+      source_bundles: [{ generated_test_count: 2, support_file_count: 2 }],
       files: [{}],
-      support_files: [{}],
-      skipped_files: [{ kind: "generated-test" }, { kind: "support-file" }]
+      support_files: [{}]
     }
   },
   "aggregation-destination-path-uniqueness": {
@@ -211,10 +212,9 @@ const fixtures = {
     positive: {
       files: [
         {
-          strategy: "a",
-          node_id: "node-a",
-          attempt_index: 0,
-          source_manifest_path: "generated-tests.json",
+          source_attempt_id: "attempt-a",
+          source_manifest_relative_path: "generated-tests.json",
+          source_manifest_sha256: "a".repeat(64),
           source_relative_path: "generated-tests/a.t.sol"
         }
       ],
@@ -224,10 +224,9 @@ const fixtures = {
     negative: {
       files: [
         {
-          strategy: "a",
-          node_id: "node-a",
-          attempt_index: 0,
-          source_manifest_path: "generated-tests.json",
+          source_attempt_id: "attempt-a",
+          source_manifest_relative_path: "generated-tests.json",
+          source_manifest_sha256: "a".repeat(64),
           source_relative_path: "generated-tests/a.t.sol"
         }
       ],
@@ -235,13 +234,86 @@ const fixtures = {
       skipped_files: [
         {
           kind: "generated-test",
-          strategy: "a",
-          node_id: "node-a",
-          attempt_index: 0,
-          source_manifest_path: "generated-tests.json",
+          source_attempt_id: "attempt-a",
+          source_manifest_relative_path: "generated-tests.json",
+          source_manifest_sha256: "a".repeat(64),
           source_relative_path: "generated-tests/a.t.sol"
         }
       ]
+    }
+  },
+  "aggregation-source-bundle-reconciliation": {
+    positive: {
+      source_bundles: [
+        {
+          strategy: "strategy-a",
+          node_id: "node-a",
+          source_attempt_id: "attempt-a",
+          attempt_index: 0,
+          source_manifest_path: "/artifacts/attempt-a/generated-tests.json",
+          source_manifest_relative_path: "generated-tests.json",
+          source_manifest_sha256: "a".repeat(64),
+          generated_test_count: 1,
+          support_file_count: 0,
+          disposition: "copied"
+        }
+      ],
+      files: [
+        {
+          strategy: "strategy-a",
+          node_id: "node-a",
+          source_attempt_id: "attempt-a",
+          attempt_index: 0,
+          source_manifest_path: "/artifacts/attempt-a/generated-tests.json",
+          source_manifest_relative_path: "generated-tests.json",
+          source_manifest_sha256: "a".repeat(64)
+        }
+      ],
+      support_files: [],
+      skipped_files: []
+    },
+    negative: {
+      source_bundles: [
+        {
+          strategy: "strategy-a",
+          node_id: "node-a",
+          source_attempt_id: "attempt-a",
+          attempt_index: 0,
+          source_manifest_path: "/artifacts/attempt-a/generated-tests.json",
+          source_manifest_relative_path: "generated-tests.json",
+          source_manifest_sha256: "a".repeat(64),
+          generated_test_count: 1,
+          support_file_count: 0,
+          disposition: "skipped"
+        }
+      ],
+      files: [
+        {
+          strategy: "strategy-a",
+          node_id: "node-a",
+          source_attempt_id: "attempt-a",
+          attempt_index: 0,
+          source_manifest_path: "/artifacts/attempt-a/generated-tests.json",
+          source_manifest_relative_path: "generated-tests.json",
+          source_manifest_sha256: "a".repeat(64)
+        }
+      ],
+      support_files: [],
+      skipped_files: []
+    }
+  },
+  "aggregation-resource-bounds": {
+    positive: {
+      source_bundles: [{ generated_test_count: 1, support_file_count: 0 }],
+      files: [{ size_bytes: 1 }],
+      support_files: [],
+      skipped_files: []
+    },
+    negative: {
+      source_bundles: [{ generated_test_count: 1_024, support_file_count: 1 }],
+      files: [],
+      support_files: [],
+      skipped_files: []
     }
   },
   "analysis-bundle-accounting-reconciliation": {
@@ -563,9 +635,20 @@ const fixtures = {
       }
     ]
   },
-  "generated-test-path-uniqueness": {
-    positive: { generated_tests: [{ path: "a" }] },
-    negative: { generated_tests: [{ path: "a" }, { path: "a" }] }
+  "generated-test-bundle-path-uniqueness": {
+    positive: { generated_tests: [{ path: "a" }], support_files: [{ path: "b" }] },
+    negative: { generated_tests: [{ path: "a" }], support_files: [{ path: "a/b" }] }
+  },
+  "generated-test-bundle-resource-bounds": {
+    positive: { generated_tests: [{ size_bytes: 1 }], support_files: [] },
+    negative: {
+      generated_tests: Array.from({ length: 5 }, () => ({ size_bytes: 16 * 1024 * 1024 })),
+      support_files: []
+    }
+  },
+  "generated-test-support-requires-test": {
+    positive: { generated_tests: [{ path: "a" }], support_files: [{ path: "b" }] },
+    negative: { generated_tests: [], support_files: [{ path: "b" }] }
   },
   "harness-repair-failure-id-uniqueness": {
     positive: [{ failure_id: "a" }],
@@ -1074,14 +1157,663 @@ test("offline schema execution never claims contextual gates passed", () => {
   }
 });
 
+test("generated-test filesystem gate rejects cumulative actual bytes before reading companions", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-test-bounds-"));
+  try {
+    fs.mkdirSync(path.join(root, "generated-tests"));
+    const generated_tests = Array.from({ length: 5 }, (_, index) => {
+      const relativePath = `generated-tests/Test-${index}.sol`;
+      const absolutePath = path.join(root, relativePath);
+      fs.writeFileSync(absolutePath, "x", "utf8");
+      fs.truncateSync(absolutePath, 16 * 1024 * 1024);
+      return { path: relativePath, size_bytes: 1, sha256: "0".repeat(64) };
+    });
+    const readSync = t.mock.method(fs, "readSync", () => {
+      throw new Error("companion content was read before cumulative resource preflight completed");
+    });
+
+    const result = executeSemanticGate("generated-test-file-integrity", {
+      document: { generated_tests, support_files: [] },
+      context: { filesystem: { rootDirectory: root } }
+    });
+    assert.equal(result.status, "failed");
+    assert.ok(
+      result.status === "failed" &&
+        result.issues.some((entry) => /67108864-byte combined bundle limit/u.test(entry.message))
+    );
+    assert.equal(readSync.mock.callCount(), 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("generated-test filesystem gate rejects hard-linked companions", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-test-hardlinks-"));
+  try {
+    const generatedTestsDir = path.join(root, "generated-tests");
+    fs.mkdirSync(generatedTestsDir);
+    const testBytes = Buffer.from("contract Replay {}\n", "utf8");
+    const supportBytes = Buffer.from("library InvariantFixture {}\n", "utf8");
+    const testPath = path.join(generatedTestsDir, "Replay.t.sol");
+    const supportPath = path.join(generatedTestsDir, "InvariantFixture.sol");
+    fs.writeFileSync(testPath, testBytes);
+    fs.writeFileSync(supportPath, supportBytes);
+    fs.linkSync(testPath, path.join(root, "Replay-alias.t.sol"));
+    fs.linkSync(supportPath, path.join(root, "InvariantFixture-alias.sol"));
+
+    const result = executeSemanticGate("generated-test-file-integrity", {
+      document: {
+        schema_version: "ultrafuzz.generated-tests.v3",
+        run_id: "run-a",
+        node_id: "strategy-a",
+        framework: "foundry",
+        generated_tests: [
+          {
+            path: "generated-tests/Replay.t.sol",
+            size_bytes: testBytes.length,
+            sha256: crypto.createHash("sha256").update(testBytes).digest("hex")
+          }
+        ],
+        support_files: [
+          {
+            path: "generated-tests/InvariantFixture.sol",
+            size_bytes: supportBytes.length,
+            sha256: crypto.createHash("sha256").update(supportBytes).digest("hex")
+          }
+        ]
+      },
+      context: { filesystem: { rootDirectory: root } }
+    });
+
+    assert.equal(result.status, "failed");
+    assert.deepEqual(
+      result.status === "failed"
+        ? result.issues.map((entry) => ({ path: entry.path, hardLinked: /hard-linked/u.test(entry.message) }))
+        : [],
+      [
+        { path: "$.generated_tests[0].path", hardLinked: true },
+        { path: "$.support_files[0].path", hardLinked: true }
+      ]
+    );
+    assert.equal(fs.lstatSync(testPath).nlink, 2);
+    assert.equal(fs.lstatSync(supportPath).nlink, 2);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("aggregation schema gates exactly reconcile authenticated atomic bundles and destinations", () => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-aggregation-gates-"));
+  const workspaceRoot = path.join(temporary, "workspace");
+  fs.mkdirSync(workspaceRoot);
+
+  type AggregationRow = Readonly<Record<string, unknown>>;
+  type TrustedAggregation = NonNullable<SemanticGateContext["aggregation"]>;
+  type TrustedBundle = TrustedAggregation["sourceBundles"][number];
+
+  try {
+    const generatedBytes = Buffer.from("contract GeneratedTest {}\n", "utf8");
+    const supportBytes = Buffer.from("library GeneratedSupport {}\n", "utf8");
+    const generatedDigest = crypto.createHash("sha256").update(generatedBytes).digest("hex");
+    const supportDigest = crypto.createHash("sha256").update(supportBytes).digest("hex");
+    const copiedManifestDigest = "a".repeat(64);
+    const emptyManifestDigest = "b".repeat(64);
+    const copiedManifestPath = path.join(temporary, "sources", "attempt-a", "generated-tests.json");
+    const emptyManifestPath = path.join(temporary, "sources", "attempt-empty", "generated-tests.json");
+    const generatedSourcePath = path.join(temporary, "sources", "attempt-a", "generated-tests", "Test.t.sol");
+    const supportSourcePath = path.join(temporary, "sources", "attempt-a", "generated-tests", "Support.sol");
+    const generatedDestinationPath = path.join(workspaceRoot, "Test.t.sol");
+    const supportDestinationPath = path.join(workspaceRoot, "Support.sol");
+    fs.writeFileSync(generatedDestinationPath, generatedBytes);
+    fs.writeFileSync(supportDestinationPath, supportBytes);
+
+    const generatedEntry = {
+      kind: "generated-test" as const,
+      sourceArtifactPath: generatedSourcePath,
+      sourceRelativePath: "generated-tests/Test.t.sol",
+      sizeBytes: generatedBytes.length,
+      sha256: generatedDigest,
+      bytes: generatedBytes,
+      language: "solidity",
+      description: "Generated invariant test",
+      provenance: { producer_node_id: "strategy-a", run_id: "run-a" }
+    };
+    const supportEntry = {
+      kind: "support-file" as const,
+      sourceArtifactPath: supportSourcePath,
+      sourceRelativePath: "generated-tests/Support.sol",
+      sizeBytes: supportBytes.length,
+      sha256: supportDigest,
+      bytes: supportBytes,
+      language: "solidity",
+      description: "Generated invariant support",
+      provenance: { producer_node_id: "strategy-a", run_id: "run-a" }
+    };
+    const copiedTrustedBundle: TrustedBundle = {
+      strategy: "strategy-a",
+      nodeId: "strategy-a",
+      sourceAttemptId: "attempt-a",
+      attemptIndex: 0,
+      sourceManifestPath: copiedManifestPath,
+      sourceManifestRelativePath: "generated-tests.json",
+      sourceManifestSha256: copiedManifestDigest,
+      sourceRunId: "run-a",
+      framework: "foundry",
+      entries: [generatedEntry, supportEntry]
+    };
+    const emptyTrustedBundle: TrustedBundle = {
+      strategy: "strategy-empty",
+      nodeId: "strategy-empty",
+      sourceAttemptId: "attempt-empty",
+      attemptIndex: 1,
+      sourceManifestPath: emptyManifestPath,
+      sourceManifestRelativePath: "generated-tests.json",
+      sourceManifestSha256: emptyManifestDigest,
+      sourceRunId: "run-a",
+      framework: "echidna",
+      entries: []
+    };
+    const contextFor = (
+      sourceBundles: readonly TrustedBundle[] = [copiedTrustedBundle, emptyTrustedBundle]
+    ): SemanticGateContext => ({ aggregation: { workspaceRoot, sourceBundles } });
+
+    const copiedBundleSummary: AggregationRow = {
+      strategy: "strategy-a",
+      node_id: "strategy-a",
+      source_attempt_id: "attempt-a",
+      attempt_index: 0,
+      source_manifest_path: copiedManifestPath,
+      source_manifest_relative_path: "generated-tests.json",
+      source_manifest_sha256: copiedManifestDigest,
+      source_run_id: "run-a",
+      framework: "foundry",
+      generated_test_count: 1,
+      support_file_count: 1,
+      disposition: "copied"
+    };
+    const emptyBundleSummary: AggregationRow = {
+      strategy: "strategy-empty",
+      node_id: "strategy-empty",
+      source_attempt_id: "attempt-empty",
+      attempt_index: 1,
+      source_manifest_path: emptyManifestPath,
+      source_manifest_relative_path: "generated-tests.json",
+      source_manifest_sha256: emptyManifestDigest,
+      source_run_id: "run-a",
+      framework: "echidna",
+      generated_test_count: 0,
+      support_file_count: 0,
+      disposition: "empty"
+    };
+    const generatedCopiedRow: AggregationRow = {
+      strategy: "strategy-a",
+      node_id: "strategy-a",
+      source_attempt_id: "attempt-a",
+      attempt_index: 0,
+      source_manifest_path: copiedManifestPath,
+      source_manifest_relative_path: "generated-tests.json",
+      source_manifest_sha256: copiedManifestDigest,
+      source_artifact_path: generatedSourcePath,
+      source_relative_path: "generated-tests/Test.t.sol",
+      destination_path: generatedDestinationPath,
+      destination_relative_path: "Test.t.sol",
+      size_bytes: generatedBytes.length,
+      sha256: generatedDigest,
+      language: "solidity",
+      description: "Generated invariant test",
+      provenance: { producer_node_id: "strategy-a", run_id: "run-a" }
+    };
+    const supportCopiedRow: AggregationRow = {
+      strategy: "strategy-a",
+      node_id: "strategy-a",
+      source_attempt_id: "attempt-a",
+      attempt_index: 0,
+      source_manifest_path: copiedManifestPath,
+      source_manifest_relative_path: "generated-tests.json",
+      source_manifest_sha256: copiedManifestDigest,
+      source_artifact_path: supportSourcePath,
+      source_relative_path: "generated-tests/Support.sol",
+      destination_path: supportDestinationPath,
+      destination_relative_path: "Support.sol",
+      size_bytes: supportBytes.length,
+      sha256: supportDigest,
+      language: "solidity",
+      description: "Generated invariant support",
+      provenance: { producer_node_id: "strategy-a", run_id: "run-a" }
+    };
+
+    const buildDocument = (
+      options: {
+        sourceBundles?: readonly AggregationRow[];
+        files?: readonly AggregationRow[];
+        supportFiles?: readonly AggregationRow[];
+        skippedFiles?: readonly AggregationRow[];
+      } = {}
+    ): unknown => {
+      const sourceBundles = options.sourceBundles ?? [copiedBundleSummary, emptyBundleSummary];
+      const files = options.files ?? [generatedCopiedRow];
+      const supportFiles = options.supportFiles ?? [supportCopiedRow];
+      const skippedFiles = options.skippedFiles ?? [];
+      const declaredCount = (field: "generated_test_count" | "support_file_count"): number =>
+        sourceBundles.reduce((total, bundle) => {
+          const count = bundle[field];
+          return total + (typeof count === "number" ? count : 0);
+        }, 0);
+      return {
+        schema_version: "ultrafuzz.aggregation-manifest.v1",
+        source_generated_tests: declaredCount("generated_test_count"),
+        copied_generated_tests: files.length,
+        source_support_files: declaredCount("support_file_count"),
+        copied_support_files: supportFiles.length,
+        source_bundles: sourceBundles,
+        files,
+        support_files: supportFiles,
+        skipped_files: skippedFiles
+      };
+    };
+    const execute = (document: unknown, context: SemanticGateContext = contextFor()) =>
+      executeSchemaSemanticGates("aggregation-manifest.schema.json", { document, context });
+    const assertPasses = (label: string, document: unknown, context: SemanticGateContext = contextFor()): void => {
+      const failures = execute(document, context)
+        .filter((result) => result.status !== "passed")
+        .map((result) => ({
+          gate: result.gate,
+          status: result.status,
+          detail:
+            result.status === "failed"
+              ? result.issues.map((entry) => entry.message)
+              : result.status === "requires-context"
+                ? result.missingContext
+                : []
+        }));
+      assert.deepEqual(failures, [], label);
+    };
+    const assertFails = (
+      label: string,
+      document: unknown,
+      gate: SemanticGateName,
+      message: RegExp,
+      context: SemanticGateContext = contextFor()
+    ): void => {
+      const result = execute(document, context).find((entry) => entry.gate === gate);
+      assert.equal(result?.status, "failed", `${label}: ${gate}`);
+      assert.match(
+        result?.status === "failed" ? result.issues.map((entry) => entry.message).join("\n") : "",
+        message,
+        label
+      );
+    };
+    const asSkipped = (row: AggregationRow, kind: "generated-test" | "support-file", reason: string) => ({
+      ...Object.fromEntries(
+        Object.entries(row).filter(([key]) => key !== "destination_path" && key !== "destination_relative_path")
+      ),
+      kind,
+      reason
+    });
+
+    const exactDocument = buildDocument();
+    assertPasses("an exact copied bundle and exact authenticated empty bundle pass every schema gate", exactDocument);
+
+    const skippedReason = "duplicate atomic bundle";
+    const skippedBundleSummary = { ...copiedBundleSummary, disposition: "skipped", reason: skippedReason };
+    assertPasses(
+      "an entire authenticated bundle may be skipped atomically",
+      buildDocument({
+        sourceBundles: [skippedBundleSummary, emptyBundleSummary],
+        files: [],
+        supportFiles: [],
+        skippedFiles: [
+          asSkipped(generatedCopiedRow, "generated-test", skippedReason),
+          asSkipped(supportCopiedRow, "support-file", skippedReason)
+        ]
+      })
+    );
+
+    const fabricatedBundleSummary: AggregationRow = {
+      ...emptyBundleSummary,
+      strategy: "strategy-fabricated",
+      node_id: "strategy-fabricated",
+      source_attempt_id: "attempt-fabricated",
+      source_manifest_path: path.join(temporary, "sources", "attempt-fabricated", "generated-tests.json"),
+      source_manifest_sha256: "c".repeat(64),
+      source_run_id: "run-fabricated",
+      framework: "medusa"
+    };
+    const bundleCases: readonly {
+      label: string;
+      document: unknown;
+      gate: SemanticGateName;
+      message: RegExp;
+    }[] = [
+      {
+        label: "omitted authenticated empty source bundle",
+        document: buildDocument({ sourceBundles: [copiedBundleSummary] }),
+        gate: "aggregation-authenticated-source-destination-reconciliation",
+        message: /omits authenticated source bundle/u
+      },
+      {
+        label: "fabricated source bundle",
+        document: buildDocument({
+          sourceBundles: [copiedBundleSummary, emptyBundleSummary, fabricatedBundleSummary]
+        }),
+        gate: "aggregation-authenticated-source-destination-reconciliation",
+        message: /fabricates source bundle/u
+      },
+      {
+        label: "duplicate source bundle",
+        document: buildDocument({
+          sourceBundles: [copiedBundleSummary, emptyBundleSummary, emptyBundleSummary]
+        }),
+        gate: "aggregation-authenticated-source-destination-reconciliation",
+        message: /repeats source bundle/u
+      },
+      {
+        label: "altered bundle framework",
+        document: buildDocument({
+          sourceBundles: [{ ...copiedBundleSummary, framework: "hardhat" }, emptyBundleSummary]
+        }),
+        gate: "aggregation-authenticated-source-destination-reconciliation",
+        message: /bundle attribution does not match authority/u
+      },
+      {
+        label: "empty bundle falsely marked copied",
+        document: buildDocument({
+          sourceBundles: [copiedBundleSummary, { ...emptyBundleSummary, disposition: "copied" }]
+        }),
+        gate: "aggregation-source-bundle-reconciliation",
+        message: /cannot describe an empty bundle/u
+      }
+    ];
+    for (const fixture of bundleCases) {
+      assertFails(fixture.label, fixture.document, fixture.gate, fixture.message);
+    }
+
+    assertFails(
+      "duplicate trusted source bundle",
+      exactDocument,
+      "aggregation-authenticated-source-destination-reconciliation",
+      /Trusted aggregation context repeats source bundle/u,
+      contextFor([copiedTrustedBundle, emptyTrustedBundle, emptyTrustedBundle])
+    );
+    const duplicatedTrustedEntryBundle: TrustedBundle = {
+      ...copiedTrustedBundle,
+      entries: [generatedEntry, supportEntry, generatedEntry]
+    };
+    assertFails(
+      "duplicate trusted source entry",
+      exactDocument,
+      "aggregation-authenticated-source-destination-reconciliation",
+      /Trusted aggregation context repeats source entry/u,
+      contextFor([duplicatedTrustedEntryBundle, emptyTrustedBundle])
+    );
+
+    const fabricatedDestinationPath = path.join(workspaceRoot, "Fabricated.t.sol");
+    const duplicateDestinationPath = path.join(workspaceRoot, "Duplicate.t.sol");
+    fs.writeFileSync(fabricatedDestinationPath, generatedBytes);
+    fs.writeFileSync(duplicateDestinationPath, generatedBytes);
+    const fabricatedEntryRow: AggregationRow = {
+      ...generatedCopiedRow,
+      source_artifact_path: path.join(temporary, "sources", "attempt-a", "generated-tests", "Fabricated.t.sol"),
+      source_relative_path: "generated-tests/Fabricated.t.sol",
+      destination_path: fabricatedDestinationPath,
+      destination_relative_path: "Fabricated.t.sol"
+    };
+    const duplicateEntryRow: AggregationRow = {
+      ...generatedCopiedRow,
+      destination_path: duplicateDestinationPath,
+      destination_relative_path: "Duplicate.t.sol"
+    };
+    const entryCases: readonly { label: string; document: unknown; message: RegExp }[] = [
+      {
+        label: "omitted authenticated source entry",
+        document: buildDocument({ supportFiles: [] }),
+        message: /omits authenticated source entry/u
+      },
+      {
+        label: "fabricated source entry",
+        document: buildDocument({ files: [generatedCopiedRow, fabricatedEntryRow] }),
+        message: /fabricates source entry/u
+      },
+      {
+        label: "duplicate source entry",
+        document: buildDocument({ files: [generatedCopiedRow, duplicateEntryRow] }),
+        message: /duplicates authenticated source entry/u
+      },
+      {
+        label: "altered typed kind",
+        document: buildDocument({ files: [generatedCopiedRow, supportCopiedRow], supportFiles: [] }),
+        message: /wrong typed kind/u
+      },
+      {
+        label: "altered language metadata",
+        document: buildDocument({ files: [{ ...generatedCopiedRow, language: "vyper" }] }),
+        message: /metadata does not match authority/u
+      },
+      {
+        label: "altered description metadata",
+        document: buildDocument({ files: [{ ...generatedCopiedRow, description: "Altered description" }] }),
+        message: /metadata does not match authority/u
+      },
+      {
+        label: "altered provenance metadata",
+        document: buildDocument({
+          files: [
+            {
+              ...generatedCopiedRow,
+              provenance: { producer_node_id: "strategy-fabricated", run_id: "run-a" }
+            }
+          ]
+        }),
+        message: /metadata does not match authority/u
+      },
+      {
+        label: "altered companion digest",
+        document: buildDocument({ files: [{ ...generatedCopiedRow, sha256: "f".repeat(64) }] }),
+        message: /metadata does not match authority/u
+      },
+      {
+        label: "altered companion size",
+        document: buildDocument({ files: [{ ...generatedCopiedRow, size_bytes: generatedBytes.length + 1 }] }),
+        message: /metadata does not match authority/u
+      }
+    ];
+    for (const fixture of entryCases) {
+      assertFails(
+        fixture.label,
+        fixture.document,
+        "aggregation-authenticated-source-destination-reconciliation",
+        fixture.message
+      );
+    }
+
+    const alteredManifestDigest = "d".repeat(64);
+    assertFails(
+      "altered source-manifest digest throughout the output",
+      buildDocument({
+        sourceBundles: [{ ...copiedBundleSummary, source_manifest_sha256: alteredManifestDigest }, emptyBundleSummary],
+        files: [{ ...generatedCopiedRow, source_manifest_sha256: alteredManifestDigest }],
+        supportFiles: [{ ...supportCopiedRow, source_manifest_sha256: alteredManifestDigest }]
+      }),
+      "aggregation-authenticated-source-destination-reconciliation",
+      /bundle attribution does not match authority/u
+    );
+
+    const partiallySkippedDocument = buildDocument({
+      sourceBundles: [skippedBundleSummary, emptyBundleSummary],
+      files: [generatedCopiedRow],
+      supportFiles: [],
+      skippedFiles: [asSkipped(supportCopiedRow, "support-file", skippedReason)]
+    });
+    const contextualPartialResult = execute(partiallySkippedDocument).find(
+      (entry) => entry.gate === "aggregation-authenticated-source-destination-reconciliation"
+    );
+    assert.equal(contextualPartialResult?.status, "passed", "partial case must otherwise match authenticated entries");
+    assertFails(
+      "copied-versus-skipped partial atomic bundle",
+      partiallySkippedDocument,
+      "aggregation-source-bundle-reconciliation",
+      /must skip every member and copy none/u
+    );
+
+    const mismatchSentinel = Buffer.from("do not mutate mismatch target\n", "utf8");
+    const mismatchTargetPath = path.join(workspaceRoot, "MismatchTarget.t.sol");
+    fs.writeFileSync(mismatchTargetPath, mismatchSentinel);
+    assertFails(
+      "destination absolute/relative path mismatch",
+      buildDocument({ files: [{ ...generatedCopiedRow, destination_path: mismatchTargetPath }] }),
+      "aggregation-authenticated-source-destination-reconciliation",
+      /must exactly resolve from destination_relative_path/u
+    );
+    assert.deepEqual(fs.readFileSync(mismatchTargetPath), mismatchSentinel);
+    assert.deepEqual(fs.readFileSync(generatedDestinationPath), generatedBytes);
+
+    const escapeSentinel = Buffer.from("do not mutate escaped target\n", "utf8");
+    const escapedTargetPath = path.join(temporary, "escaped-target.sol");
+    fs.writeFileSync(escapedTargetPath, escapeSentinel);
+    assertFails(
+      "destination path escape",
+      buildDocument({
+        files: [
+          {
+            ...generatedCopiedRow,
+            destination_path: escapedTargetPath,
+            destination_relative_path: "../escaped-target.sol"
+          }
+        ]
+      }),
+      "aggregation-authenticated-source-destination-reconciliation",
+      /must exactly resolve from destination_relative_path/u
+    );
+    assert.deepEqual(fs.readFileSync(escapedTargetPath), escapeSentinel);
+
+    const symlinkTargetPath = path.join(temporary, "symlink-target.sol");
+    const symlinkDestinationPath = path.join(workspaceRoot, "Symlink.t.sol");
+    fs.writeFileSync(symlinkTargetPath, generatedBytes);
+    fs.symlinkSync(symlinkTargetPath, symlinkDestinationPath);
+    const symlinkTargetBefore = fs.readFileSync(symlinkTargetPath);
+    const symlinkValueBefore = fs.readlinkSync(symlinkDestinationPath);
+    assertFails(
+      "symlinked destination",
+      buildDocument({
+        files: [
+          {
+            ...generatedCopiedRow,
+            destination_path: symlinkDestinationPath,
+            destination_relative_path: "Symlink.t.sol"
+          }
+        ]
+      }),
+      "aggregation-authenticated-source-destination-reconciliation",
+      /symlink/u
+    );
+    assert.equal(fs.lstatSync(symlinkDestinationPath).isSymbolicLink(), true);
+    assert.equal(fs.readlinkSync(symlinkDestinationPath), symlinkValueBefore);
+    assert.deepEqual(fs.readFileSync(symlinkTargetPath), symlinkTargetBefore);
+
+    const hardLinkTargetPath = path.join(temporary, "hard-link-target.sol");
+    const hardLinkDestinationPath = path.join(workspaceRoot, "HardLink.t.sol");
+    fs.writeFileSync(hardLinkTargetPath, generatedBytes);
+    fs.linkSync(hardLinkTargetPath, hardLinkDestinationPath);
+    const hardLinkBytesBefore = fs.readFileSync(hardLinkTargetPath);
+    const hardLinkInodeBefore = fs.lstatSync(hardLinkTargetPath).ino;
+    assertFails(
+      "hard-linked destination",
+      buildDocument({
+        files: [
+          {
+            ...generatedCopiedRow,
+            destination_path: hardLinkDestinationPath,
+            destination_relative_path: "HardLink.t.sol"
+          }
+        ]
+      }),
+      "aggregation-authenticated-source-destination-reconciliation",
+      /singly linked regular file/u
+    );
+    assert.equal(fs.lstatSync(hardLinkTargetPath).ino, hardLinkInodeBefore);
+    assert.equal(fs.lstatSync(hardLinkDestinationPath).ino, hardLinkInodeBefore);
+    assert.equal(fs.lstatSync(hardLinkTargetPath).nlink, 2);
+    assert.deepEqual(fs.readFileSync(hardLinkTargetPath), hardLinkBytesBefore);
+    assert.deepEqual(fs.readFileSync(hardLinkDestinationPath), hardLinkBytesBefore);
+
+    const driftDestinationPath = path.join(workspaceRoot, "Drift.t.sol");
+    const driftBytes = Buffer.alloc(generatedBytes.length, "x");
+    fs.writeFileSync(driftDestinationPath, driftBytes);
+    assertFails(
+      "destination byte drift",
+      buildDocument({
+        files: [
+          {
+            ...generatedCopiedRow,
+            destination_path: driftDestinationPath,
+            destination_relative_path: "Drift.t.sol"
+          }
+        ]
+      }),
+      "aggregation-authenticated-source-destination-reconciliation",
+      /destination bytes differ from the authenticated source snapshot/u
+    );
+    assert.deepEqual(fs.readFileSync(driftDestinationPath), driftBytes);
+
+    const driftedTrustedBundle: TrustedBundle = {
+      ...copiedTrustedBundle,
+      entries: [{ ...generatedEntry, bytes: driftBytes }, supportEntry]
+    };
+    assertFails(
+      "trusted source snapshot byte drift",
+      exactDocument,
+      "aggregation-authenticated-source-destination-reconciliation",
+      /Trusted aggregation source snapshot disagrees with declared bytes/u,
+      contextFor([driftedTrustedBundle, emptyTrustedBundle])
+    );
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
 test("every contextual registration executes real positive and negative checks", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-semantic-gates-"));
   try {
     fs.mkdirSync(path.join(root, "generated-tests"));
     fs.writeFileSync(path.join(root, "artifact.json"), "artifact\n");
     fs.writeFileSync(path.join(root, "generated-tests", "test.sol"), "test\n");
+    fs.writeFileSync(path.join(root, "generated-tests", "helper.sol"), "helper\n");
+    fs.writeFileSync(path.join(root, "generated-tests", "binary.dat"), Buffer.from([0xff]));
+    fs.writeFileSync(path.join(root, "copied.sol"), "test\n");
     const digest = crypto.createHash("sha256").update("artifact\n").digest("hex");
     const contentDigest = crypto.createHash("sha256").update("snapshot", "utf8").digest("hex");
+    const aggregationSourceBytes = Buffer.from("test\n", "utf8");
+    const aggregationSourceDigest = crypto.createHash("sha256").update(aggregationSourceBytes).digest("hex");
+    const aggregationManifestDigest = "a".repeat(64);
+    const aggregationBundleSummary = {
+      strategy: "strategy-a",
+      node_id: "strategy-a",
+      source_attempt_id: "attempt-a",
+      attempt_index: 0,
+      source_manifest_path: path.join(root, "source", "generated-tests.json"),
+      source_manifest_relative_path: "generated-tests.json",
+      source_manifest_sha256: aggregationManifestDigest,
+      source_run_id: "run-a",
+      framework: "foundry",
+      generated_test_count: 1,
+      support_file_count: 0,
+      disposition: "copied"
+    };
+    const aggregationCopiedRow = {
+      strategy: "strategy-a",
+      node_id: "strategy-a",
+      source_attempt_id: "attempt-a",
+      attempt_index: 0,
+      source_manifest_path: path.join(root, "source", "generated-tests.json"),
+      source_manifest_relative_path: "generated-tests.json",
+      source_manifest_sha256: aggregationManifestDigest,
+      source_artifact_path: path.join(root, "source", "generated-tests", "test.sol"),
+      source_relative_path: "generated-tests/test.sol",
+      destination_path: path.join(root, "copied.sol"),
+      destination_relative_path: "copied.sol",
+      size_bytes: aggregationSourceBytes.length,
+      sha256: aggregationSourceDigest
+    };
     const contextFixtures: Record<
       Exclude<SemanticGateName, keyof typeof fixtures>,
       { positive: unknown; negative: unknown; context: SemanticGateContext }
@@ -1115,6 +1847,48 @@ test("every contextual registration executes real positive and negative checks",
           ]
         },
         context: { analysisBundle: { manifest: { files: [] } } }
+      },
+      "aggregation-authenticated-source-destination-reconciliation": {
+        positive: {
+          source_bundles: [aggregationBundleSummary],
+          files: [aggregationCopiedRow],
+          support_files: [],
+          skipped_files: []
+        },
+        negative: {
+          source_bundles: [aggregationBundleSummary],
+          files: [{ ...aggregationCopiedRow, strategy: "fabricated-strategy" }],
+          support_files: [],
+          skipped_files: []
+        },
+        context: {
+          aggregation: {
+            workspaceRoot: root,
+            sourceBundles: [
+              {
+                strategy: "strategy-a",
+                nodeId: "strategy-a",
+                sourceAttemptId: "attempt-a",
+                attemptIndex: 0,
+                sourceManifestPath: path.join(root, "source", "generated-tests.json"),
+                sourceManifestRelativePath: "generated-tests.json",
+                sourceManifestSha256: aggregationManifestDigest,
+                sourceRunId: "run-a",
+                framework: "foundry",
+                entries: [
+                  {
+                    kind: "generated-test",
+                    sourceArtifactPath: path.join(root, "source", "generated-tests", "test.sol"),
+                    sourceRelativePath: "generated-tests/test.sol",
+                    sizeBytes: aggregationSourceBytes.length,
+                    sha256: aggregationSourceDigest,
+                    bytes: aggregationSourceBytes
+                  }
+                ]
+              }
+            ]
+          }
+        }
       },
       "artifact-manifest-file-digest": {
         positive: { files: [{ path: "artifact.json", sha256: digest, size_bytes: 9 }] },
@@ -1198,9 +1972,15 @@ test("every contextual registration executes real positive and negative checks",
         negative: { run_id: "run-foreign", node_id: "strategy-foreign" },
         context: { artifactIdentity: { runId: "run-current", nodeId: "strategy-current" } }
       },
-      "generated-test-path-exists": {
-        positive: { generated_tests: [{ path: "generated-tests/test.sol" }] },
-        negative: { generated_tests: [{ path: "generated-tests/missing.sol" }] },
+      "generated-test-file-integrity": {
+        positive: {
+          generated_tests: [{ path: "generated-tests/test.sol" }],
+          support_files: [{ path: "generated-tests/helper.sol", size_bytes: 7 }]
+        },
+        negative: {
+          generated_tests: [{ path: "generated-tests/test.sol" }],
+          support_files: [{ path: "generated-tests/binary.dat" }]
+        },
         context: { filesystem: { rootDirectory: root } }
       },
       "implemented-property-selection-join": {

@@ -1,8 +1,11 @@
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import YAML from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  loadBuiltInPromptAssets,
   PromptError,
   renderPrompt,
   validatePromptVariables,
@@ -72,7 +75,7 @@ function baseRenderInput(tmp: string): PromptRenderInput {
             },
             {
               path: "generated-tests.json",
-              contract: "ultrafuzz/generated-tests@2",
+              contract: "ultrafuzz/generated-tests@3",
               primary: false,
               description: "A manifest containing generated_tests.",
               schemaFile: "generated-tests.schema.json"
@@ -156,9 +159,171 @@ describe("prompt rendering", () => {
     }
     expect(result.renderedMarkdown).toContain("generated-tests.schema.json");
     expect(result.renderedMarkdown).toContain(
-      '{"schema_version":"ultrafuzz.generated-tests.v2","run_id":"run-1","node_id":"boundary-tests","generated_tests":[]}'
+      "Valid empty bundle: `generated_tests` and `support_files` are both `[]`; the exact checked-in native bundle `framework` remains required."
     );
+    expect(result.renderedMarkdown).not.toContain('"framework":"foundry"');
     expect(result.renderedMarkdown).not.toContain('"node_id":"<node-id>"');
+    expect(result.renderedMarkdown).toContain("## Generated-test Bundle Instructions");
+    expect(result.renderedMarkdown).toContain(
+      `Author runnable generated test source files under \`${path.join(input.node.workspacePath, "test", "foundry", "boundary-tests")}\``
+    );
+    expect(result.renderedMarkdown).toContain(
+      `mirror every declared bundle file under \`${path.join(input.node.artifactDir, "generated-tests")}\``
+    );
+    expect(result.renderedMarkdown).toContain(
+      `write the manifest to exactly \`${path.join(input.node.artifactDir, "generated-tests.json")}\``
+    );
+    expect(result.renderedMarkdown).toContain("`run_id` exactly `run-1`");
+    expect(result.renderedMarkdown).toContain("`node_id` exactly `boundary-tests`");
+    expect(result.renderedMarkdown).toContain("logical producer identity");
+    expect(result.renderedMarkdown).toContain("one required bundle-level `framework`");
+    expect(result.renderedMarkdown).toContain("remains required when both arrays are empty");
+    expect(result.renderedMarkdown).toContain("Never mix frameworks in one bundle");
+    expect(result.renderedMarkdown).not.toContain("optional fields are `language`, `framework`");
+  });
+
+  it("renders specialized generated-test instructions for every production producer", () => {
+    const topologyPath = fileURLToPath(new URL("../../../.ultrafuzz/topology.yml", import.meta.url));
+    const topology = YAML.parse(readFileSync(topologyPath, "utf8")) as {
+      nodes: Array<{
+        id: string;
+        prompt?: string;
+        depends_on?: string[];
+        outputs?: Array<{ path: string; contract: string; primary?: boolean }>;
+      }>;
+    };
+    const promptByPath = new Map(loadBuiltInPromptAssets().map((asset) => [asset.relativePath, asset.markdown]));
+    const root = path.join(os.tmpdir(), "ultrafuzz-production-generated-test-prompts");
+    const runArtifacts = path.join(root, "runs", "generated-test-render", "artifacts");
+    const logicalNodes = topology.nodes.map((node) => ({
+      id: node.id,
+      dependsOn: node.depends_on ?? [],
+      artifactDir: path.join(runArtifacts, node.id),
+      outputs: (node.outputs ?? []).map((output, index) => ({
+        path: output.path,
+        contract: output.contract,
+        primary: output.primary ?? index === 0,
+        description: `${output.contract} production output.`,
+        ...(output.contract === "ultrafuzz/generated-tests@3" ? { schemaFile: "generated-tests.schema.json" } : {})
+      }))
+    }));
+    const producers = topology.nodes.filter((node) =>
+      node.outputs?.some((output) => output.contract === "ultrafuzz/generated-tests@3")
+    );
+
+    expect(producers.length).toBeGreaterThan(0);
+    for (const producer of producers) {
+      const promptMarkdown = producer.prompt === undefined ? undefined : promptByPath.get(producer.prompt);
+      expect(promptMarkdown, producer.id).toBeDefined();
+      const artifactDir = path.join(runArtifacts, `${producer.id}-attempt-0`);
+      const workspacePath = path.join(root, "workspaces", `${producer.id}-attempt-0`);
+      const result = renderPrompt({
+        prompt: promptMarkdown!,
+        graph: { logicalNodes },
+        node: {
+          logicalId: producer.id,
+          concreteId: `${producer.id}-attempt-0`,
+          artifactDir,
+          workspacePath,
+          repoPath: path.join(root, "repo"),
+          attemptIndex: 0,
+          loopIndex: 0,
+          loopCount: 1
+        },
+        run: {
+          id: "generated-test-render",
+          artifactsDir: runArtifacts,
+          metadataPath: path.join(root, "runs", "generated-test-render", "run.json")
+        },
+        outputs: {
+          findingsPath: path.join(artifactDir, "findings.json"),
+          patchPath: path.join(artifactDir, "patch.diff")
+        }
+      });
+      const rendered = result.renderedMarkdown;
+
+      expect(rendered.match(/## Generated-test Bundle Instructions/gu), producer.id).toHaveLength(1);
+      expect(rendered, producer.id).toContain(
+        `Author runnable generated test source files under \`${path.join(workspacePath, "test", "foundry", producer.id)}\``
+      );
+      expect(rendered, producer.id).toContain(
+        `mirror every declared bundle file under \`${path.join(artifactDir, "generated-tests")}\``
+      );
+      expect(rendered, producer.id).toContain(
+        `write the manifest to exactly \`${path.join(artifactDir, "generated-tests.json")}\``
+      );
+      expect(rendered, producer.id).toContain("`run_id` exactly `generated-test-render`");
+      expect(rendered, producer.id).toContain(`\`node_id\` exactly \`${producer.id}\``);
+      expect(rendered, producer.id).toContain(
+        `Validation command: \`ultrafuzz json validate --schema '${path.join(workspacePath, ".ultrafuzz", "schemas", "generated-tests.schema.json")}' --file '${path.join(artifactDir, "generated-tests.json")}'\``
+      );
+      expect(rendered, producer.id).not.toContain("{{generated_tests_");
+    }
+  });
+
+  it("renders the authenticated aggregation bundle contract and validation command", () => {
+    const topologyPath = fileURLToPath(new URL("../../../.ultrafuzz/topology.yml", import.meta.url));
+    const topology = YAML.parse(readFileSync(topologyPath, "utf8")) as {
+      nodes: Array<{
+        id: string;
+        prompt?: string;
+        depends_on?: string[];
+        outputs?: Array<{ path: string; contract: string; primary?: boolean }>;
+      }>;
+    };
+    const promptByPath = new Map(loadBuiltInPromptAssets().map((asset) => [asset.relativePath, asset.markdown]));
+    const aggregate = topology.nodes.find((node) => node.id === "aggregate-test-files");
+    expect(aggregate?.prompt).toBe("review/aggregate-test-files.md");
+    const root = path.join(os.tmpdir(), "ultrafuzz-aggregation-prompt");
+    const runArtifacts = path.join(root, "runs", "aggregation-render", "artifacts");
+    const artifactDir = path.join(runArtifacts, "aggregate-test-files");
+    const workspacePath = path.join(root, "workspaces", "aggregate-test-files");
+    const logicalNodes = topology.nodes.map((node) => ({
+      id: node.id,
+      dependsOn: node.depends_on ?? [],
+      artifactDir: path.join(runArtifacts, node.id),
+      outputs: (node.outputs ?? []).map((output, index) => ({
+        path: output.path,
+        contract: output.contract,
+        primary: output.primary ?? index === 0,
+        description: `${output.contract} production output.`,
+        ...(node.id === "aggregate-test-files" && output.path === "aggregation.json"
+          ? { schemaFile: "aggregation-manifest.schema.json" }
+          : {})
+      }))
+    }));
+    const rendered = renderPrompt({
+      prompt: promptByPath.get(aggregate!.prompt!)!,
+      graph: { logicalNodes },
+      node: {
+        logicalId: aggregate!.id,
+        concreteId: aggregate!.id,
+        artifactDir,
+        workspacePath,
+        repoPath: path.join(root, "repo"),
+        attemptIndex: 0,
+        loopIndex: 0,
+        loopCount: 1
+      },
+      run: {
+        id: "aggregation-render",
+        artifactsDir: runArtifacts,
+        metadataPath: path.join(root, "runs", "aggregation-render", "run.json")
+      },
+      outputs: {
+        findingsPath: path.join(artifactDir, "findings.json"),
+        patchPath: path.join(artifactDir, "patch.diff")
+      }
+    }).renderedMarkdown;
+
+    expect(rendered).toContain("`source_bundles`: one record for every listed `generated-tests.json`");
+    expect(rendered).toContain("`source_attempt_id`");
+    expect(rendered).toContain("`source_manifest_sha256`");
+    expect(rendered).toContain("positive `size_bytes`");
+    expect(rendered).toContain("A bundle is atomic");
+    expect(rendered).toContain(
+      `Validation command: \`ultrafuzz json validate --schema '${path.join(workspacePath, ".ultrafuzz", "schemas", "aggregation-manifest.schema.json")}' --file '${path.join(artifactDir, "aggregation.json")}'\``
+    );
   });
 
   it("omits the schema pointer when no output ships a schema", () => {
