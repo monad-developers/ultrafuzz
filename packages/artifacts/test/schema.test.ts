@@ -26,6 +26,7 @@ import {
   USAGE_LEDGER_SCHEMA_VERSION,
   ARTIFACT_CONTRACT_IDS,
   artifactManifestJsonSchema,
+  aggregationManifestSchema,
   analysisBundleManifestJsonSchema,
   artifactContractDefinition,
   artifactContractSchemaBinding,
@@ -41,6 +42,7 @@ import {
   nodeAttemptLedgerJsonSchema,
   propertiesJsonSchema,
   referenceExpectationsJsonSchema,
+  reportSchema,
   runStateJsonSchema,
   validateAnalysisBundleManifestSchema,
   usageLedgerJsonSchema,
@@ -773,6 +775,26 @@ test("the findings v2 contract rejects aliases, omissions, lowercase severities,
   }
   assert.equal(validateFindingSchema({ ...finding, severity_guess: "low" }).ok, false);
   assert.equal(validateFindingSchema({ ...finding, unexpected: true }).ok, false);
+
+  const canonicalStrategyProvenance = {
+    ...finding,
+    strategy_provenance: {
+      detection_rates: [{ strategy: "stateful-invariant", detections: 1, configured_loops: 2 }]
+    }
+  };
+  assert.equal(validateFindingSchema(canonicalStrategyProvenance).ok, true);
+  assert.equal(
+    validateArtifactContract("ultrafuzz/findings@2", JSON.stringify([canonicalStrategyProvenance])).ok,
+    true
+  );
+  const removedStrategyAlias = {
+    ...finding,
+    strategy_provenance: {
+      strategies: [{ strategy: "stateful-invariant", detections: 1, configured_loops: 2 }]
+    }
+  };
+  assert.equal(validateFindingSchema(removedStrategyAlias).ok, false);
+  assert.equal(validateArtifactContract("ultrafuzz/findings@2", JSON.stringify([removedStrategyAlias])).ok, false);
 });
 
 test("the findings v2 schema validates closed typed evidence spans without repair", () => {
@@ -823,6 +845,7 @@ test("the findings v2 schema validates closed typed evidence spans without repai
   }
 
   for (const evidence of [
+    {},
     { kind: "source", path: "src/VeryLiquidVault.sol", end_line: 107 },
     { kind: "source", path: "src/VeryLiquidVault.sol", line: 0 },
     { kind: "source", path: "src/VeryLiquidVault.sol", line: Number.MAX_SAFE_INTEGER + 1 },
@@ -969,6 +992,12 @@ test("finding and report v2 schemas require their current canonical shapes", () 
   };
   const reportWithTypedEvidence = { ...report, non_production_outcomes: [nonProductionOutcome] };
   assert.equal(validateArtifactContract("ultrafuzz/report@2", JSON.stringify(reportWithTypedEvidence)).ok, true);
+  const reportWithEmptyEvidence = {
+    ...report,
+    non_production_outcomes: [{ ...nonProductionOutcome, evidence: [{}] }]
+  };
+  assert.equal(validateArtifactContract("ultrafuzz/report@2", JSON.stringify(reportWithEmptyEvidence)).ok, false);
+  assert.equal(reportSchema.safeParse(reportWithEmptyEvidence).success, false);
   assert.equal(
     validateArtifactContract(
       "ultrafuzz/report@2",
@@ -1239,6 +1268,13 @@ test("generated test manifest runtime and exported schemas enforce the same safe
   };
 
   assert.equal(validateGeneratedTestManifestSchema(manifest).ok, true);
+  for (const candidate of [
+    { ...manifest, provenance: {} },
+    { ...manifest, generated_tests: [{ ...manifest.generated_tests[0]!, provenance: {} }] }
+  ]) {
+    assert.equal(validateGeneratedTestManifestSchema(candidate).ok, false);
+    assert.equal(validateArtifactContract("ultrafuzz/generated-tests@2", JSON.stringify(candidate)).ok, false);
+  }
 
   const noncanonical = {
     schema_version: GENERATED_TESTS_SCHEMA_VERSION,
@@ -1273,6 +1309,35 @@ test("generated test manifest runtime and exported schemas enforce the same safe
     assert.equal(validateGeneratedTestManifestSchema(value).ok, candidate.ok, candidate.path);
     assert.equal(exportedPathPattern.test(candidate.path), candidate.ok, candidate.path);
   }
+});
+
+test("present generated-test aggregation provenance cannot be an empty object", () => {
+  const manifest = {
+    schema_version: "ultrafuzz.aggregation-manifest.v1",
+    source_generated_tests: 1,
+    copied_generated_tests: 1,
+    source_support_files: 0,
+    copied_support_files: 0,
+    files: [
+      {
+        strategy: "boundary-tests",
+        node_id: "boundary-tests",
+        attempt_index: 0,
+        source_manifest_path: "generated-tests.json",
+        source_artifact_path: "generated-tests/Boundary.t.sol",
+        source_relative_path: "generated-tests/Boundary.t.sol",
+        destination_path: "test/Boundary.t.sol",
+        destination_relative_path: "test/Boundary.t.sol",
+        bytes: 1,
+        provenance: {}
+      }
+    ],
+    support_files: [],
+    skipped_files: []
+  };
+
+  assert.equal(aggregationManifestSchema.safeParse(manifest).success, false);
+  assert.equal(validateArtifactContract("ultrafuzz/aggregation-manifest@1", JSON.stringify(manifest)).ok, false);
 });
 
 test("analysis bundle manifest schema rejects unversioned and non-allowlisted entries", () => {

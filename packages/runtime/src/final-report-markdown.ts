@@ -449,11 +449,7 @@ function strategyRows(issue: JsonRecord): Array<{ strategy: string; rate: string
 
 function collectStrategyRows(issue: JsonRecord): Array<{ strategy: string; rate: string }> | undefined {
   const provenance = isRecord(issue.strategy_provenance) ? issue.strategy_provenance : {};
-  const rates = Array.isArray(provenance.detection_rates)
-    ? provenance.detection_rates.filter(isRecord)
-    : Array.isArray(provenance.strategies)
-      ? provenance.strategies.filter(isRecord)
-      : [];
+  const rates = Array.isArray(provenance.detection_rates) ? provenance.detection_rates.filter(isRecord) : [];
   const rows: Array<{ strategy: string; rate: string }> = [];
   for (const rate of rates) {
     const strategy = rate.strategy;

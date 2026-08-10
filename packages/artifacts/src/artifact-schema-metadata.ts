@@ -216,7 +216,7 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "ultrafuzz/generated-tests@2",
     "generatedTestsJsonSchema",
     "generatedTestManifestSchema",
-    ["generated-test-path-uniqueness", "generated-test-path-exists"]
+    ["generated-test-path-uniqueness", "generated-test-current-identity", "generated-test-path-exists"]
   ),
   "harness-repairs.schema.json": artifact(
     "ultrafuzz/harness-repairs@1",

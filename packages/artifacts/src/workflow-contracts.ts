@@ -1020,21 +1020,26 @@ export const findingLifecycleLedgerSchema = withDocumentMetadata(
   "Ultrafuzz finding lifecycle ledger"
 );
 
-const aggregationProvenanceSchema = z.strictObject({
-  producer_node_id: nonEmptyString.optional(),
-  run_id: nonEmptyString.optional(),
-  logical_node_id: nonEmptyString.optional(),
-  attempt_index: nonNegativeInteger.optional(),
-  loop_index: nonNegativeInteger.optional(),
-  model_id: nonEmptyString.optional(),
-  model: nonEmptyString.optional(),
-  model_index: nonNegativeInteger.optional(),
-  agent_ref: nonEmptyString.optional(),
-  workflow_run_id: nonEmptyString.optional(),
-  workflow_task_id: nonEmptyString.optional(),
-  source_run_id: nonEmptyString.optional(),
-  origin: nonEmptyString.optional()
-});
+const aggregationProvenanceSchema = z
+  .strictObject({
+    producer_node_id: nonEmptyString.optional(),
+    run_id: nonEmptyString.optional(),
+    logical_node_id: nonEmptyString.optional(),
+    attempt_index: nonNegativeInteger.optional(),
+    loop_index: nonNegativeInteger.optional(),
+    model_id: nonEmptyString.optional(),
+    model: nonEmptyString.optional(),
+    model_index: nonNegativeInteger.optional(),
+    agent_ref: nonEmptyString.optional(),
+    workflow_run_id: nonEmptyString.optional(),
+    workflow_task_id: nonEmptyString.optional(),
+    source_run_id: nonEmptyString.optional(),
+    origin: nonEmptyString.optional()
+  })
+  .meta({ minProperties: 1 })
+  .refine((provenance) => Object.keys(provenance).length > 0, {
+    message: "Present aggregation provenance must contain at least one typed field"
+  });
 
 const aggregationFileSchema = z.strictObject({
   strategy: nonEmptyString,

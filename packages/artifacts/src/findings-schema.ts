@@ -37,7 +37,12 @@ const findingEvidenceLineRangeSchema = z.strictObject({
   end_line: positiveSafeInteger.optional()
 });
 
-const findingMetadataEvidenceSchema = z.strictObject(evidenceMetadataShape);
+const findingMetadataEvidenceSchema = z
+  .strictObject(evidenceMetadataShape)
+  .meta({ minProperties: 1 })
+  .refine((evidence) => Object.keys(evidence).length > 0, {
+    message: "Metadata evidence must contain at least one typed evidence field"
+  });
 
 const findingSingleSpanEvidenceSchema = z.strictObject({
   ...evidenceMetadataShape,
@@ -136,16 +141,10 @@ const detectionRateSchema = z.strictObject({
   configured_loops: z.number().int().positive()
 });
 
-const strategyProvenanceSchema = z.union([
-  z.strictObject({
-    detection_rates: z.array(detectionRateSchema).min(1),
-    attempts: z.array(findingStrategyHitSchema).optional()
-  }),
-  z.strictObject({
-    strategies: z.array(detectionRateSchema).min(1),
-    attempts: z.array(findingStrategyHitSchema).optional()
-  })
-]);
+const strategyProvenanceSchema = z.strictObject({
+  detection_rates: z.array(detectionRateSchema).min(1),
+  attempts: z.array(findingStrategyHitSchema).optional()
+});
 
 const proofOfConceptSchema = z.strictObject({
   scenario: z.array(nonEmptyString).min(1),

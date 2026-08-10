@@ -75,8 +75,6 @@ function baseRenderInput(tmp: string): PromptRenderInput {
               contract: "ultrafuzz/generated-tests@2",
               primary: false,
               description: "A manifest containing generated_tests.",
-              validEmptyExample:
-                '{"schema_version":"ultrafuzz.generated-tests.v2","run_id":"run-1","node_id":"boundary-tests-0","generated_tests":[]}',
               schemaFile: "generated-tests.schema.json"
             }
           ],
@@ -157,6 +155,10 @@ describe("prompt rendering", () => {
       expect(result.renderedMarkdown).toContain(guidance);
     }
     expect(result.renderedMarkdown).toContain("generated-tests.schema.json");
+    expect(result.renderedMarkdown).toContain(
+      '{"schema_version":"ultrafuzz.generated-tests.v2","run_id":"run-1","node_id":"boundary-tests","generated_tests":[]}'
+    );
+    expect(result.renderedMarkdown).not.toContain('"node_id":"<node-id>"');
   });
 
   it("omits the schema pointer when no output ships a schema", () => {

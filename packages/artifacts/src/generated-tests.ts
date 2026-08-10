@@ -60,21 +60,26 @@ const nonEmptyString = z.string().min(1);
 const nonNegativeInteger = z.number().int().nonnegative();
 const generatedTestManifestPathPattern = new RegExp(GENERATED_TEST_MANIFEST_PATH_PATTERN, "u");
 
-export const generatedTestProvenanceSchema = z.strictObject({
-  producer_node_id: nonEmptyString.optional(),
-  run_id: nonEmptyString.optional(),
-  logical_node_id: nonEmptyString.optional(),
-  attempt_index: nonNegativeInteger.optional(),
-  loop_index: nonNegativeInteger.optional(),
-  model_id: nonEmptyString.optional(),
-  model: nonEmptyString.optional(),
-  model_index: nonNegativeInteger.optional(),
-  agent_ref: nonEmptyString.optional(),
-  workflow_run_id: nonEmptyString.optional(),
-  workflow_task_id: nonEmptyString.optional(),
-  source_run_id: nonEmptyString.optional(),
-  origin: nonEmptyString.optional()
-});
+export const generatedTestProvenanceSchema = z
+  .strictObject({
+    producer_node_id: nonEmptyString.optional(),
+    run_id: nonEmptyString.optional(),
+    logical_node_id: nonEmptyString.optional(),
+    attempt_index: nonNegativeInteger.optional(),
+    loop_index: nonNegativeInteger.optional(),
+    model_id: nonEmptyString.optional(),
+    model: nonEmptyString.optional(),
+    model_index: nonNegativeInteger.optional(),
+    agent_ref: nonEmptyString.optional(),
+    workflow_run_id: nonEmptyString.optional(),
+    workflow_task_id: nonEmptyString.optional(),
+    source_run_id: nonEmptyString.optional(),
+    origin: nonEmptyString.optional()
+  })
+  .meta({ minProperties: 1 })
+  .refine((provenance) => Object.keys(provenance).length > 0, {
+    message: "Present generated-test provenance must contain at least one typed field"
+  });
 
 const generatedTestPathSchema = nonEmptyString.regex(generatedTestManifestPathPattern, {
   message: `path must use the ${GENERATED_TESTS_DIR}/<file> prefix and stay inside that directory`

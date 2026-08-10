@@ -56,6 +56,11 @@ export interface SemanticRuntimeStateContext {
   configFingerprint: string;
 }
 
+export interface SemanticArtifactIdentityContext {
+  runId: string;
+  nodeId: string;
+}
+
 export interface SemanticUsageLedgerContext {
   entries: readonly unknown[];
 }
@@ -92,6 +97,7 @@ export interface SemanticGateContext {
   git?: SemanticGitContext;
   artifactSet?: SemanticArtifactSetContext;
   plannedGraph?: SemanticPlannedGraphContext;
+  artifactIdentity?: SemanticArtifactIdentityContext;
   attemptLedger?: SemanticAttemptLedgerContext;
   runtimeState?: SemanticRuntimeStateContext;
   usageLedger?: SemanticUsageLedgerContext;
@@ -1858,6 +1864,18 @@ function generatedTestExistenceIssues(document: unknown, context: SemanticGateCo
   });
 }
 
+function generatedTestIdentityIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
+  const identity = context.artifactIdentity!;
+  const issues: SemanticGateIssue[] = [];
+  if (stringField(document, "run_id") !== identity.runId) {
+    issues.push(issue("$.run_id", "Generated-test manifest run_id does not match the current run"));
+  }
+  if (stringField(document, "node_id") !== identity.nodeId) {
+    issues.push(issue("$.node_id", "Generated-test manifest node_id does not match the logical producer"));
+  }
+  return issues;
+}
+
 function agentSourceProofGitIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
   const git = context.git!;
   const issues: SemanticGateIssue[] = [];
@@ -2495,6 +2513,11 @@ const gateSpecifications = {
     "filesystem",
     ["filesystem.rootDirectory"],
     generatedTestExistenceIssues
+  ),
+  "generated-test-current-identity": contextualGate(
+    "runtime-state",
+    ["artifactIdentity.runId", "artifactIdentity.nodeId"],
+    generatedTestIdentityIssues
   ),
   "generated-test-path-uniqueness": documentGate(uniqueFieldGate([["generated_tests"]], "path", "generated test path")),
   "harness-repair-failure-id-uniqueness": documentGate(uniqueFieldGate([[]], "failure_id", "harness failure ID")),

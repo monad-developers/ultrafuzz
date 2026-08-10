@@ -124,6 +124,14 @@ test("canonical final-report validation rejects presentation drift instead of re
   assert.throws(() => projectCanonicalFinalReport(legacyAlias), /validation/u);
   assert.deepEqual(legacyAlias, legacyBefore);
 
+  const strategyAlias = renderableReport();
+  (strategyAlias.issues as Array<Record<string, unknown>>)[0]!.strategy_provenance = {
+    strategies: [{ strategy: "stateful-invariant", detections: 1, configured_loops: 4 }]
+  };
+  const strategyAliasBefore = structuredClone(strategyAlias);
+  assert.throws(() => projectCanonicalFinalReport(strategyAlias), /validation/u);
+  assert.deepEqual(strategyAlias, strategyAliasBefore);
+
   const wrongSeverity = renderableReport();
   (wrongSeverity.issues as Array<Record<string, unknown>>)[0]!.severity = "Medium";
   assert.throws(

@@ -89,10 +89,10 @@ Invariant campaign results:
 These three files form the provenance join from a finding's `property_ids` to
 its canonical properties, source lens rows, implementation/test paths, and
 recorded fuzzer backends. Treat references to an unknown canonical property as
-an invalid current-run artifact. Historical or external artifacts may predate
-this contract: if any provenance handoff or `property_ids` lineage needed for
-the join is absent, render Property provenance as `unavailable` and continue
-report generation.
+an invalid current-run artifact. Every declared current-run provenance handoff
+and every `property_ids` lineage needed for the join must be present and valid.
+If one is absent or cannot be joined exactly, stop with validation failure; do
+not guess, repair, or render a historical compatibility value.
 
 Use these setup handoffs:
 
@@ -274,9 +274,9 @@ boilerplate in the final report.
 
 Sort production issue entries by report severity before writing them: High
 first, then Medium, then Low. The report severity vocabulary is exactly High,
-Medium, and Low. Normalize upstream values according to the global closed
-vocabulary rule before rendering `report.md` or `report.json`. Do not render
-any other report severity or issue-id class. Preserve the upstream order within
+Medium, and Low. Upstream values must already use this closed vocabulary before
+rendering `report.md` or `report.json`; reject any other value without
+normalizing, converting, or rewriting it. Preserve the upstream order within
 the same report severity.
 
 After sorting, assign issue title IDs independently per severity in rendered
@@ -552,8 +552,8 @@ Use table columns `Finding`, `Property IDs`, `Source nodes`, `Source property
 IDs`, `Implementation/test paths`, and `Fuzzer backends`. Do not add a row for a
 finding with no `property_ids`; it is a valid non-property finding. If current
 artifacts contain no property-derived findings, write `No property-derived
-findings.` If historical lineage is absent, write `unavailable` instead of
-failing or guessing.
+findings.` Missing or unjoinable current-run lineage is a validation failure;
+do not render `unavailable`, continue, or guess.
 
 When lifecycle records contain `comparison_disposition`, add a concise
 `## Prior finding disposition` section after Property provenance and before
@@ -610,10 +610,10 @@ with the final rendered issue. Also include the report-specific fields
 `family_id`, `family_variants`, and `related_findings` when those fields are
 available. Keep the canonical `strategy` field a non-empty originating strategy
 name when one is available. The structured `strategy_provenance` object must
-contain a non-empty `detection_rates` or `strategies` array. Use exactly one of
-these array keys; never emit both. Every array element contains exactly
-non-empty `strategy`, non-negative integer `detections`, and positive integer
-`configured_loops`. Optional `attempts` use the canonical strategy-hit fields.
+contain the canonical non-empty `detection_rates` array. Do not emit the removed
+`strategies` alias. Every array element contains exactly non-empty `strategy`,
+non-negative integer `detections`, and positive integer `configured_loops`.
+Optional `attempts` use the canonical strategy-hit fields.
 
 For example, this is a canonical renderable value:
 

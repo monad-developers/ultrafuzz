@@ -298,7 +298,8 @@
                         "minLength": 1
                       }
                     },
-                    "additionalProperties": false
+                    "additionalProperties": false,
+                    "minProperties": 1
                   },
                   {
                     "type": "object",
@@ -511,7 +512,8 @@
                   "minLength": 1
                 }
               },
-              "additionalProperties": false
+              "additionalProperties": false,
+              "minProperties": 1
             },
             {
               "type": "object",
@@ -693,146 +695,73 @@
         "minLength": 1
       },
       "strategy_provenance": {
-        "anyOf": [
-          {
-            "type": "object",
-            "properties": {
-              "detection_rates": {
-                "minItems": 1,
-                "type": "array",
-                "items": {
-                  "type": "object",
-                  "properties": {
-                    "strategy": {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    "detections": {
-                      "type": "integer",
-                      "minimum": 0,
-                      "maximum": 9007199254740991
-                    },
-                    "configured_loops": {
-                      "type": "integer",
-                      "exclusiveMinimum": 0,
-                      "maximum": 9007199254740991
-                    }
-                  },
-                  "required": ["strategy", "detections", "configured_loops"],
-                  "additionalProperties": false
+        "type": "object",
+        "properties": {
+          "detection_rates": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "strategy": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "detections": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "configured_loops": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
                 }
               },
-              "attempts": {
-                "type": "array",
-                "items": {
-                  "type": "object",
-                  "properties": {
-                    "strategy": {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    "attempt_index": {
-                      "type": "integer",
-                      "minimum": 0,
-                      "maximum": 9007199254740991
-                    },
-                    "model_id": {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    "model": {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    "model_index": {
-                      "type": "integer",
-                      "minimum": 0,
-                      "maximum": 9007199254740991
-                    },
-                    "loop_index": {
-                      "type": "integer",
-                      "minimum": 0,
-                      "maximum": 9007199254740991
-                    }
-                  },
-                  "required": ["strategy"],
-                  "additionalProperties": false
-                }
-              }
-            },
-            "required": ["detection_rates"],
-            "additionalProperties": false
+              "required": ["strategy", "detections", "configured_loops"],
+              "additionalProperties": false
+            }
           },
-          {
-            "type": "object",
-            "properties": {
-              "strategies": {
-                "minItems": 1,
-                "type": "array",
-                "items": {
-                  "type": "object",
-                  "properties": {
-                    "strategy": {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    "detections": {
-                      "type": "integer",
-                      "minimum": 0,
-                      "maximum": 9007199254740991
-                    },
-                    "configured_loops": {
-                      "type": "integer",
-                      "exclusiveMinimum": 0,
-                      "maximum": 9007199254740991
-                    }
-                  },
-                  "required": ["strategy", "detections", "configured_loops"],
-                  "additionalProperties": false
+          "attempts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "strategy": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "attempt_index": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "model_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "model": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "model_index": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "loop_index": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
                 }
               },
-              "attempts": {
-                "type": "array",
-                "items": {
-                  "type": "object",
-                  "properties": {
-                    "strategy": {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    "attempt_index": {
-                      "type": "integer",
-                      "minimum": 0,
-                      "maximum": 9007199254740991
-                    },
-                    "model_id": {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    "model": {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    "model_index": {
-                      "type": "integer",
-                      "minimum": 0,
-                      "maximum": 9007199254740991
-                    },
-                    "loop_index": {
-                      "type": "integer",
-                      "minimum": 0,
-                      "maximum": 9007199254740991
-                    }
-                  },
-                  "required": ["strategy"],
-                  "additionalProperties": false
-                }
-              }
-            },
-            "required": ["strategies"],
-            "additionalProperties": false
+              "required": ["strategy"],
+              "additionalProperties": false
+            }
           }
-        ]
+        },
+        "required": ["detection_rates"],
+        "additionalProperties": false
       },
       "lifecycle": {
         "type": "object",

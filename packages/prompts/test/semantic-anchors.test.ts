@@ -472,7 +472,10 @@ describe("prompt semantic anchors", () => {
 
     expect(readFileSync(templatePath, "utf8")).toContain("generated_tests");
     expect(aggregate).toContain("manifest `generated_tests` entries");
-    expect(dynamic).toContain("`generated_tests` carrying");
+    expect(dynamic).toContain("Use the exact `ultrafuzz.generated-tests.v2` manifest shape");
+    expect(dynamic).toContain("`path` with the\n`generated-tests/<file>` prefix");
+    expect(dynamic).toContain("they are not generated-test\nmanifest fields");
+    expect(dynamic).not.toContain("strategy id, source path, destination intent, and\nvalidation status");
     expect(`${readFileSync(templatePath, "utf8")}\n${promptCorpus}`).not.toContain("test_files");
     expect(readFileSync(topologyPath, "utf8")).toMatch(
       /id: reference-harness-author[\s\S]*outputs:[\s\S]*path: generated-tests\.json/u
@@ -480,6 +483,20 @@ describe("prompt semantic anchors", () => {
     for (const sourceId of manifestSources) {
       expect(requiredArtifactsById.get(sourceId), sourceId).toContain("generated-tests.json");
     }
+  });
+
+  it("keeps actors-flows limited to its declared Markdown output", () => {
+    const actors = prompt("setup/actors-flows.md");
+    const topologyPath = fileURLToPath(new URL("../../../.ultrafuzz/topology.yml", import.meta.url));
+    const topology = YAML.parse(readFileSync(topologyPath, "utf8")) as {
+      nodes: { id: string; outputs?: Array<{ path: string }> }[];
+    };
+
+    expect(topology.nodes.find((node) => node.id === "actors-flows")?.outputs?.map((output) => output.path)).toEqual([
+      "setup/actors-flows.md"
+    ]);
+    expect(actors).toContain("declares only the actor-flow Markdown output");
+    expect(actors).toContain("do not create an\nundeclared `findings.json`");
   });
 
   it("keeps admin/config tests target-native and mirrors canonical generated-test companions", () => {
@@ -581,8 +598,8 @@ describe("prompt semantic anchors", () => {
     expect(markdown).toContain("`severity_guess`, `severity`, `impact`, and");
     expect(markdown).toContain("canonical `strategy` field a non-empty");
     expect(markdown).toContain("structured `strategy_provenance` object");
-    expect(markdown).toContain("non-empty `detection_rates` or `strategies` array");
-    expect(markdown).toContain("Use exactly one of\nthese array keys; never emit both");
+    expect(markdown).toContain("canonical non-empty `detection_rates` array");
+    expect(markdown).toContain("Do not emit the removed\n`strategies` alias");
     expect(markdown).toContain("Never emit both fields");
     expect(markdown).toContain("When no known campaign backend produced the\nfinding, omit both");
     expect(markdown).toContain("never emit a one-entry `line_ranges`");
@@ -598,7 +615,8 @@ describe("prompt semantic anchors", () => {
     expect(template).toContain("Use `[]` when there are no findings");
     expect(template).toContain('Every finding must set `schema_version` to exactly `"ultrafuzz.finding.v2"`');
     expect(template).toContain("Unknown fields are invalid");
-    expect(template).toContain("Evidence entries are either non-empty strings or closed objects");
+    expect(template).toContain("`{}` is invalid");
+    expect(template).toContain("Evidence entries are either non-empty strings or non-empty closed objects");
     expect(template).toContain("without anchors or line selectors");
     expect(template).toContain("disjoint spans with `line_ranges`");
     expect(template).toContain("Never emit a one-entry `line_ranges`");

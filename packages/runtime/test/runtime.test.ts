@@ -10031,11 +10031,16 @@ test("syncRun finalizes prerequisite manifests before out-of-order descendants",
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md"]);
   writeRequiredArtifactSet(run.value!.run_root, "actors-flows", ["setup/actors-flows.md"]);
+  const undeclaredFindingsPath = path.join(run.value!.run_root, "artifacts", "actors-flows", "findings.json");
+  fs.writeFileSync(undeclaredFindingsPath, "{not-json\n", "utf8");
+  const undeclaredFindingsBefore = fs.readFileSync(undeclaredFindingsPath);
 
   const sync = await syncRun({ projectRoot: project, runId: "sync-out-of-order", env });
 
   assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
   assert.equal(sync.value?.status, "succeeded");
+  assert.deepEqual(fs.readFileSync(undeclaredFindingsPath), undeclaredFindingsBefore);
+  assert.doesNotMatch(fs.readFileSync(path.join(run.value!.run_root, "events.jsonl"), "utf8"), /findings-validated/u);
   const descendantManifest = JSON.parse(
     fs.readFileSync(path.join(run.value!.run_root, "artifacts", "actors-flows", "artifact-manifest.json"), "utf8")
   ) as { prerequisite_manifests?: Array<{ node_id?: string }> };

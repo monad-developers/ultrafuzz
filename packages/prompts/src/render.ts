@@ -317,7 +317,16 @@ function appendOutputContract(rendered: string, input: PromptRenderInput, curren
     schema_guidance: schemaGuidance,
     artifact_contracts: outputs
       .map((output) => {
-        const validEmptyExample = output.validEmptyExample === "" ? "<empty file>" : output.validEmptyExample;
+        const contextualEmptyExample =
+          output.contract === "ultrafuzz/generated-tests@2"
+            ? JSON.stringify({
+                schema_version: "ultrafuzz.generated-tests.v2",
+                run_id: input.run.id,
+                node_id: input.node.logicalId,
+                generated_tests: []
+              })
+            : output.validEmptyExample;
+        const validEmptyExample = contextualEmptyExample === "" ? "<empty file>" : contextualEmptyExample;
         const empty =
           validEmptyExample === undefined ? "Empty output is not valid." : `Valid empty form: \`${validEmptyExample}\``;
         return [

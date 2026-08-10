@@ -209,9 +209,14 @@ Write generated-test manifest details to:
 
 {{artifact_dir}}/generated-tests.json
 
-Use the same general shape as other strategy generated-test manifests, with
-`generated_tests` carrying strategy id, source path, destination intent, and
-validation status for each file.
+Use the exact `ultrafuzz.generated-tests.v2` manifest shape: top-level
+`schema_version`, current `run_id`, current `node_id`, and `generated_tests`.
+Each generated-test row must contain `path` with the
+`generated-tests/<file>` prefix and may contain only `size_bytes`, `sha256`,
+`language`, `framework`, `description`, and the documented closed `provenance`
+fields. Keep strategy IDs, destination intent, and validation status in
+`selected-strategies.json` and `provenance.json`; they are not generated-test
+manifest fields. Use an empty `generated_tests` array when no file was produced.
 
 Write findings to {{output_findings_path}}. Use an empty JSON array when no
 finding is confirmed or no generated strategy is actionable. Each finding must

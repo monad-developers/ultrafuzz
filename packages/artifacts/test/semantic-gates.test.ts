@@ -1050,6 +1050,11 @@ test("every contextual registration executes real positive and negative checks",
         negative: { failure_counts: { pre_deduplication: 2, post_deduplication: 1 } },
         context: { artifactSet: { campaigns: [{ failures: [{}] }], findings: [{}] } }
       },
+      "generated-test-current-identity": {
+        positive: { run_id: "run-current", node_id: "strategy-current" },
+        negative: { run_id: "run-foreign", node_id: "strategy-foreign" },
+        context: { artifactIdentity: { runId: "run-current", nodeId: "strategy-current" } }
+      },
       "generated-test-path-exists": {
         positive: { generated_tests: [{ path: "generated-tests/test.sol" }] },
         negative: { generated_tests: [{ path: "generated-tests/missing.sol" }] },

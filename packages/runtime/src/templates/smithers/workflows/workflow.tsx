@@ -4389,6 +4389,7 @@ function semanticGateContextForVerifiedOutput(
   verifiedOutputs: ReadonlyMap<string, VerifiedOutputSnapshot>
 ): {
   filesystem: { rootDirectory: string };
+  artifactIdentity: { runId: string; nodeId: string };
   artifactSet?: {
     campaigns?: readonly unknown[];
     findings?: readonly unknown[];
@@ -4404,7 +4405,11 @@ function semanticGateContextForVerifiedOutput(
     throw new Error(`artifact-contract failure: verified output is unavailable ${output.path}`);
   }
   const context: ReturnType<typeof semanticGateContextForVerifiedOutput> = {
-    filesystem: { rootDirectory: snapshot.artifactRoot }
+    filesystem: { rootDirectory: snapshot.artifactRoot },
+    artifactIdentity: {
+      runId: task.metadata.run.ultrafuzzRunId,
+      nodeId: task.metadata.node.logicalNodeId
+    }
   };
   if (output.schemaFile === "campaign-summary.schema.json") {
     context.artifactSet = siblingCampaignSemanticArtifacts(task, verifiedOutputs);

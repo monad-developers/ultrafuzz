@@ -1651,7 +1651,11 @@ function semanticGateContextForArtifact(input: {
 }): SemanticGateContext {
   const context: SemanticGateContext = {
     filesystem: { rootDirectory: input.artifactDir },
-    plannedGraph: { node: input.node }
+    plannedGraph: { node: input.node },
+    artifactIdentity: {
+      runId: input.layout.runId,
+      nodeId: input.node.logical_id ?? input.node.id
+    }
   };
   const artifactSet = semanticArtifactSetForSchema(input);
   const git =
@@ -3294,14 +3298,13 @@ function verifiedReportFindingAliases(entry: Record<string, unknown>, report: Re
           : []
       )
     );
-    for (const alias of stringArray([outcome.finding_id, outcome.upstream_id, outcome.source_finding_id])) {
-      if (lifecycleFindingIds.has(alias)) {
-        verifiedAliases.add(alias);
-      }
+    const sourceFindingId = typeof entry.source_finding_id === "string" ? entry.source_finding_id : undefined;
+    if (sourceFindingId !== undefined && lifecycleFindingIds.has(sourceFindingId)) {
+      verifiedAliases.add(sourceFindingId);
     }
   }
-  return [...new Set(stringArray([entry.finding_id, entry.upstream_id, entry.source_finding_id]))].filter((alias) =>
-    verifiedAliases.has(alias)
+  return stringArray([entry.finding_id, entry.source_finding_id]).filter(
+    (alias, index, aliases) => aliases.indexOf(alias) === index && verifiedAliases.has(alias)
   );
 }
 

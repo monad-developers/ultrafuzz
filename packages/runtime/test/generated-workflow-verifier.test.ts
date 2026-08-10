@@ -683,7 +683,11 @@ type VerifyArtifactsTask = {
   runRoot: string;
   workspacePath: string;
   dependencyArtifactDirs: string[];
-  metadata: { artifacts: { dir: string }; node: { logicalNodeId: string; concreteNodeId: string } };
+  metadata: {
+    run: { ultrafuzzRunId: string };
+    artifacts: { dir: string };
+    node: { logicalNodeId: string; concreteNodeId: string };
+  };
   outputs: Array<{
     path: string;
     contract: string;
@@ -816,6 +820,7 @@ function singleOutputVerificationTask(root: string, contract: string): VerifyArt
     workspacePath: root,
     dependencyArtifactDirs: [],
     metadata: {
+      run: { ultrafuzzRunId: "run-one" },
       artifacts: { dir: root },
       node: { logicalNodeId: "node-one", concreteNodeId: "node-one" }
     },
@@ -900,6 +905,41 @@ test("generated Smithers fails closed on schema-valid document semantic violatio
   }
 });
 
+test("generated Smithers binds generated-test manifests to the current run and logical producer", () => {
+  for (const [field, value] of [
+    ["run_id", "run-foreign"],
+    ["node_id", "node-foreign"]
+  ] as const) {
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-identity-")));
+    try {
+      const document = {
+        schema_version: "ultrafuzz.generated-tests.v2",
+        run_id: "run-one",
+        node_id: "node-one",
+        generated_tests: [],
+        [field]: value
+      };
+      const contents = `${JSON.stringify(document)}\n`;
+      assert.equal(validateArtifactContract("ultrafuzz/generated-tests@2", contents).ok, true);
+      fs.writeFileSync(path.join(root, "result.json"), contents, "utf8");
+
+      const harness = loadVerifyArtifactsHarness();
+      const task = singleOutputVerificationTask(root, "ultrafuzz/generated-tests@2");
+      task.outputs[0]!.schemaFile = "generated-tests.schema.json";
+
+      assert.throws(
+        () => harness.verifyArtifacts(task, harness.captureTaskOutputs(task)),
+        /generated-test-current-identity failed/u,
+        field
+      );
+      assert.equal(harness.publications.size, 0);
+      assert.equal(harness.markerWrites.length, 0);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("generated Smithers fails closed when same-node semantic counts disagree", () => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-semantic-siblings-")));
   try {
@@ -942,6 +982,7 @@ test("generated Smithers fails closed when same-node semantic counts disagree", 
       workspacePath: root,
       dependencyArtifactDirs: [],
       metadata: {
+        run: { ultrafuzzRunId: "run-one" },
         artifacts: { dir: root },
         node: { logicalNodeId: "stateful-invariant-campaign", concreteNodeId: "stateful-invariant-campaign" }
       },

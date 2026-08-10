@@ -20,7 +20,7 @@ import {
   nodeAttemptLedgerIdentity,
   normalizeNodeAttemptFailureMessage,
   queryNodeAttempts,
-  readJsonFile,
+  readRegularFileSnapshot,
   readRunMetadataDocument,
   replayEvents,
   replayNodeAttempts,
@@ -33,6 +33,7 @@ import {
   updateNodeState,
   updateRunStatus,
   usageLedgerIdentity,
+  validateArtifactContractBytes,
   validateFindingsSchema,
   validateSafeId,
   writeArtifactManifest,
@@ -321,6 +322,7 @@ const NODE_RECOVERED_STATUSES = new Set<NodeStatus>(["succeeded", "reused-from-p
 const ACCOUNTING_SCHEMA_VERSION = "ultrafuzz.accounting.v3";
 const ACCOUNTING_CHECKPOINT_SCHEMA_VERSION = "ultrafuzz.accounting-checkpoint.v1";
 const ACCOUNTING_USD_PRECISION = 12;
+const MAX_FINDINGS_SNAPSHOT_BYTES = 64 * 1024 * 1024;
 
 export async function syncRun(input: SyncRunInput, control: WorkflowSynchronizationControl = {}) {
   const result = await synchronizeLinkedWorkflowRun(input, control);
@@ -2409,30 +2411,60 @@ async function finalizeTerminalTask(input: {
 
   let findingsCount: number | undefined;
   let findingsValidationFailed = false;
-  const findingsPath = safeResolveInside(artifactDir, "findings.json", "findings path");
-  if (fs.existsSync(findingsPath)) {
+  let validatedFindingsOutputs = 0;
+  let totalFindings = 0;
+  const declaredFindingsOutputs = input.node.outputs.filter((output) => output.contract === "ultrafuzz/findings@2");
+  for (const output of declaredFindingsOutputs) {
+    const findingsPath = safeResolveInside(artifactDir, output.path, "declared findings path");
+    if (!fs.existsSync(findingsPath)) continue;
     try {
       assertSynchronizationBudget(input.control);
-      const result = validateFindingsSchema(readJsonFile(findingsPath), findingsPath);
-      if (!result.ok || result.value === undefined) {
+      const contract = validateArtifactContractBytes(
+        "ultrafuzz/findings@2",
+        readRegularFileSnapshot(findingsPath, MAX_FINDINGS_SNAPSHOT_BYTES),
+        findingsPath
+      );
+      let outputCount: number | undefined;
+      if (!contract.ok || contract.value === undefined) {
         findingsValidationFailed = true;
-        diagnostics.push({
-          code: "FINDINGS_VALIDATION_FAILED",
-          message: `findings schema validation failed: ${result.issues
-            .map((issue) => `${issue.path} ${issue.message}`)
-            .join("; ")}`,
-          severity: "error",
-          source: "findings",
-          details: { issues: result.issues }
-        });
+        // The required-artifact gate already reported failures from its own
+        // immutable byte snapshot. A failure here with a previously successful
+        // gate means the declared file changed between the two reads.
+        if (gate.ok) {
+          diagnostics.push({
+            code: "FINDINGS_VALIDATION_FAILED",
+            message: `declared findings contract validation failed: ${contract.issues
+              .map((issue) => `${issue.path} ${issue.message}`)
+              .join("; ")}`,
+            severity: "error",
+            source: "findings",
+            details: { issues: contract.issues }
+          });
+        }
       } else {
-        findingsCount = result.value.length;
+        const result = validateFindingsSchema(contract.value, findingsPath);
+        if (!result.ok || result.value === undefined) {
+          findingsValidationFailed = true;
+          diagnostics.push({
+            code: "FINDINGS_VALIDATION_FAILED",
+            message: `registered findings and retained typed schema disagree: ${result.issues
+              .map((issue) => `${issue.path} ${issue.message}`)
+              .join("; ")}`,
+            severity: "error",
+            source: "findings",
+            details: { issues: result.issues }
+          });
+        } else {
+          outputCount = result.value.length;
+          totalFindings += outputCount;
+          validatedFindingsOutputs += 1;
+        }
       }
       events.push({
         eventType: "findings-validated",
-        status: result.ok ? "succeeded" : "failed",
+        status: outputCount === undefined ? "failed" : "succeeded",
         payload: {
-          ...(findingsCount === undefined ? {} : { count: findingsCount }),
+          ...(outputCount === undefined ? {} : { count: outputCount }),
           path: path.relative(input.layout.root, findingsPath).split(path.sep).join("/")
         }
       });
@@ -2443,6 +2475,13 @@ async function finalizeTerminalTask(input: {
       findingsValidationFailed = true;
       diagnostics.push(diagnosticFromError(error, "findings", "FINDINGS_VALIDATION_FAILED"));
     }
+  }
+  if (
+    declaredFindingsOutputs.length > 0 &&
+    validatedFindingsOutputs === declaredFindingsOutputs.length &&
+    !findingsValidationFailed
+  ) {
+    findingsCount = totalFindings;
   }
 
   if (!diagnostics.some((diagnostic) => diagnostic.severity === "error")) {

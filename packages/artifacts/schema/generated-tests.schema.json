@@ -92,7 +92,8 @@
                 "minLength": 1
               }
             },
-            "additionalProperties": false
+            "additionalProperties": false,
+            "minProperties": 1
           },
           "language": {
             "type": "string",
@@ -170,7 +171,8 @@
           "minLength": 1
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "minProperties": 1
     }
   },
   "required": ["schema_version", "run_id", "node_id", "generated_tests"],

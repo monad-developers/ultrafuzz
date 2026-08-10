@@ -337,6 +337,44 @@ test("required artifact gate validates generated-test manifest shape and listed 
 
   fs.writeFileSync(path.join(artifactDir, "generated-tests", "Invariant.t.sol"), "contract InvariantTest {}\n", "utf8");
 
+  for (const [field, value] of [
+    ["run_id", "run-foreign"],
+    ["node_id", "strategy-foreign"]
+  ] as const) {
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        schema_version: "ultrafuzz.generated-tests.v2",
+        run_id: "run-1",
+        node_id: "strategy-a",
+        generated_tests: [{ path: "generated-tests/Invariant.t.sol" }],
+        [field]: value
+      }),
+      "utf8"
+    );
+    const mismatchedIdentity = verifyRequiredArtifactsForAttempt(layout, node, "strategy-a");
+    assert.equal(mismatchedIdentity.ok, false, field);
+    assert.ok(
+      mismatchedIdentity.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
+          diagnostic.details?.gate === "generated-test-current-identity"
+      ),
+      field
+    );
+  }
+
+  fs.writeFileSync(
+    manifestPath,
+    JSON.stringify({
+      schema_version: "ultrafuzz.generated-tests.v2",
+      run_id: "run-1",
+      node_id: "strategy-a",
+      generated_tests: [{ path: "generated-tests/Invariant.t.sol" }]
+    }),
+    "utf8"
+  );
+
   const valid = verifyRequiredArtifactsForAttempt(layout, node, "strategy-a");
   assert.deepEqual(valid.diagnostics, []);
   assert.equal(valid.ok, true);
@@ -3586,6 +3624,35 @@ test("final report gate joins the default recon-only campaign backend", () => {
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+
+  // Final report IDs are presentation identities. A renamed outcome may bind
+  // its campaign identity only through the canonical lifecycle source entry
+  // and the explicit source_finding_id on property provenance.
+  writeArtifact(
+    layout,
+    node.id,
+    "report.json",
+    JSON.stringify(
+      currentReport(layout.runId, {
+        non_production_outcomes: [currentNonProductionOutcome("NP-01", "finding-property")],
+        property_provenance: [
+          {
+            finding_id: "NP-01",
+            source_finding_id: "finding-property",
+            title: "Property failure",
+            property_ids: ["property-1"],
+            sources: [{ source_node_id: "property-specification-certora", source_property_id: "certora-1" }],
+            implementation_paths: ["test/recon/Properties.sol"],
+            test_paths: ["test/foundry/Property1.t.sol"],
+            fuzzer_backend: "recon"
+          }
+        ],
+        property_implementation_coverage: currentImplementedCoverage(["property-1"])
+      })
+    )
+  );
+  const renamed = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(renamed.ok, true, JSON.stringify(renamed.diagnostics));
 
   // A report claiming a backend the campaign never recorded is still rejected.
   writeArtifact(
