@@ -2639,10 +2639,14 @@ function appendTerminalTaskAttempts(input: {
       outcome = nodeAttemptOutcome(input.currentStatus);
       failureCategory = finalizationFailureCategory(input.finalization, outcome);
       outputDigest = outcome === "reused" ? outputManifestDigest : undefined;
-    } else if (outcome === "succeeded" && outputDigest === undefined) {
-      outcome = "failed";
-      failureCategory = "artifact-validation";
     }
+    // A NodeFinished event can become visible before the runtime has finished
+    // validating and durably writing its output manifest. That interval is
+    // deliberately represented by a non-terminal run-state node, not by an
+    // artifact-validation failure.  The attempt ledger is immutable, so wait
+    // for a later synchronization pass with the manifest instead of turning a
+    // successful executor outcome into a permanent phantom failure (#352).
+    if (outcome === "succeeded" && outputDigest === undefined) continue;
     if (isCurrent && ["failed", "timed-out", "canceled"].includes(outcome)) {
       failureMessage = input.finalization.lastError ?? failureMessage;
     }

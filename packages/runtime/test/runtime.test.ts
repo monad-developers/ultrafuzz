@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
-import { execFileSync, spawnSync } from "node:child_process";
+import {
+  execFileSync,
+  spawnSync,
+  type SpawnSyncOptionsWithStringEncoding,
+  type SpawnSyncReturns
+} from "node:child_process";
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import os from "node:os";
@@ -3062,9 +3067,49 @@ default_effort = "high"
 const localKimiCode =
   process.env.ULTRAFUZZ_KIMI_BIN ??
   path.join(process.cwd(), "node_modules", "@moonshot-ai", "kimi-code", "dist", "main.mjs");
+
+type Utf8SpawnSync = (
+  command: string,
+  args: readonly string[],
+  options: SpawnSyncOptionsWithStringEncoding
+) => SpawnSyncReturns<string>;
+
+function spawnKimiSurfaceProbe(
+  command: string,
+  args: readonly string[],
+  options: SpawnSyncOptionsWithStringEncoding,
+  runner: Utf8SpawnSync = spawnSync
+): SpawnSyncReturns<string> {
+  let result = runner(command, args, options);
+  const code = (result.error as NodeJS.ErrnoException | undefined)?.code;
+  if (code === "EAGAIN" || code === "ETIMEDOUT") result = runner(command, args, options);
+  return result;
+}
+
+test("Kimi surface probes retry one transient spawn failure", () => {
+  let calls = 0;
+  const transient = Object.assign(new Error("cold runner timed out"), { code: "ETIMEDOUT" });
+  const result = spawnKimiSurfaceProbe("/fixture/kimi", ["--version"], { encoding: "utf8", timeout: 15_000 }, () => {
+    calls += 1;
+    const error = calls === 1 ? transient : undefined;
+    return {
+      pid: 1,
+      output: [null, "", ""],
+      stdout: "",
+      stderr: "",
+      status: error === undefined ? 2 : null,
+      signal: null,
+      ...(error === undefined ? {} : { error })
+    };
+  });
+  assert.equal(calls, 2);
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 2);
+});
+
 test(
   "generated Kimi API config and argv match the real Kimi Code 0.29.1 surface",
-  { skip: !runningUnderBun || !fs.existsSync(localKimiCode), timeout: 15_000 },
+  { skip: !runningUnderBun || !fs.existsSync(localKimiCode), timeout: 60_000 },
   async () => {
     assert.equal(execFileSync(localKimiCode, ["--version"], { encoding: "utf8" }).trim(), "0.29.1");
     const help = execFileSync(localKimiCode, ["--help"], { encoding: "utf8" });
@@ -3105,7 +3150,7 @@ test(
     const modelIndex = parserArgs.indexOf("--model");
     assert.notEqual(modelIndex, -1);
     parserArgs[modelIndex + 1] = "missing-model-for-contract";
-    const parsed = spawnSync(localKimiCode, parserArgs, {
+    const parsed = spawnKimiSurfaceProbe(localKimiCode, parserArgs, {
       cwd: project,
       env: {
         ...process.env,
@@ -3114,9 +3159,13 @@ test(
         NO_PROXY: "127.0.0.1,localhost"
       },
       encoding: "utf8",
-      timeout: 5_000
+      timeout: 15_000
     });
-    assert.equal(parsed.error, undefined);
+    assert.equal(
+      parsed.error,
+      undefined,
+      `Kimi Code surface probe did not start after one transient retry: ${(parsed.error as NodeJS.ErrnoException | undefined)?.code ?? parsed.error?.message}`
+    );
     assert.notEqual(parsed.status, 0);
     assert.match(`${parsed.stdout}\n${parsed.stderr}`, /not configured|config\.invalid/u);
     assert.doesNotMatch(
@@ -3199,7 +3248,7 @@ display_name = "K3"
 
 test(
   "generated Kimi subscription path reflects real Kimi Code 0.29.1 rejecting near-refresh access-only credentials",
-  { skip: !runningUnderBun || !fs.existsSync(localKimiCode), timeout: 15_000 },
+  { skip: !runningUnderBun || !fs.existsSync(localKimiCode), timeout: 60_000 },
   () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-kimi-frozen-auth-"));
     try {
@@ -3243,7 +3292,7 @@ enabled = true
         "utf8"
       );
       execFileSync(localKimiCode, ["doctor", "config", path.join(home, "config.toml")], { encoding: "utf8" });
-      const parsed = spawnSync(
+      const parsed = spawnKimiSurfaceProbe(
         localKimiCode,
         ["--output-format", "text", "--model", "kimi-k3", "--prompt", "Contract only"],
         {
@@ -3255,10 +3304,14 @@ enabled = true
             NO_PROXY: "127.0.0.1,localhost"
           },
           encoding: "utf8",
-          timeout: 5_000
+          timeout: 15_000
         }
       );
-      assert.equal(parsed.error, undefined);
+      assert.equal(
+        parsed.error,
+        undefined,
+        `Kimi Code authentication probe did not start after one transient retry: ${(parsed.error as NodeJS.ErrnoException | undefined)?.code ?? parsed.error?.message}`
+      );
       assert.notEqual(parsed.status, 0);
       assert.match(`${parsed.stdout}\n${parsed.stderr}`, /login_required|refresh_token|no-refresh-token/u);
       assert.doesNotMatch(
@@ -10002,6 +10055,12 @@ test("syncRun does not finalize an agent before its deterministic verifier has e
   assert.equal(
     fs.existsSync(path.join(run.value!.run_root, "artifacts", "project-discovery", "artifact-manifest.json")),
     false
+  );
+  const attemptLedgerPath = path.join(run.value!.run_root, "attempts.jsonl");
+  assert.equal(
+    fs.existsSync(attemptLedgerPath) ? fs.readFileSync(attemptLedgerPath, "utf8").trim() : "",
+    "",
+    "an agent success must not become an immutable phantom attempt before verifier evidence exists"
   );
   const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
     nodes?: Record<string, { status?: string }>;
