@@ -1603,7 +1603,7 @@ test(
 );
 
 test(
-  "stock adapter migration recovers after process death with the target quarantined",
+  "stock adapter migration requires one strict current recovery marker before recovering a quarantined target",
   { concurrency: false, skip: process.platform === "win32" },
   () => {
     const project = tempProject();
@@ -1639,21 +1639,53 @@ test(
     });
     assert.equal(crashed.status, 86, crashed.stderr);
     assert.equal(fs.existsSync(codexPath), false);
+    const preparedPath = path.join(agentsDirectory, ".codex.ts.ultrafuzz-init-prepared");
+    const preparedBytes = fs.readFileSync(preparedPath);
     const recoveryMarkerPath = path.join(agentsDirectory, ".codex.ts.ultrafuzz-init-recovery");
     assert.equal(fs.existsSync(recoveryMarkerPath), true);
     const marker = fs.readFileSync(recoveryMarkerPath, "utf8");
+    const parsedMarker = JSON.parse(marker) as Record<string, unknown>;
     const duplicated = marker.replace(
       '"target_basename":"codex.ts"',
       '"target_basename":"codex.ts","target_basename":"codex.ts"'
     );
     assert.notEqual(duplicated, marker);
-    fs.writeFileSync(recoveryMarkerPath, duplicated, "utf8");
+    const missingVersion = { ...parsedMarker };
+    delete missingVersion.schema_version;
+    const invalidMarkers = [
+      {
+        name: "unknown field",
+        contents: `${JSON.stringify({ ...parsedMarker, unexpected: true })}\n`
+      },
+      { name: "duplicate key", contents: duplicated },
+      {
+        name: "numeric historical version",
+        contents: `${JSON.stringify({
+          ...parsedMarker,
+          schema_version: 1
+        })}\n`
+      },
+      { name: "missing version", contents: `${JSON.stringify(missingVersion)}\n` },
+      { name: "malformed present marker", contents: '{"schema_version":' },
+      {
+        name: "different target binding",
+        contents: `${JSON.stringify({
+          ...parsedMarker,
+          target_basename: "claude.ts",
+          temporary_basename: ".claude.ts.ultrafuzz-init-prepared"
+        })}\n`
+      }
+    ];
+    for (const invalid of invalidMarkers) {
+      fs.writeFileSync(recoveryMarkerPath, invalid.contents, "utf8");
 
-    const rejected = initProject({ projectRoot: project });
-    assert.equal(rejected.ok, false);
-    assert.equal(rejected.diagnostics[0]?.code, "INIT_PATH_UNSAFE");
-    assert.equal(fs.readFileSync(recoveryMarkerPath, "utf8"), duplicated);
-    assert.equal(fs.existsSync(codexPath), false);
+      const rejected = initProject({ projectRoot: project });
+      assert.equal(rejected.ok, false, invalid.name);
+      assert.equal(rejected.diagnostics[0]?.code, "INIT_PATH_UNSAFE", invalid.name);
+      assert.equal(fs.readFileSync(recoveryMarkerPath, "utf8"), invalid.contents, invalid.name);
+      assert.equal(fs.existsSync(codexPath), false, invalid.name);
+      assert.deepEqual(fs.readFileSync(preparedPath), preparedBytes, invalid.name);
+    }
 
     fs.writeFileSync(recoveryMarkerPath, marker, "utf8");
 
