@@ -27,6 +27,13 @@ describe("validateTopology", () => {
     }
   });
 
+  it("rejects required commands on non-executable meta nodes", () => {
+    const topology = validTopology();
+    topology.nodes[0] = { ...topology.nodes[0]!, required_commands: ["recon"] };
+
+    expect(() => validateTopology(topology)).toThrow(expect.objectContaining({ code: "INVALID_META_NODE" }));
+  });
+
   it("resolves group loop defaults with node overrides", () => {
     const topology = validTopology({
       defaults: { strategy_loops: 1 },

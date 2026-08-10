@@ -208,7 +208,9 @@ async function requiredCommandPreflightDiagnostics(
   try {
     commandProbes =
       input.requiredCommandProbe === undefined
-        ? await probeCommandsForExecution(resolvedConfig, requiredCommands, input.env ?? process.env)
+        ? await probeCommandsForExecution(resolvedConfig, requiredCommands, input.env ?? process.env, {
+            cwd: path.resolve(input.projectRoot)
+          })
         : await input.requiredCommandProbe(requiredCommands);
   } catch (error) {
     return [

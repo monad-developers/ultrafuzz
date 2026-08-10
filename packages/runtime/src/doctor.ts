@@ -94,7 +94,7 @@ export async function diagnoseProject(input: DoctorInput) {
                 resolved.config,
                 commandRequirements.map((entry) => entry.name),
                 env,
-                { includeVersions: true }
+                { includeVersions: true, cwd: projectRoot }
               )
             : input.requiredCommandProbe(commandRequirements.map((entry) => entry.name))
         ).catch((error: unknown) => {
