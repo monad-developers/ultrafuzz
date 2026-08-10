@@ -181,6 +181,228 @@ test("Ajv and every retained Zod parser agree bidirectionally on positive, negat
   }
 });
 
+test("property-campaign v3 JSON Schema and Zod agree on every portable status conditional", () => {
+  const entry = artifactSchemaRegistry().find((candidate) => candidate.filename === "property-campaign.schema.json");
+  assert.ok(entry?.zodParser !== undefined);
+  const parser = (artifactExports as unknown as Record<string, unknown>)[entry.zodParser] as ZodLikeParser;
+  const base = structuredClone(contractFixtures["ultrafuzz/property-campaign@3"]!.valid) as Record<string, unknown>;
+  const executionBase = base.execution as Record<string, unknown>;
+  const coverageBase = base.coverage as Record<string, unknown>;
+  const withExecution = (execution: Record<string, unknown>): Record<string, unknown> => ({
+    ...structuredClone(base),
+    execution: { ...executionBase, ...execution }
+  });
+  const withCoverage = (coverage: Record<string, unknown>): Record<string, unknown> => ({
+    ...structuredClone(base),
+    coverage: { ...coverageBase, ...coverage }
+  });
+  const result = (status: string, failureIds: string[], reason: string | null): Record<string, unknown> => ({
+    property_id: "property-1",
+    status,
+    failure_ids: failureIds,
+    coverage_metric_names: [],
+    evidence_refs: [],
+    reason
+  });
+  const failure = (
+    status: string,
+    deterministicReproducerRef: string | null,
+    reproductionBlocker: string | null
+  ): Record<string, unknown> => ({
+    id: "failure-1",
+    status,
+    property_ids: ["property-1"],
+    entrypoint: "handler()",
+    sequence: ["handler()"],
+    precondition_evidence: ["fixture precondition held"],
+    raw_reproducer_ref: "backends/recon-fuzzer/results.json",
+    deterministic_reproducer_ref: deterministicReproducerRef,
+    reproduction_blocker: reproductionBlocker
+  });
+  const cases: Array<{ label: string; value: unknown; expected: boolean }> = [
+    { label: "execution-unavailable", value: base, expected: true },
+    {
+      label: "execution-complete",
+      value: withExecution({
+        status: "complete",
+        usable_results: true,
+        started_at: "2026-01-01T00:00:00Z",
+        exit_code: 0,
+        failure: null
+      }),
+      expected: true
+    },
+    {
+      label: "execution-complete-nonzero",
+      value: withExecution({
+        status: "complete",
+        usable_results: true,
+        started_at: "2026-01-01T00:00:00Z",
+        exit_code: 1,
+        failure: null
+      }),
+      expected: false
+    },
+    {
+      label: "execution-partial",
+      value: withExecution({
+        status: "partial",
+        usable_results: true,
+        started_at: "2026-01-01T00:00:00Z",
+        exit_code: 1,
+        failure: { category: "process-failed", summary: "The backend stopped early." }
+      }),
+      expected: true
+    },
+    {
+      label: "execution-partial-without-failure",
+      value: withExecution({
+        status: "partial",
+        usable_results: true,
+        started_at: "2026-01-01T00:00:00Z",
+        exit_code: 1,
+        failure: null
+      }),
+      expected: false
+    },
+    {
+      label: "execution-blocked",
+      value: withExecution({
+        status: "blocked",
+        usable_results: false,
+        started_at: null,
+        exit_code: null,
+        failure: { category: "smoke-failed", summary: "The smoke did not pass." }
+      }),
+      expected: true
+    },
+    {
+      label: "execution-blocked-after-start",
+      value: withExecution({
+        status: "blocked",
+        usable_results: false,
+        started_at: "2026-01-01T00:00:00Z",
+        exit_code: null,
+        failure: { category: "smoke-failed", summary: "The smoke did not pass." }
+      }),
+      expected: false
+    },
+    {
+      label: "execution-timed-out",
+      value: withExecution({
+        status: "timed-out",
+        usable_results: true,
+        started_at: "2026-01-01T00:00:00Z",
+        exit_code: null,
+        failure: { category: "deadline-exceeded", summary: "The deadline elapsed." }
+      }),
+      expected: true
+    },
+    {
+      label: "execution-timed-out-wrong-category",
+      value: withExecution({
+        status: "timed-out",
+        usable_results: true,
+        started_at: "2026-01-01T00:00:00Z",
+        exit_code: null,
+        failure: { category: "process-failed", summary: "The deadline elapsed." }
+      }),
+      expected: false
+    },
+    {
+      label: "execution-unavailable-wrong-category",
+      value: withExecution({ failure: { category: "process-failed", summary: "Recon is unavailable." } }),
+      expected: false
+    },
+    {
+      label: "coverage-reported",
+      value: withCoverage({
+        status: "reported",
+        metrics: [{ name: "executions", value: 1, unit: "count", source_ref: "backends/recon-fuzzer/results.json" }],
+        unavailable_reason: null
+      }),
+      expected: true
+    },
+    {
+      label: "coverage-reported-empty",
+      value: withCoverage({ status: "reported", metrics: [], unavailable_reason: null }),
+      expected: false
+    },
+    {
+      label: "coverage-unavailable-with-metric",
+      value: withCoverage({
+        status: "unavailable",
+        metrics: [{ name: "executions", value: 1, unit: "count", source_ref: "backends/recon-fuzzer/results.json" }],
+        unavailable_reason: "The backend did not report coverage."
+      }),
+      expected: false
+    },
+    {
+      label: "property-result-failed",
+      value: { ...structuredClone(base), property_results: [result("failed", ["failure-1"], null)] },
+      expected: true
+    },
+    {
+      label: "property-result-failed-without-failure",
+      value: { ...structuredClone(base), property_results: [result("failed", [], null)] },
+      expected: false
+    },
+    {
+      label: "property-result-passed",
+      value: { ...structuredClone(base), property_results: [result("passed", [], null)] },
+      expected: true
+    },
+    {
+      label: "property-result-passed-with-reason",
+      value: { ...structuredClone(base), property_results: [result("passed", [], "Unexpected reason")] },
+      expected: false
+    },
+    {
+      label: "property-result-inconclusive",
+      value: {
+        ...structuredClone(base),
+        property_results: [result("inconclusive", [], "The run ended before classification.")]
+      },
+      expected: true
+    },
+    {
+      label: "property-result-inconclusive-without-reason",
+      value: { ...structuredClone(base), property_results: [result("inconclusive", [], null)] },
+      expected: false
+    },
+    {
+      label: "failure-reproduced",
+      value: {
+        ...structuredClone(base),
+        failures: [failure("reproduced", "backends/recon-fuzzer/reproducers/failure-1.t.sol", null)]
+      },
+      expected: true
+    },
+    {
+      label: "failure-reproduced-without-deterministic-path",
+      value: { ...structuredClone(base), failures: [failure("reproduced", null, null)] },
+      expected: false
+    },
+    {
+      label: "failure-blocked",
+      value: {
+        ...structuredClone(base),
+        failures: [failure("blocked-unreproduced", null, "The raw sequence did not replay deterministically.")]
+      },
+      expected: true
+    },
+    {
+      label: "failure-blocked-without-blocker",
+      value: { ...structuredClone(base), failures: [failure("blocked-unreproduced", null, null)] },
+      expected: false
+    }
+  ];
+
+  for (const fixture of cases) {
+    assertParity(entry.id, parser, fixture.value, fixture.expected, `property-campaign:${fixture.label}`);
+  }
+});
+
 test("analysis-bundle payload schemas and retained Zod reject the same current-version and boundary mutations", () => {
   const cases: Array<{ filename: string; parser: ZodLikeParser; label: string; value: unknown; expected: boolean }> =
     [];
