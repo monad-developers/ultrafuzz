@@ -12,6 +12,21 @@ describe("validateTopology", () => {
     expect(result.effectiveLoopCounts.strategy).toBe(2);
   });
 
+  it("normalizes required commands as unique sorted executable names", () => {
+    const topology = validTopology();
+    topology.nodes[2] = { ...topology.nodes[2]!, required_commands: ["recon", "covg-eval", "recon"] };
+
+    expect(validateTopology(topology).topology.nodes[2]?.required_commands).toEqual(["covg-eval", "recon"]);
+  });
+
+  it("rejects required commands that are paths or command-line fragments", () => {
+    for (const command of ["../recon", "/usr/bin/recon", "recon --version", "-recon", ""]) {
+      const topology = validTopology();
+      topology.nodes[2] = { ...topology.nodes[2]!, required_commands: [command] };
+      expect(() => validateTopology(topology)).toThrow(expect.objectContaining({ code: "INVALID_TOPOLOGY_SHAPE" }));
+    }
+  });
+
   it("resolves group loop defaults with node overrides", () => {
     const topology = validTopology({
       defaults: { strategy_loops: 1 },

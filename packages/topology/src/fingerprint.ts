@@ -44,6 +44,7 @@ function fingerprintNode(node: ExpandedNode): FingerprintNodePayload {
     ...(node.referenceRevision ? { referenceRevision: node.referenceRevision } : {}),
     ...(node.group ? { group: node.group } : {}),
     dependsOn: [...node.dependsOn].sort(),
+    ...(node.requiredCommands === undefined ? {} : { requiredCommands: [...node.requiredCommands].sort() }),
     artifactDir: node.artifactDir,
     ...(node.timeoutSeconds !== undefined ? { timeoutSeconds: node.timeoutSeconds } : {}),
     retryPolicy: node.retryPolicy,

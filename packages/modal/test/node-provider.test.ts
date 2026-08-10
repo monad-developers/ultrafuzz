@@ -17,6 +17,7 @@ import {
   modalNodeVolumeName,
   parseModalNodeSandboxInput,
   parseModalNodeWorkerInput,
+  probeModalCommands,
   type ModalNodeSandboxInput
 } from "../src/node-provider.js";
 import {
@@ -36,6 +37,43 @@ const PROVIDER_SECRET_ENV = "ULTRAFUZZ_TEST_PROVIDER_SECRET";
 const AGENT_ENV = "ULTRAFUZZ_TEST_AGENT_KEY";
 
 describe("Modal node sandbox provider", () => {
+  it("probes required commands inside the configured image and tears down the transient sandbox", async () => {
+    const sandbox = fakeSandbox(undefined);
+    sandbox.exec = vi.fn(async () => ({
+      stdout: {
+        readText: vi.fn(async () =>
+          JSON.stringify([
+            { name: "covg-eval", available: false, path: null, version: null },
+            { name: "recon", available: true, path: "/usr/local/bin/recon", version: "recon 1.2.3" }
+          ])
+        )
+      },
+      stderr: { readText: vi.fn(async () => "") },
+      wait: vi.fn(async () => 0)
+    }));
+    const client = fakeClient({ created: sandbox });
+
+    await expect(
+      probeModalCommands(providerOptions(client), ["recon", "covg-eval"], { includeVersions: true })
+    ).resolves.toEqual([
+      { name: "covg-eval", available: false, path: null, version: null },
+      { name: "recon", available: true, path: "/usr/local/bin/recon", version: "recon 1.2.3" }
+    ]);
+    expect(client.sandboxes.create).toHaveBeenCalledOnce();
+    expect(sandbox.exec).toHaveBeenCalledWith(
+      expect.arrayContaining(["node", "--eval", JSON.stringify(["covg-eval", "recon"])]),
+      { env: { ULTRAFUZZ_PROBE_VERSIONS: "1" } }
+    );
+    expect(sandbox.terminate).toHaveBeenCalledOnce();
+    expect(client.close).toHaveBeenCalledOnce();
+  });
+
+  it("rejects unsafe command names before creating a cloud sandbox", async () => {
+    const client = fakeClient({});
+    await expect(probeModalCommands(providerOptions(client), ["../recon"])).rejects.toThrow(/bare executable names/u);
+    expect(client.sandboxes.create).not.toHaveBeenCalled();
+  });
+
   it("uses stable bounded identities without embedding raw controller identifiers", () => {
     const tags = modalNodeTags("run/with spaces", "node:attempt");
     expect(tags).toEqual({

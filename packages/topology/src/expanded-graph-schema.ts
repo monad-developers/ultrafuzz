@@ -76,6 +76,11 @@ export const expandedGraphJsonSchema = {
           },
           group: { type: "string", minLength: 1 },
           dependsOn: { type: "array", items: { type: "string", minLength: 1 } },
+          requiredCommands: {
+            type: "array",
+            uniqueItems: true,
+            items: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._+-]*$" }
+          },
           artifactDir: { type: "string", minLength: 1 },
           timeoutSeconds: { type: "number", exclusiveMinimum: 0 },
           retryPolicy: {
@@ -199,6 +204,33 @@ function validateExpandedNodeRecord(value: unknown, path: string, issues: Topolo
   }
   validateReferenceRevision(value.referenceRevision, `${path}.referenceRevision`, issues);
   expectStringArray(value, "dependsOn", path, issues);
+  if (value.requiredCommands !== undefined) {
+    expectStringArray(value, "requiredCommands", path, issues);
+    if (
+      Array.isArray(value.requiredCommands) &&
+      value.requiredCommands.some(
+        (command) => typeof command === "string" && !/^[A-Za-z0-9][A-Za-z0-9._+-]*$/u.test(command)
+      )
+    ) {
+      issue(
+        issues,
+        `${path}.requiredCommands`,
+        "EXPANDED_NODE_REQUIRED_COMMAND_INVALID",
+        "requiredCommands must contain bare executable names"
+      );
+    }
+    if (
+      Array.isArray(value.requiredCommands) &&
+      new Set(value.requiredCommands).size !== value.requiredCommands.length
+    ) {
+      issue(
+        issues,
+        `${path}.requiredCommands`,
+        "EXPANDED_NODE_REQUIRED_COMMAND_DUPLICATE",
+        "requiredCommands must not contain duplicates"
+      );
+    }
+  }
   validateOutputs(value.outputs, `${path}.outputs`, issues);
   if (value.timeoutSeconds !== undefined && (typeof value.timeoutSeconds !== "number" || value.timeoutSeconds <= 0)) {
     issue(issues, `${path}.timeoutSeconds`, "EXPANDED_NODE_TIMEOUT_INVALID", "timeoutSeconds must be positive");

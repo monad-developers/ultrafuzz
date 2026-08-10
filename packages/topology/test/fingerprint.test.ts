@@ -40,4 +40,12 @@ describe("fingerprintGraph", () => {
       )
     ).not.toBe(base);
   });
+
+  it("changes when a node's required commands change", () => {
+    const topology = validTopology();
+    const base = fingerprintGraph(expandTopology(topology));
+    topology.nodes[2] = { ...topology.nodes[2]!, required_commands: ["recon"] };
+
+    expect(fingerprintGraph(expandTopology(topology))).not.toBe(base);
+  });
 });

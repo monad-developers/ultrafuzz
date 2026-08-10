@@ -99,17 +99,18 @@ Every node must define:
 
 Agentic nodes support:
 
-| Field             | Meaning                                                     |
-| ----------------- | ----------------------------------------------------------- |
-| `kind`            | Optional. Defaults to `agentic`.                            |
-| `prompt`          | Prompt path under `.ultrafuzz/prompts/`.                    |
-| `group`           | Group ID.                                                   |
-| `loops`           | Node loop count. Overrides group and global loop defaults.  |
-| `loop_mode`       | `parallel` or `series`. Defaults to `parallel`.             |
-| `timeout_seconds` | Node timeout override.                                      |
-| `max_attempts`    | Maximum attempts for the agent task.                        |
-| `outputs`         | Required output paths, named contracts, and primary marker. |
-| `model_profiles`  | Explicit model profile fan-out for this node.               |
+| Field               | Meaning                                                     |
+| ------------------- | ----------------------------------------------------------- |
+| `kind`              | Optional. Defaults to `agentic`.                            |
+| `prompt`            | Prompt path under `.ultrafuzz/prompts/`.                    |
+| `group`             | Group ID.                                                   |
+| `loops`             | Node loop count. Overrides group and global loop defaults.  |
+| `loop_mode`         | `parallel` or `series`. Defaults to `parallel`.             |
+| `timeout_seconds`   | Node timeout override.                                      |
+| `max_attempts`      | Maximum attempts for the agent task.                        |
+| `outputs`           | Required output paths, named contracts, and primary marker. |
+| `model_profiles`    | Explicit model profile fan-out for this node.               |
+| `required_commands` | Bare executable names that must pass launch preflight.      |
 
 Every executable node must declare at least one output, every output must name a
 resolvable contract, and exactly one output must set `primary: true`. Prompt
@@ -117,6 +118,11 @@ paths and artifact paths must be relative, traversal-free paths. Output paths
 are relative to the node artifact directory and must not start
 with `artifacts/` or `.ultrafuzz/`. The runtime-owned
 `artifact-manifest.json` path is reserved and cannot be declared as an output.
+`required_commands` entries are deduplicated across the active, transformed
+topology. Local runs resolve them on the controller `PATH`; cloud runs probe the
+configured provider image. A missing command aborts launch before run state,
+workflow IDs, node attempts, or model work are created. Ultrafuzz never installs
+these backend commands during a run.
 
 Built-in contracts include `ultrafuzz/findings@1`,
 `ultrafuzz/generated-tests@1`, `ultrafuzz/properties@1`,
@@ -249,5 +255,7 @@ Topology validation rejects:
 - Nodes without exactly one primary output.
 - Unknown fields at every topology level.
 - Invalid or unknown model profile IDs.
+- Required commands that are paths, flags, or shell fragments rather than bare
+  executable names.
 - Prompt artifact references to unknown producers, non-ancestors, or producers
   without declared artifacts.

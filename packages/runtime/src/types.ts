@@ -109,6 +109,7 @@ export interface ValidateProjectResult {
     digest?: string;
     logical_nodes: number;
     expanded_nodes: number;
+    required_commands: string[];
   };
   prompts?: {
     prompt_dir: string;
@@ -211,7 +212,12 @@ export interface PlanRunValue {
   rendered_prompts: RenderedPromptPlan[];
 }
 
-export type StartRunInput = PlanRunInput;
+export interface StartRunInput extends PlanRunInput {
+  /** Execution-provider probe override for embedders and isolated tests. */
+  requiredCommandProbe?: (
+    commands: readonly string[]
+  ) => Promise<Array<{ name: string; available: boolean; path: string | null; version: string | null }>>;
+}
 
 export interface StartRunValue {
   run_id: string;
@@ -725,6 +731,8 @@ export interface DoctorValue {
     required: boolean;
     available: boolean;
     path: string | null;
+    /** Best-effort first line from `<command> --version`. */
+    version: string | null;
   }>;
   workflow_engine: {
     bundled_version: string;
@@ -746,6 +754,8 @@ export interface DoctorInput {
   env?: Record<string, string | undefined>;
   /** Skips the registry lookup; the latest version is reported as `unknown`. */
   offline?: boolean;
+  /** Execution-provider probe override for embedders and isolated tests. */
+  requiredCommandProbe?: StartRunInput["requiredCommandProbe"];
 }
 
 export interface SyncRunInput {

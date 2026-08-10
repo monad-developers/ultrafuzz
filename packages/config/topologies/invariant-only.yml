@@ -373,6 +373,8 @@ nodes:
     kind: agentic
     prompt: strategies/invariants/coverage.md
     group: strategies
+    required_commands:
+      - covg-eval
     depends_on:
       - stateful-invariant-handlers
       - property-specification-fanin
@@ -418,6 +420,8 @@ nodes:
     kind: agentic
     prompt: strategies/invariants/invariant-testing-campaign.md
     group: strategies
+    required_commands:
+      - recon
     depends_on:
       - stateful-invariant-implement-properties
     outputs:
