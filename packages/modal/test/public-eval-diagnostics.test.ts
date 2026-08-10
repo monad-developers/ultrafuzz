@@ -396,7 +396,7 @@ describe("public post-eval diagnostics", () => {
     ).toThrow();
 
     const invalid = evalFixture();
-    fs.writeFileSync(path.join(invalid.runRoot, "state.json"), '{"schema_version":"ultrafuzz.run-state.v4"}\n');
+    fs.writeFileSync(path.join(invalid.runRoot, "state.json"), '{"schema_version":"ultrafuzz.run-state.v5"}\n');
     expect(() =>
       createPublicEvalDiagnostics({
         config: CONFIG,

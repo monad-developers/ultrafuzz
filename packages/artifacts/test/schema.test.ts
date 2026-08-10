@@ -1201,7 +1201,7 @@ test("run state schema covers all required node states and rejects malformed sta
   });
 
   assert.equal(validateRunStateSchema(state).ok, true);
-  assert.equal(state.schema_version, "ultrafuzz.run-state.v4");
+  assert.equal(state.schema_version, "ultrafuzz.run-state.v5");
   assert.equal(state.nodes["node-1"]?.wait_reason, "ready");
   assert.equal(state.nodes["node-1"]?.next_eligible_action, "dispatch");
   assert.equal(state.controller_lease.status, "active");

@@ -315,7 +315,8 @@ function registerMissingFixtureDependencies(
 function verifyRequiredArtifactsForAttempt(
   layout: ReturnType<typeof createRunLayout>,
   node: PlannedGraphNode,
-  attemptId: string
+  attemptId: string,
+  authenticated?: Parameters<typeof verifyRuntimeRequiredArtifactsForAttempt>[3]
 ): ReturnType<typeof verifyRuntimeRequiredArtifactsForAttempt> {
   const graph = JSON.parse(fs.readFileSync(layout.graphPath, "utf8")) as {
     schema_version: string;
@@ -344,7 +345,7 @@ function verifyRequiredArtifactsForAttempt(
   if (existingIndex === -1) graph.nodes.push(planned);
   else graph.nodes[existingIndex] = planned;
   fs.writeFileSync(layout.graphPath, JSON.stringify(graph), "utf8");
-  return verifyRuntimeRequiredArtifactsForAttempt(layout, planned, attemptId);
+  return verifyRuntimeRequiredArtifactsForAttempt(layout, planned, attemptId, authenticated);
 }
 
 function boundOutput(
@@ -401,6 +402,7 @@ function finalizeArtifactNode(
     nodeId,
     include: outputs.map((output) => output.path),
     outputs: [...outputs],
+    prerequisiteNodeIds: planned.depends_on,
     provenance: {
       producer_node_id: nodeId,
       logical_node_id: logicalNodeId,
@@ -440,7 +442,13 @@ function finalizeArtifactNode(
         state: "finished",
         attempt: 0
       },
-      output_contracts: { ok: true, missing: [] }
+      output_contracts: {
+        ok: true,
+        missing: [],
+        artifact_manifest_sha256: createHash("sha256")
+          .update(fs.readFileSync(path.join(getNodeArtifactDir(layout, nodeId), "artifact-manifest.json")))
+          .digest("hex")
+      }
     }
   });
 }
@@ -903,7 +911,9 @@ test("sealed planned graph ignores unrelated producers but rejects a missing pla
   };
   const plannedReportNode = { ...reportNode, depends_on: [implementationNode.id] };
   writePlannedGraph(missingLayout, [catalogNode, implementationNode, plannedReportNode]);
-  writeArtifact(missingLayout, reportNode.id, "report.json", JSON.stringify(currentReport(missingLayout.runId)));
+  // This branch deliberately leaves a planned prerequisite unfinalized. Write
+  // the current output without manufacturing a contradictory success manifest.
+  writeArtifactFile(missingLayout, reportNode.id, "report.json", JSON.stringify(currentReport(missingLayout.runId)));
   const missing = verifyRequiredArtifactsForAttempt(missingLayout, plannedReportNode, plannedReportNode.id);
   assert.equal(missing.ok, false);
   assert.ok(
@@ -2794,6 +2804,70 @@ test("property fan-in consumes one exactly bound custom property-lens path", () 
   const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
 
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+});
+
+test("authenticated current-node snapshots remain authoritative across live-file swaps", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-authenticated-current-snapshots" });
+  const node = writeMinimalPropertyFaninFixture(layout);
+  writeDeclaredPropertyLens(
+    layout,
+    "property-specification-recon",
+    "custom/recon-lens.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v2",
+      properties: [
+        {
+          id: "recon-1",
+          description: "Supply accounting remains consistent.",
+          category: "accounting",
+          priority: "high"
+        }
+      ]
+    })
+  );
+
+  const artifactDir = getNodeArtifactDir(layout, node.id);
+  const propertiesPath = path.join(artifactDir, "properties.json");
+  const markdownPath = path.join(artifactDir, "properties.md");
+  const propertiesBytes = fs.readFileSync(propertiesPath);
+  const validMarkdownBytes = fs.readFileSync(markdownPath);
+  const invalidMarkdownBytes = Buffer.from("# Authenticated but semantically unrelated Markdown\n", "utf8");
+  const authenticated = (
+    markdownBytes: Buffer
+  ): NonNullable<Parameters<typeof verifyRuntimeRequiredArtifactsForAttempt>[3]> => {
+    const bytesByPath = new Map<string, Buffer>([
+      ["properties.json", propertiesBytes],
+      ["properties.md", markdownBytes]
+    ]);
+    return {
+      outputs: new Map(
+        node.outputs.map((output) => [
+          output.path,
+          {
+            absolutePath: path.join(artifactDir, output.path),
+            bytes: Buffer.from(bytesByPath.get(output.path)!)
+          }
+        ])
+      ),
+      publications: new Map([...bytesByPath].map(([relativePath, bytes]) => [relativePath, Buffer.from(bytes)]))
+    };
+  };
+
+  // An attacker temporarily restores authorized live bytes after the host has
+  // captured a semantically invalid publication. The immutable capture wins.
+  const invalidCapture = verifyRequiredArtifactsForAttempt(layout, node, node.id, authenticated(invalidMarkdownBytes));
+  assert.equal(invalidCapture.ok, false, JSON.stringify(invalidCapture.diagnostics));
+  assert.ok(
+    invalidCapture.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_MARKDOWN_PARITY_MISSING"),
+    JSON.stringify(invalidCapture.diagnostics)
+  );
+
+  // The opposite swap cannot make an already authenticated valid publication
+  // fail: the later mutable file is not consulted by the contextual join.
+  fs.writeFileSync(markdownPath, invalidMarkdownBytes);
+  const validCapture = verifyRequiredArtifactsForAttempt(layout, node, node.id, authenticated(validMarkdownBytes));
+  assert.equal(validCapture.ok, true, JSON.stringify(validCapture.diagnostics));
+  assert.deepEqual(fs.readFileSync(markdownPath), invalidMarkdownBytes);
 });
 
 test("property fan-in selects a declared lens contract without relying on the producer name", () => {

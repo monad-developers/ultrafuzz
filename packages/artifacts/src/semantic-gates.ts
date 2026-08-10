@@ -14,6 +14,8 @@ export type SemanticGateScope = (typeof SEMANTIC_GATE_SCOPES)[number];
 export interface SemanticFilesystemContext {
   /** Directory against which artifact-relative paths are resolved. */
   rootDirectory: string;
+  /** Authenticated immutable publication bytes, keyed by artifact-relative path. */
+  files?: ReadonlyMap<string, Uint8Array>;
 }
 
 export interface SemanticGitContext {
@@ -1925,6 +1927,29 @@ function filesystemManifestIssues(
     const expectedDigest = stringField(row, "sha256");
     if (relativePath === undefined) continue;
     const filePath = resolveArtifactFile(root, relativePath);
+    const snapshot = context.filesystem!.files?.get(relativePath);
+    if (context.filesystem!.files !== undefined) {
+      const rowPath = `${displayPath(rowsPath)}[${index}]`;
+      if (filePath === undefined || snapshot === undefined) {
+        issues.push(
+          issue(`${rowPath}.path`, `Referenced file is missing or nonregular: ${JSON.stringify(relativePath)}`)
+        );
+        continue;
+      }
+      if (
+        expectedDigest !== undefined &&
+        crypto.createHash("sha256").update(snapshot).digest("hex") !== expectedDigest
+      ) {
+        issues.push(issue(`${rowPath}.sha256`, `Referenced file digest does not match ${JSON.stringify(relativePath)}`));
+      }
+      const expectedSize = numberField(row, "size_bytes");
+      if (expectedSize !== undefined && expectedSize !== snapshot.byteLength) {
+        issues.push(
+          issue(`${rowPath}.size_bytes`, `Referenced file size does not match ${JSON.stringify(relativePath)}`)
+        );
+      }
+      continue;
+    }
     let stats: fs.Stats | undefined;
     try {
       if (filePath !== undefined) stats = fs.lstatSync(filePath);
@@ -1957,6 +1982,16 @@ function generatedTestExistenceIssues(document: unknown, context: SemanticGateCo
     const relativePath = stringField(row, "path");
     if (relativePath === undefined) return [];
     const filePath = resolveArtifactFile(root, relativePath);
+    if (context.filesystem!.files !== undefined) {
+      return filePath !== undefined && context.filesystem!.files.has(relativePath)
+        ? []
+        : [
+            issue(
+              `$.generated_tests[${index}].path`,
+              `Generated test does not exist: ${JSON.stringify(relativePath)}`
+            )
+          ];
+    }
     try {
       if (filePath !== undefined) {
         const stats = fs.lstatSync(filePath);

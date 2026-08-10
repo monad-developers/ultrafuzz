@@ -2410,6 +2410,7 @@ async function finalizeTerminalTask(input: {
   }
 
   let findingsCount: number | undefined;
+  let artifactManifestSha256: string | undefined;
   let findingsValidationFailed = false;
   let validatedFindingsOutputs = 0;
   let totalFindings = 0;
@@ -2494,6 +2495,9 @@ async function finalizeTerminalTask(input: {
         prerequisiteNodeIds: input.task.dependencies,
         provenance: artifactProvenance(input.task, input.workflowRunId)
       });
+      artifactManifestSha256 = sha256File(
+        path.join(getNodeArtifactDir(input.layout, input.task.attemptId), "artifact-manifest.json")
+      );
       events.push({
         eventType: "artifact-manifest-written",
         status: "succeeded",
@@ -2542,7 +2546,11 @@ async function finalizeTerminalTask(input: {
     status: "succeeded",
     diagnostics,
     provenance: {
-      output_contracts: { ok: true, missing: [] },
+      output_contracts: {
+        ok: true,
+        missing: [],
+        artifact_manifest_sha256: artifactManifestSha256!
+      },
       ...(findingsCount !== undefined ? { findings_count: findingsCount } : {})
     },
     events

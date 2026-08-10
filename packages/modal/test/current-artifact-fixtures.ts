@@ -132,6 +132,28 @@ export function writeCurrentTerminalReport(
       ]
     })}\n`
   );
+  const layout = layoutForRunRoot(runRoot, runId);
+  writeArtifactManifest({
+    layout,
+    nodeId: "final-report",
+    include: ["report.md", "report.json"],
+    outputs,
+    provenance: {
+      producer_node_id: "final-report",
+      logical_node_id: "final-report",
+      attempt_index: 0,
+      loop_index: 0,
+      model_index: 0,
+      agent_ref: "CodexAgent",
+      workflow_run_id: workflowRunId,
+      workflow_task_id: agentTaskId,
+      origin: "workflow",
+      metadata: { concrete_node_id: "final-report" }
+    }
+  });
+  const artifactManifestSha256 = sha256Bytes(
+    fs.readFileSync(path.join(runRoot, "artifacts", "final-report", "artifact-manifest.json"))
+  );
   fs.writeFileSync(
     path.join(runRoot, "state.json"),
     `${JSON.stringify(
@@ -152,7 +174,7 @@ export function writeCurrentTerminalReport(
                 state: "finished",
                 attempt: 0
               },
-              output_contracts: { ok: true, missing: [] }
+              output_contracts: { ok: true, missing: [], artifact_manifest_sha256: artifactManifestSha256 }
             }
           }
         },
@@ -160,25 +182,6 @@ export function writeCurrentTerminalReport(
       )
     )}\n`
   );
-  const layout = layoutForRunRoot(runRoot, runId);
-  writeArtifactManifest({
-    layout,
-    nodeId: "final-report",
-    include: ["report.md", "report.json"],
-    outputs,
-    provenance: {
-      producer_node_id: "final-report",
-      logical_node_id: "final-report",
-      attempt_index: 0,
-      loop_index: 0,
-      model_index: 0,
-      agent_ref: "CodexAgent",
-      workflow_run_id: workflowRunId,
-      workflow_task_id: agentTaskId,
-      origin: "workflow",
-      metadata: { concrete_node_id: "final-report" }
-    }
-  });
   const marker: ArtifactVerificationMarker = {
     schema_version: ARTIFACT_VERIFICATION_SCHEMA_VERSION,
     attempt_id: "final-report",
@@ -272,7 +275,7 @@ export function currentRunState(
     })
   );
   return {
-    schema_version: "ultrafuzz.run-state.v4",
+    schema_version: "ultrafuzz.run-state.v5",
     run_id: "fixture-run",
     status: Object.values(nodes).some((node) => node.status === "failed") ? "failed" : "succeeded",
     graph_fingerprint: "a".repeat(64),
@@ -315,7 +318,7 @@ export function currentGenuineTaskFailureState(attemptId: string): Record<string
           verifier_task_id: `verify:${attemptId}`,
           state: "finished"
         },
-        output_contracts: { ok: true, missing: [] },
+        output_contracts: { ok: true, missing: [], artifact_manifest_sha256: "a".repeat(64) },
         terminal_disposition: {
           schema_version: "ultrafuzz.terminal-disposition.v1",
           kind: "task-output-validation-failure"
@@ -333,7 +336,7 @@ export function currentGenuineTaskFailureState(attemptId: string): Record<string
           verifier_task_id: "verify:final-report",
           state: "finished"
         },
-        output_contracts: { ok: true, missing: [] }
+        output_contracts: { ok: true, missing: [], artifact_manifest_sha256: "a".repeat(64) }
       }
     }
   });

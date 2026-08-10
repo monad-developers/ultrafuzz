@@ -15,6 +15,7 @@ import {
   writeArtifactManifest,
   writeFileDurable,
   writeJsonDurable,
+  type ArtifactManifest,
   type ArtifactManifestOutputContract,
   type ArtifactVerificationMarker,
   type PlannedGraphDocument,
@@ -102,24 +103,106 @@ test("missing verification evidence after successful finalization is invalid aut
   );
 });
 
+test("controller manifest seal rejects removal of a planned prerequisite row without repairing authority", () => {
+  const fixture = createVerifiedReportFixture("verified-report-prerequisite-removed", { withPrerequisite: true });
+  const manifestPath = path.join(fixture.layout.artifactsDir, "final-report", "artifact-manifest.json");
+  const manifest = readManifest(manifestPath);
+  assert.equal(manifest.prerequisite_manifests.length, 1);
+  manifest.prerequisite_manifests = [];
+  writeJsonDurable(manifestPath, manifest);
+  const removedBytes = fs.readFileSync(manifestPath);
+
+  assert.throws(
+    () => loadVerifiedFinalReportSnapshot(fixture.layout.root),
+    (error: unknown) =>
+      error instanceof VerifiedOutputError &&
+      error.code === "VERIFIED_OUTPUT_AUTHORITY_INVALID" &&
+      /manifest does not match controller finalization authority/iu.test(error.message)
+  );
+  assert.deepEqual(fs.readFileSync(manifestPath), removedBytes);
+});
+
+test("controller manifest seal rejects a prerequisite digest rewrite even when the rewritten digest is current", () => {
+  const fixture = createVerifiedReportFixture("verified-report-prerequisite-rewritten", { withPrerequisite: true });
+  const manifestPath = path.join(fixture.layout.artifactsDir, "final-report", "artifact-manifest.json");
+  const prerequisitePath = path.join(fixture.layout.artifactsDir, "producer", "artifact-manifest.json");
+  const prerequisite = readManifest(prerequisitePath);
+  prerequisite.created_at = "2030-01-01T00:00:00.000Z";
+  writeJsonDurable(prerequisitePath, prerequisite);
+  const rewrittenPrerequisiteBytes = fs.readFileSync(prerequisitePath);
+
+  const manifest = readManifest(manifestPath);
+  assert.equal(manifest.prerequisite_manifests.length, 1);
+  manifest.prerequisite_manifests[0]!.sha256 = digest(rewrittenPrerequisiteBytes);
+  writeJsonDurable(manifestPath, manifest);
+  const rewrittenManifestBytes = fs.readFileSync(manifestPath);
+
+  assert.throws(
+    () => loadVerifiedFinalReportSnapshot(fixture.layout.root),
+    (error: unknown) =>
+      error instanceof VerifiedOutputError &&
+      error.code === "VERIFIED_OUTPUT_AUTHORITY_INVALID" &&
+      /manifest does not match controller finalization authority/iu.test(error.message)
+  );
+  assert.deepEqual(fs.readFileSync(manifestPath), rewrittenManifestBytes);
+  assert.deepEqual(fs.readFileSync(prerequisitePath), rewrittenPrerequisiteBytes);
+});
+
+test("sealed manifest prerequisites must exactly cover the current planned direct dependencies", () => {
+  const fixture = createVerifiedReportFixture("verified-report-prerequisite-coverage", { withPrerequisite: true });
+  const manifestPath = path.join(fixture.layout.artifactsDir, "final-report", "artifact-manifest.json");
+  const manifest = readManifest(manifestPath);
+  manifest.prerequisite_manifests = [];
+  writeJsonDurable(manifestPath, manifest);
+  const manifestBytes = fs.readFileSync(manifestPath);
+  sealFinalReportManifest(fixture.layout, digest(manifestBytes));
+
+  assert.throws(
+    () => loadVerifiedFinalReportSnapshot(fixture.layout.root),
+    (error: unknown) =>
+      error instanceof VerifiedOutputError &&
+      error.code === "VERIFIED_OUTPUT_AUTHORITY_INVALID" &&
+      /prerequisites do not match the exact planned dependencies/iu.test(error.message)
+  );
+  assert.deepEqual(fs.readFileSync(manifestPath), manifestBytes);
+});
+
 function createVerifiedReportFixture(
   runId: string,
-  override: { report?: Record<string, unknown>; markdown?: string } = {}
+  override: { report?: Record<string, unknown>; markdown?: string; withPrerequisite?: boolean } = {}
 ): ReportFixture {
   const outputRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-verified-output-"));
   const outputs = finalReportOutputs();
+  const prerequisiteOutputs = producerOutputs();
   const graph: PlannedGraphDocument = {
     schema_version: PLANNED_GRAPH_SCHEMA_VERSION,
     graph_version: "3",
     topology_version: 2,
     groups: {},
     nodes: [
+      ...(override.withPrerequisite === true
+        ? [
+            {
+              id: "producer",
+              logical_id: "producer",
+              display_name: "Producer",
+              kind: "agentic" as const,
+              depends_on: [],
+              artifact_dir: "artifacts/producer",
+              outputs: prerequisiteOutputs,
+              prompt_id: "producer",
+              prompt_path: "review/producer.md",
+              loop: { index: 0, count: 1, mode: "parallel" as const, attempt_index: 0 },
+              model_fanout: []
+            }
+          ]
+        : []),
       {
         id: "final-report",
         logical_id: "final-report",
         display_name: "Final report",
         kind: "agentic",
-        depends_on: [],
+        depends_on: override.withPrerequisite === true ? ["producer"] : [],
         artifact_dir: "artifacts/final-report",
         outputs,
         prompt_id: "final-report",
@@ -136,6 +219,16 @@ function createVerifiedReportFixture(
     graphFingerprint: "f".repeat(64),
     configFingerprint: "e".repeat(64),
     stateNodes: [
+      ...(override.withPrerequisite === true
+        ? [
+            {
+              id: "producer",
+              logicalNodeId: "producer",
+              artifactDir: "artifacts/producer",
+              outputs: prerequisiteOutputs
+            }
+          ]
+        : []),
       {
         id: "final-report",
         logicalNodeId: "final-report",
@@ -153,11 +246,34 @@ function createVerifiedReportFixture(
   writeFileDurable(reportPath, reportBytes);
   writeFileDurable(markdownPath, markdownBytes);
 
+  if (override.withPrerequisite === true) {
+    writeFileDurable(path.join(layout.artifactsDir, "producer", "context.md"), "# Producer context\n");
+    writeArtifactManifest({
+      layout,
+      nodeId: "producer",
+      include: ["context.md"],
+      outputs: prerequisiteOutputs,
+      provenance: {
+        producer_node_id: "producer",
+        logical_node_id: "producer",
+        attempt_index: 0,
+        loop_index: 0,
+        model_index: 0,
+        agent_ref: "Codex",
+        workflow_run_id: WORKFLOW_RUN_ID,
+        workflow_task_id: "node:producer",
+        origin: "workflow",
+        metadata: { concrete_node_id: "producer" }
+      }
+    });
+  }
+
   writeArtifactManifest({
     layout,
     nodeId: "final-report",
     include: ["report.md", "report.json"],
     outputs,
+    prerequisiteNodeIds: override.withPrerequisite === true ? ["producer"] : [],
     provenance: {
       producer_node_id: "final-report",
       logical_node_id: "final-report",
@@ -200,7 +316,13 @@ function createVerifiedReportFixture(
         state: "finished",
         attempt: 0
       },
-      output_contracts: { ok: true, missing: [] }
+      output_contracts: {
+        ok: true,
+        missing: [],
+        artifact_manifest_sha256: digest(
+          fs.readFileSync(path.join(layout.artifactsDir, "final-report", "artifact-manifest.json"))
+        )
+      }
     }
   });
   return { layout, reportPath, markdownPath, reportBytes, markdownBytes };
@@ -224,6 +346,37 @@ function finalReportOutputs(): ArtifactManifestOutputContract[] {
       primary: false
     }
   ];
+}
+
+function producerOutputs(): ArtifactManifestOutputContract[] {
+  return [
+    {
+      path: "context.md",
+      contract: "ultrafuzz/nonempty-markdown@1",
+      contract_digest: artifactContractDefinition("ultrafuzz/nonempty-markdown@1").digest,
+      primary: true
+    }
+  ];
+}
+
+function readManifest(manifestPath: string): ArtifactManifest {
+  return JSON.parse(fs.readFileSync(manifestPath, "utf8")) as ArtifactManifest;
+}
+
+function sealFinalReportManifest(layout: RunLayout, artifactManifestSha256: string): void {
+  updateNodeState(layout, "final-report", {
+    provenance: {
+      workflow: {
+        run_id: WORKFLOW_RUN_ID,
+        task_id: VERIFIER_TASK_ID,
+        agent_task_id: AGENT_TASK_ID,
+        verifier_task_id: VERIFIER_TASK_ID,
+        state: "finished",
+        attempt: 0
+      },
+      output_contracts: { ok: true, missing: [], artifact_manifest_sha256: artifactManifestSha256 }
+    }
+  });
 }
 
 function currentReport(runId: string, issues: Record<string, unknown>[] = []): Record<string, unknown> {

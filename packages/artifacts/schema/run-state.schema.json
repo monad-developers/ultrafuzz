@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ultrafuzz:schema:artifacts:run-state:4",
+  "$id": "urn:ultrafuzz:schema:artifacts:run-state:5",
   "title": "Ultrafuzz run state",
   "type": "object",
   "required": [
@@ -18,7 +18,7 @@
   "additionalProperties": false,
   "properties": {
     "schema_version": {
-      "const": "ultrafuzz.run-state.v4"
+      "const": "ultrafuzz.run-state.v5"
     },
     "run_id": {
       "type": "string",
@@ -602,6 +602,29 @@
     "outputContractProvenance": {
       "type": "object",
       "required": ["ok", "missing"],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "ok": {
+                "const": true
+              }
+            },
+            "required": ["ok"]
+          },
+          "then": {
+            "properties": {
+              "artifact_manifest_sha256": {}
+            },
+            "required": ["artifact_manifest_sha256"]
+          },
+          "else": {
+            "not": {
+              "required": ["artifact_manifest_sha256"]
+            }
+          }
+        }
+      ],
       "additionalProperties": false,
       "properties": {
         "ok": {
@@ -614,6 +637,10 @@
             "type": "string",
             "minLength": 1
           }
+        },
+        "artifact_manifest_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
         }
       }
     },
