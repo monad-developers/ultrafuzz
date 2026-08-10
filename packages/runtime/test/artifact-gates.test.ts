@@ -862,7 +862,7 @@ test("severity classification gates preserve triaged fields and enforce the fina
   );
 });
 
-test("sealed planned graph distinguishes an absent property track from a missing planned producer", () => {
+test("sealed planned graph ignores unrelated producers but rejects a missing planned producer", () => {
   const absentLayout = createRunLayout({ projectRoot: tempProject(), runId: "run-no-property-track" });
   const reportNode = {
     ...plannedNode(["report.json"]),
@@ -885,16 +885,7 @@ test("sealed planned graph distinguishes an absent property track from a missing
   writePlannedGraph(outsideLayout, [outsideCatalogNode, reportNode]);
   writeArtifact(outsideLayout, reportNode.id, "report.json", JSON.stringify(currentReport(outsideLayout.runId)));
   const outside = verifyRuntimeRequiredArtifactsForAttempt(outsideLayout, reportNode, reportNode.id);
-  assert.equal(outside.ok, false, JSON.stringify(outside.diagnostics));
-  assert.ok(
-    outside.diagnostics.some(
-      (diagnostic) =>
-        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_CONTEXT_UNAVAILABLE" &&
-        diagnostic.details?.missing_context instanceof Array &&
-        diagnostic.details.missing_context.includes("artifactSet.propertyCatalog")
-    ),
-    JSON.stringify(outside.diagnostics)
-  );
+  assert.equal(outside.ok, true, JSON.stringify(outside.diagnostics));
 
   const missingLayout = createRunLayout({ projectRoot: tempProject(), runId: "run-missing-property-producer" });
   const catalogNode = {

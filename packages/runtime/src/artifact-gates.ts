@@ -1970,8 +1970,10 @@ function plannedContractProducerStatus(
   try {
     assertRegularFileInside(layout.root, layout.graphPath, "planned graph semantic context");
     const graph = assertPlannedGraph(readStrictRegisteredDocument(layout.graphPath, "planned-graph.schema.json"));
-    plannedAncestorIds(graph, consumer);
-    return graph.nodes.some((node) => node.outputs.some((output) => output.contract === contract))
+    const ancestorIds = plannedAncestorIds(graph, consumer);
+    return graph.nodes.some(
+      (node) => ancestorIds.has(node.id) && node.outputs.some((output) => output.contract === contract)
+    )
       ? "present"
       : "absent";
   } catch {
