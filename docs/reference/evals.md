@@ -287,22 +287,26 @@ plan → run → score → compare loop working offline.
 
 `eval status <eval-run-id>` is the read-only live view across a whole matrix.
 It derives node counts, row lifecycle state, checkpoint age, and estimated
-remaining time only from recorded eval links and durable run state. It never
-resumes, retries, synchronizes, collects, publishes, or otherwise changes a
-workflow. The compact table shows at most three active or waiting node IDs per
-row, preserves actionable wait reason → next action pairs, and uses `+N` for
-the remainder. It also distinguishes an admitted active linked workflow from a
-finished, stopped, failed, paused, waiting, or cancelled one using the current
-durable workflow binding rather than a superseded launch-time ID.
+remaining time only from recorded eval links, durable run state, and bounded
+linked-workflow evidence. It never resumes, retries, synchronizes, collects,
+publishes, or otherwise changes a workflow. The compact table shows at most
+three active or waiting node IDs per row, preserves actionable wait reason →
+next action pairs, and uses `+N` for the remainder. It also distinguishes an
+admitted active linked workflow from a finished, stopped, failed, paused,
+waiting, or cancelled one using the current durable workflow binding rather
+than a superseded launch-time ID.
 
 All rows use matrix-order opaque labels. The versioned
 `ultrafuzz.eval.status.v1` JSON keeps the full `active_node_ids` and
 `waiting_nodes` lists; each waiting entry includes its node `status`,
 `wait_reason`, and `next_eligible_action`. `linked_workflow_status` carries the
-reconciled lifecycle value, while the existing typed counts, percentages,
-timestamps, checkpoint freshness, and ETA availability remain unchanged.
-Private target metadata, repository locations, findings, and diagnostics are
-not representable.
+reconciled lifecycle value. It is `null` when no workflow is linked and
+`"unknown"` when linked evidence is missing, unsupported, or ambiguous. Wait
+reason and next action are likewise `null` when absent or newer than the known
+telemetry vocabulary. The existing typed counts, percentages, timestamps,
+checkpoint freshness, and ETA availability remain unchanged. Private target
+metadata, repository locations, findings, and diagnostics are not
+representable.
 
 Configure an independent judge panel at the root of the eval suite YAML selected
 by `--suite` or `[eval].eval_config`:

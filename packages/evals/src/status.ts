@@ -111,12 +111,13 @@ const LINKED_WORKFLOW_STATUS_VALUES = new Set<string>(EVAL_STATUS_LINKED_WORKFLO
 const TERMINAL_RUN_STATUSES = new Set<string>(TERMINAL_RUN_STATE_STATUSES);
 const COMPLETED_NODE_STATUSES = new Set<string>(TERMINAL_NODE_STATE_STATUSES);
 const MAX_VISIBLE_STATUS_NODES = 3;
+const MAX_LINKED_WORKFLOW_IDS = 32;
 // Detached summaries put lifecycle status before optional final output. Retain
 // admission evidence at the start and a bounded tail large enough to cross
 // ordinary report output without loading an unbounded workflow log.
 const WORKFLOW_LOG_PREFIX_BYTES = 32 * 1_024;
 const WORKFLOW_LOG_TAIL_BYTES = 8 * 1_024 * 1_024;
-const WORKFLOW_ADMISSION_MARKER = "SMITHERS_DETACHED_ADMISSION=run:";
+const WORKFLOW_ADMISSION_PATTERN = /^SMITHERS_DETACHED_ADMISSION=run:[^\r\n]+\r?$/gmu;
 
 /**
  * Read a complete eval matrix snapshot without synchronizing or otherwise
@@ -555,7 +556,7 @@ function tableSafeText(value: string): string {
   return JSON.stringify(value)
     .slice(1, -1)
     .replace(
-      /[\u007f-\u009f\u2028\u2029]/gu,
+      /[\u002c\u003b\u005b\u005d\u007f-\u009f\u2028\u2029\u2192]/gu,
       (character) => `\\u${character.codePointAt(0)!.toString(16).padStart(4, "0")}`
     );
 }
@@ -599,22 +600,30 @@ function readLinkedWorkflowStatus(
   activelyOwned: boolean
 ): EvalStatusLinkedWorkflowState {
   if (!Array.isArray(rawWorkflowIds) || rawWorkflowIds.length === 0) return null;
+  if (rawWorkflowIds.length > MAX_LINKED_WORKFLOW_IDS) return "unknown";
   const statuses: Exclude<EvalStatusLinkedWorkflowState, null>[] = [];
-  for (const value of rawWorkflowIds) {
+  for (const value of new Set(rawWorkflowIds)) {
     if (typeof value !== "string" || value.length === 0 || path.basename(value) !== value) {
       statuses.push("unknown");
       continue;
     }
-    let log: string;
+    let log: ReturnType<typeof readWorkflowLogEdges>;
     try {
       log = readWorkflowLogEdges(path.join(runRoot, "smithers", "logs", `${value}.log`));
     } catch {
       statuses.push("unknown");
       continue;
     }
-    const statusMatches = [...log.matchAll(/^status:\s*([a-z][a-z-]*)\s*$/gmu)];
+    const statusMatches = [...log.contents.matchAll(/^status:\s*([a-z][a-z-]*)\s*$/gmu)];
     const latestStatusMatch = statusMatches.at(-1);
-    const latestAdmissionIndex = log.lastIndexOf(WORKFLOW_ADMISSION_MARKER);
+    const latestAdmissionIndex = [...log.contents.matchAll(WORKFLOW_ADMISSION_PATTERN)].at(-1)?.index ?? -1;
+    const latestEvidenceIndex = Math.max(latestStatusMatch?.index ?? -1, latestAdmissionIndex);
+    // Evidence retained only in the prefix may have been superseded inside the
+    // omitted middle. Never report a stale lifecycle as authoritative.
+    if (log.tailStartIndex !== null && latestEvidenceIndex < log.tailStartIndex) {
+      statuses.push("unknown");
+      continue;
+    }
     if (latestAdmissionIndex > (latestStatusMatch?.index ?? -1)) {
       statuses.push(activelyOwned ? "running" : "unknown");
     } else if (latestStatusMatch?.[1] === undefined) {
@@ -633,7 +642,7 @@ function isLinkedWorkflowStatus(value: string): value is EvalStatusKnownLinkedWo
   return LINKED_WORKFLOW_STATUS_VALUES.has(value);
 }
 
-function readWorkflowLogEdges(logPath: string): string {
+function readWorkflowLogEdges(logPath: string): { contents: string; tailStartIndex: number | null } {
   const lexical = fs.lstatSync(logPath);
   if (lexical.isSymbolicLink() || !lexical.isFile()) {
     throw new Error("linked workflow log is not a bounded regular file");
@@ -650,13 +659,27 @@ function readWorkflowLogEdges(logPath: string): string {
     if (size <= WORKFLOW_LOG_PREFIX_BYTES + WORKFLOW_LOG_TAIL_BYTES) {
       const contents = Buffer.alloc(size);
       const bytes = fs.readSync(file, contents, 0, contents.length, 0);
-      return contents.subarray(0, bytes).toString("utf8");
+      return { contents: contents.subarray(0, bytes).toString("utf8"), tailStartIndex: null };
     }
     const first = Buffer.alloc(WORKFLOW_LOG_PREFIX_BYTES);
-    const last = Buffer.alloc(WORKFLOW_LOG_TAIL_BYTES);
+    const last = Buffer.alloc(WORKFLOW_LOG_TAIL_BYTES + 1);
     const firstBytes = fs.readSync(file, first, 0, first.length, 0);
     const lastBytes = fs.readSync(file, last, 0, last.length, size - last.length);
-    return `${first.subarray(0, firstBytes).toString("utf8")}\n${last.subarray(0, lastBytes).toString("utf8")}`;
+    const prefixBytes = first.subarray(0, firstBytes);
+    const prefixLineEnd = prefixBytes.at(-1) === 0x0a ? prefixBytes.length : prefixBytes.lastIndexOf(0x0a) + 1;
+    const prefix = prefixBytes.subarray(0, prefixLineEnd).toString("utf8");
+    const tailWithContext = last.subarray(0, lastBytes);
+    const tailBytes = tailWithContext.subarray(1);
+    const firstTailLineEnd = tailBytes.indexOf(0x0a);
+    // The extra context byte distinguishes a genuine line boundary from a
+    // status-looking fragment at the start of the bounded tail.
+    const tailLineStart =
+      tailWithContext[0] === 0x0a ? 0 : firstTailLineEnd === -1 ? tailBytes.length : firstTailLineEnd + 1;
+    const tail = tailBytes.subarray(tailLineStart).toString("utf8");
+    return {
+      contents: `${prefix}${tail}`,
+      tailStartIndex: prefix.length
+    };
   } finally {
     fs.closeSync(file);
   }

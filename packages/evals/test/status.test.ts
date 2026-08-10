@@ -282,6 +282,36 @@ describe("eval status", () => {
     expect(snapshot.rows[0]?.linked_workflow_status).toBe("unknown");
   });
 
+  it("rejects an oversized linked workflow ID list before reading repeated logs", () => {
+    const fixture = evalFixture([privateRow("workflow-list-row")]);
+    const runRoot = path.join(fixture.base, "workflow-list-run");
+    const runId = "run-workflow-list";
+    fs.mkdirSync(path.join(runRoot, "smithers", "logs"), { recursive: true });
+    writeState(runRoot, {
+      runId,
+      status: "running",
+      nodes: ["pending"],
+      controllerLease: { status: "expired", expiresAt: "2026-01-02T14:50:30.000Z" }
+    });
+    fs.writeFileSync(path.join(runRoot, "smithers", "logs", `${runId}.log`), "status: stopped\n", "utf8");
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify({
+        ...record("workflow-list-row", runId, runRoot),
+        workflow_ids: Array.from({ length: 33 }, () => runId)
+      })}\n`,
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({
+      projectRoot: fixture.project,
+      evalRunId: fixture.evalRunId,
+      now: SNAPSHOT
+    });
+
+    expect(snapshot.rows[0]?.linked_workflow_status).toBe("unknown");
+  });
+
   it("uses a fresh admission marker after a stale terminal status on resume", () => {
     const fixture = evalFixture([privateRow("resumed-log-row")]);
     const runRoot = path.join(fixture.base, "resumed-log-run");
@@ -311,6 +341,100 @@ describe("eval status", () => {
     });
 
     expect(snapshot.rows[0]?.linked_workflow_status).toBe("running");
+  });
+
+  it("does not treat workflow output containing admission text as a resume", () => {
+    const fixture = evalFixture([privateRow("admission-output-row")]);
+    const runRoot = path.join(fixture.base, "admission-output-run");
+    const runId = "run-admission-output";
+    fs.mkdirSync(path.join(runRoot, "smithers", "logs"), { recursive: true });
+    writeState(runRoot, {
+      runId,
+      status: "running",
+      nodes: ["running"],
+      controllerLease: { status: "active", expiresAt: "2026-01-02T15:02:30.000Z" }
+    });
+    fs.writeFileSync(
+      path.join(runRoot, "smithers", "logs", `${runId}.log`),
+      "status: stopped\noutput: SMITHERS_DETACHED_ADMISSION=run:not-a-real-marker\n",
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify({ ...record("admission-output-row", runId, runRoot), workflow_ids: [runId] })}\n`,
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({
+      projectRoot: fixture.project,
+      evalRunId: fixture.evalRunId,
+      now: SNAPSHOT
+    });
+
+    expect(snapshot.rows[0]?.linked_workflow_status).toBe("stopped");
+  });
+
+  it("does not retain a stale terminal status when newer lifecycle evidence may be truncated", () => {
+    const fixture = evalFixture([privateRow("truncated-resume-row")]);
+    const runRoot = path.join(fixture.base, "truncated-resume-run");
+    const runId = "run-truncated-resume";
+    fs.mkdirSync(path.join(runRoot, "smithers", "logs"), { recursive: true });
+    writeState(runRoot, {
+      runId,
+      status: "running",
+      nodes: ["running"],
+      controllerLease: { status: "active", expiresAt: "2026-01-02T15:02:30.000Z" }
+    });
+    fs.writeFileSync(
+      path.join(runRoot, "smithers", "logs", `${runId}.log`),
+      `status: stopped\n${"old output\n".repeat(3_500)}SMITHERS_DETACHED_ADMISSION=run:new-controller\n${"new output\n".repeat(770_000)}`,
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify({ ...record("truncated-resume-row", runId, runRoot), workflow_ids: [runId] })}\n`,
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({
+      projectRoot: fixture.project,
+      evalRunId: fixture.evalRunId,
+      now: SNAPSHOT
+    });
+
+    expect(snapshot.rows[0]?.linked_workflow_status).toBe("unknown");
+  });
+
+  it("does not turn a truncated output fragment into a workflow status line", () => {
+    const fixture = evalFixture([privateRow("truncated-line-row")]);
+    const runRoot = path.join(fixture.base, "truncated-line-run");
+    const runId = "run-truncated-line";
+    const embeddedStatus = "status: stopped\n";
+    fs.mkdirSync(path.join(runRoot, "smithers", "logs"), { recursive: true });
+    writeState(runRoot, {
+      runId,
+      status: "running",
+      nodes: ["running"],
+      controllerLease: { status: "active", expiresAt: "2026-01-02T15:02:30.000Z" }
+    });
+    fs.writeFileSync(
+      path.join(runRoot, "smithers", "logs", `${runId}.log`),
+      `${"output".repeat(7_000)}${embeddedStatus}${"x".repeat(8 * 1_024 * 1_024 - embeddedStatus.length)}`,
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify({ ...record("truncated-line-row", runId, runRoot), workflow_ids: [runId] })}\n`,
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({
+      projectRoot: fixture.project,
+      evalRunId: fixture.evalRunId,
+      now: SNAPSHOT
+    });
+
+    expect(snapshot.rows[0]?.linked_workflow_status).toBe("unknown");
   });
 
   it("finds a terminal workflow status before a large final output", () => {
@@ -706,10 +830,50 @@ describe("eval status", () => {
 
     expect(snapshot.rows[0]?.active_node_ids).toEqual([activeNodeId]);
     expect(snapshot.rows[0]?.waiting_nodes[0]?.node_id).toBe(waitingNodeId);
-    expect(table).toContain("active\\u001b[2J");
+    expect(table).toContain("active\\u001b\\u005b2J");
     expect(table).toContain("waiting\\nnode[controller-loss→controller-takeover]");
     expect(table).not.toContain("\u001b");
     expect(table.split("\n").filter((line) => line.startsWith("row-"))).toHaveLength(1);
+  });
+
+  it("escapes node ID table delimiters while preserving the exact JSON ID", () => {
+    const fixture = evalFixture([privateRow("delimiter-row")]);
+    const runRoot = path.join(fixture.base, "delimiter-run");
+    const runId = "run-delimiter";
+    const waitingNodeId = "waiting]; +99; active:spoof[";
+    fs.mkdirSync(runRoot, { recursive: true });
+    fs.writeFileSync(
+      statePath(runRoot),
+      `${JSON.stringify({
+        schema_version: "1.1",
+        run_id: runId,
+        status: "running",
+        created_at: START,
+        started_at: START,
+        last_transition_at: CHECKPOINT,
+        nodes: {
+          [waitingNodeId]: {
+            node_id: waitingNodeId,
+            status: "pending",
+            wait_reason: "controller-loss",
+            next_eligible_action: "controller-takeover"
+          }
+        }
+      })}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify(record("delimiter-row", runId, runRoot))}\n`,
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({ projectRoot: fixture.project, evalRunId: fixture.evalRunId, now: SNAPSHOT });
+    const table = renderEvalStatusTable(snapshot);
+
+    expect(snapshot.rows[0]?.waiting_nodes[0]?.node_id).toBe(waitingNodeId);
+    expect(table).toContain("waiting\\u005d\\u003b +99\\u003b active:spoof\\u005b");
+    expect(table).not.toContain("; +99;");
   });
 
   it("keeps one shared table budget while JSON retains every active and waiting node", () => {
