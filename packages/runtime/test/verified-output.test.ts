@@ -25,8 +25,12 @@ import { projectCanonicalFinalReport } from "../src/final-report-markdown.js";
 import { loadVerifiedFinalReportSnapshot, VerifiedOutputError } from "../src/verified-output.js";
 
 const WORKFLOW_RUN_ID = "workflow-current";
-const AGENT_TASK_ID = "node:final-report";
-const VERIFIER_TASK_ID = "verify:final-report";
+const REPORT_ATTEMPT_ID = "release-summary";
+const REPORT_LOGICAL_ID = "security-report";
+const REPORT_JSON_PATH = "deliverables/current-audit.json";
+const REPORT_MARKDOWN_PATH = "deliverables/current-audit.md";
+const AGENT_TASK_ID = `node:${REPORT_ATTEMPT_ID}`;
+const VERIFIER_TASK_ID = `verify:${REPORT_ATTEMPT_ID}`;
 
 interface ReportFixture {
   layout: RunLayout;
@@ -41,9 +45,11 @@ test("verified final-report reader binds immutable current bytes to verifier and
 
   const loaded = loadVerifiedFinalReportSnapshot(fixture.layout.root);
 
-  assert.equal(loaded.authority.attempt_id, "final-report");
-  assert.equal(loaded.authority.logical_node_id, "final-report");
+  assert.equal(loaded.authority.attempt_id, REPORT_ATTEMPT_ID);
+  assert.equal(loaded.authority.logical_node_id, REPORT_LOGICAL_ID);
   assert.equal(loaded.artifacts.source, "verified-agent-report");
+  assert.equal(loaded.artifacts.json_path, fixture.reportPath);
+  assert.equal(loaded.artifacts.markdown_path, fixture.markdownPath);
   assert.deepEqual(loaded.json_bytes, fixture.reportBytes);
   assert.deepEqual(loaded.markdown_bytes, fixture.markdownBytes);
   assert.deepEqual(fs.readFileSync(fixture.reportPath), fixture.reportBytes);
@@ -91,7 +97,7 @@ test("shape-valid severity drift is rejected by current semantic gates despite m
 
 test("missing verification evidence after successful finalization is invalid authority, not unavailable authority", () => {
   const fixture = createVerifiedReportFixture("verified-report-missing-marker");
-  fs.rmSync(path.join(fixture.layout.root, ".ultrafuzz-verification", "final-report.json"));
+  fs.rmSync(path.join(fixture.layout.root, ".ultrafuzz-verification", `${REPORT_ATTEMPT_ID}.json`));
 
   assert.throws(
     () => loadVerifiedFinalReportSnapshot(fixture.layout.root),
@@ -102,12 +108,111 @@ test("missing verification evidence after successful finalization is invalid aut
   );
 });
 
+test("verified final-report selection rejects absent and ambiguous declared report producers", () => {
+  const markdownOnly = finalReportOutputs().filter((output) => output.contract === "ultrafuzz/nonempty-markdown@1");
+  const absent = createSelectionLayout("verified-report-producer-absent", [
+    reportGraphNode("release-notes", markdownOnly)
+  ]);
+  assert.throws(
+    () => loadVerifiedFinalReportSnapshot(absent.root),
+    (error: unknown) =>
+      error instanceof VerifiedOutputError &&
+      error.code === "VERIFIED_OUTPUT_AUTHORITY_UNAVAILABLE" &&
+      /no current planned node declares/iu.test(error.message)
+  );
+
+  const ambiguous = createSelectionLayout("verified-report-producer-ambiguous", [
+    reportGraphNode("release-summary-a", finalReportOutputs()),
+    reportGraphNode("release-summary-b", finalReportOutputs())
+  ]);
+  assert.throws(
+    () => loadVerifiedFinalReportSnapshot(ambiguous.root),
+    (error: unknown) =>
+      error instanceof VerifiedOutputError &&
+      error.code === "VERIFIED_OUTPUT_AUTHORITY_INVALID" &&
+      /producer is ambiguous/iu.test(error.message)
+  );
+});
+
+test("verified final-report selection rejects missing or ambiguous report output contracts", () => {
+  const report = finalReportOutputs().find((output) => output.contract === "ultrafuzz/report@2")!;
+  const missingMarkdown = createVerifiedReportFixture("verified-report-markdown-missing", {
+    outputs: [{ ...report, primary: true }]
+  });
+  assert.throws(
+    () => loadVerifiedFinalReportSnapshot(missingMarkdown.layout.root),
+    (error: unknown) =>
+      error instanceof VerifiedOutputError &&
+      error.code === "VERIFIED_OUTPUT_INVALID" &&
+      /PROPERTY_REPORT_MARKDOWN_DECLARATION_AMBIGUOUS/iu.test(error.message)
+  );
+
+  const ambiguousReport = createVerifiedReportFixture("verified-report-contract-ambiguous", {
+    outputs: [
+      { ...report, path: "deliverables/audit-a.json" },
+      { ...report, path: "deliverables/audit-b.json" },
+      finalReportOutputs().find((output) => output.contract === "ultrafuzz/nonempty-markdown@1")!
+    ]
+  });
+  assert.throws(
+    () => loadVerifiedFinalReportSnapshot(ambiguousReport.layout.root),
+    (error: unknown) =>
+      error instanceof VerifiedOutputError &&
+      error.code === "VERIFIED_OUTPUT_INVALID" &&
+      /PROPERTY_REPORT_DECLARATION_AMBIGUOUS/iu.test(error.message)
+  );
+});
+
+function reportGraphNode(id: string, outputs: ArtifactManifestOutputContract[]): PlannedGraphDocument["nodes"][number] {
+  return {
+    id,
+    logical_id: id,
+    display_name: id,
+    kind: "agentic",
+    depends_on: [],
+    artifact_dir: `artifacts/${id}`,
+    outputs,
+    prompt_id: id,
+    prompt_path: `review/${id}.md`,
+    loop: { index: 0, count: 1, mode: "parallel", attempt_index: 0 },
+    model_fanout: []
+  };
+}
+
+function createSelectionLayout(runId: string, nodes: PlannedGraphDocument["nodes"]): RunLayout {
+  const outputRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-verified-output-selection-"));
+  const graph: PlannedGraphDocument = {
+    schema_version: PLANNED_GRAPH_SCHEMA_VERSION,
+    graph_version: "3",
+    topology_version: 2,
+    groups: {},
+    nodes
+  };
+  return createRunLayout({
+    outputRoot,
+    runId,
+    graph,
+    graphFingerprint: "f".repeat(64),
+    configFingerprint: "e".repeat(64),
+    stateNodes: nodes.map((node) => ({
+      id: node.id,
+      logicalNodeId: node.logical_id,
+      artifactDir: node.artifact_dir,
+      outputs: node.outputs
+    }))
+  });
+}
+
 function createVerifiedReportFixture(
   runId: string,
-  override: { report?: Record<string, unknown>; markdown?: string } = {}
+  override: {
+    report?: Record<string, unknown>;
+    markdown?: string;
+    outputs?: ArtifactManifestOutputContract[];
+  } = {}
 ): ReportFixture {
   const outputRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-verified-output-"));
-  const outputs = finalReportOutputs();
+  const outputs = override.outputs ?? finalReportOutputs();
   const graph: PlannedGraphDocument = {
     schema_version: PLANNED_GRAPH_SCHEMA_VERSION,
     graph_version: "3",
@@ -115,14 +220,14 @@ function createVerifiedReportFixture(
     groups: {},
     nodes: [
       {
-        id: "final-report",
-        logical_id: "final-report",
+        id: REPORT_ATTEMPT_ID,
+        logical_id: REPORT_LOGICAL_ID,
         display_name: "Final report",
         kind: "agentic",
         depends_on: [],
-        artifact_dir: "artifacts/final-report",
+        artifact_dir: `artifacts/${REPORT_ATTEMPT_ID}`,
         outputs,
-        prompt_id: "final-report",
+        prompt_id: REPORT_LOGICAL_ID,
         prompt_path: "review/final-report.md",
         loop: { index: 0, count: 1, mode: "parallel", attempt_index: 0 },
         model_fanout: []
@@ -137,9 +242,9 @@ function createVerifiedReportFixture(
     configFingerprint: "e".repeat(64),
     stateNodes: [
       {
-        id: "final-report",
-        logicalNodeId: "final-report",
-        artifactDir: "artifacts/final-report",
+        id: REPORT_ATTEMPT_ID,
+        logicalNodeId: REPORT_LOGICAL_ID,
+        artifactDir: `artifacts/${REPORT_ATTEMPT_ID}`,
         outputs
       }
     ]
@@ -148,19 +253,31 @@ function createVerifiedReportFixture(
   const projection = override.markdown === undefined ? projectCanonicalFinalReport(report) : undefined;
   const reportBytes = Buffer.from(`${JSON.stringify(report, null, 2)}\n`, "utf8");
   const markdownBytes = Buffer.from(override.markdown ?? projection!.markdown, "utf8");
-  const reportPath = path.join(layout.artifactsDir, "final-report", "report.json");
-  const markdownPath = path.join(layout.artifactsDir, "final-report", "report.md");
-  writeFileDurable(reportPath, reportBytes);
-  writeFileDurable(markdownPath, markdownBytes);
+  const reportPath = path.join(
+    layout.artifactsDir,
+    REPORT_ATTEMPT_ID,
+    outputs.find((output) => output.contract === "ultrafuzz/report@2")?.path ?? REPORT_JSON_PATH
+  );
+  const markdownPath = path.join(
+    layout.artifactsDir,
+    REPORT_ATTEMPT_ID,
+    outputs.find((output) => output.contract === "ultrafuzz/nonempty-markdown@1")?.path ?? REPORT_MARKDOWN_PATH
+  );
+  for (const output of outputs) {
+    writeFileDurable(
+      path.join(layout.artifactsDir, REPORT_ATTEMPT_ID, output.path),
+      output.contract === "ultrafuzz/report@2" ? reportBytes : markdownBytes
+    );
+  }
 
   writeArtifactManifest({
     layout,
-    nodeId: "final-report",
-    include: ["report.md", "report.json"],
+    nodeId: REPORT_ATTEMPT_ID,
+    include: outputs.map((output) => output.path),
     outputs,
     provenance: {
-      producer_node_id: "final-report",
-      logical_node_id: "final-report",
+      producer_node_id: REPORT_ATTEMPT_ID,
+      logical_node_id: REPORT_LOGICAL_ID,
       attempt_index: 0,
       loop_index: 0,
       model_index: 0,
@@ -168,24 +285,24 @@ function createVerifiedReportFixture(
       workflow_run_id: WORKFLOW_RUN_ID,
       workflow_task_id: AGENT_TASK_ID,
       origin: "workflow",
-      metadata: { concrete_node_id: "final-report" }
+      metadata: { concrete_node_id: REPORT_ATTEMPT_ID }
     }
   });
   const marker: ArtifactVerificationMarker = {
     schema_version: ARTIFACT_VERIFICATION_SCHEMA_VERSION,
-    attempt_id: "final-report",
-    node_id: "final-report",
+    attempt_id: REPORT_ATTEMPT_ID,
+    node_id: REPORT_LOGICAL_ID,
     artifacts: outputs.map((output) => ({
       ...output,
-      sha256: digest(output.path === "report.json" ? reportBytes : markdownBytes)
+      sha256: digest(output.contract === "ultrafuzz/report@2" ? reportBytes : markdownBytes)
     })),
     publications: outputs.map((output) => ({
       path: output.path,
-      sha256: digest(output.path === "report.json" ? reportBytes : markdownBytes)
+      sha256: digest(output.contract === "ultrafuzz/report@2" ? reportBytes : markdownBytes)
     }))
   };
-  writeJsonDurable(path.join(layout.root, ".ultrafuzz-verification", "final-report.json"), marker);
-  updateNodeState(layout, "final-report", {
+  writeJsonDurable(path.join(layout.root, ".ultrafuzz-verification", `${REPORT_ATTEMPT_ID}.json`), marker);
+  updateNodeState(layout, REPORT_ATTEMPT_ID, {
     status: "succeeded",
     finished_at: new Date().toISOString(),
     wait_since: undefined,
@@ -211,13 +328,13 @@ function finalReportOutputs(): ArtifactManifestOutputContract[] {
   assert.ok(reportBinding);
   return [
     {
-      path: "report.md",
+      path: REPORT_MARKDOWN_PATH,
       contract: "ultrafuzz/nonempty-markdown@1",
       contract_digest: artifactContractDefinition("ultrafuzz/nonempty-markdown@1").digest,
       primary: true
     },
     {
-      path: "report.json",
+      path: REPORT_JSON_PATH,
       contract: "ultrafuzz/report@2",
       contract_digest: artifactContractDefinition("ultrafuzz/report@2").digest,
       ...reportBinding,
