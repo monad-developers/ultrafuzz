@@ -5,7 +5,7 @@ import fs from "node:fs";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 import { isDeepStrictEqual } from "node:util";
 import * as ts from "typescript";
@@ -78,7 +78,7 @@ test("generated workflow input is an exact current-only envelope with bounded JS
   const inputSchema = loadGeneratedWorkflowInputSchema();
   const local = {
     schema_version: "ultrafuzz.smithers.workflow.v3",
-    run_id: "run-1",
+    ultrafuzz_run_id: "run-1",
     tasks: [{ id: "node:one", prompt_path: ".ultrafuzz/prompts/one.md" }],
     operator_prompt: "focus",
     operator_input: { tickets: [1, true, null, "three"] }
@@ -92,8 +92,9 @@ test("generated workflow input is an exact current-only envelope with bounded JS
   for (const invalid of [
     { ...local, unexpected: true },
     { ...local, schema_version: "ultrafuzz.smithers.workflow.v1" },
-    { ...local, run_id: "foreign-run" },
-    { schema_version: local.schema_version, run_id: local.run_id },
+    { ...local, ultrafuzz_run_id: "foreign-run" },
+    { ...local, run_id: local.ultrafuzz_run_id },
+    { schema_version: local.schema_version, ultrafuzz_run_id: local.ultrafuzz_run_id },
     { ...local, tasks: [{ ...local.tasks[0], extra: true }] },
     { cloud_worker: true, task_id: "node:one", tasks: [] },
     { cloud_worker: false, task_id: "node:one" }
@@ -107,7 +108,23 @@ test("generated workflow input is an exact current-only envelope with bounded JS
 
   const template = fs.readFileSync(workflowTemplatePath, "utf8");
   assert.doesNotMatch(template, /z\.looseObject|\.default\(|z\.unknown\(\)/u);
-  assert.match(template, /const inputSchema = z\.union\(\[localWorkflowInputSchema, cloudWorkerInputSchema\]\)/u);
+  assert.match(template, /const inputSchema = z\n {2}\.strictObject\(\{/u);
+});
+
+test("the workflow runner can project the generated workflow input into its input table", async () => {
+  // The runner tables this schema by walking `shape` while it creates the
+  // workflow, so a shapeless schema such as a union fails preflight on every
+  // detached submission instead of failing any test.
+  const inputSchema = loadGeneratedWorkflowInputSchema();
+  const require = createRequire(import.meta.url);
+  // The runner's own entry is Bun-only; its table projection is not.
+  const runnerRequire = createRequire(require.resolve("smithers-orchestrator"));
+  const { zodToTable } = (await import(
+    pathToFileURL(runnerRequire.resolve("@smithers-orchestrator/db/zodToTable")).href
+  )) as {
+    zodToTable: (tableName: string, schema: unknown, opts?: { isInput?: boolean }) => unknown;
+  };
+  assert.notEqual(zodToTable("ultrafuzz_workflow_input", inputSchema, { isInput: true }), undefined);
 });
 
 function loadRetryFailureAwareArgs(): (

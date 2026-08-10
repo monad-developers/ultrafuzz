@@ -154,21 +154,52 @@ const operatorInputSchema = boundedJsonValueSchema(0).superRefine((value, ctx) =
   }
 });
 
-const localWorkflowInputSchema = z.strictObject({
-  schema_version: z.literal("ultrafuzz.smithers.workflow.v3"),
-  run_id: z.literal(__ULTRAFUZZ_RUN_ID_LITERAL__),
-  tasks: z.array(inputTaskSchema).max(MAX_WORKFLOW_INPUT_TASKS),
-  operator_prompt: z.string().optional(),
-  operator_input: operatorInputSchema.optional()
-});
+const LOCAL_WORKFLOW_INPUT_KEYS = ["schema_version", "ultrafuzz_run_id", "tasks", "operator_input"] as const;
+const CLOUD_WORKER_INPUT_KEYS = ["cloud_worker", "task_id"] as const;
 
-const cloudWorkerInputSchema = z.strictObject({
-  cloud_worker: z.literal(true),
-  task_id: z.string().min(1).max(4_096),
-  operator_prompt: z.string().optional()
-});
-
-const inputSchema = z.union([localWorkflowInputSchema, cloudWorkerInputSchema]);
+/**
+ * One closed object rather than a union of the local and cloud-worker envelopes.
+ * The workflow runner projects this schema into its input table by walking
+ * `shape`, and a union exposes no shape to walk, so a union fails every detached
+ * submission during preflight. Exactly one envelope is still required, unknown
+ * properties are still rejected, and neither envelope may borrow the other's
+ * keys.
+ */
+const inputSchema = z
+  .strictObject({
+    schema_version: z.literal("ultrafuzz.smithers.workflow.v3").optional(),
+    // Not `run_id`: the workflow runner reserves that column for its own run
+    // identity, and a colliding field corrupts its input primary key.
+    ultrafuzz_run_id: z.literal(__ULTRAFUZZ_RUN_ID_LITERAL__).optional(),
+    tasks: z.array(inputTaskSchema).max(MAX_WORKFLOW_INPUT_TASKS).optional(),
+    cloud_worker: z.literal(true).optional(),
+    task_id: z.string().min(1).max(4_096).optional(),
+    operator_prompt: z.string().optional(),
+    operator_input: operatorInputSchema.optional()
+  })
+  .superRefine((value, ctx) => {
+    const localKeys = LOCAL_WORKFLOW_INPUT_KEYS.filter((key) => value[key] !== undefined);
+    const cloudKeys = CLOUD_WORKER_INPUT_KEYS.filter((key) => value[key] !== undefined);
+    if (cloudKeys.length > 0) {
+      if (localKeys.length > 0) {
+        ctx.addIssue({
+          code: "custom",
+          message: `cloud worker input must not carry local workflow keys: ${localKeys.join(", ")}`
+        });
+        return;
+      }
+      if (cloudKeys.length !== CLOUD_WORKER_INPUT_KEYS.length) {
+        ctx.addIssue({ code: "custom", message: "cloud worker input requires cloud_worker and task_id" });
+      }
+      return;
+    }
+    if (value.schema_version === undefined || value.ultrafuzz_run_id === undefined || value.tasks === undefined) {
+      ctx.addIssue({
+        code: "custom",
+        message: "local workflow input requires schema_version, ultrafuzz_run_id, and tasks"
+      });
+    }
+  });
 
 const taskOutput = z.strictObject({
   summary: z.string().min(1)

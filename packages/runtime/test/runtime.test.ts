@@ -5348,7 +5348,12 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
     operator_prompt?: string;
     operator_input?: { issue?: number };
     tasks?: Array<{ prompt?: string; prompt_path?: string }>;
+    ultrafuzz_run_id?: string;
   };
+  // `run_id` is the workflow runner's own reserved input column, so the run this
+  // envelope is bound to must travel under a key the runner does not own.
+  assert.equal(smithersInput.ultrafuzz_run_id, "smithers-run");
+  assert.equal(Object.hasOwn(smithersInput, "run_id"), false);
   assert.equal(smithersInput.operator_prompt, "Operator priority");
   assert.equal(smithersInput.operator_input?.issue, 2);
   assert.equal(smithersInput.tasks?.[0]?.prompt, undefined);

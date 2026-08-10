@@ -1723,7 +1723,9 @@ function smithersInputDocument(
 ): Record<string, unknown> {
   return {
     schema_version: SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION,
-    run_id: compiled.runId,
+    // The workflow runner owns `run_id` in its input table, so the Ultrafuzz run
+    // identity this envelope is bound to travels under its own key.
+    ultrafuzz_run_id: compiled.runId,
     ...(operatorPrompt ? { operator_prompt: operatorPrompt } : {}),
     ...(operatorInput !== undefined ? { operator_input: operatorInput } : {}),
     tasks: compiled.tasks.map((task) => ({
