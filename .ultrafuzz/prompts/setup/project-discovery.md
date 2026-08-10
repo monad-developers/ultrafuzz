@@ -136,8 +136,8 @@ empty ledger and is rejected on a ledger that has entries.
 ### Byte-preserving ledger construction
 
 Treat every `verbatim` value as a byte-preserving source slice. The verifier
-normalizes only line endings, terminal line separators, and a leading Markdown
-presentation prefix; retain internal and trailing source whitespace. For a line
+normalizes only line endings and terminal line separators; retain Markdown
+presentation prefixes plus internal and trailing source whitespace. For a line
 location, derive the value by reading the cited file and slicing the requested
 line range; for a symbol location, derive it from the matching declaration.
 Use a short local script that reads the source and serializes the ledger with

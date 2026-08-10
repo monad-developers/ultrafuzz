@@ -243,7 +243,7 @@ export const invariantLedgerJsonSchema = {
             type: "string",
             minLength: 1,
             description:
-              "Exact source slice after line-ending, terminal-line-separator, and presentation-prefix normalization; preserve all other characters, including repeated backslashes."
+              "Exact source slice after line-ending and terminal-line-separator normalization; preserve all other characters, including Markdown presentation prefixes and repeated backslashes."
           },
           inventory_ids: {
             type: "array",

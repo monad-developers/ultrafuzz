@@ -3963,11 +3963,23 @@ test("generated Smithers verifier explains byte-preserving invariant evidence", 
   assert.match(source, /Derive verbatim from the cited source with a JSON serializer/u);
   assert.match(source, /repeated backslashes and other literals remain intact/u);
   const helperStart = source.indexOf("function normalizeInvariantSourceLines");
+  const helperEnd = source.indexOf("\n\nfunction symbolFromInvariantLocation", helperStart);
   const workflowStart = source.indexOf("export default smithers");
   assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
   assert.ok(workflowStart > helperStart, source);
   assert.match(source.slice(helperStart, workflowStart), /\.join\("\\n"\)/u);
   assert.match(source, /invariantSymbolDeclaration[\s\S]*?\.split\(\/\\r\?\\n\/u\)/u);
+  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  const normalize = new Function(`${helper}; return normalizeInvariantSourceLines;`)() as (
+    lines: readonly string[]
+  ) => string;
+  assert.equal(normalize(["- first invariant", "> second invariant"]), "- first invariant\n> second invariant");
+  assert.notEqual(normalize(["- first invariant"]), normalize(["first invariant"]));
+  assert.notEqual(normalize(["> second invariant"]), normalize(["second invariant"]));
+  assert.notEqual(normalize(["- first invariant"]), normalize(["> first invariant"]));
 });
 
 // Issue #301: the pinned/tracked/unmodified rule used to be inlined here and absent from the runtime

@@ -1856,7 +1856,6 @@ function verifyInvariantSourceText(
 function normalizeInvariantSourceLines(lines: readonly string[]): string {
   return lines
     .flatMap((line) => line.replace(/\r\n?/gu, "\n").split("\n"))
-    .map((line) => line.replace(/^\s*(?:[-*+]\s+|>\s+)/u, ""))
     .join("\n")
     .replace(/\n+$/u, "");
 }

@@ -4025,7 +4025,7 @@ test("project discovery gate preserves multiline evidence through exact JSON str
     id: "project-discovery",
     logical_id: "project-discovery"
   };
-  const source = "- first invariant\n- second invariant\n";
+  const source = "- first invariant\n> second invariant\n";
   const sourceDir = path.join(layout.workspacesDir, node.id, "docs");
   fs.mkdirSync(sourceDir, { recursive: true });
   fs.writeFileSync(path.join(sourceDir, "overview.md"), source, "utf8");
@@ -4055,6 +4055,27 @@ test("project discovery gate preserves multiline evidence through exact JSON str
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+
+  for (const verbatim of [
+    "first invariant\n> second invariant",
+    "- first invariant\nsecond invariant",
+    "> first invariant\n> second invariant"
+  ]) {
+    const changedMarkdownPrefix = structuredClone(ledger);
+    changedMarkdownPrefix.entries[0]!.verbatim = verbatim;
+    writeArtifact(layout, node.id, "setup/invariant-evidence-ledger.json", JSON.stringify(changedMarkdownPrefix));
+    writeArtifact(
+      layout,
+      node.id,
+      "setup/project-discovery.md",
+      fixtureInvariantLedgerMarkdown(JSON.stringify(changedMarkdownPrefix))
+    );
+    const prefixMismatch = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+    assert.equal(prefixMismatch.ok, false);
+    assert.ok(
+      prefixMismatch.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_SOURCE_TEXT_MISMATCH")
+    );
+  }
 });
 
 test("project discovery gate preserves symbol evidence whitespace", () => {
