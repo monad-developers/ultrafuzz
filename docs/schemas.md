@@ -15,7 +15,7 @@ Schema IDs are stable, fragment-free URNs such as:
 - `urn:ultrafuzz:schema:artifacts:generated-tests:3`
 - `urn:ultrafuzz:schema:cli:result:2`
 - `urn:ultrafuzz:schema:cli:operator-input:1`
-- `urn:ultrafuzz:schema:cli:report-bundle-manifest:2`
+- `urn:ultrafuzz:schema:cli:report-bundle-manifest:3`
 - `urn:ultrafuzz:schema:evals:suite:2`
 - `urn:ultrafuzz:schema:evals:evmbench-cohort:1`
 - `urn:ultrafuzz:schema:evals:benchmark-cohort:1`

@@ -20,7 +20,12 @@ import {
   type StrictJsonlCodec,
   validateSafeId
 } from "@ultrafuzz/artifacts";
-import { runsRootForProject, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
+import {
+  loadVerifiedRunOutputSnapshots,
+  runsRootForProject,
+  type RuntimeDiagnostic,
+  type VerifiedNodeOutputSnapshot
+} from "@ultrafuzz/runtime";
 import AdmZip from "adm-zip";
 
 import { commandFailure, emitCommandResult, globalFlags, projectRoot } from "../../command-shared.js";
@@ -65,12 +70,11 @@ interface BundleFile {
 }
 
 interface ReportBundleManifest {
-  schema_version: "ultrafuzz.report-bundle-manifest.v2";
+  schema_version: "ultrafuzz.report-bundle-manifest.v3";
   run_id: string;
   created_at: string;
   included_roots: string[];
   excluded_roots: ["workspaces"];
-  excluded_patterns: ["artifacts/final-report/report.json.pre-*"];
   entry_count_without_manifest: number;
 }
 
@@ -118,11 +122,14 @@ export default class ReportBundle extends Command {
       assertNoSymlinkComponents(outputGuardRoot, outputDirectory, "output directory");
 
       const diagnostics: RuntimeDiagnostic[] = [];
+      assertCurrentBundleAuthorityPresent(layout.root);
       const validatedReport = hasFinalReportJson(layout.root, layout.artifactsDir)
         ? loadValidatedReportSnapshot(layout.root)
         : undefined;
+      const verifiedRunOutputs = loadVerifiedRunOutputSnapshots(layout.root);
       const eventJournal = loadValidatedEventJournalSnapshot(layout.root, layout.eventsPath, runId);
       const files = collectBundleFiles(layout.root, diagnostics, eventJournal);
+      assertVerifiedPublicationBundleSnapshots(files, verifiedRunOutputs);
       if (validatedReport !== undefined) assertValidatedReportBundleSnapshot(files, validatedReport);
       if (files.length === 0) {
         throw new Error("run has no report bundle artifacts to package");
@@ -133,7 +140,7 @@ export default class ReportBundle extends Command {
         zip.addFile(file.archivePath, file.contents);
       }
       const manifest: ReportBundleManifest = {
-        schema_version: "ultrafuzz.report-bundle-manifest.v2",
+        schema_version: "ultrafuzz.report-bundle-manifest.v3",
         run_id: runId,
         created_at: new Date().toISOString(),
         included_roots: [
@@ -142,7 +149,6 @@ export default class ReportBundle extends Command {
           ...RENAMED_DIRECTORIES.map((entry) => entry.archive)
         ],
         excluded_roots: ["workspaces"],
-        excluded_patterns: ["artifacts/final-report/report.json.pre-*"],
         entry_count_without_manifest: files.length
       };
       const manifestValidation = validateReportBundleManifest(manifest);
@@ -201,6 +207,40 @@ function assertValidatedReportBundleSnapshot(files: readonly BundleFile[], repor
     const captured = files.find((file) => file.absolutePath === entry.path);
     if (captured === undefined || !captured.contents.equals(entry.contents)) {
       throw new Error(`validated report changed before its immutable bundle snapshot was captured: ${entry.path}`);
+    }
+  }
+}
+
+function assertCurrentBundleAuthorityPresent(runRoot: string): void {
+  const smithersRoot = path.join(runRoot, "smithers");
+  const required = [path.join(smithersRoot, "tasks.json"), path.join(smithersRoot, "control-integrity.json")];
+  if (required.some((authorityPath) => lstatIfPresent(authorityPath) === undefined)) {
+    throw new Error(
+      "report bundling for historical or unsealed runs is unsupported; current sealed workflow authority is required"
+    );
+  }
+}
+
+function assertVerifiedPublicationBundleSnapshots(
+  files: readonly BundleFile[],
+  snapshots: readonly VerifiedNodeOutputSnapshot[]
+): void {
+  const capturedByPath = new Map<string, BundleFile>();
+  for (const file of files) {
+    const absolutePath = path.resolve(file.absolutePath);
+    if (capturedByPath.has(absolutePath)) {
+      throw new Error(`report bundle captured the same physical file more than once: ${absolutePath}`);
+    }
+    capturedByPath.set(absolutePath, file);
+  }
+  for (const snapshot of snapshots) {
+    for (const publication of snapshot.publications) {
+      const captured = capturedByPath.get(path.resolve(publication.absolute_path));
+      if (captured === undefined || !captured.contents.equals(publication.bytes)) {
+        throw new Error(
+          `verified publication changed before its immutable bundle snapshot was captured: ${publication.absolute_path}`
+        );
+      }
     }
   }
 }
@@ -413,9 +453,6 @@ function collectDirectory(
         rename === undefined
           ? displayRelativePath(runRoot, absolutePath)
           : `${rename.archiveRoot}/${displayRelativePath(rename.sourceRoot, absolutePath)}`;
-      if (shouldExcludeArchivePath(archivePath)) {
-        continue;
-      }
       addBundleFile(runRoot, absolutePath, archivePath, files, diagnostics);
     }
   }
@@ -467,10 +504,6 @@ function normalizeArchivePath(relativePath: string): string {
     }
   }
   return archivePath;
-}
-
-function shouldExcludeArchivePath(archivePath: string): boolean {
-  return /^artifacts\/final-report\/report\.json\.pre-/u.test(archivePath);
 }
 
 function skippedSymlinkDiagnostic(runRoot: string, absolutePath: string): RuntimeDiagnostic {

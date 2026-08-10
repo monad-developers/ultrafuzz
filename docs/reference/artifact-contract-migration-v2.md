@@ -29,5 +29,7 @@ Bare arrays are versioned by their contract and whole-document schema identity. 
 
 The runtime-owned ZIP index formerly emitted as the unregistered
 `ultrafuzz.report_bundle.v1` document is now the closed, registered
-`ultrafuzz.report-bundle-manifest.v2` document. Current readers and producers do
+`ultrafuzz.report-bundle-manifest.v3` document. V3 removes the historical
+pre-regeneration report-backup exclusion because current producers never create
+those backups. Current readers and producers do
 not convert historical bundle manifests.

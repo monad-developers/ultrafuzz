@@ -33,6 +33,7 @@ import { WORKFLOW_CONTROL_INTEGRITY_SCHEMA_VERSION } from "../src/runtime-contra
 import {
   loadVerifiedFinalReportSnapshot,
   loadVerifiedNodeOutputSnapshot,
+  loadVerifiedRunOutputSnapshots,
   VerifiedOutputError
 } from "../src/verified-output.js";
 
@@ -71,6 +72,18 @@ test("verified final-report reader binds immutable current bytes to verifier and
   assert.deepEqual(loaded.markdown_bytes, fixture.markdownBytes);
   assert.deepEqual(fs.readFileSync(fixture.reportPath), fixture.reportBytes);
   assert.deepEqual(fs.readFileSync(fixture.markdownPath), fixture.markdownBytes);
+  assert.deepEqual(
+    loaded.authority.publications.map((publication) => publication.absolute_path),
+    [fixture.markdownPath, fixture.reportPath]
+  );
+
+  const runSnapshots = loadVerifiedRunOutputSnapshots(fixture.layout.root);
+  assert.equal(runSnapshots.length, 1);
+  assert.equal(runSnapshots[0]!.attempt_id, fixture.attemptId);
+  assert.deepEqual(
+    runSnapshots[0]!.publications.map((publication) => publication.bytes),
+    [fixture.markdownBytes, fixture.reportBytes]
+  );
 });
 
 test("verified final-report selection resolves one finalized sealed model-fanout attempt", () => {
@@ -105,9 +118,23 @@ test("verified final-report selection resolves one finalized sealed model-fanout
   assert.equal(loaded.authority.logical_node_id, REPORT_LOGICAL_ID);
 });
 
+test("run-wide publication capture fails closed for reused outputs without current-run authority", () => {
+  const fixture = createVerifiedReportFixture("verified-report-reused");
+  updateNodeState(fixture.layout, fixture.attemptId, { status: "reused-from-prior-run" });
+
+  assert.throws(
+    () => loadVerifiedRunOutputSnapshots(fixture.layout.root),
+    (error: unknown) =>
+      error instanceof VerifiedOutputError &&
+      error.code === "VERIFIED_OUTPUT_AUTHORITY_INVALID" &&
+      /reused sealed task.*no current-run.*authority/iu.test(error.message)
+  );
+});
+
 test("post-finalization property fan-in remains readable through sealed fanout ancestor authority", () => {
   const outputRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-verified-fanout-fanin-"));
   const discoveryOutput = boundOutput("setup/invariant-evidence-ledger.json", "ultrafuzz/invariant-ledger@1", true);
+  const discoveryMarkdownOutput = boundOutput("handoffs/discovery-evidence.md", "ultrafuzz/nonempty-markdown@1", false);
   const lensOutput = boundOutput("custom/recon-lens.json", "ultrafuzz/property-lens@2", true);
   const faninOutputs = [
     boundOutput("handoffs/canonical-properties.json", "ultrafuzz/properties@2", true),
@@ -130,7 +157,7 @@ test("post-finalization property fan-in remains readable through sealed fanout a
         kind: "agentic",
         depends_on: [],
         artifact_dir: "artifacts/project-discovery",
-        outputs: [discoveryOutput],
+        outputs: [discoveryOutput, discoveryMarkdownOutput],
         prompt_id: "project-discovery",
         prompt_path: "setup/project-discovery.md",
         loop: { index: 0, count: 1, mode: "parallel", attempt_index: 0 },
@@ -203,7 +230,7 @@ test("post-finalization property fan-in remains readable through sealed fanout a
         id: "project-discovery",
         logicalNodeId: "project-discovery",
         artifactDir: "artifacts/project-discovery",
-        outputs: [discoveryOutput]
+        outputs: [discoveryOutput, discoveryMarkdownOutput]
       },
       ...lensAttemptIds.map((attemptId) => ({
         id: attemptId,
@@ -236,7 +263,8 @@ test("post-finalization property fan-in remains readable through sealed fanout a
         { id: "inventory-1", description: "Supply accounting remains consistent.", ledger_ids: ["evidence-1"] }
       ],
       scan_probes: []
-    })
+    }),
+    [discoveryMarkdownOutput.path]: "# Discovery evidence\n"
   });
   const lensDocument = JSON.stringify({
     schema_version: "ultrafuzz.property-lens.v2",
@@ -669,6 +697,11 @@ test("verified campaign reader rejects post-finalization evidence mutation witho
     loaded.outputs.some((output) => output.contract === "ultrafuzz/property-campaign@3"),
     true
   );
+  const evidencePublication = loaded.publications.find(
+    (publication) => publication.absolute_path === fixture.evidencePath
+  );
+  assert.ok(evidencePublication);
+  assert.deepEqual(evidencePublication.bytes, fixture.evidenceBytes);
 
   const mutated = Buffer.alloc(fixture.evidenceBytes.length, 0x7a);
   fs.writeFileSync(fixture.evidencePath, mutated);
@@ -1206,7 +1239,10 @@ function createVerifiedCampaignFixture(
   const catalogId = "property-specification-fanin";
   const implementationId = "stateful-invariant-implement-properties";
   const campaignId = "stateful-invariant-campaign";
-  const catalogOutputs = [boundOutput("properties.json", "ultrafuzz/properties@2", true)];
+  const catalogOutputs = [
+    boundOutput("properties.json", "ultrafuzz/properties@2", true),
+    boundOutput("properties.md", "ultrafuzz/nonempty-markdown@1", false)
+  ];
   const implementationOutputs = [
     boundOutput("implemented-properties.json", "ultrafuzz/implemented-properties@3", true)
   ];
@@ -1348,7 +1384,17 @@ function createVerifiedCampaignFixture(
   const implementationNode = graph.nodes.find((node) => node.id === implementationId)!;
   const campaignNode = graph.nodes.find((node) => node.id === campaignId)!;
   const json = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
-  finalizeNodeOutputs(layout, catalogNode, catalogId, { "properties.json": json(catalog) });
+  finalizeNodeOutputs(layout, catalogNode, catalogId, {
+    "properties.json": json(catalog),
+    "properties.md": [
+      "### Canonical property: property-one",
+      "- description: Balances remain conserved.",
+      "- category: accounting",
+      "- priority: high",
+      "- sources: property-specification-manual:property-one",
+      "### End canonical property: property-one"
+    ].join("\n")
+  });
   finalizeNodeOutputs(
     layout,
     implementationNode,

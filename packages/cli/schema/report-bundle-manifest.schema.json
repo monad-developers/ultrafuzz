@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ultrafuzz:schema:cli:report-bundle-manifest:2",
+  "$id": "urn:ultrafuzz:schema:cli:report-bundle-manifest:3",
   "title": "Ultrafuzz report bundle manifest",
   "type": "object",
   "additionalProperties": false,
@@ -10,11 +10,10 @@
     "created_at",
     "included_roots",
     "excluded_roots",
-    "excluded_patterns",
     "entry_count_without_manifest"
   ],
   "properties": {
-    "schema_version": { "const": "ultrafuzz.report-bundle-manifest.v2" },
+    "schema_version": { "const": "ultrafuzz.report-bundle-manifest.v3" },
     "run_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
     "created_at": { "type": "string", "format": "date-time" },
     "included_roots": {
@@ -36,7 +35,6 @@
       ]
     },
     "excluded_roots": { "const": ["workspaces"] },
-    "excluded_patterns": { "const": ["artifacts/final-report/report.json.pre-*"] },
     "entry_count_without_manifest": {
       "type": "integer",
       "minimum": 1,

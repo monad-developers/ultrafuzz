@@ -25,7 +25,7 @@ if (!operatorInput.ok) {
 }
 
 const reportBundleManifest = validateReportBundleManifest({
-  schema_version: "ultrafuzz.report-bundle-manifest.v2",
+  schema_version: "ultrafuzz.report-bundle-manifest.v3",
   run_id: "schema-registry-build-check",
   created_at: "2026-08-09T00:00:00.000Z",
   included_roots: [
@@ -45,7 +45,6 @@ const reportBundleManifest = validateReportBundleManifest({
     "engine-logs"
   ],
   excluded_roots: ["workspaces"],
-  excluded_patterns: ["artifacts/final-report/report.json.pre-*"],
   entry_count_without_manifest: 1
 });
 if (!reportBundleManifest.ok) {

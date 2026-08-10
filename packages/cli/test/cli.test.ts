@@ -10,15 +10,18 @@ import {
   FINDINGS_SCHEMA_VERSION,
   REPORT_SCHEMA_VERSION,
   artifactContractDefinition,
+  artifactSchemaDirectory,
   createEventRecord,
   layoutForRunRoot,
   readPlannedGraphDocument,
   readRunMetadataDocument,
   updateNodeState,
-  writeRunMetadataDocument,
-  writeArtifactManifest
+  writeArtifactManifest,
+  writeRunMetadataDocument
 } from "@ultrafuzz/artifacts";
-import { projectCanonicalFinalReport } from "@ultrafuzz/runtime";
+import { DASHBOARD_HTTP_SCHEMA_VERSION, serveDashboard } from "@ultrafuzz/dashboard";
+import { NodeTelemetryPump, type EvalArtifactUpload, type EvalMatrixRow, type EvalReporter } from "@ultrafuzz/evals";
+import { loadVerifiedRunOutputSnapshots, projectCanonicalFinalReport, syncRun } from "@ultrafuzz/runtime";
 import AdmZip from "adm-zip";
 
 import { validateReportBundleManifest } from "../src/cli-schema-registry.js";
@@ -38,12 +41,91 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-function fakeSmithersEnv(project: string, includeFinalReport = false): Record<string, string | undefined> {
+function fakeWorkflowEventPrintf(event: Record<string, unknown>): string {
+  const runIdToken = "ultrafuzz-cli-run";
+  const serialized = JSON.stringify(event);
+  const runIdCount = serialized.split(runIdToken).length - 1;
+  assert.ok(runIdCount > 0);
+  return `printf ${shellQuote(`${serialized.replaceAll(runIdToken, "%s")}\n`)} ${Array.from(
+    { length: runIdCount },
+    () => '"$2"'
+  ).join(" ")}`;
+}
+
+function fakeSmithersEnv(
+  project: string,
+  includeFinalReport = false,
+  additionalTerminalNodeIds: readonly string[] = []
+): Record<string, string | undefined> {
   const binDir = path.join(project, "fake-bin");
   fs.mkdirSync(binDir, { recursive: true });
   const inspectStatePath = path.join(project, "fake-smithers-inspect-state");
   fs.writeFileSync(inspectStatePath, "running\n", "utf8");
   const smithers = path.join(binDir, "smithers");
+  const terminalNodeIds = [
+    "project-discovery",
+    ...additionalTerminalNodeIds,
+    ...(includeFinalReport ? ["final-report"] : [])
+  ];
+  const finishedNodes = terminalNodeIds.flatMap((nodeId) => [
+    { nodeId: `prepare:${nodeId}`, state: "finished", attempt: 1, label: `prepare:${nodeId}` },
+    { nodeId: `node:${nodeId}`, state: "finished", attempt: 1, label: `node:${nodeId}` },
+    { nodeId: `verify:${nodeId}`, state: "finished", attempt: 1, label: `verify:${nodeId}` }
+  ]);
+  const workflowEvents = [
+    {
+      runId: "ultrafuzz-cli-run",
+      seq: 1,
+      timestampMs: 1_775_865_599_000,
+      type: "RunStarted",
+      payload: { runId: "ultrafuzz-cli-run", timestampMs: 1_775_865_599_000, type: "RunStarted" }
+    },
+    ...terminalNodeIds.flatMap((nodeId, index) => {
+      const startedSequence = 2 + index * 2;
+      const startedAt = 1_775_865_600_000 + index * 2_000;
+      return [
+        {
+          runId: "ultrafuzz-cli-run",
+          seq: startedSequence,
+          timestampMs: startedAt,
+          type: "NodeStarted",
+          payload: {
+            runId: "ultrafuzz-cli-run",
+            timestampMs: startedAt,
+            type: "NodeStarted",
+            nodeId: `node:${nodeId}`,
+            iteration: 0,
+            attempt: 1
+          }
+        },
+        {
+          runId: "ultrafuzz-cli-run",
+          seq: startedSequence + 1,
+          timestampMs: startedAt + 1_000,
+          type: "NodeFinished",
+          payload: {
+            runId: "ultrafuzz-cli-run",
+            timestampMs: startedAt + 1_000,
+            type: "NodeFinished",
+            nodeId: `node:${nodeId}`,
+            iteration: 0,
+            attempt: 1
+          }
+        }
+      ];
+    }),
+    {
+      runId: "ultrafuzz-cli-run",
+      seq: 2 + terminalNodeIds.length * 2,
+      timestampMs: 1_775_865_600_000 + terminalNodeIds.length * 2_000,
+      type: "RunFinished",
+      payload: {
+        runId: "ultrafuzz-cli-run",
+        timestampMs: 1_775_865_600_000 + terminalNodeIds.length * 2_000,
+        type: "RunFinished"
+      }
+    }
+  ];
   fs.writeFileSync(
     smithers,
     [
@@ -77,28 +159,7 @@ function fakeSmithersEnv(project: string, includeFinalReport = false): Record<st
       '    inspect_nodes="[]"',
       '    if [ "$inspect_state" = "succeeded" ]; then',
       '      inspect_status="finished"',
-      `      inspect_nodes=${shellQuote(
-        JSON.stringify([
-          {
-            nodeId: "node:project-discovery",
-            state: "finished",
-            attempt: 1,
-            label: "node:project-discovery"
-          },
-          {
-            nodeId: "verify:project-discovery",
-            state: "finished",
-            attempt: 1,
-            label: "verify:project-discovery"
-          },
-          ...(includeFinalReport
-            ? [
-                { nodeId: "node:final-report", state: "finished", attempt: 1, label: "node:final-report" },
-                { nodeId: "verify:final-report", state: "finished", attempt: 1, label: "verify:final-report" }
-              ]
-            : [])
-        ])
-      )}`,
+      `      inspect_nodes=${shellQuote(JSON.stringify(finishedNodes))}`,
       "    fi",
       `    printf '{"ok":true,"data":{"run":{"id":"%s","workflow":"workflow","status":"%s","started":"2026-08-09T00:00:00.000Z","elapsed":"1s"},"runState":{"runId":"%s","state":"%s","computedAt":"2026-08-09T00:00:01.000Z"},"steps":%s,"nodes":%s},"meta":{"command":"inspect","duration":"1ms"}}\\n' "$2" "$inspect_status" "$2" "$inspect_state" "$inspect_nodes" "$inspect_nodes"`,
       "    ;;",
@@ -109,49 +170,7 @@ function fakeSmithersEnv(project: string, includeFinalReport = false): Record<st
       )} ;;`,
       "      *)",
       '        if [ "$(tr -d \'\\n\' < "$SMITHERS_FAKE_INSPECT_STATE")" = "succeeded" ]; then',
-      `          printf '%s\\n' ${[
-        {
-          runId: "ultrafuzz-cli-run",
-          seq: 1,
-          timestampMs: 1_775_865_600_000,
-          type: "NodeStarted",
-          payload: {
-            runId: "ultrafuzz-cli-run",
-            timestampMs: 1_775_865_600_000,
-            type: "NodeStarted",
-            nodeId: "node:project-discovery",
-            iteration: 0,
-            attempt: 1
-          }
-        },
-        {
-          runId: "ultrafuzz-cli-run",
-          seq: 2,
-          timestampMs: 1_775_865_601_000,
-          type: "NodeFinished",
-          payload: {
-            runId: "ultrafuzz-cli-run",
-            timestampMs: 1_775_865_601_000,
-            type: "NodeFinished",
-            nodeId: "node:project-discovery",
-            iteration: 0,
-            attempt: 1
-          }
-        },
-        {
-          runId: "ultrafuzz-cli-run",
-          seq: 3,
-          timestampMs: 1_775_865_602_000,
-          type: "RunFinished",
-          payload: {
-            runId: "ultrafuzz-cli-run",
-            timestampMs: 1_775_865_602_000,
-            type: "RunFinished"
-          }
-        }
-      ]
-        .map((event) => shellQuote(JSON.stringify(event)))
-        .join(" ")}`,
+      ...workflowEvents.map((event) => `          ${fakeWorkflowEventPrintf(event)}`),
       "        fi",
       "        ;;",
       "    esac",
@@ -280,6 +299,56 @@ nodes:
     role: finish
     depends_on:
       - project-discovery
+      - final-report
+`,
+    "utf8"
+  );
+}
+
+function writeByteIdentityTopology(project: string): void {
+  fs.writeFileSync(
+    path.join(project, ".ultrafuzz", "topology.yml"),
+    `version: 2
+defaults:
+  strategy_loops: 1
+nodes:
+  - id: __start__
+    kind: meta
+    role: start
+    depends_on: []
+  - id: project-discovery
+    kind: agentic
+    prompt: setup/project-discovery.md
+    depends_on:
+      - __start__
+    outputs:
+      - path: stdout.txt
+        contract: ultrafuzz/text@1
+        primary: true
+  - id: aggregate-test-files
+    kind: agentic
+    prompt: setup/project-discovery.md
+    depends_on:
+      - project-discovery
+    outputs:
+      - path: aggregation.json
+        contract: ultrafuzz/aggregation-manifest@1
+        primary: true
+  - id: final-report
+    kind: agentic
+    prompt: setup/project-discovery.md
+    depends_on:
+      - aggregate-test-files
+    outputs:
+      - path: report.md
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
+      - path: report.json
+        contract: ultrafuzz/report@2
+  - id: __finish__
+    kind: meta
+    role: finish
+    depends_on:
       - final-report
 `,
     "utf8"
@@ -515,19 +584,18 @@ function writeCanonicalReportPair(reportDir: string, report: Record<string, unkn
 }
 
 function sealVerifiedFinalReport(runRoot: string): void {
-  const layout = layoutForRunRoot(runRoot, path.basename(runRoot));
-  const graph = readPlannedGraphDocument(layout.graphPath);
-  const candidates = graph.nodes.filter((node) => node.logical_id === "final-report");
-  assert.equal(candidates.length, 1, "report fixtures require exactly one planned final-report attempt");
-  const plannedNode = candidates[0]!;
-  const attemptId = plannedNode.id;
-  const reportDir = path.join(layout.artifactsDir, attemptId);
-  const snapshots = plannedNode.outputs.map((output) => ({
-    output,
-    bytes: fs.readFileSync(path.join(reportDir, output.path))
-  }));
+  sealVerifiedNodeOutputs(runRoot, "final-report");
+}
+
+function sealVerifiedNodeOutputs(
+  runRoot: string,
+  logicalNodeId: string,
+  additionalPublicationPaths: readonly string[] = []
+): void {
+  const authority = writeVerifierNodeAuthority(runRoot, logicalNodeId, additionalPublicationPaths);
+  const { layout, plannedNode, attemptId, artifactDir, snapshots, publications } = authority;
   const runMetadata = readRunMetadataDocument(layout.runMetadataPath, layout.runId);
-  assert.ok(runMetadata.workflow, "report fixtures require an active workflow link");
+  assert.ok(runMetadata.workflow, "verified-output fixtures require an active workflow link");
   const workflowRunId = runMetadata.workflow.run_id;
   const agentTaskId = `node:${attemptId}`;
   const verifierTaskId = `verify:${attemptId}`;
@@ -535,7 +603,7 @@ function sealVerifiedFinalReport(runRoot: string): void {
   writeArtifactManifest({
     layout,
     nodeId: attemptId,
-    include: plannedNode.outputs.map((output) => output.path),
+    include: publications.map((publication) => publication.path),
     outputs: plannedNode.outputs,
     provenance: {
       producer_node_id: attemptId,
@@ -550,14 +618,7 @@ function sealVerifiedFinalReport(runRoot: string): void {
       metadata: { concrete_node_id: plannedNode.id }
     }
   });
-  fs.mkdirSync(path.join(layout.root, ".ultrafuzz-verification"), { recursive: true });
-  writeJsonRecord(path.join(layout.root, ".ultrafuzz-verification", `${attemptId}.json`), {
-    schema_version: ARTIFACT_VERIFICATION_SCHEMA_VERSION,
-    attempt_id: attemptId,
-    node_id: plannedNode.logical_id,
-    artifacts: snapshots.map(({ output, bytes }) => ({ ...output, sha256: digest(bytes) })),
-    publications: snapshots.map(({ output, bytes }) => ({ path: output.path, sha256: digest(bytes) }))
-  });
+  const manifestBytes = fs.readFileSync(path.join(artifactDir, "artifact-manifest.json"));
   updateNodeState(layout, attemptId, {
     status: "succeeded",
     finished_at: new Date().toISOString(),
@@ -573,9 +634,57 @@ function sealVerifiedFinalReport(runRoot: string): void {
         state: "finished",
         attempt: 0
       },
-      output_contracts: { ok: true, missing: [], artifact_manifest_sha256: "a".repeat(64) }
+      output_contracts: { ok: true, missing: [], artifact_manifest_sha256: digest(manifestBytes) }
     }
   });
+}
+
+function writeVerifierNodeAuthority(
+  runRoot: string,
+  logicalNodeId: string,
+  additionalPublicationPaths: readonly string[] = []
+): {
+  layout: ReturnType<typeof layoutForRunRoot>;
+  plannedNode: ReturnType<typeof readPlannedGraphDocument>["nodes"][number];
+  attemptId: string;
+  artifactDir: string;
+  snapshots: Array<{
+    output: ReturnType<typeof readPlannedGraphDocument>["nodes"][number]["outputs"][number];
+    path: string;
+    bytes: Buffer;
+  }>;
+  publications: Array<{ path: string; bytes: Buffer }>;
+} {
+  const layout = layoutForRunRoot(runRoot, path.basename(runRoot));
+  const graph = readPlannedGraphDocument(layout.graphPath);
+  const candidates = graph.nodes.filter((node) => node.logical_id === logicalNodeId);
+  assert.equal(candidates.length, 1, `fixtures require exactly one planned ${logicalNodeId} attempt`);
+  const plannedNode = candidates[0]!;
+  const attemptId = plannedNode.id;
+  const artifactDir = path.join(layout.artifactsDir, attemptId);
+  const snapshots = plannedNode.outputs.map((output) => ({
+    output,
+    path: output.path,
+    bytes: fs.readFileSync(path.join(artifactDir, output.path))
+  }));
+  const outputPaths = new Set(snapshots.map((snapshot) => snapshot.path));
+  const additionalPublications = additionalPublicationPaths.map((publicationPath) => {
+    assert.equal(outputPaths.has(publicationPath), false, `duplicate fixture publication ${publicationPath}`);
+    return { path: publicationPath, bytes: fs.readFileSync(path.join(artifactDir, publicationPath)) };
+  });
+  const publications = [...snapshots, ...additionalPublications];
+  fs.mkdirSync(path.join(layout.root, ".ultrafuzz-verification"), { recursive: true });
+  writeJsonRecord(path.join(layout.root, ".ultrafuzz-verification", `${attemptId}.json`), {
+    schema_version: ARTIFACT_VERIFICATION_SCHEMA_VERSION,
+    attempt_id: attemptId,
+    node_id: plannedNode.logical_id,
+    artifacts: snapshots.map(({ output, bytes }) => ({ ...output, sha256: digest(bytes) })),
+    publications: publications.map(({ path: publicationPath, bytes }) => ({
+      path: publicationPath,
+      sha256: digest(bytes)
+    }))
+  });
+  return { layout, plannedNode, attemptId, artifactDir, snapshots, publications };
 }
 
 function digest(bytes: Buffer): string {
@@ -1507,7 +1616,179 @@ test("legacy report versions are rejected without a compatibility reader", async
   assertFinalReportUnchanged(reportDir, reportSnapshot);
 });
 
-test("report bundle creates a portable ZIP without workspaces or stale report backups", async () => {
+test("agent-owned bytes stay identical across validation, sync, aggregation, report, dashboard, eval, and bundle reads", async () => {
+  const project = tempProject();
+  assert.equal((await cli(project, ["init", "--force"])).code, 0);
+  writeByteIdentityTopology(project);
+  const env = fakeSmithersEnv(project, true, ["aggregate-test-files"]);
+  const launched = await cli(project, ["run", "--run-id", "byte-identity", "--json"], env);
+  assert.equal(launched.code, 0, launched.stderr);
+  const runData = parseJson(launched).data as { run_id: string; run_root: string };
+
+  const discoveryPath = path.join(runData.run_root, "artifacts", "project-discovery", "stdout.txt");
+  const aggregationPath = path.join(runData.run_root, "artifacts", "aggregate-test-files", "aggregation.json");
+  const reportDir = path.join(runData.run_root, "artifacts", "final-report");
+  const reportJsonPath = path.join(reportDir, "report.json");
+  const reportMarkdownPath = path.join(reportDir, "report.md");
+  fs.mkdirSync(path.dirname(discoveryPath), { recursive: true });
+  fs.mkdirSync(path.dirname(aggregationPath), { recursive: true });
+  fs.mkdirSync(reportDir, { recursive: true });
+  fs.writeFileSync(discoveryPath, "agent-authored discovery bytes\n", "utf8");
+  writeJsonRecord(aggregationPath, {
+    schema_version: "ultrafuzz.aggregation-manifest.v1",
+    source_generated_tests: 0,
+    copied_generated_tests: 0,
+    source_support_files: 0,
+    copied_support_files: 0,
+    source_bundles: [],
+    files: [],
+    support_files: [],
+    skipped_files: []
+  });
+  writeCanonicalReportPair(reportDir, currentReport(runData.run_id));
+
+  const agentPaths = [discoveryPath, aggregationPath, reportMarkdownPath, reportJsonPath];
+  const agentBytes = new Map(agentPaths.map((filePath) => [filePath, fs.readFileSync(filePath)] as const));
+  const assertAgentBytesUnchanged = (): void => {
+    for (const [filePath, expected] of agentBytes) assert.deepEqual(fs.readFileSync(filePath), expected, filePath);
+  };
+
+  for (const [schemaFilename, artifactPath] of [
+    ["aggregation-manifest.schema.json", aggregationPath],
+    ["report.schema.json", reportJsonPath]
+  ] as const) {
+    const validated = await cli(project, [
+      "json",
+      "validate",
+      "--schema",
+      path.join(artifactSchemaDirectory(), schemaFilename),
+      "--file",
+      artifactPath,
+      "--json"
+    ]);
+    assert.equal(validated.code, 0, `${schemaFilename}: ${validated.stderr}${validated.stdout}`);
+  }
+  assertAgentBytesUnchanged();
+
+  writeVerifierNodeAuthority(runData.run_root, "project-discovery");
+  const aggregationAuthority = writeVerifierNodeAuthority(runData.run_root, "aggregate-test-files");
+  fs.mkdirSync(path.join(runData.run_root, "workspaces", aggregationAuthority.attemptId), { recursive: true });
+  writeVerifierNodeAuthority(runData.run_root, "final-report");
+  fs.writeFileSync(path.join(project, "fake-smithers-inspect-state"), "succeeded\n", "utf8");
+  const synchronized = await syncRun({ projectRoot: project, runId: runData.run_id, env });
+  assert.equal(synchronized.ok, true, JSON.stringify(synchronized.diagnostics));
+  assert.equal(synchronized.value?.status, "succeeded", JSON.stringify(synchronized.diagnostics));
+  assertAgentBytesUnchanged();
+
+  const verified = loadVerifiedRunOutputSnapshots(runData.run_root);
+  assert.deepEqual(
+    verified.map((snapshot) => snapshot.attempt_id),
+    ["project-discovery", "aggregate-test-files", "final-report"]
+  );
+  const verifiedAggregation = verified
+    .flatMap((snapshot) => snapshot.outputs)
+    .find((output) => output.contract === "ultrafuzz/aggregation-manifest@1");
+  assert.ok(verifiedAggregation);
+  assert.deepEqual(verifiedAggregation.bytes, agentBytes.get(aggregationPath));
+  assertAgentBytesUnchanged();
+
+  const reported = await cli(project, ["report", runData.run_id, "--json"]);
+  assert.equal(reported.code, 0, reported.stderr);
+  assertAgentBytesUnchanged();
+
+  const dashboard = await serveDashboard({ projectRoot: project, runId: runData.run_id, port: 0 });
+  try {
+    const reportResponse = await fetch(new URL("/api/report", dashboard.url));
+    assert.equal(reportResponse.status, 200, await reportResponse.text());
+    const findingsResponse = await fetch(new URL("/api/findings", dashboard.url));
+    const findingsBody = await findingsResponse.text();
+    assert.equal(findingsResponse.status, 200, findingsBody);
+    assert.deepEqual(JSON.parse(findingsBody), {
+      schema_version: DASHBOARD_HTTP_SCHEMA_VERSION,
+      document_type: "findings",
+      source: "artifacts/final-report/report.json",
+      findings: []
+    });
+  } finally {
+    await dashboard.close();
+  }
+  assertAgentBytesUnchanged();
+
+  const uploads: EvalArtifactUpload[] = [];
+  const reporter: EvalReporter = {
+    name: "byte-identity",
+    async onPlan() {},
+    async onRowStart() {},
+    async onNodeEvent() {},
+    async onArtifact(artifact) {
+      uploads.push(artifact);
+    },
+    async onRowFinish() {},
+    async onScores() {},
+    async finalize() {
+      return {};
+    }
+  };
+  const row: EvalMatrixRow = {
+    id: "byte-identity-row",
+    target_id: "target",
+    variant_id: "variant",
+    trial_id: "trial",
+    run_id: runData.run_id,
+    target: {
+      id: "target",
+      repo: "https://example.com/target.git",
+      ref: "a".repeat(40),
+      ground_truth: "target.yml",
+      ground_truth_path: path.join(project, "target.yml"),
+      sensitivity: "public"
+    },
+    variant: { id: "variant" },
+    runner_model_profile: "runner",
+    judge_model_profile: "judge"
+  };
+  const cursorPath = path.join(project, ".ultrafuzz", "evals", "byte-identity-cursor.json");
+  fs.mkdirSync(path.dirname(cursorPath), { recursive: true });
+  const telemetry = new NodeTelemetryPump({
+    runRoot: runData.run_root,
+    row,
+    reporters: [reporter],
+    policy: {
+      node_telemetry: true,
+      heartbeat_interval_seconds: 60,
+      artifacts: {
+        mode: "upload",
+        mode_explicit: true,
+        include: ["report.json", "report.md"],
+        max_file_bytes: 1024 * 1024
+      }
+    },
+    cursorPath,
+    retryDelayMs: 0
+  });
+  const drained = await telemetry.drain();
+  assert.deepEqual(drained.warnings, []);
+  assert.deepEqual(uploads.map((upload) => upload.relativePath).sort(), ["report.json", "report.md"]);
+  for (const upload of uploads) {
+    assert.ok(upload.read);
+    const expected =
+      upload.relativePath === "report.json" ? agentBytes.get(reportJsonPath) : agentBytes.get(reportMarkdownPath);
+    assert.deepEqual(await upload.read(), expected);
+  }
+  assertAgentBytesUnchanged();
+
+  const bundled = await cli(project, ["report", "bundle", runData.run_id, "--json"]);
+  assert.equal(bundled.code, 0, bundled.stderr);
+  const bundlePath = (parseJson(bundled).data as { zip_path: string }).zip_path;
+  const zip = new AdmZip(bundlePath);
+  for (const [filePath, expected] of agentBytes) {
+    const relativePath = path.relative(runData.run_root, filePath).split(path.sep).join("/");
+    assert.deepEqual(zip.readFile(relativePath), expected, relativePath);
+  }
+  assertAgentBytesUnchanged();
+});
+
+test("report bundle creates a portable ZIP without workspaces", async () => {
   const project = tempProject();
   assert.equal((await cli(project, ["init", "--force"])).code, 0);
   writeReportTopology(project);
@@ -1520,6 +1801,10 @@ test("report bundle creates a portable ZIP without workspaces or stale report ba
   const artifactDir = path.join(runData.run_root, "artifacts", "project-discovery");
   fs.mkdirSync(artifactDir, { recursive: true });
   fs.writeFileSync(path.join(artifactDir, "stdout.txt"), "generated stdout\n", "utf8");
+  const supportPublicationPath = "evidence/discovery-trace.txt";
+  fs.mkdirSync(path.join(artifactDir, "evidence"), { recursive: true });
+  fs.writeFileSync(path.join(artifactDir, supportPublicationPath), "authenticated discovery trace\n", "utf8");
+  sealVerifiedNodeOutputs(runData.run_root, "project-discovery", [supportPublicationPath]);
   fs.writeFileSync(path.join(artifactDir, "bad\\name.txt"), "unsafe archive path\n", "utf8");
   const reportDir = writeFinalReportAccounting(runData.run_root, {
     tokensUsed: "123",
@@ -1527,7 +1812,6 @@ test("report bundle creates a portable ZIP without workspaces or stale report ba
     partialPricing: false
   });
   const reportSnapshot = snapshotFinalReport(reportDir);
-  fs.writeFileSync(path.join(reportDir, "report.json.pre-old"), '{"stale":true}\n', "utf8");
   const workspaceDir = path.join(runData.run_root, "workspaces", "project-discovery");
   fs.mkdirSync(workspaceDir, { recursive: true });
   fs.writeFileSync(path.join(workspaceDir, "large-cache.txt"), "do not bundle\n", "utf8");
@@ -1556,11 +1840,16 @@ test("report bundle creates a portable ZIP without workspaces or stale report ba
     .sort();
   assert.equal(entries.includes("bundle-manifest.json"), true);
   const bundleManifest = JSON.parse(zip.readAsText("bundle-manifest.json")) as { schema_version?: unknown };
-  assert.equal(bundleManifest.schema_version, "ultrafuzz.report-bundle-manifest.v2");
+  assert.equal(bundleManifest.schema_version, "ultrafuzz.report-bundle-manifest.v3");
   assert.equal(validateReportBundleManifest(bundleManifest).ok, true);
   assert.equal(entries.includes("artifacts/final-report/report.md"), true);
   assert.equal(entries.includes("artifacts/final-report/report.json"), true);
   assert.equal(entries.includes("artifacts/project-discovery/stdout.txt"), true);
+  assert.equal(entries.includes(`artifacts/project-discovery/${supportPublicationPath}`), true);
+  assert.equal(
+    zip.readAsText(`artifacts/project-discovery/${supportPublicationPath}`),
+    "authenticated discovery trace\n"
+  );
   assert.equal(entries.includes("run.json"), true);
   assert.equal(entries.includes("state.json"), true);
   assert.equal(
@@ -1571,7 +1860,6 @@ test("report bundle creates a portable ZIP without workspaces or stale report ba
     entries.some((entry) => entry.includes("\\")),
     false
   );
-  assert.equal(entries.includes("artifacts/final-report/report.json.pre-old"), false);
   // Engine retry/validation evidence must reach an operator bundle, under a
   // neutral prefix so the archive never names the orchestration engine.
   assert.equal(entries.includes("engine-logs/stream.ndjson"), true);
@@ -1587,10 +1875,6 @@ test("report bundle creates a portable ZIP without workspaces or stale report ba
   const finalReportManifest = JSON.parse(zip.readAsText("artifacts/final-report/artifact-manifest.json")) as {
     files: Array<{ path: string; size_bytes: number; sha256: string }>;
   };
-  assert.equal(
-    finalReportManifest.files.some((entry) => /^report\.json\.pre-/u.test(entry.path)),
-    false
-  );
   for (const entry of finalReportManifest.files) {
     assert.ok(zip.getEntry(`artifacts/final-report/${entry.path}`), entry.path);
   }
@@ -1652,12 +1936,34 @@ test("report bundle creates a portable ZIP without workspaces or stale report ba
   assertFinalReportUnchanged(reportDir, reportSnapshot);
 });
 
+test("report bundle rejects a changed authenticated publication from any finalized producer", async () => {
+  const project = tempProject();
+  const runData = await createReportRun(project, "report-bundle-mutated-publication");
+  const artifactDir = path.join(runData.run_root, "artifacts", "project-discovery");
+  const supportPublicationPath = "evidence/discovery-trace.txt";
+  const supportPublication = path.join(artifactDir, supportPublicationPath);
+  fs.mkdirSync(path.dirname(supportPublication), { recursive: true });
+  fs.writeFileSync(path.join(artifactDir, "stdout.txt"), "generated stdout\n", "utf8");
+  fs.writeFileSync(supportPublication, "authenticated discovery trace\n", "utf8");
+  sealVerifiedNodeOutputs(runData.run_root, "project-discovery", [supportPublicationPath]);
+
+  const changedBytes = Buffer.from("post-finalization mutation!!!!\n", "utf8");
+  fs.writeFileSync(supportPublication, changedBytes);
+  const bundled = await cli(project, ["report", "bundle", runData.run_id, "--json"]);
+
+  assert.equal(bundled.code, 1, bundled.stderr);
+  assert.match(JSON.stringify(parseJson(bundled).diagnostics), /verified publication.*changed/iu);
+  assert.deepEqual(fs.readFileSync(supportPublication), changedBytes);
+  assert.equal(
+    fs.existsSync(path.join(project, ".ultrafuzz", "bundles", `${runData.run_id}-report-bundle.zip`)),
+    false
+  );
+});
+
 test("report bundle preserves the exact validated event-record-v2 journal snapshot", async () => {
   const project = tempProject();
-  assert.equal((await cli(project, ["init", "--force"])).code, 0);
   const runId = "report-bundle-event-snapshot";
-  const runRoot = path.join(project, ".ultrafuzz", "runs", runId);
-  fs.mkdirSync(runRoot, { recursive: true });
+  const runRoot = (await createReportRun(project, runId)).run_root;
   const record = bundleFixtureEvent(runId);
   const journalBytes = Buffer.from(`  ${JSON.stringify(record)}  \n`, "utf8");
   fs.writeFileSync(path.join(runRoot, "events.jsonl"), journalBytes);
@@ -1673,11 +1979,9 @@ test("report bundle preserves the exact validated event-record-v2 journal snapsh
 
 test("report bundle treats only an absent event journal as optional", async () => {
   const project = tempProject();
-  assert.equal((await cli(project, ["init", "--force"])).code, 0);
   const runId = "report-bundle-no-event-journal";
-  const runRoot = path.join(project, ".ultrafuzz", "runs", runId);
-  fs.mkdirSync(runRoot, { recursive: true });
-  fs.writeFileSync(path.join(runRoot, "graph.fingerprint"), "sha256:fixture\n", "utf8");
+  const runRoot = (await createReportRun(project, runId)).run_root;
+  fs.rmSync(path.join(runRoot, "events.jsonl"), { force: true });
 
   const bundled = await cli(project, ["report", "bundle", runId, "--json"]);
 
@@ -1685,12 +1989,26 @@ test("report bundle treats only an absent event journal as optional", async () =
   const data = parseJson(bundled).data as { zip_path: string };
   const zip = new AdmZip(data.zip_path);
   assert.equal(zip.getEntry("events.jsonl"), null);
-  assert.equal(zip.readAsText("graph.fingerprint"), "sha256:fixture\n");
+  assert.equal(zip.readAsText("graph.fingerprint"), fs.readFileSync(path.join(runRoot, "graph.fingerprint"), "utf8"));
+});
+
+test("report bundle rejects historical runs without current sealed workflow authority", async () => {
+  const project = tempProject();
+  assert.equal((await cli(project, ["init", "--force"])).code, 0);
+  const runId = "report-bundle-historical-unsealed";
+  const runRoot = path.join(project, ".ultrafuzz", "runs", runId);
+  fs.mkdirSync(runRoot, { recursive: true });
+  fs.writeFileSync(path.join(runRoot, "graph.fingerprint"), "sha256:historical\n", "utf8");
+
+  const bundled = await cli(project, ["report", "bundle", runId, "--json"]);
+
+  assert.equal(bundled.code, 1, bundled.stderr);
+  assert.match(JSON.stringify(parseJson(bundled).diagnostics), /historical or unsealed runs is unsupported/iu);
+  assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "bundles", `${runId}-report-bundle.zip`)), false);
 });
 
 test("report bundle fails closed on every present invalid event journal", async (context) => {
   const project = tempProject();
-  assert.equal((await cli(project, ["init", "--force"])).code, 0);
   const cases: Array<{
     name: string;
     prepare(eventsPath: string, runId: string): void;
@@ -1755,9 +2073,8 @@ test("report bundle fails closed on every present invalid event journal", async 
   for (const [index, invalidCase] of cases.entries()) {
     await context.test(invalidCase.name, async () => {
       const runId = `report-bundle-invalid-events-${index}`;
-      const runRoot = path.join(project, ".ultrafuzz", "runs", runId);
-      fs.mkdirSync(runRoot, { recursive: true });
-      fs.writeFileSync(path.join(runRoot, "graph.fingerprint"), "sha256:fixture\n", "utf8");
+      const runRoot = (await createReportRun(project, runId)).run_root;
+      fs.rmSync(path.join(runRoot, "events.jsonl"), { force: true });
       invalidCase.prepare(path.join(runRoot, "events.jsonl"), runId);
 
       const bundled = await cli(project, ["report", "bundle", runId, "--json"]);

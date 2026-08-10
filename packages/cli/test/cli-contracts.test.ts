@@ -60,7 +60,7 @@ test("the CLI registry owns and compiles every CLI schema", () => {
   assert.equal(validateOperatorInput({ nested: [null, true, 1, "value"] }).ok, true);
   assert.equal(
     validateReportBundleManifest({
-      schema_version: "ultrafuzz.report-bundle-manifest.v2",
+      schema_version: "ultrafuzz.report-bundle-manifest.v3",
       run_id: "registry-test",
       created_at: "2026-08-09T00:00:00.000Z",
       included_roots: [
@@ -80,7 +80,6 @@ test("the CLI registry owns and compiles every CLI schema", () => {
         "engine-logs"
       ],
       excluded_roots: ["workspaces"],
-      excluded_patterns: ["artifacts/final-report/report.json.pre-*"],
       entry_count_without_manifest: 1
     }).ok,
     true

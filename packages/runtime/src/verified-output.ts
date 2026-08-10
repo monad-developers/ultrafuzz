@@ -76,12 +76,20 @@ export interface VerifiedOutputArtifactSnapshot {
   value: unknown;
 }
 
+export interface VerifiedOutputPublicationSnapshot {
+  path: string;
+  absolute_path: string;
+  sha256: string;
+  bytes: Buffer;
+}
+
 export interface VerifiedNodeOutputSnapshot {
   run_root: string;
   attempt_id: string;
   logical_node_id: string;
   artifact_dir: string;
   outputs: readonly VerifiedOutputArtifactSnapshot[];
+  publications: readonly VerifiedOutputPublicationSnapshot[];
 }
 
 export interface VerifiedFinalReportSnapshot {
@@ -177,6 +185,65 @@ export function loadVerifiedNodeOutputSnapshot(input: LoadVerifiedNodeOutputInpu
 }
 
 /**
+ * Capture every currently successful sealed task through its verifier,
+ * controller-finalization, schema, and semantic/context authority. This is the
+ * run-wide publication boundary used by recursive consumers such as report
+ * bundling: callers can compare every file they capture with the immutable
+ * publication bytes returned here.
+ */
+export function loadVerifiedRunOutputSnapshots(runRoot: string): readonly VerifiedNodeOutputSnapshot[] {
+  const root = path.resolve(runRoot);
+  assertNoSymlinkComponents(root, root, "run root");
+  const layout = layoutForRunRoot(root);
+  const state = readRunState(layout);
+  const graph = readPlannedGraphDocument(layout.graphPath);
+  assertRunAuthorityIdentity(layout, state);
+  const sealedTaskManifest = readCurrentSealedTaskManifest(layout, graph);
+  const snapshots: VerifiedNodeOutputSnapshot[] = [];
+
+  for (const task of sealedTaskManifest.document.tasks) {
+    const nodeState = state.nodes[task.attemptId];
+    if (nodeState === undefined) {
+      throw invalidAuthority(`sealed task ${task.attemptId} is absent from current run state`);
+    }
+    if (nodeState.status === "reused-from-prior-run") {
+      throw invalidAuthority(
+        `reused sealed task ${task.attemptId} has no current-run verifier/finalization publication authority`
+      );
+    }
+    if (nodeState.status !== "succeeded") continue;
+    if (!hasSuccessfulFinalizationAuthority(nodeState)) {
+      throw invalidAuthority(`successful sealed task ${task.attemptId} lacks current finalization authority`);
+    }
+    snapshots.push(
+      loadVerifiedNodeOutputSnapshot({
+        runRoot: root,
+        logicalNodeId: task.logicalNodeId,
+        attemptId: task.attemptId
+      })
+    );
+  }
+
+  if (!isDeepStrictEqual(readRunState(layout), state)) {
+    throw changedOutput("run-state finalization authority changed while run outputs were being read");
+  }
+  if (!isDeepStrictEqual(readPlannedGraphDocument(layout.graphPath), graph)) {
+    throw changedOutput("planned graph changed while run outputs were being read");
+  }
+  if (
+    !readAuthoritySnapshot(layout.root, sealedTaskManifest.tasksPath, "workflow task manifest").equals(
+      sealedTaskManifest.contents
+    ) ||
+    !readAuthoritySnapshot(layout.root, sealedTaskManifest.integrityPath, "workflow control seal").equals(
+      sealedTaskManifest.integrityContents
+    )
+  ) {
+    throw changedOutput("sealed Smithers task authority changed while run outputs were being read");
+  }
+  return Object.freeze(snapshots);
+}
+
+/**
  * Capture finalized producer outputs through state, plan, manifest, marker,
  * and immutable publication digests without recursively running host gates.
  * Consumers must still validate the selected output's current schema and
@@ -221,7 +288,17 @@ function loadFinalizedNodeOutputAuthority(input: LoadVerifiedNodeOutputInput): F
     attempt_id: candidate.attemptId,
     logical_node_id: logicalNodeId,
     artifact_dir: artifactDir,
-    outputs: Object.freeze(outputSnapshots)
+    outputs: Object.freeze(outputSnapshots),
+    publications: Object.freeze(
+      [...publicationSnapshots.values()].map((publication) =>
+        Object.freeze({
+          path: publication.path,
+          absolute_path: publication.absolutePath,
+          sha256: publication.sha256,
+          bytes: Buffer.from(publication.bytes)
+        })
+      )
+    )
   });
   const sealedAttempt = resolveSealedAttemptGateAuthority(
     sealedTaskManifest,

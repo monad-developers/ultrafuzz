@@ -28,7 +28,7 @@ export const CLI_RESULT_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:cli:result:2" as 
 export const CLI_RESULT_SCHEMA_FILENAME = "cli-result.schema.json" as const;
 export const OPERATOR_INPUT_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:cli:operator-input:1" as const;
 export const OPERATOR_INPUT_SCHEMA_FILENAME = "operator-input.schema.json" as const;
-export const REPORT_BUNDLE_MANIFEST_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:cli:report-bundle-manifest:2" as const;
+export const REPORT_BUNDLE_MANIFEST_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:cli:report-bundle-manifest:3" as const;
 export const REPORT_BUNDLE_MANIFEST_SCHEMA_FILENAME = "report-bundle-manifest.schema.json" as const;
 
 const MAX_CLI_SCHEMA_BYTES = 4 * 1024 * 1024;
