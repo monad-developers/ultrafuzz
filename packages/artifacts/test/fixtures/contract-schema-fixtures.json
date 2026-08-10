@@ -211,10 +211,14 @@
         "harness_author_attempt_index": 0,
         "source_plan_artifact": "x",
         "source_harness_artifact": "x",
+        "surface_id": "x",
         "intended_t_sol_path": "x",
         "focused_command": "x",
         "public_evidence_paths": ["x"],
-        "exact_observable_equality_assertions": ["x"]
+        "exact_observable_equality_assertions": ["x"],
+        "oracle_type": "independent_reference",
+        "calibration_bucket": "red_seeking_adversarial",
+        "red_seeking_priority": "high"
       },
       "authored_paths": ["x"],
       "focused_command": "x",
@@ -247,10 +251,14 @@
         "harness_author_attempt_index": 0,
         "source_plan_artifact": "x",
         "source_harness_artifact": "x",
+        "surface_id": "x",
         "intended_t_sol_path": "x",
         "focused_command": "x",
         "public_evidence_paths": ["x"],
-        "exact_observable_equality_assertions": ["x"]
+        "exact_observable_equality_assertions": ["x"],
+        "oracle_type": "independent_reference",
+        "calibration_bucket": "red_seeking_adversarial",
+        "red_seeking_priority": "high"
       },
       "authored_paths": ["x"],
       "focused_command": "x",

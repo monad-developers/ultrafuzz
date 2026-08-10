@@ -16,8 +16,7 @@ const reportSummaryFields = [
   ["Strategy loops", "strategy_loops"]
 ] as const;
 
-const severityOrder = ["High", "Medium", "Low"] as const;
-type ReportSeverity = (typeof severityOrder)[number];
+type ReportSeverity = "High" | "Medium" | "Low";
 
 interface RenderedIssue {
   issue: JsonRecord;
@@ -124,26 +123,30 @@ export function isDirectiveConformingFinalReportMarkdown(
   ) {
     return false;
   }
-  const issueCount = Array.isArray(report.issues) ? report.issues.length : 0;
-  const headings = [...markdown.matchAll(/^## \[[HML]-\d{2}\] - .+$/gmu)];
-  if (headings.length !== issueCount) {
+  const rendered = renderedIssues(Array.isArray(report.issues) ? report.issues.filter(isRecord) : []);
+  const expectedHeadings = rendered.map(renderedIssueHeading);
+  const headings = markdown.split("\n").filter((line) => line.startsWith("## ["));
+  if (
+    headings.length !== expectedHeadings.length ||
+    headings.some((heading, index) => heading !== expectedHeadings[index])
+  ) {
     return false;
   }
-  if (requireImplementationCoverage) {
-    const expectedHeadings = renderedIssues(Array.isArray(report.issues) ? report.issues.filter(isRecord) : []).map(
-      (issue) => `## [${issue.id}] - ${publicProse(issue.title)}`
-    );
-    if (headings.some((heading, index) => heading[0] !== expectedHeadings[index])) {
-      return false;
-    }
-  }
-  if (issueCount === 0) {
+  // Exact equality above proves the Markdown kept the validated JSON order,
+  // IDs, and titles. Presentation never assigns severity-local identities.
+  if (expectedHeadings.length === 0) {
     return !markdown.includes("| Issue id | Title |");
   }
   if (!markdown.startsWith("# Ultrafuzz report\n\n| Issue id | Title |\n| --- | --- |\n")) {
     return false;
   }
-  const issueBlocks = markdown.split(/(?=^## \[[HML]-\d{2}\] - )/gmu).slice(1);
+  const issueBlocks = expectedHeadings.map((heading, index) => {
+    const start = markdown.indexOf(`${heading}\n`);
+    const nextHeading = expectedHeadings[index + 1];
+    const end =
+      nextHeading === undefined ? markdown.length : markdown.indexOf(`${nextHeading}\n`, start + heading.length);
+    return markdown.slice(start, end < 0 ? markdown.length : end);
+  });
   return issueBlocks.every((block) => {
     const severityIndex = block.indexOf("\n### Severity\n");
     const proofIndex = block.indexOf("\n### Proof of Concept\n");
@@ -196,8 +199,6 @@ function isCanonicalEmptyReport(value: JsonRecord): boolean {
 
 function assertCanonicalIssuePresentation(report: JsonRecord): void {
   if (!Array.isArray(report.issues)) return;
-  const counters: Record<ReportSeverity, number> = { High: 0, Medium: 0, Low: 0 };
-  let priorSeverityIndex = -1;
   const findingsById = new Map<string, JsonRecord>();
   for (const [index, candidate] of report.issues.entries()) {
     if (!isRecord(candidate)) {
@@ -212,22 +213,12 @@ function assertCanonicalIssuePresentation(report: JsonRecord): void {
         `final report production issue ${index} has severity ${severity}; expected ${expectedSeverity} from impact ${impact.label} and likelihood ${likelihood.label}`
       );
     }
-    const severityIndex = severityOrder.indexOf(severity);
-    if (severityIndex < priorSeverityIndex) {
-      throw new Error("final report production issues are not ordered High, Medium, then Low");
-    }
-    priorSeverityIndex = severityIndex;
-    counters[severity] += 1;
-    const expectedId = `${severity[0]}-${String(counters[severity]).padStart(2, "0")}`;
-    if (candidate.id !== expectedId) {
-      throw new Error(`final report production issue ${index} must use canonical ID ${expectedId}`);
-    }
+    const findingId = typeof candidate.id === "string" ? candidate.id : "";
     const title = recordTitle(candidate, "");
-    const expectedTitle = `[${expectedId}] - ${cleanIssueTitle(title)}`;
-    if (title !== expectedTitle || cleanIssueTitle(title) === "") {
-      throw new Error(`final report production issue ${expectedId} must use title ${JSON.stringify(expectedTitle)}`);
+    if (findingId.length === 0 || title.length === 0) {
+      throw new Error(`final report production issue ${index} lacks its preserved finding ID or title`);
     }
-    findingsById.set(expectedId, candidate);
+    findingsById.set(findingId, candidate);
   }
 
   for (const candidate of Array.isArray(report.non_production_outcomes) ? report.non_production_outcomes : []) {
@@ -336,8 +327,8 @@ function renderCanonicalReport(report: JsonRecord): string {
   if (issues.length > 0) {
     lines.push("| Issue id | Title |", "| --- | --- |");
     for (const issue of issues) {
-      const heading = `[${issue.id}] - ${issue.title}`;
-      const linkLabel = `[${issue.id}] - ${publicProse(issue.title)}`;
+      const heading = renderedIssueLabel(issue);
+      const linkLabel = renderedIssueLabel(issue);
       lines.push(`| ${issue.id} | [${escapeTable(linkLabel)}](#${markdownAnchor(heading)}) |`);
     }
     lines.push("", issueCountSentence(issues), "");
@@ -371,8 +362,16 @@ function renderedIssues(issues: JsonRecord[]): RenderedIssue[] {
     issue,
     severity: requiredSeverity(issue),
     id: typeof issue.id === "string" ? issue.id : "",
-    title: cleanIssueTitle(recordTitle(issue, ""))
+    title: recordTitle(issue, "")
   }));
+}
+
+function renderedIssueLabel(issue: RenderedIssue): string {
+  return `[${publicProse(issue.id)}] - ${publicProse(issue.title)}`;
+}
+
+function renderedIssueHeading(issue: RenderedIssue): string {
+  return `## ${renderedIssueLabel(issue)}`;
 }
 
 function appendRunSummary(lines: string[], metadata: JsonRecord): void {
@@ -386,16 +385,8 @@ function appendRunSummary(lines: string[], metadata: JsonRecord): void {
 }
 
 function appendProductionIssue(lines: string[], rendered: RenderedIssue): void {
-  const { issue, id, title } = rendered;
-  lines.push(
-    "",
-    `## [${id}] - ${publicProse(title)}`,
-    "",
-    publicProse(issueDescription(issue)),
-    "",
-    "### Severity",
-    ""
-  );
+  const { issue } = rendered;
+  lines.push("", renderedIssueHeading(rendered), "", publicProse(issueDescription(issue)), "", "### Severity", "");
   const impact = riskAssessment(issue, "impact");
   const likelihood = riskAssessment(issue, "likelihood");
   lines.push(`- **Impact**: ${impact.label}: ${publicProse(impact.rationale)}`);
@@ -628,13 +619,6 @@ function exactSeverity(value: unknown): ReportSeverity | undefined {
 
 function issueDescription(issue: JsonRecord): string {
   return firstAvailableString(issue.description, issue.summary) ?? "No public issue description was recorded.";
-}
-
-function cleanIssueTitle(value: string): string {
-  return value
-    .replace(/^\s*\[[HML]-\d{2}\]\s*-\s*/iu, "")
-    .replace(/\s+/gu, " ")
-    .trim();
 }
 
 function markdownAnchor(heading: string): string {

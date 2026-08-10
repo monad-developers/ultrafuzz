@@ -20,6 +20,12 @@ Base Foundry setup:
 Property catalog:
 {{artifact_handoff:property-specification-fanin}}
 
+Copy `source_plan_artifacts` from the exact declared plan handoffs, in declared
+order. Every `covered_surfaces` entry must be an unchanged `surface_id` from
+those plans. Do not search for same-named files, invent paths or surfaces,
+rewrite attempt coordinates, accept legacy aliases, or convert an upstream
+value to another spelling.
+
 Write normally under `test/foundry/differential/**`, plus test-only scripts or helpers needed for deployment. Do not edit production contracts. Do not copy production internals into the reference.
 Write generated Foundry test contracts as `.t.sol` files under `test/foundry/differential/**` so Ultrafuzz can collect them for review and aggregation. Non-test helper libraries may use `.sol` beside those tests when the `.t.sol` files import them.
 
@@ -31,6 +37,10 @@ Build deliberately simple reference models:
 - if a behavior cannot be modeled honestly from public sources, leave a reference gap instead of guessing.
 
 Validate only the reference/harness surface you authored. Compiler errors are harness defects to record, not reasons to broaden scope.
+
+After every final JSON write, run each exact `ultrafuzz json validate` command
+printed in the output contract. The validator is read-only: fix the authored
+JSON yourself and do not return or exit the node until every command passes.
 
 Before compiling, verify local test dependencies described by the base setup or
 `foundry.toml` exist in this isolated workspace. If a required test dependency

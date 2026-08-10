@@ -63,19 +63,22 @@ import {
   type NodeProvenanceReasonCode,
   type NodeOutputContract,
   type SemanticArtifactSetContext,
+  type SemanticDifferentialArtifactBinding,
   type SemanticGateContext,
   type SemanticGitContext,
   type SemanticPropertyLensContext,
   type SemanticPropertyCampaignEvidenceContext,
+  type SemanticReviewStageContext,
   type WorkspacePatchManifest
 } from "@ultrafuzz/artifacts";
 
 import { authenticatedAggregationSemanticContext } from "./aggregation-semantic-context.js";
-import { runtimeSemanticGateDiagnostics } from "./semantic-gates.js";
 import {
   declaredAncestorOutputsByContract,
+  declaredSiblingOutputsByContract,
   type SemanticArtifactTaskDeclaration
 } from "./semantic-artifact-context.js";
+import { runtimeSemanticGateDiagnostics } from "./semantic-gates.js";
 import { WORKSPACE_PATCH_BASELINE_JSON_SCHEMA_ID } from "./runtime-contracts.js";
 import { parseRuntimeDocumentBytes } from "./runtime-document-codec.js";
 import type { PlannedGraph, PlannedGraphNode, RuntimeDiagnostic } from "./types.js";
@@ -2077,7 +2080,7 @@ function verifyRequiredArtifactShape(
           artifactDir,
           node,
           attemptId,
-          artifactPath: output.path,
+          output,
           schemaFilename: binding.schema_file as ArtifactSchemaFilename,
           attemptAuthority,
           authenticated,
@@ -2281,7 +2284,7 @@ function semanticGateContextForArtifact(input: {
   artifactDir: string;
   node: PlannedGraphNode;
   attemptId: string;
-  artifactPath: string;
+  output: PlannedGraphNode["outputs"][number];
   schemaFilename: ArtifactSchemaFilename;
   attemptAuthority?: ArtifactGateAttemptAuthority;
   authenticated?: AuthenticatedArtifactGateSnapshots;
@@ -2297,7 +2300,7 @@ function semanticGateContextForArtifact(input: {
       runId: input.layout.runId,
       nodeId: input.node.logical_id ?? input.node.id,
       attemptId: input.attemptId,
-      artifactPath: input.artifactPath
+      artifactPath: input.output.path
     }
   };
   const artifactSet = semanticArtifactSetForSchema(input);
@@ -2337,6 +2340,8 @@ function semanticArtifactSetForSchema(input: {
   layout: RunLayout;
   artifactDir: string;
   node: PlannedGraphNode;
+  attemptId: string;
+  output: PlannedGraphNode["outputs"][number];
   schemaFilename: ArtifactSchemaFilename;
   attemptAuthority?: ArtifactGateAttemptAuthority;
   authenticated?: AuthenticatedArtifactGateSnapshots;
@@ -2361,16 +2366,49 @@ function semanticArtifactSetForSchema(input: {
     const propertyLenses = semanticPropertyLenses(input.layout, input.node, input.attemptAuthority);
     return propertyLenses === undefined ? {} : { propertyLenses };
   }
+  if (
+    input.schemaFilename === "finding-lifecycle-ledger.schema.json" ||
+    input.schemaFilename === "strategy-detections.schema.json"
+  ) {
+    const reviewStage = semanticReviewStageContext(input);
+    return reviewStage === undefined ? {} : { reviewStage };
+  }
+  if (input.schemaFilename === "triaged-findings.schema.json") {
+    const dedupedFindings = semanticDedupedFindings(input.layout, input.node, input.attemptAuthority);
+    return dedupedFindings === undefined ? {} : { dedupedFindings };
+  }
   if (input.schemaFilename === "severity-classified-findings.schema.json") {
     const triagedFindings = semanticTriagedFindings(input.layout, input.node, input.attemptAuthority);
     return triagedFindings === undefined ? {} : { triagedFindings };
   }
+  if (input.schemaFilename === "selected-strategies.schema.json") {
+    return { dynamicStrategyArtifacts: semanticDynamicStrategyArtifacts(input) };
+  }
+  if (
+    input.schemaFilename === "reference-harness.schema.json" ||
+    input.schemaFilename === "audited-differential-lanes.schema.json" ||
+    input.schemaFilename === "differential-lane-result.schema.json" ||
+    input.schemaFilename === "semantic-red-registry.schema.json" ||
+    input.schemaFilename === "differential-red-triage.schema.json" ||
+    input.schemaFilename === "differential-repair-summary.schema.json" ||
+    input.schemaFilename === "differential-gap-review.schema.json" ||
+    input.schemaFilename === "differential-report-review.schema.json"
+  ) {
+    return { differentialArtifacts: semanticDifferentialArtifacts(input) };
+  }
   if (input.schemaFilename === "report.schema.json") {
     const propertyCatalog = semanticCanonicalPropertyCatalog(input.layout, input.node, input.attemptAuthority);
     const implementedProperties = semanticImplementedProperties(input.layout, input.node, input.attemptAuthority);
+    const severity = semanticFinalSeverityContext(input.layout, input.node, input.attemptAuthority);
     return {
       ...(propertyCatalog === undefined ? {} : { propertyCatalog }),
-      ...(implementedProperties === undefined ? {} : { implementedProperties })
+      ...(implementedProperties === undefined ? {} : { implementedProperties }),
+      ...(severity.severityClassifiedFindings === undefined
+        ? {}
+        : { severityClassifiedFindings: severity.severityClassifiedFindings }),
+      ...(severity.findingLifecycleLedger === undefined
+        ? {}
+        : { findingLifecycleLedger: severity.findingLifecycleLedger })
     };
   }
   return undefined;
@@ -2386,7 +2424,8 @@ function semanticTriagedFindings(
     consumer,
     "ultrafuzz/triaged-findings@1",
     "triaged findings semantic context",
-    attemptAuthority
+    attemptAuthority,
+    { directOnly: true }
   )?.value;
 }
 
@@ -2456,6 +2495,319 @@ function semanticPropertyCampaignContext(
     findingsPath: findings.path,
     implementedProperties,
     implementedPropertiesPath: implementedPropertiesArtifact.path
+  };
+}
+
+function authenticatedSemanticAttempt(
+  input: {
+    layout: RunLayout;
+    artifactDir: string;
+    node: PlannedGraphNode;
+    attemptId: string;
+    attemptAuthority?: ArtifactGateAttemptAuthority;
+    authenticated?: AuthenticatedArtifactGateSnapshots;
+  },
+  label: string
+): { current: SemanticArtifactTaskDeclaration; authority: ArtifactGateAttemptAuthority } {
+  if (input.attemptAuthority === undefined || input.authenticated === undefined) {
+    throw new Error(`${label} requires sealed attempt declarations and authenticated current snapshots`);
+  }
+  if (input.attemptAuthority.task.attemptId !== input.attemptId) {
+    throw new Error(`${label} attempt identity does not match its sealed current task`);
+  }
+  const { current } = semanticAttemptDeclarations(input.node, input.attemptAuthority);
+  const expectedArtifactDir = getNodeArtifactDir(input.layout, input.attemptId);
+  if (
+    path.resolve(input.artifactDir) !== expectedArtifactDir ||
+    path.resolve(current.artifactDir) !== expectedArtifactDir
+  ) {
+    throw new Error(`${label} artifact directory does not match its sealed attempt declaration`);
+  }
+  assertRegularFileInside(input.layout.root, input.layout.graphPath, `${label} planned graph authority`);
+  const graph = assertPlannedGraph(readStrictRegisteredDocument(input.layout.graphPath, "planned-graph.schema.json"));
+  assertExactSealedAttemptAuthority(input.layout, graph, input.node, input.attemptAuthority);
+  return { current, authority: input.attemptAuthority };
+}
+
+function semanticRunRelativePath(layout: RunLayout, absolutePath: string, label: string): string {
+  const relativePath = path.relative(path.resolve(layout.root), path.resolve(absolutePath)).split(path.sep).join("/");
+  if (
+    relativePath.length === 0 ||
+    relativePath === ".." ||
+    relativePath.startsWith("../") ||
+    path.posix.isAbsolute(relativePath)
+  ) {
+    throw new Error(`${label} is outside the run layout: ${absolutePath}`);
+  }
+  return relativePath;
+}
+
+function semanticDifferentialArtifacts(input: {
+  layout: RunLayout;
+  artifactDir: string;
+  node: PlannedGraphNode;
+  attemptId: string;
+  output: PlannedGraphNode["outputs"][number];
+  schemaFilename: ArtifactSchemaFilename;
+  attemptAuthority?: ArtifactGateAttemptAuthority;
+  authenticated?: AuthenticatedArtifactGateSnapshots;
+}): NonNullable<SemanticArtifactSetContext["differentialArtifacts"]> {
+  const { current, authority } = authenticatedSemanticAttempt(input, "differential semantic context");
+  const currentOutput = current.outputs.filter(
+    (output) => output.path === input.output.path && output.contract === input.output.contract
+  );
+  if (currentOutput.length !== 1) {
+    throw new Error(
+      `differential current output is absent from the sealed task declaration: ${JSON.stringify(input.output.path)}`
+    );
+  }
+
+  const tasksByAttempt = new Map(authority.tasks.map((task) => [task.attemptId, task] as const));
+  const ancestors = (contract: PlannedGraphNode["outputs"][number]["contract"]) =>
+    finalizedDeclaredContractProducers(input.layout, contract, input.node, authority).flatMap((producer) => {
+      const task = tasksByAttempt.get(producer.attemptId);
+      if (task === undefined) {
+        throw new Error(
+          `differential artifact producer declaration is unavailable: ${JSON.stringify(producer.attemptId)}`
+        );
+      }
+      return producer.outputs.map((output): SemanticDifferentialArtifactBinding => ({
+        attemptId: producer.attemptId,
+        logicalNodeId: task.logicalNodeId,
+        attemptIndex: task.metadata.loop.attemptIndex,
+        path: semanticRunRelativePath(input.layout, output.absolute_path, "finalized differential artifact"),
+        contract: output.contract,
+        document: assertContractDocument(output.value, output.absolute_path, output.contract)
+      }));
+    });
+  const siblings = (contract: PlannedGraphNode["outputs"][number]["contract"]) =>
+    declaredSiblingOutputsByContract(current, contract).map((output): SemanticDifferentialArtifactBinding => {
+      const artifactPath = safeResolveInside(input.artifactDir, output.path, "current differential sibling");
+      const document = parseCurrentArtifactJson(input.artifactDir, artifactPath, input.authenticated);
+      if (document === undefined) {
+        throw new Error(`authenticated differential sibling is unavailable: ${artifactPath}`);
+      }
+      return {
+        attemptId: authority.task.attemptId,
+        logicalNodeId: authority.task.logicalNodeId,
+        attemptIndex: authority.task.metadata.loop.attemptIndex,
+        path: semanticRunRelativePath(input.layout, artifactPath, "current differential sibling"),
+        contract: output.contract,
+        document: assertContractDocument(
+          document,
+          artifactPath,
+          output.contract as PlannedGraphNode["outputs"][number]["contract"]
+        )
+      };
+    });
+  const currentPath = safeResolveInside(input.artifactDir, input.output.path, "current differential artifact");
+  const currentIdentity = {
+    attemptId: authority.task.attemptId,
+    logicalNodeId: authority.task.logicalNodeId,
+    attemptIndex: authority.task.metadata.loop.attemptIndex,
+    path: semanticRunRelativePath(input.layout, currentPath, "current differential artifact"),
+    contract: input.output.contract
+  };
+
+  switch (input.schemaFilename) {
+    case "reference-harness.schema.json":
+      return { current: currentIdentity, plans: ancestors("ultrafuzz/differential-plan@1") };
+    case "audited-differential-lanes.schema.json":
+      return {
+        current: currentIdentity,
+        plans: ancestors("ultrafuzz/differential-plan@1"),
+        harnesses: ancestors("ultrafuzz/reference-harness@1")
+      };
+    case "differential-lane-result.schema.json":
+      return { current: currentIdentity, auditedLanes: ancestors("ultrafuzz/audited-differential-lanes@1") };
+    case "semantic-red-registry.schema.json":
+      return { laneResults: ancestors("ultrafuzz/differential-lane-result@1") };
+    case "differential-red-triage.schema.json":
+      return { current: currentIdentity, registries: siblings("ultrafuzz/semantic-red-registry@1") };
+    case "differential-repair-summary.schema.json":
+      return {
+        registries: ancestors("ultrafuzz/semantic-red-registry@1"),
+        triages: ancestors("ultrafuzz/differential-red-triage@1")
+      };
+    case "differential-gap-review.schema.json":
+      return {
+        auditedLanes: ancestors("ultrafuzz/audited-differential-lanes@1"),
+        laneResults: ancestors("ultrafuzz/differential-lane-result@1")
+      };
+    case "differential-report-review.schema.json":
+      return {
+        registries: ancestors("ultrafuzz/semantic-red-registry@1"),
+        triages: ancestors("ultrafuzz/differential-red-triage@1"),
+        repairSummaries: siblings("ultrafuzz/differential-repair-summary@1"),
+        gapReviews: siblings("ultrafuzz/differential-gap-review@1"),
+        findings: siblings("ultrafuzz/findings@2")
+      };
+    default:
+      return {};
+  }
+}
+
+function semanticDynamicStrategyArtifacts(input: {
+  layout: RunLayout;
+  artifactDir: string;
+  node: PlannedGraphNode;
+  attemptId: string;
+  attemptAuthority?: ArtifactGateAttemptAuthority;
+  authenticated?: AuthenticatedArtifactGateSnapshots;
+}): NonNullable<SemanticArtifactSetContext["dynamicStrategyArtifacts"]> {
+  authenticatedSemanticAttempt(input, "dynamic strategy semantic context");
+  const readDeclaredSibling = (contract: PlannedGraphNode["outputs"][number]["contract"], label: string): unknown =>
+    semanticSiblingJsonArtifact(input.artifactDir, input.node, contract, label, input.authenticated).value;
+
+  const strategyPlan = readDeclaredSibling("ultrafuzz/dynamic-strategy-plan@1", "dynamic strategy plan");
+  const enumeratorOutputs = readDeclaredSibling("ultrafuzz/dynamic-enumerator-outputs@1", "dynamic enumerator outputs");
+  const findings = readDeclaredSibling("ultrafuzz/findings@2", "dynamic findings");
+  const provenance = readDeclaredSibling("ultrafuzz/dynamic-strategy-provenance@1", "dynamic strategy provenance");
+  return { strategyPlan, enumeratorOutputs, findings, provenance };
+}
+
+function semanticReviewStageContext(input: {
+  layout: RunLayout;
+  artifactDir: string;
+  node: PlannedGraphNode;
+  attemptId: string;
+  attemptAuthority?: ArtifactGateAttemptAuthority;
+  authenticated?: AuthenticatedArtifactGateSnapshots;
+}): SemanticReviewStageContext | undefined {
+  authenticatedSemanticAttempt(input, "review stage semantic context");
+  const stageCandidates = [
+    { contract: "ultrafuzz/findings@2", stage: "dedupe-findings" },
+    { contract: "ultrafuzz/triaged-findings@1", stage: "triage" },
+    { contract: "ultrafuzz/severity-classified-findings@1", stage: "severity-classification" }
+  ] as const;
+  const declaredStages = stageCandidates.flatMap((candidate) => {
+    const count = input.node.outputs.filter((output) => output.contract === candidate.contract).length;
+    if (count > 1) {
+      throw new Error(`review stage declares ${count} ${candidate.contract} findings outputs; expected at most one`);
+    }
+    return count === 1 ? [candidate.stage] : [];
+  });
+  if (declaredStages.length !== 1) {
+    throw new Error("review stage semantic context is not identified by one exact typed findings declaration");
+  }
+  const stage = declaredStages[0]!;
+  const sibling = (contract: PlannedGraphNode["outputs"][number]["contract"], label: string) => {
+    const artifact = semanticSiblingJsonArtifact(input.artifactDir, input.node, contract, label, input.authenticated);
+    return {
+      value: artifact.value,
+      declaredPath: artifact.path
+    };
+  };
+  const optionalSibling = (contract: PlannedGraphNode["outputs"][number]["contract"], label: string) => {
+    const count = input.node.outputs.filter((output) => output.contract === contract).length;
+    if (count === 0) return undefined;
+    if (count !== 1) throw new Error(`${label} must have at most one exact declared output`);
+    return sibling(contract, label).value;
+  };
+  const finalized = (contract: PlannedGraphNode["outputs"][number]["contract"], label: string, directOnly: boolean) =>
+    finalizedSingletonAncestorOutput(input.layout, input.node, contract, label, input.attemptAuthority, {
+      directOnly
+    })?.value;
+  if (stage === "dedupe-findings") {
+    const findings = sibling("ultrafuzz/findings@2", "deduped findings");
+    const strategyDetections = optionalSibling("ultrafuzz/strategy-detections@1", "dedupe strategy detections");
+    return {
+      stage: "dedupe",
+      findingsArtifactPath: findings.declaredPath,
+      findings: findings.value,
+      lifecycleLedger: sibling("ultrafuzz/finding-lifecycle-ledger@1", "dedupe lifecycle ledger").value,
+      ...(strategyDetections === undefined ? {} : { strategyDetections })
+    };
+  }
+  if (stage === "triage") {
+    const findings = sibling("ultrafuzz/triaged-findings@1", "triaged findings");
+    return {
+      stage: "triage",
+      findingsArtifactPath: findings.declaredPath,
+      findings: findings.value,
+      lifecycleLedger: sibling("ultrafuzz/finding-lifecycle-ledger@1", "triage lifecycle ledger").value,
+      upstreamLifecycleLedger: finalized("ultrafuzz/finding-lifecycle-ledger@1", "dedupe lifecycle ledger", true),
+      upstreamStrategyDetections: finalized("ultrafuzz/strategy-detections@1", "dedupe strategy detections", true)
+    };
+  }
+  if (stage === "severity-classification") {
+    const findings = sibling("ultrafuzz/severity-classified-findings@1", "severity findings");
+    const strategyDetections = optionalSibling("ultrafuzz/strategy-detections@1", "severity strategy detections");
+    return {
+      stage: "severity-classification",
+      findingsArtifactPath: findings.declaredPath,
+      findings: findings.value,
+      lifecycleLedger: sibling("ultrafuzz/finding-lifecycle-ledger@1", "severity lifecycle ledger").value,
+      ...(strategyDetections === undefined ? {} : { strategyDetections }),
+      upstreamLifecycleLedger: finalized("ultrafuzz/finding-lifecycle-ledger@1", "triage lifecycle ledger", true),
+      upstreamStrategyDetections: finalized("ultrafuzz/strategy-detections@1", "dedupe strategy detections", false)
+    };
+  }
+  return undefined;
+}
+
+function semanticDedupedFindings(
+  layout: RunLayout,
+  consumer: PlannedGraphNode,
+  attemptAuthority?: ArtifactGateAttemptAuthority
+): unknown | undefined {
+  return finalizedSingletonAncestorOutput(
+    layout,
+    consumer,
+    "ultrafuzz/findings@2",
+    "deduped findings semantic context",
+    attemptAuthority,
+    { directOnly: true }
+  )?.value;
+}
+
+function semanticFinalSeverityContext(
+  layout: RunLayout,
+  consumer: PlannedGraphNode,
+  attemptAuthority?: ArtifactGateAttemptAuthority
+): { severityClassifiedFindings: unknown | null | undefined; findingLifecycleLedger?: unknown } {
+  const producers = finalizedDeclaredContractProducers(
+    layout,
+    "ultrafuzz/severity-classified-findings@1",
+    consumer,
+    attemptAuthority
+  );
+  if (producers.length === 0) return { severityClassifiedFindings: null };
+  if (producers.length !== 1 || producers[0]!.outputs.length !== 1) {
+    throw new Error(
+      `final report severity authority is ambiguous: expected one finalized producer/output, found ${producers.length}`
+    );
+  }
+  const producer = producers[0]!;
+  const severity = producer.outputs[0]!;
+  const declaredLedgerPaths = producer.node.outputs
+    .filter((output) => output.contract === "ultrafuzz/finding-lifecycle-ledger@1")
+    .map((output) => output.path)
+    .sort();
+  const ledgers = producer.authority.outputs.filter(
+    (output) => output.contract === "ultrafuzz/finding-lifecycle-ledger@1"
+  );
+  const finalizedLedgerPaths = ledgers.map((output) => output.path).sort();
+  if (
+    declaredLedgerPaths.length !== 1 ||
+    ledgers.length !== 1 ||
+    !sameStringSequence(declaredLedgerPaths, finalizedLedgerPaths)
+  ) {
+    throw new Error(
+      `finalized severity producer ${JSON.stringify(producer.attemptId)} must declare exactly one paired lifecycle ledger`
+    );
+  }
+  return {
+    severityClassifiedFindings: assertContractDocument(
+      severity.value,
+      severity.absolute_path,
+      "ultrafuzz/severity-classified-findings@1"
+    ),
+    findingLifecycleLedger: assertContractDocument(
+      ledgers[0]!.value,
+      ledgers[0]!.absolute_path,
+      "ultrafuzz/finding-lifecycle-ledger@1"
+    )
   };
 }
 
@@ -2894,10 +3246,11 @@ function finalizedSingletonAncestorOutput(
   consumer: PlannedGraphNode,
   contract: PlannedGraphNode["outputs"][number]["contract"],
   label: string,
-  attemptAuthority?: ArtifactGateAttemptAuthority
+  attemptAuthority?: ArtifactGateAttemptAuthority,
+  options: { directOnly?: boolean } = {}
 ): VerifiedOutputArtifactSnapshot | undefined {
-  const outputs = finalizedDeclaredContractProducers(layout, contract, consumer, attemptAuthority).flatMap((producer) =>
-    producer.outputs.slice()
+  const outputs = finalizedDeclaredContractProducers(layout, contract, consumer, attemptAuthority, options).flatMap(
+    (producer) => producer.outputs.slice()
   );
   if (outputs.length === 0) return undefined;
   if (outputs.length !== 1) {

@@ -35,6 +35,7 @@ import {
   captureWorkspaceTree,
   dependencyGateForNode,
   verifyRequiredArtifactsForAttempt as verifyRuntimeRequiredArtifactsForAttempt,
+  type AuthenticatedArtifactGateSnapshots,
   type ArtifactGateAttemptAuthority,
   type PlannedGraphNode
 } from "../src/index.js";
@@ -676,6 +677,40 @@ function smithersTaskForNode(input: {
   };
 }
 
+function sealedTaskForNode(
+  layout: ReturnType<typeof createRunLayout>,
+  node: PlannedGraphNode,
+  dependencies: readonly SmithersTaskManifestTask[] = []
+): SmithersTaskManifestTask {
+  const dependencyArtifactDirs = [
+    ...new Set(dependencies.flatMap((dependency) => [...dependency.dependencyArtifactDirs, dependency.artifactDir]))
+  ];
+  return smithersTaskForNode({
+    layout,
+    node,
+    attemptId: node.id,
+    dependencies: dependencies.map((dependency) => dependency.attemptId),
+    dependencyArtifactDirs
+  });
+}
+
+function authenticatedSnapshotsForNode(
+  layout: ReturnType<typeof createRunLayout>,
+  node: PlannedGraphNode,
+  attemptId = node.id
+): AuthenticatedArtifactGateSnapshots {
+  const artifactDir = getNodeArtifactDir(layout, attemptId);
+  const snapshots = node.outputs.flatMap((output) => {
+    const absolutePath = path.join(artifactDir, output.path);
+    if (!fs.existsSync(absolutePath)) return [];
+    return [[output.path, { absolutePath, bytes: fs.readFileSync(absolutePath) }] as const];
+  });
+  return {
+    outputs: new Map(snapshots),
+    publications: new Map(snapshots.map(([artifactPath, snapshot]) => [artifactPath, Buffer.from(snapshot.bytes)]))
+  };
+}
+
 function finalizeArtifactNode(
   layout: ReturnType<typeof createRunLayout>,
   nodeId: string,
@@ -701,10 +736,10 @@ function finalizeArtifactNode(
   const existingIndex = graph.nodes.findIndex((node) => node.id === concreteNodeId);
   const existing = existingIndex === -1 ? undefined : graph.nodes[existingIndex];
   const planned: PlannedGraphNode = {
-    ...plannedNode([]),
+    ...(existing ?? plannedNode([])),
     id: concreteNodeId,
     logical_id: logicalNodeId,
-    display_name: logicalNodeId,
+    display_name: existing?.display_name ?? logicalNodeId,
     artifact_dir: `artifacts/${concreteNodeId}`,
     depends_on:
       existing === undefined
@@ -955,6 +990,538 @@ function plannedNode(paths: string[]): PlannedGraphNode {
     model_fanout: []
   };
 }
+
+function differentialNode(
+  id: string,
+  outputs: ReadonlyArray<readonly [string, PlannedGraphNode["outputs"][number]["contract"], boolean?]>,
+  dependencies: readonly string[] = []
+): PlannedGraphNode {
+  return {
+    id,
+    logical_id: id,
+    display_name: id,
+    kind: "agentic",
+    depends_on: [...dependencies],
+    artifact_dir: `artifacts/${id}`,
+    outputs: outputs.map(([artifactPath, contract, primary = false]) => boundOutput(artifactPath, contract, primary)),
+    prompt_id: id,
+    prompt_path: `strategies/differential/${id}.md`,
+    loop: { index: 0, count: 1, mode: "parallel", attempt_index: 0 },
+    model_fanout: []
+  };
+}
+
+function differentialTask(
+  layout: ReturnType<typeof createRunLayout>,
+  node: PlannedGraphNode,
+  dependencies: readonly SmithersTaskManifestTask[]
+): SmithersTaskManifestTask {
+  return sealedTaskForNode(layout, node, dependencies);
+}
+
+function runArtifactPath(attemptId: string, artifactPath: string): string {
+  return path.posix.join("artifacts", attemptId, artifactPath);
+}
+
+test("runtime differential gates consume only exact sealed ancestor and sibling declarations", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-differential-handoff" });
+  const artifactPaths = {
+    plan: "differential/planning/current.json",
+    harness: "differential/harness/current.json",
+    audit: "differential/audit/current.json",
+    lane: "differential/lane/current.json",
+    registry: "differential/triage/registry.json",
+    triageA: "differential/triage/triage-a.json",
+    triageB: "differential/triage/triage-b.json",
+    repair: "differential/review/repair.json",
+    gap: "differential/review/gaps.json",
+    reportReview: "differential/review/report.json",
+    findings: "differential/review/findings.json"
+  } as const;
+  const planNode = differentialNode("diff-plan-attempt", [[artifactPaths.plan, "ultrafuzz/differential-plan@1", true]]);
+  const harnessNode = differentialNode(
+    "diff-harness-attempt",
+    [[artifactPaths.harness, "ultrafuzz/reference-harness@1", true]],
+    [planNode.id]
+  );
+  const auditNode = differentialNode(
+    "diff-audit-attempt",
+    [[artifactPaths.audit, "ultrafuzz/audited-differential-lanes@1", true]],
+    [harnessNode.id]
+  );
+  const laneNode = differentialNode(
+    "diff-lane-attempt",
+    [[artifactPaths.lane, "ultrafuzz/differential-lane-result@1", true]],
+    [auditNode.id]
+  );
+  const triageNode = differentialNode(
+    "diff-triage-attempt",
+    [
+      [artifactPaths.registry, "ultrafuzz/semantic-red-registry@1", true],
+      [artifactPaths.triageA, "ultrafuzz/differential-red-triage@1"],
+      [artifactPaths.triageB, "ultrafuzz/differential-red-triage@1"]
+    ],
+    [laneNode.id]
+  );
+  const reviewNode = differentialNode(
+    "diff-review-attempt",
+    [
+      [artifactPaths.repair, "ultrafuzz/differential-repair-summary@1", true],
+      [artifactPaths.gap, "ultrafuzz/differential-gap-review@1"],
+      [artifactPaths.reportReview, "ultrafuzz/differential-report-review@1"],
+      [artifactPaths.findings, "ultrafuzz/findings@2"]
+    ],
+    [triageNode.id]
+  );
+  const nodes = [planNode, harnessNode, auditNode, laneNode, triageNode, reviewNode];
+  writePlannedGraph(layout, nodes);
+  const planTask = differentialTask(layout, planNode, []);
+  const harnessTask = differentialTask(layout, harnessNode, [planTask]);
+  const auditTask = differentialTask(layout, auditNode, [harnessTask]);
+  const laneTask = differentialTask(layout, laneNode, [auditTask]);
+  const triageTask = differentialTask(layout, triageNode, [laneTask]);
+  const reviewTask = differentialTask(layout, reviewNode, [triageTask]);
+  const tasks = [planTask, harnessTask, auditTask, laneTask, triageTask, reviewTask];
+
+  const planPath = runArtifactPath(planTask.attemptId, artifactPaths.plan);
+  const harnessPath = runArtifactPath(harnessTask.attemptId, artifactPaths.harness);
+  const auditPath = runArtifactPath(auditTask.attemptId, artifactPaths.audit);
+  const plan = {
+    schema_version: "ultrafuzz.differential-plan.v1",
+    planner_attempt_index: 0,
+    candidate_surfaces: [],
+    reference_model_rules: {
+      allowed_structures: ["independent test-only models"],
+      forbidden_sources: ["production implementation internals"]
+    },
+    deployment_assumptions: [],
+    phase_priorities: [],
+    assigned_differential_lanes: [],
+    deferred_lane_candidates: [],
+    out_of_scope_surfaces: []
+  };
+  const harness = {
+    schema_version: "ultrafuzz.reference-harness.v1",
+    harness_author_attempt_index: 0,
+    source_plan_artifacts: [planPath],
+    authored_paths: [],
+    reference_models: [],
+    validation: { commands: [], passed: false, compiler_errors: [], notes: [] },
+    lane_readiness_notes: []
+  };
+  const audited = {
+    schema_version: "ultrafuzz.audited-differential-lanes.v1",
+    auditor_attempt_index: 0,
+    source_plan_artifacts: [planPath],
+    source_harness_artifacts: [harnessPath],
+    surface_audits: [],
+    ready_lanes: [] as unknown[],
+    rejected_or_narrowed_lanes: [],
+    reference_gap_work_orders: [],
+    ambiguous_spec_work_orders: []
+  };
+  const laneResult = {
+    schema_version: "ultrafuzz.differential-lane-result.v1",
+    lane_id: null,
+    attempt_index: 0,
+    auditor_attempt_index: 0,
+    source_auditor_artifact: auditPath,
+    source_plan_artifact: null,
+    source_harness_artifact: null,
+    assigned_lane_payload: null,
+    authored_paths: [],
+    focused_command: null,
+    focused_command_ran: false,
+    matched_test_count: 0,
+    status: "no_assigned_lane",
+    red_preservation_audit: {
+      result: "not_applicable",
+      pre_repair_file_hash: null,
+      assertion_predicate: null
+    },
+    red_candidates: [],
+    compile_or_harness_defects: [],
+    public_evidence_paths: [],
+    notes: []
+  };
+  const registry = {
+    schema_version: "ultrafuzz.semantic-red-registry.v1",
+    semantic_reds: [],
+    compile_or_harness_defects: []
+  };
+  const triageA = {
+    schema_version: "ultrafuzz.differential-red-triage.v1",
+    pass: "a",
+    classifications: []
+  };
+  const triageB = { ...triageA, pass: "b" };
+  const repair = {
+    schema_version: "ultrafuzz.differential-repair-summary.v1",
+    repairs_attempted: [],
+    repaired_failures: [],
+    preserved_production_or_unknown_reds: [],
+    commands: [],
+    semantic_red_registry_regenerated: false,
+    notes: []
+  };
+  const noAssignmentWorkOrder = {
+    lane_id: null,
+    attempt_index: 0,
+    auditor_attempt_index: 0,
+    source_auditor_artifact: auditPath,
+    summary: "No audited lane was assigned to this attempt.",
+    evidence_paths: []
+  };
+  const gap = {
+    schema_version: "ultrafuzz.differential-gap-review.v1",
+    ready_lanes: [],
+    lane_results_seen: [
+      {
+        lane_id: null,
+        attempt_index: 0,
+        auditor_attempt_index: 0,
+        source_auditor_artifact: auditPath,
+        status: "no_assigned_lane"
+      }
+    ],
+    missing_lane_work_orders: [],
+    incomplete_campaign_work_orders: [noAssignmentWorkOrder],
+    green_suite_evidence: [],
+    report_blockers: []
+  };
+  const reportReview = {
+    schema_version: "ultrafuzz.differential-report-review.v1",
+    campaign_status: "incomplete",
+    production_bug_reds: [],
+    harness_or_reference_repairs: [],
+    missing_or_deferred_lanes: [noAssignmentWorkOrder],
+    report_rows_ready: [],
+    notes: []
+  };
+
+  writeDeclaredArtifactNode(layout, planTask.attemptId, planNode.outputs, {
+    [artifactPaths.plan]: JSON.stringify(plan)
+  });
+  writeDeclaredArtifactNode(layout, harnessTask.attemptId, harnessNode.outputs, {
+    [artifactPaths.harness]: JSON.stringify(harness)
+  });
+  writeDeclaredArtifactNode(layout, auditTask.attemptId, auditNode.outputs, {
+    [artifactPaths.audit]: JSON.stringify(audited)
+  });
+  writeDeclaredArtifactNode(layout, laneTask.attemptId, laneNode.outputs, {
+    [artifactPaths.lane]: JSON.stringify(laneResult)
+  });
+  writeDeclaredArtifactNode(layout, triageTask.attemptId, triageNode.outputs, {
+    [artifactPaths.registry]: JSON.stringify(registry),
+    [artifactPaths.triageA]: JSON.stringify(triageA),
+    [artifactPaths.triageB]: JSON.stringify(triageB)
+  });
+  writeDeclaredArtifactNode(layout, reviewTask.attemptId, reviewNode.outputs, {
+    [artifactPaths.repair]: JSON.stringify(repair),
+    [artifactPaths.gap]: JSON.stringify(gap),
+    [artifactPaths.reportReview]: JSON.stringify(reportReview),
+    [artifactPaths.findings]: JSON.stringify([])
+  });
+
+  for (const [node, task] of [
+    [planNode, planTask],
+    [harnessNode, harnessTask],
+    [auditNode, auditTask],
+    [laneNode, laneTask],
+    [triageNode, triageTask],
+    [reviewNode, reviewTask]
+  ] as const) {
+    const result = verifyRequiredArtifactsForAttempt(
+      layout,
+      node,
+      task.attemptId,
+      { task, tasks },
+      authenticatedSnapshotsForNode(layout, node, task.attemptId)
+    );
+    assert.equal(
+      result.ok,
+      true,
+      `${task.attemptId}: ${result.diagnostics.map((diagnostic) => diagnostic.message).join("; ")}`
+    );
+  }
+
+  const lookalikePlanPath = runArtifactPath("lookalike-planner", artifactPaths.plan);
+  writeArtifactFile(layout, "lookalike-planner", artifactPaths.plan, JSON.stringify(plan));
+  fs.writeFileSync(
+    path.join(harnessTask.artifactDir, artifactPaths.harness),
+    JSON.stringify({ ...harness, source_plan_artifacts: [lookalikePlanPath] }),
+    "utf8"
+  );
+  const lookalike = verifyRequiredArtifactsForAttempt(
+    layout,
+    harnessNode,
+    harnessTask.attemptId,
+    { task: harnessTask, tasks },
+    authenticatedSnapshotsForNode(layout, harnessNode, harnessTask.attemptId)
+  );
+  assert.equal(lookalike.ok, false);
+  assert.ok(
+    lookalike.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.details?.gate === "reference-harness-plan-reconciliation" &&
+        /exactly preserve declared plan paths/u.test(diagnostic.message)
+    )
+  );
+
+  const readyLane = {
+    lane_id: "lane-a",
+    attempt_index: 0,
+    auditor_attempt_index: 0,
+    planner_attempt_index: 0,
+    harness_author_attempt_index: 0,
+    source_plan_artifact: planPath,
+    source_harness_artifact: harnessPath,
+    surface_id: "surface-a",
+    intended_t_sol_path: "test/foundry/differential/LaneA.t.sol",
+    focused_command: "forge test --match-path test/foundry/differential/LaneA.t.sol",
+    public_evidence_paths: ["docs/spec.md"],
+    exact_observable_equality_assertions: ["returns match"],
+    oracle_type: "independent_reference",
+    calibration_bucket: "red_seeking_adversarial",
+    red_seeking_priority: "high"
+  };
+  const nonEmptyPlan = {
+    ...plan,
+    candidate_surfaces: [
+      {
+        surface_id: "surface-a",
+        public_entrypoints: ["compare(uint256)"],
+        public_evidence_paths: ["docs/spec.md"],
+        oracle_basis: ["Public return values must agree."],
+        in_scope_behavior: ["Public return value"],
+        out_of_scope_behavior: [],
+        ambiguities: [],
+        priority: "high"
+      }
+    ],
+    assigned_differential_lanes: [
+      {
+        lane_id: readyLane.lane_id,
+        planner_attempt_index: readyLane.planner_attempt_index,
+        surface_id: readyLane.surface_id,
+        intended_t_sol_path: readyLane.intended_t_sol_path,
+        focused_command: readyLane.focused_command,
+        public_evidence_paths: readyLane.public_evidence_paths,
+        observable_equality_assertions: readyLane.exact_observable_equality_assertions,
+        oracle_type: readyLane.oracle_type,
+        calibration_bucket: readyLane.calibration_bucket,
+        red_seeking_priority: readyLane.red_seeking_priority
+      }
+    ]
+  };
+  const nonEmptyHarness = {
+    ...harness,
+    authored_paths: ["test/foundry/differential/ReferenceA.sol"],
+    reference_models: [
+      {
+        model_id: "reference-a",
+        covered_surfaces: ["surface-a"],
+        public_evidence_paths: ["docs/spec.md"],
+        implementation_rules_applied: ["Direct public-value comparison"],
+        known_gaps: [],
+        deployment_helpers: []
+      }
+    ],
+    validation: { commands: [readyLane.focused_command], passed: true, compiler_errors: [], notes: [] }
+  };
+  const nonEmptyAudit = {
+    ...audited,
+    surface_audits: [
+      {
+        surface_id: "surface-a",
+        status: "ready",
+        public_evidence_paths: ["docs/spec.md"],
+        audit_notes: ["Reference model covers the public surface."],
+        required_narrowing: []
+      }
+    ],
+    ready_lanes: [readyLane]
+  };
+  const preRepairFileHash = "a".repeat(64);
+  const redCandidateWithoutHash = {
+    red_candidate_id: "red-a",
+    test_path: readyLane.intended_t_sol_path,
+    failing_test_name: "test_lane_a",
+    focused_command: readyLane.focused_command,
+    failure_signature: "public return mismatch",
+    assertion: "actual == expected",
+    observed: "1",
+    expected: "2",
+    public_oracle_basis: ["docs/spec.md"],
+    classification: "untriaged"
+  };
+  const stableFailureHash = createHash("sha256")
+    .update(
+      JSON.stringify([
+        "semantic-red-v1",
+        readyLane.lane_id,
+        redCandidateWithoutHash.red_candidate_id,
+        redCandidateWithoutHash.test_path,
+        redCandidateWithoutHash.failing_test_name,
+        redCandidateWithoutHash.focused_command,
+        redCandidateWithoutHash.failure_signature,
+        redCandidateWithoutHash.assertion,
+        redCandidateWithoutHash.observed,
+        redCandidateWithoutHash.expected,
+        redCandidateWithoutHash.public_oracle_basis,
+        preRepairFileHash
+      ]),
+      "utf8"
+    )
+    .digest("hex");
+  const redCandidate = { stable_failure_hash: stableFailureHash, ...redCandidateWithoutHash };
+  const nonEmptyLaneResult = {
+    schema_version: "ultrafuzz.differential-lane-result.v1",
+    lane_id: readyLane.lane_id,
+    attempt_index: 0,
+    auditor_attempt_index: 0,
+    source_auditor_artifact: auditPath,
+    source_plan_artifact: planPath,
+    source_harness_artifact: harnessPath,
+    assigned_lane_payload: readyLane,
+    authored_paths: [readyLane.intended_t_sol_path],
+    focused_command: readyLane.focused_command,
+    focused_command_ran: true,
+    matched_test_count: 1,
+    status: "semantic_red_frozen",
+    red_preservation_audit: {
+      result: "semantic_red_frozen",
+      pre_repair_file_hash: preRepairFileHash,
+      assertion_predicate: redCandidate.assertion
+    },
+    red_candidates: [redCandidate],
+    compile_or_harness_defects: [],
+    public_evidence_paths: ["docs/spec.md"],
+    notes: []
+  };
+  const registryRed = {
+    stable_failure_hash: stableFailureHash,
+    lane_id: readyLane.lane_id,
+    red_candidate_id: redCandidate.red_candidate_id,
+    test_path: redCandidate.test_path,
+    failing_test_name: redCandidate.failing_test_name,
+    focused_command: redCandidate.focused_command,
+    failure_signature: redCandidate.failure_signature,
+    assertion: redCandidate.assertion,
+    observed: redCandidate.observed,
+    expected: redCandidate.expected,
+    public_oracle_basis: redCandidate.public_oracle_basis,
+    classification: redCandidate.classification,
+    pre_repair_file_hash: preRepairFileHash
+  };
+  const nonEmptyRegistry = { ...registry, semantic_reds: [registryRed] };
+  const productionClassification = {
+    stable_failure_hash: stableFailureHash,
+    classification: "production_bug",
+    rationale: "Public reference behavior disagrees with production.",
+    public_evidence_paths: ["docs/spec.md"],
+    repair_allowed: false
+  };
+  const nonEmptyTriageA = { ...triageA, classifications: [productionClassification] };
+  const nonEmptyTriageB = { ...triageB, classifications: [productionClassification] };
+  const nonEmptyRepair = {
+    ...repair,
+    preserved_production_or_unknown_reds: [
+      {
+        stable_failure_hash: stableFailureHash,
+        classification: "production_bug",
+        reason: "Production red remains unchanged."
+      }
+    ]
+  };
+  const readyCoordinate = {
+    lane_id: readyLane.lane_id,
+    attempt_index: 0,
+    auditor_attempt_index: 0,
+    source_auditor_artifact: auditPath
+  };
+  const nonEmptyGap = {
+    ...gap,
+    ready_lanes: [readyCoordinate],
+    lane_results_seen: [{ ...readyCoordinate, status: "semantic_red_frozen" }],
+    incomplete_campaign_work_orders: []
+  };
+  const productionRow = {
+    stable_failure_hash: stableFailureHash,
+    lane_id: readyLane.lane_id,
+    summary: "Public reference behavior disagrees with production.",
+    evidence_paths: [readyLane.intended_t_sol_path]
+  };
+  const nonEmptyReportReview = {
+    ...reportReview,
+    campaign_status: "blocked_by_preserved_reds",
+    production_bug_reds: [productionRow],
+    missing_or_deferred_lanes: [],
+    report_rows_ready: [productionRow]
+  };
+
+  writeDeclaredArtifactNode(layout, planTask.attemptId, planNode.outputs, {
+    [artifactPaths.plan]: JSON.stringify(nonEmptyPlan)
+  });
+  writeDeclaredArtifactNode(layout, harnessTask.attemptId, harnessNode.outputs, {
+    [artifactPaths.harness]: JSON.stringify(nonEmptyHarness)
+  });
+  writeDeclaredArtifactNode(layout, auditTask.attemptId, auditNode.outputs, {
+    [artifactPaths.audit]: JSON.stringify(nonEmptyAudit)
+  });
+  writeDeclaredArtifactNode(layout, laneTask.attemptId, laneNode.outputs, {
+    [artifactPaths.lane]: JSON.stringify(nonEmptyLaneResult)
+  });
+  writeDeclaredArtifactNode(layout, triageTask.attemptId, triageNode.outputs, {
+    [artifactPaths.registry]: JSON.stringify(nonEmptyRegistry),
+    [artifactPaths.triageA]: JSON.stringify(nonEmptyTriageA),
+    [artifactPaths.triageB]: JSON.stringify(nonEmptyTriageB)
+  });
+  writeDeclaredArtifactNode(layout, reviewTask.attemptId, reviewNode.outputs, {
+    [artifactPaths.repair]: JSON.stringify(nonEmptyRepair),
+    [artifactPaths.gap]: JSON.stringify(nonEmptyGap),
+    [artifactPaths.reportReview]: JSON.stringify(nonEmptyReportReview),
+    [artifactPaths.findings]: JSON.stringify([currentFinding(stableFailureHash)])
+  });
+  for (const [node, task] of [
+    [planNode, planTask],
+    [harnessNode, harnessTask],
+    [auditNode, auditTask],
+    [laneNode, laneTask],
+    [triageNode, triageTask],
+    [reviewNode, reviewTask]
+  ] as const) {
+    const result = verifyRequiredArtifactsForAttempt(
+      layout,
+      node,
+      task.attemptId,
+      { task, tasks },
+      authenticatedSnapshotsForNode(layout, node, task.attemptId)
+    );
+    assert.equal(
+      result.ok,
+      true,
+      `non-empty ${task.attemptId}: ${result.diagnostics.map((diagnostic) => diagnostic.message).join("; ")}`
+    );
+  }
+
+  fs.writeFileSync(path.join(laneTask.artifactDir, artifactPaths.lane), JSON.stringify(laneResult), "utf8");
+  const falseNoAssignment = verifyRequiredArtifactsForAttempt(
+    layout,
+    laneNode,
+    laneTask.attemptId,
+    { task: laneTask, tasks },
+    authenticatedSnapshotsForNode(layout, laneNode, laneTask.attemptId)
+  );
+  assert.equal(falseNoAssignment.ok, false);
+  assert.ok(
+    falseNoAssignment.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.details?.gate === "differential-lane-result-handoff-reconciliation" &&
+        /allowed only when no exact declared ready lane exists/u.test(diagnostic.message)
+    )
+  );
+});
 
 test("required artifact gate validates generated-test manifest shape and listed files", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
@@ -1446,6 +2013,649 @@ test("severity classification gates preserve triaged fields and enforce the fina
         diagnostic.details?.gate === "severity-classification-matrix"
     ),
     JSON.stringify(wrongMatrix.diagnostics)
+  );
+});
+
+test("triage gates preserve every deduped finding and upstream note", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-triage-preservation" });
+  const dedupeNode: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "review-dedupe-attempt",
+    logical_id: "review-dedupe-attempt",
+    artifact_dir: "artifacts/review-dedupe-attempt",
+    outputs: [boundOutput("review/deduped.json", "ultrafuzz/findings@2", true)]
+  };
+  const node: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "review-triage-attempt",
+    logical_id: "review-triage-attempt",
+    depends_on: [dedupeNode.id],
+    artifact_dir: "artifacts/review-triage-attempt",
+    outputs: [boundOutput("review/triaged.json", "ultrafuzz/triaged-findings@1", true)]
+  };
+  writePlannedGraph(layout, [dedupeNode, node]);
+  const dedupeTask = sealedTaskForNode(layout, dedupeNode);
+  const triageTask = sealedTaskForNode(layout, node, [dedupeTask]);
+  const tasks = [dedupeTask, triageTask];
+  const upstream = currentFinding("finding-triage", {
+    dedupe_key: "root-triage",
+    notes: ["stateful_failure_classification=production-bug"]
+  });
+  writeDeclaredArtifactNode(layout, dedupeTask.attemptId, dedupeNode.outputs, {
+    "review/deduped.json": JSON.stringify([upstream])
+  });
+
+  const triaged = {
+    ...upstream,
+    triage_classification: "true-positive",
+    notes: [...(upstream.notes as string[]), "triage_reason=public path is reachable"]
+  };
+  writeDeclaredArtifactNode(layout, triageTask.attemptId, node.outputs, {
+    "review/triaged.json": JSON.stringify([triaged])
+  });
+  const triagedPath = path.join(triageTask.artifactDir, "review/triaged.json");
+
+  const valid = verifyRequiredArtifactsForAttempt(
+    layout,
+    node,
+    triageTask.attemptId,
+    { task: triageTask, tasks },
+    authenticatedSnapshotsForNode(layout, node, triageTask.attemptId)
+  );
+  assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
+
+  fs.writeFileSync(
+    triagedPath,
+    JSON.stringify([
+      { ...triaged, summary: "Rewritten during triage", notes: ["triage_reason=public path is reachable"] }
+    ])
+  );
+  const rewritten = verifyRequiredArtifactsForAttempt(
+    layout,
+    node,
+    triageTask.attemptId,
+    { task: triageTask, tasks },
+    authenticatedSnapshotsForNode(layout, node, triageTask.attemptId)
+  );
+  assert.equal(rewritten.ok, false);
+  assert.ok(
+    rewritten.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
+        diagnostic.details?.gate === "triaged-finding-upstream-preservation"
+    ),
+    JSON.stringify(rewritten.diagnostics)
+  );
+});
+
+test("dynamic strategy sibling artifacts reconcile only through exact declared outputs", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-dynamic-strategy-reconciliation" });
+  const artifactPaths = {
+    plan: "dynamic/strategy-plan.current.json",
+    enumerators: "dynamic/enumerator-outputs.current.json",
+    selected: "dynamic/selected-strategies.current.json",
+    findings: "dynamic/findings.current.json",
+    provenance: "dynamic/provenance.current.json"
+  } as const;
+  const excludedContext = {
+    sibling_runs: "excluded",
+    previous_reports: "excluded",
+    host_global_paths: "excluded",
+    network_resources: "excluded",
+    extra_target_context: "excluded"
+  };
+  const recommendationA = {
+    strategy_id: "strategy-a",
+    title: "Strategy A",
+    rationale: "Exercise the uncovered transition.",
+    coverage_gap: "The transition has no focused test.",
+    evidence_paths: ["src/Target.sol"],
+    proposed_test_path: "generated-tests/StrategyA.t.sol",
+    focused_command: "forge test --match-contract StrategyA",
+    priority: "high"
+  };
+  const recommendationB = { ...recommendationA, strategy_id: "strategy-b", title: "Strategy B" };
+  const strategyPlan = {
+    schema_version: "ultrafuzz.dynamic-strategy-plan.v1",
+    dynamic_strategies_enumerator: 1,
+    status: "selected",
+    selected_strategy_count: 1,
+    selected_strategies: ["strategy-a"],
+    rejected_strategies: [{ strategy_id: "strategy-b", reason: "Lower priority." }],
+    current_run_artifacts_considered: [],
+    excluded_context: excludedContext,
+    timeout_seconds: null,
+    finalization_reserve_seconds: null
+  };
+  const enumeratorOutputs = {
+    schema_version: "ultrafuzz.dynamic-enumerator-outputs.v1",
+    enumerators: [
+      {
+        enumerator_id: "enumerator-a",
+        agent_label: "Enumerator A",
+        status: "complete",
+        diagnostics: [],
+        recommendations: [recommendationA, recommendationB]
+      }
+    ]
+  };
+  const selectedStrategies = {
+    schema_version: "ultrafuzz.selected-strategies.v1",
+    strategies: [
+      {
+        ...recommendationA,
+        enumerator_ids: ["enumerator-a"],
+        validation_plan: ["Run the focused command."]
+      }
+    ]
+  };
+  const findings = [
+    currentFinding("dynamic-finding", {
+      strategy: "dynamic-strategy-generator",
+      dynamic_strategy_id: "strategy-a",
+      enumerator_id: "enumerator-a",
+      attempt_index: 0
+    })
+  ];
+  const provenance = {
+    schema_version: "ultrafuzz.dynamic-strategy-provenance.v1",
+    current_run_artifacts: [],
+    agents: [{ agent_id: "enumerator-a", label: "Enumerator A", role: "strategy-enumerator" }],
+    models: [],
+    commands: [],
+    generated_files: [
+      {
+        strategy_id: "strategy-a",
+        source_path: "generated-tests/StrategyA.t.sol",
+        destination_intent: "Focused dynamic regression test"
+      }
+    ],
+    validation: [],
+    excluded_context: excludedContext
+  };
+  const baseline = {
+    [artifactPaths.plan]: strategyPlan,
+    [artifactPaths.enumerators]: enumeratorOutputs,
+    [artifactPaths.selected]: selectedStrategies,
+    [artifactPaths.findings]: findings,
+    [artifactPaths.provenance]: provenance
+  };
+  const node: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "dynamic-strategy-attempt",
+    logical_id: "dynamic-strategy-attempt",
+    artifact_dir: "artifacts/dynamic-strategy-attempt",
+    outputs: [
+      boundOutput(artifactPaths.plan, "ultrafuzz/dynamic-strategy-plan@1", true),
+      boundOutput(artifactPaths.enumerators, "ultrafuzz/dynamic-enumerator-outputs@1"),
+      boundOutput(artifactPaths.selected, "ultrafuzz/selected-strategies@1"),
+      boundOutput(artifactPaths.findings, "ultrafuzz/findings@2"),
+      boundOutput(artifactPaths.provenance, "ultrafuzz/dynamic-strategy-provenance@1")
+    ]
+  };
+  writePlannedGraph(layout, [node]);
+  const task = sealedTaskForNode(layout, node);
+  const tasks = [task];
+  const artifactDir = task.artifactDir;
+  const writeBaseline = (): void => {
+    for (const [fileName, value] of Object.entries(baseline)) {
+      fs.mkdirSync(path.dirname(path.join(artifactDir, fileName)), { recursive: true });
+      fs.writeFileSync(path.join(artifactDir, fileName), JSON.stringify(value), "utf8");
+    }
+  };
+  const assertReconciliationFailure = (fileName: keyof typeof baseline, value: unknown, expected: RegExp): void => {
+    writeBaseline();
+    fs.writeFileSync(path.join(artifactDir, fileName), JSON.stringify(value), "utf8");
+    const result = verifyRequiredArtifactsForAttempt(
+      layout,
+      node,
+      task.attemptId,
+      { task, tasks },
+      authenticatedSnapshotsForNode(layout, node, task.attemptId)
+    );
+    assert.equal(result.ok, false, fileName);
+    assert.ok(
+      result.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
+          diagnostic.details?.gate === "dynamic-strategy-artifact-reconciliation" &&
+          expected.test(diagnostic.message)
+      ),
+      `${fileName}: ${JSON.stringify(result.diagnostics)}`
+    );
+  };
+
+  writeDeclaredArtifactNode(
+    layout,
+    task.attemptId,
+    node.outputs,
+    Object.fromEntries(Object.entries(baseline).map(([fileName, value]) => [fileName, JSON.stringify(value)]))
+  );
+  const valid = verifyRequiredArtifactsForAttempt(
+    layout,
+    node,
+    task.attemptId,
+    { task, tasks },
+    authenticatedSnapshotsForNode(layout, node, task.attemptId)
+  );
+  assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
+
+  assertReconciliationFailure(
+    artifactPaths.plan,
+    { ...strategyPlan, rejected_strategies: [] },
+    /neither selected nor explicitly rejected/u
+  );
+  assertReconciliationFailure(
+    artifactPaths.selected,
+    {
+      ...selectedStrategies,
+      strategies: [{ ...selectedStrategies.strategies[0]!, rationale: "Rewritten after enumeration." }]
+    },
+    /does not exactly preserve/u
+  );
+  assertReconciliationFailure(
+    artifactPaths.selected,
+    {
+      ...selectedStrategies,
+      strategies: [{ ...selectedStrategies.strategies[0]!, enumerator_ids: ["enumerator-other"] }]
+    },
+    /exact recommending enumerators/u
+  );
+  assertReconciliationFailure(
+    artifactPaths.findings,
+    [{ ...findings[0]!, dynamic_strategy_id: "strategy-b" }],
+    /unselected strategy/u
+  );
+  assertReconciliationFailure(
+    artifactPaths.findings,
+    [{ ...findings[0]!, enumerator_id: "enumerator-other" }],
+    /did not recommend/u
+  );
+  assertReconciliationFailure(
+    artifactPaths.provenance,
+    { ...provenance, generated_files: [{ ...provenance.generated_files[0]!, strategy_id: "strategy-b" }] },
+    /generated file.*unselected strategy/u
+  );
+
+  writeBaseline();
+  fs.rmSync(path.join(artifactDir, artifactPaths.provenance));
+  fs.writeFileSync(path.join(artifactDir, "provenance.json"), JSON.stringify(provenance), "utf8");
+  const undeclaredLookalike = verifyRequiredArtifactsForAttempt(
+    layout,
+    node,
+    task.attemptId,
+    { task, tasks },
+    authenticatedSnapshotsForNode(layout, node, task.attemptId)
+  );
+  assert.equal(undeclaredLookalike.ok, false);
+  assert.ok(
+    undeclaredLookalike.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "REQUIRED_ARTIFACT_MISSING" &&
+        diagnostic.path === runArtifactPath(task.attemptId, artifactPaths.provenance)
+    ) &&
+      undeclaredLookalike.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code === "REQUIRED_ARTIFACT_INVALID" &&
+          diagnostic.message.includes("dynamic strategy provenance semantic context is unavailable")
+      ),
+    JSON.stringify(undeclaredLookalike.diagnostics)
+  );
+});
+
+test("final report gates preserve severity records and ledger dispositions without re-identifying findings", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-report-stage-preservation" });
+  const severityPaths = {
+    findings: "classified/current-findings.json",
+    lifecycle: "classified/current-lifecycle.json"
+  } as const;
+  const reportArtifactPath = "deliverables/final-report.json";
+  const reportMarkdownPath = "deliverables/final-report.md";
+  const severityNode: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "classified-review-attempt",
+    logical_id: "classified-review-attempt",
+    artifact_dir: "artifacts/classified-review-attempt",
+    outputs: [
+      boundOutput(severityPaths.findings, "ultrafuzz/severity-classified-findings@1", true),
+      boundOutput(severityPaths.lifecycle, "ultrafuzz/finding-lifecycle-ledger@1")
+    ]
+  };
+  const node: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "report-review-attempt",
+    logical_id: "report-review-attempt",
+    depends_on: [severityNode.id],
+    artifact_dir: "artifacts/report-review-attempt",
+    outputs: [
+      boundOutput(reportArtifactPath, "ultrafuzz/report@2", true),
+      boundOutput(reportMarkdownPath, "ultrafuzz/nonempty-markdown@1")
+    ]
+  };
+  writePlannedGraph(layout, [severityNode, node]);
+  const severityTask = sealedTaskForNode(layout, severityNode);
+  const reportTask = sealedTaskForNode(layout, node, [severityTask]);
+  const tasks = [severityTask, reportTask];
+  const classified = currentFinding("finding-report", {
+    dedupe_key: "root-report",
+    triage_classification: "true-positive",
+    notes: ["triage_reason=public path is reachable"],
+    severity: "Medium",
+    impact: "High",
+    likelihood: "Low",
+    impact_rationale: "The reachable path can lock assets.",
+    likelihood_rationale: "The path requires narrow timing.",
+    severity_rationale: "High impact x Low likelihood maps to Medium."
+  });
+  const lifecycle = {
+    dedupe_key: "root-report",
+    source_artifacts: [],
+    strategy_hits: [],
+    triage_classification: "true-positive",
+    triage_reason: "public path is reachable",
+    canonical_severity: "Medium",
+    final_disposition: "promoted",
+    stages: [
+      {
+        stage: "severity-classified",
+        artifact_path: severityPaths.findings,
+        finding_id: "finding-report"
+      }
+    ]
+  };
+  writeDeclaredArtifactNode(layout, severityTask.attemptId, severityNode.outputs, {
+    [severityPaths.findings]: JSON.stringify([classified]),
+    [severityPaths.lifecycle]: JSON.stringify({
+      schema_version: "ultrafuzz.finding-lifecycle-ledger.v1",
+      records: [lifecycle]
+    })
+  });
+
+  const reportIssue = {
+    ...classified,
+    description: "The public path can lock user assets.",
+    proof_of_concept: {
+      scenario: ["Call the public path in the affected state."],
+      language: "solidity",
+      code: "assertTrue(locked);"
+    },
+    lifecycle
+  };
+  writeDeclaredArtifactNode(layout, reportTask.attemptId, node.outputs, {
+    [reportArtifactPath]: JSON.stringify(currentReport(layout.runId, { issues: [reportIssue] })),
+    [reportMarkdownPath]: "# Final report\n"
+  });
+  const reportPath = path.join(reportTask.artifactDir, reportArtifactPath);
+
+  const valid = verifyRequiredArtifactsForAttempt(
+    layout,
+    node,
+    reportTask.attemptId,
+    { task: reportTask, tasks },
+    authenticatedSnapshotsForNode(layout, node, reportTask.attemptId)
+  );
+  assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
+
+  fs.writeFileSync(
+    reportPath,
+    JSON.stringify(
+      currentReport(layout.runId, { issues: [{ ...reportIssue, id: "M-01", title: "Retitled report row" }] })
+    )
+  );
+  const rewritten = verifyRequiredArtifactsForAttempt(
+    layout,
+    node,
+    reportTask.attemptId,
+    { task: reportTask, tasks },
+    authenticatedSnapshotsForNode(layout, node, reportTask.attemptId)
+  );
+  assert.equal(rewritten.ok, false);
+  assert.ok(
+    rewritten.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
+        diagnostic.details?.gate === "report-severity-classification-preservation"
+    ),
+    JSON.stringify(rewritten.diagnostics)
+  );
+});
+
+test("review lifecycle and strategy gates authenticate every dedupe, triage, and severity transition", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-review-lifecycle" });
+  const artifactPaths = {
+    dedupedFindings: "review-one/deduped.json",
+    dedupeStrategies: "review-one/strategies.json",
+    dedupeLifecycle: "review-one/lifecycle.json",
+    triagedFindings: "review-two/triaged.json",
+    triageLifecycle: "review-two/lifecycle.json",
+    classifiedFindings: "review-three/classified.json",
+    severityStrategies: "review-three/strategies.json",
+    severityLifecycle: "review-three/lifecycle.json"
+  } as const;
+  const dedupeNode: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "review-stage-one-attempt",
+    logical_id: "review-stage-one-attempt",
+    artifact_dir: "artifacts/review-stage-one-attempt",
+    outputs: [
+      boundOutput(artifactPaths.dedupedFindings, "ultrafuzz/findings@2", true),
+      boundOutput(artifactPaths.dedupeStrategies, "ultrafuzz/strategy-detections@1"),
+      boundOutput(artifactPaths.dedupeLifecycle, "ultrafuzz/finding-lifecycle-ledger@1")
+    ]
+  };
+  const triageNode: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "review-stage-two-attempt",
+    logical_id: "review-stage-two-attempt",
+    depends_on: [dedupeNode.id],
+    artifact_dir: "artifacts/review-stage-two-attempt",
+    outputs: [
+      boundOutput(artifactPaths.triagedFindings, "ultrafuzz/triaged-findings@1", true),
+      boundOutput(artifactPaths.triageLifecycle, "ultrafuzz/finding-lifecycle-ledger@1")
+    ]
+  };
+  const severityNode: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "review-stage-three-attempt",
+    logical_id: "review-stage-three-attempt",
+    depends_on: [triageNode.id],
+    artifact_dir: "artifacts/review-stage-three-attempt",
+    outputs: [
+      boundOutput(artifactPaths.classifiedFindings, "ultrafuzz/severity-classified-findings@1", true),
+      boundOutput(artifactPaths.severityStrategies, "ultrafuzz/strategy-detections@1"),
+      boundOutput(artifactPaths.severityLifecycle, "ultrafuzz/finding-lifecycle-ledger@1")
+    ]
+  };
+  writePlannedGraph(layout, [dedupeNode, triageNode, severityNode]);
+  const dedupeTask = sealedTaskForNode(layout, dedupeNode);
+  const triageTask = sealedTaskForNode(layout, triageNode, [dedupeTask]);
+  const severityTask = sealedTaskForNode(layout, severityNode, [triageTask]);
+  const tasks = [dedupeTask, triageTask, severityTask];
+  const dedupedFinding = currentFinding("finding-lifecycle", {
+    dedupe_key: "root-lifecycle",
+    strategy: "boundary-tests"
+  });
+  const dedupedPath = artifactPaths.dedupedFindings;
+  const strategyDetections = [
+    {
+      dedupe_key: "root-lifecycle",
+      finding_id: "finding-lifecycle",
+      title: "Property failure",
+      hits: [{ strategy: "boundary-tests", attempt_index: 0 }]
+    }
+  ];
+  const sourceArtifact = {
+    path: "artifacts/boundary-tests/findings.json",
+    node_id: "boundary-tests",
+    finding_id: "raw-finding",
+    title: "Property failure",
+    relationship: "primary"
+  };
+  const dedupeRecord = {
+    dedupe_key: "root-lifecycle",
+    source_artifacts: [sourceArtifact],
+    strategy_hits: strategyDetections[0]!.hits,
+    stages: [
+      { stage: "raw", artifact_path: sourceArtifact.path, finding_id: sourceArtifact.finding_id },
+      { stage: "deduped", artifact_path: dedupedPath, finding_id: "finding-lifecycle" }
+    ]
+  };
+  writeDeclaredArtifactNode(layout, dedupeTask.attemptId, dedupeNode.outputs, {
+    [artifactPaths.dedupedFindings]: JSON.stringify([dedupedFinding]),
+    [artifactPaths.dedupeStrategies]: JSON.stringify(strategyDetections),
+    [artifactPaths.dedupeLifecycle]: JSON.stringify({
+      schema_version: "ultrafuzz.finding-lifecycle-ledger.v1",
+      records: [dedupeRecord]
+    })
+  });
+  const validDedupe = verifyRequiredArtifactsForAttempt(
+    layout,
+    dedupeNode,
+    dedupeTask.attemptId,
+    { task: dedupeTask, tasks },
+    authenticatedSnapshotsForNode(layout, dedupeNode, dedupeTask.attemptId)
+  );
+  assert.equal(validDedupe.ok, true, JSON.stringify(validDedupe.diagnostics));
+
+  const triagedFinding = {
+    ...dedupedFinding,
+    triage_classification: "true-positive",
+    notes: ["triage_reason=public path is reachable"]
+  };
+  const triagedPath = artifactPaths.triagedFindings;
+  const triageRecord = {
+    ...dedupeRecord,
+    triage_classification: "true-positive",
+    triage_reason: "public path is reachable",
+    stages: [...dedupeRecord.stages, { stage: "triaged", artifact_path: triagedPath, finding_id: "finding-lifecycle" }]
+  };
+  writeDeclaredArtifactNode(layout, triageTask.attemptId, triageNode.outputs, {
+    [artifactPaths.triagedFindings]: JSON.stringify([triagedFinding]),
+    [artifactPaths.triageLifecycle]: JSON.stringify({
+      schema_version: "ultrafuzz.finding-lifecycle-ledger.v1",
+      records: [triageRecord]
+    })
+  });
+  const triageLedgerPath = path.join(triageTask.artifactDir, artifactPaths.triageLifecycle);
+  const validTriage = verifyRequiredArtifactsForAttempt(
+    layout,
+    triageNode,
+    triageTask.attemptId,
+    { task: triageTask, tasks },
+    authenticatedSnapshotsForNode(layout, triageNode, triageTask.attemptId)
+  );
+  assert.equal(validTriage.ok, true, JSON.stringify(validTriage.diagnostics));
+
+  fs.writeFileSync(
+    triageLedgerPath,
+    JSON.stringify({
+      schema_version: "ultrafuzz.finding-lifecycle-ledger.v1",
+      records: [{ ...triageRecord, source_artifacts: [{ ...sourceArtifact, path: "rewritten/findings.json" }] }]
+    })
+  );
+  const rewrittenTriage = verifyRequiredArtifactsForAttempt(
+    layout,
+    triageNode,
+    triageTask.attemptId,
+    { task: triageTask, tasks },
+    authenticatedSnapshotsForNode(layout, triageNode, triageTask.attemptId)
+  );
+  assert.equal(rewrittenTriage.ok, false);
+  assert.ok(
+    rewrittenTriage.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
+        diagnostic.details?.gate === "finding-lifecycle-review-stage-reconciliation"
+    ),
+    JSON.stringify(rewrittenTriage.diagnostics)
+  );
+  fs.writeFileSync(
+    triageLedgerPath,
+    JSON.stringify({ schema_version: "ultrafuzz.finding-lifecycle-ledger.v1", records: [triageRecord] })
+  );
+
+  const classifiedFinding = {
+    ...triagedFinding,
+    severity: "Medium",
+    impact: "High",
+    likelihood: "Low",
+    impact_rationale: "The reachable path can lock assets.",
+    likelihood_rationale: "The path requires narrow timing.",
+    severity_rationale: "High impact x Low likelihood maps to Medium."
+  };
+  const classifiedPath = artifactPaths.classifiedFindings;
+  const severityRecord = {
+    ...triageRecord,
+    canonical_severity: "Medium",
+    final_disposition: "promoted",
+    stages: [
+      ...triageRecord.stages,
+      { stage: "severity-classified", artifact_path: classifiedPath, finding_id: "finding-lifecycle" }
+    ]
+  };
+  writeDeclaredArtifactNode(layout, severityTask.attemptId, severityNode.outputs, {
+    [artifactPaths.classifiedFindings]: JSON.stringify([classifiedFinding]),
+    [artifactPaths.severityStrategies]: JSON.stringify(strategyDetections),
+    [artifactPaths.severityLifecycle]: JSON.stringify({
+      schema_version: "ultrafuzz.finding-lifecycle-ledger.v1",
+      records: [severityRecord]
+    })
+  });
+  const severityStrategyPath = path.join(severityTask.artifactDir, artifactPaths.severityStrategies);
+  const severityLedgerPath = path.join(severityTask.artifactDir, artifactPaths.severityLifecycle);
+  const validSeverity = verifyRequiredArtifactsForAttempt(
+    layout,
+    severityNode,
+    severityTask.attemptId,
+    { task: severityTask, tasks },
+    authenticatedSnapshotsForNode(layout, severityNode, severityTask.attemptId)
+  );
+  assert.equal(validSeverity.ok, true, JSON.stringify(validSeverity.diagnostics));
+
+  fs.writeFileSync(
+    severityStrategyPath,
+    JSON.stringify([{ ...strategyDetections[0], hits: [{ strategy: "rewritten", attempt_index: 0 }] }])
+  );
+  const rewrittenStrategy = verifyRequiredArtifactsForAttempt(
+    layout,
+    severityNode,
+    severityTask.attemptId,
+    { task: severityTask, tasks },
+    authenticatedSnapshotsForNode(layout, severityNode, severityTask.attemptId)
+  );
+  assert.equal(rewrittenStrategy.ok, false);
+  assert.ok(
+    rewrittenStrategy.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
+        diagnostic.details?.gate === "strategy-detection-review-stage-reconciliation"
+    ),
+    JSON.stringify(rewrittenStrategy.diagnostics)
+  );
+  fs.writeFileSync(severityStrategyPath, JSON.stringify(strategyDetections));
+
+  fs.writeFileSync(
+    severityLedgerPath,
+    JSON.stringify({
+      schema_version: "ultrafuzz.finding-lifecycle-ledger.v1",
+      records: [{ ...severityRecord, canonical_severity: "High" }]
+    })
+  );
+  const rewrittenSeverity = verifyRequiredArtifactsForAttempt(
+    layout,
+    severityNode,
+    severityTask.attemptId,
+    { task: severityTask, tasks },
+    authenticatedSnapshotsForNode(layout, severityNode, severityTask.attemptId)
+  );
+  assert.equal(rewrittenSeverity.ok, false);
+  assert.ok(
+    rewrittenSeverity.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
+        diagnostic.details?.gate === "finding-lifecycle-review-stage-reconciliation"
+    ),
+    JSON.stringify(rewrittenSeverity.diagnostics)
   );
 });
 

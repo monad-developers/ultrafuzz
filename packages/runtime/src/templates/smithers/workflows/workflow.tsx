@@ -60,6 +60,7 @@ const {
   captureWorkspacePatch,
   captureWorkspaceTree,
   declaredAncestorOutputsByContract,
+  declaredSiblingOutputsByContract,
   deriveWorkspacePatchGitFacts,
   hydratePinnedSubmodulesFromExecutionSnapshot,
   projectCanonicalFinalReport,
@@ -512,9 +513,10 @@ function declaredAncestorContractOutputs(
 function verifiedSingletonAncestorJsonArtifact(
   task: (typeof taskSpecs)[number],
   expectedContract: string,
-  label: string
+  label: string,
+  options: { directOnly?: boolean } = {}
 ): { path: string; value: unknown } | undefined {
-  const outputs = declaredAncestorContractOutputs(task, expectedContract);
+  const outputs = declaredAncestorContractOutputs(task, expectedContract, options);
   if (outputs.length === 0) return undefined;
   if (outputs.length !== 1) {
     throw new Error(
@@ -4481,6 +4483,304 @@ function verifiedSiblingJsonArtifact(
   return { path: output.path, value: snapshot.value };
 }
 
+function siblingDynamicStrategySemanticArtifacts(
+  task: (typeof taskSpecs)[number],
+  verifiedOutputs: ReadonlyMap<string, VerifiedOutputSnapshot>
+): {
+  strategyPlan?: unknown;
+  enumeratorOutputs?: unknown;
+  findings?: unknown;
+  provenance?: unknown;
+} {
+  const valueForContract = (contract: string, label: string): unknown | undefined => {
+    const outputs = task.outputs.filter((output) => output.contract === contract);
+    if (outputs.length === 0) return undefined;
+    if (outputs.length !== 1) {
+      throw new Error(`artifact-contract failure: task declares ${outputs.length} ${label} outputs; expected one`);
+    }
+    const snapshot = verifiedOutputs.get(outputs[0]!.path);
+    if (snapshot === undefined) {
+      throw new Error(`artifact-contract failure: verified ${label} output is unavailable ${outputs[0]!.path}`);
+    }
+    return snapshot.value;
+  };
+  const strategyPlan = valueForContract("ultrafuzz/dynamic-strategy-plan@1", "dynamic strategy plan");
+  const enumeratorOutputs = valueForContract("ultrafuzz/dynamic-enumerator-outputs@1", "dynamic enumerator outputs");
+  const findings = valueForContract("ultrafuzz/findings@2", "dynamic findings");
+  const provenance = valueForContract("ultrafuzz/dynamic-strategy-provenance@1", "dynamic strategy provenance");
+  return {
+    ...(strategyPlan === undefined ? {} : { strategyPlan }),
+    ...(enumeratorOutputs === undefined ? {} : { enumeratorOutputs }),
+    ...(findings === undefined ? {} : { findings }),
+    ...(provenance === undefined ? {} : { provenance })
+  };
+}
+
+type ReviewStageSemanticContext = {
+  stage: "dedupe" | "triage" | "severity-classification";
+  findingsArtifactPath: string;
+  findings: unknown;
+  lifecycleLedger: unknown;
+  strategyDetections?: unknown;
+  upstreamLifecycleLedger?: unknown;
+  upstreamStrategyDetections?: unknown;
+};
+
+function reviewStageSemanticContext(
+  task: (typeof taskSpecs)[number],
+  verifiedOutputs: ReadonlyMap<string, VerifiedOutputSnapshot>
+): ReviewStageSemanticContext {
+  const candidates: Array<{
+    stage: ReviewStageSemanticContext["stage"];
+    contract: (typeof taskSpecs)[number]["outputs"][number]["contract"];
+    label: string;
+  }> = [
+    { stage: "dedupe", contract: "ultrafuzz/findings@2", label: "deduped findings" },
+    { stage: "triage", contract: "ultrafuzz/triaged-findings@1", label: "triaged findings" },
+    {
+      stage: "severity-classification",
+      contract: "ultrafuzz/severity-classified-findings@1",
+      label: "severity-classified findings"
+    }
+  ].filter((candidate) => task.outputs.some((output) => output.contract === candidate.contract));
+  if (candidates.length !== 1) {
+    throw new Error(
+      `artifact-contract failure: review task must declare exactly one findings-stage contract; found ${candidates.length}`
+    );
+  }
+
+  const candidate = candidates[0]!;
+  const findings = verifiedSiblingJsonArtifact(task, verifiedOutputs, candidate.contract, candidate.label);
+  const lifecycleLedger = verifiedSiblingJsonArtifact(
+    task,
+    verifiedOutputs,
+    "ultrafuzz/finding-lifecycle-ledger@1",
+    `${candidate.stage} lifecycle ledger`
+  );
+  const strategyOutputs = task.outputs.filter((output) => output.contract === "ultrafuzz/strategy-detections@1");
+  if (strategyOutputs.length > 1) {
+    throw new Error(
+      `artifact-contract failure: ${candidate.stage} task declares ${strategyOutputs.length} strategy detection outputs; expected at most one`
+    );
+  }
+  const strategyDetections =
+    strategyOutputs.length === 0
+      ? undefined
+      : verifiedSiblingJsonArtifact(
+          task,
+          verifiedOutputs,
+          "ultrafuzz/strategy-detections@1",
+          `${candidate.stage} strategy detections`
+        ).value;
+  const context: ReviewStageSemanticContext = {
+    stage: candidate.stage,
+    findingsArtifactPath: findings.path,
+    findings: findings.value,
+    lifecycleLedger: lifecycleLedger.value,
+    ...(strategyDetections === undefined ? {} : { strategyDetections })
+  };
+  if (candidate.stage === "dedupe") return context;
+
+  const upstreamLifecycleLedger = verifiedSingletonAncestorJsonArtifact(
+    task,
+    "ultrafuzz/finding-lifecycle-ledger@1",
+    `${candidate.stage} upstream lifecycle ledger`,
+    { directOnly: true }
+  );
+  if (upstreamLifecycleLedger !== undefined) {
+    context.upstreamLifecycleLedger = upstreamLifecycleLedger.value;
+  }
+  if (candidate.stage === "severity-classification") {
+    const upstreamStrategyDetections = verifiedSingletonAncestorJsonArtifact(
+      task,
+      "ultrafuzz/strategy-detections@1",
+      "severity-classification upstream strategy detections"
+    );
+    if (upstreamStrategyDetections !== undefined) {
+      context.upstreamStrategyDetections = upstreamStrategyDetections.value;
+    }
+  }
+  return context;
+}
+
+function verifiedFinalSeverityReviewAuthority(task: (typeof taskSpecs)[number]): {
+  severityClassifiedFindings: unknown | null;
+  findingLifecycleLedger?: unknown;
+} {
+  const severityOutputs = declaredAncestorContractOutputs(task, "ultrafuzz/severity-classified-findings@1");
+  if (severityOutputs.length === 0) return { severityClassifiedFindings: null };
+  if (severityOutputs.length !== 1) {
+    throw new Error(
+      `artifact-contract failure: final severity authority must resolve to exactly one declared ultrafuzz/severity-classified-findings@1 ancestor output; found ${severityOutputs.length}`
+    );
+  }
+  const severityOutput = severityOutputs[0]!;
+  const producer = taskSpecs.find((candidate) => candidate.attemptId === severityOutput.attemptId);
+  if (producer === undefined) {
+    throw new Error(
+      `artifact-contract failure: declared final severity producer is unavailable ${severityOutput.attemptId}`
+    );
+  }
+  const lifecycleOutputs = producer.outputs.filter(
+    (output) => output.contract === "ultrafuzz/finding-lifecycle-ledger@1"
+  );
+  if (lifecycleOutputs.length !== 1) {
+    throw new Error(
+      `artifact-contract failure: final severity producer ${producer.attemptId} must declare exactly one ultrafuzz/finding-lifecycle-ledger@1 sibling; found ${lifecycleOutputs.length}`
+    );
+  }
+  const severity = verifiedDependencyJsonArtifact(
+    task,
+    severityOutput.artifactDir,
+    producer,
+    severityOutput.path,
+    severityOutput.contract
+  );
+  const lifecycle = verifiedDependencyJsonArtifact(
+    task,
+    severityOutput.artifactDir,
+    producer,
+    lifecycleOutputs[0]!.path,
+    lifecycleOutputs[0]!.contract
+  );
+  return {
+    severityClassifiedFindings: severity.value,
+    findingLifecycleLedger: lifecycle.value
+  };
+}
+
+type DifferentialSemanticArtifactBinding = {
+  attemptId: string;
+  logicalNodeId: string;
+  attemptIndex: number;
+  path: string;
+  contract: string;
+  document: unknown;
+};
+
+function declaredDifferentialArtifactPath(
+  task: (typeof taskSpecs)[number],
+  artifactDir: string,
+  relativePath: string
+): string {
+  const runRoot = path.resolve(process.cwd(), task.runRoot);
+  const artifactPath = path.resolve(artifactDir, relativePath);
+  const declaredPath = path.relative(runRoot, artifactPath);
+  if (declaredPath.length === 0 || declaredPath.startsWith(`..${path.sep}`) || path.isAbsolute(declaredPath)) {
+    throw new Error(`artifact-contract failure: declared differential artifact escapes the run root ${relativePath}`);
+  }
+  return declaredPath.split(path.sep).join(path.posix.sep);
+}
+
+function siblingDifferentialBindings(
+  task: (typeof taskSpecs)[number],
+  verifiedOutputs: ReadonlyMap<string, VerifiedOutputSnapshot>,
+  contract: string
+): DifferentialSemanticArtifactBinding[] {
+  const declarations = semanticArtifactTaskDeclarations();
+  const current = declarations.find((candidate) => candidate.attemptId === task.attemptId);
+  if (current === undefined) {
+    throw new Error(`artifact-contract failure: current differential task is unavailable ${task.attemptId}`);
+  }
+  return declaredSiblingOutputsByContract(current, contract).map(
+    (binding: { attemptId: string; logicalNodeId: string; artifactDir: string; path: string; contract: string }) => {
+      const snapshot = verifiedOutputs.get(binding.path);
+      if (snapshot === undefined) {
+        throw new Error(`artifact-contract failure: verified differential sibling is unavailable ${binding.path}`);
+      }
+      return {
+        attemptId: binding.attemptId,
+        logicalNodeId: binding.logicalNodeId,
+        attemptIndex: task.metadata.loop.attemptIndex,
+        path: declaredDifferentialArtifactPath(task, binding.artifactDir, binding.path),
+        contract: binding.contract,
+        document: snapshot.value
+      };
+    }
+  );
+}
+
+function ancestorDifferentialBindings(
+  task: (typeof taskSpecs)[number],
+  contract: string
+): DifferentialSemanticArtifactBinding[] {
+  return declaredAncestorContractOutputs(task, contract).map(
+    (binding: { attemptId: string; logicalNodeId: string; artifactDir: string; path: string; contract: string }) => {
+      const producer = taskSpecs.find((candidate) => candidate.attemptId === binding.attemptId);
+      if (producer === undefined) {
+        throw new Error(`artifact-contract failure: differential producer is undeclared ${binding.attemptId}`);
+      }
+      const artifact = verifiedDependencyJsonArtifact(
+        task,
+        binding.artifactDir,
+        producer,
+        binding.path,
+        binding.contract
+      );
+      return {
+        attemptId: binding.attemptId,
+        logicalNodeId: binding.logicalNodeId,
+        attemptIndex: producer.metadata.loop.attemptIndex,
+        path: declaredDifferentialArtifactPath(task, binding.artifactDir, binding.path),
+        contract: binding.contract,
+        document: artifact.value
+      };
+    }
+  );
+}
+
+function differentialSemanticArtifacts(
+  task: (typeof taskSpecs)[number],
+  output: (typeof taskSpecs)[number]["outputs"][number],
+  verifiedOutputs: ReadonlyMap<string, VerifiedOutputSnapshot>
+) {
+  const current = {
+    attemptId: task.attemptId,
+    logicalNodeId: task.metadata.node.logicalNodeId,
+    attemptIndex: task.metadata.loop.attemptIndex,
+    path: declaredDifferentialArtifactPath(task, task.artifactDir, output.path),
+    contract: output.contract
+  };
+  const ancestors = (contract: string) => ancestorDifferentialBindings(task, contract);
+  const siblings = (contract: string) => siblingDifferentialBindings(task, verifiedOutputs, contract);
+  switch (output.schemaFile) {
+    case "reference-harness.schema.json":
+      return { current, plans: ancestors("ultrafuzz/differential-plan@1") };
+    case "audited-differential-lanes.schema.json":
+      return {
+        current,
+        plans: ancestors("ultrafuzz/differential-plan@1"),
+        harnesses: ancestors("ultrafuzz/reference-harness@1")
+      };
+    case "differential-lane-result.schema.json":
+      return { current, auditedLanes: ancestors("ultrafuzz/audited-differential-lanes@1") };
+    case "semantic-red-registry.schema.json":
+      return { laneResults: ancestors("ultrafuzz/differential-lane-result@1") };
+    case "differential-red-triage.schema.json":
+      return { current, registries: siblings("ultrafuzz/semantic-red-registry@1") };
+    case "differential-repair-summary.schema.json":
+      return {
+        registries: ancestors("ultrafuzz/semantic-red-registry@1"),
+        triages: ancestors("ultrafuzz/differential-red-triage@1")
+      };
+    case "differential-gap-review.schema.json":
+      return {
+        auditedLanes: ancestors("ultrafuzz/audited-differential-lanes@1"),
+        laneResults: ancestors("ultrafuzz/differential-lane-result@1")
+      };
+    case "differential-report-review.schema.json":
+      return {
+        registries: ancestors("ultrafuzz/semantic-red-registry@1"),
+        triages: ancestors("ultrafuzz/differential-red-triage@1"),
+        repairSummaries: siblings("ultrafuzz/differential-repair-summary@1"),
+        gapReviews: siblings("ultrafuzz/differential-gap-review@1"),
+        findings: siblings("ultrafuzz/findings@2")
+      };
+    default:
+      return {};
+  }
+}
+
 function verifiedAncestorPropertyLenses(
   task: (typeof taskSpecs)[number]
 ): Array<{ sourceNodeId: string; projectionRequired: boolean; document: unknown }> | undefined {
@@ -4568,7 +4868,35 @@ function semanticGateContextForVerifiedOutput(
     propertyLenses?: readonly { sourceNodeId: string; projectionRequired: boolean; document: unknown }[];
     implementedProperties?: unknown;
     implementedPropertiesPath?: string;
+    dedupedFindings?: unknown;
     triagedFindings?: unknown;
+    severityClassifiedFindings?: unknown;
+    findingLifecycleLedger?: unknown;
+    reviewStage?: ReviewStageSemanticContext;
+    dynamicStrategyArtifacts?: {
+      strategyPlan?: unknown;
+      enumeratorOutputs?: unknown;
+      findings?: unknown;
+      provenance?: unknown;
+    };
+    differentialArtifacts?: {
+      current?: {
+        attemptId: string;
+        logicalNodeId: string;
+        attemptIndex: number;
+        path: string;
+        contract: string;
+      };
+      plans?: readonly DifferentialSemanticArtifactBinding[];
+      harnesses?: readonly DifferentialSemanticArtifactBinding[];
+      auditedLanes?: readonly DifferentialSemanticArtifactBinding[];
+      laneResults?: readonly DifferentialSemanticArtifactBinding[];
+      registries?: readonly DifferentialSemanticArtifactBinding[];
+      triages?: readonly DifferentialSemanticArtifactBinding[];
+      repairSummaries?: readonly DifferentialSemanticArtifactBinding[];
+      gapReviews?: readonly DifferentialSemanticArtifactBinding[];
+      findings?: readonly DifferentialSemanticArtifactBinding[];
+    };
   };
   git?: ReturnType<typeof deriveWorkspacePatchGitFacts>;
   aggregation?: {
@@ -4675,13 +5003,41 @@ function semanticGateContextForVerifiedOutput(
   } else if (output.schemaFile === "properties.schema.json") {
     const propertyLenses = verifiedAncestorPropertyLenses(task);
     context.artifactSet = propertyLenses === undefined ? {} : { propertyLenses };
+  } else if (output.schemaFile === "triaged-findings.schema.json") {
+    const dedupedFindings = verifiedSingletonAncestorJsonArtifact(task, "ultrafuzz/findings@2", "deduped findings", {
+      directOnly: true
+    });
+    context.artifactSet = dedupedFindings === undefined ? {} : { dedupedFindings: dedupedFindings.value };
   } else if (output.schemaFile === "severity-classified-findings.schema.json") {
     const triagedFindings = verifiedSingletonAncestorJsonArtifact(
       task,
       "ultrafuzz/triaged-findings@1",
-      "triaged findings"
+      "triaged findings",
+      { directOnly: true }
     );
     context.artifactSet = triagedFindings === undefined ? {} : { triagedFindings: triagedFindings.value };
+  } else if (
+    output.schemaFile === "finding-lifecycle-ledger.schema.json" ||
+    output.schemaFile === "strategy-detections.schema.json"
+  ) {
+    context.artifactSet = { reviewStage: reviewStageSemanticContext(task, verifiedOutputs) };
+  } else if (output.schemaFile === "selected-strategies.schema.json") {
+    context.artifactSet = {
+      dynamicStrategyArtifacts: siblingDynamicStrategySemanticArtifacts(task, verifiedOutputs)
+    };
+  } else if (
+    output.schemaFile === "reference-harness.schema.json" ||
+    output.schemaFile === "audited-differential-lanes.schema.json" ||
+    output.schemaFile === "differential-lane-result.schema.json" ||
+    output.schemaFile === "semantic-red-registry.schema.json" ||
+    output.schemaFile === "differential-red-triage.schema.json" ||
+    output.schemaFile === "differential-repair-summary.schema.json" ||
+    output.schemaFile === "differential-gap-review.schema.json" ||
+    output.schemaFile === "differential-report-review.schema.json"
+  ) {
+    context.artifactSet = {
+      differentialArtifacts: differentialSemanticArtifacts(task, output, verifiedOutputs)
+    };
   } else if (output.schemaFile === "report.schema.json") {
     const propertyCatalog = verifiedSingletonAncestorJsonArtifact(
       task,
@@ -4693,9 +5049,11 @@ function semanticGateContextForVerifiedOutput(
       "ultrafuzz/implemented-properties@3",
       "implemented property coverage"
     );
+    const finalSeverityAuthority = verifiedFinalSeverityReviewAuthority(task);
     context.artifactSet = {
       propertyCatalog: propertyCatalog?.value ?? UNPLANNED_PROPERTY_CATALOG_CONTEXT,
-      implementedProperties: implementedProperties?.value ?? UNPLANNED_IMPLEMENTED_PROPERTIES_CONTEXT
+      implementedProperties: implementedProperties?.value ?? UNPLANNED_IMPLEMENTED_PROPERTIES_CONTEXT,
+      ...finalSeverityAuthority
     };
   } else if (output.schemaFile === "workspace-patch.schema.json") {
     const git = workspacePatchSemanticGitContext(task, verifiedOutputs);

@@ -753,10 +753,14 @@ const readyDifferentialLaneSchema = z.strictObject({
   harness_author_attempt_index: nonNegativeInteger,
   source_plan_artifact: nonEmptyString,
   source_harness_artifact: nonEmptyString,
+  surface_id: nonEmptyString,
   intended_t_sol_path: nonEmptyString,
   focused_command: nonEmptyString,
   public_evidence_paths: uniqueStrings(1),
-  exact_observable_equality_assertions: stringList.min(1)
+  exact_observable_equality_assertions: stringList.min(1),
+  oracle_type: z.enum(["independent_reference", "metamorphic", "self_consistency", "sanity_probe"]),
+  calibration_bucket: z.enum(["red_seeking_adversarial", "green_safe_sanity"]),
+  red_seeking_priority: z.enum(PROPERTY_PRIORITIES)
 });
 
 export const auditedDifferentialLanesSchema = withDocumentMetadata(
@@ -774,7 +778,7 @@ export const auditedDifferentialLanesSchema = withDocumentMetadata(
         required_narrowing: stringList
       })
     ),
-    ready_lanes: z.array(readyDifferentialLaneSchema),
+    ready_lanes: z.array(readyDifferentialLaneSchema).max(1),
     rejected_or_narrowed_lanes: z.array(
       z.strictObject({ lane_id: nonEmptyString, disposition: z.enum(["rejected", "narrowed"]), reason: nonEmptyString })
     ),
@@ -791,6 +795,7 @@ export const auditedDifferentialLanesSchema = withDocumentMetadata(
 );
 
 const differentialRedCandidateSchema = z.strictObject({
+  stable_failure_hash: sha256,
   red_candidate_id: nonEmptyString,
   test_path: nonEmptyString,
   failing_test_name: nonEmptyString,
@@ -827,6 +832,7 @@ export const differentialLaneResultSchema = withDocumentMetadata(
       red_candidates: z.array(differentialRedCandidateSchema),
       compile_or_harness_defects: z.array(
         z.strictObject({
+          stable_failure_hash: sha256,
           category: z.enum(["compile", "harness"]),
           summary: nonEmptyString,
           evidence_paths: uniqueStrings()
@@ -1057,17 +1063,21 @@ export const differentialLaneResultSchema = withDocumentMetadata(
 const semanticRedSchema = z.strictObject({
   stable_failure_hash: sha256,
   lane_id: nonEmptyString,
+  red_candidate_id: nonEmptyString,
   test_path: nonEmptyString,
   failing_test_name: nonEmptyString,
   focused_command: nonEmptyString,
+  failure_signature: nonEmptyString,
   assertion: nonEmptyString,
   observed: nonEmptyString,
   expected: nonEmptyString,
   public_oracle_basis: uniqueStrings(1),
+  classification: z.literal("untriaged"),
   pre_repair_file_hash: sha256
 });
 
 const compileHarnessDefectSchema = z.strictObject({
+  stable_failure_hash: sha256,
   lane_id: nonEmptyString,
   category: z.enum(["compile", "harness"]),
   summary: nonEmptyString,
@@ -1144,9 +1154,24 @@ export const differentialRepairSummarySchema = withDocumentMetadata(
   "Ultrafuzz differential repair summary"
 );
 
-const gapLaneRowSchema = z.strictObject({ lane_id: nonEmptyString, attempt_index: nonNegativeInteger });
-const workOrderSchema = z.strictObject({
+const gapReadyLaneRowSchema = z.strictObject({
   lane_id: nonEmptyString,
+  attempt_index: nonNegativeInteger,
+  auditor_attempt_index: nonNegativeInteger,
+  source_auditor_artifact: nonEmptyString
+});
+const gapLaneResultRowSchema = z.strictObject({
+  lane_id: nonEmptyString.nullable(),
+  attempt_index: nonNegativeInteger,
+  auditor_attempt_index: nonNegativeInteger,
+  source_auditor_artifact: nonEmptyString,
+  status: z.enum(["green", "semantic_red_frozen", "compile_or_harness_defect", "no_assigned_lane"])
+});
+const workOrderSchema = z.strictObject({
+  lane_id: nonEmptyString.nullable(),
+  attempt_index: nonNegativeInteger,
+  auditor_attempt_index: nonNegativeInteger,
+  source_auditor_artifact: nonEmptyString,
   summary: nonEmptyString,
   evidence_paths: uniqueStrings()
 });
@@ -1154,16 +1179,19 @@ const workOrderSchema = z.strictObject({
 export const differentialGapReviewSchema = withDocumentMetadata(
   z.strictObject({
     schema_version: z.literal(DIFFERENTIAL_GAP_REVIEW_SCHEMA_VERSION),
-    ready_lanes: z.array(gapLaneRowSchema),
-    lane_results_seen: z.array(
-      gapLaneRowSchema.extend({
-        status: z.enum(["green", "semantic_red_frozen", "compile_or_harness_defect", "no_assigned_lane"])
-      })
-    ),
+    ready_lanes: z.array(gapReadyLaneRowSchema),
+    lane_results_seen: z.array(gapLaneResultRowSchema),
     missing_lane_work_orders: z.array(workOrderSchema),
     incomplete_campaign_work_orders: z.array(workOrderSchema),
     green_suite_evidence: z.array(
-      z.strictObject({ lane_id: nonEmptyString, command: nonEmptyString, matched_test_count: positiveInteger })
+      z.strictObject({
+        lane_id: nonEmptyString,
+        attempt_index: nonNegativeInteger,
+        auditor_attempt_index: nonNegativeInteger,
+        source_auditor_artifact: nonEmptyString,
+        command: nonEmptyString,
+        matched_test_count: positiveInteger
+      })
     ),
     report_blockers: z.array(
       z.strictObject({ category: nonEmptyString, summary: nonEmptyString, evidence_paths: uniqueStrings() })

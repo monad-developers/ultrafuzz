@@ -15,6 +15,8 @@ export const SUPPORTED_TEMPLATE_VARIABLES = [
   "run_metadata_path",
   "output_findings_path",
   "output_patch_path",
+  "output_stage_findings_path",
+  "output_stage_findings_relative_path",
   "strategy",
   "attempt_index",
   "strategy_loop_index",
@@ -269,6 +271,15 @@ export function renderPrompt(input: PromptRenderInput): PromptRenderResult {
     const value = variables[occurrence.name];
     if (value === undefined) {
       throw new PromptError("missing-template-variable", `missing prompt template variable: ${occurrence.name}`);
+    }
+    if (
+      (occurrence.name === "output_stage_findings_path" || occurrence.name === "output_stage_findings_relative_path") &&
+      value === ""
+    ) {
+      throw new PromptError(
+        "invalid-artifact-reference",
+        `${occurrence.name} requires exactly one declared findings, triaged-findings, or severity-classified-findings output`
+      );
     }
     rendered += value;
     consumed = occurrence.end;
@@ -814,6 +825,18 @@ function strategyAttemptTestDirectory(input: PromptRenderInput): string {
   return path.join(input.node.workspacePath, "test", "foundry", input.node.logicalId);
 }
 
+function stageFindingsOutputRelativePath(input: PromptRenderInput): string {
+  const current = input.graph.logicalNodes.filter((node) => node.id === input.node.logicalId);
+  if (current.length !== 1) return "";
+  const stageContracts = new Set([
+    "ultrafuzz/findings@2",
+    "ultrafuzz/triaged-findings@1",
+    "ultrafuzz/severity-classified-findings@1"
+  ]);
+  const outputs = artifactOutputsFor(current[0]!).filter((output) => stageContracts.has(output.contract));
+  return outputs.length === 1 ? outputs[0]!.path : "";
+}
+
 function buildVariableContext(input: PromptRenderInput): Record<string, string> {
   return {
     repo_path: input.node.repoPath,
@@ -824,6 +847,11 @@ function buildVariableContext(input: PromptRenderInput): Record<string, string> 
     run_metadata_path: input.run.metadataPath,
     output_findings_path: input.outputs.findingsPath,
     output_patch_path: input.outputs.patchPath,
+    output_stage_findings_path: (() => {
+      const relativePath = stageFindingsOutputRelativePath(input);
+      return relativePath === "" ? "" : path.join(input.node.artifactDir, relativePath);
+    })(),
+    output_stage_findings_relative_path: stageFindingsOutputRelativePath(input),
     strategy: input.node.logicalId,
     attempt_index: String(input.node.attemptIndex ?? 0),
     strategy_loop_index: String(input.node.loopIndex ?? 0),

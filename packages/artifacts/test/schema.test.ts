@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
@@ -30,6 +31,7 @@ import {
   artifactManifestJsonSchema,
   artifactVerificationJsonSchema,
   aggregationManifestSchema,
+  auditedDifferentialLanesSchema,
   coverageGoalSchema,
   differentialLaneResultSchema,
   dynamicStrategyPlanSchema,
@@ -53,6 +55,7 @@ import {
   referenceExpectationsJsonSchema,
   reportSchema,
   runStateJsonSchema,
+  semanticRedRegistrySchema,
   validateAnalysisBundleManifestSchema,
   usageLedgerJsonSchema,
   workspacePatchJsonSchema,
@@ -1829,10 +1832,14 @@ test("differential lane statuses require their exact terminal evidence in JSON S
     harness_author_attempt_index: 0,
     source_plan_artifact: "differential-plan.json",
     source_harness_artifact: "reference-harness.json",
+    surface_id: "surface-a",
     intended_t_sol_path: "test/foundry/differential/LaneA.t.sol",
     focused_command: "forge test --match-path test/foundry/differential/LaneA.t.sol",
     public_evidence_paths: ["docs/spec.md"],
-    exact_observable_equality_assertions: ["returns match"]
+    exact_observable_equality_assertions: ["returns match"],
+    oracle_type: "independent_reference",
+    calibration_bucket: "red_seeking_adversarial",
+    red_seeking_priority: "high"
   };
   const green = {
     schema_version: "ultrafuzz.differential-lane-result.v1",
@@ -1885,6 +1892,26 @@ test("differential lane statuses require their exact terminal evidence in JSON S
     },
     red_candidates: [
       {
+        stable_failure_hash: crypto
+          .createHash("sha256")
+          .update(
+            JSON.stringify([
+              "semantic-red-v1",
+              assignedLane.lane_id,
+              "red-a",
+              assignedLane.intended_t_sol_path,
+              "test_lane_a",
+              assignedLane.focused_command,
+              "mismatch",
+              "actual == expected",
+              "1",
+              "2",
+              ["docs/spec.md"],
+              "a".repeat(64)
+            ]),
+            "utf8"
+          )
+          .digest("hex"),
         red_candidate_id: "red-a",
         test_path: assignedLane.intended_t_sol_path,
         failing_test_name: "test_lane_a",
@@ -1907,7 +1934,20 @@ test("differential lane statuses require their exact terminal evidence in JSON S
       pre_repair_file_hash: null,
       assertion_predicate: null
     },
-    compile_or_harness_defects: [{ category: "compile", summary: "compile failed", evidence_paths: [] }]
+    compile_or_harness_defects: [
+      {
+        stable_failure_hash: crypto
+          .createHash("sha256")
+          .update(
+            JSON.stringify(["compile-harness-defect-v1", assignedLane.lane_id, "compile", "compile failed", []]),
+            "utf8"
+          )
+          .digest("hex"),
+        category: "compile",
+        summary: "compile failed",
+        evidence_paths: []
+      }
+    ]
   };
   const cases = [
     { name: "green", value: green, expected: true },
@@ -1933,6 +1973,104 @@ test("differential lane statuses require their exact terminal evidence in JSON S
     );
     assert.equal(
       validateArtifactContract("ultrafuzz/differential-lane-result@1", JSON.stringify(candidate.value)).ok,
+      candidate.expected,
+      `${candidate.name}:json-schema`
+    );
+  }
+});
+
+test("audited differential attempts can publish at most one ready lane in JSON Schema and Zod", () => {
+  const readyLane = {
+    lane_id: "lane-a",
+    attempt_index: 0,
+    auditor_attempt_index: 0,
+    planner_attempt_index: 0,
+    harness_author_attempt_index: 0,
+    source_plan_artifact: "differential-plan.json",
+    source_harness_artifact: "reference-harness.json",
+    surface_id: "surface-a",
+    intended_t_sol_path: "test/foundry/differential/LaneA.t.sol",
+    focused_command: "forge test --match-path test/foundry/differential/LaneA.t.sol",
+    public_evidence_paths: ["docs/spec.md"],
+    exact_observable_equality_assertions: ["returns match"],
+    oracle_type: "independent_reference" as const,
+    calibration_bucket: "red_seeking_adversarial" as const,
+    red_seeking_priority: "high" as const
+  };
+  const audited = {
+    schema_version: "ultrafuzz.audited-differential-lanes.v1",
+    auditor_attempt_index: 0,
+    source_plan_artifacts: ["differential-plan.json"],
+    source_harness_artifacts: ["reference-harness.json"],
+    surface_audits: [],
+    ready_lanes: [readyLane],
+    rejected_or_narrowed_lanes: [],
+    reference_gap_work_orders: [],
+    ambiguous_spec_work_orders: []
+  };
+
+  for (const candidate of [
+    { name: "one ready lane", value: audited, expected: true },
+    { name: "two ready lanes", value: { ...audited, ready_lanes: [readyLane, readyLane] }, expected: false }
+  ] as const) {
+    assert.equal(
+      auditedDifferentialLanesSchema.safeParse(candidate.value).success,
+      candidate.expected,
+      `${candidate.name}:zod`
+    );
+    assert.equal(
+      validateArtifactContract("ultrafuzz/audited-differential-lanes@1", JSON.stringify(candidate.value)).ok,
+      candidate.expected,
+      `${candidate.name}:json-schema`
+    );
+  }
+});
+
+test("semantic-red registries retain the complete frozen failure packet in JSON Schema and Zod", () => {
+  const semanticRed = {
+    stable_failure_hash: "a".repeat(64),
+    lane_id: "lane-a",
+    red_candidate_id: "red-a",
+    test_path: "test/foundry/differential/LaneA.t.sol",
+    failing_test_name: "test_lane_a",
+    focused_command: "forge test --match-path test/foundry/differential/LaneA.t.sol",
+    failure_signature: "public return mismatch",
+    assertion: "actual == expected",
+    observed: "1",
+    expected: "2",
+    public_oracle_basis: ["docs/spec.md"],
+    classification: "untriaged" as const,
+    pre_repair_file_hash: "b".repeat(64)
+  };
+  const registry = {
+    schema_version: "ultrafuzz.semantic-red-registry.v1",
+    semantic_reds: [semanticRed],
+    compile_or_harness_defects: []
+  };
+  const { red_candidate_id: _redCandidateId, ...withoutCandidateId } = semanticRed;
+  const { failure_signature: _failureSignature, ...withoutFailureSignature } = semanticRed;
+
+  for (const candidate of [
+    { name: "complete packet", value: registry, expected: true },
+    { name: "missing candidate ID", value: { ...registry, semantic_reds: [withoutCandidateId] }, expected: false },
+    {
+      name: "missing failure signature",
+      value: { ...registry, semantic_reds: [withoutFailureSignature] },
+      expected: false
+    },
+    {
+      name: "rewritten classification",
+      value: { ...registry, semantic_reds: [{ ...semanticRed, classification: "production_bug" }] },
+      expected: false
+    }
+  ] as const) {
+    assert.equal(
+      semanticRedRegistrySchema.safeParse(candidate.value).success,
+      candidate.expected,
+      `${candidate.name}:zod`
+    );
+    assert.equal(
+      validateArtifactContract("ultrafuzz/semantic-red-registry@1", JSON.stringify(candidate.value)).ok,
       candidate.expected,
       `${candidate.name}:json-schema`
     );

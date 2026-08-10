@@ -175,13 +175,22 @@ success is not evidence that the record should be removed. Treat
 `triaged-findings.json`; triage may add consensus notes, but it must not erase
 the original classification, reproducer, blocker, or repair evidence.
 
-Save triaged findings to {{artifact_path}}/triaged-findings.json as a JSON
+Save triaged findings to {{output_stage_findings_path}} as a JSON
 array. Every object must include `triage_classification` set to exactly one of
 the classification values above.
 
 Also save {{artifact_path}}/finding-lifecycle-ledger.json by copying the input
 ledger with `schema_version: "ultrafuzz.finding-lifecycle-ledger.v1"` and updating the matching `dedupe_key` record for every triaged finding:
 set `triage_classification`, preserve or add `triage_reason`, preserve or add
-`demotion_reason` when present, and append a `triaged` stage that points to
-{{artifact_path}}/triaged-findings.json. Do not match lifecycle records by
-title when `dedupe_key` is available.
+`demotion_reason` when present, and append a `triaged` stage whose
+`artifact_path` is the portable declared output-relative path
+`{{output_stage_findings_relative_path}}`. Do not match lifecycle records by title
+when `dedupe_key` is available.
+
+Preserve the input record order and every existing field and stage byte-for-byte
+in parsed JSON value terms. Add only `triage_classification`, `triage_reason`,
+the required `demotion_reason`, and one final `triaged` stage whose
+`artifact_path` is the portable declared output-relative path
+`{{output_stage_findings_relative_path}}` and whose `finding_id` is unchanged. Do not
+author severity, final disposition, or
+comparison fields in this stage.

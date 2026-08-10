@@ -112,6 +112,39 @@ describe("prompt rendering", () => {
     expect(() => validatePromptVariables("hello {{unknown_value}}")).toThrow(PromptError);
   });
 
+  it("renders the portable findings-stage output identity independently of its physical artifact directory", () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    tmpDirs.push(tmp);
+    const input = baseRenderInput(tmp);
+    input.prompt =
+      "Write findings: {{output_stage_findings_path}}\nLifecycle stage path: {{output_stage_findings_relative_path}}";
+    input.graph.logicalNodes.find((node) => node.id === input.node.logicalId)!.outputs![0]!.path =
+      "review/custom-findings.json";
+
+    const rendered = renderPrompt(input).renderedMarkdown;
+    expect(rendered).toContain(
+      `Write findings: ${path.join(input.node.artifactDir, "review", "custom-findings.json")}`
+    );
+    expect(rendered).toContain("Lifecycle stage path: review/custom-findings.json");
+  });
+
+  it("rejects an ambiguous portable findings-stage output identity", () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    tmpDirs.push(tmp);
+    const input = baseRenderInput(tmp);
+    input.prompt = "Lifecycle stage path: {{output_stage_findings_relative_path}}";
+    input.graph.logicalNodes
+      .find((node) => node.id === input.node.logicalId)!
+      .outputs!.push({
+        path: "triaged-findings.json",
+        contract: "ultrafuzz/triaged-findings@1",
+        primary: false,
+        description: "Triaged findings"
+      });
+
+    expect(() => renderPrompt(input)).toThrow(/requires exactly one declared findings/u);
+  });
+
   it("rejects unsafe artifact suffixes and render outputs", () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
     tmpDirs.push(tmp);
