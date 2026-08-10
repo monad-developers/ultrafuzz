@@ -31,11 +31,13 @@ import {
   type PlannedGraphNodeDocument,
   type PlannedGraphOutput,
   type RunLayout,
-  type RunState
+  type RunState,
+  type SmithersTaskManifestTask
 } from "@ultrafuzz/artifacts";
 
-import { verifyRequiredArtifactsForAttempt } from "./artifact-gates.js";
+import { verifyRequiredArtifactsForAttempt, type ArtifactGateAttemptAuthority } from "./artifact-gates.js";
 import { projectCanonicalFinalReport } from "./final-report-markdown.js";
+import { verifySealedTaskManifestSnapshot, type VerifiedSealedTaskManifestSnapshot } from "./workflow-integrity.js";
 
 const ARTIFACT_VERIFICATION_DIRECTORY = ".ultrafuzz-verification";
 const MAX_AUTHORITY_DOCUMENT_BYTES = 64 * 1024 * 1024;
@@ -127,6 +129,11 @@ interface FinalizedNodeOutputAuthority {
   snapshot: VerifiedNodeOutputSnapshot;
 }
 
+interface SealedAttemptGateAuthority {
+  snapshot: VerifiedSealedTaskManifestSnapshot;
+  authority: ArtifactGateAttemptAuthority;
+}
+
 /**
  * Read one node's externally consumable outputs through its current verifier
  * and controller-finalization authority. The returned bytes are snapshots; no
@@ -134,10 +141,12 @@ interface FinalizedNodeOutputAuthority {
  */
 export function loadVerifiedNodeOutputSnapshot(input: LoadVerifiedNodeOutputInput): VerifiedNodeOutputSnapshot {
   const authority = loadFinalizedNodeOutputAuthority(input);
+  const sealedAttempt = loadSealedAttemptGateAuthority(authority);
   const gate = verifyRequiredArtifactsForAttempt(
     authority.layout,
     authority.plannedNode,
     authority.snapshot.attempt_id,
+    sealedAttempt.authority,
     {
       outputs: new Map(
         authority.snapshot.outputs.map((output) => [
@@ -162,6 +171,7 @@ export function loadVerifiedNodeOutputSnapshot(input: LoadVerifiedNodeOutputInpu
     );
   }
   assertFinalizedAuthorityRemainedCurrent(authority);
+  assertSealedAttemptGateAuthorityRemainedCurrent(authority.layout, sealedAttempt);
   return authority.snapshot;
 }
 
@@ -339,11 +349,62 @@ function parseAndValidateManifest(bytes: Buffer, nodeId: string): ArtifactManife
   return value as ArtifactManifest;
 }
 
+function loadSealedAttemptGateAuthority(authority: FinalizedNodeOutputAuthority): SealedAttemptGateAuthority {
+  const snapshot = readCurrentSealedTaskManifest(authority.layout, authority.graph);
+  const matches = snapshot.document.tasks.filter((task) => task.attemptId === authority.snapshot.attempt_id);
+  if (matches.length !== 1) {
+    throw invalidAuthority(
+      `sealed task authority for finalized attempt ${authority.snapshot.attempt_id} is ${matches.length === 0 ? "missing" : "ambiguous"}`
+    );
+  }
+  const task: SmithersTaskManifestTask = matches[0]!;
+  if (task.concreteNodeId !== authority.plannedNode.id || task.logicalNodeId !== authority.snapshot.logical_node_id) {
+    throw invalidAuthority(
+      `sealed task authority for finalized attempt ${authority.snapshot.attempt_id} does not bind its planned node`
+    );
+  }
+  return { snapshot, authority: { task, tasks: snapshot.document.tasks } };
+}
+
+function readCurrentSealedTaskManifest(
+  layout: RunLayout,
+  graph: PlannedGraphDocument
+): VerifiedSealedTaskManifestSnapshot {
+  let snapshot: VerifiedSealedTaskManifestSnapshot;
+  try {
+    snapshot = verifySealedTaskManifestSnapshot(layout);
+  } catch (error) {
+    throw invalidAuthority("sealed Smithers task authority is incomplete or invalid", error);
+  }
+  if (!isDeepStrictEqual(readPlannedGraphDocument(layout.graphPath), graph)) {
+    throw changedOutput("planned graph changed while sealed task authority was being read");
+  }
+  return snapshot;
+}
+
+function assertSealedAttemptGateAuthorityRemainedCurrent(layout: RunLayout, sealed: SealedAttemptGateAuthority): void {
+  if (
+    !readAuthoritySnapshot(layout.root, sealed.snapshot.tasksPath, "workflow task manifest").equals(
+      sealed.snapshot.contents
+    ) ||
+    !readAuthoritySnapshot(layout.root, sealed.snapshot.integrityPath, "workflow control seal").equals(
+      sealed.snapshot.integrityContents
+    )
+  ) {
+    throw changedOutput("sealed Smithers task authority changed while outputs were being read");
+  }
+}
+
 /** Read the one authoritative final report and require an exact canonical JSON/Markdown pair. */
 export function loadVerifiedFinalReportSnapshot(runRoot: string): VerifiedFinalReportSnapshot {
-  const authority = loadVerifiedNodeOutputSnapshot({ runRoot, logicalNodeId: "final-report" });
-  const report = requiredOutput(authority, "report.json", "ultrafuzz/report@2");
-  const markdown = requiredOutput(authority, "report.md", "ultrafuzz/nonempty-markdown@1");
+  const producer = declaredFinalReportProducer(runRoot);
+  const authority = loadVerifiedNodeOutputSnapshot({
+    runRoot,
+    logicalNodeId: producer.logicalNodeId,
+    attemptId: producer.attemptId
+  });
+  const report = requiredContractOutput(authority, "ultrafuzz/report@2", "JSON report");
+  const markdown = requiredContractOutput(authority, "ultrafuzz/nonempty-markdown@1", "Markdown report");
   const projection = projectCanonicalFinalReport(report.value);
   if (!isDeepStrictEqual(projection.report, report.value)) {
     throw invalidOutput("verified report.json is not the canonical final-report projection");
@@ -367,6 +428,47 @@ export function loadVerifiedFinalReportSnapshot(runRoot: string): VerifiedFinalR
     markdown: markdown.value,
     markdown_bytes: Buffer.from(markdown.bytes)
   });
+}
+
+function declaredFinalReportProducer(runRoot: string): { attemptId: string; logicalNodeId: string } {
+  const root = path.resolve(runRoot);
+  assertNoSymlinkComponents(root, root, "run root");
+  const layout = layoutForRunRoot(root);
+  const graph = readPlannedGraphDocument(layout.graphPath);
+  const producers = graph.nodes.filter((node) =>
+    node.outputs.some((output) => output.contract === "ultrafuzz/report@2")
+  );
+  if (producers.length === 0) {
+    throw unavailableAuthority("no current planned node declares an ultrafuzz/report@2 output");
+  }
+  if (producers.length !== 1) {
+    throw invalidAuthority(
+      `current planned ultrafuzz/report@2 producer is ambiguous: ${producers.map((node) => node.id).join(", ")}`
+    );
+  }
+  const producer = producers[0]!;
+  const state = readRunState(layout);
+  assertRunAuthorityIdentity(layout, state);
+  const taskManifest = readCurrentSealedTaskManifest(layout, graph);
+  const finalizedAttempts = taskManifest.document.tasks.filter((task) => {
+    const nodeState = state.nodes[task.attemptId];
+    return (
+      task.concreteNodeId === producer.id && nodeState !== undefined && hasSuccessfulFinalizationAuthority(nodeState)
+    );
+  });
+  if (finalizedAttempts.length === 0) {
+    throw unavailableAuthority(
+      `no successful current verification/finalization authority is available for report producer ${producer.id}`
+    );
+  }
+  if (finalizedAttempts.length !== 1) {
+    throw invalidAuthority(
+      `current verification/finalization authority for report producer ${producer.id} is ambiguous: ${finalizedAttempts
+        .map((task) => task.attemptId)
+        .join(", ")}`
+    );
+  }
+  return { attemptId: finalizedAttempts[0]!.attemptId, logicalNodeId: producer.logical_id };
 }
 
 export function isVerifiedOutputAuthorityUnavailable(error: unknown): error is VerifiedOutputError {
@@ -706,16 +808,14 @@ function verificationMarkerRoot(layout: RunLayout): string {
   return markerRoot;
 }
 
-function requiredOutput(
+function requiredContractOutput(
   snapshot: VerifiedNodeOutputSnapshot,
-  relativePath: string,
-  contract: ArtifactContractId
+  contract: ArtifactContractId,
+  label: string
 ): VerifiedOutputArtifactSnapshot {
-  const matches = snapshot.outputs.filter((output) => output.path === relativePath && output.contract === contract);
+  const matches = snapshot.outputs.filter((output) => output.contract === contract);
   if (matches.length !== 1) {
-    throw invalidAuthority(
-      `final-report authority must bind exactly one ${relativePath} output with contract ${contract}`
-    );
+    throw invalidAuthority(`report authority must bind exactly one ${label} output with contract ${contract}`);
   }
   return matches[0]!;
 }

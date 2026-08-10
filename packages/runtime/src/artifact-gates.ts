@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 import {
   artifactContractDefinition,
@@ -52,6 +53,8 @@ import {
   type PropertyReferenceInput,
   type RunLayout,
   type RunState,
+  type SmithersTaskManifestOutput,
+  type SmithersTaskManifestTask,
   type NodeProvenanceReasonCode,
   type NodeOutputContract,
   type SemanticArtifactSetContext,
@@ -89,6 +92,10 @@ const UNPLANNED_IMPLEMENTED_PROPERTIES_CONTEXT = {
   selection: { priority_threshold: "high", priorities: ["high"], property_ids: [] },
   properties: []
 } satisfies ImplementedPropertiesArtifact;
+const UNPLANNED_IMPLEMENTATION_COVERAGE = {
+  status: "not-planned",
+  reason: "property-implementation-track-not-declared"
+} as const;
 
 export type DependencyGateDecision =
   | { ok: true }
@@ -103,6 +110,12 @@ export interface RequiredArtifactGate {
   ok: boolean;
   diagnostics: RuntimeDiagnostic[];
   missing: string[];
+}
+
+/** Exact sealed Smithers attempt declarations available during workflow synchronization. */
+export interface ArtifactGateAttemptAuthority {
+  task: SmithersTaskManifestTask;
+  tasks: readonly SmithersTaskManifestTask[];
 }
 
 export function checkDependencyLegality(graph: PlannedGraph): RuntimeDiagnostic[] {
@@ -258,6 +271,7 @@ export function verifyRequiredArtifactsForAttempt(
   layout: RunLayout,
   node: PlannedGraphNode,
   attemptId: string,
+  attemptAuthority?: ArtifactGateAttemptAuthority,
   authenticated?: AuthenticatedArtifactGateSnapshots
 ): RequiredArtifactGate {
   const diagnostics: RuntimeDiagnostic[] = [];
@@ -299,7 +313,16 @@ export function verifyRequiredArtifactsForAttempt(
         }
         if (authenticated === undefined) assertRegularFileInside(artifactDir, absolutePath, "required artifact");
         diagnostics.push(
-          ...verifyRequiredArtifactShape(layout, artifactDir, absolutePath, output, node, attemptId, authenticated)
+          ...verifyRequiredArtifactShape(
+            layout,
+            artifactDir,
+            absolutePath,
+            output,
+            node,
+            attemptId,
+            attemptAuthority,
+            authenticated
+          )
         );
       }
     } catch (error) {
@@ -308,12 +331,14 @@ export function verifyRequiredArtifactsForAttempt(
   }
   diagnostics.push(...verifySeverityMatrixArtifacts(artifactDir, node, authenticated));
   try {
-    diagnostics.push(...verifyInvariantEvidenceArtifacts(layout, artifactDir, node, authenticated));
+    diagnostics.push(...verifyInvariantEvidenceArtifacts(layout, artifactDir, node, attemptAuthority, authenticated));
   } catch (error) {
     diagnostics.push(diagnosticFromError(error, "invariant-ledger", "INVARIANT_EVIDENCE_READ_FAILED"));
   }
   try {
-    diagnostics.push(...verifyPropertyProvenanceArtifacts(layout, artifactDir, node, attemptId, authenticated));
+    diagnostics.push(
+      ...verifyPropertyProvenanceArtifacts(layout, artifactDir, node, attemptId, attemptAuthority, authenticated)
+    );
   } catch (error) {
     diagnostics.push(diagnosticFromError(error, "property-provenance", "PROPERTY_PROVENANCE_READ_FAILED"));
   }
@@ -335,6 +360,7 @@ function verifyInvariantEvidenceArtifacts(
   layout: RunLayout,
   artifactDir: string,
   node: PlannedGraphNode,
+  attemptAuthority?: ArtifactGateAttemptAuthority,
   authenticated?: AuthenticatedArtifactGateSnapshots
 ): RuntimeDiagnostic[] {
   const logicalId = node.logical_id ?? node.id;
@@ -538,7 +564,12 @@ function verifyInvariantEvidenceArtifacts(
   let ledgerProducer: FinalizedDeclaredProducer | undefined;
   let ledgerArtifact: VerifiedOutputArtifactSnapshot | undefined;
   try {
-    const ledgerProducers = finalizedDeclaredContractProducers(layout, "ultrafuzz/invariant-ledger@1", node);
+    const ledgerProducers = finalizedDeclaredContractProducers(
+      layout,
+      "ultrafuzz/invariant-ledger@1",
+      node,
+      attemptAuthority
+    );
     const ledgerArtifacts = ledgerProducers.flatMap((producer) =>
       producer.outputs.map((output) => ({ producer, output }))
     );
@@ -570,7 +601,9 @@ function verifyInvariantEvidenceArtifacts(
   if (!ledger.ok || ledger.value === undefined || !catalog.ok || catalog.value === undefined) {
     return diagnostics;
   }
-  diagnostics.push(...verifyLensReferenceExpectationPreservation(layout, node, catalog.value, catalogPath));
+  diagnostics.push(
+    ...verifyLensReferenceExpectationPreservation(layout, node, catalog.value, catalogPath, attemptAuthority)
+  );
   // Fan-in re-checks probe containment on the SAME ledger discovery published (issue #292). It used
   // to check none: every shape of the ledger returned before reaching a `verifyInvariantProbePath`
   // call, so an escaping probe path only ever had to survive the discovery node. The ledger lives in
@@ -920,7 +953,7 @@ function resolveStateDeclaredPropertyLens(
 type FinalizedPropertyLensResolution =
   | {
       ok: true;
-      declaration: NodeOutputContract;
+      declaration: Pick<NodeOutputContract, "path">;
       artifact: VerifiedOutputArtifactSnapshot;
       document: LensPropertiesArtifact;
     }
@@ -988,30 +1021,216 @@ function loadFinalizedPropertyLens(
   return { ok: true, declaration: declaration.output, artifact, document: typed.value };
 }
 
+type DirectArtifactDependency = {
+  attemptId: string;
+  node: PlannedGraphNode;
+  task?: SmithersTaskManifestTask;
+};
+
+/** Resolve the current attempt's exact direct dependencies from its sealed task declaration. */
+function sealedDirectArtifactDependencies(
+  layout: RunLayout,
+  consumer: PlannedGraphNode,
+  authority: ArtifactGateAttemptAuthority
+): DirectArtifactDependency[] {
+  assertRegularFileInside(layout.root, layout.graphPath, "sealed direct artifact dependency authority");
+  const graph = assertPlannedGraph(readStrictRegisteredDocument(layout.graphPath, "planned-graph.schema.json"));
+  semanticAttemptDeclarations(consumer, authority);
+  assertExactSealedAttemptAuthority(layout, graph, consumer, authority);
+  const nodesById = new Map(graph.nodes.map((node) => [node.id, node] as const));
+  const tasksByAttempt = new Map<string, SmithersTaskManifestTask>();
+  for (const task of authority.tasks) {
+    if (tasksByAttempt.has(task.attemptId)) {
+      throw new Error(`sealed Smithers task set repeats attempt ${JSON.stringify(task.attemptId)}`);
+    }
+    tasksByAttempt.set(task.attemptId, task);
+  }
+
+  const dependencies: DirectArtifactDependency[] = [];
+  for (const dependencyAttemptId of authority.task.dependencies) {
+    const task = tasksByAttempt.get(dependencyAttemptId);
+    if (task !== undefined) {
+      const node = nodesById.get(task.concreteNodeId);
+      if (
+        node === undefined ||
+        node.kind !== "agentic" ||
+        node.logical_id !== task.logicalNodeId ||
+        (node.workflow !== undefined && !node.workflow.task_node_ids.includes(`node:${task.attemptId}`))
+      ) {
+        throw new Error(
+          `sealed Smithers dependency ${JSON.stringify(dependencyAttemptId)} does not bind one planned agentic attempt`
+        );
+      }
+      dependencies.push({ attemptId: dependencyAttemptId, node, task });
+      continue;
+    }
+
+    // Reference attempts deliberately have artifact directories but no Smithers
+    // task declaration. An absent agentic task is never interpreted as a
+    // reference or as an empty producer.
+    const node = nodesById.get(dependencyAttemptId);
+    if (node === undefined || node.kind !== "reference") {
+      throw new Error(
+        `sealed Smithers dependency ${JSON.stringify(dependencyAttemptId)} has no task or planned reference declaration`
+      );
+    }
+    dependencies.push({ attemptId: dependencyAttemptId, node });
+  }
+  return dependencies;
+}
+
+function smithersOutputMatchesPlanned(
+  output: SmithersTaskManifestOutput,
+  planned: PlannedGraphNode["outputs"][number]
+): boolean {
+  return (
+    output.path === planned.path &&
+    output.contract === planned.contract &&
+    output.contractDigest === planned.contract_digest &&
+    output.schemaFile === planned.schema_file &&
+    output.schemaId === planned.schema_id &&
+    output.schemaSha256 === planned.schema_sha256 &&
+    output.schemaBundleSha256 === planned.schema_bundle_sha256 &&
+    output.validatorBuild === planned.validator_build &&
+    output.primary === planned.primary
+  );
+}
+
+/** Authenticate one fanout attempt's property lens against both sealed and planned declarations. */
+function loadFinalizedTaskPropertyLens(
+  layout: RunLayout,
+  dependency: DirectArtifactDependency,
+  source: "property-fanin" | "property-provenance"
+): FinalizedPropertyLensResolution {
+  const declarationPath = `smithers.tasks.${dependency.attemptId}.metadata.artifacts.outputs`;
+  const taskOutputs =
+    dependency.task?.metadata.artifacts.outputs.filter((output) => output.contract === PROPERTY_LENS_CONTRACT) ?? [];
+  if (taskOutputs.length !== 1) {
+    return {
+      ok: false,
+      diagnostics: [
+        {
+          code: taskOutputs.length === 0 ? "PROPERTY_LENS_DECLARATION_MISSING" : "PROPERTY_LENS_DECLARATION_AMBIGUOUS",
+          message: `Sealed Smithers attempt ${JSON.stringify(dependency.attemptId)} must declare exactly one ${PROPERTY_LENS_CONTRACT} output; found ${taskOutputs.length}`,
+          severity: "error",
+          source,
+          path: declarationPath,
+          ...(taskOutputs.length < 2 ? {} : { details: { declared_paths: taskOutputs.map((output) => output.path) } })
+        }
+      ]
+    };
+  }
+  const plannedOutputs = dependency.node.outputs.filter((output) => output.contract === PROPERTY_LENS_CONTRACT);
+  const declaration = taskOutputs[0]!;
+  if (plannedOutputs.length !== 1 || !smithersOutputMatchesPlanned(declaration, plannedOutputs[0]!)) {
+    return {
+      ok: false,
+      diagnostics: [
+        {
+          code: "PROPERTY_LENS_SCHEMA_BINDING_INVALID",
+          message: `Sealed Smithers attempt ${JSON.stringify(dependency.attemptId)} does not match its exact planned ${PROPERTY_LENS_CONTRACT} declaration`,
+          severity: "error",
+          source,
+          path: declarationPath
+        }
+      ]
+    };
+  }
+
+  let authority: ReturnType<typeof loadFinalizedNodeOutputSnapshot>;
+  try {
+    authority = loadFinalizedNodeOutputSnapshot({
+      runRoot: layout.root,
+      logicalNodeId: dependency.node.logical_id,
+      attemptId: dependency.attemptId
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      diagnostics: [
+        {
+          code: "PROPERTY_LENS_AUTHORITY_INVALID",
+          message: `Property lens attempt ${JSON.stringify(dependency.attemptId)} has no current finalized output authority: ${error instanceof Error ? error.message : String(error)}`,
+          severity: "error",
+          source,
+          path: declarationPath
+        }
+      ]
+    };
+  }
+  const artifacts = authority.outputs.filter((output) => output.contract === PROPERTY_LENS_CONTRACT);
+  if (artifacts.length !== 1 || artifacts[0]?.path !== declaration.path) {
+    return {
+      ok: false,
+      diagnostics: [
+        {
+          code: "PROPERTY_LENS_AUTHORITY_INVALID",
+          message: `Finalized authority for ${JSON.stringify(dependency.attemptId)} does not bind its sealed ${PROPERTY_LENS_CONTRACT} output`,
+          severity: "error",
+          source,
+          path: declarationPath
+        }
+      ]
+    };
+  }
+  const artifact = artifacts[0]!;
+  const typed = validateLensPropertiesSchema(artifact.value, artifact.absolute_path);
+  if (!typed.ok || typed.value === undefined) {
+    return {
+      ok: false,
+      diagnostics: typed.issues.map((issue) => ({
+        code: issue.code,
+        message: issue.message,
+        severity: "error" as const,
+        source,
+        path: issue.path
+      }))
+    };
+  }
+  return { ok: true, declaration, artifact, document: typed.value };
+}
+
 function verifyLensReferenceExpectationPreservation(
   layout: RunLayout,
   node: PlannedGraphNode,
   catalog: PropertiesArtifact,
-  catalogPath: string
+  catalogPath: string,
+  attemptAuthority?: ArtifactGateAttemptAuthority
 ): RuntimeDiagnostic[] {
   const diagnostics: RuntimeDiagnostic[] = [];
   const lensRows = new Map<string, LensReferenceRow>();
   const lensPathsByDependency = new Map<string, string>();
   const state = readRunState(layout);
-  const dependencies = plannedDirectDependencyNodes(layout, node);
+  let dependencies: DirectArtifactDependency[];
+  try {
+    dependencies =
+      attemptAuthority === undefined
+        ? plannedDirectDependencyNodes(layout, node).map((dependency) => ({
+            attemptId: dependency.id,
+            node: dependency
+          }))
+        : sealedDirectArtifactDependencies(layout, node, attemptAuthority);
+  } catch (error) {
+    return [diagnosticFromError(error, "property-fanin", "PROPERTY_LENS_AUTHORITY_INVALID")];
+  }
   for (const plannedDependency of dependencies) {
-    const dependencyId = plannedDependency.id;
-    const dependency = plannedDependency.logical_id;
+    const dependencyId = plannedDependency.attemptId;
+    const dependency = plannedDependency.node.logical_id;
     const isCatalogSource = catalog.properties.some((property) =>
       property.sources.some((source) => source.source_node_id === dependency)
     );
-    const declaresLens = plannedDependency.outputs.some((output) => output.contract === PROPERTY_LENS_CONTRACT);
-    if (isCatalogSource && isSyntheticLedgerDependency(plannedDependency)) continue;
+    const declaresLens =
+      plannedDependency.task?.metadata.artifacts.outputs.some((output) => output.contract === PROPERTY_LENS_CONTRACT) ??
+      plannedDependency.node.outputs.some((output) => output.contract === PROPERTY_LENS_CONTRACT);
+    if (isCatalogSource && isSyntheticLedgerDependency(plannedDependency.node)) continue;
     if (!isCatalogSource && !declaresLens) continue;
     // Expanded graphs may give fan-in concrete dependencies such as
     // `property-specification-recon-0` and `property-specification-recon-1`.
     // Only that declared concrete dependency may satisfy the handoff.
-    const lens = loadFinalizedPropertyLens(layout, state, dependencyId, "property-fanin");
+    const lens =
+      attemptAuthority === undefined
+        ? loadFinalizedPropertyLens(layout, state, dependencyId, "property-fanin")
+        : loadFinalizedTaskPropertyLens(layout, plannedDependency, "property-fanin");
     if (!lens.ok) {
       diagnostics.push(...lens.diagnostics);
       continue;
@@ -1031,9 +1250,9 @@ function verifyLensReferenceExpectationPreservation(
   }
 
   for (const plannedDependency of dependencies) {
-    if (isSyntheticLedgerDependency(plannedDependency)) continue;
-    const dependencyId = plannedDependency.id;
-    const dependency = plannedDependency.logical_id;
+    if (isSyntheticLedgerDependency(plannedDependency.node)) continue;
+    const dependencyId = plannedDependency.attemptId;
+    const dependency = plannedDependency.node.logical_id;
     if (
       !catalog.properties.some((property) => property.sources.some((source) => source.source_node_id === dependency))
     ) {
@@ -1088,7 +1307,7 @@ function verifyLensReferenceExpectationPreservation(
 
   const rowsBySource = new Map<string, LensReferenceRow[]>();
   for (const row of lensRows.values()) {
-    const key = `${row.sourceNodeId}\\u0000${row.propertyId}`;
+    const key = `${row.sourceNodeId}\u0000${row.propertyId}`;
     const rows = rowsBySource.get(key) ?? [];
     rows.push(row);
     rowsBySource.set(key, rows);
@@ -1108,9 +1327,7 @@ function verifyLensReferenceExpectationPreservation(
     }
   }
 
-  const dependencyLogicalIds = new Set(
-    node.depends_on.map((dependencyId) => state.nodes[dependencyId]?.logical_node_id ?? dependencyId)
-  );
+  const dependencyLogicalIds = new Set(dependencies.map((dependency) => dependency.node.logical_id));
   for (const [propertyIndex, property] of catalog.properties.entries()) {
     if ((property.reference_expectations?.length ?? 0) === 0) continue;
     for (const [sourceIndex, source] of property.sources.entries()) {
@@ -1797,6 +2014,7 @@ function verifyRequiredArtifactShape(
   output: PlannedGraphNode["outputs"][number],
   node: PlannedGraphNode,
   attemptId: string,
+  attemptAuthority?: ArtifactGateAttemptAuthority,
   authenticated?: AuthenticatedArtifactGateSnapshots
 ): RuntimeDiagnostic[] {
   const artifactBytes = readCurrentArtifactSnapshot(artifactDir, absolutePath, authenticated);
@@ -1831,6 +2049,7 @@ function verifyRequiredArtifactShape(
           node,
           attemptId,
           schemaFilename: binding.schema_file as ArtifactSchemaFilename,
+          attemptAuthority,
           authenticated
         })
       })
@@ -1906,6 +2125,7 @@ function semanticGateContextForArtifact(input: {
   node: PlannedGraphNode;
   attemptId: string;
   schemaFilename: ArtifactSchemaFilename;
+  attemptAuthority?: ArtifactGateAttemptAuthority;
   authenticated?: AuthenticatedArtifactGateSnapshots;
 }): SemanticGateContext {
   const context: SemanticGateContext = {
@@ -1936,26 +2156,27 @@ function semanticArtifactSetForSchema(input: {
   artifactDir: string;
   node: PlannedGraphNode;
   schemaFilename: ArtifactSchemaFilename;
+  attemptAuthority?: ArtifactGateAttemptAuthority;
   authenticated?: AuthenticatedArtifactGateSnapshots;
 }): SemanticArtifactSetContext | undefined {
   if (input.schemaFilename === "campaign-summary.schema.json") {
     return semanticCampaignArtifacts(input.artifactDir, input.node, input.authenticated);
   }
   if (input.schemaFilename === "implemented-properties.schema.json") {
-    const propertyCatalog = semanticCanonicalPropertyCatalog(input.layout, input.node);
+    const propertyCatalog = semanticCanonicalPropertyCatalog(input.layout, input.node, input.attemptAuthority);
     return propertyCatalog === undefined ? {} : { propertyCatalog };
   }
   if (input.schemaFilename === "properties.schema.json") {
-    const propertyLenses = semanticPropertyLenses(input.layout, input.node);
+    const propertyLenses = semanticPropertyLenses(input.layout, input.node, input.attemptAuthority);
     return propertyLenses === undefined ? {} : { propertyLenses };
   }
   if (input.schemaFilename === "severity-classified-findings.schema.json") {
-    const triagedFindings = semanticTriagedFindings(input.layout, input.node);
+    const triagedFindings = semanticTriagedFindings(input.layout, input.node, input.attemptAuthority);
     return triagedFindings === undefined ? {} : { triagedFindings };
   }
   if (input.schemaFilename === "report.schema.json") {
-    const propertyCatalog = semanticCanonicalPropertyCatalog(input.layout, input.node);
-    const implementedProperties = semanticImplementedProperties(input.layout, input.node);
+    const propertyCatalog = semanticCanonicalPropertyCatalog(input.layout, input.node, input.attemptAuthority);
+    const implementedProperties = semanticImplementedProperties(input.layout, input.node, input.attemptAuthority);
     return {
       ...(propertyCatalog === undefined ? {} : { propertyCatalog }),
       ...(implementedProperties === undefined ? {} : { implementedProperties })
@@ -1964,12 +2185,17 @@ function semanticArtifactSetForSchema(input: {
   return undefined;
 }
 
-function semanticTriagedFindings(layout: RunLayout, consumer: PlannedGraphNode): unknown | undefined {
+function semanticTriagedFindings(
+  layout: RunLayout,
+  consumer: PlannedGraphNode,
+  attemptAuthority?: ArtifactGateAttemptAuthority
+): unknown | undefined {
   return finalizedSingletonAncestorOutput(
     layout,
     consumer,
     "ultrafuzz/triaged-findings@1",
-    "triaged findings semantic context"
+    "triaged findings semantic context",
+    attemptAuthority
   )?.value;
 }
 
@@ -2013,13 +2239,15 @@ function semanticCampaignArtifacts(
 
 function semanticCanonicalPropertyCatalog(
   layout: RunLayout,
-  consumer: PlannedGraphNode
+  consumer: PlannedGraphNode,
+  attemptAuthority?: ArtifactGateAttemptAuthority
 ): PropertiesArtifact | undefined {
   const artifact = finalizedSingletonAncestorOutput(
     layout,
     consumer,
     "ultrafuzz/properties@2",
-    "canonical property semantic context"
+    "canonical property semantic context",
+    attemptAuthority
   );
   if (artifact !== undefined) {
     const parsed = validatePropertiesSchema(artifact.value, artifact.absolute_path);
@@ -2028,20 +2256,22 @@ function semanticCanonicalPropertyCatalog(
     }
     return parsed.value;
   }
-  return plannedContractProducerStatus(layout, consumer, "ultrafuzz/properties@2") === "absent"
+  return plannedContractProducerStatus(layout, consumer, "ultrafuzz/properties@2", attemptAuthority) === "absent"
     ? UNPLANNED_PROPERTY_CATALOG_CONTEXT
     : undefined;
 }
 
 function semanticImplementedProperties(
   layout: RunLayout,
-  consumer: PlannedGraphNode
+  consumer: PlannedGraphNode,
+  attemptAuthority?: ArtifactGateAttemptAuthority
 ): ImplementedPropertiesArtifact | undefined {
   const artifact = finalizedSingletonAncestorOutput(
     layout,
     consumer,
     "ultrafuzz/implemented-properties@3",
-    "implemented property semantic context"
+    "implemented property semantic context",
+    attemptAuthority
   );
   if (artifact !== undefined) {
     const parsed = validateImplementedPropertiesSchema(artifact.value, artifact.absolute_path);
@@ -2050,7 +2280,8 @@ function semanticImplementedProperties(
     }
     return parsed.value;
   }
-  return plannedContractProducerStatus(layout, consumer, "ultrafuzz/implemented-properties@3") === "absent"
+  return plannedContractProducerStatus(layout, consumer, "ultrafuzz/implemented-properties@3", attemptAuthority) ===
+    "absent"
     ? UNPLANNED_IMPLEMENTED_PROPERTIES_CONTEXT
     : undefined;
 }
@@ -2058,8 +2289,20 @@ function semanticImplementedProperties(
 function plannedContractProducerStatus(
   layout: RunLayout,
   consumer: PlannedGraphNode,
-  contract: PlannedGraphNode["outputs"][number]["contract"]
+  contract: PlannedGraphNode["outputs"][number]["contract"],
+  attemptAuthority?: ArtifactGateAttemptAuthority
 ): "absent" | "present" | "unknown" {
+  if (attemptAuthority !== undefined) {
+    try {
+      const { current, declarations } = semanticAttemptDeclarations(consumer, attemptAuthority);
+      assertRegularFileInside(layout.root, layout.graphPath, "planned contract producer authority");
+      const graph = assertPlannedGraph(readStrictRegisteredDocument(layout.graphPath, "planned-graph.schema.json"));
+      assertExactSealedAttemptAuthority(layout, graph, consumer, attemptAuthority);
+      return declaredAncestorOutputsByContract(current, declarations, contract).length === 0 ? "absent" : "present";
+    } catch {
+      return "unknown";
+    }
+  }
   if (!fs.existsSync(layout.graphPath)) return "unknown";
   try {
     assertRegularFileInside(layout.root, layout.graphPath, "planned graph semantic context");
@@ -2076,10 +2319,158 @@ function plannedContractProducerStatus(
 }
 
 type FinalizedDeclaredProducer = {
+  attemptId: string;
   node: PlannedGraphNode;
   authority: ReturnType<typeof loadFinalizedNodeOutputSnapshot>;
   outputs: readonly VerifiedOutputArtifactSnapshot[];
 };
+
+function semanticAttemptDeclarations(
+  consumer: PlannedGraphNode,
+  authority: ArtifactGateAttemptAuthority
+): { current: SemanticArtifactTaskDeclaration; declarations: SemanticArtifactTaskDeclaration[] } {
+  if (
+    authority.task.concreteNodeId !== consumer.id ||
+    authority.task.logicalNodeId !== (consumer.logical_id ?? consumer.id)
+  ) {
+    throw new Error(
+      `sealed Smithers attempt ${JSON.stringify(authority.task.attemptId)} does not bind consumer ${JSON.stringify(consumer.id)}`
+    );
+  }
+  const currentTasks = authority.tasks.filter((task) => task.attemptId === authority.task.attemptId);
+  if (currentTasks.length !== 1 || currentTasks[0] !== authority.task) {
+    throw new Error(
+      `current Smithers attempt is not the exact unique declaration in the sealed task set: ${authority.task.attemptId}`
+    );
+  }
+  const declarations = authority.tasks.map((task): SemanticArtifactTaskDeclaration => ({
+    attemptId: task.attemptId,
+    logicalNodeId: task.logicalNodeId,
+    artifactDir: task.artifactDir,
+    dependencies: task.dependencies,
+    dependencyArtifactDirs: task.dependencyArtifactDirs,
+    outputs: task.metadata.artifacts.outputs.map((output) => ({ path: output.path, contract: output.contract }))
+  }));
+  const current = declarations.find((task) => task.attemptId === authority.task.attemptId);
+  if (current === undefined) {
+    throw new Error(`current Smithers attempt is absent from the sealed task set: ${authority.task.attemptId}`);
+  }
+  return { current, declarations };
+}
+
+function plannedAttemptIdsForAuthority(node: PlannedGraphNode): string[] {
+  if (node.model_fanout.length <= 1) return [node.id];
+  return node.model_fanout.map((model) => `${node.id}__model_${model.model_index}__attempt_${model.attempt_index}`);
+}
+
+function assertExactStringSet(actual: readonly string[], expected: readonly string[], label: string): void {
+  const actualSet = new Set(actual);
+  const expectedSet = new Set(expected);
+  const duplicates = (values: readonly string[]): string[] => {
+    const seen = new Set<string>();
+    const repeated = new Set<string>();
+    for (const value of values) {
+      if (seen.has(value)) repeated.add(value);
+      else seen.add(value);
+    }
+    return [...repeated];
+  };
+  const duplicateActual = duplicates(actual);
+  const duplicateExpected = duplicates(expected);
+  const missing = expected.filter((value) => !actualSet.has(value));
+  const unexpected = actual.filter((value) => !expectedSet.has(value));
+  if (duplicateActual.length === 0 && duplicateExpected.length === 0 && missing.length === 0 && unexpected.length === 0)
+    return;
+  const summarize = (values: readonly string[]): string => {
+    const visible = [...new Set(values)].slice(0, 8);
+    return `${visible.map((value) => JSON.stringify(value)).join(", ")}${values.length > visible.length ? `, and ${values.length - visible.length} more` : ""}`;
+  };
+  throw new Error(
+    `${label} does not match the exact planned set` +
+      `${missing.length === 0 ? "" : `; missing: ${summarize(missing)}`}` +
+      `${unexpected.length === 0 ? "" : `; unexpected: ${summarize(unexpected)}`}` +
+      `${duplicateActual.length === 0 ? "" : `; duplicate actual values: ${summarize(duplicateActual)}`}` +
+      `${duplicateExpected.length === 0 ? "" : `; duplicate planned values: ${summarize(duplicateExpected)}`}`
+  );
+}
+
+/** Bind the complete sealed task set and this attempt's artifact closure to the current graph. */
+function assertExactSealedAttemptAuthority(
+  layout: RunLayout,
+  graph: PlannedGraph,
+  consumer: PlannedGraphNode,
+  authority: ArtifactGateAttemptAuthority
+): void {
+  semanticAttemptDeclarations(consumer, authority);
+  const plannedConsumer = graph.nodes.find((node) => node.id === consumer.id);
+  if (plannedConsumer === undefined || plannedConsumer.logical_id !== consumer.logical_id) {
+    throw new Error(`planned graph does not bind exact consumer ${JSON.stringify(consumer.id)}`);
+  }
+  const nodesById = new Map(graph.nodes.map((node) => [node.id, node] as const));
+  const plannedAgenticAttempts = new Map<string, PlannedGraphNode>();
+  for (const node of graph.nodes) {
+    if (node.kind !== "agentic") continue;
+    for (const attemptId of plannedAttemptIdsForAuthority(node)) {
+      if (plannedAgenticAttempts.has(attemptId)) {
+        throw new Error(`planned graph repeats Smithers attempt ${JSON.stringify(attemptId)}`);
+      }
+      plannedAgenticAttempts.set(attemptId, node);
+    }
+  }
+
+  const tasksByAttempt = new Map<string, SmithersTaskManifestTask>();
+  for (const task of authority.tasks) {
+    if (tasksByAttempt.has(task.attemptId)) {
+      throw new Error(`sealed Smithers task set repeats attempt ${JSON.stringify(task.attemptId)}`);
+    }
+    tasksByAttempt.set(task.attemptId, task);
+  }
+  assertExactStringSet([...tasksByAttempt.keys()], [...plannedAgenticAttempts.keys()], "sealed Smithers task coverage");
+  for (const [attemptId, node] of plannedAgenticAttempts) {
+    const task = tasksByAttempt.get(attemptId)!;
+    const expectedArtifactDir = getNodeArtifactDir(layout, attemptId);
+    if (
+      task.concreteNodeId !== node.id ||
+      task.logicalNodeId !== node.logical_id ||
+      path.resolve(task.artifactDir) !== expectedArtifactDir ||
+      task.metadata.artifacts.outputs.length !== node.outputs.length ||
+      task.metadata.artifacts.outputs.some(
+        (output) => !node.outputs.some((planned) => smithersOutputMatchesPlanned(output, planned))
+      ) ||
+      node.outputs.some(
+        (planned) => !task.metadata.artifacts.outputs.some((output) => smithersOutputMatchesPlanned(output, planned))
+      )
+    ) {
+      throw new Error(`sealed Smithers attempt does not match its planned node and outputs: ${attemptId}`);
+    }
+    const expectedDirectDependencies = node.depends_on.flatMap((dependencyId) => {
+      const dependency = nodesById.get(dependencyId);
+      if (dependency === undefined) {
+        throw new Error(`planned dependency ${JSON.stringify(dependencyId)} is unavailable`);
+      }
+      return plannedAttemptIdsForAuthority(dependency);
+    });
+    assertExactStringSet(
+      task.dependencies,
+      expectedDirectDependencies,
+      `sealed Smithers attempt ${JSON.stringify(attemptId)} direct dependencies`
+    );
+  }
+
+  const ancestorNodeIds = plannedAncestorIds(graph, plannedConsumer);
+  const expectedAncestorAttempts = graph.nodes
+    .filter((node) => ancestorNodeIds.has(node.id))
+    .flatMap(plannedAttemptIdsForAuthority);
+  const expectedAncestorDirectories = expectedAncestorAttempts.map((attemptId) =>
+    getNodeArtifactDir(layout, attemptId)
+  );
+  const actualAncestorDirectories = authority.task.dependencyArtifactDirs.map((directory) => path.resolve(directory));
+  assertExactStringSet(
+    actualAncestorDirectories,
+    expectedAncestorDirectories,
+    `sealed Smithers attempt ${JSON.stringify(authority.task.attemptId)} artifact ancestor closure`
+  );
+}
 
 function plannedAncestorIds(
   graph: ReturnType<typeof assertPlannedGraph>,
@@ -2131,58 +2522,100 @@ function plannedDirectDependencyNodes(layout: RunLayout, consumer: PlannedGraphN
 function finalizedDeclaredContractProducers(
   layout: RunLayout,
   contract: PlannedGraphNode["outputs"][number]["contract"],
-  consumer: PlannedGraphNode
+  consumer: PlannedGraphNode,
+  attemptAuthority?: ArtifactGateAttemptAuthority,
+  options: { directOnly?: boolean } = {}
 ): FinalizedDeclaredProducer[] {
   assertRegularFileInside(layout.root, layout.graphPath, "planned graph finalized artifact authority");
   const graph = assertPlannedGraph(readStrictRegisteredDocument(layout.graphPath, "planned-graph.schema.json"));
-  const ancestorIds = plannedAncestorIds(graph, consumer);
-  const artifactDirectory = (node: PlannedGraphNode): string =>
-    safeResolveInside(layout.root, node.artifact_dir, `planned artifact directory for ${node.id}`);
-  const ancestorDirectories = graph.nodes
-    .filter((node) => ancestorIds.has(node.id))
-    .map((node) => artifactDirectory(node));
-  const declarations: SemanticArtifactTaskDeclaration[] = graph.nodes.map((node) => ({
-    attemptId: node.id,
-    logicalNodeId: node.logical_id,
-    artifactDir: artifactDirectory(node),
-    dependencies: node.depends_on,
-    dependencyArtifactDirs: node.id === consumer.id ? ancestorDirectories : [],
-    outputs: node.outputs
-  }));
-  const current = declarations.find((declaration) => declaration.attemptId === consumer.id);
-  if (current === undefined) {
-    throw new Error(`planned graph does not bind exact consumer ${JSON.stringify(consumer.id)}`);
+  let current: SemanticArtifactTaskDeclaration;
+  let declarations: SemanticArtifactTaskDeclaration[];
+  const concreteNodeIdByAttempt = new Map<string, string>();
+  const sealedTaskByAttempt = new Map<string, SmithersTaskManifestTask>();
+  if (attemptAuthority !== undefined) {
+    ({ current, declarations } = semanticAttemptDeclarations(consumer, attemptAuthority));
+    for (const task of attemptAuthority.tasks) {
+      if (sealedTaskByAttempt.has(task.attemptId)) {
+        throw new Error(`sealed Smithers task set repeats attempt ${JSON.stringify(task.attemptId)}`);
+      }
+      sealedTaskByAttempt.set(task.attemptId, task);
+      concreteNodeIdByAttempt.set(task.attemptId, task.concreteNodeId);
+    }
+  } else {
+    const ancestorIds = plannedAncestorIds(graph, consumer);
+    const artifactDirectory = (node: PlannedGraphNode): string =>
+      safeResolveInside(layout.root, node.artifact_dir, `planned artifact directory for ${node.id}`);
+    const ancestorDirectories = graph.nodes
+      .filter((node) => ancestorIds.has(node.id))
+      .map((node) => artifactDirectory(node));
+    declarations = graph.nodes.map((node) => ({
+      attemptId: node.id,
+      logicalNodeId: node.logical_id,
+      artifactDir: artifactDirectory(node),
+      dependencies: node.depends_on,
+      dependencyArtifactDirs: node.id === consumer.id ? ancestorDirectories : [],
+      outputs: node.outputs
+    }));
+    current = declarations.find((declaration) => declaration.attemptId === consumer.id)!;
+    if (current === undefined) {
+      throw new Error(`planned graph does not bind exact consumer ${JSON.stringify(consumer.id)}`);
+    }
+    for (const node of graph.nodes) concreteNodeIdByAttempt.set(node.id, node.id);
   }
-  const bindings = declaredAncestorOutputsByContract(current, declarations, contract);
+  if (attemptAuthority !== undefined) {
+    assertExactSealedAttemptAuthority(layout, graph, consumer, attemptAuthority);
+  }
+  const bindings = declaredAncestorOutputsByContract(current, declarations, contract, options);
   const bindingsByAttempt = new Map<string, typeof bindings>();
   for (const binding of bindings) {
     bindingsByAttempt.set(binding.attemptId, [...(bindingsByAttempt.get(binding.attemptId) ?? []), binding]);
   }
   const nodesById = new Map(graph.nodes.map((node) => [node.id, node] as const));
   return [...bindingsByAttempt.entries()].map(([attemptId, declaredOutputs]) => {
-    const node = nodesById.get(attemptId);
+    const concreteNodeId = concreteNodeIdByAttempt.get(attemptId);
+    const node = concreteNodeId === undefined ? undefined : nodesById.get(concreteNodeId);
     if (node === undefined)
       throw new Error(`declared semantic producer is absent from the planned graph: ${attemptId}`);
-    let authority: ReturnType<typeof loadFinalizedNodeOutputSnapshot>;
+    const sealedTask = sealedTaskByAttempt.get(attemptId);
+    if (
+      attemptAuthority !== undefined &&
+      (sealedTask === undefined ||
+        node.kind !== "agentic" ||
+        sealedTask.logicalNodeId !== node.logical_id ||
+        (node.workflow !== undefined && !node.workflow.task_node_ids.includes(`node:${attemptId}`)))
+    ) {
+      throw new Error(`sealed semantic producer does not bind its planned attempt: ${attemptId}`);
+    }
+    if (sealedTask !== undefined) {
+      const sealedOutputs = sealedTask.metadata.artifacts.outputs.filter((output) => output.contract === contract);
+      const plannedOutputs = node.outputs.filter((output) => output.contract === contract);
+      if (
+        sealedOutputs.length !== plannedOutputs.length ||
+        sealedOutputs.some((output) => !plannedOutputs.some((planned) => smithersOutputMatchesPlanned(output, planned)))
+      ) {
+        throw new Error(`sealed ${contract} declaration does not match the planned producer: ${attemptId}`);
+      }
+    }
+    let outputAuthority: ReturnType<typeof loadFinalizedNodeOutputSnapshot>;
     try {
-      authority = loadFinalizedNodeOutputSnapshot({
+      outputAuthority = loadFinalizedNodeOutputSnapshot({
         runRoot: layout.root,
         logicalNodeId: node.logical_id,
-        attemptId: node.id
+        attemptId
       });
     } catch (error) {
       throw new Error(
-        `finalized ${contract} authority is invalid for ${node.id}: ${error instanceof Error ? error.message : String(error)}`,
+        `finalized ${contract} authority is invalid for ${attemptId}: ${error instanceof Error ? error.message : String(error)}`,
         { cause: error }
       );
     }
     const declaredPaths = declaredOutputs.map((output) => output.path).sort();
-    const outputs = authority.outputs.filter((output) => output.contract === contract);
+    const outputs = outputAuthority.outputs.filter((output) => output.contract === contract);
     const finalizedPaths = outputs.map((output) => output.path).sort();
     if (!sameStringSequence(declaredPaths, finalizedPaths)) {
-      throw new Error(`finalized ${contract} authority does not match the current declarations for ${node.id}`);
+      throw new Error(`finalized ${contract} authority does not match the current declarations for ${attemptId}`);
     }
-    return { node, authority, outputs };
+    return { attemptId, node, authority: outputAuthority, outputs };
   });
 }
 
@@ -2190,9 +2623,10 @@ function finalizedSingletonAncestorOutput(
   layout: RunLayout,
   consumer: PlannedGraphNode,
   contract: PlannedGraphNode["outputs"][number]["contract"],
-  label: string
+  label: string,
+  attemptAuthority?: ArtifactGateAttemptAuthority
 ): VerifiedOutputArtifactSnapshot | undefined {
-  const outputs = finalizedDeclaredContractProducers(layout, contract, consumer).flatMap((producer) =>
+  const outputs = finalizedDeclaredContractProducers(layout, contract, consumer, attemptAuthority).flatMap((producer) =>
     producer.outputs.slice()
   );
   if (outputs.length === 0) return undefined;
@@ -2204,7 +2638,8 @@ function finalizedSingletonAncestorOutput(
 
 function semanticPropertyLenses(
   layout: RunLayout,
-  consumer: PlannedGraphNode
+  consumer: PlannedGraphNode,
+  attemptAuthority?: ArtifactGateAttemptAuthority
 ): SemanticPropertyLensContext[] | undefined {
   const state = readRunState(layout);
   const lenses: SemanticPropertyLensContext[] = [];
@@ -2216,9 +2651,12 @@ function semanticPropertyLenses(
     artifact: VerifiedOutputArtifactSnapshot;
   }[];
   try {
-    ledgerArtifacts = finalizedDeclaredContractProducers(layout, "ultrafuzz/invariant-ledger@1", consumer).flatMap(
-      (producer) => producer.outputs.map((artifact) => ({ producer, artifact }))
-    );
+    ledgerArtifacts = finalizedDeclaredContractProducers(
+      layout,
+      "ultrafuzz/invariant-ledger@1",
+      consumer,
+      attemptAuthority
+    ).flatMap((producer) => producer.outputs.map((artifact) => ({ producer, artifact })));
   } catch {
     return undefined;
   }
@@ -2234,25 +2672,40 @@ function semanticPropertyLenses(
     });
   }
 
-  let directDependencies: readonly PlannedGraphNode[];
+  let directDependencies: DirectArtifactDependency[];
   try {
-    directDependencies = plannedDirectDependencyNodes(layout, consumer);
+    directDependencies =
+      attemptAuthority === undefined
+        ? plannedDirectDependencyNodes(layout, consumer).map((dependency) => ({
+            attemptId: dependency.id,
+            node: dependency
+          }))
+        : sealedDirectArtifactDependencies(layout, consumer, attemptAuthority);
   } catch {
     return undefined;
   }
   for (const dependency of directDependencies) {
-    const nodeId = dependency.id;
+    const nodeId = dependency.attemptId;
     const nodeState = state.nodes[nodeId];
-    if (nodeState?.logical_node_id !== undefined && nodeState.logical_node_id !== dependency.logical_id) {
+    if (
+      attemptAuthority === undefined &&
+      nodeState?.logical_node_id !== undefined &&
+      nodeState.logical_node_id !== dependency.node.logical_id
+    ) {
       return undefined;
     }
-    const declaredLensCount = dependency.outputs.filter((output) => output.contract === PROPERTY_LENS_CONTRACT).length;
+    const declaredLensCount =
+      dependency.task?.metadata.artifacts.outputs.filter((output) => output.contract === PROPERTY_LENS_CONTRACT)
+        .length ?? dependency.node.outputs.filter((output) => output.contract === PROPERTY_LENS_CONTRACT).length;
     if (declaredLensCount === 0) continue;
     if (declaredLensCount !== 1) return undefined;
     producerCount += 1;
-    const lens = loadFinalizedPropertyLens(layout, state, nodeId, "property-fanin");
+    const lens =
+      attemptAuthority === undefined
+        ? loadFinalizedPropertyLens(layout, state, nodeId, "property-fanin")
+        : loadFinalizedTaskPropertyLens(layout, dependency, "property-fanin");
     if (!lens.ok) return undefined;
-    lenses.push({ sourceNodeId: dependency.logical_id, projectionRequired: true, document: lens.document });
+    lenses.push({ sourceNodeId: dependency.node.logical_id, projectionRequired: true, document: lens.document });
   }
   return producerCount === 0 ? undefined : lenses;
 }
@@ -2390,7 +2843,7 @@ function verifySeverityMatrixArtifacts(
   if (artifact === undefined) {
     return [];
   }
-  const artifactPath = path.join(artifactDir, artifact.file);
+  const artifactPath = safeResolveInside(artifactDir, artifact.path, "severity artifact output");
   try {
     const document = parseCurrentArtifactJson(artifactDir, artifactPath, authenticated);
     if (document === undefined) return [];
@@ -2404,15 +2857,14 @@ function verifySeverityMatrixArtifacts(
   }
 }
 
-function severityArtifactForNode(
-  node: PlannedGraphNode
-): { kind: SeverityArtifactKind; file: "severity-classified-findings.json" | "report.json" } | undefined {
+function severityArtifactForNode(node: PlannedGraphNode): { kind: SeverityArtifactKind; path: string } | undefined {
   const logicalId = node.logical_id ?? node.id;
   if (logicalId === "severity-classification") {
-    return { kind: "severity-classification", file: "severity-classified-findings.json" };
+    return { kind: "severity-classification", path: "severity-classified-findings.json" };
   }
-  if (logicalId === "final-report") {
-    return { kind: "final-report", file: "report.json" };
+  const reportOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/report@2");
+  if (reportOutputs.length === 1) {
+    return { kind: "final-report", path: reportOutputs[0]!.path };
   }
   return undefined;
 }
@@ -2422,6 +2874,7 @@ function verifyPropertyProvenanceArtifacts(
   artifactDir: string,
   node: PlannedGraphNode,
   attemptId: string,
+  attemptAuthority?: ArtifactGateAttemptAuthority,
   authenticated?: AuthenticatedArtifactGateSnapshots
 ): RuntimeDiagnostic[] {
   const isPropertyLens = node.outputs.some((output) => output.contract === "ultrafuzz/property-lens@2");
@@ -2430,27 +2883,117 @@ function verifyPropertyProvenanceArtifacts(
   const isCampaign = node.outputs.some((output) => output.contract === "ultrafuzz/property-campaign@2");
   const diagnostics: RuntimeDiagnostic[] = [];
   if (isPropertyLens) {
-    diagnostics.push(...verifyLensReferenceExpectationAuthority(layout, artifactDir, node, attemptId, authenticated));
+    diagnostics.push(
+      ...verifyLensReferenceExpectationAuthority(layout, artifactDir, node, attemptId, attemptAuthority, authenticated)
+    );
   }
   if (isFinalReport) {
-    diagnostics.push(...verifyFinalReportPropertyReferences(layout, artifactDir, node, authenticated));
+    diagnostics.push(
+      ...verifyFinalReportPropertyReferences(layout, artifactDir, node, attemptAuthority, authenticated)
+    );
   }
   if (!isImplementation && !isCampaign) return diagnostics;
 
-  const catalog = readCanonicalPropertyCatalog(layout, node);
+  const catalog = readCanonicalPropertyCatalog(layout, node, attemptAuthority);
   if (catalog.diagnostics.length > 0 || catalog.value === undefined) {
     return [...diagnostics, ...catalog.diagnostics];
   }
 
+  const siblingImplementation = isImplementation
+    ? readDeclaredSiblingImplementedProperties(artifactDir, node, layout, authenticated)
+    : undefined;
   if (isImplementation) {
-    diagnostics.push(
-      ...verifyImplementationPropertyReferences(layout, artifactDir, catalog.value, node, authenticated)
-    );
+    diagnostics.push(...(siblingImplementation?.diagnostics ?? []));
+    if (siblingImplementation?.value !== undefined && siblingImplementation.path !== undefined) {
+      diagnostics.push(
+        ...verifyImplementationPropertyReferences(
+          layout,
+          artifactDir,
+          catalog.value,
+          node,
+          siblingImplementation.value,
+          siblingImplementation.path,
+          authenticated
+        )
+      );
+    }
   }
   if (isCampaign) {
-    diagnostics.push(...verifyCampaignPropertyReferences(layout, artifactDir, catalog.value, node, authenticated));
+    diagnostics.push(
+      ...verifyCampaignPropertyReferences(
+        layout,
+        artifactDir,
+        catalog.value,
+        node,
+        siblingImplementation,
+        attemptAuthority,
+        authenticated
+      )
+    );
   }
   return diagnostics;
+}
+
+type ImplementedPropertiesRead = {
+  value?: ImplementedPropertiesArtifact;
+  path?: string;
+  diagnostics: RuntimeDiagnostic[];
+};
+
+/**
+ * Capture the implementation half of a mixed-role producer from its exact
+ * declared output. The immutable bytes are schema-validated before either the
+ * implementation gate or a sibling campaign join can consume the document.
+ */
+function readDeclaredSiblingImplementedProperties(
+  artifactDir: string,
+  node: PlannedGraphNode,
+  layout: RunLayout,
+  authenticated?: AuthenticatedArtifactGateSnapshots
+): ImplementedPropertiesRead {
+  const outputs = node.outputs.filter((output) => output.contract === "ultrafuzz/implemented-properties@3");
+  if (outputs.length !== 1) {
+    return {
+      diagnostics: [
+        {
+          code: "PROPERTY_IMPLEMENTATION_DECLARATION_AMBIGUOUS",
+          message: `Property implementation must declare exactly one ultrafuzz/implemented-properties@3 output; found ${outputs.length}`,
+          severity: "error",
+          source: "property-provenance",
+          path: layout.graphPath
+        }
+      ]
+    };
+  }
+  const artifactPath = safeResolveInside(artifactDir, outputs[0]!.path, "implemented property sibling output");
+  const bytes = readCurrentArtifactSnapshot(artifactDir, artifactPath, authenticated);
+  if (bytes === undefined) {
+    return {
+      diagnostics: [
+        {
+          code: "IMPLEMENTED_PROPERTIES_SIBLING_MISSING",
+          message: `Declared sibling implementation output ${JSON.stringify(outputs[0]!.path)} is unavailable`,
+          severity: "error",
+          source: "property-provenance",
+          path: artifactPath
+        }
+      ]
+    };
+  }
+  try {
+    const contract = validateArtifactContractBytes("ultrafuzz/implemented-properties@3", bytes, artifactPath);
+    if (!contract.ok || contract.value === undefined) {
+      return { diagnostics: schemaDiagnostics(contract.issues) };
+    }
+    const parsed = validateImplementedPropertiesSchema(contract.value, artifactPath);
+    return parsed.ok && parsed.value !== undefined
+      ? { value: parsed.value, path: artifactPath, diagnostics: [] }
+      : { diagnostics: schemaDiagnostics(parsed.issues) };
+  } catch (error) {
+    return {
+      diagnostics: [diagnosticFromError(error, "property-provenance", "IMPLEMENTED_PROPERTIES_SIBLING_INVALID")]
+    };
+  }
 }
 
 function verifyImplementationPropertyReferences(
@@ -2458,32 +3001,11 @@ function verifyImplementationPropertyReferences(
   artifactDir: string,
   catalog: PropertiesArtifact,
   node: PlannedGraphNode,
+  implementation: ImplementedPropertiesArtifact,
+  implementationPath: string,
   authenticated?: AuthenticatedArtifactGateSnapshots
 ): RuntimeDiagnostic[] {
-  const implementationOutputs = node.outputs.filter(
-    (output) => output.contract === "ultrafuzz/implemented-properties@3"
-  );
-  if (implementationOutputs.length !== 1) {
-    return [
-      {
-        code: "PROPERTY_IMPLEMENTATION_DECLARATION_AMBIGUOUS",
-        message: `Property implementation must declare exactly one ultrafuzz/implemented-properties@3 output; found ${implementationOutputs.length}`,
-        severity: "error",
-        source: "property-provenance",
-        path: layout.graphPath
-      }
-    ];
-  }
-  const implementationPath = safeResolveInside(
-    artifactDir,
-    implementationOutputs[0]!.path,
-    "implemented property output"
-  );
-  const implementationDocument = parseCurrentArtifactJson(artifactDir, implementationPath, authenticated);
-  if (implementationDocument === undefined) return [];
-  const implementation = validateImplementedPropertiesSchema(implementationDocument, implementationPath);
-  if (!implementation.ok || implementation.value === undefined) return [];
-  const references: PropertyReferenceInput[] = implementation.value.properties.map((record, index) => ({
+  const references: PropertyReferenceInput[] = implementation.properties.map((record, index) => ({
     propertyIds: [record.property_id],
     path: `${implementationPath}#$.properties[${index}].property_id`
   }));
@@ -2494,7 +3016,7 @@ function verifyImplementationPropertyReferences(
   }
   return [
     ...propertyReferenceDiagnostics(catalog, references),
-    ...verifyImplementationSelectionCoverage(catalog, implementation.value, implementationPath, layout)
+    ...verifyImplementationSelectionCoverage(catalog, implementation, implementationPath, layout)
   ];
 }
 
@@ -2509,17 +3031,50 @@ function verifyLensReferenceExpectationAuthority(
   artifactDir: string,
   node: PlannedGraphNode,
   attemptId: string,
+  attemptAuthority?: ArtifactGateAttemptAuthority,
   authenticated?: AuthenticatedArtifactGateSnapshots
 ): RuntimeDiagnostic[] {
-  const declaration = resolveStateDeclaredPropertyLens(readRunState(layout), attemptId, "property-provenance");
-  if (!declaration.ok) return [declaration.diagnostic];
-  const lensPath = safeResolveInside(artifactDir, declaration.output.path, "property lens output");
+  let declaration: Pick<NodeOutputContract, "path">;
+  if (attemptAuthority === undefined) {
+    const resolved = resolveStateDeclaredPropertyLens(readRunState(layout), attemptId, "property-provenance");
+    if (!resolved.ok) return [resolved.diagnostic];
+    declaration = resolved.output;
+  } else {
+    try {
+      assertRegularFileInside(layout.root, layout.graphPath, "current property lens attempt authority");
+      const graph = assertPlannedGraph(readStrictRegisteredDocument(layout.graphPath, "planned-graph.schema.json"));
+      assertExactSealedAttemptAuthority(layout, graph, node, attemptAuthority);
+    } catch (error) {
+      return [diagnosticFromError(error, "property-provenance", "PROPERTY_LENS_AUTHORITY_INVALID")];
+    }
+    const sealedOutputs = attemptAuthority.task.metadata.artifacts.outputs.filter(
+      (output) => output.contract === PROPERTY_LENS_CONTRACT
+    );
+    const plannedOutputs = node.outputs.filter((output) => output.contract === PROPERTY_LENS_CONTRACT);
+    if (
+      sealedOutputs.length !== 1 ||
+      plannedOutputs.length !== 1 ||
+      !smithersOutputMatchesPlanned(sealedOutputs[0]!, plannedOutputs[0]!)
+    ) {
+      return [
+        {
+          code: "PROPERTY_LENS_SCHEMA_BINDING_INVALID",
+          message: `Current Smithers attempt ${JSON.stringify(attemptId)} must match its exact planned ${PROPERTY_LENS_CONTRACT} declaration`,
+          severity: "error",
+          source: "property-provenance",
+          path: `smithers.tasks.${attemptId}.metadata.artifacts.outputs`
+        }
+      ];
+    }
+    declaration = sealedOutputs[0]!;
+  }
+  const lensPath = safeResolveInside(artifactDir, declaration.path, "property lens output");
   const lensDocument = parseCurrentArtifactJson(artifactDir, lensPath, authenticated);
   if (lensDocument === undefined) {
     return [
       {
         code: "PROPERTY_LENS_MISSING",
-        message: `Declared property lens output ${JSON.stringify(declaration.output.path)} is unavailable`,
+        message: `Declared property lens output ${JSON.stringify(declaration.path)} is unavailable`,
         severity: "error",
         source: "property-provenance",
         path: lensPath
@@ -2867,6 +3422,8 @@ function verifyCampaignPropertyReferences(
   artifactDir: string,
   catalog: PropertiesArtifact,
   node: PlannedGraphNode,
+  siblingImplementation?: ImplementedPropertiesRead,
+  attemptAuthority?: ArtifactGateAttemptAuthority,
   authenticated?: AuthenticatedArtifactGateSnapshots
 ): RuntimeDiagnostic[] {
   const campaignOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/property-campaign@2");
@@ -2927,7 +3484,11 @@ function verifyCampaignPropertyReferences(
     campaigns.length === campaignPaths.length
       ? campaignFailurePartitionDiagnostics(campaigns, validatedFindings, findingsPath)
       : [];
-  const implementation = readImplementedProperties(layout, node);
+  // A node may deliberately own both implementation and campaign roles. In
+  // that case its implementation output is a sibling, not an ancestor; use
+  // the authenticated immutable snapshot captured above and never fall back
+  // to an older ancestor merely because the sibling is missing or invalid.
+  const implementation = siblingImplementation ?? readImplementedProperties(layout, node, attemptAuthority);
   if (implementation.diagnostics.length > 0 || implementation.value === undefined) {
     return [...summaryDiagnostics, ...backendDiagnostics, ...partitionDiagnostics, ...implementation.diagnostics];
   }
@@ -3355,6 +3916,7 @@ function verifyFinalReportPropertyReferences(
   layout: RunLayout,
   artifactDir: string,
   node: PlannedGraphNode,
+  attemptAuthority?: ArtifactGateAttemptAuthority,
   authenticated?: AuthenticatedArtifactGateSnapshots
 ): RuntimeDiagnostic[] {
   const reportOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/report@2");
@@ -3369,7 +3931,20 @@ function verifyFinalReportPropertyReferences(
       }
     ];
   }
+  const markdownOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/nonempty-markdown@1");
+  if (markdownOutputs.length !== 1) {
+    return [
+      {
+        code: "PROPERTY_REPORT_MARKDOWN_DECLARATION_AMBIGUOUS",
+        message: `Report producer must declare exactly one corresponding ultrafuzz/nonempty-markdown@1 output; found ${markdownOutputs.length}`,
+        severity: "error",
+        source: "property-provenance",
+        path: layout.graphPath
+      }
+    ];
+  }
   const reportPath = safeResolveInside(artifactDir, reportOutputs[0]!.path, "final report output");
+  const markdownPath = safeResolveInside(artifactDir, markdownOutputs[0]!.path, "final report Markdown output");
   const report = parseCurrentArtifactJson(artifactDir, reportPath, authenticated);
   if (report === undefined) return [];
   if (!isRecord(report)) {
@@ -3381,6 +3956,8 @@ function verifyFinalReportPropertyReferences(
     node,
     report,
     reportPath,
+    markdownPath,
+    attemptAuthority,
     authenticated
   );
   if (!Array.isArray(report.property_provenance)) {
@@ -3390,7 +3967,7 @@ function verifyFinalReportPropertyReferences(
     return diagnostics;
   }
 
-  const catalog = readCanonicalPropertyCatalog(layout, node);
+  const catalog = readCanonicalPropertyCatalog(layout, node, attemptAuthority);
   if (catalog.diagnostics.length > 0 || catalog.value === undefined) {
     return [...diagnostics, ...catalog.diagnostics];
   }
@@ -3410,11 +3987,11 @@ function verifyFinalReportPropertyReferences(
     );
   });
   diagnostics.push(...propertyReferenceDiagnostics(catalog.value, references));
-  const implementation = readImplementedProperties(layout, node);
+  const implementation = readImplementedProperties(layout, node, attemptAuthority);
   if (implementation.diagnostics.length > 0 || implementation.value === undefined) {
     return [...diagnostics, ...implementation.diagnostics];
   }
-  const campaignAuthority = readCampaignFuzzerBackends(layout, node);
+  const campaignAuthority = readCampaignFuzzerBackends(layout, node, attemptAuthority);
   diagnostics.push(...campaignAuthority.diagnostics);
   diagnostics.push(
     ...reportPropertyJoinDiagnostics(
@@ -3437,10 +4014,27 @@ function verifyFinalReportImplementationCoverage(
   node: PlannedGraphNode,
   report: Record<string, unknown>,
   reportPath: string,
+  markdownPath: string,
+  attemptAuthority?: ArtifactGateAttemptAuthority,
   authenticated?: AuthenticatedArtifactGateSnapshots
 ): RuntimeDiagnostic[] {
-  if (plannedContractProducerStatus(layout, node, "ultrafuzz/implemented-properties@3") === "absent") return [];
-  const implementation = readImplementedProperties(layout, node);
+  if (
+    plannedContractProducerStatus(layout, node, "ultrafuzz/implemented-properties@3", attemptAuthority) === "absent"
+  ) {
+    return isDeepStrictEqual(report.property_implementation_coverage, UNPLANNED_IMPLEMENTATION_COVERAGE)
+      ? []
+      : [
+          {
+            code: "PROPERTY_REPORT_IMPLEMENTATION_COVERAGE_MISMATCH",
+            message:
+              "A report without a planned property implementation producer must declare the exact not-planned coverage value",
+            severity: "error",
+            source: "property-provenance",
+            path: `${reportPath}#$.property_implementation_coverage`
+          }
+        ];
+  }
+  const implementation = readImplementedProperties(layout, node, attemptAuthority);
   if (
     implementation.diagnostics.length > 0 ||
     implementation.value === undefined ||
@@ -3461,7 +4055,7 @@ function verifyFinalReportImplementationCoverage(
     ];
   }
 
-  const catalog = readCanonicalPropertyCatalog(layout, node);
+  const catalog = readCanonicalPropertyCatalog(layout, node, attemptAuthority);
   if (catalog.diagnostics.length > 0 || catalog.value === undefined || catalog.path === undefined) {
     return catalog.diagnostics;
   }
@@ -3529,111 +4123,108 @@ function verifyFinalReportImplementationCoverage(
     }
   }
 
-  if (node.outputs.some((output) => output.path === "report.md")) {
-    const markdownPath = path.join(path.dirname(reportPath), "report.md");
-    const markdownBytes = readCurrentArtifactSnapshot(artifactDir, markdownPath, authenticated);
-    if (markdownBytes !== undefined) {
-      const markdown = markdownBytes.toString("utf8");
-      const markdownLines = markdown.split(/\r?\n/u);
-      let fenced = false;
-      let headingLineIndex = -1;
+  const markdownBytes = readCurrentArtifactSnapshot(artifactDir, markdownPath, authenticated);
+  if (markdownBytes !== undefined) {
+    const markdown = markdownBytes.toString("utf8");
+    const markdownLines = markdown.split(/\r?\n/u);
+    let fenced = false;
+    let headingLineIndex = -1;
+    for (const [index, line] of markdownLines.entries()) {
+      const trimmed = line.trim();
+      if (/^(?:`{3,}|~{3,})/u.test(trimmed)) {
+        fenced = !fenced;
+        continue;
+      }
+      if (!fenced && trimmed === "## Property implementation coverage") {
+        headingLineIndex = index;
+        break;
+      }
+    }
+    if (headingLineIndex < 0) {
+      diagnostics.push({
+        code: "PROPERTY_REPORT_IMPLEMENTATION_COVERAGE_MARKDOWN_MISSING",
+        message: "Current invariant report Markdown must render the property implementation coverage section",
+        severity: "error",
+        source: "property-provenance",
+        path: markdownPath
+      });
+    } else if (isRecord(coverage)) {
+      fenced = false;
+      let nextHeadingLineIndex = -1;
       for (const [index, line] of markdownLines.entries()) {
+        if (index <= headingLineIndex) continue;
         const trimmed = line.trim();
         if (/^(?:`{3,}|~{3,})/u.test(trimmed)) {
           fenced = !fenced;
           continue;
         }
-        if (!fenced && trimmed === "## Property implementation coverage") {
-          headingLineIndex = index;
+        if (!fenced && trimmed.startsWith("## ")) {
+          nextHeadingLineIndex = index;
           break;
         }
       }
-      if (headingLineIndex < 0) {
+      const lines = markdownLines
+        .slice(headingLineIndex + 1, nextHeadingLineIndex < 0 ? undefined : nextHeadingLineIndex)
+        .map((line) => line.trim());
+      const expectedCountFields: Array<[string, number]> = [
+        ["Selected properties", stringArray(coverage.selected_property_ids).length],
+        ["Implemented properties", stringArray(coverage.implemented_property_ids).length],
+        ["Blocked properties", stringArray(coverage.blocked_property_ids).length],
+        ["Pending properties", stringArray(coverage.pending_property_ids).length],
+        ["Deferred properties", stringArray(coverage.deferred_property_ids).length],
+        ["Reference expectation properties", stringArray(coverage.reference_expected_property_ids).length]
+      ];
+      const markdownMismatches: string[] = [];
+      const expectedThreshold =
+        typeof coverage.priority_threshold === "string" ? coverage.priority_threshold : "unavailable";
+      const thresholdLine = lines.find((line) => line.startsWith("- Priority threshold:"));
+      if (thresholdLine !== `- Priority threshold: \`${expectedThreshold}\``) {
+        markdownMismatches.push("priority_threshold");
+      }
+      const expectedPriorities = stringArray(coverage.priorities);
+      const includedPrioritiesLine = lines.find((line) => line.startsWith("- Included priorities:"));
+      const renderedPriorities = expectedPriorities.length > 0 ? expectedPriorities.join("<br>") : "unavailable";
+      if (includedPrioritiesLine !== `- Included priorities: \`${renderedPriorities}\``) {
+        markdownMismatches.push("priorities");
+      }
+      for (const [label, expectedCount] of expectedCountFields) {
+        const prefix = `- ${label}:`;
+        const line = lines.find((candidate) => candidate.startsWith(prefix));
+        if (line !== `- ${label}: \`${expectedCount}\``) {
+          markdownMismatches.push(label);
+        }
+      }
+      const expectedBlockerSummaries = stringArray(coverage.blocker_summaries);
+      const blockerHeadingIndex = lines.indexOf("Blocker summaries:");
+      const renderedBlockers: string[] = [];
+      if (blockerHeadingIndex >= 0) {
+        for (const line of lines.slice(blockerHeadingIndex + 1)) {
+          if (!line.startsWith("- ")) break;
+          renderedBlockers.push(line);
+        }
+      }
+      // The Markdown must report the same blockers as the JSON. It must not
+      // also require the author to reproduce reportPublicProse character for
+      // character: that function redacts secrets and several relative path
+      // prefixes, escapes eight Markdown characters, and HTML-escapes two
+      // more, and no prose description of it has yet survived review. Accept
+      // the escaped rendering or the summary text as written.
+      const blockerMatches = (rendered: string | undefined, summary: string): boolean =>
+        rendered === `- ${reportPublicProse(summary)}` || rendered === `- ${summary.replace(/\s+/gu, " ").trim()}`;
+      if (
+        renderedBlockers.length !== expectedBlockerSummaries.length ||
+        expectedBlockerSummaries.some((summary, index) => !blockerMatches(renderedBlockers[index], summary))
+      ) {
+        markdownMismatches.push("blocker_summaries");
+      }
+      if (markdownMismatches.length > 0) {
         diagnostics.push({
-          code: "PROPERTY_REPORT_IMPLEMENTATION_COVERAGE_MARKDOWN_MISSING",
-          message: "Current invariant report Markdown must render the property implementation coverage section",
+          code: "PROPERTY_REPORT_IMPLEMENTATION_COVERAGE_MARKDOWN_MISMATCH",
+          message: `Current invariant report Markdown coverage does not match report.json (${markdownMismatches.join(", ")})`,
           severity: "error",
           source: "property-provenance",
           path: markdownPath
         });
-      } else if (isRecord(coverage)) {
-        fenced = false;
-        let nextHeadingLineIndex = -1;
-        for (const [index, line] of markdownLines.entries()) {
-          if (index <= headingLineIndex) continue;
-          const trimmed = line.trim();
-          if (/^(?:`{3,}|~{3,})/u.test(trimmed)) {
-            fenced = !fenced;
-            continue;
-          }
-          if (!fenced && trimmed.startsWith("## ")) {
-            nextHeadingLineIndex = index;
-            break;
-          }
-        }
-        const lines = markdownLines
-          .slice(headingLineIndex + 1, nextHeadingLineIndex < 0 ? undefined : nextHeadingLineIndex)
-          .map((line) => line.trim());
-        const expectedCountFields: Array<[string, number]> = [
-          ["Selected properties", stringArray(coverage.selected_property_ids).length],
-          ["Implemented properties", stringArray(coverage.implemented_property_ids).length],
-          ["Blocked properties", stringArray(coverage.blocked_property_ids).length],
-          ["Pending properties", stringArray(coverage.pending_property_ids).length],
-          ["Deferred properties", stringArray(coverage.deferred_property_ids).length],
-          ["Reference expectation properties", stringArray(coverage.reference_expected_property_ids).length]
-        ];
-        const markdownMismatches: string[] = [];
-        const expectedThreshold =
-          typeof coverage.priority_threshold === "string" ? coverage.priority_threshold : "unavailable";
-        const thresholdLine = lines.find((line) => line.startsWith("- Priority threshold:"));
-        if (thresholdLine !== `- Priority threshold: \`${expectedThreshold}\``) {
-          markdownMismatches.push("priority_threshold");
-        }
-        const expectedPriorities = stringArray(coverage.priorities);
-        const includedPrioritiesLine = lines.find((line) => line.startsWith("- Included priorities:"));
-        const renderedPriorities = expectedPriorities.length > 0 ? expectedPriorities.join("<br>") : "unavailable";
-        if (includedPrioritiesLine !== `- Included priorities: \`${renderedPriorities}\``) {
-          markdownMismatches.push("priorities");
-        }
-        for (const [label, expectedCount] of expectedCountFields) {
-          const prefix = `- ${label}:`;
-          const line = lines.find((candidate) => candidate.startsWith(prefix));
-          if (line !== `- ${label}: \`${expectedCount}\``) {
-            markdownMismatches.push(label);
-          }
-        }
-        const expectedBlockerSummaries = stringArray(coverage.blocker_summaries);
-        const blockerHeadingIndex = lines.indexOf("Blocker summaries:");
-        const renderedBlockers: string[] = [];
-        if (blockerHeadingIndex >= 0) {
-          for (const line of lines.slice(blockerHeadingIndex + 1)) {
-            if (!line.startsWith("- ")) break;
-            renderedBlockers.push(line);
-          }
-        }
-        // The Markdown must report the same blockers as the JSON. It must not
-        // also require the author to reproduce reportPublicProse character for
-        // character: that function redacts secrets and several relative path
-        // prefixes, escapes eight Markdown characters, and HTML-escapes two
-        // more, and no prose description of it has yet survived review. Accept
-        // the escaped rendering or the summary text as written.
-        const blockerMatches = (rendered: string | undefined, summary: string): boolean =>
-          rendered === `- ${reportPublicProse(summary)}` || rendered === `- ${summary.replace(/\s+/gu, " ").trim()}`;
-        if (
-          renderedBlockers.length !== expectedBlockerSummaries.length ||
-          expectedBlockerSummaries.some((summary, index) => !blockerMatches(renderedBlockers[index], summary))
-        ) {
-          markdownMismatches.push("blocker_summaries");
-        }
-        if (markdownMismatches.length > 0) {
-          diagnostics.push({
-            code: "PROPERTY_REPORT_IMPLEMENTATION_COVERAGE_MARKDOWN_MISMATCH",
-            message: `Current invariant report Markdown coverage does not match report.json (${markdownMismatches.join(", ")})`,
-            severity: "error",
-            source: "property-provenance",
-            path: markdownPath
-          });
-        }
       }
     }
   }
@@ -3779,7 +4370,8 @@ function verifiedReportFindingAliases(
 
 function readCampaignFuzzerBackends(
   layout: RunLayout,
-  consumer: PlannedGraphNode
+  consumer: PlannedGraphNode,
+  attemptAuthority?: ArtifactGateAttemptAuthority
 ): {
   value: ReadonlyMap<string, readonly string[]>;
   sourceNodeIds: ReadonlySet<string>;
@@ -3791,7 +4383,7 @@ function readCampaignFuzzerBackends(
   const diagnostics: RuntimeDiagnostic[] = [];
   let producers: FinalizedDeclaredProducer[];
   try {
-    producers = finalizedDeclaredContractProducers(layout, "ultrafuzz/property-campaign@2", consumer);
+    producers = finalizedDeclaredContractProducers(layout, "ultrafuzz/property-campaign@2", consumer, attemptAuthority);
   } catch (error) {
     return {
       value: new Map(),
@@ -4070,7 +4662,8 @@ function sameStringSet(left: readonly string[], right: readonly string[]): boole
 
 function readCanonicalPropertyCatalog(
   layout: RunLayout,
-  consumer: PlannedGraphNode
+  consumer: PlannedGraphNode,
+  attemptAuthority?: ArtifactGateAttemptAuthority
 ): {
   value?: PropertiesArtifact;
   path?: string;
@@ -4082,7 +4675,8 @@ function readCanonicalPropertyCatalog(
       layout,
       consumer,
       "ultrafuzz/properties@2",
-      "canonical property catalog"
+      "canonical property catalog",
+      attemptAuthority
     );
   } catch (error) {
     return {
@@ -4090,6 +4684,9 @@ function readCanonicalPropertyCatalog(
     };
   }
   if (artifact === undefined) {
+    if (plannedContractProducerStatus(layout, consumer, "ultrafuzz/properties@2", attemptAuthority) === "absent") {
+      return { value: UNPLANNED_PROPERTY_CATALOG_CONTEXT, diagnostics: [] };
+    }
     return {
       diagnostics: [
         {
@@ -4109,7 +4706,8 @@ function readCanonicalPropertyCatalog(
 
 function readImplementedProperties(
   layout: RunLayout,
-  consumer: PlannedGraphNode
+  consumer: PlannedGraphNode,
+  attemptAuthority?: ArtifactGateAttemptAuthority
 ): {
   value?: ImplementedPropertiesArtifact;
   path?: string;
@@ -4121,7 +4719,8 @@ function readImplementedProperties(
       layout,
       consumer,
       "ultrafuzz/implemented-properties@3",
-      "implemented property handoff"
+      "implemented property handoff",
+      attemptAuthority
     );
   } catch (error) {
     return {
