@@ -7,6 +7,7 @@ import {
   artifactContractSchemaBinding,
   artifactSchemaDirectory,
   artifactSchemaRegistry,
+  assertArtifactVerificationMarkerSemantics,
   assertNoSymlinkComponents,
   assertPlannedGraph,
   assertRegularFileInside,
@@ -29,6 +30,7 @@ import {
   sha256Bytes,
   updateNodeState,
   validateArtifactContractBytes,
+  validateArtifactVerificationMarker,
   validateFindingsSchema,
   validateGeneratedTestManifestSchema,
   validateInvariantLedgerSchema,
@@ -43,6 +45,7 @@ import {
   validateRegisteredJsonSchema,
   verifyArtifactManifestPrerequisites,
   type ArtifactSchemaFilename,
+  type ArtifactVerificationMarker,
   type ImplementedPropertiesArtifact,
   type InvariantLedgerEntry,
   type InvariantSourceProof,
@@ -56,6 +59,7 @@ import {
   type SemanticGateContext,
   type SemanticGitContext,
   type SemanticPropertyLensContext,
+  type SemanticPropertyCampaignEvidenceContext,
   type WorkspacePatchManifest
 } from "@ultrafuzz/artifacts";
 
@@ -68,6 +72,7 @@ import { validateSeverityMatrixArtifact, type SeverityArtifactKind } from "./sev
 import { deriveWorkspacePatchGitFacts } from "./workspace-handoff.js";
 
 const MAX_ARTIFACT_SNAPSHOT_BYTES = 64 * 1024 * 1024;
+const ARTIFACT_VERIFICATION_DIRECTORY = ".ultrafuzz-verification";
 
 // These are semantic projections for topologies that deliberately omit the
 // corresponding producer. They are never written or published as artifacts;
@@ -1569,19 +1574,10 @@ function verifyRequiredArtifactShape(
           node,
           attemptId,
           artifactPath: output.path,
-          schemaFilename: binding.schema_file as ArtifactSchemaFilename
+          schemaFilename: binding.schema_file as ArtifactSchemaFilename,
+          document: contract.value
         })
       })
-    );
-  }
-  if (
-    contract.ok &&
-    contract.value !== undefined &&
-    output.contract === "ultrafuzz/property-campaign@3" &&
-    !diagnostics.some((diagnostic) => diagnostic.severity === "error")
-  ) {
-    diagnostics.push(
-      ...verifyPropertyCampaignEvidenceFiles(artifactDir, absolutePath, contract.value as PropertyCampaignArtifact)
     );
   }
   if (contract.ok && output.contract === "ultrafuzz/workspace-patch@1") {
@@ -1654,64 +1650,99 @@ function verifyRequiredArtifactShape(
   return diagnostics;
 }
 
-function verifyPropertyCampaignEvidenceFiles(
+function capturePropertyCampaignEvidenceContext(
+  layout: RunLayout,
   artifactDir: string,
-  campaignPath: string,
+  attemptId: string,
   campaign: PropertyCampaignArtifact
-): RuntimeDiagnostic[] {
-  const diagnostics: RuntimeDiagnostic[] = [];
-  for (const [index, entry] of campaign.evidence_files.entries()) {
-    const diagnosticPath = `${campaignPath}#$.evidence_files[${index}]`;
-    let evidencePath: string;
+): SemanticPropertyCampaignEvidenceContext {
+  const snapshots = campaign.evidence_files.map((entry) => {
+    const base = {
+      path: entry.path,
+      exists: false,
+      regularFile: false,
+      symbolicLink: false,
+      linkCount: null,
+      stableIdentity: false
+    };
     try {
-      evidencePath = safeResolveInside(artifactDir, entry.path, "property campaign evidence path");
+      const evidencePath = safeResolveInside(artifactDir, entry.path, "property campaign evidence path");
       if (!fs.existsSync(evidencePath)) {
-        diagnostics.push({
-          code: "PROPERTY_CAMPAIGN_EVIDENCE_MISSING",
-          message: `Property campaign evidence ${entry.path} was not published`,
-          severity: "error",
-          source: "property-campaign-evidence",
-          path: diagnosticPath
-        });
-        continue;
+        return base;
       }
       assertRegularFileInside(artifactDir, evidencePath, "property campaign evidence path");
       const before = fs.lstatSync(evidencePath, { bigint: true });
       if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n) {
-        throw new Error(`property campaign evidence must be a singly linked regular file: ${entry.path}`);
+        return {
+          ...base,
+          exists: true,
+          regularFile: before.isFile(),
+          symbolicLink: before.isSymbolicLink(),
+          linkCount: Number(before.nlink),
+          device: String(before.dev),
+          inode: String(before.ino),
+          error: `property campaign evidence must be a singly linked regular file: ${entry.path}`
+        };
       }
       const bytes = readRegularFileSnapshot(evidencePath, MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILE_BYTES);
       const after = fs.lstatSync(evidencePath, { bigint: true });
-      if (
-        !after.isFile() ||
-        after.isSymbolicLink() ||
-        after.nlink !== 1n ||
-        before.dev !== after.dev ||
-        before.ino !== after.ino ||
-        before.size !== after.size ||
-        before.mtimeNs !== after.mtimeNs ||
-        before.ctimeNs !== after.ctimeNs ||
-        after.size !== BigInt(bytes.byteLength)
-      ) {
-        throw new Error(`property campaign evidence changed while it was captured: ${entry.path}`);
-      }
-      if (bytes.byteLength !== entry.size_bytes || sha256Bytes(bytes) !== entry.sha256) {
-        diagnostics.push({
-          code: "PROPERTY_CAMPAIGN_EVIDENCE_MISMATCH",
-          message: `Property campaign evidence ${entry.path} does not match its declared size and SHA-256`,
-          severity: "error",
-          source: "property-campaign-evidence",
-          path: diagnosticPath
-        });
-      }
+      const stableIdentity =
+        after.isFile() &&
+        !after.isSymbolicLink() &&
+        after.nlink === 1n &&
+        before.dev === after.dev &&
+        before.ino === after.ino &&
+        before.size === after.size &&
+        before.mtimeNs === after.mtimeNs &&
+        before.ctimeNs === after.ctimeNs &&
+        after.size === BigInt(bytes.byteLength);
+      return {
+        ...base,
+        exists: true,
+        regularFile: after.isFile(),
+        symbolicLink: after.isSymbolicLink(),
+        linkCount: Number(after.nlink),
+        stableIdentity,
+        device: String(after.dev),
+        inode: String(after.ino),
+        bytes,
+        ...(stableIdentity ? {} : { error: `property campaign evidence changed while captured: ${entry.path}` })
+      };
     } catch (error) {
-      diagnostics.push({
-        ...diagnosticFromError(error, "property-campaign-evidence", "PROPERTY_CAMPAIGN_EVIDENCE_INVALID"),
-        path: diagnosticPath
-      });
+      return {
+        ...base,
+        error: error instanceof Error ? error.message : String(error)
+      };
     }
+  });
+  const publicationAuthority = readPropertyCampaignPublicationAuthority(layout, attemptId);
+  return {
+    snapshots,
+    ...(publicationAuthority === undefined ? {} : { publicationAuthority })
+  };
+}
+
+function readPropertyCampaignPublicationAuthority(
+  layout: RunLayout,
+  attemptId: string
+): SemanticPropertyCampaignEvidenceContext["publicationAuthority"] {
+  try {
+    const markerRoot = path.join(layout.root, ARTIFACT_VERIFICATION_DIRECTORY);
+    const markerPath = safeResolveInside(markerRoot, `${attemptId}.json`, "verification marker path");
+    assertRegularFileInside(layout.root, markerPath, "property campaign verification marker");
+    const markerValue = parseStrictJsonBytes(readRegularFileSnapshot(markerPath, MAX_ARTIFACT_SNAPSHOT_BYTES));
+    const validation = validateArtifactVerificationMarker(markerValue);
+    if (!validation.ok) return undefined;
+    const marker = markerValue as ArtifactVerificationMarker;
+    assertArtifactVerificationMarkerSemantics(marker);
+    return {
+      markerAttemptId: marker.attempt_id,
+      markerNodeId: marker.node_id,
+      publications: marker.publications.map((publication) => ({ ...publication }))
+    };
+  } catch {
+    return undefined;
   }
-  return diagnostics;
 }
 
 function semanticGateContextForArtifact(input: {
@@ -1721,6 +1752,7 @@ function semanticGateContextForArtifact(input: {
   attemptId: string;
   artifactPath: string;
   schemaFilename: ArtifactSchemaFilename;
+  document: unknown;
 }): SemanticGateContext {
   const context: SemanticGateContext = {
     filesystem: { rootDirectory: input.artifactDir },
@@ -1728,6 +1760,7 @@ function semanticGateContextForArtifact(input: {
     artifactIdentity: {
       runId: input.layout.runId,
       nodeId: input.node.logical_id ?? input.node.id,
+      attemptId: input.attemptId,
       artifactPath: input.artifactPath
     }
   };
@@ -1736,10 +1769,20 @@ function semanticGateContextForArtifact(input: {
     input.schemaFilename === "workspace-patch.schema.json"
       ? workspacePatchGitContext(input.layout, input.artifactDir, input.attemptId)
       : undefined;
+  const propertyCampaignEvidence =
+    input.schemaFilename === "property-campaign.schema.json"
+      ? capturePropertyCampaignEvidenceContext(
+          input.layout,
+          input.artifactDir,
+          input.attemptId,
+          input.document as PropertyCampaignArtifact
+        )
+      : undefined;
   return {
     ...context,
     ...(artifactSet === undefined ? {} : { artifactSet }),
-    ...(git === undefined ? {} : { git })
+    ...(git === undefined ? {} : { git }),
+    ...(propertyCampaignEvidence === undefined ? {} : { propertyCampaignEvidence })
   };
 }
 

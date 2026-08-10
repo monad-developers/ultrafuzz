@@ -4405,7 +4405,7 @@ function currentCampaign(
 }
 
 test("controller campaign gate authenticates every declared evidence file", () => {
-  for (const mode of ["missing", "digest-mismatch"] as const) {
+  for (const mode of ["missing", "digest-mismatch", "hard-link", "symlink"] as const) {
     const layout = createRunLayout({ projectRoot: tempProject(), runId: `run-campaign-evidence-${mode}` });
     campaignPropertyCatalog(layout, ["property-1"]);
     const campaignId = "stateful-invariant-campaign";
@@ -4425,8 +4425,60 @@ test("controller campaign gate authenticates every declared evidence file", () =
     assert.equal(verifyRequiredArtifactsForAttempt(layout, node, campaignId).ok, true, mode);
 
     const evidencePath = path.join(getNodeArtifactDir(layout, campaignId), campaignFixturePaths.raw_results);
-    if (mode === "missing") fs.rmSync(evidencePath);
-    else fs.writeFileSync(evidencePath, "y", "utf8");
+    if (mode === "missing") {
+      fs.rmSync(evidencePath);
+    } else if (mode === "digest-mismatch") {
+      fs.writeFileSync(evidencePath, "y", "utf8");
+    } else if (mode === "hard-link") {
+      fs.linkSync(evidencePath, `${evidencePath}.alias`);
+    } else {
+      fs.rmSync(evidencePath);
+      fs.symlinkSync(`${evidencePath}.target`, evidencePath);
+    }
+
+    const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+    assert.equal(result.ok, false, mode);
+    assert.ok(
+      result.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
+          diagnostic.details?.gate === "property-campaign-evidence-integrity"
+      ),
+      `${mode}: ${JSON.stringify(result.diagnostics)}`
+    );
+  }
+});
+
+test("controller campaign gate requires exact verification-marker publication authority", () => {
+  for (const mode of ["omitted-publication", "missing-marker"] as const) {
+    const layout = createRunLayout({ projectRoot: tempProject(), runId: `run-campaign-publication-${mode}` });
+    campaignPropertyCatalog(layout, ["property-1"]);
+    const campaignId = "stateful-invariant-campaign";
+    writeArtifact(
+      layout,
+      campaignId,
+      "recon-fuzzer-results.json",
+      JSON.stringify(currentCampaign(["property-1"], [], { executionStatus: "complete" }))
+    );
+    writeArtifact(layout, campaignId, "findings.json", "[]");
+    writeCampaignSummary(layout, campaignId, 0, 0);
+    const node = {
+      ...currentCampaignNode(["recon-fuzzer-results.json", "findings.json", "campaign-summary.json"]),
+      id: campaignId,
+      logical_id: campaignId
+    };
+    assert.equal(verifyRequiredArtifactsForAttempt(layout, node, campaignId).ok, true, mode);
+
+    const markerPath = path.join(layout.root, ".ultrafuzz-verification", `${campaignId}.json`);
+    if (mode === "missing-marker") {
+      fs.rmSync(markerPath);
+    } else {
+      const marker = JSON.parse(fs.readFileSync(markerPath, "utf8")) as {
+        publications: Array<{ path: string; sha256: string }>;
+      };
+      marker.publications = marker.publications.filter((entry) => entry.path !== campaignFixturePaths.raw_results);
+      fs.writeFileSync(markerPath, JSON.stringify(marker), "utf8");
+    }
 
     const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
     assert.equal(result.ok, false, mode);
@@ -4434,7 +4486,10 @@ test("controller campaign gate authenticates every declared evidence file", () =
       result.diagnostics.some(
         (diagnostic) =>
           diagnostic.code ===
-          (mode === "missing" ? "PROPERTY_CAMPAIGN_EVIDENCE_MISSING" : "PROPERTY_CAMPAIGN_EVIDENCE_MISMATCH")
+            (mode === "missing-marker"
+              ? "ARTIFACT_SEMANTIC_GATE_CONTEXT_UNAVAILABLE"
+              : "ARTIFACT_SEMANTIC_GATE_FAILED") &&
+          diagnostic.details?.gate === "property-campaign-publication-authority"
       ),
       `${mode}: ${JSON.stringify(result.diagnostics)}`
     );
@@ -4457,6 +4512,7 @@ function writeCampaignSummary(
       deterministic_reproducer_ref: string | null;
       reproduction_blocker: string | null;
     }>;
+    evidence_files: Array<{ path: string; sha256: string }>;
   };
   const findings = JSON.parse(fs.readFileSync(path.join(artifactDir, "findings.json"), "utf8")) as Array<{
     id: string;
@@ -4493,6 +4549,36 @@ function writeCampaignSummary(
         post_deduplication: postDeduplication
       }
     })
+  );
+  const campaignPath = path.join(artifactDir, "recon-fuzzer-results.json");
+  const campaignBytes = fs.readFileSync(campaignPath);
+  const campaignSha256 = createHash("sha256").update(campaignBytes).digest("hex");
+  const binding = artifactContractSchemaBinding("ultrafuzz/property-campaign@3");
+  assert.ok(binding);
+  const markerDir = path.join(layout.root, ".ultrafuzz-verification");
+  fs.mkdirSync(markerDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(markerDir, `${campaignId}.json`),
+    JSON.stringify({
+      schema_version: "ultrafuzz.artifact-verification.v2",
+      attempt_id: campaignId,
+      node_id: campaignId,
+      artifacts: [
+        {
+          path: "recon-fuzzer-results.json",
+          contract: "ultrafuzz/property-campaign@3",
+          contract_digest: artifactContractDefinition("ultrafuzz/property-campaign@3").digest,
+          ...binding,
+          sha256: campaignSha256,
+          primary: true
+        }
+      ],
+      publications: [
+        { path: "recon-fuzzer-results.json", sha256: campaignSha256 },
+        ...campaign.evidence_files.map((entry) => ({ path: entry.path, sha256: entry.sha256 }))
+      ]
+    }),
+    "utf8"
   );
 }
 

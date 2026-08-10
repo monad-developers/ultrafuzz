@@ -8,29 +8,35 @@
     },
     "campaign_plan_ref": {
       "type": "string",
+      "maxLength": 4096,
       "pattern": "^(?!.*(?:^|\\/)\\.{1,2}(?:\\/|$))[A-Za-z0-9._-]+(?:\\/[A-Za-z0-9._-]+)*$"
     },
     "implemented_properties_ref": {
       "type": "string",
+      "maxLength": 4096,
       "pattern": "^(?!.*(?:^|\\/)\\.{1,2}(?:\\/|$))[A-Za-z0-9._-]+(?:\\/[A-Za-z0-9._-]+)*$"
     },
     "findings_ref": {
       "type": "string",
+      "maxLength": 4096,
       "pattern": "^(?!.*(?:^|\\/)\\.{1,2}(?:\\/|$))[A-Za-z0-9._-]+(?:\\/[A-Za-z0-9._-]+)*$"
     },
     "campaign_summary_ref": {
       "type": "string",
+      "maxLength": 4096,
       "pattern": "^(?!.*(?:^|\\/)\\.{1,2}(?:\\/|$))[A-Za-z0-9._-]+(?:\\/[A-Za-z0-9._-]+)*$"
     },
     "fuzzer_backend": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "maxLength": 65536
     },
     "backend_version": {
       "anyOf": [
         {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "maxLength": 65536
         },
         {
           "type": "null"
@@ -49,12 +55,14 @@
         },
         "command": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "maxLength": 65536
         },
         "config_path": {
           "anyOf": [
             {
               "type": "string",
+              "maxLength": 4096,
               "pattern": "^(?!.*(?:^|\\/)\\.{1,2}(?:\\/|$))[A-Za-z0-9._-]+(?:\\/[A-Za-z0-9._-]+)*$"
             },
             {
@@ -65,7 +73,7 @@
         "workers": {
           "type": "integer",
           "exclusiveMinimum": 0,
-          "maximum": 9007199254740991
+          "maximum": 1000000
         },
         "started_at": {
           "anyOf": [
@@ -122,7 +130,8 @@
                 },
                 "summary": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 }
               },
               "required": ["category", "summary"],
@@ -311,22 +320,27 @@
       "properties": {
         "corpus": {
           "type": "string",
+          "maxLength": 4096,
           "pattern": "^(?!.*(?:^|\\/)\\.{1,2}(?:\\/|$))[A-Za-z0-9._-]+(?:\\/[A-Za-z0-9._-]+)*$"
         },
         "cache": {
           "type": "string",
+          "maxLength": 4096,
           "pattern": "^(?!.*(?:^|\\/)\\.{1,2}(?:\\/|$))[A-Za-z0-9._-]+(?:\\/[A-Za-z0-9._-]+)*$"
         },
         "log": {
           "type": "string",
+          "maxLength": 4096,
           "pattern": "^(?!.*(?:^|\\/)\\.{1,2}(?:\\/|$))[A-Za-z0-9._-]+(?:\\/[A-Za-z0-9._-]+)*$"
         },
         "raw_results": {
           "type": "string",
+          "maxLength": 4096,
           "pattern": "^(?!.*(?:^|\\/)\\.{1,2}(?:\\/|$))[A-Za-z0-9._-]+(?:\\/[A-Za-z0-9._-]+)*$"
         },
         "reproducers": {
           "type": "string",
+          "maxLength": 4096,
           "pattern": "^(?!.*(?:^|\\/)\\.{1,2}(?:\\/|$))[A-Za-z0-9._-]+(?:\\/[A-Za-z0-9._-]+)*$"
         }
       },
@@ -366,13 +380,15 @@
           "enum": ["reported", "unavailable"]
         },
         "metrics": {
+          "maxItems": 10000,
           "type": "array",
           "items": {
             "type": "object",
             "properties": {
               "name": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 65536
               },
               "value": {
                 "type": "number",
@@ -384,6 +400,7 @@
               },
               "source_ref": {
                 "type": "string",
+                "maxLength": 4096,
                 "pattern": "^(?!.*(?:^|\\/)\\.{1,2}(?:\\/|$))[A-Za-z0-9._-]+(?:\\/[A-Za-z0-9._-]+)*$"
               }
             },
@@ -450,7 +467,8 @@
           "anyOf": [
             {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 65536
             },
             {
               "type": "null"
@@ -507,38 +525,46 @@
       ]
     },
     "property_results": {
+      "maxItems": 10000,
       "type": "array",
       "items": {
         "type": "object",
         "properties": {
           "property_id": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 65536
           },
           "status": {
             "type": "string",
             "enum": ["passed", "failed", "inconclusive", "not-executed"]
           },
           "failure_ids": {
+            "maxItems": 10000,
             "type": "array",
             "items": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 65536
             },
             "uniqueItems": true
           },
           "coverage_metric_names": {
+            "maxItems": 10000,
             "type": "array",
             "items": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 65536
             },
             "uniqueItems": true
           },
           "evidence_refs": {
+            "maxItems": 10000,
             "type": "array",
             "items": {
               "type": "string",
+              "maxLength": 4096,
               "pattern": "^(?!.*(?:^|\\/)\\.{1,2}(?:\\/|$))[A-Za-z0-9._-]+(?:\\/[A-Za-z0-9._-]+)*$"
             },
             "uniqueItems": true
@@ -547,7 +573,8 @@
             "anyOf": [
               {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 65536
               },
               {
                 "type": "null"
@@ -626,23 +653,27 @@
       }
     },
     "failures": {
+      "maxItems": 10000,
       "type": "array",
       "items": {
         "type": "object",
         "properties": {
           "id": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 65536
           },
           "status": {
             "type": "string",
             "enum": ["reproduced", "blocked-unreproduced"]
           },
           "property_ids": {
+            "maxItems": 10000,
             "type": "array",
             "items": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 65536
             },
             "uniqueItems": true
           },
@@ -650,7 +681,8 @@
             "anyOf": [
               {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 65536
               },
               {
                 "type": "null"
@@ -658,27 +690,33 @@
             ]
           },
           "sequence": {
+            "maxItems": 10000,
             "type": "array",
             "items": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 65536
             }
           },
           "precondition_evidence": {
+            "maxItems": 10000,
             "type": "array",
             "items": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 65536
             }
           },
           "raw_reproducer_ref": {
             "type": "string",
+            "maxLength": 4096,
             "pattern": "^(?!.*(?:^|\\/)\\.{1,2}(?:\\/|$))[A-Za-z0-9._-]+(?:\\/[A-Za-z0-9._-]+)*$"
           },
           "deterministic_reproducer_ref": {
             "anyOf": [
               {
                 "type": "string",
+                "maxLength": 4096,
                 "pattern": "^(?!.*(?:^|\\/)\\.{1,2}(?:\\/|$))[A-Za-z0-9._-]+(?:\\/[A-Za-z0-9._-]+)*$"
               },
               {
@@ -690,7 +728,8 @@
             "anyOf": [
               {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 65536
               },
               {
                 "type": "null"

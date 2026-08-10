@@ -7,6 +7,8 @@ import { test } from "node:test";
 
 import {
   ARTIFACT_SCHEMA_METADATA,
+  MAX_SEMANTIC_GATE_DIAGNOSTIC_BYTES,
+  MAX_SEMANTIC_GATE_ISSUES,
   SEMANTIC_GATE_REGISTRY,
   SEMANTIC_GATE_SCOPES,
   artifactContractDefinition,
@@ -1234,6 +1236,8 @@ test("every contextual registration executes real positive and negative checks",
     fs.writeFileSync(path.join(root, "generated-tests", "test.sol"), "test\n");
     const digest = crypto.createHash("sha256").update("artifact\n").digest("hex");
     const contentDigest = crypto.createHash("sha256").update("snapshot", "utf8").digest("hex");
+    const campaignEvidenceBytes = Buffer.from("x", "utf8");
+    const campaignEvidenceDigest = crypto.createHash("sha256").update(campaignEvidenceBytes).digest("hex");
     const contextFixtures: Record<
       Exclude<SemanticGateName, keyof typeof fixtures>,
       { positive: unknown; negative: unknown; context: SemanticGateContext }
@@ -1415,6 +1419,54 @@ test("every contextual registration executes real positive and negative checks",
               ],
               finding_refs: [],
               reproducer_refs: []
+            }
+          }
+        }
+      },
+      "property-campaign-evidence-integrity": {
+        positive: {
+          evidence_files: [{ path: "backends/recon/results.json", size_bytes: 1, sha256: campaignEvidenceDigest }]
+        },
+        negative: {
+          evidence_files: [{ path: "backends/recon/results.json", size_bytes: 1, sha256: "0".repeat(64) }]
+        },
+        context: {
+          propertyCampaignEvidence: {
+            snapshots: [
+              {
+                path: "backends/recon/results.json",
+                exists: true,
+                regularFile: true,
+                symbolicLink: false,
+                linkCount: 1,
+                stableIdentity: true,
+                device: "1",
+                inode: "2",
+                bytes: campaignEvidenceBytes
+              }
+            ]
+          }
+        }
+      },
+      "property-campaign-publication-authority": {
+        positive: {
+          evidence_files: [{ path: "backends/recon/results.json", size_bytes: 1, sha256: campaignEvidenceDigest }]
+        },
+        negative: {
+          evidence_files: [{ path: "backends/recon/results.json", size_bytes: 1, sha256: "0".repeat(64) }]
+        },
+        context: {
+          artifactIdentity: {
+            runId: "run",
+            nodeId: "stateful-invariant-campaign",
+            attemptId: "campaign-attempt"
+          },
+          propertyCampaignEvidence: {
+            snapshots: [],
+            publicationAuthority: {
+              markerAttemptId: "campaign-attempt",
+              markerNodeId: "stateful-invariant-campaign",
+              publications: [{ path: "backends/recon/results.json", sha256: campaignEvidenceDigest }]
             }
           }
         }
@@ -1728,6 +1780,30 @@ test("every contextual registration executes real positive and negative checks",
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("semantic gate diagnostics are deterministically capped", () => {
+  const document = Array.from({ length: MAX_SEMANTIC_GATE_ISSUES + 2 }, () => ({ id: "duplicate" }));
+  const result = executeSemanticGate("findings-id-uniqueness", { document });
+  assert.equal(result.status, "failed");
+  assert.equal(result.status === "failed" ? result.issues.length : 0, MAX_SEMANTIC_GATE_ISSUES);
+  assert.match(result.status === "failed" ? (result.issues.at(-1)?.message ?? "") : "", /issue limit reached/u);
+  assert.equal(result.status === "failed" ? result.issues[0]?.path : undefined, "$[1]");
+
+  const astralId = "🙂".repeat(200);
+  const byteHeavy = executeSemanticGate("findings-id-uniqueness", {
+    document: Array.from({ length: 100 }, () => ({ id: astralId }))
+  });
+  assert.equal(byteHeavy.status, "failed");
+  assert.ok(byteHeavy.status === "failed" && byteHeavy.issues.length < 99);
+  assert.ok(
+    byteHeavy.status === "failed" &&
+      Buffer.byteLength(JSON.stringify(byteHeavy.issues), "utf8") <= MAX_SEMANTIC_GATE_DIAGNOSTIC_BYTES
+  );
+  assert.match(
+    byteHeavy.status === "failed" ? (byteHeavy.issues.at(-1)?.message ?? "") : "",
+    /UTF-8 diagnostic-byte bounds/u
+  );
 });
 
 test("attempt source-event joins accept only declared host-side validation failures from NodeFinished", () => {

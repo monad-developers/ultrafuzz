@@ -1,6 +1,6 @@
 import { z } from "zod/v4";
 
-import { canonicalTimestampSchema } from "./portable-json-primitives.js";
+import { canonicalTimestampSchema, hasAtMostCodePoints } from "./portable-json-primitives.js";
 import {
   schemaErrorMessage,
   validateWithZod,
@@ -28,10 +28,6 @@ const nonEmptyStringArray = z.array(nonEmptyString);
 const uniqueNonEmptyStringArray = nonEmptyStringArray
   .meta({ uniqueItems: true })
   .refine((values) => new Set(values).size === values.length, { message: "Values must be unique" });
-const uniqueSafeRelativePathArray = z
-  .array(safeRelativePath)
-  .meta({ uniqueItems: true })
-  .refine((values) => new Set(values).size === values.length, { message: "Paths must be unique" });
 /**
  * A list of reference-expectation ids, which must name at least one id when it says anything at all.
  *
@@ -176,6 +172,11 @@ export const PROPERTY_CAMPAIGN_COVERAGE_UNITS = [
 export const MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILES = 4_096;
 export const MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILE_BYTES = 16 * 1024 * 1024;
 export const MAX_PROPERTY_CAMPAIGN_EVIDENCE_TOTAL_BYTES = 64 * 1024 * 1024;
+export const MAX_PROPERTY_CAMPAIGN_RECORDS = 10_000;
+export const MAX_PROPERTY_CAMPAIGN_NESTED_ITEMS = 10_000;
+export const MAX_PROPERTY_CAMPAIGN_STRING_CODE_POINTS = 65_536;
+export const MAX_PROPERTY_CAMPAIGN_PATH_CODE_POINTS = 4_096;
+export const MAX_PROPERTY_CAMPAIGN_COUNT = 1_000_000;
 
 export type PropertyCampaignExecutionStatus = (typeof PROPERTY_CAMPAIGN_EXECUTION_STATUSES)[number];
 export type PropertyCampaignFailureCategory = (typeof PROPERTY_CAMPAIGN_FAILURE_CATEGORIES)[number];
@@ -554,18 +555,41 @@ export const implementedPropertiesSchema = z
     }
   });
 
+const propertyCampaignNonEmptyString = z
+  .string()
+  .min(1)
+  .refine((value) => hasAtMostCodePoints(value, MAX_PROPERTY_CAMPAIGN_STRING_CODE_POINTS), {
+    message: `String must not exceed ${MAX_PROPERTY_CAMPAIGN_STRING_CODE_POINTS} Unicode code points`
+  })
+  .meta({ maxLength: MAX_PROPERTY_CAMPAIGN_STRING_CODE_POINTS });
+const propertyCampaignPath = safeRelativePath
+  .refine((value) => hasAtMostCodePoints(value, MAX_PROPERTY_CAMPAIGN_PATH_CODE_POINTS), {
+    message: `Path must not exceed ${MAX_PROPERTY_CAMPAIGN_PATH_CODE_POINTS} Unicode code points`
+  })
+  .meta({ maxLength: MAX_PROPERTY_CAMPAIGN_PATH_CODE_POINTS });
+const uniquePropertyCampaignStrings = z
+  .array(propertyCampaignNonEmptyString)
+  .max(MAX_PROPERTY_CAMPAIGN_NESTED_ITEMS)
+  .meta({ uniqueItems: true })
+  .refine((values) => new Set(values).size === values.length, { message: "Values must be unique" });
+const uniquePropertyCampaignPaths = z
+  .array(propertyCampaignPath)
+  .max(MAX_PROPERTY_CAMPAIGN_NESTED_ITEMS)
+  .meta({ uniqueItems: true })
+  .refine((values) => new Set(values).size === values.length, { message: "Paths must be unique" });
+
 const propertyCampaignExecutionFailureSchema = z.strictObject({
   category: z.enum(PROPERTY_CAMPAIGN_FAILURE_CATEGORIES),
-  summary: nonEmptyString
+  summary: propertyCampaignNonEmptyString
 });
 
 const propertyCampaignExecutionSchema = z
   .strictObject({
     status: z.enum(PROPERTY_CAMPAIGN_EXECUTION_STATUSES),
     usable_results: z.boolean(),
-    command: nonEmptyString,
-    config_path: safeRelativePath.nullable(),
-    workers: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    command: propertyCampaignNonEmptyString,
+    config_path: propertyCampaignPath.nullable(),
+    workers: z.number().int().positive().max(MAX_PROPERTY_CAMPAIGN_COUNT),
     started_at: canonicalTimestampSchema.nullable(),
     finished_at: canonicalTimestampSchema,
     deadline: canonicalTimestampSchema,
@@ -751,10 +775,10 @@ const propertyCampaignExecutionSchema = z
 
 const propertyCampaignCoverageMetricSchema = z
   .strictObject({
-    name: nonEmptyString,
+    name: propertyCampaignNonEmptyString,
     value: z.number().nonnegative(),
     unit: z.enum(PROPERTY_CAMPAIGN_COVERAGE_UNITS),
-    source_ref: safeRelativePath
+    source_ref: propertyCampaignPath
   })
   .meta({
     allOf: [
@@ -787,8 +811,8 @@ const propertyCampaignCoverageMetricSchema = z
 const propertyCampaignCoverageSchema = z
   .strictObject({
     status: z.enum(PROPERTY_CAMPAIGN_COVERAGE_STATUSES),
-    metrics: z.array(propertyCampaignCoverageMetricSchema),
-    unavailable_reason: nonEmptyString.nullable()
+    metrics: z.array(propertyCampaignCoverageMetricSchema).max(MAX_PROPERTY_CAMPAIGN_NESTED_ITEMS),
+    unavailable_reason: propertyCampaignNonEmptyString.nullable()
   })
   .meta({
     allOf: [
@@ -831,12 +855,12 @@ const propertyCampaignCoverageSchema = z
 
 const propertyCampaignPropertyResultSchema = z
   .strictObject({
-    property_id: nonEmptyString,
+    property_id: propertyCampaignNonEmptyString,
     status: z.enum(PROPERTY_CAMPAIGN_PROPERTY_RESULT_STATUSES),
-    failure_ids: uniqueNonEmptyStringArray,
-    coverage_metric_names: uniqueNonEmptyStringArray,
-    evidence_refs: uniqueSafeRelativePathArray,
-    reason: nonEmptyString.nullable()
+    failure_ids: uniquePropertyCampaignStrings,
+    coverage_metric_names: uniquePropertyCampaignStrings,
+    evidence_refs: uniquePropertyCampaignPaths,
+    reason: propertyCampaignNonEmptyString.nullable()
   })
   .meta({
     allOf: [
@@ -896,15 +920,15 @@ const propertyCampaignPropertyResultSchema = z
 
 const propertyCampaignFailureSchema = z
   .strictObject({
-    id: nonEmptyString,
+    id: propertyCampaignNonEmptyString,
     status: z.enum(PROPERTY_CAMPAIGN_FAILURE_STATUSES),
-    property_ids: uniqueNonEmptyStringArray,
-    entrypoint: nonEmptyString.nullable(),
-    sequence: z.array(nonEmptyString),
-    precondition_evidence: z.array(nonEmptyString),
-    raw_reproducer_ref: safeRelativePath,
-    deterministic_reproducer_ref: safeRelativePath.nullable(),
-    reproduction_blocker: nonEmptyString.nullable()
+    property_ids: uniquePropertyCampaignStrings,
+    entrypoint: propertyCampaignNonEmptyString.nullable(),
+    sequence: z.array(propertyCampaignNonEmptyString).max(MAX_PROPERTY_CAMPAIGN_NESTED_ITEMS),
+    precondition_evidence: z.array(propertyCampaignNonEmptyString).max(MAX_PROPERTY_CAMPAIGN_NESTED_ITEMS),
+    raw_reproducer_ref: propertyCampaignPath,
+    deterministic_reproducer_ref: propertyCampaignPath.nullable(),
+    reproduction_blocker: propertyCampaignNonEmptyString.nullable()
   })
   .meta({
     allOf: [
@@ -959,7 +983,7 @@ const propertyCampaignFailureSchema = z
   });
 
 const propertyCampaignEvidenceFileSchema = z.strictObject({
-  path: safeRelativePath.max(4_096),
+  path: propertyCampaignPath,
   size_bytes: z.number().int().positive().max(MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILE_BYTES),
   sha256: z.string().regex(/^[0-9a-f]{64}$/u)
 });
@@ -967,24 +991,24 @@ const propertyCampaignEvidenceFileSchema = z.strictObject({
 export const propertyCampaignSchema = z
   .strictObject({
     schema_version: z.literal(PROPERTY_CAMPAIGN_SCHEMA_VERSION),
-    campaign_plan_ref: safeRelativePath,
-    implemented_properties_ref: safeRelativePath,
-    findings_ref: safeRelativePath,
-    campaign_summary_ref: safeRelativePath,
-    fuzzer_backend: nonEmptyString,
-    backend_version: nonEmptyString.nullable(),
+    campaign_plan_ref: propertyCampaignPath,
+    implemented_properties_ref: propertyCampaignPath,
+    findings_ref: propertyCampaignPath,
+    campaign_summary_ref: propertyCampaignPath,
+    fuzzer_backend: propertyCampaignNonEmptyString,
+    backend_version: propertyCampaignNonEmptyString.nullable(),
     execution: propertyCampaignExecutionSchema,
     paths: z.strictObject({
-      corpus: safeRelativePath,
-      cache: safeRelativePath,
-      log: safeRelativePath,
-      raw_results: safeRelativePath,
-      reproducers: safeRelativePath
+      corpus: propertyCampaignPath,
+      cache: propertyCampaignPath,
+      log: propertyCampaignPath,
+      raw_results: propertyCampaignPath,
+      reproducers: propertyCampaignPath
     }),
     evidence_files: z.array(propertyCampaignEvidenceFileSchema).max(MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILES),
     coverage: propertyCampaignCoverageSchema,
-    property_results: z.array(propertyCampaignPropertyResultSchema),
-    failures: z.array(propertyCampaignFailureSchema)
+    property_results: z.array(propertyCampaignPropertyResultSchema).max(MAX_PROPERTY_CAMPAIGN_RECORDS),
+    failures: z.array(propertyCampaignFailureSchema).max(MAX_PROPERTY_CAMPAIGN_RECORDS)
   })
   .meta({
     $id: PROPERTY_CAMPAIGN_JSON_SCHEMA_ID,

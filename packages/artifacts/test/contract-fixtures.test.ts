@@ -11,6 +11,16 @@ import {
   ARTIFACT_CONTRACT_SCHEMA_FILES,
   ARTIFACT_SCHEMA_METADATA,
   JSON_ARTIFACT_CONTRACT_IDS,
+  MAX_FINDINGS,
+  MAX_FINDING_COUNT,
+  MAX_FINDING_NESTED_ITEMS,
+  MAX_FINDING_PATH_CODE_POINTS,
+  MAX_FINDING_STRING_CODE_POINTS,
+  MAX_PROPERTY_CAMPAIGN_COUNT,
+  MAX_PROPERTY_CAMPAIGN_NESTED_ITEMS,
+  MAX_PROPERTY_CAMPAIGN_PATH_CODE_POINTS,
+  MAX_PROPERTY_CAMPAIGN_RECORDS,
+  MAX_PROPERTY_CAMPAIGN_STRING_CODE_POINTS,
   NON_JSON_ARTIFACT_CONTRACT_IDS,
   analysisAccountingSummarySchema,
   analysisAttemptHistorySchema,
@@ -450,6 +460,114 @@ test("property-campaign v3 JSON Schema and Zod agree on every portable status co
   for (const fixture of cases) {
     assertParity(entry.id, parser, fixture.value, fixture.expected, `property-campaign:${fixture.label}`);
   }
+});
+
+test("finding and property-campaign resource bounds agree in Ajv and Zod", () => {
+  const registry = artifactSchemaRegistry();
+  const exports = artifactExports as unknown as Record<string, unknown>;
+  const findingEntry = registry.find((candidate) => candidate.filename === "finding.schema.json");
+  const findingsEntry = registry.find((candidate) => candidate.filename === "findings.schema.json");
+  const campaignEntry = registry.find((candidate) => candidate.filename === "property-campaign.schema.json");
+  assert.ok(findingEntry?.zodParser !== undefined);
+  assert.ok(findingsEntry?.zodParser !== undefined);
+  assert.ok(campaignEntry?.zodParser !== undefined);
+  const findingParser = exports[findingEntry.zodParser] as ZodLikeParser;
+  const findingsParser = exports[findingsEntry.zodParser] as ZodLikeParser;
+  const campaignParser = exports[campaignEntry.zodParser] as ZodLikeParser;
+  const finding = structuredClone((contractFixtures["ultrafuzz/findings@2"]!.valid as unknown[])[0]) as Record<
+    string,
+    unknown
+  >;
+  const campaign = structuredClone(contractFixtures["ultrafuzz/property-campaign@3"]!.valid) as Record<string, unknown>;
+  const assertBoundary = (
+    schemaId: string,
+    parser: ZodLikeParser,
+    label: string,
+    boundary: unknown,
+    overflow: unknown
+  ): void => {
+    assertParity(schemaId, parser, boundary, true, `${label}:boundary`);
+    assertParity(schemaId, parser, overflow, false, `${label}:overflow`);
+  };
+
+  const findingString = { ...finding, summary: "🙂".repeat(MAX_FINDING_STRING_CODE_POINTS) };
+  assertBoundary(findingEntry.id, findingParser, "finding:string-code-points", findingString, {
+    ...findingString,
+    summary: `${findingString.summary as string}🙂`
+  });
+  const findingPath = { ...finding, affected_files: ["🙂".repeat(MAX_FINDING_PATH_CODE_POINTS)] };
+  assertBoundary(findingEntry.id, findingParser, "finding:path-code-points", findingPath, {
+    ...findingPath,
+    affected_files: [`${(findingPath.affected_files as string[])[0]}🙂`]
+  });
+  const findingNested = { ...finding, notes: Array<string>(MAX_FINDING_NESTED_ITEMS).fill("note") };
+  assertBoundary(findingEntry.id, findingParser, "finding:nested-items", findingNested, {
+    ...findingNested,
+    notes: [...(findingNested.notes as string[]), "overflow"]
+  });
+  assertBoundary(
+    findingEntry.id,
+    findingParser,
+    "finding:numeric-count",
+    { ...finding, attempt_index: MAX_FINDING_COUNT },
+    { ...finding, attempt_index: MAX_FINDING_COUNT + 1 }
+  );
+  const findingsBoundary = Array<Record<string, unknown>>(MAX_FINDINGS).fill(finding);
+  assertBoundary(findingsEntry.id, findingsParser, "findings:top-level-items", findingsBoundary, [
+    ...findingsBoundary,
+    finding
+  ]);
+
+  const campaignString = { ...campaign, fuzzer_backend: "🙂".repeat(MAX_PROPERTY_CAMPAIGN_STRING_CODE_POINTS) };
+  assertBoundary(campaignEntry.id, campaignParser, "property-campaign:string-code-points", campaignString, {
+    ...campaignString,
+    fuzzer_backend: `${campaignString.fuzzer_backend as string}🙂`
+  });
+  const campaignPath = { ...campaign, campaign_plan_ref: "a".repeat(MAX_PROPERTY_CAMPAIGN_PATH_CODE_POINTS) };
+  assertBoundary(campaignEntry.id, campaignParser, "property-campaign:path-code-points", campaignPath, {
+    ...campaignPath,
+    campaign_plan_ref: `${campaignPath.campaign_plan_ref as string}a`
+  });
+  const failure = {
+    id: "failure-1",
+    status: "reproduced",
+    property_ids: ["property-1"],
+    entrypoint: "handler()",
+    sequence: Array<string>(MAX_PROPERTY_CAMPAIGN_NESTED_ITEMS).fill("handler()"),
+    precondition_evidence: [],
+    raw_reproducer_ref: "backends/recon-fuzzer/results.json",
+    deterministic_reproducer_ref: "backends/recon-fuzzer/reproducers/failure-1.t.sol",
+    reproduction_blocker: null
+  };
+  const campaignNested = { ...campaign, failures: [failure] };
+  assertBoundary(campaignEntry.id, campaignParser, "property-campaign:nested-items", campaignNested, {
+    ...campaignNested,
+    failures: [{ ...failure, sequence: [...failure.sequence, "overflow"] }]
+  });
+  const propertyResult = {
+    property_id: "property-1",
+    status: "passed",
+    failure_ids: [],
+    coverage_metric_names: [],
+    evidence_refs: [],
+    reason: null
+  };
+  const campaignRecords = {
+    ...campaign,
+    property_results: Array<Record<string, unknown>>(MAX_PROPERTY_CAMPAIGN_RECORDS).fill(propertyResult)
+  };
+  assertBoundary(campaignEntry.id, campaignParser, "property-campaign:top-level-records", campaignRecords, {
+    ...campaignRecords,
+    property_results: [...(campaignRecords.property_results as Record<string, unknown>[]), propertyResult]
+  });
+  const campaignExecution = campaign.execution as Record<string, unknown>;
+  assertBoundary(
+    campaignEntry.id,
+    campaignParser,
+    "property-campaign:numeric-count",
+    { ...campaign, execution: { ...campaignExecution, workers: MAX_PROPERTY_CAMPAIGN_COUNT } },
+    { ...campaign, execution: { ...campaignExecution, workers: MAX_PROPERTY_CAMPAIGN_COUNT + 1 } }
+  );
 });
 
 test("analysis-bundle payload schemas and retained Zod reject the same current-version and boundary mutations", () => {

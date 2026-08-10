@@ -278,6 +278,8 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
       "property-campaign-coverage-metric-uniqueness",
       "property-campaign-evidence-file-budget",
       "property-campaign-evidence-file-closure",
+      "property-campaign-evidence-integrity",
+      "property-campaign-publication-authority",
       "property-campaign-failure-id-uniqueness",
       "property-campaign-property-result-id-uniqueness",
       "property-campaign-document-coherence",

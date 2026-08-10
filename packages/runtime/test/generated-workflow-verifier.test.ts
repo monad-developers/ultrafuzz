@@ -2724,10 +2724,10 @@ test("generated Smithers verifier publishes the complete validated set before ta
   );
   assert.ok(
     verifier.indexOf("materializeGeneratedTestCompanions(task, capturedOutputs)") <
-      verifier.indexOf("verifyOutputSemanticGates(task, verifiedOutputs)")
+      verifier.indexOf("verifyOutputSemanticGates(task, verifiedOutputs, campaignEvidence)")
   );
   assert.ok(
-    verifier.indexOf("verifyOutputSemanticGates(task, verifiedOutputs)") <
+    verifier.indexOf("verifyOutputSemanticGates(task, verifiedOutputs, campaignEvidence)") <
       verifier.indexOf("const publications = new Map<string, Buffer>()")
   );
   assert.ok(

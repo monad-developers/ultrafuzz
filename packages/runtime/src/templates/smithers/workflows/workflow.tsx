@@ -4469,10 +4469,11 @@ function workspacePatchSemanticGitContext(
 function semanticGateContextForVerifiedOutput(
   task: (typeof taskSpecs)[number],
   output: (typeof taskSpecs)[number]["outputs"][number],
-  verifiedOutputs: ReadonlyMap<string, VerifiedOutputSnapshot>
+  verifiedOutputs: ReadonlyMap<string, VerifiedOutputSnapshot>,
+  campaignEvidence: ReadonlyMap<string, ImmutableFileSnapshot>
 ): {
   filesystem: { rootDirectory: string };
-  artifactIdentity: { runId: string; nodeId: string; artifactPath: string };
+  artifactIdentity: { runId: string; nodeId: string; attemptId: string; artifactPath: string };
   artifactSet?: {
     campaignPlan?: unknown;
     campaignPlanPath?: string;
@@ -4488,6 +4489,22 @@ function semanticGateContextForVerifiedOutput(
     triagedFindings?: unknown;
   };
   git?: ReturnType<typeof deriveWorkspacePatchGitFacts>;
+  propertyCampaignEvidence?: {
+    snapshots: readonly {
+      path: string;
+      exists: boolean;
+      regularFile: boolean;
+      symbolicLink: boolean;
+      linkCount: number;
+      stableIdentity: boolean;
+      bytes: Buffer;
+    }[];
+    publicationAuthority: {
+      markerAttemptId: string;
+      markerNodeId: string;
+      publications: readonly { path: string; sha256: string }[];
+    };
+  };
 } {
   const snapshot = verifiedOutputs.get(output.path);
   if (snapshot === undefined) {
@@ -4498,6 +4515,7 @@ function semanticGateContextForVerifiedOutput(
     artifactIdentity: {
       runId: task.metadata.run.ultrafuzzRunId,
       nodeId: task.metadata.node.logicalNodeId,
+      attemptId: task.attemptId,
       artifactPath: output.path
     }
   };
@@ -4537,6 +4555,26 @@ function semanticGateContextForVerifiedOutput(
             implementedProperties: implementedProperties.value,
             implementedPropertiesPath: implementedProperties.relativePath
           })
+    };
+    const evidenceEntries = [...campaignEvidence].map(([relativePath, evidence]) => ({
+      path: relativePath,
+      exists: true,
+      regularFile: true,
+      symbolicLink: false,
+      linkCount: 1,
+      stableIdentity: true,
+      bytes: evidence.bytes
+    }));
+    context.propertyCampaignEvidence = {
+      snapshots: evidenceEntries,
+      publicationAuthority: {
+        markerAttemptId: task.attemptId,
+        markerNodeId: task.metadata.node.logicalNodeId,
+        publications: evidenceEntries.map((entry) => ({
+          path: entry.path,
+          sha256: createHash("sha256").update(entry.bytes).digest("hex")
+        }))
+      }
     };
   } else if (output.schemaFile === "campaign-summary.schema.json") {
     context.artifactSet = siblingCampaignSemanticArtifacts(task, verifiedOutputs);
@@ -4585,7 +4623,8 @@ function semanticGateContextForVerifiedOutput(
 
 function verifyOutputSemanticGates(
   task: (typeof taskSpecs)[number],
-  verifiedOutputs: ReadonlyMap<string, VerifiedOutputSnapshot>
+  verifiedOutputs: ReadonlyMap<string, VerifiedOutputSnapshot>,
+  campaignEvidence: ReadonlyMap<string, ImmutableFileSnapshot>
 ): void {
   const failures: string[] = [];
   for (const output of task.outputs) {
@@ -4594,7 +4633,7 @@ function verifyOutputSemanticGates(
       const document = verifiedOutputs.get(output.path)?.value;
       const results = executeSchemaSemanticGates(output.schemaFile, {
         document,
-        context: semanticGateContextForVerifiedOutput(task, output, verifiedOutputs)
+        context: semanticGateContextForVerifiedOutput(task, output, verifiedOutputs, campaignEvidence)
       }) as Array<
         | { status: "passed"; gate: string }
         | { status: "failed"; gate: string; issues: readonly { path: string; message: string }[] }
@@ -4660,7 +4699,7 @@ function verifyArtifacts(
   // validation, because the filesystem semantic gate must inspect the exact
   // artifact root that will be handed off.
   materializeGeneratedTestCompanions(task, capturedOutputs);
-  verifyOutputSemanticGates(task, verifiedOutputs);
+  verifyOutputSemanticGates(task, verifiedOutputs, campaignEvidence);
 
   // These companions are not semantic inputs, so keep their durable creation
   // behind the complete registry gate set as well.

@@ -8,6 +8,9 @@ import { ARTIFACT_SCHEMA_METADATA, type ArtifactSchemaFilename } from "./artifac
 import { MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES } from "./artifact-limits.js";
 import { MAX_PROPERTY_CAMPAIGN_EVIDENCE_TOTAL_BYTES } from "./property-provenance.js";
 
+export const MAX_SEMANTIC_GATE_ISSUES = 1_000;
+export const MAX_SEMANTIC_GATE_DIAGNOSTIC_BYTES = 64 * 1_024;
+
 export const SEMANTIC_GATE_SCOPES = ["document", "filesystem", "cross-artifact", "git", "runtime-state"] as const;
 
 export type SemanticGateScope = (typeof SEMANTIC_GATE_SCOPES)[number];
@@ -66,7 +69,34 @@ export interface SemanticRuntimeStateContext {
 export interface SemanticArtifactIdentityContext {
   runId: string;
   nodeId: string;
+  attemptId?: string;
   artifactPath?: string;
+}
+
+export interface SemanticPropertyCampaignEvidenceSnapshot {
+  path: string;
+  exists: boolean;
+  regularFile: boolean;
+  symbolicLink: boolean;
+  linkCount: number | null;
+  stableIdentity: boolean;
+  device?: string;
+  inode?: string;
+  bytes?: Uint8Array;
+  error?: string;
+}
+
+export interface SemanticPropertyCampaignPublicationAuthorityContext {
+  markerAttemptId: string;
+  markerNodeId: string;
+  publications: readonly { path: string; sha256: string }[];
+}
+
+export interface SemanticPropertyCampaignEvidenceContext {
+  /** One no-follow immutable byte snapshot for every declared evidence path. */
+  snapshots: readonly SemanticPropertyCampaignEvidenceSnapshot[];
+  /** Authenticated verifier marker facts; omitted when marker authority is unavailable. */
+  publicationAuthority?: SemanticPropertyCampaignPublicationAuthorityContext;
 }
 
 export interface SemanticUsageLedgerContext {
@@ -112,6 +142,7 @@ export interface SemanticGateContext {
   eventLog?: SemanticEventLogContext;
   validatorPreflight?: SemanticValidatorPreflightContext;
   analysisBundle?: SemanticAnalysisBundleContext;
+  propertyCampaignEvidence?: SemanticPropertyCampaignEvidenceContext;
 }
 
 export interface SemanticGateExecutionRequest {
@@ -2263,6 +2294,118 @@ function propertyCampaignEvidenceFileBudgetIssues(document: unknown): SemanticGa
     : [];
 }
 
+function propertyCampaignEvidenceIntegrityIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
+  const snapshots = context.propertyCampaignEvidence!.snapshots;
+  const snapshotsByPath = new Map<string, SemanticPropertyCampaignEvidenceSnapshot>();
+  const issues: SemanticGateIssue[] = [];
+  for (const snapshot of snapshots) {
+    if (snapshotsByPath.has(snapshot.path)) {
+      issues.push(issue("$.evidence_files", `Host context repeats evidence snapshot ${JSON.stringify(snapshot.path)}`));
+      continue;
+    }
+    snapshotsByPath.set(snapshot.path, snapshot);
+  }
+
+  for (const [index, entry] of arrayAt(document, ["evidence_files"]).entries()) {
+    const evidencePath = stringField(entry, "path");
+    if (evidencePath === undefined) continue;
+    const issuePath = `$.evidence_files[${index}]`;
+    const snapshot = snapshotsByPath.get(evidencePath);
+    if (snapshot === undefined) {
+      issues.push(issue(issuePath, `Host context omitted evidence snapshot ${JSON.stringify(evidencePath)}`));
+      continue;
+    }
+    if (!snapshot.exists) {
+      issues.push(issue(issuePath, `Campaign evidence was not published: ${JSON.stringify(evidencePath)}`));
+      continue;
+    }
+    if (!snapshot.regularFile || snapshot.symbolicLink) {
+      issues.push(
+        issue(issuePath, `Campaign evidence is not a no-follow regular file: ${JSON.stringify(evidencePath)}`)
+      );
+    }
+    if (snapshot.linkCount !== 1) {
+      issues.push(
+        issue(
+          issuePath,
+          `Campaign evidence must have exactly one hard link: ${JSON.stringify(evidencePath)} has ${String(snapshot.linkCount)}`
+        )
+      );
+    }
+    if (!snapshot.stableIdentity) {
+      issues.push(
+        issue(issuePath, `Campaign evidence identity changed during capture: ${JSON.stringify(evidencePath)}`)
+      );
+    }
+    if (snapshot.bytes === undefined) {
+      issues.push(
+        issue(
+          issuePath,
+          snapshot.error === undefined
+            ? `Campaign evidence has no immutable byte snapshot: ${JSON.stringify(evidencePath)}`
+            : `Campaign evidence could not be captured: ${snapshot.error}`
+        )
+      );
+      continue;
+    }
+    const actualSize = snapshot.bytes.byteLength;
+    const actualSha256 = crypto.createHash("sha256").update(snapshot.bytes).digest("hex");
+    if (numberField(entry, "size_bytes") !== actualSize || stringField(entry, "sha256") !== actualSha256) {
+      issues.push(
+        issue(
+          issuePath,
+          `Campaign evidence immutable bytes do not match the declared size and SHA-256: ${JSON.stringify(evidencePath)}`
+        )
+      );
+    }
+  }
+  return issues;
+}
+
+function propertyCampaignPublicationAuthorityIssues(
+  document: unknown,
+  context: SemanticGateContext
+): SemanticGateIssue[] {
+  const authority = context.propertyCampaignEvidence!.publicationAuthority!;
+  const identity = context.artifactIdentity!;
+  const issues: SemanticGateIssue[] = [];
+  if (authority.markerAttemptId !== identity.attemptId || authority.markerNodeId !== identity.nodeId) {
+    issues.push(issue("$", "Verification marker identity does not match the current campaign attempt"));
+  }
+  const publicationDigests = new Map<string, string>();
+  for (const publication of authority.publications) {
+    if (publicationDigests.has(publication.path)) {
+      issues.push(
+        issue("$.evidence_files", `Verification marker repeats publication ${JSON.stringify(publication.path)}`)
+      );
+      continue;
+    }
+    publicationDigests.set(publication.path, publication.sha256);
+  }
+  for (const [index, entry] of arrayAt(document, ["evidence_files"]).entries()) {
+    const evidencePath = stringField(entry, "path");
+    const declaredSha256 = stringField(entry, "sha256");
+    if (evidencePath === undefined || declaredSha256 === undefined) continue;
+    const publicationSha256 = publicationDigests.get(evidencePath);
+    if (publicationSha256 === undefined) {
+      issues.push(
+        issue(
+          `$.evidence_files[${index}].path`,
+          `Verification marker does not publish campaign evidence ${JSON.stringify(evidencePath)}`
+        )
+      );
+    } else if (publicationSha256 !== declaredSha256) {
+      issues.push(
+        issue(
+          `$.evidence_files[${index}].sha256`,
+          `Verification marker publication digest does not match campaign evidence ${JSON.stringify(evidencePath)}`
+        )
+      );
+    }
+  }
+  return issues;
+}
+
 function propertyCampaignDocumentIssues(document: unknown): SemanticGateIssue[] {
   const issues: SemanticGateIssue[] = [];
   const execution = at(document, ["execution"]);
@@ -3214,6 +3357,22 @@ const gateSpecifications = {
   ),
   "property-campaign-evidence-file-budget": documentGate(propertyCampaignEvidenceFileBudgetIssues),
   "property-campaign-evidence-file-closure": documentGate(propertyCampaignEvidenceFileClosureIssues),
+  "property-campaign-evidence-integrity": contextualGate(
+    "filesystem",
+    ["propertyCampaignEvidence.snapshots"],
+    propertyCampaignEvidenceIntegrityIssues
+  ),
+  "property-campaign-publication-authority": contextualGate(
+    "runtime-state",
+    [
+      "artifactIdentity.attemptId",
+      "artifactIdentity.nodeId",
+      "propertyCampaignEvidence.publicationAuthority.markerAttemptId",
+      "propertyCampaignEvidence.publicationAuthority.markerNodeId",
+      "propertyCampaignEvidence.publicationAuthority.publications"
+    ],
+    propertyCampaignPublicationAuthorityIssues
+  ),
   "property-campaign-failure-id-uniqueness": documentGate(
     uniqueFieldGate([["failures"]], "id", "property campaign failure ID")
   ),
@@ -3421,9 +3580,44 @@ export function executeSemanticGate<Name extends SemanticGateName>(
   } catch (error) {
     issues = [issue("$", `Semantic gate could not execute: ${error instanceof Error ? error.message : String(error)}`)];
   }
-  return issues.length === 0
+  const boundedIssues = boundSemanticGateIssues(issues);
+  return boundedIssues.length === 0
     ? { status: "passed", gate: name, scope: registration.scope }
-    : { status: "failed", gate: name, scope: registration.scope, issues: Object.freeze(issues) };
+    : { status: "failed", gate: name, scope: registration.scope, issues: Object.freeze(boundedIssues) };
+}
+
+function boundSemanticGateIssues(issues: readonly SemanticGateIssue[]): SemanticGateIssue[] {
+  if (
+    issues.length <= MAX_SEMANTIC_GATE_ISSUES &&
+    Buffer.byteLength(JSON.stringify(issues), "utf8") <= MAX_SEMANTIC_GATE_DIAGNOSTIC_BYTES
+  ) {
+    return [...issues];
+  }
+
+  const bounded: SemanticGateIssue[] = [];
+  const sentinelBudgetBytes = Buffer.byteLength(JSON.stringify(semanticGateTruncationIssue(issues.length)), "utf8");
+  let boundedIssueBytes = 0;
+  const candidateLimit = Math.min(issues.length, MAX_SEMANTIC_GATE_ISSUES - 1);
+  for (let index = 0; index < candidateLimit; index += 1) {
+    const candidate = issues[index]!;
+    const candidateBytes = Buffer.byteLength(JSON.stringify(candidate), "utf8");
+    const prospectiveIssueCount = bounded.length + 1;
+    const prospectiveBytes = 2 + boundedIssueBytes + candidateBytes + sentinelBudgetBytes + prospectiveIssueCount;
+    if (prospectiveBytes > MAX_SEMANTIC_GATE_DIAGNOSTIC_BYTES) {
+      break;
+    }
+    bounded.push(candidate);
+    boundedIssueBytes += candidateBytes;
+  }
+  bounded.push(semanticGateTruncationIssue(issues.length - bounded.length));
+  return bounded;
+}
+
+function semanticGateTruncationIssue(omitted: number): SemanticGateIssue {
+  return issue(
+    "$",
+    `Semantic gate issue limit reached; ${omitted} additional issues omitted to enforce count and UTF-8 diagnostic-byte bounds`
+  );
 }
 
 export function executeSemanticGates<Names extends readonly SemanticGateName[]>(
