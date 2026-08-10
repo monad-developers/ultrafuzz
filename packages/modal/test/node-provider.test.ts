@@ -50,7 +50,7 @@ describe("Modal node sandbox provider", () => {
       },
       stderr: { readText: vi.fn(async () => "") },
       wait: vi.fn(async () => 0)
-    }));
+    })) as unknown as typeof sandbox.exec;
     const client = fakeClient({ created: sandbox });
 
     await expect(
