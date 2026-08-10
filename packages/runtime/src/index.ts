@@ -15,6 +15,7 @@ export * from "./runtime-contracts.js";
 export * from "./runtime-document-codec.js";
 export * from "./runtime-semantic-gates.js";
 export * from "./schema-registry.js";
+export * from "./semantic-artifact-context.js";
 export * from "./semantic-gates.js";
 export * from "./severity-matrix.js";
 export * from "./smithers-package.js";
