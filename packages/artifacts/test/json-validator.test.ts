@@ -122,6 +122,62 @@ test("artifact contract shape validation shares the registered worker identity a
   assert.match(contractOversized.issues[0]?.message ?? "", /67108864-byte limit/u);
 });
 
+test("repeated registered validations reuse one compiled isolate without sharing verdicts", () => {
+  const propertiesPath = path.join(artifactSchemaDirectory(), "properties.schema.json");
+  const propertiesBytes = Buffer.from('{"schema_version":"ultrafuzz.properties.v2","properties":[]}\n');
+  const invalidBytes = Buffer.from('{"schema_version":"ultrafuzz.properties.v2","properties":[],"unexpected":true}\n');
+  const duplicateBytes = Buffer.from('{"schema_version":"ultrafuzz.properties.v2","properties":[],"properties":[]}\n');
+
+  // Each artifact keeps its own verdict, schema identity, and digest even though
+  // one isolate answers all of them.
+  const started = Date.now();
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    const valid = validateRegisteredJsonBytesSync({ schemaPath: propertiesPath, instanceBytes: propertiesBytes });
+    assert.equal(valid.status, "valid", JSON.stringify(valid.diagnostics));
+    assert.equal(valid.schema?.id, artifactContractSchemaBinding("ultrafuzz/properties@2")!.schema_id);
+    assert.deepEqual(valid.diagnostics, []);
+
+    const invalid = validateRegisteredJsonBytesSync({ schemaPath: propertiesPath, instanceBytes: invalidBytes });
+    assert.equal(invalid.status, "instance-error");
+    assert.equal(invalid.diagnostics[0]?.code, "JSON_SCHEMA_VIOLATION");
+
+    const duplicate = validateRegisteredJsonBytesSync({ schemaPath: propertiesPath, instanceBytes: duplicateBytes });
+    assert.equal(duplicate.status, "instance-error");
+    assert.equal(duplicate.diagnostics[0]?.code, "JSON_DUPLICATE_KEY");
+  }
+  // A worker started and compiled per validation costs hundreds of milliseconds
+  // each, so 90 validations could not finish anywhere near this bound.
+  assert.equal(Date.now() - started < 10_000, true, `registered validation is paying per-call compile cost`);
+});
+
+test("a caller-supplied registry never answers from the pinned validator isolate", () => {
+  const propertiesPath = path.join(artifactSchemaDirectory(), "properties.schema.json");
+  const propertiesBytes = Buffer.from('{"schema_version":"ultrafuzz.properties.v2","properties":[]}\n');
+  assert.equal(
+    validateRegisteredJsonBytesSync({ schemaPath: propertiesPath, instanceBytes: propertiesBytes }).status,
+    "valid"
+  );
+
+  const registration = artifactSchemaRegistry().find((entry) => entry.filename === "properties.schema.json")!;
+  const rejectingRegistry = [
+    { ...registration, schema: { ...registration.schema, maxProperties: 1 } }
+  ] as unknown as readonly SchemaRegistryEntry[];
+  const rejected = validateRegisteredJsonBytesSync({
+    schemaPath: propertiesPath,
+    instanceBytes: propertiesBytes,
+    schemaRegistry: rejectingRegistry,
+    schemaBundleSha256: artifactSchemaBundleDigest()
+  });
+  assert.equal(rejected.status, "instance-error", JSON.stringify(rejected.diagnostics));
+  assert.equal(rejected.diagnostics[0]?.keyword, "maxProperties");
+
+  // The supplied registry must not become the pinned bundle for later callers.
+  assert.equal(
+    validateRegisteredJsonBytesSync({ schemaPath: propertiesPath, instanceBytes: propertiesBytes }).status,
+    "valid"
+  );
+});
+
 test("file validation uses the registered schema and distinguishes instance from setup failures", async () => {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-validator-"));
   try {

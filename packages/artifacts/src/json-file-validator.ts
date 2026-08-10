@@ -107,6 +107,13 @@ interface SyncWorkerRequest extends WorkerRequest {
   responsePort: MessagePort;
 }
 
+interface ServeWorkerRequest {
+  mode: "serve";
+  registeredSchemas: RegisteredSchemaSnapshot[];
+  requestPort: MessagePort;
+  ready: Int32Array;
+}
+
 export async function validateJsonFile(options: ValidateJsonFileOptions): Promise<JsonFileValidationResult> {
   try {
     return await validateJsonFileUnchecked(options);
@@ -311,16 +318,23 @@ function validatePreparedRegisteredBytesSync(
   options: { maxErrors?: number; deadlineMs?: number }
 ): JsonFileValidationResult {
   const { registration, registry, schemaBundleSha256 } = prepared;
-  const workerResult = runValidationWorkerSync(
-    {
-      instanceBytes,
-      maxInstanceBytes: registration.maxInstanceBytes,
-      registeredSchemaId: registration.id,
-      registeredSchemas: registry.map((entry) => ({ id: entry.id, schema: entry.schema })),
-      maxErrors: Math.min(Math.max(options.maxErrors ?? 50, 1), 1_000)
-    },
-    options.deadlineMs ?? defaultValidationDeadline(registration.maxInstanceBytes)
-  );
+  const request = {
+    instanceBytes,
+    maxInstanceBytes: registration.maxInstanceBytes,
+    registeredSchemaId: registration.id,
+    maxErrors: Math.min(Math.max(options.maxErrors ?? 50, 1), 1_000)
+  };
+  const deadlineMs = options.deadlineMs ?? defaultValidationDeadline(registration.maxInstanceBytes);
+  // Only the pinned bundle is served by a reusable isolate. A caller-supplied
+  // registry gets a worker of its own, so one caller's schemas can never
+  // authenticate another caller's artifact.
+  const workerResult =
+    registry === artifactSchemaRegistry()
+      ? runServedValidationSync(request, deadlineMs)
+      : runValidationWorkerSync(
+          { ...request, registeredSchemas: registry.map((entry) => ({ id: entry.id, schema: entry.schema })) },
+          deadlineMs
+        );
   return boundValidationResult({
     ...workerResult,
     schema: {
@@ -560,6 +574,112 @@ function runValidationWorker(request: WorkerRequest, deadlineMs: number): Promis
         settle(failure("setup-error", "JSON_VALIDATOR_WORKER_EXIT", `Validator worker exited with code ${code}`));
     });
   });
+}
+
+/**
+ * A registered-schema validator isolate that outlives one request. The isolate,
+ * its resource limits, and its compiled schema bundle are the ones a
+ * single-shot worker would have used; only the compile cost is amortized, and a
+ * worker that misses its deadline or answers out of order is destroyed instead
+ * of being reused.
+ */
+interface ServedValidationWorker {
+  worker: Worker;
+  port: MessagePort;
+  ready: Int32Array;
+  sequence: number;
+}
+
+interface ServedValidationRequest {
+  instanceBytes: Buffer;
+  maxInstanceBytes: number;
+  registeredSchemaId: string;
+  maxErrors: number;
+}
+
+const MAX_SERVED_VALIDATION_WORKERS = 4;
+const servedValidationWorkers = new Map<number, ServedValidationWorker>();
+
+/** Validate one pinned-bundle instance on the isolate that already compiled it. */
+function runServedValidationSync(request: ServedValidationRequest, deadlineMs: number): JsonFileValidationResult {
+  let served: ServedValidationWorker;
+  try {
+    served = servedValidationWorker(request.maxInstanceBytes);
+  } catch (error) {
+    return failure("setup-error", "JSON_VALIDATOR_WORKER_ERROR", errorMessage(error));
+  }
+  served.sequence += 1;
+  const sequence = served.sequence;
+  Atomics.store(served.ready, 0, 0);
+  try {
+    served.port.postMessage({ ...request, sequence });
+  } catch (error) {
+    disposeServedValidationWorker(request.maxInstanceBytes);
+    return failure("setup-error", "JSON_VALIDATOR_WORKER_ERROR", errorMessage(error));
+  }
+  const deadline = Date.now() + Math.max(250, Math.min(deadlineMs, 30_000));
+  for (;;) {
+    const received = receiveMessageOnPort(served.port);
+    if (received !== undefined) {
+      const message = received.message as { sequence: number; result: JsonFileValidationResult };
+      // An answer to any other request means the isolate lost its request order,
+      // so it is retired rather than trusted for this artifact.
+      if (message.sequence !== sequence) {
+        disposeServedValidationWorker(request.maxInstanceBytes);
+        return failure(
+          "setup-error",
+          "JSON_VALIDATOR_WORKER_ERROR",
+          "Validator worker answered a request it was not asked"
+        );
+      }
+      return message.result;
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    Atomics.wait(served.ready, 0, 0, Math.min(remaining, 25));
+  }
+  // A worker that blew its deadline may still be validating, so it never serves
+  // another artifact.
+  disposeServedValidationWorker(request.maxInstanceBytes);
+  return failure("setup-error", "JSON_VALIDATION_TIMEOUT", "Schema compilation or validation exceeded its deadline");
+}
+
+function servedValidationWorker(maxInstanceBytes: number): ServedValidationWorker {
+  const existing = servedValidationWorkers.get(maxInstanceBytes);
+  if (existing !== undefined) return existing;
+  while (servedValidationWorkers.size >= MAX_SERVED_VALIDATION_WORKERS) {
+    const oldest = servedValidationWorkers.keys().next();
+    if (oldest.done === true) break;
+    disposeServedValidationWorker(oldest.value);
+  }
+  const { port1, port2 } = new MessageChannel();
+  const ready = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+  const worker = new Worker(new URL("./json-validation-worker.js", import.meta.url), {
+    workerData: {
+      mode: "serve",
+      registeredSchemas: artifactSchemaRegistry().map((entry) => ({ id: entry.id, schema: entry.schema })),
+      requestPort: port2,
+      ready
+    } satisfies ServeWorkerRequest,
+    transferList: [port2],
+    resourceLimits: validationWorkerResourceLimits(maxInstanceBytes)
+  });
+  // The validator must never keep a producer process alive on its own.
+  worker.unref();
+  port1.unref();
+  worker.once("error", () => disposeServedValidationWorker(maxInstanceBytes, worker));
+  worker.once("exit", () => disposeServedValidationWorker(maxInstanceBytes, worker));
+  const served: ServedValidationWorker = { worker, port: port1, ready, sequence: 0 };
+  servedValidationWorkers.set(maxInstanceBytes, served);
+  return served;
+}
+
+function disposeServedValidationWorker(maxInstanceBytes: number, only?: Worker): void {
+  const served = servedValidationWorkers.get(maxInstanceBytes);
+  if (served === undefined || (only !== undefined && served.worker !== only)) return;
+  servedValidationWorkers.delete(maxInstanceBytes);
+  void served.worker.terminate();
+  served.port.close();
 }
 
 function runValidationWorkerSync(request: WorkerRequest, deadlineMs: number): JsonFileValidationResult {
