@@ -55,7 +55,7 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "ultrafuzz/aggregation-manifest@1",
     "aggregationManifestJsonSchema",
     "aggregationManifestSchema",
-    ["aggregation-destination-path-uniqueness", "aggregation-count-coupling"]
+    ["aggregation-destination-path-uniqueness", "aggregation-source-entry-uniqueness", "aggregation-count-coupling"]
   ),
   "analysis-bundle.schema.json": runtime("analysisBundleManifestJsonSchema", "analysisBundleManifestSchema", [
     "analysis-bundle-path-order",
@@ -143,7 +143,7 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "ultrafuzz/differential-lane-result@1",
     "differentialLaneResultJsonSchema",
     "differentialLaneResultSchema",
-    ["differential-result-failure-hash-uniqueness"]
+    ["differential-result-failure-hash-uniqueness", "differential-result-lane-binding"]
   ),
   "differential-plan.schema.json": artifact(
     "ultrafuzz/differential-plan@1",
@@ -179,7 +179,7 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "ultrafuzz/dynamic-strategy-plan@1",
     "dynamicStrategyPlanJsonSchema",
     "dynamicStrategyPlanSchema",
-    ["dynamic-strategy-selection-count"]
+    ["dynamic-strategy-selection-coherence"]
   ),
   "dynamic-strategy-provenance.schema.json": artifact(
     "ultrafuzz/dynamic-strategy-provenance@1",

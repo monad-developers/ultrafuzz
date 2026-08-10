@@ -442,15 +442,61 @@ function aggregationDestinationIssues(document: unknown): SemanticGateIssue[] {
 
 function aggregationCountIssues(document: unknown): SemanticGateIssue[] {
   if (!isRecord(document)) return [];
+  const skippedFiles = arrayAt(document, ["skipped_files"]);
+  const skippedGeneratedTests = skippedFiles.filter((row) => stringField(row, "kind") === "generated-test").length;
+  const skippedSupportFiles = skippedFiles.filter((row) => stringField(row, "kind") === "support-file").length;
   const expected: Readonly<Record<string, number>> = {
     copied_generated_tests: arrayAt(document, ["files"]).length,
-    copied_support_files: arrayAt(document, ["support_files"]).length
+    copied_support_files: arrayAt(document, ["support_files"]).length,
+    source_generated_tests: arrayAt(document, ["files"]).length + skippedGeneratedTests,
+    source_support_files: arrayAt(document, ["support_files"]).length + skippedSupportFiles
   };
   return Object.entries(expected).flatMap(([field, count]) =>
     numberField(document, field) === count
       ? []
-      : [issue(`$.${field}`, `${field} must equal the corresponding copied-file array length (${count})`)]
+      : [issue(`$.${field}`, `${field} must equal its copied and typed-skipped source population (${count})`)]
   );
+}
+
+function aggregationSourceEntryIssues(document: unknown): SemanticGateIssue[] {
+  const rows = [
+    ...arrayAt(document, ["files"]).map((row, index) => ({ row, path: `$.files[${index}]`, kind: "generated-test" })),
+    ...arrayAt(document, ["support_files"]).map((row, index) => ({
+      row,
+      path: `$.support_files[${index}]`,
+      kind: "support-file"
+    })),
+    ...arrayAt(document, ["skipped_files"]).map((row, index) => ({
+      row,
+      path: `$.skipped_files[${index}]`,
+      kind: stringField(row, "kind")
+    }))
+  ];
+  const seen = new Set<string>();
+  const issues: SemanticGateIssue[] = [];
+  for (const entry of rows) {
+    const strategy = stringField(entry.row, "strategy");
+    const nodeId = stringField(entry.row, "node_id");
+    const attemptIndex = numberField(entry.row, "attempt_index");
+    const manifestPath = stringField(entry.row, "source_manifest_path");
+    const relativePath = stringField(entry.row, "source_relative_path");
+    if (
+      entry.kind === undefined ||
+      strategy === undefined ||
+      nodeId === undefined ||
+      attemptIndex === undefined ||
+      manifestPath === undefined ||
+      relativePath === undefined
+    ) {
+      continue;
+    }
+    const identity = JSON.stringify([entry.kind, strategy, nodeId, attemptIndex, manifestPath, relativePath]);
+    if (seen.has(identity)) {
+      issues.push(issue(entry.path, `Duplicate aggregation source entry ${identity}`));
+    }
+    seen.add(identity);
+  }
+  return issues;
 }
 
 function analysisBundlePathIssues(document: unknown): SemanticGateIssue[] {
@@ -882,6 +928,28 @@ function differentialResultIdentityIssues(document: unknown): SemanticGateIssue[
   ]);
 }
 
+function differentialResultLaneBindingIssues(document: unknown): SemanticGateIssue[] {
+  if (stringField(document, "status") === "no_assigned_lane") return [];
+  const payload = at(document, ["assigned_lane_payload"]);
+  if (!isRecord(document) || !isRecord(payload)) return [];
+  const comparisons = [
+    ["$.lane_id", document.lane_id, payload.lane_id, "lane_id"],
+    ["$.attempt_index", document.attempt_index, payload.attempt_index, "attempt_index"],
+    ["$.auditor_attempt_index", document.auditor_attempt_index, payload.auditor_attempt_index, "auditor_attempt_index"],
+    ["$.source_plan_artifact", document.source_plan_artifact, payload.source_plan_artifact, "source_plan_artifact"],
+    [
+      "$.source_harness_artifact",
+      document.source_harness_artifact,
+      payload.source_harness_artifact,
+      "source_harness_artifact"
+    ],
+    ["$.focused_command", document.focused_command, payload.focused_command, "focused_command"]
+  ] as const;
+  return comparisons.flatMap(([pathValue, actual, expected, field]) =>
+    actual === expected ? [] : [issue(pathValue, `Lane result ${field} does not match assigned_lane_payload`)]
+  );
+}
+
 function dynamicModelJoinIssues(document: unknown): SemanticGateIssue[] {
   const agents = new Set(arrayAt(document, ["agents"]).flatMap((row) => stringField(row, "agent_id") ?? ""));
   agents.delete("");
@@ -905,13 +973,51 @@ function dynamicRecommendationUniquenessIssues(document: unknown): SemanticGateI
   ]);
 }
 
-function dynamicSelectionCountIssues(document: unknown): SemanticGateIssue[] {
+function dynamicSelectionCoherenceIssues(document: unknown): SemanticGateIssue[] {
   if (!isRecord(document)) return [];
   const count = numberField(document, "selected_strategy_count");
-  const actual = stringArray(document.selected_strategies).length;
-  return count === actual
-    ? []
-    : [issue("$.selected_strategy_count", `selected_strategy_count must equal selected_strategies.length (${actual})`)];
+  const selected = stringArray(document.selected_strategies);
+  const rejected = arrayAt(document, ["rejected_strategies"]);
+  const status = stringField(document, "status");
+  const issues: SemanticGateIssue[] = [];
+  if (count !== selected.length) {
+    issues.push(
+      issue(
+        "$.selected_strategy_count",
+        `selected_strategy_count must equal selected_strategies.length (${selected.length})`
+      )
+    );
+  }
+  if (status === "selected" && selected.length === 0) {
+    issues.push(issue("$.selected_strategies", "Selected status requires at least one selected strategy ID"));
+  }
+  if ((status === "no-actionable-strategies" || status === "blocked") && selected.length > 0) {
+    issues.push(issue("$.selected_strategies", `${status} status cannot carry selected strategy IDs`));
+  }
+  const selectedIds = new Set(selected);
+  const rejectedIds = new Set<string>();
+  for (const [index, row] of rejected.entries()) {
+    const strategyId = stringField(row, "strategy_id");
+    if (strategyId === undefined) continue;
+    if (rejectedIds.has(strategyId)) {
+      issues.push(
+        issue(
+          `$.rejected_strategies[${index}].strategy_id`,
+          `Duplicate rejected strategy ID ${JSON.stringify(strategyId)}`
+        )
+      );
+    }
+    if (selectedIds.has(strategyId)) {
+      issues.push(
+        issue(
+          `$.rejected_strategies[${index}].strategy_id`,
+          `Strategy ID is both selected and rejected ${JSON.stringify(strategyId)}`
+        )
+      );
+    }
+    rejectedIds.add(strategyId);
+  }
+  return issues;
 }
 
 function externalizedStateJoinIssues(document: unknown): SemanticGateIssue[] {
@@ -2361,6 +2467,7 @@ const gateSpecifications = {
   "agent-source-proof-ref-uniqueness": documentGate(uniqueFieldGate([["refs"]], "name", "source proof ref name")),
   "aggregation-count-coupling": documentGate(aggregationCountIssues),
   "aggregation-destination-path-uniqueness": documentGate(aggregationDestinationIssues),
+  "aggregation-source-entry-uniqueness": documentGate(aggregationSourceEntryIssues),
   "analysis-bundle-file-digest": contextualGate("filesystem", ["filesystem.rootDirectory"], (document, context) =>
     filesystemManifestIssues(document, context, ["files"])
   ),
@@ -2486,6 +2593,7 @@ const gateSpecifications = {
     )
   ),
   "differential-result-failure-hash-uniqueness": documentGate(differentialResultIdentityIssues),
+  "differential-result-lane-binding": documentGate(differentialResultLaneBindingIssues),
   "differential-triage-failure-hash-uniqueness": documentGate(
     uniqueFieldGate([["classifications"]], "stable_failure_hash", "triage failure hash")
   ),
@@ -2495,7 +2603,7 @@ const gateSpecifications = {
   ),
   "dynamic-model-agent-join": documentGate(dynamicModelJoinIssues),
   "dynamic-recommendation-id-uniqueness": documentGate(dynamicRecommendationUniquenessIssues),
-  "dynamic-strategy-selection-count": documentGate(dynamicSelectionCountIssues),
+  "dynamic-strategy-selection-coherence": documentGate(dynamicSelectionCoherenceIssues),
   "externalized-state-id-uniqueness": documentGate((document, context) => [
     ...uniqueFieldGate([["state_components"]], "component_id", "state component ID")(document, context),
     ...uniqueFieldGate([["scenarios"]], "scenario_id", "state scenario ID")(document, context),

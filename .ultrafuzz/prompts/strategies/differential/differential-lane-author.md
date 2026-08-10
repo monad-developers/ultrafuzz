@@ -116,6 +116,20 @@ non-empty `red_candidate_id`, `test_path`, `failing_test_name`,
 `focused_command`, `failure_signature`, `assertion`, `observed`, and `expected`,
 at least one `public_oracle_basis`, and fixed `classification: "untriaged"`.
 
+The status controls the rest of the record. `green` requires a non-null assigned
+lane, at least one authored path, a command that ran and matched at least one
+test, empty red/defect arrays, and `no_semantic_red_observed` with null frozen-red
+fields. `semantic_red_frozen` requires the same assigned-lane and command
+evidence, at least one red candidate, no compile/harness defects, and non-null
+pre-repair hash and assertion predicate. `compile_or_harness_defect` requires an
+assigned lane, at least one authored path, a command that ran, at least one
+typed defect, no red candidates, and `not_applicable` with null frozen-red
+fields. `no_assigned_lane` requires every lane/source/command field to be null,
+all result/evidence arrays empty, zero matched tests, and `not_applicable` with
+null frozen-red fields. For every assigned status, the top-level lane identity,
+attempt indices, plan/harness paths, and command must exactly equal the assigned
+lane payload; do not copy or convert a different lane.
+
 Also write `{{artifact_path}}/generated-tests.json` using the standard
 generated-test manifest contract. Include every authored `.t.sol` lane file and
 lane-local helper needed to replay it. Write `{{output_findings_path}}` as an

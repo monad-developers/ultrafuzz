@@ -178,8 +178,24 @@ const fixtures = {
     }
   },
   "aggregation-count-coupling": {
-    positive: { copied_generated_tests: 1, copied_support_files: 1, files: [{}], support_files: [{}] },
-    negative: { copied_generated_tests: 2, copied_support_files: 1, files: [{}], support_files: [{}] }
+    positive: {
+      source_generated_tests: 2,
+      copied_generated_tests: 1,
+      source_support_files: 2,
+      copied_support_files: 1,
+      files: [{}],
+      support_files: [{}],
+      skipped_files: [{ kind: "generated-test" }, { kind: "support-file" }]
+    },
+    negative: {
+      source_generated_tests: 3,
+      copied_generated_tests: 1,
+      source_support_files: 2,
+      copied_support_files: 1,
+      files: [{}],
+      support_files: [{}],
+      skipped_files: [{ kind: "generated-test" }, { kind: "support-file" }]
+    }
   },
   "aggregation-destination-path-uniqueness": {
     positive: {
@@ -189,6 +205,43 @@ const fixtures = {
     negative: {
       files: [{ destination_path: "/w/a", destination_relative_path: "a" }],
       support_files: [{ destination_path: "/w/a", destination_relative_path: "b" }]
+    }
+  },
+  "aggregation-source-entry-uniqueness": {
+    positive: {
+      files: [
+        {
+          strategy: "a",
+          node_id: "node-a",
+          attempt_index: 0,
+          source_manifest_path: "generated-tests.json",
+          source_relative_path: "generated-tests/a.t.sol"
+        }
+      ],
+      support_files: [],
+      skipped_files: []
+    },
+    negative: {
+      files: [
+        {
+          strategy: "a",
+          node_id: "node-a",
+          attempt_index: 0,
+          source_manifest_path: "generated-tests.json",
+          source_relative_path: "generated-tests/a.t.sol"
+        }
+      ],
+      support_files: [],
+      skipped_files: [
+        {
+          kind: "generated-test",
+          strategy: "a",
+          node_id: "node-a",
+          attempt_index: 0,
+          source_manifest_path: "generated-tests.json",
+          source_relative_path: "generated-tests/a.t.sol"
+        }
+      ]
     }
   },
   "analysis-bundle-accounting-reconciliation": {
@@ -383,6 +436,42 @@ const fixtures = {
     positive: { red_candidates: [{ failure_signature: "a" }] },
     negative: { red_candidates: [{ failure_signature: "a" }, { failure_signature: "a" }] }
   },
+  "differential-result-lane-binding": {
+    positive: {
+      status: "green",
+      lane_id: "lane-a",
+      attempt_index: 0,
+      auditor_attempt_index: 1,
+      source_plan_artifact: "plan.json",
+      source_harness_artifact: "harness.json",
+      focused_command: "forge test",
+      assigned_lane_payload: {
+        lane_id: "lane-a",
+        attempt_index: 0,
+        auditor_attempt_index: 1,
+        source_plan_artifact: "plan.json",
+        source_harness_artifact: "harness.json",
+        focused_command: "forge test"
+      }
+    },
+    negative: {
+      status: "green",
+      lane_id: "lane-a",
+      attempt_index: 0,
+      auditor_attempt_index: 1,
+      source_plan_artifact: "plan.json",
+      source_harness_artifact: "harness.json",
+      focused_command: "forge test",
+      assigned_lane_payload: {
+        lane_id: "lane-b",
+        attempt_index: 0,
+        auditor_attempt_index: 1,
+        source_plan_artifact: "plan.json",
+        source_harness_artifact: "harness.json",
+        focused_command: "forge test"
+      }
+    }
+  },
   "differential-triage-failure-hash-uniqueness": {
     positive: { classifications: [{ stable_failure_hash: "a" }] },
     negative: { classifications: [{ stable_failure_hash: "a" }, { stable_failure_hash: "a" }] }
@@ -403,9 +492,19 @@ const fixtures = {
     positive: { enumerators: [{ recommendations: [{ strategy_id: "a" }] }] },
     negative: { enumerators: [{ recommendations: [{ strategy_id: "a" }, { strategy_id: "a" }] }] }
   },
-  "dynamic-strategy-selection-count": {
-    positive: { selected_strategy_count: 1, selected_strategies: ["a"] },
-    negative: { selected_strategy_count: 2, selected_strategies: ["a"] }
+  "dynamic-strategy-selection-coherence": {
+    positive: {
+      status: "selected",
+      selected_strategy_count: 1,
+      selected_strategies: ["a"],
+      rejected_strategies: [{ strategy_id: "b" }]
+    },
+    negative: {
+      status: "selected",
+      selected_strategy_count: 1,
+      selected_strategies: ["a"],
+      rejected_strategies: [{ strategy_id: "a" }]
+    }
   },
   "externalized-state-id-uniqueness": {
     positive: { state_components: [{ component_id: "a" }] },

@@ -136,6 +136,51 @@
     "finalization_reserve_seconds"
   ],
   "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "selected"
+          }
+        },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "selected_strategy_count": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "selected_strategies": {
+            "type": "array",
+            "minItems": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "enum": ["no-actionable-strategies", "blocked"]
+          }
+        },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "selected_strategy_count": {
+            "const": 0
+          },
+          "selected_strategies": {
+            "type": "array",
+            "maxItems": 0
+          }
+        }
+      }
+    }
+  ],
   "$id": "urn:ultrafuzz:schema:artifacts:dynamic-strategy-plan:1",
   "title": "Ultrafuzz dynamic strategy plan"
 }

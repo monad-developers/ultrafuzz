@@ -177,4 +177,13 @@ Save the aggregation manifest to {{artifact_path}}/aggregation.json as JSON with
 - `copied_support_files`: number of explicitly manifested native support files copied into the workspace, or `0`
 - `files`: array of copied native test records with `strategy`, `node_id`, `attempt_index`, `source_manifest_path`, `source_artifact_path`, `source_relative_path`, `destination_path`, `destination_relative_path`, `bytes`, and preserved `language`, `framework`, `description`, and `provenance` fields when present
 - `support_files`: array of explicitly manifested native support-file records with the same attribution, path-safety, framework, and provenance fields as `files`, or `[]`
-- `skipped_files`: array of skipped file records with `reason`, or `[]`
+- `skipped_files`: array of skipped file records with required `kind`
+  (`generated-test` or `support-file`), `strategy`, `node_id`, `attempt_index`,
+  `source_manifest_path`, `source_relative_path`, and `reason`, or `[]`
+
+Every considered source entry appears exactly once across its copied array or
+`skipped_files`; do not duplicate an entry to satisfy accounting. Therefore
+`source_generated_tests` equals `files.length` plus skipped `generated-test`
+rows, and `source_support_files` equals `support_files.length` plus skipped
+`support-file` rows. The copied counts equal their corresponding copied-array
+lengths.

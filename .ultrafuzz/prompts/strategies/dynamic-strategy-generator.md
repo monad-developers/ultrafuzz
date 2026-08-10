@@ -183,6 +183,12 @@ The plan JSON must include:
 - nullable `timeout_seconds` and `finalization_reserve_seconds`; use `null` only
   when the runtime context does not provide them
 
+Use `selected` only with at least one selected strategy, and make
+`selected_strategy_count` equal the array length. Both
+`no-actionable-strategies` and `blocked` require a zero count and an empty
+selected array. A strategy ID cannot be both selected and rejected, and rejected
+strategy IDs must be unique.
+
 Write raw enumerator outputs to:
 
 {{artifact_dir}}/enumerator-outputs.json

@@ -27,6 +27,9 @@ import {
   ARTIFACT_CONTRACT_IDS,
   artifactManifestJsonSchema,
   aggregationManifestSchema,
+  coverageGoalSchema,
+  differentialLaneResultSchema,
+  dynamicStrategyPlanSchema,
   analysisBundleManifestJsonSchema,
   artifactContractDefinition,
   artifactContractSchemaBinding,
@@ -1338,6 +1341,268 @@ test("present generated-test aggregation provenance cannot be an empty object", 
 
   assert.equal(aggregationManifestSchema.safeParse(manifest).success, false);
   assert.equal(validateArtifactContract("ultrafuzz/aggregation-manifest@1", JSON.stringify(manifest)).ok, false);
+});
+
+test("coverage goal status, measurement, target, and blocker evidence stay coupled in JSON Schema and Zod", () => {
+  const base = {
+    schema_version: "ultrafuzz.coverage-goal.v1",
+    target: { metric: "standardized-core-line-coverage-percent", value: 90 },
+    current_measurement: null as number | null,
+    current_status: "not-run",
+    planned_commands: [],
+    stop_conditions: ["reserve time for finalization"],
+    timeout_seconds: 60,
+    finalization_reserve_seconds: 10,
+    blockers: [] as Array<{ category: string; summary: string; evidence_paths: string[] }>
+  };
+  const blocker = { category: "coverage-tooling-blocked", summary: "covg-eval unavailable", evidence_paths: [] };
+  const cases = [
+    { name: "not run", value: base, expected: true },
+    { name: "not run with measurement", value: { ...base, current_measurement: 0 }, expected: false },
+    {
+      name: "in progress",
+      value: { ...base, current_status: "in-progress", current_measurement: 50 },
+      expected: true
+    },
+    {
+      name: "in progress with terminal blocker",
+      value: { ...base, current_status: "in-progress", blockers: [blocker] },
+      expected: false
+    },
+    { name: "target met", value: { ...base, current_status: "target-met", current_measurement: 90 }, expected: true },
+    {
+      name: "target met without measurement",
+      value: { ...base, current_status: "target-met" },
+      expected: false
+    },
+    {
+      name: "below target",
+      value: { ...base, current_status: "below-target", current_measurement: 89.9 },
+      expected: true
+    },
+    {
+      name: "below target at threshold",
+      value: { ...base, current_status: "below-target", current_measurement: 90 },
+      expected: false
+    },
+    { name: "blocked", value: { ...base, current_status: "blocked", blockers: [blocker] }, expected: true },
+    { name: "blocked without blocker", value: { ...base, current_status: "blocked" }, expected: false },
+    { name: "noncanonical target", value: { ...base, target: { ...base.target, value: 80 } }, expected: false }
+  ] as const;
+  for (const candidate of cases) {
+    assert.equal(coverageGoalSchema.safeParse(candidate.value).success, candidate.expected, `${candidate.name}:zod`);
+    assert.equal(
+      validateArtifactContract("ultrafuzz/coverage-goal@1", JSON.stringify(candidate.value)).ok,
+      candidate.expected,
+      `${candidate.name}:json-schema`
+    );
+  }
+});
+
+test("differential lane statuses require their exact terminal evidence in JSON Schema and Zod", () => {
+  const assignedLane = {
+    lane_id: "lane-a",
+    attempt_index: 0,
+    auditor_attempt_index: 0,
+    planner_attempt_index: 0,
+    harness_author_attempt_index: 0,
+    source_plan_artifact: "differential-plan.json",
+    source_harness_artifact: "reference-harness.json",
+    intended_t_sol_path: "test/foundry/differential/LaneA.t.sol",
+    focused_command: "forge test --match-path test/foundry/differential/LaneA.t.sol",
+    public_evidence_paths: ["docs/spec.md"],
+    exact_observable_equality_assertions: ["returns match"]
+  };
+  const green = {
+    schema_version: "ultrafuzz.differential-lane-result.v1",
+    lane_id: assignedLane.lane_id,
+    attempt_index: 0,
+    auditor_attempt_index: 0,
+    source_auditor_artifact: "audited-differential-lanes.json",
+    source_plan_artifact: assignedLane.source_plan_artifact,
+    source_harness_artifact: assignedLane.source_harness_artifact,
+    assigned_lane_payload: assignedLane,
+    authored_paths: [assignedLane.intended_t_sol_path],
+    focused_command: assignedLane.focused_command,
+    focused_command_ran: true,
+    matched_test_count: 1,
+    status: "green",
+    red_preservation_audit: {
+      result: "no_semantic_red_observed",
+      pre_repair_file_hash: null,
+      assertion_predicate: null
+    },
+    red_candidates: [] as unknown[],
+    compile_or_harness_defects: [] as unknown[],
+    public_evidence_paths: [] as string[],
+    notes: [] as string[]
+  };
+  const noLane = {
+    ...green,
+    lane_id: null,
+    source_plan_artifact: null,
+    source_harness_artifact: null,
+    assigned_lane_payload: null,
+    authored_paths: [],
+    focused_command: null,
+    focused_command_ran: false,
+    matched_test_count: 0,
+    status: "no_assigned_lane",
+    red_preservation_audit: {
+      result: "not_applicable",
+      pre_repair_file_hash: null,
+      assertion_predicate: null
+    }
+  };
+  const frozen = {
+    ...green,
+    status: "semantic_red_frozen",
+    red_preservation_audit: {
+      result: "semantic_red_frozen",
+      pre_repair_file_hash: "a".repeat(64),
+      assertion_predicate: "actual == expected"
+    },
+    red_candidates: [
+      {
+        red_candidate_id: "red-a",
+        test_path: assignedLane.intended_t_sol_path,
+        failing_test_name: "test_lane_a",
+        focused_command: assignedLane.focused_command,
+        failure_signature: "mismatch",
+        assertion: "actual == expected",
+        observed: "1",
+        expected: "2",
+        public_oracle_basis: ["docs/spec.md"],
+        classification: "untriaged"
+      }
+    ]
+  };
+  const defect = {
+    ...green,
+    status: "compile_or_harness_defect",
+    matched_test_count: 0,
+    red_preservation_audit: {
+      result: "not_applicable",
+      pre_repair_file_hash: null,
+      assertion_predicate: null
+    },
+    compile_or_harness_defects: [{ category: "compile", summary: "compile failed", evidence_paths: [] }]
+  };
+  const cases = [
+    { name: "green", value: green, expected: true },
+    { name: "green did not run", value: { ...green, focused_command_ran: false }, expected: false },
+    { name: "green matched nothing", value: { ...green, matched_test_count: 0 }, expected: false },
+    { name: "green lacks assignment", value: { ...green, lane_id: null }, expected: false },
+    { name: "no assigned lane", value: noLane, expected: true },
+    { name: "no lane carried source", value: { ...noLane, source_plan_artifact: "plan.json" }, expected: false },
+    { name: "frozen red", value: frozen, expected: true },
+    { name: "frozen red without candidate", value: { ...frozen, red_candidates: [] }, expected: false },
+    { name: "compile defect", value: defect, expected: true },
+    {
+      name: "defect status without defect",
+      value: { ...defect, compile_or_harness_defects: [] },
+      expected: false
+    }
+  ] as const;
+  for (const candidate of cases) {
+    assert.equal(
+      differentialLaneResultSchema.safeParse(candidate.value).success,
+      candidate.expected,
+      `${candidate.name}:zod`
+    );
+    assert.equal(
+      validateArtifactContract("ultrafuzz/differential-lane-result@1", JSON.stringify(candidate.value)).ok,
+      candidate.expected,
+      `${candidate.name}:json-schema`
+    );
+  }
+});
+
+test("dynamic strategy plan status and selected population stay coupled in JSON Schema and Zod", () => {
+  const base = {
+    schema_version: "ultrafuzz.dynamic-strategy-plan.v1",
+    dynamic_strategies_enumerator: 1,
+    status: "no-actionable-strategies",
+    selected_strategy_count: 0,
+    selected_strategies: [] as string[],
+    rejected_strategies: [],
+    current_run_artifacts_considered: [],
+    excluded_context: {
+      sibling_runs: "excluded",
+      previous_reports: "excluded",
+      host_global_paths: "excluded",
+      network_resources: "excluded",
+      extra_target_context: "excluded"
+    },
+    timeout_seconds: 60,
+    finalization_reserve_seconds: 10
+  };
+  const cases = [
+    { name: "no actionable", value: base, expected: true },
+    {
+      name: "selected",
+      value: { ...base, status: "selected", selected_strategy_count: 1, selected_strategies: ["strategy-a"] },
+      expected: true
+    },
+    {
+      name: "selected empty",
+      value: { ...base, status: "selected" },
+      expected: false
+    },
+    {
+      name: "no actionable with selected ID",
+      value: { ...base, selected_strategy_count: 1, selected_strategies: ["strategy-a"] },
+      expected: false
+    },
+    {
+      name: "blocked with selected ID",
+      value: { ...base, status: "blocked", selected_strategy_count: 1, selected_strategies: ["strategy-a"] },
+      expected: false
+    }
+  ] as const;
+  for (const candidate of cases) {
+    assert.equal(
+      dynamicStrategyPlanSchema.safeParse(candidate.value).success,
+      candidate.expected,
+      `${candidate.name}:zod`
+    );
+    assert.equal(
+      validateArtifactContract("ultrafuzz/dynamic-strategy-plan@1", JSON.stringify(candidate.value)).ok,
+      candidate.expected,
+      `${candidate.name}:json-schema`
+    );
+  }
+});
+
+test("aggregation skips require a typed source kind and attempt identity", () => {
+  const manifest = {
+    schema_version: "ultrafuzz.aggregation-manifest.v1",
+    source_generated_tests: 1,
+    copied_generated_tests: 0,
+    source_support_files: 0,
+    copied_support_files: 0,
+    files: [],
+    support_files: [],
+    skipped_files: [
+      {
+        kind: "generated-test",
+        strategy: "boundary-tests",
+        node_id: "boundary-tests",
+        attempt_index: 0,
+        source_manifest_path: "generated-tests.json",
+        source_relative_path: "generated-tests/Boundary.t.sol",
+        reason: "framework could not be determined"
+      }
+    ]
+  };
+  assert.equal(aggregationManifestSchema.safeParse(manifest).success, true);
+  assert.equal(validateArtifactContract("ultrafuzz/aggregation-manifest@1", JSON.stringify(manifest)).ok, true);
+  const missingKind = structuredClone(manifest) as Record<string, unknown> & {
+    skipped_files: Record<string, unknown>[];
+  };
+  delete missingKind.skipped_files[0]!.kind;
+  assert.equal(aggregationManifestSchema.safeParse(missingKind).success, false);
+  assert.equal(validateArtifactContract("ultrafuzz/aggregation-manifest@1", JSON.stringify(missingKind)).ok, false);
 });
 
 test("analysis bundle manifest schema rejects unversioned and non-allowlisted entries", () => {

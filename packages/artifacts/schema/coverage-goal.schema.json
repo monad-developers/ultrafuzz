@@ -15,8 +15,7 @@
         },
         "value": {
           "type": "number",
-          "minimum": 0,
-          "maximum": 100
+          "const": 90
         }
       },
       "required": ["metric", "value"],
@@ -113,6 +112,107 @@
     "blockers"
   ],
   "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "current_status": {
+            "const": "not-run"
+          }
+        },
+        "required": ["current_status"]
+      },
+      "then": {
+        "properties": {
+          "current_measurement": {
+            "type": "null"
+          },
+          "blockers": {
+            "type": "array",
+            "maxItems": 0
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "current_status": {
+            "const": "in-progress"
+          }
+        },
+        "required": ["current_status"]
+      },
+      "then": {
+        "properties": {
+          "blockers": {
+            "type": "array",
+            "maxItems": 0
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "current_status": {
+            "const": "target-met"
+          }
+        },
+        "required": ["current_status"]
+      },
+      "then": {
+        "properties": {
+          "current_measurement": {
+            "type": "number",
+            "minimum": 90,
+            "maximum": 100
+          },
+          "blockers": {
+            "type": "array",
+            "maxItems": 0
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "current_status": {
+            "const": "below-target"
+          }
+        },
+        "required": ["current_status"]
+      },
+      "then": {
+        "properties": {
+          "current_measurement": {
+            "type": "number",
+            "minimum": 0,
+            "exclusiveMaximum": 90
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "current_status": {
+            "const": "blocked"
+          }
+        },
+        "required": ["current_status"]
+      },
+      "then": {
+        "properties": {
+          "blockers": {
+            "type": "array",
+            "minItems": 1
+          }
+        }
+      }
+    }
+  ],
   "$id": "urn:ultrafuzz:schema:artifacts:coverage-goal:1",
   "title": "Ultrafuzz invariant coverage goal"
 }

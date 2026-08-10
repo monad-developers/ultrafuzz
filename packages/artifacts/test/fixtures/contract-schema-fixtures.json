@@ -121,9 +121,9 @@
       "schema_version": "ultrafuzz.coverage-goal.v1",
       "target": {
         "metric": "standardized-core-line-coverage-percent",
-        "value": 0
+        "value": 90
       },
-      "current_measurement": 0,
+      "current_measurement": null,
       "current_status": "not-run",
       "planned_commands": [],
       "stop_conditions": ["x"],
@@ -135,9 +135,9 @@
       "schema_version": "ultrafuzz.coverage-goal.v1",
       "target": {
         "metric": "standardized-core-line-coverage-percent",
-        "value": 0
+        "value": 90
       },
-      "current_measurement": 0,
+      "current_measurement": null,
       "current_status": "not-run",
       "planned_commands": [],
       "stop_conditions": ["x"],
@@ -214,15 +214,15 @@
         "public_evidence_paths": ["x"],
         "exact_observable_equality_assertions": ["x"]
       },
-      "authored_paths": [],
+      "authored_paths": ["x"],
       "focused_command": "x",
-      "focused_command_ran": false,
-      "matched_test_count": 0,
+      "focused_command_ran": true,
+      "matched_test_count": 1,
       "status": "green",
       "red_preservation_audit": {
         "result": "no_semantic_red_observed",
-        "pre_repair_file_hash": "0000000000000000000000000000000000000000000000000000000000000000",
-        "assertion_predicate": "x"
+        "pre_repair_file_hash": null,
+        "assertion_predicate": null
       },
       "red_candidates": [],
       "compile_or_harness_defects": [],
@@ -250,15 +250,15 @@
         "public_evidence_paths": ["x"],
         "exact_observable_equality_assertions": ["x"]
       },
-      "authored_paths": [],
+      "authored_paths": ["x"],
       "focused_command": "x",
-      "focused_command_ran": false,
-      "matched_test_count": 0,
+      "focused_command_ran": true,
+      "matched_test_count": 1,
       "status": "green",
       "red_preservation_audit": {
         "result": "no_semantic_red_observed",
-        "pre_repair_file_hash": "0000000000000000000000000000000000000000000000000000000000000000",
-        "assertion_predicate": "x"
+        "pre_repair_file_hash": null,
+        "assertion_predicate": null
       },
       "red_candidates": [],
       "compile_or_harness_defects": [],
@@ -374,7 +374,7 @@
     "valid": {
       "schema_version": "ultrafuzz.dynamic-strategy-plan.v1",
       "dynamic_strategies_enumerator": 0,
-      "status": "selected",
+      "status": "no-actionable-strategies",
       "selected_strategy_count": 0,
       "selected_strategies": [],
       "rejected_strategies": [],
@@ -392,7 +392,7 @@
     "invalid": {
       "schema_version": "ultrafuzz.dynamic-strategy-plan.v1",
       "dynamic_strategies_enumerator": 0,
-      "status": "selected",
+      "status": "no-actionable-strategies",
       "selected_strategy_count": 0,
       "selected_strategies": [],
       "rejected_strategies": [],

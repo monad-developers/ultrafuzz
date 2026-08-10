@@ -127,7 +127,7 @@ Apply these Recon/Chimera rules:
 - Do not run remote package availability probes such as `npm view`,
   `npm search`, `curl`, or `wget`. If Recon tooling is not already available
   through direct local commands or the explicit `npx -y recon-generate@latest
-  coverage` command below, document `coverage-tooling-blocked` and refresh the
+coverage` command below, document `coverage-tooling-blocked` and refresh the
   required artifacts instead of probing package registries.
 - After the first standardized, production-attributed coverage result, write
   checkpoint versions of `coverage-report.md`, `findings.json`,
@@ -181,6 +181,12 @@ Apply these Recon/Chimera rules:
      `stop_conditions`, `timeout_seconds`, `finalization_reserve_seconds`, and
      typed `blockers`. Each blocker has `category`, `summary`, and
      `evidence_paths`; use only the categories documented by the supplied schema.
+     Keep status and evidence exact: `not-run` has a null measurement and no
+     blockers; `in-progress` has no terminal blockers; `target-met` has a
+     measurement from 90 through 100 and no blockers; `below-target` has a
+     non-null measurement below 90; and `blocked` has at least one typed
+     blocker. Do not label a null or sub-target measurement `target-met`, and do
+     not leave a blocked terminal result as `not-run` or `in-progress`.
    - Immediately write initial checkpoint `{{artifact_dir}}/coverage-report.md`,
      `{{output_findings_path}}`, `{{artifact_dir}}/generated-tests.json`, and
      `{{artifact_dir}}/harness-repairs.json` before starting Recon or any
@@ -232,9 +238,9 @@ Apply these Recon/Chimera rules:
      dependencies, or production bugs.
    - Adjust setup/handlers only when it improves realistic reachability.
    - Keep manager switching explicit and handler complexity low.
-    - Before each bounded fuzzing command, confirm it can complete and still
-      leave the configured finalization reserve. If not, stop iterating and
-      refresh the checkpoint artifacts instead.
+   - Before each bounded fuzzing command, confirm it can complete and still
+     leave the configured finalization reserve. If not, stop iterating and
+     refresh the checkpoint artifacts instead.
 
 5. Preserve failures:
    - Treat fuzzer failures and deterministic reproducers as stateful failure

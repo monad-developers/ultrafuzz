@@ -447,6 +447,22 @@ describe("prompt semantic anchors", () => {
       expect(invariantPrompt).toContain("machine-readable source of truth");
       expect(invariantPrompt).toContain("source-only properties");
     }
+    expect(coverage).toContain("`not-run` has a null measurement and no\n     blockers");
+    expect(coverage).toContain("`target-met` has a\n     measurement from 90 through 100 and no blockers");
+    expect(coverage).toContain("`blocked` has at least one typed\n     blocker");
+  });
+
+  it("documents status-dependent differential and dynamic JSON evidence", () => {
+    const lane = prompt("strategies/differential/differential-lane-author.md");
+    const dynamic = prompt("strategies/dynamic-strategy-generator.md");
+
+    expect(lane).toContain("`green` requires a non-null assigned\nlane");
+    expect(lane).toContain("`semantic_red_frozen` requires the same assigned-lane and command\nevidence");
+    expect(lane).toContain("`compile_or_harness_defect` requires an\nassigned lane");
+    expect(lane).toContain("`no_assigned_lane` requires every lane/source/command field to be null");
+    expect(lane).toContain("must exactly equal the assigned\nlane payload");
+    expect(dynamic).toContain("Use `selected` only with at least one selected strategy");
+    expect(dynamic).toContain("A strategy ID cannot be both selected and rejected");
   });
 
   it("keeps generated-test manifests on the canonical generated_tests contract", () => {
@@ -554,6 +570,9 @@ describe("prompt semantic anchors", () => {
     expect(aggregate).toContain("existing pytest, Ape, Brownie, or other native test root");
     expect(aggregate).toContain("never overwrite one entry with another");
     expect(aggregate).toContain("Do not copy unknown manifest\nentry fields");
+    expect(aggregate).toContain("required `kind`\n  (`generated-test` or `support-file`)");
+    expect(aggregate).toContain("Every considered source entry appears exactly once");
+    expect(aggregate).toContain("plus skipped `generated-test`\nrows");
     expect(aggregate).not.toContain("source_manifest_entry");
     expect(aggregate).not.toContain("collect generated Foundry `.t.sol` files");
   });

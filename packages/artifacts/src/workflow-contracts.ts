@@ -478,19 +478,86 @@ const coverageBlockerCategory = z.enum([
 ]);
 
 export const coverageGoalSchema = withDocumentMetadata(
-  z.strictObject({
-    schema_version: z.literal(COVERAGE_GOAL_SCHEMA_VERSION),
-    target: z.strictObject({ metric: z.literal("standardized-core-line-coverage-percent"), value: percentage }),
-    current_measurement: percentage.nullable(),
-    current_status: z.enum(["not-run", "in-progress", "target-met", "below-target", "blocked"]),
-    planned_commands: uniqueStrings(),
-    stop_conditions: uniqueStrings(1),
-    timeout_seconds: positiveInteger,
-    finalization_reserve_seconds: nonNegativeInteger,
-    blockers: z.array(
-      z.strictObject({ category: coverageBlockerCategory, summary: nonEmptyString, evidence_paths: uniqueStrings() })
-    )
-  }),
+  z
+    .strictObject({
+      schema_version: z.literal(COVERAGE_GOAL_SCHEMA_VERSION),
+      target: z.strictObject({
+        metric: z.literal("standardized-core-line-coverage-percent"),
+        value: z.literal(90)
+      }),
+      current_measurement: percentage.nullable(),
+      current_status: z.enum(["not-run", "in-progress", "target-met", "below-target", "blocked"]),
+      planned_commands: uniqueStrings(),
+      stop_conditions: uniqueStrings(1),
+      timeout_seconds: positiveInteger,
+      finalization_reserve_seconds: nonNegativeInteger,
+      blockers: z.array(
+        z.strictObject({ category: coverageBlockerCategory, summary: nonEmptyString, evidence_paths: uniqueStrings() })
+      )
+    })
+    .meta({
+      allOf: [
+        {
+          if: { properties: { current_status: { const: "not-run" } }, required: ["current_status"] },
+          then: {
+            properties: {
+              current_measurement: { type: "null" },
+              blockers: { type: "array", maxItems: 0 }
+            }
+          }
+        },
+        {
+          if: { properties: { current_status: { const: "in-progress" } }, required: ["current_status"] },
+          then: { properties: { blockers: { type: "array", maxItems: 0 } } }
+        },
+        {
+          if: { properties: { current_status: { const: "target-met" } }, required: ["current_status"] },
+          then: {
+            properties: {
+              current_measurement: { type: "number", minimum: 90, maximum: 100 },
+              blockers: { type: "array", maxItems: 0 }
+            }
+          }
+        },
+        {
+          if: { properties: { current_status: { const: "below-target" } }, required: ["current_status"] },
+          then: { properties: { current_measurement: { type: "number", minimum: 0, exclusiveMaximum: 90 } } }
+        },
+        {
+          if: { properties: { current_status: { const: "blocked" } }, required: ["current_status"] },
+          then: { properties: { blockers: { type: "array", minItems: 1 } } }
+        }
+      ]
+    })
+    .superRefine((goal, context) => {
+      const addIssue = (path: "current_measurement" | "blockers", message: string) =>
+        context.addIssue({ code: "custom", message, path: [path] });
+      if (goal.current_status === "not-run") {
+        if (goal.current_measurement !== null) {
+          addIssue("current_measurement", "Coverage that has not run cannot report a measurement");
+        }
+        if (goal.blockers.length > 0) {
+          addIssue("blockers", "Coverage that has not run cannot report blockers; use blocked status");
+        }
+      } else if (goal.current_status === "in-progress") {
+        if (goal.blockers.length > 0) {
+          addIssue("blockers", "In-progress coverage cannot report terminal blockers; use blocked status");
+        }
+      } else if (goal.current_status === "target-met") {
+        if (goal.current_measurement === null || goal.current_measurement < goal.target.value) {
+          addIssue("current_measurement", "Target-met coverage requires a measurement at or above the target");
+        }
+        if (goal.blockers.length > 0) {
+          addIssue("blockers", "Target-met coverage cannot carry blockers");
+        }
+      } else if (goal.current_status === "below-target") {
+        if (goal.current_measurement === null || goal.current_measurement >= goal.target.value) {
+          addIssue("current_measurement", "Below-target coverage requires a measurement below the target");
+        }
+      } else if (goal.blockers.length === 0) {
+        addIssue("blockers", "Blocked coverage requires at least one typed blocker");
+      }
+    }),
   "coverage-goal",
   1,
   "Ultrafuzz invariant coverage goal"
@@ -718,16 +785,67 @@ export const differentialLaneResultSchema = withDocumentMetadata(
     .meta({
       allOf: [
         {
+          if: {
+            properties: {
+              status: { enum: ["green", "semantic_red_frozen", "compile_or_harness_defect"] }
+            },
+            required: ["status"]
+          },
+          then: {
+            properties: {
+              lane_id: { type: "string", minLength: 1 },
+              source_plan_artifact: { type: "string", minLength: 1 },
+              source_harness_artifact: { type: "string", minLength: 1 },
+              assigned_lane_payload: { type: "object" },
+              authored_paths: { type: "array", minItems: 1 },
+              focused_command: { type: "string", minLength: 1 }
+            }
+          }
+        },
+        {
           if: { properties: { status: { const: "no_assigned_lane" } }, required: ["status"] },
           then: {
             properties: {
               lane_id: { type: "null" },
+              source_plan_artifact: { type: "null" },
+              source_harness_artifact: { type: "null" },
               assigned_lane_payload: { type: "null" },
               focused_command: { type: "null" },
               focused_command_ran: { const: false },
               matched_test_count: { const: 0 },
               authored_paths: { type: "array", maxItems: 0 },
-              red_candidates: { type: "array", maxItems: 0 }
+              red_preservation_audit: {
+                type: "object",
+                properties: {
+                  result: { const: "not_applicable" },
+                  pre_repair_file_hash: { type: "null" },
+                  assertion_predicate: { type: "null" }
+                },
+                required: ["result", "pre_repair_file_hash", "assertion_predicate"]
+              },
+              red_candidates: { type: "array", maxItems: 0 },
+              compile_or_harness_defects: { type: "array", maxItems: 0 },
+              public_evidence_paths: { type: "array", maxItems: 0 }
+            }
+          }
+        },
+        {
+          if: { properties: { status: { const: "green" } }, required: ["status"] },
+          then: {
+            properties: {
+              focused_command_ran: { const: true },
+              matched_test_count: { type: "integer", minimum: 1 },
+              red_preservation_audit: {
+                type: "object",
+                properties: {
+                  result: { const: "no_semantic_red_observed" },
+                  pre_repair_file_hash: { type: "null" },
+                  assertion_predicate: { type: "null" }
+                },
+                required: ["result", "pre_repair_file_hash", "assertion_predicate"]
+              },
+              red_candidates: { type: "array", maxItems: 0 },
+              compile_or_harness_defects: { type: "array", maxItems: 0 }
             }
           }
         },
@@ -735,16 +853,148 @@ export const differentialLaneResultSchema = withDocumentMetadata(
           if: { properties: { status: { const: "semantic_red_frozen" } }, required: ["status"] },
           then: {
             properties: {
+              focused_command_ran: { const: true },
+              matched_test_count: { type: "integer", minimum: 1 },
               red_candidates: { type: "array", minItems: 1 },
+              compile_or_harness_defects: { type: "array", maxItems: 0 },
               red_preservation_audit: {
                 type: "object",
-                properties: { result: { const: "semantic_red_frozen" } },
-                required: ["result"]
+                properties: {
+                  result: { const: "semantic_red_frozen" },
+                  pre_repair_file_hash: { type: "string", pattern: "^[a-f0-9]{64}$" },
+                  assertion_predicate: { type: "string", minLength: 1 }
+                },
+                required: ["result", "pre_repair_file_hash", "assertion_predicate"]
               }
+            }
+          }
+        },
+        {
+          if: { properties: { status: { const: "compile_or_harness_defect" } }, required: ["status"] },
+          then: {
+            properties: {
+              focused_command_ran: { const: true },
+              red_preservation_audit: {
+                type: "object",
+                properties: {
+                  result: { const: "not_applicable" },
+                  pre_repair_file_hash: { type: "null" },
+                  assertion_predicate: { type: "null" }
+                },
+                required: ["result", "pre_repair_file_hash", "assertion_predicate"]
+              },
+              red_candidates: { type: "array", maxItems: 0 },
+              compile_or_harness_defects: { type: "array", minItems: 1 }
             }
           }
         }
       ]
+    })
+    .superRefine((result, context) => {
+      const addIssue = (path: string, message: string) =>
+        context.addIssue({ code: "custom", message, path: path.split(".") });
+      const requireAssignedLane = () => {
+        if (result.lane_id === null) addIssue("lane_id", "An executed lane result requires lane_id");
+        if (result.source_plan_artifact === null) {
+          addIssue("source_plan_artifact", "An executed lane result requires its source plan artifact");
+        }
+        if (result.source_harness_artifact === null) {
+          addIssue("source_harness_artifact", "An executed lane result requires its source harness artifact");
+        }
+        if (result.assigned_lane_payload === null) {
+          addIssue("assigned_lane_payload", "An executed lane result requires its assigned lane payload");
+        }
+        if (result.authored_paths.length === 0) {
+          addIssue("authored_paths", "An executed lane result requires at least one authored path");
+        }
+        if (result.focused_command === null) {
+          addIssue("focused_command", "An executed lane result requires its focused command");
+        }
+      };
+      const requireEmpty = (field: "red_candidates" | "compile_or_harness_defects" | "public_evidence_paths") => {
+        if (result[field].length > 0) addIssue(field, `${field} must be empty for ${result.status}`);
+      };
+      const requireAudit = (
+        auditResult: "no_semantic_red_observed" | "semantic_red_frozen" | "not_applicable",
+        evidence: "present" | "absent"
+      ) => {
+        if (result.red_preservation_audit.result !== auditResult) {
+          addIssue("red_preservation_audit.result", `Red preservation audit must be ${auditResult}`);
+        }
+        if (evidence === "present") {
+          if (result.red_preservation_audit.pre_repair_file_hash === null) {
+            addIssue("red_preservation_audit.pre_repair_file_hash", "A frozen semantic red requires a file hash");
+          }
+          if (result.red_preservation_audit.assertion_predicate === null) {
+            addIssue("red_preservation_audit.assertion_predicate", "A frozen semantic red requires an assertion");
+          }
+        } else {
+          if (result.red_preservation_audit.pre_repair_file_hash !== null) {
+            addIssue("red_preservation_audit.pre_repair_file_hash", "This status cannot carry a frozen-red hash");
+          }
+          if (result.red_preservation_audit.assertion_predicate !== null) {
+            addIssue("red_preservation_audit.assertion_predicate", "This status cannot carry a frozen-red assertion");
+          }
+        }
+      };
+
+      if (result.status === "no_assigned_lane") {
+        if (result.lane_id !== null) addIssue("lane_id", "No-assigned-lane result requires a null lane_id");
+        if (result.source_plan_artifact !== null) {
+          addIssue("source_plan_artifact", "No-assigned-lane result requires a null source plan artifact");
+        }
+        if (result.source_harness_artifact !== null) {
+          addIssue("source_harness_artifact", "No-assigned-lane result requires a null source harness artifact");
+        }
+        if (result.assigned_lane_payload !== null) {
+          addIssue("assigned_lane_payload", "No-assigned-lane result cannot carry an assigned payload");
+        }
+        if (result.authored_paths.length > 0) addIssue("authored_paths", "No-assigned-lane result cannot author files");
+        if (result.focused_command !== null) {
+          addIssue("focused_command", "No-assigned-lane result requires a null focused command");
+        }
+        if (result.focused_command_ran) {
+          addIssue("focused_command_ran", "No-assigned-lane result cannot report a command run");
+        }
+        if (result.matched_test_count !== 0) {
+          addIssue("matched_test_count", "No-assigned-lane result cannot report matched tests");
+        }
+        requireAudit("not_applicable", "absent");
+        requireEmpty("red_candidates");
+        requireEmpty("compile_or_harness_defects");
+        requireEmpty("public_evidence_paths");
+        return;
+      }
+
+      requireAssignedLane();
+      if (result.status === "green") {
+        if (!result.focused_command_ran) addIssue("focused_command_ran", "Green requires the focused command to run");
+        if (result.matched_test_count < 1) addIssue("matched_test_count", "Green requires at least one matched test");
+        requireAudit("no_semantic_red_observed", "absent");
+        requireEmpty("red_candidates");
+        requireEmpty("compile_or_harness_defects");
+      } else if (result.status === "semantic_red_frozen") {
+        if (!result.focused_command_ran) {
+          addIssue("focused_command_ran", "A frozen semantic red requires the focused command to run");
+        }
+        if (result.matched_test_count < 1) {
+          addIssue("matched_test_count", "A frozen semantic red requires at least one matched test");
+        }
+        if (result.red_candidates.length === 0) {
+          addIssue("red_candidates", "A frozen semantic red requires at least one red candidate");
+        }
+        requireEmpty("compile_or_harness_defects");
+        requireAudit("semantic_red_frozen", "present");
+      } else {
+        if (!result.focused_command_ran) {
+          addIssue("focused_command_ran", "A compile or harness defect requires the focused command to run");
+        }
+        requireEmpty("red_candidates");
+        if (result.compile_or_harness_defects.length === 0) {
+          addIssue("compile_or_harness_defects", "Defect status requires at least one typed defect");
+        }
+        requireAudit("not_applicable", "absent");
+      }
     }),
   "differential-lane-result",
   1,
@@ -913,18 +1163,77 @@ const dynamicExcludedContextSchema = z.strictObject({
 });
 
 export const dynamicStrategyPlanSchema = withDocumentMetadata(
-  z.strictObject({
-    schema_version: z.literal(DYNAMIC_STRATEGY_PLAN_SCHEMA_VERSION),
-    dynamic_strategies_enumerator: nonNegativeInteger,
-    status: z.enum(["selected", "no-actionable-strategies", "blocked"]),
-    selected_strategy_count: nonNegativeInteger,
-    selected_strategies: uniqueStrings(),
-    rejected_strategies: z.array(z.strictObject({ strategy_id: nonEmptyString, reason: nonEmptyString })),
-    current_run_artifacts_considered: z.array(z.strictObject({ path: nonEmptyString, relevance: nonEmptyString })),
-    excluded_context: dynamicExcludedContextSchema,
-    timeout_seconds: positiveInteger.nullable(),
-    finalization_reserve_seconds: nonNegativeInteger.nullable()
-  }),
+  z
+    .strictObject({
+      schema_version: z.literal(DYNAMIC_STRATEGY_PLAN_SCHEMA_VERSION),
+      dynamic_strategies_enumerator: nonNegativeInteger,
+      status: z.enum(["selected", "no-actionable-strategies", "blocked"]),
+      selected_strategy_count: nonNegativeInteger,
+      selected_strategies: uniqueStrings(),
+      rejected_strategies: z.array(z.strictObject({ strategy_id: nonEmptyString, reason: nonEmptyString })),
+      current_run_artifacts_considered: z.array(z.strictObject({ path: nonEmptyString, relevance: nonEmptyString })),
+      excluded_context: dynamicExcludedContextSchema,
+      timeout_seconds: positiveInteger.nullable(),
+      finalization_reserve_seconds: nonNegativeInteger.nullable()
+    })
+    .meta({
+      allOf: [
+        {
+          if: { properties: { status: { const: "selected" } }, required: ["status"] },
+          then: {
+            properties: {
+              selected_strategy_count: { type: "integer", minimum: 1 },
+              selected_strategies: { type: "array", minItems: 1 }
+            }
+          }
+        },
+        {
+          if: {
+            properties: { status: { enum: ["no-actionable-strategies", "blocked"] } },
+            required: ["status"]
+          },
+          then: {
+            properties: {
+              selected_strategy_count: { const: 0 },
+              selected_strategies: { type: "array", maxItems: 0 }
+            }
+          }
+        }
+      ]
+    })
+    .superRefine((plan, context) => {
+      if (plan.status === "selected") {
+        if (plan.selected_strategy_count === 0) {
+          context.addIssue({
+            code: "custom",
+            message: "Selected status requires at least one selected strategy",
+            path: ["selected_strategy_count"]
+          });
+        }
+        if (plan.selected_strategies.length === 0) {
+          context.addIssue({
+            code: "custom",
+            message: "Selected status requires at least one selected strategy ID",
+            path: ["selected_strategies"]
+          });
+        }
+      } else {
+        if (plan.selected_strategy_count !== 0) {
+          context.addIssue({
+            code: "custom",
+            message: `${plan.status} status requires selected_strategy_count to be zero`,
+            path: ["selected_strategy_count"]
+          });
+        }
+        if (plan.selected_strategies.length > 0) {
+          context.addIssue({
+            code: "custom",
+            message: `${plan.status} status cannot carry selected strategy IDs`,
+            path: ["selected_strategies"]
+          });
+        }
+      }
+    }),
   "dynamic-strategy-plan",
   1,
   "Ultrafuzz dynamic strategy plan"
@@ -1068,8 +1377,10 @@ export const aggregationManifestSchema = withDocumentMetadata(
     support_files: z.array(aggregationFileSchema),
     skipped_files: z.array(
       z.strictObject({
+        kind: z.enum(["generated-test", "support-file"]),
         strategy: nonEmptyString,
         node_id: nonEmptyString,
+        attempt_index: nonNegativeInteger,
         source_manifest_path: nonEmptyString,
         source_relative_path: nonEmptyString,
         reason: nonEmptyString

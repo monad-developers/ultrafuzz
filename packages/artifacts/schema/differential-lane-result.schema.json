@@ -337,6 +337,43 @@
       "if": {
         "properties": {
           "status": {
+            "enum": ["green", "semantic_red_frozen", "compile_or_harness_defect"]
+          }
+        },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "lane_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source_plan_artifact": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source_harness_artifact": {
+            "type": "string",
+            "minLength": 1
+          },
+          "assigned_lane_payload": {
+            "type": "object"
+          },
+          "authored_paths": {
+            "type": "array",
+            "minItems": 1
+          },
+          "focused_command": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
             "const": "no_assigned_lane"
           }
         },
@@ -345,6 +382,12 @@
       "then": {
         "properties": {
           "lane_id": {
+            "type": "null"
+          },
+          "source_plan_artifact": {
+            "type": "null"
+          },
+          "source_harness_artifact": {
             "type": "null"
           },
           "assigned_lane_payload": {
@@ -363,7 +406,74 @@
             "type": "array",
             "maxItems": 0
           },
+          "red_preservation_audit": {
+            "type": "object",
+            "properties": {
+              "result": {
+                "const": "not_applicable"
+              },
+              "pre_repair_file_hash": {
+                "type": "null"
+              },
+              "assertion_predicate": {
+                "type": "null"
+              }
+            },
+            "required": ["result", "pre_repair_file_hash", "assertion_predicate"]
+          },
           "red_candidates": {
+            "type": "array",
+            "maxItems": 0
+          },
+          "compile_or_harness_defects": {
+            "type": "array",
+            "maxItems": 0
+          },
+          "public_evidence_paths": {
+            "type": "array",
+            "maxItems": 0
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "green"
+          }
+        },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "focused_command_ran": {
+            "const": true
+          },
+          "matched_test_count": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "red_preservation_audit": {
+            "type": "object",
+            "properties": {
+              "result": {
+                "const": "no_semantic_red_observed"
+              },
+              "pre_repair_file_hash": {
+                "type": "null"
+              },
+              "assertion_predicate": {
+                "type": "null"
+              }
+            },
+            "required": ["result", "pre_repair_file_hash", "assertion_predicate"]
+          },
+          "red_candidates": {
+            "type": "array",
+            "maxItems": 0
+          },
+          "compile_or_harness_defects": {
             "type": "array",
             "maxItems": 0
           }
@@ -381,18 +491,77 @@
       },
       "then": {
         "properties": {
+          "focused_command_ran": {
+            "const": true
+          },
+          "matched_test_count": {
+            "type": "integer",
+            "minimum": 1
+          },
           "red_candidates": {
             "type": "array",
             "minItems": 1
+          },
+          "compile_or_harness_defects": {
+            "type": "array",
+            "maxItems": 0
           },
           "red_preservation_audit": {
             "type": "object",
             "properties": {
               "result": {
                 "const": "semantic_red_frozen"
+              },
+              "pre_repair_file_hash": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "assertion_predicate": {
+                "type": "string",
+                "minLength": 1
               }
             },
-            "required": ["result"]
+            "required": ["result", "pre_repair_file_hash", "assertion_predicate"]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "compile_or_harness_defect"
+          }
+        },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "focused_command_ran": {
+            "const": true
+          },
+          "red_preservation_audit": {
+            "type": "object",
+            "properties": {
+              "result": {
+                "const": "not_applicable"
+              },
+              "pre_repair_file_hash": {
+                "type": "null"
+              },
+              "assertion_predicate": {
+                "type": "null"
+              }
+            },
+            "required": ["result", "pre_repair_file_hash", "assertion_predicate"]
+          },
+          "red_candidates": {
+            "type": "array",
+            "maxItems": 0
+          },
+          "compile_or_harness_defects": {
+            "type": "array",
+            "minItems": 1
           }
         }
       }

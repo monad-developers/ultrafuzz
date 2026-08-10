@@ -295,6 +295,10 @@
       "items": {
         "type": "object",
         "properties": {
+          "kind": {
+            "type": "string",
+            "enum": ["generated-test", "support-file"]
+          },
           "strategy": {
             "type": "string",
             "minLength": 1
@@ -302,6 +306,11 @@
           "node_id": {
             "type": "string",
             "minLength": 1
+          },
+          "attempt_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
           },
           "source_manifest_path": {
             "type": "string",
@@ -316,7 +325,15 @@
             "minLength": 1
           }
         },
-        "required": ["strategy", "node_id", "source_manifest_path", "source_relative_path", "reason"],
+        "required": [
+          "kind",
+          "strategy",
+          "node_id",
+          "attempt_index",
+          "source_manifest_path",
+          "source_relative_path",
+          "reason"
+        ],
         "additionalProperties": false
       }
     }
