@@ -8,9 +8,12 @@ import test from "node:test";
 import {
   ARTIFACT_VERIFICATION_SCHEMA_VERSION,
   PLANNED_GRAPH_SCHEMA_VERSION,
+  SMITHERS_TASK_MANIFEST_SCHEMA_VERSION,
+  SMITHERS_TASK_METADATA_SCHEMA_VERSION,
   artifactContractDefinition,
   artifactContractSchemaBinding,
   createRunLayout,
+  getNodeArtifactDir,
   updateNodeState,
   writeArtifactManifest,
   writeFileDurable,
@@ -18,22 +21,29 @@ import {
   type ArtifactManifestOutputContract,
   type ArtifactVerificationMarker,
   type PlannedGraphDocument,
-  type RunLayout
+  type PlannedGraphNodeDocument,
+  type RunLayout,
+  type SmithersTaskManifestDocument,
+  type SmithersTaskManifestTask
 } from "@ultrafuzz/artifacts";
 
 import { projectCanonicalFinalReport } from "../src/final-report-markdown.js";
-import { loadVerifiedFinalReportSnapshot, VerifiedOutputError } from "../src/verified-output.js";
+import { WORKFLOW_CONTROL_INTEGRITY_SCHEMA_VERSION } from "../src/runtime-contracts.js";
+import {
+  loadVerifiedFinalReportSnapshot,
+  loadVerifiedNodeOutputSnapshot,
+  VerifiedOutputError
+} from "../src/verified-output.js";
 
 const WORKFLOW_RUN_ID = "workflow-current";
 const REPORT_ATTEMPT_ID = "release-summary";
 const REPORT_LOGICAL_ID = "security-report";
 const REPORT_JSON_PATH = "deliverables/current-audit.json";
 const REPORT_MARKDOWN_PATH = "deliverables/current-audit.md";
-const AGENT_TASK_ID = `node:${REPORT_ATTEMPT_ID}`;
-const VERIFIER_TASK_ID = `verify:${REPORT_ATTEMPT_ID}`;
 
 interface ReportFixture {
   layout: RunLayout;
+  attemptId: string;
   reportPath: string;
   markdownPath: string;
   reportBytes: Buffer;
@@ -56,6 +66,240 @@ test("verified final-report reader binds immutable current bytes to verifier and
   assert.deepEqual(fs.readFileSync(fixture.markdownPath), fixture.markdownBytes);
 });
 
+test("verified final-report selection resolves one finalized sealed model-fanout attempt", () => {
+  const selectedAttempt = `${REPORT_ATTEMPT_ID}__model_0__attempt_0`;
+  const fixture = createVerifiedReportFixture("verified-report-model-fanout", {
+    attemptId: selectedAttempt,
+    modelFanout: [
+      {
+        model_profile_id: "review-a",
+        agent_ref: "CodexAgent",
+        model_name: "gpt-test-a",
+        reasoning_effort: "high",
+        model_index: 0,
+        loop_index: 0,
+        attempt_index: 0
+      },
+      {
+        model_profile_id: "review-b",
+        agent_ref: "CodexAgent",
+        model_name: "gpt-test-b",
+        reasoning_effort: "high",
+        model_index: 1,
+        loop_index: 0,
+        attempt_index: 0
+      }
+    ]
+  });
+
+  const loaded = loadVerifiedFinalReportSnapshot(fixture.layout.root);
+
+  assert.equal(loaded.authority.attempt_id, selectedAttempt);
+  assert.equal(loaded.authority.logical_node_id, REPORT_LOGICAL_ID);
+});
+
+test("post-finalization property fan-in remains readable through sealed fanout ancestor authority", () => {
+  const outputRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-verified-fanout-fanin-"));
+  const discoveryOutput = boundOutput("setup/invariant-evidence-ledger.json", "ultrafuzz/invariant-ledger@1", true);
+  const lensOutput = boundOutput("custom/recon-lens.json", "ultrafuzz/property-lens@2", true);
+  const faninOutputs = [
+    boundOutput("handoffs/canonical-properties.json", "ultrafuzz/properties@2", true),
+    boundOutput("handoffs/canonical-properties.md", "ultrafuzz/nonempty-markdown@1", false)
+  ];
+  const lensAttemptIds = [
+    "property-specification-recon__model_0__attempt_0",
+    "property-specification-recon__model_1__attempt_0"
+  ];
+  const graph: PlannedGraphDocument = {
+    schema_version: PLANNED_GRAPH_SCHEMA_VERSION,
+    graph_version: "3",
+    topology_version: 2,
+    groups: {},
+    nodes: [
+      {
+        id: "project-discovery",
+        logical_id: "project-discovery",
+        display_name: "Project discovery",
+        kind: "agentic",
+        depends_on: [],
+        artifact_dir: "artifacts/project-discovery",
+        outputs: [discoveryOutput],
+        prompt_id: "project-discovery",
+        prompt_path: "setup/project-discovery.md",
+        loop: { index: 0, count: 1, mode: "parallel", attempt_index: 0 },
+        model_fanout: [],
+        workflow: { node_id: "node:project-discovery", task_node_ids: ["node:project-discovery"] }
+      },
+      {
+        id: "property-specification-recon",
+        logical_id: "property-specification-recon",
+        display_name: "Property specification recon",
+        kind: "agentic",
+        depends_on: ["project-discovery"],
+        artifact_dir: "artifacts/property-specification-recon",
+        outputs: [lensOutput],
+        prompt_id: "property-specification-recon",
+        prompt_path: "properties/recon.md",
+        loop: { index: 0, count: 1, mode: "parallel", attempt_index: 0 },
+        model_fanout: [
+          {
+            model_profile_id: "lens-a",
+            agent_ref: "CodexAgent",
+            model_name: "gpt-test-a",
+            reasoning_effort: "high",
+            model_index: 0,
+            loop_index: 0,
+            attempt_index: 0
+          },
+          {
+            model_profile_id: "lens-b",
+            agent_ref: "CodexAgent",
+            model_name: "gpt-test-b",
+            reasoning_effort: "high",
+            model_index: 1,
+            loop_index: 0,
+            attempt_index: 0
+          }
+        ],
+        workflow: {
+          node_id: `node:${lensAttemptIds[0]}`,
+          task_node_ids: lensAttemptIds.map((attemptId) => `node:${attemptId}`)
+        }
+      },
+      {
+        id: "property-specification-fanin",
+        logical_id: "property-specification-fanin",
+        display_name: "Property specification fan-in",
+        kind: "agentic",
+        depends_on: ["property-specification-recon"],
+        artifact_dir: "artifacts/property-specification-fanin",
+        outputs: faninOutputs,
+        prompt_id: "property-specification-fanin",
+        prompt_path: "properties/fanin.md",
+        loop: { index: 0, count: 1, mode: "parallel", attempt_index: 0 },
+        model_fanout: [],
+        workflow: {
+          node_id: "node:property-specification-fanin",
+          task_node_ids: ["node:property-specification-fanin"]
+        }
+      }
+    ]
+  };
+  const layout = createRunLayout({
+    outputRoot,
+    runId: "verified-fanout-fanin",
+    graph,
+    graphFingerprint: "f".repeat(64),
+    configFingerprint: "e".repeat(64),
+    stateNodes: [
+      {
+        id: "project-discovery",
+        logicalNodeId: "project-discovery",
+        artifactDir: "artifacts/project-discovery",
+        outputs: [discoveryOutput]
+      },
+      ...lensAttemptIds.map((attemptId) => ({
+        id: attemptId,
+        logicalNodeId: "property-specification-recon",
+        artifactDir: `artifacts/${attemptId}`,
+        outputs: [lensOutput]
+      })),
+      {
+        id: "property-specification-fanin",
+        logicalNodeId: "property-specification-fanin",
+        artifactDir: "artifacts/property-specification-fanin",
+        outputs: faninOutputs
+      }
+    ]
+  });
+  finalizeNodeOutputs(layout, graph.nodes[0]!, "project-discovery", {
+    [discoveryOutput.path]: JSON.stringify({
+      schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+      entries: [
+        {
+          id: "evidence-1",
+          source_path: "docs/overview.md",
+          source_location: "line 1",
+          kind: "invariant",
+          verbatim: "Supply accounting remains consistent.",
+          inventory_ids: ["inventory-1"]
+        }
+      ],
+      inventory_rows: [
+        { id: "inventory-1", description: "Supply accounting remains consistent.", ledger_ids: ["evidence-1"] }
+      ],
+      scan_probes: []
+    })
+  });
+  const lensDocument = JSON.stringify({
+    schema_version: "ultrafuzz.property-lens.v2",
+    properties: [
+      {
+        id: "recon-1",
+        description: "Supply accounting remains consistent.",
+        category: "accounting",
+        priority: "high"
+      }
+    ]
+  });
+  for (const [modelIndex, attemptId] of lensAttemptIds.entries()) {
+    finalizeNodeOutputs(
+      layout,
+      graph.nodes[1]!,
+      attemptId,
+      { [lensOutput.path]: lensDocument },
+      ["project-discovery"],
+      modelIndex
+    );
+  }
+  finalizeNodeOutputs(
+    layout,
+    graph.nodes[2]!,
+    "property-specification-fanin",
+    {
+      "handoffs/canonical-properties.json": JSON.stringify({
+        schema_version: "ultrafuzz.properties.v2",
+        properties: [
+          {
+            id: "property-1",
+            description: "Supply accounting remains consistent.",
+            category: "accounting",
+            priority: "high",
+            sources: [{ source_node_id: "property-specification-recon", source_property_id: "recon-1" }],
+            ledger_ids: ["evidence-1"]
+          }
+        ]
+      }),
+      "handoffs/canonical-properties.md": [
+        "### Canonical property: property-1",
+        "- description: Supply accounting remains consistent.",
+        "- category: accounting",
+        "- priority: high",
+        "- sources: property-specification-recon:recon-1",
+        "- ledger_ids: evidence-1",
+        "### End canonical property: property-1"
+      ].join("\n")
+    },
+    lensAttemptIds
+  );
+  const tasks = graph.nodes.flatMap((node) =>
+    plannedAttemptIds(node).map((attemptId) => smithersTaskForNode(layout, graph, node, attemptId))
+  );
+  writeSealedTaskAuthority(layout, graph, tasks);
+
+  const loaded = loadVerifiedNodeOutputSnapshot({
+    runRoot: layout.root,
+    logicalNodeId: "property-specification-fanin",
+    attemptId: "property-specification-fanin"
+  });
+
+  assert.equal(loaded.attempt_id, "property-specification-fanin");
+  assert.deepEqual(
+    loaded.outputs.map((output) => output.path),
+    faninOutputs.map((output) => output.path)
+  );
+});
+
 test("post-verification report mutation is rejected even when the physical JSON remains shape-valid", () => {
   const fixture = createVerifiedReportFixture("verified-report-mutated");
   const mutated = Buffer.concat([fixture.reportBytes, Buffer.from(" \n", "utf8")]);
@@ -70,6 +314,19 @@ test("post-verification report mutation is rejected even when the physical JSON 
   );
   assert.deepEqual(fs.readFileSync(fixture.reportPath), mutated);
   assert.deepEqual(fs.readFileSync(fixture.markdownPath), fixture.markdownBytes);
+});
+
+test("post-finalization reads reject task-manifest bytes that no longer match the workflow-control seal", () => {
+  const fixture = createVerifiedReportFixture("verified-report-task-authority-mutated");
+  fs.appendFileSync(path.join(fixture.layout.root, "smithers", "tasks.json"), " \n");
+
+  assert.throws(
+    () => loadVerifiedFinalReportSnapshot(fixture.layout.root),
+    (error: unknown) =>
+      error instanceof VerifiedOutputError &&
+      error.code === "VERIFIED_OUTPUT_AUTHORITY_INVALID" &&
+      /sealed Smithers task authority/iu.test(error.message)
+  );
 });
 
 test("shape-valid severity drift is rejected by current semantic gates despite matching authority digests", () => {
@@ -209,10 +466,18 @@ function createVerifiedReportFixture(
     report?: Record<string, unknown>;
     markdown?: string;
     outputs?: ArtifactManifestOutputContract[];
+    attemptId?: string;
+    modelFanout?: PlannedGraphNodeDocument["model_fanout"];
   } = {}
 ): ReportFixture {
   const outputRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-verified-output-"));
   const outputs = override.outputs ?? finalReportOutputs();
+  const attemptId = override.attemptId ?? REPORT_ATTEMPT_ID;
+  const modelFanout = override.modelFanout ?? [];
+  const plannedAttemptIds =
+    modelFanout.length <= 1
+      ? [REPORT_ATTEMPT_ID]
+      : modelFanout.map((model) => `${REPORT_ATTEMPT_ID}__model_${model.model_index}__attempt_${model.attempt_index}`);
   const graph: PlannedGraphDocument = {
     schema_version: PLANNED_GRAPH_SCHEMA_VERSION,
     graph_version: "3",
@@ -230,7 +495,11 @@ function createVerifiedReportFixture(
         prompt_id: REPORT_LOGICAL_ID,
         prompt_path: "review/final-report.md",
         loop: { index: 0, count: 1, mode: "parallel", attempt_index: 0 },
-        model_fanout: []
+        model_fanout: modelFanout,
+        workflow: {
+          node_id: `node:${plannedAttemptIds[0]!}`,
+          task_node_ids: plannedAttemptIds.map((plannedAttemptId) => `node:${plannedAttemptId}`)
+        }
       }
     ]
   };
@@ -242,9 +511,9 @@ function createVerifiedReportFixture(
     configFingerprint: "e".repeat(64),
     stateNodes: [
       {
-        id: REPORT_ATTEMPT_ID,
+        id: attemptId,
         logicalNodeId: REPORT_LOGICAL_ID,
-        artifactDir: `artifacts/${REPORT_ATTEMPT_ID}`,
+        artifactDir: `artifacts/${attemptId}`,
         outputs
       }
     ]
@@ -255,42 +524,42 @@ function createVerifiedReportFixture(
   const markdownBytes = Buffer.from(override.markdown ?? projection!.markdown, "utf8");
   const reportPath = path.join(
     layout.artifactsDir,
-    REPORT_ATTEMPT_ID,
+    attemptId,
     outputs.find((output) => output.contract === "ultrafuzz/report@2")?.path ?? REPORT_JSON_PATH
   );
   const markdownPath = path.join(
     layout.artifactsDir,
-    REPORT_ATTEMPT_ID,
+    attemptId,
     outputs.find((output) => output.contract === "ultrafuzz/nonempty-markdown@1")?.path ?? REPORT_MARKDOWN_PATH
   );
   for (const output of outputs) {
     writeFileDurable(
-      path.join(layout.artifactsDir, REPORT_ATTEMPT_ID, output.path),
+      path.join(layout.artifactsDir, attemptId, output.path),
       output.contract === "ultrafuzz/report@2" ? reportBytes : markdownBytes
     );
   }
 
   writeArtifactManifest({
     layout,
-    nodeId: REPORT_ATTEMPT_ID,
+    nodeId: attemptId,
     include: outputs.map((output) => output.path),
     outputs,
     provenance: {
-      producer_node_id: REPORT_ATTEMPT_ID,
+      producer_node_id: attemptId,
       logical_node_id: REPORT_LOGICAL_ID,
       attempt_index: 0,
       loop_index: 0,
       model_index: 0,
       agent_ref: "Codex",
       workflow_run_id: WORKFLOW_RUN_ID,
-      workflow_task_id: AGENT_TASK_ID,
+      workflow_task_id: `node:${attemptId}`,
       origin: "workflow",
       metadata: { concrete_node_id: REPORT_ATTEMPT_ID }
     }
   });
   const marker: ArtifactVerificationMarker = {
     schema_version: ARTIFACT_VERIFICATION_SCHEMA_VERSION,
-    attempt_id: REPORT_ATTEMPT_ID,
+    attempt_id: attemptId,
     node_id: REPORT_LOGICAL_ID,
     artifacts: outputs.map((output) => ({
       ...output,
@@ -301,8 +570,8 @@ function createVerifiedReportFixture(
       sha256: digest(output.contract === "ultrafuzz/report@2" ? reportBytes : markdownBytes)
     }))
   };
-  writeJsonDurable(path.join(layout.root, ".ultrafuzz-verification", `${REPORT_ATTEMPT_ID}.json`), marker);
-  updateNodeState(layout, REPORT_ATTEMPT_ID, {
+  writeJsonDurable(path.join(layout.root, ".ultrafuzz-verification", `${attemptId}.json`), marker);
+  updateNodeState(layout, attemptId, {
     status: "succeeded",
     finished_at: new Date().toISOString(),
     wait_since: undefined,
@@ -311,16 +580,269 @@ function createVerifiedReportFixture(
     provenance: {
       workflow: {
         run_id: WORKFLOW_RUN_ID,
-        task_id: VERIFIER_TASK_ID,
-        agent_task_id: AGENT_TASK_ID,
-        verifier_task_id: VERIFIER_TASK_ID,
+        task_id: `verify:${attemptId}`,
+        agent_task_id: `node:${attemptId}`,
+        verifier_task_id: `verify:${attemptId}`,
         state: "finished",
         attempt: 0
       },
       output_contracts: { ok: true, missing: [] }
     }
   });
-  return { layout, reportPath, markdownPath, reportBytes, markdownBytes };
+  const tasks = plannedAttemptIds.map((plannedAttemptId) =>
+    smithersTaskForNode(layout, graph, graph.nodes[0]!, plannedAttemptId)
+  );
+  writeSealedTaskAuthority(layout, graph, tasks);
+  return { layout, attemptId, reportPath, markdownPath, reportBytes, markdownBytes };
+}
+
+function boundOutput(
+  artifactPath: string,
+  contract: ArtifactManifestOutputContract["contract"],
+  primary: boolean
+): ArtifactManifestOutputContract {
+  return {
+    path: artifactPath,
+    contract,
+    contract_digest: artifactContractDefinition(contract).digest,
+    ...(artifactContractSchemaBinding(contract) ?? {}),
+    primary
+  };
+}
+
+function finalizeNodeOutputs(
+  layout: RunLayout,
+  node: PlannedGraphNodeDocument,
+  attemptId: string,
+  contents: Readonly<Record<string, string>>,
+  prerequisiteAttemptIds: readonly string[] = [],
+  modelIndex = 0
+): void {
+  const bytesByPath = new Map<string, Buffer>();
+  for (const output of node.outputs) {
+    const value = contents[output.path];
+    if (value === undefined) throw new Error(`missing fixture output ${output.path}`);
+    const bytes = Buffer.from(value, "utf8");
+    bytesByPath.set(output.path, bytes);
+    writeFileDurable(path.join(layout.artifactsDir, attemptId, output.path), bytes);
+  }
+  writeArtifactManifest({
+    layout,
+    nodeId: attemptId,
+    include: node.outputs.map((output) => output.path),
+    outputs: node.outputs,
+    prerequisiteNodeIds: [...prerequisiteAttemptIds],
+    provenance: {
+      producer_node_id: attemptId,
+      logical_node_id: node.logical_id,
+      attempt_index: node.loop.attempt_index,
+      loop_index: node.loop.index,
+      model_index: modelIndex,
+      agent_ref: "CodexAgent",
+      workflow_run_id: WORKFLOW_RUN_ID,
+      workflow_task_id: `node:${attemptId}`,
+      origin: "workflow",
+      metadata: { concrete_node_id: node.id }
+    }
+  });
+  const marker: ArtifactVerificationMarker = {
+    schema_version: ARTIFACT_VERIFICATION_SCHEMA_VERSION,
+    attempt_id: attemptId,
+    node_id: node.logical_id,
+    artifacts: node.outputs.map((output) => ({ ...output, sha256: digest(bytesByPath.get(output.path)!) })),
+    publications: node.outputs.map((output) => ({ path: output.path, sha256: digest(bytesByPath.get(output.path)!) }))
+  };
+  writeJsonDurable(path.join(layout.root, ".ultrafuzz-verification", `${attemptId}.json`), marker);
+  updateNodeState(layout, attemptId, {
+    status: "succeeded",
+    finished_at: new Date().toISOString(),
+    wait_since: undefined,
+    wait_reason: undefined,
+    next_eligible_action: undefined,
+    provenance: {
+      workflow: {
+        run_id: WORKFLOW_RUN_ID,
+        task_id: `verify:${attemptId}`,
+        agent_task_id: `node:${attemptId}`,
+        verifier_task_id: `verify:${attemptId}`,
+        state: "finished",
+        attempt: 0
+      },
+      output_contracts: { ok: true, missing: [] }
+    }
+  });
+}
+
+function plannedAttemptIds(node: PlannedGraphNodeDocument): string[] {
+  if (node.model_fanout.length <= 1) return [node.id];
+  return node.model_fanout.map((model) => `${node.id}__model_${model.model_index}__attempt_${model.attempt_index}`);
+}
+
+function smithersTaskForNode(
+  layout: RunLayout,
+  graph: PlannedGraphDocument,
+  node: PlannedGraphNodeDocument,
+  attemptId: string
+): SmithersTaskManifestTask {
+  const nodesById = new Map(graph.nodes.map((candidate) => [candidate.id, candidate] as const));
+  const attemptOffset = plannedAttemptIds(node).indexOf(attemptId);
+  assert.notEqual(attemptOffset, -1);
+  const model = node.model_fanout[attemptOffset];
+  const dependencies = node.depends_on.flatMap((dependencyId) => plannedAttemptIds(nodesById.get(dependencyId)!));
+  const dependencySmithersNodeIds = node.depends_on.flatMap((dependencyId) => {
+    const dependency = nodesById.get(dependencyId)!;
+    return dependency.kind === "agentic"
+      ? plannedAttemptIds(dependency).map((dependencyAttemptId) => `verify:${dependencyAttemptId}`)
+      : [];
+  });
+  const ancestors = new Set<string>();
+  const pending = [...node.depends_on];
+  while (pending.length > 0) {
+    const dependencyId = pending.pop()!;
+    if (ancestors.has(dependencyId)) continue;
+    ancestors.add(dependencyId);
+    pending.push(...nodesById.get(dependencyId)!.depends_on);
+  }
+  const dependencyArtifactDirs = graph.nodes
+    .filter((candidate) => ancestors.has(candidate.id))
+    .flatMap(plannedAttemptIds)
+    .map((ancestorAttemptId) => getNodeArtifactDir(layout, ancestorAttemptId, { create: true }));
+  const artifactDir = getNodeArtifactDir(layout, attemptId, { create: true });
+  const workspacePath = path.join(layout.workspacesDir, attemptId);
+  const outputs = node.outputs.map((output) => ({
+    path: output.path,
+    contract: output.contract,
+    contractDigest: output.contract_digest,
+    ...(output.schema_file === undefined
+      ? {}
+      : {
+          schemaFile: output.schema_file,
+          schemaId: output.schema_id,
+          schemaSha256: output.schema_sha256,
+          schemaBundleSha256: output.schema_bundle_sha256,
+          validatorBuild: output.validator_build
+        }),
+    primary: output.primary
+  }));
+  const agentRef = model?.agent_ref ?? "CodexAgent";
+  const modelName = model?.model_name ?? "gpt-test";
+  const reasoningEffort = model?.reasoning_effort ?? "high";
+  const execution = {
+    mode: "local" as const,
+    resources: { cpu: 2, memoryMiB: 1_024, timeoutSeconds: 60 },
+    agentCredentialEnv: []
+  };
+  return {
+    attemptId,
+    concreteNodeId: node.id,
+    logicalNodeId: node.logical_id,
+    preparationSmithersNodeId: `prepare:${attemptId}`,
+    smithersNodeId: `node:${attemptId}`,
+    verifierSmithersNodeId: `verify:${attemptId}`,
+    agentRef,
+    modelName,
+    reasoningEffort,
+    dependencies,
+    dependencySmithersNodeIds,
+    timeoutMs: 60_000,
+    heartbeatTimeoutMs: 60_000,
+    retries: 0,
+    retryPolicy: { backoff: "exponential", initialDelayMs: 1_000, maxDelayMs: 30_000 },
+    workspacePath,
+    artifactDir,
+    dependencyArtifactDirs,
+    renderedPromptPath: path.join(layout.root, "prompts", `${attemptId}.md`),
+    execution,
+    metadata: {
+      schemaVersion: SMITHERS_TASK_METADATA_SCHEMA_VERSION,
+      run: {
+        ultrafuzzRunId: layout.runId,
+        smithersWorkflowName: WORKFLOW_RUN_ID,
+        graphVersion: "3",
+        topologyVersion: 2
+      },
+      node: {
+        concreteNodeId: node.id,
+        logicalNodeId: node.logical_id,
+        attemptId,
+        label: node.display_name,
+        kind: "agentic",
+        ...(node.prompt_path === "" ? {} : { promptPath: node.prompt_path })
+      },
+      dependencies: {
+        concreteNodeIds: [...node.depends_on],
+        attemptIds: dependencies,
+        smithersNodeIds: dependencySmithersNodeIds
+      },
+      loop: {
+        index: node.loop.index,
+        count: node.loop.count,
+        mode: node.loop.mode,
+        attemptIndex: node.loop.attempt_index
+      },
+      model: {
+        profileId: model?.model_profile_id ?? "default",
+        agentRef,
+        modelName,
+        reasoningEffort,
+        modelIndex: model?.model_index ?? 0,
+        attemptIndex: model?.attempt_index ?? node.loop.attempt_index
+      },
+      workspace: { primitive: "worktree", path: workspacePath, repoPath: "/repo", trustModel: "skip-permissions" },
+      artifacts: { dir: artifactDir, outputs, manifestPath: path.join(artifactDir, "artifact-manifest.json") },
+      retryPolicy: { maxAttempts: 1, smithersRetries: 0 },
+      timeout: { milliseconds: 60_000, seconds: 60, heartbeatTimeoutMs: 60_000 },
+      execution: { mode: execution.mode, resources: execution.resources }
+    }
+  };
+}
+
+function writeSealedTaskAuthority(
+  layout: RunLayout,
+  graph: PlannedGraphDocument,
+  tasks: SmithersTaskManifestTask[]
+): void {
+  const smithersRoot = path.join(layout.root, "smithers");
+  fs.mkdirSync(smithersRoot, { recursive: true });
+  const tasksPath = path.join(smithersRoot, "tasks.json");
+  const document: SmithersTaskManifestDocument = {
+    schema_version: SMITHERS_TASK_MANIFEST_SCHEMA_VERSION,
+    run_id: layout.runId,
+    smithers_run_id: `ultrafuzz-${layout.runId}`,
+    workflow_name: WORKFLOW_RUN_ID,
+    pinned_submodules: null,
+    tasks
+  };
+  writeJsonDurable(tasksPath, document);
+  const graphBytes = fs.readFileSync(layout.graphPath);
+  const taskBytes = fs.readFileSync(tasksPath);
+  const emptyFile = { sha256: digest(Buffer.alloc(0)), size_bytes: 0 };
+  const files = {
+    graph: { sha256: digest(graphBytes), size_bytes: graphBytes.byteLength },
+    expanded_graph: emptyFile,
+    graph_fingerprint: emptyFile,
+    config: emptyFile,
+    tasks: { sha256: digest(taskBytes), size_bytes: taskBytes.byteLength },
+    input: emptyFile,
+    workflow: emptyFile,
+    evidence_workflow: emptyFile
+  };
+  writeJsonDurable(path.join(smithersRoot, "control-integrity.json"), {
+    schema_version: WORKFLOW_CONTROL_INTEGRITY_SCHEMA_VERSION,
+    run_id: layout.runId,
+    files,
+    execution_files: [],
+    bindings: {
+      run_id: layout.runId,
+      graph_fingerprint: "f".repeat(64),
+      config_fingerprint: "e".repeat(64),
+      expected_state_node_ids: graph.nodes.map((node) => node.id).sort(),
+      expected_task_attempt_ids: tasks.map((task) => task.attemptId).sort(),
+      expected_task_node_ids: tasks
+        .flatMap((task) => [task.preparationSmithersNodeId, task.smithersNodeId, task.verifierSmithersNodeId])
+        .sort()
+    }
+  });
 }
 
 function finalReportOutputs(): ArtifactManifestOutputContract[] {
@@ -361,16 +883,8 @@ function currentReport(runId: string, issues: Record<string, unknown>[] = []): R
     non_production_outcomes: [],
     property_provenance: [],
     property_implementation_coverage: {
-      priority_threshold: "high",
-      priorities: ["high"],
-      selected_property_ids: [],
-      implemented_property_ids: [],
-      blocked_property_ids: [],
-      pending_property_ids: [],
-      deferred_property_ids: [],
-      reference_expected_property_ids: [],
-      reference_expectation_ids: [],
-      blocker_summaries: []
+      status: "not-planned",
+      reason: "property-implementation-track-not-declared"
     }
   };
 }

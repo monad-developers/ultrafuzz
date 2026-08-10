@@ -14,7 +14,8 @@ import {
   parseStrictJsonBytes,
   parseSmithersTaskManifestBytes,
   safeResolveInside,
-  type RunLayout
+  type RunLayout,
+  type SmithersTaskManifestDocument
 } from "@ultrafuzz/artifacts";
 import { assertExpandedGraphSchema, fingerprintGraph } from "@ultrafuzz/topology";
 
@@ -101,6 +102,14 @@ export interface VerifiedWorkflowControlSnapshot {
   executionFiles: readonly (WorkflowExecutionControlFile & { contents: Buffer })[];
   bindings: WorkflowControlBindings;
   integrityContents: Buffer;
+}
+
+export interface VerifiedSealedTaskManifestSnapshot {
+  tasksPath: string;
+  integrityPath: string;
+  contents: Buffer;
+  integrityContents: Buffer;
+  document: SmithersTaskManifestDocument;
 }
 
 export interface MaterializedWorkflowExecutionSnapshot {
@@ -243,6 +252,71 @@ export function sealWorkflowControlFiles(input: {
 
 export function verifyWorkflowControlFiles(projectRoot: string, layout: RunLayout): WorkflowControlPaths {
   return verifyWorkflowControlSnapshot(projectRoot, layout).paths;
+}
+
+/**
+ * Read the task manifest through the workflow-control seal without needing the
+ * external project checkout that owns the generated workflow source. This is
+ * the post-finalization authority needed to rerun artifact gates safely.
+ */
+export function verifySealedTaskManifestSnapshot(layout: RunLayout): VerifiedSealedTaskManifestSnapshot {
+  const smithersRoot = safeResolveInside(layout.root, "smithers", "workflow control directory");
+  const tasksPath = safeResolveInside(smithersRoot, "tasks.json", "workflow task manifest");
+  const integrityPath = safeResolveInside(smithersRoot, WORKFLOW_CONTROL_INTEGRITY_FILE, "workflow control seal");
+  const integrityContents = readBoundedRegularFile(layout.root, integrityPath, "workflow control seal");
+  const seal = parseWorkflowControlIntegritySeal(integrityContents);
+  if (seal.run_id !== layout.runId) throw new Error(`workflow control seal run ID does not match ${layout.runId}`);
+
+  const graphContents = readBoundedRegularFile(layout.root, layout.graphPath, "run graph");
+  const contents = readBoundedRegularFile(layout.root, tasksPath, "workflow task manifest");
+  for (const [key, bytes] of [
+    ["graph", graphContents],
+    ["tasks", contents]
+  ] as const) {
+    const observed = digestBytes(bytes);
+    const expected = seal.files[key];
+    if (observed.sha256 !== expected.sha256 || observed.size_bytes !== expected.size_bytes) {
+      throw new Error(`sealed workflow control file changed: ${controlFileLabel(key)}`);
+    }
+  }
+
+  const graph = assertPlannedGraph(parseStrictJsonBytes(graphContents));
+  const document = parseSmithersTaskManifestBytes(contents);
+  assertSmithersTaskManifestMatchesPlannedGraph(document, graph);
+  if (document.run_id !== layout.runId) throw new Error("workflow task manifest run ID does not match the run root");
+
+  const graphNodeIds = sortedUniqueIds(
+    graph.nodes.map((node) => node.id),
+    "run graph node"
+  );
+  const taskAttemptIds = sortedUniqueIds(
+    document.tasks.map((task) => task.attemptId),
+    "workflow task attempt"
+  );
+  const taskNodeIds = sortedUniqueIds(
+    document.tasks.flatMap((task) => [
+      task.preparationSmithersNodeId,
+      task.smithersNodeId,
+      task.verifierSmithersNodeId
+    ]),
+    "workflow task node"
+  );
+  if (
+    JSON.stringify(graphNodeIds) !== JSON.stringify(seal.bindings.expected_state_node_ids) ||
+    JSON.stringify(taskAttemptIds) !== JSON.stringify(seal.bindings.expected_task_attempt_ids) ||
+    JSON.stringify(taskNodeIds) !== JSON.stringify(seal.bindings.expected_task_node_ids)
+  ) {
+    throw new Error("workflow task manifest no longer matches the sealed completeness binding");
+  }
+  const state = parseRecordJson(readBoundedRegularFile(layout.root, layout.statePath, "run state"), "run state");
+  if (
+    state.run_id !== layout.runId ||
+    state.graph_fingerprint !== seal.bindings.graph_fingerprint ||
+    state.config_fingerprint !== seal.bindings.config_fingerprint
+  ) {
+    throw new Error("run state identity or fingerprints no longer match the sealed task authority");
+  }
+  return { tasksPath, integrityPath, contents, integrityContents, document };
 }
 
 export function workflowControlGeneration(projectRoot: string, layout: RunLayout): string {
