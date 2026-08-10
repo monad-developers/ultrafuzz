@@ -2554,6 +2554,7 @@ async function finalizeTerminalTask(input: {
       const manifest = writeArtifactManifest({
         layout: input.layout,
         nodeId: input.task.attemptId,
+        include: [...verifierAuthority.publications.keys()],
         outputs: input.node.outputs,
         prerequisiteNodeIds: input.task.dependencies,
         provenance: artifactProvenance(input.task, input.workflowRunId)
@@ -2828,6 +2829,12 @@ function readControllerManifestSnapshot(
       throw new Error(`controller artifact manifest repeats file ${JSON.stringify(file.path)}`);
     }
     manifestFiles.set(file.path, file);
+  }
+  if (
+    manifestFiles.size !== authority.publications.size ||
+    [...manifestFiles].some(([relativePath]) => !authority.publications.has(relativePath))
+  ) {
+    throw new Error(`controller artifact manifest file set does not match the exact verifier publications`);
   }
   for (const publication of authority.publications.values()) {
     const file = manifestFiles.get(publication.path);

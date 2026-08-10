@@ -8138,7 +8138,7 @@ test("startRun includes bounded workflow runner stdio when submission fails", as
   assert.equal(diagnostic.details?.stderr, "submission stderr detail token=<redacted>\n");
 });
 
-test("syncRun accepts canonical findings without rewriting them and writes manifests", async () => {
+test("syncRun accepts canonical findings without rewriting them and manifests only verified publications", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -8158,6 +8158,14 @@ test("syncRun accepts canonical findings without rewriting them and writes manif
   const run = await startRun({ projectRoot: project, runId: "sync-success", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+  const unverifiedSidecarPath = path.join(
+    run.value!.run_root,
+    "artifacts",
+    "project-discovery",
+    "agent-unverified-sidecar.json"
+  );
+  const unverifiedSidecarBytes = Buffer.from('{"unverified":true}\n', "utf8");
+  fs.writeFileSync(unverifiedSidecarPath, unverifiedSidecarBytes);
   const findingsPath = path.join(run.value!.run_root, "artifacts", "project-discovery", "findings.json");
   const findingsBefore = fs.readFileSync(findingsPath);
 
@@ -8172,6 +8180,7 @@ test("syncRun accepts canonical findings without rewriting them and writes manif
   assert.equal(state.status, "succeeded");
   assert.equal(state.nodes?.["project-discovery"]?.status, "succeeded");
   assert.deepEqual(fs.readFileSync(findingsPath), findingsBefore);
+  assert.deepEqual(fs.readFileSync(unverifiedSidecarPath), unverifiedSidecarBytes);
   const findings = JSON.parse(fs.readFileSync(findingsPath, "utf8")) as Array<{ source_node_id?: string }>;
   assert.equal(findings[0]?.source_node_id, "project-discovery");
   const manifest = JSON.parse(
@@ -8183,11 +8192,7 @@ test("syncRun accepts canonical findings without rewriting them and writes manif
   };
   assert.equal(manifest.schema_version, "ultrafuzz.artifact-manifest.v3");
   assert.deepEqual(manifest.provenance?.metadata, { concrete_node_id: "project-discovery" });
-  assert.deepEqual(manifest.files?.map((entry) => entry.path).sort(), [
-    "findings.json",
-    "prompt.rendered.md",
-    "setup/project-discovery.md"
-  ]);
+  assert.deepEqual(manifest.files?.map((entry) => entry.path).sort(), ["findings.json", "setup/project-discovery.md"]);
   const events = fs.readFileSync(path.join(run.value!.run_root, "events.jsonl"), "utf8");
   assert.doesNotMatch(events, /findings-normalized/u);
   assert.match(events, /artifact-manifest-written/);
