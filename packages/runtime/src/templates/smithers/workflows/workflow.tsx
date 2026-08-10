@@ -435,31 +435,55 @@ function verifiedDependencyJsonArtifact(
   return { path: artifactPath, value };
 }
 
-function verifiedCurrentAncestorJsonArtifact(
+function semanticArtifactTaskDeclarations(): Array<{
+  attemptId: string;
+  logicalNodeId: string;
+  artifactDir: string;
+  dependencies: readonly string[];
+  dependencyArtifactDirs: readonly string[];
+  outputs: readonly { path: string; contract: string }[];
+}> {
+  return taskSpecs.map((candidate) => ({
+    attemptId: candidate.attemptId,
+    logicalNodeId: candidate.metadata.node.logicalNodeId,
+    artifactDir: candidate.artifactDir,
+    dependencies: candidate.metadata.dependencies.attemptIds,
+    dependencyArtifactDirs: candidate.dependencyArtifactDirs.map((directory) => path.resolve(process.cwd(), directory)),
+    outputs: candidate.outputs
+  }));
+}
+
+function declaredAncestorContractOutputs(
   task: (typeof taskSpecs)[number],
-  logicalNodeId: string,
-  relativePath: string,
-  expectedContract: string
-): { path: string; value: unknown } | undefined {
-  const producers = taskSpecs.filter((candidate) => candidate.metadata.node.logicalNodeId === logicalNodeId);
-  if (producers.length === 0) return undefined;
-  if (producers.length !== 1) {
-    throw new Error(`artifact-contract failure: authoritative ${relativePath} producer is ambiguous`);
+  contract: string,
+  options: { directOnly?: boolean } = {}
+): ReturnType<typeof declaredAncestorOutputsByContract> {
+  const declarations = semanticArtifactTaskDeclarations();
+  const current = declarations.find((candidate) => candidate.attemptId === task.attemptId);
+  if (current === undefined) {
+    throw new Error(`artifact-contract failure: current task declaration is unavailable ${task.attemptId}`);
   }
-  const producer = producers[0]!;
-  const outputs = producer.outputs.filter((output) => output.path === relativePath);
-  if (outputs.length !== 1 || outputs[0]?.contract !== expectedContract) {
+  return declaredAncestorOutputsByContract(current, declarations, contract, options);
+}
+
+function verifiedSingletonAncestorJsonArtifact(
+  task: (typeof taskSpecs)[number],
+  expectedContract: string,
+  label: string
+): { path: string; value: unknown } | undefined {
+  const outputs = declaredAncestorContractOutputs(task, expectedContract);
+  if (outputs.length === 0) return undefined;
+  if (outputs.length !== 1) {
     throw new Error(
-      `artifact-contract failure: authoritative ${relativePath} must declare current contract ${expectedContract}`
+      `artifact-contract failure: ${label} must resolve to exactly one declared ${expectedContract} ancestor output; found ${outputs.length}`
     );
   }
-  const dependencies = task.dependencyArtifactDirs.filter(
-    (dependency) => path.basename(dependency) === producer.attemptId
-  );
-  if (dependencies.length !== 1) {
-    throw new Error(`artifact-contract failure: authoritative ${relativePath} handoff is unavailable or ambiguous`);
+  const output = outputs[0]!;
+  const producer = taskSpecs.find((candidate) => candidate.attemptId === output.attemptId);
+  if (producer === undefined) {
+    throw new Error(`artifact-contract failure: declared ${label} producer is unavailable ${output.attemptId}`);
   }
-  return verifiedDependencyJsonArtifact(task, dependencies[0]!, producer, relativePath, expectedContract);
+  return verifiedDependencyJsonArtifact(task, output.artifactDir, producer, output.path, output.contract);
 }
 
 function configuredInvariantPrioritySelection(task: (typeof taskSpecs)[number]): {
@@ -495,18 +519,17 @@ function configuredInvariantPrioritySelection(task: (typeof taskSpecs)[number]):
 }
 
 function authoritativeFinalReportCoverage(task: (typeof taskSpecs)[number]): unknown | undefined {
-  if (task.metadata.node.logicalNodeId !== "final-report") return undefined;
-  const reportOutput = task.outputs.filter(
-    (output) => output.path === "report.json" && output.contract === "ultrafuzz/report@2"
-  );
+  const reportOutput = task.outputs.filter((output) => output.contract === "ultrafuzz/report@2");
+  if (reportOutput.length === 0) return undefined;
   if (reportOutput.length !== 1) {
-    throw new Error("artifact-contract failure: final-report must declare exactly one current report.json output");
+    throw new Error(
+      "artifact-contract failure: final-report must declare exactly one current ultrafuzz/report@2 output"
+    );
   }
-  const implementation = verifiedCurrentAncestorJsonArtifact(
+  const implementation = verifiedSingletonAncestorJsonArtifact(
     task,
-    "stateful-invariant-implement-properties",
-    "implemented-properties.json",
-    "ultrafuzz/implemented-properties@3"
+    "ultrafuzz/implemented-properties@3",
+    "implemented property coverage"
   );
   if (implementation === undefined) {
     return {
@@ -514,14 +537,9 @@ function authoritativeFinalReportCoverage(task: (typeof taskSpecs)[number]): unk
       reason: "property-implementation-track-not-declared"
     };
   }
-  const catalog = verifiedCurrentAncestorJsonArtifact(
-    task,
-    "property-specification-fanin",
-    "properties.json",
-    "ultrafuzz/properties@2"
-  );
+  const catalog = verifiedSingletonAncestorJsonArtifact(task, "ultrafuzz/properties@2", "canonical property catalog");
   if (catalog === undefined) {
-    throw new Error("artifact-contract failure: authoritative properties.json producer is unavailable");
+    throw new Error("artifact-contract failure: authoritative property catalog producer is unavailable");
   }
   const catalogValidation = validatePropertiesSchema(catalog.value, catalog.path);
   const implementationValidation = validateImplementedPropertiesSchema(implementation.value, implementation.path, {
@@ -2539,10 +2557,15 @@ function materializeInvariantSuiteCompanions(
   if (!invariantSuiteNodeIds.has(task.metadata.node.logicalNodeId)) {
     return;
   }
-  const implementationOutput = task.outputs.find(
-    (output) =>
-      output.path === "implemented-properties.json" && output.contract === "ultrafuzz/implemented-properties@3"
+  const implementationOutputs = task.outputs.filter(
+    (output) => output.contract === "ultrafuzz/implemented-properties@3"
   );
+  if (implementationOutputs.length > 1) {
+    throw new Error(
+      `artifact-contract failure: invariant suite producer declares ambiguous implemented property outputs ${task.attemptId}`
+    );
+  }
+  const implementationOutput = implementationOutputs[0];
   const artifactDir = realpathSync(task.metadata.artifacts.dir);
   const artifactRoots = taskArtifactRoots(task, artifactDir);
   const paths = new Set<string>();
@@ -3222,33 +3245,35 @@ function assertInvariantSuiteDependencyExpectations(
   suitePathsByDependency: ReadonlyMap<string, string[]>
 ): void {
   for (const dependency of dependencies) {
-    const dependencyRoot = realpathSync(dependency);
-    const implementationCandidate = path.join(dependencyRoot, "implemented-properties.json");
     const expectedPaths = new Set<string>();
-    let implementationPath: string | undefined;
-    if (pathEntryExists(implementationCandidate)) {
-      implementationPath = resolveRegularArtifactFile(
-        dependencyRoot,
-        implementationCandidate,
-        "artifact-contract failure: implemented properties JSON is not a regular file"
+    const producer = taskSpecs.find((candidate) => candidate.attemptId === path.basename(dependency));
+    if (producer === undefined) {
+      throw new Error(`artifact-contract failure: invariant suite producer declaration is unavailable ${dependency}`);
+    }
+    const implementationOutputs = producer.outputs.filter(
+      (output) => output.contract === "ultrafuzz/implemented-properties@3"
+    );
+    if (implementationOutputs.length > 1) {
+      throw new Error(
+        `artifact-contract failure: invariant suite producer declares ambiguous implemented property outputs ${producer.attemptId}`
       );
     }
-    if (implementationPath !== undefined) {
-      const implementationSnapshot = readBoundedRegularArtifactSnapshot(
-        dependencyRoot,
-        implementationPath,
-        "artifact-contract failure: implemented properties JSON is not a regular file",
-        MAX_VERIFIED_ARTIFACT_BYTES,
-        true
+    const implementationOutput = implementationOutputs[0];
+    if (implementationOutput !== undefined) {
+      const implementationArtifact = verifiedDependencyJsonArtifact(
+        task,
+        dependency,
+        producer,
+        implementationOutput.path,
+        implementationOutput.contract
       );
-      const raw = parseStrictJsonSnapshot(
-        implementationSnapshot,
-        `artifact-contract failure: implemented properties JSON is malformed ${implementationPath}`
+      const implementation = validateImplementedPropertiesSchema(
+        implementationArtifact.value,
+        implementationArtifact.path
       );
-      const implementation = validateImplementedPropertiesSchema(raw, implementationPath);
       if (!implementation.ok || implementation.value === undefined) {
         throw new Error(
-          `artifact-contract failure: implemented properties JSON is invalid ${implementationPath}: ${formatSchemaValidationIssues(implementation.issues)}`
+          `artifact-contract failure: implemented properties JSON is invalid ${implementationArtifact.path}: ${formatSchemaValidationIssues(implementation.issues)}`
         );
       }
       for (const record of implementation.value.properties) {
@@ -3261,6 +3286,7 @@ function assertInvariantSuiteDependencyExpectations(
         }
       }
     }
+    const dependencyRoot = realpathSync(dependency);
     const suiteRoot = path.join(dependencyRoot, "invariant-suite");
     if (expectedPaths.size > 0 && !existsSync(suiteRoot)) {
       throw new Error(
@@ -4326,21 +4352,11 @@ function verifiedAncestorPropertyLenses(
 ): Array<{ sourceNodeId: string; projectionRequired: boolean; document: unknown }> | undefined {
   const lenses: Array<{ sourceNodeId: string; projectionRequired: boolean; document: unknown }> = [];
   let producerCount = 0;
-  const declarations = taskSpecs.map((candidate) => ({
-    attemptId: candidate.attemptId,
-    logicalNodeId: candidate.metadata.node.logicalNodeId,
-    artifactDir: candidate.artifactDir,
-    dependencies: candidate.metadata.dependencies.attemptIds,
-    dependencyArtifactDirs: candidate.dependencyArtifactDirs.map((directory) => path.resolve(process.cwd(), directory)),
-    outputs: candidate.outputs
-  }));
-  const current = declarations.find((candidate) => candidate.attemptId === task.attemptId);
-  if (current === undefined) return undefined;
   let ledgerOutputs: ReturnType<typeof declaredAncestorOutputsByContract>;
   let lensOutputs: ReturnType<typeof declaredAncestorOutputsByContract>;
   try {
-    ledgerOutputs = declaredAncestorOutputsByContract(current, declarations, "ultrafuzz/invariant-ledger@1");
-    lensOutputs = declaredAncestorOutputsByContract(current, declarations, "ultrafuzz/property-lens@2", {
+    ledgerOutputs = declaredAncestorContractOutputs(task, "ultrafuzz/invariant-ledger@1");
+    lensOutputs = declaredAncestorContractOutputs(task, "ultrafuzz/property-lens@2", {
       directOnly: true
     });
   } catch {
@@ -4429,36 +4445,32 @@ function semanticGateContextForVerifiedOutput(
   if (output.schemaFile === "campaign-summary.schema.json") {
     context.artifactSet = siblingCampaignSemanticArtifacts(task, verifiedOutputs);
   } else if (output.schemaFile === "implemented-properties.schema.json") {
-    const propertyCatalog = verifiedCurrentAncestorJsonArtifact(
+    const propertyCatalog = verifiedSingletonAncestorJsonArtifact(
       task,
-      "property-specification-fanin",
-      "properties.json",
-      "ultrafuzz/properties@2"
+      "ultrafuzz/properties@2",
+      "canonical property catalog"
     );
     context.artifactSet = propertyCatalog === undefined ? {} : { propertyCatalog: propertyCatalog.value };
   } else if (output.schemaFile === "properties.schema.json") {
     const propertyLenses = verifiedAncestorPropertyLenses(task);
     context.artifactSet = propertyLenses === undefined ? {} : { propertyLenses };
   } else if (output.schemaFile === "severity-classified-findings.schema.json") {
-    const triagedFindings = verifiedCurrentAncestorJsonArtifact(
+    const triagedFindings = verifiedSingletonAncestorJsonArtifact(
       task,
-      "triage",
-      "triaged-findings.json",
-      "ultrafuzz/triaged-findings@1"
+      "ultrafuzz/triaged-findings@1",
+      "triaged findings"
     );
     context.artifactSet = triagedFindings === undefined ? {} : { triagedFindings: triagedFindings.value };
   } else if (output.schemaFile === "report.schema.json") {
-    const propertyCatalog = verifiedCurrentAncestorJsonArtifact(
+    const propertyCatalog = verifiedSingletonAncestorJsonArtifact(
       task,
-      "property-specification-fanin",
-      "properties.json",
-      "ultrafuzz/properties@2"
+      "ultrafuzz/properties@2",
+      "canonical property catalog"
     );
-    const implementedProperties = verifiedCurrentAncestorJsonArtifact(
+    const implementedProperties = verifiedSingletonAncestorJsonArtifact(
       task,
-      "stateful-invariant-implement-properties",
-      "implemented-properties.json",
-      "ultrafuzz/implemented-properties@3"
+      "ultrafuzz/implemented-properties@3",
+      "implemented property coverage"
     );
     context.artifactSet = {
       ...(propertyCatalog === undefined ? {} : { propertyCatalog: propertyCatalog.value }),

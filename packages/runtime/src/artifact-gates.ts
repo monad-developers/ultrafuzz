@@ -485,7 +485,7 @@ function verifyInvariantEvidenceArtifacts(
   if (!ledger.ok || ledger.value === undefined || !catalog.ok || catalog.value === undefined) {
     return diagnostics;
   }
-  diagnostics.push(...verifyLensReferenceExpectationPreservation(layout, node, catalog.value));
+  diagnostics.push(...verifyLensReferenceExpectationPreservation(layout, node, catalog.value, catalogPath));
   // Fan-in re-checks probe containment on the SAME ledger discovery published (issue #292). It used
   // to check none: every shape of the ledger returned before reaching a `verifyInvariantProbePath`
   // call, so an escaping probe path only ever had to survive the discovery node. The ledger lives in
@@ -905,7 +905,8 @@ function loadFinalizedPropertyLens(
 function verifyLensReferenceExpectationPreservation(
   layout: RunLayout,
   node: PlannedGraphNode,
-  catalog: PropertiesArtifact
+  catalog: PropertiesArtifact,
+  catalogPath: string
 ): RuntimeDiagnostic[] {
   const diagnostics: RuntimeDiagnostic[] = [];
   const lensRows = new Map<string, LensReferenceRow>();
@@ -995,7 +996,7 @@ function verifyLensReferenceExpectationPreservation(
         message: `Canonical property ${JSON.stringify(property.id)} carries reference expectations not present in its source lens artifacts: ${JSON.stringify(missingReferenceIds)}`,
         severity: "error",
         source: "property-fanin",
-        path: `${path.join(getNodeArtifactDir(layout, node.id), "properties.json")}#$.properties[${propertyIndex}].reference_expectations`
+        path: `${catalogPath}#$.properties[${propertyIndex}].reference_expectations`
       });
     }
   }
@@ -1035,7 +1036,7 @@ function verifyLensReferenceExpectationPreservation(
         message: `Canonical property ${JSON.stringify(property.id)} carries reference expectations but fan-in does not depend on source lens ${JSON.stringify(source.source_node_id)}`,
         severity: "error",
         source: "property-fanin",
-        path: `${path.join(getNodeArtifactDir(layout, node.id), "properties.json")}#$.properties[${propertyIndex}].sources[${sourceIndex}]`
+        path: `${catalogPath}#$.properties[${propertyIndex}].sources[${sourceIndex}]`
       });
     }
   }
