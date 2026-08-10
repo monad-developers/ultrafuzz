@@ -771,6 +771,7 @@ function loadVerifyArtifactsHarness(): {
     "publishVerifiedArtifacts",
     "writeArtifactVerificationMarker",
     "taskSpecs",
+    "taskPublishesWorkspacePatch",
     "declaredAncestorOutputsByContract",
     "declaredFinalReportOutputPair",
     `${emitted}; return { captureTaskOutputs, verifyArtifacts };`
@@ -819,6 +820,11 @@ function loadVerifyArtifactsHarness(): {
     },
     (...args: unknown[]) => markerWrites.push(args),
     [],
+    (task: VerifyArtifactsTask) =>
+      task.outputs.some((output) => output.path === "workspace.patch" && output.contract === "ultrafuzz/text@1") &&
+      task.outputs.some(
+        (output) => output.path === "workspace-patch.json" && output.contract === "ultrafuzz/workspace-patch@1"
+      ),
     declaredAncestorOutputsByContract,
     (task: VerifyArtifactsTask) => {
       const report = task.outputs.filter((output) => output.contract === "ultrafuzz/report@2");

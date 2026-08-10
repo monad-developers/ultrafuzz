@@ -9988,7 +9988,7 @@ test("syncRun rejects workspace-mirrored outputs without copying or repairing th
 
   assert.equal(first.ok, true, JSON.stringify(first.diagnostics));
   assert.equal(first.value?.status, "failed");
-  assert.ok(first.diagnostics.some((diagnostic) => diagnostic.code === "REQUIRED_ARTIFACT_MISSING"));
+  assert.ok(first.diagnostics.some((diagnostic) => diagnostic.code === "ARTIFACT_VERIFICATION_AUTHORITY_INVALID"));
   const firstState = JSON.parse(fs.readFileSync(statePath, "utf8")) as {
     status?: string;
     nodes?: Record<
@@ -10006,7 +10006,7 @@ test("syncRun rejects workspace-mirrored outputs without copying or repairing th
   const firstNode = structuredClone(firstState.nodes?.["project-discovery"]);
   assert.equal(firstState.status, "failed");
   assert.equal(firstNode?.status, "failed");
-  assert.match(firstNode?.last_error ?? "", /setup\/project-discovery\.md/u);
+  assert.match(firstNode?.last_error ?? "", /artifact verification marker does not exist/u);
   assert.deepEqual(firstNode?.provenance?.failure, {
     category: "artifact-contract",
     causal_task_id: "verify:project-discovery",
