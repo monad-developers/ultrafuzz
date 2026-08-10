@@ -27,6 +27,7 @@ import {
   type ArtifactManifestOutputContract,
   type ArtifactVerificationEntry,
   type ArtifactVerificationMarker,
+  type PropertyCampaignArtifact,
   type NodeState,
   type PlannedGraphDocument,
   type PlannedGraphNodeDocument,
@@ -137,6 +138,7 @@ export function loadVerifiedNodeOutputSnapshot(input: LoadVerifiedNodeOutputInpu
   const artifactDir = safeResolveInside(layout.artifactsDir, candidate.attemptId, "verified artifact directory");
   const publicationSnapshots = readAndBindPublications(artifactDir, plannedNode, documents);
   const outputSnapshots = validatePlannedOutputSnapshots(artifactDir, plannedNode, publicationSnapshots);
+  assertPropertyCampaignEvidencePublications(outputSnapshots, publicationSnapshots);
 
   const prerequisiteGate = verifyArtifactManifestPrerequisites(layout, candidate.attemptId);
   if (!prerequisiteGate.ok) {
@@ -432,6 +434,25 @@ function validatePlannedOutputSnapshots(
       value: validation.value
     });
   });
+}
+
+function assertPropertyCampaignEvidencePublications(
+  outputs: readonly VerifiedOutputArtifactSnapshot[],
+  publications: ReadonlyMap<string, PublicationSnapshot>
+): void {
+  for (const output of outputs) {
+    if (output.contract !== "ultrafuzz/property-campaign@3") continue;
+    const campaign = output.value as PropertyCampaignArtifact;
+    for (const entry of campaign.evidence_files) {
+      const publication = publications.get(entry.path);
+      if (publication === undefined) {
+        throw invalidAuthority(`verification marker does not publish campaign evidence ${entry.path}`);
+      }
+      if (publication.sha256 !== entry.sha256 || publication.bytes.byteLength !== entry.size_bytes) {
+        throw invalidAuthority(`campaign evidence authority does not match its declaration: ${entry.path}`);
+      }
+    }
+  }
 }
 
 function assertAuthorityRemainedCurrent(input: {

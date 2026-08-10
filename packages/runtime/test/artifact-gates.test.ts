@@ -31,6 +31,9 @@ import {
   type PlannedGraphNode
 } from "../src/index.js";
 
+const CAMPAIGN_EVIDENCE_BYTES = Buffer.from("x", "utf8");
+const CAMPAIGN_EVIDENCE_SHA256 = createHash("sha256").update(CAMPAIGN_EVIDENCE_BYTES).digest("hex");
+
 function tempProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-runtime-gates-"));
 }
@@ -61,7 +64,32 @@ function writeArtifact(
   contents: string
 ): string {
   registerArtifactNode(layout, nodeId);
-  return writeArtifactFile(layout, nodeId, artifactPath, contents);
+  const written = writeArtifactFile(layout, nodeId, artifactPath, contents);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(contents);
+  } catch {
+    return written;
+  }
+  // Campaign fixtures declare exact evidence bytes. Materialize those
+  // companions alongside the document so ordinary host-gate fixtures model
+  // the generated verifier's publication boundary.
+  if (
+    typeof parsed === "object" &&
+    parsed !== null &&
+    !Array.isArray(parsed) &&
+    (parsed as { schema_version?: unknown }).schema_version === "ultrafuzz.property-campaign.v3"
+  ) {
+    const evidenceFiles = (parsed as { evidence_files?: unknown }).evidence_files;
+    if (Array.isArray(evidenceFiles)) {
+      for (const entry of evidenceFiles) {
+        if (typeof entry === "object" && entry !== null && typeof (entry as { path?: unknown }).path === "string") {
+          writeArtifactFile(layout, nodeId, (entry as { path: string }).path, CAMPAIGN_EVIDENCE_BYTES);
+        }
+      }
+    }
+  }
+  return written;
 }
 
 function writePropertyLens(
@@ -4314,7 +4342,7 @@ function currentCampaign(
     evidence_files: [...evidencePaths].map((evidencePath) => ({
       path: evidencePath,
       size_bytes: 1,
-      sha256: "a".repeat(64)
+      sha256: CAMPAIGN_EVIDENCE_SHA256
     })),
     coverage: {
       status: "reported",
@@ -4359,6 +4387,43 @@ function currentCampaign(
     failures
   };
 }
+
+test("controller campaign gate authenticates every declared evidence file", () => {
+  for (const mode of ["missing", "digest-mismatch"] as const) {
+    const layout = createRunLayout({ projectRoot: tempProject(), runId: `run-campaign-evidence-${mode}` });
+    campaignPropertyCatalog(layout, ["property-1"]);
+    const campaignId = "stateful-invariant-campaign";
+    writeArtifact(
+      layout,
+      campaignId,
+      "recon-fuzzer-results.json",
+      JSON.stringify(currentCampaign(["property-1"], [], { executionStatus: "complete" }))
+    );
+    writeArtifact(layout, campaignId, "findings.json", "[]");
+    writeCampaignSummary(layout, campaignId, 0, 0);
+    const node = {
+      ...currentCampaignNode(["recon-fuzzer-results.json", "findings.json", "campaign-summary.json"]),
+      id: campaignId,
+      logical_id: campaignId
+    };
+    assert.equal(verifyRequiredArtifactsForAttempt(layout, node, campaignId).ok, true, mode);
+
+    const evidencePath = path.join(getNodeArtifactDir(layout, campaignId), campaignFixturePaths.raw_results);
+    if (mode === "missing") fs.rmSync(evidencePath);
+    else fs.writeFileSync(evidencePath, "y", "utf8");
+
+    const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+    assert.equal(result.ok, false, mode);
+    assert.ok(
+      result.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code ===
+          (mode === "missing" ? "PROPERTY_CAMPAIGN_EVIDENCE_MISSING" : "PROPERTY_CAMPAIGN_EVIDENCE_MISMATCH")
+      ),
+      `${mode}: ${JSON.stringify(result.diagnostics)}`
+    );
+  }
+});
 
 function writeCampaignSummary(
   layout: ReturnType<typeof createRunLayout>,

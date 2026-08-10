@@ -16,6 +16,7 @@ import {
   findingFuzzerBackendProvenance,
   invariantPinnedSourceRefExists,
   IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
+  MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILE_BYTES,
   PROPERTIES_SCHEMA_VERSION,
   readArtifactManifest,
   readJsonFile,
@@ -1573,6 +1574,16 @@ function verifyRequiredArtifactShape(
       })
     );
   }
+  if (
+    contract.ok &&
+    contract.value !== undefined &&
+    output.contract === "ultrafuzz/property-campaign@3" &&
+    !diagnostics.some((diagnostic) => diagnostic.severity === "error")
+  ) {
+    diagnostics.push(
+      ...verifyPropertyCampaignEvidenceFiles(artifactDir, absolutePath, contract.value as PropertyCampaignArtifact)
+    );
+  }
   if (contract.ok && output.contract === "ultrafuzz/workspace-patch@1") {
     const manifest = contract.value as WorkspacePatchManifest;
     const excluded = manifest.excluded_files ?? [];
@@ -1640,6 +1651,66 @@ function verifyRequiredArtifactShape(
     }
   }
 
+  return diagnostics;
+}
+
+function verifyPropertyCampaignEvidenceFiles(
+  artifactDir: string,
+  campaignPath: string,
+  campaign: PropertyCampaignArtifact
+): RuntimeDiagnostic[] {
+  const diagnostics: RuntimeDiagnostic[] = [];
+  for (const [index, entry] of campaign.evidence_files.entries()) {
+    const diagnosticPath = `${campaignPath}#$.evidence_files[${index}]`;
+    let evidencePath: string;
+    try {
+      evidencePath = safeResolveInside(artifactDir, entry.path, "property campaign evidence path");
+      if (!fs.existsSync(evidencePath)) {
+        diagnostics.push({
+          code: "PROPERTY_CAMPAIGN_EVIDENCE_MISSING",
+          message: `Property campaign evidence ${entry.path} was not published`,
+          severity: "error",
+          source: "property-campaign-evidence",
+          path: diagnosticPath
+        });
+        continue;
+      }
+      assertRegularFileInside(artifactDir, evidencePath, "property campaign evidence path");
+      const before = fs.lstatSync(evidencePath, { bigint: true });
+      if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n) {
+        throw new Error(`property campaign evidence must be a singly linked regular file: ${entry.path}`);
+      }
+      const bytes = readRegularFileSnapshot(evidencePath, MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILE_BYTES);
+      const after = fs.lstatSync(evidencePath, { bigint: true });
+      if (
+        !after.isFile() ||
+        after.isSymbolicLink() ||
+        after.nlink !== 1n ||
+        before.dev !== after.dev ||
+        before.ino !== after.ino ||
+        before.size !== after.size ||
+        before.mtimeNs !== after.mtimeNs ||
+        before.ctimeNs !== after.ctimeNs ||
+        after.size !== BigInt(bytes.byteLength)
+      ) {
+        throw new Error(`property campaign evidence changed while it was captured: ${entry.path}`);
+      }
+      if (bytes.byteLength !== entry.size_bytes || sha256Bytes(bytes) !== entry.sha256) {
+        diagnostics.push({
+          code: "PROPERTY_CAMPAIGN_EVIDENCE_MISMATCH",
+          message: `Property campaign evidence ${entry.path} does not match its declared size and SHA-256`,
+          severity: "error",
+          source: "property-campaign-evidence",
+          path: diagnosticPath
+        });
+      }
+    } catch (error) {
+      diagnostics.push({
+        ...diagnosticFromError(error, "property-campaign-evidence", "PROPERTY_CAMPAIGN_EVIDENCE_INVALID"),
+        path: diagnosticPath
+      });
+    }
+  }
   return diagnostics;
 }
 
