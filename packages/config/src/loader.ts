@@ -21,6 +21,9 @@ import {
 
 const TOP_LEVEL_KEYS = new Set([
   "schema_version",
+  "audit_profile",
+  "topology_path",
+  "strategy_loops",
   "dynamic_strategies_enumerator",
   "project",
   "run",
@@ -122,7 +125,16 @@ export function parseProjectConfigToml(text: string, file = CONFIG_FILE_NAME): C
   readString(root, "schema_version", ["schema_version"], diagnostics, (value) => {
     config.schemaVersion = value;
   });
-  readInteger(root, "dynamic_strategies_enumerator", ["dynamic_strategies_enumerator"], diagnostics, (value) => {
+  readString(root, "audit_profile", ["audit_profile"], diagnostics, (value) => {
+    config.auditProfile = value;
+  });
+  readString(root, "topology_path", ["topology_path"], diagnostics, (value) => {
+    config.topologyPath = value;
+  });
+  readInteger(root, "strategy_loops", ["strategy_loops"], diagnostics, (value) => {
+    config.strategyLoops = value;
+  });
+  readDynamicStrategiesEnumerator(root, diagnostics, (value) => {
     config.dynamicStrategiesEnumerator = value;
   });
 
@@ -758,6 +770,21 @@ function readInteger(
     return;
   }
   assign(value);
+}
+
+function readDynamicStrategiesEnumerator(
+  table: Record<string, unknown>,
+  diagnostics: ConfigDiagnostic[],
+  assign: (value: number | "unlimited") => void
+): void {
+  const path = ["dynamic_strategies_enumerator"];
+  const value = table.dynamic_strategies_enumerator;
+  if (value === undefined) return;
+  if (value === "unlimited" || (typeof value === "number" && Number.isInteger(value))) {
+    assign(value);
+    return;
+  }
+  pushTypeDiagnostic(path, "non-negative integer or `unlimited`", diagnostics);
 }
 
 function readNumber(

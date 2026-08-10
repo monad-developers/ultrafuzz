@@ -172,10 +172,11 @@ ultrafuzz eval publish   # post-hoc replay of a recorded run to a provider
 The public cohort and lane manifests under `benchmarks/` adapt EVMbench detect
 and the canonical Ultrafuzz benchmark cohort into the same eval-suite types.
 The bounded smoke lane selects the three Foundry, Hardhat, and Vyper
-Ultrafuzz-bench targets and pins GPT-5.6 Luna `high` for bug-finding. It uses
-`benchmarks/smoke-benchmark.yml` instead of filtering the production topology:
-one medium-reasoning context pass feeds four high-reasoning strategies in one
-parallel wave, followed by medium-reasoning dedupe and report passes. The four
+Ultrafuzz-bench targets and pins GPT-5.6 Luna `high` for bug-finding. It selects
+the CLI-packaged `smoke` audit profile instead of filtering the production
+topology: one context pass feeds four strategies in one parallel wave, followed
+by dedupe and report passes. Every node uses the selected runner model and
+reasoning level. The four
 strategies cover time, external dependencies, externalized accounting, and
 lifecycle views. Its
 lane definition still records `strategy_loops: 1` and the three disabled

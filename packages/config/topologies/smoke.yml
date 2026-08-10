@@ -8,7 +8,7 @@ groups:
     defaults:
       max_attempts: 2
       model_profiles:
-        - smoke-coordination
+        - default
   strategies:
     label: Ground-truth-informed smoke strategies
     color: "#7c3aed"
@@ -16,14 +16,14 @@ groups:
       loops: 1
       max_attempts: 2
       model_profiles:
-        - benchmark
+        - default
   review:
     label: Bounded smoke review
     color: "#0f766e"
     defaults:
       max_attempts: 2
       model_profiles:
-        - smoke-coordination
+        - default
 nodes:
   - id: __start__
     kind: meta

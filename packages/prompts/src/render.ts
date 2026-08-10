@@ -12,6 +12,7 @@ export const SUPPORTED_TEMPLATE_VARIABLES = [
   "artifact_path",
   "artifact_dir",
   "ancestor_artifacts",
+  "ancestor_generated_test_manifests",
   "run_metadata_path",
   "output_findings_path",
   "output_patch_path",
@@ -117,7 +118,7 @@ export interface PromptRenderInput {
       quorum?: number;
       panelSize?: number;
     };
-    dynamicStrategiesEnumerator?: number;
+    dynamicStrategiesEnumerator?: number | "unlimited";
     invariantPropertyPriorityThreshold?: string | number;
     invariantPropertyPriorityFilter?: string;
     invariantPropertyPriorities?: string[];
@@ -145,7 +146,8 @@ export interface PromptRenderResult {
 export type PromptArtifactReference =
   | { kind: "artifact_path"; logicalId?: string; suffix?: string }
   | { kind: "artifact_handoff"; logicalId: string }
-  | { kind: "ancestor_artifacts"; logicalIds: string[] | "direct" };
+  | { kind: "ancestor_artifacts"; logicalIds: string[] | "direct" }
+  | { kind: "ancestor_artifacts_by_contract"; logicalIds: string[]; contract: string };
 
 type ArtifactProducer =
   { kind: "current" } | { kind: "logical"; logicalId: string } | { kind: "handoff"; logicalId: string };
@@ -262,6 +264,15 @@ export function renderPrompt(input: PromptRenderInput): PromptRenderResult {
         kind: "ancestor_artifacts",
         logicalIds: ancestorArtifacts === "direct" ? "direct" : ancestorArtifacts
       });
+      consumed = occurrence.end;
+      continue;
+    }
+
+    if (occurrence.name === "ancestor_generated_test_manifests") {
+      const contract = "ultrafuzz/generated-tests@1";
+      const matched = ancestorArtifactsByContract(contract, graph);
+      rendered += renderPathList(matched.paths);
+      artifactReferences.push({ kind: "ancestor_artifacts_by_contract", logicalIds: matched.logicalIds, contract });
       consumed = occurrence.end;
       continue;
     }
@@ -720,6 +731,25 @@ function renderAncestorArtifacts(selector: "direct" | string[], graph: GraphInde
     }
   }
   return renderPathList(paths.sort());
+}
+
+function ancestorArtifactsByContract(contract: string, graph: GraphIndex): { logicalIds: string[]; paths: string[] } {
+  const logicalIds: string[] = [];
+  const paths: string[] = [];
+  for (const logicalId of [...graph.ancestorIds].sort()) {
+    const node = graph.logicalNodes.get(logicalId);
+    if (node === undefined) continue;
+    const outputs = artifactOutputsFor(node).filter((output) => output.contract === contract);
+    if (outputs.length === 0) continue;
+    logicalIds.push(logicalId);
+    for (const dir of graph.artifactDirsByLogicalId.get(logicalId) ?? []) {
+      for (const output of outputs) paths.push(path.join(dir, output.path));
+    }
+  }
+  if (paths.length === 0) {
+    throw new PromptError("invalid-artifact-reference", `no ancestor artifacts use contract ${contract}`);
+  }
+  return { logicalIds, paths: paths.sort() };
 }
 
 function renderPathList(paths: string[]): string {

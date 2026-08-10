@@ -25,6 +25,8 @@ export default class Run extends Command {
     prompt: Flags.string({ summary: "Operator prompt text" }),
     agent: Flags.string({ summary: "Override the default agent reference" }),
     model: Flags.string({ summary: "Override the default model metadata" }),
+    "audit-profile": Flags.string({ summary: "Override the configured audit profile" }),
+    "topology-path": Flags.string({ summary: "Override the selected topology path" }),
     "max-concurrency": Flags.integer({ summary: "Maximum parallel tasks" })
   };
 
@@ -50,6 +52,8 @@ export default class Run extends Command {
       prompt: flags.prompt,
       agent: flags.agent,
       model: flags.model,
+      topologyPath: flags["topology-path"],
+      ...(flags["audit-profile"] === undefined ? {} : { runtimeOverrides: { auditProfile: flags["audit-profile"] } }),
       workflowInput,
       maxConcurrency: flags["max-concurrency"],
       env: cliIo().env

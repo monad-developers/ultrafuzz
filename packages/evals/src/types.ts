@@ -368,6 +368,10 @@ export interface EvalRunRecord {
   final_status?: string;
   graph_fingerprint?: string;
   config_fingerprint?: string;
+  audit_profile?: string;
+  audit_profile_catalog_digest?: string;
+  topology_digest?: string;
+  prompt_digest?: string;
   candidate_label?: string;
   candidate_commit?: string;
   execution_artifact_id?: string;

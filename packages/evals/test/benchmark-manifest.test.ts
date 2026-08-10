@@ -12,7 +12,6 @@ import {
   BENCHMARK_SMOKE_EXCLUDED_NODE_IDS,
   BENCHMARK_SMOKE_EXCLUDED_STRATEGY_FAMILIES,
   BENCHMARK_SMOKE_SELECTED_STRATEGY_IDS,
-  BENCHMARK_SMOKE_WORKFLOW_PATH,
   BENCHMARK_SMOKE_WORKFLOW_PROFILE,
   DEFAULT_BENCHMARK_TRIALS_PER_VARIANT,
   loadBenchmarkCohortManifest,
@@ -67,11 +66,14 @@ describe("public benchmark manifests", () => {
       mode_explicit: true,
       include: ["report.md", "report.json", "findings.normalized.json"]
     });
-    expect(suite.variants[0]?.topology).toBe(BENCHMARK_SMOKE_WORKFLOW_PATH);
+    expect(suite.variants[0]?.topology).toBeUndefined();
     expect(suite.variants[0]?.workflow_input).toMatchObject({
       excluded_strategy_families: [...BENCHMARK_SMOKE_EXCLUDED_STRATEGY_FAMILIES],
       benchmark_execution: {
         workflow_profile: BENCHMARK_SMOKE_WORKFLOW_PROFILE,
+        audit_profile: "smoke",
+        audit_profile_catalog_digest: expect.stringMatching(/^[0-9a-f]{64}$/u),
+        topology_digest: expect.stringMatching(/^[0-9a-f]{64}$/u),
         selected_strategy_ids: [...BENCHMARK_SMOKE_SELECTED_STRATEGY_IDS],
         strategy_loops: 1,
         excluded_node_ids: []
@@ -90,12 +92,7 @@ describe("public benchmark manifests", () => {
       )
     ).toEqual({
       runtimeOverrides: {
-        models: {
-          profiles: {
-            benchmark: { agent: "CodexAgent", model: "gpt-5.6-luna", reasoning: "high" },
-            "smoke-coordination": { agent: "CodexAgent", model: "gpt-5.6-luna", reasoning: "medium" }
-          }
-        }
+        auditProfile: "smoke"
       }
     });
   });
@@ -241,12 +238,7 @@ describe("public benchmark manifests", () => {
       )
     ).toEqual({
       runtimeOverrides: {
-        models: {
-          profiles: {
-            benchmark: { agent: "KimiAgent", model: "kimi-k3", reasoning: "max" },
-            "smoke-coordination": { agent: "KimiAgent", model: "kimi-k3", reasoning: "max" }
-          }
-        }
+        auditProfile: "smoke"
       }
     });
 
@@ -275,12 +267,7 @@ describe("public benchmark manifests", () => {
       )
     ).toEqual({
       runtimeOverrides: {
-        models: {
-          profiles: {
-            benchmark: { agent: "DeepSeekAgent", model: "deepseek-v4-pro", reasoning: "max" },
-            "smoke-coordination": { agent: "DeepSeekAgent", model: "deepseek-v4-pro", reasoning: "max" }
-          }
-        }
+        auditProfile: "smoke"
       }
     });
   });

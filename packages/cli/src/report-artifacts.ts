@@ -145,11 +145,17 @@ function reconcileRunMetadata(runRoot: string, report: JsonRecord): JsonRecord {
   const run = readRecord(runRoot, path.join(runRoot, "run.json"));
   const state = readRecord(runRoot, path.join(runRoot, "state.json"));
   const accounting = recordField(recordField(run, "accounting"), "cumulative");
+  const auditProfile = recordField(run, "audit_profile");
   const current = isRecord(report.run_metadata) ? report.run_metadata : {};
   const metadata: JsonRecord = { ...current };
 
   assignAuthoritative(metadata, "run_id", firstDefined(run?.run_id, state?.run_id));
   assignAuthoritative(metadata, "source_run_id", firstDefined(run?.source_run_id, state?.source_run_id));
+  assignAuthoritative(metadata, "audit_profile", auditProfile?.effective);
+  assignAuthoritative(metadata, "audit_profile_catalog_digest", auditProfile?.catalog_digest);
+  assignAuthoritative(metadata, "topology_digest", auditProfile?.topology_digest);
+  assignAuthoritative(metadata, "prompt_digest", firstDefined(run?.prompt_digest, auditProfile?.prompt_digest));
+  assignAuthoritative(metadata, "expanded_graph_fingerprint", auditProfile?.expanded_graph_fingerprint);
   assignAuthoritative(
     metadata,
     "tokens_used",

@@ -101,7 +101,17 @@ export function builtInPromptRelativePaths(): string[] {
 }
 
 function builtInPromptRoot(): string {
-  return fileURLToPath(new URL("../../../.ultrafuzz/prompts/", import.meta.url));
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const candidates = [path.join(here, "prompts"), path.resolve(here, "../../../.ultrafuzz/prompts")];
+  const found = candidates.find((candidate) => {
+    try {
+      return statSync(candidate).isDirectory();
+    } catch {
+      return false;
+    }
+  });
+  if (found === undefined) throw new Error(`unable to locate the packaged prompt catalog from ${here}`);
+  return found;
 }
 
 function discoverBuiltInPromptRelativePaths(root: string): string[] {

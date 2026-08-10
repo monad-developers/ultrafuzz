@@ -166,13 +166,21 @@ Accounting contract:
   those values are present in run metadata.
 - In `report.json`, include `run_metadata.repository` with the same normalized
   URL rendered as `Repository` in `report.md`.
+- Copy the effective audit policy from `{{run_metadata_path}}` into
+  `report.json.run_metadata`: `audit_profile`,
+  `audit_profile_catalog_digest`, `topology_digest`, `prompt_digest`, and
+  `expanded_graph_fingerprint`. Use the effective profile name and the exact
+  digests/fingerprint recorded by the runtime; do not reconstruct them from
+  paths.
 
 Use `run.json#source_run_id` for `Source run ID`. If there is no source run,
 write `none` for `Source run ID`.
 
-The Run summary contains exactly these public fields: `Run ID`, `Source run ID`,
-`Repository`, `Elapsed time`, `Models used`, `Tokens used`, `Estimated spend`,
-and `Strategy loops`. Render each concrete value as Markdown inline code.
+The Run summary contains exactly these public fields when available: `Run ID`,
+`Source run ID`, `Repository`, `Elapsed time`, `Models used`, `Tokens used`,
+`Estimated spend`, `Strategy loops`, `Audit profile`, `Audit profile catalog
+digest`, `Topology digest`, `Prompt digest`, and `Expanded graph fingerprint`.
+Render each concrete value as Markdown inline code.
 
 ## Finding Selection
 

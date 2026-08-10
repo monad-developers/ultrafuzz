@@ -360,7 +360,7 @@ describe("prompt semantic anchors", () => {
       "stateful-invariant-campaign"
     );
     expect(`${topologySource}\n${aggregate}\n${dynamic}`).not.toContain("stateful-invariant-recon-campaign");
-    expect(aggregate).toContain("{{artifact_path:stateful-invariant-campaign}}/generated-tests.json");
+    expect(aggregate).toContain("{{ancestor_generated_test_manifests}}");
     expect(dynamic).toContain("{{artifact_path:stateful-invariant-campaign}}/generated-tests.json");
 
     expect(campaign).toContain("final recon-fuzzer campaign");

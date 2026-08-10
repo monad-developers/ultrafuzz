@@ -1036,6 +1036,21 @@ test("report regenerates canonical Markdown from structured issues and non-produ
   const repaired = await cli(project, ["report", runData.run_id, "--json"]);
   assert.equal(repaired.code, 0, repaired.stderr);
   assert.equal(accountingMismatchCount(parseJson(repaired)), 0);
+  const authoritativeRunMetadata = JSON.parse(
+    fs.readFileSync(path.join(runData.run_root, "run.json"), "utf8")
+  ) as Record<string, unknown>;
+  const auditProfileMetadata = authoritativeRunMetadata.audit_profile as Record<string, unknown>;
+  const reconciledReport = JSON.parse(fs.readFileSync(reportPath, "utf8")) as {
+    run_metadata: Record<string, unknown>;
+  };
+  assert.equal(reconciledReport.run_metadata.audit_profile, auditProfileMetadata.effective);
+  assert.equal(reconciledReport.run_metadata.audit_profile_catalog_digest, auditProfileMetadata.catalog_digest);
+  assert.equal(reconciledReport.run_metadata.topology_digest, auditProfileMetadata.topology_digest);
+  assert.equal(reconciledReport.run_metadata.prompt_digest, authoritativeRunMetadata.prompt_digest);
+  assert.equal(
+    reconciledReport.run_metadata.expanded_graph_fingerprint,
+    auditProfileMetadata.expanded_graph_fingerprint
+  );
   const markdown = fs.readFileSync(path.join(reportDir, "report.md"), "utf8");
   assert.match(
     markdown,
@@ -1048,7 +1063,7 @@ test("report regenerates canonical Markdown from structured issues and non-produ
   const runSummary = /^## Run summary\n\n(?<body>[\s\S]*?)(?=\n## )/mu.exec(markdown)?.groups?.body;
   assert.ok(runSummary);
   const runSummaryLabels = [...runSummary.matchAll(/^- ([^:]+): `[^`\n]+`$/gmu)].map((match) => match[1]);
-  assert.deepEqual(runSummaryLabels, [
+  const expectedRunSummaryLabels = [
     "Run ID",
     "Source run ID",
     "Repository",
@@ -1056,8 +1071,14 @@ test("report regenerates canonical Markdown from structured issues and non-produ
     "Models used",
     "Tokens used",
     "Estimated spend",
-    "Strategy loops"
-  ]);
+    "Strategy loops",
+    "Audit profile",
+    "Audit profile catalog digest",
+    "Topology digest",
+    "Prompt digest",
+    "Expanded graph fingerprint"
+  ];
+  assert.deepEqual(runSummaryLabels, expectedRunSummaryLabels);
   assert.match(
     markdown,
     /## \[M-01\] - Structured issue title\n\nDepositor can exercise the structured path which leads to the recorded state becoming inconsistent\./u
@@ -1169,7 +1190,10 @@ test("report regenerates canonical Markdown from structured issues and non-produ
   assert.doesNotMatch(zeroIssueMarkdown, /^No issues reported\.?$/imu);
   const zeroIssueRunSummary = /^## Run summary\n\n(?<body>[\s\S]*?)(?=\n## )/mu.exec(zeroIssueMarkdown)?.groups?.body;
   assert.ok(zeroIssueRunSummary);
-  assert.equal([...zeroIssueRunSummary.matchAll(/^- [^:]+: `[^`\n]+`$/gmu)].length, 8);
+  assert.deepEqual(
+    [...zeroIssueRunSummary.matchAll(/^- ([^:]+): `[^`\n]+`$/gmu)].map((match) => match[1]),
+    expectedRunSummaryLabels
+  );
   assert.ok(zeroIssueMarkdown.indexOf("## Property provenance") < zeroIssueMarkdown.indexOf("## Non-production"));
   assert.match(zeroIssueMarkdown, /## Property provenance\n\nNo property-derived findings\./u);
   assert.match(

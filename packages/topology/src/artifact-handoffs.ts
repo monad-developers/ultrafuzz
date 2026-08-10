@@ -103,6 +103,23 @@ function validatePromptVariable(
         );
       }
     }
+    return;
+  }
+
+  if (variable.name === "ancestor_generated_test_manifests") {
+    const producers = [...nodeById.values()].filter(
+      (candidate) =>
+        candidate.id !== node.id &&
+        isAncestor(node, candidate.id, nodeById, new Set()) &&
+        candidate.outputs.some((output) => output.contract === "ultrafuzz/generated-tests@1")
+    );
+    if (producers.length === 0) {
+      throw topologyError(
+        "INVALID_PROMPT_ARTIFACT_REFERENCE",
+        "ancestor_generated_test_manifests found no ancestor outputs with contract `ultrafuzz/generated-tests@1`",
+        { nodeId: node.id, variable: variable.raw }
+      );
+    }
   }
 }
 

@@ -85,23 +85,11 @@ or inline environment-assignment prefixes. Preserve the original command's
 environment, selectors, and test-root semantics, count actual failing tests,
 and keep framework-specific blocked and failing results distinct.
 
-Also inspect the Dynamic strategy generator outputs before deduping:
+Inspect every direct strategy handoff before deduping. This list is derived
+from the effective topology and includes each producer's declared findings,
+generated-test manifests, campaign evidence, and supporting outputs:
 
-Dynamic strategy plan:
-{{artifact_path:dynamic-strategy-generator}}/strategy-plan.json
-
-Dynamic selected strategies:
-{{artifact_path:dynamic-strategy-generator}}/selected-strategies.json
-
-Dynamic findings:
-{{artifact_path:dynamic-strategy-generator}}/findings.json
-
-Dynamic generated-test manifest:
-{{artifact_path:dynamic-strategy-generator}}/generated-tests.json
-
-Admin/config boundary findings: {{artifact_path:admin-config-boundaries}}/findings.json
-
-Admin/config generated-test manifest: {{artifact_path:admin-config-boundaries}}/generated-tests.json
+{{ancestor_artifacts}}
 
 Then, build a stable dedupe key from the affected contract or library, function or workflow, property/oracle, normalized title, root cause hypothesis, and reproduction shape. Keep the clearest finding with the best evidence and reproducibility. Record every duplicate with its original id, kept id, title, and dedupe key.
 

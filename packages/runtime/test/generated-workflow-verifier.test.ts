@@ -1819,7 +1819,7 @@ test("generated Smithers final-report producer replaces model coverage with cano
 
 test("generated Smithers coverage authority preserves the shipped smoke topology without a producer", () => {
   const topology = loadTopology(repositoryRoot, {
-    topologyPath: path.join(repositoryRoot, "benchmarks", "smoke-benchmark.yml"),
+    topologyPath: path.join(repositoryRoot, "packages", "config", "topologies", "smoke.yml"),
     requirePromptFiles: true
   });
   const finalReport = topology.nodes.find((node) => node.id === "final-report");

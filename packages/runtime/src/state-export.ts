@@ -201,11 +201,16 @@ export async function getRunHealth(input: {
   }
   const base = readRunListEntry(evidence.layout.root, evidence.layout.runId);
   const state = fs.existsSync(evidence.layout.statePath) ? readRunState(evidence.layout) : undefined;
+  const metadata = readJsonIfExists<Record<string, unknown>>(evidence.layout.runMetadataPath);
+  const auditProfile = metadata?.audit_profile;
   return runtimeResult<RunHealthValue>(
     true,
     {
       ...base,
       workflow_run_id: evidence.smithersRunId,
+      ...(auditProfile !== null && typeof auditProfile === "object" && !Array.isArray(auditProfile)
+        ? { audit_profile: auditProfile as Record<string, unknown> }
+        : {}),
       ...health,
       ...summarizeRunProgress({
         runStatus: base.status,
