@@ -11551,7 +11551,7 @@ test("resume rejects non-current Smithers inspect evidence before making lifecyc
   }
 });
 
-test("resume rejects failed workflow nodes without exact reset identities", async () => {
+test("resume derives reset identities from the canonical nodes of a failed workflow", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -11579,12 +11579,20 @@ test("resume rejects failed workflow nodes without exact reset identities", asyn
     env
   });
 
-  assert.equal(resumed.ok, false);
-  assert.equal(resumed.diagnostics[0]?.code, "WORKFLOW_LIFECYCLE_FAILED");
-  assert.match(resumed.diagnostics[0]?.message ?? "", /failed nodes without exact failedChildKeys reset evidence/u);
+  // The runner derives `failedChildKeys` only for a success-terminal run, so a
+  // genuinely failed run never carries them and retrying one used to be refused
+  // outright. Its canonical `nodes` array names the failed node exactly, and
+  // topology expansion gives each loop iteration its own concrete node, so the
+  // node id identifies the attempt to reset without guessing an iteration.
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
   const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
   assert.match(commands, /inspect ultrafuzz-terminal-retry-run --format json --full-output/u);
-  assert.doesNotMatch(commands, /^(?:timetravel|up) /mu);
+  assert.match(
+    commands,
+    /timetravel .* --run-id ultrafuzz-terminal-retry-run --node-id node:project-discovery --iteration 0/u
+  );
+  // Only the failed node is reset; a pending sibling is left alone.
+  assert.doesNotMatch(commands, /--node-id node:strategy/u);
 });
 
 test("resume retries failed tasks reported inside a successful terminal workflow", async () => {
