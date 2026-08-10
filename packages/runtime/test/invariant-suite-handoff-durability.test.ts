@@ -337,6 +337,15 @@ function loadWorkflowHelpers(
       }
     },
     validateImplementedPropertiesSchema: () => ({ ok: false, value: undefined }),
+    verifiedDependencyJsonArtifact: (
+      _task: TaskSpecLike,
+      dependency: string,
+      _producer: TaskSpecLike,
+      outputPath: string
+    ) => {
+      const artifactPath = path.join(dependency, outputPath);
+      return { path: artifactPath, value: parseStrictJsonBytes(fs.readFileSync(artifactPath)) };
+    },
     taskArtifactRoots: (task: TaskSpecLike) => [fs.realpathSync(task.metadata.artifacts.dir)],
     invariantSuiteProtectedBaselinePath: (task: TaskSpecLike) =>
       path.join(task.runRoot, "protected", `${task.attemptId}.json`),
@@ -1120,6 +1129,10 @@ test("#219 the recovered path still fails closed on an ancestor property with no
     // published. The suite manifest is untouched, so the record is still
     // current and the recovered path must re-check the expectation itself.
     fs.writeFileSync(path.join(setup.artifactDir, "implemented-properties.json"), "{}\n", "utf8");
+    setup.outputs.push({
+      path: "implemented-properties.json",
+      contract: "ultrafuzz/implemented-properties@3"
+    });
     state.dependencySnapshots.clear();
     assert.throws(
       () => materialize(handlers, handlers.workspacePath),
