@@ -3888,7 +3888,7 @@ test("plan uses an eval topology override without replacing the project topology
   });
 
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
-  assert.equal(plan.value!.validation.topology?.path, smokeTopology);
+  assert.equal(plan.value!.validation.topology?.path, "smoke-benchmark.yml");
   assert.deepEqual(
     plan.value!.graph.nodes.map((node) => node.logical_id),
     ["project-discovery"]

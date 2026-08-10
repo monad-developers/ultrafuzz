@@ -312,7 +312,7 @@ export async function planRun(input: PlanRunInput) {
 
 function promptDigestForGraph(graph: PlannedGraph, catalog: PromptCatalog): string {
   const promptIds = Array.from(
-    new Set(graph.nodes.map((node) => node.prompt_id).filter((promptId) => promptId.length > 0))
+    new Set(graph.nodes.filter((node) => node.prompt_path.length > 0).map((node) => node.prompt_id))
   ).sort();
   return sha256Stable(
     promptIds.map((promptId) => {
