@@ -1567,6 +1567,7 @@ function verifyRequiredArtifactShape(
           artifactDir,
           node,
           attemptId,
+          artifactPath: output.path,
           schemaFilename: binding.schema_file as ArtifactSchemaFilename
         })
       })
@@ -1647,6 +1648,7 @@ function semanticGateContextForArtifact(input: {
   artifactDir: string;
   node: PlannedGraphNode;
   attemptId: string;
+  artifactPath: string;
   schemaFilename: ArtifactSchemaFilename;
 }): SemanticGateContext {
   const context: SemanticGateContext = {
@@ -1654,7 +1656,8 @@ function semanticGateContextForArtifact(input: {
     plannedGraph: { node: input.node },
     artifactIdentity: {
       runId: input.layout.runId,
-      nodeId: input.node.logical_id ?? input.node.id
+      nodeId: input.node.logical_id ?? input.node.id,
+      artifactPath: input.artifactPath
     }
   };
   const artifactSet = semanticArtifactSetForSchema(input);
@@ -1678,6 +1681,9 @@ function semanticArtifactSetForSchema(input: {
   if (input.schemaFilename === "campaign-summary.schema.json") {
     return semanticCampaignArtifacts(input.artifactDir, input.node);
   }
+  if (input.schemaFilename === "property-campaign.schema.json") {
+    return semanticPropertyCampaignContext(input.layout, input.artifactDir, input.node);
+  }
   if (input.schemaFilename === "implemented-properties.schema.json") {
     const propertyCatalog = semanticCanonicalPropertyCatalog(input.layout);
     return propertyCatalog === undefined ? {} : { propertyCatalog };
@@ -1699,6 +1705,62 @@ function semanticArtifactSetForSchema(input: {
     };
   }
   return undefined;
+}
+
+function semanticSiblingJsonArtifact(
+  artifactDir: string,
+  node: PlannedGraphNode,
+  contract: PlannedGraphNode["outputs"][number]["contract"],
+  label: string
+): { value: unknown; path: string } {
+  const outputs = node.outputs.filter((output) => output.contract === contract);
+  if (outputs.length !== 1) {
+    throw new Error(`${label} semantic context requires exactly one declared ${contract} sibling`);
+  }
+  const output = outputs[0]!;
+  const artifactPath = safeResolveInside(artifactDir, output.path, `${label} semantic context`);
+  assertRegularFileInside(artifactDir, artifactPath, `${label} semantic context`);
+  return {
+    value: readStrictContractDocument(artifactPath, contract),
+    path: output.path
+  };
+}
+
+function semanticPropertyCampaignContext(
+  layout: RunLayout,
+  artifactDir: string,
+  node: PlannedGraphNode
+): SemanticArtifactSetContext {
+  const campaignPlan = semanticSiblingJsonArtifact(
+    artifactDir,
+    node,
+    "ultrafuzz/invariant-campaign-plan@1",
+    "campaign plan"
+  );
+  const findings = semanticSiblingJsonArtifact(artifactDir, node, "ultrafuzz/findings@2", "campaign findings");
+  if (!Array.isArray(findings.value)) {
+    throw new Error("campaign findings semantic context must be an array");
+  }
+  const campaignSummary = semanticSiblingJsonArtifact(
+    artifactDir,
+    node,
+    "ultrafuzz/campaign-summary@2",
+    "campaign summary"
+  );
+  const implementedProperties = semanticImplementedProperties(layout);
+  if (implementedProperties === undefined) {
+    throw new Error("implemented property semantic context is unavailable");
+  }
+  return {
+    campaignPlan: campaignPlan.value,
+    campaignPlanPath: campaignPlan.path,
+    campaignSummary: campaignSummary.value,
+    campaignSummaryPath: campaignSummary.path,
+    findings: findings.value,
+    findingsPath: findings.path,
+    implementedProperties,
+    implementedPropertiesPath: "implemented-properties.json"
+  };
 }
 
 function semanticTriagedFindings(layout: RunLayout): unknown | undefined {
