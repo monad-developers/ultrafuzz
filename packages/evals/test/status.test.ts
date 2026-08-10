@@ -132,32 +132,69 @@ describe("eval status", () => {
           schema_version: "1.1",
           run_id: runId,
           status: "running",
-          created_at: START,
-          started_at: START,
-          last_transition_at: "2026-01-02T14:50:00.000Z",
+          graph_fingerprint: "r61-graph",
+          config_fingerprint: "r61-config",
+          created_at: "2026-01-02T10:00:00.000Z",
+          started_at: "2026-01-02T10:00:00.000Z",
+          last_transition_at: "2026-01-02T12:01:52.000Z",
           controller_lease: {
             status: "expired",
-            renewed_at: "2026-01-02T14:50:00.000Z",
+            duration_ms: 30_000,
+            renewed_at: "2026-01-02T12:01:52.000Z",
+            expires_at: "2026-01-02T12:02:22.000Z",
             recovery_attempts: 33
+          },
+          concurrency: {
+            requested_concurrency: 1,
+            effective_concurrency: 0,
+            ready_queue_depth: 0,
+            active_work: 0,
+            queued_duration_ms: 0,
+            active_duration_ms: 0,
+            idle_duration_ms: 0,
+            observed_at: "2026-01-02T12:01:52.000Z"
           },
           nodes: {
             "aggregate-test-files": {
               node_id: "aggregate-test-files",
               status: "pending",
+              retry_count: 0,
+              timed_out: false,
+              wait_since: "2026-01-02T12:01:52.000Z",
               wait_reason: "controller-loss",
               next_eligible_action: "controller-takeover"
             },
             "final-report": {
               node_id: "final-report",
               status: "pending",
+              retry_count: 0,
+              timed_out: false,
+              wait_since: "2026-01-02T12:01:52.000Z",
               wait_reason: "controller-loss",
               next_eligible_action: "controller-takeover"
             },
             "stateful-invariant-campaign": {
               node_id: "stateful-invariant-campaign",
               status: "succeeded",
-              finished_at: "2026-01-02T14:49:00.000Z"
-            }
+              retry_count: 0,
+              timed_out: false,
+              finished_at: "2026-01-02T12:00:00.000Z"
+            },
+            ...Object.fromEntries(
+              Array.from({ length: 29 }, (_, index) => {
+                const nodeId = `completed-${String(index + 1).padStart(2, "0")}`;
+                return [
+                  nodeId,
+                  {
+                    node_id: nodeId,
+                    status: "succeeded",
+                    retry_count: 0,
+                    timed_out: false,
+                    finished_at: "2026-01-02T12:00:00.000Z"
+                  }
+                ];
+              })
+            )
           }
         },
         null,
@@ -186,6 +223,12 @@ describe("eval status", () => {
     expect(snapshot.rows[0]).toMatchObject({
       status: "running",
       terminal: false,
+      executed_nodes: 30,
+      total_nodes: 32,
+      progress_percent: 93.8,
+      checkpoint_age_seconds: 10_800,
+      checkpoint_stale: true,
+      eta_unavailable_reason: "checkpoint-stale",
       active_node_ids: [],
       waiting_nodes: [
         {
@@ -207,6 +250,98 @@ describe("eval status", () => {
     expect(table).toContain("final-report[controller-loss→controller-takeover]");
     expect(table).toContain("stopped");
     expect(table).not.toContain("controller-loss-row");
+  });
+
+  it.skipIf(process.platform === "win32")("does not follow a linked workflow log symlink", () => {
+    const fixture = evalFixture([privateRow("linked-log-row")]);
+    const runRoot = path.join(fixture.base, "linked-log-run");
+    const runId = "run-linked-log";
+    const logsRoot = path.join(runRoot, "smithers", "logs");
+    const outsideLog = path.join(fixture.base, "outside-workflow.log");
+    fs.mkdirSync(logsRoot, { recursive: true });
+    writeState(runRoot, {
+      runId,
+      status: "running",
+      nodes: ["pending"],
+      controllerLease: { status: "expired", expiresAt: "2026-01-02T14:50:30.000Z" }
+    });
+    fs.writeFileSync(outsideLog, "status: stopped\n", "utf8");
+    fs.symlinkSync(outsideLog, path.join(logsRoot, `${runId}.log`));
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify({ ...record("linked-log-row", runId, runRoot), workflow_ids: [runId] })}\n`,
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({
+      projectRoot: fixture.project,
+      evalRunId: fixture.evalRunId,
+      now: SNAPSHOT
+    });
+
+    expect(snapshot.rows[0]?.linked_workflow_status).toBe("unknown");
+  });
+
+  it("uses a fresh admission marker after a stale terminal status on resume", () => {
+    const fixture = evalFixture([privateRow("resumed-log-row")]);
+    const runRoot = path.join(fixture.base, "resumed-log-run");
+    const runId = "run-resumed-log";
+    fs.mkdirSync(path.join(runRoot, "smithers", "logs"), { recursive: true });
+    writeState(runRoot, {
+      runId,
+      status: "running",
+      nodes: ["running"],
+      controllerLease: { status: "active", expiresAt: "2026-01-02T15:02:30.000Z" }
+    });
+    fs.writeFileSync(
+      path.join(runRoot, "smithers", "logs", `${runId}.log`),
+      "runId: run-resumed-log\nstatus: stopped\nSMITHERS_DETACHED_ADMISSION=run:new-controller\n",
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify({ ...record("resumed-log-row", runId, runRoot), workflow_ids: [runId] })}\n`,
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({
+      projectRoot: fixture.project,
+      evalRunId: fixture.evalRunId,
+      now: SNAPSHOT
+    });
+
+    expect(snapshot.rows[0]?.linked_workflow_status).toBe("running");
+  });
+
+  it("finds a terminal workflow status before a large final output", () => {
+    const fixture = evalFixture([privateRow("large-output-row")]);
+    const runRoot = path.join(fixture.base, "large-output-run");
+    const runId = "run-large-output";
+    fs.mkdirSync(path.join(runRoot, "smithers", "logs"), { recursive: true });
+    writeState(runRoot, {
+      runId,
+      status: "running",
+      nodes: ["pending"],
+      controllerLease: { status: "expired", expiresAt: "2026-01-02T14:50:30.000Z" }
+    });
+    fs.writeFileSync(
+      path.join(runRoot, "smithers", "logs", `${runId}.log`),
+      `${"workflow progress\n".repeat(4_000)}runId: ${runId}\nstatus: stopped\noutput: ${"x".repeat(64 * 1_024)}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify({ ...record("large-output-row", runId, runRoot), workflow_ids: [runId] })}\n`,
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({
+      projectRoot: fixture.project,
+      evalRunId: fixture.evalRunId,
+      now: SNAPSHOT
+    });
+
+    expect(snapshot.rows[0]?.linked_workflow_status).toBe("stopped");
   });
 
   it("uses the current durable workflow binding after recovery", () => {
@@ -474,6 +609,58 @@ describe("eval status", () => {
         next_eligible_action: "approve"
       }
     ]);
+  });
+
+  it("keeps progress readable when a newer producer adds wait telemetry values", () => {
+    const fixture = evalFixture([privateRow("future-wait-row")]);
+    const runRoot = path.join(fixture.base, "future-wait-run");
+    const runId = "run-future-wait";
+    fs.mkdirSync(runRoot, { recursive: true });
+    fs.writeFileSync(
+      statePath(runRoot),
+      `${JSON.stringify({
+        schema_version: "1.1",
+        run_id: runId,
+        status: "running",
+        created_at: START,
+        started_at: START,
+        last_transition_at: CHECKPOINT,
+        nodes: {
+          future: {
+            node_id: "future",
+            status: "pending",
+            wait_reason: "future-wait-reason",
+            next_eligible_action: "future-next-action"
+          }
+        }
+      })}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify(record("future-wait-row", runId, runRoot))}\n`,
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({
+      projectRoot: fixture.project,
+      evalRunId: fixture.evalRunId,
+      now: SNAPSHOT
+    });
+
+    expect(snapshot.rows[0]).toMatchObject({
+      status: "running",
+      executed_nodes: 0,
+      total_nodes: 1,
+      waiting_nodes: [
+        {
+          node_id: "future",
+          status: "pending",
+          wait_reason: null,
+          next_eligible_action: null
+        }
+      ]
+    });
   });
 
   it("escapes node ID control characters in the table while preserving exact JSON IDs", () => {

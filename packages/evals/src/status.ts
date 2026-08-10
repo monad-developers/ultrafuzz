@@ -111,7 +111,12 @@ const LINKED_WORKFLOW_STATUS_VALUES = new Set<string>(EVAL_STATUS_LINKED_WORKFLO
 const TERMINAL_RUN_STATUSES = new Set<string>(TERMINAL_RUN_STATE_STATUSES);
 const COMPLETED_NODE_STATUSES = new Set<string>(TERMINAL_NODE_STATE_STATUSES);
 const MAX_VISIBLE_STATUS_NODES = 3;
-const WORKFLOW_LOG_EDGE_BYTES = 32 * 1_024;
+// Detached summaries put lifecycle status before optional final output. Retain
+// admission evidence at the start and a bounded tail large enough to cross
+// ordinary report output without loading an unbounded workflow log.
+const WORKFLOW_LOG_PREFIX_BYTES = 32 * 1_024;
+const WORKFLOW_LOG_TAIL_BYTES = 8 * 1_024 * 1_024;
+const WORKFLOW_ADMISSION_MARKER = "SMITHERS_DETACHED_ADMISSION=run:";
 
 /**
  * Read a complete eval matrix snapshot without synchronizing or otherwise
@@ -335,16 +340,16 @@ function statusForRecord(input: {
   const activeNodeIds = nodes
     .filter(isActiveNode)
     .map((node) => node.node_id)
-    .sort();
+    .sort(compareStrings);
   const waitingNodes = nodes
     .filter((node) => !COMPLETED_NODE_STATUSES.has(node.status) && !isActiveNode(node))
     .map((node): EvalStatusWaitingNode => ({
       node_id: node.node_id,
       status: node.status,
-      wait_reason: node.wait_reason ?? null,
-      next_eligible_action: node.next_eligible_action ?? null
+      wait_reason: knownNodeWaitReason(node.wait_reason),
+      next_eligible_action: knownNodeNextEligibleAction(node.next_eligible_action)
     }))
-    .sort((left, right) => left.node_id.localeCompare(right.node_id));
+    .sort((left, right) => compareStrings(left.node_id, right.node_id));
   const executedNodes = nodes.filter((node) => COMPLETED_NODE_STATUSES.has(node.status)).length;
   const totalNodes = nodes.length;
   const terminal = TERMINAL_RUN_STATUSES.has(rawState.status);
@@ -429,8 +434,8 @@ function isValidState(
       node_id: string;
       status: NodeStatus;
       finished_at?: string;
-      wait_reason?: NodeWaitReason;
-      next_eligible_action?: NodeNextEligibleAction;
+      wait_reason?: string;
+      next_eligible_action?: string;
     }
   >;
 } {
@@ -450,11 +455,8 @@ function isValidState(
       typeof node.status === "string" &&
       NODE_STATUSES.has(node.status) &&
       (node.finished_at === undefined || typeof node.finished_at === "string") &&
-      (node.wait_reason === undefined ||
-        (typeof node.wait_reason === "string" && NODE_WAIT_REASON_VALUES.has(node.wait_reason))) &&
-      (node.next_eligible_action === undefined ||
-        (typeof node.next_eligible_action === "string" &&
-          NODE_NEXT_ELIGIBLE_ACTION_VALUES.has(node.next_eligible_action)))
+      (node.wait_reason === undefined || typeof node.wait_reason === "string") &&
+      (node.next_eligible_action === undefined || typeof node.next_eligible_action === "string")
   );
 }
 
@@ -558,8 +560,16 @@ function tableSafeText(value: string): string {
     );
 }
 
-function isActiveNode(node: { status: NodeStatus; wait_reason?: NodeWaitReason }): boolean {
+function isActiveNode(node: { status: NodeStatus; wait_reason?: string }): boolean {
   return node.status === "running" && (node.wait_reason === undefined || node.wait_reason === "active");
+}
+
+function knownNodeWaitReason(value: string | undefined): NodeWaitReason | null {
+  return value !== undefined && NODE_WAIT_REASON_VALUES.has(value) ? (value as NodeWaitReason) : null;
+}
+
+function knownNodeNextEligibleAction(value: string | undefined): NodeNextEligibleAction | null {
+  return value !== undefined && NODE_NEXT_ELIGIBLE_ACTION_VALUES.has(value) ? (value as NodeNextEligibleAction) : null;
 }
 
 function linkedWorkflowIds(rawState: { provenance?: Record<string, unknown> }, fallback: unknown): unknown {
@@ -602,14 +612,17 @@ function readLinkedWorkflowStatus(
       statuses.push("unknown");
       continue;
     }
-    const matches = [...log.matchAll(/^status:\s*([a-z][a-z-]*)\s*$/gmu)];
-    const latest = matches.at(-1)?.[1];
-    if (latest === undefined) {
-      statuses.push(activelyOwned && log.includes("SMITHERS_DETACHED_ADMISSION=run:") ? "running" : "unknown");
-    } else if (!isLinkedWorkflowStatus(latest)) {
+    const statusMatches = [...log.matchAll(/^status:\s*([a-z][a-z-]*)\s*$/gmu)];
+    const latestStatusMatch = statusMatches.at(-1);
+    const latestAdmissionIndex = log.lastIndexOf(WORKFLOW_ADMISSION_MARKER);
+    if (latestAdmissionIndex > (latestStatusMatch?.index ?? -1)) {
+      statuses.push(activelyOwned ? "running" : "unknown");
+    } else if (latestStatusMatch?.[1] === undefined) {
+      statuses.push("unknown");
+    } else if (!isLinkedWorkflowStatus(latestStatusMatch[1])) {
       statuses.push("unknown");
     } else {
-      statuses.push(latest === "running" && !activelyOwned ? "unknown" : latest);
+      statuses.push(latestStatusMatch[1] === "running" && !activelyOwned ? "unknown" : latestStatusMatch[1]);
     }
   }
   const distinct = new Set(statuses);
@@ -621,20 +634,36 @@ function isLinkedWorkflowStatus(value: string): value is EvalStatusKnownLinkedWo
 }
 
 function readWorkflowLogEdges(logPath: string): string {
-  const file = fs.openSync(logPath, "r");
+  const lexical = fs.lstatSync(logPath);
+  if (lexical.isSymbolicLink() || !lexical.isFile()) {
+    throw new Error("linked workflow log is not a bounded regular file");
+  }
+  const noFollow = (fs.constants as typeof fs.constants & { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
+  const nonBlocking = (fs.constants as typeof fs.constants & { O_NONBLOCK?: number }).O_NONBLOCK ?? 0;
+  const file = fs.openSync(logPath, fs.constants.O_RDONLY | noFollow | nonBlocking);
   try {
-    const size = fs.fstatSync(file).size;
-    if (size <= WORKFLOW_LOG_EDGE_BYTES * 2) {
-      return fs.readFileSync(file, "utf8");
+    const stat = fs.fstatSync(file);
+    if (!stat.isFile() || !Number.isSafeInteger(stat.size) || stat.size < 0) {
+      throw new Error("linked workflow log is not a bounded regular file");
     }
-    const first = Buffer.alloc(WORKFLOW_LOG_EDGE_BYTES);
-    const last = Buffer.alloc(WORKFLOW_LOG_EDGE_BYTES);
+    const size = stat.size;
+    if (size <= WORKFLOW_LOG_PREFIX_BYTES + WORKFLOW_LOG_TAIL_BYTES) {
+      const contents = Buffer.alloc(size);
+      const bytes = fs.readSync(file, contents, 0, contents.length, 0);
+      return contents.subarray(0, bytes).toString("utf8");
+    }
+    const first = Buffer.alloc(WORKFLOW_LOG_PREFIX_BYTES);
+    const last = Buffer.alloc(WORKFLOW_LOG_TAIL_BYTES);
     const firstBytes = fs.readSync(file, first, 0, first.length, 0);
     const lastBytes = fs.readSync(file, last, 0, last.length, size - last.length);
     return `${first.subarray(0, firstBytes).toString("utf8")}\n${last.subarray(0, lastBytes).toString("utf8")}`;
   } finally {
     fs.closeSync(file);
   }
+}
+
+function compareStrings(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function reasonText(reason: EvalStatusEtaUnavailableReason): string {
