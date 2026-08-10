@@ -49,6 +49,7 @@ const unitMetric = z.number().min(0).max(1);
 const uniqueNonEmptyStrings = z.array(nonEmptyString).refine((values) => new Set(values).size === values.length, {
   message: "values must be unique"
 });
+const sha256Digest = z.string().regex(/^[0-9a-f]{64}$/u);
 
 const modelProfileSchema = z.strictObject({
   agent: nonEmptyString,
@@ -129,6 +130,9 @@ const publicSmokeBenchmarkWorkflowInputSchema = z.strictObject({
     .refine((values) => new Set(values).size === values.length, { message: "strategy families must be unique" }),
   benchmark_execution: z.strictObject({
     workflow_profile: z.literal("smoke-benchmark-v1"),
+    audit_profile: z.literal("smoke"),
+    audit_profile_catalog_digest: sha256Digest,
+    topology_digest: sha256Digest,
     selected_strategy_ids: z
       .array(benchmarkStrategyId)
       .length(4)

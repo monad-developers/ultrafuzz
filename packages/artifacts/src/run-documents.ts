@@ -64,7 +64,8 @@ export interface RunPlanExecution {
 export type RunPlanArtifactReference =
   | { kind: "artifact_path"; logicalId?: string; suffix?: string }
   | { kind: "artifact_handoff"; logicalId: string }
-  | { kind: "ancestor_artifacts"; logicalIds: string[] | "direct" };
+  | { kind: "ancestor_artifacts"; logicalIds: string[] | "direct" }
+  | { kind: "ancestor_artifacts_by_contract"; logicalIds: string[]; contract: string };
 
 export interface RunPlanRenderedPrompt {
   node_id: string;
@@ -79,6 +80,32 @@ export interface RunPlanRenderedPrompt {
   artifact_references: RunPlanArtifactReference[];
 }
 
+/**
+ * The audit profile a run was planned under. Recorded so a reader can tell which
+ * packaged profile and topology produced the graph without re-resolving config.
+ */
+export interface RunAuditProfileSummary {
+  id: string;
+  catalog_digest: string;
+  effective_topology_path: string;
+  topology_path_origin: string;
+  topology_digest: string;
+  prompt_digest: string;
+  expanded_graph_fingerprint: string;
+  effective_settings: Record<string, unknown>;
+  setting_origins: Record<string, string>;
+  overridden_settings: string[];
+  topology_overridden: boolean;
+}
+
+export interface RunMetadataAuditProfile extends Omit<RunAuditProfileSummary, "id"> {
+  requested: string;
+  effective: string;
+  catalog_schema_version: number;
+  settings: Record<string, unknown>;
+  declared_topology_path?: string;
+}
+
 export interface RunPlanDocument {
   schema_version: typeof RUN_PLAN_SCHEMA_VERSION;
   run_id: string;
@@ -87,8 +114,16 @@ export interface RunPlanDocument {
   graph_fingerprint: string;
   config_fingerprint: string;
   redacted_config_fingerprint: string;
+  prompt_digest: string;
   execution: RunPlanExecution;
-  topology: { path: string; logical_nodes: number; expanded_nodes: number };
+  topology: {
+    path: string;
+    origin?: "project-default" | "audit-profile" | "project-config" | "runtime-override";
+    digest?: string;
+    logical_nodes: number;
+    expanded_nodes: number;
+  };
+  audit_profile: RunAuditProfileSummary;
   rendered_prompts: RunPlanRenderedPrompt[];
   policy_posture: Record<"config" | "topology" | "prompts" | "paths" | "agents" | "trust", "pass" | "warn" | "fail">;
 }
@@ -214,6 +249,11 @@ export interface RunMetadataDocument {
   mode: "run" | "resume" | "replay" | "fork";
   workflow_ids: string[];
   redacted_config_fingerprint: string;
+  // Planning always records these; the layout scaffold used by resume, replay,
+  // and fixtures has no audit policy to record, so they stay optional here while
+  // the plan document, which only planning writes, requires them.
+  prompt_digest?: string;
+  audit_profile?: RunMetadataAuditProfile;
   forge_guard: {
     enabled: boolean;
     active: boolean;

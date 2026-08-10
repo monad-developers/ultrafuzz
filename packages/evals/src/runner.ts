@@ -1,8 +1,20 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { readPlannedGraphDocument, readRunState, writeFileDurable, type RunState } from "@ultrafuzz/artifacts";
-import type { EvalConfig, RuntimeConfigOverrides } from "@ultrafuzz/config";
+import {
+  readPlannedGraphDocument,
+  readRunPlanDocument,
+  readRunState,
+  writeFileDurable,
+  type RunState
+} from "@ultrafuzz/artifacts";
+import {
+  auditProfile,
+  loadAuditProfileCatalog,
+  packagedTopologyDigest,
+  type EvalConfig,
+  type RuntimeConfigOverrides
+} from "@ultrafuzz/config";
 import { startRun, syncRun, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
 import { BENCHMARK_SMOKE_WORKFLOW_PROFILE } from "./benchmark-manifest.js";
@@ -24,6 +36,7 @@ import {
   EVAL_RUN_SUMMARY_SCHEMA_VERSION,
   type EvalBenchmarkWorkflowInput,
   type EvalDurableDiagnostic,
+  type EvalSmokeBenchmarkExecutionInput,
   type EvalMatrixRow,
   type EvalCandidateProvenance,
   type EvalModelProfile,
@@ -266,15 +279,19 @@ export async function launchEvalRow(input: LaunchEvalRowInput): Promise<EvalRunR
   // recorded explicitly; it is neither repaired nor treated as missing.
   const enrichmentDiagnostics: RuntimeDiagnostic[] = [];
   let runFingerprints: ReturnType<typeof readRunFingerprints> = {};
-  if (
-    launch.ok &&
-    launch.runRoot !== undefined &&
-    (launch.graphFingerprint === undefined || launch.configFingerprint === undefined)
-  ) {
+  let runAuditPolicy: ReturnType<typeof readRunAuditPolicy> = {};
+  if (launch.ok && launch.runRoot !== undefined) {
+    if (launch.graphFingerprint === undefined || launch.configFingerprint === undefined) {
+      try {
+        runFingerprints = readRunFingerprints(launch.runRoot);
+      } catch (error) {
+        enrichmentDiagnostics.push(rowEnrichmentDiagnostic("state.json", error));
+      }
+    }
     try {
-      runFingerprints = readRunFingerprints(launch.runRoot);
+      runAuditPolicy = readRunAuditPolicy(launch.runRoot);
     } catch (error) {
-      enrichmentDiagnostics.push(rowEnrichmentDiagnostic("state.json", error));
+      enrichmentDiagnostics.push(rowEnrichmentDiagnostic("plan.json", error));
     }
   }
   const graphFingerprint = launch.graphFingerprint ?? runFingerprints.graph_fingerprint;
@@ -298,6 +315,12 @@ export async function launchEvalRow(input: LaunchEvalRowInput): Promise<EvalRunR
           status: "launched",
           ...(graphFingerprint !== undefined ? { graph_fingerprint: graphFingerprint } : {}),
           ...(configFingerprint !== undefined ? { config_fingerprint: configFingerprint } : {}),
+          ...(runAuditPolicy.audit_profile === undefined ? {} : { audit_profile: runAuditPolicy.audit_profile }),
+          ...(runAuditPolicy.audit_profile_catalog_digest === undefined
+            ? {}
+            : { audit_profile_catalog_digest: runAuditPolicy.audit_profile_catalog_digest }),
+          ...(runAuditPolicy.topology_digest === undefined ? {} : { topology_digest: runAuditPolicy.topology_digest }),
+          ...(runAuditPolicy.prompt_digest === undefined ? {} : { prompt_digest: runAuditPolicy.prompt_digest }),
           ...(executionArtifactId !== undefined ? { execution_artifact_id: executionArtifactId } : {}),
           workflow_ids: launch.workflowIds,
           launcher: { status: "succeeded", started_at: startedAt, finished_at: finishedAt },
@@ -380,26 +403,30 @@ export function benchmarkModelProfileOverrides(
   if (input === undefined) return {};
   const execution = input.benchmark_execution;
   if (!("workflow_profile" in execution) || execution.workflow_profile !== BENCHMARK_SMOKE_WORKFLOW_PROFILE) return {};
+  assertSmokeAuditPolicy(execution);
   if (runnerProfile === undefined) {
     throw new EvalError("EVAL_MODEL_PROFILE_UNKNOWN", "smoke benchmark runner profile is missing");
   }
-  const selectedModel = {
-    agent: runnerProfile.agent,
-    ...(runnerProfile.model === undefined ? {} : { model: runnerProfile.model })
-  };
-  const preservesRunnerReasoning = runnerProfile.agent === "KimiAgent" || runnerProfile.agent === "DeepSeekAgent";
-  const benchmarkReasoning = preservesRunnerReasoning ? (runnerProfile.reasoning ?? "max") : "high";
-  const coordinationReasoning = preservesRunnerReasoning ? (runnerProfile.reasoning ?? "max") : "medium";
   return {
     runtimeOverrides: {
-      models: {
-        profiles: {
-          benchmark: { ...selectedModel, reasoning: benchmarkReasoning },
-          "smoke-coordination": { ...selectedModel, reasoning: coordinationReasoning }
-        }
-      }
+      auditProfile: "smoke"
     }
   };
+}
+
+function assertSmokeAuditPolicy(execution: EvalSmokeBenchmarkExecutionInput): void {
+  const catalog = loadAuditProfileCatalog();
+  const topologyDigest = packagedTopologyDigest(auditProfile("smoke", catalog), catalog);
+  if (
+    execution.audit_profile !== "smoke" ||
+    execution.audit_profile_catalog_digest !== catalog.digest ||
+    execution.topology_digest !== topologyDigest
+  ) {
+    throw new EvalError(
+      "EVAL_BENCHMARK_EXECUTION_INVALID",
+      "smoke benchmark audit profile, catalog digest, and topology digest must match the packaged smoke policy"
+    );
+  }
 }
 
 export interface WatchEvalRowInput {
@@ -634,7 +661,40 @@ function readRunFingerprints(runRoot: string): {
   };
 }
 
-function rowEnrichmentDiagnostic(sourceDocument: "state.json" | "graph.json", error: unknown): RuntimeDiagnostic {
+/**
+ * The audit policy the run was planned under, read from the run plan document
+ * it declares. An absent plan yields nothing; a present-but-invalid plan throws
+ * so the caller can record the fault rather than record a run whose profile
+ * provenance was guessed.
+ */
+function readRunAuditPolicy(runRoot: string): {
+  audit_profile?: string;
+  audit_profile_catalog_digest?: string;
+  topology_digest?: string;
+  prompt_digest?: string;
+} {
+  const planPath = path.join(runRoot, "plan.json");
+  try {
+    fs.lstatSync(planPath);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return {};
+    }
+    throw error;
+  }
+  const plan = readRunPlanDocument(planPath);
+  return {
+    audit_profile: plan.audit_profile.id,
+    audit_profile_catalog_digest: plan.audit_profile.catalog_digest,
+    topology_digest: plan.audit_profile.topology_digest,
+    prompt_digest: plan.prompt_digest
+  };
+}
+
+function rowEnrichmentDiagnostic(
+  sourceDocument: "state.json" | "graph.json" | "plan.json",
+  error: unknown
+): RuntimeDiagnostic {
   const reason = error instanceof Error ? error.message : String(error);
   const boundedReason = (reason.trim() === "" ? "invalid durable metadata" : reason).slice(0, 1_024);
   return {

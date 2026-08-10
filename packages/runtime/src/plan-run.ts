@@ -49,8 +49,7 @@ import {
   fingerprintGraph,
   loadTopology,
   type ExpandedGraph,
-  type ExpandedNode,
-  type ProjectTopology
+  type ExpandedNode
 } from "@ultrafuzz/topology";
 
 import {
@@ -73,7 +72,9 @@ import {
   sha256Stable
 } from "./utils.js";
 import { checkDependencyLegality } from "./artifact-gates.js";
+import { effectiveAuditPolicy } from "./audit-profile-policy.js";
 import { forgeGuardMetadata } from "./forge-guard.js";
+import { transformTopologyForRun } from "./topology-transform.js";
 
 const RENDERED_PROMPT_SNAPSHOT_DIR = "prompt-snapshots";
 
@@ -89,6 +90,24 @@ export async function planRun(input: PlanRunInput) {
     return runtimeFailure<PlanRunValue>(resolved.diagnostics);
   }
   applyWorkflowRunOverrides(resolved.config, input);
+
+  let auditPolicy: ReturnType<typeof effectiveAuditPolicy>;
+  try {
+    auditPolicy = effectiveAuditPolicy({
+      projectRoot,
+      config: resolved.config,
+      runtimeTopologyPath: input.topologyPath,
+      runtimeStrategyLoops: input.topologyTransform?.strategyLoops
+    });
+  } catch (error) {
+    return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "audit-profile", "AUDIT_PROFILE_POLICY_INVALID")]);
+  }
+  const effectiveTopologyTransform: PlanRunInput["topologyTransform"] = {
+    ...(auditPolicy.strategyLoops === undefined ? {} : { strategyLoops: auditPolicy.strategyLoops }),
+    ...(input.topologyTransform?.excludedNodeIds === undefined
+      ? {}
+      : { excludedNodeIds: input.topologyTransform.excludedNodeIds })
+  };
 
   const runId = input.runId ?? generateRunId(input.mode ?? "run");
   const configFingerprint = sha256Stable(resolved.config);
@@ -113,12 +132,12 @@ export async function planRun(input: PlanRunInput) {
   try {
     const topology = transformTopologyForRun(
       loadTopology(projectRoot, {
-        ...(input.topologyPath === undefined ? {} : { topologyPath: input.topologyPath }),
+        topologyPath: auditPolicy.effectiveTopologyPath,
         requirePromptFiles: true
       }),
-      input.topologyTransform
+      effectiveTopologyTransform
     );
-    catalog = transformPromptCatalogForRun(loadPromptCatalog({ projectRoot }), input.topologyTransform);
+    catalog = transformPromptCatalogForRun(loadPromptCatalog({ projectRoot }), effectiveTopologyTransform);
     expandedGraph = expandTopology(topology, {
       projectRoot,
       runId,
@@ -134,6 +153,7 @@ export async function planRun(input: PlanRunInput) {
   }
 
   const graph = toPlannedGraph(expandedGraph, catalog);
+  const promptDigest = promptDigestForGraph(graph, catalog);
   let referenceExpectationsSource: ReferenceExpectationProvision | undefined;
   try {
     referenceExpectationsSource = provisionReferenceExpectationOutput(
@@ -195,6 +215,26 @@ export async function planRun(input: PlanRunInput) {
         mode: input.mode ?? "run",
         workflow_ids: [],
         redacted_config_fingerprint: redactedConfigFingerprint,
+        prompt_digest: promptDigest,
+        audit_profile: {
+          requested: auditPolicy.auditProfile,
+          effective: auditPolicy.auditProfile,
+          catalog_schema_version: auditPolicy.catalogSchemaVersion,
+          catalog_digest: auditPolicy.catalogDigest,
+          settings: auditPolicy.profileSettings,
+          effective_settings: auditPolicy.effectiveSettings,
+          setting_origins: auditPolicy.settingOrigins,
+          overridden_settings: auditPolicy.overriddenSettings,
+          ...(auditPolicy.declaredTopologyPath === undefined
+            ? {}
+            : { declared_topology_path: auditPolicy.declaredTopologyPath }),
+          effective_topology_path: auditPolicy.effectiveTopologyDisplayPath,
+          topology_path_origin: auditPolicy.topologyPathOrigin,
+          topology_overridden: auditPolicy.topologyOverridden,
+          topology_digest: auditPolicy.topologyDigest,
+          prompt_digest: promptDigest,
+          expanded_graph_fingerprint: graphFingerprint
+        },
         forge_guard: forgeGuardMetadata(resolved.config, false)
       }
     });
@@ -235,8 +275,22 @@ export async function planRun(input: PlanRunInput) {
     graph_fingerprint: graphFingerprint,
     config_fingerprint: configFingerprint,
     redacted_config_fingerprint: redactedConfigFingerprint,
+    prompt_digest: promptDigest,
     execution: resolved.config.execution,
     topology: validation.value.topology,
+    audit_profile: {
+      id: auditPolicy.auditProfile,
+      catalog_digest: auditPolicy.catalogDigest,
+      effective_topology_path: auditPolicy.effectiveTopologyDisplayPath,
+      topology_path_origin: auditPolicy.topologyPathOrigin,
+      topology_digest: auditPolicy.topologyDigest,
+      prompt_digest: promptDigest,
+      expanded_graph_fingerprint: graphFingerprint,
+      effective_settings: auditPolicy.effectiveSettings,
+      setting_origins: auditPolicy.settingOrigins,
+      overridden_settings: auditPolicy.overriddenSettings,
+      topology_overridden: auditPolicy.topologyOverridden
+    },
     rendered_prompts: persistedRenderedPrompts,
     policy_posture: Object.fromEntries(
       Object.entries(validation.value.policy_posture).map(([key, value]) => [key, value.status])
@@ -252,6 +306,7 @@ export async function planRun(input: PlanRunInput) {
     graph_fingerprint: graphFingerprint,
     config_fingerprint: configFingerprint,
     redacted_config_fingerprint: redactedConfigFingerprint,
+    prompt_digest: promptDigest,
     output_root: outputRoot,
     state_nodes: stateNodes,
     resolved_config: resolved.config,
@@ -259,6 +314,24 @@ export async function planRun(input: PlanRunInput) {
     layout,
     rendered_prompts: renderedPrompts
   });
+}
+
+function promptDigestForGraph(graph: PlannedGraph, catalog: PromptCatalog): string {
+  const promptIds = Array.from(
+    new Set(graph.nodes.filter((node) => node.prompt_path.length > 0).map((node) => node.prompt_id))
+  ).sort();
+  return sha256Stable(
+    promptIds.map((promptId) => {
+      const entry = catalog.entries.get(promptId);
+      if (entry === undefined) throw new Error(`prompt ${promptId} is absent from the effective prompt catalog`);
+      return {
+        id: entry.id,
+        path: entry.relativePath,
+        source: entry.source,
+        markdown: entry.markdown
+      };
+    })
+  );
 }
 
 function persistRenderedPromptSnapshots(
@@ -310,52 +383,6 @@ export function promptTextsForCatalog(catalog: PromptCatalog): Record<string, st
       [entry.relativePath, entry.body]
     ])
   );
-}
-
-export function transformTopologyForRun(
-  topology: ProjectTopology,
-  transform: PlanRunInput["topologyTransform"]
-): ProjectTopology {
-  if (
-    transform === undefined ||
-    (transform.strategyLoops === undefined && (transform.excludedNodeIds?.length ?? 0) === 0)
-  ) {
-    return topology;
-  }
-  const excluded = new Set(transform.excludedNodeIds ?? []);
-  const nodeIds = new Set(topology.nodes.map((node) => node.id));
-  for (const id of excluded) {
-    if (!nodeIds.has(id)) throw new Error(`topology transform references unknown node ${id}`);
-    const node = topology.nodes.find((candidate) => candidate.id === id);
-    if (node?.role === "start" || node?.role === "finish") {
-      throw new Error(`topology transform cannot exclude ${node.role} node ${id}`);
-    }
-  }
-  if (
-    transform.strategyLoops !== undefined &&
-    (!Number.isInteger(transform.strategyLoops) || transform.strategyLoops < 1)
-  ) {
-    throw new Error("topology transform strategy loops must be a positive integer");
-  }
-  const groups = Object.fromEntries(
-    Object.entries(topology.groups ?? {}).map(([id, group]) => [
-      id,
-      id === "strategies" && transform.strategyLoops !== undefined
-        ? { ...group, defaults: { ...group.defaults, loops: transform.strategyLoops } }
-        : group
-    ])
-  );
-  return {
-    ...topology,
-    defaults: {
-      ...topology.defaults,
-      ...(transform.strategyLoops === undefined ? {} : { strategy_loops: transform.strategyLoops })
-    },
-    groups,
-    nodes: topology.nodes
-      .filter((node) => !excluded.has(node.id))
-      .map((node) => ({ ...node, depends_on: node.depends_on.filter((dependency) => !excluded.has(dependency)) }))
-  };
 }
 
 interface ReferenceExpectationProvision {

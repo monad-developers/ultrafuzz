@@ -67,6 +67,12 @@ Every non-production outcome also preserves the canonical finding v2 fields and
 adds required `triage_classification`, `recommended_next_action`, and
 `lifecycle`.
 
+Copy the effective audit policy from the supplied run metadata into the same
+closed `run_metadata` object: `audit_profile`, `audit_profile_catalog_digest`,
+`topology_digest`, `prompt_digest`, and `expanded_graph_fingerprint`. Use the
+runtime-recorded values exactly, never reconstruct them from paths, and show
+them in the Markdown Run summary.
+
 Write `{{artifact_path}}/report.md` beginning with `# Ultrafuzz report`. Include
 a concise run summary, an issue index, and for each production issue its
 severity reasoning, evidence/PoC, affected code, and strategy detections. Add a

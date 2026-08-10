@@ -11,6 +11,13 @@ const reportPath = releaseReportPath(readOption("--report") ?? ".ultrafuzz/relea
 const gates = [
   gate("docs", "Documentation inventory", "pnpm", ["-w", "docs:check"], ["G-DOCS"]),
   gate("config", "Config package tests", "pnpm", ["--filter", "@ultrafuzz/config", "test"], ["G-CONFIG"]),
+  gate(
+    "audit-profile-package",
+    "Audit profile package assets",
+    "node",
+    ["scripts/validate-audit-profile-package.mjs"],
+    ["G-CONFIG", "G-CLI"]
+  ),
   gate("security", "Security package tests", "pnpm", ["--filter", "@ultrafuzz/security", "test"], ["G-SECURITY"]),
   gate("topology", "Topology package tests", "pnpm", ["--filter", "@ultrafuzz/topology", "test"], ["G-TOPOLOGY"]),
   gate("prompts", "Prompt package tests", "pnpm", ["--filter", "@ultrafuzz/prompts", "test"], ["G-PROMPTS"]),

@@ -14,6 +14,28 @@ describe("artifact handoff validation", () => {
     ).not.toThrow();
   });
 
+  it("requires an ancestor generated-test manifest for the contract-derived handoff", () => {
+    const topology = validTopology();
+    topology.nodes[2] = {
+      ...topology.nodes[2]!,
+      outputs: [
+        ...topology.nodes[2]!.outputs!,
+        { path: "generated-tests.json", contract: "ultrafuzz/generated-tests@3", primary: false }
+      ]
+    };
+    expect(() =>
+      validateTopology(topology, {
+        promptTexts: { "review/review.md": "Read {{ancestor_generated_test_manifests}}." }
+      })
+    ).not.toThrow();
+
+    expect(() =>
+      validateTopology(validTopology(), {
+        promptTexts: { "review/review.md": "Read {{ancestor_generated_test_manifests}}." }
+      })
+    ).toThrow(expect.objectContaining({ code: "INVALID_PROMPT_ARTIFACT_REFERENCE" }));
+  });
+
   it("prefers an explicit prompt path over a colliding node-id catalog entry", () => {
     expect(() =>
       validateTopology(validTopology(), {

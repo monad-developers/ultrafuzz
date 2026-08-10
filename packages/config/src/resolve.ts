@@ -7,6 +7,11 @@ import {
   createDefaultPromptMetadataLayer,
   createDefaultResolvedConfig
 } from "./defaults.js";
+import {
+  auditProfile as findAuditProfile,
+  loadAuditProfileCatalog,
+  type AuditProfileSettings
+} from "./audit-profiles.js";
 import { validateAgentConfigs } from "./agents.js";
 import { syncDefaultModelProfile, validateModelProfiles, validProfileId } from "./model-profiles.js";
 import { validateTriageConfig } from "./triage.js";
@@ -32,6 +37,33 @@ export function resolveConfig(input: ResolveConfigInput = {}): ConfigResult<Reso
   const config = createDefaultResolvedConfig();
   const environment = input.env ?? process.env;
 
+  const selectedAuditProfile =
+    input.runtimeOverrides?.auditProfile ?? input.projectConfig?.auditProfile ?? config.auditProfile;
+  try {
+    const catalog = loadAuditProfileCatalog();
+    const profile = findAuditProfile(selectedAuditProfile, catalog);
+    config.auditProfile = profile.id;
+    config.auditProfileResolution = {
+      catalogSchemaVersion: catalog.schemaVersion,
+      catalogDigest: catalog.digest,
+      ...(profile.topologyPath === undefined ? {} : { declaredTopologyPath: profile.topologyPath }),
+      settings: { ...profile.settings },
+      effectiveSettings: {},
+      settingOrigins: {},
+      overriddenSettings: []
+    };
+    applyAuditProfileSettings(config, profile.settings);
+  } catch (error) {
+    diagnostics.push(
+      diagnostic(
+        "CONFIG_AUDIT_PROFILE_INVALID",
+        error instanceof Error ? error.message : String(error),
+        ["audit_profile"],
+        "audit-profile"
+      )
+    );
+  }
+
   applyPromptMetadataLayer(config, createDefaultPromptMetadataLayer(), diagnostics);
   if (input.promptMetadata) {
     applyPromptMetadataLayer(config, input.promptMetadata, diagnostics);
@@ -45,6 +77,7 @@ export function resolveConfig(input: ResolveConfigInput = {}): ConfigResult<Reso
   }
 
   syncDefaultModelProfile(config);
+  finalizeAuditProfileResolution(config, input, environment);
   sortConfig(config);
   for (const entry of validateResolvedConfig(config, environment)) {
     if (!diagnostics.some((existing) => sameDiagnosticIdentity(existing, entry))) diagnostics.push(entry);
@@ -70,14 +103,25 @@ export function validateResolvedConfig(
   return diagnostics;
 }
 
-export function serializeResolvedConfigToml(config: ResolvedConfig): string {
+export interface SerializeResolvedConfigTomlOptions {
+  omitAuditProfileManagedSettings?: boolean;
+}
+
+export function serializeResolvedConfigToml(
+  config: ResolvedConfig,
+  options: SerializeResolvedConfigTomlOptions = {}
+): string {
   const clone = cloneResolvedConfig(config);
+  const omitProfileSettings = options.omitAuditProfileManagedSettings === true;
   sortConfig(clone);
   const lines: string[] = [];
 
   pushAssignments(lines, {
     schema_version: clone.schemaVersion,
-    dynamic_strategies_enumerator: clone.dynamicStrategiesEnumerator
+    audit_profile: clone.auditProfile,
+    topology_path: clone.topologyPath,
+    strategy_loops: omitProfileSettings ? undefined : clone.strategyLoops,
+    dynamic_strategies_enumerator: omitProfileSettings ? undefined : clone.dynamicStrategiesEnumerator
   });
   pushTable(lines, "project", {
     repo: clone.project.repo,
@@ -85,15 +129,15 @@ export function serializeResolvedConfigToml(config: ResolvedConfig): string {
   });
   pushTable(lines, "run", {
     output_dir: clone.run.outputDir,
-    max_parallel_agents: clone.run.maxParallelAgents,
-    max_parallel_nodes: clone.run.maxParallelNodes,
+    max_parallel_agents: omitProfileSettings ? undefined : clone.run.maxParallelAgents,
+    max_parallel_nodes: omitProfileSettings ? undefined : clone.run.maxParallelNodes,
     keep_workspaces: clone.run.keepWorkspaces,
     forge_guard_enabled: clone.run.forgeGuardEnabled,
     forge_vmem_limit_kb: clone.run.forgeVmemLimitKb,
     forge_rayon_threads: clone.run.forgeRayonThreads,
     workspace_mode: clone.run.workspaceMode,
-    default_timeout_seconds: clone.run.defaultTimeoutSeconds,
-    workflow_deadline_seconds: clone.run.workflowDeadlineSeconds,
+    default_timeout_seconds: omitProfileSettings ? undefined : clone.run.defaultTimeoutSeconds,
+    workflow_deadline_seconds: omitProfileSettings ? undefined : clone.run.workflowDeadlineSeconds,
     controller_lease_seconds: clone.run.controllerLeaseSeconds
   });
   pushTable(lines, "execution", {
@@ -147,13 +191,17 @@ export function serializeResolvedConfigToml(config: ResolvedConfig): string {
   });
   pushTable(lines, "invariants", {
     property_priority_threshold: clone.invariants.propertyPriorityThreshold,
-    invariant_testing_smoke_timeout: formatDurationSeconds(clone.invariants.invariantTestingSmokeTimeoutSeconds),
-    invariant_testing_fuzzer_timeout: formatDurationSeconds(clone.invariants.invariantTestingFuzzerTimeoutSeconds),
+    invariant_testing_smoke_timeout: omitProfileSettings
+      ? undefined
+      : formatDurationSeconds(clone.invariants.invariantTestingSmokeTimeoutSeconds),
+    invariant_testing_fuzzer_timeout: omitProfileSettings
+      ? undefined
+      : formatDurationSeconds(clone.invariants.invariantTestingFuzzerTimeoutSeconds),
     reference_expectation_enforcement: clone.invariants.referenceExpectationEnforcement
   });
   pushTable(lines, "triage", {
-    quorum: clone.triage.quorum,
-    panel_size: clone.triage.panelSize
+    quorum: omitProfileSettings ? undefined : clone.triage.quorum,
+    panel_size: omitProfileSettings ? undefined : clone.triage.panelSize
   });
   pushTable(lines, "eval", {
     eval_config: clone.eval.evalConfig,
@@ -168,6 +216,102 @@ export function serializeResolvedConfigToml(config: ResolvedConfig): string {
     });
   }
   return `${lines.join("\n").replace(/\n{3,}/g, "\n\n")}\n`;
+}
+
+function applyAuditProfileSettings(config: ResolvedConfig, settings: AuditProfileSettings): void {
+  if (settings.strategy_loops !== undefined) config.strategyLoops = settings.strategy_loops;
+  if (settings.dynamic_strategies_enumerator !== undefined) {
+    config.dynamicStrategiesEnumerator = settings.dynamic_strategies_enumerator;
+  }
+  if (settings.max_parallel_agents !== undefined) config.run.maxParallelAgents = settings.max_parallel_agents;
+  if (settings.max_parallel_nodes !== undefined) config.run.maxParallelNodes = settings.max_parallel_nodes;
+  if (settings.default_timeout_seconds !== undefined) {
+    config.run.defaultTimeoutSeconds = settings.default_timeout_seconds;
+  }
+  if (settings.workflow_deadline_seconds !== undefined) {
+    config.run.workflowDeadlineSeconds = settings.workflow_deadline_seconds;
+  }
+  if (settings.invariant_testing_smoke_timeout_seconds !== undefined) {
+    config.invariants.invariantTestingSmokeTimeoutSeconds = settings.invariant_testing_smoke_timeout_seconds;
+  }
+  if (settings.invariant_testing_fuzzer_timeout_seconds !== undefined) {
+    config.invariants.invariantTestingFuzzerTimeoutSeconds = settings.invariant_testing_fuzzer_timeout_seconds;
+  }
+  if (settings.triage_quorum !== undefined) config.triage.quorum = settings.triage_quorum;
+  if (settings.triage_panel_size !== undefined) config.triage.panelSize = settings.triage_panel_size;
+}
+
+export function resolvedAuditProfileSettings(config: ResolvedConfig): AuditProfileSettings {
+  return {
+    strategy_loops: config.strategyLoops ?? 1,
+    dynamic_strategies_enumerator: config.dynamicStrategiesEnumerator,
+    max_parallel_agents: config.run.maxParallelAgents,
+    max_parallel_nodes: config.run.maxParallelNodes,
+    default_timeout_seconds: config.run.defaultTimeoutSeconds,
+    workflow_deadline_seconds: config.run.workflowDeadlineSeconds,
+    invariant_testing_smoke_timeout_seconds: config.invariants.invariantTestingSmokeTimeoutSeconds,
+    invariant_testing_fuzzer_timeout_seconds: config.invariants.invariantTestingFuzzerTimeoutSeconds,
+    triage_quorum: config.triage.quorum,
+    triage_panel_size: config.triage.panelSize
+  };
+}
+
+function finalizeAuditProfileResolution(
+  config: ResolvedConfig,
+  input: ResolveConfigInput,
+  environment: Record<string, string | undefined>
+): void {
+  const origins = auditProfileSettingOrigins(config.auditProfileResolution.settings, input, environment);
+  config.auditProfileResolution.effectiveSettings = resolvedAuditProfileSettings(config);
+  config.auditProfileResolution.settingOrigins = origins;
+  config.auditProfileResolution.overriddenSettings = Object.keys(config.auditProfileResolution.settings)
+    .filter((key) => origins[key] !== "audit-profile")
+    .sort();
+}
+
+function auditProfileSettingOrigins(
+  profile: AuditProfileSettings,
+  input: ResolveConfigInput,
+  environment: Record<string, string | undefined>
+): Record<string, ResolvedConfig["auditProfileResolution"]["settingOrigins"][string]> {
+  const keys = Object.keys(resolvedAuditProfileSettings(createDefaultResolvedConfig()));
+  const origins = Object.fromEntries(
+    keys.map((key) => [key, Object.hasOwn(profile, key) ? "audit-profile" : "default"])
+  ) as Record<string, ResolvedConfig["auditProfileResolution"]["settingOrigins"][string]>;
+  applyLayerSettingOrigins(origins, input.projectConfig, "project-config");
+  if (environment.ULTRAFUZZ_MAX_PARALLEL_AGENTS !== undefined) origins.max_parallel_agents = "environment";
+  if (environment.ULTRAFUZZ_MAX_PARALLEL_NODES !== undefined) origins.max_parallel_nodes = "environment";
+  applyLayerSettingOrigins(origins, input.runtimeOverrides, "runtime-override");
+  return Object.fromEntries(Object.entries(origins).sort(([left], [right]) => left.localeCompare(right)));
+}
+
+function applyLayerSettingOrigins(
+  origins: Record<string, ResolvedConfig["auditProfileResolution"]["settingOrigins"][string]>,
+  layer: ProjectConfigInput | RuntimeConfigOverrides | undefined,
+  origin: "project-config" | "runtime-override"
+): void {
+  if (layer === undefined) return;
+  const runtimeLayer = layer as RuntimeConfigOverrides;
+  if (layer.strategyLoops !== undefined) origins.strategy_loops = origin;
+  if (layer.dynamicStrategiesEnumerator !== undefined) origins.dynamic_strategies_enumerator = origin;
+  if (layer.run?.maxParallelAgents !== undefined || runtimeLayer.maxParallelAgents !== undefined) {
+    origins.max_parallel_agents = origin;
+  }
+  if (layer.run?.maxParallelNodes !== undefined || runtimeLayer.maxParallelNodes !== undefined) {
+    origins.max_parallel_nodes = origin;
+  }
+  if (layer.run?.defaultTimeoutSeconds !== undefined) origins.default_timeout_seconds = origin;
+  if (layer.run?.workflowDeadlineSeconds !== undefined) origins.workflow_deadline_seconds = origin;
+  if (layer.invariants?.invariantTestingSmokeTimeoutSeconds !== undefined) {
+    origins.invariant_testing_smoke_timeout_seconds = origin;
+  }
+  if (layer.invariants?.invariantTestingFuzzerTimeoutSeconds !== undefined) {
+    origins.invariant_testing_fuzzer_timeout_seconds = origin;
+  }
+  if (layer.triage?.quorum !== undefined || runtimeLayer.triageQuorum !== undefined) origins.triage_quorum = origin;
+  if (layer.triage?.panelSize !== undefined || runtimeLayer.triagePanelSize !== undefined) {
+    origins.triage_panel_size = origin;
+  }
 }
 
 function applyPromptMetadataLayer(
@@ -309,6 +453,15 @@ function applyProjectConfigLayer(
 ): void {
   if (layer.schemaVersion !== undefined) {
     config.schemaVersion = layer.schemaVersion;
+  }
+  if (layer.auditProfile !== undefined) {
+    config.auditProfile = layer.auditProfile;
+  }
+  if (layer.topologyPath !== undefined) {
+    config.topologyPath = layer.topologyPath;
+  }
+  if (layer.strategyLoops !== undefined) {
+    config.strategyLoops = layer.strategyLoops;
   }
   if (layer.dynamicStrategiesEnumerator !== undefined) {
     config.dynamicStrategiesEnumerator = layer.dynamicStrategiesEnumerator;
@@ -612,6 +765,12 @@ function configPathSegment(segment: string): string {
   switch (segment) {
     case "schemaVersion":
       return "schema_version";
+    case "auditProfile":
+      return "audit_profile";
+    case "topologyPath":
+      return "topology_path";
+    case "strategyLoops":
+      return "strategy_loops";
     case "dynamicStrategiesEnumerator":
       return "dynamic_strategies_enumerator";
     case "outputDir":

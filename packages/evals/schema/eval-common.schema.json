@@ -212,9 +212,20 @@
         "benchmark_execution": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["workflow_profile", "selected_strategy_ids", "strategy_loops", "excluded_node_ids"],
+          "required": [
+            "workflow_profile",
+            "audit_profile",
+            "audit_profile_catalog_digest",
+            "topology_digest",
+            "selected_strategy_ids",
+            "strategy_loops",
+            "excluded_node_ids"
+          ],
           "properties": {
             "workflow_profile": { "const": "smoke-benchmark-v1" },
+            "audit_profile": { "const": "smoke" },
+            "audit_profile_catalog_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "topology_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "selected_strategy_ids": {
               "type": "array",
               "items": {

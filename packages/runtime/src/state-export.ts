@@ -215,11 +215,14 @@ export async function getRunHealth(input: {
   }
   const base = readRunListEntry(evidence.layout.root, evidence.layout.runId);
   const state = readRunState(evidence.layout);
+  const metadata = readRunMetadataDocument(evidence.layout.runMetadataPath, evidence.layout.runId);
+  const auditProfile = metadata.audit_profile;
   return runtimeResult<RunHealthValue>(
     true,
     {
       ...base,
       workflow_run_id: evidence.smithersRunId,
+      ...(auditProfile === undefined ? {} : { audit_profile: auditProfile }),
       ...health,
       ...summarizeRunProgress({
         runStatus: base.status,

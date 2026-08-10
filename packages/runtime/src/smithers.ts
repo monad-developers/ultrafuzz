@@ -34,6 +34,7 @@ import type { ExpandedGraph, ExpandedNode, ModelFanoutProvenance } from "@ultraf
 
 import { withTransientNpmRegistryRetry } from "./npm-install-retry.js";
 import {
+  enablePinnedSubmoduleWorktreeConfig,
   pinnedSubmoduleExecutionFiles,
   pinnedSubmoduleExpectationForProject,
   type PinnedSubmoduleExpectation
@@ -1227,9 +1228,14 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
   const inputPath = path.join(smithersDir, "input.json");
   const tasksPath = path.join(smithersDir, "tasks.json");
   const logsDir = path.join(smithersDir, "logs");
+  // Cloud handoffs seal the same pinned dependency bytes as local runs, so the
+  // expectation is computed for every execution mode. Every task worktree is
+  // created locally, so Git's shared worktree-config prerequisite is enabled
+  // whenever a pinned expectation exists.
   const pinnedSubmodules = invariantPinnedSourceRefExists(projectRoot)
     ? pinnedSubmoduleExpectationForProject(projectRoot)
     : undefined;
+  enablePinnedSubmoduleWorktreeConfig(projectRoot, pinnedSubmodules);
   const compiled: CompiledSmithersWorkflow = {
     schemaVersion: SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION,
     runId: input.runLayout.runId,

@@ -56,6 +56,26 @@
             "minLength": 1
           },
           "uniqueItems": true
+        },
+        "audit_profile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "audit_profile_catalog_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "topology_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "prompt_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "expanded_graph_fingerprint": {
+          "type": "string",
+          "minLength": 1
         }
       },
       "required": [
@@ -67,7 +87,12 @@
         "tokens_used",
         "estimated_spend",
         "partial_pricing",
-        "strategy_loops"
+        "strategy_loops",
+        "audit_profile",
+        "audit_profile_catalog_digest",
+        "topology_digest",
+        "prompt_digest",
+        "expanded_graph_fingerprint"
       ],
       "additionalProperties": false
     },

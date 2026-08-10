@@ -76,6 +76,19 @@ class PinnedSubmoduleRollbackError extends AggregateError {
   }
 }
 
+interface TaskGitDirectories {
+  commonGitRoot: string;
+  worktreeGitRoot: string;
+  worktreeConfigPath: string;
+}
+
+interface GitConfigEntry {
+  name: string;
+  value: string;
+}
+
+const taskGitDirectoryBindings = new Map<string, string>();
+
 /**
  * Capture only committed recursive dependency content. Every repository must be
  * clean and every child HEAD must equal its parent's gitlink before Git metadata
@@ -208,6 +221,30 @@ export function pinnedSubmoduleExecutionFiles(
   ];
 }
 
+/** Enable Git's one shared prerequisite before local task worktrees fan out. */
+export function enablePinnedSubmoduleWorktreeConfig(
+  projectRootInput: string,
+  expectationValue: PinnedSubmoduleExpectation | undefined
+): void {
+  if (expectationValue === undefined) return;
+  const projectRoot = canonicalDirectory(projectRootInput, "pinned source root");
+  const expectation = parseExpectation(expectationValue);
+  const commit = gitSha(projectRoot, ["rev-parse", "HEAD"], "pinned submodule source commit");
+  const tree = gitSha(projectRoot, ["rev-parse", "HEAD^{tree}"], "pinned submodule source tree");
+  if (commit !== expectation.source_commit || tree !== expectation.source_tree) {
+    throw new Error("pinned submodule expectation does not match the source repository");
+  }
+  assertNoSharedSubmoduleMetadata(projectRoot, commonGitDirectory(projectRoot));
+
+  const current = gitConfigValues(projectRoot, ["--local", "--null", "--get-all", "extensions.worktreeConfig"]);
+  if (current.length === 0) {
+    git(projectRoot, ["config", "--local", "--add", "extensions.worktreeConfig", "true"]);
+  } else if (JSON.stringify(current) !== JSON.stringify(["true"])) {
+    throw new Error("Git worktree configuration prerequisite is invalid");
+  }
+  assertWorktreeConfigPrerequisite(projectRoot);
+}
+
 /**
  * Restore a fresh or retried task worktree. All sealed bytes are staged and
  * verified before any existing dependency root is replaced.
@@ -220,8 +257,9 @@ export function hydratePinnedSubmodulesFromExecutionSnapshot(input: {
   if (input.expectation === undefined) return undefined;
   const workspaceRoot = canonicalDirectory(input.workspaceRoot, "task workspace");
   const loaded = loadSealedSnapshot(input.executionSnapshotRoot, input.expectation);
-  assertTaskSourceIdentity(workspaceRoot, loaded.snapshot);
+  assertSourceIdentity(workspaceRoot, loaded.snapshot);
   assertNoStaleTransactions(workspaceRoot);
+  configureTaskSubmoduleIsolation(workspaceRoot, loaded.snapshot);
 
   const transactionRoot = fs.mkdtempSync(path.join(workspaceRoot, TRANSACTION_PREFIX));
   const stagingRoot = path.join(transactionRoot, "staged");
@@ -233,6 +271,7 @@ export function hydratePinnedSubmodulesFromExecutionSnapshot(input: {
     materializeStagedTree(stagingRoot, loaded);
     verifySnapshotBytes(stagingRoot, loaded.snapshot, { allowChildGitMetadata: false, skipSourceIdentity: true });
     replaceTaskRootsTransactionally(workspaceRoot, stagingRoot, backupRoot, loaded.snapshot);
+    assertTaskSubmoduleIsolation(workspaceRoot, loaded.snapshot);
     return loaded.snapshot;
   } catch (error) {
     preserveTransaction = error instanceof PinnedSubmoduleRollbackError;
@@ -251,8 +290,9 @@ export function verifyPinnedSubmodulesFromExecutionSnapshot(input: {
   if (input.expectation === undefined) return undefined;
   const workspaceRoot = canonicalDirectory(input.workspaceRoot, "task workspace");
   const loaded = loadSealedSnapshot(input.executionSnapshotRoot, input.expectation);
-  assertTaskSourceIdentity(workspaceRoot, loaded.snapshot);
+  assertSourceIdentity(workspaceRoot, loaded.snapshot);
   assertNoStaleTransactions(workspaceRoot);
+  assertTaskSubmoduleIsolation(workspaceRoot, loaded.snapshot);
   verifySnapshotBytes(workspaceRoot, loaded.snapshot, { allowChildGitMetadata: false });
   return loaded.snapshot;
 }
@@ -465,7 +505,8 @@ function verifySnapshotBytes(
 ): void {
   const root = canonicalDirectory(rootInput, "pinned submodule byte root");
   if (options.skipSourceIdentity !== true) {
-    assertTaskSourceIdentity(root, snapshot, options.allowChildGitMetadata);
+    assertSourceIdentity(root, snapshot);
+    if (!options.allowChildGitMetadata) assertNoSharedSubmoduleMetadata(root, commonGitDirectory(root));
   }
   const observed = collectFilesystemEntries(root, snapshot, options.allowChildGitMetadata);
   if (JSON.stringify(observed) !== JSON.stringify(snapshot.entries)) {
@@ -574,11 +615,7 @@ function verifySealedFileClosure(executionSnapshotRoot: string, snapshot: Pinned
   }
 }
 
-function assertTaskSourceIdentity(
-  workspaceRoot: string,
-  snapshot: PinnedSubmoduleSnapshot,
-  allowSubmoduleMetadata = false
-): void {
+function assertSourceIdentity(workspaceRoot: string, snapshot: PinnedSubmoduleSnapshot): void {
   const commit = gitSha(workspaceRoot, ["rev-parse", "HEAD"], "task source commit");
   const tree = gitSha(workspaceRoot, ["rev-parse", "HEAD^{tree}"], "task source tree");
   if (commit !== snapshot.source_commit || tree !== snapshot.source_tree) {
@@ -586,7 +623,6 @@ function assertTaskSourceIdentity(
   }
   assertDirectGitlinks(workspaceRoot, snapshot);
   assertIndexGitlinksMatchHead(workspaceRoot, ".");
-  if (!allowSubmoduleMetadata) assertNoPersistedSubmoduleMetadata(workspaceRoot);
 }
 
 function assertSnapshotMatchesSource(
@@ -594,11 +630,11 @@ function assertSnapshotMatchesSource(
   snapshot: PinnedSubmoduleSnapshot,
   allowSubmoduleMetadata = false
 ): void {
-  assertTaskSourceIdentity(projectRoot, snapshot, allowSubmoduleMetadata);
+  assertSourceIdentity(projectRoot, snapshot);
+  if (!allowSubmoduleMetadata) assertNoSharedSubmoduleMetadata(projectRoot, commonGitDirectory(projectRoot));
 }
 
-function assertNoPersistedSubmoduleMetadata(repositoryRoot: string): void {
-  const commonGitRoot = commonGitDirectory(repositoryRoot);
+function assertNoSharedSubmoduleMetadata(repositoryRoot: string, commonGitRoot: string): void {
   const modulesPath = safeResolveInside(commonGitRoot, "modules", "shared submodule metadata");
   if (pathEntryExists(modulesPath)) {
     throw new Error("shared Git submodule metadata is present");
@@ -616,12 +652,211 @@ function assertNoPersistedSubmoduleMetadata(repositoryRoot: string): void {
   for (let index = 0; index < fields.length; index += 2) {
     const scope = fields[index]!;
     const name = fields[index + 1]!;
-    if (scope !== "local" && scope !== "worktree") continue;
+    if (scope !== "local") continue;
     if (/^url\./iu.test(name)) throw new Error("persisted repository URL rewrite configuration is present");
     if (/^submodule\./iu.test(name)) {
-      throw new Error("persisted repository submodule configuration is present");
+      throw new Error("persisted shared submodule configuration is present");
     }
   }
+}
+
+function configureTaskSubmoduleIsolation(workspaceRoot: string, snapshot: PinnedSubmoduleSnapshot): void {
+  const directories = taskGitDirectories(workspaceRoot, true);
+  assertWorktreeConfigPrerequisite(workspaceRoot);
+  assertNoSharedSubmoduleMetadata(workspaceRoot, directories.commonGitRoot);
+  assertNoTaskModules(directories);
+  const expected = expectedTaskSubmoduleConfig(workspaceRoot, snapshot);
+  if (pathEntryExists(directories.worktreeConfigPath)) {
+    assertExactTaskSubmoduleConfig(directories, expected);
+    return;
+  }
+  for (const entry of expected) {
+    git(workspaceRoot, ["config", "--worktree", "--add", entry.name, entry.value]);
+  }
+  assertExactTaskSubmoduleConfig(directories, expected);
+}
+
+function assertTaskSubmoduleIsolation(workspaceRoot: string, snapshot: PinnedSubmoduleSnapshot): void {
+  const directories = taskGitDirectories(workspaceRoot, false);
+  assertWorktreeConfigPrerequisite(workspaceRoot);
+  assertNoSharedSubmoduleMetadata(workspaceRoot, directories.commonGitRoot);
+  assertNoTaskModules(directories);
+  assertExactTaskSubmoduleConfig(directories, expectedTaskSubmoduleConfig(workspaceRoot, snapshot));
+}
+
+function assertNoTaskModules(directories: TaskGitDirectories): void {
+  const taskModules = safeResolveInside(directories.worktreeGitRoot, "modules", "task-worktree submodule metadata");
+  if (pathEntryExists(taskModules)) throw new Error("task-worktree Git submodule metadata is present");
+}
+
+function assertWorktreeConfigPrerequisite(repositoryRoot: string): void {
+  const values = gitConfigValues(repositoryRoot, ["--local", "--null", "--get-all", "extensions.worktreeConfig"]);
+  if (JSON.stringify(values) !== JSON.stringify(["true"])) {
+    throw new Error("Git worktree configuration prerequisite is missing or changed");
+  }
+}
+
+function expectedTaskSubmoduleConfig(workspaceRoot: string, snapshot: PinnedSubmoduleSnapshot): GitConfigEntry[] {
+  const directPaths = new Set(snapshot.top_level_roots);
+  const records = parseGitConfigEntries(
+    gitBuffer(
+      workspaceRoot,
+      ["config", "--blob", "HEAD:.gitmodules", "--null", "--get-regexp", "^submodule\\..*\\.path$"],
+      MAX_GIT_OUTPUT_BYTES
+    ),
+    "committed .gitmodules"
+  );
+  const mappings = records.map((entry) => {
+    const match = /^submodule\.(.+)\.path$/iu.exec(entry.name);
+    if (match === null || !isSafeRelativePath(entry.value)) {
+      throw new Error("committed .gitmodules contains an invalid direct submodule mapping");
+    }
+    return { name: match[1]!, path: entry.value };
+  });
+  if (
+    new Set(mappings.map((entry) => entry.name)).size !== mappings.length ||
+    new Set(mappings.map((entry) => entry.path)).size !== mappings.length ||
+    mappings.length !== directPaths.size ||
+    mappings.some((entry) => !directPaths.has(entry.path))
+  ) {
+    throw new Error("committed .gitmodules does not exactly map the direct pinned gitlinks");
+  }
+  return mappings
+    .flatMap((entry): GitConfigEntry[] => {
+      const prefix = `submodule.${entry.name}`;
+      const inertUrl = `file:///dev/null/ultrafuzz-pinned-submodules/${pinnedSubmoduleSnapshotSha256(snapshot)}/${encodeURIComponent(entry.path)}`;
+      return [
+        { name: `${prefix}.active`, value: "true" },
+        { name: `${prefix}.url`, value: inertUrl },
+        { name: `${prefix}.update`, value: "none" }
+      ];
+    })
+    .sort(compareConfigEntries);
+}
+
+function assertExactTaskSubmoduleConfig(directories: TaskGitDirectories, expected: readonly GitConfigEntry[]): void {
+  assertRegularPhysicalFile(directories.worktreeConfigPath, "task-worktree Git configuration");
+  const actual = parseGitConfigEntries(
+    gitBuffer(
+      directories.worktreeGitRoot,
+      ["config", "--file", directories.worktreeConfigPath, "--null", "--list"],
+      MAX_GIT_OUTPUT_BYTES
+    ),
+    "task-worktree Git configuration"
+  ).sort(compareConfigEntries);
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    throw new Error("task-worktree submodule configuration is missing, changed, duplicated, included, or additional");
+  }
+}
+
+function taskGitDirectories(workspaceRoot: string, bind: boolean): TaskGitDirectories {
+  const dotGitPath = path.join(workspaceRoot, ".git");
+  assertRegularPhysicalFile(dotGitPath, "task worktree .git file");
+  const dotGit = readBoundedRegularFile(dotGitPath, MAX_PATH_BYTES, "task worktree .git file");
+  const match = /^gitdir: ([^\0\r\n]+)\n?$/u.exec(decodeUtf8(dotGit, "task worktree .git file"));
+  if (match === null) throw new Error("task worktree .git file is invalid");
+  const worktreeGitRoot = canonicalResolvedDirectory(workspaceRoot, match[1]!, "task worktree Git directory");
+
+  const commondirPath = path.join(worktreeGitRoot, "commondir");
+  assertRegularPhysicalFile(commondirPath, "task worktree common-directory binding");
+  const commondir = decodeUtf8(
+    readBoundedRegularFile(commondirPath, MAX_PATH_BYTES, "task worktree common-directory binding"),
+    "task worktree common-directory binding"
+  ).trimEnd();
+  if (commondir.length === 0 || commondir.includes("\n") || commondir.includes("\r")) {
+    throw new Error("task worktree common-directory binding is invalid");
+  }
+  const commonGitRoot = canonicalResolvedDirectory(worktreeGitRoot, commondir, "task worktree common Git directory");
+  const worktreesRoot = safeResolveInside(commonGitRoot, "worktrees", "linked-worktree administration root");
+  if (
+    !pathEntryExists(worktreesRoot) ||
+    fs.realpathSync(worktreesRoot) !== worktreesRoot ||
+    path.dirname(worktreeGitRoot) !== worktreesRoot
+  ) {
+    throw new Error("task Git administration directory is not bound to the linked worktree registry");
+  }
+
+  const backpointerPath = path.join(worktreeGitRoot, "gitdir");
+  assertRegularPhysicalFile(backpointerPath, "task worktree Git-directory backpointer");
+  const backpointer = decodeUtf8(
+    readBoundedRegularFile(backpointerPath, MAX_PATH_BYTES, "task worktree Git-directory backpointer"),
+    "task worktree Git-directory backpointer"
+  ).trimEnd();
+  if (
+    backpointer.length === 0 ||
+    backpointer.includes("\n") ||
+    backpointer.includes("\r") ||
+    path.resolve(worktreeGitRoot, backpointer) !== dotGitPath
+  ) {
+    throw new Error("task Git administration directory is not bound to the expected workspace");
+  }
+  if (
+    commonGitDirectory(workspaceRoot) !== commonGitRoot ||
+    canonicalResolvedDirectory(
+      workspaceRoot,
+      git(workspaceRoot, ["rev-parse", "--path-format=absolute", "--git-dir"]),
+      "task worktree Git directory"
+    ) !== worktreeGitRoot
+  ) {
+    throw new Error("task Git administration directory was redirected");
+  }
+
+  const previous = taskGitDirectoryBindings.get(workspaceRoot);
+  if (previous !== undefined && previous !== worktreeGitRoot) {
+    throw new Error("task Git administration directory changed after preparation");
+  }
+  if (bind && previous === undefined) taskGitDirectoryBindings.set(workspaceRoot, worktreeGitRoot);
+  if (!bind && previous === undefined) {
+    throw new Error("task Git administration directory was not bound during preparation");
+  }
+  return {
+    commonGitRoot,
+    worktreeGitRoot,
+    worktreeConfigPath: path.join(worktreeGitRoot, "config.worktree")
+  };
+}
+
+function canonicalResolvedDirectory(base: string, value: string, label: string): string {
+  const absolute = path.resolve(base, value);
+  const real = fs.realpathSync(absolute);
+  if (real !== absolute || !fs.statSync(real).isDirectory()) throw new Error(`${label} is not a canonical directory`);
+  return real;
+}
+
+function assertRegularPhysicalFile(filePath: string, label: string): void {
+  if (!pathEntryExists(filePath)) throw new Error(`${label} does not exist`);
+  const stat = fs.lstatSync(filePath);
+  if (stat.isSymbolicLink() || !stat.isFile() || fs.realpathSync(filePath) !== filePath) {
+    throw new Error(`${label} is not a physical regular file`);
+  }
+}
+
+function parseGitConfigEntries(bytes: Buffer, label: string): GitConfigEntry[] {
+  const records = decodeUtf8(bytes, label).split("\0");
+  if (records.at(-1) === "") records.pop();
+  return records.map((record) => {
+    const separator = record.indexOf("\n");
+    if (separator <= 0) throw new Error(`${label} is invalid`);
+    return { name: record.slice(0, separator), value: record.slice(separator + 1) };
+  });
+}
+
+function gitConfigValues(cwd: string, args: string[]): string[] {
+  const result = spawnSync("git", ["config", ...args], {
+    cwd,
+    encoding: "buffer",
+    maxBuffer: MAX_GIT_OUTPUT_BYTES,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  if (result.status === 1) return [];
+  if (result.status !== 0) throw new Error("Git configuration inventory is unavailable");
+  const values = decodeUtf8(result.stdout, "Git configuration inventory").split("\0");
+  if (values.at(-1) === "") values.pop();
+  return values;
+}
+
+function compareConfigEntries(left: GitConfigEntry, right: GitConfigEntry): number {
+  return compareStrings(left.name, right.name) || compareStrings(left.value, right.value);
 }
 
 function assertNoStaleTransactions(workspaceRoot: string): void {

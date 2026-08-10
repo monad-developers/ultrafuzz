@@ -47,6 +47,7 @@ import type {
   WorkflowNodeValue
 } from "@ultrafuzz/runtime";
 
+import type { AuditProfileSettingOrigin, AuditProfileSettings } from "@ultrafuzz/config";
 import type { AnalysisSummary } from "./benchmark-analysis/lib/runner.js";
 import type { ValidatedReportArtifacts } from "./report-artifacts.js";
 
@@ -96,7 +97,12 @@ export const CLI_KNOWN_COMMANDS = [
   "eval analyze table",
   "eval analyze cost",
   "eval analyze pairwise",
-  "eval analyze all"
+  "eval analyze all",
+  "config audit-profile",
+  "config audit-profiles",
+  "topology list",
+  "topology show",
+  "topology copy"
 ] as const;
 
 export type CliKnownCommand = (typeof CLI_KNOWN_COMMANDS)[number];
@@ -264,6 +270,64 @@ export interface CliEvalPublishData {
   report_url?: string;
 }
 
+/** Payloads for the packaged audit-profile and topology commands. */
+export interface CliAuditProfileData {
+  id: string;
+  description: string;
+  intended_use: string;
+  default: boolean;
+  catalog_schema_version: number;
+  catalog_digest: string;
+  declared_topology_path: string | null;
+  effective_topology_path: string;
+  topology_path_origin: string;
+  topology_digest: string;
+  profile_settings: AuditProfileSettings;
+  effective_settings: AuditProfileSettings;
+  setting_origins: Record<string, AuditProfileSettingOrigin>;
+  overridden_settings: string[];
+}
+
+export interface CliAuditProfileSummary {
+  id: string;
+  description: string;
+  intended_use: string;
+  default: boolean;
+  topology_path?: string;
+  topology_digest?: string;
+}
+
+export interface CliAuditProfilesData {
+  schema_version: number;
+  catalog_digest: string;
+  default_profile: string;
+  profiles: CliAuditProfileSummary[];
+}
+
+export interface CliTopologySummary {
+  id: string;
+  description: string;
+  logical_nodes: number;
+  digest: string;
+}
+
+export interface CliTopologyListData {
+  topologies: CliTopologySummary[];
+}
+
+export interface CliTopologyShowData extends CliTopologySummary {
+  topology_path: string;
+  source: string;
+}
+
+export interface CliTopologyCopyData {
+  id: string;
+  source_path: string;
+  destination_path: string;
+  digest: string;
+  overwritten: boolean;
+}
+
 export interface CliCommandDataMap {
   init: InitProjectResult;
   validate: CliValidateProjectData;
@@ -308,6 +372,11 @@ export interface CliCommandDataMap {
   "eval analyze cost": AnalysisSummary;
   "eval analyze pairwise": AnalysisSummary;
   "eval analyze all": AnalysisSummary;
+  "config audit-profile": CliAuditProfileData;
+  "config audit-profiles": CliAuditProfilesData;
+  "topology list": CliTopologyListData;
+  "topology show": CliTopologyShowData;
+  "topology copy": CliTopologyCopyData;
 }
 
 export type CliCommandData = CliCommandDataMap[CliKnownCommand];

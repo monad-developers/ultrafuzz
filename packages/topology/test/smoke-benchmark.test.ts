@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { expandTopology, loadTopology } from "../src/index.js";
 
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
-const SMOKE_TOPOLOGY_PATH = path.join(REPOSITORY_ROOT, "benchmarks", "smoke-benchmark.yml");
+const SMOKE_TOPOLOGY_PATH = path.join(REPOSITORY_ROOT, "packages", "config", "topologies", "smoke.yml");
 const STRATEGY_IDS = [
   "time-warp-sequences",
   "external-dependency-boundaries",
@@ -15,8 +15,8 @@ const STRATEGY_IDS = [
 ];
 const VALIDATION_NODE_ID = "json-validation-correction";
 
-describe("smoke benchmark topology", () => {
-  it("runs one validation-correction probe, one context pass, four strategies, and two review passes", () => {
+describe("packaged smoke topology", () => {
+  it("runs one validation-correction probe, one context pass, four strategies in one wave, and two review passes", () => {
     const topology = loadTopology(REPOSITORY_ROOT, {
       topologyPath: SMOKE_TOPOLOGY_PATH,
       requirePromptFiles: true
@@ -60,18 +60,13 @@ describe("smoke benchmark topology", () => {
       projectRoot: REPOSITORY_ROOT,
       requirePromptFiles: true,
       modelProfiles: {
-        benchmark: {
+        default: {
           agentRef: "CodexAgent",
           modelName: "gpt-5.6-luna",
           reasoningEffort: "high"
-        },
-        "smoke-coordination": {
-          agentRef: "CodexAgent",
-          modelName: "gpt-5.6-luna",
-          reasoningEffort: "medium"
         }
       },
-      defaultModelProfileId: "benchmark"
+      defaultModelProfileId: "default"
     });
     const executable = graph.nodes.filter((node) => node.kind === "agentic");
     expect(executable).toHaveLength(8);
@@ -81,18 +76,8 @@ describe("smoke benchmark topology", () => {
         .filter((node) => node.logicalId !== VALIDATION_NODE_ID)
         .every((node) => node.retryPolicy.maxAttempts === 2)
     ).toBe(true);
-    expect(
-      executable
-        .filter((node) => STRATEGY_IDS.includes(node.logicalId))
-        .every((node) => node.modelFanout[0]?.reasoningEffort === "high")
-    ).toBe(true);
-    expect(
-      executable
-        .filter((node) =>
-          [VALIDATION_NODE_ID, "smoke-context", "dedupe-findings", "final-report"].includes(node.logicalId)
-        )
-        .every((node) => node.modelFanout[0]?.reasoningEffort === "medium")
-    ).toBe(true);
+    expect(executable.every((node) => node.modelFanout[0]?.modelProfileId === "default")).toBe(true);
+    expect(executable.every((node) => node.modelFanout[0]?.reasoningEffort === "high")).toBe(true);
   });
 
   it("does not replace or trim the production topology", () => {

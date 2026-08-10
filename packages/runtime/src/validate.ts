@@ -19,6 +19,8 @@ import type {
   ValidateProjectInput,
   ValidateProjectResult
 } from "./types.js";
+import { effectiveAuditPolicy } from "./audit-profile-policy.js";
+import { transformTopologyForRun } from "./topology-transform.js";
 import {
   configDiagnostics,
   diagnosticFromError,
@@ -38,7 +40,12 @@ export async function validateProject(input: ValidateProjectInput) {
   posture.prompts = promptCheck.posture;
 
   let topologySummary: ValidateProjectResult["topology"];
-  const topologyCheck = validateTopologySurface(projectRoot, resolved.config, input.topologyPath);
+  const topologyCheck = validateTopologySurface(
+    projectRoot,
+    resolved.config,
+    input.topologyPath,
+    input.topologyTransform
+  );
   posture.topology = topologyCheck.posture;
   if (topologyCheck.summary) {
     topologySummary = topologyCheck.summary;
@@ -135,6 +142,14 @@ export function summarizeConfig(config: ResolvedConfig): ValidateProjectResult["
   const defaultProfile = config.models.profiles[config.models.default];
   return {
     schema_version: config.schemaVersion,
+    audit_profile: config.auditProfile,
+    audit_profile_catalog_digest: config.auditProfileResolution.catalogDigest,
+    ...(config.auditProfileResolution.declaredTopologyPath === undefined
+      ? {}
+      : { audit_profile_topology_path: config.auditProfileResolution.declaredTopologyPath }),
+    audit_profile_effective_settings: config.auditProfileResolution.effectiveSettings,
+    audit_profile_setting_origins: config.auditProfileResolution.settingOrigins,
+    audit_profile_overridden_settings: config.auditProfileResolution.overriddenSettings,
     default_agent: defaultProfile?.agent ?? "",
     ...(defaultProfile?.model ? { default_model: defaultProfile.model } : {}),
     ...(defaultProfile?.reasoning ? { default_reasoning: defaultProfile.reasoning } : {}),
@@ -185,18 +200,36 @@ function validatePrompts(projectRoot: string): {
 function validateTopologySurface(
   projectRoot: string,
   config: ResolvedConfig | undefined,
-  topologyPath?: string
+  topologyPath?: string,
+  topologyTransform?: ValidateProjectInput["topologyTransform"]
 ): {
   posture: PostureItem;
   summary?: ValidateProjectResult["topology"];
   agentRefs?: Set<string>;
 } {
   try {
-    const pathToTopology = topologyPath ?? resolveTopologyPath(projectRoot);
-    const topology = loadTopology(projectRoot, {
-      ...(topologyPath === undefined ? {} : { topologyPath }),
-      requirePromptFiles: true
-    });
+    const policy =
+      config === undefined
+        ? undefined
+        : effectiveAuditPolicy({
+            projectRoot,
+            config,
+            runtimeTopologyPath: topologyPath,
+            runtimeStrategyLoops: topologyTransform?.strategyLoops
+          });
+    const pathToTopology = policy?.effectiveTopologyPath ?? topologyPath ?? resolveTopologyPath(projectRoot);
+    const topology = transformTopologyForRun(
+      loadTopology(projectRoot, {
+        topologyPath: pathToTopology,
+        requirePromptFiles: true
+      }),
+      {
+        ...(policy?.strategyLoops === undefined ? {} : { strategyLoops: policy.strategyLoops }),
+        ...(topologyTransform?.excludedNodeIds === undefined
+          ? {}
+          : { excludedNodeIds: topologyTransform.excludedNodeIds })
+      }
+    );
     const executionDiagnostics =
       config === undefined
         ? []
@@ -234,7 +267,13 @@ function validateTopologySurface(
         executionDiagnostics
       ),
       summary: {
-        path: pathToTopology,
+        path: policy?.effectiveTopologyDisplayPath ?? pathToTopology,
+        ...(policy === undefined
+          ? {}
+          : {
+              origin: policy.topologyPathOrigin,
+              digest: policy.topologyDigest
+            }),
         logical_nodes: topology.nodes.length,
         expanded_nodes: expanded.nodes.length
       },

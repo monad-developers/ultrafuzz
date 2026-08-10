@@ -13,6 +13,7 @@ Topology, prompts, references, runs, workspaces, and cache state live under
 
 ```toml
 schema_version = "ultrafuzz.config.v2"
+audit_profile = "balanced"
 dynamic_strategies_enumerator = 3
 
 [project]
@@ -76,18 +77,24 @@ contract used by the CLI and runtime.
 
 ## Top-Level Keys
 
-| Key                             | Meaning                                                             |
-| ------------------------------- | ------------------------------------------------------------------- |
-| `schema_version`                | Exact config contract literal: `ultrafuzz.config.v2`.               |
-| `dynamic_strategies_enumerator` | Positive integer used by prompts that enumerate dynamic strategies. |
-| `[project]`                     | Project paths.                                                      |
-| `[run]`                         | Run output, parallelism, workspace, and timeout settings.           |
-| `[execution]`                   | Local or provider-backed execution and node resource defaults.      |
-| `[models]` and `[models.<id>]`  | Default model profile and model profile definitions.                |
-| `[permissions]`                 | Trusted local execution posture and materialization defaults.       |
-| `[invariants]`                  | Invariant prompt defaults.                                          |
-| `[triage]`                      | Triage quorum and panel size.                                       |
-| `[eval]`                        | Eval suite defaults and reporting provider binding.                 |
+| Key                             | Meaning                                                                    |
+| ------------------------------- | -------------------------------------------------------------------------- |
+| `schema_version`                | Exact config contract literal: `ultrafuzz.config.v2`.                      |
+| `audit_profile`                 | Named effort/topology preset. Defaults to `balanced`.                      |
+| `topology_path`                 | Optional project-local topology override that replaces a profile topology. |
+| `strategy_loops`                | Optional positive strategy-loop override.                                  |
+| `dynamic_strategies_enumerator` | Non-negative integer or `"unlimited"` used by dynamic-strategy prompts.    |
+| `[project]`                     | Project paths.                                                             |
+| `[run]`                         | Run output, parallelism, workspace, and timeout settings.                  |
+| `[execution]`                   | Local or provider-backed execution and node resource defaults.             |
+| `[models]` and `[models.<id>]`  | Default model profile and model profile definitions.                       |
+| `[permissions]`                 | Trusted local execution posture and materialization defaults.              |
+| `[invariants]`                  | Invariant prompt defaults.                                                 |
+| `[triage]`                      | Triage quorum and panel size.                                              |
+| `[eval]`                        | Eval suite defaults and reporting provider binding.                        |
+
+See [Audit profiles](audit-profiles.md) for the generated catalog, packaged
+topologies, effective-setting inspection commands, and precedence rules.
 
 ## Project
 
@@ -284,7 +291,10 @@ unredacted workflow control contract is serialized once as camelCase JSON,
 validated against `urn:ultrafuzz:schema:config:resolved-config:2`, and published
 byte-for-byte as `smithers/resolved-config.json` before it is sealed into the
 execution snapshot. Sealed readers run the same strict parser and schema; they
-do not use historical fallbacks.
+do not use historical fallbacks. That JSON document carries the audit-profile
+resolution — catalog schema version, catalog digest, declared topology path,
+profile settings, effective settings, per-setting origins, and overridden
+settings — as typed fields of the same closed contract.
 
 ## Rejected Config Surfaces
 

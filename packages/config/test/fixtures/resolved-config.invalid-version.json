@@ -1,5 +1,36 @@
 {
   "schemaVersion": "1.0",
+  "auditProfile": "balanced",
+  "auditProfileResolution": {
+    "catalogSchemaVersion": 1,
+    "catalogDigest": "61f007e0f15d58cb08417fb1396ff2240e055be363a4a6380411fedd5e83da29",
+    "settings": {},
+    "effectiveSettings": {
+      "strategy_loops": 1,
+      "dynamic_strategies_enumerator": 3,
+      "max_parallel_agents": 4,
+      "max_parallel_nodes": 8,
+      "default_timeout_seconds": 1800,
+      "workflow_deadline_seconds": 86400,
+      "invariant_testing_smoke_timeout_seconds": 600,
+      "invariant_testing_fuzzer_timeout_seconds": 3600,
+      "triage_quorum": 3,
+      "triage_panel_size": 4
+    },
+    "settingOrigins": {
+      "default_timeout_seconds": "default",
+      "dynamic_strategies_enumerator": "default",
+      "invariant_testing_fuzzer_timeout_seconds": "default",
+      "invariant_testing_smoke_timeout_seconds": "default",
+      "max_parallel_agents": "default",
+      "max_parallel_nodes": "default",
+      "strategy_loops": "default",
+      "triage_panel_size": "default",
+      "triage_quorum": "default",
+      "workflow_deadline_seconds": "default"
+    },
+    "overriddenSettings": []
+  },
   "dynamicStrategiesEnumerator": 3,
   "project": {
     "repo": "."

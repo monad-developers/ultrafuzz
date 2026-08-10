@@ -4541,7 +4541,7 @@ test("plan uses an eval topology override without replacing the project topology
   });
 
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
-  assert.equal(plan.value!.validation.topology?.path, smokeTopology);
+  assert.equal(plan.value!.validation.topology?.path, "smoke-benchmark.yml");
   assert.deepEqual(
     plan.value!.graph.nodes.map((node) => node.logical_id),
     ["project-discovery"]
@@ -4549,20 +4549,109 @@ test("plan uses an eval topology override without replacing the project topology
   assert.equal(fs.readFileSync(canonicalTopology, "utf8"), "not: [valid\n");
 });
 
-test("plan applies smoke eval model profiles to a normally initialized target", async () => {
+test("project and runtime topology paths override a profile topology atomically", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
-  const smokeTopology = path.resolve(process.cwd(), "../..", "benchmarks", "smoke-benchmark.yml");
+  writeSmallTopology(project);
+  const projectOverride = path.join(project, ".ultrafuzz", "project-override.yml");
+  const runtimeOverride = path.join(project, ".ultrafuzz", "runtime-override.yml");
+  fs.copyFileSync(path.join(project, ".ultrafuzz", "topology.yml"), projectOverride);
+  fs.copyFileSync(projectOverride, runtimeOverride);
+  const configPath = path.join(project, "ultrafuzz.toml");
+  fs.writeFileSync(
+    configPath,
+    fs
+      .readFileSync(configPath, "utf8")
+      .replace(
+        'audit_profile = "balanced"',
+        'audit_profile = "smoke"\ntopology_path = ".ultrafuzz/project-override.yml"'
+      ),
+    "utf8"
+  );
+  fs.writeFileSync(path.join(project, ".ultrafuzz", "topology.yml"), "not: [valid\n", "utf8");
+
+  const projectSelected = await validateProject({ projectRoot: project, env: {} });
+  assert.equal(projectSelected.ok, true, JSON.stringify(projectSelected.diagnostics));
+  assert.equal(projectSelected.value!.topology?.origin, "project-config");
+  assert.equal(projectSelected.value!.topology?.path, ".ultrafuzz/project-override.yml");
+
+  const runtimeSelected = await validateProject({
+    projectRoot: project,
+    topologyPath: runtimeOverride,
+    env: {}
+  });
+  assert.equal(runtimeSelected.ok, true, JSON.stringify(runtimeSelected.diagnostics));
+  assert.equal(runtimeSelected.value!.topology?.origin, "runtime-override");
+  assert.equal(runtimeSelected.value!.topology?.path, ".ultrafuzz/runtime-override.yml");
+});
+
+test("audit profile selects its packaged topology and records portable provenance", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  const configPath = path.join(project, "ultrafuzz.toml");
+  fs.writeFileSync(
+    configPath,
+    fs.readFileSync(configPath, "utf8").replace('audit_profile = "balanced"', 'audit_profile = "smoke"'),
+    "utf8"
+  );
+  fs.writeFileSync(path.join(project, ".ultrafuzz", "topology.yml"), "not: [valid\n", "utf8");
+
+  const plan = await planRun({ projectRoot: project, runId: "profile-smoke", env: {} });
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  assert.equal(plan.value!.resolved_config.run.maxParallelNodes, 4);
+  assert.equal(plan.value!.resolved_config.run.workflowDeadlineSeconds, 14_400);
+  assert.equal(plan.value!.resolved_config.auditProfileResolution.overriddenSettings.length, 0);
+  assert.deepEqual(
+    plan.value!.graph.nodes.map((node) => node.logical_id),
+    [
+      "smoke-context",
+      "json-validation-correction",
+      "time-warp-sequences",
+      "external-dependency-boundaries",
+      "externalized-state-accounting",
+      "lifecycle-view-boundaries",
+      "dedupe-findings",
+      "final-report"
+    ]
+  );
+  assert.equal(plan.value!.validation.topology?.path, "topologies/smoke.yml");
+  assert.equal(plan.value!.validation.topology?.origin, "audit-profile");
+  const metadata = JSON.parse(fs.readFileSync(path.join(plan.value!.run_root, "run.json"), "utf8")) as {
+    prompt_digest: string;
+    audit_profile: Record<string, unknown>;
+  };
+  assert.match(metadata.prompt_digest, /^[0-9a-f]{64}$/);
+  assert.deepEqual(metadata.audit_profile, {
+    requested: "smoke",
+    effective: "smoke",
+    catalog_schema_version: 1,
+    catalog_digest: plan.value!.resolved_config.auditProfileResolution.catalogDigest,
+    settings: plan.value!.resolved_config.auditProfileResolution.settings,
+    effective_settings: plan.value!.resolved_config.auditProfileResolution.effectiveSettings,
+    setting_origins: plan.value!.resolved_config.auditProfileResolution.settingOrigins,
+    overridden_settings: [],
+    declared_topology_path: "topologies/smoke.yml",
+    effective_topology_path: "topologies/smoke.yml",
+    topology_path_origin: "audit-profile",
+    topology_overridden: false,
+    topology_digest: plan.value!.validation.topology?.digest,
+    prompt_digest: metadata.prompt_digest,
+    expanded_graph_fingerprint: plan.value!.graph_fingerprint
+  });
+});
+
+test("plan applies one smoke eval model profile to a normally initialized target", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
 
   const plan = await planRun({
     projectRoot: project,
-    topologyPath: smokeTopology,
     runId: "smoke-topology-profiles",
     runtimeOverrides: {
+      auditProfile: "smoke",
       models: {
         profiles: {
-          benchmark: { agent: "CodexAgent", model: "gpt-5.6-luna", reasoning: "high" },
-          "smoke-coordination": { agent: "CodexAgent", model: "gpt-5.6-luna", reasoning: "medium" }
+          default: { agent: "CodexAgent", model: "gpt-5.6-luna", reasoning: "high" }
         }
       }
     },
@@ -4572,12 +4661,8 @@ test("plan applies smoke eval model profiles to a normally initialized target", 
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const executable = plan.value!.graph.nodes.filter((node) => node.kind === "agentic");
   assert.equal(executable.length, 8);
-  const strategies = executable.filter((node) => node.model_fanout[0]?.model_profile_id === "benchmark");
-  const coordination = executable.filter((node) => node.model_fanout[0]?.model_profile_id === "smoke-coordination");
-  assert.equal(strategies.length, 4);
-  assert.ok(strategies.every((node) => node.model_fanout[0]?.reasoning_effort === "high"));
-  assert.equal(coordination.length, 4);
-  assert.ok(coordination.every((node) => node.model_fanout[0]?.reasoning_effort === "medium"));
+  assert.ok(executable.every((node) => node.model_fanout[0]?.model_profile_id === "default"));
+  assert.ok(executable.every((node) => node.model_fanout[0]?.reasoning_effort === "high"));
 });
 
 test("plan materializes pinned reference nodes before rendering dependent prompts", async () => {

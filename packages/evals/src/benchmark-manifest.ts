@@ -1,3 +1,4 @@
+import { auditProfile, loadAuditProfileCatalog, packagedTopologyDigest } from "@ultrafuzz/config";
 import { z } from "zod/v4";
 
 import { readStrictJsonDocument } from "./eval-durable.js";
@@ -19,7 +20,6 @@ export const BENCHMARK_SMOKE_MAX_PARALLEL_RUNS = 3;
 export const BENCHMARK_FULL_MAX_PARALLEL_RUNS = 20;
 export const BENCHMARK_SMOKE_MAX_PARALLEL_TARGETS = 4;
 export const BENCHMARK_FULL_MAX_PARALLEL_TARGETS = 8;
-export const BENCHMARK_SMOKE_WORKFLOW_PATH = "benchmarks/smoke-benchmark.yml" as const;
 export const BENCHMARK_SMOKE_WORKFLOW_PROFILE = "smoke-benchmark-v1" as const;
 export const BENCHMARK_SMOKE_SELECTED_STRATEGY_IDS = [
   "time-warp-sequences",
@@ -310,6 +310,7 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
     );
   }
   const lane = input.lanes[input.lane];
+  const smokeAuditPolicy = input.lane === "smoke" ? benchmarkSmokeAuditPolicy() : undefined;
   const topologyExclusions = benchmarkLaneTopologyExclusions(lane);
   const selectedTargets = resolveBenchmarkTargets(input);
   if (input.runnerModelProfileId !== undefined && input.runnerModelProfileOverride !== undefined) {
@@ -365,7 +366,6 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
     })),
     variants: selectedRunnerProfiles.map((profile) => ({
       id: profile.id,
-      ...(input.lane === "smoke" ? { topology: BENCHMARK_SMOKE_WORKFLOW_PATH } : {}),
       runner_model_profile: profile.id,
       judge_model_profile: judgeProfile.id,
       workflow_input: {
@@ -376,11 +376,14 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
           ...(input.lane === "smoke"
             ? {
                 workflow_profile: BENCHMARK_SMOKE_WORKFLOW_PROFILE,
+                audit_profile: smokeAuditPolicy!.audit_profile,
+                audit_profile_catalog_digest: smokeAuditPolicy!.audit_profile_catalog_digest,
+                topology_digest: smokeAuditPolicy!.topology_digest,
                 selected_strategy_ids: [...BENCHMARK_SMOKE_SELECTED_STRATEGY_IDS]
               }
             : {}),
           strategy_loops: lane.strategy_loops,
-          // The dedicated smoke graph contains only its selected nodes, so
+          // The packaged smoke profile contains only its selected nodes, so
           // production-topology exclusions would be unknown-node errors.
           excluded_node_ids: input.lane === "smoke" ? [] : topologyExclusions.excluded_node_ids
         }
@@ -411,6 +414,22 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
         mode_explicit: true
       }
     }
+  };
+}
+
+function benchmarkSmokeAuditPolicy(): {
+  audit_profile: "smoke";
+  audit_profile_catalog_digest: string;
+  topology_digest: string;
+} {
+  const catalog = loadAuditProfileCatalog();
+  const profile = auditProfile("smoke", catalog);
+  const topologyDigest = packagedTopologyDigest(profile, catalog);
+  if (topologyDigest === undefined) throw new EvalError("EVAL_BENCHMARK_MANIFEST_INVALID", "smoke topology is missing");
+  return {
+    audit_profile: "smoke",
+    audit_profile_catalog_digest: catalog.digest,
+    topology_digest: topologyDigest
   };
 }
 

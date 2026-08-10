@@ -369,7 +369,7 @@ describe("prompt semantic anchors", () => {
       "stateful-invariant-campaign"
     );
     expect(`${topologySource}\n${aggregate}\n${dynamic}`).not.toContain("stateful-invariant-recon-campaign");
-    expect(aggregate).toContain("{{artifact_path:stateful-invariant-campaign}}/generated-tests.json");
+    expect(aggregate).toContain("{{ancestor_generated_test_manifests}}");
     expect(dynamic).toContain("{{artifact_path:stateful-invariant-campaign}}/generated-tests.json");
 
     expect(campaign).toContain("final recon-fuzzer campaign");
@@ -546,7 +546,14 @@ describe("prompt semantic anchors", () => {
     expect(readFileSync(topologyPath, "utf8")).toMatch(
       /id: reference-harness-author[\s\S]*outputs:[\s\S]*path: generated-tests\.json/u
     );
-    expect([...aggregateManifestSources].sort()).toEqual([...generatedTestProducers].sort());
+    // The aggregate prompt no longer hardcodes one {{artifact_path:<producer>}} line
+    // per generated-test producer: it resolves them through
+    // {{ancestor_generated_test_manifests}}, which is what lets the packaged smoke
+    // and invariant-only topologies work, since those producers do not exist there.
+    // A static list would have to be edited for every topology.
+    expect(aggregate).toContain("{{ancestor_generated_test_manifests}}");
+    expect([...aggregateManifestSources]).toEqual([]);
+    expect(generatedTestProducers.size).toBeGreaterThan(0);
     for (const sourceId of new Set([
       ...generatedTestManifestSources(aggregate),
       ...generatedTestManifestSources(dynamic)

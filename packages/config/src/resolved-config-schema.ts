@@ -13,6 +13,9 @@ const AGENT_ID_PATTERN = /^(?!.*\.\.)[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/u;
 const NODE_ID_PATTERN = /^[a-z0-9_][a-z0-9_-]{0,127}$/u;
 const EVAL_PROVIDER_ID_PATTERN = /^[A-Za-z][A-Za-z0-9._-]{0,127}$/u;
 const HTTPS_ENDPOINT_PATTERN = /^https:\/\/\S+$/u;
+const SHA256_DIGEST_PATTERN = /^[0-9a-f]{64}$/u;
+const AUDIT_PROFILE_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/u;
+const PACKAGED_TOPOLOGY_PATH_PATTERN = /^topologies\/[a-z0-9][a-z0-9-]*\.ya?ml$/u;
 const PROJECT_LOCAL_PATH_PATTERN =
   /^(?:\.|(?![A-Za-z]:[\\/])(?![\\/])(?!.*[\\/]$)(?!.*(?:^|[\\/])\.{1,2}(?:[\\/]|$))(?!.*[\\/]{2})[^\r\n]+)$/u;
 
@@ -21,6 +24,61 @@ const environmentVariableNameSchema = z.string().regex(ENVIRONMENT_VARIABLE_PATT
 const projectLocalPathSchema = z.string().regex(PROJECT_LOCAL_PATH_PATTERN);
 const timeoutSecondsSchema = z.number().int().min(1).max(MAX_TIMEOUT_SECONDS);
 const positiveIntegerSchema = z.number().int().positive();
+const nonNegativeIntegerSchema = z.number().int().nonnegative();
+const dynamicStrategiesEnumeratorSchema = z.union([nonNegativeIntegerSchema, z.literal("unlimited")]);
+const sha256DigestSchema = z.string().regex(SHA256_DIGEST_PATTERN);
+const auditProfileIdSchema = z.string().regex(AUDIT_PROFILE_ID_PATTERN);
+const packagedTopologyPathSchema = z.string().regex(PACKAGED_TOPOLOGY_PATH_PATTERN);
+
+const AUDIT_PROFILE_SETTING_NAMES = [
+  "strategy_loops",
+  "dynamic_strategies_enumerator",
+  "max_parallel_agents",
+  "max_parallel_nodes",
+  "default_timeout_seconds",
+  "workflow_deadline_seconds",
+  "invariant_testing_smoke_timeout_seconds",
+  "invariant_testing_fuzzer_timeout_seconds",
+  "triage_quorum",
+  "triage_panel_size"
+] as const;
+
+const auditProfileSettingNameSchema = z.enum(AUDIT_PROFILE_SETTING_NAMES);
+
+const auditProfileSettingOriginSchema = z.enum([
+  "default",
+  "audit-profile",
+  "project-config",
+  "environment",
+  "runtime-override"
+]);
+
+const auditProfileSettingsSchema = z
+  .object({
+    strategy_loops: positiveIntegerSchema.optional(),
+    dynamic_strategies_enumerator: dynamicStrategiesEnumeratorSchema.optional(),
+    max_parallel_agents: positiveIntegerSchema.optional(),
+    max_parallel_nodes: positiveIntegerSchema.optional(),
+    default_timeout_seconds: timeoutSecondsSchema.optional(),
+    workflow_deadline_seconds: timeoutSecondsSchema.optional(),
+    invariant_testing_smoke_timeout_seconds: timeoutSecondsSchema.optional(),
+    invariant_testing_fuzzer_timeout_seconds: timeoutSecondsSchema.optional(),
+    triage_quorum: positiveIntegerSchema.optional(),
+    triage_panel_size: positiveIntegerSchema.optional()
+  })
+  .strict();
+
+const auditProfileResolutionSchema = z
+  .object({
+    catalogSchemaVersion: positiveIntegerSchema,
+    catalogDigest: sha256DigestSchema,
+    declaredTopologyPath: packagedTopologyPathSchema.optional(),
+    settings: auditProfileSettingsSchema,
+    effectiveSettings: auditProfileSettingsSchema,
+    settingOrigins: z.record(auditProfileSettingNameSchema, auditProfileSettingOriginSchema),
+    overriddenSettings: z.array(auditProfileSettingNameSchema).refine((names) => new Set(names).size === names.length)
+  })
+  .strict();
 
 const executionResourcesSchema = z
   .object({
@@ -170,7 +228,11 @@ const agentConfigsSchema = z
 export const resolvedConfigZodSchema: z.ZodType<ResolvedConfig> = z
   .object({
     schemaVersion: z.literal(RESOLVED_CONFIG_SCHEMA_VERSION),
-    dynamicStrategiesEnumerator: positiveIntegerSchema,
+    auditProfile: auditProfileIdSchema,
+    topologyPath: projectLocalPathSchema.optional(),
+    strategyLoops: positiveIntegerSchema.optional(),
+    auditProfileResolution: auditProfileResolutionSchema,
+    dynamicStrategiesEnumerator: dynamicStrategiesEnumeratorSchema,
     project: z
       .object({
         repo: projectLocalPathSchema,

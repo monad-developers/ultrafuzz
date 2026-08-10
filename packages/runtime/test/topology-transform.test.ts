@@ -3,15 +3,18 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { packagedTopology } from "@ultrafuzz/config";
 import { loadPromptCatalog, type PromptCatalog } from "@ultrafuzz/prompts";
-import { loadTopology, validateTopology, type ExpandedGraph, type ProjectTopology } from "@ultrafuzz/topology";
-
 import {
-  promptTextsForCatalog,
-  toPlannedGraph,
-  transformPromptCatalogForRun,
-  transformTopologyForRun
-} from "../src/plan-run.js";
+  expandTopology,
+  loadTopology,
+  validateTopology,
+  type ExpandedGraph,
+  type ProjectTopology
+} from "@ultrafuzz/topology";
+
+import { promptTextsForCatalog, toPlannedGraph, transformPromptCatalogForRun } from "../src/plan-run.js";
+import { transformTopologyForRun } from "../src/topology-transform.js";
 
 function topology(): ProjectTopology {
   return {
@@ -181,4 +184,17 @@ test("the invariant-only exclusions retain the whole stateful-invariant chain", 
     "the review fan-in lost its only surviving strategy dependency"
   );
   for (const id of invariantNodeIds) assert.equal(validation.effectiveLoopCounts[id], 1);
+});
+
+test("invariant-only strategy loops repeat the serial coverage stage", () => {
+  const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
+  const source = loadTopology(repositoryRoot, { topologyPath: packagedTopology("invariant-only").path });
+  const one = expandTopology(transformTopologyForRun(source, { strategyLoops: 1 }), { projectRoot: repositoryRoot });
+  const three = expandTopology(transformTopologyForRun(source, { strategyLoops: 3 }), {
+    projectRoot: repositoryRoot
+  });
+
+  assert.equal(one.nodes.filter((node) => node.logicalId === "stateful-invariant-coverage").length, 1);
+  assert.equal(three.nodes.filter((node) => node.logicalId === "stateful-invariant-coverage").length, 3);
+  assert.equal(three.nodes.filter((node) => node.logicalId === "stateful-invariant-campaign").length, 1);
 });

@@ -7,6 +7,8 @@
   "additionalProperties": false,
   "required": [
     "schemaVersion",
+    "auditProfile",
+    "auditProfileResolution",
     "dynamicStrategiesEnumerator",
     "project",
     "run",
@@ -22,8 +24,62 @@
     "schemaVersion": {
       "const": "ultrafuzz.config.v2"
     },
-    "dynamicStrategiesEnumerator": {
+    "auditProfile": {
+      "$ref": "#/$defs/auditProfileId"
+    },
+    "topologyPath": {
+      "$ref": "#/$defs/projectLocalPath"
+    },
+    "strategyLoops": {
       "$ref": "#/$defs/positiveInteger"
+    },
+    "auditProfileResolution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "catalogSchemaVersion",
+        "catalogDigest",
+        "settings",
+        "effectiveSettings",
+        "settingOrigins",
+        "overriddenSettings"
+      ],
+      "properties": {
+        "catalogSchemaVersion": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "catalogDigest": {
+          "$ref": "#/$defs/sha256Digest"
+        },
+        "declaredTopologyPath": {
+          "$ref": "#/$defs/packagedTopologyPath"
+        },
+        "settings": {
+          "$ref": "#/$defs/auditProfileSettings"
+        },
+        "effectiveSettings": {
+          "$ref": "#/$defs/auditProfileSettings"
+        },
+        "settingOrigins": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/auditProfileSettingName"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/auditProfileSettingOrigin"
+          }
+        },
+        "overriddenSettings": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/auditProfileSettingName"
+          }
+        }
+      }
+    },
+    "dynamicStrategiesEnumerator": {
+      "$ref": "#/$defs/dynamicStrategiesEnumerator"
     },
     "project": {
       "type": "object",
@@ -340,6 +396,88 @@
       "type": "integer",
       "minimum": 1,
       "maximum": 9007199254740991
+    },
+    "nonNegativeInteger": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "dynamicStrategiesEnumerator": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        {
+          "const": "unlimited"
+        }
+      ]
+    },
+    "sha256Digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "auditProfileId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"
+    },
+    "packagedTopologyPath": {
+      "type": "string",
+      "pattern": "^topologies/[a-z0-9][a-z0-9-]*\\.ya?ml$"
+    },
+    "auditProfileSettingName": {
+      "type": "string",
+      "enum": [
+        "strategy_loops",
+        "dynamic_strategies_enumerator",
+        "max_parallel_agents",
+        "max_parallel_nodes",
+        "default_timeout_seconds",
+        "workflow_deadline_seconds",
+        "invariant_testing_smoke_timeout_seconds",
+        "invariant_testing_fuzzer_timeout_seconds",
+        "triage_quorum",
+        "triage_panel_size"
+      ]
+    },
+    "auditProfileSettingOrigin": {
+      "type": "string",
+      "enum": ["default", "audit-profile", "project-config", "environment", "runtime-override"]
+    },
+    "auditProfileSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "strategy_loops": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "dynamic_strategies_enumerator": {
+          "$ref": "#/$defs/dynamicStrategiesEnumerator"
+        },
+        "max_parallel_agents": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "max_parallel_nodes": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "default_timeout_seconds": {
+          "$ref": "#/$defs/timeoutSeconds"
+        },
+        "workflow_deadline_seconds": {
+          "$ref": "#/$defs/timeoutSeconds"
+        },
+        "invariant_testing_smoke_timeout_seconds": {
+          "$ref": "#/$defs/timeoutSeconds"
+        },
+        "invariant_testing_fuzzer_timeout_seconds": {
+          "$ref": "#/$defs/timeoutSeconds"
+        },
+        "triage_quorum": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "triage_panel_size": {
+          "$ref": "#/$defs/positiveInteger"
+        }
+      }
     },
     "timeoutSeconds": {
       "type": "integer",

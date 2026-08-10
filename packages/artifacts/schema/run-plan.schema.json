@@ -14,42 +14,157 @@
     "execution",
     "topology",
     "rendered_prompts",
-    "policy_posture"
+    "policy_posture",
+    "prompt_digest",
+    "audit_profile"
   ],
   "properties": {
-    "schema_version": { "const": "ultrafuzz.run-plan.v2" },
-    "run_id": { "$ref": "#/$defs/safeId" },
-    "mode": { "enum": ["run", "resume", "replay", "fork"] },
-    "source_run_id": { "$ref": "#/$defs/safeId" },
-    "graph_fingerprint": { "$ref": "#/$defs/sha256" },
-    "config_fingerprint": { "$ref": "#/$defs/sha256" },
-    "redacted_config_fingerprint": { "$ref": "#/$defs/sha256" },
-    "execution": { "$ref": "#/$defs/execution" },
+    "schema_version": {
+      "const": "ultrafuzz.run-plan.v2"
+    },
+    "run_id": {
+      "$ref": "#/$defs/safeId"
+    },
+    "mode": {
+      "enum": ["run", "resume", "replay", "fork"]
+    },
+    "source_run_id": {
+      "$ref": "#/$defs/safeId"
+    },
+    "graph_fingerprint": {
+      "$ref": "#/$defs/sha256"
+    },
+    "config_fingerprint": {
+      "$ref": "#/$defs/sha256"
+    },
+    "redacted_config_fingerprint": {
+      "$ref": "#/$defs/sha256"
+    },
+    "execution": {
+      "$ref": "#/$defs/execution"
+    },
     "topology": {
       "type": "object",
       "additionalProperties": false,
       "required": ["path", "logical_nodes", "expanded_nodes"],
       "properties": {
-        "path": { "type": "string", "minLength": 1 },
-        "logical_nodes": { "type": "integer", "minimum": 1 },
-        "expanded_nodes": { "type": "integer", "minimum": 1 }
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "logical_nodes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "expanded_nodes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "origin": {
+          "enum": ["project-default", "audit-profile", "project-config", "runtime-override"]
+        },
+        "digest": {
+          "$ref": "#/$defs/sha256"
+        }
       }
     },
     "rendered_prompts": {
       "type": "array",
-      "items": { "$ref": "#/$defs/renderedPrompt" }
+      "items": {
+        "$ref": "#/$defs/renderedPrompt"
+      }
     },
     "policy_posture": {
       "type": "object",
       "additionalProperties": false,
       "required": ["config", "topology", "prompts", "paths", "agents", "trust"],
       "properties": {
-        "config": { "$ref": "#/$defs/posture" },
-        "topology": { "$ref": "#/$defs/posture" },
-        "prompts": { "$ref": "#/$defs/posture" },
-        "paths": { "$ref": "#/$defs/posture" },
-        "agents": { "$ref": "#/$defs/posture" },
-        "trust": { "$ref": "#/$defs/posture" }
+        "config": {
+          "$ref": "#/$defs/posture"
+        },
+        "topology": {
+          "$ref": "#/$defs/posture"
+        },
+        "prompts": {
+          "$ref": "#/$defs/posture"
+        },
+        "paths": {
+          "$ref": "#/$defs/posture"
+        },
+        "agents": {
+          "$ref": "#/$defs/posture"
+        },
+        "trust": {
+          "$ref": "#/$defs/posture"
+        }
+      }
+    },
+    "prompt_digest": {
+      "$ref": "#/$defs/sha256"
+    },
+    "audit_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "catalog_digest",
+        "effective_topology_path",
+        "topology_path_origin",
+        "topology_digest",
+        "prompt_digest",
+        "expanded_graph_fingerprint",
+        "effective_settings",
+        "setting_origins",
+        "overridden_settings",
+        "topology_overridden"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "catalog_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "effective_topology_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "topology_path_origin": {
+          "type": "string",
+          "minLength": 1
+        },
+        "topology_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "prompt_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "expanded_graph_fingerprint": {
+          "type": "string",
+          "minLength": 1
+        },
+        "effective_settings": {
+          "type": "object"
+        },
+        "setting_origins": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "overridden_settings": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "topology_overridden": {
+          "type": "boolean"
+        }
       }
     }
   },
@@ -70,9 +185,20 @@
       "additionalProperties": false,
       "required": ["cpu", "memoryMiB", "timeoutSeconds"],
       "properties": {
-        "cpu": { "type": "number", "exclusiveMinimum": 0, "maximum": 256 },
-        "memoryMiB": { "type": "integer", "minimum": 128, "maximum": 4194304 },
-        "timeoutSeconds": { "type": "integer", "minimum": 1 }
+        "cpu": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 256
+        },
+        "memoryMiB": {
+          "type": "integer",
+          "minimum": 128,
+          "maximum": 4194304
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 1
+        }
       }
     },
     "execution": {
@@ -80,13 +206,25 @@
       "additionalProperties": false,
       "required": ["mode", "retentionDays", "resources", "nodes", "providers"],
       "properties": {
-        "mode": { "enum": ["local", "cloud"] },
-        "provider": { "const": "modal" },
-        "retentionDays": { "type": "integer", "minimum": 1, "maximum": 3650 },
-        "resources": { "$ref": "#/$defs/resources" },
+        "mode": {
+          "enum": ["local", "cloud"]
+        },
+        "provider": {
+          "const": "modal"
+        },
+        "retentionDays": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3650
+        },
+        "resources": {
+          "$ref": "#/$defs/resources"
+        },
         "nodes": {
           "type": "object",
-          "propertyNames": { "$ref": "#/$defs/safeId" },
+          "propertyNames": {
+            "$ref": "#/$defs/safeId"
+          },
           "additionalProperties": {
             "type": "object",
             "additionalProperties": false,
@@ -96,9 +234,20 @@
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
-                  "cpu": { "type": "number", "exclusiveMinimum": 0, "maximum": 256 },
-                  "memoryMiB": { "type": "integer", "minimum": 128, "maximum": 4194304 },
-                  "timeoutSeconds": { "type": "integer", "minimum": 1 }
+                  "cpu": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "maximum": 256
+                  },
+                  "memoryMiB": {
+                    "type": "integer",
+                    "minimum": 128,
+                    "maximum": 4194304
+                  },
+                  "timeoutSeconds": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
                 }
               }
             }
@@ -113,9 +262,18 @@
               "additionalProperties": false,
               "required": ["app", "image", "credentialEnv"],
               "properties": {
-                "app": { "type": "string", "minLength": 1 },
-                "image": { "type": "string", "minLength": 1 },
-                "region": { "type": "string", "minLength": 1 },
+                "app": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "image": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "region": {
+                  "type": "string",
+                  "minLength": 1
+                },
                 "credentialEnv": {
                   "type": "array",
                   "minItems": 2,
@@ -135,18 +293,26 @@
         {
           "if": {
             "type": "object",
-            "properties": { "mode": { "const": "cloud" } },
+            "properties": {
+              "mode": {
+                "const": "cloud"
+              }
+            },
             "required": ["mode"]
           },
           "then": {
             "type": "object",
             "required": ["provider"],
             "properties": {
-              "provider": { "const": "modal" },
+              "provider": {
+                "const": "modal"
+              },
               "providers": {
                 "type": "object",
                 "required": ["modal"],
-                "properties": { "modal": {} }
+                "properties": {
+                  "modal": {}
+                }
               }
             }
           },
@@ -154,7 +320,9 @@
             "type": "object",
             "not": {
               "type": "object",
-              "properties": { "provider": {} },
+              "properties": {
+                "provider": {}
+              },
               "required": ["provider"]
             }
           }
@@ -177,22 +345,47 @@
         "artifact_references"
       ],
       "properties": {
-        "node_id": { "$ref": "#/$defs/safeId" },
-        "logical_node_id": { "$ref": "#/$defs/safeId" },
-        "attempt_id": { "$ref": "#/$defs/safeId" },
-        "prompt_id": { "type": "string", "minLength": 1 },
-        "prompt_path": { "type": "string", "minLength": 1 },
-        "rendered_prompt_path": { "type": "string", "minLength": 1 },
-        "rendered_prompt_digest": { "$ref": "#/$defs/sha256" },
-        "rendered_prompt_snapshot_path": { "type": "string", "minLength": 1 },
+        "node_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "logical_node_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "attempt_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "prompt_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "prompt_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rendered_prompt_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rendered_prompt_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "rendered_prompt_snapshot_path": {
+          "type": "string",
+          "minLength": 1
+        },
         "variables_used": {
           "type": "array",
           "uniqueItems": true,
-          "items": { "type": "string", "minLength": 1 }
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
         },
         "artifact_references": {
           "type": "array",
-          "items": { "$ref": "#/$defs/artifactReference" }
+          "items": {
+            "$ref": "#/$defs/artifactReference"
+          }
         }
       }
     },
@@ -203,9 +396,16 @@
           "additionalProperties": false,
           "required": ["kind"],
           "properties": {
-            "kind": { "const": "artifact_path" },
-            "logicalId": { "$ref": "#/$defs/safeId" },
-            "suffix": { "type": "string", "minLength": 1 }
+            "kind": {
+              "const": "artifact_path"
+            },
+            "logicalId": {
+              "$ref": "#/$defs/safeId"
+            },
+            "suffix": {
+              "type": "string",
+              "minLength": 1
+            }
           }
         },
         {
@@ -213,8 +413,12 @@
           "additionalProperties": false,
           "required": ["kind", "logicalId"],
           "properties": {
-            "kind": { "const": "artifact_handoff" },
-            "logicalId": { "$ref": "#/$defs/safeId" }
+            "kind": {
+              "const": "artifact_handoff"
+            },
+            "logicalId": {
+              "$ref": "#/$defs/safeId"
+            }
           }
         },
         {
@@ -222,17 +426,45 @@
           "additionalProperties": false,
           "required": ["kind", "logicalIds"],
           "properties": {
-            "kind": { "const": "ancestor_artifacts" },
+            "kind": {
+              "const": "ancestor_artifacts"
+            },
             "logicalIds": {
               "oneOf": [
-                { "const": "direct" },
+                {
+                  "const": "direct"
+                },
                 {
                   "type": "array",
                   "minItems": 1,
                   "uniqueItems": true,
-                  "items": { "$ref": "#/$defs/safeId" }
+                  "items": {
+                    "$ref": "#/$defs/safeId"
+                  }
                 }
               ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "logicalIds", "contract"],
+          "properties": {
+            "kind": {
+              "const": "ancestor_artifacts_by_contract"
+            },
+            "logicalIds": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/safeId"
+              }
+            },
+            "contract": {
+              "type": "string",
+              "minLength": 1
             }
           }
         }

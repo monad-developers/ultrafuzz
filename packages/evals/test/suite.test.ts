@@ -306,6 +306,9 @@ describe("eval suite JSON Schema and Zod parity", () => {
         excluded_strategy_families: ["stateful-invariant", "differential", "dynamic-strategy"],
         benchmark_execution: {
           workflow_profile: "smoke-benchmark-v1",
+          audit_profile: "smoke",
+          audit_profile_catalog_digest: "a".repeat(64),
+          topology_digest: "b".repeat(64),
           selected_strategy_ids: [
             "time-warp-sequences",
             "external-dependency-boundaries",
@@ -378,10 +381,54 @@ describe("eval suite JSON Schema and Zod parity", () => {
         excluded_strategy_families: ["stateful-invariant", "differential", "dynamic-strategy"],
         benchmark_execution: {
           workflow_profile: "smoke-benchmark-v1",
+          audit_profile: "smoke",
+          audit_profile_catalog_digest: "a".repeat(64),
+          topology_digest: "b".repeat(64),
           selected_strategy_ids: [
             "time-warp-sequences",
             "external-dependency-boundaries",
             "externalized-state-accounting"
+          ],
+          strategy_loops: 1,
+          excluded_node_ids: []
+        }
+      }
+    ],
+    [
+      "smoke controls without their audit profile policy",
+      {
+        benchmark_lane: "smoke",
+        target_frameworks: { "aave-v4": "foundry" },
+        excluded_strategy_families: ["stateful-invariant", "differential", "dynamic-strategy"],
+        benchmark_execution: {
+          workflow_profile: "smoke-benchmark-v1",
+          selected_strategy_ids: [
+            "time-warp-sequences",
+            "external-dependency-boundaries",
+            "externalized-state-accounting",
+            "lifecycle-view-boundaries"
+          ],
+          strategy_loops: 1,
+          excluded_node_ids: []
+        }
+      }
+    ],
+    [
+      "smoke controls with an unpinned audit profile catalog digest",
+      {
+        benchmark_lane: "smoke",
+        target_frameworks: { "aave-v4": "foundry" },
+        excluded_strategy_families: ["stateful-invariant", "differential", "dynamic-strategy"],
+        benchmark_execution: {
+          workflow_profile: "smoke-benchmark-v1",
+          audit_profile: "smoke",
+          audit_profile_catalog_digest: "not-a-digest",
+          topology_digest: "b".repeat(64),
+          selected_strategy_ids: [
+            "time-warp-sequences",
+            "external-dependency-boundaries",
+            "externalized-state-accounting",
+            "lifecycle-view-boundaries"
           ],
           strategy_loops: 1,
           excluded_node_ids: []

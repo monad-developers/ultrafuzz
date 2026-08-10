@@ -1247,7 +1247,8 @@ export const dynamicStrategyPlanSchema = withDocumentMetadata(
   z
     .strictObject({
       schema_version: z.literal(DYNAMIC_STRATEGY_PLAN_SCHEMA_VERSION),
-      dynamic_strategies_enumerator: nonNegativeInteger,
+      // An audit profile may lift the enumerator entirely.
+      dynamic_strategies_enumerator: z.union([nonNegativeInteger, z.literal("unlimited")]),
       status: z.enum(["selected", "no-actionable-strategies", "blocked"]),
       selected_strategy_count: nonNegativeInteger,
       selected_strategies: uniqueStrings(),
@@ -1612,6 +1613,13 @@ export const reportSchema = withDocumentMetadata(
       estimated_spend: nonEmptyString,
       partial_pricing: z.boolean(),
       strategy_loops: nonNegativeInteger,
+      // The report renders these beside the rest of the run summary, so a report
+      // that omits them cannot be projected.
+      audit_profile: nonEmptyString,
+      audit_profile_catalog_digest: sha256,
+      topology_digest: sha256,
+      prompt_digest: sha256,
+      expanded_graph_fingerprint: nonEmptyString,
       source_run_ids: uniqueStrings().optional()
     }),
     issues: z.array(reportIssueSchema),

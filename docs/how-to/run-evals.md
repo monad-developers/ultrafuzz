@@ -142,9 +142,10 @@ lane selects the three Ultrafuzz-bench targets, covering Foundry, Hardhat, and
 Vyper, and runs GPT-5.6 Luna at `high`. Its canonical controls set
 `strategy_loops: 1`, `disable_invariant_tests: true`,
 `disable_differential_tests: true`, and `disable_dynamic_strategies: true`.
-The adapter selects `benchmarks/smoke-benchmark.yml`, whose bounded graph has a
-single context pass, four parallel ground-truth-informed strategy families,
-dedupe, and final report. The production topology is not modified or filtered.
+The adapter selects the CLI-packaged `smoke` audit profile, whose bounded graph
+has a single context pass, four parallel ground-truth-informed strategy
+families, dedupe, and final report. The production topology is not modified or
+filtered.
 All three target rows run concurrently, while the four strategy nodes within
 each row use a smoke-only four-way workflow concurrency limit.
 
@@ -203,7 +204,7 @@ access, provider credentials, and provider/Modal budgets must be tightly scoped.
 A newer commit on the same branch cancels the older smoke. GPT-5.6 Luna `high`
 is the default smoke runner; repository variable
 `BENCHMARK_SMOKE_OPENAI_MODEL` can override its model while retaining the
-single OpenAI/Codex lane and fixed high-strategy/medium-coordination reasoning.
+single OpenAI/Codex lane and selected reasoning level across every smoke node.
 Candidate installation and build happen before any Modal launch, so a broken
 commit fails without allocating the benchmark matrix. GitHub Actions still
 performs the build, control, and collection work; benchmark and model compute

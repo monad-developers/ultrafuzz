@@ -44,6 +44,12 @@ export interface EvalBenchmarkExecutionInput {
 
 export interface EvalSmokeBenchmarkExecutionInput extends EvalBenchmarkExecutionInput {
   workflow_profile: "smoke-benchmark-v1";
+  /** Named audit profile the smoke lane runs under; pinned to the packaged `smoke` profile. */
+  audit_profile: "smoke";
+  /** Digest of the packaged audit-profile catalog the smoke policy was read from. */
+  audit_profile_catalog_digest: string;
+  /** Digest of the packaged topology the smoke profile selects. */
+  topology_digest: string;
   selected_strategy_ids: string[];
 }
 
@@ -417,6 +423,10 @@ export interface EvalRunRecord {
   final_status?: "launched" | "succeeded" | "failed" | "timed-out" | "canceled";
   graph_fingerprint?: string;
   config_fingerprint?: string;
+  audit_profile?: string;
+  audit_profile_catalog_digest?: string;
+  topology_digest?: string;
+  prompt_digest?: string;
   candidate_label?: string;
   candidate_commit?: string;
   execution_artifact_id?: string;
