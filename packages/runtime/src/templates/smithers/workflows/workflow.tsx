@@ -2789,8 +2789,10 @@ function assertVerifiedDependency(
       generatedTestBundles: Object.freeze(generatedTestBundles)
     });
   } catch (error) {
+    // The reason belongs in the message: a bare label leaves an operator with a
+    // failed campaign and nothing to act on.
     throw new Error(
-      `artifact-contract failure: artifact dependency has not passed verification ${path.basename(dependency)} for ${task.attemptId}`,
+      `artifact-contract failure: artifact dependency has not passed verification ${path.basename(dependency)} for ${task.attemptId}: ${error instanceof Error ? error.message : String(error)}`,
       { cause: error }
     );
   }

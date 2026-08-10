@@ -1795,7 +1795,9 @@ export async function requestSmithersPause(input: {
   env?: Record<string, string | undefined>;
 }): Promise<SmithersPauseResult> {
   const result = await execSmithersCli({
-    args: ["pause", input.smithersRunId, "--format", "json"],
+    // `--full-output` is what makes the runner emit the `{ok, data, meta}`
+    // envelope this result is read as.
+    args: ["pause", input.smithersRunId, "--format", "json", "--full-output"],
     projectRoot: input.projectRoot,
     env: input.env,
     acceptedExitCodes: [2]
@@ -1818,7 +1820,7 @@ export async function requestSmithersCancel(input: {
   // a failure: rerunning `cancel` to confirm an in-flight request must converge
   // rather than error.
   const result = await execSmithersCli({
-    args: ["cancel", input.smithersRunId, "--format", "json"],
+    args: ["cancel", input.smithersRunId, "--format", "json", "--full-output"],
     projectRoot: input.projectRoot,
     env: input.env,
     acceptedExitCodes: [2, 4]
@@ -2389,7 +2391,8 @@ export async function runSmithersLifecycleCommand(input: {
       ...(input.resetNode === undefined ? [] : ["--reset-node", input.resetNode]),
       ...(input.label === undefined ? [] : ["--label", input.label]),
       "--format",
-      "json"
+      "json",
+      "--full-output"
     ];
     const forkResult = await execSmithersCli({
       args: forkCommand,
@@ -2450,8 +2453,17 @@ export async function runSmithersLifecycleCommand(input: {
           ...supervisorCommandArgs(input.controllerLeaseSeconds)
         ]
       : input.action === "fork"
-        ? [input.action, input.workflowPath, "--run-id", input.smithersRunId, "--run", "--format", "json"]
-        : [input.action, input.workflowPath, "--run-id", input.smithersRunId, "--format", "json"];
+        ? [
+            input.action,
+            input.workflowPath,
+            "--run-id",
+            input.smithersRunId,
+            "--run",
+            "--format",
+            "json",
+            "--full-output"
+          ]
+        : [input.action, input.workflowPath, "--run-id", input.smithersRunId, "--format", "json", "--full-output"];
   const result = await execSmithersCli({
     args: command,
     projectRoot: input.projectRoot,
@@ -2528,13 +2540,17 @@ function smithersFailedTasks(inspect: CurrentSmithersInspect): Array<{ nodeId: s
     failedTasks.set(key, { nodeId, iteration });
   }
   if (failedTasks.size > 0) return [...failedTasks.values()];
-  const failedNodeIds = inspect.nodes.filter((entry) => entry.state === "failed").map((entry) => entry.nodeId);
-  if (failedNodeIds.length > 0) {
-    throw new Error(
-      `Smithers inspect reports failed nodes without exact failedChildKeys reset evidence: ${failedNodeIds.join(", ")}`
-    );
+  // The runner derives `failedChildKeys` only for a success-terminal run, so a
+  // genuinely failed run never carries them and retrying one used to throw. Its
+  // canonical `nodes` array still names every failed node exactly. Topology
+  // expansion gives each loop iteration its own concrete node, so a generated
+  // workflow runs every node at iteration 0 and the node id alone identifies the
+  // attempt to reset.
+  for (const entry of inspect.nodes) {
+    if (entry.state !== "failed") continue;
+    failedTasks.set(`${entry.nodeId}::0`, { nodeId: entry.nodeId, iteration: 0 });
   }
-  return [];
+  return [...failedTasks.values()];
 }
 
 export function parseCurrentSmithersInspect(

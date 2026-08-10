@@ -445,6 +445,12 @@ export async function synchronizeLinkedWorkflowRun(
     ...(eventsSnapshot.ok ? [] : [workflowSnapshotDiagnostic(eventsSnapshot, "WORKFLOW_EVENTS_FAILED")]),
     ...(tokenEventsSnapshot.ok ? [] : [workflowSnapshotDiagnostic(tokenEventsSnapshot, "WORKFLOW_TOKEN_EVENTS_FAILED")])
   ];
+  // A failed fetch is missing evidence, not an authoritative empty history.
+  // Continuing would finalize nodes and account usage from the inspect summary
+  // alone; the next poll retries instead.
+  if (!eventsSnapshot.ok || !tokenEventsSnapshot.ok) {
+    return { ok: false, diagnostics };
+  }
 
   let inspect: WorkflowInspect;
   try {

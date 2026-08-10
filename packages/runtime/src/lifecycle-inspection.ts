@@ -632,7 +632,9 @@ function workflowNodeArgs(
     ...(input.iteration === undefined ? [] : ["--iteration", String(input.iteration)]),
     "--format",
     format,
-    "--full-output"
+    // Only the single-document read is parsed as the runner's `{ok, data, meta}`
+    // envelope. The jsonl stream is raw records and must stay raw.
+    ...(format === "json" ? ["--full-output"] : [])
   ];
 }
 

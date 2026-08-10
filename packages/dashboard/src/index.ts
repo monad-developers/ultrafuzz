@@ -104,6 +104,12 @@ export interface DashboardServerConfig {
   runId?: string;
   liveUpdates?: boolean;
   env?: Record<string, string | undefined>;
+  /**
+   * Ultrafuzz CLI entrypoint handed to every run this dashboard launches. A
+   * schema-backed topology refuses to submit without it, so the caller that owns
+   * the CLI identity must supply it.
+   */
+  ultrafuzzCliEntrypoint?: string;
 }
 
 export interface DashboardHandle {
@@ -245,6 +251,7 @@ class DashboardApp {
   readonly port: number;
   readonly liveUpdates: boolean;
   readonly env: Record<string, string | undefined>;
+  readonly ultrafuzzCliEntrypoint?: string;
   readonly sessionToken = crypto.randomBytes(32).toString("hex");
   readonly jobs = new Map<string, CommandJob>();
   private requestedRunId?: string;
@@ -255,9 +262,11 @@ class DashboardApp {
       projectRoot: string;
       runId?: string;
       env: Record<string, string | undefined>;
+      ultrafuzzCliEntrypoint?: string;
     }
   ) {
     this.projectRoot = config.projectRoot;
+    this.ultrafuzzCliEntrypoint = config.ultrafuzzCliEntrypoint;
     this.host = config.host;
     this.port = config.port;
     this.liveUpdates = config.liveUpdates;
@@ -275,7 +284,8 @@ class DashboardApp {
       port: config.port ?? DEFAULT_PORT,
       runId,
       liveUpdates: config.liveUpdates ?? true,
-      env: config.env ?? process.env
+      env: config.env ?? process.env,
+      ...(config.ultrafuzzCliEntrypoint === undefined ? {} : { ultrafuzzCliEntrypoint: config.ultrafuzzCliEntrypoint })
     });
     app.currentRunId = runId ?? (await app.latestRunId()) ?? PREVIEW_RUN_ID;
     return app;
@@ -1313,6 +1323,8 @@ class DashboardApp {
   async executeCommand(job: CommandJob, body: JsonObject): Promise<void> {
     const command = job.command;
     const runId = commandNeedsRunId(command) ? await this.commandRunId(body) : undefined;
+    const trustedCli =
+      this.ultrafuzzCliEntrypoint === undefined ? {} : { ultrafuzzCliEntrypoint: this.ultrafuzzCliEntrypoint };
     let result: RuntimeResult<unknown> | JsonObject;
     switch (command) {
       case "validate":
@@ -1327,6 +1339,7 @@ class DashboardApp {
           model: optionalStringField(body, "model"),
           maxConcurrency: optionalNumberField(body, "maxConcurrency"),
           workflowInput: body.workflowInput,
+          ...trustedCli,
           env: this.env
         });
         if (isRuntimeOk(result) && result.value && isRecord(result.value) && typeof result.value.run_id === "string") {
@@ -1344,11 +1357,12 @@ class DashboardApp {
           projectRoot: this.projectRoot,
           runId: runId!,
           maxConcurrency: optionalNumberField(body, "maxConcurrency"),
+          ...trustedCli,
           env: this.env
         });
         break;
       case "replay":
-        result = await replayRun({ projectRoot: this.projectRoot, runId: runId!, env: this.env });
+        result = await replayRun({ projectRoot: this.projectRoot, runId: runId!, ...trustedCli, env: this.env });
         break;
       case "fork":
         result = await forkRun({
@@ -1358,6 +1372,7 @@ class DashboardApp {
           resetNode: optionalStringField(body, "resetNode"),
           label: optionalStringField(body, "label"),
           maxConcurrency: optionalNumberField(body, "maxConcurrency"),
+          ...trustedCli,
           env: this.env
         });
         break;
