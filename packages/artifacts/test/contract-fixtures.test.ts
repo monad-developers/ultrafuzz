@@ -1033,7 +1033,7 @@ test("JSON Schema maxLength and retained Zod count Unicode code points identical
   );
 });
 
-test("run-state v4 JSON Schema and Zod agree on every closed provenance variant", () => {
+test("run-state v5 JSON Schema and Zod agree on every closed provenance variant", () => {
   const entry = artifactSchemaRegistry().find((candidate) => candidate.filename === "run-state.schema.json");
   assert.ok(entry?.zodParser !== undefined);
   const parser = (artifactExports as unknown as Record<string, unknown>)[entry.zodParser] as ZodLikeParser;

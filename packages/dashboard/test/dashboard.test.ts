@@ -380,7 +380,7 @@ test("dashboard validates the serialized bytes and identities of every preview A
   }
 });
 
-test("dashboard validates persisted run-state v4 documents through the composed schema registry", async () => {
+test("dashboard validates persisted run-state v5 documents through the composed schema registry", async () => {
   const projectRoot = makeProject();
   writeSmallTopology(projectRoot);
   const runId = "dashboard-persisted";
