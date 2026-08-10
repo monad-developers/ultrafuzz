@@ -272,17 +272,11 @@ boilerplate in the final report.
 
 ## Required Markdown Shape
 
-Sort production issue entries by report severity before writing them: High
-first, then Medium, then Low. The report severity vocabulary is exactly High,
-Medium, and Low. Upstream values must already use this closed vocabulary before
-rendering `report.md` or `report.json`; reject any other value without
-normalizing, converting, or rewriting it. Preserve the upstream order within
-the same report severity.
-
-After sorting, assign issue title IDs independently per severity in rendered
-order. Use `H` for High, `M` for Medium, and `L` for Low. Start each severity
-counter at `01`, increment only within that severity, and zero-pad IDs to two
-digits. Do not copy or reuse upstream finding IDs in rendered issue titles.
+Preserve production issue order, finding `id`, and `title` exactly from the
+severity-classified handoff. Do not sort by severity, assign severity-local IDs,
+renumber findings, or add an ID prefix to a title. The report severity
+vocabulary is exactly High, Medium, and Low. Reject any other upstream value
+without normalizing, converting, or rewriting it.
 
 The report must start with this fixed title, followed immediately by a Markdown
 issue index table when production issues exist:
@@ -292,10 +286,8 @@ issue index table when production issues exist:
 
 | Issue id | Title |
 | --- | --- |
-| H-01 | [[H-01] - <issue title>](#h-01---issue-title-anchor) |
-| H-02 | [[H-02] - <next high issue title>](#h-02---next-high-issue-title-anchor) |
-| M-01 | [[M-01] - <medium issue title>](#m-01---medium-issue-title-anchor) |
-| L-01 | [[L-01] - <low issue title>](#l-01---low-issue-title-anchor) |
+| finding-a | [[finding-a] - <issue title>](#finding-a---issue-title-anchor) |
+| finding-b | [[finding-b] - <next issue title>](#finding-b---next-issue-title-anchor) |
 
 The report contains <total issue count> issues, with severity distribution <high count> high, <medium count> medium, and <low count> low.
 
@@ -319,7 +311,7 @@ outcomes, explanations, code, variants, and strategy IDs with issue-specific
 content from the upstream evidence:
 
 ````md
-## [H-01] - Depositor withdrawal accounting can lock claimable funds
+## [finding-a] - Depositor withdrawal accounting can lock claimable funds
 
 Depositor can withdraw after accounting state diverges which leads to claimable funds remaining locked. The generated reproducer shows the stale share balance persists after the withdrawal path completes.
 
@@ -630,10 +622,10 @@ For example, this is a canonical renderable value:
 Keep any additional loop-attempt provenance only in the fields admitted by the
 schema. `severity_guess` remains the upstream preliminary estimate and need not
 equal final `severity`; `severity`, `impact`, and `likelihood` use the report
-vocabulary. Never add `final_severity` or upstream/compatibility aliases. The production
-issue `title` value must include the same severity-local title ID rendered in the
-Markdown heading, for example
-`[H-01] - Selectorless fallback can refund or spend stale contract ETH`.
+vocabulary. Never add `final_severity` or upstream/compatibility aliases. The
+production issue `id` and `title` must exactly preserve the corresponding
+severity-classified finding. Render the ID separately in the Markdown heading;
+never insert it into or remove it from the JSON `title`.
 
 In every `report.json` evidence object, keep `path` as a safe relative base path
 without selectors and preserve independent `detail` prose exactly. Put section
@@ -653,8 +645,8 @@ must include a `lifecycle` object copied from the matching ledger record with
 Before finishing, verify that:
 
 - `report.md` starts with `# Ultrafuzz report`.
-- Production issue headings use `[H-01]`, `[H-02]`, `[M-01]`, or `[L-01]`
-  severity-local numbering.
+- Production issue headings use each severity-classified finding's exact
+  preserved ID and title in their preserved order.
 - The issue index table uses exactly `Issue id` and `Title`.
 - Immediately below the issue index table, `report.md` includes one sentence
   stating the total production issue count and High/Medium/Low severity

@@ -552,6 +552,133 @@ test("severity classification gates preserve triaged fields and enforce the fina
   );
 });
 
+test("triage gates preserve every deduped finding and upstream note", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-triage-preservation" });
+  const upstream = currentFinding("finding-triage", {
+    dedupe_key: "root-triage",
+    notes: ["stateful_failure_classification=production-bug"]
+  });
+  writeArtifact(layout, "dedupe-findings", "deduped-findings.json", JSON.stringify([upstream]));
+
+  const triaged = {
+    ...upstream,
+    triage_classification: "true-positive",
+    notes: [...(upstream.notes as string[]), "triage_reason=public path is reachable"]
+  };
+  const triagedPath = writeArtifact(layout, "triage", "triaged-findings.json", JSON.stringify([triaged]));
+  const node: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "triage",
+    logical_id: "triage",
+    depends_on: ["dedupe-findings"],
+    artifact_dir: "artifacts/triage",
+    outputs: [boundOutput("triaged-findings.json", "ultrafuzz/triaged-findings@1", true)]
+  };
+
+  const valid = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
+
+  fs.writeFileSync(
+    triagedPath,
+    JSON.stringify([
+      { ...triaged, summary: "Rewritten during triage", notes: ["triage_reason=public path is reachable"] }
+    ])
+  );
+  const rewritten = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(rewritten.ok, false);
+  assert.ok(
+    rewritten.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
+        diagnostic.details?.gate === "triaged-finding-upstream-preservation"
+    ),
+    JSON.stringify(rewritten.diagnostics)
+  );
+});
+
+test("final report gates preserve severity records and ledger dispositions without re-identifying findings", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-report-stage-preservation" });
+  const classified = currentFinding("finding-report", {
+    dedupe_key: "root-report",
+    triage_classification: "true-positive",
+    notes: ["triage_reason=public path is reachable"],
+    severity: "Medium",
+    impact: "High",
+    likelihood: "Low",
+    impact_rationale: "The reachable path can lock assets.",
+    likelihood_rationale: "The path requires narrow timing.",
+    severity_rationale: "High impact x Low likelihood maps to Medium."
+  });
+  const lifecycle = {
+    dedupe_key: "root-report",
+    source_artifacts: [],
+    strategy_hits: [],
+    triage_classification: "true-positive",
+    triage_reason: "public path is reachable",
+    canonical_severity: "Medium",
+    final_disposition: "promoted",
+    stages: [
+      {
+        stage: "severity-classified",
+        artifact_path: "artifacts/severity-classification/severity-classified-findings.json",
+        finding_id: "finding-report"
+      }
+    ]
+  };
+  writeArtifact(layout, "severity-classification", "severity-classified-findings.json", JSON.stringify([classified]));
+  writeArtifact(
+    layout,
+    "severity-classification",
+    "finding-lifecycle-ledger.json",
+    JSON.stringify({ schema_version: "ultrafuzz.finding-lifecycle-ledger.v1", records: [lifecycle] })
+  );
+
+  const reportIssue = {
+    ...classified,
+    description: "The public path can lock user assets.",
+    proof_of_concept: {
+      scenario: ["Call the public path in the affected state."],
+      language: "solidity",
+      code: "assertTrue(locked);"
+    },
+    lifecycle
+  };
+  const reportPath = writeArtifact(
+    layout,
+    "final-report",
+    "report.json",
+    JSON.stringify(currentReport(layout.runId, { issues: [reportIssue] }))
+  );
+  const node: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "final-report",
+    logical_id: "final-report",
+    depends_on: ["severity-classification"],
+    artifact_dir: "artifacts/final-report",
+    outputs: [boundOutput("report.json", "ultrafuzz/report@2", true)]
+  };
+
+  const valid = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
+
+  fs.writeFileSync(
+    reportPath,
+    JSON.stringify(
+      currentReport(layout.runId, { issues: [{ ...reportIssue, id: "M-01", title: "Retitled report row" }] })
+    )
+  );
+  const rewritten = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(rewritten.ok, false);
+  assert.ok(
+    rewritten.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
+        diagnostic.details?.gate === "report-severity-classification-preservation"
+    ),
+    JSON.stringify(rewritten.diagnostics)
+  );
+});
+
 test("sealed planned graph distinguishes an absent property track from a missing planned producer", () => {
   const absentLayout = createRunLayout({ projectRoot: tempProject(), runId: "run-no-property-track" });
   const reportNode = {

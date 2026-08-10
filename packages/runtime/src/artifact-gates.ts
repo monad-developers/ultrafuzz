@@ -1686,6 +1686,10 @@ function semanticArtifactSetForSchema(input: {
     const propertyLenses = semanticPropertyLenses(input.layout);
     return propertyLenses === undefined ? {} : { propertyLenses };
   }
+  if (input.schemaFilename === "triaged-findings.schema.json") {
+    const dedupedFindings = semanticDedupedFindings(input.layout);
+    return dedupedFindings === undefined ? {} : { dedupedFindings };
+  }
   if (input.schemaFilename === "severity-classified-findings.schema.json") {
     const triagedFindings = semanticTriagedFindings(input.layout);
     return triagedFindings === undefined ? {} : { triagedFindings };
@@ -1693,12 +1697,24 @@ function semanticArtifactSetForSchema(input: {
   if (input.schemaFilename === "report.schema.json") {
     const propertyCatalog = semanticCanonicalPropertyCatalog(input.layout);
     const implementedProperties = semanticImplementedProperties(input.layout);
+    const severityClassifiedFindings = semanticSeverityClassifiedFindings(input.layout);
+    const findingLifecycleLedger =
+      severityClassifiedFindings === null ? undefined : semanticSeverityLifecycleLedger(input.layout);
     return {
       ...(propertyCatalog === undefined ? {} : { propertyCatalog }),
-      ...(implementedProperties === undefined ? {} : { implementedProperties })
+      ...(implementedProperties === undefined ? {} : { implementedProperties }),
+      ...(severityClassifiedFindings === undefined ? {} : { severityClassifiedFindings }),
+      ...(findingLifecycleLedger === undefined ? {} : { findingLifecycleLedger })
     };
   }
   return undefined;
+}
+
+function semanticDedupedFindings(layout: RunLayout): unknown | undefined {
+  const artifactPath = findLogicalNodeArtifact(layout, "dedupe-findings", "deduped-findings.json");
+  if (artifactPath === undefined) return undefined;
+  assertRegularFileInside(layout.root, artifactPath, "deduped findings semantic context");
+  return readStrictContractDocument(artifactPath, "ultrafuzz/findings@2");
 }
 
 function semanticTriagedFindings(layout: RunLayout): unknown | undefined {
@@ -1706,6 +1722,24 @@ function semanticTriagedFindings(layout: RunLayout): unknown | undefined {
   if (artifactPath === undefined) return undefined;
   assertRegularFileInside(layout.root, artifactPath, "triaged findings semantic context");
   return readStrictContractDocument(artifactPath, "ultrafuzz/triaged-findings@1");
+}
+
+function semanticSeverityClassifiedFindings(layout: RunLayout): unknown | null | undefined {
+  const artifactPath = findLogicalNodeArtifact(layout, "severity-classification", "severity-classified-findings.json");
+  if (artifactPath !== undefined) {
+    assertRegularFileInside(layout.root, artifactPath, "severity findings semantic context");
+    return readStrictContractDocument(artifactPath, "ultrafuzz/severity-classified-findings@1");
+  }
+  const status = plannedProducerStatus(layout, "severity-classification", "ultrafuzz/severity-classified-findings@1");
+  if (status === "absent" || (status === "unknown" && !fs.existsSync(layout.graphPath))) return null;
+  return undefined;
+}
+
+function semanticSeverityLifecycleLedger(layout: RunLayout): unknown | undefined {
+  const artifactPath = findLogicalNodeArtifact(layout, "severity-classification", "finding-lifecycle-ledger.json");
+  if (artifactPath === undefined) return undefined;
+  assertRegularFileInside(layout.root, artifactPath, "severity lifecycle semantic context");
+  return readStrictContractDocument(artifactPath, "ultrafuzz/finding-lifecycle-ledger@1");
 }
 
 function semanticCampaignArtifacts(artifactDir: string, node: PlannedGraphNode): SemanticArtifactSetContext {

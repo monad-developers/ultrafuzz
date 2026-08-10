@@ -28,8 +28,8 @@ function renderableReport(): Record<string, unknown> {
     issues: [
       {
         schema_version: "ultrafuzz.finding.v2",
-        id: "L-01",
-        title: "[L-01] - State mismatch",
+        id: "source-finding-17",
+        title: "State mismatch",
         status: "confirmed",
         severity: "Low",
         severity_guess: "Medium",
@@ -62,9 +62,9 @@ function renderableReport(): Record<string, unknown> {
     non_production_outcomes: [],
     property_provenance: [
       {
-        finding_id: "L-01",
+        finding_id: "source-finding-17",
         source_finding_id: "source-finding",
-        title: "[L-01] - State mismatch",
+        title: "State mismatch",
         property_ids: ["property-1"],
         sources: [{ source_node_id: "properties", source_property_id: "property-1" }],
         implementation_paths: ["test/Invariant.t.sol"],
@@ -98,19 +98,22 @@ test("canonical final-report validation renders Markdown without rewriting the v
   assert.deepEqual(input, before);
 
   const issue = (first.report.issues as Array<Record<string, unknown>>)[0]!;
-  assert.equal(issue.id, "L-01");
-  assert.equal(issue.title, "[L-01] - State mismatch");
+  assert.equal(issue.id, "source-finding-17");
+  assert.equal(issue.title, "State mismatch");
   assert.equal(issue.severity, "Low");
   assert.equal(issue.severity_guess, "Medium", "the upstream preliminary estimate must remain unchanged");
   assert.equal((issue.lifecycle as Record<string, unknown>).canonical_severity, "Low");
-  assert.equal((first.report.property_provenance as Array<Record<string, unknown>>)[0]?.finding_id, "L-01");
+  assert.equal(
+    (first.report.property_provenance as Array<Record<string, unknown>>)[0]?.finding_id,
+    "source-finding-17"
+  );
   assert.equal(
     (first.report.property_provenance as Array<Record<string, unknown>>)[0]?.source_finding_id,
     "source-finding"
   );
 
   assert.match(first.markdown, /^# Ultrafuzz report\n\n\| Issue id \| Title \|/u);
-  assert.match(first.markdown, /^## \[L-01\] - State mismatch$/mu);
+  assert.match(first.markdown, /^## \[source-finding-17\] - State mismatch$/mu);
   assert.match(first.markdown, /\| stateful-invariant \| 1\/4 \|/u);
   assert.doesNotMatch(first.markdown, /synthetic-final-report-secret/u);
   assert.doesNotMatch(first.markdown, /\/home\/runner\/private/u);
@@ -139,30 +142,37 @@ test("canonical final-report validation rejects presentation drift instead of re
     /expected Low from impact Medium and likelihood Low/u
   );
 
-  const wrongId = renderableReport();
-  (wrongId.issues as Array<Record<string, unknown>>)[0]!.id = "source-finding";
-  assert.throws(() => projectCanonicalFinalReport(wrongId), /canonical ID L-01/u);
-
-  const wrongTitle = renderableReport();
-  (wrongTitle.issues as Array<Record<string, unknown>>)[0]!.title = "State mismatch";
-  assert.throws(() => projectCanonicalFinalReport(wrongTitle), /must use title/u);
-
   const staleProvenance = renderableReport();
   (staleProvenance.property_provenance as Array<Record<string, unknown>>)[0]!.finding_id = "source-finding";
   assert.throws(() => projectCanonicalFinalReport(staleProvenance), /references unknown finding/u);
 
+  const arbitraryIdentity = renderableReport();
+  (arbitraryIdentity.issues as Array<Record<string, unknown>>)[0]!.id = "finding-from-dedupe";
+  (arbitraryIdentity.issues as Array<Record<string, unknown>>)[0]!.title = "Exact upstream title";
+  const provenance = (arbitraryIdentity.property_provenance as Array<Record<string, unknown>>)[0]!;
+  provenance.finding_id = "finding-from-dedupe";
+  provenance.title = "Exact upstream title";
+  const arbitraryProjection = projectCanonicalFinalReport(arbitraryIdentity);
+  assert.equal((arbitraryProjection.report.issues as Array<Record<string, unknown>>)[0]!.id, "finding-from-dedupe");
+  assert.equal((arbitraryProjection.report.issues as Array<Record<string, unknown>>)[0]!.title, "Exact upstream title");
+  assert.match(arbitraryProjection.markdown, /^## \[finding-from-dedupe\] - Exact upstream title$/mu);
+
   const misordered = renderableReport();
   const highIssue = structuredClone((misordered.issues as Array<Record<string, unknown>>)[0]!);
   Object.assign(highIssue, {
-    id: "H-01",
-    title: "[H-01] - High impact mismatch",
+    id: "high-source-finding",
+    title: "High impact mismatch",
     severity: "High",
     impact: "High",
     likelihood: "High"
   });
   (misordered.issues as Array<Record<string, unknown>>).push(highIssue);
   misordered.property_provenance = [];
-  assert.throws(() => projectCanonicalFinalReport(misordered), /not ordered High, Medium, then Low/u);
+  const preservedOrder = projectCanonicalFinalReport(misordered);
+  assert.ok(
+    preservedOrder.markdown.indexOf("## [source-finding-17] - State mismatch") <
+      preservedOrder.markdown.indexOf("## [high-source-finding] - High impact mismatch")
+  );
 });
 
 test("canonical final-report projection supports a meaningful zero-issue report", () => {
@@ -220,7 +230,7 @@ test("directive validation rejects injected or presentation-divergent Markdown",
   );
   assert.equal(
     isDirectiveConformingFinalReportMarkdown(
-      projection.markdown.replace("## [L-01] - State mismatch", "## [M-01] - State mismatch"),
+      projection.markdown.replace("## [source-finding-17] - State mismatch", "## [changed-finding] - State mismatch"),
       projection.report
     ),
     false

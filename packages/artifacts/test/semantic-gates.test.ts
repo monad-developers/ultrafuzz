@@ -1245,6 +1245,44 @@ test("every contextual registration executes real positive and negative checks",
           }
         }
       },
+      "report-severity-classification-preservation": {
+        positive: {
+          issues: [
+            {
+              id: "finding-a",
+              title: "Preserved title",
+              dedupe_key: "root-a",
+              lifecycle: {
+                dedupe_key: "root-a",
+                final_disposition: "promoted"
+              }
+            }
+          ],
+          non_production_outcomes: []
+        },
+        negative: {
+          issues: [
+            {
+              id: "finding-a",
+              title: "Rewritten title",
+              dedupe_key: "root-a",
+              lifecycle: {
+                dedupe_key: "root-a",
+                final_disposition: "promoted"
+              }
+            }
+          ],
+          non_production_outcomes: []
+        },
+        context: {
+          artifactSet: {
+            severityClassifiedFindings: [{ id: "finding-a", title: "Preserved title", dedupe_key: "root-a" }],
+            findingLifecycleLedger: {
+              records: [{ dedupe_key: "root-a", final_disposition: "promoted" }]
+            }
+          }
+        }
+      },
       "severity-classification-upstream-preservation": {
         positive: [
           {
@@ -1275,6 +1313,33 @@ test("every contextual registration executes real positive and negative checks",
         context: {
           artifactSet: {
             triagedFindings: [{ id: "finding-a", summary: "Preserved summary", severity_guess: "Medium" }]
+          }
+        }
+      },
+      "triaged-finding-upstream-preservation": {
+        positive: [
+          {
+            id: "finding-a",
+            summary: "Preserved summary",
+            status: "confirmed",
+            notes: ["source=evidence", "triage_reason=reachable production path"],
+            triage_classification: "true-positive"
+          }
+        ],
+        negative: [
+          {
+            id: "finding-a",
+            summary: "Rewritten summary",
+            status: "confirmed",
+            notes: ["triage_reason=reachable production path"],
+            triage_classification: "true-positive"
+          }
+        ],
+        context: {
+          artifactSet: {
+            dedupedFindings: [
+              { id: "finding-a", summary: "Preserved summary", status: "confirmed", notes: ["source=evidence"] }
+            ]
           }
         }
       },

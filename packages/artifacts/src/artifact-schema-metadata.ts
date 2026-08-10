@@ -314,6 +314,7 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
   "report.schema.json": artifact("ultrafuzz/report@2", "reportJsonSchema", "reportSchema", [
     "report-finding-evidence-span-consistency",
     "report-finding-id-uniqueness",
+    "report-severity-classification-preservation",
     "report-property-provenance-join"
   ]),
   "run-plan.schema.json": runtime("runPlanJsonSchema", undefined, ["run-plan-attempt-id-uniqueness"]),
@@ -372,7 +373,11 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "ultrafuzz/triaged-findings@1",
     "triagedFindingsJsonSchema",
     "triagedFindingsSchema",
-    ["triaged-finding-evidence-span-consistency", "triaged-finding-id-uniqueness"]
+    [
+      "triaged-finding-evidence-span-consistency",
+      "triaged-finding-id-uniqueness",
+      "triaged-finding-upstream-preservation"
+    ]
   ),
   "trusted-cli.schema.json": runtime("trustedCliMetadataJsonSchema"),
   "usage-ledger.schema.json": runtime("usageLedgerJsonSchema", "usageLedgerEntrySchema", [

@@ -37,7 +37,10 @@ export interface SemanticArtifactSetContext {
   propertyCatalog?: unknown;
   propertyLenses?: readonly SemanticPropertyLensContext[];
   implementedProperties?: unknown;
+  dedupedFindings?: unknown;
   triagedFindings?: unknown;
+  severityClassifiedFindings?: unknown;
+  findingLifecycleLedger?: unknown;
 }
 
 export interface SemanticPlannedGraphContext {
@@ -370,6 +373,63 @@ const SEVERITY_CLASSIFICATION_OWNED_FIELDS = new Set([
   "severity_rationale"
 ]);
 
+const TRIAGE_OWNED_FIELDS = new Set(["triage_classification", "notes", "status"]);
+
+function preservedArraySubsequence(actual: unknown, upstream: unknown): boolean {
+  if (!Array.isArray(upstream)) return isDeepStrictEqual(actual, upstream);
+  if (!Array.isArray(actual)) return false;
+  let upstreamIndex = 0;
+  for (const value of actual) {
+    if (upstreamIndex < upstream.length && isDeepStrictEqual(value, upstream[upstreamIndex])) {
+      upstreamIndex += 1;
+    }
+  }
+  return upstreamIndex === upstream.length;
+}
+
+function triagedFindingPreservationIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
+  const triaged = Array.isArray(document) ? document : [];
+  const deduped = Array.isArray(context.artifactSet!.dedupedFindings) ? context.artifactSet!.dedupedFindings : [];
+  const issues: SemanticGateIssue[] = [];
+  if (triaged.length !== deduped.length) {
+    issues.push(
+      issue("$", `Triage record count ${triaged.length} does not preserve deduped record count ${deduped.length}`)
+    );
+  }
+  for (let index = 0; index < Math.min(triaged.length, deduped.length); index += 1) {
+    const actual = triaged[index];
+    const upstream = deduped[index];
+    if (!isRecord(actual) || !isRecord(upstream)) continue;
+    if (stringField(actual, "id") !== stringField(upstream, "id")) {
+      issues.push(issue(`$[${index}].id`, "Triage changed or reordered the deduped finding ID"));
+    }
+    const fields = new Set([...Object.keys(upstream), ...Object.keys(actual)]);
+    for (const field of fields) {
+      if (TRIAGE_OWNED_FIELDS.has(field)) continue;
+      if (!isDeepStrictEqual(actual[field], upstream[field])) {
+        issues.push(issue(`$[${index}].${field}`, `Triage did not preserve upstream field ${JSON.stringify(field)}`));
+      }
+    }
+    if (!preservedArraySubsequence(actual.notes, upstream.notes)) {
+      issues.push(issue(`$[${index}].notes`, "Triage removed or reordered an upstream note"));
+    }
+    const classification = stringField(actual, "triage_classification");
+    const upstreamStatus = stringField(upstream, "status");
+    const actualStatus = stringField(actual, "status");
+    if (classification === "false-positive" && actualStatus !== "false-positive") {
+      issues.push(issue(`$[${index}].status`, "A false-positive triage classification requires false-positive status"));
+    } else if (classification !== "false-positive" && actualStatus !== upstreamStatus) {
+      issues.push(
+        issue(
+          `$[${index}].status`,
+          "Triage may change status only to false-positive for a false-positive classification"
+        )
+      );
+    }
+  }
+  return issues;
+}
+
 function severityClassificationPreservationIssues(
   document: unknown,
   context: SemanticGateContext
@@ -403,6 +463,133 @@ function severityClassificationPreservationIssues(
           )
         );
       }
+    }
+  }
+  return issues;
+}
+
+function reportSeverityClassificationPreservationIssues(
+  document: unknown,
+  context: SemanticGateContext
+): SemanticGateIssue[] {
+  const upstreamValue = context.artifactSet!.severityClassifiedFindings;
+  // `null` is a trusted host sentinel for a topology that deliberately omits
+  // severity classification. A planned-but-missing producer never receives it.
+  if (upstreamValue === null) return [];
+  const upstream = Array.isArray(upstreamValue) ? upstreamValue : [];
+  const ledger = context.artifactSet!.findingLifecycleLedger;
+  const ledgerRecords = arrayAt(ledger, ["records"]);
+  const ledgerByKey = new Map(
+    ledgerRecords.flatMap((record) => {
+      const key = stringField(record, "dedupe_key");
+      return key === undefined ? [] : [[key, record] as const];
+    })
+  );
+  const reportRows = [
+    ...arrayAt(document, ["issues"]).map((row, index) => ({
+      row,
+      path: `$.issues[${index}]`,
+      kind: "promoted",
+      index
+    })),
+    ...arrayAt(document, ["non_production_outcomes"]).map((row, index) => ({
+      row,
+      path: `$.non_production_outcomes[${index}]`,
+      kind: "non-production",
+      index
+    }))
+  ];
+  const reportByKey = new Map<string, (typeof reportRows)[number]>();
+  const issues: SemanticGateIssue[] = [];
+  for (const entry of reportRows) {
+    const key = stringField(at(entry.row, ["lifecycle"]), "dedupe_key");
+    if (key === undefined) continue;
+    if (reportByKey.has(key)) {
+      issues.push(issue(`${entry.path}.lifecycle.dedupe_key`, `Duplicate report lifecycle key ${JSON.stringify(key)}`));
+    } else {
+      reportByKey.set(key, entry);
+    }
+  }
+
+  const previousReportIndex = { promoted: -1, "non-production": -1 };
+  for (const [upstreamIndex, finding] of upstream.entries()) {
+    if (!isRecord(finding)) continue;
+    const dedupeKey = stringField(finding, "dedupe_key");
+    if (dedupeKey === undefined) {
+      issues.push(
+        issue(
+          `$context.severityClassifiedFindings[${upstreamIndex}].dedupe_key`,
+          "Severity finding lacks a lifecycle dedupe key"
+        )
+      );
+      continue;
+    }
+    const lifecycle = ledgerByKey.get(dedupeKey);
+    if (lifecycle === undefined) {
+      issues.push(
+        issue(
+          `$context.findingLifecycleLedger.records`,
+          `Lifecycle ledger lacks severity finding key ${JSON.stringify(dedupeKey)}`
+        )
+      );
+      continue;
+    }
+    const disposition = stringField(lifecycle, "final_disposition");
+    const reportEntry = reportByKey.get(dedupeKey);
+    if (disposition === "dropped") {
+      if (reportEntry !== undefined) {
+        issues.push(
+          issue(reportEntry.path, `Dropped lifecycle record ${JSON.stringify(dedupeKey)} appears in the report`)
+        );
+      }
+      continue;
+    }
+    if (disposition !== "promoted" && disposition !== "non-production") {
+      issues.push(
+        issue(
+          `$context.findingLifecycleLedger.records`,
+          `Lifecycle record ${JSON.stringify(dedupeKey)} lacks a report disposition`
+        )
+      );
+      continue;
+    }
+    if (reportEntry === undefined) {
+      issues.push(
+        issue("$", `Report omits lifecycle record ${JSON.stringify(dedupeKey)} with disposition ${disposition}`)
+      );
+      continue;
+    }
+    if (reportEntry.kind !== disposition) {
+      issues.push(issue(reportEntry.path, `Report placement does not match lifecycle disposition ${disposition}`));
+    }
+    if (reportEntry.index <= previousReportIndex[disposition]) {
+      issues.push(issue(reportEntry.path, "Report reordered severity-classified findings"));
+    }
+    previousReportIndex[disposition] = reportEntry.index;
+    if (!isDeepStrictEqual(at(reportEntry.row, ["lifecycle"]), lifecycle)) {
+      issues.push(
+        issue(`${reportEntry.path}.lifecycle`, "Report lifecycle does not exactly copy the severity ledger record")
+      );
+    }
+    if (!isRecord(reportEntry.row)) continue;
+    for (const field of Object.keys(finding)) {
+      if (!isDeepStrictEqual(reportEntry.row[field], finding[field])) {
+        issues.push(
+          issue(`${reportEntry.path}.${field}`, `Report did not preserve severity field ${JSON.stringify(field)}`)
+        );
+      }
+    }
+  }
+
+  const upstreamKeys = new Set(
+    upstream.flatMap((finding) => {
+      const key = stringField(finding, "dedupe_key");
+      return key === undefined ? [] : [key];
+    })
+  );
+  for (const [key, entry] of reportByKey) {
+    if (!upstreamKeys.has(key)) {
+      issues.push(issue(entry.path, `Report row has no severity-classified source for ${JSON.stringify(key)}`));
     }
   }
   return issues;
@@ -2713,6 +2900,11 @@ const gateSpecifications = {
   "release-validation-report-reconciliation": documentGate(releaseValidationReportIssues),
   "report-finding-id-uniqueness": documentGate(reportFindingIdIssues),
   "report-finding-evidence-span-consistency": documentGate(reportFindingEvidenceSpanIssues),
+  "report-severity-classification-preservation": contextualGate(
+    "cross-artifact",
+    ["artifactSet.severityClassifiedFindings"],
+    reportSeverityClassificationPreservationIssues
+  ),
   "report-property-provenance-join": contextualGate(
     "cross-artifact",
     ["artifactSet.propertyCatalog", "artifactSet.implementedProperties"],
@@ -2802,6 +2994,11 @@ const gateSpecifications = {
   "strategy-detection-hit-identity-uniqueness": documentGate(strategyDetectionHitIdentityIssues),
   "triaged-finding-id-uniqueness": documentGate(uniqueFieldGate([[]], "id", "triaged finding ID")),
   "triaged-finding-evidence-span-consistency": documentGate(findingArrayEvidenceSpanIssues),
+  "triaged-finding-upstream-preservation": contextualGate(
+    "cross-artifact",
+    ["artifactSet.dedupedFindings"],
+    triagedFindingPreservationIssues
+  ),
   "usage-ledger-event-order": contextualGate("runtime-state", ["usageLedger.entries"], usageEventOrderIssues),
   "usage-ledger-source-event-join": contextualGate("runtime-state", ["eventLog.events"], usageSourceEventJoinIssues),
   "workspace-patch-git-binding": contextualGate(
