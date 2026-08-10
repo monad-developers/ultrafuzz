@@ -9908,6 +9908,75 @@ test("syncRun requires the deterministic verifier task to succeed", async () => 
   assert.equal(state.nodes?.["project-discovery"]?.provenance?.workflow?.task_id, "verify:project-discovery");
 });
 
+test("syncRun seals reproducible verifier output failures as terminal without changing authored bytes", async () => {
+  for (const variant of ["schema-invalid", "missing"] as const) {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project);
+    const workflowRunId = `ultrafuzz-sync-verifier-output-${variant}`;
+    const env = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId,
+        status: "failed",
+        state: "failed",
+        steps: [
+          { id: "node:project-discovery", state: "finished", attempt: 1 },
+          { id: "verify:project-discovery", state: "failed", attempt: 1 }
+        ]
+      }),
+      events: workflowEvents(workflowRunId, [
+        { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+        {
+          type: "NodeFailed",
+          nodeId: "verify:project-discovery",
+          attempt: 1,
+          error: { message: `artifact-contract failure: ${variant} findings.json` }
+        }
+      ])
+    });
+    const run = await startRun({ projectRoot: project, runId: `sync-verifier-output-${variant}`, env });
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    writeRequiredArtifactSet(run.value!.run_root, "project-discovery", [
+      "setup/project-discovery.md",
+      ...(variant === "schema-invalid" ? ["findings.json"] : [])
+    ]);
+    const artifactRoot = path.join(run.value!.run_root, "artifacts", "project-discovery");
+    const markdownPath = path.join(artifactRoot, "setup", "project-discovery.md");
+    const findingsPath = path.join(artifactRoot, "findings.json");
+    if (variant === "schema-invalid") fs.writeFileSync(findingsPath, "{}\n", "utf8");
+    const markdownBefore = fs.readFileSync(markdownPath);
+    const findingsBefore = variant === "schema-invalid" ? fs.readFileSync(findingsPath) : undefined;
+
+    const sync = await syncRun({ projectRoot: project, runId: `sync-verifier-output-${variant}`, env });
+
+    assert.equal(sync.ok, true, `${variant}: ${JSON.stringify(sync.diagnostics)}`);
+    assert.equal(sync.value?.status, "failed");
+    const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+      nodes?: Record<
+        string,
+        {
+          status?: string;
+          provenance?: {
+            output_contracts?: { ok?: boolean; missing?: string[] };
+            terminal_disposition?: unknown;
+          };
+        }
+      >;
+    };
+    const node = state.nodes?.["project-discovery"];
+    assert.equal(node?.status, "failed");
+    assert.equal(node?.provenance?.output_contracts?.ok, false);
+    assert.deepEqual(node?.provenance?.output_contracts?.missing, variant === "missing" ? ["findings.json"] : []);
+    assert.deepEqual(node?.provenance?.terminal_disposition, {
+      schema_version: "ultrafuzz.terminal-disposition.v1",
+      kind: "task-output-validation-failure"
+    });
+    assert.deepEqual(fs.readFileSync(markdownPath), markdownBefore);
+    if (findingsBefore === undefined) assert.equal(fs.existsSync(findingsPath), false);
+    else assert.deepEqual(fs.readFileSync(findingsPath), findingsBefore);
+  }
+});
+
 test("syncRun does not finalize an agent before its deterministic verifier has evidence", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

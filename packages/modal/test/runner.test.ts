@@ -1442,7 +1442,7 @@ describe("Modal canonical recovery probe", () => {
     expect(() => execFileSync(command[0]!, command.slice(1), { encoding: "utf8" })).toThrow();
   });
 
-  it("uses durable worker rows instead of topology-only nodes for strict completion", () => {
+  it("settles only exact clean or genuine terminal worker rows", () => {
     const canonical = {
       status: "succeeded",
       successful_nodes: 2,
@@ -1465,6 +1465,28 @@ describe("Modal canonical recovery probe", () => {
 
     expect(isModalRecoveryResultComplete(canonical, workerStatus)).toBe(true);
     expect(isModalRecoveryResultComplete({ ...canonical, successful_nodes: 1 }, workerStatus)).toBe(false);
+
+    const genuineFailure: ModalWorkerStatus = {
+      ...workerStatus,
+      category: "genuine-task-outcome",
+      error_code: "genuine-evaluation-failure",
+      node_counts: { succeeded: 1, failed: 1, remaining: 0 }
+    };
+    const failedCanonical = { ...canonical, status: "failed", successful_nodes: 1 };
+    expect(isModalRecoveryResultComplete(failedCanonical, genuineFailure)).toBe(true);
+    expect(
+      isModalRecoveryResultComplete(failedCanonical, {
+        ...genuineFailure,
+        node_counts: { succeeded: 1, failed: 0, remaining: 1 }
+      })
+    ).toBe(false);
+    expect(
+      isModalRecoveryResultComplete(failedCanonical, {
+        ...genuineFailure,
+        category: "permanent-operational-failure",
+        error_code: "terminal-run-non-resumable"
+      })
+    ).toBe(false);
   });
 });
 

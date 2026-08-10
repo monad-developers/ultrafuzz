@@ -332,10 +332,11 @@ function hasExactTaskBinding(node: Record<string, unknown>, binding: TaskBinding
 }
 
 function isGenuineTaskFailure(node: Record<string, unknown>, binding: TaskBinding, workflowRunId: string): boolean {
-  if (!hasCompletedTaskEvidence(node, binding, workflowRunId) || nonEmptyString(node.last_error) === undefined) {
+  if (!hasCompletedVerifierEvidence(node, binding, workflowRunId) || nonEmptyString(node.last_error) === undefined) {
     return false;
   }
   const provenance = record(node.provenance);
+  if (!hasExactOutputContractEvidence(provenance)) return false;
   try {
     return (
       assertTerminalDispositionDocument(provenance?.terminal_disposition).kind === "task-output-validation-failure"
@@ -348,13 +349,18 @@ function isGenuineTaskFailure(node: Record<string, unknown>, binding: TaskBindin
 function isVerifiedSucceededTask(node: Record<string, unknown>, binding: TaskBinding, workflowRunId: string): boolean {
   const provenance = record(node.provenance);
   return (
-    hasCompletedTaskEvidence(node, binding, workflowRunId) &&
+    hasCompletedVerifierEvidence(node, binding, workflowRunId) &&
+    hasSuccessfulOutputContractEvidence(provenance) &&
     node.last_error === undefined &&
     provenance?.terminal_disposition === undefined
   );
 }
 
-function hasCompletedTaskEvidence(node: Record<string, unknown>, binding: TaskBinding, workflowRunId: string): boolean {
+function hasCompletedVerifierEvidence(
+  node: Record<string, unknown>,
+  binding: TaskBinding,
+  workflowRunId: string
+): boolean {
   if (node.timed_out !== false || nonEmptyString(node.finished_at) === undefined) return false;
   const provenance = record(node.provenance);
   const workflow = record(provenance?.workflow);
@@ -367,8 +373,27 @@ function hasCompletedTaskEvidence(node: Record<string, unknown>, binding: TaskBi
   ) {
     return false;
   }
+  return true;
+}
+
+function hasSuccessfulOutputContractEvidence(provenance: Record<string, unknown> | undefined): boolean {
   const outputContracts = record(provenance?.output_contracts);
   return outputContracts?.ok === true && Array.isArray(outputContracts.missing) && outputContracts.missing.length === 0;
+}
+
+function hasExactOutputContractEvidence(provenance: Record<string, unknown> | undefined): boolean {
+  const outputContracts = record(provenance?.output_contracts);
+  if (
+    outputContracts === undefined ||
+    !Object.keys(outputContracts).every((key) => key === "ok" || key === "missing") ||
+    Object.keys(outputContracts).length !== 2 ||
+    typeof outputContracts.ok !== "boolean" ||
+    !Array.isArray(outputContracts.missing) ||
+    !outputContracts.missing.every((value) => typeof value === "string")
+  ) {
+    return false;
+  }
+  return outputContracts.ok === false || outputContracts.missing.length === 0;
 }
 
 function isCompletedWorkflowState(value: unknown): boolean {

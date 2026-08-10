@@ -2307,19 +2307,39 @@ async function finalizeTerminalTask(input: {
     const preparationFailure = wrapperFailure && input.evidenceSource === "preparation";
     const wrapperTaskId = preparationFailure ? input.task.preparationSmithersNodeId : input.task.verifierSmithersNodeId;
     const wrapperLabel = preparationFailure ? "artifact preparation" : "artifact verifier";
+    let verifierOutputGate: ReturnType<typeof verifyRequiredArtifactsForAttempt> | undefined;
+    if (
+      wrapperFailure &&
+      !preparationFailure &&
+      input.evidence.status === "failed" &&
+      input.evidence.timedOut !== true
+    ) {
+      try {
+        assertSynchronizationBudget(input.control);
+        const gate = verifyRequiredArtifactsForAttempt(input.layout, input.node, input.task.attemptId);
+        if (!gate.ok) verifierOutputGate = gate;
+      } catch (error) {
+        if (synchronizationInterruptionDiagnostic(error) !== undefined) throw error;
+        // The verifier's original terminal evidence remains authoritative for
+        // an operational recheck failure. Only a reproduced output-contract
+        // failure is allowed to suppress recovery.
+      }
+    }
+    const diagnostics: RuntimeDiagnostic[] = wrapperFailure
+      ? [
+          {
+            code: preparationFailure ? "ARTIFACT_PREPARATION_FAILED" : "ARTIFACT_VERIFIER_FAILED",
+            message: `${wrapperLabel} did not complete successfully for ${input.task.attemptId}`,
+            severity: "error",
+            source: "artifact-contracts",
+            path: wrapperTaskId
+          },
+          ...(verifierOutputGate?.diagnostics ?? [])
+        ]
+      : [];
     return {
       status: input.evidence.status,
-      diagnostics: wrapperFailure
-        ? [
-            {
-              code: preparationFailure ? "ARTIFACT_PREPARATION_FAILED" : "ARTIFACT_VERIFIER_FAILED",
-              message: `${wrapperLabel} did not complete successfully for ${input.task.attemptId}`,
-              severity: "error",
-              source: "artifact-contracts",
-              path: wrapperTaskId
-            }
-          ]
-        : [],
+      diagnostics,
       ...(input.evidence.error
         ? { lastError: input.evidence.error }
         : wrapperFailure
@@ -2334,9 +2354,30 @@ async function finalizeTerminalTask(input: {
                 causal_task_id: wrapperFailure ? wrapperTaskId : input.task.smithersNodeId,
                 causal_failure_category: category,
                 dependent_task_ids: []
-              }
+              },
+        ...(verifierOutputGate !== undefined
+          ? {
+              output_contracts: { ok: false, missing: verifierOutputGate.missing },
+              terminal_disposition: assertTerminalDispositionDocument({
+                schema_version: TERMINAL_DISPOSITION_SCHEMA_VERSION,
+                kind: "task-output-validation-failure"
+              })
+            }
+          : {})
       },
-      events: []
+      events:
+        verifierOutputGate !== undefined
+          ? [
+              {
+                eventType: "node-artifacts-missing",
+                status: "failed",
+                payload: {
+                  output_contracts: input.node.outputs,
+                  missing: verifierOutputGate.missing
+                }
+              }
+            ]
+          : []
     };
   }
 
