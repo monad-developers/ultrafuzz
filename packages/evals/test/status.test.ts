@@ -209,6 +209,285 @@ describe("eval status", () => {
     expect(table).not.toContain("controller-loss-row");
   });
 
+  it("uses the current durable workflow binding after recovery", () => {
+    const fixture = evalFixture([privateRow("recovered-row")]);
+    const runRoot = path.join(fixture.base, "recovered-run");
+    const runId = "run-recovered";
+    const oldWorkflowId = "workflow-before-recovery";
+    const currentWorkflowId = "workflow-after-recovery";
+    fs.mkdirSync(path.join(runRoot, "smithers", "logs"), { recursive: true });
+    fs.writeFileSync(
+      statePath(runRoot),
+      `${JSON.stringify({
+        schema_version: "1.1",
+        run_id: runId,
+        status: "running",
+        created_at: START,
+        started_at: START,
+        last_transition_at: CHECKPOINT,
+        controller_lease: { status: "active", expires_at: "2026-01-02T15:02:30.000Z" },
+        provenance: { workflow: { runId: currentWorkflowId } },
+        nodes: {
+          active: { node_id: "active", status: "running" }
+        }
+      })}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(path.join(runRoot, "smithers", "logs", `${oldWorkflowId}.log`), "status: stopped\n", "utf8");
+    fs.writeFileSync(path.join(runRoot, "smithers", "logs", `${currentWorkflowId}.log`), "status: running\n", "utf8");
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify({ ...record("recovered-row", runId, runRoot), workflow_ids: [oldWorkflowId] })}\n`,
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({
+      projectRoot: fixture.project,
+      evalRunId: fixture.evalRunId,
+      now: SNAPSHOT
+    });
+
+    expect(snapshot.rows[0]?.linked_workflow_status).toBe("running");
+  });
+
+  it("uses the latest recognized Smithers lifecycle without retaining an older status", () => {
+    const fixture = evalFixture([privateRow("paused-row")]);
+    const runRoot = path.join(fixture.base, "paused-run");
+    const runId = "run-paused";
+    fs.mkdirSync(path.join(runRoot, "smithers", "logs"), { recursive: true });
+    writeState(runRoot, {
+      runId,
+      status: "running",
+      nodes: ["running"],
+      controllerLease: { status: "active", expiresAt: "2026-01-02T15:02:30.000Z" }
+    });
+    fs.writeFileSync(
+      path.join(runRoot, "smithers", "logs", `${runId}.log`),
+      "status: running\nstatus: paused\n",
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify({ ...record("paused-row", runId, runRoot), workflow_ids: [runId] })}\n`,
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({
+      projectRoot: fixture.project,
+      evalRunId: fixture.evalRunId,
+      now: SNAPSHOT
+    });
+
+    expect(snapshot.rows[0]?.linked_workflow_status).toBe("paused");
+  });
+
+  it("reports an unsupported latest lifecycle as unknown instead of retaining admitted running", () => {
+    const fixture = evalFixture([privateRow("future-workflow-row")]);
+    const runRoot = path.join(fixture.base, "future-workflow-run");
+    const runId = "run-future-workflow";
+    fs.mkdirSync(path.join(runRoot, "smithers", "logs"), { recursive: true });
+    writeState(runRoot, {
+      runId,
+      status: "running",
+      nodes: ["running"],
+      controllerLease: { status: "active", expiresAt: "2026-01-02T15:02:30.000Z" }
+    });
+    fs.writeFileSync(
+      path.join(runRoot, "smithers", "logs", `${runId}.log`),
+      "SMITHERS_DETACHED_ADMISSION=run:synthetic-nonce\nstatus: running\nstatus: future-state\n",
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify({ ...record("future-workflow-row", runId, runRoot), workflow_ids: [runId] })}\n`,
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({
+      projectRoot: fixture.project,
+      evalRunId: fixture.evalRunId,
+      now: SNAPSHOT
+    });
+
+    expect(snapshot.rows[0]?.linked_workflow_status).toBe("unknown");
+  });
+
+  it("recognizes an admitted active workflow from a bounded detached-log read", () => {
+    const fixture = evalFixture([privateRow("active-workflow-row")]);
+    const runRoot = path.join(fixture.base, "active-workflow-run");
+    const runId = "run-active-workflow";
+    fs.mkdirSync(path.join(runRoot, "smithers", "logs"), { recursive: true });
+    writeState(runRoot, {
+      runId,
+      status: "running",
+      nodes: ["running"],
+      controllerLease: { status: "active", expiresAt: "2026-01-02T15:02:30.000Z" }
+    });
+    fs.writeFileSync(
+      path.join(runRoot, "smithers", "logs", `${runId}.log`),
+      `SMITHERS_DETACHED_ADMISSION=run:synthetic-nonce\n${"workflow output\n".repeat(8_000)}`,
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify({ ...record("active-workflow-row", runId, runRoot), workflow_ids: [runId] })}\n`,
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({
+      projectRoot: fixture.project,
+      evalRunId: fixture.evalRunId,
+      now: SNAPSHOT
+    });
+
+    expect(snapshot.rows[0]?.linked_workflow_status).toBe("running");
+  });
+
+  it("does not treat an old admission marker as liveness after controller expiry", () => {
+    const fixture = evalFixture([privateRow("expired-workflow-row")]);
+    const runRoot = path.join(fixture.base, "expired-workflow-run");
+    const runId = "run-expired-workflow";
+    fs.mkdirSync(path.join(runRoot, "smithers", "logs"), { recursive: true });
+    writeState(runRoot, {
+      runId,
+      status: "running",
+      nodes: ["pending"],
+      controllerLease: { status: "expired", expiresAt: "2026-01-02T14:50:30.000Z" }
+    });
+    fs.writeFileSync(
+      path.join(runRoot, "smithers", "logs", `${runId}.log`),
+      "SMITHERS_DETACHED_ADMISSION=run:stale-nonce\n",
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify({ ...record("expired-workflow-row", runId, runRoot), workflow_ids: [runId] })}\n`,
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({
+      projectRoot: fixture.project,
+      evalRunId: fixture.evalRunId,
+      now: SNAPSHOT
+    });
+
+    expect(snapshot.rows[0]?.linked_workflow_status).toBe("unknown");
+  });
+
+  it("reports a running node parked on an external gate as waiting", () => {
+    const fixture = evalFixture([privateRow("approval-row")]);
+    const runRoot = path.join(fixture.base, "approval-run");
+    const runId = "run-approval";
+    fs.mkdirSync(runRoot, { recursive: true });
+    fs.writeFileSync(
+      statePath(runRoot),
+      `${JSON.stringify({
+        schema_version: "1.1",
+        run_id: runId,
+        status: "running",
+        created_at: START,
+        started_at: START,
+        last_transition_at: CHECKPOINT,
+        nodes: {
+          approval: {
+            node_id: "approval",
+            status: "running",
+            wait_reason: "approval",
+            next_eligible_action: "approve"
+          }
+        }
+      })}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify(record("approval-row", runId, runRoot))}\n`,
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({
+      projectRoot: fixture.project,
+      evalRunId: fixture.evalRunId,
+      now: SNAPSHOT
+    });
+
+    expect(snapshot.rows[0]?.active_node_ids).toEqual([]);
+    expect(snapshot.rows[0]?.waiting_nodes).toEqual([
+      {
+        node_id: "approval",
+        status: "running",
+        wait_reason: "approval",
+        next_eligible_action: "approve"
+      }
+    ]);
+  });
+
+  it("keeps one shared table budget while JSON retains every active and waiting node", () => {
+    const fixture = evalFixture([privateRow("bounded-row")]);
+    const runRoot = path.join(fixture.base, "bounded-run");
+    const runId = "run-bounded";
+    fs.mkdirSync(runRoot, { recursive: true });
+    fs.writeFileSync(
+      statePath(runRoot),
+      `${JSON.stringify({
+        schema_version: "1.1",
+        run_id: runId,
+        status: "running",
+        created_at: START,
+        started_at: START,
+        last_transition_at: CHECKPOINT,
+        nodes: {
+          "active-a": { node_id: "active-a", status: "running" },
+          "active-b": { node_id: "active-b", status: "running" },
+          "active-c": { node_id: "active-c", status: "running" },
+          "waiting-a": {
+            node_id: "waiting-a",
+            status: "ready",
+            wait_reason: "ready",
+            next_eligible_action: "dispatch"
+          },
+          "waiting-b": {
+            node_id: "waiting-b",
+            status: "pending",
+            wait_reason: "controller-loss",
+            next_eligible_action: "controller-takeover"
+          },
+          "waiting-c": {
+            node_id: "waiting-c",
+            status: "pending",
+            wait_reason: "dependency",
+            next_eligible_action: "dependency-complete"
+          }
+        }
+      })}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify(record("bounded-row", runId, runRoot))}\n`,
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({
+      projectRoot: fixture.project,
+      evalRunId: fixture.evalRunId,
+      now: SNAPSHOT
+    });
+    const table = renderEvalStatusTable(snapshot);
+
+    expect(snapshot.rows[0]?.active_node_ids).toEqual(["active-a", "active-b", "active-c"]);
+    expect(snapshot.rows[0]?.waiting_nodes.map((node) => node.node_id)).toEqual([
+      "waiting-a",
+      "waiting-b",
+      "waiting-c"
+    ]);
+    expect(table).toContain(
+      "active:active-a; wait:waiting-a[ready→dispatch],waiting-b[controller-loss→controller-takeover]; +3"
+    );
+    expect(table).not.toContain("active-b");
+    expect(table).not.toContain("waiting-c");
+  });
+
   it("keeps incomplete, failed, inaccessible, invalid, zero-progress, and stale rows typed", () => {
     const ids = [
       "not-launched",
@@ -495,6 +774,7 @@ function writeState(
     nodes: string[];
     checkpoint?: string;
     startedAt?: string | null;
+    controllerLease?: { status: string; expiresAt: string };
   }
 ): void {
   fs.mkdirSync(runRoot, { recursive: true });
@@ -507,7 +787,12 @@ function writeState(
     ...(input.startedAt === null ? {} : { started_at: input.startedAt ?? START }),
     ...(input.status === "running" ? {} : { finished_at: checkpoint }),
     last_transition_at: checkpoint,
-    controller_lease: { renewed_at: checkpoint },
+    controller_lease: {
+      renewed_at: checkpoint,
+      ...(input.controllerLease === undefined
+        ? {}
+        : { status: input.controllerLease.status, expires_at: input.controllerLease.expiresAt })
+    },
     concurrency: { observed_at: checkpoint },
     nodes: Object.fromEntries(
       input.nodes.map((status, index) => [

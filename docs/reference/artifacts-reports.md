@@ -413,8 +413,10 @@ separately from durable workflow completion; a detached row remains
 nonterminal until its referenced run's `state.json` reaches a terminal state.
 `ultrafuzz eval status <eval-run-id>` joins these artifacts read-only to show
 every matrix row's durable node completion and ETA. Its table and versioned
-JSON use only opaque row labels and disclosure-safe lifecycle, count, and
-timing fields.
+JSON use only opaque row labels and disclosure-safe lifecycle, count, timing,
+and node-control fields. The table bounds active/waiting node IDs to three with
+a `+N` suffix; JSON retains every node ID, typed wait reason and next action,
+and the lifecycle of the currently bound linked workflow.
 
 `ultrafuzz eval score` joins the latest record with the referenced run's
 durable `state.json` and cumulative `run.json` accounting. Each row in

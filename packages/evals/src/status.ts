@@ -24,7 +24,21 @@ export type EvalStatusRowState = RunStatus | "not-launched" | "inaccessible" | "
 export type EvalStatusEtaBasis = typeof EVAL_STATUS_ETA_BASIS | "terminal" | null;
 export type EvalStatusEtaUnavailableReason =
   "progress-unavailable" | "no-completed-nodes" | "timing-unavailable" | "checkpoint-stale" | null;
-export type EvalStatusLinkedWorkflowState = "running" | "finished" | "stopped" | "failed" | "unknown" | null;
+const EVAL_STATUS_LINKED_WORKFLOW_STATES = [
+  "running",
+  "waiting-approval",
+  "waiting-event",
+  "waiting-timer",
+  "paused",
+  "continued",
+  "finished",
+  "stopped",
+  "failed",
+  "cancelled",
+  "canceled"
+] as const;
+type EvalStatusKnownLinkedWorkflowState = (typeof EVAL_STATUS_LINKED_WORKFLOW_STATES)[number];
+export type EvalStatusLinkedWorkflowState = EvalStatusKnownLinkedWorkflowState | "unknown" | null;
 
 export interface EvalStatusWaitingNode {
   node_id: string;
@@ -92,8 +106,11 @@ const RUN_STATUSES = new Set<string>(RUN_STATE_STATUSES);
 const NODE_STATUSES = new Set<string>(NODE_STATE_STATUSES);
 const NODE_WAIT_REASON_VALUES = new Set<string>(NODE_WAIT_REASONS);
 const NODE_NEXT_ELIGIBLE_ACTION_VALUES = new Set<string>(NODE_NEXT_ELIGIBLE_ACTIONS);
+const LINKED_WORKFLOW_STATUS_VALUES = new Set<string>(EVAL_STATUS_LINKED_WORKFLOW_STATES);
 const TERMINAL_RUN_STATUSES = new Set<string>(TERMINAL_RUN_STATE_STATUSES);
 const COMPLETED_NODE_STATUSES = new Set<string>(TERMINAL_NODE_STATE_STATUSES);
+const MAX_VISIBLE_STATUS_NODES = 3;
+const WORKFLOW_LOG_EDGE_BYTES = 32 * 1_024;
 
 /**
  * Read a complete eval matrix snapshot without synchronizing or otherwise
@@ -315,11 +332,11 @@ function statusForRecord(input: {
 
   const nodes = Object.values(rawState.nodes);
   const activeNodeIds = nodes
-    .filter((node) => node.status === "running")
+    .filter(isActiveNode)
     .map((node) => node.node_id)
     .sort();
   const waitingNodes = nodes
-    .filter((node) => !COMPLETED_NODE_STATUSES.has(node.status) && node.status !== "running")
+    .filter((node) => !COMPLETED_NODE_STATUSES.has(node.status) && !isActiveNode(node))
     .map((node): EvalStatusWaitingNode => ({
       node_id: node.node_id,
       status: node.status,
@@ -370,7 +387,11 @@ function statusForRecord(input: {
     checkpoint_stale: checkpointStale,
     active_node_ids: activeNodeIds,
     waiting_nodes: waitingNodes,
-    linked_workflow_status: readLinkedWorkflowStatus(input.record.ultrafuzz_run_root, input.record.workflow_ids),
+    linked_workflow_status: readLinkedWorkflowStatus(
+      input.record.ultrafuzz_run_root,
+      linkedWorkflowIds(rawState, input.record.workflow_ids),
+      hasActiveWorkflowLease(rawState, input.snapshotAtMs)
+    ),
     ...eta
   };
 }
@@ -398,8 +419,9 @@ function isValidState(
   started_at?: string;
   finished_at?: string;
   last_transition_at?: string;
-  controller_lease?: { renewed_at?: string };
+  controller_lease?: { status?: string; renewed_at?: string; expires_at?: string };
   concurrency?: { observed_at?: string };
+  provenance?: Record<string, unknown>;
   nodes: Record<
     string,
     {
@@ -500,27 +522,59 @@ function checkpointText(row: EvalStatusRow): string {
 }
 
 function nodesText(row: EvalStatusRow): string {
-  const active = boundedNodeList(row.active_node_ids, (nodeId) => nodeId);
-  const waiting = boundedNodeList(row.waiting_nodes, (node) => {
-    if (node.wait_reason === null && node.next_eligible_action === null) return node.node_id;
-    const reason = node.wait_reason ?? "unknown";
-    const action = node.next_eligible_action ?? "unknown";
-    return `${node.node_id}[${reason}→${action}]`;
-  });
+  let activeLimit = row.active_node_ids.length > 0 ? 1 : 0;
+  let waitingLimit = row.waiting_nodes.length > 0 ? 1 : 0;
+  let remaining = MAX_VISIBLE_STATUS_NODES - activeLimit - waitingLimit;
+  const additionalWaiting = Math.min(remaining, row.waiting_nodes.length - waitingLimit);
+  waitingLimit += additionalWaiting;
+  remaining -= additionalWaiting;
+  activeLimit += Math.min(remaining, row.active_node_ids.length - activeLimit);
+
   const groups = [];
-  if (active !== null) groups.push(`active:${active}`);
-  if (waiting !== null) groups.push(`wait:${waiting}`);
+  if (activeLimit > 0) groups.push(`active:${row.active_node_ids.slice(0, activeLimit).join(",")}`);
+  if (waitingLimit > 0) groups.push(`wait:${row.waiting_nodes.slice(0, waitingLimit).map(waitingNodeText).join(",")}`);
+  const omitted = row.active_node_ids.length + row.waiting_nodes.length - activeLimit - waitingLimit;
+  if (omitted > 0) groups.push(`+${omitted}`);
   return groups.length === 0 ? "none" : groups.join("; ");
 }
 
-function boundedNodeList<T>(values: T[], render: (value: T) => string): string | null {
-  if (values.length === 0) return null;
-  const visible = values.slice(0, 3).map(render).join(",");
-  const omitted = values.length - 3;
-  return omitted > 0 ? `${visible} +${omitted}` : visible;
+function waitingNodeText(node: EvalStatusWaitingNode): string {
+  if (node.wait_reason === null && node.next_eligible_action === null) return node.node_id;
+  const reason = node.wait_reason ?? "unknown";
+  const action = node.next_eligible_action ?? "unknown";
+  return `${node.node_id}[${reason}→${action}]`;
 }
 
-function readLinkedWorkflowStatus(runRoot: string, rawWorkflowIds: unknown): EvalStatusLinkedWorkflowState {
+function isActiveNode(node: { status: NodeStatus; wait_reason?: NodeWaitReason }): boolean {
+  return node.status === "running" && (node.wait_reason === undefined || node.wait_reason === "active");
+}
+
+function linkedWorkflowIds(rawState: { provenance?: Record<string, unknown> }, fallback: unknown): unknown {
+  const workflow = isRecord(rawState.provenance?.workflow) ? rawState.provenance.workflow : undefined;
+  if (workflow !== undefined && Object.hasOwn(workflow, "runId")) return [workflow.runId];
+  const inspection = workflow !== undefined && isRecord(workflow.inspection) ? workflow.inspection : undefined;
+  if (inspection !== undefined && Object.hasOwn(inspection, "runId")) return [inspection.runId];
+  return fallback;
+}
+
+function hasActiveWorkflowLease(
+  rawState: { status: RunStatus; controller_lease?: { status?: string; expires_at?: string } },
+  snapshotAtMs: number
+): boolean {
+  const expiresAtMs = timestamp(rawState.controller_lease?.expires_at);
+  return (
+    rawState.status === "running" &&
+    rawState.controller_lease?.status === "active" &&
+    expiresAtMs !== null &&
+    expiresAtMs > snapshotAtMs
+  );
+}
+
+function readLinkedWorkflowStatus(
+  runRoot: string,
+  rawWorkflowIds: unknown,
+  activelyOwned: boolean
+): EvalStatusLinkedWorkflowState {
   if (!Array.isArray(rawWorkflowIds) || rawWorkflowIds.length === 0) return null;
   const statuses: Exclude<EvalStatusLinkedWorkflowState, null>[] = [];
   for (const value of rawWorkflowIds) {
@@ -530,19 +584,44 @@ function readLinkedWorkflowStatus(runRoot: string, rawWorkflowIds: unknown): Eva
     }
     let log: string;
     try {
-      log = fs.readFileSync(path.join(runRoot, "smithers", "logs", `${value}.log`), "utf8");
+      log = readWorkflowLogEdges(path.join(runRoot, "smithers", "logs", `${value}.log`));
     } catch {
       statuses.push("unknown");
       continue;
     }
-    const matches = [...log.matchAll(/^status:\s*(running|finished|stopped|failed)\s*$/gmu)];
+    const matches = [...log.matchAll(/^status:\s*([a-z][a-z-]*)\s*$/gmu)];
     const latest = matches.at(-1)?.[1];
-    statuses.push(
-      latest === "running" || latest === "finished" || latest === "stopped" || latest === "failed" ? latest : "unknown"
-    );
+    if (latest === undefined) {
+      statuses.push(activelyOwned && log.includes("SMITHERS_DETACHED_ADMISSION=run:") ? "running" : "unknown");
+    } else if (!isLinkedWorkflowStatus(latest)) {
+      statuses.push("unknown");
+    } else {
+      statuses.push((latest === "running" || latest === "continued") && !activelyOwned ? "unknown" : latest);
+    }
   }
   const distinct = new Set(statuses);
   return distinct.size === 1 ? (statuses[0] ?? "unknown") : "unknown";
+}
+
+function isLinkedWorkflowStatus(value: string): value is EvalStatusKnownLinkedWorkflowState {
+  return LINKED_WORKFLOW_STATUS_VALUES.has(value);
+}
+
+function readWorkflowLogEdges(logPath: string): string {
+  const file = fs.openSync(logPath, "r");
+  try {
+    const size = fs.fstatSync(file).size;
+    if (size <= WORKFLOW_LOG_EDGE_BYTES * 2) {
+      return fs.readFileSync(file, "utf8");
+    }
+    const first = Buffer.alloc(WORKFLOW_LOG_EDGE_BYTES);
+    const last = Buffer.alloc(WORKFLOW_LOG_EDGE_BYTES);
+    const firstBytes = fs.readSync(file, first, 0, first.length, 0);
+    const lastBytes = fs.readSync(file, last, 0, last.length, size - last.length);
+    return `${first.subarray(0, firstBytes).toString("utf8")}\n${last.subarray(0, lastBytes).toString("utf8")}`;
+  } finally {
+    fs.closeSync(file);
+  }
 }
 
 function reasonText(reason: EvalStatusEtaUnavailableReason): string {
