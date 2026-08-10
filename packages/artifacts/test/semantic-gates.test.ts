@@ -1169,6 +1169,41 @@ test("every contextual registration executes real positive and negative checks",
         negative: { commit: "wrong", tree: "t", files: [{ content: "snapshot", sha256: contentDigest }] },
         context: { git: { commit: "c", tree: "t" } }
       },
+      "finding-lifecycle-review-stage-reconciliation": {
+        positive: {
+          records: [
+            {
+              dedupe_key: "root-a",
+              source_artifacts: [{ path: "raw/findings.json", finding_id: "raw-a" }],
+              stages: [
+                { stage: "raw", artifact_path: "raw/findings.json", finding_id: "raw-a" },
+                { stage: "deduped", artifact_path: "/artifacts/deduped-findings.json", finding_id: "finding-a" }
+              ]
+            }
+          ]
+        },
+        negative: {
+          records: [
+            {
+              dedupe_key: "root-a",
+              source_artifacts: [{ path: "raw/findings.json", finding_id: "raw-a" }],
+              stages: [
+                { stage: "raw", artifact_path: "raw/findings.json", finding_id: "raw-a" },
+                { stage: "deduped", artifact_path: "/artifacts/rewritten.json", finding_id: "finding-a" }
+              ]
+            }
+          ]
+        },
+        context: {
+          artifactSet: {
+            reviewStage: {
+              stage: "dedupe",
+              findingsArtifactPath: "/artifacts/deduped-findings.json",
+              findings: [{ id: "finding-a", dedupe_key: "root-a" }]
+            }
+          }
+        }
+      },
       "json-validator-preflight-current-identity": {
         positive: {
           data: {
@@ -1313,6 +1348,36 @@ test("every contextual registration executes real positive and negative checks",
         context: {
           artifactSet: {
             triagedFindings: [{ id: "finding-a", summary: "Preserved summary", severity_guess: "Medium" }]
+          }
+        }
+      },
+      "strategy-detection-review-stage-reconciliation": {
+        positive: [
+          {
+            dedupe_key: "root-a",
+            finding_id: "finding-a",
+            title: "Finding A",
+            hits: [{ strategy: "boundary" }]
+          }
+        ],
+        negative: [
+          {
+            dedupe_key: "root-a",
+            finding_id: "finding-a",
+            title: "Finding A",
+            hits: [{ strategy: "rewritten" }]
+          }
+        ],
+        context: {
+          artifactSet: {
+            reviewStage: {
+              stage: "dedupe",
+              findingsArtifactPath: "/artifacts/deduped-findings.json",
+              findings: [{ id: "finding-a", dedupe_key: "root-a", title: "Finding A" }],
+              lifecycleLedger: {
+                records: [{ dedupe_key: "root-a", strategy_hits: [{ strategy: "boundary" }] }]
+              }
+            }
           }
         }
       },

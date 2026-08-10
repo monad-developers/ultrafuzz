@@ -185,3 +185,10 @@ set `triage_classification`, preserve or add `triage_reason`, preserve or add
 `demotion_reason` when present, and append a `triaged` stage that points to
 {{artifact_path}}/triaged-findings.json. Do not match lifecycle records by
 title when `dedupe_key` is available.
+
+Preserve the input record order and every existing field and stage byte-for-byte
+in parsed JSON value terms. Add only `triage_classification`, `triage_reason`,
+the required `demotion_reason`, and one final `triaged` stage whose
+`artifact_path` is the exact rendered triaged-findings path and whose
+`finding_id` is unchanged. Do not author severity, final disposition, or
+comparison fields in this stage.

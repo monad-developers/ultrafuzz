@@ -55,6 +55,7 @@ import {
   type SemanticGateContext,
   type SemanticGitContext,
   type SemanticPropertyLensContext,
+  type SemanticReviewStageContext,
   type WorkspacePatchManifest
 } from "@ultrafuzz/artifacts";
 
@@ -1686,6 +1687,13 @@ function semanticArtifactSetForSchema(input: {
     const propertyLenses = semanticPropertyLenses(input.layout);
     return propertyLenses === undefined ? {} : { propertyLenses };
   }
+  if (
+    input.schemaFilename === "finding-lifecycle-ledger.schema.json" ||
+    input.schemaFilename === "strategy-detections.schema.json"
+  ) {
+    const reviewStage = semanticReviewStageContext(input.layout, input.artifactDir, input.node);
+    return reviewStage === undefined ? {} : { reviewStage };
+  }
   if (input.schemaFilename === "triaged-findings.schema.json") {
     const dedupedFindings = semanticDedupedFindings(input.layout);
     return dedupedFindings === undefined ? {} : { dedupedFindings };
@@ -1705,6 +1713,123 @@ function semanticArtifactSetForSchema(input: {
       ...(implementedProperties === undefined ? {} : { implementedProperties }),
       ...(severityClassifiedFindings === undefined ? {} : { severityClassifiedFindings }),
       ...(findingLifecycleLedger === undefined ? {} : { findingLifecycleLedger })
+    };
+  }
+  return undefined;
+}
+
+function readReviewArtifact(
+  layout: RunLayout,
+  artifactDir: string,
+  fileName: string,
+  contract: PlannedGraphNode["outputs"][number]["contract"]
+): unknown | undefined {
+  const artifactPath = safeResolveInside(artifactDir, fileName, "review stage semantic context");
+  if (!fs.existsSync(artifactPath)) return undefined;
+  assertRegularFileInside(layout.root, artifactPath, "review stage semantic context");
+  return readStrictContractDocument(artifactPath, contract);
+}
+
+function readLogicalReviewArtifact(
+  layout: RunLayout,
+  logicalNodeId: string,
+  fileName: string,
+  contract: PlannedGraphNode["outputs"][number]["contract"]
+): unknown | undefined {
+  const artifactPath = findLogicalNodeArtifact(layout, logicalNodeId, fileName);
+  if (artifactPath === undefined) return undefined;
+  assertRegularFileInside(layout.root, artifactPath, "upstream review stage semantic context");
+  return readStrictContractDocument(artifactPath, contract);
+}
+
+function semanticReviewStageContext(
+  layout: RunLayout,
+  artifactDir: string,
+  node: PlannedGraphNode
+): SemanticReviewStageContext | undefined {
+  const stage = node.logical_id ?? node.id;
+  if (stage === "dedupe-findings") {
+    return {
+      stage: "dedupe",
+      findingsArtifactPath: safeResolveInside(artifactDir, "deduped-findings.json", "deduped findings context"),
+      findings: readReviewArtifact(layout, artifactDir, "deduped-findings.json", "ultrafuzz/findings@2"),
+      lifecycleLedger: readReviewArtifact(
+        layout,
+        artifactDir,
+        "finding-lifecycle-ledger.json",
+        "ultrafuzz/finding-lifecycle-ledger@1"
+      ),
+      strategyDetections: readReviewArtifact(
+        layout,
+        artifactDir,
+        "strategy-detections.json",
+        "ultrafuzz/strategy-detections@1"
+      )
+    };
+  }
+  if (stage === "triage") {
+    return {
+      stage: "triage",
+      findingsArtifactPath: safeResolveInside(artifactDir, "triaged-findings.json", "triaged findings context"),
+      findings: readReviewArtifact(layout, artifactDir, "triaged-findings.json", "ultrafuzz/triaged-findings@1"),
+      lifecycleLedger: readReviewArtifact(
+        layout,
+        artifactDir,
+        "finding-lifecycle-ledger.json",
+        "ultrafuzz/finding-lifecycle-ledger@1"
+      ),
+      upstreamLifecycleLedger: readLogicalReviewArtifact(
+        layout,
+        "dedupe-findings",
+        "finding-lifecycle-ledger.json",
+        "ultrafuzz/finding-lifecycle-ledger@1"
+      ),
+      upstreamStrategyDetections: readLogicalReviewArtifact(
+        layout,
+        "dedupe-findings",
+        "strategy-detections.json",
+        "ultrafuzz/strategy-detections@1"
+      )
+    };
+  }
+  if (stage === "severity-classification") {
+    return {
+      stage: "severity-classification",
+      findingsArtifactPath: safeResolveInside(
+        artifactDir,
+        "severity-classified-findings.json",
+        "severity findings context"
+      ),
+      findings: readReviewArtifact(
+        layout,
+        artifactDir,
+        "severity-classified-findings.json",
+        "ultrafuzz/severity-classified-findings@1"
+      ),
+      lifecycleLedger: readReviewArtifact(
+        layout,
+        artifactDir,
+        "finding-lifecycle-ledger.json",
+        "ultrafuzz/finding-lifecycle-ledger@1"
+      ),
+      strategyDetections: readReviewArtifact(
+        layout,
+        artifactDir,
+        "strategy-detections.json",
+        "ultrafuzz/strategy-detections@1"
+      ),
+      upstreamLifecycleLedger: readLogicalReviewArtifact(
+        layout,
+        "triage",
+        "finding-lifecycle-ledger.json",
+        "ultrafuzz/finding-lifecycle-ledger@1"
+      ),
+      upstreamStrategyDetections: readLogicalReviewArtifact(
+        layout,
+        "dedupe-findings",
+        "strategy-detections.json",
+        "ultrafuzz/strategy-detections@1"
+      )
     };
   }
   return undefined;

@@ -679,6 +679,203 @@ test("final report gates preserve severity records and ledger dispositions witho
   );
 });
 
+test("review lifecycle and strategy gates authenticate every dedupe, triage, and severity transition", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-review-lifecycle" });
+  const dedupedFinding = currentFinding("finding-lifecycle", {
+    dedupe_key: "root-lifecycle",
+    strategy: "boundary-tests"
+  });
+  const dedupedPath = writeArtifact(
+    layout,
+    "dedupe-findings",
+    "deduped-findings.json",
+    JSON.stringify([dedupedFinding])
+  );
+  const strategyDetections = [
+    {
+      dedupe_key: "root-lifecycle",
+      finding_id: "finding-lifecycle",
+      title: "Property failure",
+      hits: [{ strategy: "boundary-tests", attempt_index: 0 }]
+    }
+  ];
+  writeArtifact(layout, "dedupe-findings", "strategy-detections.json", JSON.stringify(strategyDetections));
+  const sourceArtifact = {
+    path: "artifacts/boundary-tests/findings.json",
+    node_id: "boundary-tests",
+    finding_id: "raw-finding",
+    title: "Property failure",
+    relationship: "primary"
+  };
+  const dedupeRecord = {
+    dedupe_key: "root-lifecycle",
+    source_artifacts: [sourceArtifact],
+    strategy_hits: strategyDetections[0]!.hits,
+    stages: [
+      { stage: "raw", artifact_path: sourceArtifact.path, finding_id: sourceArtifact.finding_id },
+      { stage: "deduped", artifact_path: dedupedPath, finding_id: "finding-lifecycle" }
+    ]
+  };
+  writeArtifact(
+    layout,
+    "dedupe-findings",
+    "finding-lifecycle-ledger.json",
+    JSON.stringify({ schema_version: "ultrafuzz.finding-lifecycle-ledger.v1", records: [dedupeRecord] })
+  );
+  const dedupeNode: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "dedupe-findings",
+    logical_id: "dedupe-findings",
+    artifact_dir: "artifacts/dedupe-findings",
+    outputs: [
+      boundOutput("deduped-findings.json", "ultrafuzz/findings@2", true),
+      boundOutput("strategy-detections.json", "ultrafuzz/strategy-detections@1"),
+      boundOutput("finding-lifecycle-ledger.json", "ultrafuzz/finding-lifecycle-ledger@1")
+    ]
+  };
+  const validDedupe = verifyRequiredArtifactsForAttempt(layout, dedupeNode, dedupeNode.id);
+  assert.equal(validDedupe.ok, true, JSON.stringify(validDedupe.diagnostics));
+
+  const triagedFinding = {
+    ...dedupedFinding,
+    triage_classification: "true-positive",
+    notes: ["triage_reason=public path is reachable"]
+  };
+  const triagedPath = writeArtifact(layout, "triage", "triaged-findings.json", JSON.stringify([triagedFinding]));
+  const triageRecord = {
+    ...dedupeRecord,
+    triage_classification: "true-positive",
+    triage_reason: "public path is reachable",
+    stages: [...dedupeRecord.stages, { stage: "triaged", artifact_path: triagedPath, finding_id: "finding-lifecycle" }]
+  };
+  const triageLedgerPath = writeArtifact(
+    layout,
+    "triage",
+    "finding-lifecycle-ledger.json",
+    JSON.stringify({ schema_version: "ultrafuzz.finding-lifecycle-ledger.v1", records: [triageRecord] })
+  );
+  const triageNode: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "triage",
+    logical_id: "triage",
+    depends_on: ["dedupe-findings"],
+    artifact_dir: "artifacts/triage",
+    outputs: [
+      boundOutput("triaged-findings.json", "ultrafuzz/triaged-findings@1", true),
+      boundOutput("finding-lifecycle-ledger.json", "ultrafuzz/finding-lifecycle-ledger@1")
+    ]
+  };
+  const validTriage = verifyRequiredArtifactsForAttempt(layout, triageNode, triageNode.id);
+  assert.equal(validTriage.ok, true, JSON.stringify(validTriage.diagnostics));
+
+  fs.writeFileSync(
+    triageLedgerPath,
+    JSON.stringify({
+      schema_version: "ultrafuzz.finding-lifecycle-ledger.v1",
+      records: [{ ...triageRecord, source_artifacts: [{ ...sourceArtifact, path: "rewritten/findings.json" }] }]
+    })
+  );
+  const rewrittenTriage = verifyRequiredArtifactsForAttempt(layout, triageNode, triageNode.id);
+  assert.equal(rewrittenTriage.ok, false);
+  assert.ok(
+    rewrittenTriage.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
+        diagnostic.details?.gate === "finding-lifecycle-review-stage-reconciliation"
+    ),
+    JSON.stringify(rewrittenTriage.diagnostics)
+  );
+  fs.writeFileSync(
+    triageLedgerPath,
+    JSON.stringify({ schema_version: "ultrafuzz.finding-lifecycle-ledger.v1", records: [triageRecord] })
+  );
+
+  const classifiedFinding = {
+    ...triagedFinding,
+    severity: "Medium",
+    impact: "High",
+    likelihood: "Low",
+    impact_rationale: "The reachable path can lock assets.",
+    likelihood_rationale: "The path requires narrow timing.",
+    severity_rationale: "High impact x Low likelihood maps to Medium."
+  };
+  const classifiedPath = writeArtifact(
+    layout,
+    "severity-classification",
+    "severity-classified-findings.json",
+    JSON.stringify([classifiedFinding])
+  );
+  const severityStrategyPath = writeArtifact(
+    layout,
+    "severity-classification",
+    "strategy-detections.json",
+    JSON.stringify(strategyDetections)
+  );
+  const severityRecord = {
+    ...triageRecord,
+    canonical_severity: "Medium",
+    final_disposition: "promoted",
+    stages: [
+      ...triageRecord.stages,
+      { stage: "severity-classified", artifact_path: classifiedPath, finding_id: "finding-lifecycle" }
+    ]
+  };
+  const severityLedgerPath = writeArtifact(
+    layout,
+    "severity-classification",
+    "finding-lifecycle-ledger.json",
+    JSON.stringify({ schema_version: "ultrafuzz.finding-lifecycle-ledger.v1", records: [severityRecord] })
+  );
+  const severityNode: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "severity-classification",
+    logical_id: "severity-classification",
+    depends_on: ["triage"],
+    artifact_dir: "artifacts/severity-classification",
+    outputs: [
+      boundOutput("severity-classified-findings.json", "ultrafuzz/severity-classified-findings@1", true),
+      boundOutput("strategy-detections.json", "ultrafuzz/strategy-detections@1"),
+      boundOutput("finding-lifecycle-ledger.json", "ultrafuzz/finding-lifecycle-ledger@1")
+    ]
+  };
+  const validSeverity = verifyRequiredArtifactsForAttempt(layout, severityNode, severityNode.id);
+  assert.equal(validSeverity.ok, true, JSON.stringify(validSeverity.diagnostics));
+
+  fs.writeFileSync(
+    severityStrategyPath,
+    JSON.stringify([{ ...strategyDetections[0], hits: [{ strategy: "rewritten", attempt_index: 0 }] }])
+  );
+  const rewrittenStrategy = verifyRequiredArtifactsForAttempt(layout, severityNode, severityNode.id);
+  assert.equal(rewrittenStrategy.ok, false);
+  assert.ok(
+    rewrittenStrategy.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
+        diagnostic.details?.gate === "strategy-detection-review-stage-reconciliation"
+    ),
+    JSON.stringify(rewrittenStrategy.diagnostics)
+  );
+  fs.writeFileSync(severityStrategyPath, JSON.stringify(strategyDetections));
+
+  fs.writeFileSync(
+    severityLedgerPath,
+    JSON.stringify({
+      schema_version: "ultrafuzz.finding-lifecycle-ledger.v1",
+      records: [{ ...severityRecord, canonical_severity: "High" }]
+    })
+  );
+  const rewrittenSeverity = verifyRequiredArtifactsForAttempt(layout, severityNode, severityNode.id);
+  assert.equal(rewrittenSeverity.ok, false);
+  assert.ok(
+    rewrittenSeverity.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
+        diagnostic.details?.gate === "finding-lifecycle-review-stage-reconciliation"
+    ),
+    JSON.stringify(rewrittenSeverity.diagnostics)
+  );
+});
+
 test("sealed planned graph distinguishes an absent property track from a missing planned producer", () => {
   const absentLayout = createRunLayout({ projectRoot: tempProject(), runId: "run-no-property-track" });
   const reportNode = {

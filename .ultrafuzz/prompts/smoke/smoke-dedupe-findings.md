@@ -34,5 +34,11 @@ records its strategy and any available attempt/model/loop provenance.
 Write `{{artifact_path}}/finding-lifecycle-ledger.json` as an object with
 `schema_version: "ultrafuzz.finding-lifecycle-ledger.v1"` and `records`. Each record includes `dedupe_key`,
 `source_artifacts`, `strategy_hits`, and `stages` containing raw and deduped
-stages. Validate only JSON shape and required normalized-finding fields, then
-stop.
+stages. Keep records, detections, and findings in the same order. Each retained
+finding has exactly one lifecycle record and detection: their `dedupe_key`,
+finding ID, title, optional family ID, and hit arrays agree exactly. Write one
+raw stage per source artifact in source order using its exact path and finding
+ID, followed by exactly one deduped stage pointing to the exact rendered
+`{{artifact_path}}/deduped-findings.json` path and kept finding ID. Do not write
+later-stage fields. Validate only JSON shape and required normalized-finding
+fields, then stop.

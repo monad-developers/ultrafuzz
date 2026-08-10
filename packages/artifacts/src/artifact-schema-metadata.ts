@@ -199,7 +199,7 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "ultrafuzz/finding-lifecycle-ledger@1",
     "findingLifecycleLedgerJsonSchema",
     "findingLifecycleLedgerSchema",
-    ["finding-lifecycle-dedupe-key-uniqueness"]
+    ["finding-lifecycle-dedupe-key-uniqueness", "finding-lifecycle-review-stage-reconciliation"]
   ),
   "finding.schema.json": {
     role: "subschema",
@@ -367,7 +367,11 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "ultrafuzz/strategy-detections@1",
     "strategyDetectionsJsonSchema",
     "strategyDetectionsSchema",
-    ["strategy-detection-dedupe-key-uniqueness", "strategy-detection-hit-identity-uniqueness"]
+    [
+      "strategy-detection-dedupe-key-uniqueness",
+      "strategy-detection-hit-identity-uniqueness",
+      "strategy-detection-review-stage-reconciliation"
+    ]
   ),
   "triaged-findings.schema.json": artifact(
     "ultrafuzz/triaged-findings@1",

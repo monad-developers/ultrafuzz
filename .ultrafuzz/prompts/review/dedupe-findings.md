@@ -168,6 +168,17 @@ object with `schema_version: "ultrafuzz.finding-lifecycle-ledger.v1"` and a `rec
 - `stages`: at least one `raw` stage for each source artifact plus one
   `deduped` stage for the kept record.
 
+Keep the lifecycle record array in exactly the same order as
+`deduped-findings.json`, with one record per finding. In each record, write one
+`raw` stage for every `source_artifacts` entry in the same order, using that
+entry's exact `path` and `finding_id`, followed by exactly one `deduped` stage
+whose `artifact_path` is the rendered
+`{{artifact_path}}/deduped-findings.json` path and whose `finding_id` is the kept
+finding ID. Do not write triage, severity, disposition, comparison, or later
+stage fields during dedupe. The matching `strategy-detections.json` entry must
+have the same order, `dedupe_key`, finding ID, title, optional family ID, and
+exact hit array as the lifecycle record.
+
 After writing the required artifacts, run only a small number of direct JSON
 shape checks, then stop. Do not spend the finalization reserve on broad
 re-verification once the required artifacts are present and parseable.

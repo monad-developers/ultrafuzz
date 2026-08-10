@@ -57,6 +57,9 @@ Also copy the strategy detection provenance to
 so the final report can compute per-strategy detection rates from loop
 provenance.
 
+Copy the complete strategy-detections array exactly, including entry order and
+every optional field; do not regenerate it from findings or the ledger.
+
 Also save {{artifact_path}}/finding-lifecycle-ledger.json. Copy the triage
 ledger and update every `dedupe_key` record that was severity-classified:
 
@@ -69,6 +72,15 @@ ledger and update every `dedupe_key` record that was severity-classified:
   keys, and all earlier stage records;
 - append a `severity-classified` stage pointing to
   {{artifact_path}}/severity-classified-findings.json.
+
+Preserve the triage ledger record order and every upstream field and stage
+exactly. Add only `canonical_severity`, `final_disposition`, optional
+`comparison_disposition`, and one final `severity-classified` stage whose
+artifact path and finding ID exactly identify the current severity output.
+`true-positive` records are `promoted` and copy their top-level `severity` into
+`canonical_severity`; `false-positive` records are `dropped`; every other
+classification is `non-production`. Non-promoted records omit
+`canonical_severity`.
 
 If a prior-run lifecycle comparison is available in the prompt context, set
 `comparison_disposition` to exactly `promoted-again`,

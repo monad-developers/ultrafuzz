@@ -31,6 +31,16 @@ export interface SemanticPropertyLensContext {
   document: unknown;
 }
 
+export interface SemanticReviewStageContext {
+  stage: "dedupe" | "triage" | "severity-classification";
+  findingsArtifactPath: string;
+  findings?: unknown;
+  lifecycleLedger?: unknown;
+  strategyDetections?: unknown;
+  upstreamLifecycleLedger?: unknown;
+  upstreamStrategyDetections?: unknown;
+}
+
 export interface SemanticArtifactSetContext {
   campaigns?: readonly unknown[];
   findings?: readonly unknown[];
@@ -41,6 +51,7 @@ export interface SemanticArtifactSetContext {
   triagedFindings?: unknown;
   severityClassifiedFindings?: unknown;
   findingLifecycleLedger?: unknown;
+  reviewStage?: SemanticReviewStageContext;
 }
 
 export interface SemanticPlannedGraphContext {
@@ -376,6 +387,7 @@ const SEVERITY_CLASSIFICATION_OWNED_FIELDS = new Set([
 const TRIAGE_OWNED_FIELDS = new Set(["triage_classification", "notes", "status"]);
 
 function preservedArraySubsequence(actual: unknown, upstream: unknown): boolean {
+  if (upstream === undefined) return Array.isArray(actual) || actual === undefined;
   if (!Array.isArray(upstream)) return isDeepStrictEqual(actual, upstream);
   if (!Array.isArray(actual)) return false;
   let upstreamIndex = 0;
@@ -590,6 +602,268 @@ function reportSeverityClassificationPreservationIssues(
   for (const [key, entry] of reportByKey) {
     if (!upstreamKeys.has(key)) {
       issues.push(issue(entry.path, `Report row has no severity-classified source for ${JSON.stringify(key)}`));
+    }
+  }
+  return issues;
+}
+
+const LIFECYCLE_LATER_STAGE_FIELDS = [
+  "triage_classification",
+  "triage_reason",
+  "demotion_reason",
+  "canonical_severity",
+  "final_disposition",
+  "comparison_disposition"
+] as const;
+
+function lifecycleRecordPreservationIssues(
+  actual: Readonly<Record<string, unknown>>,
+  upstream: Readonly<Record<string, unknown>>,
+  ownedFields: ReadonlySet<string>,
+  recordPath: string
+): SemanticGateIssue[] {
+  const fields = new Set([...Object.keys(upstream), ...Object.keys(actual)]);
+  return [...fields].flatMap((field) => {
+    if (ownedFields.has(field)) return [];
+    return isDeepStrictEqual(actual[field], upstream[field])
+      ? []
+      : [issue(`${recordPath}.${field}`, `Lifecycle stage did not preserve upstream field ${JSON.stringify(field)}`)];
+  });
+}
+
+function findingNoteToken(finding: unknown, prefixes: readonly string[]): string | undefined {
+  for (const note of stringArray(at(finding, ["notes"]))) {
+    for (const prefix of prefixes) {
+      if (note.startsWith(prefix) && note.length > prefix.length) return note.slice(prefix.length);
+    }
+  }
+  return undefined;
+}
+
+function expectedFindingStage(
+  stage: "deduped" | "triaged" | "severity-classified",
+  artifactPath: string,
+  findingId: string
+): Readonly<Record<string, unknown>> {
+  return { stage, artifact_path: artifactPath, finding_id: findingId };
+}
+
+function lifecycleReviewStageIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
+  const review = context.artifactSet!.reviewStage!;
+  const findings = Array.isArray(review.findings) ? review.findings : [];
+  const records = arrayAt(document, ["records"]);
+  const issues: SemanticGateIssue[] = [];
+  if (!Array.isArray(review.findings)) {
+    issues.push(issue("$", `Trusted ${review.stage} findings context is unavailable`));
+  }
+  if (review.stage !== "dedupe" && !isRecord(review.upstreamLifecycleLedger)) {
+    issues.push(issue("$", `Trusted upstream lifecycle context is unavailable for ${review.stage}`));
+  }
+  if (records.length !== findings.length) {
+    issues.push(
+      issue(
+        "$.records",
+        `Lifecycle record count ${records.length} does not reconcile with ${review.stage} finding count ${findings.length}`
+      )
+    );
+  }
+
+  const upstreamRecords = arrayAt(review.upstreamLifecycleLedger, ["records"]);
+  if (review.stage !== "dedupe" && upstreamRecords.length !== records.length) {
+    issues.push(
+      issue(
+        "$.records",
+        `Lifecycle record count ${records.length} does not preserve upstream ledger count ${upstreamRecords.length}`
+      )
+    );
+  }
+
+  for (let index = 0; index < Math.min(records.length, findings.length); index += 1) {
+    const record = records[index];
+    const finding = findings[index];
+    if (!isRecord(record) || !isRecord(finding)) continue;
+    const recordPath = `$.records[${index}]`;
+    const dedupeKey = stringField(finding, "dedupe_key");
+    const findingId = stringField(finding, "id");
+    if (dedupeKey === undefined || stringField(record, "dedupe_key") !== dedupeKey) {
+      issues.push(issue(`${recordPath}.dedupe_key`, "Lifecycle record changed, omitted, or reordered the finding key"));
+    }
+    if (findingId === undefined) continue;
+
+    if (review.stage === "dedupe") {
+      if (arrayAt(record, ["source_artifacts"]).length === 0) {
+        issues.push(issue(`${recordPath}.source_artifacts`, "Dedupe lifecycle record requires a source artifact"));
+      }
+      for (const field of LIFECYCLE_LATER_STAGE_FIELDS) {
+        if (record[field] !== undefined) {
+          issues.push(
+            issue(`${recordPath}.${field}`, `Dedupe lifecycle record cannot author later-stage field ${field}`)
+          );
+        }
+      }
+      const rawStages = arrayAt(record, ["source_artifacts"]).map((source) => ({
+        stage: "raw",
+        artifact_path: stringField(source, "path"),
+        finding_id: stringField(source, "finding_id")
+      }));
+      const expectedStages = [...rawStages, expectedFindingStage("deduped", review.findingsArtifactPath, findingId)];
+      if (!isDeepStrictEqual(arrayAt(record, ["stages"]), expectedStages)) {
+        issues.push(
+          issue(
+            `${recordPath}.stages`,
+            "Dedupe lifecycle stages must exactly project every source artifact followed by the deduped finding"
+          )
+        );
+      }
+      continue;
+    }
+
+    const upstream = upstreamRecords[index];
+    if (!isRecord(upstream)) continue;
+    if (stringField(upstream, "dedupe_key") !== dedupeKey) {
+      issues.push(issue(`${recordPath}.dedupe_key`, "Lifecycle stage changed or reordered the upstream ledger key"));
+    }
+    if (review.stage === "triage") {
+      issues.push(
+        ...lifecycleRecordPreservationIssues(
+          record,
+          upstream,
+          new Set(["triage_classification", "triage_reason", "demotion_reason", "stages"]),
+          recordPath
+        )
+      );
+      const expectedStages = [
+        ...arrayAt(upstream, ["stages"]),
+        expectedFindingStage("triaged", review.findingsArtifactPath, findingId)
+      ];
+      if (!isDeepStrictEqual(arrayAt(record, ["stages"]), expectedStages)) {
+        issues.push(issue(`${recordPath}.stages`, "Triage must append exactly one stage after every preserved stage"));
+      }
+      const classification = stringField(finding, "triage_classification");
+      if (stringField(record, "triage_classification") !== classification) {
+        issues.push(
+          issue(`${recordPath}.triage_classification`, "Lifecycle triage classification differs from finding")
+        );
+      }
+      const triageReason = findingNoteToken(finding, ["triage_reason=", "classification_reason="]);
+      if (triageReason === undefined || stringField(record, "triage_reason") !== triageReason) {
+        issues.push(
+          issue(`${recordPath}.triage_reason`, "Lifecycle triage reason differs from the finding reason note")
+        );
+      }
+      const demotionReason = findingNoteToken(finding, ["demotion_reason="]);
+      if (classification === "true-positive") {
+        if (record.demotion_reason !== undefined) {
+          issues.push(issue(`${recordPath}.demotion_reason`, "A true-positive lifecycle record cannot carry demotion"));
+        }
+      } else if (demotionReason === undefined || stringField(record, "demotion_reason") !== demotionReason) {
+        issues.push(
+          issue(`${recordPath}.demotion_reason`, "A non-production lifecycle record must copy its demotion reason note")
+        );
+      }
+      continue;
+    }
+
+    issues.push(
+      ...lifecycleRecordPreservationIssues(
+        record,
+        upstream,
+        new Set(["canonical_severity", "final_disposition", "comparison_disposition", "stages"]),
+        recordPath
+      )
+    );
+    const expectedStages = [
+      ...arrayAt(upstream, ["stages"]),
+      expectedFindingStage("severity-classified", review.findingsArtifactPath, findingId)
+    ];
+    if (!isDeepStrictEqual(arrayAt(record, ["stages"]), expectedStages)) {
+      issues.push(
+        issue(
+          `${recordPath}.stages`,
+          "Severity classification must append exactly one stage after every preserved stage"
+        )
+      );
+    }
+    const classification = stringField(finding, "triage_classification");
+    const disposition = stringField(record, "final_disposition");
+    const expectedDisposition =
+      classification === "true-positive"
+        ? "promoted"
+        : classification === "false-positive"
+          ? "dropped"
+          : "non-production";
+    if (disposition !== expectedDisposition) {
+      issues.push(
+        issue(
+          `${recordPath}.final_disposition`,
+          `Lifecycle disposition must be ${expectedDisposition} for ${classification ?? "missing"} triage classification`
+        )
+      );
+    }
+    const expectedSeverity = expectedDisposition === "promoted" ? stringField(finding, "severity") : undefined;
+    if (record.canonical_severity !== expectedSeverity) {
+      issues.push(
+        issue(
+          `${recordPath}.canonical_severity`,
+          expectedDisposition === "promoted"
+            ? "Promoted lifecycle severity differs from the classified finding"
+            : "A non-promoted lifecycle record cannot carry canonical severity"
+        )
+      );
+    }
+  }
+  return issues;
+}
+
+function strategyDetectionReviewStageIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
+  const review = context.artifactSet!.reviewStage!;
+  if (review.stage === "severity-classification") {
+    if (!Array.isArray(review.upstreamStrategyDetections)) {
+      return [issue("$", "Trusted dedupe strategy detections are unavailable")];
+    }
+    return isDeepStrictEqual(document, review.upstreamStrategyDetections)
+      ? []
+      : [issue("$", "Severity classification did not exactly preserve dedupe strategy detections")];
+  }
+  if (review.stage !== "dedupe") {
+    return [issue("$", `Strategy detections are not declared for review stage ${review.stage}`)];
+  }
+  const detections = Array.isArray(document) ? document : [];
+  const findings = Array.isArray(review.findings) ? review.findings : [];
+  const lifecycleRecords = arrayAt(review.lifecycleLedger, ["records"]);
+  const issues: SemanticGateIssue[] = [];
+  if (!Array.isArray(review.findings)) issues.push(issue("$", "Trusted deduped findings context is unavailable"));
+  if (!isRecord(review.lifecycleLedger)) issues.push(issue("$", "Trusted dedupe lifecycle context is unavailable"));
+  if (detections.length !== findings.length || detections.length !== lifecycleRecords.length) {
+    issues.push(
+      issue(
+        "$",
+        `Strategy detection count ${detections.length} must equal finding count ${findings.length} and lifecycle count ${lifecycleRecords.length}`
+      )
+    );
+  }
+  for (let index = 0; index < Math.min(detections.length, findings.length, lifecycleRecords.length); index += 1) {
+    const detection = detections[index];
+    const finding = findings[index];
+    const lifecycle = lifecycleRecords[index];
+    if (!isRecord(detection) || !isRecord(finding) || !isRecord(lifecycle)) continue;
+    const basePath = `$[${index}]`;
+    for (const field of ["dedupe_key", "title"] as const) {
+      if (detection[field] !== finding[field]) {
+        issues.push(issue(`${basePath}.${field}`, `Strategy detection ${field} differs from its deduped finding`));
+      }
+    }
+    if (detection.finding_id !== finding.id) {
+      issues.push(issue(`${basePath}.finding_id`, "Strategy detection finding_id differs from its deduped finding"));
+    }
+    if (detection.family_id !== finding.family_id) {
+      issues.push(issue(`${basePath}.family_id`, "Strategy detection family_id differs from its deduped finding"));
+    }
+    if (detection.dedupe_key !== lifecycle.dedupe_key) {
+      issues.push(issue(`${basePath}.dedupe_key`, "Strategy detection key differs from its lifecycle record"));
+    }
+    if (!isDeepStrictEqual(detection.hits, lifecycle.strategy_hits)) {
+      issues.push(issue(`${basePath}.hits`, "Strategy detection hits differ from lifecycle strategy hits"));
     }
   }
   return issues;
@@ -2800,6 +3074,11 @@ const gateSpecifications = {
   "finding-lifecycle-dedupe-key-uniqueness": documentGate(
     uniqueFieldGate([["records"]], "dedupe_key", "finding lifecycle dedupe key")
   ),
+  "finding-lifecycle-review-stage-reconciliation": contextualGate(
+    "cross-artifact",
+    ["artifactSet.reviewStage"],
+    lifecycleReviewStageIssues
+  ),
   "finding-evidence-span-consistency": documentGate((document) => findingEvidenceSpanIssues(document)),
   "finding-projected-reference-uniqueness": documentGate(findingProjectedReferenceIssues),
   "findings-evidence-span-consistency": documentGate(findingArrayEvidenceSpanIssues),
@@ -2992,6 +3271,11 @@ const gateSpecifications = {
     uniqueFieldGate([[]], "dedupe_key", "strategy detection dedupe key")
   ),
   "strategy-detection-hit-identity-uniqueness": documentGate(strategyDetectionHitIdentityIssues),
+  "strategy-detection-review-stage-reconciliation": contextualGate(
+    "cross-artifact",
+    ["artifactSet.reviewStage"],
+    strategyDetectionReviewStageIssues
+  ),
   "triaged-finding-id-uniqueness": documentGate(uniqueFieldGate([[]], "id", "triaged finding ID")),
   "triaged-finding-evidence-span-consistency": documentGate(findingArrayEvidenceSpanIssues),
   "triaged-finding-upstream-preservation": contextualGate(
