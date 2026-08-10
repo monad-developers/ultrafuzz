@@ -21,7 +21,6 @@ import {
   validateArtifactManifest,
   validateArtifactVerificationMarker,
   validateSafeId,
-  verifyArtifactManifestPrerequisites,
   type ArtifactContractId,
   type ArtifactManifest,
   type ArtifactManifestOutputContract,
@@ -32,11 +31,13 @@ import {
   type PlannedGraphNodeDocument,
   type PlannedGraphOutput,
   type RunLayout,
-  type RunState
+  type RunState,
+  type SmithersTaskManifestTask
 } from "@ultrafuzz/artifacts";
 
-import { verifyRequiredArtifactsForAttempt } from "./artifact-gates.js";
+import { verifyRequiredArtifactsForAttempt, type ArtifactGateAttemptAuthority } from "./artifact-gates.js";
 import { projectCanonicalFinalReport } from "./final-report-markdown.js";
+import { verifySealedTaskManifestSnapshot, type VerifiedSealedTaskManifestSnapshot } from "./workflow-integrity.js";
 
 const ARTIFACT_VERIFICATION_DIRECTORY = ".ultrafuzz-verification";
 const MAX_AUTHORITY_DOCUMENT_BYTES = 64 * 1024 * 1024;
@@ -115,12 +116,78 @@ interface PublicationSnapshot {
   sha256: string;
 }
 
+interface FinalizedNodeOutputAuthority {
+  layout: RunLayout;
+  state: RunState;
+  graph: PlannedGraphDocument;
+  plannedNode: PlannedGraphNodeDocument;
+  documents: AuthorityDocuments;
+  artifactDir: string;
+  publications: ReadonlyMap<string, PublicationSnapshot>;
+  gateContextFiles: ReadonlyMap<string, PublicationSnapshot>;
+  prerequisiteManifests: ReadonlyMap<string, Buffer>;
+  sealedAttempt: SealedAttemptGateAuthority;
+  snapshot: VerifiedNodeOutputSnapshot;
+}
+
+interface SealedAttemptGateAuthority {
+  snapshot: VerifiedSealedTaskManifestSnapshot;
+  authority: ArtifactGateAttemptAuthority;
+}
+
 /**
  * Read one node's externally consumable outputs through its current verifier
  * and controller-finalization authority. The returned bytes are snapshots; no
  * artifact, marker, manifest, or state document is repaired or rewritten.
  */
 export function loadVerifiedNodeOutputSnapshot(input: LoadVerifiedNodeOutputInput): VerifiedNodeOutputSnapshot {
+  const authority = loadFinalizedNodeOutputAuthority(input);
+  const sealedAttempt = authority.sealedAttempt;
+  const gate = verifyRequiredArtifactsForAttempt(
+    authority.layout,
+    authority.plannedNode,
+    authority.snapshot.attempt_id,
+    sealedAttempt.authority,
+    {
+      outputs: new Map(
+        authority.snapshot.outputs.map((output) => [
+          output.path,
+          { absolutePath: output.absolute_path, bytes: Buffer.from(output.bytes) }
+        ])
+      ),
+      publications: new Map(
+        [...authority.publications].map(([relativePath, publication]) => [relativePath, Buffer.from(publication.bytes)])
+      ),
+      files: new Map(
+        [...authority.gateContextFiles].map(([relativePath, file]) => [relativePath, Buffer.from(file.bytes)])
+      )
+    }
+  );
+  const gateErrors = gate.diagnostics.filter((diagnostic) => diagnostic.severity === "error");
+  if (!gate.ok || gateErrors.length > 0) {
+    throw invalidOutput(
+      `verified output failed current semantic/context gates for ${authority.snapshot.attempt_id}: ${gateErrors
+        .map((diagnostic) => `${diagnostic.code}: ${diagnostic.message}`)
+        .join("; ")}`
+    );
+  }
+  assertFinalizedAuthorityRemainedCurrent(authority);
+  return authority.snapshot;
+}
+
+/**
+ * Capture finalized producer outputs through state, plan, manifest, marker,
+ * and immutable publication digests without recursively running host gates.
+ * Consumers must still validate the selected output's current schema and
+ * semantics before typed access.
+ */
+export function loadFinalizedNodeOutputSnapshot(input: LoadVerifiedNodeOutputInput): VerifiedNodeOutputSnapshot {
+  const authority = loadFinalizedNodeOutputAuthority(input);
+  assertFinalizedAuthorityRemainedCurrent(authority);
+  return authority.snapshot;
+}
+
+function loadFinalizedNodeOutputAuthority(input: LoadVerifiedNodeOutputInput): FinalizedNodeOutputAuthority {
   const logicalNodeId = validateSafeId(input.logicalNodeId, "logical node ID");
   const root = path.resolve(input.runRoot);
   assertNoSymlinkComponents(root, root, "run root");
@@ -128,6 +195,7 @@ export function loadVerifiedNodeOutputSnapshot(input: LoadVerifiedNodeOutputInpu
   const state = readRunState(layout);
   const graph = readPlannedGraphDocument(layout.graphPath);
   assertRunAuthorityIdentity(layout, state);
+  const sealedTaskManifest = readCurrentSealedTaskManifest(layout, graph);
 
   const candidate = selectFinalizedAttempt(state, graph, logicalNodeId, input.attemptId);
   const documents = readAuthorityDocuments(layout, candidate.attemptId);
@@ -137,47 +205,273 @@ export function loadVerifiedNodeOutputSnapshot(input: LoadVerifiedNodeOutputInpu
   const artifactDir = safeResolveInside(layout.artifactsDir, candidate.attemptId, "verified artifact directory");
   const publicationSnapshots = readAndBindPublications(artifactDir, plannedNode, documents);
   const outputSnapshots = validatePlannedOutputSnapshots(artifactDir, plannedNode, publicationSnapshots);
-
-  const prerequisiteGate = verifyArtifactManifestPrerequisites(layout, candidate.attemptId);
-  if (!prerequisiteGate.ok) {
+  const manifestSeal = finalizedManifestSeal(candidate.state);
+  if (sha256Bytes(documents.manifestBytes) !== manifestSeal) {
     throw invalidAuthority(
-      `verified output prerequisite manifests are not current for ${candidate.attemptId}; changed: ${prerequisiteGate.changed.join(", ") || "none"}; missing: ${prerequisiteGate.missing.join(", ") || "none"}`
+      `artifact manifest does not match controller finalization authority for ${candidate.attemptId}`
     );
   }
+  const gateContextFiles = readAndBindGateContextFiles(artifactDir, plannedNode, documents, publicationSnapshots);
 
-  const gate = verifyRequiredArtifactsForAttempt(layout, plannedNode, candidate.attemptId);
-  const gateErrors = gate.diagnostics.filter((diagnostic) => diagnostic.severity === "error");
-  if (!gate.ok || gateErrors.length > 0) {
-    throw invalidOutput(
-      `verified output failed current semantic/context gates for ${candidate.attemptId}: ${gateErrors
-        .map((diagnostic) => `${diagnostic.code}: ${diagnostic.message}`)
-        .join("; ")}`
-    );
-  }
-
-  assertAuthorityRemainedCurrent({
-    layout,
-    state,
-    graph,
-    documents,
-    artifactDir,
-    publications: publicationSnapshots
-  });
-
-  return Object.freeze({
+  const snapshot = Object.freeze({
     run_root: layout.root,
     attempt_id: candidate.attemptId,
     logical_node_id: logicalNodeId,
     artifact_dir: artifactDir,
     outputs: Object.freeze(outputSnapshots)
   });
+  const sealedAttempt = resolveSealedAttemptGateAuthority(
+    sealedTaskManifest,
+    candidate.attemptId,
+    logicalNodeId,
+    plannedNode
+  );
+  const prerequisiteManifests = capturePrerequisiteManifestAuthority(
+    layout,
+    graph,
+    plannedNode,
+    documents,
+    sealedAttempt
+  );
+  return {
+    layout,
+    state,
+    graph,
+    plannedNode,
+    documents,
+    artifactDir,
+    publications: publicationSnapshots,
+    gateContextFiles,
+    prerequisiteManifests,
+    sealedAttempt,
+    snapshot
+  };
+}
+
+function finalizedManifestSeal(nodeState: NodeState): string {
+  const provenance = nodeState.provenance;
+  const outputContracts = isRecord(provenance) ? provenance.output_contracts : undefined;
+  const digest = isRecord(outputContracts) ? outputContracts.artifact_manifest_sha256 : undefined;
+  if (typeof digest !== "string" || !/^[0-9a-f]{64}$/u.test(digest)) {
+    throw invalidAuthority(`controller artifact manifest digest is missing for ${nodeState.node_id}`);
+  }
+  return digest;
+}
+
+function capturePrerequisiteManifestAuthority(
+  layout: RunLayout,
+  graph: PlannedGraphDocument,
+  rootNode: PlannedGraphNodeDocument,
+  rootDocuments: AuthorityDocuments,
+  sealedAttempt: SealedAttemptGateAuthority
+): ReadonlyMap<string, Buffer> {
+  const snapshots = new Map<string, Buffer>();
+  const digestsByNode = new Map<string, string>();
+  const visiting = new Set<string>();
+  const tasksByAttempt = new Map<string, SmithersTaskManifestTask>();
+  for (const task of sealedAttempt.authority.tasks) {
+    if (tasksByAttempt.has(task.attemptId)) {
+      throw invalidAuthority(`sealed Smithers task authority repeats attempt ${task.attemptId}`);
+    }
+    tasksByAttempt.set(task.attemptId, task);
+  }
+  const plannedNodesById = new Map(graph.nodes.map((node) => [node.id, node] as const));
+
+  const capture = (
+    manifest: ArtifactManifest,
+    manifestBytes: Buffer,
+    plannedNode: PlannedGraphNodeDocument,
+    manifestPath: string
+  ): void => {
+    if (visiting.has(manifest.node_id)) {
+      throw invalidAuthority(`artifact manifest prerequisite cycle includes ${manifest.node_id}`);
+    }
+    const digest = sha256Bytes(manifestBytes);
+    const priorDigest = digestsByNode.get(manifest.node_id);
+    if (priorDigest !== undefined) {
+      if (priorDigest !== digest) {
+        throw invalidAuthority(`artifact manifest prerequisite ${manifest.node_id} has conflicting digests`);
+      }
+      return;
+    }
+    visiting.add(manifest.node_id);
+    digestsByNode.set(manifest.node_id, digest);
+    snapshots.set(manifestPath, Buffer.from(manifestBytes));
+
+    const seenPrerequisites = new Set<string>();
+    const prerequisiteAttemptIds = manifest.prerequisite_manifests.map((prerequisite) => prerequisite.node_id);
+    for (const prerequisite of manifest.prerequisite_manifests) {
+      if (seenPrerequisites.has(prerequisite.node_id)) {
+        throw invalidAuthority(`artifact manifest repeats prerequisite ${prerequisite.node_id}`);
+      }
+      seenPrerequisites.add(prerequisite.node_id);
+    }
+    const task = tasksByAttempt.get(manifest.node_id);
+    let expectedPrerequisiteAttemptIds: readonly string[];
+    if (task !== undefined) {
+      if (
+        task.concreteNodeId !== plannedNode.id ||
+        task.logicalNodeId !== plannedNode.logical_id ||
+        (plannedNode.workflow !== undefined && !plannedNode.workflow.task_node_ids.includes(`node:${task.attemptId}`))
+      ) {
+        throw invalidAuthority(`sealed task ${task.attemptId} does not bind its current planned node`);
+      }
+      expectedPrerequisiteAttemptIds = task.dependencies;
+    } else {
+      if (plannedNode.kind !== "reference" || manifest.node_id !== plannedNode.id) {
+        throw invalidAuthority(`artifact manifest ${manifest.node_id} has no exact sealed task declaration`);
+      }
+      expectedPrerequisiteAttemptIds = plannedNode.depends_on;
+    }
+    const expectedPrerequisites = new Set(expectedPrerequisiteAttemptIds);
+    if (
+      expectedPrerequisites.size !== expectedPrerequisiteAttemptIds.length ||
+      expectedPrerequisites.size !== seenPrerequisites.size ||
+      [...expectedPrerequisites].some((attemptId) => !seenPrerequisites.has(attemptId)) ||
+      prerequisiteAttemptIds.some((attemptId) => !expectedPrerequisites.has(attemptId))
+    ) {
+      throw invalidAuthority(
+        `artifact manifest prerequisite attempt IDs do not match the exact sealed dependencies for ${manifest.node_id}`
+      );
+    }
+
+    for (const prerequisite of manifest.prerequisite_manifests) {
+      const prerequisitePath = safeResolveInside(
+        safeResolveInside(layout.artifactsDir, prerequisite.node_id, "prerequisite artifact directory"),
+        ARTIFACT_MANIFEST_FILE,
+        "prerequisite artifact manifest"
+      );
+      const prerequisiteBytes = readAuthoritySnapshot(layout.root, prerequisitePath, "prerequisite artifact manifest");
+      if (sha256Bytes(prerequisiteBytes) !== prerequisite.sha256) {
+        throw invalidAuthority(`artifact manifest prerequisite digest changed for ${prerequisite.node_id}`);
+      }
+      const prerequisiteManifest = parseAndValidateManifest(prerequisiteBytes, prerequisite.node_id);
+      if (
+        prerequisiteManifest.run_id !== layout.runId ||
+        prerequisiteManifest.node_id !== prerequisite.node_id ||
+        prerequisiteManifest.producer_node_id !== prerequisite.node_id
+      ) {
+        throw invalidAuthority(`artifact manifest prerequisite identity is invalid for ${prerequisite.node_id}`);
+      }
+      const prerequisiteTask = tasksByAttempt.get(prerequisite.node_id);
+      let prerequisiteNode: PlannedGraphNodeDocument | undefined;
+      if (prerequisiteTask !== undefined) {
+        prerequisiteNode = plannedNodesById.get(prerequisiteTask.concreteNodeId);
+        if (
+          prerequisiteNode === undefined ||
+          prerequisiteNode.kind !== "agentic" ||
+          prerequisiteNode.logical_id !== prerequisiteTask.logicalNodeId ||
+          (prerequisiteNode.workflow !== undefined &&
+            !prerequisiteNode.workflow.task_node_ids.includes(`node:${prerequisiteTask.attemptId}`)) ||
+          concreteNodeIdFromManifest(prerequisiteManifest) !== prerequisiteTask.concreteNodeId ||
+          prerequisiteManifest.provenance.logical_node_id !== prerequisiteTask.logicalNodeId
+        ) {
+          throw invalidAuthority(
+            `artifact manifest prerequisite ${prerequisite.node_id} does not bind its exact sealed attempt`
+          );
+        }
+      } else {
+        prerequisiteNode = plannedNodesById.get(prerequisite.node_id);
+        const concreteId = concreteNodeIdFromManifest(prerequisiteManifest);
+        if (
+          prerequisiteNode === undefined ||
+          prerequisiteNode.kind !== "reference" ||
+          (concreteId !== undefined && concreteId !== prerequisiteNode.id)
+        ) {
+          throw invalidAuthority(
+            `artifact manifest prerequisite ${prerequisite.node_id} has no sealed task or planned reference authority`
+          );
+        }
+      }
+      capture(prerequisiteManifest, prerequisiteBytes, prerequisiteNode, prerequisitePath);
+    }
+    visiting.delete(manifest.node_id);
+  };
+
+  const rootManifestPath = safeResolveInside(
+    safeResolveInside(layout.artifactsDir, rootDocuments.manifest.node_id, "artifact directory"),
+    ARTIFACT_MANIFEST_FILE,
+    "artifact manifest"
+  );
+  capture(rootDocuments.manifest, rootDocuments.manifestBytes, rootNode, rootManifestPath);
+  snapshots.delete(rootManifestPath);
+  return snapshots;
+}
+
+function parseAndValidateManifest(bytes: Buffer, nodeId: string): ArtifactManifest {
+  let value: unknown;
+  try {
+    value = parseStrictJsonBytes(bytes);
+  } catch (error) {
+    throw invalidAuthority(`artifact manifest prerequisite is not strict JSON for ${nodeId}`, error);
+  }
+  const validation = validateArtifactManifest(value);
+  if (!validation.ok) {
+    throw invalidAuthority(
+      `artifact manifest prerequisite is schema-invalid for ${nodeId}: ${formatSchemaIssues(validation.issues)}`
+    );
+  }
+  return value as ArtifactManifest;
+}
+
+function resolveSealedAttemptGateAuthority(
+  snapshot: VerifiedSealedTaskManifestSnapshot,
+  attemptId: string,
+  logicalNodeId: string,
+  plannedNode: PlannedGraphNodeDocument
+): SealedAttemptGateAuthority {
+  const matches = snapshot.document.tasks.filter((task) => task.attemptId === attemptId);
+  if (matches.length !== 1) {
+    throw invalidAuthority(
+      `sealed task authority for finalized attempt ${attemptId} is ${matches.length === 0 ? "missing" : "ambiguous"}`
+    );
+  }
+  const task: SmithersTaskManifestTask = matches[0]!;
+  if (task.concreteNodeId !== plannedNode.id || task.logicalNodeId !== logicalNodeId) {
+    throw invalidAuthority(`sealed task authority for finalized attempt ${attemptId} does not bind its planned node`);
+  }
+  return { snapshot, authority: { task, tasks: snapshot.document.tasks } };
+}
+
+function readCurrentSealedTaskManifest(
+  layout: RunLayout,
+  graph: PlannedGraphDocument
+): VerifiedSealedTaskManifestSnapshot {
+  let snapshot: VerifiedSealedTaskManifestSnapshot;
+  try {
+    snapshot = verifySealedTaskManifestSnapshot(layout);
+  } catch (error) {
+    throw invalidAuthority("sealed Smithers task authority is incomplete or invalid", error);
+  }
+  if (!isDeepStrictEqual(readPlannedGraphDocument(layout.graphPath), graph)) {
+    throw changedOutput("planned graph changed while sealed task authority was being read");
+  }
+  return snapshot;
+}
+
+function assertSealedAttemptGateAuthorityRemainedCurrent(layout: RunLayout, sealed: SealedAttemptGateAuthority): void {
+  if (
+    !readAuthoritySnapshot(layout.root, sealed.snapshot.tasksPath, "workflow task manifest").equals(
+      sealed.snapshot.contents
+    ) ||
+    !readAuthoritySnapshot(layout.root, sealed.snapshot.integrityPath, "workflow control seal").equals(
+      sealed.snapshot.integrityContents
+    )
+  ) {
+    throw changedOutput("sealed Smithers task authority changed while outputs were being read");
+  }
 }
 
 /** Read the one authoritative final report and require an exact canonical JSON/Markdown pair. */
 export function loadVerifiedFinalReportSnapshot(runRoot: string): VerifiedFinalReportSnapshot {
-  const authority = loadVerifiedNodeOutputSnapshot({ runRoot, logicalNodeId: "final-report" });
-  const report = requiredOutput(authority, "report.json", "ultrafuzz/report@2");
-  const markdown = requiredOutput(authority, "report.md", "ultrafuzz/nonempty-markdown@1");
+  const producer = declaredFinalReportProducer(runRoot);
+  const authority = loadVerifiedNodeOutputSnapshot({
+    runRoot,
+    logicalNodeId: producer.logicalNodeId,
+    attemptId: producer.attemptId
+  });
+  const report = requiredContractOutput(authority, "ultrafuzz/report@2", "JSON report");
+  const markdown = requiredContractOutput(authority, "ultrafuzz/nonempty-markdown@1", "Markdown report");
   const projection = projectCanonicalFinalReport(report.value);
   if (!isDeepStrictEqual(projection.report, report.value)) {
     throw invalidOutput("verified report.json is not the canonical final-report projection");
@@ -201,6 +495,47 @@ export function loadVerifiedFinalReportSnapshot(runRoot: string): VerifiedFinalR
     markdown: markdown.value,
     markdown_bytes: Buffer.from(markdown.bytes)
   });
+}
+
+function declaredFinalReportProducer(runRoot: string): { attemptId: string; logicalNodeId: string } {
+  const root = path.resolve(runRoot);
+  assertNoSymlinkComponents(root, root, "run root");
+  const layout = layoutForRunRoot(root);
+  const graph = readPlannedGraphDocument(layout.graphPath);
+  const producers = graph.nodes.filter((node) =>
+    node.outputs.some((output) => output.contract === "ultrafuzz/report@2")
+  );
+  if (producers.length === 0) {
+    throw unavailableAuthority("no current planned node declares an ultrafuzz/report@2 output");
+  }
+  if (producers.length !== 1) {
+    throw invalidAuthority(
+      `current planned ultrafuzz/report@2 producer is ambiguous: ${producers.map((node) => node.id).join(", ")}`
+    );
+  }
+  const producer = producers[0]!;
+  const state = readRunState(layout);
+  assertRunAuthorityIdentity(layout, state);
+  const taskManifest = readCurrentSealedTaskManifest(layout, graph);
+  const finalizedAttempts = taskManifest.document.tasks.filter((task) => {
+    const nodeState = state.nodes[task.attemptId];
+    return (
+      task.concreteNodeId === producer.id && nodeState !== undefined && hasSuccessfulFinalizationAuthority(nodeState)
+    );
+  });
+  if (finalizedAttempts.length === 0) {
+    throw unavailableAuthority(
+      `no successful current verification/finalization authority is available for report producer ${producer.id}`
+    );
+  }
+  if (finalizedAttempts.length !== 1) {
+    throw invalidAuthority(
+      `current verification/finalization authority for report producer ${producer.id} is ambiguous: ${finalizedAttempts
+        .map((task) => task.attemptId)
+        .join(", ")}`
+    );
+  }
+  return { attemptId: finalizedAttempts[0]!.attemptId, logicalNodeId: producer.logical_id };
 }
 
 export function isVerifiedOutputAuthorityUnavailable(error: unknown): error is VerifiedOutputError {
@@ -380,6 +715,12 @@ function readAndBindPublications(
 ): Map<string, PublicationSnapshot> {
   const manifestFiles = uniqueByPath(documents.manifest.files, "artifact manifest file");
   const markerPublications = uniqueByPath(documents.marker.publications, "verification marker publication");
+  if (
+    manifestFiles.size !== markerPublications.size ||
+    [...manifestFiles].some(([relativePath]) => !markerPublications.has(relativePath))
+  ) {
+    throw invalidAuthority("controller artifact manifest file set does not match the exact verifier publications");
+  }
   const snapshots = new Map<string, PublicationSnapshot>();
   for (const [relativePath, publication] of markerPublications) {
     const manifestEntry = manifestFiles.get(relativePath);
@@ -402,6 +743,41 @@ function readAndBindPublications(
     if (!snapshots.has(output.path)) {
       throw invalidAuthority(`verification marker does not publish planned output ${output.path}`);
     }
+  }
+  return snapshots;
+}
+
+/**
+ * Capture runtime-owned current-node files that semantic gates require but the
+ * verifier does not publish as agent outputs. Their bytes are authenticated by
+ * the controller-sealed artifact manifest and remain separate from marker
+ * publications so marker semantics are not widened accidentally.
+ */
+function readAndBindGateContextFiles(
+  artifactDir: string,
+  plannedNode: PlannedGraphNodeDocument,
+  documents: AuthorityDocuments,
+  publications: ReadonlyMap<string, PublicationSnapshot>
+): Map<string, PublicationSnapshot> {
+  const requiredPaths = new Set<string>();
+  if (plannedNode.outputs.some((output) => output.contract === "ultrafuzz/workspace-patch@1")) {
+    requiredPaths.add("workspace-patch-baseline.json");
+  }
+  const manifestFiles = uniqueByPath(documents.manifest.files, "artifact manifest file");
+  const snapshots = new Map<string, PublicationSnapshot>();
+  for (const relativePath of requiredPaths) {
+    if (publications.has(relativePath)) continue;
+    const manifestEntry = manifestFiles.get(relativePath);
+    if (manifestEntry === undefined) {
+      throw invalidAuthority(`controller artifact manifest does not bind required semantic context ${relativePath}`);
+    }
+    const absolutePath = safeResolveInside(artifactDir, relativePath, "verified semantic context path");
+    const bytes = readPublicationSnapshot(artifactDir, absolutePath, relativePath);
+    const digest = sha256Bytes(bytes);
+    if (digest !== manifestEntry.sha256 || bytes.byteLength !== manifestEntry.size_bytes) {
+      throw changedOutput(`verified semantic context digest/size binding changed for ${relativePath}`);
+    }
+    snapshots.set(relativePath, { path: relativePath, absolutePath, bytes, sha256: digest });
   }
   return snapshots;
 }
@@ -434,6 +810,20 @@ function validatePlannedOutputSnapshots(
   });
 }
 
+function assertFinalizedAuthorityRemainedCurrent(authority: FinalizedNodeOutputAuthority): void {
+  assertAuthorityRemainedCurrent({
+    layout: authority.layout,
+    state: authority.state,
+    graph: authority.graph,
+    documents: authority.documents,
+    artifactDir: authority.artifactDir,
+    publications: authority.publications,
+    gateContextFiles: authority.gateContextFiles,
+    prerequisiteManifests: authority.prerequisiteManifests,
+    sealedAttempt: authority.sealedAttempt
+  });
+}
+
 function assertAuthorityRemainedCurrent(input: {
   layout: RunLayout;
   state: RunState;
@@ -441,6 +831,9 @@ function assertAuthorityRemainedCurrent(input: {
   documents: AuthorityDocuments;
   artifactDir: string;
   publications: ReadonlyMap<string, PublicationSnapshot>;
+  gateContextFiles: ReadonlyMap<string, PublicationSnapshot>;
+  prerequisiteManifests: ReadonlyMap<string, Buffer>;
+  sealedAttempt: SealedAttemptGateAuthority;
 }): void {
   const markerPath = safeResolveInside(
     verificationMarkerRoot(input.layout),
@@ -462,12 +855,26 @@ function assertAuthorityRemainedCurrent(input: {
       throw changedOutput(`verified publication changed while outputs were being read: ${publication.path}`);
     }
   }
+  for (const file of input.gateContextFiles.values()) {
+    const current = readPublicationSnapshot(input.artifactDir, file.absolutePath, file.path);
+    if (!current.equals(file.bytes)) {
+      throw changedOutput(`verified semantic context changed while outputs were being read: ${file.path}`);
+    }
+  }
+  for (const [manifestPath, manifestBytes] of input.prerequisiteManifests) {
+    if (
+      !readAuthoritySnapshot(input.layout.root, manifestPath, "prerequisite artifact manifest").equals(manifestBytes)
+    ) {
+      throw changedOutput(`prerequisite artifact manifest changed while outputs were being read: ${manifestPath}`);
+    }
+  }
   if (!isDeepStrictEqual(readRunState(input.layout), input.state)) {
     throw changedOutput("run-state finalization authority changed while outputs were being read");
   }
   if (!isDeepStrictEqual(readPlannedGraphDocument(input.layout.graphPath), input.graph)) {
     throw changedOutput("planned graph changed while outputs were being read");
   }
+  assertSealedAttemptGateAuthorityRemainedCurrent(input.layout, input.sealedAttempt);
 }
 
 function verificationMarkerRoot(layout: RunLayout): string {
@@ -477,16 +884,14 @@ function verificationMarkerRoot(layout: RunLayout): string {
   return markerRoot;
 }
 
-function requiredOutput(
+function requiredContractOutput(
   snapshot: VerifiedNodeOutputSnapshot,
-  relativePath: string,
-  contract: ArtifactContractId
+  contract: ArtifactContractId,
+  label: string
 ): VerifiedOutputArtifactSnapshot {
-  const matches = snapshot.outputs.filter((output) => output.path === relativePath && output.contract === contract);
+  const matches = snapshot.outputs.filter((output) => output.contract === contract);
   if (matches.length !== 1) {
-    throw invalidAuthority(
-      `final-report authority must bind exactly one ${relativePath} output with contract ${contract}`
-    );
+    throw invalidAuthority(`report authority must bind exactly one ${label} output with contract ${contract}`);
   }
   return matches[0]!;
 }

@@ -81,8 +81,8 @@ root-owned, read-only `/usr/local/bin/ultrafuzz` entrypoint and preflight.
 
 ## State
 
-`state.json` has schema version `ultrafuzz.run-state.v4` and schema ID
-`urn:ultrafuzz:schema:artifacts:run-state:4`. Older run-state versions are
+`state.json` has schema version `ultrafuzz.run-state.v5` and schema ID
+`urn:ultrafuzz:schema:artifacts:run-state:5`. Older run-state versions are
 unsupported by the current runtime and fail explicitly rather than entering a
 compatibility reader.
 

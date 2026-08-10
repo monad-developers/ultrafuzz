@@ -15,6 +15,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import * as ts from "typescript";
 
 import {
+  ARTIFACT_VERIFICATION_SCHEMA_VERSION,
   artifactSchemaBundleDigest,
   artifactSchemaRegistry,
   ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
@@ -984,6 +985,70 @@ function writeRequiredArtifactSet(runRoot: string, nodeId: string, required: str
       : `artifact for ${nodeId}\n`;
     fs.writeFileSync(filePath, contents, "utf8");
   }
+  writeCurrentArtifactVerificationMarker(runRoot, nodeId);
+}
+
+function writeCurrentArtifactVerificationMarker(runRoot: string, attemptId: string): void {
+  const tasksPath = path.join(runRoot, "smithers", "tasks.json");
+  if (!fs.existsSync(tasksPath)) return;
+  const document = JSON.parse(fs.readFileSync(tasksPath, "utf8")) as {
+    tasks?: Array<{
+      attemptId?: string;
+      logicalNodeId?: string;
+      metadata?: {
+        artifacts?: {
+          outputs?: Array<{
+            path: string;
+            contract: string;
+            contractDigest: string;
+            schemaFile?: string;
+            schemaId?: string;
+            schemaSha256?: string;
+            schemaBundleSha256?: string;
+            validatorBuild?: string;
+            primary: boolean;
+          }>;
+        };
+      };
+    }>;
+  };
+  const task = document.tasks?.find((candidate) => candidate.attemptId === attemptId);
+  const outputs = task?.metadata?.artifacts?.outputs;
+  if (task?.logicalNodeId === undefined || outputs === undefined || outputs.length === 0) return;
+  const artifactDir = path.join(runRoot, "artifacts", attemptId);
+  const snapshots = outputs.map((output) => {
+    const artifactPath = path.join(artifactDir, ...output.path.split("/"));
+    if (!fs.existsSync(artifactPath)) return undefined;
+    const bytes = fs.readFileSync(artifactPath);
+    return { output, sha256: crypto.createHash("sha256").update(bytes).digest("hex") };
+  });
+  if (snapshots.some((snapshot) => snapshot === undefined)) return;
+  const verified = snapshots.filter((snapshot): snapshot is NonNullable<typeof snapshot> => snapshot !== undefined);
+  const marker = {
+    schema_version: ARTIFACT_VERIFICATION_SCHEMA_VERSION,
+    attempt_id: attemptId,
+    node_id: task.logicalNodeId,
+    artifacts: verified.map(({ output, sha256 }) => ({
+      path: output.path,
+      contract: output.contract,
+      contract_digest: output.contractDigest,
+      ...(output.schemaFile === undefined
+        ? {}
+        : {
+            schema_file: output.schemaFile,
+            schema_id: output.schemaId,
+            schema_sha256: output.schemaSha256,
+            schema_bundle_sha256: output.schemaBundleSha256,
+            validator_build: output.validatorBuild
+          }),
+      sha256,
+      primary: output.primary
+    })),
+    publications: verified.map(({ output, sha256 }) => ({ path: output.path, sha256 }))
+  };
+  const markerRoot = path.join(runRoot, ".ultrafuzz-verification");
+  fs.mkdirSync(markerRoot, { recursive: true });
+  fs.writeFileSync(path.join(markerRoot, `${attemptId}.json`), `${JSON.stringify(marker, null, 2)}\n`, "utf8");
 }
 
 function writeSmallTopology(project: string): void {
@@ -4576,11 +4641,13 @@ test("plan rejects duplicate-key expectation bytes before any schema or handoff 
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeReferenceTopology(project);
+  const sourcePath = path.join(project, "reference-expectations.json");
   fs.writeFileSync(
-    path.join(project, "reference-expectations.json"),
+    sourcePath,
     '{"schema_version":"ultrafuzz.reference-expectations.v2","expectations":[],"expectations":[]}\n',
     "utf8"
   );
+  const before = fs.readFileSync(sourcePath);
   const xdgCacheHome = path.join(project, "xdg-cache");
   writeReferenceCache(xdgCacheHome);
   const previousXdgCacheHome = process.env.XDG_CACHE_HOME;
@@ -4595,6 +4662,53 @@ test("plan rejects duplicate-key expectation bytes before any schema or handoff 
 
     assert.equal(plan.ok, false);
     assert.match(plan.diagnostics.map((diagnostic) => diagnostic.message).join("\n"), /duplicate property name/u);
+    assert.deepEqual(fs.readFileSync(sourcePath), before);
+  } finally {
+    if (previousXdgCacheHome === undefined) {
+      delete process.env.XDG_CACHE_HOME;
+    } else {
+      process.env.XDG_CACHE_HOME = previousXdgCacheHome;
+    }
+  }
+});
+
+test("plan rejects duplicate reference expectation IDs before publishing trusted handoffs", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeReferenceTopology(project);
+  const sourcePath = path.join(project, "reference-expectations.json");
+  fs.writeFileSync(
+    sourcePath,
+    JSON.stringify({
+      schema_version: "ultrafuzz.reference-expectations.v2",
+      expectations: [
+        { id: "benchmark:duplicate", description: "First spelling." },
+        { id: "benchmark:duplicate", description: "Second spelling." }
+      ]
+    }),
+    "utf8"
+  );
+  const before = fs.readFileSync(sourcePath);
+  const xdgCacheHome = path.join(project, "xdg-cache");
+  writeReferenceCache(xdgCacheHome);
+  const previousXdgCacheHome = process.env.XDG_CACHE_HOME;
+  process.env.XDG_CACHE_HOME = xdgCacheHome;
+  try {
+    const plan = await planRun({
+      projectRoot: project,
+      runId: "duplicate-reference-expectation-ids",
+      referenceExpectationsPath: "reference-expectations.json",
+      env: {}
+    });
+
+    assert.equal(plan.ok, false, JSON.stringify(plan.diagnostics));
+    assert.ok(plan.diagnostics.some((diagnostic) => diagnostic.code === "REFERENCE_EXPECTATIONS_INVALID"));
+    assert.match(
+      plan.diagnostics.map((diagnostic) => diagnostic.message).join("\n"),
+      /Duplicate reference expectation ID/u
+    );
+    assert.deepEqual(fs.readFileSync(sourcePath), before);
+    assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", "duplicate-reference-expectation-ids")), false);
   } finally {
     if (previousXdgCacheHome === undefined) {
       delete process.env.XDG_CACHE_HOME;
@@ -8024,7 +8138,7 @@ test("startRun includes bounded workflow runner stdio when submission fails", as
   assert.equal(diagnostic.details?.stderr, "submission stderr detail token=<redacted>\n");
 });
 
-test("syncRun accepts canonical findings without rewriting them and writes manifests", async () => {
+test("syncRun accepts canonical findings without rewriting them and manifests only verified publications", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -8044,13 +8158,21 @@ test("syncRun accepts canonical findings without rewriting them and writes manif
   const run = await startRun({ projectRoot: project, runId: "sync-success", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+  const unverifiedSidecarPath = path.join(
+    run.value!.run_root,
+    "artifacts",
+    "project-discovery",
+    "agent-unverified-sidecar.json"
+  );
+  const unverifiedSidecarBytes = Buffer.from('{"unverified":true}\n', "utf8");
+  fs.writeFileSync(unverifiedSidecarPath, unverifiedSidecarBytes);
   const findingsPath = path.join(run.value!.run_root, "artifacts", "project-discovery", "findings.json");
   const findingsBefore = fs.readFileSync(findingsPath);
 
   const sync = await syncRun({ projectRoot: project, runId: "sync-success", env });
 
   assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
-  assert.equal(sync.value?.status, "succeeded");
+  assert.equal(sync.value?.status, "succeeded", JSON.stringify(sync.diagnostics));
   const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
     status?: string;
     nodes?: Record<string, { status?: string }>;
@@ -8058,6 +8180,7 @@ test("syncRun accepts canonical findings without rewriting them and writes manif
   assert.equal(state.status, "succeeded");
   assert.equal(state.nodes?.["project-discovery"]?.status, "succeeded");
   assert.deepEqual(fs.readFileSync(findingsPath), findingsBefore);
+  assert.deepEqual(fs.readFileSync(unverifiedSidecarPath), unverifiedSidecarBytes);
   const findings = JSON.parse(fs.readFileSync(findingsPath, "utf8")) as Array<{ source_node_id?: string }>;
   assert.equal(findings[0]?.source_node_id, "project-discovery");
   const manifest = JSON.parse(
@@ -8069,14 +8192,138 @@ test("syncRun accepts canonical findings without rewriting them and writes manif
   };
   assert.equal(manifest.schema_version, "ultrafuzz.artifact-manifest.v3");
   assert.deepEqual(manifest.provenance?.metadata, { concrete_node_id: "project-discovery" });
-  assert.deepEqual(manifest.files?.map((entry) => entry.path).sort(), [
-    "findings.json",
-    "prompt.rendered.md",
-    "setup/project-discovery.md"
-  ]);
+  assert.deepEqual(manifest.files?.map((entry) => entry.path).sort(), ["findings.json", "setup/project-discovery.md"]);
   const events = fs.readFileSync(path.join(run.value!.run_root, "events.jsonl"), "utf8");
   assert.doesNotMatch(events, /findings-normalized/u);
   assert.match(events, /artifact-manifest-written/);
+});
+
+test("syncRun rejects a valid output swap after verifier publication without repairing either version", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-verifier-snapshot-swap";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-verifier-snapshot-swap", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+  const artifactDir = path.join(run.value!.run_root, "artifacts", "project-discovery");
+  const findingsPath = path.join(artifactDir, "findings.json");
+  const markerPath = path.join(run.value!.run_root, ".ultrafuzz-verification", "project-discovery.json");
+  const markerBefore = fs.readFileSync(markerPath);
+  const swappedFindings = [
+    {
+      schema_version: "ultrafuzz.finding.v2",
+      id: "finding-project-discovery-swapped",
+      title: "Different valid candidate issue",
+      status: "candidate",
+      severity_guess: "Low",
+      confidence: "low",
+      summary: "These valid bytes were not the bytes approved by the verifier.",
+      source_node_id: "project-discovery"
+    }
+  ];
+  const swappedBytes = Buffer.from(`${JSON.stringify(swappedFindings)}\n`, "utf8");
+  fs.writeFileSync(findingsPath, swappedBytes);
+
+  const sync = await syncRun({ projectRoot: project, runId: "sync-verifier-snapshot-swap", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "failed");
+  assert.ok(
+    sync.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "ARTIFACT_VERIFICATION_AUTHORITY_INVALID" &&
+        /changed after verifier approval/u.test(diagnostic.message)
+    ),
+    JSON.stringify(sync.diagnostics)
+  );
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<
+      string,
+      {
+        status?: string;
+        provenance?: {
+          output_contracts?: { ok?: boolean; missing?: string[]; artifact_manifest_sha256?: string };
+          terminal_disposition?: unknown;
+        };
+      }
+    >;
+  };
+  const node = state.nodes?.["project-discovery"];
+  assert.equal(node?.status, "failed");
+  assert.deepEqual(node?.provenance?.output_contracts, { ok: false, missing: [] });
+  assert.deepEqual(node?.provenance?.terminal_disposition, {
+    schema_version: "ultrafuzz.terminal-disposition.v1",
+    kind: "task-output-validation-failure"
+  });
+  assert.equal(fs.existsSync(path.join(artifactDir, "artifact-manifest.json")), false);
+  assert.deepEqual(fs.readFileSync(findingsPath), swappedBytes);
+  assert.deepEqual(fs.readFileSync(markerPath), markerBefore);
+});
+
+test("syncRun persists a schema-valid failed node when controller manifest publication fails", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-manifest-write-failure";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-manifest-write-failure", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+  const manifestPath = path.join(run.value!.run_root, "artifacts", "project-discovery", "artifact-manifest.json");
+  fs.mkdirSync(manifestPath);
+
+  const sync = await syncRun({ projectRoot: project, runId: "sync-manifest-write-failure", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "failed");
+  assert.ok(
+    sync.diagnostics.some((diagnostic) => diagnostic.code === "ARTIFACT_MANIFEST_WRITE_FAILED"),
+    JSON.stringify(sync.diagnostics)
+  );
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<
+      string,
+      {
+        status?: string;
+        provenance?: {
+          output_contracts?: { ok?: boolean; missing?: string[]; artifact_manifest_sha256?: string };
+          terminal_disposition?: unknown;
+        };
+      }
+    >;
+  };
+  const node = state.nodes?.["project-discovery"];
+  assert.equal(node?.status, "failed");
+  assert.equal(node?.provenance?.output_contracts?.artifact_manifest_sha256, undefined);
+  assert.deepEqual(node?.provenance?.output_contracts, { ok: false, missing: [] });
+  assert.equal(node?.provenance?.terminal_disposition, undefined);
+  assert.equal(fs.statSync(manifestPath).isDirectory(), true);
+  assert.doesNotMatch(
+    fs.readFileSync(path.join(run.value!.run_root, "events.jsonl"), "utf8"),
+    /artifact-manifest-written/u
+  );
 });
 
 test("syncRun marks task-output validation failures for terminal disposition", async () => {
@@ -8222,7 +8469,7 @@ test("syncRun keeps a preparation failure superseded by a later successful attem
   const sync = await syncRun({ projectRoot: project, runId: "sync-preparation-recovered", env });
 
   assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
-  assert.equal(sync.value?.status, "succeeded");
+  assert.equal(sync.value?.status, "succeeded", JSON.stringify(sync.diagnostics));
   const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
     nodes?: Record<string, { status?: string }>;
   };
@@ -9746,7 +9993,7 @@ test("syncRun rejects workspace-mirrored outputs without copying or repairing th
 
   assert.equal(first.ok, true, JSON.stringify(first.diagnostics));
   assert.equal(first.value?.status, "failed");
-  assert.ok(first.diagnostics.some((diagnostic) => diagnostic.code === "REQUIRED_ARTIFACT_MISSING"));
+  assert.ok(first.diagnostics.some((diagnostic) => diagnostic.code === "ARTIFACT_VERIFICATION_AUTHORITY_INVALID"));
   const firstState = JSON.parse(fs.readFileSync(statePath, "utf8")) as {
     status?: string;
     nodes?: Record<
@@ -9764,7 +10011,7 @@ test("syncRun rejects workspace-mirrored outputs without copying or repairing th
   const firstNode = structuredClone(firstState.nodes?.["project-discovery"]);
   assert.equal(firstState.status, "failed");
   assert.equal(firstNode?.status, "failed");
-  assert.match(firstNode?.last_error ?? "", /setup\/project-discovery\.md/u);
+  assert.match(firstNode?.last_error ?? "", /artifact verification marker does not exist/u);
   assert.deepEqual(firstNode?.provenance?.failure, {
     category: "artifact-contract",
     causal_task_id: "verify:project-discovery",
@@ -10439,7 +10686,11 @@ test("syncRun records model fan-out attempts independently", async () => {
       }
     >;
   };
-  assert.equal(state.nodes?.["project-discovery__model_0__attempt_0"]?.status, "succeeded");
+  assert.equal(
+    state.nodes?.["project-discovery__model_0__attempt_0"]?.status,
+    "succeeded",
+    JSON.stringify(sync.diagnostics)
+  );
   assert.equal(state.nodes?.["project-discovery__model_1__attempt_1"]?.status, "failed");
   assert.equal(state.nodes?.["signal-analysis__model_0__attempt_0"]?.status, "running");
   assert.equal(state.nodes?.["signal-analysis__model_1__attempt_1"]?.status, "skipped");
@@ -11519,6 +11770,20 @@ credential_env = ["UFZ_PROVIDER_ONE", "UFZ_PROVIDER_TWO"]
 
   const initial = await startRun({ projectRoot: project, runId: "missing-workflow-run", env });
   assert.equal(initial.ok, false);
+  assert.equal(initial.diagnostics[0]?.code, "WORKFLOW_SUBMISSION_FAILED");
+  assert.equal(initial.diagnostics[0]?.details?.exit_code, 42);
+  const runRoot = path.join(project, ".ultrafuzz", "runs", "missing-workflow-run");
+  assert.equal(
+    fs.existsSync(path.join(runRoot, "smithers", "control-integrity.json")),
+    true,
+    "the canonical start helper must publish exact sealed control evidence before submission"
+  );
+  const sealedEvidence = await readLinkedWorkflowEvidence(project, "missing-workflow-run");
+  assert.equal(
+    sealedEvidence.ok,
+    true,
+    "diagnostics" in sealedEvidence ? JSON.stringify(sealedEvidence.diagnostics) : ""
+  );
   fs.writeFileSync(configPath, localConfig, "utf8");
   fs.writeFileSync(cloudEnvironmentLog, "", "utf8");
 
@@ -11540,7 +11805,6 @@ credential_env = ["UFZ_PROVIDER_ONE", "UFZ_PROVIDER_TWO"]
   assert.match(upCommands[1] ?? "", /--log-dir .* --input /u);
   assert.equal(fs.readFileSync(cloudEnvironmentLog, "utf8"), "provider-one|provider-two\n");
 
-  const runRoot = path.join(project, ".ultrafuzz", "runs", "missing-workflow-run");
   const recovery = JSON.parse(fs.readFileSync(path.join(runRoot, "smithers", "recovery-submission.json"), "utf8")) as {
     recovery?: string;
     command?: string[];

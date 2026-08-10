@@ -59,10 +59,28 @@ const aggregateWorkflowProvenanceSchema = z.strictObject({
   run_id: nonEmptyString,
   aggregate_attempt_statuses: z.array(z.enum(NODE_STATE_STATUSES)).min(1)
 });
-const outputContractProvenanceSchema = z.strictObject({
-  ok: z.boolean(),
-  missing: uniqueNonEmptyStrings
-});
+const outputContractProvenanceSchema = z
+  .strictObject({
+    ok: z.boolean(),
+    missing: uniqueNonEmptyStrings,
+    artifact_manifest_sha256: sha256.optional()
+  })
+  .superRefine((value, context) => {
+    if (value.ok && value.artifact_manifest_sha256 === undefined) {
+      context.addIssue({
+        code: "custom",
+        message: "successful output contracts require an authenticated artifact manifest digest",
+        path: ["artifact_manifest_sha256"]
+      });
+    }
+    if (!value.ok && value.artifact_manifest_sha256 !== undefined) {
+      context.addIssue({
+        code: "custom",
+        message: "failed output contracts cannot authenticate an artifact manifest",
+        path: ["artifact_manifest_sha256"]
+      });
+    }
+  });
 const failureProvenanceSchema = z.strictObject({
   category: z.enum(NODE_PROVENANCE_FAILURE_CATEGORIES),
   causal_task_id: nonEmptyString,
@@ -491,10 +509,18 @@ export const runStateJsonSchema = {
     outputContractProvenance: {
       type: "object",
       required: ["ok", "missing"],
+      allOf: [
+        {
+          if: { properties: { ok: { const: true } }, required: ["ok"] },
+          then: { properties: { artifact_manifest_sha256: {} }, required: ["artifact_manifest_sha256"] },
+          else: { not: { required: ["artifact_manifest_sha256"] } }
+        }
+      ],
       additionalProperties: false,
       properties: {
         ok: { type: "boolean" },
-        missing: { type: "array", uniqueItems: true, items: { type: "string", minLength: 1 } }
+        missing: { type: "array", uniqueItems: true, items: { type: "string", minLength: 1 } },
+        artifact_manifest_sha256: { type: "string", pattern: "^[0-9a-f]{64}$" }
       }
     },
     failureProvenance: {

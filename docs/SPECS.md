@@ -382,8 +382,8 @@ queued, active, and idle durations. Lost-controller recovery MUST use an atomic
 takeover claim and MUST NOT repeat completed work. Workflow deadlines and
 recovery decisions MUST be testable with a fake clock.
 
-Current run state MUST use schema version `ultrafuzz.run-state.v4` and schema ID
-`urn:ultrafuzz:schema:artifacts:run-state:4`. Older persisted state and graph
+Current run state MUST use schema version `ultrafuzz.run-state.v5` and schema ID
+`urn:ultrafuzz:schema:artifacts:run-state:5`. Older persisted state and graph
 versions MAY fail to resume, inspect, or render, but the failure MUST identify
 the unsupported version. The runtime MUST NOT add a historical reader that
 coerces old state into the current contract.

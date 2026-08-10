@@ -7,6 +7,7 @@ import {
   assertNoSymlinkComponents,
   assertRegularFileInside,
   createInitialRunState,
+  executeSemanticGate,
   artifactContractDefinition,
   artifactContractSchemaBinding,
   createRunLayout,
@@ -401,6 +402,17 @@ function provisionReferenceExpectationOutput(
     throw new Error(
       `reference expectation catalog is invalid: ${parsed.issues
         .map((issue) => `${issue.path} ${issue.message}`)
+        .join("; ")}`
+    );
+  }
+  const uniqueness = executeSemanticGate("reference-expectation-id-uniqueness", { document: parsed.value });
+  if (uniqueness.status !== "passed") {
+    if (uniqueness.status === "requires-context") {
+      throw new Error("internal reference expectation semantic gate unexpectedly requires host context");
+    }
+    throw new Error(
+      `reference expectation catalog is invalid: ${uniqueness.issues
+        .map((issue) => `${sourcePath}#${issue.path} ${issue.message}`)
         .join("; ")}`
     );
   }

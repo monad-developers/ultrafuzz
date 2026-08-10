@@ -623,7 +623,7 @@ export function writeVerifiedFinalReport(input: {
             state: "finished",
             attempt: 0
           },
-          output_contracts: { ok: true, missing: [] }
+          output_contracts: { ok: true, missing: [], artifact_manifest_sha256: "a".repeat(64) }
         }
       }
     }

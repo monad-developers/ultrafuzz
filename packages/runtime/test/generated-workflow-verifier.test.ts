@@ -7,18 +7,22 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { isDeepStrictEqual } from "node:util";
 import * as ts from "typescript";
 
 import {
   assertRegularFileInside,
   executeSchemaSemanticGates,
+  IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
   MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES,
   normalizeNodeAttemptFailureMessage,
   parseStrictJsonBytes,
+  PROPERTIES_SCHEMA_VERSION,
   readRegularFileSnapshot,
   validateArtifactContract,
   writeFileDurable
 } from "@ultrafuzz/artifacts";
+import { declaredAncestorOutputsByContract } from "../src/semantic-artifact-context.js";
 
 const runtimePackageRoot = findRuntimePackageRoot(path.dirname(fileURLToPath(import.meta.url)));
 const workflowTemplatePath = path.join(runtimePackageRoot, "src", "templates", "smithers", "workflows", "workflow.tsx");
@@ -96,7 +100,11 @@ function loadRetryFailureAwareArgs(): (
   ) as ReturnType<typeof loadRetryFailureAwareArgs>;
 }
 
-function loadPromptWithAuthoritativeFinalReportCoverage(): (prompt: string, coverage: unknown) => string {
+function loadPromptWithAuthoritativeFinalReportCoverage(): (
+  prompt: string,
+  coverage: unknown,
+  reportPath: string
+) => string {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function promptWithAuthoritativeFinalReportCoverage");
   const helperEnd = source.indexOf("\n\nfunction authoritativeFinalReportCoverageArgs", helperStart);
@@ -687,6 +695,7 @@ type VerifyArtifactsTask = {
     run: { ultrafuzzRunId: string };
     artifacts: { dir: string };
     node: { logicalNodeId: string; concreteNodeId: string };
+    dependencies: { attemptIds: string[] };
   };
   outputs: Array<{
     path: string;
@@ -761,6 +770,10 @@ function loadVerifyArtifactsHarness(): {
     "createHash",
     "publishVerifiedArtifacts",
     "writeArtifactVerificationMarker",
+    "taskSpecs",
+    "taskPublishesWorkspacePatch",
+    "declaredAncestorOutputsByContract",
+    "declaredFinalReportOutputPair",
     `${emitted}; return { captureTaskOutputs, verifyArtifacts };`
   )(
     path,
@@ -805,7 +818,19 @@ function loadVerifyArtifactsHarness(): {
     (_artifactDir: string, values: ReadonlyMap<string, Buffer>) => {
       for (const [relativePath, bytes] of values) publications.set(relativePath, Buffer.from(bytes));
     },
-    (...args: unknown[]) => markerWrites.push(args)
+    (...args: unknown[]) => markerWrites.push(args),
+    [],
+    (task: VerifyArtifactsTask) =>
+      task.outputs.some((output) => output.path === "workspace.patch" && output.contract === "ultrafuzz/text@1") &&
+      task.outputs.some(
+        (output) => output.path === "workspace-patch.json" && output.contract === "ultrafuzz/workspace-patch@1"
+      ),
+    declaredAncestorOutputsByContract,
+    (task: VerifyArtifactsTask) => {
+      const report = task.outputs.filter((output) => output.contract === "ultrafuzz/report@2");
+      const markdown = task.outputs.filter((output) => output.contract === "ultrafuzz/nonempty-markdown@1");
+      return report.length === 1 && markdown.length === 1 ? { report: report[0]!, markdown: markdown[0]! } : undefined;
+    }
   ) as {
     captureTaskOutputs: ReturnType<typeof loadVerifyArtifactsHarness>["captureTaskOutputs"];
     verifyArtifacts: ReturnType<typeof loadVerifyArtifactsHarness>["verifyArtifacts"];
@@ -822,7 +847,8 @@ function singleOutputVerificationTask(root: string, contract: string): VerifyArt
     metadata: {
       run: { ultrafuzzRunId: "run-one" },
       artifacts: { dir: root },
-      node: { logicalNodeId: "node-one", concreteNodeId: "node-one" }
+      node: { logicalNodeId: "node-one", concreteNodeId: "node-one" },
+      dependencies: { attemptIds: [] }
     },
     outputs: [
       {
@@ -984,7 +1010,8 @@ test("generated Smithers fails closed when same-node semantic counts disagree", 
       metadata: {
         run: { ultrafuzzRunId: "run-one" },
         artifacts: { dir: root },
-        node: { logicalNodeId: "stateful-invariant-campaign", concreteNodeId: "stateful-invariant-campaign" }
+        node: { logicalNodeId: "stateful-invariant-campaign", concreteNodeId: "stateful-invariant-campaign" },
+        dependencies: { attemptIds: [] }
       },
       outputs: [
         {
@@ -1045,6 +1072,302 @@ test("generated Smithers fails closed when a contextual gate lacks verified ance
   }
 });
 
+type PropertyLensHarnessProducer = {
+  attemptId: string;
+  artifactDir: string;
+  dependencyArtifactDirs: string[];
+  metadata: { node: { logicalNodeId: string }; dependencies: { attemptIds: string[] } };
+  outputs: Array<{ path: string; contract: string }>;
+};
+
+type PropertyLensHarnessTask = PropertyLensHarnessProducer;
+
+function loadVerifiedSingletonAncestorJsonArtifactHarness(
+  taskSpecs: readonly PropertyLensHarnessProducer[],
+  documents: ReadonlyMap<string, unknown>
+): (task: PropertyLensHarnessTask, contract: string, label: string) => { path: string; value: unknown } | undefined {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function semanticArtifactTaskDeclarations");
+  const helperEnd = source.indexOf("\n\nfunction configuredInvariantPrioritySelection", helperStart);
+  assert.ok(helperStart >= 0 && helperEnd > helperStart, source);
+  const emitted = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  return new Function(
+    "path",
+    "taskSpecs",
+    "declaredAncestorOutputsByContract",
+    "verifiedDependencyJsonArtifact",
+    `${emitted}; return verifiedSingletonAncestorJsonArtifact;`
+  )(
+    path,
+    taskSpecs,
+    declaredAncestorOutputsByContract,
+    (
+      _task: unknown,
+      dependency: string,
+      producer: PropertyLensHarnessProducer,
+      outputPath: string,
+      contract: string
+    ) => ({
+      path: path.join(dependency, outputPath),
+      value: documents.get(`${producer.attemptId}\u0000${contract}\u0000${outputPath}`)
+    })
+  ) as (task: PropertyLensHarnessTask, contract: string, label: string) => { path: string; value: unknown } | undefined;
+}
+
+test("generated Smithers resolves singleton JSON inputs by ancestor contract and custom path", () => {
+  const producer = (attemptId: string, logicalNodeId: string, artifactPath: string): PropertyLensHarnessProducer => ({
+    attemptId,
+    artifactDir: path.join("/run/artifacts", attemptId),
+    dependencyArtifactDirs: [],
+    metadata: { node: { logicalNodeId }, dependencies: { attemptIds: [] } },
+    outputs: [{ path: artifactPath, contract: "ultrafuzz/properties@2" }]
+  });
+  const selected = producer("catalog-current", "renamed-catalog", "custom/current-properties.json");
+  const unrelated = producer("catalog-unrelated", "same-logical-name-is-irrelevant", "properties.json");
+  const consumer: PropertyLensHarnessTask = {
+    attemptId: "report-current",
+    artifactDir: "/run/artifacts/report-current",
+    dependencyArtifactDirs: [selected.artifactDir],
+    metadata: { node: { logicalNodeId: "renamed-report" }, dependencies: { attemptIds: [selected.attemptId] } },
+    outputs: []
+  };
+  const isolatedConsumer: PropertyLensHarnessTask = {
+    ...consumer,
+    attemptId: "report-isolated",
+    artifactDir: "/run/artifacts/report-isolated",
+    dependencyArtifactDirs: [],
+    metadata: { ...consumer.metadata, dependencies: { attemptIds: [] } }
+  };
+  const document = { schema_version: "ultrafuzz.properties.v2", properties: [] };
+  const resolve = loadVerifiedSingletonAncestorJsonArtifactHarness(
+    [selected, unrelated, consumer, isolatedConsumer],
+    new Map([[`${selected.attemptId}\u0000ultrafuzz/properties@2\u0000custom/current-properties.json`, document]])
+  );
+
+  assert.deepEqual(resolve(consumer, "ultrafuzz/properties@2", "canonical property catalog"), {
+    path: "/run/artifacts/catalog-current/custom/current-properties.json",
+    value: document
+  });
+  assert.equal(resolve(isolatedConsumer, "ultrafuzz/properties@2", "canonical property catalog"), undefined);
+});
+
+function loadProducerFreeSemanticContextHarness(): (
+  task: {
+    metadata: { run: { ultrafuzzRunId: string }; node: { logicalNodeId: string } };
+  },
+  output: { path: string; schemaFile: string },
+  verifiedOutputs: ReadonlyMap<string, { artifactRoot: string }>
+) => { artifactSet?: { propertyCatalog?: unknown; implementedProperties?: unknown } } {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function semanticGateContextForVerifiedOutput");
+  const helperEnd = source.indexOf("\n\nfunction verifyOutputSemanticGates", helperStart);
+  assert.ok(helperStart >= 0 && helperEnd > helperStart, source);
+  const emitted = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  return new Function(
+    "verifiedSingletonAncestorJsonArtifact",
+    "UNPLANNED_PROPERTY_CATALOG_CONTEXT",
+    "UNPLANNED_IMPLEMENTED_PROPERTIES_CONTEXT",
+    "siblingCampaignSemanticArtifacts",
+    "verifiedAncestorPropertyLenses",
+    "workspacePatchSemanticGitContext",
+    `${emitted}; return semanticGateContextForVerifiedOutput;`
+  )(
+    () => undefined,
+    { schema_version: PROPERTIES_SCHEMA_VERSION, properties: [] },
+    {
+      schema_version: IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
+      selection: { priority_threshold: "high", priorities: ["high"], property_ids: [] },
+      properties: []
+    },
+    () => ({}),
+    () => undefined,
+    () => undefined
+  ) as ReturnType<typeof loadProducerFreeSemanticContextHarness>;
+}
+
+test("generated semantic contexts match host semantics when property producers are deliberately absent", () => {
+  const contextFor = loadProducerFreeSemanticContextHarness();
+  const task = {
+    metadata: { run: { ultrafuzzRunId: "run-no-property-track" }, node: { logicalNodeId: "custom-report" } }
+  };
+  const verifiedOutputs = new Map([["custom/report.json", { artifactRoot: "/run/artifacts/custom-report" }]]);
+
+  const report = contextFor(task, { path: "custom/report.json", schemaFile: "report.schema.json" }, verifiedOutputs);
+  assert.deepEqual(report.artifactSet, {
+    propertyCatalog: { schema_version: PROPERTIES_SCHEMA_VERSION, properties: [] },
+    implementedProperties: {
+      schema_version: IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
+      selection: { priority_threshold: "high", priorities: ["high"], property_ids: [] },
+      properties: []
+    }
+  });
+
+  const implementation = contextFor(
+    task,
+    { path: "custom/report.json", schemaFile: "implemented-properties.schema.json" },
+    verifiedOutputs
+  );
+  assert.deepEqual(implementation.artifactSet, {
+    propertyCatalog: { schema_version: PROPERTIES_SCHEMA_VERSION, properties: [] }
+  });
+});
+
+function loadVerifiedAncestorPropertyLensesHarness(
+  taskSpecs: readonly PropertyLensHarnessProducer[],
+  documents: ReadonlyMap<string, unknown>
+): (
+  task: PropertyLensHarnessTask
+) => Array<{ sourceNodeId: string; projectionRequired: boolean; document: unknown }> | undefined {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function verifiedAncestorPropertyLenses");
+  const helperEnd = source.indexOf("\n\nfunction workspacePatchSemanticGitContext", helperStart);
+  assert.ok(helperStart >= 0 && helperEnd > helperStart, source);
+  const emitted = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  return new Function(
+    "path",
+    "taskSpecs",
+    "verifiedDependencyJsonArtifact",
+    "isPlainJsonRecord",
+    "declaredAncestorContractOutputs",
+    `${emitted}; return verifiedAncestorPropertyLenses;`
+  )(
+    path,
+    taskSpecs,
+    (_task: unknown, _dependency: string, producer: { attemptId: string }, outputPath: string, _contract: string) => ({
+      value: documents.get(`${producer.attemptId}\u0000${outputPath}`)
+    }),
+    (value: unknown) => typeof value === "object" && value !== null && !Array.isArray(value),
+    (task: PropertyLensHarnessTask, contract: string, options: { directOnly?: boolean } = {}) => {
+      const declarations = taskSpecs.map((candidate) => ({
+        attemptId: candidate.attemptId,
+        logicalNodeId: candidate.metadata.node.logicalNodeId,
+        artifactDir: candidate.artifactDir,
+        dependencies: candidate.metadata.dependencies.attemptIds,
+        dependencyArtifactDirs: candidate.dependencyArtifactDirs,
+        outputs: candidate.outputs
+      }));
+      const current = declarations.find((candidate) => candidate.attemptId === task.attemptId);
+      assert.ok(current);
+      return declaredAncestorOutputsByContract(current, declarations, contract, options);
+    }
+  ) as (
+    task: PropertyLensHarnessTask
+  ) => Array<{ sourceNodeId: string; projectionRequired: boolean; document: unknown }> | undefined;
+}
+
+test("generated Smithers accepts direct lenses, excludes transitive lenses, and projects a renamed ledger", () => {
+  const producer = (
+    attemptId: string,
+    logicalNodeId: string,
+    contract: string,
+    outputPath: string
+  ): PropertyLensHarnessProducer => ({
+    attemptId,
+    artifactDir: path.join("/run/artifacts", attemptId),
+    dependencyArtifactDirs: [],
+    metadata: { node: { logicalNodeId }, dependencies: { attemptIds: [] } },
+    outputs: [{ path: outputPath, contract }]
+  });
+  const producers = [
+    producer("attempt-ledger", "custom-evidence-root", "ultrafuzz/invariant-ledger@1", "custom/ledger.json"),
+    producer("attempt-direct", "direct-review", "ultrafuzz/property-lens@2", "custom/direct.json"),
+    producer("attempt-transitive", "transitive-review", "ultrafuzz/property-lens@2", "custom/transitive.json")
+  ];
+  const consumer: PropertyLensHarnessProducer = {
+    attemptId: "attempt-consumer",
+    artifactDir: "/run/artifacts/attempt-consumer",
+    dependencyArtifactDirs: producers.map((candidate) => candidate.artifactDir),
+    metadata: {
+      node: { logicalNodeId: "property-fanin" },
+      dependencies: { attemptIds: ["attempt-direct"] }
+    },
+    outputs: []
+  };
+  const taskSpecs = [...producers, consumer];
+  const documents = new Map<string, unknown>([
+    [
+      "attempt-ledger\u0000custom/ledger.json",
+      { entries: [{ id: "evidence-one" }], inventory_rows: [], scan_probes: [] }
+    ],
+    ["attempt-direct\u0000custom/direct.json", { properties: [{ id: "direct-one" }] }],
+    ["attempt-transitive\u0000custom/transitive.json", { properties: [{ id: "transitive-one" }] }]
+  ]);
+  const resolve = loadVerifiedAncestorPropertyLensesHarness(taskSpecs, documents);
+  const result = resolve(consumer);
+
+  assert.deepEqual(result, [
+    {
+      sourceNodeId: "custom-evidence-root",
+      projectionRequired: false,
+      document: { properties: [{ id: "evidence-one" }] }
+    },
+    {
+      sourceNodeId: "direct-review",
+      projectionRequired: true,
+      document: { properties: [{ id: "direct-one" }] }
+    }
+  ]);
+});
+
+test("generated Smithers selects property and discovery inputs by their declared contracts", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function verifiedAncestorPropertyLenses");
+  const helperEnd = source.indexOf("\n\nfunction workspacePatchSemanticGitContext", helperStart);
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+  const helper = source.slice(helperStart, helperEnd);
+
+  assert.match(helper, /declaredAncestorContractOutputs/u);
+  assert.match(helper, /"ultrafuzz\/property-lens@2", \{/u);
+  assert.match(helper, /directOnly: true/u);
+  assert.match(helper, /seenLensProducers/u);
+  assert.doesNotMatch(helper, /logicalNodeId\.startsWith\("property-specification-"\)/u);
+  assert.match(helper, /"ultrafuzz\/invariant-ledger@1"/u);
+  assert.doesNotMatch(helper, /logicalNodeId === "project-discovery"/u);
+  assert.match(helper, /output\.artifactDir/u);
+  assert.match(helper, /projectionRequired: false/u);
+  assert.match(helper, /projectionRequired: true/u);
+  assert.doesNotMatch(helper, /setup\/invariant-evidence-ledger\.json/u);
+
+  const singletonStart = source.indexOf("function semanticArtifactTaskDeclarations");
+  const singletonEnd = source.indexOf("\n\nfunction configuredInvariantPrioritySelection", singletonStart);
+  assert.ok(singletonStart >= 0 && singletonEnd > singletonStart, source);
+  const singleton = source.slice(singletonStart, singletonEnd);
+  assert.match(singleton, /declaredAncestorOutputsByContract/u);
+  assert.doesNotMatch(singleton, /property-specification-fanin|stateful-invariant-implement-properties/u);
+  assert.doesNotMatch(singleton, /properties\.json|implemented-properties\.json/u);
+
+  const coverageStart = source.indexOf("function authoritativeFinalReportCoverage");
+  const coverageEnd = source.indexOf("\n\nfunction promptWithAuthoritativeFinalReportCoverage", coverageStart);
+  assert.ok(coverageStart >= 0 && coverageEnd > coverageStart, source);
+  const coverage = source.slice(coverageStart, coverageEnd);
+  assert.match(coverage, /verifiedSingletonAncestorJsonArtifact/u);
+  assert.match(coverage, /"ultrafuzz\/properties@2"/u);
+  assert.match(coverage, /"ultrafuzz\/implemented-properties@3"/u);
+  assert.doesNotMatch(coverage, /property-specification-fanin|stateful-invariant-implement-properties/u);
+
+  const companionStart = source.indexOf("function materializeInvariantSuiteCompanions");
+  const companionEnd = source.indexOf("\n\nfunction resetInvariantSuiteArtifactRoot", companionStart);
+  assert.ok(companionStart >= 0 && companionEnd > companionStart, source);
+  const companion = source.slice(companionStart, companionEnd);
+  assert.match(companion, /output\.contract === "ultrafuzz\/implemented-properties@3"/u);
+  assert.doesNotMatch(companion, /output\.path === "implemented-properties\.json"/u);
+
+  const expectationsStart = source.indexOf("function assertInvariantSuiteDependencyExpectations");
+  const expectationsEnd = source.indexOf("function reconcileInvariantSuiteWorkspace", expectationsStart);
+  assert.ok(expectationsStart >= 0 && expectationsEnd > expectationsStart, source);
+  const expectations = source.slice(expectationsStart, expectationsEnd);
+  assert.match(expectations, /verifiedDependencyJsonArtifact/u);
+  assert.match(expectations, /output\.contract === "ultrafuzz\/implemented-properties@3"/u);
+  assert.doesNotMatch(expectations, /path\.join\(dependencyRoot, "implemented-properties\.json"\)/u);
+});
+
 test("generated severity verification authenticates the triaged finding preservation context", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function semanticGateContextForVerifiedOutput");
@@ -1056,8 +1379,9 @@ test("generated severity verification authenticates the triaged finding preserva
   assert.match(helper, /output\.schemaFile === "severity-classified-findings\.schema\.json"/u);
   assert.match(
     helper,
-    /verifiedCurrentAncestorJsonArtifact\(\s*task,\s*"triage",\s*"triaged-findings\.json",\s*"ultrafuzz\/triaged-findings@1"\s*\)/u
+    /verifiedSingletonAncestorJsonArtifact\(\s*task,\s*"ultrafuzz\/triaged-findings@1",\s*"triaged findings"\s*\)/u
   );
+  assert.doesNotMatch(helper, /"triage"|"triaged-findings\.json"/u);
   assert.match(helper, /\{ triagedFindings: triagedFindings\.value \}/u);
 });
 
@@ -1179,6 +1503,27 @@ test("generated Smithers workflow guards runtime-owned workspace patch publicati
   // guarded by the flag, and the flag defaults to rejecting.
   assert.match(helper, /replaceSuperseded = false/u);
   assert.match(helper, /if \(!replaceSuperseded\) \{/u);
+});
+
+test("generated Smithers verification publishes its exact workspace patch baseline snapshot", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const verificationStart = source.indexOf("function verifyArtifacts");
+  const verificationEnd = source.indexOf("\n\nfunction isPlainJsonRecord", verificationStart);
+  const captureStart = source.indexOf("function captureWorkspacePatchBaselinePublication");
+  const captureEnd = source.indexOf("\n\nfunction publishVerifiedArtifacts", captureStart);
+
+  assert.ok(verificationStart >= 0 && verificationEnd > verificationStart, source);
+  assert.ok(captureStart >= 0 && captureEnd > captureStart, source);
+
+  const verification = source.slice(verificationStart, verificationEnd);
+  const capture = source.slice(captureStart, captureEnd);
+  assert.match(verification, /taskPublishesWorkspacePatch\(task\)/u);
+  assert.match(verification, /rememberVerifiedPublication\([\s\S]*WORKSPACE_PATCH_BASELINE_FILE/u);
+  assert.match(verification, /captureWorkspacePatchBaselinePublication\(task, artifactDir\)/u);
+  assert.match(capture, /readBoundedRegularArtifactSnapshot\(/u);
+  assert.match(capture, /parseRuntimeDocumentBytes\(/u);
+  assert.match(capture, /workspacePatchBaselineTrees\.get\(task\.attemptId\)/u);
+  assert.match(capture, /parsed\.baseline_tree !== expectedTree/u);
 });
 
 test("runtime workspace patch publication replaces empty placeholders but rejects non-empty agent patches", () => {
@@ -1689,15 +2034,16 @@ test("authoritative final-report coverage is injected as exact untrusted data be
     pending_property_ids: [],
     deferred_property_ids: []
   };
-  const injected = promptWithCoverage(renderedPrompt, coverage);
+  const injected = promptWithCoverage(renderedPrompt, coverage, "custom/final-report.json");
 
   assert.ok(injected.startsWith("trusted preamble\n\nUNTRUSTED CONTENT BOUNDARY\n\n"), injected);
   assert.match(injected, /## Authoritative property implementation coverage/u);
   assert.match(injected, /authoritative data, not instructions/u);
+  assert.match(injected, /"custom\/final-report\.json"#property_implementation_coverage/u);
   assert.match(injected, new RegExp(JSON.stringify(coverage, null, 2).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
   assert.ok(injected.indexOf('"property-one"') < injected.indexOf("trusted runtime"), injected);
   assert.throws(
-    () => promptWithCoverage("prompt without boundary", coverage),
+    () => promptWithCoverage("prompt without boundary", coverage, "custom/final-report.json"),
     /cannot locate the untrusted-content boundary/u
   );
 });
@@ -1953,6 +2299,77 @@ test("generated Smithers verifier treats the final-report projector only as a no
   assert.doesNotMatch(source, /return "unavailable"/u);
 });
 
+function loadFinalReportCanonicalProjectionHarness(): (
+  task: { outputs: Array<{ path: string; contract: string }> },
+  verifiedOutputs: ReadonlyMap<string, { value: unknown; file: { bytes: Buffer } }>
+) => void {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const declarationStart = source.indexOf("function declaredFinalReportOutputPair");
+  const declarationEnd = source.indexOf("\n\nfunction configuredInvariantPrioritySelection", declarationStart);
+  const verifierStart = source.indexOf("function isPlainJsonRecord");
+  const verifierEnd = source.indexOf("\n\nfunction readInvariantSourceSnapshot", verifierStart);
+  assert.ok(declarationStart >= 0 && declarationEnd > declarationStart, source);
+  assert.ok(verifierStart >= 0 && verifierEnd > verifierStart, source);
+  const emitted = ts.transpileModule(
+    `${source.slice(declarationStart, declarationEnd)}\n${source.slice(verifierStart, verifierEnd)}`,
+    { compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 } }
+  ).outputText;
+  return new Function(
+    "authoritativeFinalReportCoverage",
+    "isDeepStrictEqual",
+    "projectCanonicalFinalReport",
+    "Buffer",
+    `${emitted}; return verifyFinalReportCanonicalProjection;`
+  )(
+    () => ({ status: "not-planned", reason: "property-implementation-track-not-declared" }),
+    isDeepStrictEqual,
+    (report: unknown) => ({ report, markdown: "# Canonical custom report\n" }),
+    Buffer
+  ) as ReturnType<typeof loadFinalReportCanonicalProjectionHarness>;
+}
+
+test("generated canonical report verification selects renamed producers and custom declared paths", () => {
+  const verifyProjection = loadFinalReportCanonicalProjectionHarness();
+  const task = {
+    outputs: [
+      { path: "deliverables/security-audit.json", contract: "ultrafuzz/report@2" },
+      { path: "deliverables/security-audit.md", contract: "ultrafuzz/nonempty-markdown@1" }
+    ]
+  };
+  const report = {
+    property_implementation_coverage: {
+      status: "not-planned",
+      reason: "property-implementation-track-not-declared"
+    }
+  };
+  const verified = new Map<string, { value: unknown; file: { bytes: Buffer } }>([
+    ["deliverables/security-audit.json", { value: report, file: { bytes: Buffer.from("declared JSON") } }],
+    [
+      "deliverables/security-audit.md",
+      { value: "# Canonical custom report\n", file: { bytes: Buffer.from("# Canonical custom report\n") } }
+    ],
+    ["report.json", { value: { property_implementation_coverage: null }, file: { bytes: Buffer.from("ignored") } }],
+    ["report.md", { value: "ignored", file: { bytes: Buffer.from("ignored") } }]
+  ]);
+
+  assert.doesNotThrow(() => verifyProjection(task, verified));
+
+  const withoutDeclaredMarkdown = new Map(verified);
+  withoutDeclaredMarkdown.delete("deliverables/security-audit.md");
+  assert.throws(() => verifyProjection(task, withoutDeclaredMarkdown), /declared report outputs are unavailable/iu);
+
+  assert.throws(
+    () =>
+      verifyProjection(
+        {
+          outputs: [...task.outputs, { path: "deliverables/second-audit.json", contract: "ultrafuzz/report@2" }]
+        },
+        verified
+      ),
+    /exactly one current ultrafuzz\/report@2 output/iu
+  );
+});
+
 test("generated Smithers agent rejects legacy generated-test string lists without conversion", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   assert.doesNotMatch(source, /normalizeLegacyGeneratedTestManifests|typeof entry === "string" \? \{ path: entry \}/u);
@@ -2125,7 +2542,7 @@ test("generated Smithers workflow preserves the complete invariant suite across 
   assert.match(source, /record\.test_paths/u);
   assert.match(source, /pinnedSourceRef, "HEAD\^"/u);
   assert.match(source, /\$\{baseRef\}\.\.\.HEAD/u);
-  assert.match(source, /implemented properties JSON is malformed/u);
+  assert.match(source, /implemented properties JSON is invalid/u);
   assert.match(source, /selectedSources/u);
   assert.match(source, /ancestor invariant suite sources conflict/u);
   assert.match(source, /src\/contracts/u);
@@ -2357,6 +2774,7 @@ test("generated Smithers preparation requires a successful dependency artifact v
   assert.match(source, /function assertVerifiedDependency/u);
   assert.match(source, /artifact dependency has not passed verification/u);
   assert.match(source, /assertVerifiedDependency\(task, dependency\)/u);
+  assert.match(source, /assertVerifiedDependency\(task, dependency, \{ relativePath, bytes: snapshot\.bytes \}\)/u);
   assert.match(verifier, /clearArtifactVerificationMarker\(task\)/u);
   assert.match(verifier, /writeArtifactVerificationMarker\(task, artifacts, publications\)/u);
   assert.match(source, /publications: publicationEntries/u);
@@ -2519,7 +2937,11 @@ test("generated Smithers dependency verification fails closed before descendant 
           .digest("hex")
       );
     }
-  ) as (task: { attemptId: string; runRoot: string }, dependency: string) => void;
+  ) as (
+    task: { attemptId: string; runRoot: string },
+    dependency: string,
+    capturedArtifact?: Readonly<{ relativePath: string; bytes: Buffer }>
+  ) => void;
 
   const task = { attemptId: "stateful-invariant-setup", runRoot };
   assert.throws(
@@ -2612,6 +3034,20 @@ test("generated Smithers dependency verification fails closed before descendant 
   fs.writeFileSync(path.join(dependency, "properties.json"), verifiedBytes);
   writeMarker([validArtifact]);
   assert.doesNotThrow(() => assertVerifiedDependency(task, dependency));
+  const unauthenticatedCapturedBytes = Buffer.from("swapped only while captured\n", "utf8");
+  assert.throws(
+    () =>
+      assertVerifiedDependency(task, dependency, {
+        relativePath: "properties.json",
+        bytes: unauthenticatedCapturedBytes
+      }),
+    /artifact dependency has not passed verification property-specification-fanin/u
+  );
+  fs.writeFileSync(path.join(dependency, "properties.json"), "changed after the authoritative capture\n", "utf8");
+  assert.doesNotThrow(() =>
+    assertVerifiedDependency(task, dependency, { relativePath: "properties.json", bytes: verifiedBytes })
+  );
+  fs.writeFileSync(path.join(dependency, "properties.json"), verifiedBytes);
   fs.mkdirSync(path.join(generatedDependency, "generated-tests"), { recursive: true });
   const generatedBytes = Buffer.from('{"generated_tests":[{"path":"generated-tests/Property.t.sol"}]}\n');
   fs.writeFileSync(path.join(generatedDependency, "generated-tests.json"), generatedBytes);

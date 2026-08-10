@@ -14,6 +14,8 @@ export type SemanticGateScope = (typeof SEMANTIC_GATE_SCOPES)[number];
 export interface SemanticFilesystemContext {
   /** Directory against which artifact-relative paths are resolved. */
   rootDirectory: string;
+  /** Authenticated immutable publication bytes, keyed by artifact-relative path. */
+  files?: ReadonlyMap<string, Uint8Array>;
 }
 
 export interface SemanticGitContext {
@@ -28,6 +30,7 @@ export interface SemanticGitContext {
 
 export interface SemanticPropertyLensContext {
   sourceNodeId: string;
+  projectionRequired: boolean;
   document: unknown;
 }
 
@@ -1924,6 +1927,31 @@ function filesystemManifestIssues(
     const expectedDigest = stringField(row, "sha256");
     if (relativePath === undefined) continue;
     const filePath = resolveArtifactFile(root, relativePath);
+    const snapshot = context.filesystem!.files?.get(relativePath);
+    if (context.filesystem!.files !== undefined) {
+      const rowPath = `${displayPath(rowsPath)}[${index}]`;
+      if (filePath === undefined || snapshot === undefined) {
+        issues.push(
+          issue(`${rowPath}.path`, `Referenced file is missing or nonregular: ${JSON.stringify(relativePath)}`)
+        );
+        continue;
+      }
+      if (
+        expectedDigest !== undefined &&
+        crypto.createHash("sha256").update(snapshot).digest("hex") !== expectedDigest
+      ) {
+        issues.push(
+          issue(`${rowPath}.sha256`, `Referenced file digest does not match ${JSON.stringify(relativePath)}`)
+        );
+      }
+      const expectedSize = numberField(row, "size_bytes");
+      if (expectedSize !== undefined && expectedSize !== snapshot.byteLength) {
+        issues.push(
+          issue(`${rowPath}.size_bytes`, `Referenced file size does not match ${JSON.stringify(relativePath)}`)
+        );
+      }
+      continue;
+    }
     let stats: fs.Stats | undefined;
     try {
       if (filePath !== undefined) stats = fs.lstatSync(filePath);
@@ -1956,6 +1984,11 @@ function generatedTestExistenceIssues(document: unknown, context: SemanticGateCo
     const relativePath = stringField(row, "path");
     if (relativePath === undefined) return [];
     const filePath = resolveArtifactFile(root, relativePath);
+    if (context.filesystem!.files !== undefined) {
+      return filePath !== undefined && context.filesystem!.files.has(relativePath)
+        ? []
+        : [issue(`$.generated_tests[${index}].path`, `Generated test does not exist: ${JSON.stringify(relativePath)}`)];
+    }
     try {
       if (filePath !== undefined) {
         const stats = fs.lstatSync(filePath);
@@ -2176,20 +2209,31 @@ function implementedSelectionJoinIssues(document: unknown, context: SemanticGate
 
 function propertySourceJoinIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
   const known = new Set<string>();
+  const required = new Set<string>();
   for (const lens of context.artifactSet!.propertyLenses!) {
     for (const row of arrayAt(lens.document, ["properties"])) {
       const id = stringField(row, "id");
-      if (id !== undefined) known.add(JSON.stringify([lens.sourceNodeId, id]));
+      if (id === undefined) continue;
+      const key = JSON.stringify([lens.sourceNodeId, id]);
+      known.add(key);
+      if (lens.projectionRequired) required.add(key);
     }
   }
   const issues: SemanticGateIssue[] = [];
+  const referenced = new Set<string>();
   for (const [propertyIndex, property] of arrayAt(document, ["properties"]).entries()) {
     for (const [sourceIndex, source] of arrayAt(property, ["sources"]).entries()) {
       if (!isRecord(source)) continue;
       const key = JSON.stringify([source.source_node_id, source.source_property_id]);
+      referenced.add(key);
       if (!known.has(key)) {
         issues.push(issue(`$.properties[${propertyIndex}].sources[${sourceIndex}]`, `Unknown property source ${key}`));
       }
+    }
+  }
+  for (const key of required) {
+    if (!referenced.has(key)) {
+      issues.push(issue("$.properties", `Canonical properties omit declared property-lens source ${key}`));
     }
   }
   return issues;

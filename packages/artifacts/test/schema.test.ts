@@ -22,6 +22,7 @@ import {
   PLANNED_GRAPH_SCHEMA_VERSION,
   PROPERTY_LENS_SCHEMA_VERSION,
   PROPERTY_CAMPAIGN_SCHEMA_VERSION,
+  REFERENCE_EXPECTATIONS_SCHEMA_VERSION,
   REPORT_SCHEMA_VERSION,
   USAGE_LEDGER_SCHEMA_VERSION,
   ARTIFACT_CONTRACT_IDS,
@@ -57,6 +58,7 @@ import {
   validateInvariantSourceProofSchema,
   validateImplementedPropertiesSchema,
   validateLensPropertiesSchema,
+  validateReferenceExpectationsSchema,
   validateArtifactContract,
   validateNodeAttemptLedgerEntry,
   validatePropertiesSchema,
@@ -437,7 +439,13 @@ test("property catalog schema accepts one source and preserves multiple deduplic
   };
   const invalidSource = validatePropertiesSchema(sourceWithExtra);
   assert.equal(invalidSource.ok, false);
-  assert.ok(invalidSource.issues.some((issue) => issue.path.endsWith(".sources[0]") && /note/u.test(issue.message)));
+  assert.deepEqual(invalidSource.issues, [
+    {
+      path: "$.properties[0].sources[0]",
+      code: "PROPERTIES_SCHEMA_INVALID",
+      message: "must NOT have additional properties"
+    }
+  ]);
 
   const duplicateLedgerIds = {
     ...oneSource,
@@ -445,7 +453,7 @@ test("property catalog schema accepts one source and preserves multiple deduplic
   };
   const invalidLedgerIds = validatePropertiesSchema(duplicateLedgerIds);
   assert.equal(invalidLedgerIds.ok, false);
-  assert.ok(invalidLedgerIds.issues.some((issue) => /Duplicate invariant ledger ID/u.test(issue.message)));
+  assert.ok(invalidLedgerIds.issues.some((issue) => /duplicate items/u.test(issue.message)));
 });
 
 test("property lens schema requires canonical priorities and unique reference IDs", () => {
@@ -482,6 +490,140 @@ test("property lens schema requires canonical priorities and unique reference ID
     false,
     "reference expectation IDs must be unique"
   );
+});
+
+test("property lens and reference catalog validators expose Ajv additionalProperties diagnostics", () => {
+  const lens = validateLensPropertiesSchema(
+    {
+      schema_version: PROPERTY_LENS_SCHEMA_VERSION,
+      properties: [
+        {
+          id: "aviggiano-001",
+          description: "Expected behavior",
+          category: "accounting",
+          priority: "high",
+          undeclared: true
+        }
+      ]
+    },
+    "lens.json"
+  );
+  assert.equal(lens.ok, false);
+  assert.deepEqual(lens.issues, [
+    {
+      path: "lens.json.properties[0]",
+      code: "PROPERTY_LENS_SCHEMA_INVALID",
+      message: "must NOT have additional properties"
+    }
+  ]);
+
+  const expectations = validateReferenceExpectationsSchema(
+    {
+      schema_version: REFERENCE_EXPECTATIONS_SCHEMA_VERSION,
+      expectations: [{ id: "benchmark:expectation", undeclared: true }]
+    },
+    "expectations.json"
+  );
+  assert.equal(expectations.ok, false);
+  assert.deepEqual(expectations.issues, [
+    {
+      path: "expectations.json.expectations[0]",
+      code: "REFERENCE_EXPECTATIONS_SCHEMA_INVALID",
+      message: "must NOT have additional properties"
+    }
+  ]);
+});
+
+test("canonical property, implementation, and campaign validators are registered-Ajv-first", () => {
+  const properties = {
+    schema_version: PROPERTIES_SCHEMA_VERSION,
+    properties: [
+      {
+        id: "property-1",
+        description: "Balances remain conserved",
+        category: "accounting",
+        priority: "high" as const,
+        sources: [{ source_node_id: "property-specification-recon", source_property_id: "recon-1" }]
+      }
+    ]
+  };
+  const validProperties = validatePropertiesSchema(properties, "properties.json");
+  assert.equal(validProperties.ok, true);
+  assert.equal(validProperties.value, properties, "typed access must retain the exact Ajv-approved input object");
+  const invalidProperties = validatePropertiesSchema(
+    {
+      ...properties,
+      properties: [{ ...properties.properties[0]!, undeclared: true }]
+    },
+    "properties.json"
+  );
+  assert.deepEqual(invalidProperties.issues, [
+    {
+      path: "properties.json.properties[0]",
+      code: "PROPERTIES_SCHEMA_INVALID",
+      message: "must NOT have additional properties"
+    }
+  ]);
+
+  const implementation = {
+    schema_version: IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
+    selection: { priority_threshold: "high" as const, priorities: ["high" as const], property_ids: ["property-1"] },
+    properties: [
+      {
+        property_id: "property-1",
+        status: "implemented" as const,
+        implementation_paths: ["test/recon/Properties.sol"],
+        test_paths: []
+      }
+    ]
+  };
+  const validImplementation = validateImplementedPropertiesSchema(implementation, "implemented-properties.json", {
+    requireSelection: true
+  });
+  assert.equal(validImplementation.ok, true);
+  assert.equal(
+    validImplementation.value,
+    implementation,
+    "retained Zod parity must not transform an Ajv-approved implementation"
+  );
+  const invalidImplementation = validateImplementedPropertiesSchema(
+    {
+      ...implementation,
+      properties: [{ ...implementation.properties[0]!, undeclared: true }]
+    },
+    "implemented-properties.json",
+    { requireSelection: true }
+  );
+  assert.deepEqual(invalidImplementation.issues, [
+    {
+      path: "implemented-properties.json.properties[0]",
+      code: "IMPLEMENTED_PROPERTIES_SCHEMA_INVALID",
+      message: "must NOT have additional properties"
+    }
+  ]);
+
+  const campaign = {
+    schema_version: PROPERTY_CAMPAIGN_SCHEMA_VERSION,
+    fuzzer_backend: "recon",
+    failures: [{ id: "failure-1", status: "reproduced", property_ids: ["property-1"] }]
+  };
+  const validCampaign = validatePropertyCampaignSchema(campaign, "campaign.json");
+  assert.equal(validCampaign.ok, true);
+  assert.equal(validCampaign.value, campaign, "retained Zod parity must not transform an Ajv-approved campaign");
+  const invalidCampaign = validatePropertyCampaignSchema(
+    {
+      ...campaign,
+      failures: [{ ...campaign.failures[0]!, undeclared: true }]
+    },
+    "campaign.json"
+  );
+  assert.deepEqual(invalidCampaign.issues, [
+    {
+      path: "campaign.json.failures[0]",
+      code: "PROPERTY_CAMPAIGN_SCHEMA_INVALID",
+      message: "must NOT have additional properties"
+    }
+  ]);
 });
 
 test("canonical property schema preserves typed benchmark expectations", () => {
@@ -564,9 +706,18 @@ test("property implementation schema rejects source-less implemented records", (
 
   const invalid = validateImplementedPropertiesSchema(sourceLess);
   assert.equal(invalid.ok, false);
-  assert.ok(
-    invalid.issues.some((issue) => /implemented property must identify at least one source/u.test(issue.message))
-  );
+  assert.deepEqual(invalid.issues, [
+    {
+      path: "$.properties[0]",
+      code: "IMPLEMENTED_PROPERTIES_SCHEMA_INVALID",
+      message: 'must match "then" schema'
+    },
+    {
+      path: "$.properties[0]",
+      code: "IMPLEMENTED_PROPERTIES_SCHEMA_INVALID",
+      message: "must NOT be valid"
+    }
+  ]);
 });
 
 test("property implementation schema accepts selection metadata and typed blockers", () => {
@@ -1050,7 +1201,7 @@ test("run state schema covers all required node states and rejects malformed sta
   });
 
   assert.equal(validateRunStateSchema(state).ok, true);
-  assert.equal(state.schema_version, "ultrafuzz.run-state.v4");
+  assert.equal(state.schema_version, "ultrafuzz.run-state.v5");
   assert.equal(state.nodes["node-1"]?.wait_reason, "ready");
   assert.equal(state.nodes["node-1"]?.next_eligible_action, "dispatch");
   assert.equal(state.controller_lease.status, "active");

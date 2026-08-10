@@ -9,8 +9,8 @@ import { readRegularFileSnapshot } from "./schema-registry.js";
 import { executeSemanticGate } from "./semantic-gates.js";
 import { parseStrictJsonBytes } from "./strict-json.js";
 
-export const STATE_SCHEMA_VERSION = "ultrafuzz.run-state.v4" as const;
-export const RUN_STATE_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:run-state:4" as const;
+export const STATE_SCHEMA_VERSION = "ultrafuzz.run-state.v5" as const;
+export const RUN_STATE_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:run-state:5" as const;
 export const TERMINAL_DISPOSITION_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:terminal-disposition:1" as const;
 
 export const RUN_STATE_STATUSES = [
@@ -183,6 +183,8 @@ export type NodeWorkflowProvenance = TaskNodeWorkflowProvenance | AggregateNodeW
 export interface NodeOutputContractProvenance {
   ok: boolean;
   missing: string[];
+  /** Controller-authenticated digest of the finalized artifact manifest. */
+  artifact_manifest_sha256?: string;
 }
 
 export interface NodeFailureProvenance {

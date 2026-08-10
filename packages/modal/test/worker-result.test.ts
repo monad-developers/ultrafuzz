@@ -365,7 +365,7 @@ describe("strict worker result contracts", () => {
       path.join(oldRunRoot, "state.json"),
       `${JSON.stringify(currentRunState({ old: taskNode("succeeded") }))}\n`
     );
-    fs.writeFileSync(path.join(newRunRoot, "state.json"), '{"schema_version":"ultrafuzz.run-state.v4",');
+    fs.writeFileSync(path.join(newRunRoot, "state.json"), '{"schema_version":"ultrafuzz.run-state.v5",');
 
     await expect(readWorkerCheckpoint(root)).rejects.toThrow(/JSON|Unterminated|Unexpected|object-property/u);
   });

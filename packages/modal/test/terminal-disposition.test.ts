@@ -45,7 +45,7 @@ const verifiedFailure = {
   last_error: "task output did not pass final validation",
   provenance: {
     workflow: workflow("task-one"),
-    output_contracts: { ok: true, missing: [] },
+    output_contracts: { ok: true, missing: [], artifact_manifest_sha256: "a".repeat(64) },
     terminal_disposition: {
       schema_version: "ultrafuzz.terminal-disposition.v1",
       kind: "task-output-validation-failure"
@@ -332,7 +332,7 @@ describe("terminal benchmark disposition", () => {
             finished_at: "2026-01-01T00:00:00.000Z",
             provenance: {
               workflow: workflow(secondAttempt),
-              output_contracts: { ok: true, missing: [] }
+              output_contracts: { ok: true, missing: [], artifact_manifest_sha256: "a".repeat(64) }
             }
           },
           group: {
@@ -369,7 +369,7 @@ describe("terminal benchmark disposition", () => {
             finished_at: "2026-01-01T00:00:00.000Z",
             provenance: {
               workflow: workflow("task-two", { state: "failed" }),
-              output_contracts: { ok: true, missing: [] }
+              output_contracts: { ok: true, missing: [], artifact_manifest_sha256: "a".repeat(64) }
             }
           }
         }
@@ -394,7 +394,7 @@ describe("terminal benchmark disposition", () => {
             finished_at: "2026-01-01T00:00:00.000Z",
             provenance: {
               workflow: workflow("task-two", { run_id: "run-two" }),
-              output_contracts: { ok: true, missing: [] }
+              output_contracts: { ok: true, missing: [], artifact_manifest_sha256: "a".repeat(64) }
             }
           }
         }

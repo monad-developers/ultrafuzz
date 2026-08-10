@@ -7,6 +7,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  ARTIFACT_VERIFICATION_SCHEMA_VERSION,
   artifactContractDefinition,
   artifactContractSchemaBinding,
   artifactSchemaDirectory,
@@ -15,25 +16,37 @@ import {
   derivePropertyImplementationCoverage,
   getNodeArtifactDir,
   readRunState,
+  SMITHERS_TASK_MANIFEST_SCHEMA_VERSION,
+  SMITHERS_TASK_METADATA_SCHEMA_VERSION,
+  updateNodeState,
   validateRegisteredJsonFileSync,
   writeArtifact as writeArtifactFile,
+  writeArtifactManifest,
+  writeJsonDurable,
   writeRunState,
-  writeArtifactManifest
+  type ArtifactVerificationMarker,
+  type SmithersTaskManifestDocument,
+  type SmithersTaskManifestTask
 } from "@ultrafuzz/artifacts";
 import { loadBuiltInPromptAssets } from "@ultrafuzz/prompts";
 
 import {
-  CAMPAIGN_LOGICAL_NODE_IDS,
   captureWorkspacePatch,
   captureWorkspaceTree,
   dependencyGateForNode,
-  verifyRequiredArtifactsForAttempt,
+  verifyRequiredArtifactsForAttempt as verifyRuntimeRequiredArtifactsForAttempt,
+  type ArtifactGateAttemptAuthority,
   type PlannedGraphNode
 } from "../src/index.js";
+import { WORKFLOW_CONTROL_INTEGRITY_SCHEMA_VERSION } from "../src/runtime-contracts.js";
 
 function tempProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-runtime-gates-"));
 }
+
+const FIXTURE_WORKFLOW_RUN_ID = "workflow-artifact-gates";
+const FIXTURE_AGENT_TASK_ID = "agent-artifact-gates";
+const FIXTURE_VERIFIER_TASK_ID = "verifier-artifact-gates";
 
 /**
  * Real planned runs record every logical producer in state before any artifact
@@ -41,16 +54,26 @@ function tempProject(): string {
  * keep the state index in sync instead of relying on the removed historical
  * artifact-directory fallback.
  */
-function registerArtifactNode(layout: ReturnType<typeof createRunLayout>, nodeId: string): void {
+function registerArtifactNode(
+  layout: ReturnType<typeof createRunLayout>,
+  nodeId: string,
+  outputs: readonly PlannedGraphNode["outputs"][number][] = []
+): void {
   const state = readRunState(layout);
-  if (state.nodes[nodeId] !== undefined) return;
-  state.nodes[nodeId] = {
+  const node = (state.nodes[nodeId] ??= {
     node_id: nodeId,
     logical_node_id: nodeId,
     status: "succeeded",
     retry_count: 0,
     timed_out: false
-  };
+  });
+  const declared = [...(node.outputs ?? [])];
+  for (const output of outputs) {
+    if (declared.some((candidate) => candidate.path === output.path && candidate.contract === output.contract))
+      continue;
+    declared.push(output);
+  }
+  if (declared.length > 0) node.outputs = declared;
   writeRunState(layout, state);
 }
 
@@ -60,8 +83,36 @@ function writeArtifact(
   artifactPath: string,
   contents: string
 ): string {
-  registerArtifactNode(layout, nodeId);
-  return writeArtifactFile(layout, nodeId, artifactPath, contents);
+  const contract = fixtureDeclaredContract(artifactPath);
+  const existingOutputs = readRunState(layout).nodes[nodeId]?.outputs ?? [];
+  const declaredOutputs =
+    contract === undefined
+      ? []
+      : [boundOutput(artifactPath, contract, !existingOutputs.some((output) => output.primary === true))];
+  registerArtifactNode(layout, nodeId, declaredOutputs);
+  const written = writeArtifactFile(layout, nodeId, artifactPath, contents);
+  if (declaredOutputs.length > 0) {
+    const registeredOutputs = readRunState(layout).nodes[nodeId]?.outputs ?? declaredOutputs;
+    const availableOutputs = registeredOutputs.filter((output) =>
+      fs.existsSync(path.join(getNodeArtifactDir(layout, nodeId), output.path))
+    );
+    finalizeArtifactNode(layout, nodeId, availableOutputs);
+  }
+  return written;
+}
+
+function fixtureDeclaredContract(artifactPath: string): PlannedGraphNode["outputs"][number]["contract"] | undefined {
+  if (artifactPath === "setup/invariant-evidence-ledger.json") return "ultrafuzz/invariant-ledger@1";
+  if (artifactPath === "properties.json") return "ultrafuzz/properties@2";
+  if (artifactPath === "implemented-properties.json") return "ultrafuzz/implemented-properties@3";
+  if (["recon-fuzzer-results.json", "echidna-results.json", "medusa-results.json"].includes(artifactPath)) {
+    return "ultrafuzz/property-campaign@2";
+  }
+  if (artifactPath === "campaign-summary.json") return "ultrafuzz/campaign-summary@2";
+  if (artifactPath === "findings.json") return "ultrafuzz/findings@2";
+  if (artifactPath === "triaged-findings.json") return "ultrafuzz/triaged-findings@1";
+  if (artifactPath === "report.json") return "ultrafuzz/report@2";
+  return undefined;
 }
 
 function writePropertyLens(
@@ -70,10 +121,11 @@ function writePropertyLens(
   propertyIds: readonly string[]
 ): void {
   const lensName = logicalNodeId.replace(/^property-specification-/u, "");
-  writeArtifact(
+  const lensPath = `properties/${lensName}.json`;
+  writeDeclaredPropertyLens(
     layout,
     logicalNodeId,
-    `properties/${lensName}.json`,
+    lensPath,
     JSON.stringify({
       schema_version: "ultrafuzz.property-lens.v2",
       properties: propertyIds.map((id) => ({
@@ -84,6 +136,113 @@ function writePropertyLens(
       }))
     })
   );
+}
+
+function writeDeclaredPropertyLens(
+  layout: ReturnType<typeof createRunLayout>,
+  nodeId: string,
+  artifactPath: string,
+  contents: string
+): string {
+  const outputs = [boundOutput(artifactPath, "ultrafuzz/property-lens@2", true)];
+  registerArtifactNode(layout, nodeId, outputs);
+  const written = writeArtifactFile(layout, nodeId, artifactPath, contents);
+  finalizeArtifactNode(layout, nodeId, outputs);
+  return written;
+}
+
+function writeDeclaredArtifactNode(
+  layout: ReturnType<typeof createRunLayout>,
+  nodeId: string,
+  outputs: readonly PlannedGraphNode["outputs"][number][],
+  contents: Readonly<Record<string, string>>
+): void {
+  registerArtifactNode(layout, nodeId, outputs);
+  for (const output of outputs) {
+    const value = contents[output.path];
+    if (value === undefined) throw new Error(`missing fixture contents for ${output.path}`);
+    writeArtifactFile(layout, nodeId, output.path, value);
+  }
+  finalizeArtifactNode(layout, nodeId, outputs);
+}
+
+function writeMinimalPropertyFaninFixture(
+  layout: ReturnType<typeof createRunLayout>,
+  options: {
+    sourceNodeId?: string;
+    sourcePropertyId?: string;
+    dependsOn?: readonly string[];
+    referenceExpectation?: string;
+  } = {}
+): PlannedGraphNode {
+  const sourceNodeId = options.sourceNodeId ?? "property-specification-recon";
+  const sourcePropertyId = options.sourcePropertyId ?? "recon-1";
+  writeArtifact(
+    layout,
+    "project-discovery",
+    "setup/invariant-evidence-ledger.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+      entries: [
+        {
+          id: "evidence-1",
+          source_path: "docs/overview.md",
+          source_location: "line 1",
+          kind: "invariant",
+          verbatim: "Supply accounting remains consistent.",
+          inventory_ids: ["inventory-1"]
+        }
+      ],
+      inventory_rows: [
+        { id: "inventory-1", description: "Supply accounting remains consistent.", ledger_ids: ["evidence-1"] }
+      ],
+      scan_probes: []
+    })
+  );
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.properties.v2",
+      properties: [
+        {
+          id: "property-1",
+          description: "Supply accounting remains consistent.",
+          category: "accounting",
+          priority: "high",
+          sources: [{ source_node_id: sourceNodeId, source_property_id: sourcePropertyId }],
+          ledger_ids: ["evidence-1"],
+          ...(options.referenceExpectation === undefined
+            ? {}
+            : { reference_expectations: [options.referenceExpectation] })
+        }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.md",
+    [
+      "### Canonical property: property-1",
+      "- description: Supply accounting remains consistent.",
+      "- category: accounting",
+      "- priority: high",
+      `- sources: ${sourceNodeId}:${sourcePropertyId}`,
+      "- ledger_ids: evidence-1",
+      ...(options.referenceExpectation === undefined
+        ? []
+        : [`- reference_expectations: ${options.referenceExpectation}`]),
+      "### End canonical property: property-1"
+    ].join("\n")
+  );
+  return {
+    ...plannedNode(["properties.json", "properties.md"]),
+    id: "property-specification-fanin",
+    logical_id: "property-specification-fanin",
+    depends_on: [...(options.dependsOn ?? ["property-specification-recon"])]
+  };
 }
 
 function writePlannedGraph(layout: ReturnType<typeof createRunLayout>, nodes: readonly PlannedGraphNode[]): void {
@@ -100,6 +259,237 @@ function writePlannedGraph(layout: ReturnType<typeof createRunLayout>, nodes: re
   );
 }
 
+function inferredFixtureDependencies(
+  graph: { nodes: PlannedGraphNode[] },
+  outputs: readonly PlannedGraphNode["outputs"][number][],
+  explicitDependencies: readonly string[] = []
+): string[] {
+  const contracts = new Set(outputs.map((output) => output.contract));
+  const requiredContracts = new Set<PlannedGraphNode["outputs"][number]["contract"]>();
+  if (contracts.has("ultrafuzz/property-lens@2")) requiredContracts.add("ultrafuzz/invariant-ledger@1");
+  if (contracts.has("ultrafuzz/properties@2")) {
+    if (explicitDependencies.length === 0) requiredContracts.add("ultrafuzz/property-lens@2");
+    requiredContracts.add("ultrafuzz/invariant-ledger@1");
+  }
+  if (contracts.has("ultrafuzz/implemented-properties@3")) requiredContracts.add("ultrafuzz/properties@2");
+  if (contracts.has("ultrafuzz/property-campaign@2")) {
+    requiredContracts.add("ultrafuzz/implemented-properties@3");
+  }
+  if (contracts.has("ultrafuzz/report@2")) {
+    requiredContracts.add("ultrafuzz/properties@2");
+    requiredContracts.add("ultrafuzz/implemented-properties@3");
+    requiredContracts.add("ultrafuzz/property-campaign@2");
+    requiredContracts.add("ultrafuzz/triaged-findings@1");
+  }
+  if (contracts.has("ultrafuzz/severity-classified-findings@1")) {
+    requiredContracts.add("ultrafuzz/triaged-findings@1");
+  }
+  return graph.nodes
+    .filter((candidate) => candidate.outputs.some((output) => requiredContracts.has(output.contract)))
+    .map((candidate) => candidate.id);
+}
+
+function registerMissingFixtureDependencies(
+  layout: ReturnType<typeof createRunLayout>,
+  graph: { nodes: PlannedGraphNode[] },
+  dependencyIds: readonly string[],
+  consumerOutputs: readonly PlannedGraphNode["outputs"][number][]
+): void {
+  const state = readRunState(layout);
+  for (const dependencyId of dependencyIds) {
+    if (graph.nodes.some((candidate) => candidate.id === dependencyId)) continue;
+    const nodeState = state.nodes[dependencyId];
+    const stateOutputs = nodeState?.outputs ?? [];
+    const outputs =
+      stateOutputs.length > 0
+        ? stateOutputs.map((output, index) => boundOutput(output.path, output.contract, index === 0))
+        : consumerOutputs.some((output) => output.contract === "ultrafuzz/properties@2")
+          ? [boundOutput(`properties/${dependencyId}.json`, "ultrafuzz/property-lens@2", true)]
+          : [boundOutput("fixture.md", "ultrafuzz/nonempty-markdown@1", true)];
+    graph.nodes.push({
+      ...plannedNode([]),
+      id: dependencyId,
+      logical_id: nodeState?.logical_node_id ?? dependencyId,
+      display_name: nodeState?.logical_node_id ?? dependencyId,
+      artifact_dir: `artifacts/${dependencyId}`,
+      depends_on: inferredFixtureDependencies(graph, outputs),
+      outputs
+    });
+  }
+}
+
+function verifyRequiredArtifactsForAttempt(
+  layout: ReturnType<typeof createRunLayout>,
+  node: PlannedGraphNode,
+  attemptId: string,
+  attemptAuthority?: ArtifactGateAttemptAuthority,
+  authenticated?: Parameters<typeof verifyRuntimeRequiredArtifactsForAttempt>[4]
+): ReturnType<typeof verifyRuntimeRequiredArtifactsForAttempt> {
+  const graph = JSON.parse(fs.readFileSync(layout.graphPath, "utf8")) as {
+    schema_version: string;
+    graph_version: string;
+    topology_version: number;
+    groups: Record<string, unknown>;
+    nodes: PlannedGraphNode[];
+  };
+  const existing = graph.nodes.find((candidate) => candidate.id === node.id);
+  const explicitDependencies = [...new Set([...(existing?.depends_on ?? []), ...node.depends_on])].filter(
+    (dependency) => dependency !== node.id
+  );
+  registerMissingFixtureDependencies(layout, graph, explicitDependencies, node.outputs);
+  const planned = {
+    ...node,
+    artifact_dir: `artifacts/${node.id}`,
+    depends_on: [
+      ...new Set([
+        ...(existing?.depends_on ?? []),
+        ...node.depends_on,
+        ...inferredFixtureDependencies(graph, node.outputs, node.depends_on)
+      ])
+    ].filter((dependency) => dependency !== node.id)
+  };
+  const existingIndex = graph.nodes.findIndex((candidate) => candidate.id === node.id);
+  if (existingIndex === -1) graph.nodes.push(planned);
+  else graph.nodes[existingIndex] = planned;
+  fs.writeFileSync(layout.graphPath, JSON.stringify(graph), "utf8");
+  writeSealedFixtureTaskAuthority(layout, graph.nodes, attemptAuthority?.tasks);
+  return verifyRuntimeRequiredArtifactsForAttempt(layout, planned, attemptId, attemptAuthority, authenticated);
+}
+
+function fixtureAttemptIds(node: PlannedGraphNode): string[] {
+  const workflowAttempts = node.workflow?.task_node_ids.map((taskNodeId) => taskNodeId.replace(/^node:/u, ""));
+  if (workflowAttempts !== undefined && workflowAttempts.length > 0) return workflowAttempts;
+  if (node.model_fanout.length <= 1) return [node.id];
+  return node.model_fanout.map((model) => `${node.id}__model_${model.model_index}__attempt_${model.attempt_index}`);
+}
+
+function syntheticFixtureTasks(
+  layout: ReturnType<typeof createRunLayout>,
+  nodes: readonly PlannedGraphNode[]
+): SmithersTaskManifestTask[] {
+  const nodesById = new Map(nodes.map((node) => [node.id, node] as const));
+  const ancestorIds = (node: PlannedGraphNode): Set<string> => {
+    const ancestors = new Set<string>();
+    const pending = [...node.depends_on];
+    while (pending.length > 0) {
+      const dependencyId = pending.pop()!;
+      if (ancestors.has(dependencyId)) continue;
+      ancestors.add(dependencyId);
+      pending.push(...(nodesById.get(dependencyId)?.depends_on ?? []));
+    }
+    return ancestors;
+  };
+  return nodes
+    .filter((node) => node.kind === "agentic")
+    .flatMap((node) => {
+      const attempts = fixtureAttemptIds(node);
+      const dependencies = node.depends_on.flatMap((dependencyId) => {
+        const dependency = nodesById.get(dependencyId);
+        return dependency === undefined || dependency.kind === "reference"
+          ? [dependencyId]
+          : fixtureAttemptIds(dependency);
+      });
+      const dependencyArtifactDirs = nodes
+        .filter((candidate) => ancestorIds(node).has(candidate.id))
+        .flatMap((candidate) => fixtureAttemptIds(candidate))
+        .map((ancestorAttemptId) => getNodeArtifactDir(layout, ancestorAttemptId, { create: true }));
+      const dependencySmithersNodeIds = node.depends_on.flatMap((dependencyId) => {
+        const dependency = nodesById.get(dependencyId);
+        return dependency?.kind === "agentic"
+          ? fixtureAttemptIds(dependency).map((dependencyAttemptId) => `verify:${dependencyAttemptId}`)
+          : [];
+      });
+      return attempts.map((attemptId, modelIndex) => {
+        const task = smithersTaskForNode({
+          layout,
+          node,
+          attemptId,
+          dependencies,
+          dependencyArtifactDirs,
+          modelIndex
+        });
+        return {
+          ...task,
+          dependencySmithersNodeIds,
+          metadata: {
+            ...task.metadata,
+            dependencies: { ...task.metadata.dependencies, smithersNodeIds: dependencySmithersNodeIds }
+          }
+        };
+      });
+    });
+}
+
+function writeSealedFixtureTaskAuthority(
+  layout: ReturnType<typeof createRunLayout>,
+  nodes: readonly PlannedGraphNode[],
+  suppliedTasks?: readonly SmithersTaskManifestTask[]
+): void {
+  const sealedNodes = nodes.map((node) => {
+    if (node.kind !== "agentic" || node.workflow !== undefined) return node;
+    const attempts = fixtureAttemptIds(node);
+    return {
+      ...node,
+      workflow: { node_id: `node:${attempts[0]!}`, task_node_ids: attempts.map((attemptId) => `node:${attemptId}`) }
+    };
+  });
+  const graphDocument = JSON.parse(fs.readFileSync(layout.graphPath, "utf8")) as {
+    schema_version: string;
+    graph_version: string;
+    topology_version: number;
+    groups: Record<string, unknown>;
+    nodes: PlannedGraphNode[];
+  };
+  graphDocument.nodes = sealedNodes;
+  fs.writeFileSync(layout.graphPath, JSON.stringify(graphDocument), "utf8");
+  const tasks = suppliedTasks === undefined ? syntheticFixtureTasks(layout, sealedNodes) : [...suppliedTasks];
+  const smithersRoot = path.join(layout.root, "smithers");
+  fs.mkdirSync(smithersRoot, { recursive: true });
+  const tasksPath = path.join(smithersRoot, "tasks.json");
+  const document: SmithersTaskManifestDocument = {
+    schema_version: SMITHERS_TASK_MANIFEST_SCHEMA_VERSION,
+    run_id: layout.runId,
+    smithers_run_id: `ultrafuzz-${layout.runId}`,
+    workflow_name: FIXTURE_WORKFLOW_RUN_ID,
+    pinned_submodules: null,
+    tasks
+  };
+  writeJsonDurable(tasksPath, document);
+  const graphBytes = fs.readFileSync(layout.graphPath);
+  const taskBytes = fs.readFileSync(tasksPath);
+  const digest = (bytes: Buffer): string => createHash("sha256").update(bytes).digest("hex");
+  const emptyFile = { sha256: digest(Buffer.alloc(0)), size_bytes: 0 };
+  const state = readRunState(layout);
+  if (!/^[a-f0-9]{64}$/u.test(state.graph_fingerprint)) state.graph_fingerprint = "f".repeat(64);
+  if (!/^[a-f0-9]{64}$/u.test(state.config_fingerprint)) state.config_fingerprint = "e".repeat(64);
+  writeRunState(layout, state);
+  writeJsonDurable(path.join(smithersRoot, "control-integrity.json"), {
+    schema_version: WORKFLOW_CONTROL_INTEGRITY_SCHEMA_VERSION,
+    run_id: layout.runId,
+    files: {
+      graph: { sha256: digest(graphBytes), size_bytes: graphBytes.byteLength },
+      expanded_graph: emptyFile,
+      graph_fingerprint: emptyFile,
+      config: emptyFile,
+      tasks: { sha256: digest(taskBytes), size_bytes: taskBytes.byteLength },
+      input: emptyFile,
+      workflow: emptyFile,
+      evidence_workflow: emptyFile
+    },
+    execution_files: [],
+    bindings: {
+      run_id: layout.runId,
+      graph_fingerprint: state.graph_fingerprint,
+      config_fingerprint: state.config_fingerprint,
+      expected_state_node_ids: sealedNodes.map((candidate) => candidate.id).sort(),
+      expected_task_attempt_ids: tasks.map((task) => task.attemptId).sort(),
+      expected_task_node_ids: tasks
+        .flatMap((task) => [task.preparationSmithersNodeId, task.smithersNodeId, task.verifierSmithersNodeId])
+        .sort()
+    }
+  });
+}
+
 function boundOutput(
   artifactPath: string,
   contract: PlannedGraphNode["outputs"][number]["contract"],
@@ -112,6 +502,209 @@ function boundOutput(
     ...(artifactContractSchemaBinding(contract) ?? {}),
     primary
   };
+}
+
+function smithersTaskForNode(input: {
+  layout: ReturnType<typeof createRunLayout>;
+  node: PlannedGraphNode;
+  attemptId: string;
+  dependencies?: string[];
+  dependencyArtifactDirs?: string[];
+  modelIndex?: number;
+}): SmithersTaskManifestTask {
+  const dependencies = input.dependencies ?? [];
+  const dependencyArtifactDirs = input.dependencyArtifactDirs ?? [];
+  const outputs = input.node.outputs.map((output) => ({
+    path: output.path,
+    contract: output.contract,
+    contractDigest: output.contract_digest,
+    ...(output.schema_file === undefined ? {} : { schemaFile: output.schema_file }),
+    ...(output.schema_id === undefined ? {} : { schemaId: output.schema_id }),
+    ...(output.schema_sha256 === undefined ? {} : { schemaSha256: output.schema_sha256 }),
+    ...(output.schema_bundle_sha256 === undefined ? {} : { schemaBundleSha256: output.schema_bundle_sha256 }),
+    ...(output.validator_build === undefined ? {} : { validatorBuild: output.validator_build }),
+    primary: output.primary
+  }));
+  const artifactDir = getNodeArtifactDir(input.layout, input.attemptId, { create: true });
+  const workspacePath = path.join(input.layout.workspacesDir, input.attemptId);
+  const model = input.node.model_fanout.find((candidate) => candidate.model_index === (input.modelIndex ?? 0));
+  const agentRef = model?.agent_ref ?? "CodexAgent";
+  const modelName = model?.model_name ?? "gpt-test";
+  const reasoningEffort = model?.reasoning_effort ?? "high";
+  return {
+    attemptId: input.attemptId,
+    concreteNodeId: input.node.id,
+    logicalNodeId: input.node.logical_id,
+    preparationSmithersNodeId: `prepare:${input.attemptId}`,
+    smithersNodeId: `node:${input.attemptId}`,
+    verifierSmithersNodeId: `verify:${input.attemptId}`,
+    agentRef,
+    modelName,
+    reasoningEffort,
+    dependencies,
+    dependencySmithersNodeIds: dependencies.map((dependency) => `verify:${dependency}`),
+    timeoutMs: 60_000,
+    heartbeatTimeoutMs: 60_000,
+    retries: 0,
+    retryPolicy: { backoff: "exponential", initialDelayMs: 1_000, maxDelayMs: 30_000 },
+    workspacePath,
+    artifactDir,
+    dependencyArtifactDirs,
+    renderedPromptPath: path.join(input.layout.root, "prompts", `${input.attemptId}.md`),
+    execution: {
+      mode: "local",
+      resources: { cpu: 2, memoryMiB: 1_024, timeoutSeconds: 60 },
+      agentCredentialEnv: []
+    },
+    metadata: {
+      schemaVersion: SMITHERS_TASK_METADATA_SCHEMA_VERSION,
+      run: {
+        ultrafuzzRunId: input.layout.runId,
+        smithersWorkflowName: "workflow-artifact-gates",
+        graphVersion: "3",
+        topologyVersion: 2
+      },
+      node: {
+        concreteNodeId: input.node.id,
+        logicalNodeId: input.node.logical_id,
+        attemptId: input.attemptId,
+        label: input.node.display_name,
+        kind: "agentic",
+        promptPath: input.node.prompt_path
+      },
+      dependencies: {
+        concreteNodeIds: [...input.node.depends_on],
+        attemptIds: dependencies,
+        smithersNodeIds: dependencies.map((dependency) => `verify:${dependency}`)
+      },
+      loop: {
+        index: input.node.loop.index,
+        count: input.node.loop.count,
+        mode: input.node.loop.mode,
+        attemptIndex: input.node.loop.attempt_index
+      },
+      model: {
+        profileId: model?.model_profile_id ?? "default",
+        agentRef,
+        modelName,
+        reasoningEffort,
+        modelIndex: model?.model_index ?? input.modelIndex ?? 0,
+        attemptIndex: model?.attempt_index ?? input.node.loop.attempt_index
+      },
+      workspace: {
+        primitive: "worktree",
+        path: workspacePath,
+        repoPath: "/repo",
+        trustModel: "skip-permissions"
+      },
+      artifacts: {
+        dir: artifactDir,
+        outputs,
+        manifestPath: path.join(artifactDir, "artifact-manifest.json")
+      },
+      retryPolicy: { maxAttempts: 1, smithersRetries: 0 },
+      timeout: { milliseconds: 60_000, seconds: 60, heartbeatTimeoutMs: 60_000 },
+      execution: { mode: "local", resources: { cpu: 2, memoryMiB: 1_024, timeoutSeconds: 60 } }
+    }
+  };
+}
+
+function finalizeArtifactNode(
+  layout: ReturnType<typeof createRunLayout>,
+  nodeId: string,
+  outputs: readonly PlannedGraphNode["outputs"][number][],
+  identity: { concreteNodeId?: string; logicalNodeId?: string; modelIndex?: number } = {}
+): void {
+  const state = readRunState(layout);
+  const concreteNodeId = identity.concreteNodeId ?? nodeId;
+  const logicalNodeId = identity.logicalNodeId ?? state.nodes[nodeId]?.logical_node_id ?? nodeId;
+  if (state.nodes[nodeId] !== undefined) {
+    state.nodes[nodeId]!.logical_node_id = logicalNodeId;
+    state.nodes[nodeId]!.outputs = [...outputs];
+    writeRunState(layout, state);
+  }
+  const graph = JSON.parse(fs.readFileSync(layout.graphPath, "utf8")) as {
+    schema_version: string;
+    graph_version: string;
+    topology_version: number;
+    groups: Record<string, unknown>;
+    nodes: PlannedGraphNode[];
+  };
+  const existingIndex = graph.nodes.findIndex((node) => node.id === concreteNodeId);
+  const existing = existingIndex === -1 ? undefined : graph.nodes[existingIndex];
+  const planned: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: concreteNodeId,
+    logical_id: logicalNodeId,
+    display_name: logicalNodeId,
+    artifact_dir: `artifacts/${concreteNodeId}`,
+    depends_on:
+      existing === undefined
+        ? inferredFixtureDependencies(graph, outputs).filter((dependency) => dependency !== concreteNodeId)
+        : existing.depends_on,
+    outputs: [...outputs]
+  };
+  if (existingIndex === -1) graph.nodes.push(planned);
+  else graph.nodes[existingIndex] = planned;
+  fs.writeFileSync(layout.graphPath, JSON.stringify(graph), "utf8");
+
+  const outputBytes = new Map(
+    outputs.map((output) => [output.path, fs.readFileSync(path.join(getNodeArtifactDir(layout, nodeId), output.path))])
+  );
+  writeArtifactManifest({
+    layout,
+    nodeId,
+    include: outputs.map((output) => output.path),
+    outputs: [...outputs],
+    prerequisiteNodeIds: planned.depends_on,
+    provenance: {
+      producer_node_id: nodeId,
+      logical_node_id: logicalNodeId,
+      attempt_index: 0,
+      loop_index: 0,
+      model_index: identity.modelIndex ?? 0,
+      agent_ref: "Codex",
+      workflow_run_id: FIXTURE_WORKFLOW_RUN_ID,
+      workflow_task_id: FIXTURE_AGENT_TASK_ID,
+      origin: "workflow",
+      metadata: { concrete_node_id: concreteNodeId }
+    }
+  });
+  const marker: ArtifactVerificationMarker = {
+    schema_version: ARTIFACT_VERIFICATION_SCHEMA_VERSION,
+    attempt_id: nodeId,
+    node_id: logicalNodeId,
+    artifacts: outputs.map((output) => ({
+      ...output,
+      sha256: createHash("sha256").update(outputBytes.get(output.path)!).digest("hex")
+    })),
+    publications: outputs.map((output) => ({
+      path: output.path,
+      sha256: createHash("sha256").update(outputBytes.get(output.path)!).digest("hex")
+    }))
+  };
+  writeJsonDurable(path.join(layout.root, ".ultrafuzz-verification", `${nodeId}.json`), marker);
+  updateNodeState(layout, nodeId, {
+    status: "succeeded",
+    finished_at: new Date().toISOString(),
+    provenance: {
+      workflow: {
+        run_id: FIXTURE_WORKFLOW_RUN_ID,
+        task_id: FIXTURE_VERIFIER_TASK_ID,
+        agent_task_id: FIXTURE_AGENT_TASK_ID,
+        verifier_task_id: FIXTURE_VERIFIER_TASK_ID,
+        state: "finished",
+        attempt: 0
+      },
+      output_contracts: {
+        ok: true,
+        missing: [],
+        artifact_manifest_sha256: createHash("sha256")
+          .update(fs.readFileSync(path.join(getNodeArtifactDir(layout, nodeId), "artifact-manifest.json")))
+          .digest("hex")
+      }
+    }
+  });
 }
 
 function currentFinding(id: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -186,6 +779,30 @@ function currentImplementedCoverage(propertyIds: string[]): Record<string, unkno
     reference_expectation_ids: [],
     blocker_summaries: []
   };
+}
+
+function reportCoverageMarkdown(coverage: Record<string, unknown>): string {
+  const count = (field: string): number => (Array.isArray(coverage[field]) ? coverage[field].length : 0);
+  const priorities = Array.isArray(coverage.priorities) ? coverage.priorities.join("<br>") : "unavailable";
+  const blockers = Array.isArray(coverage.blocker_summaries)
+    ? coverage.blocker_summaries.map((summary) => `- ${String(summary)}`)
+    : [];
+  return [
+    "# Ultrafuzz report",
+    "",
+    "## Property implementation coverage",
+    "",
+    `- Priority threshold: \`${String(coverage.priority_threshold ?? "unavailable")}\``,
+    `- Included priorities: \`${priorities}\``,
+    `- Selected properties: \`${count("selected_property_ids")}\``,
+    `- Implemented properties: \`${count("implemented_property_ids")}\``,
+    `- Blocked properties: \`${count("blocked_property_ids")}\``,
+    `- Pending properties: \`${count("pending_property_ids")}\``,
+    `- Deferred properties: \`${count("deferred_property_ids")}\``,
+    `- Reference expectation properties: \`${count("reference_expected_property_ids")}\``,
+    ...(blockers.length === 0 ? [] : ["", "Blocker summaries:", ...blockers]),
+    ""
+  ].join("\n");
 }
 
 // A discovery workspace as a benchmark run sees it: a Git worktree whose pinned branch exists and
@@ -264,27 +881,6 @@ function plannedNode(paths: string[]): PlannedGraphNode {
     model_fanout: []
   };
 }
-
-test("the campaign provenance gate covers the campaign node the shipped topology runs", () => {
-  // Guards the regression this list fixes: the gate was previously keyed on a
-  // logical ID the default topology does not contain, so campaign property
-  // joins went unverified. A node rename must not silently reintroduce that.
-  // The runtime build copies the shipped topology to dist/topology.yml, so this
-  // asserts against the exact file the package ships.
-  const topologyPath = path.join(import.meta.dirname, "..", "..", "dist", "topology.yml");
-  const topologySource = fs.readFileSync(topologyPath, "utf8");
-  const campaignIds = [...topologySource.matchAll(/^ {2}- id: (\S+)$/gmu)]
-    .map((match) => match[1]!)
-    .filter((id) => id.startsWith("stateful-invariant-") && id.includes("campaign"));
-
-  assert.ok(campaignIds.length > 0, "shipped topology declares no invariant campaign node");
-  for (const campaignId of campaignIds) {
-    assert.ok(
-      CAMPAIGN_LOGICAL_NODE_IDS.some((gated) => gated === campaignId),
-      `topology campaign node ${campaignId} is not covered by the provenance gate`
-    );
-  }
-});
 
 test("required artifact gate validates generated-test manifest shape and listed files", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
@@ -552,18 +1148,32 @@ test("severity classification gates preserve triaged fields and enforce the fina
   );
 });
 
-test("sealed planned graph distinguishes an absent property track from a missing planned producer", () => {
+test("sealed planned graph ignores unrelated producers but rejects a missing planned producer", () => {
   const absentLayout = createRunLayout({ projectRoot: tempProject(), runId: "run-no-property-track" });
   const reportNode = {
-    ...plannedNode(["report.json"]),
+    ...plannedNode(["report.md", "report.json"]),
     id: "final-report",
     logical_id: "final-report",
     artifact_dir: "artifacts/final-report"
   };
   writePlannedGraph(absentLayout, [reportNode]);
+  writeArtifact(absentLayout, reportNode.id, "report.md", "# Report\n");
   writeArtifact(absentLayout, reportNode.id, "report.json", JSON.stringify(currentReport(absentLayout.runId)));
   const absent = verifyRequiredArtifactsForAttempt(absentLayout, reportNode, reportNode.id);
   assert.equal(absent.ok, true, JSON.stringify(absent.diagnostics));
+
+  const outsideLayout = createRunLayout({ projectRoot: tempProject(), runId: "run-property-producer-outside-closure" });
+  const outsideCatalogNode = {
+    ...plannedNode(["properties.json"]),
+    id: "unrelated-property-catalog",
+    logical_id: "unrelated-property-catalog",
+    artifact_dir: "artifacts/unrelated-property-catalog"
+  };
+  writePlannedGraph(outsideLayout, [outsideCatalogNode, reportNode]);
+  writeArtifact(outsideLayout, reportNode.id, "report.md", "# Report\n");
+  writeArtifact(outsideLayout, reportNode.id, "report.json", JSON.stringify(currentReport(outsideLayout.runId)));
+  const outside = verifyRuntimeRequiredArtifactsForAttempt(outsideLayout, reportNode, reportNode.id);
+  assert.equal(outside.ok, true, JSON.stringify(outside.diagnostics));
 
   const missingLayout = createRunLayout({ projectRoot: tempProject(), runId: "run-missing-property-producer" });
   const catalogNode = {
@@ -581,12 +1191,17 @@ test("sealed planned graph distinguishes an absent property track from a missing
   };
   const plannedReportNode = { ...reportNode, depends_on: [implementationNode.id] };
   writePlannedGraph(missingLayout, [catalogNode, implementationNode, plannedReportNode]);
-  writeArtifact(missingLayout, reportNode.id, "report.json", JSON.stringify(currentReport(missingLayout.runId)));
+  // This branch deliberately leaves a planned prerequisite unfinalized. Write
+  // the current output without manufacturing a contradictory success manifest.
+  writeArtifactFile(missingLayout, reportNode.id, "report.json", JSON.stringify(currentReport(missingLayout.runId)));
   const missing = verifyRequiredArtifactsForAttempt(missingLayout, plannedReportNode, plannedReportNode.id);
   assert.equal(missing.ok, false);
-  assert.equal(
-    missing.diagnostics.filter((diagnostic) => diagnostic.code === "ARTIFACT_SEMANTIC_GATE_CONTEXT_UNAVAILABLE").length,
-    1
+  assert.ok(
+    missing.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "REQUIRED_ARTIFACT_INVALID" && /finalized .* authority/u.test(diagnostic.message)
+    ),
+    JSON.stringify(missing.diagnostics)
   );
 
   const malformedCatalogPath = writeArtifact(
@@ -600,8 +1215,10 @@ test("sealed planned graph distinguishes an absent property track from a missing
   assert.equal(malformedCatalog.ok, false);
   assert.ok(
     malformedCatalog.diagnostics.some(
-      (diagnostic) => diagnostic.code === "REQUIRED_ARTIFACT_INVALID" && /schema-invalid/u.test(diagnostic.message)
-    )
+      (diagnostic) =>
+        diagnostic.code === "REQUIRED_ARTIFACT_INVALID" && /failed .* validation/u.test(diagnostic.message)
+    ),
+    JSON.stringify(malformedCatalog.diagnostics)
   );
   assert.deepEqual(fs.readFileSync(malformedCatalogPath), malformedCatalogBytes);
 
@@ -626,10 +1243,91 @@ test("sealed planned graph distinguishes an absent property track from a missing
   assert.equal(malformedImplementation.ok, false);
   assert.ok(
     malformedImplementation.diagnostics.some(
-      (diagnostic) => diagnostic.code === "REQUIRED_ARTIFACT_INVALID" && /schema-invalid/u.test(diagnostic.message)
-    )
+      (diagnostic) =>
+        diagnostic.code === "REQUIRED_ARTIFACT_INVALID" && /failed .* validation/u.test(diagnostic.message)
+    ),
+    JSON.stringify(malformedImplementation.diagnostics)
   );
   assert.deepEqual(fs.readFileSync(malformedImplementationPath), malformedImplementationBytes);
+});
+
+test("renamed report producers gate their exact declared JSON and Markdown paths", () => {
+  const layout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-custom-report-paths",
+    resolvedConfigToml: '[invariants]\nproperty_priority_threshold = "high"\n'
+  });
+  const coverage = currentImplementedCoverage(["property-1"]);
+  writeArtifact(
+    layout,
+    "custom-property-catalog",
+    "properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.properties.v2",
+      properties: [
+        {
+          id: "property-1",
+          description: "Balances remain conserved",
+          category: "accounting",
+          priority: "high",
+          sources: [{ source_node_id: "custom-lens", source_property_id: "source-1" }]
+        }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    "custom-implementation",
+    "implemented-properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v3",
+      selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-1"] },
+      properties: [
+        {
+          property_id: "property-1",
+          status: "implemented",
+          implementation_paths: ["test/Properties.sol"],
+          test_paths: ["test/Property1.t.sol"]
+        }
+      ]
+    })
+  );
+  const reportOutput = boundOutput("custom/final/document.json", "ultrafuzz/report@2");
+  const markdownOutput = boundOutput("rendered/security-review.md", "ultrafuzz/nonempty-markdown@1", true);
+  const node: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "terminal-export-attempt",
+    logical_id: "renamed-terminal-export",
+    display_name: "Renamed terminal export",
+    artifact_dir: "artifacts/terminal-export-attempt",
+    depends_on: ["custom-implementation"],
+    outputs: [markdownOutput, reportOutput]
+  };
+  writeArtifactFile(
+    layout,
+    node.id,
+    reportOutput.path,
+    JSON.stringify(currentReport(layout.runId, { property_implementation_coverage: coverage }))
+  );
+  writeArtifactFile(layout, node.id, markdownOutput.path, "# Report without declared coverage\n");
+  const decoy = writeArtifactFile(layout, node.id, "report.json", "{ intentionally invalid undeclared decoy");
+  const decoyBytes = fs.readFileSync(decoy);
+
+  const missingCoverage = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(missingCoverage.ok, false);
+  assert.ok(
+    missingCoverage.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "PROPERTY_REPORT_IMPLEMENTATION_COVERAGE_MARKDOWN_MISSING" &&
+        diagnostic.path?.endsWith(markdownOutput.path)
+    ),
+    JSON.stringify(missingCoverage.diagnostics)
+  );
+
+  writeArtifactFile(layout, node.id, markdownOutput.path, reportCoverageMarkdown(coverage));
+  const valid = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
+  assert.deepEqual(fs.readFileSync(decoy), decoyBytes);
 });
 
 test("required artifact gate rejects contract-invalid empty files and final-component symlinks", () => {
@@ -1634,7 +2332,8 @@ test("fanin gate checks scan probe containment against the discovery workspace",
   const node = {
     ...plannedNode(["properties.json", "properties.md"]),
     id: "property-specification-fanin",
-    logical_id: "property-specification-fanin"
+    logical_id: "property-specification-fanin",
+    depends_on: ["property-specification-recon"]
   };
   fs.mkdirSync(path.join(layout.workspacesDir, "project-discovery"), { recursive: true });
   const ledger = (probePath: string) =>
@@ -1699,7 +2398,7 @@ test("fanin gate checks scan probe containment against the discovery workspace",
   const unjustified = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(unjustified.ok, false, JSON.stringify(unjustified.diagnostics));
   assert.ok(
-    unjustified.diagnostics.some((diagnostic) => diagnostic.code === "REQUIRED_ARTIFACT_INVALID"),
+    unjustified.diagnostics.some((diagnostic) => diagnostic.code === "ARTIFACT_SEMANTIC_GATE_CONTEXT_UNAVAILABLE"),
     JSON.stringify(unjustified.diagnostics)
   );
 });
@@ -1743,7 +2442,8 @@ test("fanin gate requires every invariant ledger entry to map to a canonical pro
   const node = {
     ...plannedNode(["properties.json", "properties.md"]),
     id: "property-specification-fanin",
-    logical_id: "property-specification-fanin"
+    logical_id: "property-specification-fanin",
+    depends_on: ["property-specification-recon"]
   };
   const missingUpstreamLedger = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(missingUpstreamLedger.ok, false);
@@ -2216,7 +2916,8 @@ test("property fan-in gate ignores optional Markdown ledger evidence when checki
   const node = {
     ...plannedNode(["properties.json", "properties.md"]),
     id: "property-specification-fanin",
-    logical_id: "property-specification-fanin"
+    logical_id: "property-specification-fanin",
+    depends_on: ["property-specification-recon"]
   };
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
@@ -2313,7 +3014,7 @@ test("property fan-in gate preserves reference expectation metadata in Markdown"
       ]
     })
   );
-  writeArtifact(
+  writeDeclaredPropertyLens(
     layout,
     "property-specification-recon",
     "properties/recon.json",
@@ -2376,7 +3077,7 @@ test("property fan-in gate preserves reference expectation metadata in Markdown"
   const valid = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
 
-  writeArtifact(
+  writeDeclaredPropertyLens(
     layout,
     "property-specification-recon",
     "properties/recon.json",
@@ -2398,6 +3099,765 @@ test("property fan-in gate preserves reference expectation metadata in Markdown"
     droppedFromLens.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_DROPPED"),
     JSON.stringify(droppedFromLens.diagnostics)
   );
+});
+
+for (const [label, undeclaredPath] of [
+  ["conventional", "properties/recon.json"],
+  ["arbitrary sibling", "properties/other.json"]
+] as const) {
+  test(`property fan-in ignores ${label} lens JSON without a state declaration`, () => {
+    const layout = createRunLayout({
+      projectRoot: tempProject(),
+      runId: `run-undeclared-lens-${label.replaceAll(" ", "-")}`
+    });
+    const node = writeMinimalPropertyFaninFixture(layout);
+    const lensPath = writeArtifact(
+      layout,
+      "property-specification-recon",
+      undeclaredPath,
+      JSON.stringify({
+        schema_version: "ultrafuzz.property-lens.v2",
+        properties: [
+          {
+            id: "recon-1",
+            description: "Supply accounting remains consistent.",
+            category: "accounting",
+            priority: "high"
+          }
+        ]
+      })
+    );
+    const before = fs.readFileSync(lensPath);
+
+    const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+    assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+    assert.ok(
+      result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_LENS_DECLARATION_MISSING"),
+      JSON.stringify(result.diagnostics)
+    );
+    assert.deepEqual(fs.readFileSync(lensPath), before);
+  });
+}
+
+test("property fan-in consumes one exactly bound custom property-lens path", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-custom-declared-lens" });
+  const node = writeMinimalPropertyFaninFixture(layout);
+  writeDeclaredPropertyLens(
+    layout,
+    "property-specification-recon",
+    "custom/recon-lens.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v2",
+      properties: [
+        {
+          id: "recon-1",
+          description: "Supply accounting remains consistent.",
+          category: "accounting",
+          priority: "high"
+        }
+      ]
+    })
+  );
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+});
+
+test("authenticated current-node snapshots remain authoritative across live-file swaps", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-authenticated-current-snapshots" });
+  const node = writeMinimalPropertyFaninFixture(layout);
+  writeDeclaredPropertyLens(
+    layout,
+    "property-specification-recon",
+    "custom/recon-lens.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v2",
+      properties: [
+        {
+          id: "recon-1",
+          description: "Supply accounting remains consistent.",
+          category: "accounting",
+          priority: "high"
+        }
+      ]
+    })
+  );
+
+  const artifactDir = getNodeArtifactDir(layout, node.id);
+  const propertiesPath = path.join(artifactDir, "properties.json");
+  const markdownPath = path.join(artifactDir, "properties.md");
+  const propertiesBytes = fs.readFileSync(propertiesPath);
+  const validMarkdownBytes = fs.readFileSync(markdownPath);
+  const invalidMarkdownBytes = Buffer.from("# Authenticated but semantically unrelated Markdown\n", "utf8");
+  const authenticated = (
+    markdownBytes: Buffer
+  ): NonNullable<Parameters<typeof verifyRuntimeRequiredArtifactsForAttempt>[4]> => {
+    const bytesByPath = new Map<string, Buffer>([
+      ["properties.json", propertiesBytes],
+      ["properties.md", markdownBytes]
+    ]);
+    return {
+      outputs: new Map(
+        node.outputs.map((output) => [
+          output.path,
+          {
+            absolutePath: path.join(artifactDir, output.path),
+            bytes: Buffer.from(bytesByPath.get(output.path)!)
+          }
+        ])
+      ),
+      publications: new Map([...bytesByPath].map(([relativePath, bytes]) => [relativePath, Buffer.from(bytes)]))
+    };
+  };
+
+  // An attacker temporarily restores authorized live bytes after the host has
+  // captured a semantically invalid publication. The immutable capture wins.
+  const invalidCapture = verifyRequiredArtifactsForAttempt(
+    layout,
+    node,
+    node.id,
+    undefined,
+    authenticated(invalidMarkdownBytes)
+  );
+  assert.equal(invalidCapture.ok, false, JSON.stringify(invalidCapture.diagnostics));
+  assert.ok(
+    invalidCapture.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_MARKDOWN_PARITY_MISSING"),
+    JSON.stringify(invalidCapture.diagnostics)
+  );
+
+  // The opposite swap cannot make an already authenticated valid publication
+  // fail: the later mutable file is not consulted by the contextual join.
+  fs.writeFileSync(markdownPath, invalidMarkdownBytes);
+  const validCapture = verifyRequiredArtifactsForAttempt(
+    layout,
+    node,
+    node.id,
+    undefined,
+    authenticated(validMarkdownBytes)
+  );
+  assert.equal(validCapture.ok, true, JSON.stringify(validCapture.diagnostics));
+  assert.deepEqual(fs.readFileSync(markdownPath), invalidMarkdownBytes);
+});
+
+test("property fan-in authenticates every sealed model-fanout lens attempt independently", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-sealed-fanout-lenses" });
+  const faninNode = writeMinimalPropertyFaninFixture(layout);
+  const discoveryGraph = JSON.parse(fs.readFileSync(layout.graphPath, "utf8")) as { nodes: PlannedGraphNode[] };
+  const referenceNode: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "reference-input",
+    logical_id: "reference-input",
+    display_name: "Reference input",
+    kind: "reference",
+    depends_on: [],
+    artifact_dir: "artifacts/reference-input",
+    outputs: [boundOutput("result.md", "ultrafuzz/nonempty-markdown@1", true)],
+    prompt_id: "reference-input",
+    prompt_path: "",
+    reference: "reference-input",
+    reference_revision: {
+      provider: "github",
+      repo: "owner/repo",
+      commit: "b".repeat(40),
+      paths: ["result.md"]
+    },
+    model_fanout: []
+  };
+  const discoveryNode: PlannedGraphNode = {
+    ...discoveryGraph.nodes.find((node) => node.id === "project-discovery")!,
+    depends_on: [referenceNode.id],
+    workflow: { node_id: "node:project-discovery", task_node_ids: ["node:project-discovery"] }
+  };
+  const lensOutput = boundOutput("custom/recon-lens.json", "ultrafuzz/property-lens@2", true);
+  const lensNode: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "property-specification-recon",
+    logical_id: "property-specification-recon",
+    display_name: "Property specification recon",
+    artifact_dir: "artifacts/property-specification-recon",
+    depends_on: ["project-discovery"],
+    outputs: [lensOutput],
+    model_fanout: [
+      {
+        model_profile_id: "model-a",
+        agent_ref: "CodexAgent",
+        model_name: "gpt-test-a",
+        reasoning_effort: "high",
+        model_index: 0,
+        loop_index: 0,
+        attempt_index: 0
+      },
+      {
+        model_profile_id: "model-b",
+        agent_ref: "CodexAgent",
+        model_name: "gpt-test-b",
+        reasoning_effort: "high",
+        model_index: 1,
+        loop_index: 0,
+        attempt_index: 0
+      }
+    ],
+    workflow: {
+      node_id: "node:property-specification-recon__model_0__attempt_0",
+      task_node_ids: [
+        "node:property-specification-recon__model_0__attempt_0",
+        "node:property-specification-recon__model_1__attempt_0"
+      ]
+    }
+  };
+  const currentNode: PlannedGraphNode = {
+    ...faninNode,
+    artifact_dir: `artifacts/${faninNode.id}`,
+    depends_on: [lensNode.id],
+    workflow: { node_id: `node:${faninNode.id}`, task_node_ids: [`node:${faninNode.id}`] }
+  };
+  const unrelatedNode: PlannedGraphNode = {
+    ...plannedNode(["unrelated.md"]),
+    id: "unrelated-review",
+    logical_id: "unrelated-review",
+    display_name: "Unrelated review",
+    artifact_dir: "artifacts/unrelated-review",
+    workflow: { node_id: "node:unrelated-review", task_node_ids: ["node:unrelated-review"] }
+  };
+  const lensAttempts = [
+    "property-specification-recon__model_0__attempt_0",
+    "property-specification-recon__model_1__attempt_0"
+  ];
+  const lensDocument = JSON.stringify({
+    schema_version: "ultrafuzz.property-lens.v2",
+    properties: [
+      {
+        id: "recon-1",
+        description: "Supply accounting remains consistent.",
+        category: "accounting",
+        priority: "high"
+      }
+    ]
+  });
+  for (const [modelIndex, attemptId] of lensAttempts.entries()) {
+    registerArtifactNode(layout, attemptId, [lensOutput]);
+    writeArtifactFile(layout, attemptId, lensOutput.path, lensDocument);
+    finalizeArtifactNode(layout, attemptId, [lensOutput], {
+      concreteNodeId: lensNode.id,
+      logicalNodeId: lensNode.logical_id,
+      modelIndex
+    });
+  }
+  writePlannedGraph(layout, [referenceNode, discoveryNode, lensNode, currentNode, unrelatedNode]);
+
+  writeArtifactFile(layout, referenceNode.id, "result.md", "# Reference input\n");
+  writeArtifactManifest({
+    layout,
+    nodeId: referenceNode.id,
+    include: ["result.md"],
+    outputs: referenceNode.outputs,
+    provenance: { origin: "pinned-reference" }
+  });
+  // The minimal fixture finalized discovery before this test added its pinned
+  // reference dependency. Re-seal that manifest against the exact graph edge,
+  // then restore the richer planned node metadata used by the task authority.
+  finalizeArtifactNode(layout, discoveryNode.id, discoveryNode.outputs);
+  for (const [modelIndex, attemptId] of lensAttempts.entries()) {
+    finalizeArtifactNode(layout, attemptId, lensNode.outputs, {
+      concreteNodeId: lensNode.id,
+      logicalNodeId: lensNode.logical_id,
+      modelIndex
+    });
+  }
+  writePlannedGraph(layout, [referenceNode, discoveryNode, lensNode, currentNode, unrelatedNode]);
+
+  const referenceArtifactDir = getNodeArtifactDir(layout, referenceNode.id, { create: true });
+  const discoveryTaskWithReferenceVerifier = smithersTaskForNode({
+    layout,
+    node: discoveryNode,
+    attemptId: discoveryNode.id,
+    dependencies: [referenceNode.id],
+    dependencyArtifactDirs: [referenceArtifactDir]
+  });
+  const discoveryTask: SmithersTaskManifestTask = {
+    ...discoveryTaskWithReferenceVerifier,
+    dependencySmithersNodeIds: [],
+    metadata: {
+      ...discoveryTaskWithReferenceVerifier.metadata,
+      dependencies: {
+        ...discoveryTaskWithReferenceVerifier.metadata.dependencies,
+        smithersNodeIds: []
+      }
+    }
+  };
+  const lensTasks = lensAttempts.map((attemptId, modelIndex) =>
+    smithersTaskForNode({
+      layout,
+      node: lensNode,
+      attemptId,
+      dependencies: [discoveryNode.id],
+      dependencyArtifactDirs: [referenceArtifactDir, discoveryTask.artifactDir],
+      modelIndex
+    })
+  );
+  const currentTask = smithersTaskForNode({
+    layout,
+    node: currentNode,
+    attemptId: currentNode.id,
+    dependencies: lensAttempts,
+    dependencyArtifactDirs: [
+      referenceArtifactDir,
+      discoveryTask.artifactDir,
+      ...lensTasks.map((task) => task.artifactDir)
+    ]
+  });
+  const unrelatedTask = smithersTaskForNode({
+    layout,
+    node: unrelatedNode,
+    attemptId: unrelatedNode.id
+  });
+  const tasks = [discoveryTask, ...lensTasks, currentTask, unrelatedTask];
+  writeSealedFixtureTaskAuthority(layout, [referenceNode, discoveryNode, lensNode, currentNode, unrelatedNode], tasks);
+  const valid = verifyRuntimeRequiredArtifactsForAttempt(layout, currentNode, currentTask.attemptId, {
+    task: currentTask,
+    tasks
+  });
+  assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
+
+  const omittedAncestorTask: SmithersTaskManifestTask = {
+    ...currentTask,
+    dependencyArtifactDirs: currentTask.dependencyArtifactDirs.filter(
+      (directory) => directory !== discoveryTask.artifactDir
+    )
+  };
+  writeSealedFixtureTaskAuthority(
+    layout,
+    [referenceNode, discoveryNode, lensNode, currentNode, unrelatedNode],
+    [discoveryTask, ...lensTasks, omittedAncestorTask, unrelatedTask]
+  );
+  const omittedAncestor = verifyRuntimeRequiredArtifactsForAttempt(layout, currentNode, currentTask.attemptId, {
+    task: omittedAncestorTask,
+    tasks: [discoveryTask, ...lensTasks, omittedAncestorTask, unrelatedTask]
+  });
+  assert.equal(omittedAncestor.ok, false, JSON.stringify(omittedAncestor.diagnostics));
+  assert.ok(
+    omittedAncestor.diagnostics.some((diagnostic) => diagnostic.message.includes(discoveryTask.artifactDir)),
+    JSON.stringify(omittedAncestor.diagnostics)
+  );
+
+  const unrelatedAncestorTask: SmithersTaskManifestTask = {
+    ...currentTask,
+    dependencyArtifactDirs: [...currentTask.dependencyArtifactDirs, unrelatedTask.artifactDir]
+  };
+  writeSealedFixtureTaskAuthority(
+    layout,
+    [referenceNode, discoveryNode, lensNode, currentNode, unrelatedNode],
+    [discoveryTask, ...lensTasks, unrelatedAncestorTask, unrelatedTask]
+  );
+  const unrelatedAncestor = verifyRuntimeRequiredArtifactsForAttempt(layout, currentNode, currentTask.attemptId, {
+    task: unrelatedAncestorTask,
+    tasks: [discoveryTask, ...lensTasks, unrelatedAncestorTask, unrelatedTask]
+  });
+  assert.equal(unrelatedAncestor.ok, false, JSON.stringify(unrelatedAncestor.diagnostics));
+  assert.ok(
+    unrelatedAncestor.diagnostics.some((diagnostic) => diagnostic.message.includes(unrelatedTask.artifactDir)),
+    JSON.stringify(unrelatedAncestor.diagnostics)
+  );
+
+  const missingDeclaredTasks = [discoveryTask, lensTasks[0]!, currentTask, unrelatedTask];
+  writeSealedFixtureTaskAuthority(
+    layout,
+    [referenceNode, discoveryNode, lensNode, currentNode, unrelatedNode],
+    missingDeclaredTasks
+  );
+  const missingDeclaredAttempt = verifyRuntimeRequiredArtifactsForAttempt(layout, currentNode, currentTask.attemptId, {
+    task: currentTask,
+    tasks: missingDeclaredTasks
+  });
+  assert.equal(missingDeclaredAttempt.ok, false, JSON.stringify(missingDeclaredAttempt.diagnostics));
+  assert.ok(
+    missingDeclaredAttempt.diagnostics.some((diagnostic) =>
+      `${diagnostic.message} ${diagnostic.path ?? ""}`.includes(lensAttempts[1]!)
+    ),
+    JSON.stringify(missingDeclaredAttempt.diagnostics)
+  );
+
+  fs.unlinkSync(path.join(layout.root, ".ultrafuzz-verification", `${lensAttempts[1]}.json`));
+  writeSealedFixtureTaskAuthority(layout, [referenceNode, discoveryNode, lensNode, currentNode, unrelatedNode], tasks);
+  const missingSecondAttempt = verifyRuntimeRequiredArtifactsForAttempt(layout, currentNode, currentTask.attemptId, {
+    task: currentTask,
+    tasks
+  });
+  assert.equal(missingSecondAttempt.ok, false, JSON.stringify(missingSecondAttempt.diagnostics));
+  assert.ok(
+    missingSecondAttempt.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "PROPERTY_LENS_AUTHORITY_INVALID" &&
+        `${diagnostic.message} ${diagnostic.path ?? ""}`.includes(lensAttempts[1]!)
+    ),
+    JSON.stringify(missingSecondAttempt.diagnostics)
+  );
+});
+
+test("property fan-in selects a declared lens contract without relying on the producer name", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-contract-selected-lens" });
+  const node = writeMinimalPropertyFaninFixture(layout, {
+    sourceNodeId: "independent-security-review",
+    dependsOn: ["independent-security-review"]
+  });
+  writeDeclaredPropertyLens(
+    layout,
+    "independent-security-review",
+    "custom/review-lens.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v2",
+      properties: [
+        {
+          id: "recon-1",
+          description: "Supply accounting remains consistent.",
+          category: "accounting",
+          priority: "high"
+        }
+      ]
+    })
+  );
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+});
+
+test("property fan-in cannot hide a planned lens by omitting its state declaration and catalog rows", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-planned-lens-state-omission" });
+  const node = writeMinimalPropertyFaninFixture(layout, {
+    sourceNodeId: "project-discovery",
+    sourcePropertyId: "evidence-1",
+    dependsOn: ["property-specification-recon"]
+  });
+  writeDeclaredPropertyLens(
+    layout,
+    "property-specification-recon",
+    "custom/recon-lens.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v2",
+      properties: [
+        {
+          id: "recon-1",
+          description: "Supply accounting remains consistent.",
+          category: "accounting",
+          priority: "high"
+        }
+      ]
+    })
+  );
+  const state = readRunState(layout);
+  delete state.nodes["property-specification-recon"]!.outputs;
+  writeRunState(layout, state);
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+  assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_LENS_DECLARATION_MISSING"),
+    JSON.stringify(result.diagnostics)
+  );
+});
+
+for (const finalizationState of ["failed", "unfinalized"] as const) {
+  test(`property fan-in rejects a ${finalizationState} declared lens producer`, () => {
+    const layout = createRunLayout({
+      projectRoot: tempProject(),
+      runId: `run-${finalizationState}-declared-lens`
+    });
+    const node = writeMinimalPropertyFaninFixture(layout);
+    const output = boundOutput("custom/recon.json", "ultrafuzz/property-lens@2", true);
+    const lens = JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v2",
+      properties: [
+        {
+          id: "recon-1",
+          description: "Supply accounting remains consistent.",
+          category: "accounting",
+          priority: "high"
+        }
+      ]
+    });
+    if (finalizationState === "failed") {
+      writeDeclaredPropertyLens(layout, "property-specification-recon", output.path, lens);
+      updateNodeState(layout, "property-specification-recon", { status: "failed" });
+    } else {
+      registerArtifactNode(layout, "property-specification-recon", [output]);
+      writeArtifactFile(layout, "property-specification-recon", output.path, lens);
+    }
+
+    const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+    assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+    assert.ok(
+      result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_LENS_AUTHORITY_INVALID"),
+      JSON.stringify(result.diagnostics)
+    );
+  });
+}
+
+for (const missingAuthority of ["manifest", "verification marker"] as const) {
+  test(`property fan-in rejects a declared lens with a missing ${missingAuthority}`, () => {
+    const layout = createRunLayout({
+      projectRoot: tempProject(),
+      runId: `run-lens-missing-${missingAuthority.replaceAll(" ", "-")}`
+    });
+    const node = writeMinimalPropertyFaninFixture(layout);
+    writeDeclaredPropertyLens(
+      layout,
+      "property-specification-recon",
+      "custom/recon.json",
+      JSON.stringify({
+        schema_version: "ultrafuzz.property-lens.v2",
+        properties: [
+          {
+            id: "recon-1",
+            description: "Supply accounting remains consistent.",
+            category: "accounting",
+            priority: "high"
+          }
+        ]
+      })
+    );
+    const authorityPath =
+      missingAuthority === "manifest"
+        ? path.join(getNodeArtifactDir(layout, "property-specification-recon"), "artifact-manifest.json")
+        : path.join(layout.root, ".ultrafuzz-verification", "property-specification-recon.json");
+    fs.unlinkSync(authorityPath);
+
+    const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+    assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+    assert.ok(
+      result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_LENS_AUTHORITY_INVALID"),
+      JSON.stringify(result.diagnostics)
+    );
+  });
+}
+
+test("property fan-in rejects lens bytes changed after finalization without rewriting them", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-finalized-lens-tamper" });
+  const node = writeMinimalPropertyFaninFixture(layout);
+  const lensPath = writeDeclaredPropertyLens(
+    layout,
+    "property-specification-recon",
+    "custom/recon.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v2",
+      properties: [
+        {
+          id: "recon-1",
+          description: "Supply accounting remains consistent.",
+          category: "accounting",
+          priority: "high"
+        }
+      ]
+    })
+  );
+  const changedBytes = Buffer.from(
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v2",
+      properties: [
+        {
+          id: "recon-1",
+          description: "These are different but still schema-valid bytes.",
+          category: "accounting",
+          priority: "high"
+        }
+      ]
+    }),
+    "utf8"
+  );
+  fs.writeFileSync(lensPath, changedBytes);
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+  assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_LENS_AUTHORITY_INVALID"),
+    JSON.stringify(result.diagnostics)
+  );
+  assert.deepEqual(fs.readFileSync(lensPath), changedBytes);
+});
+
+test("property fan-in rejects ambiguous property-lens declarations", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-ambiguous-declared-lens" });
+  const node = writeMinimalPropertyFaninFixture(layout);
+  const lens = JSON.stringify({
+    schema_version: "ultrafuzz.property-lens.v2",
+    properties: [
+      {
+        id: "recon-1",
+        description: "Supply accounting remains consistent.",
+        category: "accounting",
+        priority: "high"
+      }
+    ]
+  });
+  registerArtifactNode(layout, "property-specification-recon", [
+    boundOutput("custom/recon-a.json", "ultrafuzz/property-lens@2"),
+    boundOutput("custom/recon-b.json", "ultrafuzz/property-lens@2")
+  ]);
+  writeArtifact(layout, "property-specification-recon", "custom/recon-a.json", lens);
+  writeArtifact(layout, "property-specification-recon", "custom/recon-b.json", lens);
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+  assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_LENS_DECLARATION_AMBIGUOUS"),
+    JSON.stringify(result.diagnostics)
+  );
+});
+
+test("property fan-in rejects a stale property-lens schema binding", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-stale-declared-lens" });
+  const node = writeMinimalPropertyFaninFixture(layout);
+  registerArtifactNode(layout, "property-specification-recon", [
+    {
+      ...boundOutput("custom/recon.json", "ultrafuzz/property-lens@2"),
+      schema_sha256: "0".repeat(64)
+    }
+  ]);
+  writeArtifact(
+    layout,
+    "property-specification-recon",
+    "custom/recon.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v2",
+      properties: [
+        {
+          id: "recon-1",
+          description: "Supply accounting remains consistent.",
+          category: "accounting",
+          priority: "high"
+        }
+      ]
+    })
+  );
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+  assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_LENS_SCHEMA_BINDING_INVALID"),
+    JSON.stringify(result.diagnostics)
+  );
+});
+
+test("an unrelated declared lens cannot satisfy a property fan-in source join", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-unrelated-declared-lens" });
+  const node = writeMinimalPropertyFaninFixture(layout, {
+    sourceNodeId: "property-specification-aviggiano",
+    sourcePropertyId: "aviggiano-1",
+    dependsOn: ["property-specification-recon"]
+  });
+  writeDeclaredPropertyLens(
+    layout,
+    "property-specification-recon",
+    "custom/recon.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v2",
+      properties: [
+        {
+          id: "recon-1",
+          description: "Supply accounting remains consistent.",
+          category: "accounting",
+          priority: "high"
+        }
+      ]
+    })
+  );
+  writeDeclaredPropertyLens(
+    layout,
+    "property-specification-aviggiano",
+    "custom/aviggiano.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v2",
+      properties: [
+        {
+          id: "aviggiano-1",
+          description: "Supply accounting remains consistent.",
+          category: "accounting",
+          priority: "high"
+        }
+      ]
+    })
+  );
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+  assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" && diagnostic.message.includes("Unknown property source")
+    ),
+    JSON.stringify(result.diagnostics)
+  );
+});
+
+test("a stale same-logical lens attempt cannot satisfy the current concrete fan-in dependency", () => {
+  const layout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-stale-same-logical-lens",
+    stateNodes: [
+      {
+        id: "property-specification-recon-current",
+        logicalNodeId: "property-specification-recon",
+        status: "succeeded"
+      },
+      {
+        id: "property-specification-recon-stale",
+        logicalNodeId: "property-specification-recon",
+        status: "succeeded"
+      }
+    ]
+  });
+  const node = writeMinimalPropertyFaninFixture(layout, {
+    sourceNodeId: "property-specification-recon",
+    sourcePropertyId: "recon-1",
+    dependsOn: ["property-specification-recon-current"]
+  });
+  writePropertyLens(layout, "property-specification-recon-current", ["current-only"]);
+  writePropertyLens(layout, "property-specification-recon-stale", ["recon-1"]);
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+  assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" && diagnostic.message.includes("Unknown property source")
+    ),
+    JSON.stringify(result.diagnostics)
+  );
+});
+
+test("property lens validation rejects duplicate keys without changing source bytes", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-duplicate-key-property-lens" });
+  const node = {
+    ...plannedNode(["properties/recon.json"]),
+    id: "property-specification-recon",
+    logical_id: "property-specification-recon"
+  };
+  const lensPath = writeDeclaredPropertyLens(
+    layout,
+    node.id,
+    "properties/recon.json",
+    '{"schema_version":"ultrafuzz.property-lens.v2","properties":[{"id":"recon-1","description":"Expected behavior","category":"accounting","priority":"high","priority":"low"}]}\n'
+  );
+  const before = fs.readFileSync(lensPath);
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+  assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "JSON_DUPLICATE_KEY"),
+    JSON.stringify(result.diagnostics)
+  );
+  assert.deepEqual(fs.readFileSync(lensPath), before);
 });
 
 test("property lens gate accepts a bound pinned expectation catalog without rewriting the lens", () => {
@@ -2446,7 +3906,7 @@ test("property lens gate accepts a bound pinned expectation catalog without rewr
       }
     ]
   });
-  const lensPath = writeArtifact(layout, node.id, "properties/recon.json", lens);
+  const lensPath = writeDeclaredPropertyLens(layout, node.id, "properties/recon.json", lens);
   writeArtifact(layout, "reference-properties-recon", "references/expectations.json", catalog);
   writeArtifactManifest({
     layout,
@@ -2477,7 +3937,7 @@ test("property lens gate rejects expectations when no pinned catalog was supplie
     id: "property-specification-recon",
     logical_id: "property-specification-recon"
   };
-  const lensPath = writeArtifact(
+  const lensPath = writeDeclaredPropertyLens(
     layout,
     node.id,
     "properties/recon.json",
@@ -2548,7 +4008,7 @@ test("property lens gate rejects every unauthorized catalog spelling without con
     logical_id: "property-specification-recon",
     depends_on: ["reference-properties-recon"]
   };
-  const lensPath = writeArtifact(
+  const lensPath = writeDeclaredPropertyLens(
     layout,
     node.id,
     "properties/recon.json",
@@ -2623,7 +4083,7 @@ test("property lens gate rejects a digest-bound schema-invalid expectation catal
     logical_id: "property-specification-recon",
     depends_on: ["reference-properties-recon"]
   };
-  const lensPath = writeArtifact(
+  const lensPath = writeDeclaredPropertyLens(
     layout,
     node.id,
     "properties/recon.json",
@@ -2675,7 +4135,7 @@ test("ordinary pinned references without expectation catalogs do not require cat
       }
     ]
   });
-  writeArtifact(
+  writeDeclaredPropertyLens(
     layout,
     "property-specification-recon",
     "properties/recon.json",
@@ -2705,6 +4165,68 @@ test("ordinary pinned references without expectation catalogs do not require cat
     result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_PROVENANCE_INVALID"),
     false
   );
+});
+
+test("the historical reference-expectations filename cannot authorize a property lens", () => {
+  const expectationId = "benchmark:historical:supply";
+  const catalog = JSON.stringify({
+    schema_version: "ultrafuzz.reference-expectations.v2",
+    expectations: [{ id: expectationId }]
+  });
+  const layout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-historical-expectation-path",
+    stateNodes: [
+      {
+        id: "reference-properties-recon",
+        status: "succeeded",
+        outputs: [boundOutput("references/reference-expectations.json", "ultrafuzz/reference-expectations@2")],
+        provenance: {
+          origin: "pinned-reference",
+          reference: "reference-properties-recon",
+          reference_expectations: {
+            source: "operator-supplied",
+            path: "reference-expectations.json",
+            sha256: createHash("sha256").update(catalog).digest("hex")
+          }
+        }
+      }
+    ]
+  });
+  const node = {
+    ...plannedNode(["properties/recon.json"]),
+    id: "property-specification-recon",
+    logical_id: "property-specification-recon",
+    depends_on: ["reference-properties-recon"]
+  };
+  const lensPath = writeDeclaredPropertyLens(
+    layout,
+    node.id,
+    "properties/recon.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v2",
+      properties: [
+        {
+          id: "recon-1",
+          description: "Supply accounting remains consistent.",
+          category: "accounting",
+          priority: "high",
+          reference_expectations: [expectationId]
+        }
+      ]
+    })
+  );
+  writeArtifact(layout, "reference-properties-recon", "references/reference-expectations.json", catalog);
+  const before = fs.readFileSync(lensPath);
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+  assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_CATALOG_ABSENT")
+  );
+  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED"));
+  assert.deepEqual(fs.readFileSync(lensPath), before);
 });
 
 test("property fan-in gate rejects a lens reference expectation dropped from canonical JSON", () => {
@@ -2738,7 +4260,7 @@ test("property fan-in gate rejects a lens reference expectation dropped from can
       scan_probes: []
     })
   );
-  writeArtifact(
+  writeDeclaredPropertyLens(
     layout,
     "property-specification-recon-0",
     "properties/recon.json",
@@ -2755,7 +4277,7 @@ test("property fan-in gate rejects a lens reference expectation dropped from can
       ]
     })
   );
-  writeArtifact(
+  writeDeclaredPropertyLens(
     layout,
     "property-specification-recon-1",
     "properties/recon.json",
@@ -2861,6 +4383,93 @@ test("property implementation gate rejects an unknown canonical property referen
     result.diagnostics.find((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_UNKNOWN")?.message ?? "",
     /property-unknown/u
   );
+});
+
+test("property implementation resolves custom declared catalog and implementation paths", () => {
+  const layout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-custom-property-handoffs",
+    resolvedConfigToml: '[invariants]\nproperty_priority_threshold = "high"\n'
+  });
+  const catalogId = "custom-property-catalog";
+  const catalogOutput = boundOutput("handoffs/catalog-v2.json", "ultrafuzz/properties@2", true);
+  writeDeclaredArtifactNode(layout, catalogId, [catalogOutput], {
+    [catalogOutput.path]: JSON.stringify({
+      schema_version: "ultrafuzz.properties.v2",
+      properties: [
+        {
+          id: "property-1",
+          description: "Balances remain conserved",
+          category: "accounting",
+          priority: "high",
+          sources: [{ source_node_id: "independent-review", source_property_id: "review-1" }]
+        }
+      ]
+    })
+  });
+  const implementationId = "custom-property-implementation";
+  const implementationOutput = boundOutput(
+    "handoffs/implementation-v3.json",
+    "ultrafuzz/implemented-properties@3",
+    true
+  );
+  writeDeclaredArtifactNode(layout, implementationId, [implementationOutput], {
+    [implementationOutput.path]: JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v3",
+      selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-1"] },
+      properties: [
+        {
+          property_id: "property-1",
+          status: "implemented",
+          implementation_paths: ["test/recon/Properties.sol"],
+          test_paths: ["test/foundry/Property1.t.sol"]
+        }
+      ]
+    })
+  });
+  const node: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: implementationId,
+    logical_id: implementationId,
+    display_name: implementationId,
+    artifact_dir: `artifacts/${implementationId}`,
+    depends_on: [catalogId],
+    outputs: [implementationOutput]
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+});
+
+test("property implementation accepts an intentional producer-free empty catalog through the full host gate", () => {
+  const layout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-producer-free-implementation",
+    resolvedConfigToml: '[invariants]\nproperty_priority_threshold = "high"\n'
+  });
+  const output = boundOutput("handoffs/implementation-v3.json", "ultrafuzz/implemented-properties@3", true);
+  const node: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "producer-free-implementation",
+    logical_id: "producer-free-implementation",
+    display_name: "Producer-free implementation",
+    artifact_dir: "artifacts/producer-free-implementation",
+    depends_on: [],
+    outputs: [output]
+  };
+  writeDeclaredArtifactNode(layout, node.id, [output], {
+    [output.path]: JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v3",
+      selection: { priority_threshold: "high", priorities: ["high"], property_ids: [] },
+      properties: []
+    })
+  });
+  writePlannedGraph(layout, [node]);
+
+  const result = verifyRuntimeRequiredArtifactsForAttempt(layout, node, node.id);
+
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
 });
 
 test("property implementation gate enforces declared selection coverage and actionable blockers", () => {
@@ -3373,6 +4982,34 @@ test("campaign gate accepts non-property findings and validates property-derived
   const unknown = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(unknown.ok, false);
   assert.ok(unknown.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_UNKNOWN"));
+
+  writeArtifact(
+    layout,
+    campaignId,
+    "implemented-properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v3",
+      selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-1"] },
+      properties: [
+        {
+          property_id: "property-1",
+          status: "implemented",
+          implementation_paths: ["test/recon/Properties.sol"],
+          test_paths: []
+        }
+      ]
+    })
+  );
+  const combinedNode = {
+    ...node,
+    outputs: [...node.outputs, boundOutput("implemented-properties.json", "ultrafuzz/implemented-properties@3")]
+  };
+  const combined = verifyRequiredArtifactsForAttempt(layout, combinedNode, campaignId);
+  assert.equal(combined.ok, false);
+  assert.ok(
+    combined.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_UNKNOWN"),
+    JSON.stringify(combined.diagnostics)
+  );
 });
 
 test("campaign gate accepts a partial dual-backend campaign where one backend saw nothing", () => {
@@ -3540,13 +5177,127 @@ test("campaign gate still applies to project-owned split recon campaign nodes", 
   assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_UNKNOWN"));
 });
 
+test("campaign gates select custom declared paths and ignore undeclared conventional files", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-custom-campaign-contracts" });
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.properties.v2",
+      properties: [
+        {
+          id: "property-1",
+          description: "Balances remain conserved",
+          category: "accounting",
+          priority: "high",
+          sources: [{ source_node_id: "independent-review", source_property_id: "review-1" }]
+        }
+      ]
+    })
+  );
+  const implementationId = "custom-implementation-stage";
+  writeArtifact(
+    layout,
+    implementationId,
+    "implemented-properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v3",
+      selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-1"] },
+      properties: [
+        {
+          property_id: "property-1",
+          status: "implemented",
+          implementation_paths: ["test/recon/Properties.sol"],
+          test_paths: ["test/foundry/Property1.t.sol"]
+        }
+      ]
+    })
+  );
+  const campaignId = "custom-fuzz-stage";
+  const campaignOutput = boundOutput("custom/results.json", "ultrafuzz/property-campaign@2", true);
+  const findingsOutput = boundOutput("custom/candidates.json", "ultrafuzz/findings@2");
+  writeDeclaredArtifactNode(layout, campaignId, [campaignOutput, findingsOutput], {
+    [campaignOutput.path]: JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v2",
+      fuzzer_backend: "recon",
+      failures: []
+    }),
+    [findingsOutput.path]: "[]"
+  });
+  const conventionalPath = writeArtifactFile(
+    layout,
+    campaignId,
+    "recon-fuzzer-results.json",
+    "{ this undeclared conventional file is intentionally invalid JSON"
+  );
+  const before = fs.readFileSync(conventionalPath);
+  const node: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: campaignId,
+    logical_id: campaignId,
+    display_name: campaignId,
+    artifact_dir: `artifacts/${campaignId}`,
+    depends_on: [implementationId],
+    outputs: [campaignOutput, findingsOutput]
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+  assert.deepEqual(fs.readFileSync(conventionalPath), before);
+});
+
+test("producer-free final reports require the exact not-planned implementation coverage", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-producer-free-report" });
+  const outputs = [
+    boundOutput("deliverables/report.md", "ultrafuzz/nonempty-markdown@1", true),
+    boundOutput("deliverables/report.json", "ultrafuzz/report@2")
+  ];
+  const node: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "producer-free-report",
+    logical_id: "producer-free-report",
+    display_name: "Producer-free report",
+    artifact_dir: "artifacts/producer-free-report",
+    depends_on: [],
+    outputs
+  };
+  writeDeclaredArtifactNode(layout, node.id, outputs, {
+    "deliverables/report.md": "# Ultrafuzz report\n",
+    "deliverables/report.json": JSON.stringify(currentReport(layout.runId))
+  });
+  writePlannedGraph(layout, [node]);
+
+  const valid = verifyRuntimeRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
+
+  writeArtifactFile(
+    layout,
+    node.id,
+    "deliverables/report.json",
+    JSON.stringify(
+      currentReport(layout.runId, {
+        property_implementation_coverage: currentImplementedCoverage([])
+      })
+    )
+  );
+  const mismatched = verifyRuntimeRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(mismatched.ok, false, JSON.stringify(mismatched.diagnostics));
+  assert.ok(
+    mismatched.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REPORT_IMPLEMENTATION_COVERAGE_MISMATCH"),
+    JSON.stringify(mismatched.diagnostics)
+  );
+});
+
 test("final report gate joins the default recon-only campaign backend", () => {
   const layout = createRunLayout({
     projectRoot: tempProject(),
     runId: "run-recon-report",
     resolvedConfigToml: '[invariants]\nproperty_priority_threshold = "high"\n'
   });
-  const node = { ...plannedNode(["report.json"]), id: "final-report", logical_id: "final-report" };
+  const node = { ...plannedNode(["report.md", "report.json"]), id: "final-report", logical_id: "final-report" };
+  writeArtifact(layout, node.id, "report.md", reportCoverageMarkdown(currentImplementedCoverage(["property-1"])));
   writeArtifact(
     layout,
     "property-specification-fanin",
@@ -3654,6 +5405,30 @@ test("final report gate joins the default recon-only campaign backend", () => {
   const renamed = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(renamed.ok, true, JSON.stringify(renamed.diagnostics));
 
+  const declaredPairGraph = fs.readFileSync(layout.graphPath);
+  const graphWithoutDeclaredFindings = JSON.parse(declaredPairGraph.toString("utf8")) as {
+    nodes: PlannedGraphNode[];
+  };
+  if (!graphWithoutDeclaredFindings.nodes.some((candidate) => candidate.id === "stateful-invariant-campaign")) {
+    throw new Error("campaign fixture is missing from the planned graph");
+  }
+  graphWithoutDeclaredFindings.nodes = graphWithoutDeclaredFindings.nodes.map((candidate) =>
+    candidate.id === "stateful-invariant-campaign"
+      ? {
+          ...candidate,
+          outputs: candidate.outputs.filter((output) => output.contract !== "ultrafuzz/findings@2")
+        }
+      : candidate
+  );
+  fs.writeFileSync(layout.graphPath, JSON.stringify(graphWithoutDeclaredFindings), "utf8");
+  const undeclaredFindingsPair = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(undeclaredFindingsPair.ok, false, JSON.stringify(undeclaredFindingsPair.diagnostics));
+  assert.ok(
+    undeclaredFindingsPair.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_AUTHORITY_INVALID"),
+    JSON.stringify(undeclaredFindingsPair.diagnostics)
+  );
+  fs.writeFileSync(layout.graphPath, declaredPairGraph);
+
   // A report claiming a backend the campaign never recorded is still rejected.
   writeArtifact(
     layout,
@@ -3688,7 +5463,8 @@ test("final report gate rejects backend provenance borrowed from an unrelated ca
     runId: "run-renumbered-report",
     resolvedConfigToml: '[invariants]\nproperty_priority_threshold = "high"\n'
   });
-  const node = { ...plannedNode(["report.json"]), id: "final-report", logical_id: "final-report" };
+  const node = { ...plannedNode(["report.md", "report.json"]), id: "final-report", logical_id: "final-report" };
+  writeArtifact(layout, node.id, "report.md", reportCoverageMarkdown(currentImplementedCoverage(["property-1"])));
   writeArtifact(
     layout,
     "property-specification-fanin",
@@ -3781,10 +5557,11 @@ test("final report gate rejects backend provenance borrowed from an unrelated ca
 test("final report gate rejects legacy report shapes without rewriting them and validates current provenance", () => {
   const legacyLayout = createRunLayout({ projectRoot: tempProject(), runId: "run-legacy-report" });
   const node = {
-    ...plannedNode(["report.json"]),
+    ...plannedNode(["report.md", "report.json"]),
     id: "final-report",
     logical_id: "final-report"
   };
+  writeArtifact(legacyLayout, node.id, "report.md", "# Report\n");
   const legacyPath = writeArtifact(
     legacyLayout,
     node.id,
@@ -3804,6 +5581,7 @@ test("final report gate rejects legacy report shapes without rewriting them and 
   assert.deepEqual(fs.readFileSync(legacyPath), legacyBytes);
 
   const smokeLayout = createRunLayout({ projectRoot: tempProject(), runId: "run-smoke-report" });
+  writeArtifact(smokeLayout, node.id, "report.md", "# Report\n");
   writeArtifact(smokeLayout, node.id, "report.json", JSON.stringify(currentReport(smokeLayout.runId)));
   assert.equal(verifyRequiredArtifactsForAttempt(smokeLayout, node, node.id).ok, true);
 
@@ -3812,6 +5590,12 @@ test("final report gate rejects legacy report shapes without rewriting them and 
     runId: "run-current-report",
     resolvedConfigToml: '[invariants]\nproperty_priority_threshold = "high"\n'
   });
+  writeArtifact(
+    currentLayout,
+    node.id,
+    "report.md",
+    reportCoverageMarkdown(currentImplementedCoverage(["property-1"]))
+  );
   writeArtifact(
     currentLayout,
     "property-specification-fanin",
@@ -4278,6 +6062,115 @@ function currentCampaignNode(paths: string[]): PlannedGraphNode {
     )
   };
 }
+
+test("mixed implementation and campaign roles join against the authenticated sibling implementation", () => {
+  const layout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-mixed-property-roles",
+    resolvedConfigToml: '[invariants]\nproperty_priority_threshold = "high"\n'
+  });
+  writeArtifact(
+    layout,
+    "property-catalog",
+    "properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.properties.v2",
+      properties: [
+        {
+          id: "property-1",
+          description: "Invariant property-1",
+          category: "accounting",
+          priority: "high",
+          sources: [{ source_node_id: "property-lens", source_property_id: "source-1" }]
+        }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    "stale-implementation",
+    "implemented-properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v3",
+      selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-1"] },
+      properties: [
+        {
+          property_id: "property-1",
+          status: "implemented",
+          implementation_paths: ["test/Stale.sol"],
+          test_paths: ["test/Stale.t.sol"]
+        }
+      ]
+    })
+  );
+
+  const implementationOutput = boundOutput(
+    "combined/current-implementation.json",
+    "ultrafuzz/implemented-properties@3",
+    true
+  );
+  const campaignOutput = boundOutput("combined/current-campaign.json", "ultrafuzz/property-campaign@2");
+  const findingsOutput = boundOutput("combined/current-findings.json", "ultrafuzz/findings@2");
+  const node: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "combined-property-stage",
+    logical_id: "combined-property-stage",
+    display_name: "Combined property stage",
+    artifact_dir: "artifacts/combined-property-stage",
+    depends_on: ["stale-implementation"],
+    outputs: [implementationOutput, campaignOutput, findingsOutput]
+  };
+  const siblingImplementation = (status: "blocked" | "implemented"): string =>
+    JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v3",
+      selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-1"] },
+      properties: [
+        {
+          property_id: "property-1",
+          status,
+          implementation_paths: ["test/Current.sol"],
+          test_paths: ["test/Current.t.sol"],
+          ...(status === "blocked"
+            ? {
+                blocker: {
+                  code: "CURRENT_IMPLEMENTATION_BLOCKED",
+                  summary: "The current implementation is incomplete.",
+                  next_action: "Finish the current implementation."
+                }
+              }
+            : {})
+        }
+      ]
+    });
+  writeArtifactFile(layout, node.id, implementationOutput.path, siblingImplementation("blocked"));
+  writeArtifactFile(
+    layout,
+    node.id,
+    campaignOutput.path,
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v2",
+      fuzzer_backend: "recon",
+      failures: [{ id: "failure-1", status: "reproduced", property_ids: ["property-1"] }]
+    })
+  );
+  writeArtifactFile(
+    layout,
+    node.id,
+    findingsOutput.path,
+    JSON.stringify([accountedCampaignFinding("failure-1", ["property-1"], ["failure-1"])])
+  );
+
+  const blocked = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(blocked.ok, false);
+  assert.ok(
+    blocked.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_IMPLEMENTATION_REFERENCE_INVALID"),
+    JSON.stringify(blocked.diagnostics)
+  );
+
+  writeArtifactFile(layout, node.id, implementationOutput.path, siblingImplementation("implemented"));
+  const implemented = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(implemented.ok, true, JSON.stringify(implemented.diagnostics));
+});
 
 function writeCampaignSummary(
   layout: ReturnType<typeof createRunLayout>,
@@ -5310,13 +7203,14 @@ test("coverage Markdown accepts a blocker summary escaped or as written, but not
 // prompt requires. Any target documenting parameters in tables hits this.
 test("properties Markdown parity accepts a description that ends with a pipe", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-fanin-trailing-pipe" });
+  const ledgerNodeId = "custom-evidence-root";
   // Shaped after R58's property-277: prose, then a verbatim docs table row.
   const description =
     "Project discovery evidence evidence-doc-liquidation-targethf-row (bound) at docs/overview.md:line 237; " +
     "verbatim: | `TargetHealthFactor` | A spoke-wide value set by the Governor. | Must be >= the constant. |";
   writeArtifact(
     layout,
-    "project-discovery",
+    ledgerNodeId,
     "setup/invariant-evidence-ledger.json",
     JSON.stringify({
       schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
@@ -5352,9 +7246,7 @@ test("properties Markdown parity accepts a description that ends with a pipe", (
           description,
           category: "configuration",
           priority: "high",
-          sources: [
-            { source_node_id: "project-discovery", source_property_id: "evidence-doc-liquidation-targethf-row" }
-          ],
+          sources: [{ source_node_id: ledgerNodeId, source_property_id: "evidence-doc-liquidation-targethf-row" }],
           ledger_ids: ["evidence-doc-liquidation-targethf-row"]
         }
       ]
@@ -5364,7 +7256,7 @@ test("properties Markdown parity accepts a description that ends with a pipe", (
     layout,
     "property-specification-fanin",
     "properties.md",
-    `### Canonical property: property-277\ndescription: ${description}\ncategory: configuration\npriority: high\nsources: project-discovery:evidence-doc-liquidation-targethf-row\nledger_ids: evidence-doc-liquidation-targethf-row\n### End canonical property: property-277\n`
+    `### Canonical property: property-277\ndescription: ${description}\ncategory: configuration\npriority: high\nsources: ${ledgerNodeId}:evidence-doc-liquidation-targethf-row\nledger_ids: evidence-doc-liquidation-targethf-row\n### End canonical property: property-277\n`
   );
   const node = {
     ...plannedNode(["properties.json", "properties.md"]),

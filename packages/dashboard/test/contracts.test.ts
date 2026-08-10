@@ -36,7 +36,7 @@ test("dashboard schemas are complete, closed, and reference only current compose
   );
 
   const references = registry.flatMap((entry) => entry.localReferences);
-  assert.ok(references.some((reference) => reference.startsWith("urn:ultrafuzz:schema:artifacts:run-state:4#")));
+  assert.ok(references.some((reference) => reference.startsWith("urn:ultrafuzz:schema:artifacts:run-state:5#")));
   assert.equal(
     references.some((reference) => reference.includes("run-state:3")),
     false
