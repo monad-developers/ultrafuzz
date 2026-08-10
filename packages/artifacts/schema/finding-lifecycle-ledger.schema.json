@@ -149,6 +149,7 @@
           },
           "stages": {
             "minItems": 1,
+            "maxItems": 10000,
             "type": "array",
             "items": {
               "type": "object",
@@ -159,11 +160,13 @@
                 },
                 "artifact_path": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 4096
                 },
                 "finding_id": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 }
               },
               "required": ["stage", "artifact_path"],
@@ -173,7 +176,8 @@
         },
         "required": ["dedupe_key", "source_artifacts", "strategy_hits", "stages"],
         "additionalProperties": false
-      }
+      },
+      "maxItems": 10000
     }
   },
   "required": ["schema_version", "records"],

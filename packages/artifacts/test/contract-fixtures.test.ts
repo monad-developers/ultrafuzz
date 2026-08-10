@@ -462,18 +462,30 @@ test("property-campaign v3 JSON Schema and Zod agree on every portable status co
   }
 });
 
-test("finding and property-campaign resource bounds agree in Ajv and Zod", () => {
+test("finding-derived and property-campaign resource bounds agree in Ajv and Zod", () => {
   const registry = artifactSchemaRegistry();
   const exports = artifactExports as unknown as Record<string, unknown>;
   const findingEntry = registry.find((candidate) => candidate.filename === "finding.schema.json");
   const findingsEntry = registry.find((candidate) => candidate.filename === "findings.schema.json");
   const campaignEntry = registry.find((candidate) => candidate.filename === "property-campaign.schema.json");
+  const strategyEntry = registry.find((candidate) => candidate.filename === "strategy-detections.schema.json");
+  const triagedEntry = registry.find((candidate) => candidate.filename === "triaged-findings.schema.json");
+  const severityEntry = registry.find((candidate) => candidate.filename === "severity-classified-findings.schema.json");
+  const lifecycleEntry = registry.find((candidate) => candidate.filename === "finding-lifecycle-ledger.schema.json");
   assert.ok(findingEntry?.zodParser !== undefined);
   assert.ok(findingsEntry?.zodParser !== undefined);
   assert.ok(campaignEntry?.zodParser !== undefined);
+  assert.ok(strategyEntry?.zodParser !== undefined);
+  assert.ok(triagedEntry?.zodParser !== undefined);
+  assert.ok(severityEntry?.zodParser !== undefined);
+  assert.ok(lifecycleEntry?.zodParser !== undefined);
   const findingParser = exports[findingEntry.zodParser] as ZodLikeParser;
   const findingsParser = exports[findingsEntry.zodParser] as ZodLikeParser;
   const campaignParser = exports[campaignEntry.zodParser] as ZodLikeParser;
+  const strategyParser = exports[strategyEntry.zodParser] as ZodLikeParser;
+  const triagedParser = exports[triagedEntry.zodParser] as ZodLikeParser;
+  const severityParser = exports[severityEntry.zodParser] as ZodLikeParser;
+  const lifecycleParser = exports[lifecycleEntry.zodParser] as ZodLikeParser;
   const finding = structuredClone((contractFixtures["ultrafuzz/findings@2"]!.valid as unknown[])[0]) as Record<
     string,
     unknown
@@ -517,6 +529,121 @@ test("finding and property-campaign resource bounds agree in Ajv and Zod", () =>
     ...findingsBoundary,
     finding
   ]);
+
+  const strategyDetection = structuredClone(
+    (contractFixtures["ultrafuzz/strategy-detections@1"]!.valid as unknown[])[0]
+  ) as Record<string, unknown>;
+  const strategyBoundary = Array<Record<string, unknown>>(MAX_FINDINGS).fill(strategyDetection);
+  assertBoundary(strategyEntry.id, strategyParser, "strategy-detections:top-level-items", strategyBoundary, [
+    ...strategyBoundary,
+    strategyDetection
+  ]);
+  const strategyNested = {
+    ...strategyDetection,
+    hits: Array<Record<string, unknown>>(MAX_FINDING_NESTED_ITEMS).fill({ strategy: "strategy-1" })
+  };
+  assertBoundary(
+    strategyEntry.id,
+    strategyParser,
+    "strategy-detections:hits",
+    [strategyNested],
+    [
+      {
+        ...strategyNested,
+        hits: [...(strategyNested.hits as Record<string, unknown>[]), { strategy: "overflow" }]
+      }
+    ]
+  );
+
+  const triaged = structuredClone((contractFixtures["ultrafuzz/triaged-findings@1"]!.valid as unknown[])[0]) as Record<
+    string,
+    unknown
+  >;
+  const triagedBoundary = Array<Record<string, unknown>>(MAX_FINDINGS).fill(triaged);
+  assertBoundary(triagedEntry.id, triagedParser, "triaged-findings:top-level-items", triagedBoundary, [
+    ...triagedBoundary,
+    triaged
+  ]);
+  const triageNotes = {
+    ...triaged,
+    notes: Array<string>(MAX_FINDING_NESTED_ITEMS).fill("triage_reason=confirmed")
+  };
+  assertBoundary(
+    triagedEntry.id,
+    triagedParser,
+    "triaged-findings:notes",
+    [triageNotes],
+    [{ ...triageNotes, notes: [...(triageNotes.notes as string[]), "overflow"] }]
+  );
+  const triageReasonPrefix = "triage_reason=";
+  const triageAstral = {
+    ...triaged,
+    notes: [`${triageReasonPrefix}${"🙂".repeat(MAX_FINDING_STRING_CODE_POINTS - [...triageReasonPrefix].length)}`]
+  };
+  assertBoundary(
+    triagedEntry.id,
+    triagedParser,
+    "triaged-findings:note-code-points",
+    [triageAstral],
+    [{ ...triageAstral, notes: [`${(triageAstral.notes as string[])[0]}🙂`] }]
+  );
+
+  const severity = structuredClone(
+    (contractFixtures["ultrafuzz/severity-classified-findings@1"]!.valid as unknown[])[0]
+  ) as Record<string, unknown>;
+  const severityBoundary = Array<Record<string, unknown>>(MAX_FINDINGS).fill(severity);
+  assertBoundary(severityEntry.id, severityParser, "severity-findings:top-level-items", severityBoundary, [
+    ...severityBoundary,
+    severity
+  ]);
+  const severityAstral = { ...severity, severity_rationale: "🙂".repeat(MAX_FINDING_STRING_CODE_POINTS) };
+  assertBoundary(
+    severityEntry.id,
+    severityParser,
+    "severity-findings:rationale-code-points",
+    [severityAstral],
+    [{ ...severityAstral, severity_rationale: `${severityAstral.severity_rationale}🙂` }]
+  );
+
+  const lifecycleRecord = {
+    dedupe_key: "finding-1",
+    source_artifacts: [],
+    strategy_hits: [],
+    stages: [{ stage: "raw", artifact_path: "findings/raw.json", finding_id: "finding-1" }]
+  };
+  const lifecycle = {
+    schema_version: "ultrafuzz.finding-lifecycle-ledger.v1",
+    records: Array<Record<string, unknown>>(MAX_FINDINGS).fill(lifecycleRecord)
+  };
+  assertBoundary(lifecycleEntry.id, lifecycleParser, "finding-lifecycle:top-level-records", lifecycle, {
+    ...lifecycle,
+    records: [...lifecycle.records, lifecycleRecord]
+  });
+  const lifecycleStages = {
+    schema_version: lifecycle.schema_version,
+    records: [
+      {
+        ...lifecycleRecord,
+        stages: Array<Record<string, unknown>>(MAX_FINDING_NESTED_ITEMS).fill({
+          stage: "raw",
+          artifact_path: "findings/raw.json",
+          finding_id: "finding-1"
+        })
+      }
+    ]
+  };
+  assertBoundary(lifecycleEntry.id, lifecycleParser, "finding-lifecycle:stages", lifecycleStages, {
+    ...lifecycleStages,
+    records: [
+      {
+        ...lifecycleStages.records[0],
+        stages: [
+          ...lifecycleStages.records[0]!.stages,
+          { stage: "triaged", artifact_path: "findings/triaged.json", finding_id: "finding-1" }
+        ]
+      }
+    ]
+  });
 
   const campaignString = { ...campaign, fuzzer_backend: "🙂".repeat(MAX_PROPERTY_CAMPAIGN_STRING_CODE_POINTS) };
   assertBoundary(campaignEntry.id, campaignParser, "property-campaign:string-code-points", campaignString, {

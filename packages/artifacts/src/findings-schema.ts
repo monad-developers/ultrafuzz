@@ -26,6 +26,7 @@ const nonEmptyString = z
     message: `String must not exceed ${MAX_FINDING_STRING_CODE_POINTS} Unicode code points`
   })
   .meta({ maxLength: MAX_FINDING_STRING_CODE_POINTS });
+export const findingTextSchema = nonEmptyString;
 const findingPath = z
   .string()
   .min(1)

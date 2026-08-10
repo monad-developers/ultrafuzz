@@ -1,6 +1,14 @@
 import { z } from "zod/v4";
 
-import { findingLifecycleSchema, findingSchema, findingStrategyHitSchema } from "./findings-schema.js";
+import {
+  MAX_FINDINGS,
+  MAX_FINDING_NESTED_ITEMS,
+  findingLifecycleSchema,
+  findingLifecycleStageSchema,
+  findingSchema,
+  findingStrategyHitSchema,
+  findingTextSchema
+} from "./findings-schema.js";
 import { FINDING_SEVERITIES, TRIAGE_CLASSIFICATIONS } from "./findings.js";
 import { canonicalTimestampSchema } from "./portable-json-primitives.js";
 import { PROPERTY_PRIORITIES } from "./property-provenance.js";
@@ -111,15 +119,15 @@ export const harnessRepairsSchema = withDocumentMetadata(
 );
 
 const strategyDetectionSchema = z.strictObject({
-  dedupe_key: nonEmptyString,
-  finding_id: nonEmptyString.optional(),
-  family_id: nonEmptyString.optional(),
-  title: nonEmptyString,
-  hits: z.array(findingStrategyHitSchema).min(1)
+  dedupe_key: findingTextSchema,
+  finding_id: findingTextSchema.optional(),
+  family_id: findingTextSchema.optional(),
+  title: findingTextSchema,
+  hits: z.array(findingStrategyHitSchema).min(1).max(MAX_FINDING_NESTED_ITEMS)
 });
 
 export const strategyDetectionsSchema = withDocumentMetadata(
-  z.array(strategyDetectionSchema),
+  z.array(strategyDetectionSchema).max(MAX_FINDINGS),
   "strategy-detections",
   1,
   "Ultrafuzz strategy detection provenance"
@@ -128,7 +136,7 @@ export const strategyDetectionsSchema = withDocumentMetadata(
 const triagedFindingSchema = findingSchema
   .safeExtend({
     triage_classification: z.enum(TRIAGE_CLASSIFICATIONS),
-    notes: z.array(nonEmptyString).min(1)
+    notes: z.array(findingTextSchema).min(1).max(MAX_FINDING_NESTED_ITEMS)
   })
   .meta({
     allOf: [
@@ -189,7 +197,7 @@ const triagedFindingSchema = findingSchema
   });
 
 export const triagedFindingsSchema = withDocumentMetadata(
-  z.array(triagedFindingSchema),
+  z.array(triagedFindingSchema).max(MAX_FINDINGS),
   "triaged-findings",
   1,
   "Ultrafuzz triaged findings"
@@ -201,9 +209,9 @@ const severityClassifiedFindingSchema = findingSchema
     severity: z.enum(FINDING_SEVERITIES).optional(),
     impact: z.enum(FINDING_SEVERITIES).optional(),
     likelihood: z.enum(FINDING_SEVERITIES).optional(),
-    impact_rationale: nonEmptyString.optional(),
-    likelihood_rationale: nonEmptyString.optional(),
-    severity_rationale: nonEmptyString.optional()
+    impact_rationale: findingTextSchema.optional(),
+    likelihood_rationale: findingTextSchema.optional(),
+    severity_rationale: findingTextSchema.optional()
   })
   .meta({
     allOf: [
@@ -254,7 +262,7 @@ const severityClassifiedFindingSchema = findingSchema
   });
 
 export const severityClassifiedFindingsSchema = withDocumentMetadata(
-  z.array(severityClassifiedFindingSchema),
+  z.array(severityClassifiedFindingSchema).max(MAX_FINDINGS),
   "severity-classified-findings",
   1,
   "Ultrafuzz severity-classified findings"
@@ -1308,21 +1316,13 @@ export const dynamicStrategyProvenanceSchema = withDocumentMetadata(
 );
 
 const lifecycleRecordSchema = findingLifecycleSchema.extend({
-  stages: z
-    .array(
-      z.strictObject({
-        stage: z.enum(["raw", "deduped", "triaged", "severity-classified"]),
-        artifact_path: nonEmptyString,
-        finding_id: nonEmptyString.optional()
-      })
-    )
-    .min(1)
+  stages: z.array(findingLifecycleStageSchema).min(1).max(MAX_FINDING_NESTED_ITEMS)
 });
 
 export const findingLifecycleLedgerSchema = withDocumentMetadata(
   z.strictObject({
     schema_version: z.literal(FINDING_LIFECYCLE_LEDGER_SCHEMA_VERSION),
-    records: z.array(lifecycleRecordSchema)
+    records: z.array(lifecycleRecordSchema).max(MAX_FINDINGS)
   }),
   "finding-lifecycle-ledger",
   1,

@@ -6,22 +6,27 @@
     "properties": {
       "dedupe_key": {
         "type": "string",
-        "minLength": 1
+        "minLength": 1,
+        "maxLength": 65536
       },
       "finding_id": {
         "type": "string",
-        "minLength": 1
+        "minLength": 1,
+        "maxLength": 65536
       },
       "family_id": {
         "type": "string",
-        "minLength": 1
+        "minLength": 1,
+        "maxLength": 65536
       },
       "title": {
         "type": "string",
-        "minLength": 1
+        "minLength": 1,
+        "maxLength": 65536
       },
       "hits": {
         "minItems": 1,
+        "maxItems": 10000,
         "type": "array",
         "items": {
           "type": "object",
@@ -65,6 +70,7 @@
     "required": ["dedupe_key", "title", "hits"],
     "additionalProperties": false
   },
+  "maxItems": 10000,
   "$id": "urn:ultrafuzz:schema:artifacts:strategy-detections:1",
   "title": "Ultrafuzz strategy detection provenance"
 }

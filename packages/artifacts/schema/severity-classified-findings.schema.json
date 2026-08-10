@@ -747,15 +747,18 @@
       },
       "impact_rationale": {
         "type": "string",
-        "minLength": 1
+        "minLength": 1,
+        "maxLength": 65536
       },
       "likelihood_rationale": {
         "type": "string",
-        "minLength": 1
+        "minLength": 1,
+        "maxLength": 65536
       },
       "severity_rationale": {
         "type": "string",
-        "minLength": 1
+        "minLength": 1,
+        "maxLength": 65536
       },
       "description": {
         "type": "string",
@@ -1085,6 +1088,7 @@
       }
     ]
   },
+  "maxItems": 10000,
   "$id": "urn:ultrafuzz:schema:artifacts:severity-classified-findings:1",
   "title": "Ultrafuzz severity-classified findings"
 }
