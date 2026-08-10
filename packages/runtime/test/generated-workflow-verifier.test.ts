@@ -2599,6 +2599,10 @@ test("generated Smithers preparation requires a successful dependency artifact v
   assert.match(source, /function assertVerifiedDependency/u);
   assert.match(source, /artifact dependency has not passed verification/u);
   assert.match(source, /assertVerifiedDependency\(task, dependency\)/u);
+  assert.match(
+    source,
+    /assertVerifiedDependency\(task, dependency, \{ relativePath, bytes: snapshot\.bytes \}\)/u
+  );
   assert.match(verifier, /clearArtifactVerificationMarker\(task\)/u);
   assert.match(verifier, /writeArtifactVerificationMarker\(task, artifacts, publications\)/u);
   assert.match(source, /publications: publicationEntries/u);
