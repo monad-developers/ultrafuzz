@@ -2318,7 +2318,10 @@ async function finalizeTerminalTask(input: {
     ) {
       try {
         assertSynchronizationBudget(input.control);
-        const gate = verifyRequiredArtifactsForAttempt(input.layout, input.node, input.task.attemptId);
+        const gate = verifyRequiredArtifactsForAttempt(input.layout, input.node, input.task.attemptId, {
+          task: input.task,
+          tasks: [...input.tasksByAttempt.values()]
+        });
         if (!gate.ok) verifierOutputGate = gate;
       } catch (error) {
         if (synchronizationInterruptionDiagnostic(error) !== undefined) throw error;
@@ -2387,7 +2390,10 @@ async function finalizeTerminalTask(input: {
   const events: PendingNodeEvent[] = [];
   assertSynchronizationBudget(input.control);
   const artifactDir = getNodeArtifactDir(input.layout, input.task.attemptId);
-  const gate = verifyRequiredArtifactsForAttempt(input.layout, input.node, input.task.attemptId);
+  const gate = verifyRequiredArtifactsForAttempt(input.layout, input.node, input.task.attemptId, {
+    task: input.task,
+    tasks: [...input.tasksByAttempt.values()]
+  });
   diagnostics.push(...gate.diagnostics);
   if (gate.ok) {
     events.push({

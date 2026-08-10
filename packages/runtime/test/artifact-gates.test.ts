@@ -519,6 +519,30 @@ function currentImplementedCoverage(propertyIds: string[]): Record<string, unkno
   };
 }
 
+function reportCoverageMarkdown(coverage: Record<string, unknown>): string {
+  const count = (field: string): number => (Array.isArray(coverage[field]) ? coverage[field].length : 0);
+  const priorities = Array.isArray(coverage.priorities) ? coverage.priorities.join("<br>") : "unavailable";
+  const blockers = Array.isArray(coverage.blocker_summaries)
+    ? coverage.blocker_summaries.map((summary) => `- ${String(summary)}`)
+    : [];
+  return [
+    "# Ultrafuzz report",
+    "",
+    "## Property implementation coverage",
+    "",
+    `- Priority threshold: \`${String(coverage.priority_threshold ?? "unavailable")}\``,
+    `- Included priorities: \`${priorities}\``,
+    `- Selected properties: \`${count("selected_property_ids")}\``,
+    `- Implemented properties: \`${count("implemented_property_ids")}\``,
+    `- Blocked properties: \`${count("blocked_property_ids")}\``,
+    `- Pending properties: \`${count("pending_property_ids")}\``,
+    `- Deferred properties: \`${count("deferred_property_ids")}\``,
+    `- Reference expectation properties: \`${count("reference_expected_property_ids")}\``,
+    ...(blockers.length === 0 ? [] : ["", "Blocker summaries:", ...blockers]),
+    ""
+  ].join("\n");
+}
+
 // A discovery workspace as a benchmark run sees it: a Git worktree whose pinned branch exists and
 // whose tracked sources match it exactly.
 function pinnedDiscoveryWorkspace(layout: ReturnType<typeof createRunLayout>): string {
@@ -865,12 +889,13 @@ test("severity classification gates preserve triaged fields and enforce the fina
 test("sealed planned graph ignores unrelated producers but rejects a missing planned producer", () => {
   const absentLayout = createRunLayout({ projectRoot: tempProject(), runId: "run-no-property-track" });
   const reportNode = {
-    ...plannedNode(["report.json"]),
+    ...plannedNode(["report.md", "report.json"]),
     id: "final-report",
     logical_id: "final-report",
     artifact_dir: "artifacts/final-report"
   };
   writePlannedGraph(absentLayout, [reportNode]);
+  writeArtifact(absentLayout, reportNode.id, "report.md", "# Report\n");
   writeArtifact(absentLayout, reportNode.id, "report.json", JSON.stringify(currentReport(absentLayout.runId)));
   const absent = verifyRequiredArtifactsForAttempt(absentLayout, reportNode, reportNode.id);
   assert.equal(absent.ok, true, JSON.stringify(absent.diagnostics));
@@ -883,6 +908,7 @@ test("sealed planned graph ignores unrelated producers but rejects a missing pla
     artifact_dir: "artifacts/unrelated-property-catalog"
   };
   writePlannedGraph(outsideLayout, [outsideCatalogNode, reportNode]);
+  writeArtifact(outsideLayout, reportNode.id, "report.md", "# Report\n");
   writeArtifact(outsideLayout, reportNode.id, "report.json", JSON.stringify(currentReport(outsideLayout.runId)));
   const outside = verifyRuntimeRequiredArtifactsForAttempt(outsideLayout, reportNode, reportNode.id);
   assert.equal(outside.ok, true, JSON.stringify(outside.diagnostics));
@@ -903,6 +929,7 @@ test("sealed planned graph ignores unrelated producers but rejects a missing pla
   };
   const plannedReportNode = { ...reportNode, depends_on: [implementationNode.id] };
   writePlannedGraph(missingLayout, [catalogNode, implementationNode, plannedReportNode]);
+  writeArtifact(missingLayout, reportNode.id, "report.md", "# Report\n");
   writeArtifact(missingLayout, reportNode.id, "report.json", JSON.stringify(currentReport(missingLayout.runId)));
   const missing = verifyRequiredArtifactsForAttempt(missingLayout, plannedReportNode, plannedReportNode.id);
   assert.equal(missing.ok, false);
@@ -959,6 +986,85 @@ test("sealed planned graph ignores unrelated producers but rejects a missing pla
     JSON.stringify(malformedImplementation.diagnostics)
   );
   assert.deepEqual(fs.readFileSync(malformedImplementationPath), malformedImplementationBytes);
+});
+
+test("renamed report producers gate their exact declared JSON and Markdown paths", () => {
+  const layout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-custom-report-paths",
+    resolvedConfigToml: '[invariants]\nproperty_priority_threshold = "high"\n'
+  });
+  const coverage = currentImplementedCoverage(["property-1"]);
+  writeArtifact(
+    layout,
+    "custom-property-catalog",
+    "properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.properties.v2",
+      properties: [
+        {
+          id: "property-1",
+          description: "Balances remain conserved",
+          category: "accounting",
+          priority: "high",
+          sources: [{ source_node_id: "custom-lens", source_property_id: "source-1" }]
+        }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    "custom-implementation",
+    "implemented-properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v3",
+      selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-1"] },
+      properties: [
+        {
+          property_id: "property-1",
+          status: "implemented",
+          implementation_paths: ["test/Properties.sol"],
+          test_paths: ["test/Property1.t.sol"]
+        }
+      ]
+    })
+  );
+  const reportOutput = boundOutput("custom/final/document.json", "ultrafuzz/report@2");
+  const markdownOutput = boundOutput("rendered/security-review.md", "ultrafuzz/nonempty-markdown@1", true);
+  const node: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "terminal-export-attempt",
+    logical_id: "renamed-terminal-export",
+    display_name: "Renamed terminal export",
+    artifact_dir: "artifacts/terminal-export-attempt",
+    depends_on: ["custom-implementation"],
+    outputs: [markdownOutput, reportOutput]
+  };
+  writeArtifactFile(
+    layout,
+    node.id,
+    reportOutput.path,
+    JSON.stringify(currentReport(layout.runId, { property_implementation_coverage: coverage }))
+  );
+  writeArtifactFile(layout, node.id, markdownOutput.path, "# Report without declared coverage\n");
+  const decoy = writeArtifactFile(layout, node.id, "report.json", "{ intentionally invalid undeclared decoy");
+  const decoyBytes = fs.readFileSync(decoy);
+
+  const missingCoverage = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(missingCoverage.ok, false);
+  assert.ok(
+    missingCoverage.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "PROPERTY_REPORT_IMPLEMENTATION_COVERAGE_MARKDOWN_MISSING" &&
+        diagnostic.path?.endsWith(markdownOutput.path)
+    ),
+    JSON.stringify(missingCoverage.diagnostics)
+  );
+
+  writeArtifactFile(layout, node.id, markdownOutput.path, reportCoverageMarkdown(coverage));
+  const valid = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
+  assert.deepEqual(fs.readFileSync(decoy), decoyBytes);
 });
 
 test("required artifact gate rejects contract-invalid empty files and final-component symlinks", () => {
@@ -4524,7 +4630,8 @@ test("final report gate joins the default recon-only campaign backend", () => {
     runId: "run-recon-report",
     resolvedConfigToml: '[invariants]\nproperty_priority_threshold = "high"\n'
   });
-  const node = { ...plannedNode(["report.json"]), id: "final-report", logical_id: "final-report" };
+  const node = { ...plannedNode(["report.md", "report.json"]), id: "final-report", logical_id: "final-report" };
+  writeArtifact(layout, node.id, "report.md", reportCoverageMarkdown(currentImplementedCoverage(["property-1"])));
   writeArtifact(
     layout,
     "property-specification-fanin",
@@ -4690,7 +4797,8 @@ test("final report gate rejects backend provenance borrowed from an unrelated ca
     runId: "run-renumbered-report",
     resolvedConfigToml: '[invariants]\nproperty_priority_threshold = "high"\n'
   });
-  const node = { ...plannedNode(["report.json"]), id: "final-report", logical_id: "final-report" };
+  const node = { ...plannedNode(["report.md", "report.json"]), id: "final-report", logical_id: "final-report" };
+  writeArtifact(layout, node.id, "report.md", reportCoverageMarkdown(currentImplementedCoverage(["property-1"])));
   writeArtifact(
     layout,
     "property-specification-fanin",
@@ -4783,10 +4891,11 @@ test("final report gate rejects backend provenance borrowed from an unrelated ca
 test("final report gate rejects legacy report shapes without rewriting them and validates current provenance", () => {
   const legacyLayout = createRunLayout({ projectRoot: tempProject(), runId: "run-legacy-report" });
   const node = {
-    ...plannedNode(["report.json"]),
+    ...plannedNode(["report.md", "report.json"]),
     id: "final-report",
     logical_id: "final-report"
   };
+  writeArtifact(legacyLayout, node.id, "report.md", "# Report\n");
   const legacyPath = writeArtifact(
     legacyLayout,
     node.id,
@@ -4806,6 +4915,7 @@ test("final report gate rejects legacy report shapes without rewriting them and 
   assert.deepEqual(fs.readFileSync(legacyPath), legacyBytes);
 
   const smokeLayout = createRunLayout({ projectRoot: tempProject(), runId: "run-smoke-report" });
+  writeArtifact(smokeLayout, node.id, "report.md", "# Report\n");
   writeArtifact(smokeLayout, node.id, "report.json", JSON.stringify(currentReport(smokeLayout.runId)));
   assert.equal(verifyRequiredArtifactsForAttempt(smokeLayout, node, node.id).ok, true);
 
@@ -4814,6 +4924,12 @@ test("final report gate rejects legacy report shapes without rewriting them and 
     runId: "run-current-report",
     resolvedConfigToml: '[invariants]\nproperty_priority_threshold = "high"\n'
   });
+  writeArtifact(
+    currentLayout,
+    node.id,
+    "report.md",
+    reportCoverageMarkdown(currentImplementedCoverage(["property-1"]))
+  );
   writeArtifact(
     currentLayout,
     "property-specification-fanin",
@@ -5280,6 +5396,115 @@ function currentCampaignNode(paths: string[]): PlannedGraphNode {
     )
   };
 }
+
+test("mixed implementation and campaign roles join against the authenticated sibling implementation", () => {
+  const layout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-mixed-property-roles",
+    resolvedConfigToml: '[invariants]\nproperty_priority_threshold = "high"\n'
+  });
+  writeArtifact(
+    layout,
+    "property-catalog",
+    "properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.properties.v2",
+      properties: [
+        {
+          id: "property-1",
+          description: "Invariant property-1",
+          category: "accounting",
+          priority: "high",
+          sources: [{ source_node_id: "property-lens", source_property_id: "source-1" }]
+        }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    "stale-implementation",
+    "implemented-properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v3",
+      selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-1"] },
+      properties: [
+        {
+          property_id: "property-1",
+          status: "implemented",
+          implementation_paths: ["test/Stale.sol"],
+          test_paths: ["test/Stale.t.sol"]
+        }
+      ]
+    })
+  );
+
+  const implementationOutput = boundOutput(
+    "combined/current-implementation.json",
+    "ultrafuzz/implemented-properties@3",
+    true
+  );
+  const campaignOutput = boundOutput("combined/current-campaign.json", "ultrafuzz/property-campaign@2");
+  const findingsOutput = boundOutput("combined/current-findings.json", "ultrafuzz/findings@2");
+  const node: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "combined-property-stage",
+    logical_id: "combined-property-stage",
+    display_name: "Combined property stage",
+    artifact_dir: "artifacts/combined-property-stage",
+    depends_on: ["stale-implementation"],
+    outputs: [implementationOutput, campaignOutput, findingsOutput]
+  };
+  const siblingImplementation = (status: "blocked" | "implemented"): string =>
+    JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v3",
+      selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-1"] },
+      properties: [
+        {
+          property_id: "property-1",
+          status,
+          implementation_paths: ["test/Current.sol"],
+          test_paths: ["test/Current.t.sol"],
+          ...(status === "blocked"
+            ? {
+                blocker: {
+                  code: "CURRENT_IMPLEMENTATION_BLOCKED",
+                  summary: "The current implementation is incomplete.",
+                  next_action: "Finish the current implementation."
+                }
+              }
+            : {})
+        }
+      ]
+    });
+  writeArtifactFile(layout, node.id, implementationOutput.path, siblingImplementation("blocked"));
+  writeArtifactFile(
+    layout,
+    node.id,
+    campaignOutput.path,
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v2",
+      fuzzer_backend: "recon",
+      failures: [{ id: "failure-1", status: "reproduced", property_ids: ["property-1"] }]
+    })
+  );
+  writeArtifactFile(
+    layout,
+    node.id,
+    findingsOutput.path,
+    JSON.stringify([accountedCampaignFinding("failure-1", ["property-1"], ["failure-1"])])
+  );
+
+  const blocked = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(blocked.ok, false);
+  assert.ok(
+    blocked.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_IMPLEMENTATION_REFERENCE_INVALID"),
+    JSON.stringify(blocked.diagnostics)
+  );
+
+  writeArtifactFile(layout, node.id, implementationOutput.path, siblingImplementation("implemented"));
+  const implemented = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(implemented.ok, true, JSON.stringify(implemented.diagnostics));
+});
 
 function writeCampaignSummary(
   layout: ReturnType<typeof createRunLayout>,

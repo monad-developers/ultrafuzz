@@ -53,6 +53,7 @@ import {
   type PropertyReferenceInput,
   type RunLayout,
   type RunState,
+  type SmithersTaskManifestTask,
   type NodeProvenanceReasonCode,
   type NodeOutputContract,
   type SemanticArtifactSetContext,
@@ -104,6 +105,12 @@ export interface RequiredArtifactGate {
   ok: boolean;
   diagnostics: RuntimeDiagnostic[];
   missing: string[];
+}
+
+/** Exact sealed Smithers attempt declarations available during workflow synchronization. */
+export interface ArtifactGateAttemptAuthority {
+  task: SmithersTaskManifestTask;
+  tasks: readonly SmithersTaskManifestTask[];
 }
 
 export function checkDependencyLegality(graph: PlannedGraph): RuntimeDiagnostic[] {
@@ -192,7 +199,8 @@ export function verifyRequiredArtifactsForNode(layout: RunLayout, node: PlannedG
 export function verifyRequiredArtifactsForAttempt(
   layout: RunLayout,
   node: PlannedGraphNode,
-  attemptId: string
+  attemptId: string,
+  attemptAuthority?: ArtifactGateAttemptAuthority
 ): RequiredArtifactGate {
   const diagnostics: RuntimeDiagnostic[] = [];
   const missing: string[] = [];
@@ -219,7 +227,9 @@ export function verifyRequiredArtifactsForAttempt(
         });
       } else {
         assertRegularFileInside(artifactDir, absolutePath, "required artifact");
-        diagnostics.push(...verifyRequiredArtifactShape(layout, artifactDir, absolutePath, output, node, attemptId));
+        diagnostics.push(
+          ...verifyRequiredArtifactShape(layout, artifactDir, absolutePath, output, node, attemptId, attemptAuthority)
+        );
       }
     } catch (error) {
       diagnostics.push(diagnosticFromError(error, "artifact-gates", "REQUIRED_ARTIFACT_INVALID"));
@@ -227,12 +237,12 @@ export function verifyRequiredArtifactsForAttempt(
   }
   diagnostics.push(...verifySeverityMatrixArtifacts(artifactDir, node));
   try {
-    diagnostics.push(...verifyInvariantEvidenceArtifacts(layout, artifactDir, node));
+    diagnostics.push(...verifyInvariantEvidenceArtifacts(layout, artifactDir, node, attemptAuthority));
   } catch (error) {
     diagnostics.push(diagnosticFromError(error, "invariant-ledger", "INVARIANT_EVIDENCE_READ_FAILED"));
   }
   try {
-    diagnostics.push(...verifyPropertyProvenanceArtifacts(layout, artifactDir, node, attemptId));
+    diagnostics.push(...verifyPropertyProvenanceArtifacts(layout, artifactDir, node, attemptId, attemptAuthority));
   } catch (error) {
     diagnostics.push(diagnosticFromError(error, "property-provenance", "PROPERTY_PROVENANCE_READ_FAILED"));
   }
@@ -253,7 +263,8 @@ export function verifyRequiredArtifactsForAttempt(
 function verifyInvariantEvidenceArtifacts(
   layout: RunLayout,
   artifactDir: string,
-  node: PlannedGraphNode
+  node: PlannedGraphNode,
+  attemptAuthority?: ArtifactGateAttemptAuthority
 ): RuntimeDiagnostic[] {
   const logicalId = node.logical_id ?? node.id;
   const diagnostics: RuntimeDiagnostic[] = [];
@@ -454,7 +465,12 @@ function verifyInvariantEvidenceArtifacts(
   let ledgerProducer: FinalizedDeclaredProducer | undefined;
   let ledgerArtifact: VerifiedOutputArtifactSnapshot | undefined;
   try {
-    const ledgerProducers = finalizedDeclaredContractProducers(layout, "ultrafuzz/invariant-ledger@1", node);
+    const ledgerProducers = finalizedDeclaredContractProducers(
+      layout,
+      "ultrafuzz/invariant-ledger@1",
+      node,
+      attemptAuthority
+    );
     const ledgerArtifacts = ledgerProducers.flatMap((producer) =>
       producer.outputs.map((output) => ({ producer, output }))
     );
@@ -485,7 +501,9 @@ function verifyInvariantEvidenceArtifacts(
   if (!ledger.ok || ledger.value === undefined || !catalog.ok || catalog.value === undefined) {
     return diagnostics;
   }
-  diagnostics.push(...verifyLensReferenceExpectationPreservation(layout, node, catalog.value, catalogPath));
+  diagnostics.push(
+    ...verifyLensReferenceExpectationPreservation(layout, node, catalog.value, catalogPath, attemptAuthority)
+  );
   // Fan-in re-checks probe containment on the SAME ledger discovery published (issue #292). It used
   // to check none: every shape of the ledger returned before reaching a `verifyInvariantProbePath`
   // call, so an escaping probe path only ever had to survive the discovery node. The ledger lives in
@@ -906,7 +924,8 @@ function verifyLensReferenceExpectationPreservation(
   layout: RunLayout,
   node: PlannedGraphNode,
   catalog: PropertiesArtifact,
-  catalogPath: string
+  catalogPath: string,
+  attemptAuthority?: ArtifactGateAttemptAuthority
 ): RuntimeDiagnostic[] {
   const diagnostics: RuntimeDiagnostic[] = [];
   const lensRows = new Map<string, LensReferenceRow>();
@@ -1710,7 +1729,8 @@ function verifyRequiredArtifactShape(
   absolutePath: string,
   output: PlannedGraphNode["outputs"][number],
   node: PlannedGraphNode,
-  attemptId: string
+  attemptId: string,
+  attemptAuthority?: ArtifactGateAttemptAuthority
 ): RuntimeDiagnostic[] {
   const artifactBytes = readRegularFileSnapshot(absolutePath, MAX_ARTIFACT_SNAPSHOT_BYTES);
   const schemaDiagnostics = verifyRequiredArtifactSchemaBinding(absolutePath, output, artifactBytes);
@@ -1742,7 +1762,8 @@ function verifyRequiredArtifactShape(
           artifactDir,
           node,
           attemptId,
-          schemaFilename: binding.schema_file as ArtifactSchemaFilename
+          schemaFilename: binding.schema_file as ArtifactSchemaFilename,
+          attemptAuthority
         })
       })
     );
@@ -1823,6 +1844,7 @@ function semanticGateContextForArtifact(input: {
   node: PlannedGraphNode;
   attemptId: string;
   schemaFilename: ArtifactSchemaFilename;
+  attemptAuthority?: ArtifactGateAttemptAuthority;
 }): SemanticGateContext {
   const context: SemanticGateContext = {
     filesystem: { rootDirectory: input.artifactDir },
@@ -1849,25 +1871,26 @@ function semanticArtifactSetForSchema(input: {
   artifactDir: string;
   node: PlannedGraphNode;
   schemaFilename: ArtifactSchemaFilename;
+  attemptAuthority?: ArtifactGateAttemptAuthority;
 }): SemanticArtifactSetContext | undefined {
   if (input.schemaFilename === "campaign-summary.schema.json") {
     return semanticCampaignArtifacts(input.artifactDir, input.node);
   }
   if (input.schemaFilename === "implemented-properties.schema.json") {
-    const propertyCatalog = semanticCanonicalPropertyCatalog(input.layout, input.node);
+    const propertyCatalog = semanticCanonicalPropertyCatalog(input.layout, input.node, input.attemptAuthority);
     return propertyCatalog === undefined ? {} : { propertyCatalog };
   }
   if (input.schemaFilename === "properties.schema.json") {
-    const propertyLenses = semanticPropertyLenses(input.layout, input.node);
+    const propertyLenses = semanticPropertyLenses(input.layout, input.node, input.attemptAuthority);
     return propertyLenses === undefined ? {} : { propertyLenses };
   }
   if (input.schemaFilename === "severity-classified-findings.schema.json") {
-    const triagedFindings = semanticTriagedFindings(input.layout, input.node);
+    const triagedFindings = semanticTriagedFindings(input.layout, input.node, input.attemptAuthority);
     return triagedFindings === undefined ? {} : { triagedFindings };
   }
   if (input.schemaFilename === "report.schema.json") {
-    const propertyCatalog = semanticCanonicalPropertyCatalog(input.layout, input.node);
-    const implementedProperties = semanticImplementedProperties(input.layout, input.node);
+    const propertyCatalog = semanticCanonicalPropertyCatalog(input.layout, input.node, input.attemptAuthority);
+    const implementedProperties = semanticImplementedProperties(input.layout, input.node, input.attemptAuthority);
     return {
       ...(propertyCatalog === undefined ? {} : { propertyCatalog }),
       ...(implementedProperties === undefined ? {} : { implementedProperties })
@@ -1876,12 +1899,17 @@ function semanticArtifactSetForSchema(input: {
   return undefined;
 }
 
-function semanticTriagedFindings(layout: RunLayout, consumer: PlannedGraphNode): unknown | undefined {
+function semanticTriagedFindings(
+  layout: RunLayout,
+  consumer: PlannedGraphNode,
+  attemptAuthority?: ArtifactGateAttemptAuthority
+): unknown | undefined {
   return finalizedSingletonAncestorOutput(
     layout,
     consumer,
     "ultrafuzz/triaged-findings@1",
-    "triaged findings semantic context"
+    "triaged findings semantic context",
+    attemptAuthority
   )?.value;
 }
 
@@ -1919,13 +1947,15 @@ function semanticCampaignArtifacts(artifactDir: string, node: PlannedGraphNode):
 
 function semanticCanonicalPropertyCatalog(
   layout: RunLayout,
-  consumer: PlannedGraphNode
+  consumer: PlannedGraphNode,
+  attemptAuthority?: ArtifactGateAttemptAuthority
 ): PropertiesArtifact | undefined {
   const artifact = finalizedSingletonAncestorOutput(
     layout,
     consumer,
     "ultrafuzz/properties@2",
-    "canonical property semantic context"
+    "canonical property semantic context",
+    attemptAuthority
   );
   if (artifact !== undefined) {
     const parsed = validatePropertiesSchema(artifact.value, artifact.absolute_path);
@@ -1934,20 +1964,22 @@ function semanticCanonicalPropertyCatalog(
     }
     return parsed.value;
   }
-  return plannedContractProducerStatus(layout, consumer, "ultrafuzz/properties@2") === "absent"
+  return plannedContractProducerStatus(layout, consumer, "ultrafuzz/properties@2", attemptAuthority) === "absent"
     ? UNPLANNED_PROPERTY_CATALOG_CONTEXT
     : undefined;
 }
 
 function semanticImplementedProperties(
   layout: RunLayout,
-  consumer: PlannedGraphNode
+  consumer: PlannedGraphNode,
+  attemptAuthority?: ArtifactGateAttemptAuthority
 ): ImplementedPropertiesArtifact | undefined {
   const artifact = finalizedSingletonAncestorOutput(
     layout,
     consumer,
     "ultrafuzz/implemented-properties@3",
-    "implemented property semantic context"
+    "implemented property semantic context",
+    attemptAuthority
   );
   if (artifact !== undefined) {
     const parsed = validateImplementedPropertiesSchema(artifact.value, artifact.absolute_path);
@@ -1956,7 +1988,8 @@ function semanticImplementedProperties(
     }
     return parsed.value;
   }
-  return plannedContractProducerStatus(layout, consumer, "ultrafuzz/implemented-properties@3") === "absent"
+  return plannedContractProducerStatus(layout, consumer, "ultrafuzz/implemented-properties@3", attemptAuthority) ===
+    "absent"
     ? UNPLANNED_IMPLEMENTED_PROPERTIES_CONTEXT
     : undefined;
 }
@@ -1964,8 +1997,17 @@ function semanticImplementedProperties(
 function plannedContractProducerStatus(
   layout: RunLayout,
   consumer: PlannedGraphNode,
-  contract: PlannedGraphNode["outputs"][number]["contract"]
+  contract: PlannedGraphNode["outputs"][number]["contract"],
+  attemptAuthority?: ArtifactGateAttemptAuthority
 ): "absent" | "present" | "unknown" {
+  if (attemptAuthority !== undefined) {
+    try {
+      const { current, declarations } = semanticAttemptDeclarations(consumer, attemptAuthority);
+      return declaredAncestorOutputsByContract(current, declarations, contract).length === 0 ? "absent" : "present";
+    } catch {
+      return "unknown";
+    }
+  }
   if (!fs.existsSync(layout.graphPath)) return "unknown";
   try {
     assertRegularFileInside(layout.root, layout.graphPath, "planned graph semantic context");
@@ -1982,10 +2024,38 @@ function plannedContractProducerStatus(
 }
 
 type FinalizedDeclaredProducer = {
+  attemptId: string;
   node: PlannedGraphNode;
   authority: ReturnType<typeof loadFinalizedNodeOutputSnapshot>;
   outputs: readonly VerifiedOutputArtifactSnapshot[];
 };
+
+function semanticAttemptDeclarations(
+  consumer: PlannedGraphNode,
+  authority: ArtifactGateAttemptAuthority
+): { current: SemanticArtifactTaskDeclaration; declarations: SemanticArtifactTaskDeclaration[] } {
+  if (
+    authority.task.concreteNodeId !== consumer.id ||
+    authority.task.logicalNodeId !== (consumer.logical_id ?? consumer.id)
+  ) {
+    throw new Error(
+      `sealed Smithers attempt ${JSON.stringify(authority.task.attemptId)} does not bind consumer ${JSON.stringify(consumer.id)}`
+    );
+  }
+  const declarations = authority.tasks.map((task): SemanticArtifactTaskDeclaration => ({
+    attemptId: task.attemptId,
+    logicalNodeId: task.logicalNodeId,
+    artifactDir: task.artifactDir,
+    dependencies: task.dependencies,
+    dependencyArtifactDirs: task.dependencyArtifactDirs,
+    outputs: task.metadata.artifacts.outputs.map((output) => ({ path: output.path, contract: output.contract }))
+  }));
+  const current = declarations.find((task) => task.attemptId === authority.task.attemptId);
+  if (current === undefined) {
+    throw new Error(`current Smithers attempt is absent from the sealed task set: ${authority.task.attemptId}`);
+  }
+  return { current, declarations };
+}
 
 function plannedAncestorIds(
   graph: ReturnType<typeof assertPlannedGraph>,
@@ -2037,58 +2107,70 @@ function plannedDirectDependencyNodes(layout: RunLayout, consumer: PlannedGraphN
 function finalizedDeclaredContractProducers(
   layout: RunLayout,
   contract: PlannedGraphNode["outputs"][number]["contract"],
-  consumer: PlannedGraphNode
+  consumer: PlannedGraphNode,
+  attemptAuthority?: ArtifactGateAttemptAuthority,
+  options: { directOnly?: boolean } = {}
 ): FinalizedDeclaredProducer[] {
   assertRegularFileInside(layout.root, layout.graphPath, "planned graph finalized artifact authority");
   const graph = assertPlannedGraph(readStrictRegisteredDocument(layout.graphPath, "planned-graph.schema.json"));
-  const ancestorIds = plannedAncestorIds(graph, consumer);
-  const artifactDirectory = (node: PlannedGraphNode): string =>
-    safeResolveInside(layout.root, node.artifact_dir, `planned artifact directory for ${node.id}`);
-  const ancestorDirectories = graph.nodes
-    .filter((node) => ancestorIds.has(node.id))
-    .map((node) => artifactDirectory(node));
-  const declarations: SemanticArtifactTaskDeclaration[] = graph.nodes.map((node) => ({
-    attemptId: node.id,
-    logicalNodeId: node.logical_id,
-    artifactDir: artifactDirectory(node),
-    dependencies: node.depends_on,
-    dependencyArtifactDirs: node.id === consumer.id ? ancestorDirectories : [],
-    outputs: node.outputs
-  }));
-  const current = declarations.find((declaration) => declaration.attemptId === consumer.id);
-  if (current === undefined) {
-    throw new Error(`planned graph does not bind exact consumer ${JSON.stringify(consumer.id)}`);
+  let current: SemanticArtifactTaskDeclaration;
+  let declarations: SemanticArtifactTaskDeclaration[];
+  const concreteNodeIdByAttempt = new Map<string, string>();
+  if (attemptAuthority !== undefined) {
+    ({ current, declarations } = semanticAttemptDeclarations(consumer, attemptAuthority));
+    for (const task of attemptAuthority.tasks) concreteNodeIdByAttempt.set(task.attemptId, task.concreteNodeId);
+  } else {
+    const ancestorIds = plannedAncestorIds(graph, consumer);
+    const artifactDirectory = (node: PlannedGraphNode): string =>
+      safeResolveInside(layout.root, node.artifact_dir, `planned artifact directory for ${node.id}`);
+    const ancestorDirectories = graph.nodes
+      .filter((node) => ancestorIds.has(node.id))
+      .map((node) => artifactDirectory(node));
+    declarations = graph.nodes.map((node) => ({
+      attemptId: node.id,
+      logicalNodeId: node.logical_id,
+      artifactDir: artifactDirectory(node),
+      dependencies: node.depends_on,
+      dependencyArtifactDirs: node.id === consumer.id ? ancestorDirectories : [],
+      outputs: node.outputs
+    }));
+    current = declarations.find((declaration) => declaration.attemptId === consumer.id)!;
+    if (current === undefined) {
+      throw new Error(`planned graph does not bind exact consumer ${JSON.stringify(consumer.id)}`);
+    }
+    for (const node of graph.nodes) concreteNodeIdByAttempt.set(node.id, node.id);
   }
-  const bindings = declaredAncestorOutputsByContract(current, declarations, contract);
+  const bindings = declaredAncestorOutputsByContract(current, declarations, contract, options);
   const bindingsByAttempt = new Map<string, typeof bindings>();
   for (const binding of bindings) {
     bindingsByAttempt.set(binding.attemptId, [...(bindingsByAttempt.get(binding.attemptId) ?? []), binding]);
   }
   const nodesById = new Map(graph.nodes.map((node) => [node.id, node] as const));
   return [...bindingsByAttempt.entries()].map(([attemptId, declaredOutputs]) => {
-    const node = nodesById.get(attemptId);
+    const concreteNodeId = concreteNodeIdByAttempt.get(attemptId);
+    const node = concreteNodeId === undefined ? undefined : nodesById.get(concreteNodeId);
     if (node === undefined)
       throw new Error(`declared semantic producer is absent from the planned graph: ${attemptId}`);
-    let authority: ReturnType<typeof loadFinalizedNodeOutputSnapshot>;
+    let outputAuthority: ReturnType<typeof loadFinalizedNodeOutputSnapshot>;
     try {
-      authority = loadFinalizedNodeOutputSnapshot({
+      outputAuthority = loadFinalizedNodeOutputSnapshot({
         runRoot: layout.root,
         logicalNodeId: node.logical_id,
-        attemptId: node.id
+        attemptId
       });
     } catch (error) {
       throw new Error(
-        `finalized ${contract} authority is invalid for ${node.id}: ${error instanceof Error ? error.message : String(error)}`,
+        `finalized ${contract} authority is invalid for ${attemptId}: ${error instanceof Error ? error.message : String(error)}`,
         { cause: error }
       );
     }
     const declaredPaths = declaredOutputs.map((output) => output.path).sort();
-    const outputs = authority.outputs.filter((output) => output.contract === contract);
+    const outputs = outputAuthority.outputs.filter((output) => output.contract === contract);
     const finalizedPaths = outputs.map((output) => output.path).sort();
     if (!sameStringSequence(declaredPaths, finalizedPaths)) {
-      throw new Error(`finalized ${contract} authority does not match the current declarations for ${node.id}`);
+      throw new Error(`finalized ${contract} authority does not match the current declarations for ${attemptId}`);
     }
-    return { node, authority, outputs };
+    return { attemptId, node, authority: outputAuthority, outputs };
   });
 }
 
@@ -2096,9 +2178,10 @@ function finalizedSingletonAncestorOutput(
   layout: RunLayout,
   consumer: PlannedGraphNode,
   contract: PlannedGraphNode["outputs"][number]["contract"],
-  label: string
+  label: string,
+  attemptAuthority?: ArtifactGateAttemptAuthority
 ): VerifiedOutputArtifactSnapshot | undefined {
-  const outputs = finalizedDeclaredContractProducers(layout, contract, consumer).flatMap((producer) =>
+  const outputs = finalizedDeclaredContractProducers(layout, contract, consumer, attemptAuthority).flatMap((producer) =>
     producer.outputs.slice()
   );
   if (outputs.length === 0) return undefined;
@@ -2110,7 +2193,8 @@ function finalizedSingletonAncestorOutput(
 
 function semanticPropertyLenses(
   layout: RunLayout,
-  consumer: PlannedGraphNode
+  consumer: PlannedGraphNode,
+  attemptAuthority?: ArtifactGateAttemptAuthority
 ): SemanticPropertyLensContext[] | undefined {
   const state = readRunState(layout);
   const lenses: SemanticPropertyLensContext[] = [];
@@ -2122,9 +2206,12 @@ function semanticPropertyLenses(
     artifact: VerifiedOutputArtifactSnapshot;
   }[];
   try {
-    ledgerArtifacts = finalizedDeclaredContractProducers(layout, "ultrafuzz/invariant-ledger@1", consumer).flatMap(
-      (producer) => producer.outputs.map((artifact) => ({ producer, artifact }))
-    );
+    ledgerArtifacts = finalizedDeclaredContractProducers(
+      layout,
+      "ultrafuzz/invariant-ledger@1",
+      consumer,
+      attemptAuthority
+    ).flatMap((producer) => producer.outputs.map((artifact) => ({ producer, artifact })));
   } catch {
     return undefined;
   }
@@ -2294,7 +2381,7 @@ function verifySeverityMatrixArtifacts(artifactDir: string, node: PlannedGraphNo
   if (artifact === undefined) {
     return [];
   }
-  const artifactPath = path.join(artifactDir, artifact.file);
+  const artifactPath = safeResolveInside(artifactDir, artifact.path, "severity artifact output");
   if (!fs.existsSync(artifactPath)) {
     return [];
   }
@@ -2309,15 +2396,14 @@ function verifySeverityMatrixArtifacts(artifactDir: string, node: PlannedGraphNo
   }
 }
 
-function severityArtifactForNode(
-  node: PlannedGraphNode
-): { kind: SeverityArtifactKind; file: "severity-classified-findings.json" | "report.json" } | undefined {
+function severityArtifactForNode(node: PlannedGraphNode): { kind: SeverityArtifactKind; path: string } | undefined {
   const logicalId = node.logical_id ?? node.id;
   if (logicalId === "severity-classification") {
-    return { kind: "severity-classification", file: "severity-classified-findings.json" };
+    return { kind: "severity-classification", path: "severity-classified-findings.json" };
   }
-  if (logicalId === "final-report") {
-    return { kind: "final-report", file: "report.json" };
+  const reportOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/report@2");
+  if (reportOutputs.length === 1) {
+    return { kind: "final-report", path: reportOutputs[0]!.path };
   }
   return undefined;
 }
@@ -2326,7 +2412,8 @@ function verifyPropertyProvenanceArtifacts(
   layout: RunLayout,
   artifactDir: string,
   node: PlannedGraphNode,
-  attemptId: string
+  attemptId: string,
+  attemptAuthority?: ArtifactGateAttemptAuthority
 ): RuntimeDiagnostic[] {
   const isPropertyLens = node.outputs.some((output) => output.contract === "ultrafuzz/property-lens@2");
   const isFinalReport = node.outputs.some((output) => output.contract === "ultrafuzz/report@2");
@@ -2337,51 +2424,119 @@ function verifyPropertyProvenanceArtifacts(
     diagnostics.push(...verifyLensReferenceExpectationAuthority(layout, artifactDir, node, attemptId));
   }
   if (isFinalReport) {
-    diagnostics.push(...verifyFinalReportPropertyReferences(layout, artifactDir, node));
+    diagnostics.push(...verifyFinalReportPropertyReferences(layout, artifactDir, node, attemptAuthority));
   }
   if (!isImplementation && !isCampaign) return diagnostics;
 
-  const catalog = readCanonicalPropertyCatalog(layout, node);
+  const catalog = readCanonicalPropertyCatalog(layout, node, attemptAuthority);
   if (catalog.diagnostics.length > 0 || catalog.value === undefined) {
     return [...diagnostics, ...catalog.diagnostics];
   }
 
+  const siblingImplementation = isImplementation
+    ? readDeclaredSiblingImplementedProperties(artifactDir, node, layout)
+    : undefined;
   if (isImplementation) {
-    diagnostics.push(...verifyImplementationPropertyReferences(layout, artifactDir, catalog.value, node));
+    diagnostics.push(...(siblingImplementation?.diagnostics ?? []));
+    if (siblingImplementation?.value !== undefined && siblingImplementation.path !== undefined) {
+      diagnostics.push(
+        ...verifyImplementationPropertyReferences(
+          layout,
+          artifactDir,
+          catalog.value,
+          node,
+          siblingImplementation.value,
+          siblingImplementation.path
+        )
+      );
+    }
   }
-  if (isCampaign) diagnostics.push(...verifyCampaignPropertyReferences(layout, artifactDir, catalog.value, node));
+  if (isCampaign) {
+    diagnostics.push(
+      ...verifyCampaignPropertyReferences(
+        layout,
+        artifactDir,
+        catalog.value,
+        node,
+        siblingImplementation,
+        attemptAuthority
+      )
+    );
+  }
   return diagnostics;
+}
+
+type ImplementedPropertiesRead = {
+  value?: ImplementedPropertiesArtifact;
+  path?: string;
+  diagnostics: RuntimeDiagnostic[];
+};
+
+/**
+ * Capture the implementation half of a mixed-role producer from its exact
+ * declared output. The immutable bytes are schema-validated before either the
+ * implementation gate or a sibling campaign join can consume the document.
+ */
+function readDeclaredSiblingImplementedProperties(
+  artifactDir: string,
+  node: PlannedGraphNode,
+  layout: RunLayout
+): ImplementedPropertiesRead {
+  const outputs = node.outputs.filter((output) => output.contract === "ultrafuzz/implemented-properties@3");
+  if (outputs.length !== 1) {
+    return {
+      diagnostics: [
+        {
+          code: "PROPERTY_IMPLEMENTATION_DECLARATION_AMBIGUOUS",
+          message: `Property implementation must declare exactly one ultrafuzz/implemented-properties@3 output; found ${outputs.length}`,
+          severity: "error",
+          source: "property-provenance",
+          path: layout.graphPath
+        }
+      ]
+    };
+  }
+  const artifactPath = safeResolveInside(artifactDir, outputs[0]!.path, "implemented property sibling output");
+  if (!fs.existsSync(artifactPath)) {
+    return {
+      diagnostics: [
+        {
+          code: "IMPLEMENTED_PROPERTIES_SIBLING_MISSING",
+          message: `Declared sibling implementation output ${JSON.stringify(outputs[0]!.path)} is unavailable`,
+          severity: "error",
+          source: "property-provenance",
+          path: artifactPath
+        }
+      ]
+    };
+  }
+  try {
+    assertRegularFileInside(artifactDir, artifactPath, "implemented property sibling output");
+    const bytes = readRegularFileSnapshot(artifactPath, MAX_ARTIFACT_SNAPSHOT_BYTES);
+    const contract = validateArtifactContractBytes("ultrafuzz/implemented-properties@3", bytes, artifactPath);
+    if (!contract.ok || contract.value === undefined) {
+      return { diagnostics: schemaDiagnostics(contract.issues) };
+    }
+    const parsed = validateImplementedPropertiesSchema(contract.value, artifactPath);
+    return parsed.ok && parsed.value !== undefined
+      ? { value: parsed.value, path: artifactPath, diagnostics: [] }
+      : { diagnostics: schemaDiagnostics(parsed.issues) };
+  } catch (error) {
+    return {
+      diagnostics: [diagnosticFromError(error, "property-provenance", "IMPLEMENTED_PROPERTIES_SIBLING_INVALID")]
+    };
+  }
 }
 
 function verifyImplementationPropertyReferences(
   layout: RunLayout,
   artifactDir: string,
   catalog: PropertiesArtifact,
-  node: PlannedGraphNode
+  node: PlannedGraphNode,
+  implementation: ImplementedPropertiesArtifact,
+  implementationPath: string
 ): RuntimeDiagnostic[] {
-  const implementationOutputs = node.outputs.filter(
-    (output) => output.contract === "ultrafuzz/implemented-properties@3"
-  );
-  if (implementationOutputs.length !== 1) {
-    return [
-      {
-        code: "PROPERTY_IMPLEMENTATION_DECLARATION_AMBIGUOUS",
-        message: `Property implementation must declare exactly one ultrafuzz/implemented-properties@3 output; found ${implementationOutputs.length}`,
-        severity: "error",
-        source: "property-provenance",
-        path: layout.graphPath
-      }
-    ];
-  }
-  const implementationPath = safeResolveInside(
-    artifactDir,
-    implementationOutputs[0]!.path,
-    "implemented property output"
-  );
-  if (!fs.existsSync(implementationPath)) return [];
-  const implementation = validateImplementedPropertiesSchema(readJsonFile(implementationPath), implementationPath);
-  if (!implementation.ok || implementation.value === undefined) return [];
-  const references: PropertyReferenceInput[] = implementation.value.properties.map((record, index) => ({
+  const references: PropertyReferenceInput[] = implementation.properties.map((record, index) => ({
     propertyIds: [record.property_id],
     path: `${implementationPath}#$.properties[${index}].property_id`
   }));
@@ -2393,7 +2548,7 @@ function verifyImplementationPropertyReferences(
   }
   return [
     ...propertyReferenceDiagnostics(catalog, references),
-    ...verifyImplementationSelectionCoverage(catalog, implementation.value, implementationPath, layout)
+    ...verifyImplementationSelectionCoverage(catalog, implementation, implementationPath, layout)
   ];
 }
 
@@ -2764,7 +2919,9 @@ function verifyCampaignPropertyReferences(
   layout: RunLayout,
   artifactDir: string,
   catalog: PropertiesArtifact,
-  node: PlannedGraphNode
+  node: PlannedGraphNode,
+  siblingImplementation?: ImplementedPropertiesRead,
+  attemptAuthority?: ArtifactGateAttemptAuthority
 ): RuntimeDiagnostic[] {
   const campaignOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/property-campaign@2");
   const findingOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/findings@2");
@@ -2811,7 +2968,11 @@ function verifyCampaignPropertyReferences(
     campaigns.length === campaignPaths.length
       ? campaignFailurePartitionDiagnostics(campaigns, validatedFindings, findingsPath)
       : [];
-  const implementation = readImplementedProperties(layout, node);
+  // A node may deliberately own both implementation and campaign roles. In
+  // that case its implementation output is a sibling, not an ancestor; use
+  // the authenticated immutable snapshot captured above and never fall back
+  // to an older ancestor merely because the sibling is missing or invalid.
+  const implementation = siblingImplementation ?? readImplementedProperties(layout, node, attemptAuthority);
   if (implementation.diagnostics.length > 0 || implementation.value === undefined) {
     return [...summaryDiagnostics, ...backendDiagnostics, ...partitionDiagnostics, ...implementation.diagnostics];
   }
@@ -3235,7 +3396,8 @@ function campaignFindingFuzzerBackendDiagnostics(
 function verifyFinalReportPropertyReferences(
   layout: RunLayout,
   artifactDir: string,
-  node: PlannedGraphNode
+  node: PlannedGraphNode,
+  attemptAuthority?: ArtifactGateAttemptAuthority
 ): RuntimeDiagnostic[] {
   const reportOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/report@2");
   if (reportOutputs.length !== 1) {
@@ -3249,13 +3411,33 @@ function verifyFinalReportPropertyReferences(
       }
     ];
   }
+  const markdownOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/nonempty-markdown@1");
+  if (markdownOutputs.length !== 1) {
+    return [
+      {
+        code: "PROPERTY_REPORT_MARKDOWN_DECLARATION_AMBIGUOUS",
+        message: `Report producer must declare exactly one corresponding ultrafuzz/nonempty-markdown@1 output; found ${markdownOutputs.length}`,
+        severity: "error",
+        source: "property-provenance",
+        path: layout.graphPath
+      }
+    ];
+  }
   const reportPath = safeResolveInside(artifactDir, reportOutputs[0]!.path, "final report output");
+  const markdownPath = safeResolveInside(artifactDir, markdownOutputs[0]!.path, "final report Markdown output");
   if (!fs.existsSync(reportPath)) return [];
   const report = readJsonFile(reportPath);
   if (!isRecord(report)) {
     return [];
   }
-  const diagnostics = verifyFinalReportImplementationCoverage(layout, node, report, reportPath);
+  const diagnostics = verifyFinalReportImplementationCoverage(
+    layout,
+    node,
+    report,
+    reportPath,
+    markdownPath,
+    attemptAuthority
+  );
   if (!Array.isArray(report.property_provenance)) {
     return diagnostics;
   }
@@ -3263,7 +3445,7 @@ function verifyFinalReportPropertyReferences(
     return diagnostics;
   }
 
-  const catalog = readCanonicalPropertyCatalog(layout, node);
+  const catalog = readCanonicalPropertyCatalog(layout, node, attemptAuthority);
   if (catalog.diagnostics.length > 0 || catalog.value === undefined) {
     return [...diagnostics, ...catalog.diagnostics];
   }
@@ -3283,11 +3465,11 @@ function verifyFinalReportPropertyReferences(
     );
   });
   diagnostics.push(...propertyReferenceDiagnostics(catalog.value, references));
-  const implementation = readImplementedProperties(layout, node);
+  const implementation = readImplementedProperties(layout, node, attemptAuthority);
   if (implementation.diagnostics.length > 0 || implementation.value === undefined) {
     return [...diagnostics, ...implementation.diagnostics];
   }
-  const campaignAuthority = readCampaignFuzzerBackends(layout, node);
+  const campaignAuthority = readCampaignFuzzerBackends(layout, node, attemptAuthority);
   diagnostics.push(...campaignAuthority.diagnostics);
   diagnostics.push(
     ...reportPropertyJoinDiagnostics(
@@ -3308,10 +3490,13 @@ function verifyFinalReportImplementationCoverage(
   layout: RunLayout,
   node: PlannedGraphNode,
   report: Record<string, unknown>,
-  reportPath: string
+  reportPath: string,
+  markdownPath: string,
+  attemptAuthority?: ArtifactGateAttemptAuthority
 ): RuntimeDiagnostic[] {
-  if (plannedContractProducerStatus(layout, node, "ultrafuzz/implemented-properties@3") === "absent") return [];
-  const implementation = readImplementedProperties(layout, node);
+  if (plannedContractProducerStatus(layout, node, "ultrafuzz/implemented-properties@3", attemptAuthority) === "absent")
+    return [];
+  const implementation = readImplementedProperties(layout, node, attemptAuthority);
   if (
     implementation.diagnostics.length > 0 ||
     implementation.value === undefined ||
@@ -3332,7 +3517,7 @@ function verifyFinalReportImplementationCoverage(
     ];
   }
 
-  const catalog = readCanonicalPropertyCatalog(layout, node);
+  const catalog = readCanonicalPropertyCatalog(layout, node, attemptAuthority);
   if (catalog.diagnostics.length > 0 || catalog.value === undefined || catalog.path === undefined) {
     return catalog.diagnostics;
   }
@@ -3400,110 +3585,107 @@ function verifyFinalReportImplementationCoverage(
     }
   }
 
-  if (node.outputs.some((output) => output.path === "report.md")) {
-    const markdownPath = path.join(path.dirname(reportPath), "report.md");
-    if (fs.existsSync(markdownPath)) {
-      const markdown = fs.readFileSync(markdownPath, "utf8");
-      const markdownLines = markdown.split(/\r?\n/u);
-      let fenced = false;
-      let headingLineIndex = -1;
+  if (fs.existsSync(markdownPath)) {
+    const markdown = fs.readFileSync(markdownPath, "utf8");
+    const markdownLines = markdown.split(/\r?\n/u);
+    let fenced = false;
+    let headingLineIndex = -1;
+    for (const [index, line] of markdownLines.entries()) {
+      const trimmed = line.trim();
+      if (/^(?:`{3,}|~{3,})/u.test(trimmed)) {
+        fenced = !fenced;
+        continue;
+      }
+      if (!fenced && trimmed === "## Property implementation coverage") {
+        headingLineIndex = index;
+        break;
+      }
+    }
+    if (headingLineIndex < 0) {
+      diagnostics.push({
+        code: "PROPERTY_REPORT_IMPLEMENTATION_COVERAGE_MARKDOWN_MISSING",
+        message: "Current invariant report Markdown must render the property implementation coverage section",
+        severity: "error",
+        source: "property-provenance",
+        path: markdownPath
+      });
+    } else if (isRecord(coverage)) {
+      fenced = false;
+      let nextHeadingLineIndex = -1;
       for (const [index, line] of markdownLines.entries()) {
+        if (index <= headingLineIndex) continue;
         const trimmed = line.trim();
         if (/^(?:`{3,}|~{3,})/u.test(trimmed)) {
           fenced = !fenced;
           continue;
         }
-        if (!fenced && trimmed === "## Property implementation coverage") {
-          headingLineIndex = index;
+        if (!fenced && trimmed.startsWith("## ")) {
+          nextHeadingLineIndex = index;
           break;
         }
       }
-      if (headingLineIndex < 0) {
+      const lines = markdownLines
+        .slice(headingLineIndex + 1, nextHeadingLineIndex < 0 ? undefined : nextHeadingLineIndex)
+        .map((line) => line.trim());
+      const expectedCountFields: Array<[string, number]> = [
+        ["Selected properties", stringArray(coverage.selected_property_ids).length],
+        ["Implemented properties", stringArray(coverage.implemented_property_ids).length],
+        ["Blocked properties", stringArray(coverage.blocked_property_ids).length],
+        ["Pending properties", stringArray(coverage.pending_property_ids).length],
+        ["Deferred properties", stringArray(coverage.deferred_property_ids).length],
+        ["Reference expectation properties", stringArray(coverage.reference_expected_property_ids).length]
+      ];
+      const markdownMismatches: string[] = [];
+      const expectedThreshold =
+        typeof coverage.priority_threshold === "string" ? coverage.priority_threshold : "unavailable";
+      const thresholdLine = lines.find((line) => line.startsWith("- Priority threshold:"));
+      if (thresholdLine !== `- Priority threshold: \`${expectedThreshold}\``) {
+        markdownMismatches.push("priority_threshold");
+      }
+      const expectedPriorities = stringArray(coverage.priorities);
+      const includedPrioritiesLine = lines.find((line) => line.startsWith("- Included priorities:"));
+      const renderedPriorities = expectedPriorities.length > 0 ? expectedPriorities.join("<br>") : "unavailable";
+      if (includedPrioritiesLine !== `- Included priorities: \`${renderedPriorities}\``) {
+        markdownMismatches.push("priorities");
+      }
+      for (const [label, expectedCount] of expectedCountFields) {
+        const prefix = `- ${label}:`;
+        const line = lines.find((candidate) => candidate.startsWith(prefix));
+        if (line !== `- ${label}: \`${expectedCount}\``) {
+          markdownMismatches.push(label);
+        }
+      }
+      const expectedBlockerSummaries = stringArray(coverage.blocker_summaries);
+      const blockerHeadingIndex = lines.indexOf("Blocker summaries:");
+      const renderedBlockers: string[] = [];
+      if (blockerHeadingIndex >= 0) {
+        for (const line of lines.slice(blockerHeadingIndex + 1)) {
+          if (!line.startsWith("- ")) break;
+          renderedBlockers.push(line);
+        }
+      }
+      // The Markdown must report the same blockers as the JSON. It must not
+      // also require the author to reproduce reportPublicProse character for
+      // character: that function redacts secrets and several relative path
+      // prefixes, escapes eight Markdown characters, and HTML-escapes two
+      // more, and no prose description of it has yet survived review. Accept
+      // the escaped rendering or the summary text as written.
+      const blockerMatches = (rendered: string | undefined, summary: string): boolean =>
+        rendered === `- ${reportPublicProse(summary)}` || rendered === `- ${summary.replace(/\s+/gu, " ").trim()}`;
+      if (
+        renderedBlockers.length !== expectedBlockerSummaries.length ||
+        expectedBlockerSummaries.some((summary, index) => !blockerMatches(renderedBlockers[index], summary))
+      ) {
+        markdownMismatches.push("blocker_summaries");
+      }
+      if (markdownMismatches.length > 0) {
         diagnostics.push({
-          code: "PROPERTY_REPORT_IMPLEMENTATION_COVERAGE_MARKDOWN_MISSING",
-          message: "Current invariant report Markdown must render the property implementation coverage section",
+          code: "PROPERTY_REPORT_IMPLEMENTATION_COVERAGE_MARKDOWN_MISMATCH",
+          message: `Current invariant report Markdown coverage does not match report.json (${markdownMismatches.join(", ")})`,
           severity: "error",
           source: "property-provenance",
           path: markdownPath
         });
-      } else if (isRecord(coverage)) {
-        fenced = false;
-        let nextHeadingLineIndex = -1;
-        for (const [index, line] of markdownLines.entries()) {
-          if (index <= headingLineIndex) continue;
-          const trimmed = line.trim();
-          if (/^(?:`{3,}|~{3,})/u.test(trimmed)) {
-            fenced = !fenced;
-            continue;
-          }
-          if (!fenced && trimmed.startsWith("## ")) {
-            nextHeadingLineIndex = index;
-            break;
-          }
-        }
-        const lines = markdownLines
-          .slice(headingLineIndex + 1, nextHeadingLineIndex < 0 ? undefined : nextHeadingLineIndex)
-          .map((line) => line.trim());
-        const expectedCountFields: Array<[string, number]> = [
-          ["Selected properties", stringArray(coverage.selected_property_ids).length],
-          ["Implemented properties", stringArray(coverage.implemented_property_ids).length],
-          ["Blocked properties", stringArray(coverage.blocked_property_ids).length],
-          ["Pending properties", stringArray(coverage.pending_property_ids).length],
-          ["Deferred properties", stringArray(coverage.deferred_property_ids).length],
-          ["Reference expectation properties", stringArray(coverage.reference_expected_property_ids).length]
-        ];
-        const markdownMismatches: string[] = [];
-        const expectedThreshold =
-          typeof coverage.priority_threshold === "string" ? coverage.priority_threshold : "unavailable";
-        const thresholdLine = lines.find((line) => line.startsWith("- Priority threshold:"));
-        if (thresholdLine !== `- Priority threshold: \`${expectedThreshold}\``) {
-          markdownMismatches.push("priority_threshold");
-        }
-        const expectedPriorities = stringArray(coverage.priorities);
-        const includedPrioritiesLine = lines.find((line) => line.startsWith("- Included priorities:"));
-        const renderedPriorities = expectedPriorities.length > 0 ? expectedPriorities.join("<br>") : "unavailable";
-        if (includedPrioritiesLine !== `- Included priorities: \`${renderedPriorities}\``) {
-          markdownMismatches.push("priorities");
-        }
-        for (const [label, expectedCount] of expectedCountFields) {
-          const prefix = `- ${label}:`;
-          const line = lines.find((candidate) => candidate.startsWith(prefix));
-          if (line !== `- ${label}: \`${expectedCount}\``) {
-            markdownMismatches.push(label);
-          }
-        }
-        const expectedBlockerSummaries = stringArray(coverage.blocker_summaries);
-        const blockerHeadingIndex = lines.indexOf("Blocker summaries:");
-        const renderedBlockers: string[] = [];
-        if (blockerHeadingIndex >= 0) {
-          for (const line of lines.slice(blockerHeadingIndex + 1)) {
-            if (!line.startsWith("- ")) break;
-            renderedBlockers.push(line);
-          }
-        }
-        // The Markdown must report the same blockers as the JSON. It must not
-        // also require the author to reproduce reportPublicProse character for
-        // character: that function redacts secrets and several relative path
-        // prefixes, escapes eight Markdown characters, and HTML-escapes two
-        // more, and no prose description of it has yet survived review. Accept
-        // the escaped rendering or the summary text as written.
-        const blockerMatches = (rendered: string | undefined, summary: string): boolean =>
-          rendered === `- ${reportPublicProse(summary)}` || rendered === `- ${summary.replace(/\s+/gu, " ").trim()}`;
-        if (
-          renderedBlockers.length !== expectedBlockerSummaries.length ||
-          expectedBlockerSummaries.some((summary, index) => !blockerMatches(renderedBlockers[index], summary))
-        ) {
-          markdownMismatches.push("blocker_summaries");
-        }
-        if (markdownMismatches.length > 0) {
-          diagnostics.push({
-            code: "PROPERTY_REPORT_IMPLEMENTATION_COVERAGE_MARKDOWN_MISMATCH",
-            message: `Current invariant report Markdown coverage does not match report.json (${markdownMismatches.join(", ")})`,
-            severity: "error",
-            source: "property-provenance",
-            path: markdownPath
-          });
-        }
       }
     }
   }
@@ -3649,7 +3831,8 @@ function verifiedReportFindingAliases(
 
 function readCampaignFuzzerBackends(
   layout: RunLayout,
-  consumer: PlannedGraphNode
+  consumer: PlannedGraphNode,
+  attemptAuthority?: ArtifactGateAttemptAuthority
 ): {
   value: ReadonlyMap<string, readonly string[]>;
   sourceNodeIds: ReadonlySet<string>;
@@ -3661,7 +3844,7 @@ function readCampaignFuzzerBackends(
   const diagnostics: RuntimeDiagnostic[] = [];
   let producers: FinalizedDeclaredProducer[];
   try {
-    producers = finalizedDeclaredContractProducers(layout, "ultrafuzz/property-campaign@2", consumer);
+    producers = finalizedDeclaredContractProducers(layout, "ultrafuzz/property-campaign@2", consumer, attemptAuthority);
   } catch (error) {
     return {
       value: new Map(),
@@ -3940,7 +4123,8 @@ function sameStringSet(left: readonly string[], right: readonly string[]): boole
 
 function readCanonicalPropertyCatalog(
   layout: RunLayout,
-  consumer: PlannedGraphNode
+  consumer: PlannedGraphNode,
+  attemptAuthority?: ArtifactGateAttemptAuthority
 ): {
   value?: PropertiesArtifact;
   path?: string;
@@ -3952,7 +4136,8 @@ function readCanonicalPropertyCatalog(
       layout,
       consumer,
       "ultrafuzz/properties@2",
-      "canonical property catalog"
+      "canonical property catalog",
+      attemptAuthority
     );
   } catch (error) {
     return {
@@ -3979,7 +4164,8 @@ function readCanonicalPropertyCatalog(
 
 function readImplementedProperties(
   layout: RunLayout,
-  consumer: PlannedGraphNode
+  consumer: PlannedGraphNode,
+  attemptAuthority?: ArtifactGateAttemptAuthority
 ): {
   value?: ImplementedPropertiesArtifact;
   path?: string;
@@ -3991,7 +4177,8 @@ function readImplementedProperties(
       layout,
       consumer,
       "ultrafuzz/implemented-properties@3",
-      "implemented property handoff"
+      "implemented property handoff",
+      attemptAuthority
     );
   } catch (error) {
     return {

@@ -208,9 +208,14 @@ function loadFinalizedNodeOutputAuthority(input: LoadVerifiedNodeOutputInput): F
 
 /** Read the one authoritative final report and require an exact canonical JSON/Markdown pair. */
 export function loadVerifiedFinalReportSnapshot(runRoot: string): VerifiedFinalReportSnapshot {
-  const authority = loadVerifiedNodeOutputSnapshot({ runRoot, logicalNodeId: "final-report" });
-  const report = requiredOutput(authority, "report.json", "ultrafuzz/report@2");
-  const markdown = requiredOutput(authority, "report.md", "ultrafuzz/nonempty-markdown@1");
+  const producer = declaredFinalReportProducer(runRoot);
+  const authority = loadVerifiedNodeOutputSnapshot({
+    runRoot,
+    logicalNodeId: producer.logicalNodeId,
+    attemptId: producer.attemptId
+  });
+  const report = requiredContractOutput(authority, "ultrafuzz/report@2", "JSON report");
+  const markdown = requiredContractOutput(authority, "ultrafuzz/nonempty-markdown@1", "Markdown report");
   const projection = projectCanonicalFinalReport(report.value);
   if (!isDeepStrictEqual(projection.report, report.value)) {
     throw invalidOutput("verified report.json is not the canonical final-report projection");
@@ -234,6 +239,25 @@ export function loadVerifiedFinalReportSnapshot(runRoot: string): VerifiedFinalR
     markdown: markdown.value,
     markdown_bytes: Buffer.from(markdown.bytes)
   });
+}
+
+function declaredFinalReportProducer(runRoot: string): { attemptId: string; logicalNodeId: string } {
+  const root = path.resolve(runRoot);
+  assertNoSymlinkComponents(root, root, "run root");
+  const layout = layoutForRunRoot(root);
+  const graph = readPlannedGraphDocument(layout.graphPath);
+  const producers = graph.nodes.filter((node) =>
+    node.outputs.some((output) => output.contract === "ultrafuzz/report@2")
+  );
+  if (producers.length === 0) {
+    throw unavailableAuthority("no current planned node declares an ultrafuzz/report@2 output");
+  }
+  if (producers.length !== 1) {
+    throw invalidAuthority(
+      `current planned ultrafuzz/report@2 producer is ambiguous: ${producers.map((node) => node.id).join(", ")}`
+    );
+  }
+  return { attemptId: producers[0]!.id, logicalNodeId: producers[0]!.logical_id };
 }
 
 export function isVerifiedOutputAuthorityUnavailable(error: unknown): error is VerifiedOutputError {
@@ -521,16 +545,14 @@ function verificationMarkerRoot(layout: RunLayout): string {
   return markerRoot;
 }
 
-function requiredOutput(
+function requiredContractOutput(
   snapshot: VerifiedNodeOutputSnapshot,
-  relativePath: string,
-  contract: ArtifactContractId
+  contract: ArtifactContractId,
+  label: string
 ): VerifiedOutputArtifactSnapshot {
-  const matches = snapshot.outputs.filter((output) => output.path === relativePath && output.contract === contract);
+  const matches = snapshot.outputs.filter((output) => output.contract === contract);
   if (matches.length !== 1) {
-    throw invalidAuthority(
-      `final-report authority must bind exactly one ${relativePath} output with contract ${contract}`
-    );
+    throw invalidAuthority(`report authority must bind exactly one ${label} output with contract ${contract}`);
   }
   return matches[0]!;
 }

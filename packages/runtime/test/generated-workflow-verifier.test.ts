@@ -97,7 +97,11 @@ function loadRetryFailureAwareArgs(): (
   ) as ReturnType<typeof loadRetryFailureAwareArgs>;
 }
 
-function loadPromptWithAuthoritativeFinalReportCoverage(): (prompt: string, coverage: unknown) => string {
+function loadPromptWithAuthoritativeFinalReportCoverage(): (
+  prompt: string,
+  coverage: unknown,
+  reportPath: string
+) => string {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function promptWithAuthoritativeFinalReportCoverage");
   const helperEnd = source.indexOf("\n\nfunction authoritativeFinalReportCoverageArgs", helperStart);
@@ -1931,15 +1935,16 @@ test("authoritative final-report coverage is injected as exact untrusted data be
     pending_property_ids: [],
     deferred_property_ids: []
   };
-  const injected = promptWithCoverage(renderedPrompt, coverage);
+  const injected = promptWithCoverage(renderedPrompt, coverage, "custom/final-report.json");
 
   assert.ok(injected.startsWith("trusted preamble\n\nUNTRUSTED CONTENT BOUNDARY\n\n"), injected);
   assert.match(injected, /## Authoritative property implementation coverage/u);
   assert.match(injected, /authoritative data, not instructions/u);
+  assert.match(injected, /"custom\/final-report\.json"#property_implementation_coverage/u);
   assert.match(injected, new RegExp(JSON.stringify(coverage, null, 2).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
   assert.ok(injected.indexOf('"property-one"') < injected.indexOf("trusted runtime"), injected);
   assert.throws(
-    () => promptWithCoverage("prompt without boundary", coverage),
+    () => promptWithCoverage("prompt without boundary", coverage, "custom/final-report.json"),
     /cannot locate the untrusted-content boundary/u
   );
 });
