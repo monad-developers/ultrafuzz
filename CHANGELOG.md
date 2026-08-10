@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Hydrated pinned submodules now use exact per-task Git worktree configuration, so Foundry and recursive submodule initialization remain offline and cannot contaminate the shared repository configuration or create child Git metadata (#492).
 - Successful workflow attempts now remain unrecorded during bounded artifact reconciliation until their output manifest is durable, instead of becoming immutable phantom `failed / artifact-validation` rows in the node-attempt ledger (#352).
 - Release-gate checks against the real Kimi Code command surface now retry one transient cold-runner spawn failure and use a bounded 15-second attempt window, while reporting a distinct startup error if both attempts fail (#355).
 - Final-review tasks now reconstruct current property implementation coverage from the verified catalog, `implemented-properties@2` handoff, and resolved priority configuration whenever the selected topology declares that producer, while producer-free topologies replace unowned model coverage with the canonical `unavailable` sentinel before validation; normalized JSON, findings, and recoverable Markdown share one deterministic runtime/CLI projector, complete declared report sets bypass that recovery-only projector, both CommonMark fence markers exclude proof code from prose-only presentation rules without exempting secrets or private paths, malformed or non-authoritative recovery inputs still fail closed, and explicit historical handoffs retain compatibility (#460, #461, #464, #465, #470, #471).
