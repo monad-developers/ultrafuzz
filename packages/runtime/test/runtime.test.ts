@@ -611,7 +611,10 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       '    printf \'{"ok":true,"data":{"run":{"id":"%s","workflow":"%s","status":"running","started":"2026-07-03T00:00:00.000Z","elapsed":"0s"},"runState":{"runId":"%s","state":"running","computedAt":"2026-07-03T00:00:03.000Z"},"steps":[],"nodes":[]},"meta":{"command":"inspect","duration":"1ms"}}\\n\' "$2" "$2" "$2"',
       "    ;;",
       "  ps)",
-      '    printf \'%s\\n\' \'{"ok":true,"data":{"runs":[]},"meta":{"command":"ps","duration":"1ms"}}\'',
+      '    case "$*" in',
+      '      *--full-output*) printf \'%s\\n\' \'{"ok":true,"data":{"runs":[]},"meta":{"command":"ps","duration":"1ms"}}\' ;;',
+      "      *) printf '%s\\n' '{\"runs\":[]}' ;;",
+      "    esac",
       "    ;;",
       "  events)",
       '    case "$*" in',
@@ -622,7 +625,13 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       '    if [ -n "$SMITHERS_FAKE_STATUS_JSON" ]; then',
       "      printf '%s\\n' \"$SMITHERS_FAKE_STATUS_JSON\"",
       "    else",
-      `      printf '%s\\n' ${shellQuote(JSON.stringify(currentStatusEnvelope()))}`,
+      // The runner emits its envelope only under --full-output, and emits the bare
+      // document otherwise. A fake that always enveloped hid a caller that never
+      // asked for one.
+      '      case "$*" in',
+      `        *--full-output*) printf '%s\\n' ${shellQuote(JSON.stringify(currentStatusEnvelope()))} | sed "s/__RUN_ID__/$2/g" ;;`,
+      `        *) printf '%s\\n' ${shellQuote(JSON.stringify((currentStatusEnvelope() as { data: unknown }).data))} | sed "s/__RUN_ID__/$2/g" ;;`,
+      "      esac",
       "    fi",
       "    ;;",
       "  *)",
@@ -649,7 +658,7 @@ function currentPsEnvelope(runs: unknown[]): unknown {
   };
 }
 
-function currentStatusEnvelope(): Record<string, unknown> {
+function currentStatusEnvelope(workflowRunId = "__RUN_ID__"): Record<string, unknown> {
   return {
     ok: true,
     data: {
@@ -673,6 +682,13 @@ function currentStatusEnvelope(): Record<string, unknown> {
       bottleneck: [{ nodeId: "project-discovery", iteration: 0, state: "in-progress", detail: "running 1m" }],
       bottleneckOmitted: 0,
       quota: null,
+      // The pinned runner names the run and its liveness alongside the health
+      // fields; this fixture mirrors a document captured from a real run.
+      runId: workflowRunId,
+      workflow: workflowRunId,
+      liveness: { state: "running" },
+      startedAtMs: 1_000,
+      finishedAtMs: null,
       generatedAtMs: 2_000
     },
     meta: { command: "status", duration: "1ms" }
@@ -5678,7 +5694,30 @@ test("getRunHealth adapts the workflow health summary to the Ultrafuzz run", asy
   assert.equal(health.value?.model_mix[0]?.quota_parked, false);
   assert.equal(health.value?.gating[0]?.node_id, "project-discovery");
   assert.doesNotMatch(JSON.stringify(health.value), /smithers/iu);
-  assert.match(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), /status ultrafuzz-health-run --window 5/);
+  // The runner emits the `{ok, data, meta}` envelope this reader requires only
+  // under --full-output. Asking without it returned a bare document and made
+  // `ultrafuzz status` fail against every real run.
+  assert.match(
+    fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"),
+    /status ultrafuzz-health-run --window 5 --format json --full-output/
+  );
+});
+
+test("getRunHealth binds the workflow health summary to the run it asked about", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeSmithersEnv(project);
+  const run = await startRun({ projectRoot: project, runId: "bound-health-run", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  env.SMITHERS_FAKE_STATUS_JSON = JSON.stringify(currentStatusEnvelope("ultrafuzz-another-run"));
+  const foreign = await getRunHealth({ projectRoot: project, runId: "bound-health-run", env });
+  assert.equal(foreign.ok, false);
+  assert.deepEqual(
+    foreign.diagnostics.map((diagnostic) => diagnostic.code),
+    ["WORKFLOW_STATUS_INVALID"]
+  );
 });
 
 test("getRunHealth rejects every noncurrent status envelope without fallback or filtering", async () => {
@@ -5689,7 +5728,7 @@ test("getRunHealth rejects every noncurrent status envelope without fallback or 
   const run = await startRun({ projectRoot: project, runId: "strict-health-run", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
 
-  const canonical = currentStatusEnvelope();
+  const canonical = currentStatusEnvelope("ultrafuzz-strict-health-run");
   const canonicalData = canonical.data as Record<string, unknown>;
   const invalidDocuments: Array<{ label: string; value: unknown }> = [
     { label: "bare data compatibility envelope", value: canonicalData },

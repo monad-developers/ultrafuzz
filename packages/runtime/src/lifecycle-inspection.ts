@@ -290,7 +290,9 @@ export async function diagnoseRun(input: WorkflowRunQueryInput) {
   const sync = await synchronizeLinkedWorkflowRun({ projectRoot, runId: input.runId, env: input.env });
   const syncDiagnostics = downgradedSyncDiagnostics(sync);
   const snapshot = await runSmithersInspectionCommand({
-    args: ["why", evidence.smithersRunId, "--format", "json"],
+    // `--full-output` is what makes the runner emit the `{ok, data, meta}` envelope
+    // this command's reader requires.
+    args: ["why", evidence.smithersRunId, "--format", "json", "--full-output"],
     projectRoot,
     env: linkedWorkflowExecutionEnvironment(evidence, input.env)
   });
@@ -629,7 +631,8 @@ function workflowNodeArgs(
     smithersRunId,
     ...(input.iteration === undefined ? [] : ["--iteration", String(input.iteration)]),
     "--format",
-    format
+    format,
+    "--full-output"
   ];
 }
 

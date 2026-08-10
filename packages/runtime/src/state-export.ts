@@ -184,7 +184,10 @@ export async function getRunHealth(input: {
       evidence.smithersRunId,
       ...(input.windowMinutes === undefined ? [] : ["--window", String(input.windowMinutes)]),
       "--format",
-      "json"
+      "json",
+      // The runner emits its `{ok, data, meta}` envelope only under this flag, and
+      // the reader below requires that envelope.
+      "--full-output"
     ],
     projectRoot,
     env: linkedWorkflowExecutionEnvironment(evidence, input.env)
@@ -198,7 +201,7 @@ export async function getRunHealth(input: {
       }))
     ]);
   }
-  const health = parseRunHealth(snapshot.json);
+  const health = parseRunHealth(snapshot.json, evidence.smithersRunId);
   if (health === undefined) {
     return runtimeFailure<RunHealthValue>([
       ...syncDiagnostics,
@@ -560,26 +563,44 @@ function stringField(value: Record<string, unknown>, key: string): string | unde
   return typeof field === "string" && field.length > 0 ? field : undefined;
 }
 
+/** Health fields this reader consumes; a summary missing any of them is unusable. */
+const REQUIRED_RUN_HEALTH_FIELDS = [
+  "status",
+  "verdict",
+  "reason",
+  "counts",
+  "modelMix",
+  "throughput",
+  "bottleneck",
+  "bottleneckOmitted",
+  "quota",
+  "generatedAtMs"
+] as const;
+
+/**
+ * The rest of the current runner's status document. It is named rather than
+ * ignored so an unknown field still fails closed, while the identity fields are
+ * checked against the run that was actually asked about.
+ */
+const ADDITIONAL_RUN_HEALTH_FIELDS = ["runId", "workflow", "liveness", "startedAtMs", "finishedAtMs"] as const;
+
 function parseRunHealth(
-  value: unknown
+  value: unknown,
+  expectedWorkflowRunId: string
 ): Omit<RunHealthValue, keyof RunListEntry | "workflow_run_id" | keyof RunProgressSummary> | undefined {
   const data = currentSmithersStatusData(value);
   if (
     data === undefined ||
-    !hasExactKeys(data, [
-      "status",
-      "verdict",
-      "reason",
-      "counts",
-      "modelMix",
-      "throughput",
-      "bottleneck",
-      "bottleneckOmitted",
-      "quota",
-      "generatedAtMs"
+    !hasRequiredAndAllowedKeys(data, REQUIRED_RUN_HEALTH_FIELDS, [
+      ...REQUIRED_RUN_HEALTH_FIELDS,
+      ...ADDITIONAL_RUN_HEALTH_FIELDS
     ])
   ) {
     return undefined;
+  }
+  // A summary that names another run is not this run's health.
+  for (const field of ["runId", "workflow"] as const) {
+    if (data[field] !== undefined && data[field] !== expectedWorkflowRunId) return undefined;
   }
   const counts = recordField(data, "counts");
   const throughput = recordField(data, "throughput");

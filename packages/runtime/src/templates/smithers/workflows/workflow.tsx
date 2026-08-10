@@ -2639,6 +2639,9 @@ function assertVerifiedDependency(
       );
       declaredArtifactShas.set(entry.path, entry.sha256);
       rememberExpectedVerifiedPublication(expectedPublicationShas, entry.path, artifactSnapshot.bytes);
+      if (entry.contract === "ultrafuzz/property-campaign@3") {
+        rememberExpectedCampaignEvidencePublications(dependency, entry.path, validation.value, expectedPublicationShas);
+      }
       if (entry.contract === "ultrafuzz/generated-tests@3") {
         const manifest = validation.value as {
           run_id: string;
@@ -2719,6 +2722,13 @@ function assertVerifiedDependency(
         (relativePath) => !authenticatedCapturedPaths.has(relativePath)
       );
       throw new Error(`verification marker does not authenticate captured artifacts ${missing.join(", ")}`);
+    }
+    // Every publication the producer makes has to be re-derived here, or a
+    // dependency that published correctly is refused as unexpected. The producer
+    // publishes a workspace-patch baseline for any task declaring a patch, and
+    // campaign evidence for any property-campaign output.
+    if (taskPublishesWorkspacePatch(dependencyTask)) {
+      rememberExpectedWorkspacePatchBaselinePublication(dependencyTask, dependency, expectedPublicationShas);
     }
     if (invariantSuiteNodeIds.has(dependencyTask.metadata.node.logicalNodeId)) {
       rememberExpectedInvariantSuitePublications(dependencyTask, dependency, expectedPublicationShas);
@@ -4517,6 +4527,99 @@ function rememberInvariantSuitePublications(
       )}`
     );
   }
+}
+
+/**
+ * Re-derive the evidence a property-campaign producer publishes beside its
+ * manifest. The manifest is authenticated evidence, so each file it declares is
+ * re-read and re-digested here instead of being taken from the marker.
+ */
+function rememberExpectedCampaignEvidencePublications(
+  dependency: string,
+  manifestPath: string,
+  manifestValue: unknown,
+  publications: Map<string, string>
+): void {
+  if (!isPlainJsonRecord(manifestValue) || !Array.isArray(manifestValue.evidence_files)) {
+    throw new Error(`verified dependency campaign evidence manifest is unavailable ${manifestPath}`);
+  }
+  if (manifestValue.evidence_files.length > MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILES) {
+    throw new Error(`verified dependency campaign evidence exceeds its file limit ${manifestPath}`);
+  }
+  const seen = new Set<string>();
+  let declaredBytes = 0;
+  for (const value of manifestValue.evidence_files) {
+    if (
+      !isPlainJsonRecord(value) ||
+      typeof value.path !== "string" ||
+      typeof value.size_bytes !== "number" ||
+      !Number.isSafeInteger(value.size_bytes) ||
+      value.size_bytes <= 0 ||
+      value.size_bytes > MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILE_BYTES ||
+      typeof value.sha256 !== "string" ||
+      !/^[0-9a-f]{64}$/u.test(value.sha256)
+    ) {
+      throw new Error(`verified dependency campaign evidence entry is malformed ${manifestPath}`);
+    }
+    assertSafeVerifiedPublicationPath(value.path);
+    if (seen.has(value.path)) {
+      throw new Error(`verified dependency campaign evidence is duplicated ${value.path}`);
+    }
+    seen.add(value.path);
+    declaredBytes += value.size_bytes;
+    if (declaredBytes > MAX_PROPERTY_CAMPAIGN_EVIDENCE_TOTAL_BYTES) {
+      throw new Error(`verified dependency campaign evidence exceeds its aggregate byte limit ${manifestPath}`);
+    }
+    const snapshot = readBoundedRegularArtifactSnapshot(
+      dependency,
+      path.resolve(dependency, value.path),
+      `verified dependency campaign evidence is not an immutable regular file ${value.path}`,
+      MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILE_BYTES,
+      true
+    );
+    const digest = createHash("sha256").update(snapshot.bytes).digest("hex");
+    if (snapshot.bytes.length !== value.size_bytes || digest !== value.sha256) {
+      throw new Error(`verified dependency campaign evidence does not match its manifest ${value.path}`);
+    }
+    rememberExpectedVerifiedPublication(publications, value.path, snapshot.bytes);
+  }
+}
+
+function rememberExpectedWorkspacePatchBaselinePublication(
+  dependencyTask: (typeof taskSpecs)[number],
+  dependency: string,
+  publications: Map<string, string>
+): void {
+  const dependencyRoot = realpathSync(dependency);
+  const snapshot = readBoundedRegularArtifactSnapshot(
+    dependencyRoot,
+    path.resolve(dependencyRoot, WORKSPACE_PATCH_BASELINE_FILE),
+    `artifact-contract failure: dependency workspace patch baseline is unavailable ${dependencyTask.attemptId}`,
+    MAX_PRE_AGENT_EVIDENCE_BYTES,
+    true
+  );
+  // Re-read and re-validate rather than trust the marker: the baseline is
+  // evidence about the dependency, so it must still parse as the current
+  // document and name the attempt that published it.
+  let parsed: ReturnType<typeof parseRuntimeDocumentBytes<typeof WORKSPACE_PATCH_BASELINE_JSON_SCHEMA_ID>>;
+  try {
+    parsed = parseRuntimeDocumentBytes(
+      WORKSPACE_PATCH_BASELINE_JSON_SCHEMA_ID,
+      snapshot.bytes,
+      `dependency workspace patch baseline ${dependencyTask.attemptId}`
+    );
+  } catch (error) {
+    throw new Error(
+      `artifact-contract failure: dependency workspace patch baseline is malformed ${dependencyTask.attemptId}`,
+      { cause: error }
+    );
+  }
+  if (parsed.attempt_id !== dependencyTask.attemptId) {
+    throw new Error(
+      `artifact-contract failure: dependency workspace patch baseline is invalid ${dependencyTask.attemptId}`
+    );
+  }
+  rememberExpectedVerifiedPublication(publications, WORKSPACE_PATCH_BASELINE_FILE, snapshot.bytes);
 }
 
 function rememberExpectedInvariantSuitePublications(
