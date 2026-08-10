@@ -296,67 +296,6 @@ function loadRestoreInvariantSuiteWorkspaceSnapshot(
   ) => void;
 }
 
-function loadMaterializeGeneratedTestCompanion(): (
-  workspaceRoot: string,
-  artifactRoot: string,
-  nodeIds: readonly string[],
-  relativePath: string
-) => void {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const helperStart = source.indexOf("function materializeGeneratedTestCompanion(");
-  const helperEnd = source.indexOf("\n\n/**\n * Preserve the complete invariant suite", helperStart);
-  assert.ok(helperStart >= 0, source);
-  assert.ok(helperEnd > helperStart, source);
-
-  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
-    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
-  }).outputText;
-  return new Function(
-    "path",
-    "existsSync",
-    "writeFileSync",
-    "mkdirSync",
-    "realpathSync",
-    "isStrictlyInsideDirectory",
-    "resolveNonEmptyRegularArtifactFile",
-    "readBoundedRegularArtifactSnapshot",
-    "decodeStrictUtf8Snapshot",
-    "MAX_VERIFIED_COMPANION_BYTES",
-    "INVARIANT_TEST_ROOT_NAMES",
-    `${helper}; return materializeGeneratedTestCompanion;`
-  )(
-    path,
-    fs.existsSync,
-    fs.writeFileSync,
-    fs.mkdirSync,
-    fs.realpathSync,
-    (root: string, candidate: string) => candidate !== root && candidate.startsWith(`${root}${path.sep}`),
-    (root: string, candidate: string, missingMessage: string, emptyMessage: string) => {
-      if (!fs.existsSync(candidate) || !fs.statSync(candidate).isFile()) throw new Error(missingMessage);
-      const resolved = fs.realpathSync(candidate);
-      assertRegularFileInside(root, resolved, missingMessage);
-      if (fs.statSync(resolved).size === 0) throw new Error(emptyMessage);
-      return resolved;
-    },
-    (root: string, candidate: string, failureMessage: string, maxBytes: number, requireNonEmpty: boolean) => {
-      assertRegularFileInside(root, candidate, failureMessage);
-      const resolved = fs.realpathSync(candidate);
-      const bytes = readRegularFileSnapshot(resolved, maxBytes);
-      if (requireNonEmpty && bytes.length === 0) throw new Error(`${failureMessage}: file is empty`);
-      return { path: resolved, bytes };
-    },
-    (snapshot: { bytes: Buffer }, failureMessage: string) => {
-      try {
-        return new TextDecoder("utf-8", { fatal: true }).decode(snapshot.bytes);
-      } catch (error) {
-        throw new Error(`${failureMessage}: file is not valid UTF-8`, { cause: error });
-      }
-    },
-    16 * 1024 * 1024,
-    ["test", "tests"] as const
-  ) as (workspaceRoot: string, artifactRoot: string, nodeIds: readonly string[], relativePath: string) => void;
-}
-
 function loadSafeInvariantSuiteDirectory(): (root: string, candidate: string) => string {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function safeInvariantSuiteDirectory");
@@ -395,7 +334,10 @@ function loadPreservePinnedSourceProof(): (task: {
   const commandStart = source.indexOf("const unreachableCommitCountCommand");
   const commandEnd = source.indexOf("\n\nconst { Workflow", commandStart);
   const helperStart = source.indexOf("function preservePinnedSourceProof");
-  const helperEnd = source.indexOf("\n\nfunction materializeGeneratedTestCompanions", helperStart);
+  const helperEnd = source.indexOf(
+    "\n\n/** Directory names whose task-owned generated-test work must be cleared before a retry. */",
+    helperStart
+  );
   assert.ok(commandStart >= 0, source);
   assert.ok(commandEnd > commandStart, source);
   assert.ok(helperStart >= 0, source);
@@ -715,11 +657,15 @@ test("generated Smithers authenticates the final generated-test publication snap
     path,
     (root: string, candidate: string) => candidate !== root && candidate.startsWith(`${root}${path.sep}`),
     (root: string, candidate: string, failureMessage: string, maxBytes: number, requireNonEmpty: boolean) => {
-      if (candidate === root || !candidate.startsWith(`${root}${path.sep}`)) throw new Error(failureMessage);
-      const resolved = fs.realpathSync(candidate);
-      const bytes = readRegularFileSnapshot(resolved, maxBytes);
-      if (requireNonEmpty && bytes.length === 0) throw new Error(`${failureMessage}: file is empty`);
-      return Object.freeze({ path: resolved, bytes });
+      try {
+        if (candidate === root || !candidate.startsWith(`${root}${path.sep}`)) throw new Error(failureMessage);
+        const resolved = fs.realpathSync(candidate);
+        const bytes = readRegularFileSnapshot(resolved, maxBytes);
+        if (requireNonEmpty && bytes.length === 0) throw new Error(`${failureMessage}: file is empty`);
+        return Object.freeze({ path: resolved, bytes });
+      } catch {
+        throw new Error(failureMessage);
+      }
     },
     16 * 1024 * 1024,
     (snapshot: { bytes: Buffer }, failureMessage: string) => {
@@ -759,6 +705,11 @@ test("generated Smithers authenticates the final generated-test publication snap
           generated_tests: [{ ...entry, sha256: "0".repeat(64) }]
         }),
       /file digest does not match/u
+    );
+    fs.unlinkSync(path.join(root, relativePath));
+    assert.throws(
+      () => verifyGeneratedTestFiles(root, manifest),
+      /generated-test bundle file is missing generated-tests\/Replay\.t\.sol/u
     );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -838,7 +789,6 @@ function loadVerifyArtifactsHarness(): {
     "formatSchemaValidationIssues",
     "executeSchemaSemanticGates",
     "normalizeNodeAttemptFailureMessage",
-    "materializeGeneratedTestCompanions",
     "materializeInvariantSuiteCompanions",
     "rememberVerifiedPublication",
     "verifyGeneratedTestFiles",
@@ -881,7 +831,6 @@ function loadVerifyArtifactsHarness(): {
     () => "invalid",
     executeSchemaSemanticGates,
     normalizeNodeAttemptFailureMessage,
-    () => undefined,
     () => undefined,
     remember,
     () => [],
@@ -1511,7 +1460,10 @@ test("generated Smithers invariant snapshot delegates the pin check to the share
 test("generated Smithers worktrees fail closed on any source other than the pinned benchmark ref", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const proofStart = source.indexOf("function preservePinnedSourceProof");
-  const proofEnd = source.indexOf("\n\nfunction materializeGeneratedTestCompanions", proofStart);
+  const proofEnd = source.indexOf(
+    "\n\n/** Directory names whose task-owned generated-test work must be cleared before a retry. */",
+    proofStart
+  );
   const preparationStart = source.indexOf("function prepareArtifactMirror");
   const workflowStart = source.indexOf("export default smithers");
 
@@ -2022,7 +1974,7 @@ test("generated Smithers workflow contains no output repair or legacy normalizat
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   assert.doesNotMatch(
     source,
-    /canonicalEmptyArtifact|materializeMissingMarkdownArtifacts|materializeMissingDedupeArtifact|materializeMissingFinalReportArtifacts|normalizeLegacyFinding|normalizeLegacyReportProvenance|normalizeLegacyGeneratedTest/u
+    /canonicalEmptyArtifact|materializeMissingMarkdownArtifacts|materializeMissingDedupeArtifact|materializeMissingFinalReportArtifacts|materializeGeneratedTestCompanion|normalizeLegacyFinding|normalizeLegacyReportProvenance|normalizeLegacyGeneratedTest/u
   );
 });
 
@@ -2100,92 +2052,18 @@ test("generated Smithers agent does not convert legacy report provenance", () =>
   assert.doesNotMatch(source, /normalizeLegacyReportProvenance|normalizeFinalReportSeverityRecord|originalIsValid/u);
 });
 
-test("generated Smithers agent mirrors declared workspace tests before strict verification", () => {
+test("generated Smithers never infers or repairs missing generated-test companions", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const materializerStart = source.indexOf("function materializeGeneratedTestCompanions");
-  const resolverStart = source.indexOf("function resolveRegularArtifactFile");
-
-  assert.ok(materializerStart >= 0, source);
-  assert.ok(resolverStart > materializerStart, source);
-
-  const materializer = source.slice(materializerStart, resolverStart);
-  assert.match(materializer, /const generatedPrefix = "generated-tests\/"/u);
-  assert.match(materializer, /INVARIANT_TEST_ROOT_NAMES\.flatMap/u);
+  assert.doesNotMatch(source, /materializeGeneratedTestCompanion/u);
+  assert.doesNotMatch(source, /generated test sources conflict/u);
   assert.match(
-    materializer,
-    /nodeIds\.map\(\(nodeId\) => path\.resolve\(workspaceRoot, testRoot, "foundry", nodeId, workspaceRelativePath\)\)/u
+    source,
+    /Generated-test companions are agent-owned outputs[\s\S]*?verifyOutputSemanticGates\(task, verifiedOutputs\)/u
   );
-  assert.match(
-    materializer,
-    /const existingCandidates = sourceCandidates\.filter\(\(candidate\) => existsSync\(candidate\)\)/u
-  );
-  assert.match(materializer, /generated test sources conflict/u);
-  assert.match(materializer, /readBoundedRegularArtifactSnapshot\(/u);
-  assert.match(materializer, /MAX_VERIFIED_COMPANION_BYTES,\s*true/u);
-  assert.match(materializer, /decodeStrictUtf8Snapshot\(snapshot/u);
-  assert.match(materializer, /writeFileSync\(anchoredArtifactPath, source\.bytes, \{ flag: "wx", mode: 0o600 \}\)/u);
+  assert.doesNotMatch(source, /const workspaceRelativePath = relativePath\.slice/u);
 });
 
-test("generated Smithers companions accept the logical node directory the prompt mandates", () => {
-  // `strategy_attempt_test_dir` renders `<workspace>/test/foundry/<logical id>`
-  // (packages/prompts/src/render.ts). Any node the topology expands -- every
-  // `strategies` node in the production topology, which carries `loops: 3` --
-  // has a concrete id like `externalized-state-accounting-0`, so a lookup keyed
-  // only on the concrete id never visits the directory the prompt named and an
-  // obedient agent's test is rejected as missing. Issue #348.
-  const materialize = loadMaterializeGeneratedTestCompanion();
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-test-companion-"));
-  try {
-    const workspaceRoot = fs.realpathSync(root);
-    const artifactRoot = path.join(workspaceRoot, "artifacts");
-    const mandatedDir = path.join(workspaceRoot, "test", "foundry", "externalized-state-accounting");
-    fs.mkdirSync(artifactRoot, { recursive: true });
-    fs.mkdirSync(mandatedDir, { recursive: true });
-    fs.writeFileSync(path.join(mandatedDir, "Esa.t.sol"), "contract EsaTest {}\n", "utf8");
-
-    materialize(
-      workspaceRoot,
-      artifactRoot,
-      ["externalized-state-accounting", "externalized-state-accounting-0"],
-      "generated-tests/Esa.t.sol"
-    );
-
-    assert.equal(
-      fs.readFileSync(path.join(artifactRoot, "generated-tests", "Esa.t.sol"), "utf8"),
-      "contract EsaTest {}\n"
-    );
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("generated Smithers companions still reject a test that reached no accepted directory", () => {
-  const materialize = loadMaterializeGeneratedTestCompanion();
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-test-companion-"));
-  try {
-    const workspaceRoot = fs.realpathSync(root);
-    const artifactRoot = path.join(workspaceRoot, "artifacts");
-    fs.mkdirSync(artifactRoot, { recursive: true });
-    // The conventional Foundry location, not one the companion contract accepts.
-    fs.mkdirSync(path.join(workspaceRoot, "test"), { recursive: true });
-    fs.writeFileSync(path.join(workspaceRoot, "test", "Esa.t.sol"), "contract EsaTest {}\n", "utf8");
-
-    assert.throws(
-      () =>
-        materialize(
-          workspaceRoot,
-          artifactRoot,
-          ["externalized-state-accounting", "externalized-state-accounting-0"],
-          "generated-tests/Esa.t.sol"
-        ),
-      /generated test file is missing generated-tests\/Esa\.t\.sol/u
-    );
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("generated Smithers retries clear every generated-test directory the companion lookup accepts", () => {
+test("generated Smithers retries clear every task-owned generated-test work directory", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const resetStart = source.indexOf("function resetTaskArtifactsForRetry");
   const resetEnd = source.indexOf("function resetTaskArtifactContents", resetStart);
@@ -2445,10 +2323,6 @@ test("generated Smithers verifier publishes the complete validated set before ta
   assert.match(verifier, /publishFileDurableExclusive\(artifactDir, relativePath, contents\)/u);
   assert.ok(
     verifier.indexOf("validateCapturedTaskOutputs(task, capturedOutputs)") <
-      verifier.indexOf("materializeGeneratedTestCompanions(task, capturedOutputs)")
-  );
-  assert.ok(
-    verifier.indexOf("materializeGeneratedTestCompanions(task, capturedOutputs)") <
       verifier.indexOf("verifyOutputSemanticGates(task, verifiedOutputs)")
   );
   assert.ok(

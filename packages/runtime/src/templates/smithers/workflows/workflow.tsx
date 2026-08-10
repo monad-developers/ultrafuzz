@@ -5,17 +5,7 @@
 /** @jsxImportSource smithers-orchestrator */
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import {
-  existsSync,
-  lstatSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  realpathSync,
-  rmSync,
-  statSync,
-  writeFileSync
-} from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
@@ -733,9 +723,8 @@ function resetTaskArtifactsForRetry(task: (typeof taskSpecs)[number]): void {
       if (!isStrictlyInsideDirectory(workspaceRoot, foundryParent)) {
         throw new Error(`artifact-contract failure: unsafe generated test parent ${task.attemptId}`);
       }
-      // Every directory the companion lookup accepts must be cleared, or the
-      // previous attempt's test survives in the one this reset skipped and the
-      // next attempt publishes it as its own.
+      // Clear both task identities so a retry cannot accidentally carry a
+      // previous attempt's workspace test into its newly declared artifacts.
       for (const nodeId of generatedTestNodeIds(task)) {
         resetTaskArtifactContents(path.join(foundryParent, nodeId), nodeId, "generated-test");
       }
@@ -2402,123 +2391,9 @@ function preservePinnedSourceProof(task: (typeof taskSpecs)[number]): void {
   writeFileDurable(proofPath, proofContents);
 }
 
-function materializeGeneratedTestCompanions(
-  task: (typeof taskSpecs)[number],
-  capturedOutputs: readonly CapturedTaskOutput[] = []
-): void {
-  const workspaceRoot = realpathSync(task.workspacePath);
-
-  for (const output of task.outputs) {
-    if (output.contract !== "ultrafuzz/generated-tests@3") {
-      continue;
-    }
-    const captured = capturedOutputs.find((entry) => entry.output.path === output.path);
-    if (captured === undefined) continue;
-    let contents: string;
-    try {
-      parseStrictJsonSnapshot(captured.file, `artifact-contract failure: output ${output.path}`);
-      contents = decodeStrictUtf8Snapshot(captured.file, `artifact-contract failure: output ${output.path}`);
-    } catch {
-      // The final verifier reports the typed output failure without creating a
-      // companion from an ambiguous manifest.
-      continue;
-    }
-    const validation = validateArtifactContract(output.contract, contents, output.path);
-    if (!validation.ok) continue;
-    const manifest = validation.value as {
-      generated_tests: Array<{ path: string; size_bytes: number; sha256: string }>;
-      support_files: Array<{ path: string; size_bytes: number; sha256: string }>;
-    };
-    for (const entry of [...manifest.generated_tests, ...manifest.support_files]) {
-      materializeGeneratedTestCompanion(workspaceRoot, captured.artifactRoot, generatedTestNodeIds(task), entry.path);
-    }
-  }
-}
-
-/**
- * Directory names an agent may have used for its generated tests, most
- * authoritative first.
- *
- * `strategy_attempt_test_dir` (`packages/prompts/src/render.ts`) mandates
- * `<workspace>/test/foundry/<LOGICAL node id>/`, and the retry reset below
- * clears that same logical directory. Only this lookup used the CONCRETE node
- * id, so on any node the topology expands (`loops > 1`, model fan-out) the one
- * directory the prompt named was never searched and an obedient agent's test
- * failed the contract as missing. Both ids are accepted: the logical id is what
- * the prompt promises, and the concrete id stays valid for a run that used it.
- */
+/** Directory names whose task-owned generated-test work must be cleared before a retry. */
 function generatedTestNodeIds(task: (typeof taskSpecs)[number]): string[] {
   return [...new Set([task.metadata.node.logicalNodeId, task.metadata.node.concreteNodeId])];
-}
-
-function materializeGeneratedTestCompanion(
-  workspaceRoot: string,
-  artifactRoot: string,
-  nodeIds: readonly string[],
-  relativePath: string
-): void {
-  const generatedPrefix = "generated-tests/";
-  if (!relativePath.startsWith(generatedPrefix) || relativePath.length === generatedPrefix.length) {
-    throw new Error(`artifact-contract failure: unsafe generated test path ${relativePath}`);
-  }
-  const artifactPath = path.resolve(artifactRoot, relativePath);
-  if (!isStrictlyInsideDirectory(artifactRoot, artifactPath)) {
-    throw new Error(`artifact-contract failure: unsafe generated test path ${relativePath}`);
-  }
-  if (existsSync(artifactPath)) {
-    resolveNonEmptyRegularArtifactFile(
-      artifactRoot,
-      artifactPath,
-      `artifact-contract failure: generated test file is missing ${relativePath}`,
-      `artifact-contract failure: generated test file is empty ${relativePath}`
-    );
-    return;
-  }
-
-  const workspaceRelativePath = relativePath.slice(generatedPrefix.length);
-  const sourceCandidates = [
-    ...new Set(
-      INVARIANT_TEST_ROOT_NAMES.flatMap((testRoot) => [
-        path.resolve(workspaceRoot, testRoot, "foundry", workspaceRelativePath),
-        ...nodeIds.map((nodeId) => path.resolve(workspaceRoot, testRoot, "foundry", nodeId, workspaceRelativePath))
-      ])
-    )
-  ];
-  const existingCandidates = sourceCandidates.filter((candidate) => existsSync(candidate));
-  const sourceCandidate = existingCandidates[0] ?? sourceCandidates[0];
-  if (!isStrictlyInsideDirectory(workspaceRoot, sourceCandidate)) {
-    throw new Error(`artifact-contract failure: unsafe generated test source ${relativePath}`);
-  }
-  const missingSource = `artifact-contract failure: generated test file is missing ${relativePath}`;
-  const sourceSnapshots = (existingCandidates.length === 0 ? [sourceCandidate] : existingCandidates).map(
-    (candidate) => {
-      const snapshot = readBoundedRegularArtifactSnapshot(
-        workspaceRoot,
-        candidate,
-        missingSource,
-        MAX_VERIFIED_COMPANION_BYTES,
-        true
-      );
-      decodeStrictUtf8Snapshot(snapshot, `artifact-contract failure: generated test source ${relativePath}`);
-      return snapshot;
-    }
-  );
-  const source = sourceSnapshots[0];
-  if (source === undefined) throw new Error(missingSource);
-  for (const candidate of sourceSnapshots.slice(1)) {
-    if (!candidate.bytes.equals(source.bytes)) {
-      throw new Error(`artifact-contract failure: generated test sources conflict ${relativePath}`);
-    }
-  }
-
-  const artifactParent = path.dirname(artifactPath);
-  mkdirSync(artifactParent, { recursive: true });
-  const resolvedParent = realpathSync(artifactParent);
-  if (!isStrictlyInsideDirectory(artifactRoot, resolvedParent)) {
-    throw new Error(`artifact-contract failure: unsafe generated test parent ${relativePath}`);
-  }
-  const anchoredArtifactPath = path.join(resolvedParent, path.basename(artifactPath));
-  writeFileSync(anchoredArtifactPath, source.bytes, { flag: "wx", mode: 0o600 });
 }
 
 /**
@@ -4525,11 +4400,9 @@ function verifyArtifacts(
   const capturedOutputs = capturedTaskOutputs ?? captureTaskOutputs(task);
   const { artifacts, verifiedOutputs } = validateCapturedTaskOutputs(task, capturedOutputs);
 
-  // Generated test files are runtime-owned companions. Materialize them only
-  // after every declared output has passed immutable strict JSON/Ajv shape
-  // validation, because the filesystem semantic gate must inspect the exact
-  // artifact root that will be handed off.
-  materializeGeneratedTestCompanions(task, capturedOutputs);
+  // Generated-test companions are agent-owned outputs. Verification reads the
+  // exact declared files in the artifact root and never searches the workspace,
+  // infers a source, or repairs an incomplete handoff after the agent exits.
   verifyOutputSemanticGates(task, verifiedOutputs);
 
   // These companions are not semantic inputs, so keep their durable creation
