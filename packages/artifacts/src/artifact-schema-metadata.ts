@@ -217,6 +217,7 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "generatedTestsJsonSchema",
     "generatedTestManifestSchema",
     [
+      "generated-test-bundle-resource-bounds",
       "generated-test-bundle-path-uniqueness",
       "generated-test-support-requires-test",
       "generated-test-current-identity",

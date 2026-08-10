@@ -5,7 +5,12 @@ import { isDeepStrictEqual } from "node:util";
 
 import { artifactContractDefinition, artifactContractSchemaBinding } from "./artifact-contracts.js";
 import { ARTIFACT_SCHEMA_METADATA, type ArtifactSchemaFilename } from "./artifact-schema-metadata.js";
-import { MAX_GENERATED_TEST_COMPANION_BYTES, MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES } from "./artifact-limits.js";
+import {
+  MAX_GENERATED_TEST_BUNDLE_BYTES,
+  MAX_GENERATED_TEST_BUNDLE_ENTRIES,
+  MAX_GENERATED_TEST_COMPANION_BYTES,
+  MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES
+} from "./artifact-limits.js";
 import { readRegularFileSnapshot } from "./schema-registry.js";
 
 export const SEMANTIC_GATE_SCOPES = ["document", "filesystem", "cross-artifact", "git", "runtime-state"] as const;
@@ -1953,58 +1958,108 @@ function filesystemManifestIssues(
 
 function generatedTestFileIntegrityIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
   const root = context.filesystem!.rootDirectory;
-  const issues: SemanticGateIssue[] = [];
-  for (const [field, label] of [
-    ["generated_tests", "Generated test"],
-    ["support_files", "Generated-test support file"]
-  ] as const) {
-    for (const [index, row] of arrayAt(document, [field]).entries()) {
-      const relativePath = stringField(row, "path");
-      if (relativePath === undefined) continue;
-      const rowPath = `$.${field}[${index}]`;
-      const filePath = resolveArtifactFile(root, relativePath);
-      let stats: fs.Stats | undefined;
-      try {
-        if (filePath !== undefined) stats = fs.lstatSync(filePath);
-      } catch {
-        // Reported below as missing or nonregular.
-      }
-      if (filePath === undefined || stats === undefined || !stats.isFile() || stats.isSymbolicLink()) {
-        issues.push(issue(`${rowPath}.path`, `${label} is missing or nonregular: ${JSON.stringify(relativePath)}`));
-        continue;
-      }
-      let contents: Buffer;
-      try {
-        contents = readRegularFileSnapshot(filePath, MAX_GENERATED_TEST_COMPANION_BYTES);
-      } catch {
-        issues.push(
-          issue(
-            `${rowPath}.path`,
-            `${label} cannot be captured as a bounded regular file: ${JSON.stringify(relativePath)}`
-          )
-        );
-        continue;
-      }
-      if (contents.length === 0) {
-        issues.push(issue(`${rowPath}.path`, `${label} is empty: ${JSON.stringify(relativePath)}`));
-      }
-      try {
-        new TextDecoder("utf-8", { fatal: true }).decode(contents);
-      } catch {
-        issues.push(issue(`${rowPath}.path`, `${label} is not strict UTF-8 text: ${JSON.stringify(relativePath)}`));
-      }
-      const expectedDigest = stringField(row, "sha256");
-      if (
-        expectedDigest !== undefined &&
-        crypto.createHash("sha256").update(contents).digest("hex") !== expectedDigest
-      ) {
-        issues.push(issue(`${rowPath}.sha256`, `${label} digest does not match ${JSON.stringify(relativePath)}`));
-      }
-      const expectedSize = numberField(row, "size_bytes");
-      if (expectedSize !== undefined && expectedSize !== contents.length) {
-        issues.push(issue(`${rowPath}.size_bytes`, `${label} size does not match ${JSON.stringify(relativePath)}`));
-      }
+  const resourceIssues = generatedTestBundleResourceBoundsIssues(document);
+  if (resourceIssues.length > 0) return resourceIssues;
+  const entries = (
+    [
+      ["generated_tests", "Generated test"],
+      ["support_files", "Generated-test support file"]
+    ] as const
+  ).flatMap(([field, label]) => arrayAt(document, [field]).map((row, index) => ({ field, label, row, index })));
+  const preflighted: Array<{
+    row: unknown;
+    rowPath: string;
+    label: string;
+    relativePath: string;
+    filePath: string;
+  }> = [];
+  const statIssues: SemanticGateIssue[] = [];
+  let actualBytes = 0;
+  for (const { field, label, row, index } of entries) {
+    const relativePath = stringField(row, "path");
+    if (relativePath === undefined) continue;
+    const rowPath = `$.${field}[${index}]`;
+    const filePath = resolveArtifactFile(root, relativePath);
+    let stats: fs.Stats | undefined;
+    try {
+      if (filePath !== undefined) stats = fs.lstatSync(filePath);
+    } catch {
+      // Reported below as missing or nonregular.
     }
+    if (filePath === undefined || stats === undefined || !stats.isFile() || stats.isSymbolicLink()) {
+      statIssues.push(issue(`${rowPath}.path`, `${label} is missing or nonregular: ${JSON.stringify(relativePath)}`));
+      continue;
+    }
+    if (stats.size === 0) {
+      statIssues.push(issue(`${rowPath}.path`, `${label} is empty: ${JSON.stringify(relativePath)}`));
+    }
+    if (stats.size > MAX_GENERATED_TEST_COMPANION_BYTES) {
+      statIssues.push(
+        issue(
+          `${rowPath}.path`,
+          `${label} exceeds the ${MAX_GENERATED_TEST_COMPANION_BYTES}-byte companion limit: ${JSON.stringify(relativePath)}`
+        )
+      );
+    }
+    actualBytes += stats.size;
+    preflighted.push({ row, rowPath, label, relativePath, filePath });
+  }
+  if (actualBytes > MAX_GENERATED_TEST_BUNDLE_BYTES) {
+    statIssues.push(
+      issue("$", `Generated-test companions exceed the ${MAX_GENERATED_TEST_BUNDLE_BYTES}-byte combined bundle limit`)
+    );
+  }
+  if (statIssues.length > 0) return statIssues;
+
+  const issues: SemanticGateIssue[] = [];
+  for (const { row, rowPath, label, relativePath, filePath } of preflighted) {
+    let contents: Buffer;
+    try {
+      contents = readRegularFileSnapshot(filePath, MAX_GENERATED_TEST_COMPANION_BYTES);
+    } catch {
+      issues.push(
+        issue(
+          `${rowPath}.path`,
+          `${label} cannot be captured as a bounded regular file: ${JSON.stringify(relativePath)}`
+        )
+      );
+      continue;
+    }
+    try {
+      new TextDecoder("utf-8", { fatal: true }).decode(contents);
+    } catch {
+      issues.push(issue(`${rowPath}.path`, `${label} is not strict UTF-8 text: ${JSON.stringify(relativePath)}`));
+    }
+    const expectedDigest = stringField(row, "sha256");
+    if (expectedDigest !== undefined && crypto.createHash("sha256").update(contents).digest("hex") !== expectedDigest) {
+      issues.push(issue(`${rowPath}.sha256`, `${label} digest does not match ${JSON.stringify(relativePath)}`));
+    }
+    const expectedSize = numberField(row, "size_bytes");
+    if (expectedSize !== undefined && expectedSize !== contents.length) {
+      issues.push(issue(`${rowPath}.size_bytes`, `${label} size does not match ${JSON.stringify(relativePath)}`));
+    }
+  }
+  return issues;
+}
+
+function generatedTestBundleResourceBoundsIssues(document: unknown): SemanticGateIssue[] {
+  const generatedTests = arrayAt(document, ["generated_tests"]);
+  const supportFiles = arrayAt(document, ["support_files"]);
+  const entries = [...generatedTests, ...supportFiles];
+  const issues: SemanticGateIssue[] = [];
+  if (entries.length > MAX_GENERATED_TEST_BUNDLE_ENTRIES) {
+    issues.push(
+      issue("$", `Generated-test manifest exceeds the ${MAX_GENERATED_TEST_BUNDLE_ENTRIES}-entry combined bundle limit`)
+    );
+  }
+  const declaredBytes = entries.reduce<number>((total, row) => total + (numberField(row, "size_bytes") ?? 0), 0);
+  if (declaredBytes > MAX_GENERATED_TEST_BUNDLE_BYTES) {
+    issues.push(
+      issue(
+        "$",
+        `Generated-test manifest exceeds the ${MAX_GENERATED_TEST_BUNDLE_BYTES}-byte combined declared-size limit`
+      )
+    );
   }
   return issues;
 }
@@ -2702,6 +2757,7 @@ const gateSpecifications = {
     ["artifactIdentity.runId", "artifactIdentity.nodeId"],
     generatedTestIdentityIssues
   ),
+  "generated-test-bundle-resource-bounds": documentGate(generatedTestBundleResourceBoundsIssues),
   "generated-test-bundle-path-uniqueness": documentGate(generatedTestBundlePathIssues),
   "generated-test-support-requires-test": documentGate(generatedTestSupportRequiresTestIssues),
   "harness-repair-failure-id-uniqueness": documentGate(uniqueFieldGate([[]], "failure_id", "harness failure ID")),

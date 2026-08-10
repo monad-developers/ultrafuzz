@@ -359,6 +359,30 @@ test("required artifact gate validates generated-test manifest shape and listed 
     assert.deepEqual(fs.readFileSync(manifestPath), bytes, `${name}: host validation must not rewrite the manifest`);
   }
 
+  const oversizedDeclaredManifest = {
+    schema_version: "ultrafuzz.generated-tests.v3",
+    run_id: "run-1",
+    node_id: "strategy-a",
+    generated_tests: Array.from({ length: 5 }, (_, index) => ({
+      path: `generated-tests/Oversized-${index}.sol`,
+      size_bytes: 16 * 1024 * 1024,
+      sha256: index.toString(16).padStart(64, "0")
+    })),
+    support_files: []
+  };
+  const oversizedDeclaredBytes = Buffer.from(JSON.stringify(oversizedDeclaredManifest), "utf8");
+  fs.writeFileSync(manifestPath, oversizedDeclaredBytes);
+  const oversizedDeclared = verifyRequiredArtifactsForAttempt(layout, node, "strategy-a");
+  assert.equal(oversizedDeclared.ok, false);
+  assert.ok(
+    oversizedDeclared.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
+        diagnostic.details?.gate === "generated-test-bundle-resource-bounds"
+    )
+  );
+  assert.deepEqual(fs.readFileSync(manifestPath), oversizedDeclaredBytes);
+
   fs.writeFileSync(
     manifestPath,
     JSON.stringify({

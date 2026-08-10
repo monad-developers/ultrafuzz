@@ -218,6 +218,10 @@ test("json validate enforces generated-test bundle array and support coupling wi
       generated_tests: [generatedEntry],
       support_files: [] as Array<typeof supportEntry>
     };
+    const maximumLengthPath = `generated-tests/${[
+      ...Array.from({ length: 31 }, () => "a".repeat(128)),
+      "b".repeat(81)
+    ].join("/")}`;
     const cases = [
       {
         name: "duplicate-generated-test",
@@ -233,6 +237,33 @@ test("json validate enforces generated-test bundle array and support coupling wi
         name: "support-without-test",
         value: { ...base, generated_tests: [], support_files: [supportEntry] },
         keyword: "if"
+      },
+      {
+        name: "excess-array-items",
+        value: {
+          ...base,
+          generated_tests: Array.from({ length: 1_025 }, (_, index) => ({
+            path: `generated-tests/Test-${index}.sol`,
+            size_bytes: 1,
+            sha256: index.toString(16).padStart(64, "0")
+          }))
+        },
+        keyword: "maxItems"
+      },
+      {
+        name: "excess-path-bytes",
+        value: { ...base, generated_tests: [{ ...generatedEntry, path: `${maximumLengthPath}b` }] },
+        keyword: "maxLength"
+      },
+      {
+        name: "excess-path-segments",
+        value: {
+          ...base,
+          generated_tests: [
+            { ...generatedEntry, path: `generated-tests/${Array.from({ length: 64 }, () => "a").join("/")}` }
+          ]
+        },
+        keyword: "pattern"
       }
     ] as const;
 

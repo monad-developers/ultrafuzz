@@ -3,7 +3,13 @@ import path from "node:path";
 
 import { z } from "zod/v4";
 
-import { MAX_GENERATED_TEST_COMPANION_BYTES } from "./artifact-limits.js";
+import {
+  MAX_GENERATED_TEST_BUNDLE_BYTES,
+  MAX_GENERATED_TEST_BUNDLE_ENTRIES,
+  MAX_GENERATED_TEST_COMPANION_BYTES,
+  MAX_GENERATED_TEST_PATH_BYTES,
+  MAX_GENERATED_TEST_PATH_SEGMENTS
+} from "./artifact-limits.js";
 import { validateRegisteredJsonSchema } from "./json-schema-validator.js";
 import { normalizeArtifactProvenance, type ArtifactProvenance } from "./manifests.js";
 import { getNodeArtifactDir, type RunLayout } from "./run-layout.js";
@@ -26,8 +32,16 @@ export const GENERATED_TESTS_SCHEMA_VERSION = "ultrafuzz.generated-tests.v3" as 
 export const GENERATED_TESTS_DIR = "generated-tests";
 export const GENERATED_TESTS_MANIFEST = "generated-tests.json";
 export const GENERATED_TESTS_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:generated-tests:3" as const;
-export const GENERATED_TEST_MANIFEST_PATH_PATTERN =
-  "^generated-tests/[A-Za-z0-9][A-Za-z0-9._-]{0,127}(?:/[A-Za-z0-9][A-Za-z0-9._-]{0,127})*(?![\\s\\S])" as const;
+const GENERATED_TEST_PATH_SEGMENT_PATTERN = "[A-Za-z0-9][A-Za-z0-9._-]{0,127}";
+export const GENERATED_TEST_MANIFEST_PATH_PATTERN = `^generated-tests/${GENERATED_TEST_PATH_SEGMENT_PATTERN}(?:/${GENERATED_TEST_PATH_SEGMENT_PATTERN}){0,${MAX_GENERATED_TEST_PATH_SEGMENTS - 2}}(?![\\s\\S])`;
+
+export {
+  MAX_GENERATED_TEST_BUNDLE_BYTES,
+  MAX_GENERATED_TEST_BUNDLE_ENTRIES,
+  MAX_GENERATED_TEST_COMPANION_BYTES,
+  MAX_GENERATED_TEST_PATH_BYTES,
+  MAX_GENERATED_TEST_PATH_SEGMENTS
+} from "./artifact-limits.js";
 
 export type GeneratedTestProvenance = Partial<Omit<ArtifactProvenance, "metadata">>;
 
@@ -86,9 +100,13 @@ export const generatedTestProvenanceSchema = z
     message: "Present generated-test provenance must contain at least one typed field"
   });
 
-const generatedTestPathSchema = nonEmptyString.regex(generatedTestManifestPathPattern, {
-  message: `path must use the ${GENERATED_TESTS_DIR}/<file> prefix and stay inside that directory`
-});
+const generatedTestPathSchema = z
+  .string()
+  .min(1)
+  .max(MAX_GENERATED_TEST_PATH_BYTES)
+  .regex(generatedTestManifestPathPattern, {
+    message: `path must use the ${GENERATED_TESTS_DIR}/<file> prefix, contain at most ${MAX_GENERATED_TEST_PATH_SEGMENTS} segments, and stay inside that directory`
+  });
 
 export const generatedTestEntrySchema = z
   .strictObject({
@@ -104,6 +122,7 @@ export const generatedTestEntrySchema = z
 
 const generatedTestEntriesSchema = z
   .array(generatedTestEntrySchema)
+  .max(MAX_GENERATED_TEST_BUNDLE_ENTRIES)
   .meta({ uniqueItems: true })
   .superRefine((entries, context) => {
     const seen = new Set<string>();
@@ -182,6 +201,7 @@ export function assertGeneratedTestManifestSchema(value: unknown): GeneratedTest
 }
 
 export function assertGeneratedTestManifestSemantics(manifest: GeneratedTestManifest): void {
+  assertGeneratedTestBundleResourceBounds(manifest);
   const paths = new Set<string>();
   for (const entry of [...manifest.generated_tests, ...manifest.support_files]) {
     if (paths.has(entry.path)) {
@@ -192,6 +212,21 @@ export function assertGeneratedTestManifestSemantics(manifest: GeneratedTestMani
   assertGeneratedTestPathsAreMaterializable(paths);
   if (manifest.generated_tests.length === 0 && manifest.support_files.length > 0) {
     throw new Error("generated tests manifest cannot declare support files without a runnable generated test");
+  }
+}
+
+export function assertGeneratedTestBundleResourceBounds(manifest: GeneratedTestManifest): void {
+  const entries = [...manifest.generated_tests, ...manifest.support_files];
+  if (entries.length > MAX_GENERATED_TEST_BUNDLE_ENTRIES) {
+    throw new Error(
+      `generated tests manifest exceeds the ${MAX_GENERATED_TEST_BUNDLE_ENTRIES}-entry combined bundle limit`
+    );
+  }
+  const declaredBytes = entries.reduce((total, entry) => total + entry.size_bytes, 0);
+  if (declaredBytes > MAX_GENERATED_TEST_BUNDLE_BYTES) {
+    throw new Error(
+      `generated tests manifest exceeds the ${MAX_GENERATED_TEST_BUNDLE_BYTES}-byte combined bundle limit`
+    );
   }
 }
 
@@ -310,6 +345,11 @@ function preflightGeneratedTestInputShapes(
   provenance: GeneratedTestProvenance & Pick<ArtifactProvenance, "producer_node_id">
 ): void {
   const { tests, supportFiles } = input;
+  if (tests.length + supportFiles.length > MAX_GENERATED_TEST_BUNDLE_ENTRIES) {
+    throw new Error(
+      `generated tests manifest exceeds the ${MAX_GENERATED_TEST_BUNDLE_ENTRIES}-entry combined bundle limit`
+    );
+  }
   if (tests.length === 0 && supportFiles.length > 0) {
     throw new Error("generated tests manifest cannot declare support files without a runnable generated test");
   }
@@ -335,6 +375,15 @@ function preflightGeneratedTestInputShapes(
         assertStrictUtf8(Buffer.from(entry.content), `${label} file`, manifestPath);
       }
     }
+  }
+  const suppliedBytes = [...tests, ...supportFiles].reduce(
+    (total, entry) => total + (entry.content === undefined ? 0 : Buffer.byteLength(entry.content)),
+    0
+  );
+  if (suppliedBytes > MAX_GENERATED_TEST_BUNDLE_BYTES) {
+    throw new Error(
+      `generated-test bundle supplied content exceeds the ${MAX_GENERATED_TEST_BUNDLE_BYTES}-byte combined limit`
+    );
   }
   assertGeneratedTestPathsAreMaterializable(paths);
   const placeholder = Buffer.from("x", "utf8");
@@ -368,6 +417,8 @@ function preflightGeneratedTestFiles(
   supportFiles: readonly GeneratedTestInput[]
 ): void {
   const generatedTestsRoot = path.join(nodeDir, GENERATED_TESTS_DIR);
+  const existingFiles: Array<{ label: string; manifestPath: string; absolutePath: string; sizeBytes: number }> = [];
+  let totalBytes = 0;
   for (const [label, entries] of [
     ["generated test", tests],
     ["generated-test support", supportFiles]
@@ -377,13 +428,35 @@ function preflightGeneratedTestFiles(
       const manifestPath = `${GENERATED_TESTS_DIR}/${safeRelativePath}`;
       const absolutePath = safeResolveInside(generatedTestsRoot, safeRelativePath, `${label} path`);
       assertGeneratedTestDestinationCanBeReplaced(absolutePath);
-      if (entry.content !== undefined) continue;
-      const contents = readRegularFileSnapshot(absolutePath, MAX_GENERATED_TEST_COMPANION_BYTES);
-      if (contents.length === 0) {
-        throw new Error(`${label} file must be non-empty: ${manifestPath}`);
+      if (entry.content !== undefined) {
+        totalBytes += Buffer.byteLength(entry.content);
+        continue;
       }
-      assertStrictUtf8(contents, `${label} file`, manifestPath);
+      assertRegularFileInside(generatedTestsRoot, absolutePath, `${label} file`);
+      const sizeBytes = fs.lstatSync(absolutePath).size;
+      totalBytes += sizeBytes;
+      existingFiles.push({ label, manifestPath, absolutePath, sizeBytes });
     }
+  }
+  if (totalBytes > MAX_GENERATED_TEST_BUNDLE_BYTES) {
+    throw new Error(
+      `generated-test bundle exceeds the ${MAX_GENERATED_TEST_BUNDLE_BYTES}-byte combined companion limit`
+    );
+  }
+  for (const { label, manifestPath, sizeBytes } of existingFiles) {
+    if (sizeBytes === 0) {
+      throw new Error(`${label} file must be non-empty: ${manifestPath}`);
+    }
+    if (sizeBytes > MAX_GENERATED_TEST_COMPANION_BYTES) {
+      throw new Error(`${label} file exceeds the ${MAX_GENERATED_TEST_COMPANION_BYTES}-byte limit: ${manifestPath}`);
+    }
+  }
+  for (const { label, manifestPath, absolutePath } of existingFiles) {
+    const contents = readRegularFileSnapshot(absolutePath, MAX_GENERATED_TEST_COMPANION_BYTES);
+    if (contents.length === 0) {
+      throw new Error(`${label} file must be non-empty: ${manifestPath}`);
+    }
+    assertStrictUtf8(contents, `${label} file`, manifestPath);
   }
 }
 

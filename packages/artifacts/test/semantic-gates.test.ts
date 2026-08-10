@@ -567,6 +567,13 @@ const fixtures = {
     positive: { generated_tests: [{ path: "a" }], support_files: [{ path: "b" }] },
     negative: { generated_tests: [{ path: "a" }], support_files: [{ path: "a/b" }] }
   },
+  "generated-test-bundle-resource-bounds": {
+    positive: { generated_tests: [{ size_bytes: 1 }], support_files: [] },
+    negative: {
+      generated_tests: Array.from({ length: 5 }, () => ({ size_bytes: 16 * 1024 * 1024 })),
+      support_files: []
+    }
+  },
   "generated-test-support-requires-test": {
     positive: { generated_tests: [{ path: "a" }], support_files: [{ path: "b" }] },
     negative: { generated_tests: [], support_files: [{ path: "b" }] }
@@ -1031,6 +1038,36 @@ test("offline schema execution never claims contextual gates passed", () => {
         assert.deepEqual(result.missingContext, registration.requiredContext);
       }
     }
+  }
+});
+
+test("generated-test filesystem gate rejects cumulative actual bytes before reading companions", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-test-bounds-"));
+  try {
+    fs.mkdirSync(path.join(root, "generated-tests"));
+    const generated_tests = Array.from({ length: 5 }, (_, index) => {
+      const relativePath = `generated-tests/Test-${index}.sol`;
+      const absolutePath = path.join(root, relativePath);
+      fs.writeFileSync(absolutePath, "x", "utf8");
+      fs.truncateSync(absolutePath, 16 * 1024 * 1024);
+      return { path: relativePath, size_bytes: 1, sha256: "0".repeat(64) };
+    });
+    const readSync = t.mock.method(fs, "readSync", () => {
+      throw new Error("companion content was read before cumulative resource preflight completed");
+    });
+
+    const result = executeSemanticGate("generated-test-file-integrity", {
+      document: { generated_tests, support_files: [] },
+      context: { filesystem: { rootDirectory: root } }
+    });
+    assert.equal(result.status, "failed");
+    assert.ok(
+      result.status === "failed" &&
+        result.issues.some((entry) => /67108864-byte combined bundle limit/u.test(entry.message))
+    );
+    assert.equal(readSync.mock.callCount(), 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 

@@ -32,6 +32,9 @@ const {
   executeSchemaSemanticGates,
   invariantPinnedSourceRefExists,
   materializePromptSchemas,
+  MAX_GENERATED_TEST_BUNDLE_BYTES,
+  MAX_GENERATED_TEST_BUNDLE_ENTRIES,
+  MAX_GENERATED_TEST_COMPANION_BYTES,
   INVARIANT_SUITE_MANIFEST_SCHEMA_VERSION,
   normalizeNodeAttemptFailureMessage,
   parseInvariantSuiteManifestBytes,
@@ -168,7 +171,7 @@ const verificationOutput = z.strictObject({
 const ARTIFACT_VERIFICATION_SCHEMA_VERSION = "ultrafuzz.artifact-verification.v2";
 const ARTIFACT_VERIFICATION_DIRECTORY = ".ultrafuzz-verification";
 const MAX_VERIFIED_ARTIFACT_BYTES = 64 * 1024 * 1024;
-const MAX_VERIFIED_COMPANION_BYTES = 16 * 1024 * 1024;
+const MAX_VERIFIED_COMPANION_BYTES = MAX_GENERATED_TEST_COMPANION_BYTES;
 const MAX_PRE_AGENT_EVIDENCE_BYTES = 128 * 1024 * 1024;
 const unreachableCommitCountCommand =
   'set -euo pipefail; git fsck --connectivity-only --unreachable --no-reflogs --no-progress 2>&1 | awk \'$1 == "unreachable" && $2 == "commit" { count++ } END { print count + 0 }\'';
@@ -4842,8 +4845,19 @@ function verifyGeneratedTestFiles(artifactDir: string, value: unknown): Array<{ 
     support_files: Array<{ path: string; size_bytes: number; sha256: string }>;
   };
   const entries = [...manifest.generated_tests, ...manifest.support_files];
+  if (entries.length > MAX_GENERATED_TEST_BUNDLE_ENTRIES) {
+    throw new Error(
+      `artifact-contract failure: generated-test manifest exceeds the ${MAX_GENERATED_TEST_BUNDLE_ENTRIES}-entry combined bundle limit`
+    );
+  }
+  const declaredBytes = entries.reduce((total, entry) => total + entry.size_bytes, 0);
+  if (declaredBytes > MAX_GENERATED_TEST_BUNDLE_BYTES) {
+    throw new Error(
+      `artifact-contract failure: generated-test manifest exceeds the ${MAX_GENERATED_TEST_BUNDLE_BYTES}-byte combined declared-size limit`
+    );
+  }
   const paths = new Set<string>();
-  return entries.map((entry) => {
+  const preflighted = entries.map((entry) => {
     const relativePath = entry.path;
     if (paths.has(relativePath)) {
       throw new Error(`artifact-contract failure: duplicate generated-test bundle path ${relativePath}`);
@@ -4853,11 +4867,32 @@ function verifyGeneratedTestFiles(artifactDir: string, value: unknown): Array<{ 
     if (!isStrictlyInsideDirectory(artifactDir, artifactPath)) {
       throw new Error(`artifact-contract failure: unsafe generated-test bundle path ${relativePath}`);
     }
+    const failureMessage = `artifact-contract failure: generated-test bundle file is missing ${relativePath}`;
+    const resolvedPath = resolveRegularArtifactFile(artifactDir, artifactPath, failureMessage);
+    return { entry, relativePath, artifactPath: resolvedPath, stats: statSync(resolvedPath) };
+  });
+  const actualBytes = preflighted.reduce((total, companion) => total + companion.stats.size, 0);
+  if (actualBytes > MAX_GENERATED_TEST_BUNDLE_BYTES) {
+    throw new Error(
+      `artifact-contract failure: generated-test companions exceed the ${MAX_GENERATED_TEST_BUNDLE_BYTES}-byte combined bundle limit`
+    );
+  }
+  for (const companion of preflighted) {
+    if (companion.stats.size === 0) {
+      throw new Error(`artifact-contract failure: generated-test bundle file is empty ${companion.relativePath}`);
+    }
+    if (companion.stats.size > MAX_GENERATED_TEST_COMPANION_BYTES) {
+      throw new Error(
+        `artifact-contract failure: generated-test bundle file exceeds the ${MAX_GENERATED_TEST_COMPANION_BYTES}-byte companion limit ${companion.relativePath}`
+      );
+    }
+  }
+  return preflighted.map(({ entry, relativePath, artifactPath }) => {
     const snapshot = readBoundedRegularArtifactSnapshot(
       artifactDir,
       artifactPath,
       `artifact-contract failure: generated-test bundle file is missing ${relativePath}`,
-      MAX_VERIFIED_COMPANION_BYTES,
+      MAX_GENERATED_TEST_COMPANION_BYTES,
       true
     );
     decodeStrictUtf8Snapshot(snapshot, `artifact-contract failure: generated-test bundle file ${relativePath}`);

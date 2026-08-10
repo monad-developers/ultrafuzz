@@ -631,7 +631,8 @@ test("generated Smithers verifier rejects zero-byte generated-test companions", 
 
   const generatedTestVerifier = source.slice(verifierStart, workflowStart);
   assert.match(generatedTestVerifier, /readBoundedRegularArtifactSnapshot\(/u);
-  assert.match(generatedTestVerifier, /MAX_VERIFIED_COMPANION_BYTES,\s*true/u);
+  assert.match(generatedTestVerifier, /MAX_GENERATED_TEST_COMPANION_BYTES,\s*true/u);
+  assert.match(generatedTestVerifier, /companion\.stats\.size === 0/u);
   assert.match(generatedTestVerifier, /decodeStrictUtf8Snapshot\(snapshot/u);
   assert.match(generatedTestVerifier, /snapshot\.bytes\.length !== entry\.size_bytes/u);
   assert.match(generatedTestVerifier, /createHash\("sha256"\)\.update\(snapshot\.bytes\).*entry\.sha256/su);
@@ -648,14 +649,27 @@ test("generated Smithers authenticates the final generated-test publication snap
   const verifyGeneratedTestFiles = new Function(
     "path",
     "isStrictlyInsideDirectory",
+    "resolveRegularArtifactFile",
+    "statSync",
     "readBoundedRegularArtifactSnapshot",
-    "MAX_VERIFIED_COMPANION_BYTES",
+    "MAX_GENERATED_TEST_BUNDLE_ENTRIES",
+    "MAX_GENERATED_TEST_BUNDLE_BYTES",
+    "MAX_GENERATED_TEST_COMPANION_BYTES",
     "decodeStrictUtf8Snapshot",
     "createHash",
     `${emitted}; return verifyGeneratedTestFiles;`
   )(
     path,
     (root: string, candidate: string) => candidate !== root && candidate.startsWith(`${root}${path.sep}`),
+    (root: string, candidate: string, failureMessage: string) => {
+      try {
+        if (candidate === root || !candidate.startsWith(`${root}${path.sep}`)) throw new Error(failureMessage);
+        return fs.realpathSync(candidate);
+      } catch {
+        throw new Error(failureMessage);
+      }
+    },
+    fs.statSync,
     (root: string, candidate: string, failureMessage: string, maxBytes: number, requireNonEmpty: boolean) => {
       try {
         if (candidate === root || !candidate.startsWith(`${root}${path.sep}`)) throw new Error(failureMessage);
@@ -667,6 +681,8 @@ test("generated Smithers authenticates the final generated-test publication snap
         throw new Error(failureMessage);
       }
     },
+    1_024,
+    64 * 1024 * 1024,
     16 * 1024 * 1024,
     (snapshot: { bytes: Buffer }, failureMessage: string) => {
       try {
@@ -711,6 +727,85 @@ test("generated Smithers authenticates the final generated-test publication snap
       () => verifyGeneratedTestFiles(root, manifest),
       /generated-test bundle file is missing generated-tests\/Replay\.t\.sol/u
     );
+
+    let companionReads = 0;
+    const countingVerifier = new Function(
+      "path",
+      "isStrictlyInsideDirectory",
+      "resolveRegularArtifactFile",
+      "statSync",
+      "readBoundedRegularArtifactSnapshot",
+      "MAX_GENERATED_TEST_BUNDLE_ENTRIES",
+      "MAX_GENERATED_TEST_BUNDLE_BYTES",
+      "MAX_GENERATED_TEST_COMPANION_BYTES",
+      "decodeStrictUtf8Snapshot",
+      "createHash",
+      `${emitted}; return verifyGeneratedTestFiles;`
+    )(
+      path,
+      (directory: string, candidate: string) =>
+        candidate !== directory && candidate.startsWith(`${directory}${path.sep}`),
+      (directory: string, candidate: string, failureMessage: string) => {
+        try {
+          if (candidate === directory || !candidate.startsWith(`${directory}${path.sep}`)) {
+            throw new Error(failureMessage);
+          }
+          return fs.realpathSync(candidate);
+        } catch {
+          throw new Error(failureMessage);
+        }
+      },
+      fs.statSync,
+      () => {
+        companionReads += 1;
+        throw new Error("companion content should not be opened before resource preflight passes");
+      },
+      1_024,
+      64 * 1024 * 1024,
+      16 * 1024 * 1024,
+      () => "",
+      createHash
+    ) as (artifactDir: string, value: unknown) => Array<{ path: string; contents: Buffer }>;
+
+    const boundedEntry = (entryPath: string, sizeBytes: number) => ({
+      path: entryPath,
+      size_bytes: sizeBytes,
+      sha256: "0".repeat(64)
+    });
+    assert.throws(
+      () =>
+        countingVerifier(root, {
+          generated_tests: Array.from({ length: 1_025 }, (_, index) =>
+            boundedEntry(`generated-tests/count-${index}.sol`, 1)
+          ),
+          support_files: []
+        }),
+      /1024-entry combined bundle limit/u
+    );
+    assert.equal(companionReads, 0);
+    assert.throws(
+      () =>
+        countingVerifier(root, {
+          generated_tests: Array.from({ length: 5 }, (_, index) =>
+            boundedEntry(`generated-tests/declared-${index}.sol`, 16 * 1024 * 1024)
+          ),
+          support_files: []
+        }),
+      /combined declared-size limit/u
+    );
+    assert.equal(companionReads, 0);
+
+    const actualEntries = Array.from({ length: 5 }, (_, index) => {
+      const actualPath = `generated-tests/actual-${index}.sol`;
+      fs.writeFileSync(path.join(root, actualPath), "x", "utf8");
+      fs.truncateSync(path.join(root, actualPath), 16 * 1024 * 1024);
+      return boundedEntry(actualPath, 1);
+    });
+    assert.throws(
+      () => countingVerifier(root, { generated_tests: actualEntries, support_files: [] }),
+      /companions exceed the 67108864-byte combined bundle limit/u
+    );
+    assert.equal(companionReads, 0);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

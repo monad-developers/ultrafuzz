@@ -763,6 +763,20 @@ test("portable generated-test paths and implementation selection uniqueness agre
     support_files: []
   };
   assertParity(generatedEntry.id, generatedParser, generated, true, "generated-tests:path:safe");
+  const maxLengthPath = `generated-tests/${[...Array.from({ length: 31 }, () => "a".repeat(128)), "b".repeat(81)].join(
+    "/"
+  )}`;
+  assert.equal(maxLengthPath.length, 4_096);
+  for (const [label, candidatePath, expected] of [
+    ["maximum-path-bytes", maxLengthPath, true],
+    ["excess-path-bytes", `${maxLengthPath}b`, false],
+    ["maximum-path-segments", `generated-tests/${Array.from({ length: 63 }, () => "a").join("/")}`, true],
+    ["excess-path-segments", `generated-tests/${Array.from({ length: 64 }, () => "a").join("/")}`, false]
+  ] as const) {
+    const candidate = structuredClone(generated);
+    candidate.generated_tests[0]!.path = candidatePath;
+    assertParity(generatedEntry.id, generatedParser, candidate, expected, `generated-tests:path:${label}`);
+  }
   for (const [label, unsafePath] of [
     ["wrong-root", "tests/Invariant.t.sol"],
     ["traversal", "generated-tests/../Invariant.t.sol"],
@@ -813,6 +827,31 @@ test("portable generated-test paths and implementation selection uniqueness agre
     { ...generated, generated_tests: [], support_files: [supportEntry] },
     false,
     "generated-tests:support-requires-runnable-test"
+  );
+  const boundedEntries = Array.from({ length: 1_024 }, (_, index) => ({
+    path: `generated-tests/bounded-${index}.sol`,
+    size_bytes: 1,
+    sha256: index.toString(16).padStart(64, "0")
+  }));
+  assertParity(
+    generatedEntry.id,
+    generatedParser,
+    { ...generated, generated_tests: boundedEntries },
+    true,
+    "generated-tests:maximum-array-items"
+  );
+  assertParity(
+    generatedEntry.id,
+    generatedParser,
+    {
+      ...generated,
+      generated_tests: [
+        ...boundedEntries,
+        { path: "generated-tests/excess.sol", size_bytes: 1, sha256: "f".repeat(64) }
+      ]
+    },
+    false,
+    "generated-tests:excess-array-items"
   );
 
   const implementedEntry = artifactSchemaRegistry().find(

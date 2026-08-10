@@ -8,6 +8,8 @@ import test from "node:test";
 import {
   ArtifactPathError,
   GENERATED_TESTS_SCHEMA_VERSION,
+  MAX_GENERATED_TEST_BUNDLE_BYTES,
+  MAX_GENERATED_TEST_BUNDLE_ENTRIES,
   appendUsageEvents,
   appendNodeAttempt,
   appendEvent,
@@ -1002,6 +1004,55 @@ test("generated-test manifest writer rejects support-only bundles before writing
   );
 });
 
+test("generated-test manifest writer rejects excess combined entries before creating bundle paths", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-excess-generated-test-entries" });
+
+  assert.throws(
+    () =>
+      writeGeneratedTestManifest({
+        layout,
+        nodeId: "strategy-a",
+        tests: Array.from({ length: MAX_GENERATED_TEST_BUNDLE_ENTRIES + 1 }, (_, index) => ({
+          path: `generated-tests/Test-${index}.sol`,
+          content: "x"
+        })),
+        supportFiles: []
+      }),
+    /1024-entry combined bundle limit/u
+  );
+  assert.equal(fs.existsSync(path.join(layout.artifactsDir, "strategy-a")), false);
+});
+
+test("generated-test manifest writer rejects excess cumulative existing bytes before reading companions", (t) => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-excess-generated-test-bytes" });
+  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
+  const generatedTestsDir = path.join(nodeDir, "generated-tests");
+  fs.mkdirSync(generatedTestsDir);
+  const tests = Array.from({ length: 5 }, (_, index) => {
+    const relativePath = `generated-tests/Test-${index}.sol`;
+    const absolutePath = path.join(nodeDir, relativePath);
+    fs.writeFileSync(absolutePath, "x", "utf8");
+    fs.truncateSync(absolutePath, MAX_GENERATED_TEST_BUNDLE_BYTES / 4);
+    return { path: relativePath };
+  });
+  const readSync = t.mock.method(fs, "readSync", () => {
+    throw new Error("companion content was read before cumulative resource preflight completed");
+  });
+
+  assert.throws(
+    () =>
+      writeGeneratedTestManifest({
+        layout,
+        nodeId: "strategy-a",
+        tests,
+        supportFiles: []
+      }),
+    /67108864-byte combined companion limit/u
+  );
+  assert.equal(readSync.mock.callCount(), 0);
+  assert.equal(fs.existsSync(path.join(nodeDir, "generated-tests.json")), false);
+});
+
 test("generated-test manifest writer rejects cross-array duplicate paths before changing bundle bytes", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-duplicate-generated-test" });
   const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
@@ -1044,7 +1095,7 @@ test("generated-test manifest writer preflights missing existing companions befo
         tests: [{ path: "generated-tests/Replay.t.sol", content: "replacement test\n" }],
         supportFiles: [{ path: "generated-tests/MissingHelper.sol" }]
       }),
-    /cannot open regular file/u
+    /generated-test support file does not exist/u
   );
   assert.equal(fs.readFileSync(testPath, "utf8"), "sentinel test\n");
   assert.equal(fs.readFileSync(manifestPath, "utf8"), "sentinel manifest\n");

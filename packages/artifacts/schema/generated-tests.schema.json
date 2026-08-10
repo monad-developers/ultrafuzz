@@ -15,6 +15,7 @@
       "minLength": 1
     },
     "generated_tests": {
+      "maxItems": 1024,
       "type": "array",
       "items": {
         "$ref": "#/$defs/generatedTestEntry"
@@ -22,6 +23,7 @@
       "uniqueItems": true
     },
     "support_files": {
+      "maxItems": 1024,
       "type": "array",
       "items": {
         "$ref": "#/$defs/generatedTestEntry"
@@ -65,7 +67,8 @@
         "path": {
           "type": "string",
           "minLength": 1,
-          "pattern": "^generated-tests\\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}(?:\\/[A-Za-z0-9][A-Za-z0-9._-]{0,127})*(?![\\s\\S])"
+          "maxLength": 4096,
+          "pattern": "^generated-tests\\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}(?:\\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}){0,62}(?![\\s\\S])"
         },
         "size_bytes": {
           "type": "integer",
