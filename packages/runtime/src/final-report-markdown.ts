@@ -13,7 +13,12 @@ const reportSummaryFields = [
   ["Models used", "models_used"],
   ["Tokens used", "tokens_used"],
   ["Estimated spend", "estimated_spend"],
-  ["Strategy loops", "strategy_loops"]
+  ["Strategy loops", "strategy_loops"],
+  ["Audit profile", "audit_profile"],
+  ["Audit profile catalog digest", "audit_profile_catalog_digest"],
+  ["Topology digest", "topology_digest"],
+  ["Prompt digest", "prompt_digest"],
+  ["Expanded graph fingerprint", "expanded_graph_fingerprint"]
 ] as const;
 
 const severityOrder = ["High", "Medium", "Low"] as const;

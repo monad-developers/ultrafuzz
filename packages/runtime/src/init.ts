@@ -116,7 +116,7 @@ export function initProject(input: InitProjectInput) {
     writeProjectFile(
       projectRoot,
       "ultrafuzz.toml",
-      serializeRedactedResolvedConfigToml(redacted),
+      serializeRedactedResolvedConfigToml(redacted, { omitAuditProfileManagedSettings: true }),
       input.force === true,
       created,
       preserved,

@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { expandTopology, loadTopology } from "../src/index.js";
 
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
-const SMOKE_TOPOLOGY_PATH = path.join(REPOSITORY_ROOT, "benchmarks", "smoke-benchmark.yml");
+const SMOKE_TOPOLOGY_PATH = path.join(REPOSITORY_ROOT, "packages", "config", "topologies", "smoke.yml");
 const STRATEGY_IDS = [
   "time-warp-sequences",
   "external-dependency-boundaries",
@@ -14,7 +14,7 @@ const STRATEGY_IDS = [
   "lifecycle-view-boundaries"
 ];
 
-describe("smoke benchmark topology", () => {
+describe("packaged smoke topology", () => {
   it("runs one context pass, four strategies in one wave, and two review passes", () => {
     const topology = loadTopology(REPOSITORY_ROOT, {
       topologyPath: SMOKE_TOPOLOGY_PATH,

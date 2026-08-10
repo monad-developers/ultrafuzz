@@ -1,5 +1,5 @@
 import { Args, Command } from "@oclif/core";
-import { auditProfile, loadAuditProfileCatalog, type ResolvedConfig } from "@ultrafuzz/config";
+import { auditProfile, loadAuditProfileCatalog, resolvedAuditProfileSettings } from "@ultrafuzz/config";
 import { effectiveAuditPolicy, loadResolvedProject } from "@ultrafuzz/runtime";
 
 import { cliIo, commandFailure, emitCommandResult, globalFlags, projectRoot } from "../../command-shared.js";
@@ -39,7 +39,8 @@ export default class ConfigAuditProfile extends Command {
         topology_path_origin: policy.topologyPathOrigin,
         topology_digest: policy.topologyDigest,
         profile_settings: profile.settings,
-        effective_settings: effectiveSettings(resolved.config),
+        effective_settings: resolvedAuditProfileSettings(resolved.config),
+        setting_origins: resolved.config.auditProfileResolution.settingOrigins,
         overridden_settings: resolved.config.auditProfileResolution.overriddenSettings
       };
       emitCommandResult(
@@ -78,19 +79,4 @@ export default class ConfigAuditProfile extends Command {
       );
     }
   }
-}
-
-function effectiveSettings(config: ResolvedConfig): Record<string, number | string> {
-  return {
-    strategy_loops: config.strategyLoops ?? 1,
-    dynamic_strategies_enumerator: config.dynamicStrategiesEnumerator,
-    max_parallel_agents: config.run.maxParallelAgents,
-    max_parallel_nodes: config.run.maxParallelNodes,
-    default_timeout_seconds: config.run.defaultTimeoutSeconds,
-    workflow_deadline_seconds: config.run.workflowDeadlineSeconds,
-    invariant_testing_smoke_timeout_seconds: config.invariants.invariantTestingSmokeTimeoutSeconds,
-    invariant_testing_fuzzer_timeout_seconds: config.invariants.invariantTestingFuzzerTimeoutSeconds,
-    triage_quorum: config.triage.quorum,
-    triage_panel_size: config.triage.panelSize
-  };
 }

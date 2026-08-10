@@ -141,6 +141,9 @@ export function summarizeConfig(config: ResolvedConfig): ValidateProjectResult["
     ...(config.auditProfileResolution.declaredTopologyPath === undefined
       ? {}
       : { audit_profile_topology_path: config.auditProfileResolution.declaredTopologyPath }),
+    audit_profile_effective_settings: config.auditProfileResolution.effectiveSettings,
+    audit_profile_setting_origins: config.auditProfileResolution.settingOrigins,
+    audit_profile_overridden_settings: config.auditProfileResolution.overriddenSettings,
     default_agent: defaultProfile?.agent ?? "",
     ...(defaultProfile?.model ? { default_model: defaultProfile.model } : {}),
     ...(defaultProfile?.reasoning ? { default_reasoning: defaultProfile.reasoning } : {}),

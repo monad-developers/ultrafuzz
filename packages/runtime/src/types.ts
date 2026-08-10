@@ -7,7 +7,12 @@ import type {
   RunLayout,
   RunState
 } from "@ultrafuzz/artifacts";
-import type { ResolvedConfig, RuntimeConfigOverrides } from "@ultrafuzz/config";
+import type {
+  AuditProfileSettingOrigin,
+  AuditProfileSettings,
+  ResolvedConfig,
+  RuntimeConfigOverrides
+} from "@ultrafuzz/config";
 import type { MaterializeCopySelection } from "@ultrafuzz/security";
 import type { ExpandedGraph } from "@ultrafuzz/topology";
 
@@ -79,6 +84,9 @@ export interface ValidateProjectResult {
     audit_profile: string;
     audit_profile_catalog_digest: string;
     audit_profile_topology_path?: string;
+    audit_profile_effective_settings: AuditProfileSettings;
+    audit_profile_setting_origins: Record<string, AuditProfileSettingOrigin>;
+    audit_profile_overridden_settings: string[];
     default_agent: string;
     default_model?: string;
     default_reasoning?: string;
@@ -193,6 +201,7 @@ export interface PlanRunValue {
   graph_fingerprint: string;
   config_fingerprint: string;
   redacted_config_fingerprint: string;
+  prompt_digest: string;
   output_root: string;
   state_nodes: NodeStateInput[];
   resolved_config: ResolvedConfig;
@@ -328,6 +337,7 @@ export interface RunProgressSummary {
 
 export interface RunHealthValue extends RunListEntry, RunProgressSummary {
   workflow_run_id: string;
+  audit_profile?: Record<string, unknown>;
   workflow_status: string;
   verdict: RunHealthVerdict;
   reason: string;

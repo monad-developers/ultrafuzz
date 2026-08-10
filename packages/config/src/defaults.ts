@@ -96,6 +96,8 @@ function normalizeDefaultConfig(input: ProjectConfigInput, filePath: string): Re
       catalogSchemaVersion: profileCatalog.schemaVersion,
       catalogDigest: profileCatalog.digest,
       settings: {},
+      effectiveSettings: {},
+      settingOrigins: {},
       overriddenSettings: []
     },
     dynamicStrategiesEnumerator: required(input.dynamicStrategiesEnumerator, "dynamic_strategies_enumerator", filePath),
@@ -281,6 +283,8 @@ function assertResolvedConfig(value: unknown, filePath: string): asserts value i
   );
   assertString(value.auditProfileResolution.catalogDigest, "auditProfileResolution.catalogDigest", filePath);
   assertRecord(value.auditProfileResolution.settings, "auditProfileResolution.settings", filePath);
+  assertRecord(value.auditProfileResolution.effectiveSettings, "auditProfileResolution.effectiveSettings", filePath);
+  assertRecord(value.auditProfileResolution.settingOrigins, "auditProfileResolution.settingOrigins", filePath);
   assertNumber(value.dynamicStrategiesEnumerator, "dynamicStrategiesEnumerator", filePath);
   assertRecord(value.project, "project", filePath);
   assertString(value.project.repo, "project.repo", filePath);

@@ -12,6 +12,8 @@ export interface EffectiveAuditPolicy {
   catalogSchemaVersion: number;
   catalogDigest: string;
   profileSettings: Record<string, unknown>;
+  effectiveSettings: Record<string, unknown>;
+  settingOrigins: Record<string, string>;
   overriddenSettings: string[];
   declaredTopologyPath?: string;
   effectiveTopologyPath: string;
@@ -59,6 +61,8 @@ export function effectiveAuditPolicy(input: {
     catalogSchemaVersion: catalog.schemaVersion,
     catalogDigest: catalog.digest,
     profileSettings: { ...profile.settings },
+    effectiveSettings: { ...input.config.auditProfileResolution.effectiveSettings },
+    settingOrigins: { ...input.config.auditProfileResolution.settingOrigins },
     overriddenSettings: [...input.config.auditProfileResolution.overriddenSettings],
     ...(profile.topologyPath === undefined ? {} : { declaredTopologyPath: profile.topologyPath }),
     effectiveTopologyPath,

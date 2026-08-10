@@ -147,7 +147,7 @@ provider and Modal budgets remain the hard aggregate cost boundary.
 
 The smoke has exactly three targets: one Foundry target, one Hardhat target, and
 one Vyper target. It defaults to GPT-5.6 Luna at `high`, uses one strategy loop,
-and uses the dedicated `benchmarks/smoke-benchmark.yml` graph. One
+and uses the `smoke` profile's packaged graph. One
 medium-reasoning context node feeds four high-reasoning bug-finding strategies
 in parallel; medium-reasoning dedupe and report nodes finish the row. Invariant,
 differential, dynamic, and production-only review stages are absent from this

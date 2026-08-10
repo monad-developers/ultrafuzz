@@ -11,6 +11,9 @@
       "import": "./dist/index.js"
     }
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json && cp ../../ultrafuzz.toml dist/ultrafuzz.toml && cp audit-profiles.yml dist/audit-profiles.yml && rm -rf dist/topologies && cp -R topologies dist/topologies",
     "test": "pnpm --filter @ultrafuzz/security build && vitest run",

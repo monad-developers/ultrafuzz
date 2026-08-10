@@ -97,9 +97,7 @@ export async function planRun(input: PlanRunInput) {
       runtimeStrategyLoops: input.topologyTransform?.strategyLoops
     });
   } catch (error) {
-    return runtimeFailure<PlanRunValue>([
-      diagnosticFromError(error, "audit-profile", "AUDIT_PROFILE_POLICY_INVALID")
-    ]);
+    return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "audit-profile", "AUDIT_PROFILE_POLICY_INVALID")]);
   }
   const effectiveTopologyTransform: PlanRunInput["topologyTransform"] = {
     ...(auditPolicy.strategyLoops === undefined ? {} : { strategyLoops: auditPolicy.strategyLoops }),
@@ -152,6 +150,7 @@ export async function planRun(input: PlanRunInput) {
   }
 
   const graph = toPlannedGraph(expandedGraph, catalog);
+  const promptDigest = promptDigestForGraph(graph, catalog);
   let referenceExpectationsSource: ReferenceExpectationProvision | undefined;
   try {
     referenceExpectationsSource = provisionReferenceExpectationOutput(
@@ -213,12 +212,15 @@ export async function planRun(input: PlanRunInput) {
         mode: input.mode ?? "run",
         workflow_ids: [],
         redacted_config_fingerprint: redactedConfigFingerprint,
+        prompt_digest: promptDigest,
         audit_profile: {
           requested: auditPolicy.auditProfile,
           effective: auditPolicy.auditProfile,
           catalog_schema_version: auditPolicy.catalogSchemaVersion,
           catalog_digest: auditPolicy.catalogDigest,
           settings: auditPolicy.profileSettings,
+          effective_settings: auditPolicy.effectiveSettings,
+          setting_origins: auditPolicy.settingOrigins,
           overridden_settings: auditPolicy.overriddenSettings,
           ...(auditPolicy.declaredTopologyPath === undefined
             ? {}
@@ -226,7 +228,9 @@ export async function planRun(input: PlanRunInput) {
           effective_topology_path: auditPolicy.effectiveTopologyDisplayPath,
           topology_path_origin: auditPolicy.topologyPathOrigin,
           topology_overridden: auditPolicy.topologyOverridden,
-          topology_digest: auditPolicy.topologyDigest
+          topology_digest: auditPolicy.topologyDigest,
+          prompt_digest: promptDigest,
+          expanded_graph_fingerprint: graphFingerprint
         },
         forge_guard: forgeGuardMetadata(resolved.config, false)
       }
@@ -265,6 +269,7 @@ export async function planRun(input: PlanRunInput) {
     graph_fingerprint: graphFingerprint,
     config_fingerprint: configFingerprint,
     redacted_config_fingerprint: redactedConfigFingerprint,
+    prompt_digest: promptDigest,
     execution: resolved.config.execution,
     topology: validation.value.topology,
     audit_profile: {
@@ -273,6 +278,10 @@ export async function planRun(input: PlanRunInput) {
       effective_topology_path: auditPolicy.effectiveTopologyDisplayPath,
       topology_path_origin: auditPolicy.topologyPathOrigin,
       topology_digest: auditPolicy.topologyDigest,
+      prompt_digest: promptDigest,
+      expanded_graph_fingerprint: graphFingerprint,
+      effective_settings: auditPolicy.effectiveSettings,
+      setting_origins: auditPolicy.settingOrigins,
       overridden_settings: auditPolicy.overriddenSettings,
       topology_overridden: auditPolicy.topologyOverridden
     },
@@ -291,6 +300,7 @@ export async function planRun(input: PlanRunInput) {
     graph_fingerprint: graphFingerprint,
     config_fingerprint: configFingerprint,
     redacted_config_fingerprint: redactedConfigFingerprint,
+    prompt_digest: promptDigest,
     output_root: outputRoot,
     state_nodes: stateNodes,
     resolved_config: resolved.config,
@@ -298,6 +308,24 @@ export async function planRun(input: PlanRunInput) {
     layout,
     rendered_prompts: renderedPrompts
   });
+}
+
+function promptDigestForGraph(graph: PlannedGraph, catalog: PromptCatalog): string {
+  const promptIds = Array.from(
+    new Set(graph.nodes.map((node) => node.prompt_id).filter((promptId) => promptId.length > 0))
+  ).sort();
+  return sha256Stable(
+    promptIds.map((promptId) => {
+      const entry = catalog.entries.get(promptId);
+      if (entry === undefined) throw new Error(`prompt ${promptId} is absent from the effective prompt catalog`);
+      return {
+        id: entry.id,
+        path: entry.relativePath,
+        source: entry.source,
+        markdown: entry.markdown
+      };
+    })
+  );
 }
 
 export async function repairMissingRenderedPromptsForRun(input: {

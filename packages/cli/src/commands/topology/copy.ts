@@ -100,7 +100,12 @@ function publishTopology(projectRoot: string, destination: string, contents: Buf
     } finally {
       fs.closeSync(descriptor);
     }
-    fs.renameSync(temporary, destination);
+    if (force) {
+      fs.renameSync(temporary, destination);
+    } else {
+      fs.linkSync(temporary, destination);
+      fs.unlinkSync(temporary);
+    }
   } finally {
     fs.rmSync(temporary, { force: true });
   }

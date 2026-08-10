@@ -208,8 +208,13 @@ export interface AuditProfileResolution {
   catalogDigest: string;
   declaredTopologyPath?: string;
   settings: AuditProfileSettings;
+  effectiveSettings: AuditProfileSettings;
+  settingOrigins: Record<string, AuditProfileSettingOrigin>;
   overriddenSettings: string[];
 }
+
+export type AuditProfileSettingOrigin =
+  "default" | "audit-profile" | "project-config" | "environment" | "runtime-override";
 
 export interface PromptMetadataLayer {
   models?: Record<string, Partial<ModelProfile> & { id?: string }>;

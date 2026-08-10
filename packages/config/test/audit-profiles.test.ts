@@ -86,6 +86,22 @@ max_parallel_agents = 6
       "max_parallel_nodes",
       "strategy_loops"
     ]);
+    expect(resolved.value.auditProfileResolution.effectiveSettings).toMatchObject({
+      strategy_loops: 2,
+      dynamic_strategies_enumerator: 1,
+      max_parallel_agents: 6,
+      max_parallel_nodes: 7,
+      triage_quorum: 2,
+      triage_panel_size: 3
+    });
+    expect(resolved.value.auditProfileResolution.settingOrigins).toMatchObject({
+      strategy_loops: "project-config",
+      dynamic_strategies_enumerator: "audit-profile",
+      max_parallel_agents: "project-config",
+      max_parallel_nodes: "runtime-override",
+      triage_quorum: "audit-profile",
+      triage_panel_size: "audit-profile"
+    });
     expect(serializeResolvedConfigToml(resolved.value)).toContain('audit_profile = "low-cost"');
     expect(serializeResolvedConfigToml(resolved.value)).toContain('topology_path = ".ultrafuzz/custom-topology.yml"');
   });
