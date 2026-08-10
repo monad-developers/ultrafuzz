@@ -19,7 +19,6 @@ import {
   validateArtifactContractBytes,
   validateArtifactManifest,
   validateArtifactVerificationMarker,
-  verifyArtifactManifestPrerequisites,
   type ArtifactManifest,
   type ArtifactVerificationMarker,
   type GeneratedTestEntry,
@@ -237,10 +236,7 @@ function authenticatedProducerAuthority(
   if (!isDeepStrictEqual(actualPrerequisites, expectedPrerequisites)) {
     throw new Error(`producer artifact manifest prerequisite set changed for ${attemptId}`);
   }
-  const prerequisiteGate = verifyArtifactManifestPrerequisites(layout, attemptId);
-  if (!prerequisiteGate.ok) {
-    throw new Error(`producer artifact manifest prerequisite bytes changed for ${attemptId}`);
-  }
+  authenticatePrerequisiteManifestChain(layout, artifactManifest, attemptId);
 
   const manifestFiles = new Map(artifactManifest.files.map((entry) => [entry.path, entry]));
   const markerPublications = new Map(marker.publications.map((entry) => [entry.path, entry]));
@@ -322,6 +318,75 @@ function authenticatedProducerAuthority(
     artifactManifestBytes: Buffer.from(artifactManifestBytes),
     publications
   });
+}
+
+function authenticatePrerequisiteManifestChain(
+  layout: RunLayout,
+  rootManifest: ArtifactManifest,
+  rootAttemptId: string
+): void {
+  const authenticated = new Map<string, { sha256: string; manifest: ArtifactManifest }>();
+  const visiting = new Set<string>([rootAttemptId]);
+
+  const authenticate = (nodeId: string, expectedSha256: string): ArtifactManifest => {
+    const cached = authenticated.get(nodeId);
+    if (cached !== undefined) {
+      if (cached.sha256 !== expectedSha256) {
+        throw new Error(`prerequisite artifact manifest has conflicting sealed digests for ${nodeId}`);
+      }
+      return cached.manifest;
+    }
+    if (visiting.has(nodeId)) {
+      throw new Error(`prerequisite artifact manifest chain contains a cycle at ${nodeId}`);
+    }
+    visiting.add(nodeId);
+    try {
+      const artifactRoot = safeResolveInside(layout.artifactsDir, nodeId, "prerequisite artifact directory");
+      const manifestPath = safeResolveInside(artifactRoot, ARTIFACT_MANIFEST_FILE, "prerequisite artifact manifest");
+      const bytes = readSinglyLinkedRegularFileSnapshotInside(
+        artifactRoot,
+        manifestPath,
+        MAX_AGGREGATION_AUTHORITY_BYTES,
+        `prerequisite artifact manifest ${nodeId}`
+      );
+      const sha256 = digest(bytes);
+      if (sha256 !== expectedSha256) {
+        throw new Error(`prerequisite artifact manifest bytes changed for ${nodeId}`);
+      }
+      const value = parseStrictJsonBytes(bytes);
+      const shape = validateArtifactManifest(value);
+      if (!shape.ok) throw new Error(`prerequisite artifact manifest is invalid for ${nodeId}`);
+      const manifest = value as ArtifactManifest;
+      if (
+        manifest.run_id !== layout.runId ||
+        manifest.node_id !== nodeId ||
+        manifest.producer_node_id !== nodeId ||
+        manifest.provenance.run_id !== layout.runId ||
+        manifest.provenance.producer_node_id !== nodeId
+      ) {
+        throw new Error(`prerequisite artifact manifest identity changed for ${nodeId}`);
+      }
+      const prerequisiteIds = new Set(manifest.prerequisite_manifests.map((entry) => entry.node_id));
+      if (prerequisiteIds.size !== manifest.prerequisite_manifests.length) {
+        throw new Error(`prerequisite artifact manifest repeats a prerequisite for ${nodeId}`);
+      }
+      for (const prerequisite of manifest.prerequisite_manifests) {
+        authenticate(prerequisite.node_id, prerequisite.sha256);
+      }
+      authenticated.set(nodeId, { sha256, manifest });
+      return manifest;
+    } finally {
+      visiting.delete(nodeId);
+    }
+  };
+
+  const rootPrerequisiteIds = new Set(rootManifest.prerequisite_manifests.map((entry) => entry.node_id));
+  if (rootPrerequisiteIds.size !== rootManifest.prerequisite_manifests.length) {
+    throw new Error(`producer artifact manifest repeats a prerequisite for ${rootAttemptId}`);
+  }
+  for (const prerequisite of rootManifest.prerequisite_manifests) {
+    authenticate(prerequisite.node_id, prerequisite.sha256);
+  }
 }
 
 function authenticatedEntry(

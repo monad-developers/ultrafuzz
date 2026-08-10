@@ -901,8 +901,28 @@ function loadVerifyArtifactsHarness(): {
     (root: string, candidate: string) => candidate !== root && candidate.startsWith(`${root}${path.sep}`),
     (root: string, candidate: string, failureMessage: string, maxBytes: number) => {
       if (candidate === root || !candidate.startsWith(`${root}${path.sep}`)) throw new Error(failureMessage);
+      const before = fs.lstatSync(candidate, { bigint: true });
+      if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n) {
+        throw new Error(`${failureMessage}: file is not a singly linked regular file`);
+      }
       const resolved = fs.realpathSync(candidate);
-      return Object.freeze({ path: resolved, bytes: readRegularFileSnapshot(resolved, maxBytes) });
+      const bytes = readRegularFileSnapshot(resolved, maxBytes);
+      const after = fs.lstatSync(candidate, { bigint: true });
+      if (
+        !after.isFile() ||
+        after.isSymbolicLink() ||
+        after.nlink !== 1n ||
+        before.dev !== after.dev ||
+        before.ino !== after.ino ||
+        before.size !== after.size ||
+        before.mtimeNs !== after.mtimeNs ||
+        before.ctimeNs !== after.ctimeNs ||
+        after.size !== BigInt(bytes.byteLength) ||
+        resolved !== candidate
+      ) {
+        throw new Error(`${failureMessage}: file changed while it was captured`);
+      }
+      return Object.freeze({ path: resolved, bytes });
     },
     64 * 1024 * 1024,
     () => undefined,
@@ -1071,6 +1091,88 @@ test("generated Smithers rejects non-UTF-8 generated-test support companions", (
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("generated Smithers rejects hard-linked generated-test manifests and companions before publication", async (t) => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const snapshotStart = source.indexOf("function readBoundedRegularArtifactSnapshot");
+  const snapshotEnd = source.indexOf("\n\nfunction decodeStrictUtf8Snapshot", snapshotStart);
+  const generatedStart = source.indexOf("function verifyGeneratedTestFiles");
+  const generatedEnd = source.indexOf("\n\nexport default smithers", generatedStart);
+  assert.ok(snapshotStart >= 0 && snapshotEnd > snapshotStart, source);
+  assert.ok(generatedStart >= 0 && generatedEnd > generatedStart, source);
+  const snapshotHelper = source.slice(snapshotStart, snapshotEnd);
+  const generatedVerifier = source.slice(generatedStart, generatedEnd);
+  assert.match(snapshotHelper, /before\.nlink !== 1/u);
+  assert.match(snapshotHelper, /after\.nlink !== 1/u);
+  assert.match(generatedVerifier, /readBoundedRegularArtifactSnapshot\([\s\S]*true\s*\)/u);
+
+  await t.test("manifest", () => {
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-manifest-link-")));
+    try {
+      const manifestPath = path.join(root, "result.json");
+      fs.writeFileSync(
+        manifestPath,
+        `${JSON.stringify({
+          schema_version: "ultrafuzz.generated-tests.v3",
+          run_id: "run-one",
+          node_id: "node-one",
+          framework: "foundry",
+          generated_tests: [],
+          support_files: []
+        })}\n`,
+        "utf8"
+      );
+      fs.linkSync(manifestPath, path.join(root, "result.alias.json"));
+      const harness = loadVerifyArtifactsHarness();
+      const task = singleOutputVerificationTask(root, "ultrafuzz/generated-tests@3");
+      task.outputs[0]!.schemaFile = "generated-tests.schema.json";
+
+      assert.throws(() => harness.captureTaskOutputs(task), /output is not a regular file/u);
+      assert.equal(harness.publications.size, 0);
+      assert.equal(harness.markerWrites.length, 0);
+      assert.equal(fs.lstatSync(manifestPath).nlink, 2);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("companion", () => {
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-companion-link-")));
+    try {
+      const generatedTestsDirectory = path.join(root, "generated-tests");
+      fs.mkdirSync(generatedTestsDirectory);
+      const companionContents = "contract Replay {}\n";
+      const companionPath = path.join(generatedTestsDirectory, "Replay.t.sol");
+      fs.writeFileSync(companionPath, companionContents, "utf8");
+      fs.linkSync(companionPath, path.join(root, "Replay.alias.t.sol"));
+      fs.writeFileSync(
+        path.join(root, "result.json"),
+        `${JSON.stringify({
+          schema_version: "ultrafuzz.generated-tests.v3",
+          run_id: "run-one",
+          node_id: "node-one",
+          framework: "foundry",
+          generated_tests: [generatedTestEntry("generated-tests/Replay.t.sol", companionContents)],
+          support_files: []
+        })}\n`,
+        "utf8"
+      );
+      const harness = loadVerifyArtifactsHarness();
+      const task = singleOutputVerificationTask(root, "ultrafuzz/generated-tests@3");
+      task.outputs[0]!.schemaFile = "generated-tests.schema.json";
+
+      assert.throws(
+        () => harness.verifyArtifacts(task, harness.captureTaskOutputs(task)),
+        /generated-test-file-integrity failed/u
+      );
+      assert.equal(harness.publications.size, 0);
+      assert.equal(harness.markerWrites.length, 0);
+      assert.equal(fs.lstatSync(companionPath).nlink, 2);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 test("generated Smithers binds generated-test manifests to the current run and logical producer", () => {

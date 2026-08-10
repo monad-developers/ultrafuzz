@@ -1695,7 +1695,7 @@ test("aggregation skips require a typed source kind and attempt identity", () =>
         generated_test_count: 1,
         support_file_count: 0,
         disposition: "skipped",
-        reason: "framework could not be determined"
+        reason: "declared framework is incompatible with the checked-in test stack"
       }
     ],
     files: [],
@@ -1714,7 +1714,7 @@ test("aggregation skips require a typed source kind and attempt identity", () =>
         source_relative_path: "generated-tests/Boundary.t.sol",
         size_bytes: 1,
         sha256: "a".repeat(64),
-        reason: "framework could not be determined"
+        reason: "declared framework is incompatible with the checked-in test stack"
       }
     ]
   };

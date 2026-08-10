@@ -329,20 +329,13 @@ function appendOutputContract(rendered: string, input: PromptRenderInput, curren
     schema_guidance: schemaGuidance,
     artifact_contracts: outputs
       .map((output) => {
-        const contextualEmptyExample =
-          output.contract === "ultrafuzz/generated-tests@3"
-            ? JSON.stringify({
-                schema_version: "ultrafuzz.generated-tests.v3",
-                run_id: input.run.id,
-                node_id: input.node.logicalId,
-                framework: "foundry",
-                generated_tests: [],
-                support_files: []
-              })
-            : output.validEmptyExample;
-        const validEmptyExample = contextualEmptyExample === "" ? "<empty file>" : contextualEmptyExample;
+        const validEmptyExample = output.validEmptyExample === "" ? "<empty file>" : output.validEmptyExample;
         const empty =
-          validEmptyExample === undefined ? "Empty output is not valid." : `Valid empty form: \`${validEmptyExample}\``;
+          output.contract === "ultrafuzz/generated-tests@3"
+            ? "Valid empty bundle: `generated_tests` and `support_files` are both `[]`; the exact checked-in native bundle `framework` remains required."
+            : validEmptyExample === undefined
+              ? "Empty output is not valid."
+              : `Valid empty form: \`${validEmptyExample}\``;
         return [
           `- Path: \`${path.join(input.node.artifactDir, output.path)}\`${output.primary ? " (primary)" : ""}`,
           `  Contract: \`${output.contract}\``,

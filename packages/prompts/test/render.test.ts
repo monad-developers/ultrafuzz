@@ -159,8 +159,9 @@ describe("prompt rendering", () => {
     }
     expect(result.renderedMarkdown).toContain("generated-tests.schema.json");
     expect(result.renderedMarkdown).toContain(
-      '{"schema_version":"ultrafuzz.generated-tests.v3","run_id":"run-1","node_id":"boundary-tests","framework":"foundry","generated_tests":[],"support_files":[]}'
+      "Valid empty bundle: `generated_tests` and `support_files` are both `[]`; the exact checked-in native bundle `framework` remains required."
     );
+    expect(result.renderedMarkdown).not.toContain('"framework":"foundry"');
     expect(result.renderedMarkdown).not.toContain('"node_id":"<node-id>"');
     expect(result.renderedMarkdown).toContain("## Generated-test Bundle Instructions");
     expect(result.renderedMarkdown).toContain(

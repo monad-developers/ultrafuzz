@@ -522,6 +522,91 @@ test("required artifact gate validates generated-test manifest shape and listed 
   assert.equal(valid.ok, true);
 });
 
+test("required artifact gate rejects hard-linked generated-test manifests and companions without mutation", async (t) => {
+  const createFixture = (runId: string) => {
+    const projectRoot = tempProject();
+    const layout = createRunLayout({ projectRoot, runId });
+    const artifactDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
+    const generatedTestsDirectory = path.join(artifactDir, "generated-tests");
+    fs.mkdirSync(generatedTestsDirectory);
+    const companionContents = Buffer.from("contract InvariantTest {}\n", "utf8");
+    const companionPath = path.join(generatedTestsDirectory, "Invariant.t.sol");
+    fs.writeFileSync(companionPath, companionContents);
+    const manifestPath = path.join(artifactDir, "generated-tests.json");
+    const manifestBytes = Buffer.from(
+      `${JSON.stringify({
+        schema_version: "ultrafuzz.generated-tests.v3",
+        run_id: runId,
+        node_id: "strategy-a",
+        framework: "foundry",
+        generated_tests: [
+          {
+            path: "generated-tests/Invariant.t.sol",
+            size_bytes: companionContents.byteLength,
+            sha256: createHash("sha256").update(companionContents).digest("hex")
+          }
+        ],
+        support_files: []
+      })}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(manifestPath, manifestBytes);
+    return {
+      projectRoot,
+      layout,
+      node: plannedNode(["generated-tests.json"]),
+      manifestPath,
+      manifestBytes,
+      companionPath,
+      companionContents
+    };
+  };
+
+  await t.test("manifest", () => {
+    const fixture = createFixture("run-hardlinked-generated-manifest");
+    const aliasPath = path.join(fixture.projectRoot, "generated-tests.alias.json");
+    fs.linkSync(fixture.manifestPath, aliasPath);
+    const inode = fs.lstatSync(fixture.manifestPath).ino;
+
+    const result = verifyRequiredArtifactsForAttempt(fixture.layout, fixture.node, "strategy-a");
+
+    assert.equal(result.ok, false);
+    assert.ok(
+      result.diagnostics.some(
+        (diagnostic) => diagnostic.code === "hard-link" && /singly linked regular file/u.test(diagnostic.message)
+      ),
+      JSON.stringify(result.diagnostics)
+    );
+    assert.deepEqual(fs.readFileSync(fixture.manifestPath), fixture.manifestBytes);
+    assert.deepEqual(fs.readFileSync(aliasPath), fixture.manifestBytes);
+    assert.equal(fs.lstatSync(fixture.manifestPath).ino, inode);
+    assert.equal(fs.lstatSync(fixture.manifestPath).nlink, 2);
+  });
+
+  await t.test("companion", () => {
+    const fixture = createFixture("run-hardlinked-generated-companion");
+    const aliasPath = path.join(fixture.projectRoot, "Invariant.alias.t.sol");
+    fs.linkSync(fixture.companionPath, aliasPath);
+    const inode = fs.lstatSync(fixture.companionPath).ino;
+
+    const result = verifyRequiredArtifactsForAttempt(fixture.layout, fixture.node, "strategy-a");
+
+    assert.equal(result.ok, false);
+    assert.ok(
+      result.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
+          diagnostic.details?.gate === "generated-test-file-integrity" &&
+          /hard-linked/u.test(diagnostic.message)
+      )
+    );
+    assert.deepEqual(fs.readFileSync(fixture.companionPath), fixture.companionContents);
+    assert.deepEqual(fs.readFileSync(aliasPath), fixture.companionContents);
+    assert.equal(fs.lstatSync(fixture.companionPath).ino, inode);
+    assert.equal(fs.lstatSync(fixture.companionPath).nlink, 2);
+  });
+});
+
 test("workspace patch exclusions pass the contract gate but surface a durable warning", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-workspace-exclusion" });
   const artifactDir = getNodeArtifactDir(layout, "strategy-a", { create: true });

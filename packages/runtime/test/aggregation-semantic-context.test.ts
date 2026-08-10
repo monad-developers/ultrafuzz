@@ -29,6 +29,7 @@ interface AggregationAuthorityFixture {
   layout: RunLayout;
   aggregationNode: PlannedGraphNodeDocument;
   expectedPrerequisiteAttemptIds: string[];
+  prerequisiteManifestPaths: string[];
   markerPath: string;
   artifactManifestPath: string;
   generatedManifestPath: string;
@@ -202,6 +203,31 @@ test("authenticated aggregation source authority rejects prerequisite fanout att
   }
 });
 
+test("authenticated aggregation source authority snapshots the sealed prerequisite manifest chain", async (t) => {
+  await t.test("hard-linked prerequisite manifest", (subtest) => {
+    const fixture = createAggregationAuthorityFixture("aggregation-prerequisite-hardlink");
+    subtest.after(() => fs.rmSync(path.dirname(fixture.layout.root), { recursive: true, force: true }));
+    const manifestPath = fixture.prerequisiteManifestPaths[0]!;
+    const aliasPath = path.join(fixture.layout.root, "prerequisite-manifest.alias.json");
+    fs.linkSync(manifestPath, aliasPath);
+
+    assertAuthorityRejectedWithoutMutation(fixture, /must be a singly linked regular file/u);
+    assert.equal(fs.lstatSync(manifestPath).nlink, 2);
+    assert.deepEqual(fs.readFileSync(aliasPath), fs.readFileSync(manifestPath));
+  });
+
+  await t.test("stale prerequisite manifest digest", (subtest) => {
+    const fixture = createAggregationAuthorityFixture("aggregation-prerequisite-byte-drift");
+    subtest.after(() => fs.rmSync(path.dirname(fixture.layout.root), { recursive: true, force: true }));
+    const manifestPath = fixture.prerequisiteManifestPaths[0]!;
+    const manifest = readJsonFile<ArtifactManifest>(manifestPath);
+    manifest.created_at = "2026-08-10T00:00:00.000Z";
+    writeJsonForAttack(manifestPath, manifest);
+
+    assertAuthorityRejectedWithoutMutation(fixture, /prerequisite artifact manifest bytes changed/u);
+  });
+});
+
 function createAggregationAuthorityFixture(runId: string): AggregationAuthorityFixture {
   const outputRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-aggregation-authority-"));
   const seedOutput = boundOutput("seed.md", "ultrafuzz/nonempty-markdown@1");
@@ -237,6 +263,7 @@ function createAggregationAuthorityFixture(runId: string): AggregationAuthorityF
   };
   const layout = createRunLayout({ outputRoot, runId, graph });
   const expectedPrerequisiteAttemptIds = ["seed__model_0__attempt_0", "seed__model_1__attempt_0"];
+  const prerequisiteManifestPaths: string[] = [];
   for (const [modelIndex, attemptId] of expectedPrerequisiteAttemptIds.entries()) {
     writeArtifact(layout, attemptId, seedOutput.path, `seed ${modelIndex}\n`);
     writeArtifactManifest({
@@ -250,6 +277,7 @@ function createAggregationAuthorityFixture(runId: string): AggregationAuthorityF
         metadata: { concrete_node_id: seedNode.id }
       }
     });
+    prerequisiteManifestPaths.push(path.join(layout.artifactsDir, attemptId, "artifact-manifest.json"));
   }
 
   const generatedTestContents = Buffer.from("contract Property {}\n", "utf8");
@@ -299,6 +327,7 @@ function createAggregationAuthorityFixture(runId: string): AggregationAuthorityF
     layout,
     aggregationNode,
     expectedPrerequisiteAttemptIds,
+    prerequisiteManifestPaths,
     markerPath,
     artifactManifestPath: path.join(layout.artifactsDir, producerNode.id, "artifact-manifest.json"),
     generatedManifestPath,
