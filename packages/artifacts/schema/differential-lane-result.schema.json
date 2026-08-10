@@ -90,6 +90,10 @@
               "type": "string",
               "minLength": 1
             },
+            "surface_id": {
+              "type": "string",
+              "minLength": 1
+            },
             "intended_t_sol_path": {
               "type": "string",
               "minLength": 1
@@ -114,6 +118,30 @@
                 "type": "string",
                 "minLength": 1
               }
+            },
+            "oracle_type": {
+              "type": "string",
+              "enum": [
+                "independent_reference",
+                "metamorphic",
+                "self_consistency",
+                "sanity_probe"
+              ]
+            },
+            "calibration_bucket": {
+              "type": "string",
+              "enum": [
+                "red_seeking_adversarial",
+                "green_safe_sanity"
+              ]
+            },
+            "red_seeking_priority": {
+              "type": "string",
+              "enum": [
+                "high",
+                "medium",
+                "low"
+              ]
             }
           },
           "required": [
@@ -124,10 +152,14 @@
             "harness_author_attempt_index",
             "source_plan_artifact",
             "source_harness_artifact",
+            "surface_id",
             "intended_t_sol_path",
             "focused_command",
             "public_evidence_paths",
-            "exact_observable_equality_assertions"
+            "exact_observable_equality_assertions",
+            "oracle_type",
+            "calibration_bucket",
+            "red_seeking_priority"
           ],
           "additionalProperties": false
         },
@@ -166,14 +198,23 @@
     },
     "status": {
       "type": "string",
-      "enum": ["green", "semantic_red_frozen", "compile_or_harness_defect", "no_assigned_lane"]
+      "enum": [
+        "green",
+        "semantic_red_frozen",
+        "compile_or_harness_defect",
+        "no_assigned_lane"
+      ]
     },
     "red_preservation_audit": {
       "type": "object",
       "properties": {
         "result": {
           "type": "string",
-          "enum": ["no_semantic_red_observed", "semantic_red_frozen", "not_applicable"]
+          "enum": [
+            "no_semantic_red_observed",
+            "semantic_red_frozen",
+            "not_applicable"
+          ]
         },
         "pre_repair_file_hash": {
           "anyOf": [
@@ -198,7 +239,11 @@
           ]
         }
       },
-      "required": ["result", "pre_repair_file_hash", "assertion_predicate"],
+      "required": [
+        "result",
+        "pre_repair_file_hash",
+        "assertion_predicate"
+      ],
       "additionalProperties": false
     },
     "red_candidates": {
@@ -206,6 +251,10 @@
       "items": {
         "type": "object",
         "properties": {
+          "stable_failure_hash": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
           "red_candidate_id": {
             "type": "string",
             "minLength": 1
@@ -253,6 +302,7 @@
           }
         },
         "required": [
+          "stable_failure_hash",
           "red_candidate_id",
           "test_path",
           "failing_test_name",
@@ -272,9 +322,16 @@
       "items": {
         "type": "object",
         "properties": {
+          "stable_failure_hash": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
           "category": {
             "type": "string",
-            "enum": ["compile", "harness"]
+            "enum": [
+              "compile",
+              "harness"
+            ]
           },
           "summary": {
             "type": "string",
@@ -290,7 +347,12 @@
             "uniqueItems": true
           }
         },
-        "required": ["category", "summary", "evidence_paths"],
+        "required": [
+          "stable_failure_hash",
+          "category",
+          "summary",
+          "evidence_paths"
+        ],
         "additionalProperties": false
       }
     },
@@ -337,10 +399,16 @@
       "if": {
         "properties": {
           "status": {
-            "enum": ["green", "semantic_red_frozen", "compile_or_harness_defect"]
+            "enum": [
+              "green",
+              "semantic_red_frozen",
+              "compile_or_harness_defect"
+            ]
           }
         },
-        "required": ["status"]
+        "required": [
+          "status"
+        ]
       },
       "then": {
         "properties": {
@@ -377,7 +445,9 @@
             "const": "no_assigned_lane"
           }
         },
-        "required": ["status"]
+        "required": [
+          "status"
+        ]
       },
       "then": {
         "properties": {
@@ -419,7 +489,11 @@
                 "type": "null"
               }
             },
-            "required": ["result", "pre_repair_file_hash", "assertion_predicate"]
+            "required": [
+              "result",
+              "pre_repair_file_hash",
+              "assertion_predicate"
+            ]
           },
           "red_candidates": {
             "type": "array",
@@ -443,7 +517,9 @@
             "const": "green"
           }
         },
-        "required": ["status"]
+        "required": [
+          "status"
+        ]
       },
       "then": {
         "properties": {
@@ -467,7 +543,11 @@
                 "type": "null"
               }
             },
-            "required": ["result", "pre_repair_file_hash", "assertion_predicate"]
+            "required": [
+              "result",
+              "pre_repair_file_hash",
+              "assertion_predicate"
+            ]
           },
           "red_candidates": {
             "type": "array",
@@ -487,7 +567,9 @@
             "const": "semantic_red_frozen"
           }
         },
-        "required": ["status"]
+        "required": [
+          "status"
+        ]
       },
       "then": {
         "properties": {
@@ -521,7 +603,11 @@
                 "minLength": 1
               }
             },
-            "required": ["result", "pre_repair_file_hash", "assertion_predicate"]
+            "required": [
+              "result",
+              "pre_repair_file_hash",
+              "assertion_predicate"
+            ]
           }
         }
       }
@@ -533,7 +619,9 @@
             "const": "compile_or_harness_defect"
           }
         },
-        "required": ["status"]
+        "required": [
+          "status"
+        ]
       },
       "then": {
         "properties": {
@@ -553,7 +641,11 @@
                 "type": "null"
               }
             },
-            "required": ["result", "pre_repair_file_hash", "assertion_predicate"]
+            "required": [
+              "result",
+              "pre_repair_file_hash",
+              "assertion_predicate"
+            ]
           },
           "red_candidates": {
             "type": "array",

@@ -40,7 +40,13 @@
           },
           "status": {
             "type": "string",
-            "enum": ["conformant", "reference_gap", "ambiguous_spec", "out_of_scope", "ready"]
+            "enum": [
+              "conformant",
+              "reference_gap",
+              "ambiguous_spec",
+              "out_of_scope",
+              "ready"
+            ]
           },
           "public_evidence_paths": {
             "minItems": 0,
@@ -66,7 +72,13 @@
             }
           }
         },
-        "required": ["surface_id", "status", "public_evidence_paths", "audit_notes", "required_narrowing"],
+        "required": [
+          "surface_id",
+          "status",
+          "public_evidence_paths",
+          "audit_notes",
+          "required_narrowing"
+        ],
         "additionalProperties": false
       }
     },
@@ -107,6 +119,10 @@
             "type": "string",
             "minLength": 1
           },
+          "surface_id": {
+            "type": "string",
+            "minLength": 1
+          },
           "intended_t_sol_path": {
             "type": "string",
             "minLength": 1
@@ -131,6 +147,30 @@
               "type": "string",
               "minLength": 1
             }
+          },
+          "oracle_type": {
+            "type": "string",
+            "enum": [
+              "independent_reference",
+              "metamorphic",
+              "self_consistency",
+              "sanity_probe"
+            ]
+          },
+          "calibration_bucket": {
+            "type": "string",
+            "enum": [
+              "red_seeking_adversarial",
+              "green_safe_sanity"
+            ]
+          },
+          "red_seeking_priority": {
+            "type": "string",
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ]
           }
         },
         "required": [
@@ -141,10 +181,14 @@
           "harness_author_attempt_index",
           "source_plan_artifact",
           "source_harness_artifact",
+          "surface_id",
           "intended_t_sol_path",
           "focused_command",
           "public_evidence_paths",
-          "exact_observable_equality_assertions"
+          "exact_observable_equality_assertions",
+          "oracle_type",
+          "calibration_bucket",
+          "red_seeking_priority"
         ],
         "additionalProperties": false
       }
@@ -160,14 +204,21 @@
           },
           "disposition": {
             "type": "string",
-            "enum": ["rejected", "narrowed"]
+            "enum": [
+              "rejected",
+              "narrowed"
+            ]
           },
           "reason": {
             "type": "string",
             "minLength": 1
           }
         },
-        "required": ["lane_id", "disposition", "reason"],
+        "required": [
+          "lane_id",
+          "disposition",
+          "reason"
+        ],
         "additionalProperties": false
       }
     },
@@ -194,7 +245,11 @@
             "uniqueItems": true
           }
         },
-        "required": ["surface_id", "summary", "evidence_paths"],
+        "required": [
+          "surface_id",
+          "summary",
+          "evidence_paths"
+        ],
         "additionalProperties": false
       }
     },
@@ -221,7 +276,11 @@
             "uniqueItems": true
           }
         },
-        "required": ["surface_id", "summary", "evidence_paths"],
+        "required": [
+          "surface_id",
+          "summary",
+          "evidence_paths"
+        ],
         "additionalProperties": false
       }
     }

@@ -108,7 +108,7 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "ultrafuzz/audited-differential-lanes@1",
     "auditedDifferentialLanesJsonSchema",
     "auditedDifferentialLanesSchema",
-    ["audited-differential-lane-id-uniqueness"]
+    ["audited-differential-lane-id-uniqueness", "audited-differential-handoff-reconciliation"]
   ),
   "boundary-recipes.schema.json": artifact(
     "ultrafuzz/boundary-recipes@1",
@@ -137,13 +137,17 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "ultrafuzz/differential-gap-review@1",
     "differentialGapReviewJsonSchema",
     "differentialGapReviewSchema",
-    ["differential-gap-lane-uniqueness"]
+    ["differential-gap-lane-uniqueness", "differential-gap-review-lane-reconciliation"]
   ),
   "differential-lane-result.schema.json": artifact(
     "ultrafuzz/differential-lane-result@1",
     "differentialLaneResultJsonSchema",
     "differentialLaneResultSchema",
-    ["differential-result-failure-hash-uniqueness", "differential-result-lane-binding"]
+    [
+      "differential-result-failure-hash-uniqueness",
+      "differential-result-lane-binding",
+      "differential-lane-result-handoff-reconciliation"
+    ]
   ),
   "differential-plan.schema.json": artifact(
     "ultrafuzz/differential-plan@1",
@@ -155,19 +159,19 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "ultrafuzz/differential-red-triage@1",
     "differentialRedTriageJsonSchema",
     "differentialRedTriageSchema",
-    ["differential-triage-failure-hash-uniqueness"]
+    ["differential-triage-failure-hash-uniqueness", "differential-red-triage-registry-reconciliation"]
   ),
   "differential-repair-summary.schema.json": artifact(
     "ultrafuzz/differential-repair-summary@1",
     "differentialRepairSummaryJsonSchema",
     "differentialRepairSummarySchema",
-    ["differential-repair-failure-hash-uniqueness"]
+    ["differential-repair-failure-hash-uniqueness", "differential-repair-summary-triage-reconciliation"]
   ),
   "differential-report-review.schema.json": artifact(
     "ultrafuzz/differential-report-review@1",
     "differentialReportReviewJsonSchema",
     "differentialReportReviewSchema",
-    ["differential-report-failure-hash-uniqueness"]
+    ["differential-report-failure-hash-uniqueness", "differential-report-review-reconciliation"]
   ),
   "dynamic-enumerator-outputs.schema.json": artifact(
     "ultrafuzz/dynamic-enumerator-outputs@1",
@@ -300,7 +304,8 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
   "reference-harness.schema.json": artifact(
     "ultrafuzz/reference-harness@1",
     "referenceHarnessJsonSchema",
-    "referenceHarnessSchema"
+    "referenceHarnessSchema",
+    ["reference-harness-plan-reconciliation"]
   ),
   "reference-manifest.schema.json": artifact(
     "ultrafuzz/reference-manifest@1",
@@ -339,7 +344,7 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "ultrafuzz/semantic-red-registry@1",
     "semanticRedRegistryJsonSchema",
     "semanticRedRegistrySchema",
-    ["semantic-red-hash-uniqueness"]
+    ["semantic-red-hash-uniqueness", "semantic-red-registry-lane-reconciliation"]
   ),
   "severity-classified-findings.schema.json": artifact(
     "ultrafuzz/severity-classified-findings@1",

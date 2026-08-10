@@ -8,7 +8,11 @@
     },
     "campaign_status": {
       "type": "string",
-      "enum": ["complete", "incomplete", "blocked_by_preserved_reds"]
+      "enum": [
+        "complete",
+        "incomplete",
+        "blocked_by_preserved_reds"
+      ]
     },
     "production_bug_reds": {
       "type": "array",
@@ -37,7 +41,12 @@
             "uniqueItems": true
           }
         },
-        "required": ["stable_failure_hash", "lane_id", "summary", "evidence_paths"],
+        "required": [
+          "stable_failure_hash",
+          "lane_id",
+          "summary",
+          "evidence_paths"
+        ],
         "additionalProperties": false
       }
     },
@@ -68,7 +77,12 @@
             "uniqueItems": true
           }
         },
-        "required": ["stable_failure_hash", "lane_id", "summary", "evidence_paths"],
+        "required": [
+          "stable_failure_hash",
+          "lane_id",
+          "summary",
+          "evidence_paths"
+        ],
         "additionalProperties": false
       }
     },
@@ -78,6 +92,27 @@
         "type": "object",
         "properties": {
           "lane_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "attempt_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "auditor_attempt_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "source_auditor_artifact": {
             "type": "string",
             "minLength": 1
           },
@@ -95,7 +130,14 @@
             "uniqueItems": true
           }
         },
-        "required": ["lane_id", "summary", "evidence_paths"],
+        "required": [
+          "lane_id",
+          "attempt_index",
+          "auditor_attempt_index",
+          "source_auditor_artifact",
+          "summary",
+          "evidence_paths"
+        ],
         "additionalProperties": false
       }
     },
@@ -126,7 +168,12 @@
             "uniqueItems": true
           }
         },
-        "required": ["stable_failure_hash", "lane_id", "summary", "evidence_paths"],
+        "required": [
+          "stable_failure_hash",
+          "lane_id",
+          "summary",
+          "evidence_paths"
+        ],
         "additionalProperties": false
       }
     },

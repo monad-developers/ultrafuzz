@@ -198,6 +198,96 @@ const dynamicStrategyArtifactContext: SemanticGateContext = {
   }
 };
 
+const differentialPlanPath = "artifacts/differential-oracle-planner/differential-plan.json";
+const differentialHarnessPath = "artifacts/reference-harness-author/reference-harness.json";
+const differentialAuditPath = "artifacts/reference-and-lane-auditor/audited-differential-lanes.json";
+const differentialRegistryPath = "semantic-red-registry.json";
+
+function differentialBinding(
+  path: string,
+  contract: string,
+  logicalNodeId: string,
+  document: unknown,
+  attemptId = `${logicalNodeId}:0`
+) {
+  return { attemptId, logicalNodeId, attemptIndex: 0, path, contract, document };
+}
+
+const emptyDifferentialPlan = {
+  planner_attempt_index: 0,
+  candidate_surfaces: [],
+  assigned_differential_lanes: []
+};
+const emptyReferenceHarness = {
+  harness_author_attempt_index: 0,
+  source_plan_artifacts: [differentialPlanPath],
+  reference_models: []
+};
+const emptyAuditedDifferentialLanes = {
+  auditor_attempt_index: 0,
+  source_plan_artifacts: [differentialPlanPath],
+  source_harness_artifacts: [differentialHarnessPath],
+  surface_audits: [],
+  ready_lanes: [],
+  rejected_or_narrowed_lanes: []
+};
+const emptySemanticRedRegistry = { semantic_reds: [], compile_or_harness_defects: [] };
+const emptyTriageA = { pass: "a", classifications: [] };
+const emptyTriageB = { pass: "b", classifications: [] };
+const emptyRepairSummary = {
+  repairs_attempted: [],
+  repaired_failures: [],
+  preserved_production_or_unknown_reds: []
+};
+const emptyGapReview = {
+  ready_lanes: [],
+  lane_results_seen: [],
+  missing_lane_work_orders: [],
+  incomplete_campaign_work_orders: [],
+  green_suite_evidence: [],
+  report_blockers: []
+};
+
+const differentialPlanBinding = differentialBinding(
+  differentialPlanPath,
+  "ultrafuzz/differential-plan@1",
+  "differential-oracle-planner",
+  emptyDifferentialPlan
+);
+const differentialHarnessBinding = differentialBinding(
+  differentialHarnessPath,
+  "ultrafuzz/reference-harness@1",
+  "reference-harness-author",
+  emptyReferenceHarness
+);
+const differentialAuditBinding = differentialBinding(
+  differentialAuditPath,
+  "ultrafuzz/audited-differential-lanes@1",
+  "reference-and-lane-auditor",
+  emptyAuditedDifferentialLanes
+);
+const differentialRegistryBinding = differentialBinding(
+  differentialRegistryPath,
+  "ultrafuzz/semantic-red-registry@1",
+  "differential-red-triage",
+  emptySemanticRedRegistry,
+  "differential-red-triage:0"
+);
+const differentialTriageABinding = differentialBinding(
+  "triage-a.json",
+  "ultrafuzz/differential-red-triage@1",
+  "differential-red-triage",
+  emptyTriageA,
+  "differential-red-triage:0"
+);
+const differentialTriageBBinding = differentialBinding(
+  "triage-b.json",
+  "ultrafuzz/differential-red-triage@1",
+  "differential-red-triage",
+  emptyTriageB,
+  "differential-red-triage:0"
+);
+
 const fixtures = {
   "admin-config-surface-id-uniqueness": {
     positive: { surfaces: [{ surface_id: "a" }] },
@@ -475,8 +565,8 @@ const fixtures = {
     negative: { report_rows_ready: [{ stable_failure_hash: "a" }, { stable_failure_hash: "a" }] }
   },
   "differential-result-failure-hash-uniqueness": {
-    positive: { red_candidates: [{ failure_signature: "a" }] },
-    negative: { red_candidates: [{ failure_signature: "a" }, { failure_signature: "a" }] }
+    positive: { red_candidates: [{ stable_failure_hash: "a" }] },
+    negative: { red_candidates: [{ stable_failure_hash: "a" }, { stable_failure_hash: "a" }] }
   },
   "differential-result-lane-binding": {
     positive: {
@@ -1185,6 +1275,168 @@ test("every contextual registration executes real positive and negative checks",
             ]
           }
         }
+      },
+      "audited-differential-handoff-reconciliation": {
+        positive: emptyAuditedDifferentialLanes,
+        negative: { ...emptyAuditedDifferentialLanes, source_plan_artifacts: ["lookalike-plan.json"] },
+        context: {
+          artifactSet: {
+            differentialArtifacts: {
+              current: differentialAuditBinding,
+              plans: [differentialPlanBinding],
+              harnesses: [differentialHarnessBinding]
+            }
+          }
+        }
+      },
+      "differential-gap-review-lane-reconciliation": {
+        positive: emptyGapReview,
+        negative: {
+          ...emptyGapReview,
+          ready_lanes: [
+            {
+              lane_id: "invented",
+              attempt_index: 0,
+              auditor_attempt_index: 0,
+              source_auditor_artifact: differentialAuditPath
+            }
+          ]
+        },
+        context: {
+          artifactSet: { differentialArtifacts: { auditedLanes: [differentialAuditBinding], laneResults: [] } }
+        }
+      },
+      "differential-lane-result-handoff-reconciliation": {
+        positive: {
+          lane_id: null,
+          attempt_index: 0,
+          auditor_attempt_index: 0,
+          source_auditor_artifact: differentialAuditPath,
+          status: "no_assigned_lane"
+        },
+        negative: {
+          lane_id: "invented",
+          attempt_index: 0,
+          auditor_attempt_index: 0,
+          source_auditor_artifact: differentialAuditPath,
+          status: "green",
+          assigned_lane_payload: {}
+        },
+        context: {
+          artifactSet: {
+            differentialArtifacts: {
+              current: differentialBinding(
+                "lane-result.json",
+                "ultrafuzz/differential-lane-result@1",
+                "differential-lane-author",
+                {}
+              ),
+              auditedLanes: [differentialAuditBinding]
+            }
+          }
+        }
+      },
+      "differential-red-triage-registry-reconciliation": {
+        positive: emptyTriageA,
+        negative: { ...emptyTriageA, pass: "b" },
+        context: {
+          artifactSet: {
+            differentialArtifacts: {
+              current: differentialTriageABinding,
+              registries: [differentialRegistryBinding]
+            }
+          }
+        }
+      },
+      "differential-repair-summary-triage-reconciliation": {
+        positive: emptyRepairSummary,
+        negative: {
+          ...emptyRepairSummary,
+          repairs_attempted: [
+            { stable_failure_hash: "a".repeat(64), repair_kind: "harness", summary: "Invented repair." }
+          ]
+        },
+        context: {
+          artifactSet: {
+            differentialArtifacts: {
+              registries: [differentialRegistryBinding],
+              triages: [differentialTriageABinding, differentialTriageBBinding]
+            }
+          }
+        }
+      },
+      "differential-report-review-reconciliation": {
+        positive: {
+          campaign_status: "complete",
+          production_bug_reds: [],
+          harness_or_reference_repairs: [],
+          missing_or_deferred_lanes: [],
+          report_rows_ready: []
+        },
+        negative: {
+          campaign_status: "incomplete",
+          production_bug_reds: [],
+          harness_or_reference_repairs: [],
+          missing_or_deferred_lanes: [],
+          report_rows_ready: []
+        },
+        context: {
+          artifactSet: {
+            differentialArtifacts: {
+              registries: [differentialRegistryBinding],
+              triages: [differentialTriageABinding, differentialTriageBBinding],
+              repairSummaries: [
+                differentialBinding(
+                  "repair-summary.json",
+                  "ultrafuzz/differential-repair-summary@1",
+                  "differential-repair-and-report-review",
+                  emptyRepairSummary
+                )
+              ],
+              gapReviews: [
+                differentialBinding(
+                  "gap-review.json",
+                  "ultrafuzz/differential-gap-review@1",
+                  "differential-repair-and-report-review",
+                  emptyGapReview
+                )
+              ],
+              findings: [
+                differentialBinding(
+                  "findings.json",
+                  "ultrafuzz/findings@2",
+                  "differential-repair-and-report-review",
+                  []
+                )
+              ]
+            }
+          }
+        }
+      },
+      "reference-harness-plan-reconciliation": {
+        positive: emptyReferenceHarness,
+        negative: { ...emptyReferenceHarness, source_plan_artifacts: ["lookalike-plan.json"] },
+        context: {
+          artifactSet: {
+            differentialArtifacts: {
+              current: differentialHarnessBinding,
+              plans: [differentialPlanBinding]
+            }
+          }
+        }
+      },
+      "semantic-red-registry-lane-reconciliation": {
+        positive: emptySemanticRedRegistry,
+        negative: {
+          semantic_reds: [
+            {
+              stable_failure_hash: "a".repeat(64),
+              lane_id: "invented"
+            }
+          ],
+          compile_or_harness_defects: []
+        },
+        context: { artifactSet: { differentialArtifacts: { laneResults: [] } } }
       },
       "campaign-summary-count-coupling": {
         positive: { failure_counts: { pre_deduplication: 1, post_deduplication: 1 } },

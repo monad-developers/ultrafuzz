@@ -19,13 +19,187 @@
             "type": "integer",
             "minimum": 0,
             "maximum": 9007199254740991
+          },
+          "auditor_attempt_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "source_auditor_artifact": {
+            "type": "string",
+            "minLength": 1
           }
         },
-        "required": ["lane_id", "attempt_index"],
+        "required": [
+          "lane_id",
+          "attempt_index",
+          "auditor_attempt_index",
+          "source_auditor_artifact"
+        ],
         "additionalProperties": false
       }
     },
     "lane_results_seen": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "lane_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "attempt_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "auditor_attempt_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "source_auditor_artifact": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "green",
+              "semantic_red_frozen",
+              "compile_or_harness_defect",
+              "no_assigned_lane"
+            ]
+          }
+        },
+        "required": [
+          "lane_id",
+          "attempt_index",
+          "auditor_attempt_index",
+          "source_auditor_artifact",
+          "status"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "missing_lane_work_orders": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "lane_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "attempt_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "auditor_attempt_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "source_auditor_artifact": {
+            "type": "string",
+            "minLength": 1
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence_paths": {
+            "minItems": 0,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "lane_id",
+          "attempt_index",
+          "auditor_attempt_index",
+          "source_auditor_artifact",
+          "summary",
+          "evidence_paths"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "incomplete_campaign_work_orders": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "lane_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "attempt_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "auditor_attempt_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "source_auditor_artifact": {
+            "type": "string",
+            "minLength": 1
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence_paths": {
+            "minItems": 0,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "lane_id",
+          "attempt_index",
+          "auditor_attempt_index",
+          "source_auditor_artifact",
+          "summary",
+          "evidence_paths"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "green_suite_evidence": {
       "type": "array",
       "items": {
         "type": "object",
@@ -39,75 +213,12 @@
             "minimum": 0,
             "maximum": 9007199254740991
           },
-          "status": {
-            "type": "string",
-            "enum": ["green", "semantic_red_frozen", "compile_or_harness_defect", "no_assigned_lane"]
-          }
-        },
-        "required": ["lane_id", "attempt_index", "status"],
-        "additionalProperties": false
-      }
-    },
-    "missing_lane_work_orders": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "lane_id": {
-            "type": "string",
-            "minLength": 1
+          "auditor_attempt_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
           },
-          "summary": {
-            "type": "string",
-            "minLength": 1
-          },
-          "evidence_paths": {
-            "minItems": 0,
-            "type": "array",
-            "items": {
-              "type": "string",
-              "minLength": 1
-            },
-            "uniqueItems": true
-          }
-        },
-        "required": ["lane_id", "summary", "evidence_paths"],
-        "additionalProperties": false
-      }
-    },
-    "incomplete_campaign_work_orders": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "lane_id": {
-            "type": "string",
-            "minLength": 1
-          },
-          "summary": {
-            "type": "string",
-            "minLength": 1
-          },
-          "evidence_paths": {
-            "minItems": 0,
-            "type": "array",
-            "items": {
-              "type": "string",
-              "minLength": 1
-            },
-            "uniqueItems": true
-          }
-        },
-        "required": ["lane_id", "summary", "evidence_paths"],
-        "additionalProperties": false
-      }
-    },
-    "green_suite_evidence": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "lane_id": {
+          "source_auditor_artifact": {
             "type": "string",
             "minLength": 1
           },
@@ -121,7 +232,14 @@
             "maximum": 9007199254740991
           }
         },
-        "required": ["lane_id", "command", "matched_test_count"],
+        "required": [
+          "lane_id",
+          "attempt_index",
+          "auditor_attempt_index",
+          "source_auditor_artifact",
+          "command",
+          "matched_test_count"
+        ],
         "additionalProperties": false
       }
     },
@@ -148,7 +266,11 @@
             "uniqueItems": true
           }
         },
-        "required": ["category", "summary", "evidence_paths"],
+        "required": [
+          "category",
+          "summary",
+          "evidence_paths"
+        ],
         "additionalProperties": false
       }
     }

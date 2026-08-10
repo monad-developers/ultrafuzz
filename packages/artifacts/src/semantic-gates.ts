@@ -48,6 +48,39 @@ export interface SemanticDynamicStrategyArtifactsContext {
   provenance?: unknown;
 }
 
+/** Trusted identity for one exact output declaration selected by the runtime host. */
+export interface SemanticDifferentialArtifactIdentity {
+  attemptId: string;
+  logicalNodeId: string;
+  attemptIndex: number;
+  path: string;
+  contract: string;
+}
+
+/** A schema-validated JSON document read only through an exact task-output declaration. */
+export interface SemanticDifferentialArtifactBinding extends SemanticDifferentialArtifactIdentity {
+  document: unknown;
+}
+
+/**
+ * Exact declared ancestors and siblings used to reconcile the differential
+ * pipeline. Hosts must not populate these collections through filename or
+ * logical-node lookups.
+ */
+export interface SemanticDifferentialArtifactsContext {
+  current?: SemanticDifferentialArtifactIdentity;
+  plans?: readonly SemanticDifferentialArtifactBinding[];
+  harnesses?: readonly SemanticDifferentialArtifactBinding[];
+  auditedLanes?: readonly SemanticDifferentialArtifactBinding[];
+  laneResults?: readonly SemanticDifferentialArtifactBinding[];
+  registries?: readonly SemanticDifferentialArtifactBinding[];
+  triages?: readonly SemanticDifferentialArtifactBinding[];
+  repairSummaries?: readonly SemanticDifferentialArtifactBinding[];
+  gapReviews?: readonly SemanticDifferentialArtifactBinding[];
+  reportReviews?: readonly SemanticDifferentialArtifactBinding[];
+  findings?: readonly SemanticDifferentialArtifactBinding[];
+}
+
 export interface SemanticArtifactSetContext {
   campaigns?: readonly unknown[];
   findings?: readonly unknown[];
@@ -60,6 +93,7 @@ export interface SemanticArtifactSetContext {
   findingLifecycleLedger?: unknown;
   reviewStage?: SemanticReviewStageContext;
   dynamicStrategyArtifacts?: SemanticDynamicStrategyArtifactsContext;
+  differentialArtifacts?: SemanticDifferentialArtifactsContext;
 }
 
 export interface SemanticPlannedGraphContext {
@@ -1383,18 +1417,48 @@ function dependencyJoinIssues(document: unknown): SemanticGateIssue[] {
 }
 
 function differentialResultIdentityIssues(document: unknown): SemanticGateIssue[] {
-  const rows = arrayAt(document, ["red_candidates"]);
-  return projectedUniquenessIssues([
+  const laneId = stringField(document, "lane_id");
+  const preRepairFileHash = stringField(at(document, ["red_preservation_audit"]), "pre_repair_file_hash");
+  const redRows = arrayAt(document, ["red_candidates"]);
+  const defectRows = arrayAt(document, ["compile_or_harness_defects"]);
+  const issues = projectedUniquenessIssues([
     {
-      items: rows,
+      items: redRows,
       path: "$.red_candidates",
-      project: (row) =>
-        stringField(row, "stable_failure_hash") ??
-        stringField(row, "failure_signature") ??
-        stringField(row, "red_candidate_id"),
+      project: (row) => stringField(row, "stable_failure_hash"),
       label: "differential failure identity"
+    },
+    {
+      items: defectRows,
+      path: "$.compile_or_harness_defects",
+      project: (row) => stringField(row, "stable_failure_hash"),
+      label: "differential compile/harness defect identity"
     }
   ]);
+  if (laneId === undefined) return issues;
+  for (const [index, row] of redRows.entries()) {
+    const expected = differentialRedStableHash(laneId, row, preRepairFileHash);
+    if (expected !== undefined && stringField(row, "stable_failure_hash") !== expected) {
+      issues.push(
+        issue(
+          `$.red_candidates[${index}].stable_failure_hash`,
+          "Semantic-red stable hash does not match the canonical upstream failure packet"
+        )
+      );
+    }
+  }
+  for (const [index, row] of defectRows.entries()) {
+    const expected = differentialDefectStableHash(laneId, row);
+    if (expected !== undefined && stringField(row, "stable_failure_hash") !== expected) {
+      issues.push(
+        issue(
+          `$.compile_or_harness_defects[${index}].stable_failure_hash`,
+          "Compile/harness stable hash does not match the canonical upstream defect packet"
+        )
+      );
+    }
+  }
+  return issues;
 }
 
 function differentialResultLaneBindingIssues(document: unknown): SemanticGateIssue[] {
@@ -1417,6 +1481,823 @@ function differentialResultLaneBindingIssues(document: unknown): SemanticGateIss
   return comparisons.flatMap(([pathValue, actual, expected, field]) =>
     actual === expected ? [] : [issue(pathValue, `Lane result ${field} does not match assigned_lane_payload`)]
   );
+}
+
+function sha256Json(value: unknown): string {
+  return crypto.createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex");
+}
+
+function differentialRedStableHash(
+  laneId: string,
+  row: unknown,
+  preRepairFileHash: string | undefined
+): string | undefined {
+  if (!isRecord(row) || preRepairFileHash === undefined) return undefined;
+  const projection = [
+    "semantic-red-v1",
+    laneId,
+    row.red_candidate_id,
+    row.test_path,
+    row.failing_test_name,
+    row.focused_command,
+    row.failure_signature,
+    row.assertion,
+    row.observed,
+    row.expected,
+    row.public_oracle_basis,
+    preRepairFileHash
+  ];
+  return projection.some((value) => value === undefined) ? undefined : sha256Json(projection);
+}
+
+function differentialDefectStableHash(laneId: string, row: unknown): string | undefined {
+  if (!isRecord(row)) return undefined;
+  const projection = ["compile-harness-defect-v1", laneId, row.category, row.summary, row.evidence_paths];
+  return projection.some((value) => value === undefined) ? undefined : sha256Json(projection);
+}
+
+type DifferentialBindingKey = Exclude<keyof SemanticDifferentialArtifactsContext, "current">;
+
+function differentialArtifactBindings(
+  context: SemanticGateContext,
+  key: DifferentialBindingKey
+): readonly SemanticDifferentialArtifactBinding[] {
+  return context.artifactSet?.differentialArtifacts?.[key] ?? [];
+}
+
+function differentialCurrentArtifact(context: SemanticGateContext): SemanticDifferentialArtifactIdentity | undefined {
+  return context.artifactSet?.differentialArtifacts?.current;
+}
+
+function differentialBindingPaths(bindings: readonly SemanticDifferentialArtifactBinding[]): readonly string[] {
+  return bindings.map((binding) => binding.path);
+}
+
+function exactArrayIssue(pathValue: string, actual: unknown, expected: unknown, message: string): SemanticGateIssue[] {
+  return isDeepStrictEqual(actual, expected) ? [] : [issue(pathValue, message)];
+}
+
+function bindingForExactPath(
+  bindings: readonly SemanticDifferentialArtifactBinding[],
+  artifactPath: unknown,
+  pathValue: string,
+  label: string
+): { binding?: SemanticDifferentialArtifactBinding; issues: SemanticGateIssue[] } {
+  if (typeof artifactPath !== "string") return { issues: [issue(pathValue, `${label} path is unavailable`)] };
+  const matches = bindings.filter((binding) => binding.path === artifactPath);
+  if (matches.length !== 1) {
+    return {
+      issues: [
+        issue(
+          pathValue,
+          matches.length === 0
+            ? `${label} does not name an exact declared artifact`
+            : `${label} ambiguously names more than one declared artifact`
+        )
+      ]
+    };
+  }
+  return { binding: matches[0], issues: [] };
+}
+
+function currentAttemptIssue(
+  document: unknown,
+  context: SemanticGateContext,
+  field: string,
+  label: string
+): SemanticGateIssue[] {
+  const current = differentialCurrentArtifact(context);
+  if (current === undefined) return [issue("$", "Trusted current differential artifact identity is unavailable")];
+  return numberField(document, field) === current.attemptIndex
+    ? []
+    : [issue(`$.${field}`, `${label} does not equal the declared current task attempt index`)];
+}
+
+function referenceHarnessPlanReconciliationIssues(
+  document: unknown,
+  context: SemanticGateContext
+): SemanticGateIssue[] {
+  const plans = differentialArtifactBindings(context, "plans");
+  const issues = [
+    ...currentAttemptIssue(document, context, "harness_author_attempt_index", "Harness author attempt index"),
+    ...exactArrayIssue(
+      "$.source_plan_artifacts",
+      at(document, ["source_plan_artifacts"]),
+      differentialBindingPaths(plans),
+      "Harness source_plan_artifacts must exactly preserve declared plan paths and order"
+    )
+  ];
+  const surfaceIds = new Set(
+    plans.flatMap((binding) =>
+      arrayAt(binding.document, ["candidate_surfaces"]).flatMap((surface) => stringField(surface, "surface_id") ?? [])
+    )
+  );
+  for (const [modelIndex, model] of arrayAt(document, ["reference_models"]).entries()) {
+    for (const [surfaceIndex, surfaceId] of stringArray(at(model, ["covered_surfaces"])).entries()) {
+      if (!surfaceIds.has(surfaceId)) {
+        issues.push(
+          issue(
+            `$.reference_models[${modelIndex}].covered_surfaces[${surfaceIndex}]`,
+            `Reference model covers an undeclared differential surface ${JSON.stringify(surfaceId)}`
+          )
+        );
+      }
+    }
+  }
+  for (const binding of plans) {
+    if (numberField(binding.document, "planner_attempt_index") !== binding.attemptIndex) {
+      issues.push(
+        issue(
+          "$.source_plan_artifacts",
+          `Declared plan ${JSON.stringify(binding.path)} carries a planner attempt index that does not match its task declaration`
+        )
+      );
+    }
+  }
+  return issues;
+}
+
+function plannedLaneProjection(row: unknown): Readonly<Record<string, unknown>> | undefined {
+  if (!isRecord(row)) return undefined;
+  return {
+    lane_id: row.lane_id,
+    planner_attempt_index: row.planner_attempt_index,
+    surface_id: row.surface_id,
+    intended_t_sol_path: row.intended_t_sol_path,
+    focused_command: row.focused_command,
+    public_evidence_paths: row.public_evidence_paths,
+    exact_observable_equality_assertions: row.observable_equality_assertions,
+    oracle_type: row.oracle_type,
+    calibration_bucket: row.calibration_bucket,
+    red_seeking_priority: row.red_seeking_priority
+  };
+}
+
+function auditedLanePlannedProjection(row: unknown): Readonly<Record<string, unknown>> | undefined {
+  if (!isRecord(row)) return undefined;
+  return {
+    lane_id: row.lane_id,
+    planner_attempt_index: row.planner_attempt_index,
+    surface_id: row.surface_id,
+    intended_t_sol_path: row.intended_t_sol_path,
+    focused_command: row.focused_command,
+    public_evidence_paths: row.public_evidence_paths,
+    exact_observable_equality_assertions: row.exact_observable_equality_assertions,
+    oracle_type: row.oracle_type,
+    calibration_bucket: row.calibration_bucket,
+    red_seeking_priority: row.red_seeking_priority
+  };
+}
+
+function auditedDifferentialHandoffReconciliationIssues(
+  document: unknown,
+  context: SemanticGateContext
+): SemanticGateIssue[] {
+  const plans = differentialArtifactBindings(context, "plans");
+  const harnesses = differentialArtifactBindings(context, "harnesses");
+  const current = differentialCurrentArtifact(context);
+  const issues = [
+    ...currentAttemptIssue(document, context, "auditor_attempt_index", "Auditor attempt index"),
+    ...exactArrayIssue(
+      "$.source_plan_artifacts",
+      at(document, ["source_plan_artifacts"]),
+      differentialBindingPaths(plans),
+      "Auditor source_plan_artifacts must exactly preserve declared plan paths and order"
+    ),
+    ...exactArrayIssue(
+      "$.source_harness_artifacts",
+      at(document, ["source_harness_artifacts"]),
+      differentialBindingPaths(harnesses),
+      "Auditor source_harness_artifacts must exactly preserve declared harness paths and order"
+    )
+  ];
+
+  const plannedRows = plans.flatMap((binding) =>
+    arrayAt(binding.document, ["assigned_differential_lanes"]).map((row) => ({ binding, row }))
+  );
+  const plannedIds = plannedRows.flatMap(({ row }) => stringField(row, "lane_id") ?? []);
+  if (new Set(plannedIds).size !== plannedIds.length) {
+    issues.push(issue("$.source_plan_artifacts", "Declared plans contain ambiguous duplicate lane IDs"));
+  }
+  const readyRows = arrayAt(document, ["ready_lanes"]);
+  const rejectedRows = arrayAt(document, ["rejected_or_narrowed_lanes"]);
+  const dispositionIds = [
+    ...readyRows.flatMap((row) => stringField(row, "lane_id") ?? []),
+    ...rejectedRows.flatMap((row) => stringField(row, "lane_id") ?? [])
+  ];
+  if (!sameStringSet(dispositionIds, plannedIds) || dispositionIds.length !== plannedIds.length) {
+    issues.push(
+      issue(
+        "$.ready_lanes",
+        "Every planned differential lane must receive exactly one ready, rejected, or explicitly narrowed disposition"
+      )
+    );
+  }
+
+  for (const [index, ready] of readyRows.entries()) {
+    const laneId = stringField(ready, "lane_id");
+    const matches = plannedRows.filter(({ row }) => stringField(row, "lane_id") === laneId);
+    if (matches.length !== 1) {
+      issues.push(
+        issue(`$.ready_lanes[${index}].lane_id`, "Ready lane does not resolve to exactly one declared plan lane")
+      );
+      continue;
+    }
+    const planned = matches[0]!;
+    if (!isDeepStrictEqual(auditedLanePlannedProjection(ready), plannedLaneProjection(planned.row))) {
+      issues.push(issue(`$.ready_lanes[${index}]`, "Ready lane does not exactly preserve its planner payload"));
+    }
+    if (stringField(ready, "source_plan_artifact") !== planned.binding.path) {
+      issues.push(
+        issue(`$.ready_lanes[${index}].source_plan_artifact`, "Ready lane does not preserve its exact plan path")
+      );
+    }
+    if (numberField(ready, "auditor_attempt_index") !== current?.attemptIndex) {
+      issues.push(
+        issue(`$.ready_lanes[${index}].auditor_attempt_index`, "Ready lane has the wrong auditor attempt index")
+      );
+    }
+    const harnessLookup = bindingForExactPath(
+      harnesses,
+      at(ready, ["source_harness_artifact"]),
+      `$.ready_lanes[${index}].source_harness_artifact`,
+      "Ready lane source harness"
+    );
+    issues.push(...harnessLookup.issues);
+    if (
+      harnessLookup.binding !== undefined &&
+      numberField(ready, "harness_author_attempt_index") !==
+        numberField(harnessLookup.binding.document, "harness_author_attempt_index")
+    ) {
+      issues.push(
+        issue(
+          `$.ready_lanes[${index}].harness_author_attempt_index`,
+          "Ready lane does not preserve the declared harness attempt index"
+        )
+      );
+    }
+  }
+
+  const plannedSurfaces = plans.flatMap((binding) => arrayAt(binding.document, ["candidate_surfaces"]));
+  const audits = arrayAt(document, ["surface_audits"]);
+  const expectedSurfaceIds = plannedSurfaces.flatMap((surface) => stringField(surface, "surface_id") ?? []);
+  const actualSurfaceIds = audits.flatMap((audit) => stringField(audit, "surface_id") ?? []);
+  if (!isDeepStrictEqual(actualSurfaceIds, expectedSurfaceIds)) {
+    issues.push(issue("$.surface_audits", "Surface audits must preserve every planned surface ID and order exactly"));
+  }
+  for (const [index, audit] of audits.entries()) {
+    const source = plannedSurfaces[index];
+    if (
+      source !== undefined &&
+      !isDeepStrictEqual(at(audit, ["public_evidence_paths"]), at(source, ["public_evidence_paths"]))
+    ) {
+      issues.push(
+        issue(
+          `$.surface_audits[${index}].public_evidence_paths`,
+          "Surface audit does not exactly preserve public evidence paths"
+        )
+      );
+    }
+  }
+  return issues;
+}
+
+function differentialLaneResultHandoffReconciliationIssues(
+  document: unknown,
+  context: SemanticGateContext
+): SemanticGateIssue[] {
+  const auditedBindings = differentialArtifactBindings(context, "auditedLanes");
+  const current = differentialCurrentArtifact(context);
+  const issues = currentAttemptIssue(document, context, "attempt_index", "Lane result attempt index");
+  const lookup = bindingForExactPath(
+    auditedBindings,
+    at(document, ["source_auditor_artifact"]),
+    "$.source_auditor_artifact",
+    "Lane result source auditor"
+  );
+  issues.push(...lookup.issues);
+  if (lookup.binding === undefined || current === undefined) return issues;
+  const auditorAttemptIndex = numberField(document, "auditor_attempt_index");
+  if (auditorAttemptIndex !== numberField(lookup.binding.document, "auditor_attempt_index")) {
+    issues.push(issue("$.auditor_attempt_index", "Lane result does not preserve the source auditor attempt index"));
+  }
+  const exactReadyRows = arrayAt(lookup.binding.document, ["ready_lanes"]).filter(
+    (row) =>
+      numberField(row, "attempt_index") === current.attemptIndex &&
+      numberField(row, "auditor_attempt_index") === auditorAttemptIndex
+  );
+  const status = stringField(document, "status");
+  if (status === "no_assigned_lane") {
+    if (exactReadyRows.length !== 0) {
+      issues.push(
+        issue(
+          "$.status",
+          "no_assigned_lane is allowed only when no exact declared ready lane exists for this attempt and auditor"
+        )
+      );
+    }
+    return issues;
+  }
+  if (exactReadyRows.length !== 1) {
+    issues.push(
+      issue(
+        "$.assigned_lane_payload",
+        exactReadyRows.length === 0
+          ? "Assigned lane result has no exact declared ready lane"
+          : "Assigned lane result is ambiguous across declared ready lanes"
+      )
+    );
+    return issues;
+  }
+  const expected = exactReadyRows[0];
+  if (!isDeepStrictEqual(at(document, ["assigned_lane_payload"]), expected)) {
+    issues.push(
+      issue("$.assigned_lane_payload", "Assigned lane payload does not exactly equal the audited ready lane")
+    );
+  }
+  for (const [field, expectedValue] of [
+    ["lane_id", at(expected, ["lane_id"])],
+    ["source_plan_artifact", at(expected, ["source_plan_artifact"])],
+    ["source_harness_artifact", at(expected, ["source_harness_artifact"])],
+    ["focused_command", at(expected, ["focused_command"])]
+  ] as const) {
+    if (at(document, [field]) !== expectedValue) {
+      issues.push(issue(`$.${field}`, `Lane result ${field} does not exactly preserve the audited ready lane`));
+    }
+  }
+  return issues;
+}
+
+function expectedRegistryRows(laneResults: readonly SemanticDifferentialArtifactBinding[]): {
+  semanticReds: Readonly<Record<string, unknown>>[];
+  defects: Readonly<Record<string, unknown>>[];
+} {
+  const semanticReds: Readonly<Record<string, unknown>>[] = [];
+  const defects: Readonly<Record<string, unknown>>[] = [];
+  for (const binding of laneResults) {
+    const laneId = stringField(binding.document, "lane_id");
+    if (laneId === undefined) continue;
+    const preRepairFileHash = stringField(at(binding.document, ["red_preservation_audit"]), "pre_repair_file_hash");
+    for (const row of arrayAt(binding.document, ["red_candidates"])) {
+      if (!isRecord(row)) continue;
+      semanticReds.push({
+        stable_failure_hash: row.stable_failure_hash,
+        lane_id: laneId,
+        test_path: row.test_path,
+        failing_test_name: row.failing_test_name,
+        focused_command: row.focused_command,
+        assertion: row.assertion,
+        observed: row.observed,
+        expected: row.expected,
+        public_oracle_basis: row.public_oracle_basis,
+        pre_repair_file_hash: preRepairFileHash
+      });
+    }
+    for (const row of arrayAt(binding.document, ["compile_or_harness_defects"])) {
+      if (!isRecord(row)) continue;
+      defects.push({
+        stable_failure_hash: row.stable_failure_hash,
+        lane_id: laneId,
+        category: row.category,
+        summary: row.summary,
+        evidence_paths: row.evidence_paths
+      });
+    }
+  }
+  return { semanticReds, defects };
+}
+
+function semanticRedRegistryLaneReconciliationIssues(
+  document: unknown,
+  context: SemanticGateContext
+): SemanticGateIssue[] {
+  const expected = expectedRegistryRows(differentialArtifactBindings(context, "laneResults"));
+  return [
+    ...exactArrayIssue(
+      "$.semantic_reds",
+      at(document, ["semantic_reds"]),
+      expected.semanticReds,
+      "Semantic-red registry must exactly flatten declared lane reds without omission, invention, rewrite, or reordering"
+    ),
+    ...exactArrayIssue(
+      "$.compile_or_harness_defects",
+      at(document, ["compile_or_harness_defects"]),
+      expected.defects,
+      "Semantic-red registry must exactly flatten declared lane defects without omission, invention, rewrite, or reordering"
+    )
+  ];
+}
+
+const REPAIRABLE_DIFFERENTIAL_CLASSIFICATIONS = new Set(["harness_bug", "reference_bug"]);
+
+function registryFailureRows(document: unknown): readonly unknown[] {
+  return [...arrayAt(document, ["semantic_reds"]), ...arrayAt(document, ["compile_or_harness_defects"])];
+}
+
+function differentialRedTriageRegistryReconciliationIssues(
+  document: unknown,
+  context: SemanticGateContext
+): SemanticGateIssue[] {
+  const registries = differentialArtifactBindings(context, "registries");
+  const current = differentialCurrentArtifact(context);
+  const issues: SemanticGateIssue[] = [];
+  if (registries.length !== 1) {
+    issues.push(issue("$", "Triage requires exactly one declared sibling semantic-red registry"));
+    return issues;
+  }
+  if (current === undefined) return [issue("$", "Trusted current triage artifact identity is unavailable")];
+  const basename = path.posix.basename(current.path);
+  const expectedPass = basename === "triage-a.json" ? "a" : basename === "triage-b.json" ? "b" : undefined;
+  if (expectedPass === undefined) {
+    issues.push(issue("$.pass", "Triage pass cannot be derived from the exact declared sibling output path"));
+  } else if (stringField(document, "pass") !== expectedPass) {
+    issues.push(issue("$.pass", `Triage pass must be ${expectedPass} for ${basename}`));
+  }
+  const registryRows = registryFailureRows(registries[0]!.document);
+  const expectedHashes = registryRows.flatMap((row) => stringField(row, "stable_failure_hash") ?? []);
+  const classifications = arrayAt(document, ["classifications"]);
+  const actualHashes = classifications.flatMap((row) => stringField(row, "stable_failure_hash") ?? []);
+  if (!isDeepStrictEqual(actualHashes, expectedHashes)) {
+    issues.push(
+      issue(
+        "$.classifications",
+        "Triage must classify every registry failure exactly once in registry order without rewriting its hash"
+      )
+    );
+  }
+  const semanticRedCount = arrayAt(registries[0]!.document, ["semantic_reds"]).length;
+  for (const [index, row] of classifications.entries()) {
+    const classification = stringField(row, "classification");
+    const repairAllowed = booleanField(row, "repair_allowed");
+    if (index < semanticRedCount && classification === "compile_harness_defect") {
+      issues.push(
+        issue(
+          `$.classifications[${index}].classification`,
+          "Semantic red cannot be relabeled as a compile/harness defect"
+        )
+      );
+    }
+    if (index >= semanticRedCount && classification !== "compile_harness_defect") {
+      issues.push(
+        issue(
+          `$.classifications[${index}].classification`,
+          "Compile/harness defect classification must preserve its upstream type"
+        )
+      );
+    }
+    const expectedRepairAllowed =
+      classification !== undefined && REPAIRABLE_DIFFERENTIAL_CLASSIFICATIONS.has(classification);
+    if (repairAllowed !== expectedRepairAllowed) {
+      issues.push(
+        issue(
+          `$.classifications[${index}].repair_allowed`,
+          "repair_allowed is true only for harness_bug or reference_bug"
+        )
+      );
+    }
+  }
+  return issues;
+}
+
+interface DifferentialConsensusRow {
+  stableFailureHash: string;
+  laneId: string;
+  classifications: readonly string[];
+  consensus?: string;
+  repairKind?: "harness" | "reference";
+}
+
+function differentialConsensusRows(
+  registries: readonly SemanticDifferentialArtifactBinding[],
+  triages: readonly SemanticDifferentialArtifactBinding[]
+): { rows: DifferentialConsensusRow[]; issues: SemanticGateIssue[] } {
+  const issues: SemanticGateIssue[] = [];
+  if (registries.length === 0)
+    return { rows: [], issues: [issue("$", "No declared semantic-red registry is available")] };
+  const canonicalRows = registryFailureRows(registries[0]!.document);
+  if (registries.some((binding) => !isDeepStrictEqual(binding.document, registries[0]!.document))) {
+    issues.push(issue("$", "Looped semantic-red registries do not exactly agree"));
+  }
+  const triagesByAttempt = new Map<string, SemanticDifferentialArtifactBinding[]>();
+  for (const triage of triages) {
+    const group = triagesByAttempt.get(triage.attemptId) ?? [];
+    group.push(triage);
+    triagesByAttempt.set(triage.attemptId, group);
+  }
+  const classificationsByHash = new Map<string, string[]>();
+  for (const registry of registries) {
+    const siblings = triagesByAttempt.get(registry.attemptId) ?? [];
+    const passBindings = new Map(siblings.map((binding) => [path.posix.basename(binding.path), binding] as const));
+    if (siblings.length !== 2 || !passBindings.has("triage-a.json") || !passBindings.has("triage-b.json")) {
+      issues.push(
+        issue(
+          "$",
+          `Registry attempt ${JSON.stringify(registry.attemptId)} does not have exactly one declared triage-a and triage-b sibling`
+        )
+      );
+      continue;
+    }
+    for (const name of ["triage-a.json", "triage-b.json"] as const) {
+      for (const row of arrayAt(passBindings.get(name)!.document, ["classifications"])) {
+        const hash = stringField(row, "stable_failure_hash");
+        const classification = stringField(row, "classification");
+        if (hash === undefined || classification === undefined) continue;
+        const values = classificationsByHash.get(hash) ?? [];
+        values.push(classification);
+        classificationsByHash.set(hash, values);
+      }
+    }
+  }
+  const semanticHashes = new Set(
+    arrayAt(registries[0]!.document, ["semantic_reds"]).flatMap((row) => stringField(row, "stable_failure_hash") ?? [])
+  );
+  const rows = canonicalRows.flatMap((row): DifferentialConsensusRow[] => {
+    const stableFailureHash = stringField(row, "stable_failure_hash");
+    const laneId = stringField(row, "lane_id");
+    if (stableFailureHash === undefined || laneId === undefined) return [];
+    const classifications = classificationsByHash.get(stableFailureHash) ?? [];
+    const consensus =
+      classifications.length > 0 && classifications.every((value) => value === classifications[0])
+        ? classifications[0]
+        : undefined;
+    const repairKind = semanticHashes.has(stableFailureHash)
+      ? consensus === "harness_bug"
+        ? "harness"
+        : consensus === "reference_bug"
+          ? "reference"
+          : undefined
+      : undefined;
+    return [{ stableFailureHash, laneId, classifications, consensus, repairKind }];
+  });
+  return { rows, issues };
+}
+
+function differentialRepairSummaryTriageReconciliationIssues(
+  document: unknown,
+  context: SemanticGateContext
+): SemanticGateIssue[] {
+  const consensus = differentialConsensusRows(
+    differentialArtifactBindings(context, "registries"),
+    differentialArtifactBindings(context, "triages")
+  );
+  const issues = [...consensus.issues];
+  const repairable = consensus.rows.filter((row) => row.repairKind !== undefined);
+  const attempted = arrayAt(document, ["repairs_attempted"]);
+  const attemptedProjection = attempted.map((row) => ({
+    stable_failure_hash: stringField(row, "stable_failure_hash"),
+    repair_kind: stringField(row, "repair_kind")
+  }));
+  const expectedAttempted = repairable.map((row) => ({
+    stable_failure_hash: row.stableFailureHash,
+    repair_kind: row.repairKind
+  }));
+  if (!isDeepStrictEqual(attemptedProjection, expectedAttempted)) {
+    issues.push(
+      issue(
+        "$.repairs_attempted",
+        "Repairs must cover exactly the semantic reds unanimously classified as the same harness/reference defect"
+      )
+    );
+  }
+  const repairedHashes = arrayAt(document, ["repaired_failures"]).flatMap(
+    (row) => stringField(row, "stable_failure_hash") ?? []
+  );
+  const expectedRepairHashes = repairable.map((row) => row.stableFailureHash);
+  if (!isDeepStrictEqual(repairedHashes, expectedRepairHashes)) {
+    issues.push(issue("$.repaired_failures", "Every attempted repair must have exactly one ordered repair result"));
+  }
+  const preserved = consensus.rows.filter(
+    (row) => row.repairKind === undefined && row.consensus !== "compile_harness_defect"
+  );
+  const preservedProjection = arrayAt(document, ["preserved_production_or_unknown_reds"]).map((row) => ({
+    stable_failure_hash: stringField(row, "stable_failure_hash"),
+    classification: stringField(row, "classification")
+  }));
+  const expectedPreserved = preserved.map((row) => ({
+    stable_failure_hash: row.stableFailureHash,
+    classification:
+      row.consensus === "production_bug" || row.consensus === "spec_mismatch" || row.consensus === "unknown"
+        ? row.consensus
+        : "unknown"
+  }));
+  if (!isDeepStrictEqual(preservedProjection, expectedPreserved)) {
+    issues.push(
+      issue(
+        "$.preserved_production_or_unknown_reds",
+        "Non-repairable semantic reds must be preserved exactly; disagreement may only be represented as unknown"
+      )
+    );
+  }
+  return issues;
+}
+
+function gapReadyRows(audited: readonly SemanticDifferentialArtifactBinding[]): Readonly<Record<string, unknown>>[] {
+  return audited.flatMap((binding) =>
+    arrayAt(binding.document, ["ready_lanes"]).flatMap((row) =>
+      isRecord(row)
+        ? [
+            {
+              lane_id: row.lane_id,
+              attempt_index: row.attempt_index,
+              auditor_attempt_index: row.auditor_attempt_index,
+              source_auditor_artifact: binding.path
+            }
+          ]
+        : []
+    )
+  );
+}
+
+function gapResultRows(results: readonly SemanticDifferentialArtifactBinding[]): Readonly<Record<string, unknown>>[] {
+  return results.flatMap((binding) =>
+    isRecord(binding.document)
+      ? [
+          {
+            lane_id: binding.document.lane_id,
+            attempt_index: binding.document.attempt_index,
+            auditor_attempt_index: binding.document.auditor_attempt_index,
+            source_auditor_artifact: binding.document.source_auditor_artifact,
+            status: binding.document.status
+          }
+        ]
+      : []
+  );
+}
+
+function gapCoordinate(row: unknown): Readonly<Record<string, unknown>> | undefined {
+  if (!isRecord(row)) return undefined;
+  return {
+    lane_id: row.lane_id,
+    attempt_index: row.attempt_index,
+    auditor_attempt_index: row.auditor_attempt_index,
+    source_auditor_artifact: row.source_auditor_artifact
+  };
+}
+
+function differentialGapReviewLaneReconciliationIssues(
+  document: unknown,
+  context: SemanticGateContext
+): SemanticGateIssue[] {
+  const readyRows = gapReadyRows(differentialArtifactBindings(context, "auditedLanes"));
+  const resultBindings = differentialArtifactBindings(context, "laneResults");
+  const resultRows = gapResultRows(resultBindings);
+  const issues = [
+    ...exactArrayIssue(
+      "$.ready_lanes",
+      at(document, ["ready_lanes"]),
+      readyRows,
+      "Gap review must preserve every declared audited ready lane and its exact coordinates"
+    ),
+    ...exactArrayIssue(
+      "$.lane_results_seen",
+      at(document, ["lane_results_seen"]),
+      resultRows,
+      "Gap review must preserve every declared lane result, including nullable no-assignment rows, in order"
+    )
+  ];
+  const resultCoordinates = resultRows.map((row) => JSON.stringify(gapCoordinate(row)));
+  const missing = readyRows.filter((row) => !resultCoordinates.includes(JSON.stringify(gapCoordinate(row))));
+  const actualMissing = arrayAt(document, ["missing_lane_work_orders"]).map(gapCoordinate);
+  if (!isDeepStrictEqual(actualMissing, missing.map(gapCoordinate))) {
+    issues.push(
+      issue(
+        "$.missing_lane_work_orders",
+        "Missing-lane work orders must cover exactly the audited ready lanes without a declared result"
+      )
+    );
+  }
+  const incomplete = resultRows.filter((row) =>
+    ["compile_or_harness_defect", "no_assigned_lane"].includes(String(row.status))
+  );
+  const actualIncomplete = arrayAt(document, ["incomplete_campaign_work_orders"]).map(gapCoordinate);
+  if (!isDeepStrictEqual(actualIncomplete, incomplete.map(gapCoordinate))) {
+    issues.push(
+      issue(
+        "$.incomplete_campaign_work_orders",
+        "Incomplete-campaign work orders must cover exactly compile/harness defects and no-assignment results"
+      )
+    );
+  }
+  const expectedGreen = resultBindings.flatMap((binding) => {
+    const row = binding.document;
+    return stringField(row, "status") === "green" && isRecord(row)
+      ? [
+          {
+            lane_id: row.lane_id,
+            attempt_index: row.attempt_index,
+            auditor_attempt_index: row.auditor_attempt_index,
+            source_auditor_artifact: row.source_auditor_artifact,
+            command: row.focused_command,
+            matched_test_count: row.matched_test_count
+          }
+        ]
+      : [];
+  });
+  issues.push(
+    ...exactArrayIssue(
+      "$.green_suite_evidence",
+      at(document, ["green_suite_evidence"]),
+      expectedGreen,
+      "Green suite evidence must exactly preserve each green lane command and matched-test count"
+    )
+  );
+  return issues;
+}
+
+function reportRowIdentity(row: unknown): Readonly<Record<string, unknown>> | undefined {
+  if (!isRecord(row)) return undefined;
+  return { stable_failure_hash: row.stable_failure_hash, lane_id: row.lane_id };
+}
+
+function differentialReportReviewReconciliationIssues(
+  document: unknown,
+  context: SemanticGateContext
+): SemanticGateIssue[] {
+  const registries = differentialArtifactBindings(context, "registries");
+  const consensus = differentialConsensusRows(registries, differentialArtifactBindings(context, "triages"));
+  const repairs = differentialArtifactBindings(context, "repairSummaries");
+  const gaps = differentialArtifactBindings(context, "gapReviews");
+  const findings = differentialArtifactBindings(context, "findings");
+  const issues = [...consensus.issues];
+  if (repairs.length !== 1 || gaps.length !== 1 || findings.length !== 1) {
+    issues.push(
+      issue("$", "Report review requires exactly one declared repair summary, gap review, and findings sibling")
+    );
+    return issues;
+  }
+  const production = consensus.rows.filter((row) => row.consensus === "production_bug");
+  const productionIdentities = production.map((row) => ({
+    stable_failure_hash: row.stableFailureHash,
+    lane_id: row.laneId
+  }));
+  if (!isDeepStrictEqual(arrayAt(document, ["production_bug_reds"]).map(reportRowIdentity), productionIdentities)) {
+    issues.push(
+      issue("$.production_bug_reds", "Production bug rows must exactly preserve consensus registry identities")
+    );
+  }
+  const repairedHashes = arrayAt(repairs[0]!.document, ["repaired_failures"]).flatMap((row) =>
+    stringField(row, "result") === "repaired" ? (stringField(row, "stable_failure_hash") ?? []) : []
+  );
+  const repairedIdentities = repairedHashes.flatMap((hash) => {
+    const row = consensus.rows.find((candidate) => candidate.stableFailureHash === hash);
+    return row === undefined ? [] : [{ stable_failure_hash: hash, lane_id: row.laneId }];
+  });
+  if (
+    !isDeepStrictEqual(arrayAt(document, ["harness_or_reference_repairs"]).map(reportRowIdentity), repairedIdentities)
+  ) {
+    issues.push(
+      issue(
+        "$.harness_or_reference_repairs",
+        "Repair rows must exactly preserve successful consensus repair identities"
+      )
+    );
+  }
+  const gapDocument = gaps[0]!.document;
+  const expectedMissing = [
+    ...arrayAt(gapDocument, ["missing_lane_work_orders"]),
+    ...arrayAt(gapDocument, ["incomplete_campaign_work_orders"])
+  ];
+  if (!isDeepStrictEqual(at(document, ["missing_or_deferred_lanes"]), expectedMissing)) {
+    issues.push(
+      issue(
+        "$.missing_or_deferred_lanes",
+        "Report review must exactly preserve all missing and incomplete lane work orders from gap review"
+      )
+    );
+  }
+  const expectedReady = [...productionIdentities, ...repairedIdentities];
+  if (!isDeepStrictEqual(arrayAt(document, ["report_rows_ready"]).map(reportRowIdentity), expectedReady)) {
+    issues.push(
+      issue("$.report_rows_ready", "Report-ready rows must exactly enumerate production reds then successful repairs")
+    );
+  }
+  const blockers = arrayAt(gapDocument, ["report_blockers"]);
+  const stillRed = arrayAt(repairs[0]!.document, ["repaired_failures"]).some(
+    (row) => stringField(row, "result") === "still-red"
+  );
+  const preserved = consensus.rows.some(
+    (row) => row.repairKind === undefined && row.consensus !== "compile_harness_defect"
+  );
+  const expectedStatus =
+    expectedMissing.length > 0 || blockers.length > 0
+      ? "incomplete"
+      : production.length > 0 || preserved || stillRed
+        ? "blocked_by_preserved_reds"
+        : "complete";
+  if (stringField(document, "campaign_status") !== expectedStatus) {
+    issues.push(issue("$.campaign_status", `Campaign status must be ${expectedStatus} for the reconciled artifacts`));
+  }
+  const findingIds = arrayAt(findings[0]!.document, []).flatMap((row) => stringField(row, "id") ?? []);
+  const expectedFindingIds = production.map((row) => row.stableFailureHash);
+  if (!isDeepStrictEqual(findingIds, expectedFindingIds)) {
+    issues.push(
+      issue(
+        "$",
+        "Final sibling findings must preserve each production-red stable hash exactly as its finding ID and contain no lookalikes"
+      )
+    );
+  }
+  return issues;
 }
 
 function dynamicModelJoinIssues(document: unknown): SemanticGateIssue[] {
@@ -3167,6 +4048,15 @@ const gateSpecifications = {
   "attempt-outcome-digest-coupling": documentGate(attemptOutcomeDigestIssues),
   "attempt-reuse-source-link": contextualGate("runtime-state", ["attemptLedger.entries"], attemptReuseSourceLinkIssues),
   "attempt-source-event-join": contextualGate("runtime-state", ["eventLog.events"], attemptSourceEventJoinIssues),
+  "audited-differential-handoff-reconciliation": contextualGate(
+    "cross-artifact",
+    [
+      "artifactSet.differentialArtifacts.current",
+      "artifactSet.differentialArtifacts.plans",
+      "artifactSet.differentialArtifacts.harnesses"
+    ],
+    auditedDifferentialHandoffReconciliationIssues
+  ),
   "audited-differential-lane-id-uniqueness": documentGate(
     uniqueFieldGate([["ready_lanes"], ["rejected_or_narrowed_lanes"]], "lane_id", "audited lane ID")
   ),
@@ -3204,6 +4094,11 @@ const gateSpecifications = {
   }),
   "dependency-id-uniqueness": documentGate(uniqueFieldGate([["dependencies"]], "dependency_id", "dependency ID")),
   "dependency-row-joins": documentGate(dependencyJoinIssues),
+  "differential-gap-review-lane-reconciliation": contextualGate(
+    "cross-artifact",
+    ["artifactSet.differentialArtifacts.auditedLanes", "artifactSet.differentialArtifacts.laneResults"],
+    differentialGapReviewLaneReconciliationIssues
+  ),
   "differential-gap-lane-uniqueness": documentGate(
     uniqueCompositeGate(
       [
@@ -3216,6 +4111,11 @@ const gateSpecifications = {
       ["lane_id", "attempt_index"],
       "differential gap lane identity"
     )
+  ),
+  "differential-lane-result-handoff-reconciliation": contextualGate(
+    "cross-artifact",
+    ["artifactSet.differentialArtifacts.current", "artifactSet.differentialArtifacts.auditedLanes"],
+    differentialLaneResultHandoffReconciliationIssues
   ),
   "differential-plan-lane-id-uniqueness": documentGate(
     uniqueFieldGate(
@@ -3239,12 +4139,33 @@ const gateSpecifications = {
       "repair failure hash"
     )
   ),
+  "differential-repair-summary-triage-reconciliation": contextualGate(
+    "cross-artifact",
+    ["artifactSet.differentialArtifacts.registries", "artifactSet.differentialArtifacts.triages"],
+    differentialRepairSummaryTriageReconciliationIssues
+  ),
   "differential-report-failure-hash-uniqueness": documentGate(
     uniqueFieldGate(
       [["production_bug_reds"], ["harness_or_reference_repairs"], ["report_rows_ready"]],
       "stable_failure_hash",
       "report failure hash"
     )
+  ),
+  "differential-report-review-reconciliation": contextualGate(
+    "cross-artifact",
+    [
+      "artifactSet.differentialArtifacts.registries",
+      "artifactSet.differentialArtifacts.triages",
+      "artifactSet.differentialArtifacts.repairSummaries",
+      "artifactSet.differentialArtifacts.gapReviews",
+      "artifactSet.differentialArtifacts.findings"
+    ],
+    differentialReportReviewReconciliationIssues
+  ),
+  "differential-red-triage-registry-reconciliation": contextualGate(
+    "cross-artifact",
+    ["artifactSet.differentialArtifacts.current", "artifactSet.differentialArtifacts.registries"],
+    differentialRedTriageRegistryReconciliationIssues
   ),
   "differential-result-failure-hash-uniqueness": documentGate(differentialResultIdentityIssues),
   "differential-result-lane-binding": documentGate(differentialResultLaneBindingIssues),
@@ -3376,6 +4297,11 @@ const gateSpecifications = {
   "reference-expectation-id-uniqueness": documentGate(
     uniqueFieldGate([["expectations"]], "id", "reference expectation ID")
   ),
+  "reference-harness-plan-reconciliation": contextualGate(
+    "cross-artifact",
+    ["artifactSet.differentialArtifacts.current", "artifactSet.differentialArtifacts.plans"],
+    referenceHarnessPlanReconciliationIssues
+  ),
   "reference-manifest-path-uniqueness": documentGate(
     uniqueFieldGate([["source_files"], ["artifacts"]], "path", "reference manifest path", { global: true })
   ),
@@ -3469,6 +4395,11 @@ const gateSpecifications = {
     stringField(document, "run_id") === stringField(document, "source_run_id")
       ? [issue("$.source_run_id", "Source run must differ from the destination run")]
       : []
+  ),
+  "semantic-red-registry-lane-reconciliation": contextualGate(
+    "cross-artifact",
+    ["artifactSet.differentialArtifacts.laneResults"],
+    semanticRedRegistryLaneReconciliationIssues
   ),
   "strategy-detection-dedupe-key-uniqueness": documentGate(
     uniqueFieldGate([[]], "dedupe_key", "strategy detection dedupe key")

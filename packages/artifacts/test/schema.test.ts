@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
@@ -1408,10 +1409,14 @@ test("differential lane statuses require their exact terminal evidence in JSON S
     harness_author_attempt_index: 0,
     source_plan_artifact: "differential-plan.json",
     source_harness_artifact: "reference-harness.json",
+    surface_id: "surface-a",
     intended_t_sol_path: "test/foundry/differential/LaneA.t.sol",
     focused_command: "forge test --match-path test/foundry/differential/LaneA.t.sol",
     public_evidence_paths: ["docs/spec.md"],
-    exact_observable_equality_assertions: ["returns match"]
+    exact_observable_equality_assertions: ["returns match"],
+    oracle_type: "independent_reference",
+    calibration_bucket: "red_seeking_adversarial",
+    red_seeking_priority: "high"
   };
   const green = {
     schema_version: "ultrafuzz.differential-lane-result.v1",
@@ -1464,6 +1469,26 @@ test("differential lane statuses require their exact terminal evidence in JSON S
     },
     red_candidates: [
       {
+        stable_failure_hash: crypto
+          .createHash("sha256")
+          .update(
+            JSON.stringify([
+              "semantic-red-v1",
+              assignedLane.lane_id,
+              "red-a",
+              assignedLane.intended_t_sol_path,
+              "test_lane_a",
+              assignedLane.focused_command,
+              "mismatch",
+              "actual == expected",
+              "1",
+              "2",
+              ["docs/spec.md"],
+              "a".repeat(64)
+            ]),
+            "utf8"
+          )
+          .digest("hex"),
         red_candidate_id: "red-a",
         test_path: assignedLane.intended_t_sol_path,
         failing_test_name: "test_lane_a",
@@ -1486,7 +1511,20 @@ test("differential lane statuses require their exact terminal evidence in JSON S
       pre_repair_file_hash: null,
       assertion_predicate: null
     },
-    compile_or_harness_defects: [{ category: "compile", summary: "compile failed", evidence_paths: [] }]
+    compile_or_harness_defects: [
+      {
+        stable_failure_hash: crypto
+          .createHash("sha256")
+          .update(
+            JSON.stringify(["compile-harness-defect-v1", assignedLane.lane_id, "compile", "compile failed", []]),
+            "utf8"
+          )
+          .digest("hex"),
+        category: "compile",
+        summary: "compile failed",
+        evidence_paths: []
+      }
+    ]
   };
   const cases = [
     { name: "green", value: green, expected: true },
