@@ -19,7 +19,7 @@ export async function probeCommandsForExecution(
   config: ResolvedConfig,
   commands: readonly string[],
   env: Record<string, string | undefined>,
-  options: { includeVersions?: boolean; cwd?: string } = {}
+  options: { includeVersions?: boolean; cwd?: string; createProviderAppIfMissing?: boolean } = {}
 ): Promise<RequiredCommandProbe[]> {
   const uniqueCommands = [...new Set(commands)].sort();
   if (uniqueCommands.length === 0) return [];
@@ -54,7 +54,7 @@ export async function probeCommandsForExecution(
         env?: Record<string, string | undefined>;
       },
       requiredCommands: readonly string[],
-      probeOptions?: { includeVersions?: boolean }
+      probeOptions?: { includeVersions?: boolean; createAppIfMissing?: boolean }
     ): Promise<RequiredCommandProbe[]>;
   };
   return provider.probeModalCommands(
@@ -66,7 +66,10 @@ export async function probeCommandsForExecution(
       env
     },
     uniqueCommands,
-    options
+    {
+      includeVersions: options.includeVersions,
+      createAppIfMissing: options.createProviderAppIfMissing
+    }
   );
 }
 

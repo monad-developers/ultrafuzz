@@ -209,7 +209,10 @@ async function requiredCommandPreflightDiagnostics(
     commandProbes =
       input.requiredCommandProbe === undefined
         ? await probeCommandsForExecution(resolvedConfig, requiredCommands, input.env ?? process.env, {
-            cwd: path.resolve(input.projectRoot)
+            cwd: path.resolve(input.projectRoot),
+            // Normal cloud launch already creates its configured app on first
+            // use. Preserve that behavior while keeping Doctor read-only.
+            createProviderAppIfMissing: true
           })
         : await input.requiredCommandProbe(requiredCommands);
   } catch (error) {
