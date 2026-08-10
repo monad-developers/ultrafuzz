@@ -33,3 +33,129 @@ The runtime-owned ZIP index formerly emitted as the unregistered
 pre-regeneration report-backup exclusion because current producers never create
 those backups. Current readers and producers do
 not convert historical bundle manifests.
+
+## Persisted documents outside the artifact-contract registry
+
+The artifact-contract table above is only one part of the breaking boundary.
+The following runtime-owned, operator-facing, evaluation, and Modal documents
+were also narrowed. These versions are exact identities, not aliases: a reader
+for the current identity does not accept the previous spelling or infer missing
+fields.
+
+### Core run, CLI, topology, and dashboard documents
+
+| Document                              | Previous identity                                                 | Current identity or decision                                                                                                          |
+| ------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| Node-attempt ledger                   | `1.0`                                                             | `ultrafuzz.node-attempt-ledger.v1`; the named identity accompanies the closed attempt, parent, reuse, digest, and outcome rules.      |
+| Event record                          | `1.0`                                                             | `ultrafuzz.event-record.v2`; event variants are closed and validated as whole documents.                                              |
+| Event query facade and index key      | Anonymous query/index projections                                 | `ultrafuzz.event-query-facade.v1` and `ultrafuzz.event-index-key.v1`.                                                                 |
+| Artifact manifest                     | `1.0`                                                             | `ultrafuzz.artifact-manifest.v3`; publications, digests, ownership, and contract metadata are required and closed.                    |
+| Artifact verification                 | `ultrafuzz.artifact-verification.v1`                              | `ultrafuzz.artifact-verification.v2`; verification is bound to exact producer attempts and publications.                              |
+| Invariant-suite manifest              | `ultrafuzz.invariant-suite-manifest.v1`                           | `ultrafuzz.invariant-suite-manifest.v2`; producer identity and exact file/tombstone projections are required.                         |
+| Planned graph                         | `1.0` with graph version `2`                                      | `ultrafuzz.planned-graph.v3` with graph version `3`; planned output contracts carry schema and validator authority.                   |
+| Expanded graph                        | URL-style schema identity with graph version `2`                  | `urn:ultrafuzz:schema:topology:expanded-graph:3` with graph version `3`; the graph is closed and has named cross-node semantic gates. |
+| Run layout                            | `1.0`                                                             | `ultrafuzz.run-layout.v2`; no historical layout reader remains.                                                                       |
+| Source-run link                       | `1.0`                                                             | `ultrafuzz.source-run.v2`.                                                                                                            |
+| Run plan                              | `1.0`                                                             | `ultrafuzz.run-plan.v2`.                                                                                                              |
+| Run metadata                          | `1.0`                                                             | `ultrafuzz.run-metadata.v2`; accounting and graph authority are typed.                                                                |
+| Config redactions                     | `1.0`                                                             | `ultrafuzz.config-redactions.v2`.                                                                                                     |
+| Accounting                            | `2.0`                                                             | `ultrafuzz.accounting.v3`; incomplete pricing and current control-segment evidence are explicit.                                      |
+| Accounting checkpoint                 | `1.0`                                                             | `ultrafuzz.accounting-checkpoint.v1`.                                                                                                 |
+| Run state                             | `1.1` / `ultrafuzz.state.v1`                                      | `ultrafuzz.run-state.v5`; old runs fail with an unsupported-version diagnostic.                                                       |
+| Usage ledger                          | `1.0`                                                             | `ultrafuzz.usage-ledger.v1`.                                                                                                          |
+| Release-validation report             | `ultrafuzz.release-validation.report.v1`                          | `ultrafuzz.release-validation.report.v2`.                                                                                             |
+| Smithers workflow manifest            | `ultrafuzz.smithers.workflow.v1`                                  | `ultrafuzz.smithers.workflow.v3`; exact task, package, source, and output authority is required.                                      |
+| Smithers task metadata                | `ultrafuzz.smithers.task.v1`                                      | `ultrafuzz.smithers.task.v2`.                                                                                                         |
+| Resolved config                       | `1.0` and compatibility spellings                                 | `ultrafuzz.config.v2`; there is one namespaced literal and a strict closed schema.                                                    |
+| Reference cache manifest              | `1.0`                                                             | `ultrafuzz.reference-cache-manifest.v1`.                                                                                              |
+| CLI result envelope                   | `ultrafuzz.cli.result.v1` and the eval-result envelope            | `ultrafuzz.cli.result.v2`; the separate eval-result compatibility envelope was removed.                                               |
+| Dashboard audit                       | `1.0`                                                             | `ultrafuzz.dashboard.audit.v1`.                                                                                                       |
+| Dashboard HTTP and SSE wire documents | Unversioned endpoint/event objects                                | `ultrafuzz.dashboard.http.v1` and `ultrafuzz.dashboard.sse.v1`.                                                                       |
+| Report-bundle manifest                | Unregistered `ultrafuzz.report_bundle.v1` and later partial forms | `ultrafuzz.report-bundle-manifest.v3`, as detailed above.                                                                             |
+
+The following existing identities retain their version but are now registered,
+closed whole-document schemas with named semantic gates where needed:
+`ultrafuzz.analysis-bundle.v1` and its component documents,
+`ultrafuzz.invariant-evidence-ledger.v1`,
+`ultrafuzz.invariant-source-proof.v1`,
+`ultrafuzz.terminal-disposition.v1`, the invariant-suite baseline and handoff
+documents, materialize/clean audit documents, lifecycle/control journals, and
+runtime handoff/integrity documents. Retaining the literal means that the
+already-declared canonical shape did not change; it does not create a loose or
+historical reader.
+
+The migration also introduces first canonical identities for
+`ultrafuzz.trusted-cli.v1`, the registered
+`urn:ultrafuzz:schema:artifacts:json-validator-preflight-success:1` envelope,
+`ultrafuzz.agent-adapter-recovery.v1`, and
+`ultrafuzz.cli.public-run-state.v1`. These are new runtime/control evidence,
+not renamed historical payloads.
+
+### Evaluation and benchmark documents
+
+| Document                           | Previous identity                                               | Current identity or decision                                                                                                                                                     |
+| ---------------------------------- | --------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Evaluation suite                   | `ultrafuzz.eval.v1`                                             | `ultrafuzz.eval.v2`; suite inputs and dependency/model policy are closed.                                                                                                        |
+| Evaluation run                     | `ultrafuzz.eval.run.v1`                                         | `ultrafuzz.eval.run.v3`; current launch, report, telemetry, and scoring authority is required.                                                                                   |
+| Run summary                        | Previously unversioned                                          | `ultrafuzz.eval.run-summary.v2`.                                                                                                                                                 |
+| Finding score                      | `ultrafuzz.eval.finding-score.v1`                               | `ultrafuzz.eval.finding-score.v2`; exact verified report authority is required.                                                                                                  |
+| Score summary                      | `ultrafuzz.eval.score-summary.v1`                               | `ultrafuzz.eval.score-summary.v2`; rows and counts are bound to exact scoring authority.                                                                                         |
+| Review-queue item                  | `ultrafuzz.eval.review-queue-item.v1`                           | `ultrafuzz.eval.review-queue-item.v2`; exact report and judge authority is required.                                                                                             |
+| Evaluation matrix                  | Bare/unregistered matrix                                        | Whole-document schema `urn:ultrafuzz:schema:evals:matrix:2`.                                                                                                                     |
+| Evaluation history                 | `ultrafuzz.eval.history.v1`                                     | `ultrafuzz.eval.history.v2`.                                                                                                                                                     |
+| History observation                | `ultrafuzz.eval.history.observation.v5` and earlier generations | `ultrafuzz.eval.history.observation.v6`; v1-v5 readers were removed.                                                                                                             |
+| Benchmark lanes                    | `urn:ultrafuzz:schema:evals:benchmark-lanes:1`                  | `urn:ultrafuzz:schema:evals:benchmark-lanes:2`.                                                                                                                                  |
+| Public diagnostics                 | `ultrafuzz.modal.public-eval-diagnostics.v1`                    | `ultrafuzz.modal.public-eval-diagnostics.v2`; the v1 reader was removed.                                                                                                         |
+| Benchmark-analysis source/manifest | Unregistered or generic analysis shapes                         | `ultrafuzz.eval.benchmark-source-manifest.v1` and `ultrafuzz.eval.benchmark-analysis-manifest.v1`, with typed adjudication, finding, cluster, credit, and provenance companions. |
+| EVMBench catalog                   | `ultrafuzz.evmbench.catalog.v1`                                 | `ultrafuzz.evmbench.catalog.v2`.                                                                                                                                                 |
+| EVMBench lock                      | `ultrafuzz.evmbench.lock.v1`                                    | `ultrafuzz.evmbench.lock.v2`.                                                                                                                                                    |
+| EVMBench profile                   | `ultrafuzz.evmbench.profile.v1`                                 | `ultrafuzz.evmbench.profile.v2`.                                                                                                                                                 |
+| EVMBench result                    | `ultrafuzz.evmbench.result.v1`                                  | `ultrafuzz.evmbench.result.v2`, returned through the shared CLI v2 envelope.                                                                                                     |
+
+Retained evaluation documents for ground truth, publication/status,
+recovery-equivalence, telemetry cursors, automatic history publication, and
+benchmark provenance now have registered closed schemas. New typed analysis
+documents include adjudication handoff, finding manifest, instance clusters,
+ground-truth credits, benchmark provenance, benchmark source/analysis
+manifests, and the embedded verified-report authority used by scoring. Their v1
+identities are first canonical versions rather than compatibility aliases.
+
+### Modal documents
+
+| Document                | Previous identity                                                    | Current identity or decision                                                                        |
+| ----------------------- | -------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| Benchmark configuration | `ultrafuzz.modal.benchmark.v1`                                       | `ultrafuzz.modal.benchmark.v2`; the benchmark matrix, source, model, and control policy are closed. |
+| Public benchmark bundle | `ultrafuzz.modal.public-benchmark-bundle.v4` plus a legacy v3 reader | `ultrafuzz.modal.public-benchmark-bundle.v5` only.                                                  |
+| Node result             | v1 and v2 accepted                                                   | `ultrafuzz.modal.node-result.v2` only.                                                              |
+| Worker status/result    | Separate worker-status compatibility shape plus result v2            | `ultrafuzz.modal.worker-result.v2`; partial and terminal states share one closed contract.          |
+| Launch state            | `ultrafuzz.modal.launch-state.v3` with v1/v2 migration readers       | `ultrafuzz.modal.launch-state.v3` remains current, but the v1/v2 migration path is removed.         |
+
+The retained Modal node input, dependency manifest, pinned source proof,
+worker lineage, node checkpoint/index/restore, node-worker error, recovery state
+and lifecycle, and result documents now have registered whole-document schemas.
+New control evidence uses
+`ultrafuzz.modal.benchmark-control-manifest.v1`,
+`ultrafuzz.modal.smoke-checkpoint.v1`,
+`ultrafuzz.modal.smoke-completion.v1`, and
+`ultrafuzz.modal.smoke-result.v1`.
+
+## Removed readers and repair paths
+
+There is no historical-run fallback for the following removed formats:
+
+- artifact reconciliation grace state and any post-completion artifact
+  synthesis or copying path;
+- findings aliases, missing versions, numeric confidence conversion,
+  scalar-to-array conversion, and `final_severity` compatibility;
+- config `1.0` and alternate resolved-config version spellings;
+- CLI result v1 and the separate eval-result v1 envelope;
+- Modal launch-state v1/v2, worker-status, node-result v1, and public bundle
+  v3/v4 readers;
+- evaluation history v1, observation v1-v5, public diagnostics v1, and scoring
+  aliases or inferred report authority.
+
+Current producers must emit the current identity and exact canonical bytes.
+Readers reject unsupported versions; they do not normalize an old version into
+the new one. Agent-authored correction is available only before the original
+agent session returns and is performed by the agent after running
+`ultrafuzz json validate`, never by a reader or synchronization fallback.
