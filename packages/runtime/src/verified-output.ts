@@ -126,6 +126,7 @@ interface FinalizedNodeOutputAuthority {
   publications: ReadonlyMap<string, PublicationSnapshot>;
   gateContextFiles: ReadonlyMap<string, PublicationSnapshot>;
   prerequisiteManifests: ReadonlyMap<string, Buffer>;
+  sealedAttempt: SealedAttemptGateAuthority;
   snapshot: VerifiedNodeOutputSnapshot;
 }
 
@@ -141,7 +142,7 @@ interface SealedAttemptGateAuthority {
  */
 export function loadVerifiedNodeOutputSnapshot(input: LoadVerifiedNodeOutputInput): VerifiedNodeOutputSnapshot {
   const authority = loadFinalizedNodeOutputAuthority(input);
-  const sealedAttempt = loadSealedAttemptGateAuthority(authority);
+  const sealedAttempt = authority.sealedAttempt;
   const gate = verifyRequiredArtifactsForAttempt(
     authority.layout,
     authority.plannedNode,
@@ -171,7 +172,6 @@ export function loadVerifiedNodeOutputSnapshot(input: LoadVerifiedNodeOutputInpu
     );
   }
   assertFinalizedAuthorityRemainedCurrent(authority);
-  assertSealedAttemptGateAuthorityRemainedCurrent(authority.layout, sealedAttempt);
   return authority.snapshot;
 }
 
@@ -195,6 +195,7 @@ function loadFinalizedNodeOutputAuthority(input: LoadVerifiedNodeOutputInput): F
   const state = readRunState(layout);
   const graph = readPlannedGraphDocument(layout.graphPath);
   assertRunAuthorityIdentity(layout, state);
+  const sealedTaskManifest = readCurrentSealedTaskManifest(layout, graph);
 
   const candidate = selectFinalizedAttempt(state, graph, logicalNodeId, input.attemptId);
   const documents = readAuthorityDocuments(layout, candidate.attemptId);
@@ -211,7 +212,6 @@ function loadFinalizedNodeOutputAuthority(input: LoadVerifiedNodeOutputInput): F
     );
   }
   const gateContextFiles = readAndBindGateContextFiles(artifactDir, plannedNode, documents, publicationSnapshots);
-  const prerequisiteManifests = capturePrerequisiteManifestAuthority(layout, graph, plannedNode, documents);
 
   const snapshot = Object.freeze({
     run_root: layout.root,
@@ -220,6 +220,19 @@ function loadFinalizedNodeOutputAuthority(input: LoadVerifiedNodeOutputInput): F
     artifact_dir: artifactDir,
     outputs: Object.freeze(outputSnapshots)
   });
+  const sealedAttempt = resolveSealedAttemptGateAuthority(
+    sealedTaskManifest,
+    candidate.attemptId,
+    logicalNodeId,
+    plannedNode
+  );
+  const prerequisiteManifests = capturePrerequisiteManifestAuthority(
+    layout,
+    graph,
+    plannedNode,
+    documents,
+    sealedAttempt
+  );
   return {
     layout,
     state,
@@ -230,6 +243,7 @@ function loadFinalizedNodeOutputAuthority(input: LoadVerifiedNodeOutputInput): F
     publications: publicationSnapshots,
     gateContextFiles,
     prerequisiteManifests,
+    sealedAttempt,
     snapshot
   };
 }
@@ -248,11 +262,20 @@ function capturePrerequisiteManifestAuthority(
   layout: RunLayout,
   graph: PlannedGraphDocument,
   rootNode: PlannedGraphNodeDocument,
-  rootDocuments: AuthorityDocuments
+  rootDocuments: AuthorityDocuments,
+  sealedAttempt: SealedAttemptGateAuthority
 ): ReadonlyMap<string, Buffer> {
   const snapshots = new Map<string, Buffer>();
   const digestsByNode = new Map<string, string>();
   const visiting = new Set<string>();
+  const tasksByAttempt = new Map<string, SmithersTaskManifestTask>();
+  for (const task of sealedAttempt.authority.tasks) {
+    if (tasksByAttempt.has(task.attemptId)) {
+      throw invalidAuthority(`sealed Smithers task authority repeats attempt ${task.attemptId}`);
+    }
+    tasksByAttempt.set(task.attemptId, task);
+  }
+  const plannedNodesById = new Map(graph.nodes.map((node) => [node.id, node] as const));
 
   const capture = (
     manifest: ArtifactManifest,
@@ -276,12 +299,43 @@ function capturePrerequisiteManifestAuthority(
     snapshots.set(manifestPath, Buffer.from(manifestBytes));
 
     const seenPrerequisites = new Set<string>();
-    const prerequisiteConcreteIds: string[] = [];
+    const prerequisiteAttemptIds = manifest.prerequisite_manifests.map((prerequisite) => prerequisite.node_id);
     for (const prerequisite of manifest.prerequisite_manifests) {
       if (seenPrerequisites.has(prerequisite.node_id)) {
         throw invalidAuthority(`artifact manifest repeats prerequisite ${prerequisite.node_id}`);
       }
       seenPrerequisites.add(prerequisite.node_id);
+    }
+    const task = tasksByAttempt.get(manifest.node_id);
+    let expectedPrerequisiteAttemptIds: readonly string[];
+    if (task !== undefined) {
+      if (
+        task.concreteNodeId !== plannedNode.id ||
+        task.logicalNodeId !== plannedNode.logical_id ||
+        (plannedNode.workflow !== undefined && !plannedNode.workflow.task_node_ids.includes(`node:${task.attemptId}`))
+      ) {
+        throw invalidAuthority(`sealed task ${task.attemptId} does not bind its current planned node`);
+      }
+      expectedPrerequisiteAttemptIds = task.dependencies;
+    } else {
+      if (plannedNode.kind !== "reference" || manifest.node_id !== plannedNode.id) {
+        throw invalidAuthority(`artifact manifest ${manifest.node_id} has no exact sealed task declaration`);
+      }
+      expectedPrerequisiteAttemptIds = plannedNode.depends_on;
+    }
+    const expectedPrerequisites = new Set(expectedPrerequisiteAttemptIds);
+    if (
+      expectedPrerequisites.size !== expectedPrerequisiteAttemptIds.length ||
+      expectedPrerequisites.size !== seenPrerequisites.size ||
+      [...expectedPrerequisites].some((attemptId) => !seenPrerequisites.has(attemptId)) ||
+      prerequisiteAttemptIds.some((attemptId) => !expectedPrerequisites.has(attemptId))
+    ) {
+      throw invalidAuthority(
+        `artifact manifest prerequisite attempt IDs do not match the exact sealed dependencies for ${manifest.node_id}`
+      );
+    }
+
+    for (const prerequisite of manifest.prerequisite_manifests) {
       const prerequisitePath = safeResolveInside(
         safeResolveInside(layout.artifactsDir, prerequisite.node_id, "prerequisite artifact directory"),
         ARTIFACT_MANIFEST_FILE,
@@ -299,26 +353,37 @@ function capturePrerequisiteManifestAuthority(
       ) {
         throw invalidAuthority(`artifact manifest prerequisite identity is invalid for ${prerequisite.node_id}`);
       }
-      const concreteId = concreteNodeIdFromManifest(prerequisiteManifest) ?? prerequisiteManifest.node_id;
-      const candidates = graph.nodes.filter((node) => node.id === concreteId);
-      if (candidates.length !== 1) {
-        throw invalidAuthority(
-          `artifact manifest prerequisite ${prerequisite.node_id} does not bind one current planned node`
-        );
+      const prerequisiteTask = tasksByAttempt.get(prerequisite.node_id);
+      let prerequisiteNode: PlannedGraphNodeDocument | undefined;
+      if (prerequisiteTask !== undefined) {
+        prerequisiteNode = plannedNodesById.get(prerequisiteTask.concreteNodeId);
+        if (
+          prerequisiteNode === undefined ||
+          prerequisiteNode.kind !== "agentic" ||
+          prerequisiteNode.logical_id !== prerequisiteTask.logicalNodeId ||
+          (prerequisiteNode.workflow !== undefined &&
+            !prerequisiteNode.workflow.task_node_ids.includes(`node:${prerequisiteTask.attemptId}`)) ||
+          concreteNodeIdFromManifest(prerequisiteManifest) !== prerequisiteTask.concreteNodeId ||
+          prerequisiteManifest.provenance.logical_node_id !== prerequisiteTask.logicalNodeId
+        ) {
+          throw invalidAuthority(
+            `artifact manifest prerequisite ${prerequisite.node_id} does not bind its exact sealed attempt`
+          );
+        }
+      } else {
+        prerequisiteNode = plannedNodesById.get(prerequisite.node_id);
+        const concreteId = concreteNodeIdFromManifest(prerequisiteManifest);
+        if (
+          prerequisiteNode === undefined ||
+          prerequisiteNode.kind !== "reference" ||
+          (concreteId !== undefined && concreteId !== prerequisiteNode.id)
+        ) {
+          throw invalidAuthority(
+            `artifact manifest prerequisite ${prerequisite.node_id} has no sealed task or planned reference authority`
+          );
+        }
       }
-      prerequisiteConcreteIds.push(concreteId);
-      capture(prerequisiteManifest, prerequisiteBytes, candidates[0]!, prerequisitePath);
-    }
-    const expectedConcreteIds = new Set(plannedNode.depends_on);
-    const actualConcreteIds = new Set(prerequisiteConcreteIds);
-    if (
-      expectedConcreteIds.size !== actualConcreteIds.size ||
-      [...expectedConcreteIds].some((dependencyId) => !actualConcreteIds.has(dependencyId)) ||
-      prerequisiteConcreteIds.some((dependencyId) => !expectedConcreteIds.has(dependencyId))
-    ) {
-      throw invalidAuthority(
-        `artifact manifest prerequisites do not match the exact planned dependencies for ${plannedNode.id}`
-      );
+      capture(prerequisiteManifest, prerequisiteBytes, prerequisiteNode, prerequisitePath);
     }
     visiting.delete(manifest.node_id);
   };
@@ -349,19 +414,21 @@ function parseAndValidateManifest(bytes: Buffer, nodeId: string): ArtifactManife
   return value as ArtifactManifest;
 }
 
-function loadSealedAttemptGateAuthority(authority: FinalizedNodeOutputAuthority): SealedAttemptGateAuthority {
-  const snapshot = readCurrentSealedTaskManifest(authority.layout, authority.graph);
-  const matches = snapshot.document.tasks.filter((task) => task.attemptId === authority.snapshot.attempt_id);
+function resolveSealedAttemptGateAuthority(
+  snapshot: VerifiedSealedTaskManifestSnapshot,
+  attemptId: string,
+  logicalNodeId: string,
+  plannedNode: PlannedGraphNodeDocument
+): SealedAttemptGateAuthority {
+  const matches = snapshot.document.tasks.filter((task) => task.attemptId === attemptId);
   if (matches.length !== 1) {
     throw invalidAuthority(
-      `sealed task authority for finalized attempt ${authority.snapshot.attempt_id} is ${matches.length === 0 ? "missing" : "ambiguous"}`
+      `sealed task authority for finalized attempt ${attemptId} is ${matches.length === 0 ? "missing" : "ambiguous"}`
     );
   }
   const task: SmithersTaskManifestTask = matches[0]!;
-  if (task.concreteNodeId !== authority.plannedNode.id || task.logicalNodeId !== authority.snapshot.logical_node_id) {
-    throw invalidAuthority(
-      `sealed task authority for finalized attempt ${authority.snapshot.attempt_id} does not bind its planned node`
-    );
+  if (task.concreteNodeId !== plannedNode.id || task.logicalNodeId !== logicalNodeId) {
+    throw invalidAuthority(`sealed task authority for finalized attempt ${attemptId} does not bind its planned node`);
   }
   return { snapshot, authority: { task, tasks: snapshot.document.tasks } };
 }
@@ -746,7 +813,8 @@ function assertFinalizedAuthorityRemainedCurrent(authority: FinalizedNodeOutputA
     artifactDir: authority.artifactDir,
     publications: authority.publications,
     gateContextFiles: authority.gateContextFiles,
-    prerequisiteManifests: authority.prerequisiteManifests
+    prerequisiteManifests: authority.prerequisiteManifests,
+    sealedAttempt: authority.sealedAttempt
   });
 }
 
@@ -759,6 +827,7 @@ function assertAuthorityRemainedCurrent(input: {
   publications: ReadonlyMap<string, PublicationSnapshot>;
   gateContextFiles: ReadonlyMap<string, PublicationSnapshot>;
   prerequisiteManifests: ReadonlyMap<string, Buffer>;
+  sealedAttempt: SealedAttemptGateAuthority;
 }): void {
   const markerPath = safeResolveInside(
     verificationMarkerRoot(input.layout),
@@ -799,6 +868,7 @@ function assertAuthorityRemainedCurrent(input: {
   if (!isDeepStrictEqual(readPlannedGraphDocument(input.layout.graphPath), input.graph)) {
     throw changedOutput("planned graph changed while outputs were being read");
   }
+  assertSealedAttemptGateAuthorityRemainedCurrent(input.layout, input.sealedAttempt);
 }
 
 function verificationMarkerRoot(layout: RunLayout): string {

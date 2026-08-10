@@ -16,6 +16,7 @@ import {
   derivePropertyImplementationCoverage,
   getNodeArtifactDir,
   readRunState,
+  SMITHERS_TASK_MANIFEST_SCHEMA_VERSION,
   SMITHERS_TASK_METADATA_SCHEMA_VERSION,
   updateNodeState,
   validateRegisteredJsonFileSync,
@@ -24,6 +25,7 @@ import {
   writeJsonDurable,
   writeRunState,
   type ArtifactVerificationMarker,
+  type SmithersTaskManifestDocument,
   type SmithersTaskManifestTask
 } from "@ultrafuzz/artifacts";
 import { loadBuiltInPromptAssets } from "@ultrafuzz/prompts";
@@ -36,6 +38,7 @@ import {
   type ArtifactGateAttemptAuthority,
   type PlannedGraphNode
 } from "../src/index.js";
+import { WORKFLOW_CONTROL_INTEGRITY_SCHEMA_VERSION } from "../src/runtime-contracts.js";
 
 function tempProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-runtime-gates-"));
@@ -349,7 +352,142 @@ function verifyRequiredArtifactsForAttempt(
   if (existingIndex === -1) graph.nodes.push(planned);
   else graph.nodes[existingIndex] = planned;
   fs.writeFileSync(layout.graphPath, JSON.stringify(graph), "utf8");
+  writeSealedFixtureTaskAuthority(layout, graph.nodes, attemptAuthority?.tasks);
   return verifyRuntimeRequiredArtifactsForAttempt(layout, planned, attemptId, attemptAuthority, authenticated);
+}
+
+function fixtureAttemptIds(node: PlannedGraphNode): string[] {
+  const workflowAttempts = node.workflow?.task_node_ids.map((taskNodeId) => taskNodeId.replace(/^node:/u, ""));
+  if (workflowAttempts !== undefined && workflowAttempts.length > 0) return workflowAttempts;
+  if (node.model_fanout.length <= 1) return [node.id];
+  return node.model_fanout.map((model) => `${node.id}__model_${model.model_index}__attempt_${model.attempt_index}`);
+}
+
+function syntheticFixtureTasks(
+  layout: ReturnType<typeof createRunLayout>,
+  nodes: readonly PlannedGraphNode[]
+): SmithersTaskManifestTask[] {
+  const nodesById = new Map(nodes.map((node) => [node.id, node] as const));
+  const ancestorIds = (node: PlannedGraphNode): Set<string> => {
+    const ancestors = new Set<string>();
+    const pending = [...node.depends_on];
+    while (pending.length > 0) {
+      const dependencyId = pending.pop()!;
+      if (ancestors.has(dependencyId)) continue;
+      ancestors.add(dependencyId);
+      pending.push(...(nodesById.get(dependencyId)?.depends_on ?? []));
+    }
+    return ancestors;
+  };
+  return nodes
+    .filter((node) => node.kind === "agentic")
+    .flatMap((node) => {
+      const attempts = fixtureAttemptIds(node);
+      const dependencies = node.depends_on.flatMap((dependencyId) => {
+        const dependency = nodesById.get(dependencyId);
+        return dependency === undefined || dependency.kind === "reference"
+          ? [dependencyId]
+          : fixtureAttemptIds(dependency);
+      });
+      const dependencyArtifactDirs = nodes
+        .filter((candidate) => ancestorIds(node).has(candidate.id))
+        .flatMap((candidate) => fixtureAttemptIds(candidate))
+        .map((ancestorAttemptId) => getNodeArtifactDir(layout, ancestorAttemptId, { create: true }));
+      const dependencySmithersNodeIds = node.depends_on.flatMap((dependencyId) => {
+        const dependency = nodesById.get(dependencyId);
+        return dependency?.kind === "agentic"
+          ? fixtureAttemptIds(dependency).map((dependencyAttemptId) => `verify:${dependencyAttemptId}`)
+          : [];
+      });
+      return attempts.map((attemptId, modelIndex) => {
+        const task = smithersTaskForNode({
+          layout,
+          node,
+          attemptId,
+          dependencies,
+          dependencyArtifactDirs,
+          modelIndex
+        });
+        return {
+          ...task,
+          dependencySmithersNodeIds,
+          metadata: {
+            ...task.metadata,
+            dependencies: { ...task.metadata.dependencies, smithersNodeIds: dependencySmithersNodeIds }
+          }
+        };
+      });
+    });
+}
+
+function writeSealedFixtureTaskAuthority(
+  layout: ReturnType<typeof createRunLayout>,
+  nodes: readonly PlannedGraphNode[],
+  suppliedTasks?: readonly SmithersTaskManifestTask[]
+): void {
+  const sealedNodes = nodes.map((node) => {
+    if (node.kind !== "agentic" || node.workflow !== undefined) return node;
+    const attempts = fixtureAttemptIds(node);
+    return {
+      ...node,
+      workflow: { node_id: `node:${attempts[0]!}`, task_node_ids: attempts.map((attemptId) => `node:${attemptId}`) }
+    };
+  });
+  const graphDocument = JSON.parse(fs.readFileSync(layout.graphPath, "utf8")) as {
+    schema_version: string;
+    graph_version: string;
+    topology_version: number;
+    groups: Record<string, unknown>;
+    nodes: PlannedGraphNode[];
+  };
+  graphDocument.nodes = sealedNodes;
+  fs.writeFileSync(layout.graphPath, JSON.stringify(graphDocument), "utf8");
+  const tasks = suppliedTasks === undefined ? syntheticFixtureTasks(layout, sealedNodes) : [...suppliedTasks];
+  const smithersRoot = path.join(layout.root, "smithers");
+  fs.mkdirSync(smithersRoot, { recursive: true });
+  const tasksPath = path.join(smithersRoot, "tasks.json");
+  const document: SmithersTaskManifestDocument = {
+    schema_version: SMITHERS_TASK_MANIFEST_SCHEMA_VERSION,
+    run_id: layout.runId,
+    smithers_run_id: `ultrafuzz-${layout.runId}`,
+    workflow_name: FIXTURE_WORKFLOW_RUN_ID,
+    pinned_submodules: null,
+    tasks
+  };
+  writeJsonDurable(tasksPath, document);
+  const graphBytes = fs.readFileSync(layout.graphPath);
+  const taskBytes = fs.readFileSync(tasksPath);
+  const digest = (bytes: Buffer): string => createHash("sha256").update(bytes).digest("hex");
+  const emptyFile = { sha256: digest(Buffer.alloc(0)), size_bytes: 0 };
+  const state = readRunState(layout);
+  if (!/^[a-f0-9]{64}$/u.test(state.graph_fingerprint)) state.graph_fingerprint = "f".repeat(64);
+  if (!/^[a-f0-9]{64}$/u.test(state.config_fingerprint)) state.config_fingerprint = "e".repeat(64);
+  writeRunState(layout, state);
+  writeJsonDurable(path.join(smithersRoot, "control-integrity.json"), {
+    schema_version: WORKFLOW_CONTROL_INTEGRITY_SCHEMA_VERSION,
+    run_id: layout.runId,
+    files: {
+      graph: { sha256: digest(graphBytes), size_bytes: graphBytes.byteLength },
+      expanded_graph: emptyFile,
+      graph_fingerprint: emptyFile,
+      config: emptyFile,
+      tasks: { sha256: digest(taskBytes), size_bytes: taskBytes.byteLength },
+      input: emptyFile,
+      workflow: emptyFile,
+      evidence_workflow: emptyFile
+    },
+    execution_files: [],
+    bindings: {
+      run_id: layout.runId,
+      graph_fingerprint: state.graph_fingerprint,
+      config_fingerprint: state.config_fingerprint,
+      expected_state_node_ids: sealedNodes.map((candidate) => candidate.id).sort(),
+      expected_task_attempt_ids: tasks.map((task) => task.attemptId).sort(),
+      expected_task_node_ids: tasks
+        .flatMap((task) => [task.preparationSmithersNodeId, task.smithersNodeId, task.verifierSmithersNodeId])
+        .sort()
+    }
+  });
 }
 
 function boundOutput(
@@ -389,6 +527,10 @@ function smithersTaskForNode(input: {
   }));
   const artifactDir = getNodeArtifactDir(input.layout, input.attemptId, { create: true });
   const workspacePath = path.join(input.layout.workspacesDir, input.attemptId);
+  const model = input.node.model_fanout.find((candidate) => candidate.model_index === (input.modelIndex ?? 0));
+  const agentRef = model?.agent_ref ?? "CodexAgent";
+  const modelName = model?.model_name ?? "gpt-test";
+  const reasoningEffort = model?.reasoning_effort ?? "high";
   return {
     attemptId: input.attemptId,
     concreteNodeId: input.node.id,
@@ -396,9 +538,9 @@ function smithersTaskForNode(input: {
     preparationSmithersNodeId: `prepare:${input.attemptId}`,
     smithersNodeId: `node:${input.attemptId}`,
     verifierSmithersNodeId: `verify:${input.attemptId}`,
-    agentRef: "CodexAgent",
-    modelName: "gpt-test",
-    reasoningEffort: "high",
+    agentRef,
+    modelName,
+    reasoningEffort,
     dependencies,
     dependencySmithersNodeIds: dependencies.map((dependency) => `verify:${dependency}`),
     timeoutMs: 60_000,
@@ -442,12 +584,12 @@ function smithersTaskForNode(input: {
         attemptIndex: input.node.loop.attempt_index
       },
       model: {
-        profileId: "default",
-        agentRef: "CodexAgent",
-        modelName: "gpt-test",
-        reasoningEffort: "high",
-        modelIndex: input.modelIndex ?? 0,
-        attemptIndex: input.node.loop.attempt_index
+        profileId: model?.model_profile_id ?? "default",
+        agentRef,
+        modelName,
+        reasoningEffort,
+        modelIndex: model?.model_index ?? input.modelIndex ?? 0,
+        attemptIndex: model?.attempt_index ?? input.node.loop.attempt_index
       },
       workspace: {
         primitive: "worktree",
@@ -3272,6 +3414,7 @@ test("property fan-in authenticates every sealed model-fanout lens attempt indep
     attemptId: unrelatedNode.id
   });
   const tasks = [discoveryTask, ...lensTasks, currentTask, unrelatedTask];
+  writeSealedFixtureTaskAuthority(layout, [referenceNode, discoveryNode, lensNode, currentNode, unrelatedNode], tasks);
   const valid = verifyRuntimeRequiredArtifactsForAttempt(layout, currentNode, currentTask.attemptId, {
     task: currentTask,
     tasks
@@ -3284,6 +3427,11 @@ test("property fan-in authenticates every sealed model-fanout lens attempt indep
       (directory) => directory !== discoveryTask.artifactDir
     )
   };
+  writeSealedFixtureTaskAuthority(
+    layout,
+    [referenceNode, discoveryNode, lensNode, currentNode, unrelatedNode],
+    [discoveryTask, ...lensTasks, omittedAncestorTask, unrelatedTask]
+  );
   const omittedAncestor = verifyRuntimeRequiredArtifactsForAttempt(layout, currentNode, currentTask.attemptId, {
     task: omittedAncestorTask,
     tasks: [discoveryTask, ...lensTasks, omittedAncestorTask, unrelatedTask]
@@ -3298,6 +3446,11 @@ test("property fan-in authenticates every sealed model-fanout lens attempt indep
     ...currentTask,
     dependencyArtifactDirs: [...currentTask.dependencyArtifactDirs, unrelatedTask.artifactDir]
   };
+  writeSealedFixtureTaskAuthority(
+    layout,
+    [referenceNode, discoveryNode, lensNode, currentNode, unrelatedNode],
+    [discoveryTask, ...lensTasks, unrelatedAncestorTask, unrelatedTask]
+  );
   const unrelatedAncestor = verifyRuntimeRequiredArtifactsForAttempt(layout, currentNode, currentTask.attemptId, {
     task: unrelatedAncestorTask,
     tasks: [discoveryTask, ...lensTasks, unrelatedAncestorTask, unrelatedTask]
@@ -3308,9 +3461,15 @@ test("property fan-in authenticates every sealed model-fanout lens attempt indep
     JSON.stringify(unrelatedAncestor.diagnostics)
   );
 
+  const missingDeclaredTasks = [discoveryTask, lensTasks[0]!, currentTask, unrelatedTask];
+  writeSealedFixtureTaskAuthority(
+    layout,
+    [referenceNode, discoveryNode, lensNode, currentNode, unrelatedNode],
+    missingDeclaredTasks
+  );
   const missingDeclaredAttempt = verifyRuntimeRequiredArtifactsForAttempt(layout, currentNode, currentTask.attemptId, {
     task: currentTask,
-    tasks: [discoveryTask, lensTasks[0]!, currentTask, unrelatedTask]
+    tasks: missingDeclaredTasks
   });
   assert.equal(missingDeclaredAttempt.ok, false, JSON.stringify(missingDeclaredAttempt.diagnostics));
   assert.ok(
@@ -3321,6 +3480,7 @@ test("property fan-in authenticates every sealed model-fanout lens attempt indep
   );
 
   fs.unlinkSync(path.join(layout.root, ".ultrafuzz-verification", `${lensAttempts[1]}.json`));
+  writeSealedFixtureTaskAuthority(layout, [referenceNode, discoveryNode, lensNode, currentNode, unrelatedNode], tasks);
   const missingSecondAttempt = verifyRuntimeRequiredArtifactsForAttempt(layout, currentNode, currentTask.attemptId, {
     task: currentTask,
     tasks

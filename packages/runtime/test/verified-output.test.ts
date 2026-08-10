@@ -299,6 +299,87 @@ test("post-finalization property fan-in remains readable through sealed fanout a
     loaded.outputs.map((output) => output.path),
     faninOutputs.map((output) => output.path)
   );
+
+  const faninManifestPath = path.join(layout.artifactsDir, "property-specification-fanin", "artifact-manifest.json");
+  const originalManifest = readManifest(faninManifestPath);
+  const originalManifestBytes = fs.readFileSync(faninManifestPath);
+  assert.deepEqual(
+    originalManifest.prerequisite_manifests.map((entry) => entry.node_id),
+    lensAttemptIds
+  );
+  const alternateAttemptId = "property-specification-recon__model_2__attempt_0";
+  writeFileDurable(path.join(layout.artifactsDir, alternateAttemptId, lensOutput.path), lensDocument);
+  writeArtifactManifest({
+    layout,
+    nodeId: alternateAttemptId,
+    include: [lensOutput.path],
+    outputs: [lensOutput],
+    prerequisiteNodeIds: ["project-discovery"],
+    provenance: {
+      producer_node_id: alternateAttemptId,
+      logical_node_id: "property-specification-recon",
+      attempt_index: 0,
+      loop_index: 0,
+      model_index: 2,
+      agent_ref: "CodexAgent",
+      workflow_run_id: WORKFLOW_RUN_ID,
+      workflow_task_id: `node:${alternateAttemptId}`,
+      origin: "workflow",
+      metadata: { concrete_node_id: "property-specification-recon" }
+    }
+  });
+  const alternateManifestBytes = fs.readFileSync(
+    path.join(layout.artifactsDir, alternateAttemptId, "artifact-manifest.json")
+  );
+  const alternatePrerequisite = { node_id: alternateAttemptId, sha256: digest(alternateManifestBytes) };
+  const prerequisiteVariants = [
+    {
+      label: "missing",
+      prerequisites: originalManifest.prerequisite_manifests.slice(0, 1)
+    },
+    {
+      label: "extra",
+      prerequisites: [...originalManifest.prerequisite_manifests, alternatePrerequisite]
+    },
+    {
+      label: "substituted",
+      prerequisites: [alternatePrerequisite, originalManifest.prerequisite_manifests[1]!]
+    }
+  ] as const;
+  for (const variant of prerequisiteVariants) {
+    const mutatedManifest = {
+      ...structuredClone(originalManifest),
+      prerequisite_manifests: [...variant.prerequisites]
+    };
+    writeJsonDurable(faninManifestPath, mutatedManifest);
+    const mutatedBytes = fs.readFileSync(faninManifestPath);
+    sealFinalReportManifest(layout, "property-specification-fanin", digest(mutatedBytes));
+
+    assert.throws(
+      () =>
+        loadVerifiedNodeOutputSnapshot({
+          runRoot: layout.root,
+          logicalNodeId: "property-specification-fanin",
+          attemptId: "property-specification-fanin"
+        }),
+      (error: unknown) =>
+        error instanceof VerifiedOutputError &&
+        error.code === "VERIFIED_OUTPUT_AUTHORITY_INVALID" &&
+        /prerequisite attempt IDs do not match the exact sealed dependencies/iu.test(error.message),
+      `${variant.label} fanout prerequisite attempt must fail closed`
+    );
+    assert.deepEqual(fs.readFileSync(faninManifestPath), mutatedBytes);
+  }
+  fs.writeFileSync(faninManifestPath, originalManifestBytes);
+  sealFinalReportManifest(layout, "property-specification-fanin", digest(originalManifestBytes));
+  assert.equal(
+    loadVerifiedNodeOutputSnapshot({
+      runRoot: layout.root,
+      logicalNodeId: "property-specification-fanin",
+      attemptId: "property-specification-fanin"
+    }).attempt_id,
+    "property-specification-fanin"
+  );
 });
 
 test("post-verification report mutation is rejected even when the physical JSON remains shape-valid", () => {
@@ -411,7 +492,7 @@ test("controller manifest seal rejects a prerequisite digest rewrite even when t
   assert.deepEqual(fs.readFileSync(prerequisitePath), rewrittenPrerequisiteBytes);
 });
 
-test("sealed manifest prerequisites must exactly cover the current planned direct dependencies", () => {
+test("sealed manifest prerequisites must exactly cover the current sealed direct dependency attempts", () => {
   const fixture = createVerifiedReportFixture("verified-report-prerequisite-coverage", { withPrerequisite: true });
   const manifestPath = path.join(fixture.layout.artifactsDir, fixture.attemptId, "artifact-manifest.json");
   const manifest = readManifest(manifestPath);
@@ -425,7 +506,7 @@ test("sealed manifest prerequisites must exactly cover the current planned direc
     (error: unknown) =>
       error instanceof VerifiedOutputError &&
       error.code === "VERIFIED_OUTPUT_AUTHORITY_INVALID" &&
-      /prerequisites do not match the exact planned dependencies/iu.test(error.message)
+      /prerequisite attempt IDs do not match the exact sealed dependencies/iu.test(error.message)
   );
   assert.deepEqual(fs.readFileSync(manifestPath), manifestBytes);
 });
