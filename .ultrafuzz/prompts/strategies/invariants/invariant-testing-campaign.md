@@ -164,11 +164,14 @@ Use this configured invariant testing fuzzer timeout:
      in a non-empty top-level `contributing_backend_failures` array. Across all
      property-derived findings, these arrays must partition every
      property-derived failure from the sibling backend result records exactly
-     once: do not omit a failure or claim it in more than one finding. For the
-     shipped single-backend campaign, use each failure's exact `id` string. In
-     a project-owned multi-backend campaign, a plain ID is valid only when it is
-     unique across every sibling result record; otherwise use
-     `{"fuzzer_backend":"<backend>","failure_id":"<id>"}` to disambiguate it.
+     once: do not omit a failure or claim it in more than one finding. Every
+     entry is the canonical object
+     `{"fuzzer_backend":"<backend>","failure_id":"<id>","raw_result_ref":"<campaign-result-artifact>"}`.
+     Copy `fuzzer_backend` and `failure_id` from the exact sibling campaign
+     result containing the failure. Set `raw_result_ref` to that authenticated
+     campaign result artifact (for this node, `recon-fuzzer-results.json`), not
+     to the backend-internal `paths.raw_results` evidence file. Plain failure ID
+     strings and omitted `raw_result_ref` values are invalid.
    - Put `deduplication.pre_dedup_count` on every property-derived finding and
      set it to the number of entries in that finding's
      `contributing_backend_failures`. Every contributed failure's
@@ -416,7 +419,19 @@ below are illustrative):
 {
   "id": "failure-1",
   "property_ids": ["property-1"],
-  "contributing_backend_failures": ["failure-1", "failure-2"],
+  "fuzzer_backend": "recon",
+  "contributing_backend_failures": [
+    {
+      "fuzzer_backend": "recon",
+      "failure_id": "failure-1",
+      "raw_result_ref": "recon-fuzzer-results.json"
+    },
+    {
+      "fuzzer_backend": "recon",
+      "failure_id": "failure-2",
+      "raw_result_ref": "recon-fuzzer-results.json"
+    }
+  ],
   "deduplication": {
     "pre_dedup_count": 2
   }

@@ -4218,7 +4218,11 @@ function campaignFinding(id: string, propertyIds: string[]): Record<string, unkn
   return finding;
 }
 
-type CampaignFailureReferenceFixture = string | { fuzzer_backend: string; failure_id: string };
+type CampaignFailureReferenceFixture = string | { fuzzer_backend: string; failure_id: string; raw_result_ref?: string };
+
+function campaignResultRefForBackend(backend: string): string {
+  return backend === "recon" ? "recon-fuzzer-results.json" : `${backend}-results.json`;
+}
 
 function accountedCampaignFinding(
   id: string,
@@ -4227,9 +4231,21 @@ function accountedCampaignFinding(
   preDedupCount = contributions.length,
   fuzzerBackends: string[] = ["recon"]
 ): Record<string, unknown> {
+  const defaultBackend = fuzzerBackends[0] ?? "recon";
   return {
     ...campaignFinding(id, propertyIds),
-    contributing_backend_failures: contributions,
+    contributing_backend_failures: contributions.map((contribution) => {
+      const fuzzerBackend = typeof contribution === "string" ? defaultBackend : contribution.fuzzer_backend;
+      const failureId = typeof contribution === "string" ? contribution : contribution.failure_id;
+      return {
+        fuzzer_backend: fuzzerBackend,
+        failure_id: failureId,
+        raw_result_ref:
+          typeof contribution === "string"
+            ? campaignResultRefForBackend(fuzzerBackend)
+            : (contribution.raw_result_ref ?? campaignResultRefForBackend(fuzzerBackend))
+      };
+    }),
     deduplication: { pre_dedup_count: preDedupCount },
     ...(fuzzerBackends.length === 1 ? { fuzzer_backend: fuzzerBackends[0] } : { fuzzer_backends: fuzzerBackends })
   };
@@ -4791,7 +4807,21 @@ test("campaign partition binds finding backend provenance to its exact contribut
     layout,
     campaignId,
     "findings.json",
-    JSON.stringify([accountedCampaignFinding("failure-1", ["property-1"], ["failure-1"], 1, ["medusa"])])
+    JSON.stringify([
+      accountedCampaignFinding(
+        "failure-1",
+        ["property-1"],
+        [
+          {
+            fuzzer_backend: "recon",
+            failure_id: "failure-1",
+            raw_result_ref: "recon-fuzzer-results.json"
+          }
+        ],
+        1,
+        ["medusa"]
+      )
+    ])
   );
   writeCampaignSummary(layout, campaignId, 1, 1);
   const node = {
@@ -4804,6 +4834,115 @@ test("campaign partition binds finding backend provenance to its exact contribut
   assert.equal(result.ok, false);
   assert.ok(
     result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PARTITION_BACKEND_MISMATCH")
+  );
+});
+
+test("campaign contributions bind raw_result_ref to the authenticated campaign artifact", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-raw-result-authority" });
+  campaignPropertyCatalog(layout, ["property-1"]);
+  const campaignId = "stateful-invariant-campaign";
+  writeArtifact(
+    layout,
+    campaignId,
+    "recon-fuzzer-results.json",
+    JSON.stringify(currentCampaign(["property-1"], [{ id: "failure-1", property_ids: ["property-1"] }]))
+  );
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([
+      accountedCampaignFinding(
+        "failure-1",
+        ["property-1"],
+        [
+          {
+            fuzzer_backend: "recon",
+            failure_id: "failure-1",
+            raw_result_ref: campaignFixturePaths.raw_results
+          }
+        ]
+      )
+    ])
+  );
+  writeCampaignSummary(layout, campaignId, 1, 1);
+  const node = {
+    ...currentCampaignNode(["recon-fuzzer-results.json", "findings.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PARTITION_RAW_RESULT_MISMATCH")
+  );
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
+        diagnostic.details?.gate === "property-campaign-context-joins"
+    )
+  );
+});
+
+test("campaign failures and findings cannot name selected but non-implemented properties", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-implemented-authority" });
+  campaignPropertyCatalog(layout, ["property-1"]);
+  writeArtifact(
+    layout,
+    "stateful-invariant-implement-properties",
+    "implemented-properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v3",
+      selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-1"] },
+      properties: [
+        {
+          property_id: "property-1",
+          status: "deferred",
+          implementation_paths: [],
+          test_paths: [],
+          blocker: {
+            code: "fixture-deferred",
+            summary: "The fixture property is not implemented.",
+            next_action: "Implement the property before fuzzing it."
+          }
+        }
+      ]
+    })
+  );
+  const campaignId = "stateful-invariant-campaign";
+  writeArtifact(
+    layout,
+    campaignId,
+    "recon-fuzzer-results.json",
+    JSON.stringify(currentCampaign([], [{ id: "failure-1", property_ids: ["property-1"] }]))
+  );
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([accountedCampaignFinding("failure-1", ["property-1"], ["failure-1"])])
+  );
+  writeCampaignSummary(layout, campaignId, 1, 1);
+  const node = {
+    ...currentCampaignNode(["recon-fuzzer-results.json", "findings.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.filter((diagnostic) => diagnostic.code === "PROPERTY_IMPLEMENTATION_REFERENCE_INVALID").length >=
+      2
+  );
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
+        diagnostic.details?.gate === "property-campaign-context-joins"
+    )
   );
 });
 

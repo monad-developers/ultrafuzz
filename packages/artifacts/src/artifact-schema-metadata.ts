@@ -204,11 +204,16 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
   "finding.schema.json": {
     role: "subschema",
     contractIds: [],
-    semanticGates: ["finding-evidence-span-consistency", "finding-projected-reference-uniqueness"],
+    semanticGates: [
+      "finding-campaign-provenance-coherence",
+      "finding-evidence-span-consistency",
+      "finding-projected-reference-uniqueness"
+    ],
     typescriptExport: "findingJsonSchema",
     zodParser: "findingSchema"
   },
   "findings.schema.json": artifact("ultrafuzz/findings@2", "findingsJsonSchema", "findingsSchema", [
+    "findings-campaign-provenance-coherence",
     "findings-evidence-span-consistency",
     "findings-id-uniqueness"
   ]),

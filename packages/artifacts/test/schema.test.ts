@@ -950,14 +950,23 @@ test("the findings v2 schema retains typed campaign deduplication accounting", (
     confidence: "high",
     summary: "The accounting invariant failed.",
     property_ids: ["property-1"],
+    fuzzer_backends: ["medusa", "recon"],
     contributing_backend_failures: [
-      "failure-1",
+      { fuzzer_backend: "recon", failure_id: "failure-1", raw_result_ref: "recon-fuzzer-results.json" },
       { fuzzer_backend: "medusa", failure_id: "failure-2", raw_result_ref: "medusa-results.json" }
     ],
     deduplication: { pre_dedup_count: 2, basis: "same root cause" }
   };
   assert.equal(validateFindingSchema(finding).ok, true);
   assert.equal(validateArtifactContract("ultrafuzz/findings@2", JSON.stringify([finding])).ok, true);
+  assert.equal(validateFindingSchema({ ...finding, contributing_backend_failures: ["failure-1"] }).ok, false);
+  assert.equal(
+    validateFindingSchema({
+      ...finding,
+      contributing_backend_failures: [{ fuzzer_backend: "recon", failure_id: "failure-1" }]
+    }).ok,
+    false
+  );
   assert.equal(
     validateFindingSchema({ ...finding, contributing_backend_failures: [{ fuzzer_backend: "medusa" }] }).ok,
     false

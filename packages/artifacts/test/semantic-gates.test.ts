@@ -518,6 +518,32 @@ const fixtures = {
     positive: { records: [{ dedupe_key: "a" }] },
     negative: { records: [{ dedupe_key: "a" }, { dedupe_key: "a" }] }
   },
+  "finding-campaign-provenance-coherence": {
+    positive: {
+      property_ids: ["property-1"],
+      fuzzer_backend: "recon",
+      contributing_backend_failures: [
+        {
+          fuzzer_backend: "recon",
+          failure_id: "failure-1",
+          raw_result_ref: "recon-fuzzer-results.json"
+        }
+      ],
+      deduplication: { pre_dedup_count: 1 }
+    },
+    negative: {
+      property_ids: ["property-1"],
+      fuzzer_backend: "medusa",
+      contributing_backend_failures: [
+        {
+          fuzzer_backend: "recon",
+          failure_id: "failure-1",
+          raw_result_ref: "recon-fuzzer-results.json"
+        }
+      ],
+      deduplication: { pre_dedup_count: 1 }
+    }
+  },
   "finding-evidence-span-consistency": {
     positive: {
       evidence: [{ line: 4, end_line: 8 }, { line_ranges: [{ line: 10, end_line: 12 }, { line: 14 }] }]
@@ -536,6 +562,36 @@ const fixtures = {
   "findings-id-uniqueness": {
     positive: [{ id: "a" }],
     negative: [{ id: "a" }, { id: "a" }]
+  },
+  "findings-campaign-provenance-coherence": {
+    positive: [
+      {
+        property_ids: ["property-1"],
+        fuzzer_backend: "recon",
+        contributing_backend_failures: [
+          {
+            fuzzer_backend: "recon",
+            failure_id: "failure-1",
+            raw_result_ref: "recon-fuzzer-results.json"
+          }
+        ],
+        deduplication: { pre_dedup_count: 1 }
+      }
+    ],
+    negative: [
+      {
+        property_ids: ["property-1"],
+        fuzzer_backends: ["recon", "medusa"],
+        contributing_backend_failures: [
+          {
+            fuzzer_backend: "recon",
+            failure_id: "failure-1",
+            raw_result_ref: "recon-fuzzer-results.json"
+          }
+        ],
+        deduplication: { pre_dedup_count: 1 }
+      }
+    ]
   },
   "findings-evidence-span-consistency": {
     positive: [

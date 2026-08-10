@@ -134,31 +134,23 @@
         "minItems": 1,
         "type": "array",
         "items": {
-          "anyOf": [
-            {
+          "type": "object",
+          "properties": {
+            "fuzzer_backend": {
               "type": "string",
               "minLength": 1
             },
-            {
-              "type": "object",
-              "properties": {
-                "fuzzer_backend": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "failure_id": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "raw_result_ref": {
-                  "type": "string",
-                  "minLength": 1
-                }
-              },
-              "required": ["fuzzer_backend", "failure_id"],
-              "additionalProperties": false
+            "failure_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "raw_result_ref": {
+              "type": "string",
+              "minLength": 1
             }
-          ]
+          },
+          "required": ["fuzzer_backend", "failure_id", "raw_result_ref"],
+          "additionalProperties": false
         },
         "uniqueItems": true
       },

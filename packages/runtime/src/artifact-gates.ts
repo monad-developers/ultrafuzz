@@ -2646,10 +2646,10 @@ function verifyCampaignPropertyReferences(
   );
   for (const reference of references) {
     for (const propertyId of reference.propertyIds) {
-      if (catalog.properties.some((property) => property.id === propertyId) && !implementedIds.has(propertyId)) {
+      if (!implementedIds.has(propertyId)) {
         diagnostics.push({
           code: "PROPERTY_IMPLEMENTATION_REFERENCE_INVALID",
-          message: `Canonical property ${JSON.stringify(propertyId)} was not recorded with implemented status`,
+          message: `Property ${JSON.stringify(propertyId)} is outside the exact implemented-property set`,
           severity: "error",
           source: "property-provenance",
           path: reference.path
@@ -2660,12 +2660,17 @@ function verifyCampaignPropertyReferences(
   return diagnostics;
 }
 
-type CampaignFailureReference = string | { fuzzer_backend: string; failure_id: string };
+interface CampaignFailureReference {
+  fuzzer_backend: string;
+  failure_id: string;
+  raw_result_ref: string;
+}
 
 interface PartitionedCampaignFailure {
   key: string;
   id: string;
   fuzzerBackend?: string;
+  rawResultRef: string;
   propertyIds: readonly string[];
   path: string;
 }
@@ -2681,6 +2686,7 @@ function campaignFailurePartitionDiagnostics(
       key: `${campaignIndex}\u0000${failureIndex}`,
       id: failure.id,
       ...(campaign.value.fuzzer_backend === undefined ? {} : { fuzzerBackend: campaign.value.fuzzer_backend }),
+      rawResultRef: path.basename(campaign.path),
       propertyIds: failure.property_ids ?? [],
       path: `${campaign.path}#$.failures[${failureIndex}].id`
     }))
@@ -2749,10 +2755,7 @@ function campaignFailurePartitionDiagnostics(
     for (const [referenceIndex, reference] of references.entries()) {
       const referencePath = `${contributionPath}[${referenceIndex}]`;
       const candidates =
-        typeof reference === "string"
-          ? (failuresById.get(reference) ?? [])
-          : (failuresByBackendAndId.get(campaignBackendFailureKey(reference.fuzzer_backend, reference.failure_id)) ??
-            []);
+        failuresByBackendAndId.get(campaignBackendFailureKey(reference.fuzzer_backend, reference.failure_id)) ?? [];
       if (candidates.length === 0) {
         diagnostics.push({
           code: "PROPERTY_CAMPAIGN_PARTITION_REFERENCE_UNKNOWN",
@@ -2774,6 +2777,16 @@ function campaignFailurePartitionDiagnostics(
         continue;
       }
       const failure = candidates[0]!;
+      if (reference.raw_result_ref !== failure.rawResultRef) {
+        diagnostics.push({
+          code: "PROPERTY_CAMPAIGN_PARTITION_RAW_RESULT_MISMATCH",
+          message: `Finding ${JSON.stringify(finding.id)} contribution raw_result_ref must name the authenticated campaign result ${JSON.stringify(failure.rawResultRef)}`,
+          severity: "error",
+          source: "property-provenance",
+          path: `${referencePath}.raw_result_ref`
+        });
+        continue;
+      }
       if (failure.propertyIds.length === 0) {
         diagnostics.push({
           code: "PROPERTY_CAMPAIGN_PARTITION_REFERENCE_UNKNOWN",
@@ -2842,10 +2855,10 @@ function campaignFailurePartitionDiagnostics(
           ? Object.prototype.hasOwnProperty.call(finding, "fuzzer_backend")
           : Object.prototype.hasOwnProperty.call(finding, "fuzzer_backends");
     if (
-      ownedBackends.valid &&
-      (missingBackendCount > 0 ||
-        !hasExpectedBackendShape ||
-        !sameStringSet(ownedBackends.backends, contributedBackends))
+      !ownedBackends.valid ||
+      missingBackendCount > 0 ||
+      !hasExpectedBackendShape ||
+      !sameStringSet(ownedBackends.backends, contributedBackends)
     ) {
       diagnostics.push({
         code: "PROPERTY_CAMPAIGN_PARTITION_BACKEND_MISMATCH",
@@ -2877,16 +2890,17 @@ function campaignFailureReferences(value: unknown): CampaignFailureReference[] |
   if (!Array.isArray(value)) return undefined;
   const references: CampaignFailureReference[] = [];
   for (const reference of value) {
-    if (typeof reference === "string") {
-      references.push(reference);
-      continue;
-    }
     if (
       isRecord(reference) &&
       typeof reference.fuzzer_backend === "string" &&
-      typeof reference.failure_id === "string"
+      typeof reference.failure_id === "string" &&
+      typeof reference.raw_result_ref === "string"
     ) {
-      references.push({ fuzzer_backend: reference.fuzzer_backend, failure_id: reference.failure_id });
+      references.push({
+        fuzzer_backend: reference.fuzzer_backend,
+        failure_id: reference.failure_id,
+        raw_result_ref: reference.raw_result_ref
+      });
     }
   }
   return references;

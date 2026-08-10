@@ -126,14 +126,17 @@ const relatedFindingSchema = z.strictObject({
   dedupe_key: nonEmptyString.optional()
 });
 
-const backendFailureReferenceSchema = z.union([
-  nonEmptyString,
-  z.strictObject({
-    fuzzer_backend: nonEmptyString,
-    failure_id: nonEmptyString,
-    raw_result_ref: nonEmptyString.optional()
-  })
-]);
+/**
+ * An exact reference to one failure in one authenticated property-campaign
+ * result artifact. The backend and result artifact are deliberately repeated:
+ * failure IDs are only unique inside a backend result, and downstream joins
+ * must never infer either part from array position or a filename convention.
+ */
+const backendFailureReferenceSchema = z.strictObject({
+  fuzzer_backend: nonEmptyString,
+  failure_id: nonEmptyString,
+  raw_result_ref: nonEmptyString
+});
 
 const detectionRateSchema = z.strictObject({
   strategy: nonEmptyString,

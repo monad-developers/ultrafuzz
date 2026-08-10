@@ -315,6 +315,58 @@ function sameStringSet(left: readonly string[], right: readonly string[]): boole
   return a.length === b.length && a.every((value, index) => value === b[index]);
 }
 
+function findingCampaignProvenanceIssues(document: unknown, findingPath = "$"): SemanticGateIssue[] {
+  if (!isRecord(document)) return [];
+  const propertyIds = stringArray(document.property_ids);
+  const contributions = arrayAt(document, ["contributing_backend_failures"]);
+  const hasCampaignProvenance =
+    propertyIds.length > 0 ||
+    contributions.length > 0 ||
+    Object.prototype.hasOwnProperty.call(document, "deduplication") ||
+    Object.prototype.hasOwnProperty.call(document, "fuzzer_backend") ||
+    Object.prototype.hasOwnProperty.call(document, "fuzzer_backends");
+  if (!hasCampaignProvenance) return [];
+
+  const issues: SemanticGateIssue[] = [];
+  if (propertyIds.length > 0 && contributions.length === 0) {
+    issues.push(
+      issue(
+        `${findingPath}.contributing_backend_failures`,
+        "A property-derived finding must name its contributing backend failures"
+      )
+    );
+  }
+  if (propertyIds.length > 0 && !isRecord(document.deduplication)) {
+    issues.push(
+      issue(`${findingPath}.deduplication`, "A property-derived finding must declare deduplication accounting")
+    );
+  }
+
+  const contributionBackends = sortedUnique(
+    contributions.flatMap((contribution) => stringField(contribution, "fuzzer_backend") ?? [])
+  );
+  const ownedBackends =
+    typeof document.fuzzer_backend === "string" ? [document.fuzzer_backend] : stringArray(document.fuzzer_backends);
+  const hasCanonicalOwnershipShape =
+    contributionBackends.length === 1
+      ? typeof document.fuzzer_backend === "string" &&
+        !Object.prototype.hasOwnProperty.call(document, "fuzzer_backends")
+      : contributionBackends.length > 1
+        ? Array.isArray(document.fuzzer_backends) && !Object.prototype.hasOwnProperty.call(document, "fuzzer_backend")
+        : !Object.prototype.hasOwnProperty.call(document, "fuzzer_backend") &&
+          !Object.prototype.hasOwnProperty.call(document, "fuzzer_backends");
+  if (!hasCanonicalOwnershipShape || !sameStringSet(ownedBackends, contributionBackends)) {
+    issues.push(
+      issue(findingPath, "Finding backend ownership must exactly equal the backends in contributing_backend_failures")
+    );
+  }
+  return issues;
+}
+
+function findingArrayCampaignProvenanceIssues(document: unknown): SemanticGateIssue[] {
+  return arrayAt(document, []).flatMap((finding, index) => findingCampaignProvenanceIssues(finding, `$[${index}]`));
+}
+
 function strategyDetectionHitIdentityIssues(document: unknown): SemanticGateIssue[] {
   const issues: SemanticGateIssue[] = [];
   for (const [detectionIndex, detection] of arrayAt(document, []).entries()) {
@@ -2234,6 +2286,16 @@ function propertyCampaignDocumentIssues(document: unknown): SemanticGateIssue[] 
     })
   );
   const propertyResults = arrayAt(document, ["property_results"]);
+  const failureIdsByProperty = new Map<string, string[]>();
+  for (const failure of failures) {
+    const failureId = stringField(failure, "id");
+    if (failureId === undefined) continue;
+    for (const propertyId of stringArray(at(failure, ["property_ids"]))) {
+      const ids = failureIdsByProperty.get(propertyId) ?? [];
+      ids.push(failureId);
+      failureIdsByProperty.set(propertyId, ids);
+    }
+  }
 
   if (booleanField(execution, "usable_results") === false && failures.length > 0) {
     issues.push(issue("$.failures", "A campaign without usable results cannot publish observed failures"));
@@ -2244,9 +2306,7 @@ function propertyCampaignDocumentIssues(document: unknown): SemanticGateIssue[] 
     if (propertyId === undefined) continue;
     const resultPath = `$.property_results[${resultIndex}]`;
     const actualFailureIds = stringArray(at(result, ["failure_ids"]));
-    const expectedFailureIds = failures.flatMap((failure) =>
-      stringArray(at(failure, ["property_ids"])).includes(propertyId) ? (stringField(failure, "id") ?? []) : []
-    );
+    const expectedFailureIds = failureIdsByProperty.get(propertyId) ?? [];
     if (!sameStringSet(actualFailureIds, expectedFailureIds)) {
       issues.push(
         issue(
@@ -2380,6 +2440,31 @@ function propertyCampaignContextJoinIssues(document: unknown, context: SemanticG
       )
     );
   }
+  const implementedIdSet = new Set(implementedIds);
+  for (const [failureIndex, failure] of arrayAt(document, ["failures"]).entries()) {
+    for (const [propertyIndex, propertyId] of stringArray(at(failure, ["property_ids"])).entries()) {
+      if (!implementedIdSet.has(propertyId)) {
+        issues.push(
+          issue(
+            `$.failures[${failureIndex}].property_ids[${propertyIndex}]`,
+            `Campaign failure references property ${JSON.stringify(propertyId)} outside the exact implemented-property set`
+          )
+        );
+      }
+    }
+  }
+  for (const [findingIndex, finding] of findings.entries()) {
+    for (const [propertyIndex, propertyId] of stringArray(at(finding, ["property_ids"])).entries()) {
+      if (!implementedIdSet.has(propertyId)) {
+        issues.push(
+          issue(
+            `$.findings_ref#${findingIndex}.property_ids[${propertyIndex}]`,
+            `Property-derived finding references property ${JSON.stringify(propertyId)} outside the exact implemented-property set`
+          )
+        );
+      }
+    }
+  }
 
   const backend = stringField(document, "fuzzer_backend");
   const failures = arrayAt(document, ["failures"]);
@@ -2408,17 +2493,25 @@ function propertyCampaignContextJoinIssues(document: unknown, context: SemanticG
     }
     const resolved: Readonly<Record<string, unknown>>[] = [];
     for (const [contributionIndex, contribution] of contributions.entries()) {
-      const failureId =
-        typeof contribution === "string"
-          ? contribution
-          : stringField(contribution, "fuzzer_backend") === backend
-            ? stringField(contribution, "failure_id")
-            : undefined;
+      const contributionPath = `$.findings_ref#${findingIndex}.contributing_backend_failures[${contributionIndex}]`;
+      const contributionBackend = stringField(contribution, "fuzzer_backend");
+      const failureId = contributionBackend === backend ? stringField(contribution, "failure_id") : undefined;
+      if (contributionBackend !== backend) {
+        issues.push(issue(contributionPath, "Finding contribution backend does not match this campaign result"));
+      }
+      if (stringField(contribution, "raw_result_ref") !== context.artifactIdentity!.artifactPath) {
+        issues.push(
+          issue(
+            `${contributionPath}.raw_result_ref`,
+            "Finding contribution raw_result_ref must name this authenticated campaign result artifact"
+          )
+        );
+      }
       const failure = failureId === undefined ? undefined : propertyFailures.get(failureId);
       if (failure === undefined) {
         issues.push(
           issue(
-            `$.findings_ref#${findingIndex}.contributing_backend_failures[${contributionIndex}]`,
+            contributionPath,
             "Finding contribution does not name a property-derived failure from this backend record"
           )
         );
@@ -2538,10 +2631,15 @@ function propertyCampaignContextJoinIssues(document: unknown, context: SemanticG
       )
     );
   }
+  const failuresById = new Map(
+    failures.flatMap((failure) => {
+      const failureId = stringField(failure, "id");
+      return failureId === undefined ? [] : [[failureId, failure] as const];
+    })
+  );
   for (const [rowIndex, row] of reproducerRows.entries()) {
     const findingId = stringField(row, "finding_id");
-    const failure =
-      findingId === undefined ? undefined : failures.find((entry) => stringField(entry, "id") === findingId);
+    const failure = findingId === undefined ? undefined : failuresById.get(findingId);
     if (failure === undefined) continue;
     compare(
       `$.campaign_summary_ref#reproducer_refs[${rowIndex}].path`,
@@ -3026,7 +3124,9 @@ const gateSpecifications = {
     uniqueFieldGate([["records"]], "dedupe_key", "finding lifecycle dedupe key")
   ),
   "finding-evidence-span-consistency": documentGate((document) => findingEvidenceSpanIssues(document)),
+  "finding-campaign-provenance-coherence": documentGate((document) => findingCampaignProvenanceIssues(document)),
   "finding-projected-reference-uniqueness": documentGate(findingProjectedReferenceIssues),
+  "findings-campaign-provenance-coherence": documentGate(findingArrayCampaignProvenanceIssues),
   "findings-evidence-span-consistency": documentGate(findingArrayEvidenceSpanIssues),
   "findings-id-uniqueness": documentGate(uniqueFieldGate([[]], "id", "finding ID")),
   "generated-test-path-exists": contextualGate(

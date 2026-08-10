@@ -960,7 +960,18 @@ test("Ajv and retained Zod parsers agree on canonical unique-array constraints",
   const finding = structuredClone(
     (contractFixtures["ultrafuzz/findings@2"]!.valid as Array<Record<string, unknown>>)[0]!
   );
-  finding.contributing_backend_failures = ["backend-failure-1", "backend-failure-1"];
+  finding.contributing_backend_failures = [
+    {
+      fuzzer_backend: "recon",
+      failure_id: "backend-failure-1",
+      raw_result_ref: "recon-fuzzer-results.json"
+    },
+    {
+      fuzzer_backend: "recon",
+      failure_id: "backend-failure-1",
+      raw_result_ref: "recon-fuzzer-results.json"
+    }
+  ];
 
   const implementedBase = contractFixtures["ultrafuzz/implemented-properties@3"]!.valid as Record<string, unknown>;
   const implementedWithDuplicateImplementationPaths: Record<string, unknown> & {

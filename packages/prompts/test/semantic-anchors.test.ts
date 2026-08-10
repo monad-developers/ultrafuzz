@@ -421,7 +421,11 @@ describe("prompt semantic anchors", () => {
     expect(campaign).toContain("`deduplication.pre_dedup_count`");
     expect(flatCampaign).toContain("must be a subset of the finding's `property_ids`");
     expect(flatCampaign).toContain("must be the exact union across those contributed failures");
-    expect(campaign).toContain('{"fuzzer_backend":"<backend>","failure_id":"<id>"}');
+    expect(campaign).toContain(
+      '{"fuzzer_backend":"<backend>","failure_id":"<id>","raw_result_ref":"<campaign-result-artifact>"}'
+    );
+    expect(flatCampaign).toContain("not to the backend-internal `paths.raw_results` evidence file");
+    expect(flatCampaign).toContain("Plain failure ID strings and omitted `raw_result_ref` values are invalid");
   });
 
   it("publishes runtime-owned workspace patches for every invariant handoff", () => {
