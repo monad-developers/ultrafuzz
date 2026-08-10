@@ -78,7 +78,7 @@ describe("terminal benchmark disposition", () => {
     expect(inspect).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps missing artifacts fatal", async () => {
+  it("classifies a verifier-backed missing artifact as a terminal task failure", async () => {
     const disposition = classifyTerminalDisposition(
       {
         nodes: {
@@ -98,9 +98,30 @@ describe("terminal benchmark disposition", () => {
       throw failure;
     });
 
-    await expect(runBenchmarkExecutionOnce(run, async () => disposition)).rejects.toBe(failure);
-    expect(disposition).toEqual({ kind: "operational-failure", failedTasks: 0, operationalFailures: 1 });
-    expect(canScoreBenchmarkRow("failed", disposition)).toBe(false);
+    await expect(runBenchmarkExecutionOnce(run, async () => disposition)).resolves.toEqual(disposition);
+    expect(disposition).toEqual({ kind: "genuine-task-failures", failedTasks: 1, operationalFailures: 0 });
+    expect(canScoreBenchmarkRow("failed", disposition)).toBe(true);
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it("classifies a verifier-backed schema violation as a terminal task failure", () => {
+    const disposition = classifyTerminalDisposition(
+      {
+        nodes: {
+          "task-one": {
+            ...verifiedFailure,
+            provenance: {
+              ...verifiedFailure.provenance,
+              output_contracts: { ok: false, missing: [] }
+            }
+          }
+        }
+      },
+      { tasks: [task] }
+    );
+
+    expect(disposition).toEqual({ kind: "genuine-task-failures", failedTasks: 1, operationalFailures: 0 });
+    expect(canScoreBenchmarkRow("failed", disposition)).toBe(true);
   });
 
   it("requires a structured task-output validation marker", () => {

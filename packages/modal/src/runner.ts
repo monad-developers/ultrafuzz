@@ -2277,10 +2277,28 @@ export function isModalRecoveryResultComplete(
   canonical: ModalRecoveryCanonicalProgress | undefined,
   workerStatus: ModalWorkerStatus | undefined
 ): boolean {
-  return (
-    canonical !== undefined &&
+  if (canonical === undefined) return false;
+  if (
     canonical.successful_nodes === canonical.total_nodes &&
     isModalWorkerStatusComplete(workerStatus, canonical.total_nodes)
+  ) {
+    return true;
+  }
+
+  // A verifier-backed task-output failure is a completed task outcome, not a
+  // stalled worker. Bind the terminal worker counts to the same canonical
+  // progress snapshot before settling the overseer row so an unrelated or
+  // partial failure contract cannot suppress infrastructure recovery.
+  return (
+    canonical.status === "failed" &&
+    workerStatus?.terminal === true &&
+    workerStatus.category === "genuine-task-outcome" &&
+    workerStatus.retryable === false &&
+    workerStatus.error_code === "genuine-evaluation-failure" &&
+    workerStatus.node_counts?.succeeded === canonical.successful_nodes &&
+    workerStatus.node_counts.failed === canonical.total_nodes - canonical.successful_nodes &&
+    workerStatus.node_counts.failed > 0 &&
+    workerStatus.node_counts.remaining === 0
   );
 }
 

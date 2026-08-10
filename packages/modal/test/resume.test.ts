@@ -255,7 +255,7 @@ describe("Modal durable evaluation resume", () => {
     ]);
   });
 
-  it("resumes terminal checkpoints that still have failed or unfinished logical rows", () => {
+  it("resumes operational checkpoints but never retries a terminal task outcome", () => {
     expect(
       modalDurableRunNeedsResume(
         { run_id: "durable-run-one", status: "failed" },
@@ -271,9 +271,17 @@ describe("Modal durable evaluation resume", () => {
     expect(
       modalDurableRunNeedsResume(
         { run_id: "durable-run-one", status: "failed" },
-        { succeeded: 58, failed: 1, remaining: 0 }
+        { succeeded: 58, failed: 1, remaining: 0 },
+        { kind: "operational-failure", failedTasks: 0, operationalFailures: 1 }
       )
     ).toBe(true);
+    expect(
+      modalDurableRunNeedsResume(
+        { run_id: "durable-run-one", status: "failed" },
+        { succeeded: 58, failed: 1, remaining: 0 },
+        { kind: "genuine-task-failures", failedTasks: 1, operationalFailures: 0 }
+      )
+    ).toBe(false);
     expect(
       modalDurableRunNeedsResume(
         { run_id: "durable-run-one", status: "succeeded" },

@@ -54,7 +54,12 @@ export function modalDurableResumeCommand(cliPath: string, runId: string, projec
   return ["node", cliPath, "resume", runId, "--project", projectRoot, "--force", "--retry-failed", "--json"];
 }
 
-export function modalDurableRunNeedsResume(state: ModalResumeRunState, counts: ModalResumeCheckpointCounts): boolean {
+export function modalDurableRunNeedsResume(
+  state: ModalResumeRunState,
+  counts: ModalResumeCheckpointCounts,
+  disposition?: TerminalDisposition
+): boolean {
+  if (disposition?.kind === "genuine-task-failures") return false;
   if (!isTerminalRunStatus(state.status)) return true;
   return counts.failed > 0 || counts.remaining > 0;
 }

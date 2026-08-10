@@ -282,7 +282,7 @@ async function resumeExistingEvaluation(
   modelWorkStarted = true;
   let disposition = await terminalDispositionForState(workspace, state);
   const checkpoint = await readWorkerCheckpoint(workspace.target);
-  if (modalDurableRunNeedsResume(state, checkpoint.counts)) {
+  if (modalDurableRunNeedsResume(state, checkpoint.counts, disposition)) {
     const stateBeforeResume = state;
     const resumeRunId = state.run_id;
     await runBenchmarkExecutionOnce(
