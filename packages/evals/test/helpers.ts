@@ -578,6 +578,7 @@ export function writeVerifiedFinalReport(input: {
   runId?: string;
   report?: Record<string, unknown>;
   accounting?: Record<string, unknown>;
+  reportJsonRelativePath?: string;
 }): { reportPath: string; markdownPath: string; reportBytes: Buffer; markdownBytes: Buffer } {
   const runId = input.runId ?? path.basename(input.runRoot);
   const report =
@@ -606,7 +607,7 @@ export function writeVerifiedFinalReport(input: {
   const projection = projectCanonicalFinalReport(report);
   const reportBytes = Buffer.from(`${JSON.stringify(projection.report, null, 2)}\n`, "utf8");
   const markdownBytes = Buffer.from(projection.markdown, "utf8");
-  const outputs = verifiedFinalReportOutputs();
+  const outputs = verifiedFinalReportOutputs(input.reportJsonRelativePath);
   const graph = currentPlannedGraph();
   graph.nodes[0]!.outputs = outputs;
   graph.nodes[0]!.workflow = {
@@ -618,14 +619,14 @@ export function writeVerifiedFinalReport(input: {
   const verifierTaskId = "verify:final-report";
 
   const layout = layoutForRunRoot(input.runRoot, runId);
-  const reportPath = path.join(layout.artifactsDir, "final-report", "report.json");
+  const reportPath = path.join(layout.artifactsDir, "final-report", input.reportJsonRelativePath ?? "report.json");
   const markdownPath = path.join(layout.artifactsDir, "final-report", "report.md");
   writeFileDurable(reportPath, reportBytes);
   writeFileDurable(markdownPath, markdownBytes);
   writeArtifactManifest({
     layout,
     nodeId: "final-report",
-    include: ["report.md", "report.json"],
+    include: outputs.map((output) => output.path),
     outputs,
     provenance: {
       producer_node_id: "final-report",
@@ -646,11 +647,11 @@ export function writeVerifiedFinalReport(input: {
     node_id: "final-report",
     artifacts: outputs.map((output) => ({
       ...output,
-      sha256: sha256Bytes(output.path === "report.json" ? reportBytes : markdownBytes)
+      sha256: sha256Bytes(output.contract === "ultrafuzz/report@2" ? reportBytes : markdownBytes)
     })),
     publications: outputs.map((output) => ({
       path: output.path,
-      sha256: sha256Bytes(output.path === "report.json" ? reportBytes : markdownBytes)
+      sha256: sha256Bytes(output.contract === "ultrafuzz/report@2" ? reportBytes : markdownBytes)
     }))
   };
   writeJsonDurable(path.join(layout.root, ".ultrafuzz-verification", "final-report.json"), marker);
@@ -816,7 +817,7 @@ function writeSealedFinalReportAuthority(
   });
 }
 
-function verifiedFinalReportOutputs(): ArtifactManifestOutputContract[] {
+function verifiedFinalReportOutputs(reportJsonRelativePath = "report.json"): ArtifactManifestOutputContract[] {
   const reportBinding = artifactContractSchemaBinding("ultrafuzz/report@2");
   if (reportBinding === undefined) throw new Error("missing current report schema binding");
   return [
@@ -827,7 +828,7 @@ function verifiedFinalReportOutputs(): ArtifactManifestOutputContract[] {
       primary: true
     },
     {
-      path: "report.json",
+      path: reportJsonRelativePath,
       contract: "ultrafuzz/report@2",
       contract_digest: artifactContractDefinition("ultrafuzz/report@2").digest,
       ...reportBinding,

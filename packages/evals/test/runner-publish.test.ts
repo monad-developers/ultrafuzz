@@ -21,7 +21,8 @@ import {
   initializeTestGitRepository,
   testRow,
   testSuite,
-  writeRunFixture
+  writeRunFixture,
+  writeVerifiedFinalReport
 } from "./helpers.js";
 
 const T0 = "2026-07-09T00:00:00.000Z";
@@ -892,13 +893,26 @@ describe("runner", () => {
 });
 
 describe("eval publish (post-hoc replay)", () => {
-  function publishFixture(): { projectRoot: string; evalRunRoot: string } {
+  function publishFixture(input: { reportJsonRelativePath?: string; sealFinalReport?: boolean } = {}): {
+    projectRoot: string;
+    evalRunRoot: string;
+  } {
     const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-publish-"));
     const projectRoot = path.join(base, "project");
     const suite = testSuite(path.join(base, "gt"));
     const row = testRow(suite);
     const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
     terminalRunFixture(runRoot);
+    const verifiedReport =
+      input.sealFinalReport === false
+        ? undefined
+        : writeVerifiedFinalReport({
+            runRoot,
+            runId: "run-1",
+            ...(input.reportJsonRelativePath === undefined
+              ? {}
+              : { reportJsonRelativePath: input.reportJsonRelativePath })
+          });
     const evalRunRoot = path.join(projectRoot, ".ultrafuzz", "evals", "runs", "eval-1");
     fs.mkdirSync(evalRunRoot, { recursive: true });
     fs.writeFileSync(
@@ -909,7 +923,10 @@ describe("eval publish (post-hoc replay)", () => {
     fs.writeFileSync(path.join(evalRunRoot, "matrix.json"), JSON.stringify([row]), "utf8");
     fs.writeFileSync(
       path.join(evalRunRoot, "runs.jsonl"),
-      `${JSON.stringify(currentEvalRunRecord({ row, runRoot, evalRunId: "eval-1" }))}\n`,
+      `${JSON.stringify({
+        ...currentEvalRunRecord({ row, runRoot, evalRunId: "eval-1" }),
+        ...(verifiedReport === undefined ? {} : { report_json_path: verifiedReport.reportPath })
+      })}\n`,
       "utf8"
     );
     fs.writeFileSync(
@@ -966,7 +983,7 @@ describe("eval publish (post-hoc replay)", () => {
   });
 
   it("does not persist recovery evidence before a workflow is terminal", async () => {
-    const { projectRoot, evalRunRoot } = publishFixture();
+    const { projectRoot, evalRunRoot } = publishFixture({ sealFinalReport: false });
     const runsPath = path.join(evalRunRoot, "runs.jsonl");
     const record = JSON.parse(fs.readFileSync(runsPath, "utf8")) as {
       ultrafuzz_run_root: string;
@@ -993,20 +1010,7 @@ describe("eval publish (post-hoc replay)", () => {
   });
 
   it("resolves a custom terminal report output from the run graph", async () => {
-    const { projectRoot, evalRunRoot } = publishFixture();
-    const record = JSON.parse(fs.readFileSync(path.join(evalRunRoot, "runs.jsonl"), "utf8")) as {
-      ultrafuzz_run_root: string;
-    };
-    const defaultPath = path.join(record.ultrafuzz_run_root, "artifacts", "final-report", "report.json");
-    const customPath = path.join(record.ultrafuzz_run_root, "artifacts", "final-report", "custom", "terminal.json");
-    fs.mkdirSync(path.dirname(customPath), { recursive: true });
-    fs.renameSync(defaultPath, customPath);
-    const graphPath = path.join(record.ultrafuzz_run_root, "graph.json");
-    const graph = JSON.parse(fs.readFileSync(graphPath, "utf8")) as {
-      nodes: Array<{ id: string; outputs?: Array<{ path: string }> }>;
-    };
-    graph.nodes.find((node) => node.id === "final-report")!.outputs![0]!.path = "custom/terminal.json";
-    fs.writeFileSync(graphPath, JSON.stringify(graph), "utf8");
+    const { projectRoot, evalRunRoot } = publishFixture({ reportJsonRelativePath: "custom/terminal.json" });
 
     await expect(
       publishEvalRun({
@@ -1018,6 +1022,32 @@ describe("eval publish (post-hoc replay)", () => {
     ).rejects.toMatchObject({ code: "EVAL_PUBLISH_PROVIDER_REQUIRED" });
     expect(JSON.parse(fs.readFileSync(path.join(evalRunRoot, "publication-state.json"), "utf8"))).toMatchObject({
       status: "publishable"
+    });
+  });
+
+  it("rejects schema-valid terminal report bytes changed after verification", async () => {
+    const { projectRoot, evalRunRoot } = publishFixture();
+    const record = JSON.parse(fs.readFileSync(path.join(evalRunRoot, "runs.jsonl"), "utf8")) as {
+      report_json_path: string;
+    };
+    fs.appendFileSync(record.report_json_path, " \n", "utf8");
+
+    await expect(
+      publishEvalRun({
+        projectRoot,
+        evalRunId: "eval-1",
+        evalProviderConfig: { provider: "none", providers: {} },
+        env: {}
+      })
+    ).rejects.toMatchObject({ code: "EVAL_OUTPUT_NON_PUBLISHABLE" });
+    expect(JSON.parse(fs.readFileSync(path.join(evalRunRoot, "publication-state.json"), "utf8"))).toMatchObject({
+      status: "non-publishable",
+      diagnostics: [
+        expect.objectContaining({
+          code: "TERMINAL_REPORT_NOT_PUBLISHABLE",
+          reason: expect.stringMatching(/verification authority|changed/iu)
+        })
+      ]
     });
   });
 

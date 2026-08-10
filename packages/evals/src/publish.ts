@@ -1,9 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { assertPlannedGraph, readRunState, validateArtifactContract } from "@ultrafuzz/artifacts";
+import { assertPlannedGraph, readRunState } from "@ultrafuzz/artifacts";
 import type { EvalConfig } from "@ultrafuzz/config";
-import type { RuntimeDiagnostic } from "@ultrafuzz/runtime";
+import { loadVerifiedFinalReportSnapshot, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
 import { NodeTelemetryPump } from "./node-telemetry.js";
 import {
@@ -31,7 +31,7 @@ import {
   type EvalRunRecord,
   type EvalSuiteSpec
 } from "./types.js";
-import { EvalError, evalRunRoot, resolveTerminalReportPath } from "./utils.js";
+import { EvalError, evalRunRoot, isRecord, resolveTerminalReportPath } from "./utils.js";
 
 export interface PublishEvalRunInput {
   projectRoot: string;
@@ -193,29 +193,13 @@ function assertPublishableTerminalReports(
     const reportResolution = resolveTerminalReportPath({
       ...(runRoot === undefined ? {} : { runRoot })
     });
-    const reportPath = reportResolution.path;
-    const reportExists = reportPath !== undefined && fs.existsSync(reportPath) && fs.lstatSync(reportPath).isFile();
-    let valid = status === "succeeded" && reportExists;
-    if (valid && reportPath !== undefined) {
-      valid = validateArtifactContract(
-        "ultrafuzz/report@2" as Parameters<typeof validateArtifactContract>[0],
-        fs.readFileSync(reportPath, "utf8"),
-        reportPath
-      ).ok;
-    }
-    if (!valid) {
+    const reportFailure = terminalReportPublicationFailure(record, runRoot, status, reportResolution);
+    if (reportFailure !== undefined) {
       diagnostics.push({
         code: "TERMINAL_REPORT_NOT_PUBLISHABLE",
         row_id: row.id,
         contract: "ultrafuzz/report@2",
-        reason:
-          status !== "succeeded"
-            ? `run status is ${status ?? "unknown"}`
-            : reportPath === undefined
-              ? reportResolution.reason
-              : !reportExists
-                ? "terminal report file is missing"
-                : "terminal report does not satisfy ultrafuzz/report@2",
+        reason: reportFailure,
         ...(reportResolution.relativePath === undefined ? {} : { report_path: reportResolution.relativePath })
       });
     }
@@ -252,6 +236,40 @@ function assertPublishableTerminalReports(
     status: "publishable",
     diagnostics: []
   });
+}
+
+function terminalReportPublicationFailure(
+  record: EvalRunRecord | undefined,
+  runRoot: string | undefined,
+  status: string | undefined,
+  reportResolution: ReturnType<typeof resolveTerminalReportPath>
+): string | undefined {
+  if (status !== "succeeded") return `run status is ${status ?? "unknown"}`;
+  if (record === undefined || runRoot === undefined) return "terminal report run authority is unavailable";
+  if (reportResolution.path === undefined) return reportResolution.reason;
+  if (record.report_json_path === undefined) return "eval run record does not bind a terminal report path";
+  if (record.ultrafuzz_run_id === undefined) return "eval run record does not bind an Ultrafuzz run ID";
+
+  try {
+    const snapshot = loadVerifiedFinalReportSnapshot(runRoot);
+    if (path.resolve(snapshot.artifacts.json_path) !== path.resolve(reportResolution.path)) {
+      return "verified final-report authority names a different topology-declared report path";
+    }
+    if (path.resolve(snapshot.artifacts.json_path) !== path.resolve(record.report_json_path)) {
+      return "eval run record names a different terminal report than current verification authority";
+    }
+    if (!isRecord(snapshot.json) || !isRecord(snapshot.json.run_metadata)) {
+      return "verified terminal report has invalid run metadata";
+    }
+    if (snapshot.json.run_metadata.run_id !== record.ultrafuzz_run_id) {
+      return "verified terminal report belongs to another Ultrafuzz run";
+    }
+  } catch (error) {
+    return `terminal report lacks current immutable verification authority: ${
+      error instanceof Error ? error.message : String(error)
+    }`;
+  }
+  return undefined;
 }
 
 function rowResult(record: EvalRunRecord, runRoot: string): EvalRowResult {
