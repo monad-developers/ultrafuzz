@@ -56,6 +56,7 @@ export async function ensurePersistentWorkerLineage(input: {
   lineage: ModalWorkerLineage;
   workspaceEvidencePaths: string[];
   freshCleanupPaths: string[];
+  attemptCleanupPaths: string[];
 }): Promise<void> {
   let persisted: ModalWorkerLineage | undefined;
   try {
@@ -76,6 +77,7 @@ export async function ensurePersistentWorkerLineage(input: {
       }
       return;
     }
+    await clearPaths(input.attemptCleanupPaths);
     await writeJsonAtomic(input.lineagePath, input.lineage);
     return;
   }
@@ -93,6 +95,7 @@ export async function ensurePersistentWorkerLineage(input: {
     if (input.lineage.workspace_mode !== "resume") {
       throw new CheckpointIncompatibleError("persisted lineage does not match the requested generation");
     }
+    await clearPaths(input.attemptCleanupPaths);
     await writeJsonAtomic(input.lineagePath, input.lineage);
     return;
   }

@@ -138,7 +138,8 @@ it("recognizes and cleans the legacy persistent public workspace without treatin
     fingerprints: { config: "b".repeat(64), source: "c".repeat(64), image: "d".repeat(64) },
     model_fingerprint: "e".repeat(64)
   };
-  let captured: { workspaceEvidencePaths: string[]; freshCleanupPaths: string[] } | undefined;
+  let captured:
+    { workspaceEvidencePaths: string[]; freshCleanupPaths: string[]; attemptCleanupPaths: string[] } | undefined;
   const stop = new Error("stop after preflight capture");
 
   await expect(
@@ -172,6 +173,10 @@ it("recognizes and cleans the legacy persistent public workspace without treatin
       path.join(dataRoot, "public-eval-diagnostics.json")
     ])
   );
+  expect(captured?.attemptCleanupPaths).toEqual([
+    path.join(dataRoot, "status.json"),
+    path.join(dataRoot, "result.json")
+  ]);
 }, 30_000);
 
 it("rejects a present dangling public bundle without starting replacement model work", async () => {
