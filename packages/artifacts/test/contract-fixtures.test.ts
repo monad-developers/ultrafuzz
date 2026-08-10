@@ -324,6 +324,37 @@ test("property-campaign v3 JSON Schema and Zod agree on every portable status co
       expected: true
     },
     {
+      label: "coverage-count-fraction",
+      value: withCoverage({
+        status: "reported",
+        metrics: [{ name: "executions", value: 1.5, unit: "count", source_ref: "backends/recon-fuzzer/results.json" }],
+        unavailable_reason: null
+      }),
+      expected: false
+    },
+    {
+      label: "coverage-ratio-over-one",
+      value: withCoverage({
+        status: "reported",
+        metrics: [
+          { name: "branch-ratio", value: 1.01, unit: "ratio", source_ref: "backends/recon-fuzzer/results.json" }
+        ],
+        unavailable_reason: null
+      }),
+      expected: false
+    },
+    {
+      label: "coverage-percent-over-one-hundred",
+      value: withCoverage({
+        status: "reported",
+        metrics: [
+          { name: "branch-percent", value: 100.1, unit: "percent", source_ref: "backends/recon-fuzzer/results.json" }
+        ],
+        unavailable_reason: null
+      }),
+      expected: false
+    },
+    {
       label: "coverage-reported-empty",
       value: withCoverage({ status: "reported", metrics: [], unavailable_reason: null }),
       expected: false
@@ -394,6 +425,24 @@ test("property-campaign v3 JSON Schema and Zod agree on every portable status co
     {
       label: "failure-blocked-without-blocker",
       value: { ...structuredClone(base), failures: [failure("blocked-unreproduced", null, null)] },
+      expected: false
+    },
+    {
+      label: "unsafe-plan-reference",
+      value: { ...structuredClone(base), campaign_plan_ref: "../campaign-plan.json" },
+      expected: false
+    },
+    {
+      label: "unsafe-evidence-reference",
+      value: {
+        ...structuredClone(base),
+        property_results: [
+          {
+            ...result("inconclusive", [], "The run ended before classification."),
+            evidence_refs: ["/tmp/result.json"]
+          }
+        ]
+      },
       expected: false
     }
   ];

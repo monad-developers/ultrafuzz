@@ -8,19 +8,19 @@
     },
     "campaign_plan_ref": {
       "type": "string",
-      "minLength": 1
+      "pattern": "^(?!.*(?:^|\\/)\\.{1,2}(?:\\/|$))[A-Za-z0-9._-]+(?:\\/[A-Za-z0-9._-]+)*$"
     },
     "implemented_properties_ref": {
       "type": "string",
-      "minLength": 1
+      "pattern": "^(?!.*(?:^|\\/)\\.{1,2}(?:\\/|$))[A-Za-z0-9._-]+(?:\\/[A-Za-z0-9._-]+)*$"
     },
     "findings_ref": {
       "type": "string",
-      "minLength": 1
+      "pattern": "^(?!.*(?:^|\\/)\\.{1,2}(?:\\/|$))[A-Za-z0-9._-]+(?:\\/[A-Za-z0-9._-]+)*$"
     },
     "campaign_summary_ref": {
       "type": "string",
-      "minLength": 1
+      "pattern": "^(?!.*(?:^|\\/)\\.{1,2}(?:\\/|$))[A-Za-z0-9._-]+(?:\\/[A-Za-z0-9._-]+)*$"
     },
     "fuzzer_backend": {
       "type": "string",
@@ -42,14 +42,7 @@
       "properties": {
         "status": {
           "type": "string",
-          "enum": [
-            "complete",
-            "partial",
-            "blocked",
-            "failed",
-            "timed-out",
-            "unavailable"
-          ]
+          "enum": ["complete", "partial", "blocked", "failed", "timed-out", "unavailable"]
         },
         "usable_results": {
           "type": "boolean"
@@ -62,7 +55,7 @@
           "anyOf": [
             {
               "type": "string",
-              "minLength": 1
+              "pattern": "^(?!.*(?:^|\\/)\\.{1,2}(?:\\/|$))[A-Za-z0-9._-]+(?:\\/[A-Za-z0-9._-]+)*$"
             },
             {
               "type": "null"
@@ -132,10 +125,7 @@
                   "minLength": 1
                 }
               },
-              "required": [
-                "category",
-                "summary"
-              ],
+              "required": ["category", "summary"],
               "additionalProperties": false
             },
             {
@@ -165,9 +155,7 @@
                 "const": "complete"
               }
             },
-            "required": [
-              "status"
-            ]
+            "required": ["status"]
           },
           "then": {
             "properties": {
@@ -193,9 +181,7 @@
                 "const": "partial"
               }
             },
-            "required": [
-              "status"
-            ]
+            "required": ["status"]
           },
           "then": {
             "properties": {
@@ -218,9 +204,7 @@
                 "const": "blocked"
               }
             },
-            "required": [
-              "status"
-            ]
+            "required": ["status"]
           },
           "then": {
             "properties": {
@@ -246,9 +230,7 @@
                 "const": "failed"
               }
             },
-            "required": [
-              "status"
-            ]
+            "required": ["status"]
           },
           "then": {
             "properties": {
@@ -268,9 +250,7 @@
                 "const": "timed-out"
               }
             },
-            "required": [
-              "status"
-            ]
+            "required": ["status"]
           },
           "then": {
             "properties": {
@@ -287,9 +267,7 @@
                     "const": "deadline-exceeded"
                   }
                 },
-                "required": [
-                  "category"
-                ]
+                "required": ["category"]
               }
             }
           }
@@ -301,9 +279,7 @@
                 "const": "unavailable"
               }
             },
-            "required": [
-              "status"
-            ]
+            "required": ["status"]
           },
           "then": {
             "properties": {
@@ -323,9 +299,7 @@
                     "const": "backend-unavailable"
                   }
                 },
-                "required": [
-                  "category"
-                ]
+                "required": ["category"]
               }
             }
           }
@@ -337,32 +311,26 @@
       "properties": {
         "corpus": {
           "type": "string",
-          "minLength": 1
+          "pattern": "^(?!.*(?:^|\\/)\\.{1,2}(?:\\/|$))[A-Za-z0-9._-]+(?:\\/[A-Za-z0-9._-]+)*$"
         },
         "cache": {
           "type": "string",
-          "minLength": 1
+          "pattern": "^(?!.*(?:^|\\/)\\.{1,2}(?:\\/|$))[A-Za-z0-9._-]+(?:\\/[A-Za-z0-9._-]+)*$"
         },
         "log": {
           "type": "string",
-          "minLength": 1
+          "pattern": "^(?!.*(?:^|\\/)\\.{1,2}(?:\\/|$))[A-Za-z0-9._-]+(?:\\/[A-Za-z0-9._-]+)*$"
         },
         "raw_results": {
           "type": "string",
-          "minLength": 1
+          "pattern": "^(?!.*(?:^|\\/)\\.{1,2}(?:\\/|$))[A-Za-z0-9._-]+(?:\\/[A-Za-z0-9._-]+)*$"
         },
         "reproducers": {
           "type": "string",
-          "minLength": 1
+          "pattern": "^(?!.*(?:^|\\/)\\.{1,2}(?:\\/|$))[A-Za-z0-9._-]+(?:\\/[A-Za-z0-9._-]+)*$"
         }
       },
-      "required": [
-        "corpus",
-        "cache",
-        "log",
-        "raw_results",
-        "reproducers"
-      ],
+      "required": ["corpus", "cache", "log", "raw_results", "reproducers"],
       "additionalProperties": false
     },
     "coverage": {
@@ -370,10 +338,7 @@
       "properties": {
         "status": {
           "type": "string",
-          "enum": [
-            "reported",
-            "unavailable"
-          ]
+          "enum": ["reported", "unavailable"]
         },
         "metrics": {
           "type": "array",
@@ -390,27 +355,70 @@
               },
               "unit": {
                 "type": "string",
-                "enum": [
-                  "count",
-                  "ratio",
-                  "percent",
-                  "seconds",
-                  "bytes",
-                  "executions-per-second"
-                ]
+                "enum": ["count", "ratio", "percent", "seconds", "bytes", "executions-per-second"]
               },
               "source_ref": {
                 "type": "string",
-                "minLength": 1
+                "pattern": "^(?!.*(?:^|\\/)\\.{1,2}(?:\\/|$))[A-Za-z0-9._-]+(?:\\/[A-Za-z0-9._-]+)*$"
               }
             },
-            "required": [
-              "name",
-              "value",
-              "unit",
-              "source_ref"
-            ],
-            "additionalProperties": false
+            "required": ["name", "value", "unit", "source_ref"],
+            "additionalProperties": false,
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "unit": {
+                      "enum": ["count", "bytes"]
+                    }
+                  },
+                  "required": ["unit"]
+                },
+                "then": {
+                  "properties": {
+                    "value": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "unit": {
+                      "const": "ratio"
+                    }
+                  },
+                  "required": ["unit"]
+                },
+                "then": {
+                  "properties": {
+                    "value": {
+                      "type": "number",
+                      "maximum": 1
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "unit": {
+                      "const": "percent"
+                    }
+                  },
+                  "required": ["unit"]
+                },
+                "then": {
+                  "properties": {
+                    "value": {
+                      "type": "number",
+                      "maximum": 100
+                    }
+                  }
+                }
+              }
+            ]
           }
         },
         "unavailable_reason": {
@@ -425,11 +433,7 @@
           ]
         }
       },
-      "required": [
-        "status",
-        "metrics",
-        "unavailable_reason"
-      ],
+      "required": ["status", "metrics", "unavailable_reason"],
       "additionalProperties": false,
       "allOf": [
         {
@@ -439,9 +443,7 @@
                 "const": "reported"
               }
             },
-            "required": [
-              "status"
-            ]
+            "required": ["status"]
           },
           "then": {
             "properties": {
@@ -462,9 +464,7 @@
                 "const": "unavailable"
               }
             },
-            "required": [
-              "status"
-            ]
+            "required": ["status"]
           },
           "then": {
             "properties": {
@@ -492,12 +492,7 @@
           },
           "status": {
             "type": "string",
-            "enum": [
-              "passed",
-              "failed",
-              "inconclusive",
-              "not-executed"
-            ]
+            "enum": ["passed", "failed", "inconclusive", "not-executed"]
           },
           "failure_ids": {
             "type": "array",
@@ -519,7 +514,7 @@
             "type": "array",
             "items": {
               "type": "string",
-              "minLength": 1
+              "pattern": "^(?!.*(?:^|\\/)\\.{1,2}(?:\\/|$))[A-Za-z0-9._-]+(?:\\/[A-Za-z0-9._-]+)*$"
             },
             "uniqueItems": true
           },
@@ -535,14 +530,7 @@
             ]
           }
         },
-        "required": [
-          "property_id",
-          "status",
-          "failure_ids",
-          "coverage_metric_names",
-          "evidence_refs",
-          "reason"
-        ],
+        "required": ["property_id", "status", "failure_ids", "coverage_metric_names", "evidence_refs", "reason"],
         "additionalProperties": false,
         "allOf": [
           {
@@ -552,9 +540,7 @@
                   "const": "failed"
                 }
               },
-              "required": [
-                "status"
-              ]
+              "required": ["status"]
             },
             "then": {
               "properties": {
@@ -572,14 +558,10 @@
             "if": {
               "properties": {
                 "status": {
-                  "enum": [
-                    "passed"
-                  ]
+                  "enum": ["passed"]
                 }
               },
-              "required": [
-                "status"
-              ]
+              "required": ["status"]
             },
             "then": {
               "properties": {
@@ -597,15 +579,10 @@
             "if": {
               "properties": {
                 "status": {
-                  "enum": [
-                    "inconclusive",
-                    "not-executed"
-                  ]
+                  "enum": ["inconclusive", "not-executed"]
                 }
               },
-              "required": [
-                "status"
-              ]
+              "required": ["status"]
             },
             "then": {
               "properties": {
@@ -634,10 +611,7 @@
           },
           "status": {
             "type": "string",
-            "enum": [
-              "reproduced",
-              "blocked-unreproduced"
-            ]
+            "enum": ["reproduced", "blocked-unreproduced"]
           },
           "property_ids": {
             "type": "array",
@@ -674,13 +648,13 @@
           },
           "raw_reproducer_ref": {
             "type": "string",
-            "minLength": 1
+            "pattern": "^(?!.*(?:^|\\/)\\.{1,2}(?:\\/|$))[A-Za-z0-9._-]+(?:\\/[A-Za-z0-9._-]+)*$"
           },
           "deterministic_reproducer_ref": {
             "anyOf": [
               {
                 "type": "string",
-                "minLength": 1
+                "pattern": "^(?!.*(?:^|\\/)\\.{1,2}(?:\\/|$))[A-Za-z0-9._-]+(?:\\/[A-Za-z0-9._-]+)*$"
               },
               {
                 "type": "null"
@@ -719,9 +693,7 @@
                   "const": "reproduced"
                 }
               },
-              "required": [
-                "status"
-              ]
+              "required": ["status"]
             },
             "then": {
               "properties": {
@@ -742,9 +714,7 @@
                   "const": "blocked-unreproduced"
                 }
               },
-              "required": [
-                "status"
-              ]
+              "required": ["status"]
             },
             "then": {
               "properties": {

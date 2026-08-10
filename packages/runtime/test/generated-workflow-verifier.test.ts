@@ -701,7 +701,12 @@ type VerifyArtifactsTask = {
   }>;
 };
 
-function loadVerifyArtifactsHarness(): {
+function loadVerifyArtifactsHarness(
+  options: {
+    taskSpecs?: readonly VerifyArtifactsTask[];
+    authenticatedDependencyDirs?: readonly string[];
+  } = {}
+): {
   captureTaskOutputs: (task: VerifyArtifactsTask) => Array<{
     output: VerifyArtifactsTask["outputs"][number];
     artifactRoot: string;
@@ -717,20 +722,31 @@ function loadVerifyArtifactsHarness(): {
   ) => { artifacts: Array<{ sha256: string }>; primary_artifact: string };
   publications: Map<string, Buffer>;
   markerWrites: unknown[];
+  authenticatedDependencyChecks: Array<{ consumerAttemptId: string; dependency: string }>;
 } {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const dependencyVerifierStart = source.indexOf("function verifiedDependencyJsonArtifact");
+  const dependencyVerifierEnd = source.indexOf(
+    "\n\nfunction configuredInvariantPrioritySelection",
+    dependencyVerifierStart
+  );
   const captureStart = source.indexOf("function captureTaskOutputs");
   const finalizerStart = source.indexOf("function finalizeAndVerifyArtifacts", captureStart);
   const verifierStart = source.indexOf("function verifyArtifacts", finalizerStart);
   const verifierEnd = source.indexOf("function readInvariantSourceSnapshot", verifierStart);
+  assert.ok(dependencyVerifierStart >= 0 && dependencyVerifierEnd > dependencyVerifierStart, source);
   assert.ok(captureStart >= 0 && finalizerStart > captureStart, source);
   assert.ok(verifierStart > finalizerStart && verifierEnd > verifierStart, source);
   const emitted = ts.transpileModule(
-    `${source.slice(captureStart, finalizerStart)}\n${source.slice(verifierStart, verifierEnd)}`,
+    `${source.slice(dependencyVerifierStart, dependencyVerifierEnd)}\n${source.slice(captureStart, finalizerStart)}\n${source.slice(verifierStart, verifierEnd)}`,
     { compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 } }
   ).outputText;
   const publications = new Map<string, Buffer>();
   const markerWrites: unknown[] = [];
+  const authenticatedDependencyChecks: Array<{ consumerAttemptId: string; dependency: string }> = [];
+  const authenticatedDependencies = new Set(
+    (options.authenticatedDependencyDirs ?? []).map((dependency) => fs.realpathSync(dependency))
+  );
   const remember = (values: Map<string, Buffer>, relativePath: string, bytes: Buffer): void => {
     const previous = values.get(relativePath);
     if (previous !== undefined && !previous.equals(bytes)) throw new Error(`conflicting ${relativePath}`);
@@ -739,8 +755,10 @@ function loadVerifyArtifactsHarness(): {
   const factory = new Function(
     "path",
     "realpathSync",
+    "taskSpecs",
     "taskArtifactRoots",
     "isStrictlyInsideDirectory",
+    "resolveRegularArtifactFile",
     "readBoundedRegularArtifactSnapshot",
     "MAX_VERIFIED_ARTIFACT_BYTES",
     "clearArtifactVerificationMarker",
@@ -749,6 +767,7 @@ function loadVerifyArtifactsHarness(): {
     "parseStrictJsonSnapshot",
     "validateArtifactContract",
     "formatSchemaValidationIssues",
+    "assertVerifiedDependency",
     "executeSchemaSemanticGates",
     "normalizeNodeAttemptFailureMessage",
     "materializeGeneratedTestCompanions",
@@ -765,8 +784,21 @@ function loadVerifyArtifactsHarness(): {
   )(
     path,
     fs.realpathSync,
+    options.taskSpecs ?? [],
     (_task: VerifyArtifactsTask, artifactDir: string) => [artifactDir],
     (root: string, candidate: string) => candidate !== root && candidate.startsWith(`${root}${path.sep}`),
+    (root: string, candidate: string, failureMessage: string) => {
+      try {
+        assertRegularFileInside(root, candidate, failureMessage);
+        const resolved = fs.realpathSync(candidate);
+        if (resolved === root || !resolved.startsWith(`${root}${path.sep}`) || !fs.statSync(resolved).isFile()) {
+          throw new Error(failureMessage);
+        }
+        return resolved;
+      } catch {
+        throw new Error(failureMessage);
+      }
+    },
     (root: string, candidate: string, failureMessage: string, maxBytes: number) => {
       if (candidate === root || !candidate.startsWith(`${root}${path.sep}`)) throw new Error(failureMessage);
       const resolved = fs.realpathSync(candidate);
@@ -792,6 +824,13 @@ function loadVerifyArtifactsHarness(): {
     (contract: Parameters<typeof validateArtifactContract>[0], contents: string, artifactPath: string) =>
       validateArtifactContract(contract, contents, artifactPath),
     () => "invalid",
+    (task: VerifyArtifactsTask, dependency: string) => {
+      const resolved = fs.realpathSync(dependency);
+      if (!authenticatedDependencies.has(resolved)) {
+        throw new Error(`artifact-contract failure: dependency is not authenticated ${resolved}`);
+      }
+      authenticatedDependencyChecks.push({ consumerAttemptId: task.attemptId, dependency: resolved });
+    },
     executeSchemaSemanticGates,
     normalizeNodeAttemptFailureMessage,
     () => undefined,
@@ -810,7 +849,7 @@ function loadVerifyArtifactsHarness(): {
     captureTaskOutputs: ReturnType<typeof loadVerifyArtifactsHarness>["captureTaskOutputs"];
     verifyArtifacts: ReturnType<typeof loadVerifyArtifactsHarness>["verifyArtifacts"];
   };
-  return { ...factory, publications, markerWrites };
+  return { ...factory, publications, markerWrites, authenticatedDependencyChecks };
 }
 
 function singleOutputVerificationTask(root: string, contract: string): VerifyArtifactsTask {
@@ -833,6 +872,223 @@ function singleOutputVerificationTask(root: string, contract: string): VerifyArt
       }
     ]
   };
+}
+
+const generatedCampaignPaths = {
+  corpus: "backends/recon-fuzzer/corpus",
+  cache: "backends/recon-fuzzer/cache",
+  log: "backends/recon-fuzzer/run.log",
+  raw_results: "backends/recon-fuzzer/results.json",
+  reproducers: "backends/recon-fuzzer/reproducers"
+} as const;
+
+function generatedCampaignPlanFixture(): Record<string, unknown> {
+  return {
+    schema_version: "ultrafuzz.invariant-campaign-plan.v1",
+    available_vcpus: 1,
+    workers: 1,
+    configured_budget_seconds: 600,
+    deadline: "2026-01-01T00:10:00Z",
+    finalization_reserve_seconds: 60,
+    backend: { name: "recon", version: null },
+    command_plan: [{ phase: "campaign", command: "recon fuzz ." }],
+    paths: generatedCampaignPaths
+  };
+}
+
+function generatedImplementedPropertiesFixture(): Record<string, unknown> {
+  return {
+    schema_version: "ultrafuzz.implemented-properties.v3",
+    properties: [
+      {
+        property_id: "property-one",
+        status: "implemented",
+        implementation_paths: ["src/InvariantHarness.sol"],
+        test_paths: []
+      }
+    ],
+    selection: {
+      priority_threshold: "high",
+      priorities: ["high"],
+      property_ids: ["property-one"]
+    }
+  };
+}
+
+function generatedPropertyCampaignFixture(): Record<string, unknown> {
+  return {
+    schema_version: "ultrafuzz.property-campaign.v3",
+    campaign_plan_ref: "campaign-plan.json",
+    implemented_properties_ref: "implemented-properties.json",
+    findings_ref: "findings.json",
+    campaign_summary_ref: "campaign-summary.json",
+    fuzzer_backend: "recon",
+    backend_version: null,
+    execution: {
+      status: "complete",
+      usable_results: true,
+      command: "recon fuzz .",
+      config_path: null,
+      workers: 1,
+      started_at: "2026-01-01T00:00:00Z",
+      finished_at: "2026-01-01T00:05:00Z",
+      deadline: "2026-01-01T00:10:00Z",
+      exit_code: 0,
+      failure: null
+    },
+    paths: generatedCampaignPaths,
+    coverage: {
+      status: "reported",
+      metrics: [
+        {
+          name: "executions",
+          value: 1,
+          unit: "count",
+          source_ref: generatedCampaignPaths.raw_results
+        }
+      ],
+      unavailable_reason: null
+    },
+    property_results: [
+      {
+        property_id: "property-one",
+        status: "passed",
+        failure_ids: [],
+        coverage_metric_names: ["executions"],
+        evidence_refs: [generatedCampaignPaths.raw_results],
+        reason: null
+      }
+    ],
+    failures: []
+  };
+}
+
+function generatedCampaignFindingFixture(): Record<string, unknown> {
+  return {
+    schema_version: "ultrafuzz.finding.v2",
+    id: "finding-one",
+    title: "Finding one",
+    status: "candidate",
+    severity_guess: "Medium",
+    confidence: "medium",
+    summary: "A schema-valid non-property campaign finding."
+  };
+}
+
+function generatedCampaignSummaryFixture(
+  findingIds: readonly string[],
+  postDeduplication: number
+): Record<string, unknown> {
+  return {
+    schema_version: "ultrafuzz.campaign-summary.v2",
+    outcome: "complete",
+    implemented_property_suite_refs: ["implemented-properties.json"],
+    campaign_plan_ref: "campaign-plan.json",
+    backend_results: [{ fuzzer_backend: "recon", status: "complete", result_ref: "campaign.json" }],
+    finding_refs: findingIds,
+    reproducer_refs: findingIds.map((findingId) => ({ finding_id: findingId, path: null, blocker: null })),
+    failure_counts: { pre_deduplication: 0, post_deduplication: postDeduplication }
+  };
+}
+
+function generatedCampaignVerificationFixture(
+  root: string,
+  options: { includeNonPropertyFinding?: boolean; summaryPostDeduplication?: number } = {}
+): {
+  task: VerifyArtifactsTask;
+  implementationProducer: VerifyArtifactsTask;
+  implementationArtifactDir: string;
+} {
+  const artifactDir = path.join(root, "campaign-artifacts");
+  const implementationArtifactDir = path.join(root, "dependencies", "attempt-implemented-properties");
+  fs.mkdirSync(artifactDir, { recursive: true });
+  fs.mkdirSync(implementationArtifactDir, { recursive: true });
+
+  const findings = options.includeNonPropertyFinding ? [generatedCampaignFindingFixture()] : [];
+  const findingIds = findings.map((finding) => String(finding.id));
+  const documents = new Map<string, unknown>([
+    ["campaign-plan.json", generatedCampaignPlanFixture()],
+    ["campaign.json", generatedPropertyCampaignFixture()],
+    ["findings.json", findings],
+    [
+      "campaign-summary.json",
+      generatedCampaignSummaryFixture(findingIds, options.summaryPostDeduplication ?? findingIds.length)
+    ]
+  ]);
+  for (const [relativePath, document] of documents) {
+    fs.writeFileSync(path.join(artifactDir, relativePath), `${JSON.stringify(document)}\n`, "utf8");
+  }
+  fs.writeFileSync(
+    path.join(implementationArtifactDir, "implemented-properties.json"),
+    `${JSON.stringify(generatedImplementedPropertiesFixture())}\n`,
+    "utf8"
+  );
+
+  const implementationProducer: VerifyArtifactsTask = {
+    attemptId: "attempt-implemented-properties",
+    runRoot: root,
+    workspacePath: root,
+    dependencyArtifactDirs: [],
+    metadata: {
+      run: { ultrafuzzRunId: "run-one" },
+      artifacts: { dir: implementationArtifactDir },
+      node: {
+        logicalNodeId: "stateful-invariant-implement-properties",
+        concreteNodeId: "stateful-invariant-implement-properties"
+      }
+    },
+    outputs: [
+      {
+        path: "implemented-properties.json",
+        contract: "ultrafuzz/implemented-properties@3",
+        contractDigest: "e".repeat(64),
+        schemaFile: "implemented-properties.schema.json",
+        primary: true
+      }
+    ]
+  };
+  const task: VerifyArtifactsTask = {
+    attemptId: "attempt-campaign",
+    runRoot: root,
+    workspacePath: root,
+    dependencyArtifactDirs: [implementationArtifactDir],
+    metadata: {
+      run: { ultrafuzzRunId: "run-one" },
+      artifacts: { dir: artifactDir },
+      node: { logicalNodeId: "stateful-invariant-campaign", concreteNodeId: "stateful-invariant-campaign" }
+    },
+    outputs: [
+      {
+        path: "campaign-plan.json",
+        contract: "ultrafuzz/invariant-campaign-plan@1",
+        contractDigest: "a".repeat(64),
+        schemaFile: "invariant-campaign-plan.schema.json",
+        primary: false
+      },
+      {
+        path: "campaign.json",
+        contract: "ultrafuzz/property-campaign@3",
+        contractDigest: "b".repeat(64),
+        schemaFile: "property-campaign.schema.json",
+        primary: true
+      },
+      {
+        path: "findings.json",
+        contract: "ultrafuzz/findings@2",
+        contractDigest: "c".repeat(64),
+        schemaFile: "findings.schema.json",
+        primary: false
+      },
+      {
+        path: "campaign-summary.json",
+        contract: "ultrafuzz/campaign-summary@2",
+        contractDigest: "d".repeat(64),
+        schemaFile: "campaign-summary.schema.json",
+        primary: false
+      }
+    ]
+  };
+  return { task, implementationProducer, implementationArtifactDir };
 }
 
 test("generated Smithers verifier rejects invalid UTF-8 and duplicate JSON keys from captured bytes", () => {
@@ -940,82 +1196,72 @@ test("generated Smithers binds generated-test manifests to the current run and l
   }
 });
 
-test("generated Smithers fails closed when same-node semantic counts disagree", () => {
+test("generated Smithers verifies a v3 property campaign against authenticated semantic context", () => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-semantic-siblings-")));
   try {
-    const documents = new Map<string, unknown>([
-      [
-        "campaign-summary.json",
-        {
-          schema_version: "ultrafuzz.campaign-summary.v2",
-          outcome: "complete",
-          implemented_property_suite_refs: ["implemented-properties.json"],
-          campaign_plan_ref: "campaign-plan.json",
-          backend_results: [],
-          finding_refs: [],
-          reproducer_refs: [],
-          failure_counts: { pre_deduplication: 0, post_deduplication: 0 }
-        }
-      ],
-      ["campaign.json", { schema_version: "ultrafuzz.property-campaign.v2", failures: [] }],
-      [
-        "findings.json",
-        [
-          {
-            schema_version: "ultrafuzz.finding.v2",
-            id: "finding-one",
-            title: "Finding one",
-            status: "candidate",
-            severity_guess: "Medium",
-            confidence: "medium",
-            summary: "A schema-valid sibling finding."
-          }
-        ]
-      ]
+    const fixture = generatedCampaignVerificationFixture(root);
+    const harness = loadVerifyArtifactsHarness({
+      taskSpecs: [fixture.implementationProducer],
+      authenticatedDependencyDirs: [fixture.implementationArtifactDir]
+    });
+
+    const result = harness.verifyArtifacts(fixture.task, harness.captureTaskOutputs(fixture.task));
+
+    assert.equal(result.primary_artifact, "campaign.json");
+    assert.equal(result.artifacts.length, 4);
+    assert.equal(harness.publications.size, 4);
+    assert.equal(harness.markerWrites.length, 1);
+    assert.deepEqual(harness.authenticatedDependencyChecks, [
+      { consumerAttemptId: "attempt-campaign", dependency: fixture.implementationArtifactDir }
     ]);
-    for (const [relativePath, document] of documents) {
-      fs.writeFileSync(path.join(root, relativePath), `${JSON.stringify(document)}\n`, "utf8");
-    }
-    const task: VerifyArtifactsTask = {
-      attemptId: "attempt-campaign",
-      runRoot: root,
-      workspacePath: root,
-      dependencyArtifactDirs: [],
-      metadata: {
-        run: { ultrafuzzRunId: "run-one" },
-        artifacts: { dir: root },
-        node: { logicalNodeId: "stateful-invariant-campaign", concreteNodeId: "stateful-invariant-campaign" }
-      },
-      outputs: [
-        {
-          path: "campaign-summary.json",
-          contract: "ultrafuzz/campaign-summary@2",
-          contractDigest: "a".repeat(64),
-          schemaFile: "campaign-summary.schema.json",
-          primary: true
-        },
-        {
-          path: "campaign.json",
-          contract: "ultrafuzz/property-campaign@2",
-          contractDigest: "b".repeat(64),
-          schemaFile: "property-campaign.schema.json",
-          primary: false
-        },
-        {
-          path: "findings.json",
-          contract: "ultrafuzz/findings@2",
-          contractDigest: "c".repeat(64),
-          schemaFile: "findings.schema.json",
-          primary: false
-        }
-      ]
-    };
-    const harness = loadVerifyArtifactsHarness();
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("generated Smithers fails closed when v3 campaign sibling semantic counts disagree", () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-semantic-siblings-")));
+  try {
+    const fixture = generatedCampaignVerificationFixture(root, {
+      includeNonPropertyFinding: true,
+      summaryPostDeduplication: 0
+    });
+    const harness = loadVerifyArtifactsHarness({
+      taskSpecs: [fixture.implementationProducer],
+      authenticatedDependencyDirs: [fixture.implementationArtifactDir]
+    });
 
     assert.throws(
-      () => harness.verifyArtifacts(task, harness.captureTaskOutputs(task)),
+      () => harness.verifyArtifacts(fixture.task, harness.captureTaskOutputs(fixture.task)),
       /campaign-summary-count-coupling failed/u
     );
+    assert.equal(harness.publications.size, 0);
+    assert.equal(harness.markerWrites.length, 0);
+    assert.deepEqual(harness.authenticatedDependencyChecks, [
+      { consumerAttemptId: "attempt-campaign", dependency: fixture.implementationArtifactDir }
+    ]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("generated Smithers rejects property-campaign v2 bytes without converting them", () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-campaign-v2-rejection-")));
+  try {
+    const artifactPath = path.join(root, "result.json");
+    const legacyBytes = Buffer.from(
+      `${JSON.stringify({ schema_version: "ultrafuzz.property-campaign.v2", fuzzer_backend: "recon", failures: [] })}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(artifactPath, legacyBytes);
+    const task = singleOutputVerificationTask(root, "ultrafuzz/property-campaign@3");
+    task.outputs[0]!.schemaFile = "property-campaign.schema.json";
+    const harness = loadVerifyArtifactsHarness();
+    const captured = harness.captureTaskOutputs(task);
+
+    assert.throws(() => harness.verifyArtifacts(task, captured), /ultrafuzz\/property-campaign@3\): invalid/u);
+    assert.equal(captured[0]?.file.bytes.equals(legacyBytes), true);
+    assert.equal(fs.readFileSync(artifactPath).equals(legacyBytes), true);
     assert.equal(harness.publications.size, 0);
     assert.equal(harness.markerWrites.length, 0);
   } finally {

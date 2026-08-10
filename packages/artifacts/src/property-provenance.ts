@@ -20,11 +20,18 @@ export const PROPERTY_CAMPAIGN_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:
 export const REFERENCE_EXPECTATIONS_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:reference-expectations:2" as const;
 
 const nonEmptyString = z.string().min(1);
+const safeRelativePath = z.string().regex(/^(?!.*(?:^|\/)\.{1,2}(?:\/|$))[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/u, {
+  message: "Path must be a canonical safe relative path"
+});
 const stableLedgerId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/u);
 const nonEmptyStringArray = z.array(nonEmptyString);
 const uniqueNonEmptyStringArray = nonEmptyStringArray
   .meta({ uniqueItems: true })
   .refine((values) => new Set(values).size === values.length, { message: "Values must be unique" });
+const uniqueSafeRelativePathArray = z
+  .array(safeRelativePath)
+  .meta({ uniqueItems: true })
+  .refine((values) => new Set(values).size === values.length, { message: "Paths must be unique" });
 /**
  * A list of reference-expectation ids, which must name at least one id when it says anything at all.
  *
@@ -42,23 +49,6 @@ const referenceExpectationIdsSchema = z
 export const PROPERTY_PRIORITIES = ["high", "medium", "low"] as const;
 export const propertyPrioritySchema = z.enum(PROPERTY_PRIORITIES);
 export type PropertyPriority = (typeof PROPERTY_PRIORITIES)[number];
-const propertyIdsSchema = z
-  .array(nonEmptyString)
-  .min(1)
-  .meta({ uniqueItems: true })
-  .superRefine((propertyIds, context) => {
-    const seen = new Set<string>();
-    for (const [propertyIndex, propertyId] of propertyIds.entries()) {
-      if (seen.has(propertyId)) {
-        context.addIssue({
-          code: "custom",
-          message: `Duplicate property ID ${JSON.stringify(propertyId)}`,
-          path: [propertyIndex]
-        });
-      }
-      seen.add(propertyId);
-    }
-  });
 
 export interface PropertySource {
   source_node_id: string;
@@ -564,7 +554,7 @@ const propertyCampaignExecutionSchema = z
     status: z.enum(PROPERTY_CAMPAIGN_EXECUTION_STATUSES),
     usable_results: z.boolean(),
     command: nonEmptyString,
-    config_path: nonEmptyString.nullable(),
+    config_path: safeRelativePath.nullable(),
     workers: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
     started_at: canonicalTimestampSchema.nullable(),
     finished_at: canonicalTimestampSchema,
@@ -749,12 +739,40 @@ const propertyCampaignExecutionSchema = z
     }
   });
 
-const propertyCampaignCoverageMetricSchema = z.strictObject({
-  name: nonEmptyString,
-  value: z.number().nonnegative(),
-  unit: z.enum(PROPERTY_CAMPAIGN_COVERAGE_UNITS),
-  source_ref: nonEmptyString
-});
+const propertyCampaignCoverageMetricSchema = z
+  .strictObject({
+    name: nonEmptyString,
+    value: z.number().nonnegative(),
+    unit: z.enum(PROPERTY_CAMPAIGN_COVERAGE_UNITS),
+    source_ref: safeRelativePath
+  })
+  .meta({
+    allOf: [
+      {
+        if: { properties: { unit: { enum: ["count", "bytes"] } }, required: ["unit"] },
+        then: { properties: { value: { type: "integer" } } }
+      },
+      {
+        if: { properties: { unit: { const: "ratio" } }, required: ["unit"] },
+        then: { properties: { value: { type: "number", maximum: 1 } } }
+      },
+      {
+        if: { properties: { unit: { const: "percent" } }, required: ["unit"] },
+        then: { properties: { value: { type: "number", maximum: 100 } } }
+      }
+    ]
+  })
+  .superRefine((metric, context) => {
+    if ((metric.unit === "count" || metric.unit === "bytes") && !Number.isInteger(metric.value)) {
+      context.addIssue({ code: "custom", path: ["value"], message: `${metric.unit} coverage must be an integer` });
+    }
+    if (metric.unit === "ratio" && metric.value > 1) {
+      context.addIssue({ code: "custom", path: ["value"], message: "Ratio coverage cannot exceed 1" });
+    }
+    if (metric.unit === "percent" && metric.value > 100) {
+      context.addIssue({ code: "custom", path: ["value"], message: "Percent coverage cannot exceed 100" });
+    }
+  });
 
 const propertyCampaignCoverageSchema = z
   .strictObject({
@@ -807,7 +825,7 @@ const propertyCampaignPropertyResultSchema = z
     status: z.enum(PROPERTY_CAMPAIGN_PROPERTY_RESULT_STATUSES),
     failure_ids: uniqueNonEmptyStringArray,
     coverage_metric_names: uniqueNonEmptyStringArray,
-    evidence_refs: uniqueNonEmptyStringArray,
+    evidence_refs: uniqueSafeRelativePathArray,
     reason: nonEmptyString.nullable()
   })
   .meta({
@@ -874,8 +892,8 @@ const propertyCampaignFailureSchema = z
     entrypoint: nonEmptyString.nullable(),
     sequence: z.array(nonEmptyString),
     precondition_evidence: z.array(nonEmptyString),
-    raw_reproducer_ref: nonEmptyString,
-    deterministic_reproducer_ref: nonEmptyString.nullable(),
+    raw_reproducer_ref: safeRelativePath,
+    deterministic_reproducer_ref: safeRelativePath.nullable(),
     reproduction_blocker: nonEmptyString.nullable()
   })
   .meta({
@@ -933,19 +951,19 @@ const propertyCampaignFailureSchema = z
 export const propertyCampaignSchema = z
   .strictObject({
     schema_version: z.literal(PROPERTY_CAMPAIGN_SCHEMA_VERSION),
-    campaign_plan_ref: nonEmptyString,
-    implemented_properties_ref: nonEmptyString,
-    findings_ref: nonEmptyString,
-    campaign_summary_ref: nonEmptyString,
+    campaign_plan_ref: safeRelativePath,
+    implemented_properties_ref: safeRelativePath,
+    findings_ref: safeRelativePath,
+    campaign_summary_ref: safeRelativePath,
     fuzzer_backend: nonEmptyString,
     backend_version: nonEmptyString.nullable(),
     execution: propertyCampaignExecutionSchema,
     paths: z.strictObject({
-      corpus: nonEmptyString,
-      cache: nonEmptyString,
-      log: nonEmptyString,
-      raw_results: nonEmptyString,
-      reproducers: nonEmptyString
+      corpus: safeRelativePath,
+      cache: safeRelativePath,
+      log: safeRelativePath,
+      raw_results: safeRelativePath,
+      reproducers: safeRelativePath
     }),
     coverage: propertyCampaignCoverageSchema,
     property_results: z.array(propertyCampaignPropertyResultSchema),
