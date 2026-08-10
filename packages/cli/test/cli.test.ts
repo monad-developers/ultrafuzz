@@ -593,7 +593,7 @@ function sealVerifiedNodeOutputs(
   additionalPublicationPaths: readonly string[] = []
 ): void {
   const authority = writeVerifierNodeAuthority(runRoot, logicalNodeId, additionalPublicationPaths);
-  const { layout, plannedNode, attemptId, artifactDir, snapshots, publications } = authority;
+  const { layout, plannedNode, attemptId, artifactDir, publications } = authority;
   const runMetadata = readRunMetadataDocument(layout.runMetadataPath, layout.runId);
   assert.ok(runMetadata.workflow, "verified-output fixtures require an active workflow link");
   const workflowRunId = runMetadata.workflow.run_id;
