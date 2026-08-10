@@ -1,4 +1,5 @@
 export * from "./agents.js";
+export * from "./audit-profiles.js";
 export * from "./defaults.js";
 export * from "./execution.js";
 export * from "./invariant-priority.js";

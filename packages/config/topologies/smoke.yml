@@ -1,0 +1,125 @@
+version: 2
+defaults:
+  strategy_loops: 1
+groups:
+  setup:
+    label: Smoke context
+    color: "#2563eb"
+    defaults:
+      max_attempts: 2
+      model_profiles:
+        - smoke-coordination
+  strategies:
+    label: Ground-truth-informed smoke strategies
+    color: "#7c3aed"
+    defaults:
+      loops: 1
+      max_attempts: 2
+      model_profiles:
+        - benchmark
+  review:
+    label: Bounded smoke review
+    color: "#0f766e"
+    defaults:
+      max_attempts: 2
+      model_profiles:
+        - smoke-coordination
+nodes:
+  - id: __start__
+    kind: meta
+    role: start
+    depends_on: []
+  - id: __finish__
+    kind: meta
+    role: finish
+    depends_on:
+      - final-report
+  - id: smoke-context
+    kind: agentic
+    prompt: smoke/smoke-context.md
+    group: setup
+    depends_on:
+      - __start__
+    outputs:
+      - path: smoke-context.md
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
+  - id: time-warp-sequences
+    kind: agentic
+    prompt: smoke/smoke-strategy.md
+    group: strategies
+    depends_on:
+      - smoke-context
+    outputs:
+      - path: findings.json
+        contract: ultrafuzz/findings@1
+        primary: true
+      - path: generated-tests.json
+        contract: ultrafuzz/generated-tests@1
+  - id: external-dependency-boundaries
+    kind: agentic
+    prompt: smoke/smoke-strategy.md
+    group: strategies
+    depends_on:
+      - smoke-context
+    outputs:
+      - path: findings.json
+        contract: ultrafuzz/findings@1
+        primary: true
+      - path: generated-tests.json
+        contract: ultrafuzz/generated-tests@1
+  - id: externalized-state-accounting
+    kind: agentic
+    prompt: smoke/smoke-strategy.md
+    group: strategies
+    depends_on:
+      - smoke-context
+    outputs:
+      - path: findings.json
+        contract: ultrafuzz/findings@1
+        primary: true
+      - path: generated-tests.json
+        contract: ultrafuzz/generated-tests@1
+  - id: lifecycle-view-boundaries
+    kind: agentic
+    prompt: smoke/smoke-strategy.md
+    group: strategies
+    depends_on:
+      - smoke-context
+    outputs:
+      - path: findings.json
+        contract: ultrafuzz/findings@1
+        primary: true
+      - path: generated-tests.json
+        contract: ultrafuzz/generated-tests@1
+  - id: dedupe-findings
+    kind: agentic
+    prompt: smoke/smoke-dedupe-findings.md
+    group: review
+    depends_on:
+      - time-warp-sequences
+      - external-dependency-boundaries
+      - externalized-state-accounting
+      - lifecycle-view-boundaries
+    outputs:
+      - path: deduped-findings.json
+        contract: ultrafuzz/findings@1
+        primary: true
+      - path: strategy-detections.json
+        contract: ultrafuzz/json-array@1
+      - path: finding-lifecycle-ledger.json
+        contract: ultrafuzz/json-object@1
+  - id: final-report
+    kind: agentic
+    prompt: smoke/smoke-final-report.md
+    group: review
+    depends_on:
+      - dedupe-findings
+    outputs:
+      - path: report.md
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
+      - path: report.json
+        contract: ultrafuzz/report@1
+      - path: findings.normalized.json
+        contract: ultrafuzz/findings@1

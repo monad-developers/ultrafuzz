@@ -1,0 +1,64 @@
+schema_version: 1
+default: balanced
+
+profiles:
+  smoke:
+    description: Fast end-to-end workflow validation, not a comprehensive audit.
+    intended_use: CI, installation, and integration checks.
+    topology_path: topologies/smoke.yml
+    settings:
+      strategy_loops: 1
+      dynamic_strategies_enumerator: 1
+      max_parallel_agents: 4
+      max_parallel_nodes: 4
+      workflow_deadline_seconds: 14400
+
+  low-cost:
+    description: Cost-sensitive real audit with reduced breadth and depth.
+    intended_use: Budget-constrained audits that still require the normal project workflow.
+    settings:
+      strategy_loops: 1
+      dynamic_strategies_enumerator: 1
+      max_parallel_agents: 2
+      max_parallel_nodes: 4
+      workflow_deadline_seconds: 43200
+      triage_quorum: 2
+      triage_panel_size: 3
+
+  balanced:
+    description: Recommended default for normal audits.
+    intended_use: General-purpose audits using the editable project topology.
+    settings: {}
+
+  thorough:
+    description: Broader and deeper investigation at higher cost.
+    intended_use: High-assurance audits with additional strategy and dynamic-goal breadth.
+    settings:
+      strategy_loops: 3
+      dynamic_strategies_enumerator: 5
+      max_parallel_agents: 4
+      max_parallel_nodes: 8
+      workflow_deadline_seconds: 86400
+
+  exhaustive:
+    description: Maximum practical built-in coverage and reasoning.
+    intended_use: Highest-cost release or critical-system investigations.
+    settings:
+      strategy_loops: 5
+      dynamic_strategies_enumerator: 8
+      max_parallel_agents: 8
+      max_parallel_nodes: 16
+      workflow_deadline_seconds: 86400
+
+  invariant-only:
+    description: Focused stateful-invariant discovery, implementation, campaign, and reporting.
+    intended_use: Stateful-invariant experiments such as the Aave v4 and Origin Dollar campaigns.
+    topology_path: topologies/invariant-only.yml
+    settings:
+      strategy_loops: 3
+      dynamic_strategies_enumerator: 1
+      max_parallel_agents: 4
+      max_parallel_nodes: 8
+      workflow_deadline_seconds: 86400
+      invariant_testing_smoke_timeout_seconds: 600
+      invariant_testing_fuzzer_timeout_seconds: 3600
