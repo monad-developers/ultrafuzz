@@ -72,7 +72,7 @@ function baseRenderInput(tmp: string): PromptRenderInput {
             },
             {
               path: "generated-tests.json",
-              contract: "ultrafuzz/generated-tests@2",
+              contract: "ultrafuzz/generated-tests@3",
               primary: false,
               description: "A manifest containing generated_tests.",
               schemaFile: "generated-tests.schema.json"
@@ -156,7 +156,7 @@ describe("prompt rendering", () => {
     }
     expect(result.renderedMarkdown).toContain("generated-tests.schema.json");
     expect(result.renderedMarkdown).toContain(
-      '{"schema_version":"ultrafuzz.generated-tests.v2","run_id":"run-1","node_id":"boundary-tests","generated_tests":[]}'
+      '{"schema_version":"ultrafuzz.generated-tests.v3","run_id":"run-1","node_id":"boundary-tests","generated_tests":[],"support_files":[]}'
     );
     expect(result.renderedMarkdown).not.toContain('"node_id":"<node-id>"');
   });

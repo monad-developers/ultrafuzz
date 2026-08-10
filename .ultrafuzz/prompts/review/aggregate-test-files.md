@@ -121,35 +121,45 @@ Dynamic strategy generator:
 {{artifact_path:dynamic-strategy-generator}}/generated-tests.json
 
 Use only files reported by strategy-owned generated-test manifests. Read every
-manifest listed above, including empty manifests. Treat each manifest's
-`generated_tests` array as the source of truth and ignore any non-canonical file
+manifest listed above, including empty manifests. Require the exact
+`ultrafuzz.generated-tests.v3` shape and treat its required `generated_tests`
+and `support_files` arrays together as the complete source bundle. Reject a
+manifest with a path repeated within or across the arrays, or with non-empty
+`support_files` and no runnable `generated_tests`. Ignore any non-canonical file
 list arrays. Do not rely on the current working tree or a strategy workspace
 scan as a substitute for a missing manifest entry.
 
-For each `generated_tests` entry, accept the exact byte-for-byte companion only
+For every entry in either array, accept the exact byte-for-byte companion only
 when its `path` is a normalized relative POSIX path beginning with
 `generated-tests/`, contains no empty, `.` or `..` segment or backslash, and
-resolves to a regular file inside the source node's artifact directory. Reject
-absolute paths, path escapes, and every symlink even when its target remains
-inside the artifact directory. Record rejected entries in `skipped_files`;
-never search for or substitute another file with the same basename.
+resolves to a non-empty strict UTF-8 text regular file inside the source node's
+artifact directory. This text-only rule also applies to data fixtures. Reject
+absolute paths, path escapes, and every symlink even when its
+target remains inside the artifact directory. When `size_bytes` or `sha256` is
+present, require it to match the companion exactly. Record rejected entries in
+`skipped_files` with the corresponding `generated-test` or `support-file`
+kind; never search for or substitute another file with the same basename.
 
-Determine the destination from the entry's `framework` and `language`, checked
-against project discovery, base setup, and the target's checked-in test
-configuration. Accept framework-native test extensions: Foundry `.t.sol`;
-Hardhat `.js`, `.cjs`, `.mjs`, `.ts`, `.cts`, or `.mts`; and Vyper projects'
-existing native Python test `.py` files. Infer a missing framework only when the
-extension and discovered test stack identify it unambiguously; otherwise skip
-the entry with a reason. Do not introduce a new framework or test root.
+Determine each bundle's destination from its runnable entries' `framework` and
+`language`, checked against project discovery, base setup, and the target's
+checked-in test configuration. Accept framework-native runnable test
+extensions: Foundry `.t.sol`; Hardhat `.js`, `.cjs`, `.mjs`, `.ts`, `.cts`, or
+`.mts`; and Vyper projects' existing native Python test `.py` files. Infer a
+missing framework only when the extension and discovered test stack identify
+it unambiguously; otherwise skip the affected runnable entry with a reason. Do
+not introduce a new framework or test root.
 
 Copy Foundry tests under the configured Foundry aggregation destination (for
 example `test/foundry/<strategy>/attempt-<n>/`). Copy Hardhat tests under the
 repository's existing JavaScript or TypeScript test root and Vyper tests under
 its existing pytest, Ape, Brownie, or other native test root, in both cases
-using `ultrafuzz/<strategy>/attempt-<n>/` below that root. Keep every destination
-under `{{workspace_path}}`. Preserve the companion's relative tail when safe
-and use a stable source-derived suffix when two entries would otherwise collide;
-never overwrite one entry with another.
+using `ultrafuzz/<strategy>/attempt-<n>/` below that root. Treat each accepted
+manifest as one atomic bundle: copy its accepted runnable tests and all required
+support files beneath one destination root while preserving every companion's
+relative tail below `generated-tests/`, so relative imports continue to
+resolve. Keep every destination under `{{workspace_path}}`. Use a stable
+source-derived suffix on the whole bundle when two manifests would otherwise
+collide; never flatten files or overwrite one entry with another.
 
 Preserve attribution by strategy id, source node id, attempt index, source
 manifest path, source artifact path, source relative path, and destination path.

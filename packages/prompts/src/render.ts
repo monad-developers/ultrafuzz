@@ -318,12 +318,13 @@ function appendOutputContract(rendered: string, input: PromptRenderInput, curren
     artifact_contracts: outputs
       .map((output) => {
         const contextualEmptyExample =
-          output.contract === "ultrafuzz/generated-tests@2"
+          output.contract === "ultrafuzz/generated-tests@3"
             ? JSON.stringify({
-                schema_version: "ultrafuzz.generated-tests.v2",
+                schema_version: "ultrafuzz.generated-tests.v3",
                 run_id: input.run.id,
                 node_id: input.node.logicalId,
-                generated_tests: []
+                generated_tests: [],
+                support_files: []
               })
             : output.validEmptyExample;
         const validEmptyExample = contextualEmptyExample === "" ? "<empty file>" : contextualEmptyExample;

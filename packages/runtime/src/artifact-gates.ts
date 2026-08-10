@@ -1592,7 +1592,7 @@ function verifyRequiredArtifactShape(
     }
     return diagnostics;
   }
-  if (!contract.ok || String(output.contract) !== "ultrafuzz/generated-tests@2") {
+  if (!contract.ok || String(output.contract) !== "ultrafuzz/generated-tests@3") {
     return diagnostics;
   }
 
@@ -1607,35 +1607,40 @@ function verifyRequiredArtifactShape(
     }));
   }
 
-  for (const [index, entry] of parsed.value.generated_tests.entries()) {
-    try {
-      const generatedPath = safeResolveInside(artifactDir, entry.path, "generated test manifest entry");
-      if (!fs.existsSync(generatedPath)) {
-        diagnostics.push({
-          code: "GENERATED_TEST_FILE_MISSING",
-          message: `generated test manifest entry ${entry.path} was not produced`,
-          severity: "error",
-          source: "generated-tests",
-          path: `${absolutePath}#$.generated_tests[${index}].path`
-        });
-      } else {
-        assertRegularFileInside(artifactDir, generatedPath, "generated test manifest entry");
-        const generatedStat = fs.lstatSync(generatedPath);
-        if (!generatedStat.isFile() || generatedStat.isSymbolicLink()) {
-          throw new Error(`generated test manifest entry ${entry.path} must be a regular file`);
-        }
-        if (generatedStat.size === 0) {
+  for (const [field, label, entries] of [
+    ["generated_tests", "generated test", parsed.value.generated_tests],
+    ["support_files", "generated-test support file", parsed.value.support_files]
+  ] as const) {
+    for (const [index, entry] of entries.entries()) {
+      try {
+        const generatedPath = safeResolveInside(artifactDir, entry.path, `${label} manifest entry`);
+        if (!fs.existsSync(generatedPath)) {
           diagnostics.push({
-            code: "GENERATED_TEST_FILE_EMPTY",
-            message: `generated test manifest entry ${entry.path} is empty`,
+            code: "GENERATED_TEST_FILE_MISSING",
+            message: `${label} manifest entry ${entry.path} was not produced`,
             severity: "error",
             source: "generated-tests",
-            path: `${absolutePath}#$.generated_tests[${index}].path`
+            path: `${absolutePath}#$.${field}[${index}].path`
           });
+        } else {
+          assertRegularFileInside(artifactDir, generatedPath, `${label} manifest entry`);
+          const generatedStat = fs.lstatSync(generatedPath);
+          if (!generatedStat.isFile() || generatedStat.isSymbolicLink()) {
+            throw new Error(`${label} manifest entry ${entry.path} must be a regular file`);
+          }
+          if (generatedStat.size === 0) {
+            diagnostics.push({
+              code: "GENERATED_TEST_FILE_EMPTY",
+              message: `${label} manifest entry ${entry.path} is empty`,
+              severity: "error",
+              source: "generated-tests",
+              path: `${absolutePath}#$.${field}[${index}].path`
+            });
+          }
         }
+      } catch (error) {
+        diagnostics.push(diagnosticFromError(error, "generated-tests", "GENERATED_TEST_FILE_INVALID"));
       }
-    } catch (error) {
-      diagnostics.push(diagnosticFromError(error, "generated-tests", "GENERATED_TEST_FILE_INVALID"));
     }
   }
 

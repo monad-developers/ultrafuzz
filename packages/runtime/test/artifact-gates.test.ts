@@ -231,7 +231,7 @@ function plannedNode(paths: string[]): PlannedGraphNode {
         outputPath === "workspace-patch.json"
           ? "ultrafuzz/workspace-patch@1"
           : outputPath === "generated-tests.json"
-            ? "ultrafuzz/generated-tests@2"
+            ? "ultrafuzz/generated-tests@3"
             : outputPath === "findings.json"
               ? "ultrafuzz/findings@2"
               : outputPath === "properties.json"
@@ -295,9 +295,10 @@ test("required artifact gate validates generated-test manifest shape and listed 
   fs.writeFileSync(
     manifestPath,
     JSON.stringify({
-      schema_version: "ultrafuzz.generated-tests.v2",
+      schema_version: "ultrafuzz.generated-tests.v3",
       run_id: "run-1",
       node_id: "strategy-a",
+      support_files: [],
       test_files: [{ path: "generated-tests/Invariant.t.sol" }]
     }),
     "utf8"
@@ -310,10 +311,11 @@ test("required artifact gate validates generated-test manifest shape and listed 
   fs.writeFileSync(
     manifestPath,
     JSON.stringify({
-      schema_version: "ultrafuzz.generated-tests.v2",
+      schema_version: "ultrafuzz.generated-tests.v3",
       run_id: "run-1",
       node_id: "strategy-a",
-      generated_tests: [{ path: "generated-tests/Invariant.t.sol" }]
+      generated_tests: [{ path: "generated-tests/Invariant.t.sol" }],
+      support_files: []
     }),
     "utf8"
   );
@@ -324,7 +326,8 @@ test("required artifact gate validates generated-test manifest shape and listed 
   assert.ok(
     missingFile.diagnostics.some(
       (diagnostic) =>
-        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" && diagnostic.details?.gate === "generated-test-path-exists"
+        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
+        diagnostic.details?.gate === "generated-test-file-integrity"
     )
   );
 
@@ -344,10 +347,11 @@ test("required artifact gate validates generated-test manifest shape and listed 
     fs.writeFileSync(
       manifestPath,
       JSON.stringify({
-        schema_version: "ultrafuzz.generated-tests.v2",
+        schema_version: "ultrafuzz.generated-tests.v3",
         run_id: "run-1",
         node_id: "strategy-a",
         generated_tests: [{ path: "generated-tests/Invariant.t.sol" }],
+        support_files: [],
         [field]: value
       }),
       "utf8"
@@ -364,13 +368,38 @@ test("required artifact gate validates generated-test manifest shape and listed 
     );
   }
 
+  const supportPath = path.join(artifactDir, "generated-tests", "InvariantFixture.sol");
+  fs.writeFileSync(supportPath, Buffer.from([0xff]));
   fs.writeFileSync(
     manifestPath,
     JSON.stringify({
-      schema_version: "ultrafuzz.generated-tests.v2",
+      schema_version: "ultrafuzz.generated-tests.v3",
       run_id: "run-1",
       node_id: "strategy-a",
-      generated_tests: [{ path: "generated-tests/Invariant.t.sol" }]
+      generated_tests: [{ path: "generated-tests/Invariant.t.sol" }],
+      support_files: [{ path: "generated-tests/InvariantFixture.sol" }]
+    }),
+    "utf8"
+  );
+  const binarySupport = verifyRequiredArtifactsForAttempt(layout, node, "strategy-a");
+  assert.equal(binarySupport.ok, false);
+  assert.ok(
+    binarySupport.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
+        diagnostic.details?.gate === "generated-test-file-integrity"
+    )
+  );
+  fs.writeFileSync(supportPath, "library InvariantFixture {}\n", "utf8");
+
+  fs.writeFileSync(
+    manifestPath,
+    JSON.stringify({
+      schema_version: "ultrafuzz.generated-tests.v3",
+      run_id: "run-1",
+      node_id: "strategy-a",
+      generated_tests: [{ path: "generated-tests/Invariant.t.sol" }],
+      support_files: [{ path: "generated-tests/InvariantFixture.sol" }]
     }),
     "utf8"
   );

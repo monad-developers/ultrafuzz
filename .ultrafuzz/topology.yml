@@ -354,7 +354,7 @@ nodes:
       - path: findings.json
         contract: ultrafuzz/findings@2
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@2
+        contract: ultrafuzz/generated-tests@3
   - id: encode-decode
     kind: agentic
     prompt: strategies/encode-decode.md
@@ -366,7 +366,7 @@ nodes:
         contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@2
+        contract: ultrafuzz/generated-tests@3
   - id: differential-library-tests
     kind: agentic
     prompt: strategies/differential-library-tests.md
@@ -378,7 +378,7 @@ nodes:
         contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@2
+        contract: ultrafuzz/generated-tests@3
     loops: 1
   - id: round-trip
     kind: agentic
@@ -391,7 +391,7 @@ nodes:
         contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@2
+        contract: ultrafuzz/generated-tests@3
   - id: workflow-property-based-tests
     kind: agentic
     prompt: strategies/workflow-property-based-tests.md
@@ -403,7 +403,7 @@ nodes:
         contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@2
+        contract: ultrafuzz/generated-tests@3
   - id: time-warp-sequences
     kind: agentic
     prompt: strategies/time-warp-sequences.md
@@ -415,7 +415,7 @@ nodes:
         contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@2
+        contract: ultrafuzz/generated-tests@3
   - id: expand-coverage
     kind: agentic
     prompt: strategies/expand-coverage.md
@@ -429,7 +429,7 @@ nodes:
       - path: findings.json
         contract: ultrafuzz/findings@2
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@2
+        contract: ultrafuzz/generated-tests@3
   - id: admin-config-boundaries
     kind: agentic
     prompt: strategies/admin-config-boundaries.md
@@ -446,7 +446,7 @@ nodes:
       - path: findings.json
         contract: ultrafuzz/findings@2
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@2
+        contract: ultrafuzz/generated-tests@3
   - id: external-dependency-boundaries
     kind: agentic
     prompt: strategies/external-dependency-boundaries.md
@@ -462,7 +462,7 @@ nodes:
       - path: findings.json
         contract: ultrafuzz/findings@2
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@2
+        contract: ultrafuzz/generated-tests@3
   - id: externalized-state-accounting
     kind: agentic
     prompt: strategies/externalized-state-accounting.md
@@ -478,7 +478,7 @@ nodes:
       - path: findings.json
         contract: ultrafuzz/findings@2
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@2
+        contract: ultrafuzz/generated-tests@3
   - id: amm-boundary-liquidity
     kind: agentic
     prompt: strategies/amm-boundary-liquidity.md
@@ -490,7 +490,7 @@ nodes:
         contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@2
+        contract: ultrafuzz/generated-tests@3
   - id: payable-fallback-accounting
     kind: agentic
     prompt: strategies/payable-fallback-accounting.md
@@ -502,7 +502,7 @@ nodes:
         contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@2
+        contract: ultrafuzz/generated-tests@3
   - id: packed-action-parity
     kind: agentic
     prompt: strategies/packed-action-parity.md
@@ -514,7 +514,7 @@ nodes:
         contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@2
+        contract: ultrafuzz/generated-tests@3
   - id: batch-atomicity-unsupported-actions
     kind: agentic
     prompt: strategies/batch-atomicity-unsupported-actions.md
@@ -526,7 +526,7 @@ nodes:
         contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@2
+        contract: ultrafuzz/generated-tests@3
   - id: router-exact-accounting
     kind: agentic
     prompt: strategies/router-exact-accounting.md
@@ -538,7 +538,7 @@ nodes:
         contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@2
+        contract: ultrafuzz/generated-tests@3
   - id: rounding-direction-audit
     kind: agentic
     prompt: strategies/rounding-direction-audit.md
@@ -550,7 +550,7 @@ nodes:
         contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@2
+        contract: ultrafuzz/generated-tests@3
   - id: market-exhaustion-boundaries
     kind: agentic
     prompt: strategies/market-exhaustion-boundaries.md
@@ -562,7 +562,7 @@ nodes:
         contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@2
+        contract: ultrafuzz/generated-tests@3
   - id: order-replacement-collateral
     kind: agentic
     prompt: strategies/order-replacement-collateral.md
@@ -574,7 +574,7 @@ nodes:
         contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@2
+        contract: ultrafuzz/generated-tests@3
   - id: state-machine-boundaries
     kind: agentic
     prompt: strategies/state-machine-boundaries.md
@@ -586,7 +586,7 @@ nodes:
         contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@2
+        contract: ultrafuzz/generated-tests@3
   - id: lifecycle-view-boundaries
     kind: agentic
     prompt: strategies/lifecycle-view-boundaries.md
@@ -598,7 +598,7 @@ nodes:
         contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@2
+        contract: ultrafuzz/generated-tests@3
   - id: stateful-invariant-setup
     kind: agentic
     prompt: strategies/invariants/setup.md
@@ -646,7 +646,7 @@ nodes:
       - path: findings.json
         contract: ultrafuzz/findings@2
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@2
+        contract: ultrafuzz/generated-tests@3
       - path: harness-repairs.json
         contract: ultrafuzz/harness-repairs@1
       - path: workspace.patch
@@ -667,7 +667,7 @@ nodes:
       - path: implemented-properties.json
         contract: ultrafuzz/implemented-properties@3
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@2
+        contract: ultrafuzz/generated-tests@3
       - path: findings.json
         contract: ultrafuzz/findings@2
       - path: workspace.patch
@@ -692,7 +692,7 @@ nodes:
       - path: recon-fuzzer-results.json
         contract: ultrafuzz/property-campaign@2
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@2
+        contract: ultrafuzz/generated-tests@3
       - path: findings.json
         contract: ultrafuzz/findings@2
       - path: workspace.patch
@@ -722,7 +722,7 @@ nodes:
         contract: ultrafuzz/reference-harness@1
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@2
+        contract: ultrafuzz/generated-tests@3
     loops: 1
   - id: reference-and-lane-auditor
     kind: agentic
@@ -748,7 +748,7 @@ nodes:
       - path: findings.json
         contract: ultrafuzz/findings@2
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@2
+        contract: ultrafuzz/generated-tests@3
     loops: 1
   - id: differential-red-triage
     kind: agentic
@@ -782,7 +782,7 @@ nodes:
       - path: findings.json
         contract: ultrafuzz/findings@2
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@2
+        contract: ultrafuzz/generated-tests@3
     loops: 1
   - id: dynamic-strategy-generator
     kind: agentic
@@ -829,7 +829,7 @@ nodes:
       - path: selected-strategies.json
         contract: ultrafuzz/selected-strategies@1
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@2
+        contract: ultrafuzz/generated-tests@3
       - path: findings.json
         contract: ultrafuzz/findings@2
       - path: provenance.json

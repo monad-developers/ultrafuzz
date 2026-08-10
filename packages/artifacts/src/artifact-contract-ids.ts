@@ -18,7 +18,7 @@ export const ARTIFACT_CONTRACT_IDS = [
   "ultrafuzz/externalized-state-accounting@1",
   "ultrafuzz/finding-lifecycle-ledger@1",
   "ultrafuzz/findings@2",
-  "ultrafuzz/generated-tests@2",
+  "ultrafuzz/generated-tests@3",
   "ultrafuzz/harness-repairs@1",
   "ultrafuzz/implemented-properties@3",
   "ultrafuzz/invariant-campaign-plan@1",

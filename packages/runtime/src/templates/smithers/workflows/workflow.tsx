@@ -722,7 +722,7 @@ function resetTaskArtifactsForRetry(task: (typeof taskSpecs)[number]): void {
   }
   resetTaskArtifactContents(path.join(artifactsParent, task.attemptId), task.attemptId, "mirror");
 
-  if (task.outputs.some((output) => output.contract === "ultrafuzz/generated-tests@2")) {
+  if (task.outputs.some((output) => output.contract === "ultrafuzz/generated-tests@3")) {
     for (const testRoot of invariantTestRoots(workspaceRoot)) {
       const foundryParentCandidate = path.resolve(workspaceRoot, testRoot, "foundry");
       if (!isStrictlyInsideDirectory(workspaceRoot, foundryParentCandidate)) {
@@ -2219,7 +2219,7 @@ function assertVerifiedDependency(task: (typeof taskSpecs)[number], dependency: 
       }
       declaredArtifactShas.set(entry.path, entry.sha256);
       rememberExpectedVerifiedPublication(expectedPublicationShas, entry.path, artifactSnapshot.bytes);
-      if (entry.contract === "ultrafuzz/generated-tests@2") {
+      if (entry.contract === "ultrafuzz/generated-tests@3") {
         for (const companion of verifyGeneratedTestFiles(dependency, validation.value)) {
           rememberExpectedVerifiedPublication(expectedPublicationShas, companion.path, companion.contents);
         }
@@ -2409,7 +2409,7 @@ function materializeGeneratedTestCompanions(
   const workspaceRoot = realpathSync(task.workspacePath);
 
   for (const output of task.outputs) {
-    if (output.contract !== "ultrafuzz/generated-tests@2") {
+    if (output.contract !== "ultrafuzz/generated-tests@3") {
       continue;
     }
     const captured = capturedOutputs.find((entry) => entry.output.path === output.path);
@@ -2425,14 +2425,12 @@ function materializeGeneratedTestCompanions(
     }
     const validation = validateArtifactContract(output.contract, contents, output.path);
     if (!validation.ok) continue;
-    const entries = (validation.value as { generated_tests?: Array<{ path?: string }> }).generated_tests ?? [];
-    for (const entry of entries) {
-      materializeGeneratedTestCompanion(
-        workspaceRoot,
-        captured.artifactRoot,
-        generatedTestNodeIds(task),
-        entry.path ?? ""
-      );
+    const manifest = validation.value as {
+      generated_tests: Array<{ path: string }>;
+      support_files: Array<{ path: string }>;
+    };
+    for (const entry of [...manifest.generated_tests, ...manifest.support_files]) {
+      materializeGeneratedTestCompanion(workspaceRoot, captured.artifactRoot, generatedTestNodeIds(task), entry.path);
     }
   }
 }
@@ -4547,7 +4545,7 @@ function verifyArtifacts(
       throw new Error(`artifact-contract failure: verified output is unavailable ${output.path}`);
     }
     rememberVerifiedPublication(publications, output.path, verified.file.bytes);
-    if (output.contract === "ultrafuzz/generated-tests@2") {
+    if (output.contract === "ultrafuzz/generated-tests@3") {
       for (const companion of verifyGeneratedTestFiles(verified.artifactRoot, verified.value)) {
         rememberVerifiedPublication(publications, companion.path, companion.contents);
       }
@@ -4966,26 +4964,30 @@ function writeArtifactVerificationMarker(
 }
 
 function verifyGeneratedTestFiles(artifactDir: string, value: unknown): Array<{ path: string; contents: Buffer }> {
-  const entries = (value as { generated_tests?: Array<{ path?: string }> }).generated_tests ?? [];
+  const manifest = value as {
+    generated_tests: Array<{ path: string }>;
+    support_files: Array<{ path: string }>;
+  };
+  const entries = [...manifest.generated_tests, ...manifest.support_files];
   const paths = new Set<string>();
   return entries.map((entry) => {
-    const relativePath = entry.path ?? "";
+    const relativePath = entry.path;
     if (paths.has(relativePath)) {
-      throw new Error(`artifact-contract failure: duplicate generated test path ${relativePath}`);
+      throw new Error(`artifact-contract failure: duplicate generated-test bundle path ${relativePath}`);
     }
     paths.add(relativePath);
     const artifactPath = path.resolve(artifactDir, relativePath);
     if (!isStrictlyInsideDirectory(artifactDir, artifactPath)) {
-      throw new Error(`artifact-contract failure: unsafe generated test path ${relativePath}`);
+      throw new Error(`artifact-contract failure: unsafe generated-test bundle path ${relativePath}`);
     }
     const snapshot = readBoundedRegularArtifactSnapshot(
       artifactDir,
       artifactPath,
-      `artifact-contract failure: generated test file is missing ${relativePath}`,
+      `artifact-contract failure: generated-test bundle file is missing ${relativePath}`,
       MAX_VERIFIED_COMPANION_BYTES,
       true
     );
-    decodeStrictUtf8Snapshot(snapshot, `artifact-contract failure: generated test file ${relativePath}`);
+    decodeStrictUtf8Snapshot(snapshot, `artifact-contract failure: generated-test bundle file ${relativePath}`);
     return { path: relativePath, contents: snapshot.bytes };
   });
 }

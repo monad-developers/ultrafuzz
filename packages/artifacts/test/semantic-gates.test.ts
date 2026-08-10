@@ -563,9 +563,13 @@ const fixtures = {
       }
     ]
   },
-  "generated-test-path-uniqueness": {
-    positive: { generated_tests: [{ path: "a" }] },
-    negative: { generated_tests: [{ path: "a" }, { path: "a" }] }
+  "generated-test-bundle-path-uniqueness": {
+    positive: { generated_tests: [{ path: "a" }], support_files: [{ path: "b" }] },
+    negative: { generated_tests: [{ path: "a" }], support_files: [{ path: "a" }] }
+  },
+  "generated-test-support-requires-test": {
+    positive: { generated_tests: [{ path: "a" }], support_files: [{ path: "b" }] },
+    negative: { generated_tests: [], support_files: [{ path: "b" }] }
   },
   "harness-repair-failure-id-uniqueness": {
     positive: [{ failure_id: "a" }],
@@ -1036,6 +1040,8 @@ test("every contextual registration executes real positive and negative checks",
     fs.mkdirSync(path.join(root, "generated-tests"));
     fs.writeFileSync(path.join(root, "artifact.json"), "artifact\n");
     fs.writeFileSync(path.join(root, "generated-tests", "test.sol"), "test\n");
+    fs.writeFileSync(path.join(root, "generated-tests", "helper.sol"), "helper\n");
+    fs.writeFileSync(path.join(root, "generated-tests", "binary.dat"), Buffer.from([0xff]));
     const digest = crypto.createHash("sha256").update("artifact\n").digest("hex");
     const contentDigest = crypto.createHash("sha256").update("snapshot", "utf8").digest("hex");
     const contextFixtures: Record<
@@ -1154,9 +1160,15 @@ test("every contextual registration executes real positive and negative checks",
         negative: { run_id: "run-foreign", node_id: "strategy-foreign" },
         context: { artifactIdentity: { runId: "run-current", nodeId: "strategy-current" } }
       },
-      "generated-test-path-exists": {
-        positive: { generated_tests: [{ path: "generated-tests/test.sol" }] },
-        negative: { generated_tests: [{ path: "generated-tests/missing.sol" }] },
+      "generated-test-file-integrity": {
+        positive: {
+          generated_tests: [{ path: "generated-tests/test.sol" }],
+          support_files: [{ path: "generated-tests/helper.sol", size_bytes: 7 }]
+        },
+        negative: {
+          generated_tests: [{ path: "generated-tests/test.sol" }],
+          support_files: [{ path: "generated-tests/binary.dat" }]
+        },
         context: { filesystem: { rootDirectory: root } }
       },
       "implemented-property-selection-join": {

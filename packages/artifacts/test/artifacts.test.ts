@@ -935,6 +935,14 @@ test("generated-test manifests persist explicit generated files with provenance"
         language: "solidity",
         framework: "foundry"
       }
+    ],
+    supportFiles: [
+      {
+        path: "helpers/InvariantFixture.sol",
+        content: "library InvariantFixture {}\n",
+        language: "solidity",
+        framework: "foundry"
+      }
     ]
   });
 
@@ -942,6 +950,7 @@ test("generated-test manifests persist explicit generated files with provenance"
   assert.equal(manifest.generated_tests.length, 1);
   assert.equal(manifest.generated_tests[0]!.path, "generated-tests/Invariant.t.sol");
   assert.equal(manifest.generated_tests[0]!.provenance!.agent_ref, "CodexAgent");
+  assert.equal(manifest.support_files[0]!.path, "generated-tests/helpers/InvariantFixture.sol");
   assert.equal(
     fs.existsSync(path.join(getNodeArtifactDir(layout, "strategy-a"), "generated-tests", "Invariant.t.sol")),
     true
@@ -956,11 +965,56 @@ test("generated-test manifest writer rejects zero-byte companion files", () => {
       writeGeneratedTestManifest({
         layout,
         nodeId: "strategy-a",
+        supportFiles: [],
         tests: [{ path: "generated-tests/Empty.t.sol", content: "" }]
       }),
     /generated test file must be non-empty/u
   );
   assert.equal(fs.existsSync(path.join(getNodeArtifactDir(layout, "strategy-a"), "generated-tests.json")), false);
+});
+
+test("generated-test manifest writer rejects support-only bundles before writing files", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-support-only-generated-test" });
+
+  assert.throws(
+    () =>
+      writeGeneratedTestManifest({
+        layout,
+        nodeId: "strategy-a",
+        tests: [],
+        supportFiles: [{ path: "generated-tests/Helper.sol", content: "library Helper {}\n" }]
+      }),
+    /cannot declare support files without a runnable generated test/u
+  );
+  assert.equal(fs.existsSync(path.join(getNodeArtifactDir(layout, "strategy-a"), "generated-tests.json")), false);
+  assert.equal(
+    fs.existsSync(path.join(getNodeArtifactDir(layout, "strategy-a"), "generated-tests", "Helper.sol")),
+    false
+  );
+});
+
+test("generated-test manifest writer rejects cross-array duplicate paths before changing bundle bytes", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-duplicate-generated-test" });
+  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
+  const generatedTestsDir = path.join(nodeDir, "generated-tests");
+  fs.mkdirSync(generatedTestsDir, { recursive: true });
+  const companionPath = path.join(generatedTestsDir, "Shared.sol");
+  const manifestPath = path.join(nodeDir, "generated-tests.json");
+  fs.writeFileSync(companionPath, "sentinel companion\n", "utf8");
+  fs.writeFileSync(manifestPath, "sentinel manifest\n", "utf8");
+
+  assert.throws(
+    () =>
+      writeGeneratedTestManifest({
+        layout,
+        nodeId: "strategy-a",
+        tests: [{ path: "Shared.sol", content: "replacement test\n" }],
+        supportFiles: [{ path: "generated-tests/Shared.sol", content: "replacement support\n" }]
+      }),
+    /repeats path "generated-tests\/Shared\.sol"/u
+  );
+  assert.equal(fs.readFileSync(companionPath, "utf8"), "sentinel companion\n");
+  assert.equal(fs.readFileSync(manifestPath, "utf8"), "sentinel manifest\n");
 });
 
 test("generated-test manifest writer rejects final symlinks without touching outside files", () => {
@@ -979,6 +1033,7 @@ test("generated-test manifest writer rejects final symlinks without touching out
       writeGeneratedTestManifest({
         layout,
         nodeId: "strategy-a",
+        supportFiles: [],
         tests: [{ path: "generated-tests/Linked.t.sol", content: "replacement\n" }]
       }),
     /symlink/u
@@ -1002,6 +1057,7 @@ test("generated-test manifest writer rejects broken final symlinks before writin
       writeGeneratedTestManifest({
         layout,
         nodeId: "strategy-a",
+        supportFiles: [],
         tests: [{ path: "generated-tests/Broken.t.sol", content: "replacement\n" }]
       }),
     /symlink/u
@@ -1018,6 +1074,7 @@ test("generated-test manifest writer rejects paths outside the generated-tests r
       writeGeneratedTestManifest({
         layout,
         nodeId: "strategy-a",
+        supportFiles: [],
         tests: [{ path: "generated-tests/../../Outside.t.sol", content: "outside\n" }]
       }),
     /cannot traverse outside/u

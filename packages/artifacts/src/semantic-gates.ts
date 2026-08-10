@@ -5,7 +5,8 @@ import { isDeepStrictEqual } from "node:util";
 
 import { artifactContractDefinition, artifactContractSchemaBinding } from "./artifact-contracts.js";
 import { ARTIFACT_SCHEMA_METADATA, type ArtifactSchemaFilename } from "./artifact-schema-metadata.js";
-import { MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES } from "./artifact-limits.js";
+import { MAX_GENERATED_TEST_COMPANION_BYTES, MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES } from "./artifact-limits.js";
+import { readRegularFileSnapshot } from "./schema-registry.js";
 
 export const SEMANTIC_GATE_SCOPES = ["document", "filesystem", "cross-artifact", "git", "runtime-state"] as const;
 
@@ -1950,24 +1951,68 @@ function filesystemManifestIssues(
   return issues;
 }
 
-function generatedTestExistenceIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
+function generatedTestFileIntegrityIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
   const root = context.filesystem!.rootDirectory;
-  return arrayAt(document, ["generated_tests"]).flatMap((row, index) => {
-    const relativePath = stringField(row, "path");
-    if (relativePath === undefined) return [];
-    const filePath = resolveArtifactFile(root, relativePath);
-    try {
-      if (filePath !== undefined) {
-        const stats = fs.lstatSync(filePath);
-        if (stats.isFile() && !stats.isSymbolicLink()) return [];
+  const issues: SemanticGateIssue[] = [];
+  for (const [field, label] of [
+    ["generated_tests", "Generated test"],
+    ["support_files", "Generated-test support file"]
+  ] as const) {
+    for (const [index, row] of arrayAt(document, [field]).entries()) {
+      const relativePath = stringField(row, "path");
+      if (relativePath === undefined) continue;
+      const rowPath = `$.${field}[${index}]`;
+      const filePath = resolveArtifactFile(root, relativePath);
+      let stats: fs.Stats | undefined;
+      try {
+        if (filePath !== undefined) stats = fs.lstatSync(filePath);
+      } catch {
+        // Reported below as missing or nonregular.
       }
-    } catch {
-      // Reported below.
+      if (filePath === undefined || stats === undefined || !stats.isFile() || stats.isSymbolicLink()) {
+        issues.push(issue(`${rowPath}.path`, `${label} is missing or nonregular: ${JSON.stringify(relativePath)}`));
+        continue;
+      }
+      let contents: Buffer;
+      try {
+        contents = readRegularFileSnapshot(filePath, MAX_GENERATED_TEST_COMPANION_BYTES);
+      } catch {
+        issues.push(
+          issue(
+            `${rowPath}.path`,
+            `${label} cannot be captured as a bounded regular file: ${JSON.stringify(relativePath)}`
+          )
+        );
+        continue;
+      }
+      if (contents.length === 0) {
+        issues.push(issue(`${rowPath}.path`, `${label} is empty: ${JSON.stringify(relativePath)}`));
+      }
+      try {
+        new TextDecoder("utf-8", { fatal: true }).decode(contents);
+      } catch {
+        issues.push(issue(`${rowPath}.path`, `${label} is not strict UTF-8 text: ${JSON.stringify(relativePath)}`));
+      }
+      const expectedDigest = stringField(row, "sha256");
+      if (
+        expectedDigest !== undefined &&
+        crypto.createHash("sha256").update(contents).digest("hex") !== expectedDigest
+      ) {
+        issues.push(issue(`${rowPath}.sha256`, `${label} digest does not match ${JSON.stringify(relativePath)}`));
+      }
+      const expectedSize = numberField(row, "size_bytes");
+      if (expectedSize !== undefined && expectedSize !== contents.length) {
+        issues.push(issue(`${rowPath}.size_bytes`, `${label} size does not match ${JSON.stringify(relativePath)}`));
+      }
     }
-    return [
-      issue(`$.generated_tests[${index}].path`, `Generated test does not exist: ${JSON.stringify(relativePath)}`)
-    ];
-  });
+  }
+  return issues;
+}
+
+function generatedTestSupportRequiresTestIssues(document: unknown): SemanticGateIssue[] {
+  return arrayAt(document, ["support_files"]).length > 0 && arrayAt(document, ["generated_tests"]).length === 0
+    ? [issue("$.support_files", "Generated-test support files require at least one runnable generated test")]
+    : [];
 }
 
 function generatedTestIdentityIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
@@ -2617,17 +2662,20 @@ const gateSpecifications = {
   "finding-projected-reference-uniqueness": documentGate(findingProjectedReferenceIssues),
   "findings-evidence-span-consistency": documentGate(findingArrayEvidenceSpanIssues),
   "findings-id-uniqueness": documentGate(uniqueFieldGate([[]], "id", "finding ID")),
-  "generated-test-path-exists": contextualGate(
+  "generated-test-file-integrity": contextualGate(
     "filesystem",
     ["filesystem.rootDirectory"],
-    generatedTestExistenceIssues
+    generatedTestFileIntegrityIssues
   ),
   "generated-test-current-identity": contextualGate(
     "runtime-state",
     ["artifactIdentity.runId", "artifactIdentity.nodeId"],
     generatedTestIdentityIssues
   ),
-  "generated-test-path-uniqueness": documentGate(uniqueFieldGate([["generated_tests"]], "path", "generated test path")),
+  "generated-test-bundle-path-uniqueness": documentGate(
+    uniqueFieldGate([["generated_tests"], ["support_files"]], "path", "generated-test bundle path", { global: true })
+  ),
+  "generated-test-support-requires-test": documentGate(generatedTestSupportRequiresTestIssues),
   "harness-repair-failure-id-uniqueness": documentGate(uniqueFieldGate([[]], "failure_id", "harness failure ID")),
   "implemented-property-id-uniqueness": documentGate(
     uniqueFieldGate([["properties"]], "property_id", "implemented property ID")

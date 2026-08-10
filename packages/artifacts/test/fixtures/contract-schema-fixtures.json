@@ -494,19 +494,21 @@
     ],
     "invalid": null
   },
-  "ultrafuzz/generated-tests@2": {
+  "ultrafuzz/generated-tests@3": {
     "schema_file": "generated-tests.schema.json",
     "valid": {
-      "schema_version": "ultrafuzz.generated-tests.v2",
-      "run_id": "x",
-      "node_id": "x",
-      "generated_tests": []
-    },
-    "invalid": {
-      "schema_version": "ultrafuzz.generated-tests.v2",
+      "schema_version": "ultrafuzz.generated-tests.v3",
       "run_id": "x",
       "node_id": "x",
       "generated_tests": [],
+      "support_files": []
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.generated-tests.v3",
+      "run_id": "x",
+      "node_id": "x",
+      "generated_tests": [],
+      "support_files": [],
       "__unexpected_fixture_field": true
     }
   },

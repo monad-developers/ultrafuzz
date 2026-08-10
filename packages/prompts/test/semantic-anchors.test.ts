@@ -465,7 +465,7 @@ describe("prompt semantic anchors", () => {
     expect(dynamic).toContain("A strategy ID cannot be both selected and rejected");
   });
 
-  it("keeps generated-test manifests on the canonical generated_tests contract", () => {
+  it("keeps generated-test manifests on the canonical generated/support bundle contract", () => {
     const aggregate = prompt("review/aggregate-test-files.md");
     const dynamic = prompt("strategies/dynamic-strategy-generator.md");
     const templatePath = fileURLToPath(
@@ -487,8 +487,11 @@ describe("prompt semantic anchors", () => {
     ]);
 
     expect(readFileSync(templatePath, "utf8")).toContain("generated_tests");
-    expect(aggregate).toContain("manifest `generated_tests` entries");
-    expect(dynamic).toContain("Use the exact `ultrafuzz.generated-tests.v2` manifest shape");
+    expect(readFileSync(templatePath, "utf8")).toContain("support_files");
+    expect(readFileSync(templatePath, "utf8")).toContain("must be strict UTF-8 text");
+    expect(aggregate).toContain("required `generated_tests`\nand `support_files` arrays together");
+    expect(dynamic).toContain("Use the exact `ultrafuzz.generated-tests.v3` manifest shape");
+    expect(dynamic).toContain("never list a non-runnable support file as a generated test");
     expect(dynamic).toContain("`path` with the\n`generated-tests/<file>` prefix");
     expect(dynamic).toContain("they are not generated-test\nmanifest fields");
     expect(dynamic).not.toContain("strategy id, source path, destination intent, and\nvalidation status");
@@ -559,16 +562,18 @@ describe("prompt semantic anchors", () => {
     const aggregate = prompt("review/aggregate-test-files.md");
 
     expect(aggregate).toContain("canonical generated-test companions");
-    expect(aggregate).toContain("`generated_tests` array as the source of truth");
+    expect(aggregate).toContain("required `generated_tests`\nand `support_files` arrays together");
     expect(aggregate).toContain("exact byte-for-byte companion");
+    expect(aggregate).toContain("strict UTF-8 text regular file");
+    expect(aggregate).toContain("Treat each accepted\nmanifest as one atomic bundle");
     expect(aggregate).toContain("normalized relative POSIX");
-    expect(aggregate).toContain("every symlink even when its target remains\ninside the artifact directory");
+    expect(aggregate).toContain("every symlink even when its\ntarget remains inside the artifact directory");
     expect(aggregate).toContain("Foundry `.t.sol`");
-    expect(aggregate).toContain("Hardhat `.js`, `.cjs`, `.mjs`, `.ts`, `.cts`, or `.mts`");
+    expect(aggregate).toContain("Hardhat `.js`, `.cjs`, `.mjs`, `.ts`, `.cts`, or\n`.mts`");
     expect(aggregate).toContain("existing native Python test `.py` files");
     expect(aggregate).toContain("repository's existing JavaScript or TypeScript test root");
     expect(aggregate).toContain("existing pytest, Ape, Brownie, or other native test root");
-    expect(aggregate).toContain("never overwrite one entry with another");
+    expect(aggregate).toContain("never flatten files or overwrite one entry with another");
     expect(aggregate).toContain("Do not copy unknown manifest\nentry fields");
     expect(aggregate).toContain("required `kind`\n  (`generated-test` or `support-file`)");
     expect(aggregate).toContain("Every considered source entry appears exactly once");

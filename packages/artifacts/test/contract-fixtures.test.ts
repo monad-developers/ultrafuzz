@@ -66,6 +66,7 @@ const removedContractIds = [
   "ultrafuzz/campaign-summary@1",
   "ultrafuzz/findings@1",
   "ultrafuzz/generated-tests@1",
+  "ultrafuzz/generated-tests@2",
   "ultrafuzz/implemented-properties@1",
   "ultrafuzz/implemented-properties@2",
   "ultrafuzz/json-array@1",
@@ -755,10 +756,11 @@ test("portable generated-test paths and implementation selection uniqueness agre
     generatedEntry.zodParser
   ] as ZodLikeParser;
   const generated = {
-    schema_version: "ultrafuzz.generated-tests.v2",
+    schema_version: "ultrafuzz.generated-tests.v3",
     run_id: "run-1",
     node_id: "node-1",
-    generated_tests: [{ path: "generated-tests/nested/Invariant.t.sol" }]
+    generated_tests: [{ path: "generated-tests/nested/Invariant.t.sol" }],
+    support_files: []
   };
   assertParity(generatedEntry.id, generatedParser, generated, true, "generated-tests:path:safe");
   for (const [label, unsafePath] of [

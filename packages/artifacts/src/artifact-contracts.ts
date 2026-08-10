@@ -50,8 +50,9 @@ const existingJsonContracts = {
     schemaFile: "findings.schema.json",
     validEmptyExample: "[]"
   },
-  "ultrafuzz/generated-tests@2": {
-    description: "A strict generated-test manifest whose files live beneath generated-tests/.",
+  "ultrafuzz/generated-tests@3": {
+    description:
+      "A strict generated-test bundle manifest whose runnable tests and non-runnable support files live beneath generated-tests/.",
     schemaFile: "generated-tests.schema.json"
   },
   "ultrafuzz/implemented-properties@3": {

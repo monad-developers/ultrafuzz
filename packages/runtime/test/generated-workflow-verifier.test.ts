@@ -881,22 +881,55 @@ test("generated Smithers fails closed on schema-valid document semantic violatio
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-semantic-output-")));
   try {
     const document = {
-      schema_version: "ultrafuzz.generated-tests.v2",
+      schema_version: "ultrafuzz.generated-tests.v3",
       run_id: "run-one",
       node_id: "node-one",
-      generated_tests: [{ path: "generated-tests/Duplicate.t.sol" }, { path: "generated-tests/Duplicate.t.sol" }]
+      generated_tests: [{ path: "generated-tests/Duplicate.t.sol" }],
+      support_files: [{ path: "generated-tests/Duplicate.t.sol" }]
     };
     const contents = `${JSON.stringify(document)}\n`;
-    assert.equal(validateArtifactContract("ultrafuzz/generated-tests@2", contents).ok, true);
+    assert.equal(validateArtifactContract("ultrafuzz/generated-tests@3", contents).ok, true);
     fs.writeFileSync(path.join(root, "result.json"), contents, "utf8");
 
     const harness = loadVerifyArtifactsHarness();
-    const task = singleOutputVerificationTask(root, "ultrafuzz/generated-tests@2");
+    const task = singleOutputVerificationTask(root, "ultrafuzz/generated-tests@3");
     task.outputs[0]!.schemaFile = "generated-tests.schema.json";
 
     assert.throws(
       () => harness.verifyArtifacts(task, harness.captureTaskOutputs(task)),
-      /generated-test-path-uniqueness failed/u
+      /generated-test-bundle-path-uniqueness failed/u
+    );
+    assert.equal(harness.publications.size, 0);
+    assert.equal(harness.markerWrites.length, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("generated Smithers rejects non-UTF-8 generated-test support companions", () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-support-utf8-")));
+  try {
+    fs.mkdirSync(path.join(root, "generated-tests"));
+    fs.writeFileSync(path.join(root, "generated-tests", "Replay.t.sol"), "contract Replay {}\n", "utf8");
+    fs.writeFileSync(path.join(root, "generated-tests", "fixture.dat"), Buffer.from([0xff]));
+    const document = {
+      schema_version: "ultrafuzz.generated-tests.v3",
+      run_id: "run-one",
+      node_id: "node-one",
+      generated_tests: [{ path: "generated-tests/Replay.t.sol" }],
+      support_files: [{ path: "generated-tests/fixture.dat" }]
+    };
+    const contents = `${JSON.stringify(document)}\n`;
+    assert.equal(validateArtifactContract("ultrafuzz/generated-tests@3", contents).ok, true);
+    fs.writeFileSync(path.join(root, "result.json"), contents, "utf8");
+
+    const harness = loadVerifyArtifactsHarness();
+    const task = singleOutputVerificationTask(root, "ultrafuzz/generated-tests@3");
+    task.outputs[0]!.schemaFile = "generated-tests.schema.json";
+
+    assert.throws(
+      () => harness.verifyArtifacts(task, harness.captureTaskOutputs(task)),
+      /generated-test-file-integrity failed/u
     );
     assert.equal(harness.publications.size, 0);
     assert.equal(harness.markerWrites.length, 0);
@@ -913,18 +946,19 @@ test("generated Smithers binds generated-test manifests to the current run and l
     const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-identity-")));
     try {
       const document = {
-        schema_version: "ultrafuzz.generated-tests.v2",
+        schema_version: "ultrafuzz.generated-tests.v3",
         run_id: "run-one",
         node_id: "node-one",
         generated_tests: [],
+        support_files: [],
         [field]: value
       };
       const contents = `${JSON.stringify(document)}\n`;
-      assert.equal(validateArtifactContract("ultrafuzz/generated-tests@2", contents).ok, true);
+      assert.equal(validateArtifactContract("ultrafuzz/generated-tests@3", contents).ok, true);
       fs.writeFileSync(path.join(root, "result.json"), contents, "utf8");
 
       const harness = loadVerifyArtifactsHarness();
-      const task = singleOutputVerificationTask(root, "ultrafuzz/generated-tests@2");
+      const task = singleOutputVerificationTask(root, "ultrafuzz/generated-tests@3");
       task.outputs[0]!.schemaFile = "generated-tests.schema.json";
 
       assert.throws(
@@ -1801,7 +1835,7 @@ test("generated Smithers retries reset exact task-owned artifact contents after 
     reset,
     /resetTaskArtifactContents\(path\.join\(artifactsParent, task\.attemptId\), task\.attemptId, "mirror"\)/u
   );
-  assert.match(reset, /output\.contract === "ultrafuzz\/generated-tests@2"/u);
+  assert.match(reset, /output\.contract === "ultrafuzz\/generated-tests@3"/u);
   assert.match(reset, /for \(const testRoot of invariantTestRoots\(workspaceRoot\)\)/u);
   assert.match(reset, /path\.resolve\(workspaceRoot, testRoot, "foundry"\)/u);
   assert.match(reset, /for \(const nodeId of generatedTestNodeIds\(task\)\)/u);
@@ -1953,9 +1987,10 @@ test("generated Smithers verifier treats the final-report projector only as a no
   assert.doesNotMatch(source, /return "unavailable"/u);
 });
 
-test("generated Smithers agent rejects legacy generated-test string lists without conversion", () => {
+test("generated Smithers agent rejects v2 and legacy generated-test lists without conversion", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   assert.doesNotMatch(source, /normalizeLegacyGeneratedTestManifests|typeof entry === "string" \? \{ path: entry \}/u);
+  assert.doesNotMatch(source, /ultrafuzz\/generated-tests@2|support_files\?:|\.support_files\s*\?\?\s*\[\]/u);
 });
 
 test("generated Smithers agent does not strip finding path suffixes", () => {
@@ -2398,7 +2433,7 @@ test("generated Smithers dependency verification fails closed before descendant 
   fs.mkdirSync(invariantDependency);
   const schemaBinding = {
     schemaFile: "generated-tests.schema.json",
-    schemaId: "urn:ultrafuzz:schema:artifacts:generated-tests:2",
+    schemaId: "urn:ultrafuzz:schema:artifacts:generated-tests:3",
     schemaSha256: "b".repeat(64),
     schemaBundleSha256: "c".repeat(64),
     validatorBuild: `ultrafuzz-json-validator.v1:${"d".repeat(64)}`
@@ -2431,7 +2466,7 @@ test("generated Smithers dependency verification fails closed before descendant 
       outputs: [
         {
           path: "generated-tests.json",
-          contract: "ultrafuzz/generated-tests@2",
+          contract: "ultrafuzz/generated-tests@3",
           contractDigest: "a".repeat(64),
           ...schemaBinding,
           primary: true
@@ -2499,14 +2534,20 @@ test("generated Smithers dependency verification fails closed before descendant 
       ok: true,
       issues: [],
       value:
-        contract === "ultrafuzz/generated-tests@2"
-          ? { generated_tests: [{ path: "generated-tests/Property.t.sol" }] }
+        contract === "ultrafuzz/generated-tests@3"
+          ? {
+              generated_tests: [{ path: "generated-tests/Property.t.sol" }],
+              support_files: [{ path: "generated-tests/PropertyHelper.sol" }]
+            }
           : undefined
     }),
     createHash,
     new Set(["stateful-invariant-setup"]),
     (artifactDir: string, value: unknown) =>
-      ((value as { generated_tests?: Array<{ path: string }> }).generated_tests ?? []).map((entry) => ({
+      [
+        ...(value as { generated_tests: Array<{ path: string }> }).generated_tests,
+        ...(value as { support_files: Array<{ path: string }> }).support_files
+      ].map((entry) => ({
         path: entry.path,
         contents: fs.readFileSync(path.join(artifactDir, entry.path))
       })),
@@ -2613,11 +2654,13 @@ test("generated Smithers dependency verification fails closed before descendant 
   writeMarker([validArtifact]);
   assert.doesNotThrow(() => assertVerifiedDependency(task, dependency));
   fs.mkdirSync(path.join(generatedDependency, "generated-tests"), { recursive: true });
-  const generatedBytes = Buffer.from('{"generated_tests":[{"path":"generated-tests/Property.t.sol"}]}\n');
+  const generatedBytes = Buffer.from(
+    '{"schema_version":"ultrafuzz.generated-tests.v3","run_id":"run-one","node_id":"generated-tests-fanin","generated_tests":[{"path":"generated-tests/Property.t.sol"}],"support_files":[{"path":"generated-tests/PropertyHelper.sol"}]}\n'
+  );
   fs.writeFileSync(path.join(generatedDependency, "generated-tests.json"), generatedBytes);
   const generatedArtifact = {
     path: "generated-tests.json",
-    contract: "ultrafuzz/generated-tests@2",
+    contract: "ultrafuzz/generated-tests@3",
     contract_digest: "a".repeat(64),
     ...markerSchemaBinding,
     sha256: createHash("sha256").update(generatedBytes).digest("hex"),
@@ -2625,9 +2668,15 @@ test("generated Smithers dependency verification fails closed before descendant 
   };
   const companionPath = path.join(generatedDependency, "generated-tests", "Property.t.sol");
   fs.writeFileSync(companionPath, "contract Property {}\n", "utf8");
+  const supportPath = path.join(generatedDependency, "generated-tests", "PropertyHelper.sol");
+  fs.writeFileSync(supportPath, "library PropertyHelper {}\n", "utf8");
   const companionPublication = {
     path: "generated-tests/Property.t.sol",
     sha256: createHash("sha256").update("contract Property {}\n").digest("hex")
+  };
+  const supportPublication = {
+    path: "generated-tests/PropertyHelper.sol",
+    sha256: createHash("sha256").update("library PropertyHelper {}\n").digest("hex")
   };
   writeAttemptMarker("generated-tests-fanin", [generatedArtifact]);
   assert.throws(
@@ -2637,7 +2686,7 @@ test("generated Smithers dependency verification fails closed before descendant 
   writeAttemptMarker(
     "generated-tests-fanin",
     [generatedArtifact],
-    [{ path: generatedArtifact.path, sha256: generatedArtifact.sha256 }, companionPublication]
+    [{ path: generatedArtifact.path, sha256: generatedArtifact.sha256 }, companionPublication, supportPublication]
   );
   assert.doesNotThrow(() => assertVerifiedDependency(task, generatedDependency));
   fs.writeFileSync(companionPath, "contract Tampered {}\n", "utf8");

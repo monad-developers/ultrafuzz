@@ -70,7 +70,7 @@ nodes:
         contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@2
+        contract: ultrafuzz/generated-tests@3
   - id: __finish__
     kind: meta
     role: finish

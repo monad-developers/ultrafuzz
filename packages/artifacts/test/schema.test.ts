@@ -1267,22 +1267,31 @@ test("generated test manifest runtime and exported schemas enforce the same safe
         framework: "foundry",
         description: "Focused invariant replay"
       }
-    ]
+    ],
+    support_files: []
   };
 
   assert.equal(validateGeneratedTestManifestSchema(manifest).ok, true);
+  assert.equal(
+    validateGeneratedTestManifestSchema({ ...manifest, schema_version: "ultrafuzz.generated-tests.v2" }).ok,
+    false
+  );
+  const missingSupportFiles = structuredClone(manifest) as Record<string, unknown>;
+  delete missingSupportFiles.support_files;
+  assert.equal(validateGeneratedTestManifestSchema(missingSupportFiles).ok, false);
   for (const candidate of [
     { ...manifest, provenance: {} },
     { ...manifest, generated_tests: [{ ...manifest.generated_tests[0]!, provenance: {} }] }
   ]) {
     assert.equal(validateGeneratedTestManifestSchema(candidate).ok, false);
-    assert.equal(validateArtifactContract("ultrafuzz/generated-tests@2", JSON.stringify(candidate)).ok, false);
+    assert.equal(validateArtifactContract("ultrafuzz/generated-tests@3", JSON.stringify(candidate)).ok, false);
   }
 
   const noncanonical = {
     schema_version: GENERATED_TESTS_SCHEMA_VERSION,
     run_id: "run-1",
     node_id: "strategy-a",
+    support_files: [],
     test_files: [{ path: "generated-tests/Invariant.t.sol" }]
   };
   const invalid = validateGeneratedTestManifestSchema(noncanonical);

@@ -274,11 +274,12 @@ coverage` command below, document `coverage-tooling-blocked` and refresh the
      because a later coverage run succeeds. Carry the record forward and update
      only the classification, evidence, or repair packet with new facts.
    - Include every deterministic `CryticToFoundry` reproducer or generated
-     Foundry replay file in `generated-tests.json`; use an empty
-     `generated_tests` array when no replay test was produced.
+     Foundry replay file in `generated_tests`, and include every imported
+     non-runnable helper, mock, fixture, script, or data dependency in
+     `support_files`; use both arrays empty when no replay test was produced.
    - If no fuzzer failures or deterministic reproducers were observed, write an
-     empty `findings.json` array, empty `generated_tests` manifest, and an empty
-     `harness-repairs.json` array.
+     empty `findings.json` array, a generated-test bundle with both arrays empty,
+     and an empty `harness-repairs.json` array.
 
 ## Required Outputs
 
@@ -304,9 +305,10 @@ Write generated-test and replay records to:
 
 {{artifact_dir}}/generated-tests.json
 
-The generated-test manifest must use `generated_tests` as the only test file
-list. Include deterministic Foundry replay or reproducer files when they were
-produced, and use an empty `generated_tests` array otherwise.
+The generated-test manifest must use `generated_tests` as the runnable test
+file list and `support_files` as the non-runnable dependency list. Include
+deterministic Foundry replay or reproducer files when they were produced,
+classify imported helpers separately, and use both arrays empty otherwise.
 
 Write harness repair records to:
 

@@ -12,7 +12,7 @@ coercion, defaults, transforms, aliases, or property stripping.
 Schema IDs are stable, fragment-free URNs such as:
 
 - `urn:ultrafuzz:schema:artifacts:findings:2`
-- `urn:ultrafuzz:schema:artifacts:generated-tests:2`
+- `urn:ultrafuzz:schema:artifacts:generated-tests:3`
 - `urn:ultrafuzz:schema:cli:result:2`
 - `urn:ultrafuzz:schema:cli:operator-input:1`
 - `urn:ultrafuzz:schema:cli:report-bundle-manifest:2`
@@ -33,6 +33,13 @@ Schema IDs are stable, fragment-free URNs such as:
 - `urn:ultrafuzz:schema:runtime:workflow-control-integrity:2`
 - `urn:ultrafuzz:schema:runtime:invariant-suite-handoff:1`
 - `urn:ultrafuzz:schema:topology:expanded-graph:3`
+
+The generated-tests v3 schema describes an atomic strict UTF-8 text bundle.
+`generated_tests` contains runnable tests and reproducers; `support_files`
+contains their non-runnable dependencies. Both arrays use the same closed entry
+shape and `generated-tests/` namespace, and semantic gates enforce bundle-wide
+path uniqueness, support-to-test coupling, current run/node identity, and
+filesystem integrity. Version 2 is not accepted or converted.
 
 The IDs identify schemas and resolve bundled `$ref` values; they are never
 fetched. Package-local registries enumerate every checked-in schema, its role,

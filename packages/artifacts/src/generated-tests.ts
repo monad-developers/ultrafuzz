@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { z } from "zod/v4";
 
+import { MAX_GENERATED_TEST_COMPANION_BYTES } from "./artifact-limits.js";
 import { validateRegisteredJsonSchema } from "./json-schema-validator.js";
 import { normalizeArtifactProvenance, type ArtifactProvenance } from "./manifests.js";
 import { getNodeArtifactDir, type RunLayout } from "./run-layout.js";
@@ -20,10 +21,10 @@ import { readRegularFileSnapshot } from "./schema-registry.js";
 import { validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 import { parseStrictJsonBytes } from "./strict-json.js";
 
-export const GENERATED_TESTS_SCHEMA_VERSION = "ultrafuzz.generated-tests.v2" as const;
+export const GENERATED_TESTS_SCHEMA_VERSION = "ultrafuzz.generated-tests.v3" as const;
 export const GENERATED_TESTS_DIR = "generated-tests";
 export const GENERATED_TESTS_MANIFEST = "generated-tests.json";
-export const GENERATED_TESTS_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:generated-tests:2" as const;
+export const GENERATED_TESTS_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:generated-tests:3" as const;
 export const GENERATED_TEST_MANIFEST_PATH_PATTERN =
   "^generated-tests/[A-Za-z0-9][A-Za-z0-9._-]{0,127}(?:/[A-Za-z0-9][A-Za-z0-9._-]{0,127})*(?![\\s\\S])" as const;
 
@@ -53,11 +54,13 @@ export interface GeneratedTestManifest {
   run_id: string;
   node_id: string;
   generated_tests: GeneratedTestEntry[];
+  support_files: GeneratedTestEntry[];
   provenance?: GeneratedTestProvenance;
 }
 
 const nonEmptyString = z.string().min(1);
 const nonNegativeInteger = z.number().int().nonnegative();
+const generatedTestFileSize = nonNegativeInteger.max(MAX_GENERATED_TEST_COMPANION_BYTES);
 const generatedTestManifestPathPattern = new RegExp(GENERATED_TEST_MANIFEST_PATH_PATTERN, "u");
 
 export const generatedTestProvenanceSchema = z
@@ -76,7 +79,7 @@ export const generatedTestProvenanceSchema = z
     source_run_id: nonEmptyString.optional(),
     origin: nonEmptyString.optional()
   })
-  .meta({ minProperties: 1 })
+  .meta({ id: "generatedTestProvenance", minProperties: 1 })
   .refine((provenance) => Object.keys(provenance).length > 0, {
     message: "Present generated-test provenance must contain at least one typed field"
   });
@@ -85,18 +88,20 @@ const generatedTestPathSchema = nonEmptyString.regex(generatedTestManifestPathPa
   message: `path must use the ${GENERATED_TESTS_DIR}/<file> prefix and stay inside that directory`
 });
 
-export const generatedTestEntrySchema = z.strictObject({
-  path: generatedTestPathSchema,
-  size_bytes: nonNegativeInteger.optional(),
-  sha256: z
-    .string()
-    .regex(/^[a-f0-9]{64}$/u)
-    .optional(),
-  provenance: generatedTestProvenanceSchema.optional(),
-  language: nonEmptyString.optional(),
-  framework: nonEmptyString.optional(),
-  description: nonEmptyString.optional()
-});
+export const generatedTestEntrySchema = z
+  .strictObject({
+    path: generatedTestPathSchema,
+    size_bytes: generatedTestFileSize.optional(),
+    sha256: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/u)
+      .optional(),
+    provenance: generatedTestProvenanceSchema.optional(),
+    language: nonEmptyString.optional(),
+    framework: nonEmptyString.optional(),
+    description: nonEmptyString.optional()
+  })
+  .meta({ id: "generatedTestEntry" });
 
 export const generatedTestManifestSchema = z
   .strictObject({
@@ -104,6 +109,7 @@ export const generatedTestManifestSchema = z
     run_id: nonEmptyString,
     node_id: nonEmptyString,
     generated_tests: z.array(generatedTestEntrySchema),
+    support_files: z.array(generatedTestEntrySchema),
     provenance: generatedTestProvenanceSchema.optional()
   })
   .meta({
@@ -139,11 +145,14 @@ export function assertGeneratedTestManifestSchema(value: unknown): GeneratedTest
 
 export function assertGeneratedTestManifestSemantics(manifest: GeneratedTestManifest): void {
   const paths = new Set<string>();
-  for (const entry of manifest.generated_tests) {
+  for (const entry of [...manifest.generated_tests, ...manifest.support_files]) {
     if (paths.has(entry.path)) {
       throw new Error(`generated tests manifest repeats path ${JSON.stringify(entry.path)}`);
     }
     paths.add(entry.path);
+  }
+  if (manifest.generated_tests.length === 0 && manifest.support_files.length > 0) {
+    throw new Error("generated tests manifest cannot declare support files without a runnable generated test");
   }
 }
 
@@ -151,17 +160,23 @@ export function writeGeneratedTestManifest(input: {
   layout: RunLayout;
   nodeId: string;
   tests: GeneratedTestInput[];
+  supportFiles: GeneratedTestInput[];
   provenance?: GeneratedTestProvenance;
 }): GeneratedTestManifest {
+  preflightGeneratedTestInputs(input.tests, input.supportFiles);
   const nodeDir = getNodeArtifactDir(input.layout, input.nodeId, { create: true });
   ensureSafeDirectory(nodeDir, GENERATED_TESTS_DIR);
   const provenance = normalizeArtifactProvenance(input.layout, input.nodeId, input.provenance);
   const generated_tests = input.tests.map((test) => writeGeneratedTestEntry(nodeDir, test, provenance));
+  const support_files = input.supportFiles.map((supportFile) =>
+    writeGeneratedTestEntry(nodeDir, supportFile, provenance)
+  );
   const manifest: GeneratedTestManifest = {
     schema_version: GENERATED_TESTS_SCHEMA_VERSION,
     run_id: input.layout.runId,
     node_id: input.nodeId,
     generated_tests,
+    support_files,
     provenance
   };
   assertGeneratedTestManifestSchema(manifest);
@@ -193,6 +208,11 @@ function writeGeneratedTestEntry(
   if (fileStats.size === 0) {
     throw new Error(`generated test file must be non-empty: ${absolutePath}`);
   }
+  if (fileStats.size > MAX_GENERATED_TEST_COMPANION_BYTES) {
+    throw new Error(
+      `generated test file exceeds the ${MAX_GENERATED_TEST_COMPANION_BYTES}-byte limit: ${absolutePath}`
+    );
+  }
   const entry: GeneratedTestEntry = {
     path: `${GENERATED_TESTS_DIR}/${safeRelativeTestPath}`,
     size_bytes: fileStats.size,
@@ -216,6 +236,35 @@ function writeGeneratedTestEntry(
     entry.description = input.description;
   }
   return entry;
+}
+
+function preflightGeneratedTestInputs(
+  tests: readonly GeneratedTestInput[],
+  supportFiles: readonly GeneratedTestInput[]
+): void {
+  if (tests.length === 0 && supportFiles.length > 0) {
+    throw new Error("generated tests manifest cannot declare support files without a runnable generated test");
+  }
+  const paths = new Set<string>();
+  for (const [label, entries] of [
+    ["generated test", tests],
+    ["generated-test support file", supportFiles]
+  ] as const) {
+    for (const entry of entries) {
+      const safeRelativePath = normalizeSafeRelativePath(stripGeneratedTestsPrefix(entry.path), `${label} path`);
+      const manifestPath = `${GENERATED_TESTS_DIR}/${safeRelativePath}`;
+      if (paths.has(manifestPath)) {
+        throw new Error(`generated tests manifest repeats path ${JSON.stringify(manifestPath)}`);
+      }
+      paths.add(manifestPath);
+      if (entry.content !== undefined && entry.content.length === 0) {
+        throw new Error(`${label} file must be non-empty: ${manifestPath}`);
+      }
+      if (entry.content !== undefined && Buffer.byteLength(entry.content) > MAX_GENERATED_TEST_COMPANION_BYTES) {
+        throw new Error(`${label} file exceeds the ${MAX_GENERATED_TEST_COMPANION_BYTES}-byte limit: ${manifestPath}`);
+      }
+    }
+  }
 }
 
 function assertGeneratedTestDestinationIsNotSymlink(filePath: string): void {

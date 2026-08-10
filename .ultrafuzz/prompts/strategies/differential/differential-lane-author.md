@@ -131,7 +131,9 @@ attempt indices, plan/harness paths, and command must exactly equal the assigned
 lane payload; do not copy or convert a different lane.
 
 Also write `{{artifact_path}}/generated-tests.json` using the standard
-generated-test manifest contract. Include every authored `.t.sol` lane file and
-lane-local helper needed to replay it. Write `{{output_findings_path}}` as an
+generated-test manifest contract. Include every independently runnable `.t.sol`
+lane file in `generated_tests` and every imported lane-local helper, mock,
+fixture, script, or data dependency in `support_files`. Write
+`{{output_findings_path}}` as an
 empty JSON array unless this lane produced a confirmed production-bug red that
 should already be consumable by downstream dedupe.
