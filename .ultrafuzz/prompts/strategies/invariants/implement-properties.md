@@ -88,7 +88,10 @@ cannot be lost during priority filtering.
      `test/foundry/stateful-invariant-implement-properties/` or
      `tests/foundry/stateful-invariant-implement-properties/`. Existing changed
      `*.t.sol` files under that root's `recon/`, `chimera/`, `invariants/`, or
-     `foundry/invariants/` directories are also collected.
+     `foundry/invariants/` directories are also collected. That root is the
+     repository's own top-level `test/` or `tests/` directory: the handoff
+     refuses a package-scoped suite such as `packages/<pkg>/test/`, so write
+     files you intend to report under a supported root.
    - Keep setup and handler changes minimal and realistic.
    - Do not weaken existing assertions or hide failures with broad
      precondition skips.
@@ -180,6 +183,19 @@ empty array. A
 references fail artifact validation. Preserve generated and changed test paths
 in `test_paths` and invariant/helper implementation paths in
 `implementation_paths`.
+
+Every path on an `implemented` record is repository-relative, uses forward
+slashes, and lives under an allowed root: each `implementation_paths` entry must
+start with `src/`, `contracts/`, `test/`, or `tests/`, and each `test_paths`
+entry must start with `test/` or `tests/`. The host reads these paths to
+assemble the invariant-suite handoff and terminates this node on any other root,
+including a package-scoped path such as `packages/<pkg>/test/...`, a `script/`
+helper, an absolute path, and any path through `.git`, `.ultrafuzz`,
+`.smithers`, `node_modules`, or an env file. If the work you did lives outside
+those roots, do not cite it: record the property as `blocked` with a `blocker`
+naming the suite location as the concrete obstacle. A record that is not
+`implemented` is never read for paths, so when its only paths sit under an
+unsupported root, leave its arrays empty and state the root in the blocker.
 
 Write a generated-test manifest to:
 

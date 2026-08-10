@@ -28,11 +28,21 @@ Finding lifecycle ledger:
 
 ## Output contract
 
-Write reportable severity records to
-{{output_stage_findings_path}} as JSON. Each kept object
-must preserve upstream provenance fields and assign a stable `id`. Use
-`schema_version: "ultrafuzz.finding.v2"` on every emitted finding object.
-Preserve each property-derived finding's `property_ids` unchanged.
+Write severity records to
+{{output_stage_findings_path}} as JSON. The array holds exactly one object per
+triaged finding, in the same order, with the same `id`. Never drop, add, merge,
+split, or reorder a record: exclusion from the production report happens later,
+through the lifecycle `final_disposition`, not by deleting a record here.
+
+You own exactly six fields on each record and may write nothing else:
+`severity`, `impact`, `likelihood`, `impact_rationale`, `likelihood_rationale`,
+and `severity_rationale`. Copy every other field of the triaged record
+byte-for-byte, including `schema_version` (`"ultrafuzz.finding.v2"`), `id`,
+`title`, `status`, `confidence`, `notes`, `severity_guess`, `summary`,
+`triage_classification`, evidence, provenance, and each property-derived
+finding's `property_ids`. Do not touch `status`, `notes`, or `confidence`; they
+belong to triage, and any difference from the triaged record fails the upstream
+preservation check.
 
 For every production report candidate, include these machine-readable fields:
 
@@ -42,7 +52,8 @@ For every production report candidate, include these machine-readable fields:
   `Medium`, or `Low`. Never emit `final_severity` or another alias.
 - `impact`: exactly `High`, `Medium`, or `Low`.
 - `likelihood`: exactly `High`, `Medium`, or `Low`.
-- `confidence`: lowercase `high`, `medium`, or `low`, based on evidence quality.
+- `confidence`: the preserved upstream lowercase `high`, `medium`, or `low`
+  value. Copy it unchanged; do not re-rate it from evidence quality.
 - `impact_rationale`, `likelihood_rationale`, and `severity_rationale`: concise
   source-backed explanations.
 
@@ -89,11 +100,13 @@ stable `dedupe_key` first, then family ids; do not use title matching.
 
 ## Reportability gate
 
-Exclude invalid, out-of-scope, duplicate-only, and unreachable false-positive
-records from production report entries. If a record must remain structured for a
-non-production appendix, keep its upstream `triage_classification`, use a
-canonical `status` such as `needs-review` or `false-positive`, and do not
-describe it as a production bug.
+Invalid, out-of-scope, duplicate-only, and unreachable false-positive records
+stay in `severity-classified-findings.json` like every other triaged record.
+Keep them out of the production report entries through their lifecycle record
+instead: give the matching `dedupe_key` a `final_disposition` of `dropped` or
+`non-production` with a `demotion_reason`. Copy their upstream
+`triage_classification` and `status` unchanged, and do not describe them as
+production bugs.
 
 Preserve stateful invariant context notes exactly, including
 `stateful_failure_classification=<classification>`. Use them as root-cause
@@ -111,8 +124,8 @@ test-only adapter. Production severity requires either a public/external
 entrypoint trace or a generated public wrapper PoC that reaches the same
 behavior under production-like preconditions.
 
-For every helper-level finding that remains in the output, record one of these
-exact reachability tokens:
+For every helper-level finding, record one of these exact reachability tokens in
+`severity_rationale`, which you own:
 
 - `reachability=public-entrypoint-trace`
 - `reachability=generated-public-wrapper-poc`
@@ -120,9 +133,12 @@ exact reachability tokens:
 - `reachability=public-wrapper-required`
 
 Also include concise `helper_proof=<summary>` and
-`public_exploitability=<summary>` notes when they are relevant. Helper-only
-failures without public exploitability are harness defects, defensive
-hardening, or false positives; they are not production bugs.
+`public_exploitability=<summary>` clauses in the same rationale when they are
+relevant. Never append these tokens to `notes`: triage owns `notes`, and you
+must copy the upstream array unchanged, including any reachability tokens triage
+already recorded there. Helper-only failures without public exploitability are
+harness defects, defensive hardening, or false positives; they are not
+production bugs.
 
 ## Severity classification
 
@@ -195,21 +211,34 @@ Use these caps and invalidation rules:
 
 ## Self-check before writing output
 
-Before saving `severity-classified-findings.json`, check every emitted object:
+Before saving `severity-classified-findings.json`, check the array as a whole:
+
+- It has exactly one object per triaged finding, in the same order, and each
+  `id` equals the `id` at the same index in `triaged-findings.json`.
+- Only `severity`, `impact`, `likelihood`, `impact_rationale`,
+  `likelihood_rationale`, and `severity_rationale` differ from the triaged
+  record. Every other field, `status`, `notes`, and `confidence` included, is
+  byte-for-byte identical.
+
+Then check every emitted object:
 
 - `schema_version` is exactly `"ultrafuzz.finding.v2"`.
 - `severity`, `impact`, and `likelihood` use only `High`, `Medium`, or `Low`.
 - No field used as a severity label contains `Critical`.
 - `severity == matrix(impact, likelihood)`.
 - `severity_guess` is preserved even when the final matrix differs.
-- `confidence` is lowercase `high`, `medium`, or `low`.
+- `confidence` is the preserved upstream lowercase `high`, `medium`, or `low`.
 - Neither `final_severity` nor a compatibility/upstream severity alias exists.
-- Every kept finding retains provenance, evidence references, lifecycle status,
+- Every finding retains provenance, evidence references, lifecycle status,
   triage classification, confidence, and rationale.
 - Non-production records keep their lifecycle and triage disposition instead of
   being forced into a Low production finding.
 
 ## Examples
+
+In every example below, `status`, `notes`, `title`, `triage_classification`,
+`severity_guess`, and `confidence` are copied verbatim from the triaged record;
+only the six owned fields are yours to write.
 
 High:
 
@@ -290,8 +319,10 @@ Invalid or out of scope:
 }
 ```
 
-Do not include invalid or out-of-scope records like the example above in the
-production report entries.
+Keep invalid or out-of-scope records like the example above in
+`severity-classified-findings.json` with their triaged fields intact, and mark
+them `dropped` in the lifecycle ledger. Their `final_disposition` is what keeps
+them out of the production report entries.
 
 Make sure compilation is passing but do not fix any failing tests. If Foundry
 dependencies are missing, restore project-pinned dependencies first, such as

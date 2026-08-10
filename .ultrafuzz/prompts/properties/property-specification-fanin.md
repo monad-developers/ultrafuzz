@@ -62,6 +62,18 @@ property with every distinct contributing source in `sources`. Never keep only
 the first source. Canonical IDs only need to remain stable within this run, but
 all downstream artifacts must use them unchanged.
 
+Coverage of the lens artifacts is total and machine-checked. Every property ID
+in every lens artifact must appear exactly once across the whole catalog as a
+`{"source_node_id":"<lens node>","source_property_id":"<lens property id>"}`
+pair in some canonical property's `sources`: the runtime rejects a lens ID that
+appears in no canonical property and rejects the same pair listed on two
+canonical properties. Deduplicating two rows therefore means listing both source
+pairs on the one merged canonical property, never dropping one. You may not drop
+a lens row because it duplicates wording inside its own lens, reads as
+non-testable, or looks out of scope; merge it into the canonical property it
+belongs to instead. Ledger entry IDs are not lens property IDs and stay under
+`ledger_ids`.
+
 ## Target-derived consolidation
 
 Use the project-discovery, actor/flow, base-setup, and lens artifacts together

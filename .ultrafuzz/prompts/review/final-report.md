@@ -265,15 +265,21 @@ Reachability is not a standalone report section anywhere. Include concrete
 public/helper callability evidence only inside the Likelihood and Impact
 reasoning when it changes the assessment.
 
-Use concrete actor or system-role language throughout issue-related prose,
-including issue descriptions, Severity explanations, PoC steps, family variant
-summaries, non-production outcome summaries, and recommended next actions.
-Choose actor wording from the evidence and reuse it consistently. Use `Attacker`
-only when another party can gain an advantage, grief, steal, or otherwise harm
-someone else. Use `User` when the behavior is self-impacting or the protocol
-does not work as intended for the same user who triggers it. Prefer precise
-roles such as `Depositor`, `Borrower`, `Liquidator`, `Relayer`, or `Operator`
-when clearer. Do not combine multiple roles with slash notation. Do not leave
+Use concrete actor or system-role language throughout the issue-related prose
+you author yourself: everything you write in `report.md`, including issue
+descriptions, Severity explanations, PoC steps, family variant bullets,
+non-production outcome text, and recommended next actions as rendered there,
+plus the `report.json` fields that exist only in the report, which are
+`description` and `proof_of_concept`. This rule never licenses rewriting a
+field you copy from the severity-classified handoff. In `report.json`,
+`summary`, `family_variants`, and `recommended_next_action` stay byte-identical
+to the upstream finding even when their wording is weaker than the prose you
+write around them. Choose actor wording from the evidence and reuse it
+consistently. Use `Attacker` only when another party can gain an advantage,
+grief, steal, or otherwise harm someone else. Use `User` when the behavior is
+self-impacting or the protocol does not work as intended for the same user who
+triggers it. Prefer precise roles such as `Depositor`, `Borrower`,
+`Liquidator`, `Relayer`, or `Operator` when clearer. Do not combine multiple roles with slash notation. Do not leave
 placeholder tokens, anonymous variable labels, or copied generated-test
 boilerplate in the final report.
 
@@ -359,7 +365,8 @@ funds remaining locked.`
 It must not duplicate prose awkwardly, for example avoid constructions like
 `Fallback caller can exercise selectorless fallback which leads to Registered
 fallback callers could...`. Tighten copied upstream text into a clean actor,
-action, and outcome.
+action, and outcome. Tighten it in `report.md` only; the matching `report.json`
+fields keep the upstream wording byte-for-byte.
 
 Use the upstream canonical final `severity` consistently for issue IDs,
 ordering, counts, Markdown, and JSON after verifying the matrix. Preserve
@@ -426,9 +433,11 @@ Compute the Strategy section from `strategy-detections.json`, the lifecycle
 ledger, and configured strategy loop counts. For each strategy that found the
 same deduped bug instance or same-root family variant, count matching loop
 attempts for that strategy and divide by the total configured loops for that
-strategy. Match strategy detections by stable `dedupe_key` first. Only fall back
-to `finding_id` when the finding has no dedupe key and that finding id is unique
-in both the severity-classified findings and strategy detections.
+strategy. Every severity-classified finding carries its own top-level
+`dedupe_key`, identical to its lifecycle record and its strategy-detections row,
+so match strategy detections by that key. Stop and report an invalid upstream
+artifact when a finding has no `dedupe_key`; never fall back to `finding_id` and
+never invent a key.
 
 Render the human-readable Strategy section as a Markdown table with columns
 `Strategy` and `Detection rate`. Detection rates must be exact `M/N` counts
@@ -603,11 +612,20 @@ historical `"unavailable"` compatibility value.
 
 Each production issue object must satisfy canonical finding v2. Include
 `schema_version: "ultrafuzz.finding.v2"`, `id`, `title`, `status`,
-`severity_guess`, `confidence`, and `summary`, and keep those fields consistent
-with the final rendered issue. Also include the report-specific fields
-`description`, `severity`, `likelihood`, `impact`, and `proof_of_concept`, plus
-`family_id`, `family_variants`, and `related_findings` when those fields are
-available. Keep the canonical `strategy` field a non-empty originating strategy
+`severity_guess`, `confidence`, and `summary`, copied byte-for-byte from the
+severity-classified finding.
+
+Copy every field the severity-classified finding already carries into its
+`report.json` issue object byte-for-byte, including `summary`,
+`recommended_next_action`, `family_variants` and their nested summaries,
+`severity`, `impact`, `likelihood`, `evidence`, and `strategy_provenance` when
+the upstream finding has it. You may only ADD fields the upstream finding does
+not carry, such as `description`, `proof_of_concept`, and `lifecycle`.
+Rewriting, retitling, tightening, or re-voicing a copied field fails the report;
+put your own wording in `report.md` and in the fields you add. Also include the
+report-specific fields `description`, `severity`, `likelihood`, `impact`, and
+`proof_of_concept`, plus `family_id`, `family_variants`, and `related_findings`
+when those fields are available. Keep the canonical `strategy` field a non-empty originating strategy
 name when one is available. The structured `strategy_provenance` object must
 contain the canonical non-empty `detection_rates` array. Do not emit the removed
 `strategies` alias. Every array element contains exactly non-empty `strategy`,
@@ -639,7 +657,12 @@ without selectors and preserve independent `detail` prose exactly. Put section
 anchors in `fragment`. Represent one source span with positive integer `line`
 and optional `end_line`. Use `line_ranges` only for at least two disjoint spans;
 never emit a one-entry `line_ranges`, and never combine `line_ranges` with
-`line` or `end_line`.
+`line` or `end_line`. Sort `line_ranges` by ascending `line`; the spans must not
+touch or overlap, so each entry's `line` must be greater than the previous
+entry's `line` and greater than the previous entry's `end_line`. Cite the
+earliest span first even when the later one is the interesting one. The same
+ordering applies to `line_ranges` inside `family_variants` evidence, and
+`ultrafuzz json validate` does not check it.
 
 Each non-production outcome is also a canonical finding v2 object and preserves
 machine-readable `triage_classification`, `status`, evidence, strategy
@@ -674,6 +697,14 @@ Before finishing, verify that:
 - Every `report.json` production issue satisfies canonical finding v2,
   including `schema_version`, `id`, `title`, `status`,
   `severity_guess`, `confidence`, and `summary`.
+- Every `report.json` production issue reproduces every field of its
+  severity-classified source byte-for-byte, including `summary`,
+  `recommended_next_action`, and `family_variants`, and adds only fields that
+  source does not carry.
+- Every severity-classified finding you render carries a top-level `dedupe_key`
+  matching its lifecycle record.
+- Every `line_ranges` array is sorted by ascending `line`, with each entry's
+  `line` greater than the previous entry's `end_line`.
 - Every `report.json` production issue keeps canonical `strategy` as a string
   when present and stores structured strategy details in `strategy_provenance`.
 - `report.md` contains `## Property provenance`, including every

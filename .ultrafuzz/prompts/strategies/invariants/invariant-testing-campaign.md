@@ -172,6 +172,11 @@ Use this configured invariant testing fuzzer timeout:
      campaign result artifact (for this node, `recon-fuzzer-results.json`), not
      to the backend-internal `paths.raw_results` evidence file. Plain failure ID
      strings and omitted `raw_result_ref` values are invalid.
+   - Set each property-derived finding's `id` to the exact `failure_id` of one
+     entry in that finding's own `contributing_backend_failures`. When a finding
+     deduplicates several failures, pick one of them as the representative and
+     reuse its ID verbatim. A finding may not invent a new ID, reuse an ID from
+     another finding's partition, or use a descriptive slug.
    - Put `deduplication.pre_dedup_count` on every property-derived finding and
      set it to the number of entries in that finding's
      `contributing_backend_failures`. Every contributed failure's
@@ -438,7 +443,9 @@ below are illustrative):
 }
 ```
 
-Compute the array and count from this run. Do not copy the example values.
+Compute the array and count from this run. Do not copy the example values. The
+shape is still binding: the finding's `id` is the `failure_id` of one entry in
+the array you computed, exactly as `"failure-1"` is above.
 
 If you changed files in the isolated workspace, save a patch at:
 

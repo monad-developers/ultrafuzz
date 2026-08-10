@@ -689,6 +689,12 @@ function runValidationWorkerSync(request: WorkerRequest, deadlineMs: number): Js
     transferList: [port2],
     resourceLimits: validationWorkerResourceLimits(request.maxInstanceBytes)
   });
+  // A worker that dies on its own resource limits emits `error`; unobserved, that
+  // takes the host process down instead of failing this one validation closed.
+  // The caller is blocked here, so the death is absorbed and the deadline below
+  // is what reports it.
+  worker.once("error", () => undefined);
+  worker.once("exit", () => undefined);
   const deadline = Date.now() + Math.max(250, Math.min(deadlineMs, 30_000));
   const sleeper = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
   while (Date.now() < deadline) {

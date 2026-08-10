@@ -131,8 +131,14 @@ the broader state space.
 
 Save the full deduplicated canonical finding v2 array, including candidates that
 may later triage as non-production outcomes, only to
-{{output_stage_findings_path}}. Carry duplicate and family details in
-the canonical finding fields and lifecycle ledger.
+{{output_stage_findings_path}}. Every kept finding object must carry its own
+top-level `dedupe_key`, byte-for-byte the same string as the `dedupe_key` on its
+lifecycle record and on its `strategy-detections.json` row at the same array
+index. The key is not ledger-only metadata: a kept finding without a top-level
+`dedupe_key` fails lifecycle reconciliation, and the failure is reported against
+every lifecycle record rather than against the finding. Keep each `dedupe_key`
+unique across the array. Carry duplicate and family details in the canonical
+finding fields and lifecycle ledger.
 
 Do not discard unique symptoms merely because they come from the same strategy.
 Do not hide failing tests. Dedupe is only for equivalent findings or proven
@@ -158,7 +164,8 @@ production root cause. Save
 {{artifact_path}}/strategy-detections.json as a JSON array with one object per
 deduped root or family key:
 
-- `dedupe_key`: the stable key for the deduped bug instance.
+- `dedupe_key`: the stable key for the deduped bug instance, identical to the
+  kept finding's top-level `dedupe_key` and to its lifecycle record key.
 - `finding_id`: the kept finding id when available.
 - `family_id`: the shared family id when the finding has family variants.
 - `title`: the kept finding title.

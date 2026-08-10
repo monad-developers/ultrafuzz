@@ -115,6 +115,12 @@ rather than silently skipping it.
 The JSON ledger must also contain `inventory_rows`, where each row has a
 stable `inventory-` ID, a normalized description, and one or more
 `ledger_ids`; every `inventory_id` in an entry must name one of these rows.
+The two ID lists must agree in both directions: if an entry lists
+`inventory-x`, then row `inventory-x` must list that entry's `id` in its
+`ledger_ids`, and every `ledger_ids` element must name a real entry whose
+`inventory_ids` contains that row's ID. A join that holds one way and not the
+other is rejected, so build one entry-to-row mapping and project it into both
+arrays instead of writing each side by hand.
 Record each negative source probe in `scan_probes` with a stable `probe-` ID,
 source path, query, and result. A probe `source_path` may name a real
 directory you searched, or a path that turned out not to exist; neither is

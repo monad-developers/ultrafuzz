@@ -609,6 +609,11 @@ describe("prompt semantic anchors", () => {
     expect(dedupe).toContain("normalized relative POSIX");
     expect(dedupe).toMatch(/every symlink even\s+when its target remains inside the artifact directory/u);
     expect(dedupe).toMatch(/Never search a\s+strategy workspace/u);
+    expect(dedupe).toContain("Every kept finding object must carry its own\ntop-level `dedupe_key`");
+    expect(dedupe).toMatch(/byte-for-byte the same string as the `dedupe_key` on its\s+lifecycle record/u);
+    expect(dedupe).toContain("The key is not ledger-only metadata");
+    expect(dedupe).toContain("Keep each `dedupe_key`\nunique across the array");
+    expect(dedupe).toMatch(/identical to the\s+kept finding's top-level `dedupe_key`/u);
     expect(dedupe).toContain("Never install, fetch, restore, or update dependencies during dedupe");
     expect(dedupe).not.toContain("restore project-pinned dependencies first");
     expect(dedupe).not.toContain("Dependency hydration used only");
@@ -682,6 +687,15 @@ describe("prompt semantic anchors", () => {
     expect(markdown).toContain("severity == matrix(impact, likelihood)");
     expect(markdown).toContain("Never emit `final_severity` or another alias");
     expect(markdown).toContain("Do not emit `Critical`");
+    expect(markdown).toContain("exactly one object per\ntriaged finding, in the same order, with the same `id`");
+    expect(markdown).toContain("Never drop, add, merge,\nsplit, or reorder a record");
+    expect(markdown).toContain("You own exactly six fields");
+    expect(markdown).toContain("Do not touch `status`, `notes`, or `confidence`");
+    expect(markdown).toContain("Copy it unchanged; do not re-rate it");
+    expect(markdown).toContain("stay in `severity-classified-findings.json`");
+    expect(markdown).toContain("Never append these tokens to `notes`");
+    expect(markdown).not.toContain("Exclude invalid, out-of-scope, duplicate-only");
+    expect(markdown).not.toContain("use a\ncanonical `status`");
   });
 
   it("keeps the final-report matrix guard in the report prompt", () => {
@@ -702,6 +716,22 @@ describe("prompt semantic anchors", () => {
     expect(markdown).toContain("never emit a one-entry `line_ranges`");
     expect(markdown).toContain("never combine `line_ranges` with");
     expect(markdown).toContain("`line` or `end_line`");
+    // The host gate deep-compares every key of the severity-classified finding
+    // with the report row, so the actor-role rewrite must never reach a copied
+    // JSON field. A run that re-voiced `summary` killed the terminal node.
+    expect(markdown).toContain("Copy every field the severity-classified finding already carries");
+    expect(markdown).toContain("byte-for-byte");
+    expect(markdown).toContain("You may only ADD fields the upstream finding does\nnot carry");
+    expect(markdown).toMatch(/`summary`, `family_variants`, and `recommended_next_action` stay byte-identical/u);
+    // `ultrafuzz json validate` is schema-only, so ordering is undetectable
+    // before the host gate rejects the artifact.
+    expect(markdown).toContain("Sort `line_ranges` by ascending `line`");
+    expect(markdown).toMatch(/greater than the previous\s+entry's `end_line`/u);
+    // Every severity finding carries its own key; the finding_id fallback the
+    // prompt used to allow is unreachable and contradicts the gate.
+    expect(markdown).toContain("carries its own top-level\n`dedupe_key`");
+    expect(markdown).toContain("never fall back to `finding_id`");
+    expect(markdown).not.toContain("when the finding has no dedupe key");
   });
 
   it("keeps the empty findings array contract in prompt-owned templates", () => {
