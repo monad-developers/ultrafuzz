@@ -23,6 +23,7 @@ import type { ExpandedGraph, ExpandedNode, ModelFanoutProvenance } from "@ultraf
 
 import { withTransientNpmRegistryRetry } from "./npm-install-retry.js";
 import {
+  enablePinnedSubmoduleWorktreeConfig,
   pinnedSubmoduleExecutionFiles,
   pinnedSubmoduleExpectationForProject,
   type PinnedSubmoduleExpectation
@@ -1287,6 +1288,7 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     tasks.some((task) => task.execution.mode === "local") && invariantPinnedSourceRefExists(projectRoot)
       ? pinnedSubmoduleExpectationForProject(projectRoot)
       : undefined;
+  enablePinnedSubmoduleWorktreeConfig(projectRoot, pinnedSubmodules);
   const compiled: CompiledSmithersWorkflow = {
     schemaVersion: SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION,
     runId: input.runLayout.runId,

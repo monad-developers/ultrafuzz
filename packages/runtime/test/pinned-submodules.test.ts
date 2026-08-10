@@ -8,6 +8,7 @@ import test from "node:test";
 
 import {
   capturePinnedSubmoduleSnapshot,
+  enablePinnedSubmoduleWorktreeConfig,
   hydratePinnedSubmodulesFromExecutionSnapshot,
   PINNED_SUBMODULE_EXECUTION_ROOT,
   pinnedSubmoduleExpectation,
@@ -72,6 +73,8 @@ test("sealed recursive submodules hydrate a real task worktree without child Git
   removeChildGitMetadata(fixture.source, captured.top_level_roots);
   assert.deepEqual(readPinnedSubmoduleSnapshot(fixture.source), captured);
   const expectation = pinnedSubmoduleExpectation(captured);
+  enablePinnedSubmoduleWorktreeConfig(fixture.source, expectation);
+  const sharedPrerequisiteConfigSha = sha256(fs.readFileSync(path.join(gitCommonDirectory(fixture.source), "config")));
 
   const executionRoot = path.join(fixture.root, "execution-snapshot");
   fs.mkdirSync(executionRoot);
@@ -108,6 +111,57 @@ test("sealed recursive submodules hydrate a real task worktree without child Git
   assert.deepEqual(childGitMetadata(task, captured.top_level_roots), []);
   assert.equal(fs.existsSync(path.join(gitCommonDirectory(task), "modules")), false);
   assert.equal(git(task, ["remote"]), "");
+  assert.equal(git(task, ["config", "--worktree", "--get", "submodule.dependency-alias.active"]), "true");
+  assert.equal(git(task, ["config", "--worktree", "--get", "submodule.dependency-alias.update"]), "none");
+  assert.match(
+    git(task, ["config", "--worktree", "--get", "submodule.dependency-alias.url"]),
+    /^file:\/\/\/dev\/null\/ultrafuzz-pinned-submodules\//u
+  );
+  const commonConfigPath = path.join(gitCommonDirectory(task), "config");
+  const taskGitRoot = gitDirectory(task);
+  const taskConfigPath = path.join(taskGitRoot, "config.worktree");
+  const commonConfigBeforeInitialization = sha256(fs.readFileSync(commonConfigPath));
+  assert.equal(commonConfigBeforeInitialization, sharedPrerequisiteConfigSha);
+  const taskConfigBeforeInitialization = sha256(fs.readFileSync(taskConfigPath));
+  const dependencyBeforeInitialization = sha256(fs.readFileSync(path.join(task, "vendor/dependency/dependency.txt")));
+  git(task, ["submodule", "init"]);
+  git(task, ["-c", "protocol.file.allow=never", "submodule", "update", "--init", "--recursive"]);
+  assert.equal(sha256(fs.readFileSync(commonConfigPath)), commonConfigBeforeInitialization);
+  assert.equal(sha256(fs.readFileSync(taskConfigPath)), taskConfigBeforeInitialization);
+  assert.equal(
+    sha256(fs.readFileSync(path.join(task, "vendor/dependency/dependency.txt"))),
+    dependencyBeforeInitialization
+  );
+  assert.equal(fs.existsSync(path.join(gitCommonDirectory(task), "modules")), false);
+  assert.equal(fs.existsSync(path.join(taskGitRoot, "modules")), false);
+  assert.deepEqual(childGitMetadata(task, captured.top_level_roots), []);
+  assert.deepEqual(
+    verifyPinnedSubmodulesFromExecutionSnapshot({
+      executionSnapshotRoot: executionRoot,
+      workspaceRoot: task,
+      expectation
+    }),
+    captured
+  );
+
+  const secondTask = path.join(fixture.root, "second-task-worktree");
+  git(fixture.source, ["worktree", "add", "-B", "ultrafuzz/test/second-task", secondTask, "ultrafuzz-pinned"]);
+  hydratePinnedSubmodulesFromExecutionSnapshot({
+    executionSnapshotRoot: executionRoot,
+    workspaceRoot: secondTask,
+    expectation
+  });
+  assert.equal(sha256(fs.readFileSync(commonConfigPath)), commonConfigBeforeInitialization);
+  assert.equal(git(fixture.source, ["config", "--local", "--get-all", "extensions.worktreeConfig"]), "true");
+  assert.equal(fs.existsSync(path.join(gitDirectory(secondTask), "modules")), false);
+  assert.deepEqual(
+    verifyPinnedSubmodulesFromExecutionSnapshot({
+      executionSnapshotRoot: executionRoot,
+      workspaceRoot: secondTask,
+      expectation
+    }),
+    captured
+  );
   const persistedRewrite = spawnSync("git", ["config", "--local", "--get-regexp", "^url\\."], {
     cwd: task,
     encoding: "utf8",
@@ -176,6 +230,7 @@ test("Aave-shaped nine-pin task worktree is restored transactionally and verifie
   assert.equal(sha256(fs.readFileSync(manifestPath)), expectation.manifest_sha256);
 
   removeChildGitMetadata(fixture.source, captured.top_level_roots);
+  enablePinnedSubmoduleWorktreeConfig(fixture.source, expectation);
   assert.equal(fs.existsSync(path.join(commonGitDirectory, "modules")), false);
   assert.deepEqual(childGitMetadata(fixture.source, captured.top_level_roots), []);
   assert.deepEqual(readPinnedSubmoduleSnapshot(fixture.source), captured);
@@ -237,9 +292,69 @@ test("Aave-shaped nine-pin task worktree is restored transactionally and verifie
   git(task, ["config", "--local", "--unset-all", "url.https://github.com/.insteadOf"]);
   verify();
   git(task, ["config", "--local", "submodule.lib/chimera.url", "https://github.com/example/dependency"]);
-  assert.throws(verify, /persisted repository submodule configuration/u);
-  assert.throws(hydrate, /persisted repository submodule configuration/u);
+  assert.throws(verify, /persisted shared submodule configuration/u);
+  assert.throws(hydrate, /persisted shared submodule configuration/u);
   git(task, ["config", "--local", "--unset-all", "submodule.lib/chimera.url"]);
+  verify();
+
+  const taskGitDirectory = gitDirectory(task);
+  fs.mkdirSync(path.join(taskGitDirectory, "modules"));
+  assert.throws(verify, /task-worktree Git submodule metadata is present/u);
+  assert.throws(hydrate, /task-worktree Git submodule metadata is present/u);
+  fs.rmdirSync(path.join(taskGitDirectory, "modules"));
+  verify();
+
+  const isolatedUrl = git(task, ["config", "--worktree", "--get", "submodule.lib/chimera.url"]);
+  git(task, ["config", "--worktree", "--replace-all", "submodule.lib/chimera.url", "https://example.invalid"]);
+  assert.throws(verify, /task-worktree submodule configuration/u);
+  git(task, ["config", "--worktree", "--replace-all", "submodule.lib/chimera.url", isolatedUrl]);
+  verify();
+  git(task, ["config", "--worktree", "--add", "submodule.lib/chimera.active", "true"]);
+  assert.throws(verify, /task-worktree submodule configuration/u);
+  git(task, ["config", "--worktree", "--unset-all", "submodule.lib/chimera.active"]);
+  git(task, ["config", "--worktree", "--add", "submodule.lib/chimera.active", "true"]);
+  verify();
+  git(task, ["config", "--worktree", "--add", "submodule.unexpected.active", "true"]);
+  assert.throws(verify, /task-worktree submodule configuration/u);
+  git(task, ["config", "--worktree", "--unset-all", "submodule.unexpected.active"]);
+  verify();
+  git(task, ["config", "--worktree", "--add", "include.path", "/tmp/ultrafuzz-untrusted-config"]);
+  assert.throws(verify, /task-worktree submodule configuration/u);
+  git(task, ["config", "--worktree", "--unset-all", "include.path"]);
+  verify();
+  git(task, ["config", "--worktree", "--unset-all", "submodule.lib/chimera.update"]);
+  assert.throws(verify, /task-worktree submodule configuration/u);
+  git(task, ["config", "--worktree", "--add", "submodule.lib/chimera.update", "none"]);
+  verify();
+
+  git(task, ["config", "--local", "--unset-all", "extensions.worktreeConfig"]);
+  assert.throws(verify, /worktree configuration prerequisite/u);
+  git(task, ["config", "--local", "--add", "extensions.worktreeConfig", "true"]);
+  verify();
+
+  const dotGitPath = path.join(task, ".git");
+  const dotGitBytes = fs.readFileSync(dotGitPath);
+  const dotGitBacking = path.join(fixture.root, "task-dot-git-backing");
+  fs.writeFileSync(dotGitBacking, dotGitBytes);
+  fs.rmSync(dotGitPath);
+  fs.symlinkSync(dotGitBacking, dotGitPath);
+  assert.throws(verify, /task worktree \.git file is not a physical regular file/u);
+  fs.rmSync(dotGitPath);
+  fs.writeFileSync(dotGitPath, dotGitBytes);
+  verify();
+
+  const redirectionTask = path.join(fixture.root, "redirection-task-worktree");
+  git(fixture.source, [
+    "worktree",
+    "add",
+    "-B",
+    "ultrafuzz/test/redirection-task",
+    redirectionTask,
+    "ultrafuzz-pinned"
+  ]);
+  fs.writeFileSync(dotGitPath, fs.readFileSync(path.join(redirectionTask, ".git")));
+  assert.throws(verify, /not bound to the expected workspace|changed after preparation/u);
+  fs.writeFileSync(dotGitPath, dotGitBytes);
   verify();
 
   const taskDependencyPath = path.join(task, "lib/chimera/chimera.txt");
@@ -402,6 +517,7 @@ test("pinned local compilation carries the exact manifest through the product ex
   assert.equal(fs.readFileSync(path.join(task, "vendor/dependency/dependency.txt"), "utf8"), "dependency\n");
 
   const manifestBeforeCloudCompile = fs.readFileSync(manifestPath);
+  const commonConfigBeforeCloudCompile = fs.readFileSync(path.join(gitCommonDirectory(fixture.source), "config"));
   const cloudPlan = await planRun({ projectRoot: fixture.source, runId: "pinned-cloud-only", env: {} });
   assert.equal(cloudPlan.ok, true, JSON.stringify(cloudPlan.diagnostics));
   cloudPlan.value!.resolved_config.execution = {
@@ -429,6 +545,22 @@ test("pinned local compilation carries the exact manifest through the product ex
   assert.equal(cloudCompiled.pinnedSubmodules, undefined);
   assert.match(fs.readFileSync(cloudCompiled.workflowPath, "utf8"), /"pinnedSubmodules": null/u);
   assert.deepEqual(fs.readFileSync(manifestPath), manifestBeforeCloudCompile);
+  assert.deepEqual(
+    fs.readFileSync(path.join(gitCommonDirectory(fixture.source), "config")),
+    commonConfigBeforeCloudCompile
+  );
+});
+
+test("ordinary repositories do not gain a worktree configuration prerequisite", (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-ordinary-repository-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  initRepository(root);
+  fs.writeFileSync(path.join(root, "source.txt"), "ordinary source\n");
+  commitAll(root, "ordinary source");
+  const configPath = path.join(gitCommonDirectory(root), "config");
+  const before = fs.readFileSync(configPath);
+  enablePinnedSubmoduleWorktreeConfig(root, undefined);
+  assert.deepEqual(fs.readFileSync(configPath), before);
 });
 
 function nestedSubmoduleFixture(): {
@@ -463,6 +595,15 @@ function nestedSubmoduleFixture(): {
   git(source, ["add", "."]);
   git(source, ["commit", "--quiet", "-m", "source"]);
   git(source, ["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", dependency, "vendor/dependency"]);
+  git(source, [
+    "config",
+    "-f",
+    ".gitmodules",
+    "--rename-section",
+    "submodule.vendor/dependency",
+    "submodule.dependency-alias"
+  ]);
+  git(source, ["add", ".gitmodules"]);
   git(source, ["commit", "--quiet", "-am", "dependency submodule"]);
   git(source, ["branch", "-M", "ultrafuzz-pinned"]);
   git(source, ["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"]);
@@ -578,6 +719,12 @@ function sha256(bytes: Buffer): string {
 function gitCommonDirectory(repository: string): string {
   return fs.realpathSync(
     path.resolve(repository, git(repository, ["rev-parse", "--path-format=absolute", "--git-common-dir"]))
+  );
+}
+
+function gitDirectory(repository: string): string {
+  return fs.realpathSync(
+    path.resolve(repository, git(repository, ["rev-parse", "--path-format=absolute", "--git-dir"]))
   );
 }
 
