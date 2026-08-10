@@ -2,11 +2,12 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+import { CANONICAL_ARTIFACT_PATH_SEGMENT_PATTERN } from "./artifact-path-primitives.js";
 import { readRegularFileSnapshot } from "./schema-registry.js";
 import { parseStrictJsonBytes } from "./strict-json.js";
 
 export const SAFE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-export const SAFE_PATH_SEGMENT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+export const SAFE_PATH_SEGMENT_PATTERN = CANONICAL_ARTIFACT_PATH_SEGMENT_PATTERN;
 
 export class ArtifactPathError extends Error {
   readonly code: string;

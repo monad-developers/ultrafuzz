@@ -1,5 +1,6 @@
 import { z } from "zod/v4";
 
+import { canonicalArtifactRelativePathSchema } from "./artifact-path-primitives.js";
 import { canonicalTimestampSchema, hasAtMostCodePoints } from "./portable-json-primitives.js";
 import {
   schemaErrorMessage,
@@ -20,9 +21,6 @@ export const PROPERTY_CAMPAIGN_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:
 export const REFERENCE_EXPECTATIONS_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:reference-expectations:2" as const;
 
 const nonEmptyString = z.string().min(1);
-const safeRelativePath = z.string().regex(/^(?!.*(?:^|\/)\.{1,2}(?:\/|$))[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/u, {
-  message: "Path must be a canonical safe relative path"
-});
 const stableLedgerId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/u);
 const nonEmptyStringArray = z.array(nonEmptyString);
 const uniqueNonEmptyStringArray = nonEmptyStringArray
@@ -562,7 +560,7 @@ const propertyCampaignNonEmptyString = z
     message: `String must not exceed ${MAX_PROPERTY_CAMPAIGN_STRING_CODE_POINTS} Unicode code points`
   })
   .meta({ maxLength: MAX_PROPERTY_CAMPAIGN_STRING_CODE_POINTS });
-const propertyCampaignPath = safeRelativePath
+const propertyCampaignPath = canonicalArtifactRelativePathSchema
   .refine((value) => hasAtMostCodePoints(value, MAX_PROPERTY_CAMPAIGN_PATH_CODE_POINTS), {
     message: `Path must not exceed ${MAX_PROPERTY_CAMPAIGN_PATH_CODE_POINTS} Unicode code points`
   })

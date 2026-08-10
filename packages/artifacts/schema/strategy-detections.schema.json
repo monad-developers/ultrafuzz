@@ -1,5 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "maxItems": 10000,
   "type": "array",
   "items": {
     "type": "object",
@@ -70,7 +71,6 @@
     "required": ["dedupe_key", "title", "hits"],
     "additionalProperties": false
   },
-  "maxItems": 10000,
   "$id": "urn:ultrafuzz:schema:artifacts:strategy-detections:1",
   "title": "Ultrafuzz strategy detection provenance"
 }

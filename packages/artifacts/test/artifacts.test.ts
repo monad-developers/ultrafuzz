@@ -30,6 +30,7 @@ import {
   summarizeNodeAttempts,
   updateNodeState,
   validateArtifactManifest,
+  validateArtifactVerificationMarker,
   verifyArtifactManifestPrerequisites,
   writeArtifact,
   writeArtifactManifest,
@@ -252,8 +253,10 @@ test("createRunLayout rejects symlinked run roots before creating outside writes
 });
 
 test("safe path helpers reject traversal, absolutes, unsafe IDs, and symlink escapes", () => {
+  assert.equal(normalizeSafeRelativePath(".review/report@v3+1.json"), ".review/report@v3+1.json");
   assert.throws(() => normalizeSafeRelativePath("../secret"), /traverse/);
   assert.throws(() => normalizeSafeRelativePath("/tmp/secret"), /relative/);
+  assert.throws(() => normalizeSafeRelativePath(`${"a".repeat(129)}/report.json`), /unsafe segment/);
   assert.throws(() => safeResolveInside(tempProject(), "Display Name/report.md"), /unsafe segment/);
 
   const root = tempProject();
@@ -420,13 +423,14 @@ test("failed publication cleanup detects a canonical-path replacement before acc
 
 test("artifact manifests record safe paths, sizes, digests, schema version, and provenance", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
-  const artifactPath = writeArtifact(layout, "node-a", "setup/project.json", "hello artifact\n");
+  const canonicalPath = ".setup/project@v3+1.json";
+  const artifactPath = writeArtifact(layout, "node-a", canonicalPath, "hello artifact\n");
   const manifest = writeArtifactManifest({
     layout,
     nodeId: "node-a",
     outputs: [
       {
-        path: "setup/project.json",
+        path: canonicalPath,
         contract: "ultrafuzz/coverage-goal@1",
         contract_digest: "a".repeat(64),
         schema_file: "example.schema.json",
@@ -448,7 +452,7 @@ test("artifact manifests record safe paths, sizes, digests, schema version, and 
 
   assert.equal(manifest.schema_version, "ultrafuzz.artifact-manifest.v3");
   assert.equal(manifest.files.length, 1);
-  assert.equal(manifest.files[0]!.path, "setup/project.json");
+  assert.equal(manifest.files[0]!.path, canonicalPath);
   assert.equal(manifest.files[0]!.size_bytes, fs.statSync(artifactPath).size);
   assert.equal(manifest.files[0]!.sha256, crypto.createHash("sha256").update("hello artifact\n").digest("hex"));
   assert.equal(manifest.files[0]!.provenance.producer_node_id, "node-a");
@@ -460,6 +464,20 @@ test("artifact manifests record safe paths, sizes, digests, schema version, and 
   assert.equal(manifest.output_contracts[0]!.schema_bundle_sha256, "c".repeat(64));
   assert.equal(manifest.output_contracts[0]!.validator_build, `ultrafuzz-json-validator.v1:${"d".repeat(64)}`);
   assert.deepEqual(manifest.prerequisite_manifests, []);
+
+  const marker = {
+    schema_version: "ultrafuzz.artifact-verification.v2",
+    attempt_id: "node-a.0",
+    node_id: "node-a",
+    artifacts: [
+      {
+        ...manifest.output_contracts[0],
+        sha256: manifest.files[0]!.sha256
+      }
+    ],
+    publications: [{ path: canonicalPath, sha256: manifest.files[0]!.sha256 }]
+  };
+  assert.equal(validateArtifactVerificationMarker(marker).ok, true);
 });
 
 test("artifact manifest v3 accepts only exact reference and Smithers task provenance metadata", () => {

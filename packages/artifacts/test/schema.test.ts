@@ -25,7 +25,9 @@ import {
   REPORT_SCHEMA_VERSION,
   USAGE_LEDGER_SCHEMA_VERSION,
   ARTIFACT_CONTRACT_IDS,
+  CANONICAL_ARTIFACT_RELATIVE_PATH_PATTERN,
   artifactManifestJsonSchema,
+  artifactVerificationJsonSchema,
   aggregationManifestSchema,
   coverageGoalSchema,
   differentialLaneResultSchema,
@@ -44,6 +46,8 @@ import {
   lensPropertiesJsonSchema,
   nodeAttemptLedgerJsonSchema,
   propertiesJsonSchema,
+  propertyCampaignJsonSchema,
+  plannedGraphJsonSchema,
   referenceExpectationsJsonSchema,
   reportSchema,
   runStateJsonSchema,
@@ -72,10 +76,35 @@ import {
   type ArtifactContractId,
   type PlannedGraphDocument,
   type PlannedGraphNodeDocument,
+  smithersTaskManifestJsonSchema,
   trustedCliMetadataJsonSchema
 } from "../src/index.js";
 
 const packageRoot = findPackageRoot(path.dirname(fileURLToPath(import.meta.url)));
+
+function schemaPatterns(schema: unknown): ReadonlySet<string> {
+  const patterns = new Set<string>();
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item);
+      return;
+    }
+    if (value === null || typeof value !== "object") return;
+    const record = value as Record<string, unknown>;
+    if (typeof record.pattern === "string") patterns.add(record.pattern);
+    for (const item of Object.values(record)) visit(item);
+  };
+  visit(schema);
+  return patterns;
+}
+
+test("planned outputs, manifests, markers, and campaign documents share one artifact path grammar", () => {
+  assert.equal(artifactManifestJsonSchema.$defs.safePath.pattern, CANONICAL_ARTIFACT_RELATIVE_PATH_PATTERN);
+  assert.equal(artifactVerificationJsonSchema.$defs.safePath.pattern, CANONICAL_ARTIFACT_RELATIVE_PATH_PATTERN);
+  assert.equal(plannedGraphJsonSchema.$defs.safePath.pattern, CANONICAL_ARTIFACT_RELATIVE_PATH_PATTERN);
+  assert.ok(schemaPatterns(smithersTaskManifestJsonSchema).has(CANONICAL_ARTIFACT_RELATIVE_PATH_PATTERN));
+  assert.ok(schemaPatterns(propertyCampaignJsonSchema).has(CANONICAL_ARTIFACT_RELATIVE_PATH_PATTERN));
+});
 
 test("materializes the checked-in JSON schema bundle into a task-local directory", () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-schema-bundle-"));

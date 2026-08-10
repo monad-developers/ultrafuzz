@@ -443,6 +443,16 @@ test("property-campaign v3 JSON Schema and Zod agree on every portable status co
       expected: false
     },
     {
+      label: "canonical-plan-reference",
+      value: { ...structuredClone(base), campaign_plan_ref: ".plans/campaign@v3+smoke.json" },
+      expected: true
+    },
+    {
+      label: "overlong-plan-reference-segment",
+      value: { ...structuredClone(base), campaign_plan_ref: `${"a".repeat(129)}/campaign-plan.json` },
+      expected: false
+    },
+    {
       label: "unsafe-evidence-reference",
       value: {
         ...structuredClone(base),
@@ -650,7 +660,11 @@ test("finding-derived and property-campaign resource bounds agree in Ajv and Zod
     ...campaignString,
     fuzzer_backend: `${campaignString.fuzzer_backend as string}🙂`
   });
-  const campaignPath = { ...campaign, campaign_plan_ref: "a".repeat(MAX_PROPERTY_CAMPAIGN_PATH_CODE_POINTS) };
+  const campaignPathSegments = [
+    ...Array<string>(31).fill("a".repeat(128)),
+    "a".repeat(MAX_PROPERTY_CAMPAIGN_PATH_CODE_POINTS - 31 * 128 - 31)
+  ];
+  const campaignPath = { ...campaign, campaign_plan_ref: campaignPathSegments.join("/") };
   assertBoundary(campaignEntry.id, campaignParser, "property-campaign:path-code-points", campaignPath, {
     ...campaignPath,
     campaign_plan_ref: `${campaignPath.campaign_plan_ref as string}a`
