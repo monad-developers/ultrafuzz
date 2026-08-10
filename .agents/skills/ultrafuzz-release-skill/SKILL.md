@@ -8,7 +8,8 @@ description: Publish Ultrafuzz GitHub releases from main and verify the publishe
 ## Core Rule
 
 Publish a non-draft, non-prerelease GitHub release from `main`. Inspect the
-existing releases first and match their tag, title, and release-note format.
+existing releases first and match their tag and title conventions. Use the
+release-note structure defined below even when older releases use a flat list.
 Publish only after the user explicitly asks to publish.
 
 ## Workflow
@@ -28,18 +29,36 @@ Publish only after the user explicitly asks to publish.
    - Include each user-facing pull request exactly once. Call out any commit
      that cannot be mapped confidently instead of silently omitting it.
 
-3. Write release notes in the established format.
-   - Use an unordered Markdown list with `-` markers and no introduction or
-     section headings.
-   - Keep every bullet to one physical line and write it as a concise sentence.
-   - Use one bullet per pull request by default.
-   - Group multiple pull requests into one bullet only when they are part of
-     the same feature category. Keep all grouped PR numbers on that same line,
-     such as `(#70, #71, #72)`.
+3. Write release notes in the Ultrafuzz editorial format.
+   - Open with one short paragraph explaining the release's main theme and
+     user-visible value.
+   - Follow it with 2-3 highlight bullets. Give each highlight a short bold
+     lead-in and explain the outcome in human-readable language. Highlights may
+     summarize the detailed entries and do not need PR numbers.
+   - Add detailed sections named `## New features`, `## Improvements`, and
+     `## Bug fixes`. Omit empty sections. Add `## Breaking changes` before
+     `## New features` only when the release contains breaking changes.
+   - Prefix each detailed bullet with one or two bold scope tags. Derive package
+     tags from the affected `packages/<name>/` directories, using the package
+     directory name, such as `**[runtime]**` or `**[config] [topology]**`.
+     For changes outside `packages/`, derive equivalent stable tags from the
+     affected repository surface, such as `**[docs]**`, `**[benchmarks]**`, or
+     `**[workflows]**`. Choose the primary user-visible scopes rather than
+     tagging every incidental test, fixture, or plumbing change.
+   - Use one detailed bullet per pull request by default. Group multiple pull
+     requests only when they contribute to one reader-understandable capability
+     or fix and belong in the same section. Do not group changes merely because
+     they touch the same package. Keep all grouped PR numbers together, such as
+     `(#70, #71, #72)`.
    - Prefer present-tense wording such as `Adds`, `Improves`, or `Fixes`, and
-     end each bullet with its PR number or grouped PR numbers.
-   - Compare the draft against recent releases and ensure every included PR is
-     represented once.
+     thank every PR author represented by the bullet before ending with its PR
+     number or grouped PR numbers, such as `Thanks @alice! (#70)` or
+     `Thanks @alice and @bob! (#70, #71)`. Deduplicate authors when aggregating
+     multiple PRs. Include every user-facing pull request exactly once across
+     the detailed sections.
+   - End with a `**Full changelog**` link comparing the previous and current
+     tags. Compare the draft against recent releases for tone and completeness,
+     not to preserve their older flat-list structure.
 
 4. Verify release readiness.
    - Resolve `origin/main` to the exact target commit and confirm the intended
@@ -75,4 +94,4 @@ Publish only after the user explicitly asks to publish.
 - Never omit a pull request merely because it is hard to categorize.
 - Never create the release from an unverified local `main` or feature branch.
 - Never use automatically generated notes without reviewing and converting
-  them to the repository's established one-line unordered-list format.
+  them to the Ultrafuzz editorial format above.
