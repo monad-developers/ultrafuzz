@@ -3,9 +3,14 @@ import path from "node:path";
 
 import {
   NODE_STATE_STATUSES,
+  NODE_NEXT_ELIGIBLE_ACTIONS,
+  NODE_WAIT_REASONS,
   RUN_STATE_STATUSES,
   TERMINAL_NODE_STATE_STATUSES,
   TERMINAL_RUN_STATE_STATUSES,
+  type NodeNextEligibleAction,
+  type NodeStatus,
+  type NodeWaitReason,
   type RunStatus
 } from "@ultrafuzz/artifacts";
 
@@ -19,6 +24,14 @@ export type EvalStatusRowState = RunStatus | "not-launched" | "inaccessible" | "
 export type EvalStatusEtaBasis = typeof EVAL_STATUS_ETA_BASIS | "terminal" | null;
 export type EvalStatusEtaUnavailableReason =
   "progress-unavailable" | "no-completed-nodes" | "timing-unavailable" | "checkpoint-stale" | null;
+export type EvalStatusLinkedWorkflowState = "running" | "finished" | "stopped" | "failed" | "unknown" | null;
+
+export interface EvalStatusWaitingNode {
+  node_id: string;
+  status: NodeStatus;
+  wait_reason: NodeWaitReason | null;
+  next_eligible_action: NodeNextEligibleAction | null;
+}
 
 export interface EvalStatusRow {
   row: string;
@@ -31,6 +44,9 @@ export interface EvalStatusRow {
   eta_at: string | null;
   checkpoint_age_seconds: number | null;
   checkpoint_stale: boolean | null;
+  active_node_ids: string[];
+  waiting_nodes: EvalStatusWaitingNode[];
+  linked_workflow_status: EvalStatusLinkedWorkflowState;
   eta_basis: EvalStatusEtaBasis;
   eta_unavailable_reason: EvalStatusEtaUnavailableReason;
 }
@@ -74,6 +90,8 @@ interface RunRecords {
 
 const RUN_STATUSES = new Set<string>(RUN_STATE_STATUSES);
 const NODE_STATUSES = new Set<string>(NODE_STATE_STATUSES);
+const NODE_WAIT_REASON_VALUES = new Set<string>(NODE_WAIT_REASONS);
+const NODE_NEXT_ELIGIBLE_ACTION_VALUES = new Set<string>(NODE_NEXT_ELIGIBLE_ACTIONS);
 const TERMINAL_RUN_STATUSES = new Set<string>(TERMINAL_RUN_STATE_STATUSES);
 const COMPLETED_NODE_STATUSES = new Set<string>(TERMINAL_NODE_STATE_STATUSES);
 
@@ -180,13 +198,15 @@ export function calculateEvalEta(input: CalculateEvalEtaInput): EvalEta {
 }
 
 export function renderEvalStatusTable(snapshot: EvalStatusSnapshot): string {
-  const headers = ["Row", "Status", "Progress", "ETA", "Checkpoint"];
+  const headers = ["Row", "Status", "Progress", "ETA", "Checkpoint", "Nodes", "Workflow"];
   const values = snapshot.rows.map((row) => [
     row.row,
     row.status,
     progressText(row),
     etaText(row),
-    checkpointText(row)
+    checkpointText(row),
+    nodesText(row),
+    row.linked_workflow_status ?? "unknown"
   ]);
   const widths = headers.map((header, index) =>
     Math.max(header.length, ...values.map((columns) => columns[index]?.length ?? 0))
@@ -294,6 +314,19 @@ function statusForRecord(input: {
   }
 
   const nodes = Object.values(rawState.nodes);
+  const activeNodeIds = nodes
+    .filter((node) => node.status === "running")
+    .map((node) => node.node_id)
+    .sort();
+  const waitingNodes = nodes
+    .filter((node) => !COMPLETED_NODE_STATUSES.has(node.status) && node.status !== "running")
+    .map((node): EvalStatusWaitingNode => ({
+      node_id: node.node_id,
+      status: node.status,
+      wait_reason: node.wait_reason ?? null,
+      next_eligible_action: node.next_eligible_action ?? null
+    }))
+    .sort((left, right) => left.node_id.localeCompare(right.node_id));
   const executedNodes = nodes.filter((node) => COMPLETED_NODE_STATUSES.has(node.status)).length;
   const totalNodes = nodes.length;
   const terminal = TERMINAL_RUN_STATUSES.has(rawState.status);
@@ -335,6 +368,9 @@ function statusForRecord(input: {
           : Number(((executedNodes / totalNodes) * 100).toFixed(1)),
     checkpoint_age_seconds: checkpointAgeSeconds,
     checkpoint_stale: checkpointStale,
+    active_node_ids: activeNodeIds,
+    waiting_nodes: waitingNodes,
+    linked_workflow_status: readLinkedWorkflowStatus(input.record.ultrafuzz_run_root, input.record.workflow_ids),
     ...eta
   };
 }
@@ -364,7 +400,16 @@ function isValidState(
   last_transition_at?: string;
   controller_lease?: { renewed_at?: string };
   concurrency?: { observed_at?: string };
-  nodes: Record<string, { node_id: string; status: string; finished_at?: string }>;
+  nodes: Record<
+    string,
+    {
+      node_id: string;
+      status: NodeStatus;
+      finished_at?: string;
+      wait_reason?: NodeWaitReason;
+      next_eligible_action?: NodeNextEligibleAction;
+    }
+  >;
 } {
   if (
     !isRecord(value) ||
@@ -381,7 +426,12 @@ function isValidState(
       node.node_id === nodeId &&
       typeof node.status === "string" &&
       NODE_STATUSES.has(node.status) &&
-      (node.finished_at === undefined || typeof node.finished_at === "string")
+      (node.finished_at === undefined || typeof node.finished_at === "string") &&
+      (node.wait_reason === undefined ||
+        (typeof node.wait_reason === "string" && NODE_WAIT_REASON_VALUES.has(node.wait_reason))) &&
+      (node.next_eligible_action === undefined ||
+        (typeof node.next_eligible_action === "string" &&
+          NODE_NEXT_ELIGIBLE_ACTION_VALUES.has(node.next_eligible_action)))
   );
 }
 
@@ -397,6 +447,9 @@ function unavailableRow(row: string, status: EvalStatusRowState, terminal: boole
     eta_at: null,
     checkpoint_age_seconds: null,
     checkpoint_stale: null,
+    active_node_ids: [],
+    waiting_nodes: [],
+    linked_workflow_status: null,
     eta_basis: null,
     eta_unavailable_reason: "progress-unavailable"
   };
@@ -444,6 +497,52 @@ function etaText(row: EvalStatusRow): string {
 function checkpointText(row: EvalStatusRow): string {
   if (row.checkpoint_age_seconds === null) return "unknown";
   return `${durationText(row.checkpoint_age_seconds)}${row.checkpoint_stale === true ? " stale" : ""}`;
+}
+
+function nodesText(row: EvalStatusRow): string {
+  const active = boundedNodeList(row.active_node_ids, (nodeId) => nodeId);
+  const waiting = boundedNodeList(row.waiting_nodes, (node) => {
+    if (node.wait_reason === null && node.next_eligible_action === null) return node.node_id;
+    const reason = node.wait_reason ?? "unknown";
+    const action = node.next_eligible_action ?? "unknown";
+    return `${node.node_id}[${reason}→${action}]`;
+  });
+  const groups = [];
+  if (active !== null) groups.push(`active:${active}`);
+  if (waiting !== null) groups.push(`wait:${waiting}`);
+  return groups.length === 0 ? "none" : groups.join("; ");
+}
+
+function boundedNodeList<T>(values: T[], render: (value: T) => string): string | null {
+  if (values.length === 0) return null;
+  const visible = values.slice(0, 3).map(render).join(",");
+  const omitted = values.length - 3;
+  return omitted > 0 ? `${visible} +${omitted}` : visible;
+}
+
+function readLinkedWorkflowStatus(runRoot: string, rawWorkflowIds: unknown): EvalStatusLinkedWorkflowState {
+  if (!Array.isArray(rawWorkflowIds) || rawWorkflowIds.length === 0) return null;
+  const statuses: Exclude<EvalStatusLinkedWorkflowState, null>[] = [];
+  for (const value of rawWorkflowIds) {
+    if (typeof value !== "string" || value.length === 0 || path.basename(value) !== value) {
+      statuses.push("unknown");
+      continue;
+    }
+    let log: string;
+    try {
+      log = fs.readFileSync(path.join(runRoot, "smithers", "logs", `${value}.log`), "utf8");
+    } catch {
+      statuses.push("unknown");
+      continue;
+    }
+    const matches = [...log.matchAll(/^status:\s*(running|finished|stopped|failed)\s*$/gmu)];
+    const latest = matches.at(-1)?.[1];
+    statuses.push(
+      latest === "running" || latest === "finished" || latest === "stopped" || latest === "failed" ? latest : "unknown"
+    );
+  }
+  const distinct = new Set(statuses);
+  return distinct.size === 1 ? (statuses[0] ?? "unknown") : "unknown";
 }
 
 function reasonText(reason: EvalStatusEtaUnavailableReason): string {

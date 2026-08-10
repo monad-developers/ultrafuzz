@@ -120,6 +120,95 @@ describe("eval status", () => {
     });
   });
 
+  it("shows exact controller-loss nodes when the linked workflow has stopped", () => {
+    const fixture = evalFixture([privateRow("controller-loss-row")]);
+    const runRoot = path.join(fixture.base, "controller-loss-run");
+    const runId = "run-controller-loss";
+    fs.mkdirSync(path.join(runRoot, "smithers", "logs"), { recursive: true });
+    fs.writeFileSync(
+      statePath(runRoot),
+      `${JSON.stringify(
+        {
+          schema_version: "1.1",
+          run_id: runId,
+          status: "running",
+          created_at: START,
+          started_at: START,
+          last_transition_at: "2026-01-02T14:50:00.000Z",
+          controller_lease: {
+            status: "expired",
+            renewed_at: "2026-01-02T14:50:00.000Z",
+            recovery_attempts: 33
+          },
+          nodes: {
+            "aggregate-test-files": {
+              node_id: "aggregate-test-files",
+              status: "pending",
+              wait_reason: "controller-loss",
+              next_eligible_action: "controller-takeover"
+            },
+            "final-report": {
+              node_id: "final-report",
+              status: "pending",
+              wait_reason: "controller-loss",
+              next_eligible_action: "controller-takeover"
+            },
+            "stateful-invariant-campaign": {
+              node_id: "stateful-invariant-campaign",
+              status: "succeeded",
+              finished_at: "2026-01-02T14:49:00.000Z"
+            }
+          }
+        },
+        null,
+        2
+      )}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(runRoot, "smithers", "logs", `${runId}.log`),
+      "runId: run-controller-loss\nstatus: finished\nstatus: stopped\n",
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify({ ...record("controller-loss-row", runId, runRoot), workflow_ids: [runId] })}\n`,
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({
+      projectRoot: fixture.project,
+      evalRunId: fixture.evalRunId,
+      now: SNAPSHOT
+    });
+    const table = renderEvalStatusTable(snapshot);
+
+    expect(snapshot.rows[0]).toMatchObject({
+      status: "running",
+      terminal: false,
+      active_node_ids: [],
+      waiting_nodes: [
+        {
+          node_id: "aggregate-test-files",
+          status: "pending",
+          wait_reason: "controller-loss",
+          next_eligible_action: "controller-takeover"
+        },
+        {
+          node_id: "final-report",
+          status: "pending",
+          wait_reason: "controller-loss",
+          next_eligible_action: "controller-takeover"
+        }
+      ],
+      linked_workflow_status: "stopped"
+    });
+    expect(table).toContain("aggregate-test-files[controller-loss→controller-takeover]");
+    expect(table).toContain("final-report[controller-loss→controller-takeover]");
+    expect(table).toContain("stopped");
+    expect(table).not.toContain("controller-loss-row");
+  });
+
   it("keeps incomplete, failed, inaccessible, invalid, zero-progress, and stale rows typed", () => {
     const ids = [
       "not-launched",
