@@ -4333,10 +4333,7 @@ function verifiedAncestorPropertyLenses(
 
     if (logicalNodeId === "project-discovery") {
       producerCount += 1;
-      const ledgerOutputs = producer.outputs.filter(
-        (output) =>
-          output.path === "setup/invariant-evidence-ledger.json" && output.contract === "ultrafuzz/invariant-ledger@1"
-      );
+      const ledgerOutputs = producer.outputs.filter((output) => output.contract === "ultrafuzz/invariant-ledger@1");
       if (ledgerOutputs.length !== 1) return undefined;
       const ledger = verifiedDependencyJsonArtifact(
         task,
@@ -4357,13 +4354,12 @@ function verifiedAncestorPropertyLenses(
       });
     }
 
-    if (logicalNodeId.startsWith("property-specification-") && logicalNodeId !== "property-specification-fanin") {
-      producerCount += 1;
-      if (lensOutputs.length !== 1) return undefined;
-      const output = lensOutputs[0]!;
-      const lens = verifiedDependencyJsonArtifact(task, dependency, producer, output.path, output.contract);
-      lenses.push({ sourceNodeId: logicalNodeId, document: lens.value });
-    }
+    if (lensOutputs.length === 0) continue;
+    producerCount += 1;
+    if (lensOutputs.length !== 1) return undefined;
+    const output = lensOutputs[0]!;
+    const lens = verifiedDependencyJsonArtifact(task, dependency, producer, output.path, output.contract);
+    lenses.push({ sourceNodeId: logicalNodeId, document: lens.value });
   }
   return producerCount === 0 ? undefined : lenses;
 }

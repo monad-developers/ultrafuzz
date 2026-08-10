@@ -115,12 +115,54 @@ interface PublicationSnapshot {
   sha256: string;
 }
 
+interface FinalizedNodeOutputAuthority {
+  layout: RunLayout;
+  state: RunState;
+  graph: PlannedGraphDocument;
+  plannedNode: PlannedGraphNodeDocument;
+  documents: AuthorityDocuments;
+  artifactDir: string;
+  publications: ReadonlyMap<string, PublicationSnapshot>;
+  snapshot: VerifiedNodeOutputSnapshot;
+}
+
 /**
  * Read one node's externally consumable outputs through its current verifier
  * and controller-finalization authority. The returned bytes are snapshots; no
  * artifact, marker, manifest, or state document is repaired or rewritten.
  */
 export function loadVerifiedNodeOutputSnapshot(input: LoadVerifiedNodeOutputInput): VerifiedNodeOutputSnapshot {
+  const authority = loadFinalizedNodeOutputAuthority(input);
+  const gate = verifyRequiredArtifactsForAttempt(
+    authority.layout,
+    authority.plannedNode,
+    authority.snapshot.attempt_id
+  );
+  const gateErrors = gate.diagnostics.filter((diagnostic) => diagnostic.severity === "error");
+  if (!gate.ok || gateErrors.length > 0) {
+    throw invalidOutput(
+      `verified output failed current semantic/context gates for ${authority.snapshot.attempt_id}: ${gateErrors
+        .map((diagnostic) => `${diagnostic.code}: ${diagnostic.message}`)
+        .join("; ")}`
+    );
+  }
+  assertFinalizedAuthorityRemainedCurrent(authority);
+  return authority.snapshot;
+}
+
+/**
+ * Capture finalized producer outputs through state, plan, manifest, marker,
+ * and immutable publication digests without recursively running host gates.
+ * Consumers must still validate the selected output's current schema and
+ * semantics before typed access.
+ */
+export function loadFinalizedNodeOutputSnapshot(input: LoadVerifiedNodeOutputInput): VerifiedNodeOutputSnapshot {
+  const authority = loadFinalizedNodeOutputAuthority(input);
+  assertFinalizedAuthorityRemainedCurrent(authority);
+  return authority.snapshot;
+}
+
+function loadFinalizedNodeOutputAuthority(input: LoadVerifiedNodeOutputInput): FinalizedNodeOutputAuthority {
   const logicalNodeId = validateSafeId(input.logicalNodeId, "logical node ID");
   const root = path.resolve(input.runRoot);
   assertNoSymlinkComponents(root, root, "run root");
@@ -145,32 +187,23 @@ export function loadVerifiedNodeOutputSnapshot(input: LoadVerifiedNodeOutputInpu
     );
   }
 
-  const gate = verifyRequiredArtifactsForAttempt(layout, plannedNode, candidate.attemptId);
-  const gateErrors = gate.diagnostics.filter((diagnostic) => diagnostic.severity === "error");
-  if (!gate.ok || gateErrors.length > 0) {
-    throw invalidOutput(
-      `verified output failed current semantic/context gates for ${candidate.attemptId}: ${gateErrors
-        .map((diagnostic) => `${diagnostic.code}: ${diagnostic.message}`)
-        .join("; ")}`
-    );
-  }
-
-  assertAuthorityRemainedCurrent({
-    layout,
-    state,
-    graph,
-    documents,
-    artifactDir,
-    publications: publicationSnapshots
-  });
-
-  return Object.freeze({
+  const snapshot = Object.freeze({
     run_root: layout.root,
     attempt_id: candidate.attemptId,
     logical_node_id: logicalNodeId,
     artifact_dir: artifactDir,
     outputs: Object.freeze(outputSnapshots)
   });
+  return {
+    layout,
+    state,
+    graph,
+    plannedNode,
+    documents,
+    artifactDir,
+    publications: publicationSnapshots,
+    snapshot
+  };
 }
 
 /** Read the one authoritative final report and require an exact canonical JSON/Markdown pair. */
@@ -431,6 +464,17 @@ function validatePlannedOutputSnapshots(
       bytes: Buffer.from(publication.bytes),
       value: validation.value
     });
+  });
+}
+
+function assertFinalizedAuthorityRemainedCurrent(authority: FinalizedNodeOutputAuthority): void {
+  assertAuthorityRemainedCurrent({
+    layout: authority.layout,
+    state: authority.state,
+    graph: authority.graph,
+    documents: authority.documents,
+    artifactDir: authority.artifactDir,
+    publications: authority.publications
   });
 }
 

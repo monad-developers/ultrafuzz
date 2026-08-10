@@ -1045,7 +1045,7 @@ test("generated Smithers fails closed when a contextual gate lacks verified ance
   }
 });
 
-test("generated Smithers requires exactly one declared property lens per producer", () => {
+test("generated Smithers selects property and discovery inputs by their declared contracts", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function verifiedAncestorPropertyLenses");
   const helperEnd = source.indexOf("\n\nfunction workspacePatchSemanticGitContext", helperStart);
@@ -1053,8 +1053,16 @@ test("generated Smithers requires exactly one declared property lens per produce
   assert.ok(helperEnd > helperStart, source);
   const helper = source.slice(helperStart, helperEnd);
 
+  assert.match(helper, /producer\.outputs\.filter\(\(output\) => output\.contract === "ultrafuzz\/property-lens@2"\)/u);
   assert.match(helper, /lensOutputs\.length !== 1/u);
   assert.doesNotMatch(helper, /for \(const output of lensOutputs\)/u);
+  assert.doesNotMatch(helper, /logicalNodeId\.startsWith\("property-specification-"\)/u);
+  assert.match(
+    helper,
+    /producer\.outputs\.filter\(\(output\) => output\.contract === "ultrafuzz\/invariant-ledger@1"\)/u
+  );
+  assert.match(helper, /ledgerOutputs\[0\]!\.path/u);
+  assert.doesNotMatch(helper, /setup\/invariant-evidence-ledger\.json/u);
 });
 
 test("generated severity verification authenticates the triaged finding preservation context", () => {

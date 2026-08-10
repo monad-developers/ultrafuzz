@@ -7,6 +7,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  ARTIFACT_VERIFICATION_SCHEMA_VERSION,
   artifactContractDefinition,
   artifactContractSchemaBinding,
   artifactSchemaDirectory,
@@ -15,10 +16,13 @@ import {
   derivePropertyImplementationCoverage,
   getNodeArtifactDir,
   readRunState,
+  updateNodeState,
   validateRegisteredJsonFileSync,
   writeArtifact as writeArtifactFile,
+  writeArtifactManifest,
+  writeJsonDurable,
   writeRunState,
-  writeArtifactManifest
+  type ArtifactVerificationMarker
 } from "@ultrafuzz/artifacts";
 import { loadBuiltInPromptAssets } from "@ultrafuzz/prompts";
 
@@ -34,6 +38,10 @@ import {
 function tempProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-runtime-gates-"));
 }
+
+const FIXTURE_WORKFLOW_RUN_ID = "workflow-artifact-gates";
+const FIXTURE_AGENT_TASK_ID = "agent-artifact-gates";
+const FIXTURE_VERIFIER_TASK_ID = "verifier-artifact-gates";
 
 /**
  * Real planned runs record every logical producer in state before any artifact
@@ -70,14 +78,14 @@ function writeArtifact(
   artifactPath: string,
   contents: string
 ): string {
-  registerArtifactNode(
-    layout,
-    nodeId,
+  const declaredOutputs =
     nodeId === "project-discovery" && artifactPath === "setup/invariant-evidence-ledger.json"
-      ? [boundOutput(artifactPath, "ultrafuzz/invariant-ledger@1")]
-      : []
-  );
-  return writeArtifactFile(layout, nodeId, artifactPath, contents);
+      ? [boundOutput(artifactPath, "ultrafuzz/invariant-ledger@1", true)]
+      : [];
+  registerArtifactNode(layout, nodeId, declaredOutputs);
+  const written = writeArtifactFile(layout, nodeId, artifactPath, contents);
+  if (declaredOutputs.length > 0) finalizeArtifactNode(layout, nodeId, declaredOutputs);
+  return written;
 }
 
 function writePropertyLens(
@@ -87,8 +95,7 @@ function writePropertyLens(
 ): void {
   const lensName = logicalNodeId.replace(/^property-specification-/u, "");
   const lensPath = `properties/${lensName}.json`;
-  registerArtifactNode(layout, logicalNodeId, [boundOutput(lensPath, "ultrafuzz/property-lens@2")]);
-  writeArtifact(
+  writeDeclaredPropertyLens(
     layout,
     logicalNodeId,
     lensPath,
@@ -110,8 +117,11 @@ function writeDeclaredPropertyLens(
   artifactPath: string,
   contents: string
 ): string {
-  registerArtifactNode(layout, nodeId, [boundOutput(artifactPath, "ultrafuzz/property-lens@2")]);
-  return writeArtifact(layout, nodeId, artifactPath, contents);
+  const outputs = [boundOutput(artifactPath, "ultrafuzz/property-lens@2", true)];
+  registerArtifactNode(layout, nodeId, outputs);
+  const written = writeArtifactFile(layout, nodeId, artifactPath, contents);
+  finalizeArtifactNode(layout, nodeId, outputs);
+  return written;
 }
 
 function writeMinimalPropertyFaninFixture(
@@ -219,6 +229,85 @@ function boundOutput(
     ...(artifactContractSchemaBinding(contract) ?? {}),
     primary
   };
+}
+
+function finalizeArtifactNode(
+  layout: ReturnType<typeof createRunLayout>,
+  nodeId: string,
+  outputs: readonly PlannedGraphNode["outputs"][number][]
+): void {
+  const state = readRunState(layout);
+  const logicalNodeId = state.nodes[nodeId]?.logical_node_id ?? nodeId;
+  const graph = JSON.parse(fs.readFileSync(layout.graphPath, "utf8")) as {
+    schema_version: string;
+    graph_version: string;
+    topology_version: number;
+    groups: Record<string, unknown>;
+    nodes: PlannedGraphNode[];
+  };
+  const planned: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: nodeId,
+    logical_id: logicalNodeId,
+    display_name: logicalNodeId,
+    artifact_dir: `artifacts/${nodeId}`,
+    outputs: [...outputs]
+  };
+  const existingIndex = graph.nodes.findIndex((node) => node.id === nodeId);
+  if (existingIndex === -1) graph.nodes.push(planned);
+  else graph.nodes[existingIndex] = planned;
+  fs.writeFileSync(layout.graphPath, JSON.stringify(graph), "utf8");
+
+  const outputBytes = new Map(
+    outputs.map((output) => [output.path, fs.readFileSync(path.join(getNodeArtifactDir(layout, nodeId), output.path))])
+  );
+  writeArtifactManifest({
+    layout,
+    nodeId,
+    include: outputs.map((output) => output.path),
+    outputs: [...outputs],
+    provenance: {
+      producer_node_id: nodeId,
+      logical_node_id: logicalNodeId,
+      attempt_index: 0,
+      loop_index: 0,
+      model_index: 0,
+      agent_ref: "Codex",
+      workflow_run_id: FIXTURE_WORKFLOW_RUN_ID,
+      workflow_task_id: FIXTURE_AGENT_TASK_ID,
+      origin: "workflow",
+      metadata: { concrete_node_id: nodeId }
+    }
+  });
+  const marker: ArtifactVerificationMarker = {
+    schema_version: ARTIFACT_VERIFICATION_SCHEMA_VERSION,
+    attempt_id: nodeId,
+    node_id: logicalNodeId,
+    artifacts: outputs.map((output) => ({
+      ...output,
+      sha256: createHash("sha256").update(outputBytes.get(output.path)!).digest("hex")
+    })),
+    publications: outputs.map((output) => ({
+      path: output.path,
+      sha256: createHash("sha256").update(outputBytes.get(output.path)!).digest("hex")
+    }))
+  };
+  writeJsonDurable(path.join(layout.root, ".ultrafuzz-verification", `${nodeId}.json`), marker);
+  updateNodeState(layout, nodeId, {
+    status: "succeeded",
+    finished_at: new Date().toISOString(),
+    provenance: {
+      workflow: {
+        run_id: FIXTURE_WORKFLOW_RUN_ID,
+        task_id: FIXTURE_VERIFIER_TASK_ID,
+        agent_task_id: FIXTURE_AGENT_TASK_ID,
+        verifier_task_id: FIXTURE_VERIFIER_TASK_ID,
+        state: "finished",
+        attempt: 0
+      },
+      output_contracts: { ok: true, missing: [] }
+    }
+  });
 }
 
 function currentFinding(id: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -1807,7 +1896,9 @@ test("fanin gate checks scan probe containment against the discovery workspace",
   const unjustified = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(unjustified.ok, false, JSON.stringify(unjustified.diagnostics));
   assert.ok(
-    unjustified.diagnostics.some((diagnostic) => diagnostic.code === "REQUIRED_ARTIFACT_INVALID"),
+    unjustified.diagnostics.some(
+      (diagnostic) => diagnostic.code === "ARTIFACT_SEMANTIC_GATE_CONTEXT_UNAVAILABLE"
+    ),
     JSON.stringify(unjustified.diagnostics)
   );
 });
@@ -2572,6 +2663,155 @@ test("property fan-in consumes one exactly bound custom property-lens path", () 
   const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
 
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+});
+
+test("property fan-in selects a declared lens contract without relying on the producer name", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-contract-selected-lens" });
+  const node = writeMinimalPropertyFaninFixture(layout, {
+    sourceNodeId: "independent-security-review",
+    dependsOn: ["independent-security-review"]
+  });
+  writeDeclaredPropertyLens(
+    layout,
+    "independent-security-review",
+    "custom/review-lens.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v2",
+      properties: [
+        {
+          id: "recon-1",
+          description: "Supply accounting remains consistent.",
+          category: "accounting",
+          priority: "high"
+        }
+      ]
+    })
+  );
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+});
+
+for (const finalizationState of ["failed", "unfinalized"] as const) {
+  test(`property fan-in rejects a ${finalizationState} declared lens producer`, () => {
+    const layout = createRunLayout({
+      projectRoot: tempProject(),
+      runId: `run-${finalizationState}-declared-lens`
+    });
+    const node = writeMinimalPropertyFaninFixture(layout);
+    const output = boundOutput("custom/recon.json", "ultrafuzz/property-lens@2", true);
+    const lens = JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v2",
+      properties: [
+        {
+          id: "recon-1",
+          description: "Supply accounting remains consistent.",
+          category: "accounting",
+          priority: "high"
+        }
+      ]
+    });
+    if (finalizationState === "failed") {
+      writeDeclaredPropertyLens(layout, "property-specification-recon", output.path, lens);
+      updateNodeState(layout, "property-specification-recon", { status: "failed" });
+    } else {
+      registerArtifactNode(layout, "property-specification-recon", [output]);
+      writeArtifactFile(layout, "property-specification-recon", output.path, lens);
+    }
+
+    const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+    assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+    assert.ok(
+      result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_LENS_AUTHORITY_INVALID"),
+      JSON.stringify(result.diagnostics)
+    );
+  });
+}
+
+for (const missingAuthority of ["manifest", "verification marker"] as const) {
+  test(`property fan-in rejects a declared lens with a missing ${missingAuthority}`, () => {
+    const layout = createRunLayout({
+      projectRoot: tempProject(),
+      runId: `run-lens-missing-${missingAuthority.replaceAll(" ", "-")}`
+    });
+    const node = writeMinimalPropertyFaninFixture(layout);
+    writeDeclaredPropertyLens(
+      layout,
+      "property-specification-recon",
+      "custom/recon.json",
+      JSON.stringify({
+        schema_version: "ultrafuzz.property-lens.v2",
+        properties: [
+          {
+            id: "recon-1",
+            description: "Supply accounting remains consistent.",
+            category: "accounting",
+            priority: "high"
+          }
+        ]
+      })
+    );
+    const authorityPath =
+      missingAuthority === "manifest"
+        ? path.join(getNodeArtifactDir(layout, "property-specification-recon"), "artifact-manifest.json")
+        : path.join(layout.root, ".ultrafuzz-verification", "property-specification-recon.json");
+    fs.unlinkSync(authorityPath);
+
+    const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+    assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+    assert.ok(
+      result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_LENS_AUTHORITY_INVALID"),
+      JSON.stringify(result.diagnostics)
+    );
+  });
+}
+
+test("property fan-in rejects lens bytes changed after finalization without rewriting them", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-finalized-lens-tamper" });
+  const node = writeMinimalPropertyFaninFixture(layout);
+  const lensPath = writeDeclaredPropertyLens(
+    layout,
+    "property-specification-recon",
+    "custom/recon.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v2",
+      properties: [
+        {
+          id: "recon-1",
+          description: "Supply accounting remains consistent.",
+          category: "accounting",
+          priority: "high"
+        }
+      ]
+    })
+  );
+  const changedBytes = Buffer.from(
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v2",
+      properties: [
+        {
+          id: "recon-1",
+          description: "These are different but still schema-valid bytes.",
+          category: "accounting",
+          priority: "high"
+        }
+      ]
+    }),
+    "utf8"
+  );
+  fs.writeFileSync(lensPath, changedBytes);
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+  assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_LENS_AUTHORITY_INVALID"),
+    JSON.stringify(result.diagnostics)
+  );
+  assert.deepEqual(fs.readFileSync(lensPath), changedBytes);
 });
 
 test("property fan-in rejects ambiguous property-lens declarations", () => {
