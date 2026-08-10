@@ -1139,8 +1139,7 @@ display_name: Runtime Fixture
 ---
 
 Write the neutral runtime handoff to
-{{artifact_path}}/${GENERIC_RUNTIME_MARKDOWN_PATH} and write the declared
-findings array to {{output_findings_path}}.
+{{artifact_path}}/${GENERIC_RUNTIME_MARKDOWN_PATH}.
 `,
     "utf8"
   );
