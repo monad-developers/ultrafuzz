@@ -15,6 +15,8 @@ import {
 } from "@ultrafuzz/artifacts";
 
 import {
+  AGENT_ADAPTER_RECOVERY_JSON_SCHEMA_ID,
+  MAX_AGENT_ADAPTER_RECOVERY_MARKER_BYTES,
   CLOUD_EXECUTION_GENERATION_JSON_SCHEMA_ID,
   INVARIANT_SUITE_BASELINE_JSON_SCHEMA_ID,
   INVARIANT_SUITE_HANDOFF_JSON_SCHEMA_ID,
@@ -41,6 +43,7 @@ export interface RuntimeSchemaMetadata {
   role: "runtime-state";
   typescriptExport: keyof typeof RUNTIME_SCHEMA_EXPORTS;
   semanticGates: readonly string[];
+  maxInstanceBytes?: number;
 }
 
 export function runtimeSchemaDirectory(): string {
@@ -68,6 +71,7 @@ function loadSchemaDocument(filename: string): Readonly<Record<string, unknown>>
   return deepFreeze(parsed);
 }
 
+export const agentAdapterRecoveryJsonSchema = loadSchemaDocument("agent-adapter-recovery.schema.json");
 export const cleanAuditJsonSchema = loadSchemaDocument("clean-audit.schema.json");
 export const cloudExecutionGenerationJsonSchema = loadSchemaDocument("cloud-execution-generation.schema.json");
 export const invariantSuiteBaselineJsonSchema = loadSchemaDocument("invariant-suite-baseline.schema.json");
@@ -87,6 +91,7 @@ export const workspacePatchBaselineJsonSchema = loadSchemaDocument("workspace-pa
 export const workspacePatchPreparationJsonSchema = loadSchemaDocument("workspace-patch-preparation.schema.json");
 
 export const RUNTIME_SCHEMA_EXPORTS = Object.freeze({
+  agentAdapterRecoveryJsonSchema,
   cleanAuditJsonSchema,
   cloudExecutionGenerationJsonSchema,
   invariantSuiteBaselineJsonSchema,
@@ -105,6 +110,13 @@ export const RUNTIME_SCHEMA_EXPORTS = Object.freeze({
 });
 
 export const RUNTIME_SCHEMA_METADATA: Readonly<Record<string, RuntimeSchemaMetadata>> = Object.freeze({
+  "agent-adapter-recovery.schema.json": {
+    id: AGENT_ADAPTER_RECOVERY_JSON_SCHEMA_ID,
+    role: "runtime-state",
+    typescriptExport: "agentAdapterRecoveryJsonSchema",
+    semanticGates: Object.freeze([]),
+    maxInstanceBytes: MAX_AGENT_ADAPTER_RECOVERY_MARKER_BYTES
+  },
   "clean-audit.schema.json": {
     id: CLEAN_AUDIT_JSON_SCHEMA_ID,
     role: "runtime-state",
@@ -246,7 +258,7 @@ export function runtimeSchemaRegistry(): readonly SchemaRegistryEntry[] {
         contractIds: Object.freeze([]),
         sha256: crypto.createHash("sha256").update(bytes).digest("hex"),
         schema,
-        maxInstanceBytes: DEFAULT_MAX_JSON_INSTANCE_BYTES,
+        maxInstanceBytes: metadata.maxInstanceBytes ?? DEFAULT_MAX_JSON_INSTANCE_BYTES,
         localReferences: Object.freeze(localReferences),
         semanticGates: metadata.semanticGates,
         typescriptExport: metadata.typescriptExport

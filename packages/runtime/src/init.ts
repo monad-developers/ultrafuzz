@@ -3,10 +3,17 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { assertNoSymlinkComponents, parseStrictJsonBytes } from "@ultrafuzz/artifacts";
+import { assertNoSymlinkComponents } from "@ultrafuzz/artifacts";
 import { redactResolvedConfig, resolveConfig, serializeRedactedResolvedConfigToml } from "@ultrafuzz/config";
 import { builtInPromptRelativePaths, scaffoldPrompts } from "@ultrafuzz/prompts";
 import { defaultReferenceCatalogYaml } from "@ultrafuzz/references";
+import {
+  AGENT_ADAPTER_RECOVERY_JSON_SCHEMA_ID,
+  AGENT_ADAPTER_RECOVERY_SCHEMA_VERSION,
+  MAX_AGENT_ADAPTER_RECOVERY_MARKER_BYTES,
+  type AgentAdapterRecoveryDocument
+} from "./runtime-contracts.js";
+import { parseRuntimeDocumentBytes, serializeRuntimeDocument } from "./runtime-document-codec.js";
 import { loadRuntimeTemplate } from "./runtime-template.js";
 import { renderSmithersPackageJson } from "./smithers-package.js";
 import type { InitProjectInput, InitProjectResult, RuntimeDiagnostic } from "./types.js";
@@ -17,7 +24,6 @@ const DEFAULT_TOPOLOGY = loadDefaultTopology();
 const AGENT_REGISTRY_FILE = ".smithers/agents/index.ts";
 const MAX_STOCK_AGENT_ADAPTER_BYTES = 256 * 1024;
 const MAX_AGENT_REGISTRY_BYTES = 256 * 1024;
-const AGENT_ADAPTER_RECOVERY_SCHEMA_VERSION = 1;
 const AGENT_TEMPLATES = [
   {
     file: "claude.ts",
@@ -557,7 +563,7 @@ function recoverInterruptedStockAgentAdapterPublication(
       throw new Error("generated agent adapter recovery directory changed while it was opened");
     }
     const directoryAccessPath = agentAdapterDirectoryDescriptorPath(directoryDescriptor, directory);
-    const basename = path.basename(filePath);
+    const basename = agentAdapterRecoveryTargetBasename(path.basename(filePath));
     const targetAccessPath = path.join(directoryAccessPath, basename);
     const preparedBasename = agentAdapterPreparedBasename(basename);
     const preparedAccessPath = path.join(directoryAccessPath, preparedBasename);
@@ -600,13 +606,17 @@ function recoverInterruptedStockAgentAdapterPublication(
           throw new Error("generated agent adapter recovery reservation is incomplete");
         }
       } else {
-        if (!markerIdentity.isFile() || markerIdentity.nlink !== 1n || markerIdentity.size > 4096n) {
+        if (
+          !markerIdentity.isFile() ||
+          markerIdentity.nlink !== 1n ||
+          markerIdentity.size > BigInt(MAX_AGENT_ADAPTER_RECOVERY_MARKER_BYTES)
+        ) {
           throw new Error("generated agent adapter recovery marker is unsafe");
         }
         const markerContents = readStableInitReviewFile(
           projectRoot,
           markerPath,
-          4096,
+          MAX_AGENT_ADAPTER_RECOVERY_MARKER_BYTES,
           "generated agent adapter recovery marker"
         );
         const marker = parseAgentAdapterRecoveryMarker(markerContents, basename);
@@ -700,7 +710,9 @@ function agentAdapterDisplacementBasename(basename: string): string {
   return `.${basename}.ultrafuzz-init-previous`;
 }
 
-function agentAdapterPreparedBasename(basename: string): string {
+function agentAdapterPreparedBasename<Basename extends string>(
+  basename: Basename
+): `.${Basename}.ultrafuzz-init-prepared` {
   return `.${basename}.ultrafuzz-init-prepared`;
 }
 
@@ -717,46 +729,52 @@ function lstatIfPresent(filePath: string): fs.BigIntStats | undefined {
   }
 }
 
-function parseAgentAdapterRecoveryMarker(
-  contents: Buffer,
-  targetBasename: string
-): { temporary_basename: string; temporary_dev: string; temporary_ino: string } {
-  let parsed: unknown;
+function parseAgentAdapterRecoveryMarker(contents: Buffer, targetBasename: string): AgentAdapterRecoveryDocument {
   try {
-    parsed = parseStrictJsonBytes(contents, {
-      maxBytes: MAX_STOCK_AGENT_ADAPTER_BYTES,
-      maxDepth: 8,
-      maxItems: 16,
-      maxProperties: 16
-    });
-  } catch {
-    throw new Error("generated agent adapter recovery marker is malformed");
+    if (contents.byteLength > MAX_AGENT_ADAPTER_RECOVERY_MARKER_BYTES) {
+      throw new Error("generated agent adapter recovery marker exceeds its byte limit");
+    }
+    const parsed = parseRuntimeDocumentBytes(
+      AGENT_ADAPTER_RECOVERY_JSON_SCHEMA_ID,
+      contents,
+      "generated agent adapter recovery marker"
+    );
+    assertAgentAdapterRecoveryMarkerTargetBinding(parsed, targetBasename);
+    return parsed;
+  } catch (cause) {
+    throw new Error("generated agent adapter recovery marker is malformed", { cause });
   }
+}
+
+/** Bind the schema-valid marker to the sidecar path being recovered. */
+function assertAgentAdapterRecoveryMarkerTargetBinding(
+  marker: AgentAdapterRecoveryDocument,
+  targetBasename: string
+): void {
   if (
-    typeof parsed !== "object" ||
-    parsed === null ||
-    !("schema_version" in parsed) ||
-    parsed.schema_version !== AGENT_ADAPTER_RECOVERY_SCHEMA_VERSION ||
-    !("target_basename" in parsed) ||
-    parsed.target_basename !== targetBasename ||
-    !("temporary_basename" in parsed) ||
-    typeof parsed.temporary_basename !== "string" ||
-    path.basename(parsed.temporary_basename) !== parsed.temporary_basename ||
-    !parsed.temporary_basename.startsWith(`.${targetBasename}.ultrafuzz-init-`) ||
-    !("temporary_dev" in parsed) ||
-    typeof parsed.temporary_dev !== "string" ||
-    !/^\d+$/u.test(parsed.temporary_dev) ||
-    !("temporary_ino" in parsed) ||
-    typeof parsed.temporary_ino !== "string" ||
-    !/^\d+$/u.test(parsed.temporary_ino)
+    marker.target_basename !== targetBasename ||
+    marker.temporary_basename !== agentAdapterPreparedBasename(targetBasename)
   ) {
-    throw new Error("generated agent adapter recovery marker is malformed");
+    throw new Error("generated agent adapter recovery marker targets a different adapter");
   }
-  return {
-    temporary_basename: parsed.temporary_basename,
-    temporary_dev: parsed.temporary_dev,
-    temporary_ino: parsed.temporary_ino
-  };
+}
+
+function serializeAgentAdapterRecoveryMarker(marker: AgentAdapterRecoveryDocument, targetBasename: string): Buffer {
+  const contents = Buffer.from(
+    serializeRuntimeDocument(AGENT_ADAPTER_RECOVERY_JSON_SCHEMA_ID, marker, "generated agent adapter recovery marker"),
+    "utf8"
+  );
+  // Validate the exact strict-JSON bytes that will be published, including the
+  // contextual binding to this target, before creating the durable sidecar.
+  parseAgentAdapterRecoveryMarker(contents, targetBasename);
+  return contents;
+}
+
+function agentAdapterRecoveryTargetBasename(value: string): AgentAdapterRecoveryDocument["target_basename"] {
+  if (!AGENT_TEMPLATES.some((entry) => entry.file === value)) {
+    throw new Error(`generated agent adapter recovery target is unsupported: ${value}`);
+  }
+  return value as AgentAdapterRecoveryDocument["target_basename"];
 }
 
 function replaceKnownStockAgentAdapter(
@@ -916,30 +934,29 @@ function publishAgentAdapterAtomically(
     ) {
       throw new Error("generated agent adapter displacement reservation is unsafe");
     }
-    recoveryMarkerPath = path.join(directoryAccessPath, agentAdapterRecoveryMarkerBasename(path.basename(filePath)));
+    const targetBasename = agentAdapterRecoveryTargetBasename(path.basename(filePath));
+    const recoveryMarkerContents = serializeAgentAdapterRecoveryMarker(
+      {
+        schema_version: AGENT_ADAPTER_RECOVERY_SCHEMA_VERSION,
+        target_basename: targetBasename,
+        temporary_basename: agentAdapterPreparedBasename(targetBasename),
+        temporary_dev: temporaryIdentity.dev.toString(),
+        temporary_ino: temporaryIdentity.ino.toString()
+      },
+      targetBasename
+    );
+    recoveryMarkerPath = path.join(directoryAccessPath, agentAdapterRecoveryMarkerBasename(targetBasename));
     recoveryMarkerDescriptor = fs.openSync(
       recoveryMarkerPath,
       fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_RDWR | fs.constants.O_NOFOLLOW,
       0o600
     );
-    writeNewDescriptorContents(
-      recoveryMarkerDescriptor,
-      Buffer.from(
-        `${JSON.stringify({
-          schema_version: AGENT_ADAPTER_RECOVERY_SCHEMA_VERSION,
-          target_basename: path.basename(filePath),
-          temporary_basename: path.basename(temporaryPath),
-          temporary_dev: temporaryIdentity.dev.toString(),
-          temporary_ino: temporaryIdentity.ino.toString()
-        })}\n`,
-        "utf8"
-      )
-    );
+    writeNewDescriptorContents(recoveryMarkerDescriptor, recoveryMarkerContents);
     recoveryMarkerIdentity = fs.fstatSync(recoveryMarkerDescriptor, { bigint: true });
     if (
       !recoveryMarkerIdentity.isFile() ||
       recoveryMarkerIdentity.nlink !== 1n ||
-      recoveryMarkerIdentity.size > 4096n ||
+      recoveryMarkerIdentity.size > BigInt(MAX_AGENT_ADAPTER_RECOVERY_MARKER_BYTES) ||
       recoveryMarkerIdentity.dev !== original.dev
     ) {
       throw new Error("generated agent adapter recovery marker is unsafe");
