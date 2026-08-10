@@ -31,8 +31,10 @@ import {
 import { projectCanonicalFinalReport } from "../src/final-report-markdown.js";
 import { WORKFLOW_CONTROL_INTEGRITY_SCHEMA_VERSION } from "../src/runtime-contracts.js";
 import {
+  assertVerifiedRunOutputAuthorityRemainedCurrent,
   loadVerifiedFinalReportSnapshot,
   loadVerifiedNodeOutputSnapshot,
+  loadVerifiedRunOutputAuthoritySnapshot,
   loadVerifiedRunOutputSnapshots,
   VerifiedOutputError
 } from "../src/verified-output.js";
@@ -129,6 +131,59 @@ test("run-wide publication capture fails closed for reused outputs without curre
       error.code === "VERIFIED_OUTPUT_AUTHORITY_INVALID" &&
       /reused sealed task.*no current-run.*authority/iu.test(error.message)
   );
+});
+
+test("run-wide recursive consumers reject an exact authority change after capture", () => {
+  const fixture = createVerifiedReportFixture("verified-report-run-authority-race");
+  const snapshot = loadVerifiedRunOutputAuthoritySnapshot(fixture.layout.root);
+  const stateBytes = fs.readFileSync(fixture.layout.statePath);
+
+  fs.appendFileSync(fixture.layout.statePath, "\n", "utf8");
+
+  assert.throws(
+    () => assertVerifiedRunOutputAuthorityRemainedCurrent(snapshot),
+    (error: unknown) =>
+      error instanceof VerifiedOutputError &&
+      error.code === "VERIFIED_OUTPUT_CHANGED" &&
+      /run output authority changed while recursive bundle inputs were being captured/iu.test(error.message)
+  );
+  assert.deepEqual(snapshot.state.bytes, stateBytes);
+  assert.deepEqual(fs.readFileSync(fixture.layout.statePath), Buffer.concat([stateBytes, Buffer.from("\n")]));
+});
+
+test("run-wide authority exposes exact graph-fingerprint and deduplicated manifest bytes", () => {
+  const fixture = createVerifiedReportFixture("verified-report-run-manifest-authority", { withPrerequisite: true });
+  const snapshot = loadVerifiedRunOutputAuthoritySnapshot(fixture.layout.root);
+  const expectedManifestPaths = [
+    path.join(fixture.layout.artifactsDir, "producer", "artifact-manifest.json"),
+    path.join(fixture.layout.artifactsDir, fixture.attemptId, "artifact-manifest.json")
+  ].sort();
+
+  assert.equal(snapshot.graph_fingerprint.path, fixture.layout.graphFingerprintPath);
+  assert.deepEqual(snapshot.graph_fingerprint.bytes, fs.readFileSync(fixture.layout.graphFingerprintPath));
+  assert.deepEqual(
+    snapshot.artifact_manifests.map((manifest) => manifest.path),
+    expectedManifestPaths
+  );
+  for (const manifest of snapshot.artifact_manifests) {
+    assert.deepEqual(manifest.bytes, fs.readFileSync(manifest.path));
+  }
+  assert.equal(new Set(snapshot.artifact_manifests.map((manifest) => manifest.path)).size, 2);
+});
+
+test("run-wide authority rejects a graph fingerprint outside the sealed state/control authority", () => {
+  const fixture = createVerifiedReportFixture("verified-report-graph-fingerprint-injection");
+  const injected = Buffer.from(`${"a".repeat(64)}\n`, "utf8");
+  fs.writeFileSync(fixture.layout.graphFingerprintPath, injected);
+
+  assert.throws(
+    () => loadVerifiedRunOutputAuthoritySnapshot(fixture.layout.root),
+    (error: unknown) =>
+      error instanceof VerifiedOutputError &&
+      error.code === "VERIFIED_OUTPUT_AUTHORITY_INVALID" &&
+      /graph fingerprint.*sealed workflow control file authority/iu.test(error.message)
+  );
+  assert.deepEqual(fs.readFileSync(fixture.layout.graphFingerprintPath), injected);
 });
 
 test("post-finalization property fan-in remains readable through sealed fanout ancestor authority", () => {
@@ -306,13 +361,13 @@ test("post-finalization property fan-in remains readable through sealed fanout a
         ]
       }),
       "handoffs/canonical-properties.md": [
-        "### Canonical property: property-1",
-        "- description: Supply accounting remains consistent.",
-        "- category: accounting",
-        "- priority: high",
-        "- sources: property-specification-recon:recon-1",
-        "- ledger_ids: evidence-1",
-        "### End canonical property: property-1"
+        '### Canonical property: "property-1"',
+        'description: "Supply accounting remains consistent."',
+        'category: "accounting"',
+        'priority: "high"',
+        'sources: [{"source_node_id":"property-specification-recon","source_property_id":"recon-1"}]',
+        'ledger_ids: ["evidence-1"]',
+        '### End canonical property: "property-1"'
       ].join("\n")
     },
     lensAttemptIds
@@ -507,6 +562,36 @@ test("missing verification evidence after successful finalization is invalid aut
       error instanceof VerifiedOutputError &&
       error.code === "VERIFIED_OUTPUT_AUTHORITY_INVALID" &&
       /incomplete or unreadable/iu.test(error.message)
+  );
+});
+
+test("a report producer that claims success without controller finalization authority is invalid", () => {
+  const fixture = createVerifiedReportFixture("verified-report-success-without-finalization-authority");
+  updateNodeState(fixture.layout, fixture.attemptId, { provenance: undefined });
+
+  assert.throws(
+    () => loadVerifiedFinalReportSnapshot(fixture.layout.root),
+    (error: unknown) =>
+      error instanceof VerifiedOutputError &&
+      error.code === "VERIFIED_OUTPUT_AUTHORITY_INVALID" &&
+      /claims succeeded without complete current verification\/finalization authority/iu.test(error.message)
+  );
+});
+
+test("a genuinely pending report producer remains unavailable rather than invalid", () => {
+  const fixture = createVerifiedReportFixture("verified-report-pending-authority");
+  updateNodeState(fixture.layout, fixture.attemptId, {
+    status: "pending",
+    finished_at: undefined,
+    provenance: undefined
+  });
+
+  assert.throws(
+    () => loadVerifiedFinalReportSnapshot(fixture.layout.root),
+    (error: unknown) =>
+      error instanceof VerifiedOutputError &&
+      error.code === "VERIFIED_OUTPUT_AUTHORITY_UNAVAILABLE" &&
+      /no successful current verification\/finalization authority/iu.test(error.message)
   );
 });
 
@@ -1150,12 +1235,16 @@ function writeSealedTaskAuthority(
   };
   writeJsonDurable(tasksPath, document);
   const graphBytes = fs.readFileSync(layout.graphPath);
+  const graphFingerprintBytes = fs.readFileSync(layout.graphFingerprintPath);
   const taskBytes = fs.readFileSync(tasksPath);
   const emptyFile = { sha256: digest(Buffer.alloc(0)), size_bytes: 0 };
   const files = {
     graph: { sha256: digest(graphBytes), size_bytes: graphBytes.byteLength },
     expanded_graph: emptyFile,
-    graph_fingerprint: emptyFile,
+    graph_fingerprint: {
+      sha256: digest(graphFingerprintBytes),
+      size_bytes: graphFingerprintBytes.byteLength
+    },
     config: emptyFile,
     tasks: { sha256: digest(taskBytes), size_bytes: taskBytes.byteLength },
     input: emptyFile,
@@ -1387,12 +1476,12 @@ function createVerifiedCampaignFixture(
   finalizeNodeOutputs(layout, catalogNode, catalogId, {
     "properties.json": json(catalog),
     "properties.md": [
-      "### Canonical property: property-one",
-      "- description: Balances remain conserved.",
-      "- category: accounting",
-      "- priority: high",
-      "- sources: property-specification-manual:property-one",
-      "### End canonical property: property-one"
+      '### Canonical property: "property-one"',
+      'description: "Balances remain conserved."',
+      'category: "accounting"',
+      'priority: "high"',
+      'sources: [{"source_node_id":"property-specification-manual","source_property_id":"property-one"}]',
+      '### End canonical property: "property-one"'
     ].join("\n")
   });
   finalizeNodeOutputs(

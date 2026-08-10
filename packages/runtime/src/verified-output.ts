@@ -92,6 +92,22 @@ export interface VerifiedNodeOutputSnapshot {
   publications: readonly VerifiedOutputPublicationSnapshot[];
 }
 
+export interface VerifiedRunAuthorityFileSnapshot {
+  path: string;
+  bytes: Buffer;
+}
+
+export interface VerifiedRunOutputAuthoritySnapshot {
+  run_root: string;
+  outputs: readonly VerifiedNodeOutputSnapshot[];
+  state: VerifiedRunAuthorityFileSnapshot;
+  graph: VerifiedRunAuthorityFileSnapshot;
+  graph_fingerprint: VerifiedRunAuthorityFileSnapshot;
+  workflow_tasks: VerifiedRunAuthorityFileSnapshot;
+  workflow_control_seal: VerifiedRunAuthorityFileSnapshot;
+  artifact_manifests: readonly VerifiedRunAuthorityFileSnapshot[];
+}
+
 export interface VerifiedFinalReportSnapshot {
   authority: VerifiedNodeOutputSnapshot;
   artifacts: {
@@ -150,6 +166,10 @@ interface SealedAttemptGateAuthority {
  * artifact, marker, manifest, or state document is repaired or rewritten.
  */
 export function loadVerifiedNodeOutputSnapshot(input: LoadVerifiedNodeOutputInput): VerifiedNodeOutputSnapshot {
+  return loadVerifiedNodeOutputAuthority(input).snapshot;
+}
+
+function loadVerifiedNodeOutputAuthority(input: LoadVerifiedNodeOutputInput): FinalizedNodeOutputAuthority {
   const authority = loadFinalizedNodeOutputAuthority(input);
   const sealedAttempt = authority.sealedAttempt;
   const gate = verifyRequiredArtifactsForAttempt(
@@ -181,7 +201,7 @@ export function loadVerifiedNodeOutputSnapshot(input: LoadVerifiedNodeOutputInpu
     );
   }
   assertFinalizedAuthorityRemainedCurrent(authority);
-  return authority.snapshot;
+  return authority;
 }
 
 /**
@@ -192,14 +212,33 @@ export function loadVerifiedNodeOutputSnapshot(input: LoadVerifiedNodeOutputInpu
  * publication bytes returned here.
  */
 export function loadVerifiedRunOutputSnapshots(runRoot: string): readonly VerifiedNodeOutputSnapshot[] {
+  return loadVerifiedRunOutputAuthoritySnapshot(runRoot).outputs;
+}
+
+/**
+ * Capture the exact run/control documents that authorize a run-wide output
+ * snapshot. Recursive consumers must recheck this snapshot after collecting
+ * files so a task cannot finalize into the middle of their capture.
+ */
+export function loadVerifiedRunOutputAuthoritySnapshot(runRoot: string): VerifiedRunOutputAuthoritySnapshot {
   const root = path.resolve(runRoot);
   assertNoSymlinkComponents(root, root, "run root");
   const layout = layoutForRunRoot(root);
   const state = readRunState(layout);
+  const stateContents = readAuthoritySnapshot(layout.root, layout.statePath, "run state");
+  if (!isDeepStrictEqual(readRunState(layout), state)) {
+    throw changedOutput("run-state finalization authority changed while its exact bytes were being captured");
+  }
   const graph = readPlannedGraphDocument(layout.graphPath);
+  const graphContents = readAuthoritySnapshot(layout.root, layout.graphPath, "planned graph");
+  if (!isDeepStrictEqual(readPlannedGraphDocument(layout.graphPath), graph)) {
+    throw changedOutput("planned graph changed while its exact bytes were being captured");
+  }
   assertRunAuthorityIdentity(layout, state);
   const sealedTaskManifest = readCurrentSealedTaskManifest(layout, graph);
+  const graphFingerprintContents = readAuthenticatedGraphFingerprintSnapshot(layout, state, sealedTaskManifest);
   const snapshots: VerifiedNodeOutputSnapshot[] = [];
+  const artifactManifests = new Map<string, Buffer>();
 
   for (const task of sealedTaskManifest.document.tasks) {
     const nodeState = state.nodes[task.attemptId];
@@ -215,19 +254,40 @@ export function loadVerifiedRunOutputSnapshots(runRoot: string): readonly Verifi
     if (!hasSuccessfulFinalizationAuthority(nodeState)) {
       throw invalidAuthority(`successful sealed task ${task.attemptId} lacks current finalization authority`);
     }
-    snapshots.push(
-      loadVerifiedNodeOutputSnapshot({
-        runRoot: root,
-        logicalNodeId: task.logicalNodeId,
-        attemptId: task.attemptId
-      })
+    const authority = loadVerifiedNodeOutputAuthority({
+      runRoot: root,
+      logicalNodeId: task.logicalNodeId,
+      attemptId: task.attemptId
+    });
+    snapshots.push(authority.snapshot);
+    captureUniqueAuthorityFile(
+      artifactManifests,
+      layout.artifactsDir,
+      safeResolveInside(authority.artifactDir, ARTIFACT_MANIFEST_FILE, "artifact manifest path"),
+      authority.documents.manifestBytes,
+      "artifact manifest"
     );
+    for (const [manifestPath, manifestBytes] of authority.prerequisiteManifests) {
+      captureUniqueAuthorityFile(
+        artifactManifests,
+        layout.artifactsDir,
+        manifestPath,
+        manifestBytes,
+        "prerequisite artifact manifest"
+      );
+    }
   }
 
-  if (!isDeepStrictEqual(readRunState(layout), state)) {
+  if (
+    !readAuthoritySnapshot(layout.root, layout.statePath, "run state").equals(stateContents) ||
+    !isDeepStrictEqual(readRunState(layout), state)
+  ) {
     throw changedOutput("run-state finalization authority changed while run outputs were being read");
   }
-  if (!isDeepStrictEqual(readPlannedGraphDocument(layout.graphPath), graph)) {
+  if (
+    !readAuthoritySnapshot(layout.root, layout.graphPath, "planned graph").equals(graphContents) ||
+    !isDeepStrictEqual(readPlannedGraphDocument(layout.graphPath), graph)
+  ) {
     throw changedOutput("planned graph changed while run outputs were being read");
   }
   if (
@@ -240,7 +300,38 @@ export function loadVerifiedRunOutputSnapshots(runRoot: string): readonly Verifi
   ) {
     throw changedOutput("sealed Smithers task authority changed while run outputs were being read");
   }
-  return Object.freeze(snapshots);
+  if (
+    !readAuthoritySnapshot(layout.root, layout.graphFingerprintPath, "run graph fingerprint").equals(
+      graphFingerprintContents
+    )
+  ) {
+    throw changedOutput("run graph fingerprint changed while run outputs were being read");
+  }
+  return Object.freeze({
+    run_root: root,
+    outputs: Object.freeze(snapshots),
+    state: authorityFileSnapshot(layout.statePath, stateContents),
+    graph: authorityFileSnapshot(layout.graphPath, graphContents),
+    graph_fingerprint: authorityFileSnapshot(layout.graphFingerprintPath, graphFingerprintContents),
+    workflow_tasks: authorityFileSnapshot(sealedTaskManifest.tasksPath, sealedTaskManifest.contents),
+    workflow_control_seal: authorityFileSnapshot(
+      sealedTaskManifest.integrityPath,
+      sealedTaskManifest.integrityContents
+    ),
+    artifact_manifests: Object.freeze(
+      [...artifactManifests]
+        .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+        .map(([manifestPath, manifestBytes]) => authorityFileSnapshot(manifestPath, manifestBytes))
+    )
+  });
+}
+
+/** Re-authenticate a run-wide snapshot after a recursive consumer finishes reading. */
+export function assertVerifiedRunOutputAuthorityRemainedCurrent(snapshot: VerifiedRunOutputAuthoritySnapshot): void {
+  const current = loadVerifiedRunOutputAuthoritySnapshot(snapshot.run_root);
+  if (!isDeepStrictEqual(current, snapshot)) {
+    throw changedOutput("run output authority changed while recursive bundle inputs were being captured");
+  }
 }
 
 /**
@@ -529,6 +620,73 @@ function readCurrentSealedTaskManifest(
   return snapshot;
 }
 
+function readAuthenticatedGraphFingerprintSnapshot(
+  layout: RunLayout,
+  state: RunState,
+  sealedTaskManifest: VerifiedSealedTaskManifestSnapshot
+): Buffer {
+  const contents = readAuthoritySnapshot(layout.root, layout.graphFingerprintPath, "run graph fingerprint");
+  let sealValue: unknown;
+  try {
+    sealValue = parseStrictJsonBytes(sealedTaskManifest.integrityContents);
+  } catch (error) {
+    throw invalidAuthority(
+      "workflow control seal is not strict JSON while authenticating the graph fingerprint",
+      error
+    );
+  }
+  const files = isRecord(sealValue) ? sealValue.files : undefined;
+  const graphFingerprintSeal = isRecord(files) ? files.graph_fingerprint : undefined;
+  const bindings = isRecord(sealValue) ? sealValue.bindings : undefined;
+  const expectedDigest = isRecord(graphFingerprintSeal) ? graphFingerprintSeal.sha256 : undefined;
+  const expectedSize = isRecord(graphFingerprintSeal) ? graphFingerprintSeal.size_bytes : undefined;
+  const boundFingerprint = isRecord(bindings) ? bindings.graph_fingerprint : undefined;
+  if (
+    typeof expectedDigest !== "string" ||
+    !/^[0-9a-f]{64}$/u.test(expectedDigest) ||
+    typeof expectedSize !== "number" ||
+    !Number.isSafeInteger(expectedSize) ||
+    expectedSize < 0 ||
+    typeof boundFingerprint !== "string" ||
+    !/^[0-9a-f]{64}$/u.test(boundFingerprint)
+  ) {
+    throw invalidAuthority("workflow control graph fingerprint authority is invalid");
+  }
+  if (sha256Bytes(contents) !== expectedDigest || contents.byteLength !== expectedSize) {
+    throw invalidAuthority("run graph fingerprint does not match the sealed workflow control file authority");
+  }
+  let decoded: string;
+  try {
+    decoded = new TextDecoder("utf-8", { fatal: true }).decode(contents);
+  } catch (error) {
+    throw invalidAuthority("run graph fingerprint is not valid UTF-8", error);
+  }
+  if (decoded.trim() !== state.graph_fingerprint || boundFingerprint !== state.graph_fingerprint) {
+    throw invalidAuthority("run graph fingerprint does not match current state/control authority");
+  }
+  return Buffer.from(contents);
+}
+
+function captureUniqueAuthorityFile(
+  snapshots: Map<string, Buffer>,
+  authorityRoot: string,
+  filePath: string,
+  bytes: Uint8Array,
+  label: string
+): void {
+  const absolutePath = path.resolve(filePath);
+  assertPathInside(path.resolve(authorityRoot), absolutePath, label);
+  const immutableBytes = Buffer.from(bytes);
+  const previous = snapshots.get(absolutePath);
+  if (previous !== undefined) {
+    if (!previous.equals(immutableBytes)) {
+      throw changedOutput(`${label} produced conflicting immutable snapshots for ${absolutePath}`);
+    }
+    return;
+  }
+  snapshots.set(absolutePath, immutableBytes);
+}
+
 function assertSealedAttemptGateAuthorityRemainedCurrent(layout: RunLayout, sealed: SealedAttemptGateAuthority): void {
   if (
     !readAuthoritySnapshot(layout.root, sealed.snapshot.tasksPath, "workflow task manifest").equals(
@@ -597,11 +755,21 @@ function declaredFinalReportProducer(runRoot: string): { attemptId: string; logi
   const state = readRunState(layout);
   assertRunAuthorityIdentity(layout, state);
   const taskManifest = readCurrentSealedTaskManifest(layout, graph);
-  const finalizedAttempts = taskManifest.document.tasks.filter((task) => {
+  const producerAttempts = taskManifest.document.tasks.filter((task) => task.concreteNodeId === producer.id);
+  const invalidSucceededAttempts = producerAttempts.filter((task) => {
     const nodeState = state.nodes[task.attemptId];
-    return (
-      task.concreteNodeId === producer.id && nodeState !== undefined && hasSuccessfulFinalizationAuthority(nodeState)
+    return nodeState?.status === "succeeded" && !hasSuccessfulFinalizationAuthority(nodeState);
+  });
+  if (invalidSucceededAttempts.length > 0) {
+    throw invalidAuthority(
+      `report producer ${producer.id} claims succeeded without complete current verification/finalization authority: ${invalidSucceededAttempts
+        .map((task) => task.attemptId)
+        .join(", ")}`
     );
+  }
+  const finalizedAttempts = producerAttempts.filter((task) => {
+    const nodeState = state.nodes[task.attemptId];
+    return nodeState !== undefined && hasSuccessfulFinalizationAuthority(nodeState);
   });
   if (finalizedAttempts.length === 0) {
     throw unavailableAuthority(
@@ -998,6 +1166,10 @@ function requiredContractOutput(
 function readAuthoritySnapshot(root: string, filePath: string, label: string): Buffer {
   assertRegularFileInside(root, filePath, label);
   return readRegularFileSnapshot(filePath, MAX_AUTHORITY_DOCUMENT_BYTES);
+}
+
+function authorityFileSnapshot(pathname: string, bytes: Uint8Array): VerifiedRunAuthorityFileSnapshot {
+  return Object.freeze({ path: pathname, bytes: Buffer.from(bytes) });
 }
 
 function readPublicationSnapshot(root: string, filePath: string, relativePath: string): Buffer {

@@ -14,17 +14,18 @@ import {
   layoutForRunRoot,
   parseStrictJsonBytes,
   readRegularFileSnapshot,
-  readRunState,
   validateStrictJsonlHistory,
   type EventRecord,
   type StrictJsonlCodec,
   validateSafeId
 } from "@ultrafuzz/artifacts";
 import {
-  loadVerifiedRunOutputSnapshots,
+  assertVerifiedRunOutputAuthorityRemainedCurrent,
+  isVerifiedOutputAuthorityUnavailable,
+  loadVerifiedRunOutputAuthoritySnapshot,
   runsRootForProject,
   type RuntimeDiagnostic,
-  type VerifiedNodeOutputSnapshot
+  type VerifiedRunOutputAuthoritySnapshot
 } from "@ultrafuzz/runtime";
 import AdmZip from "adm-zip";
 
@@ -123,14 +124,13 @@ export default class ReportBundle extends Command {
 
       const diagnostics: RuntimeDiagnostic[] = [];
       assertCurrentBundleAuthorityPresent(layout.root);
-      const validatedReport = hasFinalReportJson(layout.root, layout.artifactsDir)
-        ? loadValidatedReportSnapshot(layout.root)
-        : undefined;
-      const verifiedRunOutputs = loadVerifiedRunOutputSnapshots(layout.root);
+      const verifiedRunAuthority = loadVerifiedRunOutputAuthoritySnapshot(layout.root);
+      const validatedReport = loadDeclaredValidatedReportSnapshot(layout.root);
       const eventJournal = loadValidatedEventJournalSnapshot(layout.root, layout.eventsPath, runId);
       const files = collectBundleFiles(layout.root, diagnostics, eventJournal);
-      assertVerifiedPublicationBundleSnapshots(files, verifiedRunOutputs);
+      assertVerifiedRunAuthorityBundleSnapshots(files, verifiedRunAuthority);
       if (validatedReport !== undefined) assertValidatedReportBundleSnapshot(files, validatedReport);
+      assertVerifiedRunOutputAuthorityRemainedCurrent(verifiedRunAuthority);
       if (files.length === 0) {
         throw new Error("run has no report bundle artifacts to package");
       }
@@ -221,19 +221,33 @@ function assertCurrentBundleAuthorityPresent(runRoot: string): void {
   }
 }
 
-function assertVerifiedPublicationBundleSnapshots(
+function loadDeclaredValidatedReportSnapshot(runRoot: string): ValidatedReportSnapshot | undefined {
+  try {
+    return loadValidatedReportSnapshot(runRoot);
+  } catch (error) {
+    if (isVerifiedOutputAuthorityUnavailable(error)) return undefined;
+    throw error;
+  }
+}
+
+function assertVerifiedRunAuthorityBundleSnapshots(
   files: readonly BundleFile[],
-  snapshots: readonly VerifiedNodeOutputSnapshot[]
+  authority: VerifiedRunOutputAuthoritySnapshot
 ): void {
   const capturedByPath = new Map<string, BundleFile>();
+  const capturedArchivePaths = new Set<string>();
   for (const file of files) {
     const absolutePath = path.resolve(file.absolutePath);
     if (capturedByPath.has(absolutePath)) {
       throw new Error(`report bundle captured the same physical file more than once: ${absolutePath}`);
     }
+    if (capturedArchivePaths.has(file.archivePath)) {
+      throw new Error(`report bundle captured the same archive path more than once: ${file.archivePath}`);
+    }
     capturedByPath.set(absolutePath, file);
+    capturedArchivePaths.add(file.archivePath);
   }
-  for (const snapshot of snapshots) {
+  for (const snapshot of authority.outputs) {
     for (const publication of snapshot.publications) {
       const captured = capturedByPath.get(path.resolve(publication.absolute_path));
       if (captured === undefined || !captured.contents.equals(publication.bytes)) {
@@ -241,6 +255,20 @@ function assertVerifiedPublicationBundleSnapshots(
           `verified publication changed before its immutable bundle snapshot was captured: ${publication.absolute_path}`
         );
       }
+    }
+  }
+  for (const document of [authority.state, authority.graph, authority.graph_fingerprint]) {
+    const captured = capturedByPath.get(path.resolve(document.path));
+    if (captured === undefined || !captured.contents.equals(document.bytes)) {
+      throw new Error(`run authority changed before its immutable bundle snapshot was captured: ${document.path}`);
+    }
+  }
+  for (const manifest of authority.artifact_manifests) {
+    const captured = capturedByPath.get(path.resolve(manifest.path));
+    if (captured === undefined || !captured.contents.equals(manifest.bytes)) {
+      throw new Error(
+        `artifact manifest authority changed before its immutable bundle snapshot was captured: ${manifest.path}`
+      );
     }
   }
 }
@@ -257,35 +285,6 @@ function assertOutputIsOutsideRun(runRoot: string, outputPath: string): void {
   if (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))) {
     throw new Error("output ZIP must be outside the run root to avoid self-including bundles");
   }
-}
-
-function hasFinalReportJson(runRoot: string, artifactsDirectory: string): boolean {
-  if (!fs.existsSync(artifactsDirectory)) {
-    return false;
-  }
-  assertPathInside(runRoot, artifactsDirectory, "report artifacts directory");
-  assertNoSymlinkComponents(runRoot, artifactsDirectory, "report artifacts directory");
-
-  const nodeIds = new Set(["final-report"]);
-  const statePath = path.join(runRoot, "state.json");
-  if (fs.existsSync(statePath)) {
-    assertRegularFileInside(runRoot, statePath, "run state path");
-    const state = readRunState(layoutForRunRoot(runRoot));
-    for (const [nodeId, nodeState] of Object.entries(state.nodes)) {
-      if (nodeState.logical_node_id === "final-report") {
-        nodeIds.add(validateSafeId(nodeId, "final report node ID"));
-      }
-    }
-  }
-  for (const nodeId of nodeIds) {
-    const reportJsonPath = path.join(artifactsDirectory, nodeId, "report.json");
-    if (lstatIfPresent(reportJsonPath) === undefined) {
-      continue;
-    }
-    assertRegularFileInside(runRoot, reportJsonPath, "report JSON path");
-    return true;
-  }
-  return false;
 }
 
 function loadValidatedEventJournalSnapshot(

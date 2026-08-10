@@ -305,6 +305,38 @@ nodes:
   );
 }
 
+function writeCustomReportTopology(project: string): void {
+  fs.writeFileSync(
+    path.join(project, ".ultrafuzz", "topology.yml"),
+    `version: 2
+defaults:
+  strategy_loops: 1
+nodes:
+  - id: __start__
+    kind: meta
+    role: start
+    depends_on: []
+  - id: audit-delivery
+    kind: agentic
+    prompt: setup/project-discovery.md
+    depends_on:
+      - __start__
+    outputs:
+      - path: deliverables/current-audit.md
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
+      - path: deliverables/current-audit.json
+        contract: ultrafuzz/report@2
+  - id: __finish__
+    kind: meta
+    role: finish
+    depends_on:
+      - audit-delivery
+`,
+    "utf8"
+  );
+}
+
 function writeByteIdentityTopology(project: string): void {
   fs.writeFileSync(
     path.join(project, ".ultrafuzz", "topology.yml"),
@@ -381,6 +413,44 @@ async function cli(
     }
   });
   return { stdout, stderr, code };
+}
+
+async function withInjectedBundleCollectionRead<T>(
+  targetPath: string,
+  injectedBytes: Buffer,
+  operation: () => Promise<T>
+): Promise<T> {
+  const injectionRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-bundle-read-injection-"));
+  const injectionPath = path.join(injectionRoot, "injected-bytes");
+  fs.writeFileSync(injectionPath, injectedBytes);
+  const target = path.resolve(targetPath);
+  const originalOpenSync = fs.openSync;
+  const mutableFs = fs as { openSync: typeof fs.openSync };
+  let injected = false;
+  // The CLI suite runs with --test-concurrency=1; keep this global read shim
+  // scoped to one awaited command and restore it before deleting its fixture.
+  mutableFs.openSync = ((...args: unknown[]) => {
+    const candidate = args[0];
+    if (
+      !injected &&
+      typeof candidate === "string" &&
+      path.resolve(candidate) === target &&
+      new Error().stack?.includes("addBundleFile") === true
+    ) {
+      injected = true;
+      return Reflect.apply(originalOpenSync, fs, [injectionPath, ...args.slice(1)]);
+    }
+    return Reflect.apply(originalOpenSync, fs, args);
+  }) as typeof fs.openSync;
+  try {
+    const result = await operation();
+    assert.equal(injected, true, `bundle collection did not read ${target}`);
+    return result;
+  } finally {
+    mutableFs.openSync = originalOpenSync;
+    fs.unlinkSync(injectionPath);
+    fs.rmdirSync(injectionRoot);
+  }
 }
 
 function parseJson(capture: Capture): Record<string, unknown> {
@@ -1029,6 +1099,7 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
       }
     ]
   });
+  writeVerifierNodeAuthority(runData.run_root, "project-discovery");
 
   const reportDir = writeFinalReportAccounting(runData.run_root, {
     tokensUsed: "123",
@@ -1852,6 +1923,14 @@ test("report bundle creates a portable ZIP without workspaces", async () => {
   );
   assert.equal(entries.includes("run.json"), true);
   assert.equal(entries.includes("state.json"), true);
+  assert.deepEqual(
+    zip.readFile("graph.fingerprint"),
+    fs.readFileSync(path.join(runData.run_root, "graph.fingerprint"))
+  );
+  assert.deepEqual(
+    zip.readFile("artifacts/project-discovery/artifact-manifest.json"),
+    fs.readFileSync(path.join(artifactDir, "artifact-manifest.json"))
+  );
   assert.equal(
     entries.some((entry) => entry.startsWith("workspaces/")),
     false
@@ -1954,6 +2033,130 @@ test("report bundle rejects a changed authenticated publication from any finaliz
   assert.equal(bundled.code, 1, bundled.stderr);
   assert.match(JSON.stringify(parseJson(bundled).diagnostics), /verified publication.*changed/iu);
   assert.deepEqual(fs.readFileSync(supportPublication), changedBytes);
+  assert.equal(
+    fs.existsSync(path.join(project, ".ultrafuzz", "bundles", `${runData.run_id}-report-bundle.zip`)),
+    false
+  );
+});
+
+test("report bundle rejects manifest bytes injected only into the recursive archive read", async () => {
+  const project = tempProject();
+  const runData = await createReportRun(project, "report-bundle-manifest-read-injection");
+  const artifactDir = path.join(runData.run_root, "artifacts", "project-discovery");
+  fs.writeFileSync(path.join(artifactDir, "stdout.txt"), "generated stdout\n", "utf8");
+  sealVerifiedNodeOutputs(runData.run_root, "project-discovery");
+  const manifestPath = path.join(artifactDir, "artifact-manifest.json");
+  const manifestBytes = fs.readFileSync(manifestPath);
+
+  const bundled = await withInjectedBundleCollectionRead(
+    manifestPath,
+    Buffer.alloc(manifestBytes.byteLength, 0x78),
+    () => cli(project, ["report", "bundle", runData.run_id, "--json"])
+  );
+
+  assert.equal(bundled.code, 1, bundled.stderr);
+  assert.match(JSON.stringify(parseJson(bundled).diagnostics), /artifact manifest authority changed/iu);
+  assert.deepEqual(fs.readFileSync(manifestPath), manifestBytes);
+  assert.equal(
+    fs.existsSync(path.join(project, ".ultrafuzz", "bundles", `${runData.run_id}-report-bundle.zip`)),
+    false
+  );
+});
+
+test("report bundle rejects graph-fingerprint bytes injected only into the archive read", async () => {
+  const project = tempProject();
+  const runData = await createReportRun(project, "report-bundle-fingerprint-read-injection");
+  const artifactDir = path.join(runData.run_root, "artifacts", "project-discovery");
+  fs.writeFileSync(path.join(artifactDir, "stdout.txt"), "generated stdout\n", "utf8");
+  sealVerifiedNodeOutputs(runData.run_root, "project-discovery");
+  const fingerprintPath = path.join(runData.run_root, "graph.fingerprint");
+  const fingerprintBytes = fs.readFileSync(fingerprintPath);
+
+  const bundled = await withInjectedBundleCollectionRead(
+    fingerprintPath,
+    Buffer.alloc(fingerprintBytes.byteLength, 0x61),
+    () => cli(project, ["report", "bundle", runData.run_id, "--json"])
+  );
+
+  assert.equal(bundled.code, 1, bundled.stderr);
+  assert.match(JSON.stringify(parseJson(bundled).diagnostics), /run authority changed/iu);
+  assert.deepEqual(fs.readFileSync(fingerprintPath), fingerprintBytes);
+  assert.equal(
+    fs.existsSync(path.join(project, ".ultrafuzz", "bundles", `${runData.run_id}-report-bundle.zip`)),
+    false
+  );
+});
+
+test("report bundle rejects a persistently tampered sealed graph fingerprint before writing a ZIP", async () => {
+  const project = tempProject();
+  const runData = await createReportRun(project, "report-bundle-fingerprint-persistent-tamper");
+  const fingerprintPath = path.join(runData.run_root, "graph.fingerprint");
+  const tamperedBytes = Buffer.from(`${"a".repeat(64)}\n`, "utf8");
+  fs.writeFileSync(fingerprintPath, tamperedBytes);
+
+  const bundled = await cli(project, ["report", "bundle", runData.run_id, "--json"]);
+
+  assert.equal(bundled.code, 1, bundled.stderr);
+  assert.match(JSON.stringify(parseJson(bundled).diagnostics), /graph fingerprint.*sealed workflow control/iu);
+  assert.deepEqual(fs.readFileSync(fingerprintPath), tamperedBytes);
+  assert.equal(
+    fs.existsSync(path.join(project, ".ultrafuzz", "bundles", `${runData.run_id}-report-bundle.zip`)),
+    false
+  );
+});
+
+test("report bundle rejects a declared report producer that claims success without finalization authority", async () => {
+  const project = tempProject();
+  const runData = await createReportRun(project, "report-bundle-invalid-success-claim");
+  const layout = layoutForRunRoot(runData.run_root, runData.run_id);
+  updateNodeState(layout, "final-report", {
+    status: "succeeded",
+    finished_at: new Date().toISOString(),
+    wait_since: undefined,
+    wait_reason: undefined,
+    next_eligible_action: undefined,
+    provenance: undefined
+  });
+
+  const bundled = await cli(project, ["report", "bundle", runData.run_id, "--json"]);
+
+  assert.equal(bundled.code, 1, bundled.stderr);
+  assert.match(JSON.stringify(parseJson(bundled).diagnostics), /lacks current finalization authority/iu);
+  assert.equal(
+    fs.existsSync(path.join(project, ".ultrafuzz", "bundles", `${runData.run_id}-report-bundle.zip`)),
+    false
+  );
+});
+
+test("report bundle applies canonical report-pair validation to custom declarations", async () => {
+  const project = tempProject();
+  assert.equal((await cli(project, ["init", "--force"])).code, 0);
+  writeCustomReportTopology(project);
+  const run = await cli(
+    project,
+    ["run", "--run-id", "report-bundle-custom-declaration", "--json"],
+    fakeSmithersEnv(project)
+  );
+  assert.equal(run.code, 0, `${run.stderr}\n${run.stdout}`);
+  const runData = parseJson(run).data as { run_id: string; run_root: string };
+  const reportDir = path.join(runData.run_root, "artifacts", "audit-delivery", "deliverables");
+  fs.mkdirSync(reportDir, { recursive: true });
+  const projection = projectCanonicalFinalReport(
+    currentReport(runData.run_id, [], {
+      tokens_used: "123",
+      estimated_spend: "$0.46",
+      partial_pricing: false,
+      source_run_ids: []
+    })
+  );
+  writeJsonRecord(path.join(reportDir, "current-audit.json"), projection.report);
+  fs.writeFileSync(path.join(reportDir, "current-audit.md"), `${projection.markdown}\n<!-- drift -->\n`, "utf8");
+  sealVerifiedNodeOutputs(runData.run_root, "audit-delivery");
+
+  const bundled = await cli(project, ["report", "bundle", runData.run_id, "--json"]);
+
+  assert.equal(bundled.code, 1, `${bundled.stderr}\n${bundled.stdout}`);
+  assert.match(JSON.stringify(parseJson(bundled).diagnostics), /canonical projection/iu);
   assert.equal(
     fs.existsSync(path.join(project, ".ultrafuzz", "bundles", `${runData.run_id}-report-bundle.zip`)),
     false

@@ -18,7 +18,9 @@ jobs:
       ULTRAFUZZ_CODEX_REAL_DRY_RUN: "0"
       ULTRAFUZZ_RELEASE_DASHBOARD: "0"
       ULTRAFUZZ_RELEASE_REFERENCES: "0"
-    timeout-minutes: 30
+    # The exhaustive release gate now covers the complete strict-contract,
+    # host/CLI parity, and publication suites and no longer fits 30 minutes.
+    timeout-minutes: 90
 
     steps:
       - name: Check out repository
