@@ -358,6 +358,40 @@ describe("runner", () => {
     expect(launchedRunIds.every((runId) => /^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(runId))).toBe(true);
   });
 
+  it("hands every launched row the caller's Ultrafuzz CLI entrypoint", async () => {
+    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-runner-trusted-cli-"));
+    const suite = testSuite(path.join(base, "gt"));
+    const row = testRow(suite);
+    const entrypoints: (string | undefined)[] = [];
+    const launcher = async (input: { ultrafuzzCliEntrypoint?: string }) => {
+      entrypoints.push(input.ultrafuzzCliEntrypoint);
+      return { ok: false, workflowIds: [], diagnostics: [] };
+    };
+    const cliEntrypoint = path.join(base, "cli", "index.js");
+
+    await launchEvalRow({
+      projectRoot: base,
+      suitePath: "suite.yml",
+      evalRunId: "eval-trusted-cli",
+      row,
+      suite,
+      ultrafuzzCliEntrypoint: cliEntrypoint,
+      launcher
+    });
+    // A schema-backed topology refuses to submit without it, so an omitted
+    // entrypoint must stay omitted rather than become a guessed path.
+    await launchEvalRow({
+      projectRoot: base,
+      suitePath: "suite.yml",
+      evalRunId: "eval-trusted-cli",
+      row,
+      suite,
+      launcher
+    });
+
+    expect(entrypoints).toEqual([cliEntrypoint, undefined]);
+  });
+
   it("records failed launches in runs.jsonl with diagnostics", async () => {
     const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-runner-"));
     const suite = testSuite(path.join(base, "gt"));

@@ -2,6 +2,7 @@ import { Command, Flags } from "@oclif/core";
 import { resolveEvalSuitePath, runEvalSuite } from "@ultrafuzz/evals";
 
 import {
+  cliEntrypoint,
   cliIo,
   commandFailure,
   emitCommandResult,
@@ -55,6 +56,7 @@ export default class EvalRun extends Command {
         ...(flags.provider !== undefined ? { provider: flags.provider } : {}),
         ...(flags["no-watch"] === true ? { watch: false } : {}),
         evalProviderConfig: evalConfig,
+        ultrafuzzCliEntrypoint: cliEntrypoint(),
         env
       });
       emitCommandResult(

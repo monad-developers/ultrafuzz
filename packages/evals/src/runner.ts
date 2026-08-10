@@ -57,6 +57,8 @@ export type RowLauncher = (input: {
   runId: string;
   suite: EvalSuiteSpec;
   env?: Record<string, string | undefined>;
+  /** Ultrafuzz CLI entrypoint the launched run gives its schema-backed producers. */
+  ultrafuzzCliEntrypoint?: string;
 }) => Promise<RowLaunchValue>;
 
 export type RowSync = (input: {
@@ -69,6 +71,12 @@ export interface RunEvalSuiteInput extends PlanEvalSuiteInput {
   evalRunId?: string;
   rowIds?: string[];
   env?: Record<string, string | undefined>;
+  /**
+   * Ultrafuzz CLI entrypoint handed to every launched run. A schema-backed
+   * topology refuses to submit without it, so the caller that owns the CLI
+   * identity must supply it rather than letting a run guess one.
+   */
+  ultrafuzzCliEntrypoint?: string;
   /** CLI `--provider` override; precedence over env and ultrafuzz.toml. */
   provider?: string;
   /** `[eval]` section of the resolved ultrafuzz.toml (provider binding + credentials env names). */
@@ -91,6 +99,7 @@ export interface LaunchEvalRowInput {
   row: EvalMatrixRow;
   suite: EvalSuiteSpec;
   env?: Record<string, string | undefined>;
+  ultrafuzzCliEntrypoint?: string;
   evalRunRoot?: string;
   appendRecord?: boolean;
   launcher?: RowLauncher;
@@ -152,6 +161,7 @@ export async function runEvalSuite(input: RunEvalSuiteInput): Promise<EvalRunVal
       row,
       suite: plan.suite,
       ...(input.env !== undefined ? { env: input.env } : {}),
+      ...(input.ultrafuzzCliEntrypoint !== undefined ? { ultrafuzzCliEntrypoint: input.ultrafuzzCliEntrypoint } : {}),
       appendRecord: true,
       ...(input.launcher !== undefined ? { launcher: input.launcher } : {}),
       ...(plan.provenance?.candidate !== undefined ? { candidateProvenance: plan.provenance.candidate } : {})
@@ -237,7 +247,8 @@ export async function launchEvalRow(input: LaunchEvalRowInput): Promise<EvalRunR
       row: input.row,
       runId,
       suite: input.suite,
-      ...(input.env !== undefined ? { env: input.env } : {})
+      ...(input.env !== undefined ? { env: input.env } : {}),
+      ...(input.ultrafuzzCliEntrypoint !== undefined ? { ultrafuzzCliEntrypoint: input.ultrafuzzCliEntrypoint } : {})
     });
   } catch (error) {
     launch = { ok: false, workflowIds: [], diagnostics: [diagnosticFromError(error, "EVAL_ROW_LAUNCH_FAILED")] };
@@ -324,6 +335,7 @@ export const runtimeRowLauncher: RowLauncher = async (input) => {
     ...(input.suite.run.max_parallel_targets !== undefined
       ? { maxConcurrency: input.suite.run.max_parallel_targets }
       : {}),
+    ...(input.ultrafuzzCliEntrypoint !== undefined ? { ultrafuzzCliEntrypoint: input.ultrafuzzCliEntrypoint } : {}),
     workflowInput: buildWorkflowInput(input.row),
     ...benchmarkTopologyTransform(input.row),
     ...benchmarkModelProfileOverrides(input.row, runnerProfile),
