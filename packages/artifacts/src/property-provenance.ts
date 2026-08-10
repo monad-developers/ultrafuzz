@@ -559,13 +559,7 @@ function validateRegisteredPropertySchema<T>(
   const parity = validateWithZod(zodSchema, value, options);
   if (!parity.ok) {
     throw new Error(
-      schemaErrorMessage(
-        "registered JSON Schema/Zod parity",
-        parity.issues.map((issue) => ({
-          ...issue,
-          message: `registered schema and retained Zod parser disagree: ${issue.message}`
-        }))
-      )
+      `internal schema parity invariant violated: registered JSON Schema ${schemaId} accepted a document rejected by its retained Zod parser`
     );
   }
   return { ok: true, issues: [], value: value as T };

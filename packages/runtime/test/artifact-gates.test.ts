@@ -41,16 +41,26 @@ function tempProject(): string {
  * keep the state index in sync instead of relying on the removed historical
  * artifact-directory fallback.
  */
-function registerArtifactNode(layout: ReturnType<typeof createRunLayout>, nodeId: string): void {
+function registerArtifactNode(
+  layout: ReturnType<typeof createRunLayout>,
+  nodeId: string,
+  outputs: readonly PlannedGraphNode["outputs"][number][] = []
+): void {
   const state = readRunState(layout);
-  if (state.nodes[nodeId] !== undefined) return;
-  state.nodes[nodeId] = {
+  const node = (state.nodes[nodeId] ??= {
     node_id: nodeId,
     logical_node_id: nodeId,
     status: "succeeded",
     retry_count: 0,
     timed_out: false
-  };
+  });
+  const declared = [...(node.outputs ?? [])];
+  for (const output of outputs) {
+    if (declared.some((candidate) => candidate.path === output.path && candidate.contract === output.contract))
+      continue;
+    declared.push(output);
+  }
+  if (declared.length > 0) node.outputs = declared;
   writeRunState(layout, state);
 }
 
@@ -60,7 +70,13 @@ function writeArtifact(
   artifactPath: string,
   contents: string
 ): string {
-  registerArtifactNode(layout, nodeId);
+  registerArtifactNode(
+    layout,
+    nodeId,
+    nodeId === "project-discovery" && artifactPath === "setup/invariant-evidence-ledger.json"
+      ? [boundOutput(artifactPath, "ultrafuzz/invariant-ledger@1")]
+      : []
+  );
   return writeArtifactFile(layout, nodeId, artifactPath, contents);
 }
 
@@ -70,10 +86,12 @@ function writePropertyLens(
   propertyIds: readonly string[]
 ): void {
   const lensName = logicalNodeId.replace(/^property-specification-/u, "");
+  const lensPath = `properties/${lensName}.json`;
+  registerArtifactNode(layout, logicalNodeId, [boundOutput(lensPath, "ultrafuzz/property-lens@2")]);
   writeArtifact(
     layout,
     logicalNodeId,
-    `properties/${lensName}.json`,
+    lensPath,
     JSON.stringify({
       schema_version: "ultrafuzz.property-lens.v2",
       properties: propertyIds.map((id) => ({
@@ -84,6 +102,95 @@ function writePropertyLens(
       }))
     })
   );
+}
+
+function writeDeclaredPropertyLens(
+  layout: ReturnType<typeof createRunLayout>,
+  nodeId: string,
+  artifactPath: string,
+  contents: string
+): string {
+  registerArtifactNode(layout, nodeId, [boundOutput(artifactPath, "ultrafuzz/property-lens@2")]);
+  return writeArtifact(layout, nodeId, artifactPath, contents);
+}
+
+function writeMinimalPropertyFaninFixture(
+  layout: ReturnType<typeof createRunLayout>,
+  options: {
+    sourceNodeId?: string;
+    sourcePropertyId?: string;
+    dependsOn?: readonly string[];
+    referenceExpectation?: string;
+  } = {}
+): PlannedGraphNode {
+  const sourceNodeId = options.sourceNodeId ?? "property-specification-recon";
+  const sourcePropertyId = options.sourcePropertyId ?? "recon-1";
+  writeArtifact(
+    layout,
+    "project-discovery",
+    "setup/invariant-evidence-ledger.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+      entries: [
+        {
+          id: "evidence-1",
+          source_path: "docs/overview.md",
+          source_location: "line 1",
+          kind: "invariant",
+          verbatim: "Supply accounting remains consistent.",
+          inventory_ids: ["inventory-1"]
+        }
+      ],
+      inventory_rows: [
+        { id: "inventory-1", description: "Supply accounting remains consistent.", ledger_ids: ["evidence-1"] }
+      ],
+      scan_probes: []
+    })
+  );
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.properties.v2",
+      properties: [
+        {
+          id: "property-1",
+          description: "Supply accounting remains consistent.",
+          category: "accounting",
+          priority: "high",
+          sources: [{ source_node_id: sourceNodeId, source_property_id: sourcePropertyId }],
+          ledger_ids: ["evidence-1"],
+          ...(options.referenceExpectation === undefined
+            ? {}
+            : { reference_expectations: [options.referenceExpectation] })
+        }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.md",
+    [
+      "### Canonical property: property-1",
+      "- description: Supply accounting remains consistent.",
+      "- category: accounting",
+      "- priority: high",
+      `- sources: ${sourceNodeId}:${sourcePropertyId}`,
+      "- ledger_ids: evidence-1",
+      ...(options.referenceExpectation === undefined
+        ? []
+        : [`- reference_expectations: ${options.referenceExpectation}`]),
+      "### End canonical property: property-1"
+    ].join("\n")
+  );
+  return {
+    ...plannedNode(["properties.json", "properties.md"]),
+    id: "property-specification-fanin",
+    logical_id: "property-specification-fanin",
+    depends_on: [...(options.dependsOn ?? ["property-specification-recon"])]
+  };
 }
 
 function writePlannedGraph(layout: ReturnType<typeof createRunLayout>, nodes: readonly PlannedGraphNode[]): void {
@@ -1634,7 +1741,8 @@ test("fanin gate checks scan probe containment against the discovery workspace",
   const node = {
     ...plannedNode(["properties.json", "properties.md"]),
     id: "property-specification-fanin",
-    logical_id: "property-specification-fanin"
+    logical_id: "property-specification-fanin",
+    depends_on: ["property-specification-recon"]
   };
   fs.mkdirSync(path.join(layout.workspacesDir, "project-discovery"), { recursive: true });
   const ledger = (probePath: string) =>
@@ -1743,7 +1851,8 @@ test("fanin gate requires every invariant ledger entry to map to a canonical pro
   const node = {
     ...plannedNode(["properties.json", "properties.md"]),
     id: "property-specification-fanin",
-    logical_id: "property-specification-fanin"
+    logical_id: "property-specification-fanin",
+    depends_on: ["property-specification-recon"]
   };
   const missingUpstreamLedger = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(missingUpstreamLedger.ok, false);
@@ -2216,7 +2325,8 @@ test("property fan-in gate ignores optional Markdown ledger evidence when checki
   const node = {
     ...plannedNode(["properties.json", "properties.md"]),
     id: "property-specification-fanin",
-    logical_id: "property-specification-fanin"
+    logical_id: "property-specification-fanin",
+    depends_on: ["property-specification-recon"]
   };
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
@@ -2313,7 +2423,7 @@ test("property fan-in gate preserves reference expectation metadata in Markdown"
       ]
     })
   );
-  writeArtifact(
+  writeDeclaredPropertyLens(
     layout,
     "property-specification-recon",
     "properties/recon.json",
@@ -2376,7 +2486,7 @@ test("property fan-in gate preserves reference expectation metadata in Markdown"
   const valid = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
 
-  writeArtifact(
+  writeDeclaredPropertyLens(
     layout,
     "property-specification-recon",
     "properties/recon.json",
@@ -2398,6 +2508,212 @@ test("property fan-in gate preserves reference expectation metadata in Markdown"
     droppedFromLens.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_DROPPED"),
     JSON.stringify(droppedFromLens.diagnostics)
   );
+});
+
+for (const [label, undeclaredPath] of [
+  ["conventional", "properties/recon.json"],
+  ["arbitrary sibling", "properties/other.json"]
+] as const) {
+  test(`property fan-in ignores ${label} lens JSON without a state declaration`, () => {
+    const layout = createRunLayout({
+      projectRoot: tempProject(),
+      runId: `run-undeclared-lens-${label.replaceAll(" ", "-")}`
+    });
+    const node = writeMinimalPropertyFaninFixture(layout);
+    const lensPath = writeArtifact(
+      layout,
+      "property-specification-recon",
+      undeclaredPath,
+      JSON.stringify({
+        schema_version: "ultrafuzz.property-lens.v2",
+        properties: [
+          {
+            id: "recon-1",
+            description: "Supply accounting remains consistent.",
+            category: "accounting",
+            priority: "high"
+          }
+        ]
+      })
+    );
+    const before = fs.readFileSync(lensPath);
+
+    const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+    assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+    assert.ok(
+      result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_LENS_DECLARATION_MISSING"),
+      JSON.stringify(result.diagnostics)
+    );
+    assert.deepEqual(fs.readFileSync(lensPath), before);
+  });
+}
+
+test("property fan-in consumes one exactly bound custom property-lens path", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-custom-declared-lens" });
+  const node = writeMinimalPropertyFaninFixture(layout);
+  writeDeclaredPropertyLens(
+    layout,
+    "property-specification-recon",
+    "custom/recon-lens.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v2",
+      properties: [
+        {
+          id: "recon-1",
+          description: "Supply accounting remains consistent.",
+          category: "accounting",
+          priority: "high"
+        }
+      ]
+    })
+  );
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+});
+
+test("property fan-in rejects ambiguous property-lens declarations", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-ambiguous-declared-lens" });
+  const node = writeMinimalPropertyFaninFixture(layout);
+  const lens = JSON.stringify({
+    schema_version: "ultrafuzz.property-lens.v2",
+    properties: [
+      {
+        id: "recon-1",
+        description: "Supply accounting remains consistent.",
+        category: "accounting",
+        priority: "high"
+      }
+    ]
+  });
+  registerArtifactNode(layout, "property-specification-recon", [
+    boundOutput("custom/recon-a.json", "ultrafuzz/property-lens@2"),
+    boundOutput("custom/recon-b.json", "ultrafuzz/property-lens@2")
+  ]);
+  writeArtifact(layout, "property-specification-recon", "custom/recon-a.json", lens);
+  writeArtifact(layout, "property-specification-recon", "custom/recon-b.json", lens);
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+  assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_LENS_DECLARATION_AMBIGUOUS"),
+    JSON.stringify(result.diagnostics)
+  );
+});
+
+test("property fan-in rejects a stale property-lens schema binding", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-stale-declared-lens" });
+  const node = writeMinimalPropertyFaninFixture(layout);
+  registerArtifactNode(layout, "property-specification-recon", [
+    {
+      ...boundOutput("custom/recon.json", "ultrafuzz/property-lens@2"),
+      schema_sha256: "0".repeat(64)
+    }
+  ]);
+  writeArtifact(
+    layout,
+    "property-specification-recon",
+    "custom/recon.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v2",
+      properties: [
+        {
+          id: "recon-1",
+          description: "Supply accounting remains consistent.",
+          category: "accounting",
+          priority: "high"
+        }
+      ]
+    })
+  );
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+  assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_LENS_SCHEMA_BINDING_INVALID"),
+    JSON.stringify(result.diagnostics)
+  );
+});
+
+test("an unrelated declared lens cannot satisfy a property fan-in source join", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-unrelated-declared-lens" });
+  const node = writeMinimalPropertyFaninFixture(layout, {
+    sourceNodeId: "property-specification-aviggiano",
+    sourcePropertyId: "aviggiano-1",
+    dependsOn: ["property-specification-recon"]
+  });
+  writeDeclaredPropertyLens(
+    layout,
+    "property-specification-recon",
+    "custom/recon.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v2",
+      properties: [
+        {
+          id: "recon-1",
+          description: "Supply accounting remains consistent.",
+          category: "accounting",
+          priority: "high"
+        }
+      ]
+    })
+  );
+  writeDeclaredPropertyLens(
+    layout,
+    "property-specification-aviggiano",
+    "custom/aviggiano.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v2",
+      properties: [
+        {
+          id: "aviggiano-1",
+          description: "Supply accounting remains consistent.",
+          category: "accounting",
+          priority: "high"
+        }
+      ]
+    })
+  );
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+  assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" && diagnostic.message.includes("Unknown property source")
+    ),
+    JSON.stringify(result.diagnostics)
+  );
+});
+
+test("property lens validation rejects duplicate keys without changing source bytes", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-duplicate-key-property-lens" });
+  const node = {
+    ...plannedNode(["properties/recon.json"]),
+    id: "property-specification-recon",
+    logical_id: "property-specification-recon"
+  };
+  const lensPath = writeDeclaredPropertyLens(
+    layout,
+    node.id,
+    "properties/recon.json",
+    '{"schema_version":"ultrafuzz.property-lens.v2","properties":[{"id":"recon-1","description":"Expected behavior","category":"accounting","priority":"high","priority":"low"}]}\n'
+  );
+  const before = fs.readFileSync(lensPath);
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+  assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "JSON_DUPLICATE_KEY"),
+    JSON.stringify(result.diagnostics)
+  );
+  assert.deepEqual(fs.readFileSync(lensPath), before);
 });
 
 test("property lens gate accepts a bound pinned expectation catalog without rewriting the lens", () => {
@@ -2446,7 +2762,7 @@ test("property lens gate accepts a bound pinned expectation catalog without rewr
       }
     ]
   });
-  const lensPath = writeArtifact(layout, node.id, "properties/recon.json", lens);
+  const lensPath = writeDeclaredPropertyLens(layout, node.id, "properties/recon.json", lens);
   writeArtifact(layout, "reference-properties-recon", "references/expectations.json", catalog);
   writeArtifactManifest({
     layout,
@@ -2477,7 +2793,7 @@ test("property lens gate rejects expectations when no pinned catalog was supplie
     id: "property-specification-recon",
     logical_id: "property-specification-recon"
   };
-  const lensPath = writeArtifact(
+  const lensPath = writeDeclaredPropertyLens(
     layout,
     node.id,
     "properties/recon.json",
@@ -2548,7 +2864,7 @@ test("property lens gate rejects every unauthorized catalog spelling without con
     logical_id: "property-specification-recon",
     depends_on: ["reference-properties-recon"]
   };
-  const lensPath = writeArtifact(
+  const lensPath = writeDeclaredPropertyLens(
     layout,
     node.id,
     "properties/recon.json",
@@ -2623,7 +2939,7 @@ test("property lens gate rejects a digest-bound schema-invalid expectation catal
     logical_id: "property-specification-recon",
     depends_on: ["reference-properties-recon"]
   };
-  const lensPath = writeArtifact(
+  const lensPath = writeDeclaredPropertyLens(
     layout,
     node.id,
     "properties/recon.json",
@@ -2675,7 +2991,7 @@ test("ordinary pinned references without expectation catalogs do not require cat
       }
     ]
   });
-  writeArtifact(
+  writeDeclaredPropertyLens(
     layout,
     "property-specification-recon",
     "properties/recon.json",
@@ -2705,6 +3021,68 @@ test("ordinary pinned references without expectation catalogs do not require cat
     result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_PROVENANCE_INVALID"),
     false
   );
+});
+
+test("the historical reference-expectations filename cannot authorize a property lens", () => {
+  const expectationId = "benchmark:historical:supply";
+  const catalog = JSON.stringify({
+    schema_version: "ultrafuzz.reference-expectations.v2",
+    expectations: [{ id: expectationId }]
+  });
+  const layout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-historical-expectation-path",
+    stateNodes: [
+      {
+        id: "reference-properties-recon",
+        status: "succeeded",
+        outputs: [boundOutput("references/reference-expectations.json", "ultrafuzz/reference-expectations@2")],
+        provenance: {
+          origin: "pinned-reference",
+          reference: "reference-properties-recon",
+          reference_expectations: {
+            source: "operator-supplied",
+            path: "reference-expectations.json",
+            sha256: createHash("sha256").update(catalog).digest("hex")
+          }
+        }
+      }
+    ]
+  });
+  const node = {
+    ...plannedNode(["properties/recon.json"]),
+    id: "property-specification-recon",
+    logical_id: "property-specification-recon",
+    depends_on: ["reference-properties-recon"]
+  };
+  const lensPath = writeDeclaredPropertyLens(
+    layout,
+    node.id,
+    "properties/recon.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v2",
+      properties: [
+        {
+          id: "recon-1",
+          description: "Supply accounting remains consistent.",
+          category: "accounting",
+          priority: "high",
+          reference_expectations: [expectationId]
+        }
+      ]
+    })
+  );
+  writeArtifact(layout, "reference-properties-recon", "references/reference-expectations.json", catalog);
+  const before = fs.readFileSync(lensPath);
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+  assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_CATALOG_ABSENT")
+  );
+  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED"));
+  assert.deepEqual(fs.readFileSync(lensPath), before);
 });
 
 test("property fan-in gate rejects a lens reference expectation dropped from canonical JSON", () => {
@@ -2738,7 +3116,7 @@ test("property fan-in gate rejects a lens reference expectation dropped from can
       scan_probes: []
     })
   );
-  writeArtifact(
+  writeDeclaredPropertyLens(
     layout,
     "property-specification-recon-0",
     "properties/recon.json",
@@ -2755,7 +3133,7 @@ test("property fan-in gate rejects a lens reference expectation dropped from can
       ]
     })
   );
-  writeArtifact(
+  writeDeclaredPropertyLens(
     layout,
     "property-specification-recon-1",
     "properties/recon.json",

@@ -4359,9 +4359,8 @@ function verifiedAncestorPropertyLenses(
 
     if (logicalNodeId.startsWith("property-specification-") && logicalNodeId !== "property-specification-fanin") {
       producerCount += 1;
-      if (lensOutputs.length === 0) return undefined;
-    }
-    for (const output of lensOutputs) {
+      if (lensOutputs.length !== 1) return undefined;
+      const output = lensOutputs[0]!;
       const lens = verifiedDependencyJsonArtifact(task, dependency, producer, output.path, output.contract);
       lenses.push({ sourceNodeId: logicalNodeId, document: lens.value });
     }

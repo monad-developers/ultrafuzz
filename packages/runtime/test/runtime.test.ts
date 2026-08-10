@@ -4576,11 +4576,13 @@ test("plan rejects duplicate-key expectation bytes before any schema or handoff 
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeReferenceTopology(project);
+  const sourcePath = path.join(project, "reference-expectations.json");
   fs.writeFileSync(
-    path.join(project, "reference-expectations.json"),
+    sourcePath,
     '{"schema_version":"ultrafuzz.reference-expectations.v2","expectations":[],"expectations":[]}\n',
     "utf8"
   );
+  const before = fs.readFileSync(sourcePath);
   const xdgCacheHome = path.join(project, "xdg-cache");
   writeReferenceCache(xdgCacheHome);
   const previousXdgCacheHome = process.env.XDG_CACHE_HOME;
@@ -4595,6 +4597,53 @@ test("plan rejects duplicate-key expectation bytes before any schema or handoff 
 
     assert.equal(plan.ok, false);
     assert.match(plan.diagnostics.map((diagnostic) => diagnostic.message).join("\n"), /duplicate property name/u);
+    assert.deepEqual(fs.readFileSync(sourcePath), before);
+  } finally {
+    if (previousXdgCacheHome === undefined) {
+      delete process.env.XDG_CACHE_HOME;
+    } else {
+      process.env.XDG_CACHE_HOME = previousXdgCacheHome;
+    }
+  }
+});
+
+test("plan rejects duplicate reference expectation IDs before publishing trusted handoffs", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeReferenceTopology(project);
+  const sourcePath = path.join(project, "reference-expectations.json");
+  fs.writeFileSync(
+    sourcePath,
+    JSON.stringify({
+      schema_version: "ultrafuzz.reference-expectations.v2",
+      expectations: [
+        { id: "benchmark:duplicate", description: "First spelling." },
+        { id: "benchmark:duplicate", description: "Second spelling." }
+      ]
+    }),
+    "utf8"
+  );
+  const before = fs.readFileSync(sourcePath);
+  const xdgCacheHome = path.join(project, "xdg-cache");
+  writeReferenceCache(xdgCacheHome);
+  const previousXdgCacheHome = process.env.XDG_CACHE_HOME;
+  process.env.XDG_CACHE_HOME = xdgCacheHome;
+  try {
+    const plan = await planRun({
+      projectRoot: project,
+      runId: "duplicate-reference-expectation-ids",
+      referenceExpectationsPath: "reference-expectations.json",
+      env: {}
+    });
+
+    assert.equal(plan.ok, false, JSON.stringify(plan.diagnostics));
+    assert.ok(plan.diagnostics.some((diagnostic) => diagnostic.code === "REFERENCE_EXPECTATIONS_INVALID"));
+    assert.match(
+      plan.diagnostics.map((diagnostic) => diagnostic.message).join("\n"),
+      /Duplicate reference expectation ID/u
+    );
+    assert.deepEqual(fs.readFileSync(sourcePath), before);
+    assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", "duplicate-reference-expectation-ids")), false);
   } finally {
     if (previousXdgCacheHome === undefined) {
       delete process.env.XDG_CACHE_HOME;

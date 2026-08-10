@@ -1045,6 +1045,18 @@ test("generated Smithers fails closed when a contextual gate lacks verified ance
   }
 });
 
+test("generated Smithers requires exactly one declared property lens per producer", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function verifiedAncestorPropertyLenses");
+  const helperEnd = source.indexOf("\n\nfunction workspacePatchSemanticGitContext", helperStart);
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+  const helper = source.slice(helperStart, helperEnd);
+
+  assert.match(helper, /lensOutputs\.length !== 1/u);
+  assert.doesNotMatch(helper, /for \(const output of lensOutputs\)/u);
+});
+
 test("generated severity verification authenticates the triaged finding preservation context", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function semanticGateContextForVerifiedOutput");

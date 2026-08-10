@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import {
+  artifactContractDefinition,
   artifactContractSchemaBinding,
   artifactSchemaDirectory,
   artifactSchemaRegistry,
@@ -12,6 +13,7 @@ import {
   assertRegularFileInside,
   checkInvariantSourcePinned,
   derivePropertyImplementationCoverage,
+  executeSemanticGate,
   getNodeArtifactDir,
   findingFuzzerBackendProvenance,
   invariantPinnedSourceRefExists,
@@ -51,6 +53,7 @@ import {
   type RunLayout,
   type RunState,
   type NodeProvenanceReasonCode,
+  type NodeOutputContract,
   type SemanticArtifactSetContext,
   type SemanticGateContext,
   type SemanticGitContext,
@@ -67,6 +70,7 @@ import { validateSeverityMatrixArtifact, type SeverityArtifactKind } from "./sev
 import { deriveWorkspacePatchGitFacts } from "./workspace-handoff.js";
 
 const MAX_ARTIFACT_SNAPSHOT_BYTES = 64 * 1024 * 1024;
+const PROPERTY_LENS_CONTRACT = "ultrafuzz/property-lens@2" as const;
 
 // These are semantic projections for topologies that deliberately omit the
 // corresponding producer. They are never written or published as artifacts;
@@ -222,7 +226,7 @@ export function verifyRequiredArtifactsForAttempt(
     diagnostics.push(diagnosticFromError(error, "invariant-ledger", "INVARIANT_EVIDENCE_READ_FAILED"));
   }
   try {
-    diagnostics.push(...verifyPropertyProvenanceArtifacts(layout, artifactDir, node));
+    diagnostics.push(...verifyPropertyProvenanceArtifacts(layout, artifactDir, node, attemptId));
   } catch (error) {
     diagnostics.push(diagnosticFromError(error, "property-provenance", "PROPERTY_PROVENANCE_READ_FAILED"));
   }
@@ -721,6 +725,79 @@ interface LensReferenceRow {
   index: number;
 }
 
+type DeclaredPropertyLensResolution =
+  { ok: true; output: NodeOutputContract } | { ok: false; diagnostic: RuntimeDiagnostic };
+
+function resolveStateDeclaredPropertyLens(
+  state: RunState,
+  nodeId: string,
+  source: "property-fanin" | "property-provenance"
+): DeclaredPropertyLensResolution {
+  const declarationPath = `state.nodes.${nodeId}.outputs`;
+  const outputs = (state.nodes[nodeId]?.outputs ?? []).filter((output) => output.contract === PROPERTY_LENS_CONTRACT);
+  if (outputs.length === 0) {
+    return {
+      ok: false,
+      diagnostic: {
+        code: "PROPERTY_LENS_DECLARATION_MISSING",
+        message: `State node ${JSON.stringify(nodeId)} must declare exactly one ${PROPERTY_LENS_CONTRACT} output; found none`,
+        severity: "error",
+        source,
+        path: declarationPath
+      }
+    };
+  }
+  if (outputs.length !== 1) {
+    return {
+      ok: false,
+      diagnostic: {
+        code: "PROPERTY_LENS_DECLARATION_AMBIGUOUS",
+        message: `State node ${JSON.stringify(nodeId)} must declare exactly one ${PROPERTY_LENS_CONTRACT} output; found ${outputs.length}`,
+        severity: "error",
+        source,
+        path: declarationPath,
+        details: { declared_paths: outputs.map((output) => output.path) }
+      }
+    };
+  }
+
+  const output = outputs[0]!;
+  const definition = artifactContractDefinition(PROPERTY_LENS_CONTRACT);
+  const binding = artifactContractSchemaBinding(PROPERTY_LENS_CONTRACT);
+  const bindingMatches =
+    binding !== undefined &&
+    output.contract_digest === definition.digest &&
+    output.schema_file === binding.schema_file &&
+    output.schema_id === binding.schema_id &&
+    output.schema_sha256 === binding.schema_sha256 &&
+    output.schema_bundle_sha256 === binding.schema_bundle_sha256 &&
+    output.validator_build === binding.validator_build;
+  if (!bindingMatches) {
+    return {
+      ok: false,
+      diagnostic: {
+        code: "PROPERTY_LENS_SCHEMA_BINDING_INVALID",
+        message: `State node ${JSON.stringify(nodeId)} declares ${PROPERTY_LENS_CONTRACT} without its exact registered contract and schema binding`,
+        severity: "error",
+        source,
+        path: `${declarationPath}[${state.nodes[nodeId]?.outputs?.indexOf(output) ?? 0}]`,
+        details: {
+          expected: { contract_digest: definition.digest, ...binding },
+          actual: {
+            contract_digest: output.contract_digest,
+            schema_file: output.schema_file,
+            schema_id: output.schema_id,
+            schema_sha256: output.schema_sha256,
+            schema_bundle_sha256: output.schema_bundle_sha256,
+            validator_build: output.validator_build
+          }
+        }
+      }
+    };
+  }
+  return { ok: true, output };
+}
+
 function verifyLensReferenceExpectationPreservation(
   layout: RunLayout,
   node: PlannedGraphNode,
@@ -733,26 +810,29 @@ function verifyLensReferenceExpectationPreservation(
   for (const dependencyId of node.depends_on) {
     const dependency = state.nodes[dependencyId]?.logical_node_id ?? dependencyId;
     if (!dependency.startsWith("property-specification-") || dependency === "property-specification-fanin") continue;
-    const lensName = dependency.slice("property-specification-".length);
     // Expanded graphs may give fan-in concrete dependencies such as
     // `property-specification-recon-0` and `property-specification-recon-1`.
     // Only that declared concrete dependency may satisfy the handoff.
-    const declaredLensPath = state.nodes[dependencyId]?.outputs?.find(
-      (output) => String(output.contract) === "ultrafuzz/property-lens@2"
-    )?.path;
-    const lensRelativePath = declaredLensPath ?? `properties/${lensName}.json`;
+    const declaration = resolveStateDeclaredPropertyLens(state, dependencyId, "property-fanin");
+    if (!declaration.ok) {
+      diagnostics.push(declaration.diagnostic);
+      continue;
+    }
+    const lensRelativePath = declaration.output.path;
     lensPathsByDependency.set(dependencyId, lensRelativePath);
-    const lensPath = findDependencyArtifact(layout, dependencyId, lensRelativePath);
-    if (lensPath === undefined) {
+    const dependencyDir = getNodeArtifactDir(layout, dependencyId);
+    const lensPath = safeResolveInside(dependencyDir, lensRelativePath, "declared property lens");
+    if (!fs.existsSync(lensPath)) {
       diagnostics.push({
         code: "PROPERTY_LENS_MISSING",
         message: `Property fan-in cannot verify reference expectations because lens artifact for ${JSON.stringify(dependency)} is unavailable`,
         severity: "error",
         source: "property-fanin",
-        path: `artifacts/${dependency}/${lensRelativePath}`
+        path: `artifacts/${dependencyId}/${lensRelativePath}`
       });
       continue;
     }
+    assertRegularFileInside(dependencyDir, lensPath, "declared property lens");
     const lens = validateLensPropertiesSchema(readJsonFile(lensPath), lensPath);
     if (!lens.ok || lens.value === undefined) {
       diagnostics.push(
@@ -796,7 +876,10 @@ function verifyLensReferenceExpectationPreservation(
           message: `Lens artifact for ${JSON.stringify(dependency)} is missing source property ${JSON.stringify(source.source_property_id)} carrying reference expectations`,
           severity: "error",
           source: "property-fanin",
-          path: `artifacts/${dependencyId}/${lensPathsByDependency.get(dependencyId) ?? "properties.json"}`
+          path:
+            lensPathsByDependency.get(dependencyId) === undefined
+              ? `state.nodes.${dependencyId}.outputs`
+              : `artifacts/${dependencyId}/${lensPathsByDependency.get(dependencyId)}`
         });
       }
     }
@@ -1683,7 +1766,7 @@ function semanticArtifactSetForSchema(input: {
     return propertyCatalog === undefined ? {} : { propertyCatalog };
   }
   if (input.schemaFilename === "properties.schema.json") {
-    const propertyLenses = semanticPropertyLenses(input.layout);
+    const propertyLenses = semanticPropertyLenses(input.layout, input.node);
     return propertyLenses === undefined ? {} : { propertyLenses };
   }
   if (input.schemaFilename === "severity-classified-findings.schema.json") {
@@ -1805,54 +1888,72 @@ function plannedProducerStatus(
   }
 }
 
-function semanticPropertyLenses(layout: RunLayout): SemanticPropertyLensContext[] | undefined {
+function semanticPropertyLenses(
+  layout: RunLayout,
+  consumer: PlannedGraphNode
+): SemanticPropertyLensContext[] | undefined {
   const state = readRunState(layout);
   const lenses: SemanticPropertyLensContext[] = [];
   let producerCount = 0;
+  // Discovery is the transitive root evidence authority for every property
+  // lens and fan-in, even though fan-in depends directly on the lens nodes.
   for (const [nodeId, nodeState] of Object.entries(state.nodes)) {
     const logicalId = nodeState.logical_node_id ?? nodeId;
-    if (logicalId === "project-discovery") {
-      producerCount += 1;
-      const ledgerPath = path.join(getNodeArtifactDir(layout, nodeId), "setup", "invariant-evidence-ledger.json");
-      if (!fs.existsSync(ledgerPath)) return undefined;
-      assertRegularFileInside(layout.root, ledgerPath, "invariant ledger semantic context");
-      const ledger = validateInvariantLedgerSchema(
-        readStrictContractDocument(ledgerPath, "ultrafuzz/invariant-ledger@1"),
-        ledgerPath
-      );
-      if (!ledger.ok || ledger.value === undefined) return undefined;
-      lenses.push({
-        sourceNodeId: logicalId,
-        document: { properties: ledger.value.entries.map((entry) => ({ id: entry.id })) }
-      });
-      continue;
+    if (logicalId !== "project-discovery") continue;
+    producerCount += 1;
+    const ledgerOutputs = (nodeState.outputs ?? []).filter(
+      (output) => output.contract === "ultrafuzz/invariant-ledger@1"
+    );
+    if (ledgerOutputs.length !== 1) return undefined;
+    const ledgerOutput = ledgerOutputs[0]!;
+    const ledgerDefinition = artifactContractDefinition("ultrafuzz/invariant-ledger@1");
+    const ledgerBinding = artifactContractSchemaBinding("ultrafuzz/invariant-ledger@1");
+    if (
+      ledgerBinding === undefined ||
+      ledgerOutput.contract_digest !== ledgerDefinition.digest ||
+      ledgerOutput.schema_file !== ledgerBinding.schema_file ||
+      ledgerOutput.schema_id !== ledgerBinding.schema_id ||
+      ledgerOutput.schema_sha256 !== ledgerBinding.schema_sha256 ||
+      ledgerOutput.schema_bundle_sha256 !== ledgerBinding.schema_bundle_sha256 ||
+      ledgerOutput.validator_build !== ledgerBinding.validator_build
+    ) {
+      return undefined;
     }
+    const ledgerPath = safeResolveInside(
+      getNodeArtifactDir(layout, nodeId),
+      ledgerOutput.path,
+      "invariant ledger semantic context"
+    );
+    if (!fs.existsSync(ledgerPath)) return undefined;
+    assertRegularFileInside(layout.root, ledgerPath, "invariant ledger semantic context");
+    const ledger = validateInvariantLedgerSchema(
+      readStrictContractDocument(ledgerPath, "ultrafuzz/invariant-ledger@1"),
+      ledgerPath
+    );
+    if (!ledger.ok || ledger.value === undefined) return undefined;
+    lenses.push({
+      sourceNodeId: logicalId,
+      document: { properties: ledger.value.entries.map((entry) => ({ id: entry.id })) }
+    });
+  }
+
+  for (const nodeId of consumer.depends_on) {
+    const nodeState = state.nodes[nodeId];
+    const logicalId = nodeState?.logical_node_id ?? nodeId;
     if (!logicalId.startsWith("property-specification-") || logicalId === "property-specification-fanin") continue;
     producerCount += 1;
-    const declaredPaths = (nodeState.outputs ?? [])
-      .filter((output) => output.contract === "ultrafuzz/property-lens@2")
-      .map((output) => output.path);
-    const propertiesDir = path.join(getNodeArtifactDir(layout, nodeId), "properties");
-    const discoveredPaths =
-      declaredPaths.length > 0 || !fs.existsSync(propertiesDir)
-        ? []
-        : fs
-            .readdirSync(propertiesDir, { withFileTypes: true })
-            .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
-            .map((entry) => path.posix.join("properties", entry.name));
-    const lensPaths = declaredPaths.length > 0 ? declaredPaths : discoveredPaths;
-    if (lensPaths.length === 0) return undefined;
-    for (const relativePath of lensPaths) {
-      const lensPath = safeResolveInside(getNodeArtifactDir(layout, nodeId), relativePath, "property lens context");
-      if (!fs.existsSync(lensPath)) return undefined;
-      assertRegularFileInside(layout.root, lensPath, "property lens semantic context");
-      const lens = validateLensPropertiesSchema(
-        readStrictContractDocument(lensPath, "ultrafuzz/property-lens@2"),
-        lensPath
-      );
-      if (!lens.ok || lens.value === undefined) return undefined;
-      lenses.push({ sourceNodeId: logicalId, document: lens.value });
-    }
+    const declaration = resolveStateDeclaredPropertyLens(state, nodeId, "property-fanin");
+    if (!declaration.ok) return undefined;
+    const lensPath = safeResolveInside(
+      getNodeArtifactDir(layout, nodeId),
+      declaration.output.path,
+      "property lens context"
+    );
+    if (!fs.existsSync(lensPath)) return undefined;
+    assertRegularFileInside(layout.root, lensPath, "property lens semantic context");
+    const lens = validateLensPropertiesSchema(readStrictContractDocument(lensPath, PROPERTY_LENS_CONTRACT), lensPath);
+    if (!lens.ok || lens.value === undefined) return undefined;
+    lenses.push({ sourceNodeId: logicalId, document: lens.value });
   }
   return producerCount === 0 ? undefined : lenses;
 }
@@ -2041,12 +2142,13 @@ function isCampaignLogicalId(logicalId: string): boolean {
 function verifyPropertyProvenanceArtifacts(
   layout: RunLayout,
   artifactDir: string,
-  node: PlannedGraphNode
+  node: PlannedGraphNode,
+  attemptId: string
 ): RuntimeDiagnostic[] {
   const logicalId = node.logical_id ?? node.id;
   const isPropertyLens = node.outputs.some((output) => String(output.contract) === "ultrafuzz/property-lens@2");
   if (isPropertyLens) {
-    return verifyLensReferenceExpectationAuthority(layout, artifactDir, node);
+    return verifyLensReferenceExpectationAuthority(layout, artifactDir, node, attemptId);
   }
   if (logicalId === "final-report") {
     return verifyFinalReportPropertyReferences(layout, artifactDir, node);
@@ -2095,14 +2197,34 @@ function verifyPropertyProvenanceArtifacts(
 function verifyLensReferenceExpectationAuthority(
   layout: RunLayout,
   artifactDir: string,
-  node: PlannedGraphNode
+  node: PlannedGraphNode,
+  attemptId: string
 ): RuntimeDiagnostic[] {
-  const lensOutput = propertyLensOutput(node);
-  if (lensOutput === undefined) return [];
-  const lensPath = safeResolveInside(artifactDir, lensOutput.path, "property lens output");
-  if (!fs.existsSync(lensPath)) return [];
+  const declaration = resolveStateDeclaredPropertyLens(readRunState(layout), attemptId, "property-provenance");
+  if (!declaration.ok) return [declaration.diagnostic];
+  const lensPath = safeResolveInside(artifactDir, declaration.output.path, "property lens output");
+  if (!fs.existsSync(lensPath)) {
+    return [
+      {
+        code: "PROPERTY_LENS_MISSING",
+        message: `Declared property lens output ${JSON.stringify(declaration.output.path)} is unavailable`,
+        severity: "error",
+        source: "property-provenance",
+        path: lensPath
+      }
+    ];
+  }
+  assertRegularFileInside(artifactDir, lensPath, "property lens output");
   const lens = validateLensPropertiesSchema(readJsonFile(lensPath), lensPath);
-  if (!lens.ok || lens.value === undefined) return [];
+  if (!lens.ok || lens.value === undefined) {
+    return lens.issues.map((issue) => ({
+      code: issue.code,
+      message: issue.message,
+      severity: "error",
+      source: "property-provenance",
+      path: issue.path
+    }));
+  }
 
   const supplied = readLensSuppliedExpectationIds(layout, node);
   const suppliedExpectationIds = supplied.ids;
@@ -2120,10 +2242,6 @@ function verifyLensReferenceExpectationAuthority(
     }
   }
   return diagnostics;
-}
-
-function propertyLensOutput(node: PlannedGraphNode): PlannedGraphNode["outputs"][number] | undefined {
-  return node.outputs.find((output) => String(output.contract) === "ultrafuzz/property-lens@2");
 }
 
 function readLensSuppliedExpectationIds(
@@ -2144,12 +2262,6 @@ function readLensSuppliedExpectationIds(
     const expectationPaths = [
       ...(declaresReferenceExpectationCatalog(state.nodes[dependencyId]?.outputs, "references/expectations.json")
         ? ["references/expectations.json"]
-        : []),
-      ...(declaresReferenceExpectationCatalog(
-        state.nodes[dependencyId]?.outputs,
-        "references/reference-expectations.json"
-      )
-        ? ["references/reference-expectations.json"]
         : [])
     ];
     if (expectationPaths.length === 0) continue;
@@ -2265,6 +2377,21 @@ function appendExpectationCatalog(
         severity: "error",
         source: "property-provenance",
         path: catalogPath
+      });
+      return;
+    }
+    const uniqueness = executeSemanticGate("reference-expectation-id-uniqueness", { document: parsed.value });
+    if (uniqueness.status !== "passed") {
+      diagnostics.push({
+        code: "PROPERTY_REFERENCE_EXPECTATION_TAMPERED",
+        message: `Reference expectation catalog for ${JSON.stringify(dependencyId)} failed semantic validation`,
+        severity: "error",
+        source: "property-provenance",
+        path: catalogPath,
+        details:
+          uniqueness.status === "failed"
+            ? { gate: uniqueness.gate, issues: uniqueness.issues }
+            : { gate: uniqueness.gate, missing_context: uniqueness.missingContext }
       });
       return;
     }
@@ -3650,11 +3777,6 @@ function findLogicalNodeArtifact(layout: RunLayout, logicalNodeId: string, fileN
     }
   }
   return undefined;
-}
-
-function findDependencyArtifact(layout: RunLayout, dependencyId: string, fileName: string): string | undefined {
-  const concretePath = path.join(getNodeArtifactDir(layout, dependencyId), fileName);
-  return fs.existsSync(concretePath) ? concretePath : undefined;
 }
 
 function findingPropertyReferences(value: unknown, artifactPath: string): PropertyReferenceInput[] {
