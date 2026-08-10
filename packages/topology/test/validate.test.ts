@@ -191,5 +191,15 @@ describe("validateTopology", () => {
     expect(() => validateTopology(missingManifest)).toThrow(
       expect.objectContaining({ code: "INVALID_REFERENCE_NODE" })
     );
+
+    const commandRequirement = {
+      ...topology,
+      nodes: topology.nodes.map((node) =>
+        node.id === "reference-properties-example" ? { ...node, required_commands: ["recon"] } : node
+      )
+    };
+    expect(() => validateTopology(commandRequirement)).toThrow(
+      expect.objectContaining({ code: "INVALID_REFERENCE_NODE" })
+    );
   });
 });
