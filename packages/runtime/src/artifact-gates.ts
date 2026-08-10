@@ -2332,61 +2332,69 @@ function verifyPropertyProvenanceArtifacts(
   const isFinalReport = node.outputs.some((output) => output.contract === "ultrafuzz/report@2");
   const isImplementation = node.outputs.some((output) => output.contract === "ultrafuzz/implemented-properties@3");
   const isCampaign = node.outputs.some((output) => output.contract === "ultrafuzz/property-campaign@2");
+  const diagnostics: RuntimeDiagnostic[] = [];
   if (isPropertyLens) {
-    return verifyLensReferenceExpectationAuthority(layout, artifactDir, node, attemptId);
+    diagnostics.push(...verifyLensReferenceExpectationAuthority(layout, artifactDir, node, attemptId));
   }
   if (isFinalReport) {
-    return verifyFinalReportPropertyReferences(layout, artifactDir, node);
+    diagnostics.push(...verifyFinalReportPropertyReferences(layout, artifactDir, node));
   }
-  if (!isImplementation && !isCampaign) return [];
+  if (!isImplementation && !isCampaign) return diagnostics;
 
   const catalog = readCanonicalPropertyCatalog(layout, node);
   if (catalog.diagnostics.length > 0 || catalog.value === undefined) {
-    return catalog.diagnostics;
+    return [...diagnostics, ...catalog.diagnostics];
   }
 
   if (isImplementation) {
-    const implementationOutputs = node.outputs.filter(
-      (output) => output.contract === "ultrafuzz/implemented-properties@3"
-    );
-    if (implementationOutputs.length !== 1) {
-      return [
-        {
-          code: "PROPERTY_IMPLEMENTATION_DECLARATION_AMBIGUOUS",
-          message: `Property implementation must declare exactly one ultrafuzz/implemented-properties@3 output; found ${implementationOutputs.length}`,
-          severity: "error",
-          source: "property-provenance",
-          path: layout.graphPath
-        }
-      ];
-    }
-    const implementationPath = safeResolveInside(
-      artifactDir,
-      implementationOutputs[0]!.path,
-      "implemented property output"
-    );
-    if (!fs.existsSync(implementationPath)) return [];
-    const implementation = validateImplementedPropertiesSchema(readJsonFile(implementationPath), implementationPath);
-    if (!implementation.ok || implementation.value === undefined) {
-      return [];
-    }
-    const references: PropertyReferenceInput[] = implementation.value.properties.map((record, index) => ({
-      propertyIds: [record.property_id],
-      path: `${implementationPath}#$.properties[${index}].property_id`
-    }));
-    for (const output of node.outputs.filter((candidate) => candidate.contract === "ultrafuzz/findings@2")) {
-      const findingsPath = safeResolveInside(artifactDir, output.path, "implementation finding output");
-      if (fs.existsSync(findingsPath)) {
-        references.push(...findingPropertyReferences(readJsonFile(findingsPath), findingsPath));
-      }
-    }
+    diagnostics.push(...verifyImplementationPropertyReferences(layout, artifactDir, catalog.value, node));
+  }
+  if (isCampaign) diagnostics.push(...verifyCampaignPropertyReferences(layout, artifactDir, catalog.value, node));
+  return diagnostics;
+}
+
+function verifyImplementationPropertyReferences(
+  layout: RunLayout,
+  artifactDir: string,
+  catalog: PropertiesArtifact,
+  node: PlannedGraphNode
+): RuntimeDiagnostic[] {
+  const implementationOutputs = node.outputs.filter(
+    (output) => output.contract === "ultrafuzz/implemented-properties@3"
+  );
+  if (implementationOutputs.length !== 1) {
     return [
-      ...propertyReferenceDiagnostics(catalog.value, references),
-      ...verifyImplementationSelectionCoverage(catalog.value, implementation.value, implementationPath, layout)
+      {
+        code: "PROPERTY_IMPLEMENTATION_DECLARATION_AMBIGUOUS",
+        message: `Property implementation must declare exactly one ultrafuzz/implemented-properties@3 output; found ${implementationOutputs.length}`,
+        severity: "error",
+        source: "property-provenance",
+        path: layout.graphPath
+      }
     ];
   }
-
-  return verifyCampaignPropertyReferences(layout, artifactDir, catalog.value, node);
+  const implementationPath = safeResolveInside(
+    artifactDir,
+    implementationOutputs[0]!.path,
+    "implemented property output"
+  );
+  if (!fs.existsSync(implementationPath)) return [];
+  const implementation = validateImplementedPropertiesSchema(readJsonFile(implementationPath), implementationPath);
+  if (!implementation.ok || implementation.value === undefined) return [];
+  const references: PropertyReferenceInput[] = implementation.value.properties.map((record, index) => ({
+    propertyIds: [record.property_id],
+    path: `${implementationPath}#$.properties[${index}].property_id`
+  }));
+  for (const output of node.outputs.filter((candidate) => candidate.contract === "ultrafuzz/findings@2")) {
+    const findingsPath = safeResolveInside(artifactDir, output.path, "implementation finding output");
+    if (fs.existsSync(findingsPath)) {
+      references.push(...findingPropertyReferences(readJsonFile(findingsPath), findingsPath));
+    }
+  }
+  return [
+    ...propertyReferenceDiagnostics(catalog, references),
+    ...verifyImplementationSelectionCoverage(catalog, implementation.value, implementationPath, layout)
+  ];
 }
 
 /**

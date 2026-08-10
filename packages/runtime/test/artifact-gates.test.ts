@@ -4252,6 +4252,34 @@ test("campaign gate accepts non-property findings and validates property-derived
   const unknown = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(unknown.ok, false);
   assert.ok(unknown.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_UNKNOWN"));
+
+  writeArtifact(
+    layout,
+    campaignId,
+    "implemented-properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v3",
+      selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-1"] },
+      properties: [
+        {
+          property_id: "property-1",
+          status: "implemented",
+          implementation_paths: ["test/recon/Properties.sol"],
+          test_paths: []
+        }
+      ]
+    })
+  );
+  const combinedNode = {
+    ...node,
+    outputs: [...node.outputs, boundOutput("implemented-properties.json", "ultrafuzz/implemented-properties@3")]
+  };
+  const combined = verifyRequiredArtifactsForAttempt(layout, combinedNode, campaignId);
+  assert.equal(combined.ok, false);
+  assert.ok(
+    combined.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_UNKNOWN"),
+    JSON.stringify(combined.diagnostics)
+  );
 });
 
 test("campaign gate accepts a partial dual-backend campaign where one backend saw nothing", () => {
