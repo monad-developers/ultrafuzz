@@ -4281,6 +4281,12 @@ function currentCampaign(
 ): Record<string, unknown> {
   const failures = failureFixtures.map(currentCampaignFailure);
   const executionStatus = options.executionStatus ?? "partial";
+  const evidencePaths = new Set<string>([campaignFixturePaths.log, campaignFixturePaths.raw_results]);
+  for (const failure of failures) {
+    if (typeof failure.raw_reproducer_ref === "string") evidencePaths.add(failure.raw_reproducer_ref);
+    if (typeof failure.deterministic_reproducer_ref === "string")
+      evidencePaths.add(failure.deterministic_reproducer_ref);
+  }
   return {
     schema_version: "ultrafuzz.property-campaign.v3",
     campaign_plan_ref: "campaign-plan.json",
@@ -4305,6 +4311,11 @@ function currentCampaign(
           : { category: "process-failed", summary: "The fixture campaign stopped after producing usable results." }
     },
     paths: campaignFixturePaths,
+    evidence_files: [...evidencePaths].map((evidencePath) => ({
+      path: evidencePath,
+      size_bytes: 1,
+      sha256: "a".repeat(64)
+    })),
     coverage: {
       status: "reported",
       metrics: [{ name: "executions", value: 1, unit: "count", source_ref: campaignFixturePaths.raw_results }],

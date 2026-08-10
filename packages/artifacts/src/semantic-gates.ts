@@ -6,6 +6,7 @@ import { isDeepStrictEqual } from "node:util";
 import { artifactContractDefinition, artifactContractSchemaBinding } from "./artifact-contracts.js";
 import { ARTIFACT_SCHEMA_METADATA, type ArtifactSchemaFilename } from "./artifact-schema-metadata.js";
 import { MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES } from "./artifact-limits.js";
+import { MAX_PROPERTY_CAMPAIGN_EVIDENCE_TOTAL_BYTES } from "./property-provenance.js";
 
 export const SEMANTIC_GATE_SCOPES = ["document", "filesystem", "cross-artifact", "git", "runtime-state"] as const;
 
@@ -2154,6 +2155,62 @@ function campaignSummaryCountIssues(document: unknown, context: SemanticGateCont
   );
 }
 
+function propertyCampaignReferencedEvidencePaths(document: unknown): string[] {
+  const metrics = arrayAt(document, ["coverage", "metrics"]);
+  const failures = arrayAt(document, ["failures"]);
+  const propertyResults = arrayAt(document, ["property_results"]);
+  const execution = at(document, ["execution"]);
+  const paths = at(document, ["paths"]);
+  const backendStarted = stringField(execution, "started_at") !== undefined;
+  const rawResultsRequired =
+    booleanField(execution, "usable_results") === true ||
+    stringField(at(document, ["coverage"]), "status") === "reported" ||
+    failures.length > 0;
+  return [
+    ...(backendStarted && stringField(paths, "log") !== undefined ? [stringField(paths, "log")!] : []),
+    ...(rawResultsRequired && stringField(paths, "raw_results") !== undefined
+      ? [stringField(paths, "raw_results")!]
+      : []),
+    ...metrics.flatMap((metric) => stringField(metric, "source_ref") ?? []),
+    ...propertyResults.flatMap((result) => stringArray(at(result, ["evidence_refs"]))),
+    ...failures.flatMap((failure) => [
+      ...(stringField(failure, "raw_reproducer_ref") === undefined
+        ? []
+        : [stringField(failure, "raw_reproducer_ref")!]),
+      ...(stringField(failure, "deterministic_reproducer_ref") === undefined
+        ? []
+        : [stringField(failure, "deterministic_reproducer_ref")!])
+    ])
+  ];
+}
+
+function propertyCampaignEvidenceFileClosureIssues(document: unknown): SemanticGateIssue[] {
+  const evidencePaths = arrayAt(document, ["evidence_files"]).flatMap((entry) => stringField(entry, "path") ?? []);
+  if (
+    new Set(evidencePaths).size !== evidencePaths.length ||
+    !sameStringSet(evidencePaths, propertyCampaignReferencedEvidencePaths(document))
+  ) {
+    return [
+      issue(
+        "$.evidence_files",
+        "Evidence files must contain exactly one authenticated entry for every referenced campaign evidence path"
+      )
+    ];
+  }
+  return [];
+}
+
+function propertyCampaignEvidenceFileBudgetIssues(document: unknown): SemanticGateIssue[] {
+  const evidenceFiles = arrayAt(document, ["evidence_files"]);
+  const evidenceBytes = evidenceFiles.reduce<number>(
+    (total, entry) => total + (numberField(entry, "size_bytes") ?? 0),
+    0
+  );
+  return evidenceBytes > MAX_PROPERTY_CAMPAIGN_EVIDENCE_TOTAL_BYTES
+    ? [issue("$.evidence_files", "Campaign evidence files exceed the aggregate byte limit")]
+    : [];
+}
+
 function propertyCampaignDocumentIssues(document: unknown): SemanticGateIssue[] {
   const issues: SemanticGateIssue[] = [];
   const execution = at(document, ["execution"]);
@@ -3055,6 +3112,8 @@ const gateSpecifications = {
   "property-campaign-coverage-metric-uniqueness": documentGate(
     uniqueFieldGate([["coverage", "metrics"]], "name", "property campaign coverage metric")
   ),
+  "property-campaign-evidence-file-budget": documentGate(propertyCampaignEvidenceFileBudgetIssues),
+  "property-campaign-evidence-file-closure": documentGate(propertyCampaignEvidenceFileClosureIssues),
   "property-campaign-failure-id-uniqueness": documentGate(
     uniqueFieldGate([["failures"]], "id", "property campaign failure ID")
   ),

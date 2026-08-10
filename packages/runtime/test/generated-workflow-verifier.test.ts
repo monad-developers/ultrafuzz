@@ -12,6 +12,9 @@ import * as ts from "typescript";
 import {
   assertRegularFileInside,
   executeSchemaSemanticGates,
+  MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILES,
+  MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILE_BYTES,
+  MAX_PROPERTY_CAMPAIGN_EVIDENCE_TOTAL_BYTES,
   MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES,
   normalizeNodeAttemptFailureMessage,
   parseStrictJsonBytes,
@@ -705,6 +708,7 @@ function loadVerifyArtifactsHarness(
   options: {
     taskSpecs?: readonly VerifyArtifactsTask[];
     authenticatedDependencyDirs?: readonly string[];
+    onSemanticGate?: () => void;
   } = {}
 ): {
   captureTaskOutputs: (task: VerifyArtifactsTask) => Array<{
@@ -761,6 +765,10 @@ function loadVerifyArtifactsHarness(
     "resolveRegularArtifactFile",
     "readBoundedRegularArtifactSnapshot",
     "MAX_VERIFIED_ARTIFACT_BYTES",
+    "MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILES",
+    "MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILE_BYTES",
+    "MAX_PROPERTY_CAMPAIGN_EVIDENCE_TOTAL_BYTES",
+    "assertSafeVerifiedPublicationPath",
     "clearArtifactVerificationMarker",
     "decodeStrictUtf8Snapshot",
     "artifactContractDefinition",
@@ -799,12 +807,44 @@ function loadVerifyArtifactsHarness(
         throw new Error(failureMessage);
       }
     },
-    (root: string, candidate: string, failureMessage: string, maxBytes: number) => {
+    (root: string, candidate: string, failureMessage: string, maxBytes: number, requireNonEmpty = false) => {
       if (candidate === root || !candidate.startsWith(`${root}${path.sep}`)) throw new Error(failureMessage);
+      assertRegularFileInside(root, candidate, failureMessage);
       const resolved = fs.realpathSync(candidate);
-      return Object.freeze({ path: resolved, bytes: readRegularFileSnapshot(resolved, maxBytes) });
+      const before = fs.statSync(resolved);
+      if (before.nlink !== 1) throw new Error(`${failureMessage}: file is hard-linked`);
+      const bytes = readRegularFileSnapshot(resolved, maxBytes);
+      if (requireNonEmpty && bytes.length === 0) throw new Error(`${failureMessage}: file is empty`);
+      const after = fs.statSync(resolved);
+      if (
+        after.nlink !== 1 ||
+        before.dev !== after.dev ||
+        before.ino !== after.ino ||
+        before.size !== after.size ||
+        before.mtimeMs !== after.mtimeMs ||
+        before.ctimeMs !== after.ctimeMs ||
+        bytes.length !== after.size
+      ) {
+        throw new Error(`${failureMessage}: file changed while it was captured`);
+      }
+      return Object.freeze({ path: resolved, bytes });
     },
     64 * 1024 * 1024,
+    MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILES,
+    MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILE_BYTES,
+    MAX_PROPERTY_CAMPAIGN_EVIDENCE_TOTAL_BYTES,
+    (relativePath: string) => {
+      if (
+        relativePath.length === 0 ||
+        path.isAbsolute(relativePath) ||
+        relativePath.includes("\u0000") ||
+        relativePath.includes("\\") ||
+        /^[A-Za-z]:/u.test(relativePath) ||
+        relativePath.split("/").some((segment) => segment.length === 0 || segment === "..")
+      ) {
+        throw new Error(`artifact-contract failure: unsafe verified publication path ${relativePath}`);
+      }
+    },
     () => undefined,
     (snapshot: { bytes: Buffer }, failureMessage: string) => {
       try {
@@ -831,7 +871,10 @@ function loadVerifyArtifactsHarness(
       }
       authenticatedDependencyChecks.push({ consumerAttemptId: task.attemptId, dependency: resolved });
     },
-    executeSchemaSemanticGates,
+    (...args: Parameters<typeof executeSchemaSemanticGates>) => {
+      options.onSemanticGate?.();
+      return executeSchemaSemanticGates(...args);
+    },
     normalizeNodeAttemptFailureMessage,
     () => undefined,
     () => undefined,
@@ -881,6 +924,19 @@ const generatedCampaignPaths = {
   raw_results: "backends/recon-fuzzer/results.json",
   reproducers: "backends/recon-fuzzer/reproducers"
 } as const;
+
+const generatedCampaignEvidenceContents = new Map<string, Buffer>([
+  [generatedCampaignPaths.log, Buffer.from("recon campaign completed\n", "utf8")],
+  [generatedCampaignPaths.raw_results, Buffer.from('{"executions":1}\n', "utf8")]
+]);
+
+function generatedCampaignEvidenceFiles(): Array<{ path: string; size_bytes: number; sha256: string }> {
+  return [...generatedCampaignEvidenceContents].map(([evidencePath, contents]) => ({
+    path: evidencePath,
+    size_bytes: contents.length,
+    sha256: createHash("sha256").update(contents).digest("hex")
+  }));
+}
 
 function generatedCampaignPlanFixture(): Record<string, unknown> {
   return {
@@ -937,6 +993,7 @@ function generatedPropertyCampaignFixture(): Record<string, unknown> {
       failure: null
     },
     paths: generatedCampaignPaths,
+    evidence_files: generatedCampaignEvidenceFiles(),
     coverage: {
       status: "reported",
       metrics: [
@@ -1017,6 +1074,11 @@ function generatedCampaignVerificationFixture(
   ]);
   for (const [relativePath, document] of documents) {
     fs.writeFileSync(path.join(artifactDir, relativePath), `${JSON.stringify(document)}\n`, "utf8");
+  }
+  for (const [relativePath, contents] of generatedCampaignEvidenceContents) {
+    const evidencePath = path.join(artifactDir, relativePath);
+    fs.mkdirSync(path.dirname(evidencePath), { recursive: true });
+    fs.writeFileSync(evidencePath, contents);
   }
   fs.writeFileSync(
     path.join(implementationArtifactDir, "implemented-properties.json"),
@@ -1209,11 +1271,102 @@ test("generated Smithers verifies a v3 property campaign against authenticated s
 
     assert.equal(result.primary_artifact, "campaign.json");
     assert.equal(result.artifacts.length, 4);
-    assert.equal(harness.publications.size, 4);
+    assert.equal(harness.publications.size, 6);
+    for (const [relativePath, contents] of generatedCampaignEvidenceContents) {
+      assert.deepEqual(harness.publications.get(relativePath), contents);
+    }
     assert.equal(harness.markerWrites.length, 1);
     assert.deepEqual(harness.authenticatedDependencyChecks, [
       { consumerAttemptId: "attempt-campaign", dependency: fixture.implementationArtifactDir }
     ]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("generated Smithers fails closed when declared campaign evidence is missing or digest-mismatched", () => {
+  for (const mode of ["missing", "mismatched"] as const) {
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `ultrafuzz-campaign-evidence-${mode}-`)));
+    try {
+      const fixture = generatedCampaignVerificationFixture(root);
+      const harness = loadVerifyArtifactsHarness({
+        taskSpecs: [fixture.implementationProducer],
+        authenticatedDependencyDirs: [fixture.implementationArtifactDir]
+      });
+      const captured = harness.captureTaskOutputs(fixture.task);
+      const evidencePath = path.join(fixture.task.metadata.artifacts.dir, generatedCampaignPaths.raw_results);
+      if (mode === "missing") fs.rmSync(evidencePath);
+      else fs.writeFileSync(evidencePath, '{"executions":2}\n', "utf8");
+
+      assert.throws(
+        () => harness.verifyArtifacts(fixture.task, captured),
+        /campaign evidence (?:is not an immutable regular file|does not match its manifest)/u,
+        mode
+      );
+      assert.equal(harness.publications.size, 0, mode);
+      assert.equal(harness.markerWrites.length, 0, mode);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("generated Smithers rejects symlinked and hard-linked campaign evidence", () => {
+  for (const mode of ["symlink", "hardlink"] as const) {
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `ultrafuzz-campaign-evidence-${mode}-`)));
+    try {
+      const fixture = generatedCampaignVerificationFixture(root);
+      const harness = loadVerifyArtifactsHarness({
+        taskSpecs: [fixture.implementationProducer],
+        authenticatedDependencyDirs: [fixture.implementationArtifactDir]
+      });
+      const captured = harness.captureTaskOutputs(fixture.task);
+      const evidencePath = path.join(fixture.task.metadata.artifacts.dir, generatedCampaignPaths.raw_results);
+      if (mode === "symlink") {
+        const originalPath = `${evidencePath}.original`;
+        fs.renameSync(evidencePath, originalPath);
+        fs.symlinkSync(originalPath, evidencePath);
+      } else {
+        fs.linkSync(evidencePath, `${evidencePath}.alias`);
+      }
+
+      assert.throws(
+        () => harness.verifyArtifacts(fixture.task, captured),
+        /campaign evidence is not an immutable regular file|hard-linked/u,
+        mode
+      );
+      assert.equal(harness.publications.size, 0, mode);
+      assert.equal(harness.markerWrites.length, 0, mode);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("generated Smithers publishes the one immutable campaign evidence snapshot used for verification", () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-campaign-evidence-snapshot-")));
+  try {
+    const fixture = generatedCampaignVerificationFixture(root);
+    const evidencePath = path.join(fixture.task.metadata.artifacts.dir, generatedCampaignPaths.raw_results);
+    const expected = Buffer.from(generatedCampaignEvidenceContents.get(generatedCampaignPaths.raw_results)!);
+    let changed = false;
+    const harness = loadVerifyArtifactsHarness({
+      taskSpecs: [fixture.implementationProducer],
+      authenticatedDependencyDirs: [fixture.implementationArtifactDir],
+      onSemanticGate: () => {
+        if (changed) return;
+        changed = true;
+        fs.writeFileSync(evidencePath, '{"executions":999}\n', "utf8");
+      }
+    });
+
+    harness.verifyArtifacts(fixture.task, harness.captureTaskOutputs(fixture.task));
+
+    assert.equal(changed, true);
+    assert.notDeepEqual(fs.readFileSync(evidencePath), expected);
+    assert.deepEqual(harness.publications.get(generatedCampaignPaths.raw_results), expected);
+    const markerPublications = (harness.markerWrites[0] as unknown[])[2] as ReadonlyMap<string, Buffer>;
+    assert.deepEqual(markerPublications.get(generatedCampaignPaths.raw_results), expected);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

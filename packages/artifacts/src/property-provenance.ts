@@ -173,6 +173,9 @@ export const PROPERTY_CAMPAIGN_COVERAGE_UNITS = [
   "bytes",
   "executions-per-second"
 ] as const;
+export const MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILES = 4_096;
+export const MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILE_BYTES = 16 * 1024 * 1024;
+export const MAX_PROPERTY_CAMPAIGN_EVIDENCE_TOTAL_BYTES = 64 * 1024 * 1024;
 
 export type PropertyCampaignExecutionStatus = (typeof PROPERTY_CAMPAIGN_EXECUTION_STATUSES)[number];
 export type PropertyCampaignFailureCategory = (typeof PROPERTY_CAMPAIGN_FAILURE_CATEGORIES)[number];
@@ -233,6 +236,12 @@ export interface PropertyCampaignFailure {
   reproduction_blocker: string | null;
 }
 
+export interface PropertyCampaignEvidenceFile {
+  path: string;
+  size_bytes: number;
+  sha256: string;
+}
+
 export interface PropertyCampaignArtifact {
   schema_version: typeof PROPERTY_CAMPAIGN_SCHEMA_VERSION;
   campaign_plan_ref: string;
@@ -249,6 +258,7 @@ export interface PropertyCampaignArtifact {
     raw_results: string;
     reproducers: string;
   };
+  evidence_files: PropertyCampaignEvidenceFile[];
   coverage: PropertyCampaignCoverage;
   property_results: PropertyCampaignPropertyResult[];
   failures: PropertyCampaignFailure[];
@@ -948,6 +958,12 @@ const propertyCampaignFailureSchema = z
     }
   });
 
+const propertyCampaignEvidenceFileSchema = z.strictObject({
+  path: safeRelativePath.max(4_096),
+  size_bytes: z.number().int().positive().max(MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILE_BYTES),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/u)
+});
+
 export const propertyCampaignSchema = z
   .strictObject({
     schema_version: z.literal(PROPERTY_CAMPAIGN_SCHEMA_VERSION),
@@ -965,6 +981,7 @@ export const propertyCampaignSchema = z
       raw_results: safeRelativePath,
       reproducers: safeRelativePath
     }),
+    evidence_files: z.array(propertyCampaignEvidenceFileSchema).max(MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILES),
     coverage: propertyCampaignCoverageSchema,
     property_results: z.array(propertyCampaignPropertyResultSchema),
     failures: z.array(propertyCampaignFailureSchema)

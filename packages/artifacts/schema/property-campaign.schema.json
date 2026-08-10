@@ -333,6 +333,31 @@
       "required": ["corpus", "cache", "log", "raw_results", "reproducers"],
       "additionalProperties": false
     },
+    "evidence_files": {
+      "maxItems": 4096,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "maxLength": 4096,
+            "pattern": "^(?!.*(?:^|\\/)\\.{1,2}(?:\\/|$))[A-Za-z0-9._-]+(?:\\/[A-Za-z0-9._-]+)*$"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 16777216
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": ["path", "size_bytes", "sha256"],
+        "additionalProperties": false
+      }
+    },
     "coverage": {
       "type": "object",
       "properties": {
@@ -742,6 +767,7 @@
     "backend_version",
     "execution",
     "paths",
+    "evidence_files",
     "coverage",
     "property_results",
     "failures"

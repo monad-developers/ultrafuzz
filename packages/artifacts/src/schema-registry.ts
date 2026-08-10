@@ -16,6 +16,7 @@ const MAX_REGISTERED_SCHEMA_BYTES = 4 * 1024 * 1024;
 const MAX_REGISTERED_BUNDLE_BYTES = 16 * 1024 * 1024;
 const MAX_DEPENDENCY_PACKAGE_JSON_BYTES = 1024 * 1024;
 const MAX_REGISTERED_PATTERNS = 256;
+const MAX_REGISTERED_BUNDLE_PATTERNS = 512;
 const MAX_REGISTERED_PATTERN_LENGTH = 1_024;
 
 export interface SchemaRegistryEntry {
@@ -104,8 +105,8 @@ export function artifactSchemaRegistry(): readonly ArtifactSchemaRegistryEntry[]
         throw new Error(`schema must declare Draft 2020-12: ${filename}`);
       }
       bundlePatterns += assertRegisteredPatternLimits(parsed, filename);
-      if (bundlePatterns > MAX_REGISTERED_PATTERNS) {
-        throw new Error(`registered schema bundle exceeds the ${MAX_REGISTERED_PATTERNS}-pattern limit`);
+      if (bundlePatterns > MAX_REGISTERED_BUNDLE_PATTERNS) {
+        throw new Error(`registered schema bundle exceeds the ${MAX_REGISTERED_BUNDLE_PATTERNS}-pattern limit`);
       }
       const id = parsed.$id;
       if (typeof id !== "string" || id.length === 0 || id.includes("#")) {

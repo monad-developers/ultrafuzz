@@ -688,6 +688,28 @@ const fixtures = {
     positive: { coverage: { metrics: [{ name: "branches" }] } },
     negative: { coverage: { metrics: [{ name: "branches" }, { name: "branches" }] } }
   },
+  "property-campaign-evidence-file-budget": {
+    positive: { evidence_files: [{ size_bytes: 64 * 1024 * 1024 }] },
+    negative: { evidence_files: [{ size_bytes: 64 * 1024 * 1024 }, { size_bytes: 1 }] }
+  },
+  "property-campaign-evidence-file-closure": {
+    positive: {
+      execution: { usable_results: false, started_at: null },
+      paths: { log: "run.log", raw_results: "results.json" },
+      coverage: { status: "unavailable", metrics: [] },
+      property_results: [],
+      failures: [],
+      evidence_files: []
+    },
+    negative: {
+      execution: { usable_results: true, started_at: "2026-01-01T00:00:00Z" },
+      paths: { log: "run.log", raw_results: "results.json" },
+      coverage: { status: "reported", metrics: [] },
+      property_results: [],
+      failures: [],
+      evidence_files: [{ path: "run.log" }]
+    }
+  },
   "property-campaign-failure-id-uniqueness": {
     positive: { failures: [{ id: "a" }] },
     negative: { failures: [{ id: "a" }, { id: "a" }] }
@@ -958,6 +980,90 @@ test("every document-local gate has a passing and failing non-mutating fixture",
     assert.equal(executeSemanticGate(name, { document: fixture.negative }).status, "failed", `${name}:negative`);
     assert.deepEqual(fixture.positive, positiveBefore, `${name}:positive mutated`);
     assert.deepEqual(fixture.negative, negativeBefore, `${name}:negative mutated`);
+  }
+});
+
+test("campaign evidence closure derives exact file authority from execution status and typed references", () => {
+  const entry = (entryPath: string) => ({ path: entryPath, size_bytes: 1, sha256: "a".repeat(64) });
+  const base = {
+    execution: { usable_results: false, started_at: null },
+    paths: { log: "backends/recon/run.log", raw_results: "backends/recon/results.json" },
+    coverage: { status: "unavailable", metrics: [] as unknown[] },
+    property_results: [] as unknown[],
+    failures: [] as unknown[],
+    evidence_files: [] as unknown[]
+  };
+  const cases: Array<{ label: string; document: unknown; passed: boolean }> = [
+    { label: "unavailable-needs-no-operational-file", document: base, passed: true },
+    {
+      label: "started-failure-needs-only-log",
+      document: {
+        ...base,
+        execution: { usable_results: false, started_at: "2026-01-01T00:00:00Z" },
+        evidence_files: [entry(base.paths.log)]
+      },
+      passed: true
+    },
+    {
+      label: "usable-results-need-log-and-raw-results",
+      document: {
+        ...base,
+        execution: { usable_results: true, started_at: "2026-01-01T00:00:00Z" },
+        evidence_files: [entry(base.paths.log), entry(base.paths.raw_results)]
+      },
+      passed: true
+    },
+    {
+      label: "reported-coverage-needs-source-and-raw-results",
+      document: {
+        ...base,
+        coverage: {
+          status: "reported",
+          metrics: [{ name: "coverage", source_ref: "backends/recon/coverage.json" }]
+        },
+        evidence_files: [entry(base.paths.raw_results), entry("backends/recon/coverage.json")]
+      },
+      passed: true
+    },
+    {
+      label: "failure-needs-raw-and-deterministic-reproducers",
+      document: {
+        ...base,
+        failures: [
+          {
+            raw_reproducer_ref: "backends/recon/raw.txt",
+            deterministic_reproducer_ref: "backends/recon/reproducer.t.sol"
+          }
+        ],
+        evidence_files: [
+          entry(base.paths.raw_results),
+          entry("backends/recon/raw.txt"),
+          entry("backends/recon/reproducer.t.sol")
+        ]
+      },
+      passed: true
+    },
+    {
+      label: "unreferenced-entry-rejected",
+      document: { ...base, evidence_files: [entry("backends/recon/extra.txt")] },
+      passed: false
+    },
+    {
+      label: "duplicate-entry-rejected",
+      document: {
+        ...base,
+        execution: { usable_results: false, started_at: "2026-01-01T00:00:00Z" },
+        evidence_files: [entry(base.paths.log), entry(base.paths.log)]
+      },
+      passed: false
+    }
+  ];
+  for (const fixture of cases) {
+    assert.equal(
+      executeSemanticGate("property-campaign-evidence-file-closure", { document: fixture.document }).status,
+      fixture.passed ? "passed" : "failed",
+      fixture.label
+    );
   }
 });
 

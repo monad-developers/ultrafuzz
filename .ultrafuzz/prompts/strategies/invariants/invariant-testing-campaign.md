@@ -135,6 +135,18 @@ Use this configured invariant testing fuzzer timeout:
      `count`, `ratio`, `percent`, `seconds`, `bytes`, or
      `executions-per-second`, and an exact `source_ref`. Otherwise use
      `status: "unavailable"`, an empty metrics array, and a non-empty reason.
+   - Make `evidence_files` the exact file manifest for the campaign's durable
+     evidence. Include `paths.log` whenever `execution.started_at` is non-null;
+     include `paths.raw_results` whenever results are usable, coverage is
+     reported, or failures are present; and include every coverage
+     `source_ref`, property-result `evidence_refs` entry, failure
+     `raw_reproducer_ref`, and non-null `deterministic_reproducer_ref`. List each
+     unique required path exactly once and no other path. Each closed entry has
+     only `path`, positive `size_bytes`, and the lowercase SHA-256 of the exact
+     bytes. The manifest has at most 4096 files, each file is at most 16 MiB,
+     and their aggregate is at most 64 MiB. Operational corpus, cache, and
+     reproducer directories are not implicitly published; name every file that
+     must survive through one of the typed references above.
    - Emit exactly one `property_results` row for every record whose status is
      `implemented` in `implemented-properties.json`, and no other property.
      Use `passed`, `failed`, `inconclusive`, or `not-executed`; make
@@ -308,6 +320,23 @@ with this run's evidence while retaining every field:
     "raw_results": "backends/recon-fuzzer/results.json",
     "reproducers": "backends/recon-fuzzer/reproducers"
   },
+  "evidence_files": [
+    {
+      "path": "backends/recon-fuzzer/run.log",
+      "size_bytes": 1024,
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "backends/recon-fuzzer/results.json",
+      "size_bytes": 2048,
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "path": "backends/recon-fuzzer/reproducers/failure-1.t.sol",
+      "size_bytes": 4096,
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+    }
+  ],
   "coverage": {
     "status": "reported",
     "metrics": [
@@ -357,6 +386,10 @@ failures reported and no others. Do not emit one finding per counterexample: a
 fuzzer reports the same violation many times, and the backend record already
 preserves every one of them. References to an unknown or non-implemented
 canonical property fail artifact validation.
+`evidence_files` has no redundant role field: the exact status-dependent and
+explicit reference set above is the authority. The verifier captures each
+listed regular, non-hard-linked file once, checks its size and digest, and uses
+that same immutable byte snapshot for durable publication and marker digests.
 
 Write generated-test and reproducer records to:
 

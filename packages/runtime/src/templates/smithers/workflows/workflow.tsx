@@ -43,6 +43,9 @@ const {
   invariantPinnedSourceRefExists,
   materializePromptSchemas,
   INVARIANT_SUITE_MANIFEST_SCHEMA_VERSION,
+  MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILES,
+  MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILE_BYTES,
+  MAX_PROPERTY_CAMPAIGN_EVIDENCE_TOTAL_BYTES,
   normalizeNodeAttemptFailureMessage,
   parseInvariantSuiteManifestBytes,
   parseJsonValidatorPreflightSuccessEnvelope,
@@ -4298,6 +4301,68 @@ function validateCapturedTaskOutputs(
   return { artifacts, verifiedOutputs };
 }
 
+function capturePropertyCampaignEvidence(
+  task: (typeof taskSpecs)[number],
+  verifiedOutputs: ReadonlyMap<string, VerifiedOutputSnapshot>
+): ReadonlyMap<string, ImmutableFileSnapshot> {
+  const snapshots = new Map<string, ImmutableFileSnapshot>();
+  const declaredOutputPaths = new Set(task.outputs.map((output) => output.path));
+  for (const output of task.outputs) {
+    if (output.contract !== "ultrafuzz/property-campaign@3") continue;
+    const campaign = verifiedOutputs.get(output.path);
+    if (campaign === undefined || !isPlainJsonRecord(campaign.value) || !Array.isArray(campaign.value.evidence_files)) {
+      throw new Error(`artifact-contract failure: campaign evidence manifest is unavailable ${output.path}`);
+    }
+    if (campaign.value.evidence_files.length > MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILES) {
+      throw new Error(`artifact-contract failure: campaign evidence manifest exceeds its file limit ${output.path}`);
+    }
+
+    const entries: Array<{ path: string; sizeBytes: number; sha256: string }> = [];
+    const campaignPaths = new Set<string>();
+    let declaredBytes = 0;
+    for (const value of campaign.value.evidence_files) {
+      if (
+        !isPlainJsonRecord(value) ||
+        typeof value.path !== "string" ||
+        typeof value.size_bytes !== "number" ||
+        !Number.isSafeInteger(value.size_bytes) ||
+        value.size_bytes <= 0 ||
+        value.size_bytes > MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILE_BYTES ||
+        typeof value.sha256 !== "string" ||
+        !/^[0-9a-f]{64}$/u.test(value.sha256)
+      ) {
+        throw new Error(`artifact-contract failure: campaign evidence manifest entry is malformed ${output.path}`);
+      }
+      assertSafeVerifiedPublicationPath(value.path);
+      if (campaignPaths.has(value.path) || snapshots.has(value.path) || declaredOutputPaths.has(value.path)) {
+        throw new Error(`artifact-contract failure: duplicate campaign evidence path ${value.path}`);
+      }
+      campaignPaths.add(value.path);
+      declaredBytes += value.size_bytes;
+      if (declaredBytes > MAX_PROPERTY_CAMPAIGN_EVIDENCE_TOTAL_BYTES) {
+        throw new Error(`artifact-contract failure: campaign evidence exceeds its aggregate byte limit ${output.path}`);
+      }
+      entries.push({ path: value.path, sizeBytes: value.size_bytes, sha256: value.sha256 });
+    }
+
+    for (const entry of entries) {
+      const snapshot = readBoundedRegularArtifactSnapshot(
+        campaign.artifactRoot,
+        path.resolve(campaign.artifactRoot, entry.path),
+        `artifact-contract failure: campaign evidence is not an immutable regular file ${entry.path}`,
+        MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILE_BYTES,
+        true
+      );
+      const digest = createHash("sha256").update(snapshot.bytes).digest("hex");
+      if (snapshot.bytes.length !== entry.sizeBytes || digest !== entry.sha256) {
+        throw new Error(`artifact-contract failure: campaign evidence does not match its manifest ${entry.path}`);
+      }
+      snapshots.set(entry.path, snapshot);
+    }
+  }
+  return snapshots;
+}
+
 function siblingCampaignSemanticArtifacts(
   task: (typeof taskSpecs)[number],
   verifiedOutputs: ReadonlyMap<string, VerifiedOutputSnapshot>
@@ -4588,6 +4653,7 @@ function verifyArtifacts(
   const artifactRoots = taskArtifactRoots(task, artifactDir);
   const capturedOutputs = capturedTaskOutputs ?? captureTaskOutputs(task);
   const { artifacts, verifiedOutputs } = validateCapturedTaskOutputs(task, capturedOutputs);
+  const campaignEvidence = capturePropertyCampaignEvidence(task, verifiedOutputs);
 
   // Generated test files are runtime-owned companions. Materialize them only
   // after every declared output has passed immutable strict JSON/Ajv shape
@@ -4614,6 +4680,9 @@ function verifyArtifacts(
         rememberVerifiedPublication(publications, companion.path, companion.contents);
       }
     }
+  }
+  for (const [relativePath, snapshot] of campaignEvidence) {
+    rememberVerifiedPublication(publications, relativePath, snapshot.bytes);
   }
   if (invariantSuiteNodeIds.has(task.metadata.node.logicalNodeId)) {
     rememberInvariantSuitePublications(task, publications, artifactRoots);

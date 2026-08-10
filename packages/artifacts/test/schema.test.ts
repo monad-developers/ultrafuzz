@@ -555,6 +555,23 @@ test("property implementation and campaign schemas retain canonical references",
       raw_results: "backends/recon-fuzzer/results.json",
       reproducers: "backends/recon-fuzzer/reproducers"
     },
+    evidence_files: [
+      {
+        path: "backends/recon-fuzzer/run.log",
+        size_bytes: 1,
+        sha256: "a".repeat(64)
+      },
+      {
+        path: "backends/recon-fuzzer/results.json",
+        size_bytes: 1,
+        sha256: "b".repeat(64)
+      },
+      {
+        path: "backends/recon-fuzzer/reproducers/failure-1.t.sol",
+        size_bytes: 1,
+        sha256: "c".repeat(64)
+      }
+    ],
     coverage: {
       status: "reported",
       metrics: [{ name: "runs", value: 10, unit: "count", source_ref: "backends/recon-fuzzer/results.json" }],

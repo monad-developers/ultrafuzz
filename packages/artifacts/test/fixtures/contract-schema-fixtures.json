@@ -668,6 +668,7 @@
         "raw_results": "backends/recon-fuzzer/results.json",
         "reproducers": "backends/recon-fuzzer/reproducers"
       },
+      "evidence_files": [],
       "coverage": {
         "status": "unavailable",
         "metrics": [],
@@ -706,6 +707,7 @@
         "raw_results": "backends/recon-fuzzer/results.json",
         "reproducers": "backends/recon-fuzzer/reproducers"
       },
+      "evidence_files": [],
       "coverage": {
         "status": "unavailable",
         "metrics": [],

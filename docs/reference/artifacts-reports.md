@@ -323,6 +323,14 @@ one result row for every implemented property. Every observed failure carries
 its raw evidence plus either a deterministic reproducer or a typed reproduction
 blocker. Failure records caused by implemented catalog properties carry
 non-empty `property_ids`; non-property failures use an empty array.
+The required `evidence_files` array is a closed, bounded manifest of exact file
+references rather than a recursive backend-directory inventory. It lists the
+log when the backend started, raw results when the document claims usable or
+reported results, and every coverage, property-result, raw-reproducer, and
+deterministic-reproducer file exactly once with byte length and SHA-256. The
+reference set itself supplies each entry's role. Verification snapshots each
+regular non-symlink, non-hard-linked file once and reuses those bytes for digest
+checks, publication, and the verification marker.
 Property-derived `findings.json` entries carry the same property IDs and use a
 representative raw failure's ID. Historical v1/v2 records are rejected without
 conversion or compatibility fallback.
