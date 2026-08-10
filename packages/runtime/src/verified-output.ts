@@ -122,6 +122,7 @@ interface FinalizedNodeOutputAuthority {
   documents: AuthorityDocuments;
   artifactDir: string;
   publications: ReadonlyMap<string, PublicationSnapshot>;
+  gateContextFiles: ReadonlyMap<string, PublicationSnapshot>;
   prerequisiteManifests: ReadonlyMap<string, Buffer>;
   snapshot: VerifiedNodeOutputSnapshot;
 }
@@ -145,10 +146,10 @@ export function loadVerifiedNodeOutputSnapshot(input: LoadVerifiedNodeOutputInpu
         ])
       ),
       publications: new Map(
-        [...authority.publications].map(([relativePath, publication]) => [
-          relativePath,
-          Buffer.from(publication.bytes)
-        ])
+        [...authority.publications].map(([relativePath, publication]) => [relativePath, Buffer.from(publication.bytes)])
+      ),
+      files: new Map(
+        [...authority.gateContextFiles].map(([relativePath, file]) => [relativePath, Buffer.from(file.bytes)])
       )
     }
   );
@@ -195,8 +196,11 @@ function loadFinalizedNodeOutputAuthority(input: LoadVerifiedNodeOutputInput): F
   const outputSnapshots = validatePlannedOutputSnapshots(artifactDir, plannedNode, publicationSnapshots);
   const manifestSeal = finalizedManifestSeal(candidate.state);
   if (sha256Bytes(documents.manifestBytes) !== manifestSeal) {
-    throw invalidAuthority(`artifact manifest does not match controller finalization authority for ${candidate.attemptId}`);
+    throw invalidAuthority(
+      `artifact manifest does not match controller finalization authority for ${candidate.attemptId}`
+    );
   }
+  const gateContextFiles = readAndBindGateContextFiles(artifactDir, plannedNode, documents, publicationSnapshots);
   const prerequisiteManifests = capturePrerequisiteManifestAuthority(layout, graph, plannedNode, documents);
 
   const snapshot = Object.freeze({
@@ -214,6 +218,7 @@ function loadFinalizedNodeOutputAuthority(input: LoadVerifiedNodeOutputInput): F
     documents,
     artifactDir,
     publications: publicationSnapshots,
+    gateContextFiles,
     prerequisiteManifests,
     snapshot
   };
@@ -567,6 +572,41 @@ function readAndBindPublications(
   return snapshots;
 }
 
+/**
+ * Capture runtime-owned current-node files that semantic gates require but the
+ * verifier does not publish as agent outputs. Their bytes are authenticated by
+ * the controller-sealed artifact manifest and remain separate from marker
+ * publications so marker semantics are not widened accidentally.
+ */
+function readAndBindGateContextFiles(
+  artifactDir: string,
+  plannedNode: PlannedGraphNodeDocument,
+  documents: AuthorityDocuments,
+  publications: ReadonlyMap<string, PublicationSnapshot>
+): Map<string, PublicationSnapshot> {
+  const requiredPaths = new Set<string>();
+  if (plannedNode.outputs.some((output) => output.contract === "ultrafuzz/workspace-patch@1")) {
+    requiredPaths.add("workspace-patch-baseline.json");
+  }
+  const manifestFiles = uniqueByPath(documents.manifest.files, "artifact manifest file");
+  const snapshots = new Map<string, PublicationSnapshot>();
+  for (const relativePath of requiredPaths) {
+    if (publications.has(relativePath)) continue;
+    const manifestEntry = manifestFiles.get(relativePath);
+    if (manifestEntry === undefined) {
+      throw invalidAuthority(`controller artifact manifest does not bind required semantic context ${relativePath}`);
+    }
+    const absolutePath = safeResolveInside(artifactDir, relativePath, "verified semantic context path");
+    const bytes = readPublicationSnapshot(artifactDir, absolutePath, relativePath);
+    const digest = sha256Bytes(bytes);
+    if (digest !== manifestEntry.sha256 || bytes.byteLength !== manifestEntry.size_bytes) {
+      throw changedOutput(`verified semantic context digest/size binding changed for ${relativePath}`);
+    }
+    snapshots.set(relativePath, { path: relativePath, absolutePath, bytes, sha256: digest });
+  }
+  return snapshots;
+}
+
 function validatePlannedOutputSnapshots(
   artifactDir: string,
   plannedNode: PlannedGraphNodeDocument,
@@ -603,6 +643,7 @@ function assertFinalizedAuthorityRemainedCurrent(authority: FinalizedNodeOutputA
     documents: authority.documents,
     artifactDir: authority.artifactDir,
     publications: authority.publications,
+    gateContextFiles: authority.gateContextFiles,
     prerequisiteManifests: authority.prerequisiteManifests
   });
 }
@@ -614,6 +655,7 @@ function assertAuthorityRemainedCurrent(input: {
   documents: AuthorityDocuments;
   artifactDir: string;
   publications: ReadonlyMap<string, PublicationSnapshot>;
+  gateContextFiles: ReadonlyMap<string, PublicationSnapshot>;
   prerequisiteManifests: ReadonlyMap<string, Buffer>;
 }): void {
   const markerPath = safeResolveInside(
@@ -636,8 +678,16 @@ function assertAuthorityRemainedCurrent(input: {
       throw changedOutput(`verified publication changed while outputs were being read: ${publication.path}`);
     }
   }
+  for (const file of input.gateContextFiles.values()) {
+    const current = readPublicationSnapshot(input.artifactDir, file.absolutePath, file.path);
+    if (!current.equals(file.bytes)) {
+      throw changedOutput(`verified semantic context changed while outputs were being read: ${file.path}`);
+    }
+  }
   for (const [manifestPath, manifestBytes] of input.prerequisiteManifests) {
-    if (!readAuthoritySnapshot(input.layout.root, manifestPath, "prerequisite artifact manifest").equals(manifestBytes)) {
+    if (
+      !readAuthoritySnapshot(input.layout.root, manifestPath, "prerequisite artifact manifest").equals(manifestBytes)
+    ) {
       throw changedOutput(`prerequisite artifact manifest changed while outputs were being read: ${manifestPath}`);
     }
   }
