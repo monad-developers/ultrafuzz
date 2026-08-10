@@ -423,7 +423,7 @@ describe("deterministic scorer math", () => {
       row,
       findings: [
         matchedFinding(),
-        { id: "finding-2", title: "made-up nonsense", status: "false-positive" } // hard false positive
+        reviewFinding({ id: "finding-2", title: "made-up nonsense", summary: "No supporting detail." })
       ],
       bugs: BUGS
     });
@@ -469,15 +469,17 @@ describe("deterministic scorer math", () => {
   it("rejects missing and duplicate finding IDs instead of synthesizing replacements", async () => {
     const suite = testSuite("/tmp/gt");
     const row = testRow(suite);
+    const missingId = reviewFinding({ title: "Missing ID", summary: "A finding without an identity." });
+    delete missingId.id;
 
     await expect(
       scoreInMemory({
         suite,
         row,
-        findings: [{ title: "Missing ID", summary: "A finding without an identity." }],
+        findings: [missingId],
         bugs: BUGS
       })
-    ).rejects.toMatchObject({ code: "EVAL_FINDING_ID_INVALID" });
+    ).rejects.toMatchObject({ code: "EVAL_FINDINGS_INVALID" });
     await expect(
       scoreInMemory({
         suite,
@@ -486,6 +488,36 @@ describe("deterministic scorer math", () => {
         bugs: BUGS
       })
     ).rejects.toMatchObject({ code: "EVAL_FINDING_ID_INVALID" });
+  });
+
+  it("rejects malformed non-review findings before judge resolution or classification without mutation", async () => {
+    const suite = testSuite("/tmp/gt");
+    const findings = [{ id: "finding-weak", title: "Possible issue", summary: "Something may go wrong" }];
+    const before = structuredClone(findings);
+
+    await expect(
+      scoreInMemory({
+        suite,
+        row: testRow(suite),
+        findings,
+        bugs: BUGS,
+        llmJudge: true,
+        env: {}
+      })
+    ).rejects.toMatchObject({
+      code: "EVAL_FINDINGS_INVALID",
+      details: {
+        issue_count: expect.any(Number),
+        issues: expect.arrayContaining([
+          expect.objectContaining({
+            code: "FINDINGS_SCHEMA_INVALID",
+            path: "$[0]",
+            message: expect.stringMatching(/required property/u)
+          })
+        ])
+      }
+    });
+    expect(findings).toEqual(before);
   });
 
   it("routes strong, supported unmatched findings to the human review queue", async () => {
@@ -514,13 +546,18 @@ describe("deterministic scorer math", () => {
 
   it("classifies weak unsupported unmatched findings as false positives", async () => {
     const suite = testSuite("/tmp/gt");
+    const findings = [
+      reviewFinding({ id: "finding-weak", title: "Possible issue", summary: "Something may go wrong" })
+    ];
+    const before = structuredClone(findings);
     const scored = await scoreInMemory({
       suite,
       row: testRow(suite),
-      findings: [{ id: "finding-weak", title: "Possible issue", summary: "Something may go wrong" }],
+      findings,
       bugs: BUGS
     });
 
+    expect(findings).toEqual(before);
     expect(scored.rowScore).toMatchObject({ false_positives: 1, human_review_queue_count: 0 });
     expect(scored.findingScores[0]?.judge_result).toMatchObject({
       classification: "false-positive",
@@ -553,14 +590,12 @@ describe("deterministic scorer math", () => {
         reviewFinding({
           id: "finding-placeholder",
           title: "An unsupported placeholder issue",
-          summary: "An unmatched issue without concrete details",
-          proof_of_concept: "N/A"
+          summary: "An unmatched issue without concrete details"
         }),
         reviewFinding({
           id: "finding-minimal",
           title: "An unsupported minimal issue",
-          summary: "An unmatched issue without substantive details",
-          proof_of_concept: "yes"
+          summary: "An unmatched issue without substantive details"
         }),
         reviewFinding({
           id: "finding-reference",
@@ -582,44 +617,46 @@ describe("deterministic scorer math", () => {
     ]);
   });
 
-  it("ignores historical proof aliases when scoring unknown findings", async () => {
+  it("rejects historical proof aliases and malformed canonical proofs at the scoring boundary", async () => {
     const suite = testSuite("/tmp/gt");
     const aliasValue = {
       scenario: ["Invoke an unrelated operation", "Observe an unrelated result"],
       language: "text",
       code: "unrelated();"
     };
-    const aliasFindings = ["poc", "proof", "reproduction", "trace"].map((alias, index) =>
-      reviewFinding({
-        id: `finding-alias-${index}`,
-        title: `Unsupported historical alias ${index}`,
-        summary: "An unmatched issue without canonical evidence",
-        [alias]: aliasValue
-      })
-    );
-    const scored = await scoreInMemory({
-      suite,
-      row: testRow(suite),
-      findings: [
-        ...aliasFindings,
+    const invalidFindings = [
+      ...["poc", "proof", "reproduction", "trace"].map((alias, index) =>
         reviewFinding({
-          id: "finding-canonical-proof",
-          title: "Supported canonical proof",
-          summary: "An unmatched issue with canonical proof evidence",
-          proof_of_concept: aliasValue
+          id: `finding-alias-${index}`,
+          title: `Unsupported historical alias ${index}`,
+          summary: "An unmatched issue without canonical evidence",
+          [alias]: aliasValue
         })
-      ],
-      bugs: BUGS
-    });
+      ),
+      reviewFinding({
+        id: "finding-placeholder",
+        title: "Malformed canonical proof placeholder",
+        summary: "An unmatched issue with a non-object proof placeholder",
+        proof_of_concept: "N/A"
+      }),
+      reviewFinding({
+        id: "finding-minimal",
+        title: "Malformed canonical minimal proof",
+        summary: "An unmatched issue with a non-object minimal proof",
+        proof_of_concept: "yes"
+      })
+    ];
 
-    expect(scored.rowScore).toMatchObject({ false_positives: 4, human_review_queue_count: 1 });
-    expect(scored.findingScores.map((score) => score.judge_result.reason_code)).toEqual([
-      "weak-unmatched-finding",
-      "weak-unmatched-finding",
-      "weak-unmatched-finding",
-      "weak-unmatched-finding",
-      "strong-novel-finding"
-    ]);
+    for (const finding of invalidFindings) {
+      await expect(
+        scoreInMemory({
+          suite,
+          row: testRow(suite),
+          findings: [finding],
+          bugs: BUGS
+        })
+      ).rejects.toMatchObject({ code: "EVAL_FINDINGS_INVALID" });
+    }
   });
 
   it("supports a custom FindingJudge (grading never depends on a provider)", async () => {
@@ -658,7 +695,7 @@ describe("deterministic scorer math", () => {
     const scored = await scoreInMemory({
       suite,
       row: testRow(suite),
-      findings: [{ id: "finding-default-panel", title: "Possible issue", summary: "A partial match" }],
+      findings: [reviewFinding({ id: "finding-default-panel", title: "Possible issue", summary: "A partial match" })],
       bugs: BUGS,
       llmJudge: async (input) => {
         const member = calls++;
@@ -736,7 +773,7 @@ describe("deterministic scorer math", () => {
     const scored = await scoreInMemory({
       suite,
       row: testRow(suite, { judge_reasoning: "xhigh" }),
-      findings: [{ id: "finding-panel", title: "Possible issue", summary: "A partial match" }],
+      findings: [reviewFinding({ id: "finding-panel", title: "Possible issue", summary: "A partial match" })],
       bugs: BUGS,
       llmJudge: async (input) => {
         const member = calls;
@@ -874,7 +911,7 @@ describe("deterministic scorer math", () => {
     await scoreInMemory({
       suite,
       row: testRow(suite),
-      findings: [{ id: "finding-panel", title: "Possible issue", summary: "A partial match" }],
+      findings: [reviewFinding({ id: "finding-panel", title: "Possible issue", summary: "A partial match" })],
       bugs: BUGS,
       llmJudge: async (input) => {
         calls += 1;
@@ -896,7 +933,7 @@ describe("deterministic scorer math", () => {
     const scored = await scoreInMemory({
       suite,
       row: testRow(suite),
-      findings: [{ id: "candidate-finding", title: "Possible issue", summary: "A partial match" }],
+      findings: [reviewFinding({ id: "candidate-finding", title: "Possible issue", summary: "A partial match" })],
       bugs: BUGS,
       matchMode: "candidate",
       llmJudge: async (input) => {

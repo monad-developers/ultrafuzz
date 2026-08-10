@@ -7,6 +7,8 @@ import {
   ARTIFACT_VERIFICATION_SCHEMA_VERSION,
   EVENT_SCHEMA_VERSION,
   PLANNED_GRAPH_SCHEMA_VERSION,
+  SMITHERS_TASK_MANIFEST_SCHEMA_VERSION,
+  SMITHERS_TASK_METADATA_SCHEMA_VERSION,
   STATE_SCHEMA_VERSION,
   assertEventRecord,
   artifactContractDefinition,
@@ -21,9 +23,12 @@ import {
   type EventRecord,
   type NodeState,
   type PlannedGraphDocument,
-  type RunState
+  type RunLayout,
+  type RunState,
+  type SmithersTaskManifestDocument,
+  type SmithersTaskManifestTask
 } from "@ultrafuzz/artifacts";
-import { projectCanonicalFinalReport } from "@ultrafuzz/runtime";
+import { WORKFLOW_CONTROL_INTEGRITY_SCHEMA_VERSION, projectCanonicalFinalReport } from "@ultrafuzz/runtime";
 
 import type {
   EvalArtifactUpload,
@@ -604,37 +609,13 @@ export function writeVerifiedFinalReport(input: {
   const outputs = verifiedFinalReportOutputs();
   const graph = currentPlannedGraph();
   graph.nodes[0]!.outputs = outputs;
+  graph.nodes[0]!.workflow = {
+    node_id: "node:final-report",
+    task_node_ids: ["node:final-report"]
+  };
   const workflowRunId = `workflow-${runId}`;
   const agentTaskId = "node:final-report";
   const verifierTaskId = "verify:final-report";
-  const state = currentRunState({
-    runId,
-    nodes: {
-      "final-report": {
-        logical_node_id: "final-report",
-        artifact_dir: "artifacts/final-report",
-        outputs,
-        provenance: {
-          workflow: {
-            run_id: workflowRunId,
-            task_id: verifierTaskId,
-            agent_task_id: agentTaskId,
-            verifier_task_id: verifierTaskId,
-            state: "finished",
-            attempt: 0
-          },
-          output_contracts: { ok: true, missing: [], artifact_manifest_sha256: "a".repeat(64) }
-        }
-      }
-    }
-  });
-  writeCurrentRunEvidence({
-    runRoot: input.runRoot,
-    runId,
-    state,
-    graph,
-    ...(input.accounting === undefined ? {} : { accounting: input.accounting })
-  });
 
   const layout = layoutForRunRoot(input.runRoot, runId);
   const reportPath = path.join(layout.artifactsDir, "final-report", "report.json");
@@ -673,7 +654,166 @@ export function writeVerifiedFinalReport(input: {
     }))
   };
   writeJsonDurable(path.join(layout.root, ".ultrafuzz-verification", "final-report.json"), marker);
+  const manifestPath = path.join(layout.artifactsDir, "final-report", "artifact-manifest.json");
+  const state = currentRunState({
+    runId,
+    nodes: {
+      "final-report": {
+        logical_node_id: "final-report",
+        artifact_dir: "artifacts/final-report",
+        outputs,
+        provenance: {
+          workflow: {
+            run_id: workflowRunId,
+            task_id: verifierTaskId,
+            agent_task_id: agentTaskId,
+            verifier_task_id: verifierTaskId,
+            state: "finished",
+            attempt: 0
+          },
+          output_contracts: {
+            ok: true,
+            missing: [],
+            artifact_manifest_sha256: sha256Bytes(fs.readFileSync(manifestPath))
+          }
+        }
+      }
+    }
+  });
+  writeCurrentRunEvidence({
+    runRoot: input.runRoot,
+    runId,
+    state,
+    graph,
+    ...(input.accounting === undefined ? {} : { accounting: input.accounting })
+  });
+  writeSealedFinalReportAuthority(layout, graph, outputs, workflowRunId);
   return { reportPath, markdownPath, reportBytes, markdownBytes };
+}
+
+function writeSealedFinalReportAuthority(
+  layout: RunLayout,
+  graph: PlannedGraphDocument,
+  outputs: ArtifactManifestOutputContract[],
+  workflowRunId: string
+): void {
+  const node = graph.nodes[0]!;
+  const model = node.model_fanout[0]!;
+  const artifactDir = path.join(layout.artifactsDir, "final-report");
+  const workspacePath = path.join(layout.workspacesDir, "final-report");
+  const taskOutputs = outputs.map((output) => ({
+    path: output.path,
+    contract: output.contract,
+    contractDigest: output.contract_digest,
+    ...(output.schema_file === undefined
+      ? {}
+      : {
+          schemaFile: output.schema_file,
+          schemaId: output.schema_id,
+          schemaSha256: output.schema_sha256,
+          schemaBundleSha256: output.schema_bundle_sha256,
+          validatorBuild: output.validator_build
+        }),
+    primary: output.primary
+  }));
+  const resources = { cpu: 2, memoryMiB: 1_024, timeoutSeconds: 60 };
+  const task: SmithersTaskManifestTask = {
+    attemptId: "final-report",
+    concreteNodeId: node.id,
+    logicalNodeId: node.logical_id,
+    preparationSmithersNodeId: "prepare:final-report",
+    smithersNodeId: "node:final-report",
+    verifierSmithersNodeId: "verify:final-report",
+    agentRef: model.agent_ref,
+    dependencies: [],
+    dependencySmithersNodeIds: [],
+    timeoutMs: 60_000,
+    heartbeatTimeoutMs: 60_000,
+    retries: 0,
+    retryPolicy: { backoff: "exponential", initialDelayMs: 1_000, maxDelayMs: 30_000 },
+    workspacePath,
+    artifactDir,
+    dependencyArtifactDirs: [],
+    renderedPromptPath: path.join(layout.root, "prompts", "final-report.md"),
+    execution: { mode: "local", resources, agentCredentialEnv: [] },
+    metadata: {
+      schemaVersion: SMITHERS_TASK_METADATA_SCHEMA_VERSION,
+      run: {
+        ultrafuzzRunId: layout.runId,
+        smithersWorkflowName: workflowRunId,
+        graphVersion: "3",
+        topologyVersion: 2
+      },
+      node: {
+        concreteNodeId: node.id,
+        logicalNodeId: node.logical_id,
+        attemptId: "final-report",
+        label: node.display_name,
+        kind: "agentic",
+        promptPath: node.prompt_path
+      },
+      dependencies: { concreteNodeIds: [], attemptIds: [], smithersNodeIds: [] },
+      loop: {
+        index: node.loop.index,
+        count: node.loop.count,
+        mode: node.loop.mode,
+        attemptIndex: node.loop.attempt_index
+      },
+      model: {
+        profileId: model.model_profile_id,
+        agentRef: model.agent_ref,
+        modelIndex: model.model_index,
+        attemptIndex: model.attempt_index
+      },
+      workspace: { primitive: "worktree", path: workspacePath, repoPath: "/repo", trustModel: "skip-permissions" },
+      artifacts: {
+        dir: artifactDir,
+        outputs: taskOutputs,
+        manifestPath: path.join(artifactDir, "artifact-manifest.json")
+      },
+      retryPolicy: { maxAttempts: 1, smithersRetries: 0 },
+      timeout: { milliseconds: 60_000, seconds: 60, heartbeatTimeoutMs: 60_000 },
+      execution: { mode: "local", resources }
+    }
+  };
+  const smithersRoot = path.join(layout.root, "smithers");
+  const tasksPath = path.join(smithersRoot, "tasks.json");
+  const document: SmithersTaskManifestDocument = {
+    schema_version: SMITHERS_TASK_MANIFEST_SCHEMA_VERSION,
+    run_id: layout.runId,
+    smithers_run_id: `ultrafuzz-${layout.runId}`,
+    workflow_name: workflowRunId,
+    pinned_submodules: null,
+    tasks: [task]
+  };
+  writeJsonDurable(tasksPath, document);
+
+  const graphBytes = fs.readFileSync(layout.graphPath);
+  const taskBytes = fs.readFileSync(tasksPath);
+  const emptyFile = { sha256: sha256Bytes(Buffer.alloc(0)), size_bytes: 0 };
+  writeJsonDurable(path.join(smithersRoot, "control-integrity.json"), {
+    schema_version: WORKFLOW_CONTROL_INTEGRITY_SCHEMA_VERSION,
+    run_id: layout.runId,
+    files: {
+      graph: { sha256: sha256Bytes(graphBytes), size_bytes: graphBytes.byteLength },
+      expanded_graph: emptyFile,
+      graph_fingerprint: emptyFile,
+      config: emptyFile,
+      tasks: { sha256: sha256Bytes(taskBytes), size_bytes: taskBytes.byteLength },
+      input: emptyFile,
+      workflow: emptyFile,
+      evidence_workflow: emptyFile
+    },
+    execution_files: [],
+    bindings: {
+      run_id: layout.runId,
+      graph_fingerprint: TEST_SHA256,
+      config_fingerprint: TEST_SHA256,
+      expected_state_node_ids: ["final-report"],
+      expected_task_attempt_ids: ["final-report"],
+      expected_task_node_ids: ["node:final-report", "prepare:final-report", "verify:final-report"].sort()
+    }
+  });
 }
 
 function verifiedFinalReportOutputs(): ArtifactManifestOutputContract[] {

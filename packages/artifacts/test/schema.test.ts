@@ -417,15 +417,27 @@ test("finding schema accepts a canonical v2 finding and rejects malformed payloa
     summary: "Input length reaches an expensive path."
   };
 
-  assert.equal(validateFindingSchema(finding).ok, true);
-  assert.equal(validateFindingsSchema([finding]).ok, true);
+  const findings = [finding];
+  const before = structuredClone(findings);
+  const findingValidation = validateFindingSchema(finding);
+  const findingsValidation = validateFindingsSchema(findings);
+
+  assert.equal(findingValidation.ok, true);
+  assert.equal(findingValidation.value, finding);
+  assert.equal(findingsValidation.ok, true);
+  assert.equal(findingsValidation.value, findings);
+  assert.deepEqual(findings, before);
 
   const missingSummary = { ...finding };
   delete (missingSummary as Partial<typeof finding>).summary;
   const invalid = validateFindingSchema(missingSummary);
 
   assert.equal(invalid.ok, false);
-  assert.ok(invalid.issues.some((issue) => issue.path === "$.summary"));
+  assert.ok(
+    invalid.issues.some(
+      (issue) => issue.path === "$" && issue.code === "FINDING_SCHEMA_INVALID" && issue.message.includes("summary")
+    )
+  );
 });
 
 test("property catalog schema accepts one source and preserves multiple deduplicated sources", () => {

@@ -5,6 +5,7 @@ import {
   assertRegularFileInside,
   parseStrictJson,
   validateFindingSchema,
+  validateFindingsSchema,
   type NormalizedFinding
 } from "@ultrafuzz/artifacts";
 import { loadVerifiedFinalReportSnapshot } from "@ultrafuzz/runtime";
@@ -348,12 +349,23 @@ export async function scoreFindingsAgainstGroundTruth(input: ScoreFindingsAgains
   findingScores: EvalFindingScore[];
   reviewQueue: HumanReviewQueueItem[];
 }> {
+  const findingsValidation = validateFindingsSchema(input.findings);
+  if (!findingsValidation.ok || findingsValidation.value === undefined) {
+    throw new EvalError("EVAL_FINDINGS_INVALID", "scored findings must satisfy ultrafuzz.findings.v2", {
+      issue_count: findingsValidation.issues.length,
+      issues: findingsValidation.issues.slice(0, 8).map((issue) => ({
+        code: issue.code,
+        path: issue.path,
+        message: issue.message
+      }))
+    });
+  }
   return scoreFindings({
     suite: input.suite,
     row: input.row,
     record: input.record,
     reportPath: input.reportPath ?? "inline-findings",
-    findings: input.findings,
+    findings: findingsValidation.value,
     bugs: input.bugs,
     groundTruthSubject: input.groundTruthSubject,
     reportSchemaValid: input.reportSchemaValid ?? true,
