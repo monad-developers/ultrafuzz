@@ -152,7 +152,7 @@ export function writeCurrentTerminalReport(
                 state: "finished",
                 attempt: 0
               },
-              output_contracts: { ok: true, missing: [] }
+              output_contracts: { ok: true, missing: [], artifact_manifest_sha256: "a".repeat(64) }
             }
           }
         },
@@ -272,7 +272,7 @@ export function currentRunState(
     })
   );
   return {
-    schema_version: "ultrafuzz.run-state.v4",
+    schema_version: "ultrafuzz.run-state.v5",
     run_id: "fixture-run",
     status: Object.values(nodes).some((node) => node.status === "failed") ? "failed" : "succeeded",
     graph_fingerprint: "a".repeat(64),
@@ -315,7 +315,7 @@ export function currentGenuineTaskFailureState(attemptId: string): Record<string
           verifier_task_id: `verify:${attemptId}`,
           state: "finished"
         },
-        output_contracts: { ok: true, missing: [] },
+        output_contracts: { ok: true, missing: [], artifact_manifest_sha256: "a".repeat(64) },
         terminal_disposition: {
           schema_version: "ultrafuzz.terminal-disposition.v1",
           kind: "task-output-validation-failure"
@@ -333,7 +333,7 @@ export function currentGenuineTaskFailureState(attemptId: string): Record<string
           verifier_task_id: "verify:final-report",
           state: "finished"
         },
-        output_contracts: { ok: true, missing: [] }
+        output_contracts: { ok: true, missing: [], artifact_manifest_sha256: "a".repeat(64) }
       }
     }
   });

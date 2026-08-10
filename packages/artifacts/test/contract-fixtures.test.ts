@@ -1086,7 +1086,7 @@ test("run-state v4 JSON Schema and Zod agree on every closed provenance variant"
       label: "execution-task",
       value: withNodeProvenance({
         workflow: taskWorkflow,
-        output_contracts: { ok: true, missing: [] },
+        output_contracts: { ok: true, missing: [], artifact_manifest_sha256: "a".repeat(64) },
         findings_count: 0
       }),
       expected: true

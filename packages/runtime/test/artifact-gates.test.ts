@@ -440,7 +440,13 @@ function finalizeArtifactNode(
         state: "finished",
         attempt: 0
       },
-      output_contracts: { ok: true, missing: [] }
+      output_contracts: {
+        ok: true,
+        missing: [],
+        artifact_manifest_sha256: createHash("sha256")
+          .update(fs.readFileSync(path.join(getNodeArtifactDir(layout, nodeId), "artifact-manifest.json")))
+          .digest("hex")
+      }
     }
   });
 }

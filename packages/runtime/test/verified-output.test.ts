@@ -200,7 +200,13 @@ function createVerifiedReportFixture(
         state: "finished",
         attempt: 0
       },
-      output_contracts: { ok: true, missing: [] }
+      output_contracts: {
+        ok: true,
+        missing: [],
+        artifact_manifest_sha256: digest(
+          fs.readFileSync(path.join(layout.artifactsDir, "final-report", "artifact-manifest.json"))
+        )
+      }
     }
   });
   return { layout, reportPath, markdownPath, reportBytes, markdownBytes };

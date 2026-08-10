@@ -185,6 +185,16 @@ export function dependencyGateForNode(
   };
 }
 
+export interface AuthenticatedArtifactGateSnapshot {
+  absolutePath: string;
+  bytes: Buffer;
+}
+
+export interface AuthenticatedArtifactGateSnapshots {
+  outputs: ReadonlyMap<string, AuthenticatedArtifactGateSnapshot>;
+  publications: ReadonlyMap<string, Uint8Array>;
+}
+
 export function verifyRequiredArtifactsForNode(layout: RunLayout, node: PlannedGraphNode): RequiredArtifactGate {
   return verifyRequiredArtifactsForAttempt(layout, node, node.id);
 }
@@ -192,7 +202,8 @@ export function verifyRequiredArtifactsForNode(layout: RunLayout, node: PlannedG
 export function verifyRequiredArtifactsForAttempt(
   layout: RunLayout,
   node: PlannedGraphNode,
-  attemptId: string
+  attemptId: string,
+  authenticated?: AuthenticatedArtifactGateSnapshots
 ): RequiredArtifactGate {
   const diagnostics: RuntimeDiagnostic[] = [];
   const missing: string[] = [];
@@ -208,7 +219,17 @@ export function verifyRequiredArtifactsForAttempt(
     const required = output.path;
     try {
       const absolutePath = safeResolveInside(artifactDir, required, "required artifact");
-      if (!fs.existsSync(absolutePath)) {
+      const authenticatedOutput = authenticated?.outputs.get(required);
+      if (authenticated !== undefined && authenticatedOutput === undefined) {
+        missing.push(required);
+        diagnostics.push({
+          code: "REQUIRED_ARTIFACT_MISSING",
+          message: `authenticated required artifact ${required} is unavailable for ${attemptId}`,
+          severity: "error",
+          source: "artifact-gates",
+          path: path.posix.join("artifacts", attemptId, required)
+        });
+      } else if (authenticated === undefined && !fs.existsSync(absolutePath)) {
         missing.push(required);
         diagnostics.push({
           code: "REQUIRED_ARTIFACT_MISSING",
@@ -218,8 +239,22 @@ export function verifyRequiredArtifactsForAttempt(
           path: path.posix.join("artifacts", attemptId, required)
         });
       } else {
-        assertRegularFileInside(artifactDir, absolutePath, "required artifact");
-        diagnostics.push(...verifyRequiredArtifactShape(layout, artifactDir, absolutePath, output, node, attemptId));
+        if (authenticatedOutput !== undefined && authenticatedOutput.absolutePath !== absolutePath) {
+          throw new Error(`authenticated required artifact path does not match its declaration: ${required}`);
+        }
+        if (authenticated === undefined) assertRegularFileInside(artifactDir, absolutePath, "required artifact");
+        diagnostics.push(
+          ...verifyRequiredArtifactShape(
+            layout,
+            artifactDir,
+            absolutePath,
+            output,
+            node,
+            attemptId,
+            authenticatedOutput?.bytes,
+            authenticated?.publications
+          )
+        );
       }
     } catch (error) {
       diagnostics.push(diagnosticFromError(error, "artifact-gates", "REQUIRED_ARTIFACT_INVALID"));
@@ -1710,9 +1745,14 @@ function verifyRequiredArtifactShape(
   absolutePath: string,
   output: PlannedGraphNode["outputs"][number],
   node: PlannedGraphNode,
-  attemptId: string
+  attemptId: string,
+  authenticatedBytes?: Buffer,
+  authenticatedPublications?: ReadonlyMap<string, Uint8Array>
 ): RuntimeDiagnostic[] {
-  const artifactBytes = readRegularFileSnapshot(absolutePath, MAX_ARTIFACT_SNAPSHOT_BYTES);
+  const artifactBytes =
+    authenticatedBytes === undefined
+      ? readRegularFileSnapshot(absolutePath, MAX_ARTIFACT_SNAPSHOT_BYTES)
+      : Buffer.from(authenticatedBytes);
   const schemaDiagnostics = verifyRequiredArtifactSchemaBinding(absolutePath, output, artifactBytes);
   if (schemaDiagnostics.some((diagnostic) => diagnostic.severity === "error")) return schemaDiagnostics;
   const binding = artifactContractSchemaBinding(output.contract);
@@ -1742,7 +1782,8 @@ function verifyRequiredArtifactShape(
           artifactDir,
           node,
           attemptId,
-          schemaFilename: binding.schema_file as ArtifactSchemaFilename
+          schemaFilename: binding.schema_file as ArtifactSchemaFilename,
+          authenticatedPublications
         })
       })
     );
@@ -1823,9 +1864,13 @@ function semanticGateContextForArtifact(input: {
   node: PlannedGraphNode;
   attemptId: string;
   schemaFilename: ArtifactSchemaFilename;
+  authenticatedPublications?: ReadonlyMap<string, Uint8Array>;
 }): SemanticGateContext {
   const context: SemanticGateContext = {
-    filesystem: { rootDirectory: input.artifactDir },
+    filesystem: {
+      rootDirectory: input.artifactDir,
+      ...(input.authenticatedPublications === undefined ? {} : { files: input.authenticatedPublications })
+    },
     plannedGraph: { node: input.node },
     artifactIdentity: {
       runId: input.layout.runId,

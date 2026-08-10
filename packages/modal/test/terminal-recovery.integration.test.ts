@@ -254,7 +254,10 @@ function durableStateForGate(gate: { ok: boolean; missing: string[] }): unknown 
     setup: {
       status: "succeeded",
       finished_at: "2026-01-01T00:00:30.000Z",
-      provenance: { workflow: taskWorkflow("setup"), output_contracts: { ok: true, missing: [] } }
+      provenance: {
+        workflow: taskWorkflow("setup"),
+        output_contracts: { ok: true, missing: [], artifact_manifest_sha256: "a".repeat(64) }
+      }
     },
     "task-one": {
       status: gate.ok ? "succeeded" : "failed",
@@ -287,7 +290,10 @@ function durableOperationalFailure(): unknown {
     setup: {
       status: "succeeded",
       finished_at: "2026-01-01T00:00:30.000Z",
-      provenance: { workflow: taskWorkflow("setup"), output_contracts: { ok: true, missing: [] } }
+      provenance: {
+        workflow: taskWorkflow("setup"),
+        output_contracts: { ok: true, missing: [], artifact_manifest_sha256: "a".repeat(64) }
+      }
     },
     "task-one": {
       status: "failed",
@@ -295,7 +301,7 @@ function durableOperationalFailure(): unknown {
       last_error: "verification worker lost access to its volume",
       provenance: {
         workflow: taskWorkflow("task-one"),
-        output_contracts: { ok: true, missing: [] },
+        output_contracts: { ok: true, missing: [], artifact_manifest_sha256: "a".repeat(64) },
         failure: {
           category: "artifact-contract",
           causal_task_id: "verify:task-one",

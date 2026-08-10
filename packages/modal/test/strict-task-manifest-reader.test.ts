@@ -31,12 +31,12 @@ it("classifies only a current strict task manifest joined to its planned graph",
   fs.writeFileSync(
     fixture.statePath,
     currentState.replace(
-      '"schema_version":"ultrafuzz.run-state.v4"',
-      '"schema_version":"ultrafuzz.run-state.v4","schema_version":"ultrafuzz.run-state.v4"'
+      '"schema_version":"ultrafuzz.run-state.v5"',
+      '"schema_version":"ultrafuzz.run-state.v5","schema_version":"ultrafuzz.run-state.v5"'
     )
   );
   expect(inspectTerminalDispositionAtRunRoot(fixture.runRoot).kind).toBe("operational-failure");
-  fs.writeFileSync(fixture.statePath, currentState.replace("ultrafuzz.run-state.v4", "ultrafuzz.run-state.v3"));
+  fs.writeFileSync(fixture.statePath, currentState.replace("ultrafuzz.run-state.v5", "ultrafuzz.run-state.v4"));
   expect(inspectTerminalDispositionAtRunRoot(fixture.runRoot).kind).toBe("operational-failure");
   fs.writeFileSync(fixture.statePath, currentState);
 

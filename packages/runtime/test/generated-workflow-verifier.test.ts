@@ -2761,7 +2761,11 @@ test("generated Smithers dependency verification fails closed before descendant 
           .digest("hex")
       );
     }
-  ) as (task: { attemptId: string; runRoot: string }, dependency: string) => void;
+  ) as (
+    task: { attemptId: string; runRoot: string },
+    dependency: string,
+    capturedArtifact?: Readonly<{ relativePath: string; bytes: Buffer }>
+  ) => void;
 
   const task = { attemptId: "stateful-invariant-setup", runRoot };
   assert.throws(
@@ -2854,6 +2858,20 @@ test("generated Smithers dependency verification fails closed before descendant 
   fs.writeFileSync(path.join(dependency, "properties.json"), verifiedBytes);
   writeMarker([validArtifact]);
   assert.doesNotThrow(() => assertVerifiedDependency(task, dependency));
+  const unauthenticatedCapturedBytes = Buffer.from("swapped only while captured\n", "utf8");
+  assert.throws(
+    () =>
+      assertVerifiedDependency(task, dependency, {
+        relativePath: "properties.json",
+        bytes: unauthenticatedCapturedBytes
+      }),
+    /artifact dependency has not passed verification property-specification-fanin/u
+  );
+  fs.writeFileSync(path.join(dependency, "properties.json"), "changed after the authoritative capture\n", "utf8");
+  assert.doesNotThrow(() =>
+    assertVerifiedDependency(task, dependency, { relativePath: "properties.json", bytes: verifiedBytes })
+  );
+  fs.writeFileSync(path.join(dependency, "properties.json"), verifiedBytes);
   fs.mkdirSync(path.join(generatedDependency, "generated-tests"), { recursive: true });
   const generatedBytes = Buffer.from('{"generated_tests":[{"path":"generated-tests/Property.t.sol"}]}\n');
   fs.writeFileSync(path.join(generatedDependency, "generated-tests.json"), generatedBytes);

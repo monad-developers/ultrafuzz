@@ -431,7 +431,7 @@ function verifiedDependencyJsonArtifact(
   // verification marker after capture. A later replacement cannot change the
   // context retained by this verifier, while a replacement before this check
   // makes the dependency marker/digest verification fail closed.
-  assertVerifiedDependency(task, dependency);
+  assertVerifiedDependency(task, dependency, { relativePath, bytes: snapshot.bytes });
   return { path: artifactPath, value };
 }
 
@@ -2092,7 +2092,11 @@ function assertTaskInputs(task: (typeof taskSpecs)[number], workspaceRoot: strin
   }
 }
 
-function assertVerifiedDependency(task: (typeof taskSpecs)[number], dependency: string): void {
+function assertVerifiedDependency(
+  task: (typeof taskSpecs)[number],
+  dependency: string,
+  capturedArtifact?: Readonly<{ relativePath: string; bytes: Buffer }>
+): void {
   try {
     const dependencyAttemptId = path.basename(dependency);
     const dependencyTask = taskSpecs.find((candidate) => candidate.attemptId === dependencyAttemptId);
@@ -2143,6 +2147,7 @@ function assertVerifiedDependency(task: (typeof taskSpecs)[number], dependency: 
       throw new Error("verification marker artifact set does not match the declared outputs");
     }
     const seenPaths = new Set<string>();
+    let capturedArtifactAuthenticated = capturedArtifact === undefined;
     const declaredArtifactShas = new Map<string, string>();
     const expectedPublicationShas = new Map<string, string>();
     for (const artifact of marker.artifacts) {
@@ -2192,12 +2197,15 @@ function assertVerifiedDependency(task: (typeof taskSpecs)[number], dependency: 
       }
       assertSafeVerifiedPublicationPath(entry.path);
       const artifactPath = path.resolve(dependency, entry.path);
-      const artifactSnapshot = readBoundedRegularArtifactSnapshot(
-        dependency,
-        artifactPath,
-        `artifact-contract failure: verified dependency artifact is missing ${entry.path}`,
-        MAX_VERIFIED_ARTIFACT_BYTES
-      );
+      const artifactSnapshot =
+        capturedArtifact?.relativePath === entry.path
+          ? Object.freeze({ path: artifactPath, bytes: Buffer.from(capturedArtifact.bytes) })
+          : readBoundedRegularArtifactSnapshot(
+              dependency,
+              artifactPath,
+              `artifact-contract failure: verified dependency artifact is missing ${entry.path}`,
+              MAX_VERIFIED_ARTIFACT_BYTES
+            );
       const contents = decodeStrictUtf8Snapshot(
         artifactSnapshot,
         `artifact-contract failure: verified dependency artifact ${entry.path}`
@@ -2228,6 +2236,7 @@ function assertVerifiedDependency(task: (typeof taskSpecs)[number], dependency: 
       if (artifactSha !== entry.sha256) {
         throw new Error(`verified dependency artifact changed ${entry.path}`);
       }
+      if (capturedArtifact?.relativePath === entry.path) capturedArtifactAuthenticated = true;
       const validation = validateArtifactContract(
         entry.contract as Parameters<typeof validateArtifactContract>[0],
         contents,
@@ -2246,6 +2255,9 @@ function assertVerifiedDependency(task: (typeof taskSpecs)[number], dependency: 
     }
     if (seenPaths.size !== expectedArtifacts.size) {
       throw new Error("verification marker is missing a declared output");
+    }
+    if (!capturedArtifactAuthenticated) {
+      throw new Error(`verification marker does not authenticate captured artifact ${capturedArtifact?.relativePath}`);
     }
     if (invariantSuiteNodeIds.has(dependencyTask.metadata.node.logicalNodeId)) {
       rememberExpectedInvariantSuitePublications(dependencyTask, dependency, expectedPublicationShas);

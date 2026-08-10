@@ -21,7 +21,6 @@ import {
   validateArtifactManifest,
   validateArtifactVerificationMarker,
   validateSafeId,
-  verifyArtifactManifestPrerequisites,
   type ArtifactContractId,
   type ArtifactManifest,
   type ArtifactManifestOutputContract,
@@ -123,6 +122,7 @@ interface FinalizedNodeOutputAuthority {
   documents: AuthorityDocuments;
   artifactDir: string;
   publications: ReadonlyMap<string, PublicationSnapshot>;
+  prerequisiteManifests: ReadonlyMap<string, Buffer>;
   snapshot: VerifiedNodeOutputSnapshot;
 }
 
@@ -136,7 +136,21 @@ export function loadVerifiedNodeOutputSnapshot(input: LoadVerifiedNodeOutputInpu
   const gate = verifyRequiredArtifactsForAttempt(
     authority.layout,
     authority.plannedNode,
-    authority.snapshot.attempt_id
+    authority.snapshot.attempt_id,
+    {
+      outputs: new Map(
+        authority.snapshot.outputs.map((output) => [
+          output.path,
+          { absolutePath: output.absolute_path, bytes: Buffer.from(output.bytes) }
+        ])
+      ),
+      publications: new Map(
+        [...authority.publications].map(([relativePath, publication]) => [
+          relativePath,
+          Buffer.from(publication.bytes)
+        ])
+      )
+    }
   );
   const gateErrors = gate.diagnostics.filter((diagnostic) => diagnostic.severity === "error");
   if (!gate.ok || gateErrors.length > 0) {
@@ -179,13 +193,11 @@ function loadFinalizedNodeOutputAuthority(input: LoadVerifiedNodeOutputInput): F
   const artifactDir = safeResolveInside(layout.artifactsDir, candidate.attemptId, "verified artifact directory");
   const publicationSnapshots = readAndBindPublications(artifactDir, plannedNode, documents);
   const outputSnapshots = validatePlannedOutputSnapshots(artifactDir, plannedNode, publicationSnapshots);
-
-  const prerequisiteGate = verifyArtifactManifestPrerequisites(layout, candidate.attemptId);
-  if (!prerequisiteGate.ok) {
-    throw invalidAuthority(
-      `verified output prerequisite manifests are not current for ${candidate.attemptId}; changed: ${prerequisiteGate.changed.join(", ") || "none"}; missing: ${prerequisiteGate.missing.join(", ") || "none"}`
-    );
+  const manifestSeal = finalizedManifestSeal(candidate.state);
+  if (sha256Bytes(documents.manifestBytes) !== manifestSeal) {
+    throw invalidAuthority(`artifact manifest does not match controller finalization authority for ${candidate.attemptId}`);
   }
+  const prerequisiteManifests = capturePrerequisiteManifestAuthority(layout, graph, plannedNode, documents);
 
   const snapshot = Object.freeze({
     run_root: layout.root,
@@ -202,8 +214,124 @@ function loadFinalizedNodeOutputAuthority(input: LoadVerifiedNodeOutputInput): F
     documents,
     artifactDir,
     publications: publicationSnapshots,
+    prerequisiteManifests,
     snapshot
   };
+}
+
+function finalizedManifestSeal(nodeState: NodeState): string {
+  const provenance = nodeState.provenance;
+  const outputContracts = isRecord(provenance) ? provenance.output_contracts : undefined;
+  const digest = isRecord(outputContracts) ? outputContracts.artifact_manifest_sha256 : undefined;
+  if (typeof digest !== "string" || !/^[0-9a-f]{64}$/u.test(digest)) {
+    throw invalidAuthority(`controller artifact manifest digest is missing for ${nodeState.node_id}`);
+  }
+  return digest;
+}
+
+function capturePrerequisiteManifestAuthority(
+  layout: RunLayout,
+  graph: PlannedGraphDocument,
+  rootNode: PlannedGraphNodeDocument,
+  rootDocuments: AuthorityDocuments
+): ReadonlyMap<string, Buffer> {
+  const snapshots = new Map<string, Buffer>();
+  const digestsByNode = new Map<string, string>();
+  const visiting = new Set<string>();
+
+  const capture = (
+    manifest: ArtifactManifest,
+    manifestBytes: Buffer,
+    plannedNode: PlannedGraphNodeDocument,
+    manifestPath: string
+  ): void => {
+    if (visiting.has(manifest.node_id)) {
+      throw invalidAuthority(`artifact manifest prerequisite cycle includes ${manifest.node_id}`);
+    }
+    const digest = sha256Bytes(manifestBytes);
+    const priorDigest = digestsByNode.get(manifest.node_id);
+    if (priorDigest !== undefined) {
+      if (priorDigest !== digest) {
+        throw invalidAuthority(`artifact manifest prerequisite ${manifest.node_id} has conflicting digests`);
+      }
+      return;
+    }
+    visiting.add(manifest.node_id);
+    digestsByNode.set(manifest.node_id, digest);
+    snapshots.set(manifestPath, Buffer.from(manifestBytes));
+
+    const seenPrerequisites = new Set<string>();
+    const prerequisiteConcreteIds: string[] = [];
+    for (const prerequisite of manifest.prerequisite_manifests) {
+      if (seenPrerequisites.has(prerequisite.node_id)) {
+        throw invalidAuthority(`artifact manifest repeats prerequisite ${prerequisite.node_id}`);
+      }
+      seenPrerequisites.add(prerequisite.node_id);
+      const prerequisitePath = safeResolveInside(
+        safeResolveInside(layout.artifactsDir, prerequisite.node_id, "prerequisite artifact directory"),
+        ARTIFACT_MANIFEST_FILE,
+        "prerequisite artifact manifest"
+      );
+      const prerequisiteBytes = readAuthoritySnapshot(layout.root, prerequisitePath, "prerequisite artifact manifest");
+      if (sha256Bytes(prerequisiteBytes) !== prerequisite.sha256) {
+        throw invalidAuthority(`artifact manifest prerequisite digest changed for ${prerequisite.node_id}`);
+      }
+      const prerequisiteManifest = parseAndValidateManifest(prerequisiteBytes, prerequisite.node_id);
+      if (
+        prerequisiteManifest.run_id !== layout.runId ||
+        prerequisiteManifest.node_id !== prerequisite.node_id ||
+        prerequisiteManifest.producer_node_id !== prerequisite.node_id
+      ) {
+        throw invalidAuthority(`artifact manifest prerequisite identity is invalid for ${prerequisite.node_id}`);
+      }
+      const concreteId = concreteNodeIdFromManifest(prerequisiteManifest) ?? prerequisiteManifest.node_id;
+      const candidates = graph.nodes.filter((node) => node.id === concreteId);
+      if (candidates.length !== 1) {
+        throw invalidAuthority(
+          `artifact manifest prerequisite ${prerequisite.node_id} does not bind one current planned node`
+        );
+      }
+      prerequisiteConcreteIds.push(concreteId);
+      capture(prerequisiteManifest, prerequisiteBytes, candidates[0]!, prerequisitePath);
+    }
+    const expectedConcreteIds = new Set(plannedNode.depends_on);
+    const actualConcreteIds = new Set(prerequisiteConcreteIds);
+    if (
+      expectedConcreteIds.size !== actualConcreteIds.size ||
+      [...expectedConcreteIds].some((dependencyId) => !actualConcreteIds.has(dependencyId)) ||
+      prerequisiteConcreteIds.some((dependencyId) => !expectedConcreteIds.has(dependencyId))
+    ) {
+      throw invalidAuthority(
+        `artifact manifest prerequisites do not match the exact planned dependencies for ${plannedNode.id}`
+      );
+    }
+    visiting.delete(manifest.node_id);
+  };
+
+  const rootManifestPath = safeResolveInside(
+    safeResolveInside(layout.artifactsDir, rootDocuments.manifest.node_id, "artifact directory"),
+    ARTIFACT_MANIFEST_FILE,
+    "artifact manifest"
+  );
+  capture(rootDocuments.manifest, rootDocuments.manifestBytes, rootNode, rootManifestPath);
+  snapshots.delete(rootManifestPath);
+  return snapshots;
+}
+
+function parseAndValidateManifest(bytes: Buffer, nodeId: string): ArtifactManifest {
+  let value: unknown;
+  try {
+    value = parseStrictJsonBytes(bytes);
+  } catch (error) {
+    throw invalidAuthority(`artifact manifest prerequisite is not strict JSON for ${nodeId}`, error);
+  }
+  const validation = validateArtifactManifest(value);
+  if (!validation.ok) {
+    throw invalidAuthority(
+      `artifact manifest prerequisite is schema-invalid for ${nodeId}: ${formatSchemaIssues(validation.issues)}`
+    );
+  }
+  return value as ArtifactManifest;
 }
 
 /** Read the one authoritative final report and require an exact canonical JSON/Markdown pair. */
@@ -474,7 +602,8 @@ function assertFinalizedAuthorityRemainedCurrent(authority: FinalizedNodeOutputA
     graph: authority.graph,
     documents: authority.documents,
     artifactDir: authority.artifactDir,
-    publications: authority.publications
+    publications: authority.publications,
+    prerequisiteManifests: authority.prerequisiteManifests
   });
 }
 
@@ -485,6 +614,7 @@ function assertAuthorityRemainedCurrent(input: {
   documents: AuthorityDocuments;
   artifactDir: string;
   publications: ReadonlyMap<string, PublicationSnapshot>;
+  prerequisiteManifests: ReadonlyMap<string, Buffer>;
 }): void {
   const markerPath = safeResolveInside(
     verificationMarkerRoot(input.layout),
@@ -504,6 +634,11 @@ function assertAuthorityRemainedCurrent(input: {
     const current = readPublicationSnapshot(input.artifactDir, publication.absolutePath, publication.path);
     if (!current.equals(publication.bytes)) {
       throw changedOutput(`verified publication changed while outputs were being read: ${publication.path}`);
+    }
+  }
+  for (const [manifestPath, manifestBytes] of input.prerequisiteManifests) {
+    if (!readAuthoritySnapshot(input.layout.root, manifestPath, "prerequisite artifact manifest").equals(manifestBytes)) {
+      throw changedOutput(`prerequisite artifact manifest changed while outputs were being read: ${manifestPath}`);
     }
   }
   if (!isDeepStrictEqual(readRunState(input.layout), input.state)) {
