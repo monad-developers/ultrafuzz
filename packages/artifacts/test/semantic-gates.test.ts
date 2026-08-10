@@ -1142,6 +1142,61 @@ test("generated-test filesystem gate rejects cumulative actual bytes before read
   }
 });
 
+test("generated-test filesystem gate rejects hard-linked companions", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-test-hardlinks-"));
+  try {
+    const generatedTestsDir = path.join(root, "generated-tests");
+    fs.mkdirSync(generatedTestsDir);
+    const testBytes = Buffer.from("contract Replay {}\n", "utf8");
+    const supportBytes = Buffer.from("library InvariantFixture {}\n", "utf8");
+    const testPath = path.join(generatedTestsDir, "Replay.t.sol");
+    const supportPath = path.join(generatedTestsDir, "InvariantFixture.sol");
+    fs.writeFileSync(testPath, testBytes);
+    fs.writeFileSync(supportPath, supportBytes);
+    fs.linkSync(testPath, path.join(root, "Replay-alias.t.sol"));
+    fs.linkSync(supportPath, path.join(root, "InvariantFixture-alias.sol"));
+
+    const result = executeSemanticGate("generated-test-file-integrity", {
+      document: {
+        schema_version: "ultrafuzz.generated-tests.v3",
+        run_id: "run-a",
+        node_id: "strategy-a",
+        framework: "foundry",
+        generated_tests: [
+          {
+            path: "generated-tests/Replay.t.sol",
+            size_bytes: testBytes.length,
+            sha256: crypto.createHash("sha256").update(testBytes).digest("hex")
+          }
+        ],
+        support_files: [
+          {
+            path: "generated-tests/InvariantFixture.sol",
+            size_bytes: supportBytes.length,
+            sha256: crypto.createHash("sha256").update(supportBytes).digest("hex")
+          }
+        ]
+      },
+      context: { filesystem: { rootDirectory: root } }
+    });
+
+    assert.equal(result.status, "failed");
+    assert.deepEqual(
+      result.status === "failed"
+        ? result.issues.map((entry) => ({ path: entry.path, hardLinked: /hard-linked/u.test(entry.message) }))
+        : [],
+      [
+        { path: "$.generated_tests[0].path", hardLinked: true },
+        { path: "$.support_files[0].path", hardLinked: true }
+      ]
+    );
+    assert.equal(fs.lstatSync(testPath).nlink, 2);
+    assert.equal(fs.lstatSync(supportPath).nlink, 2);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("every contextual registration executes real positive and negative checks", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-semantic-gates-"));
   try {

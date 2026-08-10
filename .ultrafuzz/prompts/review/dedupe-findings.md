@@ -38,11 +38,14 @@ Strategy workspaces are isolated from this node. Never assume a generated test
 already exists in the dedupe workspace and never validate a stale same-named
 workspace file. Before focused validation, require the strategy-owned
 `generated-tests.json` to have the exact `ultrafuzz.generated-tests.v3` shape
-with its required `generated_tests` and `support_files` arrays. Treat both
-arrays together as the complete bundle, copy every exact byte-for-byte
-canonical companion into one deterministic bundle root under the existing
-native test root in `{{workspace_path}}`, and execute only the selected runnable
-entries from `generated_tests`: use
+with one required root-level `framework` and its required `generated_tests` and
+`support_files` arrays. The root `framework` must match
+`^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$`, identify the one native framework for
+the whole atomic bundle, remain present on an empty bundle, and never appear on
+an individual entry. Treat both arrays together as the complete bundle, copy
+every exact byte-for-byte canonical companion into one deterministic bundle
+root under the existing native test root in `{{workspace_path}}`, and execute
+only the selected runnable entries from `generated_tests`: use
 `ultrafuzz/dedupe/<source-node-id>/attempt-<n>/<safe-relative-tail>` below that
 root while preserving each path's relative tail below `generated-tests/` so
 relative imports continue to resolve. Do not execute a `support_files` entry.
@@ -56,21 +59,23 @@ lowercase `sha256`; paths must be unique across both arrays and no file path may
 be the slash-delimited prefix of another. Each path must contain no empty, `.`
 or `..` segment or backslash and resolve to a non-empty strict UTF-8 regular
 file inside that source node's artifact directory whose byte length and digest
-exactly match the entry. Reject absolute paths, path escapes, and every symlink
-even when its target remains inside the artifact directory. Never search a
-strategy workspace, the dedupe workspace, sibling runs, or the host for a
-missing companion. If any canonical companion or an existing native
-destination root is unavailable, record focused validation as blocked without
-partially copying the bundle. Require each selected runnable companion
-extension to match the existing framework: `.t.sol` for Foundry;
+exactly match the entry. Reject absolute paths, path escapes, every symlink even
+when its target remains inside the artifact directory, and every multiply
+linked file. Never search a strategy workspace, the dedupe workspace, sibling
+runs, or the host for a missing companion. If any canonical companion or an
+existing native destination root is unavailable, record focused validation as
+blocked without partially copying the bundle. Require each selected runnable
+companion extension to match the existing framework: `.t.sol` for Foundry;
 `.js`, `.cjs`, `.mjs`, `.ts`, `.cts`, or `.mts` for Hardhat; and `.py` for a
 Vyper project's native Python harness.
 
-For mixed repositories, dispatch each generated test according to its manifest
-`framework` and `language`, confirmed against the checked-in configuration;
-never coerce every test through one runner. If those fields are absent, infer a
-runner only from an unambiguous native extension plus the discovered existing
-test stack. Otherwise record validation as blocked instead of guessing.
+For mixed repositories, dispatch every generated test in a bundle according to
+the manifest's one root-level `framework`, confirmed against the checked-in
+configuration; use optional entry-level `language` only as corroborating
+metadata and never coerce every bundle through one runner. Do not infer,
+synthesize, normalize, or convert a missing or mismatched framework. If the
+bundle framework is absent, invalid, mixed, or incompatible with the checked-in
+test stack, record validation as blocked instead of guessing.
 
 Never install, fetch, restore, or update dependencies during dedupe. This
 includes `forge install`, `git submodule update`, `npm install`, `pnpm install`,

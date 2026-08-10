@@ -37,9 +37,14 @@ Schema IDs are stable, fragment-free URNs such as:
 The generated-tests v3 schema describes an atomic strict UTF-8 text bundle.
 `generated_tests` contains runnable tests and reproducers; `support_files`
 contains their non-runnable dependencies. Both arrays use the same closed entry
-shape and `generated-tests/` namespace, and semantic gates enforce bundle-wide
-path uniqueness, support-to-test coupling, current run/node identity, and
-filesystem integrity. Version 2 is not accepted or converted.
+shape and `generated-tests/` namespace. The manifest requires one root-level
+`framework` matching `^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$` for the entire
+atomic bundle, including an empty bundle; entry rows cannot repeat or override
+it. Semantic gates enforce bundle-wide path uniqueness, support-to-test
+coupling, current run/node identity, singly linked filesystem integrity, and
+authenticated aggregation. Aggregation preserves `framework` on each
+`source_bundles` record and never infers it or repeats it on copied/skipped
+entry rows. Version 2 is not accepted or converted.
 
 The IDs identify schemas and resolve bundled `$ref` values; they are never
 fetched. Package-local registries enumerate every checked-in schema, its role,

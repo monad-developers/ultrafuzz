@@ -25,6 +25,7 @@ import {
   queryEvents,
   readArtifactManifest,
   readEventQueryFacade,
+  readGeneratedTestManifest,
   readRunState,
   replayEvents,
   replayUsageEvents,
@@ -1185,6 +1186,103 @@ test("generated-test manifest writer preflights its manifest destination before 
   );
   assert.equal(fs.readFileSync(testPath, "utf8"), "sentinel test\n");
   assert.deepEqual(fs.readdirSync(manifestDirectory), []);
+});
+
+test("generated-test manifest writer rejects a hard-linked manifest destination before changing bundle bytes", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-hardlinked-manifest-generated-test" });
+  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
+  const generatedTestsDir = path.join(nodeDir, "generated-tests");
+  fs.mkdirSync(generatedTestsDir, { recursive: true });
+  const testPath = path.join(generatedTestsDir, "Replay.t.sol");
+  const manifestPath = path.join(nodeDir, "generated-tests.json");
+  const manifestAlias = path.join(tempProject(), "generated-tests-alias.json");
+  fs.writeFileSync(testPath, "sentinel test\n", "utf8");
+  fs.writeFileSync(manifestPath, "sentinel manifest\n", "utf8");
+  fs.linkSync(manifestPath, manifestAlias);
+  const manifestInode = fs.lstatSync(manifestPath).ino;
+
+  assert.throws(
+    () =>
+      writeGeneratedTestManifest({
+        layout,
+        nodeId: "strategy-a",
+        tests: [{ path: "generated-tests/Replay.t.sol", content: "replacement test\n" }],
+        supportFiles: []
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof ArtifactPathError);
+      assert.equal(error.code, "hard-link");
+      assert.match(error.message, /bundle destination must be singly linked/u);
+      return true;
+    }
+  );
+  assert.equal(fs.readFileSync(testPath, "utf8"), "sentinel test\n");
+  assert.equal(fs.readFileSync(manifestPath, "utf8"), "sentinel manifest\n");
+  assert.equal(fs.readFileSync(manifestAlias, "utf8"), "sentinel manifest\n");
+  assert.equal(fs.lstatSync(manifestPath).ino, manifestInode);
+  assert.equal(fs.lstatSync(manifestPath).nlink, 2);
+});
+
+test("generated-test manifest writer rejects a hard-linked companion before changing bundle bytes", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-hardlinked-companion-generated-test" });
+  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
+  const generatedTestsDir = path.join(nodeDir, "generated-tests");
+  fs.mkdirSync(generatedTestsDir, { recursive: true });
+  const testPath = path.join(generatedTestsDir, "Replay.t.sol");
+  const supportPath = path.join(generatedTestsDir, "InvariantFixture.sol");
+  const supportAlias = path.join(tempProject(), "InvariantFixture-alias.sol");
+  const manifestPath = path.join(nodeDir, "generated-tests.json");
+  fs.writeFileSync(testPath, "sentinel test\n", "utf8");
+  fs.writeFileSync(supportPath, "sentinel support\n", "utf8");
+  fs.linkSync(supportPath, supportAlias);
+  fs.writeFileSync(manifestPath, "sentinel manifest\n", "utf8");
+
+  assert.throws(
+    () =>
+      writeGeneratedTestManifest({
+        layout,
+        nodeId: "strategy-a",
+        tests: [{ path: "generated-tests/Replay.t.sol", content: "replacement test\n" }],
+        supportFiles: [{ path: "generated-tests/InvariantFixture.sol", content: "replacement support\n" }]
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof ArtifactPathError);
+      assert.equal(error.code, "hard-link");
+      assert.match(error.message, /bundle destination must be singly linked/u);
+      return true;
+    }
+  );
+  assert.equal(fs.readFileSync(testPath, "utf8"), "sentinel test\n");
+  assert.equal(fs.readFileSync(supportPath, "utf8"), "sentinel support\n");
+  assert.equal(fs.readFileSync(supportAlias, "utf8"), "sentinel support\n");
+  assert.equal(fs.readFileSync(manifestPath, "utf8"), "sentinel manifest\n");
+  assert.equal(fs.lstatSync(supportPath).nlink, 2);
+});
+
+test("generated-test manifest reader rejects a hard-linked manifest", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-read-hardlinked-generated-test" });
+  writeGeneratedTestManifest({
+    layout,
+    nodeId: "strategy-a",
+    tests: [{ path: "generated-tests/Replay.t.sol", content: "contract Replay {}\n" }],
+    supportFiles: []
+  });
+  const manifestPath = path.join(getNodeArtifactDir(layout, "strategy-a"), "generated-tests.json");
+  const manifestAlias = path.join(tempProject(), "generated-tests-alias.json");
+  fs.linkSync(manifestPath, manifestAlias);
+  const manifestBytes = fs.readFileSync(manifestPath);
+
+  assert.throws(
+    () => readGeneratedTestManifest(layout, "strategy-a"),
+    (error: unknown) => {
+      assert.ok(error instanceof ArtifactPathError);
+      assert.equal(error.code, "hard-link");
+      assert.match(error.message, /manifest must be a singly linked regular file/u);
+      return true;
+    }
+  );
+  assert.deepEqual(fs.readFileSync(manifestPath), manifestBytes);
+  assert.deepEqual(fs.readFileSync(manifestAlias), manifestBytes);
 });
 
 test("generated-test manifest writer rejects file-directory path collisions before creating bundle bytes", () => {

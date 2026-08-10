@@ -133,13 +133,16 @@ the breaking-version decisions. Non-JSON outputs use the explicit
 `ultrafuzz/nonempty-markdown@1` or `ultrafuzz/text@1` contracts.
 
 `ultrafuzz/generated-tests@3` is an atomic text bundle. Its manifest requires
-both `generated_tests` for runnable tests/reproducers and `support_files` for
-their imported helpers, mocks, fixtures, scripts, and text data. Every path is
-under `generated-tests/`, unique across both arrays, and bound to a non-empty,
-non-symlink, strict UTF-8 regular companion. Every entry requires the
+one root-level canonical ASCII `framework` for the entire bundle, including an
+empty bundle, plus both `generated_tests` for runnable tests/reproducers and
+`support_files` for their imported helpers, mocks, fixtures, scripts, and text
+data. Entry rows cannot carry or override `framework`. Every path is under
+`generated-tests/`, unique across both arrays, and bound to a non-empty,
+singly linked, non-symlink, strict UTF-8 regular companion. Every entry requires the
 companion's exact positive `size_bytes` and lowercase `sha256`; no file path may
 be the slash-delimited prefix of another. Support-only manifests are invalid;
-v2 manifests are rejected without conversion.
+aggregation preserves the declared framework per atomic source bundle without
+inference or conversion. V2 manifests are rejected without conversion.
 
 Every retained JSON contract maps to one complete checked-in Draft 2020-12
 schema. Contract definitions supply runtime validation plus the shape,

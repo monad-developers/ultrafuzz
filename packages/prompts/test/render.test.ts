@@ -175,6 +175,10 @@ describe("prompt rendering", () => {
     expect(result.renderedMarkdown).toContain("`run_id` exactly `run-1`");
     expect(result.renderedMarkdown).toContain("`node_id` exactly `boundary-tests`");
     expect(result.renderedMarkdown).toContain("logical producer identity");
+    expect(result.renderedMarkdown).toContain("one required bundle-level `framework`");
+    expect(result.renderedMarkdown).toContain("remains required when both arrays are empty");
+    expect(result.renderedMarkdown).toContain("Never mix frameworks in one bundle");
+    expect(result.renderedMarkdown).not.toContain("optional fields are `language`, `framework`");
   });
 
   it("renders specialized generated-test instructions for every production producer", () => {

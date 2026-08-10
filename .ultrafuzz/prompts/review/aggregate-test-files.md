@@ -126,36 +126,40 @@ Dynamic strategy generator:
 Use only files reported by strategy-owned generated-test manifests. Read every
 manifest listed above, including empty manifests. Require the exact
 `ultrafuzz.generated-tests.v3` shape and treat its required `generated_tests`
-and `support_files` arrays together as the complete source bundle. Reject a
-manifest with a path repeated within or across the arrays, with one file path
-as the slash-delimited prefix of another, or with non-empty `support_files` and
-no runnable `generated_tests`. Ignore any non-canonical file list arrays. Do
-not rely on the current working tree or a strategy workspace scan as a
-substitute for a missing manifest entry.
+and `support_files` arrays together as the complete source bundle. Require one
+root-level `framework` on every manifest, including an empty manifest. It must
+match `^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$` and identify the one native
+framework for the whole atomic bundle; entries must not repeat or override it.
+Reject a manifest with a path repeated within or across the arrays, with one
+file path as the slash-delimited prefix of another, or with non-empty
+`support_files` and no runnable `generated_tests`. Ignore any non-canonical file
+list arrays. Do not rely on the current working tree or a strategy workspace
+scan as a substitute for a missing manifest entry.
 
 For every entry in either array, accept the exact byte-for-byte companion only
 when its `path` is a normalized relative POSIX path beginning with
 `generated-tests/`, contains no empty, `.` or `..` segment or backslash, and
 resolves to a non-empty strict UTF-8 text regular file inside the source node's
 artifact directory. This text-only rule also applies to data fixtures. Reject
-absolute paths, path escapes, and every symlink even when its
-target remains inside the artifact directory. Require both `size_bytes` and
-`sha256` to be present and to match the companion exactly. Record rejected
-entries in `skipped_files` with the corresponding `generated-test` or
-`support-file` kind; never search for or substitute another file with the same
-basename. The manifest is one atomic bundle: if any entry fails these checks,
-copy none of its entries and record every row from that manifest as skipped,
-using the specific failure for invalid rows and a bundle-rejected reason for
-the remaining rows.
+absolute paths, path escapes, every symlink even when its target remains inside
+the artifact directory, and every multiply linked file. Require both
+`size_bytes` and `sha256` to be present and to match the companion exactly.
+Record rejected entries in `skipped_files` with the corresponding
+`generated-test` or `support-file` kind; never search for or substitute another
+file with the same basename. The manifest is one atomic bundle: if any entry
+fails these checks, copy none of its entries and record every row from that
+manifest as skipped, using the specific failure for invalid rows and a
+bundle-rejected reason for the remaining rows.
 
-Determine each bundle's destination from its runnable entries' `framework` and
-`language`, checked against project discovery, base setup, and the target's
-checked-in test configuration. Accept framework-native runnable test
-extensions: Foundry `.t.sol`; Hardhat `.js`, `.cjs`, `.mjs`, `.ts`, `.cts`, or
-`.mts`; and Vyper projects' existing native Python test `.py` files. Infer a
-missing framework only when the extension and discovered test stack identify
-it unambiguously; otherwise skip the affected runnable entry with a reason. Do
-not introduce a new framework or test root.
+Determine each bundle's destination from its required root-level `framework`,
+checked against project discovery, base setup, and the target's checked-in test
+configuration. Use an entry's optional `language` only as corroborating
+metadata. Accept framework-native runnable test extensions: Foundry `.t.sol`;
+Hardhat `.js`, `.cjs`, `.mjs`, `.ts`, `.cts`, or `.mts`; and Vyper projects'
+existing native Python test `.py` files. Never infer, synthesize, normalize, or
+convert a missing or mismatched framework. If the declared bundle framework is
+missing, invalid, mixed, or incompatible with the checked-in test stack, skip
+the whole bundle. Do not introduce a new framework or test root.
 
 Copy Foundry tests under the configured Foundry aggregation destination (for
 example `test/foundry/<strategy>/attempt-<n>/`). Copy Hardhat tests under the
@@ -171,9 +175,10 @@ collide; never flatten files or overwrite one entry with another.
 
 Preserve attribution by strategy id, source node id, attempt index, source
 manifest path, source artifact path, source relative path, and destination path.
-Also preserve every manifest entry's `language`, `framework`, `description`,
-and `provenance` fields without rewriting them. Do not copy unknown manifest
-entry fields into `aggregation.json`.
+Preserve the manifest's one `framework` only on its `source_bundles` record.
+Preserve every entry's `language`, `description`, and `provenance` fields without
+rewriting them; copied and skipped entry rows must not repeat `framework`. Do
+not copy unknown manifest entry fields into `aggregation.json`.
 
 Do not merge, rewrite, or "fix" generated test logic during aggregation. The
 isolated workspace may receive unstaged generated test files, but the git index
@@ -199,17 +204,18 @@ Save the aggregation manifest to {{artifact_path}}/aggregation.json as JSON with
   `source_attempt_id`, exact `attempt_index`, absolute `source_manifest_path`,
   artifact-relative `source_manifest_relative_path`, lowercase digest of the
   exact manifest bytes as `source_manifest_sha256`, manifest `run_id` as
-  `source_run_id`, exact `generated_test_count` and `support_file_count`, and a
-  `disposition` of `empty`, `copied`, or `skipped`. A `skipped` bundle requires
+  `source_run_id`, exact root-level `framework`, exact `generated_test_count`
+  and `support_file_count`, and a `disposition` of `empty`, `copied`, or
+  `skipped`. A `skipped` bundle requires
   one non-empty `reason`; `empty` and `copied` bundles must omit `reason`.
 - `files`: copied runnable-test rows. Every row requires `strategy`, `node_id`,
   `source_attempt_id`, `attempt_index`, `source_manifest_path`,
   `source_manifest_relative_path`, `source_manifest_sha256`, absolute
   `source_artifact_path`, `source_relative_path`, positive `size_bytes`,
   lowercase `sha256`, absolute `destination_path`, and workspace-relative
-  `destination_relative_path`. Preserve `language`, `framework`, `description`,
-  and `provenance` exactly when the source entry contains them; omit each field
-  when the source entry omits it.
+  `destination_relative_path`. Preserve `language`, `description`, and
+  `provenance` exactly when the source entry contains them; omit each field when
+  the source entry omits it. Do not add `framework` to an entry row.
 - `support_files`: copied support-file rows with the same exact source,
   destination, digest, size, and optional metadata fields as `files`, or `[]`.
 - `skipped_files`: skipped source rows with the same exact source identity,
