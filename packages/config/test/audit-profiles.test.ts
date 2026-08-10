@@ -3,7 +3,15 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { auditProfile, loadAuditProfileCatalog, packagedTopologyDigest, packagedTopologyPath } from "../src/index.js";
+import {
+  auditProfile,
+  loadAuditProfileCatalog,
+  packagedTopologyDigest,
+  packagedTopologyPath,
+  parseProjectConfigToml,
+  resolveConfig,
+  serializeResolvedConfigToml
+} from "../src/index.js";
 
 describe("audit profile catalog", () => {
   it("loads the complete shipped vocabulary and resolves packaged topologies", () => {
@@ -46,5 +54,51 @@ describe("audit profile catalog", () => {
       expect(path.relative(path.dirname(catalog.path), resolved)).toBe(profile.topologyPath);
       expect(fs.statSync(resolved).isFile()).toBe(true);
     }
+  });
+
+  it("applies profile settings below explicit project and runtime overrides", () => {
+    const parsed = parseProjectConfigToml(`
+audit_profile = "low-cost"
+topology_path = ".ultrafuzz/custom-topology.yml"
+strategy_loops = 2
+
+[run]
+max_parallel_agents = 6
+`);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const resolved = resolveConfig({
+      env: {},
+      projectConfig: parsed.value,
+      runtimeOverrides: { maxParallelNodes: 7 }
+    });
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.value.auditProfile).toBe("low-cost");
+    expect(resolved.value.topologyPath).toBe(".ultrafuzz/custom-topology.yml");
+    expect(resolved.value.strategyLoops).toBe(2);
+    expect(resolved.value.dynamicStrategiesEnumerator).toBe(1);
+    expect(resolved.value.run.maxParallelAgents).toBe(6);
+    expect(resolved.value.run.maxParallelNodes).toBe(7);
+    expect(resolved.value.triage).toEqual({ quorum: 2, panelSize: 3 });
+    expect(resolved.value.auditProfileResolution.overriddenSettings).toEqual([
+      "max_parallel_agents",
+      "max_parallel_nodes",
+      "strategy_loops"
+    ]);
+    expect(serializeResolvedConfigToml(resolved.value)).toContain('audit_profile = "low-cost"');
+    expect(serializeResolvedConfigToml(resolved.value)).toContain('topology_path = ".ultrafuzz/custom-topology.yml"');
+  });
+
+  it("fails unknown audit profiles during typed resolution", () => {
+    const resolved = resolveConfig({ env: {}, projectConfig: { auditProfile: "fastest" } });
+    expect(resolved.ok).toBe(false);
+    if (resolved.ok) return;
+    expect(resolved.diagnostics[0]).toMatchObject({
+      code: "CONFIG_AUDIT_PROFILE_INVALID",
+      path: ["audit_profile"],
+      source: "audit-profile"
+    });
+    expect(resolved.diagnostics[0]?.message).toContain("available profiles");
   });
 });

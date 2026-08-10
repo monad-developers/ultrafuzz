@@ -19,6 +19,7 @@ import type {
   ValidateProjectInput,
   ValidateProjectResult
 } from "./types.js";
+import { effectiveAuditPolicy } from "./audit-profile-policy.js";
 import {
   configDiagnostics,
   diagnosticFromError,
@@ -135,6 +136,11 @@ export function summarizeConfig(config: ResolvedConfig): ValidateProjectResult["
   const defaultProfile = config.models.profiles[config.models.default];
   return {
     schema_version: config.schemaVersion,
+    audit_profile: config.auditProfile,
+    audit_profile_catalog_digest: config.auditProfileResolution.catalogDigest,
+    ...(config.auditProfileResolution.declaredTopologyPath === undefined
+      ? {}
+      : { audit_profile_topology_path: config.auditProfileResolution.declaredTopologyPath }),
     default_agent: defaultProfile?.agent ?? "",
     ...(defaultProfile?.model ? { default_model: defaultProfile.model } : {}),
     ...(defaultProfile?.reasoning ? { default_reasoning: defaultProfile.reasoning } : {}),
@@ -192,9 +198,13 @@ function validateTopologySurface(
   agentRefs?: Set<string>;
 } {
   try {
-    const pathToTopology = topologyPath ?? resolveTopologyPath(projectRoot);
+    const policy =
+      config === undefined
+        ? undefined
+        : effectiveAuditPolicy({ projectRoot, config, runtimeTopologyPath: topologyPath });
+    const pathToTopology = policy?.effectiveTopologyPath ?? topologyPath ?? resolveTopologyPath(projectRoot);
     const topology = loadTopology(projectRoot, {
-      ...(topologyPath === undefined ? {} : { topologyPath }),
+      topologyPath: pathToTopology,
       requirePromptFiles: true
     });
     const executionDiagnostics =
@@ -234,7 +244,13 @@ function validateTopologySurface(
         executionDiagnostics
       ),
       summary: {
-        path: pathToTopology,
+        path: policy?.effectiveTopologyDisplayPath ?? pathToTopology,
+        ...(policy === undefined
+          ? {}
+          : {
+              origin: policy.topologyPathOrigin,
+              digest: policy.topologyDigest
+            }),
         logical_nodes: topology.nodes.length,
         expanded_nodes: expanded.nodes.length
       },

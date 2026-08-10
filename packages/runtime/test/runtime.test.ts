@@ -3896,6 +3896,56 @@ test("plan uses an eval topology override without replacing the project topology
   assert.equal(fs.readFileSync(canonicalTopology, "utf8"), "not: [valid\n");
 });
 
+test("audit profile selects its packaged topology and records portable provenance", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  const configPath = path.join(project, "ultrafuzz.toml");
+  fs.writeFileSync(
+    configPath,
+    fs.readFileSync(configPath, "utf8").replace('audit_profile = "balanced"', 'audit_profile = "smoke"'),
+    "utf8"
+  );
+  fs.writeFileSync(path.join(project, ".ultrafuzz", "topology.yml"), "not: [valid\n", "utf8");
+
+  const plan = await planRun({ projectRoot: project, runId: "profile-smoke", env: {} });
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  assert.deepEqual(
+    plan.value!.graph.nodes.map((node) => node.logical_id),
+    [
+      "smoke-context",
+      "time-warp-sequences",
+      "external-dependency-boundaries",
+      "externalized-state-accounting",
+      "lifecycle-view-boundaries",
+      "dedupe-findings",
+      "final-report"
+    ]
+  );
+  assert.equal(plan.value!.validation.topology?.path, "topologies/smoke.yml");
+  assert.equal(plan.value!.validation.topology?.origin, "audit-profile");
+  const metadata = JSON.parse(fs.readFileSync(path.join(plan.value!.run_root, "run.json"), "utf8")) as {
+    audit_profile: Record<string, unknown>;
+  };
+  assert.deepEqual(metadata.audit_profile, {
+    requested: "smoke",
+    effective: "smoke",
+    catalog_schema_version: 1,
+    catalog_digest: plan.value!.resolved_config.auditProfileResolution.catalogDigest,
+    settings: plan.value!.resolved_config.auditProfileResolution.settings,
+    overridden_settings: [
+      "dynamic_strategies_enumerator",
+      "max_parallel_agents",
+      "max_parallel_nodes",
+      "workflow_deadline_seconds"
+    ],
+    declared_topology_path: "topologies/smoke.yml",
+    effective_topology_path: "topologies/smoke.yml",
+    topology_path_origin: "audit-profile",
+    topology_overridden: false,
+    topology_digest: plan.value!.validation.topology?.digest
+  });
+});
+
 test("plan applies smoke eval model profiles to a normally initialized target", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

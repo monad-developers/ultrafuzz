@@ -11,6 +11,7 @@ export const AUDIT_PROFILE_CATALOG_SCHEMA_VERSION = 1 as const;
 export interface AuditProfileSettings {
   strategy_loops?: number;
   dynamic_strategies_enumerator?: number;
+  model_profile_aliases?: string[];
   max_parallel_agents?: number;
   max_parallel_nodes?: number;
   default_timeout_seconds?: number;
@@ -47,6 +48,10 @@ const settingsSchema = z
   .strictObject({
     strategy_loops: positiveIntegerSchema.optional(),
     dynamic_strategies_enumerator: positiveIntegerSchema.optional(),
+    model_profile_aliases: z
+      .array(z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/u))
+      .max(16)
+      .optional(),
     max_parallel_agents: positiveIntegerSchema.optional(),
     max_parallel_nodes: positiveIntegerSchema.optional(),
     default_timeout_seconds: positiveIntegerSchema.max(86_400).optional(),

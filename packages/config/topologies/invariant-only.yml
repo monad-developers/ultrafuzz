@@ -442,7 +442,7 @@ nodes:
     loops: 1
   - id: dedupe-findings
     kind: agentic
-    prompt: review/dedupe-findings.md
+    prompt: invariant-only/dedupe-findings.md
     group: review
     depends_on:
       - stateful-invariant-setup
@@ -486,7 +486,7 @@ nodes:
         contract: ultrafuzz/json-object@1
   - id: aggregate-test-files
     kind: agentic
-    prompt: review/aggregate-test-files.md
+    prompt: invariant-only/aggregate-test-files.md
     group: review
     depends_on:
       - severity-classification

@@ -9,6 +9,9 @@ profiles:
     settings:
       strategy_loops: 1
       dynamic_strategies_enumerator: 1
+      model_profile_aliases:
+        - benchmark
+        - smoke-coordination
       max_parallel_agents: 4
       max_parallel_nodes: 4
       workflow_deadline_seconds: 14400

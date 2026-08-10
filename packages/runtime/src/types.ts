@@ -76,6 +76,9 @@ export interface ValidateProjectResult {
   policy_posture: PolicyPosture;
   resolved_config?: {
     schema_version: string;
+    audit_profile: string;
+    audit_profile_catalog_digest: string;
+    audit_profile_topology_path?: string;
     default_agent: string;
     default_model?: string;
     default_reasoning?: string;
@@ -87,6 +90,8 @@ export interface ValidateProjectResult {
   };
   topology?: {
     path: string;
+    origin?: "project-default" | "audit-profile" | "project-config" | "runtime-override";
+    digest?: string;
     logical_nodes: number;
     expanded_nodes: number;
   };

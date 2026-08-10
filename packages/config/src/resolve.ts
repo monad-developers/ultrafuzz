@@ -7,6 +7,11 @@ import {
   createDefaultPromptMetadataLayer,
   createDefaultResolvedConfig
 } from "./defaults.js";
+import {
+  auditProfile as findAuditProfile,
+  loadAuditProfileCatalog,
+  type AuditProfileSettings
+} from "./audit-profiles.js";
 import { validateAgentConfigs } from "./agents.js";
 import { syncDefaultModelProfile, validateModelProfiles, validProfileId } from "./model-profiles.js";
 import { validateTriageConfig } from "./triage.js";
@@ -51,6 +56,16 @@ const projectLocalPathSchema = z.string().superRefine((value, context) => {
 const resolvedConfigValidationSchema = z
   .object({
     schemaVersion: nonEmptyStringSchema,
+    auditProfile: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/u),
+    topologyPath: projectLocalPathSchema.optional(),
+    strategyLoops: positiveIntegerSchema.optional(),
+    auditProfileResolution: z.object({
+      catalogSchemaVersion: positiveIntegerSchema,
+      catalogDigest: z.string().regex(/^[0-9a-f]{64}$/u),
+      declaredTopologyPath: nonEmptyStringSchema.optional(),
+      settings: z.record(z.string(), z.unknown()),
+      overriddenSettings: z.array(z.string())
+    }),
     dynamicStrategiesEnumerator: positiveIntegerSchema,
     project: z
       .object({
@@ -127,6 +142,31 @@ export function resolveConfig(input: ResolveConfigInput = {}): ConfigResult<Reso
   const config = createDefaultResolvedConfig();
   const environment = input.env ?? process.env;
 
+  const selectedAuditProfile =
+    input.runtimeOverrides?.auditProfile ?? input.projectConfig?.auditProfile ?? config.auditProfile;
+  try {
+    const catalog = loadAuditProfileCatalog();
+    const profile = findAuditProfile(selectedAuditProfile, catalog);
+    config.auditProfile = profile.id;
+    config.auditProfileResolution = {
+      catalogSchemaVersion: catalog.schemaVersion,
+      catalogDigest: catalog.digest,
+      ...(profile.topologyPath === undefined ? {} : { declaredTopologyPath: profile.topologyPath }),
+      settings: { ...profile.settings },
+      overriddenSettings: explicitAuditProfileSettingKeys(input)
+    };
+    applyAuditProfileSettings(config, profile.settings);
+  } catch (error) {
+    diagnostics.push(
+      diagnostic(
+        "CONFIG_AUDIT_PROFILE_INVALID",
+        error instanceof Error ? error.message : String(error),
+        ["audit_profile"],
+        "audit-profile"
+      )
+    );
+  }
+
   applyPromptMetadataLayer(config, createDefaultPromptMetadataLayer(), diagnostics);
   if (input.promptMetadata) {
     applyPromptMetadataLayer(config, input.promptMetadata, diagnostics);
@@ -140,6 +180,7 @@ export function resolveConfig(input: ResolveConfigInput = {}): ConfigResult<Reso
   }
 
   syncDefaultModelProfile(config);
+  applyAuditProfileModelAliases(config);
   sortConfig(config);
   diagnostics.push(...validateResolvedConfig(config, environment));
 
@@ -170,6 +211,9 @@ export function serializeResolvedConfigToml(config: ResolvedConfig): string {
 
   pushAssignments(lines, {
     schema_version: clone.schemaVersion,
+    audit_profile: clone.auditProfile,
+    topology_path: clone.topologyPath,
+    strategy_loops: clone.strategyLoops,
     dynamic_strategies_enumerator: clone.dynamicStrategiesEnumerator
   });
   pushTable(lines, "project", {
@@ -261,6 +305,67 @@ export function serializeResolvedConfigToml(config: ResolvedConfig): string {
     });
   }
   return `${lines.join("\n").replace(/\n{3,}/g, "\n\n")}\n`;
+}
+
+function applyAuditProfileSettings(config: ResolvedConfig, settings: AuditProfileSettings): void {
+  if (settings.strategy_loops !== undefined) config.strategyLoops = settings.strategy_loops;
+  if (settings.dynamic_strategies_enumerator !== undefined) {
+    config.dynamicStrategiesEnumerator = settings.dynamic_strategies_enumerator;
+  }
+  if (settings.max_parallel_agents !== undefined) config.run.maxParallelAgents = settings.max_parallel_agents;
+  if (settings.max_parallel_nodes !== undefined) config.run.maxParallelNodes = settings.max_parallel_nodes;
+  if (settings.default_timeout_seconds !== undefined) {
+    config.run.defaultTimeoutSeconds = settings.default_timeout_seconds;
+  }
+  if (settings.workflow_deadline_seconds !== undefined) {
+    config.run.workflowDeadlineSeconds = settings.workflow_deadline_seconds;
+  }
+  if (settings.invariant_testing_smoke_timeout_seconds !== undefined) {
+    config.invariants.invariantTestingSmokeTimeoutSeconds = settings.invariant_testing_smoke_timeout_seconds;
+  }
+  if (settings.invariant_testing_fuzzer_timeout_seconds !== undefined) {
+    config.invariants.invariantTestingFuzzerTimeoutSeconds = settings.invariant_testing_fuzzer_timeout_seconds;
+  }
+  if (settings.triage_quorum !== undefined) config.triage.quorum = settings.triage_quorum;
+  if (settings.triage_panel_size !== undefined) config.triage.panelSize = settings.triage_panel_size;
+}
+
+function applyAuditProfileModelAliases(config: ResolvedConfig): void {
+  const source = config.models.profiles[config.models.default];
+  if (source === undefined) return;
+  for (const id of config.auditProfileResolution.settings.model_profile_aliases ?? []) {
+    config.models.profiles[id] ??= { ...source, id };
+  }
+}
+
+function explicitAuditProfileSettingKeys(input: ResolveConfigInput): string[] {
+  const keys = new Set<string>();
+  for (const layer of [input.projectConfig, input.runtimeOverrides]) {
+    const runtimeLayer = layer as RuntimeConfigOverrides | undefined;
+    if (layer?.strategyLoops !== undefined) keys.add("strategy_loops");
+    if (layer?.dynamicStrategiesEnumerator !== undefined) keys.add("dynamic_strategies_enumerator");
+    if (layer?.run?.maxParallelAgents !== undefined || runtimeLayer?.maxParallelAgents !== undefined) {
+      keys.add("max_parallel_agents");
+    }
+    if (layer?.run?.maxParallelNodes !== undefined || runtimeLayer?.maxParallelNodes !== undefined) {
+      keys.add("max_parallel_nodes");
+    }
+    if (layer?.run?.defaultTimeoutSeconds !== undefined) keys.add("default_timeout_seconds");
+    if (layer?.run?.workflowDeadlineSeconds !== undefined) keys.add("workflow_deadline_seconds");
+    if (layer?.invariants?.invariantTestingSmokeTimeoutSeconds !== undefined) {
+      keys.add("invariant_testing_smoke_timeout_seconds");
+    }
+    if (layer?.invariants?.invariantTestingFuzzerTimeoutSeconds !== undefined) {
+      keys.add("invariant_testing_fuzzer_timeout_seconds");
+    }
+    if (layer?.triage?.quorum !== undefined || runtimeLayer?.triageQuorum !== undefined) keys.add("triage_quorum");
+    if (layer?.triage?.panelSize !== undefined || runtimeLayer?.triagePanelSize !== undefined) {
+      keys.add("triage_panel_size");
+    }
+  }
+  if (input.env?.ULTRAFUZZ_MAX_PARALLEL_AGENTS !== undefined) keys.add("max_parallel_agents");
+  if (input.env?.ULTRAFUZZ_MAX_PARALLEL_NODES !== undefined) keys.add("max_parallel_nodes");
+  return [...keys].sort();
 }
 
 function applyPromptMetadataLayer(
@@ -402,6 +507,15 @@ function applyProjectConfigLayer(
 ): void {
   if (layer.schemaVersion !== undefined) {
     config.schemaVersion = layer.schemaVersion;
+  }
+  if (layer.auditProfile !== undefined) {
+    config.auditProfile = layer.auditProfile;
+  }
+  if (layer.topologyPath !== undefined) {
+    config.topologyPath = layer.topologyPath;
+  }
+  if (layer.strategyLoops !== undefined) {
+    config.strategyLoops = layer.strategyLoops;
   }
   if (layer.dynamicStrategiesEnumerator !== undefined) {
     config.dynamicStrategiesEnumerator = layer.dynamicStrategiesEnumerator;
@@ -683,6 +797,12 @@ function configPathSegment(segment: string): string {
   switch (segment) {
     case "schemaVersion":
       return "schema_version";
+    case "auditProfile":
+      return "audit_profile";
+    case "topologyPath":
+      return "topology_path";
+    case "strategyLoops":
+      return "strategy_loops";
     case "dynamicStrategiesEnumerator":
       return "dynamic_strategies_enumerator";
     case "outputDir":

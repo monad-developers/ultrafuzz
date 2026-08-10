@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { CONFIG_FILE_NAME } from "./constants.js";
+import { loadAuditProfileCatalog } from "./audit-profiles.js";
 import { parseProjectConfigToml } from "./loader.js";
 import type {
   AgentConfig,
@@ -76,6 +77,7 @@ function defaultConfigPath(): string {
 }
 
 function normalizeDefaultConfig(input: ProjectConfigInput, filePath: string): ResolvedConfig {
+  const profileCatalog = loadAuditProfileCatalog();
   const project = requiredRecord(input.project, "project", filePath);
   const run = requiredRecord(input.run, "run", filePath);
   const models = requiredRecord(input.models, "models", filePath);
@@ -87,6 +89,15 @@ function normalizeDefaultConfig(input: ProjectConfigInput, filePath: string): Re
 
   return {
     schemaVersion: required(input.schemaVersion, "schema_version", filePath),
+    auditProfile: input.auditProfile ?? profileCatalog.defaultProfile,
+    ...(input.topologyPath === undefined ? {} : { topologyPath: input.topologyPath }),
+    ...(input.strategyLoops === undefined ? {} : { strategyLoops: input.strategyLoops }),
+    auditProfileResolution: {
+      catalogSchemaVersion: profileCatalog.schemaVersion,
+      catalogDigest: profileCatalog.digest,
+      settings: {},
+      overriddenSettings: []
+    },
     dynamicStrategiesEnumerator: required(input.dynamicStrategiesEnumerator, "dynamic_strategies_enumerator", filePath),
     project: {
       repo: required(project.repo, "project.repo", filePath),
@@ -261,6 +272,15 @@ function assertResolvedConfig(value: unknown, filePath: string): asserts value i
     throw new Error(`${filePath} must contain a mapping`);
   }
   assertString(value.schemaVersion, "schemaVersion", filePath);
+  assertString(value.auditProfile, "auditProfile", filePath);
+  assertRecord(value.auditProfileResolution, "auditProfileResolution", filePath);
+  assertNumber(
+    value.auditProfileResolution.catalogSchemaVersion,
+    "auditProfileResolution.catalogSchemaVersion",
+    filePath
+  );
+  assertString(value.auditProfileResolution.catalogDigest, "auditProfileResolution.catalogDigest", filePath);
+  assertRecord(value.auditProfileResolution.settings, "auditProfileResolution.settings", filePath);
   assertNumber(value.dynamicStrategiesEnumerator, "dynamicStrategiesEnumerator", filePath);
   assertRecord(value.project, "project", filePath);
   assertString(value.project.repo, "project.repo", filePath);

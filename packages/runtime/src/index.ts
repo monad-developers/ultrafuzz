@@ -20,3 +20,4 @@ export * from "./workflow-sync.js";
 export * from "./workflow-control.js";
 export * from "./workflow-integrity.js";
 export * from "./workspace-handoff.js";
+export * from "./audit-profile-policy.js";

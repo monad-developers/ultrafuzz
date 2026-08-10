@@ -21,6 +21,9 @@ import {
 
 const TOP_LEVEL_KEYS = new Set([
   "schema_version",
+  "audit_profile",
+  "topology_path",
+  "strategy_loops",
   "dynamic_strategies_enumerator",
   "project",
   "run",
@@ -121,6 +124,15 @@ export function parseProjectConfigToml(text: string, file = CONFIG_FILE_NAME): C
   const config: ProjectConfigInput = {};
   readString(root, "schema_version", ["schema_version"], diagnostics, (value) => {
     config.schemaVersion = value;
+  });
+  readString(root, "audit_profile", ["audit_profile"], diagnostics, (value) => {
+    config.auditProfile = value;
+  });
+  readString(root, "topology_path", ["topology_path"], diagnostics, (value) => {
+    config.topologyPath = value;
+  });
+  readInteger(root, "strategy_loops", ["strategy_loops"], diagnostics, (value) => {
+    config.strategyLoops = value;
   });
   readInteger(root, "dynamic_strategies_enumerator", ["dynamic_strategies_enumerator"], diagnostics, (value) => {
     config.dynamicStrategiesEnumerator = value;

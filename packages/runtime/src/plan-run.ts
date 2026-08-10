@@ -69,6 +69,7 @@ import {
   sha256Stable
 } from "./utils.js";
 import { checkDependencyLegality } from "./artifact-gates.js";
+import { effectiveAuditPolicy } from "./audit-profile-policy.js";
 import { forgeGuardMetadata } from "./forge-guard.js";
 
 const RENDERED_PROMPT_SNAPSHOT_DIR = "prompt-snapshots";
@@ -86,6 +87,26 @@ export async function planRun(input: PlanRunInput) {
     return runtimeFailure<PlanRunValue>(resolved.diagnostics);
   }
   applyWorkflowRunOverrides(resolved.config, input);
+
+  let auditPolicy: ReturnType<typeof effectiveAuditPolicy>;
+  try {
+    auditPolicy = effectiveAuditPolicy({
+      projectRoot,
+      config: resolved.config,
+      runtimeTopologyPath: input.topologyPath,
+      runtimeStrategyLoops: input.topologyTransform?.strategyLoops
+    });
+  } catch (error) {
+    return runtimeFailure<PlanRunValue>([
+      diagnosticFromError(error, "audit-profile", "AUDIT_PROFILE_POLICY_INVALID")
+    ]);
+  }
+  const effectiveTopologyTransform: PlanRunInput["topologyTransform"] = {
+    ...(auditPolicy.strategyLoops === undefined ? {} : { strategyLoops: auditPolicy.strategyLoops }),
+    ...(input.topologyTransform?.excludedNodeIds === undefined
+      ? {}
+      : { excludedNodeIds: input.topologyTransform.excludedNodeIds })
+  };
 
   const runId = input.runId ?? generateRunId(input.mode ?? "run");
   const configFingerprint = sha256Stable(resolved.config);
@@ -110,12 +131,12 @@ export async function planRun(input: PlanRunInput) {
   try {
     const topology = transformTopologyForRun(
       loadTopology(projectRoot, {
-        ...(input.topologyPath === undefined ? {} : { topologyPath: input.topologyPath }),
+        topologyPath: auditPolicy.effectiveTopologyPath,
         requirePromptFiles: true
       }),
-      input.topologyTransform
+      effectiveTopologyTransform
     );
-    catalog = transformPromptCatalogForRun(loadPromptCatalog({ projectRoot }), input.topologyTransform);
+    catalog = transformPromptCatalogForRun(loadPromptCatalog({ projectRoot }), effectiveTopologyTransform);
     expandedGraph = expandTopology(topology, {
       projectRoot,
       runId,
@@ -192,6 +213,21 @@ export async function planRun(input: PlanRunInput) {
         mode: input.mode ?? "run",
         workflow_ids: [],
         redacted_config_fingerprint: redactedConfigFingerprint,
+        audit_profile: {
+          requested: auditPolicy.auditProfile,
+          effective: auditPolicy.auditProfile,
+          catalog_schema_version: auditPolicy.catalogSchemaVersion,
+          catalog_digest: auditPolicy.catalogDigest,
+          settings: auditPolicy.profileSettings,
+          overridden_settings: auditPolicy.overriddenSettings,
+          ...(auditPolicy.declaredTopologyPath === undefined
+            ? {}
+            : { declared_topology_path: auditPolicy.declaredTopologyPath }),
+          effective_topology_path: auditPolicy.effectiveTopologyDisplayPath,
+          topology_path_origin: auditPolicy.topologyPathOrigin,
+          topology_overridden: auditPolicy.topologyOverridden,
+          topology_digest: auditPolicy.topologyDigest
+        },
         forge_guard: forgeGuardMetadata(resolved.config, false)
       }
     });
@@ -231,6 +267,15 @@ export async function planRun(input: PlanRunInput) {
     redacted_config_fingerprint: redactedConfigFingerprint,
     execution: resolved.config.execution,
     topology: validation.value.topology,
+    audit_profile: {
+      id: auditPolicy.auditProfile,
+      catalog_digest: auditPolicy.catalogDigest,
+      effective_topology_path: auditPolicy.effectiveTopologyDisplayPath,
+      topology_path_origin: auditPolicy.topologyPathOrigin,
+      topology_digest: auditPolicy.topologyDigest,
+      overridden_settings: auditPolicy.overriddenSettings,
+      topology_overridden: auditPolicy.topologyOverridden
+    },
     rendered_prompts: persistedRenderedPrompts,
     policy_posture: Object.fromEntries(
       Object.entries(validation.value.policy_posture).map(([key, value]) => [key, value.status])
