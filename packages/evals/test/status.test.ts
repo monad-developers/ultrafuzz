@@ -281,6 +281,60 @@ describe("eval status", () => {
     expect(snapshot.rows[0]?.linked_workflow_status).toBe("paused");
   });
 
+  it("preserves a terminal continued workflow after the product controller lease expires", () => {
+    const fixture = evalFixture([privateRow("continued-row")]);
+    const runRoot = path.join(fixture.base, "continued-run");
+    const runId = "run-continued";
+    fs.mkdirSync(path.join(runRoot, "smithers", "logs"), { recursive: true });
+    writeState(runRoot, {
+      runId,
+      status: "running",
+      nodes: ["pending"],
+      controllerLease: { status: "expired", expiresAt: "2026-01-02T14:50:30.000Z" }
+    });
+    fs.writeFileSync(path.join(runRoot, "smithers", "logs", `${runId}.log`), "status: continued\n", "utf8");
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify({ ...record("continued-row", runId, runRoot), workflow_ids: [runId] })}\n`,
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({
+      projectRoot: fixture.project,
+      evalRunId: fixture.evalRunId,
+      now: SNAPSHOT
+    });
+
+    expect(snapshot.rows[0]?.linked_workflow_status).toBe("continued");
+  });
+
+  it("recognizes the current Smithers waiting-quota lifecycle", () => {
+    const fixture = evalFixture([privateRow("quota-row")]);
+    const runRoot = path.join(fixture.base, "quota-run");
+    const runId = "run-quota";
+    fs.mkdirSync(path.join(runRoot, "smithers", "logs"), { recursive: true });
+    writeState(runRoot, {
+      runId,
+      status: "running",
+      nodes: ["pending"],
+      controllerLease: { status: "active", expiresAt: "2026-01-02T15:02:30.000Z" }
+    });
+    fs.writeFileSync(path.join(runRoot, "smithers", "logs", `${runId}.log`), "status: waiting-quota\n", "utf8");
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify({ ...record("quota-row", runId, runRoot), workflow_ids: [runId] })}\n`,
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({
+      projectRoot: fixture.project,
+      evalRunId: fixture.evalRunId,
+      now: SNAPSHOT
+    });
+
+    expect(snapshot.rows[0]?.linked_workflow_status).toBe("waiting-quota");
+  });
+
   it("reports an unsupported latest lifecycle as unknown instead of retaining admitted running", () => {
     const fixture = evalFixture([privateRow("future-workflow-row")]);
     const runRoot = path.join(fixture.base, "future-workflow-run");
@@ -420,6 +474,55 @@ describe("eval status", () => {
         next_eligible_action: "approve"
       }
     ]);
+  });
+
+  it("escapes node ID control characters in the table while preserving exact JSON IDs", () => {
+    const fixture = evalFixture([privateRow("control-character-row")]);
+    const runRoot = path.join(fixture.base, "control-character-run");
+    const runId = "run-control-character";
+    const activeNodeId = "active\u001b[2J";
+    const waitingNodeId = "waiting\nnode";
+    fs.mkdirSync(runRoot, { recursive: true });
+    fs.writeFileSync(
+      statePath(runRoot),
+      `${JSON.stringify({
+        schema_version: "1.1",
+        run_id: runId,
+        status: "running",
+        created_at: START,
+        started_at: START,
+        last_transition_at: CHECKPOINT,
+        nodes: {
+          [activeNodeId]: { node_id: activeNodeId, status: "running" },
+          [waitingNodeId]: {
+            node_id: waitingNodeId,
+            status: "pending",
+            wait_reason: "controller-loss",
+            next_eligible_action: "controller-takeover"
+          }
+        }
+      })}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify(record("control-character-row", runId, runRoot))}\n`,
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({
+      projectRoot: fixture.project,
+      evalRunId: fixture.evalRunId,
+      now: SNAPSHOT
+    });
+    const table = renderEvalStatusTable(snapshot);
+
+    expect(snapshot.rows[0]?.active_node_ids).toEqual([activeNodeId]);
+    expect(snapshot.rows[0]?.waiting_nodes[0]?.node_id).toBe(waitingNodeId);
+    expect(table).toContain("active\\u001b[2J");
+    expect(table).toContain("waiting\\nnode[controller-loss→controller-takeover]");
+    expect(table).not.toContain("\u001b");
+    expect(table.split("\n").filter((line) => line.startsWith("row-"))).toHaveLength(1);
   });
 
   it("keeps one shared table budget while JSON retains every active and waiting node", () => {

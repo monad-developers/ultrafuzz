@@ -28,6 +28,7 @@ const EVAL_STATUS_LINKED_WORKFLOW_STATES = [
   "running",
   "waiting-approval",
   "waiting-event",
+  "waiting-quota",
   "waiting-timer",
   "paused",
   "continued",
@@ -531,7 +532,9 @@ function nodesText(row: EvalStatusRow): string {
   activeLimit += Math.min(remaining, row.active_node_ids.length - activeLimit);
 
   const groups = [];
-  if (activeLimit > 0) groups.push(`active:${row.active_node_ids.slice(0, activeLimit).join(",")}`);
+  if (activeLimit > 0) {
+    groups.push(`active:${row.active_node_ids.slice(0, activeLimit).map(tableSafeText).join(",")}`);
+  }
   if (waitingLimit > 0) groups.push(`wait:${row.waiting_nodes.slice(0, waitingLimit).map(waitingNodeText).join(",")}`);
   const omitted = row.active_node_ids.length + row.waiting_nodes.length - activeLimit - waitingLimit;
   if (omitted > 0) groups.push(`+${omitted}`);
@@ -539,10 +542,20 @@ function nodesText(row: EvalStatusRow): string {
 }
 
 function waitingNodeText(node: EvalStatusWaitingNode): string {
-  if (node.wait_reason === null && node.next_eligible_action === null) return node.node_id;
+  const nodeId = tableSafeText(node.node_id);
+  if (node.wait_reason === null && node.next_eligible_action === null) return nodeId;
   const reason = node.wait_reason ?? "unknown";
   const action = node.next_eligible_action ?? "unknown";
-  return `${node.node_id}[${reason}→${action}]`;
+  return `${nodeId}[${reason}→${action}]`;
+}
+
+function tableSafeText(value: string): string {
+  return JSON.stringify(value)
+    .slice(1, -1)
+    .replace(
+      /[\u007f-\u009f\u2028\u2029]/gu,
+      (character) => `\\u${character.codePointAt(0)!.toString(16).padStart(4, "0")}`
+    );
 }
 
 function isActiveNode(node: { status: NodeStatus; wait_reason?: NodeWaitReason }): boolean {
@@ -596,7 +609,7 @@ function readLinkedWorkflowStatus(
     } else if (!isLinkedWorkflowStatus(latest)) {
       statuses.push("unknown");
     } else {
-      statuses.push((latest === "running" || latest === "continued") && !activelyOwned ? "unknown" : latest);
+      statuses.push(latest === "running" && !activelyOwned ? "unknown" : latest);
     }
   }
   const distinct = new Set(statuses);
