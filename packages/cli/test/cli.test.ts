@@ -1044,10 +1044,7 @@ test("report regenerates canonical Markdown from structured issues and non-produ
     run_metadata: Record<string, unknown>;
   };
   assert.equal(reconciledReport.run_metadata.audit_profile, auditProfileMetadata.effective);
-  assert.equal(
-    reconciledReport.run_metadata.audit_profile_catalog_digest,
-    auditProfileMetadata.catalog_digest
-  );
+  assert.equal(reconciledReport.run_metadata.audit_profile_catalog_digest, auditProfileMetadata.catalog_digest);
   assert.equal(reconciledReport.run_metadata.topology_digest, auditProfileMetadata.topology_digest);
   assert.equal(reconciledReport.run_metadata.prompt_digest, authoritativeRunMetadata.prompt_digest);
   assert.equal(
