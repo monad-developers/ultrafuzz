@@ -8807,6 +8807,64 @@ test("syncRun does not report an unattributed failure that state.json already at
   );
 });
 
+test("syncRun accepts the runner's correlation envelope and rejects a mismatched one", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  // Every event the runner emits carries this trace envelope, so refusing it left
+  // no real run syncable at all.
+  const synced = async (runId: string, correlationAttempt: number) => {
+    const workflowRunId = `ultrafuzz-${runId}`;
+    const env = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId,
+        steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+      }),
+      events: workflowEvents(workflowRunId, [
+        { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+        {
+          type: "TokenUsageReported",
+          nodeId: "node:project-discovery",
+          attempt: 1,
+          extra: {
+            iteration: 0,
+            inputTokens: 11,
+            outputTokens: 5,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            model: "gpt-correlated",
+            agent: "codex",
+            correlation: {
+              runId: workflowRunId,
+              workflowName: workflowRunId,
+              nodeId: "node:project-discovery",
+              iteration: 0,
+              attempt: correlationAttempt
+            }
+          }
+        },
+        { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+        { type: "RunFinished" }
+      ])
+    });
+    const run = await startRun({ projectRoot: project, runId, env });
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+    return syncRun({ projectRoot: project, runId, env });
+  };
+
+  const accepted = await synced("correlated-usage", 1);
+  assert.equal(accepted.ok, true, JSON.stringify(accepted.diagnostics));
+
+  // A trace envelope that names another attempt is a mixed-up event, not a
+  // routing detail to ignore, so the read fails closed instead of accounting it.
+  await assert.rejects(
+    () => synced("correlated-usage-mismatch", 2),
+    /correlation attempt disagrees with the reported usage/u
+  );
+});
+
 test("syncRun counts cache-only usage when aggregate input is explicitly zero", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

@@ -3780,9 +3780,13 @@ function validateSmithersEventPayload(type: string, payload: Record<string, unkn
     "cacheReadTokens",
     "cacheWriteTokens",
     "reasoningTokens",
-    "timestampMs"
+    "timestampMs",
+    // The runner stamps a trace envelope on every event it emits. It carries no
+    // accounting of its own, so refusing it only made every real run unsyncable.
+    "correlation"
   ];
   if (!hasOnlyKeys(payload, allowed)) throw new Error(`${label} contains unsupported fields`);
+  assertWorkflowEventCorrelation(payload, label);
   requiredWorkflowEventString(payload.model, `${label} model`);
   requiredWorkflowEventString(payload.agent, `${label} agent`);
   requiredWorkflowEventCount(payload.inputTokens, `${label} inputTokens`);
@@ -4095,6 +4099,23 @@ function errorLooksLikeTimeout(value: unknown): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The runner's trace envelope repeats the attempt identity it was emitted for.
+ * Its own shape is the runner's to evolve, but where it names the attempt it must
+ * agree with the accounting beside it: a disagreement is a mixed-up event, not a
+ * routing detail to ignore.
+ */
+function assertWorkflowEventCorrelation(payload: Record<string, unknown>, label: string): void {
+  const correlation = payload.correlation;
+  if (correlation === undefined) return;
+  if (!isRecord(correlation)) throw new Error(`${label} correlation must be an object`);
+  for (const field of ["runId", "nodeId", "iteration", "attempt"] as const) {
+    if (correlation[field] !== undefined && correlation[field] !== payload[field]) {
+      throw new Error(`${label} correlation ${field} disagrees with the reported usage`);
+    }
+  }
 }
 
 function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
