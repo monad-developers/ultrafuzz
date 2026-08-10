@@ -715,6 +715,12 @@ function readAndBindPublications(
 ): Map<string, PublicationSnapshot> {
   const manifestFiles = uniqueByPath(documents.manifest.files, "artifact manifest file");
   const markerPublications = uniqueByPath(documents.marker.publications, "verification marker publication");
+  if (
+    manifestFiles.size !== markerPublications.size ||
+    [...manifestFiles].some(([relativePath]) => !markerPublications.has(relativePath))
+  ) {
+    throw invalidAuthority("controller artifact manifest file set does not match the exact verifier publications");
+  }
   const snapshots = new Map<string, PublicationSnapshot>();
   for (const [relativePath, publication] of markerPublications) {
     const manifestEntry = manifestFiles.get(relativePath);

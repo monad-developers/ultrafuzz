@@ -398,6 +398,35 @@ test("post-verification report mutation is rejected even when the physical JSON 
   assert.deepEqual(fs.readFileSync(fixture.markdownPath), fixture.markdownBytes);
 });
 
+test("a resealed controller manifest cannot authenticate an unpublished sidecar", () => {
+  const fixture = createVerifiedReportFixture("verified-report-unpublished-sidecar");
+  const manifestPath = path.join(fixture.layout.artifactsDir, fixture.attemptId, "artifact-manifest.json");
+  const sidecarPath = path.join(fixture.layout.artifactsDir, fixture.attemptId, "unverified-sidecar.json");
+  const sidecarBytes = Buffer.from('{"unverified":true}\n', "utf8");
+  writeFileDurable(sidecarPath, sidecarBytes);
+  const manifest = readManifest(manifestPath);
+  manifest.files.push({
+    path: "unverified-sidecar.json",
+    size_bytes: sidecarBytes.byteLength,
+    sha256: digest(sidecarBytes),
+    provenance: manifest.provenance
+  });
+  manifest.files.sort((left, right) => left.path.localeCompare(right.path));
+  writeJsonDurable(manifestPath, manifest);
+  const manifestBytes = fs.readFileSync(manifestPath);
+  sealFinalReportManifest(fixture.layout, fixture.attemptId, digest(manifestBytes));
+
+  assert.throws(
+    () => loadVerifiedFinalReportSnapshot(fixture.layout.root),
+    (error: unknown) =>
+      error instanceof VerifiedOutputError &&
+      error.code === "VERIFIED_OUTPUT_AUTHORITY_INVALID" &&
+      /file set does not match the exact verifier publications/iu.test(error.message)
+  );
+  assert.deepEqual(fs.readFileSync(manifestPath), manifestBytes);
+  assert.deepEqual(fs.readFileSync(sidecarPath), sidecarBytes);
+});
+
 test("post-finalization reads reject task-manifest bytes that no longer match the workflow-control seal", () => {
   const fixture = createVerifiedReportFixture("verified-report-task-authority-mutated");
   fs.appendFileSync(path.join(fixture.layout.root, "smithers", "tasks.json"), " \n");
