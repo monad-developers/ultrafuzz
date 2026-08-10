@@ -145,6 +145,16 @@ describe("prompt rendering", () => {
     expect(() => renderPrompt(input)).toThrow(/requires exactly one declared findings/u);
   });
 
+  it("rejects overrides of topology-derived findings-stage paths", () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    tmpDirs.push(tmp);
+    const input = baseRenderInput(tmp);
+    input.prompt = "Lifecycle stage path: {{output_stage_findings_relative_path}}";
+    input.variables = { output_stage_findings_relative_path: "forged.json" };
+
+    expect(() => renderPrompt(input)).toThrow(/topology-derived and cannot be overridden/u);
+  });
+
   it("rejects unsafe artifact suffixes and render outputs", () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
     tmpDirs.push(tmp);

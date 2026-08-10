@@ -897,8 +897,12 @@ function validateVariableOverrides(variables: PromptRenderInput["variables"]): v
     if (!isSupportedTemplateVariable(key)) {
       throw new PromptError("missing-template-variable", `unknown prompt render variable override: ${key}`);
     }
-    if (key === "schema_path") {
-      throw new PromptError("invalid-render-input", "schema_path is task-local and cannot be overridden");
+    if (
+      key === "schema_path" ||
+      key === "output_stage_findings_path" ||
+      key === "output_stage_findings_relative_path"
+    ) {
+      throw new PromptError("invalid-render-input", `${key} is topology-derived and cannot be overridden`);
     }
     if (!(
       typeof value === "string" ||
