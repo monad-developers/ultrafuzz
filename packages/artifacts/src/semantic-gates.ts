@@ -1940,7 +1940,9 @@ function filesystemManifestIssues(
         expectedDigest !== undefined &&
         crypto.createHash("sha256").update(snapshot).digest("hex") !== expectedDigest
       ) {
-        issues.push(issue(`${rowPath}.sha256`, `Referenced file digest does not match ${JSON.stringify(relativePath)}`));
+        issues.push(
+          issue(`${rowPath}.sha256`, `Referenced file digest does not match ${JSON.stringify(relativePath)}`)
+        );
       }
       const expectedSize = numberField(row, "size_bytes");
       if (expectedSize !== undefined && expectedSize !== snapshot.byteLength) {
@@ -1985,12 +1987,7 @@ function generatedTestExistenceIssues(document: unknown, context: SemanticGateCo
     if (context.filesystem!.files !== undefined) {
       return filePath !== undefined && context.filesystem!.files.has(relativePath)
         ? []
-        : [
-            issue(
-              `$.generated_tests[${index}].path`,
-              `Generated test does not exist: ${JSON.stringify(relativePath)}`
-            )
-          ];
+        : [issue(`$.generated_tests[${index}].path`, `Generated test does not exist: ${JSON.stringify(relativePath)}`)];
     }
     try {
       if (filePath !== undefined) {
