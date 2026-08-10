@@ -41,6 +41,13 @@ export interface SemanticReviewStageContext {
   upstreamStrategyDetections?: unknown;
 }
 
+export interface SemanticDynamicStrategyArtifactsContext {
+  strategyPlan?: unknown;
+  enumeratorOutputs?: unknown;
+  findings?: unknown;
+  provenance?: unknown;
+}
+
 export interface SemanticArtifactSetContext {
   campaigns?: readonly unknown[];
   findings?: readonly unknown[];
@@ -52,6 +59,7 @@ export interface SemanticArtifactSetContext {
   severityClassifiedFindings?: unknown;
   findingLifecycleLedger?: unknown;
   reviewStage?: SemanticReviewStageContext;
+  dynamicStrategyArtifacts?: SemanticDynamicStrategyArtifactsContext;
 }
 
 export interface SemanticPlannedGraphContext {
@@ -1423,15 +1431,200 @@ function dynamicModelJoinIssues(document: unknown): SemanticGateIssue[] {
 }
 
 function dynamicRecommendationUniquenessIssues(document: unknown): SemanticGateIssue[] {
-  const recommendations = arrayAt(document, ["enumerators"]).flatMap((entry) => arrayAt(entry, ["recommendations"]));
-  return projectedUniquenessIssues([
-    {
-      items: recommendations,
-      path: "$.enumerators[*].recommendations",
-      project: (row) => stringField(row, "strategy_id"),
-      label: "dynamic recommendation ID"
+  return arrayAt(document, ["enumerators"]).flatMap((entry, enumeratorIndex) =>
+    projectedUniquenessIssues([
+      {
+        items: arrayAt(entry, ["recommendations"]),
+        path: `$.enumerators[${enumeratorIndex}].recommendations`,
+        project: (row) => stringField(row, "strategy_id"),
+        label: "dynamic recommendation ID within one enumerator"
+      }
+    ])
+  );
+}
+
+const dynamicRecommendationFields = [
+  "strategy_id",
+  "title",
+  "rationale",
+  "coverage_gap",
+  "evidence_paths",
+  "proposed_test_path",
+  "focused_command",
+  "priority"
+] as const;
+
+function dynamicRecommendationProjection(value: unknown): Readonly<Record<string, unknown>> | undefined {
+  if (!isRecord(value)) return undefined;
+  return Object.fromEntries(dynamicRecommendationFields.map((field) => [field, value[field]]));
+}
+
+function dynamicStrategyArtifactReconciliationIssues(
+  document: unknown,
+  context: SemanticGateContext
+): SemanticGateIssue[] {
+  const artifacts = context.artifactSet?.dynamicStrategyArtifacts;
+  if (artifacts === undefined) return [issue("$", "Trusted dynamic-strategy sibling artifacts are unavailable")];
+
+  const selectedRows = arrayAt(document, ["strategies"]);
+  const selectedIds = selectedRows.flatMap((row) => stringField(row, "strategy_id") ?? []);
+  const selectedById = new Map(
+    selectedRows.flatMap((row) => {
+      const strategyId = stringField(row, "strategy_id");
+      return strategyId === undefined ? [] : [[strategyId, row] as const];
+    })
+  );
+  const planSelectedIds = stringArray(at(artifacts.strategyPlan, ["selected_strategies"]));
+  const planSelectedCount = numberField(artifacts.strategyPlan, "selected_strategy_count");
+  const rejectedRows = arrayAt(artifacts.strategyPlan, ["rejected_strategies"]);
+  const rejectedIds = rejectedRows.flatMap((row) => stringField(row, "strategy_id") ?? []);
+  const issues: SemanticGateIssue[] = [];
+
+  if (!isDeepStrictEqual(selectedIds, planSelectedIds)) {
+    issues.push(
+      issue(
+        "$.strategies",
+        "Selected strategy IDs and order do not exactly equal strategy-plan.json#selected_strategies"
+      )
+    );
+  }
+  if (planSelectedCount !== selectedRows.length) {
+    issues.push(
+      issue(
+        "$.strategies",
+        `Selected strategy row count does not equal strategy-plan.json#selected_strategy_count (${String(planSelectedCount)})`
+      )
+    );
+  }
+
+  const recommendationsById = new Map<string, Array<{ enumeratorId: string; recommendation: unknown }>>();
+  for (const enumerator of arrayAt(artifacts.enumeratorOutputs, ["enumerators"])) {
+    const enumeratorId = stringField(enumerator, "enumerator_id");
+    if (enumeratorId === undefined) continue;
+    for (const recommendation of arrayAt(enumerator, ["recommendations"])) {
+      const strategyId = stringField(recommendation, "strategy_id");
+      if (strategyId === undefined) continue;
+      const occurrences = recommendationsById.get(strategyId) ?? [];
+      occurrences.push({ enumeratorId, recommendation });
+      recommendationsById.set(strategyId, occurrences);
     }
-  ]);
+  }
+
+  const selectedIdSet = new Set(planSelectedIds);
+  const rejectedIdSet = new Set(rejectedIds);
+  for (const strategyId of recommendationsById.keys()) {
+    const selected = selectedIdSet.has(strategyId);
+    const rejected = rejectedIdSet.has(strategyId);
+    if (selected === rejected) {
+      issues.push(
+        issue(
+          "$.strategies",
+          selected
+            ? `Enumerator recommendation is both selected and rejected ${JSON.stringify(strategyId)}`
+            : `Enumerator recommendation is neither selected nor explicitly rejected ${JSON.stringify(strategyId)}`
+        )
+      );
+    }
+    const occurrences = recommendationsById.get(strategyId) ?? [];
+    const expectedProjection = dynamicRecommendationProjection(occurrences[0]?.recommendation);
+    if (
+      expectedProjection === undefined ||
+      occurrences.some(
+        (occurrence) =>
+          !isDeepStrictEqual(dynamicRecommendationProjection(occurrence.recommendation), expectedProjection)
+      )
+    ) {
+      issues.push(
+        issue(
+          "$.strategies",
+          `Enumerators disagree on the canonical recommendation fields for ${JSON.stringify(strategyId)}`
+        )
+      );
+    }
+  }
+  for (const [kind, ids] of [
+    ["selected", planSelectedIds],
+    ["rejected", rejectedIds]
+  ] as const) {
+    for (const strategyId of ids) {
+      if (!recommendationsById.has(strategyId)) {
+        issues.push(
+          issue(
+            "$.strategies",
+            `Strategy plan marks an unknown enumerator recommendation as ${kind} ${JSON.stringify(strategyId)}`
+          )
+        );
+      }
+    }
+  }
+
+  for (const [selectedIndex, selectedRow] of selectedRows.entries()) {
+    const strategyId = stringField(selectedRow, "strategy_id");
+    if (strategyId === undefined) continue;
+    const occurrences = recommendationsById.get(strategyId) ?? [];
+    if (occurrences.length === 0) continue;
+    const expectedProjection = dynamicRecommendationProjection(occurrences[0]!.recommendation);
+    const selectedProjection = dynamicRecommendationProjection(selectedRow);
+    if (expectedProjection !== undefined && !isDeepStrictEqual(selectedProjection, expectedProjection)) {
+      issues.push(
+        issue(
+          `$.strategies[${selectedIndex}]`,
+          `Selected strategy does not exactly preserve its enumerator recommendation ${JSON.stringify(strategyId)}`
+        )
+      );
+    }
+    const expectedEnumeratorIds = occurrences.map((occurrence) => occurrence.enumeratorId);
+    if (!isDeepStrictEqual(stringArray(at(selectedRow, ["enumerator_ids"])), expectedEnumeratorIds)) {
+      issues.push(
+        issue(
+          `$.strategies[${selectedIndex}].enumerator_ids`,
+          `Selected strategy does not name the exact recommending enumerators in source order ${JSON.stringify(strategyId)}`
+        )
+      );
+    }
+  }
+
+  for (const [findingIndex, finding] of arrayAt(artifacts.findings, []).entries()) {
+    const strategyId = stringField(finding, "dynamic_strategy_id");
+    const enumeratorId = stringField(finding, "enumerator_id");
+    if (strategyId === undefined) {
+      issues.push(issue(`$.strategies`, `Dynamic finding at index ${findingIndex} omits dynamic_strategy_id`));
+      continue;
+    }
+    const selected = selectedById.get(strategyId);
+    if (selected === undefined) {
+      issues.push(
+        issue(
+          `$.strategies`,
+          `Dynamic finding at index ${findingIndex} names an unselected strategy ${JSON.stringify(strategyId)}`
+        )
+      );
+      continue;
+    }
+    if (enumeratorId === undefined) {
+      issues.push(issue(`$.strategies`, `Dynamic finding at index ${findingIndex} omits enumerator_id`));
+    } else if (!stringArray(at(selected, ["enumerator_ids"])).includes(enumeratorId)) {
+      issues.push(
+        issue(
+          `$.strategies`,
+          `Dynamic finding at index ${findingIndex} names an enumerator that did not recommend ${JSON.stringify(strategyId)}`
+        )
+      );
+    }
+  }
+
+  for (const [fileIndex, generatedFile] of arrayAt(artifacts.provenance, ["generated_files"]).entries()) {
+    const strategyId = stringField(generatedFile, "strategy_id");
+    if (strategyId !== undefined && !selectedById.has(strategyId)) {
+      issues.push(
+        issue(
+          "$.strategies",
+          `Provenance generated file at index ${fileIndex} names an unselected strategy ${JSON.stringify(strategyId)}`
+        )
+      );
+    }
+  }
+  return issues;
 }
 
 function dynamicSelectionCoherenceIssues(document: unknown): SemanticGateIssue[] {
@@ -3064,6 +3257,16 @@ const gateSpecifications = {
   ),
   "dynamic-model-agent-join": documentGate(dynamicModelJoinIssues),
   "dynamic-recommendation-id-uniqueness": documentGate(dynamicRecommendationUniquenessIssues),
+  "dynamic-strategy-artifact-reconciliation": contextualGate(
+    "cross-artifact",
+    [
+      "artifactSet.dynamicStrategyArtifacts.strategyPlan",
+      "artifactSet.dynamicStrategyArtifacts.enumeratorOutputs",
+      "artifactSet.dynamicStrategyArtifacts.findings",
+      "artifactSet.dynamicStrategyArtifacts.provenance"
+    ],
+    dynamicStrategyArtifactReconciliationIssues
+  ),
   "dynamic-strategy-selection-coherence": documentGate(dynamicSelectionCoherenceIssues),
   "externalized-state-id-uniqueness": documentGate((document, context) => [
     ...uniqueFieldGate([["state_components"]], "component_id", "state component ID")(document, context),

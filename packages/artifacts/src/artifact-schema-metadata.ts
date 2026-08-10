@@ -333,7 +333,7 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "ultrafuzz/selected-strategies@1",
     "selectedStrategiesJsonSchema",
     "selectedStrategiesSchema",
-    ["selected-strategy-id-uniqueness"]
+    ["selected-strategy-id-uniqueness", "dynamic-strategy-artifact-reconciliation"]
   ),
   "semantic-red-registry.schema.json": artifact(
     "ultrafuzz/semantic-red-registry@1",

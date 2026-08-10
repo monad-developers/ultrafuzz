@@ -200,7 +200,10 @@ Use `schema_version: "ultrafuzz.dynamic-enumerator-outputs.v1"` and an
 `focused_command`, and `priority`. If raw enumerator-specific output is useful,
 put it only in a discriminated `payload` of `{ "kind": "text", "value": "..." }`
 or `{ "kind": "json", "value": <JSON> }`; this is the sole intentionally open
-nested model payload.
+nested model payload. A single enumerator must not repeat a `strategy_id`. If
+multiple enumerators recommend the same ID, every recommendation field must be
+exactly equal as a JSON value, including array order; otherwise keep distinct
+IDs.
 
 Write selected strategy details to:
 
@@ -209,7 +212,12 @@ Write selected strategy details to:
 Set `schema_version` to `"ultrafuzz.selected-strategies.v1"` and write a
 `strategies` array. Each selected row preserves every recommendation field and
 adds non-empty `enumerator_ids` and `validation_plan` arrays. The selected IDs
-must exactly match `strategy-plan.json#selected_strategies`.
+and row order must exactly match `strategy-plan.json#selected_strategies`, and
+the row count must equal `selected_strategy_count`. `enumerator_ids` must list
+exactly every enumerator that recommended that strategy, in enumerator-output
+order. Every enumerator recommendation must appear exactly once in the plan's
+selected or explicitly rejected IDs; never invent a selected or rejected ID
+that no enumerator recommended.
 
 Write generated-test manifest details to:
 
@@ -227,7 +235,9 @@ manifest fields. Use an empty `generated_tests` array when no file was produced.
 Write findings to {{output_findings_path}}. Use an empty JSON array when no
 finding is confirmed or no generated strategy is actionable. Each finding must
 preserve dynamic provenance with `strategy`, `dynamic_strategy_id`,
-`enumerator_id` when applicable, `attempt_index`, and evidence paths.
+`enumerator_id`, `attempt_index`, and evidence paths. Its
+`dynamic_strategy_id` must name a row in `selected-strategies.json`, and its
+`enumerator_id` must name one of that row's exact recommending enumerators.
 
 Write provenance to:
 
@@ -240,4 +250,7 @@ directories, host-global paths, network resources, and extra target context were
 not used. Set `schema_version` to
 `"ultrafuzz.dynamic-strategy-provenance.v1"`; use exact top-level keys
 `current_run_artifacts`, `agents`, `models`, `commands`, `generated_files`,
-`validation`, and `excluded_context`.
+`validation`, and `excluded_context`. Every `generated_files[].strategy_id`
+must name a selected strategy. The host reconciles all five sibling JSON
+artifacts with one named, non-mutating contextual gate after shape validation;
+the standalone JSON validator cannot prove these cross-file joins.

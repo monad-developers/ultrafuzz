@@ -596,6 +596,184 @@ test("triage gates preserve every deduped finding and upstream note", () => {
   );
 });
 
+test("dynamic strategy sibling artifacts reconcile only through exact declared outputs", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-dynamic-strategy-reconciliation" });
+  const artifactDir = getNodeArtifactDir(layout, "dynamic-strategy-generator", { create: true });
+  const excludedContext = {
+    sibling_runs: "excluded",
+    previous_reports: "excluded",
+    host_global_paths: "excluded",
+    network_resources: "excluded",
+    extra_target_context: "excluded"
+  };
+  const recommendationA = {
+    strategy_id: "strategy-a",
+    title: "Strategy A",
+    rationale: "Exercise the uncovered transition.",
+    coverage_gap: "The transition has no focused test.",
+    evidence_paths: ["src/Target.sol"],
+    proposed_test_path: "generated-tests/StrategyA.t.sol",
+    focused_command: "forge test --match-contract StrategyA",
+    priority: "high"
+  };
+  const recommendationB = { ...recommendationA, strategy_id: "strategy-b", title: "Strategy B" };
+  const strategyPlan = {
+    schema_version: "ultrafuzz.dynamic-strategy-plan.v1",
+    dynamic_strategies_enumerator: 1,
+    status: "selected",
+    selected_strategy_count: 1,
+    selected_strategies: ["strategy-a"],
+    rejected_strategies: [{ strategy_id: "strategy-b", reason: "Lower priority." }],
+    current_run_artifacts_considered: [],
+    excluded_context: excludedContext,
+    timeout_seconds: null,
+    finalization_reserve_seconds: null
+  };
+  const enumeratorOutputs = {
+    schema_version: "ultrafuzz.dynamic-enumerator-outputs.v1",
+    enumerators: [
+      {
+        enumerator_id: "enumerator-a",
+        agent_label: "Enumerator A",
+        status: "complete",
+        diagnostics: [],
+        recommendations: [recommendationA, recommendationB]
+      }
+    ]
+  };
+  const selectedStrategies = {
+    schema_version: "ultrafuzz.selected-strategies.v1",
+    strategies: [
+      {
+        ...recommendationA,
+        enumerator_ids: ["enumerator-a"],
+        validation_plan: ["Run the focused command."]
+      }
+    ]
+  };
+  const findings = [
+    currentFinding("dynamic-finding", {
+      strategy: "dynamic-strategy-generator",
+      dynamic_strategy_id: "strategy-a",
+      enumerator_id: "enumerator-a",
+      attempt_index: 0
+    })
+  ];
+  const provenance = {
+    schema_version: "ultrafuzz.dynamic-strategy-provenance.v1",
+    current_run_artifacts: [],
+    agents: [{ agent_id: "enumerator-a", label: "Enumerator A", role: "strategy-enumerator" }],
+    models: [],
+    commands: [],
+    generated_files: [
+      {
+        strategy_id: "strategy-a",
+        source_path: "generated-tests/StrategyA.t.sol",
+        destination_intent: "Focused dynamic regression test"
+      }
+    ],
+    validation: [],
+    excluded_context: excludedContext
+  };
+  const baseline = {
+    "strategy-plan.json": strategyPlan,
+    "enumerator-outputs.json": enumeratorOutputs,
+    "selected-strategies.json": selectedStrategies,
+    "findings.json": findings,
+    "provenance.json": provenance
+  };
+  const node: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "dynamic-strategy-generator",
+    logical_id: "dynamic-strategy-generator",
+    artifact_dir: "artifacts/dynamic-strategy-generator",
+    outputs: [
+      boundOutput("strategy-plan.json", "ultrafuzz/dynamic-strategy-plan@1", true),
+      boundOutput("enumerator-outputs.json", "ultrafuzz/dynamic-enumerator-outputs@1"),
+      boundOutput("selected-strategies.json", "ultrafuzz/selected-strategies@1"),
+      boundOutput("findings.json", "ultrafuzz/findings@2"),
+      boundOutput("provenance.json", "ultrafuzz/dynamic-strategy-provenance@1")
+    ]
+  };
+  const writeBaseline = (): void => {
+    for (const [fileName, value] of Object.entries(baseline)) {
+      fs.writeFileSync(path.join(artifactDir, fileName), JSON.stringify(value), "utf8");
+    }
+  };
+  const assertReconciliationFailure = (fileName: keyof typeof baseline, value: unknown, expected: RegExp): void => {
+    writeBaseline();
+    fs.writeFileSync(path.join(artifactDir, fileName), JSON.stringify(value), "utf8");
+    const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+    assert.equal(result.ok, false, fileName);
+    assert.ok(
+      result.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
+          diagnostic.details?.gate === "dynamic-strategy-artifact-reconciliation" &&
+          expected.test(diagnostic.message)
+      ),
+      `${fileName}: ${JSON.stringify(result.diagnostics)}`
+    );
+  };
+
+  writeBaseline();
+  const valid = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
+
+  assertReconciliationFailure(
+    "strategy-plan.json",
+    { ...strategyPlan, rejected_strategies: [] },
+    /neither selected nor explicitly rejected/u
+  );
+  assertReconciliationFailure(
+    "selected-strategies.json",
+    {
+      ...selectedStrategies,
+      strategies: [{ ...selectedStrategies.strategies[0]!, rationale: "Rewritten after enumeration." }]
+    },
+    /does not exactly preserve/u
+  );
+  assertReconciliationFailure(
+    "selected-strategies.json",
+    {
+      ...selectedStrategies,
+      strategies: [{ ...selectedStrategies.strategies[0]!, enumerator_ids: ["enumerator-other"] }]
+    },
+    /exact recommending enumerators/u
+  );
+  assertReconciliationFailure(
+    "findings.json",
+    [{ ...findings[0]!, dynamic_strategy_id: "strategy-b" }],
+    /unselected strategy/u
+  );
+  assertReconciliationFailure(
+    "findings.json",
+    [{ ...findings[0]!, enumerator_id: "enumerator-other" }],
+    /did not recommend/u
+  );
+  assertReconciliationFailure(
+    "provenance.json",
+    { ...provenance, generated_files: [{ ...provenance.generated_files[0]!, strategy_id: "strategy-b" }] },
+    /generated file.*unselected strategy/u
+  );
+
+  writeBaseline();
+  fs.rmSync(path.join(artifactDir, "provenance.json"));
+  fs.writeFileSync(path.join(artifactDir, "undeclared-provenance.json"), JSON.stringify(provenance), "utf8");
+  const undeclaredLookalike = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(undeclaredLookalike.ok, false);
+  assert.ok(
+    undeclaredLookalike.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_CONTEXT_UNAVAILABLE" &&
+        diagnostic.details?.gate === "dynamic-strategy-artifact-reconciliation" &&
+        Array.isArray(diagnostic.details.missing_context) &&
+        diagnostic.details.missing_context.includes("artifactSet.dynamicStrategyArtifacts.provenance")
+    ),
+    JSON.stringify(undeclaredLookalike.diagnostics)
+  );
+});
+
 test("final report gates preserve severity records and ledger dispositions without re-identifying findings", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-report-stage-preservation" });
   const classified = currentFinding("finding-report", {

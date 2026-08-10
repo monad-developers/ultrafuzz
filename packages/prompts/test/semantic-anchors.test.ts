@@ -463,6 +463,11 @@ describe("prompt semantic anchors", () => {
     expect(lane).toContain("must exactly equal the assigned\nlane payload");
     expect(dynamic).toContain("Use `selected` only with at least one selected strategy");
     expect(dynamic).toContain("A strategy ID cannot be both selected and rejected");
+    expect(dynamic).toContain("Every enumerator recommendation must appear exactly once");
+    expect(dynamic).toContain("exactly every enumerator that recommended that strategy");
+    expect(dynamic).toContain("`dynamic_strategy_id` must name a row in `selected-strategies.json`");
+    expect(dynamic).toContain("Every `generated_files[].strategy_id`\nmust name a selected strategy");
+    expect(dynamic).toContain("one named, non-mutating contextual gate");
   });
 
   it("keeps generated-test manifests on the canonical generated_tests contract", () => {

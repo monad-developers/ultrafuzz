@@ -1702,6 +1702,9 @@ function semanticArtifactSetForSchema(input: {
     const triagedFindings = semanticTriagedFindings(input.layout);
     return triagedFindings === undefined ? {} : { triagedFindings };
   }
+  if (input.schemaFilename === "selected-strategies.schema.json") {
+    return { dynamicStrategyArtifacts: semanticDynamicStrategyArtifacts(input) };
+  }
   if (input.schemaFilename === "report.schema.json") {
     const propertyCatalog = semanticCanonicalPropertyCatalog(input.layout);
     const implementedProperties = semanticImplementedProperties(input.layout);
@@ -1716,6 +1719,37 @@ function semanticArtifactSetForSchema(input: {
     };
   }
   return undefined;
+}
+
+function semanticDynamicStrategyArtifacts(input: {
+  artifactDir: string;
+  node: PlannedGraphNode;
+}): NonNullable<SemanticArtifactSetContext["dynamicStrategyArtifacts"]> {
+  const readDeclaredSibling = (
+    contract: PlannedGraphNode["outputs"][number]["contract"],
+    label: string
+  ): unknown | undefined => {
+    const declared = input.node.outputs.filter((output) => output.contract === contract);
+    if (declared.length === 0) return undefined;
+    if (declared.length !== 1) {
+      throw new Error(`dynamic strategy node declares ${declared.length} ${label} outputs; expected exactly one`);
+    }
+    const artifactPath = safeResolveInside(input.artifactDir, declared[0]!.path, `${label} semantic context`);
+    if (!fs.existsSync(artifactPath)) return undefined;
+    assertRegularFileInside(input.artifactDir, artifactPath, `${label} semantic context`);
+    return readStrictContractDocument(artifactPath, contract);
+  };
+
+  const strategyPlan = readDeclaredSibling("ultrafuzz/dynamic-strategy-plan@1", "dynamic strategy plan");
+  const enumeratorOutputs = readDeclaredSibling("ultrafuzz/dynamic-enumerator-outputs@1", "dynamic enumerator outputs");
+  const findings = readDeclaredSibling("ultrafuzz/findings@2", "dynamic findings");
+  const provenance = readDeclaredSibling("ultrafuzz/dynamic-strategy-provenance@1", "dynamic strategy provenance");
+  return {
+    ...(strategyPlan === undefined ? {} : { strategyPlan }),
+    ...(enumeratorOutputs === undefined ? {} : { enumeratorOutputs }),
+    ...(findings === undefined ? {} : { findings }),
+    ...(provenance === undefined ? {} : { provenance })
+  };
 }
 
 function readReviewArtifact(

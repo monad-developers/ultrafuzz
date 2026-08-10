@@ -4320,6 +4320,39 @@ function siblingCampaignSemanticArtifacts(
   return { campaigns, findings };
 }
 
+function siblingDynamicStrategySemanticArtifacts(
+  task: (typeof taskSpecs)[number],
+  verifiedOutputs: ReadonlyMap<string, VerifiedOutputSnapshot>
+): {
+  strategyPlan?: unknown;
+  enumeratorOutputs?: unknown;
+  findings?: unknown;
+  provenance?: unknown;
+} {
+  const valueForContract = (contract: string, label: string): unknown | undefined => {
+    const outputs = task.outputs.filter((output) => output.contract === contract);
+    if (outputs.length === 0) return undefined;
+    if (outputs.length !== 1) {
+      throw new Error(`artifact-contract failure: task declares ${outputs.length} ${label} outputs; expected one`);
+    }
+    const snapshot = verifiedOutputs.get(outputs[0]!.path);
+    if (snapshot === undefined) {
+      throw new Error(`artifact-contract failure: verified ${label} output is unavailable ${outputs[0]!.path}`);
+    }
+    return snapshot.value;
+  };
+  const strategyPlan = valueForContract("ultrafuzz/dynamic-strategy-plan@1", "dynamic strategy plan");
+  const enumeratorOutputs = valueForContract("ultrafuzz/dynamic-enumerator-outputs@1", "dynamic enumerator outputs");
+  const findings = valueForContract("ultrafuzz/findings@2", "dynamic findings");
+  const provenance = valueForContract("ultrafuzz/dynamic-strategy-provenance@1", "dynamic strategy provenance");
+  return {
+    ...(strategyPlan === undefined ? {} : { strategyPlan }),
+    ...(enumeratorOutputs === undefined ? {} : { enumeratorOutputs }),
+    ...(findings === undefined ? {} : { findings }),
+    ...(provenance === undefined ? {} : { provenance })
+  };
+}
+
 function verifiedAncestorPropertyLenses(
   task: (typeof taskSpecs)[number]
 ): Array<{ sourceNodeId: string; document: unknown }> | undefined {
@@ -4397,6 +4430,12 @@ function semanticGateContextForVerifiedOutput(
     propertyLenses?: readonly { sourceNodeId: string; document: unknown }[];
     implementedProperties?: unknown;
     triagedFindings?: unknown;
+    dynamicStrategyArtifacts?: {
+      strategyPlan?: unknown;
+      enumeratorOutputs?: unknown;
+      findings?: unknown;
+      provenance?: unknown;
+    };
   };
   git?: ReturnType<typeof deriveWorkspacePatchGitFacts>;
 } {
@@ -4432,6 +4471,10 @@ function semanticGateContextForVerifiedOutput(
       "ultrafuzz/triaged-findings@1"
     );
     context.artifactSet = triagedFindings === undefined ? {} : { triagedFindings: triagedFindings.value };
+  } else if (output.schemaFile === "selected-strategies.schema.json") {
+    context.artifactSet = {
+      dynamicStrategyArtifacts: siblingDynamicStrategySemanticArtifacts(task, verifiedOutputs)
+    };
   } else if (output.schemaFile === "report.schema.json") {
     const propertyCatalog = verifiedCurrentAncestorJsonArtifact(
       task,

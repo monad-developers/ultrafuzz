@@ -156,6 +156,48 @@ const analysisBundleRecoveryGatePositive = {
   }
 };
 
+const dynamicRecommendationFixture = {
+  strategy_id: "strategy-a",
+  title: "Strategy A",
+  rationale: "Exercise the uncovered transition.",
+  coverage_gap: "The transition has no focused test.",
+  evidence_paths: ["src/Target.sol"],
+  proposed_test_path: "generated-tests/StrategyA.t.sol",
+  focused_command: "forge test --match-contract StrategyA",
+  priority: "high"
+};
+
+const selectedDynamicStrategyFixture = {
+  ...dynamicRecommendationFixture,
+  enumerator_ids: ["enumerator-a"],
+  validation_plan: ["Run the focused command."]
+};
+
+const dynamicStrategyArtifactContext: SemanticGateContext = {
+  artifactSet: {
+    dynamicStrategyArtifacts: {
+      strategyPlan: {
+        selected_strategy_count: 1,
+        selected_strategies: ["strategy-a"],
+        rejected_strategies: [{ strategy_id: "strategy-b", reason: "Lower priority." }]
+      },
+      enumeratorOutputs: {
+        enumerators: [
+          {
+            enumerator_id: "enumerator-a",
+            recommendations: [
+              dynamicRecommendationFixture,
+              { ...dynamicRecommendationFixture, strategy_id: "strategy-b", title: "Strategy B" }
+            ]
+          }
+        ]
+      },
+      findings: [{ dynamic_strategy_id: "strategy-a", enumerator_id: "enumerator-a" }],
+      provenance: { generated_files: [{ strategy_id: "strategy-a" }] }
+    }
+  }
+};
+
 const fixtures = {
   "admin-config-surface-id-uniqueness": {
     positive: { surfaces: [{ surface_id: "a" }] },
@@ -1149,6 +1191,11 @@ test("every contextual registration executes real positive and negative checks",
         negative: { failure_counts: { pre_deduplication: 2, post_deduplication: 1 } },
         context: { artifactSet: { campaigns: [{ failures: [{}] }], findings: [{}] } }
       },
+      "dynamic-strategy-artifact-reconciliation": {
+        positive: { strategies: [selectedDynamicStrategyFixture] },
+        negative: { strategies: [{ ...selectedDynamicStrategyFixture, title: "Rewritten title" }] },
+        context: dynamicStrategyArtifactContext
+      },
       "generated-test-current-identity": {
         positive: { run_id: "run-current", node_id: "strategy-current" },
         negative: { run_id: "run-foreign", node_id: "strategy-foreign" },
@@ -1587,6 +1634,120 @@ test("every contextual registration executes real positive and negative checks",
     }
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("dynamic strategy reconciliation rejects every shape-valid sibling join drift", () => {
+  interface MutableDynamicContext {
+    artifactSet: {
+      dynamicStrategyArtifacts: {
+        strategyPlan: {
+          selected_strategy_count: number;
+          selected_strategies: string[];
+          rejected_strategies: Array<{ strategy_id: string; reason: string }>;
+        };
+        enumeratorOutputs: {
+          enumerators: Array<{
+            enumerator_id: string;
+            recommendations: Array<Record<string, unknown>>;
+          }>;
+        };
+        findings: Array<Record<string, unknown>>;
+        provenance: { generated_files: Array<Record<string, unknown>> };
+      };
+    };
+  }
+
+  const cases: Array<{
+    name: string;
+    mutate: (context: MutableDynamicContext, document: { strategies: Array<Record<string, unknown>> }) => void;
+    message: RegExp;
+  }> = [
+    {
+      name: "plan order",
+      mutate: (context) => {
+        context.artifactSet.dynamicStrategyArtifacts.strategyPlan.selected_strategies = ["strategy-b"];
+        context.artifactSet.dynamicStrategyArtifacts.strategyPlan.rejected_strategies = [
+          { strategy_id: "strategy-a", reason: "Rejected." }
+        ];
+      },
+      message: /IDs and order/u
+    },
+    {
+      name: "undisposed recommendation",
+      mutate: (context) => {
+        context.artifactSet.dynamicStrategyArtifacts.strategyPlan.rejected_strategies = [];
+      },
+      message: /neither selected nor explicitly rejected/u
+    },
+    {
+      name: "invented plan strategy",
+      mutate: (context) => {
+        context.artifactSet.dynamicStrategyArtifacts.strategyPlan.rejected_strategies.push({
+          strategy_id: "strategy-invented",
+          reason: "Invented."
+        });
+      },
+      message: /unknown enumerator recommendation/u
+    },
+    {
+      name: "rewritten recommendation",
+      mutate: (_context, document) => {
+        document.strategies[0]!.rationale = "Rewritten after selection.";
+      },
+      message: /does not exactly preserve/u
+    },
+    {
+      name: "conflicting enumerators",
+      mutate: (context, document) => {
+        context.artifactSet.dynamicStrategyArtifacts.enumeratorOutputs.enumerators.push({
+          enumerator_id: "enumerator-b",
+          recommendations: [{ ...dynamicRecommendationFixture, rationale: "A conflicting rationale." }]
+        });
+        document.strategies[0]!.enumerator_ids = ["enumerator-a", "enumerator-b"];
+      },
+      message: /disagree on the canonical recommendation fields/u
+    },
+    {
+      name: "enumerator attribution",
+      mutate: (_context, document) => {
+        document.strategies[0]!.enumerator_ids = ["enumerator-other"];
+      },
+      message: /exact recommending enumerators/u
+    },
+    {
+      name: "finding strategy",
+      mutate: (context) => {
+        context.artifactSet.dynamicStrategyArtifacts.findings[0]!.dynamic_strategy_id = "strategy-b";
+      },
+      message: /unselected strategy/u
+    },
+    {
+      name: "finding enumerator",
+      mutate: (context) => {
+        context.artifactSet.dynamicStrategyArtifacts.findings[0]!.enumerator_id = "enumerator-other";
+      },
+      message: /did not recommend/u
+    },
+    {
+      name: "provenance strategy",
+      mutate: (context) => {
+        context.artifactSet.dynamicStrategyArtifacts.provenance.generated_files[0]!.strategy_id = "strategy-b";
+      },
+      message: /generated file.*unselected strategy/u
+    }
+  ];
+
+  for (const fixture of cases) {
+    const context = structuredClone(dynamicStrategyArtifactContext) as MutableDynamicContext;
+    const document = { strategies: [structuredClone(selectedDynamicStrategyFixture)] };
+    fixture.mutate(context, document);
+    const result = executeSemanticGate("dynamic-strategy-artifact-reconciliation", { document, context });
+    assert.equal(result.status, "failed", fixture.name);
+    assert.ok(
+      result.status === "failed" && result.issues.some((entry) => fixture.message.test(entry.message)),
+      fixture.name
+    );
   }
 });
 
