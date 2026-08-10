@@ -43,6 +43,10 @@ path, then lane id. Emit at most one ready lane for this auditor attempt: the
 candidate assigned to zero-based position `{{attempt_index}}` after filtering
 out rejected, ambiguous, out-of-scope, or reference-gap candidates. If no ready
 candidate maps to this auditor attempt, emit an empty `ready_lanes` array.
+Preserve that stable candidate order within both `ready_lanes` and
+`rejected_or_narrowed_lanes`. A lane is ready only when its exact source harness
+reports `validation.passed: true` and one of that harness's reference models
+lists the lane's unchanged `surface_id` in `covered_surfaces`.
 
 Set `source_plan_artifacts` and `source_harness_artifacts` to the exact declared
 handoff paths in declared order. Every planned lane must appear exactly once as

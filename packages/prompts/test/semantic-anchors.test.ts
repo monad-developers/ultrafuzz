@@ -454,6 +454,8 @@ describe("prompt semantic anchors", () => {
 
   it("documents status-dependent differential and dynamic JSON evidence", () => {
     const lane = prompt("strategies/differential/differential-lane-author.md");
+    const differentialAuditor = prompt("strategies/differential/reference-and-lane-auditor.md");
+    const differentialTriage = prompt("strategies/differential/differential-red-triage.md");
     const dynamic = prompt("strategies/dynamic-strategy-generator.md");
 
     expect(lane).toContain("`green` requires a non-null assigned\nlane");
@@ -461,6 +463,11 @@ describe("prompt semantic anchors", () => {
     expect(lane).toContain("`compile_or_harness_defect` requires an\nassigned lane");
     expect(lane).toContain("`no_assigned_lane` requires every lane/source/command field to be null");
     expect(lane).toContain("must exactly equal the assigned\nlane payload");
+    expect(differentialTriage).toContain('"red_candidate_id": ""');
+    expect(differentialTriage).toContain('"failure_signature": ""');
+    expect(differentialTriage).toContain('"classification": "untriaged"');
+    expect(differentialAuditor).toContain("reports `validation.passed: true`");
+    expect(differentialAuditor).toContain("in `covered_surfaces`");
     expect(dynamic).toContain("Use `selected` only with at least one selected strategy");
     expect(dynamic).toContain("A strategy ID cannot be both selected and rejected");
     expect(dynamic).toContain("Every enumerator recommendation must appear exactly once");

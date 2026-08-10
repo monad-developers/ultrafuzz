@@ -725,7 +725,7 @@ export const auditedDifferentialLanesSchema = withDocumentMetadata(
         required_narrowing: stringList
       })
     ),
-    ready_lanes: z.array(readyDifferentialLaneSchema),
+    ready_lanes: z.array(readyDifferentialLaneSchema).max(1),
     rejected_or_narrowed_lanes: z.array(
       z.strictObject({ lane_id: nonEmptyString, disposition: z.enum(["rejected", "narrowed"]), reason: nonEmptyString })
     ),
@@ -1010,13 +1010,16 @@ export const differentialLaneResultSchema = withDocumentMetadata(
 const semanticRedSchema = z.strictObject({
   stable_failure_hash: sha256,
   lane_id: nonEmptyString,
+  red_candidate_id: nonEmptyString,
   test_path: nonEmptyString,
   failing_test_name: nonEmptyString,
   focused_command: nonEmptyString,
+  failure_signature: nonEmptyString,
   assertion: nonEmptyString,
   observed: nonEmptyString,
   expected: nonEmptyString,
   public_oracle_basis: uniqueStrings(1),
+  classification: z.literal("untriaged"),
   pre_repair_file_hash: sha256
 });
 

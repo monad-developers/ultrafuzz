@@ -529,8 +529,7 @@ test("runtime differential gates consume only exact sealed ancestor and sibling 
     )
   );
 
-  writeArtifact(layout, harnessTask.attemptId, "reference-harness.json", JSON.stringify(harness));
-  audited.ready_lanes.push({
+  const readyLane = {
     lane_id: "lane-a",
     attempt_index: 0,
     auditor_attempt_index: 0,
@@ -546,8 +545,214 @@ test("runtime differential gates consume only exact sealed ancestor and sibling 
     oracle_type: "independent_reference",
     calibration_bucket: "red_seeking_adversarial",
     red_seeking_priority: "high"
-  });
-  writeArtifact(layout, auditTask.attemptId, "audited-differential-lanes.json", JSON.stringify(audited));
+  };
+  const nonEmptyPlan = {
+    ...plan,
+    candidate_surfaces: [
+      {
+        surface_id: "surface-a",
+        public_entrypoints: ["compare(uint256)"],
+        public_evidence_paths: ["docs/spec.md"],
+        oracle_basis: ["Public return values must agree."],
+        in_scope_behavior: ["Public return value"],
+        out_of_scope_behavior: [],
+        ambiguities: [],
+        priority: "high"
+      }
+    ],
+    assigned_differential_lanes: [
+      {
+        lane_id: readyLane.lane_id,
+        planner_attempt_index: readyLane.planner_attempt_index,
+        surface_id: readyLane.surface_id,
+        intended_t_sol_path: readyLane.intended_t_sol_path,
+        focused_command: readyLane.focused_command,
+        public_evidence_paths: readyLane.public_evidence_paths,
+        observable_equality_assertions: readyLane.exact_observable_equality_assertions,
+        oracle_type: readyLane.oracle_type,
+        calibration_bucket: readyLane.calibration_bucket,
+        red_seeking_priority: readyLane.red_seeking_priority
+      }
+    ]
+  };
+  const nonEmptyHarness = {
+    ...harness,
+    authored_paths: ["test/foundry/differential/ReferenceA.sol"],
+    reference_models: [
+      {
+        model_id: "reference-a",
+        covered_surfaces: ["surface-a"],
+        public_evidence_paths: ["docs/spec.md"],
+        implementation_rules_applied: ["Direct public-value comparison"],
+        known_gaps: [],
+        deployment_helpers: []
+      }
+    ],
+    validation: { commands: [readyLane.focused_command], passed: true, compiler_errors: [], notes: [] }
+  };
+  const nonEmptyAudit = {
+    ...audited,
+    surface_audits: [
+      {
+        surface_id: "surface-a",
+        status: "ready",
+        public_evidence_paths: ["docs/spec.md"],
+        audit_notes: ["Reference model covers the public surface."],
+        required_narrowing: []
+      }
+    ],
+    ready_lanes: [readyLane]
+  };
+  const preRepairFileHash = "a".repeat(64);
+  const redCandidateWithoutHash = {
+    red_candidate_id: "red-a",
+    test_path: readyLane.intended_t_sol_path,
+    failing_test_name: "test_lane_a",
+    focused_command: readyLane.focused_command,
+    failure_signature: "public return mismatch",
+    assertion: "actual == expected",
+    observed: "1",
+    expected: "2",
+    public_oracle_basis: ["docs/spec.md"],
+    classification: "untriaged"
+  };
+  const stableFailureHash = createHash("sha256")
+    .update(
+      JSON.stringify([
+        "semantic-red-v1",
+        readyLane.lane_id,
+        redCandidateWithoutHash.red_candidate_id,
+        redCandidateWithoutHash.test_path,
+        redCandidateWithoutHash.failing_test_name,
+        redCandidateWithoutHash.focused_command,
+        redCandidateWithoutHash.failure_signature,
+        redCandidateWithoutHash.assertion,
+        redCandidateWithoutHash.observed,
+        redCandidateWithoutHash.expected,
+        redCandidateWithoutHash.public_oracle_basis,
+        preRepairFileHash
+      ]),
+      "utf8"
+    )
+    .digest("hex");
+  const redCandidate = { stable_failure_hash: stableFailureHash, ...redCandidateWithoutHash };
+  const nonEmptyLaneResult = {
+    schema_version: "ultrafuzz.differential-lane-result.v1",
+    lane_id: readyLane.lane_id,
+    attempt_index: 0,
+    auditor_attempt_index: 0,
+    source_auditor_artifact: auditPath,
+    source_plan_artifact: planPath,
+    source_harness_artifact: harnessPath,
+    assigned_lane_payload: readyLane,
+    authored_paths: [readyLane.intended_t_sol_path],
+    focused_command: readyLane.focused_command,
+    focused_command_ran: true,
+    matched_test_count: 1,
+    status: "semantic_red_frozen",
+    red_preservation_audit: {
+      result: "semantic_red_frozen",
+      pre_repair_file_hash: preRepairFileHash,
+      assertion_predicate: redCandidate.assertion
+    },
+    red_candidates: [redCandidate],
+    compile_or_harness_defects: [],
+    public_evidence_paths: ["docs/spec.md"],
+    notes: []
+  };
+  const registryRed = {
+    stable_failure_hash: stableFailureHash,
+    lane_id: readyLane.lane_id,
+    red_candidate_id: redCandidate.red_candidate_id,
+    test_path: redCandidate.test_path,
+    failing_test_name: redCandidate.failing_test_name,
+    focused_command: redCandidate.focused_command,
+    failure_signature: redCandidate.failure_signature,
+    assertion: redCandidate.assertion,
+    observed: redCandidate.observed,
+    expected: redCandidate.expected,
+    public_oracle_basis: redCandidate.public_oracle_basis,
+    classification: redCandidate.classification,
+    pre_repair_file_hash: preRepairFileHash
+  };
+  const nonEmptyRegistry = { ...registry, semantic_reds: [registryRed] };
+  const productionClassification = {
+    stable_failure_hash: stableFailureHash,
+    classification: "production_bug",
+    rationale: "Public reference behavior disagrees with production.",
+    public_evidence_paths: ["docs/spec.md"],
+    repair_allowed: false
+  };
+  const nonEmptyTriageA = { ...triageA, classifications: [productionClassification] };
+  const nonEmptyTriageB = { ...triageB, classifications: [productionClassification] };
+  const nonEmptyRepair = {
+    ...repair,
+    preserved_production_or_unknown_reds: [
+      {
+        stable_failure_hash: stableFailureHash,
+        classification: "production_bug",
+        reason: "Production red remains unchanged."
+      }
+    ]
+  };
+  const readyCoordinate = {
+    lane_id: readyLane.lane_id,
+    attempt_index: 0,
+    auditor_attempt_index: 0,
+    source_auditor_artifact: auditPath
+  };
+  const nonEmptyGap = {
+    ...gap,
+    ready_lanes: [readyCoordinate],
+    lane_results_seen: [{ ...readyCoordinate, status: "semantic_red_frozen" }],
+    incomplete_campaign_work_orders: []
+  };
+  const productionRow = {
+    stable_failure_hash: stableFailureHash,
+    lane_id: readyLane.lane_id,
+    summary: "Public reference behavior disagrees with production.",
+    evidence_paths: [readyLane.intended_t_sol_path]
+  };
+  const nonEmptyReportReview = {
+    ...reportReview,
+    campaign_status: "blocked_by_preserved_reds",
+    production_bug_reds: [productionRow],
+    missing_or_deferred_lanes: [],
+    report_rows_ready: [productionRow]
+  };
+
+  for (const [task, artifactPath, value] of [
+    [planTask, "differential-plan.json", nonEmptyPlan],
+    [harnessTask, "reference-harness.json", nonEmptyHarness],
+    [auditTask, "audited-differential-lanes.json", nonEmptyAudit],
+    [laneTask, "lane-result.json", nonEmptyLaneResult],
+    [triageTask, "semantic-red-registry.json", nonEmptyRegistry],
+    [triageTask, "triage-a.json", nonEmptyTriageA],
+    [triageTask, "triage-b.json", nonEmptyTriageB],
+    [reviewTask, "repair-summary.json", nonEmptyRepair],
+    [reviewTask, "gap-review.json", nonEmptyGap],
+    [reviewTask, "differential-report-review.json", nonEmptyReportReview],
+    [reviewTask, "findings.json", [currentFinding(stableFailureHash)]]
+  ] as const) {
+    writeArtifact(layout, task.attemptId, artifactPath, JSON.stringify(value));
+  }
+  for (const [node, task] of [
+    [planNode, planTask],
+    [harnessNode, harnessTask],
+    [auditNode, auditTask],
+    [laneNode, laneTask],
+    [triageNode, triageTask],
+    [reviewNode, reviewTask]
+  ] as const) {
+    const result = verifyRequiredArtifactsForAttempt(layout, node, task.attemptId, { tasks });
+    assert.equal(
+      result.ok,
+      true,
+      `non-empty ${task.attemptId}: ${result.diagnostics.map((diagnostic) => diagnostic.message).join("; ")}`
+    );
+  }
+
+  writeArtifact(layout, laneTask.attemptId, "lane-result.json", JSON.stringify(laneResult));
   const falseNoAssignment = verifyRequiredArtifactsForAttempt(layout, laneNode, laneTask.attemptId, { tasks });
   assert.equal(falseNoAssignment.ok, false);
   assert.ok(

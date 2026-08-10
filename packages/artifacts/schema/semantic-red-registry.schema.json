@@ -19,6 +19,10 @@
             "type": "string",
             "minLength": 1
           },
+          "red_candidate_id": {
+            "type": "string",
+            "minLength": 1
+          },
           "test_path": {
             "type": "string",
             "minLength": 1
@@ -28,6 +32,10 @@
             "minLength": 1
           },
           "focused_command": {
+            "type": "string",
+            "minLength": 1
+          },
+          "failure_signature": {
             "type": "string",
             "minLength": 1
           },
@@ -52,6 +60,10 @@
             },
             "uniqueItems": true
           },
+          "classification": {
+            "type": "string",
+            "const": "untriaged"
+          },
           "pre_repair_file_hash": {
             "type": "string",
             "pattern": "^[a-f0-9]{64}$"
@@ -60,13 +72,16 @@
         "required": [
           "stable_failure_hash",
           "lane_id",
+          "red_candidate_id",
           "test_path",
           "failing_test_name",
           "focused_command",
+          "failure_signature",
           "assertion",
           "observed",
           "expected",
           "public_oracle_basis",
+          "classification",
           "pre_repair_file_hash"
         ],
         "additionalProperties": false

@@ -47,13 +47,16 @@ Write {{artifact_path}}/semantic-red-registry.json with this JSON shape:
     {
       "stable_failure_hash": "",
       "lane_id": "",
+      "red_candidate_id": "",
       "test_path": "",
       "failing_test_name": "",
       "focused_command": "",
+      "failure_signature": "",
       "assertion": "",
       "observed": "",
       "expected": "",
       "public_oracle_basis": [],
+      "classification": "untriaged",
       "pre_repair_file_hash": ""
     }
   ],

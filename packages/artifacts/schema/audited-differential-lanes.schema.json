@@ -71,6 +71,7 @@
       }
     },
     "ready_lanes": {
+      "maxItems": 1,
       "type": "array",
       "items": {
         "type": "object",

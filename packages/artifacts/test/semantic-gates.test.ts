@@ -936,8 +936,14 @@ const fixtures = {
     negative: { strategies: [{ strategy_id: "a" }, { strategy_id: "a" }] }
   },
   "semantic-red-hash-uniqueness": {
-    positive: { semantic_reds: [{ stable_failure_hash: "a" }] },
-    negative: { semantic_reds: [{ stable_failure_hash: "a" }, { stable_failure_hash: "a" }] }
+    positive: {
+      semantic_reds: [{ stable_failure_hash: "a" }],
+      compile_or_harness_defects: [{ stable_failure_hash: "b" }]
+    },
+    negative: {
+      semantic_reds: [{ stable_failure_hash: "a" }],
+      compile_or_harness_defects: [{ stable_failure_hash: "a" }]
+    }
   },
   "severity-finding-id-uniqueness": {
     positive: [{ id: "a" }],
@@ -1948,6 +1954,668 @@ test("differential repair reconciliation forbids semantic-red registry regenerat
   assert.equal(result.status, "failed");
   assert.ok(
     result.status === "failed" && result.issues.some((entry) => entry.path === "$.semantic_red_registry_regenerated")
+  );
+});
+
+test("differential lane selection uses exact current coordinates across every declared auditor artifact", () => {
+  const planPath = "artifacts/planner-0/differential-plan.json";
+  const harnessPath = "artifacts/harness-0/reference-harness.json";
+  const assignedAuditPath = "artifacts/auditor-assigned/audited-differential-lanes.json";
+  const emptyAuditPath = "artifacts/auditor-empty/audited-differential-lanes.json";
+  const plannedLane = {
+    lane_id: "lane-a",
+    planner_attempt_index: 0,
+    surface_id: "surface-a",
+    intended_t_sol_path: "test/foundry/differential/LaneA.t.sol",
+    focused_command: "forge test --match-path test/foundry/differential/LaneA.t.sol",
+    public_evidence_paths: ["docs/spec.md"],
+    observable_equality_assertions: ["returns match"],
+    oracle_type: "independent_reference",
+    calibration_bucket: "red_seeking_adversarial",
+    red_seeking_priority: "high"
+  };
+  const readyLane = {
+    lane_id: plannedLane.lane_id,
+    attempt_index: 0,
+    auditor_attempt_index: 0,
+    planner_attempt_index: plannedLane.planner_attempt_index,
+    harness_author_attempt_index: 0,
+    source_plan_artifact: planPath,
+    source_harness_artifact: harnessPath,
+    surface_id: plannedLane.surface_id,
+    intended_t_sol_path: plannedLane.intended_t_sol_path,
+    focused_command: plannedLane.focused_command,
+    public_evidence_paths: plannedLane.public_evidence_paths,
+    exact_observable_equality_assertions: plannedLane.observable_equality_assertions,
+    oracle_type: plannedLane.oracle_type,
+    calibration_bucket: plannedLane.calibration_bucket,
+    red_seeking_priority: plannedLane.red_seeking_priority
+  };
+  const plan = {
+    planner_attempt_index: 0,
+    candidate_surfaces: [{ surface_id: "surface-a", public_evidence_paths: ["docs/spec.md"] }],
+    assigned_differential_lanes: [plannedLane]
+  };
+  const harness = {
+    harness_author_attempt_index: 0,
+    source_plan_artifacts: [planPath],
+    reference_models: [{ covered_surfaces: ["surface-a"] }],
+    validation: { passed: true }
+  };
+  const assignedAudit = {
+    auditor_attempt_index: 0,
+    source_plan_artifacts: [planPath],
+    source_harness_artifacts: [harnessPath],
+    surface_audits: [{ surface_id: "surface-a", public_evidence_paths: ["docs/spec.md"] }],
+    ready_lanes: [readyLane],
+    rejected_or_narrowed_lanes: []
+  };
+  const planBinding = differentialBinding(
+    planPath,
+    "ultrafuzz/differential-plan@1",
+    "differential-oracle-planner",
+    plan,
+    "planner-0"
+  );
+  const harnessBinding = differentialBinding(
+    harnessPath,
+    "ultrafuzz/reference-harness@1",
+    "reference-harness-author",
+    harness,
+    "harness-0"
+  );
+  const assignedAuditBinding = differentialBinding(
+    assignedAuditPath,
+    "ultrafuzz/audited-differential-lanes@1",
+    "reference-and-lane-auditor",
+    assignedAudit,
+    "auditor-assigned"
+  );
+  const currentAudit = differentialBinding(
+    assignedAuditPath,
+    "ultrafuzz/audited-differential-lanes@1",
+    "reference-and-lane-auditor",
+    {},
+    "auditor-assigned"
+  );
+
+  assert.equal(
+    executeSemanticGate("audited-differential-handoff-reconciliation", {
+      document: assignedAudit,
+      context: {
+        artifactSet: {
+          differentialArtifacts: {
+            current: currentAudit,
+            plans: [planBinding],
+            harnesses: [harnessBinding]
+          }
+        }
+      }
+    }).status,
+    "passed"
+  );
+  const uncoveredHarness = differentialBinding(
+    harnessPath,
+    "ultrafuzz/reference-harness@1",
+    "reference-harness-author",
+    { ...harness, reference_models: [{ covered_surfaces: ["surface-other"] }] },
+    "harness-0"
+  );
+  const uncoveredHarnessResult = executeSemanticGate("audited-differential-handoff-reconciliation", {
+    document: assignedAudit,
+    context: {
+      artifactSet: {
+        differentialArtifacts: { current: currentAudit, plans: [planBinding], harnesses: [uncoveredHarness] }
+      }
+    }
+  });
+  assert.equal(uncoveredHarnessResult.status, "failed");
+  assert.ok(
+    uncoveredHarnessResult.status === "failed" &&
+      uncoveredHarnessResult.issues.some((entry) => /no declared reference model covering/u.test(entry.message))
+  );
+  const wrongReadyAttempt = executeSemanticGate("audited-differential-handoff-reconciliation", {
+    document: { ...assignedAudit, ready_lanes: [{ ...readyLane, attempt_index: 1 }] },
+    context: {
+      artifactSet: {
+        differentialArtifacts: { current: currentAudit, plans: [planBinding], harnesses: [harnessBinding] }
+      }
+    }
+  });
+  assert.equal(wrongReadyAttempt.status, "failed");
+  assert.ok(
+    wrongReadyAttempt.status === "failed" &&
+      wrongReadyAttempt.issues.some((entry) => entry.path === "$.ready_lanes[0].attempt_index")
+  );
+
+  const emptyAuditBinding = differentialBinding(
+    emptyAuditPath,
+    "ultrafuzz/audited-differential-lanes@1",
+    "reference-and-lane-auditor",
+    { ...assignedAudit, ready_lanes: [], rejected_or_narrowed_lanes: [{ lane_id: "lane-a" }] },
+    "auditor-empty"
+  );
+  const currentLane = differentialBinding(
+    "artifacts/lane-0/lane-result.json",
+    "ultrafuzz/differential-lane-result@1",
+    "differential-lane-author",
+    {},
+    "lane-0"
+  );
+  const falseNoAssignment = executeSemanticGate("differential-lane-result-handoff-reconciliation", {
+    document: {
+      lane_id: null,
+      attempt_index: 0,
+      auditor_attempt_index: 0,
+      source_auditor_artifact: emptyAuditPath,
+      status: "no_assigned_lane"
+    },
+    context: {
+      artifactSet: {
+        differentialArtifacts: {
+          current: currentLane,
+          auditedLanes: [emptyAuditBinding, assignedAuditBinding]
+        }
+      }
+    }
+  });
+  assert.equal(falseNoAssignment.status, "failed");
+  assert.ok(
+    falseNoAssignment.status === "failed" && falseNoAssignment.issues.some((entry) => entry.path === "$.status")
+  );
+
+  const wrongAuditorAttempt = executeSemanticGate("differential-lane-result-handoff-reconciliation", {
+    document: {
+      lane_id: null,
+      attempt_index: 0,
+      auditor_attempt_index: 1,
+      source_auditor_artifact: emptyAuditPath,
+      status: "no_assigned_lane"
+    },
+    context: {
+      artifactSet: {
+        differentialArtifacts: { current: currentLane, auditedLanes: [emptyAuditBinding] }
+      }
+    }
+  });
+  assert.equal(wrongAuditorAttempt.status, "failed");
+  assert.ok(
+    wrongAuditorAttempt.status === "failed" &&
+      wrongAuditorAttempt.issues.some((entry) => entry.path === "$.auditor_attempt_index")
+  );
+});
+
+test("audited differential dispositions preserve stable candidate order", () => {
+  const planPath = "artifacts/planner-0/differential-plan.json";
+  const harnessPath = "artifacts/harness-0/reference-harness.json";
+  const auditPath = "artifacts/auditor-0/audited-differential-lanes.json";
+  const plannedLane = (laneId: string, surfaceId: string) => ({
+    lane_id: laneId,
+    planner_attempt_index: 0,
+    surface_id: surfaceId,
+    intended_t_sol_path: `test/foundry/differential/${laneId}.t.sol`,
+    focused_command: `forge test --match-path test/foundry/differential/${laneId}.t.sol`,
+    public_evidence_paths: [`docs/${surfaceId}.md`],
+    observable_equality_assertions: ["returns match"],
+    oracle_type: "independent_reference",
+    calibration_bucket: "red_seeking_adversarial",
+    red_seeking_priority: "high"
+  });
+  const plan = {
+    planner_attempt_index: 0,
+    candidate_surfaces: [
+      { surface_id: "surface-a", public_evidence_paths: ["docs/surface-a.md"] },
+      { surface_id: "surface-b", public_evidence_paths: ["docs/surface-b.md"] }
+    ],
+    assigned_differential_lanes: [plannedLane("lane-a", "surface-a"), plannedLane("lane-b", "surface-b")]
+  };
+  const orderedAudit = {
+    auditor_attempt_index: 0,
+    source_plan_artifacts: [planPath],
+    source_harness_artifacts: [harnessPath],
+    surface_audits: [
+      { surface_id: "surface-a", public_evidence_paths: ["docs/surface-a.md"] },
+      { surface_id: "surface-b", public_evidence_paths: ["docs/surface-b.md"] }
+    ],
+    ready_lanes: [],
+    rejected_or_narrowed_lanes: [
+      { lane_id: "lane-a", disposition: "rejected", reason: "Not assigned to this attempt." },
+      { lane_id: "lane-b", disposition: "rejected", reason: "Not assigned to this attempt." }
+    ]
+  };
+  const context: SemanticGateContext = {
+    artifactSet: {
+      differentialArtifacts: {
+        current: differentialBinding(
+          auditPath,
+          "ultrafuzz/audited-differential-lanes@1",
+          "reference-and-lane-auditor",
+          {},
+          "auditor-0"
+        ),
+        plans: [
+          differentialBinding(
+            planPath,
+            "ultrafuzz/differential-plan@1",
+            "differential-oracle-planner",
+            plan,
+            "planner-0"
+          )
+        ],
+        harnesses: [
+          differentialBinding(
+            harnessPath,
+            "ultrafuzz/reference-harness@1",
+            "reference-harness-author",
+            { harness_author_attempt_index: 0 },
+            "harness-0"
+          )
+        ]
+      }
+    }
+  };
+
+  assert.equal(
+    executeSemanticGate("audited-differential-handoff-reconciliation", { document: orderedAudit, context }).status,
+    "passed"
+  );
+  const reordered = executeSemanticGate("audited-differential-handoff-reconciliation", {
+    document: { ...orderedAudit, rejected_or_narrowed_lanes: [...orderedAudit.rejected_or_narrowed_lanes].reverse() },
+    context
+  });
+  assert.equal(reordered.status, "failed");
+  assert.ok(
+    reordered.status === "failed" && reordered.issues.some((entry) => entry.path === "$.rejected_or_narrowed_lanes")
+  );
+});
+
+test("non-empty differential registries preserve complete ordered packets and canonical hashes", () => {
+  const hashJson = (value: unknown) => crypto.createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex");
+  const laneId = "lane-a";
+  const preRepairFileHash = "c".repeat(64);
+  const redPacket = (redCandidateId: string, observed: string) => {
+    const packet = {
+      red_candidate_id: redCandidateId,
+      test_path: "test/foundry/differential/LaneA.t.sol",
+      failing_test_name: `test_${redCandidateId}`,
+      focused_command: "forge test --match-path test/foundry/differential/LaneA.t.sol",
+      failure_signature: `${redCandidateId} mismatch`,
+      assertion: "actual == expected",
+      observed,
+      expected: "2",
+      public_oracle_basis: ["docs/spec.md"],
+      classification: "untriaged"
+    };
+    return {
+      stable_failure_hash: hashJson([
+        "semantic-red-v1",
+        laneId,
+        packet.red_candidate_id,
+        packet.test_path,
+        packet.failing_test_name,
+        packet.focused_command,
+        packet.failure_signature,
+        packet.assertion,
+        packet.observed,
+        packet.expected,
+        packet.public_oracle_basis,
+        preRepairFileHash
+      ]),
+      ...packet
+    };
+  };
+  const redA = redPacket("red-a", "0");
+  const redB = redPacket("red-b", "1");
+  const defectLaneId = "lane-b";
+  const defect = {
+    category: "compile",
+    summary: "Compiler rejected the generated harness.",
+    evidence_paths: ["test/foundry/differential/LaneB.t.sol"]
+  };
+  const defectRow = {
+    stable_failure_hash: hashJson([
+      "compile-harness-defect-v1",
+      defectLaneId,
+      defect.category,
+      defect.summary,
+      defect.evidence_paths
+    ]),
+    ...defect
+  };
+  const redResult = {
+    lane_id: laneId,
+    red_preservation_audit: { pre_repair_file_hash: preRepairFileHash },
+    red_candidates: [redA, redB],
+    compile_or_harness_defects: []
+  };
+  const defectResult = {
+    lane_id: defectLaneId,
+    red_preservation_audit: { pre_repair_file_hash: null },
+    red_candidates: [],
+    compile_or_harness_defects: [defectRow]
+  };
+  const registryRed = (row: typeof redA) => ({
+    stable_failure_hash: row.stable_failure_hash,
+    lane_id: laneId,
+    red_candidate_id: row.red_candidate_id,
+    test_path: row.test_path,
+    failing_test_name: row.failing_test_name,
+    focused_command: row.focused_command,
+    failure_signature: row.failure_signature,
+    assertion: row.assertion,
+    observed: row.observed,
+    expected: row.expected,
+    public_oracle_basis: row.public_oracle_basis,
+    classification: row.classification,
+    pre_repair_file_hash: preRepairFileHash
+  });
+  const registry = {
+    semantic_reds: [registryRed(redA), registryRed(redB)],
+    compile_or_harness_defects: [
+      { stable_failure_hash: defectRow.stable_failure_hash, lane_id: defectLaneId, ...defect }
+    ]
+  };
+  const laneBindings = [
+    differentialBinding(
+      "artifacts/lane-a/lane-result.json",
+      "ultrafuzz/differential-lane-result@1",
+      "differential-lane-author",
+      redResult,
+      "lane-a"
+    ),
+    differentialBinding(
+      "artifacts/lane-b/lane-result.json",
+      "ultrafuzz/differential-lane-result@1",
+      "differential-lane-author",
+      defectResult,
+      "lane-b"
+    )
+  ];
+  const context: SemanticGateContext = {
+    artifactSet: { differentialArtifacts: { laneResults: laneBindings } }
+  };
+
+  assert.equal(
+    executeSemanticGate("semantic-red-registry-lane-reconciliation", { document: registry, context }).status,
+    "passed"
+  );
+  assert.equal(
+    executeSemanticGate("semantic-red-registry-lane-reconciliation", {
+      document: { ...registry, semantic_reds: [...registry.semantic_reds].reverse() },
+      context
+    }).status,
+    "failed"
+  );
+  assert.equal(
+    executeSemanticGate("semantic-red-registry-lane-reconciliation", {
+      document: {
+        ...registry,
+        compile_or_harness_defects: [{ ...registry.compile_or_harness_defects[0], stable_failure_hash: "0".repeat(64) }]
+      },
+      context
+    }).status,
+    "failed"
+  );
+
+  assert.equal(
+    executeSemanticGate("differential-result-failure-hash-uniqueness", { document: redResult }).status,
+    "passed"
+  );
+  assert.equal(
+    executeSemanticGate("differential-result-failure-hash-uniqueness", { document: defectResult }).status,
+    "passed"
+  );
+  assert.equal(
+    executeSemanticGate("differential-result-failure-hash-uniqueness", {
+      document: {
+        ...redResult,
+        red_candidates: [{ ...redA, failure_signature: "rewritten mismatch" }, redB]
+      }
+    }).status,
+    "failed"
+  );
+  assert.equal(
+    executeSemanticGate("differential-result-failure-hash-uniqueness", {
+      document: {
+        ...defectResult,
+        compile_or_harness_defects: [{ ...defectRow, summary: "Rewritten compiler summary." }]
+      }
+    }).status,
+    "failed"
+  );
+  assert.equal(
+    executeSemanticGate("differential-result-failure-hash-uniqueness", {
+      document: {
+        ...defectResult,
+        compile_or_harness_defects: [{ ...defectRow, evidence_paths: [...defectRow.evidence_paths, "stderr.log"] }]
+      }
+    }).status,
+    "failed"
+  );
+  const rewrittenDefectHash = executeSemanticGate("differential-result-failure-hash-uniqueness", {
+    document: {
+      ...defectResult,
+      compile_or_harness_defects: [{ ...defectRow, stable_failure_hash: "0".repeat(64) }]
+    }
+  });
+  assert.equal(rewrittenDefectHash.status, "failed");
+  assert.ok(
+    rewrittenDefectHash.status === "failed" &&
+      rewrittenDefectHash.issues.some((entry) => entry.path === "$.compile_or_harness_defects[0].stable_failure_hash")
+  );
+});
+
+test("differential consensus authenticates every same-attempt A/B row before repair", () => {
+  const redAHash = "1".repeat(64);
+  const redBHash = "2".repeat(64);
+  const defectHash = "3".repeat(64);
+  const registry = {
+    semantic_reds: [
+      { stable_failure_hash: redAHash, lane_id: "lane-a" },
+      { stable_failure_hash: redBHash, lane_id: "lane-b" }
+    ],
+    compile_or_harness_defects: [{ stable_failure_hash: defectHash, lane_id: "lane-c" }]
+  };
+  const classifications = [
+    { stable_failure_hash: redAHash, classification: "production_bug", repair_allowed: false },
+    { stable_failure_hash: redBHash, classification: "production_bug", repair_allowed: false },
+    { stable_failure_hash: defectHash, classification: "compile_harness_defect", repair_allowed: false }
+  ];
+  const registryBinding = (attemptId: string) =>
+    differentialBinding(
+      `artifacts/${attemptId}/semantic-red-registry.json`,
+      "ultrafuzz/semantic-red-registry@1",
+      "differential-red-triage",
+      registry,
+      attemptId
+    );
+  const triageBinding = (attemptId: string, pass: "a" | "b", rows = classifications) =>
+    differentialBinding(
+      `artifacts/${attemptId}/triage-${pass}.json`,
+      "ultrafuzz/differential-red-triage@1",
+      "differential-red-triage",
+      { pass, classifications: rows },
+      attemptId
+    );
+  const registries = [registryBinding("triage-0"), registryBinding("triage-1")];
+  const triages = [
+    triageBinding("triage-0", "a"),
+    triageBinding("triage-0", "b"),
+    triageBinding("triage-1", "a"),
+    triageBinding("triage-1", "b")
+  ];
+  const repairSummary = {
+    repairs_attempted: [],
+    repaired_failures: [],
+    preserved_production_or_unknown_reds: [
+      { stable_failure_hash: redAHash, classification: "production_bug" },
+      { stable_failure_hash: redBHash, classification: "production_bug" }
+    ],
+    semantic_red_registry_regenerated: false
+  };
+  const result = (candidateTriages: typeof triages) =>
+    executeSemanticGate("differential-repair-summary-triage-reconciliation", {
+      document: repairSummary,
+      context: { artifactSet: { differentialArtifacts: { registries, triages: candidateTriages } } }
+    });
+
+  assert.equal(result(triages).status, "passed");
+
+  const wrongPass = [...triages];
+  wrongPass[0] = differentialBinding(
+    "artifacts/triage-0/triage-a.json",
+    "ultrafuzz/differential-red-triage@1",
+    "differential-red-triage",
+    { pass: "b", classifications },
+    "triage-0"
+  );
+  assert.equal(result(wrongPass).status, "failed");
+
+  const missingHash = [...triages];
+  missingHash[1] = triageBinding("triage-0", "b", classifications.slice(1));
+  assert.equal(result(missingHash).status, "failed");
+
+  const reordered = [...triages];
+  reordered[2] = triageBinding("triage-1", "a", [classifications[1]!, classifications[0]!, classifications[2]!]);
+  assert.equal(result(reordered).status, "failed");
+
+  const rewrittenDefect = [...triages];
+  rewrittenDefect[3] = triageBinding("triage-1", "b", [
+    classifications[0]!,
+    classifications[1]!,
+    { stable_failure_hash: defectHash, classification: "production_bug", repair_allowed: false }
+  ]);
+  assert.equal(result(rewrittenDefect).status, "failed");
+
+  const inconsistentRepairPermission = [...triages];
+  inconsistentRepairPermission[0] = triageBinding("triage-0", "a", [
+    { ...classifications[0]!, repair_allowed: true },
+    classifications[1]!,
+    classifications[2]!
+  ]);
+  assert.equal(result(inconsistentRepairPermission).status, "failed");
+
+  const orphan = [...triages, triageBinding("triage-orphan", "a")];
+  assert.equal(result(orphan).status, "failed");
+
+  const vanishedSemanticRed = triages.map((binding) => ({
+    ...binding,
+    document: {
+      pass: (binding.document as { pass: "a" | "b" }).pass,
+      classifications: [
+        { stable_failure_hash: redAHash, classification: "compile_harness_defect", repair_allowed: false },
+        classifications[1]!,
+        classifications[2]!
+      ]
+    }
+  }));
+  assert.equal(result(vanishedSemanticRed).status, "failed");
+});
+
+test("differential report review preserves production-red and final-finding identity order", () => {
+  const redAHash = "4".repeat(64);
+  const redBHash = "5".repeat(64);
+  const attemptId = "triage-0";
+  const registry = {
+    semantic_reds: [
+      { stable_failure_hash: redAHash, lane_id: "lane-a" },
+      { stable_failure_hash: redBHash, lane_id: "lane-b" }
+    ],
+    compile_or_harness_defects: []
+  };
+  const classifications = [
+    { stable_failure_hash: redAHash, classification: "production_bug", repair_allowed: false },
+    { stable_failure_hash: redBHash, classification: "production_bug", repair_allowed: false }
+  ];
+  const registryBinding = differentialBinding(
+    `artifacts/${attemptId}/semantic-red-registry.json`,
+    "ultrafuzz/semantic-red-registry@1",
+    "differential-red-triage",
+    registry,
+    attemptId
+  );
+  const triages = (["a", "b"] as const).map((pass) =>
+    differentialBinding(
+      `artifacts/${attemptId}/triage-${pass}.json`,
+      "ultrafuzz/differential-red-triage@1",
+      "differential-red-triage",
+      { pass, classifications },
+      attemptId
+    )
+  );
+  const productionRows = [
+    { stable_failure_hash: redAHash, lane_id: "lane-a", summary: "Production red A", evidence_paths: [] },
+    { stable_failure_hash: redBHash, lane_id: "lane-b", summary: "Production red B", evidence_paths: [] }
+  ];
+  const document = {
+    campaign_status: "blocked_by_preserved_reds",
+    production_bug_reds: productionRows,
+    harness_or_reference_repairs: [],
+    missing_or_deferred_lanes: [],
+    report_rows_ready: productionRows
+  };
+  const contextForFindings = (findings: unknown[]): SemanticGateContext => ({
+    artifactSet: {
+      differentialArtifacts: {
+        registries: [registryBinding],
+        triages,
+        repairSummaries: [
+          differentialBinding(
+            "artifacts/review-0/repair-summary.json",
+            "ultrafuzz/differential-repair-summary@1",
+            "differential-repair-and-report-review",
+            {
+              repaired_failures: [],
+              preserved_production_or_unknown_reds: [
+                { stable_failure_hash: redAHash, classification: "production_bug" },
+                { stable_failure_hash: redBHash, classification: "production_bug" }
+              ]
+            },
+            "review-0"
+          )
+        ],
+        gapReviews: [
+          differentialBinding(
+            "artifacts/review-0/gap-review.json",
+            "ultrafuzz/differential-gap-review@1",
+            "differential-repair-and-report-review",
+            { missing_lane_work_orders: [], incomplete_campaign_work_orders: [], report_blockers: [] },
+            "review-0"
+          )
+        ],
+        findings: [
+          differentialBinding(
+            "artifacts/review-0/findings.json",
+            "ultrafuzz/findings@2",
+            "differential-repair-and-report-review",
+            findings,
+            "review-0"
+          )
+        ]
+      }
+    }
+  });
+
+  assert.equal(
+    executeSemanticGate("differential-report-review-reconciliation", {
+      document,
+      context: contextForFindings([{ id: redAHash }, { id: redBHash }])
+    }).status,
+    "passed"
+  );
+  assert.equal(
+    executeSemanticGate("differential-report-review-reconciliation", {
+      document,
+      context: contextForFindings([{ id: redBHash }, { id: redAHash }])
+    }).status,
+    "failed"
+  );
+  assert.equal(
+    executeSemanticGate("differential-report-review-reconciliation", {
+      document: { ...document, production_bug_reds: [...productionRows].reverse() },
+      context: contextForFindings([{ id: redAHash }, { id: redBHash }])
+    }).status,
+    "failed"
   );
 });
 
