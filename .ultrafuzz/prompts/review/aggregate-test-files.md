@@ -57,6 +57,9 @@ Reference harness author:
 Differential lane authors:
 {{artifact_path:differential-lane-author}}/generated-tests.json
 
+Differential repair and report review:
+{{artifact_path:differential-repair-and-report-review}}/generated-tests.json
+
 Round trip:
 {{artifact_path:round-trip}}/generated-tests.json
 
