@@ -3018,7 +3018,31 @@ test("property fan-in authenticates every sealed model-fanout lens attempt indep
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-sealed-fanout-lenses" });
   const faninNode = writeMinimalPropertyFaninFixture(layout);
   const discoveryGraph = JSON.parse(fs.readFileSync(layout.graphPath, "utf8")) as { nodes: PlannedGraphNode[] };
-  const discoveryNode = discoveryGraph.nodes.find((node) => node.id === "project-discovery")!;
+  const referenceNode: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "reference-input",
+    logical_id: "reference-input",
+    display_name: "Reference input",
+    kind: "reference",
+    depends_on: [],
+    artifact_dir: "artifacts/reference-input",
+    outputs: [boundOutput("result.md", "ultrafuzz/nonempty-markdown@1", true)],
+    prompt_id: "reference-input",
+    prompt_path: "",
+    reference: "reference-input",
+    reference_revision: {
+      provider: "github",
+      repo: "owner/repo",
+      commit: "b".repeat(40),
+      paths: ["result.md"]
+    },
+    model_fanout: []
+  };
+  const discoveryNode: PlannedGraphNode = {
+    ...discoveryGraph.nodes.find((node) => node.id === "project-discovery")!,
+    depends_on: [referenceNode.id],
+    workflow: { node_id: "node:project-discovery", task_node_ids: ["node:project-discovery"] }
+  };
   const lensOutput = boundOutput("custom/recon-lens.json", "ultrafuzz/property-lens@2", true);
   const lensNode: PlannedGraphNode = {
     ...plannedNode([]),
@@ -3062,6 +3086,14 @@ test("property fan-in authenticates every sealed model-fanout lens attempt indep
     depends_on: [lensNode.id],
     workflow: { node_id: `node:${faninNode.id}`, task_node_ids: [`node:${faninNode.id}`] }
   };
+  const unrelatedNode: PlannedGraphNode = {
+    ...plannedNode(["unrelated.md"]),
+    id: "unrelated-review",
+    logical_id: "unrelated-review",
+    display_name: "Unrelated review",
+    artifact_dir: "artifacts/unrelated-review",
+    workflow: { node_id: "node:unrelated-review", task_node_ids: ["node:unrelated-review"] }
+  };
   const lensAttempts = [
     "property-specification-recon__model_0__attempt_0",
     "property-specification-recon__model_1__attempt_0"
@@ -3086,20 +3118,34 @@ test("property fan-in authenticates every sealed model-fanout lens attempt indep
       modelIndex
     });
   }
-  writePlannedGraph(layout, [discoveryNode, lensNode, currentNode]);
+  writePlannedGraph(layout, [referenceNode, discoveryNode, lensNode, currentNode, unrelatedNode]);
 
-  const discoveryTask = smithersTaskForNode({
+  const referenceArtifactDir = getNodeArtifactDir(layout, referenceNode.id, { create: true });
+  const discoveryTaskWithReferenceVerifier = smithersTaskForNode({
     layout,
     node: discoveryNode,
-    attemptId: discoveryNode.id
+    attemptId: discoveryNode.id,
+    dependencies: [referenceNode.id],
+    dependencyArtifactDirs: [referenceArtifactDir]
   });
+  const discoveryTask: SmithersTaskManifestTask = {
+    ...discoveryTaskWithReferenceVerifier,
+    dependencySmithersNodeIds: [],
+    metadata: {
+      ...discoveryTaskWithReferenceVerifier.metadata,
+      dependencies: {
+        ...discoveryTaskWithReferenceVerifier.metadata.dependencies,
+        smithersNodeIds: []
+      }
+    }
+  };
   const lensTasks = lensAttempts.map((attemptId, modelIndex) =>
     smithersTaskForNode({
       layout,
       node: lensNode,
       attemptId,
       dependencies: [discoveryNode.id],
-      dependencyArtifactDirs: [discoveryTask.artifactDir],
+      dependencyArtifactDirs: [referenceArtifactDir, discoveryTask.artifactDir],
       modelIndex
     })
   );
@@ -3108,18 +3154,57 @@ test("property fan-in authenticates every sealed model-fanout lens attempt indep
     node: currentNode,
     attemptId: currentNode.id,
     dependencies: lensAttempts,
-    dependencyArtifactDirs: [discoveryTask.artifactDir, ...lensTasks.map((task) => task.artifactDir)]
+    dependencyArtifactDirs: [
+      referenceArtifactDir,
+      discoveryTask.artifactDir,
+      ...lensTasks.map((task) => task.artifactDir)
+    ]
   });
-  const tasks = [discoveryTask, ...lensTasks, currentTask];
+  const unrelatedTask = smithersTaskForNode({
+    layout,
+    node: unrelatedNode,
+    attemptId: unrelatedNode.id
+  });
+  const tasks = [discoveryTask, ...lensTasks, currentTask, unrelatedTask];
   const valid = verifyRuntimeRequiredArtifactsForAttempt(layout, currentNode, currentTask.attemptId, {
     task: currentTask,
     tasks
   });
   assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
 
+  const omittedAncestorTask: SmithersTaskManifestTask = {
+    ...currentTask,
+    dependencyArtifactDirs: currentTask.dependencyArtifactDirs.filter(
+      (directory) => directory !== discoveryTask.artifactDir
+    )
+  };
+  const omittedAncestor = verifyRuntimeRequiredArtifactsForAttempt(layout, currentNode, currentTask.attemptId, {
+    task: omittedAncestorTask,
+    tasks: [discoveryTask, ...lensTasks, omittedAncestorTask, unrelatedTask]
+  });
+  assert.equal(omittedAncestor.ok, false, JSON.stringify(omittedAncestor.diagnostics));
+  assert.ok(
+    omittedAncestor.diagnostics.some((diagnostic) => diagnostic.message.includes(discoveryTask.artifactDir)),
+    JSON.stringify(omittedAncestor.diagnostics)
+  );
+
+  const unrelatedAncestorTask: SmithersTaskManifestTask = {
+    ...currentTask,
+    dependencyArtifactDirs: [...currentTask.dependencyArtifactDirs, unrelatedTask.artifactDir]
+  };
+  const unrelatedAncestor = verifyRuntimeRequiredArtifactsForAttempt(layout, currentNode, currentTask.attemptId, {
+    task: unrelatedAncestorTask,
+    tasks: [discoveryTask, ...lensTasks, unrelatedAncestorTask, unrelatedTask]
+  });
+  assert.equal(unrelatedAncestor.ok, false, JSON.stringify(unrelatedAncestor.diagnostics));
+  assert.ok(
+    unrelatedAncestor.diagnostics.some((diagnostic) => diagnostic.message.includes(unrelatedTask.artifactDir)),
+    JSON.stringify(unrelatedAncestor.diagnostics)
+  );
+
   const missingDeclaredAttempt = verifyRuntimeRequiredArtifactsForAttempt(layout, currentNode, currentTask.attemptId, {
     task: currentTask,
-    tasks: [discoveryTask, lensTasks[0]!, currentTask]
+    tasks: [discoveryTask, lensTasks[0]!, currentTask, unrelatedTask]
   });
   assert.equal(missingDeclaredAttempt.ok, false, JSON.stringify(missingDeclaredAttempt.diagnostics));
   assert.ok(
@@ -4091,6 +4176,36 @@ test("property implementation resolves custom declared catalog and implementatio
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
 });
 
+test("property implementation accepts an intentional producer-free empty catalog through the full host gate", () => {
+  const layout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-producer-free-implementation",
+    resolvedConfigToml: '[invariants]\nproperty_priority_threshold = "high"\n'
+  });
+  const output = boundOutput("handoffs/implementation-v3.json", "ultrafuzz/implemented-properties@3", true);
+  const node: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "producer-free-implementation",
+    logical_id: "producer-free-implementation",
+    display_name: "Producer-free implementation",
+    artifact_dir: "artifacts/producer-free-implementation",
+    depends_on: [],
+    outputs: [output]
+  };
+  writeDeclaredArtifactNode(layout, node.id, [output], {
+    [output.path]: JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v3",
+      selection: { priority_threshold: "high", priorities: ["high"], property_ids: [] },
+      properties: []
+    })
+  });
+  writePlannedGraph(layout, [node]);
+
+  const result = verifyRuntimeRequiredArtifactsForAttempt(layout, node, node.id);
+
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+});
+
 test("property implementation gate enforces declared selection coverage and actionable blockers", () => {
   const layout = createRunLayout({
     projectRoot: tempProject(),
@@ -4865,6 +4980,48 @@ test("campaign gates select custom declared paths and ignore undeclared conventi
 
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
   assert.deepEqual(fs.readFileSync(conventionalPath), before);
+});
+
+test("producer-free final reports require the exact not-planned implementation coverage", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-producer-free-report" });
+  const outputs = [
+    boundOutput("deliverables/report.md", "ultrafuzz/nonempty-markdown@1", true),
+    boundOutput("deliverables/report.json", "ultrafuzz/report@2")
+  ];
+  const node: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "producer-free-report",
+    logical_id: "producer-free-report",
+    display_name: "Producer-free report",
+    artifact_dir: "artifacts/producer-free-report",
+    depends_on: [],
+    outputs
+  };
+  writeDeclaredArtifactNode(layout, node.id, outputs, {
+    "deliverables/report.md": "# Ultrafuzz report\n",
+    "deliverables/report.json": JSON.stringify(currentReport(layout.runId))
+  });
+  writePlannedGraph(layout, [node]);
+
+  const valid = verifyRuntimeRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
+
+  writeArtifactFile(
+    layout,
+    node.id,
+    "deliverables/report.json",
+    JSON.stringify(
+      currentReport(layout.runId, {
+        property_implementation_coverage: currentImplementedCoverage([])
+      })
+    )
+  );
+  const mismatched = verifyRuntimeRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(mismatched.ok, false, JSON.stringify(mismatched.diagnostics));
+  assert.ok(
+    mismatched.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REPORT_IMPLEMENTATION_COVERAGE_MISMATCH"),
+    JSON.stringify(mismatched.diagnostics)
+  );
 });
 
 test("final report gate joins the default recon-only campaign backend", () => {

@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 import {
   artifactContractDefinition,
@@ -92,6 +93,10 @@ const UNPLANNED_IMPLEMENTED_PROPERTIES_CONTEXT = {
   selection: { priority_threshold: "high", priorities: ["high"], property_ids: [] },
   properties: []
 } satisfies ImplementedPropertiesArtifact;
+const UNPLANNED_IMPLEMENTATION_COVERAGE = {
+  status: "not-planned",
+  reason: "property-implementation-track-not-declared"
+} as const;
 
 export type DependencyGateDecision =
   | { ok: true }
@@ -933,9 +938,10 @@ function sealedDirectArtifactDependencies(
   consumer: PlannedGraphNode,
   authority: ArtifactGateAttemptAuthority
 ): DirectArtifactDependency[] {
-  semanticAttemptDeclarations(consumer, authority);
   assertRegularFileInside(layout.root, layout.graphPath, "sealed direct artifact dependency authority");
   const graph = assertPlannedGraph(readStrictRegisteredDocument(layout.graphPath, "planned-graph.schema.json"));
+  semanticAttemptDeclarations(consumer, authority);
+  assertExactSealedAttemptAuthority(layout, graph, consumer, authority);
   const nodesById = new Map(graph.nodes.map((node) => [node.id, node] as const));
   const tasksByAttempt = new Map<string, SmithersTaskManifestTask>();
   for (const task of authority.tasks) {
@@ -2188,7 +2194,7 @@ function plannedContractProducerStatus(
       const { current, declarations } = semanticAttemptDeclarations(consumer, attemptAuthority);
       assertRegularFileInside(layout.root, layout.graphPath, "planned contract producer authority");
       const graph = assertPlannedGraph(readStrictRegisteredDocument(layout.graphPath, "planned-graph.schema.json"));
-      assertSealedAncestorDirectoryAuthority(graph, current, declarations);
+      assertExactSealedAttemptAuthority(layout, graph, consumer, attemptAuthority);
       return declaredAncestorOutputsByContract(current, declarations, contract).length === 0 ? "absent" : "present";
     } catch {
       return "unknown";
@@ -2249,24 +2255,118 @@ function semanticAttemptDeclarations(
   return { current, declarations };
 }
 
-function assertSealedAncestorDirectoryAuthority(
-  graph: PlannedGraph,
-  current: SemanticArtifactTaskDeclaration,
-  declarations: readonly SemanticArtifactTaskDeclaration[]
-): void {
-  const declaredAttempts = new Set(declarations.map((declaration) => declaration.attemptId));
-  for (const dependencyDirectory of current.dependencyArtifactDirs) {
-    const attemptId = path.basename(dependencyDirectory);
-    if (declaredAttempts.has(attemptId)) continue;
-    const planned = graph.nodes.find(
-      (node) => node.id === attemptId || node.workflow?.task_node_ids.includes(`node:${attemptId}`) === true
-    );
-    if (planned?.kind === "reference") continue;
-    if (planned?.kind === "agentic") {
-      throw new Error(`planned agentic ancestor is absent from the sealed Smithers task set: ${attemptId}`);
+function plannedAttemptIdsForAuthority(node: PlannedGraphNode): string[] {
+  if (node.model_fanout.length <= 1) return [node.id];
+  return node.model_fanout.map((model) => `${node.id}__model_${model.model_index}__attempt_${model.attempt_index}`);
+}
+
+function assertExactStringSet(actual: readonly string[], expected: readonly string[], label: string): void {
+  const actualSet = new Set(actual);
+  const expectedSet = new Set(expected);
+  const duplicates = (values: readonly string[]): string[] => {
+    const seen = new Set<string>();
+    const repeated = new Set<string>();
+    for (const value of values) {
+      if (seen.has(value)) repeated.add(value);
+      else seen.add(value);
     }
-    throw new Error(`sealed dependency directory has no planned producer authority: ${dependencyDirectory}`);
+    return [...repeated];
+  };
+  const duplicateActual = duplicates(actual);
+  const duplicateExpected = duplicates(expected);
+  const missing = expected.filter((value) => !actualSet.has(value));
+  const unexpected = actual.filter((value) => !expectedSet.has(value));
+  if (duplicateActual.length === 0 && duplicateExpected.length === 0 && missing.length === 0 && unexpected.length === 0)
+    return;
+  const summarize = (values: readonly string[]): string => {
+    const visible = [...new Set(values)].slice(0, 8);
+    return `${visible.map((value) => JSON.stringify(value)).join(", ")}${values.length > visible.length ? `, and ${values.length - visible.length} more` : ""}`;
+  };
+  throw new Error(
+    `${label} does not match the exact planned set` +
+      `${missing.length === 0 ? "" : `; missing: ${summarize(missing)}`}` +
+      `${unexpected.length === 0 ? "" : `; unexpected: ${summarize(unexpected)}`}` +
+      `${duplicateActual.length === 0 ? "" : `; duplicate actual values: ${summarize(duplicateActual)}`}` +
+      `${duplicateExpected.length === 0 ? "" : `; duplicate planned values: ${summarize(duplicateExpected)}`}`
+  );
+}
+
+/** Bind the complete sealed task set and this attempt's artifact closure to the current graph. */
+function assertExactSealedAttemptAuthority(
+  layout: RunLayout,
+  graph: PlannedGraph,
+  consumer: PlannedGraphNode,
+  authority: ArtifactGateAttemptAuthority
+): void {
+  semanticAttemptDeclarations(consumer, authority);
+  const plannedConsumer = graph.nodes.find((node) => node.id === consumer.id);
+  if (plannedConsumer === undefined || plannedConsumer.logical_id !== consumer.logical_id) {
+    throw new Error(`planned graph does not bind exact consumer ${JSON.stringify(consumer.id)}`);
   }
+  const nodesById = new Map(graph.nodes.map((node) => [node.id, node] as const));
+  const plannedAgenticAttempts = new Map<string, PlannedGraphNode>();
+  for (const node of graph.nodes) {
+    if (node.kind !== "agentic") continue;
+    for (const attemptId of plannedAttemptIdsForAuthority(node)) {
+      if (plannedAgenticAttempts.has(attemptId)) {
+        throw new Error(`planned graph repeats Smithers attempt ${JSON.stringify(attemptId)}`);
+      }
+      plannedAgenticAttempts.set(attemptId, node);
+    }
+  }
+
+  const tasksByAttempt = new Map<string, SmithersTaskManifestTask>();
+  for (const task of authority.tasks) {
+    if (tasksByAttempt.has(task.attemptId)) {
+      throw new Error(`sealed Smithers task set repeats attempt ${JSON.stringify(task.attemptId)}`);
+    }
+    tasksByAttempt.set(task.attemptId, task);
+  }
+  assertExactStringSet([...tasksByAttempt.keys()], [...plannedAgenticAttempts.keys()], "sealed Smithers task coverage");
+  for (const [attemptId, node] of plannedAgenticAttempts) {
+    const task = tasksByAttempt.get(attemptId)!;
+    const expectedArtifactDir = getNodeArtifactDir(layout, attemptId);
+    if (
+      task.concreteNodeId !== node.id ||
+      task.logicalNodeId !== node.logical_id ||
+      path.resolve(task.artifactDir) !== expectedArtifactDir ||
+      task.metadata.artifacts.outputs.length !== node.outputs.length ||
+      task.metadata.artifacts.outputs.some(
+        (output) => !node.outputs.some((planned) => smithersOutputMatchesPlanned(output, planned))
+      ) ||
+      node.outputs.some(
+        (planned) => !task.metadata.artifacts.outputs.some((output) => smithersOutputMatchesPlanned(output, planned))
+      )
+    ) {
+      throw new Error(`sealed Smithers attempt does not match its planned node and outputs: ${attemptId}`);
+    }
+    const expectedDirectDependencies = node.depends_on.flatMap((dependencyId) => {
+      const dependency = nodesById.get(dependencyId);
+      if (dependency === undefined) {
+        throw new Error(`planned dependency ${JSON.stringify(dependencyId)} is unavailable`);
+      }
+      return plannedAttemptIdsForAuthority(dependency);
+    });
+    assertExactStringSet(
+      task.dependencies,
+      expectedDirectDependencies,
+      `sealed Smithers attempt ${JSON.stringify(attemptId)} direct dependencies`
+    );
+  }
+
+  const ancestorNodeIds = plannedAncestorIds(graph, plannedConsumer);
+  const expectedAncestorAttempts = graph.nodes
+    .filter((node) => ancestorNodeIds.has(node.id))
+    .flatMap(plannedAttemptIdsForAuthority);
+  const expectedAncestorDirectories = expectedAncestorAttempts.map((attemptId) =>
+    getNodeArtifactDir(layout, attemptId)
+  );
+  const actualAncestorDirectories = authority.task.dependencyArtifactDirs.map((directory) => path.resolve(directory));
+  assertExactStringSet(
+    actualAncestorDirectories,
+    expectedAncestorDirectories,
+    `sealed Smithers attempt ${JSON.stringify(authority.task.attemptId)} artifact ancestor closure`
+  );
 }
 
 function plannedAncestorIds(
@@ -2360,7 +2460,7 @@ function finalizedDeclaredContractProducers(
     for (const node of graph.nodes) concreteNodeIdByAttempt.set(node.id, node.id);
   }
   if (attemptAuthority !== undefined) {
-    assertSealedAncestorDirectoryAuthority(graph, current, declarations);
+    assertExactSealedAttemptAuthority(layout, graph, consumer, attemptAuthority);
   }
   const bindings = declaredAncestorOutputsByContract(current, declarations, contract, options);
   const bindingsByAttempt = new Map<string, typeof bindings>();
@@ -2831,7 +2931,9 @@ function verifyLensReferenceExpectationAuthority(
     declaration = resolved.output;
   } else {
     try {
-      semanticAttemptDeclarations(node, attemptAuthority);
+      assertRegularFileInside(layout.root, layout.graphPath, "current property lens attempt authority");
+      const graph = assertPlannedGraph(readStrictRegisteredDocument(layout.graphPath, "planned-graph.schema.json"));
+      assertExactSealedAttemptAuthority(layout, graph, node, attemptAuthority);
     } catch (error) {
       return [diagnosticFromError(error, "property-provenance", "PROPERTY_LENS_AUTHORITY_INVALID")];
     }
@@ -3784,8 +3886,22 @@ function verifyFinalReportImplementationCoverage(
   markdownPath: string,
   attemptAuthority?: ArtifactGateAttemptAuthority
 ): RuntimeDiagnostic[] {
-  if (plannedContractProducerStatus(layout, node, "ultrafuzz/implemented-properties@3", attemptAuthority) === "absent")
-    return [];
+  if (
+    plannedContractProducerStatus(layout, node, "ultrafuzz/implemented-properties@3", attemptAuthority) === "absent"
+  ) {
+    return isDeepStrictEqual(report.property_implementation_coverage, UNPLANNED_IMPLEMENTATION_COVERAGE)
+      ? []
+      : [
+          {
+            code: "PROPERTY_REPORT_IMPLEMENTATION_COVERAGE_MISMATCH",
+            message:
+              "A report without a planned property implementation producer must declare the exact not-planned coverage value",
+            severity: "error",
+            source: "property-provenance",
+            path: `${reportPath}#$.property_implementation_coverage`
+          }
+        ];
+  }
   const implementation = readImplementedProperties(layout, node, attemptAuthority);
   if (
     implementation.diagnostics.length > 0 ||
@@ -4435,6 +4551,9 @@ function readCanonicalPropertyCatalog(
     };
   }
   if (artifact === undefined) {
+    if (plannedContractProducerStatus(layout, consumer, "ultrafuzz/properties@2", attemptAuthority) === "absent") {
+      return { value: UNPLANNED_PROPERTY_CATALOG_CONTEXT, diagnostics: [] };
+    }
     return {
       diagnostics: [
         {
