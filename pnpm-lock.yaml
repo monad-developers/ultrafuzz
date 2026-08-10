@@ -84,6 +84,9 @@ importers:
       '@ultrafuzz/runtime':
         specifier: workspace:*
         version: link:../runtime
+      '@ultrafuzz/topology':
+        specifier: workspace:*
+        version: link:../topology
       adm-zip:
         specifier: ^0.5.18
         version: 0.5.18

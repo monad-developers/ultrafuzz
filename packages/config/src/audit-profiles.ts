@@ -38,6 +38,20 @@ export interface AuditProfileCatalog {
   profiles: Record<string, AuditProfileDefinition>;
 }
 
+export interface PackagedTopologyDefinition {
+  id: string;
+  description: string;
+  relativePath: string;
+  path: string;
+  digest: string;
+}
+
+const PACKAGED_TOPOLOGY_DESCRIPTIONS = {
+  full: "The complete production audit graph copied to projects by ultrafuzz init.",
+  smoke: "The bounded CI graph with context, four parallel strategies, dedupe, and reporting.",
+  "invariant-only": "The focused property discovery, stateful-invariant campaign, review, and reporting graph."
+} as const;
+
 const safeIdSchema = z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/u);
 const positiveIntegerSchema = z.number().int().positive();
 const packagedTopologyPathSchema = z
@@ -167,6 +181,37 @@ export function packagedTopologyDigest(
   return topologyPath === undefined
     ? undefined
     : crypto.createHash("sha256").update(fs.readFileSync(topologyPath)).digest("hex");
+}
+
+export function packagedTopologies(
+  catalog: AuditProfileCatalog = loadAuditProfileCatalog()
+): PackagedTopologyDefinition[] {
+  return Object.entries(PACKAGED_TOPOLOGY_DESCRIPTIONS).map(([id, description]) =>
+    packagedTopology(id, catalog, description)
+  );
+}
+
+export function packagedTopology(
+  id: string,
+  catalog: AuditProfileCatalog = loadAuditProfileCatalog(),
+  knownDescription?: string
+): PackagedTopologyDefinition {
+  const description =
+    knownDescription ?? PACKAGED_TOPOLOGY_DESCRIPTIONS[id as keyof typeof PACKAGED_TOPOLOGY_DESCRIPTIONS];
+  if (description === undefined) {
+    throw new Error(
+      `unknown packaged topology \`${id}\`; available topologies: ${Object.keys(PACKAGED_TOPOLOGY_DESCRIPTIONS).join(", ")}`
+    );
+  }
+  const relativePath = `topologies/${id}.yml`;
+  const topologyPath = resolvePackagedTopologyPath(path.dirname(catalog.path), relativePath);
+  return {
+    id,
+    description,
+    relativePath,
+    path: topologyPath,
+    digest: crypto.createHash("sha256").update(fs.readFileSync(topologyPath)).digest("hex")
+  };
 }
 
 export function defaultAuditProfileCatalogPath(): string {
