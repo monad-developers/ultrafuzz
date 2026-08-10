@@ -52,13 +52,21 @@ import {
   type RunState,
   type NodeProvenanceReasonCode,
   type SemanticArtifactSetContext,
+  type SemanticDifferentialArtifactBinding,
   type SemanticGateContext,
   type SemanticGitContext,
   type SemanticPropertyLensContext,
   type SemanticReviewStageContext,
+  type SmithersTaskManifestTask,
   type WorkspacePatchManifest
 } from "@ultrafuzz/artifacts";
 
+import {
+  declaredAncestorOutputsByContract,
+  declaredSiblingOutputsByContract,
+  type DeclaredSemanticArtifactOutput,
+  type SemanticArtifactTaskDeclaration
+} from "./semantic-artifact-context.js";
 import { runtimeSemanticGateDiagnostics } from "./semantic-gates.js";
 import { WORKSPACE_PATCH_BASELINE_JSON_SCHEMA_ID } from "./runtime-contracts.js";
 import { parseRuntimeDocumentBytes } from "./runtime-document-codec.js";
@@ -95,6 +103,11 @@ export interface RequiredArtifactGate {
   ok: boolean;
   diagnostics: RuntimeDiagnostic[];
   missing: string[];
+}
+
+export interface RequiredArtifactGateContext {
+  /** Exact sealed task declarations for this workflow run. */
+  tasks?: readonly SmithersTaskManifestTask[];
 }
 
 export function checkDependencyLegality(graph: PlannedGraph): RuntimeDiagnostic[] {
@@ -183,7 +196,8 @@ export function verifyRequiredArtifactsForNode(layout: RunLayout, node: PlannedG
 export function verifyRequiredArtifactsForAttempt(
   layout: RunLayout,
   node: PlannedGraphNode,
-  attemptId: string
+  attemptId: string,
+  context: RequiredArtifactGateContext = {}
 ): RequiredArtifactGate {
   const diagnostics: RuntimeDiagnostic[] = [];
   const missing: string[] = [];
@@ -210,7 +224,9 @@ export function verifyRequiredArtifactsForAttempt(
         });
       } else {
         assertRegularFileInside(artifactDir, absolutePath, "required artifact");
-        diagnostics.push(...verifyRequiredArtifactShape(layout, artifactDir, absolutePath, output, node, attemptId));
+        diagnostics.push(
+          ...verifyRequiredArtifactShape(layout, artifactDir, absolutePath, output, node, attemptId, context.tasks)
+        );
       }
     } catch (error) {
       diagnostics.push(diagnosticFromError(error, "artifact-gates", "REQUIRED_ARTIFACT_INVALID"));
@@ -1536,7 +1552,8 @@ function verifyRequiredArtifactShape(
   absolutePath: string,
   output: PlannedGraphNode["outputs"][number],
   node: PlannedGraphNode,
-  attemptId: string
+  attemptId: string,
+  tasks: readonly SmithersTaskManifestTask[] | undefined
 ): RuntimeDiagnostic[] {
   const artifactBytes = readRegularFileSnapshot(absolutePath, MAX_ARTIFACT_SNAPSHOT_BYTES);
   const schemaDiagnostics = verifyRequiredArtifactSchemaBinding(absolutePath, output, artifactBytes);
@@ -1568,6 +1585,8 @@ function verifyRequiredArtifactShape(
           artifactDir,
           node,
           attemptId,
+          output,
+          tasks,
           schemaFilename: binding.schema_file as ArtifactSchemaFilename
         })
       })
@@ -1648,6 +1667,8 @@ function semanticGateContextForArtifact(input: {
   artifactDir: string;
   node: PlannedGraphNode;
   attemptId: string;
+  output: PlannedGraphNode["outputs"][number];
+  tasks: readonly SmithersTaskManifestTask[] | undefined;
   schemaFilename: ArtifactSchemaFilename;
 }): SemanticGateContext {
   const context: SemanticGateContext = {
@@ -1674,6 +1695,9 @@ function semanticArtifactSetForSchema(input: {
   layout: RunLayout;
   artifactDir: string;
   node: PlannedGraphNode;
+  attemptId: string;
+  output: PlannedGraphNode["outputs"][number];
+  tasks: readonly SmithersTaskManifestTask[] | undefined;
   schemaFilename: ArtifactSchemaFilename;
 }): SemanticArtifactSetContext | undefined {
   if (input.schemaFilename === "campaign-summary.schema.json") {
@@ -1705,6 +1729,18 @@ function semanticArtifactSetForSchema(input: {
   if (input.schemaFilename === "selected-strategies.schema.json") {
     return { dynamicStrategyArtifacts: semanticDynamicStrategyArtifacts(input) };
   }
+  if (
+    input.schemaFilename === "reference-harness.schema.json" ||
+    input.schemaFilename === "audited-differential-lanes.schema.json" ||
+    input.schemaFilename === "differential-lane-result.schema.json" ||
+    input.schemaFilename === "semantic-red-registry.schema.json" ||
+    input.schemaFilename === "differential-red-triage.schema.json" ||
+    input.schemaFilename === "differential-repair-summary.schema.json" ||
+    input.schemaFilename === "differential-gap-review.schema.json" ||
+    input.schemaFilename === "differential-report-review.schema.json"
+  ) {
+    return { differentialArtifacts: semanticDifferentialArtifacts(input) };
+  }
   if (input.schemaFilename === "report.schema.json") {
     const propertyCatalog = semanticCanonicalPropertyCatalog(input.layout);
     const implementedProperties = semanticImplementedProperties(input.layout);
@@ -1719,6 +1755,127 @@ function semanticArtifactSetForSchema(input: {
     };
   }
   return undefined;
+}
+
+function semanticDifferentialArtifacts(input: {
+  layout: RunLayout;
+  attemptId: string;
+  output: PlannedGraphNode["outputs"][number];
+  tasks: readonly SmithersTaskManifestTask[] | undefined;
+  schemaFilename: ArtifactSchemaFilename;
+}): NonNullable<SemanticArtifactSetContext["differentialArtifacts"]> {
+  if (input.tasks === undefined) return {};
+  const matchingTasks = input.tasks.filter((task) => task.attemptId === input.attemptId);
+  if (matchingTasks.length !== 1) {
+    throw new Error(
+      `differential semantic context requires exactly one current task declaration for ${JSON.stringify(input.attemptId)}`
+    );
+  }
+  const tasksByAttempt = new Map(input.tasks.map((task) => [task.attemptId, task] as const));
+  if (tasksByAttempt.size !== input.tasks.length) {
+    throw new Error("differential semantic context received duplicate task attempt declarations");
+  }
+  const declarations = input.tasks.map(semanticTaskDeclaration);
+  const currentTask = matchingTasks[0]!;
+  const currentDeclaration = semanticTaskDeclaration(currentTask);
+  const currentOutput = currentDeclaration.outputs.filter(
+    (output) => output.path === input.output.path && output.contract === input.output.contract
+  );
+  if (currentOutput.length !== 1) {
+    throw new Error(
+      `differential current output is absent from the sealed task declaration: ${JSON.stringify(input.output.path)}`
+    );
+  }
+
+  const bind = (declared: readonly DeclaredSemanticArtifactOutput[]): SemanticDifferentialArtifactBinding[] =>
+    declared.map((output) => {
+      const producer = tasksByAttempt.get(output.attemptId);
+      if (producer === undefined) {
+        throw new Error(
+          `differential artifact producer declaration is unavailable: ${JSON.stringify(output.attemptId)}`
+        );
+      }
+      const artifactPath = safeResolveInside(output.artifactDir, output.path, "declared differential artifact");
+      assertRegularFileInside(input.layout.root, artifactPath, "declared differential semantic artifact");
+      const relativePath = path.relative(input.layout.root, artifactPath).split(path.sep).join(path.posix.sep);
+      if (relativePath.length === 0 || relativePath.startsWith("../") || path.isAbsolute(relativePath)) {
+        throw new Error(`declared differential artifact is outside the run layout: ${artifactPath}`);
+      }
+      return {
+        attemptId: output.attemptId,
+        logicalNodeId: output.logicalNodeId,
+        attemptIndex: producer.metadata.loop.attemptIndex,
+        path: relativePath,
+        contract: output.contract,
+        document: readStrictContractDocument(
+          artifactPath,
+          output.contract as Parameters<typeof artifactContractSchemaBinding>[0]
+        )
+      };
+    });
+  const ancestors = (contract: Parameters<typeof artifactContractSchemaBinding>[0]) =>
+    bind(declaredAncestorOutputsByContract(currentDeclaration, declarations, contract));
+  const siblings = (contract: Parameters<typeof artifactContractSchemaBinding>[0]) =>
+    bind(declaredSiblingOutputsByContract(currentDeclaration, contract));
+  const currentPath = safeResolveInside(currentTask.artifactDir, input.output.path, "current differential artifact");
+  const current = {
+    attemptId: currentTask.attemptId,
+    logicalNodeId: currentTask.logicalNodeId,
+    attemptIndex: currentTask.metadata.loop.attemptIndex,
+    path: path.relative(input.layout.root, currentPath).split(path.sep).join(path.posix.sep),
+    contract: input.output.contract
+  };
+
+  switch (input.schemaFilename) {
+    case "reference-harness.schema.json":
+      return { current, plans: ancestors("ultrafuzz/differential-plan@1") };
+    case "audited-differential-lanes.schema.json":
+      return {
+        current,
+        plans: ancestors("ultrafuzz/differential-plan@1"),
+        harnesses: ancestors("ultrafuzz/reference-harness@1")
+      };
+    case "differential-lane-result.schema.json":
+      return { current, auditedLanes: ancestors("ultrafuzz/audited-differential-lanes@1") };
+    case "semantic-red-registry.schema.json":
+      return { laneResults: ancestors("ultrafuzz/differential-lane-result@1") };
+    case "differential-red-triage.schema.json":
+      return { current, registries: siblings("ultrafuzz/semantic-red-registry@1") };
+    case "differential-repair-summary.schema.json":
+      return {
+        registries: ancestors("ultrafuzz/semantic-red-registry@1"),
+        triages: ancestors("ultrafuzz/differential-red-triage@1")
+      };
+    case "differential-gap-review.schema.json":
+      return {
+        auditedLanes: ancestors("ultrafuzz/audited-differential-lanes@1"),
+        laneResults: ancestors("ultrafuzz/differential-lane-result@1")
+      };
+    case "differential-report-review.schema.json":
+      return {
+        registries: ancestors("ultrafuzz/semantic-red-registry@1"),
+        triages: ancestors("ultrafuzz/differential-red-triage@1"),
+        repairSummaries: siblings("ultrafuzz/differential-repair-summary@1"),
+        gapReviews: siblings("ultrafuzz/differential-gap-review@1"),
+        findings: siblings("ultrafuzz/findings@2")
+      };
+    default:
+      return {};
+  }
+}
+
+function semanticTaskDeclaration(task: SmithersTaskManifestTask): SemanticArtifactTaskDeclaration {
+  return {
+    attemptId: task.attemptId,
+    logicalNodeId: task.logicalNodeId,
+    artifactDir: task.artifactDir,
+    dependencies: task.dependencies,
+    dependencyArtifactDirs: task.dependencyArtifactDirs,
+    outputs: task.metadata.artifacts.outputs.map((output) => ({
+      path: output.path,
+      contract: output.contract
+    }))
+  };
 }
 
 function semanticDynamicStrategyArtifacts(input: {

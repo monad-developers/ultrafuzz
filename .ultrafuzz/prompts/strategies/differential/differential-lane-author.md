@@ -13,12 +13,11 @@ Read the audited lanes and select exactly one `ready_lanes` entry whose
 {{artifact_handoff:reference-and-lane-auditor}}
 
 If more than one audited lane entry matches this attempt after reading all
-auditor artifacts, do not choose arbitrarily. Write
-`{{artifact_path}}/lane-result.json` with status `no_assigned_lane`, include the
-ambiguous source artifact paths in `notes`, write empty standard
-`generated-tests.json` and `findings.json` outputs, and stop. This prevents
-looped upstream producer attempts from being silently merged into a conflicting
-lane payload.
+auditor artifacts, do not choose arbitrarily and do not claim
+`no_assigned_lane`. Ambiguity is an invalid handoff, not absence: return a clear
+failure so the node remains failed rather than fabricating a fallback artifact.
+`no_assigned_lane` is valid only when no exact ready row matches both attempt
+coordinates.
 
 Read the base Foundry setup before authoring tests:
 
@@ -57,14 +56,12 @@ this prompt, the Read tool, `rg --files`, or unredirected `find test/foundry
 
 Run `forge --version` as a separate Bash call before the focused command. If
 `forge` is available in `PATH`, run the lane payload's `focused_command` with
-direct `forge` invocation. If the payload still uses command substitution,
-shell conditionals, absolute binary paths, host-global searches, or a
-custom binary wrapper, rewrite only the command prefix to use direct `forge`
-and run the same test selection. If the payload starts with an inline
-environment assignment, remove that prefix so the command starts with `forge`
-and backend allowlists match it. Keep the payload's existing flags, match
-selectors, and test-root semantics. If `forge` is unavailable in `PATH`, record
-validation as blocked by tool availability; do not record
+the exact direct `forge` invocation. Never rewrite, normalize, or convert the
+command. If it contains substitution, a shell conditional, an inline
+environment assignment, an absolute binary path, a host-global search, or a
+custom wrapper, fail the handoff instead of executing a lookalike command. If
+`forge` is unavailable in `PATH`, record validation as blocked by tool
+availability; do not record
 `forge: command not found` as verification, a compile defect, or a harness
 defect.
 
@@ -89,10 +86,14 @@ Write {{artifact_path}}/lane-result.json with this JSON shape:
     "harness_author_attempt_index": 0,
     "source_plan_artifact": "artifacts/differential-oracle-planner/differential-plan.json",
     "source_harness_artifact": "artifacts/reference-harness-author/reference-harness.json",
+    "surface_id": "candidate-surface-id",
     "intended_t_sol_path": "test/foundry/differential/Lane.t.sol",
     "focused_command": "forge test --match-path test/foundry/differential/Lane.t.sol --match-test test_lane",
     "public_evidence_paths": ["docs/spec.md"],
-    "exact_observable_equality_assertions": ["Public return values are equal"]
+    "exact_observable_equality_assertions": ["Public return values are equal"],
+    "oracle_type": "independent_reference",
+    "calibration_bucket": "red_seeking_adversarial",
+    "red_seeking_priority": "high"
   },
   "authored_paths": [],
   "focused_command": "forge test --match-path test/foundry/differential/Lane.t.sol --match-test test_lane",
@@ -112,9 +113,21 @@ Write {{artifact_path}}/lane-result.json with this JSON shape:
 ```
 
 For `semantic_red_frozen`, `red_candidates` is non-empty and each row contains
-non-empty `red_candidate_id`, `test_path`, `failing_test_name`,
+non-empty `stable_failure_hash`, `red_candidate_id`, `test_path`, `failing_test_name`,
 `focused_command`, `failure_signature`, `assertion`, `observed`, and `expected`,
 at least one `public_oracle_basis`, and fixed `classification: "untriaged"`.
+For `compile_or_harness_defect`, every defect row contains
+`stable_failure_hash`, `category`, `summary`, and `evidence_paths`.
+
+Compute each lowercase SHA-256 hash over the UTF-8 bytes of compact JSON for
+the exact ordered array below (the same bytes produced by JavaScript
+`JSON.stringify`), without aliases or normalization:
+
+- semantic red: `["semantic-red-v1", lane_id, red_candidate_id, test_path,
+  failing_test_name, focused_command, failure_signature, assertion, observed,
+  expected, public_oracle_basis, pre_repair_file_hash]`;
+- compile/harness defect: `["compile-harness-defect-v1", lane_id, category,
+  summary, evidence_paths]`.
 
 The status controls the rest of the record. `green` requires a non-null assigned
 lane, at least one authored path, a command that ran and matched at least one
@@ -129,6 +142,10 @@ all result/evidence arrays empty, zero matched tests, and `not_applicable` with
 null frozen-red fields. For every assigned status, the top-level lane identity,
 attempt indices, plan/harness paths, and command must exactly equal the assigned
 lane payload; do not copy or convert a different lane.
+
+After the final writes, run every exact `ultrafuzz json validate` command printed
+in the output contract. Fix the JSON yourself; the validator must not repair or
+convert it, and you must not return or exit until every command passes.
 
 Also write `{{artifact_path}}/generated-tests.json` using the standard
 generated-test manifest contract. Include every authored `.t.sol` lane file and

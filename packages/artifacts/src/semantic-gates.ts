@@ -1537,6 +1537,13 @@ function exactArrayIssue(pathValue: string, actual: unknown, expected: unknown, 
   return isDeepStrictEqual(actual, expected) ? [] : [issue(pathValue, message)];
 }
 
+function requiredBindingIssue(
+  bindings: readonly SemanticDifferentialArtifactBinding[],
+  label: string
+): SemanticGateIssue[] {
+  return bindings.length === 0 ? [issue("$", `No exact declared ${label} artifact is available`)] : [];
+}
+
 function bindingForExactPath(
   bindings: readonly SemanticDifferentialArtifactBinding[],
   artifactPath: unknown,
@@ -1579,6 +1586,7 @@ function referenceHarnessPlanReconciliationIssues(
 ): SemanticGateIssue[] {
   const plans = differentialArtifactBindings(context, "plans");
   const issues = [
+    ...requiredBindingIssue(plans, "differential plan"),
     ...currentAttemptIssue(document, context, "harness_author_attempt_index", "Harness author attempt index"),
     ...exactArrayIssue(
       "$.source_plan_artifacts",
@@ -1657,6 +1665,8 @@ function auditedDifferentialHandoffReconciliationIssues(
   const harnesses = differentialArtifactBindings(context, "harnesses");
   const current = differentialCurrentArtifact(context);
   const issues = [
+    ...requiredBindingIssue(plans, "differential plan"),
+    ...requiredBindingIssue(harnesses, "reference harness"),
     ...currentAttemptIssue(document, context, "auditor_attempt_index", "Auditor attempt index"),
     ...exactArrayIssue(
       "$.source_plan_artifacts",
@@ -1768,7 +1778,10 @@ function differentialLaneResultHandoffReconciliationIssues(
 ): SemanticGateIssue[] {
   const auditedBindings = differentialArtifactBindings(context, "auditedLanes");
   const current = differentialCurrentArtifact(context);
-  const issues = currentAttemptIssue(document, context, "attempt_index", "Lane result attempt index");
+  const issues = [
+    ...requiredBindingIssue(auditedBindings, "audited differential lanes"),
+    ...currentAttemptIssue(document, context, "attempt_index", "Lane result attempt index")
+  ];
   const lookup = bindingForExactPath(
     auditedBindings,
     at(document, ["source_auditor_artifact"]),
@@ -1872,7 +1885,9 @@ function semanticRedRegistryLaneReconciliationIssues(
   context: SemanticGateContext
 ): SemanticGateIssue[] {
   const expected = expectedRegistryRows(differentialArtifactBindings(context, "laneResults"));
+  const laneResults = differentialArtifactBindings(context, "laneResults");
   return [
+    ...requiredBindingIssue(laneResults, "differential lane result"),
     ...exactArrayIssue(
       "$.semantic_reds",
       at(document, ["semantic_reds"]),
@@ -2041,6 +2056,14 @@ function differentialRepairSummaryTriageReconciliationIssues(
     differentialArtifactBindings(context, "triages")
   );
   const issues = [...consensus.issues];
+  if (booleanField(document, "semantic_red_registry_regenerated") !== false) {
+    issues.push(
+      issue(
+        "$.semantic_red_registry_regenerated",
+        "Repair must preserve the authenticated semantic-red registry instead of regenerating or replacing it"
+      )
+    );
+  }
   const repairable = consensus.rows.filter((row) => row.repairKind !== undefined);
   const attempted = arrayAt(document, ["repairs_attempted"]);
   const attemptedProjection = attempted.map((row) => ({
@@ -2139,9 +2162,12 @@ function differentialGapReviewLaneReconciliationIssues(
   context: SemanticGateContext
 ): SemanticGateIssue[] {
   const readyRows = gapReadyRows(differentialArtifactBindings(context, "auditedLanes"));
+  const auditedBindings = differentialArtifactBindings(context, "auditedLanes");
   const resultBindings = differentialArtifactBindings(context, "laneResults");
   const resultRows = gapResultRows(resultBindings);
   const issues = [
+    ...requiredBindingIssue(auditedBindings, "audited differential lanes"),
+    ...requiredBindingIssue(resultBindings, "differential lane result"),
     ...exactArrayIssue(
       "$.ready_lanes",
       at(document, ["ready_lanes"]),

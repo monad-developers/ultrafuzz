@@ -61,6 +61,8 @@ const {
   applyWorkspacePatch,
   captureWorkspacePatch,
   captureWorkspaceTree,
+  declaredAncestorOutputsByContract,
+  declaredSiblingOutputsByContract,
   deriveWorkspacePatchGitFacts,
   hydratePinnedSubmodulesFromExecutionSnapshot,
   projectCanonicalFinalReport,
@@ -4353,6 +4355,147 @@ function siblingDynamicStrategySemanticArtifacts(
   };
 }
 
+type DifferentialSemanticArtifactBinding = {
+  attemptId: string;
+  logicalNodeId: string;
+  attemptIndex: number;
+  path: string;
+  contract: string;
+  document: unknown;
+};
+
+function semanticTaskDeclaration(task: (typeof taskSpecs)[number]) {
+  return {
+    attemptId: task.attemptId,
+    logicalNodeId: task.metadata.node.logicalNodeId,
+    artifactDir: task.artifactDir,
+    dependencies: task.dependencies,
+    dependencyArtifactDirs: task.dependencyArtifactDirs,
+    outputs: task.outputs.map((output) => ({ path: output.path, contract: output.contract }))
+  };
+}
+
+function declaredDifferentialArtifactPath(
+  task: (typeof taskSpecs)[number],
+  artifactDir: string,
+  relativePath: string
+): string {
+  const runRoot = path.resolve(process.cwd(), task.runRoot);
+  const artifactPath = path.resolve(artifactDir, relativePath);
+  const declaredPath = path.relative(runRoot, artifactPath);
+  if (declaredPath.length === 0 || declaredPath.startsWith(`..${path.sep}`) || path.isAbsolute(declaredPath)) {
+    throw new Error(`artifact-contract failure: declared differential artifact escapes the run root ${relativePath}`);
+  }
+  return declaredPath.split(path.sep).join(path.posix.sep);
+}
+
+function siblingDifferentialBindings(
+  task: (typeof taskSpecs)[number],
+  verifiedOutputs: ReadonlyMap<string, VerifiedOutputSnapshot>,
+  contract: string
+): DifferentialSemanticArtifactBinding[] {
+  const declaration = semanticTaskDeclaration(task);
+  return declaredSiblingOutputsByContract(declaration, contract).map(
+    (binding: { attemptId: string; logicalNodeId: string; artifactDir: string; path: string; contract: string }) => {
+      const snapshot = verifiedOutputs.get(binding.path);
+      if (snapshot === undefined) {
+        throw new Error(`artifact-contract failure: verified differential sibling is unavailable ${binding.path}`);
+      }
+      return {
+        attemptId: binding.attemptId,
+        logicalNodeId: binding.logicalNodeId,
+        attemptIndex: task.metadata.loop.attemptIndex,
+        path: declaredDifferentialArtifactPath(task, binding.artifactDir, binding.path),
+        contract: binding.contract,
+        document: snapshot.value
+      };
+    }
+  );
+}
+
+function ancestorDifferentialBindings(
+  task: (typeof taskSpecs)[number],
+  contract: string
+): DifferentialSemanticArtifactBinding[] {
+  const declaration = semanticTaskDeclaration(task);
+  const declarations = taskSpecs.map(semanticTaskDeclaration);
+  return declaredAncestorOutputsByContract(declaration, declarations, contract).map(
+    (binding: { attemptId: string; logicalNodeId: string; artifactDir: string; path: string; contract: string }) => {
+      const producer = taskSpecs.find((candidate) => candidate.attemptId === binding.attemptId);
+      if (producer === undefined) {
+        throw new Error(`artifact-contract failure: differential producer is undeclared ${binding.attemptId}`);
+      }
+      const artifact = verifiedDependencyJsonArtifact(
+        task,
+        binding.artifactDir,
+        producer,
+        binding.path,
+        binding.contract
+      );
+      return {
+        attemptId: binding.attemptId,
+        logicalNodeId: binding.logicalNodeId,
+        attemptIndex: producer.metadata.loop.attemptIndex,
+        path: declaredDifferentialArtifactPath(task, binding.artifactDir, binding.path),
+        contract: binding.contract,
+        document: artifact.value
+      };
+    }
+  );
+}
+
+function differentialSemanticArtifacts(
+  task: (typeof taskSpecs)[number],
+  output: (typeof taskSpecs)[number]["outputs"][number],
+  verifiedOutputs: ReadonlyMap<string, VerifiedOutputSnapshot>
+) {
+  const current = {
+    attemptId: task.attemptId,
+    logicalNodeId: task.metadata.node.logicalNodeId,
+    attemptIndex: task.metadata.loop.attemptIndex,
+    path: declaredDifferentialArtifactPath(task, task.artifactDir, output.path),
+    contract: output.contract
+  };
+  const ancestors = (contract: string) => ancestorDifferentialBindings(task, contract);
+  const siblings = (contract: string) => siblingDifferentialBindings(task, verifiedOutputs, contract);
+  switch (output.schemaFile) {
+    case "reference-harness.schema.json":
+      return { current, plans: ancestors("ultrafuzz/differential-plan@1") };
+    case "audited-differential-lanes.schema.json":
+      return {
+        current,
+        plans: ancestors("ultrafuzz/differential-plan@1"),
+        harnesses: ancestors("ultrafuzz/reference-harness@1")
+      };
+    case "differential-lane-result.schema.json":
+      return { current, auditedLanes: ancestors("ultrafuzz/audited-differential-lanes@1") };
+    case "semantic-red-registry.schema.json":
+      return { laneResults: ancestors("ultrafuzz/differential-lane-result@1") };
+    case "differential-red-triage.schema.json":
+      return { current, registries: siblings("ultrafuzz/semantic-red-registry@1") };
+    case "differential-repair-summary.schema.json":
+      return {
+        registries: ancestors("ultrafuzz/semantic-red-registry@1"),
+        triages: ancestors("ultrafuzz/differential-red-triage@1")
+      };
+    case "differential-gap-review.schema.json":
+      return {
+        auditedLanes: ancestors("ultrafuzz/audited-differential-lanes@1"),
+        laneResults: ancestors("ultrafuzz/differential-lane-result@1")
+      };
+    case "differential-report-review.schema.json":
+      return {
+        registries: ancestors("ultrafuzz/semantic-red-registry@1"),
+        triages: ancestors("ultrafuzz/differential-red-triage@1"),
+        repairSummaries: siblings("ultrafuzz/differential-repair-summary@1"),
+        gapReviews: siblings("ultrafuzz/differential-gap-review@1"),
+        findings: siblings("ultrafuzz/findings@2")
+      };
+    default:
+      return {};
+  }
+}
+
 function verifiedAncestorPropertyLenses(
   task: (typeof taskSpecs)[number]
 ): Array<{ sourceNodeId: string; document: unknown }> | undefined {
@@ -4436,6 +4579,24 @@ function semanticGateContextForVerifiedOutput(
       findings?: unknown;
       provenance?: unknown;
     };
+    differentialArtifacts?: {
+      current?: {
+        attemptId: string;
+        logicalNodeId: string;
+        attemptIndex: number;
+        path: string;
+        contract: string;
+      };
+      plans?: readonly DifferentialSemanticArtifactBinding[];
+      harnesses?: readonly DifferentialSemanticArtifactBinding[];
+      auditedLanes?: readonly DifferentialSemanticArtifactBinding[];
+      laneResults?: readonly DifferentialSemanticArtifactBinding[];
+      registries?: readonly DifferentialSemanticArtifactBinding[];
+      triages?: readonly DifferentialSemanticArtifactBinding[];
+      repairSummaries?: readonly DifferentialSemanticArtifactBinding[];
+      gapReviews?: readonly DifferentialSemanticArtifactBinding[];
+      findings?: readonly DifferentialSemanticArtifactBinding[];
+    };
   };
   git?: ReturnType<typeof deriveWorkspacePatchGitFacts>;
 } {
@@ -4474,6 +4635,19 @@ function semanticGateContextForVerifiedOutput(
   } else if (output.schemaFile === "selected-strategies.schema.json") {
     context.artifactSet = {
       dynamicStrategyArtifacts: siblingDynamicStrategySemanticArtifacts(task, verifiedOutputs)
+    };
+  } else if (
+    output.schemaFile === "reference-harness.schema.json" ||
+    output.schemaFile === "audited-differential-lanes.schema.json" ||
+    output.schemaFile === "differential-lane-result.schema.json" ||
+    output.schemaFile === "semantic-red-registry.schema.json" ||
+    output.schemaFile === "differential-red-triage.schema.json" ||
+    output.schemaFile === "differential-repair-summary.schema.json" ||
+    output.schemaFile === "differential-gap-review.schema.json" ||
+    output.schemaFile === "differential-report-review.schema.json"
+  ) {
+    context.artifactSet = {
+      differentialArtifacts: differentialSemanticArtifacts(task, output, verifiedOutputs)
     };
   } else if (output.schemaFile === "report.schema.json") {
     const propertyCatalog = verifiedCurrentAncestorJsonArtifact(

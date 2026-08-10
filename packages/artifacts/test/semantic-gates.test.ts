@@ -232,12 +232,20 @@ const emptyAuditedDifferentialLanes = {
   rejected_or_narrowed_lanes: []
 };
 const emptySemanticRedRegistry = { semantic_reds: [], compile_or_harness_defects: [] };
+const emptyNoAssignedLaneResult = {
+  lane_id: null,
+  attempt_index: 0,
+  auditor_attempt_index: 0,
+  source_auditor_artifact: differentialAuditPath,
+  status: "no_assigned_lane"
+};
 const emptyTriageA = { pass: "a", classifications: [] };
 const emptyTriageB = { pass: "b", classifications: [] };
 const emptyRepairSummary = {
   repairs_attempted: [],
   repaired_failures: [],
-  preserved_production_or_unknown_reds: []
+  preserved_production_or_unknown_reds: [],
+  semantic_red_registry_regenerated: false
 };
 const emptyGapReview = {
   ready_lanes: [],
@@ -246,6 +254,28 @@ const emptyGapReview = {
   incomplete_campaign_work_orders: [],
   green_suite_evidence: [],
   report_blockers: []
+};
+const noAssignedGapReview = {
+  ...emptyGapReview,
+  lane_results_seen: [
+    {
+      lane_id: null,
+      attempt_index: 0,
+      auditor_attempt_index: 0,
+      source_auditor_artifact: differentialAuditPath,
+      status: "no_assigned_lane"
+    }
+  ],
+  incomplete_campaign_work_orders: [
+    {
+      lane_id: null,
+      attempt_index: 0,
+      auditor_attempt_index: 0,
+      source_auditor_artifact: differentialAuditPath,
+      summary: "No lane was assigned.",
+      evidence_paths: []
+    }
+  ]
 };
 
 const differentialPlanBinding = differentialBinding(
@@ -265,6 +295,12 @@ const differentialAuditBinding = differentialBinding(
   "ultrafuzz/audited-differential-lanes@1",
   "reference-and-lane-auditor",
   emptyAuditedDifferentialLanes
+);
+const differentialLaneResultBinding = differentialBinding(
+  "artifacts/differential-lane-author/lane-result.json",
+  "ultrafuzz/differential-lane-result@1",
+  "differential-lane-author",
+  emptyNoAssignedLaneResult
 );
 const differentialRegistryBinding = differentialBinding(
   differentialRegistryPath,
@@ -1290,9 +1326,9 @@ test("every contextual registration executes real positive and negative checks",
         }
       },
       "differential-gap-review-lane-reconciliation": {
-        positive: emptyGapReview,
+        positive: noAssignedGapReview,
         negative: {
-          ...emptyGapReview,
+          ...noAssignedGapReview,
           ready_lanes: [
             {
               lane_id: "invented",
@@ -1303,7 +1339,12 @@ test("every contextual registration executes real positive and negative checks",
           ]
         },
         context: {
-          artifactSet: { differentialArtifacts: { auditedLanes: [differentialAuditBinding], laneResults: [] } }
+          artifactSet: {
+            differentialArtifacts: {
+              auditedLanes: [differentialAuditBinding],
+              laneResults: [differentialLaneResultBinding]
+            }
+          }
         }
       },
       "differential-lane-result-handoff-reconciliation": {
@@ -1436,7 +1477,9 @@ test("every contextual registration executes real positive and negative checks",
           ],
           compile_or_harness_defects: []
         },
-        context: { artifactSet: { differentialArtifacts: { laneResults: [] } } }
+        context: {
+          artifactSet: { differentialArtifacts: { laneResults: [differentialLaneResultBinding] } }
+        }
       },
       "campaign-summary-count-coupling": {
         positive: { failure_counts: { pre_deduplication: 1, post_deduplication: 1 } },
@@ -1887,6 +1930,25 @@ test("every contextual registration executes real positive and negative checks",
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("differential repair reconciliation forbids semantic-red registry regeneration", () => {
+  const result = executeSemanticGate("differential-repair-summary-triage-reconciliation", {
+    document: { ...emptyRepairSummary, semantic_red_registry_regenerated: true },
+    context: {
+      artifactSet: {
+        differentialArtifacts: {
+          registries: [differentialRegistryBinding],
+          triages: [differentialTriageABinding, differentialTriageBBinding]
+        }
+      }
+    }
+  });
+
+  assert.equal(result.status, "failed");
+  assert.ok(
+    result.status === "failed" && result.issues.some((entry) => entry.path === "$.semantic_red_registry_regenerated")
+  );
 });
 
 test("dynamic strategy reconciliation rejects every shape-valid sibling join drift", () => {

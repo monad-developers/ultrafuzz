@@ -87,10 +87,7 @@
           },
           "category": {
             "type": "string",
-            "enum": [
-              "compile",
-              "harness"
-            ]
+            "enum": ["compile", "harness"]
           },
           "summary": {
             "type": "string",
@@ -106,22 +103,12 @@
             "uniqueItems": true
           }
         },
-        "required": [
-          "stable_failure_hash",
-          "lane_id",
-          "category",
-          "summary",
-          "evidence_paths"
-        ],
+        "required": ["stable_failure_hash", "lane_id", "category", "summary", "evidence_paths"],
         "additionalProperties": false
       }
     }
   },
-  "required": [
-    "schema_version",
-    "semantic_reds",
-    "compile_or_harness_defects"
-  ],
+  "required": ["schema_version", "semantic_reds", "compile_or_harness_defects"],
   "additionalProperties": false,
   "$id": "urn:ultrafuzz:schema:artifacts:semantic-red-registry:1",
   "title": "Ultrafuzz semantic red registry"

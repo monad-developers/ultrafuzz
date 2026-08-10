@@ -18,7 +18,8 @@ import {
   validateRegisteredJsonFileSync,
   writeArtifact as writeArtifactFile,
   writeRunState,
-  writeArtifactManifest
+  writeArtifactManifest,
+  type SmithersTaskManifestTask
 } from "@ultrafuzz/artifacts";
 import { loadBuiltInPromptAssets } from "@ultrafuzz/prompts";
 
@@ -264,6 +265,299 @@ function plannedNode(paths: string[]): PlannedGraphNode {
     model_fanout: []
   };
 }
+
+function differentialNode(
+  id: string,
+  outputs: ReadonlyArray<readonly [string, PlannedGraphNode["outputs"][number]["contract"], boolean?]>,
+  dependencies: readonly string[] = []
+): PlannedGraphNode {
+  return {
+    id,
+    logical_id: id,
+    display_name: id,
+    kind: "agentic",
+    depends_on: [...dependencies],
+    artifact_dir: `artifacts/${id}`,
+    outputs: outputs.map(([artifactPath, contract, primary = false]) => boundOutput(artifactPath, contract, primary)),
+    prompt_id: id,
+    prompt_path: `strategies/differential/${id}.md`,
+    loop: { index: 0, count: 1, mode: "parallel", attempt_index: 0 },
+    model_fanout: []
+  };
+}
+
+function differentialTask(
+  layout: ReturnType<typeof createRunLayout>,
+  node: PlannedGraphNode,
+  dependencies: readonly SmithersTaskManifestTask[]
+): SmithersTaskManifestTask {
+  const artifactDir = getNodeArtifactDir(layout, node.id, { create: true });
+  const dependencyArtifactDirs = dependencies.flatMap((dependency) => [
+    ...dependency.dependencyArtifactDirs,
+    dependency.artifactDir
+  ]);
+  const uniqueDependencyArtifactDirs = [...new Set(dependencyArtifactDirs)];
+  return {
+    attemptId: node.id,
+    logicalNodeId: node.logical_id ?? node.id,
+    artifactDir,
+    dependencies: dependencies.map((dependency) => dependency.attemptId),
+    dependencyArtifactDirs: uniqueDependencyArtifactDirs,
+    metadata: {
+      loop: { attemptIndex: 0 },
+      artifacts: {
+        outputs: node.outputs.map((output) => ({ path: output.path, contract: output.contract }))
+      }
+    }
+  } as unknown as SmithersTaskManifestTask;
+}
+
+function runArtifactPath(attemptId: string, artifactPath: string): string {
+  return path.posix.join("artifacts", attemptId, artifactPath);
+}
+
+test("runtime differential gates consume only exact sealed ancestor and sibling declarations", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-differential-handoff" });
+  const planNode = differentialNode("differential-oracle-planner", [
+    ["differential-plan.json", "ultrafuzz/differential-plan@1", true]
+  ]);
+  const harnessNode = differentialNode(
+    "reference-harness-author",
+    [["reference-harness.json", "ultrafuzz/reference-harness@1", true]],
+    [planNode.id]
+  );
+  const auditNode = differentialNode(
+    "reference-and-lane-auditor",
+    [["audited-differential-lanes.json", "ultrafuzz/audited-differential-lanes@1", true]],
+    [harnessNode.id]
+  );
+  const laneNode = differentialNode(
+    "differential-lane-author",
+    [["lane-result.json", "ultrafuzz/differential-lane-result@1", true]],
+    [auditNode.id]
+  );
+  const triageNode = differentialNode(
+    "differential-red-triage",
+    [
+      ["semantic-red-registry.json", "ultrafuzz/semantic-red-registry@1", true],
+      ["triage-a.json", "ultrafuzz/differential-red-triage@1"],
+      ["triage-b.json", "ultrafuzz/differential-red-triage@1"]
+    ],
+    [laneNode.id]
+  );
+  const reviewNode = differentialNode(
+    "differential-repair-and-report-review",
+    [
+      ["repair-summary.json", "ultrafuzz/differential-repair-summary@1", true],
+      ["gap-review.json", "ultrafuzz/differential-gap-review@1"],
+      ["differential-report-review.json", "ultrafuzz/differential-report-review@1"],
+      ["findings.json", "ultrafuzz/findings@2"]
+    ],
+    [triageNode.id]
+  );
+  const planTask = differentialTask(layout, planNode, []);
+  const harnessTask = differentialTask(layout, harnessNode, [planTask]);
+  const auditTask = differentialTask(layout, auditNode, [harnessTask]);
+  const laneTask = differentialTask(layout, laneNode, [auditTask]);
+  const triageTask = differentialTask(layout, triageNode, [laneTask]);
+  const reviewTask = differentialTask(layout, reviewNode, [triageTask]);
+  const tasks = [planTask, harnessTask, auditTask, laneTask, triageTask, reviewTask];
+
+  const planPath = runArtifactPath(planTask.attemptId, "differential-plan.json");
+  const harnessPath = runArtifactPath(harnessTask.attemptId, "reference-harness.json");
+  const auditPath = runArtifactPath(auditTask.attemptId, "audited-differential-lanes.json");
+  const plan = {
+    schema_version: "ultrafuzz.differential-plan.v1",
+    planner_attempt_index: 0,
+    candidate_surfaces: [],
+    reference_model_rules: {
+      allowed_structures: ["independent test-only models"],
+      forbidden_sources: ["production implementation internals"]
+    },
+    deployment_assumptions: [],
+    phase_priorities: [],
+    assigned_differential_lanes: [],
+    deferred_lane_candidates: [],
+    out_of_scope_surfaces: []
+  };
+  const harness = {
+    schema_version: "ultrafuzz.reference-harness.v1",
+    harness_author_attempt_index: 0,
+    source_plan_artifacts: [planPath],
+    authored_paths: [],
+    reference_models: [],
+    validation: { commands: [], passed: false, compiler_errors: [], notes: [] },
+    lane_readiness_notes: []
+  };
+  const audited = {
+    schema_version: "ultrafuzz.audited-differential-lanes.v1",
+    auditor_attempt_index: 0,
+    source_plan_artifacts: [planPath],
+    source_harness_artifacts: [harnessPath],
+    surface_audits: [],
+    ready_lanes: [] as unknown[],
+    rejected_or_narrowed_lanes: [],
+    reference_gap_work_orders: [],
+    ambiguous_spec_work_orders: []
+  };
+  const laneResult = {
+    schema_version: "ultrafuzz.differential-lane-result.v1",
+    lane_id: null,
+    attempt_index: 0,
+    auditor_attempt_index: 0,
+    source_auditor_artifact: auditPath,
+    source_plan_artifact: null,
+    source_harness_artifact: null,
+    assigned_lane_payload: null,
+    authored_paths: [],
+    focused_command: null,
+    focused_command_ran: false,
+    matched_test_count: 0,
+    status: "no_assigned_lane",
+    red_preservation_audit: {
+      result: "not_applicable",
+      pre_repair_file_hash: null,
+      assertion_predicate: null
+    },
+    red_candidates: [],
+    compile_or_harness_defects: [],
+    public_evidence_paths: [],
+    notes: []
+  };
+  const registry = {
+    schema_version: "ultrafuzz.semantic-red-registry.v1",
+    semantic_reds: [],
+    compile_or_harness_defects: []
+  };
+  const triageA = {
+    schema_version: "ultrafuzz.differential-red-triage.v1",
+    pass: "a",
+    classifications: []
+  };
+  const triageB = { ...triageA, pass: "b" };
+  const repair = {
+    schema_version: "ultrafuzz.differential-repair-summary.v1",
+    repairs_attempted: [],
+    repaired_failures: [],
+    preserved_production_or_unknown_reds: [],
+    commands: [],
+    semantic_red_registry_regenerated: false,
+    notes: []
+  };
+  const noAssignmentWorkOrder = {
+    lane_id: null,
+    attempt_index: 0,
+    auditor_attempt_index: 0,
+    source_auditor_artifact: auditPath,
+    summary: "No audited lane was assigned to this attempt.",
+    evidence_paths: []
+  };
+  const gap = {
+    schema_version: "ultrafuzz.differential-gap-review.v1",
+    ready_lanes: [],
+    lane_results_seen: [
+      {
+        lane_id: null,
+        attempt_index: 0,
+        auditor_attempt_index: 0,
+        source_auditor_artifact: auditPath,
+        status: "no_assigned_lane"
+      }
+    ],
+    missing_lane_work_orders: [],
+    incomplete_campaign_work_orders: [noAssignmentWorkOrder],
+    green_suite_evidence: [],
+    report_blockers: []
+  };
+  const reportReview = {
+    schema_version: "ultrafuzz.differential-report-review.v1",
+    campaign_status: "incomplete",
+    production_bug_reds: [],
+    harness_or_reference_repairs: [],
+    missing_or_deferred_lanes: [noAssignmentWorkOrder],
+    report_rows_ready: [],
+    notes: []
+  };
+
+  for (const [task, artifactPath, value] of [
+    [planTask, "differential-plan.json", plan],
+    [harnessTask, "reference-harness.json", harness],
+    [auditTask, "audited-differential-lanes.json", audited],
+    [laneTask, "lane-result.json", laneResult],
+    [triageTask, "semantic-red-registry.json", registry],
+    [triageTask, "triage-a.json", triageA],
+    [triageTask, "triage-b.json", triageB],
+    [reviewTask, "repair-summary.json", repair],
+    [reviewTask, "gap-review.json", gap],
+    [reviewTask, "differential-report-review.json", reportReview],
+    [reviewTask, "findings.json", []]
+  ] as const) {
+    writeArtifact(layout, task.attemptId, artifactPath, JSON.stringify(value));
+  }
+
+  for (const [node, task] of [
+    [planNode, planTask],
+    [harnessNode, harnessTask],
+    [auditNode, auditTask],
+    [laneNode, laneTask],
+    [triageNode, triageTask],
+    [reviewNode, reviewTask]
+  ] as const) {
+    const result = verifyRequiredArtifactsForAttempt(layout, node, task.attemptId, { tasks });
+    assert.equal(
+      result.ok,
+      true,
+      `${task.attemptId}: ${result.diagnostics.map((diagnostic) => diagnostic.message).join("; ")}`
+    );
+  }
+
+  const lookalikePlanPath = runArtifactPath("lookalike-planner", "differential-plan.json");
+  writeArtifact(layout, "lookalike-planner", "differential-plan.json", JSON.stringify(plan));
+  writeArtifact(
+    layout,
+    harnessTask.attemptId,
+    "reference-harness.json",
+    JSON.stringify({ ...harness, source_plan_artifacts: [lookalikePlanPath] })
+  );
+  const lookalike = verifyRequiredArtifactsForAttempt(layout, harnessNode, harnessTask.attemptId, { tasks });
+  assert.equal(lookalike.ok, false);
+  assert.ok(
+    lookalike.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.details?.gate === "reference-harness-plan-reconciliation" &&
+        /exactly preserve declared plan paths/u.test(diagnostic.message)
+    )
+  );
+
+  writeArtifact(layout, harnessTask.attemptId, "reference-harness.json", JSON.stringify(harness));
+  audited.ready_lanes.push({
+    lane_id: "lane-a",
+    attempt_index: 0,
+    auditor_attempt_index: 0,
+    planner_attempt_index: 0,
+    harness_author_attempt_index: 0,
+    source_plan_artifact: planPath,
+    source_harness_artifact: harnessPath,
+    surface_id: "surface-a",
+    intended_t_sol_path: "test/foundry/differential/LaneA.t.sol",
+    focused_command: "forge test --match-path test/foundry/differential/LaneA.t.sol",
+    public_evidence_paths: ["docs/spec.md"],
+    exact_observable_equality_assertions: ["returns match"],
+    oracle_type: "independent_reference",
+    calibration_bucket: "red_seeking_adversarial",
+    red_seeking_priority: "high"
+  });
+  writeArtifact(layout, auditTask.attemptId, "audited-differential-lanes.json", JSON.stringify(audited));
+  const falseNoAssignment = verifyRequiredArtifactsForAttempt(layout, laneNode, laneTask.attemptId, { tasks });
+  assert.equal(falseNoAssignment.ok, false);
+  assert.ok(
+    falseNoAssignment.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.details?.gate === "differential-lane-result-handoff-reconciliation" &&
+        /allowed only when no exact declared ready lane exists/u.test(diagnostic.message)
+    )
+  );
+});
 
 test("the campaign provenance gate covers the campaign node the shipped topology runs", () => {
   // Guards the regression this list fixes: the gate was previously keyed on a

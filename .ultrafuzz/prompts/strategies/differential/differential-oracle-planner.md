@@ -20,6 +20,13 @@ Property catalog:
 
 Do not edit repository source files; write only the required artifacts. Do not inspect private or hidden sources. Treat production implementation behavior as runtime observation, not as the oracle source. If public sources are insufficient for a strict oracle, mark the surface ambiguous or out of scope instead of guessing.
 
+Preserve every identifier, path, attempt coordinate, and ordered array exactly
+as authored within this plan. Do not emit aliases, legacy spellings, fallback
+values, or values that require a downstream conversion. After the final write,
+run the exact `ultrafuzz json validate` command printed in the output contract;
+do not return or exit the node until it passes without modifying or repairing
+the document for you.
+
 Plan only candidate lanes whose expected behavior can be justified by public evidence. Prefer high-signal public/external equality over broad green coverage.
 
 For every lane `focused_command`, use a direct `forge` invocation from `PATH`.

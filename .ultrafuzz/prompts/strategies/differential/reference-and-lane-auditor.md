@@ -26,15 +26,13 @@ Property catalog:
 
 Do not edit repository source files; write only the required artifacts. Do not assume the reference, production, or tests are correct. Reject or narrow any lane whose strict oracle depends on guessed behavior, private layout, production internals, gas-shaped logic, or unstated preconditions.
 
-When carrying forward or narrowing a lane `focused_command`, require a direct
-`forge` invocation from `PATH`. If the planner supplied command substitution,
-shell conditionals, absolute binary paths, host-global searches, or a custom
-binary wrapper, rewrite only the command prefix so the lane author can run the
-same test with `forge`. If the planner supplied an inline environment
-assignment prefix, remove it so the command starts with `forge` and backend
-allowlists match it. Keep the original command's flags, match selectors, and
-test-root semantics. If `forge` is unavailable in `PATH`, the lane author should
-record validation as blocked by tool availability.
+When carrying forward a lane, require its `focused_command` to be an unchanged
+direct `forge` invocation from `PATH`. A command containing substitution, shell
+conditionals, an inline environment assignment, an absolute binary path, a
+host-global search, or a custom wrapper must be rejected or explicitly narrowed;
+do not rewrite or convert it into an apparently valid command. Any narrowing
+must be recorded in `rejected_or_narrowed_lanes` with `disposition: "narrowed"`
+and a non-empty reason; it must never silently alter a `ready_lanes` row.
 
 Planner and harness inputs may come from multiple looped producer attempts.
 Treat every upstream handoff as a separate candidate source. Preserve its
@@ -45,6 +43,14 @@ path, then lane id. Emit at most one ready lane for this auditor attempt: the
 candidate assigned to zero-based position `{{attempt_index}}` after filtering
 out rejected, ambiguous, out-of-scope, or reference-gap candidates. If no ready
 candidate maps to this auditor attempt, emit an empty `ready_lanes` array.
+
+Set `source_plan_artifacts` and `source_harness_artifacts` to the exact declared
+handoff paths in declared order. Every planned lane must appear exactly once as
+ready, rejected, or explicitly narrowed. A ready row must preserve the complete
+planner lane payload byte-for-JSON-value, adding only its attempt/auditor,
+harness-attempt, and exact source-artifact coordinates. Preserve every planned
+surface ID and its public evidence paths in `surface_audits`; do not accept a
+same-named lookalike artifact or convert identifiers, paths, or versions.
 
 For each surface and lane, classify it as exactly one of:
 
@@ -80,10 +86,14 @@ Write {{artifact_path}}/audited-differential-lanes.json with this JSON shape:
       "harness_author_attempt_index": 0,
       "source_plan_artifact": "",
       "source_harness_artifact": "",
+      "surface_id": "candidate-surface-id",
       "intended_t_sol_path": "test/foundry/differential/<Lane>.t.sol",
       "focused_command": "forge test --match-path test/foundry/differential/<Lane>.t.sol --match-test <test_name>",
       "public_evidence_paths": [],
-      "exact_observable_equality_assertions": []
+      "exact_observable_equality_assertions": [],
+      "oracle_type": "independent_reference | metamorphic | self_consistency | sanity_probe",
+      "calibration_bucket": "red_seeking_adversarial | green_safe_sanity",
+      "red_seeking_priority": "high | medium | low"
     }
   ],
   "rejected_or_narrowed_lanes": [],
@@ -95,3 +105,8 @@ Write {{artifact_path}}/audited-differential-lanes.json with this JSON shape:
 Assign each emitted ready lane the current zero-based `attempt_index`. The lane
 author topology attempts use `{{attempt_index}}` and `auditor_attempt_index` to
 select exactly one matching lane payload.
+
+After the final write, run the exact `ultrafuzz json validate` command printed
+in the output contract. Fix any failure in the authored JSON; do not use a
+fallback, conversion, or repair step, and do not return or exit until validation
+passes.

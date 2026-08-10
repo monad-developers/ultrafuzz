@@ -1061,6 +1061,38 @@ test("generated severity verification authenticates the triaged finding preserva
   assert.match(helper, /\{ triagedFindings: triagedFindings\.value \}/u);
 });
 
+test("generated differential verification uses exact declared siblings and ancestors", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const runtimeImportStart = source.indexOf("const {", source.indexOf("await import(artifactsModule)"));
+  const runtimeImportEnd = source.indexOf("} = await import(runtimeModule);", runtimeImportStart);
+  const helperStart = source.indexOf("function semanticTaskDeclaration");
+  const helperEnd = source.indexOf("\n\nfunction verifiedAncestorPropertyLenses", helperStart);
+  assert.ok(runtimeImportStart >= 0 && runtimeImportEnd > runtimeImportStart, source);
+  assert.ok(helperStart >= 0 && helperEnd > helperStart, source);
+  const runtimeImport = source.slice(runtimeImportStart, runtimeImportEnd);
+  const helper = source.slice(helperStart, helperEnd);
+
+  assert.match(runtimeImport, /declaredAncestorOutputsByContract/u);
+  assert.match(runtimeImport, /declaredSiblingOutputsByContract/u);
+  assert.match(helper, /ancestorDifferentialBindings/u);
+  assert.match(helper, /siblingDifferentialBindings/u);
+  assert.match(helper, /verifiedDependencyJsonArtifact/u);
+  assert.match(helper, /verifiedOutputs/u);
+  assert.doesNotMatch(helper, /verifiedCurrentAncestorJsonArtifact|findLogicalNodeArtifact/u);
+  for (const schema of [
+    "reference-harness.schema.json",
+    "audited-differential-lanes.schema.json",
+    "differential-lane-result.schema.json",
+    "semantic-red-registry.schema.json",
+    "differential-red-triage.schema.json",
+    "differential-repair-summary.schema.json",
+    "differential-gap-review.schema.json",
+    "differential-report-review.schema.json"
+  ]) {
+    assert.match(helper, new RegExp(schema.replaceAll(".", "\\."), "u"), schema);
+  }
+});
+
 test("generated Smithers workflow prepares output directories without creating agent-owned files", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const preparationStart = source.indexOf("function prepareArtifactMirror");

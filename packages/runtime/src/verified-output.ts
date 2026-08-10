@@ -5,6 +5,7 @@ import { isDeepStrictEqual } from "node:util";
 import {
   ARTIFACT_MANIFEST_FILE,
   assertArtifactVerificationMarkerSemantics,
+  assertSmithersTaskManifestMatchesPlannedGraph,
   assertNoSymlinkComponents,
   assertPathInside,
   assertRegularFileInside,
@@ -12,6 +13,7 @@ import {
   artifactContractSchemaBinding,
   layoutForRunRoot,
   parseStrictJsonBytes,
+  parseSmithersTaskManifestBytes,
   readPlannedGraphDocument,
   readRegularFileSnapshot,
   readRunState,
@@ -145,7 +147,30 @@ export function loadVerifiedNodeOutputSnapshot(input: LoadVerifiedNodeOutputInpu
     );
   }
 
-  const gate = verifyRequiredArtifactsForAttempt(layout, plannedNode, candidate.attemptId);
+  const differentialContracts = new Set<ArtifactContractId>([
+    "ultrafuzz/reference-harness@1",
+    "ultrafuzz/audited-differential-lanes@1",
+    "ultrafuzz/differential-lane-result@1",
+    "ultrafuzz/semantic-red-registry@1",
+    "ultrafuzz/differential-red-triage@1",
+    "ultrafuzz/differential-repair-summary@1",
+    "ultrafuzz/differential-gap-review@1",
+    "ultrafuzz/differential-report-review@1"
+  ]);
+  const tasks = plannedNode.outputs.some((output) => differentialContracts.has(output.contract))
+    ? (() => {
+        const taskManifestPath = safeResolveInside(layout.root, "smithers/tasks.json", "sealed workflow task manifest");
+        assertRegularFileInside(layout.root, taskManifestPath, "sealed workflow task manifest");
+        const taskManifest = parseSmithersTaskManifestBytes(
+          readRegularFileSnapshot(taskManifestPath, MAX_AUTHORITY_DOCUMENT_BYTES)
+        );
+        assertSmithersTaskManifestMatchesPlannedGraph(taskManifest, graph);
+        return taskManifest.tasks;
+      })()
+    : undefined;
+  const gate = verifyRequiredArtifactsForAttempt(layout, plannedNode, candidate.attemptId, {
+    ...(tasks === undefined ? {} : { tasks })
+  });
   const gateErrors = gate.diagnostics.filter((diagnostic) => diagnostic.severity === "error");
   if (!gate.ok || gateErrors.length > 0) {
     throw invalidOutput(
