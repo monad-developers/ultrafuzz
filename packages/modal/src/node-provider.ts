@@ -31,6 +31,37 @@ const MAX_HANDOFF_SNAPSHOT_FILE_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_HANDOFF_SNAPSHOT_TOTAL_BYTES = 8 * 1024 * 1024 * 1024;
 const SAFE_ATTEMPT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const SNAPSHOT_GENERATION_PATTERN = /^[0-9a-f]{64}$/u;
+const REQUIRED_COMMAND_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._+-]*$/u;
+const COMMAND_PROBE_TIMEOUT_MS = 60_000;
+
+const MODAL_COMMAND_PROBE_SOURCE = String.raw`
+const fs = require("node:fs");
+const path = require("node:path");
+const { spawnSync } = require("node:child_process");
+const commands = JSON.parse(process.argv.at(-1));
+const directories = (process.env.PATH || "").split(":").filter(Boolean);
+const probes = commands.map((name) => {
+  let executable = null;
+  for (const directory of directories) {
+    const candidate = path.resolve(directory, name);
+    try {
+      if (fs.statSync(candidate).isFile()) {
+        fs.accessSync(candidate, fs.constants.X_OK);
+        executable = candidate;
+        break;
+      }
+    } catch {}
+  }
+  let version = null;
+  if (executable !== null && process.env.ULTRAFUZZ_PROBE_VERSIONS === "1") {
+    const result = spawnSync(executable, ["--version"], { encoding: "utf8", timeout: 5000 });
+    const line = (result.stdout + "\n" + result.stderr).split(/\r?\n/).map((value) => value.trim()).find(Boolean);
+    version = line ? line.slice(0, 512) : null;
+  }
+  return { name, available: executable !== null, path: executable, version };
+});
+process.stdout.write(JSON.stringify(probes));
+`;
 
 export function isSafeModalAttemptId(value: string): boolean {
   return SAFE_ATTEMPT_ID_PATTERN.test(value);
@@ -50,6 +81,66 @@ export interface ModalNodeSandboxProviderOptions {
   credentialEnv: readonly string[];
   env?: Record<string, string | undefined>;
   clientFactory?: (credentials: { tokenId: string; tokenSecret: string }) => ModalNodeClient;
+}
+
+export interface ModalCommandProbe {
+  name: string;
+  available: boolean;
+  path: string | null;
+  version: string | null;
+}
+
+/** Probe the configured image itself without creating run state or a node attempt. */
+export async function probeModalCommands(
+  options: ModalNodeSandboxProviderOptions,
+  commands: readonly string[],
+  probeOptions: { includeVersions?: boolean } = {}
+): Promise<ModalCommandProbe[]> {
+  validateProviderOptions(options);
+  const uniqueCommands = [...new Set(commands)].sort();
+  if (uniqueCommands.some((command) => !REQUIRED_COMMAND_PATTERN.test(command))) {
+    throw new Error("Modal command preflight requires bare executable names");
+  }
+  if (uniqueCommands.length === 0) return [];
+
+  const env = options.env ?? process.env;
+  const [tokenIdName, tokenSecretName] = options.credentialEnv;
+  const tokenId = requiredCredential(env, tokenIdName);
+  const tokenSecret = requiredCredential(env, tokenSecretName);
+  let client: ModalNodeClient | undefined;
+  let sandbox: Sandbox | undefined;
+  try {
+    client =
+      options.clientFactory?.({ tokenId, tokenSecret }) ??
+      (new ModalClient({ tokenId, tokenSecret }) as unknown as ModalNodeClient);
+    const app = await client.apps.fromName(options.app, { createIfMissing: true });
+    const image = await client.images.fromName(options.image);
+    const identity = boundedIdentity(`${options.image}:${uniqueCommands.join(",")}`);
+    sandbox = await client.sandboxes.create(app, image, {
+      name: `ufz-preflight-${identity}`.slice(0, 63),
+      command: ["sleep", "60"],
+      timeoutMs: COMMAND_PROBE_TIMEOUT_MS,
+      workdir: "/opt/ultrafuzz",
+      ...(options.region === undefined ? {} : { regions: [options.region] }),
+      tags: { purpose: "ultrafuzz-preflight", probe: identity }
+    });
+    const processHandle = await sandbox.exec(
+      ["node", "--eval", MODAL_COMMAND_PROBE_SOURCE, JSON.stringify(uniqueCommands)],
+      { env: { ULTRAFUZZ_PROBE_VERSIONS: probeOptions.includeVersions === true ? "1" : "0" } }
+    );
+    const [exitCode, stdout, stderr] = await Promise.all([
+      processHandle.wait(),
+      processHandle.stdout.readText(),
+      processHandle.stderr.readText()
+    ]);
+    if (exitCode !== 0) throw new Error(formatWorkerExitMessage(exitCode, stdout, stderr));
+    return parseModalCommandProbes(stdout, uniqueCommands);
+  } catch (error) {
+    throw normalizedModalNodeError(error, [tokenId, tokenSecret]);
+  } finally {
+    if (sandbox !== undefined) await sandbox.terminate({ wait: true }).catch(() => undefined);
+    client?.close();
+  }
 }
 
 export class ModalNodeCleanupRefusedError extends Error {
@@ -1894,6 +1985,32 @@ function validateProviderOptions(options: ModalNodeSandboxProviderOptions): void
   ) {
     throw new Error("Modal node provider requires two credential environment-variable names");
   }
+}
+
+function parseModalCommandProbes(value: string, expectedCommands: readonly string[]): ModalCommandProbe[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error("cloud command preflight returned invalid JSON");
+  }
+  if (
+    !Array.isArray(parsed) ||
+    parsed.length !== expectedCommands.length ||
+    parsed.some(
+      (entry) =>
+        !isRecord(entry) ||
+        typeof entry.name !== "string" ||
+        !expectedCommands.includes(entry.name) ||
+        typeof entry.available !== "boolean" ||
+        (entry.path !== null && typeof entry.path !== "string") ||
+        (entry.version !== null && typeof entry.version !== "string")
+    ) ||
+    new Set(parsed.map((entry) => (entry as Record<string, unknown>).name)).size !== expectedCommands.length
+  ) {
+    throw new Error("cloud command preflight returned an invalid result");
+  }
+  return parsed as ModalCommandProbe[];
 }
 
 function normalizedModalNodeError(error: unknown, secretValues: readonly string[]): Error {

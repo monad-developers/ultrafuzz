@@ -14,6 +14,7 @@ import {
   type RunLayout
 } from "@ultrafuzz/artifacts";
 import type { ResolvedConfig } from "@ultrafuzz/config";
+import type { ExpandedGraph } from "@ultrafuzz/topology";
 
 import {
   type PlannedGraph,
@@ -26,6 +27,7 @@ import {
   type WorkflowLifecycleValue
 } from "./types.js";
 import { planRun, repairMissingRenderedPromptsFromExecutionSnapshot } from "./plan-run.js";
+import { probeCommandsForExecution } from "./required-commands.js";
 import { forgeGuardMetadata, prepareForgeGuardEnvironment } from "./forge-guard.js";
 import { readJsonIfExists, runtimeFailure, runtimeResult } from "./utils.js";
 import {
@@ -85,7 +87,10 @@ const WORKFLOW_CONTROLLER_ONLY_ENVIRONMENT_VARIABLES = new Set([
 ]);
 
 export async function startRun(input: StartRunInput) {
-  const planned = await planRun(input);
+  const planned = await planRun(input, {
+    beforeMaterialize: async ({ resolvedConfig, expandedGraph }) =>
+      requiredCommandPreflightDiagnostics(input, resolvedConfig, expandedGraph)
+  });
   if (!planned.ok || !planned.value) {
     return runtimeFailure<StartRunValue>(planned.diagnostics);
   }
@@ -191,6 +196,45 @@ export async function startRun(input: StartRunInput) {
   } finally {
     await releaseControlLock();
   }
+}
+
+async function requiredCommandPreflightDiagnostics(
+  input: StartRunInput,
+  resolvedConfig: ResolvedConfig,
+  expandedGraph: ExpandedGraph
+): Promise<RuntimeDiagnostic[]> {
+  const requiredCommands = [...new Set(expandedGraph.nodes.flatMap((node) => node.requiredCommands ?? []))].sort();
+  let commandProbes: Awaited<ReturnType<typeof probeCommandsForExecution>>;
+  try {
+    commandProbes =
+      input.requiredCommandProbe === undefined
+        ? await probeCommandsForExecution(resolvedConfig, requiredCommands, input.env ?? process.env)
+        : await input.requiredCommandProbe(requiredCommands);
+  } catch (error) {
+    return [
+      {
+        code: "RUN_REQUIRED_COMMAND_PREFLIGHT_FAILED",
+        message: `could not probe required topology commands in the configured execution environment: ${error instanceof Error ? error.message : String(error)}`,
+        severity: "error",
+        source: "runtime",
+        path: "topology.required_commands"
+      }
+    ];
+  }
+  const probeByName = new Map(commandProbes.map((probe) => [probe.name, probe]));
+  const missingCommands = requiredCommands.filter((command) => probeByName.get(command)?.available !== true);
+  return missingCommands.length === 0
+    ? []
+    : [
+        {
+          code: "RUN_REQUIRED_COMMAND_MISSING",
+          message: `required topology commands are not available in the configured execution environment: ${missingCommands.join(", ")}`,
+          severity: "error",
+          source: "runtime",
+          path: "topology.required_commands",
+          details: { commands: missingCommands }
+        }
+      ];
 }
 
 export async function resumeRun(input: WorkflowLifecycleInput) {

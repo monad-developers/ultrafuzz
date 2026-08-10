@@ -215,7 +215,8 @@ function normalizeNode(input: unknown, index: number): NormalizedTopologyNode {
       "timeout_seconds",
       "max_attempts",
       "outputs",
-      "model_profiles"
+      "model_profiles",
+      "required_commands"
     ],
     `topology node \`${input.id}\``
   );
@@ -242,8 +243,21 @@ function normalizeNode(input: unknown, index: number): NormalizedTopologyNode {
       ? {}
       : { max_attempts: normalizePositiveInteger(input.max_attempts, "max_attempts", input.id) }),
     outputs: normalizeOutputs(input.outputs, input.id),
-    model_profiles: normalizeStringArray(input.model_profiles, "model_profiles", input.id, false)
+    model_profiles: normalizeStringArray(input.model_profiles, "model_profiles", input.id, false),
+    required_commands: normalizeRequiredCommands(input.required_commands, input.id)
   };
+}
+
+function normalizeRequiredCommands(input: unknown, nodeId: string): string[] {
+  const commands = normalizeStringArray(input, "required_commands", nodeId, false);
+  if (commands.some((command) => !/^[A-Za-z0-9][A-Za-z0-9._+-]*$/u.test(command))) {
+    throw topologyError(
+      "INVALID_TOPOLOGY_SHAPE",
+      `Node \`${nodeId}\` field required_commands must contain bare executable names`,
+      { nodeId, field: "required_commands" }
+    );
+  }
+  return [...new Set(commands)].sort();
 }
 
 function normalizeOutputs(input: unknown, nodeId: string): NormalizedArtifactOutput[] {

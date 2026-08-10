@@ -27,6 +27,7 @@ describe("expanded graph schema", () => {
           label: "Strategy A",
           kind: "agentic",
           dependsOn: ["__start__"],
+          requiredCommands: ["recon"],
           artifactDir: "artifacts/strategy-a-loop-0-model-0",
           retryPolicy: { maxAttempts: 1 },
           loop: {
@@ -83,6 +84,34 @@ describe("expanded graph schema", () => {
     expect(invalid.ok).toBe(false);
     expect(invalid.issues.some((issue) => issue.path.endsWith(".logicalId"))).toBe(true);
     expect(invalid.issues.some((issue) => issue.path.endsWith(".attemptIndex"))).toBe(true);
+  });
+
+  it("rejects unsafe or duplicate required commands", () => {
+    const graph = {
+      graphVersion: GRAPH_VERSION,
+      topologyVersion: TOPOLOGY_VERSION,
+      groups: {},
+      nodes: [
+        {
+          id: "node-a",
+          logicalId: "node-a",
+          label: "Node A",
+          kind: "agentic",
+          dependsOn: [],
+          requiredCommands: ["../recon", "../recon"],
+          artifactDir: "artifacts/node-a",
+          retryPolicy: { maxAttempts: 1 },
+          loop: { index: 0, count: 1, mode: "parallel", attemptIndex: 0 },
+          outputs: [],
+          modelFanout: []
+        }
+      ]
+    };
+
+    const invalid = validateExpandedGraphSchema(graph);
+    expect(invalid.ok).toBe(false);
+    expect(invalid.issues.some((issue) => issue.code === "EXPANDED_NODE_REQUIRED_COMMAND_INVALID")).toBe(true);
+    expect(invalid.issues.some((issue) => issue.code === "EXPANDED_NODE_REQUIRED_COMMAND_DUPLICATE")).toBe(true);
   });
 
   it("snapshot is present and aligned with exported schema constants", () => {

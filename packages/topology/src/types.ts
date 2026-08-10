@@ -50,6 +50,8 @@ export interface TopologyNode {
   max_attempts?: number;
   outputs?: TopologyArtifactOutput[];
   model_profiles?: string[];
+  /** Executables that must be available before this node's workflow can launch. */
+  required_commands?: string[];
 }
 
 export interface TopologyArtifactOutput {
@@ -80,6 +82,7 @@ export interface NormalizedTopologyNode {
   max_attempts?: number;
   outputs: NormalizedArtifactOutput[];
   model_profiles: string[];
+  required_commands: string[];
 }
 
 export interface NormalizedArtifactOutput {
@@ -137,6 +140,7 @@ export interface ExpandedNode {
   referenceRevision?: ReferenceRevision;
   group?: string;
   dependsOn: string[];
+  requiredCommands?: string[];
   artifactDir: string;
   timeoutSeconds?: number;
   retryPolicy: RetryPolicy;

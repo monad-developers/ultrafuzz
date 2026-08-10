@@ -55,7 +55,8 @@ import {
   type PlanRunValue,
   type PlannedGraph,
   type PlannedGraphNode,
-  type RenderedPromptPlan
+  type RenderedPromptPlan,
+  type RuntimeDiagnostic
 } from "./types.js";
 import { validateProject } from "./validate.js";
 import { loadResolvedProject, modelProfilesForTopology, outputRootForConfig } from "./validate.js";
@@ -75,7 +76,14 @@ import { transformTopologyForRun } from "./topology-transform.js";
 const RENDERED_PROMPT_SNAPSHOT_DIR = "prompt-snapshots";
 const PROMPT_REPAIR_LOCK = ".prompt-repair";
 
-export async function planRun(input: PlanRunInput) {
+interface PlanRunHooks {
+  beforeMaterialize?(context: {
+    resolvedConfig: PlanRunValue["resolved_config"];
+    expandedGraph: ExpandedGraph;
+  }): Promise<RuntimeDiagnostic[]>;
+}
+
+export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
   const projectRoot = path.resolve(input.projectRoot);
   const validation = await validateProject(input);
   if (!validation.ok || !validation.value) {
@@ -165,6 +173,16 @@ export async function planRun(input: PlanRunInput) {
   const graphDiagnostics = checkDependencyLegality(graph);
   if (hasRuntimeErrors(graphDiagnostics)) {
     return runtimeFailure<PlanRunValue>(graphDiagnostics);
+  }
+  let preMaterializeDiagnostics: RuntimeDiagnostic[];
+  try {
+    preMaterializeDiagnostics =
+      (await hooks.beforeMaterialize?.({ resolvedConfig: resolved.config, expandedGraph })) ?? [];
+  } catch (error) {
+    preMaterializeDiagnostics = [diagnosticFromError(error, "runtime", "RUN_PREFLIGHT_FAILED")];
+  }
+  if (hasRuntimeErrors(preMaterializeDiagnostics)) {
+    return runtimeFailure<PlanRunValue>(preMaterializeDiagnostics);
   }
   const graphFingerprint = fingerprintGraph(expandedGraph);
   const createdAt = new Date().toISOString();

@@ -275,7 +275,8 @@ function validateTopologySurface(
               digest: policy.topologyDigest
             }),
         logical_nodes: topology.nodes.length,
-        expanded_nodes: expanded.nodes.length
+        expanded_nodes: expanded.nodes.length,
+        required_commands: [...new Set(expanded.nodes.flatMap((node) => node.requiredCommands ?? []))].sort()
       },
       agentRefs: selectedAgents
     };

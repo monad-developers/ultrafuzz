@@ -1,5 +1,4 @@
 import { execFile } from "node:child_process";
-import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -20,6 +19,7 @@ import type {
 } from "./types.js";
 import { runtimeResult } from "./utils.js";
 import { loadResolvedProject, validateProject } from "./validate.js";
+import { probeCommandsForExecution } from "./required-commands.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -73,36 +73,61 @@ export async function diagnoseProject(input: DoctorInput) {
   diagnostics.push(...references.diagnostics);
 
   const agentRefs = configuredAgentRefs(resolved.config?.models.profiles);
-  const toolchain = [
-    ...REQUIRED_TOOLCHAIN_COMMANDS.map((name) => ({
-      name,
-      required: true,
-      ...resolveExecutable(name, env)
-    })),
-    ...agentRefs.map((agentRef) => {
-      const executable = AGENT_EXECUTABLES[agentRef];
-      return {
-        name: executable ?? agentRef,
-        // Only demand a CLI for agents whose executable Ultrafuzz actually
-        // knows; an unrecognised ref is reported without being required.
-        required: executable !== undefined,
-        ...resolveExecutable(executable ?? agentRef, env)
-      };
-    })
-  ];
+  const topologyCommands = validation.value?.topology?.required_commands ?? [];
+  const commandRequirements = [
+    ...REQUIRED_TOOLCHAIN_COMMANDS.map((name) => ({ name, required: true })),
+    ...topologyCommands.map((name) => ({ name, required: true })),
+    ...agentRefs.map((agentRef) => ({
+      name: AGENT_EXECUTABLES[agentRef] ?? agentRef,
+      // Only demand a CLI for agents whose executable Ultrafuzz actually
+      // knows; an unrecognised ref is reported without being required.
+      required: AGENT_EXECUTABLES[agentRef] !== undefined
+    }))
+  ].filter((entry, index, entries) => entries.findIndex((candidate) => candidate.name === entry.name) === index);
+  let probeFailure: string | undefined;
+  const probes =
+    resolved.config === undefined
+      ? []
+      : await (
+          input.requiredCommandProbe === undefined
+            ? probeCommandsForExecution(
+                resolved.config,
+                commandRequirements.map((entry) => entry.name),
+                env,
+                { includeVersions: true }
+              )
+            : input.requiredCommandProbe(commandRequirements.map((entry) => entry.name))
+        ).catch((error: unknown) => {
+          probeFailure = error instanceof Error ? error.message : String(error);
+          return [];
+        });
+  const probeByName = new Map(probes.map((probe) => [probe.name, probe]));
+  const toolchain = commandRequirements.map((requirement) => ({
+    ...requirement,
+    ...(probeByName.get(requirement.name) ?? { available: false, path: null, version: null })
+  }));
   const missingTools = toolchain.filter((entry) => entry.required && !entry.available).map((entry) => entry.name);
   checks.push({
     name: "toolchain",
-    status: missingTools.length === 0 ? "ok" : "error",
+    status: missingTools.length === 0 && probeFailure === undefined ? "ok" : "error",
     summary:
-      missingTools.length === 0
-        ? `${toolchain.length} required commands available on PATH`
-        : `missing required commands on PATH: ${missingTools.join(", ")}`
+      probeFailure !== undefined
+        ? "required command probe failed in the configured execution environment"
+        : missingTools.length === 0
+          ? `${toolchain.length} required commands available in the configured execution environment`
+          : `missing required commands in the configured execution environment: ${missingTools.join(", ")}`
   });
-  if (missingTools.length > 0) {
+  if (probeFailure !== undefined) {
+    diagnostics.push({
+      code: "DOCTOR_TOOLCHAIN_PROBE_FAILED",
+      message: `could not probe required commands in the configured execution environment: ${probeFailure}`,
+      severity: "error",
+      source: "doctor"
+    });
+  } else if (missingTools.length > 0) {
     diagnostics.push({
       code: "DOCTOR_TOOLCHAIN_MISSING",
-      message: `required commands are not available on PATH: ${missingTools.join(", ")}`,
+      message: `required commands are not available in the configured execution environment: ${missingTools.join(", ")}`,
       severity: "error",
       source: "doctor"
     });
@@ -442,46 +467,6 @@ function compareSemanticVersions(left: string, right: string): number {
 
 function configuredAgentRefs(profiles: Record<string, { agent: string }> | undefined): string[] {
   return [...new Set(Object.values(profiles ?? {}).map((profile) => profile.agent))].sort();
-}
-
-function resolveExecutable(
-  name: string,
-  env: Record<string, string | undefined>
-): { available: boolean; path: string | null } {
-  const searchPath = env.PATH ?? process.env.PATH ?? "";
-  // Windows resolves a bare command name through PATHEXT and does not mark
-  // executables with an exec bit, so requiring X_OK there reports every tool
-  // missing.
-  const windows = process.platform === "win32";
-  const extensions = windows
-    ? [
-        "",
-        ...(env.PATHEXT ?? process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD")
-          .split(";")
-          .map((entry) => entry.trim())
-          .filter((entry) => entry.length > 0)
-      ]
-    : [""];
-  for (const entry of searchPath.split(path.delimiter)) {
-    if (entry.length === 0) {
-      continue;
-    }
-    for (const extension of extensions) {
-      const candidate = path.join(path.resolve(entry), `${name}${extension}`);
-      try {
-        if (!fs.statSync(candidate).isFile()) {
-          continue;
-        }
-        if (!windows) {
-          fs.accessSync(candidate, fs.constants.X_OK);
-        }
-        return { available: true, path: candidate };
-      } catch {
-        continue;
-      }
-    }
-  }
-  return { available: false, path: null };
 }
 
 function policyPostureSummary(
