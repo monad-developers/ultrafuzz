@@ -18,13 +18,15 @@
       "type": "array",
       "items": {
         "$ref": "#/$defs/generatedTestEntry"
-      }
+      },
+      "uniqueItems": true
     },
     "support_files": {
       "type": "array",
       "items": {
         "$ref": "#/$defs/generatedTestEntry"
-      }
+      },
+      "uniqueItems": true
     },
     "provenance": {
       "$ref": "#/$defs/generatedTestProvenance"
@@ -34,6 +36,28 @@
   "additionalProperties": false,
   "$id": "urn:ultrafuzz:schema:artifacts:generated-tests:3",
   "title": "Ultrafuzz generated tests manifest",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "support_files": {
+            "type": "array",
+            "minItems": 1
+          }
+        },
+        "required": ["support_files"]
+      },
+      "then": {
+        "properties": {
+          "generated_tests": {
+            "type": "array",
+            "minItems": 1
+          }
+        },
+        "required": ["generated_tests"]
+      }
+    }
+  ],
   "$defs": {
     "generatedTestEntry": {
       "type": "object",

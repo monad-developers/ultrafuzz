@@ -775,6 +775,46 @@ test("portable generated-test paths and implementation selection uniqueness agre
     assertParity(generatedEntry.id, generatedParser, candidate, false, `generated-tests:path:${label}`);
   }
 
+  const supportEntry = {
+    path: "generated-tests/nested/InvariantFixture.sol",
+    size_bytes: 1,
+    sha256: "b".repeat(64)
+  };
+  assertParity(
+    generatedEntry.id,
+    generatedParser,
+    { ...generated, support_files: [supportEntry] },
+    true,
+    "generated-tests:distinct-support-file"
+  );
+  assertParity(
+    generatedEntry.id,
+    generatedParser,
+    {
+      ...generated,
+      generated_tests: [generated.generated_tests[0], structuredClone(generated.generated_tests[0])]
+    },
+    false,
+    "generated-tests:duplicate-generated-test-entry"
+  );
+  assertParity(
+    generatedEntry.id,
+    generatedParser,
+    {
+      ...generated,
+      support_files: [supportEntry, { sha256: "b".repeat(64), size_bytes: 1, path: supportEntry.path }]
+    },
+    false,
+    "generated-tests:duplicate-support-file-entry"
+  );
+  assertParity(
+    generatedEntry.id,
+    generatedParser,
+    { ...generated, generated_tests: [], support_files: [supportEntry] },
+    false,
+    "generated-tests:support-requires-runnable-test"
+  );
+
   const implementedEntry = artifactSchemaRegistry().find(
     (candidate) => candidate.filename === "implemented-properties.schema.json"
   );

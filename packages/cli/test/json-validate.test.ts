@@ -197,6 +197,76 @@ test("json validate exposes the strict validator through the primary CLI", async
   }
 });
 
+test("json validate enforces generated-test bundle array and support coupling without rewriting", async () => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-generated-tests-"));
+  try {
+    const schema = path.join(artifactSchemaDirectory(), "generated-tests.schema.json");
+    const generatedEntry = {
+      path: "generated-tests/Replay.t.sol",
+      size_bytes: 1,
+      sha256: "a".repeat(64)
+    };
+    const supportEntry = {
+      path: "generated-tests/ReplayFixture.sol",
+      size_bytes: 1,
+      sha256: "b".repeat(64)
+    };
+    const base = {
+      schema_version: "ultrafuzz.generated-tests.v3",
+      run_id: "run-1",
+      node_id: "strategy-a",
+      generated_tests: [generatedEntry],
+      support_files: [] as Array<typeof supportEntry>
+    };
+    const cases = [
+      {
+        name: "duplicate-generated-test",
+        value: { ...base, generated_tests: [generatedEntry, structuredClone(generatedEntry)] },
+        keyword: "uniqueItems"
+      },
+      {
+        name: "duplicate-support-file",
+        value: { ...base, support_files: [supportEntry, structuredClone(supportEntry)] },
+        keyword: "uniqueItems"
+      },
+      {
+        name: "support-without-test",
+        value: { ...base, generated_tests: [], support_files: [supportEntry] },
+        keyword: "if"
+      }
+    ] as const;
+
+    for (const candidate of cases) {
+      const artifact = path.join(temporary, `${candidate.name}.json`);
+      const bytes = Buffer.from(`${JSON.stringify(candidate.value)}\n`, "utf8");
+      fs.writeFileSync(artifact, bytes);
+
+      const rejected = await capture(["json", "validate", "--schema", schema, "--file", artifact, "--json"]);
+      assert.equal(rejected.code, 1, candidate.name);
+      const envelope = JSON.parse(rejected.stdout) as {
+        ok: boolean;
+        data: { status: string; diagnostics: Array<{ keyword?: string }> };
+      };
+      assert.equal(envelope.ok, false, candidate.name);
+      assert.equal(envelope.data.status, "instance-error", candidate.name);
+      assert.ok(
+        envelope.data.diagnostics.some((diagnostic) => diagnostic.keyword === candidate.keyword),
+        `${candidate.name}: ${JSON.stringify(envelope.data.diagnostics)}`
+      );
+      assert.deepEqual(fs.readFileSync(artifact), bytes, `${candidate.name}: CLI validation must not rewrite input`);
+    }
+
+    const validArtifact = path.join(temporary, "valid.json");
+    const validBytes = Buffer.from(`${JSON.stringify({ ...base, support_files: [supportEntry] })}\n`, "utf8");
+    fs.writeFileSync(validArtifact, validBytes);
+    const accepted = await capture(["json", "validate", "--schema", schema, "--file", validArtifact]);
+    assert.equal(accepted.code, 0, accepted.stderr);
+    assert.deepEqual(fs.readFileSync(validArtifact), validBytes, "successful CLI validation must not rewrite input");
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
 test("a producer can correct an invalid draft in-session and rerun to exit zero", async () => {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-correction-"));
   try {

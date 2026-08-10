@@ -315,6 +315,50 @@ test("required artifact gate validates generated-test manifest shape and listed 
   assert.equal(legacy.ok, false);
   assert.ok(legacy.diagnostics.some((diagnostic) => diagnostic.code === "JSON_SCHEMA_VIOLATION"));
 
+  const supportEntry = manifestEntry("generated-tests/InvariantFixture.sol", "library InvariantFixture {}\n");
+  for (const [name, invalidManifest] of [
+    [
+      "support-without-test",
+      {
+        schema_version: "ultrafuzz.generated-tests.v3",
+        run_id: "run-1",
+        node_id: "strategy-a",
+        generated_tests: [],
+        support_files: [supportEntry]
+      }
+    ],
+    [
+      "duplicate-generated-test",
+      {
+        schema_version: "ultrafuzz.generated-tests.v3",
+        run_id: "run-1",
+        node_id: "strategy-a",
+        generated_tests: [generatedEntry, structuredClone(generatedEntry)],
+        support_files: []
+      }
+    ],
+    [
+      "duplicate-support-file",
+      {
+        schema_version: "ultrafuzz.generated-tests.v3",
+        run_id: "run-1",
+        node_id: "strategy-a",
+        generated_tests: [generatedEntry],
+        support_files: [supportEntry, structuredClone(supportEntry)]
+      }
+    ]
+  ] as const) {
+    const bytes = Buffer.from(JSON.stringify(invalidManifest), "utf8");
+    fs.writeFileSync(manifestPath, bytes);
+    const invalid = verifyRequiredArtifactsForAttempt(layout, node, "strategy-a");
+    assert.equal(invalid.ok, false, name);
+    assert.ok(
+      invalid.diagnostics.some((diagnostic) => diagnostic.code === "JSON_SCHEMA_VIOLATION"),
+      `${name}: ${JSON.stringify(invalid.diagnostics)}`
+    );
+    assert.deepEqual(fs.readFileSync(manifestPath), bytes, `${name}: host validation must not rewrite the manifest`);
+  }
+
   fs.writeFileSync(
     manifestPath,
     JSON.stringify({

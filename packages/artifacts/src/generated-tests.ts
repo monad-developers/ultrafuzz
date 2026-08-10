@@ -102,18 +102,57 @@ export const generatedTestEntrySchema = z
   })
   .meta({ id: "generatedTestEntry" });
 
+const generatedTestEntriesSchema = z
+  .array(generatedTestEntrySchema)
+  .meta({ uniqueItems: true })
+  .superRefine((entries, context) => {
+    const seen = new Set<string>();
+    for (const [index, entry] of entries.entries()) {
+      const key = canonicalJsonValueKey(entry);
+      if (seen.has(key)) {
+        context.addIssue({
+          code: "custom",
+          message: "Generated-test manifest entries must be unique within each array",
+          path: [index]
+        });
+      }
+      seen.add(key);
+    }
+  });
+
 export const generatedTestManifestSchema = z
   .strictObject({
     schema_version: z.literal(GENERATED_TESTS_SCHEMA_VERSION),
     run_id: nonEmptyString,
     node_id: nonEmptyString,
-    generated_tests: z.array(generatedTestEntrySchema),
-    support_files: z.array(generatedTestEntrySchema),
+    generated_tests: generatedTestEntriesSchema,
+    support_files: generatedTestEntriesSchema,
     provenance: generatedTestProvenanceSchema.optional()
   })
   .meta({
     $id: GENERATED_TESTS_JSON_SCHEMA_ID,
-    title: "Ultrafuzz generated tests manifest"
+    title: "Ultrafuzz generated tests manifest",
+    allOf: [
+      {
+        if: {
+          properties: { support_files: { type: "array", minItems: 1 } },
+          required: ["support_files"]
+        },
+        then: {
+          properties: { generated_tests: { type: "array", minItems: 1 } },
+          required: ["generated_tests"]
+        }
+      }
+    ]
+  })
+  .superRefine((manifest, context) => {
+    if (manifest.support_files.length > 0 && manifest.generated_tests.length === 0) {
+      context.addIssue({
+        code: "custom",
+        message: "Generated-test support files require at least one runnable generated test",
+        path: ["generated_tests"]
+      });
+    }
   });
 
 export const generatedTestsJsonSchema = z.toJSONSchema(generatedTestManifestSchema);
@@ -154,6 +193,20 @@ export function assertGeneratedTestManifestSemantics(manifest: GeneratedTestMani
   if (manifest.generated_tests.length === 0 && manifest.support_files.length > 0) {
     throw new Error("generated tests manifest cannot declare support files without a runnable generated test");
   }
+}
+
+function canonicalJsonValueKey(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => canonicalJsonValueKey(entry)).join(",")}]`;
+  }
+  if (typeof value === "object" && value !== null) {
+    return `{${Object.entries(value)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJsonValueKey(entry)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "undefined";
 }
 
 export function writeGeneratedTestManifest(input: {
