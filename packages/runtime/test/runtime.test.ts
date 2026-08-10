@@ -11568,6 +11568,20 @@ credential_env = ["UFZ_PROVIDER_ONE", "UFZ_PROVIDER_TWO"]
 
   const initial = await startRun({ projectRoot: project, runId: "missing-workflow-run", env });
   assert.equal(initial.ok, false);
+  assert.equal(initial.diagnostics[0]?.code, "WORKFLOW_SUBMISSION_FAILED");
+  assert.equal(initial.diagnostics[0]?.details?.exit_code, 42);
+  const runRoot = path.join(project, ".ultrafuzz", "runs", "missing-workflow-run");
+  assert.equal(
+    fs.existsSync(path.join(runRoot, "smithers", "control-integrity.json")),
+    true,
+    "the canonical start helper must publish exact sealed control evidence before submission"
+  );
+  const sealedEvidence = await readLinkedWorkflowEvidence(project, "missing-workflow-run");
+  assert.equal(
+    sealedEvidence.ok,
+    true,
+    "diagnostics" in sealedEvidence ? JSON.stringify(sealedEvidence.diagnostics) : ""
+  );
   fs.writeFileSync(configPath, localConfig, "utf8");
   fs.writeFileSync(cloudEnvironmentLog, "", "utf8");
 
@@ -11589,7 +11603,6 @@ credential_env = ["UFZ_PROVIDER_ONE", "UFZ_PROVIDER_TWO"]
   assert.match(upCommands[1] ?? "", /--log-dir .* --input /u);
   assert.equal(fs.readFileSync(cloudEnvironmentLog, "utf8"), "provider-one|provider-two\n");
 
-  const runRoot = path.join(project, ".ultrafuzz", "runs", "missing-workflow-run");
   const recovery = JSON.parse(fs.readFileSync(path.join(runRoot, "smithers", "recovery-submission.json"), "utf8")) as {
     recovery?: string;
     command?: string[];
