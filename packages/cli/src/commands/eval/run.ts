@@ -63,7 +63,9 @@ export default class EvalRun extends Command {
         this,
         "eval run",
         {
-          ok: result.failed === 0 && result.incomplete === 0,
+          // A detached launch is asked not to observe its rows, so unobserved
+          // rows are the requested outcome rather than an incomplete result.
+          ok: result.failed === 0 && (!result.watched || result.incomplete === 0),
           command: "eval run",
           data: toCliEvalRunData(result),
           text: `Eval run: ${result.eval_run_id}\nLaunched: ${result.launched}\nFailed: ${result.failed}\nIncomplete: ${result.incomplete}\nRoot: ${result.eval_run_root}\n`,

@@ -449,6 +449,8 @@ export interface EvalRunValue {
   launched: number;
   failed: number;
   incomplete: number;
+  /** Whether this call polled the launched rows toward a terminal observation. */
+  watched: boolean;
   records: EvalRunRecord[];
   report_url?: string;
   diagnostics: RuntimeDiagnostic[];

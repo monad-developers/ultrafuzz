@@ -541,6 +541,54 @@ describe("runner", () => {
     );
   });
 
+  it("publishes a detached launch summary whose counts match its own records", async () => {
+    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-run-detached-summary-"));
+    const project = path.join(base, "project");
+    const groundTruthRoot = path.join(base, "gt");
+    fs.mkdirSync(project, { recursive: true });
+    fs.mkdirSync(groundTruthRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(groundTruthRoot, "target-a.yml"),
+      "schema_version: ultrafuzz.eval-ground-truth.v1\nbugs: []\n",
+      "utf8"
+    );
+    const suite = testSuite(groundTruthRoot);
+    suite.targets[0]!.ref = "0".repeat(40);
+    const suitePath = path.join(project, "suite.yml");
+    writeSuiteInputFixture(suitePath, suite);
+    initializeTestGitRepository(project);
+    const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
+    terminalRunFixture(runRoot);
+
+    const result = await runEvalSuite({
+      projectRoot: project,
+      suitePath,
+      evalRunId: "eval-detached-summary",
+      groundTruthRoot,
+      provider: "none",
+      watch: false,
+      launcher: async () => ({
+        ok: true,
+        runId: "run-1",
+        runRoot,
+        workflowIds: ["workflow-1"],
+        diagnostics: []
+      })
+    });
+
+    // A detached launch never observed its row, so it must report the row as
+    // incomplete rather than claim a terminal outcome it did not watch. The
+    // summary is published through the canonical semantic gates, which reject a
+    // count that disagrees with the records beside it.
+    expect(result).toMatchObject({ launched: 1, failed: 0, incomplete: 1, watched: false });
+    const summary = JSON.parse(fs.readFileSync(path.join(result.eval_run_root, "run-summary.json"), "utf8")) as {
+      launched: number;
+      failed: number;
+      incomplete: number;
+    };
+    expect(summary).toMatchObject({ launched: 1, failed: 0, incomplete: 1 });
+  });
+
   it("watches terminal rows by default even when provider reporting is disabled", async () => {
     const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-run-watch-default-"));
     const project = path.join(base, "project");

@@ -186,15 +186,17 @@ export async function runEvalSuite(input: RunEvalSuiteInput): Promise<EvalRunVal
 
   const launched = records.filter((record) => record.status === "launched").length;
   const failed = records.length - launched;
-  const incomplete = watch
-    ? records.filter(
-        (record) =>
-          record.status === "launched" &&
-          (record.workflow?.terminal !== true ||
-            record.workflow.status === "timed-out" ||
-            record.workflow.status === "canceled")
-      ).length
-    : 0;
+  // Derived from the records, never from whether this call watched them. The
+  // persisted summary is read as evidence, and a detached launch that reported
+  // zero incomplete rows while holding unobserved launched records would claim
+  // terminal knowledge it never had.
+  const incomplete = records.filter(
+    (record) =>
+      record.status === "launched" &&
+      (record.workflow?.terminal !== true ||
+        record.workflow.status === "timed-out" ||
+        record.workflow.status === "canceled")
+  ).length;
   writeEvalRunSummary(path.join(root, "run-summary.json"), {
     schema_version: EVAL_RUN_SUMMARY_SCHEMA_VERSION,
     eval_run_id: evalRunId,
@@ -211,6 +213,7 @@ export async function runEvalSuite(input: RunEvalSuiteInput): Promise<EvalRunVal
     launched,
     failed,
     incomplete,
+    watched: watch,
     records,
     diagnostics
   };
