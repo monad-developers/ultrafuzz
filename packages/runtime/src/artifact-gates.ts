@@ -9,6 +9,7 @@ import {
   artifactContractSchemaBinding,
   artifactSchemaDirectory,
   artifactSchemaRegistry,
+  assertArtifactVerificationMarkerSemantics,
   assertNoSymlinkComponents,
   assertPlannedGraph,
   assertRegularFileInside,
@@ -19,6 +20,7 @@ import {
   findingFuzzerBackendProvenance,
   invariantPinnedSourceRefExists,
   IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
+  MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILE_BYTES,
   PROPERTIES_SCHEMA_VERSION,
   readArtifactManifest,
   readRegularFileSnapshot,
@@ -31,6 +33,7 @@ import {
   sha256Bytes,
   updateNodeState,
   validateArtifactContractBytes,
+  validateArtifactVerificationMarker,
   validateFindingsSchema,
   validateGeneratedTestManifestSchema,
   validateInvariantLedgerSchema,
@@ -45,6 +48,7 @@ import {
   validateRegisteredJsonSchema,
   verifyArtifactManifestPrerequisites,
   type ArtifactSchemaFilename,
+  type ArtifactVerificationMarker,
   type ImplementedPropertiesArtifact,
   type InvariantLedgerEntry,
   type InvariantSourceProof,
@@ -62,6 +66,7 @@ import {
   type SemanticGateContext,
   type SemanticGitContext,
   type SemanticPropertyLensContext,
+  type SemanticPropertyCampaignEvidenceContext,
   type WorkspacePatchManifest
 } from "@ultrafuzz/artifacts";
 
@@ -81,6 +86,7 @@ import { loadFinalizedNodeOutputSnapshot, type VerifiedOutputArtifactSnapshot } 
 
 const MAX_ARTIFACT_SNAPSHOT_BYTES = 64 * 1024 * 1024;
 const PROPERTY_LENS_CONTRACT = "ultrafuzz/property-lens@2" as const;
+const ARTIFACT_VERIFICATION_DIRECTORY = ".ultrafuzz-verification";
 
 // These are semantic projections for topologies that deliberately omit the
 // corresponding producer. They are never written or published as artifacts;
@@ -278,6 +284,19 @@ export function verifyRequiredArtifactsForAttempt(
 ): RequiredArtifactGate {
   const diagnostics: RuntimeDiagnostic[] = [];
   const missing: string[] = [];
+  if (
+    node.outputs.some((output) => output.contract === "ultrafuzz/implemented-properties@3") &&
+    node.outputs.some((output) => output.contract === "ultrafuzz/property-campaign@3")
+  ) {
+    diagnostics.push({
+      code: "PROPERTY_ROLE_DECLARATION_CONFLICT",
+      message: `Node ${node.id} must not declare both ultrafuzz/implemented-properties@3 and ultrafuzz/property-campaign@3; split implementation and campaign into dependency-ordered nodes`,
+      severity: "error",
+      source: "property-provenance",
+      path: layout.graphPath
+    });
+    return { ok: false, diagnostics, missing };
+  }
   let artifactDir: string;
   try {
     artifactDir = getNodeArtifactDir(layout, attemptId);
@@ -2058,9 +2077,11 @@ function verifyRequiredArtifactShape(
           artifactDir,
           node,
           attemptId,
+          artifactPath: output.path,
           schemaFilename: binding.schema_file as ArtifactSchemaFilename,
           attemptAuthority,
-          authenticated
+          authenticated,
+          document: contract.value
         })
       })
     );
@@ -2134,14 +2155,137 @@ function verifyRequiredArtifactShape(
   return diagnostics;
 }
 
+function capturePropertyCampaignEvidenceContext(
+  layout: RunLayout,
+  artifactDir: string,
+  attemptId: string,
+  node: PlannedGraphNode,
+  campaign: PropertyCampaignArtifact,
+  authenticated?: AuthenticatedArtifactGateSnapshots
+): SemanticPropertyCampaignEvidenceContext {
+  const snapshots = campaign.evidence_files.map((entry) => {
+    const base = {
+      path: entry.path,
+      exists: false,
+      regularFile: false,
+      symbolicLink: false,
+      linkCount: null,
+      stableIdentity: false
+    };
+    try {
+      const evidencePath = safeResolveInside(artifactDir, entry.path, "property campaign evidence path");
+      if (authenticated !== undefined) {
+        const bytes = readCurrentArtifactSnapshot(artifactDir, evidencePath, authenticated);
+        return bytes === undefined
+          ? base
+          : {
+              ...base,
+              exists: true,
+              regularFile: true,
+              symbolicLink: false,
+              linkCount: 1,
+              stableIdentity: true,
+              bytes
+            };
+      }
+      if (!fs.existsSync(evidencePath)) {
+        return base;
+      }
+      assertRegularFileInside(artifactDir, evidencePath, "property campaign evidence path");
+      const before = fs.lstatSync(evidencePath, { bigint: true });
+      if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n) {
+        return {
+          ...base,
+          exists: true,
+          regularFile: before.isFile(),
+          symbolicLink: before.isSymbolicLink(),
+          linkCount: Number(before.nlink),
+          device: String(before.dev),
+          inode: String(before.ino),
+          error: `property campaign evidence must be a singly linked regular file: ${entry.path}`
+        };
+      }
+      const bytes = readRegularFileSnapshot(evidencePath, MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILE_BYTES);
+      const after = fs.lstatSync(evidencePath, { bigint: true });
+      const stableIdentity =
+        after.isFile() &&
+        !after.isSymbolicLink() &&
+        after.nlink === 1n &&
+        before.dev === after.dev &&
+        before.ino === after.ino &&
+        before.size === after.size &&
+        before.mtimeNs === after.mtimeNs &&
+        before.ctimeNs === after.ctimeNs &&
+        after.size === BigInt(bytes.byteLength);
+      return {
+        ...base,
+        exists: true,
+        regularFile: after.isFile(),
+        symbolicLink: after.isSymbolicLink(),
+        linkCount: Number(after.nlink),
+        stableIdentity,
+        device: String(after.dev),
+        inode: String(after.ino),
+        bytes,
+        ...(stableIdentity ? {} : { error: `property campaign evidence changed while captured: ${entry.path}` })
+      };
+    } catch (error) {
+      return {
+        ...base,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  });
+  const publicationAuthority =
+    authenticated === undefined
+      ? readPropertyCampaignPublicationAuthority(layout, attemptId)
+      : {
+          markerAttemptId: attemptId,
+          markerNodeId: node.logical_id ?? node.id,
+          publications: [...authenticated.publications].map(([publicationPath, bytes]) => ({
+            path: publicationPath,
+            sha256: crypto.createHash("sha256").update(bytes).digest("hex")
+          }))
+        };
+  return {
+    snapshots,
+    ...(publicationAuthority === undefined ? {} : { publicationAuthority })
+  };
+}
+
+function readPropertyCampaignPublicationAuthority(
+  layout: RunLayout,
+  attemptId: string
+): SemanticPropertyCampaignEvidenceContext["publicationAuthority"] {
+  try {
+    const markerRoot = path.join(layout.root, ARTIFACT_VERIFICATION_DIRECTORY);
+    const markerPath = safeResolveInside(markerRoot, `${attemptId}.json`, "verification marker path");
+    assertRegularFileInside(layout.root, markerPath, "property campaign verification marker");
+    const markerValue = parseStrictJsonBytes(readRegularFileSnapshot(markerPath, MAX_ARTIFACT_SNAPSHOT_BYTES));
+    const validation = validateArtifactVerificationMarker(markerValue);
+    if (!validation.ok) return undefined;
+    const marker = markerValue as ArtifactVerificationMarker;
+    assertArtifactVerificationMarkerSemantics(marker);
+    return {
+      markerAttemptId: marker.attempt_id,
+      markerNodeId: marker.node_id,
+      publications: marker.publications.map((publication) => ({ ...publication }))
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 function semanticGateContextForArtifact(input: {
   layout: RunLayout;
   artifactDir: string;
   node: PlannedGraphNode;
   attemptId: string;
+  artifactPath: string;
   schemaFilename: ArtifactSchemaFilename;
   attemptAuthority?: ArtifactGateAttemptAuthority;
   authenticated?: AuthenticatedArtifactGateSnapshots;
+  document: unknown;
 }): SemanticGateContext {
   const context: SemanticGateContext = {
     filesystem: {
@@ -2151,7 +2295,9 @@ function semanticGateContextForArtifact(input: {
     plannedGraph: { node: input.node },
     artifactIdentity: {
       runId: input.layout.runId,
-      nodeId: input.node.logical_id ?? input.node.id
+      nodeId: input.node.logical_id ?? input.node.id,
+      attemptId: input.attemptId,
+      artifactPath: input.artifactPath
     }
   };
   const artifactSet = semanticArtifactSetForSchema(input);
@@ -2167,11 +2313,23 @@ function semanticGateContextForArtifact(input: {
           attemptId: input.attemptId
         })
       : undefined;
+  const propertyCampaignEvidence =
+    input.schemaFilename === "property-campaign.schema.json"
+      ? capturePropertyCampaignEvidenceContext(
+          input.layout,
+          input.artifactDir,
+          input.attemptId,
+          input.node,
+          input.document as PropertyCampaignArtifact,
+          input.authenticated
+        )
+      : undefined;
   return {
     ...context,
     ...(artifactSet === undefined ? {} : { artifactSet }),
     ...(git === undefined ? {} : { git }),
-    ...(aggregation === undefined ? {} : { aggregation })
+    ...(aggregation === undefined ? {} : { aggregation }),
+    ...(propertyCampaignEvidence === undefined ? {} : { propertyCampaignEvidence })
   };
 }
 
@@ -2185,6 +2343,15 @@ function semanticArtifactSetForSchema(input: {
 }): SemanticArtifactSetContext | undefined {
   if (input.schemaFilename === "campaign-summary.schema.json") {
     return semanticCampaignArtifacts(input.artifactDir, input.node, input.authenticated);
+  }
+  if (input.schemaFilename === "property-campaign.schema.json") {
+    return semanticPropertyCampaignContext(
+      input.layout,
+      input.artifactDir,
+      input.node,
+      input.attemptAuthority,
+      input.authenticated
+    );
   }
   if (input.schemaFilename === "implemented-properties.schema.json") {
     const propertyCatalog = semanticCanonicalPropertyCatalog(input.layout, input.node, input.attemptAuthority);
@@ -2223,12 +2390,81 @@ function semanticTriagedFindings(
   )?.value;
 }
 
+function semanticSiblingJsonArtifact(
+  artifactDir: string,
+  node: PlannedGraphNode,
+  contract: PlannedGraphNode["outputs"][number]["contract"],
+  label: string,
+  authenticated?: AuthenticatedArtifactGateSnapshots
+): { value: unknown; path: string } {
+  const outputs = node.outputs.filter((output) => output.contract === contract);
+  if (outputs.length !== 1) {
+    throw new Error(`${label} semantic context requires exactly one declared ${contract} sibling`);
+  }
+  const output = outputs[0]!;
+  const artifactPath = safeResolveInside(artifactDir, output.path, `${label} semantic context`);
+  const artifact = parseCurrentArtifactJson(artifactDir, artifactPath, authenticated);
+  if (artifact === undefined) throw new Error(`${label} semantic context is unavailable: ${artifactPath}`);
+  return {
+    value: assertContractDocument(artifact, artifactPath, contract),
+    path: output.path
+  };
+}
+
+function semanticPropertyCampaignContext(
+  layout: RunLayout,
+  artifactDir: string,
+  node: PlannedGraphNode,
+  attemptAuthority?: ArtifactGateAttemptAuthority,
+  authenticated?: AuthenticatedArtifactGateSnapshots
+): SemanticArtifactSetContext {
+  const campaignPlan = semanticSiblingJsonArtifact(
+    artifactDir,
+    node,
+    "ultrafuzz/invariant-campaign-plan@1",
+    "campaign plan",
+    authenticated
+  );
+  const findings = semanticSiblingJsonArtifact(
+    artifactDir,
+    node,
+    "ultrafuzz/findings@2",
+    "campaign findings",
+    authenticated
+  );
+  if (!Array.isArray(findings.value)) {
+    throw new Error("campaign findings semantic context must be an array");
+  }
+  const campaignSummary = semanticSiblingJsonArtifact(
+    artifactDir,
+    node,
+    "ultrafuzz/campaign-summary@2",
+    "campaign summary",
+    authenticated
+  );
+  const implementedProperties = semanticImplementedProperties(layout, node, attemptAuthority);
+  const implementedPropertiesArtifact = semanticImplementedPropertiesArtifact(layout, node, attemptAuthority);
+  if (implementedProperties === undefined || implementedPropertiesArtifact === undefined) {
+    throw new Error("implemented property semantic context is unavailable");
+  }
+  return {
+    campaignPlan: campaignPlan.value,
+    campaignPlanPath: campaignPlan.path,
+    campaignSummary: campaignSummary.value,
+    campaignSummaryPath: campaignSummary.path,
+    findings: findings.value,
+    findingsPath: findings.path,
+    implementedProperties,
+    implementedPropertiesPath: implementedPropertiesArtifact.path
+  };
+}
+
 function semanticCampaignArtifacts(
   artifactDir: string,
   node: PlannedGraphNode,
   authenticated?: AuthenticatedArtifactGateSnapshots
 ): SemanticArtifactSetContext {
-  const campaignOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/property-campaign@2");
+  const campaignOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/property-campaign@3");
   const findingOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/findings@2");
   const campaigns: PropertyCampaignArtifact[] = [];
   const findings: Array<Readonly<Record<string, unknown>>> = [];
@@ -2237,7 +2473,7 @@ function semanticCampaignArtifacts(
     const artifact = parseCurrentArtifactJson(artifactDir, artifactPath, authenticated);
     if (artifact === undefined) throw new Error(`campaign semantic context is unavailable: ${artifactPath}`);
     const parsed = validatePropertyCampaignSchema(
-      assertContractDocument(artifact, artifactPath, "ultrafuzz/property-campaign@2"),
+      assertContractDocument(artifact, artifactPath, "ultrafuzz/property-campaign@3"),
       artifactPath
     );
     if (!parsed.ok || parsed.value === undefined) {
@@ -2285,11 +2521,11 @@ function semanticCanonicalPropertyCatalog(
     : undefined;
 }
 
-function semanticImplementedProperties(
+function semanticImplementedPropertiesArtifact(
   layout: RunLayout,
   consumer: PlannedGraphNode,
   attemptAuthority?: ArtifactGateAttemptAuthority
-): ImplementedPropertiesArtifact | undefined {
+): { value: ImplementedPropertiesArtifact; path: string } | undefined {
   const artifact = finalizedSingletonAncestorOutput(
     layout,
     consumer,
@@ -2302,8 +2538,18 @@ function semanticImplementedProperties(
     if (!parsed.ok || parsed.value === undefined) {
       throw new Error(`implemented property semantic context is schema-invalid: ${artifact.absolute_path}`);
     }
-    return parsed.value;
+    return { value: parsed.value, path: artifact.path };
   }
+  return undefined;
+}
+
+function semanticImplementedProperties(
+  layout: RunLayout,
+  consumer: PlannedGraphNode,
+  attemptAuthority?: ArtifactGateAttemptAuthority
+): ImplementedPropertiesArtifact | undefined {
+  const artifact = semanticImplementedPropertiesArtifact(layout, consumer, attemptAuthority);
+  if (artifact !== undefined) return artifact.value;
   return plannedContractProducerStatus(layout, consumer, "ultrafuzz/implemented-properties@3", attemptAuthority) ===
     "absent"
     ? UNPLANNED_IMPLEMENTED_PROPERTIES_CONTEXT
@@ -2904,7 +3150,7 @@ function verifyPropertyProvenanceArtifacts(
   const isPropertyLens = node.outputs.some((output) => output.contract === "ultrafuzz/property-lens@2");
   const isFinalReport = node.outputs.some((output) => output.contract === "ultrafuzz/report@2");
   const isImplementation = node.outputs.some((output) => output.contract === "ultrafuzz/implemented-properties@3");
-  const isCampaign = node.outputs.some((output) => output.contract === "ultrafuzz/property-campaign@2");
+  const isCampaign = node.outputs.some((output) => output.contract === "ultrafuzz/property-campaign@3");
   const diagnostics: RuntimeDiagnostic[] = [];
   if (isPropertyLens) {
     diagnostics.push(
@@ -2944,15 +3190,7 @@ function verifyPropertyProvenanceArtifacts(
   }
   if (isCampaign) {
     diagnostics.push(
-      ...verifyCampaignPropertyReferences(
-        layout,
-        artifactDir,
-        catalog.value,
-        node,
-        siblingImplementation,
-        attemptAuthority,
-        authenticated
-      )
+      ...verifyCampaignPropertyReferences(layout, artifactDir, catalog.value, node, attemptAuthority, authenticated)
     );
   }
   return diagnostics;
@@ -3446,11 +3684,10 @@ function verifyCampaignPropertyReferences(
   artifactDir: string,
   catalog: PropertiesArtifact,
   node: PlannedGraphNode,
-  siblingImplementation?: ImplementedPropertiesRead,
   attemptAuthority?: ArtifactGateAttemptAuthority,
   authenticated?: AuthenticatedArtifactGateSnapshots
 ): RuntimeDiagnostic[] {
-  const campaignOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/property-campaign@2");
+  const campaignOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/property-campaign@3");
   const findingOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/findings@2");
   const summaryOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/campaign-summary@2");
   if (findingOutputs.length !== 1 || summaryOutputs.length > 1) {
@@ -3508,11 +3745,7 @@ function verifyCampaignPropertyReferences(
     campaigns.length === campaignPaths.length
       ? campaignFailurePartitionDiagnostics(campaigns, validatedFindings, findingsPath)
       : [];
-  // A node may deliberately own both implementation and campaign roles. In
-  // that case its implementation output is a sibling, not an ancestor; use
-  // the authenticated immutable snapshot captured above and never fall back
-  // to an older ancestor merely because the sibling is missing or invalid.
-  const implementation = siblingImplementation ?? readImplementedProperties(layout, node, attemptAuthority);
+  const implementation = readImplementedProperties(layout, node, attemptAuthority);
   if (implementation.diagnostics.length > 0 || implementation.value === undefined) {
     return [...summaryDiagnostics, ...backendDiagnostics, ...partitionDiagnostics, ...implementation.diagnostics];
   }
@@ -3566,10 +3799,10 @@ function verifyCampaignPropertyReferences(
   );
   for (const reference of references) {
     for (const propertyId of reference.propertyIds) {
-      if (catalog.properties.some((property) => property.id === propertyId) && !implementedIds.has(propertyId)) {
+      if (!implementedIds.has(propertyId)) {
         diagnostics.push({
           code: "PROPERTY_IMPLEMENTATION_REFERENCE_INVALID",
-          message: `Canonical property ${JSON.stringify(propertyId)} was not recorded with implemented status`,
+          message: `Property ${JSON.stringify(propertyId)} is outside the exact implemented-property set`,
           severity: "error",
           source: "property-provenance",
           path: reference.path
@@ -3580,12 +3813,17 @@ function verifyCampaignPropertyReferences(
   return diagnostics;
 }
 
-type CampaignFailureReference = string | { fuzzer_backend: string; failure_id: string };
+interface CampaignFailureReference {
+  fuzzer_backend: string;
+  failure_id: string;
+  raw_result_ref: string;
+}
 
 interface PartitionedCampaignFailure {
   key: string;
   id: string;
   fuzzerBackend?: string;
+  rawResultRef: string;
   propertyIds: readonly string[];
   path: string;
 }
@@ -3601,6 +3839,7 @@ function campaignFailurePartitionDiagnostics(
       key: `${campaignIndex}\u0000${failureIndex}`,
       id: failure.id,
       ...(campaign.value.fuzzer_backend === undefined ? {} : { fuzzerBackend: campaign.value.fuzzer_backend }),
+      rawResultRef: path.basename(campaign.path),
       propertyIds: failure.property_ids ?? [],
       path: `${campaign.path}#$.failures[${failureIndex}].id`
     }))
@@ -3669,10 +3908,7 @@ function campaignFailurePartitionDiagnostics(
     for (const [referenceIndex, reference] of references.entries()) {
       const referencePath = `${contributionPath}[${referenceIndex}]`;
       const candidates =
-        typeof reference === "string"
-          ? (failuresById.get(reference) ?? [])
-          : (failuresByBackendAndId.get(campaignBackendFailureKey(reference.fuzzer_backend, reference.failure_id)) ??
-            []);
+        failuresByBackendAndId.get(campaignBackendFailureKey(reference.fuzzer_backend, reference.failure_id)) ?? [];
       if (candidates.length === 0) {
         diagnostics.push({
           code: "PROPERTY_CAMPAIGN_PARTITION_REFERENCE_UNKNOWN",
@@ -3694,6 +3930,16 @@ function campaignFailurePartitionDiagnostics(
         continue;
       }
       const failure = candidates[0]!;
+      if (reference.raw_result_ref !== failure.rawResultRef) {
+        diagnostics.push({
+          code: "PROPERTY_CAMPAIGN_PARTITION_RAW_RESULT_MISMATCH",
+          message: `Finding ${JSON.stringify(finding.id)} contribution raw_result_ref must name the authenticated campaign result ${JSON.stringify(failure.rawResultRef)}`,
+          severity: "error",
+          source: "property-provenance",
+          path: `${referencePath}.raw_result_ref`
+        });
+        continue;
+      }
       if (failure.propertyIds.length === 0) {
         diagnostics.push({
           code: "PROPERTY_CAMPAIGN_PARTITION_REFERENCE_UNKNOWN",
@@ -3762,10 +4008,10 @@ function campaignFailurePartitionDiagnostics(
           ? Object.prototype.hasOwnProperty.call(finding, "fuzzer_backend")
           : Object.prototype.hasOwnProperty.call(finding, "fuzzer_backends");
     if (
-      ownedBackends.valid &&
-      (missingBackendCount > 0 ||
-        !hasExpectedBackendShape ||
-        !sameStringSet(ownedBackends.backends, contributedBackends))
+      !ownedBackends.valid ||
+      missingBackendCount > 0 ||
+      !hasExpectedBackendShape ||
+      !sameStringSet(ownedBackends.backends, contributedBackends)
     ) {
       diagnostics.push({
         code: "PROPERTY_CAMPAIGN_PARTITION_BACKEND_MISMATCH",
@@ -3797,16 +4043,17 @@ function campaignFailureReferences(value: unknown): CampaignFailureReference[] |
   if (!Array.isArray(value)) return undefined;
   const references: CampaignFailureReference[] = [];
   for (const reference of value) {
-    if (typeof reference === "string") {
-      references.push(reference);
-      continue;
-    }
     if (
       isRecord(reference) &&
       typeof reference.fuzzer_backend === "string" &&
-      typeof reference.failure_id === "string"
+      typeof reference.failure_id === "string" &&
+      typeof reference.raw_result_ref === "string"
     ) {
-      references.push({ fuzzer_backend: reference.fuzzer_backend, failure_id: reference.failure_id });
+      references.push({
+        fuzzer_backend: reference.fuzzer_backend,
+        failure_id: reference.failure_id,
+        raw_result_ref: reference.raw_result_ref
+      });
     }
   }
   return references;
@@ -4407,7 +4654,7 @@ function readCampaignFuzzerBackends(
   const diagnostics: RuntimeDiagnostic[] = [];
   let producers: FinalizedDeclaredProducer[];
   try {
-    producers = finalizedDeclaredContractProducers(layout, "ultrafuzz/property-campaign@2", consumer, attemptAuthority);
+    producers = finalizedDeclaredContractProducers(layout, "ultrafuzz/property-campaign@3", consumer, attemptAuthority);
   } catch (error) {
     return {
       value: new Map(),

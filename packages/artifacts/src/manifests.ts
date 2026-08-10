@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { CANONICAL_ARTIFACT_RELATIVE_PATH_PATTERN } from "./artifact-path-primitives.js";
 import { getNodeArtifactDir, type RunLayout } from "./run-layout.js";
 import {
   assertRegularFileInside,
@@ -203,7 +204,7 @@ export const artifactManifestJsonSchema = {
     provenance: { $ref: "#/$defs/provenance" }
   },
   $defs: {
-    safePath: { type: "string", pattern: "^[A-Za-z0-9._-]{1,128}(?:/[A-Za-z0-9._-]{1,128})*$" },
+    safePath: { type: "string", pattern: CANONICAL_ARTIFACT_RELATIVE_PATH_PATTERN },
     sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
     provenance: {
       type: "object",

@@ -3,6 +3,7 @@
   "$id": "urn:ultrafuzz:schema:artifacts:findings:2",
   "title": "Ultrafuzz findings",
   "type": "array",
+  "maxItems": 10000,
   "items": {
     "$ref": "urn:ultrafuzz:schema:artifacts:finding:2"
   }

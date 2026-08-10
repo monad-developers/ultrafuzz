@@ -14,6 +14,9 @@ import {
   assertRegularFileInside,
   executeSchemaSemanticGates,
   IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
+  MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILES,
+  MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILE_BYTES,
+  MAX_PROPERTY_CAMPAIGN_EVIDENCE_TOTAL_BYTES,
   MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES,
   normalizeNodeAttemptFailureMessage,
   parseStrictJsonBytes,
@@ -823,6 +826,7 @@ type VerifyArtifactsTask = {
   attemptId: string;
   runRoot: string;
   workspacePath: string;
+  artifactDir: string;
   dependencyArtifactDirs: string[];
   metadata: {
     run: { ultrafuzzRunId: string };
@@ -843,7 +847,13 @@ type VerifyArtifactsTask = {
   }>;
 };
 
-function loadVerifyArtifactsHarness(): {
+function loadVerifyArtifactsHarness(
+  options: {
+    taskSpecs?: readonly VerifyArtifactsTask[];
+    authenticatedDependencyDirs?: readonly string[];
+    onSemanticGate?: () => void;
+  } = {}
+): {
   captureTaskOutputs: (task: VerifyArtifactsTask) => Array<{
     output: VerifyArtifactsTask["outputs"][number];
     artifactRoot: string;
@@ -859,20 +869,31 @@ function loadVerifyArtifactsHarness(): {
   ) => { artifacts: Array<{ sha256: string }>; primary_artifact: string };
   publications: Map<string, Buffer>;
   markerWrites: unknown[];
+  authenticatedDependencyChecks: Array<{ consumerAttemptId: string; dependency: string }>;
 } {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const dependencyVerifierStart = source.indexOf("function verifiedDependencyJsonArtifact");
+  const dependencyVerifierEnd = source.indexOf(
+    "\n\nfunction configuredInvariantPrioritySelection",
+    dependencyVerifierStart
+  );
   const captureStart = source.indexOf("function captureTaskOutputs");
   const finalizerStart = source.indexOf("function finalizeAndVerifyArtifacts", captureStart);
   const verifierStart = source.indexOf("function verifyArtifacts", finalizerStart);
   const verifierEnd = source.indexOf("function readInvariantSourceSnapshot", verifierStart);
+  assert.ok(dependencyVerifierStart >= 0 && dependencyVerifierEnd > dependencyVerifierStart, source);
   assert.ok(captureStart >= 0 && finalizerStart > captureStart, source);
   assert.ok(verifierStart > finalizerStart && verifierEnd > verifierStart, source);
   const emitted = ts.transpileModule(
-    `${source.slice(captureStart, finalizerStart)}\n${source.slice(verifierStart, verifierEnd)}`,
+    `${source.slice(dependencyVerifierStart, dependencyVerifierEnd)}\n${source.slice(captureStart, finalizerStart)}\n${source.slice(verifierStart, verifierEnd)}`,
     { compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 } }
   ).outputText;
   const publications = new Map<string, Buffer>();
   const markerWrites: unknown[] = [];
+  const authenticatedDependencyChecks: Array<{ consumerAttemptId: string; dependency: string }> = [];
+  const authenticatedDependencies = new Set(
+    (options.authenticatedDependencyDirs ?? []).map((dependency) => fs.realpathSync(dependency))
+  );
   const remember = (values: Map<string, Buffer>, relativePath: string, bytes: Buffer): void => {
     const previous = values.get(relativePath);
     if (previous !== undefined && !previous.equals(bytes)) throw new Error(`conflicting ${relativePath}`);
@@ -881,16 +902,23 @@ function loadVerifyArtifactsHarness(): {
   const factory = new Function(
     "path",
     "realpathSync",
+    "taskSpecs",
     "taskArtifactRoots",
     "isStrictlyInsideDirectory",
+    "resolveRegularArtifactFile",
     "readBoundedRegularArtifactSnapshot",
     "MAX_VERIFIED_ARTIFACT_BYTES",
+    "MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILES",
+    "MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILE_BYTES",
+    "MAX_PROPERTY_CAMPAIGN_EVIDENCE_TOTAL_BYTES",
+    "assertSafeVerifiedPublicationPath",
     "clearArtifactVerificationMarker",
     "decodeStrictUtf8Snapshot",
     "artifactContractDefinition",
     "parseStrictJsonSnapshot",
     "validateArtifactContract",
     "formatSchemaValidationIssues",
+    "assertVerifiedDependency",
     "executeSchemaSemanticGates",
     "normalizeNodeAttemptFailureMessage",
     "materializeInvariantSuiteCompanions",
@@ -902,7 +930,6 @@ function loadVerifyArtifactsHarness(): {
     "createHash",
     "publishVerifiedArtifacts",
     "writeArtifactVerificationMarker",
-    "taskSpecs",
     "taskPublishesWorkspacePatch",
     "declaredAncestorOutputsByContract",
     "declaredFinalReportOutputPair",
@@ -910,16 +937,35 @@ function loadVerifyArtifactsHarness(): {
   )(
     path,
     fs.realpathSync,
+    options.taskSpecs ?? [],
     (_task: VerifyArtifactsTask, artifactDir: string) => [artifactDir],
     (root: string, candidate: string) => candidate !== root && candidate.startsWith(`${root}${path.sep}`),
-    (root: string, candidate: string, failureMessage: string, maxBytes: number) => {
+    (root: string, candidate: string, failureMessage: string) => {
+      try {
+        assertRegularFileInside(root, candidate, failureMessage);
+        const resolved = fs.realpathSync(candidate);
+        if (resolved === root || !resolved.startsWith(`${root}${path.sep}`) || !fs.statSync(resolved).isFile()) {
+          throw new Error(failureMessage);
+        }
+        return resolved;
+      } catch {
+        throw new Error(failureMessage);
+      }
+    },
+    (root: string, candidate: string, failureMessage: string, maxBytes: number, requireNonEmpty = false) => {
       if (candidate === root || !candidate.startsWith(`${root}${path.sep}`)) throw new Error(failureMessage);
-      const before = fs.lstatSync(candidate, { bigint: true });
+      let before: fs.BigIntStats;
+      try {
+        before = fs.lstatSync(candidate, { bigint: true });
+      } catch {
+        throw new Error(failureMessage);
+      }
       if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n) {
         throw new Error(`${failureMessage}: file is not a singly linked regular file`);
       }
       const resolved = fs.realpathSync(candidate);
       const bytes = readRegularFileSnapshot(resolved, maxBytes);
+      if (requireNonEmpty && bytes.length === 0) throw new Error(`${failureMessage}: file is empty`);
       const after = fs.lstatSync(candidate, { bigint: true });
       if (
         !after.isFile() ||
@@ -938,6 +984,21 @@ function loadVerifyArtifactsHarness(): {
       return Object.freeze({ path: resolved, bytes });
     },
     64 * 1024 * 1024,
+    MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILES,
+    MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILE_BYTES,
+    MAX_PROPERTY_CAMPAIGN_EVIDENCE_TOTAL_BYTES,
+    (relativePath: string) => {
+      if (
+        relativePath.length === 0 ||
+        path.isAbsolute(relativePath) ||
+        relativePath.includes("\u0000") ||
+        relativePath.includes("\\") ||
+        /^[A-Za-z]:/u.test(relativePath) ||
+        relativePath.split("/").some((segment) => segment.length === 0 || segment === "..")
+      ) {
+        throw new Error(`artifact-contract failure: unsafe verified publication path ${relativePath}`);
+      }
+    },
     () => undefined,
     (snapshot: { bytes: Buffer }, failureMessage: string) => {
       try {
@@ -957,7 +1018,17 @@ function loadVerifyArtifactsHarness(): {
     (contract: Parameters<typeof validateArtifactContract>[0], contents: string, artifactPath: string) =>
       validateArtifactContract(contract, contents, artifactPath),
     () => "invalid",
-    executeSchemaSemanticGates,
+    (task: VerifyArtifactsTask, dependency: string) => {
+      const resolved = fs.realpathSync(dependency);
+      if (!authenticatedDependencies.has(resolved)) {
+        throw new Error(`artifact-contract failure: dependency is not authenticated ${resolved}`);
+      }
+      authenticatedDependencyChecks.push({ consumerAttemptId: task.attemptId, dependency: resolved });
+    },
+    (...args: Parameters<typeof executeSchemaSemanticGates>) => {
+      options.onSemanticGate?.();
+      return executeSchemaSemanticGates(...args);
+    },
     normalizeNodeAttemptFailureMessage,
     () => undefined,
     remember,
@@ -970,7 +1041,6 @@ function loadVerifyArtifactsHarness(): {
       for (const [relativePath, bytes] of values) publications.set(relativePath, Buffer.from(bytes));
     },
     (...args: unknown[]) => markerWrites.push(args),
-    [],
     (task: VerifyArtifactsTask) =>
       task.outputs.some((output) => output.path === "workspace.patch" && output.contract === "ultrafuzz/text@1") &&
       task.outputs.some(
@@ -986,7 +1056,7 @@ function loadVerifyArtifactsHarness(): {
     captureTaskOutputs: ReturnType<typeof loadVerifyArtifactsHarness>["captureTaskOutputs"];
     verifyArtifacts: ReturnType<typeof loadVerifyArtifactsHarness>["verifyArtifacts"];
   };
-  return { ...factory, publications, markerWrites };
+  return { ...factory, publications, markerWrites, authenticatedDependencyChecks };
 }
 
 function singleOutputVerificationTask(root: string, contract: string): VerifyArtifactsTask {
@@ -994,6 +1064,7 @@ function singleOutputVerificationTask(root: string, contract: string): VerifyArt
     attemptId: "attempt-one",
     runRoot: root,
     workspacePath: root,
+    artifactDir: root,
     dependencyArtifactDirs: [],
     metadata: {
       run: { ultrafuzzRunId: "run-one" },
@@ -1010,6 +1081,246 @@ function singleOutputVerificationTask(root: string, contract: string): VerifyArt
       }
     ]
   };
+}
+
+const generatedCampaignPaths = {
+  corpus: "backends/recon-fuzzer/corpus",
+  cache: "backends/recon-fuzzer/cache",
+  log: "backends/recon-fuzzer/run.log",
+  raw_results: "backends/recon-fuzzer/results.json",
+  reproducers: "backends/recon-fuzzer/reproducers"
+} as const;
+
+const generatedCampaignEvidenceContents = new Map<string, Buffer>([
+  [generatedCampaignPaths.log, Buffer.from("recon campaign completed\n", "utf8")],
+  [generatedCampaignPaths.raw_results, Buffer.from('{"executions":1}\n', "utf8")]
+]);
+
+function generatedCampaignEvidenceFiles(): Array<{ path: string; size_bytes: number; sha256: string }> {
+  return [...generatedCampaignEvidenceContents].map(([evidencePath, contents]) => ({
+    path: evidencePath,
+    size_bytes: contents.length,
+    sha256: createHash("sha256").update(contents).digest("hex")
+  }));
+}
+
+function generatedCampaignPlanFixture(): Record<string, unknown> {
+  return {
+    schema_version: "ultrafuzz.invariant-campaign-plan.v1",
+    available_vcpus: 1,
+    workers: 1,
+    configured_budget_seconds: 600,
+    deadline: "2026-01-01T00:10:00Z",
+    finalization_reserve_seconds: 60,
+    backend: { name: "recon", version: null },
+    command_plan: [{ phase: "campaign", command: "recon fuzz ." }],
+    paths: generatedCampaignPaths
+  };
+}
+
+function generatedImplementedPropertiesFixture(): Record<string, unknown> {
+  return {
+    schema_version: "ultrafuzz.implemented-properties.v3",
+    properties: [
+      {
+        property_id: "property-one",
+        status: "implemented",
+        implementation_paths: ["src/InvariantHarness.sol"],
+        test_paths: []
+      }
+    ],
+    selection: {
+      priority_threshold: "high",
+      priorities: ["high"],
+      property_ids: ["property-one"]
+    }
+  };
+}
+
+function generatedPropertyCampaignFixture(): Record<string, unknown> {
+  return {
+    schema_version: "ultrafuzz.property-campaign.v3",
+    campaign_plan_ref: "campaign-plan.json",
+    implemented_properties_ref: "implemented-properties.json",
+    findings_ref: "findings.json",
+    campaign_summary_ref: "campaign-summary.json",
+    fuzzer_backend: "recon",
+    backend_version: null,
+    execution: {
+      status: "complete",
+      usable_results: true,
+      command: "recon fuzz .",
+      config_path: null,
+      workers: 1,
+      started_at: "2026-01-01T00:00:00Z",
+      finished_at: "2026-01-01T00:05:00Z",
+      deadline: "2026-01-01T00:10:00Z",
+      exit_code: 0,
+      failure: null
+    },
+    paths: generatedCampaignPaths,
+    evidence_files: generatedCampaignEvidenceFiles(),
+    coverage: {
+      status: "reported",
+      metrics: [
+        {
+          name: "executions",
+          value: 1,
+          unit: "count",
+          source_ref: generatedCampaignPaths.raw_results
+        }
+      ],
+      unavailable_reason: null
+    },
+    property_results: [
+      {
+        property_id: "property-one",
+        status: "passed",
+        failure_ids: [],
+        coverage_metric_names: ["executions"],
+        evidence_refs: [generatedCampaignPaths.raw_results],
+        reason: null
+      }
+    ],
+    failures: []
+  };
+}
+
+function generatedCampaignFindingFixture(): Record<string, unknown> {
+  return {
+    schema_version: "ultrafuzz.finding.v2",
+    id: "finding-one",
+    title: "Finding one",
+    status: "candidate",
+    severity_guess: "Medium",
+    confidence: "medium",
+    summary: "A schema-valid non-property campaign finding."
+  };
+}
+
+function generatedCampaignSummaryFixture(
+  findingIds: readonly string[],
+  postDeduplication: number
+): Record<string, unknown> {
+  return {
+    schema_version: "ultrafuzz.campaign-summary.v2",
+    outcome: "complete",
+    implemented_property_suite_refs: ["implemented-properties.json"],
+    campaign_plan_ref: "campaign-plan.json",
+    backend_results: [{ fuzzer_backend: "recon", status: "complete", result_ref: "campaign.json" }],
+    finding_refs: findingIds,
+    reproducer_refs: findingIds.map((findingId) => ({ finding_id: findingId, path: null, blocker: null })),
+    failure_counts: { pre_deduplication: 0, post_deduplication: postDeduplication }
+  };
+}
+
+function generatedCampaignVerificationFixture(
+  root: string,
+  options: { includeNonPropertyFinding?: boolean; summaryPostDeduplication?: number } = {}
+): {
+  task: VerifyArtifactsTask;
+  implementationProducer: VerifyArtifactsTask;
+  implementationArtifactDir: string;
+} {
+  const artifactDir = path.join(root, "campaign-artifacts");
+  const implementationArtifactDir = path.join(root, "dependencies", "attempt-implemented-properties");
+  fs.mkdirSync(artifactDir, { recursive: true });
+  fs.mkdirSync(implementationArtifactDir, { recursive: true });
+
+  const findings = options.includeNonPropertyFinding ? [generatedCampaignFindingFixture()] : [];
+  const findingIds = findings.map((finding) => String(finding.id));
+  const documents = new Map<string, unknown>([
+    ["campaign-plan.json", generatedCampaignPlanFixture()],
+    ["campaign.json", generatedPropertyCampaignFixture()],
+    ["findings.json", findings],
+    [
+      "campaign-summary.json",
+      generatedCampaignSummaryFixture(findingIds, options.summaryPostDeduplication ?? findingIds.length)
+    ]
+  ]);
+  for (const [relativePath, document] of documents) {
+    fs.writeFileSync(path.join(artifactDir, relativePath), `${JSON.stringify(document)}\n`, "utf8");
+  }
+  for (const [relativePath, contents] of generatedCampaignEvidenceContents) {
+    const evidencePath = path.join(artifactDir, relativePath);
+    fs.mkdirSync(path.dirname(evidencePath), { recursive: true });
+    fs.writeFileSync(evidencePath, contents);
+  }
+  fs.writeFileSync(
+    path.join(implementationArtifactDir, "implemented-properties.json"),
+    `${JSON.stringify(generatedImplementedPropertiesFixture())}\n`,
+    "utf8"
+  );
+
+  const implementationProducer: VerifyArtifactsTask = {
+    attemptId: "attempt-implemented-properties",
+    runRoot: root,
+    workspacePath: root,
+    artifactDir: implementationArtifactDir,
+    dependencyArtifactDirs: [],
+    metadata: {
+      run: { ultrafuzzRunId: "run-one" },
+      artifacts: { dir: implementationArtifactDir },
+      node: {
+        logicalNodeId: "stateful-invariant-implement-properties",
+        concreteNodeId: "stateful-invariant-implement-properties"
+      },
+      dependencies: { attemptIds: [] }
+    },
+    outputs: [
+      {
+        path: "implemented-properties.json",
+        contract: "ultrafuzz/implemented-properties@3",
+        contractDigest: "e".repeat(64),
+        schemaFile: "implemented-properties.schema.json",
+        primary: true
+      }
+    ]
+  };
+  const task: VerifyArtifactsTask = {
+    attemptId: "attempt-campaign",
+    runRoot: root,
+    workspacePath: root,
+    artifactDir,
+    dependencyArtifactDirs: [implementationArtifactDir],
+    metadata: {
+      run: { ultrafuzzRunId: "run-one" },
+      artifacts: { dir: artifactDir },
+      node: { logicalNodeId: "stateful-invariant-campaign", concreteNodeId: "stateful-invariant-campaign" },
+      dependencies: { attemptIds: [implementationProducer.attemptId] }
+    },
+    outputs: [
+      {
+        path: "campaign-plan.json",
+        contract: "ultrafuzz/invariant-campaign-plan@1",
+        contractDigest: "a".repeat(64),
+        schemaFile: "invariant-campaign-plan.schema.json",
+        primary: false
+      },
+      {
+        path: "campaign.json",
+        contract: "ultrafuzz/property-campaign@3",
+        contractDigest: "b".repeat(64),
+        schemaFile: "property-campaign.schema.json",
+        primary: true
+      },
+      {
+        path: "findings.json",
+        contract: "ultrafuzz/findings@2",
+        contractDigest: "c".repeat(64),
+        schemaFile: "findings.schema.json",
+        primary: false
+      },
+      {
+        path: "campaign-summary.json",
+        contract: "ultrafuzz/campaign-summary@2",
+        contractDigest: "d".repeat(64),
+        schemaFile: "campaign-summary.schema.json",
+        primary: false
+      }
+    ]
+  };
+  return { task, implementationProducer, implementationArtifactDir };
 }
 
 test("generated Smithers verifier rejects invalid UTF-8 and duplicate JSON keys from captured bytes", () => {
@@ -1238,83 +1549,185 @@ test("generated Smithers binds generated-test manifests to the current run and l
   }
 });
 
-test("generated Smithers fails closed when same-node semantic counts disagree", () => {
+test("generated Smithers verifies a v3 property campaign against authenticated semantic context", () => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-semantic-siblings-")));
   try {
-    const documents = new Map<string, unknown>([
-      [
-        "campaign-summary.json",
-        {
-          schema_version: "ultrafuzz.campaign-summary.v2",
-          outcome: "complete",
-          implemented_property_suite_refs: ["implemented-properties.json"],
-          campaign_plan_ref: "campaign-plan.json",
-          backend_results: [],
-          finding_refs: [],
-          reproducer_refs: [],
-          failure_counts: { pre_deduplication: 0, post_deduplication: 0 }
-        }
-      ],
-      ["campaign.json", { schema_version: "ultrafuzz.property-campaign.v2", failures: [] }],
-      [
-        "findings.json",
-        [
-          {
-            schema_version: "ultrafuzz.finding.v2",
-            id: "finding-one",
-            title: "Finding one",
-            status: "candidate",
-            severity_guess: "Medium",
-            confidence: "medium",
-            summary: "A schema-valid sibling finding."
-          }
-        ]
-      ]
-    ]);
-    for (const [relativePath, document] of documents) {
-      fs.writeFileSync(path.join(root, relativePath), `${JSON.stringify(document)}\n`, "utf8");
+    const fixture = generatedCampaignVerificationFixture(root);
+    const harness = loadVerifyArtifactsHarness({
+      taskSpecs: [fixture.implementationProducer, fixture.task],
+      authenticatedDependencyDirs: [fixture.implementationArtifactDir]
+    });
+
+    const result = harness.verifyArtifacts(fixture.task, harness.captureTaskOutputs(fixture.task));
+
+    assert.equal(result.primary_artifact, "campaign.json");
+    assert.equal(result.artifacts.length, 4);
+    assert.equal(harness.publications.size, 6);
+    for (const [relativePath, contents] of generatedCampaignEvidenceContents) {
+      assert.deepEqual(harness.publications.get(relativePath), contents);
     }
-    const task: VerifyArtifactsTask = {
-      attemptId: "attempt-campaign",
-      runRoot: root,
-      workspacePath: root,
-      dependencyArtifactDirs: [],
-      metadata: {
-        run: { ultrafuzzRunId: "run-one" },
-        artifacts: { dir: root },
-        node: { logicalNodeId: "stateful-invariant-campaign", concreteNodeId: "stateful-invariant-campaign" },
-        dependencies: { attemptIds: [] }
-      },
-      outputs: [
-        {
-          path: "campaign-summary.json",
-          contract: "ultrafuzz/campaign-summary@2",
-          contractDigest: "a".repeat(64),
-          schemaFile: "campaign-summary.schema.json",
-          primary: true
-        },
-        {
-          path: "campaign.json",
-          contract: "ultrafuzz/property-campaign@2",
-          contractDigest: "b".repeat(64),
-          schemaFile: "property-campaign.schema.json",
-          primary: false
-        },
-        {
-          path: "findings.json",
-          contract: "ultrafuzz/findings@2",
-          contractDigest: "c".repeat(64),
-          schemaFile: "findings.schema.json",
-          primary: false
-        }
-      ]
-    };
-    const harness = loadVerifyArtifactsHarness();
+    assert.equal(harness.markerWrites.length, 1);
+    assert.deepEqual(harness.authenticatedDependencyChecks, [
+      { consumerAttemptId: "attempt-campaign", dependency: fixture.implementationArtifactDir }
+    ]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("generated Smithers rejects mixed implementation and campaign producers", () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-mixed-property-role-")));
+  try {
+    const fixture = generatedCampaignVerificationFixture(root);
+    const implementationOutput = fixture.implementationProducer.outputs[0]!;
+    fixture.task.outputs.push({ ...implementationOutput, primary: false });
+    const harness = loadVerifyArtifactsHarness({
+      taskSpecs: [fixture.implementationProducer, fixture.task],
+      authenticatedDependencyDirs: [fixture.implementationArtifactDir]
+    });
 
     assert.throws(
-      () => harness.verifyArtifacts(task, harness.captureTaskOutputs(task)),
+      () => harness.verifyArtifacts(fixture.task),
+      /must not declare both ultrafuzz\/implemented-properties@3 and ultrafuzz\/property-campaign@3/u
+    );
+    assert.equal(harness.publications.size, 0);
+    assert.equal(harness.markerWrites.length, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("generated Smithers fails closed when declared campaign evidence is missing or digest-mismatched", () => {
+  for (const mode of ["missing", "mismatched"] as const) {
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `ultrafuzz-campaign-evidence-${mode}-`)));
+    try {
+      const fixture = generatedCampaignVerificationFixture(root);
+      const harness = loadVerifyArtifactsHarness({
+        taskSpecs: [fixture.implementationProducer, fixture.task],
+        authenticatedDependencyDirs: [fixture.implementationArtifactDir]
+      });
+      const captured = harness.captureTaskOutputs(fixture.task);
+      const evidencePath = path.join(fixture.task.metadata.artifacts.dir, generatedCampaignPaths.raw_results);
+      if (mode === "missing") fs.rmSync(evidencePath);
+      else fs.writeFileSync(evidencePath, '{"executions":2}\n', "utf8");
+
+      assert.throws(
+        () => harness.verifyArtifacts(fixture.task, captured),
+        /campaign evidence (?:is not an immutable regular file|does not match its manifest)/u,
+        mode
+      );
+      assert.equal(harness.publications.size, 0, mode);
+      assert.equal(harness.markerWrites.length, 0, mode);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("generated Smithers rejects symlinked and hard-linked campaign evidence", () => {
+  for (const mode of ["symlink", "hardlink"] as const) {
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `ultrafuzz-campaign-evidence-${mode}-`)));
+    try {
+      const fixture = generatedCampaignVerificationFixture(root);
+      const harness = loadVerifyArtifactsHarness({
+        taskSpecs: [fixture.implementationProducer, fixture.task],
+        authenticatedDependencyDirs: [fixture.implementationArtifactDir]
+      });
+      const captured = harness.captureTaskOutputs(fixture.task);
+      const evidencePath = path.join(fixture.task.metadata.artifacts.dir, generatedCampaignPaths.raw_results);
+      if (mode === "symlink") {
+        const originalPath = `${evidencePath}.original`;
+        fs.renameSync(evidencePath, originalPath);
+        fs.symlinkSync(originalPath, evidencePath);
+      } else {
+        fs.linkSync(evidencePath, `${evidencePath}.alias`);
+      }
+
+      assert.throws(
+        () => harness.verifyArtifacts(fixture.task, captured),
+        /campaign evidence is not an immutable regular file|hard-linked/u,
+        mode
+      );
+      assert.equal(harness.publications.size, 0, mode);
+      assert.equal(harness.markerWrites.length, 0, mode);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("generated Smithers publishes the one immutable campaign evidence snapshot used for verification", () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-campaign-evidence-snapshot-")));
+  try {
+    const fixture = generatedCampaignVerificationFixture(root);
+    const evidencePath = path.join(fixture.task.metadata.artifacts.dir, generatedCampaignPaths.raw_results);
+    const expected = Buffer.from(generatedCampaignEvidenceContents.get(generatedCampaignPaths.raw_results)!);
+    let changed = false;
+    const harness = loadVerifyArtifactsHarness({
+      taskSpecs: [fixture.implementationProducer, fixture.task],
+      authenticatedDependencyDirs: [fixture.implementationArtifactDir],
+      onSemanticGate: () => {
+        if (changed) return;
+        changed = true;
+        fs.writeFileSync(evidencePath, '{"executions":999}\n', "utf8");
+      }
+    });
+
+    harness.verifyArtifacts(fixture.task, harness.captureTaskOutputs(fixture.task));
+
+    assert.equal(changed, true);
+    assert.notDeepEqual(fs.readFileSync(evidencePath), expected);
+    assert.deepEqual(harness.publications.get(generatedCampaignPaths.raw_results), expected);
+    const markerPublications = (harness.markerWrites[0] as unknown[])[2] as ReadonlyMap<string, Buffer>;
+    assert.deepEqual(markerPublications.get(generatedCampaignPaths.raw_results), expected);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("generated Smithers fails closed when v3 campaign sibling semantic counts disagree", () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-semantic-siblings-")));
+  try {
+    const fixture = generatedCampaignVerificationFixture(root, {
+      includeNonPropertyFinding: true,
+      summaryPostDeduplication: 0
+    });
+    const harness = loadVerifyArtifactsHarness({
+      taskSpecs: [fixture.implementationProducer, fixture.task],
+      authenticatedDependencyDirs: [fixture.implementationArtifactDir]
+    });
+
+    assert.throws(
+      () => harness.verifyArtifacts(fixture.task, harness.captureTaskOutputs(fixture.task)),
       /campaign-summary-count-coupling failed/u
     );
+    assert.equal(harness.publications.size, 0);
+    assert.equal(harness.markerWrites.length, 0);
+    assert.deepEqual(harness.authenticatedDependencyChecks, [
+      { consumerAttemptId: "attempt-campaign", dependency: fixture.implementationArtifactDir }
+    ]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("generated Smithers rejects property-campaign v2 bytes without converting them", () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-campaign-v2-rejection-")));
+  try {
+    const artifactPath = path.join(root, "result.json");
+    const legacyBytes = Buffer.from(
+      `${JSON.stringify({ schema_version: "ultrafuzz.property-campaign.v2", fuzzer_backend: "recon", failures: [] })}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(artifactPath, legacyBytes);
+    const task = singleOutputVerificationTask(root, "ultrafuzz/property-campaign@3");
+    task.outputs[0]!.schemaFile = "property-campaign.schema.json";
+    const harness = loadVerifyArtifactsHarness();
+    const captured = harness.captureTaskOutputs(task);
+
+    assert.throws(() => harness.verifyArtifacts(task, captured), /ultrafuzz\/property-campaign@3\): invalid/u);
+    assert.equal(captured[0]?.file.bytes.equals(legacyBytes), true);
+    assert.equal(fs.readFileSync(artifactPath).equals(legacyBytes), true);
     assert.equal(harness.publications.size, 0);
     assert.equal(harness.markerWrites.length, 0);
   } finally {
@@ -1419,7 +1832,7 @@ test("generated Smithers resolves singleton JSON inputs by ancestor contract and
   );
 
   assert.deepEqual(resolve(consumer, "ultrafuzz/properties@2", "canonical property catalog"), {
-    path: "/run/artifacts/catalog-current/custom/current-properties.json",
+    path: "custom/current-properties.json",
     value: document
   });
   assert.equal(resolve(isolatedConsumer, "ultrafuzz/properties@2", "canonical property catalog"), undefined);
@@ -2675,7 +3088,7 @@ test("generated Smithers never infers or repairs missing generated-test companio
   assert.doesNotMatch(source, /generated test sources conflict/u);
   assert.match(
     source,
-    /Generated-test companions are agent-owned outputs[\s\S]*?verifyOutputSemanticGates\(task, verifiedOutputs\)/u
+    /Generated-test companions are agent-owned outputs[\s\S]*?verifyOutputSemanticGates\(task, verifiedOutputs, campaignEvidence\)/u
   );
   assert.doesNotMatch(source, /const workspaceRelativePath = relativePath\.slice/u);
 });
@@ -2940,10 +3353,10 @@ test("generated Smithers verifier publishes the complete validated set before ta
   assert.match(verifier, /publishFileDurableExclusive\(artifactDir, relativePath, contents\)/u);
   assert.ok(
     verifier.indexOf("validateCapturedTaskOutputs(task, capturedOutputs)") <
-      verifier.indexOf("verifyOutputSemanticGates(task, verifiedOutputs)")
+      verifier.indexOf("verifyOutputSemanticGates(task, verifiedOutputs, campaignEvidence)")
   );
   assert.ok(
-    verifier.indexOf("verifyOutputSemanticGates(task, verifiedOutputs)") <
+    verifier.indexOf("verifyOutputSemanticGates(task, verifiedOutputs, campaignEvidence)") <
       verifier.indexOf("const publications = new Map<string, Buffer>()")
   );
   assert.ok(

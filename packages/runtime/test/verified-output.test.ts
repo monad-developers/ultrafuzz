@@ -51,6 +51,12 @@ interface ReportFixture {
   markdownBytes: Buffer;
 }
 
+interface CampaignAuthorityFixture {
+  layout: RunLayout;
+  evidencePath: string;
+  evidenceBytes: Buffer;
+}
+
 test("verified final-report reader binds immutable current bytes to verifier and controller authority", () => {
   const fixture = createVerifiedReportFixture("verified-report-current");
 
@@ -635,6 +641,52 @@ function createSelectionLayout(runId: string, nodes: PlannedGraphDocument["nodes
   });
 }
 
+test("verified campaign reader requires every declared evidence file in verifier publications", () => {
+  const fixture = createVerifiedCampaignFixture("verified-campaign-missing-publication", {
+    omitEvidencePublication: true
+  });
+
+  assert.throws(
+    () =>
+      loadVerifiedNodeOutputSnapshot({
+        runRoot: fixture.layout.root,
+        logicalNodeId: "stateful-invariant-campaign"
+      }),
+    (error: unknown) =>
+      error instanceof VerifiedOutputError &&
+      error.code === "VERIFIED_OUTPUT_AUTHORITY_INVALID" &&
+      /does not publish campaign evidence/iu.test(error.message)
+  );
+});
+
+test("verified campaign reader rejects post-finalization evidence mutation without repair", () => {
+  const fixture = createVerifiedCampaignFixture("verified-campaign-mutated-evidence");
+  const loaded = loadVerifiedNodeOutputSnapshot({
+    runRoot: fixture.layout.root,
+    logicalNodeId: "stateful-invariant-campaign"
+  });
+  assert.equal(
+    loaded.outputs.some((output) => output.contract === "ultrafuzz/property-campaign@3"),
+    true
+  );
+
+  const mutated = Buffer.alloc(fixture.evidenceBytes.length, 0x7a);
+  fs.writeFileSync(fixture.evidencePath, mutated);
+
+  assert.throws(
+    () =>
+      loadVerifiedNodeOutputSnapshot({
+        runRoot: fixture.layout.root,
+        logicalNodeId: "stateful-invariant-campaign"
+      }),
+    (error: unknown) =>
+      error instanceof VerifiedOutputError &&
+      error.code === "VERIFIED_OUTPUT_CHANGED" &&
+      /digest\/size binding changed/iu.test(error.message)
+  );
+  assert.deepEqual(fs.readFileSync(fixture.evidencePath), mutated);
+});
+
 function createVerifiedReportFixture(
   runId: string,
   override: {
@@ -850,7 +902,8 @@ function finalizeNodeOutputs(
   attemptId: string,
   contents: Readonly<Record<string, string>>,
   prerequisiteAttemptIds: readonly string[] = [],
-  modelIndex = 0
+  modelIndex = 0,
+  additionalPublications: Readonly<Record<string, Buffer | string>> = {}
 ): void {
   const bytesByPath = new Map<string, Buffer>();
   for (const output of node.outputs) {
@@ -860,10 +913,16 @@ function finalizeNodeOutputs(
     bytesByPath.set(output.path, bytes);
     writeFileDurable(path.join(layout.artifactsDir, attemptId, output.path), bytes);
   }
+  const publicationBytes = new Map(bytesByPath);
+  for (const [publicationPath, value] of Object.entries(additionalPublications)) {
+    const bytes = Buffer.isBuffer(value) ? Buffer.from(value) : Buffer.from(value, "utf8");
+    publicationBytes.set(publicationPath, bytes);
+    writeFileDurable(path.join(layout.artifactsDir, attemptId, publicationPath), bytes);
+  }
   writeArtifactManifest({
     layout,
     nodeId: attemptId,
-    include: node.outputs.map((output) => output.path),
+    include: [...publicationBytes.keys()],
     outputs: node.outputs,
     prerequisiteNodeIds: [...prerequisiteAttemptIds],
     provenance: {
@@ -884,7 +943,10 @@ function finalizeNodeOutputs(
     attempt_id: attemptId,
     node_id: node.logical_id,
     artifacts: node.outputs.map((output) => ({ ...output, sha256: digest(bytesByPath.get(output.path)!) })),
-    publications: node.outputs.map((output) => ({ path: output.path, sha256: digest(bytesByPath.get(output.path)!) }))
+    publications: [...publicationBytes].map(([publicationPath, bytes]) => ({
+      path: publicationPath,
+      sha256: digest(bytes)
+    }))
   };
   writeJsonDurable(path.join(layout.root, ".ultrafuzz-verification", `${attemptId}.json`), marker);
   updateNodeState(layout, attemptId, {
@@ -1134,6 +1196,212 @@ function sealFinalReportManifest(layout: RunLayout, attemptId: string, artifactM
       output_contracts: { ok: true, missing: [], artifact_manifest_sha256: artifactManifestSha256 }
     }
   });
+}
+
+function createVerifiedCampaignFixture(
+  runId: string,
+  options: { omitEvidencePublication?: boolean } = {}
+): CampaignAuthorityFixture {
+  const outputRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-verified-campaign-"));
+  const catalogId = "property-specification-fanin";
+  const implementationId = "stateful-invariant-implement-properties";
+  const campaignId = "stateful-invariant-campaign";
+  const catalogOutputs = [boundOutput("properties.json", "ultrafuzz/properties@2", true)];
+  const implementationOutputs = [
+    boundOutput("implemented-properties.json", "ultrafuzz/implemented-properties@3", true)
+  ];
+  const campaignOutputs = [
+    boundOutput("campaign-plan.json", "ultrafuzz/invariant-campaign-plan@1", false),
+    boundOutput("campaign.json", "ultrafuzz/property-campaign@3", true),
+    boundOutput("findings.json", "ultrafuzz/findings@2", false),
+    boundOutput("campaign-summary.json", "ultrafuzz/campaign-summary@2", false)
+  ];
+  const graph: PlannedGraphDocument = {
+    schema_version: PLANNED_GRAPH_SCHEMA_VERSION,
+    graph_version: "3",
+    topology_version: 2,
+    groups: {},
+    nodes: [
+      plannedAgentNode(catalogId, catalogOutputs, []),
+      plannedAgentNode(implementationId, implementationOutputs, [catalogId]),
+      plannedAgentNode(campaignId, campaignOutputs, [implementationId])
+    ]
+  };
+  const layout = createRunLayout({
+    outputRoot,
+    runId,
+    graph,
+    graphFingerprint: "f".repeat(64),
+    configFingerprint: "e".repeat(64),
+    stateNodes: [
+      { id: catalogId, logicalNodeId: catalogId, artifactDir: `artifacts/${catalogId}`, outputs: catalogOutputs },
+      {
+        id: implementationId,
+        logicalNodeId: implementationId,
+        artifactDir: `artifacts/${implementationId}`,
+        outputs: implementationOutputs
+      },
+      { id: campaignId, logicalNodeId: campaignId, artifactDir: `artifacts/${campaignId}`, outputs: campaignOutputs }
+    ]
+  });
+
+  const paths = {
+    corpus: "backends/recon/corpus",
+    cache: "backends/recon/cache",
+    log: "backends/recon/run.log",
+    raw_results: "backends/recon/results.json",
+    reproducers: "backends/recon/reproducers"
+  } as const;
+  const logBytes = Buffer.from("campaign complete\n", "utf8");
+  const evidenceBytes = Buffer.from('{"executions":1}\n', "utf8");
+  const catalog = {
+    schema_version: "ultrafuzz.properties.v2",
+    properties: [
+      {
+        id: "property-one",
+        description: "Balances remain conserved.",
+        category: "accounting",
+        priority: "high",
+        sources: [{ source_node_id: "property-specification-manual", source_property_id: "property-one" }]
+      }
+    ]
+  };
+  const implemented = {
+    schema_version: "ultrafuzz.implemented-properties.v3",
+    selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-one"] },
+    properties: [
+      {
+        property_id: "property-one",
+        status: "implemented",
+        implementation_paths: ["test/recon/Properties.sol"],
+        test_paths: []
+      }
+    ]
+  };
+  const plan = {
+    schema_version: "ultrafuzz.invariant-campaign-plan.v1",
+    available_vcpus: 1,
+    workers: 1,
+    configured_budget_seconds: 600,
+    deadline: "2026-01-01T00:10:00Z",
+    finalization_reserve_seconds: 60,
+    backend: { name: "recon", version: null },
+    command_plan: [{ phase: "campaign", command: "recon fuzz ." }],
+    paths
+  };
+  const campaign = {
+    schema_version: "ultrafuzz.property-campaign.v3",
+    campaign_plan_ref: "campaign-plan.json",
+    implemented_properties_ref: "implemented-properties.json",
+    findings_ref: "findings.json",
+    campaign_summary_ref: "campaign-summary.json",
+    fuzzer_backend: "recon",
+    backend_version: null,
+    execution: {
+      status: "complete",
+      usable_results: true,
+      command: "recon fuzz .",
+      config_path: null,
+      workers: 1,
+      started_at: "2026-01-01T00:00:00Z",
+      finished_at: "2026-01-01T00:05:00Z",
+      deadline: "2026-01-01T00:10:00Z",
+      exit_code: 0,
+      failure: null
+    },
+    paths,
+    evidence_files: [
+      { path: paths.log, size_bytes: logBytes.length, sha256: digest(logBytes) },
+      { path: paths.raw_results, size_bytes: evidenceBytes.length, sha256: digest(evidenceBytes) }
+    ],
+    coverage: {
+      status: "reported",
+      metrics: [{ name: "executions", value: 1, unit: "count", source_ref: paths.raw_results }],
+      unavailable_reason: null
+    },
+    property_results: [
+      {
+        property_id: "property-one",
+        status: "passed",
+        failure_ids: [],
+        coverage_metric_names: ["executions"],
+        evidence_refs: [paths.raw_results],
+        reason: null
+      }
+    ],
+    failures: []
+  };
+  const summary = {
+    schema_version: "ultrafuzz.campaign-summary.v2",
+    outcome: "complete",
+    implemented_property_suite_refs: ["implemented-properties.json"],
+    campaign_plan_ref: "campaign-plan.json",
+    backend_results: [{ fuzzer_backend: "recon", status: "complete", result_ref: "campaign.json" }],
+    finding_refs: [],
+    reproducer_refs: [],
+    failure_counts: { pre_deduplication: 0, post_deduplication: 0 }
+  };
+
+  const campaignDir = path.join(layout.artifactsDir, campaignId);
+  const evidencePath = path.join(campaignDir, paths.raw_results);
+  const catalogNode = graph.nodes.find((node) => node.id === catalogId)!;
+  const implementationNode = graph.nodes.find((node) => node.id === implementationId)!;
+  const campaignNode = graph.nodes.find((node) => node.id === campaignId)!;
+  const json = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
+  finalizeNodeOutputs(layout, catalogNode, catalogId, { "properties.json": json(catalog) });
+  finalizeNodeOutputs(
+    layout,
+    implementationNode,
+    implementationId,
+    { "implemented-properties.json": json(implemented) },
+    [catalogId]
+  );
+  finalizeNodeOutputs(
+    layout,
+    campaignNode,
+    campaignId,
+    {
+      "campaign-plan.json": json(plan),
+      "campaign.json": json(campaign),
+      "findings.json": json([]),
+      "campaign-summary.json": json(summary)
+    },
+    [implementationId],
+    0,
+    {
+      [paths.log]: logBytes,
+      ...(options.omitEvidencePublication === true ? {} : { [paths.raw_results]: evidenceBytes })
+    }
+  );
+  if (options.omitEvidencePublication === true) writeFileDurable(evidencePath, evidenceBytes);
+
+  const tasks = graph.nodes.flatMap((node) =>
+    plannedAttemptIds(node).map((attemptId) => smithersTaskForNode(layout, graph, node, attemptId))
+  );
+  writeSealedTaskAuthority(layout, graph, tasks);
+
+  return { layout, evidencePath, evidenceBytes };
+}
+
+function plannedAgentNode(
+  id: string,
+  outputs: ArtifactManifestOutputContract[],
+  dependsOn: string[]
+): PlannedGraphDocument["nodes"][number] {
+  return {
+    id,
+    logical_id: id,
+    display_name: id,
+    kind: "agentic",
+    depends_on: dependsOn,
+    artifact_dir: `artifacts/${id}`,
+    outputs,
+    prompt_id: id,
+    prompt_path: `${id}.md`,
+    loop: { index: 0, count: 1, mode: "parallel", attempt_index: 0 },
+    model_fanout: [],
+    workflow: { node_id: `node:${id}`, task_node_ids: [`node:${id}`] }
+  };
 }
 
 function currentReport(runId: string, issues: Record<string, unknown>[] = []): Record<string, unknown> {

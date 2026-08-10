@@ -7,34 +7,41 @@
       "const": "ultrafuzz.finding-lifecycle-ledger.v1"
     },
     "records": {
+      "maxItems": 10000,
       "type": "array",
       "items": {
         "type": "object",
         "properties": {
           "dedupe_key": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 65536
           },
           "source_artifacts": {
+            "maxItems": 10000,
             "type": "array",
             "items": {
               "type": "object",
               "properties": {
                 "path": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 4096
                 },
                 "node_id": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 },
                 "finding_id": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 },
                 "title": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 },
                 "relationship": {
                   "type": "string",
@@ -46,36 +53,40 @@
             }
           },
           "strategy_hits": {
+            "maxItems": 10000,
             "type": "array",
             "items": {
               "type": "object",
               "properties": {
                 "strategy": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 },
                 "attempt_index": {
                   "type": "integer",
                   "minimum": 0,
-                  "maximum": 9007199254740991
+                  "maximum": 1000000
                 },
                 "model_id": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 },
                 "model": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 },
                 "model_index": {
                   "type": "integer",
                   "minimum": 0,
-                  "maximum": 9007199254740991
+                  "maximum": 1000000
                 },
                 "loop_index": {
                   "type": "integer",
                   "minimum": 0,
-                  "maximum": 9007199254740991
+                  "maximum": 1000000
                 }
               },
               "required": ["strategy"],
@@ -83,18 +94,22 @@
             }
           },
           "duplicate_finding_ids": {
+            "maxItems": 10000,
             "type": "array",
             "items": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 65536
             },
             "uniqueItems": true
           },
           "family_variant_keys": {
+            "maxItems": 10000,
             "type": "array",
             "items": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 65536
             },
             "uniqueItems": true
           },
@@ -113,11 +128,13 @@
           },
           "triage_reason": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 65536
           },
           "demotion_reason": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 65536
           },
           "canonical_severity": {
             "type": "string",
@@ -133,6 +150,7 @@
           },
           "stages": {
             "minItems": 1,
+            "maxItems": 10000,
             "type": "array",
             "items": {
               "type": "object",
@@ -143,11 +161,13 @@
                 },
                 "artifact_path": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 4096
                 },
                 "finding_id": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 }
               },
               "required": ["stage", "artifact_path"],

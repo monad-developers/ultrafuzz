@@ -3,6 +3,7 @@ import {
   NON_JSON_ARTIFACT_CONTRACT_IDS,
   type ArtifactContractId
 } from "./artifact-contract-ids.js";
+import { CANONICAL_ARTIFACT_RELATIVE_PATH_PATTERN } from "./artifact-path-primitives.js";
 import { validateRegisteredJsonSchema, type JsonSchemaValidationResult } from "./json-schema-validator.js";
 
 export const ARTIFACT_VERIFICATION_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:artifact-verification:2" as const;
@@ -13,7 +14,7 @@ export const AGENT_SOURCE_PROOF_SCHEMA_VERSION = "ultrafuzz.agent-source-proof.v
 
 const SHA256_PATTERN = "^[0-9a-f]{64}$";
 const GIT_OBJECT_PATTERN = "^[0-9a-f]{40}$";
-const SAFE_PATH_PATTERN = "^[A-Za-z0-9._-]{1,128}(?:/[A-Za-z0-9._-]{1,128})*$";
+const SAFE_PATH_PATTERN = CANONICAL_ARTIFACT_RELATIVE_PATH_PATTERN;
 const SCHEMA_FILE_PATTERN = "^[A-Za-z0-9][A-Za-z0-9._-]*\\.schema\\.json$";
 const VALIDATOR_BUILD_PATTERN = "^ultrafuzz-json-validator\\.v1:[0-9a-f]{64}$";
 const PINNED_SUBMODULE_PATH_PATTERN =

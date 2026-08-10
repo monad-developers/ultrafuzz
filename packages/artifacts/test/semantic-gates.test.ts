@@ -7,6 +7,8 @@ import { test } from "node:test";
 
 import {
   ARTIFACT_SCHEMA_METADATA,
+  MAX_SEMANTIC_GATE_DIAGNOSTIC_BYTES,
+  MAX_SEMANTIC_GATE_ISSUES,
   SEMANTIC_GATE_REGISTRY,
   SEMANTIC_GATE_SCOPES,
   artifactContractDefinition,
@@ -590,6 +592,32 @@ const fixtures = {
     positive: { records: [{ dedupe_key: "a" }] },
     negative: { records: [{ dedupe_key: "a" }, { dedupe_key: "a" }] }
   },
+  "finding-campaign-provenance-coherence": {
+    positive: {
+      property_ids: ["property-1"],
+      fuzzer_backend: "recon",
+      contributing_backend_failures: [
+        {
+          fuzzer_backend: "recon",
+          failure_id: "failure-1",
+          raw_result_ref: "recon-fuzzer-results.json"
+        }
+      ],
+      deduplication: { pre_dedup_count: 1 }
+    },
+    negative: {
+      property_ids: ["property-1"],
+      fuzzer_backend: "medusa",
+      contributing_backend_failures: [
+        {
+          fuzzer_backend: "recon",
+          failure_id: "failure-1",
+          raw_result_ref: "recon-fuzzer-results.json"
+        }
+      ],
+      deduplication: { pre_dedup_count: 1 }
+    }
+  },
   "finding-evidence-span-consistency": {
     positive: {
       evidence: [{ line: 4, end_line: 8 }, { line_ranges: [{ line: 10, end_line: 12 }, { line: 14 }] }]
@@ -608,6 +636,36 @@ const fixtures = {
   "findings-id-uniqueness": {
     positive: [{ id: "a" }],
     negative: [{ id: "a" }, { id: "a" }]
+  },
+  "findings-campaign-provenance-coherence": {
+    positive: [
+      {
+        property_ids: ["property-1"],
+        fuzzer_backend: "recon",
+        contributing_backend_failures: [
+          {
+            fuzzer_backend: "recon",
+            failure_id: "failure-1",
+            raw_result_ref: "recon-fuzzer-results.json"
+          }
+        ],
+        deduplication: { pre_dedup_count: 1 }
+      }
+    ],
+    negative: [
+      {
+        property_ids: ["property-1"],
+        fuzzer_backends: ["recon", "medusa"],
+        contributing_backend_failures: [
+          {
+            fuzzer_backend: "recon",
+            failure_id: "failure-1",
+            raw_result_ref: "recon-fuzzer-results.json"
+          }
+        ],
+        deduplication: { pre_dedup_count: 1 }
+      }
+    ]
   },
   "findings-evidence-span-consistency": {
     positive: [
@@ -767,9 +825,65 @@ const fixtures = {
       ]
     }
   },
+  "property-campaign-coverage-metric-uniqueness": {
+    positive: { coverage: { metrics: [{ name: "branches" }] } },
+    negative: { coverage: { metrics: [{ name: "branches" }, { name: "branches" }] } }
+  },
+  "property-campaign-evidence-file-budget": {
+    positive: { evidence_files: [{ size_bytes: 64 * 1024 * 1024 }] },
+    negative: { evidence_files: [{ size_bytes: 64 * 1024 * 1024 }, { size_bytes: 1 }] }
+  },
+  "property-campaign-evidence-file-closure": {
+    positive: {
+      execution: { usable_results: false, started_at: null },
+      paths: { log: "run.log", raw_results: "results.json" },
+      coverage: { status: "unavailable", metrics: [] },
+      property_results: [],
+      failures: [],
+      evidence_files: []
+    },
+    negative: {
+      execution: { usable_results: true, started_at: "2026-01-01T00:00:00Z" },
+      paths: { log: "run.log", raw_results: "results.json" },
+      coverage: { status: "reported", metrics: [] },
+      property_results: [],
+      failures: [],
+      evidence_files: [{ path: "run.log" }]
+    }
+  },
   "property-campaign-failure-id-uniqueness": {
     positive: { failures: [{ id: "a" }] },
     negative: { failures: [{ id: "a" }, { id: "a" }] }
+  },
+  "property-campaign-property-result-id-uniqueness": {
+    positive: { property_results: [{ property_id: "a" }] },
+    negative: { property_results: [{ property_id: "a" }, { property_id: "a" }] }
+  },
+  "property-campaign-document-coherence": {
+    positive: {
+      execution: {
+        status: "complete",
+        usable_results: true,
+        started_at: "2026-01-01T00:00:00Z",
+        finished_at: "2026-01-01T00:00:01Z",
+        deadline: "2026-01-01T00:00:02Z"
+      },
+      coverage: { metrics: [] },
+      property_results: [],
+      failures: []
+    },
+    negative: {
+      execution: {
+        status: "complete",
+        usable_results: true,
+        started_at: "2026-01-01T00:00:02Z",
+        finished_at: "2026-01-01T00:00:01Z",
+        deadline: "2026-01-01T00:00:00Z"
+      },
+      coverage: { metrics: [] },
+      property_results: [],
+      failures: []
+    }
   },
   "property-id-uniqueness": {
     positive: { properties: [{ id: "a" }] },
@@ -1052,6 +1166,90 @@ test("property source joins require exact reverse coverage of every declared len
     ]
   };
   assert.equal(executeSemanticGate("property-source-join", { document: complete, context }).status, "passed");
+});
+
+test("campaign evidence closure derives exact file authority from execution status and typed references", () => {
+  const entry = (entryPath: string) => ({ path: entryPath, size_bytes: 1, sha256: "a".repeat(64) });
+  const base = {
+    execution: { usable_results: false, started_at: null },
+    paths: { log: "backends/recon/run.log", raw_results: "backends/recon/results.json" },
+    coverage: { status: "unavailable", metrics: [] as unknown[] },
+    property_results: [] as unknown[],
+    failures: [] as unknown[],
+    evidence_files: [] as unknown[]
+  };
+  const cases: Array<{ label: string; document: unknown; passed: boolean }> = [
+    { label: "unavailable-needs-no-operational-file", document: base, passed: true },
+    {
+      label: "started-failure-needs-only-log",
+      document: {
+        ...base,
+        execution: { usable_results: false, started_at: "2026-01-01T00:00:00Z" },
+        evidence_files: [entry(base.paths.log)]
+      },
+      passed: true
+    },
+    {
+      label: "usable-results-need-log-and-raw-results",
+      document: {
+        ...base,
+        execution: { usable_results: true, started_at: "2026-01-01T00:00:00Z" },
+        evidence_files: [entry(base.paths.log), entry(base.paths.raw_results)]
+      },
+      passed: true
+    },
+    {
+      label: "reported-coverage-needs-source-and-raw-results",
+      document: {
+        ...base,
+        coverage: {
+          status: "reported",
+          metrics: [{ name: "coverage", source_ref: "backends/recon/coverage.json" }]
+        },
+        evidence_files: [entry(base.paths.raw_results), entry("backends/recon/coverage.json")]
+      },
+      passed: true
+    },
+    {
+      label: "failure-needs-raw-and-deterministic-reproducers",
+      document: {
+        ...base,
+        failures: [
+          {
+            raw_reproducer_ref: "backends/recon/raw.txt",
+            deterministic_reproducer_ref: "backends/recon/reproducer.t.sol"
+          }
+        ],
+        evidence_files: [
+          entry(base.paths.raw_results),
+          entry("backends/recon/raw.txt"),
+          entry("backends/recon/reproducer.t.sol")
+        ]
+      },
+      passed: true
+    },
+    {
+      label: "unreferenced-entry-rejected",
+      document: { ...base, evidence_files: [entry("backends/recon/extra.txt")] },
+      passed: false
+    },
+    {
+      label: "duplicate-entry-rejected",
+      document: {
+        ...base,
+        execution: { usable_results: false, started_at: "2026-01-01T00:00:00Z" },
+        evidence_files: [entry(base.paths.log), entry(base.paths.log)]
+      },
+      passed: false
+    }
+  ];
+  for (const fixture of cases) {
+    assert.equal(
+      executeSemanticGate("property-campaign-evidence-file-closure", { document: fixture.document }).status,
+      fixture.passed ? "passed" : "failed",
+      fixture.label
+    );
+  }
 });
 
 test("workspace patch path gate reports exact nonduplicated field diagnostics", () => {
@@ -1814,6 +2012,8 @@ test("every contextual registration executes real positive and negative checks",
       size_bytes: aggregationSourceBytes.length,
       sha256: aggregationSourceDigest
     };
+    const campaignEvidenceBytes = Buffer.from("x", "utf8");
+    const campaignEvidenceDigest = crypto.createHash("sha256").update(campaignEvidenceBytes).digest("hex");
     const contextFixtures: Record<
       Exclude<SemanticGateName, keyof typeof fixtures>,
       { positive: unknown; negative: unknown; context: SemanticGateContext }
@@ -1966,6 +2166,128 @@ test("every contextual registration executes real positive and negative checks",
         positive: { failure_counts: { pre_deduplication: 1, post_deduplication: 1 } },
         negative: { failure_counts: { pre_deduplication: 2, post_deduplication: 1 } },
         context: { artifactSet: { campaigns: [{ failures: [{}] }], findings: [{}] } }
+      },
+      "property-campaign-context-joins": {
+        positive: {
+          campaign_plan_ref: "campaign-plan.json",
+          implemented_properties_ref: "implemented-properties.json",
+          findings_ref: "findings.json",
+          campaign_summary_ref: "campaign-summary.json",
+          fuzzer_backend: "recon",
+          backend_version: null,
+          execution: {
+            status: "complete",
+            usable_results: true,
+            command: "recon fuzz .",
+            workers: 1,
+            deadline: "2026-01-01T00:01:00Z"
+          },
+          paths: {},
+          property_results: [],
+          failures: []
+        },
+        negative: {
+          campaign_plan_ref: "campaign-plan.json",
+          implemented_properties_ref: "implemented-properties.json",
+          findings_ref: "findings.json",
+          campaign_summary_ref: "campaign-summary.json",
+          fuzzer_backend: "medusa",
+          backend_version: null,
+          execution: {
+            status: "complete",
+            usable_results: true,
+            command: "recon fuzz .",
+            workers: 1,
+            deadline: "2026-01-01T00:01:00Z"
+          },
+          paths: {},
+          property_results: [],
+          failures: []
+        },
+        context: {
+          artifactIdentity: {
+            runId: "run",
+            nodeId: "stateful-invariant-campaign",
+            artifactPath: "recon-fuzzer-results.json"
+          },
+          artifactSet: {
+            campaignPlanPath: "campaign-plan.json",
+            campaignPlan: {
+              backend: { name: "recon", version: null },
+              workers: 1,
+              deadline: "2026-01-01T00:01:00Z",
+              command_plan: [{ phase: "campaign", command: "recon fuzz ." }],
+              paths: {}
+            },
+            implementedPropertiesPath: "implemented-properties.json",
+            implementedProperties: { properties: [] },
+            findingsPath: "findings.json",
+            findings: [],
+            campaignSummaryPath: "campaign-summary.json",
+            campaignSummary: {
+              outcome: "complete",
+              campaign_plan_ref: "campaign-plan.json",
+              implemented_property_suite_refs: ["implemented-properties.json"],
+              backend_results: [
+                {
+                  fuzzer_backend: "recon",
+                  status: "complete",
+                  result_ref: "recon-fuzzer-results.json"
+                }
+              ],
+              finding_refs: [],
+              reproducer_refs: []
+            }
+          }
+        }
+      },
+      "property-campaign-evidence-integrity": {
+        positive: {
+          evidence_files: [{ path: "backends/recon/results.json", size_bytes: 1, sha256: campaignEvidenceDigest }]
+        },
+        negative: {
+          evidence_files: [{ path: "backends/recon/results.json", size_bytes: 1, sha256: "0".repeat(64) }]
+        },
+        context: {
+          propertyCampaignEvidence: {
+            snapshots: [
+              {
+                path: "backends/recon/results.json",
+                exists: true,
+                regularFile: true,
+                symbolicLink: false,
+                linkCount: 1,
+                stableIdentity: true,
+                device: "1",
+                inode: "2",
+                bytes: campaignEvidenceBytes
+              }
+            ]
+          }
+        }
+      },
+      "property-campaign-publication-authority": {
+        positive: {
+          evidence_files: [{ path: "backends/recon/results.json", size_bytes: 1, sha256: campaignEvidenceDigest }]
+        },
+        negative: {
+          evidence_files: [{ path: "backends/recon/results.json", size_bytes: 1, sha256: "0".repeat(64) }]
+        },
+        context: {
+          artifactIdentity: {
+            runId: "run",
+            nodeId: "stateful-invariant-campaign",
+            attemptId: "campaign-attempt"
+          },
+          propertyCampaignEvidence: {
+            snapshots: [],
+            publicationAuthority: {
+              markerAttemptId: "campaign-attempt",
+              markerNodeId: "stateful-invariant-campaign",
+              publications: [{ path: "backends/recon/results.json", sha256: campaignEvidenceDigest }]
+            }
+          }
+        }
       },
       "generated-test-current-identity": {
         positive: { run_id: "run-current", node_id: "strategy-current" },
@@ -2286,6 +2608,30 @@ test("every contextual registration executes real positive and negative checks",
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("semantic gate diagnostics are deterministically capped", () => {
+  const document = Array.from({ length: MAX_SEMANTIC_GATE_ISSUES + 2 }, () => ({ id: "duplicate" }));
+  const result = executeSemanticGate("findings-id-uniqueness", { document });
+  assert.equal(result.status, "failed");
+  assert.equal(result.status === "failed" ? result.issues.length : 0, MAX_SEMANTIC_GATE_ISSUES);
+  assert.match(result.status === "failed" ? (result.issues.at(-1)?.message ?? "") : "", /issue limit reached/u);
+  assert.equal(result.status === "failed" ? result.issues[0]?.path : undefined, "$[1]");
+
+  const astralId = "🙂".repeat(200);
+  const byteHeavy = executeSemanticGate("findings-id-uniqueness", {
+    document: Array.from({ length: 100 }, () => ({ id: astralId }))
+  });
+  assert.equal(byteHeavy.status, "failed");
+  assert.ok(byteHeavy.status === "failed" && byteHeavy.issues.length < 99);
+  assert.ok(
+    byteHeavy.status === "failed" &&
+      Buffer.byteLength(JSON.stringify(byteHeavy.issues), "utf8") <= MAX_SEMANTIC_GATE_DIAGNOSTIC_BYTES
+  );
+  assert.match(
+    byteHeavy.status === "failed" ? (byteHeavy.issues.at(-1)?.message ?? "") : "",
+    /UTF-8 diagnostic-byte bounds/u
+  );
 });
 
 test("attempt source-event joins accept only declared host-side validation failures from NodeFinished", () => {

@@ -154,7 +154,7 @@ describe("expanded graph schema", () => {
       loop: { index: 0, count: 1, mode: "parallel" as const, attemptIndex: 0 },
       outputs: [
         {
-          path: "report.md",
+          path: ".review/report@v3+1.md",
           contract: "ultrafuzz/nonempty-markdown@1" as const,
           primary: true,
           contractDigest: "a".repeat(64)

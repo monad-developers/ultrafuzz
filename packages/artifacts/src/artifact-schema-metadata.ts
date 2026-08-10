@@ -211,11 +211,16 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
   "finding.schema.json": {
     role: "subschema",
     contractIds: [],
-    semanticGates: ["finding-evidence-span-consistency", "finding-projected-reference-uniqueness"],
+    semanticGates: [
+      "finding-campaign-provenance-coherence",
+      "finding-evidence-span-consistency",
+      "finding-projected-reference-uniqueness"
+    ],
     typescriptExport: "findingJsonSchema",
     zodParser: "findingSchema"
   },
   "findings.schema.json": artifact("ultrafuzz/findings@2", "findingsJsonSchema", "findingsSchema", [
+    "findings-campaign-provenance-coherence",
     "findings-evidence-span-consistency",
     "findings-id-uniqueness"
   ]),
@@ -279,10 +284,20 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "property-source-join"
   ]),
   "property-campaign.schema.json": artifact(
-    "ultrafuzz/property-campaign@2",
+    "ultrafuzz/property-campaign@3",
     "propertyCampaignJsonSchema",
     "propertyCampaignSchema",
-    ["property-campaign-failure-id-uniqueness"]
+    [
+      "property-campaign-coverage-metric-uniqueness",
+      "property-campaign-evidence-file-budget",
+      "property-campaign-evidence-file-closure",
+      "property-campaign-evidence-integrity",
+      "property-campaign-publication-authority",
+      "property-campaign-failure-id-uniqueness",
+      "property-campaign-property-result-id-uniqueness",
+      "property-campaign-document-coherence",
+      "property-campaign-context-joins"
+    ]
   ),
   "property-lens.schema.json": artifact(
     "ultrafuzz/property-lens@2",

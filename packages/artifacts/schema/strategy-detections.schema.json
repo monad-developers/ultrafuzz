@@ -1,57 +1,66 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "maxItems": 10000,
   "type": "array",
   "items": {
     "type": "object",
     "properties": {
       "dedupe_key": {
         "type": "string",
-        "minLength": 1
+        "minLength": 1,
+        "maxLength": 65536
       },
       "finding_id": {
         "type": "string",
-        "minLength": 1
+        "minLength": 1,
+        "maxLength": 65536
       },
       "family_id": {
         "type": "string",
-        "minLength": 1
+        "minLength": 1,
+        "maxLength": 65536
       },
       "title": {
         "type": "string",
-        "minLength": 1
+        "minLength": 1,
+        "maxLength": 65536
       },
       "hits": {
         "minItems": 1,
+        "maxItems": 10000,
         "type": "array",
         "items": {
           "type": "object",
           "properties": {
             "strategy": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 65536
             },
             "attempt_index": {
               "type": "integer",
               "minimum": 0,
-              "maximum": 9007199254740991
+              "maximum": 1000000
             },
             "model_id": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 65536
             },
             "model": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 65536
             },
             "model_index": {
               "type": "integer",
               "minimum": 0,
-              "maximum": 9007199254740991
+              "maximum": 1000000
             },
             "loop_index": {
               "type": "integer",
               "minimum": 0,
-              "maximum": 9007199254740991
+              "maximum": 1000000
             }
           },
           "required": ["strategy"],

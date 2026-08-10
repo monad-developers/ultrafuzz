@@ -11,6 +11,16 @@ import {
   ARTIFACT_CONTRACT_SCHEMA_FILES,
   ARTIFACT_SCHEMA_METADATA,
   JSON_ARTIFACT_CONTRACT_IDS,
+  MAX_FINDINGS,
+  MAX_FINDING_COUNT,
+  MAX_FINDING_NESTED_ITEMS,
+  MAX_FINDING_PATH_CODE_POINTS,
+  MAX_FINDING_STRING_CODE_POINTS,
+  MAX_PROPERTY_CAMPAIGN_COUNT,
+  MAX_PROPERTY_CAMPAIGN_NESTED_ITEMS,
+  MAX_PROPERTY_CAMPAIGN_PATH_CODE_POINTS,
+  MAX_PROPERTY_CAMPAIGN_RECORDS,
+  MAX_PROPERTY_CAMPAIGN_STRING_CODE_POINTS,
   NON_JSON_ARTIFACT_CONTRACT_IDS,
   analysisAccountingSummarySchema,
   analysisAttemptHistorySchema,
@@ -73,6 +83,7 @@ const removedContractIds = [
   "ultrafuzz/json-object@1",
   "ultrafuzz/properties@1",
   "ultrafuzz/property-campaign@1",
+  "ultrafuzz/property-campaign@2",
   "ultrafuzz/property-lens@1",
   "ultrafuzz/reference-expectations@1",
   "ultrafuzz/report@1"
@@ -179,6 +190,526 @@ test("Ajv and every retained Zod parser agree bidirectionally on positive, negat
       }
     }
   }
+});
+
+test("property-campaign v3 JSON Schema and Zod agree on every portable status conditional", () => {
+  const entry = artifactSchemaRegistry().find((candidate) => candidate.filename === "property-campaign.schema.json");
+  assert.ok(entry?.zodParser !== undefined);
+  const parser = (artifactExports as unknown as Record<string, unknown>)[entry.zodParser] as ZodLikeParser;
+  const base = structuredClone(contractFixtures["ultrafuzz/property-campaign@3"]!.valid) as Record<string, unknown>;
+  const executionBase = base.execution as Record<string, unknown>;
+  const coverageBase = base.coverage as Record<string, unknown>;
+  const withExecution = (execution: Record<string, unknown>): Record<string, unknown> => ({
+    ...structuredClone(base),
+    execution: { ...executionBase, ...execution }
+  });
+  const withCoverage = (coverage: Record<string, unknown>): Record<string, unknown> => ({
+    ...structuredClone(base),
+    coverage: { ...coverageBase, ...coverage }
+  });
+  const result = (status: string, failureIds: string[], reason: string | null): Record<string, unknown> => ({
+    property_id: "property-1",
+    status,
+    failure_ids: failureIds,
+    coverage_metric_names: [],
+    evidence_refs: [],
+    reason
+  });
+  const failure = (
+    status: string,
+    deterministicReproducerRef: string | null,
+    reproductionBlocker: string | null
+  ): Record<string, unknown> => ({
+    id: "failure-1",
+    status,
+    property_ids: ["property-1"],
+    entrypoint: "handler()",
+    sequence: ["handler()"],
+    precondition_evidence: ["fixture precondition held"],
+    raw_reproducer_ref: "backends/recon-fuzzer/results.json",
+    deterministic_reproducer_ref: deterministicReproducerRef,
+    reproduction_blocker: reproductionBlocker
+  });
+  const cases: Array<{ label: string; value: unknown; expected: boolean }> = [
+    { label: "execution-unavailable", value: base, expected: true },
+    {
+      label: "execution-complete",
+      value: withExecution({
+        status: "complete",
+        usable_results: true,
+        started_at: "2026-01-01T00:00:00Z",
+        exit_code: 0,
+        failure: null
+      }),
+      expected: true
+    },
+    {
+      label: "execution-complete-nonzero",
+      value: withExecution({
+        status: "complete",
+        usable_results: true,
+        started_at: "2026-01-01T00:00:00Z",
+        exit_code: 1,
+        failure: null
+      }),
+      expected: false
+    },
+    {
+      label: "execution-partial",
+      value: withExecution({
+        status: "partial",
+        usable_results: true,
+        started_at: "2026-01-01T00:00:00Z",
+        exit_code: 1,
+        failure: { category: "process-failed", summary: "The backend stopped early." }
+      }),
+      expected: true
+    },
+    {
+      label: "execution-partial-without-failure",
+      value: withExecution({
+        status: "partial",
+        usable_results: true,
+        started_at: "2026-01-01T00:00:00Z",
+        exit_code: 1,
+        failure: null
+      }),
+      expected: false
+    },
+    {
+      label: "execution-blocked",
+      value: withExecution({
+        status: "blocked",
+        usable_results: false,
+        started_at: null,
+        exit_code: null,
+        failure: { category: "smoke-failed", summary: "The smoke did not pass." }
+      }),
+      expected: true
+    },
+    {
+      label: "execution-blocked-after-start",
+      value: withExecution({
+        status: "blocked",
+        usable_results: false,
+        started_at: "2026-01-01T00:00:00Z",
+        exit_code: null,
+        failure: { category: "smoke-failed", summary: "The smoke did not pass." }
+      }),
+      expected: false
+    },
+    {
+      label: "execution-timed-out",
+      value: withExecution({
+        status: "timed-out",
+        usable_results: true,
+        started_at: "2026-01-01T00:00:00Z",
+        exit_code: null,
+        failure: { category: "deadline-exceeded", summary: "The deadline elapsed." }
+      }),
+      expected: true
+    },
+    {
+      label: "execution-timed-out-wrong-category",
+      value: withExecution({
+        status: "timed-out",
+        usable_results: true,
+        started_at: "2026-01-01T00:00:00Z",
+        exit_code: null,
+        failure: { category: "process-failed", summary: "The deadline elapsed." }
+      }),
+      expected: false
+    },
+    {
+      label: "execution-unavailable-wrong-category",
+      value: withExecution({ failure: { category: "process-failed", summary: "Recon is unavailable." } }),
+      expected: false
+    },
+    {
+      label: "coverage-reported",
+      value: withCoverage({
+        status: "reported",
+        metrics: [{ name: "executions", value: 1, unit: "count", source_ref: "backends/recon-fuzzer/results.json" }],
+        unavailable_reason: null
+      }),
+      expected: true
+    },
+    {
+      label: "coverage-count-fraction",
+      value: withCoverage({
+        status: "reported",
+        metrics: [{ name: "executions", value: 1.5, unit: "count", source_ref: "backends/recon-fuzzer/results.json" }],
+        unavailable_reason: null
+      }),
+      expected: false
+    },
+    {
+      label: "coverage-ratio-over-one",
+      value: withCoverage({
+        status: "reported",
+        metrics: [
+          { name: "branch-ratio", value: 1.01, unit: "ratio", source_ref: "backends/recon-fuzzer/results.json" }
+        ],
+        unavailable_reason: null
+      }),
+      expected: false
+    },
+    {
+      label: "coverage-percent-over-one-hundred",
+      value: withCoverage({
+        status: "reported",
+        metrics: [
+          { name: "branch-percent", value: 100.1, unit: "percent", source_ref: "backends/recon-fuzzer/results.json" }
+        ],
+        unavailable_reason: null
+      }),
+      expected: false
+    },
+    {
+      label: "coverage-reported-empty",
+      value: withCoverage({ status: "reported", metrics: [], unavailable_reason: null }),
+      expected: false
+    },
+    {
+      label: "coverage-unavailable-with-metric",
+      value: withCoverage({
+        status: "unavailable",
+        metrics: [{ name: "executions", value: 1, unit: "count", source_ref: "backends/recon-fuzzer/results.json" }],
+        unavailable_reason: "The backend did not report coverage."
+      }),
+      expected: false
+    },
+    {
+      label: "property-result-failed",
+      value: { ...structuredClone(base), property_results: [result("failed", ["failure-1"], null)] },
+      expected: true
+    },
+    {
+      label: "property-result-failed-without-failure",
+      value: { ...structuredClone(base), property_results: [result("failed", [], null)] },
+      expected: false
+    },
+    {
+      label: "property-result-passed",
+      value: { ...structuredClone(base), property_results: [result("passed", [], null)] },
+      expected: true
+    },
+    {
+      label: "property-result-passed-with-reason",
+      value: { ...structuredClone(base), property_results: [result("passed", [], "Unexpected reason")] },
+      expected: false
+    },
+    {
+      label: "property-result-inconclusive",
+      value: {
+        ...structuredClone(base),
+        property_results: [result("inconclusive", [], "The run ended before classification.")]
+      },
+      expected: true
+    },
+    {
+      label: "property-result-inconclusive-without-reason",
+      value: { ...structuredClone(base), property_results: [result("inconclusive", [], null)] },
+      expected: false
+    },
+    {
+      label: "failure-reproduced",
+      value: {
+        ...structuredClone(base),
+        failures: [failure("reproduced", "backends/recon-fuzzer/reproducers/failure-1.t.sol", null)]
+      },
+      expected: true
+    },
+    {
+      label: "failure-reproduced-without-deterministic-path",
+      value: { ...structuredClone(base), failures: [failure("reproduced", null, null)] },
+      expected: false
+    },
+    {
+      label: "failure-blocked",
+      value: {
+        ...structuredClone(base),
+        failures: [failure("blocked-unreproduced", null, "The raw sequence did not replay deterministically.")]
+      },
+      expected: true
+    },
+    {
+      label: "failure-blocked-without-blocker",
+      value: { ...structuredClone(base), failures: [failure("blocked-unreproduced", null, null)] },
+      expected: false
+    },
+    {
+      label: "unsafe-plan-reference",
+      value: { ...structuredClone(base), campaign_plan_ref: "../campaign-plan.json" },
+      expected: false
+    },
+    {
+      label: "canonical-plan-reference",
+      value: { ...structuredClone(base), campaign_plan_ref: ".plans/campaign@v3+smoke.json" },
+      expected: true
+    },
+    {
+      label: "overlong-plan-reference-segment",
+      value: { ...structuredClone(base), campaign_plan_ref: `${"a".repeat(129)}/campaign-plan.json` },
+      expected: false
+    },
+    {
+      label: "unsafe-evidence-reference",
+      value: {
+        ...structuredClone(base),
+        property_results: [
+          {
+            ...result("inconclusive", [], "The run ended before classification."),
+            evidence_refs: ["/tmp/result.json"]
+          }
+        ]
+      },
+      expected: false
+    }
+  ];
+
+  for (const fixture of cases) {
+    assertParity(entry.id, parser, fixture.value, fixture.expected, `property-campaign:${fixture.label}`);
+  }
+});
+
+test("finding-derived and property-campaign resource bounds agree in Ajv and Zod", () => {
+  const registry = artifactSchemaRegistry();
+  const exports = artifactExports as unknown as Record<string, unknown>;
+  const findingEntry = registry.find((candidate) => candidate.filename === "finding.schema.json");
+  const findingsEntry = registry.find((candidate) => candidate.filename === "findings.schema.json");
+  const campaignEntry = registry.find((candidate) => candidate.filename === "property-campaign.schema.json");
+  const strategyEntry = registry.find((candidate) => candidate.filename === "strategy-detections.schema.json");
+  const triagedEntry = registry.find((candidate) => candidate.filename === "triaged-findings.schema.json");
+  const severityEntry = registry.find((candidate) => candidate.filename === "severity-classified-findings.schema.json");
+  const lifecycleEntry = registry.find((candidate) => candidate.filename === "finding-lifecycle-ledger.schema.json");
+  assert.ok(findingEntry?.zodParser !== undefined);
+  assert.ok(findingsEntry?.zodParser !== undefined);
+  assert.ok(campaignEntry?.zodParser !== undefined);
+  assert.ok(strategyEntry?.zodParser !== undefined);
+  assert.ok(triagedEntry?.zodParser !== undefined);
+  assert.ok(severityEntry?.zodParser !== undefined);
+  assert.ok(lifecycleEntry?.zodParser !== undefined);
+  const findingParser = exports[findingEntry.zodParser] as ZodLikeParser;
+  const findingsParser = exports[findingsEntry.zodParser] as ZodLikeParser;
+  const campaignParser = exports[campaignEntry.zodParser] as ZodLikeParser;
+  const strategyParser = exports[strategyEntry.zodParser] as ZodLikeParser;
+  const triagedParser = exports[triagedEntry.zodParser] as ZodLikeParser;
+  const severityParser = exports[severityEntry.zodParser] as ZodLikeParser;
+  const lifecycleParser = exports[lifecycleEntry.zodParser] as ZodLikeParser;
+  const finding = structuredClone((contractFixtures["ultrafuzz/findings@2"]!.valid as unknown[])[0]) as Record<
+    string,
+    unknown
+  >;
+  const campaign = structuredClone(contractFixtures["ultrafuzz/property-campaign@3"]!.valid) as Record<string, unknown>;
+  const assertBoundary = (
+    schemaId: string,
+    parser: ZodLikeParser,
+    label: string,
+    boundary: unknown,
+    overflow: unknown
+  ): void => {
+    assertParity(schemaId, parser, boundary, true, `${label}:boundary`);
+    assertParity(schemaId, parser, overflow, false, `${label}:overflow`);
+  };
+
+  const findingString = { ...finding, summary: "🙂".repeat(MAX_FINDING_STRING_CODE_POINTS) };
+  assertBoundary(findingEntry.id, findingParser, "finding:string-code-points", findingString, {
+    ...findingString,
+    summary: `${findingString.summary as string}🙂`
+  });
+  const findingPath = { ...finding, affected_files: ["🙂".repeat(MAX_FINDING_PATH_CODE_POINTS)] };
+  assertBoundary(findingEntry.id, findingParser, "finding:path-code-points", findingPath, {
+    ...findingPath,
+    affected_files: [`${(findingPath.affected_files as string[])[0]}🙂`]
+  });
+  const findingNested = { ...finding, notes: Array<string>(MAX_FINDING_NESTED_ITEMS).fill("note") };
+  assertBoundary(findingEntry.id, findingParser, "finding:nested-items", findingNested, {
+    ...findingNested,
+    notes: [...(findingNested.notes as string[]), "overflow"]
+  });
+  assertBoundary(
+    findingEntry.id,
+    findingParser,
+    "finding:numeric-count",
+    { ...finding, attempt_index: MAX_FINDING_COUNT },
+    { ...finding, attempt_index: MAX_FINDING_COUNT + 1 }
+  );
+  const findingsBoundary = Array<Record<string, unknown>>(MAX_FINDINGS).fill(finding);
+  assertBoundary(findingsEntry.id, findingsParser, "findings:top-level-items", findingsBoundary, [
+    ...findingsBoundary,
+    finding
+  ]);
+
+  const strategyDetection = structuredClone(
+    (contractFixtures["ultrafuzz/strategy-detections@1"]!.valid as unknown[])[0]
+  ) as Record<string, unknown>;
+  const strategyBoundary = Array<Record<string, unknown>>(MAX_FINDINGS).fill(strategyDetection);
+  assertBoundary(strategyEntry.id, strategyParser, "strategy-detections:top-level-items", strategyBoundary, [
+    ...strategyBoundary,
+    strategyDetection
+  ]);
+  const strategyNested = {
+    ...strategyDetection,
+    hits: Array<Record<string, unknown>>(MAX_FINDING_NESTED_ITEMS).fill({ strategy: "strategy-1" })
+  };
+  assertBoundary(
+    strategyEntry.id,
+    strategyParser,
+    "strategy-detections:hits",
+    [strategyNested],
+    [
+      {
+        ...strategyNested,
+        hits: [...(strategyNested.hits as Record<string, unknown>[]), { strategy: "overflow" }]
+      }
+    ]
+  );
+
+  const triaged = structuredClone((contractFixtures["ultrafuzz/triaged-findings@1"]!.valid as unknown[])[0]) as Record<
+    string,
+    unknown
+  >;
+  const triagedBoundary = Array<Record<string, unknown>>(MAX_FINDINGS).fill(triaged);
+  assertBoundary(triagedEntry.id, triagedParser, "triaged-findings:top-level-items", triagedBoundary, [
+    ...triagedBoundary,
+    triaged
+  ]);
+  const triageNotes = {
+    ...triaged,
+    notes: Array<string>(MAX_FINDING_NESTED_ITEMS).fill("triage_reason=confirmed")
+  };
+  assertBoundary(
+    triagedEntry.id,
+    triagedParser,
+    "triaged-findings:notes",
+    [triageNotes],
+    [{ ...triageNotes, notes: [...(triageNotes.notes as string[]), "overflow"] }]
+  );
+  const triageReasonPrefix = "triage_reason=";
+  const triageAstral = {
+    ...triaged,
+    notes: [`${triageReasonPrefix}${"🙂".repeat(MAX_FINDING_STRING_CODE_POINTS - [...triageReasonPrefix].length)}`]
+  };
+  assertBoundary(
+    triagedEntry.id,
+    triagedParser,
+    "triaged-findings:note-code-points",
+    [triageAstral],
+    [{ ...triageAstral, notes: [`${(triageAstral.notes as string[])[0]}🙂`] }]
+  );
+
+  const severity = structuredClone(
+    (contractFixtures["ultrafuzz/severity-classified-findings@1"]!.valid as unknown[])[0]
+  ) as Record<string, unknown>;
+  const severityBoundary = Array<Record<string, unknown>>(MAX_FINDINGS).fill(severity);
+  assertBoundary(severityEntry.id, severityParser, "severity-findings:top-level-items", severityBoundary, [
+    ...severityBoundary,
+    severity
+  ]);
+  const severityAstral = { ...severity, severity_rationale: "🙂".repeat(MAX_FINDING_STRING_CODE_POINTS) };
+  assertBoundary(
+    severityEntry.id,
+    severityParser,
+    "severity-findings:rationale-code-points",
+    [severityAstral],
+    [{ ...severityAstral, severity_rationale: `${severityAstral.severity_rationale}🙂` }]
+  );
+
+  const lifecycleRecord = {
+    dedupe_key: "finding-1",
+    source_artifacts: [],
+    strategy_hits: [],
+    stages: [{ stage: "raw", artifact_path: "findings/raw.json", finding_id: "finding-1" }]
+  };
+  const lifecycle = {
+    schema_version: "ultrafuzz.finding-lifecycle-ledger.v1",
+    records: Array<Record<string, unknown>>(MAX_FINDINGS).fill(lifecycleRecord)
+  };
+  assertBoundary(lifecycleEntry.id, lifecycleParser, "finding-lifecycle:top-level-records", lifecycle, {
+    ...lifecycle,
+    records: [...lifecycle.records, lifecycleRecord]
+  });
+  const lifecycleStages = {
+    schema_version: lifecycle.schema_version,
+    records: [
+      {
+        ...lifecycleRecord,
+        stages: Array<Record<string, unknown>>(MAX_FINDING_NESTED_ITEMS).fill({
+          stage: "raw",
+          artifact_path: "findings/raw.json",
+          finding_id: "finding-1"
+        })
+      }
+    ]
+  };
+  assertBoundary(lifecycleEntry.id, lifecycleParser, "finding-lifecycle:stages", lifecycleStages, {
+    ...lifecycleStages,
+    records: [
+      {
+        ...lifecycleStages.records[0],
+        stages: [
+          ...lifecycleStages.records[0]!.stages,
+          { stage: "triaged", artifact_path: "findings/triaged.json", finding_id: "finding-1" }
+        ]
+      }
+    ]
+  });
+
+  const campaignString = { ...campaign, fuzzer_backend: "🙂".repeat(MAX_PROPERTY_CAMPAIGN_STRING_CODE_POINTS) };
+  assertBoundary(campaignEntry.id, campaignParser, "property-campaign:string-code-points", campaignString, {
+    ...campaignString,
+    fuzzer_backend: `${campaignString.fuzzer_backend as string}🙂`
+  });
+  const campaignPathSegments = [
+    ...Array<string>(31).fill("a".repeat(128)),
+    "a".repeat(MAX_PROPERTY_CAMPAIGN_PATH_CODE_POINTS - 31 * 128 - 31)
+  ];
+  const campaignPath = { ...campaign, campaign_plan_ref: campaignPathSegments.join("/") };
+  assertBoundary(campaignEntry.id, campaignParser, "property-campaign:path-code-points", campaignPath, {
+    ...campaignPath,
+    campaign_plan_ref: `${campaignPath.campaign_plan_ref as string}a`
+  });
+  const failure = {
+    id: "failure-1",
+    status: "reproduced",
+    property_ids: ["property-1"],
+    entrypoint: "handler()",
+    sequence: Array<string>(MAX_PROPERTY_CAMPAIGN_NESTED_ITEMS).fill("handler()"),
+    precondition_evidence: [],
+    raw_reproducer_ref: "backends/recon-fuzzer/results.json",
+    deterministic_reproducer_ref: "backends/recon-fuzzer/reproducers/failure-1.t.sol",
+    reproduction_blocker: null
+  };
+  const campaignNested = { ...campaign, failures: [failure] };
+  assertBoundary(campaignEntry.id, campaignParser, "property-campaign:nested-items", campaignNested, {
+    ...campaignNested,
+    failures: [{ ...failure, sequence: [...failure.sequence, "overflow"] }]
+  });
+  const propertyResult = {
+    property_id: "property-1",
+    status: "passed",
+    failure_ids: [],
+    coverage_metric_names: [],
+    evidence_refs: [],
+    reason: null
+  };
+  const campaignRecords = {
+    ...campaign,
+    property_results: Array<Record<string, unknown>>(MAX_PROPERTY_CAMPAIGN_RECORDS).fill(propertyResult)
+  };
+  assertBoundary(campaignEntry.id, campaignParser, "property-campaign:top-level-records", campaignRecords, {
+    ...campaignRecords,
+    property_results: [...(campaignRecords.property_results as Record<string, unknown>[]), propertyResult]
+  });
+  const campaignExecution = campaign.execution as Record<string, unknown>;
+  assertBoundary(
+    campaignEntry.id,
+    campaignParser,
+    "property-campaign:numeric-count",
+    { ...campaign, execution: { ...campaignExecution, workers: MAX_PROPERTY_CAMPAIGN_COUNT } },
+    { ...campaign, execution: { ...campaignExecution, workers: MAX_PROPERTY_CAMPAIGN_COUNT + 1 } }
+  );
 });
 
 test("analysis-bundle payload schemas and retained Zod reject the same current-version and boundary mutations", () => {
@@ -689,7 +1220,18 @@ test("Ajv and retained Zod parsers agree on canonical unique-array constraints",
   const finding = structuredClone(
     (contractFixtures["ultrafuzz/findings@2"]!.valid as Array<Record<string, unknown>>)[0]!
   );
-  finding.contributing_backend_failures = ["backend-failure-1", "backend-failure-1"];
+  finding.contributing_backend_failures = [
+    {
+      fuzzer_backend: "recon",
+      failure_id: "backend-failure-1",
+      raw_result_ref: "recon-fuzzer-results.json"
+    },
+    {
+      fuzzer_backend: "recon",
+      failure_id: "backend-failure-1",
+      raw_result_ref: "recon-fuzzer-results.json"
+    }
+  ];
 
   const implementedBase = contractFixtures["ultrafuzz/implemented-properties@3"]!.valid as Record<string, unknown>;
   const implementedWithDuplicateImplementationPaths: Record<string, unknown> & {

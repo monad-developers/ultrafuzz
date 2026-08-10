@@ -82,11 +82,13 @@
           },
           "id": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 65536
           },
           "title": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 65536
           },
           "status": {
             "type": "string",
@@ -102,7 +104,8 @@
           },
           "summary": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 65536
           },
           "triage_classification": {
             "type": "string",
@@ -119,118 +122,131 @@
           },
           "source_node_id": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 65536
           },
           "strategy": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 65536
           },
           "dynamic_strategy_id": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 65536
           },
           "enumerator_id": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 65536
           },
           "attempt_index": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 9007199254740991
+            "maximum": 1000000
           },
           "model_id": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 65536
           },
           "model": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 65536
           },
           "model_index": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 9007199254740991
+            "maximum": 1000000
           },
           "loop_index": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 9007199254740991
+            "maximum": 1000000
           },
           "affected_files": {
+            "maxItems": 10000,
             "type": "array",
             "items": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 4096
             },
             "uniqueItems": true
           },
           "affected_functions": {
+            "maxItems": 10000,
             "type": "array",
             "items": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 65536
             },
             "uniqueItems": true
           },
           "patch_refs": {
+            "maxItems": 10000,
             "type": "array",
             "items": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 4096
             },
             "uniqueItems": true
           },
           "property_ids": {
             "minItems": 1,
+            "maxItems": 10000,
             "type": "array",
             "items": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 65536
             },
             "uniqueItems": true
           },
           "fuzzer_backend": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 65536
           },
           "fuzzer_backends": {
             "minItems": 1,
+            "maxItems": 10000,
             "type": "array",
             "items": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 65536
             },
             "uniqueItems": true
           },
           "contributing_backend_failures": {
             "minItems": 1,
+            "maxItems": 10000,
             "type": "array",
             "items": {
-              "anyOf": [
-                {
+              "type": "object",
+              "properties": {
+                "fuzzer_backend": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 },
-                {
-                  "type": "object",
-                  "properties": {
-                    "fuzzer_backend": {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    "failure_id": {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    "raw_result_ref": {
-                      "type": "string",
-                      "minLength": 1
-                    }
-                  },
-                  "required": ["fuzzer_backend", "failure_id"],
-                  "additionalProperties": false
+                "failure_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 65536
+                },
+                "raw_result_ref": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
                 }
-              ]
+              },
+              "required": ["fuzzer_backend", "failure_id", "raw_result_ref"],
+              "additionalProperties": false
             },
             "uniqueItems": true
           },
@@ -240,11 +256,12 @@
               "pre_dedup_count": {
                 "type": "integer",
                 "exclusiveMinimum": 0,
-                "maximum": 9007199254740991
+                "maximum": 1000000
               },
               "basis": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 65536
               }
             },
             "required": ["pre_dedup_count"],
@@ -252,122 +269,147 @@
           },
           "dedupe_key": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 65536
           },
           "family_id": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 65536
           },
           "family_variants": {
+            "maxItems": 10000,
             "type": "array",
             "items": {
               "type": "object",
               "properties": {
                 "id": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 },
                 "title": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 },
                 "summary": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 },
                 "dedupe_key": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 },
                 "strategy": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 },
                 "attempt_index": {
                   "type": "integer",
                   "minimum": 0,
-                  "maximum": 9007199254740991
+                  "maximum": 1000000
                 },
                 "model_id": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 },
                 "model": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 },
                 "model_index": {
                   "type": "integer",
                   "minimum": 0,
-                  "maximum": 9007199254740991
+                  "maximum": 1000000
                 },
                 "loop_index": {
                   "type": "integer",
                   "minimum": 0,
-                  "maximum": 9007199254740991
+                  "maximum": 1000000
                 },
                 "affected_files": {
+                  "maxItems": 10000,
                   "type": "array",
                   "items": {
                     "type": "string",
-                    "minLength": 1
+                    "minLength": 1,
+                    "maxLength": 4096
                   },
                   "uniqueItems": true
                 },
                 "affected_functions": {
+                  "maxItems": 10000,
                   "type": "array",
                   "items": {
                     "type": "string",
-                    "minLength": 1
+                    "minLength": 1,
+                    "maxLength": 65536
                   },
                   "uniqueItems": true
                 },
                 "evidence": {
+                  "maxItems": 10000,
                   "type": "array",
                   "items": {
                     "anyOf": [
                       {
                         "type": "string",
-                        "minLength": 1
+                        "minLength": 1,
+                        "maxLength": 65536
                       },
                       {
                         "type": "object",
                         "properties": {
                           "kind": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "path": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 4096
                           },
                           "fragment": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "detail": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "symbol": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "command": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "summary": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "observed": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "expected": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           }
                         },
                         "additionalProperties": false,
@@ -378,49 +420,58 @@
                         "properties": {
                           "kind": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "path": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 4096
                           },
                           "fragment": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "detail": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "symbol": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "command": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "summary": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "observed": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "expected": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "line": {
                             "type": "integer",
                             "exclusiveMinimum": 0,
-                            "maximum": 9007199254740991
+                            "maximum": 1000000
                           },
                           "end_line": {
                             "type": "integer",
                             "exclusiveMinimum": 0,
-                            "maximum": 9007199254740991
+                            "maximum": 1000000
                           }
                         },
                         "required": ["line"],
@@ -431,42 +482,52 @@
                         "properties": {
                           "kind": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "path": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 4096
                           },
                           "fragment": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "detail": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "symbol": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "command": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "summary": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "observed": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "expected": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "line_ranges": {
                             "minItems": 2,
+                            "maxItems": 10000,
                             "type": "array",
                             "items": {
                               "type": "object",
@@ -474,12 +535,12 @@
                                 "line": {
                                   "type": "integer",
                                   "exclusiveMinimum": 0,
-                                  "maximum": 9007199254740991
+                                  "maximum": 1000000
                                 },
                                 "end_line": {
                                   "type": "integer",
                                   "exclusiveMinimum": 0,
-                                  "maximum": 9007199254740991
+                                  "maximum": 1000000
                                 }
                               },
                               "required": ["line"],
@@ -499,29 +560,35 @@
             }
           },
           "related_findings": {
+            "maxItems": 10000,
             "type": "array",
             "items": {
               "type": "object",
               "properties": {
                 "id": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 },
                 "title": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 },
                 "relationship": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 },
                 "summary": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 },
                 "dedupe_key": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 }
               },
               "required": ["id", "title", "relationship", "summary"],
@@ -529,58 +596,71 @@
             }
           },
           "notes": {
+            "maxItems": 10000,
             "type": "array",
             "items": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 65536
             }
           },
           "evidence": {
+            "maxItems": 10000,
             "type": "array",
             "items": {
               "anyOf": [
                 {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 },
                 {
                   "type": "object",
                   "properties": {
                     "kind": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "path": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 4096
                     },
                     "fragment": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "detail": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "symbol": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "command": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "summary": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "observed": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "expected": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     }
                   },
                   "additionalProperties": false,
@@ -591,49 +671,58 @@
                   "properties": {
                     "kind": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "path": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 4096
                     },
                     "fragment": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "detail": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "symbol": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "command": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "summary": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "observed": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "expected": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "line": {
                       "type": "integer",
                       "exclusiveMinimum": 0,
-                      "maximum": 9007199254740991
+                      "maximum": 1000000
                     },
                     "end_line": {
                       "type": "integer",
                       "exclusiveMinimum": 0,
-                      "maximum": 9007199254740991
+                      "maximum": 1000000
                     }
                   },
                   "required": ["line"],
@@ -644,42 +733,52 @@
                   "properties": {
                     "kind": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "path": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 4096
                     },
                     "fragment": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "detail": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "symbol": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "command": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "summary": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "observed": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "expected": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "line_ranges": {
                       "minItems": 2,
+                      "maxItems": 10000,
                       "type": "array",
                       "items": {
                         "type": "object",
@@ -687,12 +786,12 @@
                           "line": {
                             "type": "integer",
                             "exclusiveMinimum": 0,
-                            "maximum": 9007199254740991
+                            "maximum": 1000000
                           },
                           "end_line": {
                             "type": "integer",
                             "exclusiveMinimum": 0,
-                            "maximum": 9007199254740991
+                            "maximum": 1000000
                           }
                         },
                         "required": ["line"],
@@ -759,34 +858,38 @@
           },
           "recommendation": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 65536
           },
           "recommended_next_action": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 65536
           },
           "strategy_provenance": {
             "type": "object",
             "properties": {
               "detection_rates": {
                 "minItems": 1,
+                "maxItems": 10000,
                 "type": "array",
                 "items": {
                   "type": "object",
                   "properties": {
                     "strategy": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "detections": {
                       "type": "integer",
                       "minimum": 0,
-                      "maximum": 9007199254740991
+                      "maximum": 1000000
                     },
                     "configured_loops": {
                       "type": "integer",
                       "exclusiveMinimum": 0,
-                      "maximum": 9007199254740991
+                      "maximum": 1000000
                     }
                   },
                   "required": ["strategy", "detections", "configured_loops"],
@@ -794,36 +897,40 @@
                 }
               },
               "attempts": {
+                "maxItems": 10000,
                 "type": "array",
                 "items": {
                   "type": "object",
                   "properties": {
                     "strategy": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "attempt_index": {
                       "type": "integer",
                       "minimum": 0,
-                      "maximum": 9007199254740991
+                      "maximum": 1000000
                     },
                     "model_id": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "model": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "model_index": {
                       "type": "integer",
                       "minimum": 0,
-                      "maximum": 9007199254740991
+                      "maximum": 1000000
                     },
                     "loop_index": {
                       "type": "integer",
                       "minimum": 0,
-                      "maximum": 9007199254740991
+                      "maximum": 1000000
                     }
                   },
                   "required": ["strategy"],
@@ -839,28 +946,34 @@
             "properties": {
               "dedupe_key": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 65536
               },
               "source_artifacts": {
+                "maxItems": 10000,
                 "type": "array",
                 "items": {
                   "type": "object",
                   "properties": {
                     "path": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 4096
                     },
                     "node_id": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "finding_id": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "title": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "relationship": {
                       "type": "string",
@@ -872,36 +985,40 @@
                 }
               },
               "strategy_hits": {
+                "maxItems": 10000,
                 "type": "array",
                 "items": {
                   "type": "object",
                   "properties": {
                     "strategy": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "attempt_index": {
                       "type": "integer",
                       "minimum": 0,
-                      "maximum": 9007199254740991
+                      "maximum": 1000000
                     },
                     "model_id": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "model": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "model_index": {
                       "type": "integer",
                       "minimum": 0,
-                      "maximum": 9007199254740991
+                      "maximum": 1000000
                     },
                     "loop_index": {
                       "type": "integer",
                       "minimum": 0,
-                      "maximum": 9007199254740991
+                      "maximum": 1000000
                     }
                   },
                   "required": ["strategy"],
@@ -909,18 +1026,22 @@
                 }
               },
               "duplicate_finding_ids": {
+                "maxItems": 10000,
                 "type": "array",
                 "items": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 },
                 "uniqueItems": true
               },
               "family_variant_keys": {
+                "maxItems": 10000,
                 "type": "array",
                 "items": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 },
                 "uniqueItems": true
               },
@@ -939,11 +1060,13 @@
               },
               "triage_reason": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 65536
               },
               "demotion_reason": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 65536
               },
               "canonical_severity": {
                 "type": "string",
@@ -958,6 +1081,7 @@
                 "enum": ["promoted-again", "rediscovered-but-demoted", "not-reproduced", "not-searched"]
               },
               "stages": {
+                "maxItems": 10000,
                 "type": "array",
                 "items": {
                   "type": "object",
@@ -968,11 +1092,13 @@
                     },
                     "artifact_path": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 4096
                     },
                     "finding_id": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     }
                   },
                   "required": ["stage", "artifact_path"],
@@ -1016,11 +1142,13 @@
           },
           "id": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 65536
           },
           "title": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 65536
           },
           "status": {
             "type": "string",
@@ -1036,7 +1164,8 @@
           },
           "summary": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 65536
           },
           "triage_classification": {
             "type": "string",
@@ -1053,118 +1182,131 @@
           },
           "source_node_id": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 65536
           },
           "strategy": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 65536
           },
           "dynamic_strategy_id": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 65536
           },
           "enumerator_id": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 65536
           },
           "attempt_index": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 9007199254740991
+            "maximum": 1000000
           },
           "model_id": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 65536
           },
           "model": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 65536
           },
           "model_index": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 9007199254740991
+            "maximum": 1000000
           },
           "loop_index": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 9007199254740991
+            "maximum": 1000000
           },
           "affected_files": {
+            "maxItems": 10000,
             "type": "array",
             "items": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 4096
             },
             "uniqueItems": true
           },
           "affected_functions": {
+            "maxItems": 10000,
             "type": "array",
             "items": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 65536
             },
             "uniqueItems": true
           },
           "patch_refs": {
+            "maxItems": 10000,
             "type": "array",
             "items": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 4096
             },
             "uniqueItems": true
           },
           "property_ids": {
             "minItems": 1,
+            "maxItems": 10000,
             "type": "array",
             "items": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 65536
             },
             "uniqueItems": true
           },
           "fuzzer_backend": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 65536
           },
           "fuzzer_backends": {
             "minItems": 1,
+            "maxItems": 10000,
             "type": "array",
             "items": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 65536
             },
             "uniqueItems": true
           },
           "contributing_backend_failures": {
             "minItems": 1,
+            "maxItems": 10000,
             "type": "array",
             "items": {
-              "anyOf": [
-                {
+              "type": "object",
+              "properties": {
+                "fuzzer_backend": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 },
-                {
-                  "type": "object",
-                  "properties": {
-                    "fuzzer_backend": {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    "failure_id": {
-                      "type": "string",
-                      "minLength": 1
-                    },
-                    "raw_result_ref": {
-                      "type": "string",
-                      "minLength": 1
-                    }
-                  },
-                  "required": ["fuzzer_backend", "failure_id"],
-                  "additionalProperties": false
+                "failure_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 65536
+                },
+                "raw_result_ref": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
                 }
-              ]
+              },
+              "required": ["fuzzer_backend", "failure_id", "raw_result_ref"],
+              "additionalProperties": false
             },
             "uniqueItems": true
           },
@@ -1174,11 +1316,12 @@
               "pre_dedup_count": {
                 "type": "integer",
                 "exclusiveMinimum": 0,
-                "maximum": 9007199254740991
+                "maximum": 1000000
               },
               "basis": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 65536
               }
             },
             "required": ["pre_dedup_count"],
@@ -1186,122 +1329,147 @@
           },
           "dedupe_key": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 65536
           },
           "family_id": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 65536
           },
           "family_variants": {
+            "maxItems": 10000,
             "type": "array",
             "items": {
               "type": "object",
               "properties": {
                 "id": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 },
                 "title": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 },
                 "summary": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 },
                 "dedupe_key": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 },
                 "strategy": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 },
                 "attempt_index": {
                   "type": "integer",
                   "minimum": 0,
-                  "maximum": 9007199254740991
+                  "maximum": 1000000
                 },
                 "model_id": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 },
                 "model": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 },
                 "model_index": {
                   "type": "integer",
                   "minimum": 0,
-                  "maximum": 9007199254740991
+                  "maximum": 1000000
                 },
                 "loop_index": {
                   "type": "integer",
                   "minimum": 0,
-                  "maximum": 9007199254740991
+                  "maximum": 1000000
                 },
                 "affected_files": {
+                  "maxItems": 10000,
                   "type": "array",
                   "items": {
                     "type": "string",
-                    "minLength": 1
+                    "minLength": 1,
+                    "maxLength": 4096
                   },
                   "uniqueItems": true
                 },
                 "affected_functions": {
+                  "maxItems": 10000,
                   "type": "array",
                   "items": {
                     "type": "string",
-                    "minLength": 1
+                    "minLength": 1,
+                    "maxLength": 65536
                   },
                   "uniqueItems": true
                 },
                 "evidence": {
+                  "maxItems": 10000,
                   "type": "array",
                   "items": {
                     "anyOf": [
                       {
                         "type": "string",
-                        "minLength": 1
+                        "minLength": 1,
+                        "maxLength": 65536
                       },
                       {
                         "type": "object",
                         "properties": {
                           "kind": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "path": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 4096
                           },
                           "fragment": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "detail": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "symbol": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "command": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "summary": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "observed": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "expected": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           }
                         },
                         "additionalProperties": false,
@@ -1312,49 +1480,58 @@
                         "properties": {
                           "kind": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "path": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 4096
                           },
                           "fragment": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "detail": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "symbol": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "command": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "summary": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "observed": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "expected": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "line": {
                             "type": "integer",
                             "exclusiveMinimum": 0,
-                            "maximum": 9007199254740991
+                            "maximum": 1000000
                           },
                           "end_line": {
                             "type": "integer",
                             "exclusiveMinimum": 0,
-                            "maximum": 9007199254740991
+                            "maximum": 1000000
                           }
                         },
                         "required": ["line"],
@@ -1365,42 +1542,52 @@
                         "properties": {
                           "kind": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "path": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 4096
                           },
                           "fragment": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "detail": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "symbol": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "command": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "summary": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "observed": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "expected": {
                             "type": "string",
-                            "minLength": 1
+                            "minLength": 1,
+                            "maxLength": 65536
                           },
                           "line_ranges": {
                             "minItems": 2,
+                            "maxItems": 10000,
                             "type": "array",
                             "items": {
                               "type": "object",
@@ -1408,12 +1595,12 @@
                                 "line": {
                                   "type": "integer",
                                   "exclusiveMinimum": 0,
-                                  "maximum": 9007199254740991
+                                  "maximum": 1000000
                                 },
                                 "end_line": {
                                   "type": "integer",
                                   "exclusiveMinimum": 0,
-                                  "maximum": 9007199254740991
+                                  "maximum": 1000000
                                 }
                               },
                               "required": ["line"],
@@ -1433,29 +1620,35 @@
             }
           },
           "related_findings": {
+            "maxItems": 10000,
             "type": "array",
             "items": {
               "type": "object",
               "properties": {
                 "id": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 },
                 "title": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 },
                 "relationship": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 },
                 "summary": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 },
                 "dedupe_key": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 }
               },
               "required": ["id", "title", "relationship", "summary"],
@@ -1463,58 +1656,71 @@
             }
           },
           "notes": {
+            "maxItems": 10000,
             "type": "array",
             "items": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 65536
             }
           },
           "evidence": {
+            "maxItems": 10000,
             "type": "array",
             "items": {
               "anyOf": [
                 {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 },
                 {
                   "type": "object",
                   "properties": {
                     "kind": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "path": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 4096
                     },
                     "fragment": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "detail": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "symbol": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "command": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "summary": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "observed": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "expected": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     }
                   },
                   "additionalProperties": false,
@@ -1525,49 +1731,58 @@
                   "properties": {
                     "kind": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "path": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 4096
                     },
                     "fragment": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "detail": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "symbol": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "command": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "summary": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "observed": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "expected": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "line": {
                       "type": "integer",
                       "exclusiveMinimum": 0,
-                      "maximum": 9007199254740991
+                      "maximum": 1000000
                     },
                     "end_line": {
                       "type": "integer",
                       "exclusiveMinimum": 0,
-                      "maximum": 9007199254740991
+                      "maximum": 1000000
                     }
                   },
                   "required": ["line"],
@@ -1578,42 +1793,52 @@
                   "properties": {
                     "kind": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "path": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 4096
                     },
                     "fragment": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "detail": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "symbol": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "command": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "summary": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "observed": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "expected": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "line_ranges": {
                       "minItems": 2,
+                      "maxItems": 10000,
                       "type": "array",
                       "items": {
                         "type": "object",
@@ -1621,12 +1846,12 @@
                           "line": {
                             "type": "integer",
                             "exclusiveMinimum": 0,
-                            "maximum": 9007199254740991
+                            "maximum": 1000000
                           },
                           "end_line": {
                             "type": "integer",
                             "exclusiveMinimum": 0,
-                            "maximum": 9007199254740991
+                            "maximum": 1000000
                           }
                         },
                         "required": ["line"],
@@ -1654,38 +1879,46 @@
           },
           "impact_rationale": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 65536
           },
           "likelihood_rationale": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 65536
           },
           "severity_rationale": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 65536
           },
           "description": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 65536
           },
           "proof_of_concept": {
             "type": "object",
             "properties": {
               "scenario": {
                 "minItems": 1,
+                "maxItems": 10000,
                 "type": "array",
                 "items": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 }
               },
               "language": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 65536
               },
               "code": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 65536
               }
             },
             "required": ["scenario", "language", "code"],
@@ -1693,7 +1926,8 @@
           },
           "recommendation": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "maxLength": 65536
           },
           "recommended_next_action": {
             "type": "string",
@@ -1704,23 +1938,25 @@
             "properties": {
               "detection_rates": {
                 "minItems": 1,
+                "maxItems": 10000,
                 "type": "array",
                 "items": {
                   "type": "object",
                   "properties": {
                     "strategy": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "detections": {
                       "type": "integer",
                       "minimum": 0,
-                      "maximum": 9007199254740991
+                      "maximum": 1000000
                     },
                     "configured_loops": {
                       "type": "integer",
                       "exclusiveMinimum": 0,
-                      "maximum": 9007199254740991
+                      "maximum": 1000000
                     }
                   },
                   "required": ["strategy", "detections", "configured_loops"],
@@ -1728,36 +1964,40 @@
                 }
               },
               "attempts": {
+                "maxItems": 10000,
                 "type": "array",
                 "items": {
                   "type": "object",
                   "properties": {
                     "strategy": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "attempt_index": {
                       "type": "integer",
                       "minimum": 0,
-                      "maximum": 9007199254740991
+                      "maximum": 1000000
                     },
                     "model_id": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "model": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "model_index": {
                       "type": "integer",
                       "minimum": 0,
-                      "maximum": 9007199254740991
+                      "maximum": 1000000
                     },
                     "loop_index": {
                       "type": "integer",
                       "minimum": 0,
-                      "maximum": 9007199254740991
+                      "maximum": 1000000
                     }
                   },
                   "required": ["strategy"],
@@ -1773,28 +2013,34 @@
             "properties": {
               "dedupe_key": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 65536
               },
               "source_artifacts": {
+                "maxItems": 10000,
                 "type": "array",
                 "items": {
                   "type": "object",
                   "properties": {
                     "path": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 4096
                     },
                     "node_id": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "finding_id": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "title": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "relationship": {
                       "type": "string",
@@ -1806,36 +2052,40 @@
                 }
               },
               "strategy_hits": {
+                "maxItems": 10000,
                 "type": "array",
                 "items": {
                   "type": "object",
                   "properties": {
                     "strategy": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "attempt_index": {
                       "type": "integer",
                       "minimum": 0,
-                      "maximum": 9007199254740991
+                      "maximum": 1000000
                     },
                     "model_id": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "model": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     },
                     "model_index": {
                       "type": "integer",
                       "minimum": 0,
-                      "maximum": 9007199254740991
+                      "maximum": 1000000
                     },
                     "loop_index": {
                       "type": "integer",
                       "minimum": 0,
-                      "maximum": 9007199254740991
+                      "maximum": 1000000
                     }
                   },
                   "required": ["strategy"],
@@ -1843,18 +2093,22 @@
                 }
               },
               "duplicate_finding_ids": {
+                "maxItems": 10000,
                 "type": "array",
                 "items": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 },
                 "uniqueItems": true
               },
               "family_variant_keys": {
+                "maxItems": 10000,
                 "type": "array",
                 "items": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 65536
                 },
                 "uniqueItems": true
               },
@@ -1873,11 +2127,13 @@
               },
               "triage_reason": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 65536
               },
               "demotion_reason": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 65536
               },
               "canonical_severity": {
                 "type": "string",
@@ -1892,6 +2148,7 @@
                 "enum": ["promoted-again", "rediscovered-but-demoted", "not-reproduced", "not-searched"]
               },
               "stages": {
+                "maxItems": 10000,
                 "type": "array",
                 "items": {
                   "type": "object",
@@ -1902,11 +2159,13 @@
                     },
                     "artifact_path": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 4096
                     },
                     "finding_id": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 65536
                     }
                   },
                   "required": ["stage", "artifact_path"],

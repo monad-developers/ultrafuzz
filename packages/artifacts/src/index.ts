@@ -1,4 +1,5 @@
 export * from "./analysis-bundle.js";
+export * from "./artifact-path-primitives.js";
 export * from "./attempt-ledger.js";
 export * from "./events.js";
 export * from "./artifact-contract-ids.js";

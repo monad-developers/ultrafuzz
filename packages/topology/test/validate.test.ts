@@ -106,6 +106,22 @@ describe("validateTopology", () => {
       ]
     };
     expect(() => validateTopology(duplicate)).toThrow(expect.objectContaining({ code: "DUPLICATE_OUTPUT_PATH" }));
+
+    const mixedPropertyRoles = validTopology();
+    mixedPropertyRoles.nodes[1] = {
+      ...mixedPropertyRoles.nodes[1]!,
+      outputs: [
+        {
+          path: "implemented-properties.json",
+          contract: "ultrafuzz/implemented-properties@3",
+          primary: true
+        },
+        { path: "campaign.json", contract: "ultrafuzz/property-campaign@3" }
+      ]
+    };
+    expect(() => validateTopology(mixedPropertyRoles)).toThrow(
+      expect.objectContaining({ code: "PROPERTY_ROLE_DECLARATION_CONFLICT" })
+    );
   });
 
   it("rejects wrong types for optional topology v2 fields instead of silently dropping them", () => {

@@ -9,6 +9,7 @@ import {
 } from "./types.js";
 import {
   ARTIFACT_CONTRACT_IDS,
+  CANONICAL_ARTIFACT_RELATIVE_PATH_PATTERN,
   NON_JSON_ARTIFACT_CONTRACT_IDS,
   createStrictAjv,
   runValidator,
@@ -30,8 +31,7 @@ export interface TopologySchemaValidationResult<T> {
 export const EXPANDED_GRAPH_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:topology:expanded-graph:3" as const;
 
 const SAFE_ID_PATTERN = "^[a-z0-9_][a-z0-9_-]{0,127}$";
-const SAFE_PATH_PATTERN =
-  "^(?!\\.{1,2}(?:/|$))[A-Za-z0-9._@+-]{1,128}(?:/(?!\\.{1,2}(?:/|$))[A-Za-z0-9._@+-]{1,128})*$";
+const SAFE_PATH_PATTERN = CANONICAL_ARTIFACT_RELATIVE_PATH_PATTERN;
 const SHA256_PATTERN = "^[0-9a-f]{64}$";
 const SCHEMA_FILE_PATTERN = "^[A-Za-z0-9][A-Za-z0-9._-]*\\.schema\\.json$";
 const VALIDATOR_BUILD_PATTERN = "^ultrafuzz-json-validator\\.v1:[0-9a-f]{64}$";

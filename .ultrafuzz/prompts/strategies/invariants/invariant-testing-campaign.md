@@ -109,11 +109,52 @@ Use this configured invariant testing fuzzer timeout:
 
 4. Finalize the backend record.
    - Write the result record even when the backend is unavailable, fails to
-     start, crashes, or times out. The record must contain the backend name and
-     version; exact command/config; worker count; start/end timestamps and
-     terminal status; exit code or failure category; corpus, result, cache, and
-     log paths; every discovered property failure and raw reproducer reference;
-     and coverage metadata when the backend provides it.
+     start, crashes, or times out. Use only
+     `ultrafuzz.property-campaign.v3`; never emit or convert a historical
+     campaign shape. The record must contain the four authenticated artifact
+     references; backend name and nullable version; closed execution, path,
+     and coverage objects; one result row for every implemented property; and
+     every observed failure with its raw and deterministic-or-blocked
+     reproducer evidence.
+   - Set `execution.status` to exactly one of `complete`, `partial`, `blocked`,
+     `failed`, `timed-out`, or `unavailable`. `usable_results` is true only
+     when results may be consumed. A complete execution has a non-null start,
+     exit code `0`, and null failure. A partial execution has usable results,
+     a non-null start, and typed failure evidence. A blocked or unavailable
+     execution did not start and has null start and exit code. A timed-out
+     execution has a non-null start, null exit code, and
+     `deadline-exceeded` failure evidence. `finished_at` is always the record
+     finalization time, including when the backend never started.
+   - Copy `fuzzer_backend`, `backend_version`, `execution.workers`,
+     `execution.deadline`, `execution.command`, and all five `paths` values
+     exactly from `campaign-plan.json`. `execution.command` is the sole
+     `command_plan` row whose phase is `campaign`. Record the actual config
+     path or null in `execution.config_path`.
+   - Set coverage to `reported` only when at least one typed metric is
+     available. Each metric has a unique `name`, non-negative `value`, one of
+     `count`, `ratio`, `percent`, `seconds`, `bytes`, or
+     `executions-per-second`, and an exact `source_ref`. Otherwise use
+     `status: "unavailable"`, an empty metrics array, and a non-empty reason.
+   - Make `evidence_files` the exact file manifest for the campaign's durable
+     evidence. Include `paths.log` whenever `execution.started_at` is non-null;
+     include `paths.raw_results` whenever results are usable, coverage is
+     reported, or failures are present; and include every coverage
+     `source_ref`, property-result `evidence_refs` entry, failure
+     `raw_reproducer_ref`, and non-null `deterministic_reproducer_ref`. List each
+     unique required path exactly once and no other path. Each closed entry has
+     only `path`, positive `size_bytes`, and the lowercase SHA-256 of the exact
+     bytes. The manifest has at most 4096 files, each file is at most 16 MiB,
+     and their aggregate is at most 64 MiB. Operational corpus, cache, and
+     reproducer directories are not implicitly published; name every file that
+     must survive through one of the typed references above.
+   - Emit exactly one `property_results` row for every record whose status is
+     `implemented` in `implemented-properties.json`, and no other property.
+     Use `passed`, `failed`, `inconclusive`, or `not-executed`; make
+     `failure_ids` exactly the campaign failures naming that property. Failed
+     rows require failures and a null reason, passed rows require no failures
+     and a null reason, and inconclusive/not-executed rows require no failures
+     and a non-empty reason. Coverage metric names must resolve to the sibling
+     coverage object.
    - A later pass must never erase, downgrade, or overwrite an observed failure.
    - Finalize the backend record before deduplicating failures. Preserve the
      originating backend and raw record reference on every pre-deduplication
@@ -123,11 +164,14 @@ Use this configured invariant testing fuzzer timeout:
      in a non-empty top-level `contributing_backend_failures` array. Across all
      property-derived findings, these arrays must partition every
      property-derived failure from the sibling backend result records exactly
-     once: do not omit a failure or claim it in more than one finding. For the
-     shipped single-backend campaign, use each failure's exact `id` string. In
-     a project-owned multi-backend campaign, a plain ID is valid only when it is
-     unique across every sibling result record; otherwise use
-     `{"fuzzer_backend":"<backend>","failure_id":"<id>"}` to disambiguate it.
+     once: do not omit a failure or claim it in more than one finding. Every
+     entry is the canonical object
+     `{"fuzzer_backend":"<backend>","failure_id":"<id>","raw_result_ref":"<campaign-result-artifact>"}`.
+     Copy `fuzzer_backend` and `failure_id` from the exact sibling campaign
+     result containing the failure. Set `raw_result_ref` to that authenticated
+     campaign result artifact (for this node, `recon-fuzzer-results.json`), not
+     to the backend-internal `paths.raw_results` evidence file. Plain failure ID
+     strings and omitted `raw_result_ref` values are invalid.
    - Put `deduplication.pre_dedup_count` on every property-derived finding and
      set it to the number of entries in that finding's
      `contributing_backend_failures`. Every contributed failure's
@@ -145,12 +189,19 @@ Use this configured invariant testing fuzzer timeout:
      `"recon"`. Omit both fields when no backend contributed. Nested detail such
      as `backend_provenance` may supplement these join fields but does not
      replace them.
-   - When an implemented invariant property caused a failure, copy its exact
-     canonical ID from `implemented-properties.json` into a non-empty
-     `property_ids` array on that backend failure. Omit `property_ids` for
-     setup, harness, and other failures that did not originate from a catalog
-     property. Never invent or silently drop a property reference: a finding may
-     only name a property that some backend failure reported.
+   - Every backend failure has a unique ID, a status of `reproduced` or
+     `blocked-unreproduced`, a `property_ids` array, nullable entrypoint,
+     sequence and precondition-evidence arrays, and a non-empty raw reproducer
+     reference. When an implemented invariant property caused a failure, copy
+     its exact canonical ID from `implemented-properties.json` into a
+     non-empty `property_ids` array. Use an empty array for setup, harness, and
+     other failures that did not originate from a catalog property. Never
+     invent or silently drop a property reference: a finding may only name a
+     property that some backend failure reported.
+   - A reproduced failure requires a non-null deterministic reproducer path
+     and a null blocker. A blocked-unreproduced failure requires a null
+     deterministic path and a non-empty blocker. A campaign with
+     `usable_results: false` cannot publish observed failures.
    - Give the finding that deduplicates a group of failures the ID of one of the
      failures in that group, so runtime validation can prove the joins. Findings
      are one per unique failure, never one per counterexample, so most backend
@@ -240,32 +291,108 @@ Write the recon-fuzzer result record to:
 
 {{artifact_dir}}/recon-fuzzer-results.json
 
-Use this exact top-level shape for the backend record:
+Use the current closed backend-record shape below. The values illustrate a
+complete campaign with one reproduced property failure; replace every value
+with this run's evidence while retaining every field:
 
 ```json
 {
-  "schema_version": "ultrafuzz.property-campaign.v2",
+  "schema_version": "ultrafuzz.property-campaign.v3",
+  "campaign_plan_ref": "campaign-plan.json",
+  "implemented_properties_ref": "implemented-properties.json",
+  "findings_ref": "findings.json",
+  "campaign_summary_ref": "campaign-summary.json",
   "fuzzer_backend": "recon",
+  "backend_version": "0.1.0",
+  "execution": {
+    "status": "complete",
+    "usable_results": true,
+    "command": "recon fuzz . --contract CryticTester --test-mode assertion --workers 8 --corpus-dir echidna --recon-corpus-dir recon-corpus",
+    "config_path": null,
+    "workers": 8,
+    "started_at": "2026-01-01T00:00:00Z",
+    "finished_at": "2026-01-01T00:55:00Z",
+    "deadline": "2026-01-01T01:00:00Z",
+    "exit_code": 0,
+    "failure": null
+  },
+  "paths": {
+    "corpus": "backends/recon-fuzzer/corpus",
+    "cache": "backends/recon-fuzzer/cache",
+    "log": "backends/recon-fuzzer/run.log",
+    "raw_results": "backends/recon-fuzzer/results.json",
+    "reproducers": "backends/recon-fuzzer/reproducers"
+  },
+  "evidence_files": [
+    {
+      "path": "backends/recon-fuzzer/run.log",
+      "size_bytes": 1024,
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "backends/recon-fuzzer/results.json",
+      "size_bytes": 2048,
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "path": "backends/recon-fuzzer/reproducers/failure-1.t.sol",
+      "size_bytes": 4096,
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+    }
+  ],
+  "coverage": {
+    "status": "reported",
+    "metrics": [
+      {
+        "name": "executions",
+        "value": 10000,
+        "unit": "count",
+        "source_ref": "backends/recon-fuzzer/results.json"
+      }
+    ],
+    "unavailable_reason": null
+  },
+  "property_results": [
+    {
+      "property_id": "property-1",
+      "status": "failed",
+      "failure_ids": ["failure-1"],
+      "coverage_metric_names": ["executions"],
+      "evidence_refs": ["backends/recon-fuzzer/results.json"],
+      "reason": null
+    }
+  ],
   "failures": [
     {
       "id": "failure-1",
       "status": "reproduced",
-      "property_ids": ["property-1"]
+      "property_ids": ["property-1"],
+      "entrypoint": "handler_deposit(uint256)",
+      "sequence": ["handler_deposit(1)"],
+      "precondition_evidence": ["deposit amount was bounded to the available balance"],
+      "raw_reproducer_ref": "backends/recon-fuzzer/results.json",
+      "deterministic_reproducer_ref": "backends/recon-fuzzer/reproducers/failure-1.t.sol",
+      "reproduction_blocker": null
     }
   ]
 }
 ```
 
-Record the exact backend in `fuzzer_backend` when it ran, using the literal
-string `recon` so the final report join matches; omit that field when the
-backend was unavailable. Every failure needs a non-empty `id` and `status`. Use an
-empty `failures` array when none were observed. Each deduplicated finding must
-reuse the ID of one of the failures it covers, and must carry every property ID
-those failures reported and no others. Do not emit one finding per
-counterexample: a fuzzer reports the same violation many times, and the backend
-record already preserves every one of them. Property IDs are optional only for
-failures not caused by an implemented catalog property. References to an
-unknown or non-implemented canonical property fail artifact validation.
+The four reference fields must retain the exact declared artifact paths shown
+above. The backend fields and record paths must match the authenticated plan;
+the implementation reference must name the authenticated ancestor handoff;
+and the findings and summary references must name the authenticated siblings.
+The campaign summary's sole backend row must use `recon`, the execution's exact
+status, and `recon-fuzzer-results.json`. Each deduplicated property finding must
+reuse the ID of one of the failures it covers and carry every property ID those
+failures reported and no others. Do not emit one finding per counterexample: a
+fuzzer reports the same violation many times, and the backend record already
+preserves every one of them. References to an unknown or non-implemented
+canonical property fail artifact validation.
+`evidence_files` has no redundant role field: the exact status-dependent and
+explicit reference set above is the authority. The verifier captures each
+listed regular, non-hard-linked file once, checks its size and digest, and uses
+that same immutable byte snapshot for durable publication and marker digests.
 
 Write generated-test and reproducer records to:
 
@@ -279,6 +406,12 @@ The findings file must be a JSON array. Use an empty array only when the
 backend record is finalized and the campaign observed no fuzzer failures or
 deterministic reproducers.
 
+Finalize all interdependent JSON artifacts, then run every exact
+`ultrafuzz json validate` command displayed in the output contract. Correct an
+exit-1 artifact and rerun its command; after any later edit, rerun it again.
+Finish only after every displayed command exits 0. Do not repair, normalize,
+or convert an older campaign document to make validation pass.
+
 Every property-derived finding must include this accounting shape (the values
 below are illustrative):
 
@@ -286,7 +419,19 @@ below are illustrative):
 {
   "id": "failure-1",
   "property_ids": ["property-1"],
-  "contributing_backend_failures": ["failure-1", "failure-2"],
+  "fuzzer_backend": "recon",
+  "contributing_backend_failures": [
+    {
+      "fuzzer_backend": "recon",
+      "failure_id": "failure-1",
+      "raw_result_ref": "recon-fuzzer-results.json"
+    },
+    {
+      "fuzzer_backend": "recon",
+      "failure_id": "failure-2",
+      "raw_result_ref": "recon-fuzzer-results.json"
+    }
+  ],
   "deduplication": {
     "pre_dedup_count": 2
   }

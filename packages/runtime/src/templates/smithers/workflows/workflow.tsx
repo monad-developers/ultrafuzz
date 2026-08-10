@@ -37,6 +37,9 @@ const {
   MAX_GENERATED_TEST_BUNDLE_ENTRIES,
   MAX_GENERATED_TEST_COMPANION_BYTES,
   INVARIANT_SUITE_MANIFEST_SCHEMA_VERSION,
+  MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILES,
+  MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILE_BYTES,
+  MAX_PROPERTY_CAMPAIGN_EVIDENCE_TOTAL_BYTES,
   normalizeNodeAttemptFailureMessage,
   parseInvariantSuiteManifestBytes,
   parseJsonValidatorPreflightSuccessEnvelope,
@@ -427,7 +430,7 @@ function verifiedDependencyJsonArtifact(
   producer: (typeof taskSpecs)[number],
   relativePath: string,
   expectedContract: string
-): { path: string; value: unknown } {
+): { path: string; relativePath: string; value: unknown } {
   const outputs = producer.outputs.filter(
     (output) => output.path === relativePath && output.contract === expectedContract
   );
@@ -472,7 +475,7 @@ function verifiedDependencyJsonArtifact(
   // context retained by this verifier, while a replacement before this check
   // makes the dependency marker/digest verification fail closed.
   assertVerifiedDependency(task, dependency, { relativePath, bytes: snapshot.bytes });
-  return { path: artifactPath, value };
+  return { path: artifactPath, relativePath, value };
 }
 
 function semanticArtifactTaskDeclarations(): Array<{
@@ -523,7 +526,8 @@ function verifiedSingletonAncestorJsonArtifact(
   if (producer === undefined) {
     throw new Error(`artifact-contract failure: declared ${label} producer is unavailable ${output.attemptId}`);
   }
-  return verifiedDependencyJsonArtifact(task, output.artifactDir, producer, output.path, output.contract);
+  const verified = verifiedDependencyJsonArtifact(task, output.artifactDir, producer, output.path, output.contract);
+  return { path: output.path, value: verified.value };
 }
 
 function declaredFinalReportOutputPair(task: (typeof taskSpecs)[number]):
@@ -4375,6 +4379,68 @@ function validateCapturedTaskOutputs(
   return { artifacts, verifiedOutputs };
 }
 
+function capturePropertyCampaignEvidence(
+  task: (typeof taskSpecs)[number],
+  verifiedOutputs: ReadonlyMap<string, VerifiedOutputSnapshot>
+): ReadonlyMap<string, ImmutableFileSnapshot> {
+  const snapshots = new Map<string, ImmutableFileSnapshot>();
+  const declaredOutputPaths = new Set(task.outputs.map((output) => output.path));
+  for (const output of task.outputs) {
+    if (output.contract !== "ultrafuzz/property-campaign@3") continue;
+    const campaign = verifiedOutputs.get(output.path);
+    if (campaign === undefined || !isPlainJsonRecord(campaign.value) || !Array.isArray(campaign.value.evidence_files)) {
+      throw new Error(`artifact-contract failure: campaign evidence manifest is unavailable ${output.path}`);
+    }
+    if (campaign.value.evidence_files.length > MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILES) {
+      throw new Error(`artifact-contract failure: campaign evidence manifest exceeds its file limit ${output.path}`);
+    }
+
+    const entries: Array<{ path: string; sizeBytes: number; sha256: string }> = [];
+    const campaignPaths = new Set<string>();
+    let declaredBytes = 0;
+    for (const value of campaign.value.evidence_files) {
+      if (
+        !isPlainJsonRecord(value) ||
+        typeof value.path !== "string" ||
+        typeof value.size_bytes !== "number" ||
+        !Number.isSafeInteger(value.size_bytes) ||
+        value.size_bytes <= 0 ||
+        value.size_bytes > MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILE_BYTES ||
+        typeof value.sha256 !== "string" ||
+        !/^[0-9a-f]{64}$/u.test(value.sha256)
+      ) {
+        throw new Error(`artifact-contract failure: campaign evidence manifest entry is malformed ${output.path}`);
+      }
+      assertSafeVerifiedPublicationPath(value.path);
+      if (campaignPaths.has(value.path) || snapshots.has(value.path) || declaredOutputPaths.has(value.path)) {
+        throw new Error(`artifact-contract failure: duplicate campaign evidence path ${value.path}`);
+      }
+      campaignPaths.add(value.path);
+      declaredBytes += value.size_bytes;
+      if (declaredBytes > MAX_PROPERTY_CAMPAIGN_EVIDENCE_TOTAL_BYTES) {
+        throw new Error(`artifact-contract failure: campaign evidence exceeds its aggregate byte limit ${output.path}`);
+      }
+      entries.push({ path: value.path, sizeBytes: value.size_bytes, sha256: value.sha256 });
+    }
+
+    for (const entry of entries) {
+      const snapshot = readBoundedRegularArtifactSnapshot(
+        campaign.artifactRoot,
+        path.resolve(campaign.artifactRoot, entry.path),
+        `artifact-contract failure: campaign evidence is not an immutable regular file ${entry.path}`,
+        MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILE_BYTES,
+        true
+      );
+      const digest = createHash("sha256").update(snapshot.bytes).digest("hex");
+      if (snapshot.bytes.length !== entry.sizeBytes || digest !== entry.sha256) {
+        throw new Error(`artifact-contract failure: campaign evidence does not match its manifest ${entry.path}`);
+      }
+      snapshots.set(entry.path, snapshot);
+    }
+  }
+  return snapshots;
+}
+
 function siblingCampaignSemanticArtifacts(
   task: (typeof taskSpecs)[number],
   verifiedOutputs: ReadonlyMap<string, VerifiedOutputSnapshot>
@@ -4386,7 +4452,7 @@ function siblingCampaignSemanticArtifacts(
     if (snapshot === undefined) {
       throw new Error(`artifact-contract failure: verified sibling output is unavailable ${output.path}`);
     }
-    if (output.contract === "ultrafuzz/property-campaign@2") campaigns.push(snapshot.value);
+    if (output.contract === "ultrafuzz/property-campaign@3") campaigns.push(snapshot.value);
     if (output.contract === "ultrafuzz/findings@2") {
       if (!Array.isArray(snapshot.value)) {
         throw new Error(`artifact-contract failure: verified finding sibling is not an array ${output.path}`);
@@ -4395,6 +4461,24 @@ function siblingCampaignSemanticArtifacts(
     }
   }
   return { campaigns, findings };
+}
+
+function verifiedSiblingJsonArtifact(
+  task: (typeof taskSpecs)[number],
+  verifiedOutputs: ReadonlyMap<string, VerifiedOutputSnapshot>,
+  contract: (typeof taskSpecs)[number]["outputs"][number]["contract"],
+  label: string
+): { path: string; value: unknown } {
+  const outputs = task.outputs.filter((output) => output.contract === contract);
+  if (outputs.length !== 1) {
+    throw new Error(`artifact-contract failure: ${label} requires exactly one declared ${contract} sibling`);
+  }
+  const output = outputs[0]!;
+  const snapshot = verifiedOutputs.get(output.path);
+  if (snapshot === undefined) {
+    throw new Error(`artifact-contract failure: verified ${label} sibling is unavailable ${output.path}`);
+  }
+  return { path: output.path, value: snapshot.value };
 }
 
 function verifiedAncestorPropertyLenses(
@@ -4467,22 +4551,45 @@ function workspacePatchSemanticGitContext(
 function semanticGateContextForVerifiedOutput(
   task: (typeof taskSpecs)[number],
   output: (typeof taskSpecs)[number]["outputs"][number],
-  verifiedOutputs: ReadonlyMap<string, VerifiedOutputSnapshot>
+  verifiedOutputs: ReadonlyMap<string, VerifiedOutputSnapshot>,
+  campaignEvidence: ReadonlyMap<string, ImmutableFileSnapshot>
 ): {
   filesystem: { rootDirectory: string };
-  artifactIdentity: { runId: string; nodeId: string };
+  artifactIdentity: { runId: string; nodeId: string; attemptId: string; artifactPath: string };
   artifactSet?: {
+    campaignPlan?: unknown;
+    campaignPlanPath?: string;
+    campaignSummary?: unknown;
+    campaignSummaryPath?: string;
     campaigns?: readonly unknown[];
     findings?: readonly unknown[];
+    findingsPath?: string;
     propertyCatalog?: unknown;
     propertyLenses?: readonly { sourceNodeId: string; projectionRequired: boolean; document: unknown }[];
     implementedProperties?: unknown;
+    implementedPropertiesPath?: string;
     triagedFindings?: unknown;
   };
   git?: ReturnType<typeof deriveWorkspacePatchGitFacts>;
   aggregation?: {
     workspaceRoot: string;
     sourceBundles: readonly AuthenticatedAggregationSourceBundle[];
+  };
+  propertyCampaignEvidence?: {
+    snapshots: readonly {
+      path: string;
+      exists: boolean;
+      regularFile: boolean;
+      symbolicLink: boolean;
+      linkCount: number;
+      stableIdentity: boolean;
+      bytes: Buffer;
+    }[];
+    publicationAuthority: {
+      markerAttemptId: string;
+      markerNodeId: string;
+      publications: readonly { path: string; sha256: string }[];
+    };
   };
 } {
   const snapshot = verifiedOutputs.get(output.path);
@@ -4493,10 +4600,68 @@ function semanticGateContextForVerifiedOutput(
     filesystem: { rootDirectory: snapshot.artifactRoot },
     artifactIdentity: {
       runId: task.metadata.run.ultrafuzzRunId,
-      nodeId: task.metadata.node.logicalNodeId
+      nodeId: task.metadata.node.logicalNodeId,
+      attemptId: task.attemptId,
+      artifactPath: output.path
     }
   };
-  if (output.schemaFile === "campaign-summary.schema.json") {
+  if (output.schemaFile === "property-campaign.schema.json") {
+    const campaignPlan = verifiedSiblingJsonArtifact(
+      task,
+      verifiedOutputs,
+      "ultrafuzz/invariant-campaign-plan@1",
+      "campaign plan"
+    );
+    const findings = verifiedSiblingJsonArtifact(task, verifiedOutputs, "ultrafuzz/findings@2", "campaign findings");
+    if (!Array.isArray(findings.value)) {
+      throw new Error("artifact-contract failure: verified campaign findings sibling is not an array");
+    }
+    const campaignSummary = verifiedSiblingJsonArtifact(
+      task,
+      verifiedOutputs,
+      "ultrafuzz/campaign-summary@2",
+      "campaign summary"
+    );
+    const implementedProperties = verifiedSingletonAncestorJsonArtifact(
+      task,
+      "ultrafuzz/implemented-properties@3",
+      "implemented property coverage"
+    );
+    context.artifactSet = {
+      campaignPlan: campaignPlan.value,
+      campaignPlanPath: campaignPlan.path,
+      campaignSummary: campaignSummary.value,
+      campaignSummaryPath: campaignSummary.path,
+      findings: findings.value,
+      findingsPath: findings.path,
+      ...(implementedProperties === undefined
+        ? {}
+        : {
+            implementedProperties: implementedProperties.value,
+            implementedPropertiesPath: implementedProperties.path
+          })
+    };
+    const evidenceEntries = [...campaignEvidence].map(([relativePath, evidence]) => ({
+      path: relativePath,
+      exists: true,
+      regularFile: true,
+      symbolicLink: false,
+      linkCount: 1,
+      stableIdentity: true,
+      bytes: evidence.bytes
+    }));
+    context.propertyCampaignEvidence = {
+      snapshots: evidenceEntries,
+      publicationAuthority: {
+        markerAttemptId: task.attemptId,
+        markerNodeId: task.metadata.node.logicalNodeId,
+        publications: evidenceEntries.map((entry) => ({
+          path: entry.path,
+          sha256: createHash("sha256").update(entry.bytes).digest("hex")
+        }))
+      }
+    };
+  } else if (output.schemaFile === "campaign-summary.schema.json") {
     context.artifactSet = siblingCampaignSemanticArtifacts(task, verifiedOutputs);
   } else if (output.schemaFile === "implemented-properties.schema.json") {
     const propertyCatalog = verifiedSingletonAncestorJsonArtifact(
@@ -4549,7 +4714,8 @@ function semanticGateContextForVerifiedOutput(
 
 function verifyOutputSemanticGates(
   task: (typeof taskSpecs)[number],
-  verifiedOutputs: ReadonlyMap<string, VerifiedOutputSnapshot>
+  verifiedOutputs: ReadonlyMap<string, VerifiedOutputSnapshot>,
+  campaignEvidence: ReadonlyMap<string, ImmutableFileSnapshot>
 ): void {
   const failures: string[] = [];
   for (const output of task.outputs) {
@@ -4558,7 +4724,7 @@ function verifyOutputSemanticGates(
       const document = verifiedOutputs.get(output.path)?.value;
       const results = executeSchemaSemanticGates(output.schemaFile, {
         document,
-        context: semanticGateContextForVerifiedOutput(task, output, verifiedOutputs)
+        context: semanticGateContextForVerifiedOutput(task, output, verifiedOutputs, campaignEvidence)
       }) as Array<
         | { status: "passed"; gate: string }
         | { status: "failed"; gate: string; issues: readonly { path: string; message: string }[] }
@@ -4609,6 +4775,14 @@ function verifyArtifacts(
   task: (typeof taskSpecs)[number],
   capturedTaskOutputs?: readonly CapturedTaskOutput[]
 ): z.infer<typeof verificationOutput> {
+  if (
+    task.outputs.some((output) => output.contract === "ultrafuzz/implemented-properties@3") &&
+    task.outputs.some((output) => output.contract === "ultrafuzz/property-campaign@3")
+  ) {
+    throw new Error(
+      `artifact-contract failure: node ${task.attemptId} must not declare both ultrafuzz/implemented-properties@3 and ultrafuzz/property-campaign@3; split implementation and campaign into dependency-ordered nodes`
+    );
+  }
   const artifactDir = realpathSync(task.metadata.artifacts.dir);
   // A model-controlled workspace can pre-create arbitrary sidecars. Remove
   // any stale marker before validating so only this verifier can publish the
@@ -4617,11 +4791,12 @@ function verifyArtifacts(
   const artifactRoots = taskArtifactRoots(task, artifactDir);
   const capturedOutputs = capturedTaskOutputs ?? captureTaskOutputs(task);
   const { artifacts, verifiedOutputs } = validateCapturedTaskOutputs(task, capturedOutputs);
+  const campaignEvidence = capturePropertyCampaignEvidence(task, verifiedOutputs);
 
   // Generated-test companions are agent-owned outputs. Verification reads the
   // exact declared files in the artifact root and never searches the workspace,
   // infers a source, or repairs an incomplete handoff after the agent exits.
-  verifyOutputSemanticGates(task, verifiedOutputs);
+  verifyOutputSemanticGates(task, verifiedOutputs, campaignEvidence);
 
   // These companions are not semantic inputs, so keep their durable creation
   // behind the complete registry gate set as well.
@@ -4648,6 +4823,9 @@ function verifyArtifacts(
       WORKSPACE_PATCH_BASELINE_FILE,
       captureWorkspacePatchBaselinePublication(task, artifactDir)
     );
+  }
+  for (const [relativePath, snapshot] of campaignEvidence) {
+    rememberVerifiedPublication(publications, relativePath, snapshot.bytes);
   }
   if (invariantSuiteNodeIds.has(task.metadata.node.logicalNodeId)) {
     rememberInvariantSuitePublications(task, publications, artifactRoots);

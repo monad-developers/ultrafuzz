@@ -74,7 +74,7 @@
         "promptDigests": {
           "type": "object",
           "propertyNames": {
-            "pattern": "^(?!\\.{1,2}(?:/|$))[A-Za-z0-9._@+-]{1,128}(?:/(?!\\.{1,2}(?:/|$))[A-Za-z0-9._@+-]{1,128})*$"
+            "pattern": "^(?!\\.{1,2}(?:\\/|$))[A-Za-z0-9._@+-]{1,128}(?:\\/(?!\\.{1,2}(?:\\/|$))[A-Za-z0-9._@+-]{1,128})*$"
           },
           "additionalProperties": {
             "type": "string",
@@ -214,7 +214,7 @@
               "properties": {
                 "path": {
                   "type": "string",
-                  "pattern": "^(?!\\.{1,2}(?:/|$))[A-Za-z0-9._@+-]{1,128}(?:/(?!\\.{1,2}(?:/|$))[A-Za-z0-9._@+-]{1,128})*$"
+                  "pattern": "^(?!\\.{1,2}(?:\\/|$))[A-Za-z0-9._@+-]{1,128}(?:\\/(?!\\.{1,2}(?:\\/|$))[A-Za-z0-9._@+-]{1,128})*$"
                 },
                 "contract": {
                   "enum": [
@@ -244,7 +244,7 @@
                     "ultrafuzz/invariant-ledger@1",
                     "ultrafuzz/nonempty-markdown@1",
                     "ultrafuzz/properties@2",
-                    "ultrafuzz/property-campaign@2",
+                    "ultrafuzz/property-campaign@3",
                     "ultrafuzz/property-lens@2",
                     "ultrafuzz/reference-expectations@2",
                     "ultrafuzz/reference-harness@1",

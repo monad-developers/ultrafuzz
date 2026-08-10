@@ -7,22 +7,49 @@ import {
   FINDINGS_SCHEMA_VERSION,
   TRIAGE_CLASSIFICATIONS
 } from "./findings.js";
+import { hasAtMostCodePoints } from "./portable-json-primitives.js";
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 
 export const FINDING_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:finding:2" as const;
 export const FINDINGS_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:findings:2" as const;
 
-const nonEmptyString = z.string().min(1);
-const nonNegativeInteger = z.number().int().nonnegative();
-const positiveSafeInteger = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
+export const MAX_FINDINGS = 10_000;
+export const MAX_FINDING_NESTED_ITEMS = 10_000;
+export const MAX_FINDING_STRING_CODE_POINTS = 65_536;
+export const MAX_FINDING_PATH_CODE_POINTS = 4_096;
+export const MAX_FINDING_COUNT = 1_000_000;
+
+const nonEmptyString = z
+  .string()
+  .min(1)
+  .refine((value) => hasAtMostCodePoints(value, MAX_FINDING_STRING_CODE_POINTS), {
+    message: `String must not exceed ${MAX_FINDING_STRING_CODE_POINTS} Unicode code points`
+  })
+  .meta({ maxLength: MAX_FINDING_STRING_CODE_POINTS });
+export const findingTextSchema = nonEmptyString;
+const findingPath = z
+  .string()
+  .min(1)
+  .refine((value) => hasAtMostCodePoints(value, MAX_FINDING_PATH_CODE_POINTS), {
+    message: `Path must not exceed ${MAX_FINDING_PATH_CODE_POINTS} Unicode code points`
+  })
+  .meta({ maxLength: MAX_FINDING_PATH_CODE_POINTS });
+const nonNegativeInteger = z.number().int().nonnegative().max(MAX_FINDING_COUNT);
+const positiveSafeInteger = z.number().int().positive().max(MAX_FINDING_COUNT);
 const uniqueNonEmptyStrings = z
   .array(nonEmptyString)
+  .max(MAX_FINDING_NESTED_ITEMS)
   .meta({ uniqueItems: true })
   .refine((values) => new Set(values).size === values.length, { message: "Values must be unique" });
+const uniqueFindingPaths = z
+  .array(findingPath)
+  .max(MAX_FINDING_NESTED_ITEMS)
+  .meta({ uniqueItems: true })
+  .refine((values) => new Set(values).size === values.length, { message: "Paths must be unique" });
 
 const evidenceMetadataShape = {
   kind: nonEmptyString.optional(),
-  path: nonEmptyString.optional(),
+  path: findingPath.optional(),
   fragment: nonEmptyString.optional(),
   detail: nonEmptyString.optional(),
   symbol: nonEmptyString.optional(),
@@ -52,7 +79,7 @@ const findingSingleSpanEvidenceSchema = z.strictObject({
 
 const findingDisjointSpanEvidenceSchema = z.strictObject({
   ...evidenceMetadataShape,
-  line_ranges: z.array(findingEvidenceLineRangeSchema).min(2)
+  line_ranges: z.array(findingEvidenceLineRangeSchema).min(2).max(MAX_FINDING_NESTED_ITEMS)
 });
 
 export const findingEvidenceSchema = z.union([
@@ -72,7 +99,7 @@ export const findingStrategyHitSchema = z.strictObject({
 });
 
 export const findingSourceArtifactSchema = z.strictObject({
-  path: nonEmptyString,
+  path: findingPath,
   node_id: nonEmptyString,
   finding_id: nonEmptyString,
   title: nonEmptyString,
@@ -81,14 +108,14 @@ export const findingSourceArtifactSchema = z.strictObject({
 
 export const findingLifecycleStageSchema = z.strictObject({
   stage: z.enum(["raw", "deduped", "triaged", "severity-classified"]),
-  artifact_path: nonEmptyString,
+  artifact_path: findingPath,
   finding_id: nonEmptyString.optional()
 });
 
 export const findingLifecycleSchema = z.strictObject({
   dedupe_key: nonEmptyString,
-  source_artifacts: z.array(findingSourceArtifactSchema),
-  strategy_hits: z.array(findingStrategyHitSchema),
+  source_artifacts: z.array(findingSourceArtifactSchema).max(MAX_FINDING_NESTED_ITEMS),
+  strategy_hits: z.array(findingStrategyHitSchema).max(MAX_FINDING_NESTED_ITEMS),
   duplicate_finding_ids: uniqueNonEmptyStrings.optional(),
   family_variant_keys: uniqueNonEmptyStrings.optional(),
   triage_classification: z.enum(TRIAGE_CLASSIFICATIONS).optional(),
@@ -99,7 +126,7 @@ export const findingLifecycleSchema = z.strictObject({
   comparison_disposition: z
     .enum(["promoted-again", "rediscovered-but-demoted", "not-reproduced", "not-searched"])
     .optional(),
-  stages: z.array(findingLifecycleStageSchema).optional()
+  stages: z.array(findingLifecycleStageSchema).max(MAX_FINDING_NESTED_ITEMS).optional()
 });
 
 const familyVariantSchema = z.strictObject({
@@ -113,9 +140,9 @@ const familyVariantSchema = z.strictObject({
   model: nonEmptyString.optional(),
   model_index: nonNegativeInteger.optional(),
   loop_index: nonNegativeInteger.optional(),
-  affected_files: uniqueNonEmptyStrings.optional(),
+  affected_files: uniqueFindingPaths.optional(),
   affected_functions: uniqueNonEmptyStrings.optional(),
-  evidence: z.array(findingEvidenceSchema).optional()
+  evidence: z.array(findingEvidenceSchema).max(MAX_FINDING_NESTED_ITEMS).optional()
 });
 
 const relatedFindingSchema = z.strictObject({
@@ -126,28 +153,31 @@ const relatedFindingSchema = z.strictObject({
   dedupe_key: nonEmptyString.optional()
 });
 
-const backendFailureReferenceSchema = z.union([
-  nonEmptyString,
-  z.strictObject({
-    fuzzer_backend: nonEmptyString,
-    failure_id: nonEmptyString,
-    raw_result_ref: nonEmptyString.optional()
-  })
-]);
+/**
+ * An exact reference to one failure in one authenticated property-campaign
+ * result artifact. The backend and result artifact are deliberately repeated:
+ * failure IDs are only unique inside a backend result, and downstream joins
+ * must never infer either part from array position or a filename convention.
+ */
+const backendFailureReferenceSchema = z.strictObject({
+  fuzzer_backend: nonEmptyString,
+  failure_id: nonEmptyString,
+  raw_result_ref: findingPath
+});
 
 const detectionRateSchema = z.strictObject({
   strategy: nonEmptyString,
   detections: nonNegativeInteger,
-  configured_loops: z.number().int().positive()
+  configured_loops: positiveSafeInteger
 });
 
 const strategyProvenanceSchema = z.strictObject({
-  detection_rates: z.array(detectionRateSchema).min(1),
-  attempts: z.array(findingStrategyHitSchema).optional()
+  detection_rates: z.array(detectionRateSchema).min(1).max(MAX_FINDING_NESTED_ITEMS),
+  attempts: z.array(findingStrategyHitSchema).max(MAX_FINDING_NESTED_ITEMS).optional()
 });
 
 const proofOfConceptSchema = z.strictObject({
-  scenario: z.array(nonEmptyString).min(1),
+  scenario: z.array(nonEmptyString).min(1).max(MAX_FINDING_NESTED_ITEMS),
   language: nonEmptyString,
   code: nonEmptyString
 });
@@ -176,15 +206,16 @@ export const findingSchema = z
     model: nonEmptyString.optional(),
     model_index: nonNegativeInteger.optional(),
     loop_index: nonNegativeInteger.optional(),
-    affected_files: uniqueNonEmptyStrings.optional(),
+    affected_files: uniqueFindingPaths.optional(),
     affected_functions: uniqueNonEmptyStrings.optional(),
-    patch_refs: uniqueNonEmptyStrings.optional(),
+    patch_refs: uniqueFindingPaths.optional(),
     property_ids: uniqueNonEmptyStrings.min(1).optional(),
     fuzzer_backend: nonEmptyString.optional(),
     fuzzer_backends: uniqueNonEmptyStrings.min(1).optional(),
     contributing_backend_failures: z
       .array(backendFailureReferenceSchema)
       .min(1)
+      .max(MAX_FINDING_NESTED_ITEMS)
       .meta({ uniqueItems: true })
       .refine((values) => new Set(values.map((value) => JSON.stringify(value))).size === values.length, {
         message: "Backend failure references must be unique"
@@ -192,16 +223,16 @@ export const findingSchema = z
       .optional(),
     deduplication: z
       .strictObject({
-        pre_dedup_count: z.number().int().positive(),
+        pre_dedup_count: positiveSafeInteger,
         basis: nonEmptyString.optional()
       })
       .optional(),
     dedupe_key: nonEmptyString.optional(),
     family_id: nonEmptyString.optional(),
-    family_variants: z.array(familyVariantSchema).optional(),
-    related_findings: z.array(relatedFindingSchema).optional(),
-    notes: z.array(nonEmptyString).optional(),
-    evidence: z.array(findingEvidenceSchema).optional(),
+    family_variants: z.array(familyVariantSchema).max(MAX_FINDING_NESTED_ITEMS).optional(),
+    related_findings: z.array(relatedFindingSchema).max(MAX_FINDING_NESTED_ITEMS).optional(),
+    notes: z.array(nonEmptyString).max(MAX_FINDING_NESTED_ITEMS).optional(),
+    evidence: z.array(findingEvidenceSchema).max(MAX_FINDING_NESTED_ITEMS).optional(),
     severity: z.enum(FINDING_SEVERITIES).optional(),
     impact: z.enum(FINDING_SEVERITIES).optional(),
     likelihood: z.enum(FINDING_SEVERITIES).optional(),
@@ -242,7 +273,7 @@ export const findingSchema = z
 
 export type NormalizedFinding = z.infer<typeof findingSchema>;
 
-export const findingsSchema = z.array(findingSchema).meta({
+export const findingsSchema = z.array(findingSchema).max(MAX_FINDINGS).meta({
   $id: FINDINGS_JSON_SCHEMA_ID,
   title: "Ultrafuzz findings"
 });
@@ -253,6 +284,7 @@ export const findingsJsonSchema = {
   $id: FINDINGS_JSON_SCHEMA_ID,
   title: "Ultrafuzz findings",
   type: "array",
+  maxItems: MAX_FINDINGS,
   items: { $ref: FINDING_JSON_SCHEMA_ID }
 } as const;
 

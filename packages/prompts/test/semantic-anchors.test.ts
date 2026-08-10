@@ -353,6 +353,9 @@ describe("prompt semantic anchors", () => {
     expect(campaignNode?.outputs?.find((output) => output.path === "campaign-summary.json")?.contract).toBe(
       "ultrafuzz/campaign-summary@2"
     );
+    expect(campaignNode?.outputs?.find((output) => output.path === "recon-fuzzer-results.json")?.contract).toBe(
+      "ultrafuzz/property-campaign@3"
+    );
     expect(topology.nodes.find((node) => node.id === "dynamic-strategy-generator")?.depends_on).toContain(
       "stateful-invariant-campaign"
     );
@@ -379,9 +382,9 @@ describe("prompt semantic anchors", () => {
     // The campaign gate was once written from a sentence that read as one
     // finding per counterexample, and the node failed for every deduplicated
     // run until both sides were corrected. Neither side may drift back alone.
-    expect(campaign).toContain("Do not emit one finding per\ncounterexample");
+    expect(flatCampaign).toContain("Do not emit one finding per counterexample");
     expect(campaign).toContain("reuse the ID of one of the failures it covers");
-    expect(campaign).toContain("a finding may\n     only name a property that some backend failure reported");
+    expect(flatCampaign).toContain("a finding may only name a property that some backend failure reported");
     expect(campaign).toContain("one distinct root cause, not one entry in the backend");
     expect(campaign).toMatch(/single counterexample broke several properties at once/u);
     expect(campaign).toContain("all contributing backend provenance");
@@ -397,7 +400,17 @@ describe("prompt semantic anchors", () => {
     expect(campaign).toContain("`partial`: recon-fuzzer produced usable results but ended early");
     expect(campaign).toContain("`blocked`: recon-fuzzer produced no usable results");
     expect(campaign).toContain("--workers <workers>");
-    expect(campaign).toContain("using the literal\nstring `recon`");
+    expect(campaign).toContain('"schema_version": "ultrafuzz.property-campaign.v3"');
+    expect(campaign).toContain('"campaign_plan_ref": "campaign-plan.json"');
+    expect(campaign).toContain('"implemented_properties_ref": "implemented-properties.json"');
+    expect(campaign).toContain('"findings_ref": "findings.json"');
+    expect(campaign).toContain('"campaign_summary_ref": "campaign-summary.json"');
+    expect(flatCampaign).toContain("one result row for every implemented property");
+    expect(flatCampaign).toContain("A reproduced failure requires a non-null deterministic reproducer path");
+    expect(flatCampaign).toContain(
+      "run every exact `ultrafuzz json validate` command displayed in the output contract"
+    );
+    expect(flatCampaign).toContain("Do not repair, normalize, or convert an older campaign document");
     expect(campaign).toContain("{{artifact_dir}}/recon-fuzzer-results.json");
     expect(flatCampaign).toContain("`failure_counts.pre_deduplication` and `failure_counts.post_deduplication`");
     expect(flatCampaign).toContain("total number of entries across every sibling backend record's `failures` array");
@@ -408,7 +421,11 @@ describe("prompt semantic anchors", () => {
     expect(campaign).toContain("`deduplication.pre_dedup_count`");
     expect(flatCampaign).toContain("must be a subset of the finding's `property_ids`");
     expect(flatCampaign).toContain("must be the exact union across those contributed failures");
-    expect(campaign).toContain('{"fuzzer_backend":"<backend>","failure_id":"<id>"}');
+    expect(campaign).toContain(
+      '{"fuzzer_backend":"<backend>","failure_id":"<id>","raw_result_ref":"<campaign-result-artifact>"}'
+    );
+    expect(flatCampaign).toContain("not to the backend-internal `paths.raw_results` evidence file");
+    expect(flatCampaign).toContain("Plain failure ID strings and omitted `raw_result_ref` values are invalid");
   });
 
   it("publishes runtime-owned workspace patches for every invariant handoff", () => {
