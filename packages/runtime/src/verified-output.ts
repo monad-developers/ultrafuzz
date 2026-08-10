@@ -710,6 +710,14 @@ export function loadVerifiedFinalReportSnapshot(runRoot: string): VerifiedFinalR
   });
   const report = requiredContractOutput(authority, "ultrafuzz/report@2", "JSON report");
   const markdown = requiredContractOutput(authority, "ultrafuzz/nonempty-markdown@1", "Markdown report");
+  const layout = layoutForRunRoot(authority.run_root);
+  if (
+    !isRecord(report.value) ||
+    !isRecord(report.value.run_metadata) ||
+    report.value.run_metadata.run_id !== layout.runId
+  ) {
+    throw invalidOutput("verified report run_metadata.run_id does not match the authenticated Ultrafuzz run");
+  }
   const projection = projectCanonicalFinalReport(report.value);
   if (!isDeepStrictEqual(projection.report, report.value)) {
     throw invalidOutput("verified report.json is not the canonical final-report projection");
@@ -733,6 +741,14 @@ export function loadVerifiedFinalReportSnapshot(runRoot: string): VerifiedFinalR
     markdown: markdown.value,
     markdown_bytes: Buffer.from(markdown.bytes)
   });
+}
+
+/** Fail if a previously captured final-report snapshot is no longer the exact current authority. */
+export function assertVerifiedFinalReportSnapshotRemainedCurrent(snapshot: VerifiedFinalReportSnapshot): void {
+  const current = loadVerifiedFinalReportSnapshot(snapshot.authority.run_root);
+  if (!isDeepStrictEqual(current, snapshot)) {
+    throw changedOutput("verified final-report authority changed after its immutable snapshot was captured");
+  }
 }
 
 function declaredFinalReportProducer(runRoot: string): { attemptId: string; logicalNodeId: string } {

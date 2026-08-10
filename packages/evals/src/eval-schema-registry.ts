@@ -17,7 +17,7 @@ import {
 
 type EvalAjv = ReturnType<typeof createStrictAjv>;
 
-export const EVAL_COMMON_SCHEMA_ID = "urn:ultrafuzz:schema:evals:common:2" as const;
+export const EVAL_COMMON_SCHEMA_ID = "urn:ultrafuzz:schema:evals:common:3" as const;
 export const EVAL_SUITE_SCHEMA_ID = "urn:ultrafuzz:schema:evals:suite:2" as const;
 export const EVAL_ADJUDICATION_HANDOFF_SCHEMA_ID = "urn:ultrafuzz:schema:evals:adjudication-handoff:1" as const;
 export const EVAL_FINDING_MANIFEST_SCHEMA_ID = "urn:ultrafuzz:schema:evals:finding-manifest:1" as const;
@@ -43,8 +43,8 @@ export const EVAL_RUN_RECORD_SCHEMA_ID = "urn:ultrafuzz:schema:evals:run-record:
 export const EVAL_RUN_SUMMARY_SCHEMA_ID = "urn:ultrafuzz:schema:evals:run-summary:2" as const;
 export const EVAL_LLM_JUDGE_RESULT_SCHEMA_ID = "urn:ultrafuzz:schema:evals:llm-judge-result:1" as const;
 export const EVAL_LLM_JUDGE_RESULT_SCHEMA_VERSION = "ultrafuzz.eval.llm-judge-result.v1" as const;
-export const EVAL_FINDING_SCORE_SCHEMA_ID = "urn:ultrafuzz:schema:evals:finding-score:1" as const;
-export const EVAL_SCORE_SUMMARY_SCHEMA_ID = "urn:ultrafuzz:schema:evals:score-summary:1" as const;
+export const EVAL_FINDING_SCORE_SCHEMA_ID = "urn:ultrafuzz:schema:evals:finding-score:2" as const;
+export const EVAL_SCORE_SUMMARY_SCHEMA_ID = "urn:ultrafuzz:schema:evals:score-summary:2" as const;
 export const EVAL_RECOVERY_EQUIVALENCE_SCHEMA_ID = "urn:ultrafuzz:schema:evals:recovery-equivalence:1" as const;
 export const EVAL_STATUS_SCHEMA_ID = "urn:ultrafuzz:schema:evals:status:1" as const;
 export const EVAL_REVIEW_QUEUE_ITEM_SCHEMA_ID = "urn:ultrafuzz:schema:evals:review-queue-item:2" as const;

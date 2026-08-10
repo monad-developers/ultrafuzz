@@ -393,7 +393,7 @@ function hasExactOutputContractEvidence(provenance: Record<string, unknown> | un
   ) {
     return false;
   }
-  return outputContracts.ok === false || outputContracts.missing.length === 0;
+  return outputContracts.ok === false;
 }
 
 function isCompletedWorkflowState(value: unknown): boolean {

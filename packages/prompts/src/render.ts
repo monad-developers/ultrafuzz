@@ -111,7 +111,6 @@ export interface PromptRenderInput {
     metadataPath: string;
   };
   outputs: {
-    findingsPath: string;
     patchPath: string;
   };
   resolvedConfig?: {
@@ -272,13 +271,14 @@ export function renderPrompt(input: PromptRenderInput): PromptRenderResult {
     if (value === undefined) {
       throw new PromptError("missing-template-variable", `missing prompt template variable: ${occurrence.name}`);
     }
-    if (
-      (occurrence.name === "output_stage_findings_path" || occurrence.name === "output_stage_findings_relative_path") &&
-      value === ""
-    ) {
+    if (isTopologyDerivedFindingsVariable(occurrence.name) && value === "") {
+      const contractDescription =
+        occurrence.name === "output_findings_path"
+          ? "findings@2"
+          : "findings, triaged-findings, or severity-classified-findings";
       throw new PromptError(
         "invalid-artifact-reference",
-        `${occurrence.name} requires exactly one declared findings, triaged-findings, or severity-classified-findings output`
+        `${occurrence.name} requires exactly one declared ${contractDescription} output`
       );
     }
     rendered += value;
@@ -826,14 +826,24 @@ function strategyAttemptTestDirectory(input: PromptRenderInput): string {
 }
 
 function stageFindingsOutputRelativePath(input: PromptRenderInput): string {
+  return declaredFindingsOutputRelativePath(input, (contract) =>
+    new Set(["ultrafuzz/findings@2", "ultrafuzz/triaged-findings@1", "ultrafuzz/severity-classified-findings@1"]).has(
+      contract
+    )
+  );
+}
+
+function findingsOutputRelativePath(input: PromptRenderInput): string {
+  return declaredFindingsOutputRelativePath(input, (contract) => contract === "ultrafuzz/findings@2");
+}
+
+function declaredFindingsOutputRelativePath(
+  input: PromptRenderInput,
+  acceptsContract: (contract: string) => boolean
+): string {
   const current = input.graph.logicalNodes.filter((node) => node.id === input.node.logicalId);
   if (current.length !== 1) return "";
-  const stageContracts = new Set([
-    "ultrafuzz/findings@2",
-    "ultrafuzz/triaged-findings@1",
-    "ultrafuzz/severity-classified-findings@1"
-  ]);
-  const outputs = artifactOutputsFor(current[0]!).filter((output) => stageContracts.has(output.contract));
+  const outputs = artifactOutputsFor(current[0]!).filter((output) => acceptsContract(output.contract));
   return outputs.length === 1 ? outputs[0]!.path : "";
 }
 
@@ -845,7 +855,10 @@ function buildVariableContext(input: PromptRenderInput): Record<string, string> 
     artifact_path: input.node.artifactDir,
     artifact_dir: input.node.artifactDir,
     run_metadata_path: input.run.metadataPath,
-    output_findings_path: input.outputs.findingsPath,
+    output_findings_path: (() => {
+      const relativePath = findingsOutputRelativePath(input);
+      return relativePath === "" ? "" : path.join(input.node.artifactDir, relativePath);
+    })(),
     output_patch_path: input.outputs.patchPath,
     output_stage_findings_path: (() => {
       const relativePath = stageFindingsOutputRelativePath(input);
@@ -876,7 +889,6 @@ function validateRenderInputPaths(input: PromptRenderInput): void {
     input.node.artifactDir,
     input.run.artifactsDir,
     input.run.metadataPath,
-    input.outputs.findingsPath,
     input.outputs.patchPath
   ];
   for (const absolutePath of absolutePaths) {
@@ -885,7 +897,6 @@ function validateRenderInputPaths(input: PromptRenderInput): void {
     }
   }
   ensureInsidePath(input.run.artifactsDir, input.node.artifactDir, "node artifact directory");
-  ensureInsidePath(input.node.artifactDir, input.outputs.findingsPath, "output findings path");
   ensureInsidePath(input.node.artifactDir, input.outputs.patchPath, "output patch path");
 }
 
@@ -897,11 +908,7 @@ function validateVariableOverrides(variables: PromptRenderInput["variables"]): v
     if (!isSupportedTemplateVariable(key)) {
       throw new PromptError("missing-template-variable", `unknown prompt render variable override: ${key}`);
     }
-    if (
-      key === "schema_path" ||
-      key === "output_stage_findings_path" ||
-      key === "output_stage_findings_relative_path"
-    ) {
+    if (key === "schema_path" || isTopologyDerivedFindingsVariable(key)) {
       throw new PromptError("invalid-render-input", `${key} is topology-derived and cannot be overridden`);
     }
     if (!(
@@ -912,6 +919,14 @@ function validateVariableOverrides(variables: PromptRenderInput["variables"]): v
       throw new PromptError("invalid-render-input", `invalid prompt render variable value for ${key}`);
     }
   }
+}
+
+function isTopologyDerivedFindingsVariable(value: string): boolean {
+  return (
+    value === "output_findings_path" ||
+    value === "output_stage_findings_path" ||
+    value === "output_stage_findings_relative_path"
+  );
 }
 
 function resolveModelProvenance(input: PromptRenderInput): PromptModelProvenance | undefined {

@@ -862,7 +862,7 @@ describe("public Modal benchmark configuration", () => {
     const workspace = path.resolve("../..");
     const source = fs.readFileSync(path.join(workspace, "packages/modal/src/public-worker.ts"), "utf8");
     const preflight = source.indexOf("await input.preflight");
-    const persistedBundle = source.indexOf("if (fs.existsSync(bundlePath))");
+    const persistedBundle = source.indexOf("if (pathEntryPresent(bundlePath))");
     const readPersistedBundle = source.indexOf("readPublicBenchmarkBundle", persistedBundle);
     const assertPersistedLineage = source.indexOf("assertPublicWorkerBundleLineage", readPersistedBundle);
 

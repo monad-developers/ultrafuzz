@@ -21,10 +21,19 @@ import {
   normalizeNodeAttemptFailureMessage,
   parseStrictJsonBytes,
   PROPERTIES_SCHEMA_VERSION,
+  publishFileDurableExclusive,
   readRegularFileSnapshot,
   validateArtifactContract,
-  writeFileDurable
+  validateArtifactContractBytes,
+  validatePropertiesSchema,
+  writeFileDurable,
+  type InvariantLedgerArtifact,
+  type PropertiesArtifact
 } from "@ultrafuzz/artifacts";
+import {
+  canonicalPropertiesMarkdownParityIssues,
+  invariantLedgerMarkdownParityIssues
+} from "../src/canonical-properties-markdown.js";
 import { declaredAncestorOutputsByContract } from "../src/semantic-artifact-context.js";
 
 const runtimePackageRoot = findRuntimePackageRoot(path.dirname(fileURLToPath(import.meta.url)));
@@ -367,10 +376,8 @@ function loadPreservePinnedSourceProof(): (task: {
     "execFileSync",
     "realpathSync",
     "mkdirSync",
-    "existsSync",
-    "readFileSync",
     "Buffer",
-    "writeFileDurable",
+    "publishFileDurableExclusive",
     "isStrictlyInsideDirectory",
     "usesPinnedSource",
     "pinnedSourceRef",
@@ -381,10 +388,8 @@ function loadPreservePinnedSourceProof(): (task: {
     execFileSync,
     fs.realpathSync,
     fs.mkdirSync,
-    fs.existsSync,
-    fs.readFileSync,
     Buffer,
-    writeFileDurable,
+    publishFileDurableExclusive,
     (root: string, candidate: string) => candidate !== root && candidate.startsWith(`${root}${path.sep}`),
     true,
     "refs/heads/ultrafuzz-pinned",
@@ -442,7 +447,7 @@ function loadVerifyInvariantLedgerSourceEvidence(snapshotPaths: string[]): (
   task: {
     attemptId: string;
     workspacePath: string;
-    outputs: readonly { path: string }[];
+    outputs: readonly { path: string; contract: string }[];
     metadata: { node: { logicalNodeId: string }; artifacts: { dir: string } };
   },
   verifiedOutputs: ReadonlyMap<
@@ -476,7 +481,7 @@ function loadVerifyInvariantLedgerSourceEvidence(snapshotPaths: string[]): (
     "mkdirSync",
     "execFileSync",
     "createHash",
-    "writeFileDurable",
+    "publishFileDurableExclusive",
     "validateInvariantLedgerSchema",
     "validateInvariantSourceProofSchema",
     "isSafeInvariantProbePath",
@@ -486,6 +491,8 @@ function loadVerifyInvariantLedgerSourceEvidence(snapshotPaths: string[]): (
     "normalizeInvariantSourceLines",
     "symbolFromInvariantLocation",
     "invariantSymbolDeclaration",
+    "invariantLedgerMarkdownParityIssues",
+    "declaredInvariantLedgerProducerPair",
     `${helper}; return verifyInvariantLedgerSourceEvidence;`
   )(
     path,
@@ -494,7 +501,7 @@ function loadVerifyInvariantLedgerSourceEvidence(snapshotPaths: string[]): (
     fs.mkdirSync,
     () => "0000000000000000000000000000000000000000\n",
     createHash,
-    writeFileDurable,
+    publishFileDurableExclusive,
     (value: unknown) => ({ ok: true, value }),
     () => ({ ok: true }),
     (value: string) => !path.isAbsolute(value) && !value.split(/[\\/]/u).includes(".."),
@@ -511,12 +518,19 @@ function loadVerifyInvariantLedgerSourceEvidence(snapshotPaths: string[]): (
     readInvariantSourceSnapshot,
     (lines: readonly string[]) => lines.join("\n"),
     () => undefined,
-    () => undefined
+    () => undefined,
+    invariantLedgerMarkdownParityIssues,
+    (task: { outputs: readonly { path: string; contract: string }[] }) => {
+      const ledgers = task.outputs.filter((output) => output.contract === "ultrafuzz/invariant-ledger@1");
+      const markdown = task.outputs.filter((output) => output.contract === "ultrafuzz/nonempty-markdown@1");
+      if (ledgers.length !== 1 || markdown.length !== 1) throw new Error("ambiguous invariant declaration");
+      return { ledger: ledgers[0], markdown: markdown[0] };
+    }
   ) as (
     task: {
       attemptId: string;
       workspacePath: string;
-      outputs: readonly { path: string }[];
+      outputs: readonly { path: string; contract: string }[];
       metadata: { node: { logicalNodeId: string }; artifacts: { dir: string } };
     },
     verifiedOutputs: ReadonlyMap<
@@ -531,7 +545,7 @@ function invariantLedgerProbeFixture(probes: readonly Record<string, string>[]):
   task: {
     attemptId: string;
     workspacePath: string;
-    outputs: readonly { path: string }[];
+    outputs: readonly { path: string; contract: string }[];
     metadata: { node: { logicalNodeId: string }; artifacts: { dir: string } };
   };
   verifiedOutputs: ReadonlyMap<
@@ -544,8 +558,9 @@ function invariantLedgerProbeFixture(probes: readonly Record<string, string>[]):
   const artifactDir = path.join(root, "run", "artifacts", "project-discovery");
   fs.mkdirSync(workspacePath, { recursive: true });
   fs.mkdirSync(artifactDir, { recursive: true });
-  fs.mkdirSync(path.join(artifactDir, "setup"), { recursive: true });
-  const ledgerPath = path.join(artifactDir, "setup", "invariant-evidence-ledger.json");
+  fs.mkdirSync(path.join(artifactDir, "custom"), { recursive: true });
+  const ledgerRelativePath = "custom/renamed-ledger.json";
+  const ledgerPath = path.join(artifactDir, ledgerRelativePath);
   const ledger = {
     schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
     entries: [],
@@ -554,19 +569,33 @@ function invariantLedgerProbeFixture(probes: readonly Record<string, string>[]):
   };
   const contents = JSON.stringify(ledger);
   const bytes = Buffer.from(contents, "utf8");
+  const markdownRelativePath = "custom/renamed-discovery.md";
+  const markdownPath = path.join(artifactDir, markdownRelativePath);
+  const markdownContents = "# Discovery\n";
+  const markdownBytes = Buffer.from(markdownContents, "utf8");
   fs.writeFileSync(ledgerPath, bytes);
+  fs.writeFileSync(markdownPath, markdownBytes);
   return {
     root,
     task: {
       attemptId: "attempt-project-discovery",
       workspacePath,
-      outputs: [{ path: "setup/invariant-evidence-ledger.json" }],
-      metadata: { node: { logicalNodeId: "project-discovery" }, artifacts: { dir: artifactDir } }
+      outputs: [
+        { path: ledgerRelativePath, contract: "ultrafuzz/invariant-ledger@1" },
+        { path: markdownRelativePath, contract: "ultrafuzz/nonempty-markdown@1" }
+      ],
+      metadata: { node: { logicalNodeId: "renamed-discovery-role" }, artifacts: { dir: artifactDir } }
     },
     verifiedOutputs: new Map([
+      [ledgerRelativePath, { artifactRoot: artifactDir, file: { path: ledgerPath, bytes }, contents, value: ledger }],
       [
-        "setup/invariant-evidence-ledger.json",
-        { artifactRoot: artifactDir, file: { path: ledgerPath, bytes }, contents, value: ledger }
+        markdownRelativePath,
+        {
+          artifactRoot: artifactDir,
+          file: { path: markdownPath, bytes: markdownBytes },
+          contents: markdownContents,
+          value: markdownContents
+        }
       ]
     ])
   };
@@ -584,6 +613,89 @@ test("generated Smithers invariant ledger accepts a directory scan probe", () =>
 
   // A directory probe must never reach the regular-file snapshot; that call is what killed R45.
   assert.deepEqual(snapshotPaths, []);
+  fs.rmSync(fixture.root, { recursive: true, force: true });
+});
+
+test("generated Smithers invariant source proof is immutable and never repairs a present destination", () => {
+  const snapshotPaths: string[] = [];
+  const verify = loadVerifyInvariantLedgerSourceEvidence(snapshotPaths);
+  const fixture = invariantLedgerProbeFixture([]);
+  const proofPath = path.join(fixture.root, "run", "source-proofs", `${fixture.task.attemptId}.invariant.json`);
+
+  verify(fixture.task, fixture.verifiedOutputs);
+  const canonical = fs.readFileSync(proofPath);
+  verify(fixture.task, fixture.verifiedOutputs);
+  assert.deepEqual(fs.readFileSync(proofPath), canonical, "exact prior proof bytes are idempotent");
+
+  fs.writeFileSync(proofPath, "{}\n");
+  assert.throws(() => verify(fixture.task, fixture.verifiedOutputs), /invariant source proof .* changed/iu);
+  assert.equal(fs.readFileSync(proofPath, "utf8"), "{}\n", "conflicting present proof is not overwritten");
+
+  fs.unlinkSync(proofPath);
+  fs.symlinkSync("missing-proof.json", proofPath);
+  assert.throws(() => verify(fixture.task, fixture.verifiedOutputs), /invariant source proof .* changed/iu);
+  assert.equal(fs.lstatSync(proofPath).isSymbolicLink(), true, "dangling proof remains present and invalid");
+  fs.rmSync(fixture.root, { recursive: true, force: true });
+});
+
+test("generated Smithers checks the authenticated invariant Markdown before source publication", () => {
+  const snapshotPaths: string[] = [];
+  const verify = loadVerifyInvariantLedgerSourceEvidence(snapshotPaths);
+  const fixture = invariantLedgerProbeFixture([]);
+  const ledgerPath = "custom/renamed-ledger.json";
+  const markdownPath = "custom/renamed-discovery.md";
+  const ledgerSnapshot = fixture.verifiedOutputs.get(ledgerPath)!;
+  const markdownSnapshot = fixture.verifiedOutputs.get(markdownPath)!;
+  const ledger = {
+    schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+    entries: [
+      {
+        id: "evidence-one",
+        source_path: "docs/source.md",
+        source_location: "line 1",
+        kind: "invariant",
+        verbatim: "Balances remain conserved.",
+        inventory_ids: ["inventory-one"]
+      }
+    ],
+    inventory_rows: [
+      {
+        id: "inventory-one",
+        description: "Balances remain conserved.",
+        ledger_ids: ["evidence-one"]
+      }
+    ],
+    scan_probes: []
+  };
+  ledgerSnapshot.value = ledger;
+  ledgerSnapshot.contents = JSON.stringify(ledger);
+  ledgerSnapshot.file.bytes = Buffer.from(ledgerSnapshot.contents, "utf8");
+
+  assert.throws(
+    () => verify(fixture.task, fixture.verifiedOutputs),
+    /invariant ledger JSON\/Markdown parity failed.*INVARIANT_LEDGER_MARKDOWN_EVIDENCE_MISSING/iu
+  );
+  assert.deepEqual(snapshotPaths, [], "parity fails before any source snapshot is read");
+
+  markdownSnapshot.contents = [
+    '### Ledger entry: "evidence-one"',
+    'source_path: "docs/source.md"',
+    'source_location: "line 1"',
+    'kind: "invariant"',
+    'verbatim: "Balances remain conserved."',
+    'inventory_ids: ["inventory-one"]',
+    '### End ledger entry: "evidence-one"',
+    '### Inventory row: "inventory-one"',
+    'description: "Balances remain conserved."',
+    'ledger_ids: ["evidence-one"]',
+    '### End inventory row: "inventory-one"'
+  ].join("\n");
+  markdownSnapshot.file.bytes = Buffer.from(markdownSnapshot.contents, "utf8");
+  assert.throws(
+    () => verify(fixture.task, fixture.verifiedOutputs),
+    /invariant source docs\/source\.md is unavailable/iu
+  );
+  assert.deepEqual(snapshotPaths, ["docs/source.md"]);
   fs.rmSync(fixture.root, { recursive: true, force: true });
 });
 
@@ -633,8 +745,14 @@ test("generated Smithers verifier rejects zero-byte generated-test companions", 
   assert.ok(workflowStart > verifierStart, source);
 
   const helper = source.slice(helperStart, verifierStart);
-  assert.match(source, /artifactContractDefinition,[\s\S]*assertRegularFileInside,[\s\S]*validateArtifactContract/u);
-  assert.match(source, /validateArtifactContract,[\s\S]*writeFileDurable[\s\S]*= await import/u);
+  assert.match(
+    source,
+    /artifactContractDefinition,[\s\S]*assertRegularFileInside,[\s\S]*validateArtifactContractBytes/u
+  );
+  assert.match(source, /validateArtifactContractBytes,[\s\S]*writeFileDurable[\s\S]*= await import/u);
+  assert.doesNotMatch(source, /validateArtifactContract\(/u);
+  assert.match(source, /validateArtifactContractBytes\([\s\S]*snapshot\.bytes/u);
+  assert.match(source, /validateArtifactContractBytes\(output\.contract, file\.bytes, output\.path\)/u);
   assert.match(source, /assertRegularFileInside\(artifactDir, artifactPath, failureMessage\)/u);
   assert.match(helper, /readRegularFileSnapshot\(resolvedPath, maxBytes\)/u);
   assert.match(helper, /requireNonEmpty && bytes\.length === 0/u);
@@ -852,6 +970,7 @@ function loadVerifyArtifactsHarness(
     taskSpecs?: readonly VerifyArtifactsTask[];
     authenticatedDependencyDirs?: readonly string[];
     onSemanticGate?: () => void;
+    onPublishArtifacts?: () => void;
   } = {}
 ): {
   captureTaskOutputs: (task: VerifyArtifactsTask) => Array<{
@@ -891,6 +1010,7 @@ function loadVerifyArtifactsHarness(
   const publications = new Map<string, Buffer>();
   const markerWrites: unknown[] = [];
   const authenticatedDependencyChecks: Array<{ consumerAttemptId: string; dependency: string }> = [];
+  const harnessTaskSpecs = options.taskSpecs ?? [];
   const authenticatedDependencies = new Set(
     (options.authenticatedDependencyDirs ?? []).map((dependency) => fs.realpathSync(dependency))
   );
@@ -916,7 +1036,7 @@ function loadVerifyArtifactsHarness(
     "decodeStrictUtf8Snapshot",
     "artifactContractDefinition",
     "parseStrictJsonSnapshot",
-    "validateArtifactContract",
+    "validateArtifactContractBytes",
     "formatSchemaValidationIssues",
     "assertVerifiedDependency",
     "executeSchemaSemanticGates",
@@ -933,11 +1053,20 @@ function loadVerifyArtifactsHarness(
     "taskPublishesWorkspacePatch",
     "declaredAncestorOutputsByContract",
     "declaredFinalReportOutputPair",
+    "INVARIANT_LEDGER_CONTRACT",
+    "INVARIANT_LEDGER_CONVENTIONAL_PATH",
+    "DISCOVERY_MARKDOWN_CONVENTIONAL_PATH",
+    "CANONICAL_PROPERTIES_CONTRACT",
+    "CANONICAL_PROPERTIES_CONVENTIONAL_PATH",
+    "CANONICAL_PROPERTIES_MARKDOWN_CONTRACT",
+    "CANONICAL_PROPERTIES_MARKDOWN_CONVENTIONAL_PATH",
+    "canonicalPropertiesMarkdownParityIssues",
+    "validatePropertiesSchema",
     `${emitted}; return { captureTaskOutputs, verifyArtifacts };`
   )(
     path,
     fs.realpathSync,
-    options.taskSpecs ?? [],
+    harnessTaskSpecs,
     (_task: VerifyArtifactsTask, artifactDir: string) => [artifactDir],
     (root: string, candidate: string) => candidate !== root && candidate.startsWith(`${root}${path.sep}`),
     (root: string, candidate: string, failureMessage: string) => {
@@ -1007,7 +1136,9 @@ function loadVerifyArtifactsHarness(
         throw new Error(`${failureMessage}: file is not valid UTF-8`, { cause: error });
       }
     },
-    (contract: string) => ({ format: contract === "ultrafuzz/text@1" ? "text" : "json" }),
+    (contract: string) => ({
+      format: contract === "ultrafuzz/text@1" || contract === "ultrafuzz/nonempty-markdown@1" ? "text" : "json"
+    }),
     (snapshot: { bytes: Buffer }, failureMessage: string) => {
       try {
         return parseStrictJsonBytes(snapshot.bytes);
@@ -1015,15 +1146,65 @@ function loadVerifyArtifactsHarness(
         throw new Error(`${failureMessage}: file is not strict JSON`, { cause: error });
       }
     },
-    (contract: Parameters<typeof validateArtifactContract>[0], contents: string, artifactPath: string) =>
-      validateArtifactContract(contract, contents, artifactPath),
-    () => "invalid",
+    (contract: Parameters<typeof validateArtifactContractBytes>[0], contents: Uint8Array, artifactPath: string) =>
+      validateArtifactContractBytes(contract, contents, artifactPath),
+    (issues: readonly { message: string }[]) => {
+      const parserIssue = issues.find(
+        (issue) => issue.message.includes("not valid UTF-8") || issue.message.includes("not strict JSON")
+      );
+      return parserIssue?.message ?? "invalid";
+    },
     (task: VerifyArtifactsTask, dependency: string) => {
       const resolved = fs.realpathSync(dependency);
       if (!authenticatedDependencies.has(resolved)) {
         throw new Error(`artifact-contract failure: dependency is not authenticated ${resolved}`);
       }
       authenticatedDependencyChecks.push({ consumerAttemptId: task.attemptId, dependency: resolved });
+      const producer = harnessTaskSpecs.find(
+        (candidate) =>
+          candidate.attemptId === path.basename(resolved) && fs.realpathSync(candidate.artifactDir) === resolved
+      );
+      if (producer === undefined)
+        throw new Error(`artifact-contract failure: dependency producer is unavailable ${resolved}`);
+      const artifacts = new Map(
+        producer.outputs.map((output) => {
+          const artifactPath = path.join(resolved, output.path);
+          const bytes = fs.readFileSync(artifactPath);
+          const validation = validateArtifactContractBytes(
+            output.contract as Parameters<typeof validateArtifactContractBytes>[0],
+            bytes,
+            artifactPath
+          );
+          if (!validation.ok) throw new Error(`artifact-contract failure: invalid harness dependency ${output.path}`);
+          return [
+            output.path,
+            Object.freeze({
+              path: artifactPath,
+              relativePath: output.path,
+              contract: output.contract,
+              bytes: Buffer.from(bytes),
+              value: validation.value
+            })
+          ] as const;
+        })
+      );
+      const publications = new Map(
+        [...artifacts].map(([relativePath, artifact]) => [
+          relativePath,
+          createHash("sha256").update(artifact.bytes).digest("hex")
+        ])
+      );
+      return Object.freeze({
+        attemptId: producer.attemptId,
+        artifactDir: resolved,
+        markerBytes: Buffer.from(
+          JSON.stringify([...publications].sort(([left], [right]) => left.localeCompare(right))),
+          "utf8"
+        ),
+        artifacts,
+        publications,
+        generatedTestBundles: Object.freeze([])
+      });
     },
     (...args: Parameters<typeof executeSchemaSemanticGates>) => {
       options.onSemanticGate?.();
@@ -1039,6 +1220,7 @@ function loadVerifyArtifactsHarness(
     createHash,
     (_artifactDir: string, values: ReadonlyMap<string, Buffer>) => {
       for (const [relativePath, bytes] of values) publications.set(relativePath, Buffer.from(bytes));
+      options.onPublishArtifacts?.();
     },
     (...args: unknown[]) => markerWrites.push(args),
     (task: VerifyArtifactsTask) =>
@@ -1051,7 +1233,16 @@ function loadVerifyArtifactsHarness(
       const report = task.outputs.filter((output) => output.contract === "ultrafuzz/report@2");
       const markdown = task.outputs.filter((output) => output.contract === "ultrafuzz/nonempty-markdown@1");
       return report.length === 1 && markdown.length === 1 ? { report: report[0]!, markdown: markdown[0]! } : undefined;
-    }
+    },
+    "ultrafuzz/invariant-ledger@1",
+    "setup/invariant-evidence-ledger.json",
+    "setup/project-discovery.md",
+    "ultrafuzz/properties@2",
+    "properties.json",
+    "ultrafuzz/nonempty-markdown@1",
+    "properties.md",
+    canonicalPropertiesMarkdownParityIssues,
+    validatePropertiesSchema
   ) as {
     captureTaskOutputs: ReturnType<typeof loadVerifyArtifactsHarness>["captureTaskOutputs"];
     verifyArtifacts: ReturnType<typeof loadVerifyArtifactsHarness>["verifyArtifacts"];
@@ -1351,8 +1542,8 @@ test("generated Smithers hashes and publishes the captured output after its path
     const outputPath = path.join(root, "result.json");
     const original = Buffer.from("captured bytes\n", "utf8");
     fs.writeFileSync(outputPath, original);
-    const harness = loadVerifyArtifactsHarness();
     const task = singleOutputVerificationTask(root, "ultrafuzz/text@1");
+    const harness = loadVerifyArtifactsHarness();
     const captured = harness.captureTaskOutputs(task);
     fs.writeFileSync(outputPath, "mutated after capture\n", "utf8");
 
@@ -1568,6 +1759,7 @@ test("generated Smithers verifies a v3 property campaign against authenticated s
     }
     assert.equal(harness.markerWrites.length, 1);
     assert.deepEqual(harness.authenticatedDependencyChecks, [
+      { consumerAttemptId: "attempt-campaign", dependency: fixture.implementationArtifactDir },
       { consumerAttemptId: "attempt-campaign", dependency: fixture.implementationArtifactDir }
     ]);
   } finally {
@@ -1685,6 +1877,41 @@ test("generated Smithers publishes the one immutable campaign evidence snapshot 
   }
 });
 
+test("generated Smithers rejects a dependency epoch swap after publication construction and before success", () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-dependency-final-recheck-")));
+  try {
+    const fixture = generatedCampaignVerificationFixture(root);
+    const dependencyPath = path.join(fixture.implementationArtifactDir, "implemented-properties.json");
+    let publicationConstructed = false;
+    const harness = loadVerifyArtifactsHarness({
+      taskSpecs: [fixture.implementationProducer, fixture.task],
+      authenticatedDependencyDirs: [fixture.implementationArtifactDir],
+      onPublishArtifacts: () => {
+        publicationConstructed = true;
+        fs.writeFileSync(
+          dependencyPath,
+          `${JSON.stringify(generatedImplementedPropertiesFixture(), null, 2)}\n`,
+          "utf8"
+        );
+      }
+    });
+
+    assert.throws(
+      () => harness.verifyArtifacts(fixture.task, harness.captureTaskOutputs(fixture.task)),
+      /verified dependency authority changed during semantic verification attempt-implemented-properties/u
+    );
+    assert.equal(publicationConstructed, true);
+    assert.ok(harness.publications.size > 0, "publication construction completed before the dependency swap");
+    assert.equal(harness.markerWrites.length, 0, "the swapped dependency never receives a consumer success marker");
+    assert.deepEqual(harness.authenticatedDependencyChecks, [
+      { consumerAttemptId: "attempt-campaign", dependency: fixture.implementationArtifactDir },
+      { consumerAttemptId: "attempt-campaign", dependency: fixture.implementationArtifactDir }
+    ]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("generated Smithers fails closed when v3 campaign sibling semantic counts disagree", () => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-semantic-siblings-")));
   try {
@@ -1741,10 +1968,17 @@ test("generated Smithers fails closed when a contextual gate lacks verified ance
     const contents = `${JSON.stringify({ schema_version: "ultrafuzz.properties.v2", properties: [] })}\n`;
     assert.equal(validateArtifactContract("ultrafuzz/properties@2", contents).ok, true);
     fs.writeFileSync(path.join(root, "result.json"), contents, "utf8");
+    fs.writeFileSync(path.join(root, "result.md"), "# Canonical properties\n", "utf8");
 
     const task = singleOutputVerificationTask(root, "ultrafuzz/properties@2");
     task.outputs[0]!.schemaFile = "properties.schema.json";
-    const harness = loadVerifyArtifactsHarness();
+    task.outputs.push({
+      path: "result.md",
+      contract: "ultrafuzz/nonempty-markdown@1",
+      contractDigest: "b".repeat(64),
+      primary: false
+    });
+    const harness = loadVerifyArtifactsHarness({ taskSpecs: [task] });
 
     assert.throws(
       () => harness.verifyArtifacts(task, harness.captureTaskOutputs(task)),
@@ -1755,6 +1989,429 @@ test("generated Smithers fails closed when a contextual gate lacks verified ance
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+type ExactPairHarnessTask = {
+  attemptId: string;
+  metadata: { node: { logicalNodeId: string } };
+  outputs: Array<{ path: string; contract: string }>;
+};
+
+function loadGeneratedExactPairResolvers(): {
+  invariant(
+    task: ExactPairHarnessTask
+  ): { ledger: { path: string; contract: string }; markdown: { path: string; contract: string } } | undefined;
+  properties(
+    task: ExactPairHarnessTask
+  ): { catalog: { path: string; contract: string }; markdown: { path: string; contract: string } } | undefined;
+} {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function declaredInvariantLedgerProducerPair");
+  const helperEnd = source.indexOf("\n\nfunction declaredAncestorContractOutputs", helperStart);
+  assert.ok(helperStart >= 0 && helperEnd > helperStart, source);
+  const emitted = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  return new Function(
+    "INVARIANT_LEDGER_CONTRACT",
+    "INVARIANT_LEDGER_CONVENTIONAL_PATH",
+    "DISCOVERY_MARKDOWN_CONVENTIONAL_PATH",
+    "CANONICAL_PROPERTIES_CONTRACT",
+    "CANONICAL_PROPERTIES_CONVENTIONAL_PATH",
+    "CANONICAL_PROPERTIES_MARKDOWN_CONTRACT",
+    "CANONICAL_PROPERTIES_MARKDOWN_CONVENTIONAL_PATH",
+    `${emitted}; return { invariant: declaredInvariantLedgerProducerPair, properties: declaredCanonicalPropertiesPair };`
+  )(
+    "ultrafuzz/invariant-ledger@1",
+    "setup/invariant-evidence-ledger.json",
+    "setup/project-discovery.md",
+    "ultrafuzz/properties@2",
+    "properties.json",
+    "ultrafuzz/nonempty-markdown@1",
+    "properties.md"
+  ) as ReturnType<typeof loadGeneratedExactPairResolvers>;
+}
+
+test("generated verifier derives discovery and canonical-property roles from exact typed declarations", () => {
+  const resolve = loadGeneratedExactPairResolvers();
+  const discovery: ExactPairHarnessTask = {
+    attemptId: "renamed-discovery-attempt",
+    metadata: { node: { logicalNodeId: "noncanonical-discovery-logical-id" } },
+    outputs: [
+      { path: "custom/evidence.json", contract: "ultrafuzz/invariant-ledger@1" },
+      { path: "custom/discovery.md", contract: "ultrafuzz/nonempty-markdown@1" }
+    ]
+  };
+  const properties: ExactPairHarnessTask = {
+    attemptId: "renamed-canonicalizer-attempt",
+    metadata: { node: { logicalNodeId: "noncanonical-canonicalizer-logical-id" } },
+    outputs: [
+      { path: "custom/catalog.json", contract: "ultrafuzz/properties@2" },
+      { path: "custom/catalog.md", contract: "ultrafuzz/nonempty-markdown@1" }
+    ]
+  };
+
+  assert.equal(resolve.invariant(discovery)?.ledger.path, "custom/evidence.json");
+  assert.equal(resolve.invariant(discovery)?.markdown.path, "custom/discovery.md");
+  assert.equal(resolve.properties(properties)?.catalog.path, "custom/catalog.json");
+  assert.equal(resolve.properties(properties)?.markdown.path, "custom/catalog.md");
+});
+
+test("generated verifier rejects wrong-contract lookalikes and ambiguous typed discovery/property outputs", () => {
+  const resolve = loadGeneratedExactPairResolvers();
+  const task = (outputs: ExactPairHarnessTask["outputs"]): ExactPairHarnessTask => ({
+    attemptId: "attempt",
+    metadata: { node: { logicalNodeId: "renamed-role" } },
+    outputs
+  });
+
+  assert.throws(
+    () =>
+      resolve.invariant(
+        task([
+          { path: "setup/invariant-evidence-ledger.json", contract: "ultrafuzz/text@1" },
+          { path: "setup/project-discovery.md", contract: "ultrafuzz/nonempty-markdown@1" }
+        ])
+      ),
+    /wrong-contract lookalike.*invariant-evidence-ledger\.json/iu
+  );
+  assert.throws(
+    () =>
+      resolve.invariant(
+        task([
+          { path: "custom/ledger.json", contract: "ultrafuzz/invariant-ledger@1" },
+          { path: "setup/project-discovery.md", contract: "ultrafuzz/text@1" }
+        ])
+      ),
+    /wrong-contract lookalike.*project-discovery\.md/iu
+  );
+  assert.throws(
+    () =>
+      resolve.invariant(
+        task([
+          { path: "custom/a.json", contract: "ultrafuzz/invariant-ledger@1" },
+          { path: "custom/b.json", contract: "ultrafuzz/invariant-ledger@1" },
+          { path: "custom/discovery.md", contract: "ultrafuzz/nonempty-markdown@1" }
+        ])
+      ),
+    /exactly one ultrafuzz\/invariant-ledger@1.*found 2/iu
+  );
+  assert.throws(
+    () =>
+      resolve.properties(
+        task([
+          { path: "properties.json", contract: "ultrafuzz/text@1" },
+          { path: "properties.md", contract: "ultrafuzz/nonempty-markdown@1" }
+        ])
+      ),
+    /wrong-contract lookalike.*properties\.json/iu
+  );
+  assert.throws(
+    () =>
+      resolve.properties(
+        task([
+          { path: "custom/catalog.json", contract: "ultrafuzz/properties@2" },
+          { path: "custom/a.md", contract: "ultrafuzz/nonempty-markdown@1" },
+          { path: "custom/b.md", contract: "ultrafuzz/nonempty-markdown@1" }
+        ])
+      ),
+    /exactly one ultrafuzz\/nonempty-markdown@1 companion.*found 2/iu
+  );
+  assert.throws(
+    () =>
+      resolve.properties(
+        task([
+          { path: "custom/catalog.json", contract: "ultrafuzz/properties@2" },
+          { path: "custom/catalog.md", contract: "ultrafuzz/nonempty-markdown@1" },
+          { path: "properties.md", contract: "ultrafuzz/text@1" }
+        ])
+      ),
+    /wrong-contract lookalike.*properties\.md/iu
+  );
+});
+
+function loadGeneratedCurrentPropertiesParity(): (
+  task: ExactPairHarnessTask,
+  verifiedOutputs: ReadonlyMap<string, { file: { path: string }; contents: string; value: unknown }>
+) => void {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function verifyCanonicalPropertiesMarkdownPair");
+  const helperEnd = source.indexOf("\n\nfunction verifyFinalReportCanonicalProjection", helperStart);
+  assert.ok(helperStart >= 0 && helperEnd > helperStart, source);
+  const emitted = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  const resolve = loadGeneratedExactPairResolvers();
+  return new Function(
+    "declaredCanonicalPropertiesPair",
+    "validatePropertiesSchema",
+    "formatSchemaValidationIssues",
+    "canonicalPropertiesMarkdownParityIssues",
+    `${emitted}; return verifyCanonicalPropertiesMarkdownPair;`
+  )(
+    resolve.properties,
+    (value: unknown) => ({ ok: true, issues: [], value }),
+    () => "invalid",
+    canonicalPropertiesMarkdownParityIssues
+  ) as ReturnType<typeof loadGeneratedCurrentPropertiesParity>;
+}
+
+test("generated verifier applies host-identical semantic parity to authenticated custom property snapshots", () => {
+  const verify = loadGeneratedCurrentPropertiesParity();
+  const task: ExactPairHarnessTask = {
+    attemptId: "renamed-canonicalizer-attempt",
+    metadata: { node: { logicalNodeId: "noncanonical-canonicalizer" } },
+    outputs: [
+      { path: "custom/catalog.json", contract: "ultrafuzz/properties@2" },
+      { path: "custom/catalog.md", contract: "ultrafuzz/nonempty-markdown@1" }
+    ]
+  };
+  const catalog = {
+    schema_version: "ultrafuzz.properties.v2",
+    properties: [
+      {
+        id: "property-one",
+        description: "Balances remain conserved.",
+        category: "accounting",
+        priority: "high",
+        sources: [{ source_node_id: "renamed-lens", source_property_id: "lens-one" }],
+        ledger_ids: ["evidence-one"]
+      }
+    ]
+  };
+  const validMarkdown = [
+    '### Canonical property: "property-one"',
+    'description: "Balances remain conserved."',
+    'category: "accounting"',
+    'priority: "high"',
+    'sources: [{"source_node_id":"renamed-lens","source_property_id":"lens-one"}]',
+    'ledger_ids: ["evidence-one"]',
+    '### End canonical property: "property-one"'
+  ].join("\n");
+  const snapshots = (markdown: string) =>
+    new Map<string, { file: { path: string }; contents: string; value: unknown }>([
+      [
+        "custom/catalog.json",
+        { file: { path: "/run/custom/catalog.json" }, contents: JSON.stringify(catalog), value: catalog }
+      ],
+      ["custom/catalog.md", { file: { path: "/run/custom/catalog.md" }, contents: markdown, value: markdown }]
+    ]);
+
+  assert.doesNotThrow(() => verify(task, snapshots(validMarkdown)));
+  assert.throws(
+    () => verify(task, snapshots(validMarkdown.replace('priority: "high"\n', ""))),
+    /PROPERTY_MARKDOWN_PARITY_MISSING.*priority/iu
+  );
+});
+
+test("canonical property parity is exact and JSON-safe for every schema-valid delimiter", () => {
+  const propertyId = "property,;\n`:/";
+  const description = "Exact `description` | with\na second line";
+  const category = "category,;`:/";
+  const sources = [
+    {
+      source_node_id: "node,;\n`:/",
+      source_property_id: "source-property,;\n`:/"
+    }
+  ];
+  const referenceExpectations = ["expectation,;\n`:/"];
+  const catalog: PropertiesArtifact = {
+    schema_version: "ultrafuzz.properties.v2",
+    properties: [
+      {
+        id: propertyId,
+        description,
+        category,
+        priority: "high",
+        sources,
+        ledger_ids: ["evidence-one"],
+        reference_expectations: referenceExpectations
+      }
+    ]
+  };
+  const markdown = [
+    `### Canonical property: ${JSON.stringify(propertyId)}`,
+    `description: ${JSON.stringify(description)}`,
+    `category: ${JSON.stringify(category)}`,
+    'priority: "high"',
+    `sources: ${JSON.stringify(sources)}`,
+    'ledger_ids: ["evidence-one"]',
+    `reference_expectations: ${JSON.stringify(referenceExpectations)}`,
+    `### End canonical property: ${JSON.stringify(propertyId)}`
+  ].join("\n");
+  assert.deepEqual(canonicalPropertiesMarkdownParityIssues(catalog, markdown, "properties.md"), []);
+
+  for (const [field, expected] of [
+    ["description", description],
+    ["category", category],
+    ["priority", "high"]
+  ] as const) {
+    const exactLine = `${field}: ${JSON.stringify(expected)}`;
+    const altered = markdown.replace(exactLine, `${field}: ${JSON.stringify(`${expected} Ledger evidence: forged`)}`);
+    assert.ok(
+      canonicalPropertiesMarkdownParityIssues(catalog, altered, "properties.md").some(
+        (issue) => issue.code === "PROPERTY_MARKDOWN_PARITY_MISSING" && issue.message.includes(field)
+      ),
+      field
+    );
+  }
+
+  const ambiguousSources = markdown.replace(
+    `sources: ${JSON.stringify(sources)}`,
+    `sources: ${sources[0]!.source_node_id}:${sources[0]!.source_property_id}`
+  );
+  assert.ok(
+    canonicalPropertiesMarkdownParityIssues(catalog, ambiguousSources, "properties.md").some(
+      (issue) => issue.code === "PROPERTY_MARKDOWN_PARITY_MISSING" && issue.message.includes("sources")
+    )
+  );
+
+  const reordered = markdown.replace(
+    `description: ${JSON.stringify(description)}\ncategory: ${JSON.stringify(category)}`,
+    `category: ${JSON.stringify(category)}\ndescription: ${JSON.stringify(description)}`
+  );
+  assert.ok(
+    canonicalPropertiesMarkdownParityIssues(catalog, reordered, "properties.md").some(
+      (issue) => issue.code === "PROPERTY_MARKDOWN_PARITY_MISSING" && issue.message.includes("field order")
+    )
+  );
+
+  const blankLine = markdown.replace('priority: "high"', 'priority: "high"\n');
+  assert.ok(
+    canonicalPropertiesMarkdownParityIssues(catalog, blankLine, "properties.md").some(
+      (issue) => issue.code === "PROPERTY_MARKDOWN_PARITY_MISSING"
+    )
+  );
+});
+
+test("canonical property parity rejects explicit empty optional Markdown arrays", () => {
+  const catalog: PropertiesArtifact = {
+    schema_version: "ultrafuzz.properties.v2",
+    properties: [
+      {
+        id: "property-one",
+        description: "Exact description",
+        category: "accounting",
+        priority: "high",
+        sources: [{ source_node_id: "lens", source_property_id: "source" }]
+      }
+    ]
+  };
+  const markdown = [
+    '### Canonical property: "property-one"',
+    'description: "Exact description"',
+    'category: "accounting"',
+    'priority: "high"',
+    'sources: [{"source_node_id":"lens","source_property_id":"source"}]',
+    "ledger_ids: []",
+    "reference_expectations: []",
+    '### End canonical property: "property-one"'
+  ].join("\n");
+  const issues = canonicalPropertiesMarkdownParityIssues(catalog, markdown, "properties.md");
+  assert.ok(issues.some((issue) => issue.code === "INVARIANT_LEDGER_MARKDOWN_MAPPING_EXTRA"));
+  assert.ok(issues.some((issue) => issue.code === "PROPERTY_MARKDOWN_PARITY_EXTRA"));
+});
+
+test("invariant Markdown parity assigns exact fields and rejects duplicate or extra blocks", () => {
+  const ledger: InvariantLedgerArtifact = {
+    schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+    entries: [
+      {
+        id: "evidence-one",
+        source_path: "docs/source.md",
+        source_location: "line 7",
+        kind: "invariant",
+        verbatim: "line 7",
+        inventory_ids: ["inventory-one"]
+      }
+    ],
+    inventory_rows: [{ id: "inventory-one", description: "Exact inventory row", ledger_ids: ["evidence-one"] }],
+    scan_probes: []
+  };
+  const entryBlock = [
+    '### Ledger entry: "evidence-one"',
+    'source_path: "docs/source.md"',
+    'source_location: "line 7"',
+    'kind: "invariant"',
+    'verbatim: "line 7"',
+    'inventory_ids: ["inventory-one"]',
+    '### End ledger entry: "evidence-one"'
+  ].join("\n");
+  const inventoryBlock = [
+    '### Inventory row: "inventory-one"',
+    'description: "Exact inventory row"',
+    'ledger_ids: ["evidence-one"]',
+    '### End inventory row: "inventory-one"'
+  ].join("\n");
+  const valid = `${entryBlock}\n${inventoryBlock}`;
+  assert.deepEqual(invariantLedgerMarkdownParityIssues(ledger, valid, "discovery.md"), []);
+
+  const crossedFields = valid
+    .replace('source_path: "docs/source.md"', 'source_path: "line 7"')
+    .replace('source_location: "line 7"', 'source_location: "docs/source.md"');
+  assert.ok(
+    invariantLedgerMarkdownParityIssues(ledger, crossedFields, "discovery.md").some(
+      (issue) => issue.code === "INVARIANT_LEDGER_MARKDOWN_EVIDENCE_MISSING"
+    )
+  );
+
+  const reorderedFields = valid.replace(
+    'source_path: "docs/source.md"\nsource_location: "line 7"',
+    'source_location: "line 7"\nsource_path: "docs/source.md"'
+  );
+  assert.ok(
+    invariantLedgerMarkdownParityIssues(ledger, reorderedFields, "discovery.md").some(
+      (issue) => issue.code === "INVARIANT_LEDGER_MARKDOWN_EVIDENCE_MISSING"
+    )
+  );
+
+  const blankEntryLine = valid.replace('kind: "invariant"', 'kind: "invariant"\n');
+  assert.ok(
+    invariantLedgerMarkdownParityIssues(ledger, blankEntryLine, "discovery.md").some(
+      (issue) => issue.code === "INVARIANT_LEDGER_MARKDOWN_EVIDENCE_MISSING"
+    )
+  );
+
+  const duplicate = `${valid}\n${entryBlock}`;
+  const duplicateIssues = invariantLedgerMarkdownParityIssues(ledger, duplicate, "discovery.md");
+  assert.ok(duplicateIssues.some((issue) => issue.code === "INVARIANT_LEDGER_MARKDOWN_EVIDENCE_EXTRA"));
+  assert.ok(duplicateIssues.some((issue) => issue.code === "INVARIANT_LEDGER_MARKDOWN_EVIDENCE_MISSING"));
+
+  const duplicateEntryField = valid.replace('kind: "invariant"', 'kind: "invariant"\nkind: "invariant"');
+  assert.ok(
+    invariantLedgerMarkdownParityIssues(ledger, duplicateEntryField, "discovery.md").some(
+      (issue) => issue.code === "INVARIANT_LEDGER_MARKDOWN_EVIDENCE_MISSING"
+    )
+  );
+
+  const duplicateInventoryField = valid.replace(
+    'description: "Exact inventory row"',
+    'description: "Exact inventory row"\ndescription: "Exact inventory row"'
+  );
+  assert.ok(
+    invariantLedgerMarkdownParityIssues(ledger, duplicateInventoryField, "discovery.md").some(
+      (issue) => issue.code === "INVARIANT_LEDGER_MARKDOWN_INVENTORY_MISSING"
+    )
+  );
+
+  const extraEntry = `${valid}\n### Ledger entry: "evidence-extra"\nsource_path: "docs/source.md"\nsource_location: "line 7"\nkind: "invariant"\nverbatim: "line 7"\ninventory_ids: ["inventory-one"]\n### End ledger entry: "evidence-extra"`;
+  assert.ok(
+    invariantLedgerMarkdownParityIssues(ledger, extraEntry, "discovery.md").some(
+      (issue) => issue.code === "INVARIANT_LEDGER_MARKDOWN_EVIDENCE_EXTRA"
+    )
+  );
+
+  const extraInventory = `${valid}\n### Inventory row: "inventory-extra"\ndescription: "extra"\nledger_ids: ["evidence-one"]\n### End inventory row: "inventory-extra"`;
+  assert.ok(
+    invariantLedgerMarkdownParityIssues(ledger, extraInventory, "discovery.md").some(
+      (issue) => issue.code === "INVARIANT_LEDGER_MARKDOWN_INVENTORY_EXTRA"
+    )
+  );
+
+  const emptyLedger = { ...ledger, entries: [], inventory_rows: [] };
+  const unexpectedEmptyBlocks = invariantLedgerMarkdownParityIssues(emptyLedger, valid, "discovery.md");
+  assert.ok(unexpectedEmptyBlocks.some((issue) => issue.code === "INVARIANT_LEDGER_MARKDOWN_EVIDENCE_EXTRA"));
+  assert.ok(unexpectedEmptyBlocks.some((issue) => issue.code === "INVARIANT_LEDGER_MARKDOWN_INVENTORY_EXTRA"));
 });
 
 type PropertyLensHarnessProducer = {
@@ -1848,6 +2505,142 @@ test("generated Smithers resolves singleton JSON inputs by ancestor contract and
   assert.equal(resolve(isolatedConsumer, "ultrafuzz/properties@2", "canonical property catalog"), undefined);
 });
 
+function loadVerifiedCanonicalPropertyCatalogHarness(
+  taskSpecs: readonly PropertyLensHarnessProducer[],
+  documents: ReadonlyMap<string, unknown>,
+  markdownDocuments: ReadonlyMap<string, string>
+): (task: PropertyLensHarnessTask) => { path: string; value: unknown } | undefined {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function semanticArtifactTaskDeclarations");
+  const helperEnd = source.indexOf("\n\nfunction declaredFinalReportOutputPair", helperStart);
+  assert.ok(helperStart >= 0 && helperEnd > helperStart, source);
+  const emitted = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  return new Function(
+    "path",
+    "taskSpecs",
+    "declaredAncestorOutputsByContract",
+    "verifiedDependencyJsonArtifact",
+    "verifiedDependencyTextArtifact",
+    "assertVerifiedDependency",
+    "validatePropertiesSchema",
+    "formatSchemaValidationIssues",
+    "canonicalPropertiesMarkdownParityIssues",
+    "INVARIANT_LEDGER_CONTRACT",
+    "INVARIANT_LEDGER_CONVENTIONAL_PATH",
+    "DISCOVERY_MARKDOWN_CONVENTIONAL_PATH",
+    "CANONICAL_PROPERTIES_CONTRACT",
+    "CANONICAL_PROPERTIES_CONVENTIONAL_PATH",
+    "CANONICAL_PROPERTIES_MARKDOWN_CONTRACT",
+    "CANONICAL_PROPERTIES_MARKDOWN_CONVENTIONAL_PATH",
+    `${emitted}; return verifiedCanonicalPropertyCatalog;`
+  )(
+    path,
+    taskSpecs,
+    declaredAncestorOutputsByContract,
+    (
+      _task: unknown,
+      _dependency: string,
+      producer: PropertyLensHarnessProducer,
+      outputPath: string,
+      _contract: string
+    ) => {
+      const value = documents.get(`${producer.attemptId}\u0000${outputPath}`);
+      return {
+        path: `/run/${producer.attemptId}/${outputPath}`,
+        relativePath: outputPath,
+        bytes: Buffer.from(JSON.stringify(value), "utf8"),
+        value
+      };
+    },
+    (
+      _task: unknown,
+      _dependency: string,
+      producer: PropertyLensHarnessProducer,
+      outputPath: string,
+      _contract: string
+    ) => {
+      const contents = markdownDocuments.get(`${producer.attemptId}\u0000${outputPath}`) ?? "";
+      return {
+        path: `/run/${producer.attemptId}/${outputPath}`,
+        relativePath: outputPath,
+        bytes: Buffer.from(contents, "utf8"),
+        contents
+      };
+    },
+    (_task: unknown, _dependency: string, captured: unknown) => {
+      assert.ok(Array.isArray(captured));
+      assert.equal(captured.length, 2);
+    },
+    (value: unknown) => ({ ok: true, issues: [], value }),
+    () => "invalid",
+    canonicalPropertiesMarkdownParityIssues,
+    "ultrafuzz/invariant-ledger@1",
+    "setup/invariant-evidence-ledger.json",
+    "setup/project-discovery.md",
+    "ultrafuzz/properties@2",
+    "properties.json",
+    "ultrafuzz/nonempty-markdown@1",
+    "properties.md"
+  ) as (task: PropertyLensHarnessTask) => { path: string; value: unknown } | undefined;
+}
+
+test("generated canonical-property consumers authenticate one same-producer custom JSON/Markdown pair", () => {
+  const catalog: PropertyLensHarnessProducer = {
+    attemptId: "catalog-attempt",
+    artifactDir: "/run/artifacts/catalog-attempt",
+    dependencyArtifactDirs: [],
+    metadata: { node: { logicalNodeId: "renamed-catalog" }, dependencies: { attemptIds: [] } },
+    outputs: [
+      { path: "custom/catalog.json", contract: "ultrafuzz/properties@2" },
+      { path: "custom/catalog.md", contract: "ultrafuzz/nonempty-markdown@1" }
+    ]
+  };
+  const consumer: PropertyLensHarnessTask = {
+    attemptId: "consumer-attempt",
+    artifactDir: "/run/artifacts/consumer-attempt",
+    dependencyArtifactDirs: [catalog.artifactDir],
+    metadata: { node: { logicalNodeId: "renamed-consumer" }, dependencies: { attemptIds: [catalog.attemptId] } },
+    outputs: []
+  };
+  const document = {
+    schema_version: "ultrafuzz.properties.v2",
+    properties: [
+      {
+        id: "property-one",
+        description: "Balances remain conserved.",
+        category: "accounting",
+        priority: "high",
+        sources: [{ source_node_id: "renamed-lens", source_property_id: "lens-one" }]
+      }
+    ]
+  };
+  const markdown = [
+    '### Canonical property: "property-one"',
+    'description: "Balances remain conserved."',
+    'category: "accounting"',
+    'priority: "high"',
+    'sources: [{"source_node_id":"renamed-lens","source_property_id":"lens-one"}]',
+    '### End canonical property: "property-one"'
+  ].join("\n");
+  const resolve = loadVerifiedCanonicalPropertyCatalogHarness(
+    [catalog, consumer],
+    new Map([["catalog-attempt\u0000custom/catalog.json", document]]),
+    new Map([["catalog-attempt\u0000custom/catalog.md", markdown]])
+  );
+
+  assert.deepEqual(resolve(consumer), { path: "custom/catalog.json", value: document });
+
+  catalog.outputs.push({ path: "properties.md", contract: "ultrafuzz/text@1" });
+  const rejectLookalike = loadVerifiedCanonicalPropertyCatalogHarness(
+    [catalog, consumer],
+    new Map([["catalog-attempt\u0000custom/catalog.json", document]]),
+    new Map([["catalog-attempt\u0000custom/catalog.md", markdown]])
+  );
+  assert.throws(() => rejectLookalike(consumer), /wrong-contract lookalike.*properties\.md/iu);
+});
+
 test("generated severity authority excludes unrelated transitive triaged outputs", () => {
   const producer = (
     attemptId: string,
@@ -1914,6 +2707,7 @@ function loadProducerFreeSemanticContextHarness(): (
   }).outputText;
   return new Function(
     "verifiedSingletonAncestorJsonArtifact",
+    "verifiedCanonicalPropertyCatalog",
     "UNPLANNED_PROPERTY_CATALOG_CONTEXT",
     "UNPLANNED_IMPLEMENTED_PROPERTIES_CONTEXT",
     "siblingCampaignSemanticArtifacts",
@@ -1922,6 +2716,7 @@ function loadProducerFreeSemanticContextHarness(): (
     "workspacePatchSemanticGitContext",
     `${emitted}; return semanticGateContextForVerifiedOutput;`
   )(
+    () => undefined,
     () => undefined,
     { schema_version: PROPERTIES_SCHEMA_VERSION, properties: [] },
     {
@@ -1981,15 +2776,79 @@ function loadVerifiedAncestorPropertyLensesHarness(
     "path",
     "taskSpecs",
     "verifiedDependencyJsonArtifact",
+    "verifiedDependencyTextArtifact",
+    "assertVerifiedDependency",
+    "validateInvariantLedgerSchema",
+    "formatSchemaValidationIssues",
+    "invariantLedgerMarkdownParityIssues",
     "isPlainJsonRecord",
     "declaredAncestorContractOutputs",
+    "declaredInvariantLedgerProducerPair",
     `${emitted}; return verifiedAncestorPropertyLenses;`
   )(
     path,
     taskSpecs,
-    (_task: unknown, _dependency: string, producer: { attemptId: string }, outputPath: string, _contract: string) => ({
-      value: documents.get(`${producer.attemptId}\u0000${outputPath}`)
-    }),
+    (_task: unknown, _dependency: string, producer: { attemptId: string }, outputPath: string, _contract: string) => {
+      const value = documents.get(`${producer.attemptId}\u0000${outputPath}`);
+      return {
+        path: `/run/${producer.attemptId}/${outputPath}`,
+        relativePath: outputPath,
+        bytes: Buffer.from(JSON.stringify(value), "utf8"),
+        value
+      };
+    },
+    (
+      _task: unknown,
+      _dependency: string,
+      producer: PropertyLensHarnessProducer,
+      outputPath: string,
+      _contract: string
+    ) => {
+      const ledgerOutput = producer.outputs.find((output) => output.contract === "ultrafuzz/invariant-ledger@1");
+      assert.ok(ledgerOutput);
+      const ledger = documents.get(`${producer.attemptId}\u0000${ledgerOutput.path}`) as {
+        entries: Array<{
+          id: string;
+          source_path: string;
+          source_location: string;
+          kind: string;
+          verbatim: string;
+          inventory_ids: string[];
+        }>;
+        inventory_rows?: Array<{ id: string; description: string; ledger_ids: string[] }>;
+      };
+      const lines = ledger.entries.flatMap((entry) => [
+        `### Ledger entry: ${JSON.stringify(entry.id)}`,
+        `source_path: ${JSON.stringify(entry.source_path)}`,
+        `source_location: ${JSON.stringify(entry.source_location)}`,
+        `kind: ${JSON.stringify(entry.kind)}`,
+        `verbatim: ${JSON.stringify(entry.verbatim)}`,
+        `inventory_ids: ${JSON.stringify(entry.inventory_ids)}`,
+        `### End ledger entry: ${JSON.stringify(entry.id)}`
+      ]);
+      for (const row of ledger.inventory_rows ?? []) {
+        lines.push(
+          `### Inventory row: ${JSON.stringify(row.id)}`,
+          `description: ${JSON.stringify(row.description)}`,
+          `ledger_ids: ${JSON.stringify(row.ledger_ids)}`,
+          `### End inventory row: ${JSON.stringify(row.id)}`
+        );
+      }
+      const contents = lines.join("\n");
+      return {
+        path: `/run/${producer.attemptId}/${outputPath}`,
+        relativePath: outputPath,
+        bytes: Buffer.from(contents, "utf8"),
+        contents
+      };
+    },
+    (_task: unknown, _dependency: string, captured: unknown) => {
+      assert.ok(Array.isArray(captured));
+      assert.equal(captured.length, 2);
+    },
+    (value: unknown) => ({ ok: true, issues: [], value }),
+    () => "invalid",
+    invariantLedgerMarkdownParityIssues,
     (value: unknown) => typeof value === "object" && value !== null && !Array.isArray(value),
     (task: PropertyLensHarnessTask, contract: string, options: { directOnly?: boolean } = {}) => {
       const declarations = taskSpecs.map((candidate) => ({
@@ -2003,6 +2862,12 @@ function loadVerifiedAncestorPropertyLensesHarness(
       const current = declarations.find((candidate) => candidate.attemptId === task.attemptId);
       assert.ok(current);
       return declaredAncestorOutputsByContract(current, declarations, contract, options);
+    },
+    (producer: PropertyLensHarnessProducer) => {
+      const ledger = producer.outputs.filter((output) => output.contract === "ultrafuzz/invariant-ledger@1");
+      const markdown = producer.outputs.filter((output) => output.contract === "ultrafuzz/nonempty-markdown@1");
+      if (ledger.length !== 1 || markdown.length !== 1) throw new Error("invalid invariant producer pair");
+      return { ledger: ledger[0], markdown: markdown[0] };
     }
   ) as (
     task: PropertyLensHarnessTask
@@ -2022,8 +2887,15 @@ test("generated Smithers accepts direct lenses, excludes transitive lenses, and 
     metadata: { node: { logicalNodeId }, dependencies: { attemptIds: [] } },
     outputs: [{ path: outputPath, contract }]
   });
+  const ledgerProducer = producer(
+    "attempt-ledger",
+    "custom-evidence-root",
+    "ultrafuzz/invariant-ledger@1",
+    "custom/ledger.json"
+  );
+  ledgerProducer.outputs.push({ path: "custom/discovery.md", contract: "ultrafuzz/nonempty-markdown@1" });
   const producers = [
-    producer("attempt-ledger", "custom-evidence-root", "ultrafuzz/invariant-ledger@1", "custom/ledger.json"),
+    ledgerProducer,
     producer("attempt-direct", "direct-review", "ultrafuzz/property-lens@2", "custom/direct.json"),
     producer("attempt-transitive", "transitive-review", "ultrafuzz/property-lens@2", "custom/transitive.json")
   ];
@@ -2041,7 +2913,21 @@ test("generated Smithers accepts direct lenses, excludes transitive lenses, and 
   const documents = new Map<string, unknown>([
     [
       "attempt-ledger\u0000custom/ledger.json",
-      { entries: [{ id: "evidence-one" }], inventory_rows: [], scan_probes: [] }
+      {
+        schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+        entries: [
+          {
+            id: "evidence-one",
+            source_path: "docs/source.md",
+            source_location: "line 1",
+            kind: "invariant",
+            verbatim: "source",
+            inventory_ids: []
+          }
+        ],
+        inventory_rows: [],
+        scan_probes: []
+      }
     ],
     ["attempt-direct\u0000custom/direct.json", { properties: [{ id: "direct-one" }] }],
     ["attempt-transitive\u0000custom/transitive.json", { properties: [{ id: "transitive-one" }] }]
@@ -2076,12 +2962,14 @@ test("generated Smithers selects property and discovery inputs by their declared
   assert.match(helper, /directOnly: true/u);
   assert.match(helper, /seenLensProducers/u);
   assert.doesNotMatch(helper, /logicalNodeId\.startsWith\("property-specification-"\)/u);
+  assert.match(helper, /declaredInvariantLedgerProducerPair/u);
   assert.match(helper, /"ultrafuzz\/invariant-ledger@1"/u);
   assert.doesNotMatch(helper, /logicalNodeId === "project-discovery"/u);
   assert.match(helper, /output\.artifactDir/u);
   assert.match(helper, /projectionRequired: false/u);
   assert.match(helper, /projectionRequired: true/u);
   assert.doesNotMatch(helper, /setup\/invariant-evidence-ledger\.json/u);
+  assert.doesNotMatch(helper, /\bcatch\b/u);
 
   const singletonStart = source.indexOf("function semanticArtifactTaskDeclarations");
   const singletonEnd = source.indexOf("\n\nfunction configuredInvariantPrioritySelection", singletonStart);
@@ -2095,8 +2983,7 @@ test("generated Smithers selects property and discovery inputs by their declared
   const coverageEnd = source.indexOf("\n\nfunction promptWithAuthoritativeFinalReportCoverage", coverageStart);
   assert.ok(coverageStart >= 0 && coverageEnd > coverageStart, source);
   const coverage = source.slice(coverageStart, coverageEnd);
-  assert.match(coverage, /verifiedSingletonAncestorJsonArtifact/u);
-  assert.match(coverage, /"ultrafuzz\/properties@2"/u);
+  assert.match(coverage, /verifiedCanonicalPropertyCatalog/u);
   assert.match(coverage, /"ultrafuzz\/implemented-properties@3"/u);
   assert.doesNotMatch(coverage, /property-specification-fanin|stateful-invariant-implement-properties/u);
 
@@ -2163,6 +3050,7 @@ function loadGeneratedReviewContextProjectionHarness(): (
   };
   return new Function(
     "verifiedSingletonAncestorJsonArtifact",
+    "verifiedCanonicalPropertyCatalog",
     "UNPLANNED_PROPERTY_CATALOG_CONTEXT",
     "UNPLANNED_IMPLEMENTED_PROPERTIES_CONTEXT",
     "reviewStageSemanticContext",
@@ -2179,6 +3067,7 @@ function loadGeneratedReviewContextProjectionHarness(): (
       }
       return undefined;
     },
+    () => undefined,
     { schema_version: PROPERTIES_SCHEMA_VERSION, properties: [] },
     {
       schema_version: IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
@@ -2570,6 +3459,144 @@ test("generated review authority uses declared relative identity across snapshot
     () => wrongLedgerHarness.finalSeverity(wrongLedgerReport),
     /must declare exactly one ultrafuzz\/finding-lifecycle-ledger@1 sibling; found 0/u
   );
+});
+
+test("generated final-severity gates share one producer epoch and reject a cross-gate authority swap", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const dependencyStart = source.indexOf("function verifiedDependencyJsonArtifact");
+  const dependencyEnd = source.indexOf("\n\nfunction semanticArtifactTaskDeclarations", dependencyStart);
+  const finalSeverityStart = source.indexOf("function verifiedFinalSeverityReviewAuthority");
+  const finalSeverityEnd = source.indexOf("\n\ntype DifferentialSemanticArtifactBinding", finalSeverityStart);
+  assert.ok(dependencyStart >= 0 && dependencyEnd > dependencyStart, source);
+  assert.ok(finalSeverityStart >= 0 && finalSeverityEnd > finalSeverityStart, source);
+  const emitted = ts.transpileModule(
+    `${source.slice(dependencyStart, dependencyEnd)}\n${source.slice(finalSeverityStart, finalSeverityEnd)}`,
+    { compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 } }
+  ).outputText;
+  const producer: ReviewAuthorityHarnessTask = {
+    attemptId: "attempt-severity",
+    artifactDir: "/run/artifacts/attempt-severity",
+    dependencyArtifactDirs: [],
+    metadata: { node: { logicalNodeId: "severity" }, dependencies: { attemptIds: [] } },
+    outputs: [
+      { path: "review/severity.json", contract: "ultrafuzz/severity-classified-findings@1" },
+      { path: "review/lifecycle.json", contract: "ultrafuzz/finding-lifecycle-ledger@1" },
+      { path: "review/detections.json", contract: "ultrafuzz/strategy-detections@1" }
+    ]
+  };
+  const consumer: ReviewAuthorityHarnessTask = {
+    attemptId: "attempt-report",
+    artifactDir: "/run/artifacts/attempt-report",
+    dependencyArtifactDirs: [producer.artifactDir],
+    metadata: { node: { logicalNodeId: "report" }, dependencies: { attemptIds: [producer.attemptId] } },
+    outputs: [{ path: "report.json", contract: "ultrafuzz/report@2" }]
+  };
+  let authorityGeneration = 1;
+  let authenticationCount = 0;
+  const authority = () => {
+    const values = new Map<string, unknown>([
+      ["review/severity.json", [{ id: `severity-${authorityGeneration}` }]],
+      ["review/lifecycle.json", { records: [{ generation: authorityGeneration }] }],
+      ["review/detections.json", [{ id: `detection-${authorityGeneration}` }]]
+    ]);
+    const artifacts = new Map(
+      producer.outputs.map((output) => {
+        const value = values.get(output.path);
+        const bytes = Buffer.from(`${JSON.stringify(value)}\n`, "utf8");
+        return [
+          output.path,
+          Object.freeze({
+            path: path.join(producer.artifactDir, output.path),
+            relativePath: output.path,
+            contract: output.contract,
+            bytes,
+            value
+          })
+        ] as const;
+      })
+    );
+    const publications = new Map(
+      [...artifacts].map(([relativePath, artifact]) => [
+        relativePath,
+        createHash("sha256").update(artifact.bytes).digest("hex")
+      ])
+    );
+    return Object.freeze({
+      attemptId: producer.attemptId,
+      artifactDir: producer.artifactDir,
+      markerBytes: Buffer.from(`marker-generation-${authorityGeneration}\n`, "utf8"),
+      artifacts,
+      publications,
+      generatedTestBundles: Object.freeze([])
+    });
+  };
+  const declaredAncestorContractOutputs = (_task: ReviewAuthorityHarnessTask, contract: string) =>
+    producer.outputs
+      .filter((output) => output.contract === contract)
+      .map((output) => ({
+        attemptId: producer.attemptId,
+        logicalNodeId: producer.metadata.node.logicalNodeId,
+        artifactDir: producer.artifactDir,
+        path: output.path,
+        contract: output.contract
+      }));
+  const harness = new Function(
+    "path",
+    "taskSpecs",
+    "assertVerifiedDependency",
+    "declaredAncestorContractOutputs",
+    `${emitted}; return {
+      begin: beginVerifiedDependencySnapshotEpoch,
+      recheck: assertVerifiedDependencySnapshotEpochRemainedCurrent,
+      end: endVerifiedDependencySnapshotEpoch,
+      finalSeverity: verifiedFinalSeverityReviewAuthority
+    };`
+  )(
+    path,
+    [producer, consumer],
+    () => {
+      authenticationCount += 1;
+      return authority();
+    },
+    declaredAncestorContractOutputs
+  ) as {
+    begin: (task: ReviewAuthorityHarnessTask) => {
+      snapshotsByProducerAttempt: Map<
+        string,
+        { artifacts: ReadonlyMap<string, { bytes: Buffer }>; markerBytes: Buffer }
+      >;
+    };
+    recheck: (task: ReviewAuthorityHarnessTask, epoch: unknown) => void;
+    end: (task: ReviewAuthorityHarnessTask, epoch: unknown) => void;
+    finalSeverity: (task: ReviewAuthorityHarnessTask) => {
+      severityClassifiedFindings: unknown;
+      findingLifecycleLedger?: unknown;
+    };
+  };
+
+  const epoch = harness.begin(consumer);
+  try {
+    assert.deepEqual(harness.finalSeverity(consumer), {
+      severityClassifiedFindings: [{ id: "severity-1" }],
+      findingLifecycleLedger: { records: [{ generation: 1 }] }
+    });
+    assert.equal(authenticationCount, 1);
+    assert.equal(epoch.snapshotsByProducerAttempt.get(producer.attemptId)?.artifacts.size, 3);
+
+    authorityGeneration = 2;
+    assert.deepEqual(harness.finalSeverity(consumer), {
+      severityClassifiedFindings: [{ id: "severity-1" }],
+      findingLifecycleLedger: { records: [{ generation: 1 }] }
+    });
+    assert.equal(authenticationCount, 1);
+    assert.throws(
+      () => harness.recheck(consumer, epoch),
+      /verified dependency authority changed during semantic verification attempt-severity/u
+    );
+    assert.equal(authenticationCount, 2);
+  } finally {
+    harness.end(consumer, epoch);
+  }
 });
 
 test("generated review verification uses declared immutable review-stage authority", () => {
@@ -3141,9 +4168,18 @@ test("generated Smithers pinned source proof rejects any previously published by
     assert.equal(canonicalProof.schema_version, "ultrafuzz.agent-source-proof.v2");
     assert.equal(canonicalProof.dependencies, null);
     assert.deepEqual(canonicalProof.refs, [{ name: "refs/heads/ultrafuzz-pinned", object: pinnedCommit }]);
+    const canonicalProofBytes = fs.readFileSync(proofPath);
+    preservePinnedSourceProof(task);
+    assert.deepEqual(fs.readFileSync(proofPath), canonicalProofBytes, "exact prior proof bytes are idempotent");
 
     fs.writeFileSync(proofPath, JSON.stringify(canonicalProof));
     assert.throws(() => preservePinnedSourceProof(task), /pinned source proof property-specification-certora changed/u);
+
+    fs.unlinkSync(proofPath);
+    fs.symlinkSync("missing-proof.json", proofPath);
+    assert.throws(() => preservePinnedSourceProof(task), /pinned source proof property-specification-certora changed/u);
+    assert.equal(fs.lstatSync(proofPath).isSymbolicLink(), true, "dangling proof is not replaced");
+    fs.unlinkSync(proofPath);
 
     const legacyNoisyProof = {
       ...canonicalProof,
@@ -3501,19 +4537,19 @@ test("generated Smithers workflow contains no output repair or legacy normalizat
   );
 });
 
-test("durable dedupe recovery replaces a symlink without overwriting its target", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-dedupe-recovery-"));
+test("durable writer replaces a destination symlink without overwriting its target", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-durable-writer-"));
   try {
-    const symlinkTarget = path.join(root, "target.json");
-    const recoveredOutput = path.join(root, "deduped-findings.json");
+    const symlinkTarget = path.join(root, "target.txt");
+    const output = path.join(root, "output.txt");
     fs.writeFileSync(symlinkTarget, "target remains unchanged\n");
-    fs.symlinkSync(symlinkTarget, recoveredOutput);
+    fs.symlinkSync(symlinkTarget, output);
 
-    writeFileDurable(recoveredOutput, "[]\n");
+    writeFileDurable(output, "caller-authored bytes\n");
 
     assert.equal(fs.readFileSync(symlinkTarget, "utf8"), "target remains unchanged\n");
-    assert.equal(fs.lstatSync(recoveredOutput).isSymbolicLink(), false);
-    assert.equal(fs.readFileSync(recoveredOutput, "utf8"), "[]\n");
+    assert.equal(fs.lstatSync(output).isSymbolicLink(), false);
+    assert.equal(fs.readFileSync(output, "utf8"), "caller-authored bytes\n");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -3930,6 +4966,14 @@ test("generated Smithers verifier publishes the complete validated set before ta
     verifier.indexOf("publishVerifiedArtifacts(artifactDir, publications)") <
       verifier.indexOf("return { artifacts, primary_artifact: primary.path }")
   );
+  assert.ok(
+    verifier.indexOf("publishVerifiedArtifacts(artifactDir, publications)") <
+      verifier.indexOf("assertVerifiedDependencySnapshotEpochRemainedCurrent(task, dependencySnapshotEpoch)")
+  );
+  assert.ok(
+    verifier.indexOf("assertVerifiedDependencySnapshotEpochRemainedCurrent(task, dependencySnapshotEpoch)") <
+      verifier.indexOf("writeArtifactVerificationMarker(task, artifacts, publications)")
+  );
 });
 
 test("generated Smithers preparation requires a successful dependency artifact verification", () => {
@@ -3949,8 +4993,13 @@ test("generated Smithers preparation requires a successful dependency artifact v
   assert.match(source, /function assertVerifiedDependency/u);
   assert.match(source, /artifact dependency has not passed verification/u);
   assert.match(source, /assertVerifiedDependency\(task, dependency\)/u);
-  assert.match(source, /assertVerifiedDependency\(task, dependency, \{ relativePath, bytes: snapshot\.bytes \}\)/u);
+  assert.match(source, /verifiedDependencySnapshot\(task, dependency, producer\)/u);
+  assert.match(source, /artifacts: authenticatedArtifacts/u);
+  assert.match(source, /markerBytes: Buffer\.from\(markerSnapshot\.bytes\)/u);
   assert.match(verifier, /clearArtifactVerificationMarker\(task\)/u);
+  assert.match(verifier, /beginVerifiedDependencySnapshotEpoch\(task\)/u);
+  assert.match(verifier, /assertVerifiedDependencySnapshotEpochRemainedCurrent\(task, dependencySnapshotEpoch\)/u);
+  assert.match(verifier, /endVerifiedDependencySnapshotEpoch\(task, dependencySnapshotEpoch\)/u);
   assert.match(verifier, /writeArtifactVerificationMarker\(task, artifacts, publications\)/u);
   assert.match(source, /publications: publicationEntries/u);
   assert.match(source, /rememberVerifiedPublication\(publications, INVARIANT_SUITE_MANIFEST_FILE/u);
@@ -4062,7 +5111,7 @@ test("generated Smithers dependency verification fails closed before descendant 
     "assertArtifactVerificationMarkerSemantics",
     "artifactContractDefinition",
     "artifactContractSchemaBinding",
-    "validateArtifactContract",
+    "validateArtifactContractBytes",
     "createHash",
     "invariantSuiteNodeIds",
     "verifyGeneratedTestFiles",
@@ -4092,10 +5141,13 @@ test("generated Smithers dependency verification fails closed before descendant 
     () => undefined,
     (contract: string) => ({ digest: "a".repeat(64), format: contract === "ultrafuzz/text@1" ? "text" : "json" }),
     (contract: string) => (contract === "ultrafuzz/text@1" ? undefined : markerSchemaBinding),
-    (contract: string, contents: string) => ({
+    (contract: string, contents: Uint8Array) => ({
       ok: true,
       issues: [],
-      value: contract === "ultrafuzz/generated-tests@3" ? (JSON.parse(contents) as unknown) : undefined
+      value:
+        contract === "ultrafuzz/generated-tests@3"
+          ? (JSON.parse(Buffer.from(contents).toString("utf8")) as unknown)
+          : new TextDecoder("utf-8", { fatal: true }).decode(contents)
     }),
     createHash,
     new Set(["stateful-invariant-setup"]),
@@ -4119,8 +5171,14 @@ test("generated Smithers dependency verification fails closed before descendant 
   ) as (
     task: { attemptId: string; runRoot: string },
     dependency: string,
-    capturedArtifact?: Readonly<{ relativePath: string; bytes: Buffer }>
+    capturedArtifact?:
+      Readonly<{ relativePath: string; bytes: Buffer }> | readonly Readonly<{ relativePath: string; bytes: Buffer }>[]
   ) => {
+    attemptId: string;
+    artifactDir: string;
+    markerBytes: Buffer;
+    artifacts: ReadonlyMap<string, { contract: string; bytes: Buffer; value: unknown }>;
+    publications: ReadonlyMap<string, string>;
     generatedTestBundles: ReadonlyArray<{ framework: string; entries: readonly unknown[] }>;
   };
 
@@ -4214,7 +5272,12 @@ test("generated Smithers dependency verification fails closed before descendant 
   );
   fs.writeFileSync(path.join(dependency, "properties.json"), verifiedBytes);
   writeMarker([validArtifact]);
-  assert.doesNotThrow(() => assertVerifiedDependency(task, dependency));
+  const verifiedAuthority = assertVerifiedDependency(task, dependency);
+  assert.equal(verifiedAuthority.attemptId, "property-specification-fanin");
+  assert.equal(verifiedAuthority.artifactDir, dependency);
+  assert.deepEqual(verifiedAuthority.artifacts.get("properties.json")?.bytes, verifiedBytes);
+  assert.equal(verifiedAuthority.artifacts.get("properties.json")?.value, "verified\n");
+  assert.equal(verifiedAuthority.publications.get("properties.json"), sha256);
   const unauthenticatedCapturedBytes = Buffer.from("swapped only while captured\n", "utf8");
   assert.throws(
     () =>

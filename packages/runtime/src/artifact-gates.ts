@@ -74,6 +74,10 @@ import {
 
 import { authenticatedAggregationSemanticContext } from "./aggregation-semantic-context.js";
 import {
+  canonicalPropertiesMarkdownParityIssues,
+  invariantLedgerMarkdownParityIssues
+} from "./canonical-properties-markdown.js";
+import {
   declaredAncestorOutputsByContract,
   declaredSiblingOutputsByContract,
   type SemanticArtifactTaskDeclaration
@@ -90,6 +94,13 @@ import { loadFinalizedNodeOutputSnapshot, type VerifiedOutputArtifactSnapshot } 
 const MAX_ARTIFACT_SNAPSHOT_BYTES = 64 * 1024 * 1024;
 const PROPERTY_LENS_CONTRACT = "ultrafuzz/property-lens@2" as const;
 const ARTIFACT_VERIFICATION_DIRECTORY = ".ultrafuzz-verification";
+const INVARIANT_LEDGER_CONTRACT = "ultrafuzz/invariant-ledger@1" as const;
+const INVARIANT_LEDGER_CONVENTIONAL_PATH = "setup/invariant-evidence-ledger.json";
+const DISCOVERY_MARKDOWN_CONVENTIONAL_PATH = "setup/project-discovery.md";
+const CANONICAL_PROPERTIES_CONTRACT = "ultrafuzz/properties@2" as const;
+const CANONICAL_PROPERTIES_CONVENTIONAL_PATH = "properties.json";
+const CANONICAL_PROPERTIES_MARKDOWN_CONTRACT = "ultrafuzz/nonempty-markdown@1" as const;
+const CANONICAL_PROPERTIES_MARKDOWN_CONVENTIONAL_PATH = "properties.md";
 
 // These are semantic projections for topologies that deliberately omit the
 // corresponding producer. They are never written or published as artifacts;
@@ -380,6 +391,136 @@ export function verifyRequiredArtifactsForAttempt(
  * handoff, and every discovered source statement must reach at least one
  * canonical property before invariant implementation begins.
  */
+function declaredInvariantLedgerProducerPair(node: PlannedGraphNode):
+  | {
+      ledger?: PlannedGraphNode["outputs"][number];
+      markdown?: PlannedGraphNode["outputs"][number];
+      diagnostics: RuntimeDiagnostic[];
+    }
+  | undefined {
+  const ledgerOutputs = node.outputs.filter((output) => output.contract === INVARIANT_LEDGER_CONTRACT);
+  const wrongContractLookalikes = node.outputs.filter(
+    (output) =>
+      (output.path === INVARIANT_LEDGER_CONVENTIONAL_PATH && output.contract !== INVARIANT_LEDGER_CONTRACT) ||
+      (output.path === DISCOVERY_MARKDOWN_CONVENTIONAL_PATH &&
+        output.contract !== CANONICAL_PROPERTIES_MARKDOWN_CONTRACT)
+  );
+  const hasConventionalRolePath = node.outputs.some(
+    (output) =>
+      output.path === INVARIANT_LEDGER_CONVENTIONAL_PATH || output.path === DISCOVERY_MARKDOWN_CONVENTIONAL_PATH
+  );
+  if (ledgerOutputs.length === 0 && !hasConventionalRolePath) return undefined;
+
+  const diagnostics: RuntimeDiagnostic[] = wrongContractLookalikes.map((output) => ({
+    code: "INVARIANT_LEDGER_DECLARATION_WRONG_CONTRACT",
+    message: `Project discovery lookalike ${JSON.stringify(output.path)} has the wrong contract ${output.contract}`,
+    severity: "error",
+    source: "invariant-ledger",
+    path: output.path
+  }));
+  if (ledgerOutputs.length !== 1) {
+    diagnostics.push({
+      code:
+        ledgerOutputs.length === 0 ? "INVARIANT_LEDGER_DECLARATION_MISSING" : "INVARIANT_LEDGER_DECLARATION_AMBIGUOUS",
+      message: `Invariant ledger producer must declare exactly one ${INVARIANT_LEDGER_CONTRACT} output; found ${ledgerOutputs.length}`,
+      severity: "error",
+      source: "invariant-ledger"
+    });
+  }
+  const markdownOutputs = node.outputs.filter((output) => output.contract === CANONICAL_PROPERTIES_MARKDOWN_CONTRACT);
+  if (markdownOutputs.length !== 1) {
+    diagnostics.push({
+      code:
+        markdownOutputs.length === 0
+          ? "INVARIANT_LEDGER_MARKDOWN_DECLARATION_MISSING"
+          : "INVARIANT_LEDGER_MARKDOWN_DECLARATION_AMBIGUOUS",
+      message: `Invariant ledger producer must declare exactly one ${CANONICAL_PROPERTIES_MARKDOWN_CONTRACT} Markdown handoff; found ${markdownOutputs.length}`,
+      severity: "error",
+      source: "invariant-ledger"
+    });
+  }
+  return {
+    ledger: ledgerOutputs.length === 1 ? ledgerOutputs[0] : undefined,
+    markdown: markdownOutputs.length === 1 ? markdownOutputs[0] : undefined,
+    diagnostics
+  };
+}
+
+function declaredCanonicalPropertiesPair(node: PlannedGraphNode):
+  | {
+      catalog?: PlannedGraphNode["outputs"][number];
+      markdown?: PlannedGraphNode["outputs"][number];
+      diagnostics: RuntimeDiagnostic[];
+    }
+  | undefined {
+  const catalogOutputs = node.outputs.filter((output) => output.contract === CANONICAL_PROPERTIES_CONTRACT);
+  const hasConventionalRolePath = node.outputs.some(
+    (output) =>
+      output.path === CANONICAL_PROPERTIES_CONVENTIONAL_PATH ||
+      output.path === CANONICAL_PROPERTIES_MARKDOWN_CONVENTIONAL_PATH
+  );
+  if (catalogOutputs.length === 0 && !hasConventionalRolePath) return undefined;
+  const diagnostics: RuntimeDiagnostic[] = node.outputs
+    .filter(
+      (output) =>
+        output.path === CANONICAL_PROPERTIES_CONVENTIONAL_PATH && output.contract !== CANONICAL_PROPERTIES_CONTRACT
+    )
+    .map((output) => ({
+      code: "PROPERTY_CATALOG_DECLARATION_WRONG_CONTRACT",
+      message: `Canonical property catalog lookalike ${JSON.stringify(output.path)} must declare contract ${CANONICAL_PROPERTIES_CONTRACT}, not ${output.contract}`,
+      severity: "error" as const,
+      source: "property-fanin",
+      path: output.path
+    }));
+  if (catalogOutputs.length === 0) {
+    diagnostics.push({
+      code: "PROPERTY_CATALOG_DECLARATION_MISSING",
+      message: `Canonical property producer must declare exactly one ${CANONICAL_PROPERTIES_CONTRACT} output; found none`,
+      severity: "error",
+      source: "property-fanin"
+    });
+  }
+  if (catalogOutputs.length > 1) {
+    diagnostics.push({
+      code: "PROPERTY_CATALOG_DECLARATION_AMBIGUOUS",
+      message: `Canonical property producer must declare exactly one ${CANONICAL_PROPERTIES_CONTRACT} output; found ${catalogOutputs.length}`,
+      severity: "error",
+      source: "property-fanin"
+    });
+  }
+  const wrongContractLookalikes = node.outputs.filter(
+    (output) =>
+      output.path === CANONICAL_PROPERTIES_MARKDOWN_CONVENTIONAL_PATH &&
+      output.contract !== CANONICAL_PROPERTIES_MARKDOWN_CONTRACT
+  );
+  diagnostics.push(
+    ...wrongContractLookalikes.map((output): RuntimeDiagnostic => ({
+      code: "PROPERTY_MARKDOWN_DECLARATION_WRONG_CONTRACT",
+      message: `Canonical properties Markdown lookalike ${JSON.stringify(output.path)} must declare contract ${CANONICAL_PROPERTIES_MARKDOWN_CONTRACT}, not ${output.contract}`,
+      severity: "error",
+      source: "property-fanin",
+      path: output.path
+    }))
+  );
+  const markdownOutputs = node.outputs.filter((output) => output.contract === CANONICAL_PROPERTIES_MARKDOWN_CONTRACT);
+  if (markdownOutputs.length !== 1) {
+    diagnostics.push({
+      code:
+        markdownOutputs.length === 0
+          ? "PROPERTY_MARKDOWN_DECLARATION_MISSING"
+          : "PROPERTY_MARKDOWN_DECLARATION_AMBIGUOUS",
+      message: `Canonical property producer must declare exactly one ${CANONICAL_PROPERTIES_MARKDOWN_CONTRACT} companion; found ${markdownOutputs.length}`,
+      severity: "error",
+      source: "property-fanin"
+    });
+  }
+  return {
+    catalog: catalogOutputs.length === 1 ? catalogOutputs[0] : undefined,
+    markdown: markdownOutputs.length === 1 ? markdownOutputs[0] : undefined,
+    diagnostics
+  };
+}
+
 function verifyInvariantEvidenceArtifacts(
   layout: RunLayout,
   artifactDir: string,
@@ -387,103 +528,82 @@ function verifyInvariantEvidenceArtifacts(
   attemptAuthority?: ArtifactGateAttemptAuthority,
   authenticated?: AuthenticatedArtifactGateSnapshots
 ): RuntimeDiagnostic[] {
-  const logicalId = node.logical_id ?? node.id;
   const diagnostics: RuntimeDiagnostic[] = [];
-  if (
-    logicalId === "project-discovery" &&
-    node.outputs.some((output) => output.path === "setup/invariant-evidence-ledger.json")
-  ) {
-    const ledgerPath = path.join(artifactDir, "setup", "invariant-evidence-ledger.json");
-    const markdownPath = path.join(artifactDir, "setup", "project-discovery.md");
-    const ledgerBytes = readCurrentArtifactSnapshot(artifactDir, ledgerPath, authenticated);
-    const markdownBytes = readCurrentArtifactSnapshot(artifactDir, markdownPath, authenticated);
-    if (ledgerBytes === undefined || markdownBytes === undefined) {
-      return diagnostics;
-    }
-    const parsed = validateInvariantLedgerSchema(parseStrictJsonBytes(ledgerBytes), ledgerPath);
-    if (!parsed.ok || parsed.value === undefined) {
-      return diagnostics;
-    }
-    if (parsed.value.entries.length === 0 && (parsed.value.scan_probes?.length ?? 0) > 0) {
-      verifyNoInvariantsJustification(parsed.value.no_invariants_justification, ledgerPath, diagnostics);
-      if (parsed.value.inventory_rows === undefined) {
-        diagnostics.push({
-          code: "INVARIANT_LEDGER_INVENTORY_MISSING",
-          message: "An explicit no-evidence ledger must include an empty inventory_rows array",
-          severity: "error",
-          source: "invariant-ledger",
-          path: `${ledgerPath}#$.inventory_rows`
-        });
-      } else if (parsed.value.inventory_rows.length > 0) {
-        diagnostics.push({
-          code: "INVARIANT_LEDGER_INVENTORY_UNEXPECTED",
-          message: "An explicit no-evidence ledger must not contain inventory rows",
-          severity: "error",
-          source: "invariant-ledger",
-          path: `${ledgerPath}#$.inventory_rows`
-        });
-      }
-      const discoveryWorkspace = path.join(layout.workspacesDir, path.basename(artifactDir));
-      const sourceProofPath = invariantSourceProofPath(layout.root, path.basename(artifactDir));
-      if (fs.existsSync(sourceProofPath)) {
-        readInvariantSourceProof(sourceProofPath, ledgerPath, ledgerBytes, diagnostics);
-      } else if (!fs.existsSync(discoveryWorkspace)) {
-        diagnostics.push({
-          code: "INVARIANT_LEDGER_SOURCE_PROOF_MISSING",
-          message: "Invariant ledger source proof and discovery workspace are unavailable",
-          severity: "error",
-          source: "invariant-ledger",
-          path: ledgerPath
-        });
-      }
-      // DECISION (issue #292), not a fact about probes: a probe path that names nothing is still
-      // accepted, because a probe records WHERE the agent looked and an optional file it did not
-      // find is a legitimate record. Containment stays the only property enforced here — probe
-      // `result` text has zero consumers, so it cannot be checked against anything. What the
-      // decision changed is the weight put on that text: it is no longer allowed to stand in for
-      // the claim "this target has no invariant". That claim now needs
-      // `no_invariants_justification` above.
-      for (const [probeIndex, probe] of (parsed.value.scan_probes ?? []).entries()) {
-        verifyInvariantProbePath(discoveryWorkspace, probe.source_path, probeIndex, ledgerPath, diagnostics);
-      }
-      return diagnostics;
-    }
-    if (parsed.value.entries.length === 0) {
-      diagnostics.push({
-        code: "INVARIANT_LEDGER_EMPTY",
-        message: "Project discovery invariant evidence ledger must contain at least one source entry",
-        severity: "error",
-        source: "invariant-ledger",
-        path: `${ledgerPath}#$.entries`
-      });
-      return diagnostics;
-    }
+  try {
+    diagnostics.push(
+      ...verifyInvariantLedgerProducerArtifacts(layout, artifactDir, node, attemptAuthority, authenticated)
+    );
+  } catch (error) {
+    diagnostics.push(diagnosticFromError(error, "invariant-ledger", "INVARIANT_EVIDENCE_READ_FAILED"));
+  }
+  try {
+    diagnostics.push(
+      ...verifyCanonicalPropertiesProducerArtifacts(layout, artifactDir, node, attemptAuthority, authenticated)
+    );
+  } catch (error) {
+    diagnostics.push(diagnosticFromError(error, "property-fanin", "PROPERTY_CATALOG_READ_FAILED"));
+  }
+  return diagnostics;
+}
+
+function verifyInvariantLedgerProducerArtifacts(
+  layout: RunLayout,
+  artifactDir: string,
+  node: PlannedGraphNode,
+  attemptAuthority?: ArtifactGateAttemptAuthority,
+  authenticated?: AuthenticatedArtifactGateSnapshots
+): RuntimeDiagnostic[] {
+  const diagnostics: RuntimeDiagnostic[] = [];
+  const invariantProducer = declaredInvariantLedgerProducerPair(node);
+  if (invariantProducer === undefined) return diagnostics;
+  diagnostics.push(...invariantProducer.diagnostics);
+  if (invariantProducer.ledger === undefined || invariantProducer.markdown === undefined) return diagnostics;
+  if (diagnostics.some((diagnostic) => diagnostic.severity === "error")) return diagnostics;
+  const ledgerPath = safeResolveInside(artifactDir, invariantProducer.ledger.path, "invariant ledger output");
+  const markdownPath = safeResolveInside(
+    artifactDir,
+    invariantProducer.markdown.path,
+    "invariant ledger Markdown handoff"
+  );
+  const ledgerBytes = readCurrentArtifactSnapshot(artifactDir, ledgerPath, authenticated);
+  const markdownBytes = readCurrentArtifactSnapshot(artifactDir, markdownPath, authenticated);
+  if (ledgerBytes === undefined || markdownBytes === undefined) {
+    return diagnostics;
+  }
+  const parsed = validateInvariantLedgerSchema(parseStrictJsonBytes(ledgerBytes), ledgerPath);
+  if (!parsed.ok || parsed.value === undefined) {
+    return diagnostics;
+  }
+  diagnostics.push(
+    ...invariantLedgerMarkdownParityIssues(parsed.value, markdownBytes.toString("utf8"), markdownPath).map((issue) => ({
+      ...issue,
+      severity: "error" as const
+    }))
+  );
+  if (parsed.value.entries.length === 0 && (parsed.value.scan_probes?.length ?? 0) > 0) {
+    verifyNoInvariantsJustification(parsed.value.no_invariants_justification, ledgerPath, diagnostics);
     if (parsed.value.inventory_rows === undefined) {
       diagnostics.push({
         code: "INVARIANT_LEDGER_INVENTORY_MISSING",
-        message: "Project discovery invariant evidence ledger is missing structured inventory rows",
+        message: "An explicit no-evidence ledger must include an empty inventory_rows array",
         severity: "error",
         source: "invariant-ledger",
         path: `${ledgerPath}#$.inventory_rows`
       });
-      return diagnostics;
-    }
-    if (parsed.value.scan_probes === undefined) {
+    } else if (parsed.value.inventory_rows.length > 0) {
       diagnostics.push({
-        code: "INVARIANT_LEDGER_PROBES_MISSING",
-        message: "Project discovery invariant evidence ledger is missing scan probe results",
+        code: "INVARIANT_LEDGER_INVENTORY_UNEXPECTED",
+        message: "An explicit no-evidence ledger must not contain inventory rows",
         severity: "error",
         source: "invariant-ledger",
-        path: `${ledgerPath}#$.scan_probes`
+        path: `${ledgerPath}#$.inventory_rows`
       });
     }
     const discoveryWorkspace = path.join(layout.workspacesDir, path.basename(artifactDir));
     const sourceProofPath = invariantSourceProofPath(layout.root, path.basename(artifactDir));
-    const sourceProofPresent = fs.existsSync(sourceProofPath);
-    const sourceProof = sourceProofPresent
-      ? readInvariantSourceProof(sourceProofPath, ledgerPath, ledgerBytes, diagnostics)
-      : undefined;
-    if (!sourceProofPresent && !fs.existsSync(discoveryWorkspace)) {
+    if (fs.existsSync(sourceProofPath)) {
+      readInvariantSourceProof(sourceProofPath, ledgerPath, ledgerBytes, diagnostics);
+    } else if (!fs.existsSync(discoveryWorkspace)) {
       diagnostics.push({
         code: "INVARIANT_LEDGER_SOURCE_PROOF_MISSING",
         message: "Invariant ledger source proof and discovery workspace are unavailable",
@@ -492,99 +612,100 @@ function verifyInvariantEvidenceArtifacts(
         path: ledgerPath
       });
     }
-    // Same DECISION as the no-evidence branch above (issue #292): an absent probe path is accepted
-    // because a probe records where the agent looked, and containment is the only property that can
-    // be enforced when nothing consumes `result`. On this branch the ledger carries entries, and
-    // those remain byte-checked against the pinned source below.
+    // DECISION (issue #292), not a fact about probes: a probe path that names nothing is still
+    // accepted, because a probe records WHERE the agent looked and an optional file it did not
+    // find is a legitimate record. Containment stays the only property enforced here — probe
+    // `result` text has zero consumers, so it cannot be checked against anything. What the
+    // decision changed is the weight put on that text: it is no longer allowed to stand in for
+    // the claim "this target has no invariant". That claim now needs
+    // `no_invariants_justification` above.
     for (const [probeIndex, probe] of (parsed.value.scan_probes ?? []).entries()) {
       verifyInvariantProbePath(discoveryWorkspace, probe.source_path, probeIndex, ledgerPath, diagnostics);
     }
-    const markdown = markdownBytes.toString("utf8");
-    for (const [entryIndex, entry] of parsed.value.entries.entries()) {
-      if (sourceProof !== undefined) {
-        verifyInvariantSourceProofEvidence(sourceProof, entry, entryIndex, ledgerPath, diagnostics);
-      } else if (!sourceProofPresent && fs.existsSync(discoveryWorkspace)) {
-        verifyInvariantSourceEvidence(discoveryWorkspace, entry, entryIndex, ledgerPath, diagnostics);
-      }
-      const block = markdownDelimitedBlock(markdown, `### Ledger entry: ${entry.id}`, [
-        entry.id,
-        entry.source_path,
-        entry.source_location,
-        entry.verbatim,
-        ...entry.inventory_ids
-      ]);
-      if (block === undefined) {
-        diagnostics.push({
-          code: "INVARIANT_LEDGER_MARKDOWN_EVIDENCE_MISSING",
-          message: `Discovery Markdown is missing the delimited block for ledger entry ${JSON.stringify(entry.id)}`,
-          severity: "error",
-          source: "invariant-ledger",
-          path: `${markdownPath}#$.entries[${entryIndex}]`
-        });
-        continue;
-      }
-      const evidence = [entry.id, entry.source_path, entry.source_location, entry.verbatim, ...entry.inventory_ids];
-      for (const token of evidence) {
-        if (markdownContainsToken(block, token)) {
-          continue;
-        }
-        diagnostics.push({
-          code: "INVARIANT_LEDGER_MARKDOWN_EVIDENCE_MISSING",
-          message: `Discovery Markdown must preserve ledger entry ${JSON.stringify(entry.id)} token ${JSON.stringify(token)}`,
-          severity: "error",
-          source: "invariant-ledger",
-          path: `${markdownPath}#$.entries[${entryIndex}]`
-        });
-      }
-      for (const inventoryId of entry.inventory_ids) {
-        const row = parsed.value.inventory_rows.find((candidate) => candidate.id === inventoryId);
-        const rowBlock =
-          row === undefined
-            ? undefined
-            : markdownDelimitedBlock(markdown, `### Inventory row: ${inventoryId}`, [
-                inventoryId,
-                row.description,
-                ...row.ledger_ids
-              ]);
-        if (row === undefined || rowBlock === undefined || !markdownContainsToken(rowBlock, row.description)) {
-          diagnostics.push({
-            code: "INVARIANT_LEDGER_MARKDOWN_INVENTORY_MISSING",
-            message: `Discovery Markdown is missing normalized inventory row ${JSON.stringify(inventoryId)}`,
-            severity: "error",
-            source: "invariant-ledger",
-            path: `${markdownPath}#$.entries[${entryIndex}].inventory_ids`
-          });
-          continue;
-        }
-        for (const ledgerId of row.ledger_ids) {
-          if (!markdownContainsToken(rowBlock, ledgerId)) {
-            diagnostics.push({
-              code: "INVARIANT_LEDGER_MARKDOWN_INVENTORY_MISSING",
-              message: `Inventory row ${JSON.stringify(inventoryId)} is missing ledger ID ${JSON.stringify(ledgerId)}`,
-              severity: "error",
-              source: "invariant-ledger",
-              path: `${markdownPath}#$.entries[${entryIndex}].inventory_ids`
-            });
-          }
-        }
-      }
-    }
     return diagnostics;
   }
-
-  const catalogOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/properties@2");
-  if (catalogOutputs.length === 0) return diagnostics;
-  if (catalogOutputs.length !== 1) {
+  if (parsed.value.entries.length === 0) {
     diagnostics.push({
-      code: "PROPERTY_CATALOG_DECLARATION_AMBIGUOUS",
-      message: `Property fan-in must declare exactly one ultrafuzz/properties@2 output; found ${catalogOutputs.length}`,
+      code: "INVARIANT_LEDGER_EMPTY",
+      message: "Project discovery invariant evidence ledger must contain at least one source entry",
       severity: "error",
       source: "invariant-ledger",
-      path: layout.graphPath
+      path: `${ledgerPath}#$.entries`
     });
     return diagnostics;
   }
-  const catalogPath = safeResolveInside(artifactDir, catalogOutputs[0]!.path, "canonical property catalog output");
+  if (parsed.value.inventory_rows === undefined) {
+    diagnostics.push({
+      code: "INVARIANT_LEDGER_INVENTORY_MISSING",
+      message: "Project discovery invariant evidence ledger is missing structured inventory rows",
+      severity: "error",
+      source: "invariant-ledger",
+      path: `${ledgerPath}#$.inventory_rows`
+    });
+    return diagnostics;
+  }
+  if (parsed.value.scan_probes === undefined) {
+    diagnostics.push({
+      code: "INVARIANT_LEDGER_PROBES_MISSING",
+      message: "Project discovery invariant evidence ledger is missing scan probe results",
+      severity: "error",
+      source: "invariant-ledger",
+      path: `${ledgerPath}#$.scan_probes`
+    });
+  }
+  const discoveryWorkspace = path.join(layout.workspacesDir, path.basename(artifactDir));
+  const sourceProofPath = invariantSourceProofPath(layout.root, path.basename(artifactDir));
+  const sourceProofPresent = fs.existsSync(sourceProofPath);
+  const sourceProof = sourceProofPresent
+    ? readInvariantSourceProof(sourceProofPath, ledgerPath, ledgerBytes, diagnostics)
+    : undefined;
+  if (!sourceProofPresent && !fs.existsSync(discoveryWorkspace)) {
+    diagnostics.push({
+      code: "INVARIANT_LEDGER_SOURCE_PROOF_MISSING",
+      message: "Invariant ledger source proof and discovery workspace are unavailable",
+      severity: "error",
+      source: "invariant-ledger",
+      path: ledgerPath
+    });
+  }
+  // Same DECISION as the no-evidence branch above (issue #292): an absent probe path is accepted
+  // because a probe records where the agent looked, and containment is the only property that can
+  // be enforced when nothing consumes `result`. On this branch the ledger carries entries, and
+  // those remain byte-checked against the pinned source below.
+  for (const [probeIndex, probe] of (parsed.value.scan_probes ?? []).entries()) {
+    verifyInvariantProbePath(discoveryWorkspace, probe.source_path, probeIndex, ledgerPath, diagnostics);
+  }
+  for (const [entryIndex, entry] of parsed.value.entries.entries()) {
+    if (sourceProof !== undefined) {
+      verifyInvariantSourceProofEvidence(sourceProof, entry, entryIndex, ledgerPath, diagnostics);
+    } else if (!sourceProofPresent && fs.existsSync(discoveryWorkspace)) {
+      verifyInvariantSourceEvidence(discoveryWorkspace, entry, entryIndex, ledgerPath, diagnostics);
+    }
+  }
+  return diagnostics;
+}
+
+function verifyCanonicalPropertiesProducerArtifacts(
+  layout: RunLayout,
+  artifactDir: string,
+  node: PlannedGraphNode,
+  attemptAuthority?: ArtifactGateAttemptAuthority,
+  authenticated?: AuthenticatedArtifactGateSnapshots
+): RuntimeDiagnostic[] {
+  const diagnostics: RuntimeDiagnostic[] = [];
+  const canonicalPair = declaredCanonicalPropertiesPair(node);
+  if (canonicalPair === undefined) return diagnostics;
+  diagnostics.push(
+    ...canonicalPair.diagnostics.map((diagnostic) => ({ ...diagnostic, path: diagnostic.path ?? layout.graphPath }))
+  );
+  if (canonicalPair.catalog === undefined || canonicalPair.markdown === undefined) return diagnostics;
+  if (diagnostics.some((diagnostic) => diagnostic.severity === "error")) return diagnostics;
+  const catalogPath = safeResolveInside(artifactDir, canonicalPair.catalog.path, "canonical property catalog output");
+  const canonicalMarkdownPath = safeResolveInside(
+    artifactDir,
+    canonicalPair.markdown.path,
+    "canonical property Markdown output"
+  );
   let ledgerProducer: FinalizedDeclaredProducer | undefined;
   let ledgerArtifact: VerifiedOutputArtifactSnapshot | undefined;
   try {
@@ -597,6 +718,16 @@ function verifyInvariantEvidenceArtifacts(
     const ledgerArtifacts = ledgerProducers.flatMap((producer) =>
       producer.outputs.map((output) => ({ producer, output }))
     );
+    if (ledgerArtifacts.length > 1) {
+      diagnostics.push({
+        code: "INVARIANT_LEDGER_DECLARATION_AMBIGUOUS",
+        message: `Property fan-in requires exactly one finalized declared ${INVARIANT_LEDGER_CONTRACT} output; found ${ledgerArtifacts.length}`,
+        severity: "error",
+        source: "invariant-ledger",
+        path: catalogPath
+      });
+      return diagnostics;
+    }
     if (ledgerArtifacts.length === 1) {
       ledgerProducer = ledgerArtifacts[0]!.producer;
       ledgerArtifact = ledgerArtifacts[0]!.output;
@@ -615,6 +746,21 @@ function verifyInvariantEvidenceArtifacts(
     });
     return diagnostics;
   }
+  const declaredLedgerPair = declaredInvariantLedgerProducerPair(ledgerProducer.node);
+  if (
+    declaredLedgerPair === undefined ||
+    declaredLedgerPair.ledger?.path !== ledgerArtifact.path ||
+    declaredLedgerPair.diagnostics.some((diagnostic) => diagnostic.severity === "error")
+  ) {
+    diagnostics.push(...(declaredLedgerPair?.diagnostics ?? []), {
+      code: "INVARIANT_LEDGER_AUTHORITY_INVALID",
+      message: "Property fan-in invariant ledger authority does not match one exact typed producer declaration",
+      severity: "error",
+      source: "invariant-ledger",
+      path: ledgerArtifact.absolute_path
+    });
+    return diagnostics;
+  }
   const catalogDocument = parseCurrentArtifactJson(artifactDir, catalogPath, authenticated);
   if (catalogDocument === undefined) {
     return diagnostics;
@@ -624,6 +770,16 @@ function verifyInvariantEvidenceArtifacts(
   const catalog = validatePropertiesSchema(catalogDocument, catalogPath);
   if (!ledger.ok || ledger.value === undefined || !catalog.ok || catalog.value === undefined) {
     return diagnostics;
+  }
+  const markdownBytes = readCurrentArtifactSnapshot(artifactDir, canonicalMarkdownPath, authenticated);
+  if (markdownBytes !== undefined) {
+    diagnostics.push(
+      ...canonicalPropertiesMarkdownParityIssues(
+        catalog.value,
+        markdownBytes.toString("utf8"),
+        canonicalMarkdownPath
+      ).map((issue) => ({ ...issue, severity: "error" as const }))
+    );
   }
   diagnostics.push(
     ...verifyLensReferenceExpectationPreservation(layout, node, catalog.value, catalogPath, attemptAuthority)
@@ -709,178 +865,6 @@ function verifyInvariantEvidenceArtifacts(
       source: "invariant-ledger",
       path: `${ledgerPath}#$.entries[${entryIndex}].id`
     });
-  }
-  if (node.outputs.some((output) => output.path === "properties.md")) {
-    const markdownPath = path.join(artifactDir, "properties.md");
-    const markdownBytes = readCurrentArtifactSnapshot(artifactDir, markdownPath, authenticated);
-    if (markdownBytes !== undefined) {
-      const markdown = markdownBytes.toString("utf8");
-      const markdownPropertyIds = [...markdown.matchAll(/^### Canonical property:\s*(.+?)\s*$/gmu)].map(
-        (match) => match[1] ?? ""
-      );
-      const catalogPropertyIds = new Set(catalog.value.properties.map((property) => property.id));
-      const seenMarkdownPropertyIds = new Set<string>();
-      for (const [markdownIndex, propertyId] of markdownPropertyIds.entries()) {
-        if (seenMarkdownPropertyIds.has(propertyId)) {
-          diagnostics.push({
-            code: "PROPERTY_MARKDOWN_CANONICAL_DUPLICATE",
-            message: `Properties Markdown contains duplicate canonical property ${JSON.stringify(propertyId)}`,
-            severity: "error",
-            source: "property-fanin",
-            path: `${markdownPath}#canonical-property-${markdownIndex}`
-          });
-        }
-        seenMarkdownPropertyIds.add(propertyId);
-        if (!catalogPropertyIds.has(propertyId)) {
-          diagnostics.push({
-            code: "PROPERTY_MARKDOWN_CANONICAL_UNKNOWN",
-            message: `Properties Markdown contains canonical property ${JSON.stringify(propertyId)} absent from properties.json`,
-            severity: "error",
-            source: "property-fanin",
-            path: `${markdownPath}#canonical-property-${markdownIndex}`
-          });
-        }
-      }
-      for (const [propertyIndex, property] of catalog.value.properties.entries()) {
-        const block = markdownDelimitedBlock(markdown, `### Canonical property: ${property.id}`, [property.id]);
-        const propertyFields: Array<[string, string]> = [
-          ["description", property.description],
-          ["category", property.category],
-          ["priority", property.priority]
-        ];
-        const missingPropertyField = propertyFields.find(
-          ([field, value]) => block === undefined || !markdownFieldEqualsValue(block, field, value)
-        );
-        const markdownIdValues = block === undefined ? [] : markdownFieldValues(block, "id");
-        const mismatchedMarkdownId =
-          markdownIdValues.length > 0 &&
-          (markdownIdValues.length !== 1 ||
-            normalizeMarkdownFieldValue(markdownIdValues[0] ?? "") !== normalizeMarkdownFieldValue(property.id));
-        const missingSource =
-          block === undefined
-            ? property.sources[0]
-            : property.sources.find(
-                (source) =>
-                  !markdownFieldContainsAnyValue(
-                    block,
-                    "sources",
-                    sourcePairVariants(source.source_node_id, source.source_property_id)
-                  )
-              );
-        const expectedSourcePairs = property.sources.map((source) =>
-          normalizeSourcePair(`${source.source_node_id}:${source.source_property_id}`)
-        );
-        const renderedSourcePairs =
-          block === undefined ? [] : markdownFieldEntries(block, "sources", normalizeSourcePair);
-        const ledgerFieldValues = block === undefined ? [] : markdownFieldValues(block, "ledger_ids");
-        // Only required when the property actually has ledger IDs to render. Demanding the field
-        // unconditionally contradicted both the schema, where `canonical_property.ledger_ids` is
-        // `.optional()`, and the fan-in prompt, which asks for it on "every canonical property THAT
-        // REPRESENTS one or more ledger entries". R45 and R46 each lost a full fan-in attempt to that
-        // (issue #297): R46 emitted 219 properties, 78 with ledger IDs, and rendered the field exactly
-        // 78 times — correct by both other definitions, rejected by this one. The parity checks below
-        // still enforce everything that matters once a property does have IDs: each must be rendered,
-        // the right number of times, with no extras.
-        const expectsLedgerField = (property.ledger_ids ?? []).length > 0;
-        const missingLedgerField = block !== undefined && expectsLedgerField && ledgerFieldValues.length !== 1;
-        const expectedReferenceExpectations = property.reference_expectations ?? [];
-        const renderedReferenceExpectations =
-          block === undefined ? [] : markdownFieldEntries(block, "reference_expectations", normalizeLedgerId);
-        const missingReferenceExpectation = expectedReferenceExpectations.find(
-          (expectationId) => !renderedReferenceExpectations.includes(expectationId)
-        );
-        const extraReferenceExpectation = renderedReferenceExpectations.find(
-          (expectationId) =>
-            !expectedReferenceExpectations.includes(expectationId) ||
-            renderedReferenceExpectations.filter((candidate) => candidate === expectationId).length >
-              expectedReferenceExpectations.filter((candidate) => candidate === expectationId).length
-        );
-        const extraSourcePair = renderedSourcePairs.find(
-          (source) =>
-            !expectedSourcePairs.includes(source) ||
-            renderedSourcePairs.filter((candidate) => candidate === source).length >
-              expectedSourcePairs.filter((candidate) => candidate === source).length
-        );
-        if (
-          missingPropertyField !== undefined ||
-          mismatchedMarkdownId ||
-          missingSource !== undefined ||
-          missingLedgerField ||
-          missingReferenceExpectation !== undefined
-        ) {
-          const missingValue =
-            missingPropertyField?.[0] ??
-            (mismatchedMarkdownId
-              ? "id"
-              : missingLedgerField
-                ? "ledger_ids"
-                : missingReferenceExpectation !== undefined
-                  ? "reference_expectations"
-                  : `${missingSource?.source_node_id}:${missingSource?.source_property_id}`);
-          diagnostics.push({
-            code: "PROPERTY_MARKDOWN_PARITY_MISSING",
-            message: `Properties Markdown must preserve canonical property ${JSON.stringify(property.id)} with its description, category, priority, and sources (missing ${JSON.stringify(missingValue)})`,
-            severity: "error",
-            source: "property-fanin",
-            path: `${markdownPath}#$.properties[${propertyIndex}]`
-          });
-        }
-        if (extraSourcePair !== undefined) {
-          diagnostics.push({
-            code: "PROPERTY_MARKDOWN_PARITY_EXTRA",
-            message: `Properties Markdown must not add an unlisted source pair ${JSON.stringify(extraSourcePair)} to canonical property ${JSON.stringify(property.id)}`,
-            severity: "error",
-            source: "property-fanin",
-            path: `${markdownPath}#$.properties[${propertyIndex}].sources`
-          });
-        }
-        if (extraReferenceExpectation !== undefined) {
-          diagnostics.push({
-            code: "PROPERTY_MARKDOWN_PARITY_EXTRA",
-            message: `Properties Markdown must not add an unlisted reference expectation ${JSON.stringify(extraReferenceExpectation)} to canonical property ${JSON.stringify(property.id)}`,
-            severity: "error",
-            source: "property-fanin",
-            path: `${markdownPath}#$.properties[${propertyIndex}].reference_expectations`
-          });
-        }
-        if (block === undefined) {
-          for (const ledgerId of property.ledger_ids ?? []) {
-            diagnostics.push({
-              code: "INVARIANT_LEDGER_MARKDOWN_MAPPING_MISSING",
-              message: `Properties Markdown must preserve canonical property ${JSON.stringify(property.id)} and ledger ID ${JSON.stringify(ledgerId)}`,
-              severity: "error",
-              source: "invariant-ledger",
-              path: `${markdownPath}#$.properties[${propertyIndex}].ledger_ids`
-            });
-          }
-          continue;
-        }
-        const expectedLedgerIds = new Set(property.ledger_ids ?? []);
-        const renderedLedgerIds = markdownFieldEntries(block, "ledger_ids", normalizeLedgerId);
-        for (const ledgerId of property.ledger_ids ?? []) {
-          if (markdownFieldContainsValue(block, "ledger_ids", ledgerId)) continue;
-          diagnostics.push({
-            code: "INVARIANT_LEDGER_MARKDOWN_MAPPING_MISSING",
-            message: `Properties Markdown must preserve canonical property ${JSON.stringify(property.id)} and ledger ID ${JSON.stringify(ledgerId)}`,
-            severity: "error",
-            source: "invariant-ledger",
-            path: `${markdownPath}#$.properties[${propertyIndex}].ledger_ids`
-          });
-        }
-        for (const ledgerId of renderedLedgerIds) {
-          const renderedCount = renderedLedgerIds.filter((candidate) => candidate === ledgerId).length;
-          const expectedCount = (property.ledger_ids ?? []).filter((candidate) => candidate === ledgerId).length;
-          if (expectedLedgerIds.has(ledgerId) && renderedCount <= expectedCount) continue;
-          diagnostics.push({
-            code: "INVARIANT_LEDGER_MARKDOWN_MAPPING_EXTRA",
-            message: `Properties Markdown must not add an unlisted ledger ID ${JSON.stringify(ledgerId)} to canonical property ${JSON.stringify(property.id)}`,
-            severity: "error",
-            source: "invariant-ledger",
-            path: `${markdownPath}#$.properties[${propertyIndex}].ledger_ids`
-          });
-        }
-      }
-    }
   }
   return diagnostics;
 }
@@ -1752,20 +1736,19 @@ function invariantSourceProofGitContext(
 ): SemanticGitContext | undefined {
   const runRoot = path.dirname(path.dirname(proofPath));
   const workspacePath = path.join(runRoot, "workspaces", attemptId);
-  if (fs.existsSync(workspacePath)) {
-    try {
-      assertNoSymlinkComponents(runRoot, workspacePath, "invariant source-proof workspace");
-      const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: workspacePath, encoding: "utf8" }).trim();
-      const tree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], {
-        cwd: workspacePath,
-        encoding: "utf8"
-      }).trim();
-      return { commit, tree };
-    } catch {
-      // Fall through to the durable source proof below.
-    }
+  try {
+    fs.lstatSync(workspacePath);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return durableContext;
+    throw error;
   }
-  return durableContext;
+  assertNoSymlinkComponents(runRoot, workspacePath, "invariant source-proof workspace");
+  const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: workspacePath, encoding: "utf8" }).trim();
+  const tree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], {
+    cwd: workspacePath,
+    encoding: "utf8"
+  }).trim();
+  return { commit, tree };
 }
 
 function verifyInvariantSourceProofEvidence(
@@ -1887,144 +1870,6 @@ function invariantSymbolDeclaration(source: string, symbol: string): string | un
   const tail = source.slice(declaration.index + declaration[0].length);
   const next = /\n\s*(?:function|contract|library|interface|modifier|event|error|struct|enum)\s+/u.exec(tail);
   return source.slice(declaration.index, declaration.index + declaration[0].length + (next?.index ?? tail.length));
-}
-
-function markdownDelimitedBlock(
-  markdown: string,
-  marker: string,
-  requiredTokens: readonly string[] = []
-): string | undefined {
-  const endMarker = marker
-    .replace("### Ledger entry:", "### End ledger entry:")
-    .replace("### Inventory row:", "### End inventory row:")
-    .replace("### Canonical property:", "### End canonical property:");
-  const markerPattern = new RegExp(`^${escapeRegExp(marker)}[ \\t]*$`, "gmu");
-  for (const match of markdown.matchAll(markerPattern)) {
-    if (match.index === undefined) continue;
-    const start = match.index;
-    const contentStart = start + match[0].length;
-    const nextBlockPattern = /^### (?:Ledger entry:|Inventory row:|Canonical property:)/gmu;
-    nextBlockPattern.lastIndex = contentStart;
-    const nextBlock = nextBlockPattern.exec(markdown);
-    const contentLimit = nextBlock?.index ?? markdown.length;
-    const endPattern = new RegExp(`^${escapeRegExp(endMarker)}[ \\t]*$`, "gmu");
-    let endMatch: RegExpExecArray | null = null;
-    for (const candidate of markdown.slice(contentStart, contentLimit).matchAll(endPattern)) {
-      endMatch = candidate;
-    }
-    if (endMatch?.index !== undefined) {
-      const block = markdown.slice(start, contentStart + endMatch.index + endMatch[0].length);
-      if (requiredTokens.every((token) => markdownContainsToken(block, token))) {
-        return block;
-      }
-    }
-  }
-  return undefined;
-}
-
-function markdownContainsToken(markdown: string, token: string): boolean {
-  const pattern = new RegExp(`(?<![A-Za-z0-9._-])${escapeRegExp(token)}(?![A-Za-z0-9._-])`, "u");
-  if (pattern.test(markdown)) return true;
-  const normalizeIndented = (value: string): string => value.replace(/\r\n?/gu, "\n").replace(/^ {2}/gmu, "");
-  return pattern.test(normalizeIndented(markdown));
-}
-
-function markdownContainsCanonicalValue(markdown: string, value: string): boolean {
-  const normalized = value.replace(/\r\n?/gu, "\n");
-  const rendered = markdown.replaceAll("\\|", "|").replaceAll("<br>", "\n");
-  const variants = new Set([normalized, normalized.replaceAll("|", "\\|"), normalized.replaceAll("\n", "<br>")]);
-  if (markdownContainsToken(rendered, normalized)) return true;
-  return [...variants].some((variant) => markdownContainsToken(markdown, variant));
-}
-
-function markdownFieldContainsValue(markdown: string, field: string, value: string): boolean {
-  return markdownFieldContainsAnyValue(markdown, field, [value]);
-}
-
-function markdownFieldEqualsValue(markdown: string, field: string, value: string): boolean {
-  const fieldValues = markdownFieldValues(markdown, field);
-  return (
-    fieldValues.length === 1 && normalizeMarkdownFieldValue(fieldValues[0] ?? "") === normalizeMarkdownFieldValue(value)
-  );
-}
-
-function markdownFieldContainsAnyValue(markdown: string, field: string, values: readonly string[]): boolean {
-  return markdownFieldValues(markdown, field).some((fieldValue) =>
-    values.some((value) => markdownContainsCanonicalValue(fieldValue, value))
-  );
-}
-
-function markdownFieldEntries<T>(markdown: string, field: string, normalize: (value: string) => T): T[] {
-  return markdownFieldValues(markdown, field)
-    .flatMap((value) => value.replaceAll("<br>", "\n").split(/[,;\n]/u))
-    .map((value) => value.trim())
-    .filter((value) => value.length > 0 && value !== "[]")
-    .map(normalize);
-}
-
-function normalizeSourcePair(value: string): string {
-  return value
-    .replaceAll("`", "")
-    .replace(/^\s*[-*+]\s*/u, "")
-    .replace(/\s*(?::|\/)\s*/u, ":")
-    .trim();
-}
-
-function normalizeLedgerId(value: string): string {
-  return value
-    .replaceAll("`", "")
-    .replace(/^\s*[-*+]\s*/u, "")
-    .trim();
-}
-
-function normalizeMarkdownFieldValue(value: string): string {
-  return value
-    .replace(/\r\n?/gu, "\n")
-    .replaceAll("\\|", "|")
-    .replaceAll("<br>", "\n")
-    .replace(/\n?Ledger evidence(?: retained)?:[\s\S]*$/iu, "")
-    .replaceAll("`", "")
-    .trim();
-}
-
-function markdownFieldValues(markdown: string, field: string): string[] {
-  const lines = markdown.replace(/\r\n?/gu, "\n").split("\n");
-  // The leading pipe is what makes a line a table row. Capturing it lets the
-  // trailing-pipe strip below apply only to real cells: a value that merely ENDS
-  // with a pipe -- a description quoting a docs table row verbatim, which the
-  // fan-in prompt requires -- must survive intact, or parity reports the field
-  // as missing on an artifact that is byte-identical to its JSON.
-  const fieldPattern = new RegExp(`^\\s*(\\|\\s*)?(?:[-*+]\\s*)?${escapeRegExp(field)}\\s*(?::|\\|)\\s*(.*)$`, "iu");
-  const nextFieldPattern =
-    /^\s*(?:\|\s*)?(?:[-*+]\s*)?(?:id|description|category|priority|sources?|ledger[_ -]?ids?|reference[_ -]?expectations?|ledger evidence(?: retained)?)\s*(?::|\|)/iu;
-  const values: string[] = [];
-  for (let index = 0; index < lines.length; index += 1) {
-    const match = fieldPattern.exec(lines[index] ?? "");
-    if (match?.[2] === undefined) continue;
-    const openedAsTableRow = match[1] !== undefined;
-    const parts = [openedAsTableRow ? match[2].replace(/\s*\|\s*$/u, "") : match[2]];
-    for (let continuation = index + 1; continuation < lines.length; continuation += 1) {
-      const line = lines[continuation] ?? "";
-      if (
-        /^\s*(?:\|\s*)?(?:[-*+]\s*)?ledger[_ -]?evidence(?: retained?)?\s*(?::|\|)/iu.test(line) ||
-        /^\s*###\s/u.test(line) ||
-        nextFieldPattern.test(line)
-      )
-        break;
-      if (line.trim() !== "") parts.push(line.trim());
-      index = continuation;
-    }
-    values.push(parts.join("\n"));
-  }
-  return values;
-}
-
-function sourcePairVariants(sourceNodeId: string, sourcePropertyId: string): string[] {
-  return [
-    `${sourceNodeId}:${sourcePropertyId}`,
-    `${sourceNodeId} / ${sourcePropertyId}`,
-    `${sourceNodeId}/${sourcePropertyId}`
-  ];
 }
 
 function escapeRegExp(value: string): string {
@@ -2854,21 +2699,9 @@ function semanticCanonicalPropertyCatalog(
   consumer: PlannedGraphNode,
   attemptAuthority?: ArtifactGateAttemptAuthority
 ): PropertiesArtifact | undefined {
-  const artifact = finalizedSingletonAncestorOutput(
-    layout,
-    consumer,
-    "ultrafuzz/properties@2",
-    "canonical property semantic context",
-    attemptAuthority
-  );
-  if (artifact !== undefined) {
-    const parsed = validatePropertiesSchema(artifact.value, artifact.absolute_path);
-    if (!parsed.ok || parsed.value === undefined) {
-      throw new Error(`canonical property semantic context is schema-invalid: ${artifact.absolute_path}`);
-    }
-    return parsed.value;
-  }
-  return plannedContractProducerStatus(layout, consumer, "ultrafuzz/properties@2", attemptAuthority) === "absent"
+  const pair = finalizedCanonicalPropertyPair(layout, consumer, attemptAuthority);
+  if (pair !== undefined) return pair.value;
+  return plannedContractProducerStatus(layout, consumer, CANONICAL_PROPERTIES_CONTRACT, attemptAuthority) === "absent"
     ? UNPLANNED_PROPERTY_CATALOG_CONTEXT
     : undefined;
 }
@@ -3241,6 +3074,68 @@ function finalizedDeclaredContractProducers(
   });
 }
 
+interface FinalizedCanonicalPropertyPair {
+  producer: FinalizedDeclaredProducer;
+  catalog: VerifiedOutputArtifactSnapshot;
+  markdown: VerifiedOutputArtifactSnapshot;
+  value: PropertiesArtifact;
+}
+
+function finalizedCanonicalPropertyPair(
+  layout: RunLayout,
+  consumer: PlannedGraphNode,
+  attemptAuthority?: ArtifactGateAttemptAuthority
+): FinalizedCanonicalPropertyPair | undefined {
+  const bindings = finalizedDeclaredContractProducers(
+    layout,
+    CANONICAL_PROPERTIES_CONTRACT,
+    consumer,
+    attemptAuthority
+  ).flatMap((producer) => producer.outputs.map((catalog) => ({ producer, catalog })));
+  if (bindings.length === 0) return undefined;
+  if (bindings.length !== 1) {
+    throw new Error(
+      `canonical property authority is ambiguous: expected one finalized ${CANONICAL_PROPERTIES_CONTRACT} output, found ${bindings.length}`
+    );
+  }
+  const { producer, catalog } = bindings[0]!;
+  const declaration = declaredCanonicalPropertiesPair(producer.node);
+  if (
+    declaration === undefined ||
+    declaration.catalog?.path !== catalog.path ||
+    declaration.markdown === undefined ||
+    declaration.diagnostics.some((diagnostic) => diagnostic.severity === "error")
+  ) {
+    const details = declaration?.diagnostics
+      .map((diagnostic) => `${diagnostic.code}: ${diagnostic.message}`)
+      .join("; ");
+    throw new Error(
+      `canonical property authority does not bind one exact typed JSON/Markdown producer${details === undefined || details.length === 0 ? "" : `: ${details}`}`
+    );
+  }
+  const markdownOutputs = producer.authority.outputs.filter(
+    (output) => output.contract === CANONICAL_PROPERTIES_MARKDOWN_CONTRACT
+  );
+  if (markdownOutputs.length !== 1 || markdownOutputs[0]!.path !== declaration.markdown.path) {
+    throw new Error("finalized canonical properties Markdown authority does not match its exact producer declaration");
+  }
+  const parsed = validatePropertiesSchema(catalog.value, catalog.absolute_path);
+  if (!parsed.ok || parsed.value === undefined) {
+    throw new Error(`canonical property semantic context is schema-invalid: ${catalog.absolute_path}`);
+  }
+  const markdown = markdownOutputs[0]!;
+  const markdownText = new TextDecoder("utf-8", { fatal: true }).decode(markdown.bytes);
+  const parityIssues = canonicalPropertiesMarkdownParityIssues(parsed.value, markdownText, markdown.absolute_path);
+  if (parityIssues.length > 0) {
+    throw new Error(
+      `canonical property JSON/Markdown authority is inconsistent: ${parityIssues
+        .map((issue) => `${issue.code} ${issue.path}: ${issue.message}`)
+        .join("; ")}`
+    );
+  }
+  return { producer, catalog, markdown, value: parsed.value };
+}
+
 function finalizedSingletonAncestorOutput(
   layout: RunLayout,
   consumer: PlannedGraphNode,
@@ -3269,25 +3164,37 @@ function semanticPropertyLenses(
   let producerCount = 0;
   // Discovery is the transitive root evidence authority for every property
   // lens and fan-in, even though fan-in depends directly on the lens nodes.
-  let ledgerArtifacts: readonly {
-    producer: FinalizedDeclaredProducer;
-    artifact: VerifiedOutputArtifactSnapshot;
-  }[];
-  try {
-    ledgerArtifacts = finalizedDeclaredContractProducers(
-      layout,
-      "ultrafuzz/invariant-ledger@1",
-      consumer,
-      attemptAuthority
-    ).flatMap((producer) => producer.outputs.map((artifact) => ({ producer, artifact })));
-  } catch {
-    return undefined;
+  const ledgerArtifacts = finalizedDeclaredContractProducers(
+    layout,
+    "ultrafuzz/invariant-ledger@1",
+    consumer,
+    attemptAuthority
+  ).flatMap((producer) => producer.outputs.map((artifact) => ({ producer, artifact })));
+  if (ledgerArtifacts.length === 0) return undefined;
+  if (ledgerArtifacts.length !== 1) {
+    throw new Error(
+      `property semantic context is ambiguous: expected one finalized ultrafuzz/invariant-ledger@1 output, found ${ledgerArtifacts.length}`
+    );
   }
-  if (ledgerArtifacts.length > 1) return undefined;
   for (const { producer, artifact: ledgerArtifact } of ledgerArtifacts) {
+    const declaration = declaredInvariantLedgerProducerPair(producer.node);
+    if (
+      declaration === undefined ||
+      declaration.ledger?.path !== ledgerArtifact.path ||
+      declaration.diagnostics.some((diagnostic) => diagnostic.severity === "error")
+    ) {
+      const details = declaration?.diagnostics
+        .map((diagnostic) => `${diagnostic.code}: ${diagnostic.message}`)
+        .join("; ");
+      throw new Error(
+        `property semantic context does not bind one exact invariant-ledger JSON/Markdown producer${details === undefined || details.length === 0 ? "" : `: ${details}`}`
+      );
+    }
     producerCount += 1;
     const ledger = validateInvariantLedgerSchema(ledgerArtifact.value, ledgerArtifact.absolute_path);
-    if (!ledger.ok || ledger.value === undefined) return undefined;
+    if (!ledger.ok || ledger.value === undefined) {
+      throw new Error(`property semantic context contains a schema-invalid invariant ledger: ${ledgerArtifact.path}`);
+    }
     lenses.push({
       sourceNodeId: producer.node.logical_id,
       projectionRequired: false,
@@ -3295,18 +3202,13 @@ function semanticPropertyLenses(
     });
   }
 
-  let directDependencies: DirectArtifactDependency[];
-  try {
-    directDependencies =
-      attemptAuthority === undefined
-        ? plannedDirectDependencyNodes(layout, consumer).map((dependency) => ({
-            attemptId: dependency.id,
-            node: dependency
-          }))
-        : sealedDirectArtifactDependencies(layout, consumer, attemptAuthority);
-  } catch {
-    return undefined;
-  }
+  const directDependencies: DirectArtifactDependency[] =
+    attemptAuthority === undefined
+      ? plannedDirectDependencyNodes(layout, consumer).map((dependency) => ({
+          attemptId: dependency.id,
+          node: dependency
+        }))
+      : sealedDirectArtifactDependencies(layout, consumer, attemptAuthority);
   for (const dependency of directDependencies) {
     const nodeId = dependency.attemptId;
     const nodeState = state.nodes[nodeId];
@@ -3315,19 +3217,29 @@ function semanticPropertyLenses(
       nodeState?.logical_node_id !== undefined &&
       nodeState.logical_node_id !== dependency.node.logical_id
     ) {
-      return undefined;
+      throw new Error(`property semantic dependency state does not bind planned node ${dependency.attemptId}`);
     }
     const declaredLensCount =
       dependency.task?.metadata.artifacts.outputs.filter((output) => output.contract === PROPERTY_LENS_CONTRACT)
         .length ?? dependency.node.outputs.filter((output) => output.contract === PROPERTY_LENS_CONTRACT).length;
     if (declaredLensCount === 0) continue;
-    if (declaredLensCount !== 1) return undefined;
+    if (declaredLensCount !== 1) {
+      throw new Error(
+        `property semantic dependency ${dependency.attemptId} declares ${declaredLensCount} ultrafuzz/property-lens@2 outputs`
+      );
+    }
     producerCount += 1;
     const lens =
       attemptAuthority === undefined
         ? loadFinalizedPropertyLens(layout, state, nodeId, "property-fanin")
         : loadFinalizedTaskPropertyLens(layout, dependency, "property-fanin");
-    if (!lens.ok) return undefined;
+    if (!lens.ok) {
+      throw new Error(
+        `property semantic lens authority is invalid for ${dependency.attemptId}: ${lens.diagnostics
+          .map((diagnostic) => `${diagnostic.code}: ${diagnostic.message}`)
+          .join("; ")}`
+      );
+    }
     lenses.push({ sourceNodeId: dependency.node.logical_id, projectionRequired: true, document: lens.document });
   }
   return producerCount === 0 ? undefined : lenses;
@@ -5293,22 +5205,16 @@ function readCanonicalPropertyCatalog(
   path?: string;
   diagnostics: RuntimeDiagnostic[];
 } {
-  let artifact: VerifiedOutputArtifactSnapshot | undefined;
+  let pair: FinalizedCanonicalPropertyPair | undefined;
   try {
-    artifact = finalizedSingletonAncestorOutput(
-      layout,
-      consumer,
-      "ultrafuzz/properties@2",
-      "canonical property catalog",
-      attemptAuthority
-    );
+    pair = finalizedCanonicalPropertyPair(layout, consumer, attemptAuthority);
   } catch (error) {
     return {
       diagnostics: [diagnosticFromError(error, "property-provenance", "PROPERTY_CATALOG_AUTHORITY_INVALID")]
     };
   }
-  if (artifact === undefined) {
-    if (plannedContractProducerStatus(layout, consumer, "ultrafuzz/properties@2", attemptAuthority) === "absent") {
+  if (pair === undefined) {
+    if (plannedContractProducerStatus(layout, consumer, CANONICAL_PROPERTIES_CONTRACT, attemptAuthority) === "absent") {
       return { value: UNPLANNED_PROPERTY_CATALOG_CONTEXT, diagnostics: [] };
     }
     return {
@@ -5322,10 +5228,7 @@ function readCanonicalPropertyCatalog(
       ]
     };
   }
-  const result = validatePropertiesSchema(artifact.value, artifact.absolute_path);
-  return result.ok && result.value !== undefined
-    ? { value: result.value, path: artifact.absolute_path, diagnostics: [] }
-    : { diagnostics: schemaDiagnostics(result.issues) };
+  return { value: pair.value, path: pair.catalog.absolute_path, diagnostics: [] };
 }
 
 function readImplementedProperties(

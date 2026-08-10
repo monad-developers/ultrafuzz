@@ -52,7 +52,14 @@ import {
 } from "../src/eval-schema-registry.js";
 import { assertEvalSemanticGateRegistry, executeEvalSchemaSemanticGates } from "../src/eval-semantic-gates.js";
 import type { EvalFindingScore, FindingJudgeResult, HumanReviewQueueItem } from "../src/types.js";
-import { currentEvalRunRecord, currentRunManifest, currentScoreSummary, testRow, testSuite } from "./helpers.js";
+import {
+  currentEvalRunRecord,
+  currentRunManifest,
+  currentScoreSummary,
+  testReportAuthority,
+  testRow,
+  testSuite
+} from "./helpers.js";
 
 const timestamp = "2026-07-09T00:00:00.000Z";
 
@@ -80,10 +87,11 @@ function judgeResult(overrides: Partial<FindingJudgeResult> = {}): FindingJudgeR
 function findingScore(): EvalFindingScore {
   const decision = judgeResult();
   return {
-    schema_version: "ultrafuzz.eval.finding-score.v1",
+    schema_version: "ultrafuzz.eval.finding-score.v2",
     row_id: "target-a-baseline-trial-1",
     finding_id: "finding-1",
     report_path: "/tmp/report.json",
+    report_authority: testReportAuthority({ run_id: "run-1" }),
     deterministic_match: decision,
     judge_result: decision
   };

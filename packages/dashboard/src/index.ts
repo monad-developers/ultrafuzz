@@ -3,15 +3,19 @@ import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 
 import {
+  assertPlannedGraph,
   assertNoSymlinkComponents,
   assertPathInside,
   assertRegularFileInside,
+  assertRunStateSchema,
   layoutForRunRoot,
   listSafeFiles,
   parseStrictJsonBytes,
-  queryEvents,
+  parseSmithersTaskManifestBytes,
+  readPlannedGraphDocument,
   readRunMetadataDocument,
   readRunState,
   replayEvents,
@@ -22,6 +26,8 @@ import {
   type ArtifactContractId,
   type NodeStatus,
   type NodeState,
+  type PlannedGraphOutput,
+  type PlannedGraphDocument,
   type RunStatus,
   type RunState
 } from "@ultrafuzz/artifacts";
@@ -36,6 +42,7 @@ import {
 } from "@ultrafuzz/prompts";
 import {
   cleanGenerated,
+  assertVerifiedRunOutputAuthorityRemainedCurrent,
   forkRun,
   getRunStatus,
   listRuns,
@@ -52,8 +59,12 @@ import {
   modelProfilesForTopology,
   isVerifiedOutputAuthorityUnavailable,
   loadVerifiedFinalReportSnapshot,
-  loadVerifiedNodeOutputSnapshot,
-  type RuntimeResult
+  loadVerifiedRunOutputAuthoritySnapshot,
+  projectCanonicalFinalReport,
+  verifySealedTaskManifestSnapshot,
+  type RuntimeResult,
+  type VerifiedNodeOutputSnapshot,
+  type VerifiedRunOutputAuthoritySnapshot
 } from "@ultrafuzz/runtime";
 import {
   expandTopology,
@@ -123,6 +134,29 @@ type JsonObject = Record<string, unknown>;
 type HttpMethod = "GET" | "POST" | "PUT" | "DELETE";
 type DashboardSseEventType = "ultrafuzz-event" | "ultrafuzz-error" | "ultrafuzz-command-jobs";
 
+interface DashboardRunContext {
+  runId: string;
+  runsRoot: string;
+  runRoot: string;
+  persisted: boolean;
+}
+
+interface DashboardCapturedRunAuthority {
+  context: DashboardRunContext;
+  state: RunState | undefined;
+  authorityProjection: DashboardFlowAuthorityProjection | undefined;
+}
+
+const DASHBOARD_FINDINGS_CONTRACTS = [
+  "ultrafuzz/severity-classified-findings@1",
+  "ultrafuzz/triaged-findings@1",
+  "ultrafuzz/findings@2",
+  "ultrafuzz/report@2"
+] as const satisfies readonly ArtifactContractId[];
+type DashboardFindingsContract = (typeof DASHBOARD_FINDINGS_CONTRACTS)[number];
+const DASHBOARD_FINDINGS_STAGE_PRIORITY = ["severity-classified", "triaged", "deduped", "report", "raw"] as const;
+type DashboardFindingsStage = (typeof DASHBOARD_FINDINGS_STAGE_PRIORITY)[number];
+
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 3875;
 const PREVIEW_RUN_ID = "preview";
@@ -131,7 +165,6 @@ const MAX_COMMAND_JOBS = 20;
 const MAX_COMMAND_OUTPUT_BYTES = 32 * 1024;
 const MAX_REQUEST_BODY_BYTES = 1024 * 1024;
 const FINDINGS_CONTRACT = "ultrafuzz/findings@2" as ArtifactContractId;
-const REPORT_CONTRACT = "ultrafuzz/report@2" as ArtifactContractId;
 const SECURITY_HEADERS = {
   "content-security-policy": [
     "default-src 'none'",
@@ -473,12 +506,7 @@ class DashboardApp {
     });
   }
 
-  async runContext(): Promise<{
-    runId: string;
-    runsRoot: string;
-    runRoot: string;
-    persisted: boolean;
-  }> {
+  async runContext(): Promise<DashboardRunContext> {
     const runId = await this.selectedRunId();
     const runsRoot = await runsRootForProject(this.projectRoot);
     const runRoot = path.join(runsRoot, runId);
@@ -492,6 +520,26 @@ class DashboardApp {
       runRoot,
       persisted: runId !== PREVIEW_RUN_ID && fs.existsSync(runRoot)
     };
+  }
+
+  async captureRunAuthorityContext(): Promise<DashboardCapturedRunAuthority> {
+    const context = await this.runContext();
+    const observedState = await this.optionalRunState(context);
+    const authorityProjection = context.persisted
+      ? dashboardFlowAuthorityProjection(context.runRoot, observedState)
+      : undefined;
+    return {
+      context,
+      state: authorityProjection?.state ?? observedState,
+      authorityProjection
+    };
+  }
+
+  async assertCapturedRunAuthorityRemainedCurrent(captured: DashboardCapturedRunAuthority): Promise<void> {
+    if ((await this.selectedRunId()) !== captured.context.runId) {
+      throw new Error("dashboard selected run changed while the response was being projected");
+    }
+    assertDashboardCapturedRunAuthorityRemainedCurrent(captured);
   }
 
   async latestRunId(): Promise<string | undefined> {
@@ -516,12 +564,12 @@ class DashboardApp {
   async flow(): Promise<JsonObject> {
     const topology = this.loadTopologyForDisplay();
     const expanded = await this.expandCurrentTopology(topology);
-    const run = await this.runOverviewFrom(topology, expanded);
-    const state = await this.optionalRunState();
-    const context = await this.runContext();
+    const captured = await this.captureRunAuthorityContext();
+    const { context, state, authorityProjection } = captured;
+    const run = await this.runOverviewFrom(topology, expanded, captured);
     const attemptsByLogicalId = groupExpandedNodes(expanded.nodes);
     const nodes = topology.nodes.map((node, index) =>
-      this.flowNode(node, index, attemptsByLogicalId.get(node.id) ?? [], state, context.runRoot)
+      this.flowNode(node, index, attemptsByLogicalId.get(node.id) ?? [], state, context.runRoot, authorityProjection)
     );
     const edges = topology.nodes.flatMap((node) =>
       (node.depends_on ?? []).map((dependency) => {
@@ -543,13 +591,15 @@ class DashboardApp {
       const strategy = data.strategy;
       return strategy === undefined ? [] : [strategy];
     });
-    return dashboardHttpDocument("flow", {
+    const document = dashboardHttpDocument("flow", {
       run,
       nodes,
       edges,
       strategies,
       capabilities: this.commandCapabilities()
     });
+    await this.assertCapturedRunAuthorityRemainedCurrent(captured);
+    return document;
   }
 
   flowNode(
@@ -557,7 +607,8 @@ class DashboardApp {
     index: number,
     attempts: ExpandedNode[],
     state: RunState | undefined,
-    runRoot?: string
+    runRoot?: string,
+    authorityProjection?: DashboardFlowAuthorityProjection
   ): JsonObject {
     const logicalId = node.id;
     const status = aggregateLogicalStatus(attempts, state);
@@ -567,7 +618,7 @@ class DashboardApp {
     const group = node.group;
     const groups = this.loadTopologyForDisplay().groups ?? {};
     const groupInfo = group ? groups[group] : undefined;
-    const findingCount = this.countFindings(attempts, runRoot);
+    const findingCount = authorityProjection?.findingsByLogicalId.get(logicalId)?.length ?? 0;
     const requiredArtifacts = uniqueStrings([
       ...(node.outputs ?? []).map((output) => output.path),
       ...attempts.flatMap((attempt) => attempt.outputs.map((output) => output.path))
@@ -602,7 +653,7 @@ class DashboardApp {
         dependencies: [...(node.depends_on ?? [])],
         artifactDir: artifactDirs[0] ?? `artifacts/${logicalId}`,
         artifactDirs,
-        artifacts: this.artifactAvailability(attempts, runRoot),
+        artifacts: this.artifactAvailability(attempts, runRoot, authorityProjection),
         promptAvailable: node.kind === undefined || node.kind === "agentic",
         promptEditable: node.kind === undefined || node.kind === "agentic",
         topologyConnectable: true,
@@ -636,14 +687,20 @@ class DashboardApp {
   async runOverview(): Promise<JsonObject> {
     const topology = this.loadTopologyForDisplay();
     const expanded = await this.expandCurrentTopology(topology);
-    return this.runOverviewFrom(topology, expanded);
+    const captured = await this.captureRunAuthorityContext();
+    const document = await this.runOverviewFrom(topology, expanded, captured);
+    await this.assertCapturedRunAuthorityRemainedCurrent(captured);
+    return document;
   }
 
-  async runOverviewFrom(topology: ProjectTopology, expanded: ExpandedGraph): Promise<JsonObject> {
-    const context = await this.runContext();
-    const state = await this.optionalRunState();
-    const events = await this.events();
-    const findings = await this.findings();
+  async runOverviewFrom(
+    topology: ProjectTopology,
+    expanded: ExpandedGraph,
+    captured: DashboardCapturedRunAuthority
+  ): Promise<JsonObject> {
+    const { context, state, authorityProjection } = captured;
+    const events = await this.events(context);
+    const findings = authorityProjection?.allFindings ?? [];
     const attemptsByLogicalId = groupExpandedNodes(expanded.nodes);
     const nodeCounts: Record<string, number> = {};
     const activeNodes: string[] = [];
@@ -654,7 +711,7 @@ class DashboardApp {
         activeNodes.push(node.id);
       }
     }
-    const report = await this.report();
+    const report = await this.report(context);
     return dashboardHttpDocument("run-overview", {
       run_id: context.runId,
       run_root: context.runRoot,
@@ -668,7 +725,7 @@ class DashboardApp {
       expanded_nodes: expanded.nodes.length,
       node_counts: nodeCounts,
       active_nodes: activeNodes,
-      findings_count: Array.isArray(findings.findings) ? findings.findings.length : 0,
+      findings_count: findings.length,
       event_count: Array.isArray(events.events) ? events.events.length : 0,
       live_updates: this.liveUpdates,
       mode: context.persisted ? "persisted" : "preview",
@@ -700,12 +757,12 @@ class DashboardApp {
     }
     const expanded = await this.expandCurrentTopology(topology);
     const attempts = expanded.nodes.filter((attempt) => attempt.logicalId === safeNodeId);
-    const state = await this.optionalRunState();
-    const context = await this.runContext();
-    const attemptArtifacts = await this.artifactEntriesForAttempts(attempts);
+    const captured = await this.captureRunAuthorityContext();
+    const { context, state, authorityProjection } = captured;
+    const attemptArtifacts = await this.artifactEntriesForAttempts(attempts, context);
     const primary = attemptArtifacts[0];
-    return dashboardHttpDocument("node-detail", {
-      run_id: await this.selectedRunId(),
+    const document = dashboardHttpDocument("node-detail", {
+      run_id: context.runId,
       node: {
         id: safeNodeId,
         label: displayNameForNode(this.projectRoot, node),
@@ -727,7 +784,7 @@ class DashboardApp {
       stdout: primary?.stdout,
       stderr: primary?.stderr,
       rendered_prompt: primary?.renderedPrompt,
-      findings: this.findingsForAttempts(attempts, context.persisted ? context.runRoot : undefined),
+      findings: authorityProjection?.findingsByLogicalId.get(safeNodeId) ?? [],
       metadata: {
         expandedAttempts: attempts.map((attempt) => ({
           id: attempt.id,
@@ -739,9 +796,14 @@ class DashboardApp {
         }))
       }
     });
+    await this.assertCapturedRunAuthorityRemainedCurrent(captured);
+    return document;
   }
 
-  async artifactEntriesForAttempts(attempts: ExpandedNode[]): Promise<
+  async artifactEntriesForAttempts(
+    attempts: ExpandedNode[],
+    context: DashboardRunContext
+  ): Promise<
     Array<{
       attemptId: string;
       artifacts: Array<{ path: string; kind: string; size_bytes: number; sha256: string }>;
@@ -750,7 +812,6 @@ class DashboardApp {
       renderedPrompt?: string;
     }>
   > {
-    const context = await this.runContext();
     if (!context.persisted) {
       return [];
     }
@@ -782,42 +843,12 @@ class DashboardApp {
     if (!context.persisted) {
       return dashboardHttpDocument("findings", { source: "none", findings: [] });
     }
-    const candidates = [
-      "artifacts/severity-classification/severity-classified-findings.json",
-      "artifacts/triage/triaged-findings.json",
-      "artifacts/dedupe-findings/deduped-findings.json",
-      "artifacts/final-report/report.json"
-    ];
-    const state = readRunState(layoutForRunRoot(context.runRoot, context.runId));
-    for (const candidate of candidates) {
-      const file = safeResolveInside(context.runRoot, candidate, "findings path");
-      if (lstatIfPresent(file) === undefined) {
-        continue;
-      }
-      assertRegularFileInside(context.runRoot, file, "findings path");
-      const [artifactsSegment, attemptId, ...artifactSegments] = candidate.split("/");
-      if (artifactsSegment !== "artifacts" || attemptId === undefined || artifactSegments.length === 0) {
-        throw new Error(`dashboard findings candidate is not a run artifact path: ${candidate}`);
-      }
-      return dashboardHttpDocument("findings", {
-        source: candidate,
-        findings: readVerifiedFindingsArtifact({
-          runRoot: context.runRoot,
-          filePath: file,
-          attemptId,
-          logicalNodeId: state.nodes[attemptId]?.logical_node_id ?? attemptId,
-          artifactPath: artifactSegments.join("/")
-        })
-      });
-    }
-    return dashboardHttpDocument("findings", {
-      source: "scan",
-      findings: this.findingsForArtifactsRoot(context.runRoot)
-    });
+    const selected = verifiedDeclaredFindings(context.runRoot);
+    return dashboardHttpDocument("findings", selected);
   }
 
-  async report(): Promise<JsonObject> {
-    const context = await this.runContext();
+  async report(context?: DashboardRunContext): Promise<JsonObject> {
+    context ??= await this.runContext();
     if (!context.persisted) {
       return dashboardHttpDocument("report", {
         markdown_path: undefined,
@@ -826,13 +857,7 @@ class DashboardApp {
         json: undefined
       });
     }
-    const candidateDirs = uniqueStrings(this.finalReportDirs(context.runRoot, context.runId));
-    const physicalReportPresent = candidateDirs.some((candidateDir) => {
-      const markdownPath = safeResolveInside(context.runRoot, `${candidateDir}/report.md`, "report markdown");
-      const jsonPath = safeResolveInside(context.runRoot, `${candidateDir}/report.json`, "report JSON");
-      return lstatIfPresent(markdownPath) !== undefined || lstatIfPresent(jsonPath) !== undefined;
-    });
-    const state = readRunState(layoutForRunRoot(context.runRoot, context.runId));
+    const declaration = dashboardDeclaredReportAvailability(context.runRoot);
     try {
       const loaded = loadVerifiedFinalReportSnapshot(context.runRoot);
       return dashboardHttpDocument("report", {
@@ -843,8 +868,9 @@ class DashboardApp {
       });
     } catch (error) {
       if (
-        !physicalReportPresent &&
-        !hasSuccessfulDashboardFinalization(state, "final-report") &&
+        !declaration.physicalPresent &&
+        !declaration.claimedSuccess &&
+        !declaration.invalidDeclaration &&
         isVerifiedOutputAuthorityUnavailable(error)
       ) {
         return dashboardHttpDocument("report", {
@@ -858,20 +884,8 @@ class DashboardApp {
     }
   }
 
-  finalReportDirs(runRoot: string, runId: string): string[] {
-    const candidates = new Set(["final-report"]);
-    const layout = layoutForRunRoot(runRoot, runId);
-    const state = lstatIfPresent(layout.statePath) === undefined ? undefined : readRunState(layout);
-    for (const [nodeId, nodeState] of Object.entries(state?.nodes ?? {})) {
-      if (nodeState.logical_node_id === "final-report") {
-        candidates.add(validateSafeId(nodeId, "final report node ID"));
-      }
-    }
-    return [...candidates].map((nodeId) => `artifacts/${nodeId}`);
-  }
-
-  async events(): Promise<JsonObject> {
-    const context = await this.runContext();
+  async events(context?: DashboardRunContext): Promise<JsonObject> {
+    context ??= await this.runContext();
     if (!context.persisted) {
       return dashboardHttpDocument("events", {
         source: "none",
@@ -881,7 +895,7 @@ class DashboardApp {
       });
     }
     const layout = layoutForRunRoot(context.runRoot, context.runId);
-    const replay = replayEvents(layout);
+    const replay = replayEvents(layout, 500);
     if (replay.malformedRecords !== 0 || replay.truncatedRecords !== 0) {
       throw new Error(
         `event journal is invalid: ${replay.malformedRecords} malformed and ${replay.truncatedRecords} truncated records`
@@ -889,7 +903,7 @@ class DashboardApp {
     }
     return dashboardHttpDocument("events", {
       source: path.relative(context.runRoot, layout.eventsPath).split(path.sep).join("/"),
-      events: queryEvents(layout, { limit: 500 }),
+      events: replay.records,
       malformed_records: replay.malformedRecords,
       truncated_records: replay.truncatedRecords
     });
@@ -1473,8 +1487,8 @@ class DashboardApp {
     return [...this.jobs.values()].sort((left, right) => right.startedAtUnixSeconds - left.startedAtUnixSeconds);
   }
 
-  async optionalRunState(): Promise<RunState | undefined> {
-    const context = await this.runContext();
+  async optionalRunState(context?: DashboardRunContext): Promise<RunState | undefined> {
+    context ??= await this.runContext();
     if (!context.persisted) {
       return undefined;
     }
@@ -1530,15 +1544,21 @@ class DashboardApp {
     return absolute;
   }
 
-  artifactAvailability(attempts: ExpandedNode[], runRoot?: string): JsonObject {
+  artifactAvailability(
+    attempts: ExpandedNode[],
+    runRoot?: string,
+    authorityProjection?: DashboardFlowAuthorityProjection
+  ): JsonObject {
     const paths = this.artifactPathsForAttempts(attempts, runRoot);
     const exists = (name: string) => paths.some((artifactPath) => artifactPath.endsWith(`/${name}`));
+    const verifiedContracts =
+      authorityProjection?.contractsByLogicalId.get(attempts[0]?.logicalId ?? "") ?? new Set<ArtifactContractId>();
     return {
       logs: exists("stdout.log") || exists("stderr.log"),
       renderedPrompt: exists("prompt.rendered.md"),
-      findings: paths.some((artifactPath) => /findings.*\.json$/u.test(artifactPath)),
+      findings: DASHBOARD_FINDINGS_CONTRACTS.some((contract) => verifiedContracts.has(contract)),
       patch: paths.some((artifactPath) => /\.(patch|diff)$/u.test(artifactPath)),
-      report: exists("report.md") || exists("report.json"),
+      report: verifiedContracts.has("ultrafuzz/report@2"),
       metadata: exists("metadata.json")
     };
   }
@@ -1560,67 +1580,6 @@ class DashboardApp {
       }
     }
     return paths;
-  }
-
-  countFindings(attempts: ExpandedNode[], runRoot?: string): number {
-    return this.findingsForAttempts(attempts, runRoot).length;
-  }
-
-  findingsForAttempts(attempts: ExpandedNode[], runRoot?: string): unknown[] {
-    if (!runRoot || this.currentRunId === PREVIEW_RUN_ID) {
-      return [];
-    }
-    const state = readRunState(layoutForRunRoot(runRoot));
-    return attempts.flatMap((attempt) => {
-      const dir = path.join(runRoot, attempt.artifactDir);
-      if (!fs.existsSync(dir)) {
-        return [];
-      }
-      const attemptId = path.basename(dir);
-      if (!hasSuccessfulDashboardFinalization(state, attemptId)) return [];
-      return [
-        "findings.json",
-        "deduped-findings.json",
-        "triaged-findings.json",
-        "severity-classified-findings.json",
-        "report.json"
-      ].flatMap((file) => {
-        const candidate = path.join(dir, file);
-        if (!fs.existsSync(candidate)) {
-          return [];
-        }
-        assertRegularFileInside(runRoot, candidate, "findings path");
-        return readVerifiedFindingsArtifact({
-          runRoot,
-          filePath: candidate,
-          attemptId,
-          logicalNodeId: attempt.logicalId,
-          artifactPath: file
-        });
-      });
-    });
-  }
-
-  findingsForArtifactsRoot(runRoot: string): unknown[] {
-    const artifacts = path.join(runRoot, "artifacts");
-    if (!fs.existsSync(artifacts)) {
-      return [];
-    }
-    const state = readRunState(layoutForRunRoot(runRoot));
-    return listSafeFiles(artifacts)
-      .filter((entry) => findingsContractForFile(entry.relativePath) !== undefined)
-      .flatMap((entry) => {
-        const [attemptId, ...artifactSegments] = entry.relativePath.split("/");
-        if (attemptId === undefined || artifactSegments.length === 0) return [];
-        if (!hasSuccessfulDashboardFinalization(state, attemptId)) return [];
-        return readVerifiedFindingsArtifact({
-          runRoot,
-          filePath: entry.absolutePath,
-          attemptId,
-          logicalNodeId: state.nodes[attemptId]?.logical_node_id ?? attemptId,
-          artifactPath: artifactSegments.join("/")
-        });
-      });
   }
 }
 
@@ -2021,76 +1980,390 @@ function edgeColorForStatus(status: string): string {
   return "var(--mds-border-strong)";
 }
 
-function readVerifiedFindingsArtifact(input: {
-  runRoot: string;
-  filePath: string;
+interface DashboardFindingsDeclaration {
   attemptId: string;
+  concreteNodeId: string;
   logicalNodeId: string;
-  artifactPath: string;
-}): unknown[] {
-  const contract = findingsContractForFile(input.filePath);
-  if (contract === undefined) {
-    throw new Error(`dashboard has no findings contract for ${input.filePath}`);
+  output: PlannedGraphOutput & { contract: DashboardFindingsContract };
+  stage: DashboardFindingsStage;
+  source: string;
+}
+
+interface DashboardFindingsAuthorityContext {
+  authority: VerifiedRunOutputAuthoritySnapshot;
+  state: RunState;
+  graph: PlannedGraphDocument;
+  declarations: readonly DashboardFindingsDeclaration[];
+}
+
+interface DashboardFlowAuthorityProjection {
+  authority: VerifiedRunOutputAuthoritySnapshot;
+  state: RunState;
+  allFindings: readonly unknown[];
+  findingsByLogicalId: ReadonlyMap<string, readonly unknown[]>;
+  contractsByLogicalId: ReadonlyMap<string, ReadonlySet<ArtifactContractId>>;
+}
+
+export function dashboardFlowAuthorityProjection(
+  runRoot: string,
+  observedState: RunState | undefined
+): DashboardFlowAuthorityProjection | undefined {
+  const layout = layoutForRunRoot(runRoot);
+  const controlAuthority = dashboardControlAuthorityPresence(layout);
+  if (
+    !controlAuthority.tasksPresent &&
+    !controlAuthority.sealPresent &&
+    (observedState === undefined || !Object.values(observedState.nodes).some((node) => node.status === "succeeded"))
+  ) {
+    return undefined;
   }
-  let value: unknown;
-  if (path.basename(input.filePath) === "report.json") {
-    const report = loadVerifiedFinalReportSnapshot(input.runRoot);
-    if (
-      report.authority.attempt_id !== input.attemptId ||
-      path.resolve(report.artifacts.json_path) !== path.resolve(input.filePath)
-    ) {
-      throw new Error("dashboard report findings path does not match the authoritative final report");
-    }
-    value = report.json;
-  } else {
-    const authority = loadVerifiedNodeOutputSnapshot({
-      runRoot: input.runRoot,
-      logicalNodeId: input.logicalNodeId,
-      attemptId: input.attemptId
-    });
-    const matches = authority.outputs.filter(
-      (output) => output.path === input.artifactPath && output.contract === contract
+  const authority = loadVerifiedRunOutputAuthoritySnapshot(runRoot);
+  const findingsContext = dashboardFindingsAuthorityContext(authority);
+  if (observedState === undefined || !isDeepStrictEqual(findingsContext.state, observedState)) {
+    throw new Error("dashboard run state changed between the initial read and output-authority capture");
+  }
+  const allFindings = selectDashboardFindings(findingsContext).findings;
+  const declarationIdsByLogical = new Map<string, Set<string>>();
+  for (const declaration of findingsContext.declarations) {
+    const ids = declarationIdsByLogical.get(declaration.logicalNodeId) ?? new Set<string>();
+    ids.add(declaration.attemptId);
+    ids.add(declaration.concreteNodeId);
+    declarationIdsByLogical.set(declaration.logicalNodeId, ids);
+  }
+  const findingsByLogicalId = new Map<string, readonly unknown[]>();
+  for (const [logicalNodeId, ids] of declarationIdsByLogical) {
+    findingsByLogicalId.set(logicalNodeId, selectDashboardFindings(findingsContext, ids).findings);
+  }
+  const contractsByLogicalId = new Map<string, Set<ArtifactContractId>>();
+  for (const output of authority.outputs) {
+    const contracts = contractsByLogicalId.get(output.logical_node_id) ?? new Set<ArtifactContractId>();
+    for (const artifact of output.outputs) contracts.add(artifact.contract);
+    contractsByLogicalId.set(output.logical_node_id, contracts);
+  }
+  return { authority, state: findingsContext.state, allFindings, findingsByLogicalId, contractsByLogicalId };
+}
+
+function assertDashboardAbsentAuthorityRemainedCurrent(runRoot: string, state: RunState | undefined): void {
+  const layout = layoutForRunRoot(runRoot);
+  const controlAuthority = dashboardControlAuthorityPresence(layout);
+  const currentStatePresent = lstatIfPresent(layout.statePath) !== undefined;
+  if (
+    controlAuthority.tasksPresent ||
+    controlAuthority.sealPresent ||
+    (state === undefined
+      ? currentStatePresent
+      : !currentStatePresent || !isDeepStrictEqual(readRunState(layout), state))
+  ) {
+    throw new Error("dashboard output authority changed while the response was being projected");
+  }
+}
+
+function assertDashboardCapturedRunAuthorityRemainedCurrent(captured: DashboardCapturedRunAuthority): void {
+  if (captured.authorityProjection !== undefined) {
+    assertVerifiedRunOutputAuthorityRemainedCurrent(captured.authorityProjection.authority);
+  } else if (captured.context.persisted) {
+    assertDashboardAbsentAuthorityRemainedCurrent(captured.context.runRoot, captured.state);
+  }
+}
+
+interface DashboardReportAvailability {
+  physicalPresent: boolean;
+  claimedSuccess: boolean;
+  invalidDeclaration: boolean;
+}
+
+function dashboardDeclaredReportAvailability(runRoot: string): DashboardReportAvailability {
+  const layout = layoutForRunRoot(runRoot);
+  const graph = readPlannedGraphDocument(layout.graphPath);
+  const state = readRunState(layout);
+  const producers = graph.nodes.filter((node) =>
+    node.outputs.some((output) => output.contract === "ultrafuzz/report@2")
+  );
+  let sealedTasks: ReturnType<typeof verifySealedTaskManifestSnapshot>["document"]["tasks"] = [];
+  const controlAuthority = dashboardControlAuthorityPresence(layout);
+  if (controlAuthority.tasksPresent || controlAuthority.sealPresent) {
+    sealedTasks = verifySealedTaskManifestSnapshot(layout).document.tasks;
+  }
+
+  let physicalPresent = false;
+  let claimedSuccess = false;
+  let invalidDeclaration = producers.length > 1;
+  for (const producer of producers) {
+    const reportOutputs = producer.outputs.filter((output) => output.contract === "ultrafuzz/report@2");
+    const markdownOutputs = producer.outputs.filter((output) => output.contract === "ultrafuzz/nonempty-markdown@1");
+    invalidDeclaration ||= reportOutputs.length !== 1 || markdownOutputs.length !== 1;
+    const reportPaths = [...reportOutputs, ...markdownOutputs].map((output) => output.path);
+    const producerTasks = sealedTasks.filter(
+      (task) => task.concreteNodeId === producer.id && task.logicalNodeId === producer.logical_id
     );
-    if (matches.length !== 1 || path.resolve(matches[0]!.absolute_path) !== path.resolve(input.filePath)) {
-      throw new Error(`dashboard findings path is not one exact verified output: ${input.filePath}`);
+    const candidateArtifactDirs = new Set([producer.artifact_dir]);
+    for (const task of producerTasks) {
+      candidateArtifactDirs.add(path.posix.join("artifacts", validateSafeId(task.attemptId, "report attempt ID")));
+      if (state.nodes[task.attemptId]?.status === "succeeded") claimedSuccess = true;
     }
-    value = matches[0]!.value;
-  }
-  if (path.basename(input.filePath) === "report.json") {
-    if (!isRecord(value) || !Array.isArray(value.issues)) {
-      throw new Error(`verified report does not contain an issues array: ${input.filePath}`);
+    claimedSuccess ||= Object.entries(state.nodes).some(
+      ([attemptId, node]) =>
+        node.status === "succeeded" &&
+        (attemptId === producer.id ||
+          node.logical_node_id === producer.logical_id ||
+          producerTasks.some((task) => task.attemptId === attemptId))
+    );
+    for (const artifactDir of candidateArtifactDirs) {
+      for (const reportPath of reportPaths) {
+        const candidate = safeResolveInside(
+          runRoot,
+          path.posix.join(artifactDir, reportPath),
+          "declared dashboard report output"
+        );
+        if (lstatIfPresent(candidate) !== undefined) physicalPresent = true;
+      }
     }
-    return value.issues;
   }
+  return { physicalPresent, claimedSuccess, invalidDeclaration };
+}
+
+function dashboardControlAuthorityPresence(layout: ReturnType<typeof layoutForRunRoot>): {
+  tasksPresent: boolean;
+  sealPresent: boolean;
+} {
+  const smithersRoot = safeResolveInside(layout.root, "smithers", "workflow control directory");
+  const tasksPath = safeResolveInside(smithersRoot, "tasks.json", "workflow task manifest");
+  const sealPath = safeResolveInside(smithersRoot, "control-integrity.json", "workflow control seal");
+  return {
+    tasksPresent: lstatIfPresent(tasksPath) !== undefined,
+    sealPresent: lstatIfPresent(sealPath) !== undefined
+  };
+}
+
+function verifiedDeclaredFindings(
+  runRoot: string,
+  attemptIds?: ReadonlySet<string>
+): { source: string; findings: unknown[] } {
+  const layout = layoutForRunRoot(runRoot);
+  const controlAuthority = dashboardControlAuthorityPresence(layout);
+  if (
+    !controlAuthority.tasksPresent &&
+    !controlAuthority.sealPresent &&
+    !Object.values(readRunState(layout).nodes).some((node) => node.status === "succeeded")
+  ) {
+    return { source: "none", findings: [] };
+  }
+  return verifiedDeclaredFindingsFromAuthoritySnapshot(loadVerifiedRunOutputAuthoritySnapshot(runRoot), attemptIds);
+}
+
+/**
+ * Select dashboard findings from one authenticated run-wide authority epoch.
+ * The final recheck is deliberately part of this helper so recursive callers
+ * and deterministic mutation tests cannot accidentally omit it.
+ */
+export function verifiedDeclaredFindingsFromAuthoritySnapshot(
+  authority: VerifiedRunOutputAuthoritySnapshot,
+  attemptIds?: ReadonlySet<string>
+): { source: string; findings: unknown[] } {
+  const context = dashboardFindingsAuthorityContext(authority);
+  const result = selectDashboardFindings(context, attemptIds);
+  assertVerifiedRunOutputAuthorityRemainedCurrent(authority);
+  return result;
+}
+
+function dashboardFindingsAuthorityContext(
+  authority: VerifiedRunOutputAuthoritySnapshot
+): DashboardFindingsAuthorityContext {
+  const state = assertRunStateSchema(parseStrictJsonBytes(authority.state.bytes));
+  const graph = assertPlannedGraph(parseStrictJsonBytes(authority.graph.bytes));
+  const sealedTasks = parseSmithersTaskManifestBytes(authority.workflow_tasks.bytes).tasks;
+  const outputsByAttempt = new Map<string, VerifiedNodeOutputSnapshot>();
+  for (const output of authority.outputs) {
+    if (outputsByAttempt.has(output.attempt_id)) {
+      throw new Error(`dashboard run authority repeats verified attempt ${output.attempt_id}`);
+    }
+    outputsByAttempt.set(output.attempt_id, output);
+  }
+  const declarations: DashboardFindingsDeclaration[] = [];
+  const plannedNodes = graph.nodes
+    .map((plannedNode) => ({
+      plannedNode,
+      outputs: plannedNode.outputs.filter(
+        (output): output is PlannedGraphOutput & { contract: DashboardFindingsContract } =>
+          isDashboardFindingsContract(output.contract)
+      )
+    }))
+    .filter(({ outputs }) => outputs.length > 0);
+
+  if (plannedNodes.length > 0 && Object.values(state.nodes).some(hasSuccessfulDashboardNodeFinalization)) {
+    for (const { plannedNode, outputs } of plannedNodes) {
+      const finalizedTasks = sealedTasks.filter(
+        (task) =>
+          task.concreteNodeId === plannedNode.id &&
+          task.logicalNodeId === plannedNode.logical_id &&
+          hasSuccessfulDashboardNodeFinalization(state.nodes[task.attemptId]) &&
+          outputsByAttempt.has(task.attemptId)
+      );
+      if (finalizedTasks.length === 0) continue;
+      const counts = new Map<DashboardFindingsContract, number>();
+      for (const output of outputs) counts.set(output.contract, (counts.get(output.contract) ?? 0) + 1);
+      const duplicate = [...counts].find(([, count]) => count > 1);
+      if (duplicate !== undefined) {
+        throw new Error(
+          `dashboard findings authority for ${plannedNode.id} declares ${duplicate[1]} ${duplicate[0]} outputs; exactly one per contract is required`
+        );
+      }
+      for (const task of finalizedTasks) {
+        const snapshot = outputsByAttempt.get(task.attemptId)!;
+        if (snapshot.logical_node_id !== task.logicalNodeId) {
+          throw new Error(`dashboard verified output authority does not bind sealed task ${task.attemptId}`);
+        }
+        for (const output of outputs) {
+          declarations.push({
+            attemptId: task.attemptId,
+            concreteNodeId: task.concreteNodeId,
+            logicalNodeId: plannedNode.logical_id,
+            output,
+            stage: dashboardFindingsStage(plannedNode.outputs, output.contract),
+            source: path.posix.join("artifacts", task.attemptId, output.path)
+          });
+        }
+      }
+    }
+  }
+
+  return { authority, state, graph, declarations };
+}
+
+function selectDashboardFindings(
+  context: DashboardFindingsAuthorityContext,
+  attemptIds?: ReadonlySet<string>
+): { source: string; findings: unknown[] } {
+  const declarations =
+    attemptIds === undefined
+      ? context.declarations
+      : context.declarations.filter(
+          (declaration) => attemptIds.has(declaration.attemptId) || attemptIds.has(declaration.concreteNodeId)
+        );
+  const selectedStage = DASHBOARD_FINDINGS_STAGE_PRIORITY.find((stage) =>
+    declarations.some((candidate) => candidate.stage === stage)
+  );
+  const selected =
+    selectedStage === undefined
+      ? []
+      : declarationFrontier(
+          context.graph,
+          declarations.filter((candidate) => candidate.stage === selectedStage)
+        ).sort((left, right) => left.source.localeCompare(right.source));
+  const findings = selected.flatMap((declaration) => readVerifiedFindingsDeclaration(context.authority, declaration));
+  const result =
+    selected.length === 0
+      ? { source: "none", findings: [] }
+      : {
+          source:
+            selected.length === 1 ? selected[0]!.source : `declared:${selected.map((entry) => entry.source).join(",")}`,
+          findings
+        };
+  return result;
+}
+
+function declarationFrontier(
+  graph: PlannedGraphDocument,
+  candidates: readonly DashboardFindingsDeclaration[]
+): DashboardFindingsDeclaration[] {
+  return candidates.filter(
+    (candidate) =>
+      !candidates.some(
+        (other) =>
+          other.logicalNodeId !== candidate.logicalNodeId &&
+          logicalNodeDependsOn(graph, other.logicalNodeId, candidate.logicalNodeId)
+      )
+  );
+}
+
+function logicalNodeDependsOn(
+  graph: PlannedGraphDocument,
+  descendantLogicalId: string,
+  ancestorLogicalId: string
+): boolean {
+  const nodesById = new Map(graph.nodes.map((node) => [node.id, node] as const));
+  const pending = graph.nodes
+    .filter((node) => node.logical_id === descendantLogicalId)
+    .flatMap((node) => node.depends_on);
+  const visited = new Set<string>();
+  while (pending.length > 0) {
+    const next = pending.pop()!;
+    if (visited.has(next)) continue;
+    visited.add(next);
+    const node = nodesById.get(next);
+    if (node === undefined) continue;
+    if (node.logical_id === ancestorLogicalId) return true;
+    pending.push(...node.depends_on);
+  }
+  return false;
+}
+
+function readVerifiedFindingsDeclaration(
+  authority: VerifiedRunOutputAuthoritySnapshot,
+  declaration: DashboardFindingsDeclaration
+): unknown[] {
+  const node = authority.outputs.find(
+    (output) => output.attempt_id === declaration.attemptId && output.logical_node_id === declaration.logicalNodeId
+  );
+  if (node === undefined) {
+    throw new Error(`dashboard findings declaration lacks run-wide verified authority: ${declaration.source}`);
+  }
+  const matches = node.outputs.filter(
+    (output) => output.path === declaration.output.path && output.contract === declaration.output.contract
+  );
+  if (matches.length !== 1) {
+    throw new Error(`dashboard findings declaration is not one exact verified output: ${declaration.source}`);
+  }
+  if (declaration.output.contract === "ultrafuzz/report@2") {
+    const report = matches[0]!;
+    const markdown = node.outputs.filter((output) => output.contract === "ultrafuzz/nonempty-markdown@1");
+    if (markdown.length !== 1) {
+      throw new Error("dashboard report findings declaration does not have one exact Markdown companion");
+    }
+    const projection = projectCanonicalFinalReport(report.value);
+    if (!isDeepStrictEqual(projection.report, report.value)) {
+      throw new Error("dashboard verified report JSON is not its canonical final-report projection");
+    }
+    if (!markdown[0]!.bytes.equals(Buffer.from(projection.markdown, "utf8"))) {
+      throw new Error("dashboard verified report Markdown is not the canonical projection of report JSON");
+    }
+    if (!isRecord(report.value) || !Array.isArray(report.value.issues)) {
+      throw new Error(`verified report does not contain an issues array: ${declaration.source}`);
+    }
+    return report.value.issues;
+  }
+
+  const value = matches[0]!.value;
   if (!Array.isArray(value)) {
-    throw new Error(`verified findings-stage artifact is not an array: ${input.filePath}`);
+    throw new Error(`verified findings-stage artifact is not an array: ${declaration.source}`);
   }
   return value;
 }
 
-function findingsContractForFile(filePath: string): ArtifactContractId | undefined {
-  switch (path.basename(filePath)) {
-    case "findings.json":
-    case "deduped-findings.json":
-      return FINDINGS_CONTRACT;
-    case "triaged-findings.json":
-      return "ultrafuzz/triaged-findings@1" as ArtifactContractId;
-    case "severity-classified-findings.json":
-      return "ultrafuzz/severity-classified-findings@1" as ArtifactContractId;
-    case "report.json":
-      return REPORT_CONTRACT;
-    default:
-      return undefined;
+function isDashboardFindingsContract(contract: ArtifactContractId): contract is DashboardFindingsContract {
+  return (DASHBOARD_FINDINGS_CONTRACTS as readonly ArtifactContractId[]).includes(contract);
+}
+
+function dashboardFindingsStage(
+  outputs: readonly PlannedGraphOutput[],
+  contract: DashboardFindingsContract
+): DashboardFindingsStage {
+  switch (contract) {
+    case "ultrafuzz/severity-classified-findings@1":
+      return "severity-classified";
+    case "ultrafuzz/triaged-findings@1":
+      return "triaged";
+    case "ultrafuzz/report@2":
+      return "report";
+    case "ultrafuzz/findings@2":
+      return outputs.some((output) => output.contract === "ultrafuzz/finding-lifecycle-ledger@1") ? "deduped" : "raw";
   }
 }
 
-function hasSuccessfulDashboardFinalization(state: RunState, attemptOrLogicalId: string): boolean {
-  return Object.entries(state.nodes).some(([attemptId, node]) => {
-    if (attemptId !== attemptOrLogicalId && node.logical_node_id !== attemptOrLogicalId) return false;
-    if (node.status !== "succeeded" || !isRecord(node.provenance)) return false;
-    const outputContracts = node.provenance.output_contracts;
-    return isRecord(outputContracts) && outputContracts.ok === true && Array.isArray(outputContracts.missing);
-  });
+function hasSuccessfulDashboardNodeFinalization(node: NodeState | undefined): boolean {
+  if (node?.status !== "succeeded" || !isRecord(node.provenance)) return false;
+  const outputContracts = node.provenance.output_contracts;
+  return isRecord(outputContracts) && outputContracts.ok === true && Array.isArray(outputContracts.missing);
 }
 
 function posixRelativePath(root: string, filePath: string): string {

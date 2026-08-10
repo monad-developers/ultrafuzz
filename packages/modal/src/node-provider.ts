@@ -18,7 +18,8 @@ import {
   INVARIANT_PINNED_SOURCE_BRANCH,
   INVARIANT_PINNED_SOURCE_REF,
   invariantPinnedSourceRefExists,
-  materializePromptSchemas
+  materializePromptSchemas,
+  publishFileDurableExclusive
 } from "@ultrafuzz/artifacts";
 import { parseRuntimeDocumentBytes, WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID } from "@ultrafuzz/runtime";
 import {
@@ -808,9 +809,9 @@ async function publishModalNodeResult(
     }
     replacePublishedDirectory(artifacts, artifactDir);
     for (const { source, destination } of sourceProofs) {
-      replacePublishedFile(source, destination);
+      publishImmutableFileExclusive(root, source, destination);
     }
-    replacePublishedFile(verificationMarker, verificationDestination);
+    publishImmutableFileExclusive(root, verificationMarker, verificationDestination);
   } finally {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
   }
@@ -1724,20 +1725,19 @@ function assertPublishedDirectoryReplacementAllowed(source: string, destination:
   }
 }
 
-function replacePublishedFile(source: string, destination: string): void {
+function publishImmutableFileExclusive(root: string, source: string, destination: string): void {
   assertPublishedFileReplacementAllowed(source, destination);
-  fs.mkdirSync(path.dirname(destination), { recursive: true });
-  if (fs.existsSync(destination)) {
-    assertPublishedFileReplacementAllowed(source, destination);
-    return;
-  }
-  const pending = `${destination}.publishing-${process.pid}-${crypto.randomBytes(6).toString("hex")}`;
-  fs.copyFileSync(source, pending);
+  const relativeDestination = path.relative(root, destination).split(path.sep).join("/");
   try {
-    fs.renameSync(pending, destination);
-  } finally {
-    if (fs.existsSync(pending)) fs.rmSync(pending, { force: true });
+    publishFileDurableExclusive(root, relativeDestination, fs.readFileSync(source));
+  } catch (error) {
+    // Preserve the cloud-publication diagnostics for an incumbent that won a
+    // race with this exclusive publisher. A dangling link is invalid present
+    // state, while an exact regular file remains the only idempotent success.
+    assertPublishedFileReplacementAllowed(source, destination);
+    throw error;
   }
+  assertPublishedFileReplacementAllowed(source, destination);
 }
 
 function assertPublishedFileReplacementAllowed(source: string, destination: string): void {
@@ -1745,7 +1745,7 @@ function assertPublishedFileReplacementAllowed(source: string, destination: stri
   if (!sourceStat.isFile() || sourceStat.isSymbolicLink() || sourceStat.nlink !== 1) {
     throw new Error("cloud node result source file is unsafe");
   }
-  const destinationStat = fs.existsSync(destination) ? fs.lstatSync(destination) : undefined;
+  const destinationStat = lstatIfPresent(destination);
   if (
     destinationStat?.isSymbolicLink() ||
     (destinationStat !== undefined && (!destinationStat.isFile() || destinationStat.nlink !== 1))
@@ -1756,6 +1756,15 @@ function assertPublishedFileReplacementAllowed(source: string, destination: stri
     if (!fs.readFileSync(destination).equals(fs.readFileSync(source))) {
       throw new Error("cloud node result would replace an immutable publication file");
     }
+  }
+}
+
+function lstatIfPresent(filePath: string): fs.Stats | undefined {
+  try {
+    return fs.lstatSync(filePath);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined;
+    throw error;
   }
 }
 

@@ -37,6 +37,7 @@ import {
   cleanRecoveryEquivalence,
   currentRunExpansion,
   recoveryEquivalenceSummary,
+  testReportAuthority,
   testRow,
   testSuite
 } from "./helpers.js";
@@ -188,6 +189,7 @@ function rowScore(rowId: string, overrides: Partial<EvalRowScore> = {}): EvalRow
     target_id: "target-a",
     variant_id: "baseline",
     trial_id: "trial-1",
+    report_authority: testReportAuthority({ run_id: rowId }),
     report_schema_valid: true,
     ground_truth_bug_count: 2,
     finding_count: 2,
@@ -234,7 +236,7 @@ function rowScore(rowId: string, overrides: Partial<EvalRowScore> = {}): EvalRow
 
 function summary(rows: EvalRowScore[]): EvalScoreSummary {
   return {
-    schema_version: "ultrafuzz.eval.score-summary.v1",
+    schema_version: "ultrafuzz.eval.score-summary.v2",
     eval_run_id: "run-1-benchmark-smoke",
     eval_run_root: "/tmp/run-1-benchmark-smoke",
     recall_threshold: 0.7,

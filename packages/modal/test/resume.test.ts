@@ -21,7 +21,8 @@ import {
   modalDurableRunNeedsResume,
   modalEvalRunCommand,
   NonResumableTerminalRunError,
-  finalizeModalEvalRunRecord
+  finalizeModalEvalRunRecord,
+  readModalDurableRunState
 } from "../src/resume.js";
 import { currentRunState } from "./current-artifact-fixtures.js";
 
@@ -255,6 +256,19 @@ describe("Modal durable evaluation resume", () => {
     ]);
   });
 
+  it("treats only an absent durable run state as unavailable", async () => {
+    const target = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-durable-state-"));
+    await expect(readModalDurableRunState(target, "run-one")).resolves.toBeUndefined();
+
+    const runsRoot = path.join(target, ".ultrafuzz", "runs");
+    fs.mkdirSync(runsRoot, { recursive: true });
+    const malformedRunRoot = path.join(runsRoot, "run-one");
+    fs.writeFileSync(malformedRunRoot, "not a directory\n", "utf8");
+
+    await expect(readModalDurableRunState(target, "run-one")).rejects.toMatchObject({ code: "ENOTDIR" });
+    expect(fs.readFileSync(malformedRunRoot, "utf8")).toBe("not a directory\n");
+  });
+
   it("resumes operational checkpoints but never retries a terminal task outcome", () => {
     expect(
       modalDurableRunNeedsResume(
@@ -481,17 +495,13 @@ describe("Modal durable evaluation resume", () => {
     await expect(findModalResumeWorkspace(value.workRoot)).rejects.toThrow("persistent workspace is incomplete");
   });
 
-  it("treats a non-directory eval runs path as not started, and clears nothing", async () => {
+  it("rejects a non-directory eval runs path instead of treating malformed present state as absence", async () => {
     const value = fixture();
-    // ENOTDIR is classified like absence, deliberately: there is no evaluation to resume. What matters is
-    // that it names nothing to delete, so the not-started path cannot remove anything on this route.
     const evalRoot = path.join(value.control, ".ultrafuzz", "evals", "runs");
     fs.rmSync(evalRoot, { recursive: true });
     fs.writeFileSync(evalRoot, "not a directory\n");
-    const found = await findModalResumeWorkspace(value.workRoot);
-    expect(found.kind).toBe("not-started");
-    expect(found.kind === "not-started" && found.staleEvalRunIds).toBeUndefined();
-    expect(found.kind === "not-started" && found.staleRunRootIds).toBeUndefined();
+    await expect(findModalResumeWorkspace(value.workRoot)).rejects.toMatchObject({ code: "ENOTDIR" });
+    expect(fs.readFileSync(evalRoot, "utf8")).toBe("not a directory\n");
   });
 
   it("refuses to call a run root resumable when no workflow was ever linked to it (#378)", async () => {

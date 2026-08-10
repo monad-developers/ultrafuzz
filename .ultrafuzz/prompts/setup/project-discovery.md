@@ -147,11 +147,10 @@ such as `\\%` and `\\times` intact: JSON source shows each backslash escaped,
 while the parsed `verbatim` value must equal the source slice, including repeated
 backslashes and other literals. Build the Markdown
 handoff from those same parsed ledger objects so its `verbatim` blocks carry the
-identical text. Render multiline `verbatim` values as an indented literal block:
-place two spaces before each source line after the `verbatim:` field. This keeps
-source headings and delimiter-looking lines inside the field while preserving
-the parsed text. Keep extraction scripts small and file-based so source slices
-are not retyped in a large inline shell command.
+identical text. Use the strict JSON field grammar described below, so multiline
+values remain one JSON-string field with escaped line separators. Keep
+extraction scripts small and file-based so source slices are not retyped in a
+large inline shell command.
 
 Extract every explicit equation, inequality, bound, and state relation into the
 discovery artifact with its exact operands, units, and rounding semantics.
@@ -178,8 +177,15 @@ source path, source location, verbatim text, and inventory IDs so reviewers can
 audit the structured artifact without opening JSON. A source statement may map to
 multiple normalized inventory rows, and equivalent source statements may map to
 one row; record those cardinalities explicitly rather than forcing a one-to-one
-mapping. Render each entry in a delimited block beginning with
-`### Ledger entry: <id>` and each normalized row in a block beginning with
-`### Inventory row: <inventory-id>`, including the complete fields in each block.
-Close those blocks with `### End ledger entry: <id>` and
-`### End inventory row: <inventory-id>` respectively.
+mapping. Use one reversible companion grammar. Render each entry between
+`### Ledger entry: <json-string-id>` and
+`### End ledger entry: <json-string-id>`. Inside it emit exactly these strict
+JSON-valued lines: `source_path`, `source_location`, `kind`, `verbatim`, and
+`inventory_ids`. Render every normalized row between
+`### Inventory row: <json-string-id>` and
+`### End inventory row: <json-string-id>`, with exactly `description` and
+`ledger_ids` strict JSON-valued lines. Heading IDs are JSON strings even when
+simple; scalar fields are JSON strings and list fields are JSON arrays. Do not
+use bullets, tables, bare tokens, indented multiline values, aliases, extra
+fields, duplicate fields, or extra blocks. Empty ledgers must contain no ledger
+entry or inventory row blocks.

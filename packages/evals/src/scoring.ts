@@ -8,7 +8,7 @@ import {
   validateFindingsSchema,
   type NormalizedFinding
 } from "@ultrafuzz/artifacts";
-import { loadVerifiedFinalReportSnapshot } from "@ultrafuzz/runtime";
+import { assertVerifiedFinalReportSnapshotRemainedCurrent, type VerifiedFinalReportSnapshot } from "@ultrafuzz/runtime";
 
 import { summarizeEvalTerminal } from "./efficiency.js";
 import {
@@ -46,6 +46,7 @@ import {
   recoveryEquivalenceCanBeRecorded,
   withRecordedRecoveryEquivalence
 } from "./recovery-equivalence.js";
+import { loadBoundEvalReportAuthority } from "./report-authority.js";
 import { resolveJudgePanelConfig, resolveRecoveryEquivalencePolicy } from "./suite.js";
 import {
   EVAL_FINDING_SCORE_SCHEMA_VERSION,
@@ -57,10 +58,13 @@ import {
   type EvalJudgePanelConfig,
   type EvalMatrixRow,
   type EvalLongitudinalCompareValue,
+  type EvalReportAuthority,
   type EvalRowScore,
   type EvalRunRecord,
   type EvalScoreSummary,
   type EvalSuiteSpec,
+  type EvalUnboundFindingScore,
+  type EvalUnboundRowScore,
   type EvalVariantScoreSummary,
   type FindingJudge,
   type FindingJudgeResult,
@@ -171,6 +175,9 @@ export async function scoreEvalRun(input: ScoreEvalRunInput): Promise<EvalScoreS
       reportPath: reportResolution.path
     });
   });
+  for (const scored of scoredRows) {
+    assertVerifiedFinalReportSnapshotRemainedCurrent(scored.reportSnapshot);
+  }
   const rowScores: EvalRowScore[] = [];
   const findingScores: EvalFindingScore[] = [];
   const reviewQueue: HumanReviewQueueItem[] = [];
@@ -221,12 +228,20 @@ export async function scoreEvalRun(input: ScoreEvalRunInput): Promise<EvalScoreS
     })
   };
   const validatedSummary = parseEvalScoreSummary(summary, summaryPath);
-  replaceScoringOutputs(root, [
-    { filePath: scoresPath, contents: serializeEvalFindingScores(findingScores) },
-    { filePath: reviewQueuePath, contents: serializeEvalReviewQueue(reviewQueue) },
-    { filePath: summaryPath, contents: `${JSON.stringify(validatedSummary, null, 2)}\n` },
-    { filePath: summaryMarkdownPath, contents: renderSummaryMarkdown(validatedSummary) }
-  ]);
+  replaceScoringOutputs(
+    root,
+    [
+      { filePath: scoresPath, contents: serializeEvalFindingScores(findingScores) },
+      { filePath: reviewQueuePath, contents: serializeEvalReviewQueue(reviewQueue) },
+      { filePath: summaryPath, contents: `${JSON.stringify(validatedSummary, null, 2)}\n` },
+      { filePath: summaryMarkdownPath, contents: renderSummaryMarkdown(validatedSummary) }
+    ],
+    () => {
+      for (const scored of scoredRows) {
+        assertVerifiedFinalReportSnapshotRemainedCurrent(scored.reportSnapshot);
+      }
+    }
+  );
   return validatedSummary;
 }
 
@@ -260,7 +275,11 @@ interface ScoringOutputFile {
  * path keeps the previous complete result set if a local filesystem operation
  * fails during the multi-file commit.
  */
-function replaceScoringOutputs(root: string, outputs: readonly ScoringOutputFile[]): void {
+function replaceScoringOutputs(
+  root: string,
+  outputs: readonly ScoringOutputFile[],
+  assertReportAuthority: () => void
+): void {
   const transactionRoot = fs.mkdtempSync(path.join(root, ".scoring-transaction-"));
   let removeTransactionRoot = true;
   const prepared = outputs.map((output, index) => ({
@@ -282,10 +301,12 @@ function replaceScoringOutputs(root: string, outputs: readonly ScoringOutputFile
         backedUp.push(output);
       }
     }
+    assertReportAuthority();
     for (const output of prepared) {
       fs.renameSync(output.stagedPath, output.filePath);
       installed.push(output);
     }
+    assertReportAuthority();
   } catch (error) {
     const rollbackErrors: unknown[] = [];
     for (const output of [...installed].reverse()) {
@@ -335,18 +356,19 @@ export async function scoreEvalRowReport(input: ScoreEvalRowReportInput): Promis
   findingScores: EvalFindingScore[];
   reviewQueue: HumanReviewQueueItem[];
 }> {
-  return scoreRow({
+  const scored = await scoreRow({
     suite: input.suite,
     row: input.row,
     record: input.record,
     reportPath: input.reportPath,
     llmJudge: resolveJudge(input.llmJudge, input.env)
   });
+  return { rowScore: scored.rowScore, findingScores: scored.findingScores, reviewQueue: scored.reviewQueue };
 }
 
 export async function scoreFindingsAgainstGroundTruth(input: ScoreFindingsAgainstGroundTruthInput): Promise<{
-  rowScore: EvalRowScore;
-  findingScores: EvalFindingScore[];
+  rowScore: EvalUnboundRowScore;
+  findingScores: EvalUnboundFindingScore[];
   reviewQueue: HumanReviewQueueItem[];
 }> {
   const findingsValidation = validateFindingsSchema(input.findings);
@@ -637,6 +659,7 @@ async function scoreRow(input: {
   rowScore: EvalRowScore;
   findingScores: EvalFindingScore[];
   reviewQueue: HumanReviewQueueItem[];
+  reportSnapshot: VerifiedFinalReportSnapshot;
 }> {
   const groundTruth = loadGroundTruthDocument(
     input.row.target.ground_truth_path,
@@ -652,11 +675,12 @@ async function scoreRow(input: {
         })
       : groundTruth.subject;
   const report = readReport(input.record, input.reportPath);
-  return scoreFindings({
+  const scored = await scoreFindings({
     suite: input.suite,
     row: input.row,
     record: input.record,
     reportPath: report.path,
+    reportAuthority: report.authority,
     findings: report.findings,
     bugs,
     groundTruthSubject,
@@ -664,9 +688,10 @@ async function scoreRow(input: {
     matchMode: "report",
     llmJudge: input.llmJudge
   });
+  return { ...scored, reportSnapshot: report.snapshot };
 }
 
-async function scoreFindings(input: {
+interface ScoreFindingsInput {
   suite: EvalSuiteSpec;
   row: EvalMatrixRow;
   record: EvalRunRecord;
@@ -677,11 +702,29 @@ async function scoreFindings(input: {
   reportSchemaValid: boolean;
   matchMode: "report" | "candidate";
   llmJudge?: FindingJudge;
-}): Promise<{
+}
+
+interface BoundScoreFindingsResult {
   rowScore: EvalRowScore;
   findingScores: EvalFindingScore[];
   reviewQueue: HumanReviewQueueItem[];
-}> {
+}
+
+interface UnboundScoreFindingsResult {
+  rowScore: EvalUnboundRowScore;
+  findingScores: EvalUnboundFindingScore[];
+  reviewQueue: HumanReviewQueueItem[];
+}
+
+async function scoreFindings(
+  input: ScoreFindingsInput & { reportAuthority: EvalReportAuthority }
+): Promise<BoundScoreFindingsResult>;
+async function scoreFindings(
+  input: ScoreFindingsInput & { reportAuthority?: undefined }
+): Promise<UnboundScoreFindingsResult>;
+async function scoreFindings(
+  input: ScoreFindingsInput & { reportAuthority?: EvalReportAuthority }
+): Promise<BoundScoreFindingsResult | UnboundScoreFindingsResult> {
   if (input.row.target.sensitivity === "private" && input.groundTruthSubject === undefined) {
     throw new EvalError(
       "EVAL_GROUND_TRUTH_SUBJECT_MISSING",
@@ -696,7 +739,7 @@ async function scoreFindings(input: {
     });
   }
   const judgePanel = resolveJudgePanelConfig(input.suite.judge_panel);
-  const matches: EvalFindingScore[] = [];
+  const matches: EvalUnboundFindingScore[] = [];
   const reviewQueue: HumanReviewQueueItem[] = [];
   const matchedBugIds = new Set<string>();
   let duplicates = 0;
@@ -789,7 +832,7 @@ async function scoreFindings(input: {
   const judgedFindings = truePositives + falsePositives + duplicates;
   const terminal = summarizeEvalTerminal(input.record);
   const recoveryEquivalence = withRecordedRecoveryEquivalence(input.record, input.suite).recovery_equivalence!;
-  const rowScore: EvalRowScore = {
+  const rowScore: EvalUnboundRowScore = {
     row_id: input.row.id,
     target_id: input.row.target_id,
     variant_id: input.row.variant_id,
@@ -814,7 +857,14 @@ async function scoreFindings(input: {
     expansion: terminal.expansion,
     recovery_equivalence: recoveryEquivalence
   };
-  return { rowScore, findingScores: matches, reviewQueue };
+  if (input.reportAuthority === undefined) {
+    return { rowScore, findingScores: matches, reviewQueue };
+  }
+  return {
+    rowScore: { ...rowScore, report_authority: input.reportAuthority },
+    findingScores: matches.map((score) => ({ ...score, report_authority: input.reportAuthority! })),
+    reviewQueue
+  };
 }
 
 async function bestMatch(
@@ -1202,6 +1252,8 @@ function readReport(
   schemaValid: boolean;
   findings: unknown[];
   path: string;
+  authority: EvalReportAuthority;
+  snapshot: VerifiedFinalReportSnapshot;
 } {
   if (
     record.ultrafuzz_run_root === undefined ||
@@ -1212,9 +1264,9 @@ function readReport(
       path: filePath
     });
   }
-  let snapshot: ReturnType<typeof loadVerifiedFinalReportSnapshot>;
+  let bound: ReturnType<typeof loadBoundEvalReportAuthority>;
   try {
-    snapshot = loadVerifiedFinalReportSnapshot(record.ultrafuzz_run_root);
+    bound = loadBoundEvalReportAuthority(record);
   } catch (error) {
     throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", "terminal report lacks current verification authority", {
       path: filePath,
@@ -1223,10 +1275,10 @@ function readReport(
       cause: error instanceof Error ? error.message : String(error)
     });
   }
-  if (path.resolve(filePath) !== path.resolve(snapshot.artifacts.json_path)) {
+  if (path.resolve(filePath) !== path.resolve(bound.snapshot.artifacts.json_path)) {
     throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", "terminal report path is not the verified current report", {
       path: filePath,
-      verified_path: snapshot.artifacts.json_path
+      verified_path: bound.snapshot.artifacts.json_path
     });
   }
   if (path.resolve(record.report_json_path) !== path.resolve(filePath)) {
@@ -1235,18 +1287,24 @@ function readReport(
       recorded_path: record.report_json_path
     });
   }
-  if (!isRecord(snapshot.json) || !isRecord(snapshot.json.run_metadata)) {
+  if (!isRecord(bound.snapshot.json) || !isRecord(bound.snapshot.json.run_metadata)) {
     throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", "verified terminal report has invalid run metadata", {
       path: filePath
     });
   }
-  if (snapshot.json.run_metadata.run_id !== record.ultrafuzz_run_id) {
+  if (bound.snapshot.json.run_metadata.run_id !== record.ultrafuzz_run_id) {
     throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", "verified terminal report belongs to another run", {
       path: filePath,
       expected_run_id: record.ultrafuzz_run_id
     });
   }
-  return { schemaValid: true, findings: snapshot.json.issues as unknown[], path: snapshot.artifacts.json_path };
+  return {
+    schemaValid: true,
+    findings: bound.snapshot.json.issues as unknown[],
+    path: bound.snapshot.artifacts.json_path,
+    authority: bound.authority,
+    snapshot: bound.snapshot
+  };
 }
 
 function validatedReviewFinding(value: unknown, index: number): NormalizedFinding {

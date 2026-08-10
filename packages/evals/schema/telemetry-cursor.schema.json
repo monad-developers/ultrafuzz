@@ -1,5 +1,5 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:ultrafuzz:schema:evals:telemetry-cursor:1",
-  "$ref": "urn:ultrafuzz:schema:evals:common:2#/$defs/telemetryCursor"
+  "$ref": "urn:ultrafuzz:schema:evals:common:3#/$defs/telemetryCursor"
 }

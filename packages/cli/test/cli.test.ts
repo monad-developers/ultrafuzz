@@ -1478,7 +1478,7 @@ test("eval report validates the registered summary and never synthesizes missing
   fs.mkdirSync(runRoot, { recursive: true });
   const sha256 = "a".repeat(64);
   const summary = {
-    schema_version: "ultrafuzz.eval.score-summary.v1",
+    schema_version: "ultrafuzz.eval.score-summary.v2",
     eval_run_id: evalRunId,
     eval_run_root: runRoot,
     recall_threshold: 0.7,

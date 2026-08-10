@@ -101,7 +101,6 @@ function baseRenderInput(tmp: string): PromptRenderInput {
       metadataPath: path.join(tmp, "runs", "run-1", "run.json")
     },
     outputs: {
-      findingsPath: path.join(runArtifacts, "boundary-tests-0", "findings.json"),
       patchPath: path.join(runArtifacts, "boundary-tests-0", "patch.diff")
     }
   };
@@ -126,6 +125,47 @@ describe("prompt rendering", () => {
       `Write findings: ${path.join(input.node.artifactDir, "review", "custom-findings.json")}`
     );
     expect(rendered).toContain("Lifecycle stage path: review/custom-findings.json");
+  });
+
+  it("renders the standard findings output from its exact typed declaration", () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    tmpDirs.push(tmp);
+    const input = baseRenderInput(tmp);
+    input.prompt = "Write findings: {{output_findings_path}}";
+    input.graph.logicalNodes.find((node) => node.id === input.node.logicalId)!.outputs![0]!.path =
+      "custom/review-findings.json";
+
+    const rendered = renderPrompt(input).renderedMarkdown;
+    expect(rendered).toContain(
+      `Write findings: ${path.join(input.node.artifactDir, "custom", "review-findings.json")}`
+    );
+    expect(rendered).not.toContain(path.join(input.node.artifactDir, "findings.json"));
+  });
+
+  it("rejects a missing or ambiguous declared findings output when the standard variable is used", () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    tmpDirs.push(tmp);
+    const input = baseRenderInput(tmp);
+    input.prompt = "Write findings: {{output_findings_path}}";
+    const current = input.graph.logicalNodes.find((node) => node.id === input.node.logicalId)!;
+    current.outputs = current.outputs!.filter((output) => output.contract !== "ultrafuzz/findings@2");
+    expect(() => renderPrompt(input)).toThrow(/requires exactly one declared findings@2 output/u);
+
+    current.outputs.push(
+      {
+        path: "first-findings.json",
+        contract: "ultrafuzz/findings@2",
+        primary: true,
+        description: "First findings output"
+      },
+      {
+        path: "second-findings.json",
+        contract: "ultrafuzz/findings@2",
+        primary: false,
+        description: "Second findings output"
+      }
+    );
+    expect(() => renderPrompt(input)).toThrow(/requires exactly one declared findings@2 output/u);
   });
 
   it("rejects an ambiguous portable findings-stage output identity", () => {
@@ -155,6 +195,16 @@ describe("prompt rendering", () => {
     expect(() => renderPrompt(input)).toThrow(/topology-derived and cannot be overridden/u);
   });
 
+  it("rejects overrides of the topology-derived standard findings path", () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    tmpDirs.push(tmp);
+    const input = baseRenderInput(tmp);
+    input.prompt = "Write findings: {{output_findings_path}}";
+    input.variables = { output_findings_path: "forged.json" };
+
+    expect(() => renderPrompt(input)).toThrow(/topology-derived and cannot be overridden/u);
+  });
+
   it("rejects unsafe artifact suffixes and render outputs", () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
     tmpDirs.push(tmp);
@@ -162,8 +212,8 @@ describe("prompt rendering", () => {
     expect(() => validatePromptVariables("bad {{artifact_path}}/C:\\secret")).toThrow(PromptError);
 
     const input = baseRenderInput(tmp);
-    input.outputs.findingsPath = path.join(tmp, "escaped-findings.json");
-    expect(() => renderPrompt(input)).toThrow(/inside/);
+    input.graph.logicalNodes.find((node) => node.id === input.node.logicalId)!.outputs![0]!.path = "../escaped.json";
+    expect(() => renderPrompt(input)).toThrow(/relative and traversal-free/u);
   });
 
   it("points every schema-backed output at the task-local JSON Schema", () => {
@@ -279,7 +329,6 @@ describe("prompt rendering", () => {
           metadataPath: path.join(root, "runs", "generated-test-render", "run.json")
         },
         outputs: {
-          findingsPath: path.join(artifactDir, "findings.json"),
           patchPath: path.join(artifactDir, "patch.diff")
         }
       });
@@ -354,7 +403,6 @@ describe("prompt rendering", () => {
         metadataPath: path.join(root, "runs", "aggregation-render", "run.json")
       },
       outputs: {
-        findingsPath: path.join(artifactDir, "findings.json"),
         patchPath: path.join(artifactDir, "patch.diff")
       }
     }).renderedMarkdown;

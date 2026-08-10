@@ -19,8 +19,8 @@
   "properties": {
     "schema_version": { "const": "ultrafuzz.eval.benchmark-source-manifest.v1" },
     "privacy": { "const": "private-analysis-output-do-not-commit" },
-    "source_archive": { "$ref": "urn:ultrafuzz:schema:evals:common:2#/$defs/nonEmptyString" },
-    "source_size_bytes": { "$ref": "urn:ultrafuzz:schema:evals:common:2#/$defs/nonNegativeInteger" },
+    "source_archive": { "$ref": "urn:ultrafuzz:schema:evals:common:3#/$defs/nonEmptyString" },
+    "source_size_bytes": { "$ref": "urn:ultrafuzz:schema:evals:common:3#/$defs/nonNegativeInteger" },
     "source_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
     "archive_root": { "type": "string" },
     "handoff_schema_version": { "const": "ultrafuzz.eval.adjudication-handoff.v1" },
@@ -35,7 +35,7 @@
       "uniqueItems": true,
       "items": { "$ref": "#/$defs/row" }
     },
-    "ground_truth_count": { "$ref": "urn:ultrafuzz:schema:evals:common:2#/$defs/positiveInteger" }
+    "ground_truth_count": { "$ref": "urn:ultrafuzz:schema:evals:common:3#/$defs/positiveInteger" }
   },
   "$defs": {
     "row": {
@@ -43,11 +43,11 @@
       "additionalProperties": false,
       "required": ["row_id", "row_label", "condition", "variant", "order"],
       "properties": {
-        "row_id": { "$ref": "urn:ultrafuzz:schema:evals:common:2#/$defs/nonEmptyString" },
-        "row_label": { "$ref": "urn:ultrafuzz:schema:evals:common:2#/$defs/nonEmptyString" },
-        "condition": { "$ref": "urn:ultrafuzz:schema:evals:common:2#/$defs/nonEmptyString" },
-        "variant": { "$ref": "urn:ultrafuzz:schema:evals:common:2#/$defs/nonEmptyString" },
-        "order": { "$ref": "urn:ultrafuzz:schema:evals:common:2#/$defs/nonNegativeInteger" }
+        "row_id": { "$ref": "urn:ultrafuzz:schema:evals:common:3#/$defs/nonEmptyString" },
+        "row_label": { "$ref": "urn:ultrafuzz:schema:evals:common:3#/$defs/nonEmptyString" },
+        "condition": { "$ref": "urn:ultrafuzz:schema:evals:common:3#/$defs/nonEmptyString" },
+        "variant": { "$ref": "urn:ultrafuzz:schema:evals:common:3#/$defs/nonEmptyString" },
+        "order": { "$ref": "urn:ultrafuzz:schema:evals:common:3#/$defs/nonNegativeInteger" }
       }
     }
   }

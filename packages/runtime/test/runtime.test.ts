@@ -1051,7 +1051,11 @@ function writeCurrentArtifactVerificationMarker(runRoot: string, attemptId: stri
   fs.writeFileSync(path.join(markerRoot, `${attemptId}.json`), `${JSON.stringify(marker, null, 2)}\n`, "utf8");
 }
 
-function writeSmallTopology(project: string): void {
+const GENERIC_RUNTIME_MARKDOWN_PATH = "setup/runtime-fixture.md";
+
+function writeSmallTopology(project: string, discoveryMarkdownPath = "setup/project-discovery.md"): void {
+  const discoveryPromptPath =
+    discoveryMarkdownPath === GENERIC_RUNTIME_MARKDOWN_PATH ? "setup/runtime-fixture.md" : "setup/project-discovery.md";
   fs.writeFileSync(
     path.join(project, ".ultrafuzz", "topology.yml"),
     `version: 2
@@ -1064,11 +1068,11 @@ nodes:
     depends_on: []
   - id: project-discovery
     kind: agentic
-    prompt: setup/project-discovery.md
+    prompt: ${discoveryPromptPath}
     depends_on:
       - __start__
     outputs:
-      - path: setup/project-discovery.md
+      - path: ${discoveryMarkdownPath}
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: findings.json
@@ -1081,9 +1085,12 @@ nodes:
 `,
     "utf8"
   );
+  if (discoveryMarkdownPath === GENERIC_RUNTIME_MARKDOWN_PATH) writeNeutralRuntimeFixturePrompt(project);
 }
 
-function writeOutOfOrderTopology(project: string): void {
+function writeOutOfOrderTopology(project: string, discoveryMarkdownPath = "setup/project-discovery.md"): void {
+  const discoveryPromptPath =
+    discoveryMarkdownPath === GENERIC_RUNTIME_MARKDOWN_PATH ? "setup/runtime-fixture.md" : "setup/project-discovery.md";
   fs.writeFileSync(
     path.join(project, ".ultrafuzz", "topology.yml"),
     `version: 2
@@ -1105,11 +1112,11 @@ nodes:
         primary: true
   - id: project-discovery
     kind: agentic
-    prompt: setup/project-discovery.md
+    prompt: ${discoveryPromptPath}
     depends_on:
       - __start__
     outputs:
-      - path: setup/project-discovery.md
+      - path: ${discoveryMarkdownPath}
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
   - id: __finish__
@@ -1117,6 +1124,23 @@ nodes:
     role: finish
     depends_on:
       - actors-flows
+`,
+    "utf8"
+  );
+  if (discoveryMarkdownPath === GENERIC_RUNTIME_MARKDOWN_PATH) writeNeutralRuntimeFixturePrompt(project);
+}
+
+function writeNeutralRuntimeFixturePrompt(project: string): void {
+  fs.writeFileSync(
+    path.join(project, ".ultrafuzz", "prompts", "setup", "runtime-fixture.md"),
+    `---
+id: runtime-fixture
+display_name: Runtime Fixture
+---
+
+Write the neutral runtime handoff to
+{{artifact_path}}/${GENERIC_RUNTIME_MARKDOWN_PATH} and write the declared
+findings array to {{output_findings_path}}.
 `,
     "utf8"
   );
@@ -1243,7 +1267,7 @@ function writeReferenceCache(xdgCacheHome: string): void {
   );
 }
 
-function writeFanoutProject(project: string): void {
+function writeFanoutProject(project: string, discoveryMarkdownPath = "setup/project-discovery.md"): void {
   fs.mkdirSync(path.join(project, ".ultrafuzz", "workspaces"), { recursive: true });
   fs.mkdirSync(path.join(project, ".ultrafuzz", "prompts", "setup"), { recursive: true });
   fs.mkdirSync(path.join(project, ".ultrafuzz", "prompts", "strategies"), { recursive: true });
@@ -1294,7 +1318,7 @@ nodes:
     depends_on:
       - __start__
     outputs:
-      - path: setup/project-discovery.md
+      - path: ${discoveryMarkdownPath}
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: findings.json
@@ -1341,7 +1365,7 @@ display_name: Target Signal
 ---
 
 Ancestor snapshots:
-{{artifact_path:project-discovery}}/setup/project-discovery.md
+{{artifact_path:project-discovery}}/${discoveryMarkdownPath}
 
 Current findings: {{output_findings_path}}
 `,
@@ -4392,6 +4416,44 @@ test("plan creates run layout, graph fingerprint, and rendered prompt before Smi
   );
   assert.match(plan.value!.graph_fingerprint, /^[a-f0-9]{64}$/);
   assert.equal(plan.value!.graph.nodes[0]?.model_fanout[0]?.agent_ref, "CodexAgent");
+});
+
+test("plan renders the standard findings variable from the exact typed output declaration", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const topologyPath = path.join(project, ".ultrafuzz", "topology.yml");
+  fs.writeFileSync(
+    topologyPath,
+    fs.readFileSync(topologyPath, "utf8").replace("- path: findings.json", "- path: custom/review-findings.json"),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(project, ".ultrafuzz", "prompts", "setup", "project-discovery.md"),
+    `---
+id: project-discovery
+display_name: Project Discovery
+---
+
+Write findings to {{output_findings_path}}.
+`,
+    "utf8"
+  );
+
+  const plan = await planRun({ projectRoot: project, runId: "declared-findings-path", env: {} });
+
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  const renderedPrompt = fs.readFileSync(plan.value!.rendered_prompts[0]!.rendered_prompt_path, "utf8");
+  const expectedPath = path.join(
+    plan.value!.run_root,
+    "artifacts",
+    "project-discovery",
+    "custom",
+    "review-findings.json"
+  );
+  assert.ok(renderedPrompt.includes(`findings to ${expectedPath}.`), renderedPrompt);
+  assert.ok(renderedPrompt.includes(`--file '${expectedPath}'`), renderedPrompt);
+  assert.doesNotMatch(renderedPrompt, /artifacts\/project-discovery\/findings\.json/u);
 });
 
 test("plan wires the inclusive invariant priority selection into rendered prompts", async () => {
@@ -8138,7 +8200,7 @@ test("startRun includes bounded workflow runner stdio when submission fails", as
 test("syncRun accepts canonical findings without rewriting them and manifests only verified publications", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
   const workflowRunId = "ultrafuzz-sync-success";
   const env = fakeLifecycleSmithersEnv(project, {
     inspect: workflowInspect({
@@ -8154,7 +8216,7 @@ test("syncRun accepts canonical findings without rewriting them and manifests on
   });
   const run = await startRun({ projectRoot: project, runId: "sync-success", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
   const unverifiedSidecarPath = path.join(
     run.value!.run_root,
     "artifacts",
@@ -8189,7 +8251,7 @@ test("syncRun accepts canonical findings without rewriting them and manifests on
   };
   assert.equal(manifest.schema_version, "ultrafuzz.artifact-manifest.v3");
   assert.deepEqual(manifest.provenance?.metadata, { concrete_node_id: "project-discovery" });
-  assert.deepEqual(manifest.files?.map((entry) => entry.path).sort(), ["findings.json", "setup/project-discovery.md"]);
+  assert.deepEqual(manifest.files?.map((entry) => entry.path).sort(), ["findings.json", GENERIC_RUNTIME_MARKDOWN_PATH]);
   const events = fs.readFileSync(path.join(run.value!.run_root, "events.jsonl"), "utf8");
   assert.doesNotMatch(events, /findings-normalized/u);
   assert.match(events, /artifact-manifest-written/);
@@ -8272,7 +8334,7 @@ test("syncRun rejects a valid output swap after verifier publication without rep
 test("syncRun persists a schema-valid failed node when controller manifest publication fails", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
   const workflowRunId = "ultrafuzz-sync-manifest-write-failure";
   const env = fakeLifecycleSmithersEnv(project, {
     inspect: workflowInspect({
@@ -8287,7 +8349,7 @@ test("syncRun persists a schema-valid failed node when controller manifest publi
   });
   const run = await startRun({ projectRoot: project, runId: "sync-manifest-write-failure", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
   const manifestPath = path.join(run.value!.run_root, "artifacts", "project-discovery", "artifact-manifest.json");
   fs.mkdirSync(manifestPath);
 
@@ -8380,7 +8442,7 @@ test("syncRun marks task-output validation failures for terminal disposition", a
 test("syncRun surfaces a terminal preparation wrapper failure as a failed durable node", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
-  writeOutOfOrderTopology(project);
+  writeOutOfOrderTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
   const workflowRunId = "ultrafuzz-sync-preparation-failure";
   const preparationError =
     "artifact-contract failure: artifact dependency has not passed verification project-discovery for actors-flows";
@@ -8406,7 +8468,7 @@ test("syncRun surfaces a terminal preparation wrapper failure as a failed durabl
   });
   const run = await startRun({ projectRoot: project, runId: "sync-preparation-failure", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md"]);
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH]);
 
   const sync = await syncRun({ projectRoot: project, runId: "sync-preparation-failure", env });
 
@@ -8440,7 +8502,7 @@ test("syncRun surfaces a terminal preparation wrapper failure as a failed durabl
 test("syncRun keeps a preparation failure superseded by a later successful attempt", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
-  writeOutOfOrderTopology(project);
+  writeOutOfOrderTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
   const workflowRunId = "ultrafuzz-sync-preparation-recovered";
   const env = fakeLifecycleSmithersEnv(project, {
     inspect: workflowInspect({
@@ -8460,7 +8522,7 @@ test("syncRun keeps a preparation failure superseded by a later successful attem
   });
   const run = await startRun({ projectRoot: project, runId: "sync-preparation-recovered", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md"]);
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH]);
   writeRequiredArtifactSet(run.value!.run_root, "actors-flows", ["setup/actors-flows.md"]);
 
   const sync = await syncRun({ projectRoot: project, runId: "sync-preparation-recovered", env });
@@ -8613,7 +8675,7 @@ test("syncRun leaves a cancelled preparation wrapper unattributed", async () => 
 test("syncRun clears a preparation failure attribution once the node succeeds", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
-  writeOutOfOrderTopology(project);
+  writeOutOfOrderTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
   const workflowRunId = "ultrafuzz-sync-preparation-cleared";
   const failingEnv = fakeLifecycleSmithersEnv(project, {
     inspect: workflowInspect({
@@ -8636,7 +8698,7 @@ test("syncRun clears a preparation failure attribution once the node succeeds", 
   });
   const run = await startRun({ projectRoot: project, runId: "sync-preparation-cleared", env: failingEnv });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md"]);
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH]);
 
   const failed = await syncRun({ projectRoot: project, runId: "sync-preparation-cleared", env: failingEnv });
   assert.equal(failed.ok, true, JSON.stringify(failed.diagnostics));
@@ -9918,7 +9980,7 @@ test("syncRun can price missing cache telemetry with an evidence-based cache rat
 test("getRunStatus synchronizes without appending duplicate events", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
   const workflowRunId = "ultrafuzz-inspect-idempotent";
   const env = fakeLifecycleSmithersEnv(project, {
     inspect: workflowInspect({
@@ -9933,7 +9995,7 @@ test("getRunStatus synchronizes without appending duplicate events", async () =>
   });
   const run = await startRun({ projectRoot: project, runId: "inspect-idempotent", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
 
   const first = await getRunStatus({ projectRoot: project, runId: "inspect-idempotent", env });
   const second = await getRunStatus({ projectRoot: project, runId: "inspect-idempotent", env });
@@ -10315,7 +10377,7 @@ test("syncRun does not finalize an agent before its deterministic verifier has e
 test("syncRun finalizes prerequisite manifests before out-of-order descendants", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
-  writeOutOfOrderTopology(project);
+  writeOutOfOrderTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
   const workflowRunId = "ultrafuzz-sync-out-of-order";
   const env = fakeLifecycleSmithersEnv(project, {
     inspect: workflowInspect({
@@ -10332,7 +10394,7 @@ test("syncRun finalizes prerequisite manifests before out-of-order descendants",
   });
   const run = await startRun({ projectRoot: project, runId: "sync-out-of-order", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md"]);
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH]);
   writeRequiredArtifactSet(run.value!.run_root, "actors-flows", ["setup/actors-flows.md"]);
   const undeclaredFindingsPath = path.join(run.value!.run_root, "artifacts", "actors-flows", "findings.json");
   fs.writeFileSync(undeclaredFindingsPath, "{not-json\n", "utf8");
@@ -10629,7 +10691,7 @@ test("syncRun cancels a nonterminal workflow at its durable workflow deadline", 
 
 test("syncRun records model fan-out attempts independently", async () => {
   const project = tempProject();
-  writeFanoutProject(project);
+  writeFanoutProject(project, GENERIC_RUNTIME_MARKDOWN_PATH);
   const workflowRunId = "ultrafuzz-sync-fanout";
   const env = fakeLifecycleSmithersEnv(project, {
     inspect: workflowInspect({
@@ -10660,7 +10722,7 @@ test("syncRun records model fan-out attempts independently", async () => {
   const run = await startRun({ projectRoot: project, runId: "sync-fanout", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   writeRequiredArtifactSet(run.value!.run_root, "project-discovery__model_0__attempt_0", [
-    "setup/project-discovery.md",
+    GENERIC_RUNTIME_MARKDOWN_PATH,
     "findings.json"
   ]);
 

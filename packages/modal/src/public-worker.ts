@@ -34,6 +34,7 @@ import { remoteAuthDir } from "./layout.js";
 import type { ModalWorkerLineage } from "./launch-state.js";
 import {
   createPublicBenchmarkBundle,
+  parsePublicBenchmarkBundle,
   readPublicBenchmarkBundle,
   MAX_PUBLIC_BENCHMARK_FILE_BYTES,
   type PublicBenchmarkBundle,
@@ -206,16 +207,23 @@ export async function runPublicBenchmarkWorker(input: {
         }
         return [...retainedForbiddenSecretValues];
       };
-      const initialForbiddenSecretValues = await resolveForbiddenSecretValues();
-      if (fs.existsSync(bundlePath)) {
+      if (pathEntryPresent(bundlePath)) {
+        let snapshot: PublicBenchmarkBundle;
         try {
-          const bundle = readPublicBenchmarkBundle(bundlePath, initialForbiddenSecretValues);
+          snapshot = readPublicBenchmarkBundle(bundlePath);
+        } catch {
+          throw input.checkpointIncompatibleError("persisted public benchmark bundle is invalid");
+        }
+        const initialForbiddenSecretValues = await resolveForbiddenSecretValues();
+        try {
+          const bundle = parsePublicBenchmarkBundle(snapshot, initialForbiddenSecretValues);
           assertPublicWorkerBundleLineage(bundle, input.config, input.model, input.lineage);
           return "finished";
         } catch {
           throw input.checkpointIncompatibleError("persisted public benchmark bundle is invalid");
         }
       }
+      await resolveForbiddenSecretValues();
       await rm(workRoot, { recursive: true, force: true });
       await mkdir(workRoot, { recursive: true, mode: 0o700 });
       const prepared = await runWithPublicPreparationTimeout((signal) =>
@@ -342,6 +350,16 @@ export async function runPublicBenchmarkWorker(input: {
       return "finished";
     }
   });
+}
+
+function pathEntryPresent(candidate: string): boolean {
+  try {
+    fs.lstatSync(candidate);
+    return true;
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
+    throw error;
+  }
 }
 
 export function publicBenchmarkWorkRoot(dataRoot: string): string {

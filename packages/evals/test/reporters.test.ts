@@ -338,7 +338,7 @@ describe("BraintrustReporter", () => {
       recoveryEquivalence: cleanRecoveryEquivalence()
     });
     const summary: EvalScoreSummary = {
-      schema_version: "ultrafuzz.eval.score-summary.v1",
+      schema_version: "ultrafuzz.eval.score-summary.v2",
       eval_run_id: "eval-lineage",
       eval_run_root: "/tmp/generated-run",
       recall_threshold: 0.7,

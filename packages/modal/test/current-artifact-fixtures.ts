@@ -3,6 +3,8 @@ import path from "node:path";
 
 import {
   ARTIFACT_VERIFICATION_SCHEMA_VERSION,
+  SMITHERS_TASK_MANIFEST_SCHEMA_VERSION,
+  SMITHERS_TASK_METADATA_SCHEMA_VERSION,
   artifactContractDefinition,
   artifactContractSchemaBinding,
   layoutForRunRoot,
@@ -14,7 +16,7 @@ import {
   type ArtifactManifestOutputContract,
   type ArtifactVerificationMarker
 } from "@ultrafuzz/artifacts";
-import { projectCanonicalFinalReport } from "@ultrafuzz/runtime";
+import { projectCanonicalFinalReport, WORKFLOW_CONTROL_INTEGRITY_SCHEMA_VERSION } from "@ultrafuzz/runtime";
 
 const FIXTURE_TIMESTAMP = "2026-01-01T00:00:00.000Z";
 
@@ -127,7 +129,8 @@ export function writeCurrentTerminalReport(
           prompt_id: "final-report",
           prompt_path: "review/final-report.md",
           loop: { index: 0, count: 1, mode: "parallel", attempt_index: 0 },
-          model_fanout: []
+          model_fanout: [],
+          workflow: { node_id: agentTaskId, task_node_ids: [agentTaskId] }
         }
       ]
     })}\n`
@@ -196,6 +199,15 @@ export function writeCurrentTerminalReport(
     }))
   };
   writeJsonDurable(path.join(runRoot, ".ultrafuzz-verification", "final-report.json"), marker);
+  writeCurrentTaskAuthority(runRoot, [
+    {
+      id: "final-report",
+      outputs: [
+        { path: "report.md", contract: "ultrafuzz/nonempty-markdown@1", primary: true },
+        { path: "report.json", contract: "ultrafuzz/report@2", primary: false }
+      ]
+    }
+  ]);
   return reportPath;
 }
 
@@ -318,7 +330,7 @@ export function currentGenuineTaskFailureState(attemptId: string): Record<string
           verifier_task_id: `verify:${attemptId}`,
           state: "finished"
         },
-        output_contracts: { ok: true, missing: [], artifact_manifest_sha256: "a".repeat(64) },
+        output_contracts: { ok: false, missing: [] },
         terminal_disposition: {
           schema_version: "ultrafuzz.terminal-disposition.v1",
           kind: "task-output-validation-failure"
@@ -342,11 +354,13 @@ export function currentGenuineTaskFailureState(attemptId: string): Record<string
   });
 }
 
+interface CurrentTaskSpecification {
+  id: string;
+  outputs: Array<{ path: string; contract: ArtifactContractId; primary: boolean }>;
+}
+
 export function writeCurrentSmithersTaskFixture(runRoot: string, attemptId: string): void {
-  const taskSpecifications: Array<{
-    id: string;
-    outputs: Array<{ path: string; contract: ArtifactContractId; primary: boolean }>;
-  }> = [
+  const taskSpecifications: CurrentTaskSpecification[] = [
     {
       id: attemptId,
       outputs: [{ path: "result.md", contract: "ultrafuzz/nonempty-markdown@1", primary: true }]
@@ -396,89 +410,150 @@ export function writeCurrentSmithersTaskFixture(runRoot: string, attemptId: stri
       }))
     })}\n`
   );
+  writeCurrentTaskAuthority(runRoot, taskSpecifications);
+}
+
+function writeCurrentTaskAuthority(runRoot: string, taskSpecifications: readonly CurrentTaskSpecification[]): void {
+  const state = JSON.parse(fs.readFileSync(path.join(runRoot, "state.json"), "utf8")) as {
+    run_id: string;
+    graph_fingerprint: string;
+    config_fingerprint: string;
+  };
+  if (
+    typeof state.run_id !== "string" ||
+    !/^[0-9a-f]{64}$/u.test(state.graph_fingerprint) ||
+    !/^[0-9a-f]{64}$/u.test(state.config_fingerprint)
+  ) {
+    throw new Error("current task authority fixture requires exact run-state identities");
+  }
+  const graph = JSON.parse(fs.readFileSync(path.join(runRoot, "graph.json"), "utf8")) as {
+    nodes: Array<{ id: string; display_name: string; prompt_path: string }>;
+  };
+  const graphNodes = new Map(graph.nodes.map((node) => [node.id, node]));
   fs.mkdirSync(path.join(runRoot, "smithers"), { recursive: true });
-  fs.writeFileSync(
-    path.join(runRoot, "smithers", "tasks.json"),
-    `${JSON.stringify({
-      schema_version: "ultrafuzz.smithers.workflow.v3",
-      run_id: "fixture-run",
-      smithers_run_id: "workflow-one",
-      workflow_name: "fixture-workflow",
-      pinned_submodules: null,
-      tasks: taskSpecifications.map((task) => ({
-        attemptId: task.id,
-        concreteNodeId: task.id,
-        logicalNodeId: task.id,
-        preparationSmithersNodeId: `prepare:${task.id}`,
-        smithersNodeId: `node:${task.id}`,
-        verifierSmithersNodeId: `verify:${task.id}`,
-        agentRef: "CodexAgent",
-        modelName: "gpt-fixture",
-        reasoningEffort: "high",
-        dependencies: [],
-        dependencySmithersNodeIds: [],
-        timeoutMs: 60_000,
-        heartbeatTimeoutMs: 60_000,
-        retries: 0,
-        retryPolicy: { backoff: "exponential", initialDelayMs: 1_000, maxDelayMs: 30_000 },
-        workspacePath: `/runs/fixture-run/workspaces/${task.id}`,
-        artifactDir: `/runs/fixture-run/artifacts/${task.id}`,
-        dependencyArtifactDirs: [],
-        renderedPromptPath: `/runs/fixture-run/prompts/${task.id}.md`,
+  const tasksPath = path.join(runRoot, "smithers", "tasks.json");
+  const tasks = taskSpecifications.map((task) => {
+    const graphNode = graphNodes.get(task.id);
+    if (graphNode === undefined) throw new Error(`current task authority fixture has no graph node ${task.id}`);
+    const workspacePath = path.join(runRoot, "workspaces", task.id);
+    const artifactDir = path.join(runRoot, "artifacts", task.id);
+    return {
+      attemptId: task.id,
+      concreteNodeId: task.id,
+      logicalNodeId: task.id,
+      preparationSmithersNodeId: `prepare:${task.id}`,
+      smithersNodeId: `node:${task.id}`,
+      verifierSmithersNodeId: `verify:${task.id}`,
+      agentRef: "CodexAgent",
+      modelName: "gpt-fixture",
+      reasoningEffort: "high",
+      dependencies: [],
+      dependencySmithersNodeIds: [],
+      timeoutMs: 60_000,
+      heartbeatTimeoutMs: 60_000,
+      retries: 0,
+      retryPolicy: { backoff: "exponential", initialDelayMs: 1_000, maxDelayMs: 30_000 },
+      workspacePath,
+      artifactDir,
+      dependencyArtifactDirs: [],
+      renderedPromptPath: path.join(runRoot, "prompts", `${task.id}.md`),
+      execution: {
+        mode: "local",
+        resources: { cpu: 2, memoryMiB: 1_024, timeoutSeconds: 60 },
+        agentCredentialEnv: []
+      },
+      metadata: {
+        schemaVersion: SMITHERS_TASK_METADATA_SCHEMA_VERSION,
+        run: {
+          ultrafuzzRunId: state.run_id,
+          smithersWorkflowName: "fixture-workflow",
+          graphVersion: "3",
+          topologyVersion: 2
+        },
+        node: {
+          concreteNodeId: task.id,
+          logicalNodeId: task.id,
+          attemptId: task.id,
+          label: graphNode.display_name,
+          kind: "agentic",
+          promptPath: graphNode.prompt_path
+        },
+        dependencies: { concreteNodeIds: [], attemptIds: [], smithersNodeIds: [] },
+        loop: { index: 0, count: 1, mode: "parallel", attemptIndex: 0 },
+        model: {
+          profileId: "fixture-model",
+          agentRef: "CodexAgent",
+          modelName: "gpt-fixture",
+          reasoningEffort: "high",
+          modelIndex: 0,
+          attemptIndex: 0
+        },
+        workspace: {
+          primitive: "worktree",
+          path: workspacePath,
+          repoPath: "/repo",
+          trustModel: "skip-permissions"
+        },
+        artifacts: {
+          dir: artifactDir,
+          outputs: task.outputs.map((output) => ({
+            path: output.path,
+            ...currentTaskOutputBinding(output.contract),
+            primary: output.primary
+          })),
+          manifestPath: `${artifactDir}/artifact-manifest.json`
+        },
+        retryPolicy: { maxAttempts: 1, smithersRetries: 0 },
+        timeout: { milliseconds: 60_000, seconds: 60, heartbeatTimeoutMs: 60_000 },
         execution: {
           mode: "local",
-          resources: { cpu: 2, memoryMiB: 1_024, timeoutSeconds: 60 },
-          agentCredentialEnv: []
-        },
-        metadata: {
-          schemaVersion: "ultrafuzz.smithers.task.v2",
-          run: {
-            ultrafuzzRunId: "fixture-run",
-            smithersWorkflowName: "fixture-workflow",
-            graphVersion: "3",
-            topologyVersion: 2
-          },
-          node: {
-            concreteNodeId: task.id,
-            logicalNodeId: task.id,
-            attemptId: task.id,
-            label: task.id,
-            kind: "agentic",
-            promptPath: `${task.id}.md`
-          },
-          dependencies: { concreteNodeIds: [], attemptIds: [], smithersNodeIds: [] },
-          loop: { index: 0, count: 1, mode: "parallel", attemptIndex: 0 },
-          model: {
-            profileId: "fixture-model",
-            agentRef: "CodexAgent",
-            modelName: "gpt-fixture",
-            reasoningEffort: "high",
-            modelIndex: 0,
-            attemptIndex: 0
-          },
-          workspace: {
-            primitive: "worktree",
-            path: `/runs/fixture-run/workspaces/${task.id}`,
-            repoPath: "/repo",
-            trustModel: "skip-permissions"
-          },
-          artifacts: {
-            dir: `/runs/fixture-run/artifacts/${task.id}`,
-            outputs: task.outputs.map((output) => ({
-              path: output.path,
-              ...currentTaskOutputBinding(output.contract),
-              primary: output.primary
-            })),
-            manifestPath: `/runs/fixture-run/artifacts/${task.id}/artifact-manifest.json`
-          },
-          retryPolicy: { maxAttempts: 1, smithersRetries: 0 },
-          timeout: { milliseconds: 60_000, seconds: 60, heartbeatTimeoutMs: 60_000 },
-          execution: {
-            mode: "local",
-            resources: { cpu: 2, memoryMiB: 1_024, timeoutSeconds: 60 }
-          }
+          resources: { cpu: 2, memoryMiB: 1_024, timeoutSeconds: 60 }
         }
-      }))
-    })}\n`
-  );
+      }
+    };
+  });
+  writeJsonDurable(tasksPath, {
+    schema_version: SMITHERS_TASK_MANIFEST_SCHEMA_VERSION,
+    run_id: state.run_id,
+    smithers_run_id: "workflow-one",
+    workflow_name: "fixture-workflow",
+    pinned_submodules: null,
+    tasks
+  });
+
+  const layout = layoutForRunRoot(runRoot, state.run_id);
+  writeFileDurable(layout.graphFingerprintPath, Buffer.from(`${state.graph_fingerprint}\n`, "utf8"));
+  const graphBytes = fs.readFileSync(layout.graphPath);
+  const graphFingerprintBytes = fs.readFileSync(layout.graphFingerprintPath);
+  const taskBytes = fs.readFileSync(tasksPath);
+  const emptyBytes = Buffer.alloc(0);
+  const emptyFile = { sha256: sha256Bytes(emptyBytes), size_bytes: emptyBytes.byteLength };
+  writeJsonDurable(path.join(runRoot, "smithers", "control-integrity.json"), {
+    schema_version: WORKFLOW_CONTROL_INTEGRITY_SCHEMA_VERSION,
+    run_id: state.run_id,
+    files: {
+      graph: { sha256: sha256Bytes(graphBytes), size_bytes: graphBytes.byteLength },
+      expanded_graph: emptyFile,
+      graph_fingerprint: {
+        sha256: sha256Bytes(graphFingerprintBytes),
+        size_bytes: graphFingerprintBytes.byteLength
+      },
+      config: emptyFile,
+      tasks: { sha256: sha256Bytes(taskBytes), size_bytes: taskBytes.byteLength },
+      input: emptyFile,
+      workflow: emptyFile,
+      evidence_workflow: emptyFile
+    },
+    execution_files: [],
+    bindings: {
+      run_id: state.run_id,
+      graph_fingerprint: state.graph_fingerprint,
+      config_fingerprint: state.config_fingerprint,
+      expected_state_node_ids: graph.nodes.map((node) => node.id).sort(),
+      expected_task_attempt_ids: tasks.map((task) => task.attemptId).sort(),
+      expected_task_node_ids: tasks
+        .flatMap((task) => [task.preparationSmithersNodeId, task.smithersNodeId, task.verifierSmithersNodeId])
+        .sort()
+    }
+  });
 }

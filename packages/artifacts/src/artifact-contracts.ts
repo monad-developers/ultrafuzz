@@ -1,10 +1,20 @@
 import crypto from "node:crypto";
+import path from "node:path";
 import { TextDecoder } from "node:util";
 
 import { ARTIFACT_CONTRACT_IDS, type ArtifactContractId } from "./artifact-contract-ids.js";
-import { validateRegisteredJsonSchema } from "./json-schema-validator.js";
-import { artifactSchemaBundleDigest, artifactSchemaRegistry, VALIDATOR_BUILD_IDENTITY } from "./schema-registry.js";
-import { parseStrictJson, parseStrictJsonBytes, StrictJsonError } from "./strict-json.js";
+import {
+  validateRegisteredJsonBytesSync,
+  type JsonFileValidationDiagnostic,
+  type JsonFileValidationResult
+} from "./json-file-validator.js";
+import {
+  artifactSchemaBundleDigest,
+  artifactSchemaDirectory,
+  artifactSchemaRegistry,
+  VALIDATOR_BUILD_IDENTITY
+} from "./schema-registry.js";
+import { parseStrictJsonBytes, StrictJsonError } from "./strict-json.js";
 import {
   WORKFLOW_CONTRACT_DESCRIPTIONS,
   WORKFLOW_SCHEMA_FILES,
@@ -165,13 +175,7 @@ export function validateArtifactContract(
     return validateTextContract(contract, contents, artifactPath);
   }
 
-  let parsed: unknown;
-  try {
-    parsed = parseStrictJson(contents);
-  } catch (error) {
-    return strictJsonFailure(error, artifactPath);
-  }
-  return validateJsonContractValue(contract, parsed, artifactPath);
+  return validateJsonContractBytes(contract, Buffer.from(contents, "utf8"), artifactPath);
 }
 
 /** Validate the exact immutable artifact bytes, including their UTF-8 encoding. */
@@ -194,13 +198,7 @@ export function validateArtifactContractBytes(
     return validateTextContract(contract, text, artifactPath);
   }
 
-  let parsed: unknown;
-  try {
-    parsed = parseStrictJsonBytes(contents);
-  } catch (error) {
-    return strictJsonFailure(error, artifactPath);
-  }
-  return validateJsonContractValue(contract, parsed, artifactPath);
+  return validateJsonContractBytes(contract, contents, artifactPath);
 }
 
 function validateTextContract(
@@ -216,31 +214,94 @@ function validateTextContract(
   return { ok: true, issues: [], value: contents };
 }
 
-function validateJsonContractValue(
+function validateJsonContractBytes(
   contract: Exclude<ArtifactContractId, "ultrafuzz/nonempty-markdown@1" | "ultrafuzz/text@1">,
-  parsed: unknown,
+  contents: Uint8Array,
   artifactPath: string
 ): ArtifactContractValidationResult {
   const schemaFile = ARTIFACT_CONTRACT_SCHEMA_FILES[contract];
   if (schemaFile === undefined) {
     return failure("ARTIFACT_SCHEMA_UNAVAILABLE", `No JSON Schema is registered for ${contract}`, artifactPath);
   }
-  const registryEntry = artifactSchemaRegistry().find((entry) => entry.filename === schemaFile);
-  if (registryEntry === undefined) {
+  const binding = artifactContractSchemaBinding(contract);
+  if (binding === undefined) {
     return failure("ARTIFACT_SCHEMA_UNAVAILABLE", `Registered schema is unavailable: ${schemaFile}`, artifactPath);
   }
-  const shape = validateRegisteredJsonSchema(registryEntry.id, parsed);
-  if (!shape.ok) {
-    return {
-      ok: false,
-      issues: shape.issues.map((issue) => ({
-        code: "ARTIFACT_SCHEMA_INVALID",
-        message: `${issue.message} (${issue.keyword}, ${issue.schemaPath})`,
-        path: `${artifactPath}${issue.instancePath}`
-      }))
-    };
+  const validation = validateRegisteredJsonBytesSync({
+    schemaPath: path.join(artifactSchemaDirectory(), binding.schema_file),
+    instanceBytes: contents
+  });
+  if (validation.schema !== null && !sameSchemaIdentity(validation.schema, binding)) {
+    return failure(
+      "ARTIFACT_VALIDATOR_IDENTITY_MISMATCH",
+      `Registered validator identity does not match ${contract}`,
+      artifactPath
+    );
   }
-  return { ok: true, issues: [], value: parsed };
+  if (validation.status !== "valid") {
+    return workerValidationFailure(validation, artifactPath);
+  }
+  if (validation.schema === null) {
+    return failure(
+      "ARTIFACT_VALIDATOR_IDENTITY_MISMATCH",
+      `Registered validator did not report its schema identity for ${contract}`,
+      artifactPath
+    );
+  }
+
+  // The isolated worker is the sole shape-acceptance boundary. Parse the same
+  // immutable bytes only after it succeeds so callers can run semantic gates
+  // without serializing, repairing, or otherwise changing the artifact.
+  try {
+    return { ok: true, issues: [], value: parseStrictJsonBytes(contents) };
+  } catch (error) {
+    return strictJsonFailure(error, artifactPath);
+  }
+}
+
+function sameSchemaIdentity(
+  actual: NonNullable<JsonFileValidationResult["schema"]>,
+  expected: ArtifactContractSchemaBinding
+): boolean {
+  return (
+    actual.registered &&
+    actual.id === expected.schema_id &&
+    actual.sha256 === expected.schema_sha256 &&
+    actual.bundle_sha256 === expected.schema_bundle_sha256 &&
+    actual.validator_build === expected.validator_build
+  );
+}
+
+function workerValidationFailure(
+  validation: JsonFileValidationResult,
+  artifactPath: string
+): ArtifactContractValidationResult {
+  const diagnostics: readonly JsonFileValidationDiagnostic[] =
+    validation.diagnostics.length === 0
+      ? [{ code: "JSON_VALIDATOR_INTERNAL_ERROR", message: "Validator failed without a diagnostic" }]
+      : validation.diagnostics;
+  return {
+    ok: false,
+    issues: diagnostics.map((diagnostic) => ({
+      code:
+        diagnostic.code === "JSON_DUPLICATE_KEY"
+          ? "ARTIFACT_JSON_DUPLICATE_KEY"
+          : diagnostic.code === "JSON_INSTANCE_INVALID" || diagnostic.code === "JSON_INSTANCE_UNREADABLE"
+            ? "ARTIFACT_JSON_INVALID"
+            : diagnostic.code === "JSON_SCHEMA_VIOLATION"
+              ? "ARTIFACT_SCHEMA_INVALID"
+              : "ARTIFACT_VALIDATOR_FAILED",
+      message:
+        diagnostic.code === "JSON_DUPLICATE_KEY" ||
+        diagnostic.code === "JSON_INSTANCE_INVALID" ||
+        diagnostic.code === "JSON_INSTANCE_UNREADABLE"
+          ? `Artifact is not strict JSON: ${diagnostic.message}`
+          : diagnostic.keyword === undefined || diagnostic.schemaPath === undefined
+            ? diagnostic.message
+            : `${diagnostic.message} (${diagnostic.keyword}, ${diagnostic.schemaPath})`,
+      path: `${artifactPath}${diagnostic.instancePath ?? ""}`
+    }))
+  };
 }
 
 function strictJsonFailure(error: unknown, artifactPath: string): ArtifactContractValidationResult {
@@ -273,6 +334,11 @@ function failure(code: string, message: string, path: string): ArtifactContractV
 
 for (const definition of Object.values(definitions)) {
   if (definition.validEmptyExample === undefined) continue;
+  // JSON examples are exhaustively exercised against their registered worker
+  // contract by the fixture suite. Do not start one worker per example during
+  // module evaluation: that would make every CLI invocation pay for unrelated
+  // contracts before it can validate the requested file.
+  if (definition.format === "json") continue;
   const result = validateArtifactContract(definition.id, definition.validEmptyExample);
   if (!result.ok) {
     throw new Error(

@@ -41,7 +41,7 @@
     },
     "cleanTitle": {
       "allOf": [
-        { "$ref": "urn:ultrafuzz:schema:evals:common:2#/$defs/nonEmptyString" },
+        { "$ref": "urn:ultrafuzz:schema:evals:common:3#/$defs/nonEmptyString" },
         { "type": "string", "pattern": "^(?!\\[[HML]-[0-9]+\\]\\s*-\\s*).+$" }
       ]
     },
@@ -61,14 +61,14 @@
       ],
       "properties": {
         "rowId": { "$ref": "#/$defs/safeId" },
-        "label": { "$ref": "urn:ultrafuzz:schema:evals:common:2#/$defs/nonEmptyString" },
-        "condition": { "$ref": "urn:ultrafuzz:schema:evals:common:2#/$defs/nonEmptyString" },
-        "order": { "$ref": "urn:ultrafuzz:schema:evals:common:2#/$defs/nonNegativeInteger" },
+        "label": { "$ref": "urn:ultrafuzz:schema:evals:common:3#/$defs/nonEmptyString" },
+        "condition": { "$ref": "urn:ultrafuzz:schema:evals:common:3#/$defs/nonEmptyString" },
+        "order": { "$ref": "urn:ultrafuzz:schema:evals:common:3#/$defs/nonNegativeInteger" },
         "variant": { "$ref": "#/$defs/safeId" },
         "rowArchivePath": { "$ref": "#/$defs/canonicalRelativePath" },
         "runMetadataPath": { "$ref": "#/$defs/canonicalRelativePath" },
         "runId": { "$ref": "#/$defs/safeId" },
-        "findingCount": { "$ref": "urn:ultrafuzz:schema:evals:common:2#/$defs/nonNegativeInteger" }
+        "findingCount": { "$ref": "urn:ultrafuzz:schema:evals:common:3#/$defs/nonNegativeInteger" }
       }
     },
     "candidate": {
@@ -105,7 +105,7 @@
       ],
       "properties": {
         "rowId": { "$ref": "#/$defs/safeId" },
-        "issueIndex": { "$ref": "urn:ultrafuzz:schema:evals:common:2#/$defs/nonNegativeInteger" },
+        "issueIndex": { "$ref": "urn:ultrafuzz:schema:evals:common:3#/$defs/nonNegativeInteger" },
         "findingId": { "$ref": "#/$defs/findingLabel" },
         "findingInstanceId": { "$ref": "#/$defs/safeId" },
         "stableIssueId": { "$ref": "#/$defs/safeId" },

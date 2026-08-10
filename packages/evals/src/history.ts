@@ -1361,10 +1361,21 @@ function matchedGroundTruthByRow(
 ): Map<string, ReadonlySet<string>> {
   const result = new Map<string, Set<string>>(matrix.map((row) => [row.id, new Set<string>()]));
   const evidenceCounts = new Map<string, number>(matrix.map((row) => [row.id, 0]));
+  const rowScoreById = new Map(rowScores.map((score) => [score.row_id, score]));
+  if (rowScoreById.size !== rowScores.length) {
+    throw new EvalError("EVAL_HISTORY_GENERATION_INCOMPLETE", "score summary contains duplicate row identities");
+  }
   for (const score of scores) {
     const matches = result.get(score.row_id);
-    if (matches === undefined) {
+    const rowScore = rowScoreById.get(score.row_id);
+    if (matches === undefined || rowScore === undefined) {
       throw new EvalError("EVAL_HISTORY_GENERATION_INCOMPLETE", `score references unknown row ${score.row_id}`);
+    }
+    if (stableStringify(score.report_authority) !== stableStringify(rowScore.report_authority)) {
+      throw new EvalError(
+        "EVAL_HISTORY_GENERATION_INCOMPLETE",
+        `finding score authority does not match summary authority for row ${score.row_id}`
+      );
     }
     evidenceCounts.set(score.row_id, (evidenceCounts.get(score.row_id) ?? 0) + 1);
     const judge = score.judge_result;

@@ -76,11 +76,11 @@ describe("prompt semantic anchors", () => {
     expect(discovery).toContain("A symlink is not");
     expect(discovery).not.toContain("only ledger `entries` are checked byte-for-byte");
 
-    // The twin sentence four lines below the fan-in change said "render the exact ledger IDs" with no
-    // condition, contradicting it. An unconditioned instruction here is worse than an absent one: an
-    // empty rendered field is tolerated, but a placeholder such as `ledger_ids: none` is rejected as
-    // `INVARIANT_LEDGER_MARKDOWN_MAPPING_EXTRA`.
-    expect(fanin).toContain("and, when present, render the exact ledger IDs under a `ledger_ids` field");
+    // The reversible companion grammar must preserve optional members exactly:
+    // absent JSON members are omitted, while present arrays retain their exact values and order.
+    expect(fanin).toContain("then optional `ledger_ids` and `reference_expectations`");
+    expect(fanin).toContain("When an optional member is absent from JSON, omit its Markdown field entirely");
+    expect(fanin).toContain("a blank field or `[]` is not omission");
 
     // `reference_expectations` is also optional. The contract accepts empty legacy arrays, but its
     // canonical output form omits the field when there are no IDs. Only the two required path arrays

@@ -45,7 +45,7 @@ const verifiedFailure = {
   last_error: "task output did not pass final validation",
   provenance: {
     workflow: workflow("task-one"),
-    output_contracts: { ok: true, missing: [], artifact_manifest_sha256: "a".repeat(64) },
+    output_contracts: { ok: false, missing: [] },
     terminal_disposition: {
       schema_version: "ultrafuzz.terminal-disposition.v1",
       kind: "task-output-validation-failure"
@@ -133,6 +133,26 @@ describe("terminal benchmark disposition", () => {
     );
 
     expect(disposition).toEqual({ kind: "operational-failure", failedTasks: 0, operationalFailures: 1 });
+  });
+
+  it("rejects a validation-failure marker paired with successful output-contract evidence", () => {
+    for (const output_contracts of [
+      { ok: true, missing: [] },
+      { ok: true, missing: [], artifact_manifest_sha256: "a".repeat(64) }
+    ]) {
+      const disposition = classifyTerminalDisposition(
+        {
+          nodes: {
+            "task-one": {
+              ...verifiedFailure,
+              provenance: { ...verifiedFailure.provenance, output_contracts }
+            }
+          }
+        },
+        { tasks: [task] }
+      );
+      expect(disposition).toEqual({ kind: "operational-failure", failedTasks: 0, operationalFailures: 1 });
+    }
   });
 
   it("validates the complete terminal-disposition root contract", () => {

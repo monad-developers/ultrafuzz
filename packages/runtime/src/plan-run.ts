@@ -716,7 +716,6 @@ function renderPromptsForPlan(input: {
           metadataPath: input.layout.runMetadataPath
         },
         outputs: {
-          findingsPath: path.join(attempt.artifactDir, "findings.json"),
           patchPath: path.join(attempt.artifactDir, "patch.diff")
         },
         resolvedConfig: {

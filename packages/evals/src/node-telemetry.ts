@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { TextDecoder } from "node:util";
+import { isDeepStrictEqual, TextDecoder } from "node:util";
 
 import lockfile from "proper-lockfile";
 
@@ -24,10 +24,17 @@ import {
   validateSafeId,
   type ArtifactManifest,
   type ArtifactManifestEntry,
+  type ArtifactManifestOutputContract,
   type EventRecord,
   type RunState
 } from "@ultrafuzz/artifacts";
-import { loadVerifiedFinalReportSnapshot, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
+import {
+  assertVerifiedFinalReportSnapshotRemainedCurrent,
+  loadVerifiedFinalReportSnapshot,
+  type RuntimeDiagnostic,
+  type VerifiedFinalReportSnapshot,
+  type VerifiedOutputArtifactSnapshot
+} from "@ultrafuzz/runtime";
 
 import {
   reporterForReliableDelivery,
@@ -79,9 +86,15 @@ export interface NodeTelemetryPumpInput {
   reporters: EvalReporter[];
   policy: EvalReportingPolicy;
   cursorPath: string;
+  /** Exact preflight authority required by post-hoc publication. Live telemetry may omit it. */
+  requiredFinalReportSnapshot?: VerifiedFinalReportSnapshot;
   now?: () => Date;
   maxDeliveryAttempts?: number;
   retryDelayMs?: number;
+}
+
+export function isRequiredFinalReportTelemetryError(error: unknown): error is EvalError {
+  return error instanceof EvalError && error.code.startsWith("EVAL_TELEMETRY_REQUIRED_FINAL_REPORT_");
 }
 
 export function createTelemetryCursor(): TelemetryCursorState {
@@ -525,33 +538,39 @@ export class NodeTelemetryPump {
     const uploads: EvalArtifactUpload[] = [];
     const layout = layoutForRunRoot(this.input.runRoot);
     const nodeDir = getNodeArtifactDir(layout, nodeId);
-    const publishesFinalReport = manifest.output_contracts.some((output) => output.contract === "ultrafuzz/report@2");
-    let verifiedFinalReport: Map<string, { bytes: Buffer; sha256: string; absolutePath: string }> | undefined;
+    const requiredSnapshot = this.input.requiredFinalReportSnapshot;
+    const manifestDeclaresFinalReport = manifest.output_contracts.some(
+      (output) => output.contract === "ultrafuzz/report@2"
+    );
+    const isRequiredFinalReportProducer = requiredSnapshot?.authority.attempt_id === nodeId;
+    const publishesFinalReport = manifestDeclaresFinalReport || isRequiredFinalReportProducer;
+    let verifiedFinalReport: Map<string, VerifiedFinalReportFile> | undefined;
     if (publishesFinalReport) {
       try {
-        const snapshot = loadVerifiedFinalReportSnapshot(this.input.runRoot);
+        const snapshot = requiredSnapshot ?? loadVerifiedFinalReportSnapshot(this.input.runRoot);
+        if (requiredSnapshot !== undefined) {
+          if (!isRequiredFinalReportProducer) {
+            throw new Error(
+              `manifest ${nodeId} declares a final report owned by ${requiredSnapshot.authority.attempt_id}`
+            );
+          }
+          assertVerifiedFinalReportSnapshotRemainedCurrent(snapshot);
+        }
         if (snapshot.authority.attempt_id !== nodeId) {
           throw new Error(`verified final-report authority belongs to ${snapshot.authority.attempt_id}`);
         }
-        verifiedFinalReport = new Map([
-          [
-            "report.json",
-            {
-              bytes: snapshot.json_bytes,
-              sha256: sha256Bytes(snapshot.json_bytes),
-              absolutePath: snapshot.artifacts.json_path
-            }
-          ],
-          [
-            "report.md",
-            {
-              bytes: snapshot.markdown_bytes,
-              sha256: sha256Bytes(snapshot.markdown_bytes),
-              absolutePath: snapshot.artifacts.markdown_path
-            }
-          ]
-        ]);
+        verifiedFinalReport = verifiedFinalReportFiles(snapshot);
+        if (requiredSnapshot !== undefined) {
+          assertRequiredFinalReportManifest(manifest, snapshot, verifiedFinalReport);
+        }
       } catch (error) {
+        if (requiredSnapshot !== undefined) {
+          throw new EvalError(
+            "EVAL_TELEMETRY_REQUIRED_FINAL_REPORT_AUTHORITY_INVALID",
+            `required final-report publication ${nodeId} lost its preflight authority: ${error instanceof Error ? error.message : String(error)}`,
+            { node_id: nodeId, reason: error instanceof Error ? error.message : String(error) }
+          );
+        }
         warnings.push(
           warningDiagnostic(
             "EVAL_TELEMETRY_ARTIFACT_UNVERIFIED",
@@ -562,13 +581,13 @@ export class NodeTelemetryPump {
       }
     }
     for (const file of manifest.files) {
-      if (!includeSet.has(file.path)) {
+      const verified = verifiedFinalReport?.get(file.path);
+      if (!includeSet.has(file.path) && (verified === undefined || !includeSet.has(verified.policyPath))) {
         continue;
       }
       if (file.size_bytes > policy.max_file_bytes) {
         continue;
       }
-      const verified = verifiedFinalReport?.get(file.path);
       if (publishesFinalReport && verified === undefined) continue;
       if (verified !== undefined) {
         if (
@@ -576,6 +595,13 @@ export class NodeTelemetryPump {
           verified.bytes.length !== file.size_bytes ||
           verified.sha256 !== file.sha256
         ) {
+          if (requiredSnapshot !== undefined) {
+            throw new EvalError(
+              "EVAL_TELEMETRY_REQUIRED_FINAL_REPORT_MANIFEST_MISMATCH",
+              `required final-report manifest differs from preflight bytes ${nodeId}/${file.path}`,
+              { node_id: nodeId, artifact_path: file.path }
+            );
+          }
           warnings.push(
             warningDiagnostic(
               "EVAL_TELEMETRY_ARTIFACT_UNVERIFIED",
@@ -607,10 +633,25 @@ export class NodeTelemetryPump {
         sha256: file.sha256,
         ...(payloadAllowed
           ? {
-              read: async () =>
-                verified === undefined
-                  ? readValidatedArtifact(nodeDir, file, policy.max_file_bytes)
-                  : Buffer.from(verified.bytes)
+              read: async () => {
+                if (verified === undefined) return readValidatedArtifact(nodeDir, file, policy.max_file_bytes);
+                if (requiredSnapshot !== undefined) {
+                  try {
+                    assertVerifiedFinalReportSnapshotRemainedCurrent(requiredSnapshot);
+                  } catch (error) {
+                    throw new EvalError(
+                      "EVAL_TELEMETRY_REQUIRED_FINAL_REPORT_AUTHORITY_CHANGED",
+                      `required final-report authority changed before delivering ${nodeId}/${file.path}`,
+                      {
+                        node_id: nodeId,
+                        artifact_path: file.path,
+                        reason: error instanceof Error ? error.message : String(error)
+                      }
+                    );
+                  }
+                }
+                return Buffer.from(verified.bytes);
+              }
             }
           : {})
       });
@@ -675,6 +716,7 @@ export class NodeTelemetryPump {
           await action(reporter);
           delivered = true;
         } catch (error) {
+          if (isRequiredFinalReportTelemetryError(error)) throw error;
           lastError = error;
           if (attempt < this.maxAttempts && this.retryDelayMs > 0) {
             await sleep(this.retryDelayMs * attempt);
@@ -717,6 +759,102 @@ export class NodeTelemetryPump {
     this.cursor.providerIds = clone.providerIds;
     this.cursor.findingsCountByNode = clone.findingsCountByNode;
   }
+}
+
+interface VerifiedFinalReportFile {
+  bytes: Buffer;
+  sha256: string;
+  absolutePath: string;
+  /** Stable reporting-policy role retained when the topology uses a custom path. */
+  policyPath: "report.json" | "report.md";
+}
+
+function verifiedFinalReportFiles(snapshot: VerifiedFinalReportSnapshot): Map<string, VerifiedFinalReportFile> {
+  const bindings = [
+    {
+      contract: "ultrafuzz/report@2",
+      policyPath: "report.json",
+      absolutePath: snapshot.artifacts.json_path,
+      bytes: snapshot.json_bytes
+    },
+    {
+      contract: "ultrafuzz/nonempty-markdown@1",
+      policyPath: "report.md",
+      absolutePath: snapshot.artifacts.markdown_path,
+      bytes: snapshot.markdown_bytes
+    }
+  ] as const;
+  const files = new Map<string, VerifiedFinalReportFile>();
+  for (const binding of bindings) {
+    const matches = snapshot.authority.outputs.filter(
+      (output) =>
+        output.contract === binding.contract &&
+        path.resolve(output.absolute_path) === path.resolve(binding.absolutePath)
+    );
+    if (matches.length !== 1) {
+      throw new Error(`verified final-report snapshot does not bind one exact ${binding.contract} declaration`);
+    }
+    const output = matches[0]!;
+    if (files.has(output.path)) {
+      throw new Error(`verified final-report snapshot repeats declared path ${output.path}`);
+    }
+    const bytes = Buffer.from(binding.bytes);
+    files.set(output.path, {
+      bytes,
+      sha256: sha256Bytes(bytes),
+      absolutePath: binding.absolutePath,
+      policyPath: binding.policyPath
+    });
+  }
+  return files;
+}
+
+function assertRequiredFinalReportManifest(
+  manifest: ArtifactManifest,
+  snapshot: VerifiedFinalReportSnapshot,
+  verifiedFiles: ReadonlyMap<string, VerifiedFinalReportFile>
+): void {
+  const attemptId = snapshot.authority.attempt_id;
+  const expectedRunId = layoutForRunRoot(snapshot.authority.run_root).runId;
+  if (manifest.run_id !== expectedRunId || manifest.node_id !== attemptId || manifest.producer_node_id !== attemptId) {
+    throw new Error(`live final-report manifest identity does not match required producer ${attemptId}`);
+  }
+
+  const expectedDeclarations = finalReportDeclarations(snapshot.authority.outputs);
+  const actualDeclarations = finalReportDeclarations(manifest.output_contracts);
+  if (expectedDeclarations.length !== 2 || !isDeepStrictEqual(actualDeclarations, expectedDeclarations)) {
+    throw new Error("live final-report manifest does not declare the exact required JSON/Markdown pair");
+  }
+
+  for (const [relativePath, verified] of verifiedFiles) {
+    const entries = manifest.files.filter((file) => file.path === relativePath);
+    if (entries.length !== 1) {
+      throw new Error(`live final-report manifest must contain exactly one file entry for ${relativePath}`);
+    }
+    const entry = entries[0]!;
+    if (entry.size_bytes !== verified.bytes.length || entry.sha256 !== verified.sha256) {
+      throw new Error(`live final-report manifest file binding changed for ${relativePath}`);
+    }
+  }
+}
+
+function finalReportDeclarations(
+  outputs: readonly (ArtifactManifestOutputContract | VerifiedOutputArtifactSnapshot)[]
+): ArtifactManifestOutputContract[] {
+  return outputs
+    .filter((output) => output.contract === "ultrafuzz/report@2" || output.contract === "ultrafuzz/nonempty-markdown@1")
+    .map((output) => ({
+      path: output.path,
+      contract: output.contract,
+      contract_digest: output.contract_digest,
+      ...(output.schema_file === undefined ? {} : { schema_file: output.schema_file }),
+      ...(output.schema_id === undefined ? {} : { schema_id: output.schema_id }),
+      ...(output.schema_sha256 === undefined ? {} : { schema_sha256: output.schema_sha256 }),
+      ...(output.schema_bundle_sha256 === undefined ? {} : { schema_bundle_sha256: output.schema_bundle_sha256 }),
+      ...(output.validator_build === undefined ? {} : { validator_build: output.validator_build }),
+      primary: output.primary
+    }))
+    .sort((left, right) => left.contract.localeCompare(right.contract) || left.path.localeCompare(right.path));
 }
 
 async function acquireTelemetryCursorLock(cursorPath: string): Promise<() => Promise<void>> {

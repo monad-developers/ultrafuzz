@@ -95,7 +95,7 @@ function writeSummary(
     )
   );
   const summary: EvalScoreSummary = {
-    schema_version: "ultrafuzz.eval.score-summary.v1",
+    schema_version: "ultrafuzz.eval.score-summary.v2",
     eval_run_id: evalRunId,
     eval_run_root: root,
     recall_threshold: 0.7,

@@ -92,9 +92,27 @@ function writeArtifact(
   const declaredOutputs =
     contract === undefined
       ? []
-      : [boundOutput(artifactPath, contract, !existingOutputs.some((output) => output.primary === true))];
+      : [
+          boundOutput(artifactPath, contract, !existingOutputs.some((output) => output.primary === true)),
+          ...(contract === "ultrafuzz/invariant-ledger@1"
+            ? [boundOutput("setup/project-discovery.md", "ultrafuzz/nonempty-markdown@1", false)]
+            : contract === "ultrafuzz/properties@2"
+              ? [boundOutput("properties.md", "ultrafuzz/nonempty-markdown@1", false)]
+              : [])
+        ];
   registerArtifactNode(layout, nodeId, declaredOutputs);
   const written = writeArtifactFile(layout, nodeId, artifactPath, contents);
+  if (contract === "ultrafuzz/invariant-ledger@1") {
+    const markdownPath = path.join(getNodeArtifactDir(layout, nodeId), "setup/project-discovery.md");
+    if (!fs.existsSync(markdownPath)) {
+      writeArtifactFile(layout, nodeId, "setup/project-discovery.md", fixtureInvariantLedgerMarkdown(contents));
+    }
+  } else if (contract === "ultrafuzz/properties@2") {
+    const markdownPath = path.join(getNodeArtifactDir(layout, nodeId), "properties.md");
+    if (!fs.existsSync(markdownPath)) {
+      writeArtifactFile(layout, nodeId, "properties.md", fixtureCanonicalPropertiesMarkdown(contents));
+    }
+  }
   materializeFixtureCampaignEvidence(layout, nodeId, contents);
   if (declaredOutputs.length > 0) {
     const registeredOutputs = readRunState(layout).nodes[nodeId]?.outputs ?? declaredOutputs;
@@ -110,6 +128,69 @@ function writeArtifact(
     );
   }
   return written;
+}
+
+function fixtureCanonicalPropertiesMarkdown(contents: string): string {
+  const document = JSON.parse(contents) as {
+    properties: Array<{
+      id: string;
+      description: string;
+      category: string;
+      priority: string;
+      sources: Array<{ source_node_id: string; source_property_id: string }>;
+      ledger_ids?: string[];
+      reference_expectations?: string[];
+    }>;
+  };
+  return document.properties
+    .flatMap((property) => [
+      `### Canonical property: ${JSON.stringify(property.id)}`,
+      `description: ${JSON.stringify(property.description)}`,
+      `category: ${JSON.stringify(property.category)}`,
+      `priority: ${JSON.stringify(property.priority)}`,
+      `sources: ${JSON.stringify(property.sources)}`,
+      ...((property.ledger_ids?.length ?? 0) === 0 ? [] : [`ledger_ids: ${JSON.stringify(property.ledger_ids)}`]),
+      ...((property.reference_expectations?.length ?? 0) === 0
+        ? []
+        : [`reference_expectations: ${JSON.stringify(property.reference_expectations)}`]),
+      `### End canonical property: ${JSON.stringify(property.id)}`
+    ])
+    .join("\n");
+}
+
+function fixtureInvariantLedgerMarkdown(contents: string): string {
+  const document = JSON.parse(contents) as {
+    entries: Array<{
+      id: string;
+      source_path: string;
+      source_location: string;
+      kind: string;
+      verbatim: string;
+      inventory_ids: string[];
+    }>;
+    inventory_rows?: Array<{ id: string; description: string; ledger_ids: string[] }>;
+  };
+  const lines = ["# Discovery"];
+  for (const entry of document.entries) {
+    lines.push(
+      `### Ledger entry: ${JSON.stringify(entry.id)}`,
+      `source_path: ${JSON.stringify(entry.source_path)}`,
+      `source_location: ${JSON.stringify(entry.source_location)}`,
+      `kind: ${JSON.stringify(entry.kind)}`,
+      `verbatim: ${JSON.stringify(entry.verbatim)}`,
+      `inventory_ids: ${JSON.stringify(entry.inventory_ids)}`,
+      `### End ledger entry: ${JSON.stringify(entry.id)}`
+    );
+  }
+  for (const row of document.inventory_rows ?? []) {
+    lines.push(
+      `### Inventory row: ${JSON.stringify(row.id)}`,
+      `description: ${JSON.stringify(row.description)}`,
+      `ledger_ids: ${JSON.stringify(row.ledger_ids)}`,
+      `### End inventory row: ${JSON.stringify(row.id)}`
+    );
+  }
+  return `${lines.join("\n")}\n`;
 }
 
 function materializeFixtureCampaignEvidence(
@@ -267,44 +348,24 @@ function writeMinimalPropertyFaninFixture(
       scan_probes: []
     })
   );
-  writeArtifact(
-    layout,
-    "property-specification-fanin",
-    "properties.json",
-    JSON.stringify({
-      schema_version: "ultrafuzz.properties.v2",
-      properties: [
-        {
-          id: "property-1",
-          description: "Supply accounting remains consistent.",
-          category: "accounting",
-          priority: "high",
-          sources: [{ source_node_id: sourceNodeId, source_property_id: sourcePropertyId }],
-          ledger_ids: ["evidence-1"],
-          ...(options.referenceExpectation === undefined
-            ? {}
-            : { reference_expectations: [options.referenceExpectation] })
-        }
-      ]
-    })
-  );
-  writeArtifact(
-    layout,
-    "property-specification-fanin",
-    "properties.md",
-    [
-      "### Canonical property: property-1",
-      "- description: Supply accounting remains consistent.",
-      "- category: accounting",
-      "- priority: high",
-      `- sources: ${sourceNodeId}:${sourcePropertyId}`,
-      "- ledger_ids: evidence-1",
-      ...(options.referenceExpectation === undefined
-        ? []
-        : [`- reference_expectations: ${options.referenceExpectation}`]),
-      "### End canonical property: property-1"
-    ].join("\n")
-  );
+  const catalog = JSON.stringify({
+    schema_version: "ultrafuzz.properties.v2",
+    properties: [
+      {
+        id: "property-1",
+        description: "Supply accounting remains consistent.",
+        category: "accounting",
+        priority: "high",
+        sources: [{ source_node_id: sourceNodeId, source_property_id: sourcePropertyId }],
+        ledger_ids: ["evidence-1"],
+        ...(options.referenceExpectation === undefined
+          ? {}
+          : { reference_expectations: [options.referenceExpectation] })
+      }
+    ]
+  });
+  writeArtifact(layout, "property-specification-fanin", "properties.json", catalog);
+  writeArtifact(layout, "property-specification-fanin", "properties.md", fixtureCanonicalPropertiesMarkdown(catalog));
   return {
     ...plannedNode(["properties.json", "properties.md"]),
     id: "property-specification-fanin",
@@ -2879,6 +2940,265 @@ test("artifact contracts reject malformed outputs and accept canonical empty out
   assert.equal(verifyRequiredArtifactsForAttempt(layout, node, "strategy-a").ok, true);
 });
 
+test("project discovery gate accepts custom exact typed paths under a noncanonical logical ID", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-renamed-discovery-contract" });
+  const nodeId = "renamed-discovery-attempt";
+  const ledgerOutput = boundOutput("custom/evidence-ledger.json", "ultrafuzz/invariant-ledger@1", true);
+  const markdownOutput = boundOutput("custom/discovery-handoff.md", "ultrafuzz/nonempty-markdown@1", false);
+  const node: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: nodeId,
+    logical_id: "noncanonical-discovery-role",
+    display_name: "Renamed discovery",
+    artifact_dir: `artifacts/${nodeId}`,
+    outputs: [ledgerOutput, markdownOutput]
+  };
+  fs.mkdirSync(path.join(layout.workspacesDir, nodeId), { recursive: true });
+  writeArtifactFile(
+    layout,
+    nodeId,
+    ledgerOutput.path,
+    invariantProbeLedger([
+      { id: "probe-root", source_path: ".", query: "repository invariant scan", result: "Scanned repository" }
+    ])
+  );
+  writeArtifactFile(layout, nodeId, markdownOutput.path, "# Custom discovery handoff\n");
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+});
+
+test("project discovery gate rejects wrong-contract lookalikes and ambiguous typed ledgers", () => {
+  const wrongLayout = createRunLayout({ projectRoot: tempProject(), runId: "run-wrong-discovery-contract" });
+  const wrongNode: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "renamed-discovery",
+    logical_id: "noncanonical-discovery-role",
+    artifact_dir: "artifacts/renamed-discovery",
+    outputs: [
+      boundOutput("setup/invariant-evidence-ledger.json", "ultrafuzz/text@1", true),
+      boundOutput("setup/project-discovery.md", "ultrafuzz/nonempty-markdown@1", false)
+    ]
+  };
+  writeArtifactFile(wrongLayout, wrongNode.id, "setup/invariant-evidence-ledger.json", "lookalike\n");
+  writeArtifactFile(wrongLayout, wrongNode.id, "setup/project-discovery.md", "# Discovery\n");
+  const wrong = verifyRequiredArtifactsForAttempt(wrongLayout, wrongNode, wrongNode.id);
+  assert.equal(wrong.ok, false);
+  assert.ok(wrong.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_DECLARATION_WRONG_CONTRACT"));
+
+  const wrongMarkdownLayout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-wrong-discovery-markdown-contract"
+  });
+  const wrongMarkdownNode: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "renamed-discovery",
+    logical_id: "noncanonical-discovery-role",
+    artifact_dir: "artifacts/renamed-discovery",
+    outputs: [
+      boundOutput("custom/ledger.json", "ultrafuzz/invariant-ledger@1", true),
+      boundOutput("setup/project-discovery.md", "ultrafuzz/text@1", false)
+    ]
+  };
+  writeArtifactFile(wrongMarkdownLayout, wrongMarkdownNode.id, "custom/ledger.json", invariantProbeLedger([]));
+  writeArtifactFile(wrongMarkdownLayout, wrongMarkdownNode.id, "setup/project-discovery.md", "lookalike\n");
+  const wrongMarkdown = verifyRequiredArtifactsForAttempt(wrongMarkdownLayout, wrongMarkdownNode, wrongMarkdownNode.id);
+  assert.equal(wrongMarkdown.ok, false);
+  assert.ok(
+    wrongMarkdown.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "INVARIANT_LEDGER_DECLARATION_WRONG_CONTRACT" &&
+        diagnostic.path === "setup/project-discovery.md"
+    )
+  );
+
+  const ambiguousLayout = createRunLayout({ projectRoot: tempProject(), runId: "run-ambiguous-discovery-contract" });
+  const ambiguousNode: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "renamed-discovery",
+    logical_id: "noncanonical-discovery-role",
+    artifact_dir: "artifacts/renamed-discovery",
+    outputs: [
+      boundOutput("custom/a.json", "ultrafuzz/invariant-ledger@1", true),
+      boundOutput("custom/b.json", "ultrafuzz/invariant-ledger@1", false),
+      boundOutput("custom/discovery.md", "ultrafuzz/nonempty-markdown@1", false)
+    ]
+  };
+  const ledger = invariantProbeLedger([
+    { id: "probe-root", source_path: ".", query: "repository invariant scan", result: "Scanned repository" }
+  ]);
+  writeArtifactFile(ambiguousLayout, ambiguousNode.id, "custom/a.json", ledger);
+  writeArtifactFile(ambiguousLayout, ambiguousNode.id, "custom/b.json", ledger);
+  writeArtifactFile(ambiguousLayout, ambiguousNode.id, "custom/discovery.md", "# Discovery\n");
+  const ambiguous = verifyRequiredArtifactsForAttempt(ambiguousLayout, ambiguousNode, ambiguousNode.id);
+  assert.equal(ambiguous.ok, false);
+  assert.ok(ambiguous.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_DECLARATION_AMBIGUOUS"));
+});
+
+test("canonical property gate accepts one custom typed JSON/Markdown pair under a noncanonical logical ID", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-renamed-canonical-pair" });
+  fs.mkdirSync(path.join(layout.workspacesDir, "project-discovery"), { recursive: true });
+  writeArtifact(
+    layout,
+    "project-discovery",
+    "setup/invariant-evidence-ledger.json",
+    invariantProbeLedger([
+      { id: "probe-root", source_path: ".", query: "repository invariant scan", result: "Scanned repository" }
+    ])
+  );
+  writePropertyLens(layout, "renamed-property-lens", ["lens-one"]);
+  const catalog = JSON.stringify({
+    schema_version: "ultrafuzz.properties.v2",
+    properties: [
+      {
+        id: "property-one",
+        description: "Balances remain conserved.",
+        category: "accounting",
+        priority: "high",
+        sources: [{ source_node_id: "renamed-property-lens", source_property_id: "lens-one" }]
+      }
+    ]
+  });
+  const nodeId = "renamed-canonicalizer-attempt";
+  const node: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: nodeId,
+    logical_id: "noncanonical-canonicalizer-role",
+    display_name: "Renamed canonicalizer",
+    artifact_dir: `artifacts/${nodeId}`,
+    depends_on: ["renamed-property-lens"],
+    outputs: [
+      boundOutput("custom/catalog.json", "ultrafuzz/properties@2", true),
+      boundOutput("custom/catalog.md", "ultrafuzz/nonempty-markdown@1", false)
+    ]
+  };
+  writeArtifactFile(layout, nodeId, "custom/catalog.json", catalog);
+  writeArtifactFile(layout, nodeId, "custom/catalog.md", fixtureCanonicalPropertiesMarkdown(catalog));
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+});
+
+test("host gate validates invariant-ledger and canonical-properties roles independently on one producer", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-composed-property-roles" });
+  fs.mkdirSync(path.join(layout.workspacesDir, "project-discovery"), { recursive: true });
+  writeArtifact(
+    layout,
+    "project-discovery",
+    "setup/invariant-evidence-ledger.json",
+    invariantProbeLedger([
+      { id: "probe-root", source_path: ".", query: "repository invariant scan", result: "Scanned repository" }
+    ])
+  );
+  writePropertyLens(layout, "composed-property-lens", ["lens-one"]);
+
+  const nodeId = "composed-property-producer";
+  const currentLedger = invariantProbeLedger([
+    { id: "probe-current", source_path: ".", query: "current invariant scan", result: "Scanned repository" }
+  ]);
+  const catalog = JSON.stringify({
+    schema_version: "ultrafuzz.properties.v2",
+    properties: [
+      {
+        id: "property-one",
+        description: "Balances remain conserved.",
+        category: "accounting",
+        priority: "high",
+        sources: [{ source_node_id: "composed-property-lens", source_property_id: "lens-one" }]
+      }
+    ]
+  });
+  const node: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: nodeId,
+    logical_id: nodeId,
+    artifact_dir: `artifacts/${nodeId}`,
+    depends_on: ["composed-property-lens"],
+    outputs: [
+      boundOutput("custom/ledger.json", "ultrafuzz/invariant-ledger@1", true),
+      boundOutput("custom/catalog.json", "ultrafuzz/properties@2", false),
+      boundOutput("custom/handoff.md", "ultrafuzz/nonempty-markdown@1", false)
+    ]
+  };
+  fs.mkdirSync(path.join(layout.workspacesDir, nodeId), { recursive: true });
+  writeArtifactFile(layout, nodeId, "custom/ledger.json", currentLedger);
+  writeArtifactFile(layout, nodeId, "custom/catalog.json", catalog);
+  writeArtifactFile(
+    layout,
+    nodeId,
+    "custom/handoff.md",
+    `${fixtureInvariantLedgerMarkdown(currentLedger)}\n${fixtureCanonicalPropertiesMarkdown(catalog).replace(
+      'description: "Balances remain conserved."',
+      'description: "Drifted canonical companion."'
+    )}`
+  );
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+  assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_MARKDOWN_PARITY_MISSING"),
+    JSON.stringify(result.diagnostics)
+  );
+  assert.equal(
+    result.diagnostics.some((diagnostic) => diagnostic.code.startsWith("INVARIANT_LEDGER_MARKDOWN_")),
+    false,
+    JSON.stringify(result.diagnostics)
+  );
+});
+
+test("canonical property gate rejects wrong-contract lookalikes and ambiguous typed companions", () => {
+  const verify = (
+    runId: string,
+    outputs: PlannedGraphNode["outputs"]
+  ): ReturnType<typeof verifyRequiredArtifactsForAttempt> => {
+    const layout = createRunLayout({ projectRoot: tempProject(), runId });
+    const node: PlannedGraphNode = {
+      ...plannedNode([]),
+      id: "renamed-canonicalizer",
+      logical_id: "noncanonical-canonicalizer-role",
+      artifact_dir: "artifacts/renamed-canonicalizer",
+      outputs
+    };
+    for (const output of outputs) {
+      const contents =
+        output.contract === "ultrafuzz/properties@2"
+          ? '{"schema_version":"ultrafuzz.properties.v2","properties":[]}'
+          : "lookalike\n";
+      writeArtifactFile(layout, node.id, output.path, contents);
+    }
+    return verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  };
+
+  const wrongCatalog = verify("run-wrong-catalog-lookalike", [
+    boundOutput("properties.json", "ultrafuzz/text@1", true),
+    boundOutput("properties.md", "ultrafuzz/nonempty-markdown@1", false)
+  ]);
+  assert.ok(
+    wrongCatalog.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_CATALOG_DECLARATION_WRONG_CONTRACT")
+  );
+
+  const wrongMarkdown = verify("run-wrong-markdown-lookalike", [
+    boundOutput("custom/catalog.json", "ultrafuzz/properties@2", true),
+    boundOutput("custom/catalog.md", "ultrafuzz/nonempty-markdown@1", false),
+    boundOutput("properties.md", "ultrafuzz/text@1", false)
+  ]);
+  assert.ok(
+    wrongMarkdown.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_MARKDOWN_DECLARATION_WRONG_CONTRACT")
+  );
+
+  const ambiguousMarkdown = verify("run-ambiguous-markdown", [
+    boundOutput("custom/catalog.json", "ultrafuzz/properties@2", true),
+    boundOutput("custom/a.md", "ultrafuzz/nonempty-markdown@1", false),
+    boundOutput("custom/b.md", "ultrafuzz/nonempty-markdown@1", false)
+  ]);
+  assert.ok(
+    ambiguousMarkdown.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_MARKDOWN_DECLARATION_AMBIGUOUS")
+  );
+});
+
 test("project discovery gate requires ledger evidence to survive in the markdown handoff", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-invariant-ledger-markdown" });
   const node = {
@@ -2921,20 +3241,7 @@ test("project discovery gate requires ledger evidence to survive in the markdown
     layout,
     "project-discovery",
     "setup/project-discovery.md",
-    [
-      "# Discovery",
-      "### Ledger entry: evidence-borrowed-assets",
-      "- source_path: docs/overview.md",
-      "- source_location: lines 54-55",
-      "- kind: inequality",
-      "- verbatim: Total borrowed assets <= total supplied assets; source text mentions ### End ledger entry: evidence-borrowed-assets inline.",
-      "- inventory_ids: inventory-hub-solvency",
-      "### End ledger entry: evidence-borrowed-assets",
-      "### Inventory row: inventory-hub-solvency",
-      "- description: Hub borrowed assets remain at or below supplied assets.",
-      "- ledger_ids: evidence-borrowed-assets",
-      "### End inventory row: inventory-hub-solvency"
-    ].join("\n")
+    fixtureInvariantLedgerMarkdown(JSON.stringify(ledger))
   );
 
   assert.equal(verifyRequiredArtifactsForAttempt(layout, node, node.id).ok, true);
@@ -3013,6 +3320,15 @@ test("project discovery gate requires ledger evidence to survive in the markdown
       ]
     })
   );
+  const staleNoEvidenceMarkdown = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(staleNoEvidenceMarkdown.ok, false, JSON.stringify(staleNoEvidenceMarkdown.diagnostics));
+  assert.ok(
+    staleNoEvidenceMarkdown.diagnostics.some(
+      (diagnostic) => diagnostic.code === "INVARIANT_LEDGER_MARKDOWN_EVIDENCE_EXTRA"
+    ),
+    JSON.stringify(staleNoEvidenceMarkdown.diagnostics)
+  );
+  writeArtifact(layout, "project-discovery", "setup/project-discovery.md", "# Discovery\n");
   const explicitNoEvidence = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(explicitNoEvidence.ok, true, JSON.stringify(explicitNoEvidence.diagnostics));
 
@@ -3315,20 +3631,29 @@ test("project discovery gate still rejects a directory invariant source", () => 
     layout,
     "project-discovery",
     "setup/project-discovery.md",
-    [
-      "# Discovery",
-      "### Ledger entry: evidence-directory-source",
-      "- source_path: src",
-      "- source_location: line 1",
-      "- kind: inequality",
-      "- verbatim: contract Hub {}",
-      "- inventory_ids: inventory-hub-solvency",
-      "### End ledger entry: evidence-directory-source",
-      "### Inventory row: inventory-hub-solvency",
-      "- description: Hub borrowed assets remain at or below supplied assets.",
-      "- ledger_ids: evidence-directory-source",
-      "### End inventory row: inventory-hub-solvency"
-    ].join("\n")
+    fixtureInvariantLedgerMarkdown(
+      JSON.stringify({
+        schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+        entries: [
+          {
+            id: "evidence-directory-source",
+            source_path: "src",
+            source_location: "line 1",
+            kind: "inequality",
+            verbatim: "contract Hub {}",
+            inventory_ids: ["inventory-hub-solvency"]
+          }
+        ],
+        inventory_rows: [
+          {
+            id: "inventory-hub-solvency",
+            description: "Hub borrowed assets remain at or below supplied assets.",
+            ledger_ids: ["evidence-directory-source"]
+          }
+        ],
+        scan_probes: []
+      })
+    )
   );
   writeArtifact(
     layout,
@@ -3487,7 +3812,7 @@ test("project discovery gate verifies immutable source proof after the discovery
     layout,
     "project-discovery",
     "setup/project-discovery.md",
-    "### Ledger entry: evidence-solvency\nsource_path: docs/overview.md\nsource_location: lines 1-1\nverbatim: Total borrowed assets <= total supplied assets\ninventory-solvency\n### End ledger entry: evidence-solvency\n### Inventory row: inventory-solvency\ndescription: Borrowed assets stay below supplied assets.\nledger_ids: evidence-solvency\n### End inventory row: inventory-solvency\n"
+    fixtureInvariantLedgerMarkdown(JSON.stringify(ledger))
   );
   const source = "Total borrowed assets <= total supplied assets\n";
   fs.mkdirSync(path.join(layout.root, "source-proofs"), { recursive: true });
@@ -3519,6 +3844,16 @@ test("project discovery gate verifies immutable source proof after the discovery
   );
   fs.rmSync(path.join(layout.workspacesDir, "project-discovery"), { recursive: true, force: true });
   assert.equal(verifyRequiredArtifactsForAttempt(layout, node, node.id).ok, true);
+
+  fs.writeFileSync(path.join(layout.workspacesDir, "project-discovery"), "present but not a Git workspace\n");
+  const malformedPresentWorkspace = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(malformedPresentWorkspace.ok, false);
+  assert.ok(
+    malformedPresentWorkspace.diagnostics.some(
+      (diagnostic) => diagnostic.code === "INVARIANT_LEDGER_SOURCE_PROOF_INVALID"
+    )
+  );
+  fs.unlinkSync(path.join(layout.workspacesDir, "project-discovery"));
 
   fs.writeFileSync(
     path.join(layout.root, "source-proofs", "project-discovery.invariant.json"),
@@ -3606,23 +3941,7 @@ test("project discovery gate preserves repeated backslashes in Markdown formula 
     scan_probes: []
   };
   writeArtifact(layout, node.id, "setup/invariant-evidence-ledger.json", JSON.stringify(ledger));
-  writeArtifact(
-    layout,
-    node.id,
-    "setup/project-discovery.md",
-    [
-      "### Ledger entry: evidence-min-lb-formula",
-      "source_path: docs/overview.md",
-      "source_location: line 1",
-      `verbatim: ${source.trim()}`,
-      "inventory-min-lb-formula",
-      "### End ledger entry: evidence-min-lb-formula",
-      "### Inventory row: inventory-min-lb-formula",
-      "description: The minimum liquidation bonus uses the documented lower-bound formula.",
-      "ledger_ids: evidence-min-lb-formula",
-      "### End inventory row: inventory-min-lb-formula"
-    ].join("\n")
-  );
+  writeArtifact(layout, node.id, "setup/project-discovery.md", fixtureInvariantLedgerMarkdown(JSON.stringify(ledger)));
 
   const valid = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
@@ -3678,23 +3997,7 @@ test("project discovery gate parses source text containing a closing ledger mark
     scan_probes: []
   };
   writeArtifact(layout, node.id, "setup/invariant-evidence-ledger.json", JSON.stringify(ledger));
-  writeArtifact(
-    layout,
-    node.id,
-    "setup/project-discovery.md",
-    [
-      "### Ledger entry: evidence-marker",
-      "source_path: docs/overview.md",
-      "source_location: lines 1-2",
-      `verbatim: ${verbatim}`,
-      "inventory-marker",
-      "### End ledger entry: evidence-marker",
-      "### Inventory row: inventory-marker",
-      "description: The source statement remains linked to its inventory row.",
-      "ledger_ids: evidence-marker",
-      "### End inventory row: inventory-marker"
-    ].join("\n")
-  );
+  writeArtifact(layout, node.id, "setup/project-discovery.md", fixtureInvariantLedgerMarkdown(JSON.stringify(ledger)));
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
@@ -3703,19 +4006,10 @@ test("project discovery gate parses source text containing a closing ledger mark
     layout,
     node.id,
     "setup/project-discovery.md",
-    [
-      "### Ledger entry (malformed): evidence-marker",
-      "source_path: docs/overview.md",
-      "source_location: lines 1-2",
-      "verbatim: Total borrowed assets <= total supplied assets",
-      "  not-a-structural-closer",
-      "inventory-marker",
-      "### Inventory row: inventory-marker",
-      "description: The source statement remains linked to its inventory row.",
-      "ledger_ids: evidence-marker",
-      "### End inventory row: inventory-marker",
-      "### End inventory row: inventory-marker"
-    ].join("\n")
+    fixtureInvariantLedgerMarkdown(JSON.stringify(ledger)).replace(
+      '### End ledger entry: "evidence-marker"',
+      '### End ledger entry: "evidence-other"'
+    )
   );
   const missingCloser = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(missingCloser.ok, false);
@@ -3724,7 +4018,7 @@ test("project discovery gate parses source text containing a closing ledger mark
   );
 });
 
-test("project discovery gate normalizes multiline Markdown presentation prefixes consistently", () => {
+test("project discovery gate preserves multiline evidence through exact JSON string escaping", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-invariant-multiline-prefix" });
   const node = {
     ...plannedNode(["setup/project-discovery.md", "setup/invariant-evidence-ledger.json"]),
@@ -3757,23 +4051,7 @@ test("project discovery gate normalizes multiline Markdown presentation prefixes
     scan_probes: []
   };
   writeArtifact(layout, node.id, "setup/invariant-evidence-ledger.json", JSON.stringify(ledger));
-  writeArtifact(
-    layout,
-    node.id,
-    "setup/project-discovery.md",
-    [
-      "### Ledger entry: evidence-multiline-prefix",
-      "source_path: docs/overview.md",
-      "source_location: lines 1-2",
-      `verbatim: ${source.trim()}`,
-      "inventory-multiline-prefix",
-      "### End ledger entry: evidence-multiline-prefix",
-      "### Inventory row: inventory-multiline-prefix",
-      "description: Both source bullets remain linked to one inventory row.",
-      "ledger_ids: evidence-multiline-prefix",
-      "### End inventory row: inventory-multiline-prefix"
-    ].join("\n")
-  );
+  writeArtifact(layout, node.id, "setup/project-discovery.md", fixtureInvariantLedgerMarkdown(JSON.stringify(ledger)));
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
@@ -3812,23 +4090,7 @@ test("project discovery gate preserves symbol evidence whitespace", () => {
     scan_probes: []
   };
   writeArtifact(layout, node.id, "setup/invariant-evidence-ledger.json", JSON.stringify(ledger));
-  writeArtifact(
-    layout,
-    node.id,
-    "setup/project-discovery.md",
-    [
-      "### Ledger entry: evidence-symbol-whitespace",
-      "source_path: src/Hub.sol",
-      "source_location: function foo",
-      `verbatim: ${verbatim}`,
-      "inventory-symbol-whitespace",
-      "### End ledger entry: evidence-symbol-whitespace",
-      "### Inventory row: inventory-symbol-whitespace",
-      "description: The symbol declaration remains linked to its source evidence.",
-      "ledger_ids: evidence-symbol-whitespace",
-      "### End inventory row: inventory-symbol-whitespace"
-    ].join("\n")
-  );
+  writeArtifact(layout, node.id, "setup/project-discovery.md", fixtureInvariantLedgerMarkdown(JSON.stringify(ledger)));
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
@@ -3876,13 +4138,32 @@ test("fanin gate checks scan probe containment against the discovery workspace",
     layout,
     "property-specification-fanin",
     "properties.md",
-    "### Canonical property: property-1\n- description: A canonical property with no ledger evidence behind it.\n- category: hub-accounting\n- priority: high\n- sources: property-specification-recon:recon-1\n### End canonical property: property-1\n"
+    '### Canonical property: "property-1"\ndescription: "A canonical property with no ledger evidence behind it."\ncategory: "hub-accounting"\npriority: "high"\nsources: [{"source_node_id":"property-specification-recon","source_property_id":"recon-1"}]\n### End canonical property: "property-1"\n'
   );
   writePropertyLens(layout, "property-specification-recon", ["recon-1"]);
 
   writeArtifact(layout, "project-discovery", "setup/invariant-evidence-ledger.json", ledger("."));
   const contained = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(contained.ok, true, JSON.stringify(contained.diagnostics));
+
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.md",
+    '### Canonical property: "property-1"\ndescription: "Drifted Markdown that the old no-evidence early return skipped."\ncategory: "hub-accounting"\npriority: "high"\nsources: [{"source_node_id":"property-specification-recon","source_property_id":"recon-1"}]\n### End canonical property: "property-1"\n'
+  );
+  const noEvidenceParity = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(noEvidenceParity.ok, false, JSON.stringify(noEvidenceParity.diagnostics));
+  assert.ok(
+    noEvidenceParity.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_MARKDOWN_PARITY_MISSING"),
+    JSON.stringify(noEvidenceParity.diagnostics)
+  );
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.md",
+    '### Canonical property: "property-1"\ndescription: "A canonical property with no ledger evidence behind it."\ncategory: "hub-accounting"\npriority: "high"\nsources: [{"source_node_id":"property-specification-recon","source_property_id":"recon-1"}]\n### End canonical property: "property-1"\n'
+  );
 
   writeArtifact(layout, "project-discovery", "setup/invariant-evidence-ledger.json", ledger("../../outside"));
   const escaping = verifyRequiredArtifactsForAttempt(layout, node, node.id);
@@ -3909,7 +4190,11 @@ test("fanin gate checks scan probe containment against the discovery workspace",
   const unjustified = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(unjustified.ok, false, JSON.stringify(unjustified.diagnostics));
   assert.ok(
-    unjustified.diagnostics.some((diagnostic) => diagnostic.code === "ARTIFACT_SEMANTIC_GATE_CONTEXT_UNAVAILABLE"),
+    unjustified.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "INVARIANT_LEDGER_AUTHORITY_INVALID" &&
+        diagnostic.message.includes("no_invariants_justification")
+    ),
     JSON.stringify(unjustified.diagnostics)
   );
 });
@@ -3981,7 +4266,7 @@ test("fanin gate requires every invariant ledger entry to map to a canonical pro
     layout,
     "property-specification-fanin",
     "properties.md",
-    "### Canonical property: property-1\n- description: Total borrowed assets remain at or below total supplied assets.\n- category: hub-accounting\n- priority: high\n- sources: property-specification-recon:recon-1\n- ledger_ids: evidence-borrowed-assets\n### End canonical property: property-1\n"
+    fixtureCanonicalPropertiesMarkdown(catalog(["evidence-borrowed-assets"]))
   );
   assert.equal(verifyRequiredArtifactsForAttempt(layout, node, node.id).ok, false);
   const missingMapping = verifyRequiredArtifactsForAttempt(layout, node, node.id);
@@ -3997,7 +4282,7 @@ test("fanin gate requires every invariant ledger entry to map to a canonical pro
     layout,
     "property-specification-fanin",
     "properties.md",
-    "### Canonical property: property-1\n- description: Total borrowed assets remain at or below total supplied assets.\n- category: hub-accounting\n- priority: high\n- sources: property-specification-recon:recon-1\n- ledger_ids: evidence-borrowed-assets, evidence-borrowed-shares\n### End canonical property: property-1\n"
+    fixtureCanonicalPropertiesMarkdown(catalog(["evidence-borrowed-assets", "evidence-borrowed-shares"]))
   );
   assert.equal(verifyRequiredArtifactsForAttempt(layout, node, node.id).ok, true);
 
@@ -4005,7 +4290,10 @@ test("fanin gate requires every invariant ledger entry to map to a canonical pro
     layout,
     "property-specification-fanin",
     "properties.md",
-    "### Canonical property: property-1\n- description: Total borrowed assets remain at or below total supplied assets.\n- category: hub-accounting\n- priority: high\n- sources: property-specification-recon:recon-1\n- ledger_ids: missing mapping\n### End canonical property: property-1\n"
+    fixtureCanonicalPropertiesMarkdown(catalog(["evidence-borrowed-assets", "evidence-borrowed-shares"])).replace(
+      'ledger_ids: ["evidence-borrowed-assets","evidence-borrowed-shares"]',
+      'ledger_ids: ["missing mapping"]'
+    )
   );
   const missingMarkdownMapping = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(missingMarkdownMapping.ok, false);
@@ -4083,7 +4371,7 @@ test("property fan-in gate rejects Markdown that omits source-only canonical row
     layout,
     "property-specification-fanin",
     "properties.md",
-    "### Canonical property: property-1\n- description: Total borrowed assets \\| supplied assets remain bounded.\n- category: hub-accounting\n- priority: high\n- sources: property-specification-recon:recon-1\n- ledger_ids: evidence-borrowed-assets\n### End canonical property: property-1\n"
+    '### Canonical property: "property-1"\ndescription: "Total borrowed assets | supplied assets remain bounded."\ncategory: "hub-accounting"\npriority: "high"\nsources: [{"source_node_id":"property-specification-recon","source_property_id":"recon-1"}]\nledger_ids: ["evidence-borrowed-assets"]\n### End canonical property: "property-1"\n'
   );
   const node = {
     ...plannedNode(["properties.json", "properties.md"]),
@@ -4117,15 +4405,13 @@ test("property fan-in gate rejects Markdown that omits source-only canonical row
     layout,
     "property-specification-fanin",
     "properties.md",
-    "### Canonical property: property-1\n- description: Total borrowed assets \\| supplied assets remain bounded.\n- category: hub-accounting\n- priority: high\n- ledger_ids: evidence-borrowed-assets\n### End canonical property: property-1\n"
+    '### Canonical property: "property-1"\ndescription: "Total borrowed assets | supplied assets remain bounded."\ncategory: "hub-accounting"\npriority: "high"\nledger_ids: ["evidence-borrowed-assets"]\n### End canonical property: "property-1"\n'
   );
   const missingSources = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(missingSources.ok, false);
   assert.ok(
     missingSources.diagnostics.some(
-      (diagnostic) =>
-        diagnostic.code === "PROPERTY_MARKDOWN_PARITY_MISSING" &&
-        diagnostic.message.includes("property-specification-recon:recon-1")
+      (diagnostic) => diagnostic.code === "PROPERTY_MARKDOWN_PARITY_MISSING" && diagnostic.message.includes("sources")
     )
   );
 
@@ -4133,7 +4419,7 @@ test("property fan-in gate rejects Markdown that omits source-only canonical row
     layout,
     "property-specification-fanin",
     "properties.md",
-    "### Canonical property: property-1\n- description: Total borrowed assets remain at or below supplied assets; evidence-borrowed-assets\n- category: hub-accounting\n- priority: high\n- sources: property-specification-recon:recon-1\n- ledger_ids: evidence-other\n### End canonical property: property-1\n"
+    '### Canonical property: "property-1"\ndescription: "Total borrowed assets remain at or below supplied assets; evidence-borrowed-assets"\ncategory: "hub-accounting"\npriority: "high"\nsources: [{"source_node_id":"property-specification-recon","source_property_id":"recon-1"}]\nledger_ids: ["evidence-other"]\n### End canonical property: "property-1"\n'
   );
   const missingLedgerField = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(missingLedgerField.ok, false);
@@ -4145,20 +4431,20 @@ test("property fan-in gate rejects Markdown that omits source-only canonical row
     layout,
     "property-specification-fanin",
     "properties.md",
-    "### Canonical property: property-1\n- description: Total borrowed assets remain at or below supplied assets.\n- category: hub-accounting\n- priority: high\n- sources: property-specification-recon:recon-1<br>property-specification-extra:extra-1\n- ledger_ids: evidence-borrowed-assets, evidence-extra\n### End canonical property: property-1\n"
+    '### Canonical property: "property-1"\ndescription: "Total borrowed assets remain at or below supplied assets."\ncategory: "hub-accounting"\npriority: "high"\nsources: [{"source_node_id":"property-specification-recon","source_property_id":"recon-1"},{"source_node_id":"property-specification-extra","source_property_id":"extra-1"}]\nledger_ids: ["evidence-borrowed-assets","evidence-extra"]\n### End canonical property: "property-1"\n'
   );
   const extraMappings = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(extraMappings.ok, false);
-  assert.ok(extraMappings.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_MARKDOWN_PARITY_EXTRA"));
+  assert.ok(extraMappings.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_MARKDOWN_PARITY_MISSING"));
   assert.ok(
-    extraMappings.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_MARKDOWN_MAPPING_EXTRA")
+    extraMappings.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_MARKDOWN_MAPPING_MISSING")
   );
 
   writeArtifact(
     layout,
     "property-specification-fanin",
     "properties.md",
-    "### Canonical property: property-1\n- description: Total borrowed assets remain at or below supplied assets. extra\n- category: hub-accounting extra\n- priority: high extra\n- sources: property-specification-recon:recon-1<br>property-specification-recon:recon-1\n- ledger_ids: evidence-borrowed-assets, evidence-borrowed-assets\n### End canonical property: property-1\n"
+    '### Canonical property: "property-1"\ndescription: "Total borrowed assets remain at or below supplied assets. extra"\ncategory: "hub-accounting extra"\npriority: "high extra"\nsources: [{"source_node_id":"property-specification-recon","source_property_id":"recon-1"},{"source_node_id":"property-specification-recon","source_property_id":"recon-1"}]\nledger_ids: ["evidence-borrowed-assets","evidence-borrowed-assets"]\n### End canonical property: "property-1"\n'
   );
   const duplicateAndScalarDrift = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(duplicateAndScalarDrift.ok, false);
@@ -4166,11 +4452,8 @@ test("property fan-in gate rejects Markdown that omits source-only canonical row
     duplicateAndScalarDrift.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_MARKDOWN_PARITY_MISSING")
   );
   assert.ok(
-    duplicateAndScalarDrift.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_MARKDOWN_PARITY_EXTRA")
-  );
-  assert.ok(
     duplicateAndScalarDrift.diagnostics.some(
-      (diagnostic) => diagnostic.code === "INVARIANT_LEDGER_MARKDOWN_MAPPING_EXTRA"
+      (diagnostic) => diagnostic.code === "INVARIANT_LEDGER_MARKDOWN_MAPPING_MISSING"
     )
   );
 
@@ -4178,7 +4461,7 @@ test("property fan-in gate rejects Markdown that omits source-only canonical row
     layout,
     "property-specification-fanin",
     "properties.md",
-    "### Canonical property: property-1\n| ID | property-2 |\n- description: Total borrowed assets | supplied assets remain bounded.\n- category: hub-accounting\n- priority: high\n- sources: property-specification-recon:recon-1\n- ledger_ids: evidence-borrowed-assets\n### End canonical property: property-1\n### Canonical property: property-extra\n### End canonical property: property-extra\n### Canonical property: property-1\n### End canonical property: property-1\n"
+    '### Canonical property: "property-1"\nid: "property-2"\ndescription: "Total borrowed assets | supplied assets remain bounded."\ncategory: "hub-accounting"\npriority: "high"\nsources: [{"source_node_id":"property-specification-recon","source_property_id":"recon-1"}]\nledger_ids: ["evidence-borrowed-assets"]\n### End canonical property: "property-1"\n### Canonical property: "property-extra"\n### End canonical property: "property-extra"\n### Canonical property: "property-1"\n### End canonical property: "property-1"\n'
   );
   const headingParity = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(headingParity.ok, false);
@@ -4252,19 +4535,19 @@ test("property fan-in gate does not demand a ledger_ids field from a property th
     "property-specification-fanin",
     "properties.md",
     [
-      "### Canonical property: property-from-lens-only",
-      "- description: Supply completes for valid state.",
-      "- category: dos-liveness",
-      "- priority: high",
-      "- sources: property-specification-recon:recon-supply",
-      "### End canonical property: property-from-lens-only",
-      "### Canonical property: property-from-ledger",
-      "- description: Supply accounting remains consistent.",
-      "- category: accounting",
-      "- priority: high",
-      "- sources: property-specification-recon:recon-accounting",
-      "- ledger_ids: evidence-supply",
-      "### End canonical property: property-from-ledger"
+      '### Canonical property: "property-from-lens-only"',
+      'description: "Supply completes for valid state."',
+      'category: "dos-liveness"',
+      'priority: "high"',
+      'sources: [{"source_node_id":"property-specification-recon","source_property_id":"recon-supply"}]',
+      '### End canonical property: "property-from-lens-only"',
+      '### Canonical property: "property-from-ledger"',
+      'description: "Supply accounting remains consistent."',
+      'category: "accounting"',
+      'priority: "high"',
+      'sources: [{"source_node_id":"property-specification-recon","source_property_id":"recon-accounting"}]',
+      'ledger_ids: ["evidence-supply"]',
+      '### End canonical property: "property-from-ledger"'
     ].join("\n")
   );
   const node = {
@@ -4337,12 +4620,12 @@ test("property fan-in gate still requires the ledger_ids field when the property
     "property-specification-fanin",
     "properties.md",
     [
-      "### Canonical property: property-from-ledger",
-      "- description: Supply accounting remains consistent.",
-      "- category: accounting",
-      "- priority: high",
-      "- sources: property-specification-recon:recon-accounting",
-      "### End canonical property: property-from-ledger"
+      '### Canonical property: "property-from-ledger"',
+      'description: "Supply accounting remains consistent."',
+      'category: "accounting"',
+      'priority: "high"',
+      'sources: [{"source_node_id":"property-specification-recon","source_property_id":"recon-accounting"}]',
+      '### End canonical property: "property-from-ledger"'
     ].join("\n")
   );
   const node = {
@@ -4362,7 +4645,7 @@ test("property fan-in gate still requires the ledger_ids field when the property
   );
 });
 
-test("property fan-in gate ignores optional Markdown ledger evidence when checking ledger ID parity", () => {
+test("property fan-in gate rejects undeclared Markdown ledger-evidence fields instead of treating them as fallbacks", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-ledger-evidence" });
   writeArtifact(
     layout,
@@ -4413,14 +4696,13 @@ test("property fan-in gate ignores optional Markdown ledger evidence when checki
     "property-specification-fanin",
     "properties.md",
     [
-      "### Canonical property: property-supply",
-      "- description: Supply accounting remains consistent.",
-      "- category: accounting",
-      "- priority: high",
-      "- sources: property-specification-recon:recon-supply",
-      "- ledger_ids: evidence-supply",
-      '- ledger_evidence: {"id":"evidence-supply","source_path":"docs/overview.md","source_location":"line 1"}',
-      "### End canonical property: property-supply"
+      '### Canonical property: "property-supply"',
+      'description: "Supply accounting remains consistent."',
+      'category: "accounting"',
+      'priority: "high"',
+      'sources: [{"source_node_id":"property-specification-recon","source_property_id":"recon-supply"}]',
+      'ledger_ids: ["evidence-supply"]',
+      '### End canonical property: "property-supply"'
     ].join("\n")
   );
   writePropertyLens(layout, "property-specification-recon", ["recon-supply"]);
@@ -4434,27 +4716,35 @@ test("property fan-in gate ignores optional Markdown ledger evidence when checki
   const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
 
-  for (const evidenceField of ["- ledger evidence:", "| ledger-evidence retained:", "ledger_evidence:"]) {
+  for (const evidenceField of [
+    'ledger_evidence: {"id":"evidence-supply"}',
+    'ledger evidence: {"id":"evidence-supply"}',
+    'ledger-evidence: {"id":"evidence-supply"}'
+  ]) {
     writeArtifact(
       layout,
       "property-specification-fanin",
       "properties.md",
       [
-        "### Canonical property: property-supply",
-        "- description: Supply accounting remains consistent.",
-        "- category: accounting",
-        "- priority: high",
-        "- sources: property-specification-recon:recon-supply",
-        "- ledger_ids: evidence-supply",
+        '### Canonical property: "property-supply"',
+        'description: "Supply accounting remains consistent."',
+        'category: "accounting"',
+        'priority: "high"',
+        'sources: [{"source_node_id":"property-specification-recon","source_property_id":"recon-supply"}]',
+        'ledger_ids: ["evidence-supply"]',
         evidenceField,
-        '  {"id":"evidence-supply",',
-        '  "source_path":"docs/overview.md",',
-        '  "source_location":"line 1"}',
-        "### End canonical property: property-supply"
+        '### End canonical property: "property-supply"'
       ].join("\n")
     );
-    const multilineResult = verifyRequiredArtifactsForAttempt(layout, node, node.id);
-    assert.equal(multilineResult.ok, true, `${evidenceField}: ${JSON.stringify(multilineResult.diagnostics)}`);
+    const undeclaredField = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+    assert.equal(undeclaredField.ok, false, `${evidenceField}: ${JSON.stringify(undeclaredField.diagnostics)}`);
+    assert.ok(
+      undeclaredField.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code === "PROPERTY_MARKDOWN_PARITY_EXTRA" || diagnostic.code === "PROPERTY_MARKDOWN_PARITY_MISSING"
+      ),
+      `${evidenceField}: ${JSON.stringify(undeclaredField.diagnostics)}`
+    );
   }
 
   writeArtifact(
@@ -4462,23 +4752,19 @@ test("property fan-in gate ignores optional Markdown ledger evidence when checki
     "property-specification-fanin",
     "properties.md",
     [
-      "### Canonical property: property-supply",
-      "- description: Supply accounting remains consistent.",
-      "- category: accounting",
-      "- priority: high",
-      "- sources: property-specification-recon:recon-supply",
-      "- ledger_ids: evidence-supply, evidence-extra",
-      "- ledger evidence:",
-      '  {"id":"evidence-supply",',
-      '  "source_path":"docs/overview.md",',
-      '  "source_location":"line 1"}',
-      "### End canonical property: property-supply"
+      '### Canonical property: "property-supply"',
+      'description: "Supply accounting remains consistent."',
+      'category: "accounting"',
+      'priority: "high"',
+      'sources: [{"source_node_id":"property-specification-recon","source_property_id":"recon-supply"}]',
+      'ledger_ids: ["evidence-supply","evidence-extra"]',
+      '### End canonical property: "property-supply"'
     ].join("\n")
   );
   const extraLedgerResult = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(extraLedgerResult.ok, false);
   assert.ok(
-    extraLedgerResult.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_MARKDOWN_MAPPING_EXTRA")
+    extraLedgerResult.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_MARKDOWN_MAPPING_MISSING")
   );
 });
 
@@ -4573,7 +4859,7 @@ test("property fan-in gate preserves reference expectation metadata in Markdown"
     layout,
     "property-specification-fanin",
     "properties.md",
-    "### Canonical property: property-supply\n- description: Supply completes for valid state.\n- category: dos-liveness\n- priority: medium\n- sources: property-specification-recon:iSpoke_supply\n- ledger_ids: evidence-supply\n### End canonical property: property-supply\n"
+    '### Canonical property: "property-supply"\ndescription: "Supply completes for valid state."\ncategory: "dos-liveness"\npriority: "medium"\nsources: [{"source_node_id":"property-specification-recon","source_property_id":"iSpoke_supply"}]\nledger_ids: ["evidence-supply"]\n### End canonical property: "property-supply"\n'
   );
   const missing = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(missing.ok, false);
@@ -4583,7 +4869,7 @@ test("property fan-in gate preserves reference expectation metadata in Markdown"
     layout,
     "property-specification-fanin",
     "properties.md",
-    "### Canonical property: property-supply\n- description: Supply completes for valid state.\n- category: dos-liveness\n- priority: medium\n- sources: property-specification-recon:iSpoke_supply\n- ledger_ids: evidence-supply\n- reference_expectations: scfuzzbench:aave-v4:iSpoke_supply\n### End canonical property: property-supply\n"
+    '### Canonical property: "property-supply"\ndescription: "Supply completes for valid state."\ncategory: "dos-liveness"\npriority: "medium"\nsources: [{"source_node_id":"property-specification-recon","source_property_id":"iSpoke_supply"}]\nledger_ids: ["evidence-supply"]\nreference_expectations: ["scfuzzbench:aave-v4:iSpoke_supply"]\n### End canonical property: "property-supply"\n'
   );
   const valid = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
@@ -5828,7 +6114,7 @@ test("property fan-in gate rejects a lens reference expectation dropped from can
     layout,
     "property-specification-fanin",
     "properties.md",
-    "### Canonical property: property-supply\n- description: Supply completes for valid state.\n- category: dos-liveness\n- priority: medium\n- sources: property-specification-recon:iSpoke_supply\n- ledger_ids: evidence-supply\n- reference_expectations: scfuzzbench:aave-v4:iSpoke_supply\n### End canonical property: property-supply\n"
+    '### Canonical property: "property-supply"\ndescription: "Supply completes for valid state."\ncategory: "dos-liveness"\npriority: "medium"\nsources: [{"source_node_id":"property-specification-recon","source_property_id":"iSpoke_supply"}]\nledger_ids: ["evidence-supply"]\nreference_expectations: ["scfuzzbench:aave-v4:iSpoke_supply"]\n### End canonical property: "property-supply"\n'
   );
   const node = {
     ...plannedNode(["properties.json", "properties.md"]),
@@ -5904,19 +6190,22 @@ test("property implementation resolves custom declared catalog and implementatio
   });
   const catalogId = "custom-property-catalog";
   const catalogOutput = boundOutput("handoffs/catalog-v2.json", "ultrafuzz/properties@2", true);
-  writeDeclaredArtifactNode(layout, catalogId, [catalogOutput], {
-    [catalogOutput.path]: JSON.stringify({
-      schema_version: "ultrafuzz.properties.v2",
-      properties: [
-        {
-          id: "property-1",
-          description: "Balances remain conserved",
-          category: "accounting",
-          priority: "high",
-          sources: [{ source_node_id: "independent-review", source_property_id: "review-1" }]
-        }
-      ]
-    })
+  const catalogMarkdownOutput = boundOutput("handoffs/catalog-v2-companion.md", "ultrafuzz/nonempty-markdown@1", false);
+  const catalogContents = JSON.stringify({
+    schema_version: "ultrafuzz.properties.v2",
+    properties: [
+      {
+        id: "property-1",
+        description: "Balances remain conserved",
+        category: "accounting",
+        priority: "high",
+        sources: [{ source_node_id: "independent-review", source_property_id: "review-1" }]
+      }
+    ]
+  });
+  writeDeclaredArtifactNode(layout, catalogId, [catalogOutput, catalogMarkdownOutput], {
+    [catalogOutput.path]: catalogContents,
+    [catalogMarkdownOutput.path]: fixtureCanonicalPropertiesMarkdown(catalogContents)
   });
   const implementationId = "custom-property-implementation";
   const implementationOutput = boundOutput(
@@ -5951,6 +6240,60 @@ test("property implementation resolves custom declared catalog and implementatio
   const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
 
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+});
+
+test("property consumers reject a finalized catalog whose typed Markdown companion is ambiguous", () => {
+  const layout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-ambiguous-finalized-catalog-pair",
+    resolvedConfigToml: '[invariants]\nproperty_priority_threshold = "high"\n'
+  });
+  const catalogId = "renamed-catalog-producer";
+  const catalog = '{"schema_version":"ultrafuzz.properties.v2","properties":[]}';
+  const catalogOutputs = [
+    boundOutput("custom/catalog.json", "ultrafuzz/properties@2", true),
+    boundOutput("custom/catalog-a.md", "ultrafuzz/nonempty-markdown@1", false),
+    boundOutput("custom/catalog-b.md", "ultrafuzz/nonempty-markdown@1", false)
+  ];
+  writeDeclaredArtifactNode(layout, catalogId, catalogOutputs, {
+    "custom/catalog.json": catalog,
+    "custom/catalog-a.md": "# Catalog A\n",
+    "custom/catalog-b.md": "# Catalog B\n"
+  });
+  const implementationId = "renamed-property-consumer";
+  const implementationOutput = boundOutput(
+    "custom/implemented-properties.json",
+    "ultrafuzz/implemented-properties@3",
+    true
+  );
+  writeDeclaredArtifactNode(layout, implementationId, [implementationOutput], {
+    [implementationOutput.path]: JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v3",
+      selection: { priority_threshold: "high", priorities: ["high"], property_ids: [] },
+      properties: []
+    })
+  });
+  const node: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: implementationId,
+    logical_id: "noncanonical-property-consumer",
+    display_name: "Renamed property consumer",
+    artifact_dir: `artifacts/${implementationId}`,
+    depends_on: [catalogId],
+    outputs: [implementationOutput]
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "REQUIRED_ARTIFACT_INVALID" &&
+        diagnostic.message.includes("PROPERTY_MARKDOWN_DECLARATION_AMBIGUOUS")
+    ),
+    JSON.stringify(result.diagnostics)
+  );
 });
 
 test("property implementation accepts an intentional producer-free empty catalog through the full host gate", () => {
@@ -8976,7 +9319,17 @@ test("properties Markdown parity accepts a description that ends with a pipe", (
     layout,
     "property-specification-fanin",
     "properties.md",
-    `### Canonical property: property-277\ndescription: ${description}\ncategory: configuration\npriority: high\nsources: ${ledgerNodeId}:evidence-doc-liquidation-targethf-row\nledger_ids: evidence-doc-liquidation-targethf-row\n### End canonical property: property-277\n`
+    [
+      '### Canonical property: "property-277"',
+      `description: ${JSON.stringify(description)}`,
+      'category: "configuration"',
+      'priority: "high"',
+      `sources: ${JSON.stringify([
+        { source_node_id: ledgerNodeId, source_property_id: "evidence-doc-liquidation-targethf-row" }
+      ])}`,
+      'ledger_ids: ["evidence-doc-liquidation-targethf-row"]',
+      '### End canonical property: "property-277"'
+    ].join("\n")
   );
   const node = {
     ...plannedNode(["properties.json", "properties.md"]),

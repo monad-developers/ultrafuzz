@@ -1160,7 +1160,7 @@
         "suite_path": { "type": "string" },
         "suite": { "type": "string" },
         "provider": { "enum": ["braintrust", "none"] },
-        "reporting": { "$ref": "urn:ultrafuzz:schema:evals:common:2#/$defs/reportingPolicy" },
+        "reporting": { "$ref": "urn:ultrafuzz:schema:evals:common:3#/$defs/reportingPolicy" },
         "matrix": { "$ref": "urn:ultrafuzz:schema:evals:matrix:2" }
       }
     },
@@ -1790,7 +1790,7 @@
       "then": {
         "type": "object",
         "properties": {
-          "data": { "oneOf": [{ "type": "null" }, { "$ref": "urn:ultrafuzz:schema:evals:score-summary:1" }] }
+          "data": { "oneOf": [{ "type": "null" }, { "$ref": "urn:ultrafuzz:schema:evals:score-summary:2" }] }
         }
       }
     },
@@ -1799,7 +1799,7 @@
       "then": {
         "type": "object",
         "properties": {
-          "data": { "oneOf": [{ "type": "null" }, { "$ref": "urn:ultrafuzz:schema:evals:score-summary:1" }] }
+          "data": { "oneOf": [{ "type": "null" }, { "$ref": "urn:ultrafuzz:schema:evals:score-summary:2" }] }
         }
       }
     },

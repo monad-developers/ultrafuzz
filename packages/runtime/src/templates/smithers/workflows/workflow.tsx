@@ -47,7 +47,7 @@ const {
   PROPERTIES_SCHEMA_VERSION,
   publishFileDurableExclusive,
   readRegularFileSnapshot,
-  validateArtifactContract,
+  validateArtifactContractBytes,
   validateArtifactVerificationMarker,
   validateImplementedPropertiesSchema,
   validateInvariantLedgerSchema,
@@ -57,12 +57,14 @@ const {
 } = await import(artifactsModule);
 const {
   applyWorkspacePatch,
+  canonicalPropertiesMarkdownParityIssues,
   captureWorkspacePatch,
   captureWorkspaceTree,
   declaredAncestorOutputsByContract,
   declaredSiblingOutputsByContract,
   deriveWorkspacePatchGitFacts,
   hydratePinnedSubmodulesFromExecutionSnapshot,
+  invariantLedgerMarkdownParityIssues,
   projectCanonicalFinalReport,
   validateWorkspacePatchCapture,
   verifyPinnedSubmodulesFromExecutionSnapshot,
@@ -98,6 +100,13 @@ const UNPLANNED_IMPLEMENTED_PROPERTIES_CONTEXT = Object.freeze({
   }),
   properties: Object.freeze([])
 });
+const INVARIANT_LEDGER_CONTRACT = "ultrafuzz/invariant-ledger@1";
+const INVARIANT_LEDGER_CONVENTIONAL_PATH = "setup/invariant-evidence-ledger.json";
+const DISCOVERY_MARKDOWN_CONVENTIONAL_PATH = "setup/project-discovery.md";
+const CANONICAL_PROPERTIES_CONTRACT = "ultrafuzz/properties@2";
+const CANONICAL_PROPERTIES_CONVENTIONAL_PATH = "properties.json";
+const CANONICAL_PROPERTIES_MARKDOWN_CONTRACT = "ultrafuzz/nonempty-markdown@1";
+const CANONICAL_PROPERTIES_MARKDOWN_CONVENTIONAL_PATH = "properties.md";
 
 const inputTaskSchema = z.strictObject({
   id: z.string().min(1).max(4_096),
@@ -258,6 +267,28 @@ type AuthenticatedAggregationSourceBundle = {
   framework: string;
   entries: readonly AuthenticatedAggregationSourceEntry[];
 };
+
+type AuthenticatedDependencyArtifactSnapshot = Readonly<{
+  path: string;
+  relativePath: string;
+  contract: string;
+  bytes: Buffer;
+  value: unknown;
+}>;
+
+type AuthenticatedDependencySnapshot = Readonly<{
+  attemptId: string;
+  artifactDir: string;
+  markerBytes: Buffer;
+  artifacts: ReadonlyMap<string, AuthenticatedDependencyArtifactSnapshot>;
+  publications: ReadonlyMap<string, string>;
+  generatedTestBundles: readonly AuthenticatedAggregationSourceBundle[];
+}>;
+
+type VerifiedDependencySnapshotEpoch = Readonly<{
+  consumerAttemptId: string;
+  snapshotsByProducerAttempt: Map<string, AuthenticatedDependencySnapshot>;
+}>;
 
 const authenticatedAggregationSourcesByTask = new Map<string, readonly AuthenticatedAggregationSourceBundle[]>();
 
@@ -431,7 +462,7 @@ function verifiedDependencyJsonArtifact(
   producer: (typeof taskSpecs)[number],
   relativePath: string,
   expectedContract: string
-): { path: string; relativePath: string; value: unknown } {
+): { path: string; relativePath: string; bytes: Buffer; value: unknown } {
   const outputs = producer.outputs.filter(
     (output) => output.path === relativePath && output.contract === expectedContract
   );
@@ -440,43 +471,148 @@ function verifiedDependencyJsonArtifact(
       `artifact-contract failure: verified ancestor ${producer.metadata.node.logicalNodeId} must declare exactly one ${relativePath} output with contract ${expectedContract}`
     );
   }
-  const dependencyRoot = realpathSync(dependency);
-  const artifactPath = resolveRegularArtifactFile(
-    dependencyRoot,
-    path.resolve(dependencyRoot, relativePath),
-    `artifact-contract failure: verified dependency artifact is missing ${relativePath}`
-  );
-  const snapshot = readBoundedRegularArtifactSnapshot(
-    dependencyRoot,
-    artifactPath,
-    `artifact-contract failure: authoritative ${relativePath} is not a regular file`,
-    MAX_VERIFIED_ARTIFACT_BYTES
-  );
-  const contents = decodeStrictUtf8Snapshot(
-    snapshot,
-    `artifact-contract failure: authoritative ${relativePath} is not UTF-8`
-  );
-  const value = parseStrictJsonSnapshot(
-    snapshot,
-    `artifact-contract failure: authoritative ${relativePath} is malformed`
-  );
-  const validation = validateArtifactContract(
-    expectedContract as Parameters<typeof validateArtifactContract>[0],
-    contents,
-    artifactPath
-  );
-  if (!validation.ok) {
+  const authority = verifiedDependencySnapshot(task, dependency, producer);
+  const snapshot = authority.artifacts.get(relativePath);
+  if (snapshot === undefined || snapshot.contract !== expectedContract) {
     throw new Error(
-      `artifact-contract failure: authoritative ${relativePath} is schema-invalid: ${formatSchemaValidationIssues(validation.issues)}`
+      `artifact-contract failure: authenticated dependency snapshot is missing ${relativePath} with contract ${expectedContract}`
     );
   }
+  return {
+    path: snapshot.path,
+    relativePath: snapshot.relativePath,
+    bytes: Buffer.from(snapshot.bytes),
+    value: snapshot.value
+  };
+}
 
-  // Authenticate the already-captured immutable bytes against the producer's
-  // verification marker after capture. A later replacement cannot change the
-  // context retained by this verifier, while a replacement before this check
-  // makes the dependency marker/digest verification fail closed.
-  assertVerifiedDependency(task, dependency, { relativePath, bytes: snapshot.bytes });
-  return { path: artifactPath, relativePath, value };
+function verifiedDependencyTextArtifact(
+  task: (typeof taskSpecs)[number],
+  dependency: string,
+  producer: (typeof taskSpecs)[number],
+  relativePath: string,
+  expectedContract: string
+): { path: string; relativePath: string; bytes: Buffer; contents: string } {
+  const outputs = producer.outputs.filter(
+    (output) => output.path === relativePath && output.contract === expectedContract
+  );
+  if (outputs.length !== 1) {
+    throw new Error(
+      `artifact-contract failure: verified ancestor ${producer.metadata.node.logicalNodeId} must declare exactly one ${relativePath} output with contract ${expectedContract}`
+    );
+  }
+  const authority = verifiedDependencySnapshot(task, dependency, producer);
+  const snapshot = authority.artifacts.get(relativePath);
+  if (snapshot === undefined || snapshot.contract !== expectedContract) {
+    throw new Error(
+      `artifact-contract failure: authenticated dependency snapshot is missing ${relativePath} with contract ${expectedContract}`
+    );
+  }
+  if (typeof snapshot.value !== "string") {
+    throw new Error(`artifact-contract failure: authoritative ${relativePath} is not text`);
+  }
+  return {
+    path: snapshot.path,
+    relativePath: snapshot.relativePath,
+    bytes: Buffer.from(snapshot.bytes),
+    contents: snapshot.value
+  };
+}
+
+const verifiedDependencySnapshotEpochsByTask = new Map<string, VerifiedDependencySnapshotEpoch>();
+
+function beginVerifiedDependencySnapshotEpoch(task: (typeof taskSpecs)[number]): VerifiedDependencySnapshotEpoch {
+  if (verifiedDependencySnapshotEpochsByTask.has(task.attemptId)) {
+    throw new Error(`artifact-contract failure: dependency snapshot epoch is already active ${task.attemptId}`);
+  }
+  const epoch: VerifiedDependencySnapshotEpoch = Object.freeze({
+    consumerAttemptId: task.attemptId,
+    snapshotsByProducerAttempt: new Map<string, AuthenticatedDependencySnapshot>()
+  });
+  verifiedDependencySnapshotEpochsByTask.set(task.attemptId, epoch);
+  return epoch;
+}
+
+function verifiedDependencySnapshot(
+  task: (typeof taskSpecs)[number],
+  dependency: string,
+  producer: (typeof taskSpecs)[number]
+): AuthenticatedDependencySnapshot {
+  const epoch = verifiedDependencySnapshotEpochsByTask.get(task.attemptId);
+  if (epoch === undefined) return assertVerifiedDependency(task, dependency);
+  const existing = epoch.snapshotsByProducerAttempt.get(producer.attemptId);
+  if (existing !== undefined) {
+    if (path.resolve(existing.artifactDir) !== path.resolve(dependency)) {
+      throw new Error(
+        `artifact-contract failure: dependency snapshot producer changed artifact directory ${producer.attemptId}`
+      );
+    }
+    return existing;
+  }
+  const captured = assertVerifiedDependency(task, dependency);
+  if (captured.attemptId !== producer.attemptId || path.resolve(captured.artifactDir) !== path.resolve(dependency)) {
+    throw new Error(
+      `artifact-contract failure: authenticated dependency snapshot identity changed ${producer.attemptId}`
+    );
+  }
+  epoch.snapshotsByProducerAttempt.set(producer.attemptId, captured);
+  return captured;
+}
+
+function assertVerifiedDependencySnapshotEpochRemainedCurrent(
+  task: (typeof taskSpecs)[number],
+  epoch: VerifiedDependencySnapshotEpoch
+): void {
+  if (
+    epoch.consumerAttemptId !== task.attemptId ||
+    verifiedDependencySnapshotEpochsByTask.get(task.attemptId) !== epoch
+  ) {
+    throw new Error(`artifact-contract failure: dependency snapshot epoch is not active ${task.attemptId}`);
+  }
+  for (const [producerAttemptId, captured] of [...epoch.snapshotsByProducerAttempt].sort(([left], [right]) =>
+    left.localeCompare(right)
+  )) {
+    const current = assertVerifiedDependency(task, captured.artifactDir);
+    if (
+      current.attemptId !== producerAttemptId ||
+      !current.markerBytes.equals(captured.markerBytes) ||
+      current.artifacts.size !== captured.artifacts.size ||
+      current.publications.size !== captured.publications.size
+    ) {
+      throw new Error(
+        `artifact-contract failure: verified dependency authority changed during semantic verification ${producerAttemptId}`
+      );
+    }
+    for (const [relativePath, artifact] of captured.artifacts) {
+      const currentArtifact = current.artifacts.get(relativePath);
+      if (
+        currentArtifact === undefined ||
+        currentArtifact.contract !== artifact.contract ||
+        !currentArtifact.bytes.equals(artifact.bytes)
+      ) {
+        throw new Error(
+          `artifact-contract failure: verified dependency artifact changed during semantic verification ${producerAttemptId}/${relativePath}`
+        );
+      }
+    }
+    for (const [relativePath, sha256] of captured.publications) {
+      if (current.publications.get(relativePath) !== sha256) {
+        throw new Error(
+          `artifact-contract failure: verified dependency publication changed during semantic verification ${producerAttemptId}/${relativePath}`
+        );
+      }
+    }
+  }
+}
+
+function endVerifiedDependencySnapshotEpoch(
+  task: (typeof taskSpecs)[number],
+  epoch: VerifiedDependencySnapshotEpoch
+): void {
+  if (verifiedDependencySnapshotEpochsByTask.get(task.attemptId) !== epoch) {
+    throw new Error(`artifact-contract failure: dependency snapshot epoch identity changed ${task.attemptId}`);
+  }
+  verifiedDependencySnapshotEpochsByTask.delete(task.attemptId);
 }
 
 function semanticArtifactTaskDeclarations(): Array<{
@@ -495,6 +631,85 @@ function semanticArtifactTaskDeclarations(): Array<{
     dependencyArtifactDirs: candidate.dependencyArtifactDirs.map((directory) => path.resolve(process.cwd(), directory)),
     outputs: candidate.outputs
   }));
+}
+
+function declaredInvariantLedgerProducerPair(task: (typeof taskSpecs)[number]):
+  | {
+      ledger: (typeof taskSpecs)[number]["outputs"][number];
+      markdown: (typeof taskSpecs)[number]["outputs"][number];
+    }
+  | undefined {
+  const ledgerOutputs = task.outputs.filter((output) => output.contract === INVARIANT_LEDGER_CONTRACT);
+  const hasConventionalRolePath = task.outputs.some(
+    (output) =>
+      output.path === INVARIANT_LEDGER_CONVENTIONAL_PATH || output.path === DISCOVERY_MARKDOWN_CONVENTIONAL_PATH
+  );
+  if (ledgerOutputs.length === 0 && !hasConventionalRolePath) return undefined;
+  const wrongContractLookalikes = task.outputs.filter(
+    (output) =>
+      (output.path === INVARIANT_LEDGER_CONVENTIONAL_PATH && output.contract !== INVARIANT_LEDGER_CONTRACT) ||
+      (output.path === DISCOVERY_MARKDOWN_CONVENTIONAL_PATH &&
+        output.contract !== CANONICAL_PROPERTIES_MARKDOWN_CONTRACT)
+  );
+  if (wrongContractLookalikes.length > 0) {
+    throw new Error(
+      `artifact-contract failure: project discovery declares wrong-contract lookalike outputs: ${wrongContractLookalikes
+        .map((output) => `${output.path} (${output.contract})`)
+        .join(", ")}`
+    );
+  }
+  if (ledgerOutputs.length !== 1) {
+    throw new Error(
+      `artifact-contract failure: invariant ledger producer must declare exactly one ${INVARIANT_LEDGER_CONTRACT} output; found ${ledgerOutputs.length}`
+    );
+  }
+  const markdownOutputs = task.outputs.filter((output) => output.contract === CANONICAL_PROPERTIES_MARKDOWN_CONTRACT);
+  if (markdownOutputs.length !== 1) {
+    throw new Error(
+      `artifact-contract failure: invariant ledger producer must declare exactly one ${CANONICAL_PROPERTIES_MARKDOWN_CONTRACT} Markdown handoff; found ${markdownOutputs.length}`
+    );
+  }
+  return { ledger: ledgerOutputs[0]!, markdown: markdownOutputs[0]! };
+}
+
+function declaredCanonicalPropertiesPair(task: (typeof taskSpecs)[number]):
+  | {
+      catalog: (typeof taskSpecs)[number]["outputs"][number];
+      markdown: (typeof taskSpecs)[number]["outputs"][number];
+    }
+  | undefined {
+  const catalogOutputs = task.outputs.filter((output) => output.contract === CANONICAL_PROPERTIES_CONTRACT);
+  const hasConventionalRolePath = task.outputs.some(
+    (output) =>
+      output.path === CANONICAL_PROPERTIES_CONVENTIONAL_PATH ||
+      output.path === CANONICAL_PROPERTIES_MARKDOWN_CONVENTIONAL_PATH
+  );
+  if (catalogOutputs.length === 0 && !hasConventionalRolePath) return undefined;
+  const wrongContractLookalikes = task.outputs.filter(
+    (output) =>
+      (output.path === CANONICAL_PROPERTIES_CONVENTIONAL_PATH && output.contract !== CANONICAL_PROPERTIES_CONTRACT) ||
+      (output.path === CANONICAL_PROPERTIES_MARKDOWN_CONVENTIONAL_PATH &&
+        output.contract !== CANONICAL_PROPERTIES_MARKDOWN_CONTRACT)
+  );
+  if (wrongContractLookalikes.length > 0) {
+    throw new Error(
+      `artifact-contract failure: canonical properties producer declares wrong-contract lookalike outputs: ${wrongContractLookalikes
+        .map((output) => `${output.path} (${output.contract})`)
+        .join(", ")}`
+    );
+  }
+  if (catalogOutputs.length !== 1) {
+    throw new Error(
+      `artifact-contract failure: canonical properties producer must declare exactly one ${CANONICAL_PROPERTIES_CONTRACT} output; found ${catalogOutputs.length}`
+    );
+  }
+  const markdownOutputs = task.outputs.filter((output) => output.contract === CANONICAL_PROPERTIES_MARKDOWN_CONTRACT);
+  if (markdownOutputs.length !== 1) {
+    throw new Error(
+      `artifact-contract failure: canonical properties producer must declare exactly one ${CANONICAL_PROPERTIES_MARKDOWN_CONTRACT} companion; found ${markdownOutputs.length}`
+    );
+  }
+  return { catalog: catalogOutputs[0]!, markdown: markdownOutputs[0]! };
 }
 
 function declaredAncestorContractOutputs(
@@ -530,6 +745,60 @@ function verifiedSingletonAncestorJsonArtifact(
   }
   const verified = verifiedDependencyJsonArtifact(task, output.artifactDir, producer, output.path, output.contract);
   return { path: output.path, value: verified.value };
+}
+
+function verifiedCanonicalPropertyCatalog(
+  task: (typeof taskSpecs)[number]
+): { path: string; value: unknown } | undefined {
+  const outputs = declaredAncestorContractOutputs(task, CANONICAL_PROPERTIES_CONTRACT);
+  if (outputs.length === 0) return undefined;
+  if (outputs.length !== 1) {
+    throw new Error(
+      `artifact-contract failure: canonical property catalog must resolve to exactly one declared ${CANONICAL_PROPERTIES_CONTRACT} ancestor output; found ${outputs.length}`
+    );
+  }
+  const output = outputs[0]!;
+  const producer = taskSpecs.find((candidate) => candidate.attemptId === output.attemptId);
+  if (producer === undefined) {
+    throw new Error(
+      `artifact-contract failure: declared canonical property producer is unavailable ${output.attemptId}`
+    );
+  }
+  const pair = declaredCanonicalPropertiesPair(producer);
+  if (pair === undefined || pair.catalog.path !== output.path) {
+    throw new Error("artifact-contract failure: canonical property ancestor does not bind one exact typed pair");
+  }
+  const catalog = verifiedDependencyJsonArtifact(
+    task,
+    output.artifactDir,
+    producer,
+    pair.catalog.path,
+    pair.catalog.contract
+  );
+  const markdown = verifiedDependencyTextArtifact(
+    task,
+    output.artifactDir,
+    producer,
+    pair.markdown.path,
+    pair.markdown.contract
+  );
+  const parsed = validatePropertiesSchema(catalog.value, catalog.path);
+  if (!parsed.ok || parsed.value === undefined) {
+    throw new Error(
+      `artifact-contract failure: canonical property ancestor is schema-invalid: ${formatSchemaValidationIssues(parsed.issues)}`
+    );
+  }
+  const parityIssues = canonicalPropertiesMarkdownParityIssues(parsed.value, markdown.contents, markdown.path);
+  if (parityIssues.length > 0) {
+    throw new Error(
+      `artifact-contract failure: canonical property ancestor JSON/Markdown parity failed: ${parityIssues
+        .map(
+          (issue: { code: string; path: string; message: string }) => `${issue.code} ${issue.path}: ${issue.message}`
+        )
+        .join("; ")}`
+    );
+  }
+  return { path: catalog.relativePath, value: parsed.value };
 }
 
 function declaredFinalReportOutputPair(task: (typeof taskSpecs)[number]):
@@ -599,7 +868,7 @@ function authoritativeFinalReportCoverage(task: (typeof taskSpecs)[number]): unk
       reason: "property-implementation-track-not-declared"
     };
   }
-  const catalog = verifiedSingletonAncestorJsonArtifact(task, "ultrafuzz/properties@2", "canonical property catalog");
+  const catalog = verifiedCanonicalPropertyCatalog(task);
   if (catalog === undefined) {
     throw new Error("artifact-contract failure: authoritative property catalog producer is unavailable");
   }
@@ -2170,9 +2439,23 @@ function assertTaskInputs(task: (typeof taskSpecs)[number], workspaceRoot: strin
 function assertVerifiedDependency(
   task: (typeof taskSpecs)[number],
   dependency: string,
-  capturedArtifact?: Readonly<{ relativePath: string; bytes: Buffer }>
-): { generatedTestBundles: readonly AuthenticatedAggregationSourceBundle[] } {
+  capturedArtifacts?:
+    Readonly<{ relativePath: string; bytes: Buffer }> | readonly Readonly<{ relativePath: string; bytes: Buffer }>[]
+): AuthenticatedDependencySnapshot {
   try {
+    const capturedList: readonly Readonly<{ relativePath: string; bytes: Buffer }>[] =
+      capturedArtifacts === undefined
+        ? []
+        : Array.isArray(capturedArtifacts)
+          ? capturedArtifacts
+          : [capturedArtifacts as Readonly<{ relativePath: string; bytes: Buffer }>];
+    const capturedByPath = new Map<string, Buffer>();
+    for (const captured of capturedList) {
+      if (capturedByPath.has(captured.relativePath)) {
+        throw new Error(`captured dependency artifact is duplicated ${captured.relativePath}`);
+      }
+      capturedByPath.set(captured.relativePath, Buffer.from(captured.bytes));
+    }
     const dependencyAttemptId = path.basename(dependency);
     const dependencyTask = taskSpecs.find((candidate) => candidate.attemptId === dependencyAttemptId);
     if (dependencyTask === undefined || path.resolve(dependencyTask.artifactDir) !== path.resolve(dependency)) {
@@ -2222,9 +2505,10 @@ function assertVerifiedDependency(
       throw new Error("verification marker artifact set does not match the declared outputs");
     }
     const seenPaths = new Set<string>();
-    let capturedArtifactAuthenticated = capturedArtifact === undefined;
+    const authenticatedCapturedPaths = new Set<string>();
     const declaredArtifactShas = new Map<string, string>();
     const expectedPublicationShas = new Map<string, string>();
+    const authenticatedArtifacts = new Map<string, AuthenticatedDependencyArtifactSnapshot>();
     const generatedTestBundles: AuthenticatedAggregationSourceBundle[] = [];
     for (const artifact of marker.artifacts) {
       if (
@@ -2273,26 +2557,17 @@ function assertVerifiedDependency(
       }
       assertSafeVerifiedPublicationPath(entry.path);
       const artifactPath = path.resolve(dependency, entry.path);
+      const capturedArtifact = capturedByPath.get(entry.path);
       const artifactSnapshot =
-        capturedArtifact?.relativePath === entry.path
-          ? Object.freeze({ path: artifactPath, bytes: Buffer.from(capturedArtifact.bytes) })
+        capturedArtifact !== undefined
+          ? Object.freeze({ path: artifactPath, bytes: Buffer.from(capturedArtifact) })
           : readBoundedRegularArtifactSnapshot(
               dependency,
               artifactPath,
               `artifact-contract failure: verified dependency artifact is missing ${entry.path}`,
               MAX_VERIFIED_ARTIFACT_BYTES
             );
-      const contents = decodeStrictUtf8Snapshot(
-        artifactSnapshot,
-        `artifact-contract failure: verified dependency artifact ${entry.path}`
-      );
       const definition = artifactContractDefinition(entry.contract as Parameters<typeof artifactContractDefinition>[0]);
-      if (definition.format === "json") {
-        parseStrictJsonSnapshot(
-          artifactSnapshot,
-          `artifact-contract failure: verified dependency artifact ${entry.path}`
-        );
-      }
       if (definition.digest !== entry.contract_digest) {
         throw new Error(`verified dependency contract changed ${entry.path}`);
       }
@@ -2312,15 +2587,25 @@ function assertVerifiedDependency(
       if (artifactSha !== entry.sha256) {
         throw new Error(`verified dependency artifact changed ${entry.path}`);
       }
-      if (capturedArtifact?.relativePath === entry.path) capturedArtifactAuthenticated = true;
-      const validation = validateArtifactContract(
-        entry.contract as Parameters<typeof validateArtifactContract>[0],
-        contents,
+      if (capturedArtifact !== undefined) authenticatedCapturedPaths.add(entry.path);
+      const validation = validateArtifactContractBytes(
+        entry.contract as Parameters<typeof validateArtifactContractBytes>[0],
+        artifactSnapshot.bytes,
         entry.path
       );
       if (!validation.ok) {
         throw new Error(`verified dependency artifact is no longer valid ${entry.path}`);
       }
+      authenticatedArtifacts.set(
+        entry.path,
+        Object.freeze({
+          path: artifactPath,
+          relativePath: entry.path,
+          contract: entry.contract,
+          bytes: Buffer.from(artifactSnapshot.bytes),
+          value: freezeVerifiedDependencyValue(validation.value)
+        })
+      );
       declaredArtifactShas.set(entry.path, entry.sha256);
       rememberExpectedVerifiedPublication(expectedPublicationShas, entry.path, artifactSnapshot.bytes);
       if (entry.contract === "ultrafuzz/generated-tests@3") {
@@ -2398,8 +2683,11 @@ function assertVerifiedDependency(
     if (seenPaths.size !== expectedArtifacts.size) {
       throw new Error("verification marker is missing a declared output");
     }
-    if (!capturedArtifactAuthenticated) {
-      throw new Error(`verification marker does not authenticate captured artifact ${capturedArtifact?.relativePath}`);
+    if (authenticatedCapturedPaths.size !== capturedByPath.size) {
+      const missing = [...capturedByPath.keys()].filter(
+        (relativePath) => !authenticatedCapturedPaths.has(relativePath)
+      );
+      throw new Error(`verification marker does not authenticate captured artifacts ${missing.join(", ")}`);
     }
     if (invariantSuiteNodeIds.has(dependencyTask.metadata.node.logicalNodeId)) {
       rememberExpectedInvariantSuitePublications(dependencyTask, dependency, expectedPublicationShas);
@@ -2451,13 +2739,32 @@ function assertVerifiedDependency(
         throw new Error(`verification marker publication digest does not match verified output ${expectedPath}`);
       }
     }
-    return { generatedTestBundles: Object.freeze(generatedTestBundles) };
+    return Object.freeze({
+      attemptId: dependencyAttemptId,
+      artifactDir: dependency,
+      markerBytes: Buffer.from(markerSnapshot.bytes),
+      artifacts: authenticatedArtifacts,
+      publications: markerPublicationShas,
+      generatedTestBundles: Object.freeze(generatedTestBundles)
+    });
   } catch (error) {
     throw new Error(
       `artifact-contract failure: artifact dependency has not passed verification ${path.basename(dependency)} for ${task.attemptId}`,
       { cause: error }
     );
   }
+}
+
+function freezeVerifiedDependencyValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return Object.freeze(value.map((entry) => freezeVerifiedDependencyValue(entry)));
+  }
+  if (typeof value === "object" && value !== null) {
+    return Object.freeze(
+      Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, freezeVerifiedDependencyValue(entry)]))
+    );
+  }
+  return value;
 }
 
 function rememberExpectedVerifiedPublication(
@@ -2550,7 +2857,7 @@ function preservePinnedSourceProof(task: (typeof taskSpecs)[number]): void {
   if (!isStrictlyInsideDirectory(runRoot, resolvedProofRoot)) {
     throw new Error(`source-isolation failure: unsafe proof root ${task.attemptId}`);
   }
-  const proofPath = path.join(resolvedProofRoot, `${task.attemptId}.json`);
+  const proofRelativePath = `${task.attemptId}.json`;
   const proofContents = `${JSON.stringify(
     {
       schema_version: "ultrafuzz.agent-source-proof.v2",
@@ -2567,13 +2874,11 @@ function preservePinnedSourceProof(task: (typeof taskSpecs)[number]): void {
     null,
     2
   )}\n`;
-  if (existsSync(proofPath)) {
-    if (!readFileSync(proofPath).equals(Buffer.from(proofContents, "utf8"))) {
-      throw new Error(`source-isolation failure: pinned source proof ${task.attemptId} changed`);
-    }
-    return;
+  try {
+    publishFileDurableExclusive(resolvedProofRoot, proofRelativePath, proofContents);
+  } catch (error) {
+    throw new Error(`source-isolation failure: pinned source proof ${task.attemptId} changed`, { cause: error });
   }
-  writeFileDurable(proofPath, proofContents);
 }
 
 /** Directory names whose task-owned generated-test work must be cleared before a retry. */
@@ -4349,17 +4654,14 @@ function validateCapturedTaskOutputs(
       throw new Error(`artifact-contract failure: captured output does not match the declaration ${output.path}`);
     }
     const { artifactRoot, file } = captured;
-    const contents = decodeStrictUtf8Snapshot(file, `artifact-contract failure: output ${output.path}`);
-    const value =
-      artifactContractDefinition(output.contract).format === "json"
-        ? parseStrictJsonSnapshot(file, `artifact-contract failure: output ${output.path}`)
-        : contents;
-    const validation = validateArtifactContract(output.contract, contents, output.path);
+    const validation = validateArtifactContractBytes(output.contract, file.bytes, output.path);
     if (!validation.ok) {
       throw new Error(
         `artifact-contract failure for ${output.path} (${output.contract}): ${formatSchemaValidationIssues(validation.issues)}`
       );
     }
+    const contents = decodeStrictUtf8Snapshot(file, `artifact-contract failure: output ${output.path}`);
+    const value = validation.value;
     verifiedOutputs.set(output.path, Object.freeze({ artifactRoot, file, contents, value }));
     return {
       path: output.path,
@@ -4786,47 +5088,71 @@ function verifiedAncestorPropertyLenses(
 ): Array<{ sourceNodeId: string; projectionRequired: boolean; document: unknown }> | undefined {
   const lenses: Array<{ sourceNodeId: string; projectionRequired: boolean; document: unknown }> = [];
   let producerCount = 0;
-  let ledgerOutputs: ReturnType<typeof declaredAncestorOutputsByContract>;
-  let lensOutputs: ReturnType<typeof declaredAncestorOutputsByContract>;
-  try {
-    ledgerOutputs = declaredAncestorContractOutputs(task, "ultrafuzz/invariant-ledger@1");
-    lensOutputs = declaredAncestorContractOutputs(task, "ultrafuzz/property-lens@2", {
-      directOnly: true
-    });
-  } catch {
-    return undefined;
+  const ledgerOutputs = declaredAncestorContractOutputs(task, "ultrafuzz/invariant-ledger@1");
+  const lensOutputs = declaredAncestorContractOutputs(task, "ultrafuzz/property-lens@2", {
+    directOnly: true
+  });
+  if (ledgerOutputs.length === 0) return undefined;
+  if (ledgerOutputs.length !== 1) {
+    throw new Error(
+      `artifact-contract failure: property semantic context expected one invariant ledger, found ${ledgerOutputs.length}`
+    );
   }
-  if (ledgerOutputs.length > 1) return undefined;
   for (const output of ledgerOutputs) {
     const producer = taskSpecs.find((candidate) => candidate.attemptId === output.attemptId);
-    if (producer === undefined) return undefined;
+    if (producer === undefined) {
+      throw new Error(`artifact-contract failure: invariant-ledger producer is undeclared ${output.attemptId}`);
+    }
+    const pair = declaredInvariantLedgerProducerPair(producer);
+    if (pair === undefined || pair.ledger.path !== output.path) {
+      throw new Error(
+        `artifact-contract failure: invariant-ledger producer ${output.attemptId} does not bind one exact JSON/Markdown pair`
+      );
+    }
     producerCount += 1;
-    const ledger = verifiedDependencyJsonArtifact(
+    const ledger = verifiedDependencyJsonArtifact(task, output.artifactDir, producer, output.path, output.contract);
+    const markdown = verifiedDependencyTextArtifact(
       task,
       output.artifactDir,
       producer,
-      output.path,
-      output.contract
-    ).value;
-    const entries = isPlainJsonRecord(ledger) && Array.isArray(ledger.entries) ? ledger.entries : undefined;
-    if (entries === undefined) return undefined;
+      pair.markdown.path,
+      pair.markdown.contract
+    );
+    const parsed = validateInvariantLedgerSchema(ledger.value, ledger.path);
+    if (!parsed.ok || parsed.value === undefined) {
+      throw new Error(
+        `artifact-contract failure: invariant-ledger producer ${output.attemptId} is schema-invalid: ${formatSchemaValidationIssues(parsed.issues)}`
+      );
+    }
+    const parityIssues = invariantLedgerMarkdownParityIssues(parsed.value, markdown.contents, markdown.path);
+    if (parityIssues.length > 0) {
+      throw new Error(
+        `artifact-contract failure: invariant-ledger producer ${output.attemptId} JSON/Markdown parity failed: ${parityIssues
+          .map(
+            (issue: { code: string; path: string; message: string }) => `${issue.code} ${issue.path}: ${issue.message}`
+          )
+          .join("; ")}`
+      );
+    }
     lenses.push({
       sourceNodeId: output.logicalNodeId,
       projectionRequired: false,
       document: {
-        properties: entries.flatMap((entry) =>
-          isPlainJsonRecord(entry) && typeof entry.id === "string" ? [{ id: entry.id }] : []
-        )
+        properties: parsed.value.entries.map((entry) => ({ id: entry.id }))
       }
     });
   }
 
   const seenLensProducers = new Set<string>();
   for (const output of lensOutputs) {
-    if (seenLensProducers.has(output.attemptId)) return undefined;
+    if (seenLensProducers.has(output.attemptId)) {
+      throw new Error(`artifact-contract failure: property-lens producer is ambiguous ${output.attemptId}`);
+    }
     seenLensProducers.add(output.attemptId);
     const producer = taskSpecs.find((candidate) => candidate.attemptId === output.attemptId);
-    if (producer === undefined) return undefined;
+    if (producer === undefined) {
+      throw new Error(`artifact-contract failure: property-lens producer is undeclared ${output.attemptId}`);
+    }
     producerCount += 1;
     const lens = verifiedDependencyJsonArtifact(task, output.artifactDir, producer, output.path, output.contract);
     lenses.push({ sourceNodeId: output.logicalNodeId, projectionRequired: true, document: lens.value });
@@ -4992,11 +5318,7 @@ function semanticGateContextForVerifiedOutput(
   } else if (output.schemaFile === "campaign-summary.schema.json") {
     context.artifactSet = siblingCampaignSemanticArtifacts(task, verifiedOutputs);
   } else if (output.schemaFile === "implemented-properties.schema.json") {
-    const propertyCatalog = verifiedSingletonAncestorJsonArtifact(
-      task,
-      "ultrafuzz/properties@2",
-      "canonical property catalog"
-    );
+    const propertyCatalog = verifiedCanonicalPropertyCatalog(task);
     context.artifactSet = {
       propertyCatalog: propertyCatalog?.value ?? UNPLANNED_PROPERTY_CATALOG_CONTEXT
     };
@@ -5039,11 +5361,7 @@ function semanticGateContextForVerifiedOutput(
       differentialArtifacts: differentialSemanticArtifacts(task, output, verifiedOutputs)
     };
   } else if (output.schemaFile === "report.schema.json") {
-    const propertyCatalog = verifiedSingletonAncestorJsonArtifact(
-      task,
-      "ultrafuzz/properties@2",
-      "canonical property catalog"
-    );
+    const propertyCatalog = verifiedCanonicalPropertyCatalog(task);
     const implementedProperties = verifiedSingletonAncestorJsonArtifact(
       task,
       "ultrafuzz/implemented-properties@3",
@@ -5133,6 +5451,11 @@ function verifyArtifacts(
   task: (typeof taskSpecs)[number],
   capturedTaskOutputs?: readonly CapturedTaskOutput[]
 ): z.infer<typeof verificationOutput> {
+  // Conventional names may expose an intended role, but only exact typed
+  // declarations authorize its artifacts. These calls reject lookalikes even
+  // when the corresponding typed contract is entirely absent.
+  declaredInvariantLedgerProducerPair(task);
+  declaredCanonicalPropertiesPair(task);
   if (
     task.outputs.some((output) => output.contract === "ultrafuzz/implemented-properties@3") &&
     task.outputs.some((output) => output.contract === "ultrafuzz/property-campaign@3")
@@ -5150,55 +5473,91 @@ function verifyArtifacts(
   const capturedOutputs = capturedTaskOutputs ?? captureTaskOutputs(task);
   const { artifacts, verifiedOutputs } = validateCapturedTaskOutputs(task, capturedOutputs);
   const campaignEvidence = capturePropertyCampaignEvidence(task, verifiedOutputs);
+  const dependencySnapshotEpoch = beginVerifiedDependencySnapshotEpoch(task);
 
-  // Generated-test companions are agent-owned outputs. Verification reads the
-  // exact declared files in the artifact root and never searches the workspace,
-  // infers a source, or repairs an incomplete handoff after the agent exits.
-  verifyOutputSemanticGates(task, verifiedOutputs, campaignEvidence);
+  try {
+    // Generated-test companions are agent-owned outputs. Verification reads the
+    // exact declared files in the artifact root and never searches the workspace,
+    // infers a source, or repairs an incomplete handoff after the agent exits.
+    verifyOutputSemanticGates(task, verifiedOutputs, campaignEvidence);
 
-  // These companions are not semantic inputs, so keep their durable creation
-  // behind the complete registry gate set as well.
-  materializeInvariantSuiteCompanions(task, capturedOutputs);
-  verifyFinalReportCanonicalProjection(task, verifiedOutputs);
-  verifyInvariantLedgerSourceEvidence(task, verifiedOutputs);
+    // These companions are not semantic inputs, so keep their durable creation
+    // behind the complete registry gate set as well.
+    materializeInvariantSuiteCompanions(task, capturedOutputs);
+    verifyCanonicalPropertiesMarkdownPair(task, verifiedOutputs);
+    verifyFinalReportCanonicalProjection(task, verifiedOutputs);
+    verifyInvariantLedgerSourceEvidence(task, verifiedOutputs);
 
-  const publications = new Map<string, Buffer>();
-  for (const output of task.outputs) {
-    const verified = verifiedOutputs.get(output.path);
-    if (verified === undefined) {
-      throw new Error(`artifact-contract failure: verified output is unavailable ${output.path}`);
-    }
-    rememberVerifiedPublication(publications, output.path, verified.file.bytes);
-    if (output.contract === "ultrafuzz/generated-tests@3") {
-      for (const companion of verifyGeneratedTestFiles(verified.artifactRoot, verified.value)) {
-        rememberVerifiedPublication(publications, companion.path, companion.contents);
+    const publications = new Map<string, Buffer>();
+    for (const output of task.outputs) {
+      const verified = verifiedOutputs.get(output.path);
+      if (verified === undefined) {
+        throw new Error(`artifact-contract failure: verified output is unavailable ${output.path}`);
+      }
+      rememberVerifiedPublication(publications, output.path, verified.file.bytes);
+      if (output.contract === "ultrafuzz/generated-tests@3") {
+        for (const companion of verifyGeneratedTestFiles(verified.artifactRoot, verified.value)) {
+          rememberVerifiedPublication(publications, companion.path, companion.contents);
+        }
       }
     }
+    if (taskPublishesWorkspacePatch(task)) {
+      rememberVerifiedPublication(
+        publications,
+        WORKSPACE_PATCH_BASELINE_FILE,
+        captureWorkspacePatchBaselinePublication(task, artifactDir)
+      );
+    }
+    for (const [relativePath, snapshot] of campaignEvidence) {
+      rememberVerifiedPublication(publications, relativePath, snapshot.bytes);
+    }
+    if (invariantSuiteNodeIds.has(task.metadata.node.logicalNodeId)) {
+      rememberInvariantSuitePublications(task, publications, artifactRoots);
+    }
+    const primary = artifacts.find((artifact) => artifact.primary);
+    if (primary === undefined) {
+      throw new Error("artifact-contract failure: primary artifact is missing");
+    }
+    publishVerifiedArtifacts(artifactDir, publications);
+    assertVerifiedDependencySnapshotEpochRemainedCurrent(task, dependencySnapshotEpoch);
+    writeArtifactVerificationMarker(task, artifacts, publications);
+    return { artifacts, primary_artifact: primary.path };
+  } finally {
+    endVerifiedDependencySnapshotEpoch(task, dependencySnapshotEpoch);
   }
-  if (taskPublishesWorkspacePatch(task)) {
-    rememberVerifiedPublication(
-      publications,
-      WORKSPACE_PATCH_BASELINE_FILE,
-      captureWorkspacePatchBaselinePublication(task, artifactDir)
-    );
-  }
-  for (const [relativePath, snapshot] of campaignEvidence) {
-    rememberVerifiedPublication(publications, relativePath, snapshot.bytes);
-  }
-  if (invariantSuiteNodeIds.has(task.metadata.node.logicalNodeId)) {
-    rememberInvariantSuitePublications(task, publications, artifactRoots);
-  }
-  const primary = artifacts.find((artifact) => artifact.primary);
-  if (primary === undefined) {
-    throw new Error("artifact-contract failure: primary artifact is missing");
-  }
-  publishVerifiedArtifacts(artifactDir, publications);
-  writeArtifactVerificationMarker(task, artifacts, publications);
-  return { artifacts, primary_artifact: primary.path };
 }
 
 function isPlainJsonRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function verifyCanonicalPropertiesMarkdownPair(
+  task: (typeof taskSpecs)[number],
+  verifiedOutputs: ReadonlyMap<string, VerifiedOutputSnapshot>
+): void {
+  const pair = declaredCanonicalPropertiesPair(task);
+  if (pair === undefined) return;
+  const catalog = verifiedOutputs.get(pair.catalog.path);
+  const markdown = verifiedOutputs.get(pair.markdown.path);
+  if (catalog === undefined || markdown === undefined) {
+    throw new Error("artifact-contract failure: declared canonical properties outputs are unavailable for parity");
+  }
+  const parsed = validatePropertiesSchema(catalog.value, catalog.file.path);
+  if (!parsed.ok || parsed.value === undefined) {
+    throw new Error(
+      `artifact-contract failure: declared canonical property catalog is schema-invalid: ${formatSchemaValidationIssues(parsed.issues)}`
+    );
+  }
+  const issues = canonicalPropertiesMarkdownParityIssues(parsed.value, markdown.contents, markdown.file.path);
+  if (issues.length > 0) {
+    throw new Error(
+      `artifact-contract failure: canonical properties JSON/Markdown parity failed: ${issues
+        .map(
+          (issue: { code: string; path: string; message: string }) => `${issue.code} ${issue.path}: ${issue.message}`
+        )
+        .join("; ")}`
+    );
+  }
 }
 
 function verifyFinalReportCanonicalProjection(
@@ -5281,18 +5640,27 @@ function verifyInvariantLedgerSourceEvidence(
   task: (typeof taskSpecs)[number],
   verifiedOutputs: ReadonlyMap<string, VerifiedOutputSnapshot>
 ): void {
-  if (task.metadata.node.logicalNodeId !== "project-discovery") {
-    return;
-  }
-  const ledgerOutput = task.outputs.find((output) => output.path === "setup/invariant-evidence-ledger.json");
-  if (ledgerOutput === undefined) {
-    return;
-  }
+  const pair = declaredInvariantLedgerProducerPair(task);
+  if (pair === undefined) return;
+  const ledgerOutput = pair.ledger;
   const ledger = verifiedOutputs.get(ledgerOutput.path);
-  if (ledger === undefined) return;
+  const markdown = verifiedOutputs.get(pair.markdown.path);
+  if (ledger === undefined || markdown === undefined) {
+    throw new Error("artifact-contract failure: invariant ledger JSON/Markdown snapshots are unavailable");
+  }
   const validation = validateInvariantLedgerSchema(ledger.value, ledger.file.path);
   if (!validation.ok || validation.value === undefined) {
     return;
+  }
+  const parityIssues = invariantLedgerMarkdownParityIssues(validation.value, markdown.contents, markdown.file.path);
+  if (parityIssues.length > 0) {
+    throw new Error(
+      `artifact-contract failure: invariant ledger JSON/Markdown parity failed: ${parityIssues
+        .map(
+          (issue: { code: string; path: string; message: string }) => `${issue.code} ${issue.path}: ${issue.message}`
+        )
+        .join("; ")}`
+    );
   }
   const files = new Map<string, { path: string; sha256: string; content: string }>();
   const sourceSnapshots = new Map<string, { bytes: Buffer; content: string }>();
@@ -5422,7 +5790,11 @@ function verifyInvariantLedgerSourceEvidence(
   if (resolvedProofRoot !== proofRoot || !isStrictlyInsideDirectory(runRoot, resolvedProofRoot)) {
     throw new Error(`artifact-contract failure: unsafe invariant source proof root ${task.attemptId}`);
   }
-  writeFileDurable(proofPath, `${JSON.stringify(proof, null, 2)}\n`);
+  try {
+    publishFileDurableExclusive(resolvedProofRoot, path.basename(proofPath), `${JSON.stringify(proof, null, 2)}\n`);
+  } catch (error) {
+    throw new Error(`artifact-contract failure: invariant source proof ${task.attemptId} changed`, { cause: error });
+  }
 }
 
 function normalizeInvariantSourceLines(lines: readonly string[]): string {

@@ -44,6 +44,7 @@ import type {
   EvalRunProvenance,
   EvalRecoveryEquivalence,
   EvalRecoveryEquivalenceSummary,
+  EvalReportAuthority,
   EvalReportingPolicy,
   EvalRunExpansion,
   EvalRunManifest,
@@ -439,6 +440,7 @@ export function currentRowScore(row: EvalMatrixRow, overrides: Partial<EvalRowSc
     target_id: row.target_id,
     variant_id: row.variant_id,
     trial_id: row.trial_id,
+    report_authority: testReportAuthority(row),
     report_schema_valid: true,
     ground_truth_bug_count: 1,
     finding_count: 1,
@@ -479,15 +481,40 @@ export function currentRowScore(row: EvalMatrixRow, overrides: Partial<EvalRowSc
   };
 }
 
+export function testReportAuthority(
+  row: Pick<EvalMatrixRow, "run_id">,
+  overrides: Partial<EvalReportAuthority> = {}
+): EvalReportAuthority {
+  const reportRoot = path.join("/tmp", row.run_id, "artifacts", "final-report");
+  return {
+    ultrafuzz_run_id: row.run_id,
+    producer_attempt_id: `${row.run_id}:final-report:attempt-1`,
+    graph_fingerprint: TEST_SHA256,
+    config_fingerprint: TEST_SHA256,
+    report_json_path: path.join(reportRoot, "final-report.json"),
+    report_json_sha256: TEST_SHA256,
+    report_markdown_path: path.join(reportRoot, "final-report.md"),
+    report_markdown_sha256: TEST_SHA256,
+    contract: "ultrafuzz/report@2",
+    contract_digest: TEST_SHA256,
+    schema_id: "urn:ultrafuzz:schema:artifacts:final-report:2",
+    schema_sha256: TEST_SHA256,
+    schema_bundle_sha256: TEST_SHA256,
+    validator_build: "ultrafuzz-test-validator",
+    ...overrides
+  };
+}
+
 export function currentScoreSummary(input: {
   row: EvalMatrixRow;
   evalRunRoot: string;
   evalRunId?: string;
+  rowOverrides?: Partial<EvalRowScore>;
   overrides?: Partial<EvalScoreSummary>;
 }): EvalScoreSummary {
-  const row = currentRowScore(input.row);
+  const row = currentRowScore(input.row, input.rowOverrides);
   return {
-    schema_version: "ultrafuzz.eval.score-summary.v1",
+    schema_version: "ultrafuzz.eval.score-summary.v2",
     eval_run_id: input.evalRunId ?? "eval-test",
     eval_run_root: input.evalRunRoot,
     recall_threshold: 0.7,

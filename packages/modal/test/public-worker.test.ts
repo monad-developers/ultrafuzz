@@ -174,6 +174,79 @@ it("recognizes and cleans the legacy persistent public workspace without treatin
   );
 }, 30_000);
 
+it("rejects a present dangling public bundle without starting replacement model work", async () => {
+  const dataRoot = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-dangling-bundle-"));
+  const model: ModalModelSpec = {
+    slug: "benchmark-smoke-gpt-5-6-luna-high",
+    model: "gpt-5.6-luna",
+    provider: "openai",
+    agent: "CodexAgent",
+    reasoning: "high",
+    auth_mode: "api-key"
+  };
+  const config = {
+    schema_version: "ultrafuzz.modal.benchmark.v2",
+    run_id: "public-dangling-bundle",
+    app_name: "ultrafuzz-benchmarks",
+    image_name: "fixture-image",
+    braintrust: publicBraintrustConfig(),
+    node_timeout_seconds: 1800,
+    loops: 1,
+    models: [model],
+    public_benchmark: {
+      benchmark: "ultrafuzz-bench",
+      lane: "smoke",
+      runner_model_profile: model.slug,
+      candidate_repository: "https://github.com/monad-developers/ultrafuzz",
+      candidate_commit: "a".repeat(40),
+      targets: publicTargets(),
+      max_runtime_seconds: 3_600
+    }
+  } satisfies PublicModalBenchmarkConfig;
+  const lineage: ModalWorkerLineage = {
+    schema_version: "ultrafuzz.modal.worker-lineage.v1",
+    logical_run_id: config.run_id,
+    generation: 1,
+    attempt: 1,
+    attempt_id: "attempt-one",
+    workspace_mode: "resume",
+    fingerprints: { config: "b".repeat(64), source: "c".repeat(64), image: "d".repeat(64) },
+    model_fingerprint: "e".repeat(64)
+  };
+  fs.symlinkSync("missing-public-results.json", path.join(dataRoot, "public-results.json"));
+  const incompatible = new Error("checkpoint-incompatible: persisted public benchmark bundle is invalid");
+  let preflightCalls = 0;
+  const previousOpenAiApiKey = process.env.OPENAI_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+
+  try {
+    await expect(
+      runPublicBenchmarkWorker({
+        config,
+        model,
+        lineage,
+        dataRoot,
+        preflight: async () => {
+          preflightCalls += 1;
+        },
+        isCheckpointIncompatible: (error) => error === incompatible,
+        checkpointIncompatibleError: () => incompatible
+      })
+    ).rejects.toBe(incompatible);
+  } finally {
+    if (previousOpenAiApiKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previousOpenAiApiKey;
+  }
+
+  expect(preflightCalls).toBe(1);
+  expect(JSON.parse(fs.readFileSync(path.join(dataRoot, "status.json"), "utf8"))).toMatchObject({
+    result_type: "terminal",
+    model_work_started: false,
+    diagnostic_code: "checkpoint-incompatible"
+  });
+  expect(fs.readlinkSync(path.join(dataRoot, "public-results.json"))).toBe("missing-public-results.json");
+}, 30_000);
+
 it("accepts the bounded full lane before reading paid-run credentials", async () => {
   const dataRoot = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-full-lane-"));
   const model: ModalModelSpec = {
@@ -1458,6 +1531,7 @@ it("uses report.json as the sole public finding authority", () => {
   expect(reportSources.some((source) => source.source.includes("findings"))).toBe(false);
 
   fs.rmSync(path.join(dedupeRoot, "deduped-findings.json"));
+  writeGenuineTaskFailureFixture(runRoot);
   fs.appendFileSync(
     path.join(evalRoot, "runs.jsonl"),
     `${JSON.stringify({
@@ -1713,10 +1787,14 @@ function execGit(cwd: string, args: string[]): string {
 
 function writeGenuineTaskFailureFixture(runRoot: string): void {
   const attemptId = "task-one";
-  fs.writeFileSync(
-    path.join(runRoot, "state.json"),
-    `${JSON.stringify({ ...currentGenuineTaskFailureState(attemptId), run_id: "target-run" })}\n`
-  );
+  const currentState = JSON.parse(fs.readFileSync(path.join(runRoot, "state.json"), "utf8")) as {
+    nodes: Record<string, unknown>;
+  };
+  const failureState = currentGenuineTaskFailureState(attemptId) as {
+    nodes: Record<string, unknown>;
+  };
+  failureState.nodes["final-report"] = currentState.nodes["final-report"]!;
+  fs.writeFileSync(path.join(runRoot, "state.json"), `${JSON.stringify({ ...failureState, run_id: "target-run" })}\n`);
   writeCurrentSmithersTaskFixture(runRoot, attemptId);
 }
 

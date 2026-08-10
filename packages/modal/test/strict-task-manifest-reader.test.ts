@@ -50,7 +50,7 @@ it("classifies only a current strict task manifest joined to its planned graph",
   fs.writeFileSync(
     fixture.tasksPath,
     currentTasks.replace(
-      '"schema_version":"ultrafuzz.smithers.workflow.v3"',
+      /"schema_version"\s*:\s*"ultrafuzz\.smithers\.workflow\.v3"/u,
       '"schema_version":"ultrafuzz.smithers.workflow.v3","schema_version":"ultrafuzz.smithers.workflow.v3"'
     )
   );

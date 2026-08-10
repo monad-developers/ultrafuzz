@@ -41,21 +41,27 @@ timeouts, backend settings, or artifact requirements.
 
 ## Core Variables
 
-| Variable                    | Meaning                                                                |
-| --------------------------- | ---------------------------------------------------------------------- |
-| `repo_path`                 | Absolute path to the target repository being fuzzed.                   |
-| `workspace_path`            | Absolute path to this node attempt workspace.                          |
-| `schema_path`               | Absolute path to the task-local checked-in JSON schema bundle.         |
-| `artifact_path`             | Absolute path to this node attempt artifact directory.                 |
-| `artifact_dir`              | Alias for `artifact_path`.                                             |
-| `run_metadata_path`         | Absolute path to this run's `run.json`.                                |
-| `output_findings_path`      | Absolute path where the agent should write `findings.json`.            |
-| `output_patch_path`         | Absolute path reserved for a patch evidence file.                      |
-| `strategy`                  | Current logical topology node ID.                                      |
-| `attempt_index`             | Zero-based attempt index for this concrete attempt.                    |
-| `strategy_loop_index`       | Zero-based loop index for this logical node.                           |
-| `strategy_loop_count`       | Total loop count for this logical node.                                |
-| `strategy_attempt_test_dir` | Absolute workspace path for generated Foundry tests from this attempt. |
+| Variable                    | Meaning                                                                            |
+| --------------------------- | ---------------------------------------------------------------------------------- |
+| `repo_path`                 | Absolute path to the target repository being fuzzed.                               |
+| `workspace_path`            | Absolute path to this node attempt workspace.                                      |
+| `schema_path`               | Absolute path to the task-local checked-in JSON schema bundle.                     |
+| `artifact_path`             | Absolute path to this node attempt artifact directory.                             |
+| `artifact_dir`              | Alias for `artifact_path`.                                                         |
+| `run_metadata_path`         | Absolute path to this run's `run.json`.                                            |
+| `output_findings_path`      | Absolute path of this node's sole topology-declared `ultrafuzz/findings@2` output. |
+| `output_patch_path`         | Absolute path reserved for a patch evidence file.                                  |
+| `strategy`                  | Current logical topology node ID.                                                  |
+| `attempt_index`             | Zero-based attempt index for this concrete attempt.                                |
+| `strategy_loop_index`       | Zero-based loop index for this logical node.                                       |
+| `strategy_loop_count`       | Total loop count for this logical node.                                            |
+| `strategy_attempt_test_dir` | Absolute workspace path for generated Foundry tests from this attempt.             |
+
+`output_findings_path` is topology authority, not a configurable filename.
+Rendering fails unless the current node declares exactly one
+`ultrafuzz/findings@2` output, and callers cannot override the variable through
+prompt variables. Change the topology output declaration when a different path
+is required.
 
 ## Triage And Invariant Variables
 

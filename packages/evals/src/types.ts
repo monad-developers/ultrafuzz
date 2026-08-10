@@ -4,8 +4,8 @@ import type { RuntimeDiagnostic } from "@ultrafuzz/runtime";
 export const EVAL_SPEC_SCHEMA_VERSION = "ultrafuzz.eval.v2" as const;
 export const EVAL_RUN_SCHEMA_VERSION = "ultrafuzz.eval.run.v3" as const;
 export const EVAL_RUN_SUMMARY_SCHEMA_VERSION = "ultrafuzz.eval.run-summary.v2" as const;
-export const EVAL_FINDING_SCORE_SCHEMA_VERSION = "ultrafuzz.eval.finding-score.v1" as const;
-export const EVAL_SCORE_SUMMARY_SCHEMA_VERSION = "ultrafuzz.eval.score-summary.v1" as const;
+export const EVAL_FINDING_SCORE_SCHEMA_VERSION = "ultrafuzz.eval.finding-score.v2" as const;
+export const EVAL_SCORE_SUMMARY_SCHEMA_VERSION = "ultrafuzz.eval.score-summary.v2" as const;
 export const EVAL_REVIEW_QUEUE_ITEM_SCHEMA_VERSION = "ultrafuzz.eval.review-queue-item.v2" as const;
 export const EVAL_PUBLICATION_STATE_SCHEMA_VERSION = "ultrafuzz.eval.publication.v1" as const;
 
@@ -543,8 +543,30 @@ export interface EvalFindingScore {
   finding_id: string;
   finding_title?: string;
   report_path: string;
+  report_authority: EvalReportAuthority;
   deterministic_match: FindingJudgeResult;
   judge_result: FindingJudgeResult;
+}
+
+/** In-memory scorer result that is never valid as a persisted score artifact. */
+export type EvalUnboundFindingScore = Omit<EvalFindingScore, "report_authority">;
+
+/** Exact verified report and run-state authority used to derive one score row. */
+export interface EvalReportAuthority {
+  ultrafuzz_run_id: string;
+  producer_attempt_id: string;
+  graph_fingerprint: string;
+  config_fingerprint: string;
+  report_json_path: string;
+  report_json_sha256: string;
+  report_markdown_path: string;
+  report_markdown_sha256: string;
+  contract: "ultrafuzz/report@2";
+  contract_digest: string;
+  schema_id: string;
+  schema_sha256: string;
+  schema_bundle_sha256: string;
+  validator_build: string;
 }
 
 export interface HumanReviewQueueItem {
@@ -580,6 +602,7 @@ export interface EvalRowScore {
   target_id: string;
   variant_id: string;
   trial_id: string;
+  report_authority: EvalReportAuthority;
   report_schema_valid: boolean;
   ground_truth_bug_count: number;
   finding_count: number;
@@ -601,6 +624,9 @@ export interface EvalRowScore {
   expansion: EvalRunExpansion;
   recovery_equivalence: EvalRecoveryEquivalence;
 }
+
+/** In-memory scorer result that is never valid inside a persisted score summary. */
+export type EvalUnboundRowScore = Omit<EvalRowScore, "report_authority">;
 
 export interface EvalScoreSummary {
   schema_version: typeof EVAL_SCORE_SUMMARY_SCHEMA_VERSION;

@@ -591,7 +591,15 @@ function readGraph(runRoot: string): unknown {
 
 function readStateSafe(runRoot: string): RunState | undefined {
   const statePath = path.join(runRoot, "state.json");
-  return fs.existsSync(statePath) ? readRunState(statePath) : undefined;
+  try {
+    fs.lstatSync(statePath);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return undefined;
+    }
+    throw error;
+  }
+  return readRunState(statePath);
 }
 
 /** The row's terminal report path, or nothing -- never a throw that would cost the row its journal entry. */
@@ -603,9 +611,8 @@ function readRunFingerprints(runRoot: string): {
   graph_fingerprint?: string;
   config_fingerprint?: string;
 } {
-  const statePath = path.join(runRoot, "state.json");
-  if (!fs.existsSync(statePath)) return {};
-  const value = readRunState(statePath);
+  const value = readStateSafe(runRoot);
+  if (value === undefined) return {};
   return {
     ...(value.graph_fingerprint === undefined ? {} : { graph_fingerprint: value.graph_fingerprint }),
     ...(value.config_fingerprint === undefined ? {} : { config_fingerprint: value.config_fingerprint })

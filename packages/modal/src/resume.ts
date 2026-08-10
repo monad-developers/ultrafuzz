@@ -1,7 +1,7 @@
 import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 
-import { layoutForRunRoot, readRunMetadataDocument } from "@ultrafuzz/artifacts";
+import { layoutForRunRoot, readRunMetadataDocument, readRunState } from "@ultrafuzz/artifacts";
 import {
   appendEvalRunRecord,
   EVAL_RUN_SUMMARY_SCHEMA_VERSION,
@@ -68,6 +68,24 @@ export function modalDurableRunAdvanced(before: ModalResumeRunState, after: Moda
   if (before.run_id !== after.run_id) return false;
   if (before.status !== after.status) return true;
   return JSON.stringify(nodeStatuses(before.nodes)) !== JSON.stringify(nodeStatuses(after.nodes));
+}
+
+export async function readModalDurableRunState(
+  target: string,
+  expectedRunId: string
+): Promise<ModalResumeRunState | undefined> {
+  const statePath = path.join(target, ".ultrafuzz/runs", expectedRunId, "state.json");
+  try {
+    await lstat(statePath);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined;
+    throw error;
+  }
+  const state = readRunState(statePath);
+  if (state.run_id !== expectedRunId) {
+    throw new Error(`durable run state identifies ${state.run_id}, expected ${expectedRunId}`);
+  }
+  return state;
 }
 
 function isTerminalRunStatus(status: string | undefined): boolean {
@@ -312,12 +330,12 @@ function isLayoutAddressable(runRoot: string): boolean {
  *
  * Errors are NOT swallowed. Absence means the link was never written; EACCES or EIO on a durable volume
  * mean the answer is unknown, and answering "unlinked" to an unknown is how a read fault becomes a
- * deletion. Only ENOENT/ENOTDIR count as absence, matching `readdirIfMissing`.
+ * deletion. Only ENOENT counts as absence, matching `readdirIfMissing`.
  */
 async function hasLinkedWorkflow(runRoot: string): Promise<boolean> {
   const metadataPath = layoutForRunRoot(runRoot).runMetadataPath;
   const metadataStat = await lstat(metadataPath).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT" || error.code === "ENOTDIR") return undefined;
+    if (error.code === "ENOENT") return undefined;
     throw error;
   });
   if (metadataStat === undefined) return false;
@@ -363,7 +381,7 @@ function assertNoDamagedRunRoots(damaged: readonly string[]): void {
 /** Refuse a path that exists but is not a real directory. An absent path is the ordinary fresh case. */
 async function assertWorkspaceShape(directoryPath: string): Promise<void> {
   const stat = await lstat(directoryPath).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT" || error.code === "ENOTDIR") return undefined;
+    if (error.code === "ENOENT") return undefined;
     throw error;
   });
   if (stat !== undefined && !stat.isDirectory()) {
@@ -373,7 +391,7 @@ async function assertWorkspaceShape(directoryPath: string): Promise<void> {
 
 async function readdirIfMissing(directoryPath: string): Promise<string[]> {
   return readdir(directoryPath).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT" || error.code === "ENOTDIR") return [] as string[];
+    if (error.code === "ENOENT") return [] as string[];
     throw error;
   });
 }
@@ -460,7 +478,7 @@ async function isRegularFileNotSymlink(filePath: string): Promise<boolean> {
 
 async function lstatIfMissing(filePath: string): Promise<Awaited<ReturnType<typeof lstat>> | undefined> {
   return lstat(filePath).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT" || error.code === "ENOTDIR") return undefined;
+    if (error.code === "ENOENT") return undefined;
     throw error;
   });
 }

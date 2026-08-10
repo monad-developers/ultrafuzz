@@ -2,7 +2,7 @@ import fs, { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   EVAL_LLM_JUDGE_RESULT_SCHEMA_ID,
@@ -996,6 +996,17 @@ describe("deterministic scorer math", () => {
     const summary = await scoreEvalRun({ projectRoot: fixture.projectRoot, evalRunId: fixture.evalRunId });
     expect(summary.eval_run_id).toBe(fixture.evalRunId);
     expect(summary.rows[0]).toMatchObject({
+      report_authority: {
+        ultrafuzz_run_id: "generated-run",
+        producer_attempt_id: "final-report",
+        report_json_sha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
+        report_markdown_sha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
+        contract: "ultrafuzz/report@2",
+        schema_id: "urn:ultrafuzz:schema:artifacts:report:2",
+        schema_sha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
+        schema_bundle_sha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
+        validator_build: expect.any(String)
+      },
       lifecycle: {
         launcher: { status: "succeeded", finished_at: "2026-07-09T00:00:00.000Z" },
         workflow: { status: "succeeded", terminal: true, finished_at: "2026-07-09T00:01:00.000Z" }
@@ -1017,6 +1028,11 @@ describe("deterministic scorer math", () => {
       expect(fs.readFileSync(filePath, "utf8")).not.toBe(contents);
     }
     expect(fs.readFileSync(path.join(fixture.evalRunRoot, "scores.jsonl"), "utf8").trim().split("\n")).toHaveLength(2);
+    for (const line of fs.readFileSync(path.join(fixture.evalRunRoot, "scores.jsonl"), "utf8").trim().split("\n")) {
+      expect(JSON.parse(line)).toMatchObject({
+        report_authority: summary.rows[0]!.report_authority
+      });
+    }
     expect(
       fs
         .readFileSync(path.join(fixture.evalRunRoot, "review", "new-findings.jsonl"), "utf8")
@@ -1045,6 +1061,34 @@ describe("deterministic scorer math", () => {
       "| target-a-baseline-trial-1 | 60 | 60 | 0 | 123 | 0.456 | complete | complete | complete |"
     );
     expect(markdown).toContain(`Candidate: test-candidate (${"0".repeat(40)})`);
+    expect(fs.readdirSync(fixture.evalRunRoot).some((entry) => entry.startsWith(".scoring-transaction-"))).toBe(false);
+  });
+
+  it("rolls back every scoring output when report authority changes during staging", async () => {
+    const fixture = scoreRunFixture();
+    const record = JSON.parse(fs.readFileSync(path.join(fixture.evalRunRoot, "runs.jsonl"), "utf8")) as {
+      report_json_path: string;
+    };
+    const originalWriteFileSync = fs.writeFileSync.bind(fs);
+    let mutated = false;
+    const writeSpy = vi.spyOn(fs, "writeFileSync").mockImplementation((file, data, options) => {
+      originalWriteFileSync(file, data, options);
+      if (!mutated && String(file).includes(`${path.sep}.scoring-transaction-`)) {
+        mutated = true;
+        originalWriteFileSync(record.report_json_path, `${fs.readFileSync(record.report_json_path, "utf8")} `, "utf8");
+      }
+    });
+
+    try {
+      await expect(scoreEvalRun({ projectRoot: fixture.projectRoot, evalRunId: fixture.evalRunId })).rejects.toThrow();
+    } finally {
+      writeSpy.mockRestore();
+    }
+
+    expect(mutated).toBe(true);
+    for (const [filePath, contents] of fixture.outputContents) {
+      expect(fs.readFileSync(filePath, "utf8")).toBe(contents);
+    }
     expect(fs.readdirSync(fixture.evalRunRoot).some((entry) => entry.startsWith(".scoring-transaction-"))).toBe(false);
   });
 

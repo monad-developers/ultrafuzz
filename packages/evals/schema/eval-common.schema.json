@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ultrafuzz:schema:evals:common:2",
+  "$id": "urn:ultrafuzz:schema:evals:common:3",
   "$defs": {
     "nonEmptyString": {
       "type": "string",
@@ -1104,13 +1104,22 @@
     "evalFindingScore": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema_version", "row_id", "finding_id", "report_path", "deterministic_match", "judge_result"],
+      "required": [
+        "schema_version",
+        "row_id",
+        "finding_id",
+        "report_path",
+        "report_authority",
+        "deterministic_match",
+        "judge_result"
+      ],
       "properties": {
-        "schema_version": { "const": "ultrafuzz.eval.finding-score.v1" },
+        "schema_version": { "const": "ultrafuzz.eval.finding-score.v2" },
         "row_id": { "$ref": "#/$defs/nonEmptyString" },
         "finding_id": { "$ref": "#/$defs/nonEmptyString" },
         "finding_title": { "$ref": "#/$defs/nonEmptyString" },
         "report_path": { "$ref": "#/$defs/nonEmptyString" },
+        "report_authority": { "$ref": "#/$defs/evalReportAuthority" },
         "deterministic_match": { "$ref": "#/$defs/judgeResult" },
         "judge_result": { "$ref": "#/$defs/judgeResult" }
       }
@@ -1231,6 +1240,42 @@
         "cost": { "$ref": "#/$defs/efficiencyCompleteness" }
       }
     },
+    "evalReportAuthority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ultrafuzz_run_id",
+        "producer_attempt_id",
+        "graph_fingerprint",
+        "config_fingerprint",
+        "report_json_path",
+        "report_json_sha256",
+        "report_markdown_path",
+        "report_markdown_sha256",
+        "contract",
+        "contract_digest",
+        "schema_id",
+        "schema_sha256",
+        "schema_bundle_sha256",
+        "validator_build"
+      ],
+      "properties": {
+        "ultrafuzz_run_id": { "$ref": "#/$defs/nonEmptyString" },
+        "producer_attempt_id": { "$ref": "#/$defs/nonEmptyString" },
+        "graph_fingerprint": { "$ref": "#/$defs/sha256" },
+        "config_fingerprint": { "$ref": "#/$defs/sha256" },
+        "report_json_path": { "$ref": "#/$defs/nonEmptyString" },
+        "report_json_sha256": { "$ref": "#/$defs/sha256" },
+        "report_markdown_path": { "$ref": "#/$defs/nonEmptyString" },
+        "report_markdown_sha256": { "$ref": "#/$defs/sha256" },
+        "contract": { "const": "ultrafuzz/report@2" },
+        "contract_digest": { "$ref": "#/$defs/sha256" },
+        "schema_id": { "$ref": "#/$defs/nonEmptyString" },
+        "schema_sha256": { "$ref": "#/$defs/sha256" },
+        "schema_bundle_sha256": { "$ref": "#/$defs/sha256" },
+        "validator_build": { "$ref": "#/$defs/nonEmptyString" }
+      }
+    },
     "evalRowScore": {
       "type": "object",
       "additionalProperties": false,
@@ -1239,6 +1284,7 @@
         "target_id",
         "variant_id",
         "trial_id",
+        "report_authority",
         "report_schema_valid",
         "ground_truth_bug_count",
         "finding_count",
@@ -1264,6 +1310,7 @@
         "target_id": { "$ref": "#/$defs/nonEmptyString" },
         "variant_id": { "$ref": "#/$defs/nonEmptyString" },
         "trial_id": { "$ref": "#/$defs/nonEmptyString" },
+        "report_authority": { "$ref": "#/$defs/evalReportAuthority" },
         "report_schema_valid": { "type": "boolean" },
         "ground_truth_bug_count": { "$ref": "#/$defs/nonNegativeInteger" },
         "finding_count": { "$ref": "#/$defs/nonNegativeInteger" },
@@ -1369,7 +1416,7 @@
         "provenance"
       ],
       "properties": {
-        "schema_version": { "const": "ultrafuzz.eval.score-summary.v1" },
+        "schema_version": { "const": "ultrafuzz.eval.score-summary.v2" },
         "eval_run_id": { "$ref": "#/$defs/nonEmptyString" },
         "eval_run_root": { "$ref": "#/$defs/nonEmptyString" },
         "recall_threshold": { "$ref": "#/$defs/unitMetric" },

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -15,7 +16,9 @@ import {
   parseStrictJson,
   type SchemaRegistryEntry,
   StrictJsonError,
+  validateArtifactContractBytes,
   validateJsonFile,
+  validateRegisteredJsonBytesSync,
   validateRegisteredJsonSchema,
   validateRegisteredJsonFileSync,
   VALIDATOR_BUILD_IDENTITY
@@ -79,6 +82,44 @@ test("the artifact schema registry is exhaustive, fragment-free, and strictly co
     validator_build: VALIDATOR_BUILD_IDENTITY
   });
   assert.doesNotThrow(() => compileBundledSchemas());
+});
+
+test("artifact contract shape validation shares the registered worker identity and instance budget", () => {
+  const schemaPath = path.join(artifactSchemaDirectory(), "properties.schema.json");
+  const binding = artifactContractSchemaBinding("ultrafuzz/properties@2")!;
+  const validBytes = Buffer.from('{"schema_version":"ultrafuzz.properties.v2","properties":[]}\n');
+  const invalidBytes = Buffer.from('{"schema_version":"ultrafuzz.properties.v2","properties":[],"unexpected":true}\n');
+
+  const workerValid = validateRegisteredJsonBytesSync({ schemaPath, instanceBytes: validBytes });
+  const contractValid = validateArtifactContractBytes("ultrafuzz/properties@2", validBytes, "properties.json");
+  assert.equal(workerValid.status, "valid");
+  assert.equal(contractValid.ok, true, JSON.stringify(contractValid.issues));
+  assert.deepEqual(workerValid.schema, {
+    id: binding.schema_id,
+    sha256: binding.schema_sha256,
+    bundle_sha256: binding.schema_bundle_sha256,
+    validator_build: binding.validator_build,
+    registered: true
+  });
+
+  const workerInvalid = validateRegisteredJsonBytesSync({ schemaPath, instanceBytes: invalidBytes });
+  const contractInvalid = validateArtifactContractBytes("ultrafuzz/properties@2", invalidBytes, "properties.json");
+  assert.equal(workerInvalid.status, "instance-error");
+  assert.equal(workerInvalid.diagnostics[0]?.code, "JSON_SCHEMA_VIOLATION");
+  assert.equal(contractInvalid.ok, false);
+  assert.equal(contractInvalid.issues[0]?.code, "ARTIFACT_SCHEMA_INVALID");
+  assert.equal(contractInvalid.issues[0]?.path, `properties.json${workerInvalid.diagnostics[0]?.instancePath ?? ""}`);
+
+  const oversizedBytes = Buffer.alloc(DEFAULT_MAX_JSON_INSTANCE_BYTES + 1, 0x20);
+  oversizedBytes[0] = 0x5b;
+  oversizedBytes[1] = 0x5d;
+  const workerOversized = validateRegisteredJsonBytesSync({ schemaPath, instanceBytes: oversizedBytes });
+  const contractOversized = validateArtifactContractBytes("ultrafuzz/properties@2", oversizedBytes, "properties.json");
+  assert.equal(workerOversized.status, "instance-error");
+  assert.equal(workerOversized.diagnostics[0]?.code, "JSON_INSTANCE_UNREADABLE");
+  assert.equal(contractOversized.ok, false);
+  assert.equal(contractOversized.issues[0]?.code, "ARTIFACT_JSON_INVALID");
+  assert.match(contractOversized.issues[0]?.message ?? "", /67108864-byte limit/u);
 });
 
 test("file validation uses the registered schema and distinguishes instance from setup failures", async () => {
@@ -274,6 +315,70 @@ test("registered instance byte budgets reach strict schema validation without re
   assert.match(external.diagnostics[0]?.message ?? "", /67108864-byte limit/u);
 });
 
+test("Bun host registered validation preserves strict CLI acceptance for malformed instances", async (t) => {
+  const bun = bunExecutable();
+  if (bun === undefined) {
+    t.skip("Bun is unavailable");
+    return;
+  }
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-bun-correctness-"));
+  t.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
+  const schemaPath = path.join(artifactSchemaDirectory(), "properties.schema.json");
+  const fixtures = [
+    Buffer.from('{"schema_version":"ultrafuzz.properties.v2","properties":[]}\n'),
+    Buffer.from([0xff]),
+    Buffer.from('{"schema_version":"ultrafuzz.properties.v2"'),
+    Buffer.from('{"schema_version":"ultrafuzz.properties.v2","properties":[],"properties":[]}\n'),
+    Buffer.from('{"schema_version":"ultrafuzz.properties.v2","properties":[],"unexpected":true}\n')
+  ];
+  const fixturePaths = fixtures.map((bytes, index) => {
+    const filePath = path.join(temporary, `fixture-${index}.json`);
+    fs.writeFileSync(filePath, bytes);
+    return filePath;
+  });
+  const cliResults = [];
+  for (const filePath of fixturePaths) {
+    cliResults.push(await validateJsonFile({ schemaPath, filePath }));
+  }
+
+  const probePath = path.join(temporary, "validate.mjs");
+  const moduleUrl = new URL("../src/index.js", import.meta.url).href;
+  fs.writeFileSync(
+    probePath,
+    [
+      `import { validateRegisteredJsonFileSync } from ${JSON.stringify(moduleUrl)};`,
+      "const [schemaPath, ...filePaths] = process.argv.slice(2);",
+      "const results = filePaths.map((filePath) => validateRegisteredJsonFileSync({ schemaPath, filePath }));",
+      "process.stdout.write(JSON.stringify(results));",
+      ""
+    ].join("\n")
+  );
+  const child = spawnSync(bun, [probePath, schemaPath, ...fixturePaths], {
+    encoding: "utf8",
+    maxBuffer: 1024 * 1024,
+    timeout: 15_000,
+    windowsHide: true
+  });
+  assert.equal(child.error, undefined, child.error?.message);
+  assert.equal(child.status, 0, child.stderr);
+  const bunResults = JSON.parse(child.stdout) as Array<{
+    status: string;
+    diagnostics: Array<{ code?: string }>;
+  }>;
+  const acceptance = (result: { status: string; diagnostics: Array<{ code?: string }> }) => ({
+    status: result.status,
+    code: result.diagnostics[0]?.code ?? null
+  });
+  assert.deepEqual(bunResults.map(acceptance), cliResults.map(acceptance));
+  assert.deepEqual(bunResults.map(acceptance), [
+    { status: "valid", code: null },
+    { status: "instance-error", code: "JSON_INSTANCE_INVALID" },
+    { status: "instance-error", code: "JSON_INSTANCE_INVALID" },
+    { status: "instance-error", code: "JSON_DUPLICATE_KEY" },
+    { status: "instance-error", code: "JSON_SCHEMA_VIOLATION" }
+  ]);
+});
+
 test("external schemas resolve only local contained references", async () => {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-ref-"));
   try {
@@ -461,6 +566,16 @@ test("repeated external references reuse one bounded file snapshot", async (t) =
   assert.equal((await validateJsonFile({ schemaPath: root, filePath: artifact })).status, "valid");
   assert.equal(childOpenCount, 1);
 });
+
+function bunExecutable(): string | undefined {
+  const probe = spawnSync("bun", ["-e", "process.stdout.write(process.execPath)"], {
+    encoding: "utf8",
+    timeout: 10_000,
+    windowsHide: true
+  });
+  if (probe.status !== 0 || probe.stdout.length === 0) return undefined;
+  return fs.realpathSync(probe.stdout);
+}
 
 function writeJsonWithTrailingSpaces(filePath: string, value: unknown, targetBytes: number): void {
   const prefix = Buffer.from(JSON.stringify(value), "utf8");

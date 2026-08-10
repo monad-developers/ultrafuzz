@@ -88,6 +88,24 @@ test("verified final-report reader binds immutable current bytes to verifier and
   );
 });
 
+test("verified final-report reader rejects a schema-valid report that claims another run", () => {
+  const fixture = createVerifiedReportFixture("verified-report-run-identity", {
+    report: currentReport("different-run")
+  });
+  const reportBefore = fs.readFileSync(fixture.reportPath);
+  const markdownBefore = fs.readFileSync(fixture.markdownPath);
+
+  assert.throws(
+    () => loadVerifiedFinalReportSnapshot(fixture.layout.root),
+    (error: unknown) =>
+      error instanceof VerifiedOutputError &&
+      error.code === "VERIFIED_OUTPUT_INVALID" &&
+      /run_metadata\.run_id does not match the authenticated Ultrafuzz run/iu.test(error.message)
+  );
+  assert.deepEqual(fs.readFileSync(fixture.reportPath), reportBefore);
+  assert.deepEqual(fs.readFileSync(fixture.markdownPath), markdownBefore);
+});
+
 test("verified final-report selection resolves one finalized sealed model-fanout attempt", () => {
   const selectedAttempt = `${REPORT_ATTEMPT_ID}__model_0__attempt_0`;
   const fixture = createVerifiedReportFixture("verified-report-model-fanout", {

@@ -3,7 +3,6 @@ import { realpathSync } from "node:fs";
 import { access, appendFile, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { readRunState } from "@ultrafuzz/artifacts";
 import {
   assertGroundTruthSubject,
   readEvalRunSummary,
@@ -32,6 +31,7 @@ import {
   modalDurableResumeCommand,
   modalDurableRunAdvanced,
   modalDurableRunNeedsResume,
+  readModalDurableRunState,
   modalEvalRunCommand,
   NonResumableTerminalRunError,
   finalizeModalEvalRunRecord,
@@ -273,7 +273,7 @@ async function resumeExistingEvaluation(
     throw new CheckpointIncompatibleError("persistent ground truth subject binding is incompatible", { cause: error });
   });
   await writer.writePartial(await readWorkerCheckpoint(workspace.target));
-  let state = await durableRunState(workspace.target, workspace.productRunId);
+  let state = await readModalDurableRunState(workspace.target, workspace.productRunId);
   if (state === undefined) throw new CheckpointIncompatibleError("persistent workspace is missing durable run state");
   // Claim model work only once the durable run is known to be readable. Claiming it earlier costs the tight
   // pre-model retry bound: an attempt reporting model work resets the streak `MODAL_PRE_MODEL_RETRY_LIMIT`
@@ -325,7 +325,7 @@ async function waitForTerminalRun(
       label: "sync resumed run",
       failureCategory: "unreachable"
     });
-    const state = await durableRunState(workspace.target, workspace.productRunId);
+    const state = await readModalDurableRunState(workspace.target, workspace.productRunId);
     if (state !== undefined) {
       await reportProgress(workspace.target, writer);
       resumeObserved ||= modalDurableRunAdvanced(stateBeforeResume, state);
@@ -553,23 +553,6 @@ async function runEval(argv: string[], target: string, writer: WorkerResultWrite
 
 async function reportProgress(target: string, writer: WorkerResultWriter): Promise<void> {
   await writer.writePartial(await readWorkerCheckpoint(target));
-}
-
-async function durableRunState(target: string, expectedRunId: string): Promise<ModalResumeRunState | undefined> {
-  const statePath = path.join(target, ".ultrafuzz/runs", expectedRunId, "state.json");
-  try {
-    await access(statePath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT" || (error as NodeJS.ErrnoException).code === "ENOTDIR") {
-      return undefined;
-    }
-    throw error;
-  }
-  const state = readRunState(statePath);
-  if (state.run_id !== expectedRunId) {
-    throw new Error(`durable run state identifies ${state.run_id}, expected ${expectedRunId}`);
-  }
-  return state;
 }
 
 async function runChecked(

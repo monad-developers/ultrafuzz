@@ -1,14 +1,30 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 import {
+  ARTIFACT_VERIFICATION_SCHEMA_VERSION,
+  SMITHERS_TASK_MANIFEST_SCHEMA_VERSION,
+  SMITHERS_TASK_METADATA_SCHEMA_VERSION,
+  artifactContractDefinition,
+  artifactContractSchemaBinding,
   artifactSchemaDirectory,
   artifactValidatorSmokeFixturePath,
+  createRunLayout,
   DEFAULT_MAX_JSON_INSTANCE_BYTES,
-  parseJsonValidatorPreflightSuccessEnvelope
+  getNodeArtifactDir,
+  parseJsonValidatorPreflightSuccessEnvelope,
+  updateNodeState,
+  writeArtifactManifest,
+  writeJsonDurable,
+  type ArtifactVerificationMarker,
+  type JsonFileValidationResult,
+  type RunLayout,
+  type SmithersTaskManifestDocument,
+  type SmithersTaskManifestTask
 } from "@ultrafuzz/artifacts";
 import {
   RESOLVED_CONFIG_JSON_SCHEMA_ID,
@@ -36,6 +52,13 @@ import {
   referenceSchemaBundleDigest,
   referenceSchemaDirectory
 } from "@ultrafuzz/references";
+import {
+  WORKFLOW_CONTROL_INTEGRITY_SCHEMA_VERSION,
+  verifyRequiredArtifactsForAttempt,
+  type ArtifactGateAttemptAuthority,
+  type PlannedGraphNode,
+  type RuntimeDiagnostic
+} from "@ultrafuzz/runtime";
 import {
   EXPANDED_GRAPH_JSON_SCHEMA_ID,
   TOPOLOGY_SCHEMA_BUNDLE_DIGEST,
@@ -192,6 +215,221 @@ test("json validate exposes the strict validator through the primary CLI", async
     assert.deepEqual(fs.readFileSync(schema), schemaBefore);
     assert.deepEqual(fs.readFileSync(valid), validBefore);
     assert.deepEqual(fs.readFileSync(invalid), invalidBefore);
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("json validate diagnostics project exactly through the production planned-output host gate", async () => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-cli-host-parity-"));
+  try {
+    const output = boundHostOutput("results/malformed-findings.json", "ultrafuzz/findings@2", true);
+    const node = hostFixtureNode("malformed-findings-producer", [output]);
+    const fixture = createSealedHostFixture(temporary, "malformed-planned-output", [node]);
+    const schema = path.join(artifactSchemaDirectory(), "findings.schema.json");
+    const artifact = path.join(getNodeArtifactDir(fixture.layout, node.id), output.path);
+    const sensitiveValue = "must-not-appear-in-diagnostics";
+    const bytes = Buffer.from(
+      `${JSON.stringify([
+        {
+          schema_version: "ultrafuzz.finding.v2",
+          id: "finding-1",
+          title: "A deliberately malformed planned finding",
+          status: sensitiveValue,
+          severity_guess: "Medium",
+          confidence: "high",
+          summary: "The shape gate must reject this finding without exposing its invalid value.",
+          [sensitiveValue]: true
+        }
+      ])}\n`,
+      "utf8"
+    );
+    writeHostArtifact(artifact, bytes);
+
+    const producer = await capture(["json", "validate", "--schema", schema, "--file", artifact, "--json"]);
+    assert.equal(producer.code, 1);
+    assert.equal(producer.stderr, "");
+    const envelope = JSON.parse(producer.stdout) as {
+      ok: boolean;
+      data: JsonFileValidationResult;
+    };
+    assert.equal(envelope.ok, false);
+    assert.equal(envelope.data.schema?.registered, true);
+    assert.equal(envelope.data.artifact_sha256, digestHostBytes(bytes));
+    assert.deepEqual(envelope.data.diagnostics, [
+      {
+        code: "JSON_SCHEMA_VIOLATION",
+        message: "must NOT have additional properties",
+        instancePath: "/0",
+        schemaPath: "urn:ultrafuzz:schema:artifacts:finding:2/additionalProperties",
+        keyword: "additionalProperties"
+      },
+      {
+        code: "JSON_SCHEMA_VIOLATION",
+        message: "must be equal to one of the allowed values",
+        instancePath: "/0/status",
+        schemaPath: "urn:ultrafuzz:schema:artifacts:finding:2/properties/status/enum",
+        keyword: "enum"
+      }
+    ]);
+    const binding = artifactContractSchemaBinding(output.contract);
+    assert.ok(binding);
+    assert.equal(envelope.data.schema?.id, binding.schema_id);
+    const authority = fixtureAuthority(fixture.tasks, node.id);
+    const host = verifyRequiredArtifactsForAttempt(fixture.layout, node, node.id, authority);
+    const expectedHostDiagnostics: RuntimeDiagnostic[] = envelope.data.diagnostics.map((diagnostic) => ({
+      code: diagnostic.code,
+      message: diagnostic.message,
+      severity: "error",
+      source: "artifact-schema",
+      path: `${artifact}${diagnostic.instancePath === undefined ? "" : `#${diagnostic.instancePath || "/"}`}`,
+      details: {
+        contract: output.contract,
+        schema_id: binding.schema_id,
+        schema_sha256: binding.schema_sha256,
+        schema_bundle_sha256: binding.schema_bundle_sha256,
+        validator_build: binding.validator_build,
+        ...(diagnostic.schemaPath === undefined ? {} : { schema_path: diagnostic.schemaPath }),
+        ...(diagnostic.keyword === undefined ? {} : { keyword: diagnostic.keyword })
+      }
+    }));
+    assert.equal(host.ok, false);
+    assert.deepEqual(host.missing, []);
+    assert.deepEqual(host.diagnostics, expectedHostDiagnostics);
+    assert.deepEqual(
+      host.diagnostics.map((diagnostic) => diagnostic.path),
+      [`${artifact}#/0`, `${artifact}#/0/status`],
+      "host diagnostics must preserve the CLI's deterministic RFC 6901 pointer order"
+    );
+    assert.equal(
+      JSON.stringify({ cli: envelope.data.diagnostics, host: host.diagnostics }).includes(sensitiveValue),
+      false
+    );
+    assert.deepEqual(fs.readFileSync(artifact), bytes, "neither validation boundary may rewrite producer bytes");
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("json validate passes shape before the sealed host rejects a discovered cross-artifact mismatch", async () => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-semantic-boundary-"));
+  try {
+    const catalogJsonOutput = boundHostOutput("handoff/canonical-properties.json", "ultrafuzz/properties@2", true);
+    const catalogMarkdownOutput = boundHostOutput("handoff/canonical-properties.md", "ultrafuzz/nonempty-markdown@1");
+    const catalogNode = hostFixtureNode("canonical-properties-producer", [catalogJsonOutput, catalogMarkdownOutput]);
+    const implementationOutput = boundHostOutput(
+      "implementation/implemented-properties.json",
+      "ultrafuzz/implemented-properties@3",
+      true
+    );
+    const implementationNode = hostFixtureNode(
+      "implemented-properties-consumer",
+      [implementationOutput],
+      [catalogNode.id]
+    );
+    const fixture = createSealedHostFixture(temporary, "semantic-host-context", [catalogNode, implementationNode]);
+    const catalog = {
+      schema_version: "ultrafuzz.properties.v2",
+      properties: [
+        {
+          id: "property-known",
+          description: "The authenticated canonical accounting relation remains conserved.",
+          category: "accounting",
+          priority: "high",
+          sources: [{ source_node_id: "project-discovery", source_property_id: "source-known" }]
+        }
+      ]
+    };
+    finalizeHostProducer(fixture.layout, catalogNode, {
+      [catalogJsonOutput.path]: Buffer.from(`${JSON.stringify(catalog)}\n`, "utf8"),
+      [catalogMarkdownOutput.path]: Buffer.from(
+        [
+          '### Canonical property: "property-known"',
+          'description: "The authenticated canonical accounting relation remains conserved."',
+          'category: "accounting"',
+          'priority: "high"',
+          'sources: [{"source_node_id":"project-discovery","source_property_id":"source-known"}]',
+          '### End canonical property: "property-known"',
+          ""
+        ].join("\n"),
+        "utf8"
+      )
+    });
+
+    const schema = path.join(artifactSchemaDirectory(), "implemented-properties.schema.json");
+    const artifact = path.join(getNodeArtifactDir(fixture.layout, implementationNode.id), implementationOutput.path);
+    const document = {
+      schema_version: "ultrafuzz.implemented-properties.v3",
+      properties: [
+        {
+          property_id: "property-missing-from-catalog",
+          status: "deferred",
+          implementation_paths: [],
+          test_paths: [],
+          blocker: {
+            code: "not-in-catalog",
+            summary: "The selected property is absent from the canonical catalog",
+            next_action: "Reconcile the selection with the canonical property catalog"
+          }
+        }
+      ],
+      selection: {
+        priority_threshold: "high",
+        priorities: ["high"],
+        property_ids: ["property-missing-from-catalog"]
+      }
+    };
+    const bytes = Buffer.from(`${JSON.stringify(document)}\n`, "utf8");
+    writeHostArtifact(artifact, bytes);
+
+    const producer = await capture(["json", "validate", "--schema", schema, "--file", artifact, "--json"]);
+    assert.equal(producer.code, 0, producer.stderr);
+    assert.equal(producer.stderr, "");
+    const envelope = JSON.parse(producer.stdout) as {
+      ok: boolean;
+      data: JsonFileValidationResult;
+    };
+    assert.equal(envelope.ok, true);
+    assert.equal(envelope.data.status, "valid");
+    assert.equal(envelope.data.artifact_sha256, digestHostBytes(bytes));
+    assert.deepEqual(fs.readFileSync(artifact), bytes);
+    assert.equal(
+      fs.existsSync(path.join(getNodeArtifactDir(fixture.layout, catalogNode.id), "properties.json")),
+      false,
+      "host context must come from the exact typed declaration, not a conventional-path fallback"
+    );
+
+    const host = verifyRequiredArtifactsForAttempt(
+      fixture.layout,
+      implementationNode,
+      implementationNode.id,
+      fixtureAuthority(fixture.tasks, implementationNode.id)
+    );
+    assert.equal(host.ok, false);
+    assert.deepEqual(
+      host.diagnostics.filter((diagnostic) => diagnostic.details?.gate === "implemented-property-selection-join"),
+      [
+        {
+          code: "ARTIFACT_SEMANTIC_GATE_FAILED",
+          message:
+            'Semantic gate implemented-property-selection-join failed: Selection references unknown canonical property "property-missing-from-catalog"',
+          severity: "error",
+          source: "semantic-gates",
+          path: `${artifact}#$.selection.property_ids[0]`,
+          details: {
+            schema_file: "implemented-properties.schema.json",
+            gate: "implemented-property-selection-join",
+            scope: "cross-artifact"
+          }
+        }
+      ]
+    );
+    assert.equal(
+      host.diagnostics.some((diagnostic) => diagnostic.code === "ARTIFACT_SEMANTIC_GATE_CONTEXT_UNAVAILABLE"),
+      false,
+      "the host must discover the finalized sealed catalog instead of treating context as unavailable"
+    );
+    assert.deepEqual(fs.readFileSync(artifact), bytes, "the host gate must not rewrite CLI-valid producer bytes");
   } finally {
     fs.rmSync(temporary, { recursive: true, force: true });
   }
@@ -610,6 +848,306 @@ test("json validate recognizes the pinned reference cache schema and its owning 
     fs.rmSync(temporary, { recursive: true, force: true });
   }
 });
+
+const HOST_GRAPH_FINGERPRINT = "f".repeat(64);
+const HOST_CONFIG_FINGERPRINT = "e".repeat(64);
+const HOST_WORKFLOW_RUN_ID = "workflow-json-host-integration";
+
+interface SealedHostFixture {
+  layout: RunLayout;
+  tasks: SmithersTaskManifestTask[];
+}
+
+function boundHostOutput(
+  artifactPath: string,
+  contract: PlannedGraphNode["outputs"][number]["contract"],
+  primary = false
+): PlannedGraphNode["outputs"][number] {
+  return {
+    path: artifactPath,
+    contract,
+    contract_digest: artifactContractDefinition(contract).digest,
+    ...(artifactContractSchemaBinding(contract) ?? {}),
+    primary
+  };
+}
+
+function hostFixtureNode(
+  id: string,
+  outputs: readonly PlannedGraphNode["outputs"][number][],
+  dependencies: readonly string[] = []
+): PlannedGraphNode {
+  return {
+    id,
+    logical_id: id,
+    display_name: id,
+    kind: "agentic",
+    depends_on: [...dependencies],
+    artifact_dir: `artifacts/${id}`,
+    outputs: [...outputs],
+    prompt_id: id,
+    prompt_path: `fixtures/${id}.md`,
+    loop: { index: 0, count: 1, mode: "parallel", attempt_index: 0 },
+    model_fanout: [],
+    workflow: { node_id: `node:${id}`, task_node_ids: [`node:${id}`] }
+  };
+}
+
+function createSealedHostFixture(
+  projectRoot: string,
+  runId: string,
+  nodes: readonly PlannedGraphNode[]
+): SealedHostFixture {
+  const layout = createRunLayout({
+    outputRoot: path.join(projectRoot, "runs"),
+    runId,
+    resolvedConfigToml: '[invariants]\nproperty_priority_threshold = "high"\n',
+    graphFingerprint: HOST_GRAPH_FINGERPRINT,
+    configFingerprint: HOST_CONFIG_FINGERPRINT,
+    graph: {
+      schema_version: "ultrafuzz.planned-graph.v3",
+      graph_version: "3",
+      topology_version: 2,
+      groups: {},
+      nodes: [...nodes]
+    },
+    stateNodes: nodes.map((node) => ({
+      id: node.id,
+      logicalNodeId: node.logical_id,
+      artifactDir: node.artifact_dir,
+      outputs: [...node.outputs]
+    }))
+  });
+  for (const node of nodes) getNodeArtifactDir(layout, node.id, { create: true });
+  const tasks = nodes.map((node) => sealedHostTask(layout, node, nodes));
+  const smithersRoot = path.join(layout.root, "smithers");
+  fs.mkdirSync(smithersRoot, { recursive: true });
+  const tasksPath = path.join(smithersRoot, "tasks.json");
+  const taskDocument: SmithersTaskManifestDocument = {
+    schema_version: SMITHERS_TASK_MANIFEST_SCHEMA_VERSION,
+    run_id: layout.runId,
+    smithers_run_id: `ultrafuzz-${layout.runId}`,
+    workflow_name: HOST_WORKFLOW_RUN_ID,
+    pinned_submodules: null,
+    tasks
+  };
+  writeJsonDurable(tasksPath, taskDocument);
+
+  const graphBytes = fs.readFileSync(layout.graphPath);
+  const taskBytes = fs.readFileSync(tasksPath);
+  const emptyFile = { sha256: digestHostBytes(Buffer.alloc(0)), size_bytes: 0 };
+  writeJsonDurable(path.join(smithersRoot, "control-integrity.json"), {
+    schema_version: WORKFLOW_CONTROL_INTEGRITY_SCHEMA_VERSION,
+    run_id: layout.runId,
+    files: {
+      graph: { sha256: digestHostBytes(graphBytes), size_bytes: graphBytes.byteLength },
+      expanded_graph: emptyFile,
+      graph_fingerprint: emptyFile,
+      config: emptyFile,
+      tasks: { sha256: digestHostBytes(taskBytes), size_bytes: taskBytes.byteLength },
+      input: emptyFile,
+      workflow: emptyFile,
+      evidence_workflow: emptyFile
+    },
+    execution_files: [],
+    bindings: {
+      run_id: layout.runId,
+      graph_fingerprint: HOST_GRAPH_FINGERPRINT,
+      config_fingerprint: HOST_CONFIG_FINGERPRINT,
+      expected_state_node_ids: nodes.map((node) => node.id).sort(),
+      expected_task_attempt_ids: tasks.map((task) => task.attemptId).sort(),
+      expected_task_node_ids: tasks
+        .flatMap((task) => [task.preparationSmithersNodeId, task.smithersNodeId, task.verifierSmithersNodeId])
+        .sort()
+    }
+  });
+  return { layout, tasks };
+}
+
+function sealedHostTask(
+  layout: RunLayout,
+  node: PlannedGraphNode,
+  nodes: readonly PlannedGraphNode[]
+): SmithersTaskManifestTask {
+  const ancestors = hostAncestorIds(node, nodes);
+  const dependencyArtifactDirs = nodes
+    .filter((candidate) => ancestors.has(candidate.id))
+    .map((candidate) => getNodeArtifactDir(layout, candidate.id));
+  const dependencySmithersNodeIds = node.depends_on.map((dependency) => `verify:${dependency}`);
+  const artifactDir = getNodeArtifactDir(layout, node.id);
+  const workspacePath = path.join(layout.workspacesDir, node.id);
+  const outputs = node.outputs.map((output) => ({
+    path: output.path,
+    contract: output.contract,
+    contractDigest: output.contract_digest,
+    ...(output.schema_file === undefined ? {} : { schemaFile: output.schema_file }),
+    ...(output.schema_id === undefined ? {} : { schemaId: output.schema_id }),
+    ...(output.schema_sha256 === undefined ? {} : { schemaSha256: output.schema_sha256 }),
+    ...(output.schema_bundle_sha256 === undefined ? {} : { schemaBundleSha256: output.schema_bundle_sha256 }),
+    ...(output.validator_build === undefined ? {} : { validatorBuild: output.validator_build }),
+    primary: output.primary
+  }));
+  return {
+    attemptId: node.id,
+    concreteNodeId: node.id,
+    logicalNodeId: node.logical_id,
+    preparationSmithersNodeId: `prepare:${node.id}`,
+    smithersNodeId: `node:${node.id}`,
+    verifierSmithersNodeId: `verify:${node.id}`,
+    agentRef: "CodexAgent",
+    modelName: "gpt-test",
+    reasoningEffort: "high",
+    dependencies: [...node.depends_on],
+    dependencySmithersNodeIds,
+    timeoutMs: 60_000,
+    heartbeatTimeoutMs: 60_000,
+    retries: 0,
+    retryPolicy: { backoff: "exponential", initialDelayMs: 1_000, maxDelayMs: 30_000 },
+    workspacePath,
+    artifactDir,
+    dependencyArtifactDirs,
+    renderedPromptPath: path.join(layout.root, "prompts", `${node.id}.md`),
+    execution: {
+      mode: "local",
+      resources: { cpu: 2, memoryMiB: 1_024, timeoutSeconds: 60 },
+      agentCredentialEnv: []
+    },
+    metadata: {
+      schemaVersion: SMITHERS_TASK_METADATA_SCHEMA_VERSION,
+      run: {
+        ultrafuzzRunId: layout.runId,
+        smithersWorkflowName: HOST_WORKFLOW_RUN_ID,
+        graphVersion: "3",
+        topologyVersion: 2
+      },
+      node: {
+        concreteNodeId: node.id,
+        logicalNodeId: node.logical_id,
+        attemptId: node.id,
+        label: node.display_name,
+        kind: "agentic",
+        promptPath: node.prompt_path
+      },
+      dependencies: {
+        concreteNodeIds: [...node.depends_on],
+        attemptIds: [...node.depends_on],
+        smithersNodeIds: dependencySmithersNodeIds
+      },
+      loop: {
+        index: node.loop.index,
+        count: node.loop.count,
+        mode: node.loop.mode,
+        attemptIndex: node.loop.attempt_index
+      },
+      model: {
+        profileId: "default",
+        agentRef: "CodexAgent",
+        modelName: "gpt-test",
+        reasoningEffort: "high",
+        modelIndex: 0,
+        attemptIndex: node.loop.attempt_index
+      },
+      workspace: { primitive: "worktree", path: workspacePath, repoPath: "/repo", trustModel: "skip-permissions" },
+      artifacts: { dir: artifactDir, outputs, manifestPath: path.join(artifactDir, "artifact-manifest.json") },
+      retryPolicy: { maxAttempts: 1, smithersRetries: 0 },
+      timeout: { milliseconds: 60_000, seconds: 60, heartbeatTimeoutMs: 60_000 },
+      execution: { mode: "local", resources: { cpu: 2, memoryMiB: 1_024, timeoutSeconds: 60 } }
+    }
+  };
+}
+
+function hostAncestorIds(node: PlannedGraphNode, nodes: readonly PlannedGraphNode[]): ReadonlySet<string> {
+  const nodesById = new Map(nodes.map((candidate) => [candidate.id, candidate] as const));
+  const ancestors = new Set<string>();
+  const pending = [...node.depends_on];
+  while (pending.length > 0) {
+    const dependencyId = pending.shift()!;
+    if (ancestors.has(dependencyId)) continue;
+    const dependency = nodesById.get(dependencyId);
+    assert.ok(dependency, `fixture dependency ${dependencyId} must be planned`);
+    ancestors.add(dependencyId);
+    pending.push(...dependency.depends_on);
+  }
+  return ancestors;
+}
+
+function fixtureAuthority(tasks: readonly SmithersTaskManifestTask[], attemptId: string): ArtifactGateAttemptAuthority {
+  const matches = tasks.filter((task) => task.attemptId === attemptId);
+  assert.equal(matches.length, 1, `fixture requires one sealed task for ${attemptId}`);
+  return { task: matches[0]!, tasks };
+}
+
+function writeHostArtifact(artifactPath: string, bytes: Uint8Array): void {
+  fs.mkdirSync(path.dirname(artifactPath), { recursive: true });
+  fs.writeFileSync(artifactPath, bytes);
+}
+
+function finalizeHostProducer(
+  layout: RunLayout,
+  node: PlannedGraphNode,
+  contents: Readonly<Record<string, Buffer>>
+): void {
+  assert.deepEqual(Object.keys(contents).sort(), node.outputs.map((output) => output.path).sort());
+  const artifactDir = getNodeArtifactDir(layout, node.id);
+  for (const output of node.outputs) writeHostArtifact(path.join(artifactDir, output.path), contents[output.path]!);
+  writeArtifactManifest({
+    layout,
+    nodeId: node.id,
+    include: node.outputs.map((output) => output.path),
+    outputs: node.outputs,
+    prerequisiteNodeIds: node.depends_on,
+    provenance: {
+      producer_node_id: node.id,
+      logical_node_id: node.logical_id,
+      attempt_index: node.loop.attempt_index,
+      loop_index: node.loop.index,
+      model_index: 0,
+      agent_ref: "CodexAgent",
+      workflow_run_id: HOST_WORKFLOW_RUN_ID,
+      workflow_task_id: `node:${node.id}`,
+      origin: "workflow",
+      metadata: { concrete_node_id: node.id }
+    }
+  });
+  const marker: ArtifactVerificationMarker = {
+    schema_version: ARTIFACT_VERIFICATION_SCHEMA_VERSION,
+    attempt_id: node.id,
+    node_id: node.logical_id,
+    artifacts: node.outputs.map((output) => ({
+      ...output,
+      sha256: digestHostBytes(contents[output.path]!)
+    })),
+    publications: node.outputs.map((output) => ({
+      path: output.path,
+      sha256: digestHostBytes(contents[output.path]!)
+    }))
+  };
+  writeJsonDurable(path.join(layout.root, ".ultrafuzz-verification", `${node.id}.json`), marker);
+  const manifestBytes = fs.readFileSync(path.join(artifactDir, "artifact-manifest.json"));
+  updateNodeState(layout, node.id, {
+    status: "succeeded",
+    finished_at: new Date().toISOString(),
+    provenance: {
+      workflow: {
+        run_id: HOST_WORKFLOW_RUN_ID,
+        task_id: `verify:${node.id}`,
+        agent_task_id: `node:${node.id}`,
+        verifier_task_id: `verify:${node.id}`,
+        state: "finished",
+        attempt: 0
+      },
+      output_contracts: {
+        ok: true,
+        missing: [],
+        artifact_manifest_sha256: digestHostBytes(manifestBytes)
+      }
+    }
+  });
+}
+
+function digestHostBytes(bytes: Uint8Array): string {
+  return crypto.createHash("sha256").update(bytes).digest("hex");
+}
 
 function publicBundleFixture(): Record<string, unknown> {
   return {
