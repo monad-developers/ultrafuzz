@@ -4,12 +4,12 @@ This reference is generated from `packages/config/audit-profiles.yml`. Run `pnpm
 
 | Profile | Intended use | Topology | Profile settings |
 | --- | --- | --- | --- |
-| `smoke` | CI, installation, and integration checks. | `topologies/smoke.yml` | `strategy_loops=1`; `dynamic_strategies_enumerator=1`; `model_profile_aliases=benchmark,smoke-coordination`; `max_parallel_agents=4`; `max_parallel_nodes=4`; `workflow_deadline_seconds=14400` |
+| `smoke` | CI, installation, and integration checks. | `topologies/smoke.yml` | `strategy_loops=1`; `dynamic_strategies_enumerator=0`; `max_parallel_agents=4`; `max_parallel_nodes=4`; `workflow_deadline_seconds=14400` |
 | `low-cost` | Budget-constrained audits that still require the normal project workflow. | Project topology | `strategy_loops=1`; `dynamic_strategies_enumerator=1`; `max_parallel_agents=2`; `max_parallel_nodes=4`; `workflow_deadline_seconds=43200`; `triage_quorum=2`; `triage_panel_size=3` |
 | `balanced` (default) | General-purpose audits using the editable project topology. | Project topology | None |
 | `thorough` | High-assurance audits with additional strategy and dynamic-goal breadth. | Project topology | `strategy_loops=3`; `dynamic_strategies_enumerator=5`; `max_parallel_agents=4`; `max_parallel_nodes=8`; `workflow_deadline_seconds=86400` |
-| `exhaustive` | Highest-cost release or critical-system investigations. | Project topology | `strategy_loops=5`; `dynamic_strategies_enumerator=8`; `max_parallel_agents=8`; `max_parallel_nodes=16`; `workflow_deadline_seconds=86400` |
-| `invariant-only` | Stateful-invariant experiments such as the Aave v4 and Origin Dollar campaigns. | `topologies/invariant-only.yml` | `strategy_loops=3`; `dynamic_strategies_enumerator=1`; `max_parallel_agents=4`; `max_parallel_nodes=8`; `workflow_deadline_seconds=86400`; `invariant_testing_smoke_timeout_seconds=600`; `invariant_testing_fuzzer_timeout_seconds=3600` |
+| `exhaustive` | Highest-cost release or critical-system investigations. | Project topology | `strategy_loops=5`; `dynamic_strategies_enumerator=unlimited`; `max_parallel_agents=8`; `max_parallel_nodes=16`; `workflow_deadline_seconds=86400` |
+| `invariant-only` | Focused stateful-invariant campaigns for ScFuzzBench. | `topologies/invariant-only.yml` | `strategy_loops=3`; `dynamic_strategies_enumerator=0`; `max_parallel_agents=4`; `max_parallel_nodes=8`; `workflow_deadline_seconds=86400`; `invariant_testing_smoke_timeout_seconds=600`; `invariant_testing_fuzzer_timeout_seconds=3600` |
 
 Profiles provide coherent defaults. Explicit project configuration and one-run CLI options still win:
 

@@ -18,8 +18,11 @@ Learn from this campaign's setup, property, and strategy artifacts, then create
 additional target-specific Foundry tests and any resulting finding candidates
 for remaining current-run coverage opportunities.
 
-Start up to {{dynamic_strategies_enumerator}} independent max-reasoning
-enumerator sub-agents. Each enumerator should inspect only current-run
+The resolved enumerator policy is `{{dynamic_strategies_enumerator}}`. When it
+is a positive integer, start up to that many independent max-reasoning
+enumerator sub-agents. When it is `unlimited`, start as many independent
+enumerators as are useful while respecting the runtime concurrency and
+deadline limits. A value of `0` disables enumerator sub-agents. Each enumerator should inspect only current-run
 artifacts from a different neutral QA angle and recommend candidate
 target-specific coverage strategies.
 When prompting enumerators, use neutral authorized-QA wording. Do not ask
@@ -172,7 +175,7 @@ Write the aggregate strategy plan to:
 The plan JSON must include:
 
 - `schema_version`: `"1.0"`
-- `dynamic_strategies_enumerator`: the resolved integer value
+- `dynamic_strategies_enumerator`: the resolved non-negative integer or the literal `"unlimited"`
 - `status`: `"selected"`, `"no-actionable-strategies"`, or `"blocked"`
 - `selected_strategy_count`
 - `selected_strategies`: array of selected strategy ids

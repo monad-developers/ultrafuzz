@@ -134,7 +134,7 @@ export function parseProjectConfigToml(text: string, file = CONFIG_FILE_NAME): C
   readInteger(root, "strategy_loops", ["strategy_loops"], diagnostics, (value) => {
     config.strategyLoops = value;
   });
-  readInteger(root, "dynamic_strategies_enumerator", ["dynamic_strategies_enumerator"], diagnostics, (value) => {
+  readDynamicStrategiesEnumerator(root, diagnostics, (value) => {
     config.dynamicStrategiesEnumerator = value;
   });
 
@@ -770,6 +770,21 @@ function readInteger(
     return;
   }
   assign(value);
+}
+
+function readDynamicStrategiesEnumerator(
+  table: Record<string, unknown>,
+  diagnostics: ConfigDiagnostic[],
+  assign: (value: number | "unlimited") => void
+): void {
+  const path = ["dynamic_strategies_enumerator"];
+  const value = table.dynamic_strategies_enumerator;
+  if (value === undefined) return;
+  if (value === "unlimited" || (typeof value === "number" && Number.isInteger(value))) {
+    assign(value);
+    return;
+  }
+  pushTypeDiagnostic(path, "non-negative integer or `unlimited`", diagnostics);
 }
 
 function readNumber(

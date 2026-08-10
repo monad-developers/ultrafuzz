@@ -76,7 +76,7 @@ Unknown TOML keys fail validation. Strategy execution behavior belongs in
 | `audit_profile`                 | Named effort/topology preset. Defaults to `balanced`.                      |
 | `topology_path`                 | Optional project-local topology override that replaces a profile topology. |
 | `strategy_loops`                | Optional positive strategy-loop override.                                  |
-| `dynamic_strategies_enumerator` | Positive integer used by prompts that enumerate dynamic strategies.        |
+| `dynamic_strategies_enumerator` | Non-negative integer or `"unlimited"` used by dynamic-strategy prompts.    |
 | `[project]`                     | Project paths.                                                             |
 | `[run]`                         | Run output, parallelism, workspace, and timeout settings.                  |
 | `[execution]`                   | Local or provider-backed execution and node resource defaults.             |

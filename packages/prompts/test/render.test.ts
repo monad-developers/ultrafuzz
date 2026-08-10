@@ -167,6 +167,34 @@ describe("prompt rendering", () => {
     expect(result.renderedMarkdown).toContain("Do NOT include Markdown fences");
   });
 
+  it("derives generated-test manifests from every matching ancestor output contract", () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    tmpDirs.push(tmp);
+    const input = baseRenderInput(tmp);
+    input.graph.logicalNodes.push({
+      id: "aggregate-test-files",
+      dependsOn: ["boundary-tests"],
+      outputs: [],
+      artifactDir: path.join(input.run.artifactsDir, "aggregate-test-files")
+    });
+    input.node.logicalId = "aggregate-test-files";
+    input.node.concreteId = "aggregate-test-files";
+    input.node.artifactDir = path.join(input.run.artifactsDir, "aggregate-test-files");
+    input.outputs.findingsPath = path.join(input.node.artifactDir, "findings.json");
+    input.outputs.patchPath = path.join(input.node.artifactDir, "patch.diff");
+    input.prompt = "Generated tests:\n{{ancestor_generated_test_manifests}}";
+
+    const result = renderPrompt(input);
+
+    expect(result.renderedMarkdown).toContain(path.join("boundary-tests", "generated-tests.json"));
+    expect(result.renderedMarkdown).not.toContain(path.join("base-test-setup", "setup", "base-test-setup.md"));
+    expect(result.artifactReferences).toContainEqual({
+      kind: "ancestor_artifacts_by_contract",
+      logicalIds: ["boundary-tests"],
+      contract: "ultrafuzz/generated-tests@1"
+    });
+  });
+
   it("does not ask agents to author runtime-owned workspace patch outputs", () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
     tmpDirs.push(tmp);

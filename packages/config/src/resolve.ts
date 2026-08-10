@@ -32,6 +32,7 @@ import {
 } from "./types.js";
 
 const positiveIntegerSchema = z.number().int().positive();
+const dynamicStrategiesEnumeratorSchema = z.union([z.number().int().nonnegative(), z.literal("unlimited")]);
 const positiveNumberSchema = z.number().positive().finite();
 const timeoutSecondsSchema = z.number().int().min(1).max(MAX_TIMEOUT_SECONDS);
 const nonEmptyStringSchema = z.string().refine((value) => value.trim().length > 0);
@@ -71,7 +72,7 @@ const resolvedConfigValidationSchema = z
       ),
       overriddenSettings: z.array(z.string())
     }),
-    dynamicStrategiesEnumerator: positiveIntegerSchema,
+    dynamicStrategiesEnumerator: dynamicStrategiesEnumeratorSchema,
     project: z
       .object({
         repo: projectLocalPathSchema
@@ -187,7 +188,6 @@ export function resolveConfig(input: ResolveConfigInput = {}): ConfigResult<Reso
   }
 
   syncDefaultModelProfile(config);
-  applyAuditProfileModelAliases(config);
   finalizeAuditProfileResolution(config, input, environment);
   sortConfig(config);
   diagnostics.push(...validateResolvedConfig(config, environment));
@@ -350,21 +350,10 @@ function applyAuditProfileSettings(config: ResolvedConfig, settings: AuditProfil
   if (settings.triage_panel_size !== undefined) config.triage.panelSize = settings.triage_panel_size;
 }
 
-function applyAuditProfileModelAliases(config: ResolvedConfig): void {
-  const source = config.models.profiles[config.models.default];
-  if (source === undefined) return;
-  for (const id of config.auditProfileResolution.settings.model_profile_aliases ?? []) {
-    config.models.profiles[id] ??= { ...source, id };
-  }
-}
-
 export function resolvedAuditProfileSettings(config: ResolvedConfig): AuditProfileSettings {
   return {
     strategy_loops: config.strategyLoops ?? 1,
     dynamic_strategies_enumerator: config.dynamicStrategiesEnumerator,
-    ...(config.auditProfileResolution.settings.model_profile_aliases === undefined
-      ? {}
-      : { model_profile_aliases: [...config.auditProfileResolution.settings.model_profile_aliases] }),
     max_parallel_agents: config.run.maxParallelAgents,
     max_parallel_nodes: config.run.maxParallelNodes,
     default_timeout_seconds: config.run.defaultTimeoutSeconds,
@@ -385,7 +374,7 @@ function finalizeAuditProfileResolution(
   config.auditProfileResolution.effectiveSettings = resolvedAuditProfileSettings(config);
   config.auditProfileResolution.settingOrigins = origins;
   config.auditProfileResolution.overriddenSettings = Object.keys(config.auditProfileResolution.settings)
-    .filter((key) => key !== "model_profile_aliases" && origins[key] !== "audit-profile")
+    .filter((key) => origins[key] !== "audit-profile")
     .sort();
 }
 
@@ -395,7 +384,6 @@ function auditProfileSettingOrigins(
   environment: Record<string, string | undefined>
 ): Record<string, ResolvedConfig["auditProfileResolution"]["settingOrigins"][string]> {
   const keys = Object.keys(resolvedAuditProfileSettings(createDefaultResolvedConfig()));
-  if (profile.model_profile_aliases !== undefined) keys.push("model_profile_aliases");
   const origins = Object.fromEntries(
     keys.map((key) => [key, Object.hasOwn(profile, key) ? "audit-profile" : "default"])
   ) as Record<string, ResolvedConfig["auditProfileResolution"]["settingOrigins"][string]>;

@@ -3986,7 +3986,7 @@ test("audit profile selects its packaged topology and records portable provenanc
   });
 });
 
-test("plan applies smoke eval model profiles to a normally initialized target", async () => {
+test("plan applies one smoke eval model profile to a normally initialized target", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
 
@@ -3997,8 +3997,7 @@ test("plan applies smoke eval model profiles to a normally initialized target", 
       auditProfile: "smoke",
       models: {
         profiles: {
-          benchmark: { agent: "CodexAgent", model: "gpt-5.6-luna", reasoning: "high" },
-          "smoke-coordination": { agent: "CodexAgent", model: "gpt-5.6-luna", reasoning: "medium" }
+          default: { agent: "CodexAgent", model: "gpt-5.6-luna", reasoning: "high" }
         }
       }
     },
@@ -4008,12 +4007,8 @@ test("plan applies smoke eval model profiles to a normally initialized target", 
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const executable = plan.value!.graph.nodes.filter((node) => node.kind === "agentic");
   assert.equal(executable.length, 7);
-  const strategies = executable.filter((node) => node.model_fanout[0]?.model_profile_id === "benchmark");
-  const coordination = executable.filter((node) => node.model_fanout[0]?.model_profile_id === "smoke-coordination");
-  assert.equal(strategies.length, 4);
-  assert.ok(strategies.every((node) => node.model_fanout[0]?.reasoning_effort === "high"));
-  assert.equal(coordination.length, 3);
-  assert.ok(coordination.every((node) => node.model_fanout[0]?.reasoning_effort === "medium"));
+  assert.ok(executable.every((node) => node.model_fanout[0]?.model_profile_id === "default"));
+  assert.ok(executable.every((node) => node.model_fanout[0]?.reasoning_effort === "high"));
 });
 
 test("plan materializes pinned reference nodes before rendering dependent prompts", async () => {

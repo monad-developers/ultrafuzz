@@ -20,6 +20,7 @@ import type {
   ValidateProjectResult
 } from "./types.js";
 import { effectiveAuditPolicy } from "./audit-profile-policy.js";
+import { transformTopologyForRun } from "./topology-transform.js";
 import {
   configDiagnostics,
   diagnosticFromError,
@@ -39,7 +40,12 @@ export async function validateProject(input: ValidateProjectInput) {
   posture.prompts = promptCheck.posture;
 
   let topologySummary: ValidateProjectResult["topology"];
-  const topologyCheck = validateTopologySurface(projectRoot, resolved.config, input.topologyPath);
+  const topologyCheck = validateTopologySurface(
+    projectRoot,
+    resolved.config,
+    input.topologyPath,
+    input.topologyTransform
+  );
   posture.topology = topologyCheck.posture;
   if (topologyCheck.summary) {
     topologySummary = topologyCheck.summary;
@@ -194,7 +200,8 @@ function validatePrompts(projectRoot: string): {
 function validateTopologySurface(
   projectRoot: string,
   config: ResolvedConfig | undefined,
-  topologyPath?: string
+  topologyPath?: string,
+  topologyTransform?: ValidateProjectInput["topologyTransform"]
 ): {
   posture: PostureItem;
   summary?: ValidateProjectResult["topology"];
@@ -204,12 +211,25 @@ function validateTopologySurface(
     const policy =
       config === undefined
         ? undefined
-        : effectiveAuditPolicy({ projectRoot, config, runtimeTopologyPath: topologyPath });
+        : effectiveAuditPolicy({
+            projectRoot,
+            config,
+            runtimeTopologyPath: topologyPath,
+            runtimeStrategyLoops: topologyTransform?.strategyLoops
+          });
     const pathToTopology = policy?.effectiveTopologyPath ?? topologyPath ?? resolveTopologyPath(projectRoot);
-    const topology = loadTopology(projectRoot, {
-      topologyPath: pathToTopology,
-      requirePromptFiles: true
-    });
+    const topology = transformTopologyForRun(
+      loadTopology(projectRoot, {
+        topologyPath: pathToTopology,
+        requirePromptFiles: true
+      }),
+      {
+        ...(policy?.strategyLoops === undefined ? {} : { strategyLoops: policy.strategyLoops }),
+        ...(topologyTransform?.excludedNodeIds === undefined
+          ? {}
+          : { excludedNodeIds: topologyTransform.excludedNodeIds })
+      }
+    );
     const executionDiagnostics =
       config === undefined
         ? []

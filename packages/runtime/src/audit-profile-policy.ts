@@ -34,6 +34,14 @@ export function effectiveAuditPolicy(input: {
   const catalog = loadAuditProfileCatalog();
   const profile = auditProfile(input.config.auditProfile, catalog);
   const profileTopologyPath = packagedTopologyPath(profile, catalog);
+  const effectiveSettings = { ...input.config.auditProfileResolution.effectiveSettings };
+  const settingOrigins = { ...input.config.auditProfileResolution.settingOrigins };
+  const overriddenSettings = new Set(input.config.auditProfileResolution.overriddenSettings);
+  if (input.runtimeStrategyLoops !== undefined) {
+    effectiveSettings.strategy_loops = input.runtimeStrategyLoops;
+    settingOrigins.strategy_loops = "runtime-override";
+    if (profile.settings.strategy_loops !== undefined) overriddenSettings.add("strategy_loops");
+  }
 
   let effectiveTopologyPath: string;
   let effectiveTopologyDisplayPath: string;
@@ -61,9 +69,9 @@ export function effectiveAuditPolicy(input: {
     catalogSchemaVersion: catalog.schemaVersion,
     catalogDigest: catalog.digest,
     profileSettings: { ...profile.settings },
-    effectiveSettings: { ...input.config.auditProfileResolution.effectiveSettings },
-    settingOrigins: { ...input.config.auditProfileResolution.settingOrigins },
-    overriddenSettings: [...input.config.auditProfileResolution.overriddenSettings],
+    effectiveSettings,
+    settingOrigins,
+    overriddenSettings: [...overriddenSettings].sort(),
     ...(profile.topologyPath === undefined ? {} : { declaredTopologyPath: profile.topologyPath }),
     effectiveTopologyPath,
     effectiveTopologyDisplayPath,

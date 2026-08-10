@@ -375,22 +375,9 @@ export function benchmarkModelProfileOverrides(
   if (runnerProfile === undefined) {
     throw new EvalError("EVAL_MODEL_PROFILE_UNKNOWN", "smoke benchmark runner profile is missing");
   }
-  const selectedModel = {
-    agent: runnerProfile.agent,
-    ...(runnerProfile.model === undefined ? {} : { model: runnerProfile.model })
-  };
-  const preservesRunnerReasoning = runnerProfile.agent === "KimiAgent" || runnerProfile.agent === "DeepSeekAgent";
-  const benchmarkReasoning = preservesRunnerReasoning ? (runnerProfile.reasoning ?? "max") : "high";
-  const coordinationReasoning = preservesRunnerReasoning ? (runnerProfile.reasoning ?? "max") : "medium";
   return {
     runtimeOverrides: {
-      auditProfile: "smoke",
-      models: {
-        profiles: {
-          benchmark: { ...selectedModel, reasoning: benchmarkReasoning },
-          "smoke-coordination": { ...selectedModel, reasoning: coordinationReasoning }
-        }
-      }
+      auditProfile: "smoke"
     }
   };
 }

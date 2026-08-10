@@ -64,10 +64,17 @@ export interface PolicyPosture {
   trust: PostureItem;
 }
 
+export interface TopologyTransform {
+  strategyLoops?: number;
+  excludedNodeIds?: string[];
+}
+
 export interface ValidateProjectInput {
   projectRoot: string;
   /** Optional candidate-owned topology override, used by eval variants. */
   topologyPath?: string;
+  /** Internal execution transform; validation applies it so preflight matches the planned graph. */
+  topologyTransform?: TopologyTransform;
   runtimeOverrides?: RuntimeConfigOverrides;
   env?: Record<string, string | undefined>;
   agent?: string;
@@ -117,13 +124,7 @@ export interface PlanRunInput extends ValidateProjectInput {
   mode?: "run" | "resume" | "replay" | "fork";
   prompt?: string;
   workflowInput?: unknown;
-  topologyTransform?: TopologyTransform;
   maxConcurrency?: number;
-}
-
-export interface TopologyTransform {
-  strategyLoops?: number;
-  excludedNodeIds?: string[];
 }
 
 export interface PlannedGraphNode {

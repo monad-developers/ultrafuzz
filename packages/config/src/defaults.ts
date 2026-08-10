@@ -285,7 +285,7 @@ function assertResolvedConfig(value: unknown, filePath: string): asserts value i
   assertRecord(value.auditProfileResolution.settings, "auditProfileResolution.settings", filePath);
   assertRecord(value.auditProfileResolution.effectiveSettings, "auditProfileResolution.effectiveSettings", filePath);
   assertRecord(value.auditProfileResolution.settingOrigins, "auditProfileResolution.settingOrigins", filePath);
-  assertNumber(value.dynamicStrategiesEnumerator, "dynamicStrategiesEnumerator", filePath);
+  assertDynamicStrategiesEnumerator(value.dynamicStrategiesEnumerator, "dynamicStrategiesEnumerator", filePath);
   assertRecord(value.project, "project", filePath);
   assertString(value.project.repo, "project.repo", filePath);
   assertRecord(value.run, "run", filePath);
@@ -380,6 +380,15 @@ function assertNumber(value: unknown, label: string, filePath: string): asserts 
   if (typeof value !== "number" || !Number.isFinite(value)) {
     throw new Error(`${filePath} ${label} must be a number`);
   }
+}
+
+function assertDynamicStrategiesEnumerator(
+  value: unknown,
+  label: string,
+  filePath: string
+): asserts value is number | "unlimited" {
+  if (value === "unlimited") return;
+  assertNumber(value, label, filePath);
 }
 
 function assertBoolean(value: unknown, label: string, filePath: string): asserts value is boolean {

@@ -8,10 +8,11 @@ import { z } from "zod/v4";
 
 export const AUDIT_PROFILE_CATALOG_SCHEMA_VERSION = 1 as const;
 
+export type DynamicStrategiesEnumerator = number | "unlimited";
+
 export interface AuditProfileSettings {
   strategy_loops?: number;
-  dynamic_strategies_enumerator?: number;
-  model_profile_aliases?: string[];
+  dynamic_strategies_enumerator?: DynamicStrategiesEnumerator;
   max_parallel_agents?: number;
   max_parallel_nodes?: number;
   default_timeout_seconds?: number;
@@ -54,6 +55,7 @@ const PACKAGED_TOPOLOGY_DESCRIPTIONS = {
 
 const safeIdSchema = z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/u);
 const positiveIntegerSchema = z.number().int().positive();
+const dynamicStrategiesEnumeratorSchema = z.union([z.number().int().nonnegative(), z.literal("unlimited")]);
 const packagedTopologyPathSchema = z
   .string()
   .regex(/^topologies\/[a-z0-9][a-z0-9-]*\.ya?ml$/u)
@@ -61,11 +63,7 @@ const packagedTopologyPathSchema = z
 const settingsSchema = z
   .strictObject({
     strategy_loops: positiveIntegerSchema.optional(),
-    dynamic_strategies_enumerator: positiveIntegerSchema.optional(),
-    model_profile_aliases: z
-      .array(z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/u))
-      .max(16)
-      .optional(),
+    dynamic_strategies_enumerator: dynamicStrategiesEnumeratorSchema.optional(),
     max_parallel_agents: positiveIntegerSchema.optional(),
     max_parallel_nodes: positiveIntegerSchema.optional(),
     default_timeout_seconds: positiveIntegerSchema.max(86_400).optional(),

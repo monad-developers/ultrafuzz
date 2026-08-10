@@ -30,16 +30,30 @@ describe("audit profile catalog", () => {
     const smoke = auditProfile("smoke", catalog);
     expect(smoke.topologyPath).toBe("topologies/smoke.yml");
     expect(smoke.settings.strategy_loops).toBe(1);
+    expect(smoke.settings.dynamic_strategies_enumerator).toBe(0);
     const smokePath = packagedTopologyPath(smoke, catalog);
     expect(smokePath).toBeDefined();
     expect(fs.readFileSync(smokePath!, "utf8")).toContain("id: smoke-context");
     expect(packagedTopologyDigest(smoke, catalog)).toMatch(/^[0-9a-f]{64}$/u);
 
     const invariantOnly = auditProfile("invariant-only", catalog);
+    expect(invariantOnly.settings.dynamic_strategies_enumerator).toBe(0);
     expect(fs.readFileSync(packagedTopologyPath(invariantOnly, catalog)!, "utf8")).toContain(
       "id: stateful-invariant-campaign"
     );
     expect(packagedTopologyPath(auditProfile("balanced", catalog), catalog)).toBeUndefined();
+    expect(auditProfile("exhaustive", catalog).settings.dynamic_strategies_enumerator).toBe("unlimited");
+  });
+
+  it("parses and serializes the unlimited dynamic strategy enumerator", () => {
+    const parsed = parseProjectConfigToml('dynamic_strategies_enumerator = "unlimited"\n');
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const resolved = resolveConfig({ env: {}, projectConfig: parsed.value });
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.value.dynamicStrategiesEnumerator).toBe("unlimited");
+    expect(serializeResolvedConfigToml(resolved.value)).toContain('dynamic_strategies_enumerator = "unlimited"');
   });
 
   it("fails unknown names with the available profile vocabulary", () => {

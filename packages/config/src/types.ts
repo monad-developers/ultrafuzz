@@ -1,4 +1,4 @@
-import type { AuditProfileSettings } from "./audit-profiles.js";
+import type { AuditProfileSettings, DynamicStrategiesEnumerator } from "./audit-profiles.js";
 
 export type DiagnosticSeverity = "error" | "warning";
 
@@ -191,7 +191,7 @@ export interface ResolvedConfig {
   topologyPath?: string;
   strategyLoops?: number;
   auditProfileResolution: AuditProfileResolution;
-  dynamicStrategiesEnumerator: number;
+  dynamicStrategiesEnumerator: DynamicStrategiesEnumerator;
   project: ProjectConfig;
   run: RunConfig;
   execution: ExecutionConfig;
@@ -226,7 +226,7 @@ export interface ProjectConfigInput {
   auditProfile?: string;
   topologyPath?: string;
   strategyLoops?: number;
-  dynamicStrategiesEnumerator?: number;
+  dynamicStrategiesEnumerator?: DynamicStrategiesEnumerator;
   project?: Partial<ProjectConfig>;
   run?: Partial<RunConfig>;
   execution?: ExecutionConfigInput;

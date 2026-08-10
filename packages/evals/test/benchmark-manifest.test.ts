@@ -92,13 +92,7 @@ describe("public benchmark manifests", () => {
       )
     ).toEqual({
       runtimeOverrides: {
-        auditProfile: "smoke",
-        models: {
-          profiles: {
-            benchmark: { agent: "CodexAgent", model: "gpt-5.6-luna", reasoning: "high" },
-            "smoke-coordination": { agent: "CodexAgent", model: "gpt-5.6-luna", reasoning: "medium" }
-          }
-        }
+        auditProfile: "smoke"
       }
     });
   });
@@ -244,13 +238,7 @@ describe("public benchmark manifests", () => {
       )
     ).toEqual({
       runtimeOverrides: {
-        auditProfile: "smoke",
-        models: {
-          profiles: {
-            benchmark: { agent: "KimiAgent", model: "kimi-k3", reasoning: "max" },
-            "smoke-coordination": { agent: "KimiAgent", model: "kimi-k3", reasoning: "max" }
-          }
-        }
+        auditProfile: "smoke"
       }
     });
 
@@ -279,13 +267,7 @@ describe("public benchmark manifests", () => {
       )
     ).toEqual({
       runtimeOverrides: {
-        auditProfile: "smoke",
-        models: {
-          profiles: {
-            benchmark: { agent: "DeepSeekAgent", model: "deepseek-v4-pro", reasoning: "max" },
-            "smoke-coordination": { agent: "DeepSeekAgent", model: "deepseek-v4-pro", reasoning: "max" }
-          }
-        }
+        auditProfile: "smoke"
       }
     });
   });

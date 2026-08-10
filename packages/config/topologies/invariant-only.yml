@@ -393,7 +393,6 @@ nodes:
         contract: ultrafuzz/text@1
       - path: workspace-patch.json
         contract: ultrafuzz/workspace-patch@1
-    loops: 1
   - id: stateful-invariant-implement-properties
     kind: agentic
     prompt: strategies/invariants/implement-properties.md
@@ -442,7 +441,7 @@ nodes:
     loops: 1
   - id: dedupe-findings
     kind: agentic
-    prompt: invariant-only/dedupe-findings.md
+    prompt: review/dedupe-findings.md
     group: review
     depends_on:
       - stateful-invariant-setup
@@ -486,7 +485,7 @@ nodes:
         contract: ultrafuzz/json-object@1
   - id: aggregate-test-files
     kind: agentic
-    prompt: invariant-only/aggregate-test-files.md
+    prompt: review/aggregate-test-files.md
     group: review
     depends_on:
       - severity-classification

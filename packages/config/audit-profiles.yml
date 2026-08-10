@@ -8,10 +8,7 @@ profiles:
     topology_path: topologies/smoke.yml
     settings:
       strategy_loops: 1
-      dynamic_strategies_enumerator: 1
-      model_profile_aliases:
-        - benchmark
-        - smoke-coordination
+      dynamic_strategies_enumerator: 0
       max_parallel_agents: 4
       max_parallel_nodes: 4
       workflow_deadline_seconds: 14400
@@ -48,18 +45,18 @@ profiles:
     intended_use: Highest-cost release or critical-system investigations.
     settings:
       strategy_loops: 5
-      dynamic_strategies_enumerator: 8
+      dynamic_strategies_enumerator: unlimited
       max_parallel_agents: 8
       max_parallel_nodes: 16
       workflow_deadline_seconds: 86400
 
   invariant-only:
     description: Focused stateful-invariant discovery, implementation, campaign, and reporting.
-    intended_use: Stateful-invariant experiments such as the Aave v4 and Origin Dollar campaigns.
+    intended_use: Focused stateful-invariant campaigns for ScFuzzBench.
     topology_path: topologies/invariant-only.yml
     settings:
       strategy_loops: 3
-      dynamic_strategies_enumerator: 1
+      dynamic_strategies_enumerator: 0
       max_parallel_agents: 4
       max_parallel_nodes: 8
       workflow_deadline_seconds: 86400

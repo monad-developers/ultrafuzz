@@ -48,32 +48,19 @@ describe("packaged smoke topology", () => {
       projectRoot: REPOSITORY_ROOT,
       requirePromptFiles: true,
       modelProfiles: {
-        benchmark: {
+        default: {
           agentRef: "CodexAgent",
           modelName: "gpt-5.6-luna",
           reasoningEffort: "high"
-        },
-        "smoke-coordination": {
-          agentRef: "CodexAgent",
-          modelName: "gpt-5.6-luna",
-          reasoningEffort: "medium"
         }
       },
-      defaultModelProfileId: "benchmark"
+      defaultModelProfileId: "default"
     });
     const executable = graph.nodes.filter((node) => node.kind === "agentic");
     expect(executable).toHaveLength(7);
     expect(executable.every((node) => node.retryPolicy.maxAttempts === 2)).toBe(true);
-    expect(
-      executable
-        .filter((node) => STRATEGY_IDS.includes(node.logicalId))
-        .every((node) => node.modelFanout[0]?.reasoningEffort === "high")
-    ).toBe(true);
-    expect(
-      executable
-        .filter((node) => ["smoke-context", "dedupe-findings", "final-report"].includes(node.logicalId))
-        .every((node) => node.modelFanout[0]?.reasoningEffort === "medium")
-    ).toBe(true);
+    expect(executable.every((node) => node.modelFanout[0]?.modelProfileId === "default")).toBe(true);
+    expect(executable.every((node) => node.modelFanout[0]?.reasoningEffort === "high")).toBe(true);
   });
 
   it("does not replace or trim the production topology", () => {

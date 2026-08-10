@@ -51,11 +51,10 @@ describe("packaged topology collection", () => {
     ]) {
       expect(nodeIds.has(omitted), `${omitted} should be omitted`).toBe(false);
     }
-    expect(topology.nodes.find((node) => node.id === "dedupe-findings")?.prompt).toBe(
-      "invariant-only/dedupe-findings.md"
-    );
+    expect(topology.nodes.find((node) => node.id === "dedupe-findings")?.prompt).toBe("review/dedupe-findings.md");
     expect(topology.nodes.find((node) => node.id === "aggregate-test-files")?.prompt).toBe(
-      "invariant-only/aggregate-test-files.md"
+      "review/aggregate-test-files.md"
     );
+    expect(topology.nodes.find((node) => node.id === "stateful-invariant-coverage")?.loops).toBeUndefined();
   });
 });

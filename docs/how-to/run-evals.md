@@ -204,7 +204,7 @@ access, provider credentials, and provider/Modal budgets must be tightly scoped.
 A newer commit on the same branch cancels the older smoke. GPT-5.6 Luna `high`
 is the default smoke runner; repository variable
 `BENCHMARK_SMOKE_OPENAI_MODEL` can override its model while retaining the
-single OpenAI/Codex lane and fixed high-strategy/medium-coordination reasoning.
+single OpenAI/Codex lane and selected reasoning level across every smoke node.
 Candidate installation and build happen before any Modal launch, so a broken
 commit fails without allocating the benchmark matrix. GitHub Actions still
 performs the build, control, and collection work; benchmark and model compute

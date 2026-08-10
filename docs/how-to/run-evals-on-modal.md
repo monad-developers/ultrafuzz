@@ -147,13 +147,13 @@ provider and Modal budgets remain the hard aggregate cost boundary.
 
 The smoke has exactly three targets: one Foundry target, one Hardhat target, and
 one Vyper target. It defaults to GPT-5.6 Luna at `high`, uses one strategy loop,
-and uses the `smoke` profile's packaged graph. One
-medium-reasoning context node feeds four high-reasoning bug-finding strategies
-in parallel; medium-reasoning dedupe and report nodes finish the row. Invariant,
+and uses the `smoke` profile's packaged graph. One context node feeds four
+bug-finding strategies in parallel, then dedupe and report nodes finish the
+row; every node uses the selected runner model and reasoning level. Invariant,
 differential, dynamic, and production-only review stages are absent from this
 graph. Repository variable `BENCHMARK_SMOKE_OPENAI_MODEL` can override the
-smoke model without changing its single OpenAI/Codex provider, fixed
-high/medium reasoning split, or target and topology limits.
+smoke model without changing its single OpenAI/Codex provider or its target and
+topology limits.
 
 A manual `workflow_dispatch` runs the full lane instead. It evaluates every
 checked-in EVMBench target with GPT-5.6 Luna at `high`, Claude Sonnet 5 at

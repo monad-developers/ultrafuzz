@@ -15,8 +15,8 @@ const expectedConfigFiles = [
 ];
 assertPackFiles(path.join(root, "packages", "config"), expectedConfigFiles);
 assertPackFiles(path.join(root, "packages", "prompts"), [
-  "dist/prompts/invariant-only/aggregate-test-files.md",
-  "dist/prompts/invariant-only/dedupe-findings.md"
+  "dist/prompts/review/aggregate-test-files.md",
+  "dist/prompts/review/dedupe-findings.md"
 ]);
 
 for (const relativePath of expectedConfigFiles) {
@@ -26,6 +26,12 @@ for (const relativePath of expectedConfigFiles) {
   if (!fs.readFileSync(source).equals(fs.readFileSync(built))) {
     throw new Error(`${relativePath} does not match its packaged source asset`);
   }
+}
+
+const canonicalFullTopology = path.join(root, ".ultrafuzz", "topology.yml");
+const packagedFullTopology = path.join(root, "packages", "config", "topologies", "full.yml");
+if (!fs.readFileSync(canonicalFullTopology).equals(fs.readFileSync(packagedFullTopology))) {
+  throw new Error("packages/config/topologies/full.yml must match .ultrafuzz/topology.yml");
 }
 
 function assertPackFiles(packageRoot, expected) {
