@@ -1492,6 +1492,9 @@ function collectWorkflowExecutionDependencies(input: {
   const rootPackageJson = path.join(smithersRoot, "package.json");
   const rootManifest = fs.existsSync(rootPackageJson) ? readWorkflowPackageManifest(rootPackageJson) : {};
   if (fs.existsSync(rootPackageJson)) input.add(rootPackageJson, "dependencies/root-package.json");
+  // An explicit local runner replaces only the root Smithers dependency set.
+  // Module issuers still need their external runtime dependencies in the
+  // sealed closure because the runner loads those modules from the snapshot.
   const rootDependencies = input.externalRunner
     ? []
     : [...new Set([...requiredWorkflowDependencies(rootManifest), ...WORKFLOW_DIRECT_EXTERNAL_DEPENDENCIES])].sort();
@@ -1513,7 +1516,6 @@ function collectWorkflowExecutionDependencies(input: {
         dependencies[dependency.name] = module.id;
         continue;
       }
-      if (input.externalRunner) continue;
       const dependencyRoot = resolveWorkflowPackageDependency(issuer.root, dependency.name);
       if (dependencyRoot === undefined) {
         if (dependency.optional) continue;

@@ -5586,11 +5586,33 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   );
   const localDependencyManifest = JSON.parse(
     fs.readFileSync(path.join(localExecutionSnapshot, "dependencies", "manifest.json"), "utf8")
-  ) as { smithers_bin?: unknown };
+  ) as {
+    smithers_bin?: unknown;
+    packages?: Array<{ id?: unknown; name?: unknown; snapshot_path?: unknown }>;
+    issuers?: Array<{ id?: unknown; dependencies?: Record<string, unknown> }>;
+  };
   assert.equal(
     localDependencyManifest.smithers_bin,
     null,
     "a pure-local workflow may keep using its explicit controller runner without sealing the pinned package"
+  );
+  assert.equal(
+    localDependencyManifest.packages?.some((entry) => entry.name === "smithers-orchestrator"),
+    false,
+    "the explicit controller runner must not be copied into the execution snapshot"
+  );
+  const sealedZod = localDependencyManifest.packages?.find((entry) => entry.name === "zod");
+  assert.equal(typeof sealedZod?.id, "string", "module dependencies must retain zod with an external runner");
+  assert.equal(typeof sealedZod?.snapshot_path, "string");
+  assert.equal(
+    localDependencyManifest.issuers?.find((issuer) => issuer.id === "module:@ultrafuzz/artifacts")?.dependencies?.zod,
+    sealedZod?.id,
+    "the artifacts module must resolve zod from the sealed dependency closure"
+  );
+  assert.equal(
+    fs.statSync(path.join(localExecutionSnapshot, ...String(sealedZod?.snapshot_path).split("/"), "v4")).isDirectory(),
+    true,
+    "the sealed zod package must include its zod/v4 entrypoint"
   );
 
   const workflowSource = fs.readFileSync(
