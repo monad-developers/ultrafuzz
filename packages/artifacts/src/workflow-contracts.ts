@@ -637,7 +637,7 @@ const invariantCampaignPlanV1Schema = z.strictObject({
   })
 });
 
-const invariantCampaignPlanV2Schema = z.strictObject({
+const invariantCampaignPlanV2ObjectSchema = z.strictObject({
   schema_version: z.literal(INVARIANT_CAMPAIGN_PLAN_SCHEMA_VERSION),
   available_vcpus: positiveInteger,
   workers: positiveInteger,
@@ -671,8 +671,15 @@ const invariantCampaignPlanV2Schema = z.strictObject({
   })
 });
 
+export const invariantCampaignPlanV2Schema = withDocumentMetadata(
+  invariantCampaignPlanV2ObjectSchema,
+  "invariant-campaign-plan",
+  2,
+  "Ultrafuzz current invariant campaign plan"
+);
+
 export const invariantCampaignPlanSchema = withDocumentMetadata(
-  z.discriminatedUnion("schema_version", [invariantCampaignPlanV1Schema, invariantCampaignPlanV2Schema]),
+  z.discriminatedUnion("schema_version", [invariantCampaignPlanV1Schema, invariantCampaignPlanV2ObjectSchema]),
   "invariant-campaign-plan",
   1,
   "Ultrafuzz invariant campaign plan"
@@ -1688,6 +1695,7 @@ export const workflowContractSchemas = {
   "ultrafuzz/externalized-state-accounting@1": externalizedStateAccountingSchema,
   "ultrafuzz/coverage-goal@1": coverageGoalSchema,
   "ultrafuzz/invariant-campaign-plan@1": invariantCampaignPlanSchema,
+  "ultrafuzz/invariant-campaign-plan@2": invariantCampaignPlanV2Schema,
   "ultrafuzz/campaign-summary@2": campaignSummarySchema,
   "ultrafuzz/differential-plan@1": differentialPlanSchema,
   "ultrafuzz/reference-harness@1": referenceHarnessSchema,
@@ -1727,6 +1735,7 @@ export const externalizedStateAccountingJsonSchema =
   workflowContractJsonSchemas["ultrafuzz/externalized-state-accounting@1"];
 export const coverageGoalJsonSchema = workflowContractJsonSchemas["ultrafuzz/coverage-goal@1"];
 export const invariantCampaignPlanJsonSchema = workflowContractJsonSchemas["ultrafuzz/invariant-campaign-plan@1"];
+export const invariantCampaignPlanV2JsonSchema = workflowContractJsonSchemas["ultrafuzz/invariant-campaign-plan@2"];
 export const campaignSummaryJsonSchema = workflowContractJsonSchemas["ultrafuzz/campaign-summary@2"];
 export const differentialPlanJsonSchema = workflowContractJsonSchemas["ultrafuzz/differential-plan@1"];
 export const referenceHarnessJsonSchema = workflowContractJsonSchemas["ultrafuzz/reference-harness@1"];
@@ -1769,6 +1778,7 @@ export type DependencyScopeMatrix = z.infer<typeof dependencyScopeMatrixSchema>;
 export type ExternalizedStateAccounting = z.infer<typeof externalizedStateAccountingSchema>;
 export type CoverageGoal = z.infer<typeof coverageGoalSchema>;
 export type InvariantCampaignPlan = z.infer<typeof invariantCampaignPlanSchema>;
+export type InvariantCampaignPlanV2 = z.infer<typeof invariantCampaignPlanV2Schema>;
 export type CampaignSummary = z.infer<typeof campaignSummarySchema>;
 export type DifferentialPlan = z.infer<typeof differentialPlanSchema>;
 export type ReferenceHarness = z.infer<typeof referenceHarnessSchema>;
@@ -1799,6 +1809,7 @@ export const WORKFLOW_SCHEMA_FILES = {
   "ultrafuzz/externalized-state-accounting@1": "externalized-state-accounting.schema.json",
   "ultrafuzz/coverage-goal@1": "coverage-goal.schema.json",
   "ultrafuzz/invariant-campaign-plan@1": "invariant-campaign-plan.schema.json",
+  "ultrafuzz/invariant-campaign-plan@2": "invariant-campaign-plan-v2.schema.json",
   "ultrafuzz/campaign-summary@2": "campaign-summary.schema.json",
   "ultrafuzz/differential-plan@1": "differential-plan.schema.json",
   "ultrafuzz/reference-harness@1": "reference-harness.schema.json",
@@ -1832,6 +1843,8 @@ export const WORKFLOW_CONTRACT_DESCRIPTIONS: Record<WorkflowContractId, string> 
   "ultrafuzz/coverage-goal@1": "A bounded standardized-coverage goal and blocker record.",
   "ultrafuzz/invariant-campaign-plan@1":
     "The exact invariant backend, CPU, full configured Recon interval, supervised deadlines, reserve, paths, and commands.",
+  "ultrafuzz/invariant-campaign-plan@2":
+    "The current v2 invariant backend, CPU, full configured Recon interval, supervised deadlines, reserve, paths, and commands.",
   "ultrafuzz/campaign-summary@2": "A strict invariant campaign accounting summary.",
   "ultrafuzz/differential-plan@1": "Differential surfaces, oracle rules, and assigned lanes.",
   "ultrafuzz/reference-harness@1": "Authored independent reference models and validation results.",

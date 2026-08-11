@@ -425,7 +425,7 @@ describe("prompt semantic anchors", () => {
       "ultrafuzz/property-campaign@3"
     );
     expect(campaignNode?.outputs?.find((output) => output.path === "campaign-plan.json")?.contract).toBe(
-      "ultrafuzz/invariant-campaign-plan@1"
+      "ultrafuzz/invariant-campaign-plan@2"
     );
     expect(topology.nodes.find((node) => node.id === "dynamic-strategy-generator")?.depends_on).toContain(
       "stateful-invariant-campaign"
@@ -488,7 +488,8 @@ describe("prompt semantic anchors", () => {
     expect(campaign).toContain("`partial`: recon-fuzzer produced usable results but ended early");
     expect(campaign).toContain("`blocked`: recon-fuzzer produced no usable results");
     expect(campaign).toContain("--workers <workers>");
-    expect(campaign).toContain("{{schema_path}}/invariant-campaign-plan.schema.json");
+    expect(campaign).toContain("{{schema_path}}/invariant-campaign-plan-v2.schema.json");
+    expect(campaign).not.toContain("{{schema_path}}/invariant-campaign-plan.schema.json");
     expect(campaign).toContain("{{schema_path}}/campaign-summary.schema.json");
     expect(campaign).toContain("{{schema_path}}/property-campaign.schema.json");
     expect(flatCampaign).toContain(

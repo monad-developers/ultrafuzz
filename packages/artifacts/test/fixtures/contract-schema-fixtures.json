@@ -606,6 +606,72 @@
       "__unexpected_fixture_field": true
     }
   },
+  "ultrafuzz/invariant-campaign-plan@2": {
+    "schema_file": "invariant-campaign-plan-v2.schema.json",
+    "valid": {
+      "schema_version": "ultrafuzz.invariant-campaign-plan.v2",
+      "available_vcpus": 1,
+      "workers": 1,
+      "configured_budget_seconds": 3,
+      "deadline": "2026-08-09T00:00:03.000Z",
+      "finalization_reserve_seconds": 1,
+      "configured_fuzzer_timeout_seconds": 1,
+      "recon_internal_timeout_seconds": 1,
+      "recon_test_limit": "18446744073709551615",
+      "host_soft_timeout_seconds": 1,
+      "host_force_kill_grace_seconds": 1,
+      "artifact_finalization_reserve_seconds": 1,
+      "backend_started_at": "2026-08-09T00:00:00.000Z",
+      "fuzzing_deadline_utc": "2026-08-09T00:00:01.000Z",
+      "force_kill_deadline_utc": "2026-08-09T00:00:02.000Z",
+      "final_artifact_deadline_utc": "2026-08-09T00:00:03.000Z",
+      "backend": {
+        "name": "recon",
+        "version": "x",
+        "exact_shell_escaped_command": "x"
+      },
+      "command_plan": [],
+      "paths": {
+        "corpus": "x",
+        "cache": "x",
+        "log": "x",
+        "raw_results": "x",
+        "reproducers": "x"
+      }
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.invariant-campaign-plan.v2",
+      "available_vcpus": 1,
+      "workers": 1,
+      "configured_budget_seconds": 3,
+      "deadline": "2026-08-09T00:00:03.000Z",
+      "finalization_reserve_seconds": 1,
+      "configured_fuzzer_timeout_seconds": 1,
+      "recon_internal_timeout_seconds": 1,
+      "recon_test_limit": "18446744073709551615",
+      "host_soft_timeout_seconds": 1,
+      "host_force_kill_grace_seconds": 1,
+      "artifact_finalization_reserve_seconds": 1,
+      "backend_started_at": "2026-08-09T00:00:00.000Z",
+      "fuzzing_deadline_utc": "2026-08-09T00:00:01.000Z",
+      "force_kill_deadline_utc": "2026-08-09T00:00:02.000Z",
+      "final_artifact_deadline_utc": "2026-08-09T00:00:03.000Z",
+      "backend": {
+        "name": "recon",
+        "version": "x",
+        "exact_shell_escaped_command": "x"
+      },
+      "command_plan": [],
+      "paths": {
+        "corpus": "x",
+        "cache": "x",
+        "log": "x",
+        "raw_results": "x",
+        "reproducers": "x"
+      },
+      "__unexpected_fixture_field": true
+    }
+  },
   "ultrafuzz/invariant-ledger@1": {
     "schema_file": "invariant-evidence-ledger.schema.json",
     "valid": {

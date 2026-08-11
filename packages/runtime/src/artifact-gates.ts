@@ -2306,10 +2306,18 @@ function semanticPropertyCampaignContext(
   attemptAuthority?: ArtifactGateAttemptAuthority,
   authenticated?: AuthenticatedArtifactGateSnapshots
 ): SemanticArtifactSetContext {
+  const campaignPlanOutputs = node.outputs.filter(
+    (output) =>
+      output.contract === "ultrafuzz/invariant-campaign-plan@1" ||
+      output.contract === "ultrafuzz/invariant-campaign-plan@2"
+  );
+  if (campaignPlanOutputs.length !== 1) {
+    throw new Error("campaign plan semantic context requires exactly one declared campaign-plan contract sibling");
+  }
   const campaignPlan = semanticSiblingJsonArtifact(
     artifactDir,
     node,
-    "ultrafuzz/invariant-campaign-plan@1",
+    campaignPlanOutputs[0]!.contract,
     "campaign plan",
     authenticated
   );
@@ -3458,9 +3466,7 @@ function isCurrentTimeoutEvidenceCampaign(node: PlannedGraphNode): boolean {
   const logicalId = node.logical_id ?? node.id;
   return (
     isCampaignLogicalId(logicalId) &&
-    node.outputs.some(
-      (output) => output.path === "campaign-plan.json" && output.contract === "ultrafuzz/invariant-campaign-plan@1"
-    )
+    node.outputs.some((output) => output.contract === "ultrafuzz/invariant-campaign-plan@2")
   );
 }
 
@@ -3472,6 +3478,27 @@ function campaignTimeoutDiagnostic(code: string, message: string, pathValue: str
     source: "campaign-timeout-evidence",
     path: pathValue
   };
+}
+
+function declaredCampaignTimeoutArtifactPath(
+  artifactDir: string,
+  node: PlannedGraphNode,
+  contract: PlannedGraphNode["outputs"][number]["contract"],
+  label: string,
+  diagnostics: RuntimeDiagnostic[]
+): string | undefined {
+  const outputs = node.outputs.filter((output) => output.contract === contract);
+  if (outputs.length !== 1) {
+    diagnostics.push(
+      campaignTimeoutDiagnostic(
+        "CAMPAIGN_TIMEOUT_OUTPUT_DECLARATION_INVALID",
+        `Current campaign timeout evidence requires exactly one declared ${contract} ${label}; found ${outputs.length}`,
+        artifactDir
+      )
+    );
+    return undefined;
+  }
+  return safeResolveInside(artifactDir, outputs[0]!.path, `campaign timeout ${label}`);
 }
 
 function positiveIntegerField(
@@ -3597,11 +3624,38 @@ function verifyCurrentCampaignTimeoutEvidence(
   if (!isCurrentTimeoutEvidenceCampaign(node)) return [];
 
   const diagnostics: RuntimeDiagnostic[] = [];
-  const planPath = safeResolveInside(artifactDir, "campaign-plan.json", "campaign timeout plan");
-  const resultPath = safeResolveInside(artifactDir, "recon-fuzzer-results.json", "campaign timeout result");
-  const summaryPath = safeResolveInside(artifactDir, "campaign-summary.json", "campaign timeout summary");
+  const planPath = declaredCampaignTimeoutArtifactPath(
+    artifactDir,
+    node,
+    "ultrafuzz/invariant-campaign-plan@2",
+    "plan",
+    diagnostics
+  );
+  const resultPath = declaredCampaignTimeoutArtifactPath(
+    artifactDir,
+    node,
+    "ultrafuzz/property-campaign@3",
+    "result",
+    diagnostics
+  );
+  const summaryPath = declaredCampaignTimeoutArtifactPath(
+    artifactDir,
+    node,
+    "ultrafuzz/campaign-summary@2",
+    "summary",
+    diagnostics
+  );
+  if (planPath === undefined || resultPath === undefined || summaryPath === undefined) return diagnostics;
   const planValue = parseCurrentArtifactJson(artifactDir, planPath, authenticated);
-  if (!isRecord(planValue) || planValue.schema_version !== "ultrafuzz.invariant-campaign-plan.v2") return [];
+  if (!isRecord(planValue) || planValue.schema_version !== "ultrafuzz.invariant-campaign-plan.v2") {
+    return [
+      campaignTimeoutDiagnostic(
+        "CAMPAIGN_TIMEOUT_EVIDENCE_INVALID",
+        "The current invariant campaign-plan contract requires schema_version ultrafuzz.invariant-campaign-plan.v2",
+        `${planPath}#$.schema_version`
+      )
+    ];
+  }
   const resultValue = parseCurrentArtifactJson(artifactDir, resultPath, authenticated);
   const summaryValue = parseCurrentArtifactJson(artifactDir, summaryPath, authenticated);
   if (!isRecord(resultValue) || !isRecord(summaryValue)) return [];

@@ -1292,17 +1292,45 @@ test("the current invariant campaign plan contract requires v2 timeout evidence"
       reproducers: "backends/recon-fuzzer/reproducers"
     }
   };
-  assert.equal(validateArtifactContract("ultrafuzz/invariant-campaign-plan@1", JSON.stringify(plan)).ok, true);
+  assert.equal(validateArtifactContract("ultrafuzz/invariant-campaign-plan@2", JSON.stringify(plan)).ok, true);
   for (const malformed of [
     { ...plan, schema_version: "ultrafuzz.invariant-campaign-plan.v1" },
     { ...plan, configured_fuzzer_timeout_seconds: 0 },
     { ...plan, backend_started_at: "not-a-timestamp" },
     { ...plan, backend: {} }
   ]) {
-    const result = validateArtifactContract("ultrafuzz/invariant-campaign-plan@1", JSON.stringify(malformed));
+    const result = validateArtifactContract("ultrafuzz/invariant-campaign-plan@2", JSON.stringify(malformed));
     assert.equal(result.ok, false, JSON.stringify(malformed));
     assert.ok(result.issues.some((issue) => issue.code === "ARTIFACT_SCHEMA_INVALID"));
   }
+});
+
+test("the historical invariant campaign plan contract remains separate from the current v2 contract", () => {
+  const historicalPlan = {
+    schema_version: "ultrafuzz.invariant-campaign-plan.v1",
+    available_vcpus: 1,
+    workers: 1,
+    configured_budget_seconds: 600,
+    deadline: "2026-01-01T00:10:00.000Z",
+    finalization_reserve_seconds: 60,
+    backend: { name: "recon", version: null },
+    command_plan: [{ phase: "campaign", command: "recon fuzz ." }],
+    paths: {
+      corpus: "backends/recon-fuzzer/corpus",
+      cache: "backends/recon-fuzzer/cache",
+      log: "backends/recon-fuzzer/run.log",
+      raw_results: "backends/recon-fuzzer/results.json",
+      reproducers: "backends/recon-fuzzer/reproducers"
+    }
+  };
+  assert.equal(
+    validateArtifactContract("ultrafuzz/invariant-campaign-plan@1", JSON.stringify(historicalPlan)).ok,
+    true
+  );
+  assert.equal(
+    validateArtifactContract("ultrafuzz/invariant-campaign-plan@2", JSON.stringify(historicalPlan)).ok,
+    false
+  );
 });
 
 test("finding and report v2 schemas require their current canonical shapes", () => {

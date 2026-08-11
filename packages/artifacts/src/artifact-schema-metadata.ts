@@ -257,6 +257,11 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "invariantCampaignPlanJsonSchema",
     "invariantCampaignPlanSchema"
   ),
+  "invariant-campaign-plan-v2.schema.json": artifact(
+    "ultrafuzz/invariant-campaign-plan@2",
+    "invariantCampaignPlanV2JsonSchema",
+    "invariantCampaignPlanV2Schema"
+  ),
   "invariant-evidence-ledger.schema.json": artifact(
     "ultrafuzz/invariant-ledger@1",
     "invariantLedgerJsonSchema",

@@ -1298,6 +1298,8 @@ const generatedCampaignPaths = {
   raw_results: "backends/recon-fuzzer/results.json",
   reproducers: "backends/recon-fuzzer/reproducers"
 } as const;
+const GENERATED_CAMPAIGN_COMMAND =
+  "timeout --preserve-status --signal=INT --kill-after=300s 3600s recon fuzz . --workers 1 --test-limit 18446744073709551615 --timeout 3600";
 
 const generatedCampaignEvidenceContents = new Map<string, Buffer>([
   [generatedCampaignPaths.log, Buffer.from("recon campaign completed\n", "utf8")],
@@ -1314,14 +1316,24 @@ function generatedCampaignEvidenceFiles(): Array<{ path: string; size_bytes: num
 
 function generatedCampaignPlanFixture(): Record<string, unknown> {
   return {
-    schema_version: "ultrafuzz.invariant-campaign-plan.v1",
+    schema_version: "ultrafuzz.invariant-campaign-plan.v2",
     available_vcpus: 1,
     workers: 1,
-    configured_budget_seconds: 600,
-    deadline: "2026-01-01T00:10:00Z",
-    finalization_reserve_seconds: 60,
-    backend: { name: "recon", version: null },
-    command_plan: [{ phase: "campaign", command: "recon fuzz ." }],
+    configured_budget_seconds: 4200,
+    deadline: "2026-01-01T01:10:00Z",
+    finalization_reserve_seconds: 300,
+    configured_fuzzer_timeout_seconds: 3600,
+    recon_internal_timeout_seconds: 3600,
+    recon_test_limit: "18446744073709551615",
+    host_soft_timeout_seconds: 3600,
+    host_force_kill_grace_seconds: 300,
+    artifact_finalization_reserve_seconds: 300,
+    backend_started_at: "2026-01-01T00:00:00Z",
+    fuzzing_deadline_utc: "2026-01-01T01:00:00Z",
+    force_kill_deadline_utc: "2026-01-01T01:05:00Z",
+    final_artifact_deadline_utc: "2026-01-01T01:10:00Z",
+    backend: { name: "recon", version: null, exact_shell_escaped_command: GENERATED_CAMPAIGN_COMMAND },
+    command_plan: [{ phase: "campaign", command: GENERATED_CAMPAIGN_COMMAND }],
     paths: generatedCampaignPaths
   };
 }
@@ -1354,15 +1366,22 @@ function generatedPropertyCampaignFixture(): Record<string, unknown> {
     campaign_summary_ref: "campaign-summary.json",
     fuzzer_backend: "recon",
     backend_version: null,
+    configured_timeout_seconds: 3600,
+    exact_command: GENERATED_CAMPAIGN_COMMAND,
+    start_timestamp: "2026-01-01T00:00:00Z",
+    end_timestamp: "2026-01-01T01:00:00Z",
+    termination_reason: "configured-timeout",
+    campaign_outcome: "complete",
+    usable_results: true,
     execution: {
       status: "complete",
       usable_results: true,
-      command: "recon fuzz .",
+      command: GENERATED_CAMPAIGN_COMMAND,
       config_path: null,
       workers: 1,
       started_at: "2026-01-01T00:00:00Z",
-      finished_at: "2026-01-01T00:05:00Z",
-      deadline: "2026-01-01T00:10:00Z",
+      finished_at: "2026-01-01T01:00:00Z",
+      deadline: "2026-01-01T01:10:00Z",
       exit_code: 0,
       failure: null
     },
@@ -1500,9 +1519,9 @@ function generatedCampaignVerificationFixture(
     outputs: [
       {
         path: "campaign-plan.json",
-        contract: "ultrafuzz/invariant-campaign-plan@1",
+        contract: "ultrafuzz/invariant-campaign-plan@2",
         contractDigest: "a".repeat(64),
-        schemaFile: "invariant-campaign-plan.schema.json",
+        schemaFile: "invariant-campaign-plan-v2.schema.json",
         primary: false
       },
       {

@@ -22,6 +22,7 @@ export const ARTIFACT_CONTRACT_IDS = [
   "ultrafuzz/harness-repairs@1",
   "ultrafuzz/implemented-properties@3",
   "ultrafuzz/invariant-campaign-plan@1",
+  "ultrafuzz/invariant-campaign-plan@2",
   "ultrafuzz/invariant-ledger@1",
   "ultrafuzz/nonempty-markdown@1",
   "ultrafuzz/properties@2",

@@ -90,11 +90,10 @@ Use this configured invariant testing fuzzer timeout:
    - The complete configured fuzzer timeout belongs to the one campaign; do not
      divide it into per-backend slices.
    - Before launch, write a preliminary `campaign-plan.json` using the exact
-     pinned `{{schema_path}}/invariant-campaign-plan.schema.json`. The pinned
-     schema alone defines member names, types, and requiredness. Use its current
-     supervised timeout-evidence variant, not its historical compatibility
-     variant, and record the plan's CPU, worker, budget, deadline, reserve,
-     backend, command-plan, and path evidence. Also record
+     pinned `{{schema_path}}/invariant-campaign-plan-v2.schema.json`. The pinned
+     schema alone defines member names, types, and requiredness. Record the
+     plan's CPU, worker, budget, deadline, reserve, backend, command-plan, and
+     path evidence. Also record
      `configured_fuzzer_timeout_seconds`, `recon_internal_timeout_seconds`,
      `recon_test_limit` (as a decimal string), `host_soft_timeout_seconds`,
      `host_force_kill_grace_seconds`,
@@ -295,7 +294,7 @@ Write the campaign plan to:
 {{artifact_dir}}/campaign-plan.json
 
 Its exact pinned schema is
-`{{schema_path}}/invariant-campaign-plan.schema.json`.
+`{{schema_path}}/invariant-campaign-plan-v2.schema.json`.
 
 Write the backend-neutral structured summary to:
 

@@ -5414,10 +5414,18 @@ function semanticGateContextForVerifiedOutput(
     }
   };
   if (output.schemaFile === "property-campaign.schema.json") {
+    const campaignPlanOutputs = task.outputs.filter(
+      (candidate) =>
+        candidate.contract === "ultrafuzz/invariant-campaign-plan@1" ||
+        candidate.contract === "ultrafuzz/invariant-campaign-plan@2"
+    );
+    if (campaignPlanOutputs.length !== 1) {
+      throw new Error("artifact-contract failure: expected exactly one campaign-plan contract sibling");
+    }
     const campaignPlan = verifiedSiblingJsonArtifact(
       task,
       verifiedOutputs,
-      "ultrafuzz/invariant-campaign-plan@1",
+      campaignPlanOutputs[0]!.contract,
       "campaign plan"
     );
     const findings = verifiedSiblingJsonArtifact(task, verifiedOutputs, "ultrafuzz/findings@2", "campaign findings");
