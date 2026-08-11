@@ -219,6 +219,21 @@ test("stats excludes run metadata and state that belong to another run", () => {
   assert.equal(derived.diagnostics.filter((diagnostic) => diagnostic.code === "STATS_RUN_ID_MISMATCH").length, 2);
 });
 
+test("stats does not turn a cross-run-only attempt ledger into zero attempts", () => {
+  const derived = deriveRunStatistics(
+    evidence({ attemptsJsonl: jsonl([attempt("node", "node", "retry-other", { runId: "stats-other" })]) })
+  );
+
+  assert.equal(derived.value.nodes[0]?.attempt_count, null);
+  assert.equal(derived.value.nodes[0]?.executed_attempt_count, null);
+  assert.equal(derived.value.totals.duration_ms, null);
+  assert.equal(derived.value.totals.attempts_complete, false);
+  assert.equal(
+    derived.diagnostics.some((diagnostic) => diagnostic.code === "STATS_ATTEMPTS_CROSS_RUN"),
+    true
+  );
+});
+
 test("stats keeps a fan-out graph node canonical and counts retries within each strategy", () => {
   const taskOne = "node:fan__model_0__attempt_0";
   const taskTwo = "node:fan__model_1__attempt_0";

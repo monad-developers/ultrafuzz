@@ -224,7 +224,8 @@ export function deriveRunStatistics(
   }
 
   const attemptsByNode = groupByStringField(parsedAttempts.records, "node_id");
-  const attemptMetricsAvailable = evidence.attemptsJsonl !== undefined && parsedAttempts.malformed === 0;
+  const attemptMetricsAvailable =
+    evidence.attemptsJsonl !== undefined && parsedAttempts.malformed === 0 && parsedAttempts.crossRun === 0;
   const nodes = descriptors.map((descriptor) =>
     nodeStatistics(
       descriptor,
