@@ -64,6 +64,65 @@ names/hashes, while payloads stay on disk unless the suite explicitly opts
 into `mode: upload`. Before an allowlisted payload is sent, its manifest and
 path containment, regular-file status, size, and SHA-256 digest are checked.
 
+### Held-out benchmark paths
+
+A benchmark that ships a reference solution beside the code under test would
+otherwise hand the run its own answer key. A target may withhold those paths:
+
+```yaml
+targets:
+  - id: target
+    repo: "https://github.com/scfuzzbench/aave-v4-scfuzzbench"
+    ref: "edd6c82721512540c8c90e7a36a4a8e19fd7bdf3"
+    ground_truth: aave-v4-scfuzzbench/findings.yml
+    held_out_paths: ["tests/recon"]
+```
+
+Materializing a pinned target rewrites the checkout to a **parentless** revision
+that never contained the declared paths, then destroys the benchmark commit and
+the withheld blobs.
+
+A commit is required rather than a dirty worktree, because every node workspace
+is a Git worktree of the pinned branch and would otherwise restore the files.
+Keeping the benchmark commit as a parent is equally unsafe — `git show
+HEAD^:tests/recon/Properties.sol` would hand the answer key straight back — so
+the rewritten revision has no parents and the original objects are pruned along
+with the reflog. The single-revision isolation invariants are unchanged:
+`revision_count` and `commit_object_count` stay `1`.
+
+The source proof records what was withheld:
+
+```json
+"held_out": {
+  "source_commit": "edd6c82721512540c8c90e7a36a4a8e19fd7bdf3",
+  "source_tree": "3b3910d0657e4a639888ccae45822af680de6ef6",
+  "commit": "ac548733fd9c36cf9a32284a653a6429c089abfa",
+  "tree": "5e9c604d9474da946403369f652425880babee78",
+  "paths": ["tests/recon"],
+  "entries": [{ "path": "tests/recon/Properties.sol", "blob": "...", "size": 13722 }]
+}
+```
+
+`commit` and `tree` are the revision the run actually sees. `source_commit` and
+`source_tree` are provenance only — those objects are deliberately absent from
+the repository, so a reviewer can see which bytes were withheld without the run
+being able to read them back.
+
+Verification proves absence rather than diffing, since there is no parent left
+to diff against: HEAD must be the recorded parentless revision, none of the
+declared paths may be tracked, none of the recorded blobs may exist in the
+object store, the declaration must no longer match anything, and the benchmark
+commit must be unreadable. A launch is refused outright if a held-out path is
+still present in the checkout.
+
+Ground truth is written against the benchmark commit, so it keeps binding
+`source_commit` rather than the hold-out revision.
+
+Declaring a path that matches nothing fails closed rather than silently
+running without the hold-out. An agent that writes a similar file inside its
+own workspace is a legitimate result and stays allowed; only the materialized
+input is constrained.
+
 ### Recovery equivalence
 
 Each suite may declare how much model work a recovered row may repeat:
