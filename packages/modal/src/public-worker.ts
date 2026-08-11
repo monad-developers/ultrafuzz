@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
-import { mkdir, open, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, open, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { parseStrictJsonBytes } from "@ultrafuzz/artifacts";
@@ -60,6 +60,7 @@ import { OperationalDispositionError } from "./terminal-disposition.js";
 
 const ULTRAFUZZ_ROOT = "/opt/ultrafuzz";
 const BAKED_CANDIDATE_ARCHIVE = "/opt/ultrafuzz-source.tgz";
+export const PUBLIC_SMITHERS_SEED_ROOT = "/opt/ultrafuzz-smithers-seed";
 const CLI = path.join(ULTRAFUZZ_ROOT, "packages/cli/dist/index.js");
 const PUBLIC_BUNDLE_FILE = "public-results.json";
 const PUBLIC_WORKSPACE_ROOT = "/tmp/ultrafuzz-public-workspace";
@@ -744,6 +745,7 @@ async function preparePublicBenchmark(
       timeoutMs: 5 * 60 * 1000,
       signal
     });
+    await seedPublicBenchmarkSmithersDependencies(destination);
     await writeFile(
       path.join(destination, "ultrafuzz.toml"),
       modalTargetToml(model, config.node_timeout_seconds, scope.lane === "smoke" ? "smoke" : "balanced"),
@@ -812,6 +814,41 @@ async function preparePublicBenchmark(
     matrixRows: suite.targets.length * suite.variants.length * suite.run.trials_per_variant,
     maxParallelRuns: suite.run.max_parallel_runs ?? 1
   };
+}
+
+/**
+ * Materialize the image-pinned Smithers dependency tree into one disposable
+ * public target. Public evaluation otherwise installs the same generated
+ * workspace once per row during workflow submission. In Modal that registry
+ * bootstrap can consume the entire five-minute submission deadline before any
+ * model work starts. The image build resolves the exact generated manifest
+ * once; this boundary requires byte-identical manifests before copying it, so
+ * the seed cannot silently replace a target-owned or newer dependency contract.
+ */
+export async function seedPublicBenchmarkSmithersDependencies(
+  projectRoot: string,
+  seedRoot = PUBLIC_SMITHERS_SEED_ROOT
+): Promise<void> {
+  const projectPackageRoot = path.join(projectRoot, ".smithers");
+  const projectManifest = path.join(projectPackageRoot, "package.json");
+  const seedManifest = path.join(seedRoot, "package.json");
+  const [expectedManifest, actualManifest] = await Promise.all([readFile(seedManifest), readFile(projectManifest)]);
+  if (!expectedManifest.equals(actualManifest)) {
+    throw new Error("public benchmark Smithers seed manifest does not match the generated target manifest");
+  }
+  const source = path.join(seedRoot, "node_modules");
+  const destination = path.join(projectPackageRoot, "node_modules");
+  if (pathEntryPresent(destination)) {
+    throw new Error("public benchmark target already contains Smithers dependencies before image seeding");
+  }
+  await cp(source, destination, {
+    recursive: true,
+    dereference: false,
+    errorOnExist: true,
+    force: false,
+    mode: fs.constants.COPYFILE_FICLONE,
+    verbatimSymlinks: true
+  });
 }
 
 function publicBenchmarkConfiguredTargetIds(

@@ -1203,6 +1203,7 @@ describe("public Modal benchmark configuration", () => {
       "await cloneAtCommit(target.repo, target.ref, destination, logPath, { initializeSubmodules: true"
     );
     const init = worker.indexOf('["node", CLI, "init", "--project", destination', clone);
+    const smithersSeed = worker.indexOf("await seedPublicBenchmarkSmithersDependencies(destination)", init);
     const checkout = worker.indexOf('["git", "checkout", "--detach", commit]');
     const submodules = worker.indexOf('["git", "submodule", "update", "--init", "--recursive", "--depth", "1"]');
     const timeoutCap = worker.indexOf("capModalTargetTopologyTimeouts", init);
@@ -1210,6 +1211,8 @@ describe("public Modal benchmark configuration", () => {
 
     expect(clone).toBeGreaterThan(-1);
     expect(init).toBeGreaterThan(clone);
+    expect(smithersSeed).toBeGreaterThan(init);
+    expect(timeoutCap).toBeGreaterThan(smithersSeed);
     expect(timeoutCap).toBeGreaterThan(init);
     expect(referenceSync).toBeGreaterThan(timeoutCap);
     expect(checkout).toBeGreaterThan(-1);

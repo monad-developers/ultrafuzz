@@ -52,6 +52,7 @@ import {
   runAndCheckpointPublicEvalDiagnostics,
   runPublicBenchmarkWorker,
   runWithPublicPreparationTimeout,
+  seedPublicBenchmarkSmithersDependencies,
   publicScoreCommandTimeoutSeconds,
   writePublicBundleAtomic
 } from "../src/public-worker.js";
@@ -97,6 +98,38 @@ it("keeps high-fanout public benchmark work off the persistent Modal volume", ()
   expect(workRoot.startsWith(`${path.resolve(dataRoot)}${path.sep}`)).toBe(false);
   expect(() => publicBenchmarkWorkRoot("/tmp")).toThrow(/persistent volume/u);
   expect(() => publicBenchmarkWorkRoot(path.join(workRoot, "nested"))).toThrow(/persistent volume/u);
+});
+
+it("seeds only an exact generated Smithers manifest into a fresh public target", async () => {
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-smithers-seed-"));
+  const seedRoot = path.join(root, "seed");
+  const projectRoot = path.join(root, "project");
+  const manifest = '{"name":"fixture","private":true}\n';
+  fs.mkdirSync(path.join(seedRoot, "node_modules", "fixture", "bin"), { recursive: true });
+  fs.mkdirSync(path.join(projectRoot, ".smithers"), { recursive: true });
+  fs.writeFileSync(path.join(seedRoot, "package.json"), manifest);
+  fs.writeFileSync(path.join(projectRoot, ".smithers", "package.json"), manifest);
+  fs.writeFileSync(path.join(seedRoot, "node_modules", "fixture", "bin", "runner.js"), "export {};\n");
+  fs.symlinkSync("../fixture/bin/runner.js", path.join(seedRoot, "node_modules", ".runner"));
+
+  await seedPublicBenchmarkSmithersDependencies(projectRoot, seedRoot);
+
+  expect(
+    fs.readFileSync(path.join(projectRoot, ".smithers", "node_modules", "fixture", "bin", "runner.js"), "utf8")
+  ).toBe("export {};\n");
+  expect(fs.readlinkSync(path.join(projectRoot, ".smithers", "node_modules", ".runner"))).toBe(
+    "../fixture/bin/runner.js"
+  );
+  await expect(seedPublicBenchmarkSmithersDependencies(projectRoot, seedRoot)).rejects.toThrow(
+    /already contains Smithers dependencies/u
+  );
+
+  const mismatchedProject = path.join(root, "mismatched-project");
+  fs.mkdirSync(path.join(mismatchedProject, ".smithers"), { recursive: true });
+  fs.writeFileSync(path.join(mismatchedProject, ".smithers", "package.json"), `${manifest} `);
+  await expect(seedPublicBenchmarkSmithersDependencies(mismatchedProject, seedRoot)).rejects.toThrow(
+    /manifest does not match/u
+  );
 });
 
 it("recognizes and cleans the legacy persistent public workspace without treating local work as durable", async () => {

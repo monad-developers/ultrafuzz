@@ -1518,6 +1518,8 @@ describe("Modal worker identity", () => {
     expect(modalImageBuildCommand()).toContain("/usr/local/bin/ultrafuzz json validate");
     expect(modalImageBuildCommand()).toContain("validator-smoke.valid.json");
     expect(modalImageBuildCommand()).toContain("chmod -R a+rX,go-w /opt/ultrafuzz");
+    expect(modalImageBuildCommand()).toContain("node packages/modal/scripts/prepare-smithers-seed.mjs");
+    expect(modalImageBuildCommand()).toContain("/opt/ultrafuzz-smithers-seed");
     expect(modalImageBuildCommand()).toContain("@moonshot-ai/kimi-code@0.29.1");
   });
 
