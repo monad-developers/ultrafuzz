@@ -74,14 +74,19 @@ Use this configured invariant testing fuzzer timeout:
      the whole host instead of splitting it between competing backends.
    - Record the deterministic cases in the plan: 1 vCPU means 1 worker; higher
      counts use `available_vcpus` workers on the one backend.
-   - After validation and the Recon smoke, establish one wall-clock deadline
-     from `{{invariant_testing_fuzzer_timeout}}`. Reserve enough time before
-     that deadline to stop processes, parse results, deduplicate failures,
-     attempt reproducers, and finalize every required artifact.
-   - The whole configured budget minus the finalization reserve belongs to the
-     one campaign; do not divide it into per-backend slices.
-   - Write `available_vcpus`, `workers`, configured budget, deadline, and
-     finalization reserve to `campaign-plan.json` before starting the backend.
+   - After validation and the Recon smoke, establish one backend wall-clock
+     deadline from `{{invariant_testing_fuzzer_timeout}}`. The backend receives
+     the complete configured fuzzer timeout; do not subtract setup, parsing,
+     reproducer, or artifact-finalization time from it.
+   - Establish a separate finalization reserve after the backend deadline to
+     stop processes, parse results, deduplicate failures, attempt reproducers,
+     and finalize every required artifact. The finalization reserve is
+     additional to, not part of, the configured fuzzer timeout.
+   - The complete configured fuzzer timeout belongs to the one campaign; do not
+     divide it into per-backend slices.
+   - Write `available_vcpus`, `workers`, configured fuzzer timeout, backend
+     deadline, finalization reserve, and final artifact deadline to
+     `campaign-plan.json` before starting the backend.
 
 3. Run the backend without path collisions.
    - Start the long campaign from this template, substituting the resolved
@@ -99,8 +104,9 @@ Use this configured invariant testing fuzzer timeout:
      command/config before launch. Use host-safe process bounds and terminate
      the process tree at the deadline.
    - Preserve raw backend output within normal artifact size and safety limits.
-     Do not start or continue a command when it cannot leave the finalization
-     reserve intact.
+     Set Recon's internal timeout and any host-safe process bound to the complete
+     configured fuzzer timeout. Do not start the backend unless the node has
+     enough remaining time for that full timeout plus the finalization reserve.
 
 4. Finalize the backend record.
    - Write the result record even when the backend is unavailable, fails to

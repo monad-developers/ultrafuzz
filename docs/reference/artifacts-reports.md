@@ -152,7 +152,9 @@ The default `stateful-invariant-campaign` runs one final recon-fuzzer backend
 and writes backend-neutral `campaign-plan.json`, `campaign-summary.json`, and
 `campaign-report.md` artifacts plus `recon-fuzzer-results.json`. The plan
 records the resolved vCPU count, worker count, wall-clock budget, deadline, and
-finalization reserve. The backend record keeps its command, version, timestamps,
+finalization reserve. The configured invariant fuzzer timeout is the backend's
+full execution budget; the finalization reserve is additional and follows the
+backend deadline. The backend record keeps its command, version, timestamps,
 terminal status, distinct artifact paths, failures, reproducers, and available
 coverage metadata. The summary classifies the result as `complete`, `partial`,
 or `blocked` without discarding usable evidence.

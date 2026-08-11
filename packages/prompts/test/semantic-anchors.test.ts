@@ -379,7 +379,15 @@ describe("prompt semantic anchors", () => {
     expect(campaign).toContain("1 vCPU means 1 worker");
     expect(campaign).toMatch(/higher\s+counts use `available_vcpus` workers on the one backend/u);
     expect(campaign).toContain("finalization reserve");
-    expect(campaign).toContain("do not divide it into per-backend slices");
+    expect(campaign).toContain("The backend receives\n     the complete configured fuzzer timeout");
+    expect(campaign).toContain(
+      "The finalization reserve is\n     additional to, not part of, the configured fuzzer timeout"
+    );
+    expect(campaign).toContain(
+      "Set Recon's internal timeout and any host-safe process bound to the complete\n     configured fuzzer timeout"
+    );
+    expect(campaign).not.toContain("configured budget minus the finalization reserve");
+    expect(campaign).toMatch(/do not\s+divide it into per-backend slices/u);
     expect(campaign).toContain("backends/recon-fuzzer");
     expect(campaign).not.toContain("backends/echidna");
     expect(campaign).not.toContain("backends/medusa");
