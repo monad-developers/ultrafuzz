@@ -5148,7 +5148,7 @@ test("startRun forwards configured and explicitly allowed environment variables 
   assert.equal(fs.readFileSync(contextLog, "utf8"), "|||||\n");
 });
 
-test("startRun preserves an empty PATH component after target-cwd preflight", async () => {
+test("startRun rejects an untracked cwd executable before task worktrees or model work", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -5167,23 +5167,18 @@ test("startRun preserves an empty PATH component after target-cwd preflight", as
   const executable = path.join(project, "recon");
   fs.writeFileSync(executable, "#!/bin/sh\necho recon test\n", "utf8");
   fs.chmodSync(executable, 0o755);
-  const pathLog = path.join(project, "smithers-path.log");
-
   const run = await startRun({
     projectRoot: project,
     runId: "empty-path-required-command",
     env: {
       PATH: "",
-      SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log"),
-      SMITHERS_FAKE_PATH_LOG: pathLog
+      SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log")
     }
   });
 
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  assert.equal(
-    fs.readFileSync(pathLog, "utf8"),
-    `${path.join(project, ".smithers", "node_modules", ".bin")}${path.delimiter}\n`
-  );
+  assert.equal(run.ok, false);
+  assert.equal(run.diagnostics[0]?.code, "RUN_REQUIRED_COMMAND_MISSING");
+  assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", "empty-path-required-command")), false);
 });
 
 test("startRun rejects controller-only paths as credential environment names", async () => {
@@ -12105,6 +12100,40 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
       `a relaunched workflow must keep streaming into the run's own log directory: ${relaunch}`
     );
   }
+});
+
+test("lifecycle relaunch rejects a required backend that disappeared before new attempts", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const topologyPath = path.join(project, ".ultrafuzz", "topology.yml");
+  fs.writeFileSync(
+    topologyPath,
+    fs
+      .readFileSync(topologyPath, "utf8")
+      .replace(
+        "    prompt: setup/project-discovery.md\n",
+        "    prompt: setup/project-discovery.md\n    required_commands: [recon-required-test]\n"
+      ),
+    "utf8"
+  );
+  const env = fakeSmithersEnv(project);
+  const recon = path.join(project, "fake-bin", "recon-required-test");
+  fs.writeFileSync(recon, "#!/bin/sh\necho recon test\n", "utf8");
+  fs.chmodSync(recon, 0o755);
+  const run = await startRun({ projectRoot: project, runId: "lifecycle-required-command", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  fs.rmSync(recon);
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+  const eventsPath = path.join(run.value!.run_root, "events.jsonl");
+  const eventsBefore = fs.readFileSync(eventsPath, "utf8");
+
+  const resumed = await resumeRun({ projectRoot: project, runId: run.value!.run_id, env });
+
+  assert.equal(resumed.ok, false);
+  assert.equal(resumed.diagnostics[0]?.code, "RUN_REQUIRED_COMMAND_MISSING");
+  assert.equal(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), "");
+  assert.equal(fs.readFileSync(eventsPath, "utf8"), eventsBefore);
 });
 
 test("legacy workflow evidence gaps fail closed without reconstructing trust", async () => {

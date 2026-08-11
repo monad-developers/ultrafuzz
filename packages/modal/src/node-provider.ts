@@ -117,11 +117,11 @@ export async function probeModalCommands(
     client =
       options.clientFactory?.({ tokenId, tokenSecret }) ??
       (new ModalClient({ tokenId, tokenSecret }) as unknown as ModalNodeClient);
-    // Doctor leaves persistent provider state untouched. Launch preflight can
-    // opt into the same first-use app creation as normal cloud execution.
+    // Launch and Doctor can use normal first-use app creation so their probes
+    // inspect the same configured image in the same provider environment.
     const app = await client.apps.fromName(options.app, {
-      // Preserve the public probe's historical first-use behavior. Read-only
-      // callers such as Doctor opt out explicitly.
+      // Preserve the public probe's historical first-use behavior. Callers
+      // that must avoid persistent provider state can opt out explicitly.
       createIfMissing: probeOptions.createAppIfMissing !== false
     });
     const image = await client.images.fromName(options.image);

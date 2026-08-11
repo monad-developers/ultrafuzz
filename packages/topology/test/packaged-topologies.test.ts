@@ -65,7 +65,9 @@ describe("packaged topology collection", () => {
         requirePromptFiles: true
       });
       expect(topology.nodes.find((node) => node.id === "stateful-invariant-coverage")?.required_commands).toEqual([
-        "covg-eval"
+        "covg-eval",
+        "recon",
+        "recon-generate"
       ]);
       expect(topology.nodes.find((node) => node.id === "stateful-invariant-campaign")?.required_commands).toEqual([
         "recon"

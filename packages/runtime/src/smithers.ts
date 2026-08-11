@@ -3404,8 +3404,9 @@ function smithersCommandEnv(
     }
   }
   const localBin = path.join(projectRoot, ".smithers", "node_modules", ".bin");
-  // Keep an explicitly empty source PATH as a trailing empty component. Shell
-  // lookup resolves that component from the command cwd, matching preflight.
+  // Preserve the caller's PATH representation for workflow-engine compatibility.
+  // Required-command preflight intentionally accepts only stable absolute entries,
+  // because task commands execute from fresh worktrees rather than this checkout.
   merged.PATH = [localBin, sourcePath]
     .filter((entry): entry is string => typeof entry === "string")
     .join(path.delimiter);

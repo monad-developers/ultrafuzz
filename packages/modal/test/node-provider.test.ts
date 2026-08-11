@@ -107,7 +107,7 @@ describe("Modal node sandbox provider", () => {
     expect(client.sandboxes.create).not.toHaveBeenCalled();
   });
 
-  it("allows Doctor to opt out of first-use app creation", async () => {
+  it("can opt out of first-use app creation for read-only callers", async () => {
     const sandbox = fakeSandbox(undefined);
     sandbox.exec = vi.fn(async () => ({
       stdout: {

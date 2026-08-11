@@ -14,7 +14,7 @@ import {
   type RunLayout
 } from "@ultrafuzz/artifacts";
 import type { ResolvedConfig } from "@ultrafuzz/config";
-import type { ExpandedGraph } from "@ultrafuzz/topology";
+import { assertExpandedGraphSchema, type ExpandedGraph } from "@ultrafuzz/topology";
 
 import {
   type PlannedGraph,
@@ -199,7 +199,7 @@ export async function startRun(input: StartRunInput) {
 }
 
 async function requiredCommandPreflightDiagnostics(
-  input: StartRunInput,
+  input: Pick<StartRunInput, "projectRoot" | "env" | "requiredCommandProbe">,
   resolvedConfig: ResolvedConfig,
   expandedGraph: ExpandedGraph
 ): Promise<RuntimeDiagnostic[]> {
@@ -210,8 +210,8 @@ async function requiredCommandPreflightDiagnostics(
       input.requiredCommandProbe === undefined
         ? await probeCommandsForExecution(resolvedConfig, requiredCommands, input.env ?? process.env, {
             cwd: path.resolve(input.projectRoot),
-            // Normal cloud launch already creates its configured app on first
-            // use. Preserve that behavior while keeping Doctor read-only.
+            // Normal cloud launch creates its configured app on first use.
+            // Preflight must preserve that behavior to inspect the real image.
             createProviderAppIfMissing: true
           })
         : await input.requiredCommandProbe(requiredCommands);
@@ -228,16 +228,28 @@ async function requiredCommandPreflightDiagnostics(
   }
   const probeByName = new Map(commandProbes.map((probe) => [probe.name, probe]));
   const missingCommands = requiredCommands.filter((command) => probeByName.get(command)?.available !== true);
+  const missingRequirements = missingCommands.map((command) => ({
+    command,
+    node_ids: [
+      ...new Set(
+        expandedGraph.nodes
+          .filter((node) => node.requiredCommands?.includes(command) === true)
+          .map((node) => node.logicalId)
+      )
+    ].sort()
+  }));
   return missingCommands.length === 0
     ? []
     : [
         {
           code: "RUN_REQUIRED_COMMAND_MISSING",
-          message: `required topology commands are not available in the configured execution environment: ${missingCommands.join(", ")}`,
+          message: `required topology commands are not available in the configured execution environment: ${missingRequirements
+            .map((requirement) => `${requirement.command} (required by ${requirement.node_ids.join(", ")})`)
+            .join("; ")}`,
           severity: "error",
           source: "runtime",
           path: "topology.required_commands",
-          details: { commands: missingCommands }
+          details: { commands: missingCommands, requirements: missingRequirements }
         }
       ];
 }
@@ -307,6 +319,11 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
   }
   try {
     const sealedConfig = parseSealedResolvedConfig(evidence.verifiedControl.executionFiles);
+    const sealedGraph = parseSealedExpandedGraph(evidence.verifiedControl.contents.expanded_graph);
+    const preflightDiagnostics = await requiredCommandPreflightDiagnostics(input, sealedConfig, sealedGraph);
+    if (preflightDiagnostics.length > 0) {
+      return runtimeFailure<WorkflowLifecycleValue>(preflightDiagnostics);
+    }
     const requestedConcurrency = input.maxConcurrency ?? sealedConfig.run.maxParallelAgents;
     await repairMissingRenderedPromptsFromExecutionSnapshot({
       projectRoot: path.resolve(input.projectRoot),
@@ -1162,6 +1179,10 @@ function parseSealedResolvedConfig(
     throw new Error("sealed resolved workflow configuration is invalid");
   }
   return parsed as ResolvedConfig;
+}
+
+function parseSealedExpandedGraph(contents: Buffer): ExpandedGraph {
+  return assertExpandedGraphSchema(JSON.parse(contents.toString("utf8")) as unknown);
 }
 
 function runRelativePath(layout: RunLayout, candidate: string): string {

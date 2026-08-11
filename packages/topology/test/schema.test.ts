@@ -120,19 +120,25 @@ describe("expanded graph schema", () => {
     ) as {
       $id?: string;
       required?: unknown;
+      properties?: {
+        nodes?: {
+          items?: {
+            properties?: {
+              requiredCommands?: unknown;
+              outputs?: { items?: { properties?: { contract?: { enum?: unknown } } } };
+            };
+          };
+        };
+      };
     };
 
     expect(snapshot.$id).toBe(expandedGraphJsonSchema.$id);
     expect(snapshot.required).toEqual(expandedGraphJsonSchema.required);
-    const outputContractEnum = (
-      snapshot as {
-        properties?: {
-          nodes?: {
-            items?: { properties?: { outputs?: { items?: { properties?: { contract?: { enum?: unknown } } } } } };
-          };
-        };
-      }
-    ).properties?.nodes?.items?.properties?.outputs?.items?.properties?.contract?.enum;
+    const nodeProperties = snapshot.properties?.nodes?.items?.properties;
+    expect(nodeProperties?.requiredCommands).toEqual(
+      expandedGraphJsonSchema.properties.nodes.items.properties.requiredCommands
+    );
+    const outputContractEnum = nodeProperties?.outputs?.items?.properties?.contract?.enum;
     expect(outputContractEnum).toEqual(ARTIFACT_CONTRACT_IDS);
   });
 });

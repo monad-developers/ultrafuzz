@@ -91,8 +91,10 @@ selects another agent, backend-specific reasoning is cleared, including when
   workflow node's status, retries, timing, and output metadata. Tool payloads
   require explicit `--tools`.
 - `doctor` reports validation, toolchain, and pinned workflow engine install
-  posture without changing anything. It is the operational superset of
-  `validate`.
+  posture without changing project or run state or installing dependencies. It
+  is the operational superset of `validate`. A cloud check may create the
+  configured provider app so it can probe a transient sandbox in the workflow
+  image.
 
 ## Reference Commands
 
