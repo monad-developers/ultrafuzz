@@ -49,6 +49,7 @@ import {
   resumeRun,
   startRun,
   syncRun,
+  toPlannedGraph,
   validateProject
 } from "../src/index.js";
 import { runSmithersInspectionCommand } from "../src/smithers.js";
@@ -3796,6 +3797,21 @@ test("plan creates run layout, graph fingerprint, and rendered prompt before Smi
   );
   assert.match(plan.value!.graph_fingerprint, /^[a-f0-9]{64}$/);
   assert.equal(plan.value!.graph.nodes[0]?.model_fanout[0]?.agent_ref, "CodexAgent");
+});
+
+test("planned graphs persist the topology-resolved node timeout", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  const plan = await planRun({ projectRoot: project, runId: "planned-timeout", env: {} });
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  const expandedNode = plan.value!.expanded_graph.nodes.find((node) => node.id === "project-discovery");
+  assert.notEqual(expandedNode, undefined);
+  expandedNode!.timeoutSeconds = 7200;
+
+  const graph = toPlannedGraph(plan.value!.expanded_graph);
+  assert.equal(graph.nodes.find((node) => node.id === "project-discovery")?.timeout_seconds, 7200);
 });
 
 test("plan wires the inclusive invariant priority selection into rendered prompts", async () => {

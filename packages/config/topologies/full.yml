@@ -689,7 +689,7 @@ nodes:
       - stateful-invariant-implement-properties
     outputs:
       - path: campaign-plan.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/invariant-campaign-plan@1
         primary: true
       - path: campaign-report.md
         contract: ultrafuzz/nonempty-markdown@1

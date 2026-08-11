@@ -900,6 +900,7 @@ function toPlannedGraphNode(
     kind: node.kind,
     depends_on: node.dependsOn.filter((dependency) => nodeById.get(dependency)?.kind !== "meta"),
     artifact_dir: node.artifactDir,
+    ...(node.timeoutSeconds === undefined ? {} : { timeout_seconds: node.timeoutSeconds }),
     outputs: node.outputs.map((output) => ({
       path: output.path,
       contract: output.contract,

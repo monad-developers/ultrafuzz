@@ -135,6 +135,8 @@ export interface PlannedGraphNode {
   kind: string;
   depends_on: string[];
   artifact_dir: string;
+  /** The topology-resolved node timeout sealed into the persisted run graph. */
+  timeout_seconds?: number;
   outputs: PlannedArtifactOutput[];
   prompt_id: string;
   prompt_path: string;

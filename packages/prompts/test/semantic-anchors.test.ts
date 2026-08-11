@@ -361,6 +361,9 @@ describe("prompt semantic anchors", () => {
     expect(campaignNode?.outputs?.find((output) => output.path === "campaign-summary.json")?.contract).toBe(
       "ultrafuzz/campaign-summary@1"
     );
+    expect(campaignNode?.outputs?.find((output) => output.path === "campaign-plan.json")?.contract).toBe(
+      "ultrafuzz/invariant-campaign-plan@1"
+    );
     expect(topology.nodes.find((node) => node.id === "dynamic-strategy-generator")?.depends_on).toContain(
       "stateful-invariant-campaign"
     );

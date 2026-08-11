@@ -43,6 +43,7 @@ import {
 import { parseProjectConfigToml } from "@ultrafuzz/config";
 
 import type { PlannedGraph, PlannedGraphNode, RuntimeDiagnostic } from "./types.js";
+import { topologyRuntimeBudgetForTimeout } from "./topology-runtime-budget.js";
 import { diagnosticFromError } from "./utils.js";
 import { validateSeverityMatrixArtifact, type SeverityArtifactKind } from "./severity-matrix.js";
 
@@ -1624,9 +1625,8 @@ function isCurrentTimeoutEvidenceCampaign(node: PlannedGraphNode): boolean {
   const logicalId = node.logical_id ?? node.id;
   return (
     isCampaignLogicalId(logicalId) &&
-    node.outputs.some((output) => output.path === "campaign-plan.json") &&
     node.outputs.some(
-      (output) => output.path === "campaign-summary.json" && output.contract === "ultrafuzz/campaign-summary@1"
+      (output) => output.path === "campaign-plan.json" && output.contract === "ultrafuzz/invariant-campaign-plan@1"
     )
   );
 }
@@ -1790,6 +1790,31 @@ function verifyCurrentCampaignTimeoutEvidence(
     planPath,
     diagnostics
   );
+  const topologyTimeoutSeconds = node.timeout_seconds;
+  if (
+    typeof topologyTimeoutSeconds !== "number" ||
+    !Number.isSafeInteger(topologyTimeoutSeconds) ||
+    topologyTimeoutSeconds <= 0
+  ) {
+    diagnostics.push(
+      campaignTimeoutDiagnostic(
+        "CAMPAIGN_TIMEOUT_PLAN_BUDGET_MISSING",
+        "Current campaign timeout evidence requires the topology-resolved node timeout in the sealed run graph",
+        `${layout.graphPath}#$.nodes.${node.id}.timeout_seconds`
+      )
+    );
+  } else if (finalizationReserve !== undefined) {
+    const expectedReserve = topologyRuntimeBudgetForTimeout(topologyTimeoutSeconds * 1_000).finalizationReserveSeconds;
+    if (finalizationReserve !== expectedReserve) {
+      diagnostics.push(
+        campaignTimeoutDiagnostic(
+          "CAMPAIGN_TIMEOUT_FINALIZATION_RESERVE_MISMATCH",
+          `artifact_finalization_reserve_seconds reports ${finalizationReserve}, but the sealed topology budget requires ${expectedReserve}`,
+          `${planPath}#$.artifact_finalization_reserve_seconds`
+        )
+      );
+    }
+  }
   const reconTestLimit = stringField(planValue, "recon_test_limit", planPath, diagnostics);
   const backendStartedAt = timestampField(planValue, "backend_started_at", planPath, diagnostics);
   const fuzzingDeadline = timestampField(planValue, "fuzzing_deadline_utc", planPath, diagnostics);
@@ -1992,11 +2017,11 @@ function verifyCurrentCampaignTimeoutEvidence(
       );
     } else if (configuredTimeoutSeconds !== undefined) {
       const endedEarly = elapsedMs + CAMPAIGN_DURATION_TOLERANCE_MS < configuredTimeoutSeconds * 1_000;
-      if (terminationReason === "configured-timeout" && campaignOutcome === "complete" && endedEarly) {
+      if (terminationReason === "configured-timeout" && endedEarly) {
         diagnostics.push(
           campaignTimeoutDiagnostic(
             "CAMPAIGN_TIMEOUT_DURATION_MISMATCH",
-            "A complete configured-timeout campaign must run for the configured fuzzer timeout",
+            "A configured-timeout campaign must run for the configured fuzzer timeout",
             `${resultPath}#$.end_timestamp`
           )
         );
@@ -2006,6 +2031,43 @@ function verifyCurrentCampaignTimeoutEvidence(
           campaignTimeoutDiagnostic(
             "CAMPAIGN_TIMEOUT_OUTCOME_MISMATCH",
             "A campaign that ends before the configured timeout with usable results must be partial",
+            `${resultPath}#$.campaign_outcome`
+          )
+        );
+      }
+      if (
+        !endedEarly &&
+        terminationReason === "configured-timeout" &&
+        usableResults === true &&
+        campaignOutcome !== "complete"
+      ) {
+        diagnostics.push(
+          campaignTimeoutDiagnostic(
+            "CAMPAIGN_TIMEOUT_OUTCOME_MISMATCH",
+            "A configured-timeout campaign with usable results must be complete",
+            `${resultPath}#$.campaign_outcome`
+          )
+        );
+      }
+    }
+    if (
+      forceKillDeadline !== undefined &&
+      endTimestamp.milliseconds > forceKillDeadline.milliseconds + CAMPAIGN_DURATION_TOLERANCE_MS
+    ) {
+      if (terminationReason !== "host-force-kill") {
+        diagnostics.push(
+          campaignTimeoutDiagnostic(
+            "CAMPAIGN_TIMEOUT_FORCE_KILL_MISMATCH",
+            "A backend ending after the host force-kill deadline must report termination_reason host-force-kill",
+            `${resultPath}#$.termination_reason`
+          )
+        );
+      }
+      if (usableResults === true && campaignOutcome !== "partial") {
+        diagnostics.push(
+          campaignTimeoutDiagnostic(
+            "CAMPAIGN_TIMEOUT_OUTCOME_MISMATCH",
+            "A host-force-killed campaign with usable results must be partial",
             `${resultPath}#$.campaign_outcome`
           )
         );

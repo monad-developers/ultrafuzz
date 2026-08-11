@@ -169,6 +169,7 @@
                     "ultrafuzz/generated-tests@1",
                     "ultrafuzz/implemented-properties@1",
                     "ultrafuzz/implemented-properties@2",
+                    "ultrafuzz/invariant-campaign-plan@1",
                     "ultrafuzz/invariant-ledger@1",
                     "ultrafuzz/json-array@1",
                     "ultrafuzz/json-object@1",

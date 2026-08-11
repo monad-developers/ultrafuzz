@@ -4711,6 +4711,7 @@ function writeCampaignSummary(
 const RECON_TIMEOUT_TEST_LIMIT = "18446744073709551615";
 
 interface CampaignTimeoutPlanFixture extends Record<string, unknown> {
+  schema_version: "ultrafuzz.invariant-campaign-plan.v2";
   configured_fuzzer_timeout_seconds: number;
   recon_internal_timeout_seconds: number;
   recon_test_limit: string;
@@ -4755,6 +4756,7 @@ function campaignTimeoutFixture(): CampaignTimeoutFixture {
     `--timeout 3600 --test-limit ${RECON_TIMEOUT_TEST_LIMIT}`;
   return {
     plan: {
+      schema_version: "ultrafuzz.invariant-campaign-plan.v2",
       configured_fuzzer_timeout_seconds: 3600,
       recon_internal_timeout_seconds: 3600,
       recon_test_limit: RECON_TIMEOUT_TEST_LIMIT,
@@ -4787,7 +4789,9 @@ function campaignTimeoutFixture(): CampaignTimeoutFixture {
 }
 
 function runCampaignTimeoutGate(
-  mutate: (fixture: CampaignTimeoutFixture) => void = () => undefined
+  mutate: (fixture: CampaignTimeoutFixture) => void = () => undefined,
+  planContract: PlannedGraphNode["outputs"][number]["contract"] = "ultrafuzz/invariant-campaign-plan@1",
+  topologyTimeoutSeconds: number | null = 7200
 ): ReturnType<typeof verifyRequiredArtifactsForAttempt> {
   const layout = createRunLayout({
     projectRoot: tempProject(),
@@ -4812,8 +4816,9 @@ function runCampaignTimeoutGate(
     ...base,
     id: campaignId,
     logical_id: campaignId,
+    ...(topologyTimeoutSeconds === null ? {} : { timeout_seconds: topologyTimeoutSeconds }),
     outputs: base.outputs.map((output) =>
-      output.path === "campaign-plan.json" ? { ...output, contract: "ultrafuzz/json-object@1" as const } : output
+      output.path === "campaign-plan.json" ? { ...output, contract: planContract } : output
     )
   };
   return verifyRequiredArtifactsForAttempt(layout, node, campaignId);
@@ -4826,6 +4831,24 @@ test("current campaign timeout gate accepts exact configured Recon timeout evide
     result.diagnostics.filter((diagnostic) => diagnostic.source === "campaign-timeout-evidence"),
     []
   );
+});
+
+test("historical generic campaign plans bypass the current timeout-evidence gate", () => {
+  const result = runCampaignTimeoutGate((fixture) => {
+    delete (fixture.plan as Record<string, unknown>).schema_version;
+    fixture.plan.artifact_finalization_reserve_seconds = 1;
+  }, "ultrafuzz/json-object@1");
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+  assert.deepEqual(
+    result.diagnostics.filter((diagnostic) => diagnostic.source === "campaign-timeout-evidence"),
+    []
+  );
+});
+
+test("current campaign timeout gate requires the sealed topology node budget", () => {
+  const result = runCampaignTimeoutGate(() => undefined, "ultrafuzz/invariant-campaign-plan@1", null);
+  assert.equal(result.ok, false);
+  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "CAMPAIGN_TIMEOUT_PLAN_BUDGET_MISSING"));
 });
 
 test("current campaign timeout gate rejects reserve subtraction and ambiguous Recon command flags", () => {
@@ -4963,6 +4986,13 @@ test("current campaign timeout gate rejects reserve subtraction and ambiguous Re
       }
     },
     {
+      name: "positive but forged artifact finalization reserve",
+      code: "CAMPAIGN_TIMEOUT_FINALIZATION_RESERVE_MISMATCH",
+      mutate: (fixture) => {
+        fixture.plan.artifact_finalization_reserve_seconds = 299;
+      }
+    },
+    {
       name: "backend command differs from plan",
       code: "CAMPAIGN_TIMEOUT_COMMAND_MISMATCH",
       mutate: (fixture) => {
@@ -5030,6 +5060,25 @@ test("current campaign timeout gate derives early-exit outcome from recorded dur
     );
   }
 
+  const earlyConfiguredPartial = runCampaignTimeoutGate((fixture) => {
+    fixture.backend.end_timestamp = "2026-08-11T00:30:00.000Z";
+    fixture.backend.campaign_outcome = "partial";
+    fixture.summary.outcome = "partial";
+  });
+  assert.equal(earlyConfiguredPartial.ok, false);
+  assert.ok(
+    earlyConfiguredPartial.diagnostics.some((diagnostic) => diagnostic.code === "CAMPAIGN_TIMEOUT_DURATION_MISMATCH")
+  );
+
+  const fullConfiguredPartial = runCampaignTimeoutGate((fixture) => {
+    fixture.backend.campaign_outcome = "partial";
+    fixture.summary.outcome = "partial";
+  });
+  assert.equal(fullConfiguredPartial.ok, false);
+  assert.ok(
+    fullConfiguredPartial.diagnostics.some((diagnostic) => diagnostic.code === "CAMPAIGN_TIMEOUT_OUTCOME_MISMATCH")
+  );
+
   const fullDurationProcessExit = runCampaignTimeoutGate((fixture) => {
     fixture.backend.termination_reason = "process-exit";
   });
@@ -5053,6 +5102,31 @@ test("current campaign timeout gate derives early-exit outcome from recorded dur
   const truthfulBlocked = runCampaignTimeoutGate((fixture) => {
     fixture.backend.end_timestamp = "2026-08-11T00:00:01.000Z";
     fixture.backend.termination_reason = "launch-error";
+    fixture.backend.campaign_outcome = "blocked";
+    fixture.backend.usable_results = false;
+    fixture.summary.outcome = "blocked";
+  });
+  assert.equal(truthfulBlocked.ok, true, JSON.stringify(truthfulBlocked.diagnostics));
+});
+
+test("current campaign timeout gate classifies termination after the force-kill deadline", () => {
+  const falseComplete = runCampaignTimeoutGate((fixture) => {
+    fixture.backend.end_timestamp = "2026-08-11T01:05:06.000Z";
+  });
+  assert.equal(falseComplete.ok, false);
+  assert.ok(falseComplete.diagnostics.some((diagnostic) => diagnostic.code === "CAMPAIGN_TIMEOUT_FORCE_KILL_MISMATCH"));
+
+  const truthfulPartial = runCampaignTimeoutGate((fixture) => {
+    fixture.backend.end_timestamp = "2026-08-11T01:05:06.000Z";
+    fixture.backend.termination_reason = "host-force-kill";
+    fixture.backend.campaign_outcome = "partial";
+    fixture.summary.outcome = "partial";
+  });
+  assert.equal(truthfulPartial.ok, true, JSON.stringify(truthfulPartial.diagnostics));
+
+  const truthfulBlocked = runCampaignTimeoutGate((fixture) => {
+    fixture.backend.end_timestamp = "2026-08-11T01:05:06.000Z";
+    fixture.backend.termination_reason = "host-force-kill";
     fixture.backend.campaign_outcome = "blocked";
     fixture.backend.usable_results = false;
     fixture.summary.outcome = "blocked";

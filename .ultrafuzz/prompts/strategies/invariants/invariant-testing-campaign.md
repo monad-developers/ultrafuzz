@@ -85,9 +85,13 @@ Use this configured invariant testing fuzzer timeout:
      grace to parse results, deduplicate failures, attempt reproducers, and
      finalize every required artifact. The shutdown grace and artifact reserve
      are both additional to, not part of, the configured fuzzer timeout.
+     Copy the exact `Finalization reserve` value from the appended Topology
+     Runtime Context; do not choose or reduce this reserve yourself.
    - The complete configured fuzzer timeout belongs to the one campaign; do not
      divide it into per-backend slices.
    - Before launch, write a preliminary `campaign-plan.json` with
+     `schema_version` set to exactly
+     `ultrafuzz.invariant-campaign-plan.v2`,
      `configured_fuzzer_timeout_seconds`, `recon_internal_timeout_seconds`,
      `recon_test_limit` (as a decimal string),
      `host_soft_timeout_seconds`, `host_force_kill_grace_seconds`,
