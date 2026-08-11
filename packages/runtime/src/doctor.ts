@@ -38,8 +38,10 @@ const AGENT_EXECUTABLES: Record<string, string> = {
 
 /**
  * Operational superset of `validate`: reports configuration posture plus the
- * local toolchain and pinned workflow-engine install posture. Read-only — it
- * never installs, upgrades, or repairs anything.
+ * local toolchain and pinned workflow-engine install posture. It never changes
+ * project or run state and never installs, upgrades, or repairs dependencies.
+ * Cloud toolchain checks may create the configured provider app on first use
+ * and always use a transient sandbox so they inspect the launch image itself.
  */
 export async function diagnoseProject(input: DoctorInput) {
   const projectRoot = path.resolve(input.projectRoot);
