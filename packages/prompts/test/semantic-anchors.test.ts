@@ -284,6 +284,14 @@ describe("prompt semantic anchors", () => {
     }
   });
 
+  it("uses preflighted Recon coverage tooling without installing it during a run", () => {
+    const coverage = prompt("strategies/invariants/coverage.md");
+
+    expect(coverage).toContain("`recon-generate coverage`");
+    expect(coverage).not.toContain("npx -y recon-generate");
+    expect(coverage).not.toContain("recon-generate@latest");
+  });
+
   it("does not require unused fuzzer CLIs during project discovery", () => {
     const markdown = prompt("setup/project-discovery.md");
     const promptCorpus = loadBuiltInPromptAssets()

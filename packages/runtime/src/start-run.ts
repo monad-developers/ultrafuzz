@@ -14,7 +14,7 @@ import {
   type RunLayout
 } from "@ultrafuzz/artifacts";
 import type { ResolvedConfig } from "@ultrafuzz/config";
-import type { ExpandedGraph } from "@ultrafuzz/topology";
+import { assertExpandedGraphSchema, type ExpandedGraph } from "@ultrafuzz/topology";
 
 import {
   type PlannedGraph,
@@ -199,7 +199,7 @@ export async function startRun(input: StartRunInput) {
 }
 
 async function requiredCommandPreflightDiagnostics(
-  input: StartRunInput,
+  input: Pick<StartRunInput, "projectRoot" | "env" | "requiredCommandProbe">,
   resolvedConfig: ResolvedConfig,
   expandedGraph: ExpandedGraph
 ): Promise<RuntimeDiagnostic[]> {
@@ -319,6 +319,11 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
   }
   try {
     const sealedConfig = parseSealedResolvedConfig(evidence.verifiedControl.executionFiles);
+    const sealedGraph = parseSealedExpandedGraph(evidence.verifiedControl.contents.expanded_graph);
+    const preflightDiagnostics = await requiredCommandPreflightDiagnostics(input, sealedConfig, sealedGraph);
+    if (preflightDiagnostics.length > 0) {
+      return runtimeFailure<WorkflowLifecycleValue>(preflightDiagnostics);
+    }
     const requestedConcurrency = input.maxConcurrency ?? sealedConfig.run.maxParallelAgents;
     await repairMissingRenderedPromptsFromExecutionSnapshot({
       projectRoot: path.resolve(input.projectRoot),
@@ -1174,6 +1179,10 @@ function parseSealedResolvedConfig(
     throw new Error("sealed resolved workflow configuration is invalid");
   }
   return parsed as ResolvedConfig;
+}
+
+function parseSealedExpandedGraph(contents: Buffer): ExpandedGraph {
+  return assertExpandedGraphSchema(JSON.parse(contents.toString("utf8")) as unknown);
 }
 
 function runRelativePath(layout: RunLayout, candidate: string): string {

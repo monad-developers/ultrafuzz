@@ -126,9 +126,9 @@ Apply these Recon/Chimera rules:
   reason to leave the node without required artifacts.
 - Do not run remote package availability probes such as `npm view`,
   `npm search`, `curl`, or `wget`. If Recon tooling is not already available
-  through direct local commands or the explicit `npx -y recon-generate@latest
-  coverage` command below, document `coverage-tooling-blocked` and refresh the
-  required artifacts instead of probing package registries.
+  through direct local commands, document `coverage-tooling-blocked` and
+  refresh the required artifacts instead of probing package registries or
+  installing it during the run.
 - After the first standardized, production-attributed coverage result, write
   checkpoint versions of `coverage-report.md`, `findings.json`,
   `generated-tests.json`, and `harness-repairs.json` immediately, even if
@@ -139,7 +139,7 @@ Apply these Recon/Chimera rules:
   and adapt only when the target contract, config path, or project layout
   requires it.
 - Generate standardized coverage inputs with:
-  `npx -y recon-generate@latest coverage`
+  `recon-generate coverage`
 - Move the generated `recon-coverage.json` into `magic/`.
 - Evaluate standardized coverage with:
   `covg-eval magic/ echidna/ --return-json`
@@ -199,7 +199,7 @@ Apply these Recon/Chimera rules:
    - Use replay and shrinking for failures when recon-fuzzer emits reproducers.
 
 3. Standardize coverage:
-   - Run `npx -y recon-generate@latest coverage`.
+   - Run `recon-generate coverage`.
    - Move `recon-coverage.json` into `magic/`.
    - Run `covg-eval magic/ echidna/ --return-json` or the local equivalent.
    - Inspect the chosen LCOV `SF:` entries and reject the coverage result if it
@@ -208,7 +208,7 @@ Apply these Recon/Chimera rules:
    - If production sources are missing, stop handler iteration, document the
      attribution blocker, and identify the exact source files that must appear
      before coverage percentages are trusted.
-   - If `npx`, `recon-generate`, `covg-eval`, or their dependencies are absent
+   - If `recon-generate`, `covg-eval`, or their dependencies are absent
      from direct local/allowlisted commands, document the missing tool as
      `coverage-tooling-blocked` and refresh all required artifacts instead of
      probing package registries, installing dependencies, or switching to ad hoc

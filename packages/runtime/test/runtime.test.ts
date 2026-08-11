@@ -11998,6 +11998,40 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   }
 });
 
+test("lifecycle relaunch rejects a required backend that disappeared before new attempts", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const topologyPath = path.join(project, ".ultrafuzz", "topology.yml");
+  fs.writeFileSync(
+    topologyPath,
+    fs
+      .readFileSync(topologyPath, "utf8")
+      .replace(
+        "    prompt: setup/project-discovery.md\n",
+        "    prompt: setup/project-discovery.md\n    required_commands: [recon-required-test]\n"
+      ),
+    "utf8"
+  );
+  const env = fakeSmithersEnv(project);
+  const recon = path.join(project, "fake-bin", "recon-required-test");
+  fs.writeFileSync(recon, "#!/bin/sh\necho recon test\n", "utf8");
+  fs.chmodSync(recon, 0o755);
+  const run = await startRun({ projectRoot: project, runId: "lifecycle-required-command", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  fs.rmSync(recon);
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+  const eventsPath = path.join(run.value!.run_root, "events.jsonl");
+  const eventsBefore = fs.readFileSync(eventsPath, "utf8");
+
+  const resumed = await resumeRun({ projectRoot: project, runId: run.value!.run_id, env });
+
+  assert.equal(resumed.ok, false);
+  assert.equal(resumed.diagnostics[0]?.code, "RUN_REQUIRED_COMMAND_MISSING");
+  assert.equal(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), "");
+  assert.equal(fs.readFileSync(eventsPath, "utf8"), eventsBefore);
+});
+
 test("legacy workflow evidence gaps fail closed without reconstructing trust", async () => {
   const cases = [
     {

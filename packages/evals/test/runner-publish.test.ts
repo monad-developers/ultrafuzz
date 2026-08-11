@@ -192,13 +192,14 @@ describe("runner", () => {
       expect.objectContaining({
         code: "RUN_REQUIRED_COMMAND_MISSING",
         details: {
-          commands: ["covg-eval", "recon"],
+          commands: ["covg-eval", "recon", "recon-generate"],
           requirements: [
             { command: "covg-eval", node_ids: ["stateful-invariant-coverage"] },
             {
               command: "recon",
               node_ids: ["stateful-invariant-campaign", "stateful-invariant-coverage"]
-            }
+            },
+            { command: "recon-generate", node_ids: ["stateful-invariant-coverage"] }
           ]
         }
       })

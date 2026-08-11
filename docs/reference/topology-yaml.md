@@ -121,9 +121,11 @@ with `artifacts/` or `.ultrafuzz/`. The runtime-owned
 `required_commands` entries are deduplicated across the active, transformed
 topology. Local runs resolve them from stable absolute entries on the effective
 task `PATH`; cwd-dependent entries are ignored because tasks run in fresh Git
-worktrees. Cloud runs probe the configured provider image. A missing command aborts launch before run state,
-workflow IDs, node attempts, or model work are created. Ultrafuzz never installs
-these backend commands during a run.
+worktrees. Cloud runs probe the configured provider image. A missing command
+aborts launch before run state, workflow IDs, node attempts, or model work are
+created. Ultrafuzz never installs these backend commands during a run. Resume,
+replay, and fork recheck the sealed expanded graph before they can create
+another node attempt or model invocation.
 Meta and reference nodes cannot require commands because they do not
 execute workflow commands.
 

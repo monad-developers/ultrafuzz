@@ -636,6 +636,7 @@ nodes:
     required_commands:
       - covg-eval
       - recon
+      - recon-generate
     depends_on:
       - stateful-invariant-handlers
       - property-specification-fanin

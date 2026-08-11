@@ -66,7 +66,8 @@ describe("packaged topology collection", () => {
       });
       expect(topology.nodes.find((node) => node.id === "stateful-invariant-coverage")?.required_commands).toEqual([
         "covg-eval",
-        "recon"
+        "recon",
+        "recon-generate"
       ]);
       expect(topology.nodes.find((node) => node.id === "stateful-invariant-campaign")?.required_commands).toEqual([
         "recon"
