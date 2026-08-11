@@ -59,6 +59,7 @@ describe("Modal node sandbox provider", () => {
       { name: "covg-eval", available: false, path: null, version: null },
       { name: "recon", available: true, path: "/usr/local/bin/recon", version: "recon 1.2.3" }
     ]);
+    expect(client.apps.fromName).toHaveBeenCalledWith("ultrafuzz-test", { createIfMissing: true });
     expect(client.sandboxes.create).toHaveBeenCalledOnce();
     expect(sandbox.exec).toHaveBeenCalledWith(
       expect.arrayContaining(["node", "--eval", JSON.stringify(["covg-eval", "recon"])]),
@@ -68,10 +69,60 @@ describe("Modal node sandbox provider", () => {
     expect(client.close).toHaveBeenCalledOnce();
   });
 
+  it("does not resolve image commands through cwd-dependent PATH entries", async () => {
+    const sandbox = fakeSandbox(undefined);
+    let probeSource = "";
+    sandbox.exec = vi.fn(async (command: string[]) => {
+      probeSource = command[2] ?? "";
+      return {
+        stdout: {
+          readText: vi.fn(async () => JSON.stringify([{ name: "recon", available: false, path: null, version: null }]))
+        },
+        stderr: { readText: vi.fn(async () => "") },
+        wait: vi.fn(async () => 0)
+      };
+    }) as unknown as typeof sandbox.exec;
+    const client = fakeClient({ created: sandbox });
+    await probeModalCommands(providerOptions(client), ["recon"]);
+
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-probe-path-"));
+    try {
+      const relativeBin = path.join(cwd, "bin");
+      fs.mkdirSync(relativeBin);
+      fs.writeFileSync(path.join(relativeBin, "recon"), "#!/bin/sh\n", { mode: 0o755 });
+      const output = execFileSync(process.execPath, ["--eval", probeSource, JSON.stringify(["recon"])], {
+        cwd,
+        env: { PATH: `bin${path.delimiter}` },
+        encoding: "utf8"
+      });
+      expect(JSON.parse(output)).toEqual([{ name: "recon", available: false, path: null, version: null }]);
+    } finally {
+      fs.rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
   it("rejects unsafe command names before creating a cloud sandbox", async () => {
     const client = fakeClient({});
     await expect(probeModalCommands(providerOptions(client), ["../recon"])).rejects.toThrow(/bare executable names/u);
     expect(client.sandboxes.create).not.toHaveBeenCalled();
+  });
+
+  it("allows Doctor to opt out of first-use app creation", async () => {
+    const sandbox = fakeSandbox(undefined);
+    sandbox.exec = vi.fn(async () => ({
+      stdout: {
+        readText: vi.fn(async () =>
+          JSON.stringify([{ name: "recon", available: true, path: "/bin/recon", version: null }])
+        )
+      },
+      stderr: { readText: vi.fn(async () => "") },
+      wait: vi.fn(async () => 0)
+    })) as unknown as typeof sandbox.exec;
+    const client = fakeClient({ created: sandbox });
+
+    await probeModalCommands(providerOptions(client), ["recon"], { createAppIfMissing: false });
+
+    expect(client.apps.fromName).toHaveBeenCalledWith("ultrafuzz-test", { createIfMissing: false });
   });
 
   it("uses stable bounded identities without embedding raw controller identifiers", () => {

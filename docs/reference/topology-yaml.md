@@ -123,6 +123,8 @@ topology. Local runs resolve them on the controller `PATH`; cloud runs probe the
 configured provider image. A missing command aborts launch before run state,
 workflow IDs, node attempts, or model work are created. Ultrafuzz never installs
 these backend commands during a run.
+Meta and reference nodes cannot declare `required_commands` because they do not
+execute workflow commands.
 
 Built-in contracts include `ultrafuzz/findings@1`,
 `ultrafuzz/generated-tests@1`, `ultrafuzz/properties@1`,

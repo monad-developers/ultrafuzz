@@ -39,7 +39,11 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const commands = JSON.parse(process.argv.at(-1));
-const directories = (process.env.PATH || "").split(":").filter(Boolean);
+// Required cloud backends are image dependencies. Ignore relative and empty
+// PATH entries because real node execution changes cwd to the extracted target
+// project, while this image-only preflight runs before that project is uploaded.
+// Resolving those entries from the probe cwd could produce a false success.
+const directories = (process.env.PATH || "").split(":").filter((entry) => path.isAbsolute(entry));
 const probes = commands.map((name) => {
   let executable = null;
   for (const directory of directories) {
@@ -94,7 +98,7 @@ export interface ModalCommandProbe {
 export async function probeModalCommands(
   options: ModalNodeSandboxProviderOptions,
   commands: readonly string[],
-  probeOptions: { includeVersions?: boolean } = {}
+  probeOptions: { includeVersions?: boolean; createAppIfMissing?: boolean } = {}
 ): Promise<ModalCommandProbe[]> {
   validateProviderOptions(options);
   const uniqueCommands = [...new Set(commands)].sort();
@@ -113,7 +117,13 @@ export async function probeModalCommands(
     client =
       options.clientFactory?.({ tokenId, tokenSecret }) ??
       (new ModalClient({ tokenId, tokenSecret }) as unknown as ModalNodeClient);
-    const app = await client.apps.fromName(options.app, { createIfMissing: true });
+    // Doctor leaves persistent provider state untouched. Launch preflight can
+    // opt into the same first-use app creation as normal cloud execution.
+    const app = await client.apps.fromName(options.app, {
+      // Preserve the public probe's historical first-use behavior. Read-only
+      // callers such as Doctor opt out explicitly.
+      createIfMissing: probeOptions.createAppIfMissing !== false
+    });
     const image = await client.images.fromName(options.image);
     const identity = boundedIdentity(`${options.image}:${uniqueCommands.join(",")}`);
     sandbox = await client.sandboxes.create(app, image, {

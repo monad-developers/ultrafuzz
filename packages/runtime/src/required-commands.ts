@@ -19,21 +19,21 @@ export async function probeCommandsForExecution(
   config: ResolvedConfig,
   commands: readonly string[],
   env: Record<string, string | undefined>,
-  options: { includeVersions?: boolean } = {}
+  options: { includeVersions?: boolean; cwd?: string; createProviderAppIfMissing?: boolean } = {}
 ): Promise<RequiredCommandProbe[]> {
   const uniqueCommands = [...new Set(commands)].sort();
   if (uniqueCommands.length === 0) return [];
   if (config.execution.mode === "local") {
     return Promise.all(
       uniqueCommands.map(async (name) => {
-        const resolved = resolveExecutable(name, env);
+        const resolved = resolveExecutable(name, env, options.cwd);
         return {
           name,
           ...resolved,
           version:
             resolved.path === null || options.includeVersions !== true
               ? null
-              : await executableVersion(resolved.path, env)
+              : await executableVersion(resolved.path, env, options.cwd)
         };
       })
     );
@@ -54,7 +54,7 @@ export async function probeCommandsForExecution(
         env?: Record<string, string | undefined>;
       },
       requiredCommands: readonly string[],
-      probeOptions?: { includeVersions?: boolean }
+      probeOptions?: { includeVersions?: boolean; createAppIfMissing?: boolean }
     ): Promise<RequiredCommandProbe[]>;
   };
   return provider.probeModalCommands(
@@ -66,13 +66,17 @@ export async function probeCommandsForExecution(
       env
     },
     uniqueCommands,
-    options
+    {
+      includeVersions: options.includeVersions,
+      createAppIfMissing: options.createProviderAppIfMissing
+    }
   );
 }
 
 export function resolveExecutable(
   name: string,
-  env: Record<string, string | undefined>
+  env: Record<string, string | undefined>,
+  cwd = process.cwd()
 ): { available: boolean; path: string | null } {
   const searchPath = env.PATH ?? process.env.PATH ?? "";
   // Windows resolves a bare command name through PATHEXT and does not mark
@@ -89,9 +93,12 @@ export function resolveExecutable(
       ]
     : [""];
   for (const entry of searchPath.split(path.delimiter)) {
-    if (entry.length === 0) continue;
+    // Shell PATH lookup treats an empty entry as the command's working
+    // directory. Resolve relative entries against the target execution cwd,
+    // not the controller process that happened to launch Ultrafuzz.
+    const directory = entry.length === 0 ? cwd : path.resolve(cwd, entry);
     for (const extension of extensions) {
-      const candidate = path.join(path.resolve(entry), `${name}${extension}`);
+      const candidate = path.join(directory, `${name}${extension}`);
       try {
         if (!fs.statSync(candidate).isFile()) continue;
         if (!windows) fs.accessSync(candidate, fs.constants.X_OK);
@@ -104,10 +111,15 @@ export function resolveExecutable(
   return { available: false, path: null };
 }
 
-async function executableVersion(executable: string, env: Record<string, string | undefined>): Promise<string | null> {
+async function executableVersion(
+  executable: string,
+  env: Record<string, string | undefined>,
+  cwd = process.cwd()
+): Promise<string | null> {
   try {
     const { stdout, stderr } = await execFileAsync(executable, ["--version"], {
       env: { ...process.env, ...env },
+      cwd,
       timeout: VERSION_PROBE_TIMEOUT_MS
     });
     const version = `${stdout}\n${stderr}`

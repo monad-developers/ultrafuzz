@@ -109,7 +109,7 @@ export interface ValidateProjectResult {
     digest?: string;
     logical_nodes: number;
     expanded_nodes: number;
-    required_commands: string[];
+    required_commands?: string[];
   };
   prompts?: {
     prompt_dir: string;
@@ -732,7 +732,7 @@ export interface DoctorValue {
     available: boolean;
     path: string | null;
     /** Best-effort first line from `<command> --version`. */
-    version: string | null;
+    version?: string | null;
   }>;
   workflow_engine: {
     bundled_version: string;

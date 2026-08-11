@@ -26,7 +26,7 @@ function renderDoctor(value: DoctorValue): string {
       (entry) =>
         `- ${entry.name}: ${
           entry.available
-            ? `${entry.path ?? "available"}${entry.version === null ? "" : ` (${entry.version})`}`
+            ? `${entry.path ?? "available"}${entry.version == null ? "" : ` (${entry.version})`}`
             : "missing from execution environment"
         }`
     ),

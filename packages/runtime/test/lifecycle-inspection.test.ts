@@ -822,6 +822,25 @@ test("diagnoseProject reports commands required by the active topology", async (
   );
 });
 
+test("diagnoseProject resolves relative and empty PATH entries from the target project", async () => {
+  for (const searchPath of ["bin", ""]) {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project, "recon");
+    writeFakeInstalledEngine(project, { version: SMITHERS_ORCHESTRATOR_VERSION });
+    const executableDir = searchPath === "" ? project : path.join(project, searchPath);
+    fs.mkdirSync(executableDir, { recursive: true });
+    const executable = path.join(executableDir, "recon");
+    fs.writeFileSync(executable, "#!/bin/sh\necho recon test\n", "utf8");
+    fs.chmodSync(executable, 0o755);
+
+    const doctor = await diagnoseProject({ projectRoot: project, env: { PATH: searchPath }, offline: true });
+
+    assert.equal(doctor.value?.toolchain.find((entry) => entry.name === "recon")?.available, true);
+    assert.equal(doctor.value?.toolchain.find((entry) => entry.name === "recon")?.path, executable);
+  }
+});
+
 test("startRun rejects a missing required backend before creating a run", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -862,6 +881,7 @@ nodes:
         primary: true
   - id: active-branch
     prompt: setup/project-discovery.md
+    required_commands: [covg-eval]
     depends_on: [__start__]
     outputs:
       - path: active.md
@@ -881,7 +901,22 @@ nodes:
   });
 
   assert.equal(validation.ok, true, JSON.stringify(validation.diagnostics));
-  assert.deepEqual(validation.value?.topology?.required_commands, []);
+  assert.deepEqual(validation.value?.topology?.required_commands, ["covg-eval"]);
+
+  let probed: readonly string[] = [];
+  const run = await startRun({
+    projectRoot: project,
+    runId: "transformed-command-requirements",
+    topologyTransform: { excludedNodeIds: ["required-branch"] },
+    requiredCommandProbe: async (commands) => {
+      probed = commands;
+      return commands.map((name) => ({ name, available: false, path: null, version: null }));
+    }
+  });
+
+  assert.deepEqual(probed, ["covg-eval"]);
+  assert.equal(run.diagnostics[0]?.code, "RUN_REQUIRED_COMMAND_MISSING");
+  assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", "transformed-command-requirements")), false);
 });
 
 test("startRun delegates cloud requirements to the execution-provider probe before creating a run", async () => {

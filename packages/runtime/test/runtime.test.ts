@@ -358,7 +358,7 @@ function writeFakeInstalledSmithers(
   );
   fs.writeFileSync(
     paths.target,
-    '#!/bin/sh\nif [ -n "$SMITHERS_FAKE_EXECUTED_AS_LOG" ]; then printf \'%s\\n\' "$0" > "$SMITHERS_FAKE_EXECUTED_AS_LOG"; fi\nprintf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"\nprintf \'%s\\n\' \'{"ok":true}\'\n',
+    '#!/bin/sh\nif [ -n "$SMITHERS_FAKE_EXECUTED_AS_LOG" ]; then printf \'%s\\n\' "$0" > "$SMITHERS_FAKE_EXECUTED_AS_LOG"; fi\nif [ -n "$SMITHERS_FAKE_PATH_LOG" ]; then printf \'%s\\n\' "$PATH" > "$SMITHERS_FAKE_PATH_LOG"; fi\nprintf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"\nprintf \'%s\\n\' \'{"ok":true}\'\n',
     "utf8"
   );
   fs.chmodSync(paths.target, 0o755);
@@ -5042,6 +5042,44 @@ test("startRun forwards configured and explicitly allowed environment variables 
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   assert.equal(fs.readFileSync(environmentLog, "utf8"), "configured-agent-key||ci\n");
   assert.equal(fs.readFileSync(contextLog, "utf8"), "|||||\n");
+});
+
+test("startRun preserves an empty PATH component after target-cwd preflight", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const topologyPath = path.join(project, ".ultrafuzz", "topology.yml");
+  fs.writeFileSync(
+    topologyPath,
+    fs
+      .readFileSync(topologyPath, "utf8")
+      .replace(
+        "    prompt: setup/project-discovery.md\n",
+        "    prompt: setup/project-discovery.md\n    required_commands: [recon]\n"
+      ),
+    "utf8"
+  );
+  writeFakeInstalledSmithers(project);
+  const executable = path.join(project, "recon");
+  fs.writeFileSync(executable, "#!/bin/sh\necho recon test\n", "utf8");
+  fs.chmodSync(executable, 0o755);
+  const pathLog = path.join(project, "smithers-path.log");
+
+  const run = await startRun({
+    projectRoot: project,
+    runId: "empty-path-required-command",
+    env: {
+      PATH: "",
+      SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log"),
+      SMITHERS_FAKE_PATH_LOG: pathLog
+    }
+  });
+
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.equal(
+    fs.readFileSync(pathLog, "utf8"),
+    `${path.join(project, ".smithers", "node_modules", ".bin")}${path.delimiter}\n`
+  );
 });
 
 test("startRun rejects controller-only paths as credential environment names", async () => {
