@@ -266,5 +266,24 @@ describe("held-out benchmark paths", () => {
     expect(() => assertHeldOutPathsAbsent("aave-v4", root, ["tests/absent"])).not.toThrow();
     expect(() => assertHeldOutPathsAbsent("aave-v4", root, undefined)).not.toThrow();
     expect(() => assertHeldOutPathsAbsent("aave-v4", root, [" "])).not.toThrow();
+
+    // The guard joins to the checkout, so it must refuse to look outside it.
+    for (const escaping of ["../shared/reference", "/etc", "tests/../../etc", ".git"]) {
+      expect(() => assertHeldOutPathsAbsent("aave-v4", root, [escaping])).toThrow(/outside the checkout/u);
+    }
+  });
+
+  it("rejects a suite whose held-out declaration escapes the target", () => {
+    const { projectRoot, suitePath } = setup();
+    fs.writeFileSync(
+      suitePath,
+      SUITE_YAML.replace(
+        "targets:\n  - id: aave-v4",
+        'targets:\n  - id: aave-v4\n    held_out_paths: ["../shared/reference"]'
+      ),
+      "utf8"
+    );
+
+    expect(() => loadEvalSuite({ projectRoot, suitePath })).toThrow();
   });
 });

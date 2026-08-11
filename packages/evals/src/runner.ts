@@ -307,8 +307,23 @@ export function assertHeldOutPathsAbsent(
   targetPath: string,
   heldOutPaths: readonly string[] | undefined
 ): void {
-  const present = (heldOutPaths ?? [])
-    .map((relative) => relative.trim())
+  const declared = (heldOutPaths ?? []).map((relative) => relative.trim().replace(/\/+$/u, ""));
+  // Defence in depth: the suite schema already rejects these, but this guard
+  // joins to the checkout and must never be pointed outside it.
+  const escaping = declared.filter(
+    (relative) =>
+      relative !== "" &&
+      (path.isAbsolute(relative) ||
+        relative.split(/[\\/]/u).some((segment) => segment === ".." || segment === "." || segment === ".git"))
+  );
+  if (escaping.length > 0) {
+    throw new EvalError(
+      "EVAL_TARGET_HELD_OUT_PATH_UNSAFE",
+      `target ${targetId} declares held-out paths outside the checkout: ${escaping.sort().join(", ")}`,
+      { target: targetId, held_out_paths: escaping.sort() }
+    );
+  }
+  const present = declared
     .filter((relative) => relative !== "")
     .filter((relative) => fs.existsSync(path.join(targetPath, relative)))
     .sort();

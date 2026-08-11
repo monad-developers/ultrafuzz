@@ -32,6 +32,17 @@ export const DEFAULT_ARTIFACT_INCLUDE = ["report.md", "report.json", "findings.n
 export const DEFAULT_ARTIFACT_MAX_FILE_BYTES = 5_000_000;
 
 const nonEmptyString = z.string().min(1);
+/**
+ * Held-out paths are joined to the target checkout, so they must stay inside
+ * it. These are the same rules source materialization applies before removing
+ * anything: a declaration that escapes would inspect an unrelated directory
+ * and could reject a perfectly valid run.
+ */
+const heldOutPath = nonEmptyString.refine((value) => {
+  const trimmed = value.trim().replace(/\/+$/u, "");
+  if (trimmed === "" || path.isAbsolute(trimmed) || /^[A-Za-z]:/u.test(trimmed)) return false;
+  return !trimmed.split(/[\\/]/u).some((segment) => segment === ".." || segment === "." || segment === ".git");
+}, "held_out_paths entries must be relative paths inside the target that do not traverse or name Git metadata");
 
 const modelProfileSchema = z.looseObject({
   agent: nonEmptyString,
@@ -49,7 +60,7 @@ const targetSchema = z.looseObject({
   signal_profile: nonEmptyString.optional(),
   ground_truth: nonEmptyString,
   sensitivity: nonEmptyString.optional(),
-  held_out_paths: z.array(nonEmptyString).optional()
+  held_out_paths: z.array(heldOutPath).optional()
 });
 
 const variantSchema = z.looseObject({
