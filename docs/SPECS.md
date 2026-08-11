@@ -365,6 +365,13 @@ and output manifest digests. Attempt counts and terminal summaries MUST derive
 from the ledger. Failure categories MUST remain separate from raw diagnostics,
 and ledger entries MUST NOT persist raw inputs, outputs, or configuration.
 
+The CLI MUST derive per-node timing, token components, estimated cost, model,
+attempt/retry disposition, and completeness from existing run evidence without
+requiring a precomputed statistics artifact. The same projection MUST operate
+offline from a portable report bundle containing `attempts.jsonl`,
+`usage.jsonl`, `state.json`, `graph.json`, and `run.json`. Historical missing
+evidence MUST remain unavailable rather than being represented as zero.
+
 `status`, `pause`, `resume`, `replay`, and `fork` operate on the linked workflow run. They SHOULD
 perform product checks, delegate to the workflow engine, and persist updated
 linked workflow identity or lifecycle evidence.

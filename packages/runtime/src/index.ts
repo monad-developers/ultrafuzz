@@ -7,6 +7,7 @@ export * from "./final-report-markdown.js";
 export * from "./init.js";
 export * from "./lifecycle-inspection.js";
 export * from "./materialize.js";
+export * from "./model-pricing.js";
 export * from "./npm-install-retry.js";
 export * from "./plan-run.js";
 export * from "./pinned-submodules.js";
