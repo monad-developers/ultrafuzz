@@ -13,6 +13,7 @@ import {
   BENCHMARK_SMOKE_MAX_PARALLEL_RUNS,
   BENCHMARK_SMOKE_MAX_PARALLEL_TARGETS,
   boundedEvalId,
+  evalSuiteInputDocument,
   evalRunRoot,
   loadBenchmarkCohortManifest,
   loadBenchmarkLanesManifest,
@@ -782,7 +783,7 @@ async function preparePublicBenchmark(
       await writeFile(path.join(groundTruthRoot, `${target.id}.yml`), await readFile(source));
     }
   }
-  await writeFile(suitePath, stringify(suite, { lineWidth: 120 }), { mode: 0o600 });
+  await writeFile(suitePath, stringify(evalSuiteInputDocument(suite), { lineWidth: 120 }), { mode: 0o600 });
   const evalRunId = publicEvalRunId(config.run_id, model.slug);
   await runCommand(
     [

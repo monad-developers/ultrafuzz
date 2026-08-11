@@ -24,10 +24,12 @@ import {
   EVAL_BENCHMARK_COHORT_SCHEMA_ID,
   EVAL_BENCHMARK_LANES_SCHEMA_ID,
   EVAL_EVMBENCH_COHORT_SCHEMA_ID,
+  EVAL_SUITE_SCHEMA_ID,
   validateEvalJsonSchema
 } from "../src/eval-schema-registry.js";
 import { executeEvalSchemaSemanticGates } from "../src/eval-semantic-gates.js";
 import { benchmarkModelProfileOverrides, benchmarkTopologyTransform } from "../src/runner.js";
+import { evalSuiteInputDocument } from "../src/suite.js";
 
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const LANES_PATH = path.join(REPOSITORY_ROOT, "benchmarks", "lanes.json");
@@ -166,6 +168,8 @@ describe("public benchmark manifests", () => {
       mode_explicit: true,
       include: ["report.md", "report.json"]
     });
+    expect(validateEvalJsonSchema(EVAL_SUITE_SCHEMA_ID, evalSuiteInputDocument(suite))).toMatchObject({ ok: true });
+    expect(evalSuiteInputDocument(suite)).not.toHaveProperty("reporting.artifacts.mode_explicit");
     expect(suite.variants[0]?.topology).toBeUndefined();
     expect(suite.variants[0]?.workflow_input).toMatchObject({
       excluded_strategy_families: [...BENCHMARK_SMOKE_EXCLUDED_STRATEGY_FAMILIES],

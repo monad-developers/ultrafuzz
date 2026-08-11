@@ -440,6 +440,22 @@ export function planEvalSuite(input: PlanEvalSuiteInput): EvalPlanValue {
   };
 }
 
+/**
+ * Convert a normalized suite back to the closed operator-authored input shape.
+ * `mode_explicit` is runtime bookkeeping and is intentionally absent from the
+ * portable input schema.
+ */
+export function evalSuiteInputDocument(suite: EvalSuiteSpec): unknown {
+  const { mode_explicit: _modeExplicit, ...artifacts } = suite.reporting.artifacts;
+  return {
+    ...suite,
+    reporting: {
+      ...suite.reporting,
+      artifacts
+    }
+  };
+}
+
 function applyPathOverrides(suite: EvalSuiteSpec, input: PlanEvalSuiteInput): EvalSuiteSpec {
   const groundTruthRoot = input.groundTruthRoot ? path.resolve(input.groundTruthRoot) : undefined;
   const targetRoot = input.targetRoot ? path.resolve(input.targetRoot) : undefined;

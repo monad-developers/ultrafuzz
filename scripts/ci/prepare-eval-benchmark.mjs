@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 
 import {
   adaptBenchmarkManifestToEvalSuite,
+  evalSuiteInputDocument,
   loadBenchmarkCohortManifest,
   loadBenchmarkLanesManifest
 } from "../../packages/evals/dist/index.js";
@@ -30,7 +31,7 @@ const suite = adaptBenchmarkManifestToEvalSuite({
   ...(runnerModelProfileId === undefined ? {} : { runnerModelProfileId })
 });
 fs.mkdirSync(path.dirname(path.resolve(output)), { recursive: true });
-fs.writeFileSync(path.resolve(output), stringify(suite, { lineWidth: 120 }), "utf8");
+fs.writeFileSync(path.resolve(output), stringify(evalSuiteInputDocument(suite), { lineWidth: 120 }), "utf8");
 
 if (targetRoot) {
   const cli = path.join(root, "packages", "cli", "dist", "index.js");
