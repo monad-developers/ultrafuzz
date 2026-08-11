@@ -78,6 +78,18 @@ export function boundedEvalId(parts: string[], maxLength: number): string {
   return assertSafeEvalId(bounded, "eval ID");
 }
 
+/** Build the runtime run ID whose `ultrafuzz-`-prefixed Smithers ID is current and bounded. */
+export function boundedEvalWorkflowRunId(parts: string[]): string {
+  const smithersPrefix = "ultrafuzz-";
+  const smithersMaxLength = 64;
+  const compatibleParts = parts.map((part) => part.toLowerCase().replaceAll(".", "-"));
+  const runId = boundedEvalId(compatibleParts, smithersMaxLength - smithersPrefix.length);
+  if (!/^[a-z0-9_-]+$/u.test(runId)) {
+    throw new EvalError("EVAL_ID_INVALID", "eval workflow run ID is not Smithers-compatible", { runId });
+  }
+  return runId;
+}
+
 function normalizeEvalId(parts: string[]): string {
   return parts
     .join("-")

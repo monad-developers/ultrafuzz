@@ -347,7 +347,7 @@ describe("runner", () => {
       launchEvalRow({
         projectRoot: base,
         suitePath: "suite.yml",
-        evalRunId: `eval-${"e".repeat(113)}`,
+        evalRunId: `Eval.With.Dots-${"E".repeat(113)}`,
         row,
         suite,
         launcher
@@ -357,11 +357,11 @@ describe("runner", () => {
     await launch(rowB);
     await launch(rowA);
 
-    expect(launchedRunIds[0]).toHaveLength(118);
-    expect(`ultrafuzz-${launchedRunIds[0]}`).toHaveLength(128);
+    expect(launchedRunIds[0]).toHaveLength(54);
+    expect(`ultrafuzz-${launchedRunIds[0]}`).toHaveLength(64);
     expect(launchedRunIds[0]).not.toBe(launchedRunIds[1]);
     expect(launchedRunIds[0]).toBe(launchedRunIds[2]);
-    expect(launchedRunIds.every((runId) => /^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(runId))).toBe(true);
+    expect(launchedRunIds.every((runId) => /^[a-z0-9][a-z0-9_-]*$/u.test(runId))).toBe(true);
   });
 
   it("hands every launched row the caller's Ultrafuzz CLI entrypoint", async () => {

@@ -47,7 +47,7 @@ import {
 } from "./types.js";
 import {
   EvalError,
-  boundedEvalId,
+  boundedEvalWorkflowRunId,
   diagnosticFromError,
   evalRunRoot,
   generateEvalRunId,
@@ -238,9 +238,9 @@ export async function launchEvalRow(input: LaunchEvalRowInput): Promise<EvalRunR
   if (runnerProfile === undefined) {
     throw new EvalError("EVAL_MODEL_PROFILE_UNKNOWN", `missing runner model profile ${input.row.runner_model_profile}`);
   }
-  // Smithers prefixes runtime IDs with `ultrafuzz-`; keep the resulting ID at
-  // or below its 128-character limit while retaining row uniqueness.
-  const runId = boundedEvalId([input.evalRunId, input.row.run_id], 118);
+  // Smithers prefixes runtime IDs with `ultrafuzz-`; derive one that satisfies
+  // its current lowercase 64-character contract while retaining row uniqueness.
+  const runId = boundedEvalWorkflowRunId([input.evalRunId, input.row.run_id]);
   const recordBase = {
     schema_version: EVAL_RUN_SCHEMA_VERSION,
     eval_run_id: input.evalRunId,
