@@ -1,5 +1,6 @@
 import fs from "node:fs";
 
+import { auditProfile, loadAuditProfileCatalog, packagedTopologyDigest } from "@ultrafuzz/config";
 import { z } from "zod/v4";
 
 import { EVAL_SPEC_SCHEMA_VERSION, type EvalSuiteSpec } from "./types.js";
@@ -43,7 +44,8 @@ export const BENCHMARK_THREAT_MODEL_MAX_PARALLEL_RUNS = 3;
  * one opaque agent node. Eight matches the production full-lane bound.
  */
 export const BENCHMARK_THREAT_MODEL_MAX_PARALLEL_TARGETS = 8;
-export const BENCHMARK_SMOKE_WORKFLOW_PATH = "benchmarks/smoke-benchmark.yml" as const;
+/** Repository-relative source path retained for topology parity checks. */
+export const BENCHMARK_SMOKE_WORKFLOW_PATH = "packages/config/topologies/smoke.yml" as const;
 export const BENCHMARK_SMOKE_WORKFLOW_PROFILE = "smoke-benchmark-v1" as const;
 export const BENCHMARK_SMOKE_SELECTED_STRATEGY_IDS = [
   "time-warp-sequences",
@@ -484,6 +486,7 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
     );
   }
   const lane = input.lanes[input.lane];
+  const smokeAuditPolicy = input.lane === "smoke" ? benchmarkSmokeAuditPolicy() : undefined;
   const topologyExclusions = benchmarkLaneTopologyExclusions(lane);
   if (input.lane === "threat-model") {
     // The gate's whole subject is the threat-model workstream's own nodes. A lane
@@ -551,7 +554,6 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
     })),
     variants: selectedRunnerProfiles.map((profile) => ({
       id: profile.id,
-      ...(input.lane === "smoke" ? { topology: BENCHMARK_SMOKE_WORKFLOW_PATH } : {}),
       runner_model_profile: profile.id,
       judge_model_profile: judgeProfile.id,
       workflow_input: {
@@ -562,11 +564,14 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
           ...(input.lane === "smoke"
             ? {
                 workflow_profile: BENCHMARK_SMOKE_WORKFLOW_PROFILE,
+                audit_profile: smokeAuditPolicy!.audit_profile,
+                audit_profile_catalog_digest: smokeAuditPolicy!.audit_profile_catalog_digest,
+                topology_digest: smokeAuditPolicy!.topology_digest,
                 selected_strategy_ids: [...BENCHMARK_SMOKE_SELECTED_STRATEGY_IDS]
               }
             : {}),
           strategy_loops: lane.strategy_loops,
-          // The dedicated smoke graph contains only its selected nodes -- no
+          // The packaged smoke graph contains only its selected nodes -- no
           // invariant, differential, dynamic-strategy or goal-fanout node -- so
           // production-topology exclusions would be unknown-node errors here.
           // Keeping the list empty also keeps the lane's execution-policy
@@ -611,6 +616,22 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
 export function benchmarkLaneSelectedTargetIds(lane: BenchmarkLaneName, cohort: BenchmarkCohortManifest): string[] {
   // Only the EVMbench full lane runs a cohort wider than its curated selection.
   return lane === "full" ? cohort.targets.map((target) => target.id) : [...cohort.smoke_targets];
+}
+
+function benchmarkSmokeAuditPolicy(): {
+  audit_profile: "smoke";
+  audit_profile_catalog_digest: string;
+  topology_digest: string;
+} {
+  const catalog = loadAuditProfileCatalog();
+  const profile = auditProfile("smoke", catalog);
+  const topologyDigest = packagedTopologyDigest(profile, catalog);
+  if (topologyDigest === undefined) throw new EvalError("EVAL_BENCHMARK_MANIFEST_INVALID", "smoke topology is missing");
+  return {
+    audit_profile: "smoke",
+    audit_profile_catalog_digest: catalog.digest,
+    topology_digest: topologyDigest
+  };
 }
 
 function resolveBenchmarkTargets(input: {

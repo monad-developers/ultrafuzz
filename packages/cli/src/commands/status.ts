@@ -95,6 +95,7 @@ function renderHealth(value: RunHealthValue): string {
   const progress = value.progress;
   const lines = [
     `Run: ${value.run_id}`,
+    ...(typeof value.audit_profile?.effective === "string" ? [`Audit profile: ${value.audit_profile.effective}`] : []),
     `Status: ${value.verdict} (${value.status})`,
     `Reason: ${value.reason}`,
     `Progress: ${progress.percent}% (${progress.finished} finished / ${progress.in_progress} running / ${progress.pending} pending / ${progress.failed} failed${extraBuckets(value)} / ${progress.total} total)`,

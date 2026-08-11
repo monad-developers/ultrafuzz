@@ -135,7 +135,18 @@ const commonBenchmarkConfig = {
 const privateBenchmarkConfigSchema = z
   .object({
     ...commonBenchmarkConfig,
-    target: z.object({ repo: gitUrl, ref: gitRef }).strict(),
+    target: z
+      .object({
+        repo: gitUrl,
+        ref: gitRef,
+        /**
+         * Benchmark paths the run must never read, such as a reference
+         * solution beside the code under test. Withheld when the pinned
+         * target is materialized.
+         */
+        held_out_paths: z.array(relativeFile).max(64).optional()
+      })
+      .strict(),
     benchmark_execution: privateBenchmarkExecutionSchema,
     eval_reporting: privateEvalReportingSchema,
     ground_truth: z

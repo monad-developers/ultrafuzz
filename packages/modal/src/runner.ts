@@ -67,6 +67,7 @@ import {
   fingerprintTrackedSource,
   finishModalLaunchRecoveryLifecycle,
   hasExactModalLaunchTags,
+  isLegacyModalLaunchStateWithoutImageId,
   isModalWorkerStatusComplete,
   isModalWorkerStatusTerminal,
   isTransientModalError,
@@ -3053,10 +3054,33 @@ async function requiredLaunchStateForInspection(
     }
     throw error;
   }
-  const metadata = launchStateMetadata(raw);
-  const app = await modal.apps.fromName(metadata.app, { createIfMissing: false });
-  const image = await modal.images.fromName(metadata.image);
-  const state = parseCompatibleModalLaunchState(raw, {
+  const { state, image } = await resolveModalLaunchStateImageForInspection(raw, modal.images);
+  const app = await modal.apps.fromName(state.app, { createIfMissing: false });
+  return { state, app, image };
+}
+
+/**
+ * Resolve the immutable image identity that status and collect use to inspect a launch.
+ *
+ * Current and previous launch states persist the exact image ID. Looking them up by the
+ * published name would let a concurrent same-name build silently rebind inspection to a
+ * different image before the fingerprint check runs. Only v1 states, whose schema predates
+ * `image_id`, use the bounded name-based compatibility path.
+ */
+export async function resolveModalLaunchStateImageForInspection(
+  value: unknown,
+  images: Pick<ModalClient["images"], "fromId" | "fromName">
+): Promise<{ state: ModalLaunchState; image: Image }> {
+  if (!isLegacyModalLaunchStateWithoutImageId(value)) {
+    const state = parseCompatibleModalLaunchState(value);
+    const image = await images.fromId(state.image_id);
+    assertStateImage(state, image);
+    return { state, image };
+  }
+
+  const metadata = launchStateMetadata(value);
+  const image = await images.fromName(metadata.image);
+  const state = parseCompatibleModalLaunchState(value, {
     imageId: image.imageId,
     fingerprints: {
       config: "0".repeat(64),
@@ -3065,7 +3089,7 @@ async function requiredLaunchStateForInspection(
     }
   });
   assertStateImage(state, image);
-  return { state, app, image };
+  return { state, image };
 }
 
 async function requiredCurrentLaunchStateForTermination(

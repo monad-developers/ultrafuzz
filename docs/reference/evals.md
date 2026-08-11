@@ -64,6 +64,65 @@ names/hashes, while payloads stay on disk unless the suite explicitly opts
 into `mode: upload`. Before an allowlisted payload is sent, its manifest and
 path containment, regular-file status, size, and SHA-256 digest are checked.
 
+### Held-out benchmark paths
+
+A benchmark that ships a reference solution beside the code under test would
+otherwise hand the run its own answer key. A target may withhold those paths:
+
+```yaml
+targets:
+  - id: target
+    repo: "https://github.com/scfuzzbench/aave-v4-scfuzzbench"
+    ref: "edd6c82721512540c8c90e7a36a4a8e19fd7bdf3"
+    ground_truth: aave-v4-scfuzzbench/findings.yml
+    held_out_paths: ["tests/recon"]
+```
+
+Materializing a pinned target rewrites the checkout to a **parentless** revision
+that never contained the declared paths, then destroys the benchmark commit and
+the withheld blobs.
+
+A commit is required rather than a dirty worktree, because every node workspace
+is a Git worktree of the pinned branch and would otherwise restore the files.
+Keeping the benchmark commit as a parent is equally unsafe — `git show
+HEAD^:tests/recon/Properties.sol` would hand the answer key straight back — so
+the rewritten revision has no parents and the original objects are pruned along
+with the reflog. The single-revision isolation invariants are unchanged:
+`revision_count` and `commit_object_count` stay `1`.
+
+The source proof records what was withheld:
+
+```json
+"held_out": {
+  "source_commit": "edd6c82721512540c8c90e7a36a4a8e19fd7bdf3",
+  "source_tree": "3b3910d0657e4a639888ccae45822af680de6ef6",
+  "commit": "ac548733fd9c36cf9a32284a653a6429c089abfa",
+  "tree": "5e9c604d9474da946403369f652425880babee78",
+  "paths": ["tests/recon"],
+  "entries": [{ "path": "tests/recon/Properties.sol", "blob": "...", "size": 13722 }]
+}
+```
+
+`commit` and `tree` are the revision the run actually sees. `source_commit` and
+`source_tree` are provenance only — those objects are deliberately absent from
+the repository, so a reviewer can see which bytes were withheld without the run
+being able to read them back.
+
+Verification proves absence rather than diffing, since there is no parent left
+to diff against: HEAD must be the recorded parentless revision, none of the
+declared paths may be tracked, none of the recorded blobs may exist in the
+object store, the declaration must no longer match anything, and the benchmark
+commit must be unreadable. A launch is refused outright if a held-out path is
+still present in the checkout.
+
+Ground truth is written against the benchmark commit, so it keeps binding
+`source_commit` rather than the hold-out revision.
+
+Declaring a path that matches nothing fails closed rather than silently
+running without the hold-out. An agent that writes a similar file inside its
+own workspace is a legitimate result and stays allowed; only the materialized
+input is constrained.
+
 ### Recovery equivalence
 
 Each suite may declare how much model work a recovered row may repeat:
@@ -172,10 +231,11 @@ ultrafuzz eval publish   # post-hoc replay of a recorded run to a provider
 The public cohort and lane manifests under `benchmarks/` adapt EVMbench detect
 and the canonical Ultrafuzz benchmark cohort into the same eval-suite types.
 The bounded smoke lane selects the three Foundry, Hardhat, and Vyper
-Ultrafuzz-bench targets and pins GPT-5.6 Luna `high` for bug-finding. It uses
-`benchmarks/smoke-benchmark.yml` instead of filtering the production topology:
-one medium-reasoning context pass feeds four high-reasoning strategies in one
-parallel wave, followed by medium-reasoning dedupe and report passes. The four
+Ultrafuzz-bench targets and pins GPT-5.6 Luna `high` for bug-finding. It selects
+the CLI-packaged `smoke` audit profile instead of filtering the production
+topology: one context pass feeds four strategies in one parallel wave, followed
+by dedupe and report passes. Every node uses the selected runner model and
+reasoning level. The four
 strategies cover time, external dependencies, externalized accounting, and
 lifecycle views. Its
 lane definition still records `strategy_loops: 1` and the three disabled
@@ -256,7 +316,13 @@ per-target observation cardinality parity. At that point renderers exclude the
 old source run while retaining its observations in the append-only file. The
 replacement must match the old run's benchmark identity and target revisions;
 over-counted targets, duplicate ledger entries, self-references, and chains are
-rejected.
+rejected. Cohort fingerprints must match by default. An exceptional migration
+between provenance schemas can declare a `cohort_transition` with the exact
+superseded and replacement fingerprints; the old pin is checked even while the
+entry is pending, the new pin is checked when its source run arrives, and every
+non-cohort identity field (including the execution-policy fingerprint) must
+still match. This is an auditable migration guardrail, not a general
+comparability waiver.
 
 EVMBench and Ultrafuzz-bench reports are non-sensitive public benchmark output.
 The Modal publication bundle therefore includes the scored generation and the
@@ -280,13 +346,32 @@ plan → run → score → compare loop working offline.
 
 `eval status <eval-run-id>` is the read-only live view across a whole matrix.
 It derives node counts, row lifecycle state, checkpoint age, and estimated
-remaining time only from recorded eval links and durable run state. It never
-resumes, retries, synchronizes, collects, publishes, or otherwise changes a
-workflow. All rows use matrix-order opaque labels, and its versioned
-`ultrafuzz.eval.status.v1` JSON data is restricted to those labels, typed
-states, counts, percentages, timestamps, checkpoint freshness, and ETA
-availability. Private target metadata and execution-local details are not
+remaining time only from recorded eval links, durable run state, and bounded
+linked-workflow evidence. It never resumes, retries, synchronizes, collects,
+publishes, or otherwise changes a workflow. The compact table shows at most
+three active or waiting node IDs per row, truncates each displayed ID after 128
+Unicode characters while keeping the JSON value exact, preserves actionable
+wait reason → next action pairs, and uses `+N` for the remainder. It also
+distinguishes an admitted active linked workflow from a finished, stopped,
+failed, paused, waiting, or cancelled one using the current durable workflow
+binding rather than a superseded launch-time ID. Recognized Smithers lifecycle
+aliases retain their recorded spelling in JSON for compatibility across runner
+versions.
+
+All rows use matrix-order opaque labels. The versioned
+`ultrafuzz.eval.status.v1` JSON keeps the full `active_node_ids` and
+`waiting_nodes` lists; each waiting entry includes its node `status`,
+`wait_reason`, and `next_eligible_action`. `linked_workflow_status` carries the
+reconciled lifecycle value. It is `null` when no workflow is linked and
+`"unknown"` when linked evidence is missing, unsupported, or ambiguous. Wait
+reason and next action are likewise `null` when absent or newer than the known
+telemetry vocabulary. The existing typed counts, percentages, timestamps,
+checkpoint freshness, and ETA availability remain unchanged. Private target
+metadata, repository locations, findings, and diagnostics are not
 representable.
+
+The compact table renders an unlinked workflow as `none` and ambiguous or
+unavailable linked evidence as `unknown`.
 
 Configure an independent judge panel at the root of the eval suite YAML selected
 by `--suite` or `[eval].eval_config`:

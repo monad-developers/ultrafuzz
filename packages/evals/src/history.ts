@@ -106,6 +106,10 @@ export interface EvalHistoryObservation {
 export interface EvalHistorySupersession {
   superseded_source_eval_run_id: string;
   replacement_source_eval_run_id: string;
+  cohort_transition?: {
+    superseded_cohort_fingerprint: string;
+    replacement_cohort_fingerprint: string;
+  };
   reason: string;
   issue_url: string;
 }
@@ -284,6 +288,16 @@ const observationSchema = z.union([
 const supersessionSchema = z.strictObject({
   superseded_source_eval_run_id: safeText,
   replacement_source_eval_run_id: safeText,
+  cohort_transition: z
+    .strictObject({
+      superseded_cohort_fingerprint: fingerprintSchema,
+      replacement_cohort_fingerprint: fingerprintSchema
+    })
+    .refine(
+      (transition) => transition.superseded_cohort_fingerprint !== transition.replacement_cohort_fingerprint,
+      "a cohort transition must name distinct superseded and replacement fingerprints"
+    )
+    .optional(),
   reason: safeText,
   issue_url: issueUrlSchema
 });
@@ -415,6 +429,7 @@ function assertHistoryIntegrity(history: EvalHistory): void {
 
 interface SourceRunSupersessionSignature {
   identity: string;
+  cohortFingerprint: string;
   targetObservationCounts: Array<{ target: string; count: number }>;
 }
 
@@ -428,7 +443,8 @@ function sourceRunSupersessionSignature(observations: EvalHistoryObservation[]):
         model_profile: observation.model_profile,
         model: observation.model,
         reasoning_effort: observation.reasoning_effort,
-        cohort_fingerprint: observation.cohort_fingerprint,
+        trial_count: observation.trial_count,
+        execution_policy_fingerprint: observation.execution_policy_fingerprint,
         target_revisions: [...observation.target_revisions].sort((left, right) =>
           compareText(left.target, right.target)
         )
@@ -438,12 +454,17 @@ function sourceRunSupersessionSignature(observations: EvalHistoryObservation[]):
   if (signatures.size !== 1) {
     throw new EvalError("EVAL_HISTORY_INVALID", "a supersession source run has inconsistent benchmark identity");
   }
+  const cohortFingerprints = new Set(observations.map((observation) => observation.cohort_fingerprint));
+  if (cohortFingerprints.size !== 1) {
+    throw new EvalError("EVAL_HISTORY_INVALID", "a supersession source run has inconsistent cohort fingerprints");
+  }
   const targetCounts = new Map<string, number>();
   for (const observation of observations) {
     targetCounts.set(observation.target, (targetCounts.get(observation.target) ?? 0) + 1);
   }
   return {
     identity: [...signatures][0]!,
+    cohortFingerprint: [...cohortFingerprints][0]!,
     targetObservationCounts: [...targetCounts]
       .sort(([left], [right]) => compareText(left, right))
       .map(([target, count]) => ({ target, count }))
@@ -452,9 +473,18 @@ function sourceRunSupersessionSignature(observations: EvalHistoryObservation[]):
 
 function supersessionReplacementIsCompatible(
   superseded: SourceRunSupersessionSignature,
-  replacement: SourceRunSupersessionSignature
+  replacement: SourceRunSupersessionSignature,
+  cohortTransition: EvalHistorySupersession["cohort_transition"]
 ): boolean {
   if (superseded.identity !== replacement.identity) return false;
+  if (cohortTransition === undefined) {
+    if (superseded.cohortFingerprint !== replacement.cohortFingerprint) return false;
+  } else if (
+    cohortTransition.superseded_cohort_fingerprint !== superseded.cohortFingerprint ||
+    cohortTransition.replacement_cohort_fingerprint !== replacement.cohortFingerprint
+  ) {
+    return false;
+  }
   const supersededCounts = new Map(
     superseded.targetObservationCounts.map(({ target, count }) => [target, count] as const)
   );
@@ -463,12 +493,13 @@ function supersessionReplacementIsCompatible(
 
 function supersessionReplacementHasParity(
   superseded: EvalHistoryObservation[],
-  replacement: EvalHistoryObservation[]
+  replacement: EvalHistoryObservation[],
+  cohortTransition: EvalHistorySupersession["cohort_transition"]
 ): boolean {
   const supersededSignature = sourceRunSupersessionSignature(superseded);
   const replacementSignature = sourceRunSupersessionSignature(replacement);
   return (
-    supersessionReplacementIsCompatible(supersededSignature, replacementSignature) &&
+    supersessionReplacementIsCompatible(supersededSignature, replacementSignature, cohortTransition) &&
     stableStringify(supersededSignature.targetObservationCounts) ===
       stableStringify(replacementSignature.targetObservationCounts)
   );
@@ -499,6 +530,18 @@ function assertSupersessionIntegrity(history: EvalHistory): void {
         `superseded source run ${supersession.superseded_source_eval_run_id} is absent from history`
       );
     }
+    const supersededSignature = sourceRunSupersessionSignature(
+      observationsBySourceRun.get(supersession.superseded_source_eval_run_id)!
+    );
+    if (
+      supersession.cohort_transition !== undefined &&
+      supersession.cohort_transition.superseded_cohort_fingerprint !== supersededSignature.cohortFingerprint
+    ) {
+      throw new EvalError(
+        "EVAL_HISTORY_INVALID",
+        `declared superseded cohort fingerprint does not match source run ${supersession.superseded_source_eval_run_id}`
+      );
+    }
     supersededSourceRuns.add(supersession.superseded_source_eval_run_id);
   }
   for (const supersession of history.supersessions) {
@@ -510,7 +553,9 @@ function assertSupersessionIntegrity(history: EvalHistory): void {
     if (replacement === undefined) continue;
     const supersededSignature = sourceRunSupersessionSignature(superseded);
     const replacementSignature = sourceRunSupersessionSignature(replacement);
-    if (!supersessionReplacementIsCompatible(supersededSignature, replacementSignature)) {
+    if (
+      !supersessionReplacementIsCompatible(supersededSignature, replacementSignature, supersession.cohort_transition)
+    ) {
       throw new EvalError(
         "EVAL_HISTORY_INVALID",
         `replacement source run ${supersession.replacement_source_eval_run_id} does not match superseded source run ${supersession.superseded_source_eval_run_id}`
@@ -1824,7 +1869,11 @@ function renderEvalQualityChart(aggregates: EvalHistoryBenchmarkAggregate[]): st
   const visibleAggregates = aggregates.filter((aggregate) => visibleColumnKeys.has(aggregateColumnKey(aggregate)));
   const profiles = [
     ...new Map(visibleAggregates.map((aggregate) => [aggregateProfileKey(aggregate), aggregate])).values()
-  ];
+  ].sort(
+    (leftAggregate, rightAggregate) =>
+      compareText(leftAggregate.model, rightAggregate.model) ||
+      compareText(aggregateProfileKey(leftAggregate), aggregateProfileKey(rightAggregate))
+  );
   const legendTop = dateLabelBottom + 34;
   const legendRowCount = OVERVIEW_METRICS.length + 1 + profiles.length;
   const height = legendTop + Math.max(1, legendRowCount) * 22 + 18;
@@ -2126,7 +2175,10 @@ function effectiveEvalHistoryObservations(history: EvalHistory): EvalHistoryObse
   for (const supersession of history.supersessions) {
     const superseded = observationsBySourceRun.get(supersession.superseded_source_eval_run_id)!;
     const replacement = observationsBySourceRun.get(supersession.replacement_source_eval_run_id);
-    if (replacement !== undefined && supersessionReplacementHasParity(superseded, replacement)) {
+    if (
+      replacement !== undefined &&
+      supersessionReplacementHasParity(superseded, replacement, supersession.cohort_transition)
+    ) {
       supersededSourceRuns.add(supersession.superseded_source_eval_run_id);
     }
   }

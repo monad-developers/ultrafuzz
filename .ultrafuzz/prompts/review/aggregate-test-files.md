@@ -40,88 +40,13 @@ Project discovery:
 Base test setup (when rendered):
 {{artifact_path:base-test-setup}}/setup/base-test-setup.md
 
-Strategy generated-test manifests:
+Strategy generated-test manifests declared by ancestor nodes in the effective
+topology:
 
-Boundary tests:
-{{artifact_path:boundary-tests}}/generated-tests.json
-
-Encode/decode:
-{{artifact_path:encode-decode}}/generated-tests.json
-
-Differential library tests:
-{{artifact_path:differential-library-tests}}/generated-tests.json
-
-Reference harness author:
-{{artifact_path:reference-harness-author}}/generated-tests.json
-
-Differential lane authors:
-{{artifact_path:differential-lane-author}}/generated-tests.json
-
-Round trip:
-{{artifact_path:round-trip}}/generated-tests.json
-
-Workflow property tests:
-{{artifact_path:workflow-property-based-tests}}/generated-tests.json
-
-Time-warp sequences:
-{{artifact_path:time-warp-sequences}}/generated-tests.json
-
-Stateful invariant coverage:
-{{artifact_path:stateful-invariant-coverage}}/generated-tests.json
-
-Implemented invariant properties:
-{{artifact_path:stateful-invariant-implement-properties}}/generated-tests.json
-
-Invariant campaign:
-{{artifact_path:stateful-invariant-campaign}}/generated-tests.json
-
-Expand coverage:
-{{artifact_path:expand-coverage}}/generated-tests.json
-
-Admin/config boundaries:
-{{artifact_path:admin-config-boundaries}}/generated-tests.json
-
-External dependency boundaries:
-{{artifact_path:external-dependency-boundaries}}/generated-tests.json
-
-AMM boundary liquidity:
-{{artifact_path:amm-boundary-liquidity}}/generated-tests.json
-
-Payable/fallback accounting:
-{{artifact_path:payable-fallback-accounting}}/generated-tests.json
-
-Externalized-state accounting:
-{{artifact_path:externalized-state-accounting}}/generated-tests.json
-
-Packed action parity:
-{{artifact_path:packed-action-parity}}/generated-tests.json
-
-Batch atomicity unsupported actions:
-{{artifact_path:batch-atomicity-unsupported-actions}}/generated-tests.json
-
-Router exact accounting:
-{{artifact_path:router-exact-accounting}}/generated-tests.json
-
-Rounding direction audit:
-{{artifact_path:rounding-direction-audit}}/generated-tests.json
-
-Market exhaustion boundaries:
-{{artifact_path:market-exhaustion-boundaries}}/generated-tests.json
-
-Order replacement collateral:
-{{artifact_path:order-replacement-collateral}}/generated-tests.json
-
-State machine boundaries:
-{{artifact_path:state-machine-boundaries}}/generated-tests.json
-
-Lifecycle view boundaries:
-{{artifact_path:lifecycle-view-boundaries}}/generated-tests.json
-
-Dynamic strategy generator:
-{{artifact_path:dynamic-strategy-generator}}/generated-tests.json
+{{ancestor_generated_test_manifests}}
 
 Use only files reported by strategy-owned generated-test manifests. Read every
-manifest listed above, including empty manifests. Treat each manifest's
+manifest listed above, including manifests with empty `generated_tests` arrays. Treat each manifest's
 `generated_tests` array as the source of truth and ignore any non-canonical file
 list arrays. Do not rely on the current working tree or a strategy workspace
 scan as a substitute for a missing manifest entry.

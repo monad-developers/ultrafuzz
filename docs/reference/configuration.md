@@ -13,6 +13,7 @@ Topology, prompts, references, runs, workspaces, and cache state live under
 
 ```toml
 schema_version = "1.0"
+audit_profile = "balanced"
 dynamic_strategies_enumerator = 3
 
 [project]
@@ -70,18 +71,24 @@ Unknown TOML keys fail validation. Strategy execution behavior belongs in
 
 ## Top-Level Keys
 
-| Key                             | Meaning                                                             |
-| ------------------------------- | ------------------------------------------------------------------- |
-| `schema_version`                | Config schema version string.                                       |
-| `dynamic_strategies_enumerator` | Positive integer used by prompts that enumerate dynamic strategies. |
-| `[project]`                     | Project paths.                                                      |
-| `[run]`                         | Run output, parallelism, workspace, and timeout settings.           |
-| `[execution]`                   | Local or provider-backed execution and node resource defaults.      |
-| `[models]` and `[models.<id>]`  | Default model profile and model profile definitions.                |
-| `[permissions]`                 | Trusted local execution posture and materialization defaults.       |
-| `[invariants]`                  | Invariant prompt defaults.                                          |
-| `[triage]`                      | Triage quorum and panel size.                                       |
-| `[eval]`                        | Eval suite defaults and reporting provider binding.                 |
+| Key                             | Meaning                                                                    |
+| ------------------------------- | -------------------------------------------------------------------------- |
+| `schema_version`                | Config schema version string.                                              |
+| `audit_profile`                 | Named effort/topology preset. Defaults to `balanced`.                      |
+| `topology_path`                 | Optional project-local topology override that replaces a profile topology. |
+| `strategy_loops`                | Optional positive strategy-loop override.                                  |
+| `dynamic_strategies_enumerator` | Non-negative integer or `"unlimited"` used by dynamic-strategy prompts.    |
+| `[project]`                     | Project paths.                                                             |
+| `[run]`                         | Run output, parallelism, workspace, and timeout settings.                  |
+| `[execution]`                   | Local or provider-backed execution and node resource defaults.             |
+| `[models]` and `[models.<id>]`  | Default model profile and model profile definitions.                       |
+| `[permissions]`                 | Trusted local execution posture and materialization defaults.              |
+| `[invariants]`                  | Invariant prompt defaults.                                                 |
+| `[triage]`                      | Triage quorum and panel size.                                              |
+| `[eval]`                        | Eval suite defaults and reporting provider binding.                        |
+
+See [Audit profiles](audit-profiles.md) for the generated catalog, packaged
+topologies, effective-setting inspection commands, and precedence rules.
 
 ## Project
 

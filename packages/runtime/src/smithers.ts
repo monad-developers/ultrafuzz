@@ -13,6 +13,7 @@ import {
   getNodeArtifactDir,
   getNodeWorkspaceDir,
   safeResolveInside,
+  invariantPinnedSourceRefExists,
   writeFileDurable,
   writeJsonDurable,
   type RunLayout
@@ -22,6 +23,12 @@ import { redactSecretsInText, redactSecretsInValue } from "@ultrafuzz/security";
 import type { ExpandedGraph, ExpandedNode, ModelFanoutProvenance } from "@ultrafuzz/topology";
 
 import { withTransientNpmRegistryRetry } from "./npm-install-retry.js";
+import {
+  enablePinnedSubmoduleWorktreeConfig,
+  pinnedSubmoduleExecutionFiles,
+  pinnedSubmoduleExpectationForProject,
+  type PinnedSubmoduleExpectation
+} from "./pinned-submodules.js";
 import { renderRuntimeTemplate } from "./runtime-template.js";
 import {
   acquireSmithersExecutableAnchor,
@@ -1168,7 +1175,7 @@ export interface DynamicPromptRuntimeContext {
   runMetadataPath: string;
   resolvedConfig: {
     triage: { quorum: number; panelSize: number };
-    dynamicStrategiesEnumerator: number;
+    dynamicStrategiesEnumerator: number | "unlimited";
     invariantPropertyPriorityThreshold: string;
     invariantPropertyPriorityFilter: string;
     invariantPropertyPriorities: string[];
@@ -1226,6 +1233,7 @@ export interface CompiledSmithersWorkflow {
   inputPath: string;
   tasksPath: string;
   logsDir: string;
+  pinnedSubmodules?: PinnedSubmoduleExpectation;
 }
 
 export interface SubmitSmithersInput {
@@ -1400,6 +1408,11 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
   const inputPath = path.join(smithersDir, "input.json");
   const tasksPath = path.join(smithersDir, "tasks.json");
   const logsDir = path.join(smithersDir, "logs");
+  const pinnedSubmodules =
+    tasks.some((task) => task.execution.mode === "local") && invariantPinnedSourceRefExists(projectRoot)
+      ? pinnedSubmoduleExpectationForProject(projectRoot)
+      : undefined;
+  enablePinnedSubmoduleWorktreeConfig(projectRoot, pinnedSubmodules);
   const compiled: CompiledSmithersWorkflow = {
     schemaVersion: SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION,
     runId: input.runLayout.runId,
@@ -1417,7 +1430,8 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     resolvedConfigPath,
     inputPath,
     tasksPath,
-    logsDir
+    logsDir,
+    ...(pinnedSubmodules === undefined ? {} : { pinnedSubmodules })
   };
   writePreparedWorkflowFile(
     input.runLayout.root,
@@ -1447,6 +1461,7 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
         smithers_run_id: smithersRunId,
         workflow_name: workflowName,
         tasks,
+        pinned_submodules: pinnedSubmodules ?? null,
         dynamic_groups: dynamicGroups
       },
       null,
@@ -1512,6 +1527,10 @@ export async function smithersExecutionControlFiles(
       timeoutMs: SMITHERS_DEPENDENCY_INSTALL_TIMEOUT_MS,
       requirePinnedRunner: true
     });
+  }
+
+  for (const file of pinnedSubmoduleExecutionFiles(compiled.projectRoot, compiled.pinnedSubmodules)) {
+    add(file.sourcePath, file.snapshotPath);
   }
 
   const planPath = path.join(layout.root, "plan.json");
@@ -3517,8 +3536,11 @@ function smithersCommandEnv(
     }
   }
   const localBin = path.join(projectRoot, ".smithers", "node_modules", ".bin");
+  // Preserve the caller's PATH representation for workflow-engine compatibility.
+  // Required-command preflight intentionally accepts only stable absolute entries,
+  // because task commands execute from fresh worktrees rather than this checkout.
   merged.PATH = [localBin, sourcePath]
-    .filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
+    .filter((entry): entry is string => typeof entry === "string")
     .join(path.delimiter);
   return merged;
 }
@@ -4059,7 +4081,8 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
       retryPolicy: task.retryPolicy,
       metadata: executionMetadata(compiled.projectRoot, task),
       outputs: task.metadata.artifacts.outputs,
-      execution: task.execution
+      execution: task.execution,
+      pinnedSubmodules: task.execution.mode === "local" ? (compiled.pinnedSubmodules ?? null) : null
     })),
     null,
     2

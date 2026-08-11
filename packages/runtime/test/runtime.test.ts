@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
-import { execFileSync, spawnSync } from "node:child_process";
+import {
+  execFileSync,
+  spawnSync,
+  type SpawnSyncOptionsWithStringEncoding,
+  type SpawnSyncReturns
+} from "node:child_process";
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import os from "node:os";
@@ -370,7 +375,7 @@ function writeFakeInstalledSmithers(
   );
   fs.writeFileSync(
     paths.target,
-    '#!/bin/sh\nif [ -n "$SMITHERS_FAKE_EXECUTED_AS_LOG" ]; then printf \'%s\\n\' "$0" > "$SMITHERS_FAKE_EXECUTED_AS_LOG"; fi\nprintf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"\nprintf \'%s\\n\' \'{"ok":true}\'\n',
+    '#!/bin/sh\nif [ -n "$SMITHERS_FAKE_EXECUTED_AS_LOG" ]; then printf \'%s\\n\' "$0" > "$SMITHERS_FAKE_EXECUTED_AS_LOG"; fi\nif [ -n "$SMITHERS_FAKE_PATH_LOG" ]; then printf \'%s\\n\' "$PATH" > "$SMITHERS_FAKE_PATH_LOG"; fi\nprintf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"\nprintf \'%s\\n\' \'{"ok":true}\'\n',
     "utf8"
   );
   fs.chmodSync(paths.target, 0o755);
@@ -1186,14 +1191,17 @@ test("init preserves existing project-owned files and validate exposes launch po
   // The TOML parser is shared, so a fix reaches every backend at once.
   assert.equal(fs.existsSync(path.join(project, ".smithers/agents/toml.ts")), true);
   const tomlHelperText = fs.readFileSync(path.join(project, ".smithers/agents/toml.ts"), "utf8");
-  assert.match(codexAgentText, /import \{ readStringTable, stringField \} from ".\/toml";/);
+  assert.match(codexAgentText, /import \{ readRootStringTable, readStringTable, stringField \} from ".\/toml";/);
   assert.doesNotMatch(codexAgentText, /function readStringTable/);
+  assert.match(tomlHelperText, /export function readRootStringTable/);
   // TOML's \UXXXXXXXX has no JSON equivalent, so values are not JSON.parse'd.
   assert.doesNotMatch(tomlHelperText, /JSON\.parse/);
   assert.match(tomlHelperText, /escape !== "u" && escape !== "U"/);
   assert.match(codexAgentText, /const apiKey = requiredEnv/);
   assert.match(codexAgentText, /return { apiKey, env: { CODEX_API_KEY: apiKey } }/);
-  assert.match(codexAgentText, /env: { OPENAI_API_KEY: "", CODEX_API_KEY: "" }/);
+  assert.match(codexAgentText, /const env: Record<string, string> = { OPENAI_API_KEY: "", CODEX_API_KEY: "" };/);
+  assert.match(codexAgentText, /function codexProviderBaseUrl/);
+  assert.match(codexAgentText, /process\.env\.OPENAI_BASE_URL/);
   assert.match(codexAgentText, /createCodexAgent/);
   assert.match(codexAgentText, /model_reasoning_effort:\s*options\.reasoningEffort/);
   assert.match(codexAgentText, /class CompatibleCodexAgent extends SmithersCodexAgent/);
@@ -2040,6 +2048,107 @@ test(
 );
 
 test(
+  "generated CodexAgent subscription auth routes the credential preflight at the CLI's configured provider",
+  { skip: !runningUnderBun },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const configPath = path.join(project, "ultrafuzz.toml");
+    fs.writeFileSync(
+      configPath,
+      fs
+        .readFileSync(configPath, "utf8")
+        .replace(
+          /\[agents\.CodexAgent\]\nauth = "api-key"\napi_key_env = "OPENAI_API_KEY"/u,
+          '[agents.CodexAgent]\nauth = "subscription"'
+        ),
+      "utf8"
+    );
+    const { createCodexAgent } = await loadGeneratedCodexAgent(project);
+    const codexHome = path.join(project, "codex-home");
+    fs.mkdirSync(codexHome, { recursive: true });
+
+    const agentEnvironment = (): Record<string, string> =>
+      (createCodexAgent() as { opts: { env: Record<string, string> } }).opts.env;
+
+    const previous = {
+      config: process.env.ULTRAFUZZ_CONFIG_PATH,
+      codexHome: process.env.CODEX_HOME,
+      baseUrl: process.env.OPENAI_BASE_URL
+    };
+    process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
+    process.env.CODEX_HOME = codexHome;
+    delete process.env.OPENAI_BASE_URL;
+    try {
+      // No config.toml at all: unchanged behaviour, no route asserted.
+      assert.equal(agentEnvironment().OPENAI_BASE_URL, undefined);
+
+      // A provider with a base_url is adopted so preflight and the CLI agree.
+      const configToml = path.join(codexHome, "config.toml");
+      fs.writeFileSync(
+        configToml,
+        [
+          'model = "gpt-5.5"',
+          'model_provider = "gateway"',
+          "",
+          "[model_providers.gateway]",
+          'base_url = "http://127.0.0.1:2455/backend-api/codex"',
+          'wire_api = "responses"'
+        ].join("\n"),
+        "utf8"
+      );
+      assert.equal(agentEnvironment().OPENAI_BASE_URL, "http://127.0.0.1:2455/backend-api/codex");
+      // Subscription auth still refuses to hand a key to the child.
+      assert.equal(agentEnvironment().OPENAI_API_KEY, "");
+      assert.equal(agentEnvironment().CODEX_API_KEY, "");
+
+      // A quoted provider id in the table header resolves identically.
+      fs.writeFileSync(
+        configToml,
+        [
+          'model_provider = "my gateway"',
+          "",
+          '[model_providers."my gateway"]',
+          'base_url = "https://gateway.example/v1"'
+        ].join("\n"),
+        "utf8"
+      );
+      assert.equal(agentEnvironment().OPENAI_BASE_URL, "https://gateway.example/v1");
+
+      // An operator-supplied route always wins.
+      process.env.OPENAI_BASE_URL = "https://operator.example/v1";
+      assert.equal(agentEnvironment().OPENAI_BASE_URL, undefined);
+      delete process.env.OPENAI_BASE_URL;
+
+      // Default provider, unknown provider, and a provider without base_url all
+      // fall back to the public API rather than failing the run.
+      fs.writeFileSync(configToml, 'model = "gpt-5.5"\n', "utf8");
+      assert.equal(agentEnvironment().OPENAI_BASE_URL, undefined);
+      fs.writeFileSync(configToml, 'model_provider = "absent"\n', "utf8");
+      assert.equal(agentEnvironment().OPENAI_BASE_URL, undefined);
+      fs.writeFileSync(
+        configToml,
+        ['model_provider = "gateway"', "", "[model_providers.gateway]", 'wire_api = "responses"'].join("\n"),
+        "utf8"
+      );
+      assert.equal(agentEnvironment().OPENAI_BASE_URL, undefined);
+
+      // A malformed escape must not escape as an uncaught render-time throw.
+      fs.writeFileSync(configToml, 'model_provider = "bad\\q"\n', "utf8");
+      assert.equal(agentEnvironment().OPENAI_BASE_URL, undefined);
+    } finally {
+      if (previous.config === undefined) delete process.env.ULTRAFUZZ_CONFIG_PATH;
+      else process.env.ULTRAFUZZ_CONFIG_PATH = previous.config;
+      if (previous.codexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previous.codexHome;
+      if (previous.baseUrl === undefined) delete process.env.OPENAI_BASE_URL;
+      else process.env.OPENAI_BASE_URL = previous.baseUrl;
+    }
+  }
+);
+
+test(
   "generated agents cannot relabel an aliased execution-snapshot path as a credential",
   { skip: !runningUnderBun },
   async () => {
@@ -2705,9 +2814,49 @@ default_effort = "high"
 const localKimiCode =
   process.env.ULTRAFUZZ_KIMI_BIN ??
   path.join(process.cwd(), "node_modules", "@moonshot-ai", "kimi-code", "dist", "main.mjs");
+
+type Utf8SpawnSync = (
+  command: string,
+  args: readonly string[],
+  options: SpawnSyncOptionsWithStringEncoding
+) => SpawnSyncReturns<string>;
+
+function spawnKimiSurfaceProbe(
+  command: string,
+  args: readonly string[],
+  options: SpawnSyncOptionsWithStringEncoding,
+  runner: Utf8SpawnSync = spawnSync
+): SpawnSyncReturns<string> {
+  let result = runner(command, args, options);
+  const code = (result.error as NodeJS.ErrnoException | undefined)?.code;
+  if (code === "EAGAIN" || code === "ETIMEDOUT") result = runner(command, args, options);
+  return result;
+}
+
+test("Kimi surface probes retry one transient spawn failure", () => {
+  let calls = 0;
+  const transient = Object.assign(new Error("cold runner timed out"), { code: "ETIMEDOUT" });
+  const result = spawnKimiSurfaceProbe("/fixture/kimi", ["--version"], { encoding: "utf8", timeout: 15_000 }, () => {
+    calls += 1;
+    const error = calls === 1 ? transient : undefined;
+    return {
+      pid: 1,
+      output: [null, "", ""],
+      stdout: "",
+      stderr: "",
+      status: error === undefined ? 2 : null,
+      signal: null,
+      ...(error === undefined ? {} : { error })
+    };
+  });
+  assert.equal(calls, 2);
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 2);
+});
+
 test(
   "generated Kimi API config and argv match the real Kimi Code 0.29.1 surface",
-  { skip: !runningUnderBun || !fs.existsSync(localKimiCode), timeout: 15_000 },
+  { skip: !runningUnderBun || !fs.existsSync(localKimiCode), timeout: 60_000 },
   async () => {
     assert.equal(execFileSync(localKimiCode, ["--version"], { encoding: "utf8" }).trim(), "0.29.1");
     const help = execFileSync(localKimiCode, ["--help"], { encoding: "utf8" });
@@ -2748,7 +2897,7 @@ test(
     const modelIndex = parserArgs.indexOf("--model");
     assert.notEqual(modelIndex, -1);
     parserArgs[modelIndex + 1] = "missing-model-for-contract";
-    const parsed = spawnSync(localKimiCode, parserArgs, {
+    const parsed = spawnKimiSurfaceProbe(localKimiCode, parserArgs, {
       cwd: project,
       env: {
         ...process.env,
@@ -2757,9 +2906,13 @@ test(
         NO_PROXY: "127.0.0.1,localhost"
       },
       encoding: "utf8",
-      timeout: 5_000
+      timeout: 15_000
     });
-    assert.equal(parsed.error, undefined);
+    assert.equal(
+      parsed.error,
+      undefined,
+      `Kimi Code surface probe did not start after one transient retry: ${(parsed.error as NodeJS.ErrnoException | undefined)?.code ?? parsed.error?.message}`
+    );
     assert.notEqual(parsed.status, 0);
     assert.match(`${parsed.stdout}\n${parsed.stderr}`, /not configured|config\.invalid/u);
     assert.doesNotMatch(
@@ -2842,7 +2995,7 @@ display_name = "K3"
 
 test(
   "generated Kimi subscription path reflects real Kimi Code 0.29.1 rejecting near-refresh access-only credentials",
-  { skip: !runningUnderBun || !fs.existsSync(localKimiCode), timeout: 15_000 },
+  { skip: !runningUnderBun || !fs.existsSync(localKimiCode), timeout: 60_000 },
   () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-kimi-frozen-auth-"));
     try {
@@ -2886,7 +3039,7 @@ enabled = true
         "utf8"
       );
       execFileSync(localKimiCode, ["doctor", "config", path.join(home, "config.toml")], { encoding: "utf8" });
-      const parsed = spawnSync(
+      const parsed = spawnKimiSurfaceProbe(
         localKimiCode,
         ["--output-format", "text", "--model", "kimi-k3", "--prompt", "Contract only"],
         {
@@ -2898,10 +3051,14 @@ enabled = true
             NO_PROXY: "127.0.0.1,localhost"
           },
           encoding: "utf8",
-          timeout: 5_000
+          timeout: 15_000
         }
       );
-      assert.equal(parsed.error, undefined);
+      assert.equal(
+        parsed.error,
+        undefined,
+        `Kimi Code authentication probe did not start after one transient retry: ${(parsed.error as NodeJS.ErrnoException | undefined)?.code ?? parsed.error?.message}`
+      );
       assert.notEqual(parsed.status, 0);
       assert.match(`${parsed.stdout}\n${parsed.stderr}`, /login_required|refresh_token|no-refresh-token/u);
       assert.doesNotMatch(
@@ -3852,7 +4009,7 @@ test("plan uses an eval topology override without replacing the project topology
   });
 
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
-  assert.equal(plan.value!.validation.topology?.path, smokeTopology);
+  assert.equal(plan.value!.validation.topology?.path, "smoke-benchmark.yml");
   assert.deepEqual(
     plan.value!.graph.nodes.map((node) => node.logical_id),
     ["project-discovery"]
@@ -4015,20 +4172,108 @@ test("a clean scaffold plans the threat-model, goal-plan, and dynamic fanout nod
   }
 });
 
-test("plan applies smoke eval model profiles to a normally initialized target", async () => {
+test("project and runtime topology paths override a profile topology atomically", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
-  const smokeTopology = path.resolve(process.cwd(), "../..", "benchmarks", "smoke-benchmark.yml");
+  writeSmallTopology(project);
+  const projectOverride = path.join(project, ".ultrafuzz", "project-override.yml");
+  const runtimeOverride = path.join(project, ".ultrafuzz", "runtime-override.yml");
+  fs.copyFileSync(path.join(project, ".ultrafuzz", "topology.yml"), projectOverride);
+  fs.copyFileSync(projectOverride, runtimeOverride);
+  const configPath = path.join(project, "ultrafuzz.toml");
+  fs.writeFileSync(
+    configPath,
+    fs
+      .readFileSync(configPath, "utf8")
+      .replace(
+        'audit_profile = "balanced"',
+        'audit_profile = "smoke"\ntopology_path = ".ultrafuzz/project-override.yml"'
+      ),
+    "utf8"
+  );
+  fs.writeFileSync(path.join(project, ".ultrafuzz", "topology.yml"), "not: [valid\n", "utf8");
+
+  const projectSelected = await validateProject({ projectRoot: project, env: {} });
+  assert.equal(projectSelected.ok, true, JSON.stringify(projectSelected.diagnostics));
+  assert.equal(projectSelected.value!.topology?.origin, "project-config");
+  assert.equal(projectSelected.value!.topology?.path, ".ultrafuzz/project-override.yml");
+
+  const runtimeSelected = await validateProject({
+    projectRoot: project,
+    topologyPath: runtimeOverride,
+    env: {}
+  });
+  assert.equal(runtimeSelected.ok, true, JSON.stringify(runtimeSelected.diagnostics));
+  assert.equal(runtimeSelected.value!.topology?.origin, "runtime-override");
+  assert.equal(runtimeSelected.value!.topology?.path, ".ultrafuzz/runtime-override.yml");
+});
+
+test("audit profile selects its packaged topology and records portable provenance", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  const configPath = path.join(project, "ultrafuzz.toml");
+  fs.writeFileSync(
+    configPath,
+    fs.readFileSync(configPath, "utf8").replace('audit_profile = "balanced"', 'audit_profile = "smoke"'),
+    "utf8"
+  );
+  fs.writeFileSync(path.join(project, ".ultrafuzz", "topology.yml"), "not: [valid\n", "utf8");
+
+  const plan = await planRun({ projectRoot: project, runId: "profile-smoke", env: {} });
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  assert.equal(plan.value!.resolved_config.run.maxParallelNodes, 4);
+  assert.equal(plan.value!.resolved_config.run.workflowDeadlineSeconds, 14_400);
+  assert.equal(plan.value!.resolved_config.auditProfileResolution.overriddenSettings.length, 0);
+  assert.deepEqual(
+    plan.value!.graph.nodes.map((node) => node.logical_id),
+    [
+      "smoke-context",
+      "time-warp-sequences",
+      "external-dependency-boundaries",
+      "externalized-state-accounting",
+      "lifecycle-view-boundaries",
+      "dedupe-findings",
+      "final-report"
+    ]
+  );
+  assert.equal(plan.value!.validation.topology?.path, "topologies/smoke.yml");
+  assert.equal(plan.value!.validation.topology?.origin, "audit-profile");
+  const metadata = JSON.parse(fs.readFileSync(path.join(plan.value!.run_root, "run.json"), "utf8")) as {
+    prompt_digest: string;
+    audit_profile: Record<string, unknown>;
+  };
+  assert.match(metadata.prompt_digest, /^[0-9a-f]{64}$/);
+  assert.deepEqual(metadata.audit_profile, {
+    requested: "smoke",
+    effective: "smoke",
+    catalog_schema_version: 1,
+    catalog_digest: plan.value!.resolved_config.auditProfileResolution.catalogDigest,
+    settings: plan.value!.resolved_config.auditProfileResolution.settings,
+    effective_settings: plan.value!.resolved_config.auditProfileResolution.effectiveSettings,
+    setting_origins: plan.value!.resolved_config.auditProfileResolution.settingOrigins,
+    overridden_settings: [],
+    declared_topology_path: "topologies/smoke.yml",
+    effective_topology_path: "topologies/smoke.yml",
+    topology_path_origin: "audit-profile",
+    topology_overridden: false,
+    topology_digest: plan.value!.validation.topology?.digest,
+    prompt_digest: metadata.prompt_digest,
+    expanded_graph_fingerprint: plan.value!.graph_fingerprint
+  });
+});
+
+test("plan applies one smoke eval model profile to a normally initialized target", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
 
   const plan = await planRun({
     projectRoot: project,
-    topologyPath: smokeTopology,
     runId: "smoke-topology-profiles",
     runtimeOverrides: {
+      auditProfile: "smoke",
       models: {
         profiles: {
-          benchmark: { agent: "CodexAgent", model: "gpt-5.6-luna", reasoning: "high" },
-          "smoke-coordination": { agent: "CodexAgent", model: "gpt-5.6-luna", reasoning: "medium" }
+          default: { agent: "CodexAgent", model: "gpt-5.6-luna", reasoning: "high" }
         }
       }
     },
@@ -4038,12 +4283,8 @@ test("plan applies smoke eval model profiles to a normally initialized target", 
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const executable = plan.value!.graph.nodes.filter((node) => node.kind === "agentic");
   assert.equal(executable.length, 7);
-  const strategies = executable.filter((node) => node.model_fanout[0]?.model_profile_id === "benchmark");
-  const coordination = executable.filter((node) => node.model_fanout[0]?.model_profile_id === "smoke-coordination");
-  assert.equal(strategies.length, 4);
-  assert.ok(strategies.every((node) => node.model_fanout[0]?.reasoning_effort === "high"));
-  assert.equal(coordination.length, 3);
-  assert.ok(coordination.every((node) => node.model_fanout[0]?.reasoning_effort === "medium"));
+  assert.ok(executable.every((node) => node.model_fanout[0]?.model_profile_id === "default"));
+  assert.ok(executable.every((node) => node.model_fanout[0]?.reasoning_effort === "high"));
 });
 
 test("plan materializes pinned reference nodes before rendering dependent prompts", async () => {
@@ -4212,6 +4453,8 @@ test("compileSmithersWorkflow gates native dependencies on deterministic artifac
   });
 
   const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
+  assert.equal(compiled.pinnedSubmodules, undefined);
+  assert.match(workflowSource, /"pinnedSubmodules": null/u);
   assert.match(workflowSource, /dependsOn=\{task\.dependsOn\}/);
   assert.match(workflowSource, /const taskOutput = z\.object\(\{/);
   assert.match(workflowSource, /summary: z\.string\(\)\.min\(1\)/);
@@ -4223,8 +4466,10 @@ test("compileSmithersWorkflow gates native dependencies on deterministic artifac
 
   const smithersTasks = JSON.parse(fs.readFileSync(compiled.tasksPath, "utf8")) as {
     layers?: unknown;
+    pinned_submodules?: unknown;
     tasks: Array<{ attemptId: string; dependencySmithersNodeIds: string[] }>;
   };
+  assert.equal(smithersTasks.pinned_submodules, null);
   assert.equal("layers" in smithersTasks, false);
   assert.equal(workflowSource.match(/"runtimeContext":/gu)?.length, smithersTasks.tasks.length);
   assert.deepEqual(
@@ -4786,7 +5031,7 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /function artifactAwareAgent/);
   assert.match(
     workflowSource,
-    /const result = await agent\.generate\(attemptArgs\);[\s\S]*?prepareArtifactMirror\(task, \{ replayWorkspacePatches: false \}\);/
+    /const result = await agent\.generate\(attemptArgs\);[\s\S]*?prepareArtifactMirror\(task, \{ replayWorkspacePatches: false, pinnedSubmodules: "verify" \}\);/
   );
   assert.match(workflowSource, /materializeMissingMarkdownArtifacts\(task, result\)/);
   assert.match(workflowSource, /normalizeLegacyFindingFields\(task\)/);
@@ -5073,6 +5318,39 @@ test("startRun forwards configured and explicitly allowed environment variables 
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   assert.equal(fs.readFileSync(environmentLog, "utf8"), "configured-agent-key||ci\n");
   assert.equal(fs.readFileSync(contextLog, "utf8"), "|||||\n");
+});
+
+test("startRun rejects an untracked cwd executable before task worktrees or model work", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const topologyPath = path.join(project, ".ultrafuzz", "topology.yml");
+  fs.writeFileSync(
+    topologyPath,
+    fs
+      .readFileSync(topologyPath, "utf8")
+      .replace(
+        "    prompt: setup/project-discovery.md\n",
+        "    prompt: setup/project-discovery.md\n    required_commands: [recon]\n"
+      ),
+    "utf8"
+  );
+  writeFakeInstalledSmithers(project);
+  const executable = path.join(project, "recon");
+  fs.writeFileSync(executable, "#!/bin/sh\necho recon test\n", "utf8");
+  fs.chmodSync(executable, 0o755);
+  const run = await startRun({
+    projectRoot: project,
+    runId: "empty-path-required-command",
+    env: {
+      PATH: "",
+      SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log")
+    }
+  });
+
+  assert.equal(run.ok, false);
+  assert.equal(run.diagnostics[0]?.code, "RUN_REQUIRED_COMMAND_MISSING");
+  assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", "empty-path-required-command")), false);
 });
 
 test("startRun rejects controller-only paths as credential environment names", async () => {
@@ -10017,6 +10295,12 @@ test("syncRun fails a successful workflow node that is missing required artifact
   assert.equal(pending.ok, true);
   assert.equal(pending.value?.status, "running");
   assert.ok(pending.diagnostics.some((diagnostic) => diagnostic.code === "REQUIRED_ARTIFACT_GRACE_PENDING"));
+  const attemptLedgerPath = path.join(run.value!.run_root, "attempts.jsonl");
+  assert.equal(
+    fs.existsSync(attemptLedgerPath) ? fs.readFileSync(attemptLedgerPath, "utf8").trim() : "",
+    "",
+    "a successful executor attempt must stay pending until its output manifest is durable"
+  );
   assert.equal(
     fs.readFileSync(path.join(run.value!.run_root, "events.jsonl"), "utf8").match(/node-artifacts-missing/gu),
     null
@@ -10291,12 +10575,18 @@ test("syncRun keeps a strict node pending until a late safe mirror is reconciled
   });
   const run = await startRun({ projectRoot: project, runId: "sync-late-mirror", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const attemptLedgerPath = path.join(run.value!.run_root, "attempts.jsonl");
   const now = Date.parse("2026-07-03T00:02:00.000Z");
 
   const pending = await syncRun({ projectRoot: project, runId: "sync-late-mirror", env }, { now: () => now });
   assert.equal(pending.ok, true, JSON.stringify(pending.diagnostics));
   assert.equal(pending.value?.status, "running");
   assert.ok(pending.diagnostics.some((diagnostic) => diagnostic.code === "REQUIRED_ARTIFACT_GRACE_PENDING"));
+  assert.equal(
+    fs.existsSync(attemptLedgerPath) ? fs.readFileSync(attemptLedgerPath, "utf8").trim() : "",
+    "",
+    "a successful executor attempt must stay pending until its output manifest is durable"
+  );
 
   const mirrorRoot = path.join(
     run.value!.run_root,
@@ -10316,6 +10606,22 @@ test("syncRun keeps a strict node pending until a late safe mirror is reconciled
   );
   assert.equal(completed.ok, true, JSON.stringify(completed.diagnostics));
   assert.equal(completed.value?.status, "succeeded");
+  const attemptLedger = fs
+    .readFileSync(attemptLedgerPath, "utf8")
+    .trim()
+    .split("\n")
+    .map(
+      (line) =>
+        JSON.parse(line) as {
+          outcome?: string;
+          failure_category?: string;
+          manifests?: { output_sha256?: unknown };
+        }
+    );
+  assert.equal(attemptLedger.length, 1);
+  assert.equal(attemptLedger[0]?.outcome, "succeeded");
+  assert.equal(attemptLedger[0]?.failure_category, undefined);
+  assert.match(String(attemptLedger[0]?.manifests?.output_sha256), /^[a-f0-9]{64}$/u);
   const eventsPath = path.join(run.value!.run_root, "events.jsonl");
   const beforeRepeat = fs.readFileSync(eventsPath, "utf8");
   assert.equal((beforeRepeat.match(/node-artifacts-reconciled/gu) ?? []).length, 1);
@@ -11967,6 +12273,40 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
       `a relaunched workflow must keep streaming into the run's own log directory: ${relaunch}`
     );
   }
+});
+
+test("lifecycle relaunch rejects a required backend that disappeared before new attempts", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const topologyPath = path.join(project, ".ultrafuzz", "topology.yml");
+  fs.writeFileSync(
+    topologyPath,
+    fs
+      .readFileSync(topologyPath, "utf8")
+      .replace(
+        "    prompt: setup/project-discovery.md\n",
+        "    prompt: setup/project-discovery.md\n    required_commands: [recon-required-test]\n"
+      ),
+    "utf8"
+  );
+  const env = fakeSmithersEnv(project);
+  const recon = path.join(project, "fake-bin", "recon-required-test");
+  fs.writeFileSync(recon, "#!/bin/sh\necho recon test\n", "utf8");
+  fs.chmodSync(recon, 0o755);
+  const run = await startRun({ projectRoot: project, runId: "lifecycle-required-command", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  fs.rmSync(recon);
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+  const eventsPath = path.join(run.value!.run_root, "events.jsonl");
+  const eventsBefore = fs.readFileSync(eventsPath, "utf8");
+
+  const resumed = await resumeRun({ projectRoot: project, runId: run.value!.run_id, env });
+
+  assert.equal(resumed.ok, false);
+  assert.equal(resumed.diagnostics[0]?.code, "RUN_REQUIRED_COMMAND_MISSING");
+  assert.equal(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), "");
+  assert.equal(fs.readFileSync(eventsPath, "utf8"), eventsBefore);
 });
 
 test("legacy workflow evidence gaps fail closed without reconstructing trust", async () => {

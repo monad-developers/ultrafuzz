@@ -40,6 +40,12 @@ export interface EvalTarget {
   ground_truth: string;
   /** `private` forces manifest-only artifact reporting unless the suite explicitly opts into `upload`. */
   sensitivity?: string;
+  /**
+   * Benchmark paths the run must never read, such as a reference solution the
+   * agent would otherwise copy instead of deriving. Applied when the pinned
+   * target is materialized; a launch is refused if any are still present.
+   */
+  held_out_paths?: string[];
 }
 
 export interface EvalVariant {
@@ -455,6 +461,10 @@ export interface EvalRunRecord {
   final_status?: string;
   graph_fingerprint?: string;
   config_fingerprint?: string;
+  audit_profile?: string;
+  audit_profile_catalog_digest?: string;
+  topology_digest?: string;
+  prompt_digest?: string;
   candidate_label?: string;
   candidate_commit?: string;
   execution_artifact_id?: string;

@@ -3,10 +3,12 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { packagedTopology } from "@ultrafuzz/config";
 import { loadPromptCatalog } from "@ultrafuzz/prompts";
-import { loadTopology, validateTopology, type ProjectTopology } from "@ultrafuzz/topology";
+import { expandTopology, loadTopology, validateTopology, type ProjectTopology } from "@ultrafuzz/topology";
 
-import { promptTextsForCatalog, transformPromptCatalogForRun, transformTopologyForRun } from "../src/plan-run.js";
+import { promptTextsForCatalog, transformPromptCatalogForRun } from "../src/plan-run.js";
+import { transformTopologyForRun } from "../src/topology-transform.js";
 
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
 
@@ -259,33 +261,15 @@ test("the invariant-only exclusions retain the whole stateful-invariant chain", 
   for (const id of invariantNodeIds) assert.equal(validation.effectiveLoopCounts[id], 1);
 });
 
-function assertDedupePromptEnumeratesProducers(topologyPath: string | undefined, promptId: string): void {
-  const topology = loadTopology(REPOSITORY_ROOT, {
-    requirePromptFiles: true,
-    ...(topologyPath === undefined ? {} : { topologyPath })
+test("invariant-only strategy loops repeat the serial coverage stage", () => {
+  const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
+  const source = loadTopology(repositoryRoot, { topologyPath: packagedTopology("invariant-only").path });
+  const one = expandTopology(transformTopologyForRun(source, { strategyLoops: 1 }), { projectRoot: repositoryRoot });
+  const three = expandTopology(transformTopologyForRun(source, { strategyLoops: 3 }), {
+    projectRoot: repositoryRoot
   });
-  const byId = new Map(topology.nodes.map((node) => [node.id, node]));
-  const producers = (byId.get("dedupe-findings")?.depends_on ?? [])
-    .filter((id) => (byId.get(id)?.outputs ?? []).some((output) => output.path === "findings.json"))
-    .sort();
 
-  const body = loadPromptCatalog({ projectRoot: REPOSITORY_ROOT }).entries.get(promptId)?.body ?? "";
-  const cited = [
-    ...new Set(
-      [...body.matchAll(/\{\{artifact_path:([a-z0-9-]+)\}\}\/findings\.json/gu)].map((match) => match[1] as string)
-    )
-  ].sort();
-
-  assert.deepEqual(cited, producers, `${promptId} must enumerate every findings producer exactly once`);
-}
-
-test("the dedupe prompt enumerates exactly the dependencies that produce findings", () => {
-  // Ledger coverage is checked against every dependency findings artifact the
-  // run produced, so a producer the prompt never names is unreachable and fails
-  // the node. Nothing else ties either prompt's enumeration to its topology.
-  assertDedupePromptEnumeratesProducers(undefined, "dedupe-findings");
-  assertDedupePromptEnumeratesProducers(
-    path.join(REPOSITORY_ROOT, "benchmarks", "smoke-benchmark.yml"),
-    "smoke-dedupe-findings"
-  );
+  assert.equal(one.nodes.filter((node) => node.logicalId === "stateful-invariant-coverage").length, 1);
+  assert.equal(three.nodes.filter((node) => node.logicalId === "stateful-invariant-coverage").length, 3);
+  assert.equal(three.nodes.filter((node) => node.logicalId === "stateful-invariant-campaign").length, 1);
 });

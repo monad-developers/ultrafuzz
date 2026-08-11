@@ -25,6 +25,7 @@ import {
 } from "../src/defaults.js";
 import {
   createModalLaunchState,
+  fingerprintModalImage,
   latestModalWorkerStatus,
   markModalLaunchReady,
   markModalSandboxCreated,
@@ -72,6 +73,7 @@ import {
   publicEvalDiagnosticsDroppedFromEvidence,
   runningRecoverySandbox,
   replaceSanitizedModalCollectedFiles,
+  resolveModalLaunchStateImageForInspection,
   selectModalCollectedEvidence,
   terminateModalBenchmarkSandboxes,
   terminateModalBenchmarkTagScopes
@@ -136,6 +138,87 @@ describe("Modal benchmark capacity", () => {
 
     await expect(createModalLaunchSandbox(sandboxes, app, image, state, { name: "worker" })).resolves.toBe(sandbox);
     expect(sandboxes.create).toHaveBeenCalledWith(app, image, expect.objectContaining({ name: "worker", timeoutMs }));
+  });
+});
+
+describe("Modal pinned launch image inspection", () => {
+  it.each(["status", "collect"])(
+    "%s inspection keeps using image A after its published name rebounds to image B",
+    async () => {
+      const state = imageInspectionState("image-a");
+      const imageA = { imageId: "image-a" } as Image;
+      const imageB = { imageId: "image-b" } as Image;
+      const images = {
+        fromId: vi.fn(async () => imageA),
+        // This models the mutable shared name after a concurrent build. Current
+        // state inspection must never consult it.
+        fromName: vi.fn(async () => imageB)
+      };
+
+      await expect(resolveModalLaunchStateImageForInspection(state, images)).resolves.toEqual({
+        state,
+        image: imageA
+      });
+      expect(images.fromId).toHaveBeenCalledOnce();
+      expect(images.fromId).toHaveBeenCalledWith("image-a");
+      expect(images.fromName).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each(["status", "collect"])("%s inspection fails closed when the pinned ID is incompatible", async () => {
+    const state = imageInspectionState("image-a");
+    const images = {
+      fromId: vi.fn(async () => ({ imageId: "image-b" }) as Image),
+      fromName: vi.fn(async () => ({ imageId: "image-a" }) as Image)
+    };
+
+    await expect(resolveModalLaunchStateImageForInspection(state, images)).rejects.toThrow(
+      /image fingerprint mismatch/u
+    );
+    expect(images.fromId).toHaveBeenCalledWith("image-a");
+    expect(images.fromName).not.toHaveBeenCalled();
+  });
+
+  it("uses the published name only for the exact v1 schema that has no persisted image ID", async () => {
+    const legacy = legacyImageInspectionState();
+    const image = { imageId: "legacy-image-id" } as Image;
+    const images = {
+      fromId: vi.fn(async () => image),
+      fromName: vi.fn(async () => image)
+    };
+
+    const inspected = await resolveModalLaunchStateImageForInspection(legacy, images);
+
+    expect(inspected.state.image_id).toBe("legacy-image-id");
+    expect(inspected.state.fingerprints.image).toBe(fingerprintModalImage("shared-image", "legacy-image-id"));
+    expect(images.fromName).toHaveBeenCalledOnce();
+    expect(images.fromName).toHaveBeenCalledWith("shared-image");
+    expect(images.fromId).not.toHaveBeenCalled();
+  });
+
+  it("does not downgrade a malformed current state into the name-based compatibility path", async () => {
+    const malformed = { ...imageInspectionState("image-a") } as Record<string, unknown>;
+    delete malformed.image_id;
+    const images = {
+      fromId: vi.fn(async () => ({ imageId: "image-a" }) as Image),
+      fromName: vi.fn(async () => ({ imageId: "image-a" }) as Image)
+    };
+
+    await expect(resolveModalLaunchStateImageForInspection(malformed, images)).rejects.toThrow();
+    expect(images.fromId).not.toHaveBeenCalled();
+    expect(images.fromName).not.toHaveBeenCalled();
+  });
+
+  it("does not use the legacy name fallback for an invalid v1-shaped document", async () => {
+    const malformed = { ...legacyImageInspectionState(), launches: "not-an-array" };
+    const images = {
+      fromId: vi.fn(async () => ({ imageId: "image-a" }) as Image),
+      fromName: vi.fn(async () => ({ imageId: "image-a" }) as Image)
+    };
+
+    await expect(resolveModalLaunchStateImageForInspection(malformed, images)).rejects.toThrow();
+    expect(images.fromId).not.toHaveBeenCalled();
+    expect(images.fromName).not.toHaveBeenCalled();
   });
 });
 
@@ -2023,6 +2106,44 @@ function remoteFileInfo(size: number): FileInfo {
     group: "ubuntu",
     modifiedTime: 0,
     symlinkTarget: null
+  };
+}
+
+function imageInspectionState(imageId: string) {
+  return createModalLaunchState({
+    logicalRunId: "image-inspection-run",
+    generation: 1,
+    generationMode: "fresh",
+    app: "app-placeholder",
+    image: "shared-image",
+    imageId,
+    timeoutMs: 60_000,
+    sourceRevision: "revision-placeholder",
+    fingerprints: {
+      config: "a".repeat(64),
+      source: "b".repeat(64),
+      image: fingerprintModalImage("shared-image", imageId)
+    }
+  });
+}
+
+function legacyImageInspectionState() {
+  return {
+    schema_version: "ultrafuzz.modal.launch-state.v1",
+    run_id: "legacy-image-inspection-run",
+    app: "app-placeholder",
+    image: "shared-image",
+    timeout_ms: 60_000,
+    source_revision: "revision-placeholder",
+    launches: [
+      {
+        ...MODEL,
+        sandbox_id: "sandbox-placeholder",
+        volume_name: "volume-placeholder",
+        remote_root: "/data/legacy-image-inspection-run/model-one",
+        launched_at: "2026-01-01T00:00:00.000Z"
+      }
+    ]
   };
 }
 

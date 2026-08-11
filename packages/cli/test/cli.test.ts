@@ -5,7 +5,12 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { artifactContractDefinition, layoutForRunRoot, writeArtifactManifest } from "@ultrafuzz/artifacts";
+import {
+  artifactContractDefinition,
+  derivePropertyImplementationCoverage,
+  layoutForRunRoot,
+  writeArtifactManifest
+} from "@ultrafuzz/artifacts";
 import AdmZip from "adm-zip";
 
 import { runCli } from "../src/index.js";
@@ -964,27 +969,45 @@ test("report regenerates canonical Markdown from structured issues and non-produ
     )}\n`,
     "utf8"
   );
+  const canonicalCatalog = {
+    schema_version: "ultrafuzz.properties.v1" as const,
+    properties: [
+      {
+        id: "property-report-contract-1",
+        description: "Structured report property",
+        category: "accounting",
+        priority: "high" as const,
+        reference_expectations: ["scfuzzbench:aave-v4:iSpoke_supply"],
+        sources: [
+          {
+            source_node_id: "property-specification-example",
+            source_property_id: "property-specification-example-001"
+          }
+        ]
+      }
+    ]
+  };
+  const implementationHandoff = {
+    schema_version: "ultrafuzz.implemented-properties.v1" as const,
+    selection: {
+      priority_threshold: "high" as const,
+      priorities: ["high" as const],
+      property_ids: ["property-report-contract-1"]
+    },
+    properties: [
+      {
+        property_id: "property-report-contract-1",
+        status: "implemented" as const,
+        implementation_paths: ["src/Example.sol"],
+        test_paths: ["test/ExampleInvariant.t.sol"],
+        reference_expectations: ["scfuzzbench:aave-v4:iSpoke_supply"]
+      }
+    ]
+  };
   fs.mkdirSync(path.join(runData.run_root, "artifacts", "property-specification-fanin"), { recursive: true });
   fs.writeFileSync(
     path.join(runData.run_root, "artifacts", "property-specification-fanin", "properties.json"),
-    JSON.stringify({
-      schema_version: "ultrafuzz.properties.v1",
-      properties: [
-        {
-          id: "property-report-contract-1",
-          description: "Structured report property",
-          category: "accounting",
-          priority: "high",
-          reference_expectations: ["scfuzzbench:aave-v4:iSpoke_supply"],
-          sources: [
-            {
-              source_node_id: "property-specification-example",
-              source_property_id: "property-specification-example-001"
-            }
-          ]
-        }
-      ]
-    }),
+    JSON.stringify(canonicalCatalog),
     "utf8"
   );
   fs.mkdirSync(path.join(runData.run_root, "artifacts", "stateful-invariant-implement-properties"), {
@@ -992,18 +1015,7 @@ test("report regenerates canonical Markdown from structured issues and non-produ
   });
   fs.writeFileSync(
     path.join(runData.run_root, "artifacts", "stateful-invariant-implement-properties", "implemented-properties.json"),
-    JSON.stringify({
-      schema_version: "ultrafuzz.implemented-properties.v1",
-      selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-report-contract-1"] },
-      properties: [
-        {
-          property_id: "property-report-contract-1",
-          status: "implemented",
-          implementation_paths: ["src/Example.sol"],
-          test_paths: ["test/ExampleInvariant.t.sol"]
-        }
-      ]
-    }),
+    JSON.stringify(implementationHandoff),
     "utf8"
   );
   fs.mkdirSync(path.join(runData.run_root, "artifacts", "stateful-invariant-campaign"), { recursive: true });
@@ -1047,6 +1059,21 @@ test("report regenerates canonical Markdown from structured issues and non-produ
   const repaired = await cli(project, ["report", runData.run_id, "--json"]);
   assert.equal(repaired.code, 0, repaired.stderr);
   assert.equal(accountingMismatchCount(parseJson(repaired)), 0);
+  const authoritativeRunMetadata = JSON.parse(
+    fs.readFileSync(path.join(runData.run_root, "run.json"), "utf8")
+  ) as Record<string, unknown>;
+  const auditProfileMetadata = authoritativeRunMetadata.audit_profile as Record<string, unknown>;
+  const reconciledReport = JSON.parse(fs.readFileSync(reportPath, "utf8")) as {
+    run_metadata: Record<string, unknown>;
+  };
+  assert.equal(reconciledReport.run_metadata.audit_profile, auditProfileMetadata.effective);
+  assert.equal(reconciledReport.run_metadata.audit_profile_catalog_digest, auditProfileMetadata.catalog_digest);
+  assert.equal(reconciledReport.run_metadata.topology_digest, auditProfileMetadata.topology_digest);
+  assert.equal(reconciledReport.run_metadata.prompt_digest, authoritativeRunMetadata.prompt_digest);
+  assert.equal(
+    reconciledReport.run_metadata.expanded_graph_fingerprint,
+    auditProfileMetadata.expanded_graph_fingerprint
+  );
   const markdown = fs.readFileSync(path.join(reportDir, "report.md"), "utf8");
   assert.match(
     markdown,
@@ -1059,7 +1086,7 @@ test("report regenerates canonical Markdown from structured issues and non-produ
   const runSummary = /^## Run summary\n\n(?<body>[\s\S]*?)(?=\n## )/mu.exec(markdown)?.groups?.body;
   assert.ok(runSummary);
   const runSummaryLabels = [...runSummary.matchAll(/^- ([^:]+): `[^`\n]+`$/gmu)].map((match) => match[1]);
-  assert.deepEqual(runSummaryLabels, [
+  const expectedRunSummaryLabels = [
     "Run ID",
     "Source run ID",
     "Repository",
@@ -1067,8 +1094,14 @@ test("report regenerates canonical Markdown from structured issues and non-produ
     "Models used",
     "Tokens used",
     "Estimated spend",
-    "Strategy loops"
-  ]);
+    "Strategy loops",
+    "Audit profile",
+    "Audit profile catalog digest",
+    "Topology digest",
+    "Prompt digest",
+    "Expanded graph fingerprint"
+  ];
+  assert.deepEqual(runSummaryLabels, expectedRunSummaryLabels);
   assert.match(
     markdown,
     /## \[M-01\] - Structured issue title\n\nDepositor can exercise the structured path which leads to the recorded state becoming inconsistent\./u
@@ -1127,18 +1160,12 @@ test("report regenerates canonical Markdown from structured issues and non-produ
     [{ finding_id: "M-01", title: "[M-01] - Structured issue title" }]
   );
   assert.deepEqual(json.property_provenance[0]?.fuzzer_backends, ["medusa", "recon"]);
-  assert.deepEqual(json.property_implementation_coverage, {
-    priority_threshold: "high",
-    priorities: ["high"],
-    selected_property_ids: ["property-report-contract-1"],
-    implemented_property_ids: ["property-report-contract-1"],
-    blocked_property_ids: [],
-    pending_property_ids: [],
-    deferred_property_ids: [],
-    reference_expected_property_ids: ["property-report-contract-1"],
-    reference_expectation_ids: ["scfuzzbench:aave-v4:iSpoke_supply"],
-    blocker_summaries: []
+  const expectedCoverage = derivePropertyImplementationCoverage(canonicalCatalog, implementationHandoff, {
+    configuredSelection: { priority_threshold: "high", priorities: ["high"] },
+    requireConfiguredSelection: true
   });
+  assert.equal(expectedCoverage.ok, true, JSON.stringify(expectedCoverage.issues));
+  assert.deepEqual(json.property_implementation_coverage, expectedCoverage.value);
 
   fs.writeFileSync(
     reportPath,
@@ -1186,7 +1213,10 @@ test("report regenerates canonical Markdown from structured issues and non-produ
   assert.doesNotMatch(zeroIssueMarkdown, /^No issues reported\.?$/imu);
   const zeroIssueRunSummary = /^## Run summary\n\n(?<body>[\s\S]*?)(?=\n## )/mu.exec(zeroIssueMarkdown)?.groups?.body;
   assert.ok(zeroIssueRunSummary);
-  assert.equal([...zeroIssueRunSummary.matchAll(/^- [^:]+: `[^`\n]+`$/gmu)].length, 8);
+  assert.deepEqual(
+    [...zeroIssueRunSummary.matchAll(/^- ([^:]+): `[^`\n]+`$/gmu)].map((match) => match[1]),
+    expectedRunSummaryLabels
+  );
   assert.ok(zeroIssueMarkdown.indexOf("## Property provenance") < zeroIssueMarkdown.indexOf("## Non-production"));
   assert.match(zeroIssueMarkdown, /## Property provenance\n\nNo property-derived findings\./u);
   assert.match(
@@ -1502,6 +1532,48 @@ test("current invariant reports with malformed issues fail closed instead of pre
     JSON.stringify(parseJson(result).diagnostics),
     /current invariant final report|historical|renderable|FINDINGS_SCHEMA_INVALID/iu
   );
+});
+
+test("report reconciliation distinguishes a missing current handoff from an explicit historical plan", async () => {
+  const graphFor = (contract: string): Record<string, unknown> => ({
+    schema_version: "1.0",
+    nodes: [
+      {
+        id: "stateful-invariant-implement-properties",
+        logical_id: "stateful-invariant-implement-properties",
+        outputs: [{ path: "implemented-properties.json", contract }]
+      }
+    ]
+  });
+  const report = {
+    schema_version: "1.0",
+    run_metadata: {},
+    issues: [],
+    non_production_outcomes: []
+  };
+
+  const currentProject = tempProject();
+  const current = await createReportRun(currentProject, "report-current-handoff-missing");
+  writeJsonRecord(path.join(current.run_root, "graph.json"), graphFor("ultrafuzz/implemented-properties@2"));
+  const currentReportDir = path.join(current.run_root, "artifacts", "final-report");
+  fs.mkdirSync(currentReportDir, { recursive: true });
+  writeJsonRecord(path.join(currentReportDir, "report.json"), report);
+  const rejected = await cli(currentProject, ["report", current.run_id, "--json"]);
+  assert.equal(rejected.code, 1);
+  assert.match(JSON.stringify(parseJson(rejected).diagnostics), /implementation handoff is unavailable/iu);
+
+  const historicalProject = tempProject();
+  const historical = await createReportRun(historicalProject, "report-historical-handoff");
+  writeJsonRecord(path.join(historical.run_root, "graph.json"), graphFor("ultrafuzz/implemented-properties@1"));
+  const historicalReportDir = path.join(historical.run_root, "artifacts", "final-report");
+  fs.mkdirSync(historicalReportDir, { recursive: true });
+  writeJsonRecord(path.join(historicalReportDir, "report.json"), report);
+  const preserved = await cli(historicalProject, ["report", historical.run_id, "--json"]);
+  assert.equal(preserved.code, 0, preserved.stderr);
+  const historicalJson = JSON.parse(fs.readFileSync(path.join(historicalReportDir, "report.json"), "utf8")) as {
+    property_implementation_coverage?: unknown;
+  };
+  assert.equal(historicalJson.property_implementation_coverage, "unavailable");
 });
 
 test("historical loose reports preserve conforming Markdown and reject missing or nonconforming Markdown", async () => {

@@ -90,76 +90,11 @@ or inline environment-assignment prefixes. Preserve the original command's
 environment, selectors, and test-root semantics, count actual failing tests,
 and keep framework-specific blocked and failing results distinct.
 
-Read the findings of every strategy lane below. Ledger coverage is checked
-against every dependency findings artifact the run produced, not against the
-lanes you chose to inspect, so none of these may be skipped. A lane pruned
-from this run has its line removed and produces nothing to account for.
+Inspect every direct strategy handoff before deduping. This list is derived
+from the effective topology and includes each producer's declared findings,
+generated-test manifests, campaign evidence, and supporting outputs:
 
-Boundary tests findings: {{artifact_path:boundary-tests}}/findings.json
-Encode decode findings: {{artifact_path:encode-decode}}/findings.json
-Differential library tests findings: {{artifact_path:differential-library-tests}}/findings.json
-Round trip findings: {{artifact_path:round-trip}}/findings.json
-Workflow property based tests findings: {{artifact_path:workflow-property-based-tests}}/findings.json
-Time warp sequences findings: {{artifact_path:time-warp-sequences}}/findings.json
-Expand coverage findings: {{artifact_path:expand-coverage}}/findings.json
-External dependency boundaries findings: {{artifact_path:external-dependency-boundaries}}/findings.json
-Externalized state accounting findings: {{artifact_path:externalized-state-accounting}}/findings.json
-Amm boundary liquidity findings: {{artifact_path:amm-boundary-liquidity}}/findings.json
-Payable fallback accounting findings: {{artifact_path:payable-fallback-accounting}}/findings.json
-Packed action parity findings: {{artifact_path:packed-action-parity}}/findings.json
-Batch atomicity unsupported actions findings: {{artifact_path:batch-atomicity-unsupported-actions}}/findings.json
-Router exact accounting findings: {{artifact_path:router-exact-accounting}}/findings.json
-Rounding direction audit findings: {{artifact_path:rounding-direction-audit}}/findings.json
-Market exhaustion boundaries findings: {{artifact_path:market-exhaustion-boundaries}}/findings.json
-Order replacement collateral findings: {{artifact_path:order-replacement-collateral}}/findings.json
-State machine boundaries findings: {{artifact_path:state-machine-boundaries}}/findings.json
-Lifecycle view boundaries findings: {{artifact_path:lifecycle-view-boundaries}}/findings.json
-Stateful invariant coverage findings: {{artifact_path:stateful-invariant-coverage}}/findings.json
-Stateful invariant implement properties findings: {{artifact_path:stateful-invariant-implement-properties}}/findings.json
-Stateful invariant campaign findings: {{artifact_path:stateful-invariant-campaign}}/findings.json
-Differential lane author findings: {{artifact_path:differential-lane-author}}/findings.json
-Differential repair and report review findings: {{artifact_path:differential-repair-and-report-review}}/findings.json
-
-Also inspect the Dynamic strategy generator outputs before deduping:
-
-Dynamic strategy plan:
-{{artifact_path:dynamic-strategy-generator}}/strategy-plan.json
-
-Dynamic selected strategies:
-{{artifact_path:dynamic-strategy-generator}}/selected-strategies.json
-
-Dynamic findings:
-{{artifact_path:dynamic-strategy-generator}}/findings.json
-
-Dynamic generated-test manifest:
-{{artifact_path:dynamic-strategy-generator}}/generated-tests.json
-
-Also consume every runtime-generated child of the threat/class goal groups plus
-the fixed roaming goal. Ultrafuzz renders one exact artifact path per generated
-node below, so read the enumerated paths and never guess a filesystem location,
-a group directory, or a node-ID pattern. A group pruned from this run has its
-line removed and produces nothing to account for:
-
-Threat-goal findings: {{artifact_path:threat-goals}}/findings.json
-
-Threat-goal generated tests: {{artifact_path:threat-goals}}/generated-tests.json
-
-Class-goal findings: {{artifact_path:class-goals}}/findings.json
-
-Class-goal generated tests: {{artifact_path:class-goals}}/generated-tests.json
-
-Roaming-goal findings: {{artifact_path:goal-roaming}}/findings.json
-
-Roaming-goal generated tests: {{artifact_path:goal-roaming}}/generated-tests.json
-
-A dynamic group renders as a bulleted list with one line per generated node, so
-the same instruction covers a group with one child and a group with hundreds.
-Dynamic children are ordinary finding producers; never inspect only a fixed
-prefix of the enumerated list.
-
-Admin/config boundary findings: {{artifact_path:admin-config-boundaries}}/findings.json
-
-Admin/config generated-test manifest: {{artifact_path:admin-config-boundaries}}/generated-tests.json
+{{ancestor_artifacts}}
 
 Then, build a stable dedupe key from the affected contract or library, function or workflow, property/oracle, normalized title, root cause hypothesis, and reproduction shape. Keep the clearest finding with the best evidence and reproducibility. Record every duplicate with its original id, kept id, title, and dedupe key.
 

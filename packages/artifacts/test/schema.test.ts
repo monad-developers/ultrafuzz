@@ -26,6 +26,7 @@ import {
   analysisBundleManifestJsonSchema,
   artifactContractDefinition,
   createInitialRunState,
+  derivePropertyImplementationCoverage,
   findingJsonSchema,
   findingsJsonSchema,
   generatedTestsJsonSchema,
@@ -379,6 +380,83 @@ test("artifact contract registry validates structured, empty, and malformed outp
       assert.equal(validateArtifactContract(id, contract.validEmptyExample).ok, true, id);
     }
   }
+});
+
+test("the final report contract rejects raw singleton ranges and accepts the canonical scalar span", () => {
+  const independentDetail = "  The source span establishes the bounded StableSwap loop.  ";
+  const issue = {
+    schema_version: FINDINGS_SCHEMA_VERSION,
+    id: "finding-1",
+    title: "StableSwap loop boundary",
+    status: "needs-review",
+    severity_guess: "Medium",
+    confidence: "medium",
+    summary: "A bounded loop is anchored to one source span.",
+    evidence: [
+      "scope",
+      {
+        kind: "source",
+        path: "contracts/main/CurveStableSwapNG.vy",
+        detail: independentDetail,
+        line_ranges: [{ line: 318, end_line: 337 }]
+      }
+    ]
+  };
+  const report = {
+    schema_version: "1.0",
+    run_metadata: {},
+    issues: [issue],
+    non_production_outcomes: []
+  };
+
+  assert.equal(
+    validateArtifactContract("ultrafuzz/findings@1", JSON.stringify([issue]), "findings.json").ok,
+    false,
+    "standalone findings keep the canonical line_ranges minItems=2 contract"
+  );
+  assert.equal(
+    validateArtifactContract("ultrafuzz/report@1", JSON.stringify(report), "report.json").ok,
+    false,
+    "report bytes stay strict until the producer boundary canonicalizes them"
+  );
+
+  const canonical = structuredClone(report);
+  (canonical.issues[0]!.evidence as unknown[])[1] = {
+    kind: "source",
+    path: "contracts/main/CurveStableSwapNG.vy",
+    detail: independentDetail,
+    line: 318,
+    end_line: 337
+  };
+  const validation = validateArtifactContract("ultrafuzz/report@1", JSON.stringify(canonical), "report.json");
+  assert.equal(validation.ok, true, JSON.stringify(validation.issues));
+  assert.deepEqual((validation.value as typeof canonical).issues[0]!.evidence[1], canonical.issues[0]!.evidence[1]);
+
+  const multiRange = structuredClone(report);
+  multiRange.issues[0]!.evidence[1] = {
+    kind: "source",
+    path: "contracts/main/CurveStableSwapNG.vy",
+    detail: independentDetail,
+    line_ranges: [
+      { line: 318, end_line: 337 },
+      { line: 411, end_line: 419 }
+    ]
+  };
+  const multiRangeValidation = validateArtifactContract(
+    "ultrafuzz/report@1",
+    JSON.stringify(multiRange),
+    "report.json"
+  );
+  assert.equal(multiRangeValidation.ok, true, JSON.stringify(multiRangeValidation.issues));
+  assert.deepEqual((multiRangeValidation.value as typeof report).issues[0]!.evidence[1], {
+    kind: "source",
+    path: "contracts/main/CurveStableSwapNG.vy",
+    detail: independentDetail,
+    line_ranges: [
+      { line: 318, end_line: 337 },
+      { line: 411, end_line: 419 }
+    ]
+  });
 });
 
 test("invariant evidence ledger preserves verbatim source entries and inventory joins", () => {
@@ -847,6 +925,136 @@ test("property implementation schema accepts selection metadata and typed blocke
   );
 });
 
+test("derives complete report implementation coverage only from authoritative property evidence", () => {
+  const catalog = validatePropertiesSchema({
+    schema_version: PROPERTIES_SCHEMA_VERSION,
+    properties: [
+      {
+        id: "property-high",
+        description: "High-priority implementation",
+        category: "accounting",
+        priority: "high",
+        sources: [{ source_node_id: "lens-a", source_property_id: "high-1" }]
+      },
+      {
+        id: "property-low-reference",
+        description: "Reference property below the threshold",
+        category: "liveness",
+        priority: "low",
+        reference_expectations: ["benchmark:expected-low", "benchmark:shared"],
+        sources: [{ source_node_id: "lens-b", source_property_id: "low-1" }]
+      },
+      {
+        id: "property-medium",
+        description: "Blocked medium-priority implementation",
+        category: "access-control",
+        priority: "medium",
+        reference_expectations: ["benchmark:shared"],
+        sources: [{ source_node_id: "lens-c", source_property_id: "medium-1" }]
+      },
+      {
+        id: "property-pending",
+        description: "Pending high-priority implementation",
+        category: "state-transition",
+        priority: "high",
+        sources: [{ source_node_id: "lens-d", source_property_id: "pending-1" }]
+      }
+    ]
+  });
+  const implementation = validateImplementedPropertiesSchema(
+    {
+      schema_version: IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
+      selection: {
+        priority_threshold: "medium",
+        priorities: ["high", "medium"],
+        property_ids: ["property-high", "property-low-reference", "property-medium", "property-pending"]
+      },
+      properties: [
+        {
+          property_id: "property-high",
+          status: "implemented",
+          implementation_paths: ["src/Properties.sol"],
+          test_paths: []
+        },
+        {
+          property_id: "property-low-reference",
+          status: "deferred",
+          implementation_paths: [],
+          test_paths: [],
+          reference_expectations: ["benchmark:expected-low", "benchmark:shared"],
+          blocker: {
+            code: "reference-harness-missing",
+            summary: "The reference harness does not expose the transition.",
+            next_action: "Add a reference-aware handler."
+          }
+        },
+        {
+          property_id: "property-medium",
+          status: "blocked",
+          implementation_paths: [],
+          test_paths: [],
+          reference_expectations: ["benchmark:shared"],
+          blocker: {
+            code: "oracle-missing",
+            summary: "The target exposes no stable accounting getter.",
+            next_action: "Add a read-only oracle."
+          }
+        },
+        {
+          property_id: "property-pending",
+          status: "pending",
+          implementation_paths: [],
+          test_paths: [],
+          blocker: {
+            code: "pending-review",
+            summary: "The generated handler requires bounded manual review.",
+            next_action: "Review and bind the handler."
+          }
+        }
+      ]
+    },
+    "implemented-properties.json",
+    { requireSelection: true }
+  );
+  assert.ok(catalog.value);
+  assert.ok(implementation.value);
+
+  const result = derivePropertyImplementationCoverage(catalog.value!, implementation.value!, {
+    configuredSelection: { priority_threshold: "medium", priorities: ["high", "medium"] },
+    requireConfiguredSelection: true
+  });
+  assert.equal(result.ok, true, JSON.stringify(result.issues));
+  assert.deepEqual(result.value, {
+    priority_threshold: "medium",
+    priorities: ["high", "medium"],
+    selected_property_ids: ["property-high", "property-low-reference", "property-medium", "property-pending"],
+    implemented_property_ids: ["property-high"],
+    blocked_property_ids: ["property-medium"],
+    pending_property_ids: ["property-pending"],
+    deferred_property_ids: ["property-low-reference"],
+    reference_expected_property_ids: ["property-low-reference", "property-medium"],
+    reference_expectation_ids: ["benchmark:expected-low", "benchmark:shared"],
+    blocker_summaries: [
+      "property-low-reference: The reference harness does not expose the transition.",
+      "property-medium: The target exposes no stable accounting getter.",
+      "property-pending: The generated handler requires bounded manual review."
+    ]
+  });
+
+  const wrongConfig = derivePropertyImplementationCoverage(catalog.value!, implementation.value!, {
+    configuredSelection: { priority_threshold: "high", priorities: ["high"] },
+    requireConfiguredSelection: true
+  });
+  assert.equal(wrongConfig.ok, false);
+  assert.ok(wrongConfig.issues.some((issue) => issue.code === "PROPERTY_IMPLEMENTATION_SELECTION_CONFIG_MISMATCH"));
+
+  const missingConfig = derivePropertyImplementationCoverage(catalog.value!, implementation.value!, {
+    requireConfiguredSelection: true
+  });
+  assert.equal(missingConfig.ok, false);
+  assert.ok(missingConfig.issues.some((issue) => issue.code === "PROPERTY_IMPLEMENTATION_CONFIG_MISSING"));
+});
+
 test("current implementation contract requires selection while historical contract remains readable", () => {
   const historical = JSON.stringify({
     schema_version: IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
@@ -917,6 +1125,8 @@ test("the findings contract accepts the house-style schema_version and states th
   assert.match(description, /severity_guess to exactly "High", "Medium", or "Low"/u);
   assert.match(description, /including one that is or may become a non-production record/u);
   assert.match(description, /"severity_guess":"Medium"/u);
+  assert.match(description, /disjoint spans with at least two typed line_ranges entries/u);
+  assert.match(description, /Keep independent prose in detail/u);
   assert.doesNotMatch(description, /"severity_guess":"medium"/u);
   assert.equal(
     validateArtifactContract(
@@ -965,6 +1175,108 @@ test("the findings contract does not require schema_version, and still rejects m
     "an otherwise malformed finding still fails the contract"
   );
   assert.equal(validateFindingSchema({ ...withoutVersion[0], property_ids: ["property-99", "property-99"] }).ok, false);
+});
+
+test("the findings schema validates typed disjoint evidence line ranges", () => {
+  const finding = {
+    id: "failure-1",
+    title: "Disjoint source evidence",
+    status: "candidate",
+    severity_guess: "medium",
+    confidence: "high",
+    summary: "Two disjoint source ranges support the finding.",
+    evidence: [
+      {
+        kind: "source",
+        path: "VeryLiquidVault.sol",
+        detail: "The ranges jointly establish the boundary.",
+        line_ranges: [
+          { line: 105, end_line: 107 },
+          { line: 154, end_line: 185 }
+        ]
+      }
+    ]
+  };
+
+  assert.equal(validateFindingSchema(finding).ok, true);
+  assert.equal(validateArtifactContract("ultrafuzz/findings@1", JSON.stringify([finding])).ok, true);
+  const evidenceSchema = JSON.stringify(findingJsonSchema.properties.evidence);
+  assert.match(evidenceSchema, /line_ranges/u);
+  assert.match(evidenceSchema, /end_line/u);
+
+  const scalar = structuredClone(finding);
+  (scalar.evidence as unknown[])[0] = {
+    kind: "source",
+    path: "VeryLiquidVault.sol",
+    detail: "One source span establishes the boundary.",
+    line: 105,
+    end_line: 107
+  };
+  assert.equal(validateFindingSchema(scalar).ok, true);
+  assert.equal(validateArtifactContract("ultrafuzz/findings@1", JSON.stringify([scalar])).ok, true);
+
+  for (const lineRanges of [
+    null,
+    [{ line: 105, end_line: 107 }],
+    [
+      { line: 105, end_line: 104 },
+      { line: 154, end_line: 185 }
+    ],
+    [{ line: 0 }, { line: 154, end_line: 185 }],
+    [
+      { line: "105", end_line: 107 },
+      { line: 154, end_line: 185 }
+    ],
+    [
+      { line: 105, end_line: 107, note: "not canonical" },
+      { line: 154, end_line: 185 }
+    ],
+    [{ line: Number.MAX_SAFE_INTEGER + 1 }, { line: 154, end_line: 185 }]
+  ]) {
+    const malformed = structuredClone(finding) as Record<string, unknown>;
+    malformed.evidence = [
+      {
+        kind: "source",
+        path: "VeryLiquidVault.sol",
+        line_ranges: lineRanges
+      }
+    ];
+    assert.equal(validateFindingSchema(malformed).ok, false);
+    assert.equal(validateArtifactContract("ultrafuzz/findings@1", JSON.stringify([malformed])).ok, false);
+  }
+
+  for (const evidence of [
+    { kind: "source", path: "VeryLiquidVault.sol", line: 0 },
+    { kind: "source", path: "VeryLiquidVault.sol", line: Number.MAX_SAFE_INTEGER + 1 },
+    { kind: "source", path: "VeryLiquidVault.sol", line: 107, end_line: 105 },
+    {
+      kind: "source",
+      path: "VeryLiquidVault.sol",
+      line: 105,
+      line_ranges: [
+        { line: 105, end_line: 107 },
+        { line: 154, end_line: 185 }
+      ]
+    },
+    {
+      kind: "source",
+      path: "VeryLiquidVault.sol",
+      end_line: 107,
+      line_ranges: [
+        { line: 105, end_line: 107 },
+        { line: 154, end_line: 185 }
+      ]
+    }
+  ]) {
+    const malformed = structuredClone(finding) as Record<string, unknown>;
+    malformed.evidence = [evidence];
+    assert.equal(validateFindingSchema(malformed).ok, false, JSON.stringify(evidence));
+    assert.equal(
+      validateArtifactContract("ultrafuzz/findings@1", JSON.stringify([malformed])).ok,
+      false,
+      JSON.stringify(evidence)
+    );
+  }
 });
 
 test("the findings schema recognizes typed campaign deduplication accounting without imposing it globally", () => {

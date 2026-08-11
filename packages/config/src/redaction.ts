@@ -1,5 +1,5 @@
 import { cloneResolvedConfig } from "./defaults.js";
-import { serializeResolvedConfigToml } from "./resolve.js";
+import { serializeResolvedConfigToml, type SerializeResolvedConfigTomlOptions } from "./resolve.js";
 import {
   SENSITIVE_REDACTION_PLACEHOLDER,
   hasRedactionPlaceholder,
@@ -56,8 +56,11 @@ export function redactResolvedConfig(config: ResolvedConfig): RedactedResolvedCo
   };
 }
 
-export function serializeRedactedResolvedConfigToml(redacted: RedactedResolvedConfig | ResolvedConfig): string {
-  return serializeResolvedConfigToml("config" in redacted ? redacted.config : redacted);
+export function serializeRedactedResolvedConfigToml(
+  redacted: RedactedResolvedConfig | ResolvedConfig,
+  options: SerializeResolvedConfigTomlOptions = {}
+): string {
+  return serializeResolvedConfigToml("config" in redacted ? redacted.config : redacted, options);
 }
 
 export function restoreRedactedConfig(

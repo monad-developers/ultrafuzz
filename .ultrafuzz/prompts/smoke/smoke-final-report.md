@@ -52,6 +52,12 @@ Write `{{artifact_path}}/report.json` with `schema_version: "1.0"`, a
 the scoring source of truth and must remain non-empty whenever at least one
 deduped finding is supported as a production bug.
 
+Copy the effective audit policy from the supplied run metadata into
+`report.json.run_metadata`: `audit_profile`,
+`audit_profile_catalog_digest`, `topology_digest`, `prompt_digest`, and
+`expanded_graph_fingerprint`. Use the runtime-recorded values exactly and show
+them in the Markdown Run summary.
+
 Write the exact same normalized production issue array to
 `{{artifact_path}}/findings.normalized.json`. Use `[]` only when the bounded
 final review supports no production issue; this is a required smoke terminal

@@ -358,6 +358,14 @@ describe("prompt semantic anchors", () => {
     }
   });
 
+  it("uses preflighted Recon coverage tooling without installing it during a run", () => {
+    const coverage = prompt("strategies/invariants/coverage.md");
+
+    expect(coverage).toContain("`recon-generate coverage`");
+    expect(coverage).not.toContain("npx -y recon-generate");
+    expect(coverage).not.toContain("recon-generate@latest");
+  });
+
   it("does not require unused fuzzer CLIs during project discovery", () => {
     const markdown = prompt("setup/project-discovery.md");
     const promptCorpus = loadBuiltInPromptAssets()
@@ -434,7 +442,7 @@ describe("prompt semantic anchors", () => {
       "stateful-invariant-campaign"
     );
     expect(`${topologySource}\n${aggregate}\n${dynamic}`).not.toContain("stateful-invariant-recon-campaign");
-    expect(aggregate).toContain("{{artifact_path:stateful-invariant-campaign}}/generated-tests.json");
+    expect(aggregate).toContain("{{ancestor_generated_test_manifests}}");
     expect(dynamic).toContain("{{artifact_path:stateful-invariant-campaign}}/generated-tests.json");
 
     expect(campaign).toContain("final recon-fuzzer campaign");
@@ -657,6 +665,8 @@ describe("prompt semantic anchors", () => {
     expect(markdown).toContain("non-empty `detection_rates` or `strategies` array");
     expect(markdown).toContain("Use exactly one of\nthese array keys; never emit both");
     expect(markdown).toContain("omit both `fuzzer_backend` and `fuzzer_backends`");
+    expect(markdown).toContain("never emit a one-entry\n`line_ranges`");
+    expect(markdown).toContain("never combine `line_ranges` with `line` or `end_line`");
   });
 
   it("keeps threat-model-driven additive goals and provenance in the default prompts and topology", () => {
@@ -830,6 +840,10 @@ describe("prompt semantic anchors", () => {
     const template = readFileSync(templatePath, "utf8");
     expect(template).toContain("Use `[]` when there are no findings");
     expect(template).toContain("without anchors or line selectors");
+    expect(template).toContain("disjoint spans in `line_ranges`");
+    expect(template).toContain("Never emit a one-entry `line_ranges`");
+    expect(template).toContain("never combine `line_ranges` with `line` or `end_line`");
+    expect(template).toContain("Keep independent explanatory prose in `detail`");
     // The contract accepts findings without a schema_version, so the template must not demand one.
     expect(template).not.toContain('Use `schema_version: "1.0"`');
     expect(template).toContain("`schema_version` is optional");

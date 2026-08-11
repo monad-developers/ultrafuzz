@@ -170,15 +170,14 @@ provider and Modal budgets remain the hard aggregate cost boundary.
 
 The smoke has exactly three targets: one Foundry target, one Hardhat target, and
 one Vyper target. It defaults to GPT-5.6 Luna at `high`, uses one strategy loop,
-and uses the dedicated `benchmarks/smoke-benchmark.yml` graph. One
-medium-reasoning context node feeds four high-reasoning bug-finding strategies
-in parallel; medium-reasoning dedupe and report nodes finish the row. Invariant,
+and uses the `smoke` profile's packaged graph. One context node feeds four
+bug-finding strategies in parallel, then dedupe and report nodes finish the
+row; every node uses the selected runner model and reasoning level. Invariant,
 differential, dynamic, threat-model, goal-fanout, and production-only review
-stages are absent from this graph, so the lane stays cheap, bounded, and
-comparable with its already-published observations.
-Repository variable `BENCHMARK_SMOKE_OPENAI_MODEL` can override the
-smoke model without changing its single OpenAI/Codex provider, fixed
-high/medium reasoning split, or target and topology limits.
+stages are absent from this graph. Repository variable
+`BENCHMARK_SMOKE_OPENAI_MODEL` can override the
+smoke model without changing its single OpenAI/Codex provider or its target and
+topology limits.
 
 A manual `workflow_dispatch` chooses `smoke`, `full`, or `threat-model` with the
 `benchmark_lane` input. Push events always select smoke with its checked-in
@@ -197,9 +196,9 @@ strategies, with all three disable flags set to `false`.
 ### The `threat-model` release gate
 
 `threat-model` is the v0.1.0 release gate. It is the only lane that runs the
-**production** `.ultrafuzz/topology.yml` against the pinned three-target
+**production** `full` packaged topology against the pinned three-target
 Ultrafuzz-bench cohort, and it exists because neither existing lane can: smoke
-substitutes the reduced `benchmarks/smoke-benchmark.yml` graph, and full is
+substitutes the reduced packaged `smoke` graph, and full is
 bound to the EVMBench cohort. Without it, the `threat-model`, `goal-plan`,
 `threat-goals` and `class-goals` nodes never meet a real pinned protocol.
 

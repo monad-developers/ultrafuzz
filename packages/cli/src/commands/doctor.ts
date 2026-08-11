@@ -23,7 +23,12 @@ function renderDoctor(value: DoctorValue): string {
     ...value.checks.map((check) => `- ${check.name}: ${check.status} - ${check.summary}`),
     "Toolchain:",
     ...value.toolchain.map(
-      (entry) => `- ${entry.name}: ${entry.available ? (entry.path ?? "available") : "missing from PATH"}`
+      (entry) =>
+        `- ${entry.name}: ${
+          entry.available
+            ? `${entry.path ?? "available"}${entry.version == null ? "" : ` (${entry.version})`}`
+            : "missing from execution environment"
+        }`
     ),
     "Workflow engine:",
     `- bundled: ${engine.bundled_version}`,

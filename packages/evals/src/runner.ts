@@ -2,7 +2,13 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { readRunState, writeJsonDurable, type RunState } from "@ultrafuzz/artifacts";
-import type { EvalConfig, RuntimeConfigOverrides } from "@ultrafuzz/config";
+import {
+  auditProfile,
+  loadAuditProfileCatalog,
+  packagedTopologyDigest,
+  type EvalConfig,
+  type RuntimeConfigOverrides
+} from "@ultrafuzz/config";
 import { startRun, syncRun, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
 import { BENCHMARK_SMOKE_WORKFLOW_PROFILE } from "./benchmark-manifest.js";
@@ -248,7 +254,7 @@ export async function launchEvalRow(input: LaunchEvalRowInput): Promise<EvalRunR
   // buys a relaunch of work that already ran. `readRunFingerprints` swallows its
   // own faults; `resolveTerminalReportPath` is guarded here instead of there
   // because its callers elsewhere do want to hear about an unresolvable path.
-  const runFingerprints = launch.ok && launch.runRoot !== undefined ? readRunFingerprints(launch.runRoot) : {};
+  const runFingerprints = launch.ok && launch.runRoot !== undefined ? readRunPolicy(launch.runRoot) : {};
   const graphFingerprint = launch.graphFingerprint ?? runFingerprints.graph_fingerprint;
   const configFingerprint = launch.configFingerprint ?? runFingerprints.config_fingerprint;
   const executionArtifactId = launch.executionArtifactId ?? input.candidateProvenance?.execution_artifact_id;
@@ -263,6 +269,14 @@ export async function launchEvalRow(input: LaunchEvalRowInput): Promise<EvalRunR
           status: "launched",
           ...(graphFingerprint !== undefined ? { graph_fingerprint: graphFingerprint } : {}),
           ...(configFingerprint !== undefined ? { config_fingerprint: configFingerprint } : {}),
+          ...(runFingerprints.audit_profile === undefined ? {} : { audit_profile: runFingerprints.audit_profile }),
+          ...(runFingerprints.audit_profile_catalog_digest === undefined
+            ? {}
+            : { audit_profile_catalog_digest: runFingerprints.audit_profile_catalog_digest }),
+          ...(runFingerprints.topology_digest === undefined
+            ? {}
+            : { topology_digest: runFingerprints.topology_digest }),
+          ...(runFingerprints.prompt_digest === undefined ? {} : { prompt_digest: runFingerprints.prompt_digest }),
           ...(executionArtifactId !== undefined ? { execution_artifact_id: executionArtifactId } : {}),
           workflow_ids: launch.workflowIds,
           launcher: { status: "succeeded", started_at: startedAt, finished_at: finishedAt },
@@ -283,6 +297,44 @@ export async function launchEvalRow(input: LaunchEvalRowInput): Promise<EvalRunR
   return record;
 }
 
+/**
+ * Refuse to launch a benchmark whose withheld reference paths are still on
+ * disk. Materialization removes them; this is the fail-closed check that a
+ * hand-prepared or stale checkout cannot quietly reintroduce the answer key.
+ */
+export function assertHeldOutPathsAbsent(
+  targetId: string,
+  targetPath: string,
+  heldOutPaths: readonly string[] | undefined
+): void {
+  const declared = (heldOutPaths ?? []).map((relative) => relative.trim().replace(/\/+$/u, ""));
+  // Defence in depth: the suite schema already rejects these, but this guard
+  // joins to the checkout and must never be pointed outside it.
+  const escaping = declared.filter(
+    (relative) =>
+      relative !== "" &&
+      (path.isAbsolute(relative) ||
+        relative.split(/[\\/]/u).some((segment) => segment === ".." || segment === "." || segment === ".git"))
+  );
+  if (escaping.length > 0) {
+    throw new EvalError(
+      "EVAL_TARGET_HELD_OUT_PATH_UNSAFE",
+      `target ${targetId} declares held-out paths outside the checkout: ${escaping.sort().join(", ")}`,
+      { target: targetId, held_out_paths: escaping.sort() }
+    );
+  }
+  const present = declared
+    .filter((relative) => relative !== "")
+    .filter((relative) => fs.existsSync(path.join(targetPath, relative)))
+    .sort();
+  if (present.length === 0) return;
+  throw new EvalError(
+    "EVAL_TARGET_HELD_OUT_PATH_PRESENT",
+    `target ${targetId} still contains held-out benchmark paths: ${present.join(", ")}`,
+    { target: targetId, held_out_paths: present }
+  );
+}
+
 /** Default launcher: start a detached ultrafuzz run inside the target checkout. */
 export const runtimeRowLauncher: RowLauncher = async (input) => {
   if (input.row.target.path === undefined) {
@@ -292,6 +344,7 @@ export const runtimeRowLauncher: RowLauncher = async (input) => {
       { target: input.row.target_id }
     );
   }
+  assertHeldOutPathsAbsent(input.row.target_id, input.row.target.path, input.row.target.held_out_paths);
   const runnerProfile = input.suite.model_profiles[input.row.runner_model_profile];
   const result = await startRun({
     projectRoot: input.row.target.path,
@@ -357,26 +410,30 @@ export function benchmarkModelProfileOverrides(
   if (!isRecordValue(row.workflow_input)) return {};
   const execution = row.workflow_input.benchmark_execution;
   if (!isRecordValue(execution) || execution.workflow_profile !== BENCHMARK_SMOKE_WORKFLOW_PROFILE) return {};
+  assertSmokeAuditPolicy(execution);
   if (runnerProfile === undefined) {
     throw new EvalError("EVAL_MODEL_PROFILE_UNKNOWN", "smoke benchmark runner profile is missing");
   }
-  const selectedModel = {
-    agent: runnerProfile.agent,
-    ...(runnerProfile.model === undefined ? {} : { model: runnerProfile.model })
-  };
-  const preservesRunnerReasoning = runnerProfile.agent === "KimiAgent" || runnerProfile.agent === "DeepSeekAgent";
-  const benchmarkReasoning = preservesRunnerReasoning ? (runnerProfile.reasoning ?? "max") : "high";
-  const coordinationReasoning = preservesRunnerReasoning ? (runnerProfile.reasoning ?? "max") : "medium";
   return {
     runtimeOverrides: {
-      models: {
-        profiles: {
-          benchmark: { ...selectedModel, reasoning: benchmarkReasoning },
-          "smoke-coordination": { ...selectedModel, reasoning: coordinationReasoning }
-        }
-      }
+      auditProfile: "smoke"
     }
   };
+}
+
+function assertSmokeAuditPolicy(execution: Record<string, unknown>): void {
+  const catalog = loadAuditProfileCatalog();
+  const topologyDigest = packagedTopologyDigest(auditProfile("smoke", catalog), catalog);
+  if (
+    execution.audit_profile !== "smoke" ||
+    execution.audit_profile_catalog_digest !== catalog.digest ||
+    execution.topology_digest !== topologyDigest
+  ) {
+    throw new EvalError(
+      "EVAL_BENCHMARK_EXECUTION_INVALID",
+      "smoke benchmark audit profile, catalog digest, and topology digest must match the packaged smoke policy"
+    );
+  }
 }
 
 export interface WatchEvalRowInput {
@@ -587,19 +644,35 @@ function readTerminalReportPath(runRoot: string): string | undefined {
   }
 }
 
-function readRunFingerprints(runRoot: string): {
+function readRunPolicy(runRoot: string): {
   graph_fingerprint?: string;
   config_fingerprint?: string;
+  audit_profile?: string;
+  audit_profile_catalog_digest?: string;
+  topology_digest?: string;
+  prompt_digest?: string;
 } {
+  const result: ReturnType<typeof readRunPolicy> = {};
   try {
-    const value = JSON.parse(fs.readFileSync(path.join(runRoot, "state.json"), "utf8")) as Record<string, unknown>;
-    return {
-      ...(typeof value.graph_fingerprint === "string" ? { graph_fingerprint: value.graph_fingerprint } : {}),
-      ...(typeof value.config_fingerprint === "string" ? { config_fingerprint: value.config_fingerprint } : {})
-    };
+    const state = JSON.parse(fs.readFileSync(path.join(runRoot, "state.json"), "utf8")) as Record<string, unknown>;
+    if (typeof state.graph_fingerprint === "string") result.graph_fingerprint = state.graph_fingerprint;
+    if (typeof state.config_fingerprint === "string") result.config_fingerprint = state.config_fingerprint;
   } catch {
-    return {};
+    // Older or partial launches may not have durable state yet.
   }
+  try {
+    const plan = JSON.parse(fs.readFileSync(path.join(runRoot, "plan.json"), "utf8")) as Record<string, unknown>;
+    const auditPolicy = isRecordValue(plan.audit_profile) ? plan.audit_profile : {};
+    if (typeof auditPolicy.id === "string") result.audit_profile = auditPolicy.id;
+    if (typeof auditPolicy.catalog_digest === "string") {
+      result.audit_profile_catalog_digest = auditPolicy.catalog_digest;
+    }
+    if (typeof auditPolicy.topology_digest === "string") result.topology_digest = auditPolicy.topology_digest;
+    if (typeof plan.prompt_digest === "string") result.prompt_digest = plan.prompt_digest;
+  } catch {
+    // Compatibility with pre-profile and interrupted plans.
+  }
+  return result;
 }
 
 export function isTerminalRunStatus(status: string): boolean {

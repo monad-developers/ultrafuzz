@@ -105,6 +105,14 @@
               "minLength": 1
             }
           },
+          "requiredCommands": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*$"
+            }
+          },
           "artifactDir": {
             "type": "string",
             "minLength": 1

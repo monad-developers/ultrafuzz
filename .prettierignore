@@ -13,3 +13,4 @@ packages/*/dist
 packages/*/dist-test
 
 prompts/**/*.md
+docs/reference/audit-profiles.md

@@ -1,10 +1,14 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 import { assertNoSymlinkComponents, goalPlanJsonSchema, threatModelJsonSchema } from "@ultrafuzz/artifacts";
-import { redactResolvedConfig, resolveConfig, serializeRedactedResolvedConfigToml } from "@ultrafuzz/config";
+import {
+  packagedTopology,
+  redactResolvedConfig,
+  resolveConfig,
+  serializeRedactedResolvedConfigToml
+} from "@ultrafuzz/config";
 import { builtInPromptRelativePaths, scaffoldPrompts } from "@ultrafuzz/prompts";
 import { defaultReferenceCatalogYaml } from "@ultrafuzz/references";
 import { loadRuntimeTemplate } from "./runtime-template.js";
@@ -12,7 +16,7 @@ import { renderSmithersPackageJson } from "./smithers-package.js";
 import type { InitProjectInput, InitProjectResult, RuntimeDiagnostic } from "./types.js";
 import { configDiagnostics, runtimeFailure, runtimeResult, toProjectRelative } from "./utils.js";
 
-const DEFAULT_TOPOLOGY = loadDefaultTopology();
+const DEFAULT_TOPOLOGY = fs.readFileSync(packagedTopology("full").path, "utf8");
 
 const AGENT_REGISTRY_FILE = ".smithers/agents/index.ts";
 const MAX_STOCK_AGENT_ADAPTER_BYTES = 256 * 1024;
@@ -136,7 +140,7 @@ export function initProject(input: InitProjectInput) {
     writeProjectFile(
       projectRoot,
       "ultrafuzz.toml",
-      serializeRedactedResolvedConfigToml(redacted),
+      serializeRedactedResolvedConfigToml(redacted, { omitAuditProfileManagedSettings: true }),
       input.force === true,
       created,
       preserved,
@@ -1532,22 +1536,4 @@ function uniqueSorted(values: string[]): string[] {
 
 function publicInitPaths(values: string[]): string[] {
   return uniqueSorted(values).filter((value) => !value.toLowerCase().includes("smithers"));
-}
-
-function loadDefaultTopology(): string {
-  return fs.readFileSync(defaultTopologyPath(), "utf8");
-}
-
-function defaultTopologyPath(): string {
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  const candidates = [
-    path.join(here, "topology.yml"),
-    path.resolve(here, "../../../.ultrafuzz/topology.yml"),
-    path.resolve(here, "../../../../.ultrafuzz/topology.yml")
-  ];
-  const found = candidates.find((candidate) => fs.existsSync(candidate));
-  if (found === undefined) {
-    throw new Error(`unable to locate topology.yml from ${here}`);
-  }
-  return found;
 }

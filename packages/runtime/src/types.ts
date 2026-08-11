@@ -7,7 +7,12 @@ import type {
   RunLayout,
   RunState
 } from "@ultrafuzz/artifacts";
-import type { ResolvedConfig, RuntimeConfigOverrides } from "@ultrafuzz/config";
+import type {
+  AuditProfileSettingOrigin,
+  AuditProfileSettings,
+  ResolvedConfig,
+  RuntimeConfigOverrides
+} from "@ultrafuzz/config";
 import type { MaterializeCopySelection } from "@ultrafuzz/security";
 import type { ExpandedGraph } from "@ultrafuzz/topology";
 
@@ -59,10 +64,17 @@ export interface PolicyPosture {
   trust: PostureItem;
 }
 
+export interface TopologyTransform {
+  strategyLoops?: number;
+  excludedNodeIds?: string[];
+}
+
 export interface ValidateProjectInput {
   projectRoot: string;
   /** Optional candidate-owned topology override, used by eval variants. */
   topologyPath?: string;
+  /** Internal execution transform; validation applies it so preflight matches the planned graph. */
+  topologyTransform?: TopologyTransform;
   runtimeOverrides?: RuntimeConfigOverrides;
   env?: Record<string, string | undefined>;
   agent?: string;
@@ -76,6 +88,12 @@ export interface ValidateProjectResult {
   policy_posture: PolicyPosture;
   resolved_config?: {
     schema_version: string;
+    audit_profile: string;
+    audit_profile_catalog_digest: string;
+    audit_profile_topology_path?: string;
+    audit_profile_effective_settings: AuditProfileSettings;
+    audit_profile_setting_origins: Record<string, AuditProfileSettingOrigin>;
+    audit_profile_overridden_settings: string[];
     default_agent: string;
     default_model?: string;
     default_reasoning?: string;
@@ -87,8 +105,11 @@ export interface ValidateProjectResult {
   };
   topology?: {
     path: string;
+    origin?: "project-default" | "audit-profile" | "project-config" | "runtime-override";
+    digest?: string;
     logical_nodes: number;
     expanded_nodes: number;
+    required_commands?: string[];
   };
   prompts?: {
     prompt_dir: string;
@@ -104,13 +125,7 @@ export interface PlanRunInput extends ValidateProjectInput {
   mode?: "run" | "resume" | "replay" | "fork";
   prompt?: string;
   workflowInput?: unknown;
-  topologyTransform?: TopologyTransform;
   maxConcurrency?: number;
-}
-
-export interface TopologyTransform {
-  strategyLoops?: number;
-  excludedNodeIds?: string[];
 }
 
 export interface PlannedGraphNode {
@@ -216,6 +231,7 @@ export interface PlanRunValue {
   graph_fingerprint: string;
   config_fingerprint: string;
   redacted_config_fingerprint: string;
+  prompt_digest: string;
   output_root: string;
   state_nodes: NodeStateInput[];
   resolved_config: ResolvedConfig;
@@ -229,7 +245,12 @@ export interface PlanRunValue {
   vulnerability_database?: { relative_path: string; sha256: string };
 }
 
-export type StartRunInput = PlanRunInput;
+export interface StartRunInput extends PlanRunInput {
+  /** Execution-provider probe override for embedders and isolated tests. */
+  requiredCommandProbe?: (
+    commands: readonly string[]
+  ) => Promise<Array<{ name: string; available: boolean; path: string | null; version: string | null }>>;
+}
 
 export interface StartRunValue {
   run_id: string;
@@ -356,6 +377,7 @@ export interface RunProgressSummary {
 
 export interface RunHealthValue extends RunListEntry, RunProgressSummary {
   workflow_run_id: string;
+  audit_profile?: Record<string, unknown>;
   workflow_status: string;
   verdict: RunHealthVerdict;
   reason: string;
@@ -742,6 +764,8 @@ export interface DoctorValue {
     required: boolean;
     available: boolean;
     path: string | null;
+    /** Best-effort first line from `<command> --version`. */
+    version?: string | null;
   }>;
   workflow_engine: {
     bundled_version: string;
@@ -763,6 +787,8 @@ export interface DoctorInput {
   env?: Record<string, string | undefined>;
   /** Skips the registry lookup; the latest version is reported as `unknown`. */
   offline?: boolean;
+  /** Execution-provider probe override for embedders and isolated tests. */
+  requiredCommandProbe?: StartRunInput["requiredCommandProbe"];
 }
 
 export interface SyncRunInput {

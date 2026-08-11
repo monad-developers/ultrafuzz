@@ -1,7 +1,16 @@
+import type { AuditProfileSettings, DynamicStrategiesEnumerator } from "./audit-profiles.js";
+
 export type DiagnosticSeverity = "error" | "warning";
 
 export type ConfigDiagnosticSource =
-  "defaults" | "prompt-metadata" | "project-toml" | "environment" | "runtime" | "validation" | "redaction";
+  | "defaults"
+  | "audit-profile"
+  | "prompt-metadata"
+  | "project-toml"
+  | "environment"
+  | "runtime"
+  | "validation"
+  | "redaction";
 
 export interface ConfigDiagnostic {
   code: string;
@@ -179,7 +188,11 @@ export interface EvalConfig {
 
 export interface ResolvedConfig {
   schemaVersion: string;
-  dynamicStrategiesEnumerator: number;
+  auditProfile: string;
+  topologyPath?: string;
+  strategyLoops?: number;
+  auditProfileResolution: AuditProfileResolution;
+  dynamicStrategiesEnumerator: DynamicStrategiesEnumerator;
   project: ProjectConfig;
   run: RunConfig;
   execution: ExecutionConfig;
@@ -191,6 +204,19 @@ export interface ResolvedConfig {
   eval: EvalConfig;
 }
 
+export interface AuditProfileResolution {
+  catalogSchemaVersion: number;
+  catalogDigest: string;
+  declaredTopologyPath?: string;
+  settings: AuditProfileSettings;
+  effectiveSettings: AuditProfileSettings;
+  settingOrigins: Record<string, AuditProfileSettingOrigin>;
+  overriddenSettings: string[];
+}
+
+export type AuditProfileSettingOrigin =
+  "default" | "audit-profile" | "project-config" | "environment" | "runtime-override";
+
 export interface PromptMetadataLayer {
   models?: Record<string, Partial<ModelProfile> & { id?: string }>;
   run?: Partial<RunConfig>;
@@ -198,7 +224,10 @@ export interface PromptMetadataLayer {
 
 export interface ProjectConfigInput {
   schemaVersion?: string;
-  dynamicStrategiesEnumerator?: number;
+  auditProfile?: string;
+  topologyPath?: string;
+  strategyLoops?: number;
+  dynamicStrategiesEnumerator?: DynamicStrategiesEnumerator;
   project?: Partial<ProjectConfig>;
   run?: Partial<RunConfig>;
   execution?: ExecutionConfigInput;

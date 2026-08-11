@@ -46,8 +46,7 @@ import {
   fingerprintGraph,
   loadTopology,
   type ExpandedGraph,
-  type ExpandedNode,
-  type ProjectTopology
+  type ExpandedNode
 } from "@ultrafuzz/topology";
 
 import {
@@ -56,7 +55,8 @@ import {
   type PlanRunValue,
   type PlannedGraph,
   type PlannedGraphNode,
-  type RenderedPromptPlan
+  type RenderedPromptPlan,
+  type RuntimeDiagnostic
 } from "./types.js";
 import { projectArtifactSchemaDir } from "./init.js";
 import { validateProject } from "./validate.js";
@@ -72,17 +72,32 @@ import {
   sha256Stable
 } from "./utils.js";
 import { checkDependencyLegality } from "./artifact-gates.js";
+import { effectiveAuditPolicy } from "./audit-profile-policy.js";
 import { forgeGuardMetadata } from "./forge-guard.js";
 import {
   materializeVulnerabilityDatabasePlannerCatalog,
   VULNERABILITY_DATABASE_REFERENCE_NODE_ID,
   type MaterializedVulnerabilityDatabaseCatalog
 } from "./vulnerability-database.js";
+import {
+  promptTextsForCatalog,
+  transformPromptCatalogForRun,
+  transformTopologyForRun
+} from "./topology-transform.js";
+
+export { promptTextsForCatalog, transformPromptCatalogForRun } from "./topology-transform.js";
 
 const RENDERED_PROMPT_SNAPSHOT_DIR = "prompt-snapshots";
 const PROMPT_REPAIR_LOCK = ".prompt-repair";
 
-export async function planRun(input: PlanRunInput) {
+interface PlanRunHooks {
+  beforeMaterialize?(context: {
+    resolvedConfig: PlanRunValue["resolved_config"];
+    expandedGraph: ExpandedGraph;
+  }): Promise<RuntimeDiagnostic[]>;
+}
+
+export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
   const projectRoot = path.resolve(input.projectRoot);
   const validation = await validateProject(input);
   if (!validation.ok || !validation.value) {
@@ -94,6 +109,24 @@ export async function planRun(input: PlanRunInput) {
     return runtimeFailure<PlanRunValue>(resolved.diagnostics);
   }
   applyWorkflowRunOverrides(resolved.config, input);
+
+  let auditPolicy: ReturnType<typeof effectiveAuditPolicy>;
+  try {
+    auditPolicy = effectiveAuditPolicy({
+      projectRoot,
+      config: resolved.config,
+      runtimeTopologyPath: input.topologyPath,
+      runtimeStrategyLoops: input.topologyTransform?.strategyLoops
+    });
+  } catch (error) {
+    return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "audit-profile", "AUDIT_PROFILE_POLICY_INVALID")]);
+  }
+  const effectiveTopologyTransform: PlanRunInput["topologyTransform"] = {
+    ...(auditPolicy.strategyLoops === undefined ? {} : { strategyLoops: auditPolicy.strategyLoops }),
+    ...(input.topologyTransform?.excludedNodeIds === undefined
+      ? {}
+      : { excludedNodeIds: input.topologyTransform.excludedNodeIds })
+  };
 
   const runId = input.runId ?? generateRunId(input.mode ?? "run");
   const configFingerprint = sha256Stable(resolved.config);
@@ -118,12 +151,12 @@ export async function planRun(input: PlanRunInput) {
   try {
     const topology = transformTopologyForRun(
       loadTopology(projectRoot, {
-        ...(input.topologyPath === undefined ? {} : { topologyPath: input.topologyPath }),
+        topologyPath: auditPolicy.effectiveTopologyPath,
         requirePromptFiles: true
       }),
-      input.topologyTransform
+      effectiveTopologyTransform
     );
-    catalog = transformPromptCatalogForRun(loadPromptCatalog({ projectRoot }), input.topologyTransform);
+    catalog = transformPromptCatalogForRun(loadPromptCatalog({ projectRoot }), effectiveTopologyTransform);
     expandedGraph = expandTopology(topology, {
       projectRoot,
       runId,
@@ -139,6 +172,7 @@ export async function planRun(input: PlanRunInput) {
   }
 
   const graph = toPlannedGraph(expandedGraph, catalog);
+  const promptDigest = promptDigestForGraph(graph, catalog);
   let referenceExpectationsSource: ReferenceExpectationProvision | undefined;
   try {
     referenceExpectationsSource = provisionReferenceExpectationOutput(
@@ -153,6 +187,16 @@ export async function planRun(input: PlanRunInput) {
   const graphDiagnostics = checkDependencyLegality(graph);
   if (hasRuntimeErrors(graphDiagnostics)) {
     return runtimeFailure<PlanRunValue>(graphDiagnostics);
+  }
+  let preMaterializeDiagnostics: RuntimeDiagnostic[];
+  try {
+    preMaterializeDiagnostics =
+      (await hooks.beforeMaterialize?.({ resolvedConfig: resolved.config, expandedGraph })) ?? [];
+  } catch (error) {
+    preMaterializeDiagnostics = [diagnosticFromError(error, "runtime", "RUN_PREFLIGHT_FAILED")];
+  }
+  if (hasRuntimeErrors(preMaterializeDiagnostics)) {
+    return runtimeFailure<PlanRunValue>(preMaterializeDiagnostics);
   }
   const graphFingerprint = fingerprintGraph(expandedGraph);
   const createdAt = new Date().toISOString();
@@ -200,6 +244,26 @@ export async function planRun(input: PlanRunInput) {
         mode: input.mode ?? "run",
         workflow_ids: [],
         redacted_config_fingerprint: redactedConfigFingerprint,
+        prompt_digest: promptDigest,
+        audit_profile: {
+          requested: auditPolicy.auditProfile,
+          effective: auditPolicy.auditProfile,
+          catalog_schema_version: auditPolicy.catalogSchemaVersion,
+          catalog_digest: auditPolicy.catalogDigest,
+          settings: auditPolicy.profileSettings,
+          effective_settings: auditPolicy.effectiveSettings,
+          setting_origins: auditPolicy.settingOrigins,
+          overridden_settings: auditPolicy.overriddenSettings,
+          ...(auditPolicy.declaredTopologyPath === undefined
+            ? {}
+            : { declared_topology_path: auditPolicy.declaredTopologyPath }),
+          effective_topology_path: auditPolicy.effectiveTopologyDisplayPath,
+          topology_path_origin: auditPolicy.topologyPathOrigin,
+          topology_overridden: auditPolicy.topologyOverridden,
+          topology_digest: auditPolicy.topologyDigest,
+          prompt_digest: promptDigest,
+          expanded_graph_fingerprint: graphFingerprint
+        },
         forge_guard: forgeGuardMetadata(resolved.config, false)
       }
     });
@@ -273,6 +337,7 @@ export async function planRun(input: PlanRunInput) {
     graph_fingerprint: graphFingerprint,
     config_fingerprint: configFingerprint,
     redacted_config_fingerprint: redactedConfigFingerprint,
+    prompt_digest: promptDigest,
     execution: resolved.config.execution,
     ...(vulnerabilityDatabase === undefined
       ? {}
@@ -290,6 +355,19 @@ export async function planRun(input: PlanRunInput) {
           }
         }),
     topology: validation.value.topology,
+    audit_profile: {
+      id: auditPolicy.auditProfile,
+      catalog_digest: auditPolicy.catalogDigest,
+      effective_topology_path: auditPolicy.effectiveTopologyDisplayPath,
+      topology_path_origin: auditPolicy.topologyPathOrigin,
+      topology_digest: auditPolicy.topologyDigest,
+      prompt_digest: promptDigest,
+      expanded_graph_fingerprint: graphFingerprint,
+      effective_settings: auditPolicy.effectiveSettings,
+      setting_origins: auditPolicy.settingOrigins,
+      overridden_settings: auditPolicy.overriddenSettings,
+      topology_overridden: auditPolicy.topologyOverridden
+    },
     rendered_prompts: persistedRenderedPrompts,
     policy_posture: Object.fromEntries(
       Object.entries(validation.value.policy_posture).map(([key, value]) => [key, value.status])
@@ -305,6 +383,7 @@ export async function planRun(input: PlanRunInput) {
     graph_fingerprint: graphFingerprint,
     config_fingerprint: configFingerprint,
     redacted_config_fingerprint: redactedConfigFingerprint,
+    prompt_digest: promptDigest,
     output_root: outputRoot,
     state_nodes: stateNodes,
     resolved_config: resolved.config,
@@ -320,6 +399,24 @@ export async function planRun(input: PlanRunInput) {
           }
         })
   });
+}
+
+function promptDigestForGraph(graph: PlannedGraph, catalog: PromptCatalog): string {
+  const promptIds = Array.from(
+    new Set(graph.nodes.filter((node) => node.prompt_path.length > 0).map((node) => node.prompt_id))
+  ).sort();
+  return sha256Stable(
+    promptIds.map((promptId) => {
+      const entry = catalog.entries.get(promptId);
+      if (entry === undefined) throw new Error(`prompt ${promptId} is absent from the effective prompt catalog`);
+      return {
+        id: entry.id,
+        path: entry.relativePath,
+        source: entry.source,
+        markdown: entry.markdown
+      };
+    })
+  );
 }
 
 export async function repairMissingRenderedPromptsForRun(input: {
@@ -671,80 +768,6 @@ function validateRenderedPromptFile(
   if (sha256Stable(fs.readFileSync(promptPath, "utf8")) !== expectedDigest) {
     throw new Error(`existing rendered prompt does not match persisted task metadata for ${attemptId}`);
   }
-}
-
-export function transformPromptCatalogForRun(
-  catalog: PromptCatalog,
-  transform: PlanRunInput["topologyTransform"]
-): PromptCatalog {
-  const excluded = transform?.excludedNodeIds ?? [];
-  if (excluded.length === 0) return catalog;
-  const tokens = excluded.flatMap((id) => [`{{artifact_path:${id}}}`, `{{artifact_handoff:${id}}}`]);
-  const entries = new Map(
-    [...catalog.entries].map(([id, entry]) => {
-      const body = entry.body
-        .split("\n")
-        .filter((line) => !tokens.some((token) => line.includes(token)))
-        .join("\n");
-      return [id, { ...entry, body }];
-    })
-  );
-  return { ...catalog, entries };
-}
-
-export function promptTextsForCatalog(catalog: PromptCatalog): Record<string, string> {
-  return Object.fromEntries(
-    [...catalog.entries.values()].flatMap((entry) => [
-      [entry.id, entry.body],
-      [entry.relativePath, entry.body]
-    ])
-  );
-}
-
-export function transformTopologyForRun(
-  topology: ProjectTopology,
-  transform: PlanRunInput["topologyTransform"]
-): ProjectTopology {
-  if (
-    transform === undefined ||
-    (transform.strategyLoops === undefined && (transform.excludedNodeIds?.length ?? 0) === 0)
-  ) {
-    return topology;
-  }
-  const excluded = new Set(transform.excludedNodeIds ?? []);
-  const nodeIds = new Set(topology.nodes.map((node) => node.id));
-  for (const id of excluded) {
-    if (!nodeIds.has(id)) throw new Error(`topology transform references unknown node ${id}`);
-    const node = topology.nodes.find((candidate) => candidate.id === id);
-    if (node?.role === "start" || node?.role === "finish") {
-      throw new Error(`topology transform cannot exclude ${node.role} node ${id}`);
-    }
-  }
-  if (
-    transform.strategyLoops !== undefined &&
-    (!Number.isInteger(transform.strategyLoops) || transform.strategyLoops < 1)
-  ) {
-    throw new Error("topology transform strategy loops must be a positive integer");
-  }
-  const groups = Object.fromEntries(
-    Object.entries(topology.groups ?? {}).map(([id, group]) => [
-      id,
-      id === "strategies" && transform.strategyLoops !== undefined
-        ? { ...group, defaults: { ...group.defaults, loops: transform.strategyLoops } }
-        : group
-    ])
-  );
-  return {
-    ...topology,
-    defaults: {
-      ...topology.defaults,
-      ...(transform.strategyLoops === undefined ? {} : { strategy_loops: transform.strategyLoops })
-    },
-    groups,
-    nodes: topology.nodes
-      .filter((node) => !excluded.has(node.id))
-      .map((node) => ({ ...node, depends_on: node.depends_on.filter((dependency) => !excluded.has(dependency)) }))
-  };
 }
 
 interface ReferenceExpectationProvision {

@@ -14,6 +14,7 @@ import {
   type RunLayout
 } from "@ultrafuzz/artifacts";
 import type { ResolvedConfig } from "@ultrafuzz/config";
+import { assertExpandedGraphSchema, type ExpandedGraph } from "@ultrafuzz/topology";
 
 import {
   type PlannedGraph,
@@ -26,6 +27,7 @@ import {
   type WorkflowLifecycleValue
 } from "./types.js";
 import { planRun, repairMissingRenderedPromptsFromExecutionSnapshot } from "./plan-run.js";
+import { probeCommandsForExecution } from "./required-commands.js";
 import { forgeGuardMetadata, prepareForgeGuardEnvironment } from "./forge-guard.js";
 import { readJsonIfExists, runtimeFailure, runtimeResult } from "./utils.js";
 import {
@@ -85,7 +87,10 @@ const WORKFLOW_CONTROLLER_ONLY_ENVIRONMENT_VARIABLES = new Set([
 ]);
 
 export async function startRun(input: StartRunInput) {
-  const planned = await planRun(input);
+  const planned = await planRun(input, {
+    beforeMaterialize: async ({ resolvedConfig, expandedGraph }) =>
+      requiredCommandPreflightDiagnostics(input, resolvedConfig, expandedGraph)
+  });
   if (!planned.ok || !planned.value) {
     return runtimeFailure<StartRunValue>(planned.diagnostics);
   }
@@ -194,6 +199,62 @@ export async function startRun(input: StartRunInput) {
   }
 }
 
+async function requiredCommandPreflightDiagnostics(
+  input: Pick<StartRunInput, "projectRoot" | "env" | "requiredCommandProbe">,
+  resolvedConfig: ResolvedConfig,
+  expandedGraph: ExpandedGraph
+): Promise<RuntimeDiagnostic[]> {
+  const requiredCommands = [...new Set(expandedGraph.nodes.flatMap((node) => node.requiredCommands ?? []))].sort();
+  let commandProbes: Awaited<ReturnType<typeof probeCommandsForExecution>>;
+  try {
+    commandProbes =
+      input.requiredCommandProbe === undefined
+        ? await probeCommandsForExecution(resolvedConfig, requiredCommands, input.env ?? process.env, {
+            cwd: path.resolve(input.projectRoot),
+            // Normal cloud launch creates its configured app on first use.
+            // Preflight must preserve that behavior to inspect the real image.
+            createProviderAppIfMissing: true
+          })
+        : await input.requiredCommandProbe(requiredCommands);
+  } catch (error) {
+    return [
+      {
+        code: "RUN_REQUIRED_COMMAND_PREFLIGHT_FAILED",
+        message: `could not probe required topology commands in the configured execution environment: ${error instanceof Error ? error.message : String(error)}`,
+        severity: "error",
+        source: "runtime",
+        path: "topology.required_commands"
+      }
+    ];
+  }
+  const probeByName = new Map(commandProbes.map((probe) => [probe.name, probe]));
+  const missingCommands = requiredCommands.filter((command) => probeByName.get(command)?.available !== true);
+  const missingRequirements = missingCommands.map((command) => ({
+    command,
+    node_ids: [
+      ...new Set(
+        expandedGraph.nodes
+          .filter((node) => node.requiredCommands?.includes(command) === true)
+          .map((node) => node.logicalId)
+      )
+    ].sort()
+  }));
+  return missingCommands.length === 0
+    ? []
+    : [
+        {
+          code: "RUN_REQUIRED_COMMAND_MISSING",
+          message: `required topology commands are not available in the configured execution environment: ${missingRequirements
+            .map((requirement) => `${requirement.command} (required by ${requirement.node_ids.join(", ")})`)
+            .join("; ")}`,
+          severity: "error",
+          source: "runtime",
+          path: "topology.required_commands",
+          details: { commands: missingCommands, requirements: missingRequirements }
+        }
+      ];
+}
+
 export async function resumeRun(input: WorkflowLifecycleInput) {
   return submitLifecycleAction(input, "resume");
 }
@@ -259,6 +320,11 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
   }
   try {
     const sealedConfig = parseSealedResolvedConfig(evidence.verifiedControl.executionFiles);
+    const sealedGraph = parseSealedExpandedGraph(evidence.verifiedControl.contents.expanded_graph);
+    const preflightDiagnostics = await requiredCommandPreflightDiagnostics(input, sealedConfig, sealedGraph);
+    if (preflightDiagnostics.length > 0) {
+      return runtimeFailure<WorkflowLifecycleValue>(preflightDiagnostics);
+    }
     const requestedConcurrency = input.maxConcurrency ?? sealedConfig.run.maxParallelAgents;
     await repairMissingRenderedPromptsFromExecutionSnapshot({
       projectRoot: path.resolve(input.projectRoot),
@@ -1114,6 +1180,10 @@ function parseSealedResolvedConfig(
     throw new Error("sealed resolved workflow configuration is invalid");
   }
   return parsed as ResolvedConfig;
+}
+
+function parseSealedExpandedGraph(contents: Buffer): ExpandedGraph {
+  return assertExpandedGraphSchema(JSON.parse(contents.toString("utf8")) as unknown);
 }
 
 function runRelativePath(layout: RunLayout, candidate: string): string {

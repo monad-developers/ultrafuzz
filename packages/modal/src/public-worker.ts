@@ -739,13 +739,17 @@ async function preparePublicBenchmark(
       timeoutMs: 5 * 60 * 1000,
       signal
     });
-    await writeFile(path.join(destination, "ultrafuzz.toml"), modalTargetToml(model, config.node_timeout_seconds), {
-      mode: 0o600
-    });
-    capModalTargetTopologyTimeouts(
-      path.join(destination, ".ultrafuzz", "topology.yml"),
-      Math.min(config.node_timeout_seconds, scope.max_runtime_seconds)
+    await writeFile(
+      path.join(destination, "ultrafuzz.toml"),
+      modalTargetToml(model, config.node_timeout_seconds, scope.lane === "smoke" ? "smoke" : "balanced"),
+      { mode: 0o600 }
     );
+    if (scope.lane !== "smoke") {
+      capModalTargetTopologyTimeouts(
+        path.join(destination, ".ultrafuzz", "topology.yml"),
+        Math.min(config.node_timeout_seconds, scope.max_runtime_seconds)
+      );
+    }
     await runCommand(["node", CLI, "references", "sync", "--project", destination, "--json"], {
       cwd: controlRoot,
       logPath,

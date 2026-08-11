@@ -10,13 +10,350 @@ import * as ts from "typescript";
 
 import {
   assertRegularFileInside,
+  derivePropertyImplementationCoverage,
+  IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
   MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES,
+  normalizeEvidenceLineRangeCardinality,
   normalizeNodeAttemptFailureMessage,
+  PROPERTIES_SCHEMA_VERSION,
+  validateArtifactContract,
   writeFileDurable
 } from "@ultrafuzz/artifacts";
+import { loadTopology } from "@ultrafuzz/topology";
+import { projectCanonicalFinalReport } from "../src/final-report-markdown.js";
 
 const runtimePackageRoot = findRuntimePackageRoot(path.dirname(fileURLToPath(import.meta.url)));
+const repositoryRoot = path.resolve(runtimePackageRoot, "../..");
 const workflowTemplatePath = path.join(runtimePackageRoot, "src", "templates", "smithers", "workflows", "workflow.tsx");
+
+function loadBoundedFinalReportReader(): (reportPath: string) => string {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function readBoundedFinalReportJson");
+  const helperEnd = source.indexOf("\n\nfunction reconstructAuthoritativeReportImplementationCoverage", helperStart);
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  return new Function(
+    "openSync",
+    "fsConstants",
+    "fstatSync",
+    "readFileSync",
+    "closeSync",
+    "MAX_FINAL_REPORT_JSON_BYTES",
+    `${helper}; return readBoundedFinalReportJson;`
+  )(fs.openSync, fs.constants, fs.fstatSync, fs.readFileSync, fs.closeSync, 64 * 1024 * 1024) as ReturnType<
+    typeof loadBoundedFinalReportReader
+  >;
+}
+
+function loadReportImplementationCoverageReplacer(): (contents: string, coverage: unknown) => string | undefined {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function replaceReportImplementationCoverage");
+  const helperEnd = source.indexOf("\n\nfunction normalizeLegacyReportProvenance", helperStart);
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  return new Function("isPlainRecord", `${helper}; return replaceReportImplementationCoverage;`)(
+    (value: unknown): value is Record<string, unknown> =>
+      typeof value === "object" && value !== null && !Array.isArray(value)
+  ) as ReturnType<typeof loadReportImplementationCoverageReplacer>;
+}
+
+function loadReportImplementationCoverageReconstructor(
+  taskSpecs: Array<{
+    attemptId: string;
+    metadata: { node: { logicalNodeId: string } };
+    outputs: Array<{ path: string; contract: string }>;
+  }>,
+  verifiedAncestorJsonArtifact: (
+    task: unknown,
+    logicalNodeId: string,
+    relativePath: string,
+    contract: string,
+    historicalContract?: string
+  ) => { path: string; value: unknown } | undefined
+): (task: {
+  metadata: { node: { logicalNodeId: string }; artifacts: { dir: string } };
+  outputs: Array<{ path: string; contract: string }>;
+}) => void {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function reconstructAuthoritativeReportImplementationCoverage");
+  const helperEnd = source.indexOf("\n\nfunction verifiedAncestorJsonArtifact", helperStart);
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  const unexpectedAuthorityRead = (): never => {
+    throw new Error("producer-free reconstruction must not read current implementation authority");
+  };
+  return new Function(
+    "path",
+    "taskSpecs",
+    "realpathSync",
+    "taskArtifactRoots",
+    "resolveRegularArtifactFile",
+    "verifiedAncestorJsonArtifact",
+    "validatePropertiesSchema",
+    "validateImplementedPropertiesSchema",
+    "configuredInvariantPrioritySelection",
+    "derivePropertyImplementationCoverage",
+    "formatSchemaValidationIssues",
+    "readBoundedFinalReportJson",
+    "replaceReportImplementationCoverage",
+    "writeFileDurable",
+    `${helper}; return reconstructAuthoritativeReportImplementationCoverage;`
+  )(
+    path,
+    taskSpecs,
+    fs.realpathSync,
+    (_task: unknown, artifactDir: string) => [artifactDir],
+    (_artifactRoot: string, candidate: string) => candidate,
+    verifiedAncestorJsonArtifact,
+    unexpectedAuthorityRead,
+    unexpectedAuthorityRead,
+    unexpectedAuthorityRead,
+    unexpectedAuthorityRead,
+    unexpectedAuthorityRead,
+    (reportPath: string) => fs.readFileSync(reportPath, "utf8"),
+    loadReportImplementationCoverageReplacer(),
+    writeFileDurable
+  ) as ReturnType<typeof loadReportImplementationCoverageReconstructor>;
+}
+
+function loadVerifiedAncestorJsonArtifact(
+  taskSpecs: Array<{
+    attemptId: string;
+    metadata: { node: { logicalNodeId: string } };
+    outputs: Array<{ path: string; contract: string }>;
+  }>,
+  assertVerifiedDependency: (task: unknown, dependency: string) => void
+): (
+  task: { dependencyArtifactDirs: string[] },
+  logicalNodeId: string,
+  relativePath: string,
+  contract: string,
+  historicalContract?: string
+) => { path: string; value: unknown } | undefined {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function verifiedAncestorJsonArtifact");
+  const helperEnd = source.indexOf("\n\nfunction configuredInvariantPrioritySelection", helperStart);
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  return new Function(
+    "path",
+    "taskSpecs",
+    "assertVerifiedDependency",
+    "realpathSync",
+    "resolveRegularArtifactFile",
+    "readFileSync",
+    `${helper}; return verifiedAncestorJsonArtifact;`
+  )(
+    path,
+    taskSpecs,
+    assertVerifiedDependency,
+    fs.realpathSync,
+    (_root: string, candidate: string) => candidate,
+    fs.readFileSync
+  ) as ReturnType<typeof loadVerifiedAncestorJsonArtifact>;
+}
+
+function loadFinalReportProducerNormalizers(): {
+  normalizeReport: (contents: string) => string | undefined;
+  normalizeFindings: (value: unknown) => unknown[] | undefined;
+} {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const findingArrayStart = source.indexOf("function normalizedFindingArray");
+  const findingArrayEnd = source.indexOf("\n\nfunction writeNormalizedFindings", findingArrayStart);
+  const findingStart = source.indexOf("function normalizeLegacyFindingRecord");
+  const findingEnd = source.indexOf("\n\nfunction normalizeLegacyReportProvenance", findingStart);
+  const reportStart = source.indexOf("function normalizeLegacyReportProvenanceFields");
+  const reportEnd = source.indexOf("\n\nfunction normalizeLegacyGeneratedTestManifests", reportStart);
+  assert.ok(findingArrayStart >= 0 && findingArrayEnd > findingArrayStart, source);
+  assert.ok(findingStart >= 0 && findingEnd > findingStart, source);
+  assert.ok(reportStart >= 0 && reportEnd > reportStart, source);
+
+  const helper = ts.transpileModule(
+    [
+      source.slice(findingArrayStart, findingArrayEnd),
+      source.slice(findingStart, findingEnd),
+      source.slice(reportStart, reportEnd)
+    ].join("\n\n"),
+    { compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 } }
+  ).outputText;
+  return new Function(
+    "normalizeEvidenceLineRangeCardinality",
+    "normalizeFinalReportSeverityRecord",
+    "validateArtifactContract",
+    `${helper}; return { normalizeReport: normalizeLegacyReportProvenanceFields, normalizeFindings: normalizedFindingArray };`
+  )(
+    normalizeEvidenceLineRangeCardinality,
+    (value: unknown) => ({ value, changed: false }),
+    validateArtifactContract
+  ) as ReturnType<typeof loadFinalReportProducerNormalizers>;
+}
+
+function loadValidatedTaskArtifactWriter(
+  durableWriter: (filePath: string, contents: string | Uint8Array) => void = writeFileDurable
+): (
+  task: {
+    metadata: { artifacts: { dir: string } };
+    mirrorRoot: string;
+  },
+  output: { path: string; contract: string },
+  contents: string
+) => void {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const writerStart = source.indexOf("function writeValidatedTaskArtifactContents");
+  const writerEnd = source.indexOf("\n\nfunction isPlainRecord", writerStart);
+  assert.ok(writerStart >= 0 && writerEnd > writerStart, source);
+  const helper = ts.transpileModule(source.slice(writerStart, writerEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  return new Function(
+    "path",
+    "realpathSync",
+    "existsSync",
+    "validateArtifactContract",
+    "isStrictlyInsideDirectory",
+    "resolveRegularArtifactFile",
+    "mirroredArtifactDir",
+    "writeFileDurable",
+    `${helper}; return writeValidatedTaskArtifactContents;`
+  )(
+    path,
+    fs.realpathSync,
+    fs.existsSync,
+    validateArtifactContract,
+    (root: string, candidate: string) => candidate !== root && candidate.startsWith(`${root}${path.sep}`),
+    (root: string, candidate: string, message: string) => {
+      assertRegularFileInside(root, candidate, message);
+      const resolved = fs.realpathSync(candidate);
+      if (!resolved.startsWith(`${root}${path.sep}`) || !fs.statSync(resolved).isFile()) {
+        throw new Error(message);
+      }
+      return resolved;
+    },
+    (task: { mirrorRoot: string }) => task.mirrorRoot,
+    durableWriter
+  ) as ReturnType<typeof loadValidatedTaskArtifactWriter>;
+}
+
+function loadFinalReportArtifactMaterializer(
+  options: {
+    maximumJsonBytes?: number;
+    open?: (filePath: string, flags: number) => number;
+    fstat?: (descriptor: number) => { size: number; isFile: () => boolean };
+    read?: (descriptor: number) => Buffer;
+    close?: (descriptor: number) => void;
+  } = {}
+): (task: {
+  metadata: { node: { logicalNodeId: string }; artifacts: { dir: string } };
+  outputs: Array<{ path: string; contract: string }>;
+  mirrorRoot: string;
+}) => void {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const materializerStart = source.indexOf("function materializeMissingFinalReportArtifacts");
+  const helperEnd = source.indexOf("\n\nfunction normalizeLegacyFindingFields", materializerStart);
+  const reportReaderStart = source.indexOf("function readBoundedFinalReportJson", helperEnd);
+  const reportReaderEnd = source.indexOf(
+    "\n\nfunction reconstructAuthoritativeReportImplementationCoverage",
+    reportReaderStart
+  );
+  assert.ok(materializerStart >= 0 && helperEnd > materializerStart, source);
+  assert.ok(reportReaderStart > helperEnd && reportReaderEnd > reportReaderStart, source);
+  const helper = ts.transpileModule(
+    [source.slice(materializerStart, helperEnd), source.slice(reportReaderStart, reportReaderEnd)].join("\n\n"),
+    {
+      compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+    }
+  ).outputText;
+  return new Function(
+    "path",
+    "realpathSync",
+    "openSync",
+    "fstatSync",
+    "readFileSync",
+    "closeSync",
+    "fsConstants",
+    "existsSync",
+    "taskArtifactRoots",
+    "resolveRegularArtifactFile",
+    "MAX_FINAL_REPORT_JSON_BYTES",
+    "validateArtifactContract",
+    "projectCanonicalFinalReport",
+    "normalizeLegacyFindingRecord",
+    "isStrictlyInsideDirectory",
+    "mirroredArtifactDir",
+    "writeFileDurable",
+    `${helper}; return materializeMissingFinalReportArtifacts;`
+  )(
+    path,
+    fs.realpathSync,
+    options.open ?? ((filePath: string, flags: number) => fs.openSync(filePath, flags)),
+    options.fstat ?? ((descriptor: number) => fs.fstatSync(descriptor)),
+    options.read ?? ((descriptor: number) => fs.readFileSync(descriptor)),
+    options.close ?? ((descriptor: number) => fs.closeSync(descriptor)),
+    fs.constants,
+    fs.existsSync,
+    (task: { mirrorRoot: string }, canonicalRoot: string) => [canonicalRoot, task.mirrorRoot],
+    (root: string, candidate: string, message: string) => {
+      assertRegularFileInside(root, candidate, message);
+      const resolved = fs.realpathSync(candidate);
+      if (!resolved.startsWith(`${root}${path.sep}`) || !fs.statSync(resolved).isFile()) {
+        throw new Error(message);
+      }
+      return resolved;
+    },
+    options.maximumJsonBytes ?? 64 * 1024 * 1024,
+    validateArtifactContract,
+    projectCanonicalFinalReport,
+    (value: unknown) => ({ value, changed: false }),
+    (root: string, candidate: string) => candidate !== root && candidate.startsWith(`${root}${path.sep}`),
+    (task: { mirrorRoot: string }) => task.mirrorRoot,
+    writeFileDurable
+  ) as ReturnType<typeof loadFinalReportArtifactMaterializer>;
+}
+
+function generatedFinalReportFixture(): Record<string, unknown> {
+  return {
+    schema_version: "1.0",
+    run_metadata: { run_id: "generated-final-report" },
+    issues: [
+      {
+        schema_version: "1.0",
+        id: "source-finding",
+        title: "Generated projection mismatch",
+        status: "confirmed",
+        severity: "Medium",
+        severity_guess: "Medium",
+        confidence: "high",
+        summary: "A bounded transition violates the expected relationship.",
+        description: "A caller can trigger the bounded state mismatch.",
+        impact: "Medium",
+        impact_rationale: "The affected state remains bounded.",
+        likelihood: "Low",
+        likelihood_rationale: "The transition requires uncommon preconditions.",
+        proof_of_concept: {
+          scenario: ["Prepare the bounded state.", "Execute the transition and observe the mismatch."]
+        },
+        strategy: "stateful-invariant",
+        strategy_provenance: {
+          detection_rates: [{ strategy: "stateful-invariant", detections: 1, configured_loops: 4 }]
+        }
+      }
+    ],
+    non_production_outcomes: [],
+    property_provenance: []
+  };
+}
 
 function loadRetryFailureAwareArgs(): (
   args: { prompt?: unknown } | undefined,
@@ -33,6 +370,76 @@ function loadRetryFailureAwareArgs(): (
   return new Function("untrustedContentBoundary", `${helper}; return retryFailureAwareArgs;`)(
     "UNTRUSTED CONTENT BOUNDARY"
   ) as ReturnType<typeof loadRetryFailureAwareArgs>;
+}
+
+function loadTaskPromptPathForArtifactReset(): (
+  artifactDir: string,
+  promptPath: string | undefined
+) => string | undefined {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function taskPromptPathForArtifactReset");
+  const helperEnd = source.indexOf("\n\nfunction resetTaskArtifactsForRetry", helperStart);
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  return new Function("path", `${helper}; return taskPromptPathForArtifactReset;`)(path) as ReturnType<
+    typeof loadTaskPromptPathForArtifactReset
+  >;
+}
+
+function loadCanonicalTaskArtifactRetryReset(): (
+  artifactDir: string,
+  attemptId: string,
+  promptPath: string | undefined
+) => void {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const selectorStart = source.indexOf("function taskPromptPathForArtifactReset");
+  const selectorEnd = source.indexOf("\n\nfunction resetTaskArtifactsForRetry", selectorStart);
+  const resetStart = source.indexOf("function resetTaskArtifactContents");
+  const resetEnd = source.indexOf("\n\nfunction isMissingPathError", resetStart);
+  const resolverStart = source.indexOf("function resolveRegularArtifactFile");
+  const resolverEnd = source.indexOf("\n\nfunction resolveNonEmptyRegularArtifactFile", resolverStart);
+  assert.ok(selectorStart >= 0 && selectorEnd > selectorStart, source);
+  assert.ok(resetStart >= 0 && resetEnd > resetStart, source);
+  assert.ok(resolverStart >= 0 && resolverEnd > resolverStart, source);
+  const helpers = ts.transpileModule(
+    [
+      source.slice(selectorStart, selectorEnd),
+      source.slice(resetStart, resetEnd),
+      source.slice(resolverStart, resolverEnd)
+    ].join("\n"),
+    { compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 } }
+  ).outputText;
+  return new Function(
+    "path",
+    "realpathSync",
+    "lstatSync",
+    "readdirSync",
+    "rmSync",
+    "statSync",
+    "assertRegularFileInside",
+    "isStrictlyInsideDirectory",
+    "isMissingPathError",
+    "INVARIANT_SUITE_BASELINE_FILE",
+    "WORKSPACE_PATCH_BASELINE_FILE",
+    "WORKSPACE_PATCH_PREPARATION_FILE",
+    `${helpers}; return (artifactDir, attemptId, promptPath) => resetTaskArtifactContents(artifactDir, attemptId, "canonical", taskPromptPathForArtifactReset(artifactDir, promptPath));`
+  )(
+    path,
+    fs.realpathSync,
+    fs.lstatSync,
+    fs.readdirSync,
+    fs.rmSync,
+    fs.statSync,
+    assertRegularFileInside,
+    (root: string, candidate: string) => candidate !== root && candidate.startsWith(`${root}${path.sep}`),
+    (error: unknown) => error instanceof Error && "code" in error && error.code === "ENOENT",
+    "invariant-suite-baseline.json",
+    "workspace-patch-baseline.json",
+    "workspace-patch-preparation.json"
+  ) as ReturnType<typeof loadCanonicalTaskArtifactRetryReset>;
 }
 
 function loadWorkflowControlPathResolvers(): {
@@ -539,6 +946,39 @@ test("generated Smithers workflow prepares canonical empty sidecars and primary 
   assert.match(source, /dependsOn=\{\[task\.preparationId\]\}/u);
 });
 
+test("generated Smithers restores sealed submodules before inputs and only verifies them after agent work", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const preparationStart = source.indexOf("function prepareArtifactMirror");
+  const preparationEnd = source.indexOf("\n\nfunction preservePinnedSourceProof", preparationStart);
+  const agentStart = source.indexOf("function artifactAwareAgent");
+  const agentEnd = source.indexOf("function resetTaskArtifactsForRetry", agentStart);
+  assert.ok(preparationStart >= 0, source);
+  assert.ok(preparationEnd > preparationStart, source);
+  assert.ok(agentStart >= 0, source);
+  assert.ok(agentEnd > agentStart, source);
+
+  const preparation = source.slice(preparationStart, preparationEnd);
+  const agent = source.slice(agentStart, agentEnd);
+  assert.match(preparation, /options\.pinnedSubmodules === "verify"/u);
+  assert.match(preparation, /verifyPinnedSubmodulesFromExecutionSnapshot\(/u);
+  assert.match(preparation, /hydratePinnedSubmodulesFromExecutionSnapshot\(/u);
+  assert.match(preparation, /expectation: task\.pinnedSubmodules \?\? undefined/u);
+  assert.ok(
+    preparation.indexOf("hydratePinnedSubmodulesFromExecutionSnapshot") <
+      preparation.indexOf("assertTaskInputs(task, workspaceRoot)"),
+    preparation
+  );
+  assert.ok(
+    preparation.indexOf("verifyPinnedSubmodulesFromExecutionSnapshot") <
+      preparation.indexOf("preservePinnedSourceProof(task)"),
+    preparation
+  );
+  assert.match(
+    agent,
+    /prepareArtifactMirror\(task, \{ replayWorkspacePatches: false, pinnedSubmodules: "verify" \}\)/u
+  );
+});
+
 test("generated Smithers workflow leaves runtime-owned workspace patch outputs unmaterialized", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function canonicalEmptyArtifact");
@@ -829,7 +1269,8 @@ test("generated Smithers worktrees fail closed on any source other than the pinn
   assert.match(source, /"source-proofs"/u);
   assert.match(source, /path\.resolve\(process\.cwd\(\), task\.metadata\.artifacts\.dir, "\.\.", "\.\."\)/u);
   assert.doesNotMatch(source.slice(proofStart, proofEnd), /task\.runRoot/u);
-  assert.match(source, /ultrafuzz\.agent-source-proof\.v1/u);
+  assert.match(source, /ultrafuzz\.agent-source-proof\.v2/u);
+  assert.match(source.slice(proofStart, proofEnd), /dependencies: pinnedDependencies/u);
 });
 
 test("generated Smithers pinned source proof counts hidden unreachable commits without batch object output", () => {
@@ -908,7 +1349,13 @@ test("generated Smithers pinned source proof ignores unrelated same-commit Ultra
     git(["branch", "ultrafuzz/test-run/actors-flows", pinnedCommit]);
 
     preservePinnedSourceProof(task);
-    const canonicalProof = JSON.parse(fs.readFileSync(proofPath, "utf8")) as { refs: unknown[] };
+    const canonicalProof = JSON.parse(fs.readFileSync(proofPath, "utf8")) as {
+      schema_version: unknown;
+      refs: unknown[];
+      dependencies: unknown;
+    };
+    assert.equal(canonicalProof.schema_version, "ultrafuzz.agent-source-proof.v2");
+    assert.equal(canonicalProof.dependencies, null);
     assert.deepEqual(canonicalProof.refs, [{ name: "refs/heads/ultrafuzz-pinned", object: pinnedCommit }]);
 
     fs.writeFileSync(proofPath, JSON.stringify(canonicalProof));
@@ -1063,6 +1510,55 @@ test("retry feedback diagnostics are secret-redacted and UTF-8 byte bounded befo
   );
 });
 
+test("retry cleanup preserves only a task-owned prompt and accepts a sealed snapshot prompt", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-retry-prompt-"));
+  try {
+    const artifactDir = path.join(root, "run", "artifacts", "final-report");
+    const taskPrompt = path.join(artifactDir, "prompt.rendered.md");
+    const sealedPrompt = path.join(
+      root,
+      "run",
+      "smithers",
+      "execution-snapshots",
+      "sealed",
+      "controls",
+      "rendered-prompts",
+      "final-report.md"
+    );
+    fs.mkdirSync(path.dirname(taskPrompt), { recursive: true });
+    fs.mkdirSync(path.dirname(sealedPrompt), { recursive: true });
+    fs.writeFileSync(taskPrompt, "legacy prompt\n");
+    fs.writeFileSync(sealedPrompt, "sealed prompt\n");
+
+    const taskPromptPathForArtifactReset = loadTaskPromptPathForArtifactReset();
+    const resetCanonicalArtifacts = loadCanonicalTaskArtifactRetryReset();
+    assert.equal(taskPromptPathForArtifactReset(artifactDir, taskPrompt), taskPrompt);
+    assert.equal(taskPromptPathForArtifactReset(artifactDir, sealedPrompt), undefined);
+    assert.equal(taskPromptPathForArtifactReset(artifactDir, path.join(artifactDir, "nested", "prompt.md")), undefined);
+
+    fs.writeFileSync(path.join(artifactDir, "stale-report.json"), "{}\n");
+    resetCanonicalArtifacts(artifactDir, "final-report", taskPrompt);
+    assert.equal(fs.readFileSync(taskPrompt, "utf8"), "legacy prompt\n");
+    assert.equal(fs.existsSync(path.join(artifactDir, "stale-report.json")), false);
+
+    fs.mkdirSync(path.join(artifactDir, "stale", "nested"), { recursive: true });
+    fs.writeFileSync(path.join(artifactDir, "stale", "nested", "report.md"), "stale\n");
+    resetCanonicalArtifacts(artifactDir, "final-report", sealedPrompt);
+    assert.deepEqual(fs.readdirSync(artifactDir), []);
+    assert.equal(fs.readFileSync(sealedPrompt, "utf8"), "sealed prompt\n");
+
+    const linkedPrompt = path.join(artifactDir, "prompt.rendered.md");
+    fs.symlinkSync(sealedPrompt, linkedPrompt);
+    assert.throws(
+      () => resetCanonicalArtifacts(artifactDir, "final-report", linkedPrompt),
+      /unsafe canonical task input final-report/u
+    );
+    assert.equal(fs.readFileSync(sealedPrompt, "utf8"), "sealed prompt\n");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("generated Smithers retries reset exact task-owned artifact contents after the first attempt", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const agentStart = source.indexOf("function artifactAwareAgent");
@@ -1083,7 +1579,11 @@ test("generated Smithers retries reset exact task-owned artifact contents after 
   const reset = source.slice(rootsStart, preparationStart);
   assert.match(
     reset,
-    /resetTaskArtifactContents\(task\.metadata\.artifacts\.dir, task\.attemptId, "canonical", task\.promptPath\)/u
+    /const promptPath = taskPromptPathForArtifactReset\(task\.metadata\.artifacts\.dir, task\.promptPath\)/u
+  );
+  assert.match(
+    reset,
+    /resetTaskArtifactContents\(task\.metadata\.artifacts\.dir, task\.attemptId, "canonical", promptPath\)/u
   );
   assert.match(
     reset,
@@ -1175,15 +1675,32 @@ test("generated Smithers agent preserves its final response as missing non-repor
 
   const agent = source.slice(agentStart, preparationStart);
   assert.match(agent, /const result = await agent\.generate\(attemptArgs\)/u);
-  assert.match(agent, /prepareArtifactMirror\(task, \{ replayWorkspacePatches: false \}\)/u);
+  assert.match(
+    agent,
+    /prepareArtifactMirror\(task, \{ replayWorkspacePatches: false, pinnedSubmodules: "verify" \}\)/u
+  );
   assert.match(agent, /materializeMissingMarkdownArtifacts\(task, result\)/u);
   assert.match(agent, /materializeCanonicalThreatModelArtifact\(task\)/u);
+  assert.match(agent, /reconstructAuthoritativeReportImplementationCoverage\(task\)/u);
   assert.match(agent, /materializeMissingFinalReportArtifacts\(task\)/u);
   assert.match(agent, /normalizeFindingProvenance\(task\)/u);
   assert.match(agent, /normalizeLegacyReportProvenance\(task\)/u);
   assert.match(agent, /normalizeLegacyGeneratedTestManifests\(task\)/u);
   assert.match(agent, /materializeGeneratedTestCompanions\(task\)/u);
   assert.match(agent, /verifyArtifacts\(task\)/u);
+  assert.ok(
+    agent.indexOf("normalizeLegacyFindingFields(task)") <
+      agent.indexOf("reconstructAuthoritativeReportImplementationCoverage(task)")
+  );
+  assert.ok(
+    agent.indexOf("reconstructAuthoritativeReportImplementationCoverage(task)") <
+      agent.indexOf("normalizeLegacyReportProvenance(task)")
+  );
+  assert.ok(
+    agent.indexOf("normalizeLegacyReportProvenance(task)") <
+      agent.indexOf("materializeMissingFinalReportArtifacts(task)")
+  );
+  assert.ok(agent.indexOf("materializeMissingFinalReportArtifacts(task)") < agent.indexOf("verifyArtifacts(task)"));
   assert.match(source, /output\.contract !== "ultrafuzz\/nonempty-markdown@1"/u);
   assert.match(source, /const fallback = `# \$\{title\}\\n\\n\$\{summary\}\\n`/u);
 });
@@ -1252,6 +1769,462 @@ test("generated Smithers verifier canonicalizes threat Markdown and materializes
   assert.match(verifier, /rememberVerifiedPublication\(publications, selected\.path, selected\.contents\)/u);
 });
 
+test("generated Smithers coverage reconstruction bounds report JSON before parsing", () => {
+  const readReport = loadBoundedFinalReportReader();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-bounded-report-json-"));
+  const small = path.join(root, "small.json");
+  const oversized = path.join(root, "oversized.json");
+  const symlink = path.join(root, "symlink.json");
+  try {
+    fs.writeFileSync(small, '{"schema_version":"1.0"}\n');
+    fs.writeFileSync(oversized, "{}");
+    fs.truncateSync(oversized, 64 * 1024 * 1024 + 1);
+    fs.symlinkSync(small, symlink);
+
+    assert.equal(readReport(small), '{"schema_version":"1.0"}\n');
+    assert.throws(readReport.bind(undefined, oversized), /exceeds the 67108864-byte read limit/u);
+    assert.throws(readReport.bind(undefined, symlink));
+
+    const source = fs.readFileSync(workflowTemplatePath, "utf8");
+    assert.match(source, /openSync\(reportPath, fsConstants\.O_RDONLY \| fsConstants\.O_NOFOLLOW\)/u);
+    assert.match(source, /contents\.byteLength > MAX_FINAL_REPORT_JSON_BYTES/u);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("generated Smithers final-report producer replaces model coverage with canonical handoff coverage", () => {
+  const replaceCoverage = loadReportImplementationCoverageReplacer();
+  const catalog = {
+    schema_version: PROPERTIES_SCHEMA_VERSION,
+    properties: [
+      {
+        id: "property-high",
+        description: "The high-priority accounting relation holds.",
+        category: "accounting",
+        priority: "high" as const,
+        sources: [{ source_node_id: "lens-high", source_property_id: "accounting-relation" }]
+      },
+      {
+        id: "property-low-reference",
+        description: "The below-threshold reference behavior remains reachable.",
+        category: "liveness",
+        priority: "low" as const,
+        reference_expectations: ["benchmark:low-reference"],
+        sources: [{ source_node_id: "lens-low", source_property_id: "reference-behavior" }]
+      }
+    ]
+  };
+  const implementation = {
+    schema_version: IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
+    selection: {
+      priority_threshold: "high" as const,
+      priorities: ["high" as const],
+      property_ids: ["property-high", "property-low-reference"]
+    },
+    properties: [
+      {
+        property_id: "property-high",
+        status: "implemented" as const,
+        implementation_paths: ["src/Properties.sol"],
+        test_paths: []
+      },
+      {
+        property_id: "property-low-reference",
+        status: "implemented" as const,
+        implementation_paths: [],
+        test_paths: ["test/ReferenceProperty.t.sol"],
+        reference_expectations: ["benchmark:low-reference"]
+      }
+    ]
+  };
+  const derived = derivePropertyImplementationCoverage(catalog, implementation, {
+    configuredSelection: { priority_threshold: "high", priorities: ["high"] },
+    requireConfiguredSelection: true
+  });
+  assert.equal(derived.ok, true, JSON.stringify(derived.issues));
+  assert.ok(derived.value);
+  assert.deepEqual(derived.value, {
+    priority_threshold: "high",
+    priorities: ["high"],
+    selected_property_ids: ["property-high", "property-low-reference"],
+    implemented_property_ids: ["property-high", "property-low-reference"],
+    blocked_property_ids: [],
+    pending_property_ids: [],
+    deferred_property_ids: [],
+    reference_expected_property_ids: ["property-low-reference"],
+    reference_expectation_ids: ["benchmark:low-reference"],
+    blocker_summaries: []
+  });
+  assert.ok(derived.value.priorities.length > 0, "authoritative priorities must never collapse to an empty set");
+  for (const field of [
+    "selected_property_ids",
+    "implemented_property_ids",
+    "blocked_property_ids",
+    "pending_property_ids",
+    "deferred_property_ids",
+    "reference_expected_property_ids",
+    "reference_expectation_ids",
+    "blocker_summaries"
+  ] as const) {
+    assert.ok(Array.isArray(derived.value[field]), `authoritative coverage must always emit ${field}`);
+  }
+
+  // Exact recurrence of run 31315460119: the model supplied an invalid
+  // threshold, no priorities, and omitted deferred_property_ids entirely.
+  const modelReport = {
+    schema_version: "1.0",
+    run_metadata: { run_id: "31315460119" },
+    issues: [],
+    non_production_outcomes: [],
+    property_implementation_coverage: {
+      priority_threshold: "critical",
+      priorities: [],
+      selected_property_ids: ["model-owned-value"],
+      implemented_property_ids: [],
+      blocked_property_ids: [],
+      pending_property_ids: []
+    }
+  };
+  const modelBytes = `${JSON.stringify(modelReport, null, 2)}\n`;
+  assert.equal(validateArtifactContract("ultrafuzz/report@1", modelBytes, "report.json").ok, false);
+
+  const replaced = replaceCoverage(modelBytes, derived.value);
+  assert.ok(replaced);
+  assert.equal(validateArtifactContract("ultrafuzz/report@1", replaced, "report.json").ok, true);
+  assert.equal(
+    replaced,
+    `${JSON.stringify({ ...modelReport, property_implementation_coverage: derived.value }, null, 2)}\n`
+  );
+  assert.deepEqual(JSON.parse(replaced).property_implementation_coverage, derived.value);
+  assert.equal(replaceCoverage(replaced, derived.value), replaced, "canonical replacement must be byte-idempotent");
+  assert.equal(replaceCoverage("{malformed", derived.value), undefined);
+
+  const unrelatedInvalid = replaceCoverage(JSON.stringify({ ...modelReport, run_metadata: [] }), derived.value);
+  assert.ok(unrelatedInvalid);
+  assert.equal(
+    validateArtifactContract("ultrafuzz/report@1", unrelatedInvalid, "report.json").ok,
+    false,
+    "coverage reconstruction must not forgive unrelated report violations"
+  );
+});
+
+test("generated Smithers coverage authority preserves the shipped smoke topology without a producer", () => {
+  const topology = loadTopology(repositoryRoot, {
+    topologyPath: path.join(repositoryRoot, "packages", "config", "topologies", "smoke.yml"),
+    requirePromptFiles: true
+  });
+  const finalReport = topology.nodes.find((node) => node.id === "final-report");
+  assert.ok(finalReport);
+  const taskSpecs = topology.nodes
+    .filter((node) => node.kind === "agentic")
+    .map((node) => ({
+      attemptId: node.id,
+      metadata: { node: { logicalNodeId: node.id } },
+      outputs: (node.outputs ?? []).map((output) => ({ path: output.path, contract: output.contract }))
+    }));
+  assert.equal(
+    taskSpecs.some((candidate) => candidate.metadata.node.logicalNodeId === "stateful-invariant-implement-properties"),
+    false,
+    "the shipped smoke topology must exercise the genuinely absent-producer path"
+  );
+
+  const ancestors = new Set<string>();
+  const nodesById = new Map(topology.nodes.map((node) => [node.id, node]));
+  const pending = [...finalReport.depends_on];
+  while (pending.length > 0) {
+    const candidate = pending.pop()!;
+    if (ancestors.has(candidate)) continue;
+    ancestors.add(candidate);
+    pending.push(...(nodesById.get(candidate)?.depends_on ?? []));
+  }
+  let verificationCount = 0;
+  const readAncestor = loadVerifiedAncestorJsonArtifact(taskSpecs, () => {
+    verificationCount += 1;
+  });
+  assert.equal(
+    readAncestor(
+      {
+        dependencyArtifactDirs: [...ancestors].map((ancestor) =>
+          path.join(repositoryRoot, ".ultrafuzz", "runs", "smoke", "artifacts", ancestor)
+        )
+      },
+      "stateful-invariant-implement-properties",
+      "implemented-properties.json",
+      "ultrafuzz/implemented-properties@2",
+      "ultrafuzz/implemented-properties@1"
+    ),
+    undefined
+  );
+  assert.equal(verificationCount, 0, "absent authority must not reinterpret another smoke artifact as coverage");
+
+  const replaceCoverage = loadReportImplementationCoverageReplacer();
+  let reconstructionAuthorityReads = 0;
+  const reconstructCoverage = loadReportImplementationCoverageReconstructor(
+    taskSpecs,
+    (_task, logicalNodeId, relativePath, contract, historicalContract) => {
+      reconstructionAuthorityReads += 1;
+      assert.equal(logicalNodeId, "stateful-invariant-implement-properties");
+      assert.equal(relativePath, "implemented-properties.json");
+      assert.equal(contract, "ultrafuzz/implemented-properties@2");
+      assert.equal(historicalContract, "ultrafuzz/implemented-properties@1");
+      return undefined;
+    }
+  );
+  const invalidCoverageCases = [
+    {
+      runId: "31338426579",
+      coverage: {
+        priority_threshold: "high",
+        priorities: [],
+        selected_property_ids: [],
+        implemented_property_ids: [],
+        blocked_property_ids: [],
+        pending_property_ids: [],
+        deferred_property_ids: [],
+        reference_expected_property_ids: [],
+        reference_expectation_ids: [],
+        blocker_summaries: []
+      },
+      failure: /Too small: expected array to have >=1 items/u
+    },
+    {
+      runId: "31339777943",
+      coverage: {
+        priority_threshold: "high",
+        priorities: ["high"],
+        selected_property_ids: [],
+        implemented_property_ids: [],
+        blocked_property_ids: [],
+        pending_property_ids: [],
+        reference_expected_property_ids: [],
+        reference_expectation_ids: [],
+        blocker_summaries: []
+      },
+      failure: /expected array, received undefined/u
+    }
+  ];
+  for (const fixture of invalidCoverageCases) {
+    const modelReport = {
+      schema_version: "1.0",
+      run_metadata: { run_id: fixture.runId },
+      issues: [],
+      non_production_outcomes: [],
+      property_implementation_coverage: fixture.coverage
+    };
+    const modelBytes = `${JSON.stringify(modelReport, null, 2)}\n`;
+    const modelValidation = validateArtifactContract("ultrafuzz/report@1", modelBytes, "report.json");
+    assert.equal(modelValidation.ok, false, fixture.runId);
+    assert.match(modelValidation.issues.map((issue) => issue.message).join("; "), fixture.failure, fixture.runId);
+
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), `ultrafuzz-producer-free-coverage-${fixture.runId}-`));
+    const reportPath = path.join(root, "report.json");
+    try {
+      fs.writeFileSync(reportPath, modelBytes);
+      reconstructCoverage({
+        metadata: { node: { logicalNodeId: "final-report" }, artifacts: { dir: root } },
+        outputs: [{ path: "report.json", contract: "ultrafuzz/report@1" }]
+      });
+      const canonical = fs.readFileSync(reportPath, "utf8");
+      assert.equal(validateArtifactContract("ultrafuzz/report@1", canonical, "report.json").ok, true, fixture.runId);
+      assert.equal(
+        JSON.parse(canonical).property_implementation_coverage,
+        "unavailable",
+        `${fixture.runId} must use the canonical no-coverage sentinel`
+      );
+      assert.equal(
+        replaceCoverage(canonical, "unavailable"),
+        canonical,
+        "canonical no-coverage replacement must be byte-idempotent"
+      );
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+  assert.equal(reconstructionAuthorityReads, invalidCoverageCases.length);
+});
+
+test("generated Smithers coverage authority fails closed except for an explicit historical handoff", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-report-coverage-authority-"));
+  const dependency = path.join(root, "implementation-attempt");
+  fs.mkdirSync(dependency);
+  fs.writeFileSync(path.join(dependency, "implemented-properties.json"), JSON.stringify({ authoritative: true }));
+  const producer = {
+    attemptId: "implementation-attempt",
+    metadata: { node: { logicalNodeId: "stateful-invariant-implement-properties" } },
+    outputs: [
+      {
+        path: "implemented-properties.json",
+        contract: "ultrafuzz/implemented-properties@2"
+      }
+    ]
+  };
+  let verificationFailure = false;
+  let verificationCount = 0;
+  const producers = [producer];
+  const readAncestor = loadVerifiedAncestorJsonArtifact(producers, (_task, verifiedDependency) => {
+    verificationCount += 1;
+    assert.equal(verifiedDependency, dependency);
+    if (verificationFailure) throw new Error("unverified dependency");
+  });
+  const finalReportTask = { dependencyArtifactDirs: [dependency] };
+  const readCurrent = (): { path: string; value: unknown } | undefined =>
+    readAncestor(
+      finalReportTask,
+      "stateful-invariant-implement-properties",
+      "implemented-properties.json",
+      "ultrafuzz/implemented-properties@2",
+      "ultrafuzz/implemented-properties@1"
+    );
+
+  try {
+    assert.deepEqual(readCurrent()?.value, { authoritative: true });
+    assert.equal(verificationCount, 1);
+
+    producer.outputs[0]!.contract = "ultrafuzz/implemented-properties@1";
+    assert.equal(readCurrent(), undefined, "a declared historical @1 handoff keeps legacy behavior");
+    assert.equal(verificationCount, 1, "historical bytes are not reinterpreted as current coverage authority");
+
+    const historicalReportRoot = path.join(root, "historical-report");
+    fs.mkdirSync(historicalReportRoot);
+    const historicalReportPath = path.join(historicalReportRoot, "report.json");
+    const historicalReport = `${JSON.stringify(
+      { schema_version: "1.0", run_metadata: {}, issues: [], non_production_outcomes: [] },
+      null,
+      2
+    )}\n`;
+    fs.writeFileSync(historicalReportPath, historicalReport);
+    const reconstructHistorical = loadReportImplementationCoverageReconstructor([producer], () => undefined);
+    reconstructHistorical({
+      metadata: { node: { logicalNodeId: "final-report" }, artifacts: { dir: historicalReportRoot } },
+      outputs: [{ path: "report.json", contract: "ultrafuzz/report@1" }]
+    });
+    assert.equal(
+      fs.readFileSync(historicalReportPath, "utf8"),
+      historicalReport,
+      "a declared historical producer must not be rewritten as a producer-free topology"
+    );
+
+    producer.outputs = [];
+    assert.throws(readCurrent, /authoritative implemented-properties\.json handoff is unavailable/u);
+
+    producer.outputs = [
+      { path: "implemented-properties.json", contract: "ultrafuzz/implemented-properties@unexpected" }
+    ];
+    assert.throws(readCurrent, /declares unexpected contract/u);
+
+    producer.outputs[0]!.contract = "ultrafuzz/implemented-properties@2";
+    finalReportTask.dependencyArtifactDirs = [];
+    assert.throws(readCurrent, /authoritative implemented-properties\.json handoff is unavailable/u);
+
+    finalReportTask.dependencyArtifactDirs = [dependency];
+    const alternateDependency = path.join(root, "implementation-attempt-alternate");
+    fs.mkdirSync(alternateDependency);
+    fs.writeFileSync(
+      path.join(alternateDependency, "implemented-properties.json"),
+      JSON.stringify({ authoritative: "alternate" })
+    );
+    producers.push({
+      attemptId: "implementation-attempt-alternate",
+      metadata: { node: { logicalNodeId: "stateful-invariant-implement-properties" } },
+      outputs: [
+        {
+          path: "implemented-properties.json",
+          contract: "ultrafuzz/implemented-properties@2"
+        }
+      ]
+    });
+    finalReportTask.dependencyArtifactDirs = [dependency, alternateDependency];
+    assert.throws(readCurrent, /authoritative implemented-properties\.json handoff is ambiguous/u);
+
+    producers.pop();
+    finalReportTask.dependencyArtifactDirs = [dependency];
+    fs.writeFileSync(path.join(dependency, "implemented-properties.json"), "{malformed");
+    assert.throws(readCurrent, /authoritative implemented-properties\.json handoff is malformed/u);
+
+    fs.writeFileSync(path.join(dependency, "implemented-properties.json"), JSON.stringify({ authoritative: true }));
+    verificationFailure = true;
+    assert.throws(readCurrent, /unverified dependency/u);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("generated Smithers final-report normalization emits canonical report and sidecar bytes", () => {
+  const { normalizeReport, normalizeFindings } = loadFinalReportProducerNormalizers();
+  const independentDetail = "  The source span establishes the bounded StableSwap loop.  ";
+  const report = {
+    schema_version: "1.0",
+    run_metadata: { run_id: "stableswap-singleton-range" },
+    issues: [
+      {
+        schema_version: "1.0",
+        id: "M-01",
+        title: "[M-01] - StableSwap loop boundary",
+        status: "confirmed",
+        severity_guess: "Medium",
+        confidence: "medium",
+        summary: "A bounded loop is anchored to one source span.",
+        evidence: [
+          "scope",
+          {
+            kind: "source",
+            path: "contracts/main/CurveStableSwapNG.vy",
+            detail: independentDetail,
+            line_ranges: [{ line: 318, end_line: 337 }]
+          }
+        ]
+      }
+    ],
+    non_production_outcomes: []
+  };
+  const rawReportBytes = `${JSON.stringify(report, null, 2)}\n`;
+  assert.equal(validateArtifactContract("ultrafuzz/report@1", rawReportBytes, "report.json").ok, false);
+
+  const canonicalReport = {
+    ...report,
+    issues: [
+      {
+        ...report.issues[0]!,
+        evidence: [
+          "scope",
+          {
+            kind: "source",
+            path: "contracts/main/CurveStableSwapNG.vy",
+            detail: independentDetail,
+            line: 318,
+            end_line: 337
+          }
+        ]
+      }
+    ]
+  };
+  const expectedReportBytes = `${JSON.stringify(canonicalReport, null, 2)}\n`;
+
+  const normalizedReportBytes = normalizeReport(rawReportBytes);
+  assert.equal(normalizedReportBytes, expectedReportBytes);
+  assert.equal(
+    createHash("sha256").update(normalizedReportBytes!).digest("hex"),
+    "4c6b608ee8e06f5b96afc145ef64030d1e3a1fc81602308a8a3474c93146b21b"
+  );
+  const normalizedFindings = normalizeFindings(JSON.parse(normalizedReportBytes!).issues);
+  assert.deepEqual(normalizedFindings, canonicalReport.issues);
+  const normalizedSidecarBytes = `${JSON.stringify(normalizedFindings, null, 2)}\n`;
+  assert.equal(normalizedSidecarBytes, `${JSON.stringify(canonicalReport.issues, null, 2)}\n`);
+  assert.equal(
+    createHash("sha256").update(normalizedSidecarBytes).digest("hex"),
+    "21413a3a47d1253ca7ef4f5af0950f7884d1ba5a8b3bd740d6e85f5a400e925c"
+  );
+  assert.equal(validateArtifactContract("ultrafuzz/report@1", normalizedReportBytes!, "report.json").ok, true);
+  assert.equal(
+    validateArtifactContract("ultrafuzz/findings@1", normalizedSidecarBytes, "findings.normalized.json").ok,
+    true
+  );
+  assert.deepEqual(JSON.parse(normalizedReportBytes!).issues[0].evidence[1], canonicalReport.issues[0]!.evidence[1]);
+  assert.equal(JSON.parse(normalizedReportBytes!).issues[0].evidence[1].detail, independentDetail);
+  assert.equal(normalizeReport(normalizedReportBytes!), undefined, "canonical bytes are idempotent");
+});
+
 test("generated Smithers agent retains validated strategy findings when dedupe output is missing", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const fallbackStart = source.indexOf("function materializeMissingDedupeArtifact");
@@ -1296,7 +2269,7 @@ test("durable dedupe recovery replaces a symlink without overwriting its target"
 test("generated Smithers agent fails closed instead of promoting dedupe findings into a final report", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const fallbackStart = source.indexOf("function materializeMissingFinalReportArtifacts");
-  const reportReaderStart = source.indexOf("function meaningfulFinalReport");
+  const reportReaderStart = source.indexOf("function validatedFinalReport");
 
   assert.ok(fallbackStart >= 0, source);
   assert.ok(reportReaderStart > fallbackStart, source);
@@ -1304,25 +2277,42 @@ test("generated Smithers agent fails closed instead of promoting dedupe findings
   const fallback = source.slice(fallbackStart, reportReaderStart);
   assert.match(fallback, /logicalNodeId !== "final-report"/u);
   assert.match(fallback, /candidate\.path === "report\.json" && candidate\.contract === "ultrafuzz\/report@1"/u);
+  assert.match(
+    fallback,
+    /candidate\.path === "report\.md" && candidate\.contract === "ultrafuzz\/nonempty-markdown@1"/u
+  );
   assert.match(fallback, /candidate\.path === "findings\.normalized\.json"/u);
+  assert.match(fallback, /recoverableOutputs\.some\(\(output\) => finalReportOutputNeedsRecovery/u);
   assert.match(fallback, /if \(report === undefined\) \{[\s\S]*?return;\s*\}/u);
-  assert.match(fallback, /writeValidatedTaskArtifact\(task, reportOutput, report\)/u);
-  assert.match(fallback, /let findings = normalizedFindingArray\(report\.issues\)/u);
-  assert.doesNotMatch(fallback, /dedupe-findings|retainedDedupeFindings|recoveredReport|artifact_recovery/u);
+  assert.match(fallback, /const projection = projectCanonicalFinalReport\(report\)/u);
+  assert.match(fallback, /writeValidatedTaskArtifact\(task, reportOutput, projection\.report\)/u);
+  assert.match(fallback, /const findings = normalizedFindingArray\(projection\.report\.issues\)/u);
+  assert.match(fallback, /writeValidatedTaskArtifactContents\(task, markdownOutput, projection\.markdown\)/u);
+  assert.doesNotMatch(
+    fallback,
+    /dedupe-findings|retainedDedupeFindings|normalizedFindingsArtifact|recoveredReport|artifact_recovery/u
+  );
+  assert.ok(
+    fallback.indexOf("finalReportOutputNeedsRecovery(artifactRoots, output)") <
+      fallback.indexOf("projectCanonicalFinalReport(report)"),
+    fallback
+  );
   assert.doesNotMatch(source, /function normalizedFallbackReportIssue|issue\.impact =|issue\.likelihood =/u);
 });
 
-test("generated Smithers agent leaves final-report Markdown to the final-review worker", () => {
+test("generated Smithers agent projects final-report Markdown only from validated final-review JSON", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const markdownStart = source.indexOf("function materializeMissingMarkdownArtifacts");
   const summaryStart = source.indexOf("function agentResultSummary");
   const finalReportStart = source.indexOf("function materializeMissingFinalReportArtifacts");
-  const reportReaderStart = source.indexOf("function meaningfulFinalReport");
+  const reportReaderStart = source.indexOf("function validatedFinalReport");
+  const reportReaderEnd = source.indexOf("\n\nfunction normalizedFindingArray", reportReaderStart);
 
   assert.ok(markdownStart >= 0, source);
   assert.ok(summaryStart > markdownStart, source);
   assert.ok(finalReportStart > summaryStart, source);
   assert.ok(reportReaderStart > finalReportStart, source);
+  assert.ok(reportReaderEnd > reportReaderStart, source);
 
   const markdownFallback = source.slice(markdownStart, summaryStart);
   assert.match(
@@ -1332,8 +2322,454 @@ test("generated Smithers agent leaves final-report Markdown to the final-review 
   assert.match(markdownFallback, /continue;/u);
 
   const finalReportFallback = source.slice(finalReportStart, reportReaderStart);
-  assert.doesNotMatch(finalReportFallback, /report\.md|markdown|writeValidatedTextArtifact/u);
-  assert.doesNotMatch(source, /function writeRecoveredReportMarkdown|function writeValidatedTextArtifact/u);
+  assert.match(finalReportFallback, /projectCanonicalFinalReport\(report\)/u);
+  assert.match(finalReportFallback, /projection\.report/u);
+  assert.match(finalReportFallback, /projection\.markdown/u);
+  assert.doesNotMatch(finalReportFallback, /agentResultSummary|dedupe-findings|retainedDedupeFindings/u);
+  const reportReader = source.slice(reportReaderStart, reportReaderEnd);
+  assert.match(reportReader, /readBoundedFinalReportJson\(reportPath\)/u);
+  assert.doesNotMatch(reportReader, /openSync|fstatSync|readFileSync|closeSync/u);
+});
+
+test("generated Smithers rejects canonical-empty final review before touching existing report artifacts", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const materializerStart = source.indexOf("function materializeMissingFinalReportArtifacts");
+  const readerStart = source.indexOf("function validatedFinalReport");
+  const readerEnd = source.indexOf("\n\nfunction normalizedFindingArray", readerStart);
+  assert.ok(materializerStart >= 0 && readerStart > materializerStart && readerEnd > readerStart, source);
+  const materializer = source.slice(materializerStart, readerStart);
+  const reader = source.slice(readerStart, readerEnd);
+  assert.doesNotMatch(reader, /isCanonicalEmptyReport/u);
+  assert.ok(
+    materializer.indexOf("projectCanonicalFinalReport(report)") <
+      materializer.indexOf("writeValidatedTaskArtifact(task, reportOutput"),
+    materializer
+  );
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-empty-final-report-"));
+  const markdownPath = path.join(root, "report.md");
+  const findingsPath = path.join(root, "findings.normalized.json");
+  fs.writeFileSync(markdownPath, "# Existing model report\n");
+  fs.writeFileSync(findingsPath, "[]\n");
+  try {
+    assert.throws(
+      () =>
+        projectCanonicalFinalReport({
+          schema_version: "1.0",
+          run_metadata: {},
+          issues: [],
+          non_production_outcomes: []
+        }),
+      /canonical empty final report/u
+    );
+    assert.equal(fs.readFileSync(markdownPath, "utf8"), "# Existing model report\n");
+    assert.equal(fs.readFileSync(findingsPath, "utf8"), "[]\n");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("generated Smithers derives an exact empty sidecar from a meaningful zero-issue projection", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const materializerStart = source.indexOf("function materializeMissingFinalReportArtifacts");
+  const readerStart = source.indexOf("function validatedFinalReport");
+  const materializer = source.slice(materializerStart, readerStart);
+  assert.match(materializer, /normalizedFindingArray\(projection\.report\.issues\)/u);
+  assert.doesNotMatch(materializer, /normalizedFindingsArtifact|findings\.length/u);
+
+  const { normalizeFindings } = loadFinalReportProducerNormalizers();
+  const projection = projectCanonicalFinalReport({
+    schema_version: "1.0",
+    run_metadata: { run_id: "zero-issue-sidecar" },
+    issues: [],
+    non_production_outcomes: [],
+    property_provenance: []
+  });
+  assert.deepEqual(normalizeFindings(projection.report.issues), []);
+  assert.equal(`${JSON.stringify(normalizeFindings(projection.report.issues), null, 2)}\n`, "[]\n");
+});
+
+test("generated Smithers materializes one canonical JSON, Markdown, and findings projection", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-final-report-materializer-"));
+  const canonicalRoot = path.join(root, "canonical");
+  const mirrorRoot = path.join(root, "mirror");
+  fs.mkdirSync(canonicalRoot, { recursive: true });
+  fs.mkdirSync(mirrorRoot, { recursive: true });
+  const report = generatedFinalReportFixture();
+  fs.writeFileSync(path.join(canonicalRoot, "report.json"), `${JSON.stringify(report, null, 2)}\n`);
+  fs.writeFileSync(
+    path.join(canonicalRoot, "findings.normalized.json"),
+    `${JSON.stringify([{ id: "stale-independent-sidecar" }], null, 2)}\n`
+  );
+  const materialize = loadFinalReportArtifactMaterializer();
+  const task = {
+    metadata: { node: { logicalNodeId: "final-report" }, artifacts: { dir: canonicalRoot } },
+    outputs: [
+      { path: "report.md", contract: "ultrafuzz/nonempty-markdown@1" },
+      { path: "report.json", contract: "ultrafuzz/report@1" },
+      { path: "findings.normalized.json", contract: "ultrafuzz/findings@1" }
+    ],
+    mirrorRoot
+  };
+
+  try {
+    materialize(task);
+    const projection = projectCanonicalFinalReport(report);
+    assert.equal(
+      fs.readFileSync(path.join(canonicalRoot, "report.json"), "utf8"),
+      `${JSON.stringify(projection.report, null, 2)}\n`
+    );
+    assert.equal(fs.readFileSync(path.join(canonicalRoot, "report.md"), "utf8"), projection.markdown);
+    assert.equal(
+      fs.readFileSync(path.join(canonicalRoot, "findings.normalized.json"), "utf8"),
+      `${JSON.stringify(projection.report.issues, null, 2)}\n`
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("generated Smithers reads final-report JSON through a bounded no-follow descriptor", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-final-report-bounded-read-"));
+  const canonicalRoot = path.join(root, "canonical");
+  const mirrorRoot = path.join(root, "mirror");
+  fs.mkdirSync(canonicalRoot, { recursive: true });
+  fs.mkdirSync(mirrorRoot, { recursive: true });
+  const reportPath = path.join(canonicalRoot, "report.json");
+  const reportBytes = `${JSON.stringify(generatedFinalReportFixture(), null, 2)}\n`;
+  fs.writeFileSync(reportPath, reportBytes);
+
+  let openedDescriptor: number | undefined;
+  let readDescriptor: number | undefined;
+  let closedDescriptor: number | undefined;
+  const materialize = loadFinalReportArtifactMaterializer({
+    maximumJsonBytes: 32,
+    open: (filePath, flags) => {
+      assert.equal(filePath, reportPath);
+      assert.notEqual(flags & fs.constants.O_NOFOLLOW, 0);
+      openedDescriptor = fs.openSync(filePath, flags);
+      return openedDescriptor;
+    },
+    fstat: (descriptor) => {
+      assert.equal(descriptor, openedDescriptor);
+      assert.equal(fs.fstatSync(descriptor).isFile(), true);
+      // Simulate a file that passed the pre-read bound and then grew. The
+      // byteLength check on the descriptor read must still reject it.
+      return { size: 1, isFile: () => true };
+    },
+    read: (descriptor) => {
+      readDescriptor = descriptor;
+      return fs.readFileSync(descriptor);
+    },
+    close: (descriptor) => {
+      closedDescriptor = descriptor;
+      fs.closeSync(descriptor);
+    }
+  });
+  const task = {
+    metadata: { node: { logicalNodeId: "final-report" }, artifacts: { dir: canonicalRoot } },
+    outputs: [
+      { path: "report.md", contract: "ultrafuzz/nonempty-markdown@1" },
+      { path: "report.json", contract: "ultrafuzz/report@1" },
+      { path: "findings.normalized.json", contract: "ultrafuzz/findings@1" }
+    ],
+    mirrorRoot
+  };
+
+  try {
+    materialize(task);
+    assert.equal(readDescriptor, openedDescriptor);
+    assert.equal(closedDescriptor, openedDescriptor);
+    assert.equal(fs.existsSync(path.join(canonicalRoot, "report.md")), false);
+    assert.equal(fs.readFileSync(reportPath, "utf8"), reportBytes);
+  } finally {
+    if (openedDescriptor !== undefined && closedDescriptor !== openedDescriptor) {
+      fs.closeSync(openedDescriptor);
+    }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("generated Smithers bounds canonical final-report projection to artifact recovery", async (t) => {
+  const materialize = loadFinalReportArtifactMaterializer();
+  const runCase = (
+    reportContents: string | undefined,
+    options: { existingMarkdown?: string; existingFindings?: string } = {}
+  ): {
+    root: string;
+    canonicalRoot: string;
+    task: {
+      metadata: { node: { logicalNodeId: string }; artifacts: { dir: string } };
+      outputs: Array<{ path: string; contract: string }>;
+      mirrorRoot: string;
+    };
+  } => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-final-report-fail-closed-"));
+    const canonicalRoot = path.join(root, "canonical");
+    const mirrorRoot = path.join(root, "mirror");
+    fs.mkdirSync(canonicalRoot, { recursive: true });
+    fs.mkdirSync(mirrorRoot, { recursive: true });
+    if (reportContents !== undefined) fs.writeFileSync(path.join(canonicalRoot, "report.json"), reportContents);
+    if (options.existingMarkdown !== undefined) {
+      fs.writeFileSync(path.join(canonicalRoot, "report.md"), options.existingMarkdown);
+    }
+    if (options.existingFindings !== undefined) {
+      fs.writeFileSync(path.join(canonicalRoot, "findings.normalized.json"), options.existingFindings);
+    }
+    return {
+      root,
+      canonicalRoot,
+      task: {
+        metadata: { node: { logicalNodeId: "final-report" }, artifacts: { dir: canonicalRoot } },
+        outputs: [
+          { path: "report.md", contract: "ultrafuzz/nonempty-markdown@1" },
+          { path: "report.json", contract: "ultrafuzz/report@1" },
+          { path: "findings.normalized.json", contract: "ultrafuzz/findings@1" }
+        ],
+        mirrorRoot
+      }
+    };
+  };
+
+  await t.test("missing and malformed JSON do not recover Markdown", () => {
+    for (const contents of [undefined, "{ malformed\n"]) {
+      const fixture = runCase(contents);
+      try {
+        materialize(fixture.task);
+        assert.equal(fs.existsSync(path.join(fixture.canonicalRoot, "report.md")), false);
+      } finally {
+        fs.rmSync(fixture.root, { recursive: true, force: true });
+      }
+    }
+  });
+
+  await t.test("complete canonical-empty artifacts bypass recovery unchanged", () => {
+    const empty = `${JSON.stringify(
+      { schema_version: "1.0", run_metadata: {}, issues: [], non_production_outcomes: [] },
+      null,
+      2
+    )}\n`;
+    const fixture = runCase(empty, { existingMarkdown: "# Existing final report\n", existingFindings: "[]\n" });
+    try {
+      materialize(fixture.task);
+      assert.equal(fs.readFileSync(path.join(fixture.canonicalRoot, "report.json"), "utf8"), empty);
+      assert.equal(fs.readFileSync(path.join(fixture.canonicalRoot, "report.md"), "utf8"), "# Existing final report\n");
+      assert.equal(fs.readFileSync(path.join(fixture.canonicalRoot, "findings.normalized.json"), "utf8"), "[]\n");
+    } finally {
+      fs.rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("complete schema-valid but unrenderable artifacts bypass recovery unchanged", () => {
+    const report = generatedFinalReportFixture();
+    const issue = (report.issues as Array<Record<string, unknown>>)[0]!;
+    issue.strategy_provenance = { detection_rates: [{ strategy: "stateful-invariant" }] };
+    const reportBytes = `${JSON.stringify(report, null, 2)}\n`;
+    const findingsBytes = `${JSON.stringify(report.issues, null, 2)}\n`;
+    assert.equal(validateArtifactContract("ultrafuzz/report@1", reportBytes, "report.json").ok, true);
+    assert.equal(validateArtifactContract("ultrafuzz/findings@1", findingsBytes, "findings.normalized.json").ok, true);
+    const fixture = runCase(reportBytes, {
+      existingMarkdown: "# Existing final report\n",
+      existingFindings: findingsBytes
+    });
+    try {
+      materialize(fixture.task);
+      assert.equal(fs.readFileSync(path.join(fixture.canonicalRoot, "report.json"), "utf8"), reportBytes);
+      assert.equal(fs.readFileSync(path.join(fixture.canonicalRoot, "report.md"), "utf8"), "# Existing final report\n");
+      assert.equal(
+        fs.readFileSync(path.join(fixture.canonicalRoot, "findings.normalized.json"), "utf8"),
+        findingsBytes
+      );
+    } finally {
+      fs.rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("canonical-empty JSON still fails closed when Markdown needs recovery", () => {
+    const empty = `${JSON.stringify(
+      { schema_version: "1.0", run_metadata: {}, issues: [], non_production_outcomes: [] },
+      null,
+      2
+    )}\n`;
+    for (const existingMarkdown of [undefined, " \n"]) {
+      const fixture = runCase(empty, { existingMarkdown, existingFindings: "[]\n" });
+      try {
+        assert.throws(() => materialize(fixture.task), /canonical empty final report/u);
+        assert.equal(fs.existsSync(path.join(fixture.canonicalRoot, "report.md")), existingMarkdown !== undefined);
+        if (existingMarkdown !== undefined) {
+          assert.equal(fs.readFileSync(path.join(fixture.canonicalRoot, "report.md"), "utf8"), existingMarkdown);
+        }
+      } finally {
+        fs.rmSync(fixture.root, { recursive: true, force: true });
+      }
+    }
+  });
+
+  await t.test("schema-valid but unrenderable JSON does not recover Markdown", () => {
+    const report = generatedFinalReportFixture();
+    const issue = (report.issues as Array<Record<string, unknown>>)[0]!;
+    issue.strategy_provenance = { detection_rates: [{ strategy: "stateful-invariant" }] };
+    const fixture = runCase(`${JSON.stringify(report, null, 2)}\n`);
+    try {
+      assert.throws(() => materialize(fixture.task), /not renderable/u);
+      assert.equal(fs.existsSync(path.join(fixture.canonicalRoot, "report.md")), false);
+    } finally {
+      fs.rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("meaningful zero-issue JSON replaces a stale nonempty sidecar with exact empty bytes", () => {
+    const report = {
+      schema_version: "1.0",
+      run_metadata: { run_id: "meaningful-zero" },
+      issues: [],
+      non_production_outcomes: [],
+      property_provenance: []
+    };
+    const fixture = runCase(`${JSON.stringify(report, null, 2)}\n`, {
+      existingFindings: `${JSON.stringify([{ id: "stale" }], null, 2)}\n`
+    });
+    try {
+      materialize(fixture.task);
+      assert.equal(fs.readFileSync(path.join(fixture.canonicalRoot, "findings.normalized.json"), "utf8"), "[]\n");
+      assert.equal(
+        fs.readFileSync(path.join(fixture.canonicalRoot, "report.md"), "utf8"),
+        projectCanonicalFinalReport(report).markdown
+      );
+    } finally {
+      fs.rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+});
+
+test("generated Smithers final-report writes preserve strict canonical and mirror path handling", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const writerStart = source.indexOf("function writeValidatedTaskArtifactContents");
+  const writerEnd = source.indexOf("\n\nfunction isPlainRecord", writerStart);
+  assert.ok(writerStart >= 0, source);
+  assert.ok(writerEnd > writerStart, source);
+
+  const writer = source.slice(writerStart, writerEnd);
+  assert.match(writer, /validateArtifactContract\(output\.contract, contents, output\.path\)/u);
+  assert.match(writer, /isStrictlyInsideDirectory\(canonicalRoot, canonicalPath\)/u);
+  assert.match(writer, /resolveRegularArtifactFile\([\s\S]*canonicalRoot,[\s\S]*canonicalPath/u);
+  assert.match(writer, /if \(!existsSync\(canonicalPath\)\)/u);
+  assert.match(writer, /isStrictlyInsideDirectory\(mirrorRoot, mirrorPath\)/u);
+  assert.match(writer, /resolveRegularArtifactFile\([\s\S]*mirrorRoot,[\s\S]*mirrorPath/u);
+  assert.match(writer, /writeFileDurable\(existingCanonical, contents\)/u);
+  assert.match(writer, /writeFileDurable\(canonicalPath, contents\)/u);
+  assert.match(writer, /writeFileDurable\(mirrorPath, contents\)/u);
+  assert.doesNotMatch(writer, /writeFileSync/u);
+});
+
+test("generated Smithers recovered-artifact writer handles regular and unsafe paths without target writes", async (t) => {
+  const output = { path: "report.md", contract: "ultrafuzz/nonempty-markdown@1" };
+  const contents = "# Canonical final report\n";
+  const fixture = (): {
+    root: string;
+    canonicalRoot: string;
+    mirrorRoot: string;
+    task: { metadata: { artifacts: { dir: string } }; mirrorRoot: string };
+  } => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-final-report-writer-"));
+    const canonicalRoot = path.join(root, "canonical");
+    const mirrorRoot = path.join(root, "mirror");
+    fs.mkdirSync(canonicalRoot, { recursive: true });
+    fs.mkdirSync(mirrorRoot, { recursive: true });
+    return { root, canonicalRoot, mirrorRoot, task: { metadata: { artifacts: { dir: canonicalRoot } }, mirrorRoot } };
+  };
+
+  await t.test("invalid regular output is replaced durably", () => {
+    const value = fixture();
+    try {
+      fs.writeFileSync(path.join(value.canonicalRoot, "report.md"), "");
+      loadValidatedTaskArtifactWriter()(value.task, output, contents);
+      assert.equal(fs.readFileSync(path.join(value.canonicalRoot, "report.md"), "utf8"), contents);
+      assert.equal(fs.existsSync(path.join(value.mirrorRoot, "report.md")), false);
+    } finally {
+      fs.rmSync(value.root, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("canonical symlink is untouched and projection is written to the exact mirror", () => {
+    const value = fixture();
+    const target = path.join(value.root, "symlink-target.md");
+    try {
+      fs.writeFileSync(target, "target remains unchanged\n");
+      fs.symlinkSync(target, path.join(value.canonicalRoot, "report.md"));
+      loadValidatedTaskArtifactWriter()(value.task, output, contents);
+      assert.equal(fs.lstatSync(path.join(value.canonicalRoot, "report.md")).isSymbolicLink(), true);
+      assert.equal(fs.readFileSync(target, "utf8"), "target remains unchanged\n");
+      assert.equal(fs.readFileSync(path.join(value.mirrorRoot, "report.md"), "utf8"), contents);
+    } finally {
+      fs.rmSync(value.root, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("canonical hard link is atomically replaced without modifying its peer", () => {
+    const value = fixture();
+    const target = path.join(value.root, "hardlink-peer.md");
+    const canonical = path.join(value.canonicalRoot, "report.md");
+    try {
+      fs.writeFileSync(target, "peer remains unchanged\n");
+      fs.linkSync(target, canonical);
+      const originalPeerIdentity = fs.statSync(target).ino;
+      assert.equal(fs.statSync(canonical).ino, originalPeerIdentity);
+      loadValidatedTaskArtifactWriter()(value.task, output, contents);
+      assert.equal(fs.readFileSync(target, "utf8"), "peer remains unchanged\n");
+      assert.equal(fs.readFileSync(canonical, "utf8"), contents);
+      assert.notEqual(fs.statSync(canonical).ino, originalPeerIdentity);
+    } finally {
+      fs.rmSync(value.root, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("canonical directory is untouched and projection is written to the exact mirror", () => {
+    const value = fixture();
+    try {
+      fs.mkdirSync(path.join(value.canonicalRoot, "report.md"));
+      loadValidatedTaskArtifactWriter()(value.task, output, contents);
+      assert.equal(fs.statSync(path.join(value.canonicalRoot, "report.md")).isDirectory(), true);
+      assert.equal(fs.readFileSync(path.join(value.mirrorRoot, "report.md"), "utf8"), contents);
+    } finally {
+      fs.rmSync(value.root, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("unsafe canonical and mirror paths fail without modifying either target", () => {
+    const value = fixture();
+    const canonicalTarget = path.join(value.root, "canonical-target.md");
+    const mirrorTarget = path.join(value.root, "mirror-target.md");
+    try {
+      fs.writeFileSync(canonicalTarget, "canonical target\n");
+      fs.writeFileSync(mirrorTarget, "mirror target\n");
+      fs.symlinkSync(canonicalTarget, path.join(value.canonicalRoot, "report.md"));
+      fs.symlinkSync(mirrorTarget, path.join(value.mirrorRoot, "report.md"));
+      assert.throws(
+        () => loadValidatedTaskArtifactWriter()(value.task, output, contents),
+        /output is not a regular file report\.md/u
+      );
+      assert.equal(fs.readFileSync(canonicalTarget, "utf8"), "canonical target\n");
+      assert.equal(fs.readFileSync(mirrorTarget, "utf8"), "mirror target\n");
+    } finally {
+      fs.rmSync(value.root, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("durable canonical write failures propagate instead of falling through to stale canonical bytes", () => {
+    const value = fixture();
+    try {
+      fs.writeFileSync(path.join(value.canonicalRoot, "report.md"), "# Stale model report\n");
+      const writer = loadValidatedTaskArtifactWriter(() => {
+        throw new Error("injected durable write failure");
+      });
+      assert.throws(() => writer(value.task, output, contents), /injected durable write failure/u);
+      assert.equal(fs.readFileSync(path.join(value.canonicalRoot, "report.md"), "utf8"), "# Stale model report\n");
+      assert.equal(fs.existsSync(path.join(value.mirrorRoot, "report.md")), false);
+    } finally {
+      fs.rmSync(value.root, { recursive: true, force: true });
+    }
+  });
 });
 
 test("generated Smithers agent normalizes legacy generated-test string lists", () => {
@@ -2204,7 +3640,7 @@ test("generated Smithers preserves setup-patch baselines across post-agent prepa
   assert.match(helper, /captures\.slice\(replayFrom\)/u);
   assert.match(
     source,
-    /const result = await agent\.generate\(attemptArgs\);[\s\S]*?prepareArtifactMirror\(task, \{ replayWorkspacePatches: false \}\);/u
+    /const result = await agent\.generate\(attemptArgs\);[\s\S]*?prepareArtifactMirror\(task, \{ replayWorkspacePatches: false, pinnedSubmodules: "verify" \}\);/u
   );
 });
 
