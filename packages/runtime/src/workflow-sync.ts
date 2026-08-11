@@ -1745,9 +1745,7 @@ export function projectNormalizedUsageAccounting(input: {
   return {
     components: {
       input_tokens:
-        !hasAnyCounter || usage.input_tokens === undefined || unavailableWhenBreakdownMissing("input_tokens")
-          ? null
-          : normalized.components.uncached_input,
+        !hasAnyCounter || unavailableWhenBreakdownMissing("input_tokens") ? null : normalized.components.uncached_input,
       cache_read_tokens:
         !hasAnyCounter ||
         cacheReadUnavailable ||
@@ -1756,19 +1754,13 @@ export function projectNormalizedUsageAccounting(input: {
           ? null
           : normalized.components.cache_read,
       cache_write_tokens:
-        !hasAnyCounter ||
-        usage.cache_write_tokens === undefined ||
-        unavailableWhenBreakdownMissing("cache_write_tokens")
+        !hasAnyCounter || unavailableWhenBreakdownMissing("cache_write_tokens")
           ? null
           : normalized.components.cache_write,
       output_tokens:
-        !hasAnyCounter || usage.output_tokens === undefined || unavailableWhenBreakdownMissing("output_tokens")
-          ? null
-          : normalized.components.output,
+        !hasAnyCounter || unavailableWhenBreakdownMissing("output_tokens") ? null : normalized.components.output,
       reasoning_tokens:
-        !hasAnyCounter || usage.reasoning_tokens === undefined || unavailableWhenBreakdownMissing("reasoning_tokens")
-          ? null
-          : normalized.components.reasoning
+        !hasAnyCounter || unavailableWhenBreakdownMissing("reasoning_tokens") ? null : normalized.components.reasoning
     },
     total_tokens:
       explicitTotal === undefined

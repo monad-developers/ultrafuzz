@@ -126,15 +126,19 @@ export function deriveRunStatistics(
   nowMs = Date.now()
 ): { value: RunStatisticsValue; diagnostics: RuntimeDiagnostic[] } {
   const diagnostics: RuntimeDiagnostic[] = [];
-  const metadata = record(evidence.runMetadata);
-  const state = record(evidence.state);
+  const storedMetadata = record(evidence.runMetadata);
+  const storedState = record(evidence.state);
+  const metadataRunId = stringField(storedMetadata, "run_id");
+  const stateRunId = stringField(storedState, "run_id");
+  const metadata = metadataRunId !== undefined && metadataRunId !== evidence.runId ? undefined : storedMetadata;
+  const state = stateRunId !== undefined && stateRunId !== evidence.runId ? undefined : storedState;
   const graph = record(evidence.graph);
   const parsedAttempts = parseAttemptLines(evidence.attemptsJsonl, evidence.runId);
   const parsedUsage = parseUsageLines(evidence.usageJsonl, evidence.runId);
 
   for (const [label, storedRunId] of [
-    ["run.json", stringField(metadata, "run_id")],
-    ["state.json", stringField(state, "run_id")]
+    ["run.json", metadataRunId],
+    ["state.json", stateRunId]
   ] as const) {
     if (storedRunId !== undefined && storedRunId !== evidence.runId) {
       diagnostics.push(
@@ -212,7 +216,10 @@ export function deriveRunStatistics(
   }
   if (parsedUsage.malformed > 0) {
     for (const accumulator of [...usageByNode.values(), unattributed]) {
-      if (accumulator.eventCount > 0) accumulator.usageComplete = false;
+      if (accumulator.eventCount > 0) {
+        accumulator.usageComplete = false;
+        accumulator.pricingComplete = false;
+      }
     }
   }
 
@@ -527,17 +534,18 @@ function nodeStatistics(
     ...descriptor.states.map((nodeState) => arrayField(nodeState, "outputs").length)
   );
   const usageValue = usageStatistics(usage);
+  const models = uniqueStrings([
+    ...descriptor.states.map((nodeState) => stringField(nodeState, "model")),
+    ...(usageValue?.models ?? []),
+    ...graphModels(descriptor.graph)
+  ]);
   return {
     node_id: descriptor.nodeId,
     logical_node_id: descriptor.logicalNodeId,
     kind: descriptor.kind,
     status,
     outcome: aggregateAttemptOutcome(attempts),
-    model:
-      descriptor.states.map((nodeState) => stringField(nodeState, "model")).find((value) => value !== undefined) ??
-      usageValue?.models[0] ??
-      graphModel(descriptor.graph) ??
-      null,
+    model: models.length > 1 ? "mixed" : (models[0] ?? null),
     duration_ms: validDurations === 0 ? null : durationMs,
     current_elapsed_ms: currentElapsedMs,
     attempt_count: attemptsAvailable ? attempts.length : null,
@@ -675,12 +683,8 @@ function accountingCumulative(metadata: Record<string, unknown> | undefined): Re
   return recordField(recordField(metadata, "accounting"), "cumulative") ?? null;
 }
 
-function graphModel(graphNode: Record<string, unknown> | undefined): string | undefined {
-  for (const entry of arrayField(graphNode, "model_fanout")) {
-    const model = stringField(record(entry), "model_name");
-    if (model !== undefined) return model;
-  }
-  return undefined;
+function graphModels(graphNode: Record<string, unknown> | undefined): string[] {
+  return uniqueStrings(arrayField(graphNode, "model_fanout").map((entry) => stringField(record(entry), "model_name")));
 }
 
 function parseAttemptLines(text: string | undefined, expectedRunId: string): ParsedJsonLines {

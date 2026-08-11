@@ -165,6 +165,7 @@ test("stats validates, deduplicates, and run-scopes immutable ledger records", (
   assert.equal(derived.value.totals.duration_ms, null);
   assert.equal(derived.value.nodes[0]?.usage?.event_count, 1);
   assert.equal(derived.value.nodes[0]?.usage?.usage_complete, false);
+  assert.equal(derived.value.nodes[0]?.usage?.pricing_complete, false);
   const codes = new Set(derived.diagnostics.map((diagnostic) => diagnostic.code));
   for (const code of [
     "STATS_ATTEMPTS_DUPLICATE",
@@ -176,6 +177,46 @@ test("stats validates, deduplicates, and run-scopes immutable ledger records", (
   ]) {
     assert.equal(codes.has(code), true, code);
   }
+});
+
+test("stats excludes run metadata and state that belong to another run", () => {
+  const derived = deriveRunStatistics(
+    evidence({
+      runMetadata: {
+        run_id: "stats-other",
+        status: "failed",
+        accounting: {
+          cumulative: { total_tokens: 999_999, estimated_spend_usd: 999 },
+          pricing_catalog: {
+            model_prices: {
+              "gpt-test": { inputUsdPerMillion: 999, outputUsdPerMillion: 999 }
+            }
+          }
+        }
+      },
+      state: {
+        run_id: "stats-other",
+        status: "failed",
+        started_at: "2020-01-01T00:00:00.000Z",
+        finished_at: "2020-01-02T00:00:00.000Z",
+        nodes: {
+          foreign: { node_id: "foreign", status: "failed" }
+        }
+      }
+    })
+  );
+
+  assert.equal(derived.value.run_id, RUN_ID);
+  assert.equal(derived.value.status, "unknown");
+  assert.equal(derived.value.run_elapsed_ms, null);
+  assert.deepEqual(
+    derived.value.nodes.map((node) => node.node_id),
+    ["node"]
+  );
+  assert.equal(derived.value.totals.accounting_cumulative, null);
+  assert.equal(derived.value.totals.usage?.estimated_spend_usd, null);
+  assert.equal(derived.value.totals.usage?.pricing_complete, false);
+  assert.equal(derived.diagnostics.filter((diagnostic) => diagnostic.code === "STATS_RUN_ID_MISMATCH").length, 2);
 });
 
 test("stats keeps a fan-out graph node canonical and counts retries within each strategy", () => {
@@ -200,7 +241,7 @@ test("stats keeps a fan-out graph node canonical and counts retries within each 
           fan__model_1__attempt_0: {
             node_id: "fan__model_1__attempt_0",
             status: "succeeded",
-            model: "gpt-test",
+            model: "gpt-other",
             provenance: { workflow: { agent_task_id: taskTwo, attempt: 1 } }
           }
         }
@@ -215,7 +256,7 @@ test("stats keeps a fan-out graph node canonical and counts retries within each 
             workflow: { node_id: taskOne, task_node_ids: [taskOne, taskTwo] },
             model_fanout: [
               { model_name: "gpt-test", loop_index: 0, attempt_index: 0 },
-              { model_name: "gpt-test", loop_index: 0, attempt_index: 0 }
+              { model_name: "gpt-other", loop_index: 0, attempt_index: 0 }
             ]
           }
         ]
@@ -228,7 +269,7 @@ test("stats keeps a fan-out graph node canonical and counts retries within each 
           cache_write_tokens: 0,
           output_tokens: 0,
           reasoning_tokens: 0,
-          model: "gpt-test"
+          model: "gpt-other"
         }),
         usage("fan-usage-2", taskTwo, {
           input_tokens: 20,
@@ -249,9 +290,27 @@ test("stats keeps a fan-out graph node canonical and counts retries within each 
   assert.equal(derived.value.nodes[0]?.attempt_count, 3);
   assert.equal(derived.value.nodes[0]?.retry_count, 1);
   assert.equal(derived.value.nodes[0]?.usage?.total_tokens, 30);
+  assert.equal(derived.value.nodes[0]?.model, "mixed");
+  assert.deepEqual(derived.value.nodes[0]?.usage?.models, ["gpt-other", "gpt-test"]);
 });
 
 test("stats exposes incomplete component evidence as unavailable and honors provided and tiered costs", () => {
+  const canonicalOmissions = deriveRunStatistics(
+    evidence({
+      usageJsonl: jsonl([
+        usage("canonical-omissions", "node:node", {
+          input_tokens: 10,
+          cache_read_tokens: 5,
+          output_tokens: 2,
+          model: "gpt-test"
+        })
+      ])
+    })
+  ).value.nodes[0]?.usage;
+  assert.equal(canonicalOmissions?.cache_write_tokens, 0);
+  assert.equal(canonicalOmissions?.reasoning_tokens, 0);
+  assert.equal(canonicalOmissions?.usage_complete, true);
+
   const totalOnly = deriveRunStatistics(
     evidence({ usageJsonl: jsonl([usage("total-only", "node:node", { total_tokens: 100, model: "gpt-test" })]) })
   ).value.nodes[0]?.usage;
