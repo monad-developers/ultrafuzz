@@ -4708,6 +4708,366 @@ function writeCampaignSummary(
   );
 }
 
+const RECON_TIMEOUT_TEST_LIMIT = "18446744073709551615";
+
+interface CampaignTimeoutPlanFixture extends Record<string, unknown> {
+  configured_fuzzer_timeout_seconds: number;
+  recon_internal_timeout_seconds: number;
+  recon_test_limit: string;
+  host_soft_timeout_seconds: number;
+  host_force_kill_grace_seconds: number;
+  artifact_finalization_reserve_seconds: number;
+  backend_started_at: string;
+  fuzzing_deadline_utc: string;
+  force_kill_deadline_utc: string;
+  final_artifact_deadline_utc: string;
+  backend: { exact_shell_escaped_command: string };
+}
+
+interface CampaignTimeoutResultFixture extends Record<string, unknown> {
+  schema_version: "ultrafuzz.property-campaign.v1";
+  fuzzer_backend: "recon";
+  configured_timeout_seconds: number;
+  exact_command: string;
+  start_timestamp: string;
+  end_timestamp: string;
+  termination_reason: string;
+  campaign_outcome: string;
+  usable_results: boolean;
+  failures: [];
+}
+
+interface CampaignTimeoutSummaryFixture extends Record<string, unknown> {
+  outcome: string;
+  failure_counts: { pre_deduplication: number; post_deduplication: number };
+}
+
+interface CampaignTimeoutFixture {
+  plan: CampaignTimeoutPlanFixture;
+  backend: CampaignTimeoutResultFixture;
+  summary: CampaignTimeoutSummaryFixture;
+}
+
+function campaignTimeoutFixture(): CampaignTimeoutFixture {
+  const command =
+    `timeout --preserve-status --signal=INT --kill-after=300s 3600s recon fuzz . ` +
+    `--contract CryticTester --test-mode assertion --workers 8 ` +
+    `--timeout 3600 --test-limit ${RECON_TIMEOUT_TEST_LIMIT}`;
+  return {
+    plan: {
+      configured_fuzzer_timeout_seconds: 3600,
+      recon_internal_timeout_seconds: 3600,
+      recon_test_limit: RECON_TIMEOUT_TEST_LIMIT,
+      host_soft_timeout_seconds: 3600,
+      host_force_kill_grace_seconds: 300,
+      artifact_finalization_reserve_seconds: 300,
+      backend_started_at: "2026-08-11T00:00:00.000Z",
+      fuzzing_deadline_utc: "2026-08-11T01:00:00.000Z",
+      force_kill_deadline_utc: "2026-08-11T01:05:00.000Z",
+      final_artifact_deadline_utc: "2026-08-11T01:10:00.000Z",
+      backend: { exact_shell_escaped_command: command }
+    },
+    backend: {
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "recon",
+      configured_timeout_seconds: 3600,
+      exact_command: command,
+      start_timestamp: "2026-08-11T00:00:00.000Z",
+      end_timestamp: "2026-08-11T01:00:01.000Z",
+      termination_reason: "configured-timeout",
+      campaign_outcome: "complete",
+      usable_results: true,
+      failures: []
+    },
+    summary: {
+      outcome: "complete",
+      failure_counts: { pre_deduplication: 0, post_deduplication: 0 }
+    }
+  };
+}
+
+function runCampaignTimeoutGate(
+  mutate: (fixture: CampaignTimeoutFixture) => void = () => undefined
+): ReturnType<typeof verifyRequiredArtifactsForAttempt> {
+  const layout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-campaign-timeout",
+    resolvedConfigToml: '[invariants]\ninvariant_testing_fuzzer_timeout = "1h"\n'
+  });
+  campaignPropertyCatalog(layout, []);
+  const campaignId = "stateful-invariant-campaign";
+  const fixture = campaignTimeoutFixture();
+  mutate(fixture);
+  writeArtifact(layout, campaignId, "campaign-plan.json", JSON.stringify(fixture.plan));
+  writeArtifact(layout, campaignId, "recon-fuzzer-results.json", JSON.stringify(fixture.backend));
+  writeArtifact(layout, campaignId, "findings.json", "[]");
+  writeArtifact(layout, campaignId, "campaign-summary.json", JSON.stringify(fixture.summary));
+  const base = currentCampaignNode([
+    "campaign-plan.json",
+    "recon-fuzzer-results.json",
+    "findings.json",
+    "campaign-summary.json"
+  ]);
+  const node: PlannedGraphNode = {
+    ...base,
+    id: campaignId,
+    logical_id: campaignId,
+    outputs: base.outputs.map((output) =>
+      output.path === "campaign-plan.json" ? { ...output, contract: "ultrafuzz/json-object@1" as const } : output
+    )
+  };
+  return verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+}
+
+test("current campaign timeout gate accepts exact configured Recon timeout evidence", () => {
+  const result = runCampaignTimeoutGate();
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+  assert.deepEqual(
+    result.diagnostics.filter((diagnostic) => diagnostic.source === "campaign-timeout-evidence"),
+    []
+  );
+});
+
+test("current campaign timeout gate rejects reserve subtraction and ambiguous Recon command flags", () => {
+  const cases: Array<{
+    name: string;
+    code: string;
+    mutate: (fixture: CampaignTimeoutFixture) => void;
+  }> = [
+    {
+      name: "plan configured timeout",
+      code: "CAMPAIGN_TIMEOUT_CONFIG_MISMATCH",
+      mutate: (fixture) => {
+        fixture.plan.configured_fuzzer_timeout_seconds = 3300;
+      }
+    },
+    {
+      name: "Recon internal timeout",
+      code: "CAMPAIGN_TIMEOUT_CONFIG_MISMATCH",
+      mutate: (fixture) => {
+        fixture.plan.recon_internal_timeout_seconds = 3300;
+      }
+    },
+    {
+      name: "host soft timeout",
+      code: "CAMPAIGN_TIMEOUT_CONFIG_MISMATCH",
+      mutate: (fixture) => {
+        fixture.plan.host_soft_timeout_seconds = 3300;
+      }
+    },
+    {
+      name: "backend configured timeout",
+      code: "CAMPAIGN_TIMEOUT_CONFIG_MISMATCH",
+      mutate: (fixture) => {
+        fixture.backend.configured_timeout_seconds = 3300;
+      }
+    },
+    {
+      name: "reserve-subtracted command timeout",
+      code: "CAMPAIGN_TIMEOUT_COMMAND_INVALID",
+      mutate: (fixture) => {
+        const command = fixture.backend.exact_command.replace("--timeout 3600", "--timeout 3300");
+        fixture.backend.exact_command = command;
+        fixture.plan.backend.exact_shell_escaped_command = command;
+      }
+    },
+    {
+      name: "duplicate timeout flag",
+      code: "CAMPAIGN_TIMEOUT_COMMAND_INVALID",
+      mutate: (fixture) => {
+        const command = `${fixture.backend.exact_command} --timeout 3600`;
+        fixture.backend.exact_command = command;
+        fixture.plan.backend.exact_shell_escaped_command = command;
+      }
+    },
+    {
+      name: "missing timeout flag",
+      code: "CAMPAIGN_TIMEOUT_COMMAND_INVALID",
+      mutate: (fixture) => {
+        const command = fixture.backend.exact_command.replace("--timeout 3600 ", "");
+        fixture.backend.exact_command = command;
+        fixture.plan.backend.exact_shell_escaped_command = command;
+      }
+    },
+    {
+      name: "missing GNU timeout wrapper",
+      code: "CAMPAIGN_TIMEOUT_HOST_WRAPPER_INVALID",
+      mutate: (fixture) => {
+        const command = fixture.backend.exact_command.replace(
+          "timeout --preserve-status --signal=INT --kill-after=300s 3600s ",
+          ""
+        );
+        fixture.backend.exact_command = command;
+        fixture.plan.backend.exact_shell_escaped_command = command;
+      }
+    },
+    {
+      name: "wrong GNU timeout soft deadline",
+      code: "CAMPAIGN_TIMEOUT_HOST_WRAPPER_INVALID",
+      mutate: (fixture) => {
+        const command = fixture.backend.exact_command.replace("300s 3600s recon", "300s 3300s recon");
+        fixture.backend.exact_command = command;
+        fixture.plan.backend.exact_shell_escaped_command = command;
+      }
+    },
+    {
+      name: "wrong host force-kill grace",
+      code: "CAMPAIGN_TIMEOUT_HOST_GRACE_MISMATCH",
+      mutate: (fixture) => {
+        fixture.plan.host_force_kill_grace_seconds = 30;
+        const command = fixture.backend.exact_command.replace("--kill-after=300s", "--kill-after=30s");
+        fixture.backend.exact_command = command;
+        fixture.plan.backend.exact_shell_escaped_command = command;
+      }
+    },
+    {
+      name: "foreground wrapper",
+      code: "CAMPAIGN_TIMEOUT_HOST_WRAPPER_INVALID",
+      mutate: (fixture) => {
+        const command = fixture.backend.exact_command.replace("--preserve-status", "--preserve-status --foreground");
+        fixture.backend.exact_command = command;
+        fixture.plan.backend.exact_shell_escaped_command = command;
+      }
+    },
+    {
+      name: "bounded default test limit",
+      code: "CAMPAIGN_TIMEOUT_COMMAND_INVALID",
+      mutate: (fixture) => {
+        const command = fixture.backend.exact_command.replace(
+          `--test-limit ${RECON_TIMEOUT_TEST_LIMIT}`,
+          "--test-limit 50000"
+        );
+        fixture.backend.exact_command = command;
+        fixture.plan.backend.exact_shell_escaped_command = command;
+      }
+    },
+    {
+      name: "plan test limit",
+      code: "CAMPAIGN_TIMEOUT_TEST_LIMIT_MISMATCH",
+      mutate: (fixture) => {
+        fixture.plan.recon_test_limit = "50000";
+      }
+    },
+    {
+      name: "non-positive host force-kill grace",
+      code: "CAMPAIGN_TIMEOUT_EVIDENCE_INVALID",
+      mutate: (fixture) => {
+        fixture.plan.host_force_kill_grace_seconds = 0;
+      }
+    },
+    {
+      name: "non-positive artifact finalization reserve",
+      code: "CAMPAIGN_TIMEOUT_EVIDENCE_INVALID",
+      mutate: (fixture) => {
+        fixture.plan.artifact_finalization_reserve_seconds = 0;
+      }
+    },
+    {
+      name: "backend command differs from plan",
+      code: "CAMPAIGN_TIMEOUT_COMMAND_MISMATCH",
+      mutate: (fixture) => {
+        fixture.backend.exact_command = `${fixture.backend.exact_command} --quiet`;
+      }
+    },
+    {
+      name: "backend start differs from plan",
+      code: "CAMPAIGN_TIMEOUT_START_MISMATCH",
+      mutate: (fixture) => {
+        fixture.backend.start_timestamp = "2026-08-11T00:00:01.000Z";
+      }
+    },
+    {
+      name: "unknown termination reason",
+      code: "CAMPAIGN_TIMEOUT_EVIDENCE_INVALID",
+      mutate: (fixture) => {
+        fixture.backend.termination_reason = "unknown";
+      }
+    }
+  ];
+
+  for (const entry of cases) {
+    const result = runCampaignTimeoutGate(entry.mutate);
+    assert.equal(result.ok, false, entry.name);
+    assert.ok(
+      result.diagnostics.some((diagnostic) => diagnostic.code === entry.code),
+      `${entry.name}: ${JSON.stringify(result.diagnostics)}`
+    );
+  }
+});
+
+test("current campaign timeout gate verifies deadline arithmetic", () => {
+  for (const field of ["fuzzing_deadline_utc", "force_kill_deadline_utc", "final_artifact_deadline_utc"] as const) {
+    const result = runCampaignTimeoutGate((fixture) => {
+      fixture.plan[field] = "2026-08-11T01:00:02.000Z";
+    });
+    assert.equal(result.ok, false, field);
+    assert.ok(
+      result.diagnostics.some(
+        (diagnostic) => diagnostic.code === "CAMPAIGN_TIMEOUT_DEADLINE_MISMATCH" && diagnostic.path?.endsWith(field)
+      ),
+      `${field}: ${JSON.stringify(result.diagnostics)}`
+    );
+  }
+});
+
+test("current campaign timeout gate derives early-exit outcome from recorded duration and usability", () => {
+  const truthfulPartial = runCampaignTimeoutGate((fixture) => {
+    fixture.backend.end_timestamp = "2026-08-11T00:30:00.000Z";
+    fixture.backend.termination_reason = "process-exit";
+    fixture.backend.campaign_outcome = "partial";
+    fixture.summary.outcome = "partial";
+  });
+  assert.equal(truthfulPartial.ok, true, JSON.stringify(truthfulPartial.diagnostics));
+
+  const falseComplete = runCampaignTimeoutGate((fixture) => {
+    fixture.backend.end_timestamp = "2026-08-11T00:30:00.000Z";
+  });
+  assert.equal(falseComplete.ok, false);
+  for (const code of ["CAMPAIGN_TIMEOUT_DURATION_MISMATCH", "CAMPAIGN_TIMEOUT_OUTCOME_MISMATCH"]) {
+    assert.ok(
+      falseComplete.diagnostics.some((diagnostic) => diagnostic.code === code),
+      `${code}: ${JSON.stringify(falseComplete.diagnostics)}`
+    );
+  }
+
+  const fullDurationProcessExit = runCampaignTimeoutGate((fixture) => {
+    fixture.backend.termination_reason = "process-exit";
+  });
+  assert.equal(fullDurationProcessExit.ok, false);
+  assert.ok(
+    fullDurationProcessExit.diagnostics.some((diagnostic) => diagnostic.code === "CAMPAIGN_TIMEOUT_OUTCOME_MISMATCH")
+  );
+
+  const falsePartialWithoutResults = runCampaignTimeoutGate((fixture) => {
+    fixture.backend.end_timestamp = "2026-08-11T00:00:01.000Z";
+    fixture.backend.termination_reason = "launch-error";
+    fixture.backend.campaign_outcome = "partial";
+    fixture.backend.usable_results = false;
+    fixture.summary.outcome = "partial";
+  });
+  assert.equal(falsePartialWithoutResults.ok, false);
+  assert.ok(
+    falsePartialWithoutResults.diagnostics.some((diagnostic) => diagnostic.code === "CAMPAIGN_TIMEOUT_OUTCOME_MISMATCH")
+  );
+
+  const truthfulBlocked = runCampaignTimeoutGate((fixture) => {
+    fixture.backend.end_timestamp = "2026-08-11T00:00:01.000Z";
+    fixture.backend.termination_reason = "launch-error";
+    fixture.backend.campaign_outcome = "blocked";
+    fixture.backend.usable_results = false;
+    fixture.summary.outcome = "blocked";
+  });
+  assert.equal(truthfulBlocked.ok, true, JSON.stringify(truthfulBlocked.diagnostics));
+});
+
+test("current campaign timeout gate cross-checks backend and summary outcomes", () => {
+  const result = runCampaignTimeoutGate((fixture) => {
+    fixture.summary.outcome = "partial";
+  });
+  assert.equal(result.ok, false);
+  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "CAMPAIGN_TIMEOUT_SUMMARY_MISMATCH"));
+});
+
 test("campaign gate accepts many counterexamples of one property deduplicated into one finding", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-dedup" });
   campaignPropertyCatalog(layout, ["property-1"]);

@@ -790,6 +790,35 @@ nodes:
   );
 }
 
+async function compileInvariantCampaignBudgetFixture(input: {
+  logicalNodeId: "stateful-invariant-campaign" | "stateful-invariant-recon-campaign";
+  nodeTimeoutSeconds: number;
+  smokeTimeoutSeconds: number;
+  fuzzerTimeoutSeconds: number;
+  runId: string;
+}) {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const plan = await planRun({ projectRoot: project, runId: input.runId, env: {} });
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  const node = plan.value!.expanded_graph.nodes.find((candidate) => candidate.id === "project-discovery");
+  assert.notEqual(node, undefined);
+  node!.logicalId = input.logicalNodeId;
+  node!.timeoutSeconds = input.nodeTimeoutSeconds;
+  plan.value!.resolved_config.invariants.invariantTestingSmokeTimeoutSeconds = input.smokeTimeoutSeconds;
+  plan.value!.resolved_config.invariants.invariantTestingFuzzerTimeoutSeconds = input.fuzzerTimeoutSeconds;
+  const { compileSmithersWorkflow } = await import("../src/smithers.js");
+  return compileSmithersWorkflow({
+    projectRoot: project,
+    config: plan.value!.resolved_config,
+    graph: plan.value!.expanded_graph,
+    runLayout: plan.value!.layout,
+    workflowName: `ultrafuzz-${input.runId}`,
+    renderedPrompts: plan.value!.rendered_prompts
+  });
+}
+
 function writeOutOfOrderTopology(project: string): void {
   fs.writeFileSync(
     path.join(project, ".ultrafuzz", "topology.yml"),
@@ -4582,6 +4611,53 @@ test("topology runtime context keeps a bounded finalization reserve", async () =
       assert.ok(entry.workingSeconds > 0);
     }
   }
+});
+
+test("invariant campaign budget admits the shipped 7200-second node timeout", async () => {
+  const compiled = await compileInvariantCampaignBudgetFixture({
+    logicalNodeId: "stateful-invariant-campaign",
+    nodeTimeoutSeconds: 7200,
+    smokeTimeoutSeconds: 600,
+    fuzzerTimeoutSeconds: 3600,
+    runId: "campaign-budget-default"
+  });
+  assert.equal(compiled.tasks[0]?.timeoutMs, 7_200_000);
+});
+
+test("invariant campaign budget rejects an oversized fuzzer timeout with every budget term", async () => {
+  await assert.rejects(
+    compileInvariantCampaignBudgetFixture({
+      logicalNodeId: "stateful-invariant-recon-campaign",
+      nodeTimeoutSeconds: 7200,
+      smokeTimeoutSeconds: 600,
+      fuzzerTimeoutSeconds: 6001,
+      runId: "campaign-budget-exceeded"
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /INVARIANT_CAMPAIGN_TIMEOUT_BUDGET_EXCEEDED/u);
+      assert.match(error.message, /logical_node_id=stateful-invariant-recon-campaign/u);
+      assert.match(error.message, /node_timeout_seconds=7200/u);
+      assert.match(error.message, /required_seconds=7201/u);
+      assert.match(error.message, /smoke_timeout_seconds=600/u);
+      assert.match(error.message, /fuzzer_timeout_seconds=6001/u);
+      assert.match(error.message, /host_shutdown_grace_seconds=300/u);
+      assert.match(error.message, /artifact_finalization_reserve_seconds=300/u);
+      assert.match(error.message, /timeout_seconds to at least 7201/u);
+      return true;
+    }
+  );
+});
+
+test("invariant campaign budget honors an explicit larger node timeout", async () => {
+  const compiled = await compileInvariantCampaignBudgetFixture({
+    logicalNodeId: "stateful-invariant-campaign",
+    nodeTimeoutSeconds: 9000,
+    smokeTimeoutSeconds: 600,
+    fuzzerTimeoutSeconds: 7000,
+    runId: "campaign-budget-explicit"
+  });
+  assert.equal(compiled.tasks[0]?.timeoutMs, 9_000_000);
 });
 
 test("startRun --agent does not carry the previous agent's model onto the new agent", async () => {
