@@ -42,7 +42,7 @@ candidate lanes, ordered by red-seeking priority, then source plan artifact
 path, then lane id. Emit at most one ready lane for this auditor attempt: the
 candidate assigned to zero-based position `{{attempt_index}}` after filtering
 out rejected, ambiguous, out-of-scope, or reference-gap candidates. If no ready
-candidate maps to this auditor attempt, emit an empty `ready_lanes` array.
+candidate maps to this auditor attempt, emit no ready lane.
 Preserve that stable candidate order within both `ready_lanes` and
 `rejected_or_narrowed_lanes`. A lane is ready only when its exact source harness
 reports `validation.passed: true` and one of that harness's reference models
@@ -56,55 +56,21 @@ harness-attempt, and exact source-artifact coordinates. Preserve every planned
 surface ID and its public evidence paths in `surface_audits`; do not accept a
 same-named lookalike artifact or convert identifiers, paths, or versions.
 
-For each surface and lane, classify it as exactly one of:
+Classify every surface and lane from the actual audit evidence using the
+disposition vocabulary defined only by the pinned schema.
 
-- `conformant`
-- `reference_gap`
-- `ambiguous_spec`
-- `out_of_scope`
-- `ready`
+Write {{artifact_path}}/audited-differential-lanes.json. Read the exact pinned
+schema at `{{schema_path}}/audited-differential-lanes.schema.json`; it alone
+defines the JSON version, fields, types, enums, required members, and empty
+forms. After the final write, run the exact `ultrafuzz json validate` command
+rendered for this artifact in the central output contract.
 
-Write {{artifact_path}}/audited-differential-lanes.json with this JSON shape:
-
-```json
-{
-  "schema_version": "ultrafuzz.audited-differential-lanes.v1",
-  "auditor_attempt_index": {{attempt_index}},
-  "source_plan_artifacts": [],
-  "source_harness_artifacts": [],
-  "surface_audits": [
-    {
-      "surface_id": "stable-kebab-case",
-      "status": "conformant | reference_gap | ambiguous_spec | out_of_scope | ready",
-      "public_evidence_paths": [],
-      "audit_notes": [],
-      "required_narrowing": []
-    }
-  ],
-  "ready_lanes": [
-    {
-      "lane_id": "stable-kebab-case",
-      "attempt_index": {{attempt_index}},
-      "auditor_attempt_index": {{attempt_index}},
-      "planner_attempt_index": 0,
-      "harness_author_attempt_index": 0,
-      "source_plan_artifact": "",
-      "source_harness_artifact": "",
-      "surface_id": "candidate-surface-id",
-      "intended_t_sol_path": "test/foundry/differential/<Lane>.t.sol",
-      "focused_command": "forge test --match-path test/foundry/differential/<Lane>.t.sol --match-test <test_name>",
-      "public_evidence_paths": [],
-      "exact_observable_equality_assertions": [],
-      "oracle_type": "independent_reference | metamorphic | self_consistency | sanity_probe",
-      "calibration_bucket": "red_seeking_adversarial | green_safe_sanity",
-      "red_seeking_priority": "high | medium | low"
-    }
-  ],
-  "rejected_or_narrowed_lanes": [],
-  "reference_gap_work_orders": [],
-  "ambiguous_spec_work_orders": []
-}
-```
+Bind the auditor and assigned-lane attempt identities to `{{attempt_index}}`.
+Carry the exact planner and harness attempt coordinates and declared artifact
+paths with every ready lane. Preserve each planner lane payload as required
+above, add only the auditor-owned coordinates, and keep every planned lane in
+exactly one ready, rejected, or narrowed disposition. These are contextual and
+cross-artifact requirements beyond JSON Schema.
 
 Assign each emitted ready lane the current zero-based `attempt_index`. The lane
 author topology attempts use `{{attempt_index}}` and `auditor_attempt_index` to

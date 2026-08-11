@@ -169,7 +169,7 @@ export async function probeModalCommands(
       processHandle.stdout.readText(),
       processHandle.stderr.readText()
     ]);
-    if (exitCode !== 0) throw new Error(formatWorkerExitMessage(exitCode, stdout, stderr));
+    if (exitCode !== 0) throw new Error(formatCommandProbeExitMessage(exitCode, stdout, stderr));
     return parseModalCommandProbes(stdout, uniqueCommands);
   } catch (error) {
     throw normalizedModalNodeError(error, [tokenId, tokenSecret]);
@@ -1976,6 +1976,13 @@ function normalizedModalNodeError(error: unknown, secretValues: readonly string[
     .replace(/[A-Za-z_][A-Za-z0-9_]*(?=\s+(?:is|was)\s+(?:missing|unavailable|not set))/gu, "[credential]")
     .slice(0, 4_096);
   return new Error(`Modal node execution failed: ${sanitized}`);
+}
+
+function formatCommandProbeExitMessage(exitCode: number, stdout: string, stderr: string): string {
+  const details = [formatWorkerStream("stderr", stderr), formatWorkerStream("stdout", stdout)]
+    .filter((value) => value !== "")
+    .join("; ");
+  return `Modal command probe exited with code ${exitCode}${details === "" ? "" : `: ${details}`}`;
 }
 
 function formatWorkerExitMessage(exitCode: number, stdout: string, stderr: Uint8Array): string {

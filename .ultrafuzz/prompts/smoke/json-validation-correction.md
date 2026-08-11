@@ -18,11 +18,13 @@ Complete this exact sequence in this one agent session:
    Require exit status `1` and a `JSON_SCHEMA_VIOLATION` diagnostic. If the
    invalid draft exits `0`, or the command has a setup/tool failure (`2`), stop
    and report failure without claiming that validation succeeded.
-4. Correct the artifact yourself by replacing the invalid draft with the
-   canonical empty findings document `[]`.
+4. Correct the artifact yourself by replacing the invalid draft with the empty
+   findings form defined by the exact pinned schema named in the output
+   contract.
 5. Rerun the same validation command and require exit status `0`.
 6. Do not alter the artifact after the successful validation.
 
 The validator must leave both drafts byte-for-byte untouched. The invalid
 draft and its diagnostic exist only to prove that the agent receives useful
-schema feedback before returning; the final published artifact is `[]`.
+schema feedback before returning; the final published artifact is the
+schema-defined empty form.

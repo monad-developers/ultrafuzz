@@ -1,7 +1,8 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import YAML from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -106,7 +107,72 @@ function baseRenderInput(tmp: string): PromptRenderInput {
   };
 }
 
+interface TopologyOutput {
+  path: string;
+  contract: string;
+  primary?: boolean;
+}
+
+interface TopologyNode {
+  id: string;
+  kind: string;
+  prompt?: string;
+  depends_on?: string[];
+  outputs?: TopologyOutput[];
+}
+
+interface TopologyDocument {
+  nodes: TopologyNode[];
+}
+
+const runtimeOwnedOutputPaths = new Set(["workspace.patch", "workspace-patch.json"]);
+const nonSchemaContracts = new Set(["ultrafuzz/nonempty-markdown@1", "ultrafuzz/text@1"]);
+
+function occurrences(haystack: string, needle: string): number {
+  return haystack.split(needle).length - 1;
+}
+
 describe("prompt rendering", () => {
+  it("renders output-contract guidance from an installed package layout", async () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-installed-prompts-"));
+    tmpDirs.push(tmp);
+    const repoRoot = fileURLToPath(new URL("../../..", import.meta.url));
+    const appRoot = path.join(tmp, "app");
+    const packageRoot = path.join(appRoot, "node_modules", "@ultrafuzz", "prompts");
+    const distRoot = path.join(packageRoot, "dist");
+    mkdirSync(packageRoot, { recursive: true });
+    execFileSync(
+      "pnpm",
+      [
+        "exec",
+        "tsc",
+        "-p",
+        path.join(repoRoot, "packages", "prompts", "tsconfig.json"),
+        "--outDir",
+        distRoot,
+        "--tsBuildInfoFile",
+        path.join(distRoot, ".tsbuildinfo")
+      ],
+      { cwd: repoRoot, stdio: "pipe" }
+    );
+    cpSync(path.join(repoRoot, ".ultrafuzz", "prompts"), path.join(distRoot, "prompts"), { recursive: true });
+    copyFileSync(path.join(repoRoot, "packages", "prompts", "package.json"), path.join(packageRoot, "package.json"));
+    mkdirSync(path.join(appRoot, "node_modules"), { recursive: true });
+    symlinkSync(
+      realpathSync(path.join(repoRoot, "node_modules", "yaml")),
+      path.join(appRoot, "node_modules", "yaml"),
+      "dir"
+    );
+
+    const installed = (await import(
+      `${pathToFileURL(path.join(distRoot, "render.js")).href}?installed-layout=${Date.now()}`
+    )) as { renderPrompt: typeof renderPrompt };
+    const rendered = installed.renderPrompt(baseRenderInput(tmp)).renderedMarkdown;
+
+    expect(rendered).toContain("For every output declared with `Contract: ultrafuzz/findings@2`");
+    expect(rendered).toContain("Validation command: `ultrafuzz json validate --schema");
+  });
+
   it("rejects unknown variables before launch", () => {
     expect(() => validatePromptVariables("hello {{unknown_value}}")).toThrow(PromptError);
   });
@@ -252,6 +318,8 @@ describe("prompt rendering", () => {
       expect(result.renderedMarkdown).toContain(guidance);
     }
     expect(result.renderedMarkdown).toContain("generated-tests.schema.json");
+    expect(result.renderedMarkdown).toContain("For every output declared with `Contract: ultrafuzz/findings@2`");
+    expect(result.renderedMarkdown).toContain("later severity review owns final severity");
     expect(result.renderedMarkdown).toContain(
       "Schema-backed empty form: defined only by the pinned schema; inspect and validate it instead of copying a prose example."
     );
@@ -275,6 +343,118 @@ describe("prompt rendering", () => {
     expect(result.renderedMarkdown).toContain("Never mix frameworks in one bundle");
     expect(result.renderedMarkdown).not.toContain("optional fields are `language`, `framework`");
     expect(result.renderedMarkdown).not.toContain("ultrafuzz.generated-tests.v3");
+  });
+
+  it("keeps findings guidance bound to a custom declared output path", () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-custom-findings-"));
+    tmpDirs.push(tmp);
+    const input = baseRenderInput(tmp);
+    input.prompt = "Write only the declared deduplicated findings output.";
+    input.graph.logicalNodes.find((node) => node.id === input.node.logicalId)!.outputs![0]!.path =
+      "deduped-findings.json";
+
+    const rendered = renderPrompt(input).renderedMarkdown;
+
+    expect(rendered).toContain("For every output declared with `Contract: ultrafuzz/findings@2`");
+    expect(rendered).toContain("The declared path is authoritative");
+    expect(rendered).toContain(path.join(input.node.artifactDir, "deduped-findings.json"));
+    expect(rendered).not.toContain("For `findings.json`");
+  });
+
+  it("renders the pinned schema and exact validation command for every agent-authored JSON output", () => {
+    const topologyPaths = [
+      fileURLToPath(new URL("../../../.ultrafuzz/topology.yml", import.meta.url)),
+      fileURLToPath(new URL("../../config/topologies/full.yml", import.meta.url)),
+      fileURLToPath(new URL("../../config/topologies/invariant-only.yml", import.meta.url)),
+      fileURLToPath(new URL("../../config/topologies/smoke.yml", import.meta.url))
+    ];
+    const fixturePath = fileURLToPath(
+      new URL("../../artifacts/test/fixtures/contract-schema-fixtures.json", import.meta.url)
+    );
+    const schemaFixtures = JSON.parse(readFileSync(fixturePath, "utf8")) as Record<string, { schema_file: string }>;
+    const promptByPath = new Map(loadBuiltInPromptAssets().map((asset) => [asset.relativePath, asset.markdown]));
+
+    for (const topologyPath of topologyPaths) {
+      const topology = YAML.parse(readFileSync(topologyPath, "utf8")) as TopologyDocument;
+      const topologyName = path.basename(topologyPath, ".yml");
+      const root = path.join(os.tmpdir(), "ultrafuzz-schema-authority", topologyName);
+      const runArtifacts = path.join(root, "runs", "schema-authority", "artifacts");
+      const logicalNodes = topology.nodes.map((node) => ({
+        id: node.id,
+        dependsOn: node.depends_on ?? [],
+        artifactDir: path.join(runArtifacts, node.id),
+        outputs: (node.outputs ?? []).map((output, index) => {
+          const schemaFile = schemaFixtures[output.contract]?.schema_file;
+          return {
+            path: output.path,
+            contract: output.contract,
+            primary: output.primary ?? index === 0,
+            description: `${output.contract} topology output.`,
+            ...(schemaFile === undefined ? {} : { schemaFile })
+          };
+        })
+      }));
+
+      for (const node of topology.nodes.filter((candidate) => candidate.kind === "agentic")) {
+        const jsonOutputs = (node.outputs ?? []).filter(
+          (output) => !runtimeOwnedOutputPaths.has(output.path) && !nonSchemaContracts.has(output.contract)
+        );
+        for (const output of jsonOutputs) {
+          expect(
+            schemaFixtures[output.contract]?.schema_file,
+            `${topologyPath}:${node.id}:${output.path}`
+          ).toBeDefined();
+        }
+        const schemaBackedOutputs = jsonOutputs.map((output) => ({
+          ...output,
+          schemaFile: schemaFixtures[output.contract]!.schema_file
+        }));
+        if (schemaBackedOutputs.length === 0) continue;
+
+        expect(node.prompt, `${topologyPath}:${node.id}`).toBeDefined();
+        const promptMarkdown = promptByPath.get(node.prompt!);
+        expect(promptMarkdown, `${topologyPath}:${node.id}:${node.prompt}`).toBeDefined();
+        const artifactDir = path.join(runArtifacts, `${node.id}-attempt-0`);
+        const workspacePath = path.join(root, "workspaces", `${node.id}-attempt-0`);
+        const rendered = renderPrompt({
+          prompt: promptMarkdown!,
+          graph: { logicalNodes },
+          node: {
+            logicalId: node.id,
+            concreteId: `${node.id}-attempt-0`,
+            artifactDir,
+            workspacePath,
+            repoPath: path.join(root, "repo"),
+            attemptIndex: 0,
+            loopIndex: 0,
+            loopCount: 1
+          },
+          run: {
+            id: "schema-authority",
+            artifactsDir: runArtifacts,
+            metadataPath: path.join(root, "runs", "schema-authority", "run.json")
+          },
+          outputs: { patchPath: path.join(artifactDir, "workspace.patch") }
+        }).renderedMarkdown;
+
+        expect(occurrences(rendered, "Validate against:"), `${topologyPath}:${node.id}`).toBe(
+          schemaBackedOutputs.length
+        );
+        expect(occurrences(rendered, "Validation command:"), `${topologyPath}:${node.id}`).toBe(
+          schemaBackedOutputs.length
+        );
+        for (const output of schemaBackedOutputs) {
+          const schemaPath = path.join(workspacePath, ".ultrafuzz", "schemas", output.schemaFile);
+          const outputPath = path.join(artifactDir, output.path);
+          expect(rendered, `${topologyPath}:${node.id}:${output.path}`).toContain(
+            `Validate against: \`${schemaPath}\``
+          );
+          expect(rendered, `${topologyPath}:${node.id}:${output.path}`).toContain(
+            `Validation command: \`ultrafuzz json validate --schema '${schemaPath}' --file '${outputPath}'\``
+          );
+        }
+      }
+    }
   });
 
   it("renders boundary recipes from the pinned schema without a prose-owned JSON shape", () => {
@@ -318,9 +498,35 @@ describe("prompt rendering", () => {
     expect(result.renderedMarkdown).toContain(
       `Validation command: \`ultrafuzz json validate --schema '${schemaPath}' --file '${artifactPath}'\``
     );
+    expect(result.renderedMarkdown).toContain(
+      "For every output declared with `Contract: ultrafuzz/boundary-recipes@1`"
+    );
     expect(result.renderedMarkdown).not.toContain("ultrafuzz.boundary-recipes.v1");
     expect(result.renderedMarkdown).not.toContain("deferred_or_spec_gated");
     expect(result.renderedMarkdown).not.toContain("coverage_priorities");
+  });
+
+  it("does not invent a Markdown companion for a JSON-only boundary-recipe output", () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-json-only-boundary-"));
+    tmpDirs.push(tmp);
+    const input = baseRenderInput(tmp);
+    input.prompt = "Write only the declared structured boundary recipe artifact.";
+    input.graph.logicalNodes.find((node) => node.id === input.node.logicalId)!.outputs = [
+      {
+        path: "custom/recipes.json",
+        contract: "ultrafuzz/boundary-recipes@1",
+        primary: true,
+        description: "Source-backed boundary and negative test recipes.",
+        schemaFile: "boundary-recipes.schema.json"
+      }
+    ];
+
+    const rendered = renderPrompt(input).renderedMarkdown;
+
+    expect(rendered).toContain("For every output declared with `Contract: ultrafuzz/boundary-recipes@1`");
+    expect(rendered).toContain("When a human-readable boundary-recipe companion is declared");
+    expect(rendered).toContain(path.join(input.node.artifactDir, "custom", "recipes.json"));
+    expect(rendered).not.toContain("`boundary-recipes.md`");
   });
 
   it("renders specialized generated-test instructions for every production producer", () => {
@@ -455,10 +661,13 @@ describe("prompt rendering", () => {
       }
     }).renderedMarkdown;
 
-    expect(rendered).toContain("`source_bundles`: one record for every listed `generated-tests.json`");
-    expect(rendered).toContain("`source_attempt_id`");
-    expect(rendered).toContain("`source_manifest_sha256`");
-    expect(rendered).toContain("positive `size_bytes`");
+    expect(rendered).toContain(
+      `Validate against: \`${path.join(workspacePath, ".ultrafuzz", "schemas", "aggregation-manifest.schema.json")}\``
+    );
+    expect(rendered).toContain("Record one source-bundle row for every declared manifest");
+    expect(rendered).toContain("Bind each row to the source manifest's logical node");
+    expect(rendered).toContain("preserve the source identity");
+    expect(rendered).toContain("byte size, digest, and any\nsource metadata exactly");
     expect(rendered).toContain("A bundle is atomic");
     expect(rendered).toContain(
       `Validation command: \`ultrafuzz json validate --schema '${path.join(workspacePath, ".ultrafuzz", "schemas", "aggregation-manifest.schema.json")}' --file '${path.join(artifactDir, "aggregation.json")}'\``
@@ -520,9 +729,13 @@ describe("prompt rendering", () => {
     expect(result.renderedMarkdown).toContain("severity_guess");
     expect(result.renderedMarkdown).toContain("generated_tests");
     expect(result.renderedMarkdown).toContain("write each artifact to the exact absolute path");
-    expect(result.renderedMarkdown).toContain("final response MUST contain ONLY one raw, valid JSON object");
-    expect(result.renderedMarkdown).toContain('{"summary":"A concise description');
-    expect(result.renderedMarkdown).toContain("Do NOT include Markdown fences");
+    expect(result.renderedMarkdown).toContain("return only the structured task result requested by the runtime");
+    expect(result.renderedMarkdown).toContain(
+      "runtime's output schema alone owns that response's keys, types, and envelope"
+    );
+    expect(result.renderedMarkdown).toContain("schema-defined summary value");
+    expect(result.renderedMarkdown).not.toContain('{"summary":');
+    expect(result.renderedMarkdown).toContain("Do not add Markdown fences");
   });
 
   it("derives generated-test manifests from every matching ancestor output contract", () => {

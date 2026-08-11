@@ -141,5 +141,6 @@ and oracle must reference the components it actually exercises, and every test
 reference must name a test this node actually authored. These relationships are
 contextual requirements beyond JSON Schema.
 
-Write structured findings to {{output_findings_path}}. Use an empty JSON array
-if no source-backed production finding is confirmed.
+Write structured findings to {{output_findings_path}}. If no source-backed
+production finding is confirmed, use only the empty form defined by the exact
+pinned schema in the central output contract.

@@ -64,8 +64,7 @@ all downstream artifacts must use them unchanged.
 
 Coverage of the lens artifacts is total and machine-checked. Every property ID
 in every lens artifact must appear exactly once across the whole catalog as a
-`{"source_node_id":"<lens node>","source_property_id":"<lens property id>"}`
-pair in some canonical property's `sources`: the runtime rejects a lens ID that
+source-node/property-ID pair in some canonical property's `sources`: the runtime rejects a lens ID that
 appears in no canonical property and rejects the same pair listed on two
 canonical properties. Deduplicating two rows therefore means listing both source
 pairs on the one merged canonical property, never dropping one. You may not drop
@@ -95,17 +94,17 @@ row, retaining the copied source wording and its path plus line or symbol
 location in the description or source list. A ledger entry may be merged with an
 equivalent row only when the canonical row preserves every operand, comparison
 direction, unit, denominator, and rounding term; otherwise keep a separate row.
-For machine-verifiable provenance, add a `ledger_ids` array to every canonical
-property that represents one or more ledger entries, copying the stable ledger
-IDs exactly. Every ledger ID must appear in at least one canonical property's
-`ledger_ids`; one source statement may map to several canonical properties and
-several equivalent source statements may share one canonical property. Preserve
-the complete mapping in both `properties.json` and its Markdown companion.
-For each property, when that property has ledger IDs, include its complete
-`ledger_ids` list. Omit the `ledger_ids` field entirely for a property that maps
-to no ledger entry.
-In `properties.md`, use one reversible companion grammar. Render each canonical
-row between `### Canonical property: <json-string-id>` and
+For machine-verifiable provenance, copy the stable ledger IDs exactly into each
+canonical property's schema-defined ledger provenance. Every ledger ID must be
+attributed to at least one canonical property; one source statement may map to
+several canonical properties and several equivalent source statements may
+share one canonical property. Preserve the complete mapping in both
+`properties.json` and its Markdown companion, and do not invent ledger IDs for
+a property that maps to no ledger entry.
+The following reversible grammar governs only the human-readable
+`properties.md` companion; the pinned properties schema remains the sole
+authority for `properties.json`. Render each canonical row between
+`### Canonical property: <json-string-id>` and
 `### End canonical property: <json-string-id>`, where both IDs are the strict
 JSON string encoding of the exact property ID, including for simple IDs. Inside
 the block, emit exactly one line for each JSON member in this order:

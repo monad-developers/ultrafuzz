@@ -46,26 +46,21 @@ topology:
 {{ancestor_generated_test_manifests}}
 
 Use only files reported by strategy-owned generated-test manifests. Read every
-manifest listed above, including manifests with empty `generated_tests` arrays. Require the exact
-`ultrafuzz.generated-tests.v3` shape and treat its required `generated_tests`
-and `support_files` arrays together as the complete source bundle. Require one
-root-level `framework` on every manifest, including an empty manifest. It must
-match `^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$` and identify the one native
-framework for the whole atomic bundle; entries must not repeat or override it.
-Reject a manifest with a path repeated within or across the arrays, with one
-file path as the slash-delimited prefix of another, or with non-empty
-`support_files` and no runnable `generated_tests`. Ignore any non-canonical file
-list arrays. Do not rely on the current working tree or a strategy workspace
-scan as a substitute for a missing manifest entry.
+manifest listed above, including empty manifests. Validate each one against the
+exact pinned `{{schema_path}}/generated-tests.schema.json`; that schema alone
+defines its JSON version, fields, types, enums, required members, and empty
+bundle. Treat the schema-defined runnable and support entries together as one
+atomic source bundle. Bind its one framework to the checked-in native framework
+for the whole bundle. Do not rely on the current working tree, a non-canonical
+file list, or a strategy workspace scan as a substitute for a missing manifest
+entry.
 
-For every entry in either array, accept the exact byte-for-byte companion only
-when its `path` is a normalized relative POSIX path beginning with
-`generated-tests/`, contains no empty, `.` or `..` segment or backslash, and
-resolves to a non-empty strict UTF-8 text regular file inside the source node's
-artifact directory. This text-only rule also applies to data fixtures. Reject
-absolute paths, path escapes, every symlink even when its target remains inside
+For every schema-defined entry, accept the exact byte-for-byte companion only
+when it resolves to a non-empty strict UTF-8 text regular file inside the source
+node's artifact directory. This text-only rule also applies to data fixtures.
+Reject path escapes, every symlink even when its target remains inside
 the artifact directory, and every multiply linked file. Require both
-`size_bytes` and `sha256` to be present and to match the companion exactly.
+the recorded byte size and digest to match the companion exactly.
 Record rejected entries in `skipped_files` with the corresponding
 `generated-test` or `support-file` kind; never search for or substitute another
 file with the same basename. The manifest is one atomic bundle: if any entry
@@ -113,37 +108,17 @@ Before finishing, verify from `{{workspace_path}}` that each copied
 with Bash, use one standalone `wc -c <destination_path>` command per file or
 per small group of files, with no pipes or command chaining.
 
-Save the aggregation manifest to {{artifact_path}}/aggregation.json as JSON with this shape:
-
-- `schema_version`: `"ultrafuzz.aggregation-manifest.v1"`
-- `source_generated_tests`: total number of manifest `generated_tests` entries considered
-- `copied_generated_tests`: number of framework-native test files copied into the workspace
-- `source_support_files`: total number of manifest `support_files` entries considered, or `0`
-- `copied_support_files`: number of explicitly manifested native support files copied into the workspace, or `0`
-- `source_bundles`: one record for every listed `generated-tests.json`, including
-  empty manifests. Each record requires the source manifest's logical
-  `strategy`/`node_id`, exact source artifact-directory basename as
-  `source_attempt_id`, exact `attempt_index`, absolute `source_manifest_path`,
-  artifact-relative `source_manifest_relative_path`, lowercase digest of the
-  exact manifest bytes as `source_manifest_sha256`, manifest `run_id` as
-  `source_run_id`, exact root-level `framework`, exact `generated_test_count`
-  and `support_file_count`, and a `disposition` of `empty`, `copied`, or
-  `skipped`. A `skipped` bundle requires
-  one non-empty `reason`; `empty` and `copied` bundles must omit `reason`.
-- `files`: copied runnable-test rows. Every row requires `strategy`, `node_id`,
-  `source_attempt_id`, `attempt_index`, `source_manifest_path`,
-  `source_manifest_relative_path`, `source_manifest_sha256`, absolute
-  `source_artifact_path`, `source_relative_path`, positive `size_bytes`,
-  lowercase `sha256`, absolute `destination_path`, and workspace-relative
-  `destination_relative_path`. Preserve `language`, `description`, and
-  `provenance` exactly when the source entry contains them; omit each field when
-  the source entry omits it. Do not add `framework` to an entry row.
-- `support_files`: copied support-file rows with the same exact source,
-  destination, digest, size, and optional metadata fields as `files`, or `[]`.
-- `skipped_files`: skipped source rows with the same exact source identity,
-  source artifact path, digest, size, and optional metadata fields as copied
-  rows, plus required `kind` (`generated-test` or `support-file`) and non-empty
-  `reason`; skipped rows have no destination fields.
+Save the aggregation manifest to {{artifact_path}}/aggregation.json. Read the
+exact pinned `{{schema_path}}/aggregation-manifest.schema.json`; it alone
+defines the JSON version, fields, types, enums, required members, and empty
+forms. Record one source-bundle row for every declared manifest, including an
+empty or rejected bundle. Bind each row to the source manifest's logical node,
+attempt, run, framework, exact path, immutable digest, entry counts, and actual
+disposition. For copied and skipped entries, preserve the source identity,
+attempt, manifest identity, artifact-relative path, byte size, digest, and any
+source metadata exactly; add destination identity only to copied entries and a
+specific reason only to skipped entries. Preserve the source framework at the
+bundle level rather than copying it onto individual entry rows.
 
 Every considered source entry appears exactly once across its typed copied
 array or `skipped_files`; do not omit, fabricate, duplicate, or swap the kind
@@ -155,3 +130,7 @@ means both source counts are zero and no row refers to the bundle.
 corresponding `source_bundles` counts. The copied counts equal their
 corresponding copied-array lengths. Keep all four arrays whole-item unique and
 keep source identities unique across the copied/skipped union.
+
+After the final write, run the exact `ultrafuzz json validate` command rendered
+for `aggregation.json` in the central output contract. Correct any exit-1
+artifact yourself and rerun its command after any later edit.

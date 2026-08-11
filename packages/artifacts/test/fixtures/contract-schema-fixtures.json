@@ -859,7 +859,12 @@
         "tokens_used": "x",
         "estimated_spend": "x",
         "partial_pricing": false,
-        "strategy_loops": 0
+        "strategy_loops": 0,
+        "audit_profile": "full",
+        "audit_profile_catalog_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "topology_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "prompt_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "expanded_graph_fingerprint": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
       },
       "issues": [],
       "non_production_outcomes": [],
@@ -880,7 +885,12 @@
         "tokens_used": "x",
         "estimated_spend": "x",
         "partial_pricing": false,
-        "strategy_loops": 0
+        "strategy_loops": 0,
+        "audit_profile": "full",
+        "audit_profile_catalog_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "topology_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "prompt_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "expanded_graph_fingerprint": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
       },
       "issues": [],
       "non_production_outcomes": [],

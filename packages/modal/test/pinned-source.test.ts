@@ -37,7 +37,8 @@ describe("pinned benchmark source", () => {
       remotes: [],
       revision_count: 1,
       commit_object_count: 1,
-      submodules: null
+      submodules: null,
+      held_out: null
     };
     const serialized = JSON.stringify(proof);
     const field = `"commit":"${commit}"`;
@@ -418,12 +419,15 @@ describe("pinned benchmark source", () => {
     await expect(inspectPinnedSource(destination, fixture.pinned)).rejects.toThrow(/record is invalid/u);
 
     // Naming a path that is still present claims a hold-out that never happened.
-    rewrite({ entries: [{ path: "src/protocol.txt", blob: "a".repeat(40), size: 9 }] });
+    rewrite({ paths: ["src/protocol.txt"], entries: [{ path: "src/protocol.txt", blob: "a".repeat(40), size: 9 }] });
     await expect(inspectPinnedSource(destination, fixture.pinned)).rejects.toThrow(/still tracked/u);
 
     // Naming a blob that is still readable is not a hold-out either.
     const readable = git(destination, ["rev-parse", "HEAD:src/protocol.txt"]);
-    rewrite({ entries: [{ path: "reference/Properties.sol", blob: readable, size: 9 }] });
+    rewrite({
+      paths: ["reference/Properties.sol"],
+      entries: [{ path: "reference/Properties.sol", blob: readable, size: 9 }]
+    });
     await expect(inspectPinnedSource(destination, fixture.pinned)).rejects.toThrow(/still readable/u);
 
     // Claiming descent from a commit that is not the benchmark commit.

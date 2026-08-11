@@ -601,6 +601,11 @@ function currentReport(
       estimated_spend: "unavailable",
       partial_pricing: false,
       strategy_loops: 1,
+      audit_profile: "full",
+      audit_profile_catalog_digest: "a".repeat(64),
+      topology_digest: "b".repeat(64),
+      prompt_digest: "c".repeat(64),
+      expanded_graph_fingerprint: "d".repeat(64),
       ...metadata
     },
     issues,
@@ -990,7 +995,7 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   assert.equal("smithers" in (psBody.data as Record<string, unknown>), false);
 
   const inspect = await cli(project, ["inspect", runData.run_id, "--json"], env);
-  assert.equal(inspect.code, 0, inspect.stderr);
+  assert.equal(inspect.code, 0, `${inspect.stderr}\n${inspect.stdout}`);
   const inspectBody = parseJson(inspect);
   assertNoSmithersSurface(inspectBody);
   const inspectData = inspectBody.data as {
@@ -1005,7 +1010,7 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   assert.equal(Object.hasOwn(inspectData.state.provenance?.workflow ?? {}, "executionSnapshot"), false);
 
   const status = await cli(project, ["status", runData.run_id, "--window", "5", "--json"], env);
-  assert.equal(status.code, 0, status.stderr);
+  assert.equal(status.code, 0, `${status.stderr}\n${status.stdout}`);
   const statusBody = parseJson(status);
   assertNoSmithersSurface(statusBody);
   const statusData = statusBody.data as {

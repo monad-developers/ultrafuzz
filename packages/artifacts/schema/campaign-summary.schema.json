@@ -10,6 +10,11 @@
       "type": "string",
       "enum": ["complete", "partial", "blocked"]
     },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4000
+    },
     "implemented_property_suite_refs": {
       "minItems": 1,
       "type": "array",

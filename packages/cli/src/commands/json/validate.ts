@@ -32,7 +32,8 @@ export default class JsonValidate extends Command {
       refPaths: (flags.ref ?? []).map((entry) => resolveFromCli(io.cwd, entry)),
       maxErrors: flags["max-errors"],
       schemaRegistry: registry.entries,
-      schemaBundleSha256: registry.bundleByFilename.get(path.basename(schemaPath)) ?? registry.composedBundle
+      schemaBundleSha256: registry.composedBundle,
+      schemaBundleSha256BySchemaDigest: registry.bundleByDigest
     });
     if (result.status !== "valid") process.exitCode = result.status === "instance-error" ? 1 : 2;
 

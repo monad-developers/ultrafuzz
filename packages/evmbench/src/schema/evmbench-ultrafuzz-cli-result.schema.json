@@ -296,6 +296,9 @@
         "source_run_id": {
           "type": "string"
         },
+        "audit_profile": {
+          "$ref": "urn:ultrafuzz:schema:artifacts:run-metadata:2#/properties/audit_profile"
+        },
         "workflow_ids": {
           "$ref": "#/$defs/stringArray"
         },

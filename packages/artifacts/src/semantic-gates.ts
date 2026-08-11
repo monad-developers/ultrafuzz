@@ -784,6 +784,35 @@ function reportSeverityClassificationPreservationIssues(
   return issues;
 }
 
+function reportCampaignOutcomeAuthorityIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
+  const summary = context.artifactSet!.campaignSummary;
+  const reported = at(document, ["campaign_outcome"]);
+  // `null` is a trusted host sentinel for a topology with no declared campaign
+  // summary ancestor. Such a report must not publish agent-authored campaign
+  // status without an authoritative artifact behind it.
+  if (summary === null) {
+    return reported === undefined
+      ? []
+      : [issue("$.campaign_outcome", "Report declares a campaign outcome without an authoritative campaign summary")];
+  }
+  if (!isRecord(summary)) {
+    return [issue("$context.artifactSet.campaignSummary", "Authoritative campaign summary context is invalid")];
+  }
+  if (!isRecord(reported)) {
+    return [issue("$.campaign_outcome", "Report omits the authoritative campaign outcome")];
+  }
+  const issues: SemanticGateIssue[] = [];
+  if (reported.outcome !== summary.outcome) {
+    issues.push(issue("$.campaign_outcome.outcome", "Report campaign outcome does not match the campaign summary"));
+  }
+  const summaryHasReason = Object.prototype.hasOwnProperty.call(summary, "reason");
+  const reportHasReason = Object.prototype.hasOwnProperty.call(reported, "reason");
+  if (summaryHasReason !== reportHasReason || (summaryHasReason && reported.reason !== summary.reason)) {
+    issues.push(issue("$.campaign_outcome.reason", "Report campaign reason does not match the campaign summary"));
+  }
+  return issues;
+}
+
 const LIFECYCLE_LATER_STAGE_FIELDS = [
   "triage_classification",
   "triage_reason",
@@ -5944,6 +5973,11 @@ const gateSpecifications = {
     "cross-artifact",
     ["artifactSet.severityClassifiedFindings"],
     reportSeverityClassificationPreservationIssues
+  ),
+  "report-campaign-outcome-authority": contextualGate(
+    "cross-artifact",
+    ["artifactSet.campaignSummary"],
+    reportCampaignOutcomeAuthorityIssues
   ),
   "report-property-provenance-join": contextualGate(
     "cross-artifact",

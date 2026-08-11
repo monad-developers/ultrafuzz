@@ -46,7 +46,7 @@
     "topology": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "logical_nodes", "expanded_nodes"],
+      "required": ["path", "logical_nodes", "expanded_nodes", "required_commands"],
       "properties": {
         "path": {
           "type": "string",
@@ -59,6 +59,14 @@
         "expanded_nodes": {
           "type": "integer",
           "minimum": 1
+        },
+        "required_commands": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
         },
         "origin": {
           "enum": ["project-default", "audit-profile", "project-config", "runtime-override"]

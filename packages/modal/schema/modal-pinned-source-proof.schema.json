@@ -13,7 +13,8 @@
     "remotes",
     "revision_count",
     "commit_object_count",
-    "submodules"
+    "submodules",
+    "held_out"
   ],
   "properties": {
     "schema_version": { "const": "ultrafuzz.pinned-source-proof.v2" },
@@ -98,6 +99,9 @@
           }
         }
       ]
+    },
+    "held_out": {
+      "anyOf": [{ "type": "null" }, { "$ref": "urn:ultrafuzz:schema:modal:pinned-holdout:1" }]
     }
   }
 }

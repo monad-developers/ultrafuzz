@@ -129,32 +129,14 @@ explicitly define unknown required actions as no-ops or skippable.
   missing or ambiguous, preserve the repro but classify the production claim as
   `incomplete-spec`, `spec-gated`, or `undetermined` according to the evidence.
 
-Reachability fixture examples:
-
-```json
-{
-  "title": "Helper-only arithmetic mismatch",
-  "triage_classification": "harness-defect",
-  "notes": [
-    "reachability=helper-only: direct helper fuzzing bypasses public entrypoint bounds",
-    "classification_reason=harness defect: generated proof bypasses production entrypoint preconditions",
-    "demotion_reason=harness defect: generated proof bypasses production entrypoint preconditions"
-  ]
-}
-```
-
-```json
-{
-  "title": "Public entrypoint reaches helper mismatch",
-  "triage_classification": "true-positive",
-  "notes": [
-    "reachability=public-entrypoint-trace: external flow reaches the helper with production-like bounds",
-    "helper_proof=direct helper mismatch reproduced",
-    "public_exploitability=public entrypoint trace reproduces the same state transition",
-    "classification_reason=public entrypoint trace reproduces the helper mismatch under production bounds"
-  ]
-}
-```
+For a helper-only arithmetic mismatch that bypasses public entrypoint bounds,
+use `harness-defect`, append a `reachability=helper-only: ...` note, and bind
+the same concrete explanation through one classification-reason note and one
+demotion-reason note. For a mismatch reached through a production-like public
+entrypoint, use `true-positive`, append
+`reachability=public-entrypoint-trace: ...`, preserve the direct helper proof,
+state the public exploitability, and bind one classification-reason note. These
+are semantic examples, not alternate JSON shapes.
 
 Do not remove findings during triage. Preserve the upstream finding fields and
 add or update `triage_classification` with the consensus value. Triage owns only
@@ -166,7 +148,6 @@ order, then append your new notes at the end. Never edit, re-word, re-punctuate,
 merge, re-order, de-duplicate, or drop an inherited note; whitespace and
 punctuation changes count as edits. Keep the notes you append concise, and use
 them to summarize the votes, decisive evidence, and recommended next action.
-Every item retains `schema_version: "ultrafuzz.finding.v2"`.
 Every triaged finding must include exactly one machine-readable
 `triage_reason=<reason>` or `classification_reason=<reason>` note. The first
 note carrying either prefix is the one that binds downstream, so never emit a
@@ -189,12 +170,15 @@ success is not evidence that the record should be removed. Treat
 `triaged-findings.json`; triage may add consensus notes, but it must not erase
 the original classification, reproducer, blocker, or repair evidence.
 
-Save triaged findings to {{output_stage_findings_path}} as a JSON
-array. Every object must include `triage_classification` set to exactly one of
-the classification values above.
+Save triaged findings to {{output_stage_findings_path}} using the exact pinned
+`{{schema_path}}/triaged-findings.schema.json`; it alone defines the JSON
+version, fields, types, enums, required members, and empty forms. Apply exactly
+one consensus classification from the values above to every input finding.
 
 Also save {{artifact_path}}/finding-lifecycle-ledger.json by copying the input
-ledger with `schema_version: "ultrafuzz.finding-lifecycle-ledger.v1"` and updating the matching `dedupe_key` record for every triaged finding:
+ledger using the exact pinned
+`{{schema_path}}/finding-lifecycle-ledger.schema.json` and updating the matching
+`dedupe_key` record for every triaged finding:
 set `triage_classification` to the same value the triaged finding carries, set
 `triage_reason` to exactly the text that follows `triage_reason=` or
 `classification_reason=` in that finding's reason note, character for character
@@ -213,3 +197,7 @@ the required `demotion_reason`, and one final `triaged` stage whose
 `{{output_stage_findings_relative_path}}` and whose `finding_id` is unchanged. Do not
 author severity, final disposition, or
 comparison fields in this stage.
+
+After both final writes, run every exact `ultrafuzz json validate` command
+rendered for them in the central output contract. Correct any exit-1 artifact
+yourself and rerun its command after any later edit.

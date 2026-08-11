@@ -17,7 +17,12 @@ function runMetadata(runId: string): Record<string, unknown> {
     tokens_used: "100",
     estimated_spend: "$0.01",
     partial_pricing: false,
-    strategy_loops: 4
+    strategy_loops: 4,
+    audit_profile: "full",
+    audit_profile_catalog_digest: "a".repeat(64),
+    topology_digest: "b".repeat(64),
+    prompt_digest: "c".repeat(64),
+    expanded_graph_fingerprint: "d".repeat(64)
   };
 }
 
@@ -320,11 +325,15 @@ test("directive validation scans tilde-fenced code for secrets and private paths
 
 test("a campaign that never fuzzed is disclosed instead of reading as a clean result", () => {
   const empty = (): Record<string, unknown> => ({
-    schema_version: "1.0",
-    run_metadata: { run_id: "campaign-outcome-test" },
+    schema_version: "ultrafuzz.report.v2",
+    run_metadata: runMetadata("campaign-outcome-test"),
     issues: [],
     non_production_outcomes: [],
-    property_provenance: []
+    property_provenance: [],
+    property_implementation_coverage: {
+      status: "not-planned",
+      reason: "property-implementation-track-not-declared"
+    }
   });
 
   const blocked = projectCanonicalFinalReport({
@@ -345,7 +354,7 @@ test("a campaign that never fuzzed is disclosed instead of reading as a clean re
   });
 
   // A campaign that ran and found nothing keeps reading as a clean result.
-  const completed = projectCanonicalFinalReport({ ...empty(), campaign_outcome: { outcome: "completed" } });
+  const completed = projectCanonicalFinalReport({ ...empty(), campaign_outcome: { outcome: "complete" } });
   assert.doesNotMatch(completed.markdown, /## Campaign status/u);
   assert.match(completed.markdown, /^No issues reported\.$/mu);
 

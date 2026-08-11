@@ -122,6 +122,7 @@ export interface RunPlanDocument {
     digest?: string;
     logical_nodes: number;
     expanded_nodes: number;
+    required_commands: string[];
   };
   audit_profile: RunAuditProfileSummary;
   rendered_prompts: RunPlanRenderedPrompt[];

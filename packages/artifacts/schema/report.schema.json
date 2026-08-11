@@ -96,6 +96,22 @@
       ],
       "additionalProperties": false
     },
+    "campaign_outcome": {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "type": "string",
+          "enum": ["complete", "partial", "blocked"]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        }
+      },
+      "required": ["outcome"],
+      "additionalProperties": false
+    },
     "issues": {
       "type": "array",
       "items": {

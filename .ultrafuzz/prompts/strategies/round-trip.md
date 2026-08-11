@@ -39,8 +39,8 @@ each scenario, function, or logic split between each flow or action.
 
 Passing test coverage is not a finding. Record successful round-trip checks,
 target coverage summaries, and no-defect observations in summaries or manifests,
-not in `findings.json`. Write `[]` to `findings.json` when generated tests pass
-and no reproducible target defect is confirmed.
+not in `findings.json`. Use its schema-defined empty form when generated tests
+pass and no reproducible target defect is confirmed.
 
 Write generated Foundry tests as `.t.sol` files under {{strategy_attempt_test_dir}} so Ultrafuzz can collect them for review and aggregation.
 

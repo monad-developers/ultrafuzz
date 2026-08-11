@@ -18,6 +18,57 @@ function generatedTestManifestSources(markdown: string): string[] {
 }
 
 describe("prompt semantic anchors", () => {
+  it("keeps pinned schemas as the sole producer-side JSON shape authority", () => {
+    const deliberateCorrectionFixture = "smoke/json-validation-correction.md";
+    const forbiddenShapeAuthority = [
+      /schema_version/u,
+      /ultrafuzz\.[a-z0-9-]+\.v[0-9]+/u,
+      /```json/u,
+      /empty JSON array/iu,
+      /(?:canonical\s+)?findings?\s+v[0-9]+/iu,
+      /top-level (?:JSON )?(?:array|object)/iu,
+      /object wrapper/iu,
+      /(?:write|use|return|emit)[^.\n]{0,100}(?:`\[\]`|empty (?:JSON )?(?:array|list|manifest))/iu,
+      /with (?:this|the) (?:exact )?(?:JSON )?shape/iu,
+      /exact (?:top-level )?(?:JSON )?(?:keys|fields)/iu,
+      /leave (?:the )?field absent/iu,
+      /null runtime budgets/iu,
+      /non-empty\s+`property_ids`\s+array/iu,
+      /Omit the `ledger_ids` field/iu,
+      /JSON string itself/iu,
+      /non-null `(?:execution\.started_at|deterministic_reproducer_ref)`/iu,
+      /top-level `dedupe_key`/iu,
+      /omit both backend fields/iu
+    ];
+
+    for (const asset of loadBuiltInPromptAssets()) {
+      let markdown = asset.markdown;
+      if (asset.relativePath === deliberateCorrectionFixture) {
+        expect(asset.markdown).toContain('{"schema_version":"1.0","findings":[]}');
+        expect(asset.markdown).toContain("Deliberately write the schema-invalid JSON object");
+        markdown = markdown.replace('{"schema_version":"1.0","findings":[]}', "");
+      }
+      for (const pattern of forbiddenShapeAuthority) {
+        expect(markdown, `${asset.relativePath}: ${String(pattern)}`).not.toMatch(pattern);
+      }
+    }
+
+    const templateRoot = fileURLToPath(
+      new URL("../../../.ultrafuzz/prompts/_templates/output-contract/", import.meta.url)
+    );
+    for (const filename of [
+      "boundary-recipes.mdx",
+      "findings.mdx",
+      "generated-tests.mdx",
+      "output-contract.mdx"
+    ] as const) {
+      const template = readFileSync(`${templateRoot}/${filename}`, "utf8");
+      for (const pattern of forbiddenShapeAuthority) {
+        expect(template, `${filename}: ${String(pattern)}`).not.toMatch(pattern);
+      }
+    }
+  });
+
   it("routes every property lens through the task-local JSON schema bundle", () => {
     const propertyPrompts = loadBuiltInPromptAssets().filter((asset) => asset.relativePath.startsWith("properties/"));
     expect(propertyPrompts.length).toBeGreaterThan(0);
@@ -39,6 +90,8 @@ describe("prompt semantic anchors", () => {
     for (const asset of propertyPrompts) {
       expect(asset.markdown, asset.relativePath).toContain("exact identifiers present in the");
       expect(asset.markdown, asset.relativePath).toContain("{{schema_path}}/reference-expectations.schema.json");
+      expect(asset.markdown, asset.relativePath).toContain("do not invent expectation IDs");
+      expect(asset.markdown, asset.relativePath).toContain("schema's no-expectation representation");
       expect(asset.markdown, asset.relativePath).not.toContain("scfuzzbench:aave-v4:iSpoke_supply");
     }
     const fanin = prompt("properties/property-specification-fanin.md");
@@ -51,17 +104,17 @@ describe("prompt semantic anchors", () => {
   // full agentic node attempt before being found (#291, #297, #299). The gate halves are fixed; these
   // anchors keep the prompt halves from drifting back, since a prompt that contradicts its gate is only
   // discoverable by burning a node.
-  it("states that optional evidence fields are optional", () => {
+  it("preserves optional evidence semantics without owning the JSON representation", () => {
     // Matched on whitespace-normalised text. These anchors exist to stop prose from drifting back into
     // contradicting its gate, and pinning exact line breaks would make an innocent reflow look like a
     // semantic regression.
     const flat = (relativePath: string) => prompt(relativePath).replace(/\s+/gu, " ");
 
-    // `canonical_property.ledger_ids` is `.optional()` with `minItems: 1`, so a property that maps to no
-    // ledger entry has nothing to render and must not be asked for an empty field (#297, #299).
+    // Preserve the required source join while delegating the no-ledger
+    // representation to the pinned schema (#297, #299).
     const fanin = flat("properties/property-specification-fanin.md");
-    expect(fanin).toContain("when that property has ledger IDs, include its complete `ledger_ids` list");
-    expect(fanin).toContain("Omit the `ledger_ids` field entirely for a property that maps to no ledger entry");
+    expect(fanin).toContain("Every ledger ID must be attributed to at least one canonical property");
+    expect(fanin).toContain("do not invent ledger IDs for a property that maps to no ledger entry");
 
     // A scan probe records WHERE the agent searched, so a directory or an absent path is valid (#289,
     // #291). But a probe naming a regular FILE still goes through `readInvariantSourceSnapshot` and is
@@ -82,18 +135,16 @@ describe("prompt semantic anchors", () => {
     expect(fanin).toContain("When an optional member is absent from JSON, omit its Markdown field entirely");
     expect(fanin).toContain("a blank field or `[]` is not omission");
 
-    // `reference_expectations` is also optional. The contract accepts empty legacy arrays, but its
-    // canonical output form omits the field when there are no IDs. Only the two required path arrays
-    // use `[]` to say that a selected property produced no corresponding path (#328).
+    // `reference_expectations` is also optional. Keep the semantic source join here while leaving
+    // optionality and empty forms to the pinned schema (#328).
     const implementation = flat("strategies/invariants/implement-properties.md");
+    expect(implementation).toContain("{{schema_path}}/implemented-properties.schema.json");
     expect(implementation).toContain(
-      "Omit `reference_expectations` from its structured record when the property has none"
+      "Carry the complete expectation-ID set for a selected property when the source property has one"
     );
+    expect(implementation).toContain("do not invent an empty expectation set for a property that has none");
     expect(implementation).toContain(
-      "Include `implementation_paths` and `test_paths` on every record, using an empty array for either path field when no corresponding path exists"
-    );
-    expect(implementation).toContain(
-      "Omit `reference_expectations` entirely when the property has none; do not emit an empty array"
+      "Preserve generated and changed test paths separately from invariant/helper implementation paths"
     );
     expect(implementation).not.toContain("both path arrays on every record");
   });
@@ -185,15 +236,15 @@ describe("prompt semantic anchors", () => {
 
   it("requires final reports to preserve benchmark expectation coverage", () => {
     const finalReport = prompt("review/final-report.md");
+    const flatFinalReport = finalReport.replace(/\s+/gu, " ");
     expect(finalReport).toContain("reference_expected_property_ids");
     expect(finalReport).toContain("reference_expectation_ids");
     expect(finalReport).toMatch(/Preserve these arrays even when the property priority is below/iu);
-    // The report contract takes blocker_summaries as strings. The prompt used to
-    // show only an empty array and say "using each typed blocker summary", so a
-    // run emitted the typed objects and the contract discarded the whole report.
-    expect(finalReport).toContain("Every element is a plain string, never an object");
+    // The runtime derives blocker summaries from the selected implementation
+    // records. Preserve that semantic projection without redefining the JSON
+    // member type owned by the pinned report schema.
     expect(finalReport).toContain("<property-id>: <the record's blocker summary text>");
-    expect(finalReport).toMatch(/in\s+canonical catalog order/u);
+    expect(flatFinalReport).toContain("in canonical catalog order");
     // The gate compares blocker_summaries byte-for-byte with
     // `${propertyId}: ${record.blocker.summary}`, so a paraphrase fails it just
     // as surely as an object does.
@@ -213,12 +264,15 @@ describe("prompt semantic anchors", () => {
       expect(finalReport).toContain(`- ${label}: \``);
     }
     expect(finalReport).toMatch(/a line reading exactly\s+`Blocker summaries:`/u);
-    expect(finalReport).toMatch(/no blank line between\s+the heading and the first bullet/u);
-    expect(finalReport).toMatch(/Reference expectation properties`,\s+which counts `reference_expected_property_ids`/u);
+    expect(flatFinalReport).toContain("no blank line between the heading and the first bullet");
+    expect(finalReport).toMatch(
+      /`Reference expectation properties` counts the properties carrying a reference\s+expectation/u
+    );
+    expect(finalReport).toContain("exact corresponding blocker-summary value");
     // The gate accepts the summary as written or Markdown-escaped. Describing
     // reportPublicProse in prose was tried and was wrong in three ways, so the
     // prompt must keep promising the laxer contract the gate actually applies.
-    expect(finalReport).toMatch(/Markdown-escaping the special characters is accepted but not\s+required/u);
+    expect(finalReport).toMatch(/Markdown-escaping the special characters is\s+accepted but not\s+required/u);
   });
 
   it("keeps protocol failures observable during invariant handler execution", () => {
@@ -264,7 +318,7 @@ describe("prompt semantic anchors", () => {
 
     expect(setup).toMatch(/Detect `?<test-root>`?.*test\/.*tests\//su);
     expect(setup).toMatch(/existing test-root convention.*test\/recon.*tests\/recon/su);
-    expect(implementation).toContain("replace that prefix with the detected");
+    expect(implementation).toMatch(/That root is the\s+repository's own top-level `test\/` or `tests\/` directory/u);
     expect(implementation).toMatch(/test\/foundry.*tests\/foundry/su);
     expect(campaign).toMatch(/test\/foundry.*tests\/foundry/su);
   });
@@ -397,46 +451,54 @@ describe("prompt semantic anchors", () => {
     // finding per counterexample, and the node failed for every deduplicated
     // run until both sides were corrected. Neither side may drift back alone.
     expect(flatCampaign).toContain("Do not emit one finding per counterexample");
-    expect(campaign).toContain("reuse the ID of one of the failures it covers");
+    expect(flatCampaign).toContain("must reuse the ID of one of the failures it covers");
     expect(flatCampaign).toContain("a finding may only name a property that some backend failure reported");
     expect(campaign).toContain("one distinct root cause, not one entry in the backend");
     expect(campaign).toMatch(/single counterexample broke several properties at once/u);
     expect(campaign).toContain("all contributing backend provenance");
-    expect(flatCampaign).toContain("Use the top-level string `fuzzer_backend` when exactly one");
-    expect(flatCampaign).toContain("unique, lexicographically sorted `fuzzer_backends` array when several");
-    expect(flatCampaign).toContain("Never emit both fields");
-    expect(flatCampaign).toContain("Nested detail such as `backend_provenance` may supplement these join fields");
+    expect(flatCampaign).toContain("using the schema-defined representation for the number of contributing siblings");
+    expect(flatCampaign).toContain("Copy every backend identity exactly from those siblings");
+    expect(flatCampaign).toContain("keep multiple identities unique and sorted");
     expect(campaign).toContain("A later pass must never erase");
     expect(campaign).toContain("property_ids");
     expect(campaign).toContain("deterministic Foundry reproducer for every unique failure");
     expect(campaign).toContain("classify it as `blocked-unreproduced`");
-    expect(campaign).toContain("`complete`: recon-fuzzer ran to its expected terminal state");
-    expect(campaign).toContain("`partial`: recon-fuzzer produced usable results but ended early");
-    expect(campaign).toContain("`blocked`: recon-fuzzer produced no usable results");
+    expect(flatCampaign).toContain(
+      "Choose the pinned summary schema's outcome variant that matches the finalized backend execution and result usability"
+    );
+    expect(flatCampaign).toContain("Preserve every usable finding when execution ended early, crashed, or timed out");
+    expect(flatCampaign).toContain("copy the actual reason from this run");
     expect(campaign).toContain("--workers <workers>");
-    expect(campaign).toContain('"schema_version": "ultrafuzz.property-campaign.v3"');
-    expect(campaign).toContain('"campaign_plan_ref": "campaign-plan.json"');
-    expect(campaign).toContain('"implemented_properties_ref": "implemented-properties.json"');
-    expect(campaign).toContain('"findings_ref": "findings.json"');
-    expect(campaign).toContain('"campaign_summary_ref": "campaign-summary.json"');
-    expect(flatCampaign).toContain("one result row for every implemented property");
-    expect(flatCampaign).toContain("A reproduced failure requires a non-null deterministic reproducer path");
+    expect(campaign).toContain("{{schema_path}}/invariant-campaign-plan.schema.json");
+    expect(campaign).toContain("{{schema_path}}/campaign-summary.schema.json");
+    expect(campaign).toContain("{{schema_path}}/property-campaign.schema.json");
+    expect(flatCampaign).toContain(
+      "The campaign-plan, implemented-properties, findings, and campaign-summary references must retain their exact declared artifact paths"
+    );
+    expect(flatCampaign).toContain(
+      "Emit exactly one schema-defined property-result row for every implemented record in `implemented-properties.json`"
+    );
+    expect(flatCampaign).toContain(
+      "Bind deterministic reproducer evidence or the actual reproduction blocker according to the pinned failure variant"
+    );
     expect(flatCampaign).toContain(
       "run every exact `ultrafuzz json validate` command displayed in the output contract"
     );
     expect(flatCampaign).toContain("Do not repair, normalize, or convert an older campaign document");
     expect(campaign).toContain("{{artifact_dir}}/recon-fuzzer-results.json");
-    expect(flatCampaign).toContain("`failure_counts.pre_deduplication` and `failure_counts.post_deduplication`");
-    expect(flatCampaign).toContain("total number of entries across every sibling backend record's `failures` array");
-    expect(flatCampaign).toContain("total number of objects in `findings.json`, including non-property findings");
+    expect(flatCampaign).toContain(
+      "Populate the schema-admitted summary references and backend status from the exact sibling artifacts"
+    );
+    expect(flatCampaign).toContain("pre-deduplication count from every failure in every sibling backend result");
+    expect(flatCampaign).toContain("post-deduplication count from every object in `findings.json`");
     expect(flatCampaign).toContain("do not prove that every finding is a distinct root cause");
-    expect(campaign).toContain("`contributing_backend_failures` array");
+    expect(campaign).toContain("schema-defined `contributing_backend_failures` collection");
     expect(flatCampaign).toContain("must partition every property-derived failure");
     expect(campaign).toContain("`deduplication.pre_dedup_count`");
     expect(flatCampaign).toContain("must be a subset of the finding's `property_ids`");
     expect(flatCampaign).toContain("must be the exact union across those contributed failures");
-    expect(campaign).toContain(
-      '{"fuzzer_backend":"<backend>","failure_id":"<id>","raw_result_ref":"<campaign-result-artifact>"}'
+    expect(flatCampaign).toContain(
+      "Every entry binds the exact backend identity, failure ID, and campaign-result artifact reference"
     );
     expect(flatCampaign).toContain("not to the backend-internal `paths.raw_results` evidence file");
     expect(flatCampaign).toContain("Plain failure ID strings and omitted `raw_result_ref` values are invalid");
@@ -478,34 +540,38 @@ describe("prompt semantic anchors", () => {
       expect(invariantPrompt).toContain("machine-readable source of truth");
       expect(invariantPrompt).toContain("source-only properties");
     }
-    expect(coverage).toContain("`not-run` has a null measurement and no\n     blockers");
-    expect(coverage).toContain("`target-met` has a\n     measurement from 90 through 100 and no blockers");
-    expect(coverage).toContain("`blocked` has at least one typed\n     blocker");
+    expect(coverage).toContain("{{schema_path}}/coverage-goal.schema.json");
+    expect(coverage).toContain("schema-defined status, measurement, and blocker variant");
+    expect(coverage).toContain("Never present an\n     unmeasured, sub-target, or blocked result as stronger progress");
   });
 
-  it("documents status-dependent differential and dynamic JSON evidence", () => {
+  it("documents status-dependent differential and dynamic evidence beside pinned schemas", () => {
     const lane = prompt("strategies/differential/differential-lane-author.md");
     const differentialAuditor = prompt("strategies/differential/reference-and-lane-auditor.md");
     const differentialTriage = prompt("strategies/differential/differential-red-triage.md");
     const dynamic = prompt("strategies/dynamic-strategy-generator.md");
+    const flatDynamic = dynamic.replace(/\s+/gu, " ");
 
-    expect(lane).toContain("`green` requires a non-null assigned\nlane");
-    expect(lane).toContain("`semantic_red_frozen` requires the same assigned-lane and command\nevidence");
-    expect(lane).toContain("`compile_or_harness_defect` requires an\nassigned lane");
-    expect(lane).toContain("`no_assigned_lane` requires every lane/source/command field to be null");
-    expect(lane).toContain("must exactly equal the assigned\nlane payload");
-    expect(differentialTriage).toContain('"red_candidate_id": ""');
-    expect(differentialTriage).toContain('"failure_signature": ""');
-    expect(differentialTriage).toContain('"classification": "untriaged"');
+    expect(lane).toContain("{{schema_path}}/differential-lane-result.schema.json");
+    expect(lane).toContain("pinned schema's status-dependent variant");
+    expect(lane).toContain("must exactly equal that assigned-lane\npayload");
+    expect(differentialTriage).toContain("{{schema_path}}/differential-red-triage.schema.json");
+    expect(differentialTriage).toContain("each must classify every exact\nregistry hash once in registry order");
+    expect(differentialTriage).toContain("A semantic red may\nnot be relabeled `compile_harness_defect`");
+    expect(differentialTriage).toContain("Set `repair_allowed: true` only for `harness_bug` or\n`reference_bug`");
     expect(differentialAuditor).toContain("reports `validation.passed: true`");
     expect(differentialAuditor).toContain("in `covered_surfaces`");
-    expect(dynamic).toContain("Use `selected` only with at least one selected strategy");
+    expect(differentialAuditor).toContain("disposition vocabulary defined only by the pinned schema");
+    expect(dynamic).toContain("{{schema_path}}/dynamic-strategy-plan.schema.json");
+    expect(dynamic).toContain("schema-defined plan status and corresponding empty or populated\nvariant");
+    expect(flatDynamic).toContain("pinned schema's unavailable-budget representation");
+    expect(dynamic).toContain("selected count equal the selected-strategy array\nlength");
     expect(dynamic).toContain("A strategy ID cannot be both selected and rejected");
-    expect(dynamic).toContain("Every enumerator recommendation must appear exactly once");
-    expect(dynamic).toContain("exactly every enumerator that recommended that strategy");
+    expect(flatDynamic).toContain("Every enumerator recommendation must appear exactly once");
+    expect(flatDynamic).toContain("identifies every recommending enumerator in enumerator-output order");
     expect(dynamic).toContain("`dynamic_strategy_id` must name a row in `selected-strategies.json`");
-    expect(dynamic).toContain("Every `generated_files[].strategy_id`\nmust name a selected strategy");
-    expect(dynamic).toContain("one named, non-mutating contextual gate");
+    expect(flatDynamic).toContain("Every generated-file strategy ID must name a selected strategy");
+    expect(flatDynamic).toContain("one named, non-mutating contextual gate");
   });
 
   it("keeps generated-test context semantics beside the schema-owned bundle shape", () => {
@@ -543,18 +609,21 @@ describe("prompt semantic anchors", () => {
     expect(generatedTestsTemplate).not.toContain("`generated_tests`");
     expect(generatedTestsTemplate).not.toContain("`support_files`");
     expect(generatedTestsTemplate).not.toContain("size_bytes");
-    expect(aggregate).toContain("required `generated_tests`\nand `support_files` arrays together");
-    expect(aggregate).toMatch(/Require both\s+`size_bytes` and `sha256` to be present/u);
-    expect(dedupe).toContain("exact `ultrafuzz.generated-tests.v3` shape");
-    expect(dedupe).toMatch(/required `generated_tests` and\s+`support_files` arrays/u);
-    expect(dedupe).toContain("exact positive `size_bytes`");
-    expect(dynamic).toContain("Use the exact `ultrafuzz.generated-tests.v3` manifest shape");
-    expect(dynamic).toContain("one required root-level\n`framework`");
-    expect(dynamic).toContain("remain present when both arrays\nare empty");
+    expect(aggregate).toContain("{{schema_path}}/generated-tests.schema.json");
+    expect(aggregate).toContain("schema-defined runnable and support entries together as one\natomic source bundle");
+    expect(aggregate).toContain("recorded byte size and digest to match the companion exactly");
+    expect(dedupe).toContain("{{schema_path}}/generated-tests.schema.json");
+    expect(dedupe).toContain("schema-defined runnable and support entries together as the complete bundle");
+    expect(dedupe).toContain("recorded byte length and digest match");
+    expect(dynamic).toContain("{{schema_path}}/generated-tests.schema.json");
+    expect(dynamic).toMatch(/bind its one bundle framework to the repository's checked-in\s+native framework/u);
     expect(dynamic).toContain("Never mix frameworks in one bundle");
-    expect(dynamic).toContain("never list a non-runnable support file as a generated test");
-    expect(dynamic).toContain("`path` with the\n`generated-tests/<file>` prefix");
-    expect(dynamic).toContain("they are not generated-test\nmanifest fields");
+    expect(dynamic).toMatch(/Classify independently\s+runnable tests as runnable/u);
+    expect(dynamic).toContain("exact byte-for-byte companion mirrored beneath this node's");
+    expect(dynamic).toContain("recorded byte size and digest must\nmatch that companion");
+    expect(dynamic).toContain("Keep strategy IDs, destination intent, and validation\nstatus");
+    expect(dynamic).toContain("Do not publish support without a runnable test");
+    expect(dynamic).toContain("schema-defined empty bundle when no runnable test was produced");
     expect(dynamic).not.toContain("only `language`, `framework`, `description`");
     expect(dynamic).not.toContain("strategy id, source path, destination intent, and\nvalidation status");
     expect(`${readFileSync(templatePath, "utf8")}\n${promptCorpus}`).not.toContain("test_files");
@@ -619,23 +688,27 @@ describe("prompt semantic anchors", () => {
     expect(dedupe).toContain("For Hardhat");
     expect(dedupe).toContain("For Vyper");
     expect(dedupe).toContain("For mixed repositories");
-    expect(dedupe).toContain("one required root-level `framework`");
-    expect(dedupe).toContain("remain present on an empty bundle");
-    expect(dedupe).toContain("never appear on\nan individual entry");
+    expect(dedupe).toContain("{{schema_path}}/generated-tests.schema.json");
+    expect(dedupe).toContain("schema-defined runnable and support entries together as the complete bundle");
+    expect(dedupe).toContain("manifest's one root-level `framework`");
+    expect(dedupe).toContain("bundle framework is absent, invalid, mixed, or incompatible");
     expect(dedupe).toContain("Do not infer,\nsynthesize, normalize, or convert a missing or mismatched framework");
     expect(dedupe).toContain("Strategy workspaces are isolated from this node");
     expect(dedupe).toMatch(/copy\s+every exact byte-for-byte canonical companion/u);
-    expect(dedupe).toContain("Do not execute a `support_files` entry");
+    expect(dedupe).toContain("Do not execute a non-runnable support entry");
     expect(dedupe).toMatch(/blocked without\s+partially copying the bundle/u);
     expect(dedupe).toMatch(/under the existing\s+native test root in `\{\{workspace_path\}\}`/u);
-    expect(dedupe).toContain("normalized relative POSIX");
+    expect(dedupe).toContain("recorded byte length and digest match");
     expect(dedupe).toMatch(/every symlink even\s+when its target remains inside the artifact directory/u);
     expect(dedupe).toMatch(/Never search a\s+strategy workspace/u);
-    expect(dedupe).toContain("Every kept finding object must carry its own\ntop-level `dedupe_key`");
-    expect(dedupe).toMatch(/byte-for-byte the same string as the `dedupe_key` on its\s+lifecycle record/u);
-    expect(dedupe).toContain("The key is not ledger-only metadata");
-    expect(dedupe).toContain("Keep each `dedupe_key`\nunique across the array");
-    expect(dedupe).toMatch(/identical to the\s+kept finding's top-level `dedupe_key`/u);
+    expect(dedupe).toContain("Every kept finding's `dedupe_key` must be\nexactly equal as JSON");
+    expect(dedupe).toMatch(/corresponding `dedupe_key` on its lifecycle record/u);
+    expect(dedupe).toMatch(/The key is not\s+ledger-only metadata/u);
+    expect(dedupe).toContain("Keep the dedupe keys unique across the kept\nfinding population");
+    expect(dedupe).toMatch(
+      /key, finding identity, title, optional family identity, and complete\s+strategy-hit provenance must agree with the kept finding and lifecycle record/u
+    );
+    expect(dedupe).toContain("same order, `dedupe_key`, finding ID, title, optional family ID, and\nexact hit array");
     expect(dedupe).toContain("Never install, fetch, restore, or update dependencies during dedupe");
     expect(dedupe).not.toContain("restore project-pinned dependencies first");
     expect(dedupe).not.toContain("Dependency hydration used only");
@@ -645,16 +718,16 @@ describe("prompt semantic anchors", () => {
     const aggregate = prompt("review/aggregate-test-files.md");
 
     expect(aggregate).toContain("canonical generated-test companions");
-    expect(aggregate).toContain("required `generated_tests`\nand `support_files` arrays together");
+    expect(aggregate).toContain("{{schema_path}}/generated-tests.schema.json");
+    expect(aggregate).toContain("schema-defined runnable and support entries together as one\natomic source bundle");
     expect(aggregate).toContain("exact byte-for-byte companion");
     expect(aggregate).toContain("strict UTF-8 text regular file");
     expect(aggregate).toContain("Treat each accepted\nmanifest as one atomic bundle");
-    expect(aggregate).toContain("normalized relative POSIX");
     expect(aggregate).toMatch(/every symlink even when its target remains inside\s+the artifact directory/u);
     expect(aggregate).toContain("Foundry `.t.sol`");
     expect(aggregate).toMatch(/Hardhat `.js`, `.cjs`, `.mjs`, `.ts`, `.cts`, or `.mts`/u);
     expect(aggregate).toContain("existing native Python test `.py` files");
-    expect(aggregate).toContain("root-level `framework` on every manifest, including an empty manifest");
+    expect(aggregate).toContain("Bind its one framework to the checked-in native framework");
     expect(aggregate).toMatch(/Never infer, synthesize, normalize, or\s+convert a missing or mismatched framework/u);
     expect(aggregate).toContain("Preserve the manifest's one `framework` only on its `source_bundles` record");
     expect(aggregate).toContain("copied and skipped entry rows must not repeat `framework`");
@@ -662,20 +735,22 @@ describe("prompt semantic anchors", () => {
     expect(aggregate).toContain("existing pytest, Ape, Brownie, or other native test root");
     expect(aggregate).toContain("never flatten files or overwrite one entry with another");
     expect(aggregate).toMatch(/Do\s+not copy unknown manifest entry fields/u);
+    expect(aggregate).toContain("{{schema_path}}/aggregation-manifest.schema.json");
+    expect(aggregate).toContain("Record one source-bundle row for every declared manifest");
+    expect(aggregate).toContain("Bind each row to the source manifest's logical node");
     expect(aggregate).toContain(
-      "`source_bundles`: one record for every listed `generated-tests.json`, including\n  empty manifests"
+      "attempt, run, framework, exact path, immutable digest, entry counts, and actual\ndisposition"
     );
-    expect(aggregate).toContain("exact source artifact-directory basename as\n  `source_attempt_id`");
-    expect(aggregate).toContain("`source_manifest_sha256`");
-    expect(aggregate).toContain("positive `size_bytes`");
-    expect(aggregate).toContain("lowercase `sha256`");
-    expect(aggregate).toContain("plus required `kind` (`generated-test` or `support-file`)");
+    expect(aggregate).toContain("artifact-relative path, byte size, digest, and any\nsource metadata exactly");
+    expect(aggregate).toContain("corresponding\n`generated-test` or `support-file` kind");
     expect(aggregate).toContain("Every considered source entry appears exactly once");
     expect(aggregate).toContain(
       "A bundle is atomic: `copied` means all of its generated tests and\nsupport files appear once"
     );
     expect(aggregate).toContain("`empty`\nmeans both source counts are zero");
-    expect(aggregate).not.toContain("`bytes`");
+    expect(aggregate).not.toContain("schema_version");
+    expect(aggregate).not.toContain("ultrafuzz.aggregation-manifest.v1");
+    expect(aggregate).not.toContain("```json");
     expect(aggregate).not.toContain("source_manifest_entry");
     expect(aggregate).not.toContain("collect generated Foundry `.t.sol` files");
   });
@@ -691,8 +766,9 @@ describe("prompt semantic anchors", () => {
     expect(report).toContain("`javascript` or `typescript` for Hardhat");
     expect(report).toContain("`python` (or `vyper`");
     expect(report).toContain("Never translate a JavaScript, TypeScript");
-    expect(report).toContain("Framework is a\nrequired whole-bundle identity on the matching `source_bundles` record");
-    expect(report).toContain("never infer a framework from a file\nextension");
+    expect(report).toContain("{{schema_path}}/aggregation-manifest.schema.json");
+    expect(report).toContain("Bind each row through its exact authenticated source-bundle and\nmanifest identity");
+    expect(report).toContain("never infer a framework from an extension");
     expect(report).toContain("report must be self-sufficient");
     expect(report).toContain("Stop and report an invalid\nupstream artifact");
     expect(report).not.toContain("generated Solidity PoCs");
@@ -707,13 +783,18 @@ describe("prompt semantic anchors", () => {
     expect(markdown.toLowerCase()).toContain("public reachability");
     expect(markdown).toContain("incomplete-spec");
     expect(markdown).toContain("severity == matrix(impact, likelihood)");
-    expect(markdown).toContain("Never emit `final_severity` or another alias");
+    expect(markdown).toContain("Never emit a final-severity alias or re-rate confidence");
+    expect(markdown).toContain(
+      "Do not emit `final_severity`,\n`upstream_severity`, note-token aliases, or compatibility fields"
+    );
     expect(markdown).toContain("Do not emit `Critical`");
     expect(markdown).toContain("exactly one object per\ntriaged finding, in the same order, with the same `id`");
     expect(markdown).toContain("Never drop, add, merge,\nsplit, or reorder a record");
     expect(markdown).toContain("You own exactly six fields");
     expect(markdown).toContain("Do not touch `status`, `notes`, or `confidence`");
-    expect(markdown).toContain("Copy it unchanged; do not re-rate it");
+    expect(markdown).toContain(
+      "preserve the upstream preliminary\nseverity estimate and lowercase confidence unchanged"
+    );
     expect(markdown).toContain("stay in `severity-classified-findings.json`");
     expect(markdown).toContain("Never append these tokens to `notes`");
     expect(markdown).not.toContain("Exclude invalid, out-of-scope, duplicate-only");
@@ -722,22 +803,27 @@ describe("prompt semantic anchors", () => {
 
   it("keeps the final-report matrix guard in the report prompt", () => {
     const markdown = prompt("review/final-report.md");
+    const flatMarkdown = markdown.replace(/\s+/gu, " ");
 
     expect(markdown).toContain("Impact x Likelihood");
     expect(markdown).toContain("High impact + Low likelihood must render as Medium");
     expect(markdown).toContain("Medium impact + Low likelihood must render as Low");
     expect(markdown).toContain("Every production issue severity equals the Impact x Likelihood matrix result");
-    expect(markdown).toContain("canonical finding v2");
+    expect(markdown).toContain("{{schema_path}}/report.schema.json");
+    expect(markdown).toContain("run the exact `ultrafuzz json validate` command");
     expect(markdown).toContain("`severity_guess`, `severity`, `impact`, and");
-    expect(markdown).toContain("canonical `strategy` field a non-empty");
-    expect(markdown).toContain("structured `strategy_provenance` object");
-    expect(markdown).toContain("canonical non-empty `detection_rates` array");
-    expect(markdown).toContain("Do not emit the removed\n`strategies` alias");
-    expect(markdown).toContain("Never emit both fields");
-    expect(markdown).toContain("When no known campaign backend produced the\nfinding, omit both");
-    expect(markdown).toContain("never emit a one-entry `line_ranges`");
-    expect(markdown).toContain("never combine `line_ranges` with");
-    expect(markdown).toContain("`line` or `end_line`");
+    expect(markdown).toContain("canonical originating strategy name when one is available");
+    expect(markdown).toContain("`strategy_provenance` when\nthe upstream finding has it");
+    expect(flatMarkdown).toContain(
+      "Derive structured detection rates from the exact strategy hits and configured loop counts"
+    );
+    expect(flatMarkdown).toContain("Do not emit removed or compatibility aliases");
+    expect(flatMarkdown).toContain(
+      "pinned report schema alone defines how zero, one, or several producing backends are represented"
+    );
+    expect(flatMarkdown).toContain("never invent a backend or use a historical compatibility value");
+    expect(markdown).toContain("For every schema-admitted multi-span citation");
+    expect(markdown).toContain("require them not to touch or overlap");
     // The host gate deep-compares every key of the severity-classified finding
     // with the report row, so the actor-role rewrite must never reach a copied
     // JSON field. A run that re-voiced `summary` killed the terminal node.
@@ -747,11 +833,11 @@ describe("prompt semantic anchors", () => {
     expect(markdown).toMatch(/`summary`, `family_variants`, and `recommended_next_action` stay byte-identical/u);
     // `ultrafuzz json validate` is schema-only, so ordering is undetectable
     // before the host gate rejects the artifact.
-    expect(markdown).toContain("Sort `line_ranges` by ascending `line`");
+    expect(markdown).toContain("sort the\nspans by their starting line");
     expect(markdown).toMatch(/greater than the previous\s+entry's `end_line`/u);
     // Every severity finding carries its own key; the finding_id fallback the
     // prompt used to allow is unreachable and contradicts the gate.
-    expect(markdown).toContain("carries its own top-level\n`dedupe_key`");
+    expect(markdown).toContain("has a `dedupe_key` exactly equal\n  to its lifecycle record's corresponding value");
     expect(markdown).toContain("never fall back to `finding_id`");
     expect(markdown).not.toContain("when the finding has no dedupe key");
   });

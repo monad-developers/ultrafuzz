@@ -15,6 +15,7 @@ export const MODAL_NODE_RESTORE_SCHEMA_ID = "urn:ultrafuzz:schema:modal:node-res
 export const MODAL_NODE_WORKER_ERROR_SCHEMA_ID = "urn:ultrafuzz:schema:modal:node-worker-error:1" as const;
 export const MODAL_EXECUTION_DEPENDENCY_MANIFEST_SCHEMA_ID =
   "urn:ultrafuzz:schema:modal:execution-dependency-manifest:1" as const;
+export const MODAL_PINNED_HOLDOUT_SCHEMA_ID = "urn:ultrafuzz:schema:modal:pinned-holdout:1" as const;
 export const MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID = "urn:ultrafuzz:schema:modal:pinned-source-proof:2" as const;
 export const MODAL_SMOKE_CHECKPOINT_SCHEMA_ID = "urn:ultrafuzz:schema:modal:smoke-checkpoint:1" as const;
 export const MODAL_SMOKE_COMPLETION_SCHEMA_ID = "urn:ultrafuzz:schema:modal:smoke-completion:1" as const;
@@ -91,7 +92,7 @@ export interface StrictModalBenchmarkConfigBase {
 }
 
 export interface StrictPrivateModalBenchmarkConfigDocument extends StrictModalBenchmarkConfigBase {
-  target: { repo: string; ref: string };
+  target: { repo: string; ref: string; held_out_paths?: string[] };
   benchmark_execution: { excluded_node_ids: string[] };
   eval_reporting: { provider: "braintrust" | "none" };
   ground_truth: {
@@ -489,6 +490,22 @@ export interface StrictModalPinnedSubmoduleExpectation {
   total_file_bytes: number;
 }
 
+export interface StrictModalPinnedHoldoutEntry {
+  path: string;
+  blob: string;
+  size: number;
+}
+
+export interface StrictModalPinnedHoldoutDocument {
+  schema_version: "ultrafuzz.pinned-holdout.v1";
+  source_commit: string;
+  source_tree: string;
+  commit: string;
+  tree: string;
+  paths: string[];
+  entries: StrictModalPinnedHoldoutEntry[];
+}
+
 export interface StrictModalPinnedSourceProofDocument {
   schema_version: "ultrafuzz.pinned-source-proof.v2";
   commit: string;
@@ -499,6 +516,7 @@ export interface StrictModalPinnedSourceProofDocument {
   revision_count: 1;
   commit_object_count: 1;
   submodules: StrictModalPinnedSubmoduleExpectation | null;
+  held_out: StrictModalPinnedHoldoutDocument | null;
 }
 
 export type StrictModalSmokeFailureStage =
@@ -657,6 +675,7 @@ export interface ModalContractBySchemaId {
   [MODAL_NODE_RESTORE_SCHEMA_ID]: StrictModalNodeRestoreDocument;
   [MODAL_NODE_WORKER_ERROR_SCHEMA_ID]: StrictModalNodeWorkerErrorDocument;
   [MODAL_EXECUTION_DEPENDENCY_MANIFEST_SCHEMA_ID]: StrictModalExecutionDependencyManifestDocument;
+  [MODAL_PINNED_HOLDOUT_SCHEMA_ID]: StrictModalPinnedHoldoutDocument;
   [MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID]: StrictModalPinnedSourceProofDocument;
   [MODAL_SMOKE_CHECKPOINT_SCHEMA_ID]: StrictModalSmokeCheckpointDocument;
   [MODAL_SMOKE_COMPLETION_SCHEMA_ID]: StrictModalSmokeCompletionDocument;

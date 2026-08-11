@@ -152,5 +152,6 @@ actually authored, and every production finding must retain the source-backed
 in-scope rationale that makes it reportable. These relationships are contextual
 requirements beyond JSON Schema.
 
-Write structured findings to {{output_findings_path}}. Use an empty JSON array
-if no source-backed in-scope production finding is confirmed.
+Write structured findings to {{output_findings_path}}. If no source-backed
+in-scope production finding is confirmed, use only the empty form defined by
+the exact pinned schema in the central output contract.

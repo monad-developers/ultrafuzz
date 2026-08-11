@@ -48,37 +48,22 @@ such as `lib/forge-std` is missing, restore it as test infrastructure and
 document that in your artifacts; do not edit production contracts just to
 satisfy test imports.
 
-Write {{artifact_path}}/reference-harness.json with this JSON shape:
+Write {{artifact_path}}/reference-harness.json. Read the exact pinned schema at
+`{{schema_path}}/reference-harness.schema.json`; it alone defines the JSON
+version, fields, types, enums, required members, and empty forms. After the
+final write, run the exact `ultrafuzz json validate` command rendered for this
+artifact in the central output contract.
 
-```json
-{
-  "schema_version": "ultrafuzz.reference-harness.v1",
-  "harness_author_attempt_index": {{attempt_index}},
-  "source_plan_artifacts": [],
-  "authored_paths": [],
-  "reference_models": [
-    {
-      "model_id": "stable-kebab-case",
-      "covered_surfaces": [],
-      "public_evidence_paths": [],
-      "implementation_rules_applied": [],
-      "known_gaps": [],
-      "deployment_helpers": []
-    }
-  ],
-  "validation": {
-    "commands": [],
-    "passed": false,
-    "compiler_errors": [],
-    "notes": []
-  },
-  "lane_readiness_notes": []
-}
-```
+Bind the harness-author attempt identity to `{{attempt_index}}`. Keep source
+plan artifacts in declared order, preserve covered surface IDs unchanged, and
+report validation from the commands actually run. Public evidence, known
+reference gaps, authored paths, and deployment helpers must describe this
+attempt rather than a synthesized or converted upstream record. These are
+contextual and cross-artifact requirements beyond JSON Schema.
 
-Also write `{{artifact_path}}/generated-tests.json` using the standard
-generated-test manifest contract. Include every authored `.t.sol` reference or
-harness test file in `generated_tests`. Include every imported non-runnable
-helper library, mock, fixture, deployment script, or data file in
-`support_files`; never classify one as a runnable test. Use both arrays empty
-only if no test file was authored.
+Also write `{{artifact_path}}/generated-tests.json` using its exact pinned
+schema and rendered validation command from the central output contract.
+Classify every authored `.t.sol` reference or harness test as runnable and
+every imported helper library, mock, fixture, deployment script, or data file
+as non-runnable support. Use the schema-defined empty bundle only if no test
+file was authored.

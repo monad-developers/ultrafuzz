@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  artifactSchemaRegistry,
   createStrictAjv,
   DEFAULT_MAX_JSON_INSTANCE_BYTES,
   parseStrictJsonBytes,
@@ -17,6 +18,8 @@ import {
 import { EVMBENCH_SEMANTIC_GATES_BY_SCHEMA_ID } from "./semantic-gates.js";
 
 const MAX_EVMBENCH_SCHEMA_BYTES = 512 * 1024;
+const ARTIFACT_RUN_METADATA_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:run-metadata:2";
+const ARTIFACT_RUN_METADATA_AUDIT_PROFILE_REFERENCE = `${ARTIFACT_RUN_METADATA_SCHEMA_ID}#/properties/audit_profile`;
 
 const SCHEMA_METADATA = {
   "evmbench-catalog.schema.json": {
@@ -166,6 +169,11 @@ export function assertEvmbenchJsonSchema(schemaId: string, value: unknown, label
 
 function compileRegistry(registry: readonly SchemaRegistryEntry[]): void {
   const ajv = createStrictAjv();
+  const runMetadataDependency = artifactSchemaRegistry().find((entry) => entry.id === ARTIFACT_RUN_METADATA_SCHEMA_ID);
+  if (runMetadataDependency === undefined) {
+    throw new Error("canonical run metadata schema dependency is unavailable");
+  }
+  ajv.addSchema(structuredClone(runMetadataDependency.schema), runMetadataDependency.id);
   for (const entry of registry) ajv.addSchema(structuredClone(entry.schema), entry.id);
   for (const entry of registry) {
     if (ajv.getSchema(entry.id) === undefined) throw new Error(`EVMBench schema failed to compile: ${entry.id}`);
@@ -184,7 +192,11 @@ function collectLocalReferences(value: unknown, output = new Set<string>()): str
   } else if (isRecord(value)) {
     for (const [key, entry] of Object.entries(value)) {
       if (key === "$ref" && typeof entry === "string") {
-        if (!entry.startsWith("#") && !entry.startsWith("urn:ultrafuzz:schema:evmbench:")) {
+        if (
+          !entry.startsWith("#") &&
+          !entry.startsWith("urn:ultrafuzz:schema:evmbench:") &&
+          entry !== ARTIFACT_RUN_METADATA_AUDIT_PROFILE_REFERENCE
+        ) {
           throw new Error(`external EVMBench schema reference is forbidden: ${entry}`);
         }
         output.add(entry);

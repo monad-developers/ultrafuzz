@@ -39,6 +39,8 @@ export interface ValidateJsonFileOptions {
   schemaRegistry?: readonly SchemaRegistryEntry[];
   /** Identity to persist for the registry that owns the selected schema. */
   schemaBundleSha256?: string;
+  /** Owner bundle identities keyed by the exact immutable schema-byte digest. */
+  schemaBundleSha256BySchemaDigest?: ReadonlyMap<string, string>;
 }
 
 export interface ValidateRegisteredJsonFileOptions {
@@ -135,12 +137,12 @@ async function validateJsonFileUnchecked(options: ValidateJsonFileOptions): Prom
   }
 
   let registry: readonly SchemaRegistryEntry[];
-  let schemaBundleSha256: string;
+  let fallbackSchemaBundleSha256: string;
   try {
     registry = options.schemaRegistry ?? artifactSchemaRegistry();
     assertUnambiguousRegistry(registry);
-    schemaBundleSha256 = options.schemaBundleSha256 ?? schemaRegistryBundleDigest(registry);
-    if (!/^[0-9a-f]{64}$/u.test(schemaBundleSha256)) {
+    fallbackSchemaBundleSha256 = options.schemaBundleSha256 ?? schemaRegistryBundleDigest(registry);
+    if (!/^[0-9a-f]{64}$/u.test(fallbackSchemaBundleSha256)) {
       throw new Error("schema bundle identity must be a lowercase SHA-256 digest");
     }
   } catch (error) {
@@ -149,6 +151,14 @@ async function validateJsonFileUnchecked(options: ValidateJsonFileOptions): Prom
   const registeredSchemas = registry.map((entry) => ({ id: entry.id, schema: entry.schema }));
   const filenameRegistration = registry.find((entry) => entry.filename === path.basename(schemaPath));
   const schemaSha256 = sha256(schemaBytes);
+  const schemaBundleSha256 = options.schemaBundleSha256BySchemaDigest?.get(schemaSha256) ?? fallbackSchemaBundleSha256;
+  if (!/^[0-9a-f]{64}$/u.test(schemaBundleSha256)) {
+    return failure(
+      "setup-error",
+      "JSON_SCHEMA_REGISTRY_INVALID",
+      "schema bundle identity must be a lowercase SHA-256 digest"
+    );
+  }
   const digestRegistration = registry.find((entry) => entry.sha256 === schemaSha256);
   let registration: SchemaRegistryEntry | undefined;
   if (filenameRegistration !== undefined || digestRegistration !== undefined) {

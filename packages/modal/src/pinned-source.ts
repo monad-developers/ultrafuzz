@@ -9,8 +9,7 @@ import {
   PINNED_SUBMODULE_MANIFEST_LOCATION,
   pinnedSubmoduleExpectation,
   readPinnedSubmoduleSnapshot,
-  writePinnedSubmoduleSnapshot,
-  type PinnedSubmoduleExpectation
+  writePinnedSubmoduleSnapshot
 } from "@ultrafuzz/runtime";
 
 import {

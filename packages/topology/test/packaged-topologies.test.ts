@@ -3,6 +3,12 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
+import {
+  ARTIFACT_CONTRACT_IDS,
+  NON_JSON_ARTIFACT_CONTRACT_IDS,
+  artifactContractSchemaBinding
+} from "@ultrafuzz/artifacts";
+
 import { loadTopology } from "../src/index.js";
 
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -16,6 +22,54 @@ describe("packaged topology collection", () => {
         requirePromptFiles: true
       });
       expect(topology.nodes.length).toBeGreaterThan(2);
+    }
+  });
+
+  it("binds every packaged output to one current central contract and every JSON output to a registered schema", () => {
+    const currentContracts = new Set<string>(ARTIFACT_CONTRACT_IDS);
+    const nonJsonContracts = new Set<string>(NON_JSON_ARTIFACT_CONTRACT_IDS);
+    for (const name of ["full", "smoke", "invariant-only"]) {
+      const topology = loadTopology(REPOSITORY_ROOT, {
+        topologyPath: path.join(TOPOLOGY_ROOT, `${name}.yml`),
+        requirePromptFiles: true
+      });
+      for (const node of topology.nodes) {
+        for (const output of node.outputs ?? []) {
+          expect(currentContracts.has(output.contract), `${name}:${node.id}/${output.path}`).toBe(true);
+          if (!nonJsonContracts.has(output.contract)) {
+            expect(artifactContractSchemaBinding(output.contract), `${name}:${node.id}/${output.path}`).toBeDefined();
+          }
+        }
+      }
+    }
+  });
+
+  it("keeps full and invariant profile handoffs aligned with the canonical producer shapes", () => {
+    const canonical = loadTopology(REPOSITORY_ROOT, {
+      topologyPath: path.join(REPOSITORY_ROOT, ".ultrafuzz", "topology.yml"),
+      requirePromptFiles: true
+    });
+    const canonicalOutputs = new Map(
+      canonical.nodes.map((node) => [
+        node.id,
+        (node.outputs ?? [])
+          .map((output) => [output.path, output.contract] as const)
+          .sort(([left], [right]) => left.localeCompare(right))
+      ])
+    );
+    for (const name of ["full", "invariant-only"]) {
+      const topology = loadTopology(REPOSITORY_ROOT, {
+        topologyPath: path.join(TOPOLOGY_ROOT, `${name}.yml`),
+        requirePromptFiles: true
+      });
+      for (const node of topology.nodes) {
+        const expected = canonicalOutputs.get(node.id);
+        if (expected === undefined) continue;
+        const actual = (node.outputs ?? [])
+          .map((output) => [output.path, output.contract] as const)
+          .sort(([left], [right]) => left.localeCompare(right));
+        expect(actual, `${name}:${node.id}`).toEqual(expected);
+      }
     }
   });
 

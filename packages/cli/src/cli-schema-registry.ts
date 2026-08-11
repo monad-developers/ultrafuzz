@@ -158,6 +158,7 @@ export function cliSchemaBundleDigest(): string {
 export interface ComposedCliSchemaRegistry {
   entries: readonly SchemaRegistryEntry[];
   bundleByFilename: ReadonlyMap<string, string>;
+  bundleByDigest: ReadonlyMap<string, string>;
   composedBundle: string;
 }
 
@@ -177,6 +178,7 @@ export function cliSchemaRegistry(): ComposedCliSchemaRegistry {
   ];
   const entries = Object.freeze(owners.flatMap((owner) => [...owner.entries]));
   const bundleByFilename = new Map<string, string>();
+  const bundleByDigest = new Map<string, string>();
   const ids = new Set<string>();
   const digests = new Set<string>();
   for (const owner of owners) {
@@ -187,6 +189,7 @@ export function cliSchemaRegistry(): ComposedCliSchemaRegistry {
       if (ids.has(entry.id)) throw new Error(`ambiguous registered JSON Schema $id: ${entry.id}`);
       if (digests.has(entry.sha256)) throw new Error(`ambiguous registered JSON Schema digest: ${entry.sha256}`);
       bundleByFilename.set(entry.filename, owner.bundle);
+      bundleByDigest.set(entry.sha256, owner.bundle);
       ids.add(entry.id);
       digests.add(entry.sha256);
     }
@@ -194,6 +197,7 @@ export function cliSchemaRegistry(): ComposedCliSchemaRegistry {
   cachedComposedRegistry = Object.freeze({
     entries,
     bundleByFilename,
+    bundleByDigest,
     composedBundle: schemaRegistryBundleDigest(entries)
   });
   return cachedComposedRegistry;

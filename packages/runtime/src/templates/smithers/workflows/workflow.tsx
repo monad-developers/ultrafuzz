@@ -483,8 +483,26 @@ function promptForTask(
     const promptPath = task.promptPath ?? inputTask?.prompt_path;
     prompt = promptPath ? readFileSync(promptPath, "utf8") : "";
   }
-  prompt = prompt.replaceAll(task.sourceProjectRoot, process.cwd());
-  return prompt.replaceAll(task.artifactDir, mirroredArtifactDir(task));
+  prompt = relocatePromptPath(prompt, task.artifactDir, mirroredArtifactDir(task));
+  return relocatePromptPath(prompt, task.sourceProjectRoot, process.cwd());
+}
+
+function relocatePromptPath(prompt: string, sourcePath: string, destinationPath: string): string {
+  if (sourcePath === "" || sourcePath === destinationPath) return prompt;
+  const shellEscapedSource = shellSingleQuotedContent(sourcePath);
+  const shellEscapedDestination = shellSingleQuotedContent(destinationPath);
+  return prompt
+    .split("\n")
+    .map((line) =>
+      line.includes("Validation command:") && line.includes("ultrafuzz json validate")
+        ? line.replaceAll(shellEscapedSource, shellEscapedDestination)
+        : line.replaceAll(sourcePath, destinationPath)
+    )
+    .join("\n");
+}
+
+function shellSingleQuotedContent(value: string): string {
+  return value.replaceAll("'", `'"'"'`);
 }
 
 function verifiedDependencyJsonArtifact(
@@ -5503,8 +5521,15 @@ function semanticGateContextForVerifiedOutput(
       "ultrafuzz/implemented-properties@3",
       "implemented property coverage"
     );
+    const campaignSummary = verifiedSingletonAncestorJsonArtifact(
+      task,
+      "ultrafuzz/campaign-summary@2",
+      "campaign summary"
+    );
     const finalSeverityAuthority = verifiedFinalSeverityReviewAuthority(task);
     context.artifactSet = {
+      campaignSummary: campaignSummary?.value ?? null,
+      ...(campaignSummary === undefined ? {} : { campaignSummaryPath: campaignSummary.path }),
       propertyCatalog: propertyCatalog?.value ?? UNPLANNED_PROPERTY_CATALOG_CONTEXT,
       implementedProperties: implementedProperties?.value ?? UNPLANNED_IMPLEMENTED_PROPERTIES_CONTEXT,
       ...finalSeverityAuthority

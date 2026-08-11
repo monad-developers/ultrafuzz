@@ -55,6 +55,9 @@
         "eta_at",
         "checkpoint_age_seconds",
         "checkpoint_stale",
+        "active_node_ids",
+        "waiting_nodes",
+        "linked_workflow_status",
         "eta_basis",
         "eta_unavailable_reason"
       ],
@@ -84,9 +87,101 @@
         "eta_at": { "$ref": "#/$defs/nullableTimestamp" },
         "checkpoint_age_seconds": { "$ref": "#/$defs/nullableNonNegativeInteger" },
         "checkpoint_stale": { "type": ["boolean", "null"] },
+        "active_node_ids": {
+          "type": "array",
+          "maxItems": 100000,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "waiting_nodes": {
+          "type": "array",
+          "maxItems": 100000,
+          "items": { "$ref": "#/$defs/waitingNode" }
+        },
+        "linked_workflow_status": {
+          "enum": [
+            "running",
+            "in-progress",
+            "started",
+            "retrying",
+            "queued",
+            "waiting-approval",
+            "waiting-event",
+            "waiting-quota",
+            "waiting-timer",
+            "paused",
+            "continued",
+            "finished",
+            "succeeded",
+            "success",
+            "complete",
+            "completed",
+            "stopped",
+            "failed",
+            "error",
+            "timeout",
+            "timed-out",
+            "timedout",
+            "heartbeat-timeout",
+            "cancelled",
+            "canceled",
+            "unknown",
+            null
+          ]
+        },
         "eta_basis": { "enum": ["observed-terminal-node-throughput", "terminal", null] },
         "eta_unavailable_reason": {
           "enum": ["progress-unavailable", "no-completed-nodes", "timing-unavailable", "checkpoint-stale", null]
+        }
+      }
+    },
+    "waitingNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node_id", "status", "wait_reason", "next_eligible_action"],
+      "properties": {
+        "node_id": { "type": "string", "minLength": 1 },
+        "status": {
+          "enum": [
+            "pending",
+            "ready",
+            "runnable",
+            "running",
+            "succeeded",
+            "failed",
+            "skipped",
+            "timed-out",
+            "reused-from-prior-run",
+            "invalidated"
+          ]
+        },
+        "wait_reason": {
+          "enum": [
+            "ready",
+            "capacity",
+            "dependency",
+            "backoff",
+            "approval",
+            "event",
+            "timer",
+            "controller-loss",
+            "active",
+            null
+          ]
+        },
+        "next_eligible_action": {
+          "enum": [
+            "dispatch",
+            "capacity-available",
+            "dependency-complete",
+            "retry",
+            "approve",
+            "signal",
+            "timer-fire",
+            "controller-takeover",
+            "task-complete",
+            null
+          ]
         }
       }
     }

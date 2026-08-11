@@ -32,7 +32,8 @@ not sensational research.
 Aggregate their recommendations into a structured plan, select the strongest
 bounded set, then start one max-reasoning sub-agent for each selected strategy.
 Each selected strategy sub-agent must author any generated tests it recommends
-and return structured findings or an empty list.
+and return structured findings or the empty form defined by the pinned findings
+schema.
 
 ## Required current-run context
 
@@ -172,83 +173,61 @@ Write the aggregate strategy plan to:
 
 {{artifact_dir}}/strategy-plan.json
 
-The plan JSON must include:
+Read the exact pinned schema at
+`{{schema_path}}/dynamic-strategy-plan.schema.json`; it alone defines the JSON
+version, fields, types, enums, required members, and empty forms. Record the
+resolved enumerator policy exactly, cite the current-run artifacts actually
+considered, and state which sibling-run, external, and host-global context was
+excluded. Use the pinned schema's unavailable-budget representation only when
+the runtime context did not supply those budgets.
 
-- `schema_version`: `"ultrafuzz.dynamic-strategy-plan.v1"`
-- `dynamic_strategies_enumerator`: the resolved non-negative integer or the
-  literal `"unlimited"`
-- `status`: `"selected"`, `"no-actionable-strategies"`, or `"blocked"`
-- `selected_strategy_count`
-- `selected_strategies`: array of selected strategy ids
-- `rejected_strategies`: array with reasons
-- `current_run_artifacts_considered`: array of paths and relevance notes
-- `excluded_context`: object summarizing sibling-run, external, or host-global
-  context that was intentionally not used
-- nullable `timeout_seconds` and `finalization_reserve_seconds`; use `null` only
-  when the runtime context does not provide them
-
-Use `selected` only with at least one selected strategy, and make
-`selected_strategy_count` equal the array length. Both
-`no-actionable-strategies` and `blocked` require a zero count and an empty
-selected array. A strategy ID cannot be both selected and rejected, and rejected
+Choose the schema-defined plan status and corresponding empty or populated
+variant. Make the recorded selected count equal the selected-strategy array
+length. A strategy ID cannot be both selected and rejected, and rejected
 strategy IDs must be unique.
 
 Write raw enumerator outputs to:
 
 {{artifact_dir}}/enumerator-outputs.json
 
-Use `schema_version: "ultrafuzz.dynamic-enumerator-outputs.v1"` and an
-`enumerators` array. Each row has `enumerator_id`, `agent_label`, `status`,
-`diagnostics`, and typed `recommendations`. A recommendation has `strategy_id`,
-`title`, `rationale`, `coverage_gap`, `evidence_paths`, `proposed_test_path`,
-`focused_command`, and `priority`. If raw enumerator-specific output is useful,
-put it only in a discriminated `payload` of `{ "kind": "text", "value": "..." }`
-or `{ "kind": "json", "value": <JSON> }`; this is the sole intentionally open
-nested model payload. A single enumerator must not repeat a `strategy_id`. If
-multiple enumerators recommend the same ID, every recommendation field must be
-exactly equal as a JSON value, including array order; otherwise keep distinct
-IDs.
+Read the exact pinned schema at
+`{{schema_path}}/dynamic-enumerator-outputs.schema.json`; it alone defines the
+JSON shape. A single enumerator must not repeat a strategy ID. If multiple
+enumerators recommend the same ID, every recommendation value must be exactly
+equal as JSON, including array order; otherwise keep distinct IDs.
 
 Write selected strategy details to:
 
 {{artifact_dir}}/selected-strategies.json
 
-Set `schema_version` to `"ultrafuzz.selected-strategies.v1"` and write a
-`strategies` array. Each selected row preserves every recommendation field and
-adds non-empty `enumerator_ids` and `validation_plan` arrays. The selected IDs
-and row order must exactly match `strategy-plan.json#selected_strategies`, and
-the row count must equal `selected_strategy_count`. `enumerator_ids` must list
-exactly every enumerator that recommended that strategy, in enumerator-output
-order. Every enumerator recommendation must appear exactly once in the plan's
-selected or explicitly rejected IDs; never invent a selected or rejected ID
-that no enumerator recommended.
+Read the exact pinned schema at
+`{{schema_path}}/selected-strategies.schema.json`; it alone defines the JSON
+shape. Each selected row preserves its complete recommendation and identifies
+every recommending enumerator in enumerator-output order. The selected IDs and
+row order must exactly match the strategy plan, and the row count must match
+the plan's selected count. Every enumerator recommendation must appear exactly
+once among the plan's selected or explicitly rejected IDs; never invent an ID.
 
 Write generated-test manifest details to:
 
 {{artifact_dir}}/generated-tests.json
 
-Use the exact `ultrafuzz.generated-tests.v3` manifest shape: top-level
-`schema_version`, current `run_id`, current `node_id`, one required root-level
-`framework`, `generated_tests`, and `support_files`. `framework` must match
-`^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$`, identify the one checked-in native
-framework used by the whole atomic bundle, and remain present when both arrays
-are empty. Never mix frameworks in one bundle or put `framework` on an
-individual entry. Put independently runnable tests in `generated_tests` and
-any imported helpers, mocks, fixtures, scripts, or data dependencies in
-`support_files`; never list a non-runnable support file as a generated test.
-Every row in either array must contain `path` with the
-`generated-tests/<file>` prefix, exact positive `size_bytes`, and exact lowercase
-`sha256`; it may otherwise contain only `language`, `description`, and the
-documented closed `provenance` fields. Keep strategy IDs, destination
-intent, and validation status in
-`selected-strategies.json` and `provenance.json`; they are not generated-test
-manifest fields. Keep paths unique across both arrays, and never emit support
-files without at least one runnable generated test. No file path may be the
-slash-delimited prefix of another path. Use both arrays empty when no runnable
-test was produced, while retaining the required bundle framework.
+Read the exact pinned schema at `{{schema_path}}/generated-tests.schema.json`;
+it alone defines the JSON shape. Bind the manifest to the current run and this
+logical node, and bind its one bundle framework to the repository's checked-in
+native framework. Never mix frameworks in one bundle. Classify independently
+runnable tests as runnable and imported helpers, mocks, fixtures, scripts, or
+data dependencies as non-runnable support. Every manifest entry must identify
+the exact byte-for-byte companion mirrored beneath this node's
+`generated-tests/` artifact directory; its recorded byte size and digest must
+match that companion. Keep strategy IDs, destination intent, and validation
+status in the strategy-selection and provenance artifacts rather than the
+manifest. Do not publish support without a runnable test. Use the
+schema-defined empty bundle when no runnable test was produced.
 
-Write findings to {{output_findings_path}}. Use an empty JSON array when no
-finding is confirmed or no generated strategy is actionable. Each finding must
+Write findings to {{output_findings_path}} using the exact pinned findings
+schema from the central output contract. Use its schema-defined empty form when
+no finding is confirmed or no generated strategy is actionable. Each finding must
 preserve dynamic provenance with `strategy`, `dynamic_strategy_id`,
 `enumerator_id`, `attempt_index`, and evidence paths. Its
 `dynamic_strategy_id` must name a row in `selected-strategies.json`, and its
@@ -262,10 +241,14 @@ Provenance must include current-run artifacts, sub-agent ids or labels,
 model/backend information when visible, commands run, generated files,
 validation outcomes, and a statement that previous reports, sibling run
 directories, host-global paths, network resources, and extra target context were
-not used. Set `schema_version` to
-`"ultrafuzz.dynamic-strategy-provenance.v1"`; use exact top-level keys
-`current_run_artifacts`, `agents`, `models`, `commands`, `generated_files`,
-`validation`, and `excluded_context`. Every `generated_files[].strategy_id`
-must name a selected strategy. The host reconciles all five sibling JSON
-artifacts with one named, non-mutating contextual gate after shape validation;
-the standalone JSON validator cannot prove these cross-file joins.
+not used. Read the exact pinned schema at
+`{{schema_path}}/dynamic-strategy-provenance.schema.json`; it alone defines the
+JSON shape. Every generated-file strategy ID must name a selected strategy.
+The host reconciles all five sibling JSON artifacts with one named,
+non-mutating contextual gate after shape validation; the standalone JSON
+validator cannot prove these cross-file joins.
+
+After finalizing the five JSON artifacts, run every exact
+`ultrafuzz json validate` command rendered for them in the central output
+contract. Correct any exit-1 artifact yourself and rerun its command after any
+later edit.

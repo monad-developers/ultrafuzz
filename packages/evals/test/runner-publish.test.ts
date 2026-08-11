@@ -100,7 +100,12 @@ function terminalRunFixture(runRoot: string, status: "succeeded" | "timed-out" |
             tokens_used: "15",
             estimated_spend: "$0.01",
             partial_pricing: false,
-            strategy_loops: 1
+            strategy_loops: 1,
+            audit_profile: "full",
+            audit_profile_catalog_digest: "a".repeat(64),
+            topology_digest: "b".repeat(64),
+            prompt_digest: "c".repeat(64),
+            expanded_graph_fingerprint: "d".repeat(64)
           },
           issues: [],
           non_production_outcomes: [],
@@ -527,19 +532,14 @@ describe("runner", () => {
     expect(record.diagnostics).toEqual([
       expect.objectContaining({
         code: "RUN_REQUIRED_COMMAND_MISSING",
-        details: {
-          commands: ["covg-eval", "recon", "recon-generate"],
-          requirements: [
-            { command: "covg-eval", node_ids: ["stateful-invariant-coverage"] },
-            {
-              command: "recon",
-              node_ids: ["stateful-invariant-campaign", "stateful-invariant-coverage"]
-            },
-            { command: "recon-generate", node_ids: ["stateful-invariant-coverage"] }
-          ]
-        }
+        message:
+          "required topology commands are not available in the configured execution environment: covg-eval (required by stateful-invariant-coverage); recon (required by stateful-invariant-campaign, stateful-invariant-coverage); recon-generate (required by stateful-invariant-coverage)",
+        path: "topology.required_commands",
+        severity: "error",
+        source: "runtime"
       })
     ]);
+    expect(record.diagnostics[0]).not.toHaveProperty("details");
     const runsRoot = path.join(project, ".ultrafuzz", "runs");
     expect(fs.existsSync(runsRoot) ? fs.readdirSync(runsRoot) : []).toEqual([]);
   });

@@ -37,29 +37,24 @@ by project discovery, the base setup, and the generated-test manifest:
 Strategy workspaces are isolated from this node. Never assume a generated test
 already exists in the dedupe workspace and never validate a stale same-named
 workspace file. Before focused validation, require the strategy-owned
-`generated-tests.json` to have the exact `ultrafuzz.generated-tests.v3` shape
-with one required root-level `framework` and its required `generated_tests` and
-`support_files` arrays. The root `framework` must match
-`^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$`, identify the one native framework for
-the whole atomic bundle, remain present on an empty bundle, and never appear on
-an individual entry. Treat both arrays together as the complete bundle, copy
+`generated-tests.json` to validate against the exact pinned
+`{{schema_path}}/generated-tests.schema.json`. That schema alone defines the
+manifest version, fields, types, enums, required members, and empty bundle.
+Treat the schema-defined runnable and support entries together as the complete bundle, copy
 every exact byte-for-byte canonical companion into one deterministic bundle
 root under the existing native test root in `{{workspace_path}}`, and execute
-only the selected runnable entries from `generated_tests`: use
+only the selected runnable entries: use
 `ultrafuzz/dedupe/<source-node-id>/attempt-<n>/<safe-relative-tail>` below that
 root while preserving each path's relative tail below `generated-tests/` so
-relative imports continue to resolve. Do not execute a `support_files` entry.
+relative imports continue to resolve. Do not execute a non-runnable support entry.
 Do not write to `{{repo_path}}`, stage copied files, introduce a new test root,
 or overwrite another companion; use a stable source-derived suffix for a
 deterministic collision.
 
-Accept the bundle only when every entry contains a normalized relative POSIX
-`path` beginning with `generated-tests/`, exact positive `size_bytes`, and exact
-lowercase `sha256`; paths must be unique across both arrays and no file path may
-be the slash-delimited prefix of another. Each path must contain no empty, `.`
-or `..` segment or backslash and resolve to a non-empty strict UTF-8 regular
-file inside that source node's artifact directory whose byte length and digest
-exactly match the entry. Reject absolute paths, path escapes, every symlink even
+Accept the bundle only when every schema-defined entry resolves to its exact
+non-empty strict UTF-8 regular-file companion inside that source node's
+artifact directory and the recorded byte length and digest match. Reject path
+escapes, every symlink even
 when its target remains inside the artifact directory, and every multiply
 linked file. Never search a strategy workspace, the dedupe workspace, sibling
 runs, or the host for a missing companion. If any canonical companion or an
@@ -102,31 +97,30 @@ Then, build a stable dedupe key from the affected contract or library, function 
 When several proven findings share the same production root cause but exercise
 meaningfully different boundaries, actors, states, or PoC shapes, keep one
 root finding and express the rest as a finding family instead of emitting
-separate root issues. Add a stable `family_id` to the kept root finding and put
-the proven variants in `family_variants`. Each variant should include `id`,
-`title`, `summary`, `dedupe_key`, and any available provenance fields:
-`strategy`, `attempt_index`, `model_id`, `model`, `model_index`, and
-`loop_index`. Preserve evidence and reproduction metadata when available.
+separate root issues. Use the pinned findings schema's family representation,
+give the family a stable identity, and preserve each proven variant's identity,
+explanation, dedupe key, available provenance, evidence, and reproduction
+metadata.
 
-Use `related_findings` only for adjacent or similar surfaces that are useful to
-link but are not proven to share the same root cause. Each related finding
-should include `id`, `title`, `relationship`, `summary`, and `dedupe_key` when
-available. Do not merge a related finding into the confirmed root issue merely
-because it uses a neighboring entrypoint, workflow phase, actor, asset, test
-shape, or symptom. A concrete terminal-state failure should stay scoped to the
-proven terminal condition unless the artifacts prove the same root cause across
-the broader state space.
+Use the pinned schema's related-finding representation only for adjacent or
+similar surfaces that are useful to link but are not proven to share the same
+root cause. Preserve the related finding's identity, relationship, explanation,
+and dedupe evidence. Do not merge a related finding into the confirmed root
+issue merely because it uses a neighboring entrypoint, workflow phase, actor,
+asset, test shape, or symptom. A concrete terminal-state failure should stay
+scoped to the proven terminal condition unless the artifacts prove the same
+root cause across the broader state space.
 
-Save the full deduplicated canonical finding v2 array, including candidates that
+Save the full schema-defined deduplicated findings artifact, including candidates that
 may later triage as non-production outcomes, only to
-{{output_stage_findings_path}}. Every kept finding object must carry its own
-top-level `dedupe_key`, byte-for-byte the same string as the `dedupe_key` on its
-lifecycle record and on its `strategy-detections.json` row at the same array
-index. The key is not ledger-only metadata: a kept finding without a top-level
-`dedupe_key` fails lifecycle reconciliation, and the failure is reported against
-every lifecycle record rather than against the finding. Keep each `dedupe_key`
-unique across the array. Carry duplicate and family details in the canonical
-finding fields and lifecycle ledger.
+{{output_stage_findings_path}}. Every kept finding's `dedupe_key` must be
+exactly equal as JSON to the corresponding `dedupe_key` on its lifecycle record
+and on the `strategy-detections.json` row at the same position. The key is not
+ledger-only metadata: missing or unequal kept-finding provenance fails lifecycle
+reconciliation, and the failure is reported against every lifecycle record
+rather than against the finding. Keep the dedupe keys unique across the kept
+finding population. Carry duplicate and family details in the canonical finding
+fields and lifecycle ledger.
 
 Do not discard unique symptoms merely because they come from the same strategy.
 Do not hide failing tests. Dedupe is only for equivalent findings or proven
@@ -148,34 +142,21 @@ property reference during deduplication.
 
 For every deduped finding, preserve the strategy and loop-attempt provenance of
 the kept finding plus every matching duplicate or family variant for the same
-production root cause. Save
-{{artifact_path}}/strategy-detections.json as a JSON array with one object per
-deduped root or family key:
-
-- `dedupe_key`: the stable key for the deduped bug instance, identical to the
-  kept finding's top-level `dedupe_key` and to its lifecycle record key.
-- `finding_id`: the kept finding id when available.
-- `family_id`: the shared family id when the finding has family variants.
-- `title`: the kept finding title.
-- `hits`: array of every strategy hit that found the same bug, each with
-  `strategy`, `attempt_index`, `model_id`, `model`, `model_index`, and
-  `loop_index` when those fields are available.
+production root cause. Save {{artifact_path}}/strategy-detections.json using
+the exact pinned `{{schema_path}}/strategy-detections.schema.json`; it alone
+defines the JSON shape. Emit one detection record per deduped root or family
+key. Its key, finding identity, title, optional family identity, and complete
+strategy-hit provenance must agree with the kept finding and lifecycle record.
 
 Count each strategy loop attempt only once for the same deduped bug. Do not
 rename this metric Temperature.
 
-Also save {{artifact_path}}/finding-lifecycle-ledger.json. It must be a JSON
-object with `schema_version: "ultrafuzz.finding-lifecycle-ledger.v1"` and a `records` array keyed by
-`dedupe_key`. For each deduped root/family, record:
-
-- `source_artifacts`: every raw finding artifact that contributed to the kept
-  root, duplicate, or family variant, with `path`, `node_id`, `finding_id`,
-  `title`, and `relationship` (`primary`, `duplicate`, or `family-variant`).
-- `strategy_hits`: the same complete hit array written to
-  `strategy-detections.json`.
-- `duplicate_finding_ids` and `family_variant_keys` when applicable.
-- `stages`: at least one `raw` stage for each source artifact plus one
-  `deduped` stage for the kept record.
+Also save {{artifact_path}}/finding-lifecycle-ledger.json using the exact
+pinned `{{schema_path}}/finding-lifecycle-ledger.schema.json`; it alone defines
+the JSON shape. For each deduped root or family, preserve every contributing
+raw source artifact and its primary, duplicate, or family-variant relationship;
+copy the complete strategy-hit set used by the matching detection; preserve
+duplicate and family identities; and record the raw-to-deduped stage history.
 
 Keep the lifecycle record array in exactly the same order as
 `deduped-findings.json`, with one record per finding. In each record, write one
@@ -188,9 +169,11 @@ stage fields during dedupe. The matching `strategy-detections.json` entry must
 have the same order, `dedupe_key`, finding ID, title, optional family ID, and
 exact hit array as the lifecycle record.
 
-After writing the required artifacts, run only a small number of direct JSON
-shape checks, then stop. Do not spend the finalization reserve on broad
-re-verification once the required artifacts are present and parseable.
+After writing the required artifacts, run every exact
+`ultrafuzz json validate` command rendered for them in the central output
+contract, then stop. Correct an exit-1 artifact yourself and rerun its command
+after any later edit. Do not spend the finalization reserve on broad
+re-verification once the required artifacts pass their commands.
 
 Record the focused native compilation or test result, but do not fix failing
 tests or edit production code. Do not mutate the target workspace's dependency

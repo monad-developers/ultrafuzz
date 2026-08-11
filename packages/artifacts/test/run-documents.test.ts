@@ -69,6 +69,7 @@ function canonicalRunPlan(): RunPlanDocument {
     graph_fingerprint: DIGEST_A,
     config_fingerprint: DIGEST_B,
     redacted_config_fingerprint: DIGEST_A,
+    prompt_digest: DIGEST_B,
     execution: {
       mode: "local",
       retentionDays: 30,
@@ -76,7 +77,20 @@ function canonicalRunPlan(): RunPlanDocument {
       nodes: { node_a: { resources: { memoryMiB: 1_024 } } },
       providers: {}
     },
-    topology: { path: "topology.json", logical_nodes: 1, expanded_nodes: 1 },
+    topology: { path: "topology.json", logical_nodes: 1, expanded_nodes: 1, required_commands: [] },
+    audit_profile: {
+      id: "full",
+      catalog_digest: DIGEST_A,
+      effective_topology_path: "topology.json",
+      topology_path_origin: "audit-profile",
+      topology_digest: DIGEST_B,
+      prompt_digest: DIGEST_B,
+      expanded_graph_fingerprint: DIGEST_A,
+      effective_settings: {},
+      setting_origins: {},
+      overridden_settings: [],
+      topology_overridden: false
+    },
     rendered_prompts: [
       {
         node_id: "node-a-0",

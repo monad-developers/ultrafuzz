@@ -1,3 +1,5 @@
+import type { RunMetadataAuditProfile } from "@ultrafuzz/artifacts";
+
 import { assertEvmbenchJsonSchema } from "./schema-registry.js";
 import { assertEvmbenchDocumentSemantics } from "./semantic-gates.js";
 
@@ -57,6 +59,7 @@ export interface EvmbenchStatusData {
   started_at?: string;
   finished_at?: string;
   source_run_id?: string;
+  audit_profile?: RunMetadataAuditProfile;
   workflow_ids: string[];
   workflow_run_id: string;
   workflow_status: string;

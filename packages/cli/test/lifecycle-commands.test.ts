@@ -578,6 +578,7 @@ test("doctor reports install posture in human and JSON output", async () => {
 
   const json = await cli(project, ["doctor", "--json"], doctorEnv);
   const body = parseJson(json);
+  assert.notEqual(body.data, null, `${json.stdout}${json.stderr}`);
   const data = body.data as {
     checks: Array<{ name: string; status: string }>;
     toolchain: Array<{ name: string; available: boolean }>;

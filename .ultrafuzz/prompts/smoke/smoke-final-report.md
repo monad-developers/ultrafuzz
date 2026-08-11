@@ -28,44 +28,32 @@ severity from evidence with this exact matrix: Low impact is Low; Medium impact
 with Low likelihood is Low and otherwise Medium; High impact with Low
 likelihood is Medium and otherwise High. Set the final `severity` to that
 matrix result while preserving each finding's preliminary `severity_guess`.
-Each production issue includes:
-include at least:
+Each production issue must preserve the normalized finding identity,
+preliminary severity, confidence, summary, originating strategy, affected
+code, evidence, strategy provenance, and matching lifecycle record. Add final
+severity, impact, likelihood, their source-backed rationales, and a non-empty
+proof-of-concept scenario in the target's native language. These preservation
+and evidence requirements are semantic; the pinned schema owns their shape.
 
-- `schema_version: "ultrafuzz.finding.v2"`, stable `id`, concise `title`, `status`,
-  `severity_guess`, `confidence`, and `summary`;
-- `strategy` as one originating strategy string, affected files/functions, and
-  concrete evidence;
-- `severity`, `impact`, `likelihood`, all three rationale fields,
-  `description`, and `proof_of_concept` as an object with non-empty `scenario`,
-  `language`, and `code`; and
-- structured `strategy_provenance` and its matching lifecycle record when
-available.
+Write `{{artifact_path}}/report.json` using the exact pinned
+`{{schema_path}}/report.schema.json`; it alone defines the JSON version, fields,
+types, enums, required members, and empty forms. Copy the public run metadata
+from the supplied run record, preserve matching lifecycle records with
+production and non-production findings, emit no property provenance rows, and
+use the schema's typed `not-planned` property-implementation coverage variant
+because the smoke topology declares no property implementation track. Never
+synthesize that variant to hide missing or malformed evidence in a topology
+that does declare the track.
 
-Write every issue's `confidence` as one of the strings `high`, `medium`, or
-`low`; never use a numeric confidence in the normalized report.
-
-Write `{{artifact_path}}/report.json` with `schema_version: "ultrafuzz.report.v2"`.
-The closed `run_metadata` object has `run_id`, `source_run_id`, `repository`,
-`elapsed_time`, `models_used`, `tokens_used`, `estimated_spend`,
-`partial_pricing`, and integer `strategy_loops`. Write canonical finding v2
-objects with matching lifecycle records in production `issues` and
-`non_production_outcomes`, `property_provenance: []`, and this required typed
-coverage value because the smoke topology does not declare a property
-implementation track:
-
-```json
-"property_implementation_coverage": {
-  "status": "not-planned",
-  "reason": "property-implementation-track-not-declared"
-}
-```
+This smoke topology declares no campaign-summary ancestor, so omit
+`campaign_outcome`; never synthesize an agent-authored campaign status.
 
 The `issues` array is the scoring source of truth and must remain non-empty
 whenever at least one deduped finding is supported as a production bug.
 
-Every non-production outcome also preserves the canonical finding v2 fields and
-adds required `triage_classification`, `recommended_next_action`, and
-`lifecycle`.
+Every non-production outcome preserves every upstream finding field exactly and
+adds the report-context classification, recommendation, and lifecycle values
+required by the pinned report schema.
 
 Copy the effective audit policy from the supplied run metadata into the same
 closed `run_metadata` object: `audit_profile`, `audit_profile_catalog_digest`,
@@ -86,3 +74,6 @@ only when the evidence supports no production issue. Under
 ```
 
 Validate both required files against their output contracts, then stop.
+Run every exact `ultrafuzz json validate` command rendered in the central
+output contract; correct an exit-1 artifact yourself and rerun its command
+after any later edit.

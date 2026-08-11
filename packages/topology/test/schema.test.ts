@@ -207,12 +207,12 @@ describe("expanded graph schema", () => {
 
     const invalid = validateExpandedGraphSchema(graph);
     expect(invalid.ok).toBe(false);
-    expect(invalid.issues.some((issue) => issue.path.endsWith(".requiredCommands[0]") && issue.code.endsWith("PATTERN"))).toBe(
-      true
-    );
-    expect(invalid.issues.some((issue) => issue.path.endsWith(".requiredCommands") && issue.code.endsWith("UNIQUEITEMS"))).toBe(
-      true
-    );
+    expect(
+      invalid.issues.some((issue) => issue.path.endsWith(".requiredCommands[0]") && issue.code.endsWith("PATTERN"))
+    ).toBe(true);
+    expect(
+      invalid.issues.some((issue) => issue.path.endsWith(".requiredCommands") && issue.code.endsWith("UNIQUEITEMS"))
+    ).toBe(true);
   });
 
   it("snapshot is present and aligned with exported schema constants", () => {

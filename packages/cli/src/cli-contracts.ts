@@ -4,6 +4,7 @@ import {
   type NodeState,
   type PlannedGraphDocument,
   type RunMetadataAccounting,
+  type RunMetadataAuditProfile,
   type RunState,
   type WriteAnalysisBundleResult
 } from "@ultrafuzz/artifacts";
@@ -166,6 +167,8 @@ export interface CliPublicRunMetadata {
   mode: "run" | "resume" | "replay" | "fork";
   workflow_ids: string[];
   redacted_config_fingerprint: string;
+  prompt_digest?: string;
+  audit_profile?: RunMetadataAuditProfile;
   forge_guard: {
     enabled: boolean;
     active: boolean;
@@ -307,6 +310,7 @@ export interface CliAuditProfilesData {
 export interface CliTopologySummary {
   id: string;
   description: string;
+  topology_path: string;
   logical_nodes: number;
   digest: string;
 }
@@ -316,7 +320,6 @@ export interface CliTopologyListData {
 }
 
 export interface CliTopologyShowData extends CliTopologySummary {
-  topology_path: string;
   source: string;
 }
 

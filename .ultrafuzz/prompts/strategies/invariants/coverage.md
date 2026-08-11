@@ -173,26 +173,22 @@ Apply these Recon/Chimera rules:
 ## Work
 
 1. Record the coverage plan:
-   - Write `{{artifact_dir}}/coverage-goal.json` with
-     `schema_version: "ultrafuzz.coverage-goal.v1"`, `target` set to
-     `{ "metric": "standardized-core-line-coverage-percent", "value": 90 }`,
-     nullable `current_measurement`, `current_status` (`not-run`, `in-progress`,
-     `target-met`, `below-target`, or `blocked`), `planned_commands`, non-empty
-     `stop_conditions`, `timeout_seconds`, `finalization_reserve_seconds`, and
-     typed `blockers`. Each blocker has `category`, `summary`, and
-     `evidence_paths`; use only the categories documented by the supplied schema.
-     Keep status and evidence exact: `not-run` has a null measurement and no
-     blockers; `in-progress` has no terminal blockers; `target-met` has a
-     measurement from 90 through 100 and no blockers; `below-target` has a
-     non-null measurement below 90; and `blocked` has at least one typed
-     blocker. Do not label a null or sub-target measurement `target-met`, and do
-     not leave a blocked terminal result as `not-run` or `in-progress`.
+   - Write `{{artifact_dir}}/coverage-goal.json` using the exact pinned schema
+     at `{{schema_path}}/coverage-goal.schema.json`; it alone defines the JSON
+     version, fields, types, enums, required members, blocker categories, and
+     empty forms. Set the goal to 90 percent standardized core line coverage
+     and record the actual planned commands, timeout, and finalization reserve.
+     Select the schema-defined status, measurement, and blocker variant that
+     exactly matches the work and evidence observed so far. Never present an
+     unmeasured, sub-target, or blocked result as stronger progress than the
+     run actually achieved.
    - Immediately write initial checkpoint `{{artifact_dir}}/coverage-report.md`,
      `{{output_findings_path}}`, `{{artifact_dir}}/generated-tests.json`, and
      `{{artifact_dir}}/harness-repairs.json` before starting Recon or any
      build-info/storage-layout coverage command. The initial report may state
-     that standardized coverage has not run yet, but the JSON files must already
-     be valid arrays or a valid empty generated-test manifest.
+     that standardized coverage has not run yet, but each JSON file must already
+     use the empty form defined by its pinned schema and pass its rendered
+     validation command.
    - Do not start a backend goal or rely on backend goal-budget state. This
      node's timeout and finalization reserve are the only stopping budget.
    - Use the property catalog handoff to prioritize the available campaign time
@@ -274,12 +270,12 @@ Apply these Recon/Chimera rules:
      because a later coverage run succeeds. Carry the record forward and update
      only the classification, evidence, or repair packet with new facts.
    - Include every deterministic `CryticToFoundry` reproducer or generated
-     Foundry replay file in `generated_tests`, and include every imported
-     non-runnable helper, mock, fixture, script, or data dependency in
-     `support_files`; use both arrays empty when no replay test was produced.
-   - If no fuzzer failures or deterministic reproducers were observed, write an
-     empty `findings.json` array, a generated-test bundle with both arrays empty,
-     and an empty `harness-repairs.json` array.
+     Foundry replay file in the schema-defined runnable collection, and include
+     every imported non-runnable helper, mock, fixture, script, or data
+     dependency in the schema-defined support collection.
+   - If no fuzzer failures or deterministic reproducers were observed, use the
+     schema-defined empty forms for findings, generated tests, and harness
+     repairs.
 
 ## Required Outputs
 
@@ -295,8 +291,9 @@ This is the same topology-required artifact as:
 
 {{artifact_dir}}/findings.json
 
-The findings file must be a JSON array. Every fuzzer-discovered failure and
-every deterministic reproducer must appear as a finding object with a
+Read `{{schema_path}}/findings.schema.json`; it alone defines the findings JSON
+shape. Every fuzzer-discovered failure and every deterministic reproducer must
+appear as a finding with a
 `stateful_failure_classification=<classification>` token in `notes`, even when
 the final classification is `false-positive`, `incomplete-spec`, or
 `blocked-unreproduced`.
@@ -305,21 +302,23 @@ Write generated-test and replay records to:
 
 {{artifact_dir}}/generated-tests.json
 
-The generated-test manifest must use `generated_tests` as the runnable test
-file list and `support_files` as the non-runnable dependency list. Include
-deterministic Foundry replay or reproducer files when they were produced,
-classify imported helpers separately, and use both arrays empty otherwise.
+Read `{{schema_path}}/generated-tests.schema.json`; it alone defines the
+generated-test JSON shape. Include deterministic Foundry replay or reproducer
+files when they were produced, classify imported helpers as non-runnable
+support, and use the schema-defined empty bundle otherwise.
 
 Write harness repair records to:
 
 {{artifact_dir}}/harness-repairs.json
 
-The harness repair file must be a JSON array versioned by its bound contract,
-not by its items. Use an empty array when no harness defects or repair
-candidates were observed. Each non-empty entry includes `failure_id`, fixed
-`classification: "harness-defect"`, `failure_summary`, nullable
-`reproducer_path`, `repair_summary`, `files_changed_or_proposed`, `commands`,
-and `notes`. When `reproducer_path` is null, also include a non-empty
-`reproducer_unavailable_reason`; otherwise omit that field. Production bugs,
+Read `{{schema_path}}/harness-repairs.schema.json`; it alone defines the harness
+repair JSON shape. Use its empty form when no harness defects or repair
+candidates were observed. Repairs are only for harness defects. When the
+schema admits a repair candidate, report its actual reproducer availability and
+evidence without inventing an unavailability explanation. Production bugs,
 incomplete specs, false positives, and blocked/unreproduced failures stay in
 `findings.json` for downstream triage.
+
+After the final writes, run every exact `ultrafuzz json validate` command
+rendered for these artifacts in the central output contract. Correct any
+exit-1 artifact yourself and rerun its command after any later edit.

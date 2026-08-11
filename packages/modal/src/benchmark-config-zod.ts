@@ -100,7 +100,7 @@ const commonBenchmarkConfig = {
 const privateBenchmarkConfigSchema = z
   .object({
     ...commonBenchmarkConfig,
-    target: z.object({ repo: gitUrl, ref: gitRef }).strict(),
+    target: z.object({ repo: gitUrl, ref: gitRef, held_out_paths: z.array(relativeFile).max(64).optional() }).strict(),
     benchmark_execution: privateBenchmarkExecutionSchema,
     eval_reporting: privateEvalReportingSchema,
     ground_truth: z

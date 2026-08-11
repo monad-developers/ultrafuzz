@@ -76,11 +76,12 @@ actions, or buy/sell at the wrong decayed price.
 
 Passing test coverage is not a finding. Record successful time-boundary
 coverage, target coverage summaries, and no-defect observations in summaries or
-manifests, not in `findings.json`. Write `[]` to `findings.json` when generated
-tests pass and no reproducible target defect is confirmed.
+manifests, not in `findings.json`. Use its schema-defined empty form when
+generated tests pass and no reproducible target defect is confirmed.
 
-Write structured findings to {{output_findings_path}}. Use an empty JSON array
-if no finding is confirmed. For each finding, include enough provenance for
+Write structured findings to {{output_findings_path}}. If no finding is
+confirmed, use only the empty form defined by the exact pinned schema in the
+central output contract. For each finding, include enough provenance for
 review and dedupe: `strategy` as `"{{strategy}}"`, `node_id` as `"{{strategy}}"`,
 `attempt_index` as `{{attempt_index}}`, `loop_index` as
 `{{strategy_loop_index}}`, the selected time-sensitive surface, the tested time

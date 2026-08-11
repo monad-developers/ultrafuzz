@@ -660,6 +660,25 @@ test("json validate recognizes the pinned eval schema and reports the owning eva
     assert.equal(envelope.data.schema.id, EVAL_PUBLICATION_STATE_SCHEMA_ID);
     assert.equal(envelope.data.schema.bundle_sha256, evalSchemaBundleDigest());
 
+    const renamedSchema = path.join(temporary, "renamed-publication-state.schema.json");
+    fs.copyFileSync(schema, renamedSchema);
+    const renamedCapture = await capture([
+      "json",
+      "validate",
+      "--schema",
+      renamedSchema,
+      "--file",
+      publicationState,
+      "--json"
+    ]);
+    assert.equal(renamedCapture.code, 0);
+    const renamedEnvelope = JSON.parse(renamedCapture.stdout) as {
+      data: { schema: { id: string; bundle_sha256: string; registered: boolean } };
+    };
+    assert.equal(renamedEnvelope.data.schema.registered, true);
+    assert.equal(renamedEnvelope.data.schema.id, EVAL_PUBLICATION_STATE_SCHEMA_ID);
+    assert.equal(renamedEnvelope.data.schema.bundle_sha256, evalSchemaBundleDigest());
+
     const tamperedSchema = path.join(temporary, "eval-publication-state.schema.json");
     fs.writeFileSync(tamperedSchema, `${fs.readFileSync(schema, "utf8")} `, "utf8");
     const tamperedCapture = await capture(["json", "validate", "--schema", tamperedSchema, "--file", publicationState]);

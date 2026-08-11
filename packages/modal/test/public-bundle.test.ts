@@ -835,7 +835,12 @@ function completePublicSources(root: string, rowIds: string[]): Array<{ path: st
         tokens_used: "0",
         estimated_spend: "0",
         partial_pricing: false,
-        strategy_loops: 0
+        strategy_loops: 0,
+        audit_profile: "full",
+        audit_profile_catalog_digest: "a".repeat(64),
+        topology_digest: "b".repeat(64),
+        prompt_digest: "c".repeat(64),
+        expanded_graph_fingerprint: "d".repeat(64)
       },
       issues: [finding]
     });

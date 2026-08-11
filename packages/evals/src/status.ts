@@ -133,8 +133,8 @@ const LINKED_WORKFLOW_STATUS_VALUES = new Set<string>(EVAL_STATUS_LINKED_WORKFLO
 const TERMINAL_RUN_STATUSES = new Set<string>(TERMINAL_RUN_STATE_STATUSES);
 const COMPLETED_NODE_STATUSES = new Set<string>(TERMINAL_NODE_STATE_STATUSES);
 const MAX_VISIBLE_STATUS_NODES = 3;
-// Durable node IDs are valid up to 128 ASCII characters. Keep every valid ID
-// exact in the compact view and bound only malformed/future state values.
+// Preserve every durable node ID exactly in JSON while bounding only the
+// compact table representation.
 const MAX_VISIBLE_STATUS_NODE_ID_CHARACTERS = 128;
 const MAX_LINKED_WORKFLOW_IDS = 32;
 const AMBIGUOUS_LINKED_WORKFLOW_IDS = Symbol("ambiguous-linked-workflow-ids");

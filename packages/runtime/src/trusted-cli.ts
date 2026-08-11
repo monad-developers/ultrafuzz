@@ -87,13 +87,11 @@ export function prepareTrustedCliEnvironment(input: {
   }
   assertTrustedCliLauncher({ layout: input.layout, launcherPath });
 
-  const sourcePath = env.PATH ?? process.env.PATH ?? "";
   return {
     active: true,
     launcherPath,
     env: {
       ...env,
-      PATH: [trustedBin, sourcePath].filter((entry) => entry.length > 0).join(path.delimiter),
       [ULTRAFUZZ_TRUSTED_BIN_ENV]: trustedBin,
       [ULTRAFUZZ_VALIDATOR_BUILD_ENV]: VALIDATOR_BUILD_IDENTITY,
       [ULTRAFUZZ_SCHEMA_BUNDLE_SHA256_ENV]: artifactSchemaBundleDigest()

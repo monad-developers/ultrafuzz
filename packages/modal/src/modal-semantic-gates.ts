@@ -12,6 +12,7 @@ import {
   MODAL_NODE_RESTORE_SCHEMA_ID,
   MODAL_NODE_RESULT_SCHEMA_ID,
   MODAL_NODE_WORKER_ERROR_SCHEMA_ID,
+  MODAL_PINNED_HOLDOUT_SCHEMA_ID,
   MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID,
   MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID,
   MODAL_RECOVERY_LIFECYCLE_SCHEMA_ID,
@@ -30,6 +31,7 @@ import {
   type StrictModalNodeCheckpointDocument,
   type StrictModalNodeCheckpointIndexDocument,
   type StrictModalNodeResultDocument,
+  type StrictModalPinnedHoldoutDocument,
   type StrictModalPinnedSourceProofDocument,
   type StrictModalPublicBenchmarkBundleDocument,
   type StrictModalRecoveryLifecycleDocument,
@@ -56,6 +58,8 @@ export const IMPLEMENTED_MODAL_SEMANTIC_GATES = Object.freeze([
   "modal-launch-recovery-lineage",
   "modal-launch-active-recovery-uniqueness",
   "modal-node-checkpoint-index-sequence",
+  "modal-pinned-holdout-canonical",
+  "modal-pinned-source-holdout-lineage",
   "modal-pinned-source-ref-object-lineage",
   "modal-pinned-source-submodule-lineage",
   "modal-public-benchmark-bundle-uniqueness",
@@ -128,7 +132,9 @@ export const MODAL_SEMANTIC_GATES_BY_SCHEMA_ID = Object.freeze({
     "modal-execution-dependency-canonical-order",
     "modal-execution-dependency-smithers-executable"
   ],
+  [MODAL_PINNED_HOLDOUT_SCHEMA_ID]: ["modal-pinned-holdout-canonical"],
   [MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID]: [
+    "modal-pinned-source-holdout-lineage",
     "modal-pinned-source-ref-object-lineage",
     "modal-pinned-source-submodule-lineage"
   ],
@@ -237,6 +243,9 @@ export function assertModalDocumentSemantics<SchemaId extends ModalContractSchem
       return;
     case MODAL_EXECUTION_DEPENDENCY_MANIFEST_SCHEMA_ID:
       assertExecutionDependencyManifestSemantics(value as StrictModalExecutionDependencyManifestDocument);
+      return;
+    case MODAL_PINNED_HOLDOUT_SCHEMA_ID:
+      assertPinnedHoldoutSemantics(value as StrictModalPinnedHoldoutDocument);
       return;
     case MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID:
       assertPinnedSourceProofSemantics(value as StrictModalPinnedSourceProofDocument);
@@ -737,6 +746,16 @@ function assertExecutionDependencyManifestSemantics(manifest: StrictModalExecuti
 }
 
 function assertPinnedSourceProofSemantics(proof: StrictModalPinnedSourceProofDocument): void {
+  const holdout = proof.held_out;
+  if (holdout !== null) {
+    assertPinnedHoldoutSemantics(holdout);
+    if (holdout.commit !== proof.commit || holdout.tree !== proof.tree) {
+      fail("modal-pinned-source-holdout-lineage", "pinned hold-out result identity differs from the source proof");
+    }
+    if (holdout.source_commit === holdout.commit || holdout.source_tree === holdout.tree) {
+      fail("modal-pinned-source-holdout-lineage", "pinned hold-out did not change the source identity");
+    }
+  }
   const names = new Set<string>();
   let baseRefPresent = false;
   for (const reference of proof.refs) {
@@ -769,6 +788,27 @@ function assertPinnedSourceProofSemantics(proof: StrictModalPinnedSourceProofDoc
     if (!gitlinkPaths.includes(root)) fail(gate, `pinned submodule root is not a gitlink: ${root}`);
     if (roots.some((candidate, candidateIndex) => candidateIndex !== index && root.startsWith(`${candidate}/`))) {
       fail(gate, `pinned submodule roots overlap at ${root}`);
+    }
+  }
+}
+
+function assertPinnedHoldoutSemantics(holdout: StrictModalPinnedHoldoutDocument): void {
+  const gate = "modal-pinned-holdout-canonical";
+  if (!isStrictlyOrderedUniqueStrings(holdout.paths)) {
+    fail(gate, "pinned hold-out declarations are not unique and path-ordered");
+  }
+  const entryPaths = holdout.entries.map((entry) => entry.path);
+  if (!isStrictlyOrderedUniqueStrings(entryPaths)) {
+    fail(gate, "pinned hold-out entries are not unique and path-ordered");
+  }
+  for (const declared of holdout.paths) {
+    if (!entryPaths.some((entry) => entry === declared || entry.startsWith(`${declared}/`))) {
+      fail(gate, `pinned hold-out declaration matched no recorded entry: ${declared}`);
+    }
+  }
+  for (const entry of entryPaths) {
+    if (!holdout.paths.some((declared) => entry === declared || entry.startsWith(`${declared}/`))) {
+      fail(gate, `pinned hold-out entry is outside the declarations: ${entry}`);
     }
   }
 }

@@ -66,9 +66,9 @@ cannot be lost during priority filtering.
      continue in-process if sub-agent spawning or waiting fails.
    - Before spawning any sub-agent or doing broad implementation work, write
      initial versions of all required output artifacts that list the selected
-     properties, mark unimplemented entries as pending or deferred, use an
-     empty generated-test manifest, and use an empty findings array. Update
-     those artifacts as work progresses so timeout or interruption still leaves
+     properties, mark unimplemented entries as pending or deferred, and use the
+     schema-defined empty forms for generated tests and findings. Update those
+     artifacts as work progresses so timeout or interruption still leaves
      reviewable state.
    - If no properties match the threshold or carry a reference expectation, write empty implementation artifacts
      explaining that no selected properties were eligible.
@@ -132,57 +132,24 @@ Write structured implementation records to:
 
 {{artifact_dir}}/implemented-properties.json
 
-Use this exact top-level shape:
+Read the exact pinned schema at
+`{{schema_path}}/implemented-properties.schema.json`; it alone defines the
+JSON version, fields, types, enums, required members, and empty forms. After
+the final write, run the exact `ultrafuzz json validate` command rendered for
+this artifact in the central output contract.
 
-The example below uses `tests/`; replace that prefix with the detected
-repository test root when it uses `test/` instead.
-
-```json
-{
-  "schema_version": "ultrafuzz.implemented-properties.v3",
-  "selection": {
-    "priority_threshold": "{{invariant_property_priority_threshold}}",
-    "priorities": ["high"],
-    "property_ids": ["property-1"]
-  },
-  "properties": [
-    {
-      "property_id": "property-1",
-      "status": "implemented",
-      "implementation_paths": ["tests/recon/Properties.sol"],
-      "test_paths": ["tests/foundry/stateful-invariant-implement-properties/Property1.t.sol"]
-    }
-  ]
-}
-```
-
-The `selection` object is required for current runs. Set `priorities` to the
-exact configured priority set above and list every canonical ID in
+Set the schema-defined selection priorities to the exact configured priority
+set above and list every canonical ID in
 `properties.json` whose priority is in that set, plus every canonical ID with
 one or more `reference_expectations`, in catalog order. Emit one
 implementation record for every selected ID. A selected property that cannot
-be implemented must use `status` `blocked`, `pending`, or `deferred` and carry
-an actionable `blocker` object with this shape:
-
-```json
-{
-  "code": "missing-oracle",
-  "summary": "The target exposes no stable getter for the required value.",
-  "next_action": "Add a read-only harness oracle or document the source-backed blocker."
-}
-```
-
-`status` must be `implemented`, `pending`, `deferred`, or `blocked`. Include
-`implementation_paths` and `test_paths` on every record, using an empty array
-for either path field when no corresponding path exists. A selected property
-with one or more `reference_expectations` carries the complete expectation-ID
-array on its implementation record in the same order-independent set. Omit
-`reference_expectations` entirely when the property has none; do not emit an
-empty array. A
-`property_id` must exactly match a canonical ID in `properties.json`; dangling
-references fail artifact validation. Preserve generated and changed test paths
-in `test_paths` and invariant/helper implementation paths in
-`implementation_paths`.
+be implemented must carry an actionable typed blocker. Preserve every selected
+property's canonical ID exactly; dangling references fail contextual
+validation. Carry the complete expectation-ID set for a selected property when
+the source property has one, and do not invent an empty expectation set for a
+property that has none. Preserve generated and changed test paths separately
+from invariant/helper implementation paths. These selection, preservation,
+and cross-artifact joins remain required beyond JSON Schema.
 
 Every path on an `implemented` record is repository-relative, uses forward
 slashes, and lives under an allowed root: each `implementation_paths` entry must
@@ -195,28 +162,35 @@ helper, an absolute path, and any path through `.git`, `.ultrafuzz`,
 those roots, do not cite it: record the property as `blocked` with a `blocker`
 naming the suite location as the concrete obstacle. A record that is not
 `implemented` is never read for paths, so when its only paths sit under an
-unsupported root, leave its arrays empty and state the root in the blocker.
+unsupported root, cite no implementation or test paths and state the root in
+the blocker.
 
 Write a generated-test manifest to:
 
 {{artifact_dir}}/generated-tests.json
 
-List independently runnable tests and reproducers in `generated_tests`. List
-every imported non-runnable invariant/helper implementation, mock, fixture,
-script, or data dependency in `support_files`; do not misclassify those support
-files as runnable tests.
+Read the exact pinned schema at `{{schema_path}}/generated-tests.schema.json`.
+Classify independently runnable tests and reproducers as runnable and every
+imported invariant/helper implementation, mock, fixture, script, or data
+dependency as non-runnable support.
 
 Write structured findings to:
 
 {{output_findings_path}}
 
-Use an empty JSON array for findings unless property implementation itself
-finds a concrete production issue. Keep implementation-only blockers in
+Read the exact pinned schema at `{{schema_path}}/findings.schema.json`. Use its
+schema-defined empty form unless property implementation itself finds a
+concrete production issue. Keep implementation-only blockers in
 `implemented-properties.json`, not as production findings.
-When such a finding is caused by a catalog property, add a non-empty
-`property_ids` array containing its canonical ID or IDs. Omit `property_ids`
-for findings unrelated to a catalog property.
+When such a finding is caused by one or more catalog properties, preserve the
+exact canonical property attribution using the findings schema's property
+provenance representation. Use a stable union when several properties
+contribute, and do not invent property attribution for an unrelated finding.
 
 If you changed files in the isolated workspace, save a patch at:
 
 {{output_patch_path}}
+
+After all final JSON writes, run every exact `ultrafuzz json validate` command
+rendered in the central output contract. Correct any exit-1 artifact yourself
+and rerun its command after any later edit.

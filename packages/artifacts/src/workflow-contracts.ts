@@ -645,6 +645,7 @@ export const campaignSummarySchema = withDocumentMetadata(
   z.strictObject({
     schema_version: z.literal(CAMPAIGN_SUMMARY_SCHEMA_VERSION),
     outcome: z.enum(["complete", "partial", "blocked"]),
+    reason: nonEmptyString.max(4_000).optional(),
     implemented_property_suite_refs: uniqueStrings(1),
     campaign_plan_ref: nonEmptyString,
     backend_results: z.array(
@@ -1622,6 +1623,12 @@ export const reportSchema = withDocumentMetadata(
       expanded_graph_fingerprint: nonEmptyString,
       source_run_ids: uniqueStrings().optional()
     }),
+    campaign_outcome: z
+      .strictObject({
+        outcome: z.enum(["complete", "partial", "blocked"]),
+        reason: nonEmptyString.max(4_000).optional()
+      })
+      .optional(),
     issues: z.array(reportIssueSchema),
     non_production_outcomes: z.array(reportNonProductionOutcomeSchema),
     property_provenance: z.array(reportPropertyProvenanceSchema),

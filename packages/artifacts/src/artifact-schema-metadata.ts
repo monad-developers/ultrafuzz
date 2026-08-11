@@ -347,6 +347,7 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
   "report.schema.json": artifact("ultrafuzz/report@2", "reportJsonSchema", "reportSchema", [
     "report-finding-evidence-span-consistency",
     "report-finding-id-uniqueness",
+    "report-campaign-outcome-authority",
     "report-severity-classification-preservation",
     "report-property-provenance-join"
   ]),

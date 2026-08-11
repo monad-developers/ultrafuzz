@@ -2714,7 +2714,14 @@ function loadProducerFreeSemanticContextHarness(): (
   },
   output: { path: string; schemaFile: string },
   verifiedOutputs: ReadonlyMap<string, { artifactRoot: string }>
-) => { artifactSet?: { propertyCatalog?: unknown; implementedProperties?: unknown } } {
+) => {
+  artifactSet?: {
+    campaignSummary?: unknown;
+    campaignSummaryPath?: string;
+    propertyCatalog?: unknown;
+    implementedProperties?: unknown;
+  };
+} {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function semanticGateContextForVerifiedOutput");
   const helperEnd = source.indexOf("\n\nfunction verifyOutputSemanticGates", helperStart);
@@ -2757,6 +2764,7 @@ test("generated semantic contexts match host semantics when property producers a
 
   const report = contextFor(task, { path: "custom/report.json", schemaFile: "report.schema.json" }, verifiedOutputs);
   assert.deepEqual(report.artifactSet, {
+    campaignSummary: null,
     propertyCatalog: { schema_version: PROPERTIES_SCHEMA_VERSION, properties: [] },
     implementedProperties: {
       schema_version: IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
@@ -3082,6 +3090,12 @@ function loadGeneratedReviewContextProjectionHarness(): (
       if (contract === "ultrafuzz/triaged-findings@1") {
         return { path: "custom/triaged.json", value: triagedFindings };
       }
+      if (contract === "ultrafuzz/campaign-summary@2") {
+        return {
+          path: "custom/campaign-summary.json",
+          value: { outcome: "blocked", reason: "recon was unavailable" }
+        };
+      }
       return undefined;
     },
     () => undefined,
@@ -3125,6 +3139,8 @@ test("generated semantic context projects every required review authority field"
     });
   }
   assert.deepEqual(context("report.schema.json"), {
+    campaignSummary: { outcome: "blocked", reason: "recon was unavailable" },
+    campaignSummaryPath: "custom/campaign-summary.json",
     propertyCatalog: { schema_version: PROPERTIES_SCHEMA_VERSION, properties: [] },
     implementedProperties: {
       schema_version: IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
@@ -3881,6 +3897,62 @@ test("runtime workspace patch publication replaces empty placeholders but reject
 test("generated Smithers workflow prefers its relocatable task prompt path", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   assert.match(source, /const promptPath = task\.promptPath \?\? inputTask\?\.prompt_path/u);
+});
+
+test("generated local and cloud prompt relocation preserves quoted validation-command paths", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function relocatePromptPath");
+  const helperEnd = source.indexOf("\n\nfunction verifiedDependencyJsonArtifact", helperStart);
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  const relocatePromptPath = new Function(`${helper}; return relocatePromptPath;`)() as (
+    prompt: string,
+    sourcePath: string,
+    destinationPath: string
+  ) => string;
+
+  const controllerRoot = "/tmp/owner's-project";
+  const cloudRoot = "/workspace/cloud's-project";
+  const controllerArtifactDir = `${controllerRoot}/.ultrafuzz/runs/run-1/artifacts/task-0`;
+  const encodedControllerRoot = controllerRoot.replaceAll("'", `'"'"'`);
+  const rendered = [
+    `- Path: \`${controllerArtifactDir}/findings.json\``,
+    `  Validate against: \`${controllerRoot}/.ultrafuzz/workspaces/task-0/.ultrafuzz/schemas/findings.schema.json\``,
+    `  Validation command: \`ultrafuzz json validate --schema '${encodedControllerRoot}/.ultrafuzz/workspaces/task-0/.ultrafuzz/schemas/findings.schema.json' --file '${encodedControllerRoot}/.ultrafuzz/runs/run-1/artifacts/task-0/findings.json'\``
+  ].join("\n");
+
+  for (const [label, taskArtifactDir, mirroredTaskArtifactDir, destinationRoot, expectedArtifactDir] of [
+    [
+      "local",
+      controllerArtifactDir,
+      `${controllerRoot}/.ultrafuzz/runs/run-1/workspaces/task-0/artifacts/task-0`,
+      controllerRoot,
+      `${controllerRoot}/.ultrafuzz/runs/run-1/workspaces/task-0/artifacts/task-0`
+    ],
+    [
+      "cloud",
+      ".ultrafuzz/runs/run-1/artifacts/task-0",
+      ".ultrafuzz/runs/run-1/workspaces/task-0/artifacts/task-0",
+      cloudRoot,
+      `${cloudRoot}/.ultrafuzz/runs/run-1/workspaces/task-0/artifacts/task-0`
+    ]
+  ] as const) {
+    let relocated = relocatePromptPath(rendered, taskArtifactDir, mirroredTaskArtifactDir);
+    relocated = relocatePromptPath(relocated, controllerRoot, destinationRoot);
+    const encodedDestinationRoot = destinationRoot.replaceAll("'", `'"'"'`);
+    const encodedExpectedArtifactDir = expectedArtifactDir.replaceAll("'", `'"'"'`);
+
+    assert.ok(relocated.includes(expectedArtifactDir), `${label}: ${relocated}`);
+    assert.ok(
+      relocated.includes(`--schema '${encodedDestinationRoot}/.ultrafuzz/workspaces/task-0`),
+      `${label}: ${relocated}`
+    );
+    assert.ok(relocated.includes(`--file '${encodedExpectedArtifactDir}/findings.json'`), `${label}: ${relocated}`);
+    assert.equal(relocated.includes(`--file '${encodedControllerRoot}/.ultrafuzz/runs/run-1/artifacts`), false, label);
+  }
 });
 
 test(

@@ -16,8 +16,8 @@ property-catalog handoffs. When no rendered path is provided for one of those
 optional handoffs, do not treat its absence as an error: use the retained
 project discovery, actor/flow analysis, and target source directly. Prefer
 target-native tests when practical, record unavailable harness validation as
-blocked, and still emit every required artifact with valid empty arrays when
-no result can be supported.
+blocked, and still emit every required artifact using its schema-defined empty
+form when no result can be supported.
 
 Read these handoff artifacts before authoring tests:
 
@@ -145,5 +145,6 @@ specification questions, and coverage gaps. Every referenced generated test
 must be one this node actually authored. These source, test, and cross-artifact
 relationships are contextual requirements beyond JSON Schema.
 
-Write structured findings to {{output_findings_path}}. Use an empty JSON array
-if no finding is confirmed.
+Write structured findings to {{output_findings_path}}. If no finding is
+confirmed, use only the empty form defined by the exact pinned schema in the
+central output contract.

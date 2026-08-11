@@ -105,6 +105,7 @@ test("the composed CLI registry includes dashboard and runtime contract owners",
         entry.id
       );
       assert.equal(registry.bundleByFilename.get(entry.filename), bundle, entry.filename);
+      assert.equal(registry.bundleByDigest.get(entry.sha256), bundle, entry.sha256);
     }
   }
 });
@@ -188,6 +189,29 @@ test("CLI result v2 rejects legacy, open, and mistyped envelopes", () => {
   for (const candidate of invalid) {
     assert.equal(validateCliResultEnvelope(candidate).ok, false, JSON.stringify(candidate));
   }
+});
+
+test("topology show accepts its source while remaining closed", () => {
+  const envelope = {
+    schema_version: CLI_SCHEMA_VERSION,
+    command: "topology show",
+    ok: true,
+    diagnostics: [],
+    data: {
+      id: "smoke",
+      description: "A smoke topology",
+      topology_path: "topologies/smoke.yml",
+      logical_nodes: 3,
+      digest: "a".repeat(64),
+      source: "version: 1\n"
+    }
+  };
+
+  assert.equal(validateCliResultEnvelope(envelope).ok, true);
+  assert.equal(validateCliResultEnvelope({ ...envelope, data: { ...envelope.data, unexpected: true } }).ok, false);
+  const missingSource = { ...envelope.data } as Partial<typeof envelope.data>;
+  delete missingSource.source;
+  assert.equal(validateCliResultEnvelope({ ...envelope, data: missingSource }).ok, false);
 });
 
 test("unknown Oclif invocation failures remain closed and value-free", () => {

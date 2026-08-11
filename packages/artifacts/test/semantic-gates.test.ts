@@ -1529,6 +1529,31 @@ test("offline schema execution never claims contextual gates passed", () => {
   }
 });
 
+test("report campaign outcome authority distinguishes absent campaigns from untrusted status", () => {
+  assert.equal(
+    executeSemanticGate("report-campaign-outcome-authority", {
+      document: {},
+      context: { artifactSet: { campaignSummary: null } }
+    }).status,
+    "passed"
+  );
+  assert.equal(
+    executeSemanticGate("report-campaign-outcome-authority", {
+      document: { campaign_outcome: { outcome: "blocked" } },
+      context: { artifactSet: { campaignSummary: null } }
+    }).status,
+    "failed"
+  );
+  const missingReason = executeSemanticGate("report-campaign-outcome-authority", {
+    document: { campaign_outcome: { outcome: "partial" } },
+    context: { artifactSet: { campaignSummary: { outcome: "partial", reason: "deadline elapsed" } } }
+  });
+  assert.equal(missingReason.status, "failed");
+  assert.deepEqual(missingReason.status === "failed" ? missingReason.issues : [], [
+    { path: "$.campaign_outcome.reason", message: "Report campaign reason does not match the campaign summary" }
+  ]);
+});
+
 test("generated-test filesystem gate rejects cumulative actual bytes before reading companions", (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-test-bounds-"));
   try {
@@ -2775,6 +2800,19 @@ test("every contextual registration executes real positive and negative checks",
             implementedProperties: {
               properties: [{ property_id: "a", implementation_paths: ["impl"], test_paths: ["test"] }]
             }
+          }
+        }
+      },
+      "report-campaign-outcome-authority": {
+        positive: {
+          campaign_outcome: { outcome: "blocked", reason: "recon was unavailable" }
+        },
+        negative: {
+          campaign_outcome: { outcome: "complete", reason: "recon was unavailable" }
+        },
+        context: {
+          artifactSet: {
+            campaignSummary: { outcome: "blocked", reason: "recon was unavailable" }
           }
         }
       },

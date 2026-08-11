@@ -264,7 +264,7 @@ function matchesPinnedHoldout(targetPath: string, ref: string, head: string): bo
   let record: unknown;
   try {
     if (!fs.statSync(recordPath).isFile()) return false;
-    record = JSON.parse(fs.readFileSync(recordPath, "utf8"));
+    record = readStrictJsonFile(recordPath, 1024 * 1024);
   } catch {
     return false;
   }
@@ -287,8 +287,8 @@ export function evalRunRoot(projectRoot: string, evalRunId: string): string {
   );
 }
 
-function readStrictJsonFile(filePath: string): unknown {
-  return parseStrictJsonBytes(readRegularFileSnapshot(filePath, 64 * 1024 * 1024));
+function readStrictJsonFile(filePath: string, maximumBytes = 64 * 1024 * 1024): unknown {
+  return parseStrictJsonBytes(readRegularFileSnapshot(filePath, maximumBytes));
 }
 
 export function roundMetric(value: number): number {

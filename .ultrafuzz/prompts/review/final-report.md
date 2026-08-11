@@ -43,26 +43,22 @@ Read these review handoffs before writing the report:
 Aggregation manifest:
 `{{artifact_path:aggregate-test-files}}/aggregation.json`
 
-`aggregation.json` is a JSON object, not a top-level array. It contains copied
-generated test metadata under `files` and may contain support-file metadata
-under `support_files`; `source_bundles` is the complete authenticated producer
-summary, including empty or wholly skipped bundles. Use `files[]` when matching
-generated or copied test destinations. Copied rows use exact `size_bytes` and
-`sha256` fields and bind their source with `source_attempt_id`,
-`source_manifest_relative_path`, and `source_manifest_sha256`. Preserve and use
-each copied record's `language` and `provenance` when present. Framework is a
-required whole-bundle identity on the matching `source_bundles` record,
-including for empty bundles; copied and skipped entry rows do not repeat it.
-Join by the exact source bundle identity and never infer a framework from a file
-extension or mix rows from bundles with different frameworks. Do not iterate
-over the whole object as an array because that will walk scalar summary fields.
+Validate it against the exact pinned
+`{{schema_path}}/aggregation-manifest.schema.json`; that schema alone defines
+its JSON shape. Use copied runnable-test rows when matching generated or copied
+destinations. Bind each row through its exact authenticated source-bundle and
+manifest identity, preserve its byte size, digest, language, and provenance,
+and never infer a framework from an extension or mix different bundles. These
+joins and byte-preservation rules are contextual requirements beyond JSON
+Schema.
 
 Severity-classified findings:
 `{{artifact_path:severity-classification}}/severity-classified-findings.json`
 
-The severity artifact is exactly the top-level array defined by
-`ultrafuzz/severity-classified-findings@1`. Reject an object wrapper or any
-legacy spelling.
+Validate the severity artifact against the exact pinned
+`{{schema_path}}/severity-classified-findings.schema.json`; that schema alone
+defines its JSON shape. Preserve its complete ordered finding population and
+never substitute a legacy or converted artifact.
 
 Strategy detection provenance:
 `{{artifact_path:severity-classification}}/strategy-detections.json`
@@ -93,13 +89,25 @@ Implemented property records:
 Invariant campaign results:
 `{{artifact_path:stateful-invariant-campaign}}/recon-fuzzer-results.json`
 
-These three files form the provenance join from a finding's `property_ids` to
-its canonical properties, source lens rows, implementation/test paths, and
-recorded fuzzer backends. Treat references to an unknown canonical property as
-an invalid current-run artifact. Every declared current-run provenance handoff
-and every `property_ids` lineage needed for the join must be present and valid.
-If one is absent or cannot be joined exactly, stop with validation failure; do
-not guess, repair, or render a historical compatibility value.
+Authoritative invariant campaign summary:
+`{{artifact_path:stateful-invariant-campaign}}/campaign-summary.json`
+
+The catalog, implementation records, and campaign results form the provenance
+join from a finding's `property_ids` to its canonical properties, source lens
+rows, implementation/test paths, and recorded fuzzer backends. Treat references
+to an unknown canonical property as an invalid current-run artifact. Every
+declared current-run provenance handoff and every `property_ids` lineage needed
+for the join must be present and valid. If one is absent or cannot be joined
+exactly, stop with validation failure; do not guess, repair, or render a
+historical compatibility value.
+
+When the topology declares the authoritative campaign summary, validate it
+against `{{schema_path}}/campaign-summary.schema.json` and copy its `outcome`
+and its `reason` when present, exactly as parsed JSON values, into the report's
+`campaign_outcome`. When no campaign-summary ancestor is declared, omit
+`campaign_outcome`. Never infer an outcome from backend logs, findings, missing
+files, or an agent-authored fallback. This authoritative ancestor join is
+semantic and remains required in addition to report-schema validation.
 
 Use these setup handoffs:
 
@@ -457,26 +465,10 @@ human-readable Strategy section. Do not call this metric Temperature.
 Add `## Property implementation coverage` after the production issue entries
 and before `## Property provenance`. The runtime supplies the authoritative
 current-run value in this prompt. Copy that JSON value exactly; do not derive,
-repair, normalize, omit, or convert it. When the topology declares the
-property-implementation track, `property_implementation_coverage` has this
-exact tracked shape:
-
-```json
-{
-  "priority_threshold": "medium",
-  "priorities": ["high", "medium"],
-  "selected_property_ids": ["property-1", "property-2"],
-  "implemented_property_ids": ["property-1"],
-  "blocked_property_ids": [],
-  "pending_property_ids": [],
-  "deferred_property_ids": ["property-2"],
-  "reference_expected_property_ids": ["property-1"],
-  "reference_expectation_ids": ["scfuzzbench:example:expectation-1"],
-  "blocker_summaries": [
-    "property-2: The handler cannot observe the premium delta returned by the Hub."
-  ]
-}
-```
+repair, normalize, omit, or convert it. The exact pinned
+`{{schema_path}}/report.schema.json` alone defines the tracked and not-planned
+JSON variants. When the topology declares the property-implementation track,
+preserve the runtime-supplied tracked value.
 
 Use the canonical catalog order for every ID array. Keep the arrays as the
 machine-readable source of truth; counts in Markdown must match them exactly.
@@ -485,24 +477,17 @@ corresponding canonical property ID in `reference_expected_property_ids` and
 every distinct expectation identifier in `reference_expectation_ids`, in
 catalog order. Preserve these arrays even when the property priority is below
 the configured threshold.
-Include `blocker_summaries` for selected records whose status is `blocked`,
-`pending`, or `deferred`. Every element is a plain string, never an object:
-write each one as `<property-id>: <the record's blocker summary text>`, in
-canonical catalog order. Copy that summary text verbatim from the handoff
-record's `blocker.summary` — do not shorten, rephrase, re-punctuate, or
-re-case it. The typed blocker's other fields stay in the handoff record; do not
-copy the blocker object into the report.
+For every selected record whose status is `blocked`, `pending`, or `deferred`,
+preserve its blocker summary in `blocker_summaries` as
+`<property-id>: <the record's blocker summary text>`, in canonical catalog
+order. Copy that summary text verbatim from the handoff record's
+`blocker.summary` — do not shorten, rephrase, re-punctuate, or re-case it. The
+typed blocker's other fields stay in the handoff record; do not copy the blocker
+object into the report.
 When the current topology does not declare a property-implementation track,
-the authoritative value instead has this exact typed shape:
+preserve the runtime-supplied schema-defined not-planned value exactly.
 
-```json
-{
-  "status": "not-planned",
-  "reason": "property-implementation-track-not-declared"
-}
-```
-
-Render that variant in Markdown as exactly:
+Render that runtime value in Markdown as exactly:
 
 ```markdown
 - Status: `not-planned`
@@ -534,18 +519,19 @@ Blocker summaries:
 ```
 
 Join `Included priorities` with `<br>`, and write `unavailable` in the backticks
-when the threshold or priorities are missing. Each count is the length of the
-JSON array with the matching name, except `Reference expectation properties`,
-which counts `reference_expected_property_ids`. Introduce the blocker list with
-a line reading exactly `Blocker summaries:`, then one `- ` bullet per element of
-`blocker_summaries`, in the same order as the JSON, with no blank line between
-the heading and the first bullet: the list ends at the first line that is not a
-`- ` bullet. Omit the heading and the list entirely when there are no blockers.
+when the threshold or priorities are unavailable. Derive each count from the
+corresponding schema-defined collection in the authoritative coverage value;
+`Reference expectation properties` counts the properties carrying a reference
+expectation. Introduce the blocker list with a line reading exactly `Blocker summaries:`.
+Then write one `- ` bullet per authoritative blocker summary, in the same order
+as the coverage value, with no blank line between the heading and the first
+bullet: the list ends at the first line that is not a `- ` bullet. Omit the
+Markdown heading and list when the authoritative value has no blockers.
 
-Write each blocker bullet as the JSON string itself. Collapsing runs of
-whitespace to single spaces is fine; rewording, truncating, or re-punctuating it
-is not. Markdown-escaping the special characters is accepted but not required,
-so a summary naming `_beforeTokenTransfer` may appear either as
+Write each blocker bullet from the exact corresponding blocker-summary value.
+Collapsing runs of whitespace to single spaces is fine; rewording, truncating,
+or re-punctuating it is not. Markdown-escaping the special characters is
+accepted but not required, so a summary naming `_beforeTokenTransfer` may appear either as
 `- property-2: _beforeTokenTransfer reverts` or as
 `- property-2: \_beforeTokenTransfer reverts`.
 
@@ -554,19 +540,20 @@ property-derived production or non-production finding, render one concise table
 row containing:
 
 - its final finding ID/title;
-- canonical property ID or IDs from `property_ids`;
+- every canonical property ID established by the joined property lineage;
 - every source `source_node_id` and `source_property_id` joined from
   `properties.json`;
 - the union of `implementation_paths` and `test_paths` joined from
   `implemented-properties.json`;
 - every originating backend recorded for the same stable finding ID in
-  `recon-fuzzer-results.json`. When no campaign backend is known, render
-  `unavailable` in the Markdown table only; omit both backend fields from the
-  JSON provenance entry.
+  `recon-fuzzer-results.json`, preserving the exact backend union through the
+  report schema's backend-provenance representation. When no campaign backend
+  is known, render `unavailable` in the Markdown table and do not invent JSON
+  backend evidence.
 
 Use table columns `Finding`, `Property IDs`, `Source nodes`, `Source property
 IDs`, `Implementation/test paths`, and `Fuzzer backends`. Do not add a row for a
-finding with no `property_ids`; it is a valid non-property finding. If current
+finding with no joined canonical property lineage; it is a valid non-property finding. If current
 artifacts contain no property-derived findings, write `No property-derived
 findings.` Missing or unjoinable current-run lineage is a validation failure;
 do not render `unavailable`, continue, or guess.
@@ -594,63 +581,39 @@ reported.` before the Property implementation coverage section.
 
 Save the human-readable report to `{{artifact_path}}/report.md`.
 
-## Required JSON Shape
+## Structured report semantics
 
-Also save `{{artifact_path}}/report.json` as structured JSON for the CLI. Include
-`schema_version`, a `run_metadata` object matching the public Run summary
-fields, a production `issues` array, a `non_production_outcomes` array, and
-`property_provenance`.
+Also save `{{artifact_path}}/report.json` as structured JSON for the CLI. Read
+the exact pinned `{{schema_path}}/report.schema.json`; it alone defines the JSON
+version, fields, types, enums, required members, optional members, and empty
+forms. After the final write, run the exact `ultrafuzz json validate` command
+rendered for this artifact in the central output contract.
 
-Set top-level `schema_version` to exactly `"ultrafuzz.report.v2"`.
-`run_metadata` contains exact keys `run_id`, `source_run_id`, `repository`,
-`elapsed_time`, `models_used` (array), `tokens_used`, `estimated_spend`,
-`partial_pricing`, and non-negative integer `strategy_loops`; optional
-`source_run_ids` is a unique array.
+Copy run identity, repository, elapsed time, model, token, pricing, loop, and
+audit-policy metadata from the authoritative run record. Preserve each exact
+value used in the Markdown Run summary and never synthesize a missing value.
 
-`property_provenance` must be an array with one
-object per property-derived finding. Each object contains `finding_id`,
-`title`, non-empty `property_ids`, `sources` entries with `source_node_id` and
-`source_property_id`, `implementation_paths`, and `test_paths`. Use
-`fuzzer_backend` when exactly one backend produced the finding, or a unique
-sorted `fuzzer_backends` array when several backends produced the same stable
-finding ID. Never emit both fields. When no known campaign backend produced the
-finding, omit both. Use stable unions when several properties contribute and
-an empty array when there are no property-derived findings. Do not emit a
-historical `"unavailable"` compatibility value.
-
-Each production issue object must satisfy canonical finding v2. Include
-`schema_version: "ultrafuzz.finding.v2"`, `id`, `title`, `status`,
-`severity_guess`, `confidence`, and `summary`, copied byte-for-byte from the
-severity-classified finding.
+Emit one property-provenance record per property-derived finding, joined to its
+canonical property sources and implementation/test paths. Preserve the complete
+set of campaign backends that produced the stable finding, uniquely and in
+deterministic order. The pinned report schema alone defines how zero, one, or
+several producing backends are represented; never invent a backend or use a
+historical compatibility value. Use stable unions when several properties
+contribute and emit no property-provenance records when there are no
+property-derived findings.
 
 Copy every field the severity-classified finding already carries into its
 `report.json` issue object byte-for-byte, including `summary`,
 `recommended_next_action`, `family_variants` and their nested summaries,
 `severity`, `impact`, `likelihood`, `evidence`, and `strategy_provenance` when
 the upstream finding has it. You may only ADD fields the upstream finding does
-not carry, such as `description`, `proof_of_concept`, and `lifecycle`.
-Rewriting, retitling, tightening, or re-voicing a copied field fails the report;
-put your own wording in `report.md` and in the fields you add. Also include the
-report-specific fields `description`, `severity`, `likelihood`, `impact`, and
-`proof_of_concept`, plus `family_id`, `family_variants`, and `related_findings`
-when those fields are available. Keep the canonical `strategy` field a non-empty originating strategy
-name when one is available. The structured `strategy_provenance` object must
-contain the canonical non-empty `detection_rates` array. Do not emit the removed
-`strategies` alias. Every array element contains exactly non-empty `strategy`,
-non-negative integer `detections`, and positive integer `configured_loops`.
-Optional `attempts` use the canonical strategy-hit fields.
-
-For example, this is a canonical renderable value:
-
-```json
-{
-  "strategy_provenance": {
-    "detection_rates": [
-      { "strategy": "boundary-tests", "detections": 2, "configured_loops": 8 }
-    ]
-  }
-}
-```
+not carry, using only report-owned additions admitted by the pinned report
+schema. Rewriting, retitling, tightening, or re-voicing a copied field fails
+the report; put your own wording in `report.md` and in schema-admitted fields
+you add. Keep the canonical originating strategy name when one is available.
+Derive structured detection rates from the exact strategy hits and configured
+loop counts, and preserve optional attempt provenance from the canonical hit
+records. Do not emit removed or compatibility aliases.
 
 Keep any additional loop-attempt provenance only in the fields admitted by the
 schema. `severity_guess` remains the upstream preliminary estimate and need not
@@ -662,23 +625,18 @@ never insert it into or remove it from the JSON `title`.
 
 In every `report.json` evidence object, keep `path` as a safe relative base path
 without selectors and preserve independent `detail` prose exactly. Put section
-anchors in `fragment`. Represent one source span with positive integer `line`
-and optional `end_line`. Use `line_ranges` only for at least two disjoint spans;
-never emit a one-entry `line_ranges`, and never combine `line_ranges` with
-`line` or `end_line`. Sort `line_ranges` by ascending `line`; the spans must not
-touch or overlap, so each entry's `line` must be greater than the previous
-entry's `line` and greater than the previous entry's `end_line`. Cite the
-earliest span first even when the later one is the interesting one. The same
-ordering applies to `line_ranges` inside `family_variants` evidence, and
-`ultrafuzz json validate` does not check it.
+anchors in `fragment`. For every schema-admitted multi-span citation, sort the
+spans by their starting line, require them not to touch or overlap, and cite the
+earliest span first even when a later one is the interesting one. Apply the
+same ordering to family-variant evidence. These ordering rules are not checked
+by `ultrafuzz json validate`.
 
-Each non-production outcome is also a canonical finding v2 object and preserves
-machine-readable `triage_classification`, `status`, evidence, strategy
-provenance, and `recommended_next_action`. Both production issues and non-production outcomes
-must include a `lifecycle` object copied from the matching ledger record with
-`dedupe_key`, `source_artifacts`, `strategy_hits`, `triage_classification`,
-`triage_reason`, `demotion_reason`, `final_disposition`, and
-`comparison_disposition` when those fields are present.
+Each non-production outcome preserves its complete normalized finding,
+classification, status, evidence, strategy provenance, and recommended next
+action. Both production and non-production rows must copy the complete matching
+lifecycle record exactly, including every optional field that is actually
+present. These preservation, ordering, and cross-artifact joins are contextual
+requirements beyond JSON Schema.
 
 Before finishing, verify that:
 
@@ -700,29 +658,28 @@ Before finishing, verify that:
 - Production issue Impact and Likelihood bullets each begin with exactly High,
   Medium, or Low followed by a colon.
 - Every production issue severity equals the Impact x Likelihood matrix result.
-- `report.json` contains `schema_version`, `run_metadata`, `issues`, and
-  `non_production_outcomes`, plus `property_provenance` as an array.
-- Every `report.json` production issue satisfies canonical finding v2,
-  including `schema_version`, `id`, `title`, `status`,
-  `severity_guess`, `confidence`, and `summary`.
+- `report.json` passes the exact rendered validation command for its pinned
+  schema.
+- Every `report.json` production issue preserves the complete normalized
+  severity-classified finding before adding report-owned fields.
 - Every `report.json` production issue reproduces every field of its
   severity-classified source byte-for-byte, including `summary`,
   `recommended_next_action`, and `family_variants`, and adds only fields that
   source does not carry.
-- Every severity-classified finding you render carries a top-level `dedupe_key`
-  matching its lifecycle record.
+- Every severity-classified finding you render has a `dedupe_key` exactly equal
+  to its lifecycle record's corresponding value.
 - Every `line_ranges` array is sorted by ascending `line`, with each entry's
   `line` greater than the previous entry's `end_line`.
-- Every `report.json` production issue keeps canonical `strategy` as a string
-  when present and stores structured strategy details in `strategy_provenance`.
+- Every `report.json` production issue preserves the canonical originating
+  strategy value when present and keeps its structured strategy details.
 - `report.md` contains `## Property provenance`, including every
   property-derived finding and no invented property IDs for non-property
   findings.
 - `report.md` contains `## Property implementation coverage` with counts that
-  match the authoritative tracked value, or the exact typed `not-planned`
-  rendering when the current topology has no property-implementation track.
-- `report.json.property_implementation_coverage` is required and is either the
-  exact authoritative tracked object or the exact typed `not-planned` object.
+  match the authoritative tracked value, or the exact runtime-supplied
+  not-planned rendering when the current topology has no implementation track.
+- `report.json` exactly preserves the runtime-supplied authoritative property
+  implementation coverage value.
 - `report.json.run_metadata.tokens_used` and
   `report.json.run_metadata.estimated_spend` match the values rendered in
   `report.md`, and preserve the exact cumulative accounting values from

@@ -73,6 +73,11 @@
     { "$ref": "#/$defs/evalHistoryCommand" },
     { "$ref": "#/$defs/evalPublishCommand" },
     { "$ref": "#/$defs/evalAnalyzeCommand" },
+    { "$ref": "#/$defs/configAuditProfileCommand" },
+    { "$ref": "#/$defs/configAuditProfilesCommand" },
+    { "$ref": "#/$defs/topologyListCommand" },
+    { "$ref": "#/$defs/topologyShowCommand" },
+    { "$ref": "#/$defs/topologyCopyCommand" },
     { "$ref": "#/$defs/unknownInvocationFailure" }
   ],
   "$defs": {
@@ -120,7 +125,12 @@
         "eval analyze table",
         "eval analyze cost",
         "eval analyze pairwise",
-        "eval analyze all"
+        "eval analyze all",
+        "config audit-profile",
+        "config audit-profiles",
+        "topology list",
+        "topology show",
+        "topology copy"
       ]
     },
     "diagnostic": {
@@ -223,6 +233,11 @@
           "additionalProperties": false,
           "required": [
             "schema_version",
+            "audit_profile",
+            "audit_profile_catalog_digest",
+            "audit_profile_effective_settings",
+            "audit_profile_setting_origins",
+            "audit_profile_overridden_settings",
             "default_agent",
             "output_dir",
             "triage_quorum",
@@ -231,6 +246,32 @@
           ],
           "properties": {
             "schema_version": { "const": "ultrafuzz.config.v2" },
+            "audit_profile": {
+              "$ref": "urn:ultrafuzz:schema:config:resolved-config:2#/$defs/auditProfileId"
+            },
+            "audit_profile_catalog_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "audit_profile_topology_path": {
+              "$ref": "urn:ultrafuzz:schema:config:resolved-config:2#/$defs/packagedTopologyPath"
+            },
+            "audit_profile_effective_settings": {
+              "$ref": "urn:ultrafuzz:schema:config:resolved-config:2#/$defs/auditProfileSettings"
+            },
+            "audit_profile_setting_origins": {
+              "type": "object",
+              "propertyNames": {
+                "$ref": "urn:ultrafuzz:schema:config:resolved-config:2#/$defs/auditProfileSettingName"
+              },
+              "additionalProperties": {
+                "$ref": "urn:ultrafuzz:schema:config:resolved-config:2#/$defs/auditProfileSettingOrigin"
+              }
+            },
+            "audit_profile_overridden_settings": {
+              "type": "array",
+              "items": {
+                "$ref": "urn:ultrafuzz:schema:config:resolved-config:2#/$defs/auditProfileSettingName"
+              },
+              "uniqueItems": true
+            },
             "default_agent": { "type": "string" },
             "default_model": { "type": "string" },
             "default_reasoning": { "type": "string" },
@@ -244,11 +285,18 @@
         "topology": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["path", "logical_nodes", "expanded_nodes"],
+          "required": ["path", "logical_nodes", "expanded_nodes", "required_commands"],
           "properties": {
             "path": { "type": "string" },
             "logical_nodes": { "$ref": "#/$defs/nonNegativeInteger" },
-            "expanded_nodes": { "$ref": "#/$defs/nonNegativeInteger" }
+            "expanded_nodes": { "$ref": "#/$defs/nonNegativeInteger" },
+            "origin": { "enum": ["project-default", "audit-profile", "project-config", "runtime-override"] },
+            "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "required_commands": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "uniqueItems": true
+            }
           }
         },
         "prompts": {
@@ -537,6 +585,10 @@
         "mode": { "enum": ["run", "resume", "replay", "fork"] },
         "workflow_ids": { "$ref": "#/$defs/stringArray" },
         "redacted_config_fingerprint": { "type": "string" },
+        "prompt_digest": { "$ref": "urn:ultrafuzz:schema:artifacts:run-metadata:2#/$defs/sha256" },
+        "audit_profile": {
+          "$ref": "urn:ultrafuzz:schema:artifacts:run-metadata:2#/properties/audit_profile"
+        },
         "forge_guard": { "$ref": "urn:ultrafuzz:schema:artifacts:run-metadata:2#/$defs/forgeGuard" },
         "workflow": {
           "type": "object",
@@ -687,7 +739,8 @@
               "name": { "type": "string" },
               "required": { "type": "boolean" },
               "available": { "type": "boolean" },
-              "path": { "type": ["string", "null"] }
+              "path": { "type": ["string", "null"] },
+              "version": { "type": ["string", "null"] }
             }
           }
         },
@@ -1435,6 +1488,152 @@
         "outputs": { "$ref": "#/$defs/stringArray" }
       }
     },
+    "auditProfileData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "description",
+        "intended_use",
+        "default",
+        "catalog_schema_version",
+        "catalog_digest",
+        "declared_topology_path",
+        "effective_topology_path",
+        "topology_path_origin",
+        "topology_digest",
+        "profile_settings",
+        "effective_settings",
+        "setting_origins",
+        "overridden_settings"
+      ],
+      "properties": {
+        "id": { "$ref": "urn:ultrafuzz:schema:config:resolved-config:2#/$defs/auditProfileId" },
+        "description": { "type": "string", "minLength": 1 },
+        "intended_use": { "type": "string", "minLength": 1 },
+        "default": { "type": "boolean" },
+        "catalog_schema_version": { "const": 1 },
+        "catalog_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "declared_topology_path": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "urn:ultrafuzz:schema:config:resolved-config:2#/$defs/packagedTopologyPath" }
+          ]
+        },
+        "effective_topology_path": { "type": "string", "minLength": 1 },
+        "topology_path_origin": {
+          "enum": ["project-default", "audit-profile", "project-config", "runtime-override"]
+        },
+        "topology_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "profile_settings": {
+          "$ref": "urn:ultrafuzz:schema:config:resolved-config:2#/$defs/auditProfileSettings"
+        },
+        "effective_settings": {
+          "$ref": "urn:ultrafuzz:schema:config:resolved-config:2#/$defs/auditProfileSettings"
+        },
+        "setting_origins": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "urn:ultrafuzz:schema:config:resolved-config:2#/$defs/auditProfileSettingName"
+          },
+          "additionalProperties": {
+            "$ref": "urn:ultrafuzz:schema:config:resolved-config:2#/$defs/auditProfileSettingOrigin"
+          }
+        },
+        "overridden_settings": {
+          "type": "array",
+          "items": {
+            "$ref": "urn:ultrafuzz:schema:config:resolved-config:2#/$defs/auditProfileSettingName"
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "auditProfileSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "description", "intended_use", "default"],
+      "properties": {
+        "id": { "$ref": "urn:ultrafuzz:schema:config:resolved-config:2#/$defs/auditProfileId" },
+        "description": { "type": "string", "minLength": 1 },
+        "intended_use": { "type": "string", "minLength": 1 },
+        "default": { "type": "boolean" },
+        "topology_path": {
+          "$ref": "urn:ultrafuzz:schema:config:resolved-config:2#/$defs/packagedTopologyPath"
+        },
+        "topology_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "auditProfilesData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "catalog_digest", "default_profile", "profiles"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "catalog_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "default_profile": {
+          "$ref": "urn:ultrafuzz:schema:config:resolved-config:2#/$defs/auditProfileId"
+        },
+        "profiles": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/auditProfileSummary" }
+        }
+      }
+    },
+    "topologySummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "description", "topology_path", "logical_nodes", "digest"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "description": { "type": "string", "minLength": 1 },
+        "topology_path": {
+          "$ref": "urn:ultrafuzz:schema:config:resolved-config:2#/$defs/packagedTopologyPath"
+        },
+        "logical_nodes": { "$ref": "#/$defs/positiveInteger" },
+        "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "topologyListData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["topologies"],
+      "properties": {
+        "topologies": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/topologySummary" }
+        }
+      }
+    },
+    "topologyShowData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "description", "topology_path", "logical_nodes", "digest", "source"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "description": { "type": "string", "minLength": 1 },
+        "topology_path": {
+          "$ref": "urn:ultrafuzz:schema:config:resolved-config:2#/$defs/packagedTopologyPath"
+        },
+        "logical_nodes": { "$ref": "#/$defs/positiveInteger" },
+        "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "source": { "type": "string", "minLength": 1 }
+      }
+    },
+    "topologyCopyData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "source_path", "destination_path", "digest", "overwritten"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "source_path": {
+          "$ref": "urn:ultrafuzz:schema:config:resolved-config:2#/$defs/packagedTopologyPath"
+        },
+        "destination_path": { "type": "string", "minLength": 1 },
+        "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "overwritten": { "type": "boolean" }
+      }
+    },
     "initCommand": { "$ref": "#/$defs/command-init" },
     "validateCommand": { "$ref": "#/$defs/command-validate" },
     "runCommand": { "$ref": "#/$defs/command-run" },
@@ -1469,6 +1668,11 @@
     "evalCompareCommand": { "$ref": "#/$defs/command-eval-compare" },
     "evalHistoryCommand": { "$ref": "#/$defs/command-eval-history" },
     "evalPublishCommand": { "$ref": "#/$defs/command-eval-publish" },
+    "configAuditProfileCommand": { "$ref": "#/$defs/command-config-audit-profile" },
+    "configAuditProfilesCommand": { "$ref": "#/$defs/command-config-audit-profiles" },
+    "topologyListCommand": { "$ref": "#/$defs/command-topology-list" },
+    "topologyShowCommand": { "$ref": "#/$defs/command-topology-show" },
+    "topologyCopyCommand": { "$ref": "#/$defs/command-topology-copy" },
     "evalAnalyzeCommand": {
       "if": {
         "type": "object",
@@ -1542,6 +1746,11 @@
     "command-eval-compare": { "$ref": "#/$defs/commandTemplate-eval-compare" },
     "command-eval-history": { "$ref": "#/$defs/commandTemplate-eval-history" },
     "command-eval-publish": { "$ref": "#/$defs/commandTemplate-eval-publish" },
+    "command-config-audit-profile": { "$ref": "#/$defs/commandTemplate-config-audit-profile" },
+    "command-config-audit-profiles": { "$ref": "#/$defs/commandTemplate-config-audit-profiles" },
+    "command-topology-list": { "$ref": "#/$defs/commandTemplate-topology-list" },
+    "command-topology-show": { "$ref": "#/$defs/commandTemplate-topology-show" },
+    "command-topology-copy": { "$ref": "#/$defs/commandTemplate-topology-copy" },
     "commandTemplate-init": {
       "if": { "type": "object", "properties": { "command": { "const": "init" } }, "required": ["command"] },
       "then": {
@@ -1829,6 +2038,61 @@
       "then": {
         "type": "object",
         "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/evalPublishData" }] } }
+      }
+    },
+    "commandTemplate-config-audit-profile": {
+      "if": {
+        "type": "object",
+        "properties": { "command": { "const": "config audit-profile" } },
+        "required": ["command"]
+      },
+      "then": {
+        "type": "object",
+        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/auditProfileData" }] } }
+      }
+    },
+    "commandTemplate-config-audit-profiles": {
+      "if": {
+        "type": "object",
+        "properties": { "command": { "const": "config audit-profiles" } },
+        "required": ["command"]
+      },
+      "then": {
+        "type": "object",
+        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/auditProfilesData" }] } }
+      }
+    },
+    "commandTemplate-topology-list": {
+      "if": {
+        "type": "object",
+        "properties": { "command": { "const": "topology list" } },
+        "required": ["command"]
+      },
+      "then": {
+        "type": "object",
+        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/topologyListData" }] } }
+      }
+    },
+    "commandTemplate-topology-show": {
+      "if": {
+        "type": "object",
+        "properties": { "command": { "const": "topology show" } },
+        "required": ["command"]
+      },
+      "then": {
+        "type": "object",
+        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/topologyShowData" }] } }
+      }
+    },
+    "commandTemplate-topology-copy": {
+      "if": {
+        "type": "object",
+        "properties": { "command": { "const": "topology copy" } },
+        "required": ["command"]
+      },
+      "then": {
+        "type": "object",
+        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/topologyCopyData" }] } }
       }
     }
   }

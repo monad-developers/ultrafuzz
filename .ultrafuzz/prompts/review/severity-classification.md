@@ -29,7 +29,10 @@ Finding lifecycle ledger:
 ## Output contract
 
 Write severity records to
-{{output_stage_findings_path}} as JSON. The array holds exactly one object per
+{{output_stage_findings_path}} using the exact pinned
+`{{schema_path}}/severity-classified-findings.schema.json`; it alone defines
+the JSON version, fields, types, enums, required members, and empty forms. The
+output holds exactly one object per
 triaged finding, in the same order, with the same `id`. Never drop, add, merge,
 split, or reorder a record: exclusion from the production report happens later,
 through the lifecycle `final_disposition`, not by deleting a record here.
@@ -37,25 +40,18 @@ through the lifecycle `final_disposition`, not by deleting a record here.
 You own exactly six fields on each record and may write nothing else:
 `severity`, `impact`, `likelihood`, `impact_rationale`, `likelihood_rationale`,
 and `severity_rationale`. Copy every other field of the triaged record
-byte-for-byte, including `schema_version` (`"ultrafuzz.finding.v2"`), `id`,
-`title`, `status`, `confidence`, `notes`, `severity_guess`, `summary`,
+byte-for-byte, including `id`, `title`, `status`, `confidence`, `notes`,
+`severity_guess`, `summary`,
 `triage_classification`, evidence, provenance, and each property-derived
 finding's `property_ids`. Do not touch `status`, `notes`, or `confidence`; they
 belong to triage, and any difference from the triaged record fails the upstream
 preservation check.
 
-For every production report candidate, include these machine-readable fields:
-
-- `severity_guess`: the preserved upstream preliminary estimate. It does not
-  have to equal the final classification.
-- `severity`: the one canonical final matrix severity, exactly `High`,
-  `Medium`, or `Low`. Never emit `final_severity` or another alias.
-- `impact`: exactly `High`, `Medium`, or `Low`.
-- `likelihood`: exactly `High`, `Medium`, or `Low`.
-- `confidence`: the preserved upstream lowercase `high`, `medium`, or `low`
-  value. Copy it unchanged; do not re-rate it from evidence quality.
-- `impact_rationale`, `likelihood_rationale`, and `severity_rationale`: concise
-  source-backed explanations.
+For every production report candidate, preserve the upstream preliminary
+severity estimate and lowercase confidence unchanged. Decide impact and
+likelihood from evidence, derive the one final severity mechanically from the
+matrix below, and add concise source-backed impact, likelihood, and severity
+rationales. Never emit a final-severity alias or re-rate confidence.
 
 If the upstream object already had an unauthorized final `severity`, reject the
 upstream handoff instead of copying it into aliases. Preserve `severity_guess`
@@ -64,14 +60,16 @@ unchanged, decide `impact` and `likelihood`, and write only the canonical final
 `upstream_severity`, note-token aliases, or compatibility fields.
 
 Also copy the strategy detection provenance to
-{{artifact_path}}/strategy-detections.json without dropping or rewriting hits,
-so the final report can compute per-strategy detection rates from loop
-provenance.
+{{artifact_path}}/strategy-detections.json using the exact pinned
+`{{schema_path}}/strategy-detections.schema.json`, without dropping or
+rewriting hits, so the final report can compute per-strategy detection rates
+from loop provenance.
 
 Copy the complete strategy-detections array exactly, including entry order and
 every optional field; do not regenerate it from findings or the ledger.
 
-Also save {{artifact_path}}/finding-lifecycle-ledger.json. Copy the triage
+Also save {{artifact_path}}/finding-lifecycle-ledger.json using the exact
+pinned `{{schema_path}}/finding-lifecycle-ledger.schema.json`. Copy the triage
 ledger and update every `dedupe_key` record that was severity-classified:
 
 - set `canonical_severity` to the final top-level `severity` for promoted
@@ -222,7 +220,6 @@ Before saving `severity-classified-findings.json`, check the array as a whole:
 
 Then check every emitted object:
 
-- `schema_version` is exactly `"ultrafuzz.finding.v2"`.
 - `severity`, `impact`, and `likelihood` use only `High`, `Medium`, or `Low`.
 - No field used as a severity label contains `Critical`.
 - `severity == matrix(impact, likelihood)`.
@@ -236,90 +233,15 @@ Then check every emitted object:
 
 ## Examples
 
-In every example below, `status`, `notes`, `title`, `triage_classification`,
-`severity_guess`, and `confidence` are copied verbatim from the triaged record;
-only the six owned fields are yours to write.
+Copy every unowned value verbatim from the triaged record in each case. A
+public withdrawal that reliably drains assets is High impact and High
+likelihood, hence High severity. Accounting drift that can lock claimable funds
+only in a narrow state is High impact and Low likelihood, hence Medium. Rounding
+dust reached only at a low-probability boundary is at most Medium impact and
+Low likelihood, hence Low. An unsupported fee-on-transfer-token claim is a
+false positive when support is not documented.
 
-High:
-
-```json
-{
-  "schema_version": "ultrafuzz.finding.v2",
-  "title": "Public withdrawal path drains vault assets",
-  "triage_classification": "true-positive",
-  "status": "needs-review",
-  "severity": "High",
-  "severity_guess": "High",
-  "impact": "High",
-  "likelihood": "High",
-  "confidence": "high",
-  "impact_rationale": "External withdrawal path directly steals protocol assets.",
-  "likelihood_rationale": "The public withdrawal path is reliably reachable from realistic state.",
-  "severity_rationale": "Impact High x Likelihood High maps to High.",
-  "notes": [
-    "classification_reason=external withdrawal path directly steals protocol assets"
-  ]
-}
-```
-
-Medium:
-
-```json
-{
-  "schema_version": "ultrafuzz.finding.v2",
-  "title": "Integration-specific accounting drift blocks redemptions",
-  "triage_classification": "true-positive",
-  "status": "needs-review",
-  "severity": "Medium",
-  "severity_guess": "Medium",
-  "impact": "High",
-  "likelihood": "Low",
-  "confidence": "medium",
-  "impact_rationale": "Claimable funds can be locked for affected users.",
-  "likelihood_rationale": "The path requires a narrow production state and timing sequence.",
-  "severity_rationale": "Impact High x Likelihood Low maps to Medium.",
-  "notes": [
-    "classification_reason=availability and accounting impact requires specific production state"
-  ]
-}
-```
-
-Low:
-
-```json
-{
-  "schema_version": "ultrafuzz.finding.v2",
-  "title": "Rounding dust can be stranded",
-  "triage_classification": "defensive-hardening",
-  "status": "needs-review",
-  "severity": "Low",
-  "severity_guess": "Low",
-  "impact": "Medium",
-  "likelihood": "Low",
-  "confidence": "medium",
-  "impact_rationale": "The effect is bounded to limited accounting drift without direct asset theft.",
-  "likelihood_rationale": "The path requires a narrow low-probability boundary state.",
-  "severity_rationale": "Impact Medium x Likelihood Low maps to Low.",
-  "notes": [
-    "classification_reason=low-risk dust impact without meaningful asset loss"
-  ]
-}
-```
-
-Invalid or out of scope:
-
-```json
-{
-  "title": "Unsupported fee-on-transfer token breaks accounting",
-  "triage_classification": "false-positive",
-  "status": "false-positive",
-  "notes": [
-    "classification_reason=out of scope: token behavior is not documented as supported"
-  ]
-}
-```
-
-Keep invalid or out-of-scope records like the example above in
+Keep invalid or out-of-scope records in
 `severity-classified-findings.json` with their triaged fields intact, and mark
 them `dropped` in the lifecycle ledger. Their `final_disposition` is what keeps
 them out of the production report entries.
@@ -338,3 +260,7 @@ Also copy the strategy detection provenance to
 {{artifact_path}}/strategy-detections.json without dropping or rewriting hits,
 so the final report can compute per-strategy detection rates from loop
 provenance.
+
+After all three final writes, run every exact `ultrafuzz json validate` command
+rendered for them in the central output contract. Correct any exit-1 artifact
+yourself and rerun its command after any later edit.

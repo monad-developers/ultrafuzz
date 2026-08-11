@@ -220,6 +220,7 @@ test("a failed immediate submodule restore preserves the transaction backup", (c
 
   const task = path.join(fixture.root, "rollback-task-worktree");
   git(fixture.source, ["worktree", "add", "-B", "ultrafuzz/test/rollback-task", task, "ultrafuzz-pinned"]);
+  git(fixture.source, ["config", "--local", "--add", "extensions.worktreeConfig", "true"]);
   const dependencyRoot = path.join(task, "vendor/dependency");
   fs.writeFileSync(path.join(dependencyRoot, "preexisting.txt"), "recoverable bytes\n");
 

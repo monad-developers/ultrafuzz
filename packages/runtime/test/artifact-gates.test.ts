@@ -900,7 +900,12 @@ function currentReport(runId: string, overrides: Record<string, unknown> = {}): 
       tokens_used: "0",
       estimated_spend: "$0",
       partial_pricing: false,
-      strategy_loops: 1
+      strategy_loops: 1,
+      audit_profile: "full",
+      audit_profile_catalog_digest: "a".repeat(64),
+      topology_digest: "b".repeat(64),
+      prompt_digest: "c".repeat(64),
+      expanded_graph_fingerprint: "d".repeat(64)
     },
     issues: [],
     non_production_outcomes: [],
@@ -7519,6 +7524,7 @@ test("final report gate rejects legacy report shapes without rewriting them and 
     "report.json",
     JSON.stringify(
       currentReport(currentLayout.runId, {
+        campaign_outcome: { outcome: "partial" },
         property_provenance: [
           {
             finding_id: "finding-property",
@@ -7547,6 +7553,7 @@ test("final report gate rejects legacy report shapes without rewriting them and 
     "report.json",
     JSON.stringify(
       currentReport(currentLayout.runId, {
+        campaign_outcome: { outcome: "partial" },
         property_provenance: [
           {
             finding_id: "finding-property",
@@ -7572,6 +7579,7 @@ test("final report gate rejects legacy report shapes without rewriting them and 
     "report.json",
     JSON.stringify(
       currentReport(currentLayout.runId, {
+        campaign_outcome: { outcome: "partial" },
         non_production_outcomes: [currentNonProductionOutcome("finding-property", "finding-property")],
         property_provenance: [
           {
@@ -7593,6 +7601,43 @@ test("final report gate rejects legacy report shapes without rewriting them and 
   );
   const completeJoin = verifyRequiredArtifactsForAttempt(currentLayout, node, node.id);
   assert.equal(completeJoin.ok, true, JSON.stringify(completeJoin.diagnostics));
+
+  writeArtifact(
+    currentLayout,
+    node.id,
+    "report.json",
+    JSON.stringify(
+      currentReport(currentLayout.runId, {
+        campaign_outcome: { outcome: "blocked" },
+        non_production_outcomes: [currentNonProductionOutcome("finding-property", "finding-property")],
+        property_provenance: [
+          {
+            finding_id: "finding-property",
+            title: "Property failure",
+            property_ids: ["property-1"],
+            sources: [
+              { source_node_id: "property-specification-certora", source_property_id: "certora-1" },
+              { source_node_id: "property-specification-crytic", source_property_id: "crytic-2" }
+            ],
+            implementation_paths: ["test/recon/Properties.sol"],
+            test_paths: ["test/foundry/Property1.t.sol"],
+            fuzzer_backend: "recon"
+          }
+        ],
+        property_implementation_coverage: currentImplementedCoverage(["property-1"])
+      })
+    )
+  );
+  const forgedOutcome = verifyRequiredArtifactsForAttempt(currentLayout, node, node.id);
+  assert.equal(forgedOutcome.ok, false);
+  assert.ok(
+    forgedOutcome.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
+        diagnostic.details?.gate === "report-campaign-outcome-authority"
+    ),
+    JSON.stringify(forgedOutcome.diagnostics)
+  );
 });
 
 test("current final reports preserve implementation coverage in JSON and Markdown", () => {
@@ -9055,12 +9100,10 @@ test("campaign gate rejects a property claim anchored to a failure that reported
   );
 });
 
-// The coverage block's JSON and Markdown examples in final-report.md drifted
-// apart -- the JSON said one included priority while the Markdown rendered two,
-// and the Markdown reported zero deferred properties beside a blocker summary
-// that only a deferred property can produce. A model copying them could not
-// pass the gate. Run the prompt's own examples through the gate rather than
-// restating them here, so they cannot drift again.
+// The prompt still illustrates the human-readable rendering, but the pinned
+// schema and runtime-derived value are the only JSON-shape and value authority.
+// Run that Markdown illustration against a value derived from canonical
+// current-run handoffs so the prompt cannot become a parallel JSON authority.
 function fencedBlockAfter(markdown: string, anchor: string, language: string): string {
   const anchorIndex = markdown.indexOf(anchor);
   assert.ok(anchorIndex >= 0, `final-report.md no longer contains ${JSON.stringify(anchor)}`);
@@ -9073,17 +9116,69 @@ function fencedBlockAfter(markdown: string, anchor: string, language: string): s
   return markdown.slice(bodyStart, end);
 }
 
-test("the coverage examples in final-report.md satisfy the coverage gate", () => {
+test("the coverage Markdown example in final-report.md matches runtime-derived coverage", () => {
   const finalReport = loadBuiltInPromptAssets().find((asset) => asset.relativePath === "review/final-report.md");
   assert.ok(finalReport, "missing built-in prompt review/final-report.md");
-  const coverageJson = JSON.parse(
-    fencedBlockAfter(finalReport.markdown, "`property_implementation_coverage` has this", "json")
-  ) as Record<string, unknown>;
   const coverageMarkdown = fencedBlockAfter(
     finalReport.markdown,
     "These bullets are the Markdown rendering",
     "markdown"
   );
+
+  const catalog = {
+    schema_version: "ultrafuzz.properties.v2" as const,
+    properties: [
+      {
+        id: "property-1",
+        description: "The accounting relation holds.",
+        category: "accounting",
+        priority: "high" as const,
+        sources: [{ source_node_id: "property-specification-recon", source_property_id: "hub-total" }],
+        reference_expectations: ["scfuzzbench:example:expectation-1"]
+      },
+      {
+        id: "property-2",
+        description: "The premium delta is conserved.",
+        category: "accounting",
+        priority: "medium" as const,
+        sources: [{ source_node_id: "property-specification-recon", source_property_id: "premium-delta" }]
+      }
+    ]
+  };
+  const implementation = {
+    schema_version: "ultrafuzz.implemented-properties.v3" as const,
+    selection: {
+      priority_threshold: "medium" as const,
+      priorities: ["high" as const, "medium" as const],
+      property_ids: ["property-1", "property-2"]
+    },
+    properties: [
+      {
+        property_id: "property-1",
+        status: "implemented" as const,
+        implementation_paths: ["test/recon/Properties.sol"],
+        test_paths: ["test/foundry/Property1.t.sol"],
+        reference_expectations: ["scfuzzbench:example:expectation-1"]
+      },
+      {
+        property_id: "property-2",
+        status: "deferred" as const,
+        implementation_paths: [],
+        test_paths: [],
+        blocker: {
+          code: "transition-oracle-deferred",
+          summary: "The handler cannot observe the premium delta returned by the Hub.",
+          next_action: "Add property-scoped snapshots around the handler."
+        }
+      }
+    ]
+  };
+  const expectedCoverage = derivePropertyImplementationCoverage(catalog, implementation, {
+    configuredSelection: { priority_threshold: "medium", priorities: ["high", "medium"] },
+    requireConfiguredSelection: true
+  });
+  assert.equal(expectedCoverage.ok, true, JSON.stringify(expectedCoverage.issues));
+  assert.ok(expectedCoverage.value);
 
   const layout = createRunLayout({
     projectRoot: tempProject(),
@@ -9095,65 +9190,12 @@ test("the coverage examples in final-report.md satisfy the coverage gate", () =>
     id: "final-report",
     logical_id: "final-report"
   };
-  // The handoff the prompt's example describes: one implemented high-priority
-  // property carrying a reference expectation, and one deferred medium one.
-  writeArtifact(
-    layout,
-    "property-specification-fanin",
-    "properties.json",
-    JSON.stringify({
-      schema_version: "ultrafuzz.properties.v2",
-      properties: [
-        {
-          id: "property-1",
-          description: "The accounting relation holds.",
-          category: "accounting",
-          priority: "high",
-          sources: [{ source_node_id: "property-specification-recon", source_property_id: "hub-total" }],
-          reference_expectations: ["scfuzzbench:example:expectation-1"]
-        },
-        {
-          id: "property-2",
-          description: "The premium delta is conserved.",
-          category: "accounting",
-          priority: "medium",
-          sources: [{ source_node_id: "property-specification-recon", source_property_id: "premium-delta" }]
-        }
-      ]
-    })
-  );
+  writeArtifact(layout, "property-specification-fanin", "properties.json", JSON.stringify(catalog));
   writeArtifact(
     layout,
     "stateful-invariant-implement-properties",
     "implemented-properties.json",
-    JSON.stringify({
-      schema_version: "ultrafuzz.implemented-properties.v3",
-      selection: {
-        priority_threshold: "medium",
-        priorities: ["high", "medium"],
-        property_ids: ["property-1", "property-2"]
-      },
-      properties: [
-        {
-          property_id: "property-1",
-          status: "implemented",
-          implementation_paths: ["test/recon/Properties.sol"],
-          test_paths: ["test/foundry/Property1.t.sol"],
-          reference_expectations: ["scfuzzbench:example:expectation-1"]
-        },
-        {
-          property_id: "property-2",
-          status: "deferred",
-          implementation_paths: [],
-          test_paths: [],
-          blocker: {
-            code: "transition-oracle-deferred",
-            summary: "The handler cannot observe the premium delta returned by the Hub.",
-            next_action: "Add property-scoped snapshots around the handler."
-          }
-        }
-      ]
-    })
+    JSON.stringify(implementation)
   );
   writeArtifact(
     layout,
@@ -9161,7 +9203,7 @@ test("the coverage examples in final-report.md satisfy the coverage gate", () =>
     "report.json",
     JSON.stringify(
       currentReport(layout.runId, {
-        property_implementation_coverage: coverageJson
+        property_implementation_coverage: expectedCoverage.value
       })
     )
   );

@@ -38,39 +38,12 @@ Allowed classifications are:
 - `unknown`
 - `compile_harness_defect`
 
-Write {{artifact_path}}/semantic-red-registry.json with this JSON shape:
-
-```json
-{
-  "schema_version": "ultrafuzz.semantic-red-registry.v1",
-  "semantic_reds": [
-    {
-      "stable_failure_hash": "",
-      "lane_id": "",
-      "red_candidate_id": "",
-      "test_path": "",
-      "failing_test_name": "",
-      "focused_command": "",
-      "failure_signature": "",
-      "assertion": "",
-      "observed": "",
-      "expected": "",
-      "public_oracle_basis": [],
-      "classification": "untriaged",
-      "pre_repair_file_hash": ""
-    }
-  ],
-  "compile_or_harness_defects": [
-    {
-      "stable_failure_hash": "",
-      "lane_id": "",
-      "category": "compile | harness",
-      "summary": "",
-      "evidence_paths": []
-    }
-  ]
-}
-```
+Write {{artifact_path}}/semantic-red-registry.json. Read the exact pinned
+schema at `{{schema_path}}/semantic-red-registry.schema.json`; it alone defines
+the JSON version, fields, types, enums, required members, and empty forms. Copy
+the lane's semantic-red and compile/harness packets without changing any JSON
+value. Keep semantic reds before compile/harness defects and preserve the order
+within each group. These are source-preservation semantics beyond JSON Schema.
 
 Each pass must contain every registry hash exactly once and in exact registry
 order (semantic reds followed by defects). `triage-a.json` must carry
@@ -79,23 +52,13 @@ not be relabeled `compile_harness_defect`; every compile/harness defect must use
 that classification. Set `repair_allowed: true` only for `harness_bug` or
 `reference_bug`.
 
-Write {{artifact_path}}/triage-a.json and {{artifact_path}}/triage-b.json with this JSON shape:
-
-```json
-{
-  "schema_version": "ultrafuzz.differential-red-triage.v1",
-  "pass": "a",
-  "classifications": [
-    {
-      "stable_failure_hash": "",
-      "classification": "harness_bug | reference_bug | production_bug | spec_mismatch | unknown | compile_harness_defect",
-      "rationale": "",
-      "public_evidence_paths": [],
-      "repair_allowed": false
-    }
-  ]
-}
-```
+Write {{artifact_path}}/triage-a.json and {{artifact_path}}/triage-b.json. Read
+the exact pinned schema at
+`{{schema_path}}/differential-red-triage.schema.json`; it alone defines the
+JSON version, fields, types, enums, required members, and empty forms. Pass A
+must identify itself as `a` and pass B as `b`; each must classify every exact
+registry hash once in registry order and retain the public evidence used for
+its rationale.
 
 If both passes in this attempt agree that a failure is a harness or reference
 defect, mark it repairable for this attempt only. Downstream repair must require
@@ -104,6 +67,6 @@ a failure as an owned harness/reference defect. Production bugs, spec
 mismatches, and unknowns must remain preserved and unweakened.
 
 After all three final writes, run every exact `ultrafuzz json validate` command
-printed in the output contract. Fix the authored JSON yourself; do not use
-fallback spellings, conversion, or repair, and do not return or exit until all
-commands pass.
+rendered for them in the central output contract. Fix the authored JSON
+yourself; do not use fallback spellings, conversion, or repair, and do not
+return or exit until all commands pass.

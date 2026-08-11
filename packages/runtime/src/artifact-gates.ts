@@ -2244,7 +2244,10 @@ function semanticArtifactSetForSchema(input: {
     const propertyCatalog = semanticCanonicalPropertyCatalog(input.layout, input.node, input.attemptAuthority);
     const implementedProperties = semanticImplementedProperties(input.layout, input.node, input.attemptAuthority);
     const severity = semanticFinalSeverityContext(input.layout, input.node, input.attemptAuthority);
+    const campaignSummary = semanticCampaignSummary(input.layout, input.node, input.attemptAuthority);
     return {
+      ...(campaignSummary === undefined ? {} : { campaignSummary: campaignSummary.value }),
+      ...(campaignSummary?.path === undefined ? {} : { campaignSummaryPath: campaignSummary.path }),
       ...(propertyCatalog === undefined ? {} : { propertyCatalog }),
       ...(implementedProperties === undefined ? {} : { implementedProperties }),
       ...(severity.severityClassifiedFindings === undefined
@@ -2737,6 +2740,24 @@ function semanticImplementedProperties(
   return plannedContractProducerStatus(layout, consumer, "ultrafuzz/implemented-properties@3", attemptAuthority) ===
     "absent"
     ? UNPLANNED_IMPLEMENTED_PROPERTIES_CONTEXT
+    : undefined;
+}
+
+function semanticCampaignSummary(
+  layout: RunLayout,
+  consumer: PlannedGraphNode,
+  attemptAuthority?: ArtifactGateAttemptAuthority
+): { value: unknown | null; path?: string } | undefined {
+  const artifact = finalizedSingletonAncestorOutput(
+    layout,
+    consumer,
+    "ultrafuzz/campaign-summary@2",
+    "campaign summary semantic context",
+    attemptAuthority
+  );
+  if (artifact !== undefined) return { value: artifact.value, path: artifact.path };
+  return plannedContractProducerStatus(layout, consumer, "ultrafuzz/campaign-summary@2", attemptAuthority) === "absent"
+    ? { value: null }
     : undefined;
 }
 

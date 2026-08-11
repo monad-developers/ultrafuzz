@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parsePromptFrontmatter, PromptError } from "./frontmatter.js";
@@ -332,6 +332,12 @@ function appendOutputContract(rendered: string, input: PromptRenderInput, curren
   }
 
   const schemaDirectory = taskSchemaDirectory(input);
+  const findingsGuidance = outputs.some((output) => output.contract === "ultrafuzz/findings@2")
+    ? renderOutputContractTemplate("findings.mdx", {})
+    : "";
+  const boundaryRecipesGuidance = outputs.some((output) => output.contract === "ultrafuzz/boundary-recipes@1")
+    ? renderOutputContractTemplate("boundary-recipes.mdx", {})
+    : "";
   const generatedTestsOutput = outputs.find((output) => output.contract === "ultrafuzz/generated-tests@3");
   const generatedTestsGuidance =
     generatedTestsOutput === undefined
@@ -343,6 +349,10 @@ function appendOutputContract(rendered: string, input: PromptRenderInput, curren
           run_id: markdownCodeSpan(input.run.id),
           logical_node_id: markdownCodeSpan(input.node.logicalId)
         });
+  const specializedGuidance = [findingsGuidance, boundaryRecipesGuidance, generatedTestsGuidance]
+    .filter((guidance) => guidance !== "")
+    .map((guidance) => guidance.trimEnd())
+    .join("\n\n");
   const schemaGuidance = outputs.some((output) => output.schemaFile !== undefined)
     ? `Where an entry above names a schema to validate against, that file is an orchestrator-supplied JSON Schema under ${markdownCodeSpan(schemaDirectory)}. Read it before authoring the artifact. It is the sole authority on JSON versions, field names, types, enums, required or optional members, and empty forms. Prompt prose may add semantic or run-context requirements that JSON Schema cannot express, but it does not redefine the JSON shape.\n\n`
     : "";
@@ -360,7 +370,7 @@ function appendOutputContract(rendered: string, input: PromptRenderInput, curren
         return [
           `- Path: \`${path.join(input.node.artifactDir, output.path)}\`${output.primary ? " (primary)" : ""}`,
           `  Contract: \`${output.contract}\``,
-          `  Schema: ${output.description}`,
+          `  Purpose: ${output.description}`,
           // A machine-readable schema beats prose: the producer can check the
           // file it just wrote rather than discover a bad field from a failed node.
           ...(output.schemaFile === undefined
@@ -378,7 +388,7 @@ function appendOutputContract(rendered: string, input: PromptRenderInput, curren
       .join("\n")
   });
 
-  return `${rendered.trimEnd()}\n\n${generatedTestsGuidance === "" ? "" : `${generatedTestsGuidance.trimEnd()}\n\n`}${contract.trimEnd()}\n`;
+  return `${rendered.trimEnd()}\n\n${specializedGuidance === "" ? "" : `${specializedGuidance}\n\n`}${contract.trimEnd()}\n`;
 }
 
 function validationCommand(schemaPath: string, artifactPath: string): string {
@@ -439,7 +449,20 @@ function loadOutputContractTemplate(relativePath: string): string {
 }
 
 function outputContractTemplateRoot(): string {
-  return fileURLToPath(new URL("../../../.ultrafuzz/prompts/_templates/output-contract/", import.meta.url));
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    path.join(here, "prompts", "_templates", "output-contract"),
+    path.resolve(here, "../../../.ultrafuzz/prompts/_templates/output-contract")
+  ];
+  const found = candidates.find((candidate) => {
+    try {
+      return statSync(candidate).isDirectory();
+    } catch {
+      return false;
+    }
+  });
+  if (found === undefined) throw new Error(`unable to locate the packaged output contract templates from ${here}`);
+  return found;
 }
 
 export function writeRenderedPrompt(result: PromptRenderResult): string {

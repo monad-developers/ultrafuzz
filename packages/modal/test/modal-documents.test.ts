@@ -19,6 +19,7 @@ import {
   MODAL_NODE_RESTORE_SCHEMA_ID,
   MODAL_NODE_RESULT_SCHEMA_ID,
   MODAL_NODE_WORKER_ERROR_SCHEMA_ID,
+  MODAL_PINNED_HOLDOUT_SCHEMA_ID,
   MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID,
   MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID,
   MODAL_RECOVERY_LIFECYCLE_SCHEMA_ID,
@@ -311,6 +312,15 @@ function contractFixtures(): ContractFixtures {
       executable_paths: ["bin/smithers"],
       smithers_bin: "bin/smithers"
     },
+    [MODAL_PINNED_HOLDOUT_SCHEMA_ID]: {
+      schema_version: "ultrafuzz.pinned-holdout.v1",
+      source_commit: gitA,
+      source_tree: gitB,
+      commit: "c".repeat(40),
+      tree: "d".repeat(40),
+      paths: ["reference"],
+      entries: [{ path: "reference/Properties.sol", blob: gitA, size: 128 }]
+    },
     [MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID]: {
       schema_version: "ultrafuzz.pinned-source-proof.v2",
       commit: gitA,
@@ -320,7 +330,8 @@ function contractFixtures(): ContractFixtures {
       remotes: [],
       revision_count: 1,
       commit_object_count: 1,
-      submodules: null
+      submodules: null,
+      held_out: null
     },
     [MODAL_SMOKE_CHECKPOINT_SCHEMA_ID]: {
       schema_version: "ultrafuzz.modal.smoke-checkpoint.v1",
@@ -445,7 +456,7 @@ function writeJsonWithTrailingSpaces(filePath: string, value: unknown, targetByt
 describe("Modal strict JSON contract foundation", () => {
   it("registers and strictly compiles every schema with matching checked-in exports and gates", () => {
     const registry = modalSchemaRegistry();
-    expect(registry).toHaveLength(20);
+    expect(registry).toHaveLength(21);
     expect(registry.map((entry) => entry.filename)).toEqual(Object.keys(MODAL_SCHEMA_METADATA).sort());
     expect(modalSchemaBundleDigest()).toMatch(/^[0-9a-f]{64}$/u);
 

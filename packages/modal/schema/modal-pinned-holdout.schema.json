@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:modal:pinned-holdout:1",
+  "title": "Ultrafuzz pinned benchmark hold-out",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "source_commit", "source_tree", "commit", "tree", "paths", "entries"],
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.pinned-holdout.v1" },
+    "source_commit": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/gitObjectId" },
+    "source_tree": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/gitObjectId" },
+    "commit": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/gitObjectId" },
+    "tree": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/gitObjectId" },
+    "paths": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/safeHoldoutPath" }
+    },
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100000,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "blob", "size"],
+        "properties": {
+          "path": { "$ref": "#/$defs/safeHoldoutPath" },
+          "blob": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/gitObjectId" },
+          "size": { "type": "integer", "minimum": 0, "maximum": 2147483648 }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "safeHoldoutPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*(?:^|/)\\.git(?:/|$))[^\\u0000-\\u001f\\u007f]+$"
+    }
+  }
+}

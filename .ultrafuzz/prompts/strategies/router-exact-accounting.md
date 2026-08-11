@@ -47,5 +47,6 @@ Use strict balance deltas and returned amount equality. When exact semantics are
 not public-source-backed, preserve the repro as incomplete-spec rather than
 claiming a production bug.
 
-Write structured findings to {{output_findings_path}}. Use an empty JSON array
-if no finding is confirmed.
+Write structured findings to {{output_findings_path}}. If no finding is
+confirmed, use only the empty form defined by the exact pinned schema in the
+central output contract.

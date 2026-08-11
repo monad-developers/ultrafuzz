@@ -144,7 +144,13 @@
       "required": ["repo", "ref"],
       "properties": {
         "repo": { "$ref": "#/$defs/gitUrl" },
-        "ref": { "$ref": "#/$defs/gitRef" }
+        "ref": { "$ref": "#/$defs/gitRef" },
+        "held_out_paths": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/relativeFile" }
+        }
       }
     },
     "privateBenchmarkExecution": {

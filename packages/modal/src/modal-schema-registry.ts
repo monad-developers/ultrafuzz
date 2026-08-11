@@ -27,6 +27,7 @@ import {
   MODAL_NODE_RESULT_SCHEMA_ID,
   MODAL_NODE_WORKER_ERROR_SCHEMA_ID,
   MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES,
+  MODAL_PINNED_HOLDOUT_SCHEMA_ID,
   MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID,
   MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID,
   MODAL_RECOVERY_LIFECYCLE_SCHEMA_ID,
@@ -91,6 +92,7 @@ export const modalNodeInputJsonSchema = loadSchemaDocument("modal-node-input.sch
 export const modalNodeRestoreJsonSchema = loadSchemaDocument("modal-node-restore.schema.json");
 export const modalNodeResultJsonSchema = loadSchemaDocument("modal-node-result.schema.json");
 export const modalNodeWorkerErrorJsonSchema = loadSchemaDocument("modal-node-worker-error.schema.json");
+export const modalPinnedHoldoutJsonSchema = loadSchemaDocument("modal-pinned-holdout.schema.json");
 export const modalPinnedSourceProofJsonSchema = loadSchemaDocument("modal-pinned-source-proof.schema.json");
 export const modalPublicBenchmarkBundleJsonSchema = loadSchemaDocument("modal-public-benchmark-bundle.schema.json");
 export const modalRecoveryLifecycleJsonSchema = loadSchemaDocument("modal-recovery-lifecycle.schema.json");
@@ -113,6 +115,7 @@ export const MODAL_SCHEMA_EXPORTS = Object.freeze({
   modalNodeRestoreJsonSchema,
   modalNodeResultJsonSchema,
   modalNodeWorkerErrorJsonSchema,
+  modalPinnedHoldoutJsonSchema,
   modalPinnedSourceProofJsonSchema,
   modalPublicBenchmarkBundleJsonSchema,
   modalRecoveryLifecycleJsonSchema,
@@ -192,6 +195,12 @@ export const MODAL_SCHEMA_METADATA: Readonly<Record<string, ModalSchemaMetadata>
     typescriptExport: "modalNodeWorkerErrorJsonSchema",
     semanticGates: MODAL_SEMANTIC_GATES_BY_SCHEMA_ID[MODAL_NODE_WORKER_ERROR_SCHEMA_ID]
   },
+  "modal-pinned-holdout.schema.json": {
+    id: MODAL_PINNED_HOLDOUT_SCHEMA_ID,
+    role: "runtime-state",
+    typescriptExport: "modalPinnedHoldoutJsonSchema",
+    semanticGates: MODAL_SEMANTIC_GATES_BY_SCHEMA_ID[MODAL_PINNED_HOLDOUT_SCHEMA_ID]
+  },
   "modal-pinned-source-proof.schema.json": {
     id: MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID,
     role: "runtime-state",
@@ -261,6 +270,7 @@ const schemaExportsByFilename: Readonly<Record<string, Readonly<Record<string, u
   "modal-node-restore.schema.json": modalNodeRestoreJsonSchema,
   "modal-node-result.schema.json": modalNodeResultJsonSchema,
   "modal-node-worker-error.schema.json": modalNodeWorkerErrorJsonSchema,
+  "modal-pinned-holdout.schema.json": modalPinnedHoldoutJsonSchema,
   "modal-pinned-source-proof.schema.json": modalPinnedSourceProofJsonSchema,
   "modal-public-benchmark-bundle.schema.json": modalPublicBenchmarkBundleJsonSchema,
   "modal-recovery-lifecycle.schema.json": modalRecoveryLifecycleJsonSchema,

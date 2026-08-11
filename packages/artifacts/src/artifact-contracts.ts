@@ -55,8 +55,7 @@ export interface ArtifactContractSchemaBinding {
 }
 const existingJsonContracts = {
   "ultrafuzz/findings@2": {
-    description:
-      "The canonical strict Ultrafuzz finding v2 array. Evidence objects are closed: keep path as a selector-free relative base path, use fragment for a section anchor, use positive integer line and optional end_line for one source span, and use at least two typed line_ranges entries for disjoint spans. Never combine line_ranges with line or end_line, and keep independent prose in detail.",
+    description: "Canonical structured findings with source-bound evidence and independent explanatory analysis.",
     schemaFile: "findings.schema.json",
     validEmptyExample: "[]"
   },

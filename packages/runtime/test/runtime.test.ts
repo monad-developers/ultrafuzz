@@ -4519,7 +4519,10 @@ test("plan creates run layout, graph fingerprint, and rendered prompt before Smi
   assert.equal(fs.existsSync(renderedPromptPath), true);
   const renderedPrompt = fs.readFileSync(renderedPromptPath, "utf8");
   assert.match(renderedPrompt, /Contract: `ultrafuzz\/findings@2`/u);
-  assert.match(renderedPrompt, /Schema: The canonical strict Ultrafuzz finding v2 array\./u);
+  assert.match(
+    renderedPrompt,
+    /Purpose: Canonical structured findings with source-bound evidence and independent explanatory analysis\./u
+  );
   assert.match(renderedPrompt, /Validation command: `ultrafuzz json validate --schema/u);
   assert.match(renderedPrompt, /After your final write and before returning the node's final response/u);
   const persistedPlan = JSON.parse(fs.readFileSync(path.join(plan.value!.run_root, "plan.json"), "utf8")) as {
@@ -5608,7 +5611,8 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /addDir:\s*\[task\.artifactDir, \.\.\.task\.dependencyArtifactDirs\]/);
   assert.match(workflowSource, /const schemaDirectory = path\.join\(workspaceRoot, "\.ultrafuzz", "schemas"\)/u);
   assert.match(workflowSource, /materializePromptSchemas\(schemaDirectory\)/u);
-  assert.match(workflowSource, /prompt\.replaceAll\(task\.artifactDir, mirroredArtifactDir\(task\)\)/);
+  assert.match(workflowSource, /relocatePromptPath\(prompt, task\.artifactDir, mirroredArtifactDir\(task\)\)/u);
+  assert.match(workflowSource, /relocatePromptPath\(prompt, task\.sourceProjectRoot, process\.cwd\(\)\)/u);
   assert.match(workflowSource, /path\.join\(task\.workspacePath, "artifacts", task\.attemptId\)/);
   assert.match(workflowSource, /taskArtifactRoots\(task, artifactDir\)/);
   assert.match(workflowSource, /lstatSync\(candidate\)/);
