@@ -421,13 +421,21 @@ function renderCanonicalReport(report: JsonRecord): string {
     ""
   );
   appendRunSummary(lines, isRecord(report.run_metadata) ? report.run_metadata : {});
+  const campaignDidNotRun = appendCampaignOutcome(lines, report.campaign_outcome);
 
   for (const issue of issues) {
     appendProductionIssue(lines, issue);
   }
 
   if (issues.length === 0 && outcomes.length === 0) {
-    lines.push("", "No issues reported.");
+    // Saying "no issues" after a campaign that never fuzzed would report an
+    // absence of measurement as a clean result.
+    lines.push(
+      "",
+      campaignDidNotRun
+        ? "No issues were reported, but the invariant campaign did not run, so this is not a result."
+        : "No issues reported."
+    );
   }
 
   appendPropertyImplementationCoverage(lines, report.property_implementation_coverage);
@@ -454,6 +462,30 @@ function renderedIssues(issues: JsonRecord[]): RenderedIssue[] {
         title: cleanIssueTitle(recordTitle(issue, "Untitled issue"))
       };
     });
+}
+
+/** Outcomes that mean the campaign actually fuzzed. Anything else is disclosed. */
+const COMPLETED_CAMPAIGN_OUTCOMES = new Set(["completed", "complete", "succeeded", "success", "finished"]);
+
+/**
+ * Disclose a campaign that did not fuzz. Returns whether the run's empty
+ * findings are an absence of measurement rather than a clean result.
+ */
+function appendCampaignOutcome(lines: string[], campaignOutcome: unknown): boolean {
+  if (!isRecord(campaignOutcome)) return false;
+  const outcome = typeof campaignOutcome.outcome === "string" ? campaignOutcome.outcome.trim() : "";
+  if (outcome === "" || COMPLETED_CAMPAIGN_OUTCOMES.has(outcome.toLowerCase())) return false;
+  const reason = typeof campaignOutcome.reason === "string" ? campaignOutcome.reason.trim() : "";
+  lines.push(
+    "",
+    "## Campaign status",
+    "",
+    `The invariant campaign did not complete: \`${publicProse(outcome)}\`. No fuzzing result is available from this run, and an empty findings list below does not mean the properties held.`
+  );
+  if (reason !== "") {
+    lines.push("", `Reason: ${publicProse(reason)}`);
+  }
+  return true;
 }
 
 function appendRunSummary(lines: string[], metadata: JsonRecord): void {

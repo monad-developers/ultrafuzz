@@ -79,6 +79,7 @@ export function reconcileReportArtifacts(runRoot: string): ReconciledReportArtif
   }
 
   let report = reconcileRunMetadata(root, original.value);
+  report = reconcileCampaignOutcome(root, report);
   report = reconcilePropertyImplementationCoverage(root, report);
   report = reconcilePropertyProvenance(root, report);
   const projection = projectCanonicalFinalReport(report);
@@ -239,6 +240,32 @@ function reconcilePropertyProvenance(runRoot: string, report: JsonRecord): JsonR
     });
   }
   return { ...report, property_provenance: entries };
+}
+
+/**
+ * A campaign that never fuzzed and a campaign that fuzzed and found nothing
+ * both leave an empty findings array, and the agent-authored report cannot
+ * tell them apart. Take the outcome from the campaign's own summary so the
+ * report states which one happened.
+ */
+function reconcileCampaignOutcome(runRoot: string, report: JsonRecord): JsonRecord {
+  const summaryPath = logicalArtifactPath(runRoot, "stateful-invariant-campaign", "campaign-summary.json");
+  if (summaryPath === undefined) {
+    return report;
+  }
+  const summary = readRecord(runRoot, summaryPath);
+  const outcome = summary?.outcome;
+  if (typeof outcome !== "string" || outcome.trim() === "") {
+    return report;
+  }
+  const reason = summary?.reason;
+  return {
+    ...report,
+    campaign_outcome: {
+      outcome: outcome.trim(),
+      ...(typeof reason === "string" && reason.trim() !== "" ? { reason: reason.trim() } : {})
+    }
+  };
 }
 
 function reconcilePropertyImplementationCoverage(runRoot: string, report: JsonRecord): JsonRecord {

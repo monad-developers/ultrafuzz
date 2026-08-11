@@ -286,6 +286,27 @@ current report must include this object in `report.json` and render
 both representations with the implementation handoff. Reports produced before
 this field existed (and without current selection metadata) use `"unavailable"`.
 
+### Campaign outcome
+
+An invariant campaign that never fuzzed and one that fuzzed and found nothing
+both leave an empty findings array, and the agent-authored report cannot tell
+them apart. Report generation therefore takes the outcome from the campaign's
+own `campaign-summary.json` and mirrors it in `report.json` as
+`campaign_outcome`:
+
+```json
+"campaign_outcome": {
+  "outcome": "blocked",
+  "reason": "recon executable unavailable; the long single-backend campaign was not started"
+}
+```
+
+When the outcome is anything other than a completed one, `report.md` renders a
+`## Campaign status` section naming the outcome and its reason, and the
+findings sentence becomes "No issues were reported, but the invariant campaign
+did not run, so this is not a result." A campaign that ran and found nothing
+still reads as `No issues reported.`, and runs with no campaign are unchanged.
+
 Runtime artifact gates reject unknown canonical IDs and campaign references to
 properties that were not recorded with `implemented` status. They validate each
 campaign result record independently, judge unexplained findings against the

@@ -136,7 +136,13 @@ const terminalReportSchema = z.looseObject({
   issues: z.array(z.unknown()),
   non_production_outcomes: z.array(z.unknown()),
   property_provenance: z.union([z.literal("unavailable"), reportPropertyProvenanceSchema]).optional(),
-  property_implementation_coverage: propertyImplementationCoverageSchema.optional()
+  property_implementation_coverage: propertyImplementationCoverageSchema.optional(),
+  campaign_outcome: z
+    .looseObject({
+      outcome: z.string().min(1).max(200),
+      reason: z.string().min(1).max(4000).optional()
+    })
+    .optional()
 });
 const campaignSummarySchema = z.looseObject({
   failure_counts: z.looseObject({
