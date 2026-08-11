@@ -309,10 +309,10 @@ function statusForRecord(input: {
   if (!isRecord(input.record) || !["launched", "failed"].includes(String(input.record.status))) {
     return unavailableRow(input.row, "invalid", false);
   }
-  if (input.record.status === "failed") {
-    return unavailableRow(input.row, "failed", true);
-  }
   const unavailableLinkedWorkflowStatus = linkedWorkflowAvailability(input.record.workflow_ids);
+  if (input.record.status === "failed") {
+    return unavailableRow(input.row, "failed", true, unavailableLinkedWorkflowStatus);
+  }
   if (
     typeof input.record.ultrafuzz_run_id !== "string" ||
     input.record.ultrafuzz_run_id.length === 0 ||

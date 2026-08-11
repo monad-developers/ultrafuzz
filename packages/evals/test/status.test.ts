@@ -1038,7 +1038,12 @@ describe("eval status", () => {
     fs.writeFileSync(
       path.join(fixture.root, "runs.jsonl"),
       [
-        { eval_run_id: EVAL_RUN_ID, row_id: "launch-failed", status: "failed" },
+        {
+          eval_run_id: EVAL_RUN_ID,
+          row_id: "launch-failed",
+          status: "failed",
+          workflow_ids: ["workflow-launch-failed"]
+        },
         record("inaccessible", "run-inaccessible", inaccessibleRoot),
         record("invalid-state", "run-invalid", invalidRoot),
         record("zero-progress", "run-zero", zeroRoot),
@@ -1072,7 +1077,11 @@ describe("eval status", () => {
       executed_nodes: null,
       eta_unavailable_reason: "progress-unavailable"
     });
-    expect(snapshot.rows[1]).toMatchObject({ terminal: true, eta_unavailable_reason: "progress-unavailable" });
+    expect(snapshot.rows[1]).toMatchObject({
+      terminal: true,
+      linked_workflow_status: "unknown",
+      eta_unavailable_reason: "progress-unavailable"
+    });
     expect(snapshot.rows[4]).toMatchObject({
       progress_percent: 0,
       eta_unavailable_reason: "no-completed-nodes"
