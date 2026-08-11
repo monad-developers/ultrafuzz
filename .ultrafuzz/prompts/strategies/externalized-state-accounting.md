@@ -124,21 +124,22 @@ and why raw balances alone would miss the issue.
 Write the human-readable inventory, scenarios, and oracle analysis to
 `{{artifact_dir}}/externalized-state-accounting.md`.
 
-Write `{{artifact_dir}}/externalized-state-accounting.json` with
-`schema_version: "ultrafuzz.externalized-state-accounting.v1"` and exact arrays
-`state_components`, `scenarios`, `accounting_oracles`, `generated_tests`,
-`incomplete_specs`, and `coverage_notes`.
+Write `{{artifact_dir}}/externalized-state-accounting.json`. Read the pinned
+JSON Schema at
+`{{schema_path}}/externalized-state-accounting.schema.json` before authoring it.
+The schema is the only authority on the JSON version, fields, types, required
+and optional members, enums, and empty form. Run the exact
+`ultrafuzz json validate` command rendered for this file in the central
+Ultrafuzz Output Contract after the final write and correct it until the command
+exits 0.
 
-- A state component has `component_id`, `name`, `category`,
-  `economic_relevance`, non-empty `public_evidence`, non-empty `actors`,
-  `mutation_paths`, `settlement_or_claim_paths`, and `value_reads`.
-- A scenario has `scenario_id`, `title`, non-empty `actors`, `preconditions`,
-  non-empty `actions`, non-empty `state_component_ids`, `expected_outcome`, and
-  nullable `test_path`.
-- An accounting oracle has `oracle_id`, non-empty `state_component_ids`,
-  `assertion`, non-empty `public_basis`, and nullable `rounding_rule`.
-- Generated-test rows use `path` and non-empty `scenario_ids`; incomplete-spec
-  rows use `subject`, `reason`, and `evidence_paths`.
+Keep the Markdown and JSON views semantically aligned. They must describe the
+same economically relevant state components, actors, mutation and settlement
+paths, scenarios, public evidence, accounting oracles, rounding policies,
+generated tests, incomplete specifications, and coverage gaps. Every scenario
+and oracle must reference the components it actually exercises, and every test
+reference must name a test this node actually authored. These relationships are
+contextual requirements beyond JSON Schema.
 
 Write structured findings to {{output_findings_path}}. Use an empty JSON array
 if no source-backed production finding is confirmed.

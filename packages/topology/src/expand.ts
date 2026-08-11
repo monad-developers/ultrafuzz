@@ -79,6 +79,7 @@ function expandNode(
     ...(referenceRevision ? { referenceRevision } : {}),
     ...(node.group ? { group: node.group } : {}),
     dependsOn,
+    ...(node.required_commands.length === 0 ? {} : { requiredCommands: [...node.required_commands] }),
     artifactDir: deterministicArtifactDir(concreteId),
     ...timeoutSecondsFor(node, topology),
     retryPolicy: { maxAttempts: maxAttemptsFor(node, topology) },

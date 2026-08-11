@@ -12,7 +12,8 @@ import {
   materializePinnedSource,
   PINNED_SOURCE_BRANCH,
   PINNED_SOURCE_REF,
-  readPinnedSourceProof
+  readPinnedSourceProof,
+  type PinnedHoldout
 } from "../src/pinned-source.js";
 
 const roots: string[] = [];
@@ -251,6 +252,186 @@ describe("pinned benchmark source", () => {
     ).rejects.toThrow();
     expect(fs.existsSync(destination)).toBe(false);
   });
+
+  it("withholds declared reference paths and binds them to the benchmark commit", async () => {
+    const fixture = referenceSourceRepository();
+    const destination = path.join(fixture.root, "withheld");
+
+    // A materialized checkout has no committer identity, and CI and the Modal
+    // image have no global one either, so the hold-out commit must carry its
+    // own. Suppress ambient configuration to keep that honest.
+    const previousGitConfig = {
+      global: process.env.GIT_CONFIG_GLOBAL,
+      system: process.env.GIT_CONFIG_SYSTEM,
+      noSystem: process.env.GIT_CONFIG_NOSYSTEM
+    };
+    process.env.GIT_CONFIG_GLOBAL = "/dev/null";
+    process.env.GIT_CONFIG_SYSTEM = "/dev/null";
+    process.env.GIT_CONFIG_NOSYSTEM = "1";
+    let proof: Awaited<ReturnType<typeof materializePinnedSource>>;
+    try {
+      proof = await materializePinnedSource({
+        repository: fixture.repository,
+        revision: fixture.pinned,
+        destination,
+        heldOutPaths: ["reference"]
+      });
+    } finally {
+      for (const [name, value] of [
+        ["GIT_CONFIG_GLOBAL", previousGitConfig.global],
+        ["GIT_CONFIG_SYSTEM", previousGitConfig.system],
+        ["GIT_CONFIG_NOSYSTEM", previousGitConfig.noSystem]
+      ] as const) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+
+    // The answer key is gone; everything else survives untouched.
+    expect(fs.existsSync(path.join(destination, "reference"))).toBe(false);
+    expect(fs.readFileSync(path.join(destination, "src", "protocol.txt"), "utf8")).toBe("protocol\n");
+    expect(fs.readFileSync(path.join(destination, "tests", "unit.txt"), "utf8")).toBe("unit\n");
+
+    // HEAD is a parentless hold-out revision and the benchmark commit is gone,
+    // so the single-revision isolation invariants still hold.
+    expect(proof.commit).not.toBe(fixture.pinned);
+    expect(proof.revision_count).toBe(1);
+    expect(proof.commit_object_count).toBe(1);
+    expect(() => git(destination, ["rev-parse", "HEAD^"])).toThrow();
+    expect(git(destination, ["branch", "--show-current"])).toBe(PINNED_SOURCE_BRANCH);
+    expect(proof.refs).toEqual([{ name: PINNED_SOURCE_REF, object: proof.commit }]);
+    expect(git(destination, ["status", "--porcelain=v1", "--untracked-files=all"])).toBe("");
+
+    expect(proof.held_out).toMatchObject({
+      source_commit: fixture.pinned,
+      commit: proof.commit,
+      tree: proof.tree,
+      paths: ["reference"]
+    });
+
+    // The withheld bytes must be unrecoverable, not merely deleted.
+    expect(() => git(destination, ["show", `${fixture.pinned}:reference/Properties.sol`])).toThrow();
+    expect(() => git(destination, ["cat-file", "-e", fixture.pinned])).toThrow();
+    for (const entry of proof.held_out?.entries ?? []) {
+      expect(() => git(destination, ["cat-file", "-e", entry.blob])).toThrow();
+    }
+    expect(git(destination, ["reflog"])).toBe("");
+    expect(git(destination, ["fsck", "--unreachable", "--no-progress"])).toBe("");
+    expect(proof.held_out?.entries.map((entry) => entry.path)).toEqual([
+      "reference/Properties.sol",
+      "reference/nested/Handlers.sol"
+    ]);
+    for (const entry of proof.held_out?.entries ?? []) {
+      expect(entry.blob).toMatch(/^[0-9a-f]{40}$/u);
+      expect(entry.size).toBeGreaterThan(0);
+    }
+
+    // A caller that only knows the benchmark commit still verifies the checkout.
+    await expect(inspectPinnedSource(destination, fixture.pinned)).resolves.toEqual(proof);
+  }, 15_000);
+
+  it("leaves a target without a hold-out declaration unchanged", async () => {
+    const fixture = referenceSourceRepository();
+    const destination = path.join(fixture.root, "intact");
+
+    const proof = await materializePinnedSource({
+      repository: fixture.repository,
+      revision: fixture.pinned,
+      destination
+    });
+
+    expect(proof.held_out).toBeNull();
+    expect(proof.commit).toBe(fixture.pinned);
+    expect(proof.revision_count).toBe(1);
+    expect(fs.existsSync(path.join(destination, "reference", "Properties.sol"))).toBe(true);
+  }, 15_000);
+
+  it("fails closed when a hold-out declaration matches no tracked path", async () => {
+    const fixture = referenceSourceRepository();
+    const destination = path.join(fixture.root, "absent");
+
+    await expect(
+      materializePinnedSource({
+        repository: fixture.repository,
+        revision: fixture.pinned,
+        destination,
+        heldOutPaths: ["reference-that-does-not-exist"]
+      })
+    ).rejects.toThrow(/matched no tracked path/u);
+    expect(fs.existsSync(destination)).toBe(false);
+  }, 15_000);
+
+  it("rejects hold-out declarations that escape the checkout", async () => {
+    const fixture = referenceSourceRepository();
+
+    for (const heldOut of [["../outside"], ["/etc"], [".git"], ["reference/../../escape"]]) {
+      await expect(
+        materializePinnedSource({
+          repository: fixture.repository,
+          revision: fixture.pinned,
+          destination: path.join(fixture.root, "escape"),
+          heldOutPaths: heldOut
+        })
+      ).rejects.toThrow(/hold-out path must/u);
+    }
+  }, 15_000);
+
+  it("rejects a hold-out revision that was rewritten after materialization", async () => {
+    const fixture = referenceSourceRepository();
+    const destination = path.join(fixture.root, "widened");
+
+    await materializePinnedSource({
+      repository: fixture.repository,
+      revision: fixture.pinned,
+      destination,
+      heldOutPaths: ["reference"]
+    });
+
+    // A materialized checkout carries no committer identity of its own.
+    git(destination, ["config", "user.name", "Ultrafuzz test"]);
+    git(destination, ["config", "user.email", "test@example.invalid"]);
+    // Withhold a protocol file without recording it, then re-verify.
+    git(destination, ["rm", "-r", "--quiet", "--", "src"]);
+    git(destination, ["commit", "--quiet", "--no-verify", "--amend", "--no-edit"]);
+    await expect(inspectPinnedSource(destination, fixture.pinned)).rejects.toThrow(
+      /not the expected parentless revision/u
+    );
+  }, 15_000);
+
+  it("rejects a tampered hold-out record", async () => {
+    const fixture = referenceSourceRepository();
+    const destination = path.join(fixture.root, "tampered");
+
+    await materializePinnedSource({
+      repository: fixture.repository,
+      revision: fixture.pinned,
+      destination,
+      heldOutPaths: ["reference"]
+    });
+    const recordPath = path.join(destination, ".git", "ultrafuzz-pinned-holdout.json");
+    const record = JSON.parse(fs.readFileSync(recordPath, "utf8")) as PinnedHoldout;
+    const rewrite = (value: Partial<PinnedHoldout>): void =>
+      fs.writeFileSync(recordPath, JSON.stringify({ ...record, ...value }, null, 2), "utf8");
+
+    // Declaring nothing would make the audit vacuous.
+    rewrite({ entries: [], paths: [] });
+    await expect(inspectPinnedSource(destination, fixture.pinned)).rejects.toThrow(/record is invalid/u);
+
+    // Naming a path that is still present claims a hold-out that never happened.
+    rewrite({ entries: [{ path: "src/protocol.txt", blob: "a".repeat(40), size: 9 }] });
+    await expect(inspectPinnedSource(destination, fixture.pinned)).rejects.toThrow(/still tracked/u);
+
+    // Naming a blob that is still readable is not a hold-out either.
+    const readable = git(destination, ["rev-parse", "HEAD:src/protocol.txt"]);
+    rewrite({ entries: [{ path: "reference/Properties.sol", blob: readable, size: 9 }] });
+    await expect(inspectPinnedSource(destination, fixture.pinned)).rejects.toThrow(/still readable/u);
+
+    // Claiming descent from a commit that is not the benchmark commit.
+    rewrite({ source_commit: "a".repeat(40) });
+    await expect(inspectPinnedSource(destination, fixture.pinned)).rejects.toThrow(
+      /not the expected parentless revision/u
+    );
+  }, 20_000);
 });
 
 function sourceRepository(): { root: string; repository: string; pinned: string; later: string } {
@@ -270,6 +451,26 @@ function sourceRepository(): { root: string; repository: string; pinned: string;
   git(repository, ["add", "."]);
   git(repository, ["commit", "--quiet", "-m", "later"]);
   return { root, repository, pinned, later: git(repository, ["rev-parse", "HEAD"]) };
+}
+
+/** A benchmark that ships a reference solution beside the protocol under test. */
+function referenceSourceRepository(): { root: string; repository: string; pinned: string } {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-pinned-holdout-"));
+  roots.push(root);
+  const repository = path.join(root, "source");
+  fs.mkdirSync(path.join(repository, "src"), { recursive: true });
+  fs.mkdirSync(path.join(repository, "tests"), { recursive: true });
+  fs.mkdirSync(path.join(repository, "reference", "nested"), { recursive: true });
+  git(repository, ["init", "--quiet", "--initial-branch=main"]);
+  git(repository, ["config", "user.name", "Ultrafuzz test"]);
+  git(repository, ["config", "user.email", "test@example.invalid"]);
+  fs.writeFileSync(path.join(repository, "src", "protocol.txt"), "protocol\n");
+  fs.writeFileSync(path.join(repository, "tests", "unit.txt"), "unit\n");
+  fs.writeFileSync(path.join(repository, "reference", "Properties.sol"), "invariant answer key\n");
+  fs.writeFileSync(path.join(repository, "reference", "nested", "Handlers.sol"), "reference handlers\n");
+  git(repository, ["add", "."]);
+  git(repository, ["commit", "--quiet", "-m", "benchmark"]);
+  return { root, repository, pinned: git(repository, ["rev-parse", "HEAD"]) };
 }
 
 function submoduleSourceRepository(): {

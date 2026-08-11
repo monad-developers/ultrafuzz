@@ -130,21 +130,20 @@ Write structured JSON to:
 
 {{artifact_dir}}/admin-config-boundary-matrix.json
 
-The JSON must include:
+Read the pinned JSON Schema at
+`{{schema_path}}/admin-config-boundary-matrix.schema.json` before authoring the
+structured artifact. It is the only authority on its JSON version, fields,
+types, required and optional members, enums, and empty form. Run the exact
+`ultrafuzz json validate` command rendered for this file in the central
+Ultrafuzz Output Contract after the final write and correct it until the command
+exits 0.
 
-- `schema_version`: `"ultrafuzz.admin-config-boundary-matrix.v1"`
-- `surfaces`: rows with exact keys `surface_id`, `module_family`,
-  `contract_or_interface`, `documented_name`, `implementation_name`, `selector`
-  (string or `null`), `authorization_model`, `getter_or_reflection_path` (string
-  or `null`), `source_evidence`, `selected_test_cases`, and `classification`
-- `selector_mismatches`: rows with `surface_id`, `documented_name`,
-  `implementation_name`, nullable `documented_selector` and
-  `implementation_selector`, `evidence_paths`, `classification`, and `reason`,
-  or `[]`
-- `ambiguous_or_incomplete_specs`: rows with `surface_id`, `classification`,
-  `reason`, and `evidence_paths`, or `[]`
-- `generated_tests`: rows with `path` and non-empty `checks`
-- `coverage_notes`: rows with `surface_id` and `reason`
+Keep the Markdown and JSON views semantically aligned. They must cover the same
+documented surfaces, implementation names and selectors, authorization and
+reflection paths, source evidence, selected tests, classifications, unresolved
+specification questions, and coverage gaps. Every referenced generated test
+must be one this node actually authored. These source, test, and cross-artifact
+relationships are contextual requirements beyond JSON Schema.
 
 Write structured findings to {{output_findings_path}}. Use an empty JSON array
 if no finding is confirmed.

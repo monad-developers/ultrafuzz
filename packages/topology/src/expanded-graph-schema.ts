@@ -167,6 +167,11 @@ export const expandedGraphJsonSchema = {
             uniqueItems: true,
             items: { type: "string", pattern: SAFE_ID_PATTERN }
           },
+          requiredCommands: {
+            type: "array",
+            uniqueItems: true,
+            items: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._+-]*$" }
+          },
           artifactDir: {
             type: "string",
             pattern: "^artifacts/[a-z0-9_][a-z0-9_-]{0,127}$"

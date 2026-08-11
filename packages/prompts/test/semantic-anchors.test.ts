@@ -284,6 +284,14 @@ describe("prompt semantic anchors", () => {
     }
   });
 
+  it("uses preflighted Recon coverage tooling without installing it during a run", () => {
+    const coverage = prompt("strategies/invariants/coverage.md");
+
+    expect(coverage).toContain("`recon-generate coverage`");
+    expect(coverage).not.toContain("npx -y recon-generate");
+    expect(coverage).not.toContain("recon-generate@latest");
+  });
+
   it("does not require unused fuzzer CLIs during project discovery", () => {
     const markdown = prompt("setup/project-discovery.md");
     const promptCorpus = loadBuiltInPromptAssets()
@@ -500,7 +508,7 @@ describe("prompt semantic anchors", () => {
     expect(dynamic).toContain("one named, non-mutating contextual gate");
   });
 
-  it("keeps generated-test manifests on the canonical generated/support bundle contract", () => {
+  it("keeps generated-test context semantics beside the schema-owned bundle shape", () => {
     const aggregate = prompt("review/aggregate-test-files.md");
     const dedupe = prompt("review/dedupe-findings.md");
     const dynamic = prompt("strategies/dynamic-strategy-generator.md");
@@ -524,10 +532,17 @@ describe("prompt semantic anchors", () => {
         .map((node) => node.id)
     );
 
-    expect(readFileSync(templatePath, "utf8")).toContain("generated_tests");
-    expect(readFileSync(templatePath, "utf8")).toContain("support_files");
-    expect(readFileSync(templatePath, "utf8")).toContain("must be strict UTF-8 text");
-    expect(readFileSync(templatePath, "utf8")).toContain("exact positive `size_bytes`");
+    const generatedTestsTemplate = readFileSync(templatePath, "utf8");
+    expect(generatedTestsTemplate).toContain("exact pinned schema named by `Validate against`");
+    expect(generatedTestsTemplate).toContain("exact `Validation command`");
+    expect(generatedTestsTemplate).toContain("must be strict UTF-8 text");
+    expect(generatedTestsTemplate).toContain("logical producer");
+    expect(generatedTestsTemplate).toContain("checked-in native framework");
+    expect(generatedTestsTemplate).not.toContain("ultrafuzz.generated-tests.v3");
+    expect(generatedTestsTemplate).not.toContain("schema_version");
+    expect(generatedTestsTemplate).not.toContain("`generated_tests`");
+    expect(generatedTestsTemplate).not.toContain("`support_files`");
+    expect(generatedTestsTemplate).not.toContain("size_bytes");
     expect(aggregate).toContain("required `generated_tests`\nand `support_files` arrays together");
     expect(aggregate).toMatch(/Require both\s+`size_bytes` and `sha256` to be present/u);
     expect(dedupe).toContain("exact `ultrafuzz.generated-tests.v3` shape");
@@ -741,25 +756,60 @@ describe("prompt semantic anchors", () => {
     expect(markdown).not.toContain("when the finding has no dedupe key");
   });
 
-  it("keeps the empty findings array contract in prompt-owned templates", () => {
+  it("keeps findings semantics beside the schema-owned JSON shape", () => {
     const templatePath = fileURLToPath(
       new URL("../../../.ultrafuzz/prompts/_templates/output-contract/findings.mdx", import.meta.url)
     );
     const template = readFileSync(templatePath, "utf8");
-    expect(template).toContain("Use `[]` when there are no findings");
-    expect(template).toContain('Every finding must set `schema_version` to exactly `"ultrafuzz.finding.v2"`');
-    expect(template).toContain("Unknown fields are invalid");
-    expect(template).toContain("`{}` is invalid");
-    expect(template).toContain("Evidence entries are either non-empty strings or non-empty closed objects");
-    expect(template).toContain("without anchors or line selectors");
-    expect(template).toContain("disjoint spans with `line_ranges`");
-    expect(template).toContain("Never emit a one-entry `line_ranges`");
-    expect(template).toContain("never combine `line_ranges` with `line` or `end_line`");
-    expect(template).toContain("Keep independent explanatory prose in `detail`");
-    expect(template).not.toContain("`schema_version` is optional");
-    expect(template).toContain("exactly `High`, `Medium`, or `Low`");
-    expect(template).toContain("later severity review owns the final `severity`");
+    expect(template).toContain("exact pinned schema named by `Validate against`");
+    expect(template).toContain("exact `Validation command`");
+    expect(template).toContain("schema alone owns the JSON version");
+    expect(template).toContain("later severity review owns final severity");
+    expect(template).toContain("Cite evidence at its real source location");
+    expect(template).not.toContain("ultrafuzz.finding.v2");
+    expect(template).not.toContain("schema_version");
+    expect(template).not.toContain("triage_classification");
     expect(template).not.toContain("final_severity");
+  });
+
+  it("delegates the boundary-recipes JSON shape to its pinned schema", () => {
+    const boundary = prompt("strategies/boundary-tests.md");
+    const templatePath = fileURLToPath(
+      new URL("../../../.ultrafuzz/prompts/_templates/output-contract/boundary-recipes.mdx", import.meta.url)
+    );
+    const template = readFileSync(templatePath, "utf8");
+
+    expect(boundary).toContain("{{schema_path}}/boundary-recipes.schema.json");
+    expect(boundary).toMatch(/exact\s+`ultrafuzz json validate` command/u);
+    expect(template).toContain("exact pinned schema named by `Validate against`");
+    expect(template).toContain("exact `Validation command`");
+    for (const duplicate of [
+      "ultrafuzz.boundary-recipes.v1",
+      "schema_version",
+      "deferred_or_spec_gated",
+      "coverage_priorities",
+      "preferred_downstream_lane"
+    ]) {
+      expect(boundary).not.toContain(duplicate);
+      expect(template).not.toContain(duplicate);
+    }
+  });
+
+  it("delegates boundary-family JSON shapes to their pinned schemas", () => {
+    const cases = [
+      ["strategies/admin-config-boundaries.md", "admin-config-boundary-matrix.schema.json"],
+      ["strategies/external-dependency-boundaries.md", "dependency-scope-matrix.schema.json"],
+      ["strategies/externalized-state-accounting.md", "externalized-state-accounting.schema.json"]
+    ] as const;
+
+    for (const [relativePath, schemaFile] of cases) {
+      const markdown = prompt(relativePath);
+      expect(markdown, relativePath).toContain(`{{schema_path}}/${schemaFile}`);
+      expect(markdown, relativePath).toMatch(/exact\s+`ultrafuzz json validate` command/u);
+      expect(markdown, relativePath).toMatch(/contextual\s+requirements beyond JSON Schema/u);
+      expect(markdown, relativePath).not.toContain("schema_version");
+      expect(markdown, relativePath).not.toContain("exact keys");
+    }
   });
 
   it("keeps Vyper target setup guidance concrete for Foundry harnesses", () => {

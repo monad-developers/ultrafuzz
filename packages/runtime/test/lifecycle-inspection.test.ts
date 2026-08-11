@@ -21,6 +21,7 @@ import {
   listRunSnapshots,
   queryWorkflowEvents,
   startRun,
+  validateProject,
   watchWorkflowEvents,
   watchWorkflowNode,
   type WorkflowLifecycleEvent
@@ -66,7 +67,7 @@ function fakeUltrafuzzCliEntrypoint(project: string): string {
   return entrypoint;
 }
 
-function writeSmallTopology(project: string): void {
+function writeSmallTopology(project: string, requiredCommand?: string): void {
   fs.writeFileSync(
     path.join(project, ".ultrafuzz", "topology.yml"),
     `version: 2
@@ -80,6 +81,7 @@ nodes:
   - id: project-discovery
     kind: agentic
     prompt: setup/project-discovery.md
+${requiredCommand === undefined ? "" : `    required_commands:\n      - ${requiredCommand}\n`}
     depends_on:
       - __start__
     outputs:
@@ -991,6 +993,223 @@ test("diagnoseProject reports a healthy pinned install and the latest published 
   assert.equal(doctor.value?.checks.find((check) => check.name === "workflow-engine-install")?.status, "ok");
   assert.equal(typeof doctor.value?.validation.policy_posture.config?.status, "string");
   assert.ok(doctor.value?.toolchain.some((entry) => entry.name === "forge"));
+});
+
+test("diagnoseProject reports commands required by the active topology", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project, "recon");
+  writeFakeInstalledEngine(project, { version: SMITHERS_ORCHESTRATOR_VERSION });
+
+  const doctor = await diagnoseProject({
+    projectRoot: project,
+    env: { PATH: path.join(project, "empty-bin") },
+    offline: true
+  });
+
+  assert.equal(doctor.value?.toolchain.find((entry) => entry.name === "recon")?.required, true);
+  assert.equal(doctor.value?.toolchain.find((entry) => entry.name === "recon")?.available, false);
+  assert.ok(
+    doctor.diagnostics.some((entry) => entry.code === "DOCTOR_TOOLCHAIN_MISSING" && entry.message.includes("recon"))
+  );
+});
+
+test("diagnoseProject rejects cwd-dependent PATH entries that are unavailable in task worktrees", async () => {
+  for (const searchPath of ["bin", ""]) {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project, "recon");
+    writeFakeInstalledEngine(project, { version: SMITHERS_ORCHESTRATOR_VERSION });
+    const executableDir = searchPath === "" ? project : path.join(project, searchPath);
+    fs.mkdirSync(executableDir, { recursive: true });
+    const executable = path.join(executableDir, "recon");
+    fs.writeFileSync(executable, "#!/bin/sh\necho recon test\n", "utf8");
+    fs.chmodSync(executable, 0o755);
+
+    const doctor = await diagnoseProject({ projectRoot: project, env: { PATH: searchPath }, offline: true });
+
+    assert.equal(doctor.value?.toolchain.find((entry) => entry.name === "recon")?.available, false);
+    assert.ok(doctor.diagnostics.some((entry) => entry.code === "DOCTOR_TOOLCHAIN_MISSING"));
+  }
+});
+
+test("diagnoseProject includes the project-local bin inherited by task execution", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project, "recon");
+  writeFakeInstalledEngine(project, { version: SMITHERS_ORCHESTRATOR_VERSION });
+  const executable = path.join(project, ".smithers", "node_modules", ".bin", "recon");
+  fs.writeFileSync(executable, "#!/bin/sh\necho recon test\n", "utf8");
+  fs.chmodSync(executable, 0o755);
+
+  const doctor = await diagnoseProject({ projectRoot: project, env: { PATH: undefined }, offline: true });
+
+  assert.equal(doctor.value?.toolchain.find((entry) => entry.name === "recon")?.path, executable);
+});
+test("startRun rejects a missing required backend before creating a run", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project, "recon");
+
+  const run = await startRun({
+    projectRoot: project,
+    runId: "missing-recon",
+    env: { PATH: path.join(project, "empty-bin") }
+  });
+
+  assert.equal(run.ok, false);
+  assert.equal(run.diagnostics[0]?.code, "RUN_REQUIRED_COMMAND_MISSING");
+  assert.match(run.diagnostics[0]?.message ?? "", /recon \(required by project-discovery\)/u);
+  assert.deepEqual(run.diagnostics[0]?.details, {
+    commands: ["recon"],
+    requirements: [{ command: "recon", node_ids: ["project-discovery"] }]
+  });
+  assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", "missing-recon")), false);
+});
+
+test("active topology transforms remove excluded nodes' command requirements", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  fs.writeFileSync(
+    path.join(project, ".ultrafuzz", "topology.yml"),
+    `version: 2
+defaults:
+  strategy_loops: 1
+nodes:
+  - id: __start__
+    kind: meta
+    role: start
+    depends_on: []
+  - id: required-branch
+    prompt: setup/project-discovery.md
+    required_commands: [recon]
+    depends_on: [__start__]
+    outputs:
+      - path: required.md
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
+  - id: active-branch
+    prompt: setup/project-discovery.md
+    required_commands: [covg-eval]
+    depends_on: [__start__]
+    outputs:
+      - path: active.md
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
+  - id: __finish__
+    kind: meta
+    role: finish
+    depends_on: [required-branch, active-branch]
+`,
+    "utf8"
+  );
+
+  const validation = await validateProject({
+    projectRoot: project,
+    topologyTransform: { excludedNodeIds: ["required-branch"] }
+  });
+
+  assert.equal(validation.ok, true, JSON.stringify(validation.diagnostics));
+  assert.deepEqual(validation.value?.topology?.required_commands, ["covg-eval"]);
+
+  let probed: readonly string[] = [];
+  const run = await startRun({
+    projectRoot: project,
+    runId: "transformed-command-requirements",
+    topologyTransform: { excludedNodeIds: ["required-branch"] },
+    requiredCommandProbe: async (commands) => {
+      probed = commands;
+      return commands.map((name) => ({ name, available: false, path: null, version: null }));
+    }
+  });
+
+  assert.deepEqual(probed, ["covg-eval"]);
+  assert.equal(run.diagnostics[0]?.code, "RUN_REQUIRED_COMMAND_MISSING");
+  assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", "transformed-command-requirements")), false);
+});
+
+test("startRun delegates cloud requirements to the execution-provider probe before creating a run", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project, "recon");
+  const configPath = path.join(project, "ultrafuzz.toml");
+  fs.writeFileSync(
+    configPath,
+    `${fs
+      .readFileSync(configPath, "utf8")
+      .replace('[execution]\nmode = "local"', '[execution]\nmode = "cloud"\nprovider = "modal"')}
+
+[execution.providers.modal]
+app = "ultrafuzz-test"
+image = "ultrafuzz-test"
+credential_env = ["UFZ_PROVIDER_ONE", "UFZ_PROVIDER_TWO"]
+`,
+    "utf8"
+  );
+  let probed: readonly string[] = [];
+
+  const run = await startRun({
+    projectRoot: project,
+    runId: "missing-cloud-recon",
+    env: {
+      PATH: path.join(project, "controller-empty-bin"),
+      UFZ_PROVIDER_ONE: "provider-one",
+      UFZ_PROVIDER_TWO: "provider-two"
+    },
+    requiredCommandProbe: async (commands) => {
+      probed = commands;
+      return commands.map((name) => ({ name, available: false, path: null, version: null }));
+    }
+  });
+
+  assert.deepEqual(probed, ["recon"], JSON.stringify(run.diagnostics));
+  assert.equal(run.diagnostics[0]?.code, "RUN_REQUIRED_COMMAND_MISSING");
+  assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", "missing-cloud-recon")), false);
+});
+
+test("diagnoseProject probes topology commands in the configured cloud execution environment", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project, "recon");
+  writeFakeInstalledEngine(project, { version: SMITHERS_ORCHESTRATOR_VERSION });
+  const configPath = path.join(project, "ultrafuzz.toml");
+  fs.writeFileSync(
+    configPath,
+    `${fs
+      .readFileSync(configPath, "utf8")
+      .replace('[execution]\nmode = "local"', '[execution]\nmode = "cloud"\nprovider = "modal"')}
+
+[execution.providers.modal]
+app = "ultrafuzz-test"
+image = "ultrafuzz-test"
+credential_env = ["UFZ_PROVIDER_ONE", "UFZ_PROVIDER_TWO"]
+`,
+    "utf8"
+  );
+  let probed: readonly string[] = [];
+
+  const doctor = await diagnoseProject({
+    projectRoot: project,
+    env: {
+      PATH: path.join(project, "controller-empty-bin"),
+      UFZ_PROVIDER_ONE: "provider-one",
+      UFZ_PROVIDER_TWO: "provider-two"
+    },
+    offline: true,
+    requiredCommandProbe: async (commands) => {
+      probed = commands;
+      return commands.map((name) => ({
+        name,
+        available: name !== "recon",
+        path: name === "recon" ? null : `/usr/local/bin/${name}`,
+        version: null
+      }));
+    }
+  });
+
+  assert.ok(probed.includes("recon"), JSON.stringify(doctor.diagnostics));
+  assert.equal(doctor.value?.toolchain.find((entry) => entry.name === "recon")?.available, false);
+  assert.ok(doctor.diagnostics.some((entry) => entry.code === "DOCTOR_TOOLCHAIN_MISSING"));
 });
 
 // The scheduler and engine workarounds are the two that carry durable resume

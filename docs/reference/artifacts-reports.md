@@ -361,6 +361,35 @@ current topology; it is not a historical fallback. The Markdown projection
 renders the same two fields, and omission or the former `"unavailable"` string
 is schema-invalid.
 
+### Campaign outcome
+
+An invariant campaign that never fuzzed and one that fuzzed and found nothing
+both leave an empty findings array, and the agent-authored report cannot tell
+them apart. Report generation therefore takes the outcome from the campaign's
+own `campaign-summary.json` and mirrors it in `report.json` as
+`campaign_outcome`:
+
+```json
+"campaign_outcome": {
+  "outcome": "blocked",
+  "reason": "recon executable unavailable; the long single-backend campaign was not started"
+}
+```
+
+When the outcome is anything other than a completed one, `report.md` renders a
+`## Campaign status` section naming the outcome and its reason. Outcomes that
+mean no fuzzing happened — `blocked`, `not-started`, `skipped`, `unavailable` —
+say the campaign did not run, and the findings sentence becomes "No issues were
+reported, but the invariant campaign did not run, so this is not a result." An
+outcome such as `partial` did produce results, so it says the campaign did not
+complete and warns that absence of a finding does not mean the property held.
+
+A campaign that ran to completion and found nothing still reads as
+`No issues reported.`, and runs with no campaign are unchanged. When no
+authoritative summary is available the field is dropped rather than published
+from the agent-authored report, so a status shown here is always one the
+campaign itself recorded.
+
 Runtime artifact gates reject unknown canonical IDs and campaign references to
 properties that were not recorded with `implemented` status. They validate each
 campaign result record independently; require its plan/backend/command/path and
@@ -492,8 +521,10 @@ separately from durable workflow completion; a detached row remains
 nonterminal until its referenced run's `state.json` reaches a terminal state.
 `ultrafuzz eval status <eval-run-id>` joins these artifacts read-only to show
 every matrix row's durable node completion and ETA. Its table and versioned
-JSON use only opaque row labels and disclosure-safe lifecycle, count, and
-timing fields.
+JSON use only opaque row labels and disclosure-safe lifecycle, count, timing,
+and node-control fields. The table bounds active/waiting node IDs to three with
+a `+N` suffix; JSON retains every node ID, typed wait reason and next action,
+and the lifecycle of the currently bound linked workflow.
 
 `ultrafuzz eval score` joins the latest record with the referenced run's
 durable `state.json` and cumulative `run.json` accounting. Each row in

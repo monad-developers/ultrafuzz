@@ -97,6 +97,12 @@ export interface EvalTarget {
   ground_truth: string;
   /** `private` forces manifest-only artifact reporting unless the suite explicitly opts into `upload`. */
   sensitivity?: "public" | "private";
+  /**
+   * Benchmark paths the run must never read, such as a reference solution the
+   * agent would otherwise copy instead of deriving. Applied when the pinned
+   * target is materialized; a launch is refused if any are still present.
+   */
+  held_out_paths?: string[];
 }
 
 export interface EvalVariant {

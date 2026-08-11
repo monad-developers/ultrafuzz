@@ -442,7 +442,7 @@ function writeFakeInstalledSmithers(
   );
   fs.writeFileSync(
     paths.target,
-    '#!/bin/sh\nif [ -n "$SMITHERS_FAKE_EXECUTED_AS_LOG" ]; then printf \'%s\\n\' "$0" > "$SMITHERS_FAKE_EXECUTED_AS_LOG"; fi\nprintf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"\nprintf \'%s\\n\' \'{"ok":true}\'\n',
+    '#!/bin/sh\nif [ -n "$SMITHERS_FAKE_EXECUTED_AS_LOG" ]; then printf \'%s\\n\' "$0" > "$SMITHERS_FAKE_EXECUTED_AS_LOG"; fi\nif [ -n "$SMITHERS_FAKE_PATH_LOG" ]; then printf \'%s\\n\' "$PATH" > "$SMITHERS_FAKE_PATH_LOG"; fi\nprintf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"\nprintf \'%s\\n\' \'{"ok":true}\'\n',
     "utf8"
   );
   fs.chmodSync(paths.target, 0o755);
@@ -1507,14 +1507,17 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.equal(fs.existsSync(path.join(project, ".smithers/agents/toml.ts")), true);
   assert.equal(fs.existsSync(path.join(project, ".smithers/agents/strict-json.ts")), true);
   const tomlHelperText = fs.readFileSync(path.join(project, ".smithers/agents/toml.ts"), "utf8");
-  assert.match(codexAgentText, /import \{ readStringTable, stringField \} from ".\/toml";/);
+  assert.match(codexAgentText, /import \{ readRootStringTable, readStringTable, stringField \} from ".\/toml";/);
   assert.doesNotMatch(codexAgentText, /function readStringTable/);
+  assert.match(tomlHelperText, /export function readRootStringTable/);
   // TOML's \UXXXXXXXX has no JSON equivalent, so values are not JSON.parse'd.
   assert.doesNotMatch(tomlHelperText, /JSON\.parse/);
   assert.match(tomlHelperText, /escape !== "u" && escape !== "U"/);
   assert.match(codexAgentText, /const apiKey = requiredEnv/);
   assert.match(codexAgentText, /return { apiKey, env: { CODEX_API_KEY: apiKey } }/);
-  assert.match(codexAgentText, /env: { OPENAI_API_KEY: "", CODEX_API_KEY: "" }/);
+  assert.match(codexAgentText, /const env: Record<string, string> = { OPENAI_API_KEY: "", CODEX_API_KEY: "" };/);
+  assert.match(codexAgentText, /function codexProviderBaseUrl/);
+  assert.match(codexAgentText, /process\.env\.OPENAI_BASE_URL/);
   assert.match(codexAgentText, /createCodexAgent/);
   assert.match(codexAgentText, /model_reasoning_effort:\s*options\.reasoningEffort/);
   assert.match(codexAgentText, /class CompatibleCodexAgent extends SmithersCodexAgent/);
@@ -2407,6 +2410,107 @@ test(
     });
     assert.equal(resumed.args.includes("--add-dir"), false);
     await resumed.cleanup?.();
+  }
+);
+
+test(
+  "generated CodexAgent subscription auth routes the credential preflight at the CLI's configured provider",
+  { skip: !runningUnderBun },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const configPath = path.join(project, "ultrafuzz.toml");
+    fs.writeFileSync(
+      configPath,
+      fs
+        .readFileSync(configPath, "utf8")
+        .replace(
+          /\[agents\.CodexAgent\]\nauth = "api-key"\napi_key_env = "OPENAI_API_KEY"/u,
+          '[agents.CodexAgent]\nauth = "subscription"'
+        ),
+      "utf8"
+    );
+    const { createCodexAgent } = await loadGeneratedCodexAgent(project);
+    const codexHome = path.join(project, "codex-home");
+    fs.mkdirSync(codexHome, { recursive: true });
+
+    const agentEnvironment = (): Record<string, string> =>
+      (createCodexAgent() as { opts: { env: Record<string, string> } }).opts.env;
+
+    const previous = {
+      config: process.env.ULTRAFUZZ_CONFIG_PATH,
+      codexHome: process.env.CODEX_HOME,
+      baseUrl: process.env.OPENAI_BASE_URL
+    };
+    process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
+    process.env.CODEX_HOME = codexHome;
+    delete process.env.OPENAI_BASE_URL;
+    try {
+      // No config.toml at all: unchanged behaviour, no route asserted.
+      assert.equal(agentEnvironment().OPENAI_BASE_URL, undefined);
+
+      // A provider with a base_url is adopted so preflight and the CLI agree.
+      const configToml = path.join(codexHome, "config.toml");
+      fs.writeFileSync(
+        configToml,
+        [
+          'model = "gpt-5.5"',
+          'model_provider = "gateway"',
+          "",
+          "[model_providers.gateway]",
+          'base_url = "http://127.0.0.1:2455/backend-api/codex"',
+          'wire_api = "responses"'
+        ].join("\n"),
+        "utf8"
+      );
+      assert.equal(agentEnvironment().OPENAI_BASE_URL, "http://127.0.0.1:2455/backend-api/codex");
+      // Subscription auth still refuses to hand a key to the child.
+      assert.equal(agentEnvironment().OPENAI_API_KEY, "");
+      assert.equal(agentEnvironment().CODEX_API_KEY, "");
+
+      // A quoted provider id in the table header resolves identically.
+      fs.writeFileSync(
+        configToml,
+        [
+          'model_provider = "my gateway"',
+          "",
+          '[model_providers."my gateway"]',
+          'base_url = "https://gateway.example/v1"'
+        ].join("\n"),
+        "utf8"
+      );
+      assert.equal(agentEnvironment().OPENAI_BASE_URL, "https://gateway.example/v1");
+
+      // An operator-supplied route always wins.
+      process.env.OPENAI_BASE_URL = "https://operator.example/v1";
+      assert.equal(agentEnvironment().OPENAI_BASE_URL, undefined);
+      delete process.env.OPENAI_BASE_URL;
+
+      // Default provider, unknown provider, and a provider without base_url all
+      // fall back to the public API rather than failing the run.
+      fs.writeFileSync(configToml, 'model = "gpt-5.5"\n', "utf8");
+      assert.equal(agentEnvironment().OPENAI_BASE_URL, undefined);
+      fs.writeFileSync(configToml, 'model_provider = "absent"\n', "utf8");
+      assert.equal(agentEnvironment().OPENAI_BASE_URL, undefined);
+      fs.writeFileSync(
+        configToml,
+        ['model_provider = "gateway"', "", "[model_providers.gateway]", 'wire_api = "responses"'].join("\n"),
+        "utf8"
+      );
+      assert.equal(agentEnvironment().OPENAI_BASE_URL, undefined);
+
+      // A malformed escape must not escape as an uncaught render-time throw.
+      fs.writeFileSync(configToml, 'model_provider = "bad\\q"\n', "utf8");
+      assert.equal(agentEnvironment().OPENAI_BASE_URL, undefined);
+    } finally {
+      if (previous.config === undefined) delete process.env.ULTRAFUZZ_CONFIG_PATH;
+      else process.env.ULTRAFUZZ_CONFIG_PATH = previous.config;
+      if (previous.codexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previous.codexHome;
+      if (previous.baseUrl === undefined) delete process.env.OPENAI_BASE_URL;
+      else process.env.OPENAI_BASE_URL = previous.baseUrl;
+    }
   }
 );
 
@@ -6012,6 +6116,39 @@ test("startRun forwards configured and explicitly allowed environment variables 
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   assert.equal(fs.readFileSync(environmentLog, "utf8"), "configured-agent-key||ci\n");
   assert.equal(fs.readFileSync(contextLog, "utf8"), "|||||\n");
+});
+
+test("startRun rejects an untracked cwd executable before task worktrees or model work", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const topologyPath = path.join(project, ".ultrafuzz", "topology.yml");
+  fs.writeFileSync(
+    topologyPath,
+    fs
+      .readFileSync(topologyPath, "utf8")
+      .replace(
+        "    prompt: setup/project-discovery.md\n",
+        "    prompt: setup/project-discovery.md\n    required_commands: [recon]\n"
+      ),
+    "utf8"
+  );
+  writeFakeInstalledSmithers(project);
+  const executable = path.join(project, "recon");
+  fs.writeFileSync(executable, "#!/bin/sh\necho recon test\n", "utf8");
+  fs.chmodSync(executable, 0o755);
+  const run = await startRun({
+    projectRoot: project,
+    runId: "empty-path-required-command",
+    env: {
+      PATH: "",
+      SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log")
+    }
+  });
+
+  assert.equal(run.ok, false);
+  assert.equal(run.diagnostics[0]?.code, "RUN_REQUIRED_COMMAND_MISSING");
+  assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", "empty-path-required-command")), false);
 });
 
 test("startRun rejects controller-only paths as credential environment names", async () => {
@@ -11138,6 +11275,40 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
       `a relaunched workflow must keep streaming into the run's own log directory: ${relaunch}`
     );
   }
+});
+
+test("lifecycle relaunch rejects a required backend that disappeared before new attempts", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const topologyPath = path.join(project, ".ultrafuzz", "topology.yml");
+  fs.writeFileSync(
+    topologyPath,
+    fs
+      .readFileSync(topologyPath, "utf8")
+      .replace(
+        "    prompt: setup/project-discovery.md\n",
+        "    prompt: setup/project-discovery.md\n    required_commands: [recon-required-test]\n"
+      ),
+    "utf8"
+  );
+  const env = fakeSmithersEnv(project);
+  const recon = path.join(project, "fake-bin", "recon-required-test");
+  fs.writeFileSync(recon, "#!/bin/sh\necho recon test\n", "utf8");
+  fs.chmodSync(recon, 0o755);
+  const run = await startRun({ projectRoot: project, runId: "lifecycle-required-command", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  fs.rmSync(recon);
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+  const eventsPath = path.join(run.value!.run_root, "events.jsonl");
+  const eventsBefore = fs.readFileSync(eventsPath, "utf8");
+
+  const resumed = await resumeRun({ projectRoot: project, runId: run.value!.run_id, env });
+
+  assert.equal(resumed.ok, false);
+  assert.equal(resumed.diagnostics[0]?.code, "RUN_REQUIRED_COMMAND_MISSING");
+  assert.equal(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), "");
+  assert.equal(fs.readFileSync(eventsPath, "utf8"), eventsBefore);
 });
 
 test("legacy workflow evidence gaps fail closed without reconstructing trust", async () => {

@@ -235,7 +235,8 @@ describe("prompt rendering", () => {
       `Validation command: \`ultrafuzz json validate --schema '${path.join(schemaDirectory, "findings.schema.json")}' --file '${path.join(input.node.artifactDir, "findings.json")}'\``
     );
     expect(result.renderedMarkdown).toContain(`orchestrator-supplied JSON Schema under \`${schemaDirectory}\``);
-    expect(result.renderedMarkdown).toContain("It is the authority on field names, types, and required fields");
+    expect(result.renderedMarkdown).toContain("It is the sole authority on JSON versions");
+    expect(result.renderedMarkdown).toContain("Prompt prose may add semantic or run-context requirements");
     for (const guidance of [
       "Write the artifact in its canonical schema",
       "After your final write and before returning the node's final response",
@@ -252,7 +253,7 @@ describe("prompt rendering", () => {
     }
     expect(result.renderedMarkdown).toContain("generated-tests.schema.json");
     expect(result.renderedMarkdown).toContain(
-      "Valid empty bundle: `generated_tests` and `support_files` are both `[]`; the exact checked-in native bundle `framework` remains required."
+      "Schema-backed empty form: defined only by the pinned schema; inspect and validate it instead of copying a prose example."
     );
     expect(result.renderedMarkdown).not.toContain('"framework":"foundry"');
     expect(result.renderedMarkdown).not.toContain('"node_id":"<node-id>"');
@@ -266,13 +267,60 @@ describe("prompt rendering", () => {
     expect(result.renderedMarkdown).toContain(
       `write the manifest to exactly \`${path.join(input.node.artifactDir, "generated-tests.json")}\``
     );
-    expect(result.renderedMarkdown).toContain("`run_id` exactly `run-1`");
-    expect(result.renderedMarkdown).toContain("`node_id` exactly `boundary-tests`");
-    expect(result.renderedMarkdown).toContain("logical producer identity");
-    expect(result.renderedMarkdown).toContain("one required bundle-level `framework`");
-    expect(result.renderedMarkdown).toContain("remains required when both arrays are empty");
+    expect(result.renderedMarkdown).toContain("`run_id` exactly to `run-1`");
+    expect(result.renderedMarkdown).toContain("`node_id` exactly to `boundary-tests`");
+    expect(result.renderedMarkdown).toContain("logical producer shown here");
+    expect(result.renderedMarkdown).toContain("Bind the bundle framework to the one checked-in native framework");
+    expect(result.renderedMarkdown).toContain("use the empty bundle defined by the schema");
     expect(result.renderedMarkdown).toContain("Never mix frameworks in one bundle");
     expect(result.renderedMarkdown).not.toContain("optional fields are `language`, `framework`");
+    expect(result.renderedMarkdown).not.toContain("ultrafuzz.generated-tests.v3");
+  });
+
+  it("renders boundary recipes from the pinned schema without a prose-owned JSON shape", () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-boundary-recipes-"));
+    tmpDirs.push(tmp);
+    const input = baseRenderInput(tmp);
+    const boundaryPrompt = loadBuiltInPromptAssets().find(
+      (asset) => asset.relativePath === "strategies/boundary-tests.md"
+    );
+    expect(boundaryPrompt).toBeDefined();
+    input.prompt = boundaryPrompt!.markdown;
+    input.graph.logicalNodes.push({
+      id: "property-specification-fanin",
+      outputs: [
+        {
+          path: "properties.md",
+          contract: "ultrafuzz/nonempty-markdown@1",
+          primary: true,
+          description: "A human-readable property catalog."
+        }
+      ],
+      artifactDir: path.join(input.run.artifactsDir, "property-specification-fanin")
+    });
+    input.graph.logicalNodes[2]!.dependsOn = ["base-test-setup", "property-specification-fanin"];
+    input.graph.logicalNodes[2]!.outputs!.push({
+      path: "boundary-recipes.json",
+      contract: "ultrafuzz/boundary-recipes@1",
+      primary: false,
+      description: "Source-backed boundary and negative test recipes.",
+      validEmptyExample:
+        '{"schema_version":"ultrafuzz.boundary-recipes.v1","recipes":[],"deferred_or_spec_gated":[],"coverage_priorities":[]}',
+      schemaFile: "boundary-recipes.schema.json"
+    });
+
+    const result = renderPrompt(input);
+    const schemaPath = path.join(input.node.workspacePath, ".ultrafuzz", "schemas", "boundary-recipes.schema.json");
+    const artifactPath = path.join(input.node.artifactDir, "boundary-recipes.json");
+
+    expect(result.renderedMarkdown).toContain(`\`${schemaPath}\``);
+    expect(result.renderedMarkdown).toContain(`Validate against: \`${schemaPath}\``);
+    expect(result.renderedMarkdown).toContain(
+      `Validation command: \`ultrafuzz json validate --schema '${schemaPath}' --file '${artifactPath}'\``
+    );
+    expect(result.renderedMarkdown).not.toContain("ultrafuzz.boundary-recipes.v1");
+    expect(result.renderedMarkdown).not.toContain("deferred_or_spec_gated");
+    expect(result.renderedMarkdown).not.toContain("coverage_priorities");
   });
 
   it("renders specialized generated-test instructions for every production producer", () => {
@@ -344,8 +392,8 @@ describe("prompt rendering", () => {
       expect(rendered, producer.id).toContain(
         `write the manifest to exactly \`${path.join(artifactDir, "generated-tests.json")}\``
       );
-      expect(rendered, producer.id).toContain("`run_id` exactly `generated-test-render`");
-      expect(rendered, producer.id).toContain(`\`node_id\` exactly \`${producer.id}\``);
+      expect(rendered, producer.id).toContain("`run_id` exactly to `generated-test-render`");
+      expect(rendered, producer.id).toContain(`\`node_id\` exactly to \`${producer.id}\``);
       expect(rendered, producer.id).toContain(
         `Validation command: \`ultrafuzz json validate --schema '${path.join(workspacePath, ".ultrafuzz", "schemas", "generated-tests.schema.json")}' --file '${path.join(artifactDir, "generated-tests.json")}'\``
       );

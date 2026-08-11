@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { createNodeAttemptLedgerEntry, EVENT_SCHEMA_VERSION } from "@ultrafuzz/artifacts";
+import { initProject } from "@ultrafuzz/runtime";
 import { describe, expect, it, vi } from "vitest";
 
 import { summarizeEvalTerminal } from "../src/efficiency.js";
@@ -504,6 +505,43 @@ describe("runner", () => {
     expect(record).not.toHaveProperty("graph_fingerprint");
     expect(record).not.toHaveProperty("config_fingerprint");
     expect(readEvalRunRecords(path.join(evalRunRoot, "runs.jsonl"))).toEqual([record]);
+  });
+
+  it("rejects a row missing its topology backend before creating an Ultrafuzz run", async () => {
+    const project = mkdtempSync(path.join(tmpdir(), "ufz-evals-required-command-"));
+    initProject({ projectRoot: project, force: true });
+    const suite = testSuite(path.join(project, "ground-truth"));
+    const row = testRow(suite, { target: { ...testRow(suite).target, path: project } });
+
+    const record = await launchEvalRow({
+      projectRoot: project,
+      suitePath: "suite.yml",
+      evalRunId: "missing-backend-eval",
+      row,
+      suite,
+      env: { PATH: path.join(project, "empty-bin") }
+    });
+
+    expect(record.status).toBe("failed");
+    expect(record.workflow_ids).toEqual([]);
+    expect(record.diagnostics).toEqual([
+      expect.objectContaining({
+        code: "RUN_REQUIRED_COMMAND_MISSING",
+        details: {
+          commands: ["covg-eval", "recon", "recon-generate"],
+          requirements: [
+            { command: "covg-eval", node_ids: ["stateful-invariant-coverage"] },
+            {
+              command: "recon",
+              node_ids: ["stateful-invariant-campaign", "stateful-invariant-coverage"]
+            },
+            { command: "recon-generate", node_ids: ["stateful-invariant-coverage"] }
+          ]
+        }
+      })
+    ]);
+    const runsRoot = path.join(project, ".ultrafuzz", "runs");
+    expect(fs.existsSync(runsRoot) ? fs.readdirSync(runsRoot) : []).toEqual([]);
   });
 
   it("keeps a detached workflow nonterminal after its launcher exits", async () => {

@@ -136,20 +136,21 @@ Write structured JSON to:
 
 {{artifact_dir}}/dependency-scope-matrix.json
 
-The JSON must include:
+Read the pinned JSON Schema at
+`{{schema_path}}/dependency-scope-matrix.schema.json` before authoring the
+structured artifact. It is the only authority on its JSON version, fields,
+types, required and optional members, enums, and empty form. Run the exact
+`ultrafuzz json validate` command rendered for this file in the central
+Ultrafuzz Output Contract after the final write and correct it until the command
+exits 0.
 
-- `schema_version`: `"ultrafuzz.dependency-scope-matrix.v1"`
-- `dependencies`: rows with exact keys `dependency_id`,
-  `contract_or_interface`, `dependency_type`, `touched_functions`,
-  `classification`, `source_evidence`, `source_backed_scope_claim`, nullable
-  `in_scope_rationale`, `selected_test_cases`, nullable
-  `expected_classification_if_red`, `scope_notes`, and `harness_notes`
-- `in_scope_test_targets`: rows with `dependency_id` and `rationale`, or `[]`
-- `non_finding_rows`: rows with `dependency_id` and `reason`, or `[]`
-- `generated_tests`: rows with `path` and non-empty `checks`, or `[]`
-- `source_backed_in_scope_rationales`: rows with `finding_candidate_id`,
-  `dependency_id`, and non-empty `evidence_paths`, or `[]`
-- `coverage_notes`: rows with `dependency_id` and `reason`
+Keep the Markdown and JSON views semantically aligned. They must cover the same
+dependencies, touched public workflows, source evidence, scope decisions,
+source-backed rationales, selected tests, non-finding decisions, harness notes,
+and coverage gaps. Every referenced generated test must be one this node
+actually authored, and every production finding must retain the source-backed
+in-scope rationale that makes it reportable. These relationships are contextual
+requirements beyond JSON Schema.
 
 Write structured findings to {{output_findings_path}}. Use an empty JSON array
 if no source-backed in-scope production finding is confirmed.

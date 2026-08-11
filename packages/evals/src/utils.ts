@@ -243,11 +243,38 @@ export function assertTargetRef(targetPath: string, ref: string): void {
   if (/^[0-9a-f]{7,40}$/iu.test(ref) && head.startsWith(ref.toLowerCase())) {
     return;
   }
+  if (matchesPinnedHoldout(targetPath, ref, head)) {
+    return;
+  }
   throw new EvalError("EVAL_TARGET_REF_UNKNOWN", `target ref ${ref} is not present in ${targetPath}`, {
     path: targetPath,
     ref,
     head
   });
+}
+
+/**
+ * A benchmark that withholds reference paths is materialized as a parentless
+ * revision and the declared commit is destroyed, so it cannot be resolved in
+ * the checkout. Accept that checkout only when its own hold-out record says
+ * HEAD is exactly the revision derived from exactly this ref.
+ */
+function matchesPinnedHoldout(targetPath: string, ref: string, head: string): boolean {
+  const recordPath = path.join(targetPath, ".git", "ultrafuzz-pinned-holdout.json");
+  let record: unknown;
+  try {
+    if (!fs.statSync(recordPath).isFile()) return false;
+    record = JSON.parse(fs.readFileSync(recordPath, "utf8"));
+  } catch {
+    return false;
+  }
+  if (typeof record !== "object" || record === null) return false;
+  const { source_commit: sourceCommit, commit } = record as { source_commit?: unknown; commit?: unknown };
+  if (typeof sourceCommit !== "string" || typeof commit !== "string") return false;
+  if (commit.toLowerCase() !== head.toLowerCase()) return false;
+  // Suites may pin an abbreviated commit, which the non-held-out path already
+  // accepts; require it to be a hex prefix so a branch name cannot match.
+  return /^[0-9a-f]{7,40}$/iu.test(ref) && sourceCommit.toLowerCase().startsWith(ref.toLowerCase());
 }
 
 export function evalRunRoot(projectRoot: string, evalRunId: string): string {

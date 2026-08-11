@@ -34,7 +34,7 @@ targets:
     ref: ${yamlString(input.config.target.ref)}
     path: ${yamlString(input.targetPath)}
     sensitivity: private
-    ground_truth: findings.yml
+    ground_truth: findings.yml${heldOutPathsBlock(input.config.target.held_out_paths)}
 
 variants:
   - id: ${yamlString(input.model.slug)}
@@ -64,6 +64,12 @@ reporting:
     include: ["report.md", "report.json"]
     max_file_bytes: 5000000
 `;
+}
+
+/** Emitted only when the benchmark withholds paths, so existing suites are unchanged. */
+function heldOutPathsBlock(heldOutPaths: readonly string[] | undefined): string {
+  if (heldOutPaths === undefined || heldOutPaths.length === 0) return "";
+  return `\n    held_out_paths: ${yamlStringArray(heldOutPaths)}`;
 }
 
 function yamlString(value: string): string {

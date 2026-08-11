@@ -60,6 +60,9 @@ test("eval status renders disclosure-safe table and JSON snapshots without mutat
         executed_nodes: number;
         total_nodes: number;
         progress_percent: number;
+        active_node_ids: string[];
+        waiting_nodes: unknown[];
+        linked_workflow_status: string | null;
       }>;
     };
   };
@@ -72,7 +75,10 @@ test("eval status renders disclosure-safe table and JSON snapshots without mutat
       status: row.status,
       executed_nodes: row.executed_nodes,
       total_nodes: row.total_nodes,
-      progress_percent: row.progress_percent
+      progress_percent: row.progress_percent,
+      active_node_ids: row.active_node_ids,
+      waiting_nodes: row.waiting_nodes,
+      linked_workflow_status: row.linked_workflow_status
     })),
     [
       {
@@ -80,7 +86,10 @@ test("eval status renders disclosure-safe table and JSON snapshots without mutat
         status: "succeeded",
         executed_nodes: 2,
         total_nodes: 2,
-        progress_percent: 100
+        progress_percent: 100,
+        active_node_ids: [],
+        waiting_nodes: [],
+        linked_workflow_status: null
       }
     ]
   );
@@ -95,8 +104,11 @@ test("eval status renders disclosure-safe table and JSON snapshots without mutat
 
   const table = await invoke(project, ["eval", "status", evalRunId, "--project", project]);
   assert.equal(table.code, 0, table.stderr || table.stdout);
-  assert.match(table.stdout, /Row\s+Status\s+Progress\s+ETA\s+Checkpoint/u);
-  assert.match(table.stdout, /row-01\s+succeeded\s+100\.0% \(2\/2\)\s+complete/u);
+  assert.match(table.stdout, /Row\s+Status\s+Progress\s+ETA\s+Checkpoint\s+Nodes\s+Workflow/u);
+  assert.match(
+    table.stdout,
+    /row-01\s+succeeded\s+100\.0% \(2\/2\)\s+complete\s+\d+(?:s|m(?: \d+s)?|h(?: \d+m)?|d(?: \d+h)?)\s+none\s+none/u
+  );
 
   const watch = await invoke(project, [
     "eval",

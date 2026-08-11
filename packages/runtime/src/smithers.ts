@@ -3696,11 +3696,12 @@ export function composeSmithersCommandPath(
 ): string {
   const trustedBin = source[ULTRAFUZZ_TRUSTED_BIN_ENV];
   const localBin = path.join(projectRoot, ".smithers", "node_modules", ".bin");
-  const sourceEntries = (source.PATH ?? "")
-    .split(path.delimiter)
-    .filter((entry) => entry.length > 0 && entry !== trustedBin && entry !== localBin);
-  return [trustedBin, localBin, ...sourceEntries]
-    .filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
+  // Preserve the caller's PATH representation for workflow-engine compatibility,
+  // while keeping the authenticated CLI and project-local Smithers binaries first.
+  // Required-command preflight intentionally accepts only stable absolute entries,
+  // because task commands execute from fresh worktrees rather than this checkout.
+  return [trustedBin, localBin, source.PATH]
+    .filter((entry): entry is string => typeof entry === "string")
     .join(path.delimiter);
 }
 

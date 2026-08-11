@@ -41,8 +41,20 @@ export const EVAL_WORKFLOW_INPUT_RESERVED_KEYS = [
   "ultrafuzz_eval"
 ] as const;
 
-const reservedWorkflowInputKeys = new Set<string>(EVAL_WORKFLOW_INPUT_RESERVED_KEYS);
 const nonEmptyString = z.string().min(1).regex(/\S/u);
+/**
+ * Held-out paths are joined to the target checkout, so they must stay inside
+ * it. These are the same rules source materialization applies before removing
+ * anything: a declaration that escapes would inspect an unrelated directory
+ * and could reject a perfectly valid run.
+ */
+const heldOutPath = nonEmptyString.refine((value) => {
+  const trimmed = value.trim().replace(/\/+$/u, "");
+  if (trimmed === "" || path.isAbsolute(trimmed) || /^[A-Za-z]:/u.test(trimmed)) return false;
+  return !trimmed.split(/[\\/]/u).some((segment) => segment === ".." || segment === "." || segment === ".git");
+}, "held_out_paths entries must be relative paths inside the target that do not traverse or name Git metadata");
+
+const reservedWorkflowInputKeys = new Set<string>(EVAL_WORKFLOW_INPUT_RESERVED_KEYS);
 const positiveInteger = z.number().int().min(1).max(Number.MAX_SAFE_INTEGER);
 const nonNegativeInteger = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const unitMetric = z.number().min(0).max(1);
@@ -65,7 +77,8 @@ const targetSchema = z.strictObject({
   path: nonEmptyString.optional(),
   signal_profile: nonEmptyString.optional(),
   ground_truth: nonEmptyString,
-  sensitivity: z.enum(["public", "private"]).optional()
+  sensitivity: z.enum(["public", "private"]).optional(),
+  held_out_paths: z.array(heldOutPath).optional()
 });
 
 const operatorJsonValueSchema: z.ZodType<EvalOperatorJsonValue> = z.lazy(() =>

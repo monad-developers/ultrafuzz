@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { CodexAgent as SmithersCodexAgent } from "smithers-orchestrator";
 import { workflowControlChildEnvironment, workflowControlCredentialValue } from "./environment";
-import { readStringTable, stringField } from "./toml";
+import { readRootStringTable, readStringTable, stringField } from "./toml";
 
 type CodexAuthConfig = { auth?: string; api_key_env?: string; config_dir?: string };
 type CodexAuthOptions = { apiKey?: string; configDir?: string; env?: Record<string, string> };
@@ -62,12 +62,70 @@ function codexAuthOptions(): CodexAuthOptions {
     return { apiKey, env: { CODEX_API_KEY: apiKey } };
   }
   if (auth === "subscription") {
-    return {
-      ...(config.config_dir === undefined ? {} : { configDir: resolveConfigDir(config.config_dir) }),
-      env: { OPENAI_API_KEY: "", CODEX_API_KEY: "" }
-    };
+    const configDir = config.config_dir === undefined ? undefined : resolveConfigDir(config.config_dir);
+    const env: Record<string, string> = { OPENAI_API_KEY: "", CODEX_API_KEY: "" };
+    // An operator-supplied route always wins; only fill the gap.
+    if ((process.env.OPENAI_BASE_URL ?? "").trim() === "") {
+      const baseUrl = codexProviderBaseUrl(configDir);
+      if (baseUrl !== undefined) env.OPENAI_BASE_URL = baseUrl;
+    }
+    return { ...(configDir === undefined ? {} : { configDir }), env };
   }
   throw new Error(`unsupported CodexAgent auth mode in ultrafuzz.toml: ${auth}`);
+}
+
+/**
+ * Resolve the endpoint the Codex CLI will actually call. Subscription auth
+ * carries no API key, so the engine's credential preflight falls back to the
+ * public API; a CLI pointed at a gateway, proxy, or Azure deployment is then
+ * reported as unauthenticated even though it is correctly configured. Reading
+ * the CLI's own provider routing keeps the preflight and the CLI on one
+ * endpoint. Any unreadable, malformed, or incomplete configuration falls back
+ * to today's behaviour rather than failing the run.
+ */
+function codexProviderBaseUrl(configDir: string | undefined): string | undefined {
+  const home = resolveCodexHome(configDir);
+  if (home === undefined) {
+    return undefined;
+  }
+  let text: string;
+  try {
+    text = readFileSync(path.join(home, "config.toml"), "utf8");
+  } catch {
+    return undefined;
+  }
+  try {
+    const providerId = stringField(readRootStringTable(text), "model_provider")?.trim();
+    if (providerId === undefined || providerId === "") {
+      return undefined;
+    }
+    // The provider id may be bare or quoted in the table header.
+    for (const table of [`model_providers.${providerId}`, `model_providers."${providerId}"`]) {
+      const baseUrl = stringField(readStringTable(text, table), "base_url")?.trim();
+      if (baseUrl !== undefined && baseUrl !== "") {
+        return baseUrl;
+      }
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+/**
+ * Mirror the directory the spawned CLI will use: an Ultrafuzz `config_dir`
+ * becomes the child's `CODEX_HOME`, so it outranks the ambient value.
+ */
+function resolveCodexHome(configDir: string | undefined): string | undefined {
+  if (configDir !== undefined) {
+    return configDir;
+  }
+  const explicit = process.env.CODEX_HOME?.trim();
+  if (explicit !== undefined && explicit !== "") {
+    return explicit;
+  }
+  const home = process.env.HOME?.trim();
+  return home === undefined || home === "" ? undefined : path.join(home, ".codex");
 }
 
 function readCodexAuthConfig(): CodexAuthConfig {

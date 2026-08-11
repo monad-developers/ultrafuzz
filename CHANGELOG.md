@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `eval status` now names active and waiting nodes, preserves their wait reason and next eligible action in JSON, and shows whether the linked workflow is running or stopped, so controller-loss stalls identify the exact takeover work instead of appearing only as stale checkpoints (#497).
+- Fail workflow launch before run creation when an active topology's required campaign executables are unavailable, expose those requirements through `ultrafuzz doctor`, and probe cloud requirements inside the configured provider image (#498).
+
 - Hydrated pinned submodules now use exact per-task Git worktree configuration, so Foundry and recursive submodule initialization remain offline and cannot contaminate the shared repository configuration or create child Git metadata (#492).
 - Adds `ultrafuzz json validate` and producer-side prompt commands backed by one pinned Draft 2020-12 schema bundle; all JSON handoffs now use closed versioned contracts, invalid output fails without host repair or retry, and retained runtime documents are validated before publication (#439).
 - Final-review tasks derive current property implementation coverage from the verified catalog, current implemented-properties handoff, and resolved priority configuration whenever the selected topology declares that producer; JSON, findings, and Markdown share one deterministic projector, complete declared report sets remain byte-identical, both CommonMark fence markers exclude proof code from prose-only presentation rules without exempting secrets or private paths, and malformed or non-authoritative inputs fail closed (#460, #461, #464, #465, #470, #471).

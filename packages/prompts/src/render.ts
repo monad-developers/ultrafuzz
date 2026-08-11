@@ -340,12 +340,11 @@ function appendOutputContract(rendered: string, input: PromptRenderInput, curren
           strategy_attempt_test_dir: markdownCodeSpan(strategyAttemptTestDirectory(input)),
           generated_tests_dir: markdownCodeSpan(path.join(input.node.artifactDir, "generated-tests")),
           generated_tests_manifest_path: markdownCodeSpan(path.join(input.node.artifactDir, generatedTestsOutput.path)),
-          generated_tests_schema_version: markdownCodeSpan("ultrafuzz.generated-tests.v3"),
           run_id: markdownCodeSpan(input.run.id),
           logical_node_id: markdownCodeSpan(input.node.logicalId)
         });
   const schemaGuidance = outputs.some((output) => output.schemaFile !== undefined)
-    ? `Where an entry above names a schema to validate against, that file is an orchestrator-supplied JSON Schema under ${markdownCodeSpan(schemaDirectory)}. Read it before authoring the artifact. It is the authority on field names, types, and required fields; prefer it over any example when they disagree.\n\n`
+    ? `Where an entry above names a schema to validate against, that file is an orchestrator-supplied JSON Schema under ${markdownCodeSpan(schemaDirectory)}. Read it before authoring the artifact. It is the sole authority on JSON versions, field names, types, enums, required or optional members, and empty forms. Prompt prose may add semantic or run-context requirements that JSON Schema cannot express, but it does not redefine the JSON shape.\n\n`
     : "";
   const contract = renderOutputContractTemplate("output-contract.mdx", {
     schema_guidance: schemaGuidance,
@@ -353,8 +352,8 @@ function appendOutputContract(rendered: string, input: PromptRenderInput, curren
       .map((output) => {
         const validEmptyExample = output.validEmptyExample === "" ? "<empty file>" : output.validEmptyExample;
         const empty =
-          output.contract === "ultrafuzz/generated-tests@3"
-            ? "Valid empty bundle: `generated_tests` and `support_files` are both `[]`; the exact checked-in native bundle `framework` remains required."
+          output.schemaFile !== undefined
+            ? "Schema-backed empty form: defined only by the pinned schema; inspect and validate it instead of copying a prose example."
             : validEmptyExample === undefined
               ? "Empty output is not valid."
               : `Valid empty form: \`${validEmptyExample}\``;

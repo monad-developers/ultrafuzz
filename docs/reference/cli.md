@@ -31,7 +31,7 @@ accept `--json` and emit the `ultrafuzz.cli.result.v2` envelope.
 | `ultrafuzz node <run-id> <node-id>`     | Show one workflow node's status, attempts, retries, timing, and output metadata.                               |
 | `ultrafuzz snapshots <run-id>`          | List durability and workspace checkpoints for recovery and time-travel diagnosis.                              |
 | `ultrafuzz cancel <run-id>`             | Cancel an active run; cancellation is terminal, unlike pause.                                                  |
-| `ultrafuzz doctor`                      | Report validation, toolchain, and pinned workflow engine install posture without mutating anything.            |
+| `ultrafuzz doctor`                      | Report validation, toolchain, and engine posture without changing project or run state.                        |
 | `ultrafuzz resume <run-id>`             | Delegate resume for the linked workflow run after product checks.                                              |
 | `ultrafuzz replay <run-id>`             | Delegate replay for the linked workflow run after product checks.                                              |
 | `ultrafuzz fork <run-id>`               | Delegate fork for the linked workflow run after product checks.                                                |
@@ -418,7 +418,9 @@ ultrafuzz doctor [--project <path>] [--json]
 non-launching configuration contract unchanged. Doctor reports:
 
 - config, topology, prompt, and reference validation posture;
-- required local toolchain and configured agent executable availability;
+- required topology backends, toolchain, and configured agent executable
+  availability in the configured execution environment (the local `PATH` for
+  local runs or a transient probe of the provider image for cloud runs);
 - the bundled workflow engine version, the version the generated project
   requires, and the installed project-local version and bin target;
 - npm's latest published stable engine version when the registry check is
@@ -430,7 +432,13 @@ non-launching configuration contract unchanged. Doctor reports:
   is reported as modified or incompatible, because the next run fails in that
   state.
 
+Doctor does not create project run state or install, upgrade, or repair local
+dependencies. For cloud execution, checking required commands may create the
+configured provider app on first use and uses a transient sandbox so the probe
+runs inside the same image as workflow nodes.
+
 Diagnostics are stable: `DOCTOR_TOOLCHAIN_MISSING`,
+`DOCTOR_TOOLCHAIN_PROBE_FAILED`,
 `DOCTOR_WORKFLOW_ENGINE_MISSING`,
 `DOCTOR_WORKFLOW_ENGINE_VERSION_MISMATCH`,
 `DOCTOR_WORKFLOW_ENGINE_LAYOUT_INVALID`,
@@ -438,7 +446,7 @@ Diagnostics are stable: `DOCTOR_TOOLCHAIN_MISSING`,
 `DOCTOR_WORKFLOW_ENGINE_PATCHES_INCOMPATIBLE`,
 `DOCTOR_WORKFLOW_ENGINE_OUTDATED`, and `DOCTOR_REGISTRY_UNAVAILABLE`. A registry or network failure produces a
 warning and an `unknown` latest version instead of failing an otherwise valid
-offline project. Doctor never mutates or upgrades dependencies.
+offline project. Doctor never installs, mutates, or upgrades dependencies.
 
 ## Report
 

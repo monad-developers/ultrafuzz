@@ -362,7 +362,8 @@ async function prepareWorkspace(): Promise<{ target: string; control: string; su
         repository: config.target.repo,
         revision: config.target.ref,
         destination: stagingTarget,
-        proofPath: SOURCE_PROOF_PATH
+        proofPath: SOURCE_PROOF_PATH,
+        ...(config.target.held_out_paths === undefined ? {} : { heldOutPaths: config.target.held_out_paths })
       });
       await cloneAtRef(config.ground_truth.repo, config.ground_truth.ref, stagingGroundTruthRepo, "ground truth");
       await runChecked(["node", CLI, "init", "--project", stagingTarget, "--force", "--json"], {
@@ -375,7 +376,9 @@ async function prepareWorkspace(): Promise<{ target: string; control: string; su
       await materializeGroundTruth(
         path.join(stagingGroundTruthRepo, config.ground_truth.file),
         path.join(stagingGroundTruth, "findings.yml"),
-        targetProof.commit
+        // Ground truth is written against the benchmark commit; a hold-out
+        // rewrites the checkout, so bind the revision it was authored for.
+        targetProof.held_out?.source_commit ?? targetProof.commit
       );
       await configureControl(stagingControl, target, groundTruth);
       await rename(stagingRoot, WORK_ROOT);
