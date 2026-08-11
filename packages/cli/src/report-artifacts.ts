@@ -79,6 +79,7 @@ export function reconcileReportArtifacts(runRoot: string): ReconciledReportArtif
   }
 
   let report = reconcileRunMetadata(root, original.value);
+  report = reconcileCampaignOutcome(root, report);
   report = reconcilePropertyImplementationCoverage(root, report);
   report = reconcilePropertyProvenance(root, report);
   const projection = projectCanonicalFinalReport(report);
@@ -239,6 +240,43 @@ function reconcilePropertyProvenance(runRoot: string, report: JsonRecord): JsonR
     });
   }
   return { ...report, property_provenance: entries };
+}
+
+/**
+ * A campaign that never fuzzed and a campaign that fuzzed and found nothing
+ * both leave an empty findings array, and the agent-authored report cannot
+ * tell them apart. Take the outcome from the campaign's own summary so the
+ * report states which one happened.
+ */
+function reconcileCampaignOutcome(runRoot: string, report: JsonRecord): JsonRecord {
+  // A project topology may record the campaign under either supported logical
+  // node; missing one would leave an unverified status in the canonical report.
+  let summary: JsonRecord | undefined;
+  for (const logicalNodeId of ["stateful-invariant-campaign", "stateful-invariant-recon-campaign"] as const) {
+    const summaryPath = logicalArtifactPath(runRoot, logicalNodeId, "campaign-summary.json");
+    if (summaryPath === undefined) continue;
+    const candidate = readRecord(runRoot, summaryPath);
+    if (typeof candidate?.outcome === "string" && candidate.outcome.trim() !== "") {
+      summary = candidate;
+      break;
+    }
+  }
+  const outcome = summary?.outcome;
+  if (typeof outcome !== "string" || outcome.trim() === "") {
+    // Without an authoritative outcome there is nothing to stand behind, and an
+    // agent-authored status could disclose a non-run that did not happen or
+    // hide one that did. Drop it rather than publish it unverified.
+    const { campaign_outcome: unverified, ...rest } = report;
+    return unverified === undefined ? report : rest;
+  }
+  const reason = summary?.reason;
+  return {
+    ...report,
+    campaign_outcome: {
+      outcome: outcome.trim(),
+      ...(typeof reason === "string" && reason.trim() !== "" ? { reason: reason.trim() } : {})
+    }
+  };
 }
 
 function reconcilePropertyImplementationCoverage(runRoot: string, report: JsonRecord): JsonRecord {
