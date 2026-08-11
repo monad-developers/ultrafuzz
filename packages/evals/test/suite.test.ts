@@ -5,6 +5,7 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { assertHeldOutPathsAbsent } from "../src/runner.js";
 import { DEFAULT_EVAL_JUDGE_PANEL, loadEvalSuite, planEvalSuite, resolveJudgePanelConfig } from "../src/suite.js";
 import { EvalError } from "../src/utils.js";
 
@@ -236,5 +237,53 @@ describe("eval suite loading and planning", () => {
       expect(error).toBeInstanceOf(EvalError);
       expect((error as EvalError).code).toBe("EVAL_MODEL_PROFILE_UNKNOWN");
     }
+  });
+});
+
+describe("held-out benchmark paths", () => {
+  it("carries a target declaration through suite loading", () => {
+    const { projectRoot, suitePath } = setup();
+    fs.writeFileSync(
+      suitePath,
+      SUITE_YAML.replace("targets:\n  - id: aave-v4", 'targets:\n  - id: aave-v4\n    held_out_paths: ["tests/recon"]'),
+      "utf8"
+    );
+
+    const { suite } = loadEvalSuite({ projectRoot, suitePath });
+
+    expect(suite.targets[0]?.held_out_paths).toEqual(["tests/recon"]);
+  });
+
+  it("refuses to launch a target whose held-out paths are still present", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-held-out-target-"));
+    fs.mkdirSync(path.join(root, "tests", "recon"), { recursive: true });
+    fs.writeFileSync(path.join(root, "tests", "recon", "Properties.sol"), "answer key\n");
+
+    expect(() => assertHeldOutPathsAbsent("aave-v4", root, ["tests/recon"])).toThrow(
+      /still contains held-out benchmark paths: tests\/recon/u
+    );
+    // Absent, undeclared, and empty declarations all launch normally.
+    expect(() => assertHeldOutPathsAbsent("aave-v4", root, ["tests/absent"])).not.toThrow();
+    expect(() => assertHeldOutPathsAbsent("aave-v4", root, undefined)).not.toThrow();
+    expect(() => assertHeldOutPathsAbsent("aave-v4", root, [" "])).not.toThrow();
+
+    // The guard joins to the checkout, so it must refuse to look outside it.
+    for (const escaping of ["../shared/reference", "/etc", "tests/../../etc", ".git"]) {
+      expect(() => assertHeldOutPathsAbsent("aave-v4", root, [escaping])).toThrow(/outside the checkout/u);
+    }
+  });
+
+  it("rejects a suite whose held-out declaration escapes the target", () => {
+    const { projectRoot, suitePath } = setup();
+    fs.writeFileSync(
+      suitePath,
+      SUITE_YAML.replace(
+        "targets:\n  - id: aave-v4",
+        'targets:\n  - id: aave-v4\n    held_out_paths: ["../shared/reference"]'
+      ),
+      "utf8"
+    );
+
+    expect(() => loadEvalSuite({ projectRoot, suitePath })).toThrow();
   });
 });
