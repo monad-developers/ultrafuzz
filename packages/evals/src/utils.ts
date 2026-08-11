@@ -304,7 +304,10 @@ function matchesPinnedHoldout(targetPath: string, ref: string, head: string): bo
   if (typeof record !== "object" || record === null) return false;
   const { source_commit: sourceCommit, commit } = record as { source_commit?: unknown; commit?: unknown };
   if (typeof sourceCommit !== "string" || typeof commit !== "string") return false;
-  return sourceCommit.toLowerCase() === ref.toLowerCase() && commit.toLowerCase() === head.toLowerCase();
+  if (commit.toLowerCase() !== head.toLowerCase()) return false;
+  // Suites may pin an abbreviated commit, which the non-held-out path already
+  // accepts; require it to be a hex prefix so a branch name cannot match.
+  return /^[0-9a-f]{7,40}$/iu.test(ref) && sourceCommit.toLowerCase().startsWith(ref.toLowerCase());
 }
 
 export function evalRunRoot(projectRoot: string, evalRunId: string): string {

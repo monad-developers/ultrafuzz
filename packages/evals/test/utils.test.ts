@@ -76,5 +76,12 @@ describe("held-out benchmark target refs", () => {
     expect(() => assertTargetRef(root, benchmark)).toThrow(/is not present in/u);
     fs.writeFileSync(recordPath, "not json", "utf8");
     expect(() => assertTargetRef(root, benchmark)).toThrow(/is not present in/u);
+
+    // An abbreviated pin is accepted, matching the non-held-out path.
+    fs.writeFileSync(recordPath, JSON.stringify({ source_commit: benchmark, commit: head }), "utf8");
+    expect(() => assertTargetRef(root, benchmark.slice(0, 12))).not.toThrow();
+    // A non-SHA ref must never prefix-match its way in.
+    expect(() => assertTargetRef(root, "main")).toThrow(/is not present in/u);
+    expect(() => assertTargetRef(root, "a".repeat(12))).toThrow(/is not present in/u);
   });
 });
