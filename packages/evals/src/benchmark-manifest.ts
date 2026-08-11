@@ -150,7 +150,7 @@ export const BENCHMARK_SMOKE_EXCLUDED_STRATEGY_FAMILIES = [
  * that omits all of these by construction and passes an empty exclusion list, so
  * its execution-policy fingerprint stays equal to its published observations'.
  * This set is the derivation those flags describe, and every ID in it exists in
- * `.ultrafuzz/topology.yml`, not in `benchmarks/smoke-benchmark.yml`.
+ * `.ultrafuzz/topology.yml`, not in the packaged `packages/config/topologies/smoke.yml`.
  */
 export const BENCHMARK_SMOKE_EXCLUDED_NODE_IDS = [
   ...BENCHMARK_INVARIANT_EXCLUDED_NODE_IDS,

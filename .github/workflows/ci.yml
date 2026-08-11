@@ -14,11 +14,9 @@ concurrency:
 jobs:
   release-gates:
     runs-on: ubuntu-latest
-    env:
-      ULTRAFUZZ_CODEX_REAL_DRY_RUN: "0"
-      ULTRAFUZZ_RELEASE_DASHBOARD: "0"
-      ULTRAFUZZ_RELEASE_REFERENCES: "0"
-    timeout-minutes: 30
+    # A clean local run is ~21 minutes after removing the duplicated benchmark
+    # suites. Keep enough margin for dependency setup and hosted-runner variance.
+    timeout-minutes: 60
 
     steps:
       - name: Check out repository
@@ -52,11 +50,14 @@ jobs:
       - name: Build
         run: pnpm -w build
 
-      - name: Validate benchmark manifests and history charts
-        run: pnpm -w benchmark:check
-
       - name: Validate release
         run: pnpm -w validate:release
+
+      # validate:release already runs the config, runtime, and eval suites used by
+      # benchmark:check. The built CLI is all that is needed for the remaining
+      # byte-for-byte history/chart check, so do not run the long suites twice.
+      - name: Validate benchmark history charts
+        run: pnpm -w benchmark:history:check
 
       - name: Upload release validation report
         if: always()

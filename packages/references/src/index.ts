@@ -703,28 +703,27 @@ function referenceCacheGroups(catalog: ReferenceCatalog): ReferenceCacheGroup[] 
 function fetchReference(id: string, reference: ReferenceEntry, cacheDir: string): boolean {
   const { owner, repo } = githubRepoParts(reference, id);
   const remote = `https://github.com/${owner}/${repo}.git`;
+  const credential = referenceGitCredential();
   const cacheParent = path.dirname(cacheDir);
   fs.mkdirSync(cacheParent, { recursive: true });
   const tempRoot = fs.mkdtempSync(path.join(cacheParent, ".sync-"));
+  const gitEnv = {
+    ...referenceGitCredentialEnv(credential, reference.repo, remote),
+    GIT_CEILING_DIRECTORIES: tempRoot
+  };
   try {
-    runGit(tempRoot, ["init"]);
+    runGit(tempRoot, ["init"], gitEnv, credential);
     // The remote URL stays credential-free, so the token cannot leak through the temp repo config,
     // `git remote -v`, or any diagnostic that reports the configured remote.
-    runGit(tempRoot, ["remote", "add", "origin", remote]);
-    const credential = referenceGitCredential();
-    runGit(
-      tempRoot,
-      ["fetch", "--depth=1", "--filter=blob:none", "origin", reference.commit],
-      referenceGitCredentialEnv(credential, reference.repo, remote),
-      credential
-    );
+    runGit(tempRoot, ["remote", "add", "origin", remote], gitEnv, credential);
+    runGit(tempRoot, ["fetch", "--depth=1", "--filter=blob:none", "origin", reference.commit], gitEnv, credential);
 
     const staging = path.join(tempRoot, "cache");
     fs.mkdirSync(staging, { recursive: true });
     const files: ReferenceManifestFile[] = [];
-    const sourcePaths = referencePathsAtCommit(id, reference, tempRoot);
+    const sourcePaths = referencePathsAtCommit(id, reference, tempRoot, gitEnv, credential);
     for (const referencePath of sourcePaths) {
-      const data = gitBlob(id, tempRoot, reference.commit, referencePath);
+      const data = gitBlob(id, tempRoot, reference.commit, referencePath, gitEnv, credential);
       const destination = safeResolveInside(staging, referencePath, "reference cache path");
       fs.mkdirSync(path.dirname(destination), { recursive: true });
       fs.writeFileSync(destination, data);
@@ -775,13 +774,18 @@ function resolveGithubDefaultBranchSha(repo: string): string {
   const { owner, repo: repoName } = githubRepoParts(reference, "update-latest");
   const remote = `https://github.com/${owner}/${repoName}.git`;
   const credential = referenceGitCredential();
-  const credentialEnv = referenceGitCredentialEnv(credential, repo, remote);
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-reference-ls-remote-"));
+  const gitEnv = {
+    ...referenceGitCredentialEnv(credential, repo, remote),
+    GIT_CEILING_DIRECTORIES: tempRoot
+  };
   let stdout: string;
   try {
     stdout = execFileSync("git", ["ls-remote", "--symref", remote, "HEAD"], {
+      cwd: tempRoot,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
-      ...(Object.keys(credentialEnv).length === 0 ? {} : { env: { ...process.env, ...credentialEnv } })
+      env: gitEnv
     });
   } catch (error) {
     throw referenceError(
@@ -791,6 +795,8 @@ function resolveGithubDefaultBranchSha(repo: string): string {
         credential
       )
     );
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
   }
   for (const line of stdout.split("\n")) {
     const [sha, name] = line.split("\t");
@@ -804,21 +810,17 @@ function resolveGithubDefaultBranchSha(repo: string): string {
 /**
  * Runs one git command, optionally authenticated to a single remote.
  *
- * `credentialEnv` carries only `GIT_CONFIG_*` settings, so the token never reaches `args` and cannot
- * appear in the failure message this throws -- which deliberately echoes the command. The stderr is
- * still redacted, because git may quote a rejected authorization header back at us.
+ * `gitEnv` is the isolated process environment for this exact remote, so the token never reaches
+ * `args` and cannot appear in the failure message this throws -- which deliberately echoes the
+ * command. The stderr is still redacted, because git may quote a rejected authorization header
+ * back at us.
  */
-function runGit(
-  cwd: string,
-  args: string[],
-  credentialEnv: Record<string, string> = {},
-  credential?: ReferenceGitCredential
-): void {
+function runGit(cwd: string, args: string[], gitEnv: NodeJS.ProcessEnv, credential?: ReferenceGitCredential): void {
   try {
     execFileSync("git", args, {
       cwd,
       stdio: ["ignore", "ignore", "pipe"],
-      ...(Object.keys(credentialEnv).length === 0 ? {} : { env: { ...process.env, ...credentialEnv } })
+      env: gitEnv
     });
   } catch (error) {
     throw referenceError(
@@ -829,9 +831,16 @@ function runGit(
   }
 }
 
-function gitBlob(id: string, cwd: string, commit: string, referencePath: string): Buffer {
+function gitBlob(
+  id: string,
+  cwd: string,
+  commit: string,
+  referencePath: string,
+  gitEnv: NodeJS.ProcessEnv,
+  credential?: ReferenceGitCredential
+): Buffer {
   const object = `${commit}:${referencePath}`;
-  const objectType = gitOutput(cwd, ["cat-file", "-t", object]).trim();
+  const objectType = gitOutput(cwd, ["cat-file", "-t", object], gitEnv, credential).trim();
   if (objectType !== "blob") {
     throw referenceError(
       "NON_BLOB_PATH",
@@ -840,28 +849,45 @@ function gitBlob(id: string, cwd: string, commit: string, referencePath: string)
     );
   }
   try {
-    return execFileSync("git", ["show", object], { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    return execFileSync("git", ["show", object], { cwd, env: gitEnv, stdio: ["ignore", "pipe", "pipe"] });
   } catch (error) {
-    throw referenceError("GIT_FAILED", `git command failed: git show ${object}: ${stderrFor(error)}`, {
-      command: ["git", "show", object]
-    });
+    throw referenceError(
+      "GIT_FAILED",
+      redactReferenceGitCredential(`git command failed: git show ${object}: ${stderrFor(error)}`, credential),
+      { command: ["git", "show", object] }
+    );
   }
 }
 
-function gitOutput(cwd: string, args: string[]): string {
+function gitOutput(
+  cwd: string,
+  args: string[],
+  gitEnv: NodeJS.ProcessEnv,
+  credential?: ReferenceGitCredential
+): string {
   try {
-    return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    return execFileSync("git", args, { cwd, env: gitEnv, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   } catch (error) {
-    throw referenceError("GIT_FAILED", `git command failed: git ${args.join(" ")}: ${stderrFor(error)}`, {
-      command: ["git", ...args]
-    });
+    throw referenceError(
+      "GIT_FAILED",
+      redactReferenceGitCredential(`git command failed: git ${args.join(" ")}: ${stderrFor(error)}`, credential),
+      { command: ["git", ...args] }
+    );
   }
 }
 
-function referencePathsAtCommit(id: string, reference: ReferenceEntry, checkout: string): string[] {
+function referencePathsAtCommit(
+  id: string,
+  reference: ReferenceEntry,
+  checkout: string,
+  gitEnv: NodeJS.ProcessEnv,
+  credential?: ReferenceGitCredential
+): string[] {
   if (referenceKind(reference) !== VULNERABILITY_DATABASE_REFERENCE_KIND) return [...reference.paths];
-  const catalog = parseVulnerabilityDatabaseCatalog(gitBlob(id, checkout, reference.commit, "catalog.json"));
-  const entries = gitTreeEntries(checkout, reference.commit);
+  const catalog = parseVulnerabilityDatabaseCatalog(
+    gitBlob(id, checkout, reference.commit, "catalog.json", gitEnv, credential)
+  );
+  const entries = gitTreeEntries(checkout, reference.commit, gitEnv, credential);
   validateVulnerabilityDatabaseGitTree(entries, catalog);
   return vulnerabilityDatabaseReferencePaths(catalog);
 }
@@ -872,17 +898,25 @@ function effectiveCachedReferencePaths(reference: ReferenceEntry, cacheDir: stri
   return vulnerabilityDatabaseReferencePaths(parseVulnerabilityDatabaseCatalog(fs.readFileSync(catalogPath)));
 }
 
-function gitTreeEntries(cwd: string, commit: string): VulnerabilityDatabaseGitTreeEntry[] {
+function gitTreeEntries(
+  cwd: string,
+  commit: string,
+  gitEnv: NodeJS.ProcessEnv,
+  credential?: ReferenceGitCredential
+): VulnerabilityDatabaseGitTreeEntry[] {
   let output: Buffer;
   try {
     output = execFileSync("git", ["ls-tree", "-r", "-z", commit], {
       cwd,
+      env: gitEnv,
       stdio: ["ignore", "pipe", "pipe"]
     });
   } catch (error) {
-    throw referenceError("GIT_FAILED", `git command failed: git ls-tree -r -z ${commit}: ${stderrFor(error)}`, {
-      command: ["git", "ls-tree", "-r", "-z", commit]
-    });
+    throw referenceError(
+      "GIT_FAILED",
+      redactReferenceGitCredential(`git command failed: git ls-tree -r -z ${commit}: ${stderrFor(error)}`, credential),
+      { command: ["git", "ls-tree", "-r", "-z", commit] }
+    );
   }
   return parseVulnerabilityDatabaseGitTree(output);
 }

@@ -79,11 +79,7 @@ import {
   VULNERABILITY_DATABASE_REFERENCE_NODE_ID,
   type MaterializedVulnerabilityDatabaseCatalog
 } from "./vulnerability-database.js";
-import {
-  promptTextsForCatalog,
-  transformPromptCatalogForRun,
-  transformTopologyForRun
-} from "./topology-transform.js";
+import { promptTextsForCatalog, transformPromptCatalogForRun, transformTopologyForRun } from "./topology-transform.js";
 
 export { promptTextsForCatalog, transformPromptCatalogForRun } from "./topology-transform.js";
 

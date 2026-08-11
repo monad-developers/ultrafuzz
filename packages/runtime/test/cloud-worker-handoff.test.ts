@@ -10,6 +10,7 @@ import { compileSmithersWorkflow, type CompiledSmithersWorkflow } from "../src/s
 import {
   materializeHarnessWorkflowSnapshot,
   renderGeneratedWorkflow,
+  type HarnessTaskSpecSummary,
   type RenderedTask
 } from "./cloud-worker-harness.js";
 import { writeShippedVulnerabilityDatabaseCache } from "./reference-fixtures.js";
@@ -27,6 +28,11 @@ interface CloudFixture {
   runRoot: string;
   compiled: CompiledSmithersWorkflow;
   sandboxes: RenderedTask[];
+}
+
+interface CloudFixtureOptions {
+  goals?: Array<Record<string, unknown>>;
+  modelFanout?: boolean;
 }
 
 test("a relocated cloud worker runs its dispatched attempt without controller-owned dynamic state", async () => {
@@ -723,11 +729,12 @@ test("a relocated cloud worker requires correlated evidence for a runtime depend
   const worker = relocateWorker(fixture);
   const workflowPath = path.join(worker, path.relative(fixture.project, fixture.compiled.workflowPath));
   const runRoot = selected.runRoot as string;
-  const render = async (handoff: unknown): Promise<RenderedTask[]> =>
+  const render = async (handoff: unknown, captureTaskSpecs?: HarnessTaskSpecSummary[]): Promise<RenderedTask[]> =>
     renderGeneratedWorkflow({
       workflowPath,
       cwd: worker,
       forbidDynamicMaterialization: true,
+      ...(captureTaskSpecs === undefined ? {} : { captureTaskSpecs }),
       workflowInput: {
         cloud_worker: true,
         task_id: sandboxInput.task_id,
@@ -763,6 +770,15 @@ test("a relocated cloud worker requires correlated evidence for a runtime depend
       "a verifier for an unlisted attempt",
       mutate(selected, "metadata.dependencies.smithersNodeIds", [...dependencies.smithersNodeIds, "verify:unclaimed"])
     ],
+    // A generated attempt whose exact compile-time-derived verifier was removed.
+    [
+      "a generated attempt without its verifier",
+      mutate(
+        selected,
+        "metadata.dependencies.smithersNodeIds",
+        dependencies.smithersNodeIds.filter((id) => id !== `verify:${generatedAttemptId}`)
+      )
+    ],
     // A directory that is not the appended attempt's own directory.
     [
       "an artifact directory that is not the attempt's own",
@@ -795,8 +811,144 @@ test("a relocated cloud worker requires correlated evidence for a runtime depend
   for (const [label, handoff] of cases) {
     await assert.rejects(() => render(handoff), /cloud worker selected_task/u, label);
   }
-  // The real correlated extension still renders, so the rejections above are not vacuous.
+  // The real correlated extension reconstructs the generated dependency's exact compiled output
+  // declarations. It remains read-only: only the selected join reaches agent execution.
+  const taskSpecs: HarnessTaskSpecSummary[] = [];
+  assert.equal((await render(selected, taskSpecs)).filter((task) => task.props.agent !== undefined).length, 1);
+  const generatedDependency = taskSpecs.find((task) => task.attemptId === generatedAttemptId);
+  assert.ok(generatedDependency, "the generated dependency must have a worker-side verification spec");
+  assert.equal(generatedDependency.logicalNodeId, "fanout");
+  assert.equal(generatedDependency.artifactDir, path.resolve(worker, dependencyDirs.at(-1)!));
+  const generatedHandoff = dispatchedInput(fixture, "dynamic:item:threat-1").selected_task as {
+    metadata: { artifacts: { outputs: unknown[] } };
+  };
+  assert.deepEqual(generatedDependency.outputs, generatedHandoff.metadata.artifacts.outputs);
+  fs.rmSync(worker, { recursive: true, force: true });
+});
+
+test("a relocated cloud worker retains the verified agentic source of an empty dynamic group", async () => {
+  const fixture = await cloudFixture({ goals: [] });
+  const sandboxInput = dispatchedInput(fixture, "join");
+  const selected = sandboxInput.selected_task as Record<string, unknown>;
+  const source = fixture.compiled.dynamicGroups[0]!.source;
+  assert.ok(source.verifierSmithersNodeId, "the fixture's planner source must be agentic");
+  const dependencies = (
+    selected.metadata as {
+      dependencies: { concreteNodeIds: string[]; attemptIds: string[]; smithersNodeIds: string[] };
+    }
+  ).dependencies;
+  assert.ok(dependencies.concreteNodeIds.includes(source.concreteNodeId));
+  assert.ok(dependencies.attemptIds.includes(source.attemptId));
+  assert.ok(dependencies.smithersNodeIds.includes(source.verifierSmithersNodeId));
+  assert.ok(
+    (selected.dependencyArtifactDirs as string[]).includes(
+      `${selected.runRoot as string}/artifacts/${source.attemptId}`
+    )
+  );
+
+  const worker = relocateWorker(fixture);
+  const workflowPath = path.join(worker, path.relative(fixture.project, fixture.compiled.workflowPath));
+  const render = async (handoff: unknown): Promise<RenderedTask[]> =>
+    renderGeneratedWorkflow({
+      workflowPath,
+      cwd: worker,
+      forbidDynamicMaterialization: true,
+      workflowInput: {
+        cloud_worker: true,
+        task_id: sandboxInput.task_id,
+        attempt_id: sandboxInput.attempt_id,
+        execution_generation: sandboxInput.execution_generation,
+        selected_task: handoff,
+        tasks: []
+      }
+    });
   assert.equal((await render(selected)).filter((task) => task.props.agent !== undefined).length, 1);
+  await assert.rejects(
+    () =>
+      render(
+        mutate(
+          selected,
+          "metadata.dependencies.smithersNodeIds",
+          dependencies.smithersNodeIds.filter((nodeId) => nodeId !== source.verifierSmithersNodeId)
+        )
+      ),
+    /must gain exactly the required verifiers of materialized dependency attempts/u
+  );
+  fs.rmSync(worker, { recursive: true, force: true });
+});
+
+test("a relocated cloud worker reconstructs every multi-model generated dependency template", async () => {
+  const fixture = await cloudFixture({ modelFanout: true });
+  const sandboxInput = dispatchedInput(fixture, "join");
+  const selected = sandboxInput.selected_task as Record<string, unknown>;
+  const generatedInputs = fixture.sandboxes
+    .filter(
+      (task) =>
+        (task.props.meta as { node?: { concreteNodeId?: string } } | undefined)?.node?.concreteNodeId ===
+        "dynamic:item:threat-1"
+    )
+    .map((task) => task.props.input as Record<string, unknown>);
+  assert.equal(generatedInputs.length, 2, "both compiled model templates must dispatch");
+  const generatedAttemptIds = generatedInputs.map((input) => input.attempt_id as string);
+  assert.deepEqual(
+    generatedAttemptIds.map((attemptId) => attemptId.slice(attemptId.lastIndexOf("__model_"))),
+    ["__model_0__attempt_0", "__model_1__attempt_1"]
+  );
+  const dependencies = (selected.metadata as { dependencies: { attemptIds: string[]; smithersNodeIds: string[] } })
+    .dependencies;
+  for (const attemptId of generatedAttemptIds) {
+    assert.ok(dependencies.attemptIds.includes(attemptId));
+    assert.ok(dependencies.smithersNodeIds.includes(`verify:${attemptId}`));
+  }
+
+  const worker = relocateWorker(fixture);
+  const workflowPath = path.join(worker, path.relative(fixture.project, fixture.compiled.workflowPath));
+  const taskSpecs: HarnessTaskSpecSummary[] = [];
+  const render = async (handoff: unknown, capture = false): Promise<RenderedTask[]> =>
+    renderGeneratedWorkflow({
+      workflowPath,
+      cwd: worker,
+      forbidDynamicMaterialization: true,
+      ...(capture ? { captureTaskSpecs: taskSpecs } : {}),
+      workflowInput: {
+        cloud_worker: true,
+        task_id: sandboxInput.task_id,
+        attempt_id: sandboxInput.attempt_id,
+        execution_generation: sandboxInput.execution_generation,
+        selected_task: handoff,
+        tasks: []
+      }
+    });
+  assert.equal((await render(selected, true)).filter((task) => task.props.agent !== undefined).length, 1);
+  for (const generatedInput of generatedInputs) {
+    const attemptId = generatedInput.attempt_id as string;
+    const handoff = generatedInput.selected_task as {
+      artifactDir: string;
+      modelName: string | null;
+      reasoningEffort: string | null;
+      metadata: { model: { profileId: string }; artifacts: { outputs: unknown[] } };
+    };
+    const reconstructed = taskSpecs.find((task) => task.attemptId === attemptId);
+    assert.ok(reconstructed, `${attemptId} must have a reconstructed worker spec`);
+    assert.equal(reconstructed.artifactDir, path.resolve(worker, handoff.artifactDir));
+    assert.equal(reconstructed.logicalNodeId, "fanout");
+    assert.equal(reconstructed.modelProfileId, handoff.metadata.model.profileId);
+    assert.equal(reconstructed.modelName, handoff.modelName);
+    assert.equal(reconstructed.reasoningEffort, handoff.reasoningEffort);
+    assert.deepEqual(reconstructed.outputs, handoff.metadata.artifacts.outputs);
+    await assert.rejects(
+      () =>
+        render(
+          mutate(
+            selected,
+            "metadata.dependencies.smithersNodeIds",
+            dependencies.smithersNodeIds.filter((nodeId) => nodeId !== `verify:${attemptId}`)
+          )
+        ),
+      /must gain exactly the required verifiers of materialized dependency attempts/u,
+      `${attemptId} must retain its exact verifier`
+    );
+  }
   fs.rmSync(worker, { recursive: true, force: true });
 });
 
@@ -950,7 +1102,7 @@ function dispatchedInput(fixture: CloudFixture, concreteNodeId: string): Record<
  * materialized vulnerability database, then renders the controller workflow so the tests operate on
  * the real dispatched sandbox inputs instead of hand-written ones.
  */
-async function cloudFixture(): Promise<CloudFixture> {
+async function cloudFixture(options: CloudFixtureOptions = {}): Promise<CloudFixture> {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-cloud-worker-"));
   initProject({ projectRoot: project, force: true });
   writePrompt(project, "dynamic/planner.md", "dynamic-planner", "Write the plan to {{artifact_path}}/plan.json.");
@@ -966,7 +1118,10 @@ async function cloudFixture(): Promise<CloudFixture> {
     "dynamic-join",
     "Summarize all completed work.\nDatabase: {{vulnerability_database_path}}\nArtifacts: {{artifact_path}}"
   );
-  fs.writeFileSync(path.join(project, ".ultrafuzz", "topology.yml"), CLOUD_TOPOLOGY, "utf8");
+  const topology = options.modelFanout
+    ? CLOUD_TOPOLOGY.replace("    dynamic:\n", "    model_profiles: [default, claude]\n    dynamic:\n")
+    : CLOUD_TOPOLOGY;
+  fs.writeFileSync(path.join(project, ".ultrafuzz", "topology.yml"), topology, "utf8");
 
   const plan = await planRun({ projectRoot: project, runId: "cloud-worker", env: {} });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
@@ -1011,7 +1166,9 @@ async function cloudFixture(): Promise<CloudFixture> {
   fs.mkdirSync(path.dirname(sourceArtifactPath), { recursive: true });
   fs.writeFileSync(
     sourceArtifactPath,
-    `${JSON.stringify({ goals: [{ id: "threat-1", goal_prompt: "find the overdue liquidation" }] })}\n`,
+    `${JSON.stringify({
+      goals: options.goals ?? [{ id: "threat-1", goal_prompt: "find the overdue liquidation" }]
+    })}\n`,
     "utf8"
   );
   materializeDynamicRuntime({

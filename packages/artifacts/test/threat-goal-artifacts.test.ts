@@ -923,6 +923,183 @@ test("dedupe provenance rejects dropped corroborating sources and incomplete lif
   );
 });
 
+test("generic finding ID collisions cannot union unrelated discovery lanes", () => {
+  const upstream = [
+    {
+      node_id: "dynamic:threat:accounting:rounding",
+      artifact_path: "artifacts/threat/findings.json",
+      finding: {
+        id: "finding-1",
+        upstream_id: "threat-original",
+        dedupe_key: "raw:threat",
+        source_nodes: ["dynamic:threat:accounting:rounding"]
+      }
+    },
+    {
+      node_id: "dynamic:class:authorization:roles",
+      artifact_path: "artifacts/class/findings.json",
+      finding: {
+        id: "finding-1",
+        upstream_id: "class-original",
+        dedupe_key: "raw:class",
+        source_nodes: ["dynamic:class:authorization:roles"]
+      }
+    }
+  ];
+  const lifecycleLedger = {
+    schema_version: "1.0",
+    records: [
+      {
+        dedupe_key: "root:rounding",
+        family_id: "family:rounding",
+        source_artifacts: [
+          {
+            node_id: "dynamic:threat:accounting:rounding",
+            finding_id: "finding-1"
+          }
+        ]
+      },
+      {
+        dedupe_key: "root:roles",
+        family_id: "family:roles",
+        source_artifacts: [
+          {
+            node_id: "dynamic:class:authorization:roles",
+            finding_id: "finding-1"
+          }
+        ]
+      }
+    ]
+  };
+  const expectations = buildFindingSourceExpectations({
+    upstream,
+    lifecycleLedger,
+    requireLifecycleCoverage: true
+  });
+  const artifactDir = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-provenance-id-collision-"));
+  const finding = {
+    id: "finding-1",
+    dedupe_key: "root:rounding",
+    title: "Rounding drift",
+    status: "candidate",
+    severity_guess: "high",
+    confidence: "high",
+    summary: "The rounding lane found a loss of accounting precision.",
+    source_nodes: ["dynamic:threat:accounting:rounding"]
+  };
+  fs.writeFileSync(path.join(artifactDir, "deduped-findings.json"), JSON.stringify([finding]));
+  const normalized = normalizeFindings({
+    artifactDir,
+    relativePath: "deduped-findings.json",
+    provenance: { producerNodeId: "dedupe-findings" },
+    preserveSourceNodes: true,
+    requireSourceNodes: true,
+    allowedSourceNodes: upstream.flatMap((entry) => entry.finding.source_nodes),
+    sourceExpectations: expectations,
+    requireSourceExpectation: true
+  });
+  assert.deepEqual(normalized.findings[0]?.source_nodes, ["dynamic:threat:accounting:rounding"]);
+
+  for (const [label, contradictoryIdentity] of [
+    ["family ID", { family_id: "family:roles" }],
+    ["finding reference", { upstream_id: "class-original" }]
+  ] as const) {
+    fs.writeFileSync(
+      path.join(artifactDir, "deduped-findings.json"),
+      JSON.stringify([{ ...finding, ...contradictoryIdentity }])
+    );
+    assert.throws(
+      () =>
+        normalizeFindings({
+          artifactDir,
+          relativePath: "deduped-findings.json",
+          provenance: { producerNodeId: "dedupe-findings" },
+          preserveSourceNodes: true,
+          requireSourceNodes: true,
+          allowedSourceNodes: upstream.flatMap((entry) => entry.finding.source_nodes),
+          sourceExpectations: expectations,
+          requireSourceExpectation: true
+        }),
+      new RegExp(`${label} conflicts with higher-priority dependency provenance`, "u")
+    );
+  }
+
+  const freshOutputIdentity = {
+    ...finding,
+    id: "kept-finding-new",
+    family_id: "family:new",
+    source_nodes: ["dynamic:threat:accounting:rounding"]
+  };
+  fs.writeFileSync(path.join(artifactDir, "deduped-findings.json"), JSON.stringify([freshOutputIdentity]));
+  assert.deepEqual(
+    normalizeFindings({
+      artifactDir,
+      relativePath: "deduped-findings.json",
+      provenance: { producerNodeId: "dedupe-findings" },
+      preserveSourceNodes: true,
+      requireSourceNodes: true,
+      allowedSourceNodes: upstream.flatMap((entry) => entry.finding.source_nodes),
+      sourceExpectations: expectations,
+      requireSourceExpectation: true
+    }).findings[0]?.source_nodes,
+    ["dynamic:threat:accounting:rounding"]
+  );
+
+  const ambiguous = {
+    ...finding,
+    dedupe_key: undefined,
+    source_nodes: upstream.flatMap((entry) => entry.finding.source_nodes)
+  };
+  fs.writeFileSync(path.join(artifactDir, "deduped-findings.json"), JSON.stringify([ambiguous]));
+  assert.throws(
+    () =>
+      normalizeFindings({
+        artifactDir,
+        relativePath: "deduped-findings.json",
+        provenance: { producerNodeId: "dedupe-findings" },
+        preserveSourceNodes: true,
+        requireSourceNodes: true,
+        allowedSourceNodes: upstream.flatMap((entry) => entry.finding.source_nodes),
+        sourceExpectations: expectations,
+        requireSourceExpectation: true
+      }),
+    /finding ID matches conflicting dependency provenance records/u
+  );
+
+  const forgedStrongIdentity = {
+    ...finding,
+    dedupe_key: "root:unknown",
+    source_nodes: upstream.flatMap((entry) => entry.finding.source_nodes)
+  };
+  fs.writeFileSync(path.join(artifactDir, "deduped-findings.json"), JSON.stringify([forgedStrongIdentity]));
+  assert.throws(
+    () =>
+      normalizeFindings({
+        artifactDir,
+        relativePath: "deduped-findings.json",
+        provenance: { producerNodeId: "dedupe-findings" },
+        preserveSourceNodes: true,
+        requireSourceNodes: true,
+        allowedSourceNodes: upstream.flatMap((entry) => entry.finding.source_nodes),
+        sourceExpectations: expectations,
+        requireSourceExpectation: true
+      }),
+    /dedupe key does not match any dependency provenance record/u
+  );
+
+  const duplicateKeyLedger = structuredClone(lifecycleLedger);
+  duplicateKeyLedger.records[1]!.dedupe_key = "root:rounding";
+  assert.throws(
+    () =>
+      buildFindingSourceExpectations({
+        upstream,
+        lifecycleLedger: duplicateKeyLedger,
+        requireLifecycleCoverage: true
+      }),
+    /duplicate dedupe_key/u
+  );
+});
+
 test("selected vulnerability-class snapshots are manifest-backed exact artifacts", () => {
   const artifactDir = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-selected-classes-"));
   const contents = Buffer.from("# Share inflation\n\nFocused hunter instructions.\n");

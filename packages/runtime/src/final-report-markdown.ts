@@ -24,6 +24,12 @@ const reportSummaryFields = [
 const severityOrder = ["High", "Medium", "Low"] as const;
 type ReportSeverity = (typeof severityOrder)[number];
 
+/**
+ * A report-relative audit-context link: `../<dir>/.../<file>` with no traversal past the sibling
+ * artifact directory. Every segment after the single leading `..` must be an ordinary name.
+ */
+const SAFE_REPORT_RELATIVE_LINK_PATTERN = /^\.\.\/(?:(?!\.\.?\/)[A-Za-z0-9._-]+\/)+(?!\.\.?$)[A-Za-z0-9._-]+$/u;
+
 const alternateSeverityFields = new Set([
   "canonical_severity",
   "classified_severity",
@@ -138,7 +144,7 @@ export function isDirectiveConformingFinalReportMarkdown(
     containsPrivatePath(markdown) ||
     /<[A-Za-z][^>]*>/u.test(prose) ||
     /!\[[^\]]*\]\(/u.test(prose) ||
-    /(?<!\\)\]\((?!#[a-z0-9-]+\))/iu.test(prose)
+    /(?<!\\)\]\((?!(?:#[a-z0-9-]+|\.\.\/(?:(?!\.\.?\/)[A-Za-z0-9._-]+\/)+(?!\.\.?\))[A-Za-z0-9._-]+)\))/iu.test(prose)
   ) {
     return false;
   }
@@ -421,6 +427,7 @@ function renderCanonicalReport(report: JsonRecord): string {
     ""
   );
   appendRunSummary(lines, isRecord(report.run_metadata) ? report.run_metadata : {});
+  appendAuditContext(lines, report.audit_context);
   const campaignDidNotRun = appendCampaignOutcome(lines, report.campaign_outcome);
 
   for (const issue of issues) {
@@ -508,6 +515,29 @@ function appendRunSummary(lines: string[], metadata: JsonRecord): void {
   }
 }
 
+function appendAuditContext(lines: string[], value: unknown): void {
+  if (!isRecord(value)) return;
+  const threat = recordField(value, "threat_model");
+  const goalPlan = recordField(value, "goal_plan");
+  const threatMarkdown = safeReportLink(threat?.markdown);
+  const threatJson = safeReportLink(threat?.json);
+  const goalPlanJson = safeReportLink(goalPlan?.json);
+  if (threatMarkdown === undefined && threatJson === undefined && goalPlanJson === undefined) return;
+  lines.push("", "## Audit context", "");
+  if (threatMarkdown !== undefined || threatJson !== undefined) {
+    const links = [
+      threatMarkdown === undefined ? undefined : `[THREAT_MODEL.md](${threatMarkdown})`,
+      threatJson === undefined ? undefined : `[threat-model.json](${threatJson})`
+    ].filter((entry): entry is string => entry !== undefined);
+    lines.push(`- Threat model: ${links.join("; ")}`);
+  }
+  if (goalPlanJson !== undefined) lines.push(`- Goal plan: [goal-plan.json](${goalPlanJson})`);
+}
+
+function safeReportLink(value: unknown): string | undefined {
+  return typeof value === "string" && SAFE_REPORT_RELATIVE_LINK_PATTERN.test(value) ? value : undefined;
+}
+
 function appendProductionIssue(lines: string[], rendered: RenderedIssue): void {
   const { issue, id, severity, title } = rendered;
   lines.push(
@@ -523,6 +553,10 @@ function appendProductionIssue(lines: string[], rendered: RenderedIssue): void {
   const likelihood = riskAssessment(issue, "likelihood", severity);
   lines.push(`- **Impact**: ${impact.label}: ${publicProse(impact.rationale)}`);
   lines.push(`- **Likelihood**: ${likelihood.label}: ${publicProse(likelihood.rationale)}`);
+  const sourceNodes = findingSourceNodes(issue);
+  if (sourceNodes.length > 0) {
+    lines.push(`- **Source nodes**: ${sourceNodes.map((source) => `\`${publicInlineCode(source)}\``).join(", ")}`);
+  }
   lines.push("", "### Proof of Concept", "");
   appendProofOfConcept(lines, issue);
   appendFamilyVariants(lines, issue.family_variants);
@@ -992,6 +1026,15 @@ function firstDefined(...values: unknown[]): unknown {
 
 function uniqueStrings(value: unknown[]): string[] {
   return [...new Set(value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0))];
+}
+
+function findingSourceNodes(record: JsonRecord): string[] {
+  return uniqueStrings(
+    [
+      ...(Array.isArray(record.source_nodes) ? record.source_nodes : []),
+      ...(typeof record.source_node_id === "string" ? [record.source_node_id] : [])
+    ].map((value) => (typeof value === "string" ? value.trim() : value))
+  );
 }
 
 function isUnavailable(value: unknown): boolean {

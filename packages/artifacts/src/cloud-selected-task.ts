@@ -422,8 +422,9 @@ export function parseCloudSelectedTask(
 /**
  * The dependency arrays runtime lowering of a declared dynamic group legitimately extends.
  *
- * These four are lowered together, entry by entry, so they are relaxed together and then re-checked
- * as one correlated set rather than as four independent supersets.
+ * Runtime lowering updates these four as one correlated set. An empty-group fallback can reuse its
+ * source artifact directory when that directory is already in the compiled ancestry; every other
+ * materialized attempt appends its own directory.
  */
 export const CLOUD_SELECTED_TASK_RUNTIME_EXTENDED_FIELDS = [
   "dependencyArtifactDirs",
@@ -461,6 +462,12 @@ export interface CloudSelectedTaskRuntimeDependencyEvidence {
    * concrete node ID, derived from compile-time constants alone.
    */
   admissibleAttemptIds(concreteNodeId: string): readonly string[];
+  /**
+   * The exact verifier a materialized attempt requires, or `undefined` for a non-agentic source
+   * fallback. The concrete-node argument keeps the verifier claim bound to the same declared group
+   * derivation that admitted the attempt rather than inferring it from attacker-supplied text.
+   */
+  requiredVerifierSmithersNodeId(concreteNodeId: string, attemptId: string): string | undefined;
 }
 
 export interface CloudSelectedTaskCanonicalOptions {
@@ -547,27 +554,19 @@ function assertCorrelatedRuntimeDependencies(
     "metadata.dependencies.concreteNodeIds"
   );
   const artifactsRoot = `${actual.runRoot}/artifacts`;
+  const requiredArtifactDirs = attemptIds
+    .map((attemptId) => `${artifactsRoot}/${attemptId}`)
+    .filter((artifactDir) => !canonical.dependencyArtifactDirs.includes(artifactDir));
   if (
-    artifactDirs.length !== attemptIds.length ||
-    attemptIds.some((attemptId, index) => artifactDirs[index] !== `${artifactsRoot}/${attemptId}`)
+    artifactDirs.length !== requiredArtifactDirs.length ||
+    artifactDirs.some((artifactDir, index) => artifactDir !== requiredArtifactDirs[index])
   ) {
     throw new CloudSelectedTaskError(
-      "selected_task dependencyArtifactDirs must gain exactly one run-root artifact directory per materialized dependency attempt"
+      "selected_task dependencyArtifactDirs must contain each materialized dependency attempt's run-root artifact directory and append only missing directories"
     );
   }
-  // A group that expanded to no items contributes its non-agentic source attempt, which has no
-  // verifier, so the verifier identities are a subsequence rather than a one-to-one mapping.
-  let cursor = 0;
-  for (const nodeId of smithersNodeIds) {
-    while (cursor < attemptIds.length && nodeId !== `verify:${attemptIds[cursor]}`) cursor += 1;
-    if (cursor === attemptIds.length) {
-      throw new CloudSelectedTaskError(
-        "selected_task metadata.dependencies.smithersNodeIds may only gain verifiers of materialized dependency attempts, in order"
-      );
-    }
-    cursor += 1;
-  }
   const materialized = new Set<string>();
+  const concreteNodesByAttempt = new Map<string, string[]>();
   for (const nodeId of concreteNodeIds) {
     const admissible = evidence.admissibleAttemptIds(nodeId).filter((attemptId) => attemptIds.includes(attemptId));
     if (admissible.length === 0) {
@@ -575,12 +574,39 @@ function assertCorrelatedRuntimeDependencies(
         `selected_task metadata.dependencies.concreteNodeIds gained ${nodeId}, which no declared dynamic group materialized`
       );
     }
-    for (const attemptId of admissible) materialized.add(attemptId);
+    for (const attemptId of admissible) {
+      materialized.add(attemptId);
+      const concreteNodes = concreteNodesByAttempt.get(attemptId) ?? [];
+      concreteNodes.push(nodeId);
+      concreteNodesByAttempt.set(attemptId, concreteNodes);
+    }
   }
   const orphan = attemptIds.find((attemptId) => !materialized.has(attemptId));
   if (orphan !== undefined) {
     throw new CloudSelectedTaskError(
       `selected_task metadata.dependencies.attemptIds gained ${orphan} without the generated node that produced it`
+    );
+  }
+  const requiredVerifierIds = attemptIds.flatMap((attemptId) => {
+    const claims = new Set(
+      (concreteNodesByAttempt.get(attemptId) ?? []).map((concreteNodeId) =>
+        evidence.requiredVerifierSmithersNodeId(concreteNodeId, attemptId)
+      )
+    );
+    if (claims.size !== 1) {
+      throw new CloudSelectedTaskError(
+        `selected_task runtime dependency evidence does not derive one exact verifier requirement for ${attemptId}`
+      );
+    }
+    const required = [...claims][0];
+    return required === undefined ? [] : [required];
+  });
+  if (
+    smithersNodeIds.length !== requiredVerifierIds.length ||
+    smithersNodeIds.some((nodeId, index) => nodeId !== requiredVerifierIds[index])
+  ) {
+    throw new CloudSelectedTaskError(
+      "selected_task metadata.dependencies.smithersNodeIds must gain exactly the required verifiers of materialized dependency attempts, in order"
     );
   }
 }

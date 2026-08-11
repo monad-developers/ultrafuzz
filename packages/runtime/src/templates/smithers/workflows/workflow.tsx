@@ -722,6 +722,17 @@ function runtimeDependencyEvidence(groupNodeIds: readonly string[]) {
         ...generatedAttemptIdsFor(group, concreteNodeId),
         ...(group.source.concreteNodeId === concreteNodeId ? [group.source.attemptId] : [])
       ]);
+    },
+    requiredVerifierSmithersNodeId(concreteNodeId: string, attemptId: string): string | undefined {
+      for (const group of groups) {
+        if (group.source.concreteNodeId === concreteNodeId && group.source.attemptId === attemptId) {
+          return group.source.verifierSmithersNodeId;
+        }
+        if (generatedAttemptIdsFor(group, concreteNodeId).includes(attemptId)) {
+          return `verify:${attemptId}`;
+        }
+      }
+      return undefined;
     }
   };
 }
@@ -935,6 +946,61 @@ function hydrateSelectedTaskHandoff(spec: ReturnType<typeof cloudSelectedTaskHan
 }
 
 /**
+ * Reconstructs read-only specs for runtime-generated dependencies from this workflow's compiled
+ * dynamic-group templates.
+ *
+ * The selected-task DTO already proves each runtime-added attempt belongs to a declared group, but
+ * the initial serialized spec list cannot contain children that did not exist at compile time. The
+ * worker still needs each child's compiled output contracts and logical producer identity to verify
+ * its artifact marker and to resolve downstream findings/invariant provenance. Rebuilding those
+ * constants here closes that gap without transporting controller-owned task plans or trusting a
+ * second handoff DTO. Empty-group fallbacks are compiled source attempts and are excluded by
+ * `compiledAttemptIds`; the shared correlation contract has already enforced their exact verifier
+ * requirement, while every remaining generated dependency must retain its verifier here as well.
+ */
+function generatedDependencyTaskSpecs(
+  selected: ReturnType<typeof cloudSelectedTaskHandoff>,
+  executionGeneration: string
+): typeof taskSpecs {
+  const compiledAttemptIds = new Set(serializedTaskSpecs.map((task) => task.attemptId));
+  const declaredVerifierIds = new Set(selected.metadata.dependencies.smithersNodeIds);
+  const reconstructed: typeof taskSpecs = [];
+  for (const dependencyArtifactDir of selected.dependencyArtifactDirs) {
+    const dependencyAttemptId = path.posix.basename(dependencyArtifactDir);
+    if (compiledAttemptIds.has(dependencyAttemptId)) continue;
+    if (!declaredVerifierIds.has(`verify:${dependencyAttemptId}`)) {
+      throw new Error(`cloud worker selected_task dependency ${dependencyAttemptId} is missing its verifier`);
+    }
+
+    const candidates = selected.metadata.dependencies.concreteNodeIds.flatMap((concreteNodeId) => {
+      const generating = generatingGroupFor(concreteNodeId, dependencyAttemptId);
+      return generating === undefined ? [] : [{ concreteNodeId, ...generating }];
+    });
+    if (candidates.length !== 1) {
+      throw new Error(
+        `cloud worker selected_task dependency ${dependencyAttemptId} does not resolve to exactly one compiled dynamic template`
+      );
+    }
+    const candidate = candidates[0]!;
+    const canonical = generatedCanonicalSelectedTask(
+      candidate.group,
+      candidate.template,
+      candidate.concreteNodeId,
+      dependencyAttemptId,
+      GENERATED_EXPANSION_PLACEHOLDER,
+      executionGeneration
+    );
+    if (canonical.artifactDir !== dependencyArtifactDir) {
+      throw new Error(
+        `cloud worker selected_task dependency ${dependencyAttemptId} disagrees with its compiled artifact directory`
+      );
+    }
+    reconstructed.push(hydrateSelectedTaskHandoff(canonical));
+  }
+  return reconstructed;
+}
+
+/**
  * Validates one dispatch document against the exact outer input contract.
  *
  * Smithers already parses the declared input schema, but the relocated worker is launched from an
@@ -952,7 +1018,7 @@ function parseWorkflowInput(value: unknown): z.infer<typeof inputSchema> {
   return parsed.data;
 }
 
-/** Validates the handoff contract and hydrates it into exactly one runnable task spec. */
+/** Validates the handoff contract and hydrates one runnable spec plus read-only generated dependencies. */
 function cloudWorkerTaskSpecs(input: Record<string, unknown>): typeof taskSpecs {
   const taskId = input.task_id;
   const attemptId = input.attempt_id;
@@ -1033,7 +1099,7 @@ function cloudWorkerTaskSpecs(input: Record<string, unknown>): typeof taskSpecs 
         { allowsGeneratedExpansionValues: true }
       );
     }
-    return [hydrateSelectedTaskHandoff(spec)];
+    return [hydrateSelectedTaskHandoff(spec), ...generatedDependencyTaskSpecs(spec, input.execution_generation)];
   } catch (error) {
     const message = (error as Error).message;
     throw message.startsWith("cloud worker")
@@ -6286,13 +6352,13 @@ export default smithers((ctx) => {
   }
   if (cloudWorker) {
     // The controller owns graph.json, smithers/tasks.json, expansion manifests, and template
-    // snapshots. A worker receives only its already-materialized selected task spec.
+    // snapshots. A worker receives its already-materialized selected task plus read-only dependency
+    // specs reconstructed from this workflow's own compiled dynamic templates.
     availableTaskSpecs = cloudWorkerTaskSpecs(dispatch as Record<string, unknown>);
-    // Only execution narrows to the selected attempt. Dependency identity lookups by attempt ID
-    // (goal-plan threat-model provenance, dedupe and final-report dependency resolution) still
-    // resolve against every compiled attempt, which the worker already carries in its bundle.
-    const selectedId = availableTaskSpecs[0]!.id;
-    taskSpecs = [...taskSpecs.filter((task) => task.id !== selectedId), ...availableTaskSpecs];
+    // Only execution narrows to the selected attempt. Dependency identity lookups by attempt ID use
+    // every compiled static attempt plus the generated dependency specs reconstructed above.
+    const hydratedIds = new Set(availableTaskSpecs.map((task) => task.id));
+    taskSpecs = [...taskSpecs.filter((task) => !hydratedIds.has(task.id)), ...availableTaskSpecs];
   } else if (dynamicGroupSpecs.length > 0) {
     const readyGroupIds = dynamicGroupSpecs
       .filter((group) => {

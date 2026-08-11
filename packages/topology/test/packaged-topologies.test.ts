@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -9,6 +10,30 @@ const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)
 const TOPOLOGY_ROOT = path.join(REPOSITORY_ROOT, "packages", "config", "topologies");
 
 describe("packaged topology collection", () => {
+  it("keeps the packaged full graph byte-identical to the initialized project graph", () => {
+    const packagedPath = path.join(TOPOLOGY_ROOT, "full.yml");
+    const projectPath = path.join(REPOSITORY_ROOT, ".ultrafuzz", "topology.yml");
+    expect(fs.readFileSync(packagedPath)).toEqual(fs.readFileSync(projectPath));
+
+    const topology = loadTopology(REPOSITORY_ROOT, {
+      topologyPath: packagedPath,
+      requirePromptFiles: true
+    });
+    const nodes = new Map(topology.nodes.map((node) => [node.id, node]));
+    for (const id of [
+      "reference-vulnerability-database",
+      "threat-model",
+      "goal-plan",
+      "goal-roaming",
+      "threat-goals",
+      "class-goals"
+    ]) {
+      expect(nodes.has(id), `${id} must ship in the full topology`).toBe(true);
+    }
+    expect(nodes.get("threat-goals")?.dynamic?.from).toEqual({ node: "goal-plan", path: "$.threat_goals" });
+    expect(nodes.get("class-goals")?.dynamic?.from).toEqual({ node: "goal-plan", path: "$.class_goals" });
+  });
+
   it("validates every shipped topology directly with the built-in prompt catalog", () => {
     for (const name of ["full", "smoke", "invariant-only"]) {
       const topology = loadTopology(REPOSITORY_ROOT, {

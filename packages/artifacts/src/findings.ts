@@ -72,6 +72,10 @@ export interface NormalizeFindingsInput {
 export interface FindingSourceExpectation {
   finding_keys: readonly string[];
   source_nodes: readonly string[];
+  dedupe_keys: readonly string[];
+  family_ids: readonly string[];
+  finding_ids: readonly string[];
+  lifecycle_record?: boolean;
 }
 
 export interface UpstreamFindingSource {
@@ -138,17 +142,8 @@ export function readFindings(artifactDir: string): NormalizedFinding[] {
 }
 
 export function findingIdentityKeys(value: unknown): string[] {
-  if (!isPlainRecord(value)) return [];
-  const lifecycle = isPlainRecord(value.lifecycle) ? value.lifecycle : undefined;
-  return uniqueNonEmptyStrings([
-    value.dedupe_key,
-    lifecycle?.dedupe_key,
-    value.id,
-    value.upstream_id,
-    value.source_finding_id,
-    value.finding_id,
-    value.family_id
-  ]);
+  const identity = findingIdentity(value);
+  return uniqueNonEmptyStrings([...identity.dedupeKeys, ...identity.familyIds, ...identity.findingIds]);
 }
 
 /**
@@ -165,7 +160,10 @@ export function buildFindingSourceExpectations(input: {
   const upstream = input.upstream.map((entry, index) => normalizeUpstreamFindingSource(entry, index));
   const expectations: FindingSourceExpectation[] = upstream.map((entry) => ({
     finding_keys: entry.keys,
-    source_nodes: entry.sourceNodes
+    source_nodes: entry.sourceNodes,
+    dedupe_keys: entry.identity.dedupeKeys,
+    family_ids: entry.identity.familyIds,
+    finding_ids: entry.identity.findingIds
   }));
   if (input.lifecycleLedger === undefined) return expectations;
 
@@ -173,10 +171,23 @@ export function buildFindingSourceExpectations(input: {
     throw new FindingsValidationError("finding lifecycle ledger must contain a records array");
   }
   const covered = new Set<number>();
+  const lifecycleDedupeKeys = new Set<string>();
   for (const [recordIndex, rawRecord] of input.lifecycleLedger.records.entries()) {
     if (!isPlainRecord(rawRecord)) {
       throw new FindingsValidationError(`finding lifecycle record ${recordIndex} must be an object`);
     }
+    const dedupeKey =
+      typeof rawRecord.dedupe_key === "string" && rawRecord.dedupe_key.trim() !== ""
+        ? rawRecord.dedupe_key.trim()
+        : undefined;
+    if (dedupeKey === undefined) {
+      throw new FindingsValidationError(`finding lifecycle record ${recordIndex} requires dedupe_key`);
+    }
+    if (lifecycleDedupeKeys.has(dedupeKey)) {
+      throw new FindingsValidationError(`finding lifecycle ledger contains duplicate dedupe_key: ${dedupeKey}`);
+    }
+    lifecycleDedupeKeys.add(dedupeKey);
+    const identity = findingIdentity(rawRecord);
     const keys = findingIdentityKeys(rawRecord);
     if (keys.length === 0) {
       throw new FindingsValidationError(`finding lifecycle record ${recordIndex} has no stable finding key`);
@@ -213,7 +224,14 @@ export function buildFindingSourceExpectations(input: {
       covered.add(matched.index);
       appendUnique(sourceNodes, matched.sourceNodes);
     }
-    expectations.push({ finding_keys: keys, source_nodes: sourceNodes });
+    expectations.push({
+      finding_keys: keys,
+      source_nodes: sourceNodes,
+      dedupe_keys: identity.dedupeKeys,
+      family_ids: identity.familyIds,
+      finding_ids: identity.findingIds,
+      lifecycle_record: true
+    });
   }
   if (input.requireLifecycleCoverage === true && covered.size !== upstream.length) {
     const missing = upstream
@@ -222,6 +240,17 @@ export function buildFindingSourceExpectations(input: {
     throw new FindingsValidationError("finding lifecycle ledger omitted dependency findings: " + missing.join(", "));
   }
   return expectations;
+}
+
+/** Resolves a downstream finding to the exact authoritative discovery-source set. */
+export function resolveExpectedFindingSourceNodes(
+  finding: unknown,
+  expectations: readonly FindingSourceExpectation[]
+): string[] | undefined {
+  if (!isPlainRecord(finding)) {
+    throw new FindingsValidationError("finding provenance candidate must be an object");
+  }
+  return expectedSourceNodes(finding, expectations);
 }
 
 export function isSupportedFindingsSchemaVersion(value: string): boolean {
@@ -406,17 +435,82 @@ function expectedSourceNodes(
   expectations: readonly FindingSourceExpectation[] | undefined
 ): string[] | undefined {
   if (expectations === undefined) return undefined;
-  const findingKeys = new Set(findingIdentityKeys(record));
-  const matched = expectations.filter((expectation) => expectation.finding_keys.some((key) => findingKeys.has(key)));
-  if (matched.length === 0) return undefined;
-  const result: string[] = [];
-  for (const expectation of matched) {
-    appendUnique(
-      result,
-      expectation.source_nodes.map((sourceNode) => validateNodeReference(sourceNode, "expected finding source node ID"))
-    );
+  const identity = findingIdentity(record);
+  const tiers: Array<{
+    label: string;
+    values: readonly string[];
+    expectationValues: (expectation: FindingSourceExpectation) => readonly string[];
+    rejectUnknown: boolean;
+  }> = [
+    {
+      label: "dedupe key",
+      values: identity.dedupeKeys,
+      expectationValues: (expectation) => expectation.dedupe_keys,
+      rejectUnknown: true
+    },
+    {
+      label: "family ID",
+      values: identity.familyIds,
+      expectationValues: (expectation) => expectation.family_ids,
+      // A downstream deduper may mint a new family ID. If it reuses an existing family ID,
+      // however, that identity must resolve to the same discovery-source set as the stronger key.
+      rejectUnknown: false
+    },
+    {
+      label: "finding reference",
+      values: identity.referenceIds,
+      expectationValues: (expectation) => expectation.finding_ids,
+      rejectUnknown: true
+    }
+  ];
+  let authoritative: string[] | undefined;
+  for (const tier of tiers) {
+    for (const value of tier.values) {
+      const matches = expectations.filter((expectation) => tier.expectationValues(expectation).includes(value));
+      if (matches.length === 0) {
+        if (tier.rejectUnknown) {
+          throw new FindingsValidationError(`finding ${tier.label} does not match any dependency provenance record`);
+        }
+        continue;
+      }
+      const lifecycleMatches = matches.filter((expectation) => expectation.lifecycle_record === true);
+      const resolved = exactExpectedSourceNodes(lifecycleMatches.length > 0 ? lifecycleMatches : matches, tier.label);
+      if (authoritative === undefined) {
+        authoritative = resolved;
+      } else if (!sameStringSet(resolved, authoritative)) {
+        throw new FindingsValidationError(`finding ${tier.label} conflicts with higher-priority dependency provenance`);
+      }
+    }
   }
-  return result;
+
+  // A result's own ID is a fallback identity only. Dedupe and triage stages are allowed to keep or
+  // mint an output ID, so it cannot contradict stronger ancestry merely by colliding with an
+  // unrelated upstream record. With no ancestry claim, a unique matching ID remains the legacy
+  // provenance fallback.
+  if (authoritative !== undefined || identity.ownIds.length === 0) return authoritative;
+  const resolvedOwnIds = identity.ownIds.flatMap((value) => {
+    const matches = expectations.filter((expectation) => expectation.finding_ids.includes(value));
+    return matches.length === 0 ? [] : [exactExpectedSourceNodes(matches, "finding ID")];
+  });
+  const expected = resolvedOwnIds[0];
+  if (expected === undefined) return undefined;
+  if (resolvedOwnIds.some((candidate) => !sameStringSet(candidate, expected))) {
+    throw new FindingsValidationError("finding ID values resolve to conflicting dependency provenance");
+  }
+  return expected;
+}
+
+function exactExpectedSourceNodes(matches: readonly FindingSourceExpectation[], identityLabel: string): string[] {
+  const candidates = matches.map((expectation) =>
+    uniqueNonEmptyStrings(
+      expectation.source_nodes.map((sourceNode) => validateNodeReference(sourceNode, "expected finding source node ID"))
+    )
+  );
+  const expected = candidates[0] ?? [];
+  if (candidates.some((candidate) => !sameStringSet(candidate, expected))) {
+    throw new FindingsValidationError(`finding ${identityLabel} matches conflicting dependency provenance records`);
+  }
+  return expected;
 }
 
 function normalizeUpstreamFindingSource(
@@ -428,6 +522,7 @@ function normalizeUpstreamFindingSource(
   findingId: string;
   identities: string[];
   keys: string[];
+  identity: FindingIdentity;
   sourceNodes: string[];
 } {
   if (!isPlainRecord(entry.finding)) {
@@ -435,6 +530,7 @@ function normalizeUpstreamFindingSource(
   }
   const nodeId = validateNodeReference(entry.node_id, "dependency finding node ID");
   const findingId = requiredString(entry.finding, "id", index);
+  const identity = findingIdentity(entry.finding);
   const keys = findingIdentityKeys(entry.finding);
   if (keys.length === 0) {
     throw new FindingsValidationError(`dependency finding ${index} has no stable finding key`);
@@ -445,7 +541,31 @@ function normalizeUpstreamFindingSource(
     appendUnique(identities, [validateNodeReference(entry.finding.producer_node_id, "dependency producer node ID")]);
   }
   appendUnique(identities, sourceNodes);
-  return { index, nodeId, findingId, identities, keys, sourceNodes };
+  return { index, nodeId, findingId, identities, keys, identity, sourceNodes };
+}
+
+interface FindingIdentity {
+  dedupeKeys: string[];
+  familyIds: string[];
+  findingIds: string[];
+  referenceIds: string[];
+  ownIds: string[];
+}
+
+function findingIdentity(value: unknown): FindingIdentity {
+  if (!isPlainRecord(value)) {
+    return { dedupeKeys: [], familyIds: [], findingIds: [], referenceIds: [], ownIds: [] };
+  }
+  const lifecycle = isPlainRecord(value.lifecycle) ? value.lifecycle : undefined;
+  const referenceIds = uniqueNonEmptyStrings([value.upstream_id, value.source_finding_id, value.finding_id]);
+  const ownIds = uniqueNonEmptyStrings([value.id]);
+  return {
+    dedupeKeys: uniqueNonEmptyStrings([value.dedupe_key, lifecycle?.dedupe_key]),
+    familyIds: uniqueNonEmptyStrings([value.family_id]),
+    findingIds: uniqueNonEmptyStrings([...referenceIds, ...ownIds]),
+    referenceIds,
+    ownIds
+  };
 }
 
 function sourceNodesFromFinding(finding: Record<string, unknown>, index: number): string[] {

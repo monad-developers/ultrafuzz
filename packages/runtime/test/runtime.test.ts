@@ -21,6 +21,7 @@ import {
   threatModelJsonSchema,
   type RunState
 } from "@ultrafuzz/artifacts";
+import { packagedTopology } from "@ultrafuzz/config";
 import {
   CACHE_MANIFEST_FILE,
   RUN_REFERENCE_MANIFEST_FILE,
@@ -78,6 +79,16 @@ const runningUnderBun = typeof process.versions.bun === "string";
 function tempProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-runtime-"));
 }
+
+test("init copies the exact packaged full topology", () => {
+  const project = tempProject();
+  const initialized = initProject({ projectRoot: project, force: true });
+  assert.equal(initialized.ok, true, JSON.stringify(initialized.diagnostics));
+  assert.deepEqual(
+    fs.readFileSync(path.join(project, ".ultrafuzz", "topology.yml")),
+    fs.readFileSync(packagedTopology("full").path)
+  );
+});
 
 function firstSymlinkUnder(root: string): string | undefined {
   const pending = [root];

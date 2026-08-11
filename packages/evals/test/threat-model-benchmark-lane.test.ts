@@ -67,7 +67,7 @@ describe("v0.1.0 threat-model release-gate benchmark lane", () => {
       cohort.targets.map((target) => target.revision).sort()
     );
 
-    // No `topology` override: the smoke lane substitutes benchmarks/smoke-benchmark.yml,
+    // No `topology` override: the smoke lane substitutes packages/config/topologies/smoke.yml,
     // and that substitution is exactly why the three pinned targets never reach the
     // production graph today. The gate must not repeat it.
     expect(suite.variants).toHaveLength(1);

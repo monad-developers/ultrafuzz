@@ -1,7 +1,8 @@
 {
   "name": "@ultrafuzz/artifacts",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
+  "description": "Artifact contracts, schemas, and durable run records for Ultrafuzz",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -25,5 +26,17 @@
     "@ultrafuzz/prompts": "workspace:*",
     "@ultrafuzz/security": "workspace:*",
     "zod": "^4.4.3"
+  },
+  "homepage": "https://github.com/monad-developers/ultrafuzz#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/monad-developers/ultrafuzz.git",
+    "directory": "packages/artifacts"
+  },
+  "bugs": {
+    "url": "https://github.com/monad-developers/ultrafuzz/issues"
+  },
+  "engines": {
+    "node": ">=22.19.0"
   }
 }

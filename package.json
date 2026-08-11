@@ -11,7 +11,8 @@
     "benchmark:evmbench:lock": "pnpm --filter @ultrafuzz/evmbench lock",
     "build": "pnpm -r build",
     "benchmark:check": "pnpm --filter @ultrafuzz/cli... build && pnpm --filter @ultrafuzz/config test && pnpm --filter @ultrafuzz/runtime test && pnpm --filter @ultrafuzz/evals test && node packages/cli/dist/index.js eval history --check --project .",
-    "ci": "pnpm -w format:check && pnpm -w lint && pnpm -w build && pnpm -w validate:release",
+    "benchmark:history:check": "node packages/cli/dist/index.js eval history --check --project .",
+    "ci": "pnpm -w format:check && pnpm -w lint && pnpm -w build && pnpm -w validate:release && pnpm -w benchmark:history:check",
     "docs:audit-profiles": "node scripts/audit-profile-docs.mjs",
     "docs:check": "node scripts/audit-profile-docs.mjs --check && node scripts/docs-check.mjs",
     "format": "prettier --write .",
@@ -20,6 +21,7 @@
     "lint:fix": "eslint \"packages/**/*.{ts,js,mjs}\" \"scripts/**/*.{ts,js,mjs}\" \"*.{js,mjs}\" --fix",
     "test": "pnpm run test:ci-scripts && pnpm -r test",
     "test:ci-scripts": "bun test scripts/ci/*.test.ts",
+    "validate:pack": "node scripts/validate-packed-install.mjs",
     "validate:release": "node scripts/validate-release.mjs",
     "typecheck": "pnpm -r --workspace-concurrency=1 typecheck"
   },
@@ -47,6 +49,17 @@
     "packages/evals",
     "packages/dashboard",
     "packages/evmbench",
+    "packages/modal",
     "packages/cli"
-  ]
+  ],
+  "version": "0.1.0",
+  "description": "Autonomous security auditing and fuzzing for smart-contract repositories",
+  "homepage": "https://github.com/monad-developers/ultrafuzz#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/monad-developers/ultrafuzz.git"
+  },
+  "bugs": {
+    "url": "https://github.com/monad-developers/ultrafuzz/issues"
+  }
 }

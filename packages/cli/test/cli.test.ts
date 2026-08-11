@@ -1057,7 +1057,7 @@ test("report regenerates canonical Markdown from structured issues and non-produ
   fs.writeFileSync(path.join(reportDir, "report.md"), "# Placeholder\n\nunavailable\n", "utf8");
 
   const repaired = await cli(project, ["report", runData.run_id, "--json"]);
-  assert.equal(repaired.code, 0, repaired.stderr);
+  assert.equal(repaired.code, 0, `${repaired.stderr}${repaired.stdout}`);
   assert.equal(accountingMismatchCount(parseJson(repaired)), 0);
   const authoritativeRunMetadata = JSON.parse(
     fs.readFileSync(path.join(runData.run_root, "run.json"), "utf8")
@@ -1283,7 +1283,7 @@ test("report reconciliation normalizes alternate severities, recovers source run
   });
 
   const reconciled = await cli(project, ["report", runData.run_id, "--json"]);
-  assert.equal(reconciled.code, 0, reconciled.stderr);
+  assert.equal(reconciled.code, 0, `${reconciled.stderr}${reconciled.stdout}`);
   let report = JSON.parse(fs.readFileSync(reportPath, "utf8")) as {
     run_metadata: { source_run_id?: string };
     issues: Array<{ id: string; severity?: string; severity_guess?: string }>;
@@ -1299,7 +1299,7 @@ test("report reconciliation normalizes alternate severities, recovers source run
   delete runMetadata.source_run_id;
   writeJsonRecord(runMetadataPath, runMetadata);
   const stateFallback = await cli(project, ["report", runData.run_id, "--json"]);
-  assert.equal(stateFallback.code, 0, stateFallback.stderr);
+  assert.equal(stateFallback.code, 0, `${stateFallback.stderr}${stateFallback.stdout}`);
   report = JSON.parse(fs.readFileSync(reportPath, "utf8")) as typeof report;
   assert.equal(report.run_metadata.source_run_id, "source-from-state");
 });
@@ -1324,8 +1324,19 @@ test("report reconciliation links dedicated audit context and preserves dynamic 
     `${JSON.stringify([
       {
         id: "finding-overdue",
+        upstream_id: "raw-overdue",
+        dedupe_key: "root:overdue",
+        family_id: "family:overdue",
         source_node_id: sourceNodes[0],
         source_nodes: sourceNodes
+      },
+      {
+        id: "finding-roles",
+        upstream_id: "raw-roles",
+        dedupe_key: "root:roles",
+        family_id: "family:roles",
+        source_node_id: "dynamic:class:authorization:roles",
+        source_nodes: ["dynamic:class:authorization:roles"]
       }
     ])}\n`,
     "utf8"
@@ -1336,7 +1347,9 @@ test("report reconciliation links dedicated audit context and preserves dynamic 
     issues: [
       {
         schema_version: "1.0",
-        id: "finding-overdue",
+        id: "kept-report-finding-overdue",
+        dedupe_key: "root:overdue",
+        family_id: "family:new-report-family",
         title: "Fixed-term liquidation before overdue",
         status: "confirmed",
         severity: "High",
@@ -1376,6 +1389,106 @@ test("report reconciliation links dedicated audit context and preserves dynamic 
   };
   assert.equal(report.issues[0]?.source_node_id, sourceNodes[0]);
   assert.deepEqual(report.issues[0]?.source_nodes, sourceNodes);
+});
+
+test("report reconciliation rejects contradictory, unknown, and unmatched finding provenance", async () => {
+  const authoritativeSource = "dynamic:threat:liquidation:overdue";
+  const authoritativeFindings = [
+    {
+      id: "finding-overdue",
+      upstream_id: "raw-overdue",
+      dedupe_key: "root:overdue",
+      family_id: "family:overdue",
+      source_node_id: authoritativeSource,
+      source_nodes: [authoritativeSource]
+    },
+    {
+      id: "finding-roles",
+      upstream_id: "raw-roles",
+      dedupe_key: "root:roles",
+      family_id: "family:roles",
+      source_node_id: "dynamic:class:authorization:roles",
+      source_nodes: ["dynamic:class:authorization:roles"]
+    }
+  ];
+  const cases: Array<[string, Record<string, unknown>, RegExp]> = [
+    [
+      "contradictory explicit reference",
+      { dedupe_key: "root:overdue", upstream_id: "raw-roles", source_nodes: [authoritativeSource] },
+      /finding reference conflicts with higher-priority dependency provenance/u
+    ],
+    [
+      "unknown strong identity",
+      { dedupe_key: "root:unknown", source_nodes: [authoritativeSource] },
+      /finding dedupe key does not match any dependency provenance record/u
+    ],
+    [
+      "unmatched forged source",
+      { id: "unmatched-report-id", source_nodes: ["dynamic:forged:source"] },
+      /source provenance does not match an authoritative finding handoff/u
+    ]
+  ];
+  const reportWithIdentity = (identity: Record<string, unknown>): Record<string, unknown> => ({
+    schema_version: "1.0",
+    run_metadata: {},
+    issues: [
+      {
+        schema_version: "1.0",
+        id: "report-provenance-candidate",
+        title: "Finding provenance candidate",
+        status: "confirmed",
+        severity: "High",
+        severity_guess: "High",
+        confidence: "high",
+        summary: "A finding whose discovery provenance must be reconciled.",
+        description: "The report must not publish an unverified discovery-source claim.",
+        impact: "High",
+        impact_rationale: "The issue affects protected value.",
+        likelihood: "Medium",
+        likelihood_rationale: "The path is reachable under bounded conditions.",
+        proof_of_concept: { scenario: ["Prepare the state.", "Exercise the affected transition."] },
+        strategy: "goal-hunter",
+        strategy_provenance: {
+          detection_rates: [{ strategy: "goal-hunter", detections: 1, configured_loops: 1 }]
+        },
+        ...identity
+      }
+    ],
+    non_production_outcomes: [],
+    property_provenance: []
+  });
+
+  for (const [label, identity, expectedError] of cases) {
+    const project = tempProject();
+    const runData = await createReportRun(project, `report-provenance-${label.replaceAll(" ", "-")}`);
+    const artifactsRoot = path.join(runData.run_root, "artifacts");
+    const severityDir = path.join(artifactsRoot, "severity-classification");
+    const reportDir = path.join(artifactsRoot, "final-report");
+    fs.mkdirSync(severityDir, { recursive: true });
+    fs.mkdirSync(reportDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(severityDir, "severity-classified-findings.json"),
+      `${JSON.stringify(authoritativeFindings)}\n`,
+      "utf8"
+    );
+    writeJsonRecord(path.join(reportDir, "report.json"), reportWithIdentity(identity));
+
+    const rendered = await cli(project, ["report", runData.run_id, "--json"]);
+    assert.notEqual(rendered.code, 0, label);
+    assert.match(`${rendered.stdout}\n${rendered.stderr}`, expectedError, label);
+  }
+
+  const project = tempProject();
+  const runData = await createReportRun(project, "report-provenance-without-handoff");
+  const reportDir = path.join(runData.run_root, "artifacts", "final-report");
+  fs.mkdirSync(reportDir, { recursive: true });
+  writeJsonRecord(path.join(reportDir, "report.json"), reportWithIdentity({ source_nodes: ["dynamic:forged:source"] }));
+  const withoutHandoff = await cli(project, ["report", runData.run_id, "--json"]);
+  assert.notEqual(withoutHandoff.code, 0);
+  assert.match(
+    `${withoutHandoff.stdout}\n${withoutHandoff.stderr}`,
+    /source provenance requires an authoritative finding handoff/u
+  );
 });
 
 test("canonical report Markdown neutralizes injected markup and redacts secrets and internal paths", async () => {

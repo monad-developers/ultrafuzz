@@ -1,7 +1,8 @@
 {
   "name": "@ultrafuzz/dashboard",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
+  "description": "Local run dashboard for Ultrafuzz",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -36,5 +37,17 @@
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "vite": "^7.0.0"
+  },
+  "homepage": "https://github.com/monad-developers/ultrafuzz#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/monad-developers/ultrafuzz.git",
+    "directory": "packages/dashboard"
+  },
+  "bugs": {
+    "url": "https://github.com/monad-developers/ultrafuzz/issues"
+  },
+  "engines": {
+    "node": ">=22.19.0"
   }
 }

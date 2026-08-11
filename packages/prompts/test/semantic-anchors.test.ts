@@ -25,36 +25,36 @@ function artifactDirFor(concreteNodeId: string): string {
  * instead of asserting that the template text merely mentions it.
  */
 function renderDedupePrompt(body: string, generatedChildren: Record<string, string[]>): string {
-  const producers = [...new Set([...body.matchAll(/\{\{artifact_path:([a-z0-9_-]+)\}\}/gu)].map((match) => match[1]!))];
-  const logicalNodes = producers.map((id) => ({
-    id,
-    outputs: [
-      { path: "findings.json", contract: "ultrafuzz/findings@1", primary: true, description: "Findings." },
-      { path: "generated-tests.json", contract: "ultrafuzz/generated-tests@1", primary: false, description: "Tests." }
-    ],
-    // A dynamic group resolves to its generated children, never to the group's own directory.
-    artifactDir: artifactDirFor((generatedChildren[id] ?? [id])[0]!),
-    artifactDirs: (generatedChildren[id] ?? [id]).map(artifactDirFor)
-  }));
+  const topologyPath = fileURLToPath(new URL("../../../.ultrafuzz/topology.yml", import.meta.url));
+  const topology = YAML.parse(readFileSync(topologyPath, "utf8")) as {
+    nodes: Array<{
+      id: string;
+      depends_on?: string[];
+      outputs?: Array<{ path: string; contract: string; primary?: boolean }>;
+    }>;
+  };
+  const dedupeNode = topology.nodes.find((node) => node.id === "dedupe-findings");
+  if (dedupeNode === undefined) throw new Error("default topology is missing dedupe-findings");
+  const producers = dedupeNode.depends_on ?? [];
+  const logicalNodes = topology.nodes.map((node) => {
+    const concreteIds = generatedChildren[node.id] ?? [node.id];
+    return {
+      id: node.id,
+      dependsOn: node.depends_on,
+      outputs: (node.outputs ?? []).map((output) => ({
+        ...output,
+        primary: output.primary ?? false,
+        description: "Default topology output."
+      })),
+      // A dynamic group resolves to its generated children, never to the group's own directory.
+      artifactDir: artifactDirFor(concreteIds[0]!),
+      artifactDirs: concreteIds.map(artifactDirFor)
+    };
+  });
   return renderPrompt({
     prompt: body,
     graph: {
-      logicalNodes: [
-        ...logicalNodes,
-        {
-          id: "dedupe-findings",
-          dependsOn: producers,
-          outputs: [
-            {
-              path: "deduped-findings.json",
-              contract: "ultrafuzz/findings@1",
-              primary: true,
-              description: "Deduped findings."
-            }
-          ],
-          artifactDir: artifactDirFor("dedupe-findings")
-        }
-      ]
+      logicalNodes
     },
     node: {
       logicalId: "dedupe-findings",
@@ -749,7 +749,6 @@ describe("prompt semantic anchors", () => {
       // nothing is truncated to a prefix and nothing collapses several children onto one path.
       for (const [group, children] of Object.entries(generatedChildren)) {
         for (const artifact of ["findings.json", "generated-tests.json"]) {
-          if (!body.includes(`{{artifact_path:${group}}}/${artifact}`)) continue;
           for (const child of children) {
             const expectedBullet = `- ${artifactDirFor(child)}/${artifact}`;
             expect(rendered.split(expectedBullet).length - 1, `${relativePath} ${group} ${artifact} ${child}`).toBe(1);
@@ -758,8 +757,8 @@ describe("prompt semantic anchors", () => {
           expect(rendered, `${relativePath} ${group}`).not.toContain(`${artifactDirFor(group)}/${artifact}`);
         }
       }
-      // A fixed lane still renders a single unbulleted path.
-      expect(rendered).toContain(`${artifactDirFor("goal-roaming")}/findings.json`);
+      // A fixed lane still renders exactly one path.
+      expect(rendered.split(`${artifactDirFor("goal-roaming")}/findings.json`).length - 1).toBe(1);
       expect(rendered).not.toContain("{{artifact_path:");
     }
   });

@@ -1,3 +1,5 @@
+import os from "node:os";
+
 /**
  * The explicit read credential contract for pinned references that live in private repositories.
  *
@@ -69,33 +71,60 @@ export function referenceGitCredentialCoversRepo(
 }
 
 /**
- * Builds the `GIT_CONFIG_*` overlay that authenticates exactly one remote.
+ * Builds the complete, isolated environment for a Git subprocess.
  *
- * Returns an empty object whenever the credential does not cover `repo`, so an anonymous fetch stays
- * anonymous. The header is keyed to the full remote URL rather than to `https://github.com/`, so git
- * only attaches it to this one repository even though every reference shares the host.
+ * Every inherited `GIT_*` variable is removed first. Global and system configuration are replaced
+ * with the platform null device, credential helpers and prompts are disabled, and only then is an
+ * allowlisted exact-remote header added. Consequently an uncovered reference is genuinely
+ * anonymous even on a host with ambient helpers, injected `GIT_CONFIG_*` entries, or global HTTP
+ * extraheaders. The same returned environment must be used for the fetch and for later object reads:
+ * a filtered Git repository may lazily contact its promisor remote from `cat-file` or `show`.
  */
 export function referenceGitCredentialEnv(
   credential: ReferenceGitCredential | undefined,
   repo: string,
-  remote: string
-): Record<string, string> {
-  if (!referenceGitCredentialCoversRepo(credential, repo)) return {};
-  const basic = Buffer.from(`x-access-token:${credential!.token}`, "utf8").toString("base64");
+  remote: string,
+  inheritedEnv: NodeJS.ProcessEnv | Record<string, string | undefined> = process.env
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(inheritedEnv)) {
+    // Windows environment names are case-insensitive. Normalize before filtering so a caller cannot
+    // preserve a Git control (or a raw reference credential) merely by changing its key's casing.
+    const normalizedKey = key.toUpperCase();
+    if (
+      !normalizedKey.startsWith("GIT_") &&
+      normalizedKey !== REFERENCE_GITHUB_TOKEN_ENV &&
+      normalizedKey !== REFERENCE_GITHUB_REPOS_ENV &&
+      value !== undefined
+    ) {
+      env[key] = value;
+    }
+  }
+
+  const config: Array<[string, string]> = [];
+  if (referenceGitCredentialCoversRepo(credential, repo)) {
+    const basic = Buffer.from(`x-access-token:${credential!.token}`, "utf8").toString("base64");
+    config.push([`http.${remote}.extraheader`, `AUTHORIZATION: basic ${basic}`]);
+  }
+  // Reset the multi-valued helper list after repository configuration is loaded. The global and
+  // system files are already disabled below, but the explicit reset also protects commands that
+  // run after `remote add` has created the temporary repository configuration.
+  config.push(["credential.helper", ""]);
+  for (const [index, [key, value]] of config.entries()) {
+    env[`GIT_CONFIG_KEY_${index}`] = key;
+    env[`GIT_CONFIG_VALUE_${index}`] = value;
+  }
+
   return {
-    GIT_CONFIG_COUNT: "2",
-    GIT_CONFIG_KEY_0: `http.${remote}.extraheader`,
-    GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${basic}`,
-    // Reset the multi-valued helper list after repository, global, and system config have been
-    // loaded. Otherwise an ambient helper could answer after this narrowly scoped header is
-    // rejected, silently widening the credential actually used for a private fetch.
-    GIT_CONFIG_KEY_1: "credential.helper",
-    GIT_CONFIG_VALUE_1: "",
+    ...env,
+    GIT_CONFIG_COUNT: String(config.length),
     // A private fetch must fail rather than block forever on an interactive credential prompt when
     // the token is rejected, and it must never fall back to an ambient helper credential.
     GIT_TERMINAL_PROMPT: "0",
     GIT_ASKPASS: "",
-    GIT_CONFIG_NOSYSTEM: "1"
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: os.devNull,
+    GIT_CONFIG_SYSTEM: os.devNull
   };
 }
 

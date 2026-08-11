@@ -18,7 +18,9 @@ const ARTIFACT_DIR = `${RUN_ROOT}/artifacts/${ATTEMPT}`;
 /** The declared group in these cases derives exactly one generated attempt for `dynamic:item:one`. */
 const EVIDENCE = {
   admissibleAttemptIds: (concreteNodeId: string): string[] =>
-    concreteNodeId === "dynamic:item:one" ? ["generated-one"] : []
+    concreteNodeId === "dynamic:item:one" ? ["generated-one"] : [],
+  requiredVerifierSmithersNodeId: (concreteNodeId: string, attemptId: string): string | undefined =>
+    concreteNodeId === "dynamic:item:one" && attemptId === "generated-one" ? "verify:generated-one" : undefined
 };
 
 /** Applies one dependency-array override on top of the canonical handoff. */
@@ -84,7 +86,7 @@ test("a compiled attempt may only gain correlated evidence of the dependencies i
       withDependencies({
         artifactDirs: [...canonical.dependencyArtifactDirs, `${RUN_ROOT}/artifacts/generated-one`]
       }),
-      /dependencyArtifactDirs must gain exactly one run-root artifact directory per materialized dependency attempt/u
+      /dependencyArtifactDirs must contain each materialized dependency attempt's run-root artifact directory/u
     ],
     [
       "an arbitrary safe path instead of the attempt's own directory",
@@ -93,14 +95,23 @@ test("a compiled attempt may only gain correlated evidence of the dependencies i
         concreteNodeIds: [...canonical.metadata.dependencies.concreteNodeIds, "dynamic:item:one"],
         attemptIds: [...canonical.metadata.dependencies.attemptIds, "generated-one"]
       }),
-      /dependencyArtifactDirs must gain exactly one run-root artifact directory per materialized dependency attempt/u
+      /dependencyArtifactDirs must contain each materialized dependency attempt's run-root artifact directory/u
     ],
     [
       "a verifier for an attempt that was never added",
       withDependencies({
         smithersNodeIds: [...canonical.metadata.dependencies.smithersNodeIds, "verify:generated-one"]
       }),
-      /smithersNodeIds may only gain verifiers of materialized dependency attempts/u
+      /smithersNodeIds must gain exactly the required verifiers of materialized dependency attempts/u
+    ],
+    [
+      "a required verifier omitted",
+      withDependencies({
+        artifactDirs: [...canonical.dependencyArtifactDirs, `${RUN_ROOT}/artifacts/generated-one`],
+        concreteNodeIds: [...canonical.metadata.dependencies.concreteNodeIds, "dynamic:item:one"],
+        attemptIds: [...canonical.metadata.dependencies.attemptIds, "generated-one"]
+      }),
+      /smithersNodeIds must gain exactly the required verifiers of materialized dependency attempts/u
     ],
     [
       "a generated node no declared group derives",
@@ -142,9 +153,53 @@ test("a runtime extension without a verifier is still correlated with its attemp
   });
   const evidence = {
     admissibleAttemptIds: (concreteNodeId: string): string[] =>
-      concreteNodeId === "reference-source" ? ["source-one"] : []
+      concreteNodeId === "reference-source" ? ["source-one"] : [],
+    requiredVerifierSmithersNodeId: (): undefined => undefined
   };
   assertCloudSelectedTaskMatchesCanonical(sourceOnly, canonical, { runtimeDependencies: evidence });
+});
+
+test("an agentic empty-group source retains its exact compiled verifier", () => {
+  const canonical = handoff();
+  const sourceOnly = withDependencies({
+    artifactDirs: [...canonical.dependencyArtifactDirs, `${RUN_ROOT}/artifacts/source-one`],
+    concreteNodeIds: [...canonical.metadata.dependencies.concreteNodeIds, "agentic-source"],
+    attemptIds: [...canonical.metadata.dependencies.attemptIds, "source-one"],
+    smithersNodeIds: [...canonical.metadata.dependencies.smithersNodeIds, "verify:source-one"]
+  });
+  const evidence = {
+    admissibleAttemptIds: (concreteNodeId: string): string[] =>
+      concreteNodeId === "agentic-source" ? ["source-one"] : [],
+    requiredVerifierSmithersNodeId: (concreteNodeId: string, attemptId: string): string | undefined =>
+      concreteNodeId === "agentic-source" && attemptId === "source-one" ? "verify:source-one" : undefined
+  };
+  assertCloudSelectedTaskMatchesCanonical(sourceOnly, canonical, { runtimeDependencies: evidence });
+  const canonicalWithSourceArtifact = handoff({
+    dependencyArtifactDirs: [...canonical.dependencyArtifactDirs, `${RUN_ROOT}/artifacts/source-one`]
+  });
+  const sourceWithCompiledArtifact = handoff({
+    dependencyArtifactDirs: canonicalWithSourceArtifact.dependencyArtifactDirs,
+    metadata: {
+      ...canonicalWithSourceArtifact.metadata,
+      dependencies: sourceOnly.metadata.dependencies
+    }
+  });
+  assertCloudSelectedTaskMatchesCanonical(sourceWithCompiledArtifact, canonicalWithSourceArtifact, {
+    runtimeDependencies: evidence
+  });
+  assert.throws(
+    () =>
+      assertCloudSelectedTaskMatchesCanonical(
+        withDependencies({
+          artifactDirs: [...canonical.dependencyArtifactDirs, `${RUN_ROOT}/artifacts/source-one`],
+          concreteNodeIds: [...canonical.metadata.dependencies.concreteNodeIds, "agentic-source"],
+          attemptIds: [...canonical.metadata.dependencies.attemptIds, "source-one"]
+        }),
+        canonical,
+        { runtimeDependencies: evidence }
+      ),
+    /smithersNodeIds must gain exactly the required verifiers of materialized dependency attempts/u
+  );
 });
 
 test("a deferred attempt may only claim its own runtime-rendered prompt", () => {

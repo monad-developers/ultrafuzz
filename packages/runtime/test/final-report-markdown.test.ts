@@ -11,6 +11,13 @@ function renderableReport(): Record<string, unknown> {
   return {
     schema_version: "1.0",
     run_metadata: { run_id: "projection-test" },
+    audit_context: {
+      threat_model: {
+        markdown: "../threat-model/THREAT_MODEL.md",
+        json: "../threat-model/threat-model.json"
+      },
+      goal_plan: { json: "../goal-plan/goal-plan.json" }
+    },
     issues: [
       {
         schema_version: "1.0",
@@ -33,7 +40,9 @@ function renderableReport(): Record<string, unknown> {
         strategy: "stateful-invariant",
         strategy_provenance: {
           detection_rates: [{ strategy: "stateful-invariant", detections: 1, configured_loops: 4 }]
-        }
+        },
+        source_node_id: "dynamic:threat:state-mismatch",
+        source_nodes: ["dynamic:threat:state-mismatch", "dynamic:class:state-machine"]
       }
     ],
     non_production_outcomes: [],
@@ -67,7 +76,15 @@ test("canonical final-report projection returns one canonical JSON and Markdown 
   assert.equal((first.report.property_provenance as Array<Record<string, unknown>>)[0]?.finding_id, "L-01");
 
   assert.match(first.markdown, /^# Ultrafuzz report\n\n\| Issue id \| Title \|/u);
+  assert.match(
+    first.markdown,
+    /## Audit context\n\n- Threat model: \[THREAT_MODEL\.md\]\(\.\.\/threat-model\/THREAT_MODEL\.md\); \[threat-model\.json\]\(\.\.\/threat-model\/threat-model\.json\)\n- Goal plan: \[goal-plan\.json\]\(\.\.\/goal-plan\/goal-plan\.json\)/u
+  );
   assert.match(first.markdown, /^## \[L-01\] - State mismatch$/mu);
+  assert.match(
+    first.markdown,
+    /- \*\*Source nodes\*\*: `dynamic:threat:state-mismatch`, `dynamic:class:state-machine`/u
+  );
   assert.match(first.markdown, /\| stateful-invariant \| 1\/4 \|/u);
   assert.doesNotMatch(first.markdown, /synthetic-final-report-secret/u);
   assert.doesNotMatch(first.markdown, /\/home\/runner\/private/u);

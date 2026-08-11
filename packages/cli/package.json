@@ -1,7 +1,8 @@
 {
   "name": "@ultrafuzz/cli",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
+  "description": "Ultrafuzz command-line interface",
   "type": "module",
   "bin": {
     "ultrafuzz": "./dist/index.js"
@@ -43,5 +44,17 @@
   "devDependencies": {
     "@types/adm-zip": "^0.5.8",
     "@types/tar-stream": "^3.1.4"
+  },
+  "homepage": "https://github.com/monad-developers/ultrafuzz#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/monad-developers/ultrafuzz.git",
+    "directory": "packages/cli"
+  },
+  "bugs": {
+    "url": "https://github.com/monad-developers/ultrafuzz/issues"
+  },
+  "engines": {
+    "node": ">=22.19.0"
   }
 }

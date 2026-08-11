@@ -26,8 +26,11 @@ overrides:
 allowBuilds:
   "@moonshot-ai/kimi-code": false
   "@parcel/watcher": false
+  "@smithers-orchestrator/jj-darwin-arm64": false
+  "@smithers-orchestrator/jj-darwin-x64": false
   "@smithers-orchestrator/jj-linux-arm64": false
   "@smithers-orchestrator/jj-linux-x64": false
+  "@smithers-orchestrator/jj-win32-x64": false
   cbor-extract: true
   esbuild: true
   koffi: false

@@ -1,7 +1,8 @@
 {
   "name": "@ultrafuzz/runtime",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
+  "description": "Durable topology planning and workflow runtime for Ultrafuzz",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -34,5 +35,17 @@
     "@moonshot-ai/kimi-code": "0.29.1",
     "@types/proper-lockfile": "^4.1.4",
     "smithers-orchestrator": "0.32.0"
+  },
+  "homepage": "https://github.com/monad-developers/ultrafuzz#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/monad-developers/ultrafuzz.git",
+    "directory": "packages/runtime"
+  },
+  "bugs": {
+    "url": "https://github.com/monad-developers/ultrafuzz/issues"
+  },
+  "engines": {
+    "node": ">=22.19.0"
   }
 }

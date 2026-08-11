@@ -8,6 +8,7 @@ const reportPath = path.resolve(root, readOption("--report") ?? ".ultrafuzz/rele
 
 const gates = [
   gate("docs", "Documentation inventory", "pnpm", ["-w", "docs:check"], ["G-DOCS"]),
+  gate("ci-scripts", "CI script tests", "pnpm", ["-w", "test:ci-scripts"], ["G-CI"]),
   gate("config", "Config package tests", "pnpm", ["--filter", "@ultrafuzz/config", "test"], ["G-CONFIG"]),
   gate(
     "audit-profile-package",
@@ -16,12 +17,22 @@ const gates = [
     ["scripts/validate-audit-profile-package.mjs"],
     ["G-CONFIG", "G-CLI"]
   ),
+  gate("packed-install", "Packed install, init, and validate", "pnpm", ["-w", "validate:pack"], ["G-PACKAGE"]),
   gate("security", "Security package tests", "pnpm", ["--filter", "@ultrafuzz/security", "test"], ["G-SECURITY"]),
+  gate(
+    "references",
+    "References package tests",
+    "pnpm",
+    ["--filter", "@ultrafuzz/references", "test"],
+    ["G-REFERENCES"]
+  ),
   gate("topology", "Topology package tests", "pnpm", ["--filter", "@ultrafuzz/topology", "test"], ["G-TOPOLOGY"]),
   gate("prompts", "Prompt package tests", "pnpm", ["--filter", "@ultrafuzz/prompts", "test"], ["G-PROMPTS"]),
   gate("artifacts", "Artifacts package tests", "pnpm", ["--filter", "@ultrafuzz/artifacts", "test"], ["G-ARTIFACTS"]),
   gate("runtime", "Runtime package tests", "pnpm", ["--filter", "@ultrafuzz/runtime", "test"], ["G-RUNTIME"]),
+  gate("dashboard", "Dashboard package tests", "pnpm", ["--filter", "@ultrafuzz/dashboard", "test"], ["G-DASHBOARD"]),
   gate("evals", "Evals package tests", "pnpm", ["--filter", "@ultrafuzz/evals", "test"], ["G-EVALS"]),
+  gate("evmbench", "EVMBench package tests", "pnpm", ["--filter", "@ultrafuzz/evmbench", "test"], ["G-EVMBENCH"]),
   gate("modal", "Modal package tests", "pnpm", ["--filter", "@ultrafuzz/modal", "test"], ["G-MODAL"]),
   gate("cli", "CLI package tests", "pnpm", ["--filter", "@ultrafuzz/cli", "test"], ["G-CLI"]),
   gate("workspace-typecheck", "Workspace typecheck", "pnpm", ["-w", "typecheck"], ["G-WORKSPACE-TYPECHECK"])

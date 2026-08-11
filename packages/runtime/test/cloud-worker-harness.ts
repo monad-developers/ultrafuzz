@@ -18,6 +18,17 @@ export interface RenderedTask {
   props: Record<string, unknown>;
 }
 
+export interface HarnessTaskSpecSummary {
+  id: string;
+  attemptId: string;
+  artifactDir: string;
+  logicalNodeId: string;
+  modelProfileId: string;
+  modelName: string | null;
+  reasoningEffort: string | null;
+  outputs: unknown[];
+}
+
 /** Builds the minimum faithful execution-snapshot layout needed by the in-process workflow harness. */
 export function materializeHarnessWorkflowSnapshot(compiled: CompiledSmithersWorkflow): string {
   const snapshotRoot = path.join(compiled.runRoot, "smithers", "harness-execution-snapshot");
@@ -57,6 +68,8 @@ export async function renderGeneratedWorkflow(input: {
   workflowInput: Record<string, unknown>;
   /** Fails the render if the workflow reaches controller-owned dynamic materialization. */
   forbidDynamicMaterialization?: boolean;
+  /** Receives the task-spec inventory after the workflow has applied cloud-worker narrowing. */
+  captureTaskSpecs?: HarnessTaskSpecSummary[];
 }): Promise<RenderedTask[]> {
   const source = fs.readFileSync(input.workflowPath, "utf8");
   const runtimeModule = /const runtimeModule = process\.env\.ULTRAFUZZ_RUNTIME_MODULE \?\? "([^"]+)"/u.exec(source);
@@ -73,7 +86,7 @@ export async function renderGeneratedWorkflow(input: {
       verbatimModuleSyntax: true
     }
   });
-  const rewritten = transpiled.outputText
+  const productSource = transpiled.outputText
     .replaceAll('"smithers-orchestrator/jsx-runtime"', JSON.stringify(stubs.jsxRuntime))
     .replaceAll('"smithers-orchestrator"', JSON.stringify(stubs.orchestrator))
     .replaceAll('"react"', JSON.stringify(stubs.react))
@@ -86,6 +99,18 @@ export async function renderGeneratedWorkflow(input: {
       "const loadedWorkflowPath = fileURLToPath(import.meta.url);",
       `const loadedWorkflowPath = ${JSON.stringify(path.resolve(input.workflowPath))};`
     );
+  const rewritten = `${productSource}\nexport function __ultrafuzzHarnessTaskSpecs() {
+  return taskSpecs.map((task) => ({
+    id: task.id,
+    attemptId: task.attemptId,
+    artifactDir: task.artifactDir,
+    logicalNodeId: task.metadata.node.logicalNodeId,
+    modelProfileId: task.metadata.model.profileId,
+    modelName: task.modelName ?? null,
+    reasoningEffort: task.reasoningEffort ?? null,
+    outputs: task.outputs
+  }));
+}\n`;
   const harnessPath = path.join(path.dirname(input.workflowPath), `harness-${(harnessCounter += 1)}.mjs`);
   fs.writeFileSync(harnessPath, rewritten, "utf8");
 
@@ -102,8 +127,11 @@ export async function renderGeneratedWorkflow(input: {
   try {
     const module = (await import(`${pathToFileURL(harnessPath).href}?harness=${harnessCounter}`)) as {
       default: (ctx: unknown) => RenderedElement;
+      __ultrafuzzHarnessTaskSpecs: () => HarnessTaskSpecSummary[];
     };
-    return collectTasks(module.default({ input: input.workflowInput, outputMaybe: () => undefined }));
+    const rendered = module.default({ input: input.workflowInput, outputMaybe: () => undefined });
+    input.captureTaskSpecs?.push(...module.__ultrafuzzHarnessTaskSpecs());
+    return collectTasks(rendered);
   } finally {
     process.chdir(previousCwd);
     restoreEnv("ULTRAFUZZ_CLOUD_WORKER", previousWorker);

@@ -4,10 +4,12 @@ import path from "node:path";
 import {
   assertNoSymlinkComponents,
   assertRegularFileInside,
+  buildFindingSourceExpectations,
   derivePropertyImplementationCoverage,
   layoutForRunRoot,
   readArtifactManifest,
   resolveCampaignFindingBackends,
+  resolveExpectedFindingSourceNodes,
   validateArtifactContract,
   validateFindingsSchema,
   validateImplementedPropertiesSchema,
@@ -211,15 +213,41 @@ function reconcileAuditContext(runRoot: string, reportDirectory: string, report:
 
 function reconcileFindingSourceProvenance(runRoot: string, report: JsonRecord): JsonRecord {
   const upstream = readFindingHandoff(runRoot);
-  if (upstream.length === 0) return report;
-  const uniqueByKey = uniqueFindingRecordsByKey(upstream);
+  const expectations =
+    upstream.length === 0
+      ? undefined
+      : buildFindingSourceExpectations({
+          upstream: upstream.map((finding, index) => {
+            const sourceNodes = findingSourceNodes(finding);
+            if (sourceNodes.length === 0) {
+              throw new Error(`authoritative finding handoff record ${index} is missing source provenance`);
+            }
+            return {
+              node_id: sourceNodes[0]!,
+              artifact_path: `report-handoff/${index}`,
+              finding
+            };
+          })
+        });
   const reconcile = (value: unknown): unknown => {
     if (!isRecord(value)) return value;
-    const match = findingKeys(value)
-      .map((key) => uniqueByKey.get(key))
-      .find((candidate): candidate is JsonRecord => candidate !== undefined);
-    const sourceNodes = findingSourceNodes(match ?? value);
-    if (sourceNodes.length === 0) return value;
+    const claimedSourceNodes = findingSourceNodes(value);
+    // Historical and producer-free report shapes may carry their own IDs or lifecycle bookkeeping,
+    // but there is no dependency identity namespace against which those claims can be resolved. They
+    // remain renderable only while they make no discovery-source claim at all.
+    if (expectations === undefined) {
+      if (claimedSourceNodes.length > 0) {
+        throw new Error("report finding source provenance requires an authoritative finding handoff");
+      }
+      return value;
+    }
+    const sourceNodes = resolveExpectedFindingSourceNodes(value, expectations);
+    if (sourceNodes === undefined) {
+      if (claimedSourceNodes.length > 0) {
+        throw new Error("report finding source provenance does not match an authoritative finding handoff");
+      }
+      return value;
+    }
     return { ...value, source_node_id: sourceNodes[0], source_nodes: sourceNodes };
   };
   return {
@@ -248,25 +276,6 @@ function readFindingHandoff(runRoot: string): JsonRecord[] {
     if (records.length > 0) return records;
   }
   return [];
-}
-
-function uniqueFindingRecordsByKey(records: JsonRecord[]): Map<string, JsonRecord> {
-  const candidates = new Map<string, JsonRecord | undefined>();
-  for (const record of records) {
-    for (const key of findingKeys(record)) {
-      candidates.set(key, candidates.has(key) ? undefined : record);
-    }
-  }
-  return new Map([...candidates].filter((entry): entry is [string, JsonRecord] => entry[1] !== undefined));
-}
-
-function findingKeys(record: JsonRecord): string[] {
-  const lifecycle = recordField(record, "lifecycle");
-  return uniqueStrings(
-    [record.dedupe_key, lifecycle?.dedupe_key, record.id, record.upstream_id, record.source_finding_id]
-      .filter((value): value is string => typeof value === "string")
-      .map((value) => value.trim())
-  );
 }
 
 function findingSourceNodes(record: JsonRecord): string[] {

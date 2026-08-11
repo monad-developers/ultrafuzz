@@ -1,7 +1,8 @@
 {
   "name": "@ultrafuzz/topology",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
+  "description": "Topology schemas, validation, and expansion for Ultrafuzz",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -11,6 +12,10 @@
       "import": "./dist/index.js"
     }
   },
+  "files": [
+    "dist",
+    "schema"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "pnpm --filter @ultrafuzz/topology^... build && vitest run",
@@ -21,5 +26,17 @@
     "@ultrafuzz/prompts": "workspace:*",
     "@ultrafuzz/references": "workspace:*",
     "yaml": "^2.8.0"
+  },
+  "homepage": "https://github.com/monad-developers/ultrafuzz#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/monad-developers/ultrafuzz.git",
+    "directory": "packages/topology"
+  },
+  "bugs": {
+    "url": "https://github.com/monad-developers/ultrafuzz/issues"
+  },
+  "engines": {
+    "node": ">=22.19.0"
   }
 }
