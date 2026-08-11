@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `eval status` now names active and waiting nodes, preserves their wait reason and next eligible action in JSON, and shows whether the linked workflow is running or stopped, so controller-loss stalls identify the exact takeover work instead of appearing only as stale checkpoints (#497).
 - Fail workflow launch before run creation when an active topology's required campaign executable is unavailable, expose those requirements through `ultrafuzz doctor`, and probe cloud requirements inside the configured provider image.
 
 - Hydrated pinned submodules now use exact per-task Git worktree configuration, so Foundry and recursive submodule initialization remain offline and cannot contaminate the shared repository configuration or create child Git metadata (#492).
