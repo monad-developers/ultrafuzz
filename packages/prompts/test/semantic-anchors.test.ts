@@ -361,6 +361,9 @@ describe("prompt semantic anchors", () => {
     expect(campaignNode?.outputs?.find((output) => output.path === "campaign-summary.json")?.contract).toBe(
       "ultrafuzz/campaign-summary@1"
     );
+    expect(campaignNode?.outputs?.find((output) => output.path === "campaign-plan.json")?.contract).toBe(
+      "ultrafuzz/invariant-campaign-plan@1"
+    );
     expect(topology.nodes.find((node) => node.id === "dynamic-strategy-generator")?.depends_on).toContain(
       "stateful-invariant-campaign"
     );
@@ -379,7 +382,20 @@ describe("prompt semantic anchors", () => {
     expect(campaign).toContain("1 vCPU means 1 worker");
     expect(campaign).toMatch(/higher\s+counts use `available_vcpus` workers on the one backend/u);
     expect(campaign).toContain("finalization reserve");
-    expect(campaign).toContain("do not divide it into per-backend slices");
+    expect(flatCampaign).toContain(
+      "reserve the complete `{{invariant_testing_fuzzer_timeout}}` seconds for the supervised Recon process"
+    );
+    expect(flatCampaign).toContain("The shutdown grace and artifact reserve are both additional to, not part of");
+    expect(flatCampaign).toContain(
+      "`timeout --preserve-status --signal=INT --kill-after=300s {{invariant_testing_fuzzer_timeout}}s recon fuzz . --contract CryticTester --test-mode assertion --workers <workers> --test-limit 18446744073709551615 --timeout {{invariant_testing_fuzzer_timeout}} --corpus-dir echidna --recon-corpus-dir recon-corpus`"
+    );
+    expect(flatCampaign).toContain("prevents Recon's default 50,000-call cap");
+    expect(flatCampaign).toContain("Do not use `--foreground`");
+    expect(flatCampaign).toContain("`fuzzing_deadline_utc = backend_started_at + configured timeout`");
+    expect(flatCampaign).toContain("`force_kill_deadline_utc = fuzzing deadline + host grace`");
+    expect(flatCampaign).toContain("`final_artifact_deadline_utc = force-kill deadline + artifact reserve`");
+    expect(campaign).not.toContain("configured budget minus the finalization reserve");
+    expect(campaign).toMatch(/do not\s+divide it into per-backend slices/u);
     expect(campaign).toContain("backends/recon-fuzzer");
     expect(campaign).not.toContain("backends/echidna");
     expect(campaign).not.toContain("backends/medusa");
@@ -401,7 +417,7 @@ describe("prompt semantic anchors", () => {
     expect(campaign).toContain("property_ids");
     expect(campaign).toContain("deterministic Foundry reproducer for every unique failure");
     expect(campaign).toContain("classify it as `blocked-unreproduced`");
-    expect(campaign).toContain("`complete`: recon-fuzzer ran to its expected terminal state");
+    expect(flatCampaign).toContain("`complete`: recon-fuzzer ran through the full configured fuzzing interval");
     expect(campaign).toContain("`partial`: recon-fuzzer produced usable results but ended early");
     expect(campaign).toContain("`blocked`: recon-fuzzer produced no usable results");
     expect(campaign).toContain("--workers <workers>");

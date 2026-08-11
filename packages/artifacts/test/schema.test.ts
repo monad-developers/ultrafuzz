@@ -1341,6 +1341,42 @@ test("the current campaign summary contract requires the persisted-plan accounti
   );
 });
 
+test("the current invariant campaign plan contract requires v2 timeout evidence", () => {
+  const plan = {
+    schema_version: "ultrafuzz.invariant-campaign-plan.v2",
+    configured_fuzzer_timeout_seconds: 3600,
+    recon_internal_timeout_seconds: 3600,
+    recon_test_limit: "18446744073709551615",
+    host_soft_timeout_seconds: 3600,
+    host_force_kill_grace_seconds: 300,
+    artifact_finalization_reserve_seconds: 300,
+    backend_started_at: "2026-08-11T00:00:00.000Z",
+    fuzzing_deadline_utc: "2026-08-11T01:00:00.000Z",
+    force_kill_deadline_utc: "2026-08-11T01:05:00.000Z",
+    final_artifact_deadline_utc: "2026-08-11T01:10:00.000Z",
+    backend: {
+      exact_shell_escaped_command:
+        "timeout --preserve-status --signal=INT --kill-after=300s 3600s recon fuzz . --timeout 3600 --test-limit 18446744073709551615"
+    }
+  };
+  assert.equal(validateArtifactContract("ultrafuzz/invariant-campaign-plan@1", JSON.stringify(plan)).ok, true);
+  for (const malformed of [
+    { ...plan, schema_version: "ultrafuzz.invariant-campaign-plan.v1" },
+    { ...plan, configured_fuzzer_timeout_seconds: 0 },
+    { ...plan, backend_started_at: "not-a-timestamp" },
+    { ...plan, backend: {} }
+  ]) {
+    const result = validateArtifactContract("ultrafuzz/invariant-campaign-plan@1", JSON.stringify(malformed));
+    assert.equal(result.ok, false, JSON.stringify(malformed));
+    assert.ok(result.issues.some((issue) => issue.code === "INVARIANT_CAMPAIGN_PLAN_SCHEMA_INVALID"));
+  }
+  assert.equal(
+    validateArtifactContract("ultrafuzz/json-object@1", JSON.stringify({ historical_plan: true })).ok,
+    true,
+    "historical generic plans remain readable without opting into the new gate"
+  );
+});
+
 test("finding and report schemas accept non-property and historical artifacts", () => {
   const nonPropertyFinding = {
     schema_version: FINDINGS_SCHEMA_VERSION,

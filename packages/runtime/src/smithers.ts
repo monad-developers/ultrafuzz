@@ -29,6 +29,7 @@ import {
   type PinnedSubmoduleExpectation
 } from "./pinned-submodules.js";
 import { renderRuntimeTemplate } from "./runtime-template.js";
+import { topologyRuntimeBudgetForTimeout } from "./topology-runtime-budget.js";
 import {
   acquireSmithersExecutableAnchor,
   bindSmithersExecutableCapability,
@@ -3432,6 +3433,7 @@ function compileTask(input: {
   const profile = modelProfileFor(input.config, input.attempt);
   const timeoutMs =
     (input.node.timeoutSeconds ?? profile.timeoutSeconds ?? input.config.run.defaultTimeoutSeconds) * 1000;
+  assertInvariantCampaignTimeoutBudget(input, timeoutMs);
   // Agent subprocesses can spend long stretches inside a provider request where
   // Smithers cannot emit a useful task heartbeat. Keep the watchdog aligned with
   // the configured node deadline so it does not silently replace a longer node
@@ -3546,6 +3548,43 @@ function compileTask(input: {
     execution,
     metadata
   };
+}
+
+const INVARIANT_CAMPAIGN_LOGICAL_NODE_IDS = new Set([
+  "stateful-invariant-campaign",
+  "stateful-invariant-recon-campaign"
+]);
+const INVARIANT_CAMPAIGN_HOST_SHUTDOWN_GRACE_SECONDS = 300;
+
+function assertInvariantCampaignTimeoutBudget(
+  input: {
+    config: ResolvedConfig;
+    node: ExpandedNode;
+  },
+  timeoutMs: number
+): void {
+  if (!INVARIANT_CAMPAIGN_LOGICAL_NODE_IDS.has(input.node.logicalId)) {
+    return;
+  }
+  const runtimeBudget = topologyRuntimeBudgetForTimeout(timeoutMs);
+  const smokeTimeoutSeconds = input.config.invariants.invariantTestingSmokeTimeoutSeconds;
+  const fuzzerTimeoutSeconds = input.config.invariants.invariantTestingFuzzerTimeoutSeconds;
+  const requiredSeconds =
+    smokeTimeoutSeconds +
+    fuzzerTimeoutSeconds +
+    INVARIANT_CAMPAIGN_HOST_SHUTDOWN_GRACE_SECONDS +
+    runtimeBudget.finalizationReserveSeconds;
+  if (runtimeBudget.timeoutSeconds >= requiredSeconds) {
+    return;
+  }
+  throw new Error(
+    `INVARIANT_CAMPAIGN_TIMEOUT_BUDGET_EXCEEDED: logical_node_id=${input.node.logicalId} ` +
+      `node_timeout_seconds=${runtimeBudget.timeoutSeconds} is smaller than required_seconds=${requiredSeconds} ` +
+      `(smoke_timeout_seconds=${smokeTimeoutSeconds} + fuzzer_timeout_seconds=${fuzzerTimeoutSeconds} + ` +
+      `host_shutdown_grace_seconds=${INVARIANT_CAMPAIGN_HOST_SHUTDOWN_GRACE_SECONDS} + ` +
+      `artifact_finalization_reserve_seconds=${runtimeBudget.finalizationReserveSeconds}). ` +
+      `Increase the campaign node or group timeout_seconds to at least ${requiredSeconds}, or lower the invariant timeouts.`
+  );
 }
 
 function cloudAgentCredentialEnv(
@@ -3692,11 +3731,11 @@ function defaultModelProfile(config: ResolvedConfig): ResolvedConfig["models"]["
   return config.models.profiles[config.models.default] ?? Object.values(config.models.profiles)[0]!;
 }
 
+export { topologyRuntimeBudgetForTimeout };
+
 export function topologyRuntimeContextForTimeout(timeoutMs: number): string {
-  const timeoutSeconds = Math.max(1, Math.ceil(timeoutMs / 1000));
-  const maximumReserveSeconds = timeoutSeconds > 1 ? timeoutSeconds - 1 : 1;
-  const finalizationReserveSeconds = Math.min(maximumReserveSeconds, 300, Math.max(1, Math.floor(timeoutSeconds / 6)));
-  const workingBudgetSeconds = Math.max(0, timeoutSeconds - finalizationReserveSeconds);
+  const { timeoutSeconds, finalizationReserveSeconds, workingBudgetSeconds } =
+    topologyRuntimeBudgetForTimeout(timeoutMs);
   return [
     "## Topology Runtime Context",
     "",

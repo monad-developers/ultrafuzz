@@ -20,6 +20,7 @@ export const ARTIFACT_CONTRACT_IDS = [
   "ultrafuzz/generated-tests@1",
   "ultrafuzz/implemented-properties@1",
   "ultrafuzz/implemented-properties@2",
+  "ultrafuzz/invariant-campaign-plan@1",
   "ultrafuzz/invariant-ledger@1",
   "ultrafuzz/json-array@1",
   "ultrafuzz/json-object@1",
@@ -150,13 +151,29 @@ const campaignSummarySchema = z.looseObject({
     post_deduplication: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
   })
 });
+const invariantCampaignPlanSchema = z.looseObject({
+  schema_version: z.literal("ultrafuzz.invariant-campaign-plan.v2"),
+  configured_fuzzer_timeout_seconds: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  recon_internal_timeout_seconds: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  recon_test_limit: z.string().min(1),
+  host_soft_timeout_seconds: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  host_force_kill_grace_seconds: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  artifact_finalization_reserve_seconds: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  backend_started_at: z.string().datetime({ offset: true }),
+  fuzzing_deadline_utc: z.string().datetime({ offset: true }),
+  force_kill_deadline_utc: z.string().datetime({ offset: true }),
+  final_artifact_deadline_utc: z.string().datetime({ offset: true }),
+  backend: z.looseObject({
+    exact_shell_escaped_command: z.string().min(1)
+  })
+});
 
 const definitions = defineContracts([
   {
     id: "ultrafuzz/campaign-summary@1",
     format: "json",
     description:
-      "A current invariant campaign summary. failure_counts.pre_deduplication must count every sibling backend failure and failure_counts.post_deduplication must count every sibling finding. This contract also marks current campaign plans whose property-derived findings must carry the explicit contributing_backend_failures deduplication partition."
+      "A current invariant campaign summary. failure_counts.pre_deduplication must count every sibling backend failure and failure_counts.post_deduplication must count every sibling finding."
   },
   {
     id: "ultrafuzz/findings@1",
@@ -194,6 +211,12 @@ const definitions = defineContracts([
       "Current invariant implementation records keyed by canonical property_id. The artifact must declare the exact inclusive priority selection and a typed blocker for every selected property that is not implemented.",
     validEmptyExample:
       '{"schema_version":"ultrafuzz.implemented-properties.v1","selection":{"priority_threshold":"high","priorities":["high"],"property_ids":[]},"properties":[]}'
+  },
+  {
+    id: "ultrafuzz/invariant-campaign-plan@1",
+    format: "json",
+    description:
+      "A current invariant campaign plan with the v2 schema marker, configured Recon and host timeouts, a nonbinding test limit, topology-derived finalization reserve, exact command, and start-derived deadlines. This contract opts the campaign into strict runtime timeout-evidence validation."
   },
   {
     id: "ultrafuzz/json-array@1",
@@ -333,6 +356,20 @@ export function validateArtifactContract(
         ok: false,
         issues: expandSchemaIssues(result.error.issues).map((issue) => ({
           code: "CAMPAIGN_SUMMARY_SCHEMA_INVALID",
+          message: issue.message,
+          path: `${artifactPath}#${issue.path.join(".")}`
+        }))
+      };
+    }
+    return { ok: true, issues: [], value: result.data };
+  }
+  if (contract === "ultrafuzz/invariant-campaign-plan@1") {
+    const result = invariantCampaignPlanSchema.safeParse(parsed);
+    if (!result.success) {
+      return {
+        ok: false,
+        issues: expandSchemaIssues(result.error.issues).map((issue) => ({
+          code: "INVARIANT_CAMPAIGN_PLAN_SCHEMA_INVALID",
           message: issue.message,
           path: `${artifactPath}#${issue.path.join(".")}`
         }))

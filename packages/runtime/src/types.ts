@@ -135,6 +135,8 @@ export interface PlannedGraphNode {
   kind: string;
   depends_on: string[];
   artifact_dir: string;
+  /** The topology-resolved node timeout sealed into the persisted run graph. */
+  timeout_seconds?: number;
   outputs: PlannedArtifactOutput[];
   prompt_id: string;
   prompt_path: string;
@@ -153,10 +155,14 @@ export interface PlannedGraphNode {
     attempt_index: number;
   };
   model_fanout: Array<{
+    /** Explicit in current plans; optional so historical planned graphs remain readable. */
+    attempt_id?: string;
     model_profile_id: string;
     agent_ref: string;
     model_name?: string;
     reasoning_effort?: string;
+    /** Effective profile or run-default timeout for this model attempt. */
+    timeout_seconds?: number;
     model_index: number;
     loop_index: number;
     attempt_index: number;
