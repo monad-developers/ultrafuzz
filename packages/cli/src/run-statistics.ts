@@ -56,7 +56,7 @@ export interface NodeStatistics {
   retry_count: number | null;
   executed_attempt_count: number | null;
   reused_attempt_count: number | null;
-  failure_categories: string[];
+  failure_categories: string[] | null;
   output_count: number;
   usage: TokenStatistics | null;
 }
@@ -545,15 +545,15 @@ function nodeStatistics(
     logical_node_id: descriptor.logicalNodeId,
     kind: descriptor.kind,
     status,
-    outcome: aggregateAttemptOutcome(attempts),
+    outcome: attemptsAvailable ? aggregateAttemptOutcome(attempts) : null,
     model: models.length > 1 ? "mixed" : (models[0] ?? null),
-    duration_ms: validDurations === 0 ? null : durationMs,
+    duration_ms: attemptsAvailable && validDurations > 0 ? durationMs : null,
     current_elapsed_ms: currentElapsedMs,
     attempt_count: attemptsAvailable ? attempts.length : null,
     retry_count: attemptsAvailable ? retryCount : null,
     executed_attempt_count: attemptsAvailable ? executedAttempts : null,
     reused_attempt_count: attemptsAvailable ? reusedAttempts : null,
-    failure_categories: [...failureCategories].sort(),
+    failure_categories: attemptsAvailable ? [...failureCategories].sort() : null,
     output_count: outputCount,
     usage: usageValue
   };

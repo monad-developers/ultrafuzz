@@ -162,6 +162,9 @@ test("stats validates, deduplicates, and run-scopes immutable ledger records", (
   );
 
   assert.equal(derived.value.nodes[0]?.attempt_count, null);
+  assert.equal(derived.value.nodes[0]?.duration_ms, null);
+  assert.equal(derived.value.nodes[0]?.outcome, null);
+  assert.equal(derived.value.nodes[0]?.failure_categories, null);
   assert.equal(derived.value.totals.duration_ms, null);
   assert.equal(derived.value.nodes[0]?.usage?.event_count, 1);
   assert.equal(derived.value.nodes[0]?.usage?.usage_complete, false);
