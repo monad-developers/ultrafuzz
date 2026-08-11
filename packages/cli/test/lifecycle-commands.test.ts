@@ -477,8 +477,9 @@ test("cancel distinguishes a submitted request from a confirmed cancellation", a
 test("doctor reports install posture in human and JSON output", async () => {
   const { project, env } = await launchedProject();
   writeSmallTopology(project, "recon");
+  const doctorEnv = { ...env, PATH: path.dirname(env.SMITHERS_BIN!) };
 
-  const human = await cli(project, ["doctor"], env);
+  const human = await cli(project, ["doctor"], doctorEnv);
   assert.match(human.stdout + human.stderr, /^Project: /mu);
   assert.match(human.stdout + human.stderr, /^Workflow engine:$/mu);
   assert.match(human.stdout + human.stderr, /- bundled: \d+\.\d+\.\d+/u);
@@ -496,7 +497,7 @@ test("doctor reports install posture in human and JSON output", async () => {
   // without naming it, on both the human and JSON surfaces.
   assert.doesNotMatch(human.stdout + human.stderr, /smthrs/iu);
 
-  const json = await cli(project, ["doctor", "--json"], env);
+  const json = await cli(project, ["doctor", "--json"], doctorEnv);
   const body = parseJson(json);
   const data = body.data as {
     checks: Array<{ name: string; status: string }>;
