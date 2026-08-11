@@ -233,7 +233,7 @@ interface AccountingTotals {
   agents: Set<string>;
 }
 
-type UsageComponent = "uncached_input" | "cache_read" | "cache_write" | "output" | "reasoning";
+export type UsageComponent = "uncached_input" | "cache_read" | "cache_write" | "output" | "reasoning";
 
 type UsageComponentCosts = Record<UsageComponent, number>;
 
@@ -255,6 +255,22 @@ interface NormalizedUsageComponents {
   cache_write: number;
   output: number;
   reasoning: number;
+}
+
+export interface NormalizedUsageAccountingProjection {
+  components: {
+    input_tokens: number | null;
+    cache_read_tokens: number | null;
+    cache_write_tokens: number | null;
+    output_tokens: number | null;
+    reasoning_tokens: number | null;
+  };
+  total_tokens: number | null;
+  estimated_spend_usd: number | null;
+  usage_complete: boolean;
+  usage_incomplete_reasons: Array<{ code: string; field?: UsageField; component?: UsageComponent; model?: string }>;
+  pricing_complete: boolean;
+  pricing_incomplete_reasons: Array<{ code: string; component?: UsageComponent; model?: string }>;
 }
 
 interface NodeWorkflowEvidence {
@@ -1673,6 +1689,90 @@ function priceUsageComponents(input: {
     componentCostsUsd,
     billableTokens,
     incompleteReasons
+  };
+}
+
+export function projectNormalizedUsageAccounting(input: {
+  usage: NormalizedUsage;
+  usageComplete: boolean;
+  usageIncompleteReasons: LedgerUsageIncompleteReason[];
+  modelPricing: ReadonlyMap<string, ModelPricing>;
+  cacheReadRatio?: number;
+}): NormalizedUsageAccountingProjection {
+  const usage = input.usage;
+  const inputTokens = usage.input_tokens ?? 0;
+  const outputTokens = usage.output_tokens ?? 0;
+  const cacheWriteTokens = usage.cache_write_tokens ?? 0;
+  const reasoningTokens = usage.reasoning_tokens ?? 0;
+  const normalized = normalizeUsageComponents({
+    model: usage.model,
+    inputTokens,
+    outputTokens,
+    cacheReadTokens: usage.cache_read_tokens,
+    cacheWriteTokens,
+    reasoningTokens,
+    cacheReadRatio: input.cacheReadRatio
+  });
+  const componentTotal = sumUsageComponents(normalized.components);
+  const explicitTotal = usage.total_tokens;
+  const breakdownIncomplete = explicitTotal !== undefined && explicitTotal > componentTotal;
+  const componentReasons: ComponentUsageIncompleteReason[] = [
+    ...normalized.incompleteReasons,
+    ...(breakdownIncomplete
+      ? [
+          {
+            code: "component-breakdown-incomplete" as const,
+            ...(usage.model === undefined ? {} : { model: usage.model })
+          }
+        ]
+      : [])
+  ];
+  const usageUnavailable = componentReasons.some(
+    (reason) => reason.code === "component-usage-unavailable" || reason.code === "component-breakdown-incomplete"
+  );
+  const pricing = priceUsageComponents({
+    model: usage.model,
+    components: normalized.components,
+    modelPricing: input.modelPricing
+  });
+  const estimatedSpendUsd = usage.cost_usd ?? (usageUnavailable ? undefined : pricing.costUsd);
+  const hasAnyCounter = USAGE_FIELDS.some((field) => usage[field] !== undefined);
+  const cacheReadUnavailable = componentReasons.some(
+    (reason) => reason.code === "component-usage-unavailable" && reason.component === "cache_read"
+  );
+  const unavailableWhenBreakdownMissing = (field: keyof NormalizedUsage): boolean =>
+    breakdownIncomplete && usage[field] === undefined;
+  return {
+    components: {
+      input_tokens:
+        !hasAnyCounter || unavailableWhenBreakdownMissing("input_tokens") ? null : normalized.components.uncached_input,
+      cache_read_tokens:
+        !hasAnyCounter ||
+        cacheReadUnavailable ||
+        (usage.cache_read_tokens === undefined && !normalized.cacheReadPricingEstimated) ||
+        unavailableWhenBreakdownMissing("cache_read_tokens")
+          ? null
+          : normalized.components.cache_read,
+      cache_write_tokens:
+        !hasAnyCounter || unavailableWhenBreakdownMissing("cache_write_tokens")
+          ? null
+          : normalized.components.cache_write,
+      output_tokens:
+        !hasAnyCounter || unavailableWhenBreakdownMissing("output_tokens") ? null : normalized.components.output,
+      reasoning_tokens:
+        !hasAnyCounter || unavailableWhenBreakdownMissing("reasoning_tokens") ? null : normalized.components.reasoning
+    },
+    total_tokens:
+      explicitTotal === undefined
+        ? usageUnavailable || !hasAnyCounter
+          ? null
+          : componentTotal
+        : Math.max(explicitTotal, componentTotal),
+    estimated_spend_usd: estimatedSpendUsd ?? null,
+    usage_complete: input.usageComplete && input.usageIncompleteReasons.length === 0 && componentReasons.length === 0,
+    usage_incomplete_reasons: [...input.usageIncompleteReasons, ...componentReasons],
+    pricing_complete: pricing.incompleteReasons.length === 0 && (usage.cost_usd !== undefined || !usageUnavailable),
+    pricing_incomplete_reasons: pricing.incompleteReasons
   };
 }
 
