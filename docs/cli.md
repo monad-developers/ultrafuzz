@@ -157,8 +157,11 @@ Artifacts land under `.ultrafuzz/evals/runs/<eval-run-id>/`. See
 `eval status <eval-run-id>` is observational: it reads the entire matrix and
 linked durable state without synchronizing or changing any run. It uses
 deterministic opaque row labels in table and JSON output, counts every terminal
-node disposition as completed, and reports ETA as unavailable when completion
-or fresh timing evidence is insufficient.
+node disposition as completed, names active and waiting nodes, and reports ETA
+as unavailable when completion or fresh timing evidence is insufficient. The
+table limits node details to three entries with a `+N` remainder; JSON retains
+the complete node lists, typed wait reason and next action, and reconciled
+linked-workflow status.
 
 `eval bundle` exports only fixed-schema aggregate evidence for offline
 analysis. The self-contained directory is checksum-verified and excludes raw

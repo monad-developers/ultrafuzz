@@ -854,7 +854,6 @@ test("diagnoseProject includes the project-local bin inherited by task execution
 
   assert.equal(doctor.value?.toolchain.find((entry) => entry.name === "recon")?.path, executable);
 });
-
 test("startRun rejects a missing required backend before creating a run", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
