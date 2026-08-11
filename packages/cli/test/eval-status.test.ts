@@ -124,7 +124,7 @@ test("eval status renders disclosure-safe table and JSON snapshots without mutat
   const table = await invoke(project, ["eval", "status", evalRunId, "--project", project]);
   assert.equal(table.code, 0, table.stderr || table.stdout);
   assert.match(table.stdout, /Row\s+Status\s+Progress\s+ETA\s+Checkpoint\s+Nodes\s+Workflow/u);
-  assert.match(table.stdout, /row-01\s+succeeded\s+100\.0% \(2\/2\)\s+complete\s+0s\s+none\s+unknown/u);
+  assert.match(table.stdout, /row-01\s+succeeded\s+100\.0% \(2\/2\)\s+complete\s+0s\s+none\s+none/u);
 
   const watch = await invoke(project, [
     "eval",

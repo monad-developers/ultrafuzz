@@ -308,6 +308,9 @@ checkpoint freshness, and ETA availability remain unchanged. Private target
 metadata, repository locations, findings, and diagnostics are not
 representable.
 
+The compact table renders an unlinked workflow as `none` and ambiguous or
+unavailable linked evidence as `unknown`.
+
 Configure an independent judge panel at the root of the eval suite YAML selected
 by `--suite` or `[eval].eval_config`:
 

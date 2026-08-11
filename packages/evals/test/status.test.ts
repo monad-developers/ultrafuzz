@@ -509,6 +509,56 @@ describe("eval status", () => {
     expect(snapshot.rows[0]?.linked_workflow_status).toBe("running");
   });
 
+  it("fails closed when durable workflow binding projections disagree", () => {
+    const fixture = evalFixture([privateRow("split-binding-row")]);
+    const runRoot = path.join(fixture.base, "split-binding-run");
+    const runId = "run-split-binding";
+    const directWorkflowId = "workflow-direct";
+    const inspectionWorkflowId = "workflow-inspection";
+    fs.mkdirSync(path.join(runRoot, "smithers", "logs"), { recursive: true });
+    fs.writeFileSync(
+      statePath(runRoot),
+      `${JSON.stringify({
+        schema_version: "1.1",
+        run_id: runId,
+        status: "running",
+        created_at: START,
+        started_at: START,
+        last_transition_at: CHECKPOINT,
+        controller_lease: { status: "expired", expires_at: "2026-01-02T14:50:30.000Z" },
+        provenance: {
+          workflow: {
+            runId: directWorkflowId,
+            inspection: { runId: inspectionWorkflowId }
+          }
+        },
+        nodes: {
+          waiting: { node_id: "waiting", status: "pending" }
+        }
+      })}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(path.join(runRoot, "smithers", "logs", `${directWorkflowId}.log`), "status: stopped\n", "utf8");
+    fs.writeFileSync(
+      path.join(runRoot, "smithers", "logs", `${inspectionWorkflowId}.log`),
+      "status: running\n",
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify({ ...record("split-binding-row", runId, runRoot), workflow_ids: [directWorkflowId] })}\n`,
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({
+      projectRoot: fixture.project,
+      evalRunId: fixture.evalRunId,
+      now: SNAPSHOT
+    });
+
+    expect(snapshot.rows[0]?.linked_workflow_status).toBe("unknown");
+  });
+
   it("uses the latest recognized Smithers lifecycle without retaining an older status", () => {
     const fixture = evalFixture([privateRow("paused-row")]);
     const runRoot = path.join(fixture.base, "paused-run");
@@ -1043,6 +1093,11 @@ describe("eval status", () => {
       progress_percent: 50,
       eta_unavailable_reason: "timing-unavailable"
     });
+    expect(
+      renderEvalStatusTable(snapshot)
+        .split("\n")
+        .find((line) => line.startsWith("row-01"))
+    ).toMatch(/none\s+none$/u);
   });
 
   it("marks an otherwise unrecorded row invalid when the durable record journal is malformed", () => {

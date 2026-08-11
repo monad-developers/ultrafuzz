@@ -112,6 +112,7 @@ const TERMINAL_RUN_STATUSES = new Set<string>(TERMINAL_RUN_STATE_STATUSES);
 const COMPLETED_NODE_STATUSES = new Set<string>(TERMINAL_NODE_STATE_STATUSES);
 const MAX_VISIBLE_STATUS_NODES = 3;
 const MAX_LINKED_WORKFLOW_IDS = 32;
+const AMBIGUOUS_LINKED_WORKFLOW_IDS = Symbol("ambiguous-linked-workflow-ids");
 // Detached summaries put lifecycle status before optional final output. Retain
 // admission evidence at the start and a bounded tail large enough to cross
 // ordinary report output without loading an unbounded workflow log.
@@ -230,7 +231,7 @@ export function renderEvalStatusTable(snapshot: EvalStatusSnapshot): string {
     etaText(row),
     checkpointText(row),
     nodesText(row),
-    row.linked_workflow_status ?? "unknown"
+    row.linked_workflow_status === null ? "none" : row.linked_workflow_status
   ]);
   const widths = headers.map((header, index) =>
     Math.max(header.length, ...values.map((columns) => columns[index]?.length ?? 0))
@@ -575,9 +576,14 @@ function knownNodeNextEligibleAction(value: string | undefined): NodeNextEligibl
 
 function linkedWorkflowIds(rawState: { provenance?: Record<string, unknown> }, fallback: unknown): unknown {
   const workflow = isRecord(rawState.provenance?.workflow) ? rawState.provenance.workflow : undefined;
-  if (workflow !== undefined && Object.hasOwn(workflow, "runId")) return [workflow.runId];
   const inspection = workflow !== undefined && isRecord(workflow.inspection) ? workflow.inspection : undefined;
-  if (inspection !== undefined && Object.hasOwn(inspection, "runId")) return [inspection.runId];
+  const hasRunId = workflow !== undefined && Object.hasOwn(workflow, "runId");
+  const hasInspectionRunId = inspection !== undefined && Object.hasOwn(inspection, "runId");
+  if (hasRunId && hasInspectionRunId) {
+    return workflow.runId === inspection.runId ? [workflow.runId] : AMBIGUOUS_LINKED_WORKFLOW_IDS;
+  }
+  if (hasRunId) return [workflow.runId];
+  if (hasInspectionRunId) return [inspection.runId];
   return fallback;
 }
 
@@ -599,6 +605,7 @@ function readLinkedWorkflowStatus(
   rawWorkflowIds: unknown,
   activelyOwned: boolean
 ): EvalStatusLinkedWorkflowState {
+  if (rawWorkflowIds === AMBIGUOUS_LINKED_WORKFLOW_IDS) return "unknown";
   if (!Array.isArray(rawWorkflowIds) || rawWorkflowIds.length === 0) return null;
   if (rawWorkflowIds.length > MAX_LINKED_WORKFLOW_IDS) return "unknown";
   const statuses: Exclude<EvalStatusLinkedWorkflowState, null>[] = [];
