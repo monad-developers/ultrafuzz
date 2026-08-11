@@ -44,6 +44,7 @@ const EVAL_STATUS_LINKED_WORKFLOW_STATES = [
   "completed",
   "stopped",
   "failed",
+  "error",
   "timeout",
   "timed-out",
   "timedout",
@@ -129,11 +130,10 @@ const MAX_VISIBLE_STATUS_NODES = 3;
 const MAX_VISIBLE_STATUS_NODE_ID_CHARACTERS = 128;
 const MAX_LINKED_WORKFLOW_IDS = 32;
 const AMBIGUOUS_LINKED_WORKFLOW_IDS = Symbol("ambiguous-linked-workflow-ids");
-// Detached summaries put lifecycle status before optional final output. Retain
-// admission evidence at the start and a bounded tail large enough to cross
-// ordinary report output without loading an unbounded workflow log.
-const WORKFLOW_LOG_PREFIX_BYTES = 32 * 1_024;
-const WORKFLOW_LOG_TAIL_BYTES = 8 * 1_024 * 1_024;
+// Reconciliation reads only complete bounded logs. Once a log exceeds this
+// limit, omitted middle evidence could supersede either edge, so fail closed
+// without spending the watch loop's synchronous I/O budget on discarded bytes.
+const WORKFLOW_LOG_MAX_BYTES = 32 * 1_024 + 8 * 1_024 * 1_024;
 const WORKFLOW_ADMISSION_PATTERN = /^SMITHERS_DETACHED_ADMISSION=run:[^\r\n]+$/u;
 const WORKFLOW_STATUS_PATTERN = /^status:\s*([a-z][a-z-]*)\s*$/u;
 
@@ -659,10 +659,9 @@ function readLinkedWorkflowStatus(
       statuses.push("unknown");
       continue;
     }
-    // Once the middle is omitted, neither a prefix status nor tail-shaped
-    // admission can prove what happened across the gap. Fail closed instead of
-    // letting final output impersonate a resumed lifecycle.
-    if (log.tailStartIndex !== null) {
+    // Once any bytes are omitted, retained evidence cannot prove what happened
+    // later. Fail closed instead of reporting a superseded lifecycle.
+    if (!log.complete) {
       statuses.push("unknown");
       continue;
     }
@@ -732,7 +731,7 @@ function scanWorkflowLogEvidence(contents: string): {
   return { ambiguousPostOutputAdmission, latestAdmissionIndex, latestStatus };
 }
 
-function readWorkflowLogEdges(runRoot: string, logPath: string): { contents: string; tailStartIndex: number | null } {
+function readWorkflowLogEdges(runRoot: string, logPath: string): { contents: string; complete: boolean } {
   assertNoSymlinkComponents(runRoot, logPath, "linked workflow log");
   const lexical = fs.lstatSync(logPath);
   if (lexical.isSymbolicLink() || !lexical.isFile()) {
@@ -747,30 +746,21 @@ function readWorkflowLogEdges(runRoot: string, logPath: string): { contents: str
       throw new Error("linked workflow log is not a bounded regular file");
     }
     const size = stat.size;
-    if (size <= WORKFLOW_LOG_PREFIX_BYTES + WORKFLOW_LOG_TAIL_BYTES) {
-      const contents = Buffer.alloc(size);
-      const bytes = fs.readSync(file, contents, 0, contents.length, 0);
-      return { contents: contents.subarray(0, bytes).toString("utf8"), tailStartIndex: null };
+    if (size > WORKFLOW_LOG_MAX_BYTES) {
+      return { contents: "", complete: false };
     }
-    const first = Buffer.alloc(WORKFLOW_LOG_PREFIX_BYTES);
-    const last = Buffer.alloc(WORKFLOW_LOG_TAIL_BYTES + 1);
-    const firstBytes = fs.readSync(file, first, 0, first.length, 0);
-    const lastBytes = fs.readSync(file, last, 0, last.length, size - last.length);
-    const prefixBytes = first.subarray(0, firstBytes);
-    const prefixLineEnd = prefixBytes.at(-1) === 0x0a ? prefixBytes.length : prefixBytes.lastIndexOf(0x0a) + 1;
-    const prefix = prefixBytes.subarray(0, prefixLineEnd).toString("utf8");
-    const tailWithContext = last.subarray(0, lastBytes);
-    const tailBytes = tailWithContext.subarray(1);
-    const firstTailLineEnd = tailBytes.indexOf(0x0a);
-    // The extra context byte distinguishes a genuine line boundary from a
-    // status-looking fragment at the start of the bounded tail.
-    const tailLineStart =
-      tailWithContext[0] === 0x0a ? 0 : firstTailLineEnd === -1 ? tailBytes.length : firstTailLineEnd + 1;
-    const tail = tailBytes.subarray(tailLineStart).toString("utf8");
-    return {
-      contents: `${prefix}${tail}`,
-      tailStartIndex: prefix.length
-    };
+    const contents = Buffer.alloc(size);
+    let bytes = 0;
+    while (bytes < contents.length) {
+      const read = fs.readSync(file, contents, bytes, contents.length - bytes, bytes);
+      if (read === 0) break;
+      bytes += read;
+    }
+    const finalStat = fs.fstatSync(file);
+    if (bytes !== size || finalStat.size !== size) {
+      return { contents: "", complete: false };
+    }
+    return { contents: contents.toString("utf8"), complete: true };
   } finally {
     fs.closeSync(file);
   }

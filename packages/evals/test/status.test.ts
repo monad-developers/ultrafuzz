@@ -3,7 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   calculateEvalEta,
@@ -336,6 +336,36 @@ describe("eval status", () => {
     });
 
     expect(snapshot.rows[0]?.linked_workflow_status).toBe("unknown");
+  });
+
+  it("does not read payload bytes from a workflow log too large to reconcile", () => {
+    const fixture = evalFixture([privateRow("oversized-log-row")]);
+    const runRoot = path.join(fixture.base, "oversized-log-run");
+    const runId = "run-oversized-log";
+    const logPath = path.join(runRoot, "smithers", "logs", `${runId}.log`);
+    fs.mkdirSync(path.dirname(logPath), { recursive: true });
+    writeState(runRoot, {
+      runId,
+      status: "running",
+      nodes: ["pending"],
+      controllerLease: { status: "expired", expiresAt: "2026-01-02T14:50:30.000Z" }
+    });
+    fs.writeFileSync(logPath, "status: stopped\n", "utf8");
+    fs.truncateSync(logPath, 32 * 1_024 + 8 * 1_024 * 1_024 + 1);
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify({ ...record("oversized-log-row", runId, runRoot), workflow_ids: [runId] })}\n`,
+      "utf8"
+    );
+    const readSync = vi.spyOn(fs, "readSync");
+    try {
+      const snapshot = readEvalStatus({ projectRoot: fixture.project, evalRunId: fixture.evalRunId, now: SNAPSHOT });
+
+      expect(snapshot.rows[0]?.linked_workflow_status).toBe("unknown");
+      expect(readSync).not.toHaveBeenCalled();
+    } finally {
+      readSync.mockRestore();
+    }
   });
 
   it("uses a fresh admission marker after a stale terminal status on resume", () => {
@@ -763,7 +793,8 @@ describe("eval status", () => {
     ["timeout", "timeout"],
     ["timed-out", "timed-out"],
     ["timedout", "timedout"],
-    ["heartbeat-timeout", "heartbeat-timeout"]
+    ["heartbeat-timeout", "heartbeat-timeout"],
+    ["error", "error"]
   ] as const)("recognizes the Smithers %s lifecycle alias", (workflowStatus, expected) => {
     const fixture = evalFixture([privateRow("alias-row")]);
     const runRoot = path.join(fixture.base, "alias-run");
