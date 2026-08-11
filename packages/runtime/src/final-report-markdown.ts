@@ -464,28 +464,38 @@ function renderedIssues(issues: JsonRecord[]): RenderedIssue[] {
     });
 }
 
-/** Outcomes that mean the campaign actually fuzzed. Anything else is disclosed. */
+/** Outcomes that mean the campaign fuzzed to completion. */
 const COMPLETED_CAMPAIGN_OUTCOMES = new Set(["completed", "complete", "succeeded", "success", "finished"]);
+/**
+ * Outcomes that mean no fuzzing happened at all. Kept separate from merely
+ * incomplete ones: a `partial` campaign did produce results, and describing it
+ * as a non-run would be as wrong as describing a blocked one as clean.
+ */
+const UNRUN_CAMPAIGN_OUTCOMES = new Set(["blocked", "not-started", "not_started", "skipped", "unavailable"]);
 
 /**
- * Disclose a campaign that did not fuzz. Returns whether the run's empty
- * findings are an absence of measurement rather than a clean result.
+ * Disclose a campaign that did not fuzz to completion. Returns whether the run
+ * produced no fuzzing at all, so an empty findings list is an absence of
+ * measurement rather than a clean result.
  */
 function appendCampaignOutcome(lines: string[], campaignOutcome: unknown): boolean {
   if (!isRecord(campaignOutcome)) return false;
   const outcome = typeof campaignOutcome.outcome === "string" ? campaignOutcome.outcome.trim() : "";
   if (outcome === "" || COMPLETED_CAMPAIGN_OUTCOMES.has(outcome.toLowerCase())) return false;
+  const neverRan = UNRUN_CAMPAIGN_OUTCOMES.has(outcome.toLowerCase());
   const reason = typeof campaignOutcome.reason === "string" ? campaignOutcome.reason.trim() : "";
   lines.push(
     "",
     "## Campaign status",
     "",
-    `The invariant campaign did not complete: \`${publicProse(outcome)}\`. No fuzzing result is available from this run, and an empty findings list below does not mean the properties held.`
+    neverRan
+      ? `The invariant campaign did not run: \`${publicProse(outcome)}\`. No fuzzing result is available, and an empty findings list below does not mean the properties held.`
+      : `The invariant campaign did not complete: \`${publicProse(outcome)}\`. Any findings below come from a partial campaign, and absence of a finding does not mean the property held.`
   );
   if (reason !== "") {
     lines.push("", `Reason: ${publicProse(reason)}`);
   }
-  return true;
+  return neverRan;
 }
 
 function appendRunSummary(lines: string[], metadata: JsonRecord): void {

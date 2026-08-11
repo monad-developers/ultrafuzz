@@ -250,13 +250,14 @@ function reconcilePropertyProvenance(runRoot: string, report: JsonRecord): JsonR
  */
 function reconcileCampaignOutcome(runRoot: string, report: JsonRecord): JsonRecord {
   const summaryPath = logicalArtifactPath(runRoot, "stateful-invariant-campaign", "campaign-summary.json");
-  if (summaryPath === undefined) {
-    return report;
-  }
-  const summary = readRecord(runRoot, summaryPath);
+  const summary = summaryPath === undefined ? undefined : readRecord(runRoot, summaryPath);
   const outcome = summary?.outcome;
   if (typeof outcome !== "string" || outcome.trim() === "") {
-    return report;
+    // Without an authoritative outcome there is nothing to stand behind, and an
+    // agent-authored status could disclose a non-run that did not happen or
+    // hide one that did. Drop it rather than publish it unverified.
+    const { campaign_outcome: unverified, ...rest } = report;
+    return unverified === undefined ? report : rest;
   }
   const reason = summary?.reason;
   return {

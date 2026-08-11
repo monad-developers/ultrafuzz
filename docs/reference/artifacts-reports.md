@@ -302,10 +302,18 @@ own `campaign-summary.json` and mirrors it in `report.json` as
 ```
 
 When the outcome is anything other than a completed one, `report.md` renders a
-`## Campaign status` section naming the outcome and its reason, and the
-findings sentence becomes "No issues were reported, but the invariant campaign
-did not run, so this is not a result." A campaign that ran and found nothing
-still reads as `No issues reported.`, and runs with no campaign are unchanged.
+`## Campaign status` section naming the outcome and its reason. Outcomes that
+mean no fuzzing happened — `blocked`, `not-started`, `skipped`, `unavailable` —
+say the campaign did not run, and the findings sentence becomes "No issues were
+reported, but the invariant campaign did not run, so this is not a result." An
+outcome such as `partial` did produce results, so it says the campaign did not
+complete and warns that absence of a finding does not mean the property held.
+
+A campaign that ran to completion and found nothing still reads as
+`No issues reported.`, and runs with no campaign are unchanged. When no
+authoritative summary is available the field is dropped rather than published
+from the agent-authored report, so a status shown here is always one the
+campaign itself recorded.
 
 Runtime artifact gates reject unknown canonical IDs and campaign references to
 properties that were not recorded with `implemented` status. They validate each

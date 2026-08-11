@@ -227,7 +227,7 @@ test("a campaign that never fuzzed is disclosed instead of reading as a clean re
     }
   });
   assert.match(blocked.markdown, /## Campaign status/u);
-  assert.match(blocked.markdown, /did not complete: `blocked`/u);
+  assert.match(blocked.markdown, /did not run: `blocked`/u);
   assert.match(blocked.markdown, /Reason: recon executable unavailable/u);
   assert.match(blocked.markdown, /the invariant campaign did not run, so this is not a result/u);
   assert.doesNotMatch(blocked.markdown, /^No issues reported\.$/mu);
@@ -245,4 +245,15 @@ test("a campaign that never fuzzed is disclosed instead of reading as a clean re
   const absent = projectCanonicalFinalReport(empty());
   assert.doesNotMatch(absent.markdown, /## Campaign status/u);
   assert.match(absent.markdown, /^No issues reported\.$/mu);
+
+  // A partial campaign did fuzz, so it must not be described as a non-run.
+  const partial = projectCanonicalFinalReport({
+    ...empty(),
+    campaign_outcome: { outcome: "partial", reason: "the deadline elapsed before the last backend finished" }
+  });
+  assert.match(partial.markdown, /## Campaign status/u);
+  assert.match(partial.markdown, /did not complete: `partial`/u);
+  assert.match(partial.markdown, /come from a partial campaign/u);
+  assert.doesNotMatch(partial.markdown, /did not run/u);
+  assert.match(partial.markdown, /^No issues reported\.$/mu);
 });
