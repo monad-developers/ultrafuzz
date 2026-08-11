@@ -1174,14 +1174,17 @@ test("init preserves existing project-owned files and validate exposes launch po
   // The TOML parser is shared, so a fix reaches every backend at once.
   assert.equal(fs.existsSync(path.join(project, ".smithers/agents/toml.ts")), true);
   const tomlHelperText = fs.readFileSync(path.join(project, ".smithers/agents/toml.ts"), "utf8");
-  assert.match(codexAgentText, /import \{ readStringTable, stringField \} from ".\/toml";/);
+  assert.match(codexAgentText, /import \{ readRootStringTable, readStringTable, stringField \} from ".\/toml";/);
   assert.doesNotMatch(codexAgentText, /function readStringTable/);
+  assert.match(tomlHelperText, /export function readRootStringTable/);
   // TOML's \UXXXXXXXX has no JSON equivalent, so values are not JSON.parse'd.
   assert.doesNotMatch(tomlHelperText, /JSON\.parse/);
   assert.match(tomlHelperText, /escape !== "u" && escape !== "U"/);
   assert.match(codexAgentText, /const apiKey = requiredEnv/);
   assert.match(codexAgentText, /return { apiKey, env: { CODEX_API_KEY: apiKey } }/);
-  assert.match(codexAgentText, /env: { OPENAI_API_KEY: "", CODEX_API_KEY: "" }/);
+  assert.match(codexAgentText, /const env: Record<string, string> = { OPENAI_API_KEY: "", CODEX_API_KEY: "" };/);
+  assert.match(codexAgentText, /function codexProviderBaseUrl/);
+  assert.match(codexAgentText, /process\.env\.OPENAI_BASE_URL/);
   assert.match(codexAgentText, /createCodexAgent/);
   assert.match(codexAgentText, /model_reasoning_effort:\s*options\.reasoningEffort/);
   assert.match(codexAgentText, /class CompatibleCodexAgent extends SmithersCodexAgent/);
@@ -2024,6 +2027,107 @@ test(
     });
     assert.equal(resumed.args.includes("--add-dir"), false);
     await resumed.cleanup?.();
+  }
+);
+
+test(
+  "generated CodexAgent subscription auth routes the credential preflight at the CLI's configured provider",
+  { skip: !runningUnderBun },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const configPath = path.join(project, "ultrafuzz.toml");
+    fs.writeFileSync(
+      configPath,
+      fs
+        .readFileSync(configPath, "utf8")
+        .replace(
+          /\[agents\.CodexAgent\]\nauth = "api-key"\napi_key_env = "OPENAI_API_KEY"/u,
+          '[agents.CodexAgent]\nauth = "subscription"'
+        ),
+      "utf8"
+    );
+    const { createCodexAgent } = await loadGeneratedCodexAgent(project);
+    const codexHome = path.join(project, "codex-home");
+    fs.mkdirSync(codexHome, { recursive: true });
+
+    const agentEnvironment = (): Record<string, string> =>
+      (createCodexAgent() as { opts: { env: Record<string, string> } }).opts.env;
+
+    const previous = {
+      config: process.env.ULTRAFUZZ_CONFIG_PATH,
+      codexHome: process.env.CODEX_HOME,
+      baseUrl: process.env.OPENAI_BASE_URL
+    };
+    process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
+    process.env.CODEX_HOME = codexHome;
+    delete process.env.OPENAI_BASE_URL;
+    try {
+      // No config.toml at all: unchanged behaviour, no route asserted.
+      assert.equal(agentEnvironment().OPENAI_BASE_URL, undefined);
+
+      // A provider with a base_url is adopted so preflight and the CLI agree.
+      const configToml = path.join(codexHome, "config.toml");
+      fs.writeFileSync(
+        configToml,
+        [
+          'model = "gpt-5.5"',
+          'model_provider = "gateway"',
+          "",
+          "[model_providers.gateway]",
+          'base_url = "http://127.0.0.1:2455/backend-api/codex"',
+          'wire_api = "responses"'
+        ].join("\n"),
+        "utf8"
+      );
+      assert.equal(agentEnvironment().OPENAI_BASE_URL, "http://127.0.0.1:2455/backend-api/codex");
+      // Subscription auth still refuses to hand a key to the child.
+      assert.equal(agentEnvironment().OPENAI_API_KEY, "");
+      assert.equal(agentEnvironment().CODEX_API_KEY, "");
+
+      // A quoted provider id in the table header resolves identically.
+      fs.writeFileSync(
+        configToml,
+        [
+          'model_provider = "my gateway"',
+          "",
+          '[model_providers."my gateway"]',
+          'base_url = "https://gateway.example/v1"'
+        ].join("\n"),
+        "utf8"
+      );
+      assert.equal(agentEnvironment().OPENAI_BASE_URL, "https://gateway.example/v1");
+
+      // An operator-supplied route always wins.
+      process.env.OPENAI_BASE_URL = "https://operator.example/v1";
+      assert.equal(agentEnvironment().OPENAI_BASE_URL, undefined);
+      delete process.env.OPENAI_BASE_URL;
+
+      // Default provider, unknown provider, and a provider without base_url all
+      // fall back to the public API rather than failing the run.
+      fs.writeFileSync(configToml, 'model = "gpt-5.5"\n', "utf8");
+      assert.equal(agentEnvironment().OPENAI_BASE_URL, undefined);
+      fs.writeFileSync(configToml, 'model_provider = "absent"\n', "utf8");
+      assert.equal(agentEnvironment().OPENAI_BASE_URL, undefined);
+      fs.writeFileSync(
+        configToml,
+        ['model_provider = "gateway"', "", "[model_providers.gateway]", 'wire_api = "responses"'].join("\n"),
+        "utf8"
+      );
+      assert.equal(agentEnvironment().OPENAI_BASE_URL, undefined);
+
+      // A malformed escape must not escape as an uncaught render-time throw.
+      fs.writeFileSync(configToml, 'model_provider = "bad\\q"\n', "utf8");
+      assert.equal(agentEnvironment().OPENAI_BASE_URL, undefined);
+    } finally {
+      if (previous.config === undefined) delete process.env.ULTRAFUZZ_CONFIG_PATH;
+      else process.env.ULTRAFUZZ_CONFIG_PATH = previous.config;
+      if (previous.codexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previous.codexHome;
+      if (previous.baseUrl === undefined) delete process.env.OPENAI_BASE_URL;
+      else process.env.OPENAI_BASE_URL = previous.baseUrl;
+    }
   }
 );
 
