@@ -2,7 +2,13 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { Args, Command, Flags } from "@oclif/core";
-import { assertNoSymlinkComponents, assertPathInside, layoutForRunRoot, validateSafeId } from "@ultrafuzz/artifacts";
+import {
+  assertNoSymlinkComponents,
+  assertPathInside,
+  assertRegularFileInside,
+  layoutForRunRoot,
+  validateSafeId
+} from "@ultrafuzz/artifacts";
 import { runsRootForProject, synchronizeLinkedWorkflowRun, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
 import AdmZip from "adm-zip";
 
@@ -21,9 +27,23 @@ import {
   type TokenStatistics
 } from "../run-statistics.js";
 
-const MAX_JSON_BYTES = 64 * 1024 * 1024;
-const MAX_LEDGER_BYTES = 256 * 1024 * 1024;
+const MAX_JSON_BYTES = 32 * 1024 * 1024;
+const MAX_LEDGER_BYTES = 128 * 1024 * 1024;
+const MAX_COMPRESSED_ZIP_BYTES = 256 * 1024 * 1024;
+const MAX_SELECTED_UNCOMPRESSED_BYTES = 320 * 1024 * 1024;
 const MAX_ZIP_ENTRIES = 10_000;
+const EVIDENCE_MEMBER_NAMES = new Set([
+  "bundle-manifest.json",
+  "run.json",
+  "state.json",
+  "graph.json",
+  "attempts.jsonl",
+  "usage.jsonl"
+]);
+
+interface ZipReadBudget {
+  bytes: number;
+}
 
 export default class Stats extends Command {
   static override summary = "Show per-node timing, token usage, and cost statistics";
@@ -47,12 +67,13 @@ export default class Stats extends Command {
           ? await loadLocalEvidence(projectRoot(flags), args.runId!, cliIo().env)
           : loadBundleEvidence(path.resolve(cliIo().cwd, flags.bundle));
       const derived = deriveRunStatistics(loaded.evidence);
+      const diagnostics = [...loaded.diagnostics, ...derived.diagnostics];
       const result: CommandResult = {
         ok: true,
         command: commandName,
         data: derived.value,
-        text: renderStatistics(derived.value),
-        diagnostics: [...loaded.diagnostics, ...derived.diagnostics]
+        text: renderStatistics(derived.value, diagnostics),
+        diagnostics
       };
       emitCommandResult(this, commandName, result, flags.json === true);
     } catch (error) {
@@ -86,11 +107,11 @@ async function loadLocalEvidence(
     evidence: {
       runId,
       source: { kind: "local-run", path: layout.root },
-      runMetadata: readJsonFile(layout.runMetadataPath),
-      state: readJsonFile(layout.statePath),
-      graph: readJsonFile(layout.graphPath),
-      attemptsJsonl: readTextFile(layout.attemptLedgerPath, MAX_LEDGER_BYTES),
-      usageJsonl: readTextFile(layout.usageLedgerPath, MAX_LEDGER_BYTES)
+      runMetadata: readJsonFile(layout.root, layout.runMetadataPath),
+      state: readJsonFile(layout.root, layout.statePath),
+      graph: readJsonFile(layout.root, layout.graphPath),
+      attemptsJsonl: readTextFile(layout.root, layout.attemptLedgerPath, MAX_LEDGER_BYTES),
+      usageJsonl: readTextFile(layout.root, layout.usageLedgerPath, MAX_LEDGER_BYTES)
     },
     diagnostics
   };
@@ -99,12 +120,24 @@ async function loadLocalEvidence(
 function loadBundleEvidence(bundlePath: string): { evidence: StatisticsEvidence; diagnostics: RuntimeDiagnostic[] } {
   const stat = fs.statSync(bundlePath);
   if (!stat.isFile()) throw new Error(`report bundle is not a regular file: ${bundlePath}`);
+  if (stat.size > MAX_COMPRESSED_ZIP_BYTES) {
+    throw new Error(`report bundle exceeds ${MAX_COMPRESSED_ZIP_BYTES} compressed bytes: ${bundlePath}`);
+  }
   const zip = new AdmZip(bundlePath);
   const entries = zip.getEntries();
   if (entries.length > MAX_ZIP_ENTRIES) {
     throw new Error(`report bundle has too many ZIP entries: ${entries.length}/${MAX_ZIP_ENTRIES}`);
   }
-  const manifest = readZipJson(zip, entries, "bundle-manifest.json");
+  const selectedUncompressedBytes = entries
+    .filter((entry) => !entry.isDirectory && EVIDENCE_MEMBER_NAMES.has(entry.entryName))
+    .reduce((total, entry) => total + entry.header.size, 0);
+  if (selectedUncompressedBytes > MAX_SELECTED_UNCOMPRESSED_BYTES) {
+    throw new Error(
+      `report bundle evidence exceeds ${MAX_SELECTED_UNCOMPRESSED_BYTES} uncompressed bytes: ${selectedUncompressedBytes}`
+    );
+  }
+  const readBudget: ZipReadBudget = { bytes: 0 };
+  const manifest = readZipJson(zip, entries, "bundle-manifest.json", true, readBudget);
   if (manifest === undefined) throw new Error("report bundle is missing bundle-manifest.json");
   if (manifest.schema_version !== "ultrafuzz.report_bundle.v1") {
     throw new Error("ZIP is not an Ultrafuzz report bundle");
@@ -114,11 +147,11 @@ function loadBundleEvidence(bundlePath: string): { evidence: StatisticsEvidence;
     evidence: {
       runId,
       source: { kind: "report-bundle", path: bundlePath },
-      runMetadata: readZipJson(zip, entries, "run.json", false),
-      state: readZipJson(zip, entries, "state.json", false),
-      graph: readZipJson(zip, entries, "graph.json", false),
-      attemptsJsonl: readZipText(zip, entries, "attempts.jsonl", MAX_LEDGER_BYTES, false),
-      usageJsonl: readZipText(zip, entries, "usage.jsonl", MAX_LEDGER_BYTES, false)
+      runMetadata: readZipJson(zip, entries, "run.json", false, readBudget),
+      state: readZipJson(zip, entries, "state.json", false, readBudget),
+      graph: readZipJson(zip, entries, "graph.json", false, readBudget),
+      attemptsJsonl: readZipText(zip, entries, "attempts.jsonl", MAX_LEDGER_BYTES, false, readBudget),
+      usageJsonl: readZipText(zip, entries, "usage.jsonl", MAX_LEDGER_BYTES, false, readBudget)
     },
     diagnostics: []
   };
@@ -128,9 +161,10 @@ function readZipJson(
   zip: AdmZip,
   entries: AdmZip.IZipEntry[],
   entryName: string,
-  required = true
+  required = true,
+  budget?: ZipReadBudget
 ): Record<string, unknown> | undefined {
-  const text = readZipText(zip, entries, entryName, MAX_JSON_BYTES, required);
+  const text = readZipText(zip, entries, entryName, MAX_JSON_BYTES, required, budget);
   if (text === undefined) return undefined;
   try {
     const parsed = JSON.parse(text) as unknown;
@@ -150,7 +184,8 @@ function readZipText(
   entries: AdmZip.IZipEntry[],
   entryName: string,
   maximumBytes: number,
-  required = true
+  required = true,
+  budget?: ZipReadBudget
 ): string | undefined {
   const matches = entries.filter((entry) => !entry.isDirectory && entry.entryName === entryName);
   if (matches.length === 0) {
@@ -165,11 +200,17 @@ function readZipText(
   const data = zip.readFile(entry);
   if (data === null) throw new Error(`could not read report bundle member ${entryName}`);
   if (data.length > maximumBytes) throw new Error(`report bundle member exceeds ${maximumBytes} bytes: ${entryName}`);
+  if (budget !== undefined) {
+    budget.bytes += data.length;
+    if (budget.bytes > MAX_SELECTED_UNCOMPRESSED_BYTES) {
+      throw new Error(`report bundle evidence exceeds ${MAX_SELECTED_UNCOMPRESSED_BYTES} uncompressed bytes`);
+    }
+  }
   return data.toString("utf8");
 }
 
-function readJsonFile(filePath: string): Record<string, unknown> | undefined {
-  const text = readTextFile(filePath, MAX_JSON_BYTES);
+function readJsonFile(root: string, filePath: string): Record<string, unknown> | undefined {
+  const text = readTextFile(root, filePath, MAX_JSON_BYTES);
   if (text === undefined) return undefined;
   try {
     const parsed = JSON.parse(text) as unknown;
@@ -182,27 +223,30 @@ function readJsonFile(filePath: string): Record<string, unknown> | undefined {
   }
 }
 
-function readTextFile(filePath: string, maximumBytes: number): string | undefined {
+function readTextFile(root: string, filePath: string, maximumBytes: number): string | undefined {
   if (!fs.existsSync(filePath)) return undefined;
+  assertRegularFileInside(root, filePath, "run evidence");
   const stat = fs.statSync(filePath);
-  if (!stat.isFile()) throw new Error(`run evidence is not a regular file: ${filePath}`);
   if (stat.size > maximumBytes) throw new Error(`run evidence exceeds ${maximumBytes} bytes: ${filePath}`);
   return fs.readFileSync(filePath, "utf8");
 }
 
-function renderStatistics(value: RunStatisticsValue): string {
+function renderStatistics(value: RunStatisticsValue, diagnostics: RuntimeDiagnostic[]): string {
   const headers = [
     "Node",
     "Status",
+    "Outcome",
     "Time",
     "Input",
-    "Cache",
+    "CacheR",
+    "CacheW",
     "Output",
     "Reason",
     "Total",
     "Cost",
     "Model",
-    "Attempts"
+    "Exec/Reuse",
+    "Completeness"
   ];
   const rows = value.nodes.map((node) => {
     const usage = node.usage;
@@ -210,17 +254,20 @@ function renderStatistics(value: RunStatisticsValue): string {
     return [
       node.node_id,
       node.status,
+      node.outcome ?? "—",
       elapsed === 0 && node.duration_ms === null && node.current_elapsed_ms === null
         ? "—"
         : `${formatDuration(elapsed)}${node.current_elapsed_ms === null ? "" : "+"}`,
       tokenLabel(usage, "input_tokens"),
-      usage === null ? "—" : formatInteger(usage.cache_read_tokens + usage.cache_write_tokens),
+      tokenLabel(usage, "cache_read_tokens"),
+      tokenLabel(usage, "cache_write_tokens"),
       tokenLabel(usage, "output_tokens"),
       tokenLabel(usage, "reasoning_tokens"),
       tokenLabel(usage, "total_tokens"),
       costLabel(usage),
       node.model ?? "—",
-      `${node.attempt_count}${node.retry_count > 0 ? ` (${node.retry_count} retry)` : ""}`
+      attemptLabel(node.executed_attempt_count, node.reused_attempt_count, node.retry_count),
+      completenessLabel(usage)
     ];
   });
   const widths = headers.map((header, index) =>
@@ -240,7 +287,8 @@ function renderStatistics(value: RunStatisticsValue): string {
     `Status: ${value.status}`,
     `Source: ${value.source.kind} (${value.source.path})`,
     `Run elapsed: ${value.run_elapsed_ms === null ? "unavailable" : formatDuration(value.run_elapsed_ms)}`,
-    `Recorded node usage: ${usage === null ? "unavailable" : `${formatInteger(usage.total_tokens)} tokens, ${costLabel(usage)}`}`,
+    `Recorded node usage: ${usage === null || usage.total_tokens === null ? "unavailable" : `${formatInteger(usage.total_tokens)} tokens, ${costLabel(usage)}`}`,
+    `Attempt evidence: ${value.totals.attempts_complete ? "complete" : "partial or unavailable"}`,
     ...(cumulativeTokens === undefined
       ? []
       : [
@@ -250,6 +298,9 @@ function renderStatistics(value: RunStatisticsValue): string {
     line(headers),
     line(widths.map((width) => "-".repeat(width))),
     ...rows.map(line),
+    ...(diagnostics.length === 0
+      ? []
+      : ["", "Warnings:", ...diagnostics.map((diagnostic) => `- [${diagnostic.code}] ${diagnostic.message}`)]),
     ""
   ];
   return summary.join("\n");
@@ -263,6 +314,18 @@ function tokenLabel(usage: TokenStatistics | null, field: keyof TokenStatistics)
 function costLabel(usage: TokenStatistics | null): string {
   if (usage?.estimated_spend_usd === null || usage === null) return "—";
   return `$${usage.estimated_spend_usd.toFixed(2)}${usage.pricing_complete ? "" : "+"}`;
+}
+
+function attemptLabel(executed: number | null, reused: number | null, retries: number | null): string {
+  if (executed === null || reused === null) return "—";
+  return `${executed}/${reused}${retries !== null && retries > 0 ? ` (${retries} retry)` : ""}`;
+}
+
+function completenessLabel(usage: TokenStatistics | null): string {
+  if (usage === null) return "—";
+  if (usage.usage_complete && usage.pricing_complete) return "complete";
+  if (!usage.usage_complete && !usage.pricing_complete) return "usage+pricing partial";
+  return usage.usage_complete ? "pricing partial" : "usage partial";
 }
 
 function formatInteger(value: number): string {

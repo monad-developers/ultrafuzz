@@ -7,9 +7,11 @@ import test from "node:test";
 
 import {
   artifactContractDefinition,
+  createNodeAttemptLedgerEntry,
+  createUsageLedgerEntry,
   derivePropertyImplementationCoverage,
   layoutForRunRoot,
-  stableUsageDimension,
+  manifestDigest,
   writeArtifactManifest
 } from "@ultrafuzz/artifacts";
 import AdmZip from "adm-zip";
@@ -1796,8 +1798,12 @@ test("stats derives per-node timing, usage, and cost from local run evidence", a
 
   const human = await cli(project, ["stats", fixture.runId]);
   assert.equal(human.code, 0, human.stderr);
-  assert.match(human.stdout, /node-a\s+succeeded\s+1m 00s/u);
+  assert.match(human.stdout, /node-a\s+succeeded\s+succeeded\s+1m 00s/u);
   assert.match(human.stdout, /Recorded node usage: 17 tokens/u);
+  assert.match(human.stdout, /Outcome/u);
+  assert.match(human.stdout, /CacheR\s+CacheW/u);
+  assert.match(human.stdout, /Exec\/Reuse\s+Completeness/u);
+  assert.match(human.stdout, /Warnings:/u);
 });
 
 test("stats queries a report bundle offline and degrades for historical missing ledgers", async () => {
@@ -1853,13 +1859,26 @@ test("stats queries a report bundle offline and degrades for historical missing 
   assert.equal((degradedBody.data as { nodes: Array<{ usage: unknown }> }).nodes[0]?.usage, null);
 });
 
+test("stats rejects local evidence whose leaf is a symlink", async () => {
+  const project = tempProject();
+  const fixture = writeStatsFixture(project, "stats-symlink");
+  const usagePath = path.join(fixture.runRoot, "usage.jsonl");
+  const outsidePath = path.join(project, "outside-usage.jsonl");
+  fs.copyFileSync(usagePath, outsidePath);
+  fs.unlinkSync(usagePath);
+  fs.symlinkSync(outsidePath, usagePath);
+
+  const captured = await cli(project, ["stats", fixture.runId, "--json"]);
+  assert.equal(captured.code, 1);
+  assert.match(JSON.stringify(parseJson(captured).diagnostics), /symlink/u);
+});
+
 function writeStatsFixture(project: string, runId: string): { runId: string; runRoot: string } {
   const runRoot = path.join(project, ".ultrafuzz", "runs", runId);
   fs.mkdirSync(runRoot, { recursive: true });
   const workflowRunId = `workflow-${runId}`;
   const startedAt = "2026-08-11T10:00:00.000Z";
   const finishedAt = "2026-08-11T10:01:00.000Z";
-  const usageAttemptId = stableUsageDimension("usage-attempt", [workflowRunId, "node:node-a", 0, 1]);
   writeJsonRecord(path.join(runRoot, "run.json"), {
     schema_version: "1.0",
     run_id: runId,
@@ -1914,31 +1933,45 @@ function writeStatsFixture(project: string, runId: string): { runId: string; run
       }
     ]
   });
-  fs.writeFileSync(
-    path.join(runRoot, "attempts.jsonl"),
-    `${JSON.stringify({
-      node_id: "node-a",
-      lifecycle: { started_at: startedAt, finished_at: finishedAt },
+  const attemptEntry = createNodeAttemptLedgerEntry(
+    { runId },
+    {
+      nodeId: "node-a",
+      strategyAttemptId: "node-a",
+      executorRetryId: "retry-1",
+      checkpointGenerationId: "checkpoint-1",
+      workflowExecutionId: "execution-1",
+      controllerInvocationId: "controller-1",
+      startedAt,
+      finishedAt,
       outcome: "succeeded",
-      reuse: { status: "executed" }
-    })}\n`,
-    "utf8"
+      inputManifestDigest: manifestDigest("input"),
+      outputManifestDigest: manifestDigest("output")
+    }
   );
-  fs.writeFileSync(
-    path.join(runRoot, "usage.jsonl"),
-    `${JSON.stringify({
-      workflow_run_id: workflowRunId,
-      attempt_id: usageAttemptId,
+  fs.writeFileSync(path.join(runRoot, "attempts.jsonl"), `${JSON.stringify(attemptEntry)}\n`, "utf8");
+  const usageEntry = createUsageLedgerEntry(
+    { runId },
+    {
+      workflowRunId,
+      sourceEventId: "usage-source-1",
+      checkpointGenerationId: "checkpoint-1",
+      observedAt: finishedAt,
+      nodeId: "node:node-a",
+      iteration: 0,
+      attempt: 1,
       usage: {
         input_tokens: 10,
         cache_read_tokens: 5,
+        cache_write_tokens: 0,
         output_tokens: 2,
+        reasoning_tokens: 0,
         model: "gpt-test"
       },
-      usage_complete: true,
-      usage_incomplete_reasons: []
-    })}\n`,
-    "utf8"
+      usageComplete: true,
+      usageIncompleteReasons: []
+    }
   );
+  fs.writeFileSync(path.join(runRoot, "usage.jsonl"), `${JSON.stringify(usageEntry)}\n`, "utf8");
   return { runId, runRoot };
 }
