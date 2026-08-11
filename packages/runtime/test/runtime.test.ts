@@ -61,6 +61,7 @@ import {
   resumeRun,
   startRun,
   syncRun,
+  toPlannedGraph,
   validateProject
 } from "../src/index.js";
 import { projectArtifactSchemaDir, projectArtifactSchemaJson } from "../src/init.js";
@@ -816,6 +817,35 @@ nodes:
 `,
     "utf8"
   );
+}
+
+async function compileInvariantCampaignBudgetFixture(input: {
+  logicalNodeId: "stateful-invariant-campaign" | "stateful-invariant-recon-campaign";
+  nodeTimeoutSeconds: number;
+  smokeTimeoutSeconds: number;
+  fuzzerTimeoutSeconds: number;
+  runId: string;
+}) {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const plan = await planRun({ projectRoot: project, runId: input.runId, env: {} });
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  const node = plan.value!.expanded_graph.nodes.find((candidate) => candidate.id === "project-discovery");
+  assert.notEqual(node, undefined);
+  node!.logicalId = input.logicalNodeId;
+  node!.timeoutSeconds = input.nodeTimeoutSeconds;
+  plan.value!.resolved_config.invariants.invariantTestingSmokeTimeoutSeconds = input.smokeTimeoutSeconds;
+  plan.value!.resolved_config.invariants.invariantTestingFuzzerTimeoutSeconds = input.fuzzerTimeoutSeconds;
+  const { compileSmithersWorkflow } = await import("../src/smithers.js");
+  return compileSmithersWorkflow({
+    projectRoot: project,
+    config: plan.value!.resolved_config,
+    graph: plan.value!.expanded_graph,
+    runLayout: plan.value!.layout,
+    workflowName: `ultrafuzz-${input.runId}`,
+    renderedPrompts: plan.value!.rendered_prompts
+  });
 }
 
 function writeOutOfOrderTopology(project: string): void {
@@ -3797,6 +3827,25 @@ test("plan creates run layout, graph fingerprint, and rendered prompt before Smi
   assert.equal(plan.value!.graph.nodes[0]?.model_fanout[0]?.agent_ref, "CodexAgent");
 });
 
+test("planned graphs persist topology overrides and effective per-model timeouts", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  const plan = await planRun({ projectRoot: project, runId: "planned-timeout", env: {} });
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  const plannedNode = plan.value!.graph.nodes.find((node) => node.id === "project-discovery");
+  assert.equal(plannedNode?.timeout_seconds, undefined);
+  assert.equal(plannedNode?.model_fanout[0]?.timeout_seconds, plan.value!.resolved_config.run.defaultTimeoutSeconds);
+  assert.equal(plannedNode?.model_fanout[0]?.attempt_id, "project-discovery");
+  const expandedNode = plan.value!.expanded_graph.nodes.find((node) => node.id === "project-discovery");
+  assert.notEqual(expandedNode, undefined);
+  expandedNode!.timeoutSeconds = 7200;
+
+  const graph = toPlannedGraph(plan.value!.expanded_graph);
+  assert.equal(graph.nodes.find((node) => node.id === "project-discovery")?.timeout_seconds, 7200);
+});
+
 test("plan wires the inclusive invariant priority selection into rendered prompts", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -4765,6 +4814,53 @@ test("topology runtime context keeps a bounded finalization reserve", async () =
       assert.ok(entry.workingSeconds > 0);
     }
   }
+});
+
+test("invariant campaign budget admits the shipped 7200-second node timeout", async () => {
+  const compiled = await compileInvariantCampaignBudgetFixture({
+    logicalNodeId: "stateful-invariant-campaign",
+    nodeTimeoutSeconds: 7200,
+    smokeTimeoutSeconds: 600,
+    fuzzerTimeoutSeconds: 3600,
+    runId: "campaign-budget-default"
+  });
+  assert.equal(compiled.tasks[0]?.timeoutMs, 7_200_000);
+});
+
+test("invariant campaign budget rejects an oversized fuzzer timeout with every budget term", async () => {
+  await assert.rejects(
+    compileInvariantCampaignBudgetFixture({
+      logicalNodeId: "stateful-invariant-recon-campaign",
+      nodeTimeoutSeconds: 7200,
+      smokeTimeoutSeconds: 600,
+      fuzzerTimeoutSeconds: 6001,
+      runId: "campaign-budget-exceeded"
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /INVARIANT_CAMPAIGN_TIMEOUT_BUDGET_EXCEEDED/u);
+      assert.match(error.message, /logical_node_id=stateful-invariant-recon-campaign/u);
+      assert.match(error.message, /node_timeout_seconds=7200/u);
+      assert.match(error.message, /required_seconds=7201/u);
+      assert.match(error.message, /smoke_timeout_seconds=600/u);
+      assert.match(error.message, /fuzzer_timeout_seconds=6001/u);
+      assert.match(error.message, /host_shutdown_grace_seconds=300/u);
+      assert.match(error.message, /artifact_finalization_reserve_seconds=300/u);
+      assert.match(error.message, /timeout_seconds to at least 7201/u);
+      return true;
+    }
+  );
+});
+
+test("invariant campaign budget honors an explicit larger node timeout", async () => {
+  const compiled = await compileInvariantCampaignBudgetFixture({
+    logicalNodeId: "stateful-invariant-campaign",
+    nodeTimeoutSeconds: 9000,
+    smokeTimeoutSeconds: 600,
+    fuzzerTimeoutSeconds: 7000,
+    runId: "campaign-budget-explicit"
+  });
+  assert.equal(compiled.tasks[0]?.timeoutMs, 9_000_000);
 });
 
 test("startRun --agent does not carry the previous agent's model onto the new agent", async () => {

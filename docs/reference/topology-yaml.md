@@ -134,6 +134,7 @@ Built-in contracts include `ultrafuzz/findings@1`,
 `ultrafuzz/implemented-properties@1`, `ultrafuzz/implemented-properties@2`,
 `ultrafuzz/property-campaign@1`,
 `ultrafuzz/nonempty-markdown@1`, `ultrafuzz/json-object@1`,
+`ultrafuzz/invariant-campaign-plan@1`,
 `ultrafuzz/json-array@1`, `ultrafuzz/goal-plan@1`,
 `ultrafuzz/threat-model@1`, `ultrafuzz/report@1`, and `ultrafuzz/text@1`.
 Contract definitions supply both runtime validation and the shape and

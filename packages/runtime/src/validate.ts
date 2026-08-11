@@ -132,7 +132,8 @@ export function modelProfilesForTopology(
         {
           agentRef: profile.agent,
           ...(profile.model ? { modelName: profile.model } : {}),
-          ...(profile.reasoning ? { reasoningEffort: profile.reasoning } : {})
+          ...(profile.reasoning ? { reasoningEffort: profile.reasoning } : {}),
+          ...(profile.timeoutSeconds === undefined ? {} : { timeoutSeconds: profile.timeoutSeconds })
         }
       ])
   );

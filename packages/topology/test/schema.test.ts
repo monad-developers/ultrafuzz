@@ -50,6 +50,7 @@ describe("expanded graph schema", () => {
               modelProfileId: "default",
               agentRef: "CodexAgent",
               modelName: "unit-model",
+              timeoutSeconds: 1800,
               modelIndex: 0,
               loopIndex: 0,
               attemptIndex: 0
@@ -77,7 +78,9 @@ describe("expanded graph schema", () => {
           retryPolicy: { maxAttempts: 1 },
           loop: { index: 0, count: 1, mode: "parallel", attemptIndex: 0 },
           outputs: [],
-          modelFanout: [{ modelProfileId: "default", agentRef: "CodexAgent", modelIndex: 0, loopIndex: 0 }]
+          modelFanout: [
+            { modelProfileId: "default", agentRef: "CodexAgent", timeoutSeconds: 0, modelIndex: 0, loopIndex: 0 }
+          ]
         }
       ]
     });
@@ -85,6 +88,7 @@ describe("expanded graph schema", () => {
     expect(invalid.ok).toBe(false);
     expect(invalid.issues.some((issue) => issue.path.endsWith(".logicalId"))).toBe(true);
     expect(invalid.issues.some((issue) => issue.path.endsWith(".attemptIndex"))).toBe(true);
+    expect(invalid.issues.some((issue) => issue.path.endsWith(".timeoutSeconds"))).toBe(true);
   });
 
   it("rejects unsafe or duplicate required commands", () => {

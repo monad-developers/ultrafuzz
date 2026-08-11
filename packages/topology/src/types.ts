@@ -117,6 +117,7 @@ export interface ModelProfileSelection {
   agentRef: string;
   modelName?: string;
   reasoningEffort?: string;
+  timeoutSeconds?: number;
 }
 
 export interface ModelFanoutProvenance {
@@ -124,6 +125,7 @@ export interface ModelFanoutProvenance {
   agentRef: string;
   modelName?: string;
   reasoningEffort?: string;
+  timeoutSeconds?: number;
   modelIndex: number;
   loopIndex: number;
   attemptIndex: number;

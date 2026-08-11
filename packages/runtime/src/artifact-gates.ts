@@ -40,8 +40,10 @@ import {
   type RunState,
   type WorkspacePatchManifest
 } from "@ultrafuzz/artifacts";
+import { parseProjectConfigToml } from "@ultrafuzz/config";
 
 import type { PlannedGraph, PlannedGraphNode, RuntimeDiagnostic } from "./types.js";
+import { topologyRuntimeBudgetForTimeout } from "./topology-runtime-budget.js";
 import { diagnosticFromError } from "./utils.js";
 import { validateSeverityMatrixArtifact, type SeverityArtifactKind } from "./severity-matrix.js";
 
@@ -195,7 +197,7 @@ export function verifyRequiredArtifactsForAttempt(
     );
   }
   try {
-    diagnostics.push(...verifyPropertyProvenanceArtifacts(layout, artifactDir, node));
+    diagnostics.push(...verifyPropertyProvenanceArtifacts(layout, artifactDir, node, attemptId));
   } catch (error) {
     diagnostics.push(diagnosticFromError(error, "property-provenance", "PROPERTY_PROVENANCE_READ_FAILED"));
   }
@@ -1603,14 +1605,552 @@ const campaignResultArtifactNames = [
   "medusa-results.json"
 ] as const;
 
+const RECON_MAX_TEST_LIMIT = "18446744073709551615";
+const CAMPAIGN_HOST_FORCE_KILL_GRACE_SECONDS = 300;
+const CAMPAIGN_DURATION_TOLERANCE_MS = 5_000;
+const campaignTerminationReasons = new Set([
+  "configured-timeout",
+  "test-limit",
+  "process-exit",
+  "launch-error",
+  "host-force-kill"
+]);
+const campaignOutcomes = new Set(["complete", "partial", "blocked"]);
+
 function isCampaignLogicalId(logicalId: string): boolean {
   return campaignLogicalNodeIds.some((nodeId) => nodeId === logicalId);
+}
+
+function isCurrentTimeoutEvidenceCampaign(node: PlannedGraphNode): boolean {
+  const logicalId = node.logical_id ?? node.id;
+  return (
+    isCampaignLogicalId(logicalId) &&
+    node.outputs.some(
+      (output) => output.path === "campaign-plan.json" && output.contract === "ultrafuzz/invariant-campaign-plan@1"
+    )
+  );
+}
+
+function campaignTimeoutDiagnostic(code: string, message: string, pathValue: string): RuntimeDiagnostic {
+  return {
+    code,
+    message,
+    severity: "error",
+    source: "campaign-timeout-evidence",
+    path: pathValue
+  };
+}
+
+function positiveIntegerField(
+  record: Record<string, unknown>,
+  field: string,
+  artifactPath: string,
+  diagnostics: RuntimeDiagnostic[]
+): number | undefined {
+  const value = record[field];
+  if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) {
+    return value;
+  }
+  diagnostics.push(
+    campaignTimeoutDiagnostic(
+      "CAMPAIGN_TIMEOUT_EVIDENCE_INVALID",
+      `${field} must be a positive safe integer`,
+      `${artifactPath}#$.${field}`
+    )
+  );
+  return undefined;
+}
+
+function stringField(
+  record: Record<string, unknown>,
+  field: string,
+  artifactPath: string,
+  diagnostics: RuntimeDiagnostic[]
+): string | undefined {
+  const value = record[field];
+  if (typeof value === "string" && value.length > 0) {
+    return value;
+  }
+  diagnostics.push(
+    campaignTimeoutDiagnostic(
+      "CAMPAIGN_TIMEOUT_EVIDENCE_INVALID",
+      `${field} must be a non-empty string`,
+      `${artifactPath}#$.${field}`
+    )
+  );
+  return undefined;
+}
+
+function timestampField(
+  record: Record<string, unknown>,
+  field: string,
+  artifactPath: string,
+  diagnostics: RuntimeDiagnostic[]
+): { text: string; milliseconds: number } | undefined {
+  const text = stringField(record, field, artifactPath, diagnostics);
+  if (text === undefined) return undefined;
+  const milliseconds = Date.parse(text);
+  if (Number.isFinite(milliseconds)) {
+    return { text, milliseconds };
+  }
+  diagnostics.push(
+    campaignTimeoutDiagnostic(
+      "CAMPAIGN_TIMEOUT_EVIDENCE_INVALID",
+      `${field} must be a valid timestamp`,
+      `${artifactPath}#$.${field}`
+    )
+  );
+  return undefined;
+}
+
+function exactCommandFlagValues(command: string, flag: "--timeout" | "--test-limit"): string[] {
+  const escapedFlag = flag.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  const pattern = new RegExp(`(?:^|\\s)${escapedFlag}(?:(?:=|\\s+)(\\S+))?`, "gu");
+  return [...command.matchAll(pattern)].map((match) => match[1] ?? "");
+}
+
+function hasExactHostTimeoutWrapper(command: string, configuredTimeoutSeconds: number): boolean {
+  const tokens = command.trim().split(/\s+/u);
+  const timeoutIndexes = tokens.flatMap((token, index) => (token === "timeout" ? [index] : []));
+  if (timeoutIndexes.length !== 1 || tokens.includes("--foreground")) return false;
+  const timeoutIndex = timeoutIndexes[0]!;
+  const reconIndex = tokens.indexOf("recon", timeoutIndex + 1);
+  if (reconIndex < 0 || tokens[reconIndex + 1] !== "fuzz") return false;
+  const wrapperArguments = tokens.slice(timeoutIndex + 1, reconIndex);
+  return (
+    wrapperArguments.length === 4 &&
+    wrapperArguments.at(-1) === `${configuredTimeoutSeconds}s` &&
+    wrapperArguments.filter((argument) => argument === "--preserve-status").length === 1 &&
+    wrapperArguments.filter((argument) => argument === "--signal=INT").length === 1 &&
+    wrapperArguments.filter((argument) => argument === `--kill-after=${CAMPAIGN_HOST_FORCE_KILL_GRACE_SECONDS}s`)
+      .length === 1
+  );
+}
+
+function configuredInvariantFuzzerTimeoutSeconds(
+  layout: RunLayout,
+  diagnostics: RuntimeDiagnostic[]
+): number | undefined {
+  if (!fs.existsSync(layout.resolvedConfigPath)) {
+    diagnostics.push(
+      campaignTimeoutDiagnostic(
+        "CAMPAIGN_TIMEOUT_CONFIG_MISSING",
+        "Current campaign timeout evidence requires the resolved configuration",
+        layout.resolvedConfigPath
+      )
+    );
+    return undefined;
+  }
+  const parsed = parseProjectConfigToml(fs.readFileSync(layout.resolvedConfigPath, "utf8"), layout.resolvedConfigPath);
+  const timeout = parsed.ok ? parsed.value.invariants?.invariantTestingFuzzerTimeoutSeconds : undefined;
+  if (timeout !== undefined) return timeout;
+  diagnostics.push(
+    campaignTimeoutDiagnostic(
+      "CAMPAIGN_TIMEOUT_CONFIG_MISSING",
+      "Resolved configuration must declare invariants.invariant_testing_fuzzer_timeout",
+      layout.resolvedConfigPath
+    )
+  );
+  return undefined;
+}
+
+function verifyCurrentCampaignTimeoutEvidence(
+  layout: RunLayout,
+  artifactDir: string,
+  node: PlannedGraphNode,
+  attemptId: string
+): RuntimeDiagnostic[] {
+  if (!isCurrentTimeoutEvidenceCampaign(node)) return [];
+
+  const diagnostics: RuntimeDiagnostic[] = [];
+  const configuredTimeoutSeconds = configuredInvariantFuzzerTimeoutSeconds(layout, diagnostics);
+  const planPath = path.join(artifactDir, "campaign-plan.json");
+  const resultPath = path.join(artifactDir, "recon-fuzzer-results.json");
+  const summaryPath = path.join(artifactDir, "campaign-summary.json");
+  if (![planPath, resultPath, summaryPath].every((artifactPath) => fs.existsSync(artifactPath))) {
+    return diagnostics;
+  }
+
+  const planValue = readJsonFile(planPath);
+  const resultValue = readJsonFile(resultPath);
+  const summaryValue = readJsonFile(summaryPath);
+  if (!isRecord(planValue) || !isRecord(resultValue) || !isRecord(summaryValue)) return diagnostics;
+
+  const planConfiguredTimeout = positiveIntegerField(
+    planValue,
+    "configured_fuzzer_timeout_seconds",
+    planPath,
+    diagnostics
+  );
+  const reconInternalTimeout = positiveIntegerField(planValue, "recon_internal_timeout_seconds", planPath, diagnostics);
+  const hostSoftTimeout = positiveIntegerField(planValue, "host_soft_timeout_seconds", planPath, diagnostics);
+  const forceKillGrace = positiveIntegerField(planValue, "host_force_kill_grace_seconds", planPath, diagnostics);
+  const finalizationReserve = positiveIntegerField(
+    planValue,
+    "artifact_finalization_reserve_seconds",
+    planPath,
+    diagnostics
+  );
+  const modelAttempt = node.model_fanout.find((model) => {
+    const plannedAttemptId =
+      model.attempt_id ??
+      (node.model_fanout.length <= 1
+        ? node.id
+        : `${node.id}__model_${model.model_index}__attempt_${model.attempt_index}`);
+    return plannedAttemptId === attemptId;
+  });
+  const plannedTimeoutSeconds = node.timeout_seconds ?? modelAttempt?.timeout_seconds;
+  if (
+    typeof plannedTimeoutSeconds !== "number" ||
+    !Number.isSafeInteger(plannedTimeoutSeconds) ||
+    plannedTimeoutSeconds <= 0
+  ) {
+    diagnostics.push(
+      campaignTimeoutDiagnostic(
+        "CAMPAIGN_TIMEOUT_PLAN_BUDGET_MISSING",
+        "Current campaign timeout evidence requires the effective node, model-profile, or run-default timeout for this attempt in the sealed run graph",
+        `${layout.graphPath}#$.nodes.${node.id}.effective_timeout_seconds`
+      )
+    );
+  } else if (finalizationReserve !== undefined) {
+    const expectedReserve = topologyRuntimeBudgetForTimeout(plannedTimeoutSeconds * 1_000).finalizationReserveSeconds;
+    if (finalizationReserve !== expectedReserve) {
+      diagnostics.push(
+        campaignTimeoutDiagnostic(
+          "CAMPAIGN_TIMEOUT_FINALIZATION_RESERVE_MISMATCH",
+          `artifact_finalization_reserve_seconds reports ${finalizationReserve}, but the sealed topology budget requires ${expectedReserve}`,
+          `${planPath}#$.artifact_finalization_reserve_seconds`
+        )
+      );
+    }
+  }
+  const reconTestLimit = stringField(planValue, "recon_test_limit", planPath, diagnostics);
+  const backendStartedAt = timestampField(planValue, "backend_started_at", planPath, diagnostics);
+  const fuzzingDeadline = timestampField(planValue, "fuzzing_deadline_utc", planPath, diagnostics);
+  const forceKillDeadline = timestampField(planValue, "force_kill_deadline_utc", planPath, diagnostics);
+  const finalArtifactDeadline = timestampField(planValue, "final_artifact_deadline_utc", planPath, diagnostics);
+  const planBackend = isRecord(planValue.backend) ? planValue.backend : undefined;
+  if (planBackend === undefined) {
+    diagnostics.push(
+      campaignTimeoutDiagnostic(
+        "CAMPAIGN_TIMEOUT_EVIDENCE_INVALID",
+        "campaign plan backend must be an object",
+        `${planPath}#$.backend`
+      )
+    );
+  }
+  const planCommand =
+    planBackend === undefined
+      ? undefined
+      : stringField(planBackend, "exact_shell_escaped_command", `${planPath}#$.backend`, diagnostics);
+
+  for (const [field, value] of [
+    ["configured_fuzzer_timeout_seconds", planConfiguredTimeout],
+    ["recon_internal_timeout_seconds", reconInternalTimeout],
+    ["host_soft_timeout_seconds", hostSoftTimeout]
+  ] as const) {
+    if (configuredTimeoutSeconds !== undefined && value !== undefined && value !== configuredTimeoutSeconds) {
+      diagnostics.push(
+        campaignTimeoutDiagnostic(
+          "CAMPAIGN_TIMEOUT_CONFIG_MISMATCH",
+          `${field} reports ${value}, but resolved configuration requires ${configuredTimeoutSeconds}`,
+          `${planPath}#$.${field}`
+        )
+      );
+    }
+  }
+  if (reconTestLimit !== undefined && reconTestLimit !== RECON_MAX_TEST_LIMIT) {
+    diagnostics.push(
+      campaignTimeoutDiagnostic(
+        "CAMPAIGN_TIMEOUT_TEST_LIMIT_MISMATCH",
+        `recon_test_limit must be ${RECON_MAX_TEST_LIMIT}`,
+        `${planPath}#$.recon_test_limit`
+      )
+    );
+  }
+  if (forceKillGrace !== undefined && forceKillGrace !== CAMPAIGN_HOST_FORCE_KILL_GRACE_SECONDS) {
+    diagnostics.push(
+      campaignTimeoutDiagnostic(
+        "CAMPAIGN_TIMEOUT_HOST_GRACE_MISMATCH",
+        `host_force_kill_grace_seconds must be ${CAMPAIGN_HOST_FORCE_KILL_GRACE_SECONDS}`,
+        `${planPath}#$.host_force_kill_grace_seconds`
+      )
+    );
+  }
+
+  if (
+    configuredTimeoutSeconds !== undefined &&
+    forceKillGrace !== undefined &&
+    finalizationReserve !== undefined &&
+    backendStartedAt !== undefined &&
+    fuzzingDeadline !== undefined &&
+    forceKillDeadline !== undefined &&
+    finalArtifactDeadline !== undefined
+  ) {
+    const expectedFuzzingDeadline = backendStartedAt.milliseconds + configuredTimeoutSeconds * 1_000;
+    const expectedForceKillDeadline = expectedFuzzingDeadline + forceKillGrace * 1_000;
+    const expectedFinalArtifactDeadline = expectedForceKillDeadline + finalizationReserve * 1_000;
+    for (const [field, actual, expected] of [
+      ["fuzzing_deadline_utc", fuzzingDeadline.milliseconds, expectedFuzzingDeadline],
+      ["force_kill_deadline_utc", forceKillDeadline.milliseconds, expectedForceKillDeadline],
+      ["final_artifact_deadline_utc", finalArtifactDeadline.milliseconds, expectedFinalArtifactDeadline]
+    ] as const) {
+      if (actual !== expected) {
+        diagnostics.push(
+          campaignTimeoutDiagnostic(
+            "CAMPAIGN_TIMEOUT_DEADLINE_MISMATCH",
+            `${field} does not match the configured timeout and reserve arithmetic`,
+            `${planPath}#$.${field}`
+          )
+        );
+      }
+    }
+  }
+
+  const resultConfiguredTimeout = positiveIntegerField(
+    resultValue,
+    "configured_timeout_seconds",
+    resultPath,
+    diagnostics
+  );
+  if (
+    configuredTimeoutSeconds !== undefined &&
+    resultConfiguredTimeout !== undefined &&
+    resultConfiguredTimeout !== configuredTimeoutSeconds
+  ) {
+    diagnostics.push(
+      campaignTimeoutDiagnostic(
+        "CAMPAIGN_TIMEOUT_CONFIG_MISMATCH",
+        `configured_timeout_seconds reports ${resultConfiguredTimeout}, but resolved configuration requires ${configuredTimeoutSeconds}`,
+        `${resultPath}#$.configured_timeout_seconds`
+      )
+    );
+  }
+  const resultCommand = stringField(resultValue, "exact_command", resultPath, diagnostics);
+  if (planCommand !== undefined && resultCommand !== undefined && planCommand !== resultCommand) {
+    diagnostics.push(
+      campaignTimeoutDiagnostic(
+        "CAMPAIGN_TIMEOUT_COMMAND_MISMATCH",
+        "Backend result exact_command must equal the campaign plan command",
+        `${resultPath}#$.exact_command`
+      )
+    );
+  }
+  if (resultCommand !== undefined && configuredTimeoutSeconds !== undefined) {
+    const timeoutValues = exactCommandFlagValues(resultCommand, "--timeout");
+    const testLimitValues = exactCommandFlagValues(resultCommand, "--test-limit");
+    if (timeoutValues.length !== 1 || timeoutValues[0] !== String(configuredTimeoutSeconds)) {
+      diagnostics.push(
+        campaignTimeoutDiagnostic(
+          "CAMPAIGN_TIMEOUT_COMMAND_INVALID",
+          `Recon command must contain exactly one --timeout ${configuredTimeoutSeconds} flag`,
+          `${resultPath}#$.exact_command`
+        )
+      );
+    }
+    if (testLimitValues.length !== 1 || testLimitValues[0] !== RECON_MAX_TEST_LIMIT) {
+      diagnostics.push(
+        campaignTimeoutDiagnostic(
+          "CAMPAIGN_TIMEOUT_COMMAND_INVALID",
+          `Recon command must contain exactly one --test-limit ${RECON_MAX_TEST_LIMIT} flag`,
+          `${resultPath}#$.exact_command`
+        )
+      );
+    }
+    if (!hasExactHostTimeoutWrapper(resultCommand, configuredTimeoutSeconds)) {
+      diagnostics.push(
+        campaignTimeoutDiagnostic(
+          "CAMPAIGN_TIMEOUT_HOST_WRAPPER_INVALID",
+          `Recon command must use exactly one timeout --preserve-status --signal=INT --kill-after=${CAMPAIGN_HOST_FORCE_KILL_GRACE_SECONDS}s ${configuredTimeoutSeconds}s wrapper and must not use --foreground`,
+          `${resultPath}#$.exact_command`
+        )
+      );
+    }
+  }
+
+  const startTimestamp = timestampField(resultValue, "start_timestamp", resultPath, diagnostics);
+  const endTimestamp = timestampField(resultValue, "end_timestamp", resultPath, diagnostics);
+  if (
+    backendStartedAt !== undefined &&
+    startTimestamp !== undefined &&
+    backendStartedAt.milliseconds !== startTimestamp.milliseconds
+  ) {
+    diagnostics.push(
+      campaignTimeoutDiagnostic(
+        "CAMPAIGN_TIMEOUT_START_MISMATCH",
+        "Backend result start_timestamp must equal campaign plan backend_started_at",
+        `${resultPath}#$.start_timestamp`
+      )
+    );
+  }
+  const terminationReason = stringField(resultValue, "termination_reason", resultPath, diagnostics);
+  if (terminationReason !== undefined && !campaignTerminationReasons.has(terminationReason)) {
+    diagnostics.push(
+      campaignTimeoutDiagnostic(
+        "CAMPAIGN_TIMEOUT_EVIDENCE_INVALID",
+        `termination_reason must be one of ${[...campaignTerminationReasons].join(", ")}`,
+        `${resultPath}#$.termination_reason`
+      )
+    );
+  }
+  const campaignOutcome = stringField(resultValue, "campaign_outcome", resultPath, diagnostics);
+  if (campaignOutcome !== undefined && !campaignOutcomes.has(campaignOutcome)) {
+    diagnostics.push(
+      campaignTimeoutDiagnostic(
+        "CAMPAIGN_TIMEOUT_EVIDENCE_INVALID",
+        "campaign_outcome must be complete, partial, or blocked",
+        `${resultPath}#$.campaign_outcome`
+      )
+    );
+  }
+  const usableResults = resultValue.usable_results;
+  if (typeof usableResults !== "boolean") {
+    diagnostics.push(
+      campaignTimeoutDiagnostic(
+        "CAMPAIGN_TIMEOUT_EVIDENCE_INVALID",
+        "usable_results must be a boolean",
+        `${resultPath}#$.usable_results`
+      )
+    );
+  }
+
+  if (startTimestamp !== undefined && endTimestamp !== undefined) {
+    const elapsedMs = endTimestamp.milliseconds - startTimestamp.milliseconds;
+    if (elapsedMs < 0) {
+      diagnostics.push(
+        campaignTimeoutDiagnostic(
+          "CAMPAIGN_TIMEOUT_DURATION_MISMATCH",
+          "Backend end_timestamp cannot precede start_timestamp",
+          `${resultPath}#$.end_timestamp`
+        )
+      );
+    } else if (configuredTimeoutSeconds !== undefined) {
+      const endedEarly = elapsedMs + CAMPAIGN_DURATION_TOLERANCE_MS < configuredTimeoutSeconds * 1_000;
+      if (terminationReason === "configured-timeout" && endedEarly) {
+        diagnostics.push(
+          campaignTimeoutDiagnostic(
+            "CAMPAIGN_TIMEOUT_DURATION_MISMATCH",
+            "A configured-timeout campaign must run for the configured fuzzer timeout",
+            `${resultPath}#$.end_timestamp`
+          )
+        );
+      }
+      if (endedEarly && usableResults === true && campaignOutcome !== "partial") {
+        diagnostics.push(
+          campaignTimeoutDiagnostic(
+            "CAMPAIGN_TIMEOUT_OUTCOME_MISMATCH",
+            "A campaign that ends before the configured timeout with usable results must be partial",
+            `${resultPath}#$.campaign_outcome`
+          )
+        );
+      }
+      if (
+        !endedEarly &&
+        terminationReason === "configured-timeout" &&
+        usableResults === true &&
+        campaignOutcome !== "complete"
+      ) {
+        diagnostics.push(
+          campaignTimeoutDiagnostic(
+            "CAMPAIGN_TIMEOUT_OUTCOME_MISMATCH",
+            "A configured-timeout campaign with usable results must be complete",
+            `${resultPath}#$.campaign_outcome`
+          )
+        );
+      }
+    }
+    if (
+      forceKillDeadline !== undefined &&
+      endTimestamp.milliseconds > forceKillDeadline.milliseconds + CAMPAIGN_DURATION_TOLERANCE_MS
+    ) {
+      if (terminationReason !== "host-force-kill") {
+        diagnostics.push(
+          campaignTimeoutDiagnostic(
+            "CAMPAIGN_TIMEOUT_FORCE_KILL_MISMATCH",
+            "A backend ending after the host force-kill deadline must report termination_reason host-force-kill",
+            `${resultPath}#$.termination_reason`
+          )
+        );
+      }
+      if (usableResults === true && campaignOutcome !== "partial") {
+        diagnostics.push(
+          campaignTimeoutDiagnostic(
+            "CAMPAIGN_TIMEOUT_OUTCOME_MISMATCH",
+            "A host-force-killed campaign with usable results must be partial",
+            `${resultPath}#$.campaign_outcome`
+          )
+        );
+      }
+    }
+    if (
+      forceKillDeadline !== undefined &&
+      terminationReason === "host-force-kill" &&
+      endTimestamp.milliseconds + CAMPAIGN_DURATION_TOLERANCE_MS < forceKillDeadline.milliseconds
+    ) {
+      diagnostics.push(
+        campaignTimeoutDiagnostic(
+          "CAMPAIGN_TIMEOUT_FORCE_KILL_MISMATCH",
+          "A host-force-kill termination cannot precede the host force-kill deadline",
+          `${resultPath}#$.termination_reason`
+        )
+      );
+    }
+  }
+  if (usableResults === false && campaignOutcome !== "blocked") {
+    diagnostics.push(
+      campaignTimeoutDiagnostic(
+        "CAMPAIGN_TIMEOUT_OUTCOME_MISMATCH",
+        "A campaign without usable results must be blocked",
+        `${resultPath}#$.campaign_outcome`
+      )
+    );
+  }
+  if (campaignOutcome === "complete" && (terminationReason !== "configured-timeout" || usableResults !== true)) {
+    diagnostics.push(
+      campaignTimeoutDiagnostic(
+        "CAMPAIGN_TIMEOUT_OUTCOME_MISMATCH",
+        "A complete campaign must have usable results and termination_reason configured-timeout",
+        `${resultPath}#$.campaign_outcome`
+      )
+    );
+  }
+  if (usableResults === true && terminationReason !== "configured-timeout" && campaignOutcome !== "partial") {
+    diagnostics.push(
+      campaignTimeoutDiagnostic(
+        "CAMPAIGN_TIMEOUT_OUTCOME_MISMATCH",
+        "A campaign with usable results and a non-configured terminal reason must be partial",
+        `${resultPath}#$.campaign_outcome`
+      )
+    );
+  }
+  if (usableResults === true && campaignOutcome === "blocked") {
+    diagnostics.push(
+      campaignTimeoutDiagnostic(
+        "CAMPAIGN_TIMEOUT_OUTCOME_MISMATCH",
+        "A blocked campaign cannot report usable results",
+        `${resultPath}#$.campaign_outcome`
+      )
+    );
+  }
+
+  const summaryOutcome = stringField(summaryValue, "outcome", summaryPath, diagnostics);
+  if (summaryOutcome !== undefined && campaignOutcome !== undefined && summaryOutcome !== campaignOutcome) {
+    diagnostics.push(
+      campaignTimeoutDiagnostic(
+        "CAMPAIGN_TIMEOUT_SUMMARY_MISMATCH",
+        "Campaign summary outcome must equal the backend result campaign_outcome",
+        `${summaryPath}#$.outcome`
+      )
+    );
+  }
+  return diagnostics;
 }
 
 function verifyPropertyProvenanceArtifacts(
   layout: RunLayout,
   artifactDir: string,
-  node: PlannedGraphNode
+  node: PlannedGraphNode,
+  attemptId: string
 ): RuntimeDiagnostic[] {
   const logicalId = node.logical_id ?? node.id;
   const isPropertyLens = node.outputs.some((output) => output.contract === "ultrafuzz/property-lens@1");
@@ -1624,9 +2164,13 @@ function verifyPropertyProvenanceArtifacts(
     return [];
   }
 
+  const campaignTimeoutDiagnostics = isCampaignLogicalId(logicalId)
+    ? verifyCurrentCampaignTimeoutEvidence(layout, artifactDir, node, attemptId)
+    : [];
+
   const catalog = readCanonicalPropertyCatalog(layout);
   if (catalog.diagnostics.length > 0 || catalog.value === undefined) {
-    return catalog.diagnostics;
+    return [...campaignTimeoutDiagnostics, ...catalog.diagnostics];
   }
 
   if (logicalId === "stateful-invariant-implement-properties") {
@@ -1661,7 +2205,7 @@ function verifyPropertyProvenanceArtifacts(
     ];
   }
 
-  return verifyCampaignPropertyReferences(layout, artifactDir, catalog.value, node);
+  return [...campaignTimeoutDiagnostics, ...verifyCampaignPropertyReferences(layout, artifactDir, catalog.value, node)];
 }
 
 /**
