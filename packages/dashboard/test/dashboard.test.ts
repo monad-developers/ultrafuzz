@@ -57,15 +57,23 @@ test("serves logical topology flow with expanded attempt details", async () => {
 
 test("persisted flow and node detail expose human dynamic IDs with safe storage state", async () => {
   const projectRoot = makeProject();
-  // This test is about how the dashboard renders generated dynamic nodes, so it plans the shipped
-  // topology without the pinned vulnerability-database feature rather than requiring that
-  // reference's synced cache.
+  // This test exercises dashboard rendering for generated dynamic nodes, so exclude pinned
+  // reference nodes rather than requiring their caches to be materialized.
   const plan = await planRun({
     projectRoot,
     runId: "dashboard-dynamic",
     topologyTransform: {
       excludedNodeIds: [
         "reference-vulnerability-database",
+        "reference-properties-0kn0t",
+        "reference-properties-certora-thinking",
+        "reference-properties-certora-sanity",
+        "reference-properties-aviggiano",
+        "reference-properties-montyly-rounding",
+        "reference-properties-crytic",
+        "reference-properties-runtime-verification",
+        "reference-properties-a16z-erc4626",
+        "reference-properties-recon",
         "threat-model",
         "goal-plan",
         "goal-roaming",
