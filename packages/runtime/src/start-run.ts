@@ -228,16 +228,28 @@ async function requiredCommandPreflightDiagnostics(
   }
   const probeByName = new Map(commandProbes.map((probe) => [probe.name, probe]));
   const missingCommands = requiredCommands.filter((command) => probeByName.get(command)?.available !== true);
+  const missingRequirements = missingCommands.map((command) => ({
+    command,
+    node_ids: [
+      ...new Set(
+        expandedGraph.nodes
+          .filter((node) => node.requiredCommands?.includes(command) === true)
+          .map((node) => node.logicalId)
+      )
+    ].sort()
+  }));
   return missingCommands.length === 0
     ? []
     : [
         {
           code: "RUN_REQUIRED_COMMAND_MISSING",
-          message: `required topology commands are not available in the configured execution environment: ${missingCommands.join(", ")}`,
+          message: `required topology commands are not available in the configured execution environment: ${missingRequirements
+            .map((requirement) => `${requirement.command} (required by ${requirement.node_ids.join(", ")})`)
+            .join("; ")}`,
           severity: "error",
           source: "runtime",
           path: "topology.required_commands",
-          details: { commands: missingCommands }
+          details: { commands: missingCommands, requirements: missingRequirements }
         }
       ];
 }

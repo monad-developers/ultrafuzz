@@ -867,7 +867,11 @@ test("startRun rejects a missing required backend before creating a run", async 
 
   assert.equal(run.ok, false);
   assert.equal(run.diagnostics[0]?.code, "RUN_REQUIRED_COMMAND_MISSING");
-  assert.match(run.diagnostics[0]?.message ?? "", /recon/u);
+  assert.match(run.diagnostics[0]?.message ?? "", /recon \(required by project-discovery\)/u);
+  assert.deepEqual(run.diagnostics[0]?.details, {
+    commands: ["recon"],
+    requirements: [{ command: "recon", node_ids: ["project-discovery"] }]
+  });
   assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", "missing-recon")), false);
 });
 

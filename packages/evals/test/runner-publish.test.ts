@@ -191,7 +191,16 @@ describe("runner", () => {
     expect(record.diagnostics).toEqual([
       expect.objectContaining({
         code: "RUN_REQUIRED_COMMAND_MISSING",
-        details: { commands: ["covg-eval", "recon"] }
+        details: {
+          commands: ["covg-eval", "recon"],
+          requirements: [
+            { command: "covg-eval", node_ids: ["stateful-invariant-coverage"] },
+            {
+              command: "recon",
+              node_ids: ["stateful-invariant-campaign", "stateful-invariant-coverage"]
+            }
+          ]
+        }
       })
     ]);
     const runsRoot = path.join(project, ".ultrafuzz", "runs");
