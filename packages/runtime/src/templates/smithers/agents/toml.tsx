@@ -35,6 +35,23 @@ export function readStringTable(text: string, tableName: string): Record<string,
   return fields;
 }
 
+export function readRootString(text: string, key: string): string | undefined {
+  for (const rawLine of text.split(/\r?\n/u)) {
+    const line = rawLine.trim();
+    if (line === "" || line.startsWith("#")) {
+      continue;
+    }
+    if (/^\[[^\]]+\]$/u.test(line)) {
+      return undefined;
+    }
+    const assignment = /^([A-Za-z0-9_-]+)\s*=\s*"((?:\\.|[^"\\])*)"\s*(?:#.*)?$/u.exec(line);
+    if (assignment?.[1] === key && assignment[2] !== undefined) {
+      return decodeBasicString(assignment[2], key);
+    }
+  }
+  return undefined;
+}
+
 export function stringField(table: Record<string, string>, key: string): string | undefined {
   const value = table[key];
   if (value === undefined) {

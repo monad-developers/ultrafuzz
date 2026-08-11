@@ -172,7 +172,9 @@ async function loadGeneratedCodexAgent(project: string): Promise<{
       cleanup?: () => Promise<void>;
     }>;
   };
-  createCodexAgent(options?: Record<string, unknown>): unknown;
+  createCodexAgent(options?: Record<string, unknown>): {
+    preflight(options?: { rootDir?: string }): Promise<void>;
+  };
   workflowControlChildEnvironment(
     additions?: Record<string, string | undefined>,
     source?: Record<string, string | undefined>
@@ -216,7 +218,9 @@ async function loadGeneratedCodexAgent(project: string): Promise<{
         cleanup?: () => Promise<void>;
       }>;
     };
-    createCodexAgent(options?: Record<string, unknown>): unknown;
+    createCodexAgent(options?: Record<string, unknown>): {
+      preflight(options?: { rootDir?: string }): Promise<void>;
+    };
   };
   const environmentModule = (await import(pathToFileURL(path.join(fixture, "environment.mjs")).href)) as {
     workflowControlChildEnvironment(
@@ -1174,7 +1178,7 @@ test("init preserves existing project-owned files and validate exposes launch po
   // The TOML parser is shared, so a fix reaches every backend at once.
   assert.equal(fs.existsSync(path.join(project, ".smithers/agents/toml.ts")), true);
   const tomlHelperText = fs.readFileSync(path.join(project, ".smithers/agents/toml.ts"), "utf8");
-  assert.match(codexAgentText, /import \{ readStringTable, stringField \} from ".\/toml";/);
+  assert.match(codexAgentText, /import \{ readRootString, readStringTable, stringField \} from ".\/toml";/);
   assert.doesNotMatch(codexAgentText, /function readStringTable/);
   // TOML's \UXXXXXXXX has no JSON equivalent, so values are not JSON.parse'd.
   assert.doesNotMatch(tomlHelperText, /JSON\.parse/);
@@ -2024,6 +2028,51 @@ test(
     });
     assert.equal(resumed.args.includes("--add-dir"), false);
     await resumed.cleanup?.();
+  }
+);
+
+test(
+  "generated Codex adapter delegates custom-provider authentication to Codex CLI",
+  { skip: !runningUnderBun },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const configPath = path.join(project, "ultrafuzz.toml");
+    fs.writeFileSync(
+      configPath,
+      fs
+        .readFileSync(configPath, "utf8")
+        .replace('auth = "api-key"\napi_key_env = "OPENAI_API_KEY"', 'auth = "subscription"'),
+      "utf8"
+    );
+    const codexHome = path.join(project, "codex-home");
+    const binDir = path.join(project, "bin");
+    fs.mkdirSync(codexHome, { recursive: true });
+    fs.mkdirSync(binDir, { recursive: true });
+    fs.writeFileSync(path.join(codexHome, "config.toml"), 'model_provider = "internal-proxy"\n', "utf8");
+    const fakeCodex = path.join(binDir, "codex");
+    fs.writeFileSync(fakeCodex, "#!/bin/sh\nexit 0\n", { encoding: "utf8", mode: 0o755 });
+
+    const previous = {
+      codexHome: process.env.CODEX_HOME,
+      config: process.env.ULTRAFUZZ_CONFIG_PATH,
+      path: process.env.PATH
+    };
+    process.env.CODEX_HOME = codexHome;
+    process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
+    process.env.PATH = `${binDir}:${previous.path ?? ""}`;
+    try {
+      const { createCodexAgent } = await loadGeneratedCodexAgent(project);
+      await createCodexAgent().preflight({ rootDir: project });
+    } finally {
+      if (previous.codexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previous.codexHome;
+      if (previous.config === undefined) delete process.env.ULTRAFUZZ_CONFIG_PATH;
+      else process.env.ULTRAFUZZ_CONFIG_PATH = previous.config;
+      if (previous.path === undefined) delete process.env.PATH;
+      else process.env.PATH = previous.path;
+    }
   }
 );
 

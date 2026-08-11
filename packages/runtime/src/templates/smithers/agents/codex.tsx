@@ -1,8 +1,11 @@
+import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { CodexAgent as SmithersCodexAgent } from "smithers-orchestrator";
 import { workflowControlChildEnvironment, workflowControlCredentialValue } from "./environment";
-import { readStringTable, stringField } from "./toml";
+import { readRootString, readStringTable, stringField } from "./toml";
 
 type CodexAuthConfig = { auth?: string; api_key_env?: string; config_dir?: string };
 type CodexAuthOptions = { apiKey?: string; configDir?: string; env?: Record<string, string> };
@@ -10,6 +13,10 @@ export type CodexTaskOptions = { model?: string; reasoningEffort?: string; addDi
 
 type CodexCommandParams = Parameters<SmithersCodexAgent["buildCommand"]>[0];
 type CodexCommand = Awaited<ReturnType<SmithersCodexAgent["buildCommand"]>>;
+type CodexPreflightParams = Parameters<SmithersCodexAgent["preflight"]>[0];
+type SmithersCodexOptions = ConstructorParameters<typeof SmithersCodexAgent>[0];
+
+const execFileAsync = promisify(execFile);
 
 /**
  * Smithers passes an `addDir` array as one flag followed by all
@@ -18,6 +25,24 @@ type CodexCommand = Awaited<ReturnType<SmithersCodexAgent["buildCommand"]>>;
  * fresh commands; Smithers intentionally omits `addDir` for `exec resume`.
  */
 export class CompatibleCodexAgent extends SmithersCodexAgent {
+  constructor(
+    options: SmithersCodexOptions = {},
+    private readonly customProvider = false
+  ) {
+    super(options);
+  }
+
+  override async preflight(options?: CodexPreflightParams): Promise<void> {
+    if (!this.customProvider) {
+      await super.preflight(options);
+      return;
+    }
+    await execFileAsync("codex", ["--version"], {
+      cwd: options?.rootDir ?? process.cwd(),
+      env: { ...process.env, ...this.opts.env }
+    });
+  }
+
   override async buildCommand(params: CodexCommandParams): Promise<CodexCommand> {
     const command = await super.buildCommand(params);
     const sanitizedCommand = { ...command, env: workflowControlChildEnvironment(command.env) };
@@ -43,15 +68,18 @@ export class CompatibleCodexAgent extends SmithersCodexAgent {
 
 export function createCodexAgent(options: CodexTaskOptions = {}): SmithersCodexAgent {
   const auth = codexAuthOptions();
-  return new CompatibleCodexAgent({
-    ...(options.model === undefined ? {} : { model: options.model }),
-    ...(options.reasoningEffort === undefined ? {} : { config: { model_reasoning_effort: options.reasoningEffort } }),
-    ...(options.addDir === undefined ? {} : { addDir: options.addDir }),
-    sandbox: "workspace-write",
-    skipGitRepoCheck: true,
-    ...auth,
-    env: workflowControlChildEnvironment(auth.env)
-  });
+  return new CompatibleCodexAgent(
+    {
+      ...(options.model === undefined ? {} : { model: options.model }),
+      ...(options.reasoningEffort === undefined ? {} : { config: { model_reasoning_effort: options.reasoningEffort } }),
+      ...(options.addDir === undefined ? {} : { addDir: options.addDir }),
+      sandbox: "workspace-write",
+      skipGitRepoCheck: true,
+      ...auth,
+      env: workflowControlChildEnvironment(auth.env)
+    },
+    usesCustomCodexProvider(auth.configDir)
+  );
 }
 
 function codexAuthOptions(): CodexAuthOptions {
@@ -93,4 +121,15 @@ function resolveConfigDir(value: string): string {
     throw new Error("agents.CodexAgent.config_dir cannot be empty");
   }
   return path.isAbsolute(value) ? value : path.resolve(process.cwd(), value);
+}
+
+function usesCustomCodexProvider(configDir?: string): boolean {
+  const home =
+    configDir ?? (process.env.CODEX_HOME?.trim() || path.join(process.env.HOME?.trim() || os.homedir(), ".codex"));
+  try {
+    const provider = readRootString(readFileSync(path.join(home, "config.toml"), "utf8"), "model_provider");
+    return provider !== undefined && provider !== "openai";
+  } catch {
+    return false;
+  }
 }
