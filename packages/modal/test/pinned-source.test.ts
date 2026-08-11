@@ -232,12 +232,35 @@ describe("pinned benchmark source", () => {
     const fixture = referenceSourceRepository();
     const destination = path.join(fixture.root, "withheld");
 
-    const proof = await materializePinnedSource({
-      repository: fixture.repository,
-      revision: fixture.pinned,
-      destination,
-      heldOutPaths: ["reference"]
-    });
+    // A materialized checkout has no committer identity, and CI and the Modal
+    // image have no global one either, so the hold-out commit must carry its
+    // own. Suppress ambient configuration to keep that honest.
+    const previousGitConfig = {
+      global: process.env.GIT_CONFIG_GLOBAL,
+      system: process.env.GIT_CONFIG_SYSTEM,
+      noSystem: process.env.GIT_CONFIG_NOSYSTEM
+    };
+    process.env.GIT_CONFIG_GLOBAL = "/dev/null";
+    process.env.GIT_CONFIG_SYSTEM = "/dev/null";
+    process.env.GIT_CONFIG_NOSYSTEM = "1";
+    let proof: Awaited<ReturnType<typeof materializePinnedSource>>;
+    try {
+      proof = await materializePinnedSource({
+        repository: fixture.repository,
+        revision: fixture.pinned,
+        destination,
+        heldOutPaths: ["reference"]
+      });
+    } finally {
+      for (const [name, value] of [
+        ["GIT_CONFIG_GLOBAL", previousGitConfig.global],
+        ["GIT_CONFIG_SYSTEM", previousGitConfig.system],
+        ["GIT_CONFIG_NOSYSTEM", previousGitConfig.noSystem]
+      ] as const) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
 
     // The answer key is gone; everything else survives untouched.
     expect(fs.existsSync(path.join(destination, "reference"))).toBe(false);
@@ -327,6 +350,9 @@ describe("pinned benchmark source", () => {
       heldOutPaths: ["reference"]
     });
 
+    // A materialized checkout carries no committer identity of its own.
+    git(destination, ["config", "user.name", "Ultrafuzz test"]);
+    git(destination, ["config", "user.email", "test@example.invalid"]);
     // Withhold a protocol file without recording it, then re-verify.
     git(destination, ["rm", "-r", "--quiet", "--", "src"]);
     git(destination, ["commit", "--quiet", "--no-verify", "--amend", "--no-edit"]);
