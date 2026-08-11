@@ -59,7 +59,7 @@ describe("Modal node sandbox provider", () => {
       { name: "covg-eval", available: false, path: null, version: null },
       { name: "recon", available: true, path: "/usr/local/bin/recon", version: "recon 1.2.3" }
     ]);
-    expect(client.apps.fromName).toHaveBeenCalledWith("ultrafuzz-test", { createIfMissing: false });
+    expect(client.apps.fromName).toHaveBeenCalledWith("ultrafuzz-test", { createIfMissing: true });
     expect(client.sandboxes.create).toHaveBeenCalledOnce();
     expect(sandbox.exec).toHaveBeenCalledWith(
       expect.arrayContaining(["node", "--eval", JSON.stringify(["covg-eval", "recon"])]),
@@ -107,7 +107,7 @@ describe("Modal node sandbox provider", () => {
     expect(client.sandboxes.create).not.toHaveBeenCalled();
   });
 
-  it("allows launch preflight to opt into normal first-use app creation", async () => {
+  it("allows Doctor to opt out of first-use app creation", async () => {
     const sandbox = fakeSandbox(undefined);
     sandbox.exec = vi.fn(async () => ({
       stdout: {
@@ -120,9 +120,9 @@ describe("Modal node sandbox provider", () => {
     })) as unknown as typeof sandbox.exec;
     const client = fakeClient({ created: sandbox });
 
-    await probeModalCommands(providerOptions(client), ["recon"], { createAppIfMissing: true });
+    await probeModalCommands(providerOptions(client), ["recon"], { createAppIfMissing: false });
 
-    expect(client.apps.fromName).toHaveBeenCalledWith("ultrafuzz-test", { createIfMissing: true });
+    expect(client.apps.fromName).toHaveBeenCalledWith("ultrafuzz-test", { createIfMissing: false });
   });
 
   it("uses stable bounded identities without embedding raw controller identifiers", () => {

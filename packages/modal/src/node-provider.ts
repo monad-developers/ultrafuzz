@@ -120,7 +120,9 @@ export async function probeModalCommands(
     // Doctor leaves persistent provider state untouched. Launch preflight can
     // opt into the same first-use app creation as normal cloud execution.
     const app = await client.apps.fromName(options.app, {
-      createIfMissing: probeOptions.createAppIfMissing === true
+      // Preserve the public probe's historical first-use behavior. Read-only
+      // callers such as Doctor opt out explicitly.
+      createIfMissing: probeOptions.createAppIfMissing !== false
     });
     const image = await client.images.fromName(options.image);
     const identity = boundedIdentity(`${options.image}:${uniqueCommands.join(",")}`);
