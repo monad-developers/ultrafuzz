@@ -267,19 +267,31 @@ describe("pinned benchmark source", () => {
     expect(fs.readFileSync(path.join(destination, "src", "protocol.txt"), "utf8")).toBe("protocol\n");
     expect(fs.readFileSync(path.join(destination, "tests", "unit.txt"), "utf8")).toBe("unit\n");
 
-    // HEAD is the hold-out revision; the benchmark commit is its only parent.
+    // HEAD is a parentless hold-out revision and the benchmark commit is gone,
+    // so the single-revision isolation invariants still hold.
     expect(proof.commit).not.toBe(fixture.pinned);
-    expect(proof.revision_count).toBe(2);
-    expect(proof.commit_object_count).toBe(2);
-    expect(git(destination, ["rev-parse", "HEAD^"])).toBe(fixture.pinned);
+    expect(proof.revision_count).toBe(1);
+    expect(proof.commit_object_count).toBe(1);
+    expect(() => git(destination, ["rev-parse", "HEAD^"])).toThrow();
     expect(git(destination, ["branch", "--show-current"])).toBe(PINNED_SOURCE_BRANCH);
     expect(proof.refs).toEqual([{ name: PINNED_SOURCE_REF, object: proof.commit }]);
     expect(git(destination, ["status", "--porcelain=v1", "--untracked-files=all"])).toBe("");
 
     expect(proof.held_out).toMatchObject({
       source_commit: fixture.pinned,
+      commit: proof.commit,
+      tree: proof.tree,
       paths: ["reference"]
     });
+
+    // The withheld bytes must be unrecoverable, not merely deleted.
+    expect(() => git(destination, ["show", `${fixture.pinned}:reference/Properties.sol`])).toThrow();
+    expect(() => git(destination, ["cat-file", "-e", fixture.pinned])).toThrow();
+    for (const entry of proof.held_out?.entries ?? []) {
+      expect(() => git(destination, ["cat-file", "-e", entry.blob])).toThrow();
+    }
+    expect(git(destination, ["reflog"])).toBe("");
+    expect(git(destination, ["fsck", "--unreachable", "--no-progress"])).toBe("");
     expect(proof.held_out?.entries.map((entry) => entry.path)).toEqual([
       "reference/Properties.sol",
       "reference/nested/Handlers.sol"
@@ -339,7 +351,7 @@ describe("pinned benchmark source", () => {
     }
   }, 15_000);
 
-  it("rejects a hold-out revision that removed more than it declared", async () => {
+  it("rejects a hold-out revision that was rewritten after materialization", async () => {
     const fixture = referenceSourceRepository();
     const destination = path.join(fixture.root, "widened");
 
@@ -357,7 +369,7 @@ describe("pinned benchmark source", () => {
     git(destination, ["rm", "-r", "--quiet", "--", "src"]);
     git(destination, ["commit", "--quiet", "--no-verify", "--amend", "--no-edit"]);
     await expect(inspectPinnedSource(destination, fixture.pinned)).rejects.toThrow(
-      /removals do not match the recorded entries/u
+      /not the expected parentless revision/u
     );
   }, 15_000);
 
@@ -373,34 +385,26 @@ describe("pinned benchmark source", () => {
     });
     const recordPath = path.join(destination, ".git", "ultrafuzz-pinned-holdout.json");
     const record = JSON.parse(fs.readFileSync(recordPath, "utf8")) as PinnedHoldout;
+    const rewrite = (value: Partial<PinnedHoldout>): void =>
+      fs.writeFileSync(recordPath, JSON.stringify({ ...record, ...value }, null, 2), "utf8");
 
-    // Under-declaring hides a withheld path from the audit.
-    fs.writeFileSync(recordPath, JSON.stringify({ ...record, entries: record.entries.slice(0, 1) }, null, 2), "utf8");
-    await expect(inspectPinnedSource(destination, fixture.pinned)).rejects.toThrow(
-      /removals do not match the recorded entries/u
-    );
+    // Declaring nothing would make the audit vacuous.
+    rewrite({ entries: [], paths: [] });
+    await expect(inspectPinnedSource(destination, fixture.pinned)).rejects.toThrow(/record is invalid/u);
 
-    // Claiming a different upstream identity for a withheld file.
-    fs.writeFileSync(
-      recordPath,
-      JSON.stringify(
-        {
-          ...record,
-          entries: record.entries.map((entry, index) => (index === 0 ? { ...entry, size: entry.size + 1 } : entry))
-        },
-        null,
-        2
-      ),
-      "utf8"
-    );
-    await expect(inspectPinnedSource(destination, fixture.pinned)).rejects.toThrow(
-      /does not match the benchmark commit/u
-    );
+    // Naming a path that is still present claims a hold-out that never happened.
+    rewrite({ entries: [{ path: "src/protocol.txt", blob: "a".repeat(40), size: 9 }] });
+    await expect(inspectPinnedSource(destination, fixture.pinned)).rejects.toThrow(/still tracked/u);
+
+    // Naming a blob that is still readable is not a hold-out either.
+    const readable = git(destination, ["rev-parse", "HEAD:src/protocol.txt"]);
+    rewrite({ entries: [{ path: "reference/Properties.sol", blob: readable, size: 9 }] });
+    await expect(inspectPinnedSource(destination, fixture.pinned)).rejects.toThrow(/still readable/u);
 
     // Claiming descent from a commit that is not the benchmark commit.
-    fs.writeFileSync(recordPath, JSON.stringify({ ...record, source_commit: "a".repeat(40) }, null, 2), "utf8");
+    rewrite({ source_commit: "a".repeat(40) });
     await expect(inspectPinnedSource(destination, fixture.pinned)).rejects.toThrow(
-      /not derived from the expected benchmark commit/u
+      /not the expected parentless revision/u
     );
   }, 20_000);
 });

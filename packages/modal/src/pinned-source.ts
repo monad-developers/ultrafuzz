@@ -54,9 +54,16 @@ export interface PinnedHoldoutEntry {
 
 export interface PinnedHoldout {
   schema_version: typeof PINNED_HOLDOUT_SCHEMA_VERSION;
-  /** The upstream benchmark commit the hold-out is derived from. */
+  /**
+   * The upstream benchmark commit the hold-out was derived from. Recorded as
+   * provenance only: the commit is deliberately not reachable in the
+   * materialized repository, so it cannot be read back out of it.
+   */
   source_commit: string;
   source_tree: string;
+  /** The parentless revision the checkout was rewritten to. */
+  commit: string;
+  tree: string;
   /** Exactly the patterns the caller declared, normalized and sorted. */
   paths: string[];
   /** Every tracked file the declaration removed, with its upstream identity. */
@@ -70,8 +77,8 @@ export interface PinnedSourceProof {
   base_ref: typeof PINNED_SOURCE_REF;
   refs: Array<{ name: string; object: string }>;
   remotes: string[];
-  revision_count: 1 | 2;
-  commit_object_count: 1 | 2;
+  revision_count: 1;
+  commit_object_count: 1;
   submodules: ({ manifest_location: typeof PINNED_SUBMODULE_MANIFEST_LOCATION } & PinnedSubmoduleExpectation) | null;
   /**
    * Null unless the benchmark withheld reference paths. When set, `commit` and
@@ -222,10 +229,10 @@ export async function inspectPinnedSource(
   const submoduleSnapshot = readPinnedSubmoduleSnapshot(repositoryRoot);
   const hasGitlinks = await containsGitlinks(repositoryRoot, signal);
   const holdout = readPinnedHoldout(repositoryRoot);
-  // With a hold-out the checkout is one commit ahead of the benchmark: HEAD is
-  // the hold-out revision and the benchmark commit is its only parent.
-  const expectedHead = holdout === undefined ? expected : normalizedCommit;
-  const expectedRevisionCount = holdout === undefined ? 1 : 2;
+  // A hold-out rewrites the checkout to a parentless revision and destroys the
+  // benchmark commit, so the single-revision isolation invariants still hold;
+  // only the expected HEAD changes.
+  const expectedHead = holdout === undefined ? expected : holdout.commit;
   if (holdout !== undefined) {
     await verifyPinnedHoldout(repositoryRoot, holdout, normalizedCommit, expected, signal);
   }
@@ -242,8 +249,8 @@ export async function inspectPinnedSource(
     !Number.isSafeInteger(revisionCount) ||
     !Number.isSafeInteger(unreachableCommitCount) ||
     unreachableCommitCount < 0 ||
-    revisionCount !== expectedRevisionCount ||
-    commitObjectCount !== expectedRevisionCount ||
+    revisionCount !== 1 ||
+    commitObjectCount !== 1 ||
     onlyRevision !== expectedHead ||
     refs.length === 0 ||
     refs.some(
@@ -264,8 +271,8 @@ export async function inspectPinnedSource(
     base_ref: PINNED_SOURCE_REF,
     refs,
     remotes,
-    revision_count: expectedRevisionCount,
-    commit_object_count: expectedRevisionCount,
+    revision_count: 1,
+    commit_object_count: 1,
     submodules:
       submoduleSnapshot === undefined
         ? null
@@ -300,10 +307,15 @@ export function normalizeHeldOutPaths(paths: readonly string[]): string[] {
 }
 
 /**
- * Remove the declared paths and commit the removal onto the pinned branch. A
- * commit, rather than a dirty worktree, is required because every node
+ * Rewrite the checkout to a parentless revision that never contained the
+ * declared paths, then destroy the benchmark commit and the withheld blobs.
+ *
+ * A commit, rather than a dirty worktree, is required because every node
  * workspace is a Git worktree of this branch and would otherwise restore the
- * withheld files.
+ * withheld files. Keeping the benchmark commit as a parent is equally unsafe:
+ * `git show HEAD^:<path>` would hand the answer key straight back. The
+ * rewritten revision therefore has no parents, and the original objects are
+ * pruned so no reflog, dangling commit, or blob can reproduce them.
  */
 async function applyPinnedHoldout(
   repositoryRoot: string,
@@ -323,25 +335,64 @@ async function applyPinnedHoldout(
   for (const relative of tracked) {
     const blob = (await git(repositoryRoot, ["rev-parse", `HEAD:${relative}`], signal)).trim().toLowerCase();
     const size = Number((await git(repositoryRoot, ["cat-file", "-s", blob], signal)).trim());
-    if (!/^[0-9a-f]{40}$/u.test(blob) || !Number.isSafeInteger(size) || size < 0) {
+    if (!fullSha.test(blob) || !Number.isSafeInteger(size) || size < 0) {
       throw new Error(`pinned benchmark hold-out could not identify ${relative}`);
     }
     entries.push({ path: relative, blob, size });
   }
+
   await git(repositoryRoot, ["rm", "-r", "--quiet", "--", ...paths], signal);
-  await git(
-    repositoryRoot,
-    ["commit", "--quiet", "--no-verify", "--no-gpg-sign", "--message", HOLDOUT_COMMIT_MESSAGE],
-    signal,
-    HOLDOUT_COMMIT_ENVIRONMENT
-  );
+  const tree = (await git(repositoryRoot, ["write-tree"], signal)).trim().toLowerCase();
+  const commit = (
+    await git(
+      repositoryRoot,
+      ["commit-tree", "--no-gpg-sign", "-m", HOLDOUT_COMMIT_MESSAGE, tree],
+      signal,
+      HOLDOUT_COMMIT_ENVIRONMENT
+    )
+  )
+    .trim()
+    .toLowerCase();
+  if (!fullSha.test(commit) || !fullSha.test(tree)) {
+    throw new Error("pinned benchmark hold-out revision is invalid");
+  }
+  await git(repositoryRoot, ["update-ref", PINNED_SOURCE_REF, commit], signal);
+  await git(repositoryRoot, ["reset", "--quiet", "--mixed", commit], signal);
+
+  // Destroy every trace of the benchmark revision before anything can read it.
+  await rm(path.join(repositoryRoot, ".git", "FETCH_HEAD"), { force: true });
+  await rm(path.join(repositoryRoot, ".git", "ORIG_HEAD"), { force: true });
+  await rm(path.join(repositoryRoot, ".git", "logs"), { recursive: true, force: true });
+  await git(repositoryRoot, ["reflog", "expire", "--expire=now", "--expire-unreachable=now", "--all"], signal);
+  await git(repositoryRoot, ["gc", "--quiet", "--prune=now"], signal);
+
+  for (const entry of entries) {
+    if (await objectExists(repositoryRoot, entry.blob, signal)) {
+      throw new Error(`pinned benchmark hold-out left ${entry.path} readable in the object store`);
+    }
+  }
+  if (await objectExists(repositoryRoot, sourceCommit, signal)) {
+    throw new Error("pinned benchmark hold-out left the benchmark commit reachable");
+  }
+
   return {
     schema_version: PINNED_HOLDOUT_SCHEMA_VERSION,
     source_commit: sourceCommit,
     source_tree: sourceTree,
+    commit,
+    tree,
     paths,
     entries
   };
+}
+
+async function objectExists(repositoryRoot: string, object: string, signal?: AbortSignal): Promise<boolean> {
+  try {
+    await git(repositoryRoot, ["cat-file", "-e", `${object}^{object}`], signal);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function pinnedHoldoutPath(repositoryRoot: string): string {
@@ -378,8 +429,10 @@ function readPinnedHoldout(repositoryRoot: string): PinnedHoldout | undefined {
 }
 
 /**
- * Prove the hold-out revision removed exactly what it declared and changed
- * nothing else, so a reviewer can tell which bytes the run could not see.
+ * Prove the withheld bytes are absent and unrecoverable. The benchmark commit
+ * is intentionally destroyed, so there is nothing left to diff against; what
+ * matters, and what is checked here, is that neither the declared paths nor
+ * their blobs nor the benchmark revision can be read out of this repository.
  */
 async function verifyPinnedHoldout(
   repositoryRoot: string,
@@ -396,36 +449,36 @@ async function verifyPinnedHoldout(
   const message = (await git(repositoryRoot, ["log", "-1", "--format=%s", headCommit], signal)).trim();
   if (
     holdout.source_commit !== expectedSourceCommit ||
-    parents.length !== 1 ||
-    parents[0] !== expectedSourceCommit ||
+    holdout.commit !== headCommit ||
+    parents.length !== 0 ||
     message !== HOLDOUT_COMMIT_MESSAGE
   ) {
-    throw new Error("pinned benchmark hold-out is not derived from the expected benchmark commit");
+    throw new Error("pinned benchmark hold-out is not the expected parentless revision");
   }
-  const changes = (await git(repositoryRoot, ["diff", "--name-status", "-z", expectedSourceCommit, headCommit], signal))
+  if (holdout.entries.length === 0 || holdout.paths.length === 0) {
+    throw new Error("pinned benchmark hold-out record declares nothing");
+  }
+
+  const tracked = new Set(
+    (await git(repositoryRoot, ["ls-files", "-z"], signal)).split("\0").filter((entry) => entry !== "")
+  );
+  for (const entry of holdout.entries) {
+    if (tracked.has(entry.path)) {
+      throw new Error(`pinned benchmark hold-out path is still tracked: ${entry.path}`);
+    }
+    if (await objectExists(repositoryRoot, entry.blob, signal)) {
+      throw new Error(`pinned benchmark hold-out path is still readable: ${entry.path}`);
+    }
+  }
+  // A declaration that still matches tracked files was not fully applied.
+  const remaining = (await git(repositoryRoot, ["ls-files", "-z", "--", ...holdout.paths], signal))
     .split("\0")
     .filter((entry) => entry !== "");
-  const removed: string[] = [];
-  for (let index = 0; index < changes.length; index += 2) {
-    const status = changes[index];
-    const relative = changes[index + 1];
-    if (status !== "D" || relative === undefined) {
-      throw new Error("pinned benchmark hold-out changed more than the declared paths");
-    }
-    removed.push(relative);
+  if (remaining.length !== 0) {
+    throw new Error("pinned benchmark hold-out declaration still matches tracked paths");
   }
-  const declared = holdout.entries.map((entry) => entry.path).sort();
-  if (removed.sort().join("\0") !== declared.join("\0")) {
-    throw new Error("pinned benchmark hold-out removals do not match the recorded entries");
-  }
-  for (const entry of holdout.entries) {
-    const blob = (await git(repositoryRoot, ["rev-parse", `${expectedSourceCommit}:${entry.path}`], signal))
-      .trim()
-      .toLowerCase();
-    const size = Number((await git(repositoryRoot, ["cat-file", "-s", blob], signal)).trim());
-    if (blob !== entry.blob || size !== entry.size) {
-      throw new Error(`pinned benchmark hold-out entry does not match the benchmark commit: ${entry.path}`);
-    }
+  if (await objectExists(repositoryRoot, expectedSourceCommit, signal)) {
+    throw new Error("pinned benchmark hold-out left the benchmark commit readable");
   }
 }
 
