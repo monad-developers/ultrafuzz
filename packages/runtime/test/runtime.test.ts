@@ -3799,13 +3799,17 @@ test("plan creates run layout, graph fingerprint, and rendered prompt before Smi
   assert.equal(plan.value!.graph.nodes[0]?.model_fanout[0]?.agent_ref, "CodexAgent");
 });
 
-test("planned graphs persist the topology-resolved node timeout", async () => {
+test("planned graphs persist topology overrides and effective per-model timeouts", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
 
   const plan = await planRun({ projectRoot: project, runId: "planned-timeout", env: {} });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  const plannedNode = plan.value!.graph.nodes.find((node) => node.id === "project-discovery");
+  assert.equal(plannedNode?.timeout_seconds, undefined);
+  assert.equal(plannedNode?.model_fanout[0]?.timeout_seconds, plan.value!.resolved_config.run.defaultTimeoutSeconds);
+  assert.equal(plannedNode?.model_fanout[0]?.attempt_id, "project-discovery");
   const expandedNode = plan.value!.expanded_graph.nodes.find((node) => node.id === "project-discovery");
   assert.notEqual(expandedNode, undefined);
   expandedNode!.timeoutSeconds = 7200;

@@ -928,10 +928,13 @@ function toPlannedGraphNode(
       attempt_index: node.loop.attemptIndex
     },
     model_fanout: node.modelFanout.map((model) => ({
+      attempt_id:
+        node.modelFanout.length <= 1 ? node.id : `${node.id}__model_${model.modelIndex}__attempt_${model.attemptIndex}`,
       model_profile_id: model.modelProfileId,
       agent_ref: model.agentRef,
       ...(model.modelName ? { model_name: model.modelName } : {}),
       ...(model.reasoningEffort ? { reasoning_effort: model.reasoningEffort } : {}),
+      ...(model.timeoutSeconds === undefined ? {} : { timeout_seconds: model.timeoutSeconds }),
       model_index: model.modelIndex,
       loop_index: model.loopIndex,
       attempt_index: model.attemptIndex
@@ -1124,9 +1127,8 @@ function promptAttemptFor(
 }
 
 function plannedAttemptId(node: PlannedGraphNode, model: PlannedGraphNode["model_fanout"][number]): string {
-  if (node.model_fanout.length <= 1) {
-    return node.id;
-  }
+  if (model.attempt_id !== undefined) return model.attempt_id;
+  if (node.model_fanout.length <= 1) return node.id;
   return `${node.id}__model_${model.model_index}__attempt_${model.attempt_index}`;
 }
 

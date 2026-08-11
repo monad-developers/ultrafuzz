@@ -197,7 +197,7 @@ export function verifyRequiredArtifactsForAttempt(
     );
   }
   try {
-    diagnostics.push(...verifyPropertyProvenanceArtifacts(layout, artifactDir, node));
+    diagnostics.push(...verifyPropertyProvenanceArtifacts(layout, artifactDir, node, attemptId));
   } catch (error) {
     diagnostics.push(diagnosticFromError(error, "property-provenance", "PROPERTY_PROVENANCE_READ_FAILED"));
   }
@@ -1757,7 +1757,8 @@ function configuredInvariantFuzzerTimeoutSeconds(
 function verifyCurrentCampaignTimeoutEvidence(
   layout: RunLayout,
   artifactDir: string,
-  node: PlannedGraphNode
+  node: PlannedGraphNode,
+  attemptId: string
 ): RuntimeDiagnostic[] {
   if (!isCurrentTimeoutEvidenceCampaign(node)) return [];
 
@@ -1790,21 +1791,29 @@ function verifyCurrentCampaignTimeoutEvidence(
     planPath,
     diagnostics
   );
-  const topologyTimeoutSeconds = node.timeout_seconds;
+  const modelAttempt = node.model_fanout.find((model) => {
+    const plannedAttemptId =
+      model.attempt_id ??
+      (node.model_fanout.length <= 1
+        ? node.id
+        : `${node.id}__model_${model.model_index}__attempt_${model.attempt_index}`);
+    return plannedAttemptId === attemptId;
+  });
+  const plannedTimeoutSeconds = node.timeout_seconds ?? modelAttempt?.timeout_seconds;
   if (
-    typeof topologyTimeoutSeconds !== "number" ||
-    !Number.isSafeInteger(topologyTimeoutSeconds) ||
-    topologyTimeoutSeconds <= 0
+    typeof plannedTimeoutSeconds !== "number" ||
+    !Number.isSafeInteger(plannedTimeoutSeconds) ||
+    plannedTimeoutSeconds <= 0
   ) {
     diagnostics.push(
       campaignTimeoutDiagnostic(
         "CAMPAIGN_TIMEOUT_PLAN_BUDGET_MISSING",
-        "Current campaign timeout evidence requires the topology-resolved node timeout in the sealed run graph",
-        `${layout.graphPath}#$.nodes.${node.id}.timeout_seconds`
+        "Current campaign timeout evidence requires the effective node, model-profile, or run-default timeout for this attempt in the sealed run graph",
+        `${layout.graphPath}#$.nodes.${node.id}.effective_timeout_seconds`
       )
     );
   } else if (finalizationReserve !== undefined) {
-    const expectedReserve = topologyRuntimeBudgetForTimeout(topologyTimeoutSeconds * 1_000).finalizationReserveSeconds;
+    const expectedReserve = topologyRuntimeBudgetForTimeout(plannedTimeoutSeconds * 1_000).finalizationReserveSeconds;
     if (finalizationReserve !== expectedReserve) {
       diagnostics.push(
         campaignTimeoutDiagnostic(
@@ -2140,7 +2149,8 @@ function verifyCurrentCampaignTimeoutEvidence(
 function verifyPropertyProvenanceArtifacts(
   layout: RunLayout,
   artifactDir: string,
-  node: PlannedGraphNode
+  node: PlannedGraphNode,
+  attemptId: string
 ): RuntimeDiagnostic[] {
   const logicalId = node.logical_id ?? node.id;
   const isPropertyLens = node.outputs.some((output) => output.contract === "ultrafuzz/property-lens@1");
@@ -2155,7 +2165,7 @@ function verifyPropertyProvenanceArtifacts(
   }
 
   const campaignTimeoutDiagnostics = isCampaignLogicalId(logicalId)
-    ? verifyCurrentCampaignTimeoutEvidence(layout, artifactDir, node)
+    ? verifyCurrentCampaignTimeoutEvidence(layout, artifactDir, node, attemptId)
     : [];
 
   const catalog = readCanonicalPropertyCatalog(layout);

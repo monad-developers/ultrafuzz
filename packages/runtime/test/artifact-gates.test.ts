@@ -4791,7 +4791,8 @@ function campaignTimeoutFixture(): CampaignTimeoutFixture {
 function runCampaignTimeoutGate(
   mutate: (fixture: CampaignTimeoutFixture) => void = () => undefined,
   planContract: PlannedGraphNode["outputs"][number]["contract"] = "ultrafuzz/invariant-campaign-plan@1",
-  topologyTimeoutSeconds: number | null = 7200
+  topologyTimeoutSeconds: number | null = 7200,
+  modelTimeoutSeconds: number | null = null
 ): ReturnType<typeof verifyRequiredArtifactsForAttempt> {
   const layout = createRunLayout({
     projectRoot: tempProject(),
@@ -4817,6 +4818,21 @@ function runCampaignTimeoutGate(
     id: campaignId,
     logical_id: campaignId,
     ...(topologyTimeoutSeconds === null ? {} : { timeout_seconds: topologyTimeoutSeconds }),
+    ...(modelTimeoutSeconds === null
+      ? {}
+      : {
+          model_fanout: [
+            {
+              attempt_id: campaignId,
+              model_profile_id: "default",
+              agent_ref: "CodexAgent",
+              timeout_seconds: modelTimeoutSeconds,
+              model_index: 0,
+              loop_index: 0,
+              attempt_index: 0
+            }
+          ]
+        }),
     outputs: base.outputs.map((output) =>
       output.path === "campaign-plan.json" ? { ...output, contract: planContract } : output
     )
@@ -4849,6 +4865,11 @@ test("current campaign timeout gate requires the sealed topology node budget", (
   const result = runCampaignTimeoutGate(() => undefined, "ultrafuzz/invariant-campaign-plan@1", null);
   assert.equal(result.ok, false);
   assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "CAMPAIGN_TIMEOUT_PLAN_BUDGET_MISSING"));
+});
+
+test("current campaign timeout gate accepts a sealed model-profile or run-default budget", () => {
+  const result = runCampaignTimeoutGate(() => undefined, "ultrafuzz/invariant-campaign-plan@1", null, 7200);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
 });
 
 test("current campaign timeout gate rejects reserve subtraction and ambiguous Recon command flags", () => {

@@ -195,15 +195,19 @@ function modelFanoutFor(
     return [];
   }
   const profiles = options.modelProfilesByNode?.[node.id] ?? selectedModelProfiles(node, topology, options);
-  return profiles.map((profile, modelIndex) => ({
-    modelProfileId: profile.profileId,
-    agentRef: profile.agentRef,
-    ...(profile.modelName ? { modelName: profile.modelName } : {}),
-    ...(profile.reasoningEffort ? { reasoningEffort: profile.reasoningEffort } : {}),
-    modelIndex,
-    loopIndex,
-    attemptIndex: loopIndex * Math.max(profiles.length, 1) + modelIndex
-  }));
+  return profiles.map((profile, modelIndex) => {
+    const timeoutSeconds = profile.timeoutSeconds ?? options.defaultTimeoutSeconds;
+    return {
+      modelProfileId: profile.profileId,
+      agentRef: profile.agentRef,
+      ...(profile.modelName ? { modelName: profile.modelName } : {}),
+      ...(profile.reasoningEffort ? { reasoningEffort: profile.reasoningEffort } : {}),
+      ...(timeoutSeconds === undefined ? {} : { timeoutSeconds }),
+      modelIndex,
+      loopIndex,
+      attemptIndex: loopIndex * Math.max(profiles.length, 1) + modelIndex
+    };
+  });
 }
 
 function selectedModelProfiles(
