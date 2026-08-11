@@ -209,3 +209,51 @@ test("directive validation scans tilde-fenced code for secrets and private paths
     false
   );
 });
+
+test("a campaign that never fuzzed is disclosed instead of reading as a clean result", () => {
+  const empty = (): Record<string, unknown> => ({
+    schema_version: "1.0",
+    run_metadata: { run_id: "campaign-outcome-test" },
+    issues: [],
+    non_production_outcomes: [],
+    property_provenance: []
+  });
+
+  const blocked = projectCanonicalFinalReport({
+    ...empty(),
+    campaign_outcome: {
+      outcome: "blocked",
+      reason: "recon executable unavailable; the long single-backend campaign was not started"
+    }
+  });
+  assert.match(blocked.markdown, /## Campaign status/u);
+  assert.match(blocked.markdown, /did not run: `blocked`/u);
+  assert.match(blocked.markdown, /Reason: recon executable unavailable/u);
+  assert.match(blocked.markdown, /the invariant campaign did not run, so this is not a result/u);
+  assert.doesNotMatch(blocked.markdown, /^No issues reported\.$/mu);
+  assert.deepEqual(blocked.report.campaign_outcome, {
+    outcome: "blocked",
+    reason: "recon executable unavailable; the long single-backend campaign was not started"
+  });
+
+  // A campaign that ran and found nothing keeps reading as a clean result.
+  const completed = projectCanonicalFinalReport({ ...empty(), campaign_outcome: { outcome: "completed" } });
+  assert.doesNotMatch(completed.markdown, /## Campaign status/u);
+  assert.match(completed.markdown, /^No issues reported\.$/mu);
+
+  // Runs without a campaign are unchanged.
+  const absent = projectCanonicalFinalReport(empty());
+  assert.doesNotMatch(absent.markdown, /## Campaign status/u);
+  assert.match(absent.markdown, /^No issues reported\.$/mu);
+
+  // A partial campaign did fuzz, so it must not be described as a non-run.
+  const partial = projectCanonicalFinalReport({
+    ...empty(),
+    campaign_outcome: { outcome: "partial", reason: "the deadline elapsed before the last backend finished" }
+  });
+  assert.match(partial.markdown, /## Campaign status/u);
+  assert.match(partial.markdown, /did not complete: `partial`/u);
+  assert.match(partial.markdown, /come from a partial campaign/u);
+  assert.doesNotMatch(partial.markdown, /did not run/u);
+  assert.match(partial.markdown, /^No issues reported\.$/mu);
+});
