@@ -282,6 +282,32 @@ describe("eval status", () => {
     expect(snapshot.rows[0]?.linked_workflow_status).toBe("unknown");
   });
 
+  it.skipIf(process.platform === "win32")("does not follow a symlinked linked-workflow log directory", () => {
+    const fixture = evalFixture([privateRow("linked-log-directory-row")]);
+    const runRoot = path.join(fixture.base, "linked-log-directory-run");
+    const runId = "run-linked-log-directory";
+    const outsideLogs = path.join(fixture.base, "outside-workflow-logs");
+    fs.mkdirSync(path.join(runRoot, "smithers"), { recursive: true });
+    fs.mkdirSync(outsideLogs, { recursive: true });
+    writeState(runRoot, {
+      runId,
+      status: "running",
+      nodes: ["pending"],
+      controllerLease: { status: "expired", expiresAt: "2026-01-02T14:50:30.000Z" }
+    });
+    fs.writeFileSync(path.join(outsideLogs, `${runId}.log`), "status: stopped\n", "utf8");
+    fs.symlinkSync(outsideLogs, path.join(runRoot, "smithers", "logs"), "dir");
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify({ ...record("linked-log-directory-row", runId, runRoot), workflow_ids: [runId] })}\n`,
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({ projectRoot: fixture.project, evalRunId: fixture.evalRunId, now: SNAPSHOT });
+
+    expect(snapshot.rows[0]?.linked_workflow_status).toBe("unknown");
+  });
+
   it("rejects an oversized linked workflow ID list before reading repeated logs", () => {
     const fixture = evalFixture([privateRow("workflow-list-row")]);
     const runRoot = path.join(fixture.base, "workflow-list-run");
@@ -1281,6 +1307,27 @@ describe("eval status", () => {
 
     expect(snapshot.rows[0]?.linked_workflow_status).toBe("unknown");
     expect(renderEvalStatusTable(snapshot)).toMatch(/unknown$/mu);
+  });
+
+  it("preserves a linked workflow as unknown for a future run-record status", () => {
+    const fixture = evalFixture([privateRow("future-record-row")]);
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify({
+        eval_run_id: EVAL_RUN_ID,
+        row_id: "future-record-row",
+        status: "future-state",
+        workflow_ids: ["workflow-future"]
+      })}\n`,
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({ projectRoot: fixture.project, evalRunId: fixture.evalRunId, now: SNAPSHOT });
+
+    expect(snapshot.rows[0]).toMatchObject({
+      status: "invalid",
+      linked_workflow_status: "unknown"
+    });
   });
 
   it("marks an otherwise unrecorded row invalid when the durable record journal is malformed", () => {

@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import {
+  assertNoSymlinkComponents,
   NODE_STATE_STATUSES,
   NODE_NEXT_ELIGIBLE_ACTIONS,
   NODE_WAIT_REASONS,
@@ -131,8 +132,8 @@ const AMBIGUOUS_LINKED_WORKFLOW_IDS = Symbol("ambiguous-linked-workflow-ids");
 // ordinary report output without loading an unbounded workflow log.
 const WORKFLOW_LOG_PREFIX_BYTES = 32 * 1_024;
 const WORKFLOW_LOG_TAIL_BYTES = 8 * 1_024 * 1_024;
-const WORKFLOW_ADMISSION_PATTERN = /^SMITHERS_DETACHED_ADMISSION=run:[^\r\n]+\r?$/gmu;
-const WORKFLOW_OUTPUT_PATTERN = /^output:.*\r?$/gmu;
+const WORKFLOW_ADMISSION_PATTERN = /^SMITHERS_DETACHED_ADMISSION=run:[^\r\n]+$/u;
+const WORKFLOW_STATUS_PATTERN = /^status:\s*([a-z][a-z-]*)\s*$/u;
 
 /**
  * Read a complete eval matrix snapshot without synchronizing or otherwise
@@ -320,10 +321,13 @@ function statusForRecord(input: {
   snapshotAtMs: number;
   staleAfterSeconds: number;
 }): EvalStatusRow {
-  if (!isRecord(input.record) || !["launched", "failed"].includes(String(input.record.status))) {
+  if (!isRecord(input.record)) {
     return unavailableRow(input.row, "invalid", false);
   }
   const unavailableLinkedWorkflowStatus = linkedWorkflowAvailability(input.record.workflow_ids);
+  if (!["launched", "failed"].includes(String(input.record.status))) {
+    return unavailableRow(input.row, "invalid", false, unavailableLinkedWorkflowStatus);
+  }
   if (input.record.status === "failed") {
     return unavailableRow(input.row, "failed", true, unavailableLinkedWorkflowStatus);
   }
@@ -648,32 +652,13 @@ function readLinkedWorkflowStatus(
     }
     let log: ReturnType<typeof readWorkflowLogEdges>;
     try {
-      log = readWorkflowLogEdges(path.join(runRoot, "smithers", "logs", `${value}.log`));
+      log = readWorkflowLogEdges(runRoot, path.join(runRoot, "smithers", "logs", `${value}.log`));
     } catch {
       statuses.push("unknown");
       continue;
     }
-    const admissionMatches = [...log.contents.matchAll(WORKFLOW_ADMISSION_PATTERN)];
-    const outputMatches = [...log.contents.matchAll(WORKFLOW_OUTPUT_PATTERN)];
-    let admissionCursor = 0;
-    let outputCursor = 0;
-    let latestAdmissionBeforeStatus = -1;
-    let latestOutputBeforeStatus = -1;
-    const statusMatches = [...log.contents.matchAll(/^status:\s*([a-z][a-z-]*)\s*$/gmu)].filter((statusMatch) => {
-      const statusIndex = statusMatch.index;
-      while ((admissionMatches[admissionCursor]?.index ?? Number.POSITIVE_INFINITY) < statusIndex) {
-        latestAdmissionBeforeStatus = admissionMatches[admissionCursor]?.index ?? latestAdmissionBeforeStatus;
-        admissionCursor += 1;
-      }
-      while ((outputMatches[outputCursor]?.index ?? Number.POSITIVE_INFINITY) < statusIndex) {
-        latestOutputBeforeStatus = outputMatches[outputCursor]?.index ?? latestOutputBeforeStatus;
-        outputCursor += 1;
-      }
-      return latestAdmissionBeforeStatus >= latestOutputBeforeStatus;
-    });
-    const latestStatusMatch = statusMatches.at(-1);
-    const latestAdmissionIndex = admissionMatches.at(-1)?.index ?? -1;
-    const latestEvidenceIndex = Math.max(latestStatusMatch?.index ?? -1, latestAdmissionIndex);
+    const evidence = scanWorkflowLogEvidence(log.contents);
+    const latestEvidenceIndex = Math.max(evidence.latestStatus?.index ?? -1, evidence.latestAdmissionIndex);
     // Evidence retained only in the prefix may have been superseded inside the
     // omitted middle. Never report a stale lifecycle as authoritative.
     if (log.tailStartIndex !== null && latestEvidenceIndex < log.tailStartIndex) {
@@ -684,21 +669,23 @@ function readLinkedWorkflowStatus(
     // in that same tail proves that omitted output cannot own the line.
     if (
       log.tailStartIndex !== null &&
-      (latestStatusMatch?.index ?? -1) >= log.tailStartIndex &&
-      latestAdmissionIndex < log.tailStartIndex
+      (evidence.latestStatus?.index ?? -1) >= log.tailStartIndex &&
+      evidence.latestAdmissionIndex < log.tailStartIndex
     ) {
       statuses.push("unknown");
       continue;
     }
-    if (latestAdmissionIndex > (latestStatusMatch?.index ?? -1)) {
+    if (evidence.latestAdmissionIndex > (evidence.latestStatus?.index ?? -1)) {
       statuses.push(activelyOwned ? "running" : "unknown");
-    } else if (latestStatusMatch?.[1] === undefined) {
+    } else if (evidence.latestStatus === null) {
       statuses.push("unknown");
-    } else if (!isLinkedWorkflowStatus(latestStatusMatch[1])) {
+    } else if (!isLinkedWorkflowStatus(evidence.latestStatus.value)) {
       statuses.push("unknown");
     } else {
       statuses.push(
-        isRunningLinkedWorkflowStatus(latestStatusMatch[1]) && !activelyOwned ? "unknown" : latestStatusMatch[1]
+        isRunningLinkedWorkflowStatus(evidence.latestStatus.value) && !activelyOwned
+          ? "unknown"
+          : evidence.latestStatus.value
       );
     }
   }
@@ -714,7 +701,37 @@ function isRunningLinkedWorkflowStatus(value: EvalStatusKnownLinkedWorkflowState
   return ["running", "in-progress", "started", "retrying", "queued"].includes(value);
 }
 
-function readWorkflowLogEdges(logPath: string): { contents: string; tailStartIndex: number | null } {
+function scanWorkflowLogEvidence(contents: string): {
+  latestAdmissionIndex: number;
+  latestStatus: { index: number; value: string } | null;
+} {
+  let latestAdmissionIndex = -1;
+  let latestOutputIndex = -1;
+  let latestStatus: { index: number; value: string } | null = null;
+  let lineStart = 0;
+  while (lineStart < contents.length) {
+    const newlineIndex = contents.indexOf("\n", lineStart);
+    const lineEnd = newlineIndex === -1 ? contents.length : newlineIndex;
+    const rawLine = contents.slice(lineStart, lineEnd);
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    if (WORKFLOW_ADMISSION_PATTERN.test(line)) {
+      latestAdmissionIndex = lineStart;
+    } else if (line.startsWith("output:")) {
+      latestOutputIndex = lineStart;
+    } else {
+      const status = WORKFLOW_STATUS_PATTERN.exec(line)?.[1];
+      if (status !== undefined && latestAdmissionIndex >= latestOutputIndex) {
+        latestStatus = { index: lineStart, value: status };
+      }
+    }
+    if (newlineIndex === -1) break;
+    lineStart = newlineIndex + 1;
+  }
+  return { latestAdmissionIndex, latestStatus };
+}
+
+function readWorkflowLogEdges(runRoot: string, logPath: string): { contents: string; tailStartIndex: number | null } {
+  assertNoSymlinkComponents(runRoot, logPath, "linked workflow log");
   const lexical = fs.lstatSync(logPath);
   if (lexical.isSymbolicLink() || !lexical.isFile()) {
     throw new Error("linked workflow log is not a bounded regular file");
