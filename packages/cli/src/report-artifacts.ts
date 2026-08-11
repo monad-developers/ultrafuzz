@@ -249,8 +249,18 @@ function reconcilePropertyProvenance(runRoot: string, report: JsonRecord): JsonR
  * report states which one happened.
  */
 function reconcileCampaignOutcome(runRoot: string, report: JsonRecord): JsonRecord {
-  const summaryPath = logicalArtifactPath(runRoot, "stateful-invariant-campaign", "campaign-summary.json");
-  const summary = summaryPath === undefined ? undefined : readRecord(runRoot, summaryPath);
+  // A project topology may record the campaign under either supported logical
+  // node; missing one would leave an unverified status in the canonical report.
+  let summary: JsonRecord | undefined;
+  for (const logicalNodeId of ["stateful-invariant-campaign", "stateful-invariant-recon-campaign"] as const) {
+    const summaryPath = logicalArtifactPath(runRoot, logicalNodeId, "campaign-summary.json");
+    if (summaryPath === undefined) continue;
+    const candidate = readRecord(runRoot, summaryPath);
+    if (typeof candidate?.outcome === "string" && candidate.outcome.trim() !== "") {
+      summary = candidate;
+      break;
+    }
+  }
   const outcome = summary?.outcome;
   if (typeof outcome !== "string" || outcome.trim() === "") {
     // Without an authoritative outcome there is nothing to stand behind, and an
