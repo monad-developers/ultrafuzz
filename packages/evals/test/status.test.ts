@@ -1100,6 +1100,39 @@ describe("eval status", () => {
     ).toMatch(/none\s+none$/u);
   });
 
+  it("preserves an unavailable linked workflow as unknown when product state cannot be read", () => {
+    const fixture = evalFixture([privateRow("inaccessible-linked-row"), privateRow("invalid-linked-row")]);
+    const inaccessibleRoot = path.join(fixture.base, "missing-linked-run");
+    const invalidRoot = path.join(fixture.base, "invalid-linked-run");
+    fs.mkdirSync(invalidRoot, { recursive: true });
+    fs.writeFileSync(statePath(invalidRoot), "{invalid", "utf8");
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      [
+        {
+          ...record("inaccessible-linked-row", "run-inaccessible-linked", inaccessibleRoot),
+          workflow_ids: ["workflow-a"]
+        },
+        { ...record("invalid-linked-row", "run-invalid-linked", invalidRoot), workflow_ids: ["workflow-b"] }
+      ]
+        .map((value) => JSON.stringify(value))
+        .join("\n") + "\n",
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({
+      projectRoot: fixture.project,
+      evalRunId: fixture.evalRunId,
+      now: SNAPSHOT
+    });
+
+    expect(snapshot.rows).toEqual([
+      expect.objectContaining({ row: "row-01", status: "inaccessible", linked_workflow_status: "unknown" }),
+      expect.objectContaining({ row: "row-02", status: "invalid", linked_workflow_status: "unknown" })
+    ]);
+    expect(renderEvalStatusTable(snapshot).match(/unknown$/gmu)).toHaveLength(2);
+  });
+
   it("marks an otherwise unrecorded row invalid when the durable record journal is malformed", () => {
     const fixture = evalFixture([privateRow("row-secret")]);
     fs.writeFileSync(path.join(fixture.root, "runs.jsonl"), "{malformed\n", "utf8");

@@ -312,6 +312,7 @@ function statusForRecord(input: {
   if (input.record.status === "failed") {
     return unavailableRow(input.row, "failed", true);
   }
+  const unavailableLinkedWorkflowStatus = linkedWorkflowAvailability(input.record.workflow_ids);
   if (
     typeof input.record.ultrafuzz_run_id !== "string" ||
     input.record.ultrafuzz_run_id.length === 0 ||
@@ -319,23 +320,23 @@ function statusForRecord(input: {
     input.record.ultrafuzz_run_root.length === 0 ||
     !path.isAbsolute(input.record.ultrafuzz_run_root)
   ) {
-    return unavailableRow(input.row, "invalid", false);
+    return unavailableRow(input.row, "invalid", false, unavailableLinkedWorkflowStatus);
   }
 
   let contents: string;
   try {
     contents = fs.readFileSync(path.join(input.record.ultrafuzz_run_root, "state.json"), "utf8");
   } catch {
-    return unavailableRow(input.row, "inaccessible", false);
+    return unavailableRow(input.row, "inaccessible", false, unavailableLinkedWorkflowStatus);
   }
   let rawState: unknown;
   try {
     rawState = JSON.parse(contents);
   } catch {
-    return unavailableRow(input.row, "invalid", false);
+    return unavailableRow(input.row, "invalid", false, unavailableLinkedWorkflowStatus);
   }
   if (!isValidState(rawState, input.record.ultrafuzz_run_id)) {
-    return unavailableRow(input.row, "invalid", false);
+    return unavailableRow(input.row, "invalid", false, unavailableLinkedWorkflowStatus);
   }
 
   const nodes = Object.values(rawState.nodes);
@@ -462,7 +463,12 @@ function isValidState(
   );
 }
 
-function unavailableRow(row: string, status: EvalStatusRowState, terminal: boolean): EvalStatusRow {
+function unavailableRow(
+  row: string,
+  status: EvalStatusRowState,
+  terminal: boolean,
+  linkedWorkflowStatus: EvalStatusLinkedWorkflowState = null
+): EvalStatusRow {
   return {
     row,
     status,
@@ -476,10 +482,16 @@ function unavailableRow(row: string, status: EvalStatusRowState, terminal: boole
     checkpoint_stale: null,
     active_node_ids: [],
     waiting_nodes: [],
-    linked_workflow_status: null,
+    linked_workflow_status: linkedWorkflowStatus,
     eta_basis: null,
     eta_unavailable_reason: "progress-unavailable"
   };
+}
+
+function linkedWorkflowAvailability(rawWorkflowIds: unknown): EvalStatusLinkedWorkflowState {
+  return rawWorkflowIds === undefined || (Array.isArray(rawWorkflowIds) && rawWorkflowIds.length === 0)
+    ? null
+    : "unknown";
 }
 
 function unavailableEta(reason: Exclude<EvalStatusEtaUnavailableReason, null>): EvalEta {
