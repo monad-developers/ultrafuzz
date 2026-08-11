@@ -26,6 +26,10 @@ export type EvalStatusEtaUnavailableReason =
   "progress-unavailable" | "no-completed-nodes" | "timing-unavailable" | "checkpoint-stale" | null;
 const EVAL_STATUS_LINKED_WORKFLOW_STATES = [
   "running",
+  "in-progress",
+  "started",
+  "retrying",
+  "queued",
   "waiting-approval",
   "waiting-event",
   "waiting-quota",
@@ -33,8 +37,16 @@ const EVAL_STATUS_LINKED_WORKFLOW_STATES = [
   "paused",
   "continued",
   "finished",
+  "succeeded",
+  "success",
+  "complete",
+  "completed",
   "stopped",
   "failed",
+  "timeout",
+  "timed-out",
+  "timedout",
+  "heartbeat-timeout",
   "cancelled",
   "canceled"
 ] as const;
@@ -111,6 +123,7 @@ const LINKED_WORKFLOW_STATUS_VALUES = new Set<string>(EVAL_STATUS_LINKED_WORKFLO
 const TERMINAL_RUN_STATUSES = new Set<string>(TERMINAL_RUN_STATE_STATUSES);
 const COMPLETED_NODE_STATUSES = new Set<string>(TERMINAL_NODE_STATE_STATUSES);
 const MAX_VISIBLE_STATUS_NODES = 3;
+const MAX_VISIBLE_STATUS_NODE_ID_CHARACTERS = 64;
 const MAX_LINKED_WORKFLOW_IDS = 32;
 const AMBIGUOUS_LINKED_WORKFLOW_IDS = Symbol("ambiguous-linked-workflow-ids");
 // Detached summaries put lifecycle status before optional final output. Retain
@@ -119,6 +132,7 @@ const AMBIGUOUS_LINKED_WORKFLOW_IDS = Symbol("ambiguous-linked-workflow-ids");
 const WORKFLOW_LOG_PREFIX_BYTES = 32 * 1_024;
 const WORKFLOW_LOG_TAIL_BYTES = 8 * 1_024 * 1_024;
 const WORKFLOW_ADMISSION_PATTERN = /^SMITHERS_DETACHED_ADMISSION=run:[^\r\n]+\r?$/gmu;
+const WORKFLOW_OUTPUT_PATTERN = /^output:.*\r?$/gmu;
 
 /**
  * Read a complete eval matrix snapshot without synchronizing or otherwise
@@ -566,7 +580,12 @@ function waitingNodeText(node: EvalStatusWaitingNode): string {
 }
 
 function tableSafeText(value: string): string {
-  return JSON.stringify(value)
+  const characters = [...value];
+  const bounded =
+    characters.length <= MAX_VISIBLE_STATUS_NODE_ID_CHARACTERS
+      ? value
+      : `${characters.slice(0, MAX_VISIBLE_STATUS_NODE_ID_CHARACTERS).join("")}…`;
+  return JSON.stringify(bounded)
     .slice(1, -1)
     .replace(
       /[\u002c\u003b\u005b\u005d\u007f-\u009f\u2028\u2029\u2192]/gu,
@@ -618,7 +637,8 @@ function readLinkedWorkflowStatus(
   activelyOwned: boolean
 ): EvalStatusLinkedWorkflowState {
   if (rawWorkflowIds === AMBIGUOUS_LINKED_WORKFLOW_IDS) return "unknown";
-  if (!Array.isArray(rawWorkflowIds) || rawWorkflowIds.length === 0) return null;
+  if (rawWorkflowIds === undefined || (Array.isArray(rawWorkflowIds) && rawWorkflowIds.length === 0)) return null;
+  if (!Array.isArray(rawWorkflowIds)) return "unknown";
   if (rawWorkflowIds.length > MAX_LINKED_WORKFLOW_IDS) return "unknown";
   const statuses: Exclude<EvalStatusLinkedWorkflowState, null>[] = [];
   for (const value of new Set(rawWorkflowIds)) {
@@ -633,13 +653,40 @@ function readLinkedWorkflowStatus(
       statuses.push("unknown");
       continue;
     }
-    const statusMatches = [...log.contents.matchAll(/^status:\s*([a-z][a-z-]*)\s*$/gmu)];
+    const admissionMatches = [...log.contents.matchAll(WORKFLOW_ADMISSION_PATTERN)];
+    const outputMatches = [...log.contents.matchAll(WORKFLOW_OUTPUT_PATTERN)];
+    let admissionCursor = 0;
+    let outputCursor = 0;
+    let latestAdmissionBeforeStatus = -1;
+    let latestOutputBeforeStatus = -1;
+    const statusMatches = [...log.contents.matchAll(/^status:\s*([a-z][a-z-]*)\s*$/gmu)].filter((statusMatch) => {
+      const statusIndex = statusMatch.index;
+      while ((admissionMatches[admissionCursor]?.index ?? Number.POSITIVE_INFINITY) < statusIndex) {
+        latestAdmissionBeforeStatus = admissionMatches[admissionCursor]?.index ?? latestAdmissionBeforeStatus;
+        admissionCursor += 1;
+      }
+      while ((outputMatches[outputCursor]?.index ?? Number.POSITIVE_INFINITY) < statusIndex) {
+        latestOutputBeforeStatus = outputMatches[outputCursor]?.index ?? latestOutputBeforeStatus;
+        outputCursor += 1;
+      }
+      return latestAdmissionBeforeStatus >= latestOutputBeforeStatus;
+    });
     const latestStatusMatch = statusMatches.at(-1);
-    const latestAdmissionIndex = [...log.contents.matchAll(WORKFLOW_ADMISSION_PATTERN)].at(-1)?.index ?? -1;
+    const latestAdmissionIndex = admissionMatches.at(-1)?.index ?? -1;
     const latestEvidenceIndex = Math.max(latestStatusMatch?.index ?? -1, latestAdmissionIndex);
     // Evidence retained only in the prefix may have been superseded inside the
     // omitted middle. Never report a stale lifecycle as authoritative.
     if (log.tailStartIndex !== null && latestEvidenceIndex < log.tailStartIndex) {
+      statuses.push("unknown");
+      continue;
+    }
+    // A status retained only in the tail is ambiguous unless a fresh admission
+    // in that same tail proves that omitted output cannot own the line.
+    if (
+      log.tailStartIndex !== null &&
+      (latestStatusMatch?.index ?? -1) >= log.tailStartIndex &&
+      latestAdmissionIndex < log.tailStartIndex
+    ) {
       statuses.push("unknown");
       continue;
     }
@@ -650,7 +697,9 @@ function readLinkedWorkflowStatus(
     } else if (!isLinkedWorkflowStatus(latestStatusMatch[1])) {
       statuses.push("unknown");
     } else {
-      statuses.push(latestStatusMatch[1] === "running" && !activelyOwned ? "unknown" : latestStatusMatch[1]);
+      statuses.push(
+        isRunningLinkedWorkflowStatus(latestStatusMatch[1]) && !activelyOwned ? "unknown" : latestStatusMatch[1]
+      );
     }
   }
   const distinct = new Set(statuses);
@@ -659,6 +708,10 @@ function readLinkedWorkflowStatus(
 
 function isLinkedWorkflowStatus(value: string): value is EvalStatusKnownLinkedWorkflowState {
   return LINKED_WORKFLOW_STATUS_VALUES.has(value);
+}
+
+function isRunningLinkedWorkflowStatus(value: EvalStatusKnownLinkedWorkflowState): boolean {
+  return ["running", "in-progress", "started", "retrying", "queued"].includes(value);
 }
 
 function readWorkflowLogEdges(logPath: string): { contents: string; tailStartIndex: number | null } {
