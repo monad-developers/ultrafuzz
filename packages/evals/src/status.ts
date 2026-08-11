@@ -124,7 +124,9 @@ const LINKED_WORKFLOW_STATUS_VALUES = new Set<string>(EVAL_STATUS_LINKED_WORKFLO
 const TERMINAL_RUN_STATUSES = new Set<string>(TERMINAL_RUN_STATE_STATUSES);
 const COMPLETED_NODE_STATUSES = new Set<string>(TERMINAL_NODE_STATE_STATUSES);
 const MAX_VISIBLE_STATUS_NODES = 3;
-const MAX_VISIBLE_STATUS_NODE_ID_CHARACTERS = 64;
+// Durable node IDs are valid up to 128 ASCII characters. Keep every valid ID
+// exact in the compact view and bound only malformed/future state values.
+const MAX_VISIBLE_STATUS_NODE_ID_CHARACTERS = 128;
 const MAX_LINKED_WORKFLOW_IDS = 32;
 const AMBIGUOUS_LINKED_WORKFLOW_IDS = Symbol("ambiguous-linked-workflow-ids");
 // Detached summaries put lifecycle status before optional final output. Retain
@@ -591,10 +593,10 @@ function tableSafeText(value: string): string {
       : `${characters.slice(0, MAX_VISIBLE_STATUS_NODE_ID_CHARACTERS).join("")}…`;
   return JSON.stringify(bounded)
     .slice(1, -1)
-    .replace(
-      /[\u002c\u003b\u005b\u005d\u007f-\u009f\u2028\u2029\u2192]/gu,
-      (character) => `\\u${character.codePointAt(0)!.toString(16).padStart(4, "0")}`
-    );
+    .replace(/[\u002c\u003b\u005b\u005d\u007f-\u009f\u2028\u2029\u2192\p{Cf}]/gu, (character) => {
+      const codePoint = character.codePointAt(0)!;
+      return codePoint <= 0xffff ? `\\u${codePoint.toString(16).padStart(4, "0")}` : `\\u{${codePoint.toString(16)}}`;
+    });
 }
 
 function isActiveNode(node: { status: NodeStatus; wait_reason?: string }): boolean {
@@ -657,21 +659,15 @@ function readLinkedWorkflowStatus(
       statuses.push("unknown");
       continue;
     }
-    const evidence = scanWorkflowLogEvidence(log.contents);
-    const latestEvidenceIndex = Math.max(evidence.latestStatus?.index ?? -1, evidence.latestAdmissionIndex);
-    // Evidence retained only in the prefix may have been superseded inside the
-    // omitted middle. Never report a stale lifecycle as authoritative.
-    if (log.tailStartIndex !== null && latestEvidenceIndex < log.tailStartIndex) {
+    // Once the middle is omitted, neither a prefix status nor tail-shaped
+    // admission can prove what happened across the gap. Fail closed instead of
+    // letting final output impersonate a resumed lifecycle.
+    if (log.tailStartIndex !== null) {
       statuses.push("unknown");
       continue;
     }
-    // A status retained only in the tail is ambiguous unless a fresh admission
-    // in that same tail proves that omitted output cannot own the line.
-    if (
-      log.tailStartIndex !== null &&
-      (evidence.latestStatus?.index ?? -1) >= log.tailStartIndex &&
-      evidence.latestAdmissionIndex < log.tailStartIndex
-    ) {
+    const evidence = scanWorkflowLogEvidence(log.contents);
+    if (evidence.ambiguousPostOutputAdmission) {
       statuses.push("unknown");
       continue;
     }
@@ -702,9 +698,11 @@ function isRunningLinkedWorkflowStatus(value: EvalStatusKnownLinkedWorkflowState
 }
 
 function scanWorkflowLogEvidence(contents: string): {
+  ambiguousPostOutputAdmission: boolean;
   latestAdmissionIndex: number;
   latestStatus: { index: number; value: string } | null;
 } {
+  let ambiguousPostOutputAdmission = false;
   let latestAdmissionIndex = -1;
   let latestOutputIndex = -1;
   let latestStatus: { index: number; value: string } | null = null;
@@ -715,7 +713,11 @@ function scanWorkflowLogEvidence(contents: string): {
     const rawLine = contents.slice(lineStart, lineEnd);
     const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
     if (WORKFLOW_ADMISSION_PATTERN.test(line)) {
-      latestAdmissionIndex = lineStart;
+      // Final output is untrusted and can contain marker-shaped lines. Without
+      // the original admission nonce, a later marker could be either a real
+      // resume or output impersonation, so do not let it reopen parsing.
+      if (latestOutputIndex >= 0) ambiguousPostOutputAdmission = true;
+      else latestAdmissionIndex = lineStart;
     } else if (line.startsWith("output:")) {
       latestOutputIndex = lineStart;
     } else {
@@ -727,7 +729,7 @@ function scanWorkflowLogEvidence(contents: string): {
     if (newlineIndex === -1) break;
     lineStart = newlineIndex + 1;
   }
-  return { latestAdmissionIndex, latestStatus };
+  return { ambiguousPostOutputAdmission, latestAdmissionIndex, latestStatus };
 }
 
 function readWorkflowLogEdges(runRoot: string, logPath: string): { contents: string; tailStartIndex: number | null } {

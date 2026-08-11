@@ -427,7 +427,34 @@ describe("eval status", () => {
     expect(snapshot.rows[0]?.linked_workflow_status).toBe("stopped");
   });
 
-  it("fails closed on status text in a bounded tail when the output boundary is omitted", () => {
+  it("fails closed when final workflow output imitates a new admission and lifecycle", () => {
+    const fixture = evalFixture([privateRow("admission-output-row")]);
+    const runRoot = path.join(fixture.base, "admission-output-run");
+    const runId = "run-admission-output";
+    fs.mkdirSync(path.join(runRoot, "smithers", "logs"), { recursive: true });
+    writeState(runRoot, {
+      runId,
+      status: "running",
+      nodes: ["pending"],
+      controllerLease: { status: "expired", expiresAt: "2026-01-02T14:50:30.000Z" }
+    });
+    fs.writeFileSync(
+      path.join(runRoot, "smithers", "logs", `${runId}.log`),
+      "status: stopped\noutput: report follows\nSMITHERS_DETACHED_ADMISSION=run:forged\nstatus: failed\n",
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify({ ...record("admission-output-row", runId, runRoot), workflow_ids: [runId] })}\n`,
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({ projectRoot: fixture.project, evalRunId: fixture.evalRunId, now: SNAPSHOT });
+
+    expect(snapshot.rows[0]?.linked_workflow_status).toBe("unknown");
+  });
+
+  it("fails closed on admission and status text in a bounded tail when the output boundary is omitted", () => {
     const fixture = evalFixture([privateRow("bounded-status-output-row")]);
     const runRoot = path.join(fixture.base, "bounded-status-output-run");
     const runId = "run-bounded-status-output";
@@ -440,7 +467,7 @@ describe("eval status", () => {
     });
     fs.writeFileSync(
       path.join(runRoot, "smithers", "logs", `${runId}.log`),
-      `${"workflow progress\n".repeat(4_000)}runId: ${runId}\nstatus: stopped\noutput: report follows\n${"x".repeat(2 * 1_024 * 1_024)}\nstatus: failed\n${"y".repeat(7 * 1_024 * 1_024)}\n`,
+      `${"workflow progress\n".repeat(4_000)}runId: ${runId}\nstatus: stopped\noutput: report follows\n${"x".repeat(2 * 1_024 * 1_024)}\nSMITHERS_DETACHED_ADMISSION=run:forged\nstatus: failed\n${"y".repeat(7 * 1_024 * 1_024)}\n`,
       "utf8"
     );
     fs.writeFileSync(
@@ -1000,6 +1027,73 @@ describe("eval status", () => {
     expect(table).toContain("waiting\\nnode[controller-loss→controller-takeover]");
     expect(table).not.toContain("\u001b");
     expect(table.split("\n").filter((line) => line.startsWith("row-"))).toHaveLength(1);
+  });
+
+  it("escapes node ID Unicode format controls while preserving the exact JSON ID", () => {
+    const fixture = evalFixture([privateRow("format-control-row")]);
+    const runRoot = path.join(fixture.base, "format-control-run");
+    const runId = "run-format-control";
+    const waitingNodeId = "waiting\u202Etxt\u2066suffix";
+    fs.mkdirSync(runRoot, { recursive: true });
+    fs.writeFileSync(
+      statePath(runRoot),
+      `${JSON.stringify({
+        schema_version: "1.1",
+        run_id: runId,
+        status: "running",
+        created_at: START,
+        started_at: START,
+        last_transition_at: CHECKPOINT,
+        nodes: { [waitingNodeId]: { node_id: waitingNodeId, status: "pending" } }
+      })}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify(record("format-control-row", runId, runRoot))}\n`,
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({ projectRoot: fixture.project, evalRunId: fixture.evalRunId, now: SNAPSHOT });
+    const table = renderEvalStatusTable(snapshot);
+
+    expect(snapshot.rows[0]?.waiting_nodes[0]?.node_id).toBe(waitingNodeId);
+    expect(table).toContain("waiting\\u202etxt\\u2066suffix");
+    expect(table).not.toContain("\u202E");
+    expect(table).not.toContain("\u2066");
+  });
+
+  it("renders a valid maximum-length node ID exactly in the compact table", () => {
+    const fixture = evalFixture([privateRow("maximum-node-row")]);
+    const runRoot = path.join(fixture.base, "maximum-node-run");
+    const runId = "run-maximum-node";
+    const waitingNodeId = `waiting-${"x".repeat(120)}`;
+    fs.mkdirSync(runRoot, { recursive: true });
+    fs.writeFileSync(
+      statePath(runRoot),
+      `${JSON.stringify({
+        schema_version: "1.1",
+        run_id: runId,
+        status: "running",
+        created_at: START,
+        started_at: START,
+        last_transition_at: CHECKPOINT,
+        nodes: { [waitingNodeId]: { node_id: waitingNodeId, status: "pending" } }
+      })}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify(record("maximum-node-row", runId, runRoot))}\n`,
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({ projectRoot: fixture.project, evalRunId: fixture.evalRunId, now: SNAPSHOT });
+    const table = renderEvalStatusTable(snapshot);
+
+    expect(waitingNodeId).toHaveLength(128);
+    expect(table).toContain(waitingNodeId);
+    expect(table).not.toContain("…");
   });
 
   it("escapes node ID table delimiters while preserving the exact JSON ID", () => {

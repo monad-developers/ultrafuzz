@@ -349,7 +349,7 @@ It derives node counts, row lifecycle state, checkpoint age, and estimated
 remaining time only from recorded eval links, durable run state, and bounded
 linked-workflow evidence. It never resumes, retries, synchronizes, collects,
 publishes, or otherwise changes a workflow. The compact table shows at most
-three active or waiting node IDs per row, truncates each displayed ID after 64
+three active or waiting node IDs per row, truncates each displayed ID after 128
 Unicode characters while keeping the JSON value exact, preserves actionable
 wait reason → next action pairs, and uses `+N` for the remainder. It also
 distinguishes an admitted active linked workflow from a finished, stopped,
