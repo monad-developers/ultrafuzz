@@ -466,7 +466,8 @@ function validateMetaNode(node: NormalizedTopologyNode): void {
     ["reference", node.reference],
     ["group", node.group],
     ["timeout_seconds", node.timeout_seconds],
-    ["max_attempts", node.max_attempts]
+    ["max_attempts", node.max_attempts],
+    ["required_commands", node.required_commands.length === 0 ? undefined : node.required_commands]
   ].filter(([, value]) => value !== undefined);
   if (forbidden.length > 0 || node.outputs.length > 0) {
     throw topologyError("INVALID_META_NODE", "Meta nodes must not define execution fields", { nodeId: node.id });
@@ -496,6 +497,11 @@ function validateReferenceNode(node: NormalizedTopologyNode): void {
   }
   if (node.model_profiles.length > 0) {
     throw topologyError("INVALID_REFERENCE_NODE", "Reference nodes must not set model_profiles", { nodeId: node.id });
+  }
+  if (node.required_commands.length > 0) {
+    throw topologyError("INVALID_REFERENCE_NODE", "Reference nodes must not set required_commands", {
+      nodeId: node.id
+    });
   }
   if (node.max_attempts !== undefined) {
     throw topologyError("INVALID_REFERENCE_NODE", "Reference nodes must not set max_attempts", { nodeId: node.id });
