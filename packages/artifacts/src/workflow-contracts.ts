@@ -91,7 +91,8 @@ export const ADMIN_CONFIG_BOUNDARY_MATRIX_SCHEMA_VERSION = "ultrafuzz.admin-conf
 export const DEPENDENCY_SCOPE_MATRIX_SCHEMA_VERSION = "ultrafuzz.dependency-scope-matrix.v1" as const;
 export const EXTERNALIZED_STATE_ACCOUNTING_SCHEMA_VERSION = "ultrafuzz.externalized-state-accounting.v1" as const;
 export const COVERAGE_GOAL_SCHEMA_VERSION = "ultrafuzz.coverage-goal.v1" as const;
-export const INVARIANT_CAMPAIGN_PLAN_SCHEMA_VERSION = "ultrafuzz.invariant-campaign-plan.v1" as const;
+const LEGACY_INVARIANT_CAMPAIGN_PLAN_SCHEMA_VERSION = "ultrafuzz.invariant-campaign-plan.v1" as const;
+export const INVARIANT_CAMPAIGN_PLAN_SCHEMA_VERSION = "ultrafuzz.invariant-campaign-plan.v2" as const;
 export const CAMPAIGN_SUMMARY_SCHEMA_VERSION = "ultrafuzz.campaign-summary.v2" as const;
 export const DIFFERENTIAL_PLAN_SCHEMA_VERSION = "ultrafuzz.differential-plan.v1" as const;
 export const REFERENCE_HARNESS_SCHEMA_VERSION = "ultrafuzz.reference-harness.v1" as const;
@@ -616,26 +617,62 @@ export const coverageGoalSchema = withDocumentMetadata(
   "Ultrafuzz invariant coverage goal"
 );
 
-export const invariantCampaignPlanSchema = withDocumentMetadata(
-  z.strictObject({
-    schema_version: z.literal(INVARIANT_CAMPAIGN_PLAN_SCHEMA_VERSION),
-    available_vcpus: positiveInteger,
-    workers: positiveInteger,
-    configured_budget_seconds: positiveInteger,
-    deadline: timestamp,
-    finalization_reserve_seconds: nonNegativeInteger,
-    backend: z.strictObject({ name: z.literal("recon"), version: nonEmptyString.nullable() }),
-    command_plan: z.array(
-      z.strictObject({ phase: z.enum(["validation", "smoke", "campaign", "finalization"]), command: nonEmptyString })
-    ),
-    paths: z.strictObject({
-      corpus: nonEmptyString,
-      cache: nonEmptyString,
-      log: nonEmptyString,
-      raw_results: nonEmptyString,
-      reproducers: nonEmptyString
-    })
+const invariantCampaignPlanV1Schema = z.strictObject({
+  schema_version: z.literal(LEGACY_INVARIANT_CAMPAIGN_PLAN_SCHEMA_VERSION),
+  available_vcpus: positiveInteger,
+  workers: positiveInteger,
+  configured_budget_seconds: positiveInteger,
+  deadline: timestamp,
+  finalization_reserve_seconds: nonNegativeInteger,
+  backend: z.strictObject({ name: z.literal("recon"), version: nonEmptyString.nullable() }),
+  command_plan: z.array(
+    z.strictObject({ phase: z.enum(["validation", "smoke", "campaign", "finalization"]), command: nonEmptyString })
+  ),
+  paths: z.strictObject({
+    corpus: nonEmptyString,
+    cache: nonEmptyString,
+    log: nonEmptyString,
+    raw_results: nonEmptyString,
+    reproducers: nonEmptyString
+  })
+});
+
+const invariantCampaignPlanV2Schema = z.strictObject({
+  schema_version: z.literal(INVARIANT_CAMPAIGN_PLAN_SCHEMA_VERSION),
+  available_vcpus: positiveInteger,
+  workers: positiveInteger,
+  configured_budget_seconds: positiveInteger,
+  deadline: timestamp,
+  finalization_reserve_seconds: nonNegativeInteger,
+  configured_fuzzer_timeout_seconds: positiveInteger,
+  recon_internal_timeout_seconds: positiveInteger,
+  recon_test_limit: nonEmptyString,
+  host_soft_timeout_seconds: positiveInteger,
+  host_force_kill_grace_seconds: positiveInteger,
+  artifact_finalization_reserve_seconds: positiveInteger,
+  backend_started_at: timestamp,
+  fuzzing_deadline_utc: timestamp,
+  force_kill_deadline_utc: timestamp,
+  final_artifact_deadline_utc: timestamp,
+  backend: z.strictObject({
+    name: z.literal("recon"),
+    version: nonEmptyString.nullable(),
+    exact_shell_escaped_command: nonEmptyString
   }),
+  command_plan: z.array(
+    z.strictObject({ phase: z.enum(["validation", "smoke", "campaign", "finalization"]), command: nonEmptyString })
+  ),
+  paths: z.strictObject({
+    corpus: nonEmptyString,
+    cache: nonEmptyString,
+    log: nonEmptyString,
+    raw_results: nonEmptyString,
+    reproducers: nonEmptyString
+  })
+});
+
+export const invariantCampaignPlanSchema = withDocumentMetadata(
+  z.discriminatedUnion("schema_version", [invariantCampaignPlanV1Schema, invariantCampaignPlanV2Schema]),
   "invariant-campaign-plan",
   1,
   "Ultrafuzz invariant campaign plan"
@@ -1793,7 +1830,8 @@ export const WORKFLOW_CONTRACT_DESCRIPTIONS: Record<WorkflowContractId, string> 
   "ultrafuzz/dependency-scope-matrix@1": "Typed external-dependency scope decisions and evidence.",
   "ultrafuzz/externalized-state-accounting@1": "State components, value scenarios, and accounting oracles.",
   "ultrafuzz/coverage-goal@1": "A bounded standardized-coverage goal and blocker record.",
-  "ultrafuzz/invariant-campaign-plan@1": "The exact invariant backend, CPU, deadline, reserve, paths, and commands.",
+  "ultrafuzz/invariant-campaign-plan@1":
+    "The exact invariant backend, CPU, full configured Recon interval, supervised deadlines, reserve, paths, and commands.",
   "ultrafuzz/campaign-summary@2": "A strict invariant campaign accounting summary.",
   "ultrafuzz/differential-plan@1": "Differential surfaces, oracle rules, and assigned lanes.",
   "ultrafuzz/reference-harness@1": "Authored independent reference models and validation results.",

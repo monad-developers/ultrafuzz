@@ -250,6 +250,13 @@ export interface PropertyCampaignArtifact {
   campaign_summary_ref: string;
   fuzzer_backend: string;
   backend_version: string | null;
+  configured_timeout_seconds?: number;
+  exact_command?: string;
+  start_timestamp?: string;
+  end_timestamp?: string;
+  termination_reason?: "configured-timeout" | "test-limit" | "process-exit" | "launch-error" | "host-force-kill";
+  campaign_outcome?: "complete" | "partial" | "blocked";
+  usable_results?: boolean;
   execution: PropertyCampaignExecution;
   paths: {
     corpus: string;
@@ -996,6 +1003,15 @@ export const propertyCampaignSchema = z
     campaign_summary_ref: propertyCampaignPath,
     fuzzer_backend: propertyCampaignNonEmptyString,
     backend_version: propertyCampaignNonEmptyString.nullable(),
+    configured_timeout_seconds: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+    exact_command: propertyCampaignNonEmptyString.optional(),
+    start_timestamp: canonicalTimestampSchema.optional(),
+    end_timestamp: canonicalTimestampSchema.optional(),
+    termination_reason: z
+      .enum(["configured-timeout", "test-limit", "process-exit", "launch-error", "host-force-kill"])
+      .optional(),
+    campaign_outcome: z.enum(["complete", "partial", "blocked"]).optional(),
+    usable_results: z.boolean().optional(),
     execution: propertyCampaignExecutionSchema,
     paths: z.strictObject({
       corpus: propertyCampaignPath,

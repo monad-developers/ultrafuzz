@@ -67,46 +67,78 @@ Use this configured invariant testing fuzzer timeout:
      Medusa, or any other fuzzer as an additional final backend, and do not
      require their CLIs.
 
-2. Resolve CPU allocation and one deadline.
+2. Resolve CPU allocation and the supervised timing budgets.
    - Resolve available host parallelism exactly once with
      `availableParallelism()` or the runtime's equivalent and reuse that value.
    - Compute `workers = max(1, available_vcpus)`; the single final backend uses
      the whole host instead of splitting it between competing backends.
    - Record the deterministic cases in the plan: 1 vCPU means 1 worker; higher
      counts use `available_vcpus` workers on the one backend.
-   - After validation and the Recon smoke, establish one wall-clock deadline
-     from `{{invariant_testing_fuzzer_timeout}}`. Reserve enough time before
-     that deadline to stop processes, parse results, deduplicate failures,
-     attempt reproducers, and finalize every required artifact.
-   - The whole configured budget minus the finalization reserve belongs to the
-     one campaign; do not divide it into per-backend slices.
-   - Write `campaign-plan.json` before starting the backend using the exact
-     pinned `{{schema_path}}/invariant-campaign-plan.schema.json`. Record the
-     resolved CPU count, worker count, configured budget, one deadline,
-     finalization reserve, locally observed Recon version, exact command plan,
-     and collision-free artifact paths. The plan's backend is Recon and its
-     campaign command must use the resolved workers and recorded paths. These
-     runtime-value relationships are contextual requirements beyond JSON
-     Schema.
+   - After validation and the Recon smoke, reserve the complete
+     `{{invariant_testing_fuzzer_timeout}}` seconds for the supervised Recon
+     process. Do not subtract setup, parsing, shutdown, reproducer, or artifact
+     finalization time from it.
+   - Use a 300-second host shutdown grace after the fuzzing deadline. This
+     grace lets Recon handle the supervisor's `SIGINT`, finish shrinking, and
+     flush its corpus and result output before a forced kill.
+   - Establish a separate artifact-finalization reserve after the host shutdown
+     grace to parse results, deduplicate failures, attempt reproducers, and
+     finalize every required artifact. The shutdown grace and artifact reserve
+     are both additional to, not part of, the configured fuzzer timeout. Copy
+     the exact `Finalization reserve` value from the appended Topology Runtime
+     Context; do not choose or reduce this reserve yourself.
+   - The complete configured fuzzer timeout belongs to the one campaign; do not
+     divide it into per-backend slices.
+   - Before launch, write a preliminary `campaign-plan.json` using the exact
+     pinned `{{schema_path}}/invariant-campaign-plan.schema.json`. The pinned
+     schema alone defines member names, types, and requiredness. Use its current
+     supervised timeout-evidence variant, not its historical compatibility
+     variant, and record the plan's CPU, worker, budget, deadline, reserve,
+     backend, command-plan, and path evidence. Also record
+     `configured_fuzzer_timeout_seconds`, `recon_internal_timeout_seconds`,
+     `recon_test_limit` (as a decimal string), `host_soft_timeout_seconds`,
+     `host_force_kill_grace_seconds`,
+     `artifact_finalization_reserve_seconds`, and the exact campaign command in
+     both the campaign-phase command-plan row and
+     `backend.exact_shell_escaped_command`. Record the supervised launch
+     timestamp immediately before starting the process, then finalize the plan
+     with `backend_started_at`,
+     `fuzzing_deadline_utc = backend_started_at + configured timeout`,
+     `force_kill_deadline_utc = fuzzing deadline + host grace`, and
+     `final_artifact_deadline_utc = force-kill deadline + artifact reserve`.
+     Set the plan's legacy join fields `configured_budget_seconds`, `deadline`,
+     and `finalization_reserve_seconds` to the post-smoke supervised budget
+     (fuzzer timeout plus shutdown grace plus artifact reserve), final artifact
+     deadline, and exact artifact reserve respectively. These runtime-value
+     relationships are contextual requirements beyond JSON Schema.
 
 3. Run the backend without path collisions.
    - Start the long campaign from this template, substituting the resolved
      worker count and the repository's own contract, config, and corpus
      conventions:
-     `recon fuzz . --contract CryticTester --test-mode assertion --workers <workers> --corpus-dir echidna --recon-corpus-dir recon-corpus`.
+     `timeout --preserve-status --signal=INT --kill-after=300s {{invariant_testing_fuzzer_timeout}}s recon fuzz . --contract CryticTester --test-mode assertion --workers <workers> --test-limit 18446744073709551615 --timeout {{invariant_testing_fuzzer_timeout}} --corpus-dir echidna --recon-corpus-dir recon-corpus`.
      Add `--config <path>` only when the repository's Recon/Echidna config
-     requires it. Always pass `--workers` with the count resolved in step 2; do
-     not reuse the bounded smoke's `--test-limit`, `--seq-len`, or single-worker
-     flags for the long campaign.
+     requires it. Put cache or other `env KEY=value` assignments before the
+     `timeout` executable, leaving the four supervisor arguments immediately
+     before `recon fuzz`. Always pass `--workers` with the count resolved in
+     step 2; do not reuse the bounded smoke's test limit of 1, `--seq-len`, or
+     single-worker flags for the long campaign. The explicit maximum
+     `--test-limit` is nonbinding and prevents Recon's default 50,000-call cap
+     from ending the campaign before the wall-clock deadline.
    - Give recon-fuzzer distinct corpus, cache, log, raw-result, and reproducer
      paths under `{{artifact_dir}}/backends/recon-fuzzer`. Never let concurrent
      processes write the same path.
    - Record the backend's locally available version and exact shell-escaped
-     command/config before launch. Use host-safe process bounds and terminate
-     the process tree at the deadline.
+     command/config before launch. The host supervisor's `SIGINT` at the
+     complete configured timeout is the authoritative fuzzing cutoff; its
+     forced-kill grace is additional. Do not use `--foreground`, which would
+     prevent the supervisor from signalling the backend process group.
    - Preserve raw backend output within normal artifact size and safety limits.
-     Do not start or continue a command when it cannot leave the finalization
-     reserve intact.
+     Pass the exact configured timeout to Recon's `--timeout` for auditability
+     and forward compatibility even when the locally installed Recon version
+     relies on the host supervisor for enforcement. Do not start the backend
+     unless the node has enough remaining time for the full timeout, the
+     300-second shutdown grace, and the separate artifact-finalization reserve.
 
 4. Finalize the backend record.
    - Write the result record even when the backend is unavailable, fails to
@@ -126,6 +158,14 @@ Use this configured invariant testing fuzzer timeout:
      `campaign-plan.json`. Bind the executed campaign command to the plan's
      campaign-phase command and record the actual configuration-path outcome
      through the pinned result schema's applicable variant.
+   - For a v2 campaign plan, also populate the result's timeout-evidence fields:
+     `configured_timeout_seconds`, `exact_command`, `start_timestamp`,
+     `end_timestamp`, typed `termination_reason`, `campaign_outcome`, and
+     `usable_results`. Copy `exact_command` from the plan and the nested
+     execution command, copy `start_timestamp` from `backend_started_at` and
+     `execution.started_at`, and bind `end_timestamp` to
+     `execution.finished_at`. These duplicate joins are intentional evidence
+     checks; their values must agree exactly.
    - Populate the schema-defined coverage record only from observed metrics and
      bind every metric to its exact evidence source. When coverage is not
      available, select the schema's unavailable variant and record the actual
@@ -219,6 +259,17 @@ Use this configured invariant testing fuzzer timeout:
      production bugs distinct.
 
 6. Determine the campaign outcome.
+   - `complete`: recon-fuzzer ran through the full configured fuzzing interval;
+     the supervisor's expected `SIGINT` at that deadline counts as its expected
+     terminal state.
+   - `partial`: recon-fuzzer produced usable results but ended early, crashed,
+     reached a test limit, or was force-killed before its expected terminal
+     state.
+   - `blocked`: recon-fuzzer produced no usable results.
+   - Use `termination_reason=configured-timeout` only after the full interval.
+     Use exactly one of `test-limit`, `process-exit`, `launch-error`, or
+     `host-force-kill` for other terminal conditions. An early run with usable
+     results is `partial`; a run without usable results is `blocked`.
    - Choose the pinned summary schema's outcome variant that matches the
      finalized backend execution and result usability. Preserve every usable
      finding when execution ended early, crashed, or timed out, and clearly

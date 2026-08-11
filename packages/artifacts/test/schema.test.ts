@@ -1262,6 +1262,49 @@ test("the campaign summary v2 contract requires complete typed accounting", () =
   );
 });
 
+test("the current invariant campaign plan contract requires v2 timeout evidence", () => {
+  const command =
+    "timeout --preserve-status --signal=INT --kill-after=300s 3600s recon fuzz . --timeout 3600 --test-limit 18446744073709551615";
+  const plan = {
+    schema_version: "ultrafuzz.invariant-campaign-plan.v2",
+    available_vcpus: 8,
+    workers: 8,
+    configured_budget_seconds: 3600,
+    deadline: "2026-08-11T01:00:00.000Z",
+    finalization_reserve_seconds: 300,
+    configured_fuzzer_timeout_seconds: 3600,
+    recon_internal_timeout_seconds: 3600,
+    recon_test_limit: "18446744073709551615",
+    host_soft_timeout_seconds: 3600,
+    host_force_kill_grace_seconds: 300,
+    artifact_finalization_reserve_seconds: 300,
+    backend_started_at: "2026-08-11T00:00:00.000Z",
+    fuzzing_deadline_utc: "2026-08-11T01:00:00.000Z",
+    force_kill_deadline_utc: "2026-08-11T01:05:00.000Z",
+    final_artifact_deadline_utc: "2026-08-11T01:10:00.000Z",
+    backend: { name: "recon", version: null, exact_shell_escaped_command: command },
+    command_plan: [{ phase: "campaign", command }],
+    paths: {
+      corpus: "backends/recon-fuzzer/corpus",
+      cache: "backends/recon-fuzzer/cache",
+      log: "backends/recon-fuzzer/run.log",
+      raw_results: "backends/recon-fuzzer/results.json",
+      reproducers: "backends/recon-fuzzer/reproducers"
+    }
+  };
+  assert.equal(validateArtifactContract("ultrafuzz/invariant-campaign-plan@1", JSON.stringify(plan)).ok, true);
+  for (const malformed of [
+    { ...plan, schema_version: "ultrafuzz.invariant-campaign-plan.v1" },
+    { ...plan, configured_fuzzer_timeout_seconds: 0 },
+    { ...plan, backend_started_at: "not-a-timestamp" },
+    { ...plan, backend: {} }
+  ]) {
+    const result = validateArtifactContract("ultrafuzz/invariant-campaign-plan@1", JSON.stringify(malformed));
+    assert.equal(result.ok, false, JSON.stringify(malformed));
+    assert.ok(result.issues.some((issue) => issue.code === "ARTIFACT_SCHEMA_INVALID"));
+  }
+});
+
 test("finding and report v2 schemas require their current canonical shapes", () => {
   const nonPropertyFinding = {
     schema_version: FINDINGS_SCHEMA_VERSION,

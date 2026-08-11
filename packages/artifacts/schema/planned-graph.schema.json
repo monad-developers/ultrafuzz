@@ -67,6 +67,10 @@
             "type": "string",
             "pattern": "^artifacts/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
           },
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 1
+          },
           "outputs": {
             "type": "array",
             "minItems": 1,
@@ -266,6 +270,9 @@
               "additionalProperties": false,
               "required": ["model_profile_id", "agent_ref", "model_index", "loop_index", "attempt_index"],
               "properties": {
+                "attempt_id": {
+                  "$ref": "#/$defs/workflowTaskId"
+                },
                 "model_profile_id": {
                   "type": "string",
                   "minLength": 1
@@ -281,6 +288,10 @@
                 "reasoning_effort": {
                   "type": "string",
                   "minLength": 1
+                },
+                "timeout_seconds": {
+                  "type": "integer",
+                  "minimum": 1
                 },
                 "model_index": {
                   "type": "integer",

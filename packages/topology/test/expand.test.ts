@@ -94,6 +94,22 @@ describe("expandTopology", () => {
     ]);
   });
 
+  it("seals the effective profile or run-default timeout into each model attempt", () => {
+    const fallback = expandTopology(validTopology(), {
+      defaultModelProfileId: "fast",
+      defaultTimeoutSeconds: 1800,
+      modelProfiles: [{ profileId: "fast", agentRef: "CodexAgent" }]
+    });
+    expect(fallback.nodes.find((node) => node.id === "strategy-1")?.modelFanout[0]?.timeoutSeconds).toBe(1800);
+
+    const profileOverride = expandTopology(validTopology(), {
+      defaultModelProfileId: "fast",
+      defaultTimeoutSeconds: 1800,
+      modelProfiles: [{ profileId: "fast", agentRef: "CodexAgent", timeoutSeconds: 900 }]
+    });
+    expect(profileOverride.nodes.find((node) => node.id === "strategy-1")?.modelFanout[0]?.timeoutSeconds).toBe(900);
+  });
+
   it("uses group model profile defaults unless the node overrides them", () => {
     const topology = validTopology({
       groups: {

@@ -208,6 +208,7 @@ export const expandedGraphJsonSchema = {
                 agentRef: { type: "string", minLength: 1 },
                 modelName: { type: "string", minLength: 1 },
                 reasoningEffort: { type: "string", minLength: 1 },
+                timeoutSeconds: { type: "integer", minimum: 1 },
                 modelIndex: { type: "integer", minimum: 0 },
                 loopIndex: { type: "integer", minimum: 0 },
                 attemptIndex: { type: "integer", minimum: 0 }

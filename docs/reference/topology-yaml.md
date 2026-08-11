@@ -135,10 +135,11 @@ execute workflow commands.
 Current JSON contracts include `ultrafuzz/findings@2`,
 `ultrafuzz/generated-tests@3`, `ultrafuzz/properties@2`,
 `ultrafuzz/implemented-properties@3`, `ultrafuzz/property-campaign@3`,
-`ultrafuzz/property-lens@2`, `ultrafuzz/reference-expectations@2`, and
-`ultrafuzz/report@2`, plus named contracts for the other workflow-specific JSON
-documents. `ultrafuzz/json-object@1` and `ultrafuzz/json-array@1` were removed;
-they are not generic escape hatches. See the
+`ultrafuzz/invariant-campaign-plan@1`, `ultrafuzz/property-lens@2`,
+`ultrafuzz/reference-expectations@2`, and `ultrafuzz/report@2`, plus named
+contracts for the other workflow-specific JSON documents.
+`ultrafuzz/json-object@1` and `ultrafuzz/json-array@1` were removed; they are not
+generic escape hatches. See the
 [strict contract migration inventory](artifact-contract-migration-v2.md) for
 the breaking-version decisions. Non-JSON outputs use the explicit
 `ultrafuzz/nonempty-markdown@1` or `ultrafuzz/text@1` contracts.
@@ -158,8 +159,10 @@ inference or conversion. V2 manifests are rejected without conversion.
 Every retained JSON contract maps to one complete checked-in Draft 2020-12
 schema. Contract definitions supply runtime validation plus the shape,
 valid-empty form, and exact validation command appended to producer prompts.
-Only the current contract ID and schema-version spelling are accepted. Old
-IDs, aliases, conversion readers, and generic JSON contracts are unsupported.
+Only current contract IDs are accepted. The invariant campaign-plan contract
+retains its sealed v1 reader for historical runs; newly rendered campaigns emit
+v2 timeout evidence. Other old schema versions, aliases, conversion readers,
+and generic JSON contracts are unsupported.
 
 ## Meta Nodes
 

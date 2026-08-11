@@ -192,10 +192,21 @@ The default `stateful-invariant-campaign` runs one final recon-fuzzer backend
 and writes backend-neutral `campaign-plan.json`, `campaign-summary.json`, and
 `campaign-report.md` artifacts plus `recon-fuzzer-results.json`. The plan
 records the resolved vCPU count, worker count, wall-clock budget, deadline, and
-finalization reserve. The backend record keeps its command, version, timestamps,
+finalization reserve. The configured invariant fuzzer timeout is the backend's
+full execution budget. The long Recon command passes that exact value to
+`--timeout`, uses an explicit nonbinding test limit instead of Recon's default
+50,000-call cap, and has a host supervisor send `SIGINT` only when the complete
+fuzzing interval has elapsed. A bounded process-shutdown grace follows that
+cutoff, and the artifact-finalization reserve follows the shutdown grace; neither
+is subtracted from the configured fuzzer timeout. The backend record keeps its
+command, configured timeout, version, timestamps, typed termination reason,
 terminal status, distinct artifact paths, failures, reproducers, and available
 coverage metadata. The summary classifies the result as `complete`, `partial`,
-or `blocked` without discarding usable evidence.
+or `blocked` without discarding usable evidence, and runtime validation rejects
+a full-timeout claim whose command or elapsed timestamps disagree with the
+resolved configuration. Workflow compilation also rejects an invariant campaign
+whose effective node timeout cannot contain the smoke timeout, complete fuzzer
+timeout, host shutdown grace, and artifact-finalization reserve.
 
 Required outputs are node-specific and declared with versioned contracts in
 `.ultrafuzz/topology.yml`. Output paths are relative to the node artifact

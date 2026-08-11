@@ -885,8 +885,13 @@ function assertTaskMatchesPlannedNode(
 
 function plannedAttemptIds(node: PlannedGraphNodeDocument): string[] {
   if (node.model_fanout.length === 0) return [node.id];
-  if (node.model_fanout.length === 1) return [node.id];
-  return node.model_fanout.map((model) => `${node.id}__model_${model.model_index}__attempt_${model.attempt_index}`);
+  return node.model_fanout.map(
+    (model) =>
+      model.attempt_id ??
+      (node.model_fanout.length === 1
+        ? node.id
+        : `${node.id}__model_${model.model_index}__attempt_${model.attempt_index}`)
+  );
 }
 
 function toManifestOutput(output: PlannedGraphOutput): SmithersTaskManifestOutput {

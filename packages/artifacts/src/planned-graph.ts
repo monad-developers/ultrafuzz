@@ -97,6 +97,7 @@ export const plannedGraphJsonSchema = {
           kind: { enum: ["agentic", "reference"] },
           depends_on: { type: "array", uniqueItems: true, items: { $ref: "#/$defs/safeId" } },
           artifact_dir: { type: "string", pattern: "^artifacts/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+          timeout_seconds: { type: "integer", minimum: 1 },
           outputs: { type: "array", minItems: 1, items: plannedOutputJsonSchema },
           prompt_id: { type: "string", minLength: 1 },
           prompt_path: { type: "string" },
@@ -130,10 +131,12 @@ export const plannedGraphJsonSchema = {
               additionalProperties: false,
               required: ["model_profile_id", "agent_ref", "model_index", "loop_index", "attempt_index"],
               properties: {
+                attempt_id: { $ref: "#/$defs/workflowTaskId" },
                 model_profile_id: { type: "string", minLength: 1 },
                 agent_ref: { type: "string", minLength: 1 },
                 model_name: { type: "string", minLength: 1 },
                 reasoning_effort: { type: "string", minLength: 1 },
+                timeout_seconds: { type: "integer", minimum: 1 },
                 model_index: { type: "integer", minimum: 0 },
                 loop_index: { type: "integer", minimum: 0 },
                 attempt_index: { type: "integer", minimum: 0 }
@@ -237,6 +240,7 @@ export interface PlannedGraphNodeDocument {
   kind: "agentic" | "reference";
   depends_on: string[];
   artifact_dir: string;
+  timeout_seconds?: number;
   outputs: PlannedGraphOutput[];
   prompt_id: string;
   prompt_path: string;
@@ -244,10 +248,12 @@ export interface PlannedGraphNodeDocument {
   reference_revision?: { provider: "github"; repo: string; commit: string; paths: string[] };
   loop: { index: number; count: number; mode: "parallel" | "series"; attempt_index: number };
   model_fanout: Array<{
+    attempt_id?: string;
     model_profile_id: string;
     agent_ref: string;
     model_name?: string;
     reasoning_effort?: string;
+    timeout_seconds?: number;
     model_index: number;
     loop_index: number;
     attempt_index: number;
@@ -337,6 +343,7 @@ export function assertPlannedGraphSemantics(graph: PlannedGraphDocument): void {
     }
 
     const modelKeys = new Set<string>();
+    const modelAttemptIds = new Set<string>();
     for (const model of node.model_fanout) {
       const key = `${model.model_profile_id}\u0000${model.model_index}\u0000${model.loop_index}\u0000${model.attempt_index}`;
       if (modelKeys.has(key)) {
@@ -346,6 +353,18 @@ export function assertPlannedGraphSemantics(graph: PlannedGraphDocument): void {
       if (model.loop_index !== node.loop.index) {
         throw new Error(`planned graph node ${JSON.stringify(node.id)} has a model bound to another loop`);
       }
+      const expectedAttemptId =
+        node.model_fanout.length <= 1
+          ? node.id
+          : `${node.id}__model_${model.model_index}__attempt_${model.attempt_index}`;
+      if (model.attempt_id !== undefined && model.attempt_id !== expectedAttemptId) {
+        throw new Error(`planned graph node ${JSON.stringify(node.id)} has an inconsistent model attempt ID`);
+      }
+      const attemptId = model.attempt_id ?? expectedAttemptId;
+      if (modelAttemptIds.has(attemptId)) {
+        throw new Error(`planned graph node ${JSON.stringify(node.id)} repeats a model attempt ID`);
+      }
+      modelAttemptIds.add(attemptId);
     }
     for (const taskId of node.workflow?.task_node_ids ?? []) {
       if (workflowTaskIds.has(taskId))
