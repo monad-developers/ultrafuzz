@@ -57,7 +57,7 @@ function assertNoEngineBranding(value: unknown): void {
   assert.doesNotMatch(JSON.stringify(value), /smthrs/iu);
 }
 
-function writeSmallTopology(project: string): void {
+function writeSmallTopology(project: string, requiredCommand?: string): void {
   fs.writeFileSync(
     path.join(project, ".ultrafuzz", "topology.yml"),
     `version: 2
@@ -71,6 +71,7 @@ nodes:
   - id: project-discovery
     kind: agentic
     prompt: setup/project-discovery.md
+${requiredCommand === undefined ? "" : `    required_commands: [${requiredCommand}]`}
     depends_on:
       - __start__
     outputs:
@@ -475,6 +476,7 @@ test("cancel distinguishes a submitted request from a confirmed cancellation", a
 
 test("doctor reports install posture in human and JSON output", async () => {
   const { project, env } = await launchedProject();
+  writeSmallTopology(project, "recon");
 
   const human = await cli(project, ["doctor"], env);
   assert.match(human.stdout + human.stderr, /^Project: /mu);
@@ -488,6 +490,7 @@ test("doctor reports install posture in human and JSON output", async () => {
   assert.match(human.stdout + human.stderr, /- compatibility patches: .*supervisor descriptor /u);
   assert.match(human.stdout + human.stderr, /- compatibility patches: .*terminal state restore /u);
   assert.match(human.stdout + human.stderr, /- compatibility patches: .*resume hydration /u);
+  assert.match(human.stdout + human.stderr, /- recon: missing from execution environment/u);
   assert.doesNotMatch(human.stdout + human.stderr, /smithers-orchestrator/u);
   // The registry check reports the renamed upstream package; it must describe it
   // without naming it, on both the human and JSON surfaces.
@@ -497,12 +500,13 @@ test("doctor reports install posture in human and JSON output", async () => {
   const body = parseJson(json);
   const data = body.data as {
     checks: Array<{ name: string; status: string }>;
-    toolchain: Array<{ name: string }>;
+    toolchain: Array<{ name: string; available: boolean }>;
     workflow_engine: { required_version: string; latest_published_version: string };
   };
   assert.ok(data.checks.some((check) => check.name === "workflow-engine-install"));
   assert.ok(data.checks.some((check) => check.name === "workflow-engine-registry"));
   assert.ok(data.toolchain.some((entry) => entry.name === "forge"));
+  assert.equal(data.toolchain.find((entry) => entry.name === "recon")?.available, false);
   assert.match(data.workflow_engine.required_version, /^\d+\.\d+\.\d+$/u);
   assert.equal(typeof data.workflow_engine.latest_published_version, "string");
 });

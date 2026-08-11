@@ -24,16 +24,28 @@ export async function probeCommandsForExecution(
   const uniqueCommands = [...new Set(commands)].sort();
   if (uniqueCommands.length === 0) return [];
   if (config.execution.mode === "local") {
+    const cwd = options.cwd ?? process.cwd();
+    const sourcePath = Object.hasOwn(env, "PATH") ? env.PATH : process.env.PATH;
+    // Smithers prepends this directory to the PATH inherited by local tasks.
+    // Reproduce that effective lookup path during preflight. Relative and empty
+    // source entries are intentionally ignored by resolveExecutable because
+    // tasks execute in fresh worktrees, not the mutable controller checkout.
+    const effectiveEnv = {
+      ...env,
+      PATH: [path.join(cwd, ".smithers", "node_modules", ".bin"), sourcePath]
+        .filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
+        .join(path.delimiter)
+    };
     return Promise.all(
       uniqueCommands.map(async (name) => {
-        const resolved = resolveExecutable(name, env, options.cwd);
+        const resolved = resolveExecutable(name, effectiveEnv);
         return {
           name,
           ...resolved,
           version:
             resolved.path === null || options.includeVersions !== true
               ? null
-              : await executableVersion(resolved.path, env, options.cwd)
+              : await executableVersion(resolved.path, effectiveEnv, cwd)
         };
       })
     );
@@ -75,10 +87,9 @@ export async function probeCommandsForExecution(
 
 export function resolveExecutable(
   name: string,
-  env: Record<string, string | undefined>,
-  cwd = process.cwd()
+  env: Record<string, string | undefined>
 ): { available: boolean; path: string | null } {
-  const searchPath = env.PATH ?? process.env.PATH ?? "";
+  const searchPath = Object.hasOwn(env, "PATH") ? (env.PATH ?? "") : (process.env.PATH ?? "");
   // Windows resolves a bare command name through PATHEXT and does not mark
   // executables with an exec bit, so requiring X_OK there reports every tool
   // missing.
@@ -93,12 +104,12 @@ export function resolveExecutable(
       ]
     : [""];
   for (const entry of searchPath.split(path.delimiter)) {
-    // Shell PATH lookup treats an empty entry as the command's working
-    // directory. Resolve relative entries against the target execution cwd,
-    // not the controller process that happened to launch Ultrafuzz.
-    const directory = entry.length === 0 ? cwd : path.resolve(cwd, entry);
+    // Local tasks run in fresh worktrees. A relative or empty entry resolved
+    // from the controller checkout can therefore prove the wrong executable
+    // and allow model work to start without its required backend.
+    if (!path.isAbsolute(entry)) continue;
     for (const extension of extensions) {
-      const candidate = path.join(directory, `${name}${extension}`);
+      const candidate = path.join(entry, `${name}${extension}`);
       try {
         if (!fs.statSync(candidate).isFile()) continue;
         if (!windows) fs.accessSync(candidate, fs.constants.X_OK);

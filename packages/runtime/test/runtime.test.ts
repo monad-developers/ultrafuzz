@@ -358,7 +358,7 @@ function writeFakeInstalledSmithers(
   );
   fs.writeFileSync(
     paths.target,
-    '#!/bin/sh\nif [ -n "$SMITHERS_FAKE_EXECUTED_AS_LOG" ]; then printf \'%s\\n\' "$0" > "$SMITHERS_FAKE_EXECUTED_AS_LOG"; fi\nif [ -n "$SMITHERS_FAKE_PATH_LOG" ]; then printf \'%s\\n\' "$PATH" > "$SMITHERS_FAKE_PATH_LOG"; fi\nprintf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"\nprintf \'%s\\n\' \'{"ok":true}\'\n',
+    '#!/bin/sh\nif [ -n "$SMITHERS_FAKE_EXECUTED_AS_LOG" ]; then printf \'%s\\n\' "$0" > "$SMITHERS_FAKE_EXECUTED_AS_LOG"; fi\nprintf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"\nprintf \'%s\\n\' \'{"ok":true}\'\n',
     "utf8"
   );
   fs.chmodSync(paths.target, 0o755);
@@ -5044,7 +5044,7 @@ test("startRun forwards configured and explicitly allowed environment variables 
   assert.equal(fs.readFileSync(contextLog, "utf8"), "|||||\n");
 });
 
-test("startRun preserves an empty PATH component after target-cwd preflight", async () => {
+test("startRun rejects an untracked cwd executable before task worktrees or model work", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -5063,23 +5063,18 @@ test("startRun preserves an empty PATH component after target-cwd preflight", as
   const executable = path.join(project, "recon");
   fs.writeFileSync(executable, "#!/bin/sh\necho recon test\n", "utf8");
   fs.chmodSync(executable, 0o755);
-  const pathLog = path.join(project, "smithers-path.log");
-
   const run = await startRun({
     projectRoot: project,
     runId: "empty-path-required-command",
     env: {
       PATH: "",
-      SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log"),
-      SMITHERS_FAKE_PATH_LOG: pathLog
+      SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log")
     }
   });
 
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  assert.equal(
-    fs.readFileSync(pathLog, "utf8"),
-    `${path.join(project, ".smithers", "node_modules", ".bin")}${path.delimiter}\n`
-  );
+  assert.equal(run.ok, false);
+  assert.equal(run.diagnostics[0]?.code, "RUN_REQUIRED_COMMAND_MISSING");
+  assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", "empty-path-required-command")), false);
 });
 
 test("startRun rejects controller-only paths as credential environment names", async () => {

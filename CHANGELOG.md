@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Fail workflow launch before run creation when an active topology's required campaign executable is unavailable, expose those requirements through `ultrafuzz doctor`, and probe cloud requirements inside the configured provider image.
+- Fail workflow launch before run creation when an active topology's required campaign executable is unavailable, expose those requirements through `ultrafuzz doctor`, and probe cloud requirements inside the configured provider image (#498).
 
 - Hydrated pinned submodules now use exact per-task Git worktree configuration, so Foundry and recursive submodule initialization remain offline and cannot contaminate the shared repository configuration or create child Git metadata (#492).
 - Successful workflow attempts now remain unrecorded during bounded artifact reconciliation until their output manifest is durable, instead of becoming immutable phantom `failed / artifact-validation` rows in the node-attempt ledger (#352).

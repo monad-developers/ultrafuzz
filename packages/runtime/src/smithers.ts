@@ -3404,10 +3404,8 @@ function smithersCommandEnv(
     }
   }
   const localBin = path.join(projectRoot, ".smithers", "node_modules", ".bin");
-  // Keep an explicitly empty source PATH as a trailing empty component. Shell
-  // lookup resolves that component from the command cwd, matching preflight.
   merged.PATH = [localBin, sourcePath]
-    .filter((entry): entry is string => typeof entry === "string")
+    .filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
     .join(path.delimiter);
   return merged;
 }
