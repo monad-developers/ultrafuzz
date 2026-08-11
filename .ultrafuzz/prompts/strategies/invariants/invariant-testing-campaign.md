@@ -105,7 +105,7 @@ Use this configured invariant testing fuzzer timeout:
      `fuzzing_deadline_utc = backend_started_at + configured timeout`,
      `force_kill_deadline_utc = fuzzing deadline + host grace`, and
      `final_artifact_deadline_utc = force-kill deadline + artifact reserve`.
-     Set the plan's legacy join fields `configured_budget_seconds`, `deadline`,
+     Set the plan's required join fields `configured_budget_seconds`, `deadline`,
      and `finalization_reserve_seconds` to the post-smoke supervised budget
      (fuzzer timeout plus shutdown grace plus artifact reserve), final artifact
      deadline, and exact artifact reserve respectively. These runtime-value
@@ -157,7 +157,7 @@ Use this configured invariant testing fuzzer timeout:
      `campaign-plan.json`. Bind the executed campaign command to the plan's
      campaign-phase command and record the actual configuration-path outcome
      through the pinned result schema's applicable variant.
-   - For a v2 campaign plan, also populate the result's timeout-evidence fields:
+   - Populate the result's required timeout-evidence fields:
      `configured_timeout_seconds`, `exact_command`, `start_timestamp`,
      `end_timestamp`, typed `termination_reason`, `campaign_outcome`, and
      `usable_results`. Copy `exact_command` from the plan and the nested

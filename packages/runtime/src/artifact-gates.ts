@@ -68,6 +68,7 @@ import {
   type SemanticGitContext,
   type SemanticPropertyLensContext,
   type SemanticPropertyCampaignEvidenceContext,
+  type SemanticPropertyCampaignTimeoutContext,
   type SemanticReviewStageContext,
   type WorkspacePatchManifest
 } from "@ultrafuzz/artifacts";
@@ -2173,12 +2174,17 @@ function semanticGateContextForArtifact(input: {
           input.authenticated
         )
       : undefined;
+  const propertyCampaignTimeout =
+    input.schemaFilename === "property-campaign.schema.json"
+      ? semanticPropertyCampaignTimeoutContext(input.layout, input.node, input.attemptId)
+      : undefined;
   return {
     ...context,
     ...(artifactSet === undefined ? {} : { artifactSet }),
     ...(git === undefined ? {} : { git }),
     ...(aggregation === undefined ? {} : { aggregation }),
-    ...(propertyCampaignEvidence === undefined ? {} : { propertyCampaignEvidence })
+    ...(propertyCampaignEvidence === undefined ? {} : { propertyCampaignEvidence }),
+    ...(propertyCampaignTimeout === undefined ? {} : { propertyCampaignTimeout })
   };
 }
 
@@ -2306,18 +2312,10 @@ function semanticPropertyCampaignContext(
   attemptAuthority?: ArtifactGateAttemptAuthority,
   authenticated?: AuthenticatedArtifactGateSnapshots
 ): SemanticArtifactSetContext {
-  const campaignPlanOutputs = node.outputs.filter(
-    (output) =>
-      output.contract === "ultrafuzz/invariant-campaign-plan@1" ||
-      output.contract === "ultrafuzz/invariant-campaign-plan@2"
-  );
-  if (campaignPlanOutputs.length !== 1) {
-    throw new Error("campaign plan semantic context requires exactly one declared campaign-plan contract sibling");
-  }
   const campaignPlan = semanticSiblingJsonArtifact(
     artifactDir,
     node,
-    campaignPlanOutputs[0]!.contract,
+    "ultrafuzz/invariant-campaign-plan@2",
     "campaign plan",
     authenticated
   );
@@ -3434,18 +3432,6 @@ function severityArtifactForNode(node: PlannedGraphNode): { kind: SeverityArtifa
   return undefined;
 }
 
-/**
- * Logical node IDs whose artifacts carry campaign property provenance. The
- * default topology runs one final recon-fuzzer campaign in
- * `stateful-invariant-campaign`; the dedicated recon campaign node stays
- * accepted so project-owned topologies that split the campaign keep their
- * gates. Exported so a test can pin this list to the shipped topology — the
- * bug this list fixes was a gate keyed on an ID the topology did not contain.
- */
-export const CAMPAIGN_LOGICAL_NODE_IDS = ["stateful-invariant-campaign", "stateful-invariant-recon-campaign"] as const;
-
-const campaignLogicalNodeIds = CAMPAIGN_LOGICAL_NODE_IDS;
-
 const RECON_MAX_TEST_LIMIT = "18446744073709551615";
 const CAMPAIGN_HOST_FORCE_KILL_GRACE_SECONDS = 300;
 const CAMPAIGN_DURATION_TOLERANCE_MS = 5_000;
@@ -3458,16 +3444,14 @@ const campaignTerminationReasons = new Set([
 ]);
 const campaignOutcomes = new Set(["complete", "partial", "blocked"]);
 
-function isCampaignLogicalId(logicalId: string): boolean {
-  return campaignLogicalNodeIds.some((nodeId) => nodeId === logicalId);
-}
+const currentCampaignRoleContracts = new Set<PlannedGraphNode["outputs"][number]["contract"]>([
+  "ultrafuzz/invariant-campaign-plan@2",
+  "ultrafuzz/property-campaign@3",
+  "ultrafuzz/campaign-summary@2"
+]);
 
-function isCurrentTimeoutEvidenceCampaign(node: PlannedGraphNode): boolean {
-  const logicalId = node.logical_id ?? node.id;
-  return (
-    isCampaignLogicalId(logicalId) &&
-    node.outputs.some((output) => output.contract === "ultrafuzz/invariant-campaign-plan@2")
-  );
+function hasCurrentCampaignOutputRole(node: PlannedGraphNode): boolean {
+  return node.outputs.some((output) => currentCampaignRoleContracts.has(output.contract));
 }
 
 function campaignTimeoutDiagnostic(code: string, message: string, pathValue: string): RuntimeDiagnostic {
@@ -3587,6 +3571,19 @@ function hasExactHostTimeoutWrapper(command: string, configuredTimeoutSeconds: n
   );
 }
 
+function readConfiguredInvariantFuzzerTimeoutSeconds(layout: RunLayout): number | undefined {
+  if (!fs.existsSync(layout.resolvedConfigPath)) return undefined;
+  try {
+    const parsed = parseProjectConfigToml(
+      fs.readFileSync(layout.resolvedConfigPath, "utf8"),
+      layout.resolvedConfigPath
+    );
+    return parsed.ok ? parsed.value.invariants?.invariantTestingFuzzerTimeoutSeconds : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function configuredInvariantFuzzerTimeoutSeconds(
   layout: RunLayout,
   diagnostics: RuntimeDiagnostic[]
@@ -3601,8 +3598,7 @@ function configuredInvariantFuzzerTimeoutSeconds(
     );
     return undefined;
   }
-  const parsed = parseProjectConfigToml(fs.readFileSync(layout.resolvedConfigPath, "utf8"), layout.resolvedConfigPath);
-  const timeout = parsed.ok ? parsed.value.invariants?.invariantTestingFuzzerTimeoutSeconds : undefined;
+  const timeout = readConfiguredInvariantFuzzerTimeoutSeconds(layout);
   if (timeout !== undefined) return timeout;
   diagnostics.push(
     campaignTimeoutDiagnostic(
@@ -3614,6 +3610,35 @@ function configuredInvariantFuzzerTimeoutSeconds(
   return undefined;
 }
 
+function plannedCampaignTimeoutSeconds(node: PlannedGraphNode, attemptId: string): number | undefined {
+  const modelAttempt = node.model_fanout.find((model) => {
+    const plannedAttemptId =
+      model.attempt_id ??
+      (node.model_fanout.length <= 1
+        ? node.id
+        : `${node.id}__model_${model.model_index}__attempt_${model.attempt_index}`);
+    return plannedAttemptId === attemptId;
+  });
+  const timeout = node.timeout_seconds ?? modelAttempt?.timeout_seconds;
+  return typeof timeout === "number" && Number.isSafeInteger(timeout) && timeout > 0 ? timeout : undefined;
+}
+
+function semanticPropertyCampaignTimeoutContext(
+  layout: RunLayout,
+  node: PlannedGraphNode,
+  attemptId: string
+): SemanticPropertyCampaignTimeoutContext | undefined {
+  const configuredFuzzerTimeoutSeconds = readConfiguredInvariantFuzzerTimeoutSeconds(layout);
+  const plannedTimeoutSeconds = plannedCampaignTimeoutSeconds(node, attemptId);
+  if (configuredFuzzerTimeoutSeconds === undefined || plannedTimeoutSeconds === undefined) return undefined;
+  return {
+    configuredFuzzerTimeoutSeconds,
+    plannedTimeoutSeconds,
+    finalizationReserveSeconds: topologyRuntimeBudgetForTimeout(plannedTimeoutSeconds * 1_000)
+      .finalizationReserveSeconds
+  };
+}
+
 function verifyCurrentCampaignTimeoutEvidence(
   layout: RunLayout,
   artifactDir: string,
@@ -3621,7 +3646,7 @@ function verifyCurrentCampaignTimeoutEvidence(
   attemptId: string,
   authenticated?: AuthenticatedArtifactGateSnapshots
 ): RuntimeDiagnostic[] {
-  if (!isCurrentTimeoutEvidenceCampaign(node)) return [];
+  if (!hasCurrentCampaignOutputRole(node)) return [];
 
   const diagnostics: RuntimeDiagnostic[] = [];
   const planPath = declaredCampaignTimeoutArtifactPath(
@@ -3645,7 +3670,16 @@ function verifyCurrentCampaignTimeoutEvidence(
     "summary",
     diagnostics
   );
-  if (planPath === undefined || resultPath === undefined || summaryPath === undefined) return diagnostics;
+  const findingsPath = declaredCampaignTimeoutArtifactPath(
+    artifactDir,
+    node,
+    "ultrafuzz/findings@2",
+    "findings",
+    diagnostics
+  );
+  if (planPath === undefined || resultPath === undefined || summaryPath === undefined || findingsPath === undefined) {
+    return diagnostics;
+  }
   const planValue = parseCurrentArtifactJson(artifactDir, planPath, authenticated);
   if (!isRecord(planValue) || planValue.schema_version !== "ultrafuzz.invariant-campaign-plan.v2") {
     return [
@@ -3658,7 +3692,25 @@ function verifyCurrentCampaignTimeoutEvidence(
   }
   const resultValue = parseCurrentArtifactJson(artifactDir, resultPath, authenticated);
   const summaryValue = parseCurrentArtifactJson(artifactDir, summaryPath, authenticated);
-  if (!isRecord(resultValue) || !isRecord(summaryValue)) return [];
+  if (!isRecord(resultValue)) {
+    diagnostics.push(
+      campaignTimeoutDiagnostic(
+        "CAMPAIGN_TIMEOUT_EVIDENCE_INVALID",
+        "The current property-campaign result must be an object",
+        resultPath
+      )
+    );
+  }
+  if (!isRecord(summaryValue)) {
+    diagnostics.push(
+      campaignTimeoutDiagnostic(
+        "CAMPAIGN_TIMEOUT_EVIDENCE_INVALID",
+        "The current campaign summary must be an object",
+        summaryPath
+      )
+    );
+  }
+  if (!isRecord(resultValue) || !isRecord(summaryValue)) return diagnostics;
 
   const configuredTimeoutSeconds = configuredInvariantFuzzerTimeoutSeconds(layout, diagnostics);
 
@@ -3678,26 +3730,14 @@ function verifyCurrentCampaignTimeoutEvidence(
     planPath,
     diagnostics
   );
-  const legacyFinalizationReserve = positiveIntegerField(
+  const requiredFinalizationReserve = positiveIntegerField(
     planValue,
     "finalization_reserve_seconds",
     planPath,
     diagnostics
   );
-  const modelAttempt = node.model_fanout.find((model) => {
-    const plannedAttemptId =
-      model.attempt_id ??
-      (node.model_fanout.length <= 1
-        ? node.id
-        : `${node.id}__model_${model.model_index}__attempt_${model.attempt_index}`);
-    return plannedAttemptId === attemptId;
-  });
-  const plannedTimeoutSeconds = node.timeout_seconds ?? modelAttempt?.timeout_seconds;
-  if (
-    typeof plannedTimeoutSeconds !== "number" ||
-    !Number.isSafeInteger(plannedTimeoutSeconds) ||
-    plannedTimeoutSeconds <= 0
-  ) {
+  const plannedTimeoutSeconds = plannedCampaignTimeoutSeconds(node, attemptId);
+  if (plannedTimeoutSeconds === undefined) {
     diagnostics.push(
       campaignTimeoutDiagnostic(
         "CAMPAIGN_TIMEOUT_PLAN_BUDGET_MISSING",
@@ -3722,7 +3762,7 @@ function verifyCurrentCampaignTimeoutEvidence(
   const fuzzingDeadline = timestampField(planValue, "fuzzing_deadline_utc", planPath, diagnostics);
   const forceKillDeadline = timestampField(planValue, "force_kill_deadline_utc", planPath, diagnostics);
   const finalArtifactDeadline = timestampField(planValue, "final_artifact_deadline_utc", planPath, diagnostics);
-  const legacyDeadline = timestampField(planValue, "deadline", planPath, diagnostics);
+  const requiredDeadline = timestampField(planValue, "deadline", planPath, diagnostics);
   const planBackend = isRecord(planValue.backend) ? planValue.backend : undefined;
   if (planBackend === undefined) {
     diagnostics.push(
@@ -3787,9 +3827,9 @@ function verifyCurrentCampaignTimeoutEvidence(
     );
   }
   if (
-    legacyFinalizationReserve !== undefined &&
+    requiredFinalizationReserve !== undefined &&
     finalizationReserve !== undefined &&
-    legacyFinalizationReserve !== finalizationReserve
+    requiredFinalizationReserve !== finalizationReserve
   ) {
     diagnostics.push(
       campaignTimeoutDiagnostic(
@@ -3800,9 +3840,9 @@ function verifyCurrentCampaignTimeoutEvidence(
     );
   }
   if (
-    legacyDeadline !== undefined &&
+    requiredDeadline !== undefined &&
     finalArtifactDeadline !== undefined &&
-    legacyDeadline.milliseconds !== finalArtifactDeadline.milliseconds
+    requiredDeadline.milliseconds !== finalArtifactDeadline.milliseconds
   ) {
     diagnostics.push(
       campaignTimeoutDiagnostic(
@@ -4162,12 +4202,14 @@ function verifyPropertyProvenanceArtifacts(
   attemptAuthority?: ArtifactGateAttemptAuthority,
   authenticated?: AuthenticatedArtifactGateSnapshots
 ): RuntimeDiagnostic[] {
-  const logicalId = node.logical_id ?? node.id;
   const isPropertyLens = node.outputs.some((output) => output.contract === "ultrafuzz/property-lens@2");
   const isFinalReport = node.outputs.some((output) => output.contract === "ultrafuzz/report@2");
   const isImplementation = node.outputs.some((output) => output.contract === "ultrafuzz/implemented-properties@3");
   const isCampaign = node.outputs.some((output) => output.contract === "ultrafuzz/property-campaign@3");
   const diagnostics: RuntimeDiagnostic[] = [];
+  if (hasCurrentCampaignOutputRole(node)) {
+    diagnostics.push(...verifyCurrentCampaignTimeoutEvidence(layout, artifactDir, node, attemptId, authenticated));
+  }
   if (isPropertyLens) {
     diagnostics.push(
       ...verifyLensReferenceExpectationAuthority(layout, artifactDir, node, attemptId, attemptAuthority, authenticated)
@@ -4179,10 +4221,6 @@ function verifyPropertyProvenanceArtifacts(
     );
   }
   if (!isImplementation && !isCampaign) return diagnostics;
-
-  if (isCampaignLogicalId(logicalId)) {
-    diagnostics.push(...verifyCurrentCampaignTimeoutEvidence(layout, artifactDir, node, attemptId, authenticated));
-  }
 
   const catalog = readCanonicalPropertyCatalog(layout, node, attemptAuthority);
   if (catalog.diagnostics.length > 0 || catalog.value === undefined) {

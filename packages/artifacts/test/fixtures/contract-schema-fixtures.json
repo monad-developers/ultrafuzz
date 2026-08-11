@@ -562,50 +562,6 @@
       "__unexpected_fixture_field": true
     }
   },
-  "ultrafuzz/invariant-campaign-plan@1": {
-    "schema_file": "invariant-campaign-plan.schema.json",
-    "valid": {
-      "schema_version": "ultrafuzz.invariant-campaign-plan.v1",
-      "available_vcpus": 1,
-      "workers": 1,
-      "configured_budget_seconds": 1,
-      "deadline": "2026-08-09T00:00:00.000Z",
-      "finalization_reserve_seconds": 0,
-      "backend": {
-        "name": "recon",
-        "version": "x"
-      },
-      "command_plan": [],
-      "paths": {
-        "corpus": "x",
-        "cache": "x",
-        "log": "x",
-        "raw_results": "x",
-        "reproducers": "x"
-      }
-    },
-    "invalid": {
-      "schema_version": "ultrafuzz.invariant-campaign-plan.v1",
-      "available_vcpus": 1,
-      "workers": 1,
-      "configured_budget_seconds": 1,
-      "deadline": "2026-08-09T00:00:00.000Z",
-      "finalization_reserve_seconds": 0,
-      "backend": {
-        "name": "recon",
-        "version": "x"
-      },
-      "command_plan": [],
-      "paths": {
-        "corpus": "x",
-        "cache": "x",
-        "log": "x",
-        "raw_results": "x",
-        "reproducers": "x"
-      },
-      "__unexpected_fixture_field": true
-    }
-  },
   "ultrafuzz/invariant-campaign-plan@2": {
     "schema_file": "invariant-campaign-plan-v2.schema.json",
     "valid": {

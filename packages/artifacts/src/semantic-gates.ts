@@ -166,6 +166,13 @@ export interface SemanticPropertyCampaignEvidenceContext {
   publicationAuthority?: SemanticPropertyCampaignPublicationAuthorityContext;
 }
 
+/** Sealed run facts that campaign timeout evidence must reproduce exactly. */
+export interface SemanticPropertyCampaignTimeoutContext {
+  configuredFuzzerTimeoutSeconds: number;
+  plannedTimeoutSeconds: number;
+  finalizationReserveSeconds: number;
+}
+
 export interface SemanticUsageLedgerContext {
   entries: readonly unknown[];
 }
@@ -243,6 +250,7 @@ export interface SemanticGateContext {
   analysisBundle?: SemanticAnalysisBundleContext;
   aggregation?: SemanticAggregationContext;
   propertyCampaignEvidence?: SemanticPropertyCampaignEvidenceContext;
+  propertyCampaignTimeout?: SemanticPropertyCampaignTimeoutContext;
 }
 
 export interface SemanticGateExecutionRequest {
@@ -4977,6 +4985,310 @@ function propertyCampaignDocumentIssues(document: unknown): SemanticGateIssue[] 
   return issues;
 }
 
+const RECON_MAX_TEST_LIMIT = "18446744073709551615";
+const CAMPAIGN_HOST_FORCE_KILL_GRACE_SECONDS = 300;
+const CAMPAIGN_DURATION_TOLERANCE_MS = 5_000;
+
+function campaignTimeoutFlagValues(command: string, flag: "--timeout" | "--test-limit"): string[] {
+  const escapedFlag = flag.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  const pattern = new RegExp(`(?:^|\\s)${escapedFlag}(?:(?:=|\\s+)(\\S+))?`, "gu");
+  return [...command.matchAll(pattern)].map((match) => match[1] ?? "");
+}
+
+function hasExactCampaignHostTimeoutWrapper(command: string, configuredTimeoutSeconds: number): boolean {
+  const tokens = command.trim().split(/\s+/u);
+  const timeoutIndexes = tokens.flatMap((token, index) => (token === "timeout" ? [index] : []));
+  if (timeoutIndexes.length !== 1 || tokens.includes("--foreground")) return false;
+  const timeoutIndex = timeoutIndexes[0]!;
+  const reconIndex = tokens.indexOf("recon", timeoutIndex + 1);
+  if (reconIndex < 0 || tokens[reconIndex + 1] !== "fuzz") return false;
+  const wrapperArguments = tokens.slice(timeoutIndex + 1, reconIndex);
+  return (
+    wrapperArguments.length === 4 &&
+    wrapperArguments.at(-1) === `${configuredTimeoutSeconds}s` &&
+    wrapperArguments.filter((argument) => argument === "--preserve-status").length === 1 &&
+    wrapperArguments.filter((argument) => argument === "--signal=INT").length === 1 &&
+    wrapperArguments.filter((argument) => argument === `--kill-after=${CAMPAIGN_HOST_FORCE_KILL_GRACE_SECONDS}s`)
+      .length === 1
+  );
+}
+
+function campaignTimestamp(
+  record: unknown,
+  field: string,
+  pathValue: string,
+  issues: SemanticGateIssue[]
+): number | undefined {
+  const text = stringField(record, field);
+  if (text === undefined) {
+    issues.push(issue(`${pathValue}.${field}`, `${field} must be a timestamp`));
+    return undefined;
+  }
+  const milliseconds = Date.parse(text);
+  if (!Number.isFinite(milliseconds)) {
+    issues.push(issue(`${pathValue}.${field}`, `${field} must be a valid timestamp`));
+    return undefined;
+  }
+  return milliseconds;
+}
+
+function propertyCampaignTimeoutEvidenceIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
+  const plan = context.artifactSet!.campaignPlan;
+  const summary = context.artifactSet!.campaignSummary;
+  const expectations = context.propertyCampaignTimeout!;
+  const issues: SemanticGateIssue[] = [];
+  const planPath = "$.campaign_plan_ref";
+  const summaryPath = "$.campaign_summary_ref";
+  const execution = at(document, ["execution"]);
+  const configuredTimeoutSeconds = expectations.configuredFuzzerTimeoutSeconds;
+  const plannedTimeoutSeconds = expectations.plannedTimeoutSeconds;
+  const finalizationReserveSeconds = expectations.finalizationReserveSeconds;
+  const compare = (pathValue: string, actual: unknown, expected: unknown, message: string): void => {
+    if (!isDeepStrictEqual(actual, expected)) issues.push(issue(pathValue, message));
+  };
+
+  if (!Number.isSafeInteger(configuredTimeoutSeconds) || configuredTimeoutSeconds <= 0) {
+    issues.push(issue("$", "Trusted configured fuzzer timeout must be a positive safe integer"));
+  }
+  if (!Number.isSafeInteger(plannedTimeoutSeconds) || plannedTimeoutSeconds <= 0) {
+    issues.push(issue("$", "Trusted planned task timeout must be a positive safe integer"));
+  }
+  if (!Number.isSafeInteger(finalizationReserveSeconds) || finalizationReserveSeconds <= 0) {
+    issues.push(issue("$", "Trusted artifact finalization reserve must be a positive safe integer"));
+  }
+
+  for (const field of [
+    "configured_fuzzer_timeout_seconds",
+    "recon_internal_timeout_seconds",
+    "host_soft_timeout_seconds"
+  ] as const) {
+    compare(
+      `${planPath}#${field}`,
+      numberField(plan, field),
+      configuredTimeoutSeconds,
+      `${field} must equal the configured invariant fuzzer timeout`
+    );
+  }
+  compare(
+    "$.configured_timeout_seconds",
+    numberField(document, "configured_timeout_seconds"),
+    configuredTimeoutSeconds,
+    "configured_timeout_seconds must equal the configured invariant fuzzer timeout"
+  );
+  compare(
+    `${planPath}#host_force_kill_grace_seconds`,
+    numberField(plan, "host_force_kill_grace_seconds"),
+    CAMPAIGN_HOST_FORCE_KILL_GRACE_SECONDS,
+    "host_force_kill_grace_seconds must equal the runtime shutdown grace"
+  );
+  compare(
+    `${planPath}#artifact_finalization_reserve_seconds`,
+    numberField(plan, "artifact_finalization_reserve_seconds"),
+    finalizationReserveSeconds,
+    "artifact_finalization_reserve_seconds must equal the sealed task reserve"
+  );
+  compare(
+    `${planPath}#finalization_reserve_seconds`,
+    numberField(plan, "finalization_reserve_seconds"),
+    finalizationReserveSeconds,
+    "finalization_reserve_seconds must equal the sealed task reserve"
+  );
+  compare(
+    `${planPath}#configured_budget_seconds`,
+    numberField(plan, "configured_budget_seconds"),
+    configuredTimeoutSeconds + CAMPAIGN_HOST_FORCE_KILL_GRACE_SECONDS + finalizationReserveSeconds,
+    "configured_budget_seconds must equal the fuzzer timeout plus shutdown grace and artifact reserve"
+  );
+  if ((numberField(plan, "configured_budget_seconds") ?? 0) > plannedTimeoutSeconds) {
+    issues.push(issue(`${planPath}#configured_budget_seconds`, "Campaign budget exceeds the sealed task timeout"));
+  }
+  compare(
+    `${planPath}#recon_test_limit`,
+    stringField(plan, "recon_test_limit"),
+    RECON_MAX_TEST_LIMIT,
+    "recon_test_limit must use the nonbinding maximum"
+  );
+
+  const backend = at(plan, ["backend"]);
+  const campaignCommands = arrayAt(plan, ["command_plan"]).filter((row) => stringField(row, "phase") === "campaign");
+  if (campaignCommands.length !== 1) {
+    issues.push(issue(`${planPath}#command_plan`, "Campaign plan must contain exactly one campaign command"));
+  }
+  const plannedCommand = campaignCommands.length === 1 ? stringField(campaignCommands[0], "command") : undefined;
+  const backendCommand = stringField(backend, "exact_shell_escaped_command");
+  const resultCommand = stringField(document, "exact_command");
+  compare(
+    `${planPath}#backend.exact_shell_escaped_command`,
+    backendCommand,
+    plannedCommand,
+    "Backend exact command must equal the campaign-phase command"
+  );
+  compare(
+    "$.exact_command",
+    resultCommand,
+    plannedCommand,
+    "Result exact command must equal the campaign plan command"
+  );
+  compare(
+    "$.execution.command",
+    stringField(execution, "command"),
+    plannedCommand,
+    "Execution command must equal the campaign plan command"
+  );
+  if (resultCommand !== undefined) {
+    const timeoutValues = campaignTimeoutFlagValues(resultCommand, "--timeout");
+    const testLimitValues = campaignTimeoutFlagValues(resultCommand, "--test-limit");
+    if (timeoutValues.length !== 1 || timeoutValues[0] !== String(configuredTimeoutSeconds)) {
+      issues.push(
+        issue("$.exact_command", `Recon command must contain exactly one --timeout ${configuredTimeoutSeconds} flag`)
+      );
+    }
+    if (testLimitValues.length !== 1 || testLimitValues[0] !== RECON_MAX_TEST_LIMIT) {
+      issues.push(
+        issue("$.exact_command", `Recon command must contain exactly one --test-limit ${RECON_MAX_TEST_LIMIT} flag`)
+      );
+    }
+    if (!hasExactCampaignHostTimeoutWrapper(resultCommand, configuredTimeoutSeconds)) {
+      issues.push(
+        issue(
+          "$.exact_command",
+          `Recon command must use one timeout --preserve-status --signal=INT --kill-after=${CAMPAIGN_HOST_FORCE_KILL_GRACE_SECONDS}s ${configuredTimeoutSeconds}s wrapper without --foreground`
+        )
+      );
+    }
+  }
+
+  const backendStartedAt = campaignTimestamp(plan, "backend_started_at", planPath, issues);
+  const fuzzingDeadline = campaignTimestamp(plan, "fuzzing_deadline_utc", planPath, issues);
+  const forceKillDeadline = campaignTimestamp(plan, "force_kill_deadline_utc", planPath, issues);
+  const finalArtifactDeadline = campaignTimestamp(plan, "final_artifact_deadline_utc", planPath, issues);
+  const requiredDeadline = campaignTimestamp(plan, "deadline", planPath, issues);
+  const startTimestamp = campaignTimestamp(document, "start_timestamp", "$", issues);
+  const endTimestamp = campaignTimestamp(document, "end_timestamp", "$", issues);
+  const executionStartedAt = campaignTimestamp(execution, "started_at", "$.execution", issues);
+  const executionFinishedAt = campaignTimestamp(execution, "finished_at", "$.execution", issues);
+  const executionDeadline = campaignTimestamp(execution, "deadline", "$.execution", issues);
+
+  if (backendStartedAt !== undefined) {
+    compare("$.start_timestamp", startTimestamp, backendStartedAt, "Result start must equal plan backend start");
+    compare(
+      "$.execution.started_at",
+      executionStartedAt,
+      backendStartedAt,
+      "Execution start must equal plan backend start"
+    );
+  }
+  compare("$.end_timestamp", executionFinishedAt, endTimestamp, "Result end must equal execution finish");
+  if (finalArtifactDeadline !== undefined) {
+    compare(
+      `${planPath}#deadline`,
+      requiredDeadline,
+      finalArtifactDeadline,
+      "Campaign plan deadline must equal final artifact deadline"
+    );
+    compare(
+      "$.execution.deadline",
+      executionDeadline,
+      finalArtifactDeadline,
+      "Execution deadline must equal plan final artifact deadline"
+    );
+  }
+  if (
+    backendStartedAt !== undefined &&
+    fuzzingDeadline !== undefined &&
+    forceKillDeadline !== undefined &&
+    finalArtifactDeadline !== undefined
+  ) {
+    const expectedFuzzingDeadline = backendStartedAt + configuredTimeoutSeconds * 1_000;
+    const expectedForceKillDeadline = expectedFuzzingDeadline + CAMPAIGN_HOST_FORCE_KILL_GRACE_SECONDS * 1_000;
+    const expectedFinalArtifactDeadline = expectedForceKillDeadline + finalizationReserveSeconds * 1_000;
+    compare(
+      `${planPath}#fuzzing_deadline_utc`,
+      fuzzingDeadline,
+      expectedFuzzingDeadline,
+      "Fuzzing deadline does not match configured timeout arithmetic"
+    );
+    compare(
+      `${planPath}#force_kill_deadline_utc`,
+      forceKillDeadline,
+      expectedForceKillDeadline,
+      "Force-kill deadline does not match configured grace arithmetic"
+    );
+    compare(
+      `${planPath}#final_artifact_deadline_utc`,
+      finalArtifactDeadline,
+      expectedFinalArtifactDeadline,
+      "Final artifact deadline does not match reserve arithmetic"
+    );
+  }
+
+  const terminationReason = stringField(document, "termination_reason");
+  const campaignOutcome = stringField(document, "campaign_outcome");
+  const usableResults = booleanField(document, "usable_results");
+  compare(
+    "$.execution.usable_results",
+    booleanField(execution, "usable_results"),
+    usableResults,
+    "Execution usability must equal result usability"
+  );
+  if (startTimestamp !== undefined && endTimestamp !== undefined) {
+    const elapsedMs = endTimestamp - startTimestamp;
+    if (elapsedMs < 0) {
+      issues.push(issue("$.end_timestamp", "Campaign end cannot precede its start"));
+    } else {
+      const endedEarly = elapsedMs + CAMPAIGN_DURATION_TOLERANCE_MS < configuredTimeoutSeconds * 1_000;
+      if (terminationReason === "configured-timeout" && endedEarly) {
+        issues.push(issue("$.end_timestamp", "A configured-timeout campaign must run for the configured timeout"));
+      }
+      if (endedEarly && usableResults === true && campaignOutcome !== "partial") {
+        issues.push(issue("$.campaign_outcome", "An early campaign with usable results must be partial"));
+      }
+      if (
+        !endedEarly &&
+        terminationReason === "configured-timeout" &&
+        usableResults === true &&
+        campaignOutcome !== "complete"
+      ) {
+        issues.push(issue("$.campaign_outcome", "A completed configured-timeout campaign must report complete"));
+      }
+    }
+    if (forceKillDeadline !== undefined && endTimestamp > forceKillDeadline + CAMPAIGN_DURATION_TOLERANCE_MS) {
+      if (terminationReason !== "host-force-kill") {
+        issues.push(issue("$.termination_reason", "A campaign ending after the force-kill deadline must say so"));
+      }
+      if (usableResults === true && campaignOutcome !== "partial") {
+        issues.push(issue("$.campaign_outcome", "A force-killed campaign with usable results must be partial"));
+      }
+    }
+    if (
+      forceKillDeadline !== undefined &&
+      terminationReason === "host-force-kill" &&
+      endTimestamp + CAMPAIGN_DURATION_TOLERANCE_MS < forceKillDeadline
+    ) {
+      issues.push(issue("$.termination_reason", "A host-force-kill cannot precede its deadline"));
+    }
+  }
+  if (usableResults === false && campaignOutcome !== "blocked") {
+    issues.push(issue("$.campaign_outcome", "A campaign without usable results must be blocked"));
+  }
+  if (campaignOutcome === "complete" && (terminationReason !== "configured-timeout" || usableResults !== true)) {
+    issues.push(issue("$.campaign_outcome", "A complete campaign requires usable configured-timeout results"));
+  }
+  if (usableResults === true && terminationReason !== "configured-timeout" && campaignOutcome !== "partial") {
+    issues.push(issue("$.campaign_outcome", "Usable results from another terminal reason must be partial"));
+  }
+  if (usableResults === true && campaignOutcome === "blocked") {
+    issues.push(issue("$.campaign_outcome", "A blocked campaign cannot report usable results"));
+  }
+  compare(
+    `${summaryPath}#outcome`,
+    stringField(summary, "outcome"),
+    campaignOutcome,
+    "Campaign summary outcome must equal the timeout-evidence outcome"
+  );
+  return issues;
+}
+
 function propertyCampaignContextJoinIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
   const artifactSet = context.artifactSet!;
   const plan = artifactSet.campaignPlan;
@@ -5936,6 +6248,17 @@ const gateSpecifications = {
     uniqueFieldGate([["property_results"]], "property_id", "property campaign result property ID")
   ),
   "property-campaign-document-coherence": documentGate(propertyCampaignDocumentIssues),
+  "property-campaign-timeout-evidence": contextualGate(
+    "runtime-state",
+    [
+      "artifactSet.campaignPlan",
+      "artifactSet.campaignSummary",
+      "propertyCampaignTimeout.configuredFuzzerTimeoutSeconds",
+      "propertyCampaignTimeout.plannedTimeoutSeconds",
+      "propertyCampaignTimeout.finalizationReserveSeconds"
+    ],
+    propertyCampaignTimeoutEvidenceIssues
+  ),
   "property-campaign-context-joins": contextualGate(
     "cross-artifact",
     [

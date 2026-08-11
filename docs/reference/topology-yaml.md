@@ -159,11 +159,11 @@ inference or conversion. V2 manifests are rejected without conversion.
 Every retained JSON contract maps to one complete checked-in Draft 2020-12
 schema. Contract definitions supply runtime validation plus the shape,
 valid-empty form, and exact validation command appended to producer prompts.
-Newly rendered artifacts use only current contract IDs. Current invariant campaigns use
+Only current contract IDs are accepted. Invariant campaigns use
 `ultrafuzz/invariant-campaign-plan@2`, whose schema accepts only v2 timeout
-evidence. The separate `ultrafuzz/invariant-campaign-plan@1` contract remains a
-sealed historical reader. Other old schema versions, aliases, conversion
-readers, and generic JSON contracts are unsupported.
+evidence. The old `ultrafuzz/invariant-campaign-plan@1` contract and v1 document
+shape are unsupported. Other old schema versions, aliases, conversion readers,
+and generic JSON contracts are unsupported.
 
 ## Meta Nodes
 

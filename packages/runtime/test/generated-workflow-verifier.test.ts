@@ -963,6 +963,11 @@ type VerifyArtifactsTask = {
   workspacePath: string;
   artifactDir: string;
   dependencyArtifactDirs: string[];
+  campaignTimeoutExpectations?: {
+    configuredFuzzerTimeoutSeconds: number;
+    plannedTimeoutSeconds: number;
+    finalizationReserveSeconds: number;
+  } | null;
   metadata: {
     run: { ultrafuzzRunId: string };
     artifacts: { dir: string };
@@ -1510,6 +1515,11 @@ function generatedCampaignVerificationFixture(
     workspacePath: root,
     artifactDir,
     dependencyArtifactDirs: [implementationArtifactDir],
+    campaignTimeoutExpectations: {
+      configuredFuzzerTimeoutSeconds: 3600,
+      plannedTimeoutSeconds: 7200,
+      finalizationReserveSeconds: 300
+    },
     metadata: {
       run: { ultrafuzzRunId: "run-one" },
       artifacts: { dir: artifactDir },
@@ -1798,6 +1808,153 @@ test("generated Smithers verifies a v3 property campaign against authenticated s
       { consumerAttemptId: "attempt-campaign", dependency: fixture.implementationArtifactDir },
       { consumerAttemptId: "attempt-campaign", dependency: fixture.implementationArtifactDir }
     ]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("generated Smithers requires exactly one declaration for every current campaign tuple member", () => {
+  const tupleMembers = [
+    ["plan", "ultrafuzz/invariant-campaign-plan@2"],
+    ["result", "ultrafuzz/property-campaign@3"],
+    ["summary", "ultrafuzz/campaign-summary@2"],
+    ["findings", "ultrafuzz/findings@2"]
+  ] as const;
+  for (const [label, contract] of tupleMembers) {
+    for (const count of [0, 2] as const) {
+      const root = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), `ultrafuzz-campaign-tuple-${label}-${count}-`))
+      );
+      try {
+        const fixture = generatedCampaignVerificationFixture(root);
+        const output = fixture.task.outputs.find((candidate) => candidate.contract === contract);
+        assert.notEqual(output, undefined, label);
+        if (count === 0) {
+          fixture.task.outputs = fixture.task.outputs.filter((candidate) => candidate.contract !== contract);
+        } else {
+          const duplicatePath = `duplicate-${output!.path}`;
+          fs.copyFileSync(
+            path.join(fixture.task.artifactDir, output!.path),
+            path.join(fixture.task.artifactDir, duplicatePath)
+          );
+          fixture.task.outputs.push({ ...output!, path: duplicatePath, primary: false });
+        }
+        const harness = loadVerifyArtifactsHarness({
+          taskSpecs: [fixture.implementationProducer, fixture.task],
+          authenticatedDependencyDirs: [fixture.implementationArtifactDir]
+        });
+        const escapedContract = contract.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+
+        assert.throws(
+          () => harness.verifyArtifacts(fixture.task, harness.captureTaskOutputs(fixture.task)),
+          new RegExp(`exactly one complete campaign output tuple.*${escapedContract}=${count}`, "u"),
+          `${label}:${count}`
+        );
+        assert.equal(harness.publications.size, 0, `${label}:${count}`);
+        assert.equal(harness.markerWrites.length, 0, `${label}:${count}`);
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    }
+  }
+});
+
+test("generated Smithers rejects schema-valid forged timeout evidence before publication", () => {
+  const record = (value: unknown): Record<string, unknown> => value as Record<string, unknown>;
+  const cases: Array<{
+    label: string;
+    mutate: (plan: Record<string, unknown>, result: Record<string, unknown>, summary: Record<string, unknown>) => void;
+  }> = [
+    {
+      label: "configured timeout",
+      mutate: (plan, result) => {
+        plan.configured_fuzzer_timeout_seconds = 3300;
+        plan.recon_internal_timeout_seconds = 3300;
+        plan.host_soft_timeout_seconds = 3300;
+        result.configured_timeout_seconds = 3300;
+      }
+    },
+    {
+      label: "campaign command",
+      mutate: (plan, result) => {
+        const command = GENERATED_CAMPAIGN_COMMAND.replaceAll("3600", "3300");
+        record(plan.backend).exact_shell_escaped_command = command;
+        record((plan.command_plan as unknown[])[0]).command = command;
+        result.exact_command = command;
+        record(result.execution).command = command;
+      }
+    },
+    {
+      label: "deadline arithmetic",
+      mutate: (plan, result) => {
+        plan.fuzzing_deadline_utc = "2026-01-01T00:59:00Z";
+        plan.force_kill_deadline_utc = "2026-01-01T01:04:00Z";
+        plan.final_artifact_deadline_utc = "2026-01-01T01:09:00Z";
+        plan.deadline = "2026-01-01T01:09:00Z";
+        record(result.execution).deadline = "2026-01-01T01:09:00Z";
+      }
+    },
+    {
+      label: "campaign outcome",
+      mutate: (_plan, result) => {
+        result.campaign_outcome = "partial";
+      }
+    }
+  ];
+
+  for (const { label, mutate } of cases) {
+    const root = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), `ultrafuzz-forged-timeout-${label.replaceAll(" ", "-")}-`))
+    );
+    try {
+      const fixture = generatedCampaignVerificationFixture(root);
+      const plan = generatedCampaignPlanFixture();
+      const result = generatedPropertyCampaignFixture();
+      const summary = generatedCampaignSummaryFixture([], 0);
+      mutate(plan, result, summary);
+      for (const [relativePath, contract, document] of [
+        ["campaign-plan.json", "ultrafuzz/invariant-campaign-plan@2", plan],
+        ["campaign.json", "ultrafuzz/property-campaign@3", result],
+        ["campaign-summary.json", "ultrafuzz/campaign-summary@2", summary]
+      ] as const) {
+        const contents = `${JSON.stringify(document)}\n`;
+        assert.equal(validateArtifactContract(contract, contents).ok, true, label);
+        fs.writeFileSync(path.join(fixture.task.artifactDir, relativePath), contents, "utf8");
+      }
+      const harness = loadVerifyArtifactsHarness({
+        taskSpecs: [fixture.implementationProducer, fixture.task],
+        authenticatedDependencyDirs: [fixture.implementationArtifactDir]
+      });
+
+      assert.throws(
+        () => harness.verifyArtifacts(fixture.task, harness.captureTaskOutputs(fixture.task)),
+        /property-campaign-timeout-evidence failed/u,
+        label
+      );
+      assert.equal(harness.publications.size, 0, label);
+      assert.equal(harness.markerWrites.length, 0, label);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("generated Smithers fails closed without sealed campaign timeout expectations", () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-missing-timeout-authority-")));
+  try {
+    const fixture = generatedCampaignVerificationFixture(root);
+    fixture.task.campaignTimeoutExpectations = null;
+    const harness = loadVerifyArtifactsHarness({
+      taskSpecs: [fixture.implementationProducer, fixture.task],
+      authenticatedDependencyDirs: [fixture.implementationArtifactDir]
+    });
+
+    assert.throws(
+      () => harness.verifyArtifacts(fixture.task, harness.captureTaskOutputs(fixture.task)),
+      /property-campaign-timeout-evidence requires trusted context: propertyCampaignTimeout/u
+    );
+    assert.equal(harness.publications.size, 0);
+    assert.equal(harness.markerWrites.length, 0);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

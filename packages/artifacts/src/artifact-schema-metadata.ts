@@ -252,15 +252,10 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "implementedPropertiesSchema",
     ["implemented-property-id-uniqueness", "implemented-property-selection-join"]
   ),
-  "invariant-campaign-plan.schema.json": artifact(
-    "ultrafuzz/invariant-campaign-plan@1",
-    "invariantCampaignPlanJsonSchema",
-    "invariantCampaignPlanSchema"
-  ),
   "invariant-campaign-plan-v2.schema.json": artifact(
     "ultrafuzz/invariant-campaign-plan@2",
-    "invariantCampaignPlanV2JsonSchema",
-    "invariantCampaignPlanV2Schema"
+    "invariantCampaignPlanJsonSchema",
+    "invariantCampaignPlanSchema"
   ),
   "invariant-evidence-ledger.schema.json": artifact(
     "ultrafuzz/invariant-ledger@1",
@@ -305,6 +300,7 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
       "property-campaign-failure-id-uniqueness",
       "property-campaign-property-result-id-uniqueness",
       "property-campaign-document-coherence",
+      "property-campaign-timeout-evidence",
       "property-campaign-context-joins"
     ]
   ),

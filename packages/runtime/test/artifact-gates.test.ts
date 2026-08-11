@@ -253,7 +253,7 @@ function fixtureDeclaredContract(artifactPath: string): PlannedGraphNode["output
   if (["recon-fuzzer-results.json", "echidna-results.json", "medusa-results.json"].includes(artifactPath)) {
     return "ultrafuzz/property-campaign@3";
   }
-  if (artifactPath === "campaign-plan.json") return "ultrafuzz/invariant-campaign-plan@1";
+  if (artifactPath === "campaign-plan.json") return "ultrafuzz/invariant-campaign-plan@2";
   if (artifactPath === "campaign-summary.json") return "ultrafuzz/campaign-summary@2";
   if (artifactPath === "findings.json") return "ultrafuzz/findings@2";
   if (artifactPath === "triaged-findings.json") return "ultrafuzz/triaged-findings@1";
@@ -1038,7 +1038,7 @@ function plannedNode(paths: string[]): PlannedGraphNode {
                           )
                         ? "ultrafuzz/property-campaign@3"
                         : outputPath === "campaign-plan.json"
-                          ? "ultrafuzz/invariant-campaign-plan@1"
+                          ? "ultrafuzz/invariant-campaign-plan@2"
                           : outputPath === "campaign-summary.json"
                             ? "ultrafuzz/campaign-summary@2"
                             : outputPath === "report.json"
@@ -7025,7 +7025,11 @@ test("campaign gate still applies to project-owned split recon campaign nodes", 
 });
 
 test("campaign gates select custom declared paths and ignore undeclared conventional files", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-custom-campaign-contracts" });
+  const layout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-custom-campaign-contracts",
+    resolvedConfigToml: '[invariants]\ninvariant_testing_fuzzer_timeout = "1h"\n'
+  });
   writeArtifact(
     layout,
     "property-specification-fanin",
@@ -7064,7 +7068,7 @@ test("campaign gates select custom declared paths and ignore undeclared conventi
   const campaignId = "custom-fuzz-stage";
   const campaignOutput = boundOutput("custom/results.json", "ultrafuzz/property-campaign@3", true);
   const findingsOutput = boundOutput("custom/candidates.json", "ultrafuzz/findings@2");
-  const campaignPlanOutput = boundOutput("custom/plan.json", "ultrafuzz/invariant-campaign-plan@1");
+  const campaignPlanOutput = boundOutput("custom/plan.json", "ultrafuzz/invariant-campaign-plan@2");
   const campaignSummaryOutput = boundOutput("custom/summary.json", "ultrafuzz/campaign-summary@2");
   const customCampaign = {
     ...currentCampaign(["property-1"], [], { executionStatus: "complete" }),
@@ -7079,7 +7083,7 @@ test("campaign gates select custom declared paths and ignore undeclared conventi
     {
       [campaignOutput.path]: JSON.stringify(customCampaign),
       [findingsOutput.path]: "[]",
-      [campaignPlanOutput.path]: JSON.stringify(historicalCampaignPlan()),
+      [campaignPlanOutput.path]: JSON.stringify(currentCampaignPlan()),
       [campaignSummaryOutput.path]: JSON.stringify({
         schema_version: "ultrafuzz.campaign-summary.v2",
         outcome: "complete",
@@ -7106,6 +7110,7 @@ test("campaign gates select custom declared paths and ignore undeclared conventi
     display_name: campaignId,
     artifact_dir: `artifacts/${campaignId}`,
     depends_on: [implementationId],
+    timeout_seconds: 7200,
     outputs: [campaignOutput, findingsOutput, campaignPlanOutput, campaignSummaryOutput]
   };
 
@@ -7947,16 +7952,9 @@ function accountedCampaignFinding(
 }
 
 function currentCampaignNode(paths: string[]): PlannedGraphNode {
-  const node = plannedNode([...new Set([...paths, "campaign-plan.json", "campaign-summary.json"])]);
   return {
-    ...node,
-    outputs: node.outputs.map((output) =>
-      output.path === "campaign-plan.json"
-        ? boundOutput(output.path, "ultrafuzz/invariant-campaign-plan@1", output.primary)
-        : output.path === "campaign-summary.json"
-          ? { ...output, contract: "ultrafuzz/campaign-summary@2" as const }
-          : output
-    )
+    ...plannedNode([...new Set([...paths, "campaign-plan.json", "campaign-summary.json"])]),
+    timeout_seconds: 7200
   };
 }
 
@@ -7968,16 +7966,42 @@ const campaignFixturePaths = {
   reproducers: "backends/recon-fuzzer/reproducers"
 } as const;
 
-function historicalCampaignPlan(): Record<string, unknown> {
+const RECON_TIMEOUT_TEST_LIMIT = "18446744073709551615";
+const CURRENT_CAMPAIGN_TIMEOUT_SECONDS = 3600;
+const CURRENT_CAMPAIGN_FORCE_KILL_GRACE_SECONDS = 300;
+const CURRENT_CAMPAIGN_FINALIZATION_RESERVE_SECONDS = 300;
+const CURRENT_CAMPAIGN_STARTED_AT = "2026-01-01T00:00:00.000Z";
+const CURRENT_CAMPAIGN_FUZZING_DEADLINE = "2026-01-01T01:00:00.000Z";
+const CURRENT_CAMPAIGN_FORCE_KILL_DEADLINE = "2026-01-01T01:05:00.000Z";
+const CURRENT_CAMPAIGN_FINAL_ARTIFACT_DEADLINE = "2026-01-01T01:10:00.000Z";
+const CURRENT_CAMPAIGN_COMMAND =
+  `timeout --preserve-status --signal=INT --kill-after=${CURRENT_CAMPAIGN_FORCE_KILL_GRACE_SECONDS}s ` +
+  `${CURRENT_CAMPAIGN_TIMEOUT_SECONDS}s recon fuzz . --workers 1 ` +
+  `--timeout ${CURRENT_CAMPAIGN_TIMEOUT_SECONDS} --test-limit ${RECON_TIMEOUT_TEST_LIMIT}`;
+
+function currentCampaignPlan(): Record<string, unknown> {
   return {
-    schema_version: "ultrafuzz.invariant-campaign-plan.v1",
+    schema_version: "ultrafuzz.invariant-campaign-plan.v2",
     available_vcpus: 1,
     workers: 1,
-    configured_budget_seconds: 600,
-    deadline: "2026-01-01T00:10:00Z",
-    finalization_reserve_seconds: 60,
-    backend: { name: "recon", version: null },
-    command_plan: [{ phase: "campaign", command: "recon fuzz ." }],
+    configured_budget_seconds:
+      CURRENT_CAMPAIGN_TIMEOUT_SECONDS +
+      CURRENT_CAMPAIGN_FORCE_KILL_GRACE_SECONDS +
+      CURRENT_CAMPAIGN_FINALIZATION_RESERVE_SECONDS,
+    deadline: CURRENT_CAMPAIGN_FINAL_ARTIFACT_DEADLINE,
+    finalization_reserve_seconds: CURRENT_CAMPAIGN_FINALIZATION_RESERVE_SECONDS,
+    configured_fuzzer_timeout_seconds: CURRENT_CAMPAIGN_TIMEOUT_SECONDS,
+    recon_internal_timeout_seconds: CURRENT_CAMPAIGN_TIMEOUT_SECONDS,
+    recon_test_limit: RECON_TIMEOUT_TEST_LIMIT,
+    host_soft_timeout_seconds: CURRENT_CAMPAIGN_TIMEOUT_SECONDS,
+    host_force_kill_grace_seconds: CURRENT_CAMPAIGN_FORCE_KILL_GRACE_SECONDS,
+    artifact_finalization_reserve_seconds: CURRENT_CAMPAIGN_FINALIZATION_RESERVE_SECONDS,
+    backend_started_at: CURRENT_CAMPAIGN_STARTED_AT,
+    fuzzing_deadline_utc: CURRENT_CAMPAIGN_FUZZING_DEADLINE,
+    force_kill_deadline_utc: CURRENT_CAMPAIGN_FORCE_KILL_DEADLINE,
+    final_artifact_deadline_utc: CURRENT_CAMPAIGN_FINAL_ARTIFACT_DEADLINE,
+    backend: { name: "recon", version: null, exact_shell_escaped_command: CURRENT_CAMPAIGN_COMMAND },
+    command_plan: [{ phase: "campaign", command: CURRENT_CAMPAIGN_COMMAND }],
     paths: campaignFixturePaths
   };
 }
@@ -8022,6 +8046,8 @@ function currentCampaign(
 ): Record<string, unknown> {
   const failures = failureFixtures.map(currentCampaignFailure);
   const executionStatus = options.executionStatus ?? "partial";
+  const complete = executionStatus === "complete";
+  const finishedAt = complete ? "2026-01-01T01:00:01.000Z" : "2026-01-01T00:05:00.000Z";
   const evidencePaths = new Set<string>([campaignFixturePaths.log, campaignFixturePaths.raw_results]);
   for (const failure of failures) {
     if (typeof failure.raw_reproducer_ref === "string") evidencePaths.add(failure.raw_reproducer_ref);
@@ -8036,20 +8062,26 @@ function currentCampaign(
     campaign_summary_ref: "campaign-summary.json",
     fuzzer_backend: options.fuzzerBackend ?? "recon",
     backend_version: null,
+    configured_timeout_seconds: CURRENT_CAMPAIGN_TIMEOUT_SECONDS,
+    exact_command: CURRENT_CAMPAIGN_COMMAND,
+    start_timestamp: CURRENT_CAMPAIGN_STARTED_AT,
+    end_timestamp: finishedAt,
+    termination_reason: complete ? "configured-timeout" : "process-exit",
+    campaign_outcome: complete ? "complete" : "partial",
+    usable_results: true,
     execution: {
       status: executionStatus,
       usable_results: true,
-      command: "recon fuzz .",
+      command: CURRENT_CAMPAIGN_COMMAND,
       config_path: null,
       workers: 1,
-      started_at: "2026-01-01T00:00:00Z",
-      finished_at: "2026-01-01T00:05:00Z",
-      deadline: "2026-01-01T00:10:00Z",
-      exit_code: executionStatus === "complete" ? 0 : 1,
-      failure:
-        executionStatus === "complete"
-          ? null
-          : { category: "process-failed", summary: "The fixture campaign stopped after producing usable results." }
+      started_at: CURRENT_CAMPAIGN_STARTED_AT,
+      finished_at: finishedAt,
+      deadline: CURRENT_CAMPAIGN_FINAL_ARTIFACT_DEADLINE,
+      exit_code: complete ? 0 : 1,
+      failure: complete
+        ? null
+        : { category: "process-failed", summary: "The fixture campaign stopped after producing usable results." }
     },
     paths: campaignFixturePaths,
     evidence_files: [...evidencePaths].map((evidencePath) => ({
@@ -8199,7 +8231,16 @@ function writeCampaignSummary(
   preDeduplication: number,
   postDeduplication: number
 ): void {
-  writeArtifact(layout, campaignId, "campaign-plan.json", JSON.stringify(historicalCampaignPlan()));
+  const timeoutSetting = 'invariant_testing_fuzzer_timeout = "1h"';
+  const currentConfig = fs.readFileSync(layout.resolvedConfigPath, "utf8");
+  if (!/^\s*invariant_testing_fuzzer_timeout\s*=/mu.test(currentConfig)) {
+    const invariantsHeader = /^\s*\[invariants\]\s*$/mu;
+    const withTimeout = invariantsHeader.test(currentConfig)
+      ? currentConfig.replace(invariantsHeader, (header) => `${header}\n${timeoutSetting}`)
+      : `${currentConfig.trimEnd()}${currentConfig.trim().length === 0 ? "" : "\n\n"}[invariants]\n${timeoutSetting}\n`;
+    fs.writeFileSync(layout.resolvedConfigPath, withTimeout, "utf8");
+  }
+  writeArtifact(layout, campaignId, "campaign-plan.json", JSON.stringify(currentCampaignPlan()));
   const artifactDir = getNodeArtifactDir(layout, campaignId);
   const campaign = JSON.parse(fs.readFileSync(path.join(artifactDir, "recon-fuzzer-results.json"), "utf8")) as {
     fuzzer_backend: string;
@@ -8248,8 +8289,6 @@ function writeCampaignSummary(
     })
   );
 }
-
-const RECON_TIMEOUT_TEST_LIMIT = "18446744073709551615";
 
 interface CampaignTimeoutPlanFixture extends Record<string, unknown> {
   schema_version: "ultrafuzz.invariant-campaign-plan.v2";
@@ -8424,44 +8463,64 @@ function synchronizeStrictCampaignTimeoutFixture(fixture: CampaignTimeoutFixture
 
 function runCampaignTimeoutGate(
   mutate: (fixture: CampaignTimeoutFixture) => void = () => undefined,
-  planContract: PlannedGraphNode["outputs"][number]["contract"] = "ultrafuzz/invariant-campaign-plan@2",
-  topologyTimeoutSeconds: number | null = 7200,
-  modelTimeoutSeconds: number | null = null,
-  declaredPaths: {
-    plan: string;
-    result: string;
-    findings: string;
-    summary: string;
-  } = {
+  options: {
+    topologyTimeoutSeconds?: number | null;
+    modelTimeoutSeconds?: number | null;
+    logicalNodeId?: string;
+    outputCounts?: Partial<Record<"plan" | "result" | "findings" | "summary", number>>;
+    nonRecordDocument?: "result" | "summary";
+    declaredPaths?: {
+      plan: string;
+      result: string;
+      findings: string;
+      summary: string;
+    };
+  } = {}
+): ReturnType<typeof verifyRequiredArtifactsForAttempt> {
+  const topologyTimeoutSeconds = options.topologyTimeoutSeconds === undefined ? 7200 : options.topologyTimeoutSeconds;
+  const modelTimeoutSeconds = options.modelTimeoutSeconds ?? null;
+  const declaredPaths = options.declaredPaths ?? {
     plan: "campaign-plan.json",
     result: "recon-fuzzer-results.json",
     findings: "findings.json",
     summary: "campaign-summary.json"
-  }
-): ReturnType<typeof verifyRequiredArtifactsForAttempt> {
+  };
+  const outputCounts = {
+    plan: 1,
+    result: 1,
+    findings: 1,
+    summary: 1,
+    ...options.outputCounts
+  };
+  const rolePath = (role: keyof typeof outputCounts, index: number): string =>
+    index === 0 ? declaredPaths[role] : `${declaredPaths[role]}.duplicate-${index}`;
   const layout = createRunLayout({
     projectRoot: tempProject(),
     runId: "run-campaign-timeout",
     resolvedConfigToml: '[invariants]\ninvariant_testing_fuzzer_timeout = "1h"\n'
   });
   campaignPropertyCatalog(layout, ["property-1"]);
-  const campaignId = "stateful-invariant-campaign";
+  const campaignId = options.logicalNodeId ?? "stateful-invariant-campaign";
   const fixture = campaignTimeoutFixture();
   mutate(fixture);
-  if (fixture.plan.schema_version === "ultrafuzz.invariant-campaign-plan.v2") {
-    synchronizeStrictCampaignTimeoutFixture(fixture);
-  }
+  synchronizeStrictCampaignTimeoutFixture(fixture);
   fixture.summary.campaign_plan_ref = declaredPaths.plan;
   fixture.summary.backend_results[0] = {
     ...fixture.summary.backend_results[0],
     result_ref: declaredPaths.result
   };
-  writeArtifact(layout, campaignId, declaredPaths.plan, JSON.stringify(fixture.plan), planContract);
+  writeArtifact(
+    layout,
+    campaignId,
+    declaredPaths.plan,
+    JSON.stringify(fixture.plan),
+    "ultrafuzz/invariant-campaign-plan@2"
+  );
   writeArtifact(
     layout,
     campaignId,
     declaredPaths.result,
-    JSON.stringify(fixture.backend),
+    JSON.stringify(options.nonRecordDocument === "result" ? [] : fixture.backend),
     "ultrafuzz/property-campaign@3"
   );
   writeArtifact(layout, campaignId, declaredPaths.findings, "[]", "ultrafuzz/findings@2");
@@ -8469,15 +8528,60 @@ function runCampaignTimeoutGate(
     layout,
     campaignId,
     declaredPaths.summary,
-    JSON.stringify(fixture.summary),
+    JSON.stringify(options.nonRecordDocument === "summary" ? [] : fixture.summary),
     "ultrafuzz/campaign-summary@2"
   );
+  for (let index = 1; index < outputCounts.plan; index += 1) {
+    writeArtifact(
+      layout,
+      campaignId,
+      rolePath("plan", index),
+      JSON.stringify(fixture.plan),
+      "ultrafuzz/invariant-campaign-plan@2"
+    );
+  }
+  for (let index = 1; index < outputCounts.result; index += 1) {
+    writeArtifact(
+      layout,
+      campaignId,
+      rolePath("result", index),
+      JSON.stringify(fixture.backend),
+      "ultrafuzz/property-campaign@3"
+    );
+  }
+  for (let index = 1; index < outputCounts.findings; index += 1) {
+    writeArtifact(layout, campaignId, rolePath("findings", index), "[]", "ultrafuzz/findings@2");
+  }
+  for (let index = 1; index < outputCounts.summary; index += 1) {
+    writeArtifact(
+      layout,
+      campaignId,
+      rolePath("summary", index),
+      JSON.stringify(fixture.summary),
+      "ultrafuzz/campaign-summary@2"
+    );
+  }
   const base = currentCampaignNode([
     "campaign-plan.json",
     "recon-fuzzer-results.json",
     "findings.json",
     "campaign-summary.json"
   ]);
+  const outputs = [
+    ...Array.from({ length: outputCounts.plan }, (_, index) =>
+      boundOutput(rolePath("plan", index), "ultrafuzz/invariant-campaign-plan@2", index === 0)
+    ),
+    ...Array.from({ length: outputCounts.result }, (_, index) =>
+      boundOutput(rolePath("result", index), "ultrafuzz/property-campaign@3", false)
+    ),
+    ...Array.from({ length: outputCounts.findings }, (_, index) =>
+      boundOutput(rolePath("findings", index), "ultrafuzz/findings@2", false)
+    ),
+    ...Array.from({ length: outputCounts.summary }, (_, index) =>
+      boundOutput(rolePath("summary", index), "ultrafuzz/campaign-summary@2", false)
+    )
+  ];
+  if (outputs.length > 0 && !outputs.some((output) => output.primary)) outputs[0] = { ...outputs[0]!, primary: true };
   const node: PlannedGraphNode = {
     ...base,
     id: campaignId,
@@ -8498,13 +8602,9 @@ function runCampaignTimeoutGate(
             }
           ]
         }),
-    outputs: [
-      boundOutput(declaredPaths.plan, planContract, true),
-      boundOutput(declaredPaths.result, "ultrafuzz/property-campaign@3", false),
-      boundOutput(declaredPaths.findings, "ultrafuzz/findings@2", false),
-      boundOutput(declaredPaths.summary, "ultrafuzz/campaign-summary@2", false)
-    ]
+    outputs
   };
+  if (topologyTimeoutSeconds === null) delete node.timeout_seconds;
   return verifyRequiredArtifactsForAttempt(layout, node, campaignId);
 }
 
@@ -8517,52 +8617,19 @@ test("current campaign timeout gate accepts exact configured Recon timeout evide
   );
 });
 
-test("historical @1 campaign plans remain outside the current v2 timeout-evidence gate", () => {
-  const result = runCampaignTimeoutGate((fixture) => {
-    fixture.plan = historicalCampaignPlan() as CampaignTimeoutPlanFixture;
-    fixture.backend = currentCampaign(["property-1"], [], {
-      executionStatus: "complete"
-    }) as unknown as CampaignTimeoutResultFixture;
-  }, "ultrafuzz/invariant-campaign-plan@1");
-  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
-  assert.deepEqual(
-    result.diagnostics.filter((diagnostic) => diagnostic.source === "campaign-timeout-evidence"),
-    []
-  );
-});
-
-test("current v2 campaign-plan contract fails closed on a historical v1 document", () => {
-  const result = runCampaignTimeoutGate((fixture) => {
-    fixture.plan = historicalCampaignPlan() as CampaignTimeoutPlanFixture;
-    fixture.backend = currentCampaign(["property-1"], [], {
-      executionStatus: "complete"
-    }) as unknown as CampaignTimeoutResultFixture;
-  });
-  assert.equal(result.ok, false);
-  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "JSON_SCHEMA_VIOLATION"));
-  assert.ok(
-    result.diagnostics.some(
-      (diagnostic) =>
-        diagnostic.code === "CAMPAIGN_TIMEOUT_EVIDENCE_INVALID" &&
-        diagnostic.path?.endsWith("campaign-plan.json#$.schema_version")
-    ),
-    JSON.stringify(result.diagnostics)
-  );
-});
-
 test("current campaign timeout gate resolves custom artifact paths from sealed contract declarations", () => {
   const result = runCampaignTimeoutGate(
     (fixture) => {
       fixture.plan.configured_fuzzer_timeout_seconds = 3300;
     },
-    "ultrafuzz/invariant-campaign-plan@2",
-    7200,
-    null,
     {
-      plan: "custom/campaign-plan.json",
-      result: "custom/recon-results.json",
-      findings: "custom/findings.json",
-      summary: "custom/campaign-summary.json"
+      logicalNodeId: "project-owned-recon-campaign",
+      declaredPaths: {
+        plan: "custom/campaign-plan.json",
+        result: "custom/recon-results.json",
+        findings: "custom/findings.json",
+        summary: "custom/campaign-summary.json"
+      }
     }
   );
   assert.equal(result.ok, false);
@@ -8576,14 +8643,58 @@ test("current campaign timeout gate resolves custom artifact paths from sealed c
   );
 });
 
+test("current campaign timeout gate requires exactly one declaration for every tuple member", () => {
+  const tupleMembers = [
+    ["plan", "ultrafuzz/invariant-campaign-plan@2"],
+    ["result", "ultrafuzz/property-campaign@3"],
+    ["summary", "ultrafuzz/campaign-summary@2"],
+    ["findings", "ultrafuzz/findings@2"]
+  ] as const;
+  for (const [role, contract] of tupleMembers) {
+    for (const count of [0, 2] as const) {
+      const result = runCampaignTimeoutGate(() => undefined, {
+        logicalNodeId: "project-owned-recon-campaign",
+        outputCounts: { [role]: count }
+      });
+      assert.equal(result.ok, false, `${role}:${count}`);
+      assert.ok(
+        result.diagnostics.some(
+          (diagnostic) =>
+            diagnostic.code === "CAMPAIGN_TIMEOUT_OUTPUT_DECLARATION_INVALID" &&
+            diagnostic.message.includes(contract) &&
+            diagnostic.message.endsWith(`found ${count}`)
+        ),
+        `${role}:${count}: ${JSON.stringify(result.diagnostics)}`
+      );
+    }
+  }
+});
+
+test("current campaign timeout gate explicitly rejects non-object result and summary documents", () => {
+  for (const role of ["result", "summary"] as const) {
+    const result = runCampaignTimeoutGate(() => undefined, { nonRecordDocument: role });
+    assert.equal(result.ok, false, role);
+    assert.ok(
+      result.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code === "CAMPAIGN_TIMEOUT_EVIDENCE_INVALID" && diagnostic.message.includes("must be an object")
+      ),
+      `${role}: ${JSON.stringify(result.diagnostics)}`
+    );
+  }
+});
+
 test("current campaign timeout gate requires the sealed topology node budget", () => {
-  const result = runCampaignTimeoutGate(() => undefined, "ultrafuzz/invariant-campaign-plan@2", null);
+  const result = runCampaignTimeoutGate(() => undefined, { topologyTimeoutSeconds: null });
   assert.equal(result.ok, false);
   assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "CAMPAIGN_TIMEOUT_PLAN_BUDGET_MISSING"));
 });
 
 test("current campaign timeout gate accepts a sealed model-profile or run-default budget", () => {
-  const result = runCampaignTimeoutGate(() => undefined, "ultrafuzz/invariant-campaign-plan@2", null, 7200);
+  const result = runCampaignTimeoutGate(() => undefined, {
+    topologyTimeoutSeconds: null,
+    modelTimeoutSeconds: 7200
+  });
   assert.deepEqual(
     result.diagnostics.filter((diagnostic) => diagnostic.source === "campaign-timeout-evidence"),
     [],

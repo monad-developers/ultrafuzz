@@ -5399,6 +5399,11 @@ function semanticGateContextForVerifiedOutput(
       publications: readonly { path: string; sha256: string }[];
     };
   };
+  propertyCampaignTimeout?: {
+    configuredFuzzerTimeoutSeconds: number;
+    plannedTimeoutSeconds: number;
+    finalizationReserveSeconds: number;
+  };
 } {
   const snapshot = verifiedOutputs.get(output.path);
   if (snapshot === undefined) {
@@ -5414,18 +5419,10 @@ function semanticGateContextForVerifiedOutput(
     }
   };
   if (output.schemaFile === "property-campaign.schema.json") {
-    const campaignPlanOutputs = task.outputs.filter(
-      (candidate) =>
-        candidate.contract === "ultrafuzz/invariant-campaign-plan@1" ||
-        candidate.contract === "ultrafuzz/invariant-campaign-plan@2"
-    );
-    if (campaignPlanOutputs.length !== 1) {
-      throw new Error("artifact-contract failure: expected exactly one campaign-plan contract sibling");
-    }
     const campaignPlan = verifiedSiblingJsonArtifact(
       task,
       verifiedOutputs,
-      campaignPlanOutputs[0]!.contract,
+      "ultrafuzz/invariant-campaign-plan@2",
       "campaign plan"
     );
     const findings = verifiedSiblingJsonArtifact(task, verifiedOutputs, "ultrafuzz/findings@2", "campaign findings");
@@ -5477,6 +5474,9 @@ function semanticGateContextForVerifiedOutput(
         }))
       }
     };
+    if (task.campaignTimeoutExpectations !== null && task.campaignTimeoutExpectations !== undefined) {
+      context.propertyCampaignTimeout = task.campaignTimeoutExpectations;
+    }
   } else if (output.schemaFile === "campaign-summary.schema.json") {
     context.artifactSet = siblingCampaignSemanticArtifacts(task, verifiedOutputs);
   } else if (output.schemaFile === "implemented-properties.schema.json") {
@@ -5600,6 +5600,32 @@ function verifyOutputSemanticGates(
   }
 }
 
+function requireCompleteInvariantCampaignOutputTuple(task: (typeof taskSpecs)[number]): void {
+  const campaignPlanContract = "ultrafuzz/invariant-campaign-plan@2";
+  const tupleContracts = [
+    campaignPlanContract,
+    "ultrafuzz/property-campaign@3",
+    "ultrafuzz/campaign-summary@2",
+    "ultrafuzz/findings@2"
+  ] as const;
+  const roleContracts: ReadonlySet<string> = new Set(tupleContracts.slice(0, 3));
+  if (!task.outputs.some((output) => roleContracts.has(output.contract))) return;
+
+  const invalidCounts = tupleContracts
+    .map((contract) => ({
+      contract,
+      count: task.outputs.filter((output) => output.contract === contract).length
+    }))
+    .filter(({ count }) => count !== 1);
+  if (invalidCounts.length === 0) return;
+
+  throw new Error(
+    `artifact-contract failure: node ${task.attemptId} declaring a current campaign output role must declare exactly one complete campaign output tuple (${tupleContracts.join(", ")}); observed ${invalidCounts
+      .map(({ contract, count }) => `${contract}=${count}`)
+      .join(", ")}`
+  );
+}
+
 function finalizeAndVerifyArtifacts(task: (typeof taskSpecs)[number]): z.infer<typeof verificationOutput> {
   // The model session has already returned. Only explicitly runtime-owned
   // artifacts and exact-byte companions may be materialized here. This task is
@@ -5641,6 +5667,7 @@ function verifyArtifacts(
   const artifactRoots = taskArtifactRoots(task, artifactDir);
   const capturedOutputs = capturedTaskOutputs ?? captureTaskOutputs(task);
   const { artifacts, verifiedOutputs } = validateCapturedTaskOutputs(task, capturedOutputs);
+  requireCompleteInvariantCampaignOutputTuple(task);
   const campaignEvidence = capturePropertyCampaignEvidence(task, verifiedOutputs);
   const dependencySnapshotEpoch = beginVerifiedDependencySnapshotEpoch(task);
 

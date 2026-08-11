@@ -16,6 +16,8 @@ import * as ts from "typescript";
 
 import {
   ARTIFACT_VERIFICATION_SCHEMA_VERSION,
+  artifactContractDefinition,
+  artifactContractSchemaBinding,
   artifactSchemaBundleDigest,
   artifactSchemaRegistry,
   ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
@@ -1106,7 +1108,7 @@ nodes:
 }
 
 async function compileInvariantCampaignBudgetFixture(input: {
-  logicalNodeId: "stateful-invariant-campaign" | "stateful-invariant-recon-campaign";
+  logicalNodeId: string;
   nodeTimeoutSeconds: number;
   smokeTimeoutSeconds: number;
   fuzzerTimeoutSeconds: number;
@@ -1121,6 +1123,20 @@ async function compileInvariantCampaignBudgetFixture(input: {
   assert.notEqual(node, undefined);
   node!.logicalId = input.logicalNodeId;
   node!.timeoutSeconds = input.nodeTimeoutSeconds;
+  const definition = artifactContractDefinition("ultrafuzz/invariant-campaign-plan@2");
+  const binding = artifactContractSchemaBinding("ultrafuzz/invariant-campaign-plan@2");
+  assert.notEqual(binding, undefined);
+  node!.outputs.push({
+    path: "campaign-plan.json",
+    contract: "ultrafuzz/invariant-campaign-plan@2",
+    contractDigest: definition.digest,
+    primary: false,
+    schemaFile: binding!.schema_file,
+    schemaId: binding!.schema_id,
+    schemaSha256: binding!.schema_sha256,
+    schemaBundleSha256: binding!.schema_bundle_sha256,
+    validatorBuild: binding!.validator_build
+  });
   plan.value!.resolved_config.invariants.invariantTestingSmokeTimeoutSeconds = input.smokeTimeoutSeconds;
   plan.value!.resolved_config.invariants.invariantTestingFuzzerTimeoutSeconds = input.fuzzerTimeoutSeconds;
   const { compileSmithersWorkflow } = await import("../src/smithers.js");
@@ -5398,12 +5414,17 @@ test("invariant campaign budget admits the shipped 7200-second node timeout", as
     runId: "campaign-budget-default"
   });
   assert.equal(compiled.tasks[0]?.timeoutMs, 7_200_000);
+  const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
+  assert.match(
+    workflowSource,
+    /"campaignTimeoutExpectations": \{\s*"configuredFuzzerTimeoutSeconds": 3600,\s*"plannedTimeoutSeconds": 7200,\s*"finalizationReserveSeconds": 300\s*\}/u
+  );
 });
 
-test("invariant campaign budget rejects an oversized fuzzer timeout with every budget term", async () => {
+test("invariant campaign budget follows the @2 output contract on project-owned nodes", async () => {
   await assert.rejects(
     compileInvariantCampaignBudgetFixture({
-      logicalNodeId: "stateful-invariant-recon-campaign",
+      logicalNodeId: "project-owned-recon-campaign",
       nodeTimeoutSeconds: 7200,
       smokeTimeoutSeconds: 600,
       fuzzerTimeoutSeconds: 6001,
@@ -5412,7 +5433,7 @@ test("invariant campaign budget rejects an oversized fuzzer timeout with every b
     (error: unknown) => {
       assert.ok(error instanceof Error);
       assert.match(error.message, /INVARIANT_CAMPAIGN_TIMEOUT_BUDGET_EXCEEDED/u);
-      assert.match(error.message, /logical_node_id=stateful-invariant-recon-campaign/u);
+      assert.match(error.message, /logical_node_id=project-owned-recon-campaign/u);
       assert.match(error.message, /node_timeout_seconds=7200/u);
       assert.match(error.message, /required_seconds=7201/u);
       assert.match(error.message, /smoke_timeout_seconds=600/u);

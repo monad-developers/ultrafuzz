@@ -2213,6 +2213,42 @@ test("every contextual registration executes real positive and negative checks",
     };
     const campaignEvidenceBytes = Buffer.from("x", "utf8");
     const campaignEvidenceDigest = crypto.createHash("sha256").update(campaignEvidenceBytes).digest("hex");
+    const campaignTimeoutCommand =
+      "timeout --preserve-status --signal=INT --kill-after=300s 60s recon fuzz . --workers 1 " +
+      "--timeout 60 --test-limit 18446744073709551615";
+    const campaignTimeoutPlan = {
+      configured_fuzzer_timeout_seconds: 60,
+      recon_internal_timeout_seconds: 60,
+      host_soft_timeout_seconds: 60,
+      host_force_kill_grace_seconds: 300,
+      artifact_finalization_reserve_seconds: 100,
+      finalization_reserve_seconds: 100,
+      configured_budget_seconds: 460,
+      recon_test_limit: "18446744073709551615",
+      backend_started_at: "2026-01-01T00:00:00.000Z",
+      fuzzing_deadline_utc: "2026-01-01T00:01:00.000Z",
+      force_kill_deadline_utc: "2026-01-01T00:06:00.000Z",
+      final_artifact_deadline_utc: "2026-01-01T00:07:40.000Z",
+      deadline: "2026-01-01T00:07:40.000Z",
+      backend: { exact_shell_escaped_command: campaignTimeoutCommand },
+      command_plan: [{ phase: "campaign", command: campaignTimeoutCommand }]
+    };
+    const campaignTimeoutDocument = {
+      configured_timeout_seconds: 60,
+      exact_command: campaignTimeoutCommand,
+      start_timestamp: "2026-01-01T00:00:00.000Z",
+      end_timestamp: "2026-01-01T00:01:00.000Z",
+      termination_reason: "configured-timeout",
+      campaign_outcome: "complete",
+      usable_results: true,
+      execution: {
+        command: campaignTimeoutCommand,
+        usable_results: true,
+        started_at: "2026-01-01T00:00:00.000Z",
+        finished_at: "2026-01-01T00:01:00.000Z",
+        deadline: "2026-01-01T00:07:40.000Z"
+      }
+    };
     const contextFixtures: Record<
       Exclude<SemanticGateName, keyof typeof fixtures>,
       { positive: unknown; negative: unknown; context: SemanticGateContext }
@@ -2534,6 +2570,21 @@ test("every contextual registration executes real positive and negative checks",
         positive: { failure_counts: { pre_deduplication: 1, post_deduplication: 1 } },
         negative: { failure_counts: { pre_deduplication: 2, post_deduplication: 1 } },
         context: { artifactSet: { campaigns: [{ failures: [{}] }], findings: [{}] } }
+      },
+      "property-campaign-timeout-evidence": {
+        positive: campaignTimeoutDocument,
+        negative: { ...campaignTimeoutDocument, configured_timeout_seconds: 59 },
+        context: {
+          artifactSet: {
+            campaignPlan: campaignTimeoutPlan,
+            campaignSummary: { outcome: "complete" }
+          },
+          propertyCampaignTimeout: {
+            configuredFuzzerTimeoutSeconds: 60,
+            plannedTimeoutSeconds: 600,
+            finalizationReserveSeconds: 100
+          }
+        }
       },
       "property-campaign-context-joins": {
         positive: {

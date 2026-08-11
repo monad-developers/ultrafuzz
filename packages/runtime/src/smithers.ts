@@ -1292,7 +1292,12 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     )}\n`,
     "workflow input"
   );
-  writePreparedWorkflowFile(projectRoot, workflowPath, renderWorkflowSource(compiled), "generated Smithers workflow");
+  writePreparedWorkflowFile(
+    projectRoot,
+    workflowPath,
+    renderWorkflowSource(compiled, input.config),
+    "generated Smithers workflow"
+  );
   writePreparedWorkflowFile(
     input.runLayout.root,
     evidenceWorkflowPath,
@@ -3844,11 +3849,12 @@ function compileTask(input: {
   };
 }
 
-const INVARIANT_CAMPAIGN_LOGICAL_NODE_IDS = new Set([
-  "stateful-invariant-campaign",
-  "stateful-invariant-recon-campaign"
-]);
 const INVARIANT_CAMPAIGN_HOST_SHUTDOWN_GRACE_SECONDS = 300;
+const INVARIANT_CAMPAIGN_ROLE_CONTRACTS = new Set([
+  "ultrafuzz/invariant-campaign-plan@2",
+  "ultrafuzz/property-campaign@3",
+  "ultrafuzz/campaign-summary@2"
+]);
 
 function assertInvariantCampaignTimeoutBudget(
   input: {
@@ -3857,7 +3863,7 @@ function assertInvariantCampaignTimeoutBudget(
   },
   timeoutMs: number
 ): void {
-  if (!INVARIANT_CAMPAIGN_LOGICAL_NODE_IDS.has(input.node.logicalId)) {
+  if (!input.node.outputs.some((output) => output.contract === "ultrafuzz/invariant-campaign-plan@2")) {
     return;
   }
   const runtimeBudget = topologyRuntimeBudgetForTimeout(timeoutMs);
@@ -4055,7 +4061,7 @@ export function topologyRuntimeContextForTimeout(timeoutMs: number): string {
   ].join("\n");
 }
 
-function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
+function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: ResolvedConfig): string {
   const taskSpecs = JSON.stringify(
     compiled.tasks.map((task) => ({
       id: task.smithersNodeId,
@@ -4082,6 +4088,15 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
       branch: `ultrafuzz/${compiled.runId}/${task.attemptId}`,
       timeoutMs: task.timeoutMs,
       runtimeContext: topologyRuntimeContextForTimeout(task.timeoutMs),
+      campaignTimeoutExpectations: task.metadata.artifacts.outputs.some((output) =>
+        INVARIANT_CAMPAIGN_ROLE_CONTRACTS.has(output.contract)
+      )
+        ? {
+            configuredFuzzerTimeoutSeconds: config.invariants.invariantTestingFuzzerTimeoutSeconds,
+            plannedTimeoutSeconds: task.metadata.timeout.seconds,
+            finalizationReserveSeconds: topologyRuntimeBudgetForTimeout(task.timeoutMs).finalizationReserveSeconds
+          }
+        : null,
       heartbeatTimeoutMs: task.heartbeatTimeoutMs,
       retries: task.retries,
       retryPolicy: task.retryPolicy,
