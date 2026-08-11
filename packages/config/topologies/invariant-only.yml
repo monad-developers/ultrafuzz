@@ -375,6 +375,7 @@ nodes:
     group: strategies
     required_commands:
       - covg-eval
+      - recon
     depends_on:
       - stateful-invariant-handlers
       - property-specification-fanin
