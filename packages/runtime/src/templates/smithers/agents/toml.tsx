@@ -35,6 +35,29 @@ export function readStringTable(text: string, tableName: string): Record<string,
   return fields;
 }
 
+/**
+ * Read the assignments that precede the first table header. TOML calls these
+ * the root table; `readStringTable` cannot express them because it only starts
+ * collecting once a `[table]` line matches.
+ */
+export function readRootStringTable(text: string): Record<string, string> {
+  const fields: Record<string, string> = {};
+  for (const rawLine of text.split(/\r?\n/u)) {
+    const line = rawLine.trim();
+    if (line === "" || line.startsWith("#")) {
+      continue;
+    }
+    if (line.startsWith("[")) {
+      break;
+    }
+    const assignment = /^([A-Za-z0-9_-]+)\s*=\s*"((?:\\.|[^"\\])*)"\s*(?:#.*)?$/u.exec(line);
+    if (assignment?.[1] && assignment[2] !== undefined) {
+      fields[assignment[1]] = decodeBasicString(assignment[2], assignment[1]);
+    }
+  }
+  return fields;
+}
+
 export function stringField(table: Record<string, string>, key: string): string | undefined {
   const value = table[key];
   if (value === undefined) {
