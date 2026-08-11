@@ -349,11 +349,14 @@ It derives node counts, row lifecycle state, checkpoint age, and estimated
 remaining time only from recorded eval links, durable run state, and bounded
 linked-workflow evidence. It never resumes, retries, synchronizes, collects,
 publishes, or otherwise changes a workflow. The compact table shows at most
-three active or waiting node IDs per row, preserves actionable wait reason →
-next action pairs, and uses `+N` for the remainder. It also distinguishes an
-admitted active linked workflow from a finished, stopped, failed, paused,
-waiting, or cancelled one using the current durable workflow binding rather
-than a superseded launch-time ID.
+three active or waiting node IDs per row, truncates each displayed ID after 128
+Unicode characters while keeping the JSON value exact, preserves actionable
+wait reason → next action pairs, and uses `+N` for the remainder. It also
+distinguishes an admitted active linked workflow from a finished, stopped,
+failed, paused, waiting, or cancelled one using the current durable workflow
+binding rather than a superseded launch-time ID. Recognized Smithers lifecycle
+aliases retain their recorded spelling in JSON for compatibility across runner
+versions.
 
 All rows use matrix-order opaque labels. The versioned
 `ultrafuzz.eval.status.v1` JSON keeps the full `active_node_ids` and

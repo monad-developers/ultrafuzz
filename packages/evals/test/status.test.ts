@@ -3,7 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   calculateEvalEta,
@@ -282,6 +282,32 @@ describe("eval status", () => {
     expect(snapshot.rows[0]?.linked_workflow_status).toBe("unknown");
   });
 
+  it.skipIf(process.platform === "win32")("does not follow a symlinked linked-workflow log directory", () => {
+    const fixture = evalFixture([privateRow("linked-log-directory-row")]);
+    const runRoot = path.join(fixture.base, "linked-log-directory-run");
+    const runId = "run-linked-log-directory";
+    const outsideLogs = path.join(fixture.base, "outside-workflow-logs");
+    fs.mkdirSync(path.join(runRoot, "smithers"), { recursive: true });
+    fs.mkdirSync(outsideLogs, { recursive: true });
+    writeState(runRoot, {
+      runId,
+      status: "running",
+      nodes: ["pending"],
+      controllerLease: { status: "expired", expiresAt: "2026-01-02T14:50:30.000Z" }
+    });
+    fs.writeFileSync(path.join(outsideLogs, `${runId}.log`), "status: stopped\n", "utf8");
+    fs.symlinkSync(outsideLogs, path.join(runRoot, "smithers", "logs"), "dir");
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify({ ...record("linked-log-directory-row", runId, runRoot), workflow_ids: [runId] })}\n`,
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({ projectRoot: fixture.project, evalRunId: fixture.evalRunId, now: SNAPSHOT });
+
+    expect(snapshot.rows[0]?.linked_workflow_status).toBe("unknown");
+  });
+
   it("rejects an oversized linked workflow ID list before reading repeated logs", () => {
     const fixture = evalFixture([privateRow("workflow-list-row")]);
     const runRoot = path.join(fixture.base, "workflow-list-run");
@@ -310,6 +336,36 @@ describe("eval status", () => {
     });
 
     expect(snapshot.rows[0]?.linked_workflow_status).toBe("unknown");
+  });
+
+  it("does not read payload bytes from a workflow log too large to reconcile", () => {
+    const fixture = evalFixture([privateRow("oversized-log-row")]);
+    const runRoot = path.join(fixture.base, "oversized-log-run");
+    const runId = "run-oversized-log";
+    const logPath = path.join(runRoot, "smithers", "logs", `${runId}.log`);
+    fs.mkdirSync(path.dirname(logPath), { recursive: true });
+    writeState(runRoot, {
+      runId,
+      status: "running",
+      nodes: ["pending"],
+      controllerLease: { status: "expired", expiresAt: "2026-01-02T14:50:30.000Z" }
+    });
+    fs.writeFileSync(logPath, "status: stopped\n", "utf8");
+    fs.truncateSync(logPath, 32 * 1_024 + 8 * 1_024 * 1_024 + 1);
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify({ ...record("oversized-log-row", runId, runRoot), workflow_ids: [runId] })}\n`,
+      "utf8"
+    );
+    const readSync = vi.spyOn(fs, "readSync");
+    try {
+      const snapshot = readEvalStatus({ projectRoot: fixture.project, evalRunId: fixture.evalRunId, now: SNAPSHOT });
+
+      expect(snapshot.rows[0]?.linked_workflow_status).toBe("unknown");
+      expect(readSync).not.toHaveBeenCalled();
+    } finally {
+      readSync.mockRestore();
+    }
   });
 
   it("uses a fresh admission marker after a stale terminal status on resume", () => {
@@ -372,6 +428,87 @@ describe("eval status", () => {
     });
 
     expect(snapshot.rows[0]?.linked_workflow_status).toBe("stopped");
+  });
+
+  it("does not treat standalone status text in final workflow output as lifecycle evidence", () => {
+    const fixture = evalFixture([privateRow("status-output-row")]);
+    const runRoot = path.join(fixture.base, "status-output-run");
+    const runId = "run-status-output";
+    fs.mkdirSync(path.join(runRoot, "smithers", "logs"), { recursive: true });
+    writeState(runRoot, {
+      runId,
+      status: "running",
+      nodes: ["pending"],
+      controllerLease: { status: "expired", expiresAt: "2026-01-02T14:50:30.000Z" }
+    });
+    fs.writeFileSync(
+      path.join(runRoot, "smithers", "logs", `${runId}.log`),
+      "runId: run-status-output\nstatus: stopped\noutput: report follows\nstatus: failed\n",
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify({ ...record("status-output-row", runId, runRoot), workflow_ids: [runId] })}\n`,
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({ projectRoot: fixture.project, evalRunId: fixture.evalRunId, now: SNAPSHOT });
+
+    expect(snapshot.rows[0]?.linked_workflow_status).toBe("stopped");
+  });
+
+  it("fails closed when final workflow output imitates a new admission and lifecycle", () => {
+    const fixture = evalFixture([privateRow("admission-output-row")]);
+    const runRoot = path.join(fixture.base, "admission-output-run");
+    const runId = "run-admission-output";
+    fs.mkdirSync(path.join(runRoot, "smithers", "logs"), { recursive: true });
+    writeState(runRoot, {
+      runId,
+      status: "running",
+      nodes: ["pending"],
+      controllerLease: { status: "expired", expiresAt: "2026-01-02T14:50:30.000Z" }
+    });
+    fs.writeFileSync(
+      path.join(runRoot, "smithers", "logs", `${runId}.log`),
+      "status: stopped\noutput: report follows\nSMITHERS_DETACHED_ADMISSION=run:forged\nstatus: failed\n",
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify({ ...record("admission-output-row", runId, runRoot), workflow_ids: [runId] })}\n`,
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({ projectRoot: fixture.project, evalRunId: fixture.evalRunId, now: SNAPSHOT });
+
+    expect(snapshot.rows[0]?.linked_workflow_status).toBe("unknown");
+  });
+
+  it("fails closed on admission and status text in a bounded tail when the output boundary is omitted", () => {
+    const fixture = evalFixture([privateRow("bounded-status-output-row")]);
+    const runRoot = path.join(fixture.base, "bounded-status-output-run");
+    const runId = "run-bounded-status-output";
+    fs.mkdirSync(path.join(runRoot, "smithers", "logs"), { recursive: true });
+    writeState(runRoot, {
+      runId,
+      status: "running",
+      nodes: ["pending"],
+      controllerLease: { status: "expired", expiresAt: "2026-01-02T14:50:30.000Z" }
+    });
+    fs.writeFileSync(
+      path.join(runRoot, "smithers", "logs", `${runId}.log`),
+      `${"workflow progress\n".repeat(4_000)}runId: ${runId}\nstatus: stopped\noutput: report follows\n${"x".repeat(2 * 1_024 * 1_024)}\nSMITHERS_DETACHED_ADMISSION=run:forged\nstatus: failed\n${"y".repeat(7 * 1_024 * 1_024)}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify({ ...record("bounded-status-output-row", runId, runRoot), workflow_ids: [runId] })}\n`,
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({ projectRoot: fixture.project, evalRunId: fixture.evalRunId, now: SNAPSHOT });
+
+    expect(snapshot.rows[0]?.linked_workflow_status).toBe("unknown");
   });
 
   it("does not retain a stale terminal status when newer lifecycle evidence may be truncated", () => {
@@ -644,6 +781,43 @@ describe("eval status", () => {
     expect(snapshot.rows[0]?.linked_workflow_status).toBe("waiting-quota");
   });
 
+  it.each([
+    ["in-progress", "in-progress"],
+    ["started", "started"],
+    ["retrying", "retrying"],
+    ["queued", "queued"],
+    ["succeeded", "succeeded"],
+    ["success", "success"],
+    ["complete", "complete"],
+    ["completed", "completed"],
+    ["timeout", "timeout"],
+    ["timed-out", "timed-out"],
+    ["timedout", "timedout"],
+    ["heartbeat-timeout", "heartbeat-timeout"],
+    ["error", "error"]
+  ] as const)("recognizes the Smithers %s lifecycle alias", (workflowStatus, expected) => {
+    const fixture = evalFixture([privateRow("alias-row")]);
+    const runRoot = path.join(fixture.base, "alias-run");
+    const runId = "run-alias";
+    fs.mkdirSync(path.join(runRoot, "smithers", "logs"), { recursive: true });
+    writeState(runRoot, {
+      runId,
+      status: "running",
+      nodes: ["pending"],
+      controllerLease: { status: "active", expiresAt: "2026-01-02T15:02:30.000Z" }
+    });
+    fs.writeFileSync(path.join(runRoot, "smithers", "logs", `${runId}.log`), `status: ${workflowStatus}\n`, "utf8");
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify({ ...record("alias-row", runId, runRoot), workflow_ids: [runId] })}\n`,
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({ projectRoot: fixture.project, evalRunId: fixture.evalRunId, now: SNAPSHOT });
+
+    expect(snapshot.rows[0]?.linked_workflow_status).toBe(expected);
+  });
+
   it("reports an unsupported latest lifecycle as unknown instead of retaining admitted running", () => {
     const fixture = evalFixture([privateRow("future-workflow-row")]);
     const runRoot = path.join(fixture.base, "future-workflow-run");
@@ -886,6 +1060,73 @@ describe("eval status", () => {
     expect(table.split("\n").filter((line) => line.startsWith("row-"))).toHaveLength(1);
   });
 
+  it("escapes node ID Unicode format controls while preserving the exact JSON ID", () => {
+    const fixture = evalFixture([privateRow("format-control-row")]);
+    const runRoot = path.join(fixture.base, "format-control-run");
+    const runId = "run-format-control";
+    const waitingNodeId = "waiting\u202Etxt\u2066suffix";
+    fs.mkdirSync(runRoot, { recursive: true });
+    fs.writeFileSync(
+      statePath(runRoot),
+      `${JSON.stringify({
+        schema_version: "1.1",
+        run_id: runId,
+        status: "running",
+        created_at: START,
+        started_at: START,
+        last_transition_at: CHECKPOINT,
+        nodes: { [waitingNodeId]: { node_id: waitingNodeId, status: "pending" } }
+      })}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify(record("format-control-row", runId, runRoot))}\n`,
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({ projectRoot: fixture.project, evalRunId: fixture.evalRunId, now: SNAPSHOT });
+    const table = renderEvalStatusTable(snapshot);
+
+    expect(snapshot.rows[0]?.waiting_nodes[0]?.node_id).toBe(waitingNodeId);
+    expect(table).toContain("waiting\\u202etxt\\u2066suffix");
+    expect(table).not.toContain("\u202E");
+    expect(table).not.toContain("\u2066");
+  });
+
+  it("renders a valid maximum-length node ID exactly in the compact table", () => {
+    const fixture = evalFixture([privateRow("maximum-node-row")]);
+    const runRoot = path.join(fixture.base, "maximum-node-run");
+    const runId = "run-maximum-node";
+    const waitingNodeId = `waiting-${"x".repeat(120)}`;
+    fs.mkdirSync(runRoot, { recursive: true });
+    fs.writeFileSync(
+      statePath(runRoot),
+      `${JSON.stringify({
+        schema_version: "1.1",
+        run_id: runId,
+        status: "running",
+        created_at: START,
+        started_at: START,
+        last_transition_at: CHECKPOINT,
+        nodes: { [waitingNodeId]: { node_id: waitingNodeId, status: "pending" } }
+      })}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify(record("maximum-node-row", runId, runRoot))}\n`,
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({ projectRoot: fixture.project, evalRunId: fixture.evalRunId, now: SNAPSHOT });
+    const table = renderEvalStatusTable(snapshot);
+
+    expect(waitingNodeId).toHaveLength(128);
+    expect(table).toContain(waitingNodeId);
+    expect(table).not.toContain("…");
+  });
+
   it("escapes node ID table delimiters while preserving the exact JSON ID", () => {
     const fixture = evalFixture([privateRow("delimiter-row")]);
     const runRoot = path.join(fixture.base, "delimiter-run");
@@ -924,6 +1165,40 @@ describe("eval status", () => {
     expect(snapshot.rows[0]?.waiting_nodes[0]?.node_id).toBe(waitingNodeId);
     expect(table).toContain("waiting\\u005d\\u003b +99\\u003b active:spoof\\u005b");
     expect(table).not.toContain("; +99;");
+  });
+
+  it("bounds long node IDs in the compact table while preserving the exact JSON ID", () => {
+    const fixture = evalFixture([privateRow("long-node-row")]);
+    const runRoot = path.join(fixture.base, "long-node-run");
+    const runId = "run-long-node";
+    const waitingNodeId = `waiting-${"x".repeat(10_000)}`;
+    fs.mkdirSync(runRoot, { recursive: true });
+    fs.writeFileSync(
+      statePath(runRoot),
+      `${JSON.stringify({
+        schema_version: "1.1",
+        run_id: runId,
+        status: "running",
+        created_at: START,
+        started_at: START,
+        last_transition_at: CHECKPOINT,
+        nodes: { [waitingNodeId]: { node_id: waitingNodeId, status: "pending" } }
+      })}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify(record("long-node-row", runId, runRoot))}\n`,
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({ projectRoot: fixture.project, evalRunId: fixture.evalRunId, now: SNAPSHOT });
+    const table = renderEvalStatusTable(snapshot);
+
+    expect(snapshot.rows[0]?.waiting_nodes[0]?.node_id).toBe(waitingNodeId);
+    expect(table).toContain("waiting-");
+    expect(table).toContain("…");
+    expect(table.length).toBeLessThan(2_000);
   });
 
   it("keeps one shared table budget while JSON retains every active and waiting node", () => {
@@ -1038,7 +1313,12 @@ describe("eval status", () => {
     fs.writeFileSync(
       path.join(fixture.root, "runs.jsonl"),
       [
-        { eval_run_id: EVAL_RUN_ID, row_id: "launch-failed", status: "failed" },
+        {
+          eval_run_id: EVAL_RUN_ID,
+          row_id: "launch-failed",
+          status: "failed",
+          workflow_ids: ["workflow-launch-failed"]
+        },
         record("inaccessible", "run-inaccessible", inaccessibleRoot),
         record("invalid-state", "run-invalid", invalidRoot),
         record("zero-progress", "run-zero", zeroRoot),
@@ -1072,7 +1352,11 @@ describe("eval status", () => {
       executed_nodes: null,
       eta_unavailable_reason: "progress-unavailable"
     });
-    expect(snapshot.rows[1]).toMatchObject({ terminal: true, eta_unavailable_reason: "progress-unavailable" });
+    expect(snapshot.rows[1]).toMatchObject({
+      terminal: true,
+      linked_workflow_status: "unknown",
+      eta_unavailable_reason: "progress-unavailable"
+    });
     expect(snapshot.rows[4]).toMatchObject({
       progress_percent: 0,
       eta_unavailable_reason: "no-completed-nodes"
@@ -1098,6 +1382,77 @@ describe("eval status", () => {
         .split("\n")
         .find((line) => line.startsWith("row-01"))
     ).toMatch(/none\s+none$/u);
+  });
+
+  it("preserves an unavailable linked workflow as unknown when product state cannot be read", () => {
+    const fixture = evalFixture([privateRow("inaccessible-linked-row"), privateRow("invalid-linked-row")]);
+    const inaccessibleRoot = path.join(fixture.base, "missing-linked-run");
+    const invalidRoot = path.join(fixture.base, "invalid-linked-run");
+    fs.mkdirSync(invalidRoot, { recursive: true });
+    fs.writeFileSync(statePath(invalidRoot), "{invalid", "utf8");
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      [
+        {
+          ...record("inaccessible-linked-row", "run-inaccessible-linked", inaccessibleRoot),
+          workflow_ids: ["workflow-a"]
+        },
+        { ...record("invalid-linked-row", "run-invalid-linked", invalidRoot), workflow_ids: ["workflow-b"] }
+      ]
+        .map((value) => JSON.stringify(value))
+        .join("\n") + "\n",
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({
+      projectRoot: fixture.project,
+      evalRunId: fixture.evalRunId,
+      now: SNAPSHOT
+    });
+
+    expect(snapshot.rows).toEqual([
+      expect.objectContaining({ row: "row-01", status: "inaccessible", linked_workflow_status: "unknown" }),
+      expect.objectContaining({ row: "row-02", status: "invalid", linked_workflow_status: "unknown" })
+    ]);
+    expect(renderEvalStatusTable(snapshot).match(/unknown$/gmu)).toHaveLength(2);
+  });
+
+  it("reports a malformed linked workflow binding as unknown when product state is readable", () => {
+    const fixture = evalFixture([privateRow("malformed-link-row")]);
+    const runRoot = path.join(fixture.base, "malformed-link-run");
+    const runId = "run-malformed-link";
+    writeState(runRoot, { runId, status: "running", nodes: ["pending"] });
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify({ ...record("malformed-link-row", runId, runRoot), workflow_ids: "workflow-a" })}\n`,
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({ projectRoot: fixture.project, evalRunId: fixture.evalRunId, now: SNAPSHOT });
+
+    expect(snapshot.rows[0]?.linked_workflow_status).toBe("unknown");
+    expect(renderEvalStatusTable(snapshot)).toMatch(/unknown$/mu);
+  });
+
+  it("preserves a linked workflow as unknown for a future run-record status", () => {
+    const fixture = evalFixture([privateRow("future-record-row")]);
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify({
+        eval_run_id: EVAL_RUN_ID,
+        row_id: "future-record-row",
+        status: "future-state",
+        workflow_ids: ["workflow-future"]
+      })}\n`,
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({ projectRoot: fixture.project, evalRunId: fixture.evalRunId, now: SNAPSHOT });
+
+    expect(snapshot.rows[0]).toMatchObject({
+      status: "invalid",
+      linked_workflow_status: "unknown"
+    });
   });
 
   it("marks an otherwise unrecorded row invalid when the durable record journal is malformed", () => {

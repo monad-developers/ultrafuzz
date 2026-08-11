@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import {
+  assertNoSymlinkComponents,
   NODE_STATE_STATUSES,
   NODE_NEXT_ELIGIBLE_ACTIONS,
   NODE_WAIT_REASONS,
@@ -26,6 +27,10 @@ export type EvalStatusEtaUnavailableReason =
   "progress-unavailable" | "no-completed-nodes" | "timing-unavailable" | "checkpoint-stale" | null;
 const EVAL_STATUS_LINKED_WORKFLOW_STATES = [
   "running",
+  "in-progress",
+  "started",
+  "retrying",
+  "queued",
   "waiting-approval",
   "waiting-event",
   "waiting-quota",
@@ -33,8 +38,17 @@ const EVAL_STATUS_LINKED_WORKFLOW_STATES = [
   "paused",
   "continued",
   "finished",
+  "succeeded",
+  "success",
+  "complete",
+  "completed",
   "stopped",
   "failed",
+  "error",
+  "timeout",
+  "timed-out",
+  "timedout",
+  "heartbeat-timeout",
   "cancelled",
   "canceled"
 ] as const;
@@ -111,14 +125,17 @@ const LINKED_WORKFLOW_STATUS_VALUES = new Set<string>(EVAL_STATUS_LINKED_WORKFLO
 const TERMINAL_RUN_STATUSES = new Set<string>(TERMINAL_RUN_STATE_STATUSES);
 const COMPLETED_NODE_STATUSES = new Set<string>(TERMINAL_NODE_STATE_STATUSES);
 const MAX_VISIBLE_STATUS_NODES = 3;
+// Durable node IDs are valid up to 128 ASCII characters. Keep every valid ID
+// exact in the compact view and bound only malformed/future state values.
+const MAX_VISIBLE_STATUS_NODE_ID_CHARACTERS = 128;
 const MAX_LINKED_WORKFLOW_IDS = 32;
 const AMBIGUOUS_LINKED_WORKFLOW_IDS = Symbol("ambiguous-linked-workflow-ids");
-// Detached summaries put lifecycle status before optional final output. Retain
-// admission evidence at the start and a bounded tail large enough to cross
-// ordinary report output without loading an unbounded workflow log.
-const WORKFLOW_LOG_PREFIX_BYTES = 32 * 1_024;
-const WORKFLOW_LOG_TAIL_BYTES = 8 * 1_024 * 1_024;
-const WORKFLOW_ADMISSION_PATTERN = /^SMITHERS_DETACHED_ADMISSION=run:[^\r\n]+\r?$/gmu;
+// Reconciliation reads only complete bounded logs. Once a log exceeds this
+// limit, omitted middle evidence could supersede either edge, so fail closed
+// without spending the watch loop's synchronous I/O budget on discarded bytes.
+const WORKFLOW_LOG_MAX_BYTES = 32 * 1_024 + 8 * 1_024 * 1_024;
+const WORKFLOW_ADMISSION_PATTERN = /^SMITHERS_DETACHED_ADMISSION=run:[^\r\n]+$/u;
+const WORKFLOW_STATUS_PATTERN = /^status:\s*([a-z][a-z-]*)\s*$/u;
 
 /**
  * Read a complete eval matrix snapshot without synchronizing or otherwise
@@ -306,11 +323,15 @@ function statusForRecord(input: {
   snapshotAtMs: number;
   staleAfterSeconds: number;
 }): EvalStatusRow {
-  if (!isRecord(input.record) || !["launched", "failed"].includes(String(input.record.status))) {
+  if (!isRecord(input.record)) {
     return unavailableRow(input.row, "invalid", false);
   }
+  const unavailableLinkedWorkflowStatus = linkedWorkflowAvailability(input.record.workflow_ids);
+  if (!["launched", "failed"].includes(String(input.record.status))) {
+    return unavailableRow(input.row, "invalid", false, unavailableLinkedWorkflowStatus);
+  }
   if (input.record.status === "failed") {
-    return unavailableRow(input.row, "failed", true);
+    return unavailableRow(input.row, "failed", true, unavailableLinkedWorkflowStatus);
   }
   if (
     typeof input.record.ultrafuzz_run_id !== "string" ||
@@ -319,23 +340,23 @@ function statusForRecord(input: {
     input.record.ultrafuzz_run_root.length === 0 ||
     !path.isAbsolute(input.record.ultrafuzz_run_root)
   ) {
-    return unavailableRow(input.row, "invalid", false);
+    return unavailableRow(input.row, "invalid", false, unavailableLinkedWorkflowStatus);
   }
 
   let contents: string;
   try {
     contents = fs.readFileSync(path.join(input.record.ultrafuzz_run_root, "state.json"), "utf8");
   } catch {
-    return unavailableRow(input.row, "inaccessible", false);
+    return unavailableRow(input.row, "inaccessible", false, unavailableLinkedWorkflowStatus);
   }
   let rawState: unknown;
   try {
     rawState = JSON.parse(contents);
   } catch {
-    return unavailableRow(input.row, "invalid", false);
+    return unavailableRow(input.row, "invalid", false, unavailableLinkedWorkflowStatus);
   }
   if (!isValidState(rawState, input.record.ultrafuzz_run_id)) {
-    return unavailableRow(input.row, "invalid", false);
+    return unavailableRow(input.row, "invalid", false, unavailableLinkedWorkflowStatus);
   }
 
   const nodes = Object.values(rawState.nodes);
@@ -462,7 +483,12 @@ function isValidState(
   );
 }
 
-function unavailableRow(row: string, status: EvalStatusRowState, terminal: boolean): EvalStatusRow {
+function unavailableRow(
+  row: string,
+  status: EvalStatusRowState,
+  terminal: boolean,
+  linkedWorkflowStatus: EvalStatusLinkedWorkflowState = null
+): EvalStatusRow {
   return {
     row,
     status,
@@ -476,10 +502,16 @@ function unavailableRow(row: string, status: EvalStatusRowState, terminal: boole
     checkpoint_stale: null,
     active_node_ids: [],
     waiting_nodes: [],
-    linked_workflow_status: null,
+    linked_workflow_status: linkedWorkflowStatus,
     eta_basis: null,
     eta_unavailable_reason: "progress-unavailable"
   };
+}
+
+function linkedWorkflowAvailability(rawWorkflowIds: unknown): EvalStatusLinkedWorkflowState {
+  return rawWorkflowIds === undefined || (Array.isArray(rawWorkflowIds) && rawWorkflowIds.length === 0)
+    ? null
+    : "unknown";
 }
 
 function unavailableEta(reason: Exclude<EvalStatusEtaUnavailableReason, null>): EvalEta {
@@ -554,12 +586,17 @@ function waitingNodeText(node: EvalStatusWaitingNode): string {
 }
 
 function tableSafeText(value: string): string {
-  return JSON.stringify(value)
+  const characters = [...value];
+  const bounded =
+    characters.length <= MAX_VISIBLE_STATUS_NODE_ID_CHARACTERS
+      ? value
+      : `${characters.slice(0, MAX_VISIBLE_STATUS_NODE_ID_CHARACTERS).join("")}…`;
+  return JSON.stringify(bounded)
     .slice(1, -1)
-    .replace(
-      /[\u002c\u003b\u005b\u005d\u007f-\u009f\u2028\u2029\u2192]/gu,
-      (character) => `\\u${character.codePointAt(0)!.toString(16).padStart(4, "0")}`
-    );
+    .replace(/[\u002c\u003b\u005b\u005d\u007f-\u009f\u2028\u2029\u2192\p{Cf}]/gu, (character) => {
+      const codePoint = character.codePointAt(0)!;
+      return codePoint <= 0xffff ? `\\u${codePoint.toString(16).padStart(4, "0")}` : `\\u{${codePoint.toString(16)}}`;
+    });
 }
 
 function isActiveNode(node: { status: NodeStatus; wait_reason?: string }): boolean {
@@ -606,7 +643,8 @@ function readLinkedWorkflowStatus(
   activelyOwned: boolean
 ): EvalStatusLinkedWorkflowState {
   if (rawWorkflowIds === AMBIGUOUS_LINKED_WORKFLOW_IDS) return "unknown";
-  if (!Array.isArray(rawWorkflowIds) || rawWorkflowIds.length === 0) return null;
+  if (rawWorkflowIds === undefined || (Array.isArray(rawWorkflowIds) && rawWorkflowIds.length === 0)) return null;
+  if (!Array.isArray(rawWorkflowIds)) return "unknown";
   if (rawWorkflowIds.length > MAX_LINKED_WORKFLOW_IDS) return "unknown";
   const statuses: Exclude<EvalStatusLinkedWorkflowState, null>[] = [];
   for (const value of new Set(rawWorkflowIds)) {
@@ -616,29 +654,34 @@ function readLinkedWorkflowStatus(
     }
     let log: ReturnType<typeof readWorkflowLogEdges>;
     try {
-      log = readWorkflowLogEdges(path.join(runRoot, "smithers", "logs", `${value}.log`));
+      log = readWorkflowLogEdges(runRoot, path.join(runRoot, "smithers", "logs", `${value}.log`));
     } catch {
       statuses.push("unknown");
       continue;
     }
-    const statusMatches = [...log.contents.matchAll(/^status:\s*([a-z][a-z-]*)\s*$/gmu)];
-    const latestStatusMatch = statusMatches.at(-1);
-    const latestAdmissionIndex = [...log.contents.matchAll(WORKFLOW_ADMISSION_PATTERN)].at(-1)?.index ?? -1;
-    const latestEvidenceIndex = Math.max(latestStatusMatch?.index ?? -1, latestAdmissionIndex);
-    // Evidence retained only in the prefix may have been superseded inside the
-    // omitted middle. Never report a stale lifecycle as authoritative.
-    if (log.tailStartIndex !== null && latestEvidenceIndex < log.tailStartIndex) {
+    // Once any bytes are omitted, retained evidence cannot prove what happened
+    // later. Fail closed instead of reporting a superseded lifecycle.
+    if (!log.complete) {
       statuses.push("unknown");
       continue;
     }
-    if (latestAdmissionIndex > (latestStatusMatch?.index ?? -1)) {
-      statuses.push(activelyOwned ? "running" : "unknown");
-    } else if (latestStatusMatch?.[1] === undefined) {
+    const evidence = scanWorkflowLogEvidence(log.contents);
+    if (evidence.ambiguousPostOutputAdmission) {
       statuses.push("unknown");
-    } else if (!isLinkedWorkflowStatus(latestStatusMatch[1])) {
+      continue;
+    }
+    if (evidence.latestAdmissionIndex > (evidence.latestStatus?.index ?? -1)) {
+      statuses.push(activelyOwned ? "running" : "unknown");
+    } else if (evidence.latestStatus === null) {
+      statuses.push("unknown");
+    } else if (!isLinkedWorkflowStatus(evidence.latestStatus.value)) {
       statuses.push("unknown");
     } else {
-      statuses.push(latestStatusMatch[1] === "running" && !activelyOwned ? "unknown" : latestStatusMatch[1]);
+      statuses.push(
+        isRunningLinkedWorkflowStatus(evidence.latestStatus.value) && !activelyOwned
+          ? "unknown"
+          : evidence.latestStatus.value
+      );
     }
   }
   const distinct = new Set(statuses);
@@ -649,7 +692,47 @@ function isLinkedWorkflowStatus(value: string): value is EvalStatusKnownLinkedWo
   return LINKED_WORKFLOW_STATUS_VALUES.has(value);
 }
 
-function readWorkflowLogEdges(logPath: string): { contents: string; tailStartIndex: number | null } {
+function isRunningLinkedWorkflowStatus(value: EvalStatusKnownLinkedWorkflowState): boolean {
+  return ["running", "in-progress", "started", "retrying", "queued"].includes(value);
+}
+
+function scanWorkflowLogEvidence(contents: string): {
+  ambiguousPostOutputAdmission: boolean;
+  latestAdmissionIndex: number;
+  latestStatus: { index: number; value: string } | null;
+} {
+  let ambiguousPostOutputAdmission = false;
+  let latestAdmissionIndex = -1;
+  let latestOutputIndex = -1;
+  let latestStatus: { index: number; value: string } | null = null;
+  let lineStart = 0;
+  while (lineStart < contents.length) {
+    const newlineIndex = contents.indexOf("\n", lineStart);
+    const lineEnd = newlineIndex === -1 ? contents.length : newlineIndex;
+    const rawLine = contents.slice(lineStart, lineEnd);
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    if (WORKFLOW_ADMISSION_PATTERN.test(line)) {
+      // Final output is untrusted and can contain marker-shaped lines. Without
+      // the original admission nonce, a later marker could be either a real
+      // resume or output impersonation, so do not let it reopen parsing.
+      if (latestOutputIndex >= 0) ambiguousPostOutputAdmission = true;
+      else latestAdmissionIndex = lineStart;
+    } else if (line.startsWith("output:")) {
+      latestOutputIndex = lineStart;
+    } else {
+      const status = WORKFLOW_STATUS_PATTERN.exec(line)?.[1];
+      if (status !== undefined && latestAdmissionIndex >= latestOutputIndex) {
+        latestStatus = { index: lineStart, value: status };
+      }
+    }
+    if (newlineIndex === -1) break;
+    lineStart = newlineIndex + 1;
+  }
+  return { ambiguousPostOutputAdmission, latestAdmissionIndex, latestStatus };
+}
+
+function readWorkflowLogEdges(runRoot: string, logPath: string): { contents: string; complete: boolean } {
+  assertNoSymlinkComponents(runRoot, logPath, "linked workflow log");
   const lexical = fs.lstatSync(logPath);
   if (lexical.isSymbolicLink() || !lexical.isFile()) {
     throw new Error("linked workflow log is not a bounded regular file");
@@ -663,30 +746,21 @@ function readWorkflowLogEdges(logPath: string): { contents: string; tailStartInd
       throw new Error("linked workflow log is not a bounded regular file");
     }
     const size = stat.size;
-    if (size <= WORKFLOW_LOG_PREFIX_BYTES + WORKFLOW_LOG_TAIL_BYTES) {
-      const contents = Buffer.alloc(size);
-      const bytes = fs.readSync(file, contents, 0, contents.length, 0);
-      return { contents: contents.subarray(0, bytes).toString("utf8"), tailStartIndex: null };
+    if (size > WORKFLOW_LOG_MAX_BYTES) {
+      return { contents: "", complete: false };
     }
-    const first = Buffer.alloc(WORKFLOW_LOG_PREFIX_BYTES);
-    const last = Buffer.alloc(WORKFLOW_LOG_TAIL_BYTES + 1);
-    const firstBytes = fs.readSync(file, first, 0, first.length, 0);
-    const lastBytes = fs.readSync(file, last, 0, last.length, size - last.length);
-    const prefixBytes = first.subarray(0, firstBytes);
-    const prefixLineEnd = prefixBytes.at(-1) === 0x0a ? prefixBytes.length : prefixBytes.lastIndexOf(0x0a) + 1;
-    const prefix = prefixBytes.subarray(0, prefixLineEnd).toString("utf8");
-    const tailWithContext = last.subarray(0, lastBytes);
-    const tailBytes = tailWithContext.subarray(1);
-    const firstTailLineEnd = tailBytes.indexOf(0x0a);
-    // The extra context byte distinguishes a genuine line boundary from a
-    // status-looking fragment at the start of the bounded tail.
-    const tailLineStart =
-      tailWithContext[0] === 0x0a ? 0 : firstTailLineEnd === -1 ? tailBytes.length : firstTailLineEnd + 1;
-    const tail = tailBytes.subarray(tailLineStart).toString("utf8");
-    return {
-      contents: `${prefix}${tail}`,
-      tailStartIndex: prefix.length
-    };
+    const contents = Buffer.alloc(size);
+    let bytes = 0;
+    while (bytes < contents.length) {
+      const read = fs.readSync(file, contents, bytes, contents.length - bytes, bytes);
+      if (read === 0) break;
+      bytes += read;
+    }
+    const finalStat = fs.fstatSync(file);
+    if (bytes !== size || finalStat.size !== size) {
+      return { contents: "", complete: false };
+    }
+    return { contents: contents.toString("utf8"), complete: true };
   } finally {
     fs.closeSync(file);
   }
