@@ -15,6 +15,7 @@ accept `--json` and emit the `ultrafuzz.cli.result.v2` envelope.
 | `ps`                      | List Ultrafuzz runs with linked workflow status.                                                                          |
 | `inspect <run-id>`        | Show product evidence and linked workflow details for a run.                                                              |
 | `status <run-id>`         | Show a concise health verdict, progress, ETA, current-step duration, throughput, and gating nodes.                        |
+| `stats <run-id>`          | Derive per-node timing, token usage, cost, retry, outcome, and completeness statistics.                                   |
 | `pause <run-id>`          | Gracefully pause a running workflow after in-flight tasks finish.                                                         |
 | `why <run-id>`            | Diagnose why a run is blocked, paused, quota-parked, waiting, or unable to progress.                                      |
 | `timeline <run-id>`       | Show checkpoint frames and fork lineage, with the frame numbers `fork --frame` accepts.                                   |
@@ -123,6 +124,12 @@ document. `--json` uses the usual `ultrafuzz.cli.result.v2` envelope.
 - `node <run-id> <node-id> [--attempts] [--tools] [--watch]` shows one
   workflow node's status, retries, timing, and output metadata. Tool payloads
   require explicit `--tools`.
+- `stats <run-id> [--json]` derives node timing and usage directly from the
+  run ledgers. `stats --bundle <report-bundle.zip>` performs the same query
+  offline from a current `ultrafuzz.report-bundle-manifest.v3` ZIP. Neither
+  mode creates a `stats.json` artifact. A genuinely absent optional ledger is
+  reported as unavailable rather than zero; absent usage also makes cumulative
+  accounting unavailable. Malformed present evidence fails the command.
 - `doctor` reports validation, toolchain, and pinned workflow engine install
   posture without changing project or run state or installing dependencies. It
   is the operational superset of `validate`. A cloud check may create the

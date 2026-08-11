@@ -24,6 +24,7 @@ accept `--json` and emit the `ultrafuzz.cli.result.v2` envelope.
 | `ultrafuzz ps`                          | List Ultrafuzz runs and linked workflow status.                                                                |
 | `ultrafuzz inspect <run-id>`            | Show product evidence and linked workflow details for a run.                                                   |
 | `ultrafuzz status <run-id>`             | Show a concise health verdict, progress, ETA, current-step duration, throughput, and gating nodes.             |
+| `ultrafuzz stats <run-id>`              | Derive per-node timing, token usage, cost, retry, outcome, and completeness statistics.                        |
 | `ultrafuzz pause <run-id>`              | Gracefully pause an active run after its in-flight tasks finish.                                               |
 | `ultrafuzz why <run-id>`                | Diagnose why a run is blocked, paused, quota-parked, waiting, or unable to progress.                           |
 | `ultrafuzz timeline <run-id>`           | Show checkpoint frames and fork lineage, including the frame numbers `fork --frame` accepts.                   |
@@ -247,6 +248,8 @@ ultrafuzz status <run-id> \
   [--watch] \
   [--interval <seconds>] \
   [--json]
+ultrafuzz stats <run-id> [--project <path>] [--json]
+ultrafuzz stats --bundle <report-bundle.zip> [--json]
 ultrafuzz pause <run-id> [--project <path>] [--json]
 ultrafuzz cancel <run-id> [--project <path>] [--json]
 ultrafuzz why <run-id> [--project <path>] [--json]
@@ -309,6 +312,45 @@ or the poll fails. With `--json --watch`, every poll writes one
 newline-delimited `ultrafuzz.cli.result.v2` envelope so the stream pipes into
 `jq` and other line-oriented tools; without `--watch`, `--json` keeps the
 existing pretty-printed single envelope.
+
+`stats` derives its snapshot on demand; it does not read or write a precomputed
+statistics artifact. Local-run mode synchronizes linked workflow evidence when
+available, then reads `attempts.jsonl`, `usage.jsonl`, `state.json`,
+`graph.json`, `graph.fingerprint`, and `run.json` twice as one evidence set.
+The command accepts the bytes only when both complete reads match, retries a
+recognized mutation race at most three times, and timestamps the snapshot
+immediately after the accepted second read. The table shows each node's status,
+completed and currently elapsed execution time, token components, estimated
+spend, model, and attempt count. JSON output uses `ultrafuzz.stats.v1` inside
+the normal CLI envelope and additionally exposes retries, executed/reused
+counts, outcomes, failure categories, completeness, unattributed usage, and
+cumulative run accounting.
+
+`stats --bundle` reads an `ultrafuzz report bundle` ZIP directly without
+extracting it and without the original checkout, workflow backend, provider,
+or network. It accepts only the registered
+`ultrafuzz.report-bundle-manifest.v3` contract and validates the current run,
+state, graph, graph-fingerprint, and ledger contracts against the manifest run
+ID. The manifest creation time anchors live elapsed calculations and must not
+precede any historical timestamp in the included state, attempts, usage, or
+accounting evidence, or be later than the host statistics clock.
+
+A genuinely absent attempt ledger produces a warning and unavailable attempt
+counts and durations. A genuinely absent usage ledger produces warnings and
+`null` usage; metadata cumulative accounting is also hidden because the
+missing ledger cannot authenticate it. A local run that still claims
+accounting after losing `usage.jsonl`, a present-but-empty usage ledger paired
+with accounting, invalid UTF-8, duplicate JSON keys, malformed rows, duplicate
+or conflicting ledger identities, cross-run rows, and aliased or duplicate ZIP
+members fail the command. An `artifacts/` subtree by itself is not sufficient.
+
+Bundle creation requires current sealed workflow authority, but manifest v3
+does not archive `workflow-run-link-journal.json` or the sealed workflow
+control files. Offline statistics therefore prove agreement among the bundled
+workflow IDs, control generation, state provenance, graph tasks, and ledgers;
+they cannot independently prove the historical backend link that originally
+authorized those IDs. The v3 manifest is a snapshot contract, not a standalone
+attestation of workflow-link history.
 
 The JSON envelope carries stable machine-readable fields alongside the existing
 counts:

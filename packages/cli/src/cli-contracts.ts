@@ -51,6 +51,7 @@ import type {
 import type { AuditProfileSettingOrigin, AuditProfileSettings } from "@ultrafuzz/config";
 import type { AnalysisSummary } from "./benchmark-analysis/lib/runner.js";
 import type { ValidatedReportArtifacts } from "./report-artifacts.js";
+import type { RunStatisticsValue } from "./run-statistics.js";
 
 export const CLI_SCHEMA_VERSION = "ultrafuzz.cli.result.v2" as const;
 export const CLI_PUBLIC_RUN_STATE_SCHEMA_VERSION = "ultrafuzz.cli.public-run-state.v1" as const;
@@ -61,6 +62,7 @@ export const CLI_KNOWN_COMMANDS = [
   "run",
   "ps",
   "status",
+  "stats",
   "inspect",
   "report",
   "report bundle",
@@ -337,6 +339,7 @@ export interface CliCommandDataMap {
   run: StartRunValue;
   ps: RunListValue;
   status: RunHealthValue;
+  stats: RunStatisticsValue;
   inspect: CliInspectData;
   report: ValidatedReportArtifacts;
   "report bundle": CliReportBundleData;

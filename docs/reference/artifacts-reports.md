@@ -40,10 +40,30 @@ indexes are JSONL files derived from `events.jsonl`; SQLite events are not part
 of the artifact contract.
 
 `usage.jsonl` is an append-only ledger of normalized workflow usage events.
-Each entry has stable event, attempt, and checkpoint-generation identifiers.
-Replaying the same continuation is idempotent, while events from later
-checkpoint generations remain distinct. The ledger stores normalized counters
-and typed usage-completeness reasons, not raw execution records.
+Each entry's immutable identity is the exact Smithers pair
+`(workflow_run_id, source_event_sequence)`; `control_generation`, node,
+iteration, and attempt remain validated evidence dimensions rather than
+surrogate identities. Replaying the same continuation is idempotent. The
+ledger stores closed normalized counters, not raw execution records.
+
+`ultrafuzz stats <run-id>` joins this ledger with `attempts.jsonl`, `state.json`,
+`graph.json`, and `run.json` to derive per-node timing and usage on demand. The
+current v3 portable report-bundle ZIP includes all five files plus the bound
+`graph.fingerprint`, so
+`ultrafuzz stats --bundle <report-bundle.zip>` can perform the same query
+offline. Present evidence is parsed with the same strict current readers as a
+local run. Local mode accepts one coherent evidence snapshot only after two
+matching complete reads and anchors it immediately after the accepted second
+read. Only a genuinely absent optional ledger can be unavailable. Missing
+usage makes both usage statistics and cumulative accounting unavailable because
+the ledger can no longer authenticate the metadata rollup. Statistics are not
+persisted as a separate `stats.json` artifact.
+
+The v3 bundle proves internal agreement among its workflow identifiers and
+control generation, but it omits `workflow-run-link-journal.json` and sealed
+workflow control files. An offline consumer therefore cannot independently
+authenticate the historical workflow-link chain; the bundle manifest is a
+snapshot inventory rather than a standalone workflow-origin attestation.
 
 ## Run Metadata
 

@@ -6,7 +6,12 @@ import { hasAtMostCodePoints } from "./portable-json-primitives.js";
 import { type RunLayout } from "./run-layout.js";
 import { SAFE_ID_PATTERN, validateSafeId } from "./safe-paths.js";
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
-import { appendStrictJsonlRecords, readStrictJsonlSnapshot, type StrictJsonlCodec } from "./strict-jsonl.js";
+import {
+  appendStrictJsonlRecords,
+  parseStrictJsonlBytes,
+  readStrictJsonlSnapshot,
+  type StrictJsonlCodec
+} from "./strict-jsonl.js";
 
 export const USAGE_LEDGER_SCHEMA_VERSION = "ultrafuzz.usage-ledger.v1" as const;
 export const USAGE_LEDGER_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:usage-ledger:1" as const;
@@ -244,6 +249,15 @@ export function replayUsageEvents(
   const expectedRunId = typeof layoutOrPath === "string" ? undefined : layoutOrPath.runId;
   return {
     entries: readStrictJsonlSnapshot(ledgerPath, usageLedgerCodec(expectedRunId)).records,
+    malformedEntries: 0,
+    duplicateEntries: 0
+  };
+}
+
+/** Replay an immutable usage-ledger snapshot captured outside the filesystem. */
+export function parseUsageLedgerBytes(bytes: Uint8Array, expectedRunId?: string): UsageLedgerReplay {
+  return {
+    entries: parseStrictJsonlBytes(bytes, usageLedgerCodec(expectedRunId)).records,
     malformedEntries: 0,
     duplicateEntries: 0
   };

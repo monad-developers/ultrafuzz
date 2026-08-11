@@ -443,7 +443,14 @@ export function writeRunState(target: RunLayoutStateLike | string, state: RunSta
 export function readRunState(target: RunLayoutStateLike | string): RunState {
   const statePath = resolveStatePath(target);
   const value = parseStrictJsonBytes(readRegularFileSnapshot(statePath, 64 * 1024 * 1024));
+  return assertRunStateDocument(value);
+}
+
+export function assertRunStateDocument(value: unknown, expectedRunId?: string): RunState {
   assertCurrentRunState(value);
+  if (expectedRunId !== undefined && value.run_id !== expectedRunId) {
+    throw new Error(`run state identity does not match run ${JSON.stringify(expectedRunId)}`);
+  }
   return value;
 }
 

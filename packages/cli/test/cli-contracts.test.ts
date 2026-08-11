@@ -214,6 +214,60 @@ test("topology show accepts its source while remaining closed", () => {
   assert.equal(validateCliResultEnvelope({ ...envelope, data: missingSource }).ok, false);
 });
 
+test("stats has an exact command discriminator and a fully closed result shape", () => {
+  const data = {
+    schema_version: "ultrafuzz.stats.v1",
+    run_id: "stats-contract",
+    generated_at: "2026-08-11T00:00:00.000Z",
+    source: { kind: "local-run", path: "/tmp/stats-contract" },
+    status: "succeeded",
+    run_elapsed_ms: 1,
+    nodes: [],
+    totals: {
+      node_count: 0,
+      status_counts: {
+        pending: 0,
+        ready: 0,
+        runnable: 0,
+        running: 0,
+        succeeded: 0,
+        failed: 0,
+        skipped: 0,
+        "timed-out": 0,
+        "reused-from-prior-run": 0,
+        invalidated: 0,
+        unknown: 0
+      },
+      duration_ms: 0,
+      attempts_complete: true,
+      usage: null,
+      accounting_cumulative: null
+    },
+    unattributed_usage: null
+  };
+  const envelope = {
+    schema_version: CLI_SCHEMA_VERSION,
+    command: "stats",
+    ok: true,
+    diagnostics: [],
+    data
+  };
+
+  assert.equal(validateCliResultEnvelope(envelope).ok, true);
+  assert.equal(validateCliResultEnvelope({ ...envelope, data: { ...data, legacy: true } }).ok, false);
+  assert.equal(
+    validateCliResultEnvelope({
+      ...envelope,
+      data: { ...data, totals: { ...data.totals, accounting_cumulative: { opaque: true } } }
+    }).ok,
+    false
+  );
+  assert.equal(
+    validateCliResultEnvelope({ ...envelope, data: { ...data, run_elapsed_ms: Number.MAX_SAFE_INTEGER + 1 } }).ok,
+    false
+  );
+});
+
 test("unknown Oclif invocation failures remain closed and value-free", () => {
   assert.equal(
     validateCliResultEnvelope({

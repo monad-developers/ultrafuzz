@@ -41,6 +41,19 @@ export function readStrictJsonlSnapshot<RecordType>(
   }
   const maxBytes = codec.maxBytes ?? DEFAULT_STRICT_JSONL_MAX_BYTES;
   const bytes = readRegularFileSnapshot(filePath, maxBytes);
+  return parseStrictJsonlBytes(bytes, codec);
+}
+
+/** Parse one already-captured immutable JSONL byte snapshot. */
+export function parseStrictJsonlBytes<RecordType>(
+  input: Uint8Array,
+  codec: StrictJsonlCodec<RecordType>
+): StrictJsonlSnapshot<RecordType> {
+  const bytes = Buffer.from(input);
+  const maxBytes = codec.maxBytes ?? DEFAULT_STRICT_JSONL_MAX_BYTES;
+  if (bytes.byteLength > maxBytes) {
+    throw new Error(`${codec.label} exceeds the ${maxBytes}-byte limit`);
+  }
   if (bytes.byteLength === 0) return { records: [], byteLength: 0, exists: true };
   if (bytes[bytes.byteLength - 1] !== 0x0a) {
     throw new Error(`${codec.label} has a torn or unterminated final record`);

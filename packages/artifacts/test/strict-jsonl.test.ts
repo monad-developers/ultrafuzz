@@ -4,7 +4,19 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { appendStrictJsonlRecords, readStrictJsonlSnapshot, type StrictJsonlCodec } from "../src/strict-jsonl.js";
+import {
+  MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES,
+  createNodeAttemptLedgerEntry,
+  manifestDigest,
+  parseNodeAttemptLedgerBytes,
+  type NodeAttemptLedgerEntry
+} from "../src/attempt-ledger.js";
+import {
+  appendStrictJsonlRecords,
+  parseStrictJsonlBytes,
+  readStrictJsonlSnapshot,
+  type StrictJsonlCodec
+} from "../src/strict-jsonl.js";
 
 interface TestRecord {
   run_id: string;
@@ -88,7 +100,21 @@ test("strict JSONL rejects duplicate keys, invalid UTF-8, blank rows, and torn t
     const { journal } = tempJournal();
     fs.writeFileSync(journal, bytes);
     assert.throws(() => readStrictJsonlSnapshot(journal, codec()), pattern);
+    assert.throws(() => parseStrictJsonlBytes(bytes, codec()), pattern);
   }
+});
+
+test("strict JSONL byte snapshots use the same codec, identity, and history gates as files", () => {
+  const bytes = Buffer.from(`${JSON.stringify(record(1))}\n${JSON.stringify(record(2))}\n`);
+  assert.deepEqual(parseStrictJsonlBytes(bytes, codec()), {
+    records: [record(1), record(2)],
+    byteLength: bytes.byteLength,
+    exists: true
+  });
+  assert.throws(
+    () => parseStrictJsonlBytes(Buffer.from(`${JSON.stringify(record(1))}\n${JSON.stringify(record(1))}\n`), codec()),
+    /duplicate identity/u
+  );
 });
 
 test("strict JSONL rejects wrong-run rows and duplicate or conflicting composite identities", () => {
@@ -134,3 +160,62 @@ test("strict JSONL refuses append when any existing row is corrupt", () => {
   assert.throws(() => appendStrictJsonlRecords(journal, [record(2)], codec(), root), /blank record at line 2/u);
   assert.deepEqual(fs.readFileSync(journal), before);
 });
+
+test("node-attempt byte readers reject inverted lifecycle evidence and oversized UTF-8 messages", () => {
+  const canonical = nodeAttempt(2);
+  const cases: Array<{ entry: NodeAttemptLedgerEntry; pattern: RegExp }> = [
+    {
+      entry: { ...canonical, started_event_sequence: canonical.source_event_sequence },
+      pattern: /started_event_sequence must precede/iu
+    },
+    {
+      entry: {
+        ...canonical,
+        lifecycle: { started_at: "2026-08-11T10:01:00.000Z", finished_at: "2026-08-11T10:00:00.000Z" }
+      },
+      pattern: /finished_at cannot precede/iu
+    },
+    {
+      entry: {
+        ...canonical,
+        outcome: "failed",
+        manifests: { ...canonical.manifests, output_sha256: null },
+        failure_category: "executor-error",
+        failure_message: "😀".repeat(Math.floor(MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES / 4) + 1)
+      },
+      pattern: /failure_message exceeds.*UTF-8 bytes/iu
+    }
+  ];
+  for (const { entry, pattern } of cases) {
+    assert.throws(() => parseNodeAttemptLedgerBytes(Buffer.from(`${JSON.stringify(entry)}\n`), "run-current"), pattern);
+  }
+});
+
+test("node-attempt history accepts cross-task terminal events appended outside event-sequence order", () => {
+  const rows = [nodeAttempt(4), nodeAttempt(2)];
+  assert.deepEqual(
+    parseNodeAttemptLedgerBytes(Buffer.from(`${rows.map((entry) => JSON.stringify(entry)).join("\n")}\n`)).entries,
+    rows
+  );
+});
+
+function nodeAttempt(sourceEventSequence: number): NodeAttemptLedgerEntry {
+  return createNodeAttemptLedgerEntry(
+    { runId: "run-current" },
+    {
+      workflowRunId: "workflow-current",
+      controlGeneration: "a".repeat(64),
+      nodeId: "node-current",
+      strategyAttemptId: `strategy-${sourceEventSequence}`,
+      iteration: 0,
+      attempt: sourceEventSequence,
+      startedEventSequence: sourceEventSequence - 1,
+      sourceEventSequence,
+      startedAt: "2026-08-11T10:00:00.000Z",
+      finishedAt: "2026-08-11T10:01:00.000Z",
+      outcome: "succeeded",
+      inputManifestDigest: manifestDigest("input"),
+      outputManifestDigest: manifestDigest("output")
+    }
+  );
+}

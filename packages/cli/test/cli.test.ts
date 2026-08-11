@@ -11,13 +11,20 @@ import {
   REPORT_SCHEMA_VERSION,
   artifactContractDefinition,
   artifactSchemaDirectory,
+  appendNodeAttempt,
+  appendUsageEvents,
+  createInitialRunState,
   createEventRecord,
+  createRunLayout,
   layoutForRunRoot,
+  manifestDigest,
   readPlannedGraphDocument,
   readRunMetadataDocument,
   updateNodeState,
+  updateRunStatus,
   writeArtifactManifest,
-  writeRunMetadataDocument
+  writeRunMetadataDocument,
+  type RunLayout
 } from "@ultrafuzz/artifacts";
 import { DASHBOARD_HTTP_SCHEMA_VERSION, serveDashboard } from "@ultrafuzz/dashboard";
 import { NodeTelemetryPump, type EvalArtifactUpload, type EvalMatrixRow, type EvalReporter } from "@ultrafuzz/evals";
@@ -164,6 +171,13 @@ function fakeSmithersEnv(
       `    printf '{"ok":true,"data":{"run":{"id":"%s","workflow":"workflow","status":"%s","started":"2026-08-09T00:00:00.000Z","elapsed":"1s"},"runState":{"runId":"%s","state":"%s","computedAt":"2026-08-09T00:00:01.000Z"},"steps":%s,"nodes":%s},"meta":{"command":"inspect","duration":"1ms"}}\\n' "$2" "$inspect_status" "$2" "$inspect_state" "$inspect_nodes" "$inspect_nodes"`,
       "    ;;",
       "  events)",
+      '    if [ "$SMITHERS_FAKE_INVALID_EVENT_STREAM" = "events" ] && [ "$3" != "--type" ]; then',
+      "      printf '%s' '{\"malformed\":'",
+      "      exit 0",
+      '    elif [ "$SMITHERS_FAKE_INVALID_EVENT_STREAM" = "token-events" ] && [ "$3" = "--type" ]; then',
+      "      printf '%s' '{\"malformed\":'",
+      "      exit 0",
+      "    fi",
       '    case "$*" in',
       `      *--full-output*) printf '%s\\n' ${shellQuote(
         JSON.stringify({ ok: true, data: [], meta: { command: "events", duration: "1ms" } })
@@ -2314,3 +2328,781 @@ test("report bundle packages incomplete runs without a final-report JSON", async
     false
   );
 });
+
+test("stats reads strict local current evidence and reports genuinely absent ledgers", async () => {
+  const project = tempProject();
+  const fixture = writeStatsFixture(project, "stats-local", { linked: false });
+
+  const captured = await cli(project, ["stats", fixture.runId, "--json"]);
+  assert.equal(captured.code, 0, captured.stderr);
+  const body = parseJson(captured);
+  assert.equal(body.ok, true);
+  const data = body.data as {
+    schema_version: string;
+    run_id: string;
+    status: string;
+    source: { kind: string };
+    nodes: Array<{
+      node_id: string;
+      duration_ms: number | null;
+      attempt_count: number | null;
+      usage: {
+        input_tokens: number;
+        cache_read_tokens: number;
+        output_tokens: number;
+        total_tokens: number;
+        estimated_spend_usd: number | null;
+        usage_complete: boolean;
+        pricing_complete: boolean;
+      } | null;
+    }>;
+    totals: { usage: { total_tokens: number; estimated_spend_usd: number | null } | null };
+  };
+  assert.equal(data.schema_version, "ultrafuzz.stats.v1");
+  assert.equal(data.run_id, fixture.runId);
+  assert.equal(data.status, "succeeded");
+  assert.equal(data.source.kind, "local-run");
+  const node = data.nodes.find((entry) => entry.node_id === "node-a");
+  assert.ok(node);
+  assert.equal(node.duration_ms, null);
+  assert.equal(node.attempt_count, null);
+  assert.equal(node.usage, null);
+  assert.equal(data.totals.usage, null);
+  assert.match(JSON.stringify(body.diagnostics), /STATS_ATTEMPTS_UNAVAILABLE/u);
+  assert.match(JSON.stringify(body.diagnostics), /STATS_USAGE_UNAVAILABLE/u);
+
+  const human = await cli(project, ["stats", fixture.runId]);
+  assert.equal(human.code, 0, human.stderr);
+  assert.match(human.stdout, /node-a\s+succeeded/u);
+  assert.match(human.stdout, /Outcome/u);
+  assert.match(human.stdout, /CacheR\s+CacheW/u);
+  assert.match(human.stdout, /Exec\/Reuse\s+Completeness/u);
+  assert.match(human.stdout, /Warnings:/u);
+});
+
+test("stats falls back to unchanged local evidence when workflow event output is malformed", async (context) => {
+  const project = tempProject();
+  assert.equal((await cli(project, ["init", "--force"])).code, 0);
+  writeSmallTopology(project);
+  const env = fakeSmithersEnv(project);
+  const run = await cli(project, ["run", "--run-id", "stats-invalid-workflow-events", "--json"], env);
+  assert.equal(run.code, 0, run.stderr);
+  const runRoot = (parseJson(run).data as { run_root: string }).run_root;
+  const evidencePaths = ["state.json", "run.json", "attempts.jsonl", "usage.jsonl"].map((name) =>
+    path.join(runRoot, name)
+  );
+  const before = evidencePaths.map((filePath) => fs.readFileSync(filePath));
+
+  for (const [stream, diagnosticCode] of [
+    ["events", "WORKFLOW_EVENTS_INVALID"],
+    ["token-events", "WORKFLOW_TOKEN_EVENTS_INVALID"]
+  ] as const) {
+    await context.test(stream, async () => {
+      const captured = await cli(project, ["stats", "stats-invalid-workflow-events", "--json"], {
+        ...env,
+        SMITHERS_FAKE_INVALID_EVENT_STREAM: stream
+      });
+      assert.equal(captured.code, 0, captured.stderr);
+      const body = parseJson(captured);
+      assert.equal(body.ok, true);
+      assert.equal(
+        (body.diagnostics as Array<{ code: string; severity: string }>).some(
+          (diagnostic) => diagnostic.code === diagnosticCode && diagnostic.severity === "warning"
+        ),
+        true,
+        JSON.stringify(body.diagnostics)
+      );
+      evidencePaths.forEach((filePath, index) => assert.deepEqual(fs.readFileSync(filePath), before[index]));
+    });
+  }
+});
+
+test("stats queries a current report bundle offline and reports genuinely missing ledgers", async () => {
+  const project = tempProject();
+  const fixture = writeStatsFixture(project, "stats-bundle");
+  const bundlePath = path.join(project, "stats-bundle.zip");
+  writeStatsBundle(bundlePath, fixture);
+  fs.rmSync(fixture.runRoot, { recursive: true });
+
+  const captured = await cli(project, ["stats", "--bundle", bundlePath, "--json"]);
+  assert.equal(captured.code, 0, captured.stderr);
+  const body = parseJson(captured);
+  const data = body.data as {
+    source: { kind: string; path: string };
+    nodes: Array<{ node_id: string; duration_ms: number | null; usage: { total_tokens: number } | null }>;
+  };
+  assert.equal(data.source.kind, "report-bundle");
+  assert.equal(data.source.path, bundlePath);
+  assert.equal(data.nodes.find((entry) => entry.node_id === "node-a")?.duration_ms, 60_000);
+  assert.equal(data.nodes.find((entry) => entry.node_id === "node-a")?.usage?.total_tokens, 17);
+
+  const missingLedgersFixture = writeStatsFixture(project, "stats-missing-ledgers");
+  const missingLedgersPath = path.join(project, "stats-missing-ledgers.zip");
+  writeStatsBundle(missingLedgersPath, missingLedgersFixture, {
+    omitted: new Set(["attempts.jsonl", "usage.jsonl"])
+  });
+  const degraded = await cli(project, ["stats", "--bundle", missingLedgersPath, "--json"]);
+  assert.equal(degraded.code, 0, degraded.stderr);
+  const degradedBody = parseJson(degraded);
+  assert.match(JSON.stringify(degradedBody.diagnostics), /STATS_ATTEMPTS_UNAVAILABLE/u);
+  assert.match(JSON.stringify(degradedBody.diagnostics), /STATS_USAGE_UNAVAILABLE/u);
+  assert.match(JSON.stringify(degradedBody.diagnostics), /STATS_ACCOUNTING_UNVERIFIED/u);
+  assert.equal((degradedBody.data as { nodes: Array<{ usage: unknown }> }).nodes[0]?.usage, null);
+  assert.equal(
+    (degradedBody.data as { totals: { accounting_cumulative: unknown } }).totals.accounting_cumulative,
+    null
+  );
+});
+
+test("stats rejects a historical report-bundle manifest", async () => {
+  const project = tempProject();
+  const fixture = writeStatsFixture(project, "stats-v1-bundle");
+  const bundlePath = path.join(project, "stats-v1-bundle.zip");
+  writeStatsBundle(bundlePath, fixture, {
+    manifestBytes: Buffer.from(
+      `${JSON.stringify({ schema_version: "ultrafuzz.report_bundle.v1", run_id: fixture.runId })}\n`,
+      "utf8"
+    )
+  });
+
+  const captured = await cli(project, ["stats", "--bundle", bundlePath, "--json"]);
+  assert.equal(captured.code, 1);
+  assert.match(JSON.stringify(parseJson(captured).diagnostics), /report bundle manifest is invalid/iu);
+});
+
+test("stats fails closed for malformed present bundle evidence", async (context) => {
+  const project = tempProject();
+  const cases: Array<{
+    name: string;
+    member?: string;
+    bytes?: (fixture: ReturnType<typeof writeStatsFixture>) => Buffer;
+    mutateZip?: (bytes: Buffer) => Buffer;
+    diagnostic: RegExp;
+  }> = [
+    {
+      name: "invalid UTF-8 JSON",
+      member: "state.json",
+      bytes: () => Buffer.from([0x7b, 0xff, 0x7d]),
+      diagnostic: /valid UTF-8/iu
+    },
+    {
+      name: "duplicate JSON key",
+      member: "run.json",
+      bytes: (fixture) =>
+        Buffer.from(
+          `{"schema_version":"ultrafuzz.run-metadata.v2","run_id":"${fixture.runId}","run_id":"${fixture.runId}"}\n`
+        ),
+      diagnostic: /duplicate property name/iu
+    },
+    {
+      name: "duplicate attempt identity",
+      member: "attempts.jsonl",
+      bytes: (fixture) => {
+        const line = fs.readFileSync(path.join(fixture.runRoot, "attempts.jsonl"));
+        return Buffer.concat([line, line]);
+      },
+      diagnostic: /duplicate identity/iu
+    },
+    {
+      name: "conflicting usage identity",
+      member: "usage.jsonl",
+      bytes: (fixture) => {
+        const canonical = JSON.parse(fs.readFileSync(path.join(fixture.runRoot, "usage.jsonl"), "utf8")) as {
+          observed_timestamp_ms: number;
+        };
+        const conflict = { ...canonical, observed_timestamp_ms: canonical.observed_timestamp_ms + 1 };
+        return Buffer.from(`${JSON.stringify(canonical)}\n${JSON.stringify(conflict)}\n`, "utf8");
+      },
+      diagnostic: /conflicting duplicate identity/iu
+    },
+    {
+      name: "cross-run usage row",
+      member: "usage.jsonl",
+      bytes: (fixture) => {
+        const canonical = JSON.parse(fs.readFileSync(path.join(fixture.runRoot, "usage.jsonl"), "utf8")) as {
+          run_id: string;
+        };
+        return Buffer.from(`${JSON.stringify({ ...canonical, run_id: "foreign-run" })}\n`, "utf8");
+      },
+      diagnostic: /belongs to.*expected/iu
+    },
+    {
+      name: "same-identity usage content drift",
+      member: "usage.jsonl",
+      bytes: (fixture) => {
+        const canonical = JSON.parse(fs.readFileSync(path.join(fixture.runRoot, "usage.jsonl"), "utf8")) as {
+          usage: { input_tokens: number };
+        };
+        canonical.usage.input_tokens += 1;
+        return Buffer.from(`${JSON.stringify(canonical)}\n`, "utf8");
+      },
+      diagnostic: /does not exactly match usage-ledger accounting/iu
+    },
+    {
+      name: "capture before node finish",
+      member: "state.json",
+      bytes: (fixture) => {
+        const state = JSON.parse(fs.readFileSync(path.join(fixture.runRoot, "state.json"), "utf8")) as {
+          nodes: Record<string, { finished_at?: string }>;
+        };
+        state.nodes["node-a"]!.finished_at = "2026-08-11T10:03:00.000Z";
+        return Buffer.from(`${JSON.stringify(state)}\n`, "utf8");
+      },
+      diagnostic: /capture precedes node .* finished_at/iu
+    },
+    {
+      name: "capture before attempt finish",
+      member: "attempts.jsonl",
+      bytes: (fixture) => {
+        const attempt = JSON.parse(fs.readFileSync(path.join(fixture.runRoot, "attempts.jsonl"), "utf8")) as {
+          lifecycle: { finished_at: string };
+        };
+        attempt.lifecycle.finished_at = "2026-08-11T10:03:00.000Z";
+        return Buffer.from(`${JSON.stringify(attempt)}\n`, "utf8");
+      },
+      diagnostic: /capture precedes attempt ledger entry 0 lifecycle finished_at/iu
+    },
+    {
+      name: "capture before usage observation",
+      member: "usage.jsonl",
+      bytes: (fixture) => {
+        const usage = JSON.parse(fs.readFileSync(path.join(fixture.runRoot, "usage.jsonl"), "utf8")) as {
+          observed_timestamp_ms: number;
+        };
+        usage.observed_timestamp_ms = Date.parse("2026-08-11T10:03:00.000Z");
+        return Buffer.from(`${JSON.stringify(usage)}\n`, "utf8");
+      },
+      diagnostic: /capture precedes usage ledger entry 0 observed_timestamp_ms/iu
+    },
+    {
+      name: "capture before accounting update",
+      member: "run.json",
+      bytes: (fixture) => {
+        const metadata = JSON.parse(fs.readFileSync(path.join(fixture.runRoot, "run.json"), "utf8")) as {
+          accounting: { updated_at: string };
+        };
+        metadata.accounting.updated_at = "2026-08-11T10:03:00.000Z";
+        return Buffer.from(`${JSON.stringify(metadata)}\n`, "utf8");
+      },
+      diagnostic: /capture precedes accounting updated_at/iu
+    },
+    {
+      name: "present empty usage ledger with accounting",
+      member: "usage.jsonl",
+      bytes: () => Buffer.alloc(0),
+      diagnostic: /present empty usage ledger/iu
+    },
+    {
+      name: "uppercase graph fingerprint",
+      member: "graph.fingerprint",
+      bytes: () => Buffer.from(`${"A".repeat(64)}\n`),
+      diagnostic: /lowercase SHA-256 digest/iu
+    },
+    {
+      name: "short graph fingerprint",
+      member: "graph.fingerprint",
+      bytes: () => Buffer.from("abc\n"),
+      diagnostic: /lowercase SHA-256 digest/iu
+    },
+    {
+      name: "noncanonical graph fingerprint newline",
+      member: "graph.fingerprint",
+      bytes: () => Buffer.from(`${"a".repeat(64)}\n\n`),
+      diagnostic: /canonical single-line fingerprint/iu
+    },
+    {
+      name: "duplicate ZIP member",
+      mutateZip: (bytes) => duplicateCentralDirectoryEntry(bytes, "state.json"),
+      diagnostic: /duplicate ZIP member/iu
+    }
+  ];
+
+  for (const [index, invalidCase] of cases.entries()) {
+    await context.test(invalidCase.name, async () => {
+      const fixture = writeStatsFixture(project, `stats-invalid-${index}`);
+      const bundlePath = path.join(project, `stats-invalid-${index}.zip`);
+      writeStatsBundle(bundlePath, fixture, {
+        ...(invalidCase.member === undefined || invalidCase.bytes === undefined
+          ? {}
+          : { replacements: new Map([[invalidCase.member, invalidCase.bytes(fixture)]]) })
+      });
+      if (invalidCase.mutateZip !== undefined) {
+        fs.writeFileSync(bundlePath, invalidCase.mutateZip(fs.readFileSync(bundlePath)));
+      }
+
+      const captured = await cli(project, ["stats", "--bundle", bundlePath, "--json"]);
+      assert.equal(captured.code, 1, captured.stderr);
+      assert.match(JSON.stringify(parseJson(captured).diagnostics), invalidCase.diagnostic);
+    });
+  }
+});
+
+test("stats binds the v3 manifest entry count and rejects ZIP path aliases", async (context) => {
+  const project = tempProject();
+  await context.test("manifest entry count", async () => {
+    const fixture = writeStatsFixture(project, "stats-count-mismatch");
+    const bundlePath = path.join(project, "stats-count-mismatch.zip");
+    writeStatsBundle(bundlePath, fixture, { manifestBytes: statsBundleManifestBytes(fixture, 99) });
+
+    const captured = await cli(project, ["stats", "--bundle", bundlePath, "--json"]);
+    assert.equal(captured.code, 1);
+    assert.match(JSON.stringify(parseJson(captured).diagnostics), /entry count.*does not match/iu);
+  });
+  await context.test("path alias", async () => {
+    const fixture = writeStatsFixture(project, "stats-path-alias");
+    const bundlePath = path.join(project, "stats-path-alias.zip");
+    writeStatsBundle(bundlePath, fixture);
+    fs.writeFileSync(bundlePath, renameCentralDirectoryEntry(fs.readFileSync(bundlePath), "state.json", "./run.json"));
+
+    const captured = await cli(project, ["stats", "--bundle", bundlePath, "--json"]);
+    assert.equal(captured.code, 1);
+    assert.match(JSON.stringify(parseJson(captured).diagnostics), /non-canonical ZIP member/iu);
+  });
+  for (const [name, replacement] of [
+    ["backslash", "dir\\x.json"],
+    ["drive colon", "C:/run.jsn"],
+    ["control character", "\u0001state.jsn"],
+    ["parent traversal", "../run.jsn"]
+  ] as const) {
+    await context.test(name, async () => {
+      const fixture = writeStatsFixture(project, `stats-path-${name.replaceAll(" ", "-")}`);
+      const bundlePath = path.join(project, `stats-path-${name.replaceAll(" ", "-")}.zip`);
+      writeStatsBundle(bundlePath, fixture);
+      fs.writeFileSync(bundlePath, renameCentralDirectoryEntry(fs.readFileSync(bundlePath), "state.json", replacement));
+
+      const captured = await cli(project, ["stats", "--bundle", bundlePath, "--json"]);
+      assert.equal(captured.code, 1);
+      assert.match(JSON.stringify(parseJson(captured).diagnostics), /non-canonical ZIP member/iu);
+    });
+  }
+  await context.test("capture precedes durable state", async () => {
+    const fixture = writeStatsFixture(project, "stats-early-capture");
+    const bundlePath = path.join(project, "stats-early-capture.zip");
+    writeStatsBundle(bundlePath, fixture, {
+      manifestBytes: statsBundleManifestBytes(fixture, 6, "2026-08-11T09:59:59.000Z")
+    });
+
+    const captured = await cli(project, ["stats", "--bundle", bundlePath, "--json"]);
+    assert.equal(captured.code, 1);
+    assert.match(JSON.stringify(parseJson(captured).diagnostics), /capture precedes state created_at/iu);
+  });
+  await context.test("manifest capture is in the future", async () => {
+    const fixture = writeStatsFixture(project, "stats-future-capture");
+    const bundlePath = path.join(project, "stats-future-capture.zip");
+    writeStatsBundle(bundlePath, fixture, {
+      manifestBytes: statsBundleManifestBytes(fixture, 6, "2099-08-11T10:02:00.000Z")
+    });
+
+    const captured = await cli(project, ["stats", "--bundle", bundlePath, "--json"]);
+    assert.equal(captured.code, 1);
+    assert.match(JSON.stringify(parseJson(captured).diagnostics), /evidence capture cannot be in the future/iu);
+  });
+});
+
+test("stats rejects local evidence whose leaf is a symlink", async () => {
+  const project = tempProject();
+  const fixture = writeStatsFixture(project, "stats-symlink");
+  const usagePath = path.join(fixture.runRoot, "usage.jsonl");
+  const outsidePath = path.join(project, "outside-usage.jsonl");
+  fs.copyFileSync(usagePath, outsidePath);
+  fs.unlinkSync(usagePath);
+  fs.symlinkSync(outsidePath, usagePath);
+
+  const captured = await cli(project, ["stats", fixture.runId, "--json"]);
+  assert.equal(captured.code, 1);
+  assert.match(JSON.stringify(parseJson(captured).diagnostics), /symlink/u);
+});
+
+test("stats rejects linked local evidence without sealed workflow authority", async () => {
+  const project = tempProject();
+  const fixture = writeStatsFixture(project, "stats-missing-control-authority");
+
+  const captured = await cli(project, ["stats", fixture.runId, "--json"]);
+  assert.equal(captured.code, 1);
+  assert.match(JSON.stringify(parseJson(captured).diagnostics), /linked workflow authority is invalid/iu);
+  assert.match(JSON.stringify(parseJson(captured).diagnostics), /control seal/iu);
+});
+
+function writeStatsFixture(
+  project: string,
+  runId: string,
+  options: { linked?: boolean } = {}
+): { runId: string; runRoot: string; layout: RunLayout } {
+  const linked = options.linked ?? true;
+  const startedAt = "2026-08-11T10:00:00.000Z";
+  const finishedAt = "2026-08-11T10:01:00.000Z";
+  const graphFingerprint = "a".repeat(64);
+  const workflowRunId = `workflow-${runId}`;
+  const workflowTaskId = "node:node-a";
+  const controlGeneration = "c".repeat(64);
+  const workflowLinkId = "00000000-0000-4000-8000-000000000001";
+  const executionSnapshotPath = `smithers/execution-snapshots/${"e".repeat(64)}`;
+  const output = {
+    path: "result.md",
+    contract: "ultrafuzz/nonempty-markdown@1" as const,
+    contract_digest: artifactContractDefinition("ultrafuzz/nonempty-markdown@1").digest,
+    primary: true
+  };
+  const summary = {
+    uncached_input_tokens: 10,
+    input_tokens: 10,
+    output_tokens: 2,
+    cache_read_tokens: 5,
+    cache_write_tokens: 0,
+    reasoning_tokens: 0,
+    inclusive_token_total: 17,
+    billable_token_total: 17,
+    total_tokens: 17,
+    tokens_used: "17",
+    estimated_spend: "$0.0000",
+    estimated_spend_usd: 0.0000165,
+    component_costs_usd: {
+      uncached_input: 0.00001,
+      cache_read: 0.0000025,
+      cache_write: 0,
+      output: 0.000004,
+      reasoning: 0
+    },
+    usage_complete: true,
+    usage_incomplete_reasons: [],
+    pricing_complete: true,
+    pricing_incomplete_reasons: [],
+    partial_pricing: false,
+    cache_read_pricing_estimated: false,
+    event_count: 1,
+    priced_event_count: 1,
+    unpriced_event_count: 0,
+    models: ["gpt-test"],
+    agents: ["agent-test"]
+  };
+  const currentAccounting = {
+    ...summary,
+    control_generation: controlGeneration,
+    workflow_run_id: workflowRunId,
+    source_event_sequences: [3],
+    attempts: [{ node_id: "node-a", iteration: 0, attempt: 1 }]
+  };
+  const initialState = createInitialRunState({
+    runId,
+    graphFingerprint,
+    configFingerprint: "b".repeat(64),
+    createdAt: startedAt,
+    nodes: [
+      {
+        id: "node-a",
+        logicalNodeId: "node-a",
+        artifactDir: "artifacts/node-a",
+        outputs: [output],
+        model: "gpt-test",
+        ...(linked
+          ? {
+              provenance: {
+                workflow: {
+                  run_id: workflowRunId,
+                  task_id: workflowTaskId,
+                  agent_task_id: workflowTaskId,
+                  verifier_task_id: "verify:node-a"
+                }
+              }
+            }
+          : {})
+      }
+    ],
+    ...(linked
+      ? {
+          provenance: {
+            workflow: {
+              inspection: { runId: workflowRunId },
+              runId: workflowRunId,
+              compiledRunId: workflowRunId,
+              name: "stats-workflow",
+              controlGeneration,
+              linkId: workflowLinkId,
+              executionSnapshot: executionSnapshotPath
+            }
+          }
+        }
+      : {})
+  });
+  const layout = createRunLayout({
+    projectRoot: project,
+    runId,
+    createdAt: startedAt,
+    graphFingerprint,
+    configFingerprint: "b".repeat(64),
+    graph: {
+      schema_version: "ultrafuzz.planned-graph.v3",
+      graph_version: "3",
+      topology_version: 2,
+      groups: {},
+      nodes: [
+        {
+          id: "node-a",
+          logical_id: "node-a",
+          display_name: "Node A",
+          kind: "agentic",
+          depends_on: [],
+          artifact_dir: "artifacts/node-a",
+          outputs: [output],
+          prompt_id: "node-a",
+          prompt_path: ".ultrafuzz/prompts/node-a.mdx",
+          loop: { index: 0, count: 1, mode: "parallel", attempt_index: 0 },
+          model_fanout: [
+            {
+              model_profile_id: "gpt-test",
+              agent_ref: "agent-test",
+              model_name: "gpt-test",
+              model_index: 0,
+              loop_index: 0,
+              attempt_index: 0
+            }
+          ],
+          ...(linked ? { workflow: { node_id: workflowTaskId, task_node_ids: [workflowTaskId] } } : {})
+        }
+      ]
+    },
+    state: initialState,
+    ...(linked
+      ? {
+          runMetadata: {
+            mode: "run" as const,
+            workflow_ids: [workflowRunId],
+            redacted_config_fingerprint: "d".repeat(64),
+            forge_guard: { enabled: false, active: false, virtual_memory_limit_kb: 1, rayon_threads: 1 },
+            workflow: {
+              run_id: workflowRunId,
+              compiled_run_id: workflowRunId,
+              name: "stats-workflow",
+              path: "workflow.tsx",
+              evidence_path: "smithers/workflow.tsx",
+              expanded_graph_path: "smithers/expanded-graph.json",
+              config_path: "smithers/config.json",
+              input_path: "smithers/input.json",
+              tasks_path: "smithers/tasks.json",
+              control_integrity_path: "smithers/control-integrity.json",
+              control_generation: controlGeneration,
+              workflow_link_id: workflowLinkId,
+              execution_snapshot_path: executionSnapshotPath,
+              task_node_ids: [workflowTaskId]
+            },
+            accounting: {
+              schema_version: "ultrafuzz.accounting.v3" as const,
+              source: "usage-ledger" as const,
+              workflow_run_id: workflowRunId,
+              current: currentAccounting,
+              segments: [currentAccounting],
+              cumulative: { ...summary, source_run_ids: [] },
+              checkpoint: {
+                schema_version: "ultrafuzz.accounting-checkpoint.v1" as const,
+                ledger_event_count: 1,
+                last_source_event_sequence: 3,
+                control_generation: controlGeneration,
+                workflow_run_id: workflowRunId
+              },
+              pricing_catalog: {
+                source: "configured-catalog" as const,
+                status: "available" as const,
+                fetched_at: startedAt,
+                resolved_models: ["gpt-test"],
+                unresolved_models: [],
+                model_prices: {
+                  "gpt-test": {
+                    inputUsdPerMillion: 1,
+                    cachedInputUsdPerMillion: 0.5,
+                    cacheWriteUsdPerMillion: 1.5,
+                    outputUsdPerMillion: 2
+                  }
+                }
+              },
+              updated_at: finishedAt
+            }
+          }
+        }
+      : {})
+  });
+  updateRunStatus(layout, "running", startedAt);
+  updateNodeState(
+    layout,
+    "node-a",
+    { status: "succeeded", started_at: startedAt, finished_at: finishedAt, model: "gpt-test" },
+    finishedAt
+  );
+  updateRunStatus(layout, "succeeded", finishedAt);
+  if (linked) {
+    appendNodeAttempt(layout, {
+      workflowRunId,
+      controlGeneration,
+      nodeId: "node-a",
+      strategyAttemptId: "node-a",
+      iteration: 0,
+      attempt: 1,
+      startedEventSequence: 1,
+      sourceEventSequence: 2,
+      startedAt,
+      finishedAt,
+      outcome: "succeeded",
+      inputManifestDigest: manifestDigest("input"),
+      outputManifestDigest: manifestDigest("output")
+    });
+    appendUsageEvents(layout, [
+      {
+        workflowRunId,
+        controlGeneration,
+        sourceEventSequence: 3,
+        observedTimestampMs: Date.parse(finishedAt),
+        nodeId: "node-a",
+        iteration: 0,
+        attempt: 1,
+        usage: {
+          input_tokens: 10,
+          cache_read_tokens: 5,
+          cache_write_tokens: 0,
+          output_tokens: 2,
+          reasoning_tokens: 0,
+          model: "gpt-test",
+          agent: "agent-test"
+        }
+      }
+    ]);
+  } else {
+    fs.unlinkSync(layout.attemptLedgerPath);
+    fs.unlinkSync(layout.usageLedgerPath);
+  }
+  return { runId, runRoot: layout.root, layout };
+}
+
+const REPORT_BUNDLE_INCLUDED_ROOTS = [
+  "attempts.jsonl",
+  "config.redactions.json",
+  "config.resolved.toml",
+  "events.jsonl",
+  "graph.fingerprint",
+  "graph.json",
+  "plan.json",
+  "run.json",
+  "state.json",
+  "usage.jsonl",
+  "artifacts",
+  "review",
+  "events.index",
+  "engine-logs"
+] as const;
+
+function writeStatsBundle(
+  bundlePath: string,
+  fixture: ReturnType<typeof writeStatsFixture>,
+  options: {
+    omitted?: ReadonlySet<string>;
+    replacements?: ReadonlyMap<string, Buffer>;
+    manifestBytes?: Buffer;
+    extraEntries?: ReadonlyMap<string, Buffer>;
+  } = {}
+): void {
+  const evidenceNames = ["run.json", "state.json", "graph.json", "graph.fingerprint", "attempts.jsonl", "usage.jsonl"];
+  const zip = new AdmZip();
+  let entryCount = 0;
+  for (const name of evidenceNames) {
+    if (options.omitted?.has(name) === true) continue;
+    zip.addFile(name, options.replacements?.get(name) ?? fs.readFileSync(path.join(fixture.runRoot, name)));
+    entryCount += 1;
+  }
+  for (const [name, bytes] of options.extraEntries ?? []) {
+    zip.addFile(name, bytes);
+    entryCount += 1;
+  }
+  const manifest = {
+    schema_version: "ultrafuzz.report-bundle-manifest.v3",
+    run_id: fixture.runId,
+    created_at: "2026-08-11T10:02:00.000Z",
+    included_roots: REPORT_BUNDLE_INCLUDED_ROOTS,
+    excluded_roots: ["workspaces"],
+    entry_count_without_manifest: entryCount
+  };
+  zip.addFile("bundle-manifest.json", options.manifestBytes ?? Buffer.from(`${JSON.stringify(manifest)}\n`, "utf8"));
+  zip.writeZip(bundlePath);
+}
+
+function statsBundleManifestBytes(
+  fixture: ReturnType<typeof writeStatsFixture>,
+  entryCountWithoutManifest: number,
+  createdAt = "2026-08-11T10:02:00.000Z"
+): Buffer {
+  return Buffer.from(
+    `${JSON.stringify({
+      schema_version: "ultrafuzz.report-bundle-manifest.v3",
+      run_id: fixture.runId,
+      created_at: createdAt,
+      included_roots: REPORT_BUNDLE_INCLUDED_ROOTS,
+      excluded_roots: ["workspaces"],
+      entry_count_without_manifest: entryCountWithoutManifest
+    })}\n`,
+    "utf8"
+  );
+}
+
+function duplicateCentralDirectoryEntry(zipBytes: Buffer, entryName: string): Buffer {
+  const endSignature = 0x06054b50;
+  const centralSignature = 0x02014b50;
+  let endOffset = -1;
+  for (let offset = zipBytes.length - 22; offset >= Math.max(0, zipBytes.length - 65_557); offset -= 1) {
+    if (zipBytes.readUInt32LE(offset) === endSignature) {
+      endOffset = offset;
+      break;
+    }
+  }
+  assert.notEqual(endOffset, -1, "ZIP end-of-central-directory record");
+  const centralOffset = zipBytes.readUInt32LE(endOffset + 16);
+  const centralSize = zipBytes.readUInt32LE(endOffset + 12);
+  let offset = centralOffset;
+  let selected: Buffer | undefined;
+  while (offset < centralOffset + centralSize) {
+    assert.equal(zipBytes.readUInt32LE(offset), centralSignature);
+    const nameLength = zipBytes.readUInt16LE(offset + 28);
+    const extraLength = zipBytes.readUInt16LE(offset + 30);
+    const commentLength = zipBytes.readUInt16LE(offset + 32);
+    const recordLength = 46 + nameLength + extraLength + commentLength;
+    const name = zipBytes.subarray(offset + 46, offset + 46 + nameLength).toString("utf8");
+    if (name === entryName) selected = Buffer.from(zipBytes.subarray(offset, offset + recordLength));
+    offset += recordLength;
+  }
+  assert.ok(selected, entryName);
+  const end = Buffer.from(zipBytes.subarray(endOffset));
+  const diskEntries = end.readUInt16LE(8);
+  const totalEntries = end.readUInt16LE(10);
+  end.writeUInt16LE(diskEntries + 1, 8);
+  end.writeUInt16LE(totalEntries + 1, 10);
+  end.writeUInt32LE(centralSize + selected.length, 12);
+  return Buffer.concat([zipBytes.subarray(0, endOffset), selected, end]);
+}
+
+function renameCentralDirectoryEntry(zipBytes: Buffer, entryName: string, replacement: string): Buffer {
+  assert.equal(Buffer.byteLength(entryName), Buffer.byteLength(replacement));
+  const copy = Buffer.from(zipBytes);
+  const endSignature = 0x06054b50;
+  const centralSignature = 0x02014b50;
+  let endOffset = -1;
+  for (let offset = copy.length - 22; offset >= Math.max(0, copy.length - 65_557); offset -= 1) {
+    if (copy.readUInt32LE(offset) === endSignature) {
+      endOffset = offset;
+      break;
+    }
+  }
+  assert.notEqual(endOffset, -1, "ZIP end-of-central-directory record");
+  const centralOffset = copy.readUInt32LE(endOffset + 16);
+  const centralSize = copy.readUInt32LE(endOffset + 12);
+  let offset = centralOffset;
+  while (offset < centralOffset + centralSize) {
+    assert.equal(copy.readUInt32LE(offset), centralSignature);
+    const nameLength = copy.readUInt16LE(offset + 28);
+    const extraLength = copy.readUInt16LE(offset + 30);
+    const commentLength = copy.readUInt16LE(offset + 32);
+    const nameStart = offset + 46;
+    const name = copy.subarray(nameStart, nameStart + nameLength).toString("utf8");
+    if (name === entryName) {
+      copy.write(replacement, nameStart, nameLength, "utf8");
+      return copy;
+    }
+    offset += 46 + nameLength + extraLength + commentLength;
+  }
+  assert.fail(`missing ZIP central-directory entry ${entryName}`);
+}

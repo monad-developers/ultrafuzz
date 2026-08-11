@@ -9079,7 +9079,7 @@ test("syncRun accepts the runner's correlation envelope and rejects a mismatched
 
   // Every event the runner emits carries this trace envelope, so refusing it left
   // no real run syncable at all.
-  const synced = async (runId: string, correlationAttempt: number) => {
+  const synced = async (runId: string, correlationAttempt: number, control: Parameters<typeof syncRun>[1] = {}) => {
     const workflowRunId = `ultrafuzz-${runId}`;
     const env = fakeLifecycleSmithersEnv(project, {
       inspect: workflowInspect({
@@ -9116,7 +9116,7 @@ test("syncRun accepts the runner's correlation envelope and rejects a mismatched
     const run = await startRun({ projectRoot: project, runId, env });
     assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
     writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
-    return syncRun({ projectRoot: project, runId, env });
+    return syncRun({ projectRoot: project, runId, env }, control);
   };
 
   const accepted = await synced("correlated-usage", 1);
@@ -9127,6 +9127,15 @@ test("syncRun accepts the runner's correlation envelope and rejects a mismatched
   await assert.rejects(
     () => synced("correlated-usage-mismatch", 2),
     /correlation attempt disagrees with the reported usage/u
+  );
+
+  const observational = await synced("correlated-usage-mismatch-observational", 2, {
+    tolerateInvalidEventStreams: true
+  });
+  assert.equal(observational.ok, false);
+  assert.ok(
+    observational.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_EVENTS_INVALID"),
+    JSON.stringify(observational.diagnostics)
   );
 });
 

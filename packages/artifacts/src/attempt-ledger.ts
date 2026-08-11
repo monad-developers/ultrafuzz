@@ -15,7 +15,12 @@ import {
 import { type RunLayout } from "./run-layout.js";
 import { SAFE_ID_PATTERN, sha256Bytes, validateSafeId } from "./safe-paths.js";
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
-import { appendStrictJsonlRecords, readStrictJsonlSnapshot, type StrictJsonlCodec } from "./strict-jsonl.js";
+import {
+  appendStrictJsonlRecords,
+  parseStrictJsonlBytes,
+  readStrictJsonlSnapshot,
+  type StrictJsonlCodec
+} from "./strict-jsonl.js";
 
 export const NODE_ATTEMPT_LEDGER_SCHEMA_VERSION = "ultrafuzz.node-attempt-ledger.v1" as const;
 export { MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES } from "./artifact-limits.js";
@@ -518,6 +523,15 @@ export function replayNodeAttempts(
   };
 }
 
+/** Replay an immutable attempt-ledger snapshot captured outside the filesystem. */
+export function parseNodeAttemptLedgerBytes(bytes: Uint8Array, expectedRunId?: string): NodeAttemptReplay {
+  return {
+    entries: parseStrictJsonlBytes(bytes, nodeAttemptLedgerCodec(expectedRunId)).records,
+    malformedEntries: 0,
+    duplicateEntries: 0
+  };
+}
+
 export function queryNodeAttempts(
   layoutOrPath: (Pick<RunLayout, "attemptLedgerPath"> & Partial<Pick<RunLayout, "runId">>) | string,
   query: NodeAttemptQuery = {}
@@ -575,6 +589,7 @@ function nodeAttemptLedgerCodec(expectedRunId?: string): StrictJsonlCodec<NodeAt
     label: "node attempt ledger",
     parseRecord: (value, recordPath) => {
       const entry = assertNodeAttemptLedgerEntry(value, recordPath);
+      assertNodeAttemptLedgerReadSemantics(entry, recordPath);
       if (expectedRunId !== undefined && entry.run_id !== expectedRunId) {
         throw new Error(
           `${recordPath}.run_id belongs to ${JSON.stringify(entry.run_id)}, expected ${JSON.stringify(expectedRunId)}`
@@ -585,6 +600,21 @@ function nodeAttemptLedgerCodec(expectedRunId?: string): StrictJsonlCodec<NodeAt
     identity: nodeAttemptLedgerIdentity,
     validateHistory: validateNodeAttemptLedgerHistory
   };
+}
+
+function assertNodeAttemptLedgerReadSemantics(entry: NodeAttemptLedgerEntry, recordPath: string): void {
+  if (entry.started_event_sequence >= entry.source_event_sequence) {
+    throw new Error(`${recordPath}.started_event_sequence must precede source_event_sequence`);
+  }
+  if (Date.parse(entry.lifecycle.started_at) > Date.parse(entry.lifecycle.finished_at)) {
+    throw new Error(`${recordPath}.lifecycle.finished_at cannot precede lifecycle.started_at`);
+  }
+  if (
+    entry.failure_message !== undefined &&
+    Buffer.byteLength(entry.failure_message, "utf8") > MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES
+  ) {
+    throw new Error(`${recordPath}.failure_message exceeds ${MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES} UTF-8 bytes`);
+  }
 }
 
 function validateNodeAttemptLedgerHistory(entries: readonly NodeAttemptLedgerEntry[]): void {

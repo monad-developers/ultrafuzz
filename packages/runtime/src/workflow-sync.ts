@@ -55,6 +55,7 @@ import {
   type NodeAttemptFailureCategory,
   type NodeAttemptLedgerEntry,
   type NodeAttemptOutcome,
+  type NormalizedUsage,
   type ExecutionNodeProvenance,
   type NodeFailureProvenance,
   type NodeProvenance,
@@ -62,6 +63,7 @@ import {
   type NodeStatus,
   type RunLayout,
   type RunMetadataAccounting,
+  type RunMetadataDocument,
   type RunStatus,
   type SmithersTaskManifestDocument,
   type SmithersTaskManifestTask,
@@ -234,7 +236,7 @@ interface AccountingTotals {
   agents: Set<string>;
 }
 
-type UsageComponent = "uncached_input" | "cache_read" | "cache_write" | "output" | "reasoning";
+export type UsageComponent = "uncached_input" | "cache_read" | "cache_write" | "output" | "reasoning";
 
 type UsageComponentCosts = Record<UsageComponent, number>;
 
@@ -256,6 +258,22 @@ interface NormalizedUsageComponents {
   cache_write: number;
   output: number;
   reasoning: number;
+}
+
+export interface NormalizedUsageAccountingProjection {
+  components: {
+    input_tokens: number | null;
+    cache_read_tokens: number | null;
+    cache_write_tokens: number | null;
+    output_tokens: number | null;
+    reasoning_tokens: number | null;
+  };
+  total_tokens: number | null;
+  estimated_spend_usd: number | null;
+  usage_complete: boolean;
+  usage_incomplete_reasons: Array<{ code: string; component?: UsageComponent; model?: string }>;
+  pricing_complete: boolean;
+  pricing_incomplete_reasons: Array<{ code: string; component?: UsageComponent; model?: string }>;
 }
 
 interface NodeWorkflowEvidence {
@@ -308,6 +326,12 @@ export interface WorkflowSynchronizationControl {
   now?: () => number;
   signal?: AbortSignal;
   deadlineMs?: number;
+  /**
+   * Observational callers may retain the last coherent local snapshot when a
+   * Smithers event stream is malformed. Mutation-capable synchronization stays
+   * fail-closed by default and rethrows the parser error.
+   */
+  tolerateInvalidEventStreams?: boolean;
 }
 
 const NODE_TERMINAL_STATUSES = new Set<NodeStatus>([
@@ -461,8 +485,26 @@ export async function synchronizeLinkedWorkflowRun(
       diagnostics: [diagnosticFromError(error, "workflow", "WORKFLOW_INSPECT_INVALID")]
     };
   }
-  const events = parseWorkflowEvents(eventsSnapshot.stdout, evidence.smithersRunId);
-  const tokenEvents = parseWorkflowEvents(tokenEventsSnapshot.stdout, evidence.smithersRunId);
+  let events: WorkflowEvent[];
+  try {
+    events = parseWorkflowEvents(eventsSnapshot.stdout, evidence.smithersRunId);
+  } catch (error) {
+    if (control.tolerateInvalidEventStreams !== true) throw error;
+    return {
+      ok: false,
+      diagnostics: [diagnosticFromError(error, "workflow", "WORKFLOW_EVENTS_INVALID")]
+    };
+  }
+  let tokenEvents: WorkflowEvent[];
+  try {
+    tokenEvents = parseWorkflowEvents(tokenEventsSnapshot.stdout, evidence.smithersRunId);
+  } catch (error) {
+    if (control.tolerateInvalidEventStreams !== true) throw error;
+    return {
+      ok: false,
+      diagnostics: [diagnosticFromError(error, "workflow", "WORKFLOW_TOKEN_EVENTS_INVALID")]
+    };
+  }
   let syncResult;
   try {
     syncResult = await synchronizeTasks({
@@ -1405,6 +1447,149 @@ function assertAccountingMatchesUsageLedger(
   ) {
     throw new Error(`${label}.checkpoint does not exactly identify the final usage-ledger event`);
   }
+
+  const cacheReadRatios = [
+    ...new Set(
+      accounting.segments.flatMap((segment) =>
+        segment.cache_read_ratio_used === undefined ? [] : [segment.cache_read_ratio_used]
+      )
+    )
+  ];
+  if (cacheReadRatios.length > 1) {
+    throw new Error(`${label}.segments use inconsistent cache-read ratios`);
+  }
+  const recomputedSegments = accountingSegmentsFromUsageLedger(entries, accounting.pricing, cacheReadRatios[0]);
+  for (const [index, recomputed] of recomputedSegments.entries()) {
+    if (!isDeepStrictEqual(accounting.segments[index], recomputed)) {
+      throw new Error(`${label}.segments[${index}] does not exactly match usage-ledger accounting`);
+    }
+  }
+}
+
+/** Validate the complete current-run authority between run.json accounting and usage.jsonl. */
+export function assertRunMetadataAccountingUsageAuthority(
+  metadata: RunMetadataDocument,
+  entries: readonly UsageLedgerEntry[] | undefined,
+  label = "run.json#$.accounting"
+): void {
+  if (entries === undefined) return;
+  if (entries.length === 0) {
+    if (metadata.accounting !== undefined) {
+      throw new Error(`${label} cannot exist with a present empty usage ledger`);
+    }
+    return;
+  }
+  if (metadata.accounting === undefined) {
+    throw new Error(`a non-empty usage ledger requires ${label}`);
+  }
+  if (metadata.workflow === undefined) {
+    throw new Error(`${label} requires active workflow metadata`);
+  }
+  if (entries.some((entry) => entry.control_generation !== metadata.workflow!.control_generation)) {
+    throw new Error(`${label} usage ledger contains a foreign workflow control generation`);
+  }
+
+  const accounting = storedAccountingDocument(metadata.accounting, metadata.workflow.run_id);
+  assertAccountingMatchesUsageLedger(accounting, entries, label);
+  if (accounting.current.control_generation !== metadata.workflow.control_generation) {
+    throw new Error(`${label}.current.control_generation does not match the active workflow control generation`);
+  }
+  if (accounting.cumulative.source_run_ids.includes(metadata.run_id)) {
+    throw new Error(`${label}.cumulative.source_run_ids cannot contain the current run ID`);
+  }
+
+  const currentRunCumulative = cumulativeAccountingSummary(accounting.segments, []);
+  if (metadata.source_run_id === undefined) {
+    if (accounting.cumulative.source_run_ids.length !== 0) {
+      throw new Error(`${label}.cumulative.source_run_ids requires a direct source run`);
+    }
+    if (!isDeepStrictEqual(accounting.cumulative, currentRunCumulative)) {
+      throw new Error(`${label}.cumulative does not exactly aggregate the usage-ledger segments`);
+    }
+    return;
+  }
+
+  if (accounting.cumulative.source_run_ids[0] !== metadata.source_run_id) {
+    throw new Error(`${label}.cumulative.source_run_ids does not begin with run.json source_run_id`);
+  }
+  assertCumulativeAccountingContainsCurrentRun(accounting.cumulative, currentRunCumulative, label);
+}
+
+function assertCumulativeAccountingContainsCurrentRun(
+  cumulative: CumulativeAccountingSummary,
+  current: CumulativeAccountingSummary,
+  label: string
+): void {
+  for (const field of [
+    "uncached_input_tokens",
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "reasoning_tokens",
+    "inclusive_token_total",
+    "billable_token_total",
+    "total_tokens",
+    "event_count",
+    "priced_event_count",
+    "unpriced_event_count"
+  ] as const) {
+    if (cumulative[field] < current[field]) {
+      throw new Error(`${label}.cumulative.${field} is smaller than the current-run contribution`);
+    }
+  }
+  for (const component of Object.keys(current.component_costs_usd) as UsageComponent[]) {
+    if (cumulative.component_costs_usd[component] < current.component_costs_usd[component]) {
+      throw new Error(
+        `${label}.cumulative.component_costs_usd.${component} is smaller than the current-run contribution`
+      );
+    }
+  }
+  for (const model of current.models) {
+    if (!cumulative.models.includes(model)) {
+      throw new Error(`${label}.cumulative.models omits current-run model ${JSON.stringify(model)}`);
+    }
+  }
+  for (const agent of current.agents) {
+    if (!cumulative.agents.includes(agent)) {
+      throw new Error(`${label}.cumulative.agents omits current-run agent ${JSON.stringify(agent)}`);
+    }
+  }
+  if (!current.usage_complete && cumulative.usage_complete) {
+    throw new Error(`${label}.cumulative cannot claim complete usage when current-run usage is incomplete`);
+  }
+  if (!current.pricing_complete && cumulative.pricing_complete) {
+    throw new Error(`${label}.cumulative cannot claim complete pricing when current-run pricing is incomplete`);
+  }
+  if (current.partial_pricing && !cumulative.partial_pricing) {
+    throw new Error(`${label}.cumulative cannot clear current-run partial pricing`);
+  }
+  if (current.cache_read_pricing_estimated && !cumulative.cache_read_pricing_estimated) {
+    throw new Error(`${label}.cumulative cannot clear current-run estimated cache-read pricing`);
+  }
+  if (
+    current.cache_read_ratio_used !== undefined &&
+    cumulative.cache_read_ratio_used !== undefined &&
+    cumulative.cache_read_ratio_used !== current.cache_read_ratio_used
+  ) {
+    throw new Error(`${label}.cumulative.cache_read_ratio_used conflicts with the current-run ratio`);
+  }
+  for (const reason of current.usage_incomplete_reasons) {
+    if (!cumulative.usage_incomplete_reasons.some((candidate) => isDeepStrictEqual(candidate, reason))) {
+      throw new Error(`${label}.cumulative.usage_incomplete_reasons omits a current-run reason`);
+    }
+  }
+  for (const reason of current.pricing_incomplete_reasons) {
+    if (!cumulative.pricing_incomplete_reasons.some((candidate) => isDeepStrictEqual(candidate, reason))) {
+      throw new Error(`${label}.cumulative.pricing_incomplete_reasons omits a current-run reason`);
+    }
+  }
+  if (
+    current.estimated_spend_usd !== undefined &&
+    (cumulative.estimated_spend_usd === undefined || cumulative.estimated_spend_usd < current.estimated_spend_usd)
+  ) {
+    throw new Error(`${label}.cumulative.estimated_spend_usd is smaller than the current-run contribution`);
+  }
 }
 
 function storedPricingCatalog(value: unknown, label: string): StoredPricingCatalog {
@@ -1748,7 +1933,7 @@ function storedAccountingSummary(value: unknown, label: string): AccountingSumma
     if (estimatedSpend !== formatUsd(estimatedSpendUsd, partialPricing)) {
       throw new Error(`${label}.estimated_spend does not match estimated_spend_usd`);
     }
-    if (roundUsd(sumComponentCosts(componentCosts)) !== roundUsd(estimatedSpendUsd)) {
+    if (roundAccountingUsd(sumComponentCosts(componentCosts)) !== roundAccountingUsd(estimatedSpendUsd)) {
       throw new Error(`${label}.component_costs_usd does not sum to estimated_spend_usd`);
     }
   }
@@ -1938,7 +2123,7 @@ function priceUsageComponents(input: {
       });
       continue;
     }
-    componentCostsUsd[component] = roundUsd((tokens * rate) / 1_000_000);
+    componentCostsUsd[component] = roundAccountingUsd((tokens * rate) / 1_000_000);
     if (rate > 0) {
       billableTokens += tokens;
     }
@@ -1949,6 +2134,57 @@ function priceUsageComponents(input: {
     componentCostsUsd,
     billableTokens,
     incompleteReasons
+  };
+}
+
+export function projectNormalizedUsageAccounting(input: {
+  usage: NormalizedUsage;
+  modelPricing: ReadonlyMap<string, ModelPricing>;
+  cacheReadRatio?: number;
+}): NormalizedUsageAccountingProjection {
+  const usage = input.usage;
+  const inputTokens = usage.input_tokens;
+  const outputTokens = usage.output_tokens;
+  const cacheWriteTokens = usage.cache_write_tokens ?? 0;
+  const reasoningTokens = usage.reasoning_tokens ?? 0;
+  const normalized = normalizeUsageComponents({
+    model: usage.model,
+    inputTokens,
+    outputTokens,
+    cacheReadTokens: usage.cache_read_tokens,
+    cacheWriteTokens,
+    reasoningTokens,
+    cacheReadRatio: input.cacheReadRatio
+  });
+  const componentTotal = sumUsageComponents(normalized.components);
+  const componentReasons = normalized.incompleteReasons;
+  const usageUnavailable = componentReasons.some((reason) => reason.code === "component-usage-unavailable");
+  const pricing = priceUsageComponents({
+    model: usage.model,
+    components: normalized.components,
+    modelPricing: input.modelPricing
+  });
+  const estimatedSpendUsd = usageUnavailable ? undefined : pricing.costUsd;
+  const cacheReadUnavailable = componentReasons.some(
+    (reason) => reason.code === "component-usage-unavailable" && reason.component === "cache_read"
+  );
+  return {
+    components: {
+      input_tokens: normalized.components.uncached_input,
+      cache_read_tokens:
+        cacheReadUnavailable || (usage.cache_read_tokens === undefined && !normalized.cacheReadPricingEstimated)
+          ? null
+          : normalized.components.cache_read,
+      cache_write_tokens: normalized.components.cache_write,
+      output_tokens: normalized.components.output,
+      reasoning_tokens: normalized.components.reasoning
+    },
+    total_tokens: usageUnavailable ? null : componentTotal,
+    estimated_spend_usd: estimatedSpendUsd ?? null,
+    usage_complete: componentReasons.length === 0,
+    usage_incomplete_reasons: componentReasons,
+    pricing_complete: pricing.incompleteReasons.length === 0,
+    pricing_incomplete_reasons: pricing.incompleteReasons
   };
 }
 
@@ -1974,7 +2210,10 @@ function addComponentCosts(target: UsageComponentCosts, source: UsageComponentCo
 
 function roundedComponentCosts(costs: UsageComponentCosts): UsageComponentCosts {
   return Object.fromEntries(
-    (Object.entries(costs) as Array<[UsageComponent, number]>).map(([component, cost]) => [component, roundUsd(cost)])
+    (Object.entries(costs) as Array<[UsageComponent, number]>).map(([component, cost]) => [
+      component,
+      roundAccountingUsd(cost)
+    ])
   ) as UsageComponentCosts;
 }
 
@@ -1983,10 +2222,10 @@ function sumComponentCosts(costs: UsageComponentCosts): number {
 }
 
 function addUsd(current: number | undefined, amount: number): number {
-  return roundUsd((current ?? 0) + amount);
+  return roundAccountingUsd((current ?? 0) + amount);
 }
 
-function roundUsd(value: number): number {
+export function roundAccountingUsd(value: number): number {
   return Number(value.toFixed(ACCOUNTING_USD_PRECISION));
 }
 

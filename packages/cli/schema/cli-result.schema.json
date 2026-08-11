@@ -43,6 +43,7 @@
     { "$ref": "#/$defs/runCommand" },
     { "$ref": "#/$defs/psCommand" },
     { "$ref": "#/$defs/statusCommand" },
+    { "$ref": "#/$defs/statsCommand" },
     { "$ref": "#/$defs/inspectCommand" },
     { "$ref": "#/$defs/reportCommand" },
     { "$ref": "#/$defs/reportBundleCommand" },
@@ -88,6 +89,7 @@
         "run",
         "ps",
         "status",
+        "stats",
         "inspect",
         "report",
         "report bundle",
@@ -1488,6 +1490,258 @@
         "outputs": { "$ref": "#/$defs/stringArray" }
       }
     },
+    "statsNullableNonNegativeInteger": {
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/nonNegativeInteger" }]
+    },
+    "statsTokenData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "output_tokens",
+        "reasoning_tokens",
+        "total_tokens",
+        "estimated_spend_usd",
+        "usage_complete",
+        "pricing_complete",
+        "event_count",
+        "models"
+      ],
+      "properties": {
+        "input_tokens": { "$ref": "#/$defs/statsNullableNonNegativeInteger" },
+        "cache_read_tokens": { "$ref": "#/$defs/statsNullableNonNegativeInteger" },
+        "cache_write_tokens": { "$ref": "#/$defs/statsNullableNonNegativeInteger" },
+        "output_tokens": { "$ref": "#/$defs/statsNullableNonNegativeInteger" },
+        "reasoning_tokens": { "$ref": "#/$defs/statsNullableNonNegativeInteger" },
+        "total_tokens": { "$ref": "#/$defs/statsNullableNonNegativeInteger" },
+        "estimated_spend_usd": {
+          "oneOf": [{ "type": "null" }, { "type": "number", "minimum": 0 }]
+        },
+        "usage_complete": { "type": "boolean" },
+        "pricing_complete": { "type": "boolean" },
+        "event_count": { "$ref": "#/$defs/nonNegativeInteger" },
+        "models": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "statsNodeData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node_id",
+        "logical_node_id",
+        "kind",
+        "status",
+        "outcome",
+        "model",
+        "duration_ms",
+        "current_elapsed_ms",
+        "attempt_count",
+        "retry_count",
+        "executed_attempt_count",
+        "reused_attempt_count",
+        "failure_categories",
+        "output_count",
+        "usage"
+      ],
+      "properties": {
+        "node_id": { "type": "string", "minLength": 1 },
+        "logical_node_id": {
+          "oneOf": [{ "type": "null" }, { "type": "string", "minLength": 1 }]
+        },
+        "kind": { "enum": ["agentic", "reference", null] },
+        "status": {
+          "enum": [
+            "pending",
+            "ready",
+            "runnable",
+            "running",
+            "succeeded",
+            "failed",
+            "skipped",
+            "timed-out",
+            "reused-from-prior-run",
+            "invalidated",
+            "unknown"
+          ]
+        },
+        "outcome": {
+          "enum": ["succeeded", "failed", "timed-out", "canceled", "reused", "mixed", null]
+        },
+        "model": { "oneOf": [{ "type": "null" }, { "type": "string", "minLength": 1 }] },
+        "duration_ms": { "$ref": "#/$defs/statsNullableNonNegativeInteger" },
+        "current_elapsed_ms": { "$ref": "#/$defs/statsNullableNonNegativeInteger" },
+        "attempt_count": { "$ref": "#/$defs/statsNullableNonNegativeInteger" },
+        "retry_count": { "$ref": "#/$defs/statsNullableNonNegativeInteger" },
+        "executed_attempt_count": { "$ref": "#/$defs/statsNullableNonNegativeInteger" },
+        "reused_attempt_count": { "$ref": "#/$defs/statsNullableNonNegativeInteger" },
+        "failure_categories": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "enum": [
+                  "executor-error",
+                  "timeout",
+                  "canceled",
+                  "dependency",
+                  "invalid-output",
+                  "artifact-validation",
+                  "unknown"
+                ]
+              }
+            }
+          ]
+        },
+        "output_count": { "$ref": "#/$defs/nonNegativeInteger" },
+        "usage": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/statsTokenData" }] }
+      }
+    },
+    "statsStatusCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pending",
+        "ready",
+        "runnable",
+        "running",
+        "succeeded",
+        "failed",
+        "skipped",
+        "timed-out",
+        "reused-from-prior-run",
+        "invalidated",
+        "unknown"
+      ],
+      "properties": {
+        "pending": { "$ref": "#/$defs/nonNegativeInteger" },
+        "ready": { "$ref": "#/$defs/nonNegativeInteger" },
+        "runnable": { "$ref": "#/$defs/nonNegativeInteger" },
+        "running": { "$ref": "#/$defs/nonNegativeInteger" },
+        "succeeded": { "$ref": "#/$defs/nonNegativeInteger" },
+        "failed": { "$ref": "#/$defs/nonNegativeInteger" },
+        "skipped": { "$ref": "#/$defs/nonNegativeInteger" },
+        "timed-out": { "$ref": "#/$defs/nonNegativeInteger" },
+        "reused-from-prior-run": { "$ref": "#/$defs/nonNegativeInteger" },
+        "invalidated": { "$ref": "#/$defs/nonNegativeInteger" },
+        "unknown": { "$ref": "#/$defs/nonNegativeInteger" }
+      }
+    },
+    "statsAccountingCumulative": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "output_tokens",
+        "reasoning_tokens",
+        "total_tokens",
+        "estimated_spend_usd",
+        "usage_complete",
+        "pricing_complete",
+        "event_count",
+        "models",
+        "agents",
+        "source_run_ids"
+      ],
+      "properties": {
+        "input_tokens": { "$ref": "#/$defs/nonNegativeInteger" },
+        "cache_read_tokens": { "$ref": "#/$defs/nonNegativeInteger" },
+        "cache_write_tokens": { "$ref": "#/$defs/nonNegativeInteger" },
+        "output_tokens": { "$ref": "#/$defs/nonNegativeInteger" },
+        "reasoning_tokens": { "$ref": "#/$defs/nonNegativeInteger" },
+        "total_tokens": { "$ref": "#/$defs/nonNegativeInteger" },
+        "estimated_spend_usd": {
+          "oneOf": [{ "type": "null" }, { "type": "number", "minimum": 0 }]
+        },
+        "usage_complete": { "type": "boolean" },
+        "pricing_complete": { "type": "boolean" },
+        "event_count": { "$ref": "#/$defs/nonNegativeInteger" },
+        "models": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "agents": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "source_run_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "statsData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "run_id",
+        "generated_at",
+        "source",
+        "status",
+        "run_elapsed_ms",
+        "nodes",
+        "totals",
+        "unattributed_usage"
+      ],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.stats.v1" },
+        "run_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        },
+        "generated_at": { "type": "string", "format": "date-time" },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "path"],
+          "properties": {
+            "kind": { "enum": ["local-run", "report-bundle"] },
+            "path": { "type": "string", "minLength": 1 }
+          }
+        },
+        "status": { "enum": ["pending", "running", "paused", "succeeded", "failed", "timed-out", "canceled"] },
+        "run_elapsed_ms": { "$ref": "#/$defs/nonNegativeInteger" },
+        "nodes": { "type": "array", "items": { "$ref": "#/$defs/statsNodeData" } },
+        "totals": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "node_count",
+            "status_counts",
+            "duration_ms",
+            "attempts_complete",
+            "usage",
+            "accounting_cumulative"
+          ],
+          "properties": {
+            "node_count": { "$ref": "#/$defs/nonNegativeInteger" },
+            "status_counts": { "$ref": "#/$defs/statsStatusCounts" },
+            "duration_ms": { "$ref": "#/$defs/statsNullableNonNegativeInteger" },
+            "attempts_complete": { "type": "boolean" },
+            "usage": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/statsTokenData" }] },
+            "accounting_cumulative": {
+              "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/statsAccountingCumulative" }]
+            }
+          }
+        },
+        "unattributed_usage": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/statsTokenData" }]
+        }
+      }
+    },
     "auditProfileData": {
       "type": "object",
       "additionalProperties": false,
@@ -1639,6 +1893,7 @@
     "runCommand": { "$ref": "#/$defs/command-run" },
     "psCommand": { "$ref": "#/$defs/command-ps" },
     "statusCommand": { "$ref": "#/$defs/command-status" },
+    "statsCommand": { "$ref": "#/$defs/command-stats" },
     "inspectCommand": { "$ref": "#/$defs/command-inspect" },
     "reportCommand": { "$ref": "#/$defs/command-report" },
     "reportBundleCommand": { "$ref": "#/$defs/command-report-bundle" },
@@ -1717,6 +1972,7 @@
     "command-run": { "$ref": "#/$defs/commandTemplate-run" },
     "command-ps": { "$ref": "#/$defs/commandTemplate-ps" },
     "command-status": { "$ref": "#/$defs/commandTemplate-status" },
+    "command-stats": { "$ref": "#/$defs/commandTemplate-stats" },
     "command-inspect": { "$ref": "#/$defs/commandTemplate-inspect" },
     "command-report": { "$ref": "#/$defs/commandTemplate-report" },
     "command-report-bundle": { "$ref": "#/$defs/commandTemplate-report-bundle" },
@@ -1784,6 +2040,13 @@
       "then": {
         "type": "object",
         "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/statusData" }] } }
+      }
+    },
+    "commandTemplate-stats": {
+      "if": { "type": "object", "properties": { "command": { "const": "stats" } }, "required": ["command"] },
+      "then": {
+        "type": "object",
+        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/statsData" }] } }
       }
     },
     "commandTemplate-inspect": {

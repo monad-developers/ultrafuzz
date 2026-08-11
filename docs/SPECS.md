@@ -396,12 +396,33 @@ generic JSON values, `required_artifacts`, partial identities, and workflow-stat
 aliases MUST be rejected rather than normalized.
 
 Completed node attempts MUST be appended immutably to `attempts.jsonl` with
-stable strategy-attempt, executor-retry, checkpoint-generation,
-workflow-execution, and controller-invocation identities. Entries MUST preserve
-parent and reuse relationships, lifecycle timestamps, typed outcomes, and input
-and output manifest digests. Attempt counts and terminal summaries MUST derive
-from the ledger. Failure categories MUST remain separate from raw diagnostics,
-and ledger entries MUST NOT persist raw inputs, outputs, or configuration.
+the exact Smithers identity `(workflow_run_id, source_event_sequence)`.
+Strategy-attempt, control-generation, node, iteration, attempt, and reuse-source
+coordinates MUST remain validated evidence fields and MUST NOT become surrogate
+ledger identities. Entries MUST preserve lifecycle timestamps, typed outcomes,
+reuse source coordinates, and input and output manifest digests. Attempt counts
+and terminal summaries MUST derive from the ledger. Failure categories MUST
+remain separate from raw diagnostics, and ledger entries MUST NOT persist raw
+inputs, outputs, or configuration.
+
+The CLI MUST derive per-node timing, token components, estimated cost, model,
+attempt/retry disposition, and completeness from existing run evidence without
+requiring a precomputed statistics artifact. The same projection MUST operate
+offline only from the registered current v3 report-bundle manifest containing
+current `state.json`, `graph.json`, `graph.fingerprint`, and `run.json`
+documents. Present attempt and usage ledgers MUST pass the same strict UTF-8,
+duplicate-key, schema, run-binding, identity, and history readers as local run
+evidence; malformed, duplicate, conflicting, or cross-run rows MUST fail the
+query. Local evidence MUST be accepted only after two byte-identical reads of
+the complete evidence set, with bounded retries for recognized mutation races;
+the snapshot timestamp MUST be taken immediately after the accepted second
+read. A capture timestamp MUST NOT precede any historical observation carried
+by the snapshot or be later than the statistics clock. A genuinely absent
+optional ledger MUST remain unavailable rather than being represented as zero.
+When usage evidence is absent from a bundle, unauthenticated metadata
+accounting MUST also remain unavailable; a local run that retains accounting
+but loses its usage ledger MUST fail closed. The CLI result MUST use the exact
+closed `ultrafuzz.stats.v1` data contract inside `ultrafuzz.cli.result.v2`.
 
 `status`, `pause`, `resume`, `replay`, and `fork` operate on the linked workflow run. They SHOULD
 perform product checks, delegate to the workflow engine, and persist updated

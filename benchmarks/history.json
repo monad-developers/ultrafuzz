@@ -11424,6 +11424,216 @@
           ]
         }
       }
+    },
+    {
+      "schema_version": "ultrafuzz.eval.history.observation.v6",
+      "id": "ci-31500921737-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:stableswap-ng-vyper:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
+      "benchmark": "ultrafuzz-bench",
+      "lane": "smoke",
+      "target": "stableswap-ng-vyper",
+      "variant": "benchmark-smoke-gpt-5-6-luna-high",
+      "trial_count": 1,
+      "run_timestamp": "2026-08-11T14:23:18.063Z",
+      "candidate_commit": "c011d7d2fd1599698ac6962ba8f5e7f904f5d73b",
+      "candidate_repository_url": "https://github.com/monad-developers/ultrafuzz",
+      "cohort_fingerprint": "sha256:5d6ac3fd37b855433925c76b0c4c3f4906bb62b0eec812aec1b88f3a1b0c9a8d",
+      "target_revisions": [
+        {
+          "target": "stableswap-ng-vyper",
+          "revision": "8c78731ed43c22e6bcdcb5d39b0a7d02f8cb0386"
+        },
+        {
+          "target": "venus-isolated-pools-hardhat",
+          "revision": "9853f6f4fe906b635e214b22de9f627c6a17ba5b"
+        },
+        {
+          "target": "very-liquid-vaults-foundry",
+          "revision": "e50384709a696c86ab0440bbbc3dd14a5f4ff6ec"
+        }
+      ],
+      "model_profile": "benchmark-smoke-gpt-5-6-luna-high",
+      "model": "gpt-5.6-luna",
+      "reasoning_effort": "high",
+      "execution_policy_fingerprint": "sha256:fbbf61e0e6c0aa05110e6c85eead59c65dd6475ddad260be50c7efc400f79816",
+      "scoring_fingerprint": "sha256:d387f5719ee5167015ca934b5d1241de6b8517a86fc8cc54ba45e38da1b355c5",
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "cumulative_unique_true_positives": 0,
+      "wall_clock_seconds": 883.724,
+      "wall_clock_completeness": {
+        "status": "complete",
+        "reasons": []
+      },
+      "cost_usd": 5.8078528,
+      "cost_completeness": {
+        "status": "complete",
+        "reasons": []
+      },
+      "source_eval_run_id": "ci-31500921737-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high",
+      "source_artifact": "https://github.com/monad-developers/ultrafuzz/actions/runs/31500921737",
+      "ground_truth_bug_count": 7,
+      "status": "succeeded",
+      "executed_case_count": 1,
+      "graded_case_count": 1,
+      "publication_url": "https://github.com/monad-developers/ultrafuzz/actions/runs/31500921737/artifacts",
+      "target_publication": {
+        "target": "stableswap-ng-vyper",
+        "repository": "https://github.com/curvefi/stableswap-ng",
+        "revision": "8c78731ed43c22e6bcdcb5d39b0a7d02f8cb0386",
+        "framework": "vyper",
+        "status": "succeeded",
+        "executed_case_count": 1,
+        "graded_case_count": 1,
+        "publication_location": {
+          "bundle_path": "public-results.json",
+          "report_paths": [
+            "reports/stableswap-ng-vyper-benchmark-smoke-gpt-5-6-luna-high-trial-1/report.md",
+            "reports/stableswap-ng-vyper-benchmark-smoke-gpt-5-6-luna-high-trial-1/report.json",
+            "reports/stableswap-ng-vyper-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
+          ]
+        }
+      }
+    },
+    {
+      "schema_version": "ultrafuzz.eval.history.observation.v6",
+      "id": "ci-31500921737-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:venus-isolated-pools-hardhat:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
+      "benchmark": "ultrafuzz-bench",
+      "lane": "smoke",
+      "target": "venus-isolated-pools-hardhat",
+      "variant": "benchmark-smoke-gpt-5-6-luna-high",
+      "trial_count": 1,
+      "run_timestamp": "2026-08-11T14:23:18.063Z",
+      "candidate_commit": "c011d7d2fd1599698ac6962ba8f5e7f904f5d73b",
+      "candidate_repository_url": "https://github.com/monad-developers/ultrafuzz",
+      "cohort_fingerprint": "sha256:5d6ac3fd37b855433925c76b0c4c3f4906bb62b0eec812aec1b88f3a1b0c9a8d",
+      "target_revisions": [
+        {
+          "target": "stableswap-ng-vyper",
+          "revision": "8c78731ed43c22e6bcdcb5d39b0a7d02f8cb0386"
+        },
+        {
+          "target": "venus-isolated-pools-hardhat",
+          "revision": "9853f6f4fe906b635e214b22de9f627c6a17ba5b"
+        },
+        {
+          "target": "very-liquid-vaults-foundry",
+          "revision": "e50384709a696c86ab0440bbbc3dd14a5f4ff6ec"
+        }
+      ],
+      "model_profile": "benchmark-smoke-gpt-5-6-luna-high",
+      "model": "gpt-5.6-luna",
+      "reasoning_effort": "high",
+      "execution_policy_fingerprint": "sha256:fbbf61e0e6c0aa05110e6c85eead59c65dd6475ddad260be50c7efc400f79816",
+      "scoring_fingerprint": "sha256:d387f5719ee5167015ca934b5d1241de6b8517a86fc8cc54ba45e38da1b355c5",
+      "precision": 1,
+      "recall": 0.2353,
+      "f1": 0.381,
+      "cumulative_unique_true_positives": 4,
+      "wall_clock_seconds": 906.251,
+      "wall_clock_completeness": {
+        "status": "complete",
+        "reasons": []
+      },
+      "cost_usd": null,
+      "cost_completeness": {
+        "status": "unavailable",
+        "reasons": ["pricing-unavailable"]
+      },
+      "source_eval_run_id": "ci-31500921737-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high",
+      "source_artifact": "https://github.com/monad-developers/ultrafuzz/actions/runs/31500921737",
+      "ground_truth_bug_count": 17,
+      "status": "succeeded",
+      "executed_case_count": 1,
+      "graded_case_count": 1,
+      "publication_url": "https://github.com/monad-developers/ultrafuzz/actions/runs/31500921737/artifacts",
+      "target_publication": {
+        "target": "venus-isolated-pools-hardhat",
+        "repository": "https://github.com/code-423n4/2023-05-venus",
+        "revision": "9853f6f4fe906b635e214b22de9f627c6a17ba5b",
+        "framework": "hardhat",
+        "status": "succeeded",
+        "executed_case_count": 1,
+        "graded_case_count": 1,
+        "publication_location": {
+          "bundle_path": "public-results.json",
+          "report_paths": [
+            "reports/venus-isolated-pools-hardhat-benchmark-smoke-gpt-5-6-luna-high-trial-1/report.md",
+            "reports/venus-isolated-pools-hardhat-benchmark-smoke-gpt-5-6-luna-high-trial-1/report.json",
+            "reports/venus-isolated-pools-hardhat-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
+          ]
+        }
+      }
+    },
+    {
+      "schema_version": "ultrafuzz.eval.history.observation.v6",
+      "id": "ci-31500921737-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high:very-liquid-vaults-foundry:benchmark-smoke-gpt-5-6-luna-high:benchmark-smoke-gpt-5-6-luna-high",
+      "benchmark": "ultrafuzz-bench",
+      "lane": "smoke",
+      "target": "very-liquid-vaults-foundry",
+      "variant": "benchmark-smoke-gpt-5-6-luna-high",
+      "trial_count": 1,
+      "run_timestamp": "2026-08-11T14:23:18.063Z",
+      "candidate_commit": "c011d7d2fd1599698ac6962ba8f5e7f904f5d73b",
+      "candidate_repository_url": "https://github.com/monad-developers/ultrafuzz",
+      "cohort_fingerprint": "sha256:5d6ac3fd37b855433925c76b0c4c3f4906bb62b0eec812aec1b88f3a1b0c9a8d",
+      "target_revisions": [
+        {
+          "target": "stableswap-ng-vyper",
+          "revision": "8c78731ed43c22e6bcdcb5d39b0a7d02f8cb0386"
+        },
+        {
+          "target": "venus-isolated-pools-hardhat",
+          "revision": "9853f6f4fe906b635e214b22de9f627c6a17ba5b"
+        },
+        {
+          "target": "very-liquid-vaults-foundry",
+          "revision": "e50384709a696c86ab0440bbbc3dd14a5f4ff6ec"
+        }
+      ],
+      "model_profile": "benchmark-smoke-gpt-5-6-luna-high",
+      "model": "gpt-5.6-luna",
+      "reasoning_effort": "high",
+      "execution_policy_fingerprint": "sha256:fbbf61e0e6c0aa05110e6c85eead59c65dd6475ddad260be50c7efc400f79816",
+      "scoring_fingerprint": "sha256:d387f5719ee5167015ca934b5d1241de6b8517a86fc8cc54ba45e38da1b355c5",
+      "precision": 1,
+      "recall": 0.1429,
+      "f1": 0.2501,
+      "cumulative_unique_true_positives": 1,
+      "wall_clock_seconds": 1356.86,
+      "wall_clock_completeness": {
+        "status": "partial",
+        "reasons": ["node-attempt-timestamps-final-attempt-only"]
+      },
+      "cost_usd": 6.64425076,
+      "cost_completeness": {
+        "status": "complete",
+        "reasons": []
+      },
+      "source_eval_run_id": "ci-31500921737-1-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high",
+      "source_artifact": "https://github.com/monad-developers/ultrafuzz/actions/runs/31500921737",
+      "ground_truth_bug_count": 7,
+      "status": "succeeded",
+      "executed_case_count": 1,
+      "graded_case_count": 1,
+      "publication_url": "https://github.com/monad-developers/ultrafuzz/actions/runs/31500921737/artifacts",
+      "target_publication": {
+        "target": "very-liquid-vaults-foundry",
+        "repository": "https://github.com/rheo-xyz/very-liquid-vaults",
+        "revision": "e50384709a696c86ab0440bbbc3dd14a5f4ff6ec",
+        "framework": "foundry",
+        "status": "succeeded",
+        "executed_case_count": 1,
+        "graded_case_count": 1,
+        "publication_location": {
+          "bundle_path": "public-results.json",
+          "report_paths": [
+            "reports/very-liquid-vaults-foundry-benchmark-smoke-gpt-5-6-luna-high-trial-1/report.md",
+            "reports/very-liquid-vaults-foundry-benchmark-smoke-gpt-5-6-luna-high-trial-1/report.json",
+            "reports/very-liquid-vaults-foundry-benchmark-smoke-gpt-5-6-luna-high-trial-1/findings.normalized.json"
+          ]
+        }
+      }
     }
   ]
 }
