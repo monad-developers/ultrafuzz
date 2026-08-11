@@ -9,6 +9,7 @@ import {
   artifactContractDefinition,
   derivePropertyImplementationCoverage,
   layoutForRunRoot,
+  stableUsageDimension,
   writeArtifactManifest
 } from "@ultrafuzz/artifacts";
 import AdmZip from "adm-zip";
@@ -1739,3 +1740,205 @@ test("report bundle packages incomplete runs without a final-report JSON", async
     false
   );
 });
+
+test("stats derives per-node timing, usage, and cost from local run evidence", async () => {
+  const project = tempProject();
+  const fixture = writeStatsFixture(project, "stats-local");
+
+  const captured = await cli(project, ["stats", fixture.runId, "--json"]);
+  assert.equal(captured.code, 0, captured.stderr);
+  const body = parseJson(captured);
+  assert.equal(body.ok, true);
+  const data = body.data as {
+    schema_version: string;
+    run_id: string;
+    status: string;
+    source: { kind: string };
+    nodes: Array<{
+      node_id: string;
+      duration_ms: number | null;
+      attempt_count: number;
+      usage: {
+        input_tokens: number;
+        cache_read_tokens: number;
+        output_tokens: number;
+        total_tokens: number;
+        estimated_spend_usd: number | null;
+        usage_complete: boolean;
+        pricing_complete: boolean;
+      } | null;
+    }>;
+    totals: { usage: { total_tokens: number; estimated_spend_usd: number | null } | null };
+  };
+  assert.equal(data.schema_version, "ultrafuzz.stats.v1");
+  assert.equal(data.run_id, fixture.runId);
+  assert.equal(data.status, "succeeded");
+  assert.equal(data.source.kind, "local-run");
+  const node = data.nodes.find((entry) => entry.node_id === "node-a");
+  assert.ok(node);
+  assert.equal(node.duration_ms, 60_000);
+  assert.equal(node.attempt_count, 1);
+  assert.deepEqual(node.usage, {
+    input_tokens: 10,
+    cache_read_tokens: 5,
+    cache_write_tokens: 0,
+    output_tokens: 2,
+    reasoning_tokens: 0,
+    total_tokens: 17,
+    estimated_spend_usd: 0.000017,
+    usage_complete: true,
+    pricing_complete: true,
+    event_count: 1,
+    models: ["gpt-test"]
+  });
+  assert.equal(data.totals.usage?.total_tokens, 17);
+  assert.equal(data.totals.usage?.estimated_spend_usd, 0.000017);
+
+  const human = await cli(project, ["stats", fixture.runId]);
+  assert.equal(human.code, 0, human.stderr);
+  assert.match(human.stdout, /node-a\s+succeeded\s+1m 00s/u);
+  assert.match(human.stdout, /Recorded node usage: 17 tokens/u);
+});
+
+test("stats queries a report bundle offline and degrades for historical missing ledgers", async () => {
+  const project = tempProject();
+  const fixture = writeStatsFixture(project, "stats-bundle");
+  const bundlePath = path.join(project, "stats-bundle.zip");
+  const zip = new AdmZip();
+  zip.addFile(
+    "bundle-manifest.json",
+    Buffer.from(`${JSON.stringify({ schema_version: "ultrafuzz.report_bundle.v1", run_id: fixture.runId })}\n`, "utf8")
+  );
+  for (const name of ["run.json", "state.json", "graph.json", "attempts.jsonl", "usage.jsonl"]) {
+    zip.addFile(name, fs.readFileSync(path.join(fixture.runRoot, name)));
+  }
+  zip.writeZip(bundlePath);
+  fs.rmSync(fixture.runRoot, { recursive: true });
+
+  const captured = await cli(project, ["stats", "--bundle", bundlePath, "--json"]);
+  assert.equal(captured.code, 0, captured.stderr);
+  const body = parseJson(captured);
+  const data = body.data as {
+    source: { kind: string; path: string };
+    nodes: Array<{ node_id: string; duration_ms: number | null; usage: { total_tokens: number } | null }>;
+  };
+  assert.equal(data.source.kind, "report-bundle");
+  assert.equal(data.source.path, bundlePath);
+  assert.equal(data.nodes.find((entry) => entry.node_id === "node-a")?.duration_ms, 60_000);
+  assert.equal(data.nodes.find((entry) => entry.node_id === "node-a")?.usage?.total_tokens, 17);
+
+  const historicalPath = path.join(project, "historical-bundle.zip");
+  const historical = new AdmZip();
+  historical.addFile(
+    "bundle-manifest.json",
+    Buffer.from(
+      `${JSON.stringify({ schema_version: "ultrafuzz.report_bundle.v1", run_id: "historical-stats" })}\n`,
+      "utf8"
+    )
+  );
+  historical.addFile(
+    "state.json",
+    Buffer.from(
+      `${JSON.stringify({ run_id: "historical-stats", status: "succeeded", nodes: { legacy: { node_id: "legacy", status: "succeeded" } } })}\n`,
+      "utf8"
+    )
+  );
+  historical.writeZip(historicalPath);
+
+  const degraded = await cli(project, ["stats", "--bundle", historicalPath, "--json"]);
+  assert.equal(degraded.code, 0, degraded.stderr);
+  const degradedBody = parseJson(degraded);
+  assert.match(JSON.stringify(degradedBody.diagnostics), /STATS_ATTEMPTS_UNAVAILABLE/u);
+  assert.match(JSON.stringify(degradedBody.diagnostics), /STATS_USAGE_UNAVAILABLE/u);
+  assert.equal((degradedBody.data as { nodes: Array<{ usage: unknown }> }).nodes[0]?.usage, null);
+});
+
+function writeStatsFixture(project: string, runId: string): { runId: string; runRoot: string } {
+  const runRoot = path.join(project, ".ultrafuzz", "runs", runId);
+  fs.mkdirSync(runRoot, { recursive: true });
+  const workflowRunId = `workflow-${runId}`;
+  const startedAt = "2026-08-11T10:00:00.000Z";
+  const finishedAt = "2026-08-11T10:01:00.000Z";
+  const usageAttemptId = stableUsageDimension("usage-attempt", [workflowRunId, "node:node-a", 0, 1]);
+  writeJsonRecord(path.join(runRoot, "run.json"), {
+    schema_version: "1.0",
+    run_id: runId,
+    accounting: {
+      pricing_catalog: {
+        model_prices: {
+          "gpt-test": {
+            inputUsdPerMillion: 1,
+            cachedInputUsdPerMillion: 0.5,
+            outputUsdPerMillion: 2
+          }
+        }
+      },
+      cumulative: {
+        total_tokens: 17,
+        estimated_spend_usd: 0.000017,
+        usage_complete: true,
+        pricing_complete: true
+      }
+    }
+  });
+  writeJsonRecord(path.join(runRoot, "state.json"), {
+    schema_version: "1.1",
+    run_id: runId,
+    status: "succeeded",
+    created_at: startedAt,
+    started_at: startedAt,
+    finished_at: finishedAt,
+    nodes: {
+      "node-a": {
+        node_id: "node-a",
+        logical_node_id: "node-a",
+        status: "succeeded",
+        retry_count: 0,
+        model: "gpt-test",
+        outputs: [{ path: "result.md" }],
+        provenance: { workflow: { agent_task_id: "node:node-a", attempt: 1 } }
+      }
+    }
+  });
+  writeJsonRecord(path.join(runRoot, "graph.json"), {
+    schema_version: "1.0",
+    nodes: [
+      {
+        id: "node-a",
+        logical_id: "node-a",
+        kind: "agentic",
+        loop: { index: 0, count: 1 },
+        workflow: { node_id: "node:node-a", task_node_ids: ["node:node-a"] },
+        model_fanout: [{ model_name: "gpt-test", loop_index: 0 }],
+        outputs: [{ path: "result.md" }]
+      }
+    ]
+  });
+  fs.writeFileSync(
+    path.join(runRoot, "attempts.jsonl"),
+    `${JSON.stringify({
+      node_id: "node-a",
+      lifecycle: { started_at: startedAt, finished_at: finishedAt },
+      outcome: "succeeded",
+      reuse: { status: "executed" }
+    })}\n`,
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(runRoot, "usage.jsonl"),
+    `${JSON.stringify({
+      workflow_run_id: workflowRunId,
+      attempt_id: usageAttemptId,
+      usage: {
+        input_tokens: 10,
+        cache_read_tokens: 5,
+        output_tokens: 2,
+        model: "gpt-test"
+      },
+      usage_complete: true,
+      usage_incomplete_reasons: []
+    })}\n`,
+    "utf8"
+  );
+  return { runId, runRoot };
+}

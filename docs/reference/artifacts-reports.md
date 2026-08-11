@@ -42,6 +42,12 @@ Replaying the same continuation is idempotent, while events from later
 checkpoint generations remain distinct. The ledger stores normalized counters
 and typed usage-completeness reasons, not raw execution records.
 
+`ultrafuzz stats <run-id>` joins this ledger with `attempts.jsonl`, `state.json`,
+`graph.json`, and `run.json` to derive per-node timing and usage on demand. The
+portable report-bundle ZIP includes all five files, so
+`ultrafuzz stats --bundle <report-bundle.zip>` can perform the same query
+offline. Statistics are not persisted as a separate `stats.json` artifact.
+
 ## Run Metadata
 
 `run.json` records the run schema version, run ID, creation timestamp, mode,

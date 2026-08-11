@@ -23,6 +23,7 @@ accept `--json` and emit the `ultrafuzz.cli.result.v1` envelope.
 | `ultrafuzz ps`                          | List Ultrafuzz runs and linked workflow status.                                                                |
 | `ultrafuzz inspect <run-id>`            | Show product evidence and linked workflow details for a run.                                                   |
 | `ultrafuzz status <run-id>`             | Show a concise health verdict, progress, ETA, current-step duration, throughput, and gating nodes.             |
+| `ultrafuzz stats <run-id>`              | Derive per-node timing, token usage, cost, retry, outcome, and completeness statistics.                        |
 | `ultrafuzz pause <run-id>`              | Gracefully pause an active run after its in-flight tasks finish.                                               |
 | `ultrafuzz why <run-id>`                | Diagnose why a run is blocked, paused, quota-parked, waiting, or unable to progress.                           |
 | `ultrafuzz timeline <run-id>`           | Show checkpoint frames and fork lineage, including the frame numbers `fork --frame` accepts.                   |
@@ -176,6 +177,8 @@ ultrafuzz status <run-id> \
   [--watch] \
   [--interval <seconds>] \
   [--json]
+ultrafuzz stats <run-id> [--project <path>] [--json]
+ultrafuzz stats --bundle <report-bundle.zip> [--json]
 ultrafuzz pause <run-id> [--project <path>] [--json]
 ultrafuzz cancel <run-id> [--project <path>] [--json]
 ultrafuzz why <run-id> [--project <path>] [--json]
@@ -238,6 +241,22 @@ or the poll fails. With `--json --watch`, every poll writes one
 newline-delimited `ultrafuzz.cli.result.v1` envelope so the stream pipes into
 `jq` and other line-oriented tools; without `--watch`, `--json` keeps the
 existing pretty-printed single envelope.
+
+`stats` derives its snapshot on demand; it does not read or write a precomputed
+statistics artifact. Local-run mode synchronizes linked workflow evidence when
+available, then joins `attempts.jsonl`, `usage.jsonl`, `state.json`,
+`graph.json`, and `run.json`. The table shows each node's status, completed and
+currently elapsed execution time, token components, estimated spend, model,
+and attempt count. JSON output uses `ultrafuzz.stats.v1` inside the normal CLI
+envelope and additionally exposes retries, executed/reused counts, outcomes,
+failure categories, completeness, unattributed usage, and cumulative run
+accounting.
+
+`stats --bundle` reads an `ultrafuzz report bundle` ZIP directly without
+extracting it and without the original checkout, workflow backend, provider,
+or network. Report bundles already carry the required top-level ledgers.
+Historical bundles with missing ledgers produce warnings and `null` statistics
+instead of invented zeroes. An `artifacts/` subtree by itself is not sufficient.
 
 The JSON envelope carries stable machine-readable fields alongside the existing
 counts:
