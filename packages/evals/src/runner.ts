@@ -297,6 +297,29 @@ export async function launchEvalRow(input: LaunchEvalRowInput): Promise<EvalRunR
   return record;
 }
 
+/**
+ * Refuse to launch a benchmark whose withheld reference paths are still on
+ * disk. Materialization removes them; this is the fail-closed check that a
+ * hand-prepared or stale checkout cannot quietly reintroduce the answer key.
+ */
+export function assertHeldOutPathsAbsent(
+  targetId: string,
+  targetPath: string,
+  heldOutPaths: readonly string[] | undefined
+): void {
+  const present = (heldOutPaths ?? [])
+    .map((relative) => relative.trim())
+    .filter((relative) => relative !== "")
+    .filter((relative) => fs.existsSync(path.join(targetPath, relative)))
+    .sort();
+  if (present.length === 0) return;
+  throw new EvalError(
+    "EVAL_TARGET_HELD_OUT_PATH_PRESENT",
+    `target ${targetId} still contains held-out benchmark paths: ${present.join(", ")}`,
+    { target: targetId, held_out_paths: present }
+  );
+}
+
 /** Default launcher: start a detached ultrafuzz run inside the target checkout. */
 export const runtimeRowLauncher: RowLauncher = async (input) => {
   if (input.row.target.path === undefined) {
@@ -306,6 +329,7 @@ export const runtimeRowLauncher: RowLauncher = async (input) => {
       { target: input.row.target_id }
     );
   }
+  assertHeldOutPathsAbsent(input.row.target_id, input.row.target.path, input.row.target.held_out_paths);
   const runnerProfile = input.suite.model_profiles[input.row.runner_model_profile];
   const result = await startRun({
     projectRoot: input.row.target.path,

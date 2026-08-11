@@ -64,6 +64,46 @@ names/hashes, while payloads stay on disk unless the suite explicitly opts
 into `mode: upload`. Before an allowlisted payload is sent, its manifest and
 path containment, regular-file status, size, and SHA-256 digest are checked.
 
+### Held-out benchmark paths
+
+A benchmark that ships a reference solution beside the code under test would
+otherwise hand the run its own answer key. A target may withhold those paths:
+
+```yaml
+targets:
+  - id: target
+    repo: "https://github.com/scfuzzbench/aave-v4-scfuzzbench"
+    ref: "edd6c82721512540c8c90e7a36a4a8e19fd7bdf3"
+    ground_truth: aave-v4-scfuzzbench/findings.yml
+    held_out_paths: ["tests/recon"]
+```
+
+Materializing a pinned target removes the declared paths and commits the
+removal onto the pinned branch — a commit rather than a dirty worktree,
+because every node workspace is a Git worktree of that branch and would
+otherwise restore them. The source proof then records the withheld files:
+
+```json
+"held_out": {
+  "source_commit": "edd6c82721512540c8c90e7a36a4a8e19fd7bdf3",
+  "source_tree": "3b3910d0657e4a639888ccae45822af680de6ef6",
+  "paths": ["tests/recon"],
+  "entries": [{ "path": "tests/recon/Properties.sol", "blob": "...", "size": 13722 }]
+}
+```
+
+`commit` and `tree` are the hold-out revision; `source_commit` and
+`source_tree` bind the benchmark commit it descends from, so a reviewer can
+prove exactly which bytes the run could not see. Verification re-derives the
+difference and rejects a hold-out revision that removed anything it did not
+declare, and a launch is refused outright if a held-out path is still present
+in the checkout.
+
+Declaring a path that matches nothing fails closed rather than silently
+running without the hold-out. An agent that writes a similar file inside its
+own workspace is a legitimate result and stays allowed; only the materialized
+input is constrained.
+
 ### Recovery equivalence
 
 Each suite may declare how much model work a recovered row may repeat:

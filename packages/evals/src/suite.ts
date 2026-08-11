@@ -48,7 +48,8 @@ const targetSchema = z.looseObject({
   path: nonEmptyString.optional(),
   signal_profile: nonEmptyString.optional(),
   ground_truth: nonEmptyString,
-  sensitivity: nonEmptyString.optional()
+  sensitivity: nonEmptyString.optional(),
+  held_out_paths: z.array(nonEmptyString).optional()
 });
 
 const variantSchema = z.looseObject({
