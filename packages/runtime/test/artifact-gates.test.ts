@@ -5110,6 +5110,16 @@ test("current campaign timeout gate derives early-exit outcome from recorded dur
 });
 
 test("current campaign timeout gate classifies termination after the force-kill deadline", () => {
+  const prematureForceKill = runCampaignTimeoutGate((fixture) => {
+    fixture.backend.termination_reason = "host-force-kill";
+    fixture.backend.campaign_outcome = "partial";
+    fixture.summary.outcome = "partial";
+  });
+  assert.equal(prematureForceKill.ok, false);
+  assert.ok(
+    prematureForceKill.diagnostics.some((diagnostic) => diagnostic.code === "CAMPAIGN_TIMEOUT_FORCE_KILL_MISMATCH")
+  );
+
   const falseComplete = runCampaignTimeoutGate((fixture) => {
     fixture.backend.end_timestamp = "2026-08-11T01:05:06.000Z";
   });

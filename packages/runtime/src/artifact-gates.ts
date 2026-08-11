@@ -2073,6 +2073,19 @@ function verifyCurrentCampaignTimeoutEvidence(
         );
       }
     }
+    if (
+      forceKillDeadline !== undefined &&
+      terminationReason === "host-force-kill" &&
+      endTimestamp.milliseconds + CAMPAIGN_DURATION_TOLERANCE_MS < forceKillDeadline.milliseconds
+    ) {
+      diagnostics.push(
+        campaignTimeoutDiagnostic(
+          "CAMPAIGN_TIMEOUT_FORCE_KILL_MISMATCH",
+          "A host-force-kill termination cannot precede the host force-kill deadline",
+          `${resultPath}#$.termination_reason`
+        )
+      );
+    }
   }
   if (usableResults === false && campaignOutcome !== "blocked") {
     diagnostics.push(
