@@ -146,6 +146,9 @@ const terminalReportSchema = z.looseObject({
     .optional()
 });
 const campaignSummarySchema = z.looseObject({
+  // Historical and project-owned campaign summaries predate the stateful
+  // sequence marker. The current invariant campaign runtime gate requires it.
+  sequence_length: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
   failure_counts: z.looseObject({
     pre_deduplication: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
     post_deduplication: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
@@ -156,6 +159,7 @@ const invariantCampaignPlanSchema = z.looseObject({
   configured_fuzzer_timeout_seconds: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   recon_internal_timeout_seconds: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   recon_test_limit: z.string().min(1),
+  recon_sequence_length: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   host_soft_timeout_seconds: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   host_force_kill_grace_seconds: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   artifact_finalization_reserve_seconds: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),

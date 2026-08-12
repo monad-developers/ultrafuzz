@@ -1606,6 +1606,7 @@ const campaignResultArtifactNames = [
 ] as const;
 
 const RECON_MAX_TEST_LIMIT = "18446744073709551615";
+const RECON_STATEFUL_SEQUENCE_LENGTH = 100;
 const CAMPAIGN_HOST_FORCE_KILL_GRACE_SECONDS = 300;
 const CAMPAIGN_DURATION_TOLERANCE_MS = 5_000;
 const campaignTerminationReasons = new Set([
@@ -1703,7 +1704,7 @@ function timestampField(
   return undefined;
 }
 
-function exactCommandFlagValues(command: string, flag: "--timeout" | "--test-limit"): string[] {
+function exactCommandFlagValues(command: string, flag: "--timeout" | "--test-limit" | "--seq-len"): string[] {
   const escapedFlag = flag.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
   const pattern = new RegExp(`(?:^|\\s)${escapedFlag}(?:(?:=|\\s+)(\\S+))?`, "gu");
   return [...command.matchAll(pattern)].map((match) => match[1] ?? "");
@@ -1776,6 +1777,17 @@ function verifyCurrentCampaignTimeoutEvidence(
   const summaryValue = readJsonFile(summaryPath);
   if (!isRecord(planValue) || !isRecord(resultValue) || !isRecord(summaryValue)) return diagnostics;
 
+  const summarySequenceLength = positiveIntegerField(summaryValue, "sequence_length", summaryPath, diagnostics);
+  if (summarySequenceLength !== undefined && summarySequenceLength !== RECON_STATEFUL_SEQUENCE_LENGTH) {
+    diagnostics.push(
+      campaignTimeoutDiagnostic(
+        "CAMPAIGN_SEQUENCE_LENGTH_MISMATCH",
+        `campaign summary sequence_length must be ${RECON_STATEFUL_SEQUENCE_LENGTH}`,
+        `${summaryPath}#$.sequence_length`
+      )
+    );
+  }
+
   const planConfiguredTimeout = positiveIntegerField(
     planValue,
     "configured_fuzzer_timeout_seconds",
@@ -1825,6 +1837,7 @@ function verifyCurrentCampaignTimeoutEvidence(
     }
   }
   const reconTestLimit = stringField(planValue, "recon_test_limit", planPath, diagnostics);
+  const reconSequenceLength = positiveIntegerField(planValue, "recon_sequence_length", planPath, diagnostics);
   const backendStartedAt = timestampField(planValue, "backend_started_at", planPath, diagnostics);
   const fuzzingDeadline = timestampField(planValue, "fuzzing_deadline_utc", planPath, diagnostics);
   const forceKillDeadline = timestampField(planValue, "force_kill_deadline_utc", planPath, diagnostics);
@@ -1865,6 +1878,15 @@ function verifyCurrentCampaignTimeoutEvidence(
         "CAMPAIGN_TIMEOUT_TEST_LIMIT_MISMATCH",
         `recon_test_limit must be ${RECON_MAX_TEST_LIMIT}`,
         `${planPath}#$.recon_test_limit`
+      )
+    );
+  }
+  if (reconSequenceLength !== undefined && reconSequenceLength !== RECON_STATEFUL_SEQUENCE_LENGTH) {
+    diagnostics.push(
+      campaignTimeoutDiagnostic(
+        "CAMPAIGN_SEQUENCE_LENGTH_MISMATCH",
+        `recon_sequence_length must be ${RECON_STATEFUL_SEQUENCE_LENGTH} for a stateful invariant campaign`,
+        `${planPath}#$.recon_sequence_length`
       )
     );
   }
@@ -1927,6 +1949,16 @@ function verifyCurrentCampaignTimeoutEvidence(
     );
   }
   const resultCommand = stringField(resultValue, "exact_command", resultPath, diagnostics);
+  const resultSequenceLength = positiveIntegerField(resultValue, "sequence_length", resultPath, diagnostics);
+  if (resultSequenceLength !== undefined && resultSequenceLength !== RECON_STATEFUL_SEQUENCE_LENGTH) {
+    diagnostics.push(
+      campaignTimeoutDiagnostic(
+        "CAMPAIGN_SEQUENCE_LENGTH_MISMATCH",
+        `sequence_length must be ${RECON_STATEFUL_SEQUENCE_LENGTH} for a stateful invariant campaign`,
+        `${resultPath}#$.sequence_length`
+      )
+    );
+  }
   if (planCommand !== undefined && resultCommand !== undefined && planCommand !== resultCommand) {
     diagnostics.push(
       campaignTimeoutDiagnostic(
@@ -1939,6 +1971,7 @@ function verifyCurrentCampaignTimeoutEvidence(
   if (resultCommand !== undefined && configuredTimeoutSeconds !== undefined) {
     const timeoutValues = exactCommandFlagValues(resultCommand, "--timeout");
     const testLimitValues = exactCommandFlagValues(resultCommand, "--test-limit");
+    const sequenceLengthValues = exactCommandFlagValues(resultCommand, "--seq-len");
     if (timeoutValues.length !== 1 || timeoutValues[0] !== String(configuredTimeoutSeconds)) {
       diagnostics.push(
         campaignTimeoutDiagnostic(
@@ -1953,6 +1986,15 @@ function verifyCurrentCampaignTimeoutEvidence(
         campaignTimeoutDiagnostic(
           "CAMPAIGN_TIMEOUT_COMMAND_INVALID",
           `Recon command must contain exactly one --test-limit ${RECON_MAX_TEST_LIMIT} flag`,
+          `${resultPath}#$.exact_command`
+        )
+      );
+    }
+    if (sequenceLengthValues.length !== 1 || sequenceLengthValues[0] !== String(RECON_STATEFUL_SEQUENCE_LENGTH)) {
+      diagnostics.push(
+        campaignTimeoutDiagnostic(
+          "CAMPAIGN_SEQUENCE_LENGTH_COMMAND_INVALID",
+          `Recon command must contain exactly one --seq-len ${RECON_STATEFUL_SEQUENCE_LENGTH} flag`,
           `${resultPath}#$.exact_command`
         )
       );
