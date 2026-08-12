@@ -110,7 +110,7 @@ export function testRow(suite: EvalSuiteSpec, overrides: Partial<EvalMatrixRow> 
     trial_id: "trial-1",
     run_id: "bug-finding-regression-target-a-baseline-trial-1",
     target: { ...target, ground_truth_path: path.join(suite.ground_truth_root ?? "/", target.ground_truth) },
-    variant: { id: "baseline", prompt_overlay_paths: [] },
+    variant: { id: "baseline" },
     runner_model_profile: suite.run.runner_model_profile,
     judge_model_profile: suite.run.judge_model_profile,
     judge_model: "gpt-5.5",

@@ -52,8 +52,6 @@ export interface EvalVariant {
   id: string;
   /** Optional topology override; when omitted the target project's CI topology is used unmodified. */
   topology?: string;
-  prompts?: string;
-  prompt_overlays?: string[];
   model_profiles?: string[];
   workflow_input?: unknown;
   runner_model_profile?: string;
@@ -160,8 +158,6 @@ export interface ResolvedEvalTarget extends EvalTarget {
 
 export interface ResolvedEvalVariant extends EvalVariant {
   topology_path?: string;
-  prompts_path?: string;
-  prompt_overlay_paths: string[];
 }
 
 export interface EvalMatrixRow {
