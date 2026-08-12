@@ -1314,7 +1314,7 @@ export function assertPublicBenchmarkGeneration(
       row.id !== expectedId ||
       row.run_id !== expectedRunId ||
       stableStringify(publicTargetScope(row.target)) !== stableStringify(target) ||
-      stableStringify(publicVariantScope(row.variant)) !== stableStringify({ ...variant, prompt_overlay_paths: [] }) ||
+      stableStringify(publicVariantScope(row.variant)) !== stableStringify(variant) ||
       stableStringify(row.workflow_input) !== stableStringify(variant.workflow_input) ||
       row.runner_model_profile !== runnerProfileId ||
       row.runner_model !== runnerProfile.model ||

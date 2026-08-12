@@ -18,7 +18,6 @@ import {
 } from "./types.js";
 import {
   EvalError,
-  assertExistingDirectory,
   assertExistingFile,
   assertExternalPath,
   assertSafeEvalId,
@@ -63,16 +62,25 @@ const targetSchema = z.looseObject({
   held_out_paths: z.array(heldOutPath).optional()
 });
 
-const variantSchema = z.looseObject({
-  id: nonEmptyString,
-  topology: nonEmptyString.optional(),
-  prompts: nonEmptyString.optional(),
-  prompt_overlays: z.array(nonEmptyString).optional(),
-  model_profiles: z.array(nonEmptyString).optional(),
-  workflow_input: z.unknown().optional(),
-  runner_model_profile: nonEmptyString.optional(),
-  judge_model_profile: nonEmptyString.optional()
-});
+const variantSchema = z
+  .looseObject({
+    id: nonEmptyString,
+    topology: nonEmptyString.optional(),
+    model_profiles: z.array(nonEmptyString).optional(),
+    workflow_input: z.unknown().optional(),
+    runner_model_profile: nonEmptyString.optional(),
+    judge_model_profile: nonEmptyString.optional()
+  })
+  .superRefine((variant, context) => {
+    for (const field of ["prompts", "prompt_overlays"] as const) {
+      if (!Object.prototype.hasOwnProperty.call(variant, field)) continue;
+      context.addIssue({
+        code: "custom",
+        path: [field],
+        message: `variant ${field} is unsupported; use variant topology with nodes that reference the intended prompt files`
+      });
+    }
+  });
 
 const judgePanelSchema = z
   .looseObject({
@@ -219,12 +227,14 @@ export function loadEvalSuite(input: Pick<PlanEvalSuiteInput, "projectRoot" | "s
   }
   const result = suiteSchema.safeParse(parsed);
   if (!result.success) {
-    throw new EvalError("EVAL_SUITE_INVALID", `eval suite ${suitePath} failed schema validation`, {
+    const issues = result.error.issues.map((issue) => ({
+      path: issue.path.join("."),
+      message: issue.message
+    }));
+    const summary = issues.map((issue) => `${issue.path || "suite"}: ${issue.message}`).join("; ");
+    throw new EvalError("EVAL_SUITE_INVALID", `eval suite ${suitePath} failed schema validation: ${summary}`, {
       path: suitePath,
-      issues: result.error.issues.map((issue) => ({
-        path: issue.path.join("."),
-        message: issue.message
-      }))
+      issues
     });
   }
   const data = result.data;
@@ -277,12 +287,6 @@ export function planEvalSuite(input: PlanEvalSuiteInput): EvalPlanValue {
   for (const variant of variants) {
     if (variant.topology_path !== undefined) {
       assertExistingFile(variant.topology_path, `variant ${variant.id} topology`);
-    }
-    if (variant.prompts_path !== undefined) {
-      assertExistingDirectory(variant.prompts_path, `variant ${variant.id} prompts`);
-    }
-    for (const overlay of variant.prompt_overlay_paths) {
-      assertExistingDirectory(overlay, `variant ${variant.id} prompt overlay`);
     }
   }
 
@@ -409,9 +413,7 @@ function resolveTarget(
 function resolveVariant(projectRoot: string, variant: EvalSuiteSpec["variants"][number]): ResolvedEvalVariant {
   return {
     ...variant,
-    ...(variant.topology ? { topology_path: resolveProjectPath(projectRoot, variant.topology) } : {}),
-    ...(variant.prompts ? { prompts_path: resolveProjectPath(projectRoot, variant.prompts) } : {}),
-    prompt_overlay_paths: (variant.prompt_overlays ?? []).map((overlay) => resolveProjectPath(projectRoot, overlay))
+    ...(variant.topology ? { topology_path: resolveProjectPath(projectRoot, variant.topology) } : {})
   };
 }
 

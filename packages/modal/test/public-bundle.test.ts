@@ -712,7 +712,7 @@ function realisticMatrix(rowIds: string[]) {
         ground_truth: `${targetId}.yml`,
         ground_truth_path: `/ground-truth/${targetId}.yml`
       },
-      variant: { id: TEST_MODEL_SLUG, prompt_overlay_paths: [] },
+      variant: { id: TEST_MODEL_SLUG },
       workflow_input: {
         target_frameworks: { [targetId]: framework }
       },
