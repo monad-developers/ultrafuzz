@@ -845,12 +845,20 @@ describe("prompt semantic anchors", () => {
     expect(flatMarkdown).toContain("never invent a backend or use a historical compatibility value");
     expect(markdown).toContain("For every schema-admitted multi-span citation");
     expect(markdown).toContain("require them not to touch or overlap");
-    // The host gate deep-compares every key of the severity-classified finding
-    // with the report row, so the actor-role rewrite must never reach a copied
-    // JSON field. A run that re-voiced `summary` killed the terminal node.
+    expect(flatMarkdown).toContain("stable-sort issues High, then Medium, then Low");
+    expect(flatMarkdown).toContain("preserving source order within each severity");
+    expect(markdown).toContain("`H-01`, `M-01`, and `L-01`");
+    expect(markdown).toContain("`H-09`, `H-10`");
+    expect(flatMarkdown).toContain("identity through the exact `lifecycle.dedupe_key`, `source_artifacts`");
+    expect(flatMarkdown).toContain(
+      "host renderer validates this authored order, numbering, and title shape without sorting"
+    );
+    // Presentation identity is report-owned; substantive upstream fields stay
+    // byte-identical and lifecycle metadata authenticates the source join.
     expect(markdown).toContain("Copy every field the severity-classified finding already carries");
     expect(markdown).toContain("byte-for-byte");
-    expect(markdown).toContain("You may only ADD fields the upstream finding does\nnot carry");
+    expect(flatMarkdown).toContain("except the report-owned `id` and `title`");
+    expect(flatMarkdown).toContain("Apart from authoring canonical report `id` and `title`, you may only ADD fields");
     expect(markdown).toMatch(/`summary`, `family_variants`, and `recommended_next_action` stay byte-identical/u);
     // `ultrafuzz json validate` is schema-only, so ordering is undetectable
     // before the host gate rejects the artifact.

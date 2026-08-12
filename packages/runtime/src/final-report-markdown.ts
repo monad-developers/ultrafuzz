@@ -21,7 +21,8 @@ const reportSummaryFields = [
   ["Expanded graph fingerprint", "expanded_graph_fingerprint"]
 ] as const;
 
-type ReportSeverity = "High" | "Medium" | "Low";
+const severityOrder = ["High", "Medium", "Low"] as const;
+type ReportSeverity = (typeof severityOrder)[number];
 
 interface RenderedIssue {
   issue: JsonRecord;
@@ -204,6 +205,8 @@ function isCanonicalEmptyReport(value: JsonRecord): boolean {
 
 function assertCanonicalIssuePresentation(report: JsonRecord): void {
   if (!Array.isArray(report.issues)) return;
+  const counters: Record<ReportSeverity, number> = { High: 0, Medium: 0, Low: 0 };
+  let priorSeverityIndex = -1;
   const findingsById = new Map<string, JsonRecord>();
   for (const [index, candidate] of report.issues.entries()) {
     if (!isRecord(candidate)) {
@@ -218,10 +221,20 @@ function assertCanonicalIssuePresentation(report: JsonRecord): void {
         `final report production issue ${index} has severity ${severity}; expected ${expectedSeverity} from impact ${impact.label} and likelihood ${likelihood.label}`
       );
     }
-    const findingId = typeof candidate.id === "string" ? candidate.id : "";
+    const severityIndex = severityOrder.indexOf(severity);
+    if (severityIndex < priorSeverityIndex) {
+      throw new Error("final report production issues are not ordered High, Medium, then Low");
+    }
+    priorSeverityIndex = severityIndex;
+    counters[severity] += 1;
+    const findingId = `${severity[0]}-${String(counters[severity]).padStart(2, "0")}`;
+    if (candidate.id !== findingId) {
+      throw new Error(`final report production issue ${index} must use canonical ID ${findingId}`);
+    }
     const title = recordTitle(candidate, "");
-    if (findingId.length === 0 || title.length === 0) {
-      throw new Error(`final report production issue ${index} lacks its preserved finding ID or title`);
+    const expectedTitle = `[${findingId}] - ${cleanIssueTitle(title)}`;
+    if (title !== expectedTitle || cleanIssueTitle(title) === "") {
+      throw new Error(`final report production issue ${findingId} must use title ${JSON.stringify(expectedTitle)}`);
     }
     findingsById.set(findingId, candidate);
   }
@@ -375,7 +388,7 @@ function renderedIssues(issues: JsonRecord[]): RenderedIssue[] {
     issue,
     severity: requiredSeverity(issue),
     id: typeof issue.id === "string" ? issue.id : "",
-    title: recordTitle(issue, "")
+    title: cleanIssueTitle(recordTitle(issue, ""))
   }));
 }
 
@@ -651,6 +664,13 @@ function requiredSeverity(issue: JsonRecord): ReportSeverity {
     throw new Error("production issue is missing a High, Medium, or Low report severity");
   }
   return severity;
+}
+
+function cleanIssueTitle(value: string): string {
+  return value
+    .replace(/^\s*\[[HML]-\d{2,}\]\s*-\s*/iu, "")
+    .replace(/\s+/gu, " ")
+    .trim();
 }
 
 function riskAssessment(

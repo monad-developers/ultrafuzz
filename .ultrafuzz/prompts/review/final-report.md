@@ -301,11 +301,18 @@ boilerplate in the final report.
 
 ## Required Markdown Shape
 
-Preserve production issue order, finding `id`, and `title` exactly from the
-severity-classified handoff. Do not sort by severity, assign severity-local IDs,
-renumber findings, or add an ID prefix to a title. The report severity
-vocabulary is exactly High, Medium, and Low. Reject any other upstream value
-without normalizing, converting, or rewriting it.
+The final-report producer owns production issue presentation in `report.json`:
+stable-sort issues High, then Medium, then Low while preserving source order
+within each severity. Assign severity-local IDs independently, starting at
+`H-01`, `M-01`, and `L-01`; use a minimum of two digits so the sequence
+continues `H-09`, `H-10`, and beyond. Set each JSON title to
+`[<report ID>] - <original title text>`. Do not copy or reuse an upstream
+machine ID in the report ID or title prefix. Preserve authenticated upstream
+identity through the exact `lifecycle.dedupe_key`, `source_artifacts`, and
+other source metadata. The host renderer validates this authored order,
+numbering, and title shape without sorting, renumbering, or rewriting JSON.
+The report severity vocabulary is exactly High, Medium, and Low. Reject any
+other upstream value without normalizing, converting, or rewriting it.
 
 The report must start with this fixed title, followed immediately by a Markdown
 issue index table when production issues exist:
@@ -315,8 +322,10 @@ issue index table when production issues exist:
 
 | Issue id | Title |
 | --- | --- |
-| finding-a | [[finding-a] - <issue title>](#finding-a---issue-title-anchor) |
-| finding-b | [[finding-b] - <next issue title>](#finding-b---next-issue-title-anchor) |
+| H-01 | [[H-01] - <issue title>](#h-01---issue-title-anchor) |
+| H-02 | [[H-02] - <next high issue title>](#h-02---next-high-issue-title-anchor) |
+| M-01 | [[M-01] - <medium issue title>](#m-01---medium-issue-title-anchor) |
+| L-01 | [[L-01] - <low issue title>](#l-01---low-issue-title-anchor) |
 
 The report contains <total issue count> issues, with severity distribution <high count> high, <medium count> medium, and <low count> low.
 
@@ -340,7 +349,7 @@ outcomes, explanations, code, variants, and strategy IDs with issue-specific
 content from the upstream evidence:
 
 ````md
-## [finding-a] - Depositor withdrawal accounting can lock claimable funds
+## [H-01] - Depositor withdrawal accounting can lock claimable funds
 
 Depositor can withdraw after accounting state diverges which leads to claimable funds remaining locked. The generated reproducer shows the stale share balance persists after the withdrawal path completes.
 
@@ -381,7 +390,7 @@ funds remaining locked.`
 It must not duplicate prose awkwardly, for example avoid constructions like
 `Fallback caller can exercise selectorless fallback which leads to Registered
 fallback callers could...`. Tighten copied upstream text into a clean actor,
-action, and outcome. Tighten it in `report.md` only; the matching `report.json`
+action, and outcome. The title prefix is report-owned; all substantive copied
 fields keep the upstream wording byte-for-byte.
 
 Use the upstream canonical final `severity` consistently for issue IDs,
@@ -615,14 +624,15 @@ contribute and emit no property-provenance records when there are no
 property-derived findings.
 
 Copy every field the severity-classified finding already carries into its
-`report.json` issue object byte-for-byte, including `summary`,
+`report.json` issue object byte-for-byte except the report-owned `id` and
+`title`, including `summary`,
 `recommended_next_action`, `family_variants` and their nested summaries,
 `severity`, `impact`, `likelihood`, `evidence`, and `strategy_provenance` when
-the upstream finding has it. You may only ADD fields the upstream finding does
-not carry, using only report-owned additions admitted by the pinned report
-schema. Rewriting, retitling, tightening, or re-voicing a copied field fails
-the report; put your own wording in `report.md` and in schema-admitted fields
-you add. Keep the canonical originating strategy name when one is available.
+the upstream finding has it. Apart from authoring canonical report `id` and
+`title`, you may only ADD fields the upstream finding does not carry, using
+only report-owned additions admitted by the pinned report schema. Rewriting,
+tightening, or re-voicing any other copied field fails the report. Keep the
+canonical originating strategy name when one is available.
 Derive structured detection rates from the exact strategy hits and configured
 loop counts, and preserve optional attempt provenance from the canonical hit
 records. Do not emit removed or compatibility aliases.
@@ -631,9 +641,10 @@ Keep any additional loop-attempt provenance only in the fields admitted by the
 schema. `severity_guess` remains the upstream preliminary estimate and need not
 equal final `severity`; `severity`, `impact`, and `likelihood` use the report
 vocabulary. Never add `final_severity` or upstream/compatibility aliases. The
-production issue `id` and `title` must exactly preserve the corresponding
-severity-classified finding. Render the ID separately in the Markdown heading;
-never insert it into or remove it from the JSON `title`.
+production issue `id`, `title`, and cross-severity order are report-owned.
+Author them in canonical presentation form before validation; the renderer
+only validates and renders them. Use exact lifecycle and source metadata—not
+presentation identity—to retain the corresponding severity-classified finding.
 
 In every `report.json` evidence object, keep `path` as a safe relative base path
 without selectors and preserve independent `detail` prose exactly. Put section
@@ -653,8 +664,9 @@ requirements beyond JSON Schema.
 Before finishing, verify that:
 
 - `report.md` starts with `# Ultrafuzz report`.
-- Production issue headings use each severity-classified finding's exact
-  preserved ID and title in their preserved order.
+- Production issue headings are stable-sorted High, Medium, Low, preserve
+  source order within each severity, and use canonical severity-local IDs and
+  prefixed titles (`H-01`, `H-09`, `H-10`, `M-01`, and `L-01`).
 - The issue index table uses exactly `Issue id` and `Title`.
 - Immediately below the issue index table, `report.md` includes one sentence
   stating the total production issue count and High/Medium/Low severity
@@ -673,9 +685,9 @@ Before finishing, verify that:
 - `report.json` passes the exact rendered validation command for its pinned
   schema.
 - Every `report.json` production issue preserves the complete normalized
-  severity-classified finding before adding report-owned fields.
-- Every `report.json` production issue reproduces every field of its
-  severity-classified source byte-for-byte, including `summary`,
+  severity-classified finding except for report-owned `id` and `title`.
+- Every `report.json` production issue reproduces every non-presentation field
+  of its severity-classified source byte-for-byte, including `summary`,
   `recommended_next_action`, and `family_variants`, and adds only fields that
   source does not carry.
 - Every severity-classified finding you render has a `dedupe_key` exactly equal

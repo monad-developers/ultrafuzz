@@ -2908,8 +2908,19 @@ test("every contextual registration executes real positive and negative checks",
         positive: {
           issues: [
             {
-              id: "finding-a",
-              title: "Preserved title",
+              id: "H-01",
+              title: "[H-01] - High title",
+              severity: "High",
+              dedupe_key: "root-b",
+              lifecycle: {
+                dedupe_key: "root-b",
+                final_disposition: "promoted"
+              }
+            },
+            {
+              id: "L-01",
+              title: "[L-01] - Low title",
+              severity: "Low",
               dedupe_key: "root-a",
               lifecycle: {
                 dedupe_key: "root-a",
@@ -2922,11 +2933,22 @@ test("every contextual registration executes real positive and negative checks",
         negative: {
           issues: [
             {
-              id: "finding-a",
-              title: "Rewritten title",
+              id: "L-01",
+              title: "[L-01] - Low title",
+              severity: "Low",
               dedupe_key: "root-a",
               lifecycle: {
                 dedupe_key: "root-a",
+                final_disposition: "promoted"
+              }
+            },
+            {
+              id: "H-01",
+              title: "[H-01] - High title",
+              severity: "High",
+              dedupe_key: "root-b",
+              lifecycle: {
+                dedupe_key: "root-b",
                 final_disposition: "promoted"
               }
             }
@@ -2935,9 +2957,15 @@ test("every contextual registration executes real positive and negative checks",
         },
         context: {
           artifactSet: {
-            severityClassifiedFindings: [{ id: "finding-a", title: "Preserved title", dedupe_key: "root-a" }],
+            severityClassifiedFindings: [
+              { id: "finding-a", title: "Low title", severity: "Low", dedupe_key: "root-a" },
+              { id: "finding-b", title: "High title", severity: "High", dedupe_key: "root-b" }
+            ],
             findingLifecycleLedger: {
-              records: [{ dedupe_key: "root-a", final_disposition: "promoted" }]
+              records: [
+                { dedupe_key: "root-a", final_disposition: "promoted" },
+                { dedupe_key: "root-b", final_disposition: "promoted" }
+              ]
             }
           }
         }

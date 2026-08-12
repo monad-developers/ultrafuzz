@@ -706,7 +706,63 @@ function reportSeverityClassificationPreservationIssues(
     }
   }
 
-  const previousReportIndex = { promoted: -1, "non-production": -1 };
+  const severityRank = new Map([
+    ["High", 0],
+    ["Medium", 1],
+    ["Low", 2]
+  ]);
+  const promotedUpstream = upstream
+    .flatMap((finding, sourceIndex) => {
+      if (!isRecord(finding)) return [];
+      const key = stringField(finding, "dedupe_key");
+      if (key === undefined || stringField(ledgerByKey.get(key), "final_disposition") !== "promoted") return [];
+      return [{ finding, key, sourceIndex }];
+    })
+    .sort((left, right) => {
+      const leftRank = severityRank.get(stringField(left.finding, "severity") ?? "") ?? 3;
+      const rightRank = severityRank.get(stringField(right.finding, "severity") ?? "") ?? 3;
+      return leftRank - rightRank || left.sourceIndex - right.sourceIndex;
+    });
+  const promotedReport = reportRows.filter((entry) => entry.kind === "promoted");
+  const severityCounters = new Map([
+    ["High", 0],
+    ["Medium", 0],
+    ["Low", 0]
+  ]);
+  for (const [index, expected] of promotedUpstream.entries()) {
+    const actual = promotedReport[index];
+    if (actual === undefined) continue;
+    const actualKey = stringField(at(actual.row, ["lifecycle"]), "dedupe_key");
+    if (actualKey !== expected.key) {
+      issues.push(issue(actual.path, "Report production issues are not stable-sorted High, Medium, then Low"));
+      continue;
+    }
+    const severity = stringField(expected.finding, "severity") ?? "";
+    const priorCount = severityCounters.get(severity);
+    if (priorCount === undefined) {
+      issues.push(issue(actual.path, "Report production issue lacks a canonical High, Medium, or Low severity"));
+      continue;
+    }
+    const count = priorCount + 1;
+    severityCounters.set(severity, count);
+    const expectedId = `${severity[0]}-${String(count).padStart(2, "0")}`;
+    if (stringField(actual.row, "id") !== expectedId) {
+      issues.push(issue(`${actual.path}.id`, `Report production issue must use canonical ID ${expectedId}`));
+    }
+    const upstreamTitle = stringField(expected.finding, "title") ?? "";
+    const baseTitle = upstreamTitle
+      .replace(/^\s*\[[HML]-\d{2,}\]\s*-\s*/iu, "")
+      .replace(/\s+/gu, " ")
+      .trim();
+    const expectedTitle = `[${expectedId}] - ${baseTitle}`;
+    if (stringField(actual.row, "title") !== expectedTitle || baseTitle === "") {
+      issues.push(
+        issue(`${actual.path}.title`, `Report production issue must use title ${JSON.stringify(expectedTitle)}`)
+      );
+    }
+  }
+
+  let previousNonProductionIndex = -1;
   for (const [upstreamIndex, finding] of upstream.entries()) {
     if (!isRecord(finding)) continue;
     const dedupeKey = stringField(finding, "dedupe_key");
@@ -757,10 +813,10 @@ function reportSeverityClassificationPreservationIssues(
     if (reportEntry.kind !== disposition) {
       issues.push(issue(reportEntry.path, `Report placement does not match lifecycle disposition ${disposition}`));
     }
-    if (reportEntry.index <= previousReportIndex[disposition]) {
-      issues.push(issue(reportEntry.path, "Report reordered severity-classified findings"));
+    if (disposition === "non-production" && reportEntry.index <= previousNonProductionIndex) {
+      issues.push(issue(reportEntry.path, "Report reordered non-production severity-classified findings"));
     }
-    previousReportIndex[disposition] = reportEntry.index;
+    if (disposition === "non-production") previousNonProductionIndex = reportEntry.index;
     if (!isDeepStrictEqual(at(reportEntry.row, ["lifecycle"]), lifecycle)) {
       issues.push(
         issue(`${reportEntry.path}.lifecycle`, "Report lifecycle does not exactly copy the severity ledger record")
@@ -768,6 +824,7 @@ function reportSeverityClassificationPreservationIssues(
     }
     if (!isRecord(reportEntry.row)) continue;
     for (const field of Object.keys(finding)) {
+      if (disposition === "promoted" && (field === "id" || field === "title")) continue;
       if (!isDeepStrictEqual(reportEntry.row[field], finding[field])) {
         issues.push(
           issue(`${reportEntry.path}.${field}`, `Report did not preserve severity field ${JSON.stringify(field)}`)
