@@ -94,6 +94,10 @@ export interface WorkspacePatchManifest {
   result_tree: string;
   patch_sha256: string;
   files: WorkspacePatchFile[];
+  source_snapshot?: {
+    status: "preserved";
+    protected_roots: string[];
+  };
   excluded_files?: WorkspacePatchExcludedFile[];
 }
 
@@ -112,8 +116,13 @@ export function captureWorkspaceTree(workspaceRoot: string): string {
 }
 
 /** Capture only changes made after the supplied dependency baseline tree. */
-export function captureWorkspacePatch(workspaceRoot: string, baselineTree: string): WorkspacePatchCapture {
+export function captureWorkspacePatch(
+  workspaceRoot: string,
+  baselineTree: string,
+  productionSourceRoots: readonly string[] = ["src", "contracts"]
+): WorkspacePatchCapture {
   assertObjectId(baselineTree, "workspace patch baseline tree");
+  const protectedRoots = normalizeProductionSourceRoots(productionSourceRoots);
   const baseCommit = runGit(workspaceRoot, ["rev-parse", "HEAD"]).trim();
   const capture = withTemporaryIndex(workspaceRoot, (index) => {
     const excluded = new Map<string, WorkspacePatchExcludedFile>();
@@ -129,6 +138,11 @@ export function captureWorkspacePatch(workspaceRoot: string, baselineTree: strin
       const changedPaths = splitNulBuffer(
         runGitBuffer(workspaceRoot, ["diff", "--cached", "--name-only", "-z", "--no-renames", baselineTree], index)
       );
+      const changedFiles = parseChangedPaths(
+        Buffer.concat(changedPaths.flatMap((entry) => [entry, NUL])).toString("utf8")
+      );
+      for (const entry of changedFiles) assertWorkspacePatchPath(workspaceRoot, entry.path);
+      assertProductionSourcePreserved(changedFiles, protectedRoots);
       const diff = captureWorkspaceDiff(workspaceRoot, diffArgs, index);
       const measuredBytes = diff.bytes.length;
 
@@ -168,8 +182,7 @@ export function captureWorkspacePatch(workspaceRoot: string, baselineTree: strin
       if (Buffer.byteLength(patch, "utf8") > MAX_PATCH_BYTES) {
         throw new Error(`workspace patch exceeds ${MAX_PATCH_BYTES} bytes`);
       }
-      const files = parseChangedPaths(Buffer.concat(changedPaths.flatMap((entry) => [entry, NUL])).toString("utf8"));
-      for (const entry of files) assertWorkspacePatchPath(workspaceRoot, entry.path);
+      const files = changedFiles;
       const excludedFiles = [...excluded.values()].sort((left, right) => left.path.localeCompare(right.path));
       return { resultTree, patch, files, excludedFiles };
     }
@@ -184,9 +197,35 @@ export function captureWorkspacePatch(workspaceRoot: string, baselineTree: strin
       result_tree: capture.resultTree,
       patch_sha256: sha256(capture.patch),
       files: capture.files,
+      source_snapshot: { status: "preserved", protected_roots: protectedRoots },
       ...(capture.excludedFiles.length === 0 ? {} : { excluded_files: capture.excludedFiles })
     }
   };
+}
+
+function normalizeProductionSourceRoots(roots: readonly string[]): string[] {
+  if (roots.length === 0) throw new Error("production source roots must not be empty");
+  const normalized = roots.map((root) => normalizeWorkspacePatchPath(root, "production source root"));
+  if (new Set(normalized).size !== normalized.length) throw new Error("production source roots must be unique");
+  return normalized.sort((left, right) => left.localeCompare(right));
+}
+
+function pathIsInsideRoot(candidate: string, root: string): boolean {
+  return candidate === root || candidate.startsWith(`${root}/`);
+}
+
+function assertProductionSourcePreserved(
+  files: readonly WorkspacePatchFile[],
+  protectedRoots: readonly string[]
+): void {
+  const productionEdits = files.filter((entry) => protectedRoots.some((root) => pathIsInsideRoot(entry.path, root)));
+  if (productionEdits.length > 0) {
+    throw new Error(
+      `source-snapshot violation: workspace patch modifies protected production source: ${productionEdits
+        .map((entry) => entry.path)
+        .join(", ")}`
+    );
+  }
 }
 
 /**
@@ -747,6 +786,16 @@ function validateManifest(manifest: WorkspacePatchManifest): void {
   assertObjectId(manifest.result_tree, "workspace patch result tree");
   if (!/^[0-9a-f]{64}$/u.test(manifest.patch_sha256)) {
     throw new Error("workspace patch digest is invalid");
+  }
+  if (manifest.source_snapshot !== undefined) {
+    if (
+      manifest.source_snapshot.status !== "preserved" ||
+      !Array.isArray(manifest.source_snapshot.protected_roots) ||
+      manifest.source_snapshot.protected_roots.length === 0
+    ) {
+      throw new Error("workspace patch source snapshot assertion is invalid");
+    }
+    normalizeProductionSourceRoots(manifest.source_snapshot.protected_roots);
   }
   const excluded = new Set<string>();
   if (manifest.excluded_files !== undefined) {

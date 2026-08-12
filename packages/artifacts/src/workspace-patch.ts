@@ -63,6 +63,10 @@ function isSafeWorkspacePatchPath(value: string): boolean {
 }
 
 export const workspacePatchFileSchema = z.strictObject({ path: workspacePatchPath });
+export const workspacePatchSourceSnapshotSchema = z.strictObject({
+  status: z.literal("preserved"),
+  protected_roots: z.array(workspacePatchPath).min(1)
+});
 export const workspacePatchExcludedFileSchema = z.strictObject({
   path: workspacePatchPath,
   diff_bytes_at_least: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
@@ -76,6 +80,7 @@ export const workspacePatchSchema = z
     result_tree: gitObjectId,
     patch_sha256: sha256,
     files: z.array(workspacePatchFileSchema),
+    source_snapshot: workspacePatchSourceSnapshotSchema.optional(),
     excluded_files: z.array(workspacePatchExcludedFileSchema).min(1).optional()
   })
   .superRefine((manifest, context) => {
@@ -135,6 +140,19 @@ export const workspacePatchJsonSchema = {
     base_tree: { type: "string", pattern: "^[0-9a-f]{40,64}$" },
     result_tree: { type: "string", pattern: "^[0-9a-f]{40,64}$" },
     patch_sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
+    source_snapshot: {
+      type: "object",
+      additionalProperties: false,
+      required: ["status", "protected_roots"],
+      properties: {
+        status: { const: "preserved" },
+        protected_roots: {
+          type: "array",
+          minItems: 1,
+          items: { type: "string", pattern: "^[A-Za-z0-9._-]{1,128}(?:/[A-Za-z0-9._-]{1,128})*$" }
+        }
+      }
+    },
     excluded_files: {
       type: "array",
       minItems: 1,

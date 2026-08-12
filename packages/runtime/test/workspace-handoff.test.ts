@@ -62,6 +62,50 @@ test("captures tracked and untracked setup changes relative to the dependency ba
   }
 });
 
+test("rejects a workspace handoff that mutates declared production source", () => {
+  const root = fixture();
+  try {
+    mkdirSync(path.join(root, "src"), { recursive: true });
+    writeFileSync(path.join(root, "src", "Vault.sol"), "contract Vault {}\n");
+    git(root, ["add", "src/Vault.sol"]);
+    git(root, ["commit", "--quiet", "-m", "production source"]);
+    const baseline = captureWorkspaceTree(root);
+    writeFileSync(path.join(root, "src", "Vault.sol"), "contract Vault { function bypass() external {} }\n");
+
+    assert.throws(
+      () => captureWorkspacePatch(root, baseline, ["src"]),
+      /source-snapshot violation: workspace patch modifies protected production source: src\/Vault\.sol/u
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("records source preservation while allowing harness and runtime artifact writes", () => {
+  const root = fixture();
+  try {
+    mkdirSync(path.join(root, "src"), { recursive: true });
+    writeFileSync(path.join(root, "src", "Vault.sol"), "contract Vault {}\n");
+    git(root, ["add", "src/Vault.sol"]);
+    git(root, ["commit", "--quiet", "-m", "production source"]);
+    const baseline = captureWorkspaceTree(root);
+    mkdirSync(path.join(root, "test"), { recursive: true });
+    mkdirSync(path.join(root, "artifacts"), { recursive: true });
+    writeFileSync(path.join(root, "test", "VaultHarness.t.sol"), "contract VaultHarness {}\n");
+    writeFileSync(path.join(root, "artifacts", "finding.json"), "{}\n");
+
+    const captured = captureWorkspacePatch(root, baseline, ["contracts", "src"]);
+    assert.deepEqual(captured.manifest.files, [{ path: "test/VaultHarness.t.sol" }]);
+    assert.deepEqual(captured.manifest.source_snapshot, {
+      status: "preserved",
+      protected_roots: ["contracts", "src"]
+    });
+    assert.doesNotMatch(captured.patch, /artifacts/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // R44's `property-specification-a16z` node died here (issue #281). Any negative pathspec makes
 // `git add` report an ignored path as an error instead of skipping it, so an ignored `node_modules`
 // aborted capture outright — `:(exclude)node_modules`, `:!node_modules` and the `/**` form all fail
@@ -1039,32 +1083,33 @@ test("ranks the real capture by real bytes, through git and the code that runs i
     git(root, ["add", ".gitignore"]);
     git(root, ["commit", "--quiet", "-m", "base"]);
     // Both files are NUL-free, so git classifies them as TEXT and `--binary` emits their bytes raw
-    // rather than deflating them. `corpus/` sorts before `src/`, and git emits in path order, so the
-    // capture holds all of corpus and a truncated head of src.
+    // rather than deflating them. `corpus/` sorts before `lib/`, and git emits in path order, so the
+    // capture holds all of corpus and a truncated head of lib. This synthetic authored root stays
+    // outside the default production-source policy because source preservation is tested separately.
     //
     // 0xE9 is a valid latin-1 byte and an invalid UTF-8 sequence: 12 MB of it decodes to 12M replacement
     // characters worth 36 MB, which is how a 12 MB root outranks a 21 MB one.
     mkdirSync(path.join(root, "corpus"), { recursive: true });
-    mkdirSync(path.join(root, "src"), { recursive: true });
+    mkdirSync(path.join(root, "lib"), { recursive: true });
     writeFileSync(path.join(root, "corpus", "latin.bin"), "seed\n");
-    writeFileSync(path.join(root, "src", "big.bin"), "seed\n");
-    git(root, ["add", "corpus", "src"]);
+    writeFileSync(path.join(root, "lib", "big.bin"), "seed\n");
+    git(root, ["add", "corpus", "lib"]);
     git(root, ["commit", "--quiet", "-m", "seed tracked contributors"]);
     const baseline = captureWorkspaceTree(root);
     writeFileSync(path.join(root, "corpus", "latin.bin"), Buffer.alloc(12 * 1024 * 1024, 0xe9));
-    writeFileSync(path.join(root, "src", "big.bin"), Buffer.alloc(30 * 1024 * 1024, 0x61));
+    writeFileSync(path.join(root, "lib", "big.bin"), Buffer.alloc(30 * 1024 * 1024, 0x61));
 
     assert.throws(
       () => captureWorkspacePatch(root, baseline),
       (error: unknown) => {
         const message = error instanceof Error ? error.message : String(error);
-        const ranked = [...message.matchAll(/\b(corpus|src) \(>=(\d+) diff bytes/gu)].map((match) => ({
+        const ranked = [...message.matchAll(/\b(corpus|lib) \(>=(\d+) diff bytes/gu)].map((match) => ({
           root: match[1] ?? "",
           bytes: Number(match[2])
         }));
         assert.deepEqual(
           ranked.map((entry) => entry.root),
-          ["src", "corpus"],
+          ["lib", "corpus"],
           message
         );
         // The floor must be a floor. `corpus` is fully captured, so its total cannot exceed its own size

@@ -1014,6 +1014,16 @@ test("generated Smithers workflow guards runtime-owned workspace patch publicati
   assert.match(helper, /if \(!replaceSuperseded\) \{/u);
 });
 
+test("generated Smithers workspace handoff enforces declared production source roots", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function materializeWorkspacePatch");
+  const helperEnd = source.indexOf("\n\n/**", helperStart);
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+  const helper = source.slice(helperStart, helperEnd);
+  assert.match(helper, /captureWorkspacePatch\(workspaceRoot, baselineTree, task\.productionSourceRoots\)/u);
+});
+
 test("runtime workspace patch publication replaces empty placeholders but rejects non-empty agent patches", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function writeWorkspacePatchArtifact");

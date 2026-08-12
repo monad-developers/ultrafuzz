@@ -89,6 +89,9 @@ api_key_env = "DEEPSEEK_API_KEY"
 trust_model = "skip-permissions"
 prompt_review_required = true
 materialize_outputs_as_unstaged = true
+# Target-relative roots whose committed contents are production source. Workspace
+# handoffs fail closed if an agent edits, deletes, or adds a file under these roots.
+production_source_roots = ["src", "contracts"]
 
 
 [invariants]

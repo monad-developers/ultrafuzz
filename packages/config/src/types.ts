@@ -147,6 +147,8 @@ export interface PermissionConfig {
   trustModel: TrustModel;
   promptReviewRequired: boolean;
   materializeOutputsAsUnstaged: boolean;
+  /** Target-relative directory roots whose contents must remain pinned to the source snapshot. */
+  productionSourceRoots: string[];
 }
 
 export interface InvariantConfig {

@@ -988,7 +988,7 @@ function materializeWorkspacePatch(task: (typeof taskSpecs)[number]): void {
     throw new Error(`artifact-contract failure: workspace patch baseline is unavailable ${task.attemptId}`);
   }
   const workspaceRoot = realpathSync(task.workspacePath);
-  const captured = captureWorkspacePatch(workspaceRoot, baselineTree);
+  const captured = captureWorkspacePatch(workspaceRoot, baselineTree, task.productionSourceRoots);
   const manifest = `${JSON.stringify(captured.manifest, null, 2)}\n`;
   for (const artifactRoot of taskArtifactRoots(task, realpathSync(task.metadata.artifacts.dir))) {
     // Classify the surviving pair BEFORE writing either half of the new one. Writing the patch first
