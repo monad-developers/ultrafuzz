@@ -42,9 +42,12 @@ finding ID, title, optional family ID, and hit arrays agree exactly. Write one
 raw stage per source artifact in source order using its exact path and finding
 ID, followed by exactly one deduped stage whose `artifact_path` is the portable
 declared output-relative path `{{output_stage_findings_relative_path}}` and whose
-`finding_id` is the kept finding ID. Do not write
-later-stage fields. Validate only JSON shape and required normalized-finding
-fields, then stop. Those schemas alone define every JSON version, field, type,
-enum, required member, and empty form. Run every exact
+`finding_id` is the kept finding ID. Do not copy or write fields owned by later
+triage, severity, or final-review stages. In particular, remove
+`triage_classification` from a dedupe lifecycle record even if an input carries
+it; preserving that field would still author a later-stage value at the dedupe
+stage. Validate only JSON shape and required normalized-finding fields, then
+stop. Those schemas alone define every JSON version, field, type, enum, required
+member, and empty form. Run every exact
 `ultrafuzz json validate` command rendered in the central output contract;
 correct an exit-1 artifact yourself and rerun its command after any later edit.

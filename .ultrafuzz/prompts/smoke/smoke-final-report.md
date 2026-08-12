@@ -61,10 +61,22 @@ closed `run_metadata` object: `audit_profile`, `audit_profile_catalog_digest`,
 runtime-recorded values exactly, never reconstruct them from paths, and show
 them in the Markdown Run summary.
 
-Write `{{artifact_path}}/report.md` beginning with `# Ultrafuzz report`. Include
-a concise run summary, an issue index, and for each production issue its
-severity reasoning, evidence/PoC, affected code, and strategy detections. Add a
-short non-production outcomes table when needed. State `No issues reported.`
+After `report.json` passes its exact rendered validation command, generate the
+required byte-exact canonical Markdown with this producer command:
+
+```sh
+ultrafuzz report render --file '{{artifact_path}}/report.json' --output '{{artifact_path}}/report.md'
+```
+
+The command fails instead of inventing missing final-review evidence. Treat
+exit 1 as a report JSON authoring failure: correct `report.json`, rerun its exact
+validation command, and rerun this renderer. Do not author or hand-edit
+`report.md` after the renderer succeeds.
+
+The rendered `report.md` begins with `# Ultrafuzz report` and includes a concise
+run summary, an issue index, and for each production issue its severity
+reasoning, evidence/PoC, affected code, and strategy detections. It includes a
+short non-production outcomes table when needed and states `No issues reported.`
 only when the evidence supports no production issue. Under
 `## Property implementation coverage`, render exactly:
 
@@ -73,7 +85,6 @@ only when the evidence supports no production issue. Under
 - Reason: `property-implementation-track-not-declared`
 ```
 
-Validate both required files against their output contracts, then stop.
 Run every exact `ultrafuzz json validate` command rendered in the central
-output contract; correct an exit-1 artifact yourself and rerun its command
-after any later edit.
+output contract; correct an exit-1 JSON artifact yourself and rerun its command
+after any later edit. Then run the canonical Markdown renderer above and stop.

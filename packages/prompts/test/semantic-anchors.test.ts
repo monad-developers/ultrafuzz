@@ -880,12 +880,20 @@ describe("prompt semantic anchors", () => {
   });
 
   it("gives the final-report producer the canonical Markdown renderer", () => {
-    const markdown = prompt("review/final-report.md");
-    expect(markdown).toContain(
-      "ultrafuzz report render --file '{{artifact_path}}/report.json' --output '{{artifact_path}}/report.md'"
-    );
-    expect(markdown).toContain("Do not hand-edit `report.md` after");
-    expect(markdown).toContain("the renderer succeeds");
+    for (const promptPath of ["review/final-report.md", "smoke/smoke-final-report.md"]) {
+      const markdown = prompt(promptPath);
+      expect(markdown, promptPath).toContain(
+        "ultrafuzz report render --file '{{artifact_path}}/report.json' --output '{{artifact_path}}/report.md'"
+      );
+      expect(markdown, promptPath).toMatch(/Do not (?:author or )?hand-edit\s+`report\.md` after/u);
+      expect(markdown, promptPath).toContain("the renderer succeeds");
+    }
+  });
+
+  it("keeps smoke dedupe lifecycle records free of later-stage ownership", () => {
+    const markdown = prompt("smoke/smoke-dedupe-findings.md");
+    expect(markdown).toContain("fields owned by later\ntriage, severity, or final-review stages");
+    expect(markdown).toContain("remove\n`triage_classification` from a dedupe lifecycle record");
   });
 
   it("delegates the boundary-recipes JSON shape to its pinned schema", () => {
