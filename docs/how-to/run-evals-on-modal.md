@@ -154,7 +154,7 @@ runs without opening logs:
 ```bash
 repository=monad-developers/ultrafuzz
 release_sha=<40-character-release-sha>
-gh api "repos/$repository/commits/$release_sha/check-runs?per_page=100" \
+gh api --paginate "repos/$repository/commits/$release_sha/check-runs?per_page=100" \
   --jq '.check_runs[] | [.name, .conclusion, .details_url] | @tsv'
 ```
 
@@ -165,10 +165,9 @@ of the commit to which GitHub attached their checks, use the run title:
 
 ```bash
 candidate_sha=<40-character-candidate-sha>
-gh run list --repo "$repository" --workflow eval-benchmark-recovery.yml \
-  --limit 100 --json databaseId,displayTitle,conclusion,url \
+gh api --paginate "repos/$repository/actions/workflows/eval-benchmark-recovery.yml/runs?per_page=100" \
   | jq --arg candidate "$candidate_sha" \
-      '.[] | select(.displayTitle | contains("candidate \($candidate) from source run"))'
+      '.workflow_runs[] | select(.display_title | contains("candidate \($candidate) from source run")) | {id, display_title, conclusion, html_url}'
 ```
 
 The smoke has exactly three targets: one Foundry target, one Hardhat target, and
