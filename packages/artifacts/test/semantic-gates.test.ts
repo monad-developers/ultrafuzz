@@ -1298,6 +1298,27 @@ test("every document-local gate has a passing and failing non-mutating fixture",
   }
 });
 
+test("property references alone do not claim fuzzer campaign provenance", () => {
+  assert.equal(
+    executeSemanticGate("finding-campaign-provenance-coherence", {
+      document: { property_ids: ["property-1"] }
+    }).status,
+    "passed"
+  );
+  assert.equal(
+    executeSemanticGate("findings-campaign-provenance-coherence", {
+      document: [{ property_ids: ["property-1"] }]
+    }).status,
+    "passed"
+  );
+  assert.equal(
+    executeSemanticGate("finding-campaign-provenance-coherence", {
+      document: { property_ids: ["property-1"], fuzzer_backend: "recon" }
+    }).status,
+    "failed"
+  );
+});
+
 test("property source joins require exact reverse coverage of every declared lens row", () => {
   const context = {
     artifactSet: {

@@ -459,7 +459,6 @@ function findingCampaignProvenanceIssues(document: unknown, findingPath = "$"): 
   const propertyIds = stringArray(document.property_ids);
   const contributions = arrayAt(document, ["contributing_backend_failures"]);
   const hasCampaignProvenance =
-    propertyIds.length > 0 ||
     contributions.length > 0 ||
     Object.prototype.hasOwnProperty.call(document, "deduplication") ||
     Object.prototype.hasOwnProperty.call(document, "fuzzer_backend") ||
@@ -471,13 +470,16 @@ function findingCampaignProvenanceIssues(document: unknown, findingPath = "$"): 
     issues.push(
       issue(
         `${findingPath}.contributing_backend_failures`,
-        "A property-derived finding must name its contributing backend failures"
+        "A campaign finding with property IDs must name its contributing backend failures"
       )
     );
   }
   if (propertyIds.length > 0 && !isRecord(document.deduplication)) {
     issues.push(
-      issue(`${findingPath}.deduplication`, "A property-derived finding must declare deduplication accounting")
+      issue(
+        `${findingPath}.deduplication`,
+        "A campaign finding with property IDs must declare deduplication accounting"
+      )
     );
   }
 
