@@ -5107,6 +5107,15 @@ test("current campaign timeout gate rejects reserve subtraction and ambiguous Re
       }
     },
     {
+      name: "stateful sequence flag after the option terminator",
+      code: "CAMPAIGN_SEQUENCE_LENGTH_COMMAND_INVALID",
+      mutate: (fixture) => {
+        const command = fixture.backend.exact_command.replace("--seq-len 100", "-- --seq-len 100");
+        fixture.backend.exact_command = command;
+        fixture.plan.backend.exact_shell_escaped_command = command;
+      }
+    },
+    {
       name: "plan test limit",
       code: "CAMPAIGN_TIMEOUT_TEST_LIMIT_MISMATCH",
       mutate: (fixture) => {

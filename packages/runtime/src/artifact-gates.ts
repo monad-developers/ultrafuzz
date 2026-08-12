@@ -1753,6 +1753,7 @@ function exactReconCommandFlagValues(command: string, flag: "--timeout" | "--tes
   );
   if (reconIndexes.length !== 1) return [];
   const argv = tokens.slice(reconIndexes[0]! + 2);
+  if (argv.includes("--")) return [];
   const values: string[] = [];
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index]!;
