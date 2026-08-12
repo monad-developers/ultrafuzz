@@ -459,10 +459,7 @@ function findingCampaignProvenanceIssues(document: unknown, findingPath = "$"): 
   const propertyIds = stringArray(document.property_ids);
   const contributions = arrayAt(document, ["contributing_backend_failures"]);
   const hasCampaignProvenance =
-    contributions.length > 0 ||
-    Object.prototype.hasOwnProperty.call(document, "deduplication") ||
-    Object.prototype.hasOwnProperty.call(document, "fuzzer_backend") ||
-    Object.prototype.hasOwnProperty.call(document, "fuzzer_backends");
+    contributions.length > 0 || Object.prototype.hasOwnProperty.call(document, "deduplication");
   if (!hasCampaignProvenance) return [];
 
   const issues: SemanticGateIssue[] = [];
