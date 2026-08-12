@@ -3,9 +3,12 @@ import { lstat, mkdir, open, readFile, readdir, rename, rm, unlink } from "node:
 import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 
+import lockfile from "proper-lockfile";
+
 import { fingerprintModalConfigFile, fingerprintModalModel, type ModalBenchmarkConfig } from "./config.js";
 import type { ModalModelSpec } from "./defaults.js";
 import { parseModalWorkerLineage, type ModalWorkerLineage } from "./launch-state.js";
+import type { WorkerResultWriteGuard } from "./worker-result.js";
 
 export class CheckpointIncompatibleError extends Error {
   override readonly name = "CheckpointIncompatibleError";
@@ -42,6 +45,26 @@ export async function ensurePersistentWorkerLineage(input: {
   workspaceEvidencePaths: string[];
   freshCleanupPaths: string[];
   attemptCleanupPaths: string[];
+  resultGenerationFloorPath: string;
+  resultGenerationFloor: number;
+}): Promise<void> {
+  await mkdir(path.dirname(input.lineagePath), { recursive: true, mode: 0o700 });
+  const release = await acquireLineageLock(input.lineagePath);
+  try {
+    await ensurePersistentWorkerLineageLocked(input);
+  } finally {
+    await release();
+  }
+}
+
+async function ensurePersistentWorkerLineageLocked(input: {
+  lineagePath: string;
+  lineage: ModalWorkerLineage;
+  workspaceEvidencePaths: string[];
+  freshCleanupPaths: string[];
+  attemptCleanupPaths: string[];
+  resultGenerationFloorPath: string;
+  resultGenerationFloor: number;
 }): Promise<void> {
   let persisted: ModalWorkerLineage | undefined;
   try {
@@ -62,6 +85,7 @@ export async function ensurePersistentWorkerLineage(input: {
       }
       return;
     }
+    await preserveGenerationFloor(input);
     await clearPaths(input.attemptCleanupPaths);
     await writeJsonAtomic(input.lineagePath, input.lineage);
     return;
@@ -80,6 +104,7 @@ export async function ensurePersistentWorkerLineage(input: {
     if (input.lineage.workspace_mode !== "resume") {
       throw new CheckpointIncompatibleError("persisted lineage does not match the requested generation");
     }
+    await preserveGenerationFloor(input);
     await clearPaths(input.attemptCleanupPaths);
     await writeJsonAtomic(input.lineagePath, input.lineage);
     return;
@@ -89,6 +114,7 @@ export async function ensurePersistentWorkerLineage(input: {
     if (input.lineage.workspace_mode !== "fresh" || input.lineage.generation <= persisted.generation) {
       throw new CheckpointIncompatibleError("persisted lineage does not match the requested generation");
     }
+    await preserveGenerationFloor(input);
     await clearPaths(input.freshCleanupPaths);
     await writeJsonAtomic(input.lineagePath, input.lineage);
     return;
@@ -100,8 +126,88 @@ export async function ensurePersistentWorkerLineage(input: {
   if (existingWorkspace && input.lineage.workspace_mode !== "fresh") {
     throw new CheckpointIncompatibleError("unversioned persistent workspace cannot be resumed");
   }
-  if (input.lineage.workspace_mode === "fresh") await clearPaths(input.freshCleanupPaths);
+  if (input.lineage.workspace_mode === "fresh") {
+    await preserveGenerationFloor(input);
+    await clearPaths(input.freshCleanupPaths);
+  }
   await writeJsonAtomic(input.lineagePath, input.lineage);
+}
+
+export async function assertCurrentPersistentWorkerLineage(
+  lineagePath: string,
+  expected: ModalWorkerLineage
+): Promise<void> {
+  let persisted: ModalWorkerLineage;
+  try {
+    persisted = parseModalWorkerLineage(JSON.parse(await readFile(lineagePath, "utf8")) as unknown);
+  } catch {
+    throw new CheckpointIncompatibleError("current worker lineage is unavailable or invalid");
+  }
+  if (JSON.stringify(persisted) !== JSON.stringify(expected)) {
+    throw new CheckpointIncompatibleError("current worker lineage no longer matches this attempt");
+  }
+}
+
+export function guardCurrentPersistentWorkerLineage(
+  lineagePath: string,
+  expected: ModalWorkerLineage
+): WorkerResultWriteGuard {
+  return async <T>(write: () => Promise<T>): Promise<T> => {
+    const release = await acquireLineageLock(lineagePath);
+    try {
+      await assertCurrentPersistentWorkerLineage(lineagePath, expected);
+      return await write();
+    } finally {
+      await release();
+    }
+  };
+}
+
+async function acquireLineageLock(lineagePath: string): Promise<() => Promise<void>> {
+  return lockfile.lock(path.dirname(lineagePath), {
+    realpath: false,
+    stale: 30_000,
+    retries: { retries: 120, factor: 1, minTimeout: 250, maxTimeout: 500 }
+  });
+}
+
+async function preserveGenerationFloor(input: {
+  resultGenerationFloorPath: string;
+  resultGenerationFloor: number;
+  attemptCleanupPaths: string[];
+}): Promise<void> {
+  let generation = input.resultGenerationFloor;
+  for (const candidate of input.attemptCleanupPaths) generation = Math.max(generation, await readGeneration(candidate));
+  await writeGenerationFloor(input.resultGenerationFloorPath, generation);
+}
+
+async function writeGenerationFloor(filePath: string, generation: number): Promise<void> {
+  const existing = await readGenerationFloor(filePath);
+  await writeJsonAtomic(filePath, { generation: Math.max(existing, generation) });
+}
+
+async function readGenerationFloor(filePath: string): Promise<number> {
+  try {
+    const value = JSON.parse(await readFile(filePath, "utf8")) as { generation?: unknown };
+    return typeof value.generation === "number" && Number.isSafeInteger(value.generation) && value.generation >= 0
+      ? value.generation
+      : 0;
+  } catch (error) {
+    if (isNodeError(error, "ENOENT")) return 0;
+    throw new CheckpointIncompatibleError("persisted result generation floor is invalid");
+  }
+}
+
+async function readGeneration(filePath: string): Promise<number> {
+  try {
+    const value = JSON.parse(await readFile(filePath, "utf8")) as { generation?: unknown };
+    return typeof value.generation === "number" && Number.isSafeInteger(value.generation) && value.generation >= 0
+      ? value.generation
+      : 0;
+  } catch (error) {
+    if (isNodeError(error, "ENOENT") || error instanceof SyntaxError) return 0;
+    throw error;
+  }
 }
 
 function samePersistentWorkspace(left: ModalWorkerLineage, right: ModalWorkerLineage): boolean {
