@@ -115,13 +115,15 @@ Use this configured invariant testing fuzzer timeout:
    - Start the long campaign from this template, substituting the resolved
      worker count and the repository's own contract, config, and corpus
      conventions:
-     `timeout --preserve-status --signal=INT --kill-after=300s {{invariant_testing_fuzzer_timeout}}s recon fuzz . --contract CryticTester --test-mode assertion --workers <workers> --test-limit 18446744073709551615 --timeout {{invariant_testing_fuzzer_timeout}} --corpus-dir echidna --recon-corpus-dir recon-corpus`.
+     `timeout --preserve-status --signal=INT --kill-after=300s {{invariant_testing_fuzzer_timeout}}s recon fuzz . --contract CryticTester --test-mode assertion --workers <workers> --test-limit 18446744073709551615 --seq-len 100 --timeout {{invariant_testing_fuzzer_timeout}} --corpus-dir echidna --recon-corpus-dir recon-corpus`.
      Add `--config <path>` only when the repository's Recon/Echidna config
      requires it. Put cache or other `env KEY=value` assignments before the
      `timeout` executable, leaving the four supervisor arguments immediately
      before `recon fuzz`. Always pass `--workers` with the count resolved in
-     step 2; do not reuse the bounded smoke's test limit of 1, `--seq-len`, or
-     single-worker flags for the long campaign. The explicit maximum
+     step 2; do not reuse the bounded smoke's test limit or sequence length of
+     1, or its single-worker flag, for the long campaign. The explicit
+     `--seq-len 100` prevents a generated `seqLen: 1` smoke configuration from
+     silently disabling multi-transaction state exploration. The explicit maximum
      `--test-limit` is nonbinding and prevents Recon's default 50,000-call cap
      from ending the campaign before the wall-clock deadline.
    - Give recon-fuzzer distinct corpus, cache, log, raw-result, and reproducer

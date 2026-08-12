@@ -450,8 +450,9 @@ describe("prompt semantic anchors", () => {
     );
     expect(flatCampaign).toContain("The shutdown grace and artifact reserve are both additional to, not part of");
     expect(flatCampaign).toContain(
-      "`timeout --preserve-status --signal=INT --kill-after=300s {{invariant_testing_fuzzer_timeout}}s recon fuzz . --contract CryticTester --test-mode assertion --workers <workers> --test-limit 18446744073709551615 --timeout {{invariant_testing_fuzzer_timeout}} --corpus-dir echidna --recon-corpus-dir recon-corpus`"
+      "`timeout --preserve-status --signal=INT --kill-after=300s {{invariant_testing_fuzzer_timeout}}s recon fuzz . --contract CryticTester --test-mode assertion --workers <workers> --test-limit 18446744073709551615 --seq-len 100 --timeout {{invariant_testing_fuzzer_timeout}} --corpus-dir echidna --recon-corpus-dir recon-corpus`"
     );
+    expect(flatCampaign).toContain("`--seq-len 100` prevents a generated `seqLen: 1`");
     expect(flatCampaign).toContain("prevents Recon's default 50,000-call cap");
     expect(flatCampaign).toContain("Do not use `--foreground`");
     expect(flatCampaign).toContain("`fuzzing_deadline_utc = backend_started_at + configured timeout`");

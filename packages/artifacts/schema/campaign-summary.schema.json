@@ -10,6 +10,11 @@
       "type": "string",
       "enum": ["complete", "partial", "blocked"]
     },
+    "sequence_length": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
     "reason": {
       "type": "string",
       "minLength": 1,
@@ -116,6 +121,7 @@
   "required": [
     "schema_version",
     "outcome",
+    "sequence_length",
     "implemented_property_suite_refs",
     "campaign_plan_ref",
     "backend_results",

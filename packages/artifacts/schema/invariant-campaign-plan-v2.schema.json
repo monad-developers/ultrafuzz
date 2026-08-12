@@ -45,6 +45,11 @@
       "type": "string",
       "minLength": 1
     },
+    "recon_sequence_length": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
     "host_soft_timeout_seconds": {
       "type": "integer",
       "exclusiveMinimum": 0,
@@ -162,6 +167,7 @@
     "configured_fuzzer_timeout_seconds",
     "recon_internal_timeout_seconds",
     "recon_test_limit",
+    "recon_sequence_length",
     "host_soft_timeout_seconds",
     "host_force_kill_grace_seconds",
     "artifact_finalization_reserve_seconds",

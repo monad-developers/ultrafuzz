@@ -627,6 +627,7 @@ export const invariantCampaignPlanSchema = withDocumentMetadata(
     configured_fuzzer_timeout_seconds: positiveInteger,
     recon_internal_timeout_seconds: positiveInteger,
     recon_test_limit: nonEmptyString,
+    recon_sequence_length: positiveInteger,
     host_soft_timeout_seconds: positiveInteger,
     host_force_kill_grace_seconds: positiveInteger,
     artifact_finalization_reserve_seconds: positiveInteger,
@@ -659,6 +660,7 @@ export const campaignSummarySchema = withDocumentMetadata(
   z.strictObject({
     schema_version: z.literal(CAMPAIGN_SUMMARY_SCHEMA_VERSION),
     outcome: z.enum(["complete", "partial", "blocked"]),
+    sequence_length: positiveInteger,
     reason: nonEmptyString.max(4_000).optional(),
     implemented_property_suite_refs: uniqueStrings(1),
     campaign_plan_ref: nonEmptyString,

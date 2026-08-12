@@ -251,6 +251,7 @@ export interface PropertyCampaignArtifact {
   fuzzer_backend: string;
   backend_version: string | null;
   configured_timeout_seconds?: number;
+  sequence_length?: number;
   exact_command?: string;
   start_timestamp?: string;
   end_timestamp?: string;
@@ -1004,6 +1005,7 @@ export const propertyCampaignSchema = z
     fuzzer_backend: propertyCampaignNonEmptyString,
     backend_version: propertyCampaignNonEmptyString.nullable(),
     configured_timeout_seconds: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+    sequence_length: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
     exact_command: propertyCampaignNonEmptyString.optional(),
     start_timestamp: canonicalTimestampSchema.optional(),
     end_timestamp: canonicalTimestampSchema.optional(),

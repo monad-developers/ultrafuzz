@@ -7087,6 +7087,7 @@ test("campaign gates select custom declared paths and ignore undeclared conventi
       [campaignSummaryOutput.path]: JSON.stringify({
         schema_version: "ultrafuzz.campaign-summary.v2",
         outcome: "complete",
+        sequence_length: 100,
         implemented_property_suite_refs: ["implemented-properties.json"],
         campaign_plan_ref: campaignPlanOutput.path,
         backend_results: [{ fuzzer_backend: "recon", status: "complete", result_ref: campaignOutput.path }],
@@ -7977,7 +7978,7 @@ const CURRENT_CAMPAIGN_FINAL_ARTIFACT_DEADLINE = "2026-01-01T01:10:00.000Z";
 const CURRENT_CAMPAIGN_COMMAND =
   `timeout --preserve-status --signal=INT --kill-after=${CURRENT_CAMPAIGN_FORCE_KILL_GRACE_SECONDS}s ` +
   `${CURRENT_CAMPAIGN_TIMEOUT_SECONDS}s recon fuzz . --workers 1 ` +
-  `--timeout ${CURRENT_CAMPAIGN_TIMEOUT_SECONDS} --test-limit ${RECON_TIMEOUT_TEST_LIMIT}`;
+  `--timeout ${CURRENT_CAMPAIGN_TIMEOUT_SECONDS} --test-limit ${RECON_TIMEOUT_TEST_LIMIT} --seq-len 100`;
 
 function currentCampaignPlan(): Record<string, unknown> {
   return {
@@ -7993,6 +7994,7 @@ function currentCampaignPlan(): Record<string, unknown> {
     configured_fuzzer_timeout_seconds: CURRENT_CAMPAIGN_TIMEOUT_SECONDS,
     recon_internal_timeout_seconds: CURRENT_CAMPAIGN_TIMEOUT_SECONDS,
     recon_test_limit: RECON_TIMEOUT_TEST_LIMIT,
+    recon_sequence_length: 100,
     host_soft_timeout_seconds: CURRENT_CAMPAIGN_TIMEOUT_SECONDS,
     host_force_kill_grace_seconds: CURRENT_CAMPAIGN_FORCE_KILL_GRACE_SECONDS,
     artifact_finalization_reserve_seconds: CURRENT_CAMPAIGN_FINALIZATION_RESERVE_SECONDS,
@@ -8063,6 +8065,7 @@ function currentCampaign(
     fuzzer_backend: options.fuzzerBackend ?? "recon",
     backend_version: null,
     configured_timeout_seconds: CURRENT_CAMPAIGN_TIMEOUT_SECONDS,
+    sequence_length: 100,
     exact_command: CURRENT_CAMPAIGN_COMMAND,
     start_timestamp: CURRENT_CAMPAIGN_STARTED_AT,
     end_timestamp: finishedAt,
@@ -8264,6 +8267,7 @@ function writeCampaignSummary(
     JSON.stringify({
       schema_version: "ultrafuzz.campaign-summary.v2",
       outcome: campaign.execution.status === "complete" ? "complete" : "partial",
+      sequence_length: 100,
       implemented_property_suite_refs: ["implemented-properties.json"],
       campaign_plan_ref: "campaign-plan.json",
       backend_results: [
@@ -8300,6 +8304,7 @@ interface CampaignTimeoutPlanFixture extends Record<string, unknown> {
   configured_fuzzer_timeout_seconds: number;
   recon_internal_timeout_seconds: number;
   recon_test_limit: string;
+  recon_sequence_length: number;
   host_soft_timeout_seconds: number;
   host_force_kill_grace_seconds: number;
   artifact_finalization_reserve_seconds: number;
@@ -8316,6 +8321,7 @@ interface CampaignTimeoutResultFixture extends Record<string, unknown> {
   schema_version: "ultrafuzz.property-campaign.v3";
   fuzzer_backend: "recon";
   configured_timeout_seconds: number;
+  sequence_length: number;
   exact_command: string;
   start_timestamp: string;
   end_timestamp: string;
@@ -8331,6 +8337,7 @@ interface CampaignTimeoutResultFixture extends Record<string, unknown> {
 interface CampaignTimeoutSummaryFixture extends Record<string, unknown> {
   schema_version: "ultrafuzz.campaign-summary.v2";
   outcome: string;
+  sequence_length: number;
   campaign_plan_ref: string;
   backend_results: Array<Record<string, unknown>>;
   failure_counts: { pre_deduplication: number; post_deduplication: number };
@@ -8346,12 +8353,13 @@ function campaignTimeoutFixture(): CampaignTimeoutFixture {
   const command =
     `timeout --preserve-status --signal=INT --kill-after=300s 3600s recon fuzz . ` +
     `--contract CryticTester --test-mode assertion --workers 8 ` +
-    `--timeout 3600 --test-limit ${RECON_TIMEOUT_TEST_LIMIT}`;
+    `--timeout 3600 --test-limit ${RECON_TIMEOUT_TEST_LIMIT} --seq-len 100`;
   const backend = currentCampaign(["property-1"], [], {
     executionStatus: "complete"
   }) as unknown as CampaignTimeoutResultFixture;
   Object.assign(backend, {
     configured_timeout_seconds: 3600,
+    sequence_length: 100,
     exact_command: command,
     start_timestamp: "2026-08-11T00:00:00.000Z",
     end_timestamp: "2026-08-11T01:00:01.000Z",
@@ -8378,6 +8386,7 @@ function campaignTimeoutFixture(): CampaignTimeoutFixture {
       configured_fuzzer_timeout_seconds: 3600,
       recon_internal_timeout_seconds: 3600,
       recon_test_limit: RECON_TIMEOUT_TEST_LIMIT,
+      recon_sequence_length: 100,
       host_soft_timeout_seconds: 3600,
       host_force_kill_grace_seconds: 300,
       artifact_finalization_reserve_seconds: 300,
@@ -8393,6 +8402,7 @@ function campaignTimeoutFixture(): CampaignTimeoutFixture {
     summary: {
       schema_version: "ultrafuzz.campaign-summary.v2",
       outcome: "complete",
+      sequence_length: 100,
       implemented_property_suite_refs: ["implemented-properties.json"],
       campaign_plan_ref: "campaign-plan.json",
       backend_results: [{ fuzzer_backend: "recon", status: "complete", result_ref: "recon-fuzzer-results.json" }],
@@ -8811,6 +8821,117 @@ test("current campaign timeout gate rejects reserve subtraction and ambiguous Re
           `--test-limit ${RECON_TIMEOUT_TEST_LIMIT}`,
           "--test-limit 50000"
         );
+        fixture.backend.exact_command = command;
+        fixture.plan.backend.exact_shell_escaped_command = command;
+      }
+    },
+    {
+      name: "one-step stateful sequence in plan",
+      code: "CAMPAIGN_SEQUENCE_LENGTH_MISMATCH",
+      mutate: (fixture) => {
+        fixture.plan.recon_sequence_length = 1;
+      }
+    },
+    {
+      name: "one-step stateful sequence in result",
+      code: "CAMPAIGN_SEQUENCE_LENGTH_MISMATCH",
+      mutate: (fixture) => {
+        fixture.backend.sequence_length = 1;
+      }
+    },
+    {
+      name: "one-step stateful sequence in summary",
+      code: "CAMPAIGN_SEQUENCE_LENGTH_MISMATCH",
+      mutate: (fixture) => {
+        fixture.summary.sequence_length = 1;
+      }
+    },
+    {
+      name: "one-step stateful sequence command",
+      code: "CAMPAIGN_SEQUENCE_LENGTH_COMMAND_INVALID",
+      mutate: (fixture) => {
+        const command = fixture.backend.exact_command.replace("--seq-len 100", "--seq-len 1");
+        fixture.backend.exact_command = command;
+        fixture.plan.backend.exact_shell_escaped_command = command;
+      }
+    },
+    {
+      name: "missing stateful sequence command flag",
+      code: "CAMPAIGN_SEQUENCE_LENGTH_COMMAND_INVALID",
+      mutate: (fixture) => {
+        const command = fixture.backend.exact_command.replace(" --seq-len 100", "");
+        fixture.backend.exact_command = command;
+        fixture.plan.backend.exact_shell_escaped_command = command;
+      }
+    },
+    {
+      name: "stateful sequence flag before a compound Recon command",
+      code: "CAMPAIGN_SEQUENCE_LENGTH_COMMAND_INVALID",
+      mutate: (fixture) => {
+        const command = `echo --seq-len 100 >/dev/null && ${fixture.backend.exact_command.replace(" --seq-len 100", "")}`;
+        fixture.backend.exact_command = command;
+        fixture.plan.backend.exact_shell_escaped_command = command;
+      }
+    },
+    ...["&&", "||", ";", "|", "&"].map((operator) => ({
+      name: `attached ${operator} compound command`,
+      code: "CAMPAIGN_SEQUENCE_LENGTH_COMMAND_INVALID",
+      mutate: (fixture: CampaignTimeoutFixture) => {
+        const command = `${fixture.backend.exact_command}${operator}recon fuzz . --config smoke.yaml`;
+        fixture.backend.exact_command = command;
+        fixture.plan.backend.exact_shell_escaped_command = command;
+      }
+    })),
+    {
+      name: "newline-delimited evidence command",
+      code: "CAMPAIGN_SEQUENCE_LENGTH_COMMAND_INVALID",
+      mutate: (fixture) => {
+        const command = `${fixture.backend.exact_command.replace(" --seq-len 100", "")}\necho --seq-len 100`;
+        fixture.backend.exact_command = command;
+        fixture.plan.backend.exact_shell_escaped_command = command;
+      }
+    },
+    {
+      name: "non-executed Recon text passed to another command",
+      code: "CAMPAIGN_TIMEOUT_HOST_WRAPPER_INVALID",
+      mutate: (fixture) => {
+        const command = `echo ${fixture.backend.exact_command}`;
+        fixture.backend.exact_command = command;
+        fixture.plan.backend.exact_shell_escaped_command = command;
+      }
+    },
+    {
+      name: "commented stateful sequence flag",
+      code: "CAMPAIGN_SEQUENCE_LENGTH_COMMAND_INVALID",
+      mutate: (fixture) => {
+        const command = fixture.backend.exact_command.replace(" --seq-len 100", " # --seq-len 100");
+        fixture.backend.exact_command = command;
+        fixture.plan.backend.exact_shell_escaped_command = command;
+      }
+    },
+    {
+      name: "quoted stateful sequence text",
+      code: "CAMPAIGN_SEQUENCE_LENGTH_COMMAND_INVALID",
+      mutate: (fixture) => {
+        const command = fixture.backend.exact_command.replace("--seq-len 100", "'--seq-len 100'");
+        fixture.backend.exact_command = command;
+        fixture.plan.backend.exact_shell_escaped_command = command;
+      }
+    },
+    {
+      name: "duplicate stateful sequence flags",
+      code: "CAMPAIGN_SEQUENCE_LENGTH_COMMAND_INVALID",
+      mutate: (fixture) => {
+        const command = `${fixture.backend.exact_command} --seq-len 100`;
+        fixture.backend.exact_command = command;
+        fixture.plan.backend.exact_shell_escaped_command = command;
+      }
+    },
+    {
+      name: "stateful sequence flag after the option terminator",
+      code: "CAMPAIGN_SEQUENCE_LENGTH_COMMAND_INVALID",
+      mutate: (fixture) => {
+        const command = fixture.backend.exact_command.replace("--seq-len 100", "-- --seq-len 100");
         fixture.backend.exact_command = command;
         fixture.plan.backend.exact_shell_escaped_command = command;
       }

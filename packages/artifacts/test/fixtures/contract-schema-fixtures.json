@@ -92,6 +92,7 @@
     "valid": {
       "schema_version": "ultrafuzz.campaign-summary.v2",
       "outcome": "complete",
+      "sequence_length": 100,
       "implemented_property_suite_refs": ["x"],
       "campaign_plan_ref": "x",
       "backend_results": [],
@@ -105,6 +106,7 @@
     "invalid": {
       "schema_version": "ultrafuzz.campaign-summary.v2",
       "outcome": "complete",
+      "sequence_length": 100,
       "implemented_property_suite_refs": ["x"],
       "campaign_plan_ref": "x",
       "backend_results": [],
@@ -574,6 +576,7 @@
       "configured_fuzzer_timeout_seconds": 1,
       "recon_internal_timeout_seconds": 1,
       "recon_test_limit": "18446744073709551615",
+      "recon_sequence_length": 100,
       "host_soft_timeout_seconds": 1,
       "host_force_kill_grace_seconds": 1,
       "artifact_finalization_reserve_seconds": 1,
@@ -605,6 +608,7 @@
       "configured_fuzzer_timeout_seconds": 1,
       "recon_internal_timeout_seconds": 1,
       "recon_test_limit": "18446744073709551615",
+      "recon_sequence_length": 100,
       "host_soft_timeout_seconds": 1,
       "host_force_kill_grace_seconds": 1,
       "artifact_finalization_reserve_seconds": 1,

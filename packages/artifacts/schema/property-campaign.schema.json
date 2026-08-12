@@ -48,6 +48,11 @@
       "exclusiveMinimum": 0,
       "maximum": 9007199254740991
     },
+    "sequence_length": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
     "exact_command": {
       "type": "string",
       "minLength": 1,

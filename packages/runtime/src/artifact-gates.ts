@@ -3433,6 +3433,7 @@ function severityArtifactForNode(node: PlannedGraphNode): { kind: SeverityArtifa
 }
 
 const RECON_MAX_TEST_LIMIT = "18446744073709551615";
+const RECON_STATEFUL_SEQUENCE_LENGTH = 100;
 const CAMPAIGN_HOST_FORCE_KILL_GRACE_SECONDS = 300;
 const CAMPAIGN_DURATION_TOLERANCE_MS = 5_000;
 const campaignTerminationReasons = new Set([
@@ -3547,17 +3548,82 @@ function timestampField(
   return undefined;
 }
 
-function exactCommandFlagValues(command: string, flag: "--timeout" | "--test-limit"): string[] {
-  const escapedFlag = flag.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-  const pattern = new RegExp(`(?:^|\\s)${escapedFlag}(?:(?:=|\\s+)(\\S+))?`, "gu");
-  return [...command.matchAll(pattern)].map((match) => match[1] ?? "");
+function constrainedShellTokens(command: string): string[] | undefined {
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+  for (let index = 0; index < command.length; index += 1) {
+    const character = command[index]!;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote !== undefined) {
+      if (character === quote) quote = undefined;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      continue;
+    }
+    if (
+      character === "#" ||
+      character === ";" ||
+      character === "&" ||
+      character === "|" ||
+      character === "<" ||
+      character === ">" ||
+      character === "`" ||
+      character === "\n" ||
+      character === "\r" ||
+      (character === "$" && command[index + 1] === "(")
+    ) {
+      return undefined;
+    }
+  }
+  if (quote !== undefined || escaped) return undefined;
+  const tokens = command.trim().split(/\s+/u);
+  return tokens;
+}
+
+function exactReconCommandFlagValues(command: string, flag: "--timeout" | "--test-limit" | "--seq-len"): string[] {
+  const tokens = constrainedShellTokens(command);
+  if (tokens === undefined) return [];
+  const reconIndexes = tokens.flatMap((token, index) =>
+    token === "recon" && tokens[index + 1] === "fuzz" ? [index] : []
+  );
+  if (reconIndexes.length !== 1) return [];
+  const argv = tokens.slice(reconIndexes[0]! + 2);
+  if (argv.includes("--")) return [];
+  const values: string[] = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index]!;
+    if (token === flag) {
+      values.push(argv[index + 1] ?? "");
+    } else if (token.startsWith(`${flag}=`)) {
+      values.push(token.slice(flag.length + 1));
+    }
+  }
+  return values;
 }
 
 function hasExactHostTimeoutWrapper(command: string, configuredTimeoutSeconds: number): boolean {
-  const tokens = command.trim().split(/\s+/u);
+  const tokens = constrainedShellTokens(command);
+  if (tokens === undefined) return false;
   const timeoutIndexes = tokens.flatMap((token, index) => (token === "timeout" ? [index] : []));
   if (timeoutIndexes.length !== 1 || tokens.includes("--foreground")) return false;
   const timeoutIndex = timeoutIndexes[0]!;
+  const prefix = tokens.slice(0, timeoutIndex);
+  const assignmentStart = prefix[0] === "env" ? 1 : 0;
+  if (
+    prefix.slice(assignmentStart).some((token) => !/^[A-Za-z_][A-Za-z0-9_]*=\S+$/u.test(token)) ||
+    (prefix[0] === "env" && prefix.length === 1)
+  ) {
+    return false;
+  }
   const reconIndex = tokens.indexOf("recon", timeoutIndex + 1);
   if (reconIndex < 0 || tokens[reconIndex + 1] !== "fuzz") return false;
   const wrapperArguments = tokens.slice(timeoutIndex + 1, reconIndex);
@@ -3714,6 +3780,17 @@ function verifyCurrentCampaignTimeoutEvidence(
 
   const configuredTimeoutSeconds = configuredInvariantFuzzerTimeoutSeconds(layout, diagnostics);
 
+  const summarySequenceLength = positiveIntegerField(summaryValue, "sequence_length", summaryPath, diagnostics);
+  if (summarySequenceLength !== RECON_STATEFUL_SEQUENCE_LENGTH) {
+    diagnostics.push(
+      campaignTimeoutDiagnostic(
+        "CAMPAIGN_SEQUENCE_LENGTH_MISMATCH",
+        `campaign summary sequence_length must be ${RECON_STATEFUL_SEQUENCE_LENGTH}`,
+        `${summaryPath}#$.sequence_length`
+      )
+    );
+  }
+
   const planConfiguredTimeout = positiveIntegerField(
     planValue,
     "configured_fuzzer_timeout_seconds",
@@ -3758,6 +3835,7 @@ function verifyCurrentCampaignTimeoutEvidence(
     }
   }
   const reconTestLimit = stringField(planValue, "recon_test_limit", planPath, diagnostics);
+  const reconSequenceLength = positiveIntegerField(planValue, "recon_sequence_length", planPath, diagnostics);
   const backendStartedAt = timestampField(planValue, "backend_started_at", planPath, diagnostics);
   const fuzzingDeadline = timestampField(planValue, "fuzzing_deadline_utc", planPath, diagnostics);
   const forceKillDeadline = timestampField(planValue, "force_kill_deadline_utc", planPath, diagnostics);
@@ -3799,6 +3877,15 @@ function verifyCurrentCampaignTimeoutEvidence(
         "CAMPAIGN_TIMEOUT_TEST_LIMIT_MISMATCH",
         `recon_test_limit must be ${RECON_MAX_TEST_LIMIT}`,
         `${planPath}#$.recon_test_limit`
+      )
+    );
+  }
+  if (reconSequenceLength !== RECON_STATEFUL_SEQUENCE_LENGTH) {
+    diagnostics.push(
+      campaignTimeoutDiagnostic(
+        "CAMPAIGN_SEQUENCE_LENGTH_MISMATCH",
+        `recon_sequence_length must be ${RECON_STATEFUL_SEQUENCE_LENGTH} for a stateful invariant campaign`,
+        `${planPath}#$.recon_sequence_length`
       )
     );
   }
@@ -3902,6 +3989,16 @@ function verifyCurrentCampaignTimeoutEvidence(
     );
   }
   const resultCommand = stringField(resultValue, "exact_command", resultPath, diagnostics);
+  const resultSequenceLength = positiveIntegerField(resultValue, "sequence_length", resultPath, diagnostics);
+  if (resultSequenceLength !== RECON_STATEFUL_SEQUENCE_LENGTH) {
+    diagnostics.push(
+      campaignTimeoutDiagnostic(
+        "CAMPAIGN_SEQUENCE_LENGTH_MISMATCH",
+        `sequence_length must be ${RECON_STATEFUL_SEQUENCE_LENGTH} for a stateful invariant campaign`,
+        `${resultPath}#$.sequence_length`
+      )
+    );
+  }
   if (planCommand !== undefined && resultCommand !== undefined && planCommand !== resultCommand) {
     diagnostics.push(
       campaignTimeoutDiagnostic(
@@ -3912,8 +4009,9 @@ function verifyCurrentCampaignTimeoutEvidence(
     );
   }
   if (resultCommand !== undefined && configuredTimeoutSeconds !== undefined) {
-    const timeoutValues = exactCommandFlagValues(resultCommand, "--timeout");
-    const testLimitValues = exactCommandFlagValues(resultCommand, "--test-limit");
+    const timeoutValues = exactReconCommandFlagValues(resultCommand, "--timeout");
+    const testLimitValues = exactReconCommandFlagValues(resultCommand, "--test-limit");
+    const sequenceLengthValues = exactReconCommandFlagValues(resultCommand, "--seq-len");
     if (timeoutValues.length !== 1 || timeoutValues[0] !== String(configuredTimeoutSeconds)) {
       diagnostics.push(
         campaignTimeoutDiagnostic(
@@ -3928,6 +4026,15 @@ function verifyCurrentCampaignTimeoutEvidence(
         campaignTimeoutDiagnostic(
           "CAMPAIGN_TIMEOUT_COMMAND_INVALID",
           `Recon command must contain exactly one --test-limit ${RECON_MAX_TEST_LIMIT} flag`,
+          `${resultPath}#$.exact_command`
+        )
+      );
+    }
+    if (sequenceLengthValues.length !== 1 || sequenceLengthValues[0] !== String(RECON_STATEFUL_SEQUENCE_LENGTH)) {
+      diagnostics.push(
+        campaignTimeoutDiagnostic(
+          "CAMPAIGN_SEQUENCE_LENGTH_COMMAND_INVALID",
+          `Recon command must contain exactly one --seq-len ${RECON_STATEFUL_SEQUENCE_LENGTH} flag`,
           `${resultPath}#$.exact_command`
         )
       );

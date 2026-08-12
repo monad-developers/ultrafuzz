@@ -1242,6 +1242,7 @@ test("the campaign summary v2 contract requires complete typed accounting", () =
   const summary = {
     schema_version: CAMPAIGN_SUMMARY_SCHEMA_VERSION,
     outcome: "partial",
+    sequence_length: 100,
     implemented_property_suite_refs: ["implemented-properties.json"],
     campaign_plan_ref: "invariant-campaign-plan.json",
     backend_results: [],
@@ -1276,6 +1277,7 @@ test("the current invariant campaign plan contract requires v2 timeout evidence"
     configured_fuzzer_timeout_seconds: 3600,
     recon_internal_timeout_seconds: 3600,
     recon_test_limit: "18446744073709551615",
+    recon_sequence_length: 100,
     host_soft_timeout_seconds: 3600,
     host_force_kill_grace_seconds: 300,
     artifact_finalization_reserve_seconds: 300,
@@ -1297,6 +1299,7 @@ test("the current invariant campaign plan contract requires v2 timeout evidence"
   for (const malformed of [
     { ...plan, schema_version: "ultrafuzz.invariant-campaign-plan.v1" },
     { ...plan, configured_fuzzer_timeout_seconds: 0 },
+    { ...plan, recon_sequence_length: 0 },
     { ...plan, backend_started_at: "not-a-timestamp" },
     { ...plan, backend: {} }
   ]) {

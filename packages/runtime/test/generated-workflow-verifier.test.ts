@@ -1304,7 +1304,7 @@ const generatedCampaignPaths = {
   reproducers: "backends/recon-fuzzer/reproducers"
 } as const;
 const GENERATED_CAMPAIGN_COMMAND =
-  "timeout --preserve-status --signal=INT --kill-after=300s 3600s recon fuzz . --workers 1 --test-limit 18446744073709551615 --timeout 3600";
+  "timeout --preserve-status --signal=INT --kill-after=300s 3600s recon fuzz . --workers 1 --test-limit 18446744073709551615 --timeout 3600 --seq-len 100";
 
 const generatedCampaignEvidenceContents = new Map<string, Buffer>([
   [generatedCampaignPaths.log, Buffer.from("recon campaign completed\n", "utf8")],
@@ -1330,6 +1330,7 @@ function generatedCampaignPlanFixture(): Record<string, unknown> {
     configured_fuzzer_timeout_seconds: 3600,
     recon_internal_timeout_seconds: 3600,
     recon_test_limit: "18446744073709551615",
+    recon_sequence_length: 100,
     host_soft_timeout_seconds: 3600,
     host_force_kill_grace_seconds: 300,
     artifact_finalization_reserve_seconds: 300,
@@ -1372,6 +1373,7 @@ function generatedPropertyCampaignFixture(): Record<string, unknown> {
     fuzzer_backend: "recon",
     backend_version: null,
     configured_timeout_seconds: 3600,
+    sequence_length: 100,
     exact_command: GENERATED_CAMPAIGN_COMMAND,
     start_timestamp: "2026-01-01T00:00:00Z",
     end_timestamp: "2026-01-01T01:00:00Z",
@@ -1437,6 +1439,7 @@ function generatedCampaignSummaryFixture(
   return {
     schema_version: "ultrafuzz.campaign-summary.v2",
     outcome: "complete",
+    sequence_length: 100,
     implemented_property_suite_refs: ["implemented-properties.json"],
     campaign_plan_ref: "campaign-plan.json",
     backend_results: [{ fuzzer_backend: "recon", status: "complete", result_ref: "campaign.json" }],
