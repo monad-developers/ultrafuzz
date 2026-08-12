@@ -145,7 +145,11 @@ export async function runPublicBenchmarkWorker(input: {
   model: ModalModelSpec;
   lineage: ModalWorkerLineage;
   dataRoot: string;
-  preflight: (context: { workspaceEvidencePaths: string[]; freshCleanupPaths: string[] }) => Promise<void>;
+  preflight: (context: {
+    workspaceEvidencePaths: string[];
+    freshCleanupPaths: string[];
+    attemptCleanupPaths: string[];
+  }) => Promise<void>;
   isCheckpointIncompatible: (error: unknown) => boolean;
   checkpointIncompatibleError: (message: string) => Error;
 }): Promise<void> {
@@ -190,7 +194,8 @@ export async function runPublicBenchmarkWorker(input: {
           logPath,
           path.join(input.dataRoot, "failure-details.json"),
           path.join(input.dataRoot, "outcome")
-        ]
+        ],
+        attemptCleanupPaths: [statusPath, resultPath]
       });
       await writeFile(logPath, `${new Date().toISOString()} worker-started\n`, { mode: 0o600 });
       await writer.writePartial(emptyWorkerCheckpoint());

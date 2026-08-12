@@ -138,7 +138,8 @@ async function main(): Promise<void> {
           SOURCE_PROOF_PATH,
           path.join(DATA_ROOT, "failure-details.json"),
           path.join(DATA_ROOT, "outcome")
-        ]
+        ],
+        attemptCleanupPaths: [STATUS_PATH, RESULT_PATH]
       });
       await writeFile(LOG_PATH, "", { mode: 0o600 });
       await appendGenericLog("worker-started");

@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { MODAL_WORKER_LINEAGE_SCHEMA_VERSION } from "../src/defaults.js";
 import type { ModalWorkerLineage } from "../src/launch-state.js";
 import { CheckpointIncompatibleError, ensurePersistentWorkerLineage } from "../src/worker-lineage.js";
+import { WorkerResultWriter, emptyWorkerCheckpoint } from "../src/worker-result.js";
 
 const roots: string[] = [];
 
@@ -36,6 +37,8 @@ describe("persistent Modal worker lineage", () => {
     const first = lineage();
     await ensure(fixture, first);
     fs.writeFileSync(fixture.bundle, "validated bundle\n");
+    fs.writeFileSync(fixture.statusPath, "old status\n");
+    fs.writeFileSync(fixture.resultPath, "old result\n");
     const second = { ...first, attempt: 2, attempt_id: "attempt-2" };
 
     await ensure(fixture, second);
@@ -45,7 +48,35 @@ describe("persistent Modal worker lineage", () => {
       attempt_id: "attempt-2"
     });
     expect(fs.existsSync(fixture.bundle)).toBe(true);
+    expect(fs.existsSync(fixture.statusPath)).toBe(false);
+    expect(fs.existsSync(fixture.resultPath)).toBe(false);
     await expect(ensure(fixture, first)).rejects.toThrow(/newer than the requested attempt/u);
+  });
+
+  it("preserves the writer generation read before a same-generation attempt handoff", async () => {
+    const fixture = lineageFixture();
+    const first = lineage();
+    await ensure(fixture, first);
+    const writer = await WorkerResultWriter.create({
+      statusPath: fixture.statusPath,
+      resultPath: fixture.resultPath,
+      executionContext: () => ({ launch_generation: 1, attempt: 1, model_work_started: false })
+    });
+    await writer.writeTerminal("finished", emptyWorkerCheckpoint());
+    const previousGeneration = JSON.parse(fs.readFileSync(fixture.resultPath, "utf8")).generation as number;
+    const second = { ...first, attempt: 2, attempt_id: "attempt-2" };
+    const retryWriter = await WorkerResultWriter.create({
+      statusPath: fixture.statusPath,
+      resultPath: fixture.resultPath,
+      executionContext: () => ({ launch_generation: 1, attempt: 2, model_work_started: false })
+    });
+
+    await ensure(fixture, second);
+    await retryWriter.writePartial(emptyWorkerCheckpoint());
+
+    const status = JSON.parse(fs.readFileSync(fixture.statusPath, "utf8")) as { generation: number; attempt: number };
+    expect(status).toMatchObject({ generation: previousGeneration + 1, attempt: 2 });
+    expect(fs.existsSync(fixture.resultPath)).toBe(false);
   });
 
   it("allows a newer resume attempt to roll forward the worker image for the same workspace", async () => {
@@ -130,6 +161,8 @@ function lineageFixture(): {
   workspace: string;
   bundle: string;
   lineagePath: string;
+  statusPath: string;
+  resultPath: string;
 } {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-worker-lineage-"));
   roots.push(root);
@@ -137,7 +170,9 @@ function lineageFixture(): {
     root,
     workspace: path.join(root, "public-workspace"),
     bundle: path.join(root, "public-results.json"),
-    lineagePath: path.join(root, "lineage.json")
+    lineagePath: path.join(root, "lineage.json"),
+    statusPath: path.join(root, "status.json"),
+    resultPath: path.join(root, "result.json")
   };
 }
 
@@ -159,6 +194,7 @@ async function ensure(fixture: ReturnType<typeof lineageFixture>, value: ModalWo
     lineagePath: fixture.lineagePath,
     lineage: value,
     workspaceEvidencePaths: [fixture.workspace, fixture.bundle],
-    freshCleanupPaths: [fixture.workspace, fixture.bundle]
+    freshCleanupPaths: [fixture.workspace, fixture.bundle, fixture.statusPath, fixture.resultPath],
+    attemptCleanupPaths: [fixture.statusPath, fixture.resultPath]
   });
 }
