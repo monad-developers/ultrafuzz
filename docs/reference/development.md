@@ -33,6 +33,13 @@ The root CI script runs format check, lint, build, and release validation:
 pnpm -w run ci
 ```
 
+Pull requests run formatting, lint, and the workspace build while they are
+drafts. Marking a pull request ready for review adds benchmark-history and full
+release validation. Feature branches are validated only by the pull-request
+event, avoiding a duplicate push run; pushes to `main` run the full lane.
+Release validation uses three isolated CI lanes with a maximum of three jobs in
+parallel, then records their results in stable gate order in the JSON report.
+
 ## Package Checks
 
 Focused package iteration uses pnpm filters:

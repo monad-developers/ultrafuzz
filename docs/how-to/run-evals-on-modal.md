@@ -128,22 +128,21 @@ credential in memory immediately before scoring and never persists it.
 
 The checked-in GitHub workflow uses Actions only to build the candidate and as a
 control and collection plane; all benchmark and model compute runs on Modal.
-Every non-deletion push to a branch in this repository launches the paid smoke
-for the exact pushed commit, including pushes to branches whose pull requests
-are still drafts. Fork pull-request events do not run this workflow. Repository
-write access that is allowed to receive Actions secrets is therefore inside the
-benchmark credential and cost trust boundary; protect that access and enforce
-scoped provider credentials and hard provider/Modal budgets. A newer commit on
-the same branch cancels its older smoke workflow. Each run installs and builds
-the exact candidate commit before building its immutable Modal image.
+Every non-deletion push to `main` launches the paid smoke for the exact merged
+commit. Feature-branch and pull-request events, including drafts, do not run this
+workflow. Repository write access that can merge or push to `main` is therefore
+inside the benchmark credential and cost trust boundary; protect that access
+and enforce scoped provider credentials and hard provider/Modal budgets. A
+newer commit on `main` cancels its older smoke workflow. Each run installs and
+builds the exact candidate commit before building its immutable Modal image.
 
-Cancellation is latest-wins only within one branch. A separate recovery
+Cancellation is latest-wins on `main`. A separate recovery
 workflow uses tooling from the trusted default branch, treats the exact
 candidate checkout only as fingerprinted data, and semantically validates the
 incomplete attempt's immutable pre-compute plan before giving termination code
 Modal credentials. It recovers failed, timed-out, and cancelled generations.
-Runs on different branches and independent full dispatches may overlap, so
-provider and Modal budgets remain the hard aggregate cost boundary.
+Independent manual dispatches may overlap the automatic smoke, so provider and
+Modal budgets remain the hard aggregate cost boundary.
 
 GitHub attaches a `workflow_run` recovery check to the trusted default-branch
 tooling commit, not to the candidate tree it operates on. Recovery run titles,
@@ -180,15 +179,16 @@ graph. Repository variable `BENCHMARK_SMOKE_OPENAI_MODEL` can override the
 smoke model without changing its single OpenAI/Codex provider or its target and
 topology limits.
 
-A manual `workflow_dispatch` runs the full lane instead. It evaluates every
-checked-in EVMBench target with GPT-5.6 Luna at `high`, Claude Sonnet 5 at
-`high`, Kimi K3 at `max`, and DeepSeek V4 Pro at `max` by default. Dispatch
-inputs `openai_model`, `openai_reasoning`, `anthropic_model`,
+A manual `workflow_dispatch` selects the full lane by default and can explicitly
+select smoke for an ad hoc run. Full evaluates every checked-in EVMBench target
+with GPT-5.6 Luna at `high`, Claude Sonnet 5 at `high`, Kimi K3 at `max`, and
+DeepSeek V4 Pro at `max` by default. Dispatch inputs `openai_model`,
+`openai_reasoning`, `anthropic_model`,
 `anthropic_reasoning`, `kimi_model`, `kimi_reasoning`, `deepseek_model`, and
 `deepseek_reasoning` provide explicit overrides. The full lane retains the
 production strategy set, including invariant, differential, and dynamic
 strategies, with all three disable flags set to `false`. Push events can never
-select this lane.
+select the full lane.
 
 Both lanes use the standard Modal benchmark resources described above. Each
 smoke target row has a 15,000-second model-work watchdog: the smoke graph's four
@@ -239,11 +239,10 @@ and chart paths are excluded from the Modal push trigger, so the App commit
 cannot recursively start another benchmark run.
 
 Only a successful producer run whose candidate is still reachable from the
-repository's default `main` branch may mint the publisher token. Feature-branch
-smoke runs still execute and upload review artifacts, but their data is not
-published; the successful `main` run after merge is the publication source.
-Full-lane runs follow the same boundary by dispatching the Modal benchmark
-workflow on `main`. There is no free-form artifact replay entry point.
+repository's default `main` branch may mint the publisher token. The automatic
+`main` smoke after merge is the publication source. Full-lane runs follow the
+same boundary by dispatching the Modal benchmark workflow on `main`. There is
+no free-form artifact replay entry point.
 
 Configure the App client ID as the `EVAL_HISTORY_APP_CLIENT_ID` Actions
 variable and its private key as the `EVAL_HISTORY_APP_PRIVATE_KEY` Actions

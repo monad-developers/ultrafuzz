@@ -2,23 +2,75 @@ name: CI
 
 on:
   push:
+    branches:
+      - main
   pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+      - converted_to_draft
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  release-gates:
+  draft-and-build-gates:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          version: 11.1.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check formatting
+        run: pnpm -w format:check
+
+      - name: Lint
+        run: pnpm -w lint
+
+      - name: Build
+        run: pnpm -w build
+
+  release-validation:
+    needs: draft-and-build-gates
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        include:
+          - lane: package-gates
+            gates: docs,config,audit-profile-package,security,topology,prompts,artifacts,evals,modal
+          - lane: runtime
+            gates: runtime
+          - lane: cli-typecheck
+            gates: cli,workspace-typecheck
     env:
       ULTRAFUZZ_CODEX_REAL_DRY_RUN: "0"
       ULTRAFUZZ_RELEASE_DASHBOARD: "0"
       ULTRAFUZZ_RELEASE_REFERENCES: "0"
-    timeout-minutes: 30
 
     steps:
       - name: Check out repository
@@ -43,25 +95,73 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Check formatting
-        run: pnpm -w format:check
+      - name: Validate release lane
+        run: >-
+          pnpm -w validate:release --
+          --gates "${{ matrix.gates }}"
+          --report ".ultrafuzz/release-validation/${{ matrix.lane }}.json"
 
-      - name: Lint
-        run: pnpm -w lint
+      - name: Validate benchmark history charts
+        if: matrix.lane == 'cli-typecheck'
+        run: pnpm -w benchmark:check:prebuilt
 
-      - name: Build
-        run: pnpm -w build
+      - name: Upload release validation lane
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-validation-report-${{ matrix.lane }}
+          path: .ultrafuzz/release-validation/${{ matrix.lane }}.json
+          if-no-files-found: error
 
-      - name: Validate benchmark manifests and history charts
-        run: pnpm -w benchmark:check
+  release-gates:
+    needs:
+      - draft-and-build-gates
+      - release-validation
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
 
-      - name: Validate release
-        run: pnpm -w validate:release
+    steps:
+      - name: Require draft and build gates
+        if: needs.draft-and-build-gates.result != 'success'
+        run: exit 1
+
+      - name: Check out repository
+        if: github.event_name == 'push' || github.event.pull_request.draft == false
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Node.js
+        if: github.event_name == 'push' || github.event.pull_request.draft == false
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Download release validation lanes
+        if: github.event_name == 'push' || github.event.pull_request.draft == false
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: release-validation-report-*
+          path: .ultrafuzz/release-validation
+          merge-multiple: true
+
+      - name: Merge release validation report
+        if: github.event_name == 'push' || github.event.pull_request.draft == false
+        run: >-
+          node scripts/validate-release.mjs
+          --merge-report-dir .ultrafuzz/release-validation
+          --report .ultrafuzz/release-validation.report.json
+
+      - name: Require release validation lanes
+        if: >-
+          always() &&
+          (github.event_name == 'push' || github.event.pull_request.draft == false) &&
+          needs.release-validation.result != 'success'
+        run: exit 1
 
       - name: Upload release validation report
-        if: always()
+        if: always() && (github.event_name == 'push' || github.event.pull_request.draft == false)
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-validation-report
           path: .ultrafuzz/release-validation.report.json
-          if-no-files-found: ignore
+          if-no-files-found: error
