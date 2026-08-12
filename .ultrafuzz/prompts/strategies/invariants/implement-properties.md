@@ -80,9 +80,25 @@ cannot be lost during priority filtering.
      repair the handler and rerun its bounded smoke when any entry is missing.
    - Prefer Recon/Chimera `Properties.sol` assertions and helper methods that
      observe real state reached by handlers.
-   - Every assertion observes state after a directly invoked protocol action;
-     preserve any target revert, panic, or out-of-gas failure as Recon evidence
-     and connect it to the selected property when the catalog requires it.
+   - Classify semantic coverage for every selected property as `exact`,
+     `partial`, `weaker`, or `deferred`. Only `exact` semantics may use status
+     `implemented`; partial and weaker analogues remain non-implemented with an
+     actionable blocker instead of receiving credit for source presence.
+   - Every implemented property names its executable assertion/helper symbols
+     and the public backend entrypoints that invoke them. A helper that is not
+     reachable from an admitted public entrypoint is not an executable oracle.
+   - A plain protocol revert from a direct target call is discarded by Recon
+     assertion mode and is not a liveness oracle. For a liveness property, use
+     a narrowly property-scoped selector classifier: explicitly allow only the
+     documented revert selectors, and convert every unexpected selector,
+     empty revert, panic, and failed call into a named assertion failure that
+     Recon detects. Do not use a blanket catch that treats every revert alike.
+   - Add both a positive regression that demonstrates the accepted/success
+     path and a negative regression that makes an unexpected revert selector
+     trip the assertion. Record both paths as executable-oracle evidence.
+   - Record prerequisite-state and protocol-call reachability for each exact
+     property, with evidence paths. If either is unreachable, record an
+     explicit blocker; a vacuous assertion is not implemented.
    - Put new Foundry-compatible invariant test or reproducer files under the
      repository's test root, for example
      `test/foundry/stateful-invariant-implement-properties/` or
@@ -146,8 +162,21 @@ repository test root when it uses `test/` instead.
     {
       "property_id": "property-1",
       "status": "implemented",
+      "semantic_coverage": "exact",
       "implementation_paths": ["tests/recon/Properties.sol"],
-      "test_paths": ["tests/foundry/stateful-invariant-implement-properties/Property1.t.sol"]
+      "test_paths": ["tests/foundry/stateful-invariant-implement-properties/Property1.t.sol"],
+      "executable_oracle": {
+        "kind": "state-assertion",
+        "symbols": ["Properties.property_example"],
+        "backend_entrypoints": ["property_example()"],
+        "positive_test_paths": ["tests/foundry/stateful-invariant-implement-properties/Property1.t.sol"],
+        "negative_test_paths": ["tests/foundry/stateful-invariant-implement-properties/Property1.t.sol"]
+      },
+      "reachability": {
+        "prerequisite_states": ["a funded actor and initialized market are reachable"],
+        "protocol_calls": ["TargetFunctions.market_action"],
+        "evidence_paths": ["tests/foundry/stateful-invariant-implement-properties/Property1.t.sol"]
+      }
     }
   ]
 }
@@ -180,6 +209,14 @@ empty array. A
 references fail artifact validation. Preserve generated and changed test paths
 in `test_paths` and invariant/helper implementation paths in
 `implementation_paths`.
+
+Every record must include `semantic_coverage` with one of `exact`, `partial`,
+`weaker`, or `deferred`. Every `implemented` record must use `exact` and include
+the complete `executable_oracle` and `reachability` objects shown above. For a
+selector-aware liveness oracle, set `kind` to `selector-liveness`, add
+`allowed_error_selectors` (an explicit array, empty when no revert is allowed),
+and add `unexpected_error_assertion` naming the assertion symbol that turns an
+unexpected selector into a Recon-detectable failure.
 
 Write a generated-test manifest to:
 

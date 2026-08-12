@@ -40,6 +40,17 @@ Use this configured invariant testing fuzzer timeout:
      Preserve the existing priority-threshold selection; do not add a property
      limit, delete a property, weaken an assertion, or maintain a separate
      backend-specific property suite.
+   - Derive the exact intended public property entrypoints from each
+     implemented record's `executable_oracle.backend_entrypoints`. Compare that
+     set with the compiled target ABI and Recon's admitted test list. Record
+     both the intended and admitted sets; source presence and ABI presence do
+     not prove backend admission.
+   - If any intended property entrypoint is absent from Recon's admitted set,
+     name every omission and report the campaign as `partial` (or `blocked` if
+     no usable results exist), never `complete`.
+   - If any selected property is partial, weaker, deferred, pending, or blocked
+     rather than exactly implemented, report semantic coverage as incomplete
+     and do not report the campaign as `complete`.
    - Validate the target contract and the repository's target-specific
      Recon/Echidna-format configuration before starting the backend. Backend
      command adaptation may change only repository-required details such as
@@ -286,6 +297,8 @@ Use this exact top-level shape for the backend record:
   "termination_reason": "configured-timeout",
   "campaign_outcome": "complete",
   "usable_results": true,
+  "intended_property_entrypoints": ["property_example()"],
+  "admitted_property_entrypoints": ["property_example()"],
   "failures": [
     {
       "id": "failure-1",
@@ -310,6 +323,13 @@ counterexample: a fuzzer reports the same violation many times, and the backend
 record already preserves every one of them. Property IDs are optional only for
 failures not caused by an implemented catalog property. References to an
 unknown or non-implemented canonical property fail artifact validation.
+
+The `intended_property_entrypoints` and `admitted_property_entrypoints` arrays
+are required for current campaigns. Use normalized ABI signatures consistently
+in both arrays. Include only executable property entrypoints in the intended
+set; the admitted set may additionally contain handlers or backend-generic
+tests. Never infer admission from the compiled ABI alone: preserve Recon's
+actual discovery/admission output as evidence.
 
 Write generated-test and reproducer records to:
 

@@ -65,8 +65,9 @@ Apply these Recon/Chimera rules:
 - Invoke each protocol entrypoint as a direct call. Construct its arguments
   from documented valid preconditions so every reached call represents a
   realistic user, keeper, liquidator, or protocol-role action.
-- Every reached target revert, panic, or out-of-gas failure propagates to Recon;
-  that observable failure is the signal the campaign records. When a
+- Every reached target revert, panic, or out-of-gas failure remains observable
+  in raw execution evidence, but a plain target revert is discarded by Recon
+  assertion mode and must not be credited as a liveness failure. When a
   documented precondition cannot be met, return before invoking the target and
   record the guard and its source in the handler inventory.
 - Use a typed high-level function call for every protocol action, check each
@@ -79,6 +80,11 @@ Apply these Recon/Chimera rules:
   failures observable. When a documented protocol boundary has no typed ABI,
   a low-level `.call` or `.delegatecall` is valid only with its source-backed
   selector, checked success and return data, and explicit failure propagation.
+- When a selected liveness property must distinguish allowed from unexpected
+  reverts, use a narrowly property-scoped wrapper that checks the exact allowed
+  selector set and converts every unexpected selector or empty revert into a
+  named assertion failure. Cover that classifier with a positive allowed/success
+  regression and a negative unexpected-selector regression.
 - Use a narrowly documented non-protocol dependency boundary only when the
   dependency contract explicitly defines an expected failure result; preserve
   the target protocol call and its failure semantics in all other cases.

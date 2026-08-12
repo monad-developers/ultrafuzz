@@ -102,12 +102,32 @@ export interface PropertiesArtifact {
 }
 
 export type PropertyImplementationStatus = "implemented" | "pending" | "deferred" | "blocked";
+export type PropertySemanticCoverage = "exact" | "partial" | "weaker" | "deferred";
+
+export interface PropertyExecutableOracle extends Record<string, unknown> {
+  kind: "state-assertion" | "selector-liveness";
+  symbols: string[];
+  backend_entrypoints: string[];
+  positive_test_paths: string[];
+  negative_test_paths: string[];
+  allowed_error_selectors?: string[];
+  unexpected_error_assertion?: string;
+}
+
+export interface PropertyReachabilityEvidence extends Record<string, unknown> {
+  prerequisite_states: string[];
+  protocol_calls: string[];
+  evidence_paths: string[];
+}
 
 export interface ImplementedPropertyRecord extends Record<string, unknown> {
   property_id: string;
   status: PropertyImplementationStatus;
   implementation_paths: string[];
   test_paths: string[];
+  semantic_coverage?: PropertySemanticCoverage;
+  executable_oracle?: PropertyExecutableOracle;
+  reachability?: PropertyReachabilityEvidence;
   /** Benchmark/reference expectation IDs carried by this implementation record. */
   reference_expectations?: string[];
   /** A typed, actionable explanation for a selected property that is not implemented. */
@@ -170,7 +190,11 @@ export interface PropertyCampaignFailure extends Record<string, unknown> {
 export interface PropertyCampaignArtifact {
   schema_version: typeof PROPERTY_CAMPAIGN_SCHEMA_VERSION;
   fuzzer_backend?: string;
+  campaign_outcome?: string;
+  usable_results?: boolean;
   failures: PropertyCampaignFailure[];
+  intended_property_entrypoints?: string[];
+  admitted_property_entrypoints?: string[];
 }
 
 export type FindingFuzzerBackendProvenance =
@@ -391,6 +415,25 @@ const implementedPropertySchema = z.looseObject({
   status: z.enum(["implemented", "pending", "deferred", "blocked"]),
   implementation_paths: nonEmptyStringArray,
   test_paths: nonEmptyStringArray,
+  semantic_coverage: z.enum(["exact", "partial", "weaker", "deferred"]).optional(),
+  executable_oracle: z
+    .strictObject({
+      kind: z.enum(["state-assertion", "selector-liveness"]),
+      symbols: nonEmptyStringArray,
+      backend_entrypoints: nonEmptyStringArray,
+      positive_test_paths: nonEmptyStringArray,
+      negative_test_paths: nonEmptyStringArray,
+      allowed_error_selectors: z.array(nonEmptyString).optional(),
+      unexpected_error_assertion: nonEmptyString.optional()
+    })
+    .optional(),
+  reachability: z
+    .strictObject({
+      prerequisite_states: nonEmptyStringArray,
+      protocol_calls: nonEmptyStringArray,
+      evidence_paths: nonEmptyStringArray
+    })
+    .optional(),
   reference_expectations: optionalReferenceExpectationIds,
   blocker: z
     .strictObject({
@@ -476,7 +519,11 @@ export const propertyCampaignSchema = z
   .object({
     schema_version: z.literal(PROPERTY_CAMPAIGN_SCHEMA_VERSION),
     fuzzer_backend: nonEmptyString.optional(),
-    failures: z.array(propertyCampaignFailureSchema)
+    campaign_outcome: nonEmptyString.optional(),
+    usable_results: z.boolean().optional(),
+    failures: z.array(propertyCampaignFailureSchema),
+    intended_property_entrypoints: nonEmptyStringArray.optional(),
+    admitted_property_entrypoints: nonEmptyStringArray.optional()
   })
   .superRefine((artifact, context) => {
     const failureIds = new Set<string>();
@@ -631,7 +678,7 @@ export function validatePropertiesSchema(value: unknown, path = "$"): SchemaVali
 export function validateImplementedPropertiesSchema(
   value: unknown,
   path = "$",
-  options: { requireSelection?: boolean } = {}
+  options: { requireSelection?: boolean; requireExecutableEvidence?: boolean } = {}
 ): SchemaValidationResult<ImplementedPropertiesArtifact> {
   const result = validateWithZod(implementedPropertiesSchema as z.ZodType<ImplementedPropertiesArtifact>, value, {
     path,
@@ -648,6 +695,64 @@ export function validateImplementedPropertiesSchema(
         }
       ]
     };
+  }
+  if (options.requireExecutableEvidence && result.ok && result.value !== undefined) {
+    const issues: SchemaValidationIssue[] = [];
+    for (const [index, property] of result.value.properties.entries()) {
+      const propertyPath = `${path}#$.properties[${index}]`;
+      if (property.semantic_coverage === undefined) {
+        issues.push({
+          code: "PROPERTY_SEMANTIC_COVERAGE_REQUIRED",
+          message: "Current implementation records must classify semantic coverage as exact, partial, weaker, or deferred",
+          path: `${propertyPath}.semantic_coverage`
+        });
+      }
+      if (property.status !== "implemented") continue;
+      if (property.semantic_coverage !== "exact") {
+        issues.push({
+          code: "PROPERTY_IMPLEMENTATION_NOT_EXACT",
+          message: "A property may be recorded as implemented only when its executable semantics are exact",
+          path: `${propertyPath}.semantic_coverage`
+        });
+      }
+      const oracle = property.executable_oracle;
+      if (
+        oracle === undefined ||
+        oracle.symbols.length === 0 ||
+        oracle.backend_entrypoints.length === 0 ||
+        oracle.positive_test_paths.length === 0 ||
+        oracle.negative_test_paths.length === 0
+      ) {
+        issues.push({
+          code: "PROPERTY_EXECUTABLE_ORACLE_REQUIRED",
+          message: "An implemented property must identify its oracle symbols, backend entrypoints, and positive and negative regression paths",
+          path: `${propertyPath}.executable_oracle`
+        });
+      } else if (
+        oracle.kind === "selector-liveness" &&
+        (oracle.allowed_error_selectors === undefined || oracle.unexpected_error_assertion === undefined)
+      ) {
+        issues.push({
+          code: "PROPERTY_LIVENESS_ORACLE_INVALID",
+          message: "A selector-liveness oracle must explicitly list allowed error selectors and name the assertion used for unexpected selectors",
+          path: `${propertyPath}.executable_oracle`
+        });
+      }
+      const reachability = property.reachability;
+      if (
+        reachability === undefined ||
+        reachability.prerequisite_states.length === 0 ||
+        reachability.protocol_calls.length === 0 ||
+        reachability.evidence_paths.length === 0
+      ) {
+        issues.push({
+          code: "PROPERTY_REACHABILITY_EVIDENCE_REQUIRED",
+          message: "An implemented property must record prerequisite-state, protocol-call, and evidence-path reachability",
+          path: `${propertyPath}.reachability`
+        });
+      }
+    }
+    if (issues.length > 0) return { ok: false, issues, value: result.value };
   }
   return result;
 }

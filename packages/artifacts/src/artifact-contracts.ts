@@ -20,6 +20,7 @@ export const ARTIFACT_CONTRACT_IDS = [
   "ultrafuzz/generated-tests@1",
   "ultrafuzz/implemented-properties@1",
   "ultrafuzz/implemented-properties@2",
+  "ultrafuzz/implemented-properties@3",
   "ultrafuzz/invariant-campaign-plan@1",
   "ultrafuzz/invariant-ledger@1",
   "ultrafuzz/json-array@1",
@@ -222,6 +223,14 @@ const definitions = defineContracts([
     format: "json",
     description:
       "Current invariant implementation records keyed by canonical property_id. The artifact must declare the exact inclusive priority selection and a typed blocker for every selected property that is not implemented.",
+    validEmptyExample:
+      '{"schema_version":"ultrafuzz.implemented-properties.v1","selection":{"priority_threshold":"high","priorities":["high"],"property_ids":[]},"properties":[]}'
+  },
+  {
+    id: "ultrafuzz/implemented-properties@3",
+    format: "json",
+    description:
+      "Current executable property records. Every implemented property has exact semantic coverage, structured oracle and backend entrypoints, positive and negative regressions, and prerequisite-state/protocol-call reachability evidence.",
     validEmptyExample:
       '{"schema_version":"ultrafuzz.implemented-properties.v1","selection":{"priority_threshold":"high","priorities":["high"],"property_ids":[]},"properties":[]}'
   },
@@ -446,9 +455,14 @@ export function validateArtifactContract(
       ...(result.value === undefined ? {} : { value: result.value })
     };
   }
-  if (contract === "ultrafuzz/implemented-properties@1" || contract === "ultrafuzz/implemented-properties@2") {
+  if (
+    contract === "ultrafuzz/implemented-properties@1" ||
+    contract === "ultrafuzz/implemented-properties@2" ||
+    contract === "ultrafuzz/implemented-properties@3"
+  ) {
     const result = validateImplementedPropertiesSchema(parsed, artifactPath, {
-      requireSelection: contract === "ultrafuzz/implemented-properties@2"
+      requireSelection: contract !== "ultrafuzz/implemented-properties@1",
+      requireExecutableEvidence: contract === "ultrafuzz/implemented-properties@3"
     });
     return {
       ok: result.ok,

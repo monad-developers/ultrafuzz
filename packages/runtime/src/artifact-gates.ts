@@ -2318,7 +2318,9 @@ function verifyPropertyProvenanceArtifacts(
         layout,
         node.outputs.some(
           (output) =>
-            output.path === "implemented-properties.json" && output.contract === "ultrafuzz/implemented-properties@2"
+            output.path === "implemented-properties.json" &&
+            (output.contract === "ultrafuzz/implemented-properties@2" ||
+              output.contract === "ultrafuzz/implemented-properties@3")
         )
       )
     ];
@@ -3001,9 +3003,11 @@ function verifyCampaignPropertyReferences(
     const campaign = validatePropertyCampaignSchema(readJsonFile(campaignPath), campaignPath);
     return campaign.ok && campaign.value !== undefined ? [{ path: campaignPath, value: campaign.value }] : [];
   });
+  const implementation = readImplementedProperties(layout);
+  const admissionDiagnostics = campaignPropertyAdmissionDiagnostics(layout, campaigns, implementation.value);
   const findings = validateFindingsSchema(readJsonFile(findingsPath), findingsPath);
   if (!findings.ok || findings.value === undefined) {
-    return [];
+    return admissionDiagnostics;
   }
   const validatedFindings = findings.value;
   const campaignValues = campaigns.map((campaign) => campaign.value);
@@ -3026,9 +3030,14 @@ function verifyCampaignPropertyReferences(
           )
         )
       : [];
-  const implementation = readImplementedProperties(layout);
   if (implementation.diagnostics.length > 0 || implementation.value === undefined) {
-    return [...summaryDiagnostics, ...backendDiagnostics, ...partitionDiagnostics, ...implementation.diagnostics];
+    return [
+      ...admissionDiagnostics,
+      ...summaryDiagnostics,
+      ...backendDiagnostics,
+      ...partitionDiagnostics,
+      ...implementation.diagnostics
+    ];
   }
   const candidateFindingIds = new Set(
     campaigns.flatMap((campaign) => campaign.value.failures.map((failure) => failure.id))
@@ -3047,6 +3056,7 @@ function verifyCampaignPropertyReferences(
   references.push(...findingPropertyReferences(validatedFindings, findingsPath));
 
   const diagnostics = [
+    ...admissionDiagnostics,
     ...summaryDiagnostics,
     ...backendDiagnostics,
     ...partitionDiagnostics,
@@ -3089,6 +3099,80 @@ function verifyCampaignPropertyReferences(
           path: reference.path
         });
       }
+    }
+  }
+  return diagnostics;
+}
+
+function campaignPropertyAdmissionDiagnostics(
+  layout: RunLayout,
+  campaigns: readonly { path: string; value: PropertyCampaignArtifact }[],
+  implementation: ImplementedPropertiesArtifact | undefined
+): RuntimeDiagnostic[] {
+  const contracts = declaredLogicalArtifactContracts(
+    layout,
+    "stateful-invariant-implement-properties",
+    "implemented-properties.json"
+  );
+  if (!contracts.has("ultrafuzz/implemented-properties@3") || implementation === undefined) return [];
+
+  const expectedEntrypoints = [
+    ...new Set(
+      implementation.properties.flatMap((record) =>
+        record.status === "implemented" ? (record.executable_oracle?.backend_entrypoints ?? []) : []
+      )
+    )
+  ].sort();
+  const incompleteProperties = implementation.properties
+    .filter((record) => record.status !== "implemented")
+    .map((record) => record.property_id);
+  const diagnostics: RuntimeDiagnostic[] = [];
+  for (const campaign of campaigns) {
+    const intended = campaign.value.intended_property_entrypoints;
+    const admitted = campaign.value.admitted_property_entrypoints;
+    if (intended === undefined || admitted === undefined) {
+      diagnostics.push({
+        code: "CAMPAIGN_PROPERTY_ADMISSION_EVIDENCE_MISSING",
+        message: "Current campaigns must record intended and backend-admitted property entrypoints",
+        severity: "error",
+        source: "property-provenance",
+        path: campaign.path
+      });
+      continue;
+    }
+    const sortedIntended = [...new Set(intended)].sort();
+    const intendedMatches =
+      sortedIntended.length === expectedEntrypoints.length &&
+      sortedIntended.every((entrypoint, index) => entrypoint === expectedEntrypoints[index]);
+    if (!intendedMatches) {
+      diagnostics.push({
+        code: "CAMPAIGN_PROPERTY_INTENT_MISMATCH",
+        message: `Campaign intended property entrypoints must exactly match implemented executable oracles (expected: ${JSON.stringify(expectedEntrypoints)}, actual: ${JSON.stringify(sortedIntended)})`,
+        severity: "error",
+        source: "property-provenance",
+        path: `${campaign.path}#$.intended_property_entrypoints`
+      });
+    }
+    const admittedSet = new Set(admitted);
+    const omitted = expectedEntrypoints.filter((entrypoint) => !admittedSet.has(entrypoint));
+    const outcome = campaign.value.campaign_outcome;
+    if (omitted.length > 0) {
+      diagnostics.push({
+        code: "CAMPAIGN_PROPERTY_ENTRYPOINT_OMITTED",
+        message: `Backend omitted intended property entrypoints: ${JSON.stringify(omitted)}`,
+        severity: outcome === "complete" ? "error" : "warning",
+        source: "property-provenance",
+        path: `${campaign.path}#$.admitted_property_entrypoints`
+      });
+    }
+    if (incompleteProperties.length > 0) {
+      diagnostics.push({
+        code: "CAMPAIGN_PROPERTY_SEMANTICS_INCOMPLETE",
+        message: `Selected properties lack exact executable implementations: ${JSON.stringify(incompleteProperties)}`,
+        severity: outcome === "complete" ? "error" : "warning",
+        source: "property-provenance",
+        path: `${campaign.path}#$.campaign_outcome`
+      });
     }
   }
   return diagnostics;
@@ -3557,7 +3641,11 @@ function verifyFinalReportImplementationCoverage(
   if (declaredContract === "ultrafuzz/implemented-properties@1") {
     return [];
   }
-  if (declaredContract !== undefined && declaredContract !== "ultrafuzz/implemented-properties@2") {
+  if (
+    declaredContract !== undefined &&
+    declaredContract !== "ultrafuzz/implemented-properties@2" &&
+    declaredContract !== "ultrafuzz/implemented-properties@3"
+  ) {
     return [
       {
         code: "PROPERTY_IMPLEMENTATION_HANDOFF_CONTRACT_INVALID",
@@ -3568,7 +3656,9 @@ function verifyFinalReportImplementationCoverage(
       }
     ];
   }
-  const currentHandoffDeclared = declaredContract === "ultrafuzz/implemented-properties@2";
+  const currentHandoffDeclared =
+    declaredContract === "ultrafuzz/implemented-properties@2" ||
+    declaredContract === "ultrafuzz/implemented-properties@3";
   const implementationPath = findLogicalNodeArtifact(
     layout,
     "stateful-invariant-implement-properties",

@@ -276,7 +276,7 @@ v1 contract.
 
 `implemented-properties.json` uses schema version
 `ultrafuzz.implemented-properties.v1`; current invariant nodes publish it
-through the `ultrafuzz/implemented-properties@2` contract. Every record has a canonical
+through the `ultrafuzz/implemented-properties@3` contract. Every record has a canonical
 `property_id`, a status (`implemented`, `pending`, `deferred`, or `blocked`),
 and `implementation_paths` and `test_paths` arrays. The invariant campaign's
 `recon-fuzzer-results.json` uses `ultrafuzz.property-campaign.v1`; failure
