@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { MessageChannel, receiveMessageOnPort, Worker, type MessagePort } from "node:worker_threads";
 
 import {
@@ -482,49 +482,139 @@ function assertUnambiguousRegistry(registry: readonly SchemaRegistryEntry[]): vo
   }
 }
 
+const SINGLE_SCHEMA_KEYWORDS = new Set([
+  "additionalItems",
+  "additionalProperties",
+  "contains",
+  "contentSchema",
+  "else",
+  "if",
+  "items",
+  "not",
+  "propertyNames",
+  "then",
+  "unevaluatedItems",
+  "unevaluatedProperties"
+]);
+const SCHEMA_ARRAY_KEYWORDS = new Set(["allOf", "anyOf", "oneOf", "prefixItems"]);
+const SCHEMA_MAP_KEYWORDS = new Set(["$defs", "definitions", "dependentSchemas", "patternProperties", "properties"]);
+const REFERENCE_KEYWORDS = new Set(["$dynamicRef", "$recursiveRef", "$ref"]);
+
 function rewriteAndLoadReferences(value: unknown, referringPath: string, load: (filePath: string) => string): void {
-  if (Array.isArray(value)) {
-    for (const entry of value) rewriteAndLoadReferences(entry, referringPath, load);
-    return;
-  }
+  visitSchemaReferences(value, pathToFileURL(referringPath).href, load);
+}
+
+function visitSchemaReferences(value: unknown, inheritedBase: string, load: (filePath: string) => string): void {
   if (!isRecord(value)) return;
+  const base = scopedSchemaBase(value.$id, inheritedBase);
+
+  for (const key of REFERENCE_KEYWORDS) {
+    const entry = value[key];
+    if (typeof entry !== "string") continue;
+    value[key] = rewriteLocalSchemaReference(entry, base, load);
+  }
+
   for (const [key, entry] of Object.entries(value)) {
-    if ((key !== "$ref" && key !== "$dynamicRef" && key !== "$recursiveRef") || typeof entry !== "string") {
-      rewriteAndLoadReferences(entry, referringPath, load);
+    if (SINGLE_SCHEMA_KEYWORDS.has(key)) {
+      if (Array.isArray(entry) && key === "items") {
+        for (const item of entry) visitSchemaReferences(item, base, load);
+      } else {
+        visitSchemaReferences(entry, base, load);
+      }
       continue;
     }
-    if (entry.length > MAX_SCHEMA_REFERENCE_LENGTH) {
-      throw new Error(`schema reference exceeds the ${MAX_SCHEMA_REFERENCE_LENGTH}-character limit`);
+    if (SCHEMA_ARRAY_KEYWORDS.has(key) && Array.isArray(entry)) {
+      for (const item of entry) visitSchemaReferences(item, base, load);
+      continue;
     }
-    if (entry.startsWith("#") || /^urn:/iu.test(entry)) continue;
-    const hashIndex = entry.indexOf("#");
-    const relative = hashIndex === -1 ? entry : entry.slice(0, hashIndex);
-    const fragment = hashIndex === -1 ? "" : entry.slice(hashIndex);
-    if (relative.length === 0) continue;
-    if (relative.includes("?")) throw new Error(`schema reference queries are forbidden: ${entry}`);
-    let decoded: string;
-    try {
-      decoded = decodeURIComponent(relative);
-    } catch {
-      throw new Error(`schema reference contains invalid percent-encoding: ${entry}`);
+    if (SCHEMA_MAP_KEYWORDS.has(key) && isRecord(entry)) {
+      for (const item of Object.values(entry)) visitSchemaReferences(item, base, load);
+      continue;
     }
-    const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):/u.exec(decoded)?.[1]?.toLowerCase();
-    if (scheme === "http" || scheme === "https") {
-      throw new Error(`HTTP(S) schema references are forbidden: ${entry}`);
+    // Draft 2019-09 and earlier permitted schema-valued entries in
+    // `dependencies`; array-valued property dependencies are instance data.
+    if (key === "dependencies" && isRecord(entry)) {
+      for (const item of Object.values(entry)) {
+        if (!Array.isArray(item)) visitSchemaReferences(item, base, load);
+      }
     }
-    if (
-      scheme === "file" ||
-      path.isAbsolute(decoded) ||
-      path.win32.isAbsolute(decoded) ||
-      /^[A-Za-z]:/u.test(decoded) ||
-      decoded.includes("\\")
-    ) {
-      throw new Error(`absolute file schema references are forbidden: ${entry}`);
-    }
-    if (scheme !== undefined) throw new Error(`non-local schema reference scheme is forbidden: ${entry}`);
-    const loadedPath = load(path.resolve(path.dirname(referringPath), decoded));
-    value[key] = `${pathToFileURL(loadedPath).href}${fragment}`;
   }
+}
+
+function scopedSchemaBase(identifier: unknown, inheritedBase: string): string {
+  if (typeof identifier !== "string" || identifier.length === 0) return inheritedBase;
+  if (identifier.length > MAX_SCHEMA_ID_LENGTH) {
+    throw new Error(`schema $id exceeds the ${MAX_SCHEMA_ID_LENGTH}-character limit`);
+  }
+  if (identifier.includes("#")) throw new Error("schema $id must not contain a fragment");
+  if (identifier.includes("?")) throw new Error(`schema $id queries are forbidden: ${identifier}`);
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(identifier);
+  } catch {
+    throw new Error(`schema $id contains invalid percent-encoding: ${identifier}`);
+  }
+  if (decoded.includes("\\")) throw new Error(`schema $id contains a non-portable path separator: ${identifier}`);
+  const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):/u.exec(decoded)?.[1]?.toLowerCase();
+  // Non-hierarchical identifiers name the schema resource but cannot provide
+  // a filesystem location for a relative external reference. Preserve the
+  // containing file as the local base, matching the existing trusted-bundle
+  // behavior for urn: schema IDs.
+  if (scheme !== undefined && scheme !== "file" && scheme !== "http" && scheme !== "https") {
+    return inheritedBase;
+  }
+  try {
+    return new URL(identifier, inheritedBase).href;
+  } catch {
+    throw new Error(`schema $id is not a valid URI reference: ${identifier}`);
+  }
+}
+
+function rewriteLocalSchemaReference(entry: string, base: string, load: (filePath: string) => string): string {
+  if (entry.length > MAX_SCHEMA_REFERENCE_LENGTH) {
+    throw new Error(`schema reference exceeds the ${MAX_SCHEMA_REFERENCE_LENGTH}-character limit`);
+  }
+  if (entry.startsWith("#") || /^urn:/iu.test(entry)) return entry;
+  const hashIndex = entry.indexOf("#");
+  const relative = hashIndex === -1 ? entry : entry.slice(0, hashIndex);
+  const fragment = hashIndex === -1 ? "" : entry.slice(hashIndex);
+  if (relative.length === 0) return entry;
+  if (relative.includes("?")) throw new Error(`schema reference queries are forbidden: ${entry}`);
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(relative);
+  } catch {
+    throw new Error(`schema reference contains invalid percent-encoding: ${entry}`);
+  }
+  const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):/u.exec(decoded)?.[1]?.toLowerCase();
+  if (scheme === "http" || scheme === "https") {
+    throw new Error(`HTTP(S) schema references are forbidden: ${entry}`);
+  }
+  if (
+    scheme === "file" ||
+    path.isAbsolute(decoded) ||
+    path.win32.isAbsolute(decoded) ||
+    /^[A-Za-z]:/u.test(decoded) ||
+    decoded.includes("\\")
+  ) {
+    throw new Error(`absolute file schema references are forbidden: ${entry}`);
+  }
+  if (scheme !== undefined) throw new Error(`non-local schema reference scheme is forbidden: ${entry}`);
+
+  let resolved: URL;
+  try {
+    resolved = new URL(decoded, base);
+  } catch {
+    throw new Error(`schema reference is not a valid URI reference: ${entry}`);
+  }
+  if (resolved.protocol === "http:" || resolved.protocol === "https:") {
+    throw new Error(`HTTP(S) schema references are forbidden: ${entry}`);
+  }
+  if (resolved.protocol !== "file:") {
+    throw new Error(`non-local schema reference scheme is forbidden: ${entry}`);
+  }
+  const loadedPath = load(fileURLToPath(resolved));
+  return `${pathToFileURL(loadedPath).href}${fragment}`;
 }
 
 function enforcePatternLimits(value: unknown): number {

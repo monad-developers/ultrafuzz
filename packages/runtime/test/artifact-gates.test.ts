@@ -2370,7 +2370,7 @@ test("dynamic strategy sibling artifacts reconcile only through exact declared o
   );
 });
 
-test("final report gates preserve severity records and ledger dispositions without re-identifying findings", () => {
+test("final report gates preserve severity records and ledger dispositions under canonical presentation IDs", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-report-stage-preservation" });
   const severityPaths = {
     findings: "classified/current-findings.json",
@@ -2440,6 +2440,8 @@ test("final report gates preserve severity records and ledger dispositions witho
 
   const reportIssue = {
     ...classified,
+    id: "M-01",
+    title: "[M-01] - Property failure",
     description: "The public path can lock user assets.",
     proof_of_concept: {
       scenario: ["Call the public path in the affected state."],
@@ -2466,7 +2468,7 @@ test("final report gates preserve severity records and ledger dispositions witho
   fs.writeFileSync(
     reportPath,
     JSON.stringify(
-      currentReport(layout.runId, { issues: [{ ...reportIssue, id: "M-01", title: "Retitled report row" }] })
+      currentReport(layout.runId, { issues: [{ ...reportIssue, id: "finding-report", title: "Property failure" }] })
     )
   );
   const rewritten = verifyRequiredArtifactsForAttempt(
@@ -7248,29 +7250,43 @@ test("final report gate joins the default recon-only campaign backend", () => {
   // Final report IDs are presentation identities. A renamed outcome may bind
   // its campaign identity only through the canonical lifecycle source entry
   // and the explicit source_finding_id on property provenance.
-  writeArtifact(
-    layout,
-    node.id,
-    "report.json",
-    JSON.stringify(
-      currentReport(layout.runId, {
-        non_production_outcomes: [currentNonProductionOutcome("NP-01", "finding-property")],
-        property_provenance: [
-          {
-            finding_id: "NP-01",
-            source_finding_id: "finding-property",
-            title: "Property failure",
-            property_ids: ["property-1"],
-            sources: [{ source_node_id: "property-specification-certora", source_property_id: "certora-1" }],
-            implementation_paths: ["test/recon/Properties.sol"],
-            test_paths: ["test/foundry/Property1.t.sol"],
-            fuzzer_backend: "recon"
-          }
-        ],
-        property_implementation_coverage: currentImplementedCoverage(["property-1"])
-      })
-    )
+  const renamedReport = (sourceFindingId?: string) =>
+    currentReport(layout.runId, {
+      non_production_outcomes: [currentNonProductionOutcome("NP-01", "finding-property")],
+      property_provenance: [
+        {
+          finding_id: "NP-01",
+          ...(sourceFindingId === undefined ? {} : { source_finding_id: sourceFindingId }),
+          title: "Property failure",
+          property_ids: ["property-1"],
+          sources: [{ source_node_id: "property-specification-certora", source_property_id: "certora-1" }],
+          implementation_paths: ["test/recon/Properties.sol"],
+          test_paths: ["test/foundry/Property1.t.sol"],
+          fuzzer_backend: "recon"
+        }
+      ],
+      property_implementation_coverage: currentImplementedCoverage(["property-1"])
+    });
+
+  writeArtifact(layout, node.id, "report.json", JSON.stringify(renamedReport()));
+  const missingSourceId = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(missingSourceId.ok, false, JSON.stringify(missingSourceId.diagnostics));
+  assert.ok(
+    missingSourceId.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REPORT_SOURCE_FINDING_ID_REQUIRED"),
+    JSON.stringify(missingSourceId.diagnostics)
   );
+
+  writeArtifact(layout, node.id, "report.json", JSON.stringify(renamedReport("unrelated-finding")));
+  const mismatchedSourceId = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(mismatchedSourceId.ok, false, JSON.stringify(mismatchedSourceId.diagnostics));
+  assert.ok(
+    mismatchedSourceId.diagnostics.some(
+      (diagnostic) => diagnostic.code === "PROPERTY_REPORT_SOURCE_FINDING_ID_MISMATCH"
+    ),
+    JSON.stringify(mismatchedSourceId.diagnostics)
+  );
+
+  writeArtifact(layout, node.id, "report.json", JSON.stringify(renamedReport("finding-property")));
   const renamed = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(renamed.ok, true, JSON.stringify(renamed.diagnostics));
 

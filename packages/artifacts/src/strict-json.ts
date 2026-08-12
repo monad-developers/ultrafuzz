@@ -227,6 +227,9 @@ class Parser {
     }
     const value = Number(matched);
     if (!Number.isFinite(value)) this.syntax("JSON number is outside the supported finite range");
+    if (!sameDecimalValue(matched, String(value)) || !sameIntegerValue(matched, value)) {
+      this.syntax("JSON number cannot be represented without changing its value");
+    }
     return value;
   }
 
@@ -251,4 +254,67 @@ function isWhitespace(char: string): boolean {
 
 function escapePointer(value: string): string {
   return value.replaceAll("~", "~0").replaceAll("/", "~1");
+}
+
+interface NormalizedDecimal {
+  negative: boolean;
+  coefficient: string;
+  exponent: number;
+}
+
+/**
+ * Compare decimal values rather than spellings. `Number#toString` is the
+ * shortest decimal that identifies the parsed IEEE-754 value; requiring it to
+ * equal the input mathematically rejects lexemes that JavaScript rounded onto
+ * another JSON number while retaining harmless spellings such as `1.0` and
+ * `1e3`.
+ */
+function sameDecimalValue(left: string, right: string): boolean {
+  const normalizedLeft = normalizeDecimal(left);
+  const normalizedRight = normalizeDecimal(right);
+  return (
+    normalizedLeft !== undefined &&
+    normalizedRight !== undefined &&
+    normalizedLeft.negative === normalizedRight.negative &&
+    normalizedLeft.coefficient === normalizedRight.coefficient &&
+    normalizedLeft.exponent === normalizedRight.exponent
+  );
+}
+
+function sameIntegerValue(input: string, parsed: number): boolean {
+  const normalized = normalizeDecimal(input);
+  if (normalized === undefined || normalized.exponent < 0) return true;
+  if (!Number.isInteger(parsed)) return false;
+  return sameDecimalValue(input, BigInt(parsed).toString());
+}
+
+function normalizeDecimal(value: string): NormalizedDecimal | undefined {
+  const negative = value.startsWith("-");
+  const unsigned = negative ? value.slice(1) : value;
+  const exponentIndex = unsigned.search(/[eE]/u);
+  const significand = exponentIndex === -1 ? unsigned : unsigned.slice(0, exponentIndex);
+  const exponentText = exponentIndex === -1 ? "0" : unsigned.slice(exponentIndex + 1);
+  if (/^0(?:\.0+)?$/u.test(significand)) return { negative: false, coefficient: "0", exponent: 0 };
+  // A finite, non-zero Number never needs an exponent outside this bound. Keep
+  // conversion bounded even when an adversarial JSON lexeme fills the byte
+  // budget with exponent digits.
+  if (!/^[+-]?[0-9]+$/u.test(exponentText) || exponentText.replace(/^[+-]?0*/u, "").length > 6) {
+    return undefined;
+  }
+  const explicitExponent = Number(exponentText);
+  if (!Number.isSafeInteger(explicitExponent)) return undefined;
+
+  const decimalIndex = significand.indexOf(".");
+  const fractionalDigits = decimalIndex === -1 ? 0 : significand.length - decimalIndex - 1;
+  let coefficient = significand.replace(".", "").replace(/^0+/u, "");
+  if (coefficient.length === 0) return undefined;
+
+  let exponent = explicitExponent - fractionalDigits;
+  const trailingZeroCount = /0*$/u.exec(coefficient)?.[0].length ?? 0;
+  if (trailingZeroCount > 0) {
+    coefficient = coefficient.slice(0, -trailingZeroCount);
+    exponent += trailingZeroCount;
+  }
+  if (!Number.isSafeInteger(exponent)) return undefined;
+  return { negative, coefficient, exponent };
 }

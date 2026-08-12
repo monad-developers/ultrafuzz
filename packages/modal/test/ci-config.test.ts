@@ -931,6 +931,17 @@ describe("public Modal benchmark configuration", () => {
     const qualifierCheckout = qualifier.steps.find((step) => step.uses?.startsWith("actions/checkout@"));
     expect(qualifierCheckout?.with?.ref).toBe("main");
     expect(qualifierCheckout?.with?.["persist-credentials"]).toBe(false);
+    const qualifierPnpm = qualifier.steps.findIndex((step) => step.uses?.startsWith("pnpm/action-setup@"));
+    const qualifierBuild = qualifier.steps.findIndex((step) => step.name === "Build trusted qualification dependency");
+    const qualifierRun = qualifier.steps.findIndex(
+      (step) => step.name === "Qualify the exact completed producer attempt"
+    );
+    expect(qualifierPnpm).toBeGreaterThan(-1);
+    expect(qualifierBuild).toBeGreaterThan(qualifierPnpm);
+    expect(qualifierRun).toBeGreaterThan(qualifierBuild);
+    expect(qualifier.steps[qualifierBuild]?.run).toBe(
+      "pnpm install --frozen-lockfile\npnpm --filter @ultrafuzz/artifacts... build\n"
+    );
     const qualification = qualifier.steps.find(
       (step) => step.name === "Qualify the exact completed producer attempt"
     )?.run;

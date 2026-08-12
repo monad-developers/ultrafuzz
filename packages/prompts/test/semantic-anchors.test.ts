@@ -275,6 +275,16 @@ describe("prompt semantic anchors", () => {
     expect(finalReport).toMatch(/Markdown-escaping the special characters is\s+accepted but not\s+required/u);
   });
 
+  it("requires renumbered property findings to retain authenticated campaign identity", () => {
+    const finalReport = prompt("review/final-report.md").replace(/\s+/gu, " ");
+    expect(finalReport).toContain(
+      "set its `property_provenance.source_finding_id` to the exact authenticated upstream campaign finding ID"
+    );
+    expect(finalReport).toContain("keep `property_provenance.finding_id` equal to the report ID");
+    expect(finalReport).toContain("Obtain that source ID from the matching lifecycle source record");
+    expect(finalReport).toContain("omit `source_finding_id` after renumbering");
+  });
+
   it("keeps protocol failures observable during invariant handler execution", () => {
     const handlers = prompt("strategies/invariants/handlers.md");
     const setup = prompt("strategies/invariants/setup.md");

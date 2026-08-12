@@ -153,6 +153,36 @@ test("json validate shared success envelope admits an unregistered schema with a
   }
 });
 
+test("json validate rejects rounded numeric lexemes before schema validation", async () => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-lossless-number-"));
+  try {
+    const schema = path.join(temporary, "integer.schema.json");
+    const artifact = path.join(temporary, "artifact.json");
+    fs.writeFileSync(
+      schema,
+      JSON.stringify({
+        $schema: "https://json-schema.org/draft/2020-12/schema",
+        type: "integer",
+        maximum: 9_007_199_254_740_991
+      })
+    );
+    fs.writeFileSync(artifact, "9007199254740991.4");
+
+    const result = await capture(["json", "validate", "--schema", schema, "--file", artifact, "--json"]);
+    assert.equal(result.code, 1, result.stderr);
+    const envelope = JSON.parse(result.stdout) as {
+      ok: boolean;
+      data: { status: string; diagnostics: Array<{ code: string; message: string }> };
+    };
+    assert.equal(envelope.ok, false);
+    assert.equal(envelope.data.status, "instance-error");
+    assert.equal(envelope.data.diagnostics[0]?.code, "JSON_INSTANCE_INVALID");
+    assert.match(envelope.data.diagnostics[0]?.message ?? "", /cannot be represented without changing its value/u);
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
 test("json validate exposes the strict validator through the primary CLI", async () => {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-cli-"));
   try {

@@ -645,6 +645,12 @@ production issue `id`, `title`, and cross-severity order are report-owned.
 Author them in canonical presentation form before validation; the renderer
 only validates and renders them. Use exact lifecycle and source metadata—not
 presentation identity—to retain the corresponding severity-classified finding.
+Whenever a property-derived finding is assigned a different report presentation
+ID, set its `property_provenance.source_finding_id` to the exact authenticated
+upstream campaign finding ID and keep `property_provenance.finding_id` equal to
+the report ID. Obtain that source ID from the matching lifecycle source record;
+do not copy the report ID into both fields, infer an ID from a property, or omit
+`source_finding_id` after renumbering.
 
 In every `report.json` evidence object, keep `path` as a safe relative base path
 without selectors and preserve independent `detail` prose exactly. Put section

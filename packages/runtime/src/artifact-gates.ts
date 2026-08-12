@@ -5743,6 +5743,33 @@ function reportPropertyJoinDiagnostics(
       `${reportPath}#$.property_provenance[${entryIndex}].test_paths`
     );
 
+    const campaignSourceFindingIds = reportCampaignSourceFindingIds(entry, report, campaignSourceNodeIds);
+    const reportFindingId = typeof entry.finding_id === "string" ? entry.finding_id : undefined;
+    const sourceFindingId = typeof entry.source_finding_id === "string" ? entry.source_finding_id : undefined;
+    if (
+      reportFindingId !== undefined &&
+      campaignSourceFindingIds.length > 0 &&
+      !campaignSourceFindingIds.includes(reportFindingId)
+    ) {
+      if (sourceFindingId === undefined) {
+        addReportJoinMismatch(
+          diagnostics,
+          false,
+          "PROPERTY_REPORT_SOURCE_FINDING_ID_REQUIRED",
+          "Renumbered report property provenance must retain its authenticated campaign finding ID",
+          `${reportPath}#$.property_provenance[${entryIndex}].source_finding_id`
+        );
+      } else if (!campaignSourceFindingIds.includes(sourceFindingId)) {
+        addReportJoinMismatch(
+          diagnostics,
+          false,
+          "PROPERTY_REPORT_SOURCE_FINDING_ID_MISMATCH",
+          "Report property provenance source_finding_id does not match the authenticated campaign finding",
+          `${reportPath}#$.property_provenance[${entryIndex}].source_finding_id`
+        );
+      }
+    }
+
     const expectedBackends = verifiedReportFindingAliases(entry, report, campaignSourceNodeIds).flatMap(
       (findingId) => fuzzerBackendsByFinding.get(findingId) ?? []
     );
@@ -5772,6 +5799,23 @@ function verifiedReportFindingAliases(
     return [];
   }
   const verifiedAliases = new Set([findingId]);
+  const lifecycleFindingIds = new Set(reportCampaignSourceFindingIds(entry, report, campaignSourceNodeIds));
+  const sourceFindingId = typeof entry.source_finding_id === "string" ? entry.source_finding_id : undefined;
+  if (sourceFindingId !== undefined && lifecycleFindingIds.has(sourceFindingId)) {
+    verifiedAliases.add(sourceFindingId);
+  }
+  return stringArray([entry.finding_id, entry.source_finding_id]).filter(
+    (alias, index, aliases) => aliases.indexOf(alias) === index && verifiedAliases.has(alias)
+  );
+}
+
+function reportCampaignSourceFindingIds(
+  entry: Record<string, unknown>,
+  report: Record<string, unknown>,
+  campaignSourceNodeIds: ReadonlySet<string>
+): string[] {
+  const findingId = typeof entry.finding_id === "string" ? entry.finding_id : undefined;
+  if (findingId === undefined) return [];
   const outcomes = [report.issues, report.non_production_outcomes].flatMap((entries) =>
     Array.isArray(entries) ? entries.filter(isRecord) : []
   );
@@ -5783,25 +5827,17 @@ function verifiedReportFindingAliases(
     ) {
       continue;
     }
-    const lifecycleFindingIds = new Set(
-      outcome.lifecycle.source_artifacts.flatMap((source) =>
-        isRecord(source) &&
-        typeof source.node_id === "string" &&
-        campaignSourceNodeIds.has(source.node_id) &&
-        source.relationship === "primary" &&
-        typeof source.finding_id === "string"
-          ? [source.finding_id]
-          : []
-      )
+    return outcome.lifecycle.source_artifacts.flatMap((source) =>
+      isRecord(source) &&
+      typeof source.node_id === "string" &&
+      campaignSourceNodeIds.has(source.node_id) &&
+      source.relationship === "primary" &&
+      typeof source.finding_id === "string"
+        ? [source.finding_id]
+        : []
     );
-    const sourceFindingId = typeof entry.source_finding_id === "string" ? entry.source_finding_id : undefined;
-    if (sourceFindingId !== undefined && lifecycleFindingIds.has(sourceFindingId)) {
-      verifiedAliases.add(sourceFindingId);
-    }
   }
-  return stringArray([entry.finding_id, entry.source_finding_id]).filter(
-    (alias, index, aliases) => aliases.indexOf(alias) === index && verifiedAliases.has(alias)
-  );
+  return [];
 }
 
 function readCampaignFuzzerBackends(

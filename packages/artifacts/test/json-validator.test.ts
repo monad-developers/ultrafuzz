@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 
 import {
   artifactSchemaBundleDigest,
@@ -36,6 +37,33 @@ test("strict JSON parsing rejects duplicate object keys", () => {
   assert.throws(() => parseStrictJson('"😀"', { maxBytes: 5 }), /byte limit/u);
   assert.throws(() => parseStrictJsonBytes(Buffer.from([0xef, 0xbb, 0xbf, 0x7b, 0x7d])), /byte-order mark/u);
   assert.throws(() => parseStrictJsonBytes(Buffer.from([0x7b, 0xff, 0x7d])), /valid UTF-8/u);
+});
+
+test("strict JSON parsing rejects number lexemes whose numeric value would change", () => {
+  assert.equal(parseStrictJson("0.1"), 0.1);
+  assert.equal(parseStrictJson("1.0"), 1);
+  assert.equal(parseStrictJson("1e3"), 1_000);
+  assert.equal(parseStrictJson("0e9999999"), 0);
+  assert.equal(parseStrictJson("9007199254740991"), 9_007_199_254_740_991);
+  assert.equal(parseStrictJson("9007199254740992"), 9_007_199_254_740_992);
+
+  for (const value of [
+    "9007199254740991.4",
+    "9007199254740993",
+    "1000000000000000100",
+    "0.10000000000000001",
+    "1.0000000000000001",
+    "1e-324"
+  ]) {
+    assert.throws(
+      () => parseStrictJson(value),
+      (error: unknown) =>
+        error instanceof StrictJsonError &&
+        error.kind === "syntax" &&
+        /cannot be represented without changing its value/u.test(error.message),
+      value
+    );
+  }
 });
 
 test("schema validation applies JSON own-property semantics", () => {
@@ -586,6 +614,82 @@ test("external schemas resolve only local contained references", async () => {
   } finally {
     fs.rmSync(temporary, { recursive: true, force: true });
   }
+});
+
+test("external schema references honor nested identifiers and ignore instance-valued reference keys", async (t) => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-scoped-ref-"));
+  t.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
+  const nestedDirectory = path.join(temporary, "sub");
+  const hashDirectory = path.join(temporary, "sub#scope");
+  const queryDirectory = path.join(temporary, "sub?scope");
+  fs.mkdirSync(nestedDirectory);
+  fs.mkdirSync(hashDirectory);
+  fs.mkdirSync(queryDirectory);
+  const root = path.join(temporary, "root.json");
+  const rootChild = path.join(temporary, "child.json");
+  const nestedChild = path.join(nestedDirectory, "child.json");
+  const hashChild = path.join(hashDirectory, "child.json");
+  const queryChild = path.join(queryDirectory, "child.json");
+  const artifact = path.join(temporary, "artifact.json");
+
+  fs.writeFileSync(
+    rootChild,
+    JSON.stringify({
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      $id: "urn:test:root-child:1",
+      const: "wrong-root-child"
+    })
+  );
+  fs.writeFileSync(
+    nestedChild,
+    JSON.stringify({
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      $id: "urn:test:nested-child:1",
+      const: "nested-child"
+    })
+  );
+  for (const [childPath, id, expected] of [
+    [hashChild, "urn:test:hash-child:1", "hash-child"],
+    [queryChild, "urn:test:query-child:1", "query-child"]
+  ] as const) {
+    fs.writeFileSync(
+      childPath,
+      JSON.stringify({
+        $schema: "https://json-schema.org/draft/2020-12/schema",
+        $id: id,
+        const: expected
+      })
+    );
+  }
+  fs.writeFileSync(
+    root,
+    JSON.stringify({
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      $id: pathToFileURL(root).href,
+      type: "object",
+      additionalProperties: false,
+      required: ["value", "hash", "query", "literal", "choice"],
+      properties: {
+        value: { $ref: "#/$defs/scoped" },
+        hash: { $ref: "#/$defs/hashScoped" },
+        query: { $ref: "#/$defs/queryScoped" },
+        literal: { const: { $ref: "missing.json" } },
+        choice: { enum: [{ $ref: "also-missing.json" }] }
+      },
+      $defs: {
+        scoped: { $id: "sub/", $ref: "child.json" },
+        hashScoped: { $id: "sub%23scope/", $ref: "child.json" },
+        queryScoped: { $id: "sub%3Fscope/", $ref: "child.json" }
+      }
+    })
+  );
+  fs.writeFileSync(
+    artifact,
+    '{"value":"nested-child","hash":"hash-child","query":"query-child","literal":{"$ref":"missing.json"},"choice":{"$ref":"also-missing.json"}}'
+  );
+
+  const result = await validateJsonFile({ schemaPath: root, filePath: artifact });
+  assert.equal(result.status, "valid", JSON.stringify(result.diagnostics));
 });
 
 test("repeated external references reuse one bounded file snapshot", async (t) => {
