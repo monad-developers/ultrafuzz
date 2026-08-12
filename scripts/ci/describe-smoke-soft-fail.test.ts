@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 import {
+  automaticSmokeOperationalSoftFail,
   decideSmokeSoftFail,
   describeSmokeSoftFail,
   smokeSoftFailRequiresScoringReady
@@ -79,6 +80,61 @@ describe("smoke soft-fail description", () => {
 });
 
 describe("smoke soft-fail ref policy", () => {
+  it("soft-fails operational outcomes for automatic main smoke runs", () => {
+    const resumeRequired = { terminal_status: "failed", category: "resume-required" };
+
+    expect(automaticSmokeOperationalSoftFail("smoke", "push", resumeRequired)).toBe(true);
+    expect(
+      decideSmokeSoftFail("/absent/diagnostics.json", "main", {
+        mode: "smoke",
+        eventName: "push",
+        outcome: resumeRequired
+      })
+    ).toMatchObject({ soft_fail: true, blocks_gate: false });
+    for (const category of [
+      "transient-operational-failure",
+      "permanent-operational-failure",
+      "collection-failed",
+      "collection-timeout"
+    ]) {
+      expect(automaticSmokeOperationalSoftFail("smoke", "push", { terminal_status: "failed", category })).toBe(true);
+    }
+  });
+
+  it("keeps manual, full, successful, genuine, and control outcomes strict", () => {
+    const operational = { terminal_status: "failed", category: "resume-required" };
+    const genuine = { terminal_status: "failed", category: "genuine-task-outcome" };
+
+    expect(automaticSmokeOperationalSoftFail("smoke", "workflow_dispatch", operational)).toBe(false);
+    expect(automaticSmokeOperationalSoftFail("full", "push", operational)).toBe(false);
+    expect(automaticSmokeOperationalSoftFail("smoke", "push", genuine)).toBe(false);
+    expect(automaticSmokeOperationalSoftFail("smoke", "push", { terminal_status: "failed" })).toBe(false);
+    for (const category of [
+      "incompatible-checkpoint",
+      "runner-status-invalid",
+      "launch-state-missing",
+      "control-plane-timeout"
+    ]) {
+      expect(automaticSmokeOperationalSoftFail("smoke", "push", { terminal_status: "failed", category })).toBe(false);
+    }
+    expect(
+      automaticSmokeOperationalSoftFail("smoke", "push", {
+        terminal_status: "succeeded",
+        category: "succeeded"
+      })
+    ).toBe(false);
+    for (const policy of [
+      { mode: "smoke", eventName: "workflow_dispatch", outcome: operational },
+      { mode: "full", eventName: "push", outcome: operational },
+      { mode: "smoke", eventName: "push", outcome: genuine }
+    ]) {
+      expect(decideSmokeSoftFail("/absent/diagnostics.json", "main", policy)).toMatchObject({
+        soft_fail: false,
+        blocks_gate: true
+      });
+    }
+  });
+
   it("requires scoring readiness on every release branch and the benchmark validation branch", () => {
     for (const refName of ["release/v0.1.0", "release/v0.2.0-rc.1", "test/v0.1.0-ultrafuzz-bench"]) {
       expect(smokeSoftFailRequiresScoringReady(refName)).toBe(true);
@@ -99,14 +155,17 @@ describe("smoke soft-fail ref policy", () => {
 
   it("blocks an unscoreable release soft-fail but not the same feature-branch failure", () => {
     const diagnosticsPath = write(diagnostics([row(false, ["terminal-report-missing"])]));
+    const policy = automaticPolicy();
 
-    expect(decideSmokeSoftFail(diagnosticsPath, "release/v0.1.0")).toMatchObject({
+    expect(decideSmokeSoftFail(diagnosticsPath, "release/v0.1.0", policy)).toMatchObject({
       validated: false,
+      soft_fail: true,
       scoring_ready_required: true,
       blocks_gate: true
     });
-    expect(decideSmokeSoftFail(diagnosticsPath, "feature/my-change")).toMatchObject({
+    expect(decideSmokeSoftFail(diagnosticsPath, "feature/my-change", policy)).toMatchObject({
       validated: false,
+      soft_fail: true,
       scoring_ready_required: false,
       blocks_gate: false
     });
@@ -115,9 +174,10 @@ describe("smoke soft-fail ref policy", () => {
   it("allows a release soft-fail when scoring readiness is internally consistent and true", () => {
     const diagnosticsPath = write(diagnostics([row(true), row(true), row(true)]));
 
-    expect(decideSmokeSoftFail(diagnosticsPath, "release/v0.1.0")).toEqual({
+    expect(decideSmokeSoftFail(diagnosticsPath, "release/v0.1.0", automaticPolicy())).toEqual({
       validated: true,
       detail: "public eval diagnostics report scoring_ready=true for 3/3 rows",
+      soft_fail: true,
       scoring_ready_required: true,
       blocks_gate: false
     });
@@ -125,13 +185,20 @@ describe("smoke soft-fail ref policy", () => {
 
   it("emits the decision as machine-readable JSON for the workflow", () => {
     const diagnosticsPath = write(diagnostics([row(false, ["terminal-report-missing"])]));
+    const outcomePath = writeOutcome({ terminal_status: "failed", category: "resume-required" });
     const output = execFileSync(
       "node",
       [
         path.resolve("scripts/ci/describe-smoke-soft-fail.mjs"),
         "--json",
         "--ref",
-        "test/v0.1.0-ultrafuzz-bench",
+        "main",
+        "--mode",
+        "smoke",
+        "--event",
+        "push",
+        "--outcome",
+        outcomePath,
         diagnosticsPath
       ],
       { encoding: "utf8" }
@@ -139,8 +206,9 @@ describe("smoke soft-fail ref policy", () => {
 
     expect(JSON.parse(output)).toMatchObject({
       validated: false,
-      scoring_ready_required: true,
-      blocks_gate: true
+      soft_fail: true,
+      scoring_ready_required: false,
+      blocks_gate: false
     });
   });
 });
@@ -162,4 +230,20 @@ function write(document: Diagnostics): string {
   const diagnosticsPath = path.join(root, "public-eval-diagnostics.json");
   fs.writeFileSync(diagnosticsPath, `${JSON.stringify(document)}\n`);
   return diagnosticsPath;
+}
+
+function writeOutcome(document: Record<string, unknown>): string {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "smoke-soft-fail-outcome-"));
+  roots.push(root);
+  const outcomePath = path.join(root, "outcome.json");
+  fs.writeFileSync(outcomePath, `${JSON.stringify(document)}\n`);
+  return outcomePath;
+}
+
+function automaticPolicy() {
+  return {
+    mode: "smoke",
+    eventName: "push",
+    outcome: { terminal_status: "failed", category: "resume-required" }
+  };
 }
