@@ -56,6 +56,7 @@ import {
 import type { PublicBenchmarkBundle } from "../src/public-bundle.js";
 import { createExactCandidateSourceArchive } from "../src/runner.js";
 import { OperationalDispositionError } from "../src/terminal-disposition.js";
+import { ensurePersistentWorkerLineage } from "../src/worker-lineage.js";
 import { emptyWorkerCheckpoint, runWithTerminalPersistence, WorkerResultWriter } from "../src/worker-result.js";
 
 it("keeps high-fanout public benchmark work off the persistent Modal volume", () => {
@@ -191,7 +192,12 @@ it("accepts the bounded full lane before reading paid-run credentials", async ()
         model,
         lineage,
         dataRoot,
-        preflight: async () => undefined,
+        preflight: (context) =>
+          ensurePersistentWorkerLineage({
+            lineagePath: path.join(dataRoot, "lineage.json"),
+            lineage,
+            ...context
+          }),
         isCheckpointIncompatible: () => false,
         checkpointIncompatibleError: (message) => new Error(message)
       })
