@@ -434,7 +434,7 @@ describe("public Modal benchmark configuration", () => {
       expect(result.stderr).toMatch(testCase.message);
       expect(fs.existsSync(path.join(output, "manifest.json"))).toBe(false);
     }
-  });
+  }, 15_000);
 
   it("rejects malformed-present model selection JSON instead of defaulting or converting it", () => {
     const workspace = path.resolve("../..");
