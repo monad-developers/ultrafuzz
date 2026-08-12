@@ -1440,7 +1440,7 @@ test("current invariant reports with malformed issues fail closed instead of pre
   );
 });
 
-test("report reconciliation distinguishes a missing current handoff from an explicit historical plan", async () => {
+test("report reconciliation rejects a missing current implementation handoff", async () => {
   const graphFor = (contract: string): Record<string, unknown> => ({
     schema_version: "1.0",
     nodes: [
@@ -1467,19 +1467,6 @@ test("report reconciliation distinguishes a missing current handoff from an expl
   const rejected = await cli(currentProject, ["report", current.run_id, "--json"]);
   assert.equal(rejected.code, 1);
   assert.match(JSON.stringify(parseJson(rejected).diagnostics), /implementation handoff is unavailable/iu);
-
-  const historicalProject = tempProject();
-  const historical = await createReportRun(historicalProject, "report-historical-handoff");
-  writeJsonRecord(path.join(historical.run_root, "graph.json"), graphFor("ultrafuzz/implemented-properties@3"));
-  const historicalReportDir = path.join(historical.run_root, "artifacts", "final-report");
-  fs.mkdirSync(historicalReportDir, { recursive: true });
-  writeJsonRecord(path.join(historicalReportDir, "report.json"), report);
-  const preserved = await cli(historicalProject, ["report", historical.run_id, "--json"]);
-  assert.equal(preserved.code, 0, preserved.stderr);
-  const historicalJson = JSON.parse(fs.readFileSync(path.join(historicalReportDir, "report.json"), "utf8")) as {
-    property_implementation_coverage?: unknown;
-  };
-  assert.equal(historicalJson.property_implementation_coverage, "unavailable");
 });
 
 test("historical loose reports preserve conforming Markdown and reject missing or nonconforming Markdown", async () => {

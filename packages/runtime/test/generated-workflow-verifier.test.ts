@@ -73,8 +73,7 @@ function loadReportImplementationCoverageReconstructor(
     task: unknown,
     logicalNodeId: string,
     relativePath: string,
-    contract: string,
-    historicalContract?: string
+    contract: string
   ) => { path: string; value: unknown } | undefined
 ): (task: {
   metadata: { node: { logicalNodeId: string }; artifacts: { dir: string } };
@@ -136,8 +135,7 @@ function loadVerifiedAncestorJsonArtifact(
   task: { dependencyArtifactDirs: string[] },
   logicalNodeId: string,
   relativePath: string,
-  contract: string,
-  historicalContract?: string
+  contract: string
 ) => { path: string; value: unknown } | undefined {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function verifiedAncestorJsonArtifact");
@@ -1859,7 +1857,6 @@ test("generated Smithers coverage authority preserves the shipped smoke topology
       },
       "stateful-invariant-implement-properties",
       "implemented-properties.json",
-      "ultrafuzz/implemented-properties@3",
       "ultrafuzz/implemented-properties@3"
     ),
     undefined
@@ -1870,12 +1867,11 @@ test("generated Smithers coverage authority preserves the shipped smoke topology
   let reconstructionAuthorityReads = 0;
   const reconstructCoverage = loadReportImplementationCoverageReconstructor(
     taskSpecs,
-    (_task, logicalNodeId, relativePath, contract, historicalContract) => {
+    (_task, logicalNodeId, relativePath, contract) => {
       reconstructionAuthorityReads += 1;
       assert.equal(logicalNodeId, "stateful-invariant-implement-properties");
       assert.equal(relativePath, "implemented-properties.json");
       assert.equal(contract, "ultrafuzz/implemented-properties@3");
-      assert.equal(historicalContract, "ultrafuzz/implemented-properties@3");
       return undefined;
     }
   );
@@ -1952,7 +1948,7 @@ test("generated Smithers coverage authority preserves the shipped smoke topology
   assert.equal(reconstructionAuthorityReads, invalidCoverageCases.length);
 });
 
-test("generated Smithers coverage authority fails closed except for an explicit historical handoff", () => {
+test("generated Smithers coverage authority fails closed for every non-current handoff", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-report-coverage-authority-"));
   const dependency = path.join(root, "implementation-attempt");
   fs.mkdirSync(dependency);
@@ -1981,37 +1977,12 @@ test("generated Smithers coverage authority fails closed except for an explicit 
       finalReportTask,
       "stateful-invariant-implement-properties",
       "implemented-properties.json",
-      "ultrafuzz/implemented-properties@3",
       "ultrafuzz/implemented-properties@3"
     );
 
   try {
     assert.deepEqual(readCurrent()?.value, { authoritative: true });
     assert.equal(verificationCount, 1);
-
-    producer.outputs[0]!.contract = "ultrafuzz/implemented-properties@3";
-    assert.equal(readCurrent(), undefined, "a declared historical @1 handoff keeps legacy behavior");
-    assert.equal(verificationCount, 1, "historical bytes are not reinterpreted as current coverage authority");
-
-    const historicalReportRoot = path.join(root, "historical-report");
-    fs.mkdirSync(historicalReportRoot);
-    const historicalReportPath = path.join(historicalReportRoot, "report.json");
-    const historicalReport = `${JSON.stringify(
-      { schema_version: "1.0", run_metadata: {}, issues: [], non_production_outcomes: [] },
-      null,
-      2
-    )}\n`;
-    fs.writeFileSync(historicalReportPath, historicalReport);
-    const reconstructHistorical = loadReportImplementationCoverageReconstructor([producer], () => undefined);
-    reconstructHistorical({
-      metadata: { node: { logicalNodeId: "final-report" }, artifacts: { dir: historicalReportRoot } },
-      outputs: [{ path: "report.json", contract: "ultrafuzz/report@1" }]
-    });
-    assert.equal(
-      fs.readFileSync(historicalReportPath, "utf8"),
-      historicalReport,
-      "a declared historical producer must not be rewritten as a producer-free topology"
-    );
 
     producer.outputs = [];
     assert.throws(readCurrent, /authoritative implemented-properties\.json handoff is unavailable/u);

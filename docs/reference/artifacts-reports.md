@@ -278,7 +278,12 @@ v1 contract.
 `ultrafuzz.implemented-properties.v1`; current invariant nodes publish it
 through the `ultrafuzz/implemented-properties@3` contract. Every record has a canonical
 `property_id`, a status (`implemented`, `pending`, `deferred`, or `blocked`),
-and `implementation_paths` and `test_paths` arrays. The invariant campaign's
+semantic coverage (`exact`, `partial`, `weaker`, or `deferred`), and
+`implementation_paths` and `test_paths` arrays. An implemented record must
+identify its executable oracle symbols, admitted backend entrypoints, positive
+and negative regression paths, and prerequisite-state/protocol-call
+reachability evidence. Selector-liveness oracles additionally list allowed
+error selectors and the assertion used for unexpected selectors. The invariant campaign's
 `recon-fuzzer-results.json` uses `ultrafuzz.property-campaign.v1`; failure
 records caused by implemented catalog properties carry `property_ids`.
 Property-derived `findings.json` entries carry the same optional
@@ -291,8 +296,9 @@ ordered `property_ids` selected from the canonical catalog. Every selected
 property has one implementation record. A selected property that is not
 implemented carries a typed `blocker` object with `code`, `summary`, and
 `next_action`; this preserves an actionable reason instead of silently
-deferring benchmark-relevant coverage. Historical artifacts may omit
-`selection` and remain readable.
+deferring benchmark-relevant coverage. `@3` is the only supported
+implemented-property contract; payloads without selection or executable
+evidence fail closed.
 
 The final report mirrors this handoff in
 `property_implementation_coverage`, preserving the threshold, inclusive
@@ -300,8 +306,8 @@ priorities, selected IDs, ordered implemented/blocked/pending/deferred ID
 arrays, and the reference expectation property/ID arrays for analysis. A
 current report must include this object in `report.json` and render
 `## Property implementation coverage` in `report.md`; runtime checks compare
-both representations with the implementation handoff. Reports produced before
-this field existed (and without current selection metadata) use `"unavailable"`.
+both representations with the implementation handoff. Topologies that do not
+declare an invariant implementation producer use `"unavailable"`.
 
 ### Campaign outcome
 

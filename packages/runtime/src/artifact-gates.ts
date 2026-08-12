@@ -2318,8 +2318,7 @@ function verifyPropertyProvenanceArtifacts(
         layout,
         node.outputs.some(
           (output) =>
-            output.path === "implemented-properties.json" &&
-            output.contract === "ultrafuzz/implemented-properties@3"
+            output.path === "implemented-properties.json" && output.contract === "ultrafuzz/implemented-properties@3"
         )
       )
     ];
@@ -3608,11 +3607,10 @@ function verifyFinalReportPropertyReferences(
 }
 
 /**
- * A current invariant run carries selection metadata in the @2 implementation
+ * A current invariant run carries executable evidence in the @3 implementation
  * handoff. Its terminal report must preserve the same coverage accounting and
  * render the corresponding Markdown section. Reports from before this
- * handoff, which have no implementation selection, retain historical
- * compatibility.
+ * handoff. Topologies without that producer retain the unavailable sentinel.
  */
 function verifyFinalReportImplementationCoverage(
   layout: RunLayout,
@@ -4275,7 +4273,15 @@ function readImplementedProperties(layout: RunLayout): {
       ]
     };
   }
-  const result = validateImplementedPropertiesSchema(readJsonFile(implementationPath), implementationPath);
+  const contracts = declaredLogicalArtifactContracts(
+    layout,
+    "stateful-invariant-implement-properties",
+    "implemented-properties.json"
+  );
+  const result = validateImplementedPropertiesSchema(readJsonFile(implementationPath), implementationPath, {
+    requireSelection: contracts.has("ultrafuzz/implemented-properties@3"),
+    requireExecutableEvidence: contracts.has("ultrafuzz/implemented-properties@3")
+  });
   return result.ok && result.value !== undefined
     ? { value: result.value, diagnostics: [] }
     : { diagnostics: schemaDiagnostics(result.issues) };

@@ -19,6 +19,10 @@ export const REFERENCE_EXPECTATIONS_JSON_SCHEMA_ID =
 const nonEmptyString = z.string().min(1);
 const stableLedgerId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/u);
 const nonEmptyStringArray = z.array(nonEmptyString);
+const uniqueNonEmptyStringArray = nonEmptyStringArray.refine((values) => new Set(values).size === values.length, {
+  message: "Values must be unique"
+});
+const errorSelectorSchema = z.string().regex(/^0x[0-9a-fA-F]{8}$/u, "Expected a bytes4 error selector");
 /**
  * A list of reference-expectation ids, which must name at least one id when it says anything at all.
  *
@@ -423,7 +427,12 @@ const implementedPropertySchema = z.looseObject({
       backend_entrypoints: nonEmptyStringArray,
       positive_test_paths: nonEmptyStringArray,
       negative_test_paths: nonEmptyStringArray,
-      allowed_error_selectors: z.array(nonEmptyString).optional(),
+      allowed_error_selectors: z
+        .array(errorSelectorSchema)
+        .refine((selectors) => new Set(selectors.map((selector) => selector.toLowerCase())).size === selectors.length, {
+          message: "Allowed error selectors must be unique"
+        })
+        .optional(),
       unexpected_error_assertion: nonEmptyString.optional()
     })
     .optional(),
@@ -522,8 +531,8 @@ export const propertyCampaignSchema = z
     campaign_outcome: nonEmptyString.optional(),
     usable_results: z.boolean().optional(),
     failures: z.array(propertyCampaignFailureSchema),
-    intended_property_entrypoints: nonEmptyStringArray.optional(),
-    admitted_property_entrypoints: nonEmptyStringArray.optional()
+    intended_property_entrypoints: uniqueNonEmptyStringArray.optional(),
+    admitted_property_entrypoints: uniqueNonEmptyStringArray.optional()
   })
   .superRefine((artifact, context) => {
     const failureIds = new Set<string>();
@@ -703,7 +712,8 @@ export function validateImplementedPropertiesSchema(
       if (property.semantic_coverage === undefined) {
         issues.push({
           code: "PROPERTY_SEMANTIC_COVERAGE_REQUIRED",
-          message: "Current implementation records must classify semantic coverage as exact, partial, weaker, or deferred",
+          message:
+            "Current implementation records must classify semantic coverage as exact, partial, weaker, or deferred",
           path: `${propertyPath}.semantic_coverage`
         });
       }
@@ -725,7 +735,8 @@ export function validateImplementedPropertiesSchema(
       ) {
         issues.push({
           code: "PROPERTY_EXECUTABLE_ORACLE_REQUIRED",
-          message: "An implemented property must identify its oracle symbols, backend entrypoints, and positive and negative regression paths",
+          message:
+            "An implemented property must identify its oracle symbols, backend entrypoints, and positive and negative regression paths",
           path: `${propertyPath}.executable_oracle`
         });
       } else if (
@@ -734,7 +745,8 @@ export function validateImplementedPropertiesSchema(
       ) {
         issues.push({
           code: "PROPERTY_LIVENESS_ORACLE_INVALID",
-          message: "A selector-liveness oracle must explicitly list allowed error selectors and name the assertion used for unexpected selectors",
+          message:
+            "A selector-liveness oracle must explicitly list allowed error selectors and name the assertion used for unexpected selectors",
           path: `${propertyPath}.executable_oracle`
         });
       }
@@ -747,7 +759,8 @@ export function validateImplementedPropertiesSchema(
       ) {
         issues.push({
           code: "PROPERTY_REACHABILITY_EVIDENCE_REQUIRED",
-          message: "An implemented property must record prerequisite-state, protocol-call, and evidence-path reachability",
+          message:
+            "An implemented property must record prerequisite-state, protocol-call, and evidence-path reachability",
           path: `${propertyPath}.reachability`
         });
       }

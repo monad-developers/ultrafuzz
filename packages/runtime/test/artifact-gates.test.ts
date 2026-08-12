@@ -3238,6 +3238,7 @@ test("property implementation gate enforces declared selection coverage and acti
         {
           property_id: "property-high",
           status: "deferred",
+          semantic_coverage: "deferred",
           implementation_paths: [],
           test_paths: []
         }
@@ -3264,6 +3265,7 @@ test("property implementation gate enforces declared selection coverage and acti
         {
           property_id: "property-high",
           status: "deferred",
+          semantic_coverage: "deferred",
           implementation_paths: [],
           test_paths: []
         }
@@ -3291,6 +3293,7 @@ test("property implementation gate enforces declared selection coverage and acti
         {
           property_id: "property-high",
           status: "deferred",
+          semantic_coverage: "deferred",
           implementation_paths: [],
           test_paths: []
         }
@@ -3319,6 +3322,7 @@ test("property implementation gate enforces declared selection coverage and acti
         {
           property_id: "property-high",
           status: "blocked",
+          semantic_coverage: "deferred",
           implementation_paths: [],
           test_paths: [],
           blocker: {
@@ -3348,6 +3352,7 @@ test("property implementation gate enforces declared selection coverage and acti
         {
           property_id: "property-high",
           status: "blocked",
+          semantic_coverage: "deferred",
           implementation_paths: [],
           test_paths: [],
           blocker: {
@@ -3359,6 +3364,7 @@ test("property implementation gate enforces declared selection coverage and acti
         {
           property_id: "property-medium",
           status: "blocked",
+          semantic_coverage: "deferred",
           implementation_paths: [],
           test_paths: [],
           blocker: {
@@ -3443,6 +3449,21 @@ test("property implementation gate includes lower-priority benchmark expectation
     })
   );
   const nodeId = "stateful-invariant-implement-properties";
+  const exactEvidence = (propertyId: string): Record<string, unknown> => ({
+    semantic_coverage: "exact",
+    executable_oracle: {
+      kind: "state-assertion",
+      symbols: [`Properties.${propertyId}`],
+      backend_entrypoints: [`${propertyId}()`],
+      positive_test_paths: [`test/foundry/${propertyId}.t.sol`],
+      negative_test_paths: [`test/foundry/${propertyId}.t.sol`]
+    },
+    reachability: {
+      prerequisite_states: ["initialized state"],
+      protocol_calls: ["TargetFunctions.action"],
+      evidence_paths: [`test/foundry/${propertyId}.t.sol`]
+    }
+  });
   writeArtifact(
     layout,
     nodeId,
@@ -3454,6 +3475,7 @@ test("property implementation gate includes lower-priority benchmark expectation
         {
           property_id: "property-high",
           status: "implemented",
+          ...exactEvidence("property-high"),
           implementation_paths: ["test/recon/Properties.sol"],
           test_paths: []
         }
@@ -3494,12 +3516,14 @@ test("property implementation gate includes lower-priority benchmark expectation
         {
           property_id: "property-high",
           status: "implemented",
+          ...exactEvidence("property-high"),
           implementation_paths: ["test/recon/Properties.sol"],
           test_paths: []
         },
         {
           property_id: "property-supply",
           status: "implemented",
+          ...exactEvidence("property-supply"),
           implementation_paths: ["test/recon/Properties.sol"],
           test_paths: []
         }
@@ -3528,12 +3552,14 @@ test("property implementation gate includes lower-priority benchmark expectation
         {
           property_id: "property-high",
           status: "implemented",
+          ...exactEvidence("property-high"),
           implementation_paths: ["test/recon/Properties.sol"],
           test_paths: []
         },
         {
           property_id: "property-supply",
           status: "implemented",
+          ...exactEvidence("property-supply"),
           implementation_paths: ["test/recon/Properties.sol"],
           test_paths: [],
           reference_expectations: ["scfuzzbench:aave-v4:iSpoke_supply"]
@@ -3741,6 +3767,116 @@ test("campaign gate accepts non-property findings and validates property-derived
   const unknown = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(unknown.ok, false);
   assert.ok(unknown.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_UNKNOWN"));
+});
+
+test("current campaign cannot report complete when Recon omits an executable property entrypoint", () => {
+  const layout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-campaign-property-admission",
+    graph: {
+      schema_version: "1.0",
+      nodes: [
+        {
+          id: "stateful-invariant-implement-properties",
+          logical_id: "stateful-invariant-implement-properties",
+          outputs: [{ path: "implemented-properties.json", contract: "ultrafuzz/implemented-properties@3" }]
+        }
+      ]
+    }
+  });
+  campaignPropertyCatalog(layout, ["property-1"]);
+  const campaignId = "stateful-invariant-campaign";
+  const node = {
+    ...plannedNode(["recon-fuzzer-results.json", "findings.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+  writeArtifact(layout, campaignId, "findings.json", "[]");
+  const writeResult = (campaignOutcome: "complete" | "partial", admitted: string[]): void => {
+    writeArtifact(
+      layout,
+      campaignId,
+      "recon-fuzzer-results.json",
+      JSON.stringify({
+        schema_version: "ultrafuzz.property-campaign.v1",
+        fuzzer_backend: "recon",
+        campaign_outcome: campaignOutcome,
+        usable_results: true,
+        intended_property_entrypoints: ["property-1()"],
+        admitted_property_entrypoints: admitted,
+        failures: []
+      })
+    );
+  };
+
+  writeResult("complete", []);
+  const falseComplete = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(falseComplete.ok, false);
+  assert.ok(
+    falseComplete.diagnostics.some(
+      (diagnostic) => diagnostic.code === "CAMPAIGN_PROPERTY_ENTRYPOINT_OMITTED" && diagnostic.severity === "error"
+    ),
+    JSON.stringify(falseComplete.diagnostics)
+  );
+
+  writeResult("partial", []);
+  const truthfulPartial = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(truthfulPartial.ok, true, JSON.stringify(truthfulPartial.diagnostics));
+  assert.ok(
+    truthfulPartial.diagnostics.some(
+      (diagnostic) => diagnostic.code === "CAMPAIGN_PROPERTY_ENTRYPOINT_OMITTED" && diagnostic.severity === "warning"
+    )
+  );
+
+  writeResult("complete", ["property-1()"]);
+  const admitted = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(admitted.ok, true, JSON.stringify(admitted.diagnostics));
+
+  writeArtifact(
+    layout,
+    "stateful-invariant-implement-properties",
+    "implemented-properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v1",
+      selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-1"] },
+      properties: [
+        {
+          property_id: "property-1",
+          status: "deferred",
+          semantic_coverage: "partial",
+          implementation_paths: ["test/recon/Properties.sol"],
+          test_paths: [],
+          blocker: {
+            code: "partial-oracle",
+            summary: "The current assertion is weaker than the selected property.",
+            next_action: "Implement an exact executable oracle and its regressions."
+          }
+        }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    campaignId,
+    "recon-fuzzer-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "recon",
+      campaign_outcome: "complete",
+      usable_results: true,
+      intended_property_entrypoints: [],
+      admitted_property_entrypoints: [],
+      failures: []
+    })
+  );
+  const semanticallyIncomplete = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(semanticallyIncomplete.ok, false);
+  assert.ok(
+    semanticallyIncomplete.diagnostics.some(
+      (diagnostic) => diagnostic.code === "CAMPAIGN_PROPERTY_SEMANTICS_INCOMPLETE"
+    ),
+    JSON.stringify(semanticallyIncomplete.diagnostics)
+  );
 });
 
 test("campaign gate accepts a partial dual-backend campaign where one backend saw nothing", () => {
@@ -4522,7 +4658,7 @@ test("current final reports preserve implementation coverage in JSON and Markdow
   );
 });
 
-test("final-report coverage gate distinguishes missing current handoffs from explicit historical plans", () => {
+test("final-report coverage gate rejects a missing current handoff", () => {
   const graphFor = (contract: string): Record<string, unknown> => ({
     schema_version: "1.0",
     nodes: [
@@ -4561,15 +4697,6 @@ test("final-report coverage gate distinguishes missing current handoffs from exp
     missingCurrent.diagnostics.some((diagnostic) => diagnostic.code === "IMPLEMENTED_PROPERTIES_MISSING"),
     JSON.stringify(missingCurrent.diagnostics)
   );
-
-  const historical = createRunLayout({
-    projectRoot: tempProject(),
-    runId: "run-historical-coverage-handoff",
-    graph: graphFor("ultrafuzz/implemented-properties@3")
-  });
-  writeReport(historical);
-  const preservedHistorical = verifyRequiredArtifactsForAttempt(historical, finalNode, finalNode.id);
-  assert.equal(preservedHistorical.ok, true, JSON.stringify(preservedHistorical.diagnostics));
 });
 
 test("dependency gates reject reused descendants after an ancestor manifest changes", () => {
@@ -4631,11 +4758,25 @@ function campaignPropertyCatalog(layout: ReturnType<typeof createRunLayout>, pro
     "implemented-properties.json",
     JSON.stringify({
       schema_version: "ultrafuzz.implemented-properties.v1",
+      selection: { priority_threshold: "high", priorities: ["high"], property_ids: propertyIds },
       properties: propertyIds.map((propertyId) => ({
         property_id: propertyId,
         status: "implemented",
+        semantic_coverage: "exact",
         implementation_paths: ["test/recon/Properties.sol"],
-        test_paths: []
+        test_paths: [`test/foundry/${propertyId}.t.sol`],
+        executable_oracle: {
+          kind: "state-assertion",
+          symbols: [`Properties.${propertyId}`],
+          backend_entrypoints: [`${propertyId}()`],
+          positive_test_paths: [`test/foundry/${propertyId}.t.sol`],
+          negative_test_paths: [`test/foundry/${propertyId}.t.sol`]
+        },
+        reachability: {
+          prerequisite_states: ["initialized state"],
+          protocol_calls: ["TargetFunctions.action"],
+          evidence_paths: [`test/foundry/${propertyId}.t.sol`]
+        }
       }))
     })
   );

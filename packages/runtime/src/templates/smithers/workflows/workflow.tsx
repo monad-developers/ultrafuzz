@@ -2576,8 +2576,7 @@ function verifiedAncestorJsonArtifact(
   task: (typeof taskSpecs)[number],
   logicalNodeId: string,
   relativePath: string,
-  contract: string,
-  historicalContract?: string
+  contract: string
 ): { path: string; value: unknown } | undefined {
   const declaredProducers = taskSpecs.filter((candidate) => candidate.metadata.node.logicalNodeId === logicalNodeId);
   // Some selected topologies deliberately omit this producer. The shipped
@@ -2604,9 +2603,6 @@ function verifiedAncestorJsonArtifact(
     throw new Error(`artifact-contract failure: authoritative ${relativePath} handoff is ambiguous`);
   }
   const candidate = candidates[0]!;
-  if (historicalContract !== undefined && candidate.output.contract === historicalContract) {
-    return undefined;
-  }
   if (candidate.output.contract !== contract) {
     throw new Error(
       `artifact-contract failure: authoritative ${relativePath} handoff declares unexpected contract ${JSON.stringify(candidate.output.contract)}; expected ${JSON.stringify(contract)}`
@@ -3004,8 +3000,7 @@ function materializeInvariantSuiteCompanions(task: (typeof taskSpecs)[number]): 
   }
   const implementationOutput = task.outputs.find(
     (output) =>
-      output.path === "implemented-properties.json" &&
-      output.contract === "ultrafuzz/implemented-properties@3"
+      output.path === "implemented-properties.json" && output.contract === "ultrafuzz/implemented-properties@3"
   );
   const artifactDir = realpathSync(task.metadata.artifacts.dir);
   const artifactRoots = taskArtifactRoots(task, artifactDir);

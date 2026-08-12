@@ -1049,18 +1049,92 @@ test("derives complete report implementation coverage only from authoritative pr
   assert.ok(missingConfig.issues.some((issue) => issue.code === "PROPERTY_IMPLEMENTATION_CONFIG_MISSING"));
 });
 
-test("current implementation contract requires selection while historical contract remains readable", () => {
-  const historical = JSON.stringify({
+test("current implementation contract rejects payloads without selection", () => {
+  const missingSelection = JSON.stringify({
     schema_version: IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
     properties: []
   });
-  assert.equal(validateArtifactContract("ultrafuzz/implemented-properties@3", historical).ok, true);
-  assert.equal(validateArtifactContract("ultrafuzz/implemented-properties@3", historical).ok, false);
+  assert.equal(validateArtifactContract("ultrafuzz/implemented-properties@3", missingSelection).ok, false);
   assert.ok(
-    validateArtifactContract("ultrafuzz/implemented-properties@3", historical).issues.some(
+    validateArtifactContract("ultrafuzz/implemented-properties@3", missingSelection).issues.some(
       (issue) => issue.code === "IMPLEMENTED_PROPERTIES_SELECTION_REQUIRED"
     )
   );
+});
+
+test("current implementation contract requires exact executable and reachability evidence", () => {
+  const record = {
+    property_id: "property-1",
+    status: "implemented",
+    semantic_coverage: "exact",
+    implementation_paths: ["test/recon/Properties.sol"],
+    test_paths: ["test/foundry/Property1.t.sol"],
+    executable_oracle: {
+      kind: "state-assertion",
+      symbols: ["Properties.property_one"],
+      backend_entrypoints: ["property_one()"],
+      positive_test_paths: ["test/foundry/Property1.t.sol"],
+      negative_test_paths: ["test/foundry/Property1.t.sol"]
+    },
+    reachability: {
+      prerequisite_states: ["initialized market"],
+      protocol_calls: ["TargetFunctions.market_action"],
+      evidence_paths: ["test/foundry/Property1.t.sol"]
+    }
+  };
+  const document = (property: Record<string, unknown>): string =>
+    JSON.stringify({
+      schema_version: IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
+      selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-1"] },
+      properties: [property]
+    });
+
+  assert.equal(validateArtifactContract("ultrafuzz/implemented-properties@3", document(record)).ok, true);
+  const sourceOnly = validateArtifactContract(
+    "ultrafuzz/implemented-properties@3",
+    document({
+      property_id: "property-1",
+      status: "implemented",
+      implementation_paths: ["test/recon/Properties.sol"],
+      test_paths: []
+    })
+  );
+  assert.equal(sourceOnly.ok, false);
+  assert.ok(sourceOnly.issues.some((issue) => issue.code === "PROPERTY_EXECUTABLE_ORACLE_REQUIRED"));
+  assert.ok(sourceOnly.issues.some((issue) => issue.code === "PROPERTY_REACHABILITY_EVIDENCE_REQUIRED"));
+});
+
+test("a plain direct target revert cannot satisfy a selector-liveness oracle", () => {
+  const result = validateArtifactContract(
+    "ultrafuzz/implemented-properties@3",
+    JSON.stringify({
+      schema_version: IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
+      selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-live"] },
+      properties: [
+        {
+          property_id: "property-live",
+          status: "implemented",
+          semantic_coverage: "exact",
+          implementation_paths: ["test/recon/Properties.sol"],
+          test_paths: ["test/foundry/Liveness.t.sol"],
+          executable_oracle: {
+            kind: "selector-liveness",
+            symbols: ["TargetFunctions.supply"],
+            backend_entrypoints: ["target_supply(uint256)"],
+            positive_test_paths: ["test/foundry/Liveness.t.sol"],
+            negative_test_paths: ["test/foundry/Liveness.t.sol"]
+          },
+          reachability: {
+            prerequisite_states: ["funded actor"],
+            protocol_calls: ["TargetFunctions.supply"],
+            evidence_paths: ["test/foundry/Liveness.t.sol"]
+          }
+        }
+      ]
+    })
+  );
+  assert.equal(result.ok, false);
+  assert.ok(result.issues.some((issue) => issue.code === "PROPERTY_LIVENESS_ORACLE_INVALID"));
 });
 
 test("unknown canonical property references produce a clear diagnostic", () => {
@@ -1833,6 +1907,7 @@ test("an empty optional reference_expectations list is accepted, as omitting it 
   const property = {
     property_id: "property-1",
     status: "pending" as const,
+    semantic_coverage: "deferred" as const,
     implementation_paths: [],
     test_paths: [],
     blocker: {
@@ -1841,7 +1916,7 @@ test("an empty optional reference_expectations list is accepted, as omitting it 
       next_action: "Audit the harness and either implement the assertion or record a concrete blocker."
     }
   };
-  // `@2` requires `selection`; omitting it fails with IMPLEMENTED_PROPERTIES_SELECTION_REQUIRED and would
+  // `@3` requires `selection`; omitting it fails with IMPLEMENTED_PROPERTIES_SELECTION_REQUIRED and would
   // make this test pass or fail for a reason unrelated to the field under test. R51's real document did
   // carry a selection block, which is why its ONLY error was the expectations list.
   const document = (extra: Record<string, unknown>) =>
