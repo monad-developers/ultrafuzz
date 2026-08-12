@@ -1704,14 +1704,44 @@ function timestampField(
   return undefined;
 }
 
-function exactCommandFlagValues(command: string, flag: "--timeout" | "--test-limit" | "--seq-len"): string[] {
-  const escapedFlag = flag.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-  const pattern = new RegExp(`(?:^|\\s)${escapedFlag}(?:(?:=|\\s+)(\\S+))?`, "gu");
-  return [...command.matchAll(pattern)].map((match) => match[1] ?? "");
+function constrainedShellTokens(command: string): string[] | undefined {
+  const tokens = command.trim().split(/\s+/u);
+  const hasShellSyntax = tokens.some(
+    (token) =>
+      token.startsWith("#") ||
+      token.startsWith(">") ||
+      token.startsWith("<") ||
+      token === "&&" ||
+      token === "||" ||
+      token === ";" ||
+      token === "|"
+  );
+  return hasShellSyntax ? undefined : tokens;
+}
+
+function exactReconCommandFlagValues(command: string, flag: "--timeout" | "--test-limit" | "--seq-len"): string[] {
+  const tokens = constrainedShellTokens(command);
+  if (tokens === undefined) return [];
+  const reconIndexes = tokens.flatMap((token, index) =>
+    token === "recon" && tokens[index + 1] === "fuzz" ? [index] : []
+  );
+  if (reconIndexes.length !== 1) return [];
+  const argv = tokens.slice(reconIndexes[0]! + 2);
+  const values: string[] = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index]!;
+    if (token === flag) {
+      values.push(argv[index + 1] ?? "");
+    } else if (token.startsWith(`${flag}=`)) {
+      values.push(token.slice(flag.length + 1));
+    }
+  }
+  return values;
 }
 
 function hasExactHostTimeoutWrapper(command: string, configuredTimeoutSeconds: number): boolean {
-  const tokens = command.trim().split(/\s+/u);
+  const tokens = constrainedShellTokens(command);
+  if (tokens === undefined) return false;
   const timeoutIndexes = tokens.flatMap((token, index) => (token === "timeout" ? [index] : []));
   if (timeoutIndexes.length !== 1 || tokens.includes("--foreground")) return false;
   const timeoutIndex = timeoutIndexes[0]!;
@@ -1777,8 +1807,11 @@ function verifyCurrentCampaignTimeoutEvidence(
   const summaryValue = readJsonFile(summaryPath);
   if (!isRecord(planValue) || !isRecord(resultValue) || !isRecord(summaryValue)) return diagnostics;
 
-  const summarySequenceLength = positiveIntegerField(summaryValue, "sequence_length", summaryPath, diagnostics);
-  if (summarySequenceLength !== undefined && summarySequenceLength !== RECON_STATEFUL_SEQUENCE_LENGTH) {
+  const requiresSequenceEvidence = planValue.schema_version === "ultrafuzz.invariant-campaign-plan.v3";
+  const summarySequenceLength = requiresSequenceEvidence
+    ? positiveIntegerField(summaryValue, "sequence_length", summaryPath, diagnostics)
+    : undefined;
+  if (requiresSequenceEvidence && summarySequenceLength !== RECON_STATEFUL_SEQUENCE_LENGTH) {
     diagnostics.push(
       campaignTimeoutDiagnostic(
         "CAMPAIGN_SEQUENCE_LENGTH_MISMATCH",
@@ -1837,7 +1870,9 @@ function verifyCurrentCampaignTimeoutEvidence(
     }
   }
   const reconTestLimit = stringField(planValue, "recon_test_limit", planPath, diagnostics);
-  const reconSequenceLength = positiveIntegerField(planValue, "recon_sequence_length", planPath, diagnostics);
+  const reconSequenceLength = requiresSequenceEvidence
+    ? positiveIntegerField(planValue, "recon_sequence_length", planPath, diagnostics)
+    : undefined;
   const backendStartedAt = timestampField(planValue, "backend_started_at", planPath, diagnostics);
   const fuzzingDeadline = timestampField(planValue, "fuzzing_deadline_utc", planPath, diagnostics);
   const forceKillDeadline = timestampField(planValue, "force_kill_deadline_utc", planPath, diagnostics);
@@ -1881,7 +1916,7 @@ function verifyCurrentCampaignTimeoutEvidence(
       )
     );
   }
-  if (reconSequenceLength !== undefined && reconSequenceLength !== RECON_STATEFUL_SEQUENCE_LENGTH) {
+  if (requiresSequenceEvidence && reconSequenceLength !== RECON_STATEFUL_SEQUENCE_LENGTH) {
     diagnostics.push(
       campaignTimeoutDiagnostic(
         "CAMPAIGN_SEQUENCE_LENGTH_MISMATCH",
@@ -1949,8 +1984,10 @@ function verifyCurrentCampaignTimeoutEvidence(
     );
   }
   const resultCommand = stringField(resultValue, "exact_command", resultPath, diagnostics);
-  const resultSequenceLength = positiveIntegerField(resultValue, "sequence_length", resultPath, diagnostics);
-  if (resultSequenceLength !== undefined && resultSequenceLength !== RECON_STATEFUL_SEQUENCE_LENGTH) {
+  const resultSequenceLength = requiresSequenceEvidence
+    ? positiveIntegerField(resultValue, "sequence_length", resultPath, diagnostics)
+    : undefined;
+  if (requiresSequenceEvidence && resultSequenceLength !== RECON_STATEFUL_SEQUENCE_LENGTH) {
     diagnostics.push(
       campaignTimeoutDiagnostic(
         "CAMPAIGN_SEQUENCE_LENGTH_MISMATCH",
@@ -1969,9 +2006,11 @@ function verifyCurrentCampaignTimeoutEvidence(
     );
   }
   if (resultCommand !== undefined && configuredTimeoutSeconds !== undefined) {
-    const timeoutValues = exactCommandFlagValues(resultCommand, "--timeout");
-    const testLimitValues = exactCommandFlagValues(resultCommand, "--test-limit");
-    const sequenceLengthValues = exactCommandFlagValues(resultCommand, "--seq-len");
+    const timeoutValues = exactReconCommandFlagValues(resultCommand, "--timeout");
+    const testLimitValues = exactReconCommandFlagValues(resultCommand, "--test-limit");
+    const sequenceLengthValues = requiresSequenceEvidence
+      ? exactReconCommandFlagValues(resultCommand, "--seq-len")
+      : [];
     if (timeoutValues.length !== 1 || timeoutValues[0] !== String(configuredTimeoutSeconds)) {
       diagnostics.push(
         campaignTimeoutDiagnostic(
@@ -1990,7 +2029,10 @@ function verifyCurrentCampaignTimeoutEvidence(
         )
       );
     }
-    if (sequenceLengthValues.length !== 1 || sequenceLengthValues[0] !== String(RECON_STATEFUL_SEQUENCE_LENGTH)) {
+    if (
+      requiresSequenceEvidence &&
+      (sequenceLengthValues.length !== 1 || sequenceLengthValues[0] !== String(RECON_STATEFUL_SEQUENCE_LENGTH))
+    ) {
       diagnostics.push(
         campaignTimeoutDiagnostic(
           "CAMPAIGN_SEQUENCE_LENGTH_COMMAND_INVALID",

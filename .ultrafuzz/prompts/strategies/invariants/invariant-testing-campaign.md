@@ -91,7 +91,7 @@ Use this configured invariant testing fuzzer timeout:
      divide it into per-backend slices.
    - Before launch, write a preliminary `campaign-plan.json` with
      `schema_version` set to exactly
-     `ultrafuzz.invariant-campaign-plan.v2`,
+     `ultrafuzz.invariant-campaign-plan.v3`,
      `configured_fuzzer_timeout_seconds`, `recon_internal_timeout_seconds`,
      `recon_test_limit` (as a decimal string), `recon_sequence_length` set to
      `100`,
