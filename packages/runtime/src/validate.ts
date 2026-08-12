@@ -29,6 +29,9 @@ import {
   runtimeResult
 } from "./utils.js";
 
+const STATEFUL_INVARIANT_CAMPAIGN_PROMPT_ID = "stateful-invariant-campaign";
+const REQUIRED_RECON_SEQUENCE_ARGUMENT = "--seq-len 100";
+
 export async function validateProject(input: ValidateProjectInput) {
   const projectRoot = path.resolve(input.projectRoot);
   const resolved = await loadResolvedProject(input);
@@ -182,8 +185,28 @@ function validatePrompts(projectRoot: string): {
   }
   try {
     const catalog = loadPromptCatalog({ projectRoot });
+    const diagnostics: RuntimeDiagnostic[] = [];
+    const campaignPrompt = catalog.entries.get(STATEFUL_INVARIANT_CAMPAIGN_PROMPT_ID);
+    if (campaignPrompt !== undefined && !campaignPrompt.markdown.includes(REQUIRED_RECON_SEQUENCE_ARGUMENT)) {
+      diagnostics.push({
+        code: "PROMPT_STATEFUL_SEQUENCE_REQUIREMENT_MISSING",
+        message:
+          `stateful invariant campaign prompt must require the runtime-mandated ` +
+          `\`${REQUIRED_RECON_SEQUENCE_ARGUMENT}\` argument; update the custom prompt or preserve local edits ` +
+          "and refresh stock project files with `ultrafuzz init --force`",
+        severity: "error",
+        source: "prompts",
+        path: campaignPrompt.absolutePath ?? campaignPrompt.relativePath
+      });
+    }
     return {
-      posture: postureFromDiagnostics("prompts", "project prompt catalog loads and variables are strict", []),
+      posture: postureFromDiagnostics(
+        "prompts",
+        diagnostics.length === 0
+          ? "project prompt catalog loads and variables are strict"
+          : "project prompt catalog is incompatible with current runtime requirements",
+        diagnostics
+      ),
       summary: {
         prompt_dir: promptDir,
         prompt_count: catalog.orderedIds.length

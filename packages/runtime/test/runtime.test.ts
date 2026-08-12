@@ -3712,6 +3712,32 @@ test("validate rejects unknown agent references before launch", async () => {
   assert.ok(run.diagnostics.some((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN"));
 });
 
+test("validate and plan reject a stale stateful campaign prompt before launch", async () => {
+  const project = tempProject();
+  const init = initProject({ projectRoot: project, force: true });
+  assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+  const campaignPromptPath = path.join(
+    project,
+    ".ultrafuzz/prompts/strategies/invariants/invariant-testing-campaign.md"
+  );
+  const currentPrompt = fs.readFileSync(campaignPromptPath, "utf8");
+  assert.match(currentPrompt, /--seq-len 100/u);
+  fs.writeFileSync(campaignPromptPath, currentPrompt.replaceAll("--seq-len 100", "--seq-len 1"), "utf8");
+
+  const validation = await validateProject({ projectRoot: project, env: {} });
+  assert.equal(validation.ok, false);
+  assert.ok(
+    validation.diagnostics.some((diagnostic) => diagnostic.code === "PROMPT_STATEFUL_SEQUENCE_REQUIREMENT_MISSING")
+  );
+
+  const planned = await planRun({ projectRoot: project, runId: "stale-sequence-prompt", env: {} });
+  assert.equal(planned.ok, false);
+  assert.ok(
+    planned.diagnostics.some((diagnostic) => diagnostic.code === "PROMPT_STATEFUL_SEQUENCE_REQUIREMENT_MISSING")
+  );
+  assert.equal(fs.existsSync(path.join(project, ".ultrafuzz/runs/stale-sequence-prompt")), false);
+});
+
 test("validate ignores unused opt-in model profiles in older agent registries", async () => {
   const project = tempProject();
   const init = initProject({ projectRoot: project, force: true });
