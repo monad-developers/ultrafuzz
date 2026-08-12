@@ -758,7 +758,7 @@ function materializeWorkspacePatchDependencies(
   // sensitive-path rejection -- used to live inside `applyWorkspacePatch`, so skipping a patch meant
   // skipping its validation entirely, and the skip decision reads `result_tree` from a manifest nothing
   // had checked was even well formed.
-  for (const capture of captures) validateWorkspacePatchCapture(workspaceRoot, capture);
+  for (const capture of captures) validateWorkspacePatchCapture(workspaceRoot, capture, task.productionSourceRoots);
   // On a RESUME the worktree lives on a durable volume and still holds the previous attempt's state, so it
   // can already sit at -- or past -- some of these dependencies' outputs. Skip the prefix the worktree
   // already holds (issue #312). On a fresh run at the pinned baseline nothing normally matches, though a
@@ -780,7 +780,7 @@ function materializeWorkspacePatchDependencies(
       const currentTree = captureWorkspaceTree(workspaceRoot);
       if (currentTree !== capture.manifest.base_tree) continue;
     }
-    applyWorkspacePatch(workspaceRoot, capture);
+    applyWorkspacePatch(workspaceRoot, capture, task.productionSourceRoots);
   }
   if (!workspacePatchPreparationTrees.has(task.attemptId)) {
     const persistedPreparation = readWorkspacePatchPreparation(task);
@@ -994,7 +994,12 @@ function materializeWorkspacePatch(task: (typeof taskSpecs)[number]): void {
     // Classify the surviving pair BEFORE writing either half of the new one. Writing the patch first
     // would leave the manifest describing different bytes, and the pair could no longer be recognised
     // as one this node published.
-    const superseded = holdsSupersededWorkspacePatchPair(artifactRoot, workspaceRoot, baselineTree);
+    const superseded = holdsSupersededWorkspacePatchPair(
+      artifactRoot,
+      workspaceRoot,
+      baselineTree,
+      task.productionSourceRoots
+    );
     writeWorkspacePatchArtifact(artifactRoot, "workspace.patch", captured.patch, superseded);
     writeWorkspacePatchArtifact(artifactRoot, "workspace-patch.json", manifest, superseded);
   }
@@ -1034,7 +1039,12 @@ function materializeWorkspacePatch(task: (typeof taskSpecs)[number]): void {
  * this bug warrants, so it is named rather than built -- but anyone reusing this helper somewhere that
  * does NOT immediately overwrite the survivor needs that mechanism instead of this one.
  */
-function holdsSupersededWorkspacePatchPair(artifactRoot: string, workspaceRoot: string, baselineTree: string): boolean {
+function holdsSupersededWorkspacePatchPair(
+  artifactRoot: string,
+  workspaceRoot: string,
+  baselineTree: string,
+  productionSourceRoots: readonly string[]
+): boolean {
   const patchPath = path.resolve(artifactRoot, "workspace.patch");
   const manifestPath = path.resolve(artifactRoot, "workspace-patch.json");
   // Both halves are required: a lone patch keeps the caller's rejection, which is what stops an agent
@@ -1066,9 +1076,11 @@ function holdsSupersededWorkspacePatchPair(artifactRoot: string, workspaceRoot: 
   }
   if (manifest === null || (manifest as Record<string, unknown>).base_tree !== baselineTree) return false;
   try {
-    validateWorkspacePatchCapture(workspaceRoot, { patch, manifest } as Parameters<
-      typeof validateWorkspacePatchCapture
-    >[1]);
+    validateWorkspacePatchCapture(
+      workspaceRoot,
+      { patch, manifest } as Parameters<typeof validateWorkspacePatchCapture>[1],
+      productionSourceRoots
+    );
   } catch {
     return false;
   }

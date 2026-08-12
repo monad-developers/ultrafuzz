@@ -150,7 +150,7 @@ export const workspacePatchJsonSchema = {
   title: "Ultrafuzz workspace patch manifest",
   type: "object",
   additionalProperties: false,
-  required: ["schema_version", "base_commit", "base_tree", "result_tree", "patch_sha256", "files"],
+  required: ["schema_version", "base_commit", "base_tree", "result_tree", "patch_sha256", "source_snapshot", "files"],
   properties: {
     schema_version: { const: WORKSPACE_PATCH_SCHEMA_VERSION },
     base_commit: { type: "string", pattern: "^[0-9a-f]{40,64}$" },

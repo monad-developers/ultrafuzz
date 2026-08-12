@@ -185,6 +185,7 @@ test("workspace patch exclusions pass the contract gate but surface a durable wa
       base_tree: "b".repeat(40),
       result_tree: "c".repeat(40),
       patch_sha256: "d".repeat(64),
+      source_snapshot: { status: "preserved", protected_roots: ["contracts", "src"] },
       files: [{ path: "test/Handlers.t.sol" }],
       excluded_files: [
         {

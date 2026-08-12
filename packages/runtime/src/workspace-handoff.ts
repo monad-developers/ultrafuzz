@@ -280,8 +280,12 @@ function workspacePatchDiffArgs(baselineTree: string): string[] {
  * precede the decision, and re-running it inside `applyWorkspacePatch` keeps that function safe for any
  * caller. Every check here is pure and idempotent; the cost is one extra digest and one extra `rev-parse`.
  */
-export function validateWorkspacePatchCapture(workspaceRoot: string, capture: WorkspacePatchCapture): void {
-  validateManifest(capture.manifest);
+export function validateWorkspacePatchCapture(
+  workspaceRoot: string,
+  capture: WorkspacePatchCapture,
+  expectedProductionSourceRoots: readonly string[]
+): void {
+  validateManifest(capture.manifest, expectedProductionSourceRoots);
   const patchBytes = Buffer.byteLength(capture.patch, "utf8");
   if (patchBytes > MAX_PATCH_BYTES) {
     throw new Error(`workspace patch exceeds ${MAX_PATCH_BYTES} bytes`);
@@ -308,8 +312,12 @@ export function validateWorkspacePatchCapture(workspaceRoot: string, capture: Wo
   }
 }
 
-export function applyWorkspacePatch(workspaceRoot: string, capture: WorkspacePatchCapture): void {
-  validateWorkspacePatchCapture(workspaceRoot, capture);
+export function applyWorkspacePatch(
+  workspaceRoot: string,
+  capture: WorkspacePatchCapture,
+  expectedProductionSourceRoots: readonly string[]
+): void {
+  validateWorkspacePatchCapture(workspaceRoot, capture, expectedProductionSourceRoots);
   const currentTree = captureWorkspaceTree(workspaceRoot);
   if (currentTree === capture.manifest.result_tree) return;
   if (currentTree !== capture.manifest.base_tree) {
@@ -777,7 +785,7 @@ function assertNotIgnoredPatchPath(
   throw new Error(`workspace patch cannot modify an ignored untracked path: ${relativePath}`);
 }
 
-function validateManifest(manifest: WorkspacePatchManifest): void {
+function validateManifest(manifest: WorkspacePatchManifest, expectedProductionSourceRoots: readonly string[]): void {
   if (manifest.schema_version !== WORKSPACE_PATCH_SCHEMA_VERSION) {
     throw new Error("workspace patch manifest schema version is invalid");
   }
@@ -796,6 +804,15 @@ function validateManifest(manifest: WorkspacePatchManifest): void {
     throw new Error("workspace patch source snapshot assertion is invalid");
   }
   const protectedRoots = normalizeProductionSourceRoots(manifest.source_snapshot.protected_roots);
+  const expectedProtectedRoots = normalizeProductionSourceRoots(expectedProductionSourceRoots);
+  if (
+    protectedRoots.length !== expectedProtectedRoots.length ||
+    protectedRoots.some((root, index) => root !== expectedProtectedRoots[index])
+  ) {
+    throw new Error(
+      `workspace patch protected production roots mismatch: expected ${expectedProtectedRoots.join(", ")}, got ${protectedRoots.join(", ")}`
+    );
+  }
   const excluded = new Set<string>();
   if (manifest.excluded_files !== undefined) {
     if (!Array.isArray(manifest.excluded_files) || manifest.excluded_files.length === 0) {
