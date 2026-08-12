@@ -48,6 +48,7 @@ import {
   publicEvalRunId,
   preparePublicEvalSuite,
   publicEvalFailureDiagnosticLogPayload,
+  publicEvalFailureDiagnosticLogPayloadFromRecords,
   publicEvalModelWorkEvidence,
   publicEvalCommandLeftFinalJournal,
   publicEvalRunErrorCanBePublished,
@@ -1156,6 +1157,22 @@ it("publishes only bounded redacted workflow-submission messages from eval JSON"
   }>;
   expect(longDecoded[0]!.message).toContain("stderr: decisive child failure");
   expect(Buffer.byteLength(longDecoded[0]!.message, "utf8")).toBeLessThanOrEqual(1_000);
+});
+
+it("publishes workflow-submission messages from the strict durable eval journal", () => {
+  const secret = "opaque-fixture-secret";
+  const payload = publicEvalFailureDiagnosticLogPayloadFromRecords(
+    [
+      failedRunRecord("row-1", "WORKFLOW_SUBMISSION_FAILED", `detached runner failed: ${secret}`),
+      failedRunRecord("row-2", "EVAL_TARGET_PATH_MISSING", `must not publish ${secret}`)
+    ],
+    [secret]
+  );
+
+  expect(payload).toBeDefined();
+  expect(JSON.parse(Buffer.from(payload!, "base64url").toString("utf8"))).toEqual([
+    { code: "WORKFLOW_SUBMISSION_FAILED", message: "detached runner failed: <redacted>" }
+  ]);
 });
 
 it("reserves bounded capture independently for the final eval stdout envelope", () => {

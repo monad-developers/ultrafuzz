@@ -284,7 +284,13 @@ export async function runPublicBenchmarkWorker(input: {
           // The eval command has finished writing its journal, so what it
           // recorded about launched rows outranks the flag this worker raised
           // before the command began (#320).
-          if (publicEvalModelWorkEvidence(evalRunRoot(prepared.controlRoot, prepared.evalRunId)) === "none") {
+          const publicEvalRoot = evalRunRoot(prepared.controlRoot, prepared.evalRunId);
+          const records = readPublicEvalRunRecords(publicEvalRoot);
+          const failurePayload = publicEvalFailureDiagnosticLogPayloadFromRecords(records ?? [], [
+            ...retainedForbiddenSecretValues
+          ]);
+          if (failurePayload !== undefined) appendPublicEvalFailureDiagnosticLogPayload(logPath, failurePayload);
+          if (publicEvalModelWorkEvidence(publicEvalRoot) === "none") {
             modelWorkStarted = false;
           }
         },
@@ -1368,7 +1374,24 @@ export function publicEvalFailureDiagnosticLogPayload(
     return undefined;
   }
   if (!isPlainRecord(parsed) || !Array.isArray(parsed.diagnostics)) return undefined;
-  const diagnostics = parsed.diagnostics
+  return publicEvalFailureDiagnosticLogPayloadFromDiagnostics(parsed.diagnostics, forbiddenSecretValues);
+}
+
+export function publicEvalFailureDiagnosticLogPayloadFromRecords(
+  records: readonly EvalRunRecord[],
+  forbiddenSecretValues: readonly string[]
+): string | undefined {
+  return publicEvalFailureDiagnosticLogPayloadFromDiagnostics(
+    records.flatMap((record) => record.diagnostics),
+    forbiddenSecretValues
+  );
+}
+
+function publicEvalFailureDiagnosticLogPayloadFromDiagnostics(
+  entries: readonly unknown[],
+  forbiddenSecretValues: readonly string[]
+): string | undefined {
+  const diagnostics = entries
     .filter(
       (entry): entry is Record<string, unknown> =>
         isPlainRecord(entry) && entry.code === "WORKFLOW_SUBMISSION_FAILED" && typeof entry.message === "string"
@@ -1380,6 +1403,14 @@ export function publicEvalFailureDiagnosticLogPayload(
     }));
   if (diagnostics.length === 0) return undefined;
   return Buffer.from(JSON.stringify(diagnostics), "utf8").toString("base64url");
+}
+
+function appendPublicEvalFailureDiagnosticLogPayload(logPath: string, payload: string): void {
+  try {
+    fs.appendFileSync(logPath, `${new Date().toISOString()} eval-failure-diagnostics ${payload}\n`);
+  } catch {
+    // The diagnostic is evidence, not an outcome.
+  }
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
