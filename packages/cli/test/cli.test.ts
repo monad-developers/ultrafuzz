@@ -1615,6 +1615,8 @@ test("report bundle creates a portable ZIP without workspaces or stale report ba
   const engineLogDir = path.join(runData.run_root, "smithers", "logs");
   fs.mkdirSync(engineLogDir, { recursive: true });
   fs.writeFileSync(path.join(engineLogDir, "stream.ndjson"), '{"event":"retry"}\n', "utf8");
+  fs.writeFileSync(path.join(engineLogDir, "node:project-discovery-0-1.ndjson"), '{"event":"agent"}\n', "utf8");
+  fs.writeFileSync(path.join(engineLogDir, "node%3Aproject-discovery-0-1.ndjson"), '{"event":"literal"}\n', "utf8");
 
   const bundled = await cli(project, ["report", "bundle", runData.run_id, "--json"]);
   assert.equal(bundled.code, 0, bundled.stderr);
@@ -1652,6 +1654,23 @@ test("report bundle creates a portable ZIP without workspaces or stale report ba
   // neutral prefix so the archive never names the orchestration engine.
   assert.equal(entries.includes("engine-logs/stream.ndjson"), true);
   assert.equal(zip.readAsText("engine-logs/stream.ndjson"), '{"event":"retry"}\n');
+  assert.equal(entries.includes("engine-logs/node%3Aproject-discovery-0-1.ndjson"), true);
+  assert.equal(zip.readAsText("engine-logs/node%3Aproject-discovery-0-1.ndjson"), '{"event":"agent"}\n');
+  assert.equal(entries.includes("engine-logs/node%253Aproject-discovery-0-1.ndjson"), true);
+  assert.equal(zip.readAsText("engine-logs/node%253Aproject-discovery-0-1.ndjson"), '{"event":"literal"}\n');
+  const bundleManifest = JSON.parse(zip.readAsText("bundle-manifest.json")) as {
+    path_mappings: Array<{ source_path: string; archive_path: string }>;
+  };
+  assert.deepEqual(bundleManifest.path_mappings, [
+    {
+      source_path: "engine-logs/node%3Aproject-discovery-0-1.ndjson",
+      archive_path: "engine-logs/node%253Aproject-discovery-0-1.ndjson"
+    },
+    {
+      source_path: "engine-logs/node:project-discovery-0-1.ndjson",
+      archive_path: "engine-logs/node%3Aproject-discovery-0-1.ndjson"
+    }
+  ]);
   assert.equal(
     entries.some((entry) => /smithers/iu.test(entry)),
     false

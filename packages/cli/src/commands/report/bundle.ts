@@ -49,6 +49,7 @@ interface BundleData {
 interface BundleFile {
   absolutePath: string;
   archivePath: string;
+  sourceArchivePath?: string;
 }
 
 export default class ReportBundle extends Command {
@@ -118,6 +119,9 @@ export default class ReportBundle extends Command {
         ],
         excluded_roots: ["workspaces"],
         excluded_patterns: ["artifacts/final-report/report.json.pre-*"],
+        path_mappings: files
+          .filter((file) => file.sourceArchivePath !== undefined)
+          .map((file) => ({ source_path: file.sourceArchivePath, archive_path: file.archivePath })),
         entry_count_without_manifest: files.length
       };
       zip.addFile("bundle-manifest.json", Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, "utf8"));
@@ -256,11 +260,13 @@ function collectDirectory(
       const archivePath =
         rename === undefined
           ? displayRelativePath(runRoot, absolutePath)
-          : `${rename.archiveRoot}/${displayRelativePath(rename.sourceRoot, absolutePath)}`;
+          : `${rename.archiveRoot}/${portableArchiveRelativePath(displayRelativePath(rename.sourceRoot, absolutePath))}`;
       if (shouldExcludeArchivePath(archivePath)) {
         continue;
       }
-      addBundleFile(runRoot, absolutePath, archivePath, files, diagnostics);
+      const sourceArchivePath =
+        rename === undefined ? undefined : `${rename.archiveRoot}/${displayRelativePath(rename.sourceRoot, absolutePath)}`;
+      addBundleFile(runRoot, absolutePath, archivePath, files, diagnostics, sourceArchivePath);
     }
   }
 }
@@ -270,11 +276,17 @@ function addBundleFile(
   absolutePath: string,
   archivePath: string,
   files: BundleFile[],
-  diagnostics: RuntimeDiagnostic[]
+  diagnostics: RuntimeDiagnostic[],
+  sourceArchivePath?: string
 ): void {
   try {
     assertRegularFileInside(runRoot, absolutePath, "bundle file");
-    files.push({ absolutePath, archivePath: normalizeArchivePath(archivePath) });
+    const normalizedArchivePath = normalizeArchivePath(archivePath);
+    files.push({
+      absolutePath,
+      archivePath: normalizedArchivePath,
+      ...(sourceArchivePath !== undefined && sourceArchivePath !== normalizedArchivePath ? { sourceArchivePath } : {})
+    });
   } catch (error) {
     diagnostics.push({
       code: "REPORT_BUNDLE_FILE_SKIPPED",
@@ -284,6 +296,13 @@ function addBundleFile(
       path: absolutePath
     });
   }
+}
+
+function portableArchiveRelativePath(relativePath: string): string {
+  return relativePath
+    .split("/")
+    .map((segment) => segment.replaceAll("%", "%25").replaceAll(":", "%3A"))
+    .join("/");
 }
 
 function normalizeArchivePath(relativePath: string): string {
