@@ -1164,14 +1164,16 @@ it("publishes workflow-submission messages from the strict durable eval journal"
   const payload = publicEvalFailureDiagnosticLogPayloadFromRecords(
     [
       failedRunRecord("row-1", "WORKFLOW_SUBMISSION_FAILED", `detached runner failed: ${secret}`),
-      failedRunRecord("row-2", "EVAL_TARGET_PATH_MISSING", `must not publish ${secret}`)
+      failedRunRecord("row-2", "EVAL_ROW_LAUNCH_FAILED", `launcher threw: ${secret}`),
+      failedRunRecord("row-3", "EVAL_TARGET_PATH_MISSING", `must not publish ${secret}`)
     ],
     [secret]
   );
 
   expect(payload).toBeDefined();
   expect(JSON.parse(Buffer.from(payload!, "base64url").toString("utf8"))).toEqual([
-    { code: "WORKFLOW_SUBMISSION_FAILED", message: "detached runner failed: <redacted>" }
+    { code: "WORKFLOW_SUBMISSION_FAILED", message: "detached runner failed: <redacted>" },
+    { code: "EVAL_ROW_LAUNCH_FAILED", message: "launcher threw: <redacted>" }
   ]);
 });
 
