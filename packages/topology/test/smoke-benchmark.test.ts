@@ -69,7 +69,9 @@ describe("packaged smoke topology", () => {
 
     expect(production.nodes.some((node) => node.id === "smoke-context")).toBe(false);
     expect(production.nodes.length).toBeGreaterThan(smoke.nodes.length);
-    expect(production.nodes.some((node) => node.id === "stateful-invariant-campaign")).toBe(true);
+    // The NoFuzz control removes the invariant campaign chain from the default project topology; the
+    // remaining assertions still prove the smoke topology has not replaced or trimmed it.
+    expect(production.nodes.some((node) => node.id === "stateful-invariant-campaign")).toBe(false);
     expect(production.nodes.some((node) => node.id === "dynamic-strategy-generator")).toBe(true);
   });
 });

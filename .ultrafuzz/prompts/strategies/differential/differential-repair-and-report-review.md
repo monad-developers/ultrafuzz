@@ -22,26 +22,24 @@ Lane results:
 Audited lanes:
 {{artifact_handoff:reference-and-lane-auditor}}
 
-This workspace should include direct replay of `base-test-setup` fixtures and
-`differential-lane-author` generated lane tests. Use those replayed files for
-final focused-command reruns. If a focused command matches zero tests, first
-check whether the expected lane file exists in this workspace before marking
-the campaign incomplete.
-
 The `differential-red-triage` logical node is expected to provide
 `{{strategy_loop_count}}` fresh attempt artifact directories. If fewer than
 `{{strategy_loop_count}}` independent triage attempt directories are present, do
 not repair; mark the campaign incomplete in `gap-review.json` and
 `differential-report-review.json`.
 
-Never weaken, remove, skip, or over-bound credible production-bug red tests. Do not repair reds classified as production bug, spec mismatch, or unknown. If repair changes observed failures, regenerate the semantic-red registry shape in the repair summary and preserve the old failure packet history.
+Preserve credible production-bug mismatches. Keep production bug, spec
+mismatch, and unknown classifications visible in the report review.
 
 Repair a harness or reference defect only when every fresh triage attempt
 independently agrees it is a harness or reference defect. If the attempts
 disagree, or any attempt classifies the red as production bug, spec mismatch, or
 unknown, preserve the red and report the disagreement.
 
-Run a final gap review before reporting. Include green suites, missing lane artifacts, no-assigned-lane attempts, lanes without focused commands, focused commands that ran zero tests, and audited ready lanes without a corresponding `lane-result.json`. Emit missing-lane or incomplete-campaign work orders when artifacts are absent.
+Run a final gap review before reporting. Include missing lane artifacts,
+no-assigned-lane attempts, and audited ready lanes without a corresponding
+`lane-result.json`. Emit missing-lane or incomplete-campaign work orders when
+artifacts are absent.
 
 Write {{artifact_path}}/repair-summary.json with this JSON shape:
 
@@ -66,7 +64,7 @@ Write {{artifact_path}}/gap-review.json with this JSON shape:
   "lane_results_seen": [],
   "missing_lane_work_orders": [],
   "incomplete_campaign_work_orders": [],
-  "green_suite_evidence": [],
+  "source_review_evidence": [],
   "report_blockers": []
 }
 ```
@@ -90,7 +88,10 @@ Also write the standard findings output to `{{output_findings_path}}`. If
 normal finding so downstream dedupe, triage, and final reporting consume it. Use
 an empty JSON array only when no production-bug reds are confirmed.
 
-Also write `{{artifact_path}}/generated-tests.json` using the standard
-generated-test manifest contract. Include repaired or preserved replay tests
-that should be aggregated downstream, and use an empty `generated_tests` array
-when this node produced no generated or repaired test files.
+A property that holds is not a finding. Record satisfied checks,
+reviewed-surface summaries, and no-defect observations in summaries, not in
+`findings.json`. Write `[]` to `findings.json` when no source-backed violation
+is confirmed.
+
+Do not edit production contracts or repository source files; write only the
+required artifacts.

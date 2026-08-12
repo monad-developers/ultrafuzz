@@ -3,6 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import { packagedTopology } from "@ultrafuzz/config";
 import { initProject } from "@ultrafuzz/runtime";
 import { describe, expect, it } from "vitest";
 
@@ -175,7 +176,19 @@ describe("runner", () => {
     const project = mkdtempSync(path.join(tmpdir(), "ufz-evals-required-command-"));
     initProject({ projectRoot: project, force: true });
     const suite = testSuite(path.join(project, "ground-truth"));
-    const row = testRow(suite, { target: { ...testRow(suite).target, path: project } });
+    // The NoFuzz control removes the invariant campaign chain -- the only nodes that declare
+    // `required_commands` -- from the default project topology, so a row on the default topology has no
+    // backend to be missing and the gate cannot fire. Pin the row's variant to the packaged
+    // `invariant-only` topology, which still declares exactly these three commands, so this test keeps
+    // asserting the preflight gate rather than the shipped default topology's contents.
+    const row = testRow(suite, {
+      target: { ...testRow(suite).target, path: project },
+      variant: {
+        id: "baseline",
+        prompt_overlay_paths: [],
+        topology_path: packagedTopology("invariant-only").path
+      }
+    });
 
     const record = await launchEvalRow({
       projectRoot: project,

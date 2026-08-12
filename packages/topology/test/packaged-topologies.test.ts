@@ -59,7 +59,10 @@ describe("packaged topology collection", () => {
   });
 
   it("declares the invariant backend commands in every topology that runs them", () => {
-    for (const name of ["full", "invariant-only"]) {
+    // The NoFuzz control removes the invariant campaign chain from `full.yml` (the mirror of the
+    // editable project topology), so `invariant-only.yml` is now the only shipped topology that runs
+    // these backends. The required-commands contract itself is unchanged.
+    for (const name of ["invariant-only"]) {
       const topology = loadTopology(REPOSITORY_ROOT, {
         topologyPath: path.join(TOPOLOGY_ROOT, `${name}.yml`),
         requirePromptFiles: true

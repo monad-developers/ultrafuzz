@@ -14,6 +14,7 @@ import {
   writeArtifact,
   writeArtifactManifest
 } from "@ultrafuzz/artifacts";
+import { packagedTopology } from "@ultrafuzz/config";
 import { loadBuiltInPromptAssets } from "@ultrafuzz/prompts";
 
 import {
@@ -114,8 +115,21 @@ test("the campaign provenance gate covers the campaign node the shipped topology
     .map((match) => match[1]!)
     .filter((id) => id.startsWith("stateful-invariant-") && id.includes("campaign"));
 
-  assert.ok(campaignIds.length > 0, "shipped topology declares no invariant campaign node");
-  for (const campaignId of campaignIds) {
+  // The NoFuzz control removes the invariant campaign chain from the DEFAULT topology, so the shipped
+  // dist/topology.yml declares no campaign node at all. The gate list itself is unchanged and still
+  // guards `invariant-only.yml`, so assert both halves: the default topology runs no campaign, and the
+  // gate still covers every campaign id parsed from the packaged invariant topology. The second half
+  // keeps the original regression guard intact -- renaming a campaign node in invariant-only.yml still
+  // fails here instead of silently disabling the provenance join.
+  assert.deepEqual(campaignIds, []);
+
+  const invariantOnlySource = fs.readFileSync(packagedTopology("invariant-only").path, "utf8");
+  const invariantCampaignIds = [...invariantOnlySource.matchAll(/^ {2}- id: (\S+)$/gmu)]
+    .map((match) => match[1]!)
+    .filter((id) => id.startsWith("stateful-invariant-") && id.includes("campaign"));
+
+  assert.ok(invariantCampaignIds.length > 0, "packaged invariant-only topology declares no invariant campaign node");
+  for (const campaignId of invariantCampaignIds) {
     assert.ok(
       CAMPAIGN_LOGICAL_NODE_IDS.some((gated) => gated === campaignId),
       `topology campaign node ${campaignId} is not covered by the provenance gate`
