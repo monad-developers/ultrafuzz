@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 
 import { expect, it } from "vitest";
@@ -27,6 +28,7 @@ import {
   assertPublicWorkerInput,
   assertPublicWorkerBundleLineage,
   checkpointPublicModelWorkStart,
+  captureBoundedCommandOutput,
   materializeBakedCandidate,
   MAX_PUBLIC_OPTIONAL_ROW_ARTIFACT_FILES,
   PUBLIC_OPTIONAL_ROW_ARTIFACTS,
@@ -1154,6 +1156,18 @@ it("publishes only bounded redacted workflow-submission messages from eval JSON"
   }>;
   expect(longDecoded[0]!.message).toContain("stderr: decisive child failure");
   expect(Buffer.byteLength(longDecoded[0]!.message, "utf8")).toBeLessThanOrEqual(1_000);
+});
+
+it("reserves bounded capture independently for the final eval stdout envelope", () => {
+  const stdoutStream = new PassThrough();
+  const stderrStream = new PassThrough();
+  const capture = captureBoundedCommandOutput(stdoutStream, stderrStream, 32);
+
+  stderrStream.end(Buffer.alloc(64, 0x65));
+  stdoutStream.end('{"diagnostics":[{"code":"x"}]}');
+
+  expect(Buffer.concat(capture.stderr)).toEqual(Buffer.alloc(32, 0x65));
+  expect(Buffer.concat(capture.stdout).toString("utf8")).toBe('{"diagnostics":[{"code":"x"}]}');
 });
 
 it("preserves the eval run failure when no diagnostic can be built", async () => {

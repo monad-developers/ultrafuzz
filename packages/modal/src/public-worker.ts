@@ -1230,18 +1230,7 @@ async function runCommand(
     env: { ...process.env, ...options.env },
     stdio: ["ignore", "pipe", "pipe"]
   });
-  const stdout: Buffer[] = [];
-  const stderr: Buffer[] = [];
-  let outputBytes = 0;
-  for (const [stream, chunks] of [
-    [child.stdout, stdout],
-    [child.stderr, stderr]
-  ] as const) {
-    stream.on("data", (chunk: Buffer) => {
-      if (outputBytes < 1024 * 1024) chunks.push(chunk.subarray(0, 1024 * 1024 - outputBytes));
-      outputBytes += chunk.byteLength;
-    });
-  }
+  const { stdout, stderr } = captureBoundedCommandOutput(child.stdout, child.stderr);
   let timedOut = false;
   let aborted = false;
   let killTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1325,6 +1314,31 @@ async function runCommand(
   }
   await fs.promises.appendFile(options.logPath, `${new Date().toISOString()} operation-finished\n`);
   return capturedStdout;
+}
+
+export function captureBoundedCommandOutput(
+  stdoutStream: NodeJS.ReadableStream,
+  stderrStream: NodeJS.ReadableStream,
+  maxBytesPerStream = 1024 * 1024
+): { stdout: Buffer[]; stderr: Buffer[] } {
+  const stdout: Buffer[] = [];
+  const stderr: Buffer[] = [];
+  // Keep the streams independently bounded. `eval run --json` writes its
+  // decisive result envelope to stdout only after all row submissions have
+  // returned, while the commands they invoke can emit substantial stderr.
+  // A shared budget lets that stderr consume the entire allowance and silently
+  // discard the allowlisted workflow-submission diagnostic we need below.
+  for (const [stream, chunks] of [
+    [stdoutStream, stdout],
+    [stderrStream, stderr]
+  ] as const) {
+    let capturedBytes = 0;
+    stream.on("data", (chunk: Buffer) => {
+      if (capturedBytes < maxBytesPerStream) chunks.push(chunk.subarray(0, maxBytesPerStream - capturedBytes));
+      capturedBytes += chunk.byteLength;
+    });
+  }
+  return { stdout, stderr };
 }
 
 /** Why an interrupted command stopped: this worker's own reason first, the signal that took it otherwise. */
