@@ -667,6 +667,9 @@ describe("public Modal benchmark configuration", () => {
       }
     });
     expect(releaseValidation?.steps.find((step) => step.name === "Validate release lane")?.run).toContain("--gates");
+    const packageLaneBuild = releaseValidation?.steps.find((step) => step.name === "Build package lane dependencies");
+    expect(packageLaneBuild?.if).toBe("matrix.lane == 'package-gates'");
+    expect(packageLaneBuild?.run).toBe("pnpm --filter @ultrafuzz/modal... build");
     expect(releaseValidation?.steps.find((step) => step.name === "Validate benchmark history charts")?.if).toBe(
       "matrix.lane == 'cli-typecheck'"
     );

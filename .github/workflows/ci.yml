@@ -95,6 +95,10 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Build package lane dependencies
+        if: matrix.lane == 'package-gates'
+        run: pnpm --filter @ultrafuzz/modal... build
+
       - name: Validate release lane
         run: >-
           pnpm -w validate:release --
