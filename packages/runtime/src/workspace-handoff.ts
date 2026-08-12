@@ -94,7 +94,7 @@ export interface WorkspacePatchManifest {
   result_tree: string;
   patch_sha256: string;
   files: WorkspacePatchFile[];
-  source_snapshot?: {
+  source_snapshot: {
     status: "preserved";
     protected_roots: string[];
   };
@@ -787,16 +787,15 @@ function validateManifest(manifest: WorkspacePatchManifest): void {
   if (!/^[0-9a-f]{64}$/u.test(manifest.patch_sha256)) {
     throw new Error("workspace patch digest is invalid");
   }
-  if (manifest.source_snapshot !== undefined) {
-    if (
-      manifest.source_snapshot.status !== "preserved" ||
-      !Array.isArray(manifest.source_snapshot.protected_roots) ||
-      manifest.source_snapshot.protected_roots.length === 0
-    ) {
-      throw new Error("workspace patch source snapshot assertion is invalid");
-    }
-    normalizeProductionSourceRoots(manifest.source_snapshot.protected_roots);
+  if (
+    manifest.source_snapshot === undefined ||
+    manifest.source_snapshot.status !== "preserved" ||
+    !Array.isArray(manifest.source_snapshot.protected_roots) ||
+    manifest.source_snapshot.protected_roots.length === 0
+  ) {
+    throw new Error("workspace patch source snapshot assertion is invalid");
   }
+  const protectedRoots = normalizeProductionSourceRoots(manifest.source_snapshot.protected_roots);
   const excluded = new Set<string>();
   if (manifest.excluded_files !== undefined) {
     if (!Array.isArray(manifest.excluded_files) || manifest.excluded_files.length === 0) {
@@ -819,6 +818,9 @@ function validateManifest(manifest: WorkspacePatchManifest): void {
         throw new Error(`workspace patch excluded file path is not canonical or is duplicated: ${entry.path}`);
       }
       rejectSensitivePath(normalized);
+      if (protectedRoots.some((root) => pathIsInsideRoot(normalized, root))) {
+        throw new Error(`workspace patch excluded file modifies protected production source: ${normalized}`);
+      }
       excluded.add(normalized);
     }
   }
@@ -836,6 +838,9 @@ function validateManifest(manifest: WorkspacePatchManifest): void {
       throw new Error(`workspace patch path is both included and excluded: ${entry.path}`);
     }
     rejectSensitivePath(normalized);
+    if (protectedRoots.some((root) => pathIsInsideRoot(normalized, root))) {
+      throw new Error(`workspace patch file modifies protected production source: ${normalized}`);
+    }
     seen.add(normalized);
   }
 }

@@ -80,12 +80,22 @@ export const workspacePatchSchema = z
     result_tree: gitObjectId,
     patch_sha256: sha256,
     files: z.array(workspacePatchFileSchema),
-    source_snapshot: workspacePatchSourceSnapshotSchema.optional(),
+    source_snapshot: workspacePatchSourceSnapshotSchema,
     excluded_files: z.array(workspacePatchExcludedFileSchema).min(1).optional()
   })
   .superRefine((manifest, context) => {
+    const protectedRoots = manifest.source_snapshot.protected_roots;
+    const protectedPath = (candidate: string): boolean =>
+      protectedRoots.some((root) => candidate === root || candidate.startsWith(`${root}/`));
     const seen = new Set<string>();
     for (const [index, entry] of manifest.files.entries()) {
+      if (protectedPath(entry.path)) {
+        context.addIssue({
+          code: "custom",
+          message: "Protected production source cannot appear in workspace patch files",
+          path: ["files", index, "path"]
+        });
+      }
       if (seen.has(entry.path)) {
         context.addIssue({
           code: "custom",
@@ -97,6 +107,13 @@ export const workspacePatchSchema = z
     }
     const excluded = new Set<string>();
     for (const [index, entry] of (manifest.excluded_files ?? []).entries()) {
+      if (protectedPath(entry.path)) {
+        context.addIssue({
+          code: "custom",
+          message: "Protected production source cannot be hidden by overflow exclusion",
+          path: ["excluded_files", index, "path"]
+        });
+      }
       if (excluded.has(entry.path)) {
         context.addIssue({
           code: "custom",

@@ -14,7 +14,8 @@ const valid = {
   base_tree: "b".repeat(40),
   result_tree: "c".repeat(40),
   patch_sha256: "d".repeat(64),
-  files: [{ path: "foundry.toml" }]
+  files: [{ path: "foundry.toml" }],
+  source_snapshot: { status: "preserved" as const, protected_roots: ["contracts", "src"] }
 };
 
 test("validates the workspace patch manifest contract", () => {
@@ -26,6 +27,8 @@ test("validates the workspace patch manifest contract", () => {
   assert.equal(validateWorkspacePatchSchema({ ...valid, files: [{ path: ".git/.keep" }] }).ok, false);
   assert.equal(validateWorkspacePatchSchema({ ...valid, files: [{ path: ".npmrc" }] }).ok, false);
   assert.equal(validateWorkspacePatchSchema({ ...valid, files: [{ path: "artifacts/agent.json" }] }).ok, false);
+  assert.equal(validateWorkspacePatchSchema({ ...valid, source_snapshot: undefined }).ok, false);
+  assert.equal(validateWorkspacePatchSchema({ ...valid, files: [{ path: "src/Vault.sol" }] }).ok, false);
 });
 
 test("rejects duplicate or traversal workspace patch paths", () => {
@@ -65,6 +68,10 @@ test("accepts audited exact-file overflow exclusions and rejects ambiguous recor
       files: [{ path: exclusion.path }],
       excluded_files: [exclusion]
     }).ok,
+    false
+  );
+  assert.equal(
+    validateWorkspacePatchSchema({ ...valid, excluded_files: [{ ...exclusion, path: "contracts/Vault.sol" }] }).ok,
     false
   );
 });
