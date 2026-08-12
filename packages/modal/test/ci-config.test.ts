@@ -726,12 +726,14 @@ describe("public Modal benchmark configuration", () => {
     const workspace = path.resolve("../..");
     const recoveryText = fs.readFileSync(path.join(workspace, ".github/workflows/eval-benchmark-recovery.yml"), "utf8");
     const recovery = parse(recoveryText) as {
+      "run-name": string;
       on: { workflow_run: { workflows: string[]; types: string[] } };
       permissions: Record<string, string>;
       concurrency: { group: string; "cancel-in-progress": boolean };
       jobs: Record<
         string,
         {
+          name?: string;
           if?: string;
           env?: Record<string, string>;
           "timeout-minutes"?: number;
@@ -749,10 +751,18 @@ describe("public Modal benchmark configuration", () => {
     };
 
     expect(recovery.on.workflow_run).toEqual({ workflows: ["Modal Eval Benchmarks"], types: ["completed"] });
+    expect(recovery["run-name"]).toBe(
+      "Recover Modal benchmark candidate ${{ github.event.workflow_run.head_sha }} " +
+        "from source run ${{ github.event.workflow_run.id }} attempt ${{ github.event.workflow_run.run_attempt }}"
+    );
     expect(recovery.permissions).toEqual({ actions: "read", contents: "read" });
     expect(recovery.concurrency.group).toContain("github.event.workflow_run.id");
     expect(recovery.concurrency["cancel-in-progress"]).toBe(false);
     const cleanup = recovery.jobs.cleanup_incomplete_run!;
+    expect(cleanup.name).toBe(
+      "Recover candidate ${{ github.event.workflow_run.head_sha }} " +
+        "from source run ${{ github.event.workflow_run.id }} attempt ${{ github.event.workflow_run.run_attempt }}"
+    );
     expect(cleanup.if).toContain("github.event.workflow_run.conclusion == 'cancelled'");
     expect(cleanup.if).toContain("github.event.workflow_run.conclusion == 'failure'");
     expect(cleanup.if).toContain("github.event.workflow_run.conclusion == 'timed_out'");
@@ -763,6 +773,12 @@ describe("public Modal benchmark configuration", () => {
     expect(cleanup.env?.BENCHMARK_CANDIDATE).toBe("${{ github.event.workflow_run.head_sha }}");
     expect(cleanup.env).not.toHaveProperty("BENCHMARK_MODE");
     expect(cleanup["timeout-minutes"]).toBeGreaterThanOrEqual(75);
+
+    const attribution = cleanup.steps.find((step) => step.name === "Publish candidate attribution")!;
+    expect(attribution.run).toContain("$GITHUB_STEP_SUMMARY");
+    expect(attribution.run).toContain("$BENCHMARK_CANDIDATE");
+    expect(attribution.run).toContain("actions/runs/$SOURCE_RUN_ID/attempts/$SOURCE_RUN_ATTEMPT");
+    expect(attribution.run).toContain("$GITHUB_SHA");
 
     const checkouts = cleanup.steps.filter((step) => step.uses?.startsWith("actions/checkout@"));
     expect(checkouts).toHaveLength(2);
