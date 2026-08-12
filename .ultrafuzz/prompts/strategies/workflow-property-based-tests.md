@@ -42,6 +42,15 @@ runtime Strategy loop count is 1, cover every workflow in the stable list.
 For each assigned item, inspect the relevant scenario, function, or logic split
 and record concrete bug evidence when the property is violated.
 
+Run source inspection as separate Bash calls, waiting for each tool result
+before the next command. Use a single simple workspace-relative command per Bash
+call. Do not pipe `grep` into `head`, `tail`, `sort`, or `uniq`, and never
+combine inspection commands with `&&`, `;`, `||`, pipes, or redirection. Bash
+already runs from the isolated workspace path. Do not prepend `cd`, `cd
+... || exit 1`, or any other directory-changing wrapper. Do not use command
+substitution, shell conditionals, absolute binary paths, or host-global
+searches.
+
 Write structured findings to {{output_findings_path}}. Use an empty JSON array
 if no finding is confirmed.
 

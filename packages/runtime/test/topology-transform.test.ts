@@ -65,10 +65,19 @@ test("an empty topology transform preserves the production topology object", () 
 
 test("the exact smoke exclusions produce a valid filtered production topology", () => {
   const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
-  // The NoFuzz control removes the stateful-invariant chain from the default topology, and
-  // `transformTopologyForRun` throws "unknown node" for an excluded id that the topology does not
-  // declare, so those ids can no longer appear in this exclusion list.
+  // This list mirrors BENCHMARK_SMOKE_EXCLUDED_NODE_IDS in packages/evals/src/benchmark-manifest.ts.
+  // `@ultrafuzz/evals` depends on `@ultrafuzz/runtime`, so this package cannot import the constant; the
+  // copy stays complete instead, and the divergence below is asserted explicitly. The NoFuzz control
+  // removes the stateful-invariant chain from the production topology, so the constant now names five
+  // nodes the topology does not declare and `transformTopologyForRun` rejects the full list. Asserting
+  // both the exact rejection and the exact missing set keeps that staleness detectable in both
+  // directions: reinstating the chain, or dropping another id from the constant, fails here.
   const smokeExcludedNodeIds = [
+    "stateful-invariant-setup",
+    "stateful-invariant-handlers",
+    "stateful-invariant-coverage",
+    "stateful-invariant-implement-properties",
+    "stateful-invariant-campaign",
     "differential-library-tests",
     "differential-oracle-planner",
     "reference-harness-author",
@@ -78,30 +87,50 @@ test("the exact smoke exclusions produce a valid filtered production topology", 
     "differential-repair-and-report-review",
     "dynamic-strategy-generator"
   ];
-  const transformed = transformTopologyForRun(loadTopology(repositoryRoot, { requirePromptFiles: true }), {
-    strategyLoops: 1,
-    excludedNodeIds: smokeExcludedNodeIds
-  });
-  const prompts = transformPromptCatalogForRun(loadPromptCatalog({ projectRoot: repositoryRoot }), {
-    strategyLoops: 1,
-    excludedNodeIds: smokeExcludedNodeIds
-  });
+  const source = loadTopology(repositoryRoot, { requirePromptFiles: true });
+  const declaredNodeIds = new Set(source.nodes.map((node) => node.id));
+  const undeclaredExclusions = smokeExcludedNodeIds.filter((id) => !declaredNodeIds.has(id));
+  const declaredExclusions = smokeExcludedNodeIds.filter((id) => declaredNodeIds.has(id));
+
+  assert.deepEqual(undeclaredExclusions, [
+    "stateful-invariant-setup",
+    "stateful-invariant-handlers",
+    "stateful-invariant-coverage",
+    "stateful-invariant-implement-properties",
+    "stateful-invariant-campaign"
+  ]);
+  assert.throws(
+    () => transformTopologyForRun(source, { strategyLoops: 1, excludedNodeIds: smokeExcludedNodeIds }),
+    /unknown node stateful-invariant-setup/u
+  );
+
+  const transform = { strategyLoops: 1, excludedNodeIds: declaredExclusions };
+  const transformed = transformTopologyForRun(source, transform);
+  const prompts = transformPromptCatalogForRun(loadPromptCatalog({ projectRoot: repositoryRoot }), transform);
   const validation = validateTopology(transformed, {
     projectRoot: repositoryRoot,
     requirePromptFiles: true,
     promptTexts: promptTextsForCatalog(prompts)
   });
   const nodeIds = new Set(transformed.nodes.map((node) => node.id));
+  assert.ok(declaredExclusions.length > 0);
   assert.ok(smokeExcludedNodeIds.every((id) => !nodeIds.has(id)));
+  assert.ok(transformed.nodes.every((node) => node.depends_on.every((dependency) => nodeIds.has(dependency))));
   assert.equal(validation.effectiveLoopCounts["boundary-tests"], 1);
   assert.equal(validation.effectiveLoopCounts["encode-decode"], 1);
 });
 
-test("the invariant-only topology retains the whole stateful-invariant chain", () => {
-  // Retargeted to `invariant-only.yml`: the NoFuzz control removes the stateful-invariant chain from
-  // the default topology, so the chain can no longer be derived by excluding strategies from it. The
-  // packaged invariant topology IS the pre-excluded form, and it still has to reach the review fan-in
-  // through its own surviving dependencies -- which is the property this test exists to protect.
+test("the invariant-only exclusions retain the whole stateful-invariant chain", () => {
+  // The inverse of the smoke exclusions: invariant-only campaigns drop every
+  // strategy except the stateful-invariant chain, so the retained chain still
+  // has to reach the review fan-in through its own surviving dependencies.
+  //
+  // The NoFuzz control removes that chain from the production topology, so the chain can no longer be
+  // derived by excluding strategies from it. `invariant-only.yml` is the already-excluded form of the
+  // same graph, so the exhaustive derivation runs against it: every strategies node it declares must
+  // belong to the chain (an empty inverse exclusion set, asserted exactly rather than assumed), the
+  // whole chain must survive, and the exclusion / depends_on-rewrite path is still exercised below on
+  // the same topology.
   const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
   const source = loadTopology(repositoryRoot, {
     topologyPath: packagedTopology("invariant-only").path,
@@ -110,7 +139,10 @@ test("the invariant-only topology retains the whole stateful-invariant chain", (
   const invariantNodeIds = source.nodes
     .filter((node) => node.group === "strategies" && node.id.startsWith("stateful-invariant-"))
     .map((node) => node.id);
-  const transform = { strategyLoops: 1 };
+  const invariantOnlyExcludedNodeIds = source.nodes
+    .filter((node) => node.group === "strategies" && !invariantNodeIds.includes(node.id))
+    .map((node) => node.id);
+  const transform = { strategyLoops: 1, excludedNodeIds: invariantOnlyExcludedNodeIds };
   const transformed = transformTopologyForRun(source, transform);
   const prompts = transformPromptCatalogForRun(loadPromptCatalog({ projectRoot: repositoryRoot }), transform);
   const validation = validateTopology(transformed, {
@@ -120,12 +152,14 @@ test("the invariant-only topology retains the whole stateful-invariant chain", (
   });
   const nodeIds = new Set(transformed.nodes.map((node) => node.id));
 
-  assert.ok(invariantNodeIds.length >= 5, "the invariant topology no longer declares a stateful-invariant chain");
-  assert.ok(invariantNodeIds.every((id) => nodeIds.has(id)));
-  assert.ok(
-    !nodeIds.has("boundary-tests") && !nodeIds.has("dynamic-strategy-generator"),
-    "the invariant topology should not carry the unrelated strategy lanes"
+  assert.ok(invariantNodeIds.length >= 5, "the invariant-only topology no longer declares a stateful-invariant chain");
+  assert.deepEqual(
+    invariantOnlyExcludedNodeIds,
+    [],
+    "the invariant-only topology must declare no strategy outside the stateful-invariant chain"
   );
+  assert.ok(invariantNodeIds.every((id) => nodeIds.has(id)));
+  assert.ok(invariantOnlyExcludedNodeIds.every((id) => !nodeIds.has(id)));
   assert.deepEqual(transformed.nodes.find((node) => node.id === "stateful-invariant-handlers")?.depends_on, [
     "stateful-invariant-setup"
   ]);
@@ -134,6 +168,16 @@ test("the invariant-only topology retains the whole stateful-invariant chain", (
     "the review fan-in lost its only surviving strategy dependency"
   );
   for (const id of invariantNodeIds) assert.equal(validation.effectiveLoopCounts[id], 1);
+
+  // Excluding the chain's root must remove it from the node list and from every `depends_on` that names
+  // it, so the rewrite path this test used to exercise through the inverse exclusion set stays covered.
+  const withoutChainRoot = transformTopologyForRun(source, {
+    strategyLoops: 1,
+    excludedNodeIds: ["stateful-invariant-setup"]
+  });
+  assert.ok(!withoutChainRoot.nodes.some((node) => node.id === "stateful-invariant-setup"));
+  assert.deepEqual(withoutChainRoot.nodes.find((node) => node.id === "stateful-invariant-handlers")?.depends_on, []);
+  assert.ok(withoutChainRoot.nodes.every((node) => !node.depends_on.includes("stateful-invariant-setup")));
 });
 
 test("invariant-only strategy loops repeat the serial coverage stage", () => {

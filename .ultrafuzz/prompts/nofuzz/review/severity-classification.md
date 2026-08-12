@@ -1,5 +1,5 @@
 ---
-id: severity-classification
+id: nofuzz-severity-classification
 display_name: Severity classification
 ---
 
@@ -87,10 +87,10 @@ non-production appendix, keep its upstream `triage_classification`, use a
 canonical `status` such as `needs-review` or `false-positive`, and do not
 describe it as a production bug.
 
-Preserve stateful invariant context notes exactly, including
-`stateful_failure_classification=<classification>`. Use them as root-cause
-context, not as permission to promote invalid or blocked records. Do not
-promote `blocked-unreproduced` records without replayable evidence. Do not
+Preserve upstream context notes exactly, including
+`stateful_failure_classification=<classification>` when present. Use them as
+root-cause context, not as permission to promote invalid or blocked records. Do
+not promote `blocked-unreproduced` records without replayable evidence. Do not
 promote source-comment-only assumptions to production bugs without support from
 public docs, README, interfaces, tests, emitted behavior, or other allowed
 public sources.
@@ -98,18 +98,23 @@ public sources.
 ## Public reachability gate for helper-level findings
 
 Before assigning production severity, identify findings whose proof depends on
-direct calls to an internal helper, library function, generated wrapper, or
-test-only adapter. Production severity requires either a public/external
-entrypoint trace or a generated public wrapper PoC that reaches the same
-behavior under production-like preconditions.
+direct calls to an internal helper, library function, auxiliary wrapper, or
+test-only adapter. Production severity requires source-backed public/external
+entrypoint evidence that reaches the same behavior under production-like
+preconditions.
 
 For every helper-level finding that remains in the output, record one of these
 exact reachability tokens:
 
 - `reachability=public-entrypoint-trace`
-- `reachability=generated-public-wrapper-poc`
+- `reachability=public-caller-source-chain`
 - `reachability=helper-only`
 - `reachability=public-wrapper-required`
+
+This list is exactly the set the triage node can emit in this topology. Treat
+`reachability=public-entrypoint-trace` and
+`reachability=public-caller-source-chain` as the two promotion-eligible tokens,
+and any other reachability token as an invalid upstream artifact.
 
 Also include concise `helper_proof=<summary>` and
 `public_exploitability=<summary>` notes when they are relevant. Helper-only
@@ -296,13 +301,9 @@ Invalid or out of scope:
 Do not include invalid or out-of-scope records like the example above in the
 production report entries.
 
-Make sure compilation is passing but do not fix any failing tests. If Foundry
-dependencies are missing, restore project-pinned dependencies first, such as
-`git submodule update --init --recursive lib/forge-std` when `.gitmodules`
-contains that path. Do not run `forge install` or rewrite `foundry.lock` when a
-pinned dependency path already exists. Dependency hydration used only to run
-verification is not a target workspace change; do not include lockfile or
-dependency-vendor drift in the reported artifacts.
+Do not edit production contracts or repository source files; write only the
+required artifacts. Do not install, fetch, restore, or update dependencies, and
+do not rewrite lockfiles or dependency-vendor directories.
 
 Save severity-classified findings to
 {{artifact_path}}/severity-classified-findings.json as JSON.

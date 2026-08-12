@@ -34,7 +34,7 @@ nodes:
       - final-report
   - id: project-discovery
     kind: agentic
-    prompt: setup/project-discovery.md
+    prompt: nofuzz/setup/project-discovery.md
     group: setup
     depends_on:
       - __start__
@@ -56,7 +56,7 @@ nodes:
         primary: true
   - id: setup-foundry
     kind: agentic
-    prompt: setup/prepare-foundry-harness.md
+    prompt: nofuzz/setup/prepare-foundry-harness.md
     group: setup
     depends_on:
       - actors-flows
@@ -70,7 +70,7 @@ nodes:
         contract: ultrafuzz/workspace-patch@1
   - id: base-test-setup
     kind: agentic
-    prompt: setup/discover-base-test.md
+    prompt: nofuzz/setup/discover-base-test.md
     group: setup
     depends_on:
       - setup-foundry
@@ -672,7 +672,7 @@ nodes:
     loops: 1
   - id: dedupe-findings
     kind: agentic
-    prompt: review/dedupe-findings.md
+    prompt: nofuzz/review/dedupe-findings.md
     group: review
     depends_on:
       - boundary-tests
@@ -711,7 +711,7 @@ nodes:
         contract: ultrafuzz/json-object@1
   - id: triage
     kind: agentic
-    prompt: review/triage.md
+    prompt: nofuzz/review/triage.md
     group: review
     depends_on:
       - dedupe-findings
@@ -723,7 +723,7 @@ nodes:
         contract: ultrafuzz/json-object@1
   - id: severity-classification
     kind: agentic
-    prompt: review/severity-classification.md
+    prompt: nofuzz/review/severity-classification.md
     group: review
     depends_on:
       - triage
@@ -737,7 +737,7 @@ nodes:
         contract: ultrafuzz/json-object@1
   - id: final-report
     kind: agentic
-    prompt: review/final-report.md
+    prompt: nofuzz/review/final-report.md
     group: review
     depends_on:
       - severity-classification

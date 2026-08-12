@@ -59,22 +59,38 @@ describe("packaged topology collection", () => {
   });
 
   it("declares the invariant backend commands in every topology that runs them", () => {
-    // The NoFuzz control removes the invariant campaign chain from `full.yml` (the mirror of the
-    // editable project topology), so `invariant-only.yml` is now the only shipped topology that runs
-    // these backends. The required-commands contract itself is unchanged.
-    for (const name of ["invariant-only"]) {
+    // The NoFuzz control removes the invariant chain from `full.yml` (the mirror of the editable project
+    // topology), so the set of topologies that run these backends is derived rather than hardcoded: the
+    // command contract is asserted wherever the chain ships, and a topology without the chain must claim
+    // no backend at all. That keeps both halves pinned -- a chain node reintroduced without its
+    // required_commands, or an unrelated topology claiming a backend it never runs, still fails here.
+    const expectedCommands = new Map([
+      ["stateful-invariant-coverage", ["covg-eval", "recon", "recon-generate"]],
+      ["stateful-invariant-campaign", ["recon"]]
+    ]);
+    const topologiesWithChain: string[] = [];
+
+    for (const name of ["full", "smoke", "invariant-only"]) {
       const topology = loadTopology(REPOSITORY_ROOT, {
         topologyPath: path.join(TOPOLOGY_ROOT, `${name}.yml`),
         requirePromptFiles: true
       });
-      expect(topology.nodes.find((node) => node.id === "stateful-invariant-coverage")?.required_commands).toEqual([
-        "covg-eval",
-        "recon",
-        "recon-generate"
-      ]);
-      expect(topology.nodes.find((node) => node.id === "stateful-invariant-campaign")?.required_commands).toEqual([
-        "recon"
-      ]);
+      const chainNodes = topology.nodes.filter((node) => node.id.startsWith("stateful-invariant-"));
+      if (chainNodes.length === 0) {
+        expect(
+          topology.nodes.filter((node) => (node.required_commands ?? []).length > 0),
+          `${name} declares backend commands without the chain that runs them`
+        ).toEqual([]);
+        continue;
+      }
+      topologiesWithChain.push(name);
+      for (const [nodeId, commands] of expectedCommands) {
+        expect(topology.nodes.find((node) => node.id === nodeId)?.required_commands, `${name}:${nodeId}`).toEqual(
+          commands
+        );
+      }
     }
+
+    expect(topologiesWithChain).toEqual(["invariant-only"]);
   });
 });

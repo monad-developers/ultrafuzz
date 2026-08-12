@@ -27,6 +27,15 @@ of scope.
 Plan only candidate lanes whose expected behavior can be justified by public
 evidence. Prefer high-signal public/external equality.
 
+Run source inspection as separate Bash calls, waiting for each tool result
+before the next command. Use a single simple workspace-relative command per Bash
+call. Do not pipe `grep` into `head`, `tail`, `sort`, or `uniq`, and never
+combine inspection commands with `&&`, `;`, `||`, pipes, or redirection. Bash
+already runs from the isolated workspace path. Do not prepend `cd`, `cd
+... || exit 1`, or any other directory-changing wrapper. Do not use command
+substitution, shell conditionals, absolute binary paths, or host-global
+searches.
+
 Write {{artifact_path}}/differential-plan.json with this JSON shape:
 
 For every `public_evidence_paths` string, use a plain safe relative file path

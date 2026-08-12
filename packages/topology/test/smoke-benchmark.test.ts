@@ -7,6 +7,13 @@ import { expandTopology, loadTopology } from "../src/index.js";
 
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const SMOKE_TOPOLOGY_PATH = path.join(REPOSITORY_ROOT, "packages", "config", "topologies", "smoke.yml");
+const INVARIANT_ONLY_TOPOLOGY_PATH = path.join(
+  REPOSITORY_ROOT,
+  "packages",
+  "config",
+  "topologies",
+  "invariant-only.yml"
+);
 const STRATEGY_IDS = [
   "time-warp-sequences",
   "external-dependency-boundaries",
@@ -66,12 +73,25 @@ describe("packaged smoke topology", () => {
   it("does not replace or trim the production topology", () => {
     const smoke = loadTopology(REPOSITORY_ROOT, { topologyPath: SMOKE_TOPOLOGY_PATH });
     const production = loadTopology(REPOSITORY_ROOT);
+    const invariantOnly = loadTopology(REPOSITORY_ROOT, { topologyPath: INVARIANT_ONLY_TOPOLOGY_PATH });
+    const campaignChainIds = [
+      "stateful-invariant-setup",
+      "stateful-invariant-handlers",
+      "stateful-invariant-coverage",
+      "stateful-invariant-implement-properties",
+      "stateful-invariant-campaign"
+    ];
 
     expect(production.nodes.some((node) => node.id === "smoke-context")).toBe(false);
     expect(production.nodes.length).toBeGreaterThan(smoke.nodes.length);
-    // The NoFuzz control removes the invariant campaign chain from the default project topology; the
-    // remaining assertions still prove the smoke topology has not replaced or trimmed it.
-    expect(production.nodes.some((node) => node.id === "stateful-invariant-campaign")).toBe(false);
+    // The NoFuzz control removes the invariant campaign chain from the production topology, so the
+    // chain's presence is asserted where it still ships. Both halves are pinned: the production topology
+    // carries no chain node, and `invariant-only.yml` carries the whole chain -- so neither the control's
+    // removal nor the packaged invariant topology can drift unnoticed.
+    expect(production.nodes.filter((node) => campaignChainIds.includes(node.id))).toEqual([]);
+    expect(invariantOnly.nodes.filter((node) => campaignChainIds.includes(node.id)).map((node) => node.id)).toEqual(
+      campaignChainIds
+    );
     expect(production.nodes.some((node) => node.id === "dynamic-strategy-generator")).toBe(true);
   });
 });

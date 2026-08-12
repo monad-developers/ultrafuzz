@@ -43,6 +43,15 @@ property catalog, and setup artifacts. With this run's loop values, work only on
 surfaces where `surface_index % {{strategy_loop_count}} == {{strategy_loop_index}}`.
 If the runtime Strategy loop count is 1, cover every surface in the stable list.
 
+Run source inspection as separate Bash calls, waiting for each tool result
+before the next command. Use a single simple workspace-relative command per Bash
+call. Do not pipe `grep` into `head`, `tail`, `sort`, or `uniq`, and never
+combine inspection commands with `&&`, `;`, `||`, pipes, or redirection. Bash
+already runs from the isolated workspace path. Do not prepend `cd`, `cd
+... || exit 1`, or any other directory-changing wrapper. Do not use command
+substitution, shell conditionals, absolute binary paths, or host-global
+searches.
+
 For each assigned surface, inspect at least one sequence where time changes
 between two or more real protocol calls. Single-call timestamp behavior is only
 useful when that is the protocol's only reachable time behavior.

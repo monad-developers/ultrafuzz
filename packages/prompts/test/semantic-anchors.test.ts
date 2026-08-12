@@ -17,71 +17,26 @@ function generatedTestManifestSources(markdown: string): string[] {
   return [...markdown.matchAll(/\{\{artifact_path:([^}]+)\}\}\/generated-tests\.json/gu)].map((match) => match[1]!);
 }
 
+// The NoFuzz control removes the stateful-invariant chain and every generated-test output from the
+// DEFAULT topology only. `invariant-only.yml` still ships that chain, still runs the same prompts, and
+// is now the only packaged topology that authors generated tests, so the assertions that used to read
+// the invariant contract out of the default topology read it here instead. The default topology is
+// still asserted, from the other side, to carry no campaign chain and no generated-test manifest, so
+// neither half can drift without a failure.
 const DEFAULT_TOPOLOGY_PATH = fileURLToPath(new URL("../../../.ultrafuzz/topology.yml", import.meta.url));
 const INVARIANT_ONLY_TOPOLOGY_PATH = fileURLToPath(
   new URL("../../../packages/config/topologies/invariant-only.yml", import.meta.url)
 );
 
-function topologyNodes(topologyPath: string): Array<{
+interface TopologyNode {
   id: string;
   prompt?: string;
   depends_on?: string[];
   outputs?: Array<{ path: string; contract?: string }>;
-}> {
-  return (
-    YAML.parse(readFileSync(topologyPath, "utf8")) as {
-      nodes: Array<{
-        id: string;
-        prompt?: string;
-        depends_on?: string[];
-        outputs?: Array<{ path: string; contract?: string }>;
-      }>;
-    }
-  ).nodes;
 }
 
-// The NoFuzz control removes fuzz execution and generated-test authoring from the DEFAULT topology
-// only; `invariant-only.yml` and `smoke.yml` still ship the campaign chain, and their prompts stay in
-// the built-in catalog. So the negative anchors below must be scoped to the prompts the default graph
-// can actually reach -- asserting over the whole catalog would fail on those retained prompts, and a
-// blanket path-prefix exemption would silently gut the assertions instead.
-function reachablePromptPaths(): Set<string> {
-  return new Set(
-    topologyNodes(DEFAULT_TOPOLOGY_PATH)
-      .map((node) => node.prompt)
-      .filter((value): value is string => typeof value === "string")
-  );
-}
-
-function reachablePromptAssets(): Array<{ relativePath: string; markdown: string }> {
-  const reachable = reachablePromptPaths();
-  const assets = loadBuiltInPromptAssets().filter((asset) => reachable.has(asset.relativePath));
-  if (assets.length !== reachable.size) {
-    const missing = [...reachable].filter((path) => !assets.some((asset) => asset.relativePath === path));
-    throw new Error(`default topology references prompts missing from the catalog: ${missing.join(", ")}`);
-  }
-  return assets;
-}
-
-function reachablePromptCorpus(): string {
-  return reachablePromptAssets()
-    .map((asset) => asset.markdown)
-    .join("\n");
-}
-
-// Every `strategies/` prompt the default topology reaches that also declares a `findings.json` output.
-// These are the prompts the control reframed from test authoring to source analysis, so they are the
-// ones whose findings path and anti-false-positive counterweight the paired precision comparison
-// depends on. Derived from the topology so a new strategy node cannot skip the guards below.
-function reframedFindingsProducerPrompts(): string[] {
-  return topologyNodes(DEFAULT_TOPOLOGY_PATH)
-    .filter(
-      (node) =>
-        typeof node.prompt === "string" &&
-        node.prompt.startsWith("strategies/") &&
-        (node.outputs ?? []).some((output) => output.path === "findings.json")
-    )
-    .map((node) => node.prompt!);
+function topologyNodes(topologyPath: string): TopologyNode[] {
+  return (YAML.parse(readFileSync(topologyPath, "utf8")) as { nodes: TopologyNode[] }).nodes;
 }
 
 describe("prompt semantic anchors", () => {
@@ -365,11 +320,7 @@ describe("prompt semantic anchors", () => {
       .map((asset) => asset.markdown)
       .join("\n");
 
-    // The NoFuzz control makes discovery read-only, so it no longer probes local tooling with
-    // `forge --version`; the surviving requirement is that tooling availability is RECORDED as
-    // evidence rather than resolved by running a fuzzer CLI.
-    expect(markdown).toContain("Record visible project-local tooling evidence");
-    expect(markdown).not.toContain("forge --version");
+    expect(markdown).toContain("forge --version");
     expect(promptCorpus).not.toContain("echidna --version");
     expect(promptCorpus).not.toContain("medusa --version");
     expect(promptCorpus).not.toContain("halmos --version");
@@ -410,13 +361,11 @@ describe("prompt semantic anchors", () => {
     const flatCampaign = campaign.replace(/\s+/gu, " ");
     const aggregate = prompt("review/aggregate-test-files.md");
     const dynamic = prompt("strategies/dynamic-strategy-generator.md");
-    // The campaign chain lives in `invariant-only.yml` under the NoFuzz control; the default topology
-    // no longer declares it. The backend-neutrality contract is unchanged and still needs coverage, so
-    // this half reads the packaged topology that actually runs the campaign.
-    const topologyPath = INVARIANT_ONLY_TOPOLOGY_PATH;
-    const topologySource = readFileSync(topologyPath, "utf8");
-    const nodes = topologyNodes(topologyPath);
-    const campaignNode = nodes.find((node) => node.id === "stateful-invariant-campaign");
+    const topologySource = readFileSync(INVARIANT_ONLY_TOPOLOGY_PATH, "utf8");
+    const defaultTopologySource = readFileSync(DEFAULT_TOPOLOGY_PATH, "utf8");
+    const invariantNodes = topologyNodes(INVARIANT_ONLY_TOPOLOGY_PATH);
+    const defaultNodes = topologyNodes(DEFAULT_TOPOLOGY_PATH);
+    const campaignNode = invariantNodes.find((node) => node.id === "stateful-invariant-campaign");
 
     expect(campaignNode?.outputs?.map((output) => output.path)).toEqual(
       expect.arrayContaining([
@@ -436,12 +385,22 @@ describe("prompt semantic anchors", () => {
     expect(campaignNode?.outputs?.find((output) => output.path === "campaign-plan.json")?.contract).toBe(
       "ultrafuzz/invariant-campaign-plan@1"
     );
-    expect(nodes.find((node) => node.id === "dedupe-findings")?.depends_on).toContain("stateful-invariant-campaign");
-    expect(`${topologySource}\n${aggregate}\n${dynamic}`).not.toContain("stateful-invariant-recon-campaign");
+    // In `invariant-only.yml` the campaign must still reach the review fan-in through its own
+    // dependencies; `dynamic-strategy-generator` is not part of that topology, so the default topology
+    // carries the other half of the same guard: it declares no invariant chain and nothing depends on
+    // the campaign, which is exactly what the control removed.
+    expect(invariantNodes.find((node) => node.id === "dedupe-findings")?.depends_on).toContain(
+      "stateful-invariant-campaign"
+    );
+    expect(defaultNodes.filter((node) => node.id.startsWith("stateful-invariant-"))).toEqual([]);
+    expect(defaultNodes.flatMap((node) => node.depends_on ?? [])).not.toContain("stateful-invariant-campaign");
+    expect(`${topologySource}\n${defaultTopologySource}\n${aggregate}\n${dynamic}`).not.toContain(
+      "stateful-invariant-recon-campaign"
+    );
     expect(aggregate).toContain("{{ancestor_generated_test_manifests}}");
-    // `dynamic-strategy-generator` is absent from `invariant-only.yml`, and the NoFuzz control removed
-    // its generated-test manifest handoffs, so it no longer reads the campaign manifest.
-    expect(dynamic).not.toContain("{{artifact_path:stateful-invariant-campaign}}/generated-tests.json");
+    // The control's dynamic strategy generator authors no tests, so it reads no generated-test manifest
+    // from any node. Asserting the empty derivation keeps a reintroduced manifest reference visible.
+    expect(generatedTestManifestSources(dynamic)).toEqual([]);
 
     expect(campaign).toContain("final recon-fuzzer campaign");
     expect(campaign).toContain("one implemented Chimera property suite");
@@ -506,10 +465,6 @@ describe("prompt semantic anchors", () => {
   });
 
   it("publishes runtime-owned workspace patches for every invariant handoff", () => {
-    // Retargeted to `invariant-only.yml`: the NoFuzz control removed the stateful-invariant nodes from
-    // the default topology, but the workspace-patch output contract they carry is unchanged and still
-    // needs coverage in the topology that declares them.
-    const nodes = topologyNodes(INVARIANT_ONLY_TOPOLOGY_PATH);
     const invariantNodeIds = [
       "stateful-invariant-setup",
       "stateful-invariant-handlers",
@@ -517,16 +472,31 @@ describe("prompt semantic anchors", () => {
       "stateful-invariant-implement-properties",
       "stateful-invariant-campaign"
     ];
+    // Asserted over every packaged topology that declares these nodes rather than over one topology, so
+    // the contract still holds wherever the chain ships: `invariant-only.yml` must declare all five, and
+    // the control's default topology declares none. If a chain node is ever added back to the default
+    // topology without the patch outputs, this still fails.
+    const declaringTopologies = [INVARIANT_ONLY_TOPOLOGY_PATH, DEFAULT_TOPOLOGY_PATH];
+    const declaredCounts = new Map<string, number>();
 
-    for (const id of invariantNodeIds) {
-      const outputs = nodes.find((node) => node.id === id)?.outputs ?? [];
-      expect(outputs, id).toEqual(
-        expect.arrayContaining([
-          { path: "workspace.patch", contract: "ultrafuzz/text@1" },
-          { path: "workspace-patch.json", contract: "ultrafuzz/workspace-patch@1" }
-        ])
-      );
+    for (const topologyPath of declaringTopologies) {
+      const nodes = topologyNodes(topologyPath);
+      for (const id of invariantNodeIds) {
+        const node = nodes.find((candidate) => candidate.id === id);
+        if (node === undefined) {
+          continue;
+        }
+        declaredCounts.set(id, (declaredCounts.get(id) ?? 0) + 1);
+        expect(node.outputs ?? [], `${topologyPath}:${id}`).toEqual(
+          expect.arrayContaining([
+            { path: "workspace.patch", contract: "ultrafuzz/text@1" },
+            { path: "workspace-patch.json", contract: "ultrafuzz/workspace-patch@1" }
+          ])
+        );
+      }
     }
+
+    expect([...invariantNodeIds].filter((id) => (declaredCounts.get(id) ?? 0) > 0)).toEqual(invariantNodeIds);
   });
 
   it("keeps invariant setup and coverage JSON-first with Markdown parity", () => {
@@ -541,249 +511,108 @@ describe("prompt semantic anchors", () => {
   });
 
   it("keeps generated-test manifests on the canonical generated_tests contract", () => {
-    // The NoFuzz control removes every `generated-tests.json` output from the DEFAULT topology, but the
-    // canonical `generated_tests` manifest contract still ships for `invariant-only.yml`, and the shared
-    // `generated-tests.mdx` output-contract template still documents it. Both stay pinned here; only the
-    // topology this half reads is retargeted.
     const aggregate = prompt("review/aggregate-test-files.md");
+    const dynamic = prompt("strategies/dynamic-strategy-generator.md");
     const templatePath = fileURLToPath(
       new URL("../../../.ultrafuzz/prompts/_templates/output-contract/generated-tests.mdx", import.meta.url)
     );
-    const template = readFileSync(templatePath, "utf8");
-    const topologyPath = INVARIANT_ONLY_TOPOLOGY_PATH;
-    const nodes = topologyNodes(topologyPath);
+    // `invariant-only.yml` is now the only packaged topology whose nodes author generated tests, so the
+    // node-side half of the manifest contract is asserted there. The hardcoded `reference-harness-author`
+    // check is replaced by an exhaustive derivation over every node whose prompt writes a manifest, so a
+    // renamed or newly added authoring node cannot slip past this test.
+    const invariantNodes = topologyNodes(INVARIANT_ONLY_TOPOLOGY_PATH);
     const requiredArtifactsById = new Map(
-      nodes.map((node) => [node.id, (node.outputs ?? []).map((output) => output.path)])
+      invariantNodes.map((node) => [node.id, (node.outputs ?? []).map((output) => output.path)])
     );
-    const promptCorpus = loadBuiltInPromptAssets()
-      .map((asset) => asset.markdown)
-      .join("\n");
-    const manifestSources = new Set(generatedTestManifestSources(aggregate));
+    const assets = loadBuiltInPromptAssets();
+    const promptCorpus = assets.map((asset) => asset.markdown).join("\n");
+    const manifestWritingPromptPaths = new Set(
+      assets
+        .filter((asset) => asset.markdown.includes("{{artifact_dir}}/generated-tests.json"))
+        .map((asset) => asset.relativePath)
+    );
+    const manifestSources = new Set([
+      ...generatedTestManifestSources(aggregate),
+      ...generatedTestManifestSources(dynamic)
+    ]);
 
-    expect(template).toContain("generated_tests");
+    expect(readFileSync(templatePath, "utf8")).toContain("generated_tests");
     expect(aggregate).toContain("manifest `generated_tests` entries");
-    // Whole-catalog assertion, exactly as at base: the legacy `test_files` key must appear nowhere in
-    // the built-in catalog or the shared template, including the prompts the default topology cannot
-    // reach. Narrowing this to reachable prompts is not forced by the control.
-    expect(`${template}\n${promptCorpus}`).not.toContain("test_files");
-    expect(readFileSync(topologyPath, "utf8")).toMatch(
-      /id: stateful-invariant-campaign[\s\S]*outputs:[\s\S]*path: generated-tests\.json/u
+    // The control's dynamic strategy generator no longer plans generated tests, so it carries no
+    // manifest key at all; the canonical-key guard below covers every prompt that still writes one.
+    expect(dynamic).not.toContain("generated_tests");
+    // Pins which prompts author a manifest at all: in the control only the retained invariant chain
+    // does, so a strategy or review prompt drifting back into test authoring shows up here.
+    expect([...manifestWritingPromptPaths].sort()).toEqual([
+      "strategies/invariants/coverage.md",
+      "strategies/invariants/implement-properties.md",
+      "strategies/invariants/invariant-testing-campaign.md"
+    ]);
+    expect(`${readFileSync(templatePath, "utf8")}\n${promptCorpus}`).not.toContain("test_files");
+    const authoringNodeIds = invariantNodes
+      .filter((node) => node.prompt !== undefined && manifestWritingPromptPaths.has(node.prompt))
+      .map((node) => node.id);
+    expect(authoringNodeIds.length).toBeGreaterThan(0);
+    for (const nodeId of authoringNodeIds) {
+      expect(requiredArtifactsById.get(nodeId), nodeId).toContain("generated-tests.json");
+    }
+    // The other half: the control's default topology declares no generated-test output and reaches no
+    // prompt that writes a manifest, so a reintroduced authoring node fails here instead of silently
+    // producing an unverified manifest.
+    const defaultNodes = topologyNodes(DEFAULT_TOPOLOGY_PATH);
+    expect(defaultNodes.flatMap((node) => (node.outputs ?? []).map((output) => output.path))).not.toContain(
+      "generated-tests.json"
     );
+    expect(
+      defaultNodes.filter((node) => node.prompt !== undefined && manifestWritingPromptPaths.has(node.prompt))
+    ).toEqual([]);
     for (const sourceId of manifestSources) {
       expect(requiredArtifactsById.get(sourceId), sourceId).toContain("generated-tests.json");
     }
   });
 
-  it("removes generated-test authoring from every prompt the default topology can reach", () => {
-    const corpus = reachablePromptCorpus();
-
-    // The control's whole point is that no reachable node authors or runs tests. These negatives are
-    // the guard: a prompt drifting back into test authoring would silently un-blind the paired eval.
-    expect(corpus).not.toContain("generated-tests.json");
-    expect(corpus).not.toContain("generated_tests");
-    expect(corpus).not.toContain("strategy_attempt_test_dir");
-    expect(corpus).not.toContain("test_files");
-    expect(corpus).not.toContain("Solidity PoC code block");
-
-    // And the default topology must declare no generated-test manifest output at all.
-    for (const node of topologyNodes(DEFAULT_TOPOLOGY_PATH)) {
-      const outputs = (node.outputs ?? []).map((output) => output.path);
-      expect(outputs, node.id).not.toContain("generated-tests.json");
-      for (const output of node.outputs ?? []) {
-        expect(output.contract, node.id).not.toBe("ultrafuzz/generated-tests@1");
-      }
-    }
-  });
-
-  it("keeps a source-backed findings path reachable in the default topology", () => {
-    // The control must not be degenerate: removing fuzz execution and test authoring may not remove
-    // the ability to report a source-backed finding through a declared findings contract.
-    const producers = topologyNodes(DEFAULT_TOPOLOGY_PATH).filter((node) =>
-      (node.outputs ?? []).some((output) => output.contract === "ultrafuzz/findings@1")
-    );
-    expect(producers.length).toBeGreaterThan(0);
-    expect(producers.map((node) => node.id)).toContain("dynamic-strategy-generator");
-  });
-
-  it("tells every reframed findings producer where to write findings and when to write none", () => {
-    // Reframing these nodes from test authoring to source analysis must not leave `findings.json` as a
-    // declared output with no instruction to write it (a node would then pass its gate by writing
-    // nothing), and must not drop the anti-false-positive counterweight the fuzzing arm keeps. Both
-    // halves are graded-outcome-relevant, so they are pinned per prompt rather than over a joined corpus.
-    for (const relativePath of reframedFindingsProducerPrompts()) {
-      const markdown = prompt(relativePath);
-      expect(markdown, relativePath).toMatch(/\{\{output_findings_path\}\}|`findings\.json`/u);
-      expect(markdown, relativePath).toContain("A property that holds is not a finding");
-      expect(markdown, relativePath).toContain("Write `[]` to `findings.json` when no source-backed violation");
-      // Issue #531 PRESERVE: source snapshot. Removing fuzz execution does not license source edits.
-      expect(markdown, relativePath).toContain("Do not edit production contracts or repository source files");
-    }
-  });
-
-  it("keeps the source-snapshot and dependency-mutation prohibitions on every reachable writing node", () => {
-    // `setup-foundry` and `base-test-setup` publish a workspace patch that every downstream analysis
-    // workspace receives, and the review chain runs with tool access. A single production-source edit or
-    // dependency install in any of them would put the control on a different source snapshot than the
-    // treatment arm, which no runtime allowlist prevents.
-    for (const relativePath of [
-      "setup/project-discovery.md",
-      "setup/prepare-foundry-harness.md",
-      "setup/discover-base-test.md",
-      "review/dedupe-findings.md",
-      "review/triage.md",
-      "review/severity-classification.md",
-      "strategies/differential/differential-oracle-planner.md",
-      "strategies/differential/reference-and-lane-auditor.md"
-    ]) {
-      const markdown = prompt(relativePath);
-      expect(markdown, relativePath).toContain("Do not edit production contracts or repository source files");
-    }
-
-    for (const relativePath of [
-      "setup/project-discovery.md",
-      "setup/prepare-foundry-harness.md",
-      "setup/discover-base-test.md",
-      "review/dedupe-findings.md",
-      "review/triage.md",
-      "review/severity-classification.md",
-      "strategies/admin-config-boundaries.md"
-    ]) {
-      const markdown = prompt(relativePath);
-      expect(markdown, relativePath).toMatch(
-        /install, fetch, restore,\s+or update dependencies|Do not install or fetch/u
-      );
-    }
-  });
-
-  it("keeps the execution-agnostic oracle-validity and harm guardrails in the reframed prompts", () => {
-    // None of these are fuzzing capabilities. Source-only analysis makes the differential soundness
-    // rules more load-bearing, not less, and the workflow prompt is the one whose output format became
-    // pure prose scenarios -- exactly what the harm guardrail constrains.
-    expect(prompt("strategies/differential/differential-lane-author.md")).toContain(
-      "Do not compare private storage layout, packed fields, gas-shaped internals, assembly behavior, or production implementation-private state."
-    );
-    expect(prompt("strategies/differential/reference-and-lane-auditor.md")).toContain(
-      "Do not assume the reference, production, or tests are correct."
-    );
-    expect(prompt("strategies/differential/differential-oracle-planner.md")).toContain(
-      "Do not inspect private or hidden sources."
-    );
-    expect(prompt("strategies/differential/reference-harness-author.md")).toContain(
-      "Do not copy production internals into the reference."
-    );
-    expect(prompt("strategies/workflow-property-based-tests.md")).toContain(
-      "Do not write misuse-oriented narratives,\npublic abuse instructions, or harmful walkthroughs."
-    );
-  });
-
-  it("keeps the base reachability token vocabulary so report.json cannot fingerprint the arm", () => {
-    const triage = prompt("review/triage.md");
-    const severity = prompt("review/severity-classification.md");
-    const differentialLibrary = prompt("strategies/differential-library-tests.md");
-
-    // `severity-classification.md` requires "one of these exact reachability tokens" on every surviving
-    // helper-level finding, and those notes propagate into `report.json`. No runtime code or schema
-    // constrains the vocabulary, so a renamed token would identify the arm from the graded artifact
-    // alone. Keep the base spellings, and keep triage and severity on the same keys.
-    for (const token of [
-      "`reachability=public-entrypoint-trace`",
-      "`reachability=generated-public-wrapper-poc`",
-      "`reachability=helper-only`",
-      "`reachability=public-wrapper-required`"
-    ]) {
-      expect(severity, token).toContain(token);
-    }
-    expect(triage).toContain("reachability=public-entrypoint-trace");
-    expect(triage).toContain("reachability=public-wrapper-required");
-    expect(differentialLibrary).toContain("reachability=public-wrapper-required");
-
-    for (const markdown of [triage, severity, differentialLibrary]) {
-      expect(markdown).not.toContain("public-entrypoint-evidence-required");
-    }
-
-    // Severity reads `helper_proof=`, so triage must write that key and not a renamed one.
-    expect(severity).toContain("`helper_proof=<summary>`");
-    expect(triage).toContain("helper_proof=");
-    expect(triage).not.toContain("helper_evidence=");
-  });
-
-  it("renders property implementation coverage as unavailable instead of an unsatisfiable read", () => {
-    const report = prompt("review/final-report.md");
-
-    // `propertiesSchema` is a strict object over `schema_version` and `properties`, so the canonical
-    // catalog cannot carry a `selection` key, and the CLI forces `unavailable` when no
-    // `implemented-properties.json` handoff is declared -- which is always true in this topology.
-    // Instructing a read of `properties.json.selection` would invite a fabricated coverage object that
-    // disagrees with the CLI-derived value.
-    expect(report).toContain("The default topology declares no");
-    expect(report).toContain("cannot supply a\n`selection` object");
-    expect(report).toContain("Do not\nsynthesize a coverage object");
-    expect(report).toContain("`report.json.property_implementation_coverage` is the string `unavailable`");
-    expect(report).not.toContain("Read the canonical property catalog's");
-  });
-
-  it("keeps admin/config boundary analysis source-backed and classification-complete", () => {
+  // `strategies/admin-config-boundaries.md` is exclusive to the default topology, and the NoFuzz control
+  // reframes it from authoring target-native tests to source-only bug search. The target-native and
+  // generated-test-companion anchors therefore have no subject left; they are replaced by the control's
+  // own contract plus negative guards, so test authoring, workspace writes, or a generated-test manifest
+  // drifting back into this prompt still fails here instead of quietly re-arming the removed capability.
+  it("keeps admin/config analysis source-backed with no generated-test authoring", () => {
     const admin = prompt("strategies/admin-config-boundaries.md");
 
-    // The NoFuzz control converts this node from test authoring to source-evidence bug search. The
-    // optional-handoff tolerance and the `base-test-setup` rendering label are unchanged contracts and
-    // must not regress to the older "Base Foundry setup:" label.
+    expect(admin).toContain("find bugs associated with documented admin/configuration");
     expect(admin).toContain("Base test setup (when rendered):");
     expect(admin).not.toContain("Base Foundry setup:");
-    expect(admin).toContain("A bounded benchmark topology may intentionally omit");
-    expect(admin).toContain("property-guided bug-search specialist");
-    expect(admin).toContain("Your job is to find bugs associated with documented admin/configuration");
     expect(admin).toContain("Read these handoff artifacts before analysis:");
-
-    // The classification vocabulary feeds the triage enum, so it must survive the reframing intact.
-    for (const classification of [
-      "`production-bug`",
-      "`implementation-drift`",
-      "`incomplete-spec`",
-      "`harness-defect`",
-      "`inconclusive`"
-    ]) {
-      expect(admin, classification).toContain(classification);
-    }
-    expect(admin).toContain("record the source evidence");
-    expect(admin).toContain("`analysis_notes`");
-    expect(admin).toContain("`review_notes`");
-
-    // No test authoring or execution may remain.
-    expect(admin).not.toContain("strategy_attempt_test_dir");
-    expect(admin).not.toContain("generated-tests.json");
-    expect(admin).not.toContain("For Foundry targets, write `.t.sol`");
+    expect(admin).toMatch(
+      /Do not install or fetch missing tools or dependencies,\s+and do not otherwise\s+mutate the target workspace's dependency state/u
+    );
+    expect(admin).toContain("Do not edit production contracts or repository source files");
+    expect(admin).toContain("A property that holds is not a finding.");
+    expect(admin).toContain("Write `[]` to `findings.json` when no source-backed violation");
+    expect(admin).not.toContain("generated-tests");
+    expect(admin).not.toContain("{{strategy_attempt_test_dir}}");
+    expect(admin).not.toContain("{{workspace_path}}");
   });
 
-  it("dedupes from written findings and source evidence without running native reproducers", () => {
+  it("validates deduped native reproducers without hydrating isolated workspaces", () => {
     const dedupe = prompt("review/dedupe-findings.md");
 
-    // The NoFuzz control deletes the native-runner validation section: there are no generated tests to
-    // hydrate or execute. Dedupe now works from written artifacts and source evidence only.
-    expect(dedupe).toContain("Dedupe from written findings, property artifacts, source evidence");
-    expect(dedupe).toContain("{{ancestor_artifacts}}");
-
-    // The dedupe semantics that are NOT about execution must survive intact.
-    expect(dedupe).toContain("build a stable dedupe key");
-    expect(dedupe).toContain("`family_id`");
-    expect(dedupe).toContain("`related_findings`");
-    expect(dedupe).toContain("Preserve `property_ids` on every property-derived finding");
-    expect(dedupe).toContain("Stateful-analysis records are first-class findings");
-    expect(dedupe).toContain("Do not hide adverse evidence");
-    expect(dedupe).toContain("Count each strategy loop attempt only once");
-
-    // Removing fuzz execution does not license mutating the pinned target workspace. Issue #531 requires
-    // both arms to run against the same source snapshot, so the dependency-mutation and source-edit
-    // prohibitions stay exactly as at base -- they are not fuzzing capabilities.
+    expect(dedupe).toContain("{{artifact_path:project-discovery}}/setup/project-discovery.md");
+    expect(dedupe).toContain("{{artifact_path:base-test-setup}}/setup/base-test-setup.md");
+    expect(dedupe).toContain("For Foundry");
+    expect(dedupe).toContain("For Hardhat");
+    expect(dedupe).toContain("For Vyper");
+    expect(dedupe).toContain("For mixed repositories");
+    expect(dedupe).toMatch(/manifest\s+`framework` and `language`/u);
+    expect(dedupe).toContain("Strategy workspaces are isolated from this node");
+    expect(dedupe).toContain("copy only its exact byte-for-byte canonical");
+    expect(dedupe).toContain("under the existing native test root in\n`{{workspace_path}}`");
+    expect(dedupe).toContain("normalized relative POSIX");
+    expect(dedupe).toContain("every symlink even when its\ntarget remains inside the artifact directory");
+    expect(dedupe).toContain("Never search a strategy workspace");
     expect(dedupe).toContain("Never install, fetch, restore, or update dependencies during dedupe");
-    expect(dedupe).toContain("Do not rewrite lockfiles or dependency-vendor directories");
-    expect(dedupe).toContain("Do not edit production contracts or repository source files");
-
-    // No runner dispatch, workspace hydration, or companion copying may remain.
-    expect(dedupe).not.toContain("Strategy workspaces are isolated from this node");
-    expect(dedupe).not.toContain("copy only its exact byte-for-byte canonical");
-    expect(dedupe).not.toContain("generated-tests.json");
-    expect(dedupe).not.toContain("forge --version");
+    expect(dedupe).not.toContain("restore project-pinned dependencies first");
+    expect(dedupe).not.toContain("Dependency hydration used only");
   });
 
   it("aggregates canonical generated-test companions into framework-native roots", () => {
@@ -805,32 +634,21 @@ describe("prompt semantic anchors", () => {
     expect(aggregate).not.toContain("collect generated Foundry `.t.sol` files");
   });
 
-  it("requires a source-backed proof-of-concept scenario instead of an embedded reproducer", () => {
+  it("embeds one self-contained reproducer in the target's native language", () => {
     const report = prompt("review/final-report.md");
 
-    // The control has no generated tests to minimize, so the PoC contract becomes an ordered
-    // source-backed scenario. `appendProofOfConcept` already treats `proof.code` as optional and
-    // requires only the human-readable scenario, so this stays inside the report contract.
-    expect(report).toContain("source-backed evidence belong in the normal issue");
-    expect(report).toContain("express the Proof of Concept as an ordered");
-    expect(report).toContain("name the contract,\nfunction, and source location for each step");
-    expect(report).toContain("Use the finding's recorded source evidence");
+    expect(report).toContain("generated target-native reproducers belong in the normal issue");
+    expect(report).toContain("exact canonical `generated-tests/<relative-file>` companion");
+    expect(report).toContain("exactly one fenced code\nblock");
+    expect(report).toContain("minimized self-contained target-native reproducer");
+    expect(report).toContain("`solidity` for Foundry `.t.sol`");
+    expect(report).toContain("`javascript` or `typescript` for Hardhat");
+    expect(report).toContain("`python` (or `vyper`");
+    expect(report).toContain("Never translate a JavaScript, TypeScript");
     expect(report).toContain("report must be self-sufficient");
-    expect(report).toContain("Stop\nand report an invalid upstream artifact");
-
-    // The runtime rejects a report.md missing either heading, and the preamble sentence is hardcoded,
-    // so all three must survive the reframing byte-for-byte.
-    expect(report).toContain("## Property implementation coverage");
-    expect(report).toContain("## Property provenance");
-    expect(report).toContain("Ultrafuzz is an automated smart-contract fuzzing campaign assistant.");
-    // The provenance table header is rendered from a hardcoded 6-column list in the runtime.
-    expect(report).toContain("`Implementation/test paths`, and `Fuzzer backends`");
-
-    // No embedded-reproducer contract may remain.
-    expect(report).not.toContain("exactly one fenced code\nblock");
-    expect(report).not.toContain("minimized self-contained target-native reproducer");
-    expect(report).not.toContain("exact canonical `generated-tests/<relative-file>` companion");
+    expect(report).toContain("Stop and report an invalid\nupstream artifact");
     expect(report).not.toContain("generated Solidity PoCs");
+    expect(report).not.toContain("minimized self-contained Foundry reproducer");
   });
 
   it("keeps the severity matrix and reportability gates in the classifier prompt", () => {
@@ -885,37 +703,40 @@ describe("prompt semantic anchors", () => {
     const setupFoundry = prompt("setup/prepare-foundry-harness.md");
     const baseSetup = prompt("setup/discover-base-test.md");
 
-    // The NoFuzz control makes all three setup nodes read-only, so the Vyper guidance becomes
-    // "record the evidence needed to reason about deployment" rather than "build a working harness".
-    // Vyper must still be DETECTED and its blockers still recorded, which is what these anchors pin.
     expect(projectDiscovery).toContain("whether production contracts are Solidity, Vyper, or mixed Solidity/Vyper");
     expect(projectDiscovery).toContain("`.vy` production contracts");
     expect(projectDiscovery).toContain("`vyper` or `vyper-json` commands");
-    expect(projectDiscovery).toContain("record the Solidity interface and project-local");
-    expect(projectDiscovery).toContain("compiler evidence needed to understand deployment and ABI interactions");
+    expect(projectDiscovery).toContain("Vyper-only projects as still needing Solidity-based Foundry tests");
 
-    expect(setupFoundry).toContain("record the Solidity interfaces, ABI-derived interfaces");
-    expect(setupFoundry).toContain("record concrete bytecode and deployment expectations");
-    expect(setupFoundry).toContain("constructor/init argument handling");
-    expect(setupFoundry).toContain("FFI configuration notes");
+    expect(setupFoundry).toContain("`test/foundry/<strategy>`");
+    expect(setupFoundry).toMatch(/do not ask Foundry to\s+compile `\.vy` files as Solidity sources/u);
+    expect(setupFoundry).toContain("Solidity interfaces");
+    expect(setupFoundry).toContain("public/external ABI");
+    expect(setupFoundry).toContain("target project's pinned compiler/tooling");
+    expect(setupFoundry).toContain("`vm.ffi`");
+    expect(setupFoundry).toContain("hex-decodes the compiler stdout");
+    expect(setupFoundry).toContain("ABI-encoded `__init__`");
+    expect(setupFoundry).toContain("without a function selector");
+    expect(setupFoundry).toContain("`bytes.concat(decodedBytecode, abi.encode(...))`");
+    expect(setupFoundry).toContain("inline `create`");
+    expect(setupFoundry).toContain("never pass undecoded `vm.ffi` stdout directly to `create`");
+    expect(setupFoundry).toContain("`forge test --ffi`");
+    expect(setupFoundry).toContain("`ffi = true`");
+    expect(setupFoundry).toContain("`vm.etch` writes runtime bytecode");
+    expect(setupFoundry).toContain("does not run constructor");
     expect(setupFoundry).toMatch(/project-local\s+Vyper dependency is unavailable/u);
-    expect(setupFoundry).toContain("Record whether the Foundry harness appears complete");
 
-    expect(baseSetup).toContain("record visible Solidity interfaces, ABI-derived interfaces");
-    expect(baseSetup).toContain("record any project-local compiler or bytecode");
-    expect(baseSetup).toContain("constructor/init argument handling, FFI configuration");
+    expect(baseSetup).toContain("Vyper-aware while keeping the tests");
+    expect(baseSetup).toContain("ABI-derived interfaces");
+    expect(baseSetup).toContain("`vyper`, or `vyper-json`");
+    expect(baseSetup).toContain("`vm.ffi` plus inline `create`");
+    expect(baseSetup).toContain("hex-decode ASCII hex compiler stdout");
+    expect(baseSetup).toContain("append ABI-encoded `__init__` constructor");
+    expect(baseSetup).toContain("without a function selector");
+    expect(baseSetup).toContain("`bytes.concat(decodedBytecode, abi.encode(...))`");
+    expect(baseSetup).toContain("Do not pass undecoded `vm.ffi` stdout directly to `create`");
+    expect(baseSetup).toContain("constructor-dependent Vyper contracts need decoded initcode");
+    expect(baseSetup).toContain("`vm.etch` does not run constructors or init code");
     expect(baseSetup).toContain("project-local Vyper dependencies as explicit validation blockers");
-    expect(baseSetup).toContain("Record whether compilation status is known from existing evidence");
-
-    // No harness construction or test execution may remain in the setup chain.
-    for (const [name, markdown] of [
-      ["project-discovery", projectDiscovery],
-      ["prepare-foundry-harness", setupFoundry],
-      ["discover-base-test", baseSetup]
-    ] as const) {
-      expect(markdown, name).not.toContain("Make sure Foundry compilation is passing");
-      expect(markdown, name).not.toContain("forge test --ffi");
-      expect(markdown, name).not.toContain("strategy_attempt_test_dir");
-    }
   });
 });

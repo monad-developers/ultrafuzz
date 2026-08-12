@@ -42,8 +42,20 @@ Do not edit production contracts or repository source files; write only the
 required artifacts. Do not weaken an observed strict mismatch to make the lane
 look consistent.
 
-Stay inside the current workspace and the explicit artifact paths above when
-locating evidence.
+When locating artifact inputs or source files, stay inside the current Workspace
+and the explicit artifact paths above. Do not search from filesystem root and do
+not suppress errors with shell redirection. Use the literal artifact paths from
+this prompt, the Read tool, `rg --files`, or unredirected `find src -type f`
+scoped to workspace directories.
+
+Run source inspection as separate Bash calls, waiting for each tool result
+before the next command. Use a single simple workspace-relative command per Bash
+call. Do not pipe `grep` into `head`, `tail`, `sort`, or `uniq`, and never
+combine inspection commands with `&&`, `;`, `||`, pipes, or redirection. Bash
+already runs from the isolated workspace path. Do not prepend `cd`, `cd
+... || exit 1`, or any other directory-changing wrapper. Do not use command
+substitution, shell conditionals, absolute binary paths, or host-global
+searches.
 
 Write {{artifact_path}}/lane-result.json with this JSON shape:
 

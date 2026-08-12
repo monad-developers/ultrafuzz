@@ -1,16 +1,16 @@
 ---
-id: final-report
+id: nofuzz-final-report
 display_name: Generate report
 ---
 
 # Generate report
 
 Your job is to produce a concise final audit issue list from the upstream
-finding, triage, severity classification, lifecycle, strategy detection, and
-generated-test aggregation outputs.
+finding, triage, severity classification, lifecycle, and strategy detection
+outputs.
 
-A bounded benchmark topology may intentionally omit triage, severity, test
-aggregation, property, or harness handoffs. When no rendered path is provided,
+A bounded benchmark topology may intentionally omit triage, severity,
+property, or harness handoffs. When no rendered path is provided,
 do not treat the omitted handoff as an error. When the severity-classification
 handoff is absent, perform one source-backed bounded classification pass over
 each deduplicated finding and enrich its matching dedupe lifecycle record in
@@ -39,16 +39,6 @@ resulting issue list is empty.
 ## Required Inputs
 
 Read these review handoffs before writing the report:
-
-Aggregation manifest:
-`{{artifact_path:aggregate-test-files}}/aggregation.json`
-
-`aggregation.json` is a JSON object, not a top-level array. It contains copied
-generated test metadata under `files` and may contain support-file metadata
-under `support_files`. Use `files[]` when matching generated or copied test
-destinations. Preserve and use each record's `language`, `framework`,
-and `provenance` when present. Do not iterate over the whole object as an array
-because that will walk scalar summary fields.
 
 Severity-classified findings:
 `{{artifact_path:severity-classification}}/severity-classified-findings.json`
@@ -81,19 +71,15 @@ Use these property provenance handoffs when they exist:
 Canonical property catalog:
 `{{artifact_path:property-specification-fanin}}/properties.json`
 
-Implemented property records:
-`{{artifact_path:stateful-invariant-implement-properties}}/implemented-properties.json`
-
-Invariant campaign results:
-`{{artifact_path:stateful-invariant-campaign}}/recon-fuzzer-results.json`
-
-These three files form the provenance join from a finding's `property_ids` to
-its canonical properties, source lens rows, implementation/test paths, and
-recorded fuzzer backends. Treat references to an unknown canonical property as
-an invalid current-run artifact. Historical or external artifacts may predate
-this contract: if any provenance handoff or `property_ids` lineage needed for
-the join is absent, render Property provenance as `unavailable` and continue
-report generation.
+This file, together with each finding's recorded source evidence, forms the
+provenance join from a finding's `property_ids` to its canonical properties,
+source lens rows, and cited source locations. Treat references to an unknown
+canonical property as an invalid current-run artifact. This topology renders no
+implemented-property handoff, so the provenance join can never be completed
+here. Exactly one behaviour therefore applies to every run under this topology,
+whether or not any finding carries `property_ids`: render Property provenance as
+`unavailable` in `report.md`, emit the empty array (`[]`) for
+`report.json.property_provenance`, and continue report generation.
 
 Use these setup handoffs:
 
@@ -109,7 +95,6 @@ Base test setup:
 Use exactly the rendered filenames above when reading prior-node outputs. When
 you mention an input internally or in `report.json` provenance, preserve the
 exact source filename where useful, for example
-`{{artifact_path:aggregate-test-files}}/aggregation.json`,
 `{{artifact_path:severity-classification}}/severity-classified-findings.json`,
 `{{artifact_path:severity-classification}}/strategy-detections.json`,
 `{{artifact_path:severity-classification}}/finding-lifecycle-ledger.json`, and
@@ -193,9 +178,9 @@ Preserve actionable non-production classifications such as `incomplete-spec`,
 `defensive-hardening` in a concise appendix table instead of mixing them into
 the production issue list.
 
-For stateful invariant records, preserve every upstream finding whose `notes`
+For stateful analysis records, preserve every upstream finding whose `notes`
 contain `stateful_failure_classification=<classification>`. Production-bug
-records with generated target-native reproducers belong in the normal issue
+records with source-backed evidence belong in the normal issue
 list. Preserve
 stateful `harness-defect` and `incomplete-spec` records through the
 non-production actionable outcomes appendix and `report.json`
@@ -288,8 +273,8 @@ someone else. Use `User` when the behavior is self-impacting or the protocol
 does not work as intended for the same user who triggers it. Prefer precise
 roles such as `Depositor`, `Borrower`, `Liquidator`, `Relayer`, or `Operator`
 when clearer. Do not combine multiple roles with slash notation. Do not leave
-placeholder tokens, anonymous variable labels, or copied generated-test
-boilerplate in the final report.
+placeholder tokens, anonymous variable labels, or copied boilerplate in the
+final report.
 
 ## Required Markdown Shape
 
@@ -342,7 +327,7 @@ content from the upstream evidence:
 ````md
 ## [H-01] - Depositor withdrawal accounting can lock claimable funds
 
-Depositor can withdraw after accounting state diverges which leads to claimable funds remaining locked. The generated reproducer shows the stale share balance persists after the withdrawal path completes.
+Depositor can withdraw after accounting state diverges which leads to claimable funds remaining locked. The cited source evidence shows the stale share balance persists after the withdrawal path completes.
 
 ### Severity
 
@@ -351,14 +336,9 @@ Depositor can withdraw after accounting state diverges which leads to claimable 
 
 ### Proof of Concept
 
-1. Depositor prepares a position that records shares against the vault state.
-2. Depositor performs the public redeem action after the accounting state diverges.
-3. Depositor observes claimable funds remain locked after the redeem action completes.
-
-```typescript
-// Example only: replace this with the minimized target-native reproducer,
-// including the imports, fixtures, setup, and helpers needed to run it.
-```
+1. Depositor prepares a position that records shares against the vault state, tracked by the share accounting in `Vault.deposit`.
+2. Depositor performs the public redeem action after the accounting state diverges, reaching the stale-balance branch in `Vault.redeem`.
+3. Depositor observes claimable funds remain locked after the redeem action completes, because the recorded share total is never reconciled.
 
 #### Family variants
 
@@ -404,33 +384,25 @@ scenario before or alongside the code. Prefer meaningful actor names such as
 they improve understanding; otherwise use generic names such as `Alice` and
 `Bob`.
 
-Use the severity finding's explicit generated test path first, then the
-aggregation manifest, to locate generated or copied tests. Prefer an aggregation
-record that matches the same source artifact path, source relative path,
-strategy, and attempt index as the finding. If the aggregation manifest is
-missing that exact source test, or if same-path generated tests differ across
-attempts and a copied destination would be ambiguous, read the source artifact's
-exact canonical `generated-tests/<relative-file>` companion instead of a
-flattened copy. Do not replace an unavailable native companion with a similarly
-named file from another attempt or framework.
+Use the finding's recorded source evidence to locate the exact production code
+that the scenario exercises. Prefer evidence that names the contract or library,
+the function or workflow, and the source location the upstream artifact cited.
+Do not substitute a similarly named function, a neighboring entrypoint, or a
+different code path for the one the evidence actually cites.
 
-For each production issue with a generated test, include exactly one fenced code
-block containing a minimized self-contained target-native reproducer, not a
-pointer to a file and not an unedited full generated test suite. Select the
-language fence from the canonical companion and aggregation metadata: use
-`solidity` for Foundry `.t.sol`, `javascript` or `typescript` for Hardhat, and
-`python` (or `vyper` only when the reproducer itself is Vyper source) for a
-Vyper project's native harness. Never translate a JavaScript, TypeScript,
-Python, or Vyper reproducer into Solidity merely for the report.
+For each production issue, express the Proof of Concept as an ordered
+source-backed scenario in prose: name the actor, the state the actor
+establishes, the public or external call sequence, and the observable divergence
+from the cited property. Quote or paraphrase the specific production statements,
+conditions, and arithmetic that produce the divergence, and name the contract,
+function, and source location for each step.
 
-Include every import, mock, fixture, harness, constant, setup step, and helper
-needed for the relevant test function or functions to run in the target's
-existing framework. Remove unrelated generated test functions, unused helpers,
-exploratory assertions, logging-only code, and comments that do not help
-reproduce the issue. Keep multiple test functions only when they are all
-necessary to prove the same production issue. Stop and report an invalid
-upstream artifact if no relevant generated test source, executable scenario, or
-self-contained reproducer source is available for a production issue.
+Describe the preconditions, actor balances, configuration values, and state
+transitions the scenario depends on, so a reviewer can follow the argument
+against the source without a prepared harness. Omit unrelated behavior,
+exploratory reasoning, and observations that do not advance the argument. Stop
+and report an invalid upstream artifact if no cited source evidence or
+followable scenario is available for a production issue.
 
 Do not write local file paths, artifact-relative paths, generated test paths,
 Markdown links, or permalink labels in the human-readable issue body. The
@@ -438,8 +410,8 @@ report must be self-sufficient when `report.md` is sent by itself.
 
 If the upstream finding has `family_variants`, keep one issue entry for the
 shared production root cause and add a `#### Family variants` subheading inside
-the Proof of Concept section after the primary native reproducer or execution
-trace. List variants as concise bullets with each variant title and summary
+the Proof of Concept section after the primary source-backed scenario. List
+variants as concise bullets with each variant title and summary
 only. Omit the subheading when there are no family variants.
 
 ## Strategy Section
@@ -460,10 +432,18 @@ human-readable Strategy section. Do not call this metric Temperature.
 ## Additional Sections
 
 Add `## Property implementation coverage` after the production issue entries
-and before `## Property provenance`. Read the implementation handoff's
-`selection` object and property records. When
-the handoff is historical or lacks `selection`, render `unavailable` instead
-of guessing. In `report.json`, emit `property_implementation_coverage` with
+and before `## Property provenance`. The default topology declares no
+property-implementation handoff, and the canonical `properties.json` contract
+carries only `schema_version` and `properties`, so it cannot supply a
+`selection` object. This run therefore has no implementation-coverage lineage:
+render the literal `unavailable` under that heading in `report.md`, and emit the
+string `unavailable` for `report.json.property_implementation_coverage`. Do not
+synthesize a coverage object from the property catalog, the findings, or the
+source tree.
+
+Only a topology that renders an implemented-property handoff supplying a
+`selection` object and property records lets the report carry a coverage object
+at all. When such a handoff is rendered, emit `property_implementation_coverage` with
 this exact shape:
 
 ```json
@@ -537,27 +517,19 @@ so a summary naming `_beforeTokenTransfer` may appear either as
 `- property-2: _beforeTokenTransfer reverts` or as
 `- property-2: \_beforeTokenTransfer reverts`.
 
-Add `## Property provenance` after the implementation coverage section. For every
-property-derived production or non-production finding, render one concise table
-row containing:
+Add `## Property provenance` after the implementation coverage section. This
+topology renders no implemented-property handoff, so the `implementation_paths`
+and `test_paths` lineage that every provenance row requires does not exist for
+any finding, and the join cannot be completed even when findings carry
+`property_ids`. Render the literal `unavailable` as the entire Markdown body of
+that heading, and emit the empty array (`[]`) for
+`report.json.property_provenance`.
 
-- its final finding ID/title;
-- canonical property ID or IDs from `property_ids`;
-- every source `source_node_id` and `source_property_id` joined from
-  `properties.json`;
-- the union of `implementation_paths` and `test_paths` joined from
-  `implemented-properties.json`;
-- every originating backend recorded for the same stable finding ID in
-  `recon-fuzzer-results.json`. When no campaign backend is known, render
-  `unavailable` in the Markdown table only; omit both backend fields from the
-  JSON provenance entry.
-
-Use table columns `Finding`, `Property IDs`, `Source nodes`, `Source property
-IDs`, `Implementation/test paths`, and `Fuzzer backends`. Do not add a row for a
-finding with no `property_ids`; it is a valid non-property finding. If current
-artifacts contain no property-derived findings, write `No property-derived
-findings.` If historical lineage is absent, write `unavailable` instead of
-failing or guessing.
+Do not render a provenance table, do not write `No property-derived findings.`,
+and do not synthesize provenance rows, `implementation_paths`, `test_paths`, or
+backend fields from the property catalog, the findings, the lifecycle ledger, or
+the source tree. The literal `unavailable` belongs in the Markdown body only; it
+is never a valid `report.json.property_provenance` value.
 
 When lifecycle records contain `comparison_disposition`, add a concise
 `## Prior finding disposition` section after Property provenance and before
@@ -589,19 +561,15 @@ Also save `{{artifact_path}}/report.json` as structured JSON for the CLI. Includ
 fields, a production `issues` array, a `non_production_outcomes` array, and
 `property_provenance`.
 
-When provenance is available, `property_provenance` must be an array with one
-object per property-derived finding. Each object contains `finding_id`,
-`title`, non-empty `property_ids`, `sources` entries with `source_node_id` and
-`source_property_id`, `implementation_paths`, and `test_paths`. Use
-`fuzzer_backend` when exactly one backend produced the finding, or a unique
-sorted `fuzzer_backends` array when several backends produced the same stable
-finding ID. Never emit both fields. When no known campaign backend produced the
-finding, omit both `fuzzer_backend` and `fuzzer_backends`; the literal
-`"unavailable"` is never a backend value. Use stable unions when several
-properties contribute. Preserve the whole `property_provenance` value as the
-string `"unavailable"` for genuinely unavailable historical provenance whose
-handoffs are absent. Use an empty array for a current run with no
-property-derived findings.
+`property_provenance` is always the empty array (`[]`) under this topology. A
+provenance object is only well-formed when it carries `finding_id`, `title`,
+non-empty `property_ids`, `sources` entries with `source_node_id` and
+`source_property_id`, and the required `implementation_paths` and `test_paths`
+arrays; this topology renders no implemented-property handoff, so that lineage
+does not exist and no such object can be constructed. Emit `[]` for every run,
+including runs whose findings carry `property_ids`. Never emit a provenance
+entry, and never substitute the string `"unavailable"` for the
+`property_provenance` value or for either path array.
 
 Each production issue object must satisfy the canonical normalized finding
 schema. Include at least `schema_version`, `id`, `title`, `status`,
@@ -669,31 +637,33 @@ Before finishing, verify that:
   distribution.
 - Production issue descriptions and Proof of Concept steps use concrete
   actor-role language and do not contain placeholder tokens, anonymous variable
-  labels, or copied generated-test boilerplate.
+  labels, or copied boilerplate.
 - Production issues include `### Proof of Concept`.
-- Production issues with generated tests include exactly one inline fenced code
-  block whose language matches the target-native reproducer.
+- Production issue Proof of Concept sections give an ordered source-backed
+  scenario that names the contract, function, and source location for each step.
 - Production issues include a `### Strategy` detection-rate table.
 - Production issues do not include a standalone reachability section.
 - Production issue Impact and Likelihood bullets each begin with exactly High,
   Medium, or Low followed by a colon.
 - Every production issue severity equals the Impact x Likelihood matrix result.
 - `report.json` contains `schema_version`, `run_metadata`, `issues`, and
-  `non_production_outcomes`, plus `property_provenance` as an array or
-  `"unavailable"`.
+  `non_production_outcomes`, plus `property_provenance` as the empty array
+  (`[]`).
 - Every `report.json` production issue satisfies the canonical normalized
   finding schema, including `schema_version`, `id`, `title`, `status`,
   `severity_guess`, `confidence`, and `summary`.
 - Every `report.json` production issue keeps canonical `strategy` as a string
   when present and stores structured strategy details in `strategy_provenance`.
-- `report.md` contains `## Property provenance`, including every
-  property-derived finding and no invented property IDs for non-property
-  findings.
-- `report.md` contains `## Property implementation coverage` with counts that
-  match the implementation handoff, or the literal `unavailable` for
-  historical artifacts.
-- `report.json.property_implementation_coverage` is either the exact
-  machine-readable coverage object or the string `unavailable`.
+- `report.md` contains `## Property provenance` whose body is the literal
+  `unavailable`, with no provenance table and no invented property IDs, because
+  this topology renders no implemented-property handoff.
+- `report.json.property_provenance` is the empty array (`[]`), not a provenance
+  entry and not the string `"unavailable"`.
+- `report.md` contains `## Property implementation coverage` rendered as the
+  literal `unavailable`, because the default topology declares no
+  property-implementation handoff.
+- `report.json.property_implementation_coverage` is the string `unavailable`,
+  not a synthesized coverage object.
 - `report.json.run_metadata.tokens_used` and
   `report.json.run_metadata.estimated_spend` match the values rendered in
   `report.md`, and preserve the exact cumulative accounting values from

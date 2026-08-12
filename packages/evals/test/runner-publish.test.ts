@@ -177,10 +177,11 @@ describe("runner", () => {
     initProject({ projectRoot: project, force: true });
     const suite = testSuite(path.join(project, "ground-truth"));
     // The NoFuzz control removes the invariant campaign chain -- the only nodes that declare
-    // `required_commands` -- from the default project topology, so a row on the default topology has no
-    // backend to be missing and the gate cannot fire. Pin the row's variant to the packaged
-    // `invariant-only` topology, which still declares exactly these three commands, so this test keeps
-    // asserting the preflight gate rather than the shipped default topology's contents.
+    // `required_commands` -- from the project topology `initProject` scaffolds, so a row on that topology
+    // has no backend left to be missing and the preflight gate cannot fire. Pinning the row's variant to
+    // the packaged `invariant-only` topology, which still declares exactly these three commands, keeps
+    // this test asserting the gate itself (including its exact per-command node attribution) instead of
+    // the shipped default topology's contents.
     const row = testRow(suite, {
       target: { ...testRow(suite).target, path: project },
       variant: {

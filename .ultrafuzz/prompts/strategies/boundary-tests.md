@@ -48,7 +48,10 @@ Read this property catalog handoff before writing boundary recipes:
    the carrier is `uint256`). Avoid helper encoders/casts that truncate before
    the external call; use carrier-width ABI calldata or manually assembled
    fallback calldata for out-of-range rows.
-6. Cite source evidence for boundary constants used in recipes.
+6. When inspecting source for boundary constants, use the Read tool or one
+   direct workspace-relative command at a time. Do not pipe `grep` into
+   `head`, `tail`, `sort`, or `uniq`. Cite source evidence for boundary
+   constants used in recipes.
 
 ## Required Outputs
 
@@ -65,7 +68,8 @@ and `review_priorities`. Each recipe should name the workflow, public support,
 setup, action sequence, oracle, negative/boundary values, expected
 classification if confirmed, and preferred downstream lane.
 
-Ensure the JSON is syntactically valid.
+Validate JSON with one direct Bash call when needed. Do not use command
+substitution, pipes, or chained shell commands for post-write validation.
 
 A property that holds is not a finding. Record satisfied checks,
 reviewed-surface summaries, and no-defect observations in summaries, not in

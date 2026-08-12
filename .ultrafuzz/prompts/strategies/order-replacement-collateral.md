@@ -18,6 +18,11 @@ Base Foundry setup:
 Property catalog:
 {{artifact_handoff:property-specification-fanin}}
 
+When inspecting source for order ownership, collateral, or native-token helper
+terms, use the Read tool or one direct workspace-relative command at a time. Do
+not pipe `grep` into `head`, `tail`, `sort`, or `uniq`. Do not combine probes
+with `;`, `&&`, `||`, pipes, or stdout/stderr redirection.
+
 ## Focus
 
 - Replace or amend resting orders with smaller size, larger size, same size,

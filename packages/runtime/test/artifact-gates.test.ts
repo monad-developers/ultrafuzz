@@ -115,13 +115,13 @@ test("the campaign provenance gate covers the campaign node the shipped topology
     .map((match) => match[1]!)
     .filter((id) => id.startsWith("stateful-invariant-") && id.includes("campaign"));
 
-  // The NoFuzz control removes the invariant campaign chain from the DEFAULT topology, so the shipped
-  // dist/topology.yml declares no campaign node at all. The gate list itself is unchanged and still
-  // guards `invariant-only.yml`, so assert both halves: the default topology runs no campaign, and the
-  // gate still covers every campaign id parsed from the packaged invariant topology. The second half
-  // keeps the original regression guard intact -- renaming a campaign node in invariant-only.yml still
-  // fails here instead of silently disabling the provenance join.
-  assert.deepEqual(campaignIds, []);
+  // The NoFuzz control removes the invariant campaign chain from the shipped default topology, so
+  // dist/topology.yml declares no campaign node. The gate list is unchanged and still guards
+  // `invariant-only.yml`, so both halves are asserted: the shipped default topology runs no campaign,
+  // and every campaign node the packaged invariant topology declares is still covered by the gate. The
+  // original regression guard is intact -- renaming a campaign node there still fails here instead of
+  // silently leaving campaign property joins unverified.
+  assert.deepEqual(campaignIds, [], "the shipped default topology unexpectedly declares an invariant campaign node");
 
   const invariantOnlySource = fs.readFileSync(packagedTopology("invariant-only").path, "utf8");
   const invariantCampaignIds = [...invariantOnlySource.matchAll(/^ {2}- id: (\S+)$/gmu)]

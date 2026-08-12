@@ -18,6 +18,15 @@ Base Foundry setup:
 Property catalog:
 {{artifact_handoff:property-specification-fanin}}
 
+Run source inspection as separate Bash calls, waiting for each tool result
+before the next command. Use a single simple workspace-relative command per Bash
+call. Do not pipe `grep` into `head`, `tail`, `sort`, or `uniq`, and never
+combine inspection commands with `&&`, `;`, `||`, pipes, or redirection. Bash
+already runs from the isolated workspace path. Do not prepend `cd`, `cd
+... || exit 1`, or any other directory-changing wrapper. Do not use command
+substitution, shell conditionals, absolute binary paths, or host-global
+searches.
+
 ## Focus
 
 - Supported action ids at documented minimum, maximum, maximum plus one, and
