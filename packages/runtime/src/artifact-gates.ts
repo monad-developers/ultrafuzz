@@ -1705,18 +1705,44 @@ function timestampField(
 }
 
 function constrainedShellTokens(command: string): string[] | undefined {
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+  for (let index = 0; index < command.length; index += 1) {
+    const character = command[index]!;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote !== undefined) {
+      if (character === quote) quote = undefined;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      continue;
+    }
+    if (
+      character === "#" ||
+      character === ";" ||
+      character === "&" ||
+      character === "|" ||
+      character === "<" ||
+      character === ">" ||
+      character === "`" ||
+      character === "\n" ||
+      character === "\r" ||
+      (character === "$" && command[index + 1] === "(")
+    ) {
+      return undefined;
+    }
+  }
+  if (quote !== undefined || escaped) return undefined;
   const tokens = command.trim().split(/\s+/u);
-  const hasShellSyntax = tokens.some(
-    (token) =>
-      token.startsWith("#") ||
-      token.startsWith(">") ||
-      token.startsWith("<") ||
-      token === "&&" ||
-      token === "||" ||
-      token === ";" ||
-      token === "|"
-  );
-  return hasShellSyntax ? undefined : tokens;
+  return tokens;
 }
 
 function exactReconCommandFlagValues(command: string, flag: "--timeout" | "--test-limit" | "--seq-len"): string[] {
@@ -1745,6 +1771,14 @@ function hasExactHostTimeoutWrapper(command: string, configuredTimeoutSeconds: n
   const timeoutIndexes = tokens.flatMap((token, index) => (token === "timeout" ? [index] : []));
   if (timeoutIndexes.length !== 1 || tokens.includes("--foreground")) return false;
   const timeoutIndex = timeoutIndexes[0]!;
+  const prefix = tokens.slice(0, timeoutIndex);
+  const assignmentStart = prefix[0] === "env" ? 1 : 0;
+  if (
+    prefix.slice(assignmentStart).some((token) => !/^[A-Za-z_][A-Za-z0-9_]*=\S+$/u.test(token)) ||
+    (prefix[0] === "env" && prefix.length === 1)
+  ) {
+    return false;
+  }
   const reconIndex = tokens.indexOf("recon", timeoutIndex + 1);
   if (reconIndex < 0 || tokens[reconIndex + 1] !== "fuzz") return false;
   const wrapperArguments = tokens.slice(timeoutIndex + 1, reconIndex);

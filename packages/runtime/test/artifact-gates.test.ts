@@ -5052,6 +5052,33 @@ test("current campaign timeout gate rejects reserve subtraction and ambiguous Re
         fixture.plan.backend.exact_shell_escaped_command = command;
       }
     },
+    ...["&&", "||", ";", "|", "&"].map((operator) => ({
+      name: `attached ${operator} compound command`,
+      code: "CAMPAIGN_SEQUENCE_LENGTH_COMMAND_INVALID",
+      mutate: (fixture: CampaignTimeoutFixture) => {
+        const command = `${fixture.backend.exact_command}${operator}recon fuzz . --config smoke.yaml`;
+        fixture.backend.exact_command = command;
+        fixture.plan.backend.exact_shell_escaped_command = command;
+      }
+    })),
+    {
+      name: "newline-delimited evidence command",
+      code: "CAMPAIGN_SEQUENCE_LENGTH_COMMAND_INVALID",
+      mutate: (fixture) => {
+        const command = `${fixture.backend.exact_command.replace(" --seq-len 100", "")}\necho --seq-len 100`;
+        fixture.backend.exact_command = command;
+        fixture.plan.backend.exact_shell_escaped_command = command;
+      }
+    },
+    {
+      name: "non-executed Recon text passed to another command",
+      code: "CAMPAIGN_TIMEOUT_HOST_WRAPPER_INVALID",
+      mutate: (fixture) => {
+        const command = `echo ${fixture.backend.exact_command}`;
+        fixture.backend.exact_command = command;
+        fixture.plan.backend.exact_shell_escaped_command = command;
+      }
+    },
     {
       name: "commented stateful sequence flag",
       code: "CAMPAIGN_SEQUENCE_LENGTH_COMMAND_INVALID",
