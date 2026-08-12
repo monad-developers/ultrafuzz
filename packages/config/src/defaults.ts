@@ -237,7 +237,8 @@ function normalizePermissions(permissions: Partial<PermissionConfig>, filePath: 
       permissions.materializeOutputsAsUnstaged,
       "permissions.materialize_outputs_as_unstaged",
       filePath
-    )
+    ),
+    productionSourceRoots: required(permissions.productionSourceRoots, "permissions.production_source_roots", filePath)
   };
 }
 
@@ -344,6 +345,12 @@ function assertResolvedConfig(value: unknown, filePath: string): asserts value i
   }
   assertBoolean(value.permissions.promptReviewRequired, "permissions.promptReviewRequired", filePath);
   assertBoolean(value.permissions.materializeOutputsAsUnstaged, "permissions.materializeOutputsAsUnstaged", filePath);
+  if (!Array.isArray(value.permissions.productionSourceRoots) || value.permissions.productionSourceRoots.length === 0) {
+    throw new Error(`${filePath} permissions.productionSourceRoots must be a non-empty array`);
+  }
+  for (const root of value.permissions.productionSourceRoots) {
+    assertString(root, "permissions.productionSourceRoots[]", filePath);
+  }
   assertRecord(value.invariants, "invariants", filePath);
   assertString(value.invariants.propertyPriorityThreshold, "invariants.propertyPriorityThreshold", filePath);
   assertNumber(

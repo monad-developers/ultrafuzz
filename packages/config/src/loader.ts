@@ -57,7 +57,12 @@ const EXECUTION_PROVIDER_KEYS = ["modal"] as const;
 const MODAL_EXECUTION_PROVIDER_KEYS = ["app", "image", "region", "credential_env"] as const;
 const MODEL_PROFILE_KEYS = ["agent", "model", "reasoning", "timeout_seconds"] as const;
 const AGENT_KEYS = ["auth", "api_key_env", "config_dir"] as const;
-const PERMISSION_KEYS = ["trust_model", "prompt_review_required", "materialize_outputs_as_unstaged"] as const;
+const PERMISSION_KEYS = [
+  "trust_model",
+  "prompt_review_required",
+  "materialize_outputs_as_unstaged",
+  "production_source_roots"
+] as const;
 const INVARIANT_KEYS = [
   "property_priority_threshold",
   "invariant_testing_smoke_timeout",
@@ -491,6 +496,13 @@ export function parseProjectConfigToml(text: string, file = CONFIG_FILE_NAME): C
         type: "boolean",
         assign: (value) => {
           permissionConfig.materializeOutputsAsUnstaged = value;
+        }
+      },
+      {
+        key: "production_source_roots",
+        type: "string-array",
+        assign: (value) => {
+          permissionConfig.productionSourceRoots = value;
         }
       }
     ]);

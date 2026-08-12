@@ -63,6 +63,10 @@ function isSafeWorkspacePatchPath(value: string): boolean {
 }
 
 export const workspacePatchFileSchema = z.strictObject({ path: workspacePatchPath });
+export const workspacePatchSourceSnapshotSchema = z.strictObject({
+  status: z.literal("preserved"),
+  protected_roots: z.array(workspacePatchPath).min(1)
+});
 export const workspacePatchExcludedFileSchema = z.strictObject({
   path: workspacePatchPath,
   diff_bytes_at_least: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
@@ -76,11 +80,22 @@ export const workspacePatchSchema = z
     result_tree: gitObjectId,
     patch_sha256: sha256,
     files: z.array(workspacePatchFileSchema),
+    source_snapshot: workspacePatchSourceSnapshotSchema,
     excluded_files: z.array(workspacePatchExcludedFileSchema).min(1).optional()
   })
   .superRefine((manifest, context) => {
+    const protectedRoots = manifest.source_snapshot.protected_roots;
+    const protectedPath = (candidate: string): boolean =>
+      protectedRoots.some((root) => candidate === root || candidate.startsWith(`${root}/`));
     const seen = new Set<string>();
     for (const [index, entry] of manifest.files.entries()) {
+      if (protectedPath(entry.path)) {
+        context.addIssue({
+          code: "custom",
+          message: "Protected production source cannot appear in workspace patch files",
+          path: ["files", index, "path"]
+        });
+      }
       if (seen.has(entry.path)) {
         context.addIssue({
           code: "custom",
@@ -92,6 +107,13 @@ export const workspacePatchSchema = z
     }
     const excluded = new Set<string>();
     for (const [index, entry] of (manifest.excluded_files ?? []).entries()) {
+      if (protectedPath(entry.path)) {
+        context.addIssue({
+          code: "custom",
+          message: "Protected production source cannot be hidden by overflow exclusion",
+          path: ["excluded_files", index, "path"]
+        });
+      }
       if (excluded.has(entry.path)) {
         context.addIssue({
           code: "custom",
@@ -128,13 +150,26 @@ export const workspacePatchJsonSchema = {
   title: "Ultrafuzz workspace patch manifest",
   type: "object",
   additionalProperties: false,
-  required: ["schema_version", "base_commit", "base_tree", "result_tree", "patch_sha256", "files"],
+  required: ["schema_version", "base_commit", "base_tree", "result_tree", "patch_sha256", "source_snapshot", "files"],
   properties: {
     schema_version: { const: WORKSPACE_PATCH_SCHEMA_VERSION },
     base_commit: { type: "string", pattern: "^[0-9a-f]{40,64}$" },
     base_tree: { type: "string", pattern: "^[0-9a-f]{40,64}$" },
     result_tree: { type: "string", pattern: "^[0-9a-f]{40,64}$" },
     patch_sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
+    source_snapshot: {
+      type: "object",
+      additionalProperties: false,
+      required: ["status", "protected_roots"],
+      properties: {
+        status: { const: "preserved" },
+        protected_roots: {
+          type: "array",
+          minItems: 1,
+          items: { type: "string", pattern: "^[A-Za-z0-9._-]{1,128}(?:/[A-Za-z0-9._-]{1,128})*$" }
+        }
+      }
+    },
     excluded_files: {
       type: "array",
       minItems: 1,

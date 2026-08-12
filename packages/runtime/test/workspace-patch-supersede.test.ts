@@ -90,6 +90,7 @@ function manifestObject(patch: string, baseCommit: string, baseTree = OWN_BASELI
     base_tree: baseTree,
     result_tree: RESULT_TREE,
     patch_sha256: sha256(patch),
+    source_snapshot: { status: "preserved", protected_roots: ["contracts", "src"] },
     files: [{ path: "a.t.sol" }]
   };
 }
@@ -197,6 +198,7 @@ function task(fixture: { root: string; workspaceRoot: string }): unknown {
   return {
     attemptId: "attempt",
     workspacePath: fixture.workspaceRoot,
+    productionSourceRoots: ["contracts", "src"],
     metadata: { artifacts: { dir: fixture.root } }
   };
 }
