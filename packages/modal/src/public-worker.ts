@@ -476,10 +476,7 @@ export type PublicEvalModelWorkEvidence = "launched" | "none" | "unknown";
  * the pre-model retry that `none` buys it.
  */
 const PUBLIC_EVAL_POST_SUBMISSION_DIAGNOSTIC_CODES: ReadonlySet<string> = new Set(["WORKFLOW_SUBMISSION_FAILED"]);
-const PUBLIC_EVAL_LOGGABLE_FAILURE_DIAGNOSTIC_CODES: ReadonlySet<string> = new Set([
-  "EVAL_ROW_LAUNCH_FAILED",
-  "WORKFLOW_SUBMISSION_FAILED"
-]);
+const PUBLIC_EVAL_LOGGABLE_FAILURE_DIAGNOSTIC_CODE = /^[A-Z][A-Z0-9_]{0,127}$/u;
 
 /**
  * What the eval run's own journal records about model work having begun.
@@ -1400,8 +1397,9 @@ function publicEvalFailureDiagnosticLogPayloadFromDiagnostics(
       (entry): entry is Record<string, unknown> =>
         isPlainRecord(entry) &&
         typeof entry.code === "string" &&
-        PUBLIC_EVAL_LOGGABLE_FAILURE_DIAGNOSTIC_CODES.has(entry.code) &&
-        typeof entry.message === "string"
+        PUBLIC_EVAL_LOGGABLE_FAILURE_DIAGNOSTIC_CODE.test(entry.code) &&
+        typeof entry.message === "string" &&
+        entry.severity === "error"
     )
     .slice(0, 3)
     .map((entry) => ({

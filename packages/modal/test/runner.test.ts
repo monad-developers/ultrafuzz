@@ -747,6 +747,19 @@ describe("Modal result collection", () => {
         context
       )
     ).not.toThrow();
+    const runtimeDiagnosticPayload = Buffer.from(
+      JSON.stringify([{ code: "WORKFLOW_DEPENDENCY_INSTALL_FAILED", message: "registry request timed out" }]),
+      "utf8"
+    ).toString("base64url");
+    expect(() =>
+      assertSanitizedModalCollectedFiles(
+        {
+          ...files,
+          "worker.log": `2026-01-01T00:00:00.000Z eval-failure-diagnostics ${runtimeDiagnosticPayload}\n`
+        },
+        context
+      )
+    ).not.toThrow();
     const launcherDiagnosticPayload = Buffer.from(
       JSON.stringify([{ code: "EVAL_ROW_LAUNCH_FAILED", message: "launcher threw before returning a result" }]),
       "utf8"

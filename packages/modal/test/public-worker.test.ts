@@ -1114,6 +1114,7 @@ it("publishes only bounded redacted workflow-submission messages from eval JSON"
         {
           code: "WORKFLOW_SUBMISSION_FAILED",
           message: `runner failed with api_key=${secret}\nprivate detail`,
+          severity: "error",
           details: { credential: secret }
         },
         { code: "EVAL_ROW_SYNC_FAILED", message: `must not publish ${secret}` }
@@ -1146,7 +1147,8 @@ it("publishes only bounded redacted workflow-submission messages from eval JSON"
       diagnostics: [
         {
           code: "WORKFLOW_SUBMISSION_FAILED",
-          message: `${"command-prefix ".repeat(100)}stderr: decisive child failure`
+          message: `${"command-prefix ".repeat(100)}stderr: decisive child failure`,
+          severity: "error"
         }
       ]
     }),
@@ -1165,7 +1167,7 @@ it("publishes workflow-submission messages from the strict durable eval journal"
     [
       failedRunRecord("row-1", "WORKFLOW_SUBMISSION_FAILED", `detached runner failed: ${secret}`),
       failedRunRecord("row-2", "EVAL_ROW_LAUNCH_FAILED", `launcher threw: ${secret}`),
-      failedRunRecord("row-3", "EVAL_TARGET_PATH_MISSING", `must not publish ${secret}`)
+      failedRunRecord("row-3", "EVAL_TARGET_PATH_MISSING", `target missing: ${secret}`)
     ],
     [secret]
   );
@@ -1173,7 +1175,8 @@ it("publishes workflow-submission messages from the strict durable eval journal"
   expect(payload).toBeDefined();
   expect(JSON.parse(Buffer.from(payload!, "base64url").toString("utf8"))).toEqual([
     { code: "WORKFLOW_SUBMISSION_FAILED", message: "detached runner failed: <redacted>" },
-    { code: "EVAL_ROW_LAUNCH_FAILED", message: "launcher threw: <redacted>" }
+    { code: "EVAL_ROW_LAUNCH_FAILED", message: "launcher threw: <redacted>" },
+    { code: "EVAL_TARGET_PATH_MISSING", message: "target missing: <redacted>" }
   ]);
 });
 

@@ -3579,9 +3579,8 @@ function isGenericWorkerLifecycleLine(line: string, forbiddenSecretValues: reado
           entry !== null &&
           !Array.isArray(entry) &&
           Object.keys(entry).sort().join(",") === "code,message" &&
-          ["EVAL_ROW_LAUNCH_FAILED", "WORKFLOW_SUBMISSION_FAILED"].includes(
-            (entry as Record<string, unknown>).code as string
-          ) &&
+          typeof (entry as Record<string, unknown>).code === "string" &&
+          /^[A-Z][A-Z0-9_]{0,127}$/u.test((entry as Record<string, string>).code!) &&
           typeof (entry as Record<string, unknown>).message === "string" &&
           Buffer.byteLength((entry as Record<string, string>).message!, "utf8") <= 1_000 &&
           redactSecretsInText((entry as Record<string, string>).message!) ===
