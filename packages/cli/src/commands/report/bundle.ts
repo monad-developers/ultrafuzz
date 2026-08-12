@@ -265,7 +265,9 @@ function collectDirectory(
         continue;
       }
       const sourceArchivePath =
-        rename === undefined ? undefined : `${rename.archiveRoot}/${displayRelativePath(rename.sourceRoot, absolutePath)}`;
+        rename === undefined
+          ? undefined
+          : `${rename.archiveRoot}/${displayRelativePath(rename.sourceRoot, absolutePath)}`;
       addBundleFile(runRoot, absolutePath, archivePath, files, diagnostics, sourceArchivePath);
     }
   }
