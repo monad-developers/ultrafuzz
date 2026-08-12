@@ -303,7 +303,7 @@ function addBundleFile(
 function portableArchiveRelativePath(relativePath: string): string {
   return relativePath
     .split("/")
-    .map((segment) => segment.replaceAll("%", "%25").replaceAll(":", "%3A"))
+    .map((segment) => `entry-${crypto.createHash("sha256").update(segment, "utf8").digest("hex")}`)
     .join("/");
 }
 
