@@ -146,13 +146,15 @@ const terminalReportSchema = z.looseObject({
     .optional()
 });
 const campaignSummarySchema = z.looseObject({
+  // Historical and project-owned campaign summaries predate the stateful
+  // sequence marker. The current invariant campaign runtime gate requires it.
+  sequence_length: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
   failure_counts: z.looseObject({
     pre_deduplication: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
     post_deduplication: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
   })
 });
-const invariantCampaignPlanSchema = z.looseObject({
-  schema_version: z.literal("ultrafuzz.invariant-campaign-plan.v2"),
+const invariantCampaignPlanBaseShape = {
   configured_fuzzer_timeout_seconds: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   recon_internal_timeout_seconds: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   recon_test_limit: z.string().min(1),
@@ -166,7 +168,18 @@ const invariantCampaignPlanSchema = z.looseObject({
   backend: z.looseObject({
     exact_shell_escaped_command: z.string().min(1)
   })
-});
+};
+const invariantCampaignPlanSchema = z.union([
+  z.looseObject({
+    schema_version: z.literal("ultrafuzz.invariant-campaign-plan.v2"),
+    ...invariantCampaignPlanBaseShape
+  }),
+  z.looseObject({
+    schema_version: z.literal("ultrafuzz.invariant-campaign-plan.v3"),
+    ...invariantCampaignPlanBaseShape,
+    recon_sequence_length: z.number().int().positive().max(Number.MAX_SAFE_INTEGER)
+  })
+]);
 
 const definitions = defineContracts([
   {
@@ -216,7 +229,7 @@ const definitions = defineContracts([
     id: "ultrafuzz/invariant-campaign-plan@1",
     format: "json",
     description:
-      "A current invariant campaign plan with the v2 schema marker, configured Recon and host timeouts, a nonbinding test limit, topology-derived finalization reserve, exact command, and start-derived deadlines. This contract opts the campaign into strict runtime timeout-evidence validation."
+      "An invariant campaign plan with configured Recon and host timeouts, a nonbinding test limit, topology-derived finalization reserve, exact command, and start-derived deadlines. Historical v2 plans remain readable; v3 plans additionally require stateful sequence-length evidence and opt into strict sequence validation."
   },
   {
     id: "ultrafuzz/json-array@1",

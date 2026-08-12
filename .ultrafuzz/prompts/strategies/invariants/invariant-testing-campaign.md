@@ -91,9 +91,10 @@ Use this configured invariant testing fuzzer timeout:
      divide it into per-backend slices.
    - Before launch, write a preliminary `campaign-plan.json` with
      `schema_version` set to exactly
-     `ultrafuzz.invariant-campaign-plan.v2`,
+     `ultrafuzz.invariant-campaign-plan.v3`,
      `configured_fuzzer_timeout_seconds`, `recon_internal_timeout_seconds`,
-     `recon_test_limit` (as a decimal string),
+     `recon_test_limit` (as a decimal string), `recon_sequence_length` set to
+     `100`,
      `host_soft_timeout_seconds`, `host_force_kill_grace_seconds`,
      `artifact_finalization_reserve_seconds`, the exact command under
      `backend.exact_shell_escaped_command`, and pending start-derived deadline
@@ -107,13 +108,15 @@ Use this configured invariant testing fuzzer timeout:
    - Start the long campaign from this template, substituting the resolved
      worker count and the repository's own contract, config, and corpus
      conventions:
-     `timeout --preserve-status --signal=INT --kill-after=300s {{invariant_testing_fuzzer_timeout}}s recon fuzz . --contract CryticTester --test-mode assertion --workers <workers> --test-limit 18446744073709551615 --timeout {{invariant_testing_fuzzer_timeout}} --corpus-dir echidna --recon-corpus-dir recon-corpus`.
+     `timeout --preserve-status --signal=INT --kill-after=300s {{invariant_testing_fuzzer_timeout}}s recon fuzz . --contract CryticTester --test-mode assertion --workers <workers> --test-limit 18446744073709551615 --seq-len 100 --timeout {{invariant_testing_fuzzer_timeout}} --corpus-dir echidna --recon-corpus-dir recon-corpus`.
      Add `--config <path>` only when the repository's Recon/Echidna config
      requires it. Put cache or other `env KEY=value` assignments before the
      `timeout` executable, leaving the four supervisor arguments immediately
      before `recon fuzz`. Always pass `--workers` with the count resolved in
-     step 2; do not reuse the bounded smoke's test limit of 1, `--seq-len`, or
-     single-worker flags for the long campaign. The explicit maximum
+     step 2; do not reuse the bounded smoke's test limit or sequence length of
+     1, or its single-worker flag, for the long campaign. The explicit
+     `--seq-len 100` prevents a generated `seqLen: 1` smoke configuration from
+     silently disabling multi-transaction state exploration. The explicit maximum
      `--test-limit` is nonbinding and prevents Recon's default 50,000-call cap
      from ending the campaign before the wall-clock deadline.
    - Give recon-fuzzer distinct corpus, cache, log, raw-result, and reproducer
@@ -138,7 +141,7 @@ Use this configured invariant testing fuzzer timeout:
      terminal status; exit code or failure category; corpus, result, cache, and
      log paths; every discovered property failure and raw reproducer reference;
      and coverage metadata when the backend provides it. Also record the exact
-     `configured_timeout_seconds`, `exact_command`, `start_timestamp`,
+     `configured_timeout_seconds`, `sequence_length`, `exact_command`, `start_timestamp`,
      `end_timestamp`, typed `termination_reason`, `campaign_outcome`, and
      `usable_results` fields used by runtime timing validation.
    - A later pass must never erase, downgrade, or overwrite an observed failure.
@@ -221,7 +224,9 @@ Use this configured invariant testing fuzzer timeout:
    - In the campaign summary, record the outcome, shared implemented
      property-suite references, campaign-plan reference, the backend result
      reference and status, final finding references, and reproducer or
-     reproduction-blocker references. Put the failure counts under exactly
+     reproduction-blocker references. Record `sequence_length: 100` alongside
+     the backend outcome so stateful reachability remains visible downstream.
+     Put the failure counts under exactly
      `failure_counts.pre_deduplication` and
      `failure_counts.post_deduplication`. `pre_deduplication` is the total
      number of entries across every sibling backend record's `failures` array,
@@ -247,6 +252,7 @@ defined above:
 
 ```json
 {
+  "sequence_length": 100,
   "failure_counts": {
     "pre_deduplication": 29,
     "post_deduplication": 2
@@ -273,7 +279,8 @@ Use this exact top-level shape for the backend record:
   "schema_version": "ultrafuzz.property-campaign.v1",
   "fuzzer_backend": "recon",
   "configured_timeout_seconds": 3600,
-  "exact_command": "timeout --preserve-status --signal=INT --kill-after=300s 3600s recon fuzz . --contract CryticTester --test-mode assertion --workers 32 --test-limit 18446744073709551615 --timeout 3600 --corpus-dir echidna --recon-corpus-dir recon-corpus",
+  "sequence_length": 100,
+  "exact_command": "timeout --preserve-status --signal=INT --kill-after=300s 3600s recon fuzz . --contract CryticTester --test-mode assertion --workers 32 --test-limit 18446744073709551615 --seq-len 100 --timeout 3600 --corpus-dir echidna --recon-corpus-dir recon-corpus",
   "start_timestamp": "2026-01-01T00:00:00Z",
   "end_timestamp": "2026-01-01T01:00:00Z",
   "termination_reason": "configured-timeout",
