@@ -1321,6 +1321,16 @@ test("property references alone do not claim fuzzer campaign provenance", () => 
     executeSemanticGate("finding-campaign-provenance-coherence", {
       document: { property_ids: ["property-1"], fuzzer_backend: "recon", deduplication: { pre_dedup_count: 1 } }
     }).status,
+    "passed"
+  );
+  assert.equal(
+    executeSemanticGate("finding-campaign-provenance-coherence", {
+      document: {
+        property_ids: ["property-1"],
+        fuzzer_backend: "recon",
+        contributing_backend_failures: [{ fuzzer_backend: "recon", failure_id: "failure-1" }]
+      }
+    }).status,
     "failed"
   );
 });

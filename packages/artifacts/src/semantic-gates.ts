@@ -458,8 +458,7 @@ function findingCampaignProvenanceIssues(document: unknown, findingPath = "$"): 
   if (!isRecord(document)) return [];
   const propertyIds = stringArray(document.property_ids);
   const contributions = arrayAt(document, ["contributing_backend_failures"]);
-  const hasCampaignProvenance =
-    contributions.length > 0 || Object.prototype.hasOwnProperty.call(document, "deduplication");
+  const hasCampaignProvenance = contributions.length > 0;
   if (!hasCampaignProvenance) return [];
 
   const issues: SemanticGateIssue[] = [];
