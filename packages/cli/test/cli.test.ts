@@ -1615,6 +1615,11 @@ test("report bundle creates a portable ZIP without workspaces or stale report ba
   const engineLogDir = path.join(runData.run_root, "smithers", "logs");
   fs.mkdirSync(engineLogDir, { recursive: true });
   fs.writeFileSync(path.join(engineLogDir, "stream.ndjson"), '{"event":"retry"}\n', "utf8");
+  fs.writeFileSync(path.join(engineLogDir, "node:project-discovery-0-1.ndjson"), '{"event":"agent"}\n', "utf8");
+  fs.writeFileSync(path.join(engineLogDir, "node%3Aproject-discovery-0-1.ndjson"), '{"event":"literal"}\n', "utf8");
+  fs.writeFileSync(path.join(engineLogDir, "CON.log"), '{"event":"device"}\n', "utf8");
+  fs.writeFileSync(path.join(engineLogDir, "Trace.log"), '{"event":"uppercase"}\n', "utf8");
+  fs.writeFileSync(path.join(engineLogDir, "trace.log"), '{"event":"lowercase"}\n', "utf8");
 
   const bundled = await cli(project, ["report", "bundle", runData.run_id, "--json"]);
   assert.equal(bundled.code, 0, bundled.stderr);
@@ -1650,8 +1655,30 @@ test("report bundle creates a portable ZIP without workspaces or stale report ba
   assert.equal(entries.includes("artifacts/final-report/report.json.pre-old"), false);
   // Engine retry/validation evidence must reach an operator bundle, under a
   // neutral prefix so the archive never names the orchestration engine.
-  assert.equal(entries.includes("engine-logs/stream.ndjson"), true);
-  assert.equal(zip.readAsText("engine-logs/stream.ndjson"), '{"event":"retry"}\n');
+  const portableEnginePath = (name: string): string =>
+    `engine-logs/entry-${crypto.createHash("sha256").update(name, "utf8").digest("hex")}`;
+  const expectedEngineLogs = new Map([
+    ["stream.ndjson", '{"event":"retry"}\n'],
+    ["node:project-discovery-0-1.ndjson", '{"event":"agent"}\n'],
+    ["node%3Aproject-discovery-0-1.ndjson", '{"event":"literal"}\n'],
+    ["CON.log", '{"event":"device"}\n'],
+    ["Trace.log", '{"event":"uppercase"}\n'],
+    ["trace.log", '{"event":"lowercase"}\n']
+  ]);
+  for (const [name, content] of expectedEngineLogs) {
+    assert.equal(entries.includes(portableEnginePath(name)), true);
+    assert.equal(zip.readAsText(portableEnginePath(name)), content);
+  }
+  assert.equal(new Set([...expectedEngineLogs.keys()].map(portableEnginePath)).size, expectedEngineLogs.size);
+  const bundleManifest = JSON.parse(zip.readAsText("bundle-manifest.json")) as {
+    path_mappings: Array<{ source_path: string; archive_path: string }>;
+  };
+  assert.deepEqual(
+    bundleManifest.path_mappings,
+    [...expectedEngineLogs.keys()]
+      .map((name) => ({ source_path: `engine-logs/${name}`, archive_path: portableEnginePath(name) }))
+      .sort((left, right) => left.archive_path.localeCompare(right.archive_path))
+  );
   assert.equal(
     entries.some((entry) => /smithers/iu.test(entry)),
     false
