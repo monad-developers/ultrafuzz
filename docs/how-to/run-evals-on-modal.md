@@ -145,6 +145,31 @@ Modal credentials. It recovers failed, timed-out, and cancelled generations.
 Runs on different branches and independent full dispatches may overlap, so
 provider and Modal budgets remain the hard aggregate cost boundary.
 
+GitHub attaches a `workflow_run` recovery check to the trusted default-branch
+tooling commit, not to the candidate tree it operates on. Recovery run titles,
+check names, and job summaries therefore carry the full candidate SHA plus the
+source run and attempt. When qualifying an exact release commit, list its check
+runs without opening logs:
+
+```bash
+repository=monad-developers/ultrafuzz
+release_sha=<40-character-release-sha>
+gh api --paginate "repos/$repository/commits/$release_sha/check-runs?per_page=100" \
+  --jq '.check_runs[] | [.name, .conclusion, .details_url] | @tsv'
+```
+
+A check named `Recover candidate <sha> from source run ...` is about the tree
+identified by `<sha>`; it is tree-local to the release only when that SHA equals
+`$release_sha`. To query recovery runs for a candidate directly, independently
+of the commit to which GitHub attached their checks, use the run title:
+
+```bash
+candidate_sha=<40-character-candidate-sha>
+gh api --paginate "repos/$repository/actions/workflows/eval-benchmark-recovery.yml/runs?per_page=100" \
+  | jq --arg candidate "$candidate_sha" \
+      '.workflow_runs[] | select(.display_title | contains("candidate \($candidate) from source run")) | {id, display_title, conclusion, html_url}'
+```
+
 The smoke has exactly three targets: one Foundry target, one Hardhat target, and
 one Vyper target. It defaults to GPT-5.6 Luna at `high`, uses one strategy loop,
 and uses the `smoke` profile's packaged graph. One context node feeds four
