@@ -589,6 +589,18 @@ version, fields, types, enums, required members, optional members, and empty
 forms. After the final write, run the exact `ultrafuzz json validate` command
 rendered for this artifact in the central output contract.
 
+After `report.json` passes validation, generate the required byte-exact
+canonical Markdown with this producer command:
+
+```sh
+ultrafuzz report render --file '{{artifact_path}}/report.json' --output '{{artifact_path}}/report.md'
+```
+
+The command fails instead of inventing missing final-review evidence. Treat
+exit 1 as a report JSON authoring failure: correct `report.json`, rerun its exact
+validation command, and rerun this renderer. Do not hand-edit `report.md` after
+the renderer succeeds.
+
 Copy run identity, repository, elapsed time, model, token, pricing, loop, and
 audit-policy metadata from the authoritative run record. Preserve each exact
 value used in the Markdown Run summary and never synthesize a missing value.

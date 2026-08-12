@@ -879,6 +879,15 @@ describe("prompt semantic anchors", () => {
     expect(template).not.toContain("final_severity");
   });
 
+  it("gives the final-report producer the canonical Markdown renderer", () => {
+    const markdown = prompt("review/final-report.md");
+    expect(markdown).toContain(
+      "ultrafuzz report render --file '{{artifact_path}}/report.json' --output '{{artifact_path}}/report.md'"
+    );
+    expect(markdown).toContain("Do not hand-edit `report.md` after");
+    expect(markdown).toContain("the renderer succeeds");
+  });
+
   it("delegates the boundary-recipes JSON shape to its pinned schema", () => {
     const boundary = prompt("strategies/boundary-tests.md");
     const templatePath = fileURLToPath(

@@ -65,6 +65,7 @@ export const CLI_KNOWN_COMMANDS = [
   "stats",
   "inspect",
   "report",
+  "report render",
   "report bundle",
   "materialize",
   "clean",
@@ -342,6 +343,11 @@ export interface CliCommandDataMap {
   stats: RunStatisticsValue;
   inspect: CliInspectData;
   report: ValidatedReportArtifacts;
+  "report render": {
+    source_path: string;
+    destination_path: string;
+    sha256: string;
+  };
   "report bundle": CliReportBundleData;
   materialize: MaterializeValue;
   clean: CleanGeneratedValue;

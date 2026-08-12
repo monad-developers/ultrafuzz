@@ -672,6 +672,25 @@ function writeCanonicalReportPair(reportDir: string, report: Record<string, unkn
   fs.writeFileSync(path.join(reportDir, "report.md"), projection.markdown, "utf8");
 }
 
+test("report render gives producers the exact canonical Markdown without host repair", async () => {
+  const project = tempProject();
+  const reportPath = path.join(project, "report.json");
+  const markdownPath = path.join(project, "report.md");
+  const report = currentReport("producer-render", [currentReportIssue()]);
+  const expected = projectCanonicalFinalReport(report).markdown;
+  writeJsonRecord(reportPath, report);
+
+  const result = await cli(project, ["report", "render", "--file", reportPath, "--output", markdownPath]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(fs.readFileSync(markdownPath, "utf8"), expected);
+
+  writeJsonRecord(reportPath, { ...report, issues: [{ id: "invalid" }] });
+  const before = fs.readFileSync(markdownPath);
+  const invalid = await cli(project, ["report", "render", "--file", reportPath, "--output", markdownPath]);
+  assert.equal(invalid.code, 1);
+  assert.deepEqual(fs.readFileSync(markdownPath), before);
+});
+
 function sealVerifiedFinalReport(runRoot: string): void {
   sealVerifiedNodeOutputs(runRoot, "final-report");
 }
