@@ -1460,7 +1460,7 @@ test("report reconciliation distinguishes a missing current handoff from an expl
 
   const currentProject = tempProject();
   const current = await createReportRun(currentProject, "report-current-handoff-missing");
-  writeJsonRecord(path.join(current.run_root, "graph.json"), graphFor("ultrafuzz/implemented-properties@2"));
+  writeJsonRecord(path.join(current.run_root, "graph.json"), graphFor("ultrafuzz/implemented-properties@3"));
   const currentReportDir = path.join(current.run_root, "artifacts", "final-report");
   fs.mkdirSync(currentReportDir, { recursive: true });
   writeJsonRecord(path.join(currentReportDir, "report.json"), report);
@@ -1470,7 +1470,7 @@ test("report reconciliation distinguishes a missing current handoff from an expl
 
   const historicalProject = tempProject();
   const historical = await createReportRun(historicalProject, "report-historical-handoff");
-  writeJsonRecord(path.join(historical.run_root, "graph.json"), graphFor("ultrafuzz/implemented-properties@1"));
+  writeJsonRecord(path.join(historical.run_root, "graph.json"), graphFor("ultrafuzz/implemented-properties@3"));
   const historicalReportDir = path.join(historical.run_root, "artifacts", "final-report");
   fs.mkdirSync(historicalReportDir, { recursive: true });
   writeJsonRecord(path.join(historicalReportDir, "report.json"), report);

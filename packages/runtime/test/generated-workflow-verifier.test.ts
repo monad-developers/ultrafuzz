@@ -1859,8 +1859,8 @@ test("generated Smithers coverage authority preserves the shipped smoke topology
       },
       "stateful-invariant-implement-properties",
       "implemented-properties.json",
-      "ultrafuzz/implemented-properties@2",
-      "ultrafuzz/implemented-properties@1"
+      "ultrafuzz/implemented-properties@3",
+      "ultrafuzz/implemented-properties@3"
     ),
     undefined
   );
@@ -1874,8 +1874,8 @@ test("generated Smithers coverage authority preserves the shipped smoke topology
       reconstructionAuthorityReads += 1;
       assert.equal(logicalNodeId, "stateful-invariant-implement-properties");
       assert.equal(relativePath, "implemented-properties.json");
-      assert.equal(contract, "ultrafuzz/implemented-properties@2");
-      assert.equal(historicalContract, "ultrafuzz/implemented-properties@1");
+      assert.equal(contract, "ultrafuzz/implemented-properties@3");
+      assert.equal(historicalContract, "ultrafuzz/implemented-properties@3");
       return undefined;
     }
   );
@@ -1963,7 +1963,7 @@ test("generated Smithers coverage authority fails closed except for an explicit 
     outputs: [
       {
         path: "implemented-properties.json",
-        contract: "ultrafuzz/implemented-properties@2"
+        contract: "ultrafuzz/implemented-properties@3"
       }
     ]
   };
@@ -1981,15 +1981,15 @@ test("generated Smithers coverage authority fails closed except for an explicit 
       finalReportTask,
       "stateful-invariant-implement-properties",
       "implemented-properties.json",
-      "ultrafuzz/implemented-properties@2",
-      "ultrafuzz/implemented-properties@1"
+      "ultrafuzz/implemented-properties@3",
+      "ultrafuzz/implemented-properties@3"
     );
 
   try {
     assert.deepEqual(readCurrent()?.value, { authoritative: true });
     assert.equal(verificationCount, 1);
 
-    producer.outputs[0]!.contract = "ultrafuzz/implemented-properties@1";
+    producer.outputs[0]!.contract = "ultrafuzz/implemented-properties@3";
     assert.equal(readCurrent(), undefined, "a declared historical @1 handoff keeps legacy behavior");
     assert.equal(verificationCount, 1, "historical bytes are not reinterpreted as current coverage authority");
 
@@ -2021,7 +2021,7 @@ test("generated Smithers coverage authority fails closed except for an explicit 
     ];
     assert.throws(readCurrent, /declares unexpected contract/u);
 
-    producer.outputs[0]!.contract = "ultrafuzz/implemented-properties@2";
+    producer.outputs[0]!.contract = "ultrafuzz/implemented-properties@3";
     finalReportTask.dependencyArtifactDirs = [];
     assert.throws(readCurrent, /authoritative implemented-properties\.json handoff is unavailable/u);
 
@@ -2038,7 +2038,7 @@ test("generated Smithers coverage authority fails closed except for an explicit 
       outputs: [
         {
           path: "implemented-properties.json",
-          contract: "ultrafuzz/implemented-properties@2"
+          contract: "ultrafuzz/implemented-properties@3"
         }
       ]
     });

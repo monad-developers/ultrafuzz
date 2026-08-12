@@ -131,7 +131,7 @@ execute workflow commands.
 
 Built-in contracts include `ultrafuzz/findings@1`,
 `ultrafuzz/generated-tests@1`, `ultrafuzz/properties@1`,
-`ultrafuzz/implemented-properties@1`, `ultrafuzz/implemented-properties@2`, `ultrafuzz/implemented-properties@3`,
+`ultrafuzz/implemented-properties@3`,
 `ultrafuzz/property-campaign@1`,
 `ultrafuzz/nonempty-markdown@1`, `ultrafuzz/json-object@1`,
 `ultrafuzz/invariant-campaign-plan@1`,

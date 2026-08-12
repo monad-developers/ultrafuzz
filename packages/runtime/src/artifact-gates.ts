@@ -2319,8 +2319,7 @@ function verifyPropertyProvenanceArtifacts(
         node.outputs.some(
           (output) =>
             output.path === "implemented-properties.json" &&
-            (output.contract === "ultrafuzz/implemented-properties@2" ||
-              output.contract === "ultrafuzz/implemented-properties@3")
+            output.contract === "ultrafuzz/implemented-properties@3"
         )
       )
     ];
@@ -3638,14 +3637,7 @@ function verifyFinalReportImplementationCoverage(
     ];
   }
   const declaredContract = declaredContracts.values().next().value as string | undefined;
-  if (declaredContract === "ultrafuzz/implemented-properties@1") {
-    return [];
-  }
-  if (
-    declaredContract !== undefined &&
-    declaredContract !== "ultrafuzz/implemented-properties@2" &&
-    declaredContract !== "ultrafuzz/implemented-properties@3"
-  ) {
+  if (declaredContract !== undefined && declaredContract !== "ultrafuzz/implemented-properties@3") {
     return [
       {
         code: "PROPERTY_IMPLEMENTATION_HANDOFF_CONTRACT_INVALID",
@@ -3656,9 +3648,7 @@ function verifyFinalReportImplementationCoverage(
       }
     ];
   }
-  const currentHandoffDeclared =
-    declaredContract === "ultrafuzz/implemented-properties@2" ||
-    declaredContract === "ultrafuzz/implemented-properties@3";
+  const currentHandoffDeclared = declaredContract === "ultrafuzz/implemented-properties@3";
   const implementationPath = findLogicalNodeArtifact(
     layout,
     "stateful-invariant-implement-properties",

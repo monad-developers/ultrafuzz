@@ -2503,9 +2503,7 @@ function reconstructAuthoritativeReportImplementationCoverage(task: (typeof task
     task,
     "stateful-invariant-implement-properties",
     "implemented-properties.json",
-    "ultrafuzz/implemented-properties@2",
-    "ultrafuzz/implemented-properties@3",
-    "ultrafuzz/implemented-properties@1"
+    "ultrafuzz/implemented-properties@3"
   );
   const implementationProducerDeclared = taskSpecs.some(
     (candidate) => candidate.metadata.node.logicalNodeId === "stateful-invariant-implement-properties"
@@ -3007,9 +3005,7 @@ function materializeInvariantSuiteCompanions(task: (typeof taskSpecs)[number]): 
   const implementationOutput = task.outputs.find(
     (output) =>
       output.path === "implemented-properties.json" &&
-      (output.contract === "ultrafuzz/implemented-properties@1" ||
-        (output.contract === "ultrafuzz/implemented-properties@2" ||
-          output.contract === "ultrafuzz/implemented-properties@3"))
+      output.contract === "ultrafuzz/implemented-properties@3"
   );
   const artifactDir = realpathSync(task.metadata.artifacts.dir);
   const artifactRoots = taskArtifactRoots(task, artifactDir);

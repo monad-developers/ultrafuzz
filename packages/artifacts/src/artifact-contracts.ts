@@ -18,8 +18,6 @@ export const ARTIFACT_CONTRACT_IDS = [
   "ultrafuzz/campaign-summary@1",
   "ultrafuzz/findings@1",
   "ultrafuzz/generated-tests@1",
-  "ultrafuzz/implemented-properties@1",
-  "ultrafuzz/implemented-properties@2",
   "ultrafuzz/implemented-properties@3",
   "ultrafuzz/invariant-campaign-plan@1",
   "ultrafuzz/invariant-ledger@1",
@@ -210,21 +208,6 @@ const definitions = defineContracts([
       "A structured invariant evidence ledger. Every entry preserves verbatim source text, its source path and line or symbol location, and one or more inventory IDs; inventory rows provide the normalized join and each row maps back to one or more ledger entries.",
     validEmptyExample:
       '{"schema_version":"ultrafuzz.invariant-evidence-ledger.v1","entries":[{"id":"evidence-example","source_path":"docs/example.md","source_location":"line 1","kind":"invariant","verbatim":"Example relation","inventory_ids":["inventory-example"]}],"inventory_rows":[{"id":"inventory-example","description":"Example relation","ledger_ids":["evidence-example"]}],"scan_probes":[]}'
-  },
-  {
-    id: "ultrafuzz/implemented-properties@1",
-    format: "json",
-    description:
-      "Implementation records keyed by canonical property_id, with implementation status and implementation/test paths. Current runs also emit selection metadata and a typed blocker for every selected property that is not implemented.",
-    validEmptyExample: '{"schema_version":"ultrafuzz.implemented-properties.v1","properties":[]}'
-  },
-  {
-    id: "ultrafuzz/implemented-properties@2",
-    format: "json",
-    description:
-      "Current invariant implementation records keyed by canonical property_id. The artifact must declare the exact inclusive priority selection and a typed blocker for every selected property that is not implemented.",
-    validEmptyExample:
-      '{"schema_version":"ultrafuzz.implemented-properties.v1","selection":{"priority_threshold":"high","priorities":["high"],"property_ids":[]},"properties":[]}'
   },
   {
     id: "ultrafuzz/implemented-properties@3",
@@ -455,14 +438,10 @@ export function validateArtifactContract(
       ...(result.value === undefined ? {} : { value: result.value })
     };
   }
-  if (
-    contract === "ultrafuzz/implemented-properties@1" ||
-    contract === "ultrafuzz/implemented-properties@2" ||
-    contract === "ultrafuzz/implemented-properties@3"
-  ) {
+  if (contract === "ultrafuzz/implemented-properties@3") {
     const result = validateImplementedPropertiesSchema(parsed, artifactPath, {
-      requireSelection: contract !== "ultrafuzz/implemented-properties@1",
-      requireExecutableEvidence: contract === "ultrafuzz/implemented-properties@3"
+      requireSelection: true,
+      requireExecutableEvidence: true
     });
     return {
       ok: result.ok,

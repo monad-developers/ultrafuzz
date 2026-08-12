@@ -61,8 +61,6 @@ export function reconcileReportArtifacts(runRoot: string): ReconciledReportArtif
   if (!supportsCanonicalFinalReportProjection(original.value)) {
     if (
       logicalArtifactContract(root, "stateful-invariant-implement-properties", "implemented-properties.json") ===
-        "ultrafuzz/implemented-properties@2" ||
-      logicalArtifactContract(root, "stateful-invariant-implement-properties", "implemented-properties.json") ===
         "ultrafuzz/implemented-properties@3" ||
       readImplementedPropertiesArtifact(root)?.selection !== undefined
     ) {
@@ -287,14 +285,7 @@ function reconcilePropertyImplementationCoverage(runRoot: string, report: JsonRe
     "stateful-invariant-implement-properties",
     "implemented-properties.json"
   );
-  if (implementationContract === "ultrafuzz/implemented-properties@1") {
-    return { ...report, property_implementation_coverage: "unavailable" };
-  }
-  if (
-    implementationContract !== undefined &&
-    implementationContract !== "ultrafuzz/implemented-properties@2" &&
-    implementationContract !== "ultrafuzz/implemented-properties@3"
-  ) {
+  if (implementationContract !== undefined && implementationContract !== "ultrafuzz/implemented-properties@3") {
     throw new Error(
       `current-run property implementation handoff declares unexpected contract ${JSON.stringify(implementationContract)}`
     );
@@ -306,10 +297,7 @@ function reconcilePropertyImplementationCoverage(runRoot: string, report: JsonRe
     "implemented-properties.json"
   );
   if (implementationPath === undefined) {
-    if (
-      implementationContract === "ultrafuzz/implemented-properties@2" ||
-      implementationContract === "ultrafuzz/implemented-properties@3"
-    ) {
+    if (implementationContract === "ultrafuzz/implemented-properties@3") {
       throw new Error("current-run property implementation handoff is unavailable");
     }
     return { ...report, property_implementation_coverage: "unavailable" };
@@ -318,17 +306,12 @@ function reconcilePropertyImplementationCoverage(runRoot: string, report: JsonRe
     readUnknown(runRoot, implementationPath),
     implementationPath,
     {
-      requireSelection:
-        implementationContract === "ultrafuzz/implemented-properties@2" ||
-        implementationContract === "ultrafuzz/implemented-properties@3",
+      requireSelection: implementationContract === "ultrafuzz/implemented-properties@3",
       requireExecutableEvidence: implementationContract === "ultrafuzz/implemented-properties@3"
     }
   );
   if (!implementationResult.ok || implementationResult.value === undefined) {
-    if (
-      implementationContract !== "ultrafuzz/implemented-properties@2" &&
-      implementationContract !== "ultrafuzz/implemented-properties@3"
-    ) {
+    if (implementationContract !== "ultrafuzz/implemented-properties@3") {
       return { ...report, property_implementation_coverage: "unavailable" };
     }
     const detail = implementationResult.issues

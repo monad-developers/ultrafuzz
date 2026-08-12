@@ -167,8 +167,6 @@
                     "ultrafuzz/campaign-summary@1",
                     "ultrafuzz/findings@1",
                     "ultrafuzz/generated-tests@1",
-                    "ultrafuzz/implemented-properties@1",
-                    "ultrafuzz/implemented-properties@2",
                     "ultrafuzz/implemented-properties@3",
                     "ultrafuzz/invariant-campaign-plan@1",
                     "ultrafuzz/invariant-ledger@1",

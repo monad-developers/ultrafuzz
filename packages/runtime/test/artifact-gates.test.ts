@@ -77,7 +77,7 @@ function plannedNode(paths: string[]): PlannedGraphNode {
               : outputPath === "properties.json"
                 ? "ultrafuzz/properties@1"
                 : outputPath === "implemented-properties.json"
-                  ? "ultrafuzz/implemented-properties@1"
+                  ? "ultrafuzz/implemented-properties@3"
                   : outputPath === "setup/invariant-evidence-ledger.json"
                     ? "ultrafuzz/invariant-ledger@1"
                     : ["echidna-results.json", "medusa-results.json", "recon-fuzzer-results.json"].includes(outputPath)
@@ -3250,7 +3250,7 @@ test("property implementation gate enforces declared selection coverage and acti
     logical_id: nodeId,
     outputs: plannedNode(["implemented-properties.json"]).outputs.map((output) => ({
       ...output,
-      contract: "ultrafuzz/implemented-properties@2" as const
+      contract: "ultrafuzz/implemented-properties@3" as const
     }))
   };
 
@@ -3465,7 +3465,7 @@ test("property implementation gate includes lower-priority benchmark expectation
     ...baseNode,
     id: nodeId,
     logical_id: nodeId,
-    outputs: baseNode.outputs.map((output) => ({ ...output, contract: "ultrafuzz/implemented-properties@2" as const }))
+    outputs: baseNode.outputs.map((output) => ({ ...output, contract: "ultrafuzz/implemented-properties@3" as const }))
   };
   const result = verifyRequiredArtifactsForAttempt(layout, node, nodeId);
   assert.equal(result.ok, false);
@@ -4552,7 +4552,7 @@ test("final-report coverage gate distinguishes missing current handoffs from exp
     projectRoot: tempProject(),
     runId: "run-current-coverage-handoff-missing",
     resolvedConfigToml: '[invariants]\nproperty_priority_threshold = "high"\n',
-    graph: graphFor("ultrafuzz/implemented-properties@2")
+    graph: graphFor("ultrafuzz/implemented-properties@3")
   });
   writeReport(current);
   const missingCurrent = verifyRequiredArtifactsForAttempt(current, finalNode, finalNode.id);
@@ -4565,7 +4565,7 @@ test("final-report coverage gate distinguishes missing current handoffs from exp
   const historical = createRunLayout({
     projectRoot: tempProject(),
     runId: "run-historical-coverage-handoff",
-    graph: graphFor("ultrafuzz/implemented-properties@1")
+    graph: graphFor("ultrafuzz/implemented-properties@3")
   });
   writeReport(historical);
   const preservedHistorical = verifyRequiredArtifactsForAttempt(historical, finalNode, finalNode.id);

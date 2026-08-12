@@ -1054,10 +1054,10 @@ test("current implementation contract requires selection while historical contra
     schema_version: IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
     properties: []
   });
-  assert.equal(validateArtifactContract("ultrafuzz/implemented-properties@1", historical).ok, true);
-  assert.equal(validateArtifactContract("ultrafuzz/implemented-properties@2", historical).ok, false);
+  assert.equal(validateArtifactContract("ultrafuzz/implemented-properties@3", historical).ok, true);
+  assert.equal(validateArtifactContract("ultrafuzz/implemented-properties@3", historical).ok, false);
   assert.ok(
-    validateArtifactContract("ultrafuzz/implemented-properties@2", historical).issues.some(
+    validateArtifactContract("ultrafuzz/implemented-properties@3", historical).issues.some(
       (issue) => issue.code === "IMPLEMENTED_PROPERTIES_SELECTION_REQUIRED"
     )
   );
@@ -1852,14 +1852,14 @@ test("an empty optional reference_expectations list is accepted, as omitting it 
     });
 
   // Omitting it was always valid; the empty array must be too, and a populated one must keep working.
-  assert.equal(validateArtifactContract("ultrafuzz/implemented-properties@2", document({})).ok, true);
+  assert.equal(validateArtifactContract("ultrafuzz/implemented-properties@3", document({})).ok, true);
   const empty = validateArtifactContract(
-    "ultrafuzz/implemented-properties@2",
+    "ultrafuzz/implemented-properties@3",
     document({ reference_expectations: [] })
   );
   assert.equal(empty.ok, true, JSON.stringify(empty.issues));
   assert.equal(
-    validateArtifactContract("ultrafuzz/implemented-properties@2", document({ reference_expectations: ["e1"] })).ok,
+    validateArtifactContract("ultrafuzz/implemented-properties@3", document({ reference_expectations: ["e1"] })).ok,
     true
   );
 });
@@ -1868,7 +1868,7 @@ test("a duplicated reference expectation is still rejected once empty lists are 
   // Accepting `[]` must not accept anything else. The dedup rule inside the list is the reason the schema
   // is more than `z.array(string)`, so it has to survive the change.
   const result = validateArtifactContract(
-    "ultrafuzz/implemented-properties@2",
+    "ultrafuzz/implemented-properties@3",
     JSON.stringify({
       schema_version: "ultrafuzz.implemented-properties.v1",
       properties: [
@@ -1899,7 +1899,7 @@ test("every schema validation issue carries the field path that identifies it", 
   // Kept because the invariant is what makes that formatter possible: if paths ever stopped being
   // populated here, the useful message downstream would silently become useless again.
   const result = validateArtifactContract(
-    "ultrafuzz/implemented-properties@2",
+    "ultrafuzz/implemented-properties@3",
     JSON.stringify({
       schema_version: "ultrafuzz.implemented-properties.v1",
       properties: [{ property_id: "", status: "pending", implementation_paths: [], test_paths: [] }],
