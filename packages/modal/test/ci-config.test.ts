@@ -662,7 +662,7 @@ describe("public Modal benchmark configuration", () => {
             gates: "docs,config,audit-profile-package,security,topology,prompts,artifacts,evals,modal"
           },
           { lane: "runtime", gates: "runtime" },
-          { lane: "cli-typecheck", gates: "cli,workspace-typecheck" }
+          { lane: "cli-typecheck", gates: "cli,benchmark-history,workspace-typecheck" }
         ]
       }
     });
@@ -672,9 +672,7 @@ describe("public Modal benchmark configuration", () => {
     );
     expect(modalDependentLaneBuild?.if).toBe("matrix.lane == 'package-gates' || matrix.lane == 'runtime'");
     expect(modalDependentLaneBuild?.run).toBe("pnpm --filter @ultrafuzz/modal... build");
-    expect(releaseValidation?.steps.find((step) => step.name === "Validate benchmark history charts")?.if).toBe(
-      "matrix.lane == 'cli-typecheck'"
-    );
+    expect(releaseValidation?.steps.find((step) => step.name === "Validate benchmark history charts")).toBeUndefined();
     expect(workflow.jobs["release-gates"]?.needs).toEqual(["draft-and-build-gates", "release-validation"]);
     expect(
       workflow.jobs["release-gates"]?.steps.find((step) => step.name === "Merge release validation report")?.run

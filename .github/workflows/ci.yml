@@ -66,7 +66,7 @@ jobs:
           - lane: runtime
             gates: runtime
           - lane: cli-typecheck
-            gates: cli,workspace-typecheck
+            gates: cli,benchmark-history,workspace-typecheck
     env:
       ULTRAFUZZ_CODEX_REAL_DRY_RUN: "0"
       ULTRAFUZZ_RELEASE_DASHBOARD: "0"
@@ -104,10 +104,6 @@ jobs:
           pnpm -w validate:release --
           --gates "${{ matrix.gates }}"
           --report ".ultrafuzz/release-validation/${{ matrix.lane }}.json"
-
-      - name: Validate benchmark history charts
-        if: matrix.lane == 'cli-typecheck'
-        run: pnpm -w benchmark:check:prebuilt
 
       - name: Upload release validation lane
         if: always()
