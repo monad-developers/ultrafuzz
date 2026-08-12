@@ -455,7 +455,7 @@ describe("public Modal benchmark configuration", () => {
       >;
     };
     expect(Object.hasOwn(workflow.on, "push")).toBe(true);
-    expect(workflow.on.push.branches).toEqual(["**"]);
+    expect(workflow.on.push.branches).toEqual(["main"]);
     expect(Object.hasOwn(workflow.on, "pull_request")).toBe(false);
     expect(workflow.on.workflow_dispatch.inputs).toEqual({
       benchmark_mode: expect.objectContaining({ default: "full", type: "choice", options: ["full", "smoke"] }),
@@ -610,14 +610,73 @@ describe("public Modal benchmark configuration", () => {
     }
   });
 
-  it("cancels superseded CI work on the same branch", () => {
+  it("uses a fast draft lane and cancels superseded CI work for the same pull request", () => {
     const workspace = path.resolve("../..");
     const workflow = parse(fs.readFileSync(path.join(workspace, ".github/workflows/ci.yml"), "utf8")) as {
+      on: {
+        push: { branches: string[] };
+        pull_request: { types: string[] };
+      };
       concurrency: { group: string; "cancel-in-progress": boolean };
+      jobs: Record<
+        string,
+        {
+          if?: string;
+          needs?: string[];
+          strategy?: {
+            "fail-fast": boolean;
+            "max-parallel": number;
+            matrix: { include: Array<{ lane: string; gates: string }> };
+          };
+          steps: Array<{ name?: string; if?: string; run?: string }>;
+        }
+      >;
     };
 
+    expect(workflow.on.push.branches).toEqual(["main"]);
+    expect(workflow.on.pull_request.types).toEqual([
+      "opened",
+      "synchronize",
+      "reopened",
+      "ready_for_review",
+      "converted_to_draft"
+    ]);
+    expect(workflow.concurrency.group).toContain("github.event.pull_request.number");
     expect(workflow.concurrency.group).toContain("github.ref");
     expect(workflow.concurrency["cancel-in-progress"]).toBe(true);
+
+    const steps = workflow.jobs["draft-and-build-gates"]?.steps ?? [];
+    for (const name of ["Check formatting", "Lint", "Build"]) {
+      expect(steps.find((step) => step.name === name)?.if, `${name} must run for drafts`).toBeUndefined();
+    }
+    const fullLane = "github.event_name == 'push' || github.event.pull_request.draft == false";
+    const releaseValidation = workflow.jobs["release-validation"];
+    expect(releaseValidation?.if).toBe(fullLane);
+    expect(releaseValidation?.strategy).toEqual({
+      "fail-fast": false,
+      "max-parallel": 3,
+      matrix: {
+        include: [
+          {
+            lane: "package-gates",
+            gates: "docs,config,audit-profile-package,security,topology,prompts,artifacts,evals,modal"
+          },
+          { lane: "runtime", gates: "runtime" },
+          { lane: "cli-typecheck", gates: "cli,benchmark-history,workspace-typecheck" }
+        ]
+      }
+    });
+    expect(releaseValidation?.steps.find((step) => step.name === "Validate release lane")?.run).toContain("--gates");
+    const modalDependentLaneBuild = releaseValidation?.steps.find(
+      (step) => step.name === "Build Modal-dependent lane dependencies"
+    );
+    expect(modalDependentLaneBuild?.if).toBe("matrix.lane == 'package-gates' || matrix.lane == 'runtime'");
+    expect(modalDependentLaneBuild?.run).toBe("pnpm --filter @ultrafuzz/modal... build");
+    expect(releaseValidation?.steps.find((step) => step.name === "Validate benchmark history charts")).toBeUndefined();
+    expect(workflow.jobs["release-gates"]?.needs).toEqual(["draft-and-build-gates", "release-validation"]);
+    expect(
+      workflow.jobs["release-gates"]?.steps.find((step) => step.name === "Merge release validation report")?.run
+    ).toContain("--merge-report-dir");
   });
 
   it("terminates every exact detached sandbox after either supported run becomes incomplete", () => {
@@ -992,7 +1051,7 @@ describe("public Modal benchmark configuration", () => {
     const producer = parse(fs.readFileSync(path.join(workspace, ".github/workflows/eval-benchmarks.yml"), "utf8")) as {
       on: { push: { branches: string[]; "paths-ignore": string[] } };
     };
-    expect(producer.on.push.branches).toEqual(["**"]);
+    expect(producer.on.push.branches).toEqual(["main"]);
     expect(producer.on.push["paths-ignore"]).toEqual([
       "benchmarks/history.json",
       "benchmarks/public-results/**",

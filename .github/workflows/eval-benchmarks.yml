@@ -3,7 +3,7 @@ name: Modal Eval Benchmarks
 on:
   push:
     branches:
-      - "**"
+      - main
     paths-ignore:
       - benchmarks/history.json
       - benchmarks/public-results/**
