@@ -259,6 +259,20 @@ describe("eval durable schema registry", () => {
       })
     ).toBeDefined();
   });
+
+  it("accepts run audit lineage fields while rejecting unknown run-record fields", () => {
+    const record = {
+      ...canonicalFixtures().record,
+      audit_profile: "smoke",
+      audit_profile_catalog_digest: "a".repeat(64),
+      topology_digest: "b".repeat(64),
+      prompt_digest: "c".repeat(64)
+    };
+    expect(validateEvalJsonSchema(EVAL_RUN_RECORD_SCHEMA_ID, record)).toMatchObject({ ok: true, issues: [] });
+    expect(
+      validateEvalJsonSchema(EVAL_RUN_RECORD_SCHEMA_ID, { ...record, unknown_lineage: "d".repeat(64) })
+    ).toMatchObject({ ok: false });
+  });
 });
 
 describe("eval durable readers and writers", () => {
