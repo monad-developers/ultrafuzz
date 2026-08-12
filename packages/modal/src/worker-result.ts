@@ -153,7 +153,7 @@ export class WorkerResultWriter {
     const generation = Math.max(
       await persistedGeneration(input.statusPath),
       await persistedGeneration(input.resultPath),
-      input.generationFloorPath === undefined ? 0 : await persistedGeneration(input.generationFloorPath)
+      input.generationFloorPath === undefined ? 0 : await persistedGenerationFloor(input.generationFloorPath)
     );
     return new WorkerResultWriter(
       input.statusPath,
@@ -205,9 +205,12 @@ export class WorkerResultWriter {
   }
 
   private async refreshGenerationFloor(): Promise<void> {
-    if (this.generationFloorPath !== undefined) {
-      this.generation = Math.max(this.generation, await persistedGeneration(this.generationFloorPath));
-    }
+    this.generation = Math.max(
+      this.generation,
+      await persistedGeneration(this.statusPath),
+      await persistedGeneration(this.resultPath),
+      this.generationFloorPath === undefined ? 0 : await persistedGenerationFloor(this.generationFloorPath)
+    );
   }
 
   private contract(
@@ -447,6 +450,19 @@ async function persistedGeneration(filePath: string): Promise<number> {
   const value = await readJsonRecord(filePath);
   const generation = value?.generation;
   return typeof generation === "number" && Number.isSafeInteger(generation) && generation >= 0 ? generation : 0;
+}
+
+async function persistedGenerationFloor(filePath: string): Promise<number> {
+  try {
+    const value = record(JSON.parse(await readFile(filePath, "utf8")));
+    const generation = value?.generation;
+    if (typeof generation === "number" && Number.isSafeInteger(generation) && generation >= 0) return generation;
+    throw new Error("persisted result generation floor is invalid");
+  } catch (error) {
+    if (isNodeError(error, "ENOENT")) return 0;
+    if (error instanceof SyntaxError) throw new Error("persisted result generation floor is invalid", { cause: error });
+    throw error;
+  }
 }
 
 async function readJsonRecord(filePath: string): Promise<Record<string, unknown> | undefined> {

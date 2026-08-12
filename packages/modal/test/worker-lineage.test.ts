@@ -151,6 +151,37 @@ describe("persistent Modal worker lineage", () => {
     expect(partial.generation).toBe(terminal.generation + 1);
   });
 
+  it("fails closed when the generation floor is corrupt after attempt cleanup", async () => {
+    const fixture = lineageFixture();
+    const first = lineage();
+    await ensure(fixture, first);
+    const firstWriter = await writerFor(fixture, first);
+    await firstWriter.writeTerminal("finished", emptyWorkerCheckpoint());
+    const second = { ...first, attempt: 2, attempt_id: "attempt-2" };
+    await ensure(fixture, second);
+    fs.writeFileSync(fixture.generationFloorPath, "not json\n");
+
+    await expect(writerFor(fixture, second)).rejects.toThrow(/generation floor is invalid/u);
+    expect(fs.existsSync(fixture.statusPath)).toBe(false);
+    expect(fs.existsSync(fixture.resultPath)).toBe(false);
+  });
+
+  it("serializes result generations from duplicate processes with identical lineage", async () => {
+    const fixture = lineageFixture();
+    const first = lineage();
+    await ensure(fixture, first);
+    const left = await writerFor(fixture, first);
+    const right = await writerFor(fixture, first);
+
+    const written = await Promise.all([
+      left.writePartial(emptyWorkerCheckpoint()),
+      right.writePartial(emptyWorkerCheckpoint())
+    ]);
+
+    expect(written.map((contract) => contract.generation).sort((a, b) => a - b)).toEqual([1, 2]);
+    expect(JSON.parse(fs.readFileSync(fixture.statusPath, "utf8"))).toMatchObject({ generation: 2 });
+  });
+
   it("allows a newer resume attempt to roll forward the worker image for the same workspace", async () => {
     const fixture = lineageFixture();
     const first = lineage();
