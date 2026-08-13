@@ -157,6 +157,29 @@ Apply these Recon/Chimera rules:
 - In the report, list the selected LCOV file, every production `SF:` source
   prefix that was present, and any expected core production contracts absent
   from LCOV.
+- Write `{{artifact_dir}}/coverage-evidence.json` using the
+  `ultrafuzz/coverage-evidence@1` contract and validate it against
+  `{{schema_path}}/coverage-evidence.schema.json`. Set `schema_version` to
+  `ultrafuzz.coverage-evidence.v1`. Every file entry must include `path`,
+  `kind`, `included`, `critical`, `covered_ranges`, and `total_ranges`; excluded
+  entries also require `exclusion_reason`. It must name every included and
+  excluded file with production/test/harness/dependency attribution and an
+  exclusion reason. `counted_ranges` must enumerate the selected functions or
+  ranges and may reference only files with `included: true`. For an excluded
+  production file, publish no selected counted range; set `total_ranges` to its
+  actual material declaration count so the `production-source` denominator
+  still discloses it. List material zero-coverage components, and publish both `selected-range` and
+  `production-source` views (plus `declared-critical-path` when declared).
+  After the structural JSON Schema check, run
+  `ultrafuzz artifact validate ultrafuzz/coverage-evidence@1 {{artifact_dir}}/coverage-evidence.json`.
+  This standalone artifact validator must pass before finishing; it enforces
+  cross-field joins and denominator reconciliation within the JSON artifact.
+  It cannot inspect the isolated workspace. At publication, the runtime also
+  reconciles the declared production files and ranges against the trusted
+  workspace source inventory; do not treat the standalone command as that
+  workspace-aware publication check.
+  Never publish a bare percentage: render each score as
+  `<scope>: <covered_ranges>/<total_ranges>` in `coverage-report.md`.
 - Recon Magic coverage excludes ABI view/pure functions before evaluation and
   filters internal/private missing reports; use that standardized result.
 - Chase at least 90% standardized line coverage of core production contracts.

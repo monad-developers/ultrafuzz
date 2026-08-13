@@ -4,6 +4,7 @@ export const ARTIFACT_CONTRACT_IDS = [
   "ultrafuzz/audited-differential-lanes@1",
   "ultrafuzz/boundary-recipes@1",
   "ultrafuzz/campaign-summary@2",
+  "ultrafuzz/coverage-evidence@1",
   "ultrafuzz/coverage-goal@1",
   "ultrafuzz/dependency-scope-matrix@1",
   "ultrafuzz/differential-gap-review@1",
