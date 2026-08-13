@@ -11250,7 +11250,15 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
     "Overall coverage came to 25%.",
     "Overall coverage hit 25%.",
     "Coverage accounted for 39/39 ranges.",
-    "Unlike selected-range measurements: overall coverage was 25%."
+    "Unlike selected-range measurements: overall coverage was 25%.",
+    "Coverage was **100%**.",
+    "Coverage was *100%*.",
+    "Coverage was `100%`.",
+    "Coverage was <strong>100%</strong>.",
+    "Coverage was [100%](https://example.invalid/coverage).",
+    "Coverage was 100<!-- rendered -->%.",
+    "Coverage was 100\u200b%.",
+    "Coverage was **39/39** ranges."
   ]) {
     writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\n${mixedScore}\n`);
     const mixed = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
@@ -11258,7 +11266,8 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
     assert.ok(
       mixed.diagnostics.some(
         (diagnostic) =>
-          diagnostic.code === (mixedScore.includes("/") ? "UNSCOPED_COVERAGE_FRACTION" : "UNSCOPED_COVERAGE_PERCENTAGE")
+          diagnostic.code ===
+          (/\b\d+\s*\/\s*\d+\b/u.test(mixedScore) ? "UNSCOPED_COVERAGE_FRACTION" : "UNSCOPED_COVERAGE_PERCENTAGE")
       ),
       mixedScore
     );
