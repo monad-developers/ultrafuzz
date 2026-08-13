@@ -76,6 +76,8 @@ import {
   type WorkspacePatchManifest
 } from "@ultrafuzz/artifacts";
 import { parseProjectConfigToml } from "@ultrafuzz/config";
+import { decodeHTML } from "entities";
+import { fromMarkdown } from "mdast-util-from-markdown";
 
 import { authenticatedAggregationSemanticContext } from "./aggregation-semantic-context.js";
 import {
@@ -6669,9 +6671,10 @@ function unscopedCoverageScoreDiagnostics(
   artifactPath: string,
   requireCoverageContext = false
 ): RuntimeDiagnostic[] {
-  return contents
-    .split(/\r?\n/u)
-    .map((line, index) => ({ line, lineNumber: index + 1 }))
+  return renderedMarkdownBlocks(contents)
+    .flatMap(({ text, lineNumber }) =>
+      text.split(/\r?\n/u).map((line, index) => ({ line, lineNumber: lineNumber + index }))
+    )
     .flatMap(({ line, lineNumber }) =>
       unscopedCoverageScoreKinds(line, requireCoverageContext).map((kind) => ({ lineNumber, kind }))
     )
@@ -6688,27 +6691,23 @@ function unscopedCoverageScoreDiagnostics(
 }
 
 function unscopedReportCoverageScoreDiagnostics(contents: string, artifactPath: string): RuntimeDiagnostic[] {
-  let fenced = false;
   let coverageSection = false;
-  return contents
-    .split(/\r?\n/u)
-    .map((line, index) => ({ line, lineNumber: index + 1 }))
-    .map(({ line, lineNumber }) => {
-      const trimmed = line.trim();
-      if (/^(?:`{3,}|~{3,})/u.test(trimmed)) {
-        fenced = !fenced;
-        return { lineNumber, kinds: [] };
-      }
-      if (fenced) return { lineNumber, kinds: [] };
-      if (/^##\s+/u.test(trimmed)) {
+  return renderedMarkdownBlocks(contents)
+    .flatMap((block) => {
+      if (block.headingDepth === 2) {
         coverageSection =
-          /^##\s+(?:scoped coverage evidence|coverage(?:\s+(?:evidence|report|results?|summary))?)\s*$/iu.test(trimmed);
+          /^(?:scoped coverage evidence|coverage(?:\s+(?:evidence|report|results?|summary))?)\s*$/iu.test(
+            block.text.trim()
+          );
       }
-      return {
-        lineNumber,
-        kinds: unscopedCoverageScoreKinds(line, !coverageSection)
-      };
+      return block.text
+        .split(/\r?\n/u)
+        .map((line, index) => ({ line, lineNumber: block.lineNumber + index, coverageSection }));
     })
+    .map(({ line, lineNumber, coverageSection }) => ({
+      lineNumber,
+      kinds: unscopedCoverageScoreKinds(line, !coverageSection)
+    }))
     .flatMap(({ lineNumber, kinds }) => kinds.map((kind) => ({ lineNumber, kind })))
     .map(({ lineNumber, kind }) => ({
       code: kind === "percentage" ? "UNSCOPED_COVERAGE_PERCENTAGE" : "UNSCOPED_COVERAGE_FRACTION",
@@ -6726,14 +6725,7 @@ function unscopedCoverageScoreKinds(line: string, requireCoverageContext: boolea
   const score = /\b(?:100(?:\.0+)?|\d{1,2}(?:\.\d+)?)\s*%|\b\d+\s*\/\s*\d+\b/gu;
   const namedScope = /\b(?:selected-range|production-source)\b/giu;
   const kinds = new Set<"percentage" | "fraction">();
-  const normalizedLine = line
-    .replace(/(?:&#(?:0*37|x0*25)|&percnt);/giu, "%")
-    .replace(/<!--[\s\S]*?-->/gu, "")
-    .replace(/<\/?(?:b|code|del|em|i|mark|s|span|strong|u)(?:\s[^<>]*)?>/giu, "")
-    .replace(/[\u200B-\u200D\u2060\uFEFF]/gu, "")
-    .replace(/[*_~`]+/gu, "")
-    .replace(/\[([^\]\r\n]*)\]\([^\r\n)]*\)/gu, "$1")
-    .replace(/\[([^\]\r\n]*)\]/gu, "$1");
+  const normalizedLine = decodeHTML(line).replace(/\p{Cf}/gu, "");
   for (const clause of normalizedLine.split(
     /\s*(?:[,!?;()[\]{}]|\u2013|\u2014|(?<!\d)\.|\.(?!\d)|\b(?:and|but|whereas|while)\b)\s*/iu
   )) {
@@ -6770,6 +6762,104 @@ function unscopedCoverageScoreKinds(line: string, requireCoverageContext: boolea
     }
   }
   return [...kinds];
+}
+
+interface RenderedMarkdownBlock {
+  text: string;
+  lineNumber: number;
+  headingDepth?: number;
+}
+
+interface MarkdownNode {
+  type: string;
+  value?: string;
+  alt?: string;
+  depth?: number;
+  children?: MarkdownNode[];
+  position?: { start?: { line?: number } };
+}
+
+function renderedMarkdownBlocks(contents: string): RenderedMarkdownBlock[] {
+  const root = fromMarkdown(contents) as MarkdownNode;
+  const blocks: RenderedMarkdownBlock[] = [];
+  const visit = (node: MarkdownNode): void => {
+    if (node.type === "code" || node.type === "definition" || node.type === "thematicBreak") return;
+    if (node.type === "paragraph" || node.type === "heading" || node.type === "html") {
+      const text = renderedMarkdownNodeText(node).replace(/\p{Cf}/gu, "");
+      if (text.length > 0) {
+        blocks.push({
+          text,
+          lineNumber: node.position?.start?.line ?? 1,
+          ...(node.type === "heading" && node.depth !== undefined ? { headingDepth: node.depth } : {})
+        });
+      }
+      return;
+    }
+    node.children?.forEach(visit);
+  };
+  visit(root);
+  return blocks;
+}
+
+function renderedMarkdownNodeText(node: MarkdownNode): string {
+  if (node.type === "text") return decodeHTML(node.value ?? "");
+  if (node.type === "inlineCode") return node.value ?? "";
+  if (node.type === "html") return visibleHtmlText(node.value ?? "");
+  if (node.type === "image" || node.type === "imageReference") return decodeHTML(node.alt ?? "");
+  if (node.type === "break") return "\n";
+  return node.children?.map(renderedMarkdownNodeText).join("") ?? "";
+}
+
+function visibleHtmlText(html: string): string {
+  let visible = "";
+  let index = 0;
+  const hiddenElements: string[] = [];
+  while (index < html.length) {
+    if (html.startsWith("<!--", index)) {
+      const commentEnd = html.indexOf("-->", index + 4);
+      index = commentEnd === -1 ? html.length : commentEnd + 3;
+      continue;
+    }
+    if (html[index] !== "<") {
+      if (hiddenElements.length === 0) visible += html[index];
+      index += 1;
+      continue;
+    }
+
+    const tagEnd = htmlTagEnd(html, index + 1);
+    if (tagEnd === -1) {
+      if (hiddenElements.length === 0) visible += "<";
+      index += 1;
+      continue;
+    }
+    const tag = html.slice(index + 1, tagEnd);
+    const tagName = /^\s*\/?\s*([A-Za-z][A-Za-z0-9:-]*)/u.exec(tag)?.[1]?.toLowerCase();
+    if (tagName !== undefined && /^(?:head|script|style|template)$/u.test(tagName)) {
+      if (/^\s*\//u.test(tag)) {
+        const matchingIndex = hiddenElements.lastIndexOf(tagName);
+        if (matchingIndex !== -1) hiddenElements.splice(matchingIndex, 1);
+      } else if (!/\/\s*$/u.test(tag)) {
+        hiddenElements.push(tagName);
+      }
+    }
+    index = tagEnd + 1;
+  }
+  return decodeHTML(visible);
+}
+
+function htmlTagEnd(html: string, start: number): number {
+  let quote: '"' | "'" | undefined;
+  for (let index = start; index < html.length; index += 1) {
+    const character = html[index]!;
+    if (quote !== undefined) {
+      if (character === quote) quote = undefined;
+    } else if (character === '"' || character === "'") {
+      quote = character;
+    } else if (character === ">") {
+      return index;
+    }
+  }
+  return -1;
 }
 
 function coverageMetricScoreLanguageContext(value: string): boolean {

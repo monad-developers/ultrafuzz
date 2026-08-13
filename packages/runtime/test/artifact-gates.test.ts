@@ -11258,7 +11258,19 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
     "Coverage was [100%](https://example.invalid/coverage).",
     "Coverage was 100<!-- rendered -->%.",
     "Coverage was 100\u200b%.",
-    "Coverage was **39/39** ranges."
+    "Coverage was **39/39** ranges.",
+    "Coverage was 100\\%.",
+    "Coverage was 39\\/39 ranges.",
+    "Coverage was 39&#47;39 ranges.",
+    "Coverage was &#49;&#48;&#48;&percnt;.",
+    "Coverage was 100&ZeroWidthSpace;%.",
+    "Coverage was 100<!--\nrendered\n-->%.",
+    'Coverage was <a href="https://example.invalid">100%</a>.',
+    "Coverage was <small>100%</small>.",
+    "Coverage was 100<wbr>%.",
+    "Cover&#97;ge was 100%.",
+    'Coverage was <strong title="x>y">100%</strong>.',
+    'Coverage was 100% <a href="selected-range">details</a>.'
   ]) {
     writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\n${mixedScore}\n`);
     const mixed = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
@@ -11267,11 +11279,33 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
       mixed.diagnostics.some(
         (diagnostic) =>
           diagnostic.code ===
-          (/\b\d+\s*\/\s*\d+\b/u.test(mixedScore) ? "UNSCOPED_COVERAGE_FRACTION" : "UNSCOPED_COVERAGE_PERCENTAGE")
+          (/\b\d+\s*(?:\/|\\\/|&#47;)\s*\d+\b/u.test(mixedScore)
+            ? "UNSCOPED_COVERAGE_FRACTION"
+            : "UNSCOPED_COVERAGE_PERCENTAGE")
       ),
       mixedScore
     );
   }
+
+  for (const nonRenderedScore of [
+    "<!--\nCoverage was 100%.\n-->",
+    '<div title="Coverage was 100%">No score is published.</div>',
+    '<a title="Coverage was 100%">Coverage details</a>',
+    "[details]: https://example.invalid/?coverage=100%"
+  ]) {
+    writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\n${nonRenderedScore}\n`);
+    const hidden = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+    assert.equal(hidden.ok, true, `${nonRenderedScore}: ${JSON.stringify(hidden.diagnostics)}`);
+  }
+
+  writeArtifact(
+    layout,
+    reportNode.id,
+    "report.md",
+    `${scopedMarkdown}\n## Notes\n\nCoverage was 100% <a href="details">production-source</a>.\n`
+  );
+  const linkedVisibleScope = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+  assert.equal(linkedVisibleScope.ok, true, JSON.stringify(linkedVisibleScope.diagnostics));
 
   writeArtifact(
     layout,
