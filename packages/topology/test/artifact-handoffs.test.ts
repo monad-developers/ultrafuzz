@@ -200,6 +200,8 @@ describe("artifact handoff validation", () => {
       "Run forge test --root=.",
       "Evidence: root=0xabc classification=error result=pass.",
       "Record evidence using helper contracts in each finding note.",
+      "Perform a reachability cross-check before triage.",
+      "Document reachability edge-cases in the report.",
       "risK=non-semantic Unicode evidence."
     ]) {
       expect(() =>
@@ -253,7 +255,10 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       "Use internal for reachability.",
       "Every finding must include reachability_note renamed-public-trace.",
       "Every finding must include reachability_note internal.",
-      "Write helper evidence under helperEvidence in every finding note."
+      "Write helper evidence under helperEvidence in every finding note.",
+      'Emit { "reachability": "internal" } on every finding.',
+      "Reachability: internal.",
+      "Rename helper_proof to helperEvidence."
     ]) {
       expect(
         () =>

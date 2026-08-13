@@ -164,39 +164,44 @@ const quantifiedFindingTarget =
   /\b(?:all|each|every)\s+(?:finding|issue|output(?:\s+object)?|record|result)s?\b|\b(?:finding|issue|report)\s+(?:fields?|metadata|notes?)\b/iu;
 const quantifiedFindingAction =
   /\b(?:all|each|every)\s+(?:finding|issue|output(?:\s+object)?|record|result)s?\b[^\n]{0,160}\b(?:contain|emit|get|have|include|return|store|use)s?\b/iu;
-const reportNoteKeyReference =
-  /(?:(?:`|"|'|<|\(|\[))?([A-Za-z][-_0-9A-Za-z]{0,127})(?:(?:`|"|'|>|\)|\]))?\s+note(\s+key)?\b/giu;
-const reachabilityNoteValueReference =
-  /(?:(?:`|"|'|<|\(|\[))?([A-Za-z0-9]+(?:-[A-Za-z0-9]+)+)(?:(?:`|"|'|>|\)|\]))?\s+(?:as\s+the\s+)?reachability\s+(?:classification|note|token|value)\b/iu;
-const reachabilityTokenValuePattern = "[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+";
-const reachabilityKeyWithValueReference = new RegExp(
-  `\\b(reachability(?:[_-](?:classification|note|token|value))?)\\b(?:[ \\t]+(?:classification|note|token|value))?[ \\t]*(?:=|:|is|to|as)?[ \\t]*(?:\\x60|"|'|<|\\(|\\[)?(${reachabilityTokenValuePattern})`,
-  "iu"
-);
-const valueForReachabilityReference = new RegExp(
-  `(?:\\x60|"|'|<|\\(|\\[)?(${reachabilityTokenValuePattern})(?:\\x60|"|'|>|\\)|\\])?[ \\t]+(?:as|for|to|under)[ \\t]+(?:the[ \\t]+)?(reachability(?:[_-](?:classification|note|token|value))?|reachability[ \\t]+(?:classification|note|token|value))\\b`,
-  "iu"
-);
 const vocabularyDirectiveActionPattern =
-  "(?:add|annotate|append|assign|define|emit|include|label|mark|populate|put|record|return|set|store|use|write)";
+  "(?:add|annotate|append|assign|classify|define|emit|include|label|mark|populate|put|record|return|set|store|use|write)s?";
 const promptVocabularyIdentifierPattern = "[A-Za-z0-9][-_0-9A-Za-z]{0,127}";
+const promptVocabularyOpenWrapperPattern = "(?:\\x60|\"|'|<|\\(|\\[)?";
+const promptVocabularyCloseWrapperPattern = "(?:\\x60|\"|'|>|\\)|\\])?";
+const promptReachabilityFieldPattern =
+  "reachability(?:[_-](?:classification|note|token|value)|[ \\t]+(?:classification|note|token|value))?";
+const findingReportColonAssignment = new RegExp(
+  `${assignmentBoundaryPattern}[ \\t]*(?:(?:\\x60|"|'|\\*|_|\\[|\\{|\\(|<)+[ \\t]*)?(${assignmentKeyPattern})(?:[ \\t]*(?:\\x60|"|'|\\*|_|\\]|\\}|\\)|>)+)?[ \\t]*:[ \\t]*(?:(?:\\x60|"|'|\\*|_|\\[|\\{|\\(|<)+[ \\t]*)?(${promptVocabularyIdentifierPattern})`,
+  "giu"
+);
+const findingReportStandaloneAssignment = new RegExp(
+  `(?:^|\\n)[ \\t]*(?:(?:-|\\*|>|\\x60|"|'|\\(|\\[|\\{|<|:)+[ \\t]*)*(${assignmentKeyPattern})[ \\t]*(={1,2})[ \\t]*${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})`,
+  "gimu"
+);
 const connectedReachabilityValueDirective = new RegExp(
-  `\\b${vocabularyDirectiveActionPattern}\\b[^.;\\n]{0,160}?\\b(reachability(?:[_-](?:classification|note|token|value))?)\\b(?:[ \\t]+(?:classification|note|token|value))?[ \\t]+(?:=|:|is|to|as)[ \\t]+(?:\\x60|"|'|<|\\(|\\[)?(${promptVocabularyIdentifierPattern})`,
+  `\\b${vocabularyDirectiveActionPattern}\\b[^.;\\n]{0,160}?\\b(${promptReachabilityFieldPattern})\\b[ \\t]+(?:=|:|is|to|as)[ \\t]+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})`,
   "iu"
 );
 const directReachabilityAliasDirective = new RegExp(
-  `\\b${vocabularyDirectiveActionPattern}\\b[^.;\\n]{0,160}?\\b(reachability[_-](?:classification|note|token|value))\\b[ \\t]+(?:\\x60|"|'|<|\\(|\\[)?(${promptVocabularyIdentifierPattern})`,
+  `\\b${vocabularyDirectiveActionPattern}\\b[^.;\\n]{0,160}?\\b(reachability[_-](?:classification|note|token|value))\\b[ \\t]+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})`,
   "iu"
 );
 const reverseReachabilityValueDirective = new RegExp(
-  `\\b${vocabularyDirectiveActionPattern}\\b[^.;\\n]{0,160}?(?:\\x60|"|'|<|\\(|\\[)?(${promptVocabularyIdentifierPattern})(?:\\x60|"|'|>|\\)|\\])?[ \\t]+(?:as|for|to|under)[ \\t]+(?:the[ \\t]+)?(reachability(?:[_-](?:classification|note|token|value))?|reachability[ \\t]+(?:classification|note|token|value))\\b`,
+  `\\b${vocabularyDirectiveActionPattern}\\b[ \\t]+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})${promptVocabularyCloseWrapperPattern}[ \\t]+(?:as|for|to|under)[ \\t]+(?:the[ \\t]+)?(${promptReachabilityFieldPattern})\\b`,
   "iu"
 );
 const directedNoteKeyReference =
-  /\b(?:under|using|via|(?:key|field)\s+(?:named|called))\s+(?:the\s+)?(?:`|"|'|<|\(|\[)?([A-Za-z][-_0-9A-Za-z]{0,127})(?:`|"|'|>|\)|\])?(?=[^.;\n]{0,120}\b(?:(?:all|each|every)\s+)?(?:(?:finding|issue|report)\s+)?notes?\b)/giu;
-const literalReachabilityValue = new RegExp(
-  `(?<![-_0-9A-Za-z])(${FINDING_REACHABILITY_VALUES.join("|")})(?![-_0-9A-Za-z])`,
-  "u"
+  /\bunder\s+(?:the\s+)?(?:`|"|'|<|\(|\[)?([A-Za-z][-_0-9A-Za-z]{0,127})(?:`|"|'|>|\)|\])?(?=[^.;\n]{0,120}\b(?:(?:all|each|every)\s+)?(?:(?:finding|issue|report)\s+)?notes?(\s+key)?\b)/giu;
+const reportNoteKeyReference =
+  /(?:(?:`|"|'|<|\(|\[))?([A-Za-z][-_0-9A-Za-z]{0,127})(?:(?:`|"|'|>|\)|\]))?\s+note(\s+key)?\b/giu;
+const findingReportRenameDirective = new RegExp(
+  `\\brename\\b[ \\t]+(?:the[ \\t]+)?${promptVocabularyOpenWrapperPattern}(${promptReachabilityFieldPattern}|${promptVocabularyIdentifierPattern})${promptVocabularyCloseWrapperPattern}[ \\t]+(?:to|as)[ \\t]+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})`,
+  "giu"
+);
+const findingReportReplacementDirective = new RegExp(
+  `\\buse\\b[ \\t]+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})${promptVocabularyCloseWrapperPattern}[ \\t]+instead[ \\t]+of[ \\t]+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})`,
+  "giu"
 );
 const promptClause = /[^.;\n]*(?:[.;\n]|$)/gu;
 
@@ -207,30 +212,31 @@ export interface FindingReportSemanticAssignment {
 }
 
 export function findingReportSemanticAssignment(text: string): FindingReportSemanticAssignment | undefined {
-  const literal = literalReachabilityValue.exec(text);
-  if (literal !== null) return { key: "reachability", operator: "=", value: literal[1]! };
-
-  const reachabilityReference = reachabilityNoteValueReference.exec(text);
-  if (reachabilityReference !== null) {
-    return { key: "reachability", operator: "=", value: reachabilityReference[1]! };
+  findingReportStandaloneAssignment.lastIndex = 0;
+  for (const assignment of text.matchAll(findingReportStandaloneAssignment)) {
+    const key = assignment[1]!;
+    if (isPromptReportVocabularyKey(key)) {
+      return { key, operator: assignment[2] as "=" | "==", value: assignment[3]! };
+    }
   }
 
-  const keyedReachabilityReference = reachabilityKeyWithValueReference.exec(text);
-  if (keyedReachabilityReference !== null) {
-    return {
-      key: keyedReachabilityReference[1]!,
-      operator: "=",
-      value: keyedReachabilityReference[2]!
-    };
-  }
-
-  const reverseReachabilityReference = valueForReachabilityReference.exec(text);
-  if (reverseReachabilityReference !== null) {
-    return {
-      key: reverseReachabilityReference[2]!.replace(/[ \t]+/gu, "_"),
-      operator: "=",
-      value: reverseReachabilityReference[1]!
-    };
+  findingReportColonAssignment.lastIndex = 0;
+  for (const assignment of text.matchAll(findingReportColonAssignment)) {
+    const key = assignment[1]!;
+    const clauseStart =
+      Math.max(
+        text.lastIndexOf("\n", assignment.index),
+        text.lastIndexOf(".", assignment.index),
+        text.lastIndexOf(";", assignment.index)
+      ) + 1;
+    const prefix = text.slice(clauseStart, assignment.index);
+    const standsAlone = /^[ \t]*(?:(?:-|\*|>|\x60|"|'|\(|\[|\{|<|:)+[ \t]*)*$/u.test(prefix);
+    if (
+      (standsAlone && canonicalFindingNoteKey(key) === "reachability") ||
+      (isPromptReportVocabularyKey(key) && findingReportDirective.test(prefix))
+    ) {
+      return { key, operator: "=", value: assignment[2]! };
+    }
   }
 
   for (const [pattern, keyIndex, valueIndex] of [
@@ -248,12 +254,21 @@ export function findingReportSemanticAssignment(text: string): FindingReportSema
     }
   }
 
+  for (const renamePattern of [findingReportRenameDirective, findingReportReplacementDirective]) {
+    renamePattern.lastIndex = 0;
+    for (const rename of text.matchAll(renamePattern)) {
+      const from = rename[1]!.replace(/[ \t]+/gu, "_");
+      const to = rename[2]!.replace(/[ \t]+/gu, "_");
+      if (isPromptReportVocabularyKey(from) || isPromptReportVocabularyKey(to)) {
+        return { key: to, operator: "=", value: `<renamed-from:${from}>` };
+      }
+    }
+  }
+
   directedNoteKeyReference.lastIndex = 0;
   for (const reference of text.matchAll(directedNoteKeyReference)) {
     const identifier = reference[1]!;
-    const assignmentShaped =
-      canonicalFindingNoteKey(identifier) !== undefined || /[-_]/u.test(identifier) || /[a-z][A-Z]/u.test(identifier);
-    if (assignmentShaped && isFindingReportMetadataKey(identifier)) {
+    if (reference[2] !== undefined || isPromptReportVocabularyKey(identifier)) {
       return { key: identifier, operator: "=", value: "<note-key>" };
     }
   }
@@ -287,6 +302,13 @@ export function findingReportSemanticAssignment(text: string): FindingReportSema
     }
   }
   return undefined;
+}
+
+function isPromptReportVocabularyKey(identifier: string): boolean {
+  return (
+    canonicalFindingNoteKey(identifier) !== undefined ||
+    ((/[-_]/u.test(identifier) || /[a-z][A-Z]/u.test(identifier)) && isFindingReportMetadataKey(identifier))
+  );
 }
 
 export interface FindingNoteAssignmentIssue {
