@@ -119,6 +119,70 @@
       "__unexpected_fixture_field": true
     }
   },
+  "ultrafuzz/coverage-evidence@1": {
+    "schema_file": "coverage-evidence.schema.json",
+    "valid": {
+      "schema_version": "ultrafuzz.coverage-evidence.v1",
+      "views": [
+        { "scope": "selected-range", "covered_ranges": 1, "total_ranges": 1 },
+        { "scope": "production-source", "covered_ranges": 1, "total_ranges": 2 }
+      ],
+      "files": [
+        {
+          "path": "src/Core.sol",
+          "kind": "production",
+          "included": true,
+          "critical": false,
+          "covered_ranges": 1,
+          "total_ranges": 1
+        },
+        {
+          "path": "src/Critical.sol",
+          "kind": "production",
+          "included": false,
+          "critical": false,
+          "exclusion_reason": "not selected",
+          "covered_ranges": 0,
+          "total_ranges": 1
+        }
+      ],
+      "counted_ranges": [
+        { "file": "src/Core.sol", "kind": "production", "start_line": 1, "end_line": 1, "covered": true }
+      ],
+      "zero_coverage_components": [{ "path": "src/Critical.sol", "kind": "production" }]
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.coverage-evidence.v1",
+      "views": [
+        { "scope": "selected-range", "covered_ranges": 1, "total_ranges": 1 },
+        { "scope": "production-source", "covered_ranges": 1, "total_ranges": 2 }
+      ],
+      "files": [
+        {
+          "path": "src/Core.sol",
+          "kind": "production",
+          "included": true,
+          "critical": false,
+          "covered_ranges": 1,
+          "total_ranges": 1
+        },
+        {
+          "path": "src/Critical.sol",
+          "kind": "production",
+          "included": false,
+          "critical": false,
+          "exclusion_reason": "not selected",
+          "covered_ranges": 0,
+          "total_ranges": 1
+        }
+      ],
+      "counted_ranges": [
+        { "file": "src/Core.sol", "kind": "production", "start_line": 1, "end_line": 1, "covered": true }
+      ],
+      "zero_coverage_components": [{ "path": "src/Critical.sol", "kind": "production" }],
+      "__unexpected_fixture_field": true
+    }
+  },
   "ultrafuzz/coverage-goal@1": {
     "schema_file": "coverage-goal.schema.json",
     "valid": {

@@ -134,6 +134,12 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "config-redactions-path-uniqueness"
   ]),
   "coverage-goal.schema.json": artifact("ultrafuzz/coverage-goal@1", "coverageGoalJsonSchema", "coverageGoalSchema"),
+  "coverage-evidence.schema.json": artifact(
+    "ultrafuzz/coverage-evidence@1",
+    "coverageEvidenceJsonSchema",
+    "coverageEvidenceSchema",
+    ["coverage-evidence-reconciliation"]
+  ),
   "dependency-scope-matrix.schema.json": artifact(
     "ultrafuzz/dependency-scope-matrix@1",
     "dependencyScopeMatrixJsonSchema",
@@ -349,6 +355,7 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "report-finding-evidence-span-consistency",
     "report-finding-id-uniqueness",
     "report-finding-report-vocabulary",
+    "report-coverage-evidence-reconciliation",
     "report-campaign-outcome-authority",
     "report-severity-classification-preservation",
     "report-property-provenance-join"

@@ -83,6 +83,7 @@ export const CLI_KNOWN_COMMANDS = [
   "events",
   "node",
   "snapshots",
+  "artifact validate",
   "json validate",
   "eval plan",
   "eval run",
@@ -334,6 +335,11 @@ export interface CliTopologyCopyData {
   overwritten: boolean;
 }
 
+export interface CliArtifactValidateData {
+  contract: string;
+  path: string;
+}
+
 export interface CliCommandDataMap {
   init: InitProjectResult;
   validate: CliValidateProjectData;
@@ -365,6 +371,7 @@ export interface CliCommandDataMap {
   events: WorkflowEventsValue | WorkflowLifecycleEvent;
   node: CliWorkflowNodeData;
   snapshots: RunSnapshotsValue;
+  "artifact validate": CliArtifactValidateData;
   "json validate": JsonFileValidationResult;
   "eval plan": CliEvalPlanData;
   "eval run": CliEvalRunData;

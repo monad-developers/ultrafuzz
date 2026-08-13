@@ -33,6 +33,7 @@ import {
   artifactVerificationJsonSchema,
   aggregationManifestSchema,
   auditedDifferentialLanesSchema,
+  coverageEvidenceJsonSchema,
   coverageGoalSchema,
   differentialLaneResultSchema,
   dynamicStrategyPlanSchema,
@@ -2740,6 +2741,7 @@ test("node attempt ledger shape stays structural while byte and ordering rules r
 
 test("artifact schema snapshots are present and aligned with exported schema constants", () => {
   const findingSnapshot = readSchemaSnapshot("finding.schema.json");
+  const coverageEvidenceSnapshot = readSchemaSnapshot("coverage-evidence.schema.json");
   const analysisBundleSnapshot = readSchemaSnapshot("analysis-bundle.schema.json");
   const artifactManifestSnapshot = readSchemaSnapshot("artifact-manifest.schema.json");
   const generatedTestsSnapshot = readSchemaSnapshot("generated-tests.schema.json");
@@ -2759,6 +2761,7 @@ test("artifact schema snapshots are present and aligned with exported schema con
   // Checking only $id and required let the published finding snapshot keep "const": "1.0" after the
   // exported schema had moved on, so the snapshot is compared whole like its siblings.
   assert.deepEqual(findingSnapshot, findingJsonSchema);
+  assert.deepEqual(coverageEvidenceSnapshot, coverageEvidenceJsonSchema);
   assert.deepEqual(generatedTestsSnapshot, generatedTestsJsonSchema);
   assert.deepEqual(invariantLedgerSnapshot, invariantLedgerJsonSchema);
   assert.deepEqual(invariantSourceProofSnapshot, invariantSourceProofJsonSchema);

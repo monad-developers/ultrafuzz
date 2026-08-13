@@ -327,6 +327,26 @@ const differentialTriageBBinding = differentialBinding(
   "differential-red-triage:0"
 );
 
+const validCoverageEvidence = {
+  schema_version: "ultrafuzz.coverage-evidence.v1",
+  views: [
+    { scope: "selected-range", covered_ranges: 0, total_ranges: 0 },
+    { scope: "production-source", covered_ranges: 0, total_ranges: 0 }
+  ],
+  files: [
+    {
+      path: "src/Core.sol",
+      kind: "production",
+      included: true,
+      critical: false,
+      covered_ranges: 0,
+      total_ranges: 0
+    }
+  ],
+  counted_ranges: [],
+  zero_coverage_components: []
+};
+
 const fixtures = {
   "admin-config-surface-id-uniqueness": {
     positive: { surfaces: [{ surface_id: "a" }] },
@@ -639,6 +659,29 @@ const fixtures = {
     },
     negative: {
       entries: [{ path: ["models", "profiles", "a", "model"] }, { path: ["models", "profiles", "a", "model"] }]
+    }
+  },
+  "coverage-evidence-reconciliation": {
+    positive: validCoverageEvidence,
+    negative: {
+      schema_version: "ultrafuzz.coverage-evidence.v1",
+      views: [
+        { scope: "selected-range", covered_ranges: 0, total_ranges: 0 },
+        { scope: "production-source", covered_ranges: 0, total_ranges: 1 }
+      ],
+      files: [
+        {
+          path: "src/Core.sol",
+          kind: "production",
+          included: false,
+          critical: false,
+          exclusion_reason: "not selected",
+          covered_ranges: 0,
+          total_ranges: 1
+        }
+      ],
+      counted_ranges: [{ file: "src/Core.sol", kind: "production", start_line: 1, end_line: 1, covered: false }],
+      zero_coverage_components: [{ path: "src/Core.sol", kind: "production" }]
     }
   },
   "dependency-id-uniqueness": {
@@ -1115,6 +1158,18 @@ const fixtures = {
     negative: {
       issues: [],
       non_production_outcomes: [{ notes: ["reachability=renamed-public-trace"] }]
+    }
+  },
+  "report-coverage-evidence-reconciliation": {
+    positive: { coverage_evidence: validCoverageEvidence },
+    negative: {
+      coverage_evidence: {
+        ...validCoverageEvidence,
+        views: [
+          { scope: "selected-range", covered_ranges: 0, total_ranges: 1 },
+          { scope: "production-source", covered_ranges: 0, total_ranges: 1 }
+        ]
+      }
     }
   },
   "run-metadata-accounting-workflow-identity": {

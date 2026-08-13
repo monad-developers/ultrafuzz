@@ -377,10 +377,23 @@ function renderCanonicalReport(report: JsonRecord): string {
   }
 
   appendPropertyImplementationCoverage(lines, report.property_implementation_coverage);
+  appendCoverageEvidence(lines, report.coverage_evidence);
   appendPropertyProvenance(lines, report.property_provenance, issues, outcomes);
   appendPriorFindingDisposition(lines, issues, outcomes);
   appendNonProductionOutcomes(lines, outcomes);
   return `${trimTrailingBlankLines(lines).join("\n")}\n`;
+}
+
+function appendCoverageEvidence(lines: string[], value: unknown): void {
+  if (!isRecord(value) || !Array.isArray(value.views)) return;
+  lines.push("", "## Scoped coverage evidence", "");
+  for (const view of value.views.filter(isRecord)) {
+    lines.push(
+      `- ${inlineValue(view.scope)}: \`${inlineValue(view.covered_ranges)}/${inlineValue(view.total_ranges)}\``
+    );
+  }
+  const zero = Array.isArray(value.zero_coverage_components) ? value.zero_coverage_components.filter(isRecord) : [];
+  lines.push(`- Zero-coverage components: \`${zero.length}\``);
 }
 
 function renderedIssues(issues: JsonRecord[]): RenderedIssue[] {

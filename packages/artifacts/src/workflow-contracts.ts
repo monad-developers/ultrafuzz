@@ -12,6 +12,7 @@ import {
   findingTextSchema
 } from "./findings-schema.js";
 import { FINDING_SEVERITIES, TRIAGE_CLASSIFICATIONS } from "./findings.js";
+import { coverageEvidenceSchema } from "./coverage-evidence.js";
 import {
   MAX_AGGREGATION_ABSOLUTE_PATH_CHARS,
   MAX_AGGREGATION_REASON_CHARS,
@@ -1655,6 +1656,7 @@ export const reportSchema = withDocumentMetadata(
       .optional(),
     issues: z.array(reportIssueSchema),
     non_production_outcomes: z.array(reportNonProductionOutcomeSchema),
+    coverage_evidence: coverageEvidenceSchema.optional(),
     property_provenance: z.array(reportPropertyProvenanceSchema),
     property_implementation_coverage: z.union([reportCoverageNotPlannedSchema, reportCoverageSchema])
   }),

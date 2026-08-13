@@ -64,6 +64,11 @@ const existingJsonContracts = {
       "A strict generated-test bundle manifest whose runnable tests and non-runnable support files live beneath generated-tests/.",
     schemaFile: "generated-tests.schema.json"
   },
+  "ultrafuzz/coverage-evidence@1": {
+    description:
+      "Complete scoped coverage evidence with selected-range and production-source views, explicit source inclusion, attributed counted ranges, and material zero-coverage components.",
+    schemaFile: "coverage-evidence.schema.json"
+  },
   "ultrafuzz/implemented-properties@3": {
     description: "Strict current property selection and implementation records with typed blockers.",
     schemaFile: "implemented-properties.schema.json",
