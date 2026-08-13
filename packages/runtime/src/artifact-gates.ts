@@ -6726,7 +6726,14 @@ function unscopedCoverageScoreKinds(line: string, requireCoverageContext: boolea
   const score = /\b(?:100(?:\.0+)?|\d{1,2}(?:\.\d+)?)\s*%|\b\d+\s*\/\s*\d+\b/gu;
   const namedScope = /\b(?:selected-range|production-source)\b/giu;
   const kinds = new Set<"percentage" | "fraction">();
-  const normalizedLine = line.replace(/(?:&#(?:0*37|x0*25)|&percnt);/giu, "%");
+  const normalizedLine = line
+    .replace(/(?:&#(?:0*37|x0*25)|&percnt);/giu, "%")
+    .replace(/<!--[\s\S]*?-->/gu, "")
+    .replace(/<\/?(?:b|code|del|em|i|mark|s|span|strong|u)(?:\s[^<>]*)?>/giu, "")
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/gu, "")
+    .replace(/[*_~`]+/gu, "")
+    .replace(/\[([^\]\r\n]*)\]\([^\r\n)]*\)/gu, "$1")
+    .replace(/\[([^\]\r\n]*)\]/gu, "$1");
   for (const clause of normalizedLine.split(
     /\s*(?:[,!?;()[\]{}]|\u2013|\u2014|(?<!\d)\.|\.(?!\d)|\b(?:and|but|whereas|while)\b)\s*/iu
   )) {
