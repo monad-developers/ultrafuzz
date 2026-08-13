@@ -10,7 +10,7 @@ const MAX_GITHUB_API_ENVELOPE_BYTES = 16 * 1024 * 1024;
 const PRODUCER_WORKFLOW_PATH = ".github/workflows/eval-benchmarks.yml";
 const SUPPORTED_EVENTS = new Set(["push", "workflow_dispatch"]);
 const SUPPORTED_BENCHMARK_MODES = ["smoke", "full"];
-const REQUIRED_ARTIFACT_PREFIXES = ["modal-benchmark-launch", "public-benchmark-results"];
+const REQUIRED_ARTIFACT_PREFIXES = ["modal-benchmark-launch", "modal-benchmark-control", "public-benchmark-results"];
 
 export function qualifyModalBenchmarkPublication(eventValue, jobsValue, artifactsValue, repository) {
   const event = record(eventValue);

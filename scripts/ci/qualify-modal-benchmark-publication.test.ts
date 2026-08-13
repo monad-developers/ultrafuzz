@@ -155,7 +155,7 @@ function artifacts(mode: "smoke" | "full", overrides: { expired?: boolean; runAt
   const attempt = overrides.runAttempt ?? runAttempt;
   const expired = overrides.expired ?? false;
   return {
-    artifacts: ["modal-benchmark-launch", "public-benchmark-results"].map((prefix) => ({
+    artifacts: ["modal-benchmark-launch", "modal-benchmark-control", "public-benchmark-results"].map((prefix) => ({
       name: `${prefix}-${mode}-${runId}-${attempt}`,
       expired
     }))
