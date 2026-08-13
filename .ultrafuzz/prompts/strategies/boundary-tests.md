@@ -71,7 +71,5 @@ classification if confirmed, and preferred downstream lane.
 Validate JSON with one direct Bash call when needed. Do not use command
 substitution, pipes, or chained shell commands for post-write validation.
 
-A property that holds is not a finding. Record satisfied checks,
-reviewed-surface summaries, and no-defect observations in summaries, not in
-`findings.json`. Write `[]` to `findings.json` when no source-backed violation
-is confirmed.
+Write structured findings to {{output_findings_path}}. Use an empty JSON array
+if no finding is confirmed.

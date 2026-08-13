@@ -64,11 +64,7 @@ public reachability before treating the result as production evidence:
   production code invoking the helper from a public/external caller and shows
   that caller admitting the offending arguments or state, the finding may also
   remain `true-positive`. Add a note with
-  `reachability=public-caller-source-chain` plus the cited caller, the helper
-  call site, and the guards you checked. This is the source-backed promotion
-  path for helper-level findings in this topology; it requires cited source
-  spans for every link in the chain, and speculation that a caller "probably"
-  reaches the helper is not sufficient.
+  `reachability=public-caller-source-chain`.
 - If the finding is helper-only and public entrypoints enforce stricter bounds,
   classify it as `harness-defect`, `defensive-hardening`, or `false-positive`
   according to the evidence. Set `status` to `false-positive` for unreachable

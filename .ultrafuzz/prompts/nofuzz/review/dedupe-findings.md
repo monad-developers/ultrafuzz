@@ -105,3 +105,9 @@ object with `schema_version: "1.0"` and a `records` array keyed by
 After writing the required artifacts, run only a small number of direct JSON
 shape checks, then stop. Do not spend the finalization reserve on broad
 re-verification once the required artifacts are present and parseable.
+
+For every JSON shape check, use direct focused commands. Do not use command
+substitution, shell conditionals, absolute binary paths, host-global searches,
+or inline environment-assignment prefixes.
+
+Record the JSON shape-check result, but do not edit production contracts.
