@@ -1294,6 +1294,7 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
     "classification_result=bug",
     "proof_kind=public",
     "reachability=renamed-public-trace",
+    "`reachability` = `internal`",
     "Reachability: internal",
     "reachability : internal",
     '"reachability": "internal"',

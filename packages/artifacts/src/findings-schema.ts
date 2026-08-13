@@ -55,6 +55,7 @@ const assignmentKeyPattern = FINDING_REPORT_ASSIGNMENT_KEY_PATTERN;
 const assignmentBoundaryPattern = "(?:^|[^\\p{L}\\p{N}\\p{M}_%\\-])";
 const assignmentOperatorPrefixPattern = "[ \\t]*=(?!=)";
 const anyAssignmentOperatorPattern = "\\s*={1,2}\\s*";
+const assignmentKeyCloseWrapperPattern = "(?:\\x60|\"|'|>|\\)|\\])?";
 const colonAssignmentOperatorPattern = "[ \\t]*:[ \\t]*";
 const typedValueBoundaryPattern = "(?::|[.;,*`\\s&)\\]}>\"']|$)";
 const uniqueTypedValuePattern = `(?:${[...FINDING_REACHABILITY_VALUES, ...STATEFUL_FAILURE_CLASSIFICATION_VALUES].join(
@@ -74,8 +75,8 @@ const globallyValidatedNoteKeyPattern = `(?:${FINDING_NOTE_KEYS.filter(
  * report metadata. The grammar is intentionally ASCII and is mirrored byte for
  * byte into the portable JSON Schemas below. */
 const reportNotePrefixPattern = "^[ \\t]*(?:(?:-|\\*|>|\\x60|\"|'|\\(|\\[|\\{|<|:)+[ \\t]*)*";
-const reportNoteSearchPrefixPattern = `(?=${reportNotePrefixPattern}${assignmentKeyPattern}\\s*={1,2})[\\s\\S]*?`;
-const validCanonicalAssignmentPrefixPattern = `${supportedNoteKeyPattern}[ \\t]*=(?!=)[ \\t]*(?!["'([{<\\x60])(?=\\S)`;
+const reportNoteSearchPrefixPattern = `(?=${reportNotePrefixPattern}${assignmentKeyPattern}[ \\t]*${assignmentKeyCloseWrapperPattern}\\s*={1,2})[\\s\\S]*?`;
+const validCanonicalAssignmentPrefixPattern = `${supportedNoteKeyPattern}[ \\t]*${assignmentKeyCloseWrapperPattern}[ \\t]*=(?!=)[ \\t]*(?!["'([{<\\x60])(?=\\S)`;
 
 function asciiCaseInsensitivePattern(value: string): string {
   return value.replace(/[A-Za-z]/gu, (character) => `[${character.toLowerCase()}${character.toUpperCase()}]`);
@@ -128,35 +129,34 @@ const reportAliasPatternGroups = chunkPatternAlternatives([
   ...explicitReportAliasKeys
 ]);
 const unsupportedAliasAssignmentPatterns = reportAliasPatternGroups.map((patterns) => {
-  const aliasKeyPattern = `(?=${assignmentKeyPattern}\\s*={1,2})[-_0-9A-Za-z]*(?:${patterns.join("|")})[-_0-9A-Za-z]*`;
-  return `${assignmentBoundaryPattern}(?!(${supportedNoteKeyPattern})[ \\t]*={1,2})(?:(${aliasKeyPattern}))${anyAssignmentOperatorPattern}`;
+  const aliasKeyPattern = `(?=${assignmentKeyPattern}[ \\t]*${assignmentKeyCloseWrapperPattern}\\s*={1,2})[-_0-9A-Za-z]*(?:${patterns.join("|")})[-_0-9A-Za-z]*`;
+  return `${assignmentBoundaryPattern}(?!(${supportedNoteKeyPattern})[ \\t]*${assignmentKeyCloseWrapperPattern}[ \\t]*={1,2})(?:(${aliasKeyPattern}))[ \\t]*${assignmentKeyCloseWrapperPattern}${anyAssignmentOperatorPattern}`;
 });
-const unsupportedBareHelperAliasPattern = `${assignmentBoundaryPattern}(_*[hH][eE][lL][pP][eE][rR]_*)${anyAssignmentOperatorPattern}`;
+const unsupportedBareHelperAliasPattern = `${assignmentBoundaryPattern}(_*[hH][eE][lL][pP][eE][rR]_*)[ \\t]*${assignmentKeyCloseWrapperPattern}${anyAssignmentOperatorPattern}`;
 const evidenceAssignmentKeyPattern = `(?:${FINDING_REPORT_EVIDENCE_ASSIGNMENT_KEYS.map((key) =>
   key.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")
 ).join("|")})`;
 const unsupportedMetadataPairAliasPatterns = FINDING_REPORT_MULTITERM_METADATA_KEY_PATTERNS.map(
   (pattern) =>
-    `${assignmentBoundaryPattern}(?!(${supportedNoteKeyPattern})[ \\t]*={1,2})(?!${evidenceAssignmentKeyPattern}[ \\t]*={1,2})(?:((?=${assignmentKeyPattern}\\s*={1,2})${pattern}))${anyAssignmentOperatorPattern}`
+    `${assignmentBoundaryPattern}(?!(${supportedNoteKeyPattern})[ \\t]*${assignmentKeyCloseWrapperPattern}[ \\t]*={1,2})(?!${evidenceAssignmentKeyPattern}[ \\t]*${assignmentKeyCloseWrapperPattern}[ \\t]*={1,2})(?:((?=${assignmentKeyPattern}[ \\t]*${assignmentKeyCloseWrapperPattern}\\s*={1,2})${pattern}))[ \\t]*${assignmentKeyCloseWrapperPattern}${anyAssignmentOperatorPattern}`
 );
-const invalidCanonicalGrammarPattern = `${assignmentBoundaryPattern}(?!${validCanonicalAssignmentPrefixPattern})(${globallyValidatedNoteKeyPattern})${anyAssignmentOperatorPattern}`;
-const unsupportedUniqueTypedAliasPattern = `${assignmentBoundaryPattern}(?!${supportedNoteKeyPattern}[ \\t]*=(?!=))(${assignmentKeyPattern})${assignmentOperatorPrefixPattern}[ \\t]*${valueWrapperPattern}${uniqueTypedValuePattern}${typedValueBoundaryPattern}`;
+const invalidCanonicalGrammarPattern = `${assignmentBoundaryPattern}(?!${validCanonicalAssignmentPrefixPattern})(${globallyValidatedNoteKeyPattern})[ \\t]*${assignmentKeyCloseWrapperPattern}${anyAssignmentOperatorPattern}`;
+const unsupportedUniqueTypedAliasPattern = `${assignmentBoundaryPattern}(?!${supportedNoteKeyPattern}[ \\t]*${assignmentKeyCloseWrapperPattern}[ \\t]*=(?!=))(${assignmentKeyPattern})[ \\t]*${assignmentKeyCloseWrapperPattern}${assignmentOperatorPrefixPattern}[ \\t]*${valueWrapperPattern}${uniqueTypedValuePattern}${typedValueBoundaryPattern}`;
 const riskAliasKeyPattern =
   "(?:risk|severity|rating|risk_level|severity_level|impact_level|likelihood_level|impact_rating|likelihood_rating)";
-const unsupportedRiskTypedAliasPattern = `${reportNoteSearchPrefixPattern}${assignmentBoundaryPattern}(${riskAliasKeyPattern})${assignmentOperatorPrefixPattern}[ \\t]*${valueWrapperPattern}${riskValuePattern}${typedValueBoundaryPattern}`;
-const colonKeyCloseWrapperPattern = "(?:\\x60|\"|'|>|\\)|\\])?";
-const canonicalColonAssignmentPattern = `${assignmentBoundaryPattern}${valueWrapperPattern}(${globallyValidatedNoteKeyPattern})[ \\t]*${colonKeyCloseWrapperPattern}${colonAssignmentOperatorPattern}${valueWrapperPattern}(?=\\S)`;
+const unsupportedRiskTypedAliasPattern = `${reportNoteSearchPrefixPattern}${assignmentBoundaryPattern}(${riskAliasKeyPattern})[ \\t]*${assignmentKeyCloseWrapperPattern}${assignmentOperatorPrefixPattern}[ \\t]*${valueWrapperPattern}${riskValuePattern}${typedValueBoundaryPattern}`;
+const canonicalColonAssignmentPattern = `${assignmentBoundaryPattern}${valueWrapperPattern}(${globallyValidatedNoteKeyPattern})[ \\t]*${assignmentKeyCloseWrapperPattern}${colonAssignmentOperatorPattern}${valueWrapperPattern}(?=\\S)`;
 const unsupportedMetadataPairColonPatterns = FINDING_REPORT_MULTITERM_METADATA_KEY_PATTERNS.map(
   (pattern) =>
-    `${assignmentBoundaryPattern}${valueWrapperPattern}(?!${supportedNoteKeyPattern}[ \\t]*${colonKeyCloseWrapperPattern}${colonAssignmentOperatorPattern})(?!${evidenceAssignmentKeyPattern}[ \\t]*${colonKeyCloseWrapperPattern}${colonAssignmentOperatorPattern})(?:((?=${assignmentKeyPattern}[ \\t]*${colonKeyCloseWrapperPattern}${colonAssignmentOperatorPattern})${pattern}))[ \\t]*${colonKeyCloseWrapperPattern}${colonAssignmentOperatorPattern}${valueWrapperPattern}(?=\\S)`
+    `${assignmentBoundaryPattern}${valueWrapperPattern}(?!${supportedNoteKeyPattern}[ \\t]*${assignmentKeyCloseWrapperPattern}${colonAssignmentOperatorPattern})(?!${evidenceAssignmentKeyPattern}[ \\t]*${assignmentKeyCloseWrapperPattern}${colonAssignmentOperatorPattern})(?:((?=${assignmentKeyPattern}[ \\t]*${assignmentKeyCloseWrapperPattern}${colonAssignmentOperatorPattern})${pattern}))[ \\t]*${assignmentKeyCloseWrapperPattern}${colonAssignmentOperatorPattern}${valueWrapperPattern}(?=\\S)`
 );
 
 function invalidTypedAssignmentPattern(key: string, values: readonly string[]): string {
-  return `${reportNoteSearchPrefixPattern}${assignmentBoundaryPattern}(${key})${assignmentOperatorPrefixPattern}(?![ \\t]*(?:${values.join("|")})${typedValueBoundaryPattern})[ \\t]*`;
+  return `${reportNoteSearchPrefixPattern}${assignmentBoundaryPattern}(${key})[ \\t]*${assignmentKeyCloseWrapperPattern}${assignmentOperatorPrefixPattern}(?![ \\t]*(?:${values.join("|")})${typedValueBoundaryPattern})[ \\t]*`;
 }
 
 function invalidGlobalTypedAssignmentPattern(key: string, values: readonly string[]): string {
-  return `${assignmentBoundaryPattern}(${key})${assignmentOperatorPrefixPattern}(?![ \\t]*(?:${values.join("|")})${typedValueBoundaryPattern})[ \\t]*`;
+  return `${assignmentBoundaryPattern}(${key})[ \\t]*${assignmentKeyCloseWrapperPattern}${assignmentOperatorPrefixPattern}(?![ \\t]*(?:${values.join("|")})${typedValueBoundaryPattern})[ \\t]*`;
 }
 
 function chunkPatternAlternatives(patterns: readonly string[]): string[][] {
@@ -171,7 +171,7 @@ function chunkPatternAlternatives(patterns: readonly string[]): string[][] {
 }
 
 const findingNoteAssignment = new RegExp(
-  `(?<![\\p{L}\\p{N}\\p{M}_%\\-])(${assignmentKeyPattern})(\\s*(={1,2})\\s*)`,
+  `(?<![\\p{L}\\p{N}\\p{M}_%\\-])(${assignmentKeyPattern})[ \\t]*${assignmentKeyCloseWrapperPattern}(\\s*(={1,2})\\s*)`,
   "gu"
 );
 const findingReportDirective =
@@ -201,19 +201,19 @@ const findingReportStandaloneAssignment = new RegExp(
   "gimu"
 );
 const connectedReachabilityValueDirective = new RegExp(
-  `\\b${vocabularyDirectiveActionPattern}\\b[^.;\\n]{0,160}?\\b(${promptReachabilityFieldPattern})\\b[ \\t]+(?:=|:|is|to|as)[ \\t]+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})`,
+  `\\b${vocabularyDirectiveActionPattern}\\b[^.;\\n]{0,160}?\\b(${promptReachabilityFieldPattern})\\b${promptVocabularyCloseWrapperPattern}[ \\t]+(?:=|:|is|to|as)[ \\t]+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})`,
   "iu"
 );
 const directReachabilityAliasDirective = new RegExp(
-  `\\b${vocabularyDirectiveActionPattern}\\b[^.;\\n]{0,160}?\\b(reachability[_-](?:classification|note|token|value))\\b[ \\t]+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})`,
+  `\\b${vocabularyDirectiveActionPattern}\\b[^.;\\n]{0,160}?\\b(reachability[_-](?:classification|note|token|value))\\b${promptVocabularyCloseWrapperPattern}[ \\t]+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})`,
   "iu"
 );
 const directReachabilityValueDirective = new RegExp(
-  `\\b${directReachabilityAssignmentActionPattern}\\b[^.;\\n]{0,160}?\\b(reachability)\\b[ \\t]+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})${promptVocabularyCloseWrappersPattern}${promptAssignmentTerminatorPattern}`,
+  `\\b${directReachabilityAssignmentActionPattern}\\b[^.;\\n]{0,160}?\\b(reachability)\\b${promptVocabularyCloseWrapperPattern}[ \\t]+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})${promptVocabularyCloseWrappersPattern}${promptAssignmentTerminatorPattern}`,
   "iu"
 );
 const reverseReachabilityValueDirective = new RegExp(
-  `\\b${vocabularyDirectiveActionPattern}\\b[ \\t]+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})${promptVocabularyCloseWrapperPattern}[ \\t]+(?:as|for|to|under)[ \\t]+(?:the[ \\t]+)?(${promptReachabilityFieldPattern})\\b`,
+  `\\b${vocabularyDirectiveActionPattern}\\b[ \\t]+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})${promptVocabularyCloseWrapperPattern}[ \\t]+(?:as|for|to|under)[ \\t]+(?:the[ \\t]+)?${promptVocabularyOpenWrapperPattern}(${promptReachabilityFieldPattern})\\b${promptVocabularyCloseWrapperPattern}`,
   "iu"
 );
 const directedNoteKeyReference =
@@ -223,7 +223,7 @@ const directedReportNoteKeyReference = new RegExp(
   "giu"
 );
 const findingReportRenameDirective = new RegExp(
-  `\\b(?:change|map|rename|replace)\\b[ \\t]+(?:the[ \\t]+)?${promptVocabularyOpenWrapperPattern}(${promptReachabilityFieldPattern}|${promptVocabularyIdentifierPattern})${promptVocabularyCloseWrapperPattern}[ \\t]+(?:as|to|with)[ \\t]+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})`,
+  `\\b(?:change|map|rename|replace)\\b[ \\t]+(?:the[ \\t]+)?${promptVocabularyOpenWrapperPattern}(${promptReachabilityFieldPattern}|${promptVocabularyIdentifierPattern})${promptVocabularyCloseWrapperPattern}[ \\t]+(?:as|by|into|to|with)[ \\t]+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})`,
   "giu"
 );
 const findingReportReplacementDirective = new RegExp(
