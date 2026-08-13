@@ -41,7 +41,11 @@ const findingReportAssignmentKey = new RegExp(`^${FINDING_REPORT_ASSIGNMENT_KEY_
 /** Exact assignment-shaped evidence keys that overlap the report-metadata
  * vocabulary. Keep this list narrow: a generic uppercase exemption would let
  * producer-local aliases such as `ROOT_CAUSE` evade the authority. */
-export const FINDING_REPORT_EVIDENCE_ASSIGNMENT_KEYS = ["STATEFUL_RUNS", "--dependency-version"] as const;
+export const FINDING_REPORT_EVIDENCE_ASSIGNMENT_KEYS = [
+  "STATEFUL_RUNS",
+  "--dependency-version",
+  "report_status"
+] as const;
 
 export function canonicalFindingNoteKey(key: string): (typeof FINDING_NOTE_KEYS)[number] | undefined {
   if (!findingReportAssignmentKey.test(key)) return undefined;
@@ -50,13 +54,10 @@ export function canonicalFindingNoteKey(key: string): (typeof FINDING_NOTE_KEYS)
 }
 
 const FINDING_REPORT_METADATA_TERM_GROUPS = [
-  ["audit", "cause", "classification", "confidence", "decision"],
-  ["demotion", "dependency", "disposition", "evidence", "exploit"],
-  ["finding", "helper", "impact", "likelihood", "note"],
-  ["outcome", "proof", "public", "reachability", "reason"],
-  ["report", "resolution", "result", "risk", "root"],
-  ["scope", "severity", "stateful", "status", "summary"],
-  ["triage", "verdict"]
+  ["reachability", "reason", "report", "resolution", "result", "risk", "root", "finding", "helper"],
+  ["decision", "demotion", "dependency", "disposition", "proof", "public", "audit", "note"],
+  ["scope", "severity", "stateful", "status", "summary", "evidence", "exploit", "likelihood"],
+  ["cause", "classification", "confidence", "outcome", "verdict", "impact", "triage"]
 ] as const;
 
 const FINDING_REPORT_METADATA_TERMS = FINDING_REPORT_METADATA_TERM_GROUPS.flat();
@@ -65,12 +66,59 @@ function asciiCaseInsensitivePattern(value: string): string {
   return value.replace(/[A-Za-z]/gu, (character) => `[${character.toLowerCase()}${character.toUpperCase()}]`);
 }
 
+interface MetadataTermTrieNode {
+  terminal: boolean;
+  children: Map<string, MetadataTermTrieNode>;
+}
+
+function asciiCaseInsensitiveAlternation(values: readonly string[]): string {
+  const root: MetadataTermTrieNode = { terminal: false, children: new Map() };
+  for (const value of values) {
+    let node = root;
+    for (const character of value) {
+      let child = node.children.get(character);
+      if (child === undefined) {
+        child = { terminal: false, children: new Map() };
+        node.children.set(character, child);
+      }
+      node = child;
+    }
+    node.terminal = true;
+  }
+
+  function render(node: MetadataTermTrieNode): string {
+    const branches = [...node.children].map(
+      ([character, child]) => `${asciiCaseInsensitivePattern(character)}${render(child)}`
+    );
+    if (node.terminal) branches.push("");
+    if (branches.length === 1) return branches[0]!;
+    const nonEmptyBranches = branches.filter((branch) => branch.length > 0);
+    const alternatives = `(?:${nonEmptyBranches.join("|")})`;
+    return node.terminal ? `${alternatives}?` : alternatives;
+  }
+
+  return render(root);
+}
+
+const FINDING_REPORT_METADATA_TERM_PATTERNS = FINDING_REPORT_METADATA_TERM_GROUPS.map(asciiCaseInsensitiveAlternation);
+
+/** Bounded ASCII identifier fragments containing two report-metadata terms.
+ * Each ordered group pair is a separate pattern so checked-in portable schemas
+ * remain below their per-pattern complexity limit. Requiring two
+ * terms preserves ordinary evidence keys such as `root_slot`, `proof_size`,
+ * and `impact_price` while closing unenumerated producer-local aliases such as
+ * `root_reason`, `audit_status`, and `helper_verdict`. Callers must pair each
+ * fragment with the bounded assignment-key lookahead below. */
+export const FINDING_REPORT_MULTITERM_METADATA_KEY_PATTERNS = FINDING_REPORT_METADATA_TERM_PATTERNS.flatMap((left) =>
+  FINDING_REPORT_METADATA_TERM_PATTERNS.map((right) => `[-_0-9A-Za-z]*${left}[-_0-9A-Za-z]*${right}[-_0-9A-Za-z]*`)
+);
+
 /** A bounded ASCII identifier containing a report-metadata term. This defines
  * a family, rather than a blacklist of guessed aliases, so producer-local
  * renames such as `helper_summary` and `reachability_note` fail closed. */
 export const FINDING_REPORT_METADATA_KEY_PATTERNS = FINDING_REPORT_METADATA_TERM_GROUPS.map(
-  (terms) =>
-    `(?=${FINDING_REPORT_ASSIGNMENT_KEY_PATTERN}\\s*={1,2})[-_0-9A-Za-z]*(?:${terms.map(asciiCaseInsensitivePattern).join("|")})[-_0-9A-Za-z]*`
+  (_, index) =>
+    `(?=${FINDING_REPORT_ASSIGNMENT_KEY_PATTERN}\\s*={1,2})[-_0-9A-Za-z]*${FINDING_REPORT_METADATA_TERM_PATTERNS[index]}[-_0-9A-Za-z]*`
 );
 
 export function isFindingReportMetadataKey(key: string): boolean {

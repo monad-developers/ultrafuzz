@@ -13,6 +13,8 @@ import {
   FINDING_NOTE_KEYS,
   FINDING_REACHABILITY_VALUES,
   FINDING_REPORT_ASSIGNMENT_KEY_PATTERN,
+  FINDING_REPORT_EVIDENCE_ASSIGNMENT_KEYS,
+  FINDING_REPORT_MULTITERM_METADATA_KEY_PATTERNS,
   FINDING_RISK_VALUES,
   STATEFUL_FAILURE_CLASSIFICATION_VALUES,
   canonicalFindingNoteKey,
@@ -53,6 +55,7 @@ const assignmentKeyPattern = FINDING_REPORT_ASSIGNMENT_KEY_PATTERN;
 const assignmentBoundaryPattern = "(?:^|[^\\p{L}\\p{N}\\p{M}_%\\-])";
 const assignmentOperatorPrefixPattern = "[ \\t]*=(?!=)";
 const anyAssignmentOperatorPattern = "\\s*={1,2}\\s*";
+const colonAssignmentOperatorPattern = "[ \\t]*:[ \\t]*";
 const typedValueBoundaryPattern = "(?::|[.;,*`\\s&)\\]}>\"']|$)";
 const uniqueTypedValuePattern = `(?:${[...FINDING_REACHABILITY_VALUES, ...STATEFUL_FAILURE_CLASSIFICATION_VALUES].join(
   "|"
@@ -129,11 +132,24 @@ const unsupportedAliasAssignmentPatterns = reportAliasPatternGroups.map((pattern
   return `${assignmentBoundaryPattern}(?!(${supportedNoteKeyPattern})[ \\t]*={1,2})(?:(${aliasKeyPattern}))${anyAssignmentOperatorPattern}`;
 });
 const unsupportedBareHelperAliasPattern = `${assignmentBoundaryPattern}(_*[hH][eE][lL][pP][eE][rR]_*)${anyAssignmentOperatorPattern}`;
+const evidenceAssignmentKeyPattern = `(?:${FINDING_REPORT_EVIDENCE_ASSIGNMENT_KEYS.map((key) =>
+  key.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")
+).join("|")})`;
+const unsupportedMetadataPairAliasPatterns = FINDING_REPORT_MULTITERM_METADATA_KEY_PATTERNS.map(
+  (pattern) =>
+    `${assignmentBoundaryPattern}(?!(${supportedNoteKeyPattern})[ \\t]*={1,2})(?!${evidenceAssignmentKeyPattern}[ \\t]*={1,2})(?:((?=${assignmentKeyPattern}\\s*={1,2})${pattern}))${anyAssignmentOperatorPattern}`
+);
 const invalidCanonicalGrammarPattern = `${assignmentBoundaryPattern}(?!${validCanonicalAssignmentPrefixPattern})(${globallyValidatedNoteKeyPattern})${anyAssignmentOperatorPattern}`;
 const unsupportedUniqueTypedAliasPattern = `${assignmentBoundaryPattern}(?!${supportedNoteKeyPattern}[ \\t]*=(?!=))(${assignmentKeyPattern})${assignmentOperatorPrefixPattern}[ \\t]*${valueWrapperPattern}${uniqueTypedValuePattern}${typedValueBoundaryPattern}`;
 const riskAliasKeyPattern =
   "(?:risk|severity|rating|risk_level|severity_level|impact_level|likelihood_level|impact_rating|likelihood_rating)";
 const unsupportedRiskTypedAliasPattern = `${reportNoteSearchPrefixPattern}${assignmentBoundaryPattern}(${riskAliasKeyPattern})${assignmentOperatorPrefixPattern}[ \\t]*${valueWrapperPattern}${riskValuePattern}${typedValueBoundaryPattern}`;
+const colonKeyCloseWrapperPattern = "(?:\\x60|\"|'|>|\\)|\\])?";
+const canonicalColonAssignmentPattern = `${assignmentBoundaryPattern}${valueWrapperPattern}(${globallyValidatedNoteKeyPattern})[ \\t]*${colonKeyCloseWrapperPattern}${colonAssignmentOperatorPattern}${valueWrapperPattern}(?=\\S)`;
+const unsupportedMetadataPairColonPatterns = FINDING_REPORT_MULTITERM_METADATA_KEY_PATTERNS.map(
+  (pattern) =>
+    `${assignmentBoundaryPattern}${valueWrapperPattern}(?!${supportedNoteKeyPattern}[ \\t]*${colonKeyCloseWrapperPattern}${colonAssignmentOperatorPattern})(?!${evidenceAssignmentKeyPattern}[ \\t]*${colonKeyCloseWrapperPattern}${colonAssignmentOperatorPattern})(?:((?=${assignmentKeyPattern}[ \\t]*${colonKeyCloseWrapperPattern}${colonAssignmentOperatorPattern})${pattern}))[ \\t]*${colonKeyCloseWrapperPattern}${colonAssignmentOperatorPattern}${valueWrapperPattern}(?=\\S)`
+);
 
 function invalidTypedAssignmentPattern(key: string, values: readonly string[]): string {
   return `${reportNoteSearchPrefixPattern}${assignmentBoundaryPattern}(${key})${assignmentOperatorPrefixPattern}(?![ \\t]*(?:${values.join("|")})${typedValueBoundaryPattern})[ \\t]*`;
@@ -166,13 +182,18 @@ const quantifiedFindingAction =
   /\b(?:all|each|every)\s+(?:finding|issue|output(?:\s+object)?|record|result)s?\b[^\n]{0,160}\b(?:contain|emit|get|have|include|return|store|use)s?\b/iu;
 const vocabularyDirectiveActionPattern =
   "(?:add|annotate|append|assign|classify|define|emit|include|label|mark|populate|put|record|return|set|store|use|write)s?";
+const directReachabilityAssignmentActionPattern = "(?:assign|emit|mark|set)s?";
 const promptVocabularyIdentifierPattern = "[A-Za-z0-9][-_0-9A-Za-z]{0,127}";
 const promptVocabularyOpenWrapperPattern = "(?:\\x60|\"|'|<|\\(|\\[)?";
 const promptVocabularyCloseWrapperPattern = "(?:\\x60|\"|'|>|\\)|\\])?";
+const promptVocabularyCloseWrappersPattern = "(?:(?:\\x60|\"|'|>|\\)|\\]|\\})[ \\t]*)*";
+const promptFindingTargetPattern =
+  "(?:all|each|every)[ \\t]+(?:finding|issue|output(?:[ \\t]+object)?|record|result)s?";
+const promptAssignmentTerminatorPattern = `(?=[ \\t]*(?:(?:on|to|for)[ \\t]+${promptFindingTargetPattern})?[ \\t]*(?:[.;]|$))`;
 const promptReachabilityFieldPattern =
   "reachability(?:[_-](?:classification|note|token|value)|[ \\t]+(?:classification|note|token|value))?";
 const findingReportColonAssignment = new RegExp(
-  `${assignmentBoundaryPattern}[ \\t]*(?:(?:\\x60|"|'|\\*|_|\\[|\\{|\\(|<)+[ \\t]*)?(${assignmentKeyPattern})(?:[ \\t]*(?:\\x60|"|'|\\*|_|\\]|\\}|\\)|>)+)?[ \\t]*:[ \\t]*(?:(?:\\x60|"|'|\\*|_|\\[|\\{|\\(|<)+[ \\t]*)?(${promptVocabularyIdentifierPattern})`,
+  `${assignmentBoundaryPattern}[ \\t]*(?:(?:\\x60|"|'|\\*|_|\\[|\\{|\\(|<)+[ \\t]*)?(${assignmentKeyPattern})(?:[ \\t]*(?:\\x60|"|'|\\*|_|\\]|\\}|\\)|>)+)?[ \\t]*:[ \\t]*(?:(?:\\x60|"|'|\\*|_|\\[|\\{|\\(|<)+[ \\t]*)?(${promptVocabularyIdentifierPattern})${promptVocabularyCloseWrappersPattern}${promptAssignmentTerminatorPattern}`,
   "giu"
 );
 const findingReportStandaloneAssignment = new RegExp(
@@ -187,16 +208,22 @@ const directReachabilityAliasDirective = new RegExp(
   `\\b${vocabularyDirectiveActionPattern}\\b[^.;\\n]{0,160}?\\b(reachability[_-](?:classification|note|token|value))\\b[ \\t]+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})`,
   "iu"
 );
+const directReachabilityValueDirective = new RegExp(
+  `\\b${directReachabilityAssignmentActionPattern}\\b[^.;\\n]{0,160}?\\b(reachability)\\b[ \\t]+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})${promptVocabularyCloseWrappersPattern}${promptAssignmentTerminatorPattern}`,
+  "iu"
+);
 const reverseReachabilityValueDirective = new RegExp(
   `\\b${vocabularyDirectiveActionPattern}\\b[ \\t]+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})${promptVocabularyCloseWrapperPattern}[ \\t]+(?:as|for|to|under)[ \\t]+(?:the[ \\t]+)?(${promptReachabilityFieldPattern})\\b`,
   "iu"
 );
 const directedNoteKeyReference =
   /\bunder\s+(?:the\s+)?(?:`|"|'|<|\(|\[)?([A-Za-z][-_0-9A-Za-z]{0,127})(?:`|"|'|>|\)|\])?(?=[^.;\n]{0,120}\b(?:(?:all|each|every)\s+)?(?:(?:finding|issue|report)\s+)?notes?(\s+key)?\b)/giu;
-const reportNoteKeyReference =
-  /(?:(?:`|"|'|<|\(|\[))?([A-Za-z][-_0-9A-Za-z]{0,127})(?:(?:`|"|'|>|\)|\]))?\s+note(\s+key)?\b/giu;
+const directedReportNoteKeyReference = new RegExp(
+  `\\b${vocabularyDirectiveActionPattern}\\b[^.;\\n]{0,160}?(?:\\x60|"|'|<|\\(|\\[)?([A-Za-z][-_0-9A-Za-z]{0,127})(?:\\x60|"|'|>|\\)|\\])?[ \\t]+note(?:[ \\t]+key)?\\b`,
+  "giu"
+);
 const findingReportRenameDirective = new RegExp(
-  `\\brename\\b[ \\t]+(?:the[ \\t]+)?${promptVocabularyOpenWrapperPattern}(${promptReachabilityFieldPattern}|${promptVocabularyIdentifierPattern})${promptVocabularyCloseWrapperPattern}[ \\t]+(?:to|as)[ \\t]+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})`,
+  `\\b(?:change|map|rename|replace)\\b[ \\t]+(?:the[ \\t]+)?${promptVocabularyOpenWrapperPattern}(${promptReachabilityFieldPattern}|${promptVocabularyIdentifierPattern})${promptVocabularyCloseWrapperPattern}[ \\t]+(?:as|to|with)[ \\t]+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})`,
   "giu"
 );
 const findingReportReplacementDirective = new RegExp(
@@ -223,18 +250,7 @@ export function findingReportSemanticAssignment(text: string): FindingReportSema
   findingReportColonAssignment.lastIndex = 0;
   for (const assignment of text.matchAll(findingReportColonAssignment)) {
     const key = assignment[1]!;
-    const clauseStart =
-      Math.max(
-        text.lastIndexOf("\n", assignment.index),
-        text.lastIndexOf(".", assignment.index),
-        text.lastIndexOf(";", assignment.index)
-      ) + 1;
-    const prefix = text.slice(clauseStart, assignment.index);
-    const standsAlone = /^[ \t]*(?:(?:-|\*|>|\x60|"|'|\(|\[|\{|<|:)+[ \t]*)*$/u.test(prefix);
-    if (
-      (standsAlone && canonicalFindingNoteKey(key) === "reachability") ||
-      (isPromptReportVocabularyKey(key) && findingReportDirective.test(prefix))
-    ) {
+    if (isPromptReportVocabularyKey(key)) {
       return { key, operator: "=", value: assignment[2]! };
     }
   }
@@ -242,6 +258,7 @@ export function findingReportSemanticAssignment(text: string): FindingReportSema
   for (const [pattern, keyIndex, valueIndex] of [
     [connectedReachabilityValueDirective, 1, 2],
     [directReachabilityAliasDirective, 1, 2],
+    [directReachabilityValueDirective, 1, 2],
     [reverseReachabilityValueDirective, 2, 1]
   ] as const) {
     const reference = pattern.exec(text);
@@ -273,10 +290,10 @@ export function findingReportSemanticAssignment(text: string): FindingReportSema
     }
   }
 
-  reportNoteKeyReference.lastIndex = 0;
-  for (const reference of text.matchAll(reportNoteKeyReference)) {
+  directedReportNoteKeyReference.lastIndex = 0;
+  for (const reference of text.matchAll(directedReportNoteKeyReference)) {
     const identifier = reference[1]!;
-    if (reference[2] !== undefined || identifier.includes("_") || canonicalFindingNoteKey(identifier) !== undefined) {
+    if (identifier.toLowerCase() !== "report-bound" && isPromptReportVocabularyKey(identifier)) {
       return { key: identifier, operator: "=", value: "<note-key>" };
     }
   }
@@ -284,14 +301,14 @@ export function findingReportSemanticAssignment(text: string): FindingReportSema
   for (const clauseMatch of text.matchAll(promptClause)) {
     const clause = clauseMatch[0]!;
     if (clause.length === 0) continue;
+    const assignment = clause.matchAll(findingNoteAssignment).next().value;
     const noteIssue = findingNoteAssignmentIssue(clause);
-    if (noteIssue !== undefined) return semanticAssignmentForKey(clause, noteIssue.key);
+    if (noteIssue !== undefined && assignment !== undefined) return semanticAssignmentForKey(clause, noteIssue.key);
 
     const directed =
       (findingReportDirective.test(clause) && quantifiedFindingTarget.test(clause)) ||
       quantifiedFindingAction.test(clause);
     if (!directed) continue;
-    const assignment = clause.matchAll(findingNoteAssignment).next().value;
     if (assignment !== undefined) {
       const key = assignment[1]!;
       return {
@@ -331,6 +348,13 @@ const findingNoteConstraintRules = [
     findingNoteConstraint(pattern, "Unsupported report-bound finding note key")
   ),
   findingNoteConstraint(unsupportedBareHelperAliasPattern, "Unsupported report-bound finding note key"),
+  ...unsupportedMetadataPairAliasPatterns.map((pattern) =>
+    findingNoteConstraint(pattern, "Unsupported report-bound finding note key")
+  ),
+  findingNoteConstraint(canonicalColonAssignmentPattern, "Unsupported report-bound finding note key"),
+  ...unsupportedMetadataPairColonPatterns.map((pattern) =>
+    findingNoteConstraint(pattern, "Unsupported report-bound finding note key")
+  ),
   findingNoteConstraint(invalidCanonicalGrammarPattern, "Unsupported report-bound finding note key"),
   findingNoteConstraint(unsupportedUniqueTypedAliasPattern, "Unsupported report-bound finding note key"),
   findingNoteConstraint(unsupportedRiskTypedAliasPattern, "Unsupported report-bound finding note key"),

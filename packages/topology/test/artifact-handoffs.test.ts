@@ -202,6 +202,11 @@ describe("artifact handoff validation", () => {
       "Record evidence using helper contracts in each finding note.",
       "Perform a reachability cross-check before triage.",
       "Document reachability edge-cases in the report.",
+      "Review the reachability note before triage.",
+      "The reachability note was preserved byte-for-byte.",
+      "Document reachability note edge-cases in the report.",
+      "Reachability: internal functions require a cross-check before triage.",
+      "Reachability: internal behavior must be documented.",
       "risK=non-semantic Unicode evidence."
     ]) {
       expect(() =>
@@ -258,7 +263,15 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       "Write helper evidence under helperEvidence in every finding note.",
       'Emit { "reachability": "internal" } on every finding.',
       "Reachability: internal.",
-      "Rename helper_proof to helperEvidence."
+      "Rename helper_proof to helperEvidence.",
+      "Set reachability internal on every finding.",
+      "Emit reachability internal on every finding.",
+      "Assign reachability internal to every finding.",
+      "Mark reachability internal for each finding.",
+      "helper_proof: helperEvidence.",
+      "Change helper_proof to helperEvidence.",
+      "Map helper_proof to helperEvidence.",
+      "Replace helper_proof with helperEvidence."
     ]) {
       expect(
         () =>
