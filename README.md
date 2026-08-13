@@ -21,7 +21,11 @@ local dashboard plus final report for review.
 Tell your agent:
 
 ```
-Run Ultrafuzz on my project and monitor it from start to finish. If any node fails, for example, due to cyber refusals, resume from where it left off. Use subscription auth, the best available model at its highest reasoning effort, high concurrency limits, and the default audit profile. If you need to install any dependencies, ask for my approval first.
+Run Ultrafuzz on my project and monitor it from start to finish.
+If any node fails, for example, due to cyber refusals, resume from where it left off.
+Use subscription auth, the best available model at its highest reasoning effort,
+high concurrency limits, and the default audit profile.
+If you need to install any dependencies, ask for my approval first.
 ```
 
 ## Documentation
