@@ -18,6 +18,7 @@ import {
   evmbenchCohortZodSchema,
   loadBenchmarkCohortManifest,
   loadBenchmarkLanesManifest,
+  resolveBenchmarkPolicyManifestPaths,
   ultrafuzzBenchCohortZodSchema
 } from "../src/benchmark-manifest.js";
 import {
@@ -61,6 +62,30 @@ describe("public benchmark manifests", () => {
       true
     );
     expectShapeParity(EVAL_BENCHMARK_LANES_SCHEMA_ID, benchmarkLanesZodSchema, jsonFixture(LANES_PATH), true);
+  });
+
+  it("resolves exactly one complete current or legacy candidate policy layout", () => {
+    expect(resolveBenchmarkPolicyManifestPaths(REPOSITORY_ROOT, "ultrafuzz-bench")).toEqual({
+      layout: "benchmark-family",
+      cohortRelativePath: "benchmarks/ultrafuzzbench/cohort.json",
+      lanesRelativePath: "benchmarks/ultrafuzzbench/lanes.json"
+    });
+
+    const legacyRoot = mkdtempSync(path.join(tmpdir(), "ultrafuzz-benchmark-policy-layout-"));
+    fs.mkdirSync(path.join(legacyRoot, "benchmarks"));
+    fs.writeFileSync(path.join(legacyRoot, "benchmarks", "lanes.json"), "{}\n");
+    fs.writeFileSync(path.join(legacyRoot, "benchmarks", "evmbench-detect.json"), "{}\n");
+    expect(resolveBenchmarkPolicyManifestPaths(legacyRoot, "evmbench")).toEqual({
+      layout: "legacy-root",
+      cohortRelativePath: "benchmarks/evmbench-detect.json",
+      lanesRelativePath: "benchmarks/lanes.json"
+    });
+
+    fs.mkdirSync(path.join(legacyRoot, "benchmarks", "ultrafuzzbench"));
+    fs.writeFileSync(path.join(legacyRoot, "benchmarks", "ultrafuzzbench", "lanes.json"), "{}\n");
+    expect(() => resolveBenchmarkPolicyManifestPaths(legacyRoot, "evmbench")).toThrowError(
+      expect.objectContaining({ code: "EVAL_BENCHMARK_MANIFEST_INVALID" })
+    );
   });
 
   it("rejects the same portable cohort mutations in JSON Schema and retained Zod", () => {

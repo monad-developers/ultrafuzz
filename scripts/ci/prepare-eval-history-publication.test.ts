@@ -514,6 +514,39 @@ describe("trusted automatic eval-history publication handoff", () => {
       })
     ).toThrow(/symbolic link/u);
   });
+
+  it("accepts a pre-family candidate policy checkout and rejects mixed policy layouts", () => {
+    const root = temporaryRoot("ultrafuzz-legacy-publication-policy-");
+    fs.mkdirSync(path.join(root, "benchmarks"));
+    fs.writeFileSync(path.join(root, "benchmarks/lanes.json"), "{}\n");
+    fs.writeFileSync(path.join(root, "benchmarks/ultrafuzz-bench.json"), "{}\n");
+    git(root, ["init", "-b", "main"]);
+    git(root, ["config", "user.name", "Test"]);
+    git(root, ["config", "user.email", "test@example.com"]);
+    git(root, ["add", "benchmarks"]);
+    git(root, ["commit", "-m", "legacy policy"]);
+    const legacyCommit = git(root, ["rev-parse", "HEAD"]).trim();
+    expect(
+      validateBenchmarkPolicyFiles({
+        policyRoot: root,
+        candidateCommit: legacyCommit,
+        benchmark: "ultrafuzz-bench"
+      })
+    ).toBe(fs.realpathSync(root));
+
+    fs.mkdirSync(path.join(root, "benchmarks", "ultrafuzzbench"));
+    fs.writeFileSync(path.join(root, "benchmarks/ultrafuzzbench/lanes.json"), "{}\n");
+    git(root, ["add", "benchmarks/ultrafuzzbench/lanes.json"]);
+    git(root, ["commit", "-m", "mixed policy"]);
+    const mixedCommit = git(root, ["rev-parse", "HEAD"]).trim();
+    expect(() =>
+      validateBenchmarkPolicyFiles({
+        policyRoot: root,
+        candidateCommit: mixedCommit,
+        benchmark: "ultrafuzz-bench"
+      })
+    ).toThrow(/exactly one complete canonical benchmark policy layout/u);
+  });
 });
 
 function smokeContext() {
