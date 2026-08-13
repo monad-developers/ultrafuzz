@@ -235,7 +235,7 @@ App; a lost race is retried with the new tip. The exact candidate checkout
 supplies the benchmark policy, and observations and regenerated charts stay
 keyed to that candidate commit. This compare-and-swap loop retains every
 complete generation without relying on a GitHub concurrency queue, which can
-discard a pending job. Its commit is restricted to `benchmarks/history.json`
+discard a pending job. Its commit is restricted to `benchmarks/ultrafuzzbench/history.json`
 and the nine `docs/assets/eval-history/*.svg` charts.
 
 Configure the App client ID as the `EVAL_HISTORY_APP_CLIENT_ID` Actions

@@ -49,9 +49,9 @@ if (!outputDirectory) throw new Error("output directory is required");
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const benchmark = mode === "smoke" ? "ultrafuzz-bench" : "evmbench";
 const cohort = loadBenchmarkCohortManifest(
-  path.join(repositoryRoot, "benchmarks", benchmark === "evmbench" ? "evmbench-detect.json" : "ultrafuzz-bench.json")
+  path.join(repositoryRoot, "benchmarks", benchmark === "evmbench" ? "evmbench" : "ultrafuzzbench", "cohort.json")
 );
-const lanes = loadBenchmarkLanesManifest(path.join(repositoryRoot, "benchmarks/lanes.json"));
+const lanes = loadBenchmarkLanesManifest(path.join(repositoryRoot, "benchmarks/ultrafuzzbench/lanes.json"));
 const lane = lanes[mode];
 const selectedTargets =
   mode === "smoke"

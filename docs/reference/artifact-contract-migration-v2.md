@@ -88,8 +88,7 @@ historical reader.
 The migration also introduces first canonical identities for
 `ultrafuzz.trusted-cli.v1`, the registered
 `urn:ultrafuzz:schema:artifacts:json-validator-preflight-success:1` envelope,
-`ultrafuzz.agent-adapter-recovery.v1`, and
-`ultrafuzz.cli.public-run-state.v1`. These are new runtime/control evidence,
+and `ultrafuzz.cli.public-run-state.v1`. These are new runtime/control evidence,
 not renamed historical payloads.
 
 ### Evaluation and benchmark documents

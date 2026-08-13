@@ -7,7 +7,7 @@ by `packages/evals/schema/eval-ground-truth.schema.json`; public source
 identity is typed separately from the optional private subject binding.
 
 EVMBench labels are materialized at runtime from the exact Frontier Evals commit
-pinned in `benchmarks/evmbench-detect.json`. The Ultrafuzz-bench YAML files in
+pinned in `benchmarks/evmbench/cohort.json`. The Ultrafuzz-bench YAML files in
 this directory normalize already-public audit reports and retain their source
 URLs and retrieval identities. Low-value informational and gas-only observations
 are excluded where the source report distinguishes them.

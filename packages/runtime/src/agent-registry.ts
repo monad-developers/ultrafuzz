@@ -204,6 +204,7 @@ function topLevelConstBindings(source: ts.SourceFile): ReadonlyMap<string, ts.Ex
 
 function topLevelNameIsBound(source: ts.SourceFile, name: string): boolean {
   for (const statement of source.statements) {
+    if (ts.isImportEqualsDeclaration(statement) && statement.name.text === name) return true;
     if (ts.isImportDeclaration(statement)) {
       const clause = statement.importClause;
       if (clause?.name?.text === name) return true;
@@ -222,15 +223,22 @@ function topLevelNameIsBound(source: ts.SourceFile, name: string): boolean {
     }
     if (
       ts.isVariableStatement(statement) &&
-      statement.declarationList.declarations.some(
-        (declaration) => ts.isIdentifier(declaration.name) && declaration.name.text === name
-      )
+      statement.declarationList.declarations.some((declaration) => bindingNameContains(declaration.name, name))
     )
       return true;
     if ((ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement)) && statement.name?.text === name)
       return true;
+    if ((ts.isEnumDeclaration(statement) || ts.isModuleDeclaration(statement)) && statement.name.text === name)
+      return true;
   }
   return false;
+}
+
+function bindingNameContains(binding: ts.BindingName, name: string): boolean {
+  if (ts.isIdentifier(binding)) return binding.text === name;
+  return binding.elements.some(
+    (element) => !ts.isOmittedExpression(element) && bindingNameContains(element.name, name)
+  );
 }
 
 function isUnshadowedObjectFreeze(

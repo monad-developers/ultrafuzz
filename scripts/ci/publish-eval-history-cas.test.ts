@@ -13,6 +13,7 @@ import {
 
 const SCRIPT = fileURLToPath(new URL("./publish-eval-history-cas.mjs", import.meta.url));
 const TARGET_REF = "refs/heads/main";
+const HISTORY_PATH = "benchmarks/ultrafuzzbench/history.json";
 const CHARTS = [
   "latest-summary.svg",
   "quality.svg",
@@ -51,7 +52,7 @@ describe("eval history Git CAS publisher", () => {
     expect(first.published).toBe(true);
     expect(second.published).toBe(true);
     expect(Math.max(first.attempts, second.attempts)).toBeGreaterThanOrEqual(2);
-    const history = JSON.parse(git(fixture.bare, ["show", `${TARGET_REF}:benchmarks/history.json`])) as {
+    const history = JSON.parse(git(fixture.bare, ["show", `${TARGET_REF}:${HISTORY_PATH}`])) as {
       observations: Array<{ id: string }>;
     };
     expect(history.observations.map((entry) => entry.id)).toEqual([
@@ -90,7 +91,7 @@ describe("eval history Git CAS publisher", () => {
     expect(git(fixture.bare, ["rev-parse", TARGET_REF]).trim()).toBe(beforeRetry);
     expect(Number(git(fixture.bare, ["rev-list", "--count", `${candidateCommit}..${TARGET_REF}`]))).toBe(2);
     expect(git(fixture.bare, ["diff", "--name-only", candidateCommit, TARGET_REF]).trim().split("\n")).toEqual(
-      ["benchmarks/history.json", ...CHARTS.map((chart) => `docs/assets/eval-history/${chart}`).sort()].sort()
+      [HISTORY_PATH, ...CHARTS.map((chart) => `docs/assets/eval-history/${chart}`).sort()].sort()
     );
     for (const chart of CHARTS) {
       expect(git(fixture.bare, ["show", `${TARGET_REF}:docs/assets/eval-history/${chart}`])).toBe(
@@ -111,7 +112,7 @@ describe("eval history Git CAS publisher", () => {
     await invokePublisher(fixture.checkoutA, generationA, inputRoot);
     git(fixture.seed, ["pull", "--ff-only", "origin", "main"]);
     appendFixtureHistoryObservation(fixture.seed, "observation-main", "run-main");
-    git(fixture.seed, ["add", "benchmarks/history.json", "docs/assets/eval-history"]);
+    git(fixture.seed, ["add", HISTORY_PATH, "docs/assets/eval-history"]);
     git(fixture.seed, ["commit", "-m", "Append independent main history"]);
     git(fixture.seed, ["push", "origin", "main"]);
     const mainBeforePublication = git(fixture.bare, ["rev-parse", "refs/heads/main"]).trim();
@@ -122,7 +123,7 @@ describe("eval history Git CAS publisher", () => {
     const targetAfter = git(fixture.bare, ["rev-parse", TARGET_REF]).trim();
     expect(gitStatus(fixture.bare, ["merge-base", "--is-ancestor", mainBeforePublication, targetAfter])).toBe(0);
     expect(git(fixture.bare, ["rev-list", "--parents", "-n", "1", targetAfter]).trim().split(" ")).toHaveLength(2);
-    const history = JSON.parse(git(fixture.bare, ["show", `${TARGET_REF}:benchmarks/history.json`])) as {
+    const history = JSON.parse(git(fixture.bare, ["show", `${TARGET_REF}:${HISTORY_PATH}`])) as {
       observations: Array<{ id: string }>;
     };
     expect(history.observations.map((entry) => entry.id)).toEqual([
@@ -187,7 +188,7 @@ describe("eval history Git CAS publisher", () => {
     const publishedTarget = git(fixture.bare, ["rev-parse", TARGET_REF]).trim();
     expect(git(fixture.bare, ["show", `${TARGET_REF}:independent-main-change.txt`])).toBe("must be preserved\n");
     expect(git(fixture.bare, ["diff", "--name-only", independentTarget, publishedTarget]).trim().split("\n")).toEqual(
-      ["benchmarks/history.json", ...CHARTS.map((chart) => `docs/assets/eval-history/${chart}`)].sort()
+      [HISTORY_PATH, ...CHARTS.map((chart) => `docs/assets/eval-history/${chart}`)].sort()
     );
   });
 
@@ -310,11 +311,11 @@ function createRepositoryFixture(): { root: string; bare: string; seed: string; 
   git(seed, ["config", "user.email", "fixture@example.com"]);
   writeFile(path.join(seed, ".gitignore"), "dist/\n.ultrafuzz/\n");
   writeFile(
-    path.join(seed, "benchmarks", "history.json"),
+    path.join(seed, HISTORY_PATH),
     `${JSON.stringify({ schema_version: "fixture.history.v1", observations: [] }, null, 2)}\n`
   );
   for (const chart of CHARTS) writeFile(path.join(seed, "docs", "assets", "eval-history", chart), `${chart}:\n`);
-  git(seed, ["add", ".gitignore", "benchmarks/history.json", "docs/assets/eval-history"]);
+  git(seed, ["add", ".gitignore", HISTORY_PATH, "docs/assets/eval-history"]);
   git(seed, ["commit", "-m", "Initial history"]);
   git(seed, ["remote", "add", "origin", bare]);
   git(seed, ["push", "-u", "origin", "main"]);
@@ -348,7 +349,7 @@ const projectIndex = args.indexOf("--project");
 if (projectIndex < 0 || args[projectIndex + 1] === undefined) throw new Error("fixture CLI requires --project");
 const project = path.resolve(args[projectIndex + 1]);
 const runId = args[2]?.startsWith("--") === false ? args[2] : undefined;
-const historyPath = path.join(project, "benchmarks", "history.json");
+const historyPath = path.join(project, "benchmarks", "ultrafuzzbench", "history.json");
 const chartsRoot = path.join(project, "docs", "assets", "eval-history");
 
 function expectedCharts(history) {
@@ -443,7 +444,7 @@ function writeGeneration(root: string, file: string, evalRunIds: string[], candi
 }
 
 function appendFixtureHistoryObservation(root: string, observationId: string, evalRunId: string): void {
-  const historyPath = path.join(root, "benchmarks", "history.json");
+  const historyPath = path.join(root, HISTORY_PATH);
   const history = JSON.parse(fs.readFileSync(historyPath, "utf8")) as {
     observations: Array<{ id: string; source_eval_run_id: string }>;
   };

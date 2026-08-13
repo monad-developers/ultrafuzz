@@ -23,7 +23,7 @@ if (process.argv.includes("--check")) {
 function render(catalog) {
   const profiles = Object.entries(catalog.profiles);
   const rows = profiles.map(([id, profile]) => {
-    const name = `\`${id}\`${id === catalog.default ? " (default)" : ""}`;
+    const name = `\`${id}\`${id === "default" ? " (default)" : ""}`;
     const topology = profile.topology_path === undefined ? "Project topology" : `\`${profile.topology_path}\``;
     const settings = Object.entries(profile.settings)
       .map(([key, value]) => `\`${key}=${formatValue(value)}\``)
@@ -45,6 +45,8 @@ Profiles provide coherent defaults. Explicit project configuration and one-run C
 Topology selection is atomic rather than merged:
 
 \`.ultrafuzz/topology.yml < profile topology_path < project topology_path < --topology-path\`
+
+The \`default\` profile is reserved for the unmodified project workflow: it has no settings overrides and uses the project topology. Catalogs without \`profiles.default\` are rejected.
 
 Use \`ultrafuzz config audit-profiles\` for the catalog, \`ultrafuzz config audit-profile <name>\` for effective project settings, and \`ultrafuzz run --audit-profile <name>\` for a one-run override.
 

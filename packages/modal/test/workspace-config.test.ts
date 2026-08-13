@@ -23,7 +23,7 @@ describe("Modal target model profiles", () => {
     expect(config).toContain("max_parallel_nodes = 32");
     expect(config).toContain("keep_workspaces = false");
     expect(config).toContain('invariant_testing_smoke_timeout = "10min"');
-    expect(config).toContain('audit_profile = "balanced"');
+    expect(config).toContain('audit_profile = "default"');
     const parsed = parseProjectConfigToml(config, "modal-target-ultrafuzz.toml");
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
