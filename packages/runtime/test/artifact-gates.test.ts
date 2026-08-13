@@ -10668,6 +10668,17 @@ test("coverage gate groups same-line Solidity declarations into one representabl
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+
+  fs.writeFileSync(
+    path.join(workspace, "magic/recon-coverage.json"),
+    JSON.stringify({ "src/Minified.sol": ["1"], "lib/Missing.sol": ["1"] })
+  );
+  const nonexistentDependency = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(nonexistentDependency.ok, false);
+  assert.ok(
+    nonexistentDependency.diagnostics.some((diagnostic) => diagnostic.code === "COVERAGE_RECON_SELECTION_FILE_UNKNOWN"),
+    JSON.stringify(nonexistentDependency.diagnostics)
+  );
 });
 
 test("coverage gate fails closed when every configured production root is missing", () => {

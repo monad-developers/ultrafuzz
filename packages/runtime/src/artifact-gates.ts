@@ -4546,12 +4546,23 @@ function verifyCoverageProductionInventory(
     }
   }
 
-  const productionRangesByFile = new Map<string, Record<string, unknown>[]>();
+  const productionRangesByFile = new Map<
+    string,
+    { all: Record<string, unknown>[]; byStartLine: Map<number, Record<string, unknown>[]> }
+  >();
   for (const [index, candidate] of evidence.counted_ranges.entries()) {
     if (!isRecord(candidate) || typeof candidate.file !== "string") continue;
     if (candidate.kind === "production") {
-      const ranges = productionRangesByFile.get(candidate.file) ?? [];
-      ranges.push(candidate);
+      const ranges = productionRangesByFile.get(candidate.file) ?? {
+        all: [] as Record<string, unknown>[],
+        byStartLine: new Map<number, Record<string, unknown>[]>()
+      };
+      ranges.all.push(candidate);
+      if (typeof candidate.start_line === "number") {
+        const sameLine = ranges.byStartLine.get(candidate.start_line) ?? [];
+        sameLine.push(candidate);
+        ranges.byStartLine.set(candidate.start_line, sameLine);
+      }
       productionRangesByFile.set(candidate.file, ranges);
     }
     if (!declaredFiles.has(candidate.file)) continue;
@@ -4576,14 +4587,33 @@ function verifyCoverageProductionInventory(
     }
   }
 
+  let materialRangeCount = 0;
   for (const relativePath of inventory) {
     const sourceText = sourceSnapshot(relativePath, "production coverage source").text;
-    const declarations = materialCoverageDeclarations(relativePath, sourceText);
+    let declarations: MaterialCoverageDeclaration[];
+    try {
+      declarations = materialCoverageDeclarations(
+        relativePath,
+        sourceText,
+        MAX_COVERAGE_EVIDENCE_RANGES - materialRangeCount
+      );
+    } catch (error) {
+      diagnostics.push({
+        code: "COVERAGE_SOURCE_INVENTORY_UNSAFE",
+        message: error instanceof Error ? error.message : "Coverage production range inventory is unsafe",
+        severity: "error",
+        source: "coverage-evidence",
+        path: evidencePath
+      });
+      return diagnostics;
+    }
+    materialRangeCount += declarations.length;
     const declarationLines = declarations.map((declaration) => declaration.line);
     const declarationLineSet = new Set(declarationLines);
     const declaredFile = declaredProductionFiles.get(relativePath);
     if (declaredFile === undefined) continue;
-    const declaredRanges = productionRangesByFile.get(relativePath) ?? [];
+    const declaredRangeIndex = productionRangesByFile.get(relativePath);
+    const declaredRanges = declaredRangeIndex?.all ?? [];
 
     if (declaredFile.total_ranges !== declarationLines.length) {
       diagnostics.push({
@@ -4605,7 +4635,7 @@ function verifyCoverageProductionInventory(
       });
     }
     for (const declaration of declarations) {
-      const matching = declaredRanges.filter((candidate) => candidate.start_line === declaration.line);
+      const matching = declaredRangeIndex?.byStartLine.get(declaration.line) ?? [];
       if (matching.length !== 1) {
         diagnostics.push({
           code: "COVERAGE_PRODUCTION_RANGE_OMITTED",
@@ -4616,10 +4646,11 @@ function verifyCoverageProductionInventory(
         });
         continue;
       }
-      const selectedByRecon =
-        reconSelection.ranges
-          ?.get(relativePath)
-          ?.some((range) => range.startLine <= declaration.endLine && range.endLine >= declaration.line) ?? false;
+      const selectedByRecon = reconCoverageRangesOverlap(
+        reconSelection.ranges?.get(relativePath),
+        declaration.line,
+        declaration.endLine
+      );
       if (reconSelection.ranges !== undefined && matching[0]!.selected !== selectedByRecon) {
         diagnostics.push({
           code: "COVERAGE_PRODUCTION_RANGE_SELECTION_MISMATCH",
@@ -4660,8 +4691,19 @@ type ReconCoverageSelection = {
   diagnostics: RuntimeDiagnostic[];
 };
 
-function materialCoverageDeclarations(relativePath: string, source: string): MaterialCoverageDeclaration[] {
-  const declarationsByLine = new Map<number, MaterialCoverageDeclaration[]>();
+function materialCoverageDeclarations(
+  relativePath: string,
+  source: string,
+  maximumRanges: number
+): MaterialCoverageDeclaration[] {
+  const declarationsByLine = new Map<number, number>();
+  const recordDeclaration = (declaration: MaterialCoverageDeclaration): void => {
+    const previousEndLine = declarationsByLine.get(declaration.line);
+    if (previousEndLine === undefined && declarationsByLine.size >= maximumRanges) {
+      throw new Error(`Coverage production source inventory exceeds ${MAX_COVERAGE_EVIDENCE_RANGES} material ranges`);
+    }
+    declarationsByLine.set(declaration.line, Math.max(previousEndLine ?? declaration.endLine, declaration.endLine));
+  };
   if (path.extname(relativePath) === ".sol") {
     const lexicalSource = stripCoverageSourceCommentsAndStrings(source);
     let parenthesisDepth = 0;
@@ -4680,22 +4722,18 @@ function materialCoverageDeclarations(relativePath: string, source: string): Mat
       }
       scannedThrough = match.index ?? scannedThrough;
       if (parenthesisDepth > 0 || braceDepth > 1) continue;
-      const signatureEnd = solidityDeclarationSignatureEnd(lexicalSource, match.index ?? 0);
+      const signatureEnd = solidityDeclarationSignatureEnd(lexicalSource, match.index ?? 0, currentLine);
       // Interface and abstract signatures end in `;` and have no executable
       // range that LCOV can cover. Only declarations with an implementation
       // body belong in the production-source denominator.
-      if (lexicalSource[signatureEnd - 1] !== "{") continue;
-      const declarations = declarationsByLine.get(currentLine) ?? [];
-      declarations.push({
+      if (lexicalSource[signatureEnd.index - 1] !== "{") continue;
+      recordDeclaration({
         line: currentLine,
-        endLine: solidityDeclarationEndLine(lexicalSource, signatureEnd)
+        endLine: solidityDeclarationEndLine(lexicalSource, signatureEnd.index, signatureEnd.line)
       });
-      declarationsByLine.set(currentLine, declarations);
     }
     for (const getter of solidityPublicGetterDeclarations(lexicalSource)) {
-      const declarations = declarationsByLine.get(getter.line) ?? [];
-      declarations.push(getter);
-      declarationsByLine.set(getter.line, declarations);
+      recordDeclaration(getter);
     }
   }
   if (path.extname(relativePath) === ".vy") {
@@ -4703,9 +4741,7 @@ function materialCoverageDeclarations(relativePath: string, source: string): Mat
       .replace(/\r?\n$/u, "")
       .split(/\r?\n/u);
     for (const declaration of vyperMaterialCoverageDeclarations(vyperLines)) {
-      const declarations = declarationsByLine.get(declaration.line) ?? [];
-      declarations.push(declaration);
-      declarationsByLine.set(declaration.line, declarations);
+      recordDeclaration(declaration);
     }
   }
 
@@ -4716,38 +4752,40 @@ function materialCoverageDeclarations(relativePath: string, source: string): Mat
   // complete production-source denominator.
   return [...declarationsByLine.entries()]
     .sort(([left], [right]) => left - right)
-    .map(([line, declarationsAtLine]) => ({
-      line,
-      endLine: Math.max(...declarationsAtLine.map((declaration) => declaration.endLine))
-    }));
+    .map(([line, endLine]) => ({ line, endLine }));
 }
 
-function solidityDeclarationSignatureEnd(source: string, start: number): number {
+function solidityDeclarationSignatureEnd(
+  source: string,
+  start: number,
+  startLine: number
+): { index: number; line: number } {
   let parenthesisDepth = 0;
+  let line = startLine;
   for (let index = start; index < source.length; index += 1) {
     const character = source[index]!;
     if (character === "(") parenthesisDepth += 1;
     else if (character === ")") parenthesisDepth = Math.max(0, parenthesisDepth - 1);
-    else if (parenthesisDepth === 0 && (character === "{" || character === ";")) return index + 1;
+    else if (parenthesisDepth === 0 && (character === "{" || character === ";")) return { index: index + 1, line };
+    if (character === "\n") line += 1;
   }
-  return source.length;
+  return { index: source.length, line };
 }
 
-function solidityDeclarationEndLine(source: string, signatureEnd: number): number {
-  if (source[signatureEnd - 1] !== "{") return coverageLineAt(source, signatureEnd - 1);
+function solidityDeclarationEndLine(source: string, signatureEnd: number, signatureEndLine: number): number {
+  if (source[signatureEnd - 1] !== "{") return signatureEndLine;
   let depth = 1;
+  let line = signatureEndLine;
   for (let index = signatureEnd; index < source.length; index += 1) {
-    if (source[index] === "{") depth += 1;
-    else if (source[index] === "}") {
+    const character = source[index];
+    if (character === "\n") line += 1;
+    else if (character === "{") depth += 1;
+    else if (character === "}") {
       depth -= 1;
-      if (depth === 0) return coverageLineAt(source, index);
+      if (depth === 0) return line;
     }
   }
-  return coverageLineAt(source, signatureEnd - 1);
-}
-
-function coverageLineAt(source: string, index: number): number {
-  return (source.slice(0, Math.max(0, index)).match(/\n/gu)?.length ?? 0) + 1;
+  return signatureEndLine;
 }
 
 function solidityPublicGetterDeclarations(source: string): MaterialCoverageDeclaration[] {
@@ -5084,6 +5122,18 @@ function readReconCoverageSelection(workspacePath: string, inventory: ReadonlySe
       // outside the configured production-source authority and therefore do
       // not authenticate selected production ranges; dependency evidence is
       // still reconciled independently against declared workspace files.
+      try {
+        const sourcePath = safeResolveInside(workspacePath, relativePath, "Recon-selected non-production source");
+        assertRegularFileInside(workspacePath, sourcePath, "Recon-selected non-production source");
+      } catch {
+        diagnostics.push({
+          code: "COVERAGE_RECON_SELECTION_FILE_UNKNOWN",
+          message: `Recon coverage selection map includes nonexistent or unsafe non-production source ${relativePath}`,
+          severity: "error",
+          source: "coverage-evidence",
+          path: selectionPath
+        });
+      }
       continue;
     }
     if (!Array.isArray(rawRanges) || rawRanges.length === 0) {
@@ -5134,9 +5184,39 @@ function readReconCoverageSelection(workspacePath: string, inventory: ReadonlySe
       }
       parsedRanges.push({ startLine, endLine });
     }
-    ranges.set(relativePath, parsedRanges);
+    ranges.set(relativePath, coalesceReconCoverageRanges(parsedRanges));
   }
   return diagnostics.length === 0 ? { ranges, diagnostics } : { diagnostics };
+}
+
+function coalesceReconCoverageRanges(ranges: readonly ReconCoverageRange[]): ReconCoverageRange[] {
+  const sorted = [...ranges].sort((left, right) => left.startLine - right.startLine || left.endLine - right.endLine);
+  const coalesced: ReconCoverageRange[] = [];
+  for (const range of sorted) {
+    const previous = coalesced.at(-1);
+    if (previous === undefined || range.startLine > previous.endLine + 1) {
+      coalesced.push({ ...range });
+      continue;
+    }
+    previous.endLine = Math.max(previous.endLine, range.endLine);
+  }
+  return coalesced;
+}
+
+function reconCoverageRangesOverlap(
+  ranges: readonly ReconCoverageRange[] | undefined,
+  startLine: number,
+  endLine: number
+): boolean {
+  if (ranges === undefined || ranges.length === 0) return false;
+  let low = 0;
+  let high = ranges.length;
+  while (low < high) {
+    const middle = low + Math.floor((high - low) / 2);
+    if (ranges[middle]!.startLine <= endLine) low = middle + 1;
+    else high = middle;
+  }
+  return low > 0 && ranges[low - 1]!.endLine >= startLine;
 }
 
 type ImplementedPropertiesRead = {
