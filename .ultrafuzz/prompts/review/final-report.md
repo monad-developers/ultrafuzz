@@ -5,6 +5,12 @@ display_name: Generate report
 
 # Generate report
 
+Use the authoritative reachability tokens and report-bound note keys below for every finding; do not copy or rename them locally:
+
+{{finding_reachability_vocabulary}}
+
+{{finding_note_key_vocabulary}}
+
 Your job is to produce a concise final audit issue list from the upstream
 finding, triage, severity classification, lifecycle, strategy detection, and
 generated-test aggregation outputs.
@@ -187,7 +193,7 @@ Preserve actionable non-production classifications such as `incomplete-spec`,
 the production issue list.
 
 For stateful invariant records, preserve every upstream finding whose `notes`
-contain `stateful_failure_classification=<classification>`. Production-bug
+contain the authoritative `stateful_failure_classification` note key. Production-bug
 records with generated target-native reproducers belong in the normal issue
 list. Preserve
 stateful `harness-defect` and `incomplete-spec` records through the

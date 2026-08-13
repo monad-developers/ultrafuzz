@@ -28,7 +28,6 @@ describe("artifact handoff validation", () => {
         promptTexts: { "review/review.md": "Read {{ancestor_generated_test_manifests}}." }
       })
     ).not.toThrow();
-
     expect(() =>
       validateTopology(validTopology(), {
         promptTexts: { "review/review.md": "Read {{ancestor_generated_test_manifests}}." }
@@ -125,5 +124,141 @@ describe("artifact handoff validation", () => {
         promptTexts: { "review/review.md": "Use {{not_a_real_variable}}." }
       })
     ).toThrow(expect.objectContaining({ code: "UNKNOWN_PROMPT_VARIABLE" }));
+  });
+
+  it("requires review producers and consumers to share authoritative report vocabularies", () => {
+    const topology = validTopology();
+    topology.nodes[3] = {
+      ...topology.nodes[3]!,
+      id: "triage",
+      prompt: "review/triage.md",
+      outputs: [{ path: "reviewed-findings.json", contract: "ultrafuzz/findings@1", primary: true }]
+    };
+    topology.nodes[4] = { ...topology.nodes[4]!, depends_on: ["triage"] };
+
+    expect(() =>
+      validateTopology(topology, {
+        promptTexts: { "review/triage.md": "Hard-code reachability=renamed-public-trace." }
+      })
+    ).toThrow(expect.objectContaining({ code: "MISSING_REPORT_VOCABULARY_REFERENCE" }));
+    expect(() =>
+      validateTopology(topology, {
+        promptTexts: {
+          "review/triage.md": "Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}."
+        }
+      })
+    ).not.toThrow();
+    expect(() =>
+      validateTopology(topology, {
+        promptTexts: {
+          "review/triage.md":
+            "FOUNDRY_PROFILE=ci seed=123. Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}."
+        }
+      })
+    ).not.toThrow();
+    expect(() =>
+      validateTopology(topology, {
+        promptTexts: {
+          "review/triage.md":
+            "CHAIN_ID=1 block=latest and a=b. Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}."
+        }
+      })
+    ).not.toThrow();
+    for (const unsupported of [
+      "audit_decision=accepted",
+      "finding_outcome=confirmed",
+      "reachabilityEvidence=renamed",
+      "reachability=renamed-public-trace",
+      "reachability =renamed-public-trace",
+      "reachability = renamed-public-trace",
+      "likelihood=likely",
+      "9root_cause=renamed",
+      "audit_decision=accepted on each issue",
+      "audit_decision=accepted on each result",
+      "Set audit_decision=accepted",
+      "Use audit_decision=accepted",
+      "Define audit_decision=accepted",
+      "Mark audit_decision=accepted",
+      "Treat audit_decision=accepted as final",
+      "Require audit_decision=accepted",
+      "Mandate audit_decision=accepted",
+      "The model returns audit_decision=accepted",
+      "Assign audit_decision=accepted",
+      "Enforce audit_decision=accepted"
+    ]) {
+      expect(() =>
+        validateTopology(topology, {
+          promptTexts: {
+            "review/triage.md": `Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}. Put ${unsupported} on each finding.`
+          }
+        })
+      ).toThrow(expect.objectContaining({ code: "DUPLICATED_REPORT_VOCABULARY" }));
+    }
+    expect(() =>
+      validateTopology(topology, {
+        promptTexts: {
+          "review/triage.md":
+            "Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}, plus classification_evidence=<summary>."
+        }
+      })
+    ).toThrow(expect.objectContaining({ code: "DUPLICATED_REPORT_VOCABULARY" }));
+
+    for (const renamed of ["ROOTCAUSE=renamed", "RootCause=renamed", "_root_cause=renamed"]) {
+      expect(() =>
+        validateTopology(topology, {
+          promptTexts: {
+            "review/triage.md": `Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}. Put ${renamed} on each finding.`
+          }
+        })
+      ).toThrow(expect.objectContaining({ code: "DUPLICATED_REPORT_VOCABULARY" }));
+    }
+
+    topology.nodes[3] = {
+      ...topology.nodes[3]!,
+      group: "strategies"
+    };
+    expect(() =>
+      validateTopology(topology, {
+        promptTexts: {
+          "review/triage.md": "Write stateful_failure_alias=renamed to the finding notes."
+        }
+      })
+    ).toThrow(expect.objectContaining({ code: "MISSING_REPORT_VOCABULARY_REFERENCE" }));
+
+    expect(() =>
+      validateTopology(topology, {
+        promptTexts: {
+          "review/triage.md":
+            "Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}, plus stateful_failure_alias=renamed."
+        }
+      })
+    ).toThrow(expect.objectContaining({ code: "DUPLICATED_REPORT_VOCABULARY" }));
+
+    expect(() =>
+      validateTopology(topology, {
+        promptTexts: {
+          "review/triage.md":
+            "Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}. Put root_cause_reason=renamed in notes."
+        }
+      })
+    ).toThrow(expect.objectContaining({ code: "DUPLICATED_REPORT_VOCABULARY" }));
+
+    expect(() =>
+      validateTopology(topology, {
+        promptTexts: {
+          "review/triage.md":
+            "Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}. Put root_cause_reason=renamed on each finding."
+        }
+      })
+    ).toThrow(expect.objectContaining({ code: "DUPLICATED_REPORT_VOCABULARY" }));
+
+    expect(() =>
+      validateTopology(topology, {
+        promptTexts: {
+          "review/triage.md":
+            "Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}. Put ROOT_CAUSE=renamed on each finding."
+        }
+      })
+    ).toThrow(expect.objectContaining({ code: "DUPLICATED_REPORT_VOCABULARY" }));
   });
 });

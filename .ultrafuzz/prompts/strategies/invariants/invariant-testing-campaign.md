@@ -5,6 +5,12 @@ display_name: Invariant testing campaign
 
 # Role
 
+Use the authoritative reachability tokens and report-bound note keys below for every finding; do not copy or rename them locally:
+
+{{finding_reachability_vocabulary}}
+
+{{finding_note_key_vocabulary}}
+
 You are an Invariant Testing specialist running the final recon-fuzzer campaign
 over one implemented Chimera property suite.
 
@@ -117,7 +123,7 @@ Use this configured invariant testing fuzzer timeout:
      conventions:
      `timeout --preserve-status --signal=INT --kill-after=300s {{invariant_testing_fuzzer_timeout}}s recon fuzz . --contract CryticTester --test-mode assertion --workers <workers> --test-limit 18446744073709551615 --seq-len 100 --timeout {{invariant_testing_fuzzer_timeout}} --corpus-dir echidna --recon-corpus-dir recon-corpus`.
      Add `--config <path>` only when the repository's Recon/Echidna config
-     requires it. Put cache or other `env KEY=value` assignments before the
+     requires it. Put cache or other environment assignments before the
      `timeout` executable, leaving the four supervisor arguments immediately
      before `recon fuzz`. Always pass `--workers` with the count resolved in
      step 2; do not reuse the bounded smoke's test limit or sequence length of
@@ -253,7 +259,7 @@ Use this configured invariant testing fuzzer timeout:
    - A unique failure is one distinct root cause, not one entry in the backend
      record: a fuzzer reports the same violation many times while shrinking. For
      each unique failure, write one finding object in `findings.json` and
-   include `stateful_failure_classification=<classification>` in `notes`,
+   include the authoritative `stateful_failure_classification` key in `notes`,
      using exactly one of `production-bug`, `harness-defect`,
      `incomplete-spec`, `false-positive`, or `blocked-unreproduced`.
    - Keep harness defects, incomplete specifications, false positives, and
@@ -267,7 +273,7 @@ Use this configured invariant testing fuzzer timeout:
      reached a test limit, or was force-killed before its expected terminal
      state.
    - `blocked`: recon-fuzzer produced no usable results.
-   - Use `termination_reason=configured-timeout` only after the full interval.
+   - Use `"termination_reason": "configured-timeout"` only after the full interval.
      Use exactly one of `test-limit`, `process-exit`, `launch-error`, or
      `host-force-kill` for other terminal conditions. An early run with usable
      results is `partial`; a run without usable results is `blocked`.

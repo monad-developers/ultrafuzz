@@ -7,6 +7,7 @@ export * from "./artifact-contracts.js";
 export * from "./artifact-schema-metadata.js";
 export * from "./findings.js";
 export * from "./findings-schema.js";
+export * from "./finding-note-vocabulary.js";
 export * from "./generated-tests.js";
 export * from "./invariant-ledger.js";
 export * from "./invariant-source-pin.js";

@@ -4357,6 +4357,8 @@ display_name: Priority plumbing test
 Threshold={{invariant_property_priority_threshold}}
 Filter={{invariant_property_priority_filter}}
 Priorities={{invariant_property_priorities}}
+{{finding_reachability_vocabulary}}
+{{finding_note_key_vocabulary}}
 `,
     "utf8"
   );

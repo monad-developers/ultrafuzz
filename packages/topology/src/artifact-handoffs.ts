@@ -1,3 +1,4 @@
+import { findingNoteAssignmentIssue } from "@ultrafuzz/artifacts";
 import { PromptError, extractPromptVariables } from "@ultrafuzz/prompts";
 import type { PromptVariableReference } from "@ultrafuzz/prompts";
 import { START_NODE_ID } from "./types.js";
@@ -25,9 +26,42 @@ export function validateArtifactHandoffs(
     if (promptText === undefined) {
       continue;
     }
+    validateReportVocabularyVariables(node, promptText);
     for (const variable of extractPromptVariablesForNode(node, promptText)) {
       validatePromptVariable(node, variable, nodeById);
     }
+  }
+}
+
+function validateReportVocabularyVariables(node: NormalizedTopologyNode, promptText: string): void {
+  const publishesFindings = node.outputs.some(
+    (output) => output.contract === "ultrafuzz/findings@1" && output.primary === true
+  );
+  const duplicated = promptText
+    .split(/(?<=[.!?])\s+|\r?\n/gu)
+    .filter((scope) =>
+      /\b(?:put|set|assign|use|define|mark|treat|require|mandate|enforce|return|record|write|emit|save|persist|include|attach|add|plus)\b|\b(?:finding|issue|result|report|note|triage|severity|reachability|classification|helper|proof|exploitability|likelihood|impact)\w*\b/iu.test(
+        scope
+      )
+    )
+    .map((scope) => findingNoteAssignmentIssue(scope))
+    .find((issue) => issue !== undefined);
+  if (!publishesFindings) return;
+  for (const variable of ["finding_reachability_vocabulary", "finding_note_key_vocabulary"]) {
+    if (!promptText.includes(`{{${variable}}}`)) {
+      throw topologyError(
+        "MISSING_REPORT_VOCABULARY_REFERENCE",
+        `Node \`${node.id}\` prompt must reference authoritative report vocabulary \`{{${variable}}}\``,
+        { nodeId: node.id, variable }
+      );
+    }
+  }
+  if (duplicated !== undefined) {
+    throw topologyError(
+      "DUPLICATED_REPORT_VOCABULARY",
+      `Node \`${node.id}\` prompt duplicates unsupported report-bound key \`${duplicated.key}\`; use the authoritative rendered variables`,
+      { nodeId: node.id, key: duplicated.key }
+    );
   }
 }
 

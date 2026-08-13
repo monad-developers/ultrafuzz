@@ -78,3 +78,10 @@ tool availability; do not use command substitution, shell conditionals, absolute
 binary paths, or host-global searches to work around it.
 
 Make sure compilation is passing but do not fix any failing tests.
+
+
+Use only the authoritative report-bound note vocabulary:
+
+{{finding_reachability_vocabulary}}
+
+{{finding_note_key_vocabulary}}
