@@ -6723,18 +6723,47 @@ function unscopedReportCoverageScoreDiagnostics(contents: string, artifactPath: 
 }
 
 function unscopedCoverageScoreKinds(line: string, requireCoverageContext: boolean): ("percentage" | "fraction")[] {
-  const percentage = /\b(?:100(?:\.0+)?|\d{1,2}(?:\.\d+)?)\s*%/u;
-  const fraction = /\b\d+\s*\/\s*\d+\b/u;
-  const namedScope = /\b(?:selected-range|production-source)\b/iu;
+  const score = /\b(?:100(?:\.0+)?|\d{1,2}(?:\.\d+)?)\s*%|\b\d+\s*\/\s*\d+\b/gu;
+  const namedScope = /\b(?:selected-range|production-source)\b/giu;
   const kinds = new Set<"percentage" | "fraction">();
-  const normalizedLine = line.replace(/&#(?:0*37|x0*25);/giu, "%");
-  for (const clause of normalizedLine.split(/\s*(?:[,;]|\b(?:and|but|whereas|while)\b)\s*/iu)) {
-    if (namedScope.test(clause)) continue;
-    if (requireCoverageContext && !coverageMetricLanguageContext(clause)) continue;
-    if (percentage.test(clause)) kinds.add("percentage");
-    if (fraction.test(clause)) kinds.add("fraction");
+  const normalizedLine = line.replace(/(?:&#(?:0*37|x0*25)|&percnt);/giu, "%");
+  for (const clause of normalizedLine.split(
+    /\s*(?:[,!?;()[\]{}]|\u2013|\u2014|(?<!\d)\.|\.(?!\d)|\b(?:and|but|whereas|while)\b)\s*/iu
+  )) {
+    const scores = [...clause.matchAll(score)];
+    const scopes = [...clause.matchAll(namedScope)];
+    for (const [index, match] of scores.entries()) {
+      const start = match.index!;
+      const end = start + match[0].length;
+      const previous = scores[index - 1];
+      const next = scores[index + 1];
+      const regionStart = previous === undefined ? 0 : Math.floor((previous.index! + previous[0].length + start) / 2);
+      const regionEnd = next === undefined ? clause.length : Math.ceil((end + next.index!) / 2);
+      const contextRegion = clause.slice(
+        previous === undefined ? 0 : previous.index! + previous[0].length,
+        next === undefined ? clause.length : next.index!
+      );
+      const scoped = scopes.some((scope) => {
+        const midpoint = scope.index! + scope[0].length / 2;
+        return midpoint >= regionStart && midpoint < regionEnd;
+      });
+      if (scoped) continue;
+      if (requireCoverageContext && !coverageMetricScoreLanguageContext(contextRegion)) continue;
+      kinds.add(match[0].includes("%") ? "percentage" : "fraction");
+    }
   }
   return [...kinds];
+}
+
+function coverageMetricScoreLanguageContext(value: string): boolean {
+  const score = "(?:\\b(?:100(?:\\.0+)?|\\d{1,2}(?:\\.\\d+)?)\\s*%|\\b\\d+\\s*\\/\\s*\\d+\\b)";
+  const coverageMetric = "(?:coverage|lcov|covg-eval|standardized[ \\t]+(?:measurement|rate|result|score))";
+  const metricQualifier = "(?:branch|code|function|line|overall|range|source|standardized|test)";
+  const metricLink = "(?::|=|at\\b|is\\b|measured\\b|of\\b|reached\\b|remained\\b|was\\b|stood[ \\t]+at\\b)?";
+  return new RegExp(
+    `(?:${coverageMetric}[ \\t]*(?:(?:measurement|percentage|rate|result|score)[ \\t]*)?${metricLink}[ \\t]*${score}|${score}[ \\t]*(?:${metricQualifier}[ \\t]+)?${coverageMetric})`,
+    "iu"
+  ).test(value);
 }
 
 function markdownSectionOccurrences(contents: string, heading: string): string[][] {
