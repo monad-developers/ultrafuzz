@@ -88,6 +88,10 @@
       }
     }
   },
+  "retry": {
+    "sameAgentAttempts": 1,
+    "agents": []
+  },
   "agents": {
     "ClaudeAgent": {
       "auth": "subscription"

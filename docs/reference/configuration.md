@@ -50,6 +50,9 @@ model = "gpt-5.5"
 reasoning = "xhigh"
 timeout_seconds = 1800
 
+[retry]
+same_agent_attempts = 1
+
 [permissions]
 trust_model = "skip-permissions"
 prompt_review_required = true
@@ -88,6 +91,7 @@ contract used by the CLI and runtime.
 | `[run]`                         | Run output, parallelism, workspace, and timeout settings.                  |
 | `[execution]`                   | Local or provider-backed execution and node resource defaults.             |
 | `[models]` and `[models.<id>]`  | Default model profile and model profile definitions.                       |
+| `[retry]`                       | Bounded primary retries and opt-in ordered model fallback.                 |
 | `[permissions]`                 | Trusted local execution posture and materialization defaults.              |
 | `[invariants]`                  | Invariant prompt defaults.                                                 |
 | `[triage]`                      | Triage quorum and panel size.                                              |
@@ -185,6 +189,28 @@ topology node or group default.
 
 Generated defaults may include `[models] synthesized_default = true` when the
 default profile was synthesized by the scaffold.
+
+## Retry Policy
+
+```toml
+[retry]
+same_agent_attempts = 3
+agents = ["sol-xhigh", "gpt55-xhigh"]
+```
+
+`same_agent_attempts` is a positive integer counting the first primary attempt.
+The optional `agents` array contains unique existing model-profile IDs. Its
+first entry is the default primary profile; later entries each receive one
+fallback attempt in order. Profile names are opaque: `gpt55-xhigh` maps to
+`model = "gpt-5.5"` and `reasoning = "xhigh"` only through its explicit
+`[models.gpt55-xhigh]` table.
+
+Fallback is disabled when `agents` is absent or empty. A topology node
+`max_attempts` overrides its group, and a group value overrides
+`retry.same_agent_attempts`. Automatic retries are generic Smithers-retryable
+failures: Ultrafuzz neither parses the error nor changes the prompt. Each retry
+uses a fresh session and bounded exponential backoff. Benchmark/eval rows reject
+configured fallback so a row cannot silently change models.
 
 ## Permissions
 

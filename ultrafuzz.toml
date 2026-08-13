@@ -57,6 +57,13 @@ agent = "DeepSeekAgent"
 model = "deepseek-v4-pro"
 reasoning = "max"
 
+# Automatic agent retries are error-agnostic and resend the original prompt in
+# a fresh session. The count includes the first primary attempt. Set `agents`
+# to an ordered list of model profile IDs to opt into model fallback.
+[retry]
+same_agent_attempts = 1
+agents = []
+
 [agents.CodexAgent]
 auth = "api-key"
 api_key_env = "OPENAI_API_KEY"

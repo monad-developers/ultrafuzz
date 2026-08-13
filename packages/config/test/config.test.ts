@@ -73,6 +73,7 @@ describe("config loading and resolution", () => {
       model: "deepseek-v4-pro",
       reasoning: "max"
     });
+    expect(resolved.value.retry).toEqual({ sameAgentAttempts: 1, agents: [] });
     expect(resolved.value.run.workflowDeadlineSeconds).toBe(86_400);
     expect(resolved.value.run.controllerLeaseSeconds).toBe(30);
     expect(resolved.value.invariants.invariantTestingSmokeTimeoutSeconds).toBe(600);
@@ -91,6 +92,57 @@ describe("config loading and resolution", () => {
       nodes: {},
       providers: {}
     });
+  });
+
+  it("resolves an error-agnostic retry policy through explicit model profile IDs", () => {
+    const parsed = parseProjectConfigToml(`
+[models.sol-xhigh]
+agent = "CodexAgent"
+model = "gpt-5.6-sol"
+reasoning = "xhigh"
+
+[models.gpt55-xhigh]
+agent = "CodexAgent"
+model = "gpt-5.5"
+reasoning = "xhigh"
+
+[retry]
+same_agent_attempts = 3
+agents = ["sol-xhigh", "gpt55-xhigh"]
+`);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const resolved = resolveConfig({ env: {}, projectConfig: parsed.value });
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) throw new Error(JSON.stringify(resolved.diagnostics, null, 2));
+    expect(resolved.value.retry).toEqual({
+      sameAgentAttempts: 3,
+      agents: ["sol-xhigh", "gpt55-xhigh"]
+    });
+    expect(resolved.value.models.profiles["gpt55-xhigh"]).toMatchObject({
+      agent: "CodexAgent",
+      model: "gpt-5.5",
+      reasoning: "xhigh"
+    });
+    expect(serializeRedactedResolvedConfigToml(resolved.value)).toContain('agents = ["sol-xhigh", "gpt55-xhigh"]');
+  });
+
+  it("rejects unknown and duplicate retry profile IDs without parsing provider errors", () => {
+    const unknown = resolveConfig({
+      env: {},
+      projectConfig: { retry: { sameAgentAttempts: 2, agents: ["missing"] } }
+    });
+    expect(unknown.ok).toBe(false);
+    if (!unknown.ok) expect(unknown.diagnostics.map((entry) => entry.code)).toContain("CONFIG_RETRY_AGENT_UNKNOWN");
+
+    const duplicate = resolveConfig({
+      env: {},
+      projectConfig: { retry: { agents: ["default", "default"] } }
+    });
+    expect(duplicate.ok).toBe(false);
+    if (!duplicate.ok) {
+      expect(duplicate.diagnostics.map((entry) => entry.code)).toContain("CONFIG_RETRY_AGENT_DUPLICATE");
+    }
   });
 
   it("loads and serializes declared production source roots", () => {

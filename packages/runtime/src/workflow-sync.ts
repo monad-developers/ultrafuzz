@@ -53,6 +53,7 @@ import {
   type ArtifactVerificationMarker,
   type AppendUsageEventInput,
   type NodeAttemptFailureCategory,
+  type NodeAttemptAgentProvenance,
   type NodeAttemptLedgerEntry,
   type NodeAttemptOutcome,
   type NormalizedUsage,
@@ -3257,6 +3258,7 @@ function appendTerminalTaskAttempts(input: {
       finishedAt: attempt.finishedAt,
       outcome,
       inputManifestDigest,
+      agent: nodeAttemptAgentProvenance(input.task, attempt, input.events),
       ...(outputDigest === undefined ? {} : { outputManifestDigest: outputDigest }),
       ...(reuse === undefined ? {} : { reuse }),
       ...(failureCategory === undefined ? {} : { failureCategory }),
@@ -3320,6 +3322,58 @@ function appendTerminalTaskAttempts(input: {
     appended: results.some((result) => result.appended),
     executedAttempts: allEntries.filter((entry) => entry.reuse.status === "executed").length,
     currentAttemptExecuted
+  };
+}
+
+function nodeAttemptAgentProvenance(
+  task: StoredWorkflowTask,
+  attempt: Pick<TerminalWorkflowAttempt, "nodeId" | "iteration" | "retry">,
+  events: readonly WorkflowEvent[]
+): NodeAttemptAgentProvenance {
+  const projectedIndex = Math.min(Math.max(0, attempt.retry - 1), task.agentChain.length - 1);
+  const observedModels = new Set(
+    events
+      .filter(
+        (event) =>
+          event.type === "TokenUsageReported" &&
+          stringField(event.payload, "nodeId") === attempt.nodeId &&
+          numberField(event.payload, "iteration") === attempt.iteration &&
+          numberField(event.payload, "attempt") === attempt.retry
+      )
+      .map((event) => stringField(event.payload, "model"))
+      .filter((model): model is string => model !== undefined)
+  );
+  let chainIndex = projectedIndex;
+  let selection: NodeAttemptAgentProvenance["selection"] = "projected";
+  let observedModel: string | undefined;
+  if (observedModels.size === 1) {
+    observedModel = [...observedModels][0]!;
+    const matchingProfiles = [
+      ...new Set(task.agentChain.filter((entry) => entry.modelName === observedModel).map((entry) => entry.profileId))
+    ];
+    if (matchingProfiles.length === 1) {
+      const matchingProfileId = matchingProfiles[0]!;
+      const observedIndex =
+        task.agentChain[projectedIndex]?.profileId === matchingProfileId
+          ? projectedIndex
+          : task.agentChain.findIndex((entry) => entry.profileId === matchingProfileId);
+      if (observedIndex >= 0) {
+        chainIndex = observedIndex;
+        selection = "observed";
+      }
+    }
+  }
+  const agent = task.agentChain[chainIndex]!;
+  return {
+    chain_index: chainIndex,
+    profile_id: agent.profileId,
+    agent_ref: agent.agentRef,
+    ...(observedModel === undefined && agent.modelName === undefined
+      ? {}
+      : { model_name: observedModel ?? agent.modelName }),
+    ...(agent.reasoningEffort === undefined ? {} : { reasoning_effort: agent.reasoningEffort }),
+    role: agent.role,
+    selection
   };
 }
 

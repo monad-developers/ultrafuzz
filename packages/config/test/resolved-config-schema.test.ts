@@ -24,8 +24,8 @@ import {
   validateResolvedConfigJson
 } from "../src/index.js";
 
-const EXPECTED_SCHEMA_SHA256 = "1769195f8d7c435d3e09be6782474014d6f39de449197c5eb6b89e5800fa4889";
-const EXPECTED_BUNDLE_SHA256 = "05a348eb7f16019f81687a5c65483e1724fc9eff4e666ed4879737c6355cb609";
+const EXPECTED_SCHEMA_SHA256 = "c1a417b831d3cd20b2f2d0f8075bb390f011b1c57771252d19779e603f58420b";
+const EXPECTED_BUNDLE_SHA256 = "96a75ca47d8d686dc530392508ff947537d5001ec2926bf07f75f8c7d0ade82d";
 
 describe("resolved config JSON contract", () => {
   it("registers the exact checked-in Draft 2020-12 schema and stable digests", () => {
@@ -119,6 +119,11 @@ describe("resolved config JSON contract", () => {
         }
       },
       { label: "empty profiles", mutate: (value) => void (record(value.models).profiles = {}) },
+      { label: "zero retry attempts", mutate: (value) => void (record(value.retry).sameAgentAttempts = 0) },
+      {
+        label: "duplicate retry profiles",
+        mutate: (value) => void (record(value.retry).agents = ["default", "default"])
+      },
       { label: "unknown profile property", mutate: (value) => void (profile(value, "default").temperature = 1) },
       { label: "unsupported Kimi reasoning", mutate: (value) => void (profile(value, "kimi").reasoning = "xhigh") },
       {

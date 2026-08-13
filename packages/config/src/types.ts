@@ -139,6 +139,13 @@ export interface ModelsConfig {
   profiles: Record<string, ModelProfile>;
 }
 
+export interface RetryConfig {
+  /** Total primary-profile attempts, including the first generation. */
+  sameAgentAttempts: number;
+  /** Ordered model-profile IDs. The first profile is primary; later profiles are opt-in fallbacks. */
+  agents: string[];
+}
+
 export interface AgentConfig {
   auth: AgentAuthMode;
   apiKeyEnv?: string;
@@ -200,6 +207,7 @@ export interface ResolvedConfig {
   run: RunConfig;
   execution: ExecutionConfig;
   models: ModelsConfig;
+  retry: RetryConfig;
   agents: Record<string, AgentConfig>;
   permissions: PermissionConfig;
   invariants: InvariantConfig;
@@ -239,6 +247,7 @@ export interface ProjectConfigInput {
     synthesizedDefault?: boolean;
     profiles?: Record<string, Partial<ModelProfile> & { id?: string }>;
   };
+  retry?: Partial<RetryConfig>;
   agents?: Record<string, Partial<AgentConfig>>;
   permissions?: Partial<PermissionConfig>;
   invariants?: Partial<InvariantConfig>;
@@ -277,6 +286,8 @@ export interface RuntimeConfigOverrides extends ProjectConfigInput {
   maxParallelNodes?: number;
   outputDir?: string;
   keepWorkspaces?: boolean;
+  /** Fail planning when project retry configuration would allow a different model profile. */
+  forbidModelFallback?: boolean;
 }
 
 export interface ResolveConfigInput {

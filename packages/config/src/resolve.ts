@@ -99,6 +99,7 @@ export function validateResolvedConfig(
   diagnostics.push(...validateAgentConfigs(config.agents));
   diagnostics.push(...validateTriageConfig(config.triage));
   diagnostics.push(...validateModelProfiles(config));
+  diagnostics.push(...validateRetryConfig(config));
   diagnostics.push(...validateExecutionConfig(config, env));
   return diagnostics;
 }
@@ -177,6 +178,10 @@ export function serializeResolvedConfigToml(
       timeout_seconds: profile.timeoutSeconds
     });
   }
+  pushTable(lines, "retry", {
+    same_agent_attempts: clone.retry.sameAgentAttempts,
+    agents: clone.retry.agents.length === 0 ? undefined : clone.retry.agents
+  });
   for (const [id, agent] of Object.entries(clone.agents)) {
     pushTable(lines, tableName(["agents", id]), {
       auth: agent.auth,
@@ -508,6 +513,14 @@ function applyProjectConfigLayer(
       }
     }
   }
+  if (layer.retry) {
+    if (layer.retry.sameAgentAttempts !== undefined) {
+      config.retry.sameAgentAttempts = layer.retry.sameAgentAttempts;
+    }
+    if (layer.retry.agents !== undefined) {
+      config.retry.agents = [...layer.retry.agents];
+    }
+  }
   if (layer.agents) {
     for (const [id, agent] of Object.entries(layer.agents).sort()) {
       config.agents[id] = normalizeAgentConfig(agent, config.agents[id]);
@@ -645,6 +658,46 @@ function normalizeAgentConfig(source: Partial<AgentConfig>, base?: AgentConfig):
     apiKeyEnv: source.apiKeyEnv ?? base?.apiKeyEnv,
     configDir: source.configDir ?? base?.configDir
   };
+}
+
+function validateRetryConfig(config: ResolvedConfig): ConfigDiagnostic[] {
+  const diagnostics: ConfigDiagnostic[] = [];
+  if (!Number.isSafeInteger(config.retry.sameAgentAttempts) || config.retry.sameAgentAttempts <= 0) {
+    diagnostics.push(
+      diagnostic(
+        "CONFIG_RETRY_ATTEMPTS_INVALID",
+        "retry.same_agent_attempts must be a positive safe integer",
+        ["retry", "same_agent_attempts"],
+        "validation"
+      )
+    );
+  }
+  const seen = new Set<string>();
+  for (const [index, profileId] of config.retry.agents.entries()) {
+    if (seen.has(profileId)) {
+      diagnostics.push(
+        diagnostic(
+          "CONFIG_RETRY_AGENT_DUPLICATE",
+          `retry.agents repeats model profile \`${profileId}\``,
+          ["retry", "agents", String(index)],
+          "validation"
+        )
+      );
+      continue;
+    }
+    seen.add(profileId);
+    if (config.models.profiles[profileId] === undefined) {
+      diagnostics.push(
+        diagnostic(
+          "CONFIG_RETRY_AGENT_UNKNOWN",
+          `retry.agents references unknown model profile \`${profileId}\``,
+          ["retry", "agents", String(index)],
+          "validation"
+        )
+      );
+    }
+  }
+  return diagnostics;
 }
 
 function applyIntegerEnv(

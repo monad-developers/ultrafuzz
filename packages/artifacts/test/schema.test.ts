@@ -1338,7 +1338,28 @@ test("finding and report v2 schemas require their current canonical shapes", () 
       audit_profile_catalog_digest: "a".repeat(64),
       topology_digest: "b".repeat(64),
       prompt_digest: "c".repeat(64),
-      expanded_graph_fingerprint: "d".repeat(64)
+      expanded_graph_fingerprint: "d".repeat(64),
+      agent_execution: {
+        planned_chain: [
+          {
+            attempt: 1,
+            profile_id: "gpt55-xhigh",
+            agent_ref: "CodexAgent",
+            model_name: "gpt-5.5",
+            reasoning_effort: "xhigh",
+            role: "primary"
+          }
+        ],
+        failed_attempts: [],
+        producer: {
+          attempt: 1,
+          profile_id: "gpt55-xhigh",
+          agent_ref: "CodexAgent",
+          model_name: "gpt-5.5",
+          reasoning_effort: "xhigh",
+          role: "primary"
+        }
+      }
     },
     issues: [],
     non_production_outcomes: [],

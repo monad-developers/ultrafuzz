@@ -121,6 +121,8 @@ A compatible config MUST support:
   `workflow_deadline_seconds`, and `controller_lease_seconds`
 - `[models] default` plus `[models.<id>] agent`, `model`, and
   `timeout_seconds`
+- `[retry] same_agent_attempts` plus an optional ordered `agents` list of model
+  profile IDs
 - `[permissions] trust_model`, `prompt_review_required`, and
   `materialize_outputs_as_unstaged`
 - `[invariants] property_priority_threshold`,
@@ -135,6 +137,12 @@ Unknown TOML keys MUST fail validation. Model profile IDs and agent references
 MUST use safe identifiers. Omitted model selection in topology MUST resolve to
 the configured default model profile only; model fan-out MUST be explicit in a
 node or group default.
+
+Retry profile IDs MUST resolve through `[models.<id>]` without parsing the ID.
+Fallback MUST be disabled by default. Automatic retries MUST use the original
+prompt in a fresh session, MUST NOT classify error text, and MUST exhaust the
+bounded primary attempt count before trying ordered fallbacks. Node and group
+`max_attempts` overrides MUST take precedence over the project primary count.
 
 Config resolution SHOULD apply built-in defaults, project TOML, supported
 environment overrides, and runtime overrides in deterministic order. The

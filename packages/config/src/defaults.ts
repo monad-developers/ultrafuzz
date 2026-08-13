@@ -15,6 +15,7 @@ import type {
   PermissionConfig,
   ProjectConfigInput,
   PromptMetadataLayer,
+  RetryConfig,
   ResolvedConfig,
   RunConfig
 } from "./types.js";
@@ -89,6 +90,7 @@ function normalizeDefaultConfig(input: ProjectConfigInput, filePath: string): Re
   const project = requiredRecord(input.project, "project", filePath);
   const run = requiredRecord(input.run, "run", filePath);
   const models = requiredRecord(input.models, "models", filePath);
+  const retry = requiredRecord(input.retry, "retry", filePath);
   const agents = requiredRecord(input.agents, "agents", filePath);
   const execution = requiredRecord(input.execution, "execution", filePath);
   const permissions = requiredRecord(input.permissions, "permissions", filePath);
@@ -125,6 +127,7 @@ function normalizeDefaultConfig(input: ProjectConfigInput, filePath: string): Re
         ])
       )
     },
+    retry: normalizeRetryConfig(retry, filePath),
     agents: Object.fromEntries(
       Object.entries(agents).map(([id, agent]) => [id, normalizeAgentConfig(id, agent, filePath)])
     ),
@@ -156,6 +159,13 @@ function normalizeDefaultConfig(input: ProjectConfigInput, filePath: string): Re
       panelSize: required(triage.panelSize, "triage.panel_size", filePath)
     },
     eval: normalizeEvalConfig(input.eval)
+  };
+}
+
+function normalizeRetryConfig(retry: Partial<RetryConfig>, filePath: string): RetryConfig {
+  return {
+    sameAgentAttempts: required(retry.sameAgentAttempts, "retry.same_agent_attempts", filePath),
+    agents: [...required(retry.agents, "retry.agents", filePath)]
   };
 }
 

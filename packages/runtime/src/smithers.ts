@@ -24,6 +24,7 @@ import {
   SMITHERS_TASK_METADATA_SCHEMA_VERSION as REGISTERED_SMITHERS_TASK_METADATA_SCHEMA_VERSION,
   writeFileDurable,
   type RunLayout,
+  type SmithersTaskManifestAgentChainEntry,
   type SmithersTaskManifestDocument,
   type SmithersTaskManifestMetadata,
   type SmithersTaskManifestTask
@@ -2196,6 +2197,7 @@ export async function runSmithersLifecycleCommand(input: {
   };
 
   let preResumeStderr = "";
+  let currentInspection: CurrentSmithersInspect | undefined;
   if (input.action === "resume" && input.relaunchPaths !== undefined) {
     const inspection = await runSmithersInspectionCommand({
       args: ["inspect", input.smithersRunId, "--format", "json", "--full-output"],
@@ -2249,7 +2251,7 @@ export async function runSmithersLifecycleCommand(input: {
         `workflow inspection failed before resume: ${inspection.error ?? (inspection.stderr.trim() || "unknown error")}`
       );
     }
-    const currentInspection = parseCurrentSmithersInspect(inspection, input.smithersRunId);
+    currentInspection = parseCurrentSmithersInspect(inspection, input.smithersRunId);
     if (smithersRunStateIsActive(currentInspection) && input.resetNode === undefined && input.force !== true) {
       return {
         stdout: inspection.stdout,
@@ -2310,6 +2312,13 @@ export async function runSmithersLifecycleCommand(input: {
         : path.join(path.dirname(input.relaunchPaths.inputPath), "reset-node-applied.json");
     let resetStderr = "";
     if (!resetNodeMarkerMatches(resetMarkerPath, input.smithersRunId, input.resetNode)) {
+      // A failure can be durable in the canonical node snapshot even when the
+      // runner cannot resolve its implicit "latest attempt" lookup. Pinning the
+      // iteration from that snapshot keeps --reset-node recoverable by node ID.
+      const resetIteration =
+        currentInspection === undefined
+          ? undefined
+          : smithersFailedTasks(currentInspection).find((task) => task.nodeId === input.resetNode)?.iteration;
       const resetResult = await execSmithersCli({
         args: [
           "timetravel",
@@ -2318,6 +2327,7 @@ export async function runSmithersLifecycleCommand(input: {
           input.smithersRunId,
           "--node-id",
           input.resetNode,
+          ...(resetIteration === undefined ? [] : ["--iteration", String(resetIteration)]),
           "--no-vcs",
           "--force",
           "--format",
@@ -3732,6 +3742,7 @@ function compileTask(input: {
   artifactDependencyAttemptIds: readonly string[];
 }): CompiledSmithersTask {
   const profile = modelProfileFor(input.config, input.attempt);
+  const agentChain = agentChainForTask(input.config, profile, input.node.retryPolicy.maxAttempts);
   const timeoutMs =
     (input.node.timeoutSeconds ?? profile.timeoutSeconds ?? input.config.run.defaultTimeoutSeconds) * 1000;
   assertInvariantCampaignTimeoutBudget(input, timeoutMs);
@@ -3740,7 +3751,7 @@ function compileTask(input: {
   // the configured node deadline so it does not silently replace a longer node
   // timeout with the old ten-minute cap.
   const heartbeatTimeoutMs = timeoutMs;
-  const retries = Math.max(0, input.node.retryPolicy.maxAttempts - 1);
+  const retries = agentChain.length - 1;
   const artifactDir = getNodeArtifactDir(input.runLayout, input.attempt.attemptId, { create: true });
   const workspacePath = getNodeWorkspaceDir(input.runLayout, input.attempt.attemptId);
   const dependencyArtifactDirs = input.artifactDependencyAttemptIds.map((attemptId) =>
@@ -3748,8 +3759,13 @@ function compileTask(input: {
   );
   const dependencySmithersNodeIds = input.dependencyAgenticAttemptIds.map(verifierSmithersNodeIdForAttempt);
   const executionResources = resolveExecutionResources(input.config, input.node.logicalId);
-  const agent = input.config.agents[profile.agent];
-  const agentCredentialEnv = cloudAgentCredentialEnv(input.config.execution.mode, profile.agent, agent);
+  const agentCredentialEnv = [
+    ...new Set(
+      agentChain.flatMap((entry) =>
+        cloudAgentCredentialEnv(input.config.execution.mode, entry.agentRef, input.config.agents[entry.agentRef])
+      )
+    )
+  ];
   const execution = {
     mode: input.config.execution.mode,
     ...(input.config.execution.provider === undefined ? {} : { provider: input.config.execution.provider }),
@@ -3798,7 +3814,8 @@ function compileTask(input: {
       ...(profile.model ? { modelName: profile.model } : {}),
       ...(profile.reasoning ? { reasoningEffort: profile.reasoning } : {}),
       modelIndex: input.attempt.modelIndex,
-      attemptIndex: input.attempt.attemptIndex
+      attemptIndex: input.attempt.attemptIndex,
+      agentChain
     },
     workspace: {
       primitive: "worktree",
@@ -3812,7 +3829,8 @@ function compileTask(input: {
       manifestPath: path.join(artifactDir, "artifact-manifest.json")
     },
     retryPolicy: {
-      maxAttempts: input.node.retryPolicy.maxAttempts,
+      maxAttempts: agentChain.length,
+      sameAgentAttempts: input.node.retryPolicy.maxAttempts,
       smithersRetries: retries
     },
     timeout: {
@@ -3834,6 +3852,7 @@ function compileTask(input: {
     smithersNodeId: smithersNodeIdForAttempt(input.attempt.attemptId),
     verifierSmithersNodeId: verifierSmithersNodeIdForAttempt(input.attempt.attemptId),
     agentRef: profile.agent,
+    agentChain,
     ...(profile.model ? { modelName: profile.model } : {}),
     ...(profile.reasoning ? { reasoningEffort: profile.reasoning } : {}),
     dependencies: [...input.dependencyAttemptIds],
@@ -3841,7 +3860,7 @@ function compileTask(input: {
     timeoutMs,
     heartbeatTimeoutMs,
     retries,
-    retryPolicy: { backoff: "exponential", initialDelayMs: 1_000, maxDelayMs: 30_000 },
+    retryPolicy: { backoff: "exponential", initialDelayMs: 1_000 },
     workspacePath,
     artifactDir,
     dependencyArtifactDirs,
@@ -3849,6 +3868,29 @@ function compileTask(input: {
     execution,
     metadata
   };
+}
+
+function agentChainForTask(
+  config: ResolvedConfig,
+  primary: ResolvedConfig["models"]["profiles"][string],
+  sameAgentAttempts: number
+): SmithersTaskManifestAgentChainEntry[] {
+  const entry = (
+    profile: ResolvedConfig["models"]["profiles"][string],
+    role: SmithersTaskManifestAgentChainEntry["role"]
+  ): SmithersTaskManifestAgentChainEntry => ({
+    profileId: profile.id,
+    agentRef: profile.agent,
+    ...(profile.model === undefined ? {} : { modelName: profile.model }),
+    ...(profile.reasoning === undefined ? {} : { reasoningEffort: profile.reasoning }),
+    role
+  });
+  const configuredPrimaryIndex = config.retry.agents.indexOf(primary.id);
+  const fallbackProfileIds = configuredPrimaryIndex < 0 ? [] : config.retry.agents.slice(configuredPrimaryIndex + 1);
+  return [
+    ...Array.from({ length: sameAgentAttempts }, () => entry(primary, "primary")),
+    ...fallbackProfileIds.map((profileId) => entry(config.models.profiles[profileId]!, "fallback"))
+  ];
 }
 
 const INVARIANT_CAMPAIGN_HOST_SHUTDOWN_GRACE_SECONDS = 300;
@@ -4072,6 +4114,7 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
       attemptId: task.attemptId,
       dependsOn: task.dependencySmithersNodeIds,
       agentRef: task.agentRef,
+      agentChain: task.agentChain,
       modelName: task.modelName ?? null,
       reasoningEffort: task.reasoningEffort ?? null,
       prompt: "",
@@ -4101,7 +4144,10 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
         : null,
       heartbeatTimeoutMs: task.heartbeatTimeoutMs,
       retries: task.retries,
-      retryPolicy: task.retryPolicy,
+      retryPolicy: {
+        backoff: task.retryPolicy.backoff,
+        initialDelayMs: task.retryPolicy.initialDelayMs
+      },
       metadata: executionMetadata(compiled.projectRoot, task),
       outputs: task.metadata.artifacts.outputs,
       execution: task.execution,

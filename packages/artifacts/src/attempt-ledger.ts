@@ -51,6 +51,18 @@ export interface AttemptSourceIdentity {
   source_event_sequence: number;
 }
 
+export interface NodeAttemptAgentProvenance {
+  /** Smithers agent-chain rung selected for this execution. */
+  chain_index: number;
+  profile_id: string;
+  agent_ref: string;
+  model_name?: string;
+  reasoning_effort?: string;
+  role: "primary" | "fallback";
+  /** `observed` is joined from token telemetry; `projected` follows Smithers' bounded retry order. */
+  selection: "observed" | "projected";
+}
+
 /**
  * Canonical evidence for one actual Smithers attempt occurrence. Its immutable
  * identity is (workflow_run_id, source_event_sequence), where the sequence is
@@ -83,6 +95,7 @@ export interface NodeAttemptLedgerEntry {
     input_sha256: ManifestDigest;
     output_sha256: ManifestDigest | null;
   };
+  agent?: NodeAttemptAgentProvenance;
   failure_category?: NodeAttemptFailureCategory;
   failure_message?: string;
 }
@@ -103,6 +116,7 @@ export interface AppendNodeAttemptInput {
   reuse?: { status: "executed" } | { status: "reused"; sourceWorkflowRunId: string; sourceEventSequence: number };
   inputManifestDigest: string;
   outputManifestDigest?: string | null;
+  agent?: NodeAttemptAgentProvenance;
   failureCategory?: NodeAttemptFailureCategory;
   failureMessage?: string;
 }
@@ -162,6 +176,15 @@ const reusedReuseSchema = z.strictObject({
   status: z.literal("reused"),
   source: attemptSourceIdentitySchema
 });
+const attemptAgentProvenanceSchema = z.strictObject({
+  chain_index: count,
+  profile_id: dimensionId,
+  agent_ref: dimensionId,
+  model_name: dimensionId.optional(),
+  reasoning_effort: dimensionId.optional(),
+  role: z.enum(["primary", "fallback"]),
+  selection: z.enum(["observed", "projected"])
+});
 
 export const nodeAttemptLedgerEntrySchema = z
   .strictObject({
@@ -185,6 +208,7 @@ export const nodeAttemptLedgerEntrySchema = z
       input_sha256: digest,
       output_sha256: digest.nullable()
     }),
+    agent: attemptAgentProvenanceSchema.optional(),
     failure_category: z.enum(NODE_ATTEMPT_FAILURE_CATEGORIES).optional(),
     failure_message: failureMessage.optional()
   })
@@ -305,6 +329,20 @@ export const nodeAttemptLedgerJsonSchema = {
         output_sha256: {
           anyOf: [{ type: "string", pattern: SHA256_PATTERN.source }, { type: "null" }]
         }
+      }
+    },
+    agent: {
+      type: "object",
+      required: ["chain_index", "profile_id", "agent_ref", "role", "selection"],
+      additionalProperties: false,
+      properties: {
+        chain_index: countJsonSchema,
+        profile_id: dimensionJsonSchema,
+        agent_ref: dimensionJsonSchema,
+        model_name: dimensionJsonSchema,
+        reasoning_effort: dimensionJsonSchema,
+        role: { enum: ["primary", "fallback"] },
+        selection: { enum: ["observed", "projected"] }
       }
     },
     failure_category: { enum: [...NODE_ATTEMPT_FAILURE_CATEGORIES] },
@@ -470,6 +508,7 @@ export function createNodeAttemptLedgerEntry(
           ? null
           : normalizeDigest(input.outputManifestDigest, "output manifest digest")
     },
+    ...(input.agent === undefined ? {} : { agent: structuredClone(input.agent) }),
     ...(input.failureCategory === undefined ? {} : { failure_category: input.failureCategory }),
     ...(normalizedFailureMessage === undefined ? {} : { failure_message: normalizedFailureMessage })
   });

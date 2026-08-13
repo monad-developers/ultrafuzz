@@ -1036,6 +1036,15 @@ function sealedHostTask(
     ...(output.validator_build === undefined ? {} : { validatorBuild: output.validator_build }),
     primary: output.primary
   }));
+  const agentChain = [
+    {
+      profileId: "default",
+      agentRef: "CodexAgent",
+      modelName: "gpt-test",
+      reasoningEffort: "high",
+      role: "primary" as const
+    }
+  ];
   return {
     attemptId: node.id,
     concreteNodeId: node.id,
@@ -1044,6 +1053,7 @@ function sealedHostTask(
     smithersNodeId: `node:${node.id}`,
     verifierSmithersNodeId: `verify:${node.id}`,
     agentRef: "CodexAgent",
+    agentChain,
     modelName: "gpt-test",
     reasoningEffort: "high",
     dependencies: [...node.depends_on],
@@ -1051,7 +1061,7 @@ function sealedHostTask(
     timeoutMs: 60_000,
     heartbeatTimeoutMs: 60_000,
     retries: 0,
-    retryPolicy: { backoff: "exponential", initialDelayMs: 1_000, maxDelayMs: 30_000 },
+    retryPolicy: { backoff: "exponential", initialDelayMs: 1_000 },
     workspacePath,
     artifactDir,
     dependencyArtifactDirs,
@@ -1094,11 +1104,12 @@ function sealedHostTask(
         modelName: "gpt-test",
         reasoningEffort: "high",
         modelIndex: 0,
-        attemptIndex: node.loop.attempt_index
+        attemptIndex: node.loop.attempt_index,
+        agentChain
       },
       workspace: { primitive: "worktree", path: workspacePath, repoPath: "/repo", trustModel: "skip-permissions" },
       artifacts: { dir: artifactDir, outputs, manifestPath: path.join(artifactDir, "artifact-manifest.json") },
-      retryPolicy: { maxAttempts: 1, smithersRetries: 0 },
+      retryPolicy: { maxAttempts: 1, sameAgentAttempts: 1, smithersRetries: 0 },
       timeout: { milliseconds: 60_000, seconds: 60, heartbeatTimeoutMs: 60_000 },
       execution: { mode: "local", resources: { cpu: 2, memoryMiB: 1_024, timeoutSeconds: 60 } }
     }

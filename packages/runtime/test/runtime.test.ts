@@ -5145,6 +5145,12 @@ test("compileSmithersWorkflow gates native dependencies on deterministic artifac
 test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes", async () => {
   const project = tempProject();
   writeFanoutProject(project);
+  const configPath = path.join(project, "ultrafuzz.toml");
+  fs.writeFileSync(
+    configPath,
+    fs.readFileSync(configPath, "utf8").replace("[models]", "[retry]\nsame_agent_attempts = 2\n\n[models]"),
+    "utf8"
+  );
   const promptMarker = "CLOUD_PROMPT_ONLY_PRIVATE_MARKER";
   fs.appendFileSync(
     path.join(project, ".ultrafuzz", "prompts", "setup", "project-discovery.md"),
@@ -5191,6 +5197,7 @@ test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes
 
   const discovery = compiled.tasks.find((task) => task.metadata.node.logicalNodeId === "project-discovery");
   assert.ok(discovery);
+  assert.equal(discovery.retries, 1);
   assert.deepEqual(discovery.execution.resources, {
     cpu: 8,
     memoryMiB: 16384,
@@ -5199,6 +5206,8 @@ test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes
   assert.deepEqual(discovery.execution.agentCredentialEnv, ["OPENAI_API_KEY"]);
   const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
   assert.match(workflowSource, /<Sandbox/);
+  assert.match(workflowSource, /<Sandbox[\s\S]*?retries=\{0\}/u);
+  assert.match(workflowSource, /<Task[\s\S]*?agent=\{agentForTask\(task\)\}[\s\S]*?retries=\{task\.retries\}/u);
   assert.match(workflowSource, /createModalNodeSandboxProvider/);
   assert.match(workflowSource, /schema_version: "ultrafuzz\.modal\.node\.v1"/);
   assert.match(workflowSource, /run_id: "cloud-nodes"/u);
@@ -5384,6 +5393,101 @@ nodes:
     workflowSource
   );
   assert.match(workflowSource, /\$\{task\.runtimeContext\}\\n\\n\$\{operatorPrompt\}/u);
+});
+
+test("compileSmithersWorkflow exhausts same-profile retries before ordered fallback", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const configPath = path.join(project, "ultrafuzz.toml");
+  fs.writeFileSync(
+    configPath,
+    fs
+      .readFileSync(configPath, "utf8")
+      .replace("same_agent_attempts = 1", 'same_agent_attempts = 3\nagents = ["sol-xhigh", "gpt55-xhigh"]')
+      .replace(
+        "[models.claude]",
+        '[models.sol-xhigh]\nagent = "CodexAgent"\nmodel = "gpt-5.6-sol"\nreasoning = "xhigh"\n\n' +
+          '[models.gpt55-xhigh]\nagent = "CodexAgent"\nmodel = "gpt-5.5"\nreasoning = "xhigh"\n\n' +
+          "[models.claude]"
+      ),
+    "utf8"
+  );
+
+  const plan = await planRun({ projectRoot: project, runId: "ordered-retry-chain", env: {} });
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  const { compileSmithersWorkflow } = await import("../src/smithers.js");
+  const compiled = compileSmithersWorkflow({
+    projectRoot: project,
+    config: plan.value!.resolved_config,
+    graph: plan.value!.expanded_graph,
+    runLayout: plan.value!.layout,
+    workflowName: "ultrafuzz-ordered-retry-chain",
+    renderedPrompts: plan.value!.rendered_prompts
+  });
+
+  const task = compiled.tasks.find((candidate) => candidate.logicalNodeId === "project-discovery");
+  assert.ok(task);
+  assert.deepEqual(
+    task.agentChain.map((entry) => [entry.profileId, entry.modelName, entry.reasoningEffort, entry.role]),
+    [
+      ["sol-xhigh", "gpt-5.6-sol", "xhigh", "primary"],
+      ["sol-xhigh", "gpt-5.6-sol", "xhigh", "primary"],
+      ["sol-xhigh", "gpt-5.6-sol", "xhigh", "primary"],
+      ["gpt55-xhigh", "gpt-5.5", "xhigh", "fallback"]
+    ]
+  );
+  assert.equal(task.retries, 3);
+  assert.deepEqual(task.retryPolicy, { backoff: "exponential", initialDelayMs: 1_000 });
+  assert.deepEqual(task.metadata.retryPolicy, {
+    maxAttempts: 4,
+    sameAgentAttempts: 3,
+    smithersRetries: 3
+  });
+  const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
+  assert.match(workflowSource, /agent=\{agentForTask\(task\)\}/u);
+  assert.doesNotMatch(workflowSource, /maxDelayMs/u);
+});
+
+test("runtime model overrides apply to the retry policy's configured primary profile", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const configPath = path.join(project, "ultrafuzz.toml");
+  fs.writeFileSync(
+    configPath,
+    fs
+      .readFileSync(configPath, "utf8")
+      .replace("same_agent_attempts = 1", 'same_agent_attempts = 2\nagents = ["sol-xhigh", "gpt55-xhigh"]')
+      .replace(
+        "[models.claude]",
+        '[models.sol-xhigh]\nagent = "CodexAgent"\nmodel = "gpt-5.6-sol"\nreasoning = "xhigh"\n\n' +
+          '[models.gpt55-xhigh]\nagent = "CodexAgent"\nmodel = "gpt-5.5"\nreasoning = "xhigh"\n\n' +
+          "[models.claude]"
+      ),
+    "utf8"
+  );
+
+  const plan = await planRun({
+    projectRoot: project,
+    runId: "retry-primary-runtime-override",
+    model: "gpt-5.6-sol-override",
+    reasoning: "high",
+    env: {}
+  });
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  assert.equal(plan.value!.resolved_config.models.profiles["sol-xhigh"]?.model, "gpt-5.6-sol-override");
+  assert.equal(plan.value!.resolved_config.models.profiles["sol-xhigh"]?.reasoning, "high");
+  assert.equal(plan.value!.resolved_config.models.profiles["gpt55-xhigh"]?.model, "gpt-5.5");
+  assert.ok(
+    plan
+      .value!.expanded_graph.nodes.flatMap((node) => node.modelFanout)
+      .every(
+        (selection) =>
+          selection.modelProfileId !== "sol-xhigh" ||
+          (selection.modelName === "gpt-5.6-sol-override" && selection.reasoningEffort === "high")
+      )
+  );
 });
 
 test("topology runtime context keeps a bounded finalization reserve", async () => {
@@ -10977,6 +11081,91 @@ test("syncRun maps failed workflow nodes into durable failed run state", async (
     failedLedger.map((entry) => entry.failure_message),
     ["agent failed", "agent failed again"]
   );
+  assert.deepEqual(
+    failedLedger.map((entry) => entry.agent),
+    [1, 2].map(() => ({
+      chain_index: 0,
+      profile_id: "default",
+      agent_ref: "CodexAgent",
+      model_name: "gpt-5.5",
+      reasoning_effort: "xhigh",
+      role: "primary",
+      selection: "projected"
+    }))
+  );
+});
+
+test("syncRun records failed primaries and the actual fallback producer", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+  const configPath = path.join(project, "ultrafuzz.toml");
+  fs.writeFileSync(
+    configPath,
+    fs
+      .readFileSync(configPath, "utf8")
+      .replace("same_agent_attempts = 1", 'same_agent_attempts = 3\nagents = ["sol-xhigh", "gpt55-xhigh"]')
+      .replace(
+        "[models.claude]",
+        '[models.sol-xhigh]\nagent = "CodexAgent"\nmodel = "gpt-5.6-sol"\nreasoning = "xhigh"\n\n' +
+          '[models.gpt55-xhigh]\nagent = "CodexAgent"\nmodel = "gpt-5.5"\nreasoning = "xhigh"\n\n' +
+          "[models.claude]"
+      ),
+    "utf8"
+  );
+  const workflowRunId = "ultrafuzz-fallback-provenance";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 4 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFailed", nodeId: "node:project-discovery", attempt: 1, error: { message: "opaque one" } },
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 2 },
+      { type: "NodeFailed", nodeId: "node:project-discovery", attempt: 2, error: { message: "opaque two" } },
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 3 },
+      { type: "NodeFailed", nodeId: "node:project-discovery", attempt: 3, error: { message: "opaque three" } },
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 4 },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 4,
+        extra: { model: "gpt-5.5", agent: "codex", inputTokens: 10, outputTokens: 5 }
+      },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 4 },
+      { type: "RunFinished" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "fallback-provenance", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "fallback-provenance", env });
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  const attemptsBytes = fs.readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8").trim();
+  assert.notEqual(attemptsBytes, "", JSON.stringify(sync.diagnostics));
+  const attempts = attemptsBytes
+    .split("\n")
+    .map((line) => JSON.parse(line) as { outcome?: string; agent?: Record<string, unknown> });
+  assert.deepEqual(
+    attempts.map((entry) => [entry.outcome, entry.agent?.chain_index, entry.agent?.profile_id, entry.agent?.role]),
+    [
+      ["failed", 0, "sol-xhigh", "primary"],
+      ["failed", 1, "sol-xhigh", "primary"],
+      ["failed", 2, "sol-xhigh", "primary"],
+      ["succeeded", 3, "gpt55-xhigh", "fallback"]
+    ]
+  );
+  assert.deepEqual(attempts[3]?.agent, {
+    chain_index: 3,
+    profile_id: "gpt55-xhigh",
+    agent_ref: "CodexAgent",
+    model_name: "gpt-5.5",
+    reasoning_effort: "xhigh",
+    role: "fallback",
+    selection: "observed"
+  });
 });
 
 test("syncRun records a terminal attempt when its start event arrives later", async () => {
@@ -12001,6 +12190,19 @@ test("resume derives reset identities from the canonical nodes of a failed workf
   );
   // Only the failed node is reset; a pending sibling is left alone.
   assert.doesNotMatch(commands, /--node-id node:strategy/u);
+
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+  const resetByNode = await resumeRun({
+    projectRoot: project,
+    runId: "terminal-retry-run",
+    resetNode: "node:project-discovery",
+    env
+  });
+  assert.equal(resetByNode.ok, true, JSON.stringify(resetByNode.diagnostics));
+  assert.match(
+    fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"),
+    /timetravel .* --run-id ultrafuzz-terminal-retry-run --node-id node:project-discovery --iteration 0 --no-vcs --force --format json/u
+  );
 });
 
 test("resume retries failed tasks reported inside a successful terminal workflow", async () => {

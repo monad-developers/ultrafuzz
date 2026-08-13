@@ -1617,6 +1617,21 @@ const reportNonProductionOutcomeSchema = findingSchema.safeExtend({
   lifecycle: findingLifecycleSchema
 });
 
+const reportAgentAttemptSchema = z.strictObject({
+  attempt: positiveInteger,
+  profile_id: nonEmptyString,
+  agent_ref: nonEmptyString,
+  model_name: nonEmptyString.optional(),
+  reasoning_effort: nonEmptyString.optional(),
+  role: z.enum(["primary", "fallback"])
+});
+
+const reportAgentExecutionSchema = z.strictObject({
+  planned_chain: z.array(reportAgentAttemptSchema).min(1),
+  failed_attempts: z.array(reportAgentAttemptSchema),
+  producer: reportAgentAttemptSchema
+});
+
 export const reportSchema = withDocumentMetadata(
   z.strictObject({
     schema_version: z.literal(REPORT_SCHEMA_VERSION),
@@ -1637,6 +1652,7 @@ export const reportSchema = withDocumentMetadata(
       topology_digest: sha256,
       prompt_digest: sha256,
       expanded_graph_fingerprint: nonEmptyString,
+      agent_execution: reportAgentExecutionSchema.optional(),
       source_run_ids: uniqueStrings().optional()
     }),
     campaign_outcome: z

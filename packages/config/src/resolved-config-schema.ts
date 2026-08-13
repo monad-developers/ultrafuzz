@@ -262,6 +262,12 @@ export const resolvedConfigZodSchema: z.ZodType<ResolvedConfig> = z
         profiles: modelProfilesSchema
       })
       .strict(),
+    retry: z
+      .object({
+        sameAgentAttempts: positiveIntegerSchema,
+        agents: z.array(z.string().regex(PROFILE_ID_PATTERN)).refine((ids) => new Set(ids).size === ids.length)
+      })
+      .strict(),
     agents: agentConfigsSchema,
     permissions: z
       .object({

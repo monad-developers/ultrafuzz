@@ -100,6 +100,40 @@
         "output_sha256": { "anyOf": [{ "type": "string", "pattern": "^[a-f0-9]{64}$" }, { "type": "null" }] }
       }
     },
+    "agent": {
+      "type": "object",
+      "required": ["chain_index", "profile_id", "agent_ref", "role", "selection"],
+      "additionalProperties": false,
+      "properties": {
+        "chain_index": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "profile_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+        },
+        "agent_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+        },
+        "model_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+        },
+        "reasoning_effort": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+        },
+        "role": { "enum": ["primary", "fallback"] },
+        "selection": { "enum": ["observed", "projected"] }
+      }
+    },
     "failure_category": {
       "enum": [
         "executor-error",

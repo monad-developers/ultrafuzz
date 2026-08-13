@@ -1165,6 +1165,15 @@ function smithersTaskForNode(
   const agentRef = model?.agent_ref ?? "CodexAgent";
   const modelName = model?.model_name ?? "gpt-test";
   const reasoningEffort = model?.reasoning_effort ?? "high";
+  const agentChain = [
+    {
+      profileId: model?.model_profile_id ?? "default",
+      agentRef,
+      modelName,
+      reasoningEffort,
+      role: "primary" as const
+    }
+  ];
   const execution = {
     mode: "local" as const,
     resources: { cpu: 2, memoryMiB: 1_024, timeoutSeconds: 60 },
@@ -1178,6 +1187,7 @@ function smithersTaskForNode(
     smithersNodeId: `node:${attemptId}`,
     verifierSmithersNodeId: `verify:${attemptId}`,
     agentRef,
+    agentChain,
     modelName,
     reasoningEffort,
     dependencies,
@@ -1185,7 +1195,7 @@ function smithersTaskForNode(
     timeoutMs: 60_000,
     heartbeatTimeoutMs: 60_000,
     retries: 0,
-    retryPolicy: { backoff: "exponential", initialDelayMs: 1_000, maxDelayMs: 30_000 },
+    retryPolicy: { backoff: "exponential", initialDelayMs: 1_000 },
     workspacePath,
     artifactDir,
     dependencyArtifactDirs,
@@ -1224,11 +1234,12 @@ function smithersTaskForNode(
         modelName,
         reasoningEffort,
         modelIndex: model?.model_index ?? 0,
-        attemptIndex: model?.attempt_index ?? node.loop.attempt_index
+        attemptIndex: model?.attempt_index ?? node.loop.attempt_index,
+        agentChain
       },
       workspace: { primitive: "worktree", path: workspacePath, repoPath: "/repo", trustModel: "skip-permissions" },
       artifacts: { dir: artifactDir, outputs, manifestPath: path.join(artifactDir, "artifact-manifest.json") },
-      retryPolicy: { maxAttempts: 1, smithersRetries: 0 },
+      retryPolicy: { maxAttempts: 1, sameAgentAttempts: 1, smithersRetries: 0 },
       timeout: { milliseconds: 60_000, seconds: 60, heartbeatTimeoutMs: 60_000 },
       execution: { mode: execution.mode, resources: execution.resources }
     }

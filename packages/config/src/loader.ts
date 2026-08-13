@@ -30,6 +30,7 @@ const TOP_LEVEL_KEYS = new Set([
   "run",
   "execution",
   "models",
+  "retry",
   "agents",
   "permissions",
   "invariants",
@@ -57,6 +58,7 @@ const EXECUTION_NODE_KEYS = ["resources"] as const;
 const EXECUTION_PROVIDER_KEYS = ["modal"] as const;
 const MODAL_EXECUTION_PROVIDER_KEYS = ["app", "image", "region", "credential_env"] as const;
 const MODEL_PROFILE_KEYS = ["agent", "model", "reasoning", "timeout_seconds"] as const;
+const RETRY_KEYS = ["same_agent_attempts", "agents"] as const;
 const AGENT_KEYS = ["auth", "api_key_env", "config_dir"] as const;
 const PERMISSION_KEYS = [
   "trust_model",
@@ -449,6 +451,28 @@ export function parseProjectConfigToml(text: string, file = CONFIG_FILE_NAME): C
         [key]: modelProfile
       };
     }
+  }
+
+  const retry = readConfigTable(root, "retry", RETRY_KEYS, diagnostics);
+  if (retry) {
+    const retryConfig: NonNullable<ProjectConfigInput["retry"]> = {};
+    config.retry = retryConfig;
+    readScalarFields(retry, ["retry"], diagnostics, [
+      {
+        key: "same_agent_attempts",
+        type: "integer",
+        assign: (value) => {
+          retryConfig.sameAgentAttempts = value;
+        }
+      },
+      {
+        key: "agents",
+        type: "string-array",
+        assign: (value) => {
+          retryConfig.agents = value;
+        }
+      }
+    ]);
   }
 
   const agents = readTable(root, "agents", ["agents"], diagnostics);

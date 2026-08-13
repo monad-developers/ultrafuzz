@@ -19,6 +19,22 @@ function task(overrides: Partial<SmithersTaskManifestTask> = {}): SmithersTaskMa
   const logicalNodeId = overrides.logicalNodeId ?? "producer";
   const dependencies = overrides.dependencies ?? ["meta-start"];
   const dependencySmithersNodeIds = overrides.dependencySmithersNodeIds ?? [];
+  const agentChain = [
+    {
+      profileId: "default",
+      agentRef: "CodexAgent",
+      modelName: "gpt-test",
+      reasoningEffort: "high",
+      role: "primary" as const
+    },
+    {
+      profileId: "default",
+      agentRef: "CodexAgent",
+      modelName: "gpt-test",
+      reasoningEffort: "high",
+      role: "primary" as const
+    }
+  ];
   return {
     attemptId,
     concreteNodeId,
@@ -27,6 +43,7 @@ function task(overrides: Partial<SmithersTaskManifestTask> = {}): SmithersTaskMa
     smithersNodeId: `node:${attemptId}`,
     verifierSmithersNodeId: `verify:${attemptId}`,
     agentRef: "CodexAgent",
+    agentChain,
     modelName: "gpt-test",
     reasoningEffort: "high",
     dependencies,
@@ -34,7 +51,7 @@ function task(overrides: Partial<SmithersTaskManifestTask> = {}): SmithersTaskMa
     timeoutMs: 60_000,
     heartbeatTimeoutMs: 60_000,
     retries: 1,
-    retryPolicy: { backoff: "exponential", initialDelayMs: 1_000, maxDelayMs: 30_000 },
+    retryPolicy: { backoff: "exponential", initialDelayMs: 1_000 },
     workspacePath: `/runs/run-1/workspaces/${attemptId}`,
     artifactDir: `/runs/run-1/artifacts/${attemptId}`,
     dependencyArtifactDirs: [],
@@ -72,7 +89,8 @@ function task(overrides: Partial<SmithersTaskManifestTask> = {}): SmithersTaskMa
         modelName: "gpt-test",
         reasoningEffort: "high",
         modelIndex: 0,
-        attemptIndex: 0
+        attemptIndex: 0,
+        agentChain
       },
       workspace: {
         primitive: "worktree",
@@ -92,7 +110,7 @@ function task(overrides: Partial<SmithersTaskManifestTask> = {}): SmithersTaskMa
         ],
         manifestPath: `/runs/run-1/artifacts/${attemptId}/artifact-manifest.json`
       },
-      retryPolicy: { maxAttempts: 2, smithersRetries: 1 },
+      retryPolicy: { maxAttempts: 2, sameAgentAttempts: 2, smithersRetries: 1 },
       timeout: { milliseconds: 60_000, seconds: 60, heartbeatTimeoutMs: 60_000 },
       execution: { mode: "local", resources: { cpu: 2, memoryMiB: 1_024, timeoutSeconds: 60 } }
     },
