@@ -110,6 +110,27 @@ describe("Modal target model profiles", () => {
     expect(config).toContain('[agents.DeepSeekAgent]\nauth = "api-key"\napi_key_env = "DEEPSEEK_API_KEY"');
   });
 
+  it("generates a dedicated OpenRouter API-key profile without changing the catalogue ID", () => {
+    const model = "~anthropic/claude-sonnet-latest:free";
+    const config = modalTargetToml(
+      {
+        slug: "openrouter-catalogue",
+        model,
+        provider: "openrouter",
+        agent: "OpenRouterAgent",
+        reasoning: "high",
+        auth_mode: "api-key"
+      },
+      900
+    );
+
+    expect(config).toContain(`[models.default]\nagent = "OpenRouterAgent"\nmodel = ${JSON.stringify(model)}`);
+    expect(config).toContain('[agents.OpenRouterAgent]\nauth = "api-key"\napi_key_env = "OPENROUTER_API_KEY"');
+    const parsed = parseProjectConfigToml(config, "modal-openrouter-ultrafuzz.toml");
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(resolveConfig({ projectConfig: parsed.value, env: {} }).ok).toBe(true);
+  });
+
   it("caps explicit group and node timeouts to the public benchmark node budget", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-timeout-cap-"));
     const topologyPath = path.join(root, "topology.yml");

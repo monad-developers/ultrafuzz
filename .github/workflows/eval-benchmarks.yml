@@ -28,6 +28,7 @@ on:
           - anthropic
           - deepseek
           - kimi
+          - openrouter
       smoke_model:
         description: smoke mode only, runner model
         required: true
@@ -133,6 +134,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.ANTHROPIC_API_KEY || '' }}
           DEEPSEEK_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.DEEPSEEK_API_KEY || '' }}
           KIMI_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_API_KEY || github.event_name == 'workflow_dispatch' && secrets.MOONSHOT_API_KEY || '' }}
+          OPENROUTER_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.OPENROUTER_API_KEY || '' }}
           KIMI_BASE_URL: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_BASE_URL || github.event_name == 'workflow_dispatch' && vars.KIMI_BASE_URL || '' }}
           BENCHMARK_SMOKE_PROVIDER: ${{ github.event_name == 'workflow_dispatch' && (inputs.smoke_provider || 'openai') || 'openai' }}
         run: |
@@ -146,6 +148,7 @@ jobs:
               anthropic) required+=(ANTHROPIC_API_KEY) ;;
               deepseek) required+=(DEEPSEEK_API_KEY) ;;
               kimi) required+=(KIMI_API_KEY) ;;
+              openrouter) required+=(OPENROUTER_API_KEY) ;;
             esac
           fi
           for name in "${required[@]}"; do
@@ -245,6 +248,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.ANTHROPIC_API_KEY || '' }}
           DEEPSEEK_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.DEEPSEEK_API_KEY || '' }}
           KIMI_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_API_KEY || github.event_name == 'workflow_dispatch' && secrets.MOONSHOT_API_KEY || '' }}
+          OPENROUTER_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.OPENROUTER_API_KEY || '' }}
           KIMI_BASE_URL: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_BASE_URL || github.event_name == 'workflow_dispatch' && vars.KIMI_BASE_URL || '' }}
         run: |
           : > "$BENCHMARK_CONTROL/launch-attempts.jsonl"
@@ -379,6 +383,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.ANTHROPIC_API_KEY || '' }}
           DEEPSEEK_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.DEEPSEEK_API_KEY || '' }}
           KIMI_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_API_KEY || github.event_name == 'workflow_dispatch' && secrets.MOONSHOT_API_KEY || '' }}
+          OPENROUTER_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.OPENROUTER_API_KEY || '' }}
           KIMI_BASE_URL: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_BASE_URL || github.event_name == 'workflow_dispatch' && vars.KIMI_BASE_URL || '' }}
         run: |
           control_timeout_seconds="$(jq -er \
@@ -583,6 +588,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.ANTHROPIC_API_KEY || '' }}
           DEEPSEEK_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.DEEPSEEK_API_KEY || '' }}
           KIMI_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_API_KEY || github.event_name == 'workflow_dispatch' && secrets.MOONSHOT_API_KEY || '' }}
+          OPENROUTER_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.OPENROUTER_API_KEY || '' }}
           KIMI_BASE_URL: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_BASE_URL || github.event_name == 'workflow_dispatch' && vars.KIMI_BASE_URL || '' }}
         run: |
           mkdir -p "$BENCHMARK_RESULTS"

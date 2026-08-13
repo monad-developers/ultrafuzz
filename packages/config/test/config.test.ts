@@ -60,6 +60,10 @@ describe("config loading and resolution", () => {
       auth: "api-key",
       apiKeyEnv: "DEEPSEEK_API_KEY"
     });
+    expect(resolved.value.agents.OpenRouterAgent).toEqual({
+      auth: "api-key",
+      apiKeyEnv: "OPENROUTER_API_KEY"
+    });
     expect(resolved.value.models.profiles.default?.reasoning).toBe("xhigh");
     expect(resolved.value.models.profiles.kimi).toEqual({
       id: "kimi",
@@ -72,6 +76,12 @@ describe("config loading and resolution", () => {
       agent: "DeepSeekAgent",
       model: "deepseek-v4-pro",
       reasoning: "max"
+    });
+    expect(resolved.value.models.profiles.openrouter).toEqual({
+      id: "openrouter",
+      agent: "OpenRouterAgent",
+      model: "anthropic/claude-sonnet-4.6",
+      reasoning: "high"
     });
     expect(resolved.value.run.workflowDeadlineSeconds).toBe(86_400);
     expect(resolved.value.run.controllerLeaseSeconds).toBe(30);
@@ -411,6 +421,47 @@ config_dir = ".kimi-code"
     expect(serialized).toContain("forge_rayon_threads = 1");
   });
 
+  it("preserves opaque OpenRouter catalogue IDs and rejects only unsafe boundaries", () => {
+    const model = "~vendor/model.latest:free+preview@2026";
+    const accepted = resolveConfig({
+      env: {},
+      projectConfig: {
+        models: {
+          profiles: {
+            routed: { agent: "OpenRouterAgent", model, reasoning: "high" }
+          }
+        }
+      }
+    });
+    expect(accepted.ok).toBe(true);
+    if (!accepted.ok) return;
+    expect(accepted.value.models.profiles.routed?.model).toBe(model);
+    expect(serializeRedactedResolvedConfigToml(accepted.value)).toContain(`model = ${JSON.stringify(model)}`);
+
+    for (const invalidModel of [
+      "vendor/model with-space",
+      "vendor/model\nnext",
+      "vendor/model\u0080control",
+      `vendor/${"m".repeat(250)}`
+    ]) {
+      const invalid = resolveConfig({
+        env: {},
+        projectConfig: {
+          models: { profiles: { routed: { agent: "OpenRouterAgent", model: invalidModel } } }
+        }
+      });
+      expect(invalid.ok).toBe(false);
+      if (!invalid.ok) {
+        expect(invalid.diagnostics).toContainEqual(
+          expect.objectContaining({
+            code: "CONFIG_MODEL_OPENROUTER_ID_INVALID",
+            path: ["models", "routed", "model"]
+          })
+        );
+      }
+    }
+  });
+
   it("loads ultrafuzz.toml from disk", async () => {
     const root = mkdtempSync(join(tmpdir(), "ultrafuzz-config-"));
     await mkdir(root, { recursive: true });
@@ -565,6 +616,23 @@ describe("resolved config named semantic diagnostics", () => {
           "CONFIG_AGENT_DEEPSEEK_AUTH_UNSUPPORTED",
           "DeepSeekAgent supports only api-key authentication",
           ["agents", "DeepSeekAgent", "auth"]
+        )
+      ]
+    },
+    {
+      label: "unsupported OpenRouter subscription authentication",
+      projectConfig: {
+        agents: {
+          OpenRouterAgent: {
+            auth: "subscription"
+          }
+        }
+      },
+      diagnostics: [
+        validationDiagnostic(
+          "CONFIG_AGENT_OPENROUTER_AUTH_UNSUPPORTED",
+          "OpenRouterAgent supports only api-key authentication",
+          ["agents", "OpenRouterAgent", "auth"]
         )
       ]
     },

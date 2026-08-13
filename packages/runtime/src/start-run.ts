@@ -229,6 +229,11 @@ async function requiredCommandPreflightDiagnostics(
   resolvedConfig: ResolvedConfig,
   expandedGraph: ExpandedGraph
 ): Promise<RuntimeDiagnostic[]> {
+  const credentialDiagnostics = openRouterCredentialPreflightDiagnostics(
+    resolvedConfig,
+    expandedGraph,
+    input.env ?? process.env
+  );
   const requiredCommands = [...new Set(expandedGraph.nodes.flatMap((node) => node.requiredCommands ?? []))].sort();
   let commandProbes: Awaited<ReturnType<typeof probeCommandsForExecution>>;
   try {
@@ -243,6 +248,7 @@ async function requiredCommandPreflightDiagnostics(
         : await input.requiredCommandProbe(requiredCommands);
   } catch (error) {
     return [
+      ...credentialDiagnostics,
       {
         code: "RUN_REQUIRED_COMMAND_PREFLIGHT_FAILED",
         message: `could not probe required topology commands in the configured execution environment: ${error instanceof Error ? error.message : String(error)}`,
@@ -265,8 +271,9 @@ async function requiredCommandPreflightDiagnostics(
     ].sort()
   }));
   return missingCommands.length === 0
-    ? []
+    ? credentialDiagnostics
     : [
+        ...credentialDiagnostics,
         {
           code: "RUN_REQUIRED_COMMAND_MISSING",
           message: `required topology commands are not available in the configured execution environment: ${missingRequirements
@@ -278,6 +285,27 @@ async function requiredCommandPreflightDiagnostics(
           details: { commands: missingCommands, requirements: missingRequirements }
         }
       ];
+}
+
+function openRouterCredentialPreflightDiagnostics(
+  config: ResolvedConfig,
+  graph: ExpandedGraph,
+  env: Record<string, string | undefined>
+): RuntimeDiagnostic[] {
+  const selected = graph.nodes.some((node) => node.modelFanout.some((model) => model.agentRef === "OpenRouterAgent"));
+  if (!selected) return [];
+  const agent = config.agents.OpenRouterAgent;
+  const name = agent?.auth === "api-key" ? agent.apiKeyEnv : undefined;
+  if (name !== undefined && (env[name] ?? "").trim() !== "") return [];
+  return [
+    {
+      code: "RUN_AGENT_CREDENTIAL_MISSING",
+      message: `OpenRouterAgent requires its configured API-key environment variable${name === undefined ? "" : ` (${name})`} to be set`,
+      severity: "error",
+      source: "runtime",
+      path: "agents.OpenRouterAgent.api_key_env"
+    }
+  ];
 }
 
 export async function resumeRun(input: WorkflowLifecycleInput) {

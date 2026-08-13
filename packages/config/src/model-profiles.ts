@@ -13,6 +13,7 @@ const KIMI_REASONING_EFFORTS = new Set(["low", "high", "max"]);
 const DEEPSEEK_REASONING_EFFORTS = new Set(["low", "high", "max"]);
 const PROFILE_ID_PATTERN = /^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const SAFE_AGENT_REF_PATTERN = /^(?!.*\.\.)[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/u;
+const OPENROUTER_MODEL_ID_PATTERN = /^[^\s\p{Cc}]+$/u;
 
 const profileIdSchema = z.string().regex(PROFILE_ID_PATTERN);
 
@@ -219,6 +220,19 @@ function validateProviderModelProfiles(config: ResolvedConfig): ConfigDiagnostic
           "CONFIG_MODEL_DEEPSEEK_REASONING_UNSUPPORTED",
           `DeepSeek model profile \`${id}\` reasoning must be low, high, or max`,
           ["models", id, "reasoning"],
+          "validation"
+        )
+      );
+    }
+    if (
+      profile.agent === "OpenRouterAgent" &&
+      (profile.model === undefined || profile.model.length > 256 || !OPENROUTER_MODEL_ID_PATTERN.test(profile.model))
+    ) {
+      diagnostics.push(
+        diagnostic(
+          "CONFIG_MODEL_OPENROUTER_ID_INVALID",
+          `OpenRouter model profile \`${id}\` model must be a non-empty catalogue ID without whitespace or control characters and at most 256 characters`,
+          ["models", id, "model"],
           "validation"
         )
       );

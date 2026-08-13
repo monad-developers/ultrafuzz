@@ -199,6 +199,51 @@ subscription plan cannot supply a zero or unrelated rate. The current
 DeepSeek V4 Pro at $0.435 per million cache-miss input tokens, $0.003625 per
 million cache-hit input tokens, and $0.87 per million output tokens.
 
+## OpenRouter agent
+
+`ultrafuzz init` generates a dedicated `OpenRouterAgent` backed by the Codex
+CLI. Select the included opt-in profile or create another profile with any
+OpenRouter catalogue ID:
+
+```toml
+[models.openrouter]
+agent = "OpenRouterAgent"
+model = "~anthropic/claude-sonnet-latest:free"
+reasoning = "high"
+
+[agents.OpenRouterAgent]
+auth = "api-key"
+api_key_env = "OPENROUTER_API_KEY"
+```
+
+Set the key outside TOML, then select the profile in topology or use a one-off
+override:
+
+```bash
+export OPENROUTER_API_KEY=...
+ultrafuzz run --agent OpenRouterAgent --model '~anthropic/claude-sonnet-latest:free'
+```
+
+OpenRouter authentication is API-key only. `api_key_env` may name another
+environment variable, but the credential value is never written to config or
+run provenance. The generated adapter creates a mode-`0700` Codex home at
+`.ultrafuzz/openrouter-codex` by default, writes a mode-`0600` provider config
+that names the credential environment variable, and fixes its route to the official
+`https://openrouter.ai/api/v1` base URL. A configured `config_dir` selects a
+different adapter-managed Codex home; its `config.toml` is owned by this route.
+Competing provider credentials and ambient endpoint overrides are cleared from
+the model subprocess.
+
+The `model` value is an opaque OpenRouter catalogue ID. Ultrafuzz preserves it
+exactly through CLI overrides, resolved config, Codex `--model`, Modal launch
+state, and benchmark provenance. It does not download or ship a model
+allowlist, so vendor/model IDs, `~` aliases, and catalogue variants such as
+`:free` remain usable as OpenRouter evolves. IDs must be at most 256 characters
+and contain no whitespace or control characters. Choose a model that supports
+the coding and tool behavior required by the selected Ultrafuzz topology; being
+listed by OpenRouter alone does not guarantee agent compatibility. See
+OpenRouter's [Codex CLI integration](https://openrouter.ai/docs/cookbook/coding-agents/codex-cli).
+
 Default triage requires quorum `3` from a panel size of `4`:
 
 ```toml

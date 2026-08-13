@@ -32,7 +32,8 @@ const MAX_BUNDLE_JSON_BYTES = 5 * 1024 * 1024;
 const MAX_POLICY_BYTES = 16 * 1024 * 1024;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const SAFE_LOWER_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/u;
-const SAFE_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
+const OPAQUE_MODEL = /^[^\s\p{Cc}]+$/u;
+const LEGACY_SAFE_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const SAFE_REASONING = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
 const FULL_COMMIT = /^[0-9a-f]{40}$/u;
 const POSITIVE_DECIMAL = /^[1-9][0-9]*$/u;
@@ -65,7 +66,8 @@ const PROVIDER_AGENT = {
   openai: "CodexAgent",
   anthropic: "ClaudeAgent",
   deepseek: "DeepSeekAgent",
-  kimi: "KimiAgent"
+  kimi: "KimiAgent",
+  openrouter: "OpenRouterAgent"
 };
 
 /**
@@ -768,7 +770,14 @@ export function validateAutomaticPairConfig(config, model, pair, context, usedMo
   if (expectedAgent === undefined) {
     throw new Error(`benchmark config ${pair.config_path} has an unsupported model provider`);
   }
-  if (!SAFE_MODEL.test(model.model) || /(?:^|[-_.:/])latest$/iu.test(model.model)) {
+  if (
+    typeof model.model !== "string" ||
+    model.model.length === 0 ||
+    model.model.length > 256 ||
+    !OPAQUE_MODEL.test(model.model) ||
+    (pair.provider !== "openrouter" &&
+      (!LEGACY_SAFE_MODEL.test(model.model) || /(?:^|[-_.:/])latest$/iu.test(model.model)))
+  ) {
     throw new Error(`benchmark config ${pair.config_path} has an unsafe or unpinned model`);
   }
   if (!SAFE_REASONING.test(model.reasoning)) {

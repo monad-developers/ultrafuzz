@@ -212,6 +212,7 @@ function validateTopologySurface(
 ): {
   posture: PostureItem;
   summary?: ValidateProjectResult["topology"];
+  selectedAgentRefs: string[];
 } {
   try {
     const policy =
@@ -272,6 +273,7 @@ function validateTopologySurface(
         "YAML topology v1 loads, validates, and expands",
         executionDiagnostics
       ),
+      selectedAgentRefs: [...selectedAgents].sort(),
       summary: {
         path: policy?.effectiveTopologyDisplayPath ?? pathToTopology,
         ...(policy === undefined
@@ -289,9 +291,14 @@ function validateTopologySurface(
     return {
       posture: postureFromDiagnostics("topology", "topology failed validation", [
         diagnosticFromError(error, "topology", "TOPOLOGY_INVALID")
-      ])
+      ]),
+      selectedAgentRefs: []
     };
   }
+}
+
+export function activeTopologyAgentRefs(projectRoot: string, config: ResolvedConfig): string[] {
+  return validateTopologySurface(projectRoot, config).selectedAgentRefs;
 }
 
 function evaluatePolicies(

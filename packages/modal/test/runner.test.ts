@@ -1147,6 +1147,29 @@ describe("Modal result collection", () => {
     ).toThrow(/KIMI_BASE_URL must be an HTTPS URL/u);
   });
 
+  it("forwards only the dedicated OpenRouter runner key plus the public judge key", () => {
+    const config = publicCollectionLineage().config;
+    const model: ModalModelSpec = {
+      slug: "openrouter-catalogue",
+      model: "~anthropic/claude-sonnet-latest:free",
+      provider: "openrouter",
+      agent: "OpenRouterAgent",
+      reasoning: "high",
+      auth_mode: "api-key"
+    };
+
+    expect(
+      modalBenchmarkSecretValues(config, model, {
+        OPENROUTER_API_KEY: "openrouter-secret",
+        OPENAI_API_KEY: "judge-secret",
+        ANTHROPIC_API_KEY: "unrelated-secret"
+      })
+    ).toEqual({
+      OPENROUTER_API_KEY: "openrouter-secret",
+      OPENAI_API_KEY: "judge-secret"
+    });
+  });
+
   it("atomically replaces allowlisted files and removes a stale terminal artifact", async () => {
     const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-collect-"));
     const output = path.join(root, "model-one");

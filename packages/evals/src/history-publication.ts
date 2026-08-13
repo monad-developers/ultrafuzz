@@ -20,7 +20,7 @@ export const EVAL_HISTORY_PUBLICATION_HANDOFF_GATE = "eval-history-publication-p
 export type EvalHistoryPublicationBenchmark = "evmbench" | "ultrafuzz-bench";
 export type EvalHistoryPublicationLane = "smoke" | "full";
 export type EvalHistoryPublicationStatus = "succeeded" | "genuine-task-failures" | "failed";
-export type EvalHistoryPublicationProvider = "openai" | "anthropic" | "kimi" | "deepseek";
+export type EvalHistoryPublicationProvider = "openai" | "anthropic" | "kimi" | "deepseek" | "openrouter";
 
 export interface EvalHistoryAutomaticPublicationPair {
   pair: string;

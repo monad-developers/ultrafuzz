@@ -104,7 +104,7 @@
       ],
       "properties": {
         "pair": { "$ref": "#/$defs/safeLowerId" },
-        "provider": { "enum": ["openai", "anthropic", "kimi", "deepseek"] },
+        "provider": { "enum": ["openai", "anthropic", "kimi", "deepseek", "openrouter"] },
         "model_slug": { "$ref": "#/$defs/safeLowerId" },
         "bundle_path": { "$ref": "#/$defs/relativePath" },
         "unpack_path": { "$ref": "#/$defs/safeLowerId" },

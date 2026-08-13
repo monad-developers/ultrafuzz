@@ -184,6 +184,26 @@ describe("persistent Modal worker lineage", () => {
     expect(JSON.parse(fs.readFileSync(fixture.statusPath, "utf8"))).toMatchObject({ attempt: 3 });
   });
 
+  it("keeps the lineage lock inside a writable data root behind a canonicalized mount", async () => {
+    const mount = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-worker-mount-"));
+    roots.push(mount);
+    const resolvedMount = path.join(mount, "resolved-volume");
+    const lexicalMount = path.join(mount, "data");
+    const resolvedDataRoot = path.join(resolvedMount, "logical-run", "model");
+    fs.mkdirSync(resolvedDataRoot, { recursive: true, mode: 0o700 });
+    fs.symlinkSync(resolvedMount, lexicalMount, "dir");
+    const runRoot = path.dirname(resolvedDataRoot);
+    fs.chmodSync(runRoot, 0o500);
+    const fixture = lineageFixtureAt(path.join(fs.realpathSync.native(lexicalMount), "logical-run", "model"));
+
+    try {
+      await ensure(fixture, lineage());
+      expect(readModalWorkerLineage(fixture.lineagePath)).toEqual(lineage());
+    } finally {
+      fs.chmodSync(runRoot, 0o700);
+    }
+  });
+
   it("leaves current result files byte-for-byte unchanged when a superseded worker finalizes", async () => {
     const fixture = lineageFixture();
     const first = lineage();
@@ -356,6 +376,10 @@ function lineageFixture(): {
 } {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-worker-lineage-"));
   roots.push(root);
+  return lineageFixtureAt(root);
+}
+
+function lineageFixtureAt(root: string): ReturnType<typeof lineageFixture> {
   return {
     root,
     workspace: path.join(root, "public-workspace"),

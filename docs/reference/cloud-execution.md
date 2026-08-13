@@ -39,6 +39,12 @@ handoff archives, tags, errors, or logs. API-key agent credentials are injected
 through a per-launch Modal Secret. Subscription-based agent authentication is
 not supported by cloud node execution.
 
+An OpenRouter task uses the `api_key_env` configured for `OpenRouterAgent`
+(`OPENROUTER_API_KEY` by default). Only that named credential is forwarded for
+the task; the provider identity and exact catalogue model ID remain in task and
+Modal provenance, while the key value does not. The sandbox uses the same
+official `https://openrouter.ai/api/v1` route as local execution.
+
 Node overrides use logical topology node IDs and are applied after model and
 strategy fan-out, so every concrete attempt derived from that logical node
 receives the override. Unknown node IDs fail validation before launch.

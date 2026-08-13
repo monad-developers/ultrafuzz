@@ -26,8 +26,8 @@ export const MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES = 256 * 1024 * 1024;
 export type StrictModalLaunchMode = "fresh" | "resume";
 export type StrictModalLaunchPhase = "reserved" | "sandbox-created" | "launched" | "failed";
 export type StrictModalPostModelRecovery = "relaunch" | "stop";
-export type StrictModalModelProvider = "openai" | "anthropic" | "deepseek" | "kimi";
-export type StrictModalModelAgent = "CodexAgent" | "ClaudeAgent" | "DeepSeekAgent" | "KimiAgent";
+export type StrictModalModelProvider = "openai" | "anthropic" | "deepseek" | "kimi" | "openrouter";
+export type StrictModalModelAgent = "CodexAgent" | "ClaudeAgent" | "DeepSeekAgent" | "KimiAgent" | "OpenRouterAgent";
 export type StrictModalRecoveryStartReason =
   | "initial"
   | "pre-model-retry"

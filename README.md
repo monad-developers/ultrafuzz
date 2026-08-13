@@ -4,6 +4,11 @@
 
 Ultrafuzz is an agentic orchestrator for smart contract fuzzing.
 
+Model work can run through first-party Codex, Claude, Kimi, and DeepSeek
+adapters or through OpenRouter. The dedicated `OpenRouterAgent` accepts current
+OpenRouter catalogue IDs without a built-in allowlist and reads
+`OPENROUTER_API_KEY`; see [Config](docs/config.md#openrouter-agent).
+
 ![Ultrafuzz dashboard](docs/assets/ultrafuzz-dashboard.png)
 
 This tool initializes a protocol repository with editable prompts and topology, runs

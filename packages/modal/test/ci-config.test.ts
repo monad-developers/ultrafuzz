@@ -377,6 +377,46 @@ describe("public Modal benchmark configuration", () => {
     ]);
   });
 
+  it("creates an OpenRouter smoke benchmark and preserves a punctuation-rich catalogue ID", () => {
+    const workspace = path.resolve("../..");
+    const output = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-openrouter-smoke-"));
+    const model = "~anthropic/claude-sonnet-latest:free+preview@2026";
+    execFileSync(
+      process.execPath,
+      [
+        path.join(workspace, "scripts/ci/prepare-modal-benchmarks.mjs"),
+        "b".repeat(40),
+        "https://github.com/monad-developers/ultrafuzz",
+        "57890-1",
+        output,
+        "smoke"
+      ],
+      {
+        cwd: workspace,
+        env: {
+          ...process.env,
+          BENCHMARK_MODELS_JSON: JSON.stringify([{ provider: "openrouter", model, reasoning: "high" }])
+        }
+      }
+    );
+    const manifest = JSON.parse(fs.readFileSync(path.join(output, "manifest.json"), "utf8")) as {
+      pairs: Array<{ provider: string; config_path: string }>;
+    };
+    expect(manifest.pairs).toHaveLength(1);
+    expect(manifest.pairs[0]?.provider).toBe("openrouter");
+    const config = JSON.parse(fs.readFileSync(path.join(output, manifest.pairs[0]!.config_path), "utf8")) as {
+      models: Array<Record<string, string>>;
+    };
+    expect(config.models[0]).toEqual(
+      expect.objectContaining({
+        provider: "openrouter",
+        agent: "OpenRouterAgent",
+        model,
+        auth_mode: "api-key"
+      })
+    );
+  });
+
   it("rejects unsafe model overrides and provider sets that do not match the mode", () => {
     const workspace = path.resolve("../..");
     const cases = [

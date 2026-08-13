@@ -11,13 +11,18 @@ const fullSha = z.string().regex(/^[0-9a-f]{40}$/u);
 const relativeFile = z.string().regex(/^(?!\/)(?![A-Za-z]:[\\/])(?!.*(?:^|[\\/])\.\.(?:[\\/]|$)).+$/u);
 const envName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/u);
 const httpsUrl = z.string().max(2048).regex(MODAL_HTTPS_URL_PATTERN);
+const openRouterModelId = z
+  .string()
+  .min(1)
+  .max(256)
+  .regex(/^[^\s\p{Cc}]+$/u);
 
 const modelSchema = z
   .object({
     slug: safeId,
     model: z.string().min(1).max(256),
-    provider: z.enum(["openai", "anthropic", "deepseek", "kimi"]),
-    agent: z.enum(["CodexAgent", "ClaudeAgent", "DeepSeekAgent", "KimiAgent"]),
+    provider: z.enum(["openai", "anthropic", "deepseek", "kimi", "openrouter"]),
+    agent: z.enum(["CodexAgent", "ClaudeAgent", "DeepSeekAgent", "KimiAgent", "OpenRouterAgent"]),
     reasoning: z.string().min(1).max(64),
     auth_mode: z.enum(["api-key", "subscription"])
   })
@@ -27,7 +32,8 @@ const modelSchema = z
       (model.provider === "openai" && model.agent === "CodexAgent") ||
       (model.provider === "anthropic" && model.agent === "ClaudeAgent") ||
       (model.provider === "deepseek" && model.agent === "DeepSeekAgent") ||
-      (model.provider === "kimi" && model.agent === "KimiAgent"),
+      (model.provider === "kimi" && model.agent === "KimiAgent") ||
+      (model.provider === "openrouter" && model.agent === "OpenRouterAgent"),
     "model provider and agent do not match"
   )
   .refine(
@@ -41,6 +47,14 @@ const modelSchema = z
   .refine(
     (model) => model.provider !== "deepseek" || model.auth_mode === "api-key",
     "DeepSeek authentication must use an API key"
+  )
+  .refine(
+    (model) => model.provider !== "openrouter" || model.auth_mode === "api-key",
+    "OpenRouter authentication must use an API key"
+  )
+  .refine(
+    (model) => model.provider !== "openrouter" || openRouterModelId.safeParse(model.model).success,
+    "OpenRouter model must be an opaque catalogue ID without whitespace or control characters"
   );
 
 const publicBenchmarkTargetSchema = z

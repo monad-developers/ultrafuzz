@@ -24,8 +24,8 @@ import {
   validateResolvedConfigJson
 } from "../src/index.js";
 
-const EXPECTED_SCHEMA_SHA256 = "1769195f8d7c435d3e09be6782474014d6f39de449197c5eb6b89e5800fa4889";
-const EXPECTED_BUNDLE_SHA256 = "05a348eb7f16019f81687a5c65483e1724fc9eff4e666ed4879737c6355cb609";
+const EXPECTED_SCHEMA_SHA256 = "b0e99445134a24c3a2ecbce12221bcae0e2bd414ee441f0dcfc78eff6fb7d314";
+const EXPECTED_BUNDLE_SHA256 = "55c4a39be2c2178a247f33d36622ac0e8cd030c2cec4f65b2828af5cae5cf9a2";
 
 describe("resolved config JSON contract", () => {
   it("registers the exact checked-in Draft 2020-12 schema and stable digests", () => {
@@ -126,6 +126,18 @@ describe("resolved config JSON contract", () => {
         mutate: (value) => void (record(record(value.agents).DeepSeekAgent).auth = "subscription")
       },
       {
+        label: "OpenRouter subscription",
+        mutate: (value) => void (record(record(value.agents).OpenRouterAgent).auth = "subscription")
+      },
+      {
+        label: "OpenRouter model whitespace",
+        mutate: (value) => void (profile(value, "openrouter").model = "vendor/model bad")
+      },
+      {
+        label: "OpenRouter model control character",
+        mutate: (value) => void (profile(value, "openrouter").model = "vendor/model\u0080control")
+      },
+      {
         label: "missing api key env",
         mutate: (value) => void delete record(record(value.agents).CodexAgent).apiKeyEnv
       },
@@ -182,6 +194,18 @@ describe("resolved config JSON contract", () => {
     expect(validateResolvedConfigJson(value).ok).toBe(true);
     expect(resolvedConfigZodSchema.safeParse(value).success).toBe(true);
     expect(resolvedConfigValidatorsAgree(value)).toBe(true);
+  });
+
+  it("accepts punctuation-rich opaque OpenRouter catalogue IDs without transforming them", () => {
+    const value = validFixture();
+    const model = "~vendor/model.latest:free+preview@2026";
+    profile(value, "openrouter").model = model;
+
+    expect(validateResolvedConfigJson(value).ok).toBe(true);
+    const zod = resolvedConfigZodSchema.safeParse(value);
+    expect(zod.success).toBe(true);
+    if (zod.success) expect(zod.data.models.profiles.openrouter?.model).toBe(model);
+    expect(profile(value, "openrouter").model).toBe(model);
   });
 
   it("rejects duplicate keys and invalid UTF-8 before schema validation", () => {

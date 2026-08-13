@@ -83,8 +83,8 @@ class RealModalSmokeDriver implements ModalSmokeDriver {
     this.auth =
       provider === "kimi"
         ? await prepareSubscriptionAuthCopy({ provider, auth_mode: "subscription", model: "kimi-k3" })
-        : provider === "deepseek"
-          ? await prepareDeepSeekSmokeAuth(this.options.apiKey)
+        : provider === "deepseek" || provider === "openrouter"
+          ? await prepareApiKeySmokeAuth(provider, this.options.apiKey)
           : subscriptionAuthCopy({ provider, auth_mode: "subscription" });
     if (this.auth === undefined) throw new Error("smoke auth is unavailable");
     await access(this.auth.source);
@@ -286,15 +286,21 @@ async function drain(stream: ReadableStream<string>): Promise<void> {
   }
 }
 
-async function prepareDeepSeekSmokeAuth(apiKey: string | undefined): Promise<SubscriptionAuthCopy> {
-  if (apiKey === undefined || apiKey.trim() === "") throw new Error("DeepSeek smoke requires DEEPSEEK_API_KEY");
-  const temporary = await mkdtemp(path.join(tmpdir(), "ultrafuzz-modal-smoke-deepseek-auth-"));
+async function prepareApiKeySmokeAuth(
+  provider: "deepseek" | "openrouter",
+  apiKey: string | undefined
+): Promise<SubscriptionAuthCopy> {
+  const environmentName = provider === "deepseek" ? "DEEPSEEK_API_KEY" : "OPENROUTER_API_KEY";
+  if (apiKey === undefined || apiKey.trim() === "") {
+    throw new Error(`${provider === "deepseek" ? "DeepSeek" : "OpenRouter"} smoke requires ${environmentName}`);
+  }
+  const temporary = await mkdtemp(path.join(tmpdir(), `ultrafuzz-modal-smoke-${provider}-auth-`));
   const source = path.join(temporary, "api-key");
   try {
     await writeFile(source, apiKey, { encoding: "utf8", mode: 0o600 });
     return {
       source,
-      destination: remoteAuthPath("deepseek"),
+      destination: remoteAuthPath(provider),
       cleanup: async () => {
         await rm(temporary, { recursive: true, force: true });
       }

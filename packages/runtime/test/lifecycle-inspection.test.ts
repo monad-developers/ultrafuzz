@@ -995,6 +995,77 @@ test("diagnoseProject reports a healthy pinned install and the latest published 
   assert.ok(doctor.value?.toolchain.some((entry) => entry.name === "forge"));
 });
 
+test("diagnoseProject reports a missing credential for a selected OpenRouter profile", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const configPath = path.join(project, "ultrafuzz.toml");
+  fs.writeFileSync(
+    configPath,
+    fs
+      .readFileSync(configPath, "utf8")
+      .replace(
+        'agent = "CodexAgent"\nmodel = "gpt-5.5"\nreasoning = "xhigh"',
+        'agent = "OpenRouterAgent"\nmodel = "~anthropic/claude-sonnet-latest:free"\nreasoning = "high"'
+      ),
+    "utf8"
+  );
+  writeFakeInstalledEngine(project, { version: SMITHERS_VERSION });
+  const probe = async (names: readonly string[]) =>
+    names.map((name) => ({ name, available: true, path: `/usr/bin/${name}`, version: "test" }));
+
+  const missing = await diagnoseProject({
+    projectRoot: project,
+    env: { PATH: "/usr/bin" },
+    offline: true,
+    requiredCommandProbe: probe
+  });
+  assert.equal(missing.value?.checks.find((check) => check.name === "agent-credentials")?.status, "error");
+  assert.ok(missing.diagnostics.some((entry) => entry.code === "DOCTOR_AGENT_CREDENTIAL_MISSING"));
+
+  const ready = await diagnoseProject({
+    projectRoot: project,
+    env: { PATH: "/usr/bin", OPENROUTER_API_KEY: "test-key" },
+    offline: true,
+    requiredCommandProbe: probe
+  });
+  assert.equal(ready.value?.checks.find((check) => check.name === "agent-credentials")?.status, "ok");
+  assert.equal(
+    ready.diagnostics.some((entry) => entry.code === "DOCTOR_AGENT_CREDENTIAL_MISSING"),
+    false
+  );
+});
+
+test("diagnoseProject checks an OpenRouter profile selected only by topology", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const topologyPath = path.join(project, ".ultrafuzz", "topology.yml");
+  fs.writeFileSync(
+    topologyPath,
+    fs
+      .readFileSync(topologyPath, "utf8")
+      .replace(
+        "    prompt: setup/project-discovery.md\n",
+        "    prompt: setup/project-discovery.md\n    model_profiles:\n      - openrouter\n"
+      ),
+    "utf8"
+  );
+  writeFakeInstalledEngine(project, { version: SMITHERS_VERSION });
+  const probe = async (names: readonly string[]) =>
+    names.map((name) => ({ name, available: true, path: `/usr/bin/${name}`, version: "test" }));
+
+  const missing = await diagnoseProject({
+    projectRoot: project,
+    env: { PATH: "/usr/bin" },
+    offline: true,
+    requiredCommandProbe: probe
+  });
+
+  assert.equal(missing.value?.checks.find((check) => check.name === "agent-credentials")?.status, "error");
+  assert.ok(missing.diagnostics.some((entry) => entry.code === "DOCTOR_AGENT_CREDENTIAL_MISSING"));
+});
+
 test("diagnoseProject reports commands required by the active topology", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
