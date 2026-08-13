@@ -52,7 +52,7 @@ export async function validateProject(input: ValidateProjectInput) {
   }
 
   if (resolved.config) {
-    const policy = evaluatePolicies(projectRoot, resolved.config, input.env ?? process.env, topologyCheck.agentRefs);
+    const policy = evaluatePolicies(projectRoot, resolved.config);
     Object.assign(posture, policy.posture);
   } else {
     const blocked = postureFromDiagnostics("policy", "policy checks need valid config", [
@@ -206,7 +206,6 @@ function validateTopologySurface(
 ): {
   posture: PostureItem;
   summary?: ValidateProjectResult["topology"];
-  agentRefs?: Set<string>;
 } {
   try {
     const policy =
@@ -278,8 +277,7 @@ function validateTopologySurface(
         logical_nodes: topology.nodes.length,
         expanded_nodes: expanded.nodes.length,
         required_commands: [...new Set(expanded.nodes.flatMap((node) => node.requiredCommands ?? []))].sort()
-      },
-      agentRefs: selectedAgents
+      }
     };
   } catch (error) {
     return {
@@ -292,13 +290,11 @@ function validateTopologySurface(
 
 function evaluatePolicies(
   projectRoot: string,
-  config: ResolvedConfig,
-  _env: Record<string, string | undefined>,
-  selectedAgentRefs: Set<string> | undefined
+  config: ResolvedConfig
 ): {
   posture: Omit<PolicyPosture, "config" | "topology" | "prompts">;
 } {
-  const agentRegistry = validateAgentReferences(projectRoot, config, selectedAgentRefs);
+  const agentRegistry = validateAgentReferences(projectRoot, config);
   return {
     posture: {
       paths: postureFromDiagnostics("paths", "product files are written through project-local path guards", []),
@@ -312,50 +308,44 @@ function evaluatePolicies(
   };
 }
 
-function validateAgentReferences(
-  projectRoot: string,
-  config: ResolvedConfig,
-  selectedAgentRefs: Set<string> | undefined
-): RuntimeDiagnostic[] {
+function validateAgentReferences(projectRoot: string, config: ResolvedConfig): RuntimeDiagnostic[] {
   const diagnostics: RuntimeDiagnostic[] = [];
-  const defaultProfile = config.models.profiles[config.models.default];
-  const agentRefs = selectedAgentRefs ?? new Set(defaultProfile === undefined ? [] : [defaultProfile.agent]);
-  const candidates = [
-    path.join(projectRoot, ".smithers", "agents.ts"),
-    path.join(projectRoot, ".smithers", "agents", "index.ts")
-  ];
-  const existing = candidates.filter((candidate) => fs.existsSync(candidate));
-  if (existing.length === 0) {
+  const agentRefs = new Set(Object.values(config.models.profiles).map((profile) => profile.agent));
+  const registryPath = path.join(projectRoot, ".smithers", "agents", "index.ts");
+  if (!fs.existsSync(registryPath)) {
     return [
       {
         code: "AGENT_REGISTRY_MISSING",
-        message: "project agent registry is missing; rerun ultrafuzz init to restore it",
+        message:
+          "canonical project agent registry .smithers/agents/index.ts is missing; rerun ultrafuzz init to restore it",
         severity: "error",
         source: "agents",
-        path: "agent registry"
+        path: ".smithers/agents/index.ts"
       }
     ];
   }
-  const registryText = existing.map((candidate) => fs.readFileSync(candidate, "utf8")).join("\n");
+  const registryText = fs.readFileSync(registryPath, "utf8");
   for (const agentRef of [...agentRefs].sort()) {
-    if (!agentRefExported(registryText, agentRef)) {
+    if (!registersAgentFactory(registryText, agentRef)) {
       diagnostics.push({
         code: "AGENT_REFERENCE_UNKNOWN",
-        message: `agent reference ${agentRef} is not exported by the project agent registry`,
+        message: `agent reference ${agentRef} is not registered in agentFactories by .smithers/agents/index.ts`,
         severity: "error",
         source: "agents",
-        path: "agent registry"
+        path: ".smithers/agents/index.ts"
       });
     }
   }
   return diagnostics;
 }
 
-function agentRefExported(registryText: string, agentRef: string): boolean {
+function registersAgentFactory(registryText: string, agentRef: string): boolean {
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(agentRef)) {
     return false;
   }
-  return new RegExp(`\\b${agentRef}\\b`, "u").test(registryText);
+  const uncommented = registryText.replace(/\/\*[\s\S]*?\*\//gu, "").replace(/\/\/[^\r\n]*/gu, "");
+  const factories = /\bexport\s+const\s+agentFactories\s*=\s*\{([^}]*)\}/u.exec(uncommented);
+  return factories !== null && new RegExp(`(?:^|,)\\s*${agentRef}\\s*:`, "u").test(factories[1] ?? "");
 }
 
 function applyAgentOverrides(config: ResolvedConfig, input: ValidateProjectInput): void {

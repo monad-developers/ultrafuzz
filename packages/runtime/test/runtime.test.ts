@@ -1335,7 +1335,13 @@ function writeFanoutProject(project: string, discoveryMarkdownPath = "setup/proj
   fs.mkdirSync(path.join(project, ".smithers", "agents"), { recursive: true });
   fs.writeFileSync(
     path.join(project, ".smithers", "agents", "index.ts"),
-    "export const CodexAgent = {};\nexport const ClaudeAgent = {};\n",
+    "const createAgent = () => null;\n" +
+      "export const agentFactories = {\n" +
+      "  ClaudeAgent: createAgent,\n" +
+      "  CodexAgent: createAgent,\n" +
+      "  DeepSeekAgent: createAgent,\n" +
+      "  KimiAgent: createAgent\n" +
+      "};\n",
     "utf8"
   );
   fs.writeFileSync(
@@ -4496,7 +4502,7 @@ test("validate rejects unknown agent references before launch", async () => {
   assert.ok(run.diagnostics.some((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN"));
 });
 
-test("validate ignores unused opt-in model profiles in older agent registries", async () => {
+test("validate rejects incomplete current agent registries even when missing profiles are unused", async () => {
   const project = tempProject();
   const init = initProject({ projectRoot: project, force: true });
   assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
@@ -4504,12 +4510,23 @@ test("validate ignores unused opt-in model profiles in older agent registries", 
   fs.writeFileSync(
     path.join(project, ".smithers/agents/index.ts"),
     'export { createCodexAgent } from "./codex";\n' +
-      "export const agentFactories = { CodexAgent: createCodexAgent };\n",
+      'export { ClaudeAgent } from "./claude";\n' +
+      "export const agentFactories = {\n" +
+      "  CodexAgent: createCodexAgent,\n" +
+      "  // DeepSeekAgent: createDeepSeekAgent,\n" +
+      '  note: "KimiAgent:"\n' +
+      "};\n",
     "utf8"
   );
 
   const validate = await validateProject({ projectRoot: project, env: {} });
-  assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
+  assert.equal(validate.ok, false);
+  assert.deepEqual(
+    validate.diagnostics
+      .filter((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN")
+      .map((diagnostic) => diagnostic.message.match(/agent reference (\w+)/u)?.[1]),
+    ["ClaudeAgent", "DeepSeekAgent", "KimiAgent"]
+  );
 
   const kimiRun = await startRun({
     projectRoot: project,
@@ -4519,6 +4536,20 @@ test("validate ignores unused opt-in model profiles in older agent registries", 
   });
   assert.equal(kimiRun.ok, false);
   assert.ok(kimiRun.diagnostics.some((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN"));
+});
+
+test("validate rejects the historical single-file agent registry location", async () => {
+  const project = tempProject();
+  const init = initProject({ projectRoot: project, force: true });
+  assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+  writeSmallTopology(project);
+  const canonicalRegistry = path.join(project, ".smithers/agents/index.ts");
+  fs.renameSync(canonicalRegistry, path.join(project, ".smithers/agents.ts"));
+
+  const validate = await validateProject({ projectRoot: project, env: {} });
+
+  assert.equal(validate.ok, false);
+  assert.ok(validate.diagnostics.some((diagnostic) => diagnostic.code === "AGENT_REGISTRY_MISSING"));
 });
 
 test("init and run layout reject symlinked project-owned roots before writes", async () => {
