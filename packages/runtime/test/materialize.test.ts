@@ -18,6 +18,11 @@ function git(cwd: string, args: string[]): string {
 
 function writeSmallTopology(project: string): void {
   fs.writeFileSync(
+    path.join(project, ".ultrafuzz", "prompts", "setup", "test-output.md"),
+    "Write the result to `{{artifact_path}}/stdout.txt`.\n",
+    "utf8"
+  );
+  fs.writeFileSync(
     path.join(project, ".ultrafuzz", "topology.yml"),
     `version: 2
 defaults:
@@ -29,7 +34,7 @@ nodes:
     depends_on: []
   - id: project-discovery
     kind: agentic
-    prompt: setup/project-discovery.md
+    prompt: setup/test-output.md
     depends_on:
       - __start__
     outputs:

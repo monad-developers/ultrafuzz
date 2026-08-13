@@ -261,7 +261,16 @@ function fakeSmithersEnv(
   };
 }
 
+function writeSyntheticOutputPrompt(project: string, outputPaths: string[]): void {
+  fs.writeFileSync(
+    path.join(project, ".ultrafuzz", "prompts", "setup", "test-output.md"),
+    `${outputPaths.map((outputPath) => `Write the declared output to \`{{artifact_path}}/${outputPath}\`.`).join("\n")}\n`,
+    "utf8"
+  );
+}
+
 function writeSmallTopology(project: string): void {
+  writeSyntheticOutputPrompt(project, ["stdout.txt"]);
   fs.writeFileSync(
     path.join(project, ".ultrafuzz", "topology.yml"),
     `version: 2
@@ -274,7 +283,7 @@ nodes:
     depends_on: []
   - id: project-discovery
     kind: agentic
-    prompt: setup/project-discovery.md
+    prompt: setup/test-output.md
     depends_on:
       - __start__
     outputs:
@@ -300,6 +309,7 @@ function appendReportVocabularyPromptReferences(project: string): void {
 }
 
 function writeReportTopology(project: string): void {
+  writeSyntheticOutputPrompt(project, ["stdout.txt"]);
   fs.writeFileSync(
     path.join(project, ".ultrafuzz", "topology.yml"),
     `version: 2
@@ -312,7 +322,7 @@ nodes:
     depends_on: []
   - id: project-discovery
     kind: agentic
-    prompt: setup/project-discovery.md
+    prompt: setup/test-output.md
     depends_on:
       - __start__
     outputs:
@@ -321,7 +331,7 @@ nodes:
         primary: true
   - id: final-report
     kind: agentic
-    prompt: setup/project-discovery.md
+    prompt: setup/test-output.md
     depends_on:
       - __start__
     outputs:
@@ -376,6 +386,7 @@ nodes:
 }
 
 function writeByteIdentityTopology(project: string): void {
+  writeSyntheticOutputPrompt(project, ["stdout.txt", "aggregation.json"]);
   fs.writeFileSync(
     path.join(project, ".ultrafuzz", "topology.yml"),
     `version: 2
@@ -388,7 +399,7 @@ nodes:
     depends_on: []
   - id: project-discovery
     kind: agentic
-    prompt: setup/project-discovery.md
+    prompt: setup/test-output.md
     depends_on:
       - __start__
     outputs:
@@ -397,7 +408,7 @@ nodes:
         primary: true
   - id: aggregate-test-files
     kind: agentic
-    prompt: setup/project-discovery.md
+    prompt: setup/test-output.md
     depends_on:
       - project-discovery
     outputs:
@@ -406,7 +417,7 @@ nodes:
         primary: true
   - id: final-report
     kind: agentic
-    prompt: setup/project-discovery.md
+    prompt: setup/test-output.md
     depends_on:
       - aggregate-test-files
     outputs:
