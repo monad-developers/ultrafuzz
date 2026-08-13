@@ -4861,16 +4861,9 @@ function trustedCoverageSourceKind(
   productionInventory: ReadonlySet<string>
 ): CoverageSourceKind | undefined {
   if (productionInventory.has(relativePath)) return "production";
-  const segments = relativePath.split("/");
-  const first = segments[0]!.toLowerCase();
+  const segments = relativePath.split("/").map((segment) => segment.toLowerCase());
   const dependencyRoots = new Set(["lib", "libs", "vendor", "vendors", "dependency", "dependencies"]);
-  if (dependencyRoots.has(first) || segments.some((segment) => segment.toLowerCase() === "node_modules")) {
-    return "dependency";
-  }
-  if (first === "test" || first === "tests") {
-    const harnessRoots = new Set(["recon", "echidna", "fuzz", "fuzzing", "invariant", "invariants", "harness"]);
-    return segments.slice(1).some((segment) => harnessRoots.has(segment.toLowerCase())) ? "harness" : "test";
-  }
+  const testRoots = new Set(["test", "tests"]);
   const harnessRoots = new Set([
     "recon",
     "echidna",
@@ -4883,7 +4876,17 @@ function trustedCoverageSourceKind(
     "script",
     "scripts"
   ]);
-  return harnessRoots.has(first) ? "harness" : undefined;
+  const rootedKinds = segments
+    .map((segment, index): { index: number; kind: CoverageSourceKind } | undefined => {
+      if (dependencyRoots.has(segment) || segment === "node_modules") return { index, kind: "dependency" };
+      if (testRoots.has(segment)) return { index, kind: "test" };
+      if (harnessRoots.has(segment)) return { index, kind: "harness" };
+      return undefined;
+    })
+    .filter((entry): entry is { index: number; kind: CoverageSourceKind } => entry !== undefined);
+  const root = rootedKinds[0];
+  if (root?.kind !== "test") return root?.kind;
+  return rootedKinds.some((entry) => entry.index > root.index && entry.kind === "harness") ? "harness" : "test";
 }
 
 function lcovRangeCovered(coveredLines: readonly number[] | undefined, startLine: number, endLine: number): boolean {
@@ -6661,23 +6664,17 @@ function coverageEvidenceMarkdownProjectionDiagnostics(
       ];
 }
 
-function unscopedCoverageScoreDiagnostics(contents: string, artifactPath: string): RuntimeDiagnostic[] {
-  const percentage = /\b(?:100(?:\.0+)?|\d{1,2}(?:\.\d+)?)\s*%/u;
-  const fraction = /\b\d+\s*\/\s*\d+\b/u;
-  const namedScope = /\b(?:selected-range|production-source)\b/iu;
+function unscopedCoverageScoreDiagnostics(
+  contents: string,
+  artifactPath: string,
+  requireCoverageContext = false
+): RuntimeDiagnostic[] {
   return contents
     .split(/\r?\n/u)
     .map((line, index) => ({ line, lineNumber: index + 1 }))
-    .map(({ line, lineNumber }) => ({
-      lineNumber,
-      kind:
-        percentage.test(line) && !namedScope.test(line)
-          ? "percentage"
-          : fraction.test(line) && !namedScope.test(line)
-            ? "fraction"
-            : undefined
-    }))
-    .filter((entry): entry is { lineNumber: number; kind: "percentage" | "fraction" } => entry.kind !== undefined)
+    .flatMap(({ line, lineNumber }) =>
+      unscopedCoverageScoreKinds(line, requireCoverageContext).map((kind) => ({ lineNumber, kind }))
+    )
     .map(({ lineNumber, kind }) => ({
       code: kind === "percentage" ? "UNSCOPED_COVERAGE_PERCENTAGE" : "UNSCOPED_COVERAGE_FRACTION",
       message:
@@ -6691,9 +6688,6 @@ function unscopedCoverageScoreDiagnostics(contents: string, artifactPath: string
 }
 
 function unscopedReportCoverageScoreDiagnostics(contents: string, artifactPath: string): RuntimeDiagnostic[] {
-  const percentage = /\b(?:100(?:\.0+)?|\d{1,2}(?:\.\d+)?)\s*%/u;
-  const fraction = /\b\d+\s*\/\s*\d+\b/u;
-  const namedScope = /\b(?:selected-range|production-source)\b/iu;
   let fenced = false;
   let coverageSection = false;
   return contents
@@ -6703,23 +6697,19 @@ function unscopedReportCoverageScoreDiagnostics(contents: string, artifactPath: 
       const trimmed = line.trim();
       if (/^(?:`{3,}|~{3,})/u.test(trimmed)) {
         fenced = !fenced;
-        return { lineNumber, kind: undefined };
+        return { lineNumber, kinds: [] };
       }
-      if (fenced) return { lineNumber, kind: undefined };
+      if (fenced) return { lineNumber, kinds: [] };
       if (/^##\s+/u.test(trimmed)) {
         coverageSection =
           /^##\s+(?:scoped coverage evidence|coverage(?:\s+(?:evidence|report|results?|summary))?)\s*$/iu.test(trimmed);
       }
-      const coverageContext = coverageSection || coverageMetricLanguageContext(line);
-      const kind =
-        coverageContext && percentage.test(line) && !namedScope.test(line)
-          ? "percentage"
-          : coverageContext && fraction.test(line) && !namedScope.test(line)
-            ? "fraction"
-            : undefined;
-      return { lineNumber, kind };
+      return {
+        lineNumber,
+        kinds: unscopedCoverageScoreKinds(line, !coverageSection)
+      };
     })
-    .filter((entry): entry is { lineNumber: number; kind: "percentage" | "fraction" } => entry.kind !== undefined)
+    .flatMap(({ lineNumber, kinds }) => kinds.map((kind) => ({ lineNumber, kind })))
     .map(({ lineNumber, kind }) => ({
       code: kind === "percentage" ? "UNSCOPED_COVERAGE_PERCENTAGE" : "UNSCOPED_COVERAGE_FRACTION",
       message:
@@ -6730,6 +6720,21 @@ function unscopedReportCoverageScoreDiagnostics(contents: string, artifactPath: 
       source: "coverage-evidence",
       path: `${artifactPath}:${lineNumber}`
     }));
+}
+
+function unscopedCoverageScoreKinds(line: string, requireCoverageContext: boolean): ("percentage" | "fraction")[] {
+  const percentage = /\b(?:100(?:\.0+)?|\d{1,2}(?:\.\d+)?)\s*%/u;
+  const fraction = /\b\d+\s*\/\s*\d+\b/u;
+  const namedScope = /\b(?:selected-range|production-source)\b/iu;
+  const kinds = new Set<"percentage" | "fraction">();
+  const normalizedLine = line.replace(/&#(?:0*37|x0*25);/giu, "%");
+  for (const clause of normalizedLine.split(/\s*(?:[,;]|\b(?:and|but|whereas|while)\b)\s*/iu)) {
+    if (namedScope.test(clause)) continue;
+    if (requireCoverageContext && !coverageMetricLanguageContext(clause)) continue;
+    if (percentage.test(clause)) kinds.add("percentage");
+    if (fraction.test(clause)) kinds.add("fraction");
+  }
+  return [...kinds];
 }
 
 function markdownSectionOccurrences(contents: string, heading: string): string[][] {
@@ -6783,7 +6788,7 @@ function unscopedCoverageScoreDiagnosticsInJson(
   const visit = (value: unknown, jsonPath: string, directCoverageField: boolean): void => {
     if (typeof value === "string") {
       if (directCoverageField || coverageMetricLanguageContext(value)) {
-        diagnostics.push(...unscopedCoverageScoreDiagnostics(value, `${reportPath}#${jsonPath}`));
+        diagnostics.push(...unscopedCoverageScoreDiagnostics(value, `${reportPath}#${jsonPath}`, !directCoverageField));
       }
       return;
     }
