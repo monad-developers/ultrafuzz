@@ -207,6 +207,8 @@ describe("artifact handoff validation", () => {
       "Document reachability note edge-cases in the report.",
       "Reachability: internal functions require a cross-check before triage.",
       "Reachability: internal behavior must be documented.",
+      "Do not set reachability to internal on every finding.",
+      "The old prompt set reachability to internal on every finding.",
       "risK=non-semantic Unicode evidence."
     ]) {
       expect(() =>
@@ -268,6 +270,10 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       "Change helper_proof into helperEvidence.",
       "Replace helper_proof by helperEvidence.",
       "Set `reachability` to `internal` on every finding.",
+      "Set the reachability field to internal on every finding.",
+      "Rename the helper_proof note key to helperEvidence.",
+      "Set **reachability** to **internal** on every finding.",
+      "Rename the helper_proof key to helperEvidence.",
       "Set reachability internal on every finding.",
       "Emit reachability internal on every finding.",
       "Assign reachability internal to every finding.",
