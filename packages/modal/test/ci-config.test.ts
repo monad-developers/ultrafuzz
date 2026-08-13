@@ -62,7 +62,9 @@ describe("public Modal benchmark configuration", () => {
     expect(manifest).not.toHaveProperty("experiment");
     expect(manifest.benchmark).toBe("ultrafuzz-bench");
     expect(manifest.execution).toEqual({ mode: "modal", dry_run: false });
-    const cohort = JSON.parse(fs.readFileSync(path.join(workspace, "benchmarks/ultrafuzz-bench.json"), "utf8")) as {
+    const cohort = JSON.parse(
+      fs.readFileSync(path.join(workspace, "benchmarks/ultrafuzzbench/cohort.json"), "utf8")
+    ) as {
       smoke_targets: string[];
       targets: BenchmarkTarget[];
     };
@@ -162,7 +164,7 @@ describe("public Modal benchmark configuration", () => {
     expect(manifest).not.toHaveProperty("experiment");
     expect(manifest.benchmark).toBe("evmbench");
     expect(manifest.execution).toEqual({ mode: "modal", dry_run: false });
-    const cohort = JSON.parse(fs.readFileSync(path.join(workspace, "benchmarks/evmbench-detect.json"), "utf8")) as {
+    const cohort = JSON.parse(fs.readFileSync(path.join(workspace, "benchmarks/evmbench/cohort.json"), "utf8")) as {
       targets: BenchmarkTarget[];
     };
     expect(manifest.targets).toEqual(cohort.targets);
@@ -1133,8 +1135,8 @@ describe("public Modal benchmark configuration", () => {
     };
     expect(producer.on.push.branches).toEqual(["main"]);
     expect(producer.on.push["paths-ignore"]).toEqual([
-      "benchmarks/history.json",
-      "benchmarks/public-results/**",
+      "benchmarks/ultrafuzzbench/history.json",
+      "benchmarks/ultrafuzzbench/results/**",
       "docs/assets/eval-history/**"
     ]);
 

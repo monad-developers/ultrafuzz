@@ -722,14 +722,10 @@ async function preparePublicBenchmark(
   throwIfAborted(signal);
   await materializeBakedCandidate(scope.candidate_commit, controlRoot, logPath, BAKED_CANDIDATE_ARCHIVE, signal);
   const cohort = loadBenchmarkCohortManifest(
-    path.join(
-      controlRoot,
-      "benchmarks",
-      scope.benchmark === "evmbench" ? "evmbench-detect.json" : "ultrafuzz-bench.json"
-    )
+    path.join(controlRoot, "benchmarks", scope.benchmark === "evmbench" ? "evmbench" : "ultrafuzzbench", "cohort.json")
   );
   const selectedTargetIds = publicBenchmarkConfiguredTargetIds(config, cohort);
-  const lanes = loadBenchmarkLanesManifest(path.join(controlRoot, "benchmarks", "lanes.json"));
+  const lanes = loadBenchmarkLanesManifest(path.join(controlRoot, "benchmarks", "ultrafuzzbench", "lanes.json"));
   const baseSuite = adaptBenchmarkManifestToEvalSuite({
     benchmark: scope.benchmark,
     lane: scope.lane,
@@ -796,7 +792,7 @@ async function preparePublicBenchmark(
   } else {
     for (const target of suite.targets) {
       throwIfAborted(signal);
-      const source = path.join(controlRoot, "benchmarks/public-ground-truth/ultrafuzz-bench", `${target.id}.yml`);
+      const source = path.join(controlRoot, "benchmarks/ultrafuzzbench/ground-truth", `${target.id}.yml`);
       await writeFile(path.join(groundTruthRoot, `${target.id}.yml`), await readFile(source));
     }
   }

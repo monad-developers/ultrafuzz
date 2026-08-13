@@ -145,7 +145,7 @@ targets:
   - id: target
     repo: "https://github.com/scfuzzbench/aave-v4-scfuzzbench"
     ref: "edd6c82721512540c8c90e7a36a4a8e19fd7bdf3"
-    ground_truth: aave-v4-scfuzzbench/findings.yml
+    ground_truth: aave-v4/findings.yml
     held_out_paths: ["tests/recon"]
 ```
 
@@ -348,7 +348,7 @@ Incomplete or duplicate target sets are retained in the append-only history but
 omitted from the overview. The **UltrafuzzBench Score** is macro-F1: the
 arithmetic mean of the per-target F1 values, so each target and framework has
 equal weight. Macro precision and recall use the same equal-target weighting.
-Precision and recall remain available in `benchmarks/history.json` but are omitted
+Precision and recall remain available in `benchmarks/ultrafuzzbench/history.json` but are omitted
 from the overview charts.
 
 The latest-result summary sums recorded target cost and uses the slowest
@@ -384,7 +384,7 @@ IQR.
 
 `eval history` consumes complete scored generations, stores aggregate metrics
 plus immutable candidate, cohort, execution-policy, and scoring lineage in
-`benchmarks/history.json`, and renders the README SVGs without network or model
+`benchmarks/ultrafuzzbench/history.json`, and renders the README SVGs without network or model
 calls. A known partial efficiency value remains numeric and renders with a
 partial marker and typed reasons. An unavailable value remains `null` and
 renders with an `n/a` cross. Legacy partial observations whose numeric value was

@@ -6,6 +6,10 @@ recall, detect-award, and fully typed per-audit fields under `official_evmbench`
 Recorder extras remain only in the preserved upstream JSONL and are never copied
 into the normalized result.
 
+`cohort.json` pins the public target set used by the Modal full benchmark lane. The
+remaining manifests and profiles in this directory support the official EVMBench
+adapter described below.
+
 The lock points at exact commits for the maintained EVMBench repository, its
 frontier-evals submodule, and every public target snapshot. Audit build contexts and
 benchmark evidence are represented by one-way manifests so the repository can

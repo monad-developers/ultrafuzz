@@ -13,15 +13,16 @@ const ref = process.argv[2];
 if (!ref) throw new Error("usage: merge-pending-eval-history.mjs <git-ref>");
 
 const root = process.cwd();
-const historyPath = path.join(root, "benchmarks", "history.json");
-const pendingText = execFileSync("git", ["show", `${ref}:benchmarks/history.json`], {
+const historyRelativePath = "benchmarks/ultrafuzzbench/history.json";
+const historyPath = path.join(root, historyRelativePath);
+const pendingText = execFileSync("git", ["show", `${ref}:${historyRelativePath}`], {
   cwd: root,
   encoding: "utf8",
   stdio: ["ignore", "pipe", "inherit"]
 });
 
 const current = readEvalHistory(historyPath);
-const pending = parseEvalHistoryBytes(Buffer.from(pendingText, "utf8"), `${ref}:benchmarks/history.json`);
+const pending = parseEvalHistoryBytes(Buffer.from(pendingText, "utf8"), `${ref}:${historyRelativePath}`);
 const merged = mergeEvalHistory(current, pending.observations);
 fs.writeFileSync(historyPath, formatEvalHistoryJson(merged), "utf8");
 process.stdout.write(`Preserved ${merged.observations.length - current.observations.length} pending observations.\n`);
