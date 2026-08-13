@@ -11,11 +11,16 @@ import {
 } from "./findings.js";
 import {
   FINDING_NOTE_KEYS,
+  FINDING_NOTE_KEYS_ASCII_CASE_INSENSITIVE_PATTERN,
   FINDING_REACHABILITY_VALUES,
-  FINDING_REPORT_SEMANTIC_KEY_PATTERNS,
+  FINDING_REPORT_ASSIGNMENT_KEY_PATTERN,
+  FINDING_REPORT_EVIDENCE_ASSIGNMENT_KEYS,
+  FINDING_REPORT_METADATA_KEY_PATTERNS,
   FINDING_RISK_VALUES,
   STATEFUL_FAILURE_CLASSIFICATION_VALUES,
-  isFindingReportSemanticKey
+  canonicalFindingNoteKey,
+  isFindingReportEvidenceAssignmentKey,
+  isFindingReportMetadataKey
 } from "./finding-note-vocabulary.js";
 import { validateRegisteredJsonSchema } from "./json-schema-validator.js";
 import { hasAtMostCodePoints } from "./portable-json-primitives.js";
@@ -48,21 +53,31 @@ const findingPath = z
 const nonNegativeInteger = z.number().int().nonnegative().max(MAX_FINDING_COUNT);
 const positiveSafeInteger = z.number().int().positive().max(MAX_FINDING_COUNT);
 const supportedNoteKeyPattern = `(?:${FINDING_NOTE_KEYS.join("|")})`;
-const assignmentKeyCharacters = "\\p{L}\\p{N}\\p{M}\\p{Sc}\\p{Sk}\\p{So}_-";
-const assignmentKeyPattern = `[${assignmentKeyCharacters}]+`;
-const assignmentBoundaryPattern = "(?:^|[^\\p{L}\\p{N}\\p{M}\\p{Sc}\\p{Sk}\\p{So}_-])";
-const assignmentOperatorPattern = "(?:\\s+=(?!=)\\s*|=(?!=)\\s*)";
-const anyAssignmentOperatorPattern = "(?:\\s*={1,2}\\s*)";
-const unsupportedAssignmentPatterns = FINDING_REPORT_SEMANTIC_KEY_PATTERNS.map(
-  (semanticKeyPattern) =>
-    `${assignmentBoundaryPattern}(?!${supportedNoteKeyPattern}${assignmentOperatorPattern})${semanticKeyPattern}${anyAssignmentOperatorPattern}`
+const assignmentKeyPattern = FINDING_REPORT_ASSIGNMENT_KEY_PATTERN;
+const assignmentBoundaryPattern = "(?:^|[^\\p{L}\\p{N}\\p{M}_-])";
+const clauseAssignmentBoundaryPattern = "(?:^|[\\n;,*|&<])[ \\t]*";
+const assignmentOperatorPrefixPattern = "[ \\t]*=(?!=)";
+const assignmentOperatorPattern = `${assignmentOperatorPrefixPattern}[ \\t]*(?=\\S)`;
+const anyAssignmentOperatorPattern = "\\s*={1,2}\\s*";
+const evidenceAssignmentKeyPattern = `(?:${FINDING_REPORT_EVIDENCE_ASSIGNMENT_KEYS.join("|")})`;
+const unsupportedCanonicalAssignmentPattern = `${assignmentBoundaryPattern}(?!${supportedNoteKeyPattern}${assignmentOperatorPattern})${FINDING_NOTE_KEYS_ASCII_CASE_INSENSITIVE_PATTERN}${anyAssignmentOperatorPattern}`;
+const unsupportedMetadataAssignmentPatterns = FINDING_REPORT_METADATA_KEY_PATTERNS.map(
+  (metadataKeyPattern) =>
+    `${clauseAssignmentBoundaryPattern}(?!${evidenceAssignmentKeyPattern}${anyAssignmentOperatorPattern})(?!${supportedNoteKeyPattern}${assignmentOperatorPattern})${metadataKeyPattern}${anyAssignmentOperatorPattern}`
 );
-const typedValueBoundaryPattern = "(?::|[;,*`\\s&]|$)";
-const invalidTypedAssignmentPattern = `${assignmentBoundaryPattern}(?:reachability${assignmentOperatorPattern}(?!(?:${FINDING_REACHABILITY_VALUES.join("|")})${typedValueBoundaryPattern})|stateful_failure_classification${assignmentOperatorPattern}(?!(?:${STATEFUL_FAILURE_CLASSIFICATION_VALUES.join("|")})${typedValueBoundaryPattern})|(?:likelihood|impact)${assignmentOperatorPattern}(?!(?:${FINDING_RISK_VALUES.join("|")})${typedValueBoundaryPattern}))`;
+const chainedMetadataAssignmentPatterns = FINDING_REPORT_METADATA_KEY_PATTERNS.map(
+  (metadataKeyPattern) =>
+    `${assignmentBoundaryPattern}${supportedNoteKeyPattern}${assignmentOperatorPattern}[^\\n;,*|&]{0,4096}\\s+(?!${evidenceAssignmentKeyPattern}${anyAssignmentOperatorPattern})(?!${supportedNoteKeyPattern}${assignmentOperatorPattern})${metadataKeyPattern}${anyAssignmentOperatorPattern}`
+);
+const typedValueBoundaryPattern = "(?::|[.;,*`\\s&]|$)";
+const invalidTypedAssignmentPattern = `${assignmentBoundaryPattern}(?:reachability${assignmentOperatorPrefixPattern}(?![ \\t]*(?:${FINDING_REACHABILITY_VALUES.join("|")})${typedValueBoundaryPattern})[ \\t]*|stateful_failure_classification${assignmentOperatorPrefixPattern}(?![ \\t]*(?:${STATEFUL_FAILURE_CLASSIFICATION_VALUES.join("|")})${typedValueBoundaryPattern})[ \\t]*|(?:likelihood|impact)${assignmentOperatorPrefixPattern}(?![ \\t]*(?:${FINDING_RISK_VALUES.join("|")})${typedValueBoundaryPattern})[ \\t]*)`;
 const findingNoteAssignment = new RegExp(
-  `(?<![${assignmentKeyCharacters}])(${assignmentKeyPattern})(\\s*(={1,2})\\s*)`,
+  `(?<![\\p{L}\\p{N}\\p{M}_-])(${assignmentKeyPattern})(\\s*(={1,2})\\s*)`,
   "gu"
 );
+const findingNoteClauseBoundary = /(?:^|[\n;,*|&<])[ \t]*$/u;
+const findingReportDirective =
+  /(?:^|[^A-Za-z])(?:add|append|assign|define|emit|enforce|include|mandate|mark|plus|put|record|require|returns?|set|treat|use|write)(?:\s+(?:an?|the))?\s+$/iu;
 
 export interface FindingReportSemanticAssignment {
   key: string;
@@ -73,8 +88,15 @@ export interface FindingReportSemanticAssignment {
 export function findingReportSemanticAssignment(text: string): FindingReportSemanticAssignment | undefined {
   for (const assignment of text.matchAll(findingNoteAssignment)) {
     const key = assignment[1]!;
-    if (!isFindingReportSemanticKey(key)) continue;
-    const value = text.slice(assignment.index + assignment[0].length).match(/^[^;,*`\s:&]*/u)?.[0] ?? "";
+    const canonical = canonicalFindingNoteKey(key);
+    const prefix = text.slice(0, assignment.index);
+    const reportMetadata =
+      canonical !== undefined ||
+      (isFindingReportMetadataKey(key) &&
+        !isFindingReportEvidenceAssignmentKey(key) &&
+        (findingNoteClauseBoundary.test(prefix) || findingReportDirective.test(prefix)));
+    if (!reportMetadata) continue;
+    const value = assignedValue(text, assignment.index + assignment[0].length);
     return { key, operator: assignment[3] as "=" | "==", value };
   }
   return undefined;
@@ -86,30 +108,46 @@ export interface FindingNoteAssignmentIssue {
 }
 
 export function findingNoteAssignmentIssue(note: string): FindingNoteAssignmentIssue | undefined {
+  let previousReportAssignmentEnd: number | undefined;
   for (const assignment of note.matchAll(findingNoteAssignment)) {
     const key = assignment[1]!;
-    if (!isFindingReportSemanticKey(key)) continue;
-    if (!FINDING_NOTE_KEYS.includes(key as (typeof FINDING_NOTE_KEYS)[number]) || assignment[3] !== "=") {
+    const canonical = canonicalFindingNoteKey(key);
+    const prefix = note.slice(0, assignment.index);
+    const clauseAssignment =
+      findingNoteClauseBoundary.test(prefix) ||
+      (previousReportAssignmentEnd !== undefined && assignment.index - previousReportAssignmentEnd <= 4097);
+    const reportMetadata =
+      canonical !== undefined ||
+      (clauseAssignment && isFindingReportMetadataKey(key) && !isFindingReportEvidenceAssignmentKey(key));
+    if (!reportMetadata) continue;
+    previousReportAssignmentEnd = assignment.index + assignment[0].length;
+    if (canonical === undefined || key !== canonical || assignment[3] !== "=") {
       return { key, message: "Unsupported report-bound finding note key" };
     }
-    const value = note.slice(assignment.index + assignment[0].length).match(/^[^;,*`\s:&]*/u)?.[0] ?? "";
+    const value = assignedValue(note, assignment.index + assignment[0].length);
     const allowed =
-      key === "reachability"
+      canonical === "reachability"
         ? FINDING_REACHABILITY_VALUES
-        : key === "stateful_failure_classification"
+        : canonical === "stateful_failure_classification"
           ? STATEFUL_FAILURE_CLASSIFICATION_VALUES
-          : key === "likelihood" || key === "impact"
+          : canonical === "likelihood" || canonical === "impact"
             ? FINDING_RISK_VALUES
             : undefined;
     if (allowed !== undefined && !allowed.includes(value as never)) {
-      return { key, message: `Unsupported finding ${key} token ${JSON.stringify(value)}` };
+      return { key, message: `Unsupported finding ${canonical} token ${JSON.stringify(value)}` };
     }
   }
   return undefined;
 }
 
+function assignedValue(text: string, start: number): string {
+  return text.slice(start).match(/^[^.;,*`\s:&]*/u)?.[0] ?? "";
+}
+
 const findingNoteJsonSchemaConstraints = [
-  ...unsupportedAssignmentPatterns.map((pattern) => ({ not: { pattern } })),
+  { not: { pattern: unsupportedCanonicalAssignmentPattern } },
+  ...unsupportedMetadataAssignmentPatterns.map((pattern) => ({ not: { pattern } })),
+  ...chainedMetadataAssignmentPatterns.map((pattern) => ({ not: { pattern } })),
   { not: { pattern: invalidTypedAssignmentPattern } }
 ];
 export const findingReportBoundTextSchema = nonEmptyString

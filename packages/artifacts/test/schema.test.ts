@@ -1157,11 +1157,14 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
 
   for (const note of [
     "reachability=public-entrypoint-trace: verified",
+    "reachability = public-entrypoint-trace: verified",
     "reachability=generated-public-wrapper-poc: verified",
     "reachability=helper-only: public entrypoints reject the input",
+    "reachability=helper-only.",
     "reachability=public-wrapper-required: add a wrapper proof",
     "stateful_failure_classification=production-bug: reproduced",
     "likelihood=High",
+    "likelihood = High",
     "impact=Low",
     "triage_reason=public evidence supports the issue",
     "helper_proof=direct helper mismatch reproduced"
@@ -1186,16 +1189,27 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
     "RISK_FREE_RATE=0.05 impact_price=123 helper_address=0xabc",
     "--dependency-version=1.2.3 STATEFUL_RUNS=1000 scope_id=request-7",
     "https://x.test/?impact_price=123",
+    "The HTTP response had status=200.",
+    "The oracle returned confidence=0.95.",
+    "The trace entered scope=global before reverting.",
+    "The shell printed outcome=success.",
+    "The proof checks risk=0 after withdrawal.",
+    "emit Status(status=200)",
     "_=non-semantic evidence",
     "根因=non-semantic evidence",
     "Δ=non-semantic evidence",
     "💣=non-semantic evidence",
+    "risK=non-semantic Unicode evidence",
+    "liKelihood=non-semantic Unicode evidence",
     "https://x.test/?root%5Fcause=encoded-query-key"
   ]) {
     assertNoteParity(evidenceAssignment, true);
   }
 
   for (const semanticAlias of [
+    "helper_summary=renamed producer key",
+    "reachability_note=helper-only",
+    "classification_notes=accepted",
     "helper_evidence=renamed producer key",
     "classification_evidence=renamed producer key",
     "root_cause_reason=renamed",
@@ -1207,13 +1221,11 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
     "_root_cause=renamed",
     "__root_cause=renamed",
     "___Helper=renamed",
-    "\u0301_root_cause=renamed",
-    "root_cause\u0301=renamed",
-    "r_\u0301o-o_t__cause=renamed",
     "root_cause__=renamed",
     "<root_cause=renamed>",
     "-root_cause=renamed",
     "--root_cause=renamed",
+    "root-cause=renamed",
     "triage_reason=ok;root_cause=renamed",
     "triage_reason=ok,root_cause=renamed",
     "triage_reason=ok*root_cause=renamed",
@@ -1227,7 +1239,6 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
     "root_cause==renamed",
     "reachability==helper-only",
     "9root_cause=renamed",
-    "_9\u0301_root_cause=renamed",
     "helperEvidence=renamed",
     "dependencyScope=renamed",
     "resolution=confirmed",
@@ -1246,6 +1257,15 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
   ]) {
     assertNoteParity(semanticAlias, false);
     assert.notEqual(findingNoteAssignmentIssue(semanticAlias), undefined, semanticAlias);
+  }
+
+  for (const nonAsciiIdentifier of [
+    "\u0301_root_cause=non-semantic Unicode evidence",
+    "root_cause\u0301=non-semantic Unicode evidence",
+    "r_\u0301o-o_t__cause=non-semantic Unicode evidence",
+    "_9\u0301_root_cause=non-semantic Unicode evidence"
+  ]) {
+    assertNoteParity(nonAsciiIdentifier, true);
   }
 
   assert.deepEqual(findingNoteAssignmentIssue("triage_reason=ok root_cause=renamed"), {
@@ -1310,9 +1330,10 @@ test("max-length adversarial report notes preserve Zod and isolated JSON Schema 
     { label: "separator-only", note: "_".repeat(MAX_FINDING_STRING_CODE_POINTS), expected: true },
     { label: "mark-only", note: "\u0301".repeat(MAX_FINDING_STRING_CODE_POINTS), expected: true },
     { label: "long near-miss", note: maxNote("", "_", "root_causx=x"), expected: true },
-    { label: "long leading separators", note: maxNote("", "_", "root_cause=x"), expected: false },
-    { label: "long leading marks", note: maxNote("", "\u0301", "root_cause=x"), expected: false },
-    { label: "long internal separators", note: maxNote("r", "_", "oot_cause=x"), expected: false }
+    { label: "long leading separators", note: maxNote("", "_", "root_cause=x"), expected: true },
+    { label: "long leading marks", note: maxNote("", "\u0301", "root_cause=x"), expected: true },
+    { label: "long internal separators", note: maxNote("r", "_", "oot_cause=x"), expected: true },
+    { label: "long clause separator", note: maxNote("", "x", ";root_cause=x"), expected: false }
   ] as const;
 
   for (const { label, note, expected } of cases) {

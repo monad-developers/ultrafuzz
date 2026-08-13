@@ -26,178 +26,67 @@ export const FINDING_NOTE_KEYS = [
   "impact"
 ] as const;
 
-export const FINDING_REPORT_SEMANTIC_KEY_ALIASES = [
-  "audit_decision",
-  "cause",
-  "reason",
-  "root_cause",
-  "root-cause",
-  "rootcause",
-  "root_cause_reason",
-  "finding_classification",
-  "finding_outcome",
-  "classification",
-  "classification_evidence",
-  "classificationEvidence",
-  "classification_alias",
-  "helper",
-  "helper_evidence",
-  "helperEvidence",
-  "reachability_alias",
-  "reachability_evidence",
-  "scope",
-  "scope_decision",
-  "proof",
-  "exploitability",
-  "risk",
-  "risk_score",
-  "severity",
-  "severityalias",
-  "triage",
-  "verdict",
-  "confidence",
-  "status",
-  "finding_kind",
-  "finding-kind",
-  "stateful_failure_alias",
-  "helper_proof_alias",
-  "dependency_scope_alias",
-  "dependencyScope",
-  "resolution",
-  "disposition",
-  "final_severity",
-  "severity_guess",
-  "confidence_score",
-  "finding_status",
-  "triage_result",
-  "classification_result",
-  "proof_kind",
-  "outcome",
-  "decision",
-  "report_severity",
-  "reachability_status",
-  "helper_reachability",
-  "exploit_path",
-  "exploitEvidence"
+/** ASCII-only, case-insensitive forms used by both the runtime and portable
+ * JSON-Schema grammar. Unicode compatibility folds are deliberately excluded:
+ * JSON Schema has no portable equivalent, and identifiers in the authority are
+ * ASCII exact apart from case. */
+export const FINDING_NOTE_KEYS_ASCII_CASE_INSENSITIVE_PATTERN = `(?:${FINDING_NOTE_KEYS.map((key) =>
+  key.replace(/[A-Za-z]/gu, (character) => `[${character.toLowerCase()}${character.toUpperCase()}]`)
+).join("|")})`;
+
+export const FINDING_REPORT_ASSIGNMENT_KEY_PATTERN = "[-_0-9A-Za-z]{1,128}";
+
+const findingReportAssignmentKey = new RegExp(`^${FINDING_REPORT_ASSIGNMENT_KEY_PATTERN}$`, "u");
+
+/** Exact assignment-shaped evidence keys that overlap the report-metadata
+ * vocabulary. Keep this list narrow: a generic uppercase exemption would let
+ * producer-local aliases such as `ROOT_CAUSE` evade the authority. */
+export const FINDING_REPORT_EVIDENCE_ASSIGNMENT_KEYS = [
+  "RISK_FREE_RATE",
+  "STATEFUL_RUNS",
+  "--dependency-version"
 ] as const;
 
-function compactFindingReportSemanticKey(key: string): string {
-  return key
-    .replace(/\p{M}/gu, "")
-    .replace(/^[-_]+/u, "")
-    .replace(/^\d+/u, "")
-    .toLocaleLowerCase("en-US")
-    .replaceAll("_", "")
-    .replaceAll("-", "");
+export function canonicalFindingNoteKey(key: string): (typeof FINDING_NOTE_KEYS)[number] | undefined {
+  if (!findingReportAssignmentKey.test(key)) return undefined;
+  const normalized = key.replace(/[A-Z]/gu, (character) => character.toLowerCase());
+  return FINDING_NOTE_KEYS.find((candidate) => candidate === normalized);
 }
 
-const FINDING_REPORT_SEMANTIC_KEYS = new Set(
-  [
-    ...FINDING_NOTE_KEYS,
-    ...FINDING_REPORT_SEMANTIC_KEY_ALIASES,
-    ...["root_cause", "classification", "stateful_failure"].flatMap((prefix) =>
-      ["reason", "classification", "evidence", "alias"].map((suffix) => `${prefix}_${suffix}`)
-    ),
-    ...["", "final", "finding", "triage", "classification", "proof"].flatMap((prefix) =>
-      ["resolution", "result", "status", "severity", "confidence", "disposition", "kind"].map((suffix) =>
-        prefix === "" ? suffix : `${prefix}_${suffix}`
-      )
-    )
-  ].map(compactFindingReportSemanticKey)
+const FINDING_REPORT_METADATA_TERM_GROUPS = [
+  ["audit", "cause", "classification", "confidence", "decision"],
+  ["demotion", "dependency", "disposition", "evidence", "exploit"],
+  ["finding", "helper", "impact", "likelihood", "note"],
+  ["outcome", "proof", "public", "reachability", "reason"],
+  ["report", "resolution", "result", "risk", "root"],
+  ["scope", "severity", "stateful", "status", "summary"],
+  ["triage", "verdict"]
+] as const;
+
+const FINDING_REPORT_METADATA_TERMS = FINDING_REPORT_METADATA_TERM_GROUPS.flat();
+
+function asciiCaseInsensitivePattern(value: string): string {
+  return value.replace(/[A-Za-z]/gu, (character) => `[${character.toLowerCase()}${character.toUpperCase()}]`);
+}
+
+/** A bounded ASCII identifier containing a report-metadata term. This defines
+ * a family, rather than a blacklist of guessed aliases, so producer-local
+ * renames such as `helper_summary` and `reachability_note` fail closed. */
+export const FINDING_REPORT_METADATA_KEY_PATTERNS = FINDING_REPORT_METADATA_TERM_GROUPS.map(
+  (terms) =>
+    `(?=${FINDING_REPORT_ASSIGNMENT_KEY_PATTERN}\\s*={1,2})[-_0-9A-Za-z]*(?:${terms.map(asciiCaseInsensitivePattern).join("|")})[-_0-9A-Za-z]*`
 );
 
-function asciiCaseInsensitiveCharacter(character: string): string {
-  const lower = character.toLocaleLowerCase("en-US");
-  const upper = character.toLocaleUpperCase("en-US");
-  return lower === upper ? lower.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&") : `[${lower}${upper}]`;
+export function isFindingReportMetadataKey(key: string): boolean {
+  if (!findingReportAssignmentKey.test(key)) return false;
+  const normalized = key.replace(/[A-Z]/gu, (character) => character.toLowerCase());
+  return FINDING_REPORT_METADATA_TERMS.some((term) => normalized.includes(term));
 }
 
-const FINDING_REPORT_SEMANTIC_KEY_IGNORED_PATTERN = "[-_\\p{M}]*";
-
-interface FindingReportSemanticKeyTrie {
-  terminal: boolean;
-  children: Map<string, FindingReportSemanticKeyTrie>;
-}
-
-function findingReportSemanticKeyTrie(keys: ReadonlySet<string>): FindingReportSemanticKeyTrie {
-  const root: FindingReportSemanticKeyTrie = { terminal: false, children: new Map() };
-  for (const key of keys) {
-    let node = root;
-    for (const character of key) {
-      let child = node.children.get(character);
-      if (child === undefined) {
-        child = { terminal: false, children: new Map() };
-        node.children.set(character, child);
-      }
-      node = child;
-    }
-    node.terminal = true;
-  }
-  return root;
-}
-
-function renderFindingReportSemanticKeyTrie(node: FindingReportSemanticKeyTrie, includeIgnoredPrefix = true): string {
-  if (node.children.size === 0) return "";
-  const alternatives = [...node.children.entries()]
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(
-      ([character, child]) => `${asciiCaseInsensitiveCharacter(character)}${renderFindingReportSemanticKeyTrie(child)}`
-    );
-  const children = alternatives.length === 1 ? alternatives[0]! : `(?:${alternatives.join("|")})`;
-  const continuation = `${includeIgnoredPrefix ? FINDING_REPORT_SEMANTIC_KEY_IGNORED_PATTERN : ""}${children}`;
-  return node.terminal ? `(?:${continuation})?` : continuation;
-}
-
-// Leave room for assignment boundaries and operators inside the registry's
-// 1,024-character limit for a complete JSON-Schema pattern.
-const MAX_FINDING_REPORT_SEMANTIC_KEY_PATTERN_LENGTH = 700;
-
-function renderFindingReportSemanticKeyPattern(keys: ReadonlySet<string>): string {
-  // Keep every nullable ignored-character run separated by a required digit or
-  // semantic-key character. Adjacent `*` runs make a failed unanchored match
-  // explore every possible partition of a long separator-only note. Marks
-  // after the final leading digit belong to the one ignored run before the
-  // first semantic-key character, so this remains equivalent to
-  // compactFindingReportSemanticKey without the quadratic backtracking.
-  const leadingPattern = `${FINDING_REPORT_SEMANTIC_KEY_IGNORED_PATTERN}(?:[0-9](?:\\p{M}*[0-9])*${FINDING_REPORT_SEMANTIC_KEY_IGNORED_PATTERN})?`;
-  return `${leadingPattern}${renderFindingReportSemanticKeyTrie(
-    findingReportSemanticKeyTrie(keys),
-    false
-  )}${FINDING_REPORT_SEMANTIC_KEY_IGNORED_PATTERN}`;
-}
-
-function findingReportSemanticKeyPatterns(keys: ReadonlySet<string>): readonly string[] {
-  const patterns: string[] = [];
-  let chunk = new Set<string>();
-  for (const key of [...keys].sort()) {
-    const candidate = new Set([...chunk, key]);
-    const candidatePattern = renderFindingReportSemanticKeyPattern(candidate);
-    if (candidatePattern.length <= MAX_FINDING_REPORT_SEMANTIC_KEY_PATTERN_LENGTH) {
-      chunk = candidate;
-      continue;
-    }
-    if (chunk.size === 0) {
-      throw new Error(`Finding report semantic key pattern exceeds the bounded pattern length: ${key}`);
-    }
-    patterns.push(renderFindingReportSemanticKeyPattern(chunk));
-    chunk = new Set([key]);
-    if (renderFindingReportSemanticKeyPattern(chunk).length > MAX_FINDING_REPORT_SEMANTIC_KEY_PATTERN_LENGTH) {
-      throw new Error(`Finding report semantic key pattern exceeds the bounded pattern length: ${key}`);
-    }
-  }
-  if (chunk.size > 0) patterns.push(renderFindingReportSemanticKeyPattern(chunk));
-  return patterns;
-}
-
-/**
- * Portable, bounded JSON-Schema patterns for the exact key family recognized
- * by {@link isFindingReportSemanticKey}. Separators and ASCII case are ignored
- * by both representations, so runtime and bundled Ajv validation cannot drift.
- */
-export const FINDING_REPORT_SEMANTIC_KEY_PATTERNS = findingReportSemanticKeyPatterns(FINDING_REPORT_SEMANTIC_KEYS);
-
-export function isFindingReportSemanticKey(key: string): boolean {
-  return FINDING_REPORT_SEMANTIC_KEYS.has(compactFindingReportSemanticKey(key));
+export function isFindingReportEvidenceAssignmentKey(key: string): boolean {
+  return FINDING_REPORT_EVIDENCE_ASSIGNMENT_KEYS.includes(
+    key as (typeof FINDING_REPORT_EVIDENCE_ASSIGNMENT_KEYS)[number]
+  );
 }
 
 export function findingReachabilityPromptVocabulary(): string {

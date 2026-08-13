@@ -173,6 +173,23 @@ describe("artifact handoff validation", () => {
         }
       })
     ).not.toThrow();
+    for (const evidence of [
+      "The HTTP response had status=200.",
+      "The oracle returned confidence=0.95.",
+      "The trace entered scope=global before reverting.",
+      "The shell printed outcome=success.",
+      "The proof checks risk=0 after withdrawal.",
+      "RISK_FREE_RATE=0.05 impact_price=123 helper_address=0xabc.",
+      "risK=non-semantic Unicode evidence."
+    ]) {
+      expect(() =>
+        validateTopology(topology, {
+          promptTexts: {
+            "review/triage.md": `Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}. ${evidence}`
+          }
+        })
+      ).not.toThrow();
+    }
 
     expect(() =>
       validateTopology(topology, {
@@ -218,6 +235,9 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       })
     ).not.toThrow();
     for (const unsupported of [
+      "helper_summary=renamed producer key",
+      "reachability_note=helper-only",
+      "classification_notes=accepted",
       "audit_decision=accepted",
       "finding_outcome=confirmed",
       "reachabilityEvidence=renamed",
@@ -239,12 +259,14 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       "Assign audit_decision=accepted",
       "Enforce audit_decision=accepted"
     ]) {
-      expect(() =>
-        validateTopology(topology, {
-          promptTexts: {
-            "review/triage.md": `Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}. Put ${unsupported} on each finding.`
-          }
-        })
+      expect(
+        () =>
+          validateTopology(topology, {
+            promptTexts: {
+              "review/triage.md": `Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}. Put ${unsupported} on each finding.`
+            }
+          }),
+        unsupported
       ).toThrow(expect.objectContaining({ code: "DUPLICATED_REPORT_VOCABULARY" }));
     }
     expect(() =>
