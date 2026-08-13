@@ -121,11 +121,18 @@ function promptReferencesCurrentOutput(
   outputPath: string,
   contract: string
 ): boolean {
+  const expectedContentPattern = new Set([
+    "ultrafuzz/findings@2",
+    "ultrafuzz/triaged-findings@1",
+    "ultrafuzz/severity-classified-findings@1"
+  ]).has(contract)
+    ? "findings?"
+    : undefined;
   const findingsOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/findings@2");
   if (contract === "ultrafuzz/findings@2" && findingsOutputs.length === 1 && findingsOutputs[0]!.path === outputPath) {
     if (
       variables.some((variable) => variable.name === "output_findings_path") &&
-      hasWriteInstruction(promptText, "output_findings_path")
+      hasWriteInstruction(promptText, "output_findings_path", "findings?")
     ) {
       return true;
     }
@@ -138,7 +145,7 @@ function promptReferencesCurrentOutput(
   if (stageFindingsOutputs.length === 1 && stageFindingsOutputs[0]!.path === outputPath) {
     if (
       variables.some((variable) => variable.name === "output_stage_findings_path") &&
-      hasWriteInstruction(promptText, "output_stage_findings_path")
+      hasWriteInstruction(promptText, "output_stage_findings_path", "findings?")
     ) {
       return true;
     }
@@ -152,24 +159,30 @@ function promptReferencesCurrentOutput(
   ) {
     return hasAffirmativeWriteInstruction(
       promptText,
-      `\\{\\{\\s*artifact_path\\s*\\}\\}/${escapedPath}${destinationBoundary}`
+      `\\{\\{\\s*artifact_path\\s*\\}\\}/${escapedPath}${destinationBoundary}`,
+      expectedContentPattern
     );
   }
   return hasAffirmativeWriteInstruction(
     promptText,
-    `\\{\\{\\s*artifact_dir\\s*\\}\\}/${escapedPath}${destinationBoundary}`
+    `\\{\\{\\s*artifact_dir\\s*\\}\\}/${escapedPath}${destinationBoundary}`,
+    expectedContentPattern
   );
 }
 
-function hasWriteInstruction(promptText: string, variable: string): boolean {
+function hasWriteInstruction(promptText: string, variable: string, expectedContentPattern?: string): boolean {
   const token =
     `\\{\\{\\s*${escapeRegExp(variable)}\\s*\\}\\}` + `(?=$|[\\s\\x60'"),;!\\]}]|\\.(?=$|[\\s\\x60'"),;!\\]}]))`;
-  return hasAffirmativeWriteInstruction(promptText, token);
+  return hasAffirmativeWriteInstruction(promptText, token, expectedContentPattern);
 }
 
-function hasAffirmativeWriteInstruction(promptText: string, destinationPattern: string): boolean {
-  const outputVerb = `(?:write|emit|save|persist|produce|create|mirror|list|record)`;
-  const passiveOutputVerb = `(?:written|emitted|saved|persisted|produced|created|mirrored|listed|recorded)`;
+function hasAffirmativeWriteInstruction(
+  promptText: string,
+  destinationPattern: string,
+  expectedContentPattern?: string
+): boolean {
+  const outputVerb = `(?:write|emit|save|persist|produce|create|mirror|list|record|store|put|publish|serialize|output(?!\\s*(?::|\\b(?:is|are|was|were)\\b))|deliver)`;
+  const passiveOutputVerb = `(?:written|emitted|saved|persisted|produced|created|mirrored|listed|recorded|stored|put|published|serialized|output|delivered)`;
   const passiveSubject =
     `(?:(?:the|all|any)\\s+)?(?:(?:confirmed|structured|normalized|generated|final|required)\\s+){0,3}` +
     `(?:findings?|outputs?|artifacts?|results?|reports?|manifests?|catalogs?|ledgers?|files?)`;
@@ -177,10 +190,48 @@ function hasAffirmativeWriteInstruction(promptText: string, destinationPattern: 
     `(?:(?:the\\s+)?agent\\s+(?:(?:is\\s+(?:required|mandated)\\s+to)|(?:must|shall|should))|` +
     `you\\s+(?:(?:are\\s+(?:required|mandated)\\s+to)|(?:must|shall|should)))`;
   const mandatoryPassive =
-    `${passiveSubject}\\s+(?:(?:must|shall)\\s+be|(?:are|is)\\s+(?:required|mandated)\\s+to\\s+be|` +
+    `${passiveSubject}\\s+(?:(?:must|shall)\\s+be|(?:are|is)\\s+to\\s+be|(?:are|is)\\s+(?:required|mandated)\\s+to\\s+be|` +
     `(?:are|is)\\s+mandatory\\s+(?:and\\s+)?(?:must|shall)\\s+be)\\s+${passiveOutputVerb}\\b`;
+  const destinationFirstContent =
+    expectedContentPattern ?? "findings?|outputs?|artifacts?|results?|reports?|manifests?|catalogs?|ledgers?|files?";
+  const destinationFirstPassive = new RegExp(
+    `(?:^|[.!?]\\s+|\\n\\s*)[\\x60'"]?(?:${destinationPattern})[\\x60'"]?\\s+` +
+      `(?:(?:must|shall)\\s+be|(?:is|are)\\s+to\\s+be|(?:is|are)\\s+(?:required|mandated)\\s+to\\s+be)\\s+` +
+      `${passiveOutputVerb}\\b[^.!?]{0,160}\\b(?:${destinationFirstContent})\\b`,
+    "gimu"
+  );
+  for (const match of promptText.matchAll(destinationFirstPassive)) {
+    const directiveIndex = match.index + instructionVerbOffset(match[0]);
+    if (
+      !hasNonRequiredDirectiveMeaning(promptText, match[0], match.index, directiveIndex) &&
+      !hasNonRequiredDirectiveScope(promptText, directiveIndex) &&
+      (expectedContentPattern === undefined || !hasProjectedArtifactContent(match[0], expectedContentPattern))
+    ) {
+      return true;
+    }
+  }
+  const crossSentenceSubject =
+    `(?:(?:the|all|any)\\s+)?(?:(?:confirmed|structured|normalized|generated|final|required)\\s+){0,3}` +
+    `(?:${expectedContentPattern ?? "findings?|outputs?|artifacts?|results?|reports?|manifests?|catalogs?|ledgers?|files?"})`;
+  const crossSentencePassive = new RegExp(
+    `(?:^|[.!?]\\s+|\\n\\s*)(?:[-*+>]\\s+)?(?:(?:also|always|immediately|please|then)\\s+)?` +
+      `${outputVerb}\\s+${crossSentenceSubject}\\s*[.!?]\\s*(?:they|it|these|those|this|that)\\s+` +
+      `(?:(?:must|shall)\\s+be|(?:are|is)\\s+to\\s+be|(?:are|is)\\s+(?:required|mandated)\\s+to\\s+be)\\s+` +
+      `${passiveOutputVerb}\\b[^.!?]{0,200}${destinationPattern}`,
+    "gimu"
+  );
+  for (const match of promptText.matchAll(crossSentencePassive)) {
+    const directiveIndex = match.index + instructionVerbOffset(match[0]);
+    if (
+      !hasNonRequiredDirectiveMeaning(promptText, match[0], match.index, directiveIndex) &&
+      !hasNonRequiredDirectiveScope(promptText, directiveIndex) &&
+      hasDirectDestinationBinding(match[0], destinationPattern, expectedContentPattern)
+    ) {
+      return true;
+    }
+  }
   const requiredException = new RegExp(
-    `(?:^|[.!?]\\s+|\\n\\s*)(?:(?:(?:do\\s+not|never)\\s+(?:fail|forget)\\s+to|without\\s+fail,)\\s*${outputVerb}\\b|(?:do\\s+not|never)\\s+omit\\s+writing\\b|(?:be\\s+sure\\s+to|make\\s+sure\\s+to|the\\s+agent\\s+is\\s+required\\s+to|you\\s+need\\s+to)\\s+${outputVerb}\\b)[^.!?]{0,200}${destinationPattern}`,
+    `(?:^|[.!?]\\s+|\\n\\s*)(?:(?:(?:(?:you|the\\s+agent)\\s+)?(?:do\\s+not|never|must\\s+not|shall\\s+not|cannot)\\s+(?:fail|forget)\\s+to|without\\s+fail,)\\s*${outputVerb}\\b|(?:do\\s+not|never|must\\s+not|shall\\s+not)\\s+omit\\s+writing\\b|(?:be\\s+sure\\s+to|make\\s+sure\\s+to|the\\s+agent\\s+is\\s+required\\s+to|you\\s+need\\s+to)\\s+${outputVerb}\\b)[^.!?]{0,200}${destinationPattern}`,
     "gimu"
   );
   for (const match of promptText.matchAll(requiredException)) {
@@ -195,12 +246,18 @@ function hasAffirmativeWriteInstruction(promptText: string, destinationPattern: 
     if (
       !hasNonRequiredDirectiveMeaning(promptText, match[0], match.index, directiveIndex) &&
       !hasNonRequiredDirectiveScope(promptText, directiveIndex, undefined, true, startsIndependentSentence) &&
-      hasDirectDestinationBinding(match[0], destinationPattern)
+      hasDirectDestinationBinding(match[0], destinationPattern, expectedContentPattern)
     )
       return true;
   }
+  const mandatoryLeadIn =
+    `(?:(?:(?:also|always|immediately|otherwise|please|then|finally)\\s*,?\\s+)|` +
+    `(?:(?:regardless\\s+of\\s+(?:(?:the\\s+)?(?:outcome|result)|whether\\b[^,]{0,100})|` +
+    `no\\s+matter\\s+(?:(?:the\\s+)?(?:outcome|result)|whether\\b[^,]{0,100})|` +
+    `whether\\s+or\\s+not[^,]{0,100}|whether\\b[^,]{0,100}\\bor\\s+not|even\\s+if[^,]{0,100}|` +
+    `in\\s+every\\s+case|at\\s+completion)\\s*,\\s*))?`;
   const directive = new RegExp(
-    `(?:^|[.!?]\\s+|\\n\\s*|\\band\\s+|(?:required\\s+output|output):\\s+|,\\s+(?=(?:also|immediately|then)\\b))(?:[-*+>]\\s+)?(?:(?:also|always|immediately|otherwise|please|then)\\s+)?(?:(?:ensure(?:\\s+you)?|remember\\s+to|${mandatoryPreamble})\\s+)?(?:${outputVerb}\\b(?!\\s+(?:whether|if)\\b)|${mandatoryPassive})[^.!?]{0,200}${destinationPattern}`,
+    `(?:^|[.!?]\\s+|\\n\\s*|\\band\\s+|(?:required\\s+output|output):\\s+|;\\s+|,\\s+(?:(?:but|yet)\\s+|(?=(?:also|immediately|then)\\b)))(?:[-*+>]\\s+)?${mandatoryLeadIn}(?:(?:ensure(?:\\s+you)?|remember\\s+to|${mandatoryPreamble})\\s+)?(?:${outputVerb}\\b(?!\\s+(?:whether|if)\\b)|${mandatoryPassive})[^.!?]{0,200}${destinationPattern}`,
     "gimu"
   );
   for (const match of promptText.matchAll(directive)) {
@@ -234,17 +291,34 @@ function hasAffirmativeWriteInstruction(promptText: string, destinationPattern: 
       /\{\{[^{}\r\n]+\}\}\s*$/u.test(precedingHeading) ||
       previousNonemptyLine === undefined;
     const startsAfterSentenceBoundary = /^[.!?]\s+/u.test(match[0]);
+    const startsAfterClauseBoundary = /^[,;]\s+/u.test(match[0]);
+    const startsAfterBareSemicolon = /^;\s+(?!(?:also|but|immediately|then|yet)\b)/iu.test(match[0]);
+    const precedingClause = prefix.slice(
+      Math.max(prefix.lastIndexOf("."), prefix.lastIndexOf("!"), prefix.lastIndexOf("?")) + 1
+    );
+    const startsIndependentClause =
+      startsAfterClauseBoundary &&
+      /\b(?:write|emit|save|persist|produce|create|mirror|list|record|store|put|publish|serialize|output|deliver)\b/iu.test(
+        precedingClause
+      );
+    const startsWithUnconditionalLeadIn =
+      /^(?:[.!?]\s+|\r?\n\s*)?(?:(?:regardless\s+of|no\s+matter)\s+(?:(?:the\s+)?(?:outcome|result)|whether\b[^,]{0,100})|whether\s+or\s+not[^,]{0,100}|whether\b[^,]{0,100}\bor\s+not|even\s+if[^,]{0,100}|in\s+every\s+case|at\s+completion)\s*,/iu.test(
+        match[0]
+      );
     const startsIndependentSentence =
       (!startsMarkdownItem && startsAfterSentenceBoundary) ||
       (startsOnContinuationLine && !startsMarkdownItem && /[.!?]\s*$/u.test(precedingHeading));
+    const startsIndependentDirective =
+      startsIndependentSentence || startsIndependentClause || startsWithUnconditionalLeadIn;
     if (
       !allowedLineBoundary ||
+      (startsAfterBareSemicolon && !startsIndependentClause) ||
       hasNonRequiredDirectiveScope(
         promptText,
         directiveIndex,
-        startsIndependentSentence ? undefined : listIntroducer || undefined,
-        startsIndependentSentence,
-        startsIndependentSentence
+        startsIndependentDirective ? undefined : listIntroducer || undefined,
+        startsIndependentDirective,
+        startsIndependentDirective
       )
     )
       continue;
@@ -252,7 +326,7 @@ function hasAffirmativeWriteInstruction(promptText: string, destinationPattern: 
     if (
       !hasNonRequiredDirectiveMeaning(promptText, match[0], match.index, directiveIndex) &&
       allowedLineBoundary &&
-      hasDirectDestinationBinding(match[0], destinationPattern)
+      hasDirectDestinationBinding(match[0], destinationPattern, expectedContentPattern)
     ) {
       return true;
     }
@@ -267,16 +341,31 @@ function hasNonRequiredDirectiveMeaning(
   directiveIndex: number
 ): boolean {
   const negativeObject =
-    /\b(?:write|writing|emit|save|persist|produce|create|mirror|list|record)\s+(?:no\b|nothing\b|zero\b|anything\s+except\b)/iu.test(
+    /\b(?:write|writing|emit|save|persist|produce|create|mirror|list|record|store|put|publish|serialize|output|deliver)\s+(?:no\b|nothing\b|zero\b|anything\s+except\b)/iu.test(
       matchText
     );
   const followingSentence = promptText
     .slice(directiveIndex, directiveIndex + matchText.length + 100)
     .split(/[.!?](?:\s|$)/u, 1)[0]!;
   const directiveText = followingSentence.replace(/,\s*if\s+any\s*,/giu, ",");
+  const conditionalDirectiveText = directiveText
+    .replace(/\b(?:regardless\s+of|irrespective\s+of|no\s+matter)\s+whether\b/giu, "")
+    .replace(/\bwhether\s+or\s+not\b/giu, "")
+    .replace(/\bwhether\b[^,;.!?]{0,100}\bor\s+not\b/giu, "")
+    .replace(/\beven\s+if\b/giu, "");
   const descriptiveClause =
-    /\b(?:whether|if)\b/iu.test(directiveText) ||
+    /\b(?:whether|if)\b/iu.test(conditionalDirectiveText) ||
     /\b(?:assessment|answer|decision|description|note|report|summary)\b[^.!?]{0,120}\b(?:about|of|on|regarding)\b/iu.test(
+      directiveText
+    );
+  const explicitEmptyPlaceholder =
+    /\b(?:write|emit|save|persist|produce|create|mirror|list|record|store|put|publish|serialize|output|deliver)\s+(?:(?:an?|the)\s+)?(?:(?:empty|blank)\s+)?(?:placeholder|dummy|stub|sentinel)\b/iu.test(
+      directiveText
+    ) ||
+    /\b(?:write|emit|save|persist|produce|create|mirror|list|record|store|put|publish|serialize|output|deliver)\s*(?:\[\]|\{\})/iu.test(
+      directiveText
+    ) ||
+    /\b(?:write|emit|save|persist|produce|create|mirror|list|record|store|put|publish|serialize|output|deliver)\s+(?:(?:an?|the)\s+)?(?:empty|blank|zero[- ](?:entry|item))\s+(?:(?:json|findings?)\s+)?(?:array|object|file|artifact|manifest|placeholder)\b/iu.test(
       directiveText
     );
   const trailingClause =
@@ -284,32 +373,50 @@ function hasNonRequiredDirectiveMeaning(
       .slice(matchIndex + matchText.length)
       .match(/^[^.!?]*/u)?.[0]
       .trim() ?? "";
-  const discretionaryClause =
-    /^[,;]?\s*(?:at\s+(?:need|your\s+discretion)|assuming|as\s+long\s+as|conditionally|contingent\s+on|depending\s+(?:on|upon)|discretionary|except\s+(?:if|when)|in\s+(?:case|the\s+event)|optional|optionally|should\s+(?:you\s+wish|\w+\s+\w+)|subject\s+to|to\s+the\s+extent|whether|whenever|if|when|where|unless|provided|upon\s+request|only\s+(?:as|if|when)|as\s+(?:appropriate|needed)|on\s+(?:request|demand))\b/iu.test(
+  const unconditionalTrailingClause =
+    /^[,;]?\s*(?:even\s+if|whether\s+or\s+not|whether\b[^,;.!?]{0,100}\bor\s+not\b|(?:regardless\s+of|irrespective\s+of|no\s+matter)\s+whether)\b/iu.test(
       trailingClause
-    ) ||
+    );
+  const discretionaryClause =
+    (!unconditionalTrailingClause &&
+      /^[,;]?\s*(?:at\s+(?:need|your\s+discretion)|assuming|as\s+long\s+as|conditionally|contingent\s+on|depending\s+(?:on|upon)|discretionary|except\s+(?:if|when)|in\s+(?:case|the\s+event)|optional|optionally|should\s+(?:you\s+wish|\w+\s+\w+)|subject\s+to|to\s+the\s+extent|whether|whenever|if|when|where|unless|provided|upon\s+request|only\s+(?:as|if|when)|as\s+(?:appropriate|needed)|on\s+(?:request|demand))\b/iu.test(
+        trailingClause
+      )) ||
     /^(?:[.;]\s*)?(?:(?:this|that|the\s+output|publication)\s+is\s+optional|omit\s+when)\b/iu.test(
       promptText.slice(matchIndex + matchText.length)
     );
-  return negativeObject || descriptiveClause || discretionaryClause;
+  return negativeObject || descriptiveClause || explicitEmptyPlaceholder || discretionaryClause;
 }
 
 function instructionVerbOffset(value: string): number {
   return value.search(
-    /\b(?:write|writing|written|emit|emitted|save|saved|persist|persisted|produce|produced|create|created|mirror|mirrored|list|listed|record|recorded)\b/iu
+    /\b(?:write|writing|written|emit|emitted|save|saved|persist|persisted|produce|produced|create|created|mirror|mirrored|list|listed|record|recorded|store|stored|put|publish|published|serialize|serialized|output(?!\s*(?::|\b(?:is|are|was|were)\b))|deliver|delivered)\b/iu
   );
 }
 
-function hasDirectDestinationBinding(matchText: string, destinationPattern: string): boolean {
+function hasDirectDestinationBinding(
+  matchText: string,
+  destinationPattern: string,
+  expectedContentPattern?: string
+): boolean {
   const destination = new RegExp(destinationPattern, "imu").exec(matchText);
   if (destination === null) return false;
   const actionVerb =
-    /\b(write|writing|written|emit|emitted|save|saved|persist|persisted|produce|produced|create|created|mirror|mirrored|list|listed|record|recorded|inspect|read|review|check|verify|examine|assess|describe|explain|mention|reference|refer|determine|decide|consider|delete|remove|avoid|skip|omit|do|say|state|indicate|point|link|compare)\b/giu;
+    /\b(write|writing|written|emit|emitted|save|saved|persist|persisted|produce|produced|create|created|mirror|mirrored|list|listed|record|recorded|store|stored|put|publish|published|serialize|serialized|output|deliver|delivered|inspect|read|review|check|verify|examine|assess|describe|explain|mention|reference|refer|determine|decide|consider|delete|remove|avoid|skip|omit|do|say|state|indicate|point|link|compare)\b/giu;
   const verbs = Array.from(matchText.slice(0, destination.index).matchAll(actionVerb));
-  const nearestVerb = verbs.at(-1);
+  const lastVerb = verbs.at(-1);
+  const previousVerb = verbs.at(-2);
+  const outputIsContentNoun =
+    expectedContentPattern !== undefined &&
+    lastVerb?.[1]?.toLocaleLowerCase("en-US") === "output" &&
+    previousVerb !== undefined &&
+    new RegExp(`\\b(?:${expectedContentPattern})\\b(?:\\s+(?:artifact|document|file|json))?\\s*$`, "iu").test(
+      matchText.slice(previousVerb.index + previousVerb[0].length, lastVerb.index)
+    );
+  const nearestVerb = outputIsContentNoun ? previousVerb : lastVerb;
   if (
     nearestVerb === undefined ||
-    !/^(?:write|writing|written|emit|emitted|save|saved|persist|persisted|produce|produced|create|created|mirror|mirrored|list|listed|record|recorded)$/iu.test(
+    !/^(?:write|writing|written|emit|emitted|save|saved|persist|persisted|produce|produced|create|created|mirror|mirrored|list|listed|record|recorded|store|stored|put|publish|published|serialize|serialized|output|deliver|delivered)$/iu.test(
       nearestVerb[1]!
     )
   ) {
@@ -321,7 +428,7 @@ function hasDirectDestinationBinding(matchText: string, destinationPattern: stri
     /(?:\b(?:do\s+not|never|must\s+not|shall\s+not|should\s+not|cannot|(?:can|could|will|would|may|might|need)\s+not|(?:is|are)\s+(?:not\s+(?:allowed|permitted|required)|unable|forbidden|prohibited)\s+to|avoid|skip|omit|fail(?:ed|ing)?\s+to|refuse\s+to|decline\s+to)|\b(?:don|doesn|can|won|mustn|shouldn|couldn|wouldn)['’]t|\b(?:isn|aren)['’]t\s+(?:allowed|permitted|required|able)\s+to)\s*$/iu.test(
       beforeNearestVerb
     ) &&
-    !/\b(?:do\s+not|never)\s+(?:(?:fail|forget)\s+to|omit)\s*$/iu.test(beforeNearestVerb)
+    !/\b(?:do\s+not|never|must\s+not|shall\s+not|cannot)\s+(?:(?:fail|forget)\s+to|omit)\s*$/iu.test(beforeNearestVerb)
   ) {
     return false;
   }
@@ -340,11 +447,53 @@ function hasDirectDestinationBinding(matchText: string, destinationPattern: stri
 
   const relationship = Array.from(
     binding.matchAll(/\b(to|at|in|into|under|as|for|about|regarding|on|before|after|alongside|near)\b/giu)
-  ).at(-1)?.[1];
+  ).at(-1);
+  if (
+    expectedContentPattern !== undefined &&
+    !hasExpectedArtifactContent(matchText, nearestVerb, binding, relationship, expectedContentPattern)
+  ) {
+    return false;
+  }
   if (relationship === undefined) {
     return !/^(?:list|listed|record|recorded)$/iu.test(nearestVerb[1]!) && !/[\p{L}\p{N}]/u.test(binding);
   }
-  return /^(?:to|at|in|into|under|as)$/iu.test(relationship);
+  return /^(?:to|at|in|into|under|as)$/iu.test(relationship[1]!);
+}
+
+function hasExpectedArtifactContent(
+  matchText: string,
+  nearestVerb: RegExpMatchArray,
+  binding: string,
+  relationship: RegExpMatchArray | undefined,
+  expectedContentPattern: string
+): boolean {
+  const expectedContent = new RegExp(`\\b(?:${expectedContentPattern})\\b`, "iu");
+  const directObject = binding
+    .slice(0, relationship?.index ?? binding.length)
+    .replace(/^[\s,:;()-]+|[\s,:;()-]+$/gu, "");
+  const passiveForm =
+    /^(?:written|emitted|saved|persisted|produced|created|mirrored|listed|recorded|stored|published|serialized|delivered)$/iu.test(
+      nearestVerb[1]!
+    );
+  const beforeNearestVerb = matchText.slice(0, nearestVerb.index);
+  const passivePutOrOutput =
+    /^(?:put|output)$/iu.test(nearestVerb[1]!) &&
+    /\b(?:must|shall|is|are)\s+(?:(?:required|mandated)\s+to\s+)?be\s*$/iu.test(beforeNearestVerb);
+  const contentBinding = passiveForm || passivePutOrOutput ? beforeNearestVerb : directObject;
+  if (expectedContent.test(contentBinding)) {
+    return !hasProjectedArtifactContent(contentBinding, expectedContentPattern);
+  }
+  return /^(?:(?:the|a|an|all|any|required|declared|current|final|structured|normalized)\s+)*(?:it|them|this|that|these|those|output|artifact|result|document|file|json)$/iu.test(
+    directObject
+  );
+}
+
+function hasProjectedArtifactContent(value: string, expectedContentPattern: string): boolean {
+  return new RegExp(
+    `(?:\\b(?:number|count|total|checksum|digest|hash|metadata|summary|description|assessment)\\s+(?:of\\s+)?(?:the\\s+)?(?:${expectedContentPattern})\\b|` +
+      `\\b(?:${expectedContentPattern})\\s+(?:number|count|total|checksum|digest|hash|metadata|summary|description|assessment)\\b)`,
+    "iu"
+  ).test(value);
 }
 
 function hasNonRequiredDirectiveScope(
@@ -403,6 +552,13 @@ function nearestMarkdownDirectiveHeading(promptPrefix: string): string | undefin
 }
 
 function isNonRequiredDirectiveHeading(heading: string): boolean {
+  if (
+    /(?:\bnot\s+optional\b|\bnon[- ]optional\b|\b(?:do\s+not|never|must\s+not|shall\s+not)\s+(?:fail(?:\s+to)?|forget(?:\s+to)?|omit|skip)(?:\s+(?:this|the\s+(?:artifact|following|output)))?\s*[:.)-]?\s*$|\b(?:required|mandatory)\b[^:\r\n]{0,80}\b(?:do\s+not|never)\s+(?:omit|skip|forget)\b)/iu.test(
+      heading
+    )
+  ) {
+    return false;
+  }
   return (
     /(?:\b(?:advisory|avoid|banned|barred|candidate|cannot|decline|disallowed|discourage|discouraged|discretionary|elective|example|except|exclude|forbidden|illegal|ignore|ignored|illustrative|never|no|nonessential|not|omit|optional|optionally|prevent|prohibited|recommended|refuse|refrain|skip|suggested|unnecessary|unauthorized|without)\b|(?:aren|don|mayn|mustn|shouldn|can)['’]t|\bif\s+(?:needed|useful)\b|\bwhen\s+(?:appropriate|convenient|useful)\b|\bas\s+needed\b|\bat\s+your\s+discretion\b)/iu.test(
       heading

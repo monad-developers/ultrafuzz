@@ -750,6 +750,66 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
     ).toThrow(expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" }));
   });
 
+  it("rejects placeholder empties and instructions that bind the destination to different content", () => {
+    for (const prompt of [
+      "Write [] to {{output_findings_path}} as a placeholder.",
+      "Write [] to {{output_findings_path}}.",
+      "Write to {{output_findings_path}}.",
+      "Create an empty placeholder at {{output_findings_path}}.",
+      "Create an empty findings array at {{output_findings_path}} without reviewing the target.",
+      "Write compiler logs to {{output_findings_path}}.",
+      "Write findings, then output compiler logs to {{output_findings_path}}.",
+      "Whether or not findings exist, write compiler logs to {{output_findings_path}}.",
+      "Save a checksum at {{output_findings_path}}.",
+      "Record the number of findings in {{output_findings_path}}.",
+      "{{output_findings_path}} must be written with the number of findings.",
+      "List source files in {{output_findings_path}}."
+    ]) {
+      expect(
+        () => validateTopology(validTopology(), { promptTexts: { "strategies/strategy.md": prompt } }),
+        prompt
+      ).toThrow(expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" }));
+    }
+  });
+
+  it("accepts mandatory empty-result clauses, affirmative negation headings, and ordinary output verbs", () => {
+    for (const prompt of [
+      "Write findings to {{output_findings_path}} even if there are none.",
+      "Write findings to {{output_findings_path}} whether or not any findings exist.",
+      "Write findings to {{output_findings_path}} whether any findings exist or not.",
+      "Whether or not any findings exist, write findings to {{output_findings_path}}.",
+      "Even if there are no findings, write findings to {{output_findings_path}}.",
+      "Regardless of whether findings exist, write findings to {{output_findings_path}}.",
+      "Not optional:\nWrite findings to {{output_findings_path}}.",
+      "Do not forget:\nWrite findings to {{output_findings_path}}.",
+      "Never omit:\nWrite findings to {{output_findings_path}}.",
+      "Required (do not omit):\nWrite findings to {{output_findings_path}}.",
+      "Store findings at {{output_findings_path}}.",
+      "Write the standard findings output to {{output_findings_path}}.",
+      "Publish findings to {{output_findings_path}}.",
+      "Deliver findings to {{output_findings_path}}.",
+      "Put findings in {{output_findings_path}}.",
+      "Serialize findings to {{output_findings_path}}.",
+      "Output findings to {{output_findings_path}}.",
+      "{{output_findings_path}} must be written with all findings.",
+      "`{{output_findings_path}}` must be written with all findings.",
+      "Write the findings. They must be saved to {{output_findings_path}}.",
+      "The required findings are to be written to {{output_findings_path}}.",
+      "Do not write logs; write findings to {{output_findings_path}}.",
+      "Do not write logs, but write findings to {{output_findings_path}}.",
+      "You must not fail to write findings to {{output_findings_path}}.",
+      "Regardless of outcome, write findings to {{output_findings_path}}.",
+      "In every case, write findings to {{output_findings_path}}.",
+      "At completion, write findings to {{output_findings_path}}.",
+      "Finally, write findings to {{output_findings_path}}."
+    ]) {
+      expect(
+        () => validateTopology(validTopology(), { promptTexts: { "strategies/strategy.md": prompt } }),
+        prompt
+      ).not.toThrow();
+    }
+  });
+
   it("applies valid-empty checks generically and accepts only the exact current output destination", () => {
     const topology = validTopology();
     topology.nodes[2] = {
