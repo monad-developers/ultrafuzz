@@ -67,7 +67,7 @@ function loadGeneratedWorkflowInputSchema(): { safeParse(value: unknown): { succ
     compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
   }).outputText;
   const require = createRequire(import.meta.url);
-  const smithersRoot = packageRootForEntry(require.resolve("smithers-orchestrator"));
+  const smithersRoot = packageRootForEntry(require.resolve("smthrs"));
   const z = (createRequire(path.join(smithersRoot, "package.json"))("zod/v4") as { z: unknown }).z;
   return new Function("z", `${compiled}; return inputSchema;`)(z) as ReturnType<
     typeof loadGeneratedWorkflowInputSchema
@@ -118,10 +118,8 @@ test("the workflow runner can project the generated workflow input into its inpu
   const inputSchema = loadGeneratedWorkflowInputSchema();
   const require = createRequire(import.meta.url);
   // The runner's own entry is Bun-only; its table projection is not.
-  const runnerRequire = createRequire(require.resolve("smithers-orchestrator"));
-  const { zodToTable } = (await import(
-    pathToFileURL(runnerRequire.resolve("@smithers-orchestrator/db/zodToTable")).href
-  )) as {
+  const runnerRequire = createRequire(require.resolve("smthrs"));
+  const { zodToTable } = (await import(pathToFileURL(runnerRequire.resolve("@smthrs/db/zodToTable")).href)) as {
     zodToTable: (tableName: string, schema: unknown, opts?: { isInput?: boolean }) => unknown;
   };
   assert.notEqual(zodToTable("ultrafuzz_workflow_input", inputSchema, { isInput: true }), undefined);

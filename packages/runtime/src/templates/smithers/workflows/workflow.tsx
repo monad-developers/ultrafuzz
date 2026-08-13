@@ -2,7 +2,7 @@
 // smithers-display-name: Ultrafuzz __ULTRAFUZZ_RUN_ID__
 // smithers-description: Generated Ultrafuzz product workflow. Smithers owns execution; Ultrafuzz owns config, topology, prompts, artifacts, reports, and materialization evidence.
 // project-agents: .smithers/agents
-/** @jsxImportSource smithers-orchestrator */
+/** @jsxImportSource smthrs */
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
@@ -10,7 +10,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { Fragment } from "react";
-import { createSmithers, type AgentLike } from "smithers-orchestrator";
+import { createSmithers, type AgentLike } from "smthrs";
 import { z } from "zod/v4";
 // Imported via the explicit index path: Smithers' bootstrap can scaffold a
 // sibling .smithers/agents.ts, which bun's resolution would prefer over the
@@ -996,14 +996,21 @@ function authoritativeFinalReportCoverageArgs<T extends { prompt?: unknown } | u
 
 function baseAgentForTask(task: (typeof taskSpecs)[number]): AgentLike | AgentLike[] | undefined {
   const factory = agentFactories[task.agentRef];
-  if (factory === undefined) {
+  if (typeof factory !== "function") {
     throw new Error(`agent factory is not registered: ${task.agentRef}`);
   }
-  return factory({
+  const selected = factory({
     ...(task.modelName === null ? {} : { model: task.modelName }),
     ...(task.reasoningEffort === null ? {} : { reasoningEffort: task.reasoningEffort }),
     addDir: [task.artifactDir, ...task.dependencyArtifactDirs]
   });
+  if (selected === null || selected === undefined || (Array.isArray(selected) && selected.length === 0)) {
+    throw new Error(`agent factory returned no agents: ${task.agentRef}`);
+  }
+  if (Array.isArray(selected) && selected.some((agent) => agent === null || agent === undefined)) {
+    throw new Error(`agent factory returned a nullish agent chain entry: ${task.agentRef}`);
+  }
+  return selected;
 }
 
 function agentForTask(task: (typeof taskSpecs)[number]): AgentLike | AgentLike[] | undefined {

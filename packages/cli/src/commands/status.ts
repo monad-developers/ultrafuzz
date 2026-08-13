@@ -17,6 +17,15 @@ import { formatStatusDuration } from "../status-rendering.js";
 const DEFAULT_WATCH_INTERVAL_SECONDS = 30;
 
 const TERMINAL_RUN_STATUSES = new Set<string>(TERMINAL_RUN_STATE_STATUSES);
+const STOP_WATCH_VERDICTS = new Set<RunHealthValue["verdict"]>([
+  "done",
+  "degraded",
+  "orphaned",
+  "cancel-pending",
+  "paused",
+  "cancelled",
+  "failed"
+]);
 
 export default class Status extends Command {
   static override summary = "Show concise health for an Ultrafuzz run";
@@ -83,7 +92,7 @@ function emitStatusResult(command: Command, result: CommandResult, watch: boolea
 }
 
 function shouldRefresh(value: RunHealthValue | undefined): boolean {
-  return value !== undefined && !TERMINAL_RUN_STATUSES.has(value.status);
+  return value !== undefined && !TERMINAL_RUN_STATUSES.has(value.status) && !STOP_WATCH_VERDICTS.has(value.verdict);
 }
 
 async function wait(milliseconds: number): Promise<void> {

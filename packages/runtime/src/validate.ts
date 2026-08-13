@@ -20,7 +20,7 @@ import type {
   ValidateProjectResult
 } from "./types.js";
 import { effectiveAuditPolicy } from "./audit-profile-policy.js";
-import { registeredAgentFactoryNames } from "./agent-registry.js";
+import { agentRegistryRegisters, inspectAgentRegistry } from "./agent-registry.js";
 import { transformTopologyForRun } from "./topology-transform.js";
 import {
   configDiagnostics,
@@ -29,8 +29,6 @@ import {
   postureFromDiagnostics,
   runtimeResult
 } from "./utils.js";
-
-const SAFE_AGENT_REF_PATTERN = /^(?!.*\.\.)[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/u;
 
 export async function validateProject(input: ValidateProjectInput) {
   const projectRoot = path.resolve(input.projectRoot);
@@ -327,29 +325,32 @@ function validateAgentReferences(
     ...configuredAgentRefs,
     ...Object.values(config.models.profiles).map((profile) => profile.agent)
   ]);
-  const registryPath = path.join(projectRoot, ".smithers", "agents", "index.ts");
-  if (!fs.existsSync(registryPath)) {
+  const registry = inspectAgentRegistry(projectRoot);
+  if (!registry.exists) {
     return [
       {
         code: "AGENT_REGISTRY_MISSING",
-        message:
-          "canonical project agent registry .smithers/agents/index.ts is missing; rerun ultrafuzz init to restore it",
+        message: "project agent registry is missing; rerun ultrafuzz init to restore it",
         severity: "error",
-        source: "agents",
-        path: ".smithers/agents/index.ts"
+        source: "agents"
       }
     ];
   }
-  const registryText = fs.readFileSync(registryPath, "utf8");
-  const registeredFactories = registeredAgentFactoryNames(registryText);
+  if (registry.error !== undefined) {
+    diagnostics.push({
+      code: "AGENT_REGISTRY_INVALID",
+      message: "project agent registry could not be safely inspected; rerun ultrafuzz init or repair it manually",
+      severity: "error",
+      source: "agents"
+    });
+  }
   for (const agentRef of [...agentRefs].sort()) {
-    if (!SAFE_AGENT_REF_PATTERN.test(agentRef) || !registeredFactories.has(agentRef)) {
+    if (!agentRegistryRegisters(registry, agentRef)) {
       diagnostics.push({
         code: "AGENT_REFERENCE_UNKNOWN",
-        message: `agent reference ${agentRef} is not registered in agentFactories by .smithers/agents/index.ts`,
+        message: `agent reference ${agentRef} is not registered in agentFactories by the project agent registry`,
         severity: "error",
-        source: "agents",
-        path: ".smithers/agents/index.ts"
+        source: "agents"
       });
     }
   }

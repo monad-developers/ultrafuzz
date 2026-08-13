@@ -105,9 +105,12 @@ ultrafuzz.toml
 ```
 
 Without `--force`, every existing config, topology, prompt, reference catalog,
-and generated agent adapter file is preserved. Use `--force` to replace
-existing generated files with the current templates. `init` emits an
-actionable diagnostic when a preserved adapter requires manual review.
+and project-owned agent adapter file is preserved. The one migration exception
+is an exact generated Smithers 0.32 manifest: `init` updates that manifest and
+any byte-identical immediately prior stock adapters while preserving customized
+and older adapters. Use `--force` to replace existing generated files with the
+current templates. `init` emits an actionable diagnostic when a preserved
+adapter requires manual review.
 
 ## Validate
 

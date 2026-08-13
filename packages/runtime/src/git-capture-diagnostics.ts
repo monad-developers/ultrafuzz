@@ -272,7 +272,7 @@ export function rethrowOversizedGitOutput(args: readonly string[], error: unknow
   // Drop the payload before attaching this as a `cause`. The engine's `errorToJson` walks `cause` and
   // de-cycles with a WeakSet, so it does NOT throw — an earlier version of this comment was wrong to say
   // it did — but it does not TRUNCATE either. Node holds the capture in both `stdout` and `output[1]`, so
-  // an unstripped cause serializes to a multiple of the capture. Measured against `errorToJson` 0.32.0:
+  // an unstripped cause serializes to a multiple of the capture. Measured against `errorToJson` 0.34.0:
   // a 4 MB STRING capture (`runGit`) serializes to 8,389,061 chars, 2.0x, because Node holds the payload
   // in both `stdout` and `output[1]`. A 1 MB BUFFER capture (`runGitBuffer`) serializes to 25,041,207
   // chars, 23.9x, because a Buffer expands into one JSON key per byte. Stripped, both come to 386 chars

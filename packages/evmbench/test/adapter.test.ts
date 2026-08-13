@@ -11,6 +11,7 @@ import {
   runEvmbenchAdapter,
   seedSmithersDependencies
 } from "../src/adapter.js";
+import type { EvmbenchStatusVerdict } from "../src/cli-contracts.js";
 import { EVMBENCH_PROFILE_VERSION, type EvmbenchProfile } from "../src/contracts.js";
 
 const temporaryDirectories: string[] = [];
@@ -178,6 +179,63 @@ describe("EVMBench adapter", () => {
     ).rejects.toThrow(`cannot complete unattended while ${verdict}: ${reason}`);
   });
 
+  it("treats a degraded run as terminal non-success without waiting", async () => {
+    const fixture = adapterFixture();
+
+    await expect(
+      runEvmbenchAdapter({
+        ...fixture,
+        wait: async () => {
+          throw new Error("adapter should not wait");
+        },
+        execute: (args) =>
+          args[0] === "status"
+            ? success("status", statusData("degraded", "review loop exhausted before convergence"))
+            : defaultSuccess(args[0], fixture.auditRoot)
+      })
+    ).rejects.toThrow(
+      "ended degraded without converging: review loop exhausted before convergence; explicit operator review is required"
+    );
+  });
+
+  it("does not auto-resume an existing degraded run", async () => {
+    const fixture = adapterFixture();
+    fs.mkdirSync(path.join(fixture.auditRoot, ".ultrafuzz", "runs", "evmbench-smoke"), { recursive: true });
+    const invocations: string[][] = [];
+
+    await expect(
+      runEvmbenchAdapter({
+        ...fixture,
+        execute: (args) => {
+          invocations.push(args);
+          return args[0] === "status"
+            ? success("status", statusData("degraded", "maximum iterations reached"))
+            : defaultSuccess(args[0], fixture.auditRoot);
+        }
+      })
+    ).rejects.toThrow("ended degraded without converging: maximum iterations reached");
+    expect(invocations.some(([command]) => command === "resume")).toBe(false);
+  });
+
+  it.each(["orphaned", "cancel-pending"] as const)("does not auto-resume an existing %s run", async (verdict) => {
+    const fixture = adapterFixture();
+    fs.mkdirSync(path.join(fixture.auditRoot, ".ultrafuzz", "runs", "evmbench-smoke"), { recursive: true });
+    const invocations: string[][] = [];
+
+    await expect(
+      runEvmbenchAdapter({
+        ...fixture,
+        execute: (args) => {
+          invocations.push(args);
+          return args[0] === "status"
+            ? success("status", statusData(verdict, `run is ${verdict}`))
+            : defaultSuccess(args[0], fixture.auditRoot);
+        }
+      })
+    ).rejects.toThrow(`ended with ${verdict}`);
+    expect(invocations.some(([command]) => command === "resume")).toBe(false);
+  });
+
   it("rejects malformed and unknown status verdicts", async () => {
     const missing = adapterFixture();
     await expect(
@@ -307,20 +365,8 @@ function reportData(markdownPath: string): Record<string, unknown> {
   };
 }
 
-function statusData(
-  verdict:
-    | "done"
-    | "running-healthy"
-    | "progressing"
-    | "stalled"
-    | "blocked"
-    | "waiting-quota"
-    | "paused"
-    | "cancelled"
-    | "failed",
-  reason = "synthetic status"
-): Record<string, unknown> {
-  const terminal = new Set(["done", "blocked", "paused", "cancelled", "failed"]).has(verdict);
+function statusData(verdict: EvmbenchStatusVerdict, reason = "synthetic status"): Record<string, unknown> {
+  const terminal = new Set(["done", "degraded", "blocked", "paused", "cancelled", "failed"]).has(verdict);
   return {
     run_id: "evmbench-smoke",
     run_root: "/synthetic/.ultrafuzz/runs/evmbench-smoke",

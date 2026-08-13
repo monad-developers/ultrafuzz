@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { ClaudeCodeAgent as SmithersClaudeCodeAgent } from "smithers-orchestrator";
+import { ClaudeCodeAgent as SmithersClaudeCodeAgent } from "smthrs";
 import { workflowControlChildEnvironment, workflowControlCredentialValue } from "./environment";
 import { readStringTable, stringField } from "./toml";
 

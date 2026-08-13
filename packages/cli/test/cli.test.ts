@@ -49,6 +49,39 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
+function fakeStatusEnvelope(verdict = "running-healthy"): Record<string, unknown> {
+  const running = verdict === "running-healthy";
+  return {
+    ok: true,
+    data: {
+      status: verdict === "done" || verdict === "degraded" ? "finished" : "running",
+      verdict,
+      reason: verdict === "degraded" ? "review loop exhausted" : "1 running, 2 finished in last 10m",
+      counts: {
+        finished: 2,
+        inProgress: running ? 1 : 0,
+        pending: running ? 3 : 0,
+        failed: 0,
+        waitingApproval: 0,
+        waitingEvent: 0,
+        waitingTimer: 0,
+        skipped: 0,
+        other: 0,
+        total: running ? 6 : 2
+      },
+      modelMix: [{ engine: "codex", model: "gpt-test", attempts: 3, quotaParked: false }],
+      throughput: { recentFinished: 2, windowMs: 600_000, totalFinished: 2, lastFinishedAtMs: 1_000 },
+      bottleneck: running
+        ? [{ nodeId: "project-discovery", iteration: 0, state: "in-progress", detail: "running 1m" }]
+        : [],
+      bottleneckOmitted: 0,
+      quota: null,
+      generatedAtMs: 2_000
+    },
+    meta: { command: "status", duration: "1ms" }
+  };
+}
+
 function fakeWorkflowEventPrintf(event: Record<string, unknown>): string {
   const runIdToken = "ultrafuzz-cli-run";
   const serialized = JSON.stringify(event);
@@ -201,35 +234,11 @@ function fakeSmithersEnv(
       "    exit 2",
       "    ;;",
       "  status)",
-      `    printf '%s\\n' ${shellQuote(
-        JSON.stringify({
-          ok: true,
-          data: {
-            status: "running",
-            verdict: "running-healthy",
-            reason: "1 running, 2 finished in last 10m",
-            counts: {
-              finished: 2,
-              inProgress: 1,
-              pending: 3,
-              failed: 0,
-              waitingApproval: 0,
-              waitingEvent: 0,
-              waitingTimer: 0,
-              skipped: 0,
-              other: 0,
-              total: 6
-            },
-            modelMix: [{ engine: "codex", model: "gpt-test", attempts: 3, quotaParked: false }],
-            throughput: { recentFinished: 2, windowMs: 600_000, totalFinished: 2, lastFinishedAtMs: 1_000 },
-            bottleneck: [{ nodeId: "project-discovery", iteration: 0, state: "in-progress", detail: "running 1m" }],
-            bottleneckOmitted: 0,
-            quota: null,
-            generatedAtMs: 2_000
-          },
-          meta: { command: "status", duration: "1ms" }
-        })
-      )}`,
+      '    if [ -n "$SMITHERS_FAKE_STATUS_JSON" ]; then',
+      "      printf '%s\\n' \"$SMITHERS_FAKE_STATUS_JSON\"",
+      "    else",
+      `      printf '%s\\n' ${shellQuote(JSON.stringify(fakeStatusEnvelope()))}`,
+      "    fi",
       "    ;;",
       "  *)",
       "    printf '%s\\n' '{\"ok\":true}'",
@@ -1347,6 +1356,24 @@ test("status --watch --json keeps a failing poll on one NDJSON line", async () =
   assert.equal(body.ok, false);
   assert.equal(body.command, "status");
   assert.equal((body.diagnostics as Array<{ code: string }>)[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
+});
+
+test("status --watch stops immediately on a degraded verdict even while product state is nonterminal", async () => {
+  const project = tempProject();
+  const env = fakeSmithersEnv(project);
+  assert.equal((await cli(project, ["init", "--json"], env)).code, 0);
+  writeSmallTopology(project);
+  const run = await cli(project, ["run", "--run-id", "watch-degraded-run", "--json"], env);
+  assert.equal(run.code, 0, run.stderr);
+  env.SMITHERS_FAKE_STATUS_JSON = JSON.stringify(fakeStatusEnvelope("degraded"));
+
+  const watched = await cli(project, ["status", "watch-degraded-run", "--watch", "--interval", "1", "--json"], env);
+
+  assert.equal(watched.code, 0, watched.stderr);
+  const lines = watched.stdout.split("\n").filter(Boolean);
+  assert.equal(lines.length, 1);
+  const body = JSON.parse(lines[0]!) as { data?: { verdict?: string } };
+  assert.equal(body.data?.verdict, "degraded");
 });
 
 test("old commands and backend flags are rejected instead of aliased or shimmed", async () => {

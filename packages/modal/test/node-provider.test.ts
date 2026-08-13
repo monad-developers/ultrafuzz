@@ -180,7 +180,7 @@ describe("Modal node sandbox provider", { timeout: 30_000 }, () => {
       expect(entries).toContain(`./${fixture.input.execution_snapshot_root}/dependencies/packages/000001/dist/cli.js`);
       expect(entries).toContain(`./${fixture.input.execution_snapshot_root}/dependencies/manifest.json`);
       expect(entries).not.toContain("./.smithers/agents/kimi.ts");
-      expect(entries).not.toContain(`./${fixture.input.execution_snapshot_root}/node_modules/smithers-orchestrator`);
+      expect(entries).not.toContain(`./${fixture.input.execution_snapshot_root}/node_modules/smthrs`);
       for (const dependency of fixture.input.dependency_artifact_dirs) {
         expect(entries).toContain(`./${dependency}/`);
         const marker = `./${fixture.input.run_root}/.ultrafuzz-verification/${path.basename(dependency)}.json`;
@@ -882,7 +882,7 @@ fs.writeFileSync(${JSON.stringify(observationPath)}, JSON.stringify({
         first.projectRoot,
         fixture.input.execution_snapshot_root,
         "node_modules",
-        "smithers-orchestrator"
+        "smthrs"
       );
       expect(fs.lstatSync(smithersLink).isSymbolicLink()).toBe(true);
       expect(fs.realpathSync(smithersLink)).toBe(
@@ -2409,7 +2409,7 @@ function createProjectFixture(options: { smithersCli?: string; pinnedSubmodules?
     ["modules/@ultrafuzz/artifacts/dist/index.js", "export const sealedArtifacts = true;\n"],
     ["modules/@ultrafuzz/runtime/package.json", '{"name":"@ultrafuzz/runtime"}\n'],
     ["modules/@ultrafuzz/runtime/dist/index.js", "export const sealedRuntime = true;\n"],
-    ["dependencies/packages/000001/package.json", '{"name":"smithers-orchestrator","version":"1.0.0"}\n'],
+    ["dependencies/packages/000001/package.json", '{"name":"smthrs","version":"1.0.0"}\n'],
     ["dependencies/packages/000001/dist/cli.js", options.smithersCli ?? "#!/usr/bin/env node\n"]
   ]);
   if (options.pinnedSubmodules === true) {
@@ -2453,7 +2453,7 @@ function createProjectFixture(options: { smithersCli?: string; pinnedSubmodules?
     packages: [
       {
         id: "package:000001",
-        name: "smithers-orchestrator",
+        name: "smthrs",
         version: "1.0.0",
         snapshot_path: "dependencies/packages/000001"
       }
@@ -2462,7 +2462,7 @@ function createProjectFixture(options: { smithersCli?: string; pinnedSubmodules?
       { id: "module:@ultrafuzz/artifacts", snapshot_path: "modules/@ultrafuzz/artifacts", dependencies: {} },
       { id: "module:@ultrafuzz/runtime", snapshot_path: "modules/@ultrafuzz/runtime", dependencies: {} },
       { id: "package:000001", snapshot_path: "dependencies/packages/000001", dependencies: {} },
-      { id: "root", snapshot_path: ".", dependencies: { "smithers-orchestrator": "package:000001" } }
+      { id: "root", snapshot_path: ".", dependencies: { smthrs: "package:000001" } }
     ],
     executable_paths: ["dependencies/packages/000001/dist/cli.js"],
     smithers_bin: "dependencies/packages/000001/dist/cli.js"
@@ -2474,7 +2474,7 @@ function createProjectFixture(options: { smithersCli?: string; pinnedSubmodules?
     fs.writeFileSync(destination, contents);
   }
   fs.chmodSync(path.join(pendingSnapshotRoot, "dependencies/packages/000001/dist/cli.js"), 0o500);
-  const dependencyLink = path.join(pendingSnapshotRoot, "node_modules", "smithers-orchestrator");
+  const dependencyLink = path.join(pendingSnapshotRoot, "node_modules", "smthrs");
   fs.mkdirSync(path.dirname(dependencyLink), { recursive: true });
   fs.symlinkSync("../dependencies/packages/000001", dependencyLink, "dir");
 
