@@ -159,10 +159,9 @@ Apply these Recon/Chimera rules:
   from LCOV.
 - Write `{{artifact_dir}}/coverage-evidence.json` using the
   `ultrafuzz/coverage-evidence@1` contract and validate it against
-  `{{schema_path}}/coverage-evidence.schema.json`. Set `schema_version` to
-  `ultrafuzz.coverage-evidence.v1`. Set `lcov.path` to the exact safe
-  workspace-relative path of the selected raw LCOV file and `lcov.sha256` to
-  its lowercase SHA-256; the runtime reads and authenticates that exact file.
+  `{{schema_path}}/coverage-evidence.schema.json`. Set `lcov.path` to the exact
+  safe workspace-relative path of the selected raw LCOV file and `lcov.sha256`
+  to its lowercase SHA-256; the runtime reads and authenticates that exact file.
   Every file entry must include `path`,
   `kind`, `included`, `covered_ranges`, and `total_ranges`; excluded
   entries also require `exclusion_reason`. It must name every included and

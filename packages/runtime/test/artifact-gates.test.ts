@@ -10582,6 +10582,51 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
     spoofedAttribution.diagnostics.some((diagnostic) => diagnostic.code === "COVERAGE_SOURCE_ATTRIBUTION_MISMATCH"),
     JSON.stringify(spoofedAttribution.diagnostics)
   );
+
+  fs.mkdirSync(path.join(workspace, "packages/core/lib"), { recursive: true });
+  fs.mkdirSync(path.join(workspace, "packages/core/test/recon"), { recursive: true });
+  fs.writeFileSync(path.join(workspace, "packages/core/lib/Dep.sol"), "library Dep { function value() internal {} }\n");
+  fs.writeFileSync(
+    path.join(workspace, "packages/core/test/recon/NestedHarness.sol"),
+    "contract NestedHarness { function fuzz() external {} }\n"
+  );
+  const nestedSources = structuredClone(evidence);
+  nestedSources.lcov = writeCoverageLcov(workspace, {
+    "src/Core.sol": { 2: 1, 3: 0 },
+    "src/Critical.sol": { 4: 0, 5: 0, 6: 0, 7: 0 },
+    "packages/core/lib/Dep.sol": { 1: 1 },
+    "packages/core/test/recon/NestedHarness.sol": { 1: 1 }
+  });
+  nestedSources.files.push(
+    {
+      path: "packages/core/lib/Dep.sol",
+      kind: "dependency",
+      included: false,
+      exclusion_reason: "not selected",
+      covered_ranges: 0,
+      total_ranges: 0
+    },
+    {
+      path: "packages/core/test/recon/NestedHarness.sol",
+      kind: "harness",
+      included: false,
+      exclusion_reason: "not selected",
+      covered_ranges: 0,
+      total_ranges: 0
+    }
+  );
+  publish(
+    nestedSources,
+    scopedMarkdown.replace(
+      "- `src/Critical.sol` (production): not selected",
+      "- `src/Critical.sol` (production): not selected\n" +
+        "- `packages/core/lib/Dep.sol` (dependency): not selected\n" +
+        "- `packages/core/test/recon/NestedHarness.sol` (harness): not selected"
+    )
+  );
+  const nestedAttribution = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(nestedAttribution.ok, true, JSON.stringify(nestedAttribution.diagnostics));
+
   evidence.lcov = writeCoverageLcov(workspace, {
     "src/Core.sol": { 2: 1, 3: 0 },
     "src/Critical.sol": { 4: 0, 5: 0, 6: 0, 7: 0 }
@@ -11197,6 +11242,25 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
   const namedPercentage = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
   assert.equal(namedPercentage.ok, true, JSON.stringify(namedPercentage.diagnostics));
 
+  writeArtifact(
+    layout,
+    reportNode.id,
+    "report.md",
+    `${scopedMarkdown}\n## Notes\n\nThe selected-range score was 100%, while overall coverage was 25%.\n`
+  );
+  const mixedScopePercentage = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+  assert.equal(mixedScopePercentage.ok, false);
+  assert.ok(mixedScopePercentage.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"));
+
+  writeArtifact(
+    layout,
+    reportNode.id,
+    "report.md",
+    `${scopedMarkdown}\n## Notes\n\nAt 100% utilization, insurance coverage is exhausted.\n`
+  );
+  const insuranceProse = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+  assert.equal(insuranceProse.ok, true, JSON.stringify(insuranceProse.diagnostics));
+
   writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\nThe selected-range was 1/1.\n`);
   const misplaced = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
   assert.equal(misplaced.ok, false);
@@ -11208,6 +11272,11 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
   const disguisedPercentage = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
   assert.equal(disguisedPercentage.ok, false);
   assert.ok(disguisedPercentage.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"));
+
+  writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\n100&#37; standardized coverage.\n`);
+  const encodedPercentage = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+  assert.equal(encodedPercentage.ok, false);
+  assert.ok(encodedPercentage.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"));
 
   writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\nStandardized coverage: 39/39.\n`);
   const disguisedFraction = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
