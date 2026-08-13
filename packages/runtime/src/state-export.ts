@@ -585,7 +585,17 @@ const REQUIRED_RUN_HEALTH_FIELDS = [
  * ignored so an unknown field still fails closed, while the identity fields are
  * checked against the run that was actually asked about.
  */
-const ADDITIONAL_RUN_HEALTH_FIELDS = ["runId", "workflow", "liveness", "startedAtMs", "finishedAtMs"] as const;
+const ADDITIONAL_RUN_HEALTH_FIELDS = [
+  "runId",
+  "workflow",
+  "liveness",
+  "startedBy",
+  "startedAtMs",
+  "finishedAtMs",
+  "attention",
+  "information",
+  "oneshotControl"
+] as const;
 
 function parseRunHealth(
   value: unknown,
@@ -602,9 +612,8 @@ function parseRunHealth(
     return undefined;
   }
   // A summary that names another run is not this run's health.
-  for (const field of ["runId", "workflow"] as const) {
-    if (data[field] !== undefined && data[field] !== expectedWorkflowRunId) return undefined;
-  }
+  if (data.runId !== undefined && data.runId !== expectedWorkflowRunId) return undefined;
+  if (data.workflow !== undefined && stringField(data, "workflow") === undefined) return undefined;
   const counts = recordField(data, "counts");
   const throughput = recordField(data, "throughput");
   const verdict = stringField(data ?? {}, "verdict");
@@ -690,7 +699,7 @@ function parseRunHealth(
     return nodeId === undefined ||
       iteration === undefined ||
       state === undefined ||
-      !SMITHERS_NODE_STATES.includes(state as (typeof SMITHERS_NODE_STATES)[number]) ||
+      (!SMITHERS_NODE_STATES.includes(state as (typeof SMITHERS_NODE_STATES)[number]) && state !== "quota-parked") ||
       detail === undefined
       ? []
       : [{ node_id: nodeId, iteration, state, detail }];
@@ -714,7 +723,7 @@ function parseRunHealth(
       parkedCount === undefined ||
       resetAtMs === undefined ||
       parkedNodeIds === undefined ||
-      parkedCount !== parkedNodeIds.length ||
+      parkedCount < parkedNodeIds.length ||
       new Set(parkedNodeIds).size !== parkedNodeIds.length
     ) {
       return undefined;
@@ -722,6 +731,24 @@ function parseRunHealth(
     quota = { parked_count: parkedCount, parked_node_ids: parkedNodeIds, reset_at_ms: resetAtMs };
   }
   if (gatingOmitted === undefined) {
+    return undefined;
+  }
+  const liveness = parseRunHealthLiveness(data.liveness);
+  const startedBy = parseRunHealthStartedBy(data.startedBy);
+  const attention = parseRunHealthAttention(data.attention);
+  const information = parseRunHealthInformation(data.information);
+  const oneshotControl = parseRunHealthOneshotControl(data.oneshotControl);
+  const startedAtMs = nullableNumberField(data, "startedAtMs");
+  const finishedAtMs = nullableNumberField(data, "finishedAtMs");
+  if (
+    (data.liveness !== undefined && liveness === undefined) ||
+    (data.startedBy !== undefined && startedBy === undefined) ||
+    (data.attention !== undefined && attention === undefined) ||
+    (data.information !== undefined && information === undefined) ||
+    (data.oneshotControl !== undefined && oneshotControl === undefined) ||
+    (data.startedAtMs !== undefined && startedAtMs === undefined) ||
+    (data.finishedAtMs !== undefined && finishedAtMs === undefined)
+  ) {
     return undefined;
   }
   return {
@@ -739,6 +766,10 @@ function parseRunHealth(
     gating,
     gating_omitted: gatingOmitted,
     quota,
+    ...(attention === undefined ? {} : { attention }),
+    ...(information === undefined ? {} : { information }),
+    ...(oneshotControl === undefined ? {} : { oneshot_control: oneshotControl }),
+    ...(startedBy === undefined ? {} : { started_by: startedBy }),
     generated_at_ms: generatedAtMs
   };
 }
@@ -749,6 +780,8 @@ const RUN_HEALTH_VERDICTS = new Set<RunHealthVerdict>([
   "running-healthy",
   "progressing",
   "stalled",
+  "orphaned",
+  "cancel-pending",
   "blocked",
   "waiting-quota",
   "paused",
@@ -758,6 +791,154 @@ const RUN_HEALTH_VERDICTS = new Set<RunHealthVerdict>([
 
 function isRunHealthVerdict(value: string | undefined): value is RunHealthVerdict {
   return value !== undefined && RUN_HEALTH_VERDICTS.has(value as RunHealthVerdict);
+}
+
+function parseRunHealthLiveness(value: unknown): Record<string, unknown> | undefined {
+  if (value === undefined) return undefined;
+  const record = objectRecord(value);
+  if (record === undefined || !hasRequiredAndAllowedKeys(record, ["state"], ["state", "unhealthy"])) return undefined;
+  const state = stringField(record, "state");
+  if (state === undefined || !SMITHERS_RUN_STATES.includes(state as (typeof SMITHERS_RUN_STATES)[number])) {
+    return undefined;
+  }
+  if (record.unhealthy === undefined) return record;
+  const unhealthy = objectRecord(record.unhealthy);
+  const kind = unhealthy === undefined ? undefined : stringField(unhealthy, "kind");
+  if (unhealthy === undefined || kind === undefined) return undefined;
+  const keysByKind: Readonly<Record<string, readonly string[]>> = {
+    "engine-heartbeat-stale": ["kind", "lastHeartbeatAt"],
+    "timer-overdue": ["kind", "wakeAt", "overdueMs"],
+    "ui-heartbeat-stale": ["kind", "lastSeenAt"],
+    "db-lock": ["kind"],
+    "sandbox-unreachable": ["kind"],
+    "supervisor-backoff": ["kind", "attempt", "nextAt"]
+  };
+  const expected = keysByKind[kind];
+  if (expected === undefined || !hasExactKeys(unhealthy, expected)) return undefined;
+  for (const key of ["lastHeartbeatAt", "wakeAt", "lastSeenAt", "nextAt"] as const) {
+    if (unhealthy[key] !== undefined && stringField(unhealthy, key) === undefined) return undefined;
+  }
+  for (const key of ["overdueMs", "attempt"] as const) {
+    if (unhealthy[key] !== undefined && numberField(unhealthy, key) === undefined) return undefined;
+  }
+  return record;
+}
+
+function parseRunHealthStartedBy(value: unknown): RunHealthValue["started_by"] | undefined {
+  if (value === undefined) return undefined;
+  const record = objectRecord(value);
+  if (
+    record === undefined ||
+    Object.keys(record).length === 0 ||
+    Object.keys(record).some((key) => !["harness", "sessionId", "detected"].includes(key))
+  )
+    return undefined;
+  const harness = record.harness === undefined ? undefined : stringField(record, "harness");
+  const sessionId = record.sessionId === undefined ? undefined : stringField(record, "sessionId");
+  if (
+    (record.harness !== undefined && harness === undefined) ||
+    (record.sessionId !== undefined && sessionId === undefined)
+  )
+    return undefined;
+  if (harness === undefined && sessionId === undefined) return undefined;
+  if (record.detected !== undefined && record.detected !== true) return undefined;
+  return {
+    ...(harness === undefined ? {} : { harness }),
+    ...(sessionId === undefined ? {} : { session_id: sessionId }),
+    ...(record.detected === true ? { detected: true as const } : {})
+  };
+}
+
+function parseRunHealthAttention(value: unknown): RunHealthValue["attention"] | undefined {
+  if (value === undefined) return undefined;
+  const record = objectRecord(value);
+  const keys = [
+    "operation",
+    "opId",
+    "crossedCount",
+    "blockingCount",
+    "revertibleCount",
+    "warningCount",
+    "lateCompletion",
+    "archivedByOp",
+    "timestampMs"
+  ] as const;
+  if (record === undefined || !hasExactKeys(record, keys)) return undefined;
+  const operation = stringField(record, "operation");
+  const opId = nullableStringField(record, "opId");
+  const archivedByOp = nullableStringField(record, "archivedByOp");
+  const counts = keys.slice(2, 6).map((key) => numberField(record, key));
+  const timestampMs = numberField(record, "timestampMs");
+  if (
+    operation === undefined ||
+    opId === undefined ||
+    archivedByOp === undefined ||
+    counts.some((entry) => entry === undefined) ||
+    record.lateCompletion === undefined ||
+    typeof record.lateCompletion !== "boolean" ||
+    timestampMs === undefined
+  )
+    return undefined;
+  return {
+    operation,
+    op_id: opId,
+    crossed_count: counts[0]!,
+    blocking_count: counts[1]!,
+    revertible_count: counts[2]!,
+    warning_count: counts[3]!,
+    late_completion: record.lateCompletion,
+    archived_by_op: archivedByOp,
+    timestamp_ms: timestampMs
+  };
+}
+
+function parseRunHealthInformation(value: unknown): RunHealthValue["information"] | undefined {
+  if (value === undefined) return undefined;
+  const record = objectRecord(value);
+  if (record === undefined || !hasExactKeys(record, ["operation", "warningCount", "timestampMs"])) return undefined;
+  const operation = stringField(record, "operation");
+  const warningCount = numberField(record, "warningCount");
+  const timestampMs = numberField(record, "timestampMs");
+  return operation === undefined || warningCount === undefined || timestampMs === undefined
+    ? undefined
+    : { operation, warning_count: warningCount, timestamp_ms: timestampMs };
+}
+
+function parseRunHealthOneshotControl(value: unknown): RunHealthValue["oneshot_control"] | undefined {
+  if (value === undefined) return undefined;
+  const record = objectRecord(value);
+  if (
+    record === undefined ||
+    !hasRequiredAndAllowedKeys(
+      record,
+      ["kind", "status", "timestampMs"],
+      ["kind", "status", "messageId", "restartedAsRunId", "error", "timestampMs"]
+    )
+  )
+    return undefined;
+  const kind = record.kind === "steer" || record.kind === "restart" ? record.kind : undefined;
+  const status = stringField(record, "status");
+  const timestampMs = numberField(record, "timestampMs");
+  const messageId = record.messageId === undefined ? undefined : stringField(record, "messageId");
+  const restartedAsRunId = record.restartedAsRunId === undefined ? undefined : stringField(record, "restartedAsRunId");
+  const error = record.error === undefined ? undefined : stringField(record, "error");
+  if (
+    kind === undefined ||
+    status === undefined ||
+    timestampMs === undefined ||
+    (record.messageId !== undefined && messageId === undefined) ||
+    (record.restartedAsRunId !== undefined && restartedAsRunId === undefined) ||
+    (record.error !== undefined && error === undefined)
+  )
+    return undefined;
+  return {
+    kind,
+    status,
+    ...(messageId === undefined ? {} : { message_id: messageId }),
+    ...(restartedAsRunId === undefined ? {} : { restarted_as_run_id: restartedAsRunId }),
+    ...(error === undefined ? {} : { error }),
+    timestamp_ms: timestampMs
+  };
 }
 
 function publicHealthReason(value: string): string {

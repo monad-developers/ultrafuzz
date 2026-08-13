@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Upgrades the pinned workflow engine to Smithers 0.34.0 through the `smthrs` package family, removes old-package and agent-registry fallbacks, pins the matching Effect 4 beta tree, and recognizes exhausted-loop `degraded` runs as terminal non-success. Opening an existing Smithers store with this release migrates it forward; downgrading that store to the 0.32 runtime is unsupported (#570, #579).
+- Upgrades the pinned workflow engine to Smithers 0.34.0 through the `smthrs` package family, removes old-package and agent-registry fallbacks, pins the matching Effect 4 beta tree, and recognizes exhausted-loop `degraded` runs as terminal non-success. Before opening an existing project, rerun `ultrafuzz init` without `--force`: it rewrites an authenticated generated 0.32 dependency manifest and byte-identical stock adapters while preserving dependency extensions and customized files. Opening the Smithers store then migrates it forward; downgrading that store to the 0.32 runtime is unsupported (#570, #579).
 - `eval status` now names active and waiting nodes, preserves their wait reason and next eligible action in JSON, and shows whether the linked workflow is running or stopped, so controller-loss stalls identify the exact takeover work instead of appearing only as stale checkpoints (#497).
 - Fail workflow launch before run creation when an active topology's required campaign executables are unavailable, expose those requirements through `ultrafuzz doctor`, and probe cloud requirements inside the configured provider image (#498).
 

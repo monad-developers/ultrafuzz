@@ -840,6 +840,8 @@ function workflowInspect(input: {
   state?: TestSmithersRunState;
   error?: unknown;
   failedChildKeys?: string[];
+  exhaustedLoops?: Array<{ id: string; iteration: number; maxIterations: number | null }>;
+  steers?: Array<Record<string, unknown>>;
   includeVerifierSteps?: boolean;
   steps: Array<{ id: string; state: TestSmithersNodeState; attempt?: number }>;
 }): unknown {
@@ -888,6 +890,8 @@ function workflowInspect(input: {
       ...(input.failedChildKeys === undefined || input.failedChildKeys.length === 0
         ? {}
         : { failedChildren: input.failedChildKeys.length, failedChildKeys: input.failedChildKeys }),
+      ...(input.exhaustedLoops === undefined ? {} : { exhaustedLoops: input.exhaustedLoops }),
+      ...(input.steers === undefined ? {} : { steers: input.steers }),
       steps,
       nodes
     },
@@ -1698,6 +1702,54 @@ test("non-force init upgrades an exact historical stock agent adapter and is ide
     false
   );
   assert.equal(fs.readFileSync(codexPath, "utf8"), upgradedSource);
+});
+
+test("non-force init upgrades the generated 0.32 manifest and immediately prior stock adapters", () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  const manifestPath = path.join(project, ".smithers", "package.json");
+  const oldManifest = {
+    name: "ultrafuzz-smithers",
+    private: true,
+    type: "module",
+    dependencies: {
+      "@moonshot-ai/kimi-code": "0.29.1",
+      "smithers-orchestrator": "0.32.0",
+      zod: "4.4.3",
+      "custom-agent-package": "1.2.3"
+    },
+    devDependencies: { typescript: "6.0.3" },
+    overrides: {
+      effect: "4.0.0-beta.102",
+      "@effect/opentelemetry": "4.0.0-beta.102",
+      "@effect/platform-bun": "4.0.0-beta.102",
+      "@effect/platform-node-shared": "4.0.0-beta.102",
+      "@effect/sql-sqlite-bun": "4.0.0-beta.102"
+    }
+  };
+  fs.writeFileSync(manifestPath, `${JSON.stringify(oldManifest, null, 2)}\n`, "utf8");
+  const codexPath = path.join(project, ".smithers", "agents", "codex.ts");
+  fs.writeFileSync(
+    codexPath,
+    fs
+      .readFileSync(codexPath, "utf8")
+      .replaceAll("@smthrs/agents", "@smithers-orchestrator/agents")
+      .replaceAll('from "smthrs"', 'from "smithers-orchestrator"'),
+    "utf8"
+  );
+
+  const upgraded = initProject({ projectRoot: project });
+
+  assert.equal(upgraded.ok, true, JSON.stringify(upgraded.diagnostics));
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as {
+    dependencies: Record<string, string>;
+  };
+  assert.equal(manifest.dependencies["smithers-orchestrator"], undefined);
+  assert.equal(manifest.dependencies.smthrs, "0.34.0");
+  assert.equal(manifest.dependencies["custom-agent-package"], "1.2.3");
+  const source = fs.readFileSync(codexPath, "utf8");
+  assert.match(source, /from "(?:smthrs|@smthrs\/agents)"/u);
+  assert.doesNotMatch(source, /smithers-orchestrator/u);
 });
 
 test("non-force init upgrades a read-only stock adapter and preserves its mode", () => {
@@ -4582,6 +4634,75 @@ test("validate accepts a typed aliased registry composed from static spreads", a
   assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
 });
 
+test("validate applies registry overwrite order and rejects nullish or shadowed factories", async () => {
+  const project = tempProject();
+  const init = initProject({ projectRoot: project, force: true });
+  assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+  writeSmallTopology(project);
+  const registryPath = path.join(project, ".smithers/agents/index.ts");
+  const factories =
+    "const factory = () => ({ id: 'agent' });\n" +
+    "const core = { ClaudeAgent: factory, CodexAgent: factory, DeepSeekAgent: factory, KimiAgent: factory };\n";
+
+  fs.writeFileSync(
+    registryPath,
+    factories + "const registry = { ...core, CodexAgent: undefined };\nexport { registry as agentFactories };\n",
+    "utf8"
+  );
+  const overwritten = await validateProject({ projectRoot: project, env: {} });
+  assert.equal(overwritten.ok, false);
+  assert.equal(
+    overwritten.diagnostics.filter(
+      (diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN" && /CodexAgent/u.test(diagnostic.message)
+    ).length,
+    1
+  );
+
+  fs.writeFileSync(
+    registryPath,
+    factories +
+      "const unknown = dynamicRegistry();\nconst registry = { ...core, ...unknown };\nexport { registry as agentFactories };\n",
+    "utf8"
+  );
+  const unknownOverride = await validateProject({ projectRoot: project, env: {} });
+  assert.equal(unknownOverride.ok, false);
+  assert.equal(
+    unknownOverride.diagnostics.filter((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN").length,
+    4
+  );
+
+  fs.writeFileSync(
+    registryPath,
+    "const Object = { freeze: (value: unknown) => value };\n" +
+      factories +
+      "export const agentFactories = Object.freeze(core);\n",
+    "utf8"
+  );
+  const shadowed = await validateProject({ projectRoot: project, env: {} });
+  assert.equal(shadowed.ok, false);
+  assert.ok(shadowed.diagnostics.some((diagnostic) => diagnostic.code === "AGENT_REGISTRY_INVALID"));
+});
+
+test("validate rejects unsafe or oversized canonical agent registries with diagnostics", async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  writeSmallTopology(project);
+  const registryPath = path.join(project, ".smithers/agents/index.ts");
+  const outside = path.join(project, "outside-registry.ts");
+  fs.writeFileSync(outside, fs.readFileSync(registryPath));
+  fs.unlinkSync(registryPath);
+  fs.linkSync(outside, registryPath);
+  const hardlinked = await validateProject({ projectRoot: project, env: {} });
+  assert.equal(hardlinked.ok, false);
+  assert.ok(hardlinked.diagnostics.some((diagnostic) => diagnostic.code === "AGENT_REGISTRY_INVALID"));
+
+  fs.unlinkSync(registryPath);
+  fs.writeFileSync(registryPath, `export const agentFactories = {};/*${"x".repeat(256 * 1024)}*/`, "utf8");
+  const oversized = await validateProject({ projectRoot: project, env: {} });
+  assert.equal(oversized.ok, false);
+  assert.ok(oversized.diagnostics.some((diagnostic) => diagnostic.code === "AGENT_REGISTRY_INVALID"));
+});
+
 test("validate ignores textual, type-only, and cyclic agentFactories lookalikes", async () => {
   const project = tempProject();
   const init = initProject({ projectRoot: project, force: true });
@@ -5226,6 +5347,8 @@ test("compileSmithersWorkflow gates native dependencies on deterministic artifac
   assert.match(workflowSource, /<Parallel\b/);
   assert.doesNotMatch(workflowSource, /agentRegistry/u);
   assert.match(workflowSource, /agent factory is not registered/u);
+  assert.match(workflowSource, /agent factory returned no agents/u);
+  assert.match(workflowSource, /agent factory returned a nullish agent chain entry/u);
 
   const smithersTasks = JSON.parse(fs.readFileSync(compiled.tasksPath, "utf8")) as {
     layers?: unknown;
@@ -6166,7 +6289,7 @@ test("getRunHealth accepts the terminal degraded verdict without converting it t
       status: "finished",
       verdict: "degraded",
       reason: "loop review exhausted before its until condition passed",
-      liveness: { state: "finished" },
+      liveness: { state: "succeeded" },
       finishedAtMs: 2_000
     }
   });
@@ -6234,6 +6357,74 @@ test("getRunHealth rejects every noncurrent status envelope without fallback or 
       invalid.label
     );
   }
+});
+
+test("getRunHealth accepts strict 0.34 orphan, cancel-pending, quota, and operation metadata shapes", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeSmithersEnv(project);
+  const run = await startRun({ projectRoot: project, runId: "health-034-shapes", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const envelope = currentStatusEnvelope("ultrafuzz-health-034-shapes");
+  const base = envelope.data as Record<string, unknown>;
+
+  for (const verdict of ["orphaned", "cancel-pending"] as const) {
+    env.SMITHERS_FAKE_STATUS_JSON = JSON.stringify({
+      ...envelope,
+      data: {
+        ...base,
+        verdict,
+        reason: `run is ${verdict}`,
+        liveness: {
+          state: verdict,
+          unhealthy: { kind: "engine-heartbeat-stale", lastHeartbeatAt: "2026-08-13T00:00:00.000Z" }
+        },
+        startedBy: { harness: "codex", sessionId: "session-1", detected: true },
+        attention: {
+          operation: "time travel",
+          opId: null,
+          crossedCount: 2,
+          blockingCount: 1,
+          revertibleCount: 1,
+          warningCount: 0,
+          lateCompletion: false,
+          archivedByOp: null,
+          timestampMs: 2_000
+        },
+        information: { operation: "rewind", warningCount: 1, timestampMs: 2_001 },
+        oneshotControl: { kind: "steer", status: "agent-acked", messageId: "message-1", timestampMs: 2_002 }
+      }
+    });
+    const health = await getRunHealth({ projectRoot: project, runId: "health-034-shapes", env });
+    assert.equal(health.ok, true, `${verdict}: ${JSON.stringify(health.diagnostics)}`);
+    assert.equal(health.value?.verdict, verdict);
+    assert.equal(health.value?.started_by?.session_id, "session-1");
+    assert.equal(health.value?.attention?.crossed_count, 2);
+    assert.equal(health.value?.oneshot_control?.message_id, "message-1");
+  }
+
+  env.SMITHERS_FAKE_STATUS_JSON = JSON.stringify({
+    ...envelope,
+    data: {
+      ...base,
+      status: "waiting-quota",
+      verdict: "waiting-quota",
+      reason: "5 tasks quota-parked",
+      bottleneck: [
+        { nodeId: "node-a", iteration: 0, state: "quota-parked", detail: null },
+        { nodeId: "node-b", iteration: 0, state: "quota-parked", detail: null },
+        { nodeId: "node-c", iteration: 0, state: "quota-parked", detail: null }
+      ],
+      bottleneckOmitted: 2,
+      quota: { parkedCount: 5, parkedNodeIds: ["node-a", "node-b", "node-c"], resetAtMs: null },
+      liveness: { state: "waiting-quota" }
+    }
+  });
+  const quota = await getRunHealth({ projectRoot: project, runId: "health-034-shapes", env });
+  assert.equal(quota.ok, true, JSON.stringify(quota.diagnostics));
+  assert.equal(quota.value?.quota?.parked_count, 5);
+  assert.equal(quota.value?.gating[0]?.state, "quota-parked");
 });
 
 test("pauseRun accepts the workflow runner pause-request exit and is idempotent once paused", async () => {
@@ -6334,21 +6525,27 @@ test("startRun maps keep_workspaces to the Smithers worktree retention environme
   }
 });
 
-test("startRun fixes detached admission at the supported five-minute timeout", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const timeoutLog = path.join(project, "detached-admission-timeout.log");
-  const env = {
-    ...fakeSmithersEnv(project),
-    SMITHERS_DETACHED_ADMISSION_TIMEOUT_MS: "1",
-    SMITHERS_FAKE_ADMISSION_TIMEOUT_LOG: timeoutLog
-  };
+test("startRun defaults detached admission to five minutes without overriding an explicit timeout", async () => {
+  for (const explicitTimeout of [undefined, "1"] as const) {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project);
+    const timeoutLog = path.join(project, "detached-admission-timeout.log");
+    const env = {
+      ...fakeSmithersEnv(project),
+      ...(explicitTimeout === undefined ? {} : { SMITHERS_DETACHED_ADMISSION_TIMEOUT_MS: explicitTimeout }),
+      SMITHERS_FAKE_ADMISSION_TIMEOUT_LOG: timeoutLog
+    };
 
-  const run = await startRun({ projectRoot: project, runId: "detached-admission-timeout", env });
+    const run = await startRun({
+      projectRoot: project,
+      runId: `detached-admission-timeout-${explicitTimeout ?? "default"}`,
+      env
+    });
 
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  assert.equal(fs.readFileSync(timeoutLog, "utf8"), "300000\n");
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    assert.equal(fs.readFileSync(timeoutLog, "utf8"), `${explicitTimeout ?? "300000"}\n`);
+  }
 });
 
 test("startRun injects the configured Forge guard into the workflow environment and metadata", async () => {
@@ -11078,6 +11275,47 @@ test("syncRun does not mark a completed workflow succeeded without task evidence
   assert.ok(sync.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_TASK_EVIDENCE_MISSING"));
 });
 
+test("syncRun persists exhausted-loop evidence and fails a completed degraded workflow", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-degraded-loop";
+  const exhaustedLoops = [{ id: "review", iteration: 3, maxIterations: 3 }];
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      exhaustedLoops,
+      steers: [
+        {
+          steerId: "steer-1",
+          nodeId: "node:project-discovery",
+          status: "consumed",
+          message: "focus the final pass",
+          author: "operator",
+          queued: "2026-07-03T00:00:01.000Z",
+          consumedByAttempt: 1,
+          consumedByIteration: 0
+        }
+      ],
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunFinished", extra: { exhaustedLoops } }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-degraded-loop", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "sync-degraded-loop", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "failed");
+  const events = fs.readFileSync(path.join(run.value!.run_root, "events.jsonl"), "utf8");
+  assert.match(events, /"exhausted_loops":\[\{"id":"review","iteration":3,"max_iterations":3\}\]/u);
+});
+
 test("syncRun maps failed workflow nodes into durable failed run state", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -12080,21 +12318,21 @@ test("resume rejects non-current Smithers inspect evidence before making lifecyc
       inspect: invalidInspect((fixture) => {
         fixture.data.result = [];
       }),
-      message: /data contains fields outside the pinned 0\.32\.0 shape: result/u
+      message: /data contains fields outside the pinned 0\.34\.0 shape: result/u
     },
     {
       label: "unknown run field",
       inspect: invalidInspect((fixture) => {
         fixture.data.run!.phase = "running";
       }),
-      message: /data\.run contains fields outside the pinned 0\.32\.0 shape: phase/u
+      message: /data\.run contains fields outside the pinned 0\.34\.0 shape: phase/u
     },
     {
       label: "unknown run-state field",
       inspect: invalidInspect((fixture) => {
         fixture.data.runState!.status = "running";
       }),
-      message: /data\.runState contains fields outside the pinned 0\.32\.0 shape: status/u
+      message: /data\.runState contains fields outside the pinned 0\.34\.0 shape: status/u
     },
     {
       label: "removed node-state alias",

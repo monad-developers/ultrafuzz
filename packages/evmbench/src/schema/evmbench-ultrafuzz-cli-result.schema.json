@@ -315,6 +315,8 @@
             "running-healthy",
             "progressing",
             "stalled",
+            "orphaned",
+            "cancel-pending",
             "blocked",
             "waiting-quota",
             "paused",
@@ -595,6 +597,65 @@
               }
             }
           ]
+        },
+        "attention": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "operation",
+            "op_id",
+            "crossed_count",
+            "blocking_count",
+            "revertible_count",
+            "warning_count",
+            "late_completion",
+            "archived_by_op",
+            "timestamp_ms"
+          ],
+          "properties": {
+            "operation": { "type": "string", "minLength": 1 },
+            "op_id": { "type": ["string", "null"] },
+            "crossed_count": { "$ref": "#/$defs/nonNegativeInteger" },
+            "blocking_count": { "$ref": "#/$defs/nonNegativeInteger" },
+            "revertible_count": { "$ref": "#/$defs/nonNegativeInteger" },
+            "warning_count": { "$ref": "#/$defs/nonNegativeInteger" },
+            "late_completion": { "type": "boolean" },
+            "archived_by_op": { "type": ["string", "null"] },
+            "timestamp_ms": { "$ref": "#/$defs/nonNegativeInteger" }
+          }
+        },
+        "information": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["operation", "warning_count", "timestamp_ms"],
+          "properties": {
+            "operation": { "type": "string", "minLength": 1 },
+            "warning_count": { "$ref": "#/$defs/nonNegativeInteger" },
+            "timestamp_ms": { "$ref": "#/$defs/nonNegativeInteger" }
+          }
+        },
+        "oneshot_control": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "status", "timestamp_ms"],
+          "properties": {
+            "kind": { "enum": ["steer", "restart"] },
+            "status": { "type": "string", "minLength": 1 },
+            "message_id": { "type": "string", "minLength": 1 },
+            "restarted_as_run_id": { "type": "string", "minLength": 1 },
+            "error": { "type": "string", "minLength": 1 },
+            "timestamp_ms": { "$ref": "#/$defs/nonNegativeInteger" }
+          }
+        },
+        "started_by": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "harness": { "type": "string", "minLength": 1 },
+            "session_id": { "type": "string", "minLength": 1 },
+            "detected": { "const": true }
+          }
         },
         "generated_at_ms": {
           "$ref": "#/$defs/nonNegativeInteger"

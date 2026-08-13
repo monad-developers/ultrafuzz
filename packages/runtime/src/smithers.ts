@@ -66,6 +66,7 @@ import {
 } from "./workflow-execution-snapshot-capability.js";
 import {
   assertSmithersPackageManifest,
+  migrateStockSmithers032PackageManifest,
   SMITHERS_BIN_PATH,
   SMITHERS_VERSION,
   smithersDependencyInstallArgs
@@ -1021,6 +1022,13 @@ export interface CurrentSmithersInspect {
   runState: SmithersRunState;
   nodes: CurrentSmithersInspectNode[];
   failedChildKeys: string[];
+  exhaustedLoops: CurrentSmithersExhaustedLoop[];
+}
+
+export interface CurrentSmithersExhaustedLoop {
+  id: string;
+  iteration: number;
+  maxIterations: number | null;
 }
 
 const SMITHERS_ACTIVE_RUN_STATES = new Set<SmithersRunState>([
@@ -2585,6 +2593,8 @@ export function parseCurrentSmithersInspect(
       "approvals",
       "timers",
       "loops",
+      "exhaustedLoops",
+      "steers",
       "config"
     ],
     "Smithers inspect data"
@@ -2597,6 +2607,7 @@ export function parseCurrentSmithersInspect(
       throw new Error(`Smithers inspect data.${key} must be an array`);
     }
   }
+  if (data.steers !== undefined) validateCurrentSmithersSteers(data.steers);
   if (data.config !== undefined && !isObjectRecord(data.config)) {
     throw new Error("Smithers inspect data.config must be an object");
   }
@@ -2704,7 +2715,76 @@ export function parseCurrentSmithersInspect(
   });
 
   const failedChildKeys = parseCurrentSmithersFailedChildKeys(data, nodeIds);
-  return { runStatus, runState: parsedRunState, nodes, failedChildKeys };
+  const exhaustedLoops = parseCurrentSmithersExhaustedLoops(data.exhaustedLoops);
+  if (exhaustedLoops.length > 0 && parsedRunState !== "succeeded") {
+    throw new Error("Smithers inspect data.exhaustedLoops is only valid for a succeeded workflow state");
+  }
+  return { runStatus, runState: parsedRunState, nodes, failedChildKeys, exhaustedLoops };
+}
+
+function parseCurrentSmithersExhaustedLoops(value: unknown): CurrentSmithersExhaustedLoop[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error("Smithers inspect data.exhaustedLoops must be a non-empty array when present");
+  }
+  const ids = new Set<string>();
+  return value.map((entry, index) => {
+    const label = `Smithers inspect data.exhaustedLoops[${index}]`;
+    if (!isObjectRecord(entry) || !hasExactObjectKeys(entry, ["id", "iteration", "maxIterations"])) {
+      throw new Error(`${label} must use the exact current shape`);
+    }
+    const id = requiredCurrentInspectString(entry.id, `${label}.id`);
+    if (ids.has(id)) throw new Error(`${label}.id duplicates an earlier exhausted loop`);
+    ids.add(id);
+    const iteration = requiredCurrentInspectCount(entry.iteration, `${label}.iteration`);
+    const maxIterations =
+      entry.maxIterations === null ? null : requiredCurrentInspectCount(entry.maxIterations, `${label}.maxIterations`);
+    if (maxIterations !== null && maxIterations === 0) {
+      throw new Error(`${label}.maxIterations must be positive when present`);
+    }
+    return { id, iteration, maxIterations };
+  });
+}
+
+function validateCurrentSmithersSteers(value: unknown): void {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error("Smithers inspect data.steers must be a non-empty array when present");
+  }
+  const ids = new Set<string>();
+  for (const [index, entry] of value.entries()) {
+    const label = `Smithers inspect data.steers[${index}]`;
+    if (
+      !isObjectRecord(entry) ||
+      !["steerId", "nodeId", "status", "message", "queued"].every((key) => Object.hasOwn(entry, key)) ||
+      Object.keys(entry).some(
+        (key) =>
+          ![
+            "steerId",
+            "nodeId",
+            "status",
+            "message",
+            "author",
+            "queued",
+            "consumedByAttempt",
+            "consumedByIteration"
+          ].includes(key)
+      )
+    ) {
+      throw new Error(`${label} must use the exact current shape`);
+    }
+    const steerId = requiredCurrentInspectString(entry.steerId, `${label}.steerId`);
+    if (ids.has(steerId)) throw new Error(`${label}.steerId duplicates an earlier steer`);
+    ids.add(steerId);
+    requiredCurrentInspectString(entry.nodeId, `${label}.nodeId`);
+    requiredCurrentInspectEnum(entry.status, ["queued", "consumed", "expired"] as const, `${label}.status`);
+    requiredCurrentInspectString(entry.message, `${label}.message`);
+    const queued = requiredCurrentInspectString(entry.queued, `${label}.queued`);
+    if (!isCanonicalDateTime(queued)) throw new Error(`${label}.queued must be a canonical timestamp`);
+    if (entry.author !== undefined) requiredCurrentInspectString(entry.author, `${label}.author`);
+    for (const key of ["consumedByAttempt", "consumedByIteration"] as const) {
+      if (entry[key] !== undefined) requiredCurrentInspectCount(entry[key], `${label}.${key}`);
+    }
+  }
 }
 
 function validateCurrentSmithersInspectMeta(value: unknown): void {
@@ -3130,7 +3210,19 @@ async function ensureSmithersDependencies(
   assertNoSymlinkComponents(projectRoot, packageRoot, "Smithers package");
   assertNoSymlinkComponents(projectRoot, packageJson, "Smithers package manifest");
   const parsedManifest = readPackageManagerOwnedManifestEnvelope(packageJson, "generated Smithers package manifest");
-  assertSmithersPackageManifest(parsedManifest);
+  const migratedManifest = migrateStockSmithers032PackageManifest(parsedManifest);
+  if (migratedManifest !== undefined) {
+    const identity = fs.lstatSync(packageJson, { bigint: true });
+    if (!identity.isFile() || identity.isSymbolicLink() || identity.nlink !== 1n) {
+      throw new Error("generated Smithers package manifest must be a singly linked regular file before migration");
+    }
+    writeFileDurable(packageJson, migratedManifest);
+  }
+  assertSmithersPackageManifest(
+    migratedManifest === undefined
+      ? parsedManifest
+      : readPackageManagerOwnedManifestEnvelope(packageJson, "migrated generated Smithers package manifest")
+  );
   const nodeModules = path.join(packageRoot, "node_modules");
   if (fs.existsSync(nodeModules)) {
     assertNoSymlinkComponents(projectRoot, nodeModules, "Smithers dependencies");
@@ -3635,7 +3727,7 @@ function smithersCommandEnv(
   keepWorkspaces?: boolean
 ): NodeJS.ProcessEnv {
   const source: NodeJS.ProcessEnv = { ...process.env, ...(env ?? {}) };
-  source.SMITHERS_DETACHED_ADMISSION_TIMEOUT_MS = SMITHERS_DETACHED_ADMISSION_TIMEOUT_MS;
+  source.SMITHERS_DETACHED_ADMISSION_TIMEOUT_MS ??= SMITHERS_DETACHED_ADMISSION_TIMEOUT_MS;
   if (keepWorkspaces !== undefined) {
     source.SMITHERS_KEEP_WORKTREES = keepWorkspaces ? "1" : undefined;
   }

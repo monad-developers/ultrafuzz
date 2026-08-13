@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { assertNoSymlinkComponents } from "@ultrafuzz/artifacts";
+import { assertNoSymlinkComponents, parseStrictJsonBytes } from "@ultrafuzz/artifacts";
 import {
   packagedTopology,
   redactResolvedConfig,
@@ -19,15 +19,14 @@ import {
 } from "./runtime-contracts.js";
 import { parseRuntimeDocumentBytes, serializeRuntimeDocument } from "./runtime-document-codec.js";
 import { loadRuntimeTemplate } from "./runtime-template.js";
-import { renderSmithersPackageJson } from "./smithers-package.js";
+import { migrateStockSmithers032PackageManifest, renderSmithersPackageJson } from "./smithers-package.js";
 import type { InitProjectInput, InitProjectResult, RuntimeDiagnostic } from "./types.js";
 import { configDiagnostics, runtimeFailure, runtimeResult, toProjectRelative } from "./utils.js";
+import { AGENT_REGISTRY_RELATIVE_PATH, agentRegistryRegisters, inspectAgentRegistry } from "./agent-registry.js";
 
 const DEFAULT_TOPOLOGY = fs.readFileSync(packagedTopology("full").path, "utf8");
 
-const AGENT_REGISTRY_FILE = ".smithers/agents/index.ts";
 const MAX_STOCK_AGENT_ADAPTER_BYTES = 256 * 1024;
-const MAX_AGENT_REGISTRY_BYTES = 256 * 1024;
 const AGENT_TEMPLATES = [
   {
     file: "claude.ts",
@@ -35,6 +34,7 @@ const AGENT_TEMPLATES = [
     ref: "ClaudeAgent",
     stockSha256: new Set([
       "efee33db0341d979a412c2f66559700af4462241667a3f9587af857218b341c4",
+      "f2b97c9b57aa45bdc3b42be20d7a3baddc0086a2bae95c161b841599f3262232",
       "6774e116b8efa175a20a53f8a645c7c9046f266bba974d0e4fab01c5d072c28b",
       "2cc5a7a75e23c40d3da5e80438a916e6f3671e794ef6023115d78c94fa03d210"
     ])
@@ -45,6 +45,7 @@ const AGENT_TEMPLATES = [
     ref: "CodexAgent",
     stockSha256: new Set([
       "26dae14e43c09dbe7901aa731cd552b282d502d86cea8cc6726e4a8579cd3236",
+      "b932fb7da3c05fdc662f60359e8a751aaabd236ca4072dfeaade1a7bb25a01b5",
       "f6497ac57506ec1af4c426711197d43fbbe6d5b5122eef9e8c6e438a6bd65c8e",
       "b2469baaaf5a0818dff321017200feef78e1e285c3f9adb96dcb7c958e5e835c",
       "bce18463addcd722bde69f3d1f46a0d98c7417e8b0fbc1dd64eaa81acc934019",
@@ -61,6 +62,7 @@ const AGENT_TEMPLATES = [
     ref: "DeepSeekAgent",
     stockSha256: new Set([
       "c23a03c84e2f62d2e6b23ee7b27b1464a633fe20bb5b91c34d2c93d37dcf7e35",
+      "1da0e8300e1b9f5c8311c14414acd3029b750fe70644c9d364c598ea460a08f2",
       "65bf43f333cbced8ff0157e942d3c78267d8245d6c0041e053c8577a463e7407"
     ])
   },
@@ -70,6 +72,7 @@ const AGENT_TEMPLATES = [
     ref: "KimiAgent",
     stockSha256: new Set([
       "fdbeaad6ea55122da50e9c9d86ac58a8b6377f419f8e78df23fb1fb401924e0b",
+      "8e9c9fee048d2ac7a04669d8999647ba460c27855959bb77cd2b7eb0ea1ac940",
       "6de5f4b00b54b533f8fc1aa0628f5a402dbb6521a4584852d83786ee59dcb2fd",
       "25c499f8631db6e2529b046b5d2243119b456696c7a4a729345baa6f21f4c4f5",
       "f790a3f121da84049032cfc5bf5d300f7bd56e9e3b15d0a51df5ea1b275de75f",
@@ -123,6 +126,8 @@ export function initProject(input: InitProjectInput) {
   const redacted = redactResolvedConfig(resolved.value);
 
   try {
+    const stockSmithersPackageMigrated =
+      input.force !== true && upgradeStockSmithersPackageManifest(projectRoot, created, preserved, overwritten);
     writeProjectFile(
       projectRoot,
       "ultrafuzz.toml",
@@ -150,15 +155,17 @@ export function initProject(input: InitProjectInput) {
       preserved,
       overwritten
     );
-    writeProjectFile(
-      projectRoot,
-      ".smithers/package.json",
-      renderSmithersPackageJson(),
-      input.force === true,
-      created,
-      preserved,
-      overwritten
-    );
+    if (!stockSmithersPackageMigrated) {
+      writeProjectFile(
+        projectRoot,
+        ".smithers/package.json",
+        renderSmithersPackageJson(),
+        input.force === true,
+        created,
+        preserved,
+        overwritten
+      );
+    }
     writeProjectFile(
       projectRoot,
       ".smithers/agents/index.ts",
@@ -266,6 +273,36 @@ export function initProject(input: InitProjectInput) {
   );
 }
 
+function upgradeStockSmithersPackageManifest(
+  projectRoot: string,
+  created: string[],
+  preserved: string[],
+  overwritten: string[]
+): boolean {
+  const relativePath = ".smithers/package.json";
+  const filePath = path.join(projectRoot, relativePath);
+  const identity = lstatIfPresent(filePath);
+  if (identity === undefined || !identity.isFile() || identity.isSymbolicLink() || identity.nlink !== 1n) return false;
+  try {
+    const bytes = readStableInitReviewFile(projectRoot, filePath, 1024 * 1024, "generated Smithers package manifest");
+    const parsed = parseStrictJsonBytes(bytes, {
+      maxBytes: 1024 * 1024,
+      maxDepth: 32,
+      maxItems: 10_000,
+      maxProperties: 10_000
+    });
+    const migrated = migrateStockSmithers032PackageManifest(parsed);
+    if (migrated === undefined) return false;
+    writeProjectFile(projectRoot, relativePath, migrated, true, created, preserved, overwritten);
+    return true;
+  } catch {
+    // A custom or malformed manifest is project-owned: preserve it and let the
+    // launch validator report the exact incompatibility without making init
+    // destructive or unusable.
+    return false;
+  }
+}
+
 function upgradedStockAdapterDiagnostics(relativePaths: readonly string[]): RuntimeDiagnostic[] {
   return relativePaths.map((relativePath) => ({
     code: "INIT_STOCK_AGENT_ADAPTER_UPGRADED",
@@ -342,76 +379,37 @@ function manualAgentAdapterReviewDiagnostic(relativePath: string, reason: string
 // exports it, and the agent is only rejected later, at launch. Report it here
 // instead of leaving the mismatch silent.
 function staleAgentRegistryDiagnostics(projectRoot: string): RuntimeDiagnostic[] {
-  const registryPath = path.join(projectRoot, AGENT_REGISTRY_FILE);
-  let registryText: string;
-  try {
-    const lexical = fs.lstatSync(registryPath, { bigint: true });
-    if (lexical.isSymbolicLink() || !lexical.isFile() || lexical.nlink !== 1n) {
-      return [
-        manualAgentRegistryReviewDiagnostic(
-          "is not a physical single-link file, so init preserved it without inspection; replace it with an ordinary file"
-        )
-      ];
-    }
-    if (lexical.size > BigInt(MAX_AGENT_REGISTRY_BYTES)) {
-      return [
-        manualAgentRegistryReviewDiagnostic("is too large to inspect as a generated agent registry and was preserved")
-      ];
-    }
-    registryText = readStableInitReviewFile(
-      projectRoot,
-      registryPath,
-      MAX_AGENT_REGISTRY_BYTES,
-      "generated agent registry"
-    ).toString("utf8");
-  } catch (error) {
-    if (isNodeError(error) && error.code === "ENOENT") return [];
-    return [manualAgentRegistryReviewDiagnostic("could not be safely inspected during post-init review")];
+  const registry = inspectAgentRegistry(projectRoot);
+  if (!registry.exists) return [];
+  if (registry.error !== undefined) {
+    // This runs after init may already have written other project files. Keep
+    // the warning actionable without reflecting an OS/parser error that can
+    // contain sensitive path or injected error details.
+    return [
+      manualAgentRegistryReviewDiagnostic("was preserved without inspection because it could not be safely inspected")
+    ];
   }
-  try {
-    return AGENT_TEMPLATES.filter(
-      (agent) =>
-        namedPathExistsNoFollow(path.join(projectRoot, ".smithers", "agents", agent.file)) &&
-        !registersAgentFactory(registryText, agent.ref)
-    ).map((agent) => ({
-      code: "INIT_AGENT_REGISTRY_STALE",
-      message: `${AGENT_REGISTRY_FILE} does not register ${agent.ref} in agentFactories, so runs cannot select it; rerun ultrafuzz init --force to regenerate the registry, or add the entry by hand`,
-      severity: "warning" as const,
-      source: "runtime",
-      path: AGENT_REGISTRY_FILE
-    }));
-  } catch {
-    return [manualAgentRegistryReviewDiagnostic("could not be safely inspected during post-init review")];
-  }
+  return AGENT_TEMPLATES.filter(
+    (agent) =>
+      lstatIfPresent(path.join(projectRoot, ".smithers", "agents", agent.file)) !== undefined &&
+      !agentRegistryRegisters(registry, agent.ref)
+  ).map((agent) => ({
+    code: "INIT_AGENT_REGISTRY_STALE",
+    message: `${AGENT_REGISTRY_RELATIVE_PATH} does not register ${agent.ref} in agentFactories, so runs cannot select it; rerun ultrafuzz init --force to regenerate the registry, or add the entry by hand`,
+    severity: "warning" as const,
+    source: "runtime",
+    path: AGENT_REGISTRY_RELATIVE_PATH
+  }));
 }
 
 function manualAgentRegistryReviewDiagnostic(reason: string): RuntimeDiagnostic {
   return {
     code: "INIT_AGENT_REGISTRY_REVIEW_REQUIRED",
-    message: `${AGENT_REGISTRY_FILE} ${reason}; verify manually that agentFactories registers every generated agent before starting a run`,
+    message: `${AGENT_REGISTRY_RELATIVE_PATH} ${reason}; verify manually that agentFactories registers every generated agent before starting a run`,
     severity: "warning",
     source: "runtime",
-    path: AGENT_REGISTRY_FILE
+    path: AGENT_REGISTRY_RELATIVE_PATH
   };
-}
-
-function namedPathExistsNoFollow(filePath: string): boolean {
-  try {
-    fs.lstatSync(filePath);
-    return true;
-  } catch (error) {
-    if (isNodeError(error) && error.code === "ENOENT") return false;
-    throw error;
-  }
-}
-
-// Generated adapters export only their factory, so agentFactories is the sole
-// path that resolves them. Merely naming the agent elsewhere in the registry --
-// an `export { ClaudeAgent }` left over from an older adapter, say -- does not
-// make it selectable, so match the factory entry rather than the bare name.
-function registersAgentFactory(registryText: string, ref: string): boolean {
-  const factories = /agentFactories\s*=\s*\{([^}]*)\}/u.exec(registryText);
-  return factories === null ? false : new RegExp(`\\b${ref}\\s*:`, "u").test(factories[1] ?? "");
 }
 
 function writeProjectFile(

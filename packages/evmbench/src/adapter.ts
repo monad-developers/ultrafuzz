@@ -9,7 +9,7 @@ import {
   writeFileDurable
 } from "@ultrafuzz/artifacts";
 
-import { parseEvmbenchCliResult, type EvmbenchCliCommand } from "./cli-contracts.js";
+import { parseEvmbenchCliResult, type EvmbenchCliCommand, type EvmbenchStatusVerdict } from "./cli-contracts.js";
 import { parseEvmbenchProfileBytes, serializeEvmbenchProfile, type EvmbenchProfile } from "./contracts.js";
 
 const MAX_PROFILE_BYTES = 1024 * 1024;
@@ -51,9 +51,7 @@ export async function runEvmbenchAdapter(options: AdapterOptions): Promise<{ run
   const runRoot = path.join(auditRoot, ".ultrafuzz", "runs", runId);
   if (fs.existsSync(runRoot)) {
     const existing = commandData("status", execute(["status", runId, "--project", auditRoot, "--json"]));
-    if (existing.verdict === "degraded") {
-      throw degradedRunError(runId, existing.reason);
-    }
+    assertEvmbenchVerdictCanProgress(runId, existing.verdict, existing.reason, true);
     if (existing.verdict !== "done") {
       commandData(
         "resume",
@@ -93,17 +91,7 @@ export async function runEvmbenchAdapter(options: AdapterOptions): Promise<{ run
     const status = commandData("status", execute(["status", runId, "--project", auditRoot, "--json"]));
     const verdict = status.verdict;
     if (verdict === "done") break;
-    if (verdict === "degraded") {
-      throw degradedRunError(runId, status.reason);
-    }
-    if (verdict === "failed" || verdict === "cancelled") {
-      throw new Error(`Ultrafuzz run ${runId} ended with ${verdict}; inspect the run before retrying`);
-    }
-    if (verdict === "blocked" || verdict === "paused") {
-      throw new Error(
-        `Ultrafuzz run ${runId} cannot complete unattended while ${verdict}${status.reason === "" ? "" : `: ${status.reason}`}`
-      );
-    }
+    assertEvmbenchVerdictCanProgress(runId, verdict, status.reason, false);
     if (!WAITABLE_VERDICTS.has(verdict)) {
       throw new Error(`Ultrafuzz run ${runId} returned an unknown status verdict: ${verdict}`);
     }
@@ -117,6 +105,26 @@ export async function runEvmbenchAdapter(options: AdapterOptions): Promise<{ run
   const reportPath = report.markdown_path;
   copyFinalMarkdown({ reportPath, submissionRoot });
   return { runId, reportPath };
+}
+
+function assertEvmbenchVerdictCanProgress(
+  runId: string,
+  verdict: EvmbenchStatusVerdict,
+  reason: string,
+  existing: boolean
+): void {
+  if (verdict === "done") return;
+  if (verdict === "degraded") throw degradedRunError(runId, reason);
+  if (["failed", "cancelled", "cancel-pending", "orphaned"].includes(verdict)) {
+    throw new Error(
+      `Ultrafuzz run ${runId} ${existing ? "already " : ""}ended with ${verdict}; inspect the run before retrying`
+    );
+  }
+  if (verdict === "blocked" || verdict === "paused") {
+    throw new Error(
+      `Ultrafuzz run ${runId} cannot complete unattended while ${verdict}${reason === "" ? "" : `: ${reason}`}`
+    );
+  }
 }
 
 export function seedSmithersDependencies(auditRoot: string, seedNodeModules: string): void {

@@ -917,10 +917,30 @@
             "stale",
             "orphaned",
             "failed",
+            "cancel-pending",
             "cancelled",
             "succeeded",
             "unknown"
           ]
+        },
+        "exhausted_loops": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "iteration", "max_iterations"],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/nonEmptyString"
+              },
+              "iteration": {
+                "$ref": "#/$defs/nonNegativeSafeInteger"
+              },
+              "max_iterations": {
+                "anyOf": [{ "type": "null" }, { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }]
+              }
+            }
+          }
         },
         "synced_nodes": {
           "$ref": "#/$defs/nonNegativeSafeInteger"

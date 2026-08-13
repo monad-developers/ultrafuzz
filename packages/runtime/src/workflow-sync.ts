@@ -115,6 +115,7 @@ interface WorkflowInspect {
   runState: SynchronizableSmithersRunState;
   steps: WorkflowStep[];
   failedWorkflowTaskIds: string[];
+  exhaustedLoops: CurrentSmithersInspect["exhaustedLoops"];
 }
 
 type SmithersRunStatus = CurrentSmithersInspect["runStatus"];
@@ -651,6 +652,11 @@ export async function synchronizeLinkedWorkflowRun(
         workflow_run_id: evidence.smithersRunId,
         workflow_status: inspect.runStatus,
         workflow_state: inspect.runState,
+        exhausted_loops: inspect.exhaustedLoops.map((loop) => ({
+          id: loop.id,
+          iteration: loop.iteration,
+          max_iterations: loop.maxIterations
+        })),
         synced_nodes: syncResult.syncedNodes,
         accounting_available: accountingResult.available,
         recovery_due: workflowControl.recoveryDue,
@@ -3704,7 +3710,7 @@ function finalRunStatus(
 ): RunStatus {
   const statuses = [...nodeStatuses.values()];
   const workflowStatus = inspect.runState;
-  if (workflowStatus === "cancelled") {
+  if (workflowStatus === "cancelled" || workflowStatus === "cancel-pending") {
     return currentStatus === "timed-out" ? "timed-out" : "canceled";
   }
   if (workflowStatus === "paused") {
@@ -3724,7 +3730,11 @@ function finalRunStatus(
   ) {
     return "running";
   }
-  if (workflowStatus === "failed" || statuses.some((status) => ["failed", "skipped", "invalidated"].includes(status))) {
+  if (
+    inspect.exhaustedLoops.length > 0 ||
+    workflowStatus === "failed" ||
+    statuses.some((status) => ["failed", "skipped", "invalidated"].includes(status))
+  ) {
     return "failed";
   }
   if (
@@ -3793,7 +3803,7 @@ function unattributedTerminalFailureKey(payload: unknown): string {
 }
 
 function workflowSucceeded(inspect: WorkflowInspect): boolean {
-  return inspect.runState === "succeeded";
+  return inspect.runState === "succeeded" && inspect.exhaustedLoops.length === 0;
 }
 
 function aggregateAttemptStatuses(statuses: NodeStatus[]): NodeStatus {
@@ -3936,7 +3946,8 @@ function parseInspectSnapshot(snapshot: SmithersCommandSnapshot, expectedWorkflo
     runStatus: current.runStatus,
     runState: current.runState,
     steps: current.nodes.map((node) => ({ id: node.nodeId, state: node.state, attempt: node.attempt })),
-    failedWorkflowTaskIds: [...failedWorkflowTaskIds].sort()
+    failedWorkflowTaskIds: [...failedWorkflowTaskIds].sort(),
+    exhaustedLoops: current.exhaustedLoops
   };
 }
 

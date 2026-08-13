@@ -11,7 +11,6 @@ import {
 } from "@ultrafuzz/config";
 import { loadPromptCatalog, projectPromptDir } from "@ultrafuzz/prompts";
 import { expandTopology, loadTopology, resolveTopologyPath, type ModelProfileSelection } from "@ultrafuzz/topology";
-import * as ts from "typescript";
 
 import type {
   PolicyPosture,
@@ -21,6 +20,7 @@ import type {
   ValidateProjectResult
 } from "./types.js";
 import { effectiveAuditPolicy } from "./audit-profile-policy.js";
+import { agentRegistryRegisters, inspectAgentRegistry } from "./agent-registry.js";
 import { transformTopologyForRun } from "./topology-transform.js";
 import {
   configDiagnostics,
@@ -29,8 +29,6 @@ import {
   postureFromDiagnostics,
   runtimeResult
 } from "./utils.js";
-
-const SAFE_AGENT_REF_PATTERN = /^(?!.*\.\.)[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/u;
 
 export async function validateProject(input: ValidateProjectInput) {
   const projectRoot = path.resolve(input.projectRoot);
@@ -327,164 +325,36 @@ function validateAgentReferences(
     ...configuredAgentRefs,
     ...Object.values(config.models.profiles).map((profile) => profile.agent)
   ]);
-  const registryPath = path.join(projectRoot, ".smithers", "agents", "index.ts");
-  if (!fs.existsSync(registryPath)) {
+  const registry = inspectAgentRegistry(projectRoot);
+  if (!registry.exists) {
     return [
       {
         code: "AGENT_REGISTRY_MISSING",
-        message:
-          "canonical project agent registry .smithers/agents/index.ts is missing; rerun ultrafuzz init to restore it",
+        message: "project agent registry is missing; rerun ultrafuzz init to restore it",
         severity: "error",
-        source: "agents",
-        path: ".smithers/agents/index.ts"
+        source: "agents"
       }
     ];
   }
-  const registryText = fs.readFileSync(registryPath, "utf8");
+  if (registry.error !== undefined) {
+    diagnostics.push({
+      code: "AGENT_REGISTRY_INVALID",
+      message: "project agent registry could not be safely inspected; rerun ultrafuzz init or repair it manually",
+      severity: "error",
+      source: "agents"
+    });
+  }
   for (const agentRef of [...agentRefs].sort()) {
-    if (!registersAgentFactory(registryText, agentRef)) {
+    if (!agentRegistryRegisters(registry, agentRef)) {
       diagnostics.push({
         code: "AGENT_REFERENCE_UNKNOWN",
-        message: `agent reference ${agentRef} is not registered in agentFactories by .smithers/agents/index.ts`,
+        message: `agent reference ${agentRef} is not registered in agentFactories by the project agent registry`,
         severity: "error",
-        source: "agents",
-        path: ".smithers/agents/index.ts"
+        source: "agents"
       });
     }
   }
   return diagnostics;
-}
-
-function registersAgentFactory(registryText: string, agentRef: string): boolean {
-  if (!SAFE_AGENT_REF_PATTERN.test(agentRef)) return false;
-  const source = ts.createSourceFile(
-    ".smithers/agents/index.ts",
-    registryText,
-    ts.ScriptTarget.Latest,
-    false,
-    ts.ScriptKind.TS
-  );
-  const parseDiagnostics = (source as ts.SourceFile & { parseDiagnostics: readonly ts.Diagnostic[] }).parseDiagnostics;
-  if (parseDiagnostics.length > 0) return false;
-  const localNames = exportedAgentFactoriesLocalNames(source);
-  const bindings = topLevelConstBindings(source);
-  return [...localNames].some((localName) => {
-    const initializer = bindings.get(localName);
-    return initializer !== undefined && registryMemberNames(initializer, bindings, new Set()).has(agentRef);
-  });
-}
-
-function exportedAgentFactoriesLocalNames(source: ts.SourceFile): ReadonlySet<string> {
-  const localNames = new Set<string>();
-  for (const statement of source.statements) {
-    if (ts.isVariableStatement(statement) && hasExportModifier(statement)) {
-      for (const declaration of statement.declarationList.declarations) {
-        if (ts.isIdentifier(declaration.name) && declaration.name.text === "agentFactories") {
-          localNames.add(declaration.name.text);
-        }
-      }
-      continue;
-    }
-    if (
-      !ts.isExportDeclaration(statement) ||
-      statement.isTypeOnly ||
-      statement.moduleSpecifier !== undefined ||
-      statement.exportClause === undefined ||
-      !ts.isNamedExports(statement.exportClause)
-    ) {
-      continue;
-    }
-    for (const element of statement.exportClause.elements) {
-      if (!element.isTypeOnly && moduleExportNameText(element.name) === "agentFactories") {
-        localNames.add(
-          element.propertyName === undefined ? "agentFactories" : moduleExportNameText(element.propertyName)
-        );
-      }
-    }
-  }
-  return localNames;
-}
-
-function topLevelConstBindings(source: ts.SourceFile): ReadonlyMap<string, ts.Expression> {
-  const bindings = new Map<string, ts.Expression>();
-  for (const statement of source.statements) {
-    if (!ts.isVariableStatement(statement) || (statement.declarationList.flags & ts.NodeFlags.Const) === 0) continue;
-    for (const declaration of statement.declarationList.declarations) {
-      if (ts.isIdentifier(declaration.name) && declaration.initializer !== undefined) {
-        bindings.set(declaration.name.text, declaration.initializer);
-      }
-    }
-  }
-  return bindings;
-}
-
-function registryMemberNames(
-  expression: ts.Expression,
-  bindings: ReadonlyMap<string, ts.Expression>,
-  visiting: ReadonlySet<string>
-): ReadonlySet<string> {
-  const current = unwrapTypeExpressions(expression);
-  if (ts.isIdentifier(current)) {
-    if (visiting.has(current.text)) return new Set();
-    const initializer = bindings.get(current.text);
-    if (initializer === undefined) return new Set();
-    return registryMemberNames(initializer, bindings, new Set([...visiting, current.text]));
-  }
-  if (
-    ts.isCallExpression(current) &&
-    current.arguments.length === 1 &&
-    ts.isPropertyAccessExpression(current.expression) &&
-    ts.isIdentifier(current.expression.expression) &&
-    current.expression.expression.text === "Object" &&
-    current.expression.name.text === "freeze"
-  ) {
-    return registryMemberNames(current.arguments[0]!, bindings, visiting);
-  }
-  if (!ts.isObjectLiteralExpression(current)) return new Set();
-
-  const names = new Set<string>();
-  for (const property of current.properties) {
-    if (ts.isSpreadAssignment(property)) {
-      for (const name of registryMemberNames(property.expression, bindings, visiting)) names.add(name);
-      continue;
-    }
-    const name = objectMemberName(property);
-    if (name !== undefined) names.add(name);
-  }
-  return names;
-}
-
-function hasExportModifier(node: ts.VariableStatement): boolean {
-  return ts.getModifiers(node)?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword) ?? false;
-}
-
-function moduleExportNameText(name: ts.ModuleExportName): string {
-  return name.text;
-}
-
-function unwrapTypeExpressions(expression: ts.Expression): ts.Expression {
-  let current = expression;
-  while (ts.isAsExpression(current) || ts.isSatisfiesExpression(current) || ts.isParenthesizedExpression(current)) {
-    current = current.expression;
-  }
-  return current;
-}
-
-function objectMemberName(property: ts.ObjectLiteralElementLike): string | undefined {
-  if (
-    !ts.isPropertyAssignment(property) &&
-    !ts.isShorthandPropertyAssignment(property) &&
-    !ts.isMethodDeclaration(property)
-  ) {
-    return undefined;
-  }
-  const name = property.name;
-  if (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNoSubstitutionTemplateLiteral(name)) return name.text;
-  if (ts.isComputedPropertyName(name)) {
-    const expression = unwrapTypeExpressions(name.expression);
-    if (ts.isStringLiteral(expression) || ts.isNoSubstitutionTemplateLiteral(expression)) return expression.text;
-  }
-  return undefined;
 }
 
 function applyAgentOverrides(config: ResolvedConfig, input: ValidateProjectInput): void {

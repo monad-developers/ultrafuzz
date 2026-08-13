@@ -996,14 +996,21 @@ function authoritativeFinalReportCoverageArgs<T extends { prompt?: unknown } | u
 
 function baseAgentForTask(task: (typeof taskSpecs)[number]): AgentLike | AgentLike[] | undefined {
   const factory = agentFactories[task.agentRef];
-  if (factory === undefined) {
+  if (typeof factory !== "function") {
     throw new Error(`agent factory is not registered: ${task.agentRef}`);
   }
-  return factory({
+  const selected = factory({
     ...(task.modelName === null ? {} : { model: task.modelName }),
     ...(task.reasoningEffort === null ? {} : { reasoningEffort: task.reasoningEffort }),
     addDir: [task.artifactDir, ...task.dependencyArtifactDirs]
   });
+  if (selected === null || selected === undefined || (Array.isArray(selected) && selected.length === 0)) {
+    throw new Error(`agent factory returned no agents: ${task.agentRef}`);
+  }
+  if (Array.isArray(selected) && selected.some((agent) => agent === null || agent === undefined)) {
+    throw new Error(`agent factory returned a nullish agent chain entry: ${task.agentRef}`);
+  }
+  return selected;
 }
 
 function agentForTask(task: (typeof taskSpecs)[number]): AgentLike | AgentLike[] | undefined {

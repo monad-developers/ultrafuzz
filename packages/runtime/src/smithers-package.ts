@@ -40,6 +40,21 @@ const REQUIRED_SMITHERS_DEPENDENCIES = {
   overrides: REQUIRED_SMITHERS_OVERRIDES
 } as const;
 
+const STOCK_SMITHERS_032_DEPENDENCIES = {
+  dependencies: {
+    "@moonshot-ai/kimi-code": KIMI_CODE_VERSION,
+    "smithers-orchestrator": "0.32.0",
+    zod: "4.4.3"
+  },
+  devDependencies: {
+    typescript: "6.0.3"
+  },
+  overrides: {
+    effect: "4.0.0-beta.102",
+    ...Object.fromEntries(SMITHERS_EFFECT_PACKAGE_NAMES.map((name) => [name, "4.0.0-beta.102"]))
+  }
+} as const;
+
 // When each pinned version above reached npm. This is the input to the
 // resolution cutoff below, and the reason a pin bump cannot silently leave the
 // cutoff behind: `assertSmithersResolutionCutoff`, which the suite runs, demands
@@ -76,11 +91,11 @@ const SMITHERS_PIN_PUBLISH_TIMES: Readonly<Record<string, string>> = {
 // needs, and it needs no lockfile in the run workspace, so `--package-lock=false`
 // and the generated manifest is current-only.
 //
-// The rule for moving it: the next UTC midnight after the newest pin above. It
-// must never precede a pinned version's own publish instant -- npm would fail to
-// find the pin at all -- and dating it a day back keeps every selectable tarball
-// well past propagation.
-export const SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF = "2026-08-14T00:00:00Z";
+// The rule for moving it: choose a fixed instant after every new pin has
+// published and propagated, but already in the past when release validation
+// runs -- npm does not freeze a future `--before` view. This instant is more
+// than eight hours after the newest pin (`smthrs@0.34.0`, at 03:21:30Z).
+export const SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF = "2026-08-13T12:00:00Z";
 
 /**
  * Fails when a pinned version has no recorded publish instant, or when the
@@ -150,6 +165,52 @@ export function renderSmithersPackageJson(): string {
       private: true,
       type: "module",
       ...REQUIRED_SMITHERS_DEPENDENCIES
+    },
+    null,
+    2
+  )}\n`;
+}
+
+/**
+ * Authenticates and rewrites the generated 0.32 manifest once. Extra packages
+ * in the three dependency extension maps are preserved; executable fields and
+ * manifests with modified generated pins are never migrated automatically.
+ */
+export function migrateStockSmithers032PackageManifest(value: unknown): string | undefined {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["name", "private", "type", "dependencies", "devDependencies", "overrides"]) ||
+    value.name !== "ultrafuzz-smithers" ||
+    value.private !== true ||
+    value.type !== "module"
+  ) {
+    return undefined;
+  }
+  const migratedSections: Record<string, Record<string, string>> = {};
+  for (const [section, expected] of Object.entries(STOCK_SMITHERS_032_DEPENDENCIES)) {
+    const actual = value[section];
+    if (!isRecord(actual) || !hasDependencyEntries(actual)) return undefined;
+    for (const [name, version] of Object.entries(expected)) {
+      if (actual[name] !== version) return undefined;
+    }
+    migratedSections[section] = { ...(actual as Record<string, string>) };
+  }
+  const dependencies = migratedSections.dependencies!;
+  if (Object.hasOwn(dependencies, SMITHERS_PACKAGE_NAME) && dependencies[SMITHERS_PACKAGE_NAME] !== SMITHERS_VERSION) {
+    return undefined;
+  }
+  delete dependencies["smithers-orchestrator"];
+  dependencies[SMITHERS_PACKAGE_NAME] = SMITHERS_VERSION;
+  const overrides = migratedSections.overrides!;
+  for (const [name, version] of Object.entries(REQUIRED_SMITHERS_OVERRIDES)) overrides[name] = version;
+  return `${JSON.stringify(
+    {
+      name: value.name,
+      private: value.private,
+      type: value.type,
+      dependencies,
+      devDependencies: migratedSections.devDependencies,
+      overrides
     },
     null,
     2

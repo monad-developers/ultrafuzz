@@ -243,6 +243,8 @@ export type RunHealthVerdict =
   | "running-healthy"
   | "progressing"
   | "stalled"
+  | "orphaned"
+  | "cancel-pending"
   | "blocked"
   | "waiting-quota"
   | "paused"
@@ -334,6 +336,35 @@ export interface RunHealthValue extends RunListEntry, RunProgressSummary {
     parked_node_ids: string[];
     reset_at_ms: number | null;
   } | null;
+  attention?: {
+    operation: string;
+    op_id: string | null;
+    crossed_count: number;
+    blocking_count: number;
+    revertible_count: number;
+    warning_count: number;
+    late_completion: boolean;
+    archived_by_op: string | null;
+    timestamp_ms: number;
+  };
+  information?: {
+    operation: string;
+    warning_count: number;
+    timestamp_ms: number;
+  };
+  oneshot_control?: {
+    kind: "steer" | "restart";
+    status: string;
+    message_id?: string;
+    restarted_as_run_id?: string;
+    error?: string;
+    timestamp_ms: number;
+  };
+  started_by?: {
+    harness?: string;
+    session_id?: string;
+    detected?: true;
+  };
   generated_at_ms: number;
 }
 
