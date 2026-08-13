@@ -34,6 +34,8 @@ import {
   aggregationManifestSchema,
   auditedDifferentialLanesSchema,
   coverageEvidenceJsonSchema,
+  MAX_COVERAGE_EVIDENCE_FILES,
+  MAX_COVERAGE_EVIDENCE_RANGES,
   coverageGoalSchema,
   differentialLaneResultSchema,
   dynamicStrategyPlanSchema,
@@ -2830,6 +2832,16 @@ test("artifact schema snapshots are present and aligned with exported schema con
   // exported schema had moved on, so the snapshot is compared whole like its siblings.
   assert.deepEqual(findingSnapshot, findingJsonSchema);
   assert.deepEqual(coverageEvidenceSnapshot, coverageEvidenceJsonSchema);
+  const boundedCoverageSnapshot = coverageEvidenceSnapshot as {
+    properties: {
+      files: { maxItems: number };
+      counted_ranges: { maxItems: number };
+      zero_coverage_components: { maxItems: number };
+    };
+  };
+  assert.equal(boundedCoverageSnapshot.properties.files.maxItems, MAX_COVERAGE_EVIDENCE_FILES);
+  assert.equal(boundedCoverageSnapshot.properties.counted_ranges.maxItems, MAX_COVERAGE_EVIDENCE_RANGES);
+  assert.equal(boundedCoverageSnapshot.properties.zero_coverage_components.maxItems, MAX_COVERAGE_EVIDENCE_FILES);
   assert.deepEqual(generatedTestsSnapshot, generatedTestsJsonSchema);
   assert.deepEqual(invariantLedgerSnapshot, invariantLedgerJsonSchema);
   assert.deepEqual(invariantSourceProofSnapshot, invariantSourceProofJsonSchema);

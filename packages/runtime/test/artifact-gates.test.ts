@@ -10565,6 +10565,122 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
   );
 });
 
+test("coverage gate groups same-line Solidity declarations into one representable trusted range", () => {
+  const layout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-minified-scoped-coverage",
+    resolvedConfigToml: '[permissions]\nproduction_source_roots = ["src"]\n'
+  });
+  const node = {
+    ...plannedNode(["coverage-goal.json", "coverage-report.md", "coverage-evidence.json"]),
+    id: "stateful-invariant-coverage",
+    logical_id: "stateful-invariant-coverage",
+    artifact_dir: "artifacts/stateful-invariant-coverage"
+  };
+  writePlannedGraph(layout, [node]);
+  const workspace = path.join(layout.workspacesDir, node.id);
+  fs.mkdirSync(path.join(workspace, "src"), { recursive: true });
+  fs.mkdirSync(path.join(workspace, "lib"), { recursive: true });
+  fs.mkdirSync(path.join(workspace, "magic"), { recursive: true });
+  fs.writeFileSync(
+    path.join(workspace, "src/Minified.sol"),
+    "contract Minified { uint256 public a; uint256 public b; function set(uint256 value) external { a = value; } }\n"
+  );
+  fs.writeFileSync(
+    path.join(workspace, "src/Interfaces.sol"),
+    "interface ExternalApi { function quote(uint256 value) external view returns (uint256); } " +
+      "abstract contract AbstractApi { function settle() external virtual; }\n"
+  );
+  fs.writeFileSync(
+    path.join(workspace, "lib/Dependency.sol"),
+    "library Dependency { function normalize(uint256 value) internal pure returns (uint256) { return value; } }\n"
+  );
+  fs.writeFileSync(
+    path.join(workspace, "magic/recon-coverage.json"),
+    JSON.stringify({ "src/Minified.sol": ["1"], "lib/Dependency.sol": ["1"] })
+  );
+  const evidence = {
+    schema_version: "ultrafuzz.coverage-evidence.v1",
+    views: [
+      { scope: "selected-range", covered_ranges: 1, total_ranges: 1 },
+      { scope: "production-source", covered_ranges: 1, total_ranges: 1 }
+    ],
+    files: [
+      {
+        path: "src/Minified.sol",
+        kind: "production",
+        included: true,
+        covered_ranges: 1,
+        total_ranges: 1
+      },
+      {
+        path: "lib/Dependency.sol",
+        kind: "dependency",
+        included: false,
+        exclusion_reason: "outside configured production roots",
+        covered_ranges: 1,
+        total_ranges: 1
+      },
+      {
+        path: "src/Interfaces.sol",
+        kind: "production",
+        included: false,
+        exclusion_reason: "contains no executable declarations",
+        covered_ranges: 0,
+        total_ranges: 0
+      }
+    ],
+    counted_ranges: [
+      {
+        file: "src/Minified.sol",
+        kind: "production",
+        start_line: 1,
+        line_count: 1,
+        selected: true,
+        covered: true
+      },
+      {
+        file: "lib/Dependency.sol",
+        kind: "dependency",
+        start_line: 1,
+        line_count: 1,
+        selected: false,
+        covered: true
+      }
+    ],
+    zero_coverage_components: []
+  };
+  writeArtifact(
+    layout,
+    node.id,
+    "coverage-goal.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.coverage-goal.v1",
+      target: { scope: "selected-range", minimum_percent: 90 },
+      current_measurement: { scope: "selected-range", covered_ranges: 1, total_ranges: 1 },
+      current_status: "measured",
+      planned_commands: [],
+      stop_conditions: ["reserve time for finalization"],
+      timeout_seconds: 60,
+      finalization_reserve_seconds: 10,
+      blockers: []
+    })
+  );
+  writeArtifact(
+    layout,
+    node.id,
+    "coverage-report.md",
+    "# Coverage\n\n## Scoped coverage evidence\n\n- selected-range: `1/1`\n- production-source: `1/1`\n\n" +
+      "Excluded components:\n- `lib/Dependency.sol` (dependency): outside configured production roots\n" +
+      "- `src/Interfaces.sol` (production): contains no executable declarations\n\n" +
+      "Zero-coverage components:\n- None\n"
+  );
+  writeArtifact(layout, node.id, "coverage-evidence.json", JSON.stringify(evidence));
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+});
+
 test("coverage gate fails closed when every configured production root is missing", () => {
   const layout = createRunLayout({
     projectRoot: tempProject(),
@@ -10670,6 +10786,9 @@ test("coverage gate authenticates Vyper declaration boundaries outside the Solid
       "@internal",
       "def helper():",
       "    pass",
+      "",
+      "interface ExternalApi:",
+      "    def quote(value: uint256) -> uint256: view",
       ""
     ].join("\n")
   );
@@ -10868,6 +10987,11 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
   assert.equal(disguisedPercentage.ok, false);
   assert.ok(disguisedPercentage.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"));
 
+  writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\nStandardized coverage: 39/39.\n`);
+  const disguisedFraction = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+  assert.equal(disguisedFraction.ok, false);
+  assert.ok(disguisedFraction.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_FRACTION"));
+
   writeArtifact(
     layout,
     reportNode.id,
@@ -10954,6 +11078,21 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
   const prosePercentage = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
   assert.equal(prosePercentage.ok, false);
   assert.ok(prosePercentage.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"));
+
+  const fractionIssue = {
+    ...structuredClone(percentageIssue),
+    notes: ["triage_reason=public path is reachable", "Standardized coverage was 39/39."]
+  };
+  const fractionReport = currentReport(layout.runId, {
+    coverage_evidence: evidence,
+    issues: [fractionIssue]
+  });
+  const fractionReportValidation = validateArtifactContract("ultrafuzz/report@2", JSON.stringify(fractionReport));
+  assert.equal(fractionReportValidation.ok, true, JSON.stringify(fractionReportValidation.issues));
+  writeArtifact(layout, reportNode.id, "report.json", JSON.stringify(fractionReport));
+  const proseFraction = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+  assert.equal(proseFraction.ok, false);
+  assert.ok(proseFraction.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_FRACTION"));
 
   writeArtifact(layout, reportNode.id, "report.md", scopedMarkdown);
   writeArtifact(
