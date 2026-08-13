@@ -16,6 +16,7 @@ import {
   INVARIANT_LEDGER_SCHEMA_VERSION,
   INVARIANT_SOURCE_PROOF_SCHEMA_VERSION,
   IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
+  MAX_FINDING_STRING_CODE_POINTS,
   NODE_ATTEMPT_LEDGER_SCHEMA_VERSION,
   NODE_STATE_STATUSES,
   RUN_STATE_STATUSES,
@@ -1287,6 +1288,43 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
     assert.equal(
       validateArtifactContract("ultrafuzz/severity-classified-findings@1", JSON.stringify([invalidSeverity])).ok,
       false
+    );
+  }
+});
+
+test("max-length adversarial report notes preserve Zod and isolated JSON Schema parity", () => {
+  const finding = {
+    schema_version: FINDINGS_SCHEMA_VERSION,
+    id: "semantic-key-performance",
+    title: "Semantic key validation remains bounded",
+    status: "candidate",
+    severity_guess: "Low",
+    confidence: "low",
+    summary: "Adversarial notes must not exhaust the isolated validator deadline."
+  };
+  const maxNote = (prefix: string, repeated: string, suffix: string): string => {
+    const fixedCodePoints = [...prefix, ...suffix].length;
+    return `${prefix}${repeated.repeat(MAX_FINDING_STRING_CODE_POINTS - fixedCodePoints)}${suffix}`;
+  };
+  const cases = [
+    { label: "separator-only", note: "_".repeat(MAX_FINDING_STRING_CODE_POINTS), expected: true },
+    { label: "mark-only", note: "\u0301".repeat(MAX_FINDING_STRING_CODE_POINTS), expected: true },
+    { label: "long near-miss", note: maxNote("", "_", "root_causx=x"), expected: true },
+    { label: "long leading separators", note: maxNote("", "_", "root_cause=x"), expected: false },
+    { label: "long leading marks", note: maxNote("", "\u0301", "root_cause=x"), expected: false },
+    { label: "long internal separators", note: maxNote("r", "_", "oot_cause=x"), expected: false }
+  ] as const;
+
+  for (const { label, note, expected } of cases) {
+    assert.equal([...note].length, MAX_FINDING_STRING_CODE_POINTS, `${label}: fixture length`);
+    const candidate = { ...finding, notes: [note] };
+    assert.equal(findingSchema.safeParse(candidate).success, expected, `${label}: Zod parser`);
+    const bundled = validateArtifactContract("ultrafuzz/findings@2", JSON.stringify([candidate]));
+    assert.equal(bundled.ok, expected, `${label}: bundled contract`);
+    assert.equal(
+      bundled.issues.some((issue) => issue.code === "ARTIFACT_VALIDATOR_FAILED"),
+      false,
+      `${label}: isolated validator deadline`
     );
   }
 });

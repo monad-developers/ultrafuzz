@@ -136,7 +136,7 @@ function findingReportSemanticKeyTrie(keys: ReadonlySet<string>): FindingReportS
   return root;
 }
 
-function renderFindingReportSemanticKeyTrie(node: FindingReportSemanticKeyTrie): string {
+function renderFindingReportSemanticKeyTrie(node: FindingReportSemanticKeyTrie, includeIgnoredPrefix = true): string {
   if (node.children.size === 0) return "";
   const alternatives = [...node.children.entries()]
     .sort(([left], [right]) => left.localeCompare(right))
@@ -144,7 +144,7 @@ function renderFindingReportSemanticKeyTrie(node: FindingReportSemanticKeyTrie):
       ([character, child]) => `${asciiCaseInsensitiveCharacter(character)}${renderFindingReportSemanticKeyTrie(child)}`
     );
   const children = alternatives.length === 1 ? alternatives[0]! : `(?:${alternatives.join("|")})`;
-  const continuation = `${FINDING_REPORT_SEMANTIC_KEY_IGNORED_PATTERN}${children}`;
+  const continuation = `${includeIgnoredPrefix ? FINDING_REPORT_SEMANTIC_KEY_IGNORED_PATTERN : ""}${children}`;
   return node.terminal ? `(?:${continuation})?` : continuation;
 }
 
@@ -153,8 +153,16 @@ function renderFindingReportSemanticKeyTrie(node: FindingReportSemanticKeyTrie):
 const MAX_FINDING_REPORT_SEMANTIC_KEY_PATTERN_LENGTH = 700;
 
 function renderFindingReportSemanticKeyPattern(keys: ReadonlySet<string>): string {
-  return `${FINDING_REPORT_SEMANTIC_KEY_IGNORED_PATTERN}(?:[0-9]\\p{M}*)*${renderFindingReportSemanticKeyTrie(
-    findingReportSemanticKeyTrie(keys)
+  // Keep every nullable ignored-character run separated by a required digit or
+  // semantic-key character. Adjacent `*` runs make a failed unanchored match
+  // explore every possible partition of a long separator-only note. Marks
+  // after the final leading digit belong to the one ignored run before the
+  // first semantic-key character, so this remains equivalent to
+  // compactFindingReportSemanticKey without the quadratic backtracking.
+  const leadingPattern = `${FINDING_REPORT_SEMANTIC_KEY_IGNORED_PATTERN}(?:[0-9](?:\\p{M}*[0-9])*${FINDING_REPORT_SEMANTIC_KEY_IGNORED_PATTERN})?`;
+  return `${leadingPattern}${renderFindingReportSemanticKeyTrie(
+    findingReportSemanticKeyTrie(keys),
+    false
   )}${FINDING_REPORT_SEMANTIC_KEY_IGNORED_PATTERN}`;
 }
 
