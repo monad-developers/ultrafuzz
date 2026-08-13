@@ -55,7 +55,7 @@ export async function validateProject(input: ValidateProjectInput) {
   }
 
   if (resolved.config) {
-    const policy = evaluatePolicies(projectRoot, resolved.config);
+    const policy = evaluatePolicies(projectRoot, resolved.config, resolved.configuredAgentRefs ?? []);
     Object.assign(posture, policy.posture);
   } else {
     const blocked = postureFromDiagnostics("policy", "policy checks need valid config", [
@@ -87,6 +87,7 @@ export async function validateProject(input: ValidateProjectInput) {
 export async function loadResolvedProject(input: ValidateProjectInput): Promise<{
   config?: ResolvedConfig;
   configPath?: string;
+  configuredAgentRefs?: readonly string[];
   diagnostics: RuntimeDiagnostic[];
 }> {
   const loaded = await loadProjectConfig(path.resolve(input.projectRoot));
@@ -104,10 +105,14 @@ export async function loadResolvedProject(input: ValidateProjectInput): Promise<
       diagnostics: configDiagnostics(redactDiagnostics([...loaded.diagnostics, ...resolved.diagnostics]))
     };
   }
+  const configuredAgentRefs = [
+    ...new Set(Object.values(resolved.value.models.profiles).map((profile) => profile.agent))
+  ];
   applyAgentOverrides(resolved.value, input);
   return {
     config: resolved.value,
     configPath: loaded.value.path,
+    configuredAgentRefs,
     diagnostics: configDiagnostics(redactDiagnostics([...loaded.diagnostics, ...resolved.diagnostics]))
   };
 }
@@ -293,11 +298,12 @@ function validateTopologySurface(
 
 function evaluatePolicies(
   projectRoot: string,
-  config: ResolvedConfig
+  config: ResolvedConfig,
+  configuredAgentRefs: readonly string[]
 ): {
   posture: Omit<PolicyPosture, "config" | "topology" | "prompts">;
 } {
-  const agentRegistry = validateAgentReferences(projectRoot, config);
+  const agentRegistry = validateAgentReferences(projectRoot, config, configuredAgentRefs);
   return {
     posture: {
       paths: postureFromDiagnostics("paths", "product files are written through project-local path guards", []),
@@ -311,9 +317,16 @@ function evaluatePolicies(
   };
 }
 
-function validateAgentReferences(projectRoot: string, config: ResolvedConfig): RuntimeDiagnostic[] {
+function validateAgentReferences(
+  projectRoot: string,
+  config: ResolvedConfig,
+  configuredAgentRefs: readonly string[]
+): RuntimeDiagnostic[] {
   const diagnostics: RuntimeDiagnostic[] = [];
-  const agentRefs = new Set(Object.values(config.models.profiles).map((profile) => profile.agent));
+  const agentRefs = new Set([
+    ...configuredAgentRefs,
+    ...Object.values(config.models.profiles).map((profile) => profile.agent)
+  ]);
   const registryPath = path.join(projectRoot, ".smithers", "agents", "index.ts");
   if (!fs.existsSync(registryPath)) {
     return [
@@ -379,6 +392,7 @@ function exportedAgentFactoriesLocalNames(source: ts.SourceFile): ReadonlySet<st
     }
     if (
       !ts.isExportDeclaration(statement) ||
+      statement.isTypeOnly ||
       statement.moduleSpecifier !== undefined ||
       statement.exportClause === undefined ||
       !ts.isNamedExports(statement.exportClause)
@@ -386,7 +400,7 @@ function exportedAgentFactoriesLocalNames(source: ts.SourceFile): ReadonlySet<st
       continue;
     }
     for (const element of statement.exportClause.elements) {
-      if (moduleExportNameText(element.name) === "agentFactories") {
+      if (!element.isTypeOnly && moduleExportNameText(element.name) === "agentFactories") {
         localNames.add(
           element.propertyName === undefined ? "agentFactories" : moduleExportNameText(element.propertyName)
         );
