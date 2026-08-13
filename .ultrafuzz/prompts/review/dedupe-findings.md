@@ -11,19 +11,22 @@ The declared outputs are `deduped-findings.json`, `strategy-detections.json`,
 and `finding-lifecycle-ledger.json`. Do not write prompt-only `findings.json`,
 `duplicates.json`, or alternate compatibility handoffs.
 
-Read the project-discovery and base-test handoffs before validation so the
-repository's checked-in test framework and native test root determine the
-runner:
+Inspect every rendered input before deduping. The list is derived from the
+effective topology and includes every direct producer's declared handoffs:
 
-Project discovery:
-{{artifact_path:project-discovery}}/setup/project-discovery.md
+{{ancestor_artifacts}}
 
-Base test setup (when rendered):
-{{artifact_path:base-test-setup}}/setup/base-test-setup.md
+When the list includes project-discovery or base-test setup handoffs, read them
+before validation so the repository's checked-in test framework and native test
+root determine the runner. A bounded topology may intentionally omit those
+handoffs. When they are absent, do not treat the omission as an error and do not
+run native tests during dedupe; perform one model-only consolidation pass over
+the rendered finding inputs instead.
 
-Validate only focused generated tests or reproducers that contribute to the
-dedupe result. Dispatch each validation through the existing framework recorded
-by project discovery, the base setup, and the generated-test manifest:
+When native validation context is present, validate only focused generated
+tests or reproducers that contribute to the dedupe result. Dispatch each
+validation through the existing framework recorded by project discovery, the
+base setup, and the generated-test manifest:
 
 - For Foundry, run `forge --version` as a separate Bash call, then direct
   focused `forge` commands that preserve the original environment variables,
@@ -85,12 +88,6 @@ substitution, shell conditionals, absolute binary paths, host-global searches,
 or inline environment-assignment prefixes. Preserve the original command's
 environment, selectors, and test-root semantics, count actual failing tests,
 and keep framework-specific blocked and failing results distinct.
-
-Inspect every direct strategy handoff before deduping. This list is derived
-from the effective topology and includes each producer's declared findings,
-generated-test manifests, campaign evidence, and supporting outputs:
-
-{{ancestor_artifacts}}
 
 Then, build a stable dedupe key from the affected contract or library, function or workflow, property/oracle, normalized title, root cause hypothesis, and reproduction shape. Keep the clearest finding with the best evidence and reproducibility. Record every duplicate with its original id, kept id, title, and dedupe key.
 
@@ -165,9 +162,11 @@ entry's exact `path` and `finding_id`, followed by exactly one `deduped` stage
 whose `artifact_path` is the portable declared output-relative path
 `{{output_stage_findings_relative_path}}` and whose `finding_id` is the kept
 finding ID. Do not write triage, severity, disposition, comparison, or later
-stage fields during dedupe. The matching `strategy-detections.json` entry must
-have the same order, `dedupe_key`, finding ID, title, optional family ID, and
-exact hit array as the lifecycle record.
+stage fields during dedupe. In particular, remove `triage_classification` from
+a dedupe lifecycle record even if an input carries it; preserving that field
+would still author a later-stage value at the dedupe stage. The matching
+`strategy-detections.json` entry must have the same order, `dedupe_key`, finding
+ID, title, optional family ID, and exact hit array as the lifecycle record.
 
 After writing the required artifacts, run every exact
 `ultrafuzz json validate` command rendered for them in the central output

@@ -713,8 +713,11 @@ describe("prompt semantic anchors", () => {
   it("validates deduped native reproducers without hydrating isolated workspaces", () => {
     const dedupe = prompt("review/dedupe-findings.md");
 
-    expect(dedupe).toContain("{{artifact_path:project-discovery}}/setup/project-discovery.md");
-    expect(dedupe).toContain("{{artifact_path:base-test-setup}}/setup/base-test-setup.md");
+    expect(dedupe).toContain("{{ancestor_artifacts}}");
+    expect(dedupe).toContain("When the list includes project-discovery or base-test setup handoffs");
+    expect(dedupe).toMatch(
+      /When they are absent, do not treat the omission as an error and do not\s+run native tests/u
+    );
     expect(dedupe).toContain("For Foundry");
     expect(dedupe).toContain("For Hardhat");
     expect(dedupe).toContain("For Vyper");
@@ -739,7 +742,7 @@ describe("prompt semantic anchors", () => {
     expect(dedupe).toMatch(
       /key, finding identity, title, optional family identity, and complete\s+strategy-hit provenance must agree with the kept finding and lifecycle record/u
     );
-    expect(dedupe).toContain("same order, `dedupe_key`, finding ID, title, optional family ID, and\nexact hit array");
+    expect(dedupe).toMatch(/same order, `dedupe_key`, finding\s+ID, title, optional family ID, and exact hit array/u);
     expect(dedupe).toContain("Never install, fetch, restore, or update dependencies during dedupe");
     expect(dedupe).not.toContain("restore project-pinned dependencies first");
     expect(dedupe).not.toContain("Dependency hydration used only");
@@ -898,20 +901,32 @@ describe("prompt semantic anchors", () => {
   });
 
   it("gives the final-report producer the canonical Markdown renderer", () => {
-    for (const promptPath of ["review/final-report.md", "smoke/smoke-final-report.md"]) {
-      const markdown = prompt(promptPath);
-      expect(markdown, promptPath).toContain(
-        "ultrafuzz report render --file '{{artifact_path}}/report.json' --output '{{artifact_path}}/report.md'"
-      );
-      expect(markdown, promptPath).toMatch(/Do not (?:author or )?hand-edit\s+`report\.md` after/u);
-      expect(markdown, promptPath).toContain("the renderer succeeds");
-    }
+    const markdown = prompt("review/final-report.md");
+    expect(markdown).toContain(
+      "ultrafuzz report render --file '{{artifact_path}}/report.json' --output '{{artifact_path}}/report.md'"
+    );
+    expect(markdown).toMatch(/Do not (?:author or )?hand-edit\s+`report\.md` after/u);
+    expect(markdown).toContain("the renderer succeeds");
   });
 
-  it("keeps smoke dedupe lifecycle records free of later-stage ownership", () => {
-    const markdown = prompt("smoke/smoke-dedupe-findings.md");
-    expect(markdown).toContain("fields owned by later\ntriage, severity, or final-review stages");
-    expect(markdown).toContain("remove\n`triage_classification` from a dedupe lifecycle record");
+  it("keeps dedupe lifecycle records free of later-stage ownership", () => {
+    const markdown = prompt("review/dedupe-findings.md");
+    expect(markdown).toContain("Do not write triage, severity, disposition, comparison, or later\nstage fields");
+    expect(markdown).toContain("remove `triage_classification` from\na dedupe lifecycle record");
+  });
+
+  it("reuses the shared review prompts in the smoke topology", () => {
+    const topologyPath = fileURLToPath(new URL("../../config/topologies/smoke.yml", import.meta.url));
+    const topology = YAML.parse(readFileSync(topologyPath, "utf8")) as {
+      nodes: Array<{ id: string; prompt?: string }>;
+    };
+    const prompts = new Map(topology.nodes.map((node) => [node.id, node.prompt]));
+    const assets = loadBuiltInPromptAssets().map((asset) => asset.relativePath);
+
+    expect(prompts.get("dedupe-findings")).toBe("review/dedupe-findings.md");
+    expect(prompts.get("final-report")).toBe("review/final-report.md");
+    expect(assets).not.toContain("smoke/smoke-dedupe-findings.md");
+    expect(assets).not.toContain("smoke/smoke-final-report.md");
   });
 
   it("delegates the boundary-recipes JSON shape to its pinned schema", () => {

@@ -38,12 +38,26 @@ resulting issue list is empty.
 
 ## Required Inputs
 
-Read these review handoffs before writing the report:
+Read every rendered input before writing the report. The list is derived from
+the effective topology, so a bounded topology can omit stages without leaving
+stale prompt paths:
 
-Aggregation manifest:
-`{{artifact_path:aggregate-test-files}}/aggregation.json`
+{{ancestor_artifacts}}
 
-Validate it against the exact pinned
+Use exact declared filenames to identify the available handoffs. When
+`severity-classified-findings.json`, its `strategy-detections.json`, and its
+`finding-lifecycle-ledger.json` are present, treat them as the review source of
+truth. Validate the severity artifact against the exact pinned
+`{{schema_path}}/severity-classified-findings.schema.json`; that schema alone
+defines its JSON shape. Preserve its complete ordered finding population and
+never substitute a legacy or converted artifact.
+
+When the severity-classification handoffs are absent, use the rendered
+`deduped-findings.json`, `strategy-detections.json`, and
+`finding-lifecycle-ledger.json` as the exact dedupe-stage fallbacks. Do not
+invent a missing path or legacy filename.
+
+When `aggregation.json` is present, validate it against the exact pinned
 `{{schema_path}}/aggregation-manifest.schema.json`; that schema alone defines
 its JSON shape. Use copied runnable-test rows when matching generated or copied
 destinations. Bind each row through its exact authenticated source-bundle and
@@ -52,45 +66,9 @@ and never infer a framework from an extension or mix different bundles. These
 joins and byte-preservation rules are contextual requirements beyond JSON
 Schema.
 
-Severity-classified findings:
-`{{artifact_path:severity-classification}}/severity-classified-findings.json`
-
-Validate the severity artifact against the exact pinned
-`{{schema_path}}/severity-classified-findings.schema.json`; that schema alone
-defines its JSON shape. Preserve its complete ordered finding population and
-never substitute a legacy or converted artifact.
-
-Strategy detection provenance:
-`{{artifact_path:severity-classification}}/strategy-detections.json`
-
-Finding lifecycle ledger:
-`{{artifact_path:severity-classification}}/finding-lifecycle-ledger.json`
-
-When the severity-classification handoff is absent in a bounded topology, use
-these exact dedupe-stage fallbacks instead:
-
-Dedupe strategy detection provenance:
-`{{artifact_path:dedupe-findings}}/strategy-detections.json`
-
-Dedupe finding lifecycle ledger:
-`{{artifact_path:dedupe-findings}}/finding-lifecycle-ledger.json`
-
-Dedupe report:
-`{{artifact_path:dedupe-findings}}/deduped-findings.json`
-
-Use these property provenance handoffs when they exist:
-
-Canonical property catalog:
-`{{artifact_path:property-specification-fanin}}/properties.json`
-
-Implemented property records:
-`{{artifact_path:stateful-invariant-implement-properties}}/implemented-properties.json`
-
-Invariant campaign results:
-`{{artifact_path:stateful-invariant-campaign}}/recon-fuzzer-results.json`
-
-Authoritative invariant campaign summary:
-`{{artifact_path:stateful-invariant-campaign}}/campaign-summary.json`
+Use `properties.json`, `implemented-properties.json`,
+`recon-fuzzer-results.json`, and `campaign-summary.json` as property provenance
+handoffs when they are present in the rendered list.
 
 The catalog, implementation records, and campaign results form the provenance
 join from a finding's `property_ids` to its canonical properties, source lens
@@ -109,27 +87,11 @@ and its `reason` when present, exactly as parsed JSON values, into the report's
 files, or an agent-authored fallback. This authoritative ancestor join is
 semantic and remains required in addition to report-schema validation.
 
-Use these setup handoffs:
-
-Project discovery:
-`{{artifact_path:project-discovery}}/setup/project-discovery.md`
-
-Foundry setup (when rendered):
-`{{artifact_path:setup-foundry}}/setup/setup-foundry.md`
-
-Base test setup:
-`{{artifact_path:base-test-setup}}/setup/base-test-setup.md`
-
-Use exactly the rendered filenames above when reading prior-node outputs. When
-you mention an input internally or in `report.json` provenance, preserve the
-exact source filename where useful, for example
-`{{artifact_path:aggregate-test-files}}/aggregation.json`,
-`{{artifact_path:severity-classification}}/severity-classified-findings.json`,
-`{{artifact_path:severity-classification}}/strategy-detections.json`,
-`{{artifact_path:severity-classification}}/finding-lifecycle-ledger.json`, and
-`{{artifact_path:dedupe-findings}}/deduped-findings.json`. Do not invent legacy
-filenames such as `dedupe-findings/findings.json` when the exact rendered
-filename differs.
+Use project-discovery, Foundry setup, and base-test setup handoffs when their
+declared Markdown files are present. Preserve every exact rendered filename
+when mentioning an input internally or in `report.json` provenance. Do not
+invent legacy filenames such as `dedupe-findings/findings.json` when the
+rendered filename differs.
 
 The base test setup handoff is the source of truth for reusable fixture paths.
 Read it before writing or minimizing PoCs, and use the exact fixture path it
