@@ -34,18 +34,23 @@ export function validateArtifactHandoffs(
       continue;
     }
     const promptBody = promptBodyForNode(node, promptText);
-    validateReportVocabularyVariables(node, promptBody);
-    for (const variable of extractPromptVariablesForNode(node, promptBody)) {
+    const variables = extractPromptVariablesForNode(node, promptBody);
+    validateReportVocabularyVariables(node, promptBody, variables);
+    for (const variable of variables) {
       validatePromptVariable(node, variable, nodeById);
     }
   }
 }
 
-function validateReportVocabularyVariables(node: NormalizedTopologyNode, promptText: string): void {
+function validateReportVocabularyVariables(
+  node: NormalizedTopologyNode,
+  promptText: string,
+  variables: PromptVariableReference[]
+): void {
   const publishesReportVocabulary = node.outputs.some((output) => REPORT_VOCABULARY_CONTRACTS.has(output.contract));
   if (!publishesReportVocabulary) return;
   for (const variable of ["finding_reachability_vocabulary", "finding_note_key_vocabulary"]) {
-    if (!promptText.includes(`{{${variable}}}`)) {
+    if (!variables.some((reference) => reference.name === variable)) {
       throw topologyError(
         "MISSING_REPORT_VOCABULARY_REFERENCE",
         `Node \`${node.id}\` prompt must reference authoritative report vocabulary \`{{${variable}}}\``,

@@ -1187,6 +1187,8 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
     "Evidence: <https://x.test/?tx=abc>",
     "request_id=abc123",
     "RISK_FREE_RATE=0.05 impact_price=123 helper_address=0xabc",
+    "helper_balance=0 proof_size=32 root_slot=0x00 IMPACT_PRICE=123",
+    "MERKLE_ROOT=0xabc PUBLIC_KEY=0x123 risk_ratio=0.5 HELPER_BALANCE=0",
     "--dependency-version=1.2.3 STATEFUL_RUNS=1000 scope_id=request-7",
     "https://x.test/?impact_price=123",
     "The HTTP response had status=200.",
@@ -1194,6 +1196,7 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
     "The trace entered scope=global before reverting.",
     "The shell printed outcome=success.",
     "The proof checks risk=0 after withdrawal.",
+    "https://x.test/?tx=abc&status=200",
     "emit Status(status=200)",
     "_=non-semantic evidence",
     "根因=non-semantic evidence",
@@ -1204,6 +1207,10 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
     "https://x.test/?root%5Fcause=encoded-query-key"
   ]) {
     assertNoteParity(evidenceAssignment, true);
+  }
+
+  for (const wrappedCanonical of ["(reachability=helper-only)", "[reachability=helper-only]"]) {
+    assertNoteParity(wrappedCanonical, true);
   }
 
   for (const semanticAlias of [
@@ -1223,12 +1230,23 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
     "___Helper=renamed",
     "root_cause__=renamed",
     "<root_cause=renamed>",
+    "`root_cause=renamed`",
+    '"root_cause=renamed"',
+    "Triage: root_cause=renamed",
+    "Observed. root_cause=renamed",
+    "> root_cause=renamed",
+    "Set report field root_cause=renamed",
+    "Record a `helper_evidence=renamed` note",
     "-root_cause=renamed",
     "--root_cause=renamed",
     "root-cause=renamed",
     "triage_reason=public evidence root_cause=renamed",
     "triage_reason=ok x=y root_cause=renamed",
     "triage_reason=ok RISK_FREE_RATE=0.05 root_cause=renamed",
+    "triage_reason=ok (root_cause=renamed)",
+    "triage_reason=ok/root_cause=renamed",
+    "triage_reason=ok attainability=renamed",
+    `triage_reason=ok ${"a".repeat(4100)} root_cause=renamed`,
     "triage_reason=ok;root_cause=renamed",
     "triage_reason=ok,root_cause=renamed",
     "triage_reason=ok*root_cause=renamed",
@@ -1256,10 +1274,20 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
     "reachability=renamed-public-trace",
     "stateful_failure_classification=renamed",
     "likelihood=likely",
-    "impact=critical"
+    "impact=critical",
+    'attainability="helper-only"',
+    "attainability=(helper-only)"
   ]) {
     assertNoteParity(semanticAlias, false);
     assert.notEqual(findingNoteAssignmentIssue(semanticAlias), undefined, semanticAlias);
+  }
+
+  for (const unsupportedAssignmentWhitespace of [
+    "reachability\n=helper-only",
+    "reachability=\nhelper-only",
+    "reachability\u00a0=\u00a0helper-only"
+  ]) {
+    assertNoteParity(unsupportedAssignmentWhitespace, false);
   }
 
   for (const nonAsciiIdentifier of [

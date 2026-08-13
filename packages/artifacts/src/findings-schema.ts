@@ -54,33 +54,82 @@ const nonNegativeInteger = z.number().int().nonnegative().max(MAX_FINDING_COUNT)
 const positiveSafeInteger = z.number().int().positive().max(MAX_FINDING_COUNT);
 const supportedNoteKeyPattern = `(?:${FINDING_NOTE_KEYS.join("|")})`;
 const assignmentKeyPattern = FINDING_REPORT_ASSIGNMENT_KEY_PATTERN;
-const assignmentBoundaryPattern = "(?:^|[^\\p{L}\\p{N}\\p{M}_-])";
-const clauseAssignmentBoundaryPattern = "(?:^|[\\n;,*|&<])[ \\t]*";
+const assignmentBoundaryPattern = "(?:^|[^\\p{L}\\p{N}\\p{M}_%\\-])";
 const assignmentOperatorPrefixPattern = "[ \\t]*=(?!=)";
 const assignmentOperatorPattern = `${assignmentOperatorPrefixPattern}[ \\t]*(?=\\S)`;
 const anyAssignmentOperatorPattern = "\\s*={1,2}\\s*";
-const evidenceAssignmentKeyPattern = `(?:${FINDING_REPORT_EVIDENCE_ASSIGNMENT_KEYS.join("|")})`;
+const contextualEvidenceAssignmentKeyNames = [
+  "amount",
+  "balance",
+  "block",
+  "chain",
+  "confidence",
+  "expected",
+  "gas",
+  "observed",
+  "outcome",
+  "risk",
+  "runs",
+  "scope",
+  "seed",
+  "size",
+  "slot",
+  "status",
+  "tx",
+  "value"
+] as const;
+const contextualEvidenceAssignmentKeys: ReadonlySet<string> = new Set(contextualEvidenceAssignmentKeyNames);
+const contextualEvidenceAssignmentKeyPattern = `(?:${contextualEvidenceAssignmentKeyNames.join("|")})`;
+const findingReportEvidenceKeySuffixes = [
+  "id",
+  "price",
+  "address",
+  "rate",
+  "count",
+  "amount",
+  "balance",
+  "hash",
+  "url",
+  "path",
+  "code",
+  "version",
+  "size",
+  "slot",
+  "number",
+  "profile",
+  "root",
+  "key",
+  "ratio"
+] as const;
+const evidenceAssignmentKeySuffixPattern = `_(?:${findingReportEvidenceKeySuffixes.flatMap((suffix) => [suffix, suffix.toUpperCase()]).join("|")})`;
+const evidenceAssignmentKeyPattern = `(?:${FINDING_REPORT_EVIDENCE_ASSIGNMENT_KEYS.join("|")}|${contextualEvidenceAssignmentKeyPattern}|${assignmentKeyPattern}${evidenceAssignmentKeySuffixPattern})`;
 const unsupportedCanonicalAssignmentPattern = `${assignmentBoundaryPattern}(?!${supportedNoteKeyPattern}${assignmentOperatorPattern})${FINDING_NOTE_KEYS_ASCII_CASE_INSENSITIVE_PATTERN}${anyAssignmentOperatorPattern}`;
 const unsupportedMetadataAssignmentPatterns = FINDING_REPORT_METADATA_KEY_PATTERNS.map(
   (metadataKeyPattern) =>
-    `${clauseAssignmentBoundaryPattern}(?!${evidenceAssignmentKeyPattern}${anyAssignmentOperatorPattern})(?!${supportedNoteKeyPattern}${assignmentOperatorPattern})${metadataKeyPattern}${anyAssignmentOperatorPattern}`
+    `${assignmentBoundaryPattern}(?!${evidenceAssignmentKeyPattern}${anyAssignmentOperatorPattern})(?!${supportedNoteKeyPattern}${assignmentOperatorPattern})${metadataKeyPattern}${anyAssignmentOperatorPattern}`
 );
-// A report-assignment clause may contain prose and further canonical
-// assignments, but not producer-local assignments. The gap cannot cross an
-// assignment operator and consumes at most 4,097 code points, so consecutive
-// scans are disjoint and linear even at the 65,536-point note limit.
-const chainedAssignmentGapPattern = "(?:[^\\n;,*|&=]{0,4096}[ \\t])?";
-const unsupportedChainedAssignmentPattern = `${assignmentBoundaryPattern}${supportedNoteKeyPattern}${assignmentOperatorPattern}${chainedAssignmentGapPattern}(?!${supportedNoteKeyPattern}${assignmentOperatorPattern})${assignmentKeyPattern}${anyAssignmentOperatorPattern}`;
-const typedValueBoundaryPattern = "(?::|[.;,*`\\s&]|$)";
+const typedValuePattern = `(?:${[
+  ...FINDING_REACHABILITY_VALUES,
+  ...STATEFUL_FAILURE_CLASSIFICATION_VALUES,
+  ...FINDING_RISK_VALUES
+].join("|")})`;
+const typedValueBoundaryPattern = "(?::|[.;,*`\\s&)\\]}>\"']|$)";
+const optionalAssignedValueWrapperPattern = `(?:"|'|\\(|\\[|\\{)?`;
+const unsupportedTypedAliasPattern = `${assignmentBoundaryPattern}(?!${evidenceAssignmentKeyPattern}${anyAssignmentOperatorPattern})(?!${supportedNoteKeyPattern}${assignmentOperatorPattern})${assignmentKeyPattern}${assignmentOperatorPrefixPattern}[ \\t]*${optionalAssignedValueWrapperPattern}${typedValuePattern}${typedValueBoundaryPattern}`;
 const invalidTypedAssignmentPattern = `${assignmentBoundaryPattern}(?:reachability${assignmentOperatorPrefixPattern}(?![ \\t]*(?:${FINDING_REACHABILITY_VALUES.join("|")})${typedValueBoundaryPattern})[ \\t]*|stateful_failure_classification${assignmentOperatorPrefixPattern}(?![ \\t]*(?:${STATEFUL_FAILURE_CLASSIFICATION_VALUES.join("|")})${typedValueBoundaryPattern})[ \\t]*|(?:likelihood|impact)${assignmentOperatorPrefixPattern}(?![ \\t]*(?:${FINDING_RISK_VALUES.join("|")})${typedValueBoundaryPattern})[ \\t]*)`;
+const assignmentNonIdentifierBoundaryPattern = "[^\\p{L}\\p{N}\\p{M}_%\\-]";
+const reportAssignmentClauseStartPattern = "(?:^|[.;\\n])[ \\t]*";
+const canonicalAssignmentWithinClausePattern = `(?:[^.;\\n]*${assignmentNonIdentifierBoundaryPattern})?${supportedNoteKeyPattern}${assignmentOperatorPattern}`;
+const allowedChainedAssignmentKeyPattern = `(?:${evidenceAssignmentKeyPattern}|${supportedNoteKeyPattern})`;
+const unsupportedChainedAssignmentPattern = `${reportAssignmentClauseStartPattern}(?=${canonicalAssignmentWithinClausePattern})[^.;\\n]*${assignmentNonIdentifierBoundaryPattern}(?!${allowedChainedAssignmentKeyPattern}${anyAssignmentOperatorPattern})${assignmentKeyPattern}${anyAssignmentOperatorPattern}`;
 const findingNoteAssignment = new RegExp(
-  `(?<![\\p{L}\\p{N}\\p{M}_-])(${assignmentKeyPattern})(\\s*(={1,2})\\s*)`,
+  `(?<![\\p{L}\\p{N}\\p{M}_%\\-])(${assignmentKeyPattern})(\\s*(={1,2})\\s*)`,
   "gu"
 );
-const findingNoteClauseBoundary = /(?:^|[\n;,*|&<])[ \t]*$/u;
-const chainedFindingReportAssignmentGap = new RegExp(`^${chainedAssignmentGapPattern}$`, "u");
 const findingReportDirective =
-  /(?:^|[^A-Za-z])(?:add|append|assign|define|emit|enforce|include|mandate|mark|plus|put|record|require|returns?|set|treat|use|write)(?:\s+(?:an?|the))?\s+$/iu;
+  /(?:^|[^A-Za-z])(?:add|append|assign|define|emit|enforce|include|mandate|mark|plus|put|record|require|returns?|set|treat|use|write)\b[^.;\n]{0,160}$/iu;
+const findingReportDirectiveSubject =
+  /(?:findings?|notes?|reports?|fields?|metadata|classifications?|triage|severity|vocabular(?:y|ies))/iu;
 
 export interface FindingReportSemanticAssignment {
   key: string;
@@ -92,14 +141,17 @@ export function findingReportSemanticAssignment(text: string): FindingReportSema
   for (const assignment of text.matchAll(findingNoteAssignment)) {
     const key = assignment[1]!;
     const canonical = canonicalFindingNoteKey(key);
-    const prefix = text.slice(0, assignment.index);
+    const directedAssignment = isFindingReportDirectedAssignment(text, assignment.index, key);
+    const value = assignedValue(text, assignment.index + assignment[0].length);
     const reportMetadata =
       canonical !== undefined ||
+      directedAssignment ||
+      isUnambiguousFindingReportMetadataKey(key) ||
+      isUnsupportedTypedAlias(key, value) ||
       (isFindingReportMetadataKey(key) &&
-        !isFindingReportEvidenceAssignmentKey(key) &&
-        (findingNoteClauseBoundary.test(prefix) || findingReportDirective.test(prefix)));
+        !isFindingReportEvidenceLikeKey(key) &&
+        hasFindingNoteClauseBoundary(text, assignment.index));
     if (!reportMetadata) continue;
-    const value = assignedValue(text, assignment.index + assignment[0].length);
     return { key, operator: assignment[3] as "=" | "==", value };
   }
   return undefined;
@@ -111,25 +163,29 @@ export interface FindingNoteAssignmentIssue {
 }
 
 export function findingNoteAssignmentIssue(note: string): FindingNoteAssignmentIssue | undefined {
-  let previousReportAssignmentEnd: number | undefined;
+  let reportClauseActive = false;
+  let previousAssignmentEnd = 0;
   for (const assignment of note.matchAll(findingNoteAssignment)) {
+    if (/[.;\n]/u.test(note.slice(previousAssignmentEnd, assignment.index))) reportClauseActive = false;
+    previousAssignmentEnd = assignment.index + assignment[0].length;
     const key = assignment[1]!;
     const canonical = canonicalFindingNoteKey(key);
-    const prefix = note.slice(0, assignment.index);
-    const followsReportAssignment =
-      previousReportAssignmentEnd !== undefined &&
-      chainedFindingReportAssignmentGap.test(note.slice(previousReportAssignmentEnd, assignment.index));
-    const clauseAssignment = findingNoteClauseBoundary.test(prefix) || followsReportAssignment;
+    const value = assignedValue(note, assignment.index + assignment[0].length);
     const reportMetadata =
       canonical !== undefined ||
-      followsReportAssignment ||
-      (clauseAssignment && isFindingReportMetadataKey(key) && !isFindingReportEvidenceAssignmentKey(key));
+      isUnambiguousFindingReportMetadataKey(key) ||
+      isUnsupportedTypedAlias(key, value) ||
+      (reportClauseActive && !isFindingReportEvidenceLikeKey(key));
     if (!reportMetadata) continue;
-    previousReportAssignmentEnd = assignment.index + assignment[0].length;
-    if (canonical === undefined || key !== canonical || assignment[3] !== "=") {
+    if (
+      canonical === undefined ||
+      key !== canonical ||
+      assignment[3] !== "=" ||
+      !/^[ \t]*=[ \t]*$/u.test(assignment[2]!) ||
+      hasAssignmentValueWrapper(note, assignment.index + assignment[0].length)
+    ) {
       return { key, message: "Unsupported report-bound finding note key" };
     }
-    const value = assignedValue(note, assignment.index + assignment[0].length);
     const allowed =
       canonical === "reachability"
         ? FINDING_REACHABILITY_VALUES
@@ -141,17 +197,71 @@ export function findingNoteAssignmentIssue(note: string): FindingNoteAssignmentI
     if (allowed !== undefined && !allowed.includes(value as never)) {
       return { key, message: `Unsupported finding ${canonical} token ${JSON.stringify(value)}` };
     }
+    reportClauseActive = true;
   }
   return undefined;
 }
 
+function isUnambiguousFindingReportMetadataKey(key: string): boolean {
+  return isFindingReportMetadataKey(key) && !isFindingReportEvidenceLikeKey(key);
+}
+
+function isUnsupportedTypedAlias(key: string, value: string): boolean {
+  if (canonicalFindingNoteKey(key) !== undefined || isFindingReportEvidenceLikeKey(key)) return false;
+  return (
+    FINDING_REACHABILITY_VALUES.includes(value as never) ||
+    STATEFUL_FAILURE_CLASSIFICATION_VALUES.includes(value as never) ||
+    FINDING_RISK_VALUES.includes(value as never)
+  );
+}
+
+function isFindingReportEvidenceLikeKey(key: string): boolean {
+  if (isFindingReportEvidenceAssignmentKey(key)) return true;
+  if (contextualEvidenceAssignmentKeys.has(key)) return true;
+  const separator = key.lastIndexOf("_");
+  if (separator < 0) return false;
+  const suffix = key.slice(separator + 1);
+  if (suffix !== suffix.toLowerCase() && suffix !== suffix.toUpperCase()) return false;
+  return findingReportEvidenceKeySuffixes.includes(suffix.toLowerCase() as never);
+}
+
+function isFindingReportDirectedAssignment(text: string, assignmentIndex: number, key: string): boolean {
+  if (isFindingReportEvidenceLikeKey(key)) return false;
+  let clauseStart = assignmentIndex - 1;
+  while (clauseStart >= 0 && !".;\n".includes(text[clauseStart]!)) clauseStart -= 1;
+  let clauseEnd = assignmentIndex;
+  while (clauseEnd < text.length && !".;\n".includes(text[clauseEnd]!)) clauseEnd += 1;
+  const prefix = text.slice(Math.max(clauseStart + 1, assignmentIndex - 256), assignmentIndex);
+  const clause = text.slice(clauseStart + 1, Math.min(clauseEnd, assignmentIndex + 256));
+  return findingReportDirective.test(prefix) && findingReportDirectiveSubject.test(clause);
+}
+
+function hasAssignmentValueWrapper(text: string, start: number): boolean {
+  return (
+    text[start] === '"' || text[start] === "'" || text[start] === "(" || text[start] === "[" || text[start] === "{"
+  );
+}
+
+function hasFindingNoteClauseBoundary(text: string, assignmentIndex: number): boolean {
+  let index = assignmentIndex - 1;
+  while (index >= 0 && (text[index] === " " || text[index] === "\t")) index -= 1;
+  return index < 0 || "\n;,*|<`\"'([{>:.".includes(text[index]!);
+}
+
 function assignedValue(text: string, start: number): string {
-  return text.slice(start).match(/^[^.;,*`\s:&]*/u)?.[0] ?? "";
+  let end = start;
+  while (end < text.length && text[end] === " ") end += 1;
+  const opening = text[end];
+  if (opening === '"' || opening === "'" || opening === "(" || opening === "[" || opening === "{") end += 1;
+  const valueStart = end;
+  while (end < text.length && !/[=.;,*`\s:&)\]}>'"]/u.test(text[end]!)) end += 1;
+  return text.slice(valueStart, end);
 }
 
 const findingNoteJsonSchemaConstraints = [
   { not: { pattern: unsupportedCanonicalAssignmentPattern } },
   ...unsupportedMetadataAssignmentPatterns.map((pattern) => ({ not: { pattern } })),
+  { not: { pattern: unsupportedTypedAliasPattern } },
   { not: { pattern: unsupportedChainedAssignmentPattern } },
   { not: { pattern: invalidTypedAssignmentPattern } }
 ];

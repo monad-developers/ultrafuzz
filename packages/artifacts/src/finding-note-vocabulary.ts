@@ -41,11 +41,7 @@ const findingReportAssignmentKey = new RegExp(`^${FINDING_REPORT_ASSIGNMENT_KEY_
 /** Exact assignment-shaped evidence keys that overlap the report-metadata
  * vocabulary. Keep this list narrow: a generic uppercase exemption would let
  * producer-local aliases such as `ROOT_CAUSE` evade the authority. */
-export const FINDING_REPORT_EVIDENCE_ASSIGNMENT_KEYS = [
-  "RISK_FREE_RATE",
-  "STATEFUL_RUNS",
-  "--dependency-version"
-] as const;
+export const FINDING_REPORT_EVIDENCE_ASSIGNMENT_KEYS = ["STATEFUL_RUNS", "--dependency-version"] as const;
 
 export function canonicalFindingNoteKey(key: string): (typeof FINDING_NOTE_KEYS)[number] | undefined {
   if (!findingReportAssignmentKey.test(key)) return undefined;

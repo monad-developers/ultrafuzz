@@ -164,6 +164,13 @@ describe("artifact handoff validation", () => {
           }
         })
       ).not.toThrow();
+      expect(() =>
+        validateTopology(topology, {
+          promptTexts: {
+            "review/triage.md": "Use {{ finding_reachability_vocabulary }} and {{ finding_note_key_vocabulary }}."
+          }
+        })
+      ).not.toThrow();
     }
     expect(() =>
       validateTopology(topology, {
@@ -180,6 +187,12 @@ describe("artifact handoff validation", () => {
       "The shell printed outcome=success.",
       "The proof checks risk=0 after withdrawal.",
       "RISK_FREE_RATE=0.05 impact_price=123 helper_address=0xabc.",
+      "Set FOUNDRY_PROFILE=ci.",
+      "Use CHAIN_ID=1.",
+      "Use CHAIN_ID=1 when testing public entrypoints.",
+      "Record block_number=1.",
+      "helper_balance=0 proof_size=32 root_slot=0x00 IMPACT_PRICE=123.",
+      "MERKLE_ROOT=0xabc PUBLIC_KEY=0x123 risk_ratio=0.5 HELPER_BALANCE=0.",
       "risK=non-semantic Unicode evidence."
     ]) {
       expect(() =>
@@ -257,7 +270,12 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       "Mandate audit_decision=accepted",
       "The model returns audit_decision=accepted",
       "Assign audit_decision=accepted",
-      "Enforce audit_decision=accepted"
+      "Enforce audit_decision=accepted",
+      "Set attainability=helper-only on each finding",
+      "Set exposure=public on each finding",
+      "Set rating=critical on each finding",
+      "root_cause=renamed",
+      "Record a `helper_evidence=renamed` note"
     ]) {
       expect(
         () =>
