@@ -11276,6 +11276,24 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
     "Coverage was &#49;&#48;&#48;&percnt;.",
     "Coverage was 100&ZeroWidthSpace;%.",
     "Coverage was 100<!--\nrendered\n-->%.",
+    "Coverage was\n100%.",
+    "Coverage was 100% <script>selected-range</script>.",
+    "Coverage was 100% <template>selected-range</template>.",
+    "Coverage was 100% <span hidden>selected-range</span>.",
+    'Coverage was 100% <span aria-hidden="true">selected-range</span>.',
+    'Coverage was 100% <span style="display: none">selected-range</span>.',
+    "Coverage was 100% <span inert>selected-range</span>.",
+    "Coverage was 100% ![selected-range](https://example.invalid/chart.svg).",
+    "Coverage was 10\uFE0F0%.",
+    "Covera\u034Fge was 100%.",
+    "<h2>Coverage</h2>\n\n100%.",
+    "### Coverage\n\n100%.",
+    "| Coverage |\n| --- |\n| 100% |",
+    "Coverage:\n\n- 100%.",
+    "```text\nCoverage was 100%.\n```",
+    "    Coverage was 100%.",
+    "<pre>Coverage was 100%.</pre>",
+    "All production lines were covered (100%).",
     'Coverage was <a href="https://example.invalid">100%</a>.',
     "Coverage was <small>100%</small>.",
     "Coverage was 100<wbr>%.",
@@ -11302,7 +11320,14 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
     "<!--\nCoverage was 100%.\n-->",
     '<div title="Coverage was 100%">No score is published.</div>',
     '<a title="Coverage was 100%">Coverage details</a>',
-    "[details]: https://example.invalid/?coverage=100%"
+    "[details]: https://example.invalid/?coverage=100%",
+    "<template>Coverage was 100%.</template>",
+    "<span hidden>Coverage was 100%.</span>",
+    '<span aria-hidden="true">Coverage was 100%.</span>',
+    '<span style="visibility: hidden">Coverage was 100%.</span>',
+    "<span inert>Coverage was 100%.</span>",
+    "<template>\n\nCoverage was 100%.\n\n</template>",
+    "Coverage was 100&amp;#37;."
   ]) {
     writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\n${nonRenderedScore}\n`);
     const hidden = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
@@ -11317,6 +11342,15 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
   );
   const linkedVisibleScope = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
   assert.equal(linkedVisibleScope.ok, true, JSON.stringify(linkedVisibleScope.diagnostics));
+
+  writeArtifact(
+    layout,
+    reportNode.id,
+    "report.md",
+    `${scopedMarkdown}\n## Notes\n\nCoverage was 100%\nfor production-source.\n`
+  );
+  const wrappedVisibleScope = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+  assert.equal(wrappedVisibleScope.ok, true, JSON.stringify(wrappedVisibleScope.diagnostics));
 
   writeArtifact(
     layout,
