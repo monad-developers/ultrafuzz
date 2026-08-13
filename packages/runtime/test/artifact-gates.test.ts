@@ -10346,7 +10346,11 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
       "contract Critical {",
       "  struct Inner { uint256 x; }",
       "  struct Outer { Inner inner; }",
+      "  modifier check(bool ok) { require(ok); _; }",
       "  function helper() private {}",
+      // Equality inside a modifier argument belongs to the function signature;
+      // it must not hide the public getter declared after the function body.
+      "  function guarded(bool cond) external check(cond == true) {}",
       "  Outer public state = Outer({inner: Inner({x: 1})});",
       "}",
       ""
@@ -10358,7 +10362,7 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
     schema_version: "ultrafuzz.coverage-evidence.v1",
     views: [
       { scope: "selected-range", covered_ranges: 1, total_ranges: 1 },
-      { scope: "production-source", covered_ranges: 1, total_ranges: 4 }
+      { scope: "production-source", covered_ranges: 1, total_ranges: 6 }
     ],
     files: [
       {
@@ -10374,7 +10378,7 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
         included: false,
         exclusion_reason: "not selected",
         covered_ranges: 0,
-        total_ranges: 2
+        total_ranges: 4
       }
     ],
     counted_ranges: [
@@ -10409,12 +10413,28 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
         line_count: 1,
         selected: false,
         covered: false
+      },
+      {
+        file: "src/Critical.sol",
+        kind: "production",
+        start_line: 6,
+        line_count: 1,
+        selected: false,
+        covered: false
+      },
+      {
+        file: "src/Critical.sol",
+        kind: "production",
+        start_line: 7,
+        line_count: 1,
+        selected: false,
+        covered: false
       }
     ],
     zero_coverage_components: [{ path: "src/Critical.sol", kind: "production" }]
   };
   const scopedMarkdown =
-    "# Coverage\n\n## Scoped coverage evidence\n\n- selected-range: `1/1`\n- production-source: `1/4`\n\n" +
+    "# Coverage\n\n## Scoped coverage evidence\n\n- selected-range: `1/1`\n- production-source: `1/6`\n\n" +
     "Excluded components:\n- `src/Critical.sol` (production): not selected\n\n" +
     "Zero-coverage components:\n- `src/Critical.sol` (production)\n";
   const goal = {
@@ -10482,7 +10502,7 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
   assert.ok(fakeSource.diagnostics.some((diagnostic) => diagnostic.code === "COVERAGE_NON_PRODUCTION_FILE_UNKNOWN"));
 
   const hiddenExcludedRange = structuredClone(evidence);
-  hiddenExcludedRange.counted_ranges[3]!.selected = true;
+  hiddenExcludedRange.counted_ranges[5]!.selected = true;
   publish(hiddenExcludedRange);
   const hidden = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(hidden.ok, false);
@@ -10496,8 +10516,8 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
   );
 
   const inventedExcludedTotal = structuredClone(evidence);
-  inventedExcludedTotal.files[1]!.total_ranges = 3;
-  inventedExcludedTotal.views[1]!.total_ranges = 5;
+  inventedExcludedTotal.files[1]!.total_ranges = 5;
+  inventedExcludedTotal.views[1]!.total_ranges = 7;
   publish(inventedExcludedTotal);
   const invented = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(invented.ok, false);
@@ -10512,7 +10532,7 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
   incidentallyCoveredUnselected.views[1]!.covered_ranges = 2;
   publish(
     incidentallyCoveredUnselected,
-    scopedMarkdown.replace("production-source: `1/4`", "production-source: `2/4`")
+    scopedMarkdown.replace("production-source: `1/6`", "production-source: `2/6`")
   );
   const independentViews = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(independentViews.ok, true, JSON.stringify(independentViews.diagnostics));
@@ -10531,7 +10551,7 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
   );
 
   const wrongBoundary = structuredClone(evidence);
-  wrongBoundary.counted_ranges[3]!.line_count = 2;
+  wrongBoundary.counted_ranges[5]!.line_count = 2;
   publish(wrongBoundary);
   const staleBoundary = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(staleBoundary.ok, false);

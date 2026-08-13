@@ -4809,7 +4809,7 @@ function solidityPublicGetterDeclarations(source: string): MaterialCoverageDecla
         statementLine = line;
       } else if (structuralBraceDepth === 1) {
         const prefix = source.slice(statementStart, index);
-        if (/=/u.test(prefix)) {
+        if (solidityStatementHasTopLevelInitializer(prefix)) {
           initializerBraceDepth = 1;
           continue;
         }
@@ -4848,6 +4848,26 @@ function solidityPublicGetterDeclarations(source: string): MaterialCoverageDecla
     statementLine = line;
   }
   return declarations;
+}
+
+function solidityStatementHasTopLevelInitializer(statementPrefix: string): boolean {
+  let parenthesisDepth = 0;
+  let bracketDepth = 0;
+  for (let index = 0; index < statementPrefix.length; index += 1) {
+    const character = statementPrefix[index]!;
+    if (character === "(") parenthesisDepth += 1;
+    else if (character === ")") parenthesisDepth = Math.max(0, parenthesisDepth - 1);
+    else if (character === "[") bracketDepth += 1;
+    else if (character === "]") bracketDepth = Math.max(0, bracketDepth - 1);
+    else if (character === "=" && parenthesisDepth === 0 && bracketDepth === 0) {
+      const previous = statementPrefix[index - 1];
+      const next = statementPrefix[index + 1];
+      if (previous !== "=" && previous !== "!" && previous !== "<" && previous !== ">" && next !== "=") {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 function vyperMaterialCoverageDeclarations(sourceLines: readonly string[]): MaterialCoverageDeclaration[] {
