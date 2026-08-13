@@ -64,7 +64,7 @@ Write structured JSON to:
 {{artifact_dir}}/boundary-recipes.json
 
 The JSON should include `schema_version`, `recipes`, `deferred_or_spec_gated`,
-and `review_priorities`. Each recipe should name the workflow, public support,
+and `coverage_priorities`. Each recipe should name the workflow, public support,
 setup, action sequence, oracle, negative/boundary values, expected
 classification if confirmed, and preferred downstream lane.
 
@@ -75,6 +75,3 @@ A property that holds is not a finding. Record satisfied checks,
 reviewed-surface summaries, and no-defect observations in summaries, not in
 `findings.json`. Write `[]` to `findings.json` when no source-backed violation
 is confirmed.
-
-Do not edit production contracts or repository source files; write only the
-required artifacts.

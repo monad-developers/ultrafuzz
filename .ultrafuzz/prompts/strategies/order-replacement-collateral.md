@@ -20,8 +20,7 @@ Property catalog:
 
 When inspecting source for order ownership, collateral, or native-token helper
 terms, use the Read tool or one direct workspace-relative command at a time. Do
-not pipe `grep` into `head`, `tail`, `sort`, or `uniq`. Do not combine probes
-with `;`, `&&`, `||`, pipes, or stdout/stderr redirection.
+not pipe `grep` into `head`, `tail`, `sort`, or `uniq`.
 
 ## Focus
 
@@ -45,6 +44,3 @@ A property that holds is not a finding. Record satisfied checks,
 reviewed-surface summaries, and no-defect observations in summaries, not in
 `findings.json`. Write `[]` to `findings.json` when no source-backed violation
 is confirmed.
-
-Do not edit production contracts or repository source files; write only the
-required artifacts.

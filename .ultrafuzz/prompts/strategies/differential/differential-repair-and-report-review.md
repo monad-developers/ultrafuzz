@@ -28,8 +28,10 @@ The `differential-red-triage` logical node is expected to provide
 not repair; mark the campaign incomplete in `gap-review.json` and
 `differential-report-review.json`.
 
-Preserve credible production-bug mismatches. Keep production bug, spec
-mismatch, and unknown classifications visible in the report review.
+Never weaken, remove, skip, or over-bound a credible production-bug mismatch. Do
+not repair mismatches classified as production bug, spec mismatch, or unknown. If
+repair changes the observed mismatch set, regenerate the semantic-red registry
+shape in the repair summary and preserve the old mismatch evidence history.
 
 Repair a harness or reference defect only when every fresh triage attempt
 independently agrees it is a harness or reference defect. If the attempts
@@ -92,6 +94,3 @@ A property that holds is not a finding. Record satisfied checks,
 reviewed-surface summaries, and no-defect observations in summaries, not in
 `findings.json`. Write `[]` to `findings.json` when no source-backed violation
 is confirmed.
-
-Do not edit production contracts or repository source files; write only the
-required artifacts.

@@ -99,9 +99,10 @@ public sources.
 
 Before assigning production severity, identify findings whose proof depends on
 direct calls to an internal helper, library function, auxiliary wrapper, or
-test-only adapter. Production severity requires source-backed public/external
-entrypoint evidence that reaches the same behavior under production-like
-preconditions.
+test-only adapter. Production severity requires either a public/external
+entrypoint trace or a public caller source chain that reaches the same behavior
+under production-like preconditions. Do not assign production severity to a
+helper-level finding that establishes neither.
 
 For every helper-level finding that remains in the output, record one of these
 exact reachability tokens:
@@ -115,6 +116,16 @@ This list is exactly the set the triage node can emit in this topology. Treat
 `reachability=public-entrypoint-trace` and
 `reachability=public-caller-source-chain` as the two promotion-eligible tokens,
 and any other reachability token as an invalid upstream artifact.
+
+`reachability=public-caller-source-chain` is this topology's substitute for a
+generated public wrapper PoC, so it must carry the same evidentiary weight or it
+does not promote. Do not promote it unless the finding cites source spans for
+every link in the caller chain from the public/external entrypoint down to the
+helper call site, and cites the source span showing that caller admitting the
+offending arguments or state. Never promote a chain whose links are inferred,
+partially cited, or asserted as probable, and never accept naming, symmetry, or
+plausibility in place of a cited span. Demote such a finding to
+`reachability=public-wrapper-required` and record the missing span.
 
 Also include concise `helper_proof=<summary>` and
 `public_exploitability=<summary>` notes when they are relevant. Helper-only
@@ -300,10 +311,6 @@ Invalid or out of scope:
 
 Do not include invalid or out-of-scope records like the example above in the
 production report entries.
-
-Do not edit production contracts or repository source files; write only the
-required artifacts. Do not install, fetch, restore, or update dependencies, and
-do not rewrite lockfiles or dependency-vendor directories.
 
 Save severity-classified findings to
 {{artifact_path}}/severity-classified-findings.json as JSON.

@@ -41,14 +41,12 @@ downstream analysis, including any project-local compiler script, ABI-visible
 interfaces, constructor/init argument handling, and FFI configuration notes
 already present in project files.
 
-Do not edit production contracts or repository source files; write only the
-required artifacts. Do not stage, commit, push, or rewrite unrelated
-configuration. Do not install, fetch, restore, or update dependencies: no
-`git clone`, `forge install`, `git submodule update`, `npm install`,
-`pnpm install`, `yarn install`, `bun install`, or `pip install`, and no
-rewritten lockfiles or dependency-vendor directories. The captured workspace
-patch reaches every downstream analysis workspace, so any such change would move
-the whole run off the pinned source snapshot.
+Do not stage, commit, push, or rewrite unrelated
+configuration. Keep dependency evidence patch-visible for downstream Ultrafuzz
+workspaces: do not vendor or claim a dependency that exists only inside a nested
+git checkout or submodule, because a nested checkout may resolve locally yet be
+omitted from downstream workspace snapshots. Record the missing dependency
+clearly in the setup handoff instead.
 
 Record whether the Foundry harness appears complete and note validation
 blockers.

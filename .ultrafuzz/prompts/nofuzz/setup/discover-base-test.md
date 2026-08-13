@@ -38,20 +38,18 @@ fixture.
 
 Record whether compilation status is known from existing evidence.
 
-Do not edit production contracts or repository source files; write only the
-required artifacts. Do not rename or rewrite working fixtures, and do not change
-import paths only to match reference filenames such as `Setup.t.sol`; those
-examples describe structure, not a required naming migration. Do not stage,
-commit, push, or rewrite unrelated configuration.
+If an existing Foundry fixture already compiles and provides a reusable
+deploy/setup base, preserve its current file names and imports. Do not rename
+working fixtures, change import paths, or rewrite source files only to match
+reference filenames such as `Setup.t.sol`; those examples describe structure, not
+a required naming migration.
 
 Identify existing dependency locations and import assumptions for the base
 fixture. Record missing workspace-relative dependencies as blockers or
-unknowns. Do not install, fetch, restore, or update dependencies to resolve
-them: no `git clone`, `forge install`, `git submodule update`, `npm install`,
-`pnpm install`, `yarn install`, `bun install`, or `pip install`, and no
-rewritten lockfiles or dependency-vendor directories. This node's workspace
-state is captured into the patch every downstream analysis workspace receives,
-so any such change would move the whole run off the pinned source snapshot.
+unknowns. Any dependency evidence the base fixture relies on must be
+patch-visible to downstream Ultrafuzz workspaces. Do not treat required imports
+that exist only in a nested git checkout or submodule as present, because those
+contents will not be captured in the patch artifact.
 
 If the setup handoff says `lib/forge-std` exists but this isolated workspace is
 missing it, treat that as stale or non-patch-visible handoff evidence. Do not

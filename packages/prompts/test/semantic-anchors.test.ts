@@ -586,7 +586,11 @@ describe("prompt semantic anchors", () => {
     expect(admin).toMatch(
       /Do not install or fetch missing tools or dependencies,\s+and do not otherwise\s+mutate the target workspace's dependency state/u
     );
-    expect(admin).toContain("Do not edit production contracts or repository source files");
+    // The base counterpart carries no blanket source-edit prohibition, only the conditional
+    // "do not edit production contracts just to satisfy test imports" whose subject (restoring
+    // test dependencies to compile generated tests) does not exist here. A blanket guard would
+    // make the control arm strictly stricter than the treatment arm, so it is pinned out.
+    expect(admin).not.toContain("Do not edit production contracts or repository source files");
     expect(admin).toContain("A property that holds is not a finding.");
     expect(admin).toContain("Write `[]` to `findings.json` when no source-backed violation");
     expect(admin).not.toContain("generated-tests");

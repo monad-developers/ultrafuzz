@@ -45,19 +45,10 @@ step:
   agreement, classify the finding as `undetermined`.
 
 Use source, specification, property, and artifact evidence for triage.
-Do not edit production contracts or repository source files; write only the
-required artifacts.
-Do not install, fetch, restore, or update dependencies, and do not rewrite
-lockfiles or dependency-vendor directories.
 
 Run source inspection as separate Bash calls, waiting for each tool result
-before the next command. Use a single simple workspace-relative command per Bash
-call. Do not pipe `grep` into `head`, `tail`, `sort`, or `uniq`, and never
-combine inspection commands with `&&`, `;`, `||`, pipes, or redirection. Bash
-already runs from the isolated workspace path. Do not prepend `cd`, `cd
-... || exit 1`, or any other directory-changing wrapper. Do not use command
-substitution, shell conditionals, absolute binary paths, or host-global
-searches.
+before the next command. Do not use command substitution, shell conditionals,
+absolute binary paths, or host-global searches.
 
 ## Helper reachability audit
 

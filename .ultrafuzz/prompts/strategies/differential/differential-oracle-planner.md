@@ -18,8 +18,7 @@ Base Foundry setup:
 Property catalog:
 {{artifact_handoff:property-specification-fanin}}
 
-Do not edit production contracts or repository source files; write only the
-required artifacts. Do not inspect private or hidden sources. Treat production
+Do not edit repository source files; write only the required artifacts. Do not inspect private or hidden sources. Treat production
 implementation behavior as observation, not as the oracle source. If public
 sources are insufficient for a strict oracle, mark the surface ambiguous or out
 of scope.
@@ -27,14 +26,8 @@ of scope.
 Plan only candidate lanes whose expected behavior can be justified by public
 evidence. Prefer high-signal public/external equality.
 
-Run source inspection as separate Bash calls, waiting for each tool result
-before the next command. Use a single simple workspace-relative command per Bash
-call. Do not pipe `grep` into `head`, `tail`, `sort`, or `uniq`, and never
-combine inspection commands with `&&`, `;`, `||`, pipes, or redirection. Bash
-already runs from the isolated workspace path. Do not prepend `cd`, `cd
-... || exit 1`, or any other directory-changing wrapper. Do not use command
-substitution, shell conditionals, absolute binary paths, or host-global
-searches.
+Do not use command substitution, shell conditionals, absolute binary paths, or
+host-global searches.
 
 Write {{artifact_path}}/differential-plan.json with this JSON shape:
 

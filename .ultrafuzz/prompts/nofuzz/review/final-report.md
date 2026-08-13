@@ -77,9 +77,9 @@ source lens rows, and cited source locations. Treat references to an unknown
 canonical property as an invalid current-run artifact. This topology renders no
 implemented-property handoff, so the provenance join can never be completed
 here. Exactly one behaviour therefore applies to every run under this topology,
-whether or not any finding carries `property_ids`: render Property provenance as
-`unavailable` in `report.md`, emit the empty array (`[]`) for
-`report.json.property_provenance`, and continue report generation.
+whether or not any finding carries `property_ids`: emit the empty array (`[]`)
+for `report.json.property_provenance`, render the Property provenance body as
+`No property-derived findings.` in `report.md`, and continue report generation.
 
 Use these setup handoffs:
 
@@ -521,15 +521,19 @@ Add `## Property provenance` after the implementation coverage section. This
 topology renders no implemented-property handoff, so the `implementation_paths`
 and `test_paths` lineage that every provenance row requires does not exist for
 any finding, and the join cannot be completed even when findings carry
-`property_ids`. Render the literal `unavailable` as the entire Markdown body of
-that heading, and emit the empty array (`[]`) for
-`report.json.property_provenance`.
+`property_ids`. Emit the empty array (`[]`) for
+`report.json.property_provenance`, and write `No property-derived findings.` as
+the entire Markdown body of that heading. That sentence is exactly what the
+Ultrafuzz runtime renders for an empty `property_provenance` array when it
+regenerates `report.md` from `report.json`, so writing anything else here is
+overwritten on publish and only creates a mismatch.
 
-Do not render a provenance table, do not write `No property-derived findings.`,
-and do not synthesize provenance rows, `implementation_paths`, `test_paths`, or
-backend fields from the property catalog, the findings, the lifecycle ledger, or
-the source tree. The literal `unavailable` belongs in the Markdown body only; it
-is never a valid `report.json.property_provenance` value.
+Do not render a provenance table and do not synthesize provenance rows,
+`implementation_paths`, `test_paths`, or backend fields from the property
+catalog, the findings, the lifecycle ledger, or the source tree. Reserve the
+literal `unavailable` for the individual public-facing fields that are genuinely
+unavailable; it is never a valid `report.json.property_provenance` value and it
+is not the body of this heading under this topology.
 
 When lifecycle records contain `comparison_disposition`, add a concise
 `## Prior finding disposition` section after Property provenance and before
@@ -654,9 +658,10 @@ Before finishing, verify that:
   `severity_guess`, `confidence`, and `summary`.
 - Every `report.json` production issue keeps canonical `strategy` as a string
   when present and stores structured strategy details in `strategy_provenance`.
-- `report.md` contains `## Property provenance` whose body is the literal
-  `unavailable`, with no provenance table and no invented property IDs, because
-  this topology renders no implemented-property handoff.
+- `report.md` contains `## Property provenance` whose body is exactly
+  `No property-derived findings.`, with no provenance table and no invented
+  property IDs, because this topology renders no implemented-property handoff and
+  the runtime renders that sentence for an empty `property_provenance` array.
 - `report.json.property_provenance` is the empty array (`[]`), not a provenance
   entry and not the string `"unavailable"`.
 - `report.md` contains `## Property implementation coverage` rendered as the

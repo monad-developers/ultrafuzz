@@ -44,13 +44,10 @@ surfaces where `surface_index % {{strategy_loop_count}} == {{strategy_loop_index
 If the runtime Strategy loop count is 1, cover every surface in the stable list.
 
 Run source inspection as separate Bash calls, waiting for each tool result
-before the next command. Use a single simple workspace-relative command per Bash
-call. Do not pipe `grep` into `head`, `tail`, `sort`, or `uniq`, and never
-combine inspection commands with `&&`, `;`, `||`, pipes, or redirection. Bash
-already runs from the isolated workspace path. Do not prepend `cd`, `cd
-... || exit 1`, or any other directory-changing wrapper. Do not use command
-substitution, shell conditionals, absolute binary paths, or host-global
-searches.
+before the next command. Never combine inspection commands with `&&`, `;`,
+`||`, pipes, or redirection. Bash already runs from the isolated workspace
+path. Do not prepend `cd`, `cd ... || exit 1`, or any other
+directory-changing wrapper.
 
 For each assigned surface, inspect at least one sequence where time changes
 between two or more real protocol calls. Single-call timestamp behavior is only
@@ -71,6 +68,3 @@ A property that holds is not a finding. Record satisfied checks,
 reviewed-surface summaries, and no-defect observations in summaries, not in
 `findings.json`. Write `[]` to `findings.json` when no source-backed violation
 is confirmed.
-
-Do not edit production contracts or repository source files; write only the
-required artifacts.

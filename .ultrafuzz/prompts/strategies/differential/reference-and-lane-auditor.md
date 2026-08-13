@@ -24,21 +24,13 @@ Base Foundry setup:
 Property catalog:
 {{artifact_handoff:property-specification-fanin}}
 
-Do not edit production contracts or repository source files; write only the
-required artifacts.
-Do not assume the reference, production, or tests are correct.
+Do not edit repository source files; write only the required artifacts. Do not assume the reference, production, or tests are correct.
 Reject or narrow any lane whose strict oracle depends on guessed behavior,
 private layout, production internals, gas-shaped logic, or unstated
 preconditions.
 
-Run source inspection as separate Bash calls, waiting for each tool result
-before the next command. Use a single simple workspace-relative command per Bash
-call. Do not pipe `grep` into `head`, `tail`, `sort`, or `uniq`, and never
-combine inspection commands with `&&`, `;`, `||`, pipes, or redirection. Bash
-already runs from the isolated workspace path. Do not prepend `cd`, `cd
-... || exit 1`, or any other directory-changing wrapper. Do not use command
-substitution, shell conditionals, absolute binary paths, or host-global
-searches.
+Do not use command substitution, shell conditionals, absolute binary paths, or
+host-global searches.
 
 Planner and harness inputs may come from multiple looped producer attempts.
 Treat every upstream handoff as a separate candidate source. Preserve its

@@ -31,11 +31,6 @@ with `;`, `echo` separators, `2>/dev/null`, or multi-stage filters such as
 that they were absent or not found and continue.
 
 Produce discovery notes only.
-Do not edit production contracts or repository source files; write only the
-required artifacts.
-Do not install, fetch, restore, or update dependencies during discovery, and do
-not vendor untracked compiler or test dependencies.
-Do not rewrite lockfiles or dependency-vendor directories.
 Enumerate:
 
 - whether the project is Hardhat, Foundry, or mixed
@@ -59,7 +54,10 @@ For projects with Vyper signals, record only project-local compiler evidence:
 the exact Vyper command, script, or dependency pin the repository provides,
 normally `vyper`, `vyper-json`, a package script, or a Python environment file.
 Record visible project-local tooling evidence and any unavailable project-local
-tooling as discovery context.
+tooling as discovery context. If `vyper --version` or `vyper-json --version` is
+directly available in PATH you may record it, but do not search global install
+directories and do not install or vendor untracked compiler dependencies during
+discovery.
 
 If a tool version command returns `command not found`, record that the tool is
 not available in PATH and continue. Do not inspect host or global installation

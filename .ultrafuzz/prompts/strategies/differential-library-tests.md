@@ -59,8 +59,8 @@ list. For each assigned target, inspect the relevant scenario, function, or
 logic split and record concrete mismatch evidence when the property is
 violated.
 
-Keep analysis local to this attempt. Preserve observed strict mismatches as
-evidence.
+Keep analysis local to this attempt. Do not edit production contracts.
+Preserve observed strict mismatches as evidence.
 
 Write structured findings to {{output_findings_path}}. Use an empty JSON array
 if no finding is confirmed.
@@ -71,13 +71,5 @@ reviewed-surface summaries, and no-defect observations in summaries, not in
 is confirmed.
 
 Run source inspection as separate Bash calls, waiting for each tool result
-before the next command. Use a single simple workspace-relative command per Bash
-call. Do not pipe `grep` into `head`, `tail`, `sort`, or `uniq`, and never
-combine inspection commands with `&&`, `;`, `||`, pipes, or redirection. Bash
-already runs from the isolated workspace path. Do not prepend `cd`, `cd
-... || exit 1`, or any other directory-changing wrapper. Do not use command
-substitution, shell conditionals, absolute binary paths, or host-global
-searches.
-
-Do not edit production contracts or repository source files; write only the
-required artifacts.
+before the next command. Never combine inspection commands with `&&`, `;`,
+`||`, pipes, or redirection.

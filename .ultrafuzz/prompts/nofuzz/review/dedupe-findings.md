@@ -25,8 +25,6 @@ includes `forge install`, `git submodule update`, `npm install`, `pnpm install`,
 `yarn install`, `bun install`, `pip install`, and tool bootstrap commands.
 Do not rewrite lockfiles or dependency-vendor directories, and do not mutate the
 target workspace's dependency state.
-Do not edit production contracts or repository source files; write only the
-required artifacts.
 
 Inspect every direct strategy handoff before deduping. This list is derived
 from the effective topology and includes each producer's declared findings,

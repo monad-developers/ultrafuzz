@@ -20,7 +20,7 @@ Base Foundry setup:
 Property catalog:
 {{artifact_handoff:property-specification-fanin}}
 
-Do not copy production internals into the reference.
+Do not edit production contracts. Do not copy production internals into the reference.
 
 Build deliberately simple reference models:
 
@@ -53,6 +53,3 @@ nearby summary fields.
   "lane_readiness_notes": []
 }
 ```
-
-Do not edit production contracts or repository source files; write only the
-required artifacts.

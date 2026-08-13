@@ -132,6 +132,3 @@ A property that holds is not a finding. Record satisfied checks,
 reviewed-surface summaries, and no-defect observations in summaries, not in
 `findings.json`. Write `[]` to `findings.json` when no source-backed violation
 is confirmed.
-
-Do not edit production contracts or repository source files; write only the
-required artifacts.
