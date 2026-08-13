@@ -353,25 +353,71 @@ function registersAgentFactory(registryText: string, agentRef: string): boolean 
   );
   const parseDiagnostics = (source as ts.SourceFile & { parseDiagnostics: readonly ts.Diagnostic[] }).parseDiagnostics;
   if (parseDiagnostics.length > 0) return false;
-  const registry = source.statements.find(
-    (statement): statement is ts.VariableStatement =>
+  const localNames = exportedAgentFactoriesLocalNames(source);
+  return source.statements.some(
+    (statement) =>
       ts.isVariableStatement(statement) &&
-      (ts.getModifiers(statement)?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword) ?? false) &&
       (statement.declarationList.flags & ts.NodeFlags.Const) !== 0 &&
-      statement.declarationList.declarations.some(
-        (declaration) => ts.isIdentifier(declaration.name) && declaration.name.text === "agentFactories"
-      )
+      statement.declarationList.declarations.some((declaration) => {
+        if (!ts.isIdentifier(declaration.name) || !localNames.has(declaration.name.text)) return false;
+        const initializer = declaration.initializer && registryObjectLiteral(declaration.initializer);
+        return initializer?.properties.some((property) => objectMemberName(property) === agentRef) ?? false;
+      })
   );
-  const declaration = registry?.declarationList.declarations.find(
-    (candidate) => ts.isIdentifier(candidate.name) && candidate.name.text === "agentFactories"
-  );
-  const initializer =
-    declaration?.initializer === undefined ? undefined : unwrapTypeExpressions(declaration.initializer);
-  return (
-    initializer !== undefined &&
-    ts.isObjectLiteralExpression(initializer) &&
-    initializer.properties.some((property) => objectMemberName(property) === agentRef)
-  );
+}
+
+function exportedAgentFactoriesLocalNames(source: ts.SourceFile): ReadonlySet<string> {
+  const localNames = new Set<string>();
+  for (const statement of source.statements) {
+    if (ts.isVariableStatement(statement) && hasExportModifier(statement)) {
+      for (const declaration of statement.declarationList.declarations) {
+        if (ts.isIdentifier(declaration.name) && declaration.name.text === "agentFactories") {
+          localNames.add(declaration.name.text);
+        }
+      }
+      continue;
+    }
+    if (
+      !ts.isExportDeclaration(statement) ||
+      statement.moduleSpecifier !== undefined ||
+      statement.exportClause === undefined ||
+      !ts.isNamedExports(statement.exportClause)
+    ) {
+      continue;
+    }
+    for (const element of statement.exportClause.elements) {
+      if (moduleExportNameText(element.name) === "agentFactories") {
+        localNames.add(
+          element.propertyName === undefined ? "agentFactories" : moduleExportNameText(element.propertyName)
+        );
+      }
+    }
+  }
+  return localNames;
+}
+
+function hasExportModifier(node: ts.VariableStatement): boolean {
+  return ts.getModifiers(node)?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword) ?? false;
+}
+
+function moduleExportNameText(name: ts.ModuleExportName): string {
+  return name.text;
+}
+
+function registryObjectLiteral(expression: ts.Expression): ts.ObjectLiteralExpression | undefined {
+  const current = unwrapTypeExpressions(expression);
+  if (ts.isObjectLiteralExpression(current)) return current;
+  if (
+    ts.isCallExpression(current) &&
+    current.arguments.length === 1 &&
+    ts.isPropertyAccessExpression(current.expression) &&
+    ts.isIdentifier(current.expression.expression) &&
+    current.expression.expression.text === "Object" &&
+    current.expression.name.text === "freeze"
+  ) {
+    return registryObjectLiteral(current.arguments[0]!);
+  }
+  return undefined;
 }
 
 function unwrapTypeExpressions(expression: ts.Expression): ts.Expression {
@@ -392,6 +438,10 @@ function objectMemberName(property: ts.ObjectLiteralElementLike): string | undef
   }
   const name = property.name;
   if (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNoSubstitutionTemplateLiteral(name)) return name.text;
+  if (ts.isComputedPropertyName(name)) {
+    const expression = unwrapTypeExpressions(name.expression);
+    if (ts.isStringLiteral(expression) || ts.isNoSubstitutionTemplateLiteral(expression)) return expression.text;
+  }
   return undefined;
 }
 

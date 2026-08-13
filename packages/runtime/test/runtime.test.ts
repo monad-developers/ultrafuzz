@@ -4586,6 +4586,29 @@ test("validate accepts typed current registries with shorthand factory entries",
   assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
 });
 
+test("validate accepts separately exported frozen registries with static computed keys", async () => {
+  const project = tempProject();
+  const init = initProject({ projectRoot: project, force: true });
+  assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+  writeSmallTopology(project);
+  fs.writeFileSync(
+    path.join(project, ".smithers/agents/index.ts"),
+    "const createAgent = () => null;\n" +
+      "const registry = Object.freeze({\n" +
+      '  ["ClaudeAgent"]: createAgent,\n' +
+      "  CodexAgent: createAgent,\n" +
+      "  DeepSeekAgent: createAgent,\n" +
+      "  KimiAgent: createAgent\n" +
+      "} as const);\n" +
+      "export { registry as agentFactories };\n",
+    "utf8"
+  );
+
+  const validate = await validateProject({ projectRoot: project, env: {} });
+
+  assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
+});
+
 test("validate accepts quoted factory keys for current custom agent IDs", async () => {
   const project = tempProject();
   const init = initProject({ projectRoot: project, force: true });
