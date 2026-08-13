@@ -32,8 +32,8 @@ import { loadVerifiedRunOutputSnapshots, projectCanonicalFinalReport, syncRun } 
 import AdmZip from "adm-zip";
 
 import { validateReportBundleManifest } from "../src/cli-schema-registry.js";
-import { formatDuration as formatStatusDuration } from "../src/commands/status.js";
 import { runCli } from "../src/index.js";
+import { formatStatusDuration } from "../src/status-rendering.js";
 
 interface Capture {
   stdout: string;
