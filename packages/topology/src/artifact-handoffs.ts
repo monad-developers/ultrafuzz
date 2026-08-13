@@ -304,7 +304,7 @@ function hasDirectDestinationBinding(matchText: string, destinationPattern: stri
   const destination = new RegExp(destinationPattern, "imu").exec(matchText);
   if (destination === null) return false;
   const actionVerb =
-    /\b(write|writing|written|emit|emitted|save|saved|persist|persisted|produce|produced|create|created|mirror|mirrored|list|listed|record|recorded|inspect|read|review|check|verify|examine|assess|describe|explain|mention|reference|determine|decide|consider|delete|remove|avoid|skip|omit)\b/giu;
+    /\b(write|writing|written|emit|emitted|save|saved|persist|persisted|produce|produced|create|created|mirror|mirrored|list|listed|record|recorded|inspect|read|review|check|verify|examine|assess|describe|explain|mention|reference|refer|determine|decide|consider|delete|remove|avoid|skip|omit|do|say|state|indicate|point|link|compare)\b/giu;
   const verbs = Array.from(matchText.slice(0, destination.index).matchAll(actionVerb));
   const nearestVerb = verbs.at(-1);
   if (
@@ -318,7 +318,7 @@ function hasDirectDestinationBinding(matchText: string, destinationPattern: stri
 
   const beforeNearestVerb = matchText.slice(0, nearestVerb.index);
   if (
-    /(?:\b(?:do\s+not|never|must\s+not|shall\s+not|should\s+not|avoid|skip|omit|fail(?:ed|ing)?\s+to|refuse\s+to|decline\s+to)|\b(?:don|can|won|mustn|shouldn)['’]t)\s*$/iu.test(
+    /(?:\b(?:do\s+not|never|must\s+not|shall\s+not|should\s+not|cannot|(?:can|could|will|would|may|might|need)\s+not|(?:is|are)\s+(?:not\s+(?:allowed|permitted|required)|unable|forbidden|prohibited)\s+to|avoid|skip|omit|fail(?:ed|ing)?\s+to|refuse\s+to|decline\s+to)|\b(?:don|doesn|can|won|mustn|shouldn|couldn|wouldn)['’]t|\b(?:isn|aren)['’]t\s+(?:allowed|permitted|required|able)\s+to)\s*$/iu.test(
       beforeNearestVerb
     ) &&
     !/\b(?:do\s+not|never)\s+(?:(?:fail|forget)\s+to|omit)\s*$/iu.test(beforeNearestVerb)
@@ -341,7 +341,9 @@ function hasDirectDestinationBinding(matchText: string, destinationPattern: stri
   const relationship = Array.from(
     binding.matchAll(/\b(to|at|in|into|under|as|for|about|regarding|on|before|after|alongside|near)\b/giu)
   ).at(-1)?.[1];
-  if (relationship === undefined) return !/[\p{L}\p{N}]/u.test(binding);
+  if (relationship === undefined) {
+    return !/^(?:list|listed|record|recorded)$/iu.test(nearestVerb[1]!) && !/[\p{L}\p{N}]/u.test(binding);
+  }
   return /^(?:to|at|in|into|under|as)$/iu.test(relationship);
 }
 
