@@ -50,7 +50,10 @@ import {
   validateInvariantLedgerSchema,
   validateInvariantSourceProofSchema,
   validateRegisteredJsonSchema,
+  validateWorkflowContract,
   validateWorkspacePatchSchema,
+  WORKFLOW_VALID_EMPTY_EXAMPLES,
+  workflowContractSchemas,
   workspacePatchSchema
 } from "../src/index.js";
 
@@ -63,6 +66,90 @@ interface ContractFixture {
 interface ZodLikeParser {
   safeParse(value: unknown): { success: boolean; data?: unknown };
 }
+
+type WorkflowEmptyClassification =
+  { kind: "canonical-empty" } | { kind: "context-required"; contextFreeEmptyCandidate: unknown };
+
+const workflowEmptyClassifications = {
+  "ultrafuzz/harness-repairs@1": { kind: "canonical-empty" },
+  "ultrafuzz/strategy-detections@1": { kind: "canonical-empty" },
+  "ultrafuzz/triaged-findings@1": { kind: "canonical-empty" },
+  "ultrafuzz/severity-classified-findings@1": { kind: "canonical-empty" },
+  "ultrafuzz/reference-manifest@1": {
+    kind: "context-required",
+    contextFreeEmptyCandidate: {
+      schema_version: "ultrafuzz.reference-manifest.v1",
+      source_files: [],
+      artifacts: []
+    }
+  },
+  "ultrafuzz/boundary-recipes@1": { kind: "canonical-empty" },
+  "ultrafuzz/admin-config-boundary-matrix@1": { kind: "canonical-empty" },
+  "ultrafuzz/dependency-scope-matrix@1": { kind: "canonical-empty" },
+  "ultrafuzz/externalized-state-accounting@1": { kind: "canonical-empty" },
+  "ultrafuzz/coverage-goal@1": {
+    kind: "context-required",
+    contextFreeEmptyCandidate: {
+      schema_version: "ultrafuzz.coverage-goal.v1",
+      current_measurement: null,
+      current_status: "not-run",
+      planned_commands: [],
+      stop_conditions: [],
+      blockers: []
+    }
+  },
+  "ultrafuzz/invariant-campaign-plan@2": {
+    kind: "context-required",
+    contextFreeEmptyCandidate: {
+      schema_version: "ultrafuzz.invariant-campaign-plan.v2",
+      command_plan: []
+    }
+  },
+  "ultrafuzz/campaign-summary@2": {
+    kind: "context-required",
+    contextFreeEmptyCandidate: {
+      schema_version: "ultrafuzz.campaign-summary.v2",
+      outcome: "complete",
+      backend_results: [],
+      finding_refs: [],
+      reproducer_refs: [],
+      failure_counts: { pre_deduplication: 0, post_deduplication: 0 }
+    }
+  },
+  "ultrafuzz/differential-plan@1": { kind: "canonical-empty" },
+  "ultrafuzz/reference-harness@1": { kind: "canonical-empty" },
+  "ultrafuzz/audited-differential-lanes@1": { kind: "canonical-empty" },
+  "ultrafuzz/differential-lane-result@1": {
+    kind: "context-required",
+    contextFreeEmptyCandidate: {
+      schema_version: "ultrafuzz.differential-lane-result.v1",
+      red_candidates: [],
+      compile_or_harness_defects: [],
+      public_evidence_paths: [],
+      notes: []
+    }
+  },
+  "ultrafuzz/semantic-red-registry@1": { kind: "canonical-empty" },
+  "ultrafuzz/differential-red-triage@1": { kind: "canonical-empty" },
+  "ultrafuzz/differential-repair-summary@1": { kind: "canonical-empty" },
+  "ultrafuzz/differential-gap-review@1": { kind: "canonical-empty" },
+  "ultrafuzz/differential-report-review@1": { kind: "canonical-empty" },
+  "ultrafuzz/dynamic-strategy-plan@1": { kind: "canonical-empty" },
+  "ultrafuzz/dynamic-enumerator-outputs@1": { kind: "canonical-empty" },
+  "ultrafuzz/selected-strategies@1": { kind: "canonical-empty" },
+  "ultrafuzz/dynamic-strategy-provenance@1": { kind: "canonical-empty" },
+  "ultrafuzz/finding-lifecycle-ledger@1": { kind: "canonical-empty" },
+  "ultrafuzz/aggregation-manifest@1": { kind: "canonical-empty" },
+  "ultrafuzz/report@2": {
+    kind: "context-required",
+    contextFreeEmptyCandidate: {
+      schema_version: "ultrafuzz.report.v2",
+      issues: [],
+      non_production_outcomes: [],
+      property_provenance: []
+    }
+  }
+} as const satisfies Record<keyof typeof workflowContractSchemas, WorkflowEmptyClassification>;
 
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
 const fixturePath = [
@@ -138,6 +225,54 @@ test("every JSON contract has canonical positive and negative fixtures and valid
     assert.equal(JSON.stringify(fixture.valid), validBytes, `${contract} valid bytes changed`);
     assert.equal(JSON.stringify(fixture.invalid), invalidBytes, `${contract} invalid bytes changed`);
     assert.deepEqual(parseStrictJson(validBytes), fixture.valid, contract);
+  }
+});
+
+test("valid-empty metadata exhaustively covers every current contract that accepts an empty domain result", () => {
+  const expectedEmptyWorkflowContracts = Object.entries(workflowEmptyClassifications)
+    .filter(([, classification]) => classification.kind === "canonical-empty")
+    .map(([contract]) => contract)
+    .sort();
+  assert.deepEqual(Object.keys(WORKFLOW_VALID_EMPTY_EXAMPLES).sort(), expectedEmptyWorkflowContracts);
+
+  for (const [contract, schema] of Object.entries(workflowContractSchemas)) {
+    const workflowContract = contract as keyof typeof workflowContractSchemas;
+    const classification = workflowEmptyClassifications[workflowContract];
+    const example = WORKFLOW_VALID_EMPTY_EXAMPLES[workflowContract];
+    if (classification.kind === "canonical-empty") {
+      assert.notEqual(example, undefined, contract);
+      const value = JSON.parse(example!);
+      assert.equal(validateWorkflowContract(workflowContract, value).ok, true, contract);
+      assert.equal(schema.safeParse(value).success, true, contract);
+      continue;
+    }
+
+    assert.equal(example, undefined, `${contract} requires run- or source-specific context`);
+    assert.equal(schema.safeParse(classification.contextFreeEmptyCandidate).success, false, contract);
+    assert.equal(
+      validateWorkflowContract(workflowContract, classification.contextFreeEmptyCandidate).ok,
+      false,
+      contract
+    );
+  }
+
+  const nonWorkflowValidEmptyContracts = [
+    "ultrafuzz/findings@2",
+    "ultrafuzz/generated-tests@3",
+    "ultrafuzz/invariant-ledger@1",
+    "ultrafuzz/implemented-properties@3",
+    "ultrafuzz/properties@2",
+    "ultrafuzz/property-campaign@3",
+    "ultrafuzz/text@1"
+  ] as const;
+  const expectedValidEmptyContracts = [...expectedEmptyWorkflowContracts, ...nonWorkflowValidEmptyContracts].sort();
+  const actualValidEmptyContracts = ARTIFACT_CONTRACT_IDS.filter(
+    (contract) => artifactContractDefinition(contract).validEmptyExample !== undefined
+  ).sort();
+  assert.deepEqual(actualValidEmptyContracts, expectedValidEmptyContracts);
+  for (const contract of actualValidEmptyContracts) {
+    const example = artifactContractDefinition(contract).validEmptyExample!;
+    assert.equal(validateArtifactContract(contract, example).ok, true, contract);
   }
 });
 

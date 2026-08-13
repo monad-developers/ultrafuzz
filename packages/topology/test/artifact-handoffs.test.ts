@@ -89,7 +89,10 @@ describe("artifact handoff validation", () => {
       "Write a report stating if {{output_findings_path}} already exists.",
       "Write a description of whether {{output_findings_path}} should be created.",
       "Write an assessment of the existing file at {{output_findings_path}}.",
+      "Investigate the output. Write a report explaining whether {{output_findings_path}} was produced by another tool.",
       "Write findings to {{output_findings_path}} if a finding exists.",
+      "Write findings to {{output_findings_path}} only if a finding exists.",
+      "Write findings to {{output_findings_path}} as long as a finding exists.",
       "If any findings are confirmed, write them to {{output_findings_path}}.",
       "Optional:\n- Write findings to {{output_findings_path}}.",
       "Unnecessary output:\nWrite findings to {{output_findings_path}}.",
@@ -638,7 +641,14 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       "Be sure to write findings to {{output_findings_path}}.",
       "Do not edit source files.\nBe sure to write findings to {{output_findings_path}}.",
       "Make sure to write findings to {{output_findings_path}}.",
+      "The agent must write findings to {{output_findings_path}}.",
+      "The agent shall write findings to {{output_findings_path}}.",
       "The agent is required to write findings to {{output_findings_path}}.",
+      "The agent is mandated to write findings to {{output_findings_path}}.",
+      "Findings must be written to {{output_findings_path}}.",
+      "Findings are required to be written to {{output_findings_path}}.",
+      "Findings are mandatory and must be written to {{output_findings_path}}.",
+      "All confirmed findings shall be written to {{output_findings_path}}.",
       "- Do not edit source files\n- Write findings to {{output_findings_path}}.",
       "Do not perform any of the following:\n- Modify source files.\n\nRequired output: Write findings to {{output_findings_path}}.",
       "Do not write findings to {{output_findings_path}}. Write findings to {{output_findings_path}}.",
@@ -660,8 +670,9 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       "Artifact finalization:\nWrite findings to {{output_findings_path}}.",
       "## Optional\n\n## Required output\n\nWrite findings to {{output_findings_path}}."
     ]) {
-      expect(() =>
-        validateTopology(validTopology(), { promptTexts: { "strategies/strategy.md": prompt } })
+      expect(
+        () => validateTopology(validTopology(), { promptTexts: { "strategies/strategy.md": prompt } }),
+        prompt
       ).not.toThrow();
     }
 
@@ -754,11 +765,22 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       "Write {{artifact_dir}}/results.txt.",
       "Write findings to {{output_findings_path}}.",
       "The destination is {{artifact_path}}/nested/results.txt. Write logs to {{artifact_path}}/other.txt.",
-      "Do not write {{artifact_path}}/nested/results.txt. Write logs to {{artifact_path}}/other.txt."
+      "Do not write {{artifact_path}}/nested/results.txt. Write logs to {{artifact_path}}/other.txt.",
+      "Write {{artifact_path}}/nested/results.txt.bak.",
+      "Write {{artifact_path}}/nested/results.txt/backup.",
+      "Write {{artifact_path}}/nested/results.txt-old.",
+      "Write {{artifact_path}}/nested/results.txt2."
     ]) {
       expect(() => validateTopology(topology, { promptTexts: { "strategies/strategy.md": prompt } })).toThrow(
         expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" })
       );
+    }
+    for (const prompt of [
+      "Write {{artifact_path}}/nested/results.txt?backup.",
+      "Write {{artifact_path}}/nested/results.txt#copy.",
+      "Write {{artifact_path}}/nested/results.txt:bak."
+    ]) {
+      expect(() => validateTopology(topology, { promptTexts: { "strategies/strategy.md": prompt } })).toThrow();
     }
     expect(() =>
       validateTopology(topology, {
@@ -768,6 +790,84 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
     expect(() =>
       validateTopology(topology, {
         promptTexts: { "strategies/strategy.md": "Write {{artifact_dir}}/nested/results.txt." }
+      })
+    ).not.toThrow();
+    expect(() =>
+      validateTopology(topology, {
+        promptTexts: { "strategies/strategy.md": "The result must be written to {{artifact_path}}/nested/results.txt." }
+      })
+    ).not.toThrow();
+  });
+
+  it("does not let an unrelated write authenticate a later destination mention", () => {
+    for (const prompt of [
+      "Write a note, then inspect {{output_findings_path}}.",
+      "Write a note and do not create {{output_findings_path}}.",
+      "Write a report about {{output_findings_path}}.",
+      "Create the parent directory for {{output_findings_path}}.",
+      "Write {{output_findings_path}}.bak.",
+      "Write logs elsewhere and inspect {{output_findings_path}}.",
+      "Write logs elsewhere; never create {{output_findings_path}}.",
+      "Write logs elsewhere; don't create {{output_findings_path}}.",
+      "Write logs elsewhere and fail to create {{output_findings_path}}.",
+      "Write a summary explaining that {{output_findings_path}} already exists.",
+      "Write a note saying {{output_findings_path}} already exists.",
+      "Write logs containing {{output_findings_path}}."
+    ]) {
+      expect(
+        () => validateTopology(validTopology(), { promptTexts: { "strategies/strategy.md": prompt } }),
+        prompt
+      ).toThrow(expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" }));
+    }
+
+    const textTopology = validTopology();
+    textTopology.nodes[2] = {
+      ...textTopology.nodes[2]!,
+      outputs: [
+        { path: "report.md", contract: "ultrafuzz/nonempty-markdown@1", primary: true },
+        { path: "nested/results.txt", contract: "ultrafuzz/text@1", primary: false }
+      ]
+    };
+    for (const prompt of [
+      "Write logs elsewhere and inspect {{artifact_dir}}/nested/results.txt.",
+      "Write output to {{artifact_dir}}/nested/results.txt.bak.",
+      "Write logs mentioning {{artifact_dir}}/nested/results.txt."
+    ]) {
+      expect(
+        () => validateTopology(textTopology, { promptTexts: { "strategies/strategy.md": prompt } }),
+        prompt
+      ).toThrow(expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" }));
+    }
+  });
+
+  it("uses current contract metadata to require generated-test destinations", () => {
+    const topology = validTopology();
+    topology.nodes[2] = {
+      ...topology.nodes[2]!,
+      outputs: [
+        { path: "report.md", contract: "ultrafuzz/nonempty-markdown@1", primary: true },
+        { path: "generated-tests.json", contract: "ultrafuzz/generated-tests@3", primary: false }
+      ]
+    };
+
+    expect(() =>
+      validateTopology(topology, {
+        promptTexts: { "strategies/strategy.md": "Write {{artifact_path}}/report.md." }
+      })
+    ).toThrow(
+      expect.objectContaining({
+        code: "MISSING_PROMPT_OUTPUT_INSTRUCTION",
+        details: expect.objectContaining({
+          path: "generated-tests.json",
+          contract: "ultrafuzz/generated-tests@3"
+        })
+      })
+    );
+    expect(() =>
+      validateTopology(topology, {
+        promptTexts: {
+          "strategies/strategy.md": "Write {{artifact_path}}/report.md. Write {{artifact_path}}/generated-tests.json."
+        }
       })
     ).not.toThrow();
   });

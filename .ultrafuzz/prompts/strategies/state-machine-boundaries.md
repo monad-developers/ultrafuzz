@@ -128,3 +128,7 @@ Use only the authoritative report-bound note vocabulary:
 {{finding_reachability_vocabulary}}
 
 {{finding_note_key_vocabulary}}
+
+Write `{{artifact_dir}}/generated-tests.json` using its exact pinned schema.
+Use its schema-defined empty bundle when no runnable generated test was
+produced.

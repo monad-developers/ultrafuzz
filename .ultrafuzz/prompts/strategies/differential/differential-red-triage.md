@@ -52,8 +52,8 @@ not be relabeled `compile_harness_defect`; every compile/harness defect must use
 that classification. Set `repair_allowed: true` only for `harness_bug` or
 `reference_bug`.
 
-Write {{artifact_path}}/triage-a.json and {{artifact_path}}/triage-b.json. Read
-the exact pinned schema at
+Write {{artifact_path}}/triage-a.json.
+Write {{artifact_path}}/triage-b.json. Read the exact pinned schema at
 `{{schema_path}}/differential-red-triage.schema.json`; it alone defines the
 JSON version, fields, types, enums, required members, and empty forms. Pass A
 must identify itself as `a` and pass B as `b`; each must classify every exact

@@ -143,6 +143,9 @@ why the absence is a property of the target rather than of the search. This
 justification belongs only to an empty ledger and is rejected on a ledger that
 has entries.
 
+Write the completed invariant evidence ledger to
+`{{artifact_path}}/setup/invariant-evidence-ledger.json`.
+
 ### Byte-preserving ledger construction
 
 Treat every `verbatim` value as a byte-preserving source slice. The verifier

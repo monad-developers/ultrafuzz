@@ -20,7 +20,8 @@ Complete this exact sequence in this one agent session:
    and report failure without claiming that validation succeeded.
 4. Correct the artifact yourself by replacing the invalid draft with the empty
    findings form defined by the exact pinned schema named in the output
-   contract.
+   contract. The final findings must be written to
+   `{{output_findings_path}}`.
 5. Rerun the same validation command and require exit status `0`.
 6. Do not alter the artifact after the successful validation.
 

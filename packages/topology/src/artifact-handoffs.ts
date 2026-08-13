@@ -144,7 +144,7 @@ function promptReferencesCurrentOutput(
     }
   }
   const escapedPath = escapeRegExp(outputPath);
-  const destinationBoundary = `(?=$|[\\s\\x60'".,;:!?)}\\]])`;
+  const destinationBoundary = `(?=$|[\\s\\x60'"),;!\\]}]|\\.(?=$|[\\s\\x60'"),;!\\]}]))`;
   if (
     variables.some(
       (variable) => variable.name === "artifact_path" && variable.argument === undefined && variable.path === outputPath
@@ -162,13 +162,25 @@ function promptReferencesCurrentOutput(
 }
 
 function hasWriteInstruction(promptText: string, variable: string): boolean {
-  const token = `\\{\\{\\s*${escapeRegExp(variable)}\\s*\\}\\}`;
+  const token =
+    `\\{\\{\\s*${escapeRegExp(variable)}\\s*\\}\\}` + `(?=$|[\\s\\x60'"),;!\\]}]|\\.(?=$|[\\s\\x60'"),;!\\]}]))`;
   return hasAffirmativeWriteInstruction(promptText, token);
 }
 
 function hasAffirmativeWriteInstruction(promptText: string, destinationPattern: string): boolean {
+  const outputVerb = `(?:write|emit|save|persist|produce|create|mirror|list|record)`;
+  const passiveOutputVerb = `(?:written|emitted|saved|persisted|produced|created|mirrored|listed|recorded)`;
+  const passiveSubject =
+    `(?:(?:the|all|any)\\s+)?(?:(?:confirmed|structured|normalized|generated|final|required)\\s+){0,3}` +
+    `(?:findings?|outputs?|artifacts?|results?|reports?|manifests?|catalogs?|ledgers?|files?)`;
+  const mandatoryPreamble =
+    `(?:(?:the\\s+)?agent\\s+(?:(?:is\\s+(?:required|mandated)\\s+to)|(?:must|shall|should))|` +
+    `you\\s+(?:(?:are\\s+(?:required|mandated)\\s+to)|(?:must|shall|should)))`;
+  const mandatoryPassive =
+    `${passiveSubject}\\s+(?:(?:must|shall)\\s+be|(?:are|is)\\s+(?:required|mandated)\\s+to\\s+be|` +
+    `(?:are|is)\\s+mandatory\\s+(?:and\\s+)?(?:must|shall)\\s+be)\\s+${passiveOutputVerb}\\b`;
   const requiredException = new RegExp(
-    `(?:^|[.!?]\\s+|\\n\\s*)(?:(?:(?:do\\s+not|never)\\s+(?:fail|forget)\\s+to|without\\s+fail,)\\s*(?:write|emit|save|persist|produce|create|mirror|list|record)\\b|(?:do\\s+not|never)\\s+omit\\s+writing\\b|(?:be\\s+sure\\s+to|make\\s+sure\\s+to|the\\s+agent\\s+is\\s+required\\s+to|you\\s+need\\s+to)\\s+(?:write|emit|save|persist|produce|create|mirror|list|record)\\b)[^.!?]{0,200}${destinationPattern}`,
+    `(?:^|[.!?]\\s+|\\n\\s*)(?:(?:(?:do\\s+not|never)\\s+(?:fail|forget)\\s+to|without\\s+fail,)\\s*${outputVerb}\\b|(?:do\\s+not|never)\\s+omit\\s+writing\\b|(?:be\\s+sure\\s+to|make\\s+sure\\s+to|the\\s+agent\\s+is\\s+required\\s+to|you\\s+need\\s+to)\\s+${outputVerb}\\b)[^.!?]{0,200}${destinationPattern}`,
     "gimu"
   );
   for (const match of promptText.matchAll(requiredException)) {
@@ -182,12 +194,13 @@ function hasAffirmativeWriteInstruction(promptText: string, destinationPattern: 
       (/^[.!?]\s+/u.test(match[0]) || (/^\r?\n/u.test(normalizedMatchStart) && /[.!?]\s*$/u.test(precedingLine)));
     if (
       !hasNonRequiredDirectiveMeaning(promptText, match[0], match.index, directiveIndex) &&
-      !hasNonRequiredDirectiveScope(promptText, directiveIndex, undefined, true, startsIndependentSentence)
+      !hasNonRequiredDirectiveScope(promptText, directiveIndex, undefined, true, startsIndependentSentence) &&
+      hasDirectDestinationBinding(match[0], destinationPattern)
     )
       return true;
   }
   const directive = new RegExp(
-    `(?:^|[.!?]\\s+|\\n\\s*|\\band\\s+|(?:required\\s+output|output):\\s+|,\\s+(?=immediately\\b))(?:[-*+>]\\s+)?(?:(?:also|always|immediately|otherwise|please|then)\\s+)?(?:(?:ensure(?:\\s+you)?|remember\\s+to|you\\s+(?:must|shall|should))\\s+)?(?:write|emit|save|persist|produce|create|mirror|list|record)\\b(?!\\s+(?:whether|if)\\b)[^.!?]{0,200}${destinationPattern}`,
+    `(?:^|[.!?]\\s+|\\n\\s*|\\band\\s+|(?:required\\s+output|output):\\s+|,\\s+(?=(?:also|immediately|then)\\b))(?:[-*+>]\\s+)?(?:(?:also|always|immediately|otherwise|please|then)\\s+)?(?:(?:ensure(?:\\s+you)?|remember\\s+to|${mandatoryPreamble})\\s+)?(?:${outputVerb}\\b(?!\\s+(?:whether|if)\\b)|${mandatoryPassive})[^.!?]{0,200}${destinationPattern}`,
     "gimu"
   );
   for (const match of promptText.matchAll(directive)) {
@@ -236,7 +249,11 @@ function hasAffirmativeWriteInstruction(promptText: string, destinationPattern: 
     )
       continue;
     if (startsOrderedListItem && listIntroducer !== "" && isNonRequiredDirectiveHeading(listIntroducer)) continue;
-    if (!hasNonRequiredDirectiveMeaning(promptText, match[0], match.index, directiveIndex) && allowedLineBoundary) {
+    if (
+      !hasNonRequiredDirectiveMeaning(promptText, match[0], match.index, directiveIndex) &&
+      allowedLineBoundary &&
+      hasDirectDestinationBinding(match[0], destinationPattern)
+    ) {
       return true;
     }
   }
@@ -268,7 +285,7 @@ function hasNonRequiredDirectiveMeaning(
       .match(/^[^.!?]*/u)?.[0]
       .trim() ?? "";
   const discretionaryClause =
-    /^[,;]?\s*(?:at\s+(?:need|your\s+discretion)|assuming|contingent\s+on|depending\s+(?:on|upon)|discretionary|except\s+when|in\s+(?:case|the\s+event)|optional|optionally|should\s+(?:you\s+wish|\w+\s+\w+)|subject\s+to|to\s+the\s+extent|whether|whenever|if|when|where|unless|provided|upon\s+request|only\s+(?:as|when)|as\s+(?:appropriate|needed)|on\s+(?:request|demand))\b/iu.test(
+    /^[,;]?\s*(?:at\s+(?:need|your\s+discretion)|assuming|as\s+long\s+as|conditionally|contingent\s+on|depending\s+(?:on|upon)|discretionary|except\s+(?:if|when)|in\s+(?:case|the\s+event)|optional|optionally|should\s+(?:you\s+wish|\w+\s+\w+)|subject\s+to|to\s+the\s+extent|whether|whenever|if|when|where|unless|provided|upon\s+request|only\s+(?:as|if|when)|as\s+(?:appropriate|needed)|on\s+(?:request|demand))\b/iu.test(
       trailingClause
     ) ||
     /^(?:[.;]\s*)?(?:(?:this|that|the\s+output|publication)\s+is\s+optional|omit\s+when)\b/iu.test(
@@ -278,7 +295,54 @@ function hasNonRequiredDirectiveMeaning(
 }
 
 function instructionVerbOffset(value: string): number {
-  return value.search(/\b(?:write|writing|emit|save|persist|produce|create|mirror|list|record)\b/iu);
+  return value.search(
+    /\b(?:write|writing|written|emit|emitted|save|saved|persist|persisted|produce|produced|create|created|mirror|mirrored|list|listed|record|recorded)\b/iu
+  );
+}
+
+function hasDirectDestinationBinding(matchText: string, destinationPattern: string): boolean {
+  const destination = new RegExp(destinationPattern, "imu").exec(matchText);
+  if (destination === null) return false;
+  const actionVerb =
+    /\b(write|writing|written|emit|emitted|save|saved|persist|persisted|produce|produced|create|created|mirror|mirrored|list|listed|record|recorded|inspect|read|review|check|verify|examine|assess|describe|explain|mention|reference|determine|decide|consider|delete|remove|avoid|skip|omit)\b/giu;
+  const verbs = Array.from(matchText.slice(0, destination.index).matchAll(actionVerb));
+  const nearestVerb = verbs.at(-1);
+  if (
+    nearestVerb === undefined ||
+    !/^(?:write|writing|written|emit|emitted|save|saved|persist|persisted|produce|produced|create|created|mirror|mirrored|list|listed|record|recorded)$/iu.test(
+      nearestVerb[1]!
+    )
+  ) {
+    return false;
+  }
+
+  const beforeNearestVerb = matchText.slice(0, nearestVerb.index);
+  if (
+    /(?:\b(?:do\s+not|never|must\s+not|shall\s+not|should\s+not|avoid|skip|omit|fail(?:ed|ing)?\s+to|refuse\s+to|decline\s+to)|\b(?:don|can|won|mustn|shouldn)['’]t)\s*$/iu.test(
+      beforeNearestVerb
+    ) &&
+    !/\b(?:do\s+not|never)\s+(?:(?:fail|forget)\s+to|omit)\s*$/iu.test(beforeNearestVerb)
+  ) {
+    return false;
+  }
+
+  const binding = matchText
+    .slice(nearestVerb.index + nearestVerb[0].length, destination.index)
+    .replace(/,\s*if\s+any\s*,/giu, ",");
+  if (
+    /\b(?:parent\s+)?(?:directory|folder)\s+(?:for|at|containing)\s*$/iu.test(binding.trimEnd()) ||
+    /\b(?:summary|report|note|description|assessment|logs?|message|explanation|account)\b[^.!?]{0,100}\b(?:that|whether|if|mentioning|saying|stating|containing|including|citing|quoting|about|regarding|on)\b/iu.test(
+      binding
+    )
+  ) {
+    return false;
+  }
+
+  const relationship = Array.from(
+    binding.matchAll(/\b(to|at|in|into|under|as|for|about|regarding|on|before|after|alongside|near)\b/giu)
+  ).at(-1)?.[1];
+  if (relationship === undefined) return !/[\p{L}\p{N}]/u.test(binding);
+  return /^(?:to|at|in|into|under|as)$/iu.test(relationship);
 }
 
 function hasNonRequiredDirectiveScope(

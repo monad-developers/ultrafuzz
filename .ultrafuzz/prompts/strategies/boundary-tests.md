@@ -86,3 +86,7 @@ or chained shell commands for post-write validation.
 Write structured findings to `{{output_findings_path}}` using the exact pinned
 findings schema. Use its schema-defined empty form when no source-backed
 production finding is confirmed.
+
+Write the generated-test manifest to `{{artifact_dir}}/generated-tests.json`
+using its exact pinned schema. Use its schema-defined empty bundle when no
+runnable generated test was produced.

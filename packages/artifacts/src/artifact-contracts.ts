@@ -62,7 +62,9 @@ const existingJsonContracts = {
   "ultrafuzz/generated-tests@3": {
     description:
       "A strict generated-test bundle manifest whose runnable tests and non-runnable support files live beneath generated-tests/.",
-    schemaFile: "generated-tests.schema.json"
+    schemaFile: "generated-tests.schema.json",
+    validEmptyExample:
+      '{"schema_version":"ultrafuzz.generated-tests.v3","run_id":"run","node_id":"node","framework":"foundry","generated_tests":[],"support_files":[]}'
   },
   "ultrafuzz/implemented-properties@3": {
     description: "Strict current property selection and implementation records with typed blockers.",
@@ -72,7 +74,9 @@ const existingJsonContracts = {
   },
   "ultrafuzz/invariant-ledger@1": {
     description: "A structured invariant evidence ledger with verbatim source and inventory joins.",
-    schemaFile: "invariant-evidence-ledger.schema.json"
+    schemaFile: "invariant-evidence-ledger.schema.json",
+    validEmptyExample:
+      '{"schema_version":"ultrafuzz.invariant-evidence-ledger.v1","entries":[],"inventory_rows":[],"no_invariants_justification":"No invariant statements were found after scanning the target sources.","scan_probes":[{"id":"probe-source","source_path":"src/Target.sol","query":"invariant","result":"none"}]}'
   },
   "ultrafuzz/properties@2": {
     description: "A strict canonical property catalog with stable source references.",

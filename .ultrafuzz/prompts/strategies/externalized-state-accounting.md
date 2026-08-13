@@ -150,3 +150,7 @@ contextual requirements beyond JSON Schema.
 Write structured findings to {{output_findings_path}}. If no source-backed
 production finding is confirmed, use only the empty form defined by the exact
 pinned schema in the central output contract.
+
+Write `{{artifact_dir}}/generated-tests.json` using its exact pinned schema.
+Use its schema-defined empty bundle when no runnable generated test was
+produced.

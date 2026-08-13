@@ -1867,6 +1867,32 @@ export const WORKFLOW_VALID_EMPTY_EXAMPLES: Partial<Record<WorkflowContractId, s
     deferred_or_spec_gated: [],
     coverage_priorities: []
   }),
+  "ultrafuzz/admin-config-boundary-matrix@1": JSON.stringify({
+    schema_version: ADMIN_CONFIG_BOUNDARY_MATRIX_SCHEMA_VERSION,
+    surfaces: [],
+    selector_mismatches: [],
+    ambiguous_or_incomplete_specs: [],
+    generated_tests: [],
+    coverage_notes: []
+  }),
+  "ultrafuzz/dependency-scope-matrix@1": JSON.stringify({
+    schema_version: DEPENDENCY_SCOPE_MATRIX_SCHEMA_VERSION,
+    dependencies: [],
+    in_scope_test_targets: [],
+    non_finding_rows: [],
+    generated_tests: [],
+    source_backed_in_scope_rationales: [],
+    coverage_notes: []
+  }),
+  "ultrafuzz/externalized-state-accounting@1": JSON.stringify({
+    schema_version: EXTERNALIZED_STATE_ACCOUNTING_SCHEMA_VERSION,
+    state_components: [],
+    scenarios: [],
+    accounting_oracles: [],
+    generated_tests: [],
+    incomplete_specs: [],
+    coverage_notes: []
+  }),
   "ultrafuzz/finding-lifecycle-ledger@1": JSON.stringify({
     schema_version: FINDING_LIFECYCLE_LEDGER_SCHEMA_VERSION,
     records: []
@@ -1881,5 +1907,115 @@ export const WORKFLOW_VALID_EMPTY_EXAMPLES: Partial<Record<WorkflowContractId, s
     files: [],
     support_files: [],
     skipped_files: []
+  }),
+  "ultrafuzz/audited-differential-lanes@1": JSON.stringify({
+    schema_version: AUDITED_DIFFERENTIAL_LANES_SCHEMA_VERSION,
+    auditor_attempt_index: 0,
+    source_plan_artifacts: [],
+    source_harness_artifacts: [],
+    surface_audits: [],
+    ready_lanes: [],
+    rejected_or_narrowed_lanes: [],
+    reference_gap_work_orders: [],
+    ambiguous_spec_work_orders: []
+  }),
+  "ultrafuzz/differential-gap-review@1": JSON.stringify({
+    schema_version: DIFFERENTIAL_GAP_REVIEW_SCHEMA_VERSION,
+    ready_lanes: [],
+    lane_results_seen: [],
+    missing_lane_work_orders: [],
+    incomplete_campaign_work_orders: [],
+    green_suite_evidence: [],
+    report_blockers: []
+  }),
+  "ultrafuzz/differential-plan@1": JSON.stringify({
+    schema_version: DIFFERENTIAL_PLAN_SCHEMA_VERSION,
+    planner_attempt_index: 0,
+    candidate_surfaces: [],
+    reference_model_rules: { allowed_structures: ["none"], forbidden_sources: ["none"] },
+    deployment_assumptions: [],
+    phase_priorities: [],
+    assigned_differential_lanes: [],
+    deferred_lane_candidates: [],
+    out_of_scope_surfaces: []
+  }),
+  "ultrafuzz/differential-red-triage@1": JSON.stringify({
+    schema_version: DIFFERENTIAL_RED_TRIAGE_SCHEMA_VERSION,
+    pass: "a",
+    classifications: []
+  }),
+  "ultrafuzz/differential-repair-summary@1": JSON.stringify({
+    schema_version: DIFFERENTIAL_REPAIR_SUMMARY_SCHEMA_VERSION,
+    repairs_attempted: [],
+    repaired_failures: [],
+    preserved_production_or_unknown_reds: [],
+    commands: [],
+    semantic_red_registry_regenerated: false,
+    notes: []
+  }),
+  "ultrafuzz/differential-report-review@1": JSON.stringify({
+    schema_version: DIFFERENTIAL_REPORT_REVIEW_SCHEMA_VERSION,
+    campaign_status: "complete",
+    production_bug_reds: [],
+    harness_or_reference_repairs: [],
+    missing_or_deferred_lanes: [],
+    report_rows_ready: [],
+    notes: []
+  }),
+  "ultrafuzz/dynamic-enumerator-outputs@1": JSON.stringify({
+    schema_version: DYNAMIC_ENUMERATOR_OUTPUTS_SCHEMA_VERSION,
+    enumerators: []
+  }),
+  "ultrafuzz/dynamic-strategy-plan@1": JSON.stringify({
+    schema_version: DYNAMIC_STRATEGY_PLAN_SCHEMA_VERSION,
+    dynamic_strategies_enumerator: 0,
+    status: "no-actionable-strategies",
+    selected_strategy_count: 0,
+    selected_strategies: [],
+    rejected_strategies: [],
+    current_run_artifacts_considered: [],
+    excluded_context: {
+      sibling_runs: "excluded",
+      previous_reports: "excluded",
+      host_global_paths: "excluded",
+      network_resources: "excluded",
+      extra_target_context: "excluded"
+    },
+    timeout_seconds: 1,
+    finalization_reserve_seconds: 0
+  }),
+  "ultrafuzz/dynamic-strategy-provenance@1": JSON.stringify({
+    schema_version: DYNAMIC_STRATEGY_PROVENANCE_SCHEMA_VERSION,
+    current_run_artifacts: [],
+    agents: [],
+    models: [],
+    commands: [],
+    generated_files: [],
+    validation: [],
+    excluded_context: {
+      sibling_runs: "excluded",
+      previous_reports: "excluded",
+      host_global_paths: "excluded",
+      network_resources: "excluded",
+      extra_target_context: "excluded"
+    }
+  }),
+  "ultrafuzz/reference-harness@1": JSON.stringify({
+    schema_version: REFERENCE_HARNESS_SCHEMA_VERSION,
+    harness_author_attempt_index: 0,
+    source_plan_artifacts: [],
+    authored_paths: [],
+    reference_models: [],
+    validation: { commands: [], passed: false, compiler_errors: [], notes: [] },
+    lane_readiness_notes: []
+  }),
+  "ultrafuzz/selected-strategies@1": JSON.stringify({
+    schema_version: SELECTED_STRATEGIES_SCHEMA_VERSION,
+    strategies: []
+  }),
+  "ultrafuzz/semantic-red-registry@1": JSON.stringify({
+    schema_version: SEMANTIC_RED_REGISTRY_SCHEMA_VERSION,
+    semantic_reds: [],
+    compile_or_harness_defects: []
   })
 };

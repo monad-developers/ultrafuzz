@@ -17,7 +17,7 @@ describe("fingerprintGraph", () => {
         configFingerprint: "a".repeat(64),
         promptTexts: {
           "strategies/strategy.md":
-            "Write original {{output_findings_path}} {{finding_reachability_vocabulary}} {{finding_note_key_vocabulary}}"
+            "Write original findings to {{output_findings_path}} {{finding_reachability_vocabulary}} {{finding_note_key_vocabulary}}"
         }
       })
     );
@@ -31,7 +31,7 @@ describe("fingerprintGraph", () => {
           configFingerprint: "a".repeat(64),
           promptTexts: {
             "strategies/strategy.md":
-              "Write changed {{output_findings_path}} {{finding_reachability_vocabulary}} {{finding_note_key_vocabulary}}"
+              "Write changed findings to {{output_findings_path}} {{finding_reachability_vocabulary}} {{finding_note_key_vocabulary}}"
           }
         })
       )
@@ -43,7 +43,7 @@ describe("fingerprintGraph", () => {
           configFingerprint: "b".repeat(64),
           promptTexts: {
             "strategies/strategy.md":
-              "Write original {{output_findings_path}} {{finding_reachability_vocabulary}} {{finding_note_key_vocabulary}}"
+              "Write original findings to {{output_findings_path}} {{finding_reachability_vocabulary}} {{finding_note_key_vocabulary}}"
           }
         })
       )
