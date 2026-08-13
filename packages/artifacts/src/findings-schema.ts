@@ -65,14 +65,12 @@ const unsupportedMetadataAssignmentPatterns = FINDING_REPORT_METADATA_KEY_PATTER
   (metadataKeyPattern) =>
     `${clauseAssignmentBoundaryPattern}(?!${evidenceAssignmentKeyPattern}${anyAssignmentOperatorPattern})(?!${supportedNoteKeyPattern}${assignmentOperatorPattern})${metadataKeyPattern}${anyAssignmentOperatorPattern}`
 );
-// The gap cannot cross another assignment operator and consumes at most 4,097
-// code points. Consecutive assignment gaps are therefore disjoint, keeping all
-// chained-alias scans linear in the note length even at the 65,536-point limit.
+// A report-assignment clause may contain prose and further canonical
+// assignments, but not producer-local assignments. The gap cannot cross an
+// assignment operator and consumes at most 4,097 code points, so consecutive
+// scans are disjoint and linear even at the 65,536-point note limit.
 const chainedAssignmentGapPattern = "(?:[^\\n;,*|&=]{0,4096}[ \\t])?";
-const chainedMetadataAssignmentPatterns = FINDING_REPORT_METADATA_KEY_PATTERNS.map(
-  (metadataKeyPattern) =>
-    `${assignmentBoundaryPattern}${supportedNoteKeyPattern}${assignmentOperatorPattern}${chainedAssignmentGapPattern}(?!${evidenceAssignmentKeyPattern}${anyAssignmentOperatorPattern})(?!${supportedNoteKeyPattern}${assignmentOperatorPattern})${metadataKeyPattern}${anyAssignmentOperatorPattern}`
-);
+const unsupportedChainedAssignmentPattern = `${assignmentBoundaryPattern}${supportedNoteKeyPattern}${assignmentOperatorPattern}${chainedAssignmentGapPattern}(?!${supportedNoteKeyPattern}${assignmentOperatorPattern})${assignmentKeyPattern}${anyAssignmentOperatorPattern}`;
 const typedValueBoundaryPattern = "(?::|[.;,*`\\s&]|$)";
 const invalidTypedAssignmentPattern = `${assignmentBoundaryPattern}(?:reachability${assignmentOperatorPrefixPattern}(?![ \\t]*(?:${FINDING_REACHABILITY_VALUES.join("|")})${typedValueBoundaryPattern})[ \\t]*|stateful_failure_classification${assignmentOperatorPrefixPattern}(?![ \\t]*(?:${STATEFUL_FAILURE_CLASSIFICATION_VALUES.join("|")})${typedValueBoundaryPattern})[ \\t]*|(?:likelihood|impact)${assignmentOperatorPrefixPattern}(?![ \\t]*(?:${FINDING_RISK_VALUES.join("|")})${typedValueBoundaryPattern})[ \\t]*)`;
 const findingNoteAssignment = new RegExp(
@@ -124,6 +122,7 @@ export function findingNoteAssignmentIssue(note: string): FindingNoteAssignmentI
     const clauseAssignment = findingNoteClauseBoundary.test(prefix) || followsReportAssignment;
     const reportMetadata =
       canonical !== undefined ||
+      followsReportAssignment ||
       (clauseAssignment && isFindingReportMetadataKey(key) && !isFindingReportEvidenceAssignmentKey(key));
     if (!reportMetadata) continue;
     previousReportAssignmentEnd = assignment.index + assignment[0].length;
@@ -153,7 +152,7 @@ function assignedValue(text: string, start: number): string {
 const findingNoteJsonSchemaConstraints = [
   { not: { pattern: unsupportedCanonicalAssignmentPattern } },
   ...unsupportedMetadataAssignmentPatterns.map((pattern) => ({ not: { pattern } })),
-  ...chainedMetadataAssignmentPatterns.map((pattern) => ({ not: { pattern } })),
+  { not: { pattern: unsupportedChainedAssignmentPattern } },
   { not: { pattern: invalidTypedAssignmentPattern } }
 ];
 export const findingReportBoundTextSchema = nonEmptyString
