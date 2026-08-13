@@ -712,10 +712,17 @@ describe("public Modal benchmark configuration", () => {
     expect(releaseReporterBuild?.if).toBe("matrix.lane == 'cli-typecheck'");
     expect(releaseReporterBuild?.run).toBe("pnpm --filter @ultrafuzz/artifacts... build");
     expect(releaseValidation?.steps.find((step) => step.name === "Validate benchmark history charts")).toBeUndefined();
-    expect(workflow.jobs["release-gates"]?.needs).toEqual(["draft-and-build-gates", "release-validation"]);
-    expect(
-      workflow.jobs["release-gates"]?.steps.find((step) => step.name === "Merge release validation report")?.run
-    ).toContain("--merge-report-dir");
+    const releaseGates = workflow.jobs["release-gates"];
+    expect(releaseGates?.needs).toEqual(["draft-and-build-gates", "release-validation"]);
+    expect(releaseGates?.steps.find((step) => step.name === "Install dependencies")?.run).toBe(
+      "pnpm install --frozen-lockfile"
+    );
+    expect(releaseGates?.steps.find((step) => step.name === "Build release reporter dependencies")?.run).toBe(
+      "pnpm --filter @ultrafuzz/artifacts... build"
+    );
+    expect(releaseGates?.steps.find((step) => step.name === "Merge release validation report")?.run).toContain(
+      "--merge-report-dir"
+    );
   });
 
   it("terminates every exact detached sandbox after either supported run becomes incomplete", () => {
