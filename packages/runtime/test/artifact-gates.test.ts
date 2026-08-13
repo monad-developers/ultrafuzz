@@ -11241,6 +11241,21 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
   assert.equal(mixedScopePercentage.ok, false);
   assert.ok(mixedScopePercentage.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"));
 
+  for (const mixedScore of [
+    "The selected-range score was 100%. Overall coverage was 25%.",
+    "The selected-range score was 100% (overall coverage was 25%).",
+    "Selected-range coverage was 100% — overall coverage was 25%.",
+    "Selected-range coverage was 100% overall coverage was 25%."
+  ]) {
+    writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\n${mixedScore}\n`);
+    const mixed = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+    assert.equal(mixed.ok, false, mixedScore);
+    assert.ok(
+      mixed.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"),
+      mixedScore
+    );
+  }
+
   writeArtifact(
     layout,
     reportNode.id,
@@ -11249,6 +11264,15 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
   );
   const insuranceProse = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
   assert.equal(insuranceProse.ok, true, JSON.stringify(insuranceProse.diagnostics));
+
+  writeArtifact(
+    layout,
+    reportNode.id,
+    "report.md",
+    `${scopedMarkdown}\n## Notes\n\nAt 100% utilization insurance coverage is exhausted.\n`
+  );
+  const insuranceProseWithoutComma = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+  assert.equal(insuranceProseWithoutComma.ok, true, JSON.stringify(insuranceProseWithoutComma.diagnostics));
 
   writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\nThe selected-range was 1/1.\n`);
   const misplaced = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
@@ -11262,10 +11286,25 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
   assert.equal(disguisedPercentage.ok, false);
   assert.ok(disguisedPercentage.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"));
 
+  writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\nOverall coverage reached 99.5%.\n`);
+  const decimalPercentage = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+  assert.equal(decimalPercentage.ok, false);
+  assert.ok(decimalPercentage.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"));
+
   writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\n100&#37; standardized coverage.\n`);
   const encodedPercentage = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
   assert.equal(encodedPercentage.ok, false);
   assert.ok(encodedPercentage.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"));
+
+  writeArtifact(
+    layout,
+    reportNode.id,
+    "report.md",
+    `${scopedMarkdown}\n## Notes\n\nStandardized coverage was 100&percnt;.\n`
+  );
+  const namedEntityPercentage = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+  assert.equal(namedEntityPercentage.ok, false);
+  assert.ok(namedEntityPercentage.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"));
 
   writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\nStandardized coverage: 39/39.\n`);
   const disguisedFraction = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
