@@ -1778,7 +1778,7 @@
         "description": { "type": "string", "minLength": 1 },
         "intended_use": { "type": "string", "minLength": 1 },
         "default": { "type": "boolean" },
-        "catalog_schema_version": { "const": 1 },
+        "catalog_schema_version": { "const": 2 },
         "catalog_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "declared_topology_path": {
           "oneOf": [
@@ -1835,7 +1835,7 @@
       "additionalProperties": false,
       "required": ["schema_version", "catalog_digest", "default_profile", "profiles"],
       "properties": {
-        "schema_version": { "const": 1 },
+        "schema_version": { "const": 2 },
         "catalog_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "default_profile": {
           "$ref": "urn:ultrafuzz:schema:config:resolved-config:2#/$defs/auditProfileId"

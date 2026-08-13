@@ -163,9 +163,10 @@ export function modalBenchmarkPolicyDimensions(policyRoot, mode) {
   const cohortPath = path.join(
     policyRoot,
     "benchmarks",
-    benchmark === "evmbench" ? "evmbench-detect.json" : "ultrafuzz-bench.json"
+    benchmark === "evmbench" ? "evmbench" : "ultrafuzzbench",
+    "cohort.json"
   );
-  const lanesPath = path.join(policyRoot, "benchmarks", "lanes.json");
+  const lanesPath = path.join(policyRoot, "benchmarks", "ultrafuzzbench", "lanes.json");
   const cohort = loadBenchmarkCohortManifest(cohortPath);
   const lanes = loadBenchmarkLanesManifest(lanesPath);
   const selectedTargets =

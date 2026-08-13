@@ -116,8 +116,8 @@ first refresh and atomically persist a near-expiry host OAuth token under the
 same `.kimi-code/oauth/kimi-code.lock` used by Kimi Code. Workers then stage a
 refreshable snapshot into a durable per-row auth home and point each invocation
 at that home, so long rows refresh one shared Modal credential instead of racing
-independent copies. If the selected provider persists a scoped `oauthHost` (or
-`oauth_host` in older layouts), Ultrafuzz refreshes against that host unless
+independent copies. If the selected provider persists a scoped `oauthHost`,
+Ultrafuzz refreshes against that host unless
 `KIMI_CODE_OAUTH_HOST` or `KIMI_OAUTH_HOST` overrides it. When collection or
 resume inspects the row, Ultrafuzz only promotes a refreshed Modal credential
 back to the host if it descends from the token staged for that row.

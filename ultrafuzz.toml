@@ -1,5 +1,5 @@
 schema_version = "ultrafuzz.config.v2"
-audit_profile = "balanced"
+audit_profile = "default"
 dynamic_strategies_enumerator = 3
 
 [project]

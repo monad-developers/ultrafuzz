@@ -19,7 +19,10 @@ export default class EvalHistory extends Command {
   };
   static override flags = {
     ...globalFlags,
-    history: Flags.string({ default: "benchmarks/history.json", summary: "Versioned history JSON path" }),
+    history: Flags.string({
+      default: "benchmarks/ultrafuzzbench/history.json",
+      summary: "Versioned history JSON path"
+    }),
     charts: Flags.string({
       default: "docs/assets/eval-history",
       summary: "Directory for deterministic SVG charts"

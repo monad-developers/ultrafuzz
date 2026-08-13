@@ -934,8 +934,10 @@ describe("longitudinal eval history", () => {
   });
 
   it("parses the fully migrated checked-in history", () => {
-    const checkedIn = JSON.parse(fs.readFileSync(path.join(REPOSITORY_ROOT, "benchmarks", "history.json"), "utf8"));
-    const parsed = parseEvalHistory(checkedIn, "benchmarks/history.json");
+    const checkedIn = JSON.parse(
+      fs.readFileSync(path.join(REPOSITORY_ROOT, "benchmarks", "ultrafuzzbench", "history.json"), "utf8")
+    );
+    const parsed = parseEvalHistory(checkedIn, "benchmarks/ultrafuzzbench/history.json");
     const legacySourceRun = "ci-31264673583-1-smoke-ultrafuzz-bench-deepseek-benchmark-smoke-deepseek-v4-flash-max";
     const legacyObservations = parsed.observations.filter(
       (candidate) => candidate.source_eval_run_id === legacySourceRun
@@ -1403,8 +1405,10 @@ describe("longitudinal eval history", () => {
   });
 
   it("requires the exact public target, variant, and trial matrix", () => {
-    const cohort = loadBenchmarkCohortManifest(path.join(REPOSITORY_ROOT, "benchmarks", "ultrafuzz-bench.json"));
-    const lanes = loadBenchmarkLanesManifest(path.join(REPOSITORY_ROOT, "benchmarks", "lanes.json"));
+    const cohort = loadBenchmarkCohortManifest(
+      path.join(REPOSITORY_ROOT, "benchmarks", "ultrafuzzbench", "cohort.json")
+    );
+    const lanes = loadBenchmarkLanesManifest(path.join(REPOSITORY_ROOT, "benchmarks", "ultrafuzzbench", "lanes.json"));
     const suite = adaptBenchmarkManifestToEvalSuite({ benchmark: "ultrafuzz-bench", lane: "smoke", cohort, lanes });
     const matrix = publicMatrix(suite);
 

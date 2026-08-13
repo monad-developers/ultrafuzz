@@ -1,11 +1,4 @@
 {
-  "agent-adapter-recovery.schema.json": {
-    "schema_version": "ultrafuzz.agent-adapter-recovery.v1",
-    "target_basename": "codex.ts",
-    "temporary_basename": ".codex.ts.ultrafuzz-init-prepared",
-    "temporary_dev": "2049",
-    "temporary_ino": "123456"
-  },
   "cloud-execution-generation.schema.json": {
     "schema_version": "ultrafuzz.cloud.execution-generation.v1",
     "generation": "7cb5f68a-5ef5-46b1-8477-94fe4dfe0730",

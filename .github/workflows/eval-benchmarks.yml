@@ -5,8 +5,8 @@ on:
     branches:
       - main
     paths-ignore:
-      - benchmarks/history.json
-      - benchmarks/public-results/**
+      - benchmarks/ultrafuzzbench/history.json
+      - benchmarks/ultrafuzzbench/results/**
       - docs/assets/eval-history/**
   workflow_dispatch:
     inputs:

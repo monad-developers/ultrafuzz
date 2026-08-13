@@ -1,4 +1,3 @@
-export const AGENT_ADAPTER_RECOVERY_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:runtime:agent-adapter-recovery:1" as const;
 export const WORKSPACE_PATCH_BASELINE_JSON_SCHEMA_ID =
   "urn:ultrafuzz:schema:runtime:workspace-patch-baseline:1" as const;
 export const WORKSPACE_PATCH_PREPARATION_JSON_SCHEMA_ID =
@@ -23,8 +22,6 @@ export const PINNED_SUBMODULE_SNAPSHOT_JSON_SCHEMA_ID =
 export const PINNED_SUBMODULE_EXPECTATION_JSON_SCHEMA_ID =
   "urn:ultrafuzz:schema:runtime:pinned-submodule-expectation:1" as const;
 
-export const AGENT_ADAPTER_RECOVERY_SCHEMA_VERSION = "ultrafuzz.agent-adapter-recovery.v1" as const;
-export const MAX_AGENT_ADAPTER_RECOVERY_MARKER_BYTES = 4 * 1024;
 export const WORKSPACE_PATCH_BASELINE_SCHEMA_VERSION = "ultrafuzz.workspace-patch-baseline.v1" as const;
 export const WORKSPACE_PATCH_PREPARATION_SCHEMA_VERSION = "ultrafuzz.workspace-patch-preparation.v1" as const;
 export const INVARIANT_SUITE_BASELINE_SCHEMA_VERSION = "ultrafuzz.invariant-suite-baseline.v1" as const;
@@ -40,7 +37,6 @@ export const PINNED_SUBMODULE_SNAPSHOT_SCHEMA_VERSION = "ultrafuzz.pinned-submod
 export const PINNED_SUBMODULE_EXPECTATION_SCHEMA_VERSION = "ultrafuzz.pinned-submodules-expectation.v1" as const;
 
 export const RUNTIME_DOCUMENT_SCHEMA_IDS = Object.freeze([
-  AGENT_ADAPTER_RECOVERY_JSON_SCHEMA_ID,
   CLOUD_EXECUTION_GENERATION_JSON_SCHEMA_ID,
   INVARIANT_SUITE_BASELINE_JSON_SCHEMA_ID,
   INVARIANT_SUITE_HANDOFF_JSON_SCHEMA_ID,
@@ -57,17 +53,6 @@ export const RUNTIME_DOCUMENT_SCHEMA_IDS = Object.freeze([
 ] as const);
 
 export type RuntimeDocumentSchemaId = (typeof RUNTIME_DOCUMENT_SCHEMA_IDS)[number];
-
-export type AgentAdapterRecoveryTargetBasename = "claude.ts" | "codex.ts" | "deepseek.ts" | "kimi.ts";
-export type AgentAdapterRecoveryTemporaryBasename = `.${AgentAdapterRecoveryTargetBasename}.ultrafuzz-init-prepared`;
-
-export interface AgentAdapterRecoveryDocument {
-  schema_version: typeof AGENT_ADAPTER_RECOVERY_SCHEMA_VERSION;
-  target_basename: AgentAdapterRecoveryTargetBasename;
-  temporary_basename: AgentAdapterRecoveryTemporaryBasename;
-  temporary_dev: string;
-  temporary_ino: string;
-}
 
 export interface WorkspacePatchBaselineDocument {
   schema_version: typeof WORKSPACE_PATCH_BASELINE_SCHEMA_VERSION;
@@ -280,7 +265,6 @@ export interface PinnedSubmoduleExpectationDocument {
 }
 
 export interface RuntimeDocumentBySchemaId {
-  [AGENT_ADAPTER_RECOVERY_JSON_SCHEMA_ID]: AgentAdapterRecoveryDocument;
   [WORKSPACE_PATCH_BASELINE_JSON_SCHEMA_ID]: WorkspacePatchBaselineDocument;
   [WORKSPACE_PATCH_PREPARATION_JSON_SCHEMA_ID]: WorkspacePatchPreparationDocument;
   [INVARIANT_SUITE_BASELINE_JSON_SCHEMA_ID]: InvariantSuiteBaselineDocument;

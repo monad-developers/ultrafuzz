@@ -189,8 +189,9 @@ export function validateBenchmarkPolicyFiles(input) {
   if (gitOutput(policyRoot, ["status", "--porcelain=v1", "--untracked-files=no"]) !== "") {
     throw new Error("benchmark policy checkout has tracked modifications");
   }
-  const cohortFile = input.benchmark === "evmbench" ? "evmbench-detect.json" : "ultrafuzz-bench.json";
-  for (const relative of ["benchmarks/lanes.json", `benchmarks/${cohortFile}`]) {
+  const cohortPath =
+    input.benchmark === "evmbench" ? "benchmarks/evmbench/cohort.json" : "benchmarks/ultrafuzzbench/cohort.json";
+  for (const relative of ["benchmarks/ultrafuzzbench/lanes.json", cohortPath]) {
     regularFileInside(policyRoot, relative, MAX_POLICY_BYTES, `benchmark policy ${relative}`);
   }
   return policyRoot;
@@ -477,10 +478,13 @@ function benchmarkPolicyDimensions(policyRoot, identity, evalModule, producerPol
   const cohortPath = path.join(
     policyRoot,
     "benchmarks",
-    identity.benchmark === "evmbench" ? "evmbench-detect.json" : "ultrafuzz-bench.json"
+    identity.benchmark === "evmbench" ? "evmbench" : "ultrafuzzbench",
+    "cohort.json"
   );
   const cohort = evalModule.loadBenchmarkCohortManifest(cohortPath);
-  const lanes = evalModule.loadBenchmarkLanesManifest(path.join(policyRoot, "benchmarks", "lanes.json"));
+  const lanes = evalModule.loadBenchmarkLanesManifest(
+    path.join(policyRoot, "benchmarks", "ultrafuzzbench", "lanes.json")
+  );
   if (
     (identity.benchmark === "evmbench" && cohort.schema_version !== evalModule.EVMBENCH_COHORT_SCHEMA_VERSION) ||
     (identity.benchmark === "ultrafuzz-bench" &&

@@ -17,7 +17,7 @@ import { executeEvalSchemaSemanticGates } from "../src/eval-semantic-gates.js";
 const REVISION = "0123456789abcdef0123456789abcdef01234567";
 const BUGS = [{ id: "H-1", title: "Example" }];
 const AAVE_GROUND_TRUTH_PATH = fileURLToPath(
-  new URL("../../../benchmarks/private-ground-truth/aave-v4-scfuzzbench/findings.yml", import.meta.url)
+  new URL("../../../benchmarks/scfuzzbench/aave-v4/findings.yml", import.meta.url)
 );
 const AAVE_UPSTREAM_REPOSITORY = "https://github.com/aave/aave-v4";
 const AAVE_SCFUZZBENCH_REPOSITORY = "https://github.com/scfuzzbench/aave-v4-scfuzzbench";
@@ -27,7 +27,7 @@ const PUBLIC_GROUND_TRUTH_PATHS = [
   "venus-isolated-pools-hardhat.yml",
   "very-liquid-vaults-foundry.yml"
 ].map((filename) =>
-  fileURLToPath(new URL(`../../../benchmarks/public-ground-truth/ultrafuzz-bench/${filename}`, import.meta.url))
+  fileURLToPath(new URL(`../../../benchmarks/ultrafuzzbench/ground-truth/${filename}`, import.meta.url))
 );
 
 describe("private ground-truth subject binding", () => {

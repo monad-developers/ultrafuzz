@@ -483,9 +483,9 @@ describe("trusted automatic eval-history publication handoff", () => {
 
   it("rejects a clean candidate policy commit whose selected manifest is a symlink", () => {
     const root = temporaryRoot("ultrafuzz-publication-policy-");
-    fs.mkdirSync(path.join(root, "benchmarks"));
-    fs.writeFileSync(path.join(root, "benchmarks/lanes.json"), "{}\n");
-    fs.writeFileSync(path.join(root, "benchmarks/ultrafuzz-bench.json"), "{}\n");
+    fs.mkdirSync(path.join(root, "benchmarks", "ultrafuzzbench"), { recursive: true });
+    fs.writeFileSync(path.join(root, "benchmarks/ultrafuzzbench/lanes.json"), "{}\n");
+    fs.writeFileSync(path.join(root, "benchmarks/ultrafuzzbench/cohort.json"), "{}\n");
     git(root, ["init", "-b", "main"]);
     git(root, ["config", "user.name", "Test"]);
     git(root, ["config", "user.email", "test@example.com"]);
@@ -500,10 +500,10 @@ describe("trusted automatic eval-history publication handoff", () => {
       })
     ).toBe(fs.realpathSync(root));
 
-    fs.unlinkSync(path.join(root, "benchmarks/lanes.json"));
+    fs.unlinkSync(path.join(root, "benchmarks/ultrafuzzbench/lanes.json"));
     fs.writeFileSync(path.join(root, "outside.json"), "{}\n");
-    fs.symlinkSync("../outside.json", path.join(root, "benchmarks/lanes.json"));
-    git(root, ["add", "benchmarks/lanes.json"]);
+    fs.symlinkSync("../../outside.json", path.join(root, "benchmarks/ultrafuzzbench/lanes.json"));
+    git(root, ["add", "benchmarks/ultrafuzzbench/lanes.json"]);
     git(root, ["commit", "-m", "symlink policy"]);
     const symlinkCommit = git(root, ["rev-parse", "HEAD"]).trim();
     expect(() =>

@@ -1,9 +1,9 @@
 {
   "schemaVersion": "1.0",
-  "auditProfile": "balanced",
+  "auditProfile": "default",
   "auditProfileResolution": {
-    "catalogSchemaVersion": 1,
-    "catalogDigest": "61f007e0f15d58cb08417fb1396ff2240e055be363a4a6380411fedd5e83da29",
+    "catalogSchemaVersion": 2,
+    "catalogDigest": "d3ccb85ac0cfe567ad9dc388b454358bc8e6cef4f611bdfeee6ff1bc6062f016",
     "settings": {},
     "effectiveSettings": {
       "strategy_loops": 1,

@@ -21,7 +21,6 @@ test("runtime audit schemas are closed, registered, and enforce exact current ve
   assert.deepEqual(
     runtimeSchemaRegistry().map((entry) => entry.filename),
     [
-      "agent-adapter-recovery.schema.json",
       "clean-audit.schema.json",
       "cloud-execution-generation.schema.json",
       "invariant-suite-baseline.schema.json",
