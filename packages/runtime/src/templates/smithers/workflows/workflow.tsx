@@ -15,7 +15,7 @@ import { z } from "zod/v4";
 // Imported via the explicit index path: Smithers' bootstrap can scaffold a
 // sibling .smithers/agents.ts, which bun's resolution would prefer over the
 // .smithers/agents/ directory this workflow needs.
-import * as projectAgents from "../agents/index.ts";
+import { agentFactories as projectAgentFactories } from "../agents/index.ts";
 
 const artifactsModule = process.env.ULTRAFUZZ_ARTIFACTS_MODULE ?? __ULTRAFUZZ_ARTIFACTS_MODULE__;
 const runtimeModule = process.env.ULTRAFUZZ_RUNTIME_MODULE ?? __ULTRAFUZZ_RUNTIME_MODULE__;
@@ -251,10 +251,8 @@ const { Workflow, Task, Worktree, Parallel, Sandbox, smithers, outputs } = creat
   verification: verificationOutput
 });
 
-const agentRegistry = projectAgents as Record<string, AgentLike | AgentLike[]>;
 type AgentFactory = (options: { model?: string; reasoningEffort?: string; addDir?: string[] }) => AgentLike;
-const agentFactories =
-  (projectAgents as unknown as { agentFactories?: Record<string, AgentFactory> }).agentFactories ?? {};
+const agentFactories = projectAgentFactories as Record<string, AgentFactory>;
 const serializedTaskSpecs = __ULTRAFUZZ_TASK_SPECS__ as const;
 const loadedWorkflowPath = fileURLToPath(import.meta.url);
 const persistedWorkflowPath = process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH;
@@ -1182,7 +1180,7 @@ function baseAgentForProfile(
 ): AgentLike | AgentLike[] | undefined {
   const factory = agentFactories[profile.agentRef];
   if (factory === undefined) {
-    return agentRegistry[profile.agentRef];
+    throw new Error(`agent factory is not registered: ${profile.agentRef}`);
   }
   return factory({
     ...(profile.modelName === undefined ? {} : { model: profile.modelName }),

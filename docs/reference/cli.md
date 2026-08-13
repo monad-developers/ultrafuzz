@@ -104,12 +104,10 @@ ultrafuzz.toml
 .ultrafuzz/cache/
 ```
 
-Without `--force`, existing config, topology, prompts, and reference catalog
-files are preserved. Generated agent adapters whose bytes exactly match a stock
-version from an earlier Ultrafuzz release are upgraded to the current sealed
-configuration contract. Customized, symlinked, and hard-linked adapters are
-never replaced automatically; `init` emits an actionable diagnostic when one
-requires manual review.
+Without `--force`, every existing config, topology, prompt, reference catalog,
+and generated agent adapter file is preserved. Use `--force` to replace
+existing generated files with the current templates. `init` emits an
+actionable diagnostic when a preserved adapter requires manual review.
 
 ## Validate
 

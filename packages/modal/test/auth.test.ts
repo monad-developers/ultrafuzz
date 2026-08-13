@@ -283,6 +283,35 @@ describe("runtime-only subscription auth", () => {
     ).toBe(false);
   });
 
+  it("does not use the obsolete snake-case Kimi OAuth host as refresh authority", async () => {
+    const source = kimiAuthFixture({ oauthHost: "https://obsolete.example" });
+    const configPath = path.join(source, "config.toml");
+    fs.writeFileSync(configPath, fs.readFileSync(configPath, "utf8").replace("oauthHost =", "oauth_host ="), "utf8");
+    const urls: string[] = [];
+
+    await refreshKimiSubscriptionAuth(
+      source,
+      "kimi-k3",
+      {},
+      {
+        fetch: async (input) => {
+          urls.push(String(input));
+          return new Response(
+            JSON.stringify({
+              access_token: "fresh-access",
+              refresh_token: "fresh-refresh",
+              expires_in: 900
+            }),
+            { status: 200, headers: { "content-type": "application/json" } }
+          );
+        },
+        now: () => 2_000_000_000
+      }
+    );
+
+    expect(urls).toEqual(["https://auth.kimi.com/api/oauth/token"]);
+  });
+
   it("rejects unsafe Kimi OAuth refresh hosts before sending refresh tokens", async () => {
     const source = kimiAuthFixture();
     const fetchImpl: typeof fetch = async () => {
@@ -500,7 +529,7 @@ model = "unrelated"
     expect(sourceCredentials.refresh_token).toBe("old-refresh");
     const snapshotConfig = fs.readFileSync(path.join(prepared!.source, "config.toml"), "utf8");
     expect(snapshotConfig).toContain('[providers."managed:kimi-code"]');
-    expect(snapshotConfig).toContain('oauth_host = "https://auth.persisted.example"');
+    expect(snapshotConfig).toContain('oauthHost = "https://auth.persisted.example"');
     expect(snapshotConfig).toContain("[models.kimi-k3]");
     expect(snapshotConfig).not.toContain("unrelated");
     expect(snapshotConfig).not.toContain("do-not-copy");
@@ -624,7 +653,7 @@ default_effort = "max"
 [providers."managed:kimi-code"]
 type = "kimi"
 base_url = "https://api.kimi.com/coding/v1"
-oauth = { storage = "file", key = ${JSON.stringify(oauthKey)}${options.oauthHost === undefined ? "" : `, oauth_host = ${JSON.stringify(options.oauthHost)}`} }
+oauth = { storage = "file", key = ${JSON.stringify(oauthKey)}${options.oauthHost === undefined ? "" : `, oauthHost = ${JSON.stringify(options.oauthHost)}`} }
 ${kimiK3Alias}
 [models."kimi-code/k3"]
 provider = "managed:kimi-code"

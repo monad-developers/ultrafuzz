@@ -1381,7 +1381,13 @@ function writeFanoutProject(project: string, discoveryMarkdownPath = "setup/proj
   fs.mkdirSync(path.join(project, ".smithers", "agents"), { recursive: true });
   fs.writeFileSync(
     path.join(project, ".smithers", "agents", "index.ts"),
-    "export const CodexAgent = {};\nexport const ClaudeAgent = {};\n",
+    "const createAgent = () => null;\n" +
+      "export const agentFactories = {\n" +
+      "  ClaudeAgent: createAgent,\n" +
+      "  CodexAgent: createAgent,\n" +
+      "  DeepSeekAgent: createAgent,\n" +
+      "  KimiAgent: createAgent\n" +
+      "};\n",
     "utf8"
   );
   fs.writeFileSync(
@@ -1552,9 +1558,9 @@ test(
 
       const codexPath = path.join(project, ".smithers", "agents", "codex.ts");
       fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
-      const upgraded = initProject({ projectRoot: project });
-      assert.equal(upgraded.ok, true, JSON.stringify(upgraded.diagnostics));
-      assert.match(fs.readFileSync(codexPath, "utf8"), /process\.env\.ULTRAFUZZ_CONFIG_PATH/u);
+      const preserved = initProject({ projectRoot: project });
+      assert.equal(preserved.ok, true, JSON.stringify(preserved.diagnostics));
+      assert.equal(fs.readFileSync(codexPath, "utf8"), V0_0_2_STOCK_CODEX_ADAPTER);
 
       const attackedProject = tempProject();
       mismatchedPath = path.join(attackedProject, "ultrafuzz.toml");
@@ -1693,7 +1699,7 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.equal(validate.value?.resolved_config?.default_reasoning, "xhigh");
 });
 
-test("non-force init upgrades an exact historical stock agent adapter and is idempotent", () => {
+test("non-force init preserves historical stock agent adapters and force replaces them", () => {
   assert.equal(
     crypto.createHash("sha256").update(V0_0_2_STOCK_CODEX_ADAPTER).digest("hex"),
     "26dae14e43c09dbe7901aa731cd552b282d502d86cea8cc6726e4a8579cd3236"
@@ -1701,427 +1707,19 @@ test("non-force init upgrades an exact historical stock agent adapter and is ide
   const project = tempProject();
   assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
   const codexPath = path.join(project, ".smithers", "agents", "codex.ts");
-  const environmentPath = path.join(project, ".smithers", "agents", "environment.ts");
+  const currentAdapter = fs.readFileSync(codexPath, "utf8");
   fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
   const historicalStats = fs.statSync(codexPath, { bigint: true });
-  fs.unlinkSync(environmentPath);
 
-  const upgraded = initProject({ projectRoot: project });
+  const preserved = initProject({ projectRoot: project });
 
-  assert.equal(upgraded.ok, true, JSON.stringify(upgraded.diagnostics));
-  assert.deepEqual(
-    upgraded.diagnostics
-      .filter((diagnostic) => diagnostic.code === "INIT_STOCK_AGENT_ADAPTER_UPGRADED")
-      .map((diagnostic) => diagnostic.path),
-    [".smithers/agents/codex.ts"]
-  );
-  const upgradedSource = fs.readFileSync(codexPath, "utf8");
-  const upgradedStats = fs.statSync(codexPath, { bigint: true });
-  assert.notEqual(upgradedStats.ino, historicalStats.ino);
-  assert.equal(upgradedStats.mode, historicalStats.mode);
-  assert.equal(
-    fs.readdirSync(path.dirname(codexPath)).some((entry) => entry.includes(".ultrafuzz-init-")),
-    false
-  );
-  assert.match(upgradedSource, /process\.env\.ULTRAFUZZ_CONFIG_PATH/u);
-  assert.match(upgradedSource, /workflowControlChildEnvironment/u);
-  assert.equal(fs.existsSync(environmentPath), true);
-  const recreatedEnvironmentSource = fs.readFileSync(environmentPath, "utf8");
-  for (const name of [
-    "ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR",
-    "ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT",
-    "ULTRAFUZZ_SNAPSHOT_PROCESS_DESCRIPTOR",
-    "ULTRAFUZZ_SNAPSHOT_PROCESS_ROOT"
-  ]) {
-    assert.match(recreatedEnvironmentSource, new RegExp(`"${name}"`, "u"));
-  }
-
-  const repeated = initProject({ projectRoot: project });
-  assert.equal(repeated.ok, true, JSON.stringify(repeated.diagnostics));
-  assert.equal(
-    repeated.diagnostics.some((diagnostic) => diagnostic.code === "INIT_STOCK_AGENT_ADAPTER_UPGRADED"),
-    false
-  );
-  assert.equal(fs.readFileSync(codexPath, "utf8"), upgradedSource);
+  assert.equal(preserved.ok, true, JSON.stringify(preserved.diagnostics));
+  assert.equal(fs.readFileSync(codexPath, "utf8"), V0_0_2_STOCK_CODEX_ADAPTER);
+  assert.equal(fs.statSync(codexPath, { bigint: true }).ino, historicalStats.ino);
+  const forced = initProject({ projectRoot: project, force: true });
+  assert.equal(forced.ok, true, JSON.stringify(forced.diagnostics));
+  assert.equal(fs.readFileSync(codexPath, "utf8"), currentAdapter);
 });
-
-test("non-force init upgrades a read-only stock adapter and preserves its mode", () => {
-  const project = tempProject();
-  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
-  const codexPath = path.join(project, ".smithers", "agents", "codex.ts");
-  fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
-  fs.chmodSync(codexPath, 0o444);
-
-  const upgraded = initProject({ projectRoot: project });
-
-  assert.equal(upgraded.ok, true, JSON.stringify(upgraded.diagnostics));
-  assert.match(fs.readFileSync(codexPath, "utf8"), /process\.env\.ULTRAFUZZ_CONFIG_PATH/u);
-  assert.equal(fs.statSync(codexPath).mode & 0o777, 0o444);
-});
-
-test(
-  "stock adapter migration restores a customization installed at the publication boundary",
-  { concurrency: false },
-  () => {
-    const project = tempProject();
-    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
-    const agentsDirectory = path.join(project, ".smithers", "agents");
-    const codexPath = path.join(agentsDirectory, "codex.ts");
-    const concurrentPath = path.join(agentsDirectory, "concurrent-codex.ts");
-    const customized = 'export const concurrentCustomization = "must survive init";\n';
-    fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
-    fs.writeFileSync(concurrentPath, customized, "utf8");
-    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "renameSync")!;
-    const originalRenameSync = fs.renameSync;
-    let injected = false;
-
-    Object.defineProperty(fs, "renameSync", {
-      ...originalDescriptor,
-      value: (...args: unknown[]) => {
-        const [source, destination] = args.map(String);
-        if (
-          !injected &&
-          path.basename(source ?? "") === "codex.ts" &&
-          path.basename(destination ?? "") === ".codex.ts.ultrafuzz-init-previous"
-        ) {
-          injected = true;
-          Reflect.apply(originalRenameSync, fs, [concurrentPath, codexPath]);
-        }
-        return Reflect.apply(originalRenameSync, fs, args) as void;
-      }
-    });
-    try {
-      const failed = initProject({ projectRoot: project });
-      assert.equal(injected, true);
-      assert.equal(failed.ok, false);
-      assert.equal(failed.diagnostics[0]?.code, "INIT_PATH_UNSAFE");
-      assert.equal(fs.readFileSync(codexPath, "utf8"), customized);
-      assert.equal(
-        fs.readdirSync(agentsDirectory).some((entry) => entry.includes(".ultrafuzz-init-")),
-        false
-      );
-    } finally {
-      Object.defineProperty(fs, "renameSync", originalDescriptor);
-    }
-  }
-);
-
-test(
-  "stock adapter migration requires one strict current recovery marker before recovering a quarantined target",
-  { concurrency: false, skip: process.platform === "win32" },
-  () => {
-    const project = tempProject();
-    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
-    const agentsDirectory = path.join(project, ".smithers", "agents");
-    const codexPath = path.join(agentsDirectory, "codex.ts");
-    fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
-    const runtimeUrl = new URL("../../dist/index.js", import.meta.url).href;
-    const crashScript = String.raw`
-      import fs from "node:fs";
-      import path from "node:path";
-      const project = process.argv[1];
-      const runtimeUrl = process.argv[2];
-      const { initProject } = await import(runtimeUrl);
-      const originalRenameSync = fs.renameSync;
-      Object.defineProperty(fs, "renameSync", {
-        ...Object.getOwnPropertyDescriptor(fs, "renameSync"),
-        value: (...args) => {
-          const result = Reflect.apply(originalRenameSync, fs, args);
-          if (
-            path.basename(String(args[0])) === "codex.ts" &&
-            path.basename(String(args[1])) === ".codex.ts.ultrafuzz-init-previous"
-          ) process.exit(86);
-          return result;
-        }
-      });
-      initProject({ projectRoot: project });
-      process.exit(87);
-    `;
-
-    const crashed = spawnSync(process.execPath, ["--input-type=module", "-e", crashScript, project, runtimeUrl], {
-      encoding: "utf8"
-    });
-    assert.equal(crashed.status, 86, crashed.stderr);
-    assert.equal(fs.existsSync(codexPath), false);
-    const preparedPath = path.join(agentsDirectory, ".codex.ts.ultrafuzz-init-prepared");
-    const preparedBytes = fs.readFileSync(preparedPath);
-    const recoveryMarkerPath = path.join(agentsDirectory, ".codex.ts.ultrafuzz-init-recovery");
-    assert.equal(fs.existsSync(recoveryMarkerPath), true);
-    const marker = fs.readFileSync(recoveryMarkerPath, "utf8");
-    const parsedMarker = JSON.parse(marker) as Record<string, unknown>;
-    const duplicated = marker.replace(
-      '"target_basename":"codex.ts"',
-      '"target_basename":"codex.ts","target_basename":"codex.ts"'
-    );
-    assert.notEqual(duplicated, marker);
-    const missingVersion = { ...parsedMarker };
-    delete missingVersion.schema_version;
-    const invalidMarkers = [
-      {
-        name: "unknown field",
-        contents: `${JSON.stringify({ ...parsedMarker, unexpected: true })}\n`
-      },
-      { name: "duplicate key", contents: duplicated },
-      {
-        name: "numeric historical version",
-        contents: `${JSON.stringify({
-          ...parsedMarker,
-          schema_version: 1
-        })}\n`
-      },
-      { name: "missing version", contents: `${JSON.stringify(missingVersion)}\n` },
-      { name: "malformed present marker", contents: '{"schema_version":' },
-      {
-        name: "different target binding",
-        contents: `${JSON.stringify({
-          ...parsedMarker,
-          target_basename: "claude.ts",
-          temporary_basename: ".claude.ts.ultrafuzz-init-prepared"
-        })}\n`
-      }
-    ];
-    for (const invalid of invalidMarkers) {
-      fs.writeFileSync(recoveryMarkerPath, invalid.contents, "utf8");
-
-      const rejected = initProject({ projectRoot: project });
-      assert.equal(rejected.ok, false, invalid.name);
-      assert.equal(rejected.diagnostics[0]?.code, "INIT_PATH_UNSAFE", invalid.name);
-      assert.equal(fs.readFileSync(recoveryMarkerPath, "utf8"), invalid.contents, invalid.name);
-      assert.equal(fs.existsSync(codexPath), false, invalid.name);
-      assert.deepEqual(fs.readFileSync(preparedPath), preparedBytes, invalid.name);
-    }
-
-    fs.writeFileSync(recoveryMarkerPath, marker, "utf8");
-
-    const recovered = initProject({ projectRoot: project });
-
-    assert.equal(recovered.ok, true, JSON.stringify(recovered.diagnostics));
-    assert.match(fs.readFileSync(codexPath, "utf8"), /process\.env\.ULTRAFUZZ_CONFIG_PATH/u);
-    assert.equal(
-      fs.readdirSync(agentsDirectory).some((entry) => entry.includes(".ultrafuzz-init-")),
-      false
-    );
-    assert.deepEqual(openDescriptorTargetsInside(agentsDirectory), []);
-  }
-);
-
-test(
-  "stock adapter migration rejects a torn present recovery marker without repairing it",
-  { concurrency: false, skip: process.platform === "win32" },
-  () => {
-    const project = tempProject();
-    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
-    const agentsDirectory = path.join(project, ".smithers", "agents");
-    const codexPath = path.join(agentsDirectory, "codex.ts");
-    const recoveryMarkerPath = path.join(agentsDirectory, ".codex.ts.ultrafuzz-init-recovery");
-    fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
-    const runtimeUrl = new URL("../../dist/index.js", import.meta.url).href;
-    const crashScript = String.raw`
-      import fs from "node:fs";
-      const project = process.argv[1];
-      const runtimeUrl = process.argv[2];
-      const { initProject } = await import(runtimeUrl);
-      const originalOpenSync = fs.openSync;
-      Object.defineProperty(fs, "openSync", {
-        ...Object.getOwnPropertyDescriptor(fs, "openSync"),
-        value: (...args) => {
-          const descriptor = Reflect.apply(originalOpenSync, fs, args);
-          if (String(args[0]).endsWith(".codex.ts.ultrafuzz-init-recovery")) process.exit(86);
-          return descriptor;
-        }
-      });
-      initProject({ projectRoot: project });
-      process.exit(87);
-    `;
-
-    const crashed = spawnSync(process.execPath, ["--input-type=module", "-e", crashScript, project, runtimeUrl], {
-      encoding: "utf8"
-    });
-    assert.equal(crashed.status, 86, crashed.stderr);
-    assert.equal(fs.statSync(recoveryMarkerPath).size, 0);
-    assert.equal(fs.existsSync(path.join(agentsDirectory, ".codex.ts.ultrafuzz-init-prepared")), true);
-    assert.equal(fs.existsSync(path.join(agentsDirectory, ".codex.ts.ultrafuzz-init-previous")), true);
-
-    const entries = fs.readdirSync(agentsDirectory).sort();
-    const rejected = initProject({ projectRoot: project });
-
-    assert.equal(rejected.ok, false);
-    assert.equal(rejected.diagnostics[0]?.code, "INIT_PATH_UNSAFE");
-    assert.equal(fs.statSync(recoveryMarkerPath).size, 0);
-    assert.deepEqual(fs.readdirSync(agentsDirectory).sort(), entries);
-    assert.equal(fs.existsSync(codexPath), true);
-    assert.equal(fs.readFileSync(codexPath, "utf8"), V0_0_2_STOCK_CODEX_ADAPTER);
-  }
-);
-
-test(
-  "stock adapter migration leaves the original intact when temporary publication fails",
-  { concurrency: false },
-  () => {
-    const project = tempProject();
-    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
-    const agentsDirectory = path.join(project, ".smithers", "agents");
-    const codexPath = path.join(agentsDirectory, "codex.ts");
-    fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
-    const entriesBefore = fs.readdirSync(agentsDirectory).sort();
-    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "writeSync")!;
-
-    Object.defineProperty(fs, "writeSync", {
-      ...originalDescriptor,
-      value: (..._args: unknown[]) => {
-        throw new Error("induced temporary publication write failure");
-      }
-    });
-    try {
-      const failed = initProject({ projectRoot: project });
-      assert.equal(failed.ok, false);
-      assert.equal(failed.diagnostics[0]?.code, "INIT_PATH_UNSAFE");
-      assert.equal(fs.readFileSync(codexPath, "utf8"), V0_0_2_STOCK_CODEX_ADAPTER);
-      assert.deepEqual(fs.readdirSync(agentsDirectory).sort(), entriesBefore);
-    } finally {
-      Object.defineProperty(fs, "writeSync", originalDescriptor);
-    }
-  }
-);
-
-test(
-  "stock adapter migration retains and recovers a deterministic path when cleanup fails",
-  { concurrency: false },
-  () => {
-    const project = tempProject();
-    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
-    const agentsDirectory = path.join(project, ".smithers", "agents");
-    const codexPath = path.join(agentsDirectory, "codex.ts");
-    const preparedPath = path.join(agentsDirectory, ".codex.ts.ultrafuzz-init-prepared");
-    fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
-    const writeDescriptor = Object.getOwnPropertyDescriptor(fs, "writeSync")!;
-    const unlinkDescriptor = Object.getOwnPropertyDescriptor(fs, "unlinkSync")!;
-    const originalUnlinkSync = fs.unlinkSync;
-
-    Object.defineProperty(fs, "writeSync", {
-      ...writeDescriptor,
-      value: (..._args: unknown[]) => {
-        throw new Error("induced publication failure before recovery marker creation");
-      }
-    });
-    Object.defineProperty(fs, "unlinkSync", {
-      ...unlinkDescriptor,
-      value: (...args: unknown[]) => {
-        if (path.basename(String(args[0])) === path.basename(preparedPath)) {
-          throw Object.assign(new Error("induced prepared-file cleanup failure"), { code: "EIO" });
-        }
-        return Reflect.apply(originalUnlinkSync, fs, args) as void;
-      }
-    });
-    try {
-      const failed = initProject({ projectRoot: project });
-      assert.equal(failed.ok, false);
-      assert.equal(fs.existsSync(preparedPath), true);
-      assert.equal(fs.readFileSync(codexPath, "utf8"), V0_0_2_STOCK_CODEX_ADAPTER);
-    } finally {
-      Object.defineProperty(fs, "writeSync", writeDescriptor);
-      Object.defineProperty(fs, "unlinkSync", unlinkDescriptor);
-    }
-
-    const recovered = initProject({ projectRoot: project });
-    assert.equal(recovered.ok, true, JSON.stringify(recovered.diagnostics));
-    assert.equal(fs.existsSync(preparedPath), false);
-    assert.match(fs.readFileSync(codexPath, "utf8"), /process\.env\.ULTRAFUZZ_CONFIG_PATH/u);
-  }
-);
-
-test(
-  "stock adapter migration removes its temporary file when the first temporary fstat fails",
-  { concurrency: false, skip: process.platform === "win32" || !fs.existsSync("/proc/self/fd") },
-  () => {
-    const project = tempProject();
-    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
-    const agentsDirectory = path.join(project, ".smithers", "agents");
-    const codexPath = path.join(agentsDirectory, "codex.ts");
-    fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
-    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "fstatSync")!;
-    const originalFstatSync = fs.fstatSync;
-    let induced = false;
-
-    Object.defineProperty(fs, "fstatSync", {
-      ...originalDescriptor,
-      value: (...args: unknown[]) => {
-        const descriptor = Number(args[0]);
-        let target = "";
-        try {
-          target = fs.readlinkSync(`/proc/self/fd/${descriptor}`);
-        } catch {
-          // Let the real fstat report invalid descriptors.
-        }
-        if (!induced && target.includes(".codex.ts.ultrafuzz-init-")) {
-          induced = true;
-          throw Object.assign(new Error("induced first temporary fstat failure"), { code: "EIO" });
-        }
-        return Reflect.apply(originalFstatSync, fs, args) as fs.Stats | fs.BigIntStats;
-      }
-    });
-    try {
-      const failed = initProject({ projectRoot: project });
-      assert.equal(induced, true);
-      assert.equal(failed.ok, false);
-      assert.equal(fs.readFileSync(codexPath, "utf8"), V0_0_2_STOCK_CODEX_ADAPTER);
-      assert.equal(
-        fs.readdirSync(agentsDirectory).some((entry) => entry.includes(".ultrafuzz-init-")),
-        false
-      );
-      assert.deepEqual(openDescriptorTargetsInside(agentsDirectory), []);
-    } finally {
-      Object.defineProperty(fs, "fstatSync", originalDescriptor);
-    }
-  }
-);
-
-test(
-  "stock adapter migration aggregates a failed temporary close without skipping cleanup",
-  { concurrency: false, skip: process.platform === "win32" || !fs.existsSync("/proc/self/fd") },
-  () => {
-    const project = tempProject();
-    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
-    const agentsDirectory = path.join(project, ".smithers", "agents");
-    const codexPath = path.join(agentsDirectory, "codex.ts");
-    fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
-    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "closeSync")!;
-    const originalCloseSync = fs.closeSync;
-    let induced = false;
-
-    Object.defineProperty(fs, "closeSync", {
-      ...originalDescriptor,
-      value: (...args: unknown[]) => {
-        const descriptor = Number(args[0]);
-        let target = "";
-        try {
-          target = fs.readlinkSync(`/proc/self/fd/${descriptor}`);
-        } catch {
-          // Let the real close report invalid descriptors.
-        }
-        if (!induced && target.includes(".codex.ts.ultrafuzz-init-")) {
-          induced = true;
-          Reflect.apply(originalCloseSync, fs, args);
-          throw Object.assign(new Error("induced first temporary close failure"), { code: "EIO" });
-        }
-        return Reflect.apply(originalCloseSync, fs, args) as void;
-      }
-    });
-    try {
-      const upgraded = initProject({ projectRoot: project });
-      assert.equal(induced, true);
-      assert.equal(upgraded.ok, false, JSON.stringify(upgraded.diagnostics));
-      assert.match(fs.readFileSync(codexPath, "utf8"), /process\.env\.ULTRAFUZZ_CONFIG_PATH/u);
-      assert.equal(
-        fs.readdirSync(agentsDirectory).some((entry) => entry.includes(".ultrafuzz-init-")),
-        false
-      );
-      assert.deepEqual(openDescriptorTargetsInside(agentsDirectory), []);
-    } finally {
-      Object.defineProperty(fs, "closeSync", originalDescriptor);
-    }
-  }
-);
 
 test(
   "init converts an adapter inspection failure into a preserved manual-review warning",
@@ -2141,7 +1739,7 @@ test(
       value: (...args: unknown[]) => {
         if (String(args[0]) === codexPath) {
           codexOpenCount += 1;
-          if (codexOpenCount === 2) {
+          if (codexOpenCount === 1) {
             throw Object.assign(new Error("induced sensitive adapter inspection failure"), { code: "EACCES" });
           }
         }
@@ -2151,7 +1749,7 @@ test(
     try {
       const preserved = initProject({ projectRoot: project });
       assert.equal(preserved.ok, true, JSON.stringify(preserved.diagnostics));
-      assert.equal(codexOpenCount, 2);
+      assert.equal(codexOpenCount, 1);
       assert.equal(fs.readFileSync(codexPath, "utf8"), customized);
       const warning = preserved.diagnostics.find(
         (diagnostic) =>
@@ -2198,7 +1796,7 @@ test("non-force init preserves a customized stale adapter and force remains expl
   assert.match(fs.readFileSync(codexPath, "utf8"), /process\.env\.ULTRAFUZZ_CONFIG_PATH/u);
 });
 
-test("non-force init never follows or overwrites linked stock adapter paths", () => {
+test("non-force init never follows or overwrites linked adapter paths", () => {
   for (const linkKind of ["symbolic", "hard"] as const) {
     const project = tempProject();
     assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
@@ -2228,7 +1826,7 @@ test("non-force init never follows or overwrites linked stock adapter paths", ()
   }
 });
 
-test("startRun gives manual upgrade guidance for a customized stale adapter", async () => {
+test("startRun gives manual update guidance for a customized stale adapter", async () => {
   const project = tempProject();
   assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
   writeSmallTopology(project);
@@ -2241,7 +1839,7 @@ test("startRun gives manual upgrade guidance for a customized stale adapter", as
   assert.equal(run.diagnostics[0]?.code, "WORKFLOW_SUBMISSION_FAILED");
   assert.match(run.diagnostics[0]?.message ?? "", /process\.env\.ULTRAFUZZ_CONFIG_PATH/u);
   assert.match(run.diagnostics[0]?.message ?? "", /rerun ultrafuzz init/u);
-  assert.match(run.diagnostics[0]?.message ?? "", /update this customized adapter manually/u);
+  assert.match(run.diagnostics[0]?.message ?? "", /update this adapter manually/u);
 });
 
 test("init preserves a dangling adapter symlink without writing through it", () => {
@@ -2291,188 +1889,6 @@ test("init does not modify a regular file swapped after the anchored open", { co
   assert.equal(fs.readFileSync(environmentPath, "utf8"), concurrentContents);
   assert.equal(fs.readFileSync(`${environmentPath}.old`, "utf8"), originalContents);
 });
-
-test(
-  "stock adapter publication retains the replacement when final directory fsync fails",
-  { concurrency: false },
-  () => {
-    const project = tempProject();
-    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
-    const agentsDirectory = path.join(project, ".smithers", "agents");
-    const codexPath = path.join(agentsDirectory, "codex.ts");
-    const expectedReplacement = fs.readFileSync(codexPath, "utf8");
-    fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
-    const originalFsyncSync = fs.fsyncSync;
-    const descriptor = Object.getOwnPropertyDescriptor(fs, "fsyncSync")!;
-    let directoryFsyncs = 0;
-    Object.defineProperty(fs, "fsyncSync", {
-      ...descriptor,
-      value: (fileDescriptor: number) => {
-        let target = "";
-        try {
-          target = fs.readlinkSync(`/proc/self/fd/${fileDescriptor}`);
-        } catch {
-          // Let the real fsync report invalid descriptors.
-        }
-        if (target === agentsDirectory) {
-          directoryFsyncs += 1;
-          if (directoryFsyncs === 4)
-            throw Object.assign(new Error("induced final directory fsync failure"), { code: "EIO" });
-        }
-        return originalFsyncSync(fileDescriptor);
-      }
-    });
-    try {
-      const result = initProject({ projectRoot: project });
-      assert.equal(result.ok, false);
-    } finally {
-      Object.defineProperty(fs, "fsyncSync", descriptor);
-    }
-    assert.equal(directoryFsyncs, 4);
-    assert.equal(fs.readFileSync(codexPath, "utf8"), expectedReplacement);
-    assert.deepEqual(
-      fs.readdirSync(agentsDirectory).filter((entry) => entry.includes(".ultrafuzz-init-")),
-      []
-    );
-  }
-);
-
-test(
-  "stock adapter publication retains its recovery marker when post-displacement fsync fails",
-  { concurrency: false },
-  () => {
-    const project = tempProject();
-    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
-    const agentsDirectory = path.join(project, ".smithers", "agents");
-    const codexPath = path.join(agentsDirectory, "codex.ts");
-    const expectedReplacement = fs.readFileSync(codexPath, "utf8");
-    fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
-    const originalFsyncSync = fs.fsyncSync;
-    const descriptor = Object.getOwnPropertyDescriptor(fs, "fsyncSync")!;
-    let directoryFsyncs = 0;
-    Object.defineProperty(fs, "fsyncSync", {
-      ...descriptor,
-      value: (fileDescriptor: number) => {
-        let target = "";
-        try {
-          target = fs.readlinkSync(`/proc/self/fd/${fileDescriptor}`);
-        } catch {
-          // Let the real fsync report invalid descriptors.
-        }
-        if (target === agentsDirectory) {
-          directoryFsyncs += 1;
-          if (directoryFsyncs === 3)
-            throw Object.assign(new Error("induced post-displacement directory fsync failure"), { code: "EIO" });
-        }
-        return originalFsyncSync(fileDescriptor);
-      }
-    });
-    try {
-      const result = initProject({ projectRoot: project });
-      assert.equal(result.ok, false);
-    } finally {
-      Object.defineProperty(fs, "fsyncSync", descriptor);
-    }
-    assert.equal(directoryFsyncs, 3);
-    assert.equal(fs.readFileSync(codexPath, "utf8"), expectedReplacement);
-    assert.deepEqual(
-      fs.readdirSync(agentsDirectory).filter((entry) => entry.includes(".ultrafuzz-init-")),
-      [".codex.ts.ultrafuzz-init-recovery"]
-    );
-    assert.equal(initProject({ projectRoot: project }).ok, true);
-    assert.equal(fs.existsSync(path.join(agentsDirectory, ".codex.ts.ultrafuzz-init-recovery")), false);
-  }
-);
-
-test(
-  "stock adapter publication restores the original when intermediate commit fsync fails",
-  { concurrency: false },
-  () => {
-    const project = tempProject();
-    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
-    const agentsDirectory = path.join(project, ".smithers", "agents");
-    const codexPath = path.join(agentsDirectory, "codex.ts");
-    fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
-    const originalFsyncSync = fs.fsyncSync;
-    const descriptor = Object.getOwnPropertyDescriptor(fs, "fsyncSync")!;
-    let directoryFsyncs = 0;
-    Object.defineProperty(fs, "fsyncSync", {
-      ...descriptor,
-      value: (fileDescriptor: number) => {
-        let target = "";
-        try {
-          target = fs.readlinkSync(`/proc/self/fd/${fileDescriptor}`);
-        } catch {
-          // Let the real fsync report invalid descriptors.
-        }
-        if (target === agentsDirectory) {
-          directoryFsyncs += 1;
-          if (directoryFsyncs === 2)
-            throw Object.assign(new Error("induced intermediate directory fsync failure"), { code: "EIO" });
-        }
-        return originalFsyncSync(fileDescriptor);
-      }
-    });
-    try {
-      const result = initProject({ projectRoot: project });
-      assert.equal(result.ok, false);
-    } finally {
-      Object.defineProperty(fs, "fsyncSync", descriptor);
-    }
-    assert.equal(directoryFsyncs, 2);
-    assert.equal(fs.readFileSync(codexPath, "utf8"), V0_0_2_STOCK_CODEX_ADAPTER);
-    assert.deepEqual(
-      fs.readdirSync(agentsDirectory).filter((entry) => entry.includes(".ultrafuzz-init-")),
-      []
-    );
-  }
-);
-
-test(
-  "stock adapter publication retains the replacement when final directory stability fails",
-  { concurrency: false },
-  () => {
-    const project = tempProject();
-    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
-    const agentsDirectory = path.join(project, ".smithers", "agents");
-    const codexPath = path.join(agentsDirectory, "codex.ts");
-    const expectedReplacement = fs.readFileSync(codexPath, "utf8");
-    fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
-    const originalLstatSync = fs.lstatSync;
-    const descriptor = Object.getOwnPropertyDescriptor(fs, "lstatSync")!;
-    let injected = false;
-    Object.defineProperty(fs, "lstatSync", {
-      ...descriptor,
-      value: (...args: unknown[]) => {
-        const result = Reflect.apply(originalLstatSync, fs, args) as fs.BigIntStats;
-        if (
-          !injected &&
-          String(args[0]) === agentsDirectory &&
-          !fs.existsSync(path.join(agentsDirectory, ".codex.ts.ultrafuzz-init-recovery"))
-        ) {
-          const target = fs.lstatSync(codexPath, { bigint: true });
-          if (target.size === BigInt(Buffer.byteLength(expectedReplacement))) {
-            injected = true;
-            return { ...result, ino: result.ino + 1n } as fs.BigIntStats;
-          }
-        }
-        return result;
-      }
-    });
-    try {
-      const result = initProject({ projectRoot: project });
-      assert.equal(result.ok, false);
-    } finally {
-      Object.defineProperty(fs, "lstatSync", descriptor);
-    }
-    assert.equal(injected, true);
-    assert.equal(fs.readFileSync(codexPath, "utf8"), expectedReplacement);
-    assert.deepEqual(
-      fs.readdirSync(agentsDirectory).filter((entry) => entry.includes(".ultrafuzz-init-")),
-      []
-    );
-  }
-);
 
 test(
   "generated Codex adapter repeats artifact directory flags and preserves resume argv",
@@ -4542,7 +3958,7 @@ test("validate rejects unknown agent references before launch", async () => {
   assert.ok(run.diagnostics.some((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN"));
 });
 
-test("validate ignores unused opt-in model profiles in older agent registries", async () => {
+test("validate rejects incomplete current agent registries even when missing profiles are unused", async () => {
   const project = tempProject();
   const init = initProject({ projectRoot: project, force: true });
   assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
@@ -4550,12 +3966,23 @@ test("validate ignores unused opt-in model profiles in older agent registries", 
   fs.writeFileSync(
     path.join(project, ".smithers/agents/index.ts"),
     'export { createCodexAgent } from "./codex";\n' +
-      "export const agentFactories = { CodexAgent: createCodexAgent };\n",
+      'export { ClaudeAgent } from "./claude";\n' +
+      "export const agentFactories = {\n" +
+      "  CodexAgent: createCodexAgent,\n" +
+      "  // DeepSeekAgent: createDeepSeekAgent,\n" +
+      '  note: "KimiAgent:"\n' +
+      "};\n",
     "utf8"
   );
 
   const validate = await validateProject({ projectRoot: project, env: {} });
-  assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
+  assert.equal(validate.ok, false);
+  assert.deepEqual(
+    validate.diagnostics
+      .filter((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN")
+      .map((diagnostic) => diagnostic.message.match(/agent reference (\w+)/u)?.[1]),
+    ["ClaudeAgent", "DeepSeekAgent", "KimiAgent"]
+  );
 
   const kimiRun = await startRun({
     projectRoot: project,
@@ -4565,6 +3992,208 @@ test("validate ignores unused opt-in model profiles in older agent registries", 
   });
   assert.equal(kimiRun.ok, false);
   assert.ok(kimiRun.diagnostics.some((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN"));
+});
+
+test("validate requires every configured agent factory after a default agent override", async () => {
+  const project = tempProject();
+  const init = initProject({ projectRoot: project, force: true });
+  assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+  writeSmallTopology(project);
+  const registryPath = path.join(project, ".smithers/agents/index.ts");
+  fs.writeFileSync(
+    registryPath,
+    fs.readFileSync(registryPath, "utf8").replace("  CodexAgent: createCodexAgent,\n", ""),
+    "utf8"
+  );
+
+  const validate = await validateProject({ projectRoot: project, agent: "ClaudeAgent", env: {} });
+
+  assert.equal(validate.ok, false);
+  assert.deepEqual(
+    validate.diagnostics
+      .filter((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN")
+      .map((diagnostic) => diagnostic.message.match(/agent reference (\w+)/u)?.[1]),
+    ["CodexAgent"]
+  );
+});
+
+test("validate ignores agentFactories lookalikes inside registry strings", async () => {
+  const project = tempProject();
+  const init = initProject({ projectRoot: project, force: true });
+  assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+  writeSmallTopology(project);
+  fs.writeFileSync(
+    path.join(project, ".smithers/agents/index.ts"),
+    'export const decoy = "export const agentFactories = { ClaudeAgent: fake, CodexAgent: fake, DeepSeekAgent: fake, KimiAgent: fake }";\n',
+    "utf8"
+  );
+
+  const validate = await validateProject({ projectRoot: project, env: {} });
+
+  assert.equal(validate.ok, false);
+  assert.deepEqual(
+    validate.diagnostics
+      .filter((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN")
+      .map((diagnostic) => diagnostic.message.match(/agent reference (\w+)/u)?.[1]),
+    ["ClaudeAgent", "CodexAgent", "DeepSeekAgent", "KimiAgent"]
+  );
+});
+
+test("validate rejects type-only agentFactories exports", async () => {
+  const project = tempProject();
+  const init = initProject({ projectRoot: project, force: true });
+  assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+  writeSmallTopology(project);
+  const registryPrefix =
+    "const createAgent = () => null;\n" +
+    "const registry = {\n" +
+    "  ClaudeAgent: createAgent,\n" +
+    "  CodexAgent: createAgent,\n" +
+    "  DeepSeekAgent: createAgent,\n" +
+    "  KimiAgent: createAgent\n" +
+    "};\n";
+  for (const exportStatement of [
+    "export type { registry as agentFactories };\n",
+    "export { type registry as agentFactories };\n"
+  ]) {
+    fs.writeFileSync(path.join(project, ".smithers/agents/index.ts"), registryPrefix + exportStatement, "utf8");
+
+    const validate = await validateProject({ projectRoot: project, env: {} });
+
+    assert.equal(validate.ok, false);
+    assert.deepEqual(
+      validate.diagnostics
+        .filter((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN")
+        .map((diagnostic) => diagnostic.message.match(/agent reference (\w+)/u)?.[1]),
+      ["ClaudeAgent", "CodexAgent", "DeepSeekAgent", "KimiAgent"]
+    );
+  }
+});
+
+test("validate accepts typed current registries with shorthand factory entries", async () => {
+  const project = tempProject();
+  const init = initProject({ projectRoot: project, force: true });
+  assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+  writeSmallTopology(project);
+  fs.writeFileSync(
+    path.join(project, ".smithers/agents/index.ts"),
+    "type Factory = () => unknown;\n" +
+      "const ClaudeAgent: Factory = () => null;\n" +
+      "const CodexAgent: Factory = () => null;\n" +
+      "const createDeepSeek: Factory = () => null;\n" +
+      "const createKimi: Factory = () => null;\n" +
+      "export const agentFactories: Record<string, Factory> = {\n" +
+      "  ClaudeAgent,\n" +
+      "  CodexAgent,\n" +
+      "  DeepSeekAgent: createDeepSeek,\n" +
+      '  "KimiAgent": createKimi\n' +
+      "};\n",
+    "utf8"
+  );
+
+  const validate = await validateProject({ projectRoot: project, env: {} });
+
+  assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
+});
+
+test("validate accepts separately exported frozen registries with static computed keys", async () => {
+  const project = tempProject();
+  const init = initProject({ projectRoot: project, force: true });
+  assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+  writeSmallTopology(project);
+  fs.writeFileSync(
+    path.join(project, ".smithers/agents/index.ts"),
+    "const createAgent = () => null;\n" +
+      "const registry = Object.freeze({\n" +
+      '  ["ClaudeAgent"]: createAgent,\n' +
+      "  CodexAgent: createAgent,\n" +
+      "  DeepSeekAgent: createAgent,\n" +
+      "  KimiAgent: createAgent\n" +
+      "} as const);\n" +
+      "export { registry as agentFactories };\n",
+    "utf8"
+  );
+
+  const validate = await validateProject({ projectRoot: project, env: {} });
+
+  assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
+});
+
+test("validate and init accept canonical registries composed from local factory spreads", async () => {
+  const project = tempProject();
+  const initialized = initProject({ projectRoot: project, force: true });
+  assert.equal(initialized.ok, true, JSON.stringify(initialized.diagnostics));
+  writeSmallTopology(project);
+  fs.writeFileSync(
+    path.join(project, ".smithers/agents/index.ts"),
+    "const createAgent = () => null;\n" +
+      "const coreFactories = Object.freeze({\n" +
+      "  ClaudeAgent: createAgent,\n" +
+      "  CodexAgent: createAgent\n" +
+      "});\n" +
+      "const additionalFactories = {\n" +
+      "  DeepSeekAgent: createAgent,\n" +
+      "  KimiAgent: createAgent\n" +
+      "};\n" +
+      "export const agentFactories = {\n" +
+      "  ...coreFactories,\n" +
+      "  ...additionalFactories\n" +
+      "};\n",
+    "utf8"
+  );
+
+  const validate = await validateProject({ projectRoot: project, env: {} });
+  const preserved = initProject({ projectRoot: project });
+
+  assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
+  assert.equal(preserved.ok, true, JSON.stringify(preserved.diagnostics));
+  assert.equal(
+    preserved.diagnostics.some((diagnostic) => diagnostic.code === "INIT_AGENT_REGISTRY_STALE"),
+    false
+  );
+});
+
+test("validate accepts quoted factory keys for current custom agent IDs", async () => {
+  const project = tempProject();
+  const init = initProject({ projectRoot: project, force: true });
+  assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+  writeSmallTopology(project);
+  const configPath = path.join(project, "ultrafuzz.toml");
+  fs.writeFileSync(
+    configPath,
+    fs.readFileSync(configPath, "utf8").replace('agent = "CodexAgent"', 'agent = "custom.agent:v1-beta"'),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(project, ".smithers/agents/index.ts"),
+    "const createAgent = () => null;\n" +
+      "export const agentFactories = {\n" +
+      "  ClaudeAgent: createAgent,\n" +
+      "  CodexAgent: createAgent,\n" +
+      "  DeepSeekAgent: createAgent,\n" +
+      "  KimiAgent: createAgent,\n" +
+      '  "custom.agent:v1-beta": createAgent\n' +
+      "};\n",
+    "utf8"
+  );
+
+  const validate = await validateProject({ projectRoot: project, env: {} });
+
+  assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
+});
+
+test("validate rejects the historical single-file agent registry location", async () => {
+  const project = tempProject();
+  const init = initProject({ projectRoot: project, force: true });
+  assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+  writeSmallTopology(project);
+  const canonicalRegistry = path.join(project, ".smithers/agents/index.ts");
+  fs.renameSync(canonicalRegistry, path.join(project, ".smithers/agents.ts"));
+
+  const validate = await validateProject({ projectRoot: project, env: {} });
+
+  assert.equal(validate.ok, false);
+  assert.ok(validate.diagnostics.some((diagnostic) => diagnostic.code === "AGENT_REGISTRY_MISSING"));
 });
 
 test("init and run layout reject symlinked project-owned roots before writes", async () => {
@@ -5158,6 +4787,8 @@ test("compileSmithersWorkflow gates native dependencies on deterministic artifac
   assert.doesNotMatch(workflowSource, /const layers =/);
   assert.doesNotMatch(workflowSource, /<Sequence\b/);
   assert.match(workflowSource, /<Parallel\b/);
+  assert.doesNotMatch(workflowSource, /agentRegistry/u);
+  assert.match(workflowSource, /agent factory is not registered/u);
 
   const smithersTasks = JSON.parse(fs.readFileSync(compiled.tasksPath, "utf8")) as {
     layers?: unknown;
@@ -5937,8 +5568,8 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.doesNotMatch(workflowSource, /z\.object\(/u);
   // Explicit index path: a sibling .smithers/agents.ts scaffolded by Smithers
   // would otherwise shadow the .smithers/agents/ directory under bun.
-  assert.match(workflowSource, /import \* as projectAgents from "\.\.\/agents\/index\.ts";/);
-  assert.doesNotMatch(workflowSource, /import \* as projectAgents from "\.\.\/agents";/);
+  assert.match(workflowSource, /import \{ agentFactories as projectAgentFactories \} from "\.\.\/agents\/index\.ts";/);
+  assert.doesNotMatch(workflowSource, /import \{ agentFactories as projectAgentFactories \} from "\.\.\/agents";/);
   assert.match(workflowSource, /agent=\{agentForTask\(task, fullTaskPrompt\)\}/);
   assert.match(workflowSource, /addDir:\s*\[task\.artifactDir, \.\.\.task\.dependencyArtifactDirs\]/);
   assert.match(workflowSource, /const schemaDirectory = path\.join\(workspaceRoot, "\.ultrafuzz", "schemas"\)/u);

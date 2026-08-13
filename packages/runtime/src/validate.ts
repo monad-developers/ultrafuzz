@@ -20,6 +20,7 @@ import type {
   ValidateProjectResult
 } from "./types.js";
 import { effectiveAuditPolicy } from "./audit-profile-policy.js";
+import { registeredAgentFactoryNames } from "./agent-registry.js";
 import { transformTopologyForRun } from "./topology-transform.js";
 import {
   configDiagnostics,
@@ -28,6 +29,8 @@ import {
   postureFromDiagnostics,
   runtimeResult
 } from "./utils.js";
+
+const SAFE_AGENT_REF_PATTERN = /^(?!.*\.\.)[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/u;
 
 export async function validateProject(input: ValidateProjectInput) {
   const projectRoot = path.resolve(input.projectRoot);
@@ -52,7 +55,7 @@ export async function validateProject(input: ValidateProjectInput) {
   }
 
   if (resolved.config) {
-    const policy = evaluatePolicies(projectRoot, resolved.config, input.env ?? process.env, topologyCheck.agentRefs);
+    const policy = evaluatePolicies(projectRoot, resolved.config, resolved.configuredAgentRefs ?? []);
     Object.assign(posture, policy.posture);
   } else {
     const blocked = postureFromDiagnostics("policy", "policy checks need valid config", [
@@ -84,6 +87,7 @@ export async function validateProject(input: ValidateProjectInput) {
 export async function loadResolvedProject(input: ValidateProjectInput): Promise<{
   config?: ResolvedConfig;
   configPath?: string;
+  configuredAgentRefs?: readonly string[];
   diagnostics: RuntimeDiagnostic[];
 }> {
   const loaded = await loadProjectConfig(path.resolve(input.projectRoot));
@@ -101,10 +105,14 @@ export async function loadResolvedProject(input: ValidateProjectInput): Promise<
       diagnostics: configDiagnostics(redactDiagnostics([...loaded.diagnostics, ...resolved.diagnostics]))
     };
   }
+  const configuredAgentRefs = [
+    ...new Set(Object.values(resolved.value.models.profiles).map((profile) => profile.agent))
+  ];
   applyAgentOverrides(resolved.value, input);
   return {
     config: resolved.value,
     configPath: loaded.value.path,
+    configuredAgentRefs,
     diagnostics: configDiagnostics(redactDiagnostics([...loaded.diagnostics, ...resolved.diagnostics]))
   };
 }
@@ -206,7 +214,6 @@ function validateTopologySurface(
 ): {
   posture: PostureItem;
   summary?: ValidateProjectResult["topology"];
-  agentRefs?: Set<string>;
 } {
   try {
     const policy =
@@ -287,8 +294,7 @@ function validateTopologySurface(
         logical_nodes: topology.nodes.length,
         expanded_nodes: expanded.nodes.length,
         required_commands: [...new Set(expanded.nodes.flatMap((node) => node.requiredCommands ?? []))].sort()
-      },
-      agentRefs: selectedAgents
+      }
     };
   } catch (error) {
     return {
@@ -302,12 +308,11 @@ function validateTopologySurface(
 function evaluatePolicies(
   projectRoot: string,
   config: ResolvedConfig,
-  _env: Record<string, string | undefined>,
-  selectedAgentRefs: Set<string> | undefined
+  configuredAgentRefs: readonly string[]
 ): {
   posture: Omit<PolicyPosture, "config" | "topology" | "prompts">;
 } {
-  const agentRegistry = validateAgentReferences(projectRoot, config, selectedAgentRefs);
+  const agentRegistry = validateAgentReferences(projectRoot, config, configuredAgentRefs);
   return {
     posture: {
       paths: postureFromDiagnostics("paths", "product files are written through project-local path guards", []),
@@ -324,47 +329,40 @@ function evaluatePolicies(
 function validateAgentReferences(
   projectRoot: string,
   config: ResolvedConfig,
-  selectedAgentRefs: Set<string> | undefined
+  configuredAgentRefs: readonly string[]
 ): RuntimeDiagnostic[] {
   const diagnostics: RuntimeDiagnostic[] = [];
-  const defaultProfile = config.models.profiles[config.models.default];
-  const agentRefs = selectedAgentRefs ?? new Set(defaultProfile === undefined ? [] : [defaultProfile.agent]);
-  const candidates = [
-    path.join(projectRoot, ".smithers", "agents.ts"),
-    path.join(projectRoot, ".smithers", "agents", "index.ts")
-  ];
-  const existing = candidates.filter((candidate) => fs.existsSync(candidate));
-  if (existing.length === 0) {
+  const agentRefs = new Set([
+    ...configuredAgentRefs,
+    ...Object.values(config.models.profiles).map((profile) => profile.agent)
+  ]);
+  const registryPath = path.join(projectRoot, ".smithers", "agents", "index.ts");
+  if (!fs.existsSync(registryPath)) {
     return [
       {
         code: "AGENT_REGISTRY_MISSING",
-        message: "project agent registry is missing; rerun ultrafuzz init to restore it",
+        message:
+          "canonical project agent registry .smithers/agents/index.ts is missing; rerun ultrafuzz init to restore it",
         severity: "error",
         source: "agents",
-        path: "agent registry"
+        path: ".smithers/agents/index.ts"
       }
     ];
   }
-  const registryText = existing.map((candidate) => fs.readFileSync(candidate, "utf8")).join("\n");
+  const registryText = fs.readFileSync(registryPath, "utf8");
+  const registeredFactories = registeredAgentFactoryNames(registryText);
   for (const agentRef of [...agentRefs].sort()) {
-    if (!agentRefExported(registryText, agentRef)) {
+    if (!SAFE_AGENT_REF_PATTERN.test(agentRef) || !registeredFactories.has(agentRef)) {
       diagnostics.push({
         code: "AGENT_REFERENCE_UNKNOWN",
-        message: `agent reference ${agentRef} is not exported by the project agent registry`,
+        message: `agent reference ${agentRef} is not registered in agentFactories by .smithers/agents/index.ts`,
         severity: "error",
         source: "agents",
-        path: "agent registry"
+        path: ".smithers/agents/index.ts"
       });
     }
   }
   return diagnostics;
-}
-
-function agentRefExported(registryText: string, agentRef: string): boolean {
-  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(agentRef)) {
-    return false;
-  }
-  return new RegExp(`\\b${agentRef}\\b`, "u").test(registryText);
 }
 
 function applyAgentOverrides(config: ResolvedConfig, input: ValidateProjectInput): void {

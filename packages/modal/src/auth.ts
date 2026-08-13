@@ -444,7 +444,7 @@ function kimiOAuthRefresh(contents: Uint8Array): {
 }
 
 function kimiPersistedOAuthHost(providerName: string, oauth: Record<string, unknown>): string | undefined {
-  const value = oauth.oauth_host ?? oauth.oauthHost;
+  const value = oauth.oauthHost;
   if (value === undefined) return undefined;
   if (typeof value !== "string" || value.trim() === "") {
     throw new Error(`Kimi subscription provider ${providerName} has an invalid OAuth host`);
