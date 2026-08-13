@@ -1072,8 +1072,13 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   const runningState = JSON.parse(fs.readFileSync(statePath, "utf8")) as {
     status: string;
     nodes: Record<string, Record<string, unknown>>;
+    workflow_deadline_at?: string;
   };
   const firstNodeId = Object.keys(runningState.nodes)[0]!;
+  // These fixtures deliberately exercise multi-day elapsed durations. Keep
+  // the synthetic run live so status synchronization does not correctly time
+  // it out at the real workflow deadline before duration rendering is tested.
+  runningState.workflow_deadline_at = new Date(Date.now() + 7 * 86_400_000).toISOString();
   runningState.nodes[firstNodeId] = {
     ...runningState.nodes[firstNodeId],
     status: "running",

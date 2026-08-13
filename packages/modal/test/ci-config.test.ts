@@ -993,6 +993,7 @@ describe("public Modal benchmark configuration", () => {
           steps: Array<{
             id?: string;
             name?: string;
+            if?: string;
             uses?: string;
             run?: string;
             env?: Record<string, string>;
