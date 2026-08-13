@@ -1204,9 +1204,9 @@ export function assertPublicBenchmarkGeneration(
   matrix: EvalMatrixRow[]
 ): void {
   const cohort = loadBenchmarkCohortManifest(
-    path.join(projectRoot, "benchmarks", benchmark === "evmbench" ? "evmbench-detect.json" : "ultrafuzz-bench.json")
+    path.join(projectRoot, "benchmarks", benchmark === "evmbench" ? "evmbench" : "ultrafuzzbench", "cohort.json")
   );
-  const lanes = loadBenchmarkLanesManifest(path.join(projectRoot, "benchmarks", "lanes.json"));
+  const lanes = loadBenchmarkLanesManifest(path.join(projectRoot, "benchmarks", "ultrafuzzbench", "lanes.json"));
   const actualRunnerProfiles = [
     ...new Set(suite.variants.map((variant) => variant.runner_model_profile ?? suite.run.runner_model_profile))
   ];

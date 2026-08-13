@@ -20,9 +20,9 @@ if (!output) throw new Error("benchmark suite output path is required");
 
 const root = process.cwd();
 const cohort = loadBenchmarkCohortManifest(
-  path.join(root, "benchmarks", benchmark === "evmbench" ? "evmbench-detect.json" : "ultrafuzz-bench.json")
+  path.join(root, "benchmarks", benchmark === "evmbench" ? "evmbench" : "ultrafuzzbench", "cohort.json")
 );
-const lanes = loadBenchmarkLanesManifest(path.join(root, "benchmarks", "lanes.json"));
+const lanes = loadBenchmarkLanesManifest(path.join(root, "benchmarks", "ultrafuzzbench", "lanes.json"));
 const suite = adaptBenchmarkManifestToEvalSuite({
   benchmark,
   lane,

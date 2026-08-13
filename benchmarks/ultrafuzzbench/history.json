@@ -1926,7 +1926,7 @@
       "status": "succeeded",
       "executed_case_count": 1,
       "graded_case_count": 1,
-      "publication_url": "https://github.com/monad-developers/ultrafuzz/tree/main/benchmarks/public-results/ultrafuzz-bench/smoke/kimi-k3-max-bdf2482db2ad359aa9b48775e73206fa37f32278",
+      "publication_url": "https://github.com/monad-developers/ultrafuzz/tree/main/benchmarks/ultrafuzzbench/results/smoke/kimi-k3-max-bdf2482db2ad359aa9b48775e73206fa37f32278",
       "target_publication": {
         "target": "stableswap-ng-vyper",
         "repository": "https://github.com/curvefi/stableswap-ng",
@@ -1995,7 +1995,7 @@
       "status": "succeeded",
       "executed_case_count": 1,
       "graded_case_count": 1,
-      "publication_url": "https://github.com/monad-developers/ultrafuzz/tree/main/benchmarks/public-results/ultrafuzz-bench/smoke/kimi-k3-max-bdf2482db2ad359aa9b48775e73206fa37f32278",
+      "publication_url": "https://github.com/monad-developers/ultrafuzz/tree/main/benchmarks/ultrafuzzbench/results/smoke/kimi-k3-max-bdf2482db2ad359aa9b48775e73206fa37f32278",
       "target_publication": {
         "target": "venus-isolated-pools-hardhat",
         "repository": "https://github.com/code-423n4/2023-05-venus",
@@ -2064,7 +2064,7 @@
       "status": "succeeded",
       "executed_case_count": 1,
       "graded_case_count": 1,
-      "publication_url": "https://github.com/monad-developers/ultrafuzz/tree/main/benchmarks/public-results/ultrafuzz-bench/smoke/kimi-k3-max-bdf2482db2ad359aa9b48775e73206fa37f32278",
+      "publication_url": "https://github.com/monad-developers/ultrafuzz/tree/main/benchmarks/ultrafuzzbench/results/smoke/kimi-k3-max-bdf2482db2ad359aa9b48775e73206fa37f32278",
       "target_publication": {
         "target": "very-liquid-vaults-foundry",
         "repository": "https://github.com/rheo-xyz/very-liquid-vaults",
@@ -3583,7 +3583,7 @@
       "status": "succeeded",
       "executed_case_count": 1,
       "graded_case_count": 1,
-      "publication_url": "https://github.com/monad-developers/ultrafuzz/tree/main/benchmarks/public-results/ultrafuzz-bench/smoke/deepseek-v4-pro-max-09277b81397d06cf697403a863c8f29f4e2320b9",
+      "publication_url": "https://github.com/monad-developers/ultrafuzz/tree/main/benchmarks/ultrafuzzbench/results/smoke/deepseek-v4-pro-max-09277b81397d06cf697403a863c8f29f4e2320b9",
       "target_publication": {
         "target": "stableswap-ng-vyper",
         "repository": "https://github.com/curvefi/stableswap-ng",
@@ -3652,7 +3652,7 @@
       "status": "succeeded",
       "executed_case_count": 1,
       "graded_case_count": 1,
-      "publication_url": "https://github.com/monad-developers/ultrafuzz/tree/main/benchmarks/public-results/ultrafuzz-bench/smoke/deepseek-v4-pro-max-09277b81397d06cf697403a863c8f29f4e2320b9",
+      "publication_url": "https://github.com/monad-developers/ultrafuzz/tree/main/benchmarks/ultrafuzzbench/results/smoke/deepseek-v4-pro-max-09277b81397d06cf697403a863c8f29f4e2320b9",
       "target_publication": {
         "target": "venus-isolated-pools-hardhat",
         "repository": "https://github.com/code-423n4/2023-05-venus",
@@ -3721,7 +3721,7 @@
       "status": "succeeded",
       "executed_case_count": 1,
       "graded_case_count": 1,
-      "publication_url": "https://github.com/monad-developers/ultrafuzz/tree/main/benchmarks/public-results/ultrafuzz-bench/smoke/deepseek-v4-pro-max-09277b81397d06cf697403a863c8f29f4e2320b9",
+      "publication_url": "https://github.com/monad-developers/ultrafuzz/tree/main/benchmarks/ultrafuzzbench/results/smoke/deepseek-v4-pro-max-09277b81397d06cf697403a863c8f29f4e2320b9",
       "target_publication": {
         "target": "very-liquid-vaults-foundry",
         "repository": "https://github.com/rheo-xyz/very-liquid-vaults",
@@ -4204,7 +4204,7 @@
       "status": "succeeded",
       "executed_case_count": 1,
       "graded_case_count": 1,
-      "publication_url": "https://github.com/monad-developers/ultrafuzz/tree/main/benchmarks/public-results/ultrafuzz-bench/smoke/kimi-k3-max-5771bbcb44218fd64e14580443b2502cdf11dad8",
+      "publication_url": "https://github.com/monad-developers/ultrafuzz/tree/main/benchmarks/ultrafuzzbench/results/smoke/kimi-k3-max-5771bbcb44218fd64e14580443b2502cdf11dad8",
       "target_publication": {
         "target": "stableswap-ng-vyper",
         "repository": "https://github.com/curvefi/stableswap-ng",
@@ -4273,7 +4273,7 @@
       "status": "succeeded",
       "executed_case_count": 1,
       "graded_case_count": 1,
-      "publication_url": "https://github.com/monad-developers/ultrafuzz/tree/main/benchmarks/public-results/ultrafuzz-bench/smoke/kimi-k3-max-5771bbcb44218fd64e14580443b2502cdf11dad8",
+      "publication_url": "https://github.com/monad-developers/ultrafuzz/tree/main/benchmarks/ultrafuzzbench/results/smoke/kimi-k3-max-5771bbcb44218fd64e14580443b2502cdf11dad8",
       "target_publication": {
         "target": "venus-isolated-pools-hardhat",
         "repository": "https://github.com/code-423n4/2023-05-venus",
@@ -4342,7 +4342,7 @@
       "status": "succeeded",
       "executed_case_count": 1,
       "graded_case_count": 1,
-      "publication_url": "https://github.com/monad-developers/ultrafuzz/tree/main/benchmarks/public-results/ultrafuzz-bench/smoke/kimi-k3-max-5771bbcb44218fd64e14580443b2502cdf11dad8",
+      "publication_url": "https://github.com/monad-developers/ultrafuzz/tree/main/benchmarks/ultrafuzzbench/results/smoke/kimi-k3-max-5771bbcb44218fd64e14580443b2502cdf11dad8",
       "target_publication": {
         "target": "very-liquid-vaults-foundry",
         "repository": "https://github.com/rheo-xyz/very-liquid-vaults",

@@ -1400,8 +1400,8 @@ function shimTar(root: string, script: string): () => void {
 
 it("bounds public provider fan-out by mode", () => {
   const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
-  const lanes = loadBenchmarkLanesManifest(path.join(repositoryRoot, "benchmarks/lanes.json"));
-  const smokeCohort = loadBenchmarkCohortManifest(path.join(repositoryRoot, "benchmarks/ultrafuzz-bench.json"));
+  const lanes = loadBenchmarkLanesManifest(path.join(repositoryRoot, "benchmarks/ultrafuzzbench/lanes.json"));
+  const smokeCohort = loadBenchmarkCohortManifest(path.join(repositoryRoot, "benchmarks/ultrafuzzbench/cohort.json"));
   const smokeBaseSuite = adaptBenchmarkManifestToEvalSuite({
     benchmark: "ultrafuzz-bench",
     lane: "smoke",
@@ -1425,7 +1425,7 @@ it("bounds public provider fan-out by mode", () => {
   expect(smokeSuite).not.toBe(smokeBaseSuite);
   expect(smokeSuite.run).not.toBe(smokeBaseSuite.run);
 
-  const fullCohort = loadBenchmarkCohortManifest(path.join(repositoryRoot, "benchmarks/evmbench-detect.json"));
+  const fullCohort = loadBenchmarkCohortManifest(path.join(repositoryRoot, "benchmarks/evmbench/cohort.json"));
   const fullBaseSuite = adaptBenchmarkManifestToEvalSuite({
     benchmark: "evmbench",
     lane: "full",
