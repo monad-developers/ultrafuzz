@@ -10776,6 +10776,154 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
   );
 });
 
+test("coverage gate prunes nested dependency, test, and harness roots from production inventory", () => {
+  const layout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-scoped-coverage-nested-roots",
+    resolvedConfigToml: '[permissions]\nproduction_source_roots = ["src"]\n'
+  });
+  const node = {
+    ...plannedNode(["coverage-goal.json", "coverage-report.md", "coverage-evidence.json"]),
+    id: "stateful-invariant-coverage",
+    logical_id: "stateful-invariant-coverage",
+    artifact_dir: "artifacts/stateful-invariant-coverage"
+  };
+  writePlannedGraph(layout, [node]);
+  const workspace = path.join(layout.workspacesDir, node.id);
+  for (const relativePath of [
+    "src/Core.sol",
+    "src/Dependencies/Dep.sol",
+    "src/test/Test.sol",
+    "src/test/recon/Harness.sol"
+  ]) {
+    const absolutePath = path.join(workspace, relativePath);
+    fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
+    fs.writeFileSync(absolutePath, `contract ${path.basename(relativePath, ".sol")} { function run() external {} }\n`);
+  }
+  fs.mkdirSync(path.join(workspace, "magic"), { recursive: true });
+  fs.writeFileSync(
+    path.join(workspace, "magic/recon-coverage.json"),
+    JSON.stringify({ "src/Core.sol": ["1"], "src/Dependencies/Dep.sol": ["1"] })
+  );
+  const lcov = writeCoverageLcov(workspace, {
+    "src/Core.sol": { 1: 1 },
+    "src/Dependencies/Dep.sol": { 1: 1 },
+    "src/test/Test.sol": { 1: 1 },
+    "src/test/recon/Harness.sol": { 1: 1 }
+  });
+  const evidence = {
+    schema_version: "ultrafuzz.coverage-evidence.v1",
+    lcov,
+    views: [
+      { scope: "selected-range", covered_ranges: 1, total_ranges: 1 },
+      { scope: "production-source", covered_ranges: 1, total_ranges: 1 }
+    ],
+    files: [
+      { path: "src/Core.sol", kind: "production", included: true, covered_ranges: 1, total_ranges: 1 },
+      {
+        path: "src/Dependencies/Dep.sol",
+        kind: "dependency",
+        included: false,
+        exclusion_reason: "nested dependency source",
+        covered_ranges: 1,
+        total_ranges: 1
+      },
+      {
+        path: "src/test/Test.sol",
+        kind: "test",
+        included: false,
+        exclusion_reason: "nested test source",
+        covered_ranges: 1,
+        total_ranges: 1
+      },
+      {
+        path: "src/test/recon/Harness.sol",
+        kind: "harness",
+        included: false,
+        exclusion_reason: "nested harness source",
+        covered_ranges: 1,
+        total_ranges: 1
+      }
+    ],
+    counted_ranges: [
+      {
+        file: "src/Core.sol",
+        kind: "production",
+        start_line: 1,
+        line_count: 1,
+        selected: true,
+        covered: true
+      },
+      {
+        file: "src/Dependencies/Dep.sol",
+        kind: "dependency",
+        start_line: 1,
+        line_count: 1,
+        selected: false,
+        covered: true
+      },
+      {
+        file: "src/test/Test.sol",
+        kind: "test",
+        start_line: 1,
+        line_count: 1,
+        selected: false,
+        covered: true
+      },
+      {
+        file: "src/test/recon/Harness.sol",
+        kind: "harness",
+        start_line: 1,
+        line_count: 1,
+        selected: false,
+        covered: true
+      }
+    ],
+    zero_coverage_components: []
+  };
+  writeArtifact(
+    layout,
+    node.id,
+    "coverage-goal.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.coverage-goal.v1",
+      target: { scope: "selected-range", minimum_percent: 90 },
+      current_measurement: { scope: "selected-range", covered_ranges: 1, total_ranges: 1 },
+      current_status: "measured",
+      planned_commands: [],
+      stop_conditions: ["reserve time for finalization"],
+      timeout_seconds: 60,
+      finalization_reserve_seconds: 10,
+      blockers: []
+    })
+  );
+  writeArtifact(
+    layout,
+    node.id,
+    "coverage-report.md",
+    "# Coverage\n\n## Scoped coverage evidence\n\n- selected-range: `1/1`\n- production-source: `1/1`\n\n" +
+      "Excluded components:\n- `src/Dependencies/Dep.sol` (dependency): nested dependency source\n" +
+      "- `src/test/Test.sol` (test): nested test source\n" +
+      "- `src/test/recon/Harness.sol` (harness): nested harness source\n\n" +
+      "Zero-coverage components:\n- None\n"
+  );
+  writeArtifact(layout, node.id, "coverage-evidence.json", JSON.stringify(evidence));
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+
+  const relabeled = structuredClone(evidence);
+  relabeled.files[1]!.kind = "production";
+  relabeled.counted_ranges[1]!.kind = "production";
+  writeArtifact(layout, node.id, "coverage-evidence.json", JSON.stringify(relabeled));
+  const spoofed = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(spoofed.ok, false);
+  assert.ok(
+    spoofed.diagnostics.some((diagnostic) => diagnostic.code === "COVERAGE_SOURCE_ATTRIBUTION_MISMATCH"),
+    JSON.stringify(spoofed.diagnostics)
+  );
+});
+
 test("coverage gate groups same-line Solidity declarations into one representable trusted range", () => {
   const layout = createRunLayout({
     projectRoot: tempProject(),
