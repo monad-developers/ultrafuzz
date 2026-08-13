@@ -182,7 +182,7 @@ describe("expandTopology", () => {
           depends_on: ["__start__"],
           outputs: [
             { path: "references/example.md", contract: "ultrafuzz/nonempty-markdown@1", primary: true },
-            { path: RUN_REFERENCE_MANIFEST_FILE, contract: "ultrafuzz/json-object@1" }
+            { path: RUN_REFERENCE_MANIFEST_FILE, contract: "ultrafuzz/reference-manifest@1" }
           ]
         },
         { ...validTopology().nodes[2]!, depends_on: ["setup", "reference-properties-example"] },

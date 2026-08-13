@@ -4,10 +4,16 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { packagedTopology } from "@ultrafuzz/config";
-import { loadPromptCatalog } from "@ultrafuzz/prompts";
-import { expandTopology, loadTopology, validateTopology, type ProjectTopology } from "@ultrafuzz/topology";
+import { loadPromptCatalog, type PromptCatalog } from "@ultrafuzz/prompts";
+import {
+  expandTopology,
+  loadTopology,
+  validateTopology,
+  type ExpandedGraph,
+  type ProjectTopology
+} from "@ultrafuzz/topology";
 
-import { promptTextsForCatalog, transformPromptCatalogForRun } from "../src/plan-run.js";
+import { promptTextsForCatalog, toPlannedGraph, transformPromptCatalogForRun } from "../src/plan-run.js";
 import { transformTopologyForRun } from "../src/topology-transform.js";
 
 function topology(): ProjectTopology {
@@ -61,6 +67,51 @@ test("per-run topology transform rejects unknown nodes, terminals, and invalid l
 test("an empty topology transform preserves the production topology object", () => {
   const source = { version: 2, defaults: { strategy_loops: 3 }, nodes: topology().nodes } satisfies ProjectTopology;
   assert.equal(transformTopologyForRun(source, { excludedNodeIds: [] }), source);
+});
+
+test("planned prompt binding never falls back from the declared path to a matching node ID", () => {
+  const catalog: PromptCatalog = {
+    entries: new Map([
+      [
+        "declared-node",
+        {
+          id: "declared-node",
+          displayName: "Wrong path",
+          relativePath: "other/wrong-path.md",
+          source: "project",
+          frontmatter: { id: "declared-node" },
+          body: "wrong path\n",
+          markdown: "wrong path\n"
+        }
+      ]
+    ]),
+    orderedIds: ["declared-node"]
+  };
+  const expanded: ExpandedGraph = {
+    graphVersion: "3",
+    topologyVersion: 2,
+    groups: {},
+    nodes: [
+      {
+        id: "declared-node",
+        logicalId: "declared-node",
+        label: "Declared node",
+        kind: "agentic",
+        promptPath: "declared/exact-path.md",
+        dependsOn: [],
+        artifactDir: "artifacts/declared-node",
+        retryPolicy: { maxAttempts: 1 },
+        loop: { index: 0, count: 1, mode: "parallel", attemptIndex: 0 },
+        outputs: [],
+        modelFanout: []
+      }
+    ]
+  };
+
+  assert.throws(
+    () => toPlannedGraph(expanded, catalog),
+    /prompt declared\/exact-path\.md for declared-node was not found/u
+  );
 });
 
 test("the exact smoke exclusions produce a valid filtered production topology", () => {

@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -21,6 +21,16 @@ describe("loadTopology", () => {
     writeFileSync(path.join(dir, ".ultrafuzz", "topology.yml"), "version: [\n");
     try {
       expect(() => loadTopology(dir)).toThrow(expect.objectContaining({ code: "TOPOLOGY_PARSE" }));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not classify a dangling topology symlink as missing", () => {
+    const dir = mkProject();
+    symlinkSync(path.join(dir, "missing-topology.yml"), path.join(dir, ".ultrafuzz", "topology.yml"));
+    try {
+      expect(() => loadTopology(dir)).toThrow(expect.objectContaining({ code: "SYMLINK_PATH" }));
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

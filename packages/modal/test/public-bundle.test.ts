@@ -3,17 +3,23 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { parseEvalRunRecord, type EvalRunRecord } from "@ultrafuzz/evals";
+import { projectCanonicalFinalReport } from "@ultrafuzz/runtime";
 import { describe, expect, it } from "vitest";
 
+import { MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID } from "../src/modal-contracts.js";
+import { validateModalJsonSchema } from "../src/modal-schema-registry.js";
 import {
   MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES,
   PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION,
   createPublicBenchmarkBundle,
   extractPublicBenchmarkBundle,
   parsePublicBenchmarkBundle,
+  parsePublicBenchmarkBundleBytes,
   readPublicBenchmarkBundle
 } from "../src/public-bundle.js";
 import { PUBLIC_EVAL_DIAGNOSTICS_SCHEMA_VERSION } from "../src/public-eval-diagnostics.js";
+import { currentReportIssue, currentTerminalReport } from "./current-artifact-fixtures.js";
 
 const TEST_LINEAGE = {
   logical_run_id: "fixture-run",
@@ -52,21 +58,8 @@ describe("public Modal benchmark bundles", () => {
       files
     });
     const output = path.join(root, "output");
-    expect(bundle.schema_version).toBe("ultrafuzz.modal.public-benchmark-bundle.v4");
+    expect(bundle.schema_version).toBe("ultrafuzz.modal.public-benchmark-bundle.v5");
     expect(bundle.schema_version).toBe(PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION);
-    expect(
-      parsePublicBenchmarkBundle({
-        ...bundle,
-        schema_version: "ultrafuzz.modal.public-benchmark-bundle.v3"
-      })
-    ).toMatchObject({ schema_version: "ultrafuzz.modal.public-benchmark-bundle.v3", status: "succeeded" });
-    expect(() =>
-      parsePublicBenchmarkBundle({
-        ...bundle,
-        schema_version: "ultrafuzz.modal.public-benchmark-bundle.v3",
-        status: "failed"
-      })
-    ).toThrow();
     expect(bundle).toMatchObject({
       status: "succeeded",
       executed_case_count: 2,
@@ -82,11 +75,7 @@ describe("public Modal benchmark bundles", () => {
           graded_case_count: 1,
           publication_location: {
             bundle_path: "public-results.json",
-            report_paths: [
-              "reports/target-a-runner-trial-1/report.md",
-              "reports/target-a-runner-trial-1/report.json",
-              "reports/target-a-runner-trial-1/findings.normalized.json"
-            ]
+            report_paths: ["reports/target-a-runner-trial-1/report.md", "reports/target-a-runner-trial-1/report.json"]
           }
         },
         {
@@ -99,11 +88,7 @@ describe("public Modal benchmark bundles", () => {
           graded_case_count: 1,
           publication_location: {
             bundle_path: "public-results.json",
-            report_paths: [
-              "reports/target-b-runner-trial-1/report.md",
-              "reports/target-b-runner-trial-1/report.json",
-              "reports/target-b-runner-trial-1/findings.normalized.json"
-            ]
+            report_paths: ["reports/target-b-runner-trial-1/report.md", "reports/target-b-runner-trial-1/report.json"]
           }
         }
       ]
@@ -114,11 +99,42 @@ describe("public Modal benchmark bundles", () => {
     ).toMatchObject({ summary: { scoring_ready: true } });
     for (const rowId of rowIds) {
       expect(fs.readFileSync(path.join(output, "reports", rowId, "report.json"), "utf8")).toContain("issues");
-      expect(fs.readFileSync(path.join(output, "reports", rowId, "report.md"), "utf8")).toContain("Report");
-      expect(
-        JSON.parse(fs.readFileSync(path.join(output, "reports", rowId, "findings.normalized.json"), "utf8"))
-      ).toHaveLength(1);
+      expect(fs.readFileSync(path.join(output, "reports", rowId, "report.md"), "utf8")).toContain("Ultrafuzz report");
     }
+  });
+
+  it("uses the registered v5 schema as the first whole-document acceptance gate", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-schema-"));
+    const bundle = createPublicBenchmarkBundle({
+      ...TEST_BUNDLE_METADATA,
+      files: completePublicSources(root, ["target-a-runner-trial-1"])
+    });
+    expect(validateModalJsonSchema(MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID, bundle)).toMatchObject({ ok: true });
+
+    const tamperedFiles = bundle.files.map((file, index) =>
+      index === 0 ? { ...file, contents_base64: Buffer.from("tampered").toString("base64") } : file
+    );
+    expect(() => parsePublicBenchmarkBundle({ ...bundle, files: tamperedFiles, unexpected: true })).toThrow(
+      /canonical JSON Schema validation/u
+    );
+    expect(() =>
+      parsePublicBenchmarkBundle({
+        ...bundle,
+        schema_version: "ultrafuzz.modal.public-benchmark-bundle.v4"
+      })
+    ).toThrow(/canonical JSON Schema validation/u);
+    expect(() =>
+      parsePublicBenchmarkBundle({
+        ...bundle,
+        lineage: { ...bundle.lineage, unexpected: true }
+      })
+    ).toThrow(/canonical JSON Schema validation/u);
+    expect(() =>
+      parsePublicBenchmarkBundle({
+        ...bundle,
+        targets: bundle.targets.map((target) => ({ ...target, unexpected: true }))
+      })
+    ).toThrow(/canonical JSON Schema validation/u);
   });
 
   it("rejects traversal, duplicate paths, and tampered contents", () => {
@@ -127,9 +143,12 @@ describe("public Modal benchmark bundles", () => {
       ...TEST_BUNDLE_METADATA,
       files: completePublicSources(root, ["target-a-runner-trial-1"])
     });
-    expect(() => parsePublicBenchmarkBundle({ ...bundle, files: [...bundle.files, bundle.files[0]] })).toThrow(
-      /duplicate/u
-    );
+    expect(() =>
+      parsePublicBenchmarkBundle({
+        ...bundle,
+        files: [...bundle.files, { ...bundle.files[0]!, sha256: "f".repeat(64) }]
+      })
+    ).toThrow(/duplicate/u);
     expect(() =>
       parsePublicBenchmarkBundle({
         ...bundle,
@@ -144,6 +163,11 @@ describe("public Modal benchmark bundles", () => {
         files: bundle.files.map((file, index) => (index === 0 ? { ...file, path: "../eval.json" } : file))
       })
     ).toThrow();
+    const serialized = JSON.stringify(bundle);
+    const field = `"schema_version":"${PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION}"`;
+    const duplicate = serialized.replace(field, `${field},"schema_version":"shadow-version"`);
+    expect(duplicate).not.toBe(serialized);
+    expect(() => parsePublicBenchmarkBundleBytes(Buffer.from(duplicate, "utf8"))).toThrow(/strict JSON/u);
   });
 
   it("bounds encoded file payloads and rejects an oversized local bundle before reading it", () => {
@@ -161,7 +185,7 @@ describe("public Modal benchmark bundles", () => {
           index === 0 ? { ...file, contents_base64: "A".repeat(maxFileBase64Characters + 1) } : file
         )
       })
-    ).toThrow(/too big/iu);
+    ).toThrow(/canonical JSON Schema validation/iu);
 
     const oversizedBundle = path.join(root, "oversized-public-results.json");
     const descriptor = fs.openSync(oversizedBundle, "wx", 0o600);
@@ -173,7 +197,7 @@ describe("public Modal benchmark bundles", () => {
     expect(() => readPublicBenchmarkBundle(oversizedBundle)).toThrow(/exceeds the size limit/u);
   });
 
-  it("requires the complete report triplet for every exact matrix row", () => {
+  it("requires the complete report pair for every exact matrix row", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-rows-"));
     const rowIds = ["target-a-runner-trial-1", "target-b-runner-trial-1"];
     const bundle = createPublicBenchmarkBundle({
@@ -181,7 +205,7 @@ describe("public Modal benchmark bundles", () => {
       files: completePublicSources(root, rowIds)
     });
 
-    for (const required of ["report.md", "report.json", "findings.normalized.json"]) {
+    for (const required of ["report.md", "report.json"]) {
       expect(() =>
         parsePublicBenchmarkBundle({
           ...bundle,
@@ -189,6 +213,19 @@ describe("public Modal benchmark bundles", () => {
         })
       ).toThrow(new RegExp(`missing reports/${rowIds[1]}/${required.replace(".", "\\.")}`, "u"));
     }
+  });
+
+  it("requires report.md to be the exact canonical projection of report.json", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-report-projection-"));
+    const rowId = "target-a-runner-trial-1";
+    const bundle = createPublicBenchmarkBundle({
+      ...TEST_BUNDLE_METADATA,
+      files: completePublicSources(root, [rowId])
+    });
+
+    expect(() =>
+      parsePublicBenchmarkBundle(replaceBundleContents(bundle, `reports/${rowId}/report.md`, "# Noncanonical report\n"))
+    ).toThrow(/report\.md is not the canonical projection/u);
   });
 
   it("fails the smoke no-regression gate when any target row has no finding", () => {
@@ -199,9 +236,9 @@ describe("public Modal benchmark bundles", () => {
       files: completePublicSources(root, [rowId])
     });
 
-    expect(() =>
-      parsePublicBenchmarkBundle(replaceBundleContents(bundle, `reports/${rowId}/findings.normalized.json`, "[]\n"))
-    ).toThrow(/must report at least one normalized finding/u);
+    expect(() => parsePublicBenchmarkBundle(replaceReportIssuesAndScore(bundle, rowId, []))).toThrow(
+      /must report at least one production issue/u
+    );
   });
 
   it("allows empty smoke findings only for the single failed datapoint", () => {
@@ -230,7 +267,7 @@ describe("public Modal benchmark bundles", () => {
       scoring_ready: true
     });
     let failedBundle = replaceBundleContents(bundle, diagnosticsPath, `${JSON.stringify(diagnostics, null, 2)}\n`);
-    failedBundle = replaceBundleContents(failedBundle, `reports/${rowIds[2]}/findings.normalized.json`, "[]\n");
+    failedBundle = replaceReportIssuesAndScore(failedBundle, rowIds[2]!, []);
     failedBundle = {
       ...failedBundle,
       status: "failed",
@@ -272,9 +309,86 @@ describe("public Modal benchmark bundles", () => {
       files: completePublicSources(root, [rowId])
     });
 
+    expect(() => parsePublicBenchmarkBundle(replaceReportIssuesAndScore(bundle, rowId, [{}]))).toThrow(
+      /schema-invalid terminal report/u
+    );
+  });
+
+  it("rejects schema-valid terminal reports that fail document semantic gates", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-semantic-report-"));
+    const rowId = "target-a-runner-trial-1";
+    const bundle = createPublicBenchmarkBundle({
+      ...TEST_BUNDLE_METADATA,
+      files: completePublicSources(root, [rowId])
+    });
+    const report = JSON.parse(bundleFileText(bundle, `reports/${rowId}/report.json`)) as {
+      issues: Array<Record<string, unknown>>;
+    };
+    const duplicate = structuredClone(report.issues[0]!);
+
     expect(() =>
-      parsePublicBenchmarkBundle(replaceBundleContents(bundle, `reports/${rowId}/findings.normalized.json`, "[{}]\n"))
-    ).toThrow(/invalid normalized findings/u);
+      parsePublicBenchmarkBundle(replaceReportIssuesAndScore(bundle, rowId, [report.issues[0], duplicate]))
+    ).toThrow(/semantic-invalid terminal report/u);
+  });
+
+  it("joins each terminal report to its run, target, and scored issue count", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-report-lineage-"));
+    const rowId = "target-a-runner-trial-1";
+    const bundle = createPublicBenchmarkBundle({
+      ...TEST_BUNDLE_METADATA,
+      files: completePublicSources(root, [rowId])
+    });
+    const reportPath = `reports/${rowId}/report.json`;
+    const report = JSON.parse(bundleFileText(bundle, reportPath)) as {
+      run_metadata: Record<string, unknown>;
+    };
+
+    const wrongRun = structuredClone(report);
+    wrongRun.run_metadata.run_id = "different-run";
+    expect(() =>
+      parsePublicBenchmarkBundle(replaceBundleContents(bundle, reportPath, `${JSON.stringify(wrongRun)}\n`))
+    ).toThrow(/does not match its Ultrafuzz run ID/u);
+
+    const wrongRepository = structuredClone(report);
+    wrongRepository.run_metadata.repository = "https://github.com/example/different-target";
+    expect(() =>
+      parsePublicBenchmarkBundle(replaceBundleContents(bundle, reportPath, `${JSON.stringify(wrongRepository)}\n`))
+    ).toThrow(/does not match its target repository/u);
+
+    const summary = JSON.parse(bundleFileText(bundle, "eval/summary.json")) as {
+      rows: Array<Record<string, unknown>>;
+    };
+    summary.rows[0]!.finding_count = 2;
+    expect(() =>
+      parsePublicBenchmarkBundle(
+        replaceBundleContents(bundle, "eval/summary.json", `${JSON.stringify(summary, null, 2)}\n`)
+      )
+    ).toThrow(/issue count does not match its score/u);
+  });
+
+  it("rejects duplicate JSON keys at report and eval lineage boundaries", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-duplicate-json-"));
+    const rowId = "target-a-runner-trial-1";
+    const bundle = createPublicBenchmarkBundle({
+      ...TEST_BUNDLE_METADATA,
+      files: completePublicSources(root, [rowId])
+    });
+    const reportPath = `reports/${rowId}/report.json`;
+    const report = bundleFileText(bundle, reportPath).replace(
+      '"schema_version": "ultrafuzz.report.v2"',
+      '"schema_version": "ultrafuzz.report.v2",\n  "schema_version": "ultrafuzz.report.v2"'
+    );
+    expect(() => parsePublicBenchmarkBundle(replaceBundleContents(bundle, reportPath, report))).toThrow(
+      /invalid strict report JSON/u
+    );
+
+    const record = bundleFileText(bundle, "eval/runs.jsonl").replace(
+      `"row_id":"${rowId}"`,
+      `"row_id":"${rowId}","row_id":"${rowId}"`
+    );
+    expect(() => parsePublicBenchmarkBundle(replaceBundleContents(bundle, "eval/runs.jsonl", record))).toThrow(
+      /runs\.jsonl line 1 is not strict JSON/u
+    );
   });
 
   it("requires complete positive result metadata for executed and graded cases", () => {
@@ -284,10 +398,10 @@ describe("public Modal benchmark bundles", () => {
       files: completePublicSources(root, ["target-a-runner-trial-1"])
     });
 
-    const missing = structuredClone(bundle) as Record<string, unknown>;
+    const missing = structuredClone(bundle) as unknown as Record<string, unknown>;
     delete missing.targets;
     expect(() => parsePublicBenchmarkBundle(missing)).toThrow();
-    const missingExecuted = structuredClone(bundle) as Record<string, unknown>;
+    const missingExecuted = structuredClone(bundle) as unknown as Record<string, unknown>;
     delete missingExecuted.executed_case_count;
     expect(() => parsePublicBenchmarkBundle(missingExecuted)).toThrow();
 
@@ -588,6 +702,31 @@ function bundleFileText(bundle: ReturnType<typeof createPublicBenchmarkBundle>, 
   return Buffer.from(file.contents_base64, "base64").toString("utf8");
 }
 
+function replaceReportIssuesAndScore(
+  bundle: ReturnType<typeof createPublicBenchmarkBundle>,
+  rowId: string,
+  issues: unknown[]
+): ReturnType<typeof createPublicBenchmarkBundle> {
+  const reportPath = `reports/${rowId}/report.json`;
+  const report = JSON.parse(bundleFileText(bundle, reportPath)) as Record<string, unknown>;
+  report.issues = issues;
+  let updated = replaceBundleContents(bundle, reportPath, `${JSON.stringify(report, null, 2)}\n`);
+  try {
+    const projection = projectCanonicalFinalReport(report);
+    updated = replaceBundleContents(updated, `reports/${rowId}/report.md`, projection.markdown);
+  } catch {
+    // Invalid report fixtures are intentionally rejected before projection parity.
+  }
+  const summary = JSON.parse(bundleFileText(updated, "eval/summary.json")) as {
+    rows: Array<Record<string, unknown>>;
+  };
+  const score = summary.rows.find((row) => row.row_id === rowId);
+  if (score === undefined) throw new Error(`missing score fixture for ${rowId}`);
+  score.finding_count = issues.length;
+  updated = replaceBundleContents(updated, "eval/summary.json", `${JSON.stringify(summary, null, 2)}\n`);
+  return updated;
+}
+
 function completePublicSources(root: string, rowIds: string[]): Array<{ path: string; root: string; source: string }> {
   const evalRoot = path.join(root, "eval-source");
   const matrix = realisticMatrix(rowIds);
@@ -647,14 +786,27 @@ function completePublicSources(root: string, rowIds: string[]): Array<{ path: st
     ["matrix.json", `${JSON.stringify(matrix, null, 2)}\n`],
     [
       "runs.jsonl",
-      `${rowIds.map((rowId) => JSON.stringify({ row_id: rowId, final_status: "succeeded" })).join("\n")}\n`
+      `${matrix.map((row, index) => JSON.stringify(canonicalEvalRunRecord(root, row, index))).join("\n")}\n`
     ],
     ["run-summary.json", `${JSON.stringify({ succeeded: rowIds.length }, null, 2)}\n`],
     ["public-eval-diagnostics.json", `${JSON.stringify(diagnostics, null, 2)}\n`],
     ["scores.jsonl", `${rowIds.map((rowId) => JSON.stringify({ row_id: rowId, score: 1 })).join("\n")}\n`],
     [
       "summary.json",
-      `${JSON.stringify({ rows: rowIds.map((rowId) => ({ row_id: rowId, finding_count: 1 })) }, null, 2)}\n`
+      `${JSON.stringify(
+        {
+          rows: matrix.map((row) => ({
+            row_id: row.id,
+            target_id: row.target_id,
+            variant_id: row.variant_id,
+            trial_id: row.trial_id,
+            report_schema_valid: true,
+            finding_count: 1
+          }))
+        },
+        null,
+        2
+      )}\n`
     ],
     ["summary.md", "# Eval summary\n"]
   ]);
@@ -664,35 +816,84 @@ function completePublicSources(root: string, rowIds: string[]): Array<{ path: st
     fs.writeFileSync(source, contents);
     return { path: `eval/${name}`, root, source };
   });
-  for (const rowId of rowIds) {
-    const finding = {
-      schema_version: "1.0",
-      id: `${rowId}-finding-1`,
-      title: "Fixture finding",
-      status: "confirmed",
-      severity_guess: "Low",
-      confidence: "high",
+  for (const row of matrix) {
+    const finding = currentReportIssue({
+      lifecycle: {
+        dedupe_key: `${row.id}-dedupe-key`,
+        source_artifacts: [],
+        strategy_hits: []
+      },
       summary: "A fixture finding used to exercise public bundle validation."
-    };
+    });
+    const report = currentTerminalReport({
+      run_metadata: {
+        run_id: row.run_id,
+        source_run_id: "none",
+        repository: row.target.repo,
+        elapsed_time: "0s",
+        models_used: [TEST_MODEL],
+        tokens_used: "0",
+        estimated_spend: "0",
+        partial_pricing: false,
+        strategy_loops: 0,
+        audit_profile: "full",
+        audit_profile_catalog_digest: "a".repeat(64),
+        topology_digest: "b".repeat(64),
+        prompt_digest: "c".repeat(64),
+        expanded_graph_fingerprint: "d".repeat(64)
+      },
+      issues: [finding]
+    });
+    const projection = projectCanonicalFinalReport(report);
     for (const [name, contents] of [
-      ["report.md", `# Report for ${rowId}\n`],
-      [
-        "report.json",
-        `${JSON.stringify(
-          { schema_version: "1.0", run_metadata: {}, issues: [finding], non_production_outcomes: [] },
-          null,
-          2
-        )}\n`
-      ],
-      ["findings.normalized.json", `${JSON.stringify([finding], null, 2)}\n`]
+      ["report.md", projection.markdown],
+      ["report.json", `${JSON.stringify(projection.report, null, 2)}\n`]
     ] as const) {
-      const source = path.join(root, "report-source", rowId, name);
+      const source = path.join(root, "report-source", row.id, name);
       fs.mkdirSync(path.dirname(source), { recursive: true });
       fs.writeFileSync(source, contents);
-      sources.push({ path: `reports/${rowId}/${name}`, root, source });
+      sources.push({ path: `reports/${row.id}/${name}`, root, source });
     }
   }
   return sources;
+}
+
+function canonicalEvalRunRecord(
+  root: string,
+  row: ReturnType<typeof realisticMatrix>[number],
+  index: number
+): EvalRunRecord {
+  const runRoot = path.join(root, "runs", row.run_id);
+  return parseEvalRunRecord(
+    {
+      schema_version: "ultrafuzz.eval.run.v3",
+      eval_run_id: TEST_EVAL_RUN_ID,
+      row_id: row.id,
+      target_id: row.target_id,
+      variant_id: row.variant_id,
+      trial_id: row.trial_id,
+      ultrafuzz_run_id: row.run_id,
+      ultrafuzz_run_root: runRoot,
+      report_json_path: path.join(runRoot, "artifacts", "final-report", "report.json"),
+      status: "launched",
+      final_status: "succeeded",
+      candidate_commit: TEST_CANDIDATE,
+      workflow_ids: [`workflow-${index + 1}`],
+      launcher: {
+        status: "succeeded",
+        started_at: TEST_CREATED_AT,
+        finished_at: TEST_CREATED_AT
+      },
+      workflow: {
+        status: "succeeded",
+        terminal: true,
+        started_at: TEST_CREATED_AT,
+        finished_at: TEST_CREATED_AT
+      },
+      diagnostics: []
+    },
+    `public bundle fixture ${row.id}`
+  );
 }
 
 function realisticMatrix(rowIds: string[]) {
@@ -714,7 +915,13 @@ function realisticMatrix(rowIds: string[]) {
       },
       variant: { id: TEST_MODEL_SLUG },
       workflow_input: {
-        target_frameworks: { [targetId]: framework }
+        benchmark_lane: "full",
+        target_frameworks: { [targetId]: framework },
+        excluded_strategy_families: [],
+        benchmark_execution: {
+          strategy_loops: 1,
+          excluded_node_ids: []
+        }
       },
       runner_model_profile: TEST_MODEL_SLUG,
       runner_model: TEST_MODEL,

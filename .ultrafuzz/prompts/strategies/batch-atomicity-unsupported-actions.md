@@ -69,5 +69,6 @@ source-backed production evidence unless docs explicitly define required
 unknown actions as no-ops. Classify assumptions as incomplete-spec when either
 the finite set or required rollback semantics are undocumented.
 
-Write structured findings to {{output_findings_path}}. Use an empty JSON array
-if no finding is confirmed.
+Write structured findings to {{output_findings_path}}. If no finding is
+confirmed, use only the empty form defined by the exact pinned schema in the
+central output contract.

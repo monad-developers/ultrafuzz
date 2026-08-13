@@ -68,8 +68,8 @@ satisfy test imports.
 
 Passing test coverage is not a finding. Record successful equivalence checks,
 target coverage summaries, and no-defect observations in summaries or manifests,
-not in `findings.json`. Write `[]` to `findings.json` when generated tests pass
-and no reproducible target defect is confirmed.
+not in `findings.json`. Use its schema-defined empty form when generated tests
+pass and no reproducible target defect is confirmed.
 
 Run build, list, and test validation as separate Bash calls, waiting for each
 tool result before the next command. Never combine validation commands with

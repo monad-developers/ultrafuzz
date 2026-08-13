@@ -4,11 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { validateAnalysisBundle } from "@ultrafuzz/artifacts";
-
 import { runCli } from "../src/index.js";
 
-test("eval bundle exposes the privacy-safe offline export mode", async () => {
+test("eval bundle rejects an eval run without canonical terminal and scoring evidence", async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-cli-analysis-"));
   const evalRunId = "eval-cli-analysis";
   fs.mkdirSync(path.join(project, ".ultrafuzz", "evals", "runs", evalRunId), { recursive: true });
@@ -31,21 +29,20 @@ test("eval bundle exposes the privacy-safe offline export mode", async () => {
     }
   });
 
-  assert.equal(code, 0, stderr || stdout);
+  assert.equal(code, 1, stderr || stdout);
   const result = JSON.parse(stdout) as {
     command: string;
     ok: boolean;
-    data: { output_dir: string; omissions: { omissions: Array<{ kind: string }> } };
+    diagnostics: Array<{ code: string; message: string }>;
+    data: null;
   };
   assert.equal(result.command, "eval bundle");
-  assert.equal(result.ok, true);
-  assert.equal(result.data.output_dir, path.join(project, "analysis"));
-  assert.deepEqual(result.data.omissions.omissions.map(({ kind }) => kind).sort(), [
-    "accounting-summary",
-    "attempt-history",
-    "evaluation-metrics",
-    "recovery-summary",
-    "terminal-status"
-  ]);
-  assert.doesNotThrow(() => validateAnalysisBundle(result.data.output_dir));
+  assert.equal(result.ok, false);
+  assert.equal(result.data, null);
+  assert.deepEqual(
+    result.diagnostics.map(({ code }) => code),
+    ["EVAL_BUNDLE_FAILED"]
+  );
+  assert.match(result.diagnostics[0]?.message ?? "", /runs\.jsonl/u);
+  assert.equal(fs.existsSync(path.join(project, "analysis")), false);
 });

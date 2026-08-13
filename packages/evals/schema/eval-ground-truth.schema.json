@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:evals:ground-truth:1",
+  "title": "Ultrafuzz eval ground truth v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "bugs"],
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.eval-ground-truth.v1" },
+    "subject": { "$ref": "#/$defs/subject" },
+    "source": { "$ref": "#/$defs/publicSource" },
+    "provenance": { "$ref": "#/$defs/privateProvenance" },
+    "canaries": {
+      "type": "array",
+      "maxItems": 1000,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/canary" }
+    },
+    "bugs": {
+      "type": "array",
+      "maxItems": 10000,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/bug" }
+    }
+  },
+  "$defs": {
+    "nonBlankText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16384,
+      "pattern": "\\S"
+    },
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "\\S"
+    },
+    "httpUrl": {
+      "type": "string",
+      "maxLength": 2048,
+      "pattern": "^https?://[^\\s]+$"
+    },
+    "fullSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "stringList": {
+      "type": "array",
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/nonBlankText" }
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "revision"],
+      "properties": {
+        "repository": { "$ref": "#/$defs/httpUrl" },
+        "revision": { "$ref": "#/$defs/fullSha" }
+      }
+    },
+    "publicSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url", "retrieved_sha256", "note"],
+      "properties": {
+        "url": { "$ref": "#/$defs/httpUrl" },
+        "source_commit": { "$ref": "#/$defs/fullSha" },
+        "retrieved_sha256": { "$ref": "#/$defs/sha256" },
+        "note": { "$ref": "#/$defs/nonBlankText" }
+      }
+    },
+    "privateProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "benchmark_id",
+        "ultrafuzz_target_repo",
+        "ultrafuzz_target_commit",
+        "scfuzzbench_target_repo",
+        "scfuzzbench_target_commit",
+        "note"
+      ],
+      "properties": {
+        "name": { "$ref": "#/$defs/nonBlankText" },
+        "benchmark_id": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+        "ultrafuzz_target_repo": { "$ref": "#/$defs/httpUrl" },
+        "ultrafuzz_target_commit": { "$ref": "#/$defs/fullSha" },
+        "scfuzzbench_target_repo": { "$ref": "#/$defs/httpUrl" },
+        "scfuzzbench_target_commit": { "$ref": "#/$defs/fullSha" },
+        "note": { "$ref": "#/$defs/nonBlankText" }
+      }
+    },
+    "canary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "benchmark_name", "title"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "benchmark_name": { "$ref": "#/$defs/identifier" },
+        "title": { "$ref": "#/$defs/nonBlankText" }
+      }
+    },
+    "bug": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "title": { "$ref": "#/$defs/nonBlankText" },
+        "severity": { "$ref": "#/$defs/nonBlankText" },
+        "root_cause": { "$ref": "#/$defs/nonBlankText" },
+        "root_cause_keywords": { "$ref": "#/$defs/stringList" },
+        "affected_files": { "$ref": "#/$defs/stringList" },
+        "affected_functions": { "$ref": "#/$defs/stringList" },
+        "impact": { "$ref": "#/$defs/nonBlankText" },
+        "impact_keywords": { "$ref": "#/$defs/stringList" },
+        "evidence": {
+          "oneOf": [{ "$ref": "#/$defs/nonBlankText" }, { "$ref": "#/$defs/stringList" }]
+        },
+        "evidence_keywords": { "$ref": "#/$defs/stringList" },
+        "keywords": { "$ref": "#/$defs/stringList" }
+      }
+    }
+  }
+}

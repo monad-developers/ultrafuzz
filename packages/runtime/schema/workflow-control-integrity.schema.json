@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:runtime:workflow-control-integrity:2",
+  "title": "Ultrafuzz workflow control integrity seal",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run_id", "files", "execution_files", "bindings"],
+  "properties": {
+    "schema_version": {
+      "const": "ultrafuzz.workflow-control-integrity.v2"
+    },
+    "run_id": {
+      "$ref": "#/$defs/identity"
+    },
+    "files": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "graph",
+        "expanded_graph",
+        "graph_fingerprint",
+        "config",
+        "tasks",
+        "input",
+        "workflow",
+        "evidence_workflow"
+      ],
+      "properties": {
+        "graph": {
+          "$ref": "#/$defs/fileSeal"
+        },
+        "expanded_graph": {
+          "$ref": "#/$defs/fileSeal"
+        },
+        "graph_fingerprint": {
+          "$ref": "#/$defs/fileSeal"
+        },
+        "config": {
+          "$ref": "#/$defs/fileSeal"
+        },
+        "tasks": {
+          "$ref": "#/$defs/fileSeal"
+        },
+        "input": {
+          "$ref": "#/$defs/fileSeal"
+        },
+        "workflow": {
+          "$ref": "#/$defs/fileSeal"
+        },
+        "evidence_workflow": {
+          "$ref": "#/$defs/fileSeal"
+        }
+      }
+    },
+    "execution_files": {
+      "type": "array",
+      "maxItems": 100000,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/executionFileSeal"
+      }
+    },
+    "bindings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "graph_fingerprint",
+        "config_fingerprint",
+        "expected_state_node_ids",
+        "expected_task_attempt_ids",
+        "expected_task_node_ids"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/identity"
+        },
+        "graph_fingerprint": {
+          "$ref": "#/$defs/sha256"
+        },
+        "config_fingerprint": {
+          "$ref": "#/$defs/sha256"
+        },
+        "expected_state_node_ids": {
+          "$ref": "#/$defs/identityArray"
+        },
+        "expected_task_attempt_ids": {
+          "$ref": "#/$defs/identityArray"
+        },
+        "expected_task_node_ids": {
+          "$ref": "#/$defs/identityArray"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "identity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[^\\u0000]+$"
+    },
+    "identityArray": {
+      "type": "array",
+      "maxItems": 100000,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/identity"
+      }
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "fileSeal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha256", "size_bytes"],
+      "properties": {
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 67108864
+        }
+      }
+    },
+    "executionFileSeal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_path", "snapshot_path", "sha256", "size_bytes"],
+      "properties": {
+        "source_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "snapshot_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 67108864
+        }
+      }
+    }
+  }
+}

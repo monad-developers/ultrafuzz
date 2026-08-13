@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:modal:recovery-lifecycle:1",
+  "title": "Ultrafuzz Modal recovery lifecycle document",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "summary", "records"],
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.modal.recovery-lifecycle.v1" },
+    "summary": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/recoveryLifecycleSummary" },
+    "records": {
+      "type": "array",
+      "maxItems": 100000,
+      "items": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/recoveryLifecycleRecord" }
+    }
+  }
+}

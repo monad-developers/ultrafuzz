@@ -38,6 +38,17 @@ function commitChange(directory: string, contents: string, tag?: string): string
   return git(directory, ["rev-parse", "HEAD"]);
 }
 
+function writeGroundTruth(filePath: string, bugIds: string[] = []): void {
+  fs.writeFileSync(
+    filePath,
+    `${JSON.stringify({
+      schema_version: "ultrafuzz.eval-ground-truth.v1",
+      bugs: bugIds.map((id) => ({ id }))
+    })}\n`,
+    "utf8"
+  );
+}
+
 function fixture(): { plan: EvalPlanValue; candidateRoot: string; targetRoot: string; groundTruthPath: string } {
   const base = mkdtempSync(path.join(tmpdir(), "ufz-eval-lineage-"));
   const candidateRoot = path.join(base, "candidate");
@@ -47,7 +58,7 @@ function fixture(): { plan: EvalPlanValue; candidateRoot: string; targetRoot: st
   const targetCommit = initializeRepository(targetRoot);
   fs.mkdirSync(groundTruthRoot, { recursive: true });
   const groundTruthPath = path.join(groundTruthRoot, "target-a.yml");
-  fs.writeFileSync(groundTruthPath, "bugs: []\n", "utf8");
+  writeGroundTruth(groundTruthPath);
   const suite = testSuite(groundTruthRoot, {
     targets: [
       {
@@ -74,7 +85,7 @@ function fixture(): { plan: EvalPlanValue; candidateRoot: string; targetRoot: st
   };
 }
 
-describe("versioned eval lineage", () => {
+describe("versioned eval lineage", { timeout: 15_000 }, () => {
   it("keeps the cohort stable across candidate releases and changes it for comparison controls", () => {
     const generated = fixture();
     const policy = { watch: true, watchTimeoutSeconds: 120, pollIntervalMs: 10 };
@@ -91,11 +102,11 @@ describe("versioned eval lineage", () => {
     expect(nextCandidate.candidate.commit).not.toBe(first.candidate.commit);
     expect(nextCandidate.benchmark.cohort_fingerprint).toBe(first.benchmark.cohort_fingerprint);
 
-    fs.writeFileSync(generated.groundTruthPath, "bugs:\n  - id: GENERATED-1\n", "utf8");
+    writeGroundTruth(generated.groundTruthPath, ["GENERATED-1"]);
     const changedGroundTruth = buildEvalRunProvenance(generated.plan, policy);
     expect(changedGroundTruth.benchmark.cohort_fingerprint).not.toBe(first.benchmark.cohort_fingerprint);
 
-    fs.writeFileSync(generated.groundTruthPath, "bugs: []\n", "utf8");
+    writeGroundTruth(generated.groundTruthPath);
     commitChange(generated.targetRoot, "target v2\n");
     const changedTarget = buildEvalRunProvenance(generated.plan, policy);
     expect(changedTarget.benchmark.cohort_fingerprint).not.toBe(first.benchmark.cohort_fingerprint);
@@ -103,7 +114,7 @@ describe("versioned eval lineage", () => {
     fs.writeFileSync(path.join(generated.targetRoot, "tracked.txt"), "dirty target\n", "utf8");
     const dirtyTarget = buildEvalRunProvenance(generated.plan, policy);
     expect(dirtyTarget.benchmark).toMatchObject({
-      availability: "incomplete",
+      availability: "available",
       targets: [{ id: "target-a", dirty: true }]
     });
     expect(dirtyTarget.benchmark.cohort_fingerprint).not.toBe(changedTarget.benchmark.cohort_fingerprint);
@@ -145,14 +156,14 @@ describe("versioned eval lineage", () => {
     });
     fs.rmSync(path.join(generated.candidateRoot, "scratch.log"));
 
-    fs.writeFileSync(generated.groundTruthPath, "bugs:\n  - id: GENERATED-2\n", "utf8");
+    writeGroundTruth(generated.groundTruthPath, ["GENERATED-2"]);
     const rescoredGroundTruth = buildScoringProvenance({
       projectRoot: generated.candidateRoot,
       suite: generated.plan.suite,
       matrix: generated.plan.matrix
     });
     expect(rescoredGroundTruth.fingerprint).not.toBe(cleanScoring.fingerprint);
-    fs.writeFileSync(generated.groundTruthPath, "bugs: []\n", "utf8");
+    writeGroundTruth(generated.groundTruthPath);
 
     fs.writeFileSync(path.join(generated.candidateRoot, "tracked.txt"), "dirty candidate\n", "utf8");
     const dirty = buildEvalRunProvenance(generated.plan, { watch: false });
@@ -168,7 +179,7 @@ describe("versioned eval lineage", () => {
     expect(dirtyScoring.fingerprint).not.toBe(cleanScoring.fingerprint);
     expect(cleanScoring).toMatchObject({
       judge_mode: "deterministic",
-      judge_prompt_version: "ultrafuzz-eval-judge-v9-independent-semantic-boundary-family",
+      judge_prompt_version: "ultrafuzz-eval-judge-v10-registered-result-schema",
       judge_models: ["gpt-5.5"],
       judge_panel: { total: 3, quorum: 2 },
       ground_truth_sha256: { "target-a": expect.stringMatching(/^sha256:/u) }

@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { parseProjectConfigToml, resolveConfig } from "@ultrafuzz/config";
 import { describe, expect, it } from "vitest";
 
 import { DEFAULT_BENCHMARK_MODELS } from "../src/defaults.js";
@@ -12,6 +13,7 @@ describe("Modal target model profiles", () => {
     const model = DEFAULT_BENCHMARK_MODELS[4]!;
     const config = modalTargetToml(model, 7_200);
 
+    expect(config).toMatch(/^schema_version = "ultrafuzz\.config\.v2"$/mu);
     expect(config).toContain(`[models.default]\nagent = "ClaudeAgent"\nmodel = "claude-fable-5"`);
     expect(config).toContain(`[models.benchmark]\nagent = "ClaudeAgent"\nmodel = "claude-fable-5"`);
     expect(config).not.toContain("[models.smoke-coordination]");
@@ -22,13 +24,22 @@ describe("Modal target model profiles", () => {
     expect(config).toContain("keep_workspaces = false");
     expect(config).toContain('invariant_testing_smoke_timeout = "10min"');
     expect(config).toContain('audit_profile = "balanced"');
+    const parsed = parseProjectConfigToml(config, "modal-target-ultrafuzz.toml");
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(resolveConfig({ projectConfig: parsed.value, env: {} }).ok).toBe(true);
   });
 
   it("selects the packaged smoke audit profile for smoke target preparation", () => {
     const config = modalTargetToml(DEFAULT_BENCHMARK_MODELS[0]!, 900, "smoke");
 
+    expect(config).toMatch(/^schema_version = "ultrafuzz\.config\.v2"$/mu);
     expect(config).toContain('audit_profile = "smoke"');
     expect(config).not.toContain("dynamic_strategies_enumerator");
+    const parsed = parseProjectConfigToml(config, "modal-target-ultrafuzz.toml");
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(resolveConfig({ projectConfig: parsed.value, env: {} }).ok).toBe(true);
   });
 
   it("uses the staged API key for a public Claude benchmark target", () => {

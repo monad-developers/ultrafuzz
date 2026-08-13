@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 
 import { expect, it } from "vitest";
@@ -8,7 +9,9 @@ import { expect, it } from "vitest";
 import {
   adaptBenchmarkManifestToEvalSuite,
   loadBenchmarkCohortManifest,
-  loadBenchmarkLanesManifest
+  loadBenchmarkLanesManifest,
+  type EvalRunRecord,
+  type EvalRunSummary
 } from "@ultrafuzz/evals";
 
 import type { PublicModalBenchmarkConfig } from "../src/config.js";
@@ -25,6 +28,7 @@ import {
   assertPublicWorkerInput,
   assertPublicWorkerBundleLineage,
   checkpointPublicModelWorkStart,
+  captureBoundedCommandOutput,
   materializeBakedCandidate,
   MAX_PUBLIC_OPTIONAL_ROW_ARTIFACT_FILES,
   PUBLIC_OPTIONAL_ROW_ARTIFACTS,
@@ -44,12 +48,14 @@ import {
   publicEvalRunId,
   preparePublicEvalSuite,
   publicEvalFailureDiagnosticLogPayload,
+  publicEvalFailureDiagnosticLogPayloadFromRecords,
   publicEvalModelWorkEvidence,
   publicEvalCommandLeftFinalJournal,
   publicEvalRunErrorCanBePublished,
   runAndCheckpointPublicEvalDiagnostics,
   runPublicBenchmarkWorker,
   runWithPublicPreparationTimeout,
+  seedPublicBenchmarkSmithersDependencies,
   publicScoreCommandTimeoutSeconds,
   writePublicBundleAtomic
 } from "../src/public-worker.js";
@@ -58,6 +64,34 @@ import { createExactCandidateSourceArchive } from "../src/runner.js";
 import { OperationalDispositionError } from "../src/terminal-disposition.js";
 import { ensurePersistentWorkerLineage } from "../src/worker-lineage.js";
 import { emptyWorkerCheckpoint, runWithTerminalPersistence, WorkerResultWriter } from "../src/worker-result.js";
+import {
+  currentGenuineTaskFailureState,
+  currentReportIssue,
+  currentTerminalReport,
+  writeCurrentSmithersTaskFixture,
+  writeCurrentTerminalReport
+} from "./current-artifact-fixtures.js";
+
+function publicBraintrustConfig() {
+  return {
+    project: "fixture",
+    api_key_env: "BRAINTRUST_API_KEY",
+    judge_api_key_env: "OPENAI_API_KEY",
+    judge_url: "https://api.openai.com/v1/chat/completions",
+    judge_credential_ttl_seconds: 57_600
+  } as const;
+}
+
+function publicTargets() {
+  return [
+    {
+      id: "target-one",
+      repository: "https://github.com/example/target-one",
+      revision: "b".repeat(40),
+      framework: "foundry"
+    }
+  ];
+}
 
 it("keeps high-fanout public benchmark work off the persistent Modal volume", () => {
   const dataRoot = "/data/public-run/model";
@@ -68,6 +102,38 @@ it("keeps high-fanout public benchmark work off the persistent Modal volume", ()
   expect(workRoot.startsWith(`${path.resolve(dataRoot)}${path.sep}`)).toBe(false);
   expect(() => publicBenchmarkWorkRoot("/tmp")).toThrow(/persistent volume/u);
   expect(() => publicBenchmarkWorkRoot(path.join(workRoot, "nested"))).toThrow(/persistent volume/u);
+});
+
+it("seeds only an exact generated Smithers manifest into a fresh public target", async () => {
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-smithers-seed-"));
+  const seedRoot = path.join(root, "seed");
+  const projectRoot = path.join(root, "project");
+  const manifest = '{"name":"fixture","private":true}\n';
+  fs.mkdirSync(path.join(seedRoot, "node_modules", "fixture", "bin"), { recursive: true });
+  fs.mkdirSync(path.join(projectRoot, ".smithers"), { recursive: true });
+  fs.writeFileSync(path.join(seedRoot, "package.json"), manifest);
+  fs.writeFileSync(path.join(projectRoot, ".smithers", "package.json"), manifest);
+  fs.writeFileSync(path.join(seedRoot, "node_modules", "fixture", "bin", "runner.js"), "export {};\n");
+  fs.symlinkSync("../fixture/bin/runner.js", path.join(seedRoot, "node_modules", ".runner"));
+
+  await seedPublicBenchmarkSmithersDependencies(projectRoot, seedRoot);
+
+  expect(
+    fs.readFileSync(path.join(projectRoot, ".smithers", "node_modules", "fixture", "bin", "runner.js"), "utf8")
+  ).toBe("export {};\n");
+  expect(fs.readlinkSync(path.join(projectRoot, ".smithers", "node_modules", ".runner"))).toBe(
+    "../fixture/bin/runner.js"
+  );
+  await expect(seedPublicBenchmarkSmithersDependencies(projectRoot, seedRoot)).rejects.toThrow(
+    /already contains Smithers dependencies/u
+  );
+
+  const mismatchedProject = path.join(root, "mismatched-project");
+  fs.mkdirSync(path.join(mismatchedProject, ".smithers"), { recursive: true });
+  fs.writeFileSync(path.join(mismatchedProject, ".smithers", "package.json"), `${manifest} `);
+  await expect(seedPublicBenchmarkSmithersDependencies(mismatchedProject, seedRoot)).rejects.toThrow(
+    /manifest does not match/u
+  );
 });
 
 it("recognizes and cleans the legacy persistent public workspace without treating local work as durable", async () => {
@@ -81,11 +147,11 @@ it("recognizes and cleans the legacy persistent public workspace without treatin
     auth_mode: "api-key"
   };
   const config = {
-    schema_version: "ultrafuzz.modal.benchmark.v1",
+    schema_version: "ultrafuzz.modal.benchmark.v2",
     run_id: "public-preflight",
     app_name: "ultrafuzz-benchmarks",
     image_name: "fixture-image",
-    braintrust: { project: "fixture", api_key_env: "BRAINTRUST_API_KEY", judge_credential_ttl_seconds: 57_600 },
+    braintrust: publicBraintrustConfig(),
     node_timeout_seconds: 1800,
     loops: 1,
     models: [model],
@@ -95,6 +161,7 @@ it("recognizes and cleans the legacy persistent public workspace without treatin
       runner_model_profile: model.slug,
       candidate_repository: "https://github.com/monad-developers/ultrafuzz",
       candidate_commit: "a".repeat(40),
+      targets: publicTargets(),
       max_runtime_seconds: 3_600
     }
   } satisfies PublicModalBenchmarkConfig;
@@ -108,7 +175,8 @@ it("recognizes and cleans the legacy persistent public workspace without treatin
     fingerprints: { config: "b".repeat(64), source: "c".repeat(64), image: "d".repeat(64) },
     model_fingerprint: "e".repeat(64)
   };
-  let captured: { workspaceEvidencePaths: string[]; freshCleanupPaths: string[] } | undefined;
+  let captured:
+    { workspaceEvidencePaths: string[]; freshCleanupPaths: string[]; attemptCleanupPaths: string[] } | undefined;
   const stop = new Error("stop after preflight capture");
 
   await expect(
@@ -142,6 +210,84 @@ it("recognizes and cleans the legacy persistent public workspace without treatin
       path.join(dataRoot, "public-eval-diagnostics.json")
     ])
   );
+  expect(captured?.attemptCleanupPaths).toEqual([
+    path.join(dataRoot, "status.json"),
+    path.join(dataRoot, "result.json")
+  ]);
+}, 30_000);
+
+it("rejects a present dangling public bundle without starting replacement model work", async () => {
+  const dataRoot = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-dangling-bundle-"));
+  const model: ModalModelSpec = {
+    slug: "benchmark-smoke-gpt-5-6-luna-high",
+    model: "gpt-5.6-luna",
+    provider: "openai",
+    agent: "CodexAgent",
+    reasoning: "high",
+    auth_mode: "api-key"
+  };
+  const config = {
+    schema_version: "ultrafuzz.modal.benchmark.v2",
+    run_id: "public-dangling-bundle",
+    app_name: "ultrafuzz-benchmarks",
+    image_name: "fixture-image",
+    braintrust: publicBraintrustConfig(),
+    node_timeout_seconds: 1800,
+    loops: 1,
+    models: [model],
+    public_benchmark: {
+      benchmark: "ultrafuzz-bench",
+      lane: "smoke",
+      runner_model_profile: model.slug,
+      candidate_repository: "https://github.com/monad-developers/ultrafuzz",
+      candidate_commit: "a".repeat(40),
+      targets: publicTargets(),
+      max_runtime_seconds: 3_600
+    }
+  } satisfies PublicModalBenchmarkConfig;
+  const lineage: ModalWorkerLineage = {
+    schema_version: "ultrafuzz.modal.worker-lineage.v1",
+    logical_run_id: config.run_id,
+    generation: 1,
+    attempt: 1,
+    attempt_id: "attempt-one",
+    workspace_mode: "resume",
+    fingerprints: { config: "b".repeat(64), source: "c".repeat(64), image: "d".repeat(64) },
+    model_fingerprint: "e".repeat(64)
+  };
+  fs.writeFileSync(path.join(dataRoot, "lineage.json"), `${JSON.stringify(lineage)}\n`, { mode: 0o600 });
+  fs.symlinkSync("missing-public-results.json", path.join(dataRoot, "public-results.json"));
+  const incompatible = new Error("checkpoint-incompatible: persisted public benchmark bundle is invalid");
+  let preflightCalls = 0;
+  const previousOpenAiApiKey = process.env.OPENAI_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+
+  try {
+    await expect(
+      runPublicBenchmarkWorker({
+        config,
+        model,
+        lineage,
+        dataRoot,
+        preflight: async () => {
+          preflightCalls += 1;
+        },
+        isCheckpointIncompatible: (error) => error === incompatible,
+        checkpointIncompatibleError: () => incompatible
+      })
+    ).rejects.toBe(incompatible);
+  } finally {
+    if (previousOpenAiApiKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previousOpenAiApiKey;
+  }
+
+  expect(preflightCalls).toBe(1);
+  expect(JSON.parse(fs.readFileSync(path.join(dataRoot, "status.json"), "utf8"))).toMatchObject({
+    result_type: "terminal",
+    model_work_started: false,
+    diagnostic_code: "checkpoint-incompatible"
+  });
+  expect(fs.readlinkSync(path.join(dataRoot, "public-results.json"))).toBe("missing-public-results.json");
 }, 30_000);
 
 it("accepts the bounded full lane before reading paid-run credentials", async () => {
@@ -155,11 +301,11 @@ it("accepts the bounded full lane before reading paid-run credentials", async ()
     auth_mode: "api-key"
   };
   const config = {
-    schema_version: "ultrafuzz.modal.benchmark.v1",
+    schema_version: "ultrafuzz.modal.benchmark.v2",
     run_id: "public-full-lane",
     app_name: "ultrafuzz-benchmarks",
     image_name: "fixture-image",
-    braintrust: { project: "fixture", api_key_env: "BRAINTRUST_API_KEY", judge_credential_ttl_seconds: 57_600 },
+    braintrust: publicBraintrustConfig(),
     node_timeout_seconds: 1800,
     loops: 1,
     models: [model],
@@ -169,6 +315,7 @@ it("accepts the bounded full lane before reading paid-run credentials", async ()
       runner_model_profile: model.slug,
       candidate_repository: "https://github.com/monad-developers/ultrafuzz",
       candidate_commit: "a".repeat(40),
+      targets: publicTargets(),
       max_runtime_seconds: 3_600
     }
   } satisfies PublicModalBenchmarkConfig;
@@ -218,11 +365,11 @@ it("allows only API-key public workers plus Kimi subscription workers", () => {
     auth_mode: "api-key"
   };
   const config = {
-    schema_version: "ultrafuzz.modal.benchmark.v1",
+    schema_version: "ultrafuzz.modal.benchmark.v2",
     run_id: "public-auth-admission",
     app_name: "ultrafuzz-benchmarks",
     image_name: "fixture-image",
-    braintrust: { project: "fixture", api_key_env: "BRAINTRUST_API_KEY", judge_credential_ttl_seconds: 57_600 },
+    braintrust: publicBraintrustConfig(),
     node_timeout_seconds: 1800,
     loops: 1,
     models: [apiKeyModel],
@@ -232,6 +379,7 @@ it("allows only API-key public workers plus Kimi subscription workers", () => {
       runner_model_profile: apiKeyModel.slug,
       candidate_repository: "https://github.com/monad-developers/ultrafuzz",
       candidate_commit: "a".repeat(40),
+      targets: publicTargets(),
       max_runtime_seconds: 3_600
     }
   } satisfies PublicModalBenchmarkConfig;
@@ -413,9 +561,15 @@ it("reads model work evidence from the eval journal and never invents it", () =>
 
   // A row whose launcher failed after submitting a workflow may already have
   // spent tokens, so it counts as work having started.
+  const failedAfterLaunch = failedRunRecord(
+    "row-1",
+    "WORKFLOW_SUBMISSION_FAILED",
+    "workflow submission acknowledgement timed out",
+    ["workflow-1"]
+  );
   fs.writeFileSync(
     path.join(evalRoot, "run-summary.json"),
-    `${JSON.stringify({ records: [{ row_id: "row-1", status: "failed", workflow_ids: ["workflow-1"] }] })}\n`
+    `${JSON.stringify(runSummaryFromRecords([failedAfterLaunch]))}\n`
   );
   expect(publicEvalModelWorkEvidence(evalRoot)).toBe("launched");
 
@@ -423,43 +577,62 @@ it("reads model work evidence from the eval journal and never invents it", () =>
   fs.rmSync(path.join(evalRoot, "run-summary.json"));
   fs.writeFileSync(
     path.join(evalRoot, "runs.jsonl"),
-    `${JSON.stringify({ row_id: "row-1", status: "failed", workflow_ids: [] })}\n`
+    `${JSON.stringify(failedRunRecord("row-1", "EVAL_TARGET_PATH_MISSING", "target path is missing"))}\n`
   );
   expect(publicEvalModelWorkEvidence(evalRoot)).toBe("none");
 
+  // Malformed-present is not absence: the current summary remains
+  // authoritative and cannot silently fall back to the valid line journal.
   fs.writeFileSync(path.join(evalRoot, "run-summary.json"), "{ not json\n");
-  expect(publicEvalModelWorkEvidence(evalRoot)).toBe("none");
+  expect(() => publicEvalModelWorkEvidence(evalRoot)).toThrow(/durable JSON is invalid/u);
+
+  const invalidRowSummary = runSummary(0) as unknown as Record<string, unknown>;
+  invalidRowSummary.records = [...runSummary(0).records, { row_id: "invalid-row" }];
+  invalidRowSummary.failed = 4;
+  fs.writeFileSync(path.join(evalRoot, "run-summary.json"), `${JSON.stringify(invalidRowSummary)}\n`);
+  expect(() => publicEvalModelWorkEvidence(evalRoot)).toThrow(/failed canonical schema/u);
+
+  fs.rmSync(path.join(evalRoot, "run-summary.json"));
+  fs.writeFileSync(
+    path.join(evalRoot, "runs.jsonl"),
+    `${JSON.stringify(failedRunRecord("row-1", "EVAL_TARGET_PATH_MISSING", "target path is missing"))}\n{}\n`
+  );
+  expect(() => publicEvalModelWorkEvidence(evalRoot)).toThrow(/failed canonical schema/u);
+
+  fs.symlinkSync(path.join(evalRoot, "runs.jsonl"), path.join(evalRoot, "run-summary.json"));
+  expect(() => publicEvalModelWorkEvidence(evalRoot)).toThrow(/must be a regular file/u);
 });
 
 it("never reports no model work for a row whose submission may have landed", () => {
   const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-submission-"));
   const evalRoot = path.join(root, "eval-run");
   fs.mkdirSync(evalRoot, { recursive: true });
-  const submissionFailed = {
-    row_id: "row-1",
-    target_id: "row-1",
-    status: "failed",
+  const submissionFailed = failedRunRecord(
+    "row-4",
+    "WORKFLOW_SUBMISSION_FAILED",
     // `submitSmithersWorkflow` can fail after the engine has taken the workflow
     // -- a lease or acknowledgement that never comes back -- and the runtime
     // discards the id on that path, so the row names no workflow to count.
-    workflow_ids: [],
-    diagnostics: [{ code: "WORKFLOW_SUBMISSION_FAILED", message: "detached admission timed out" }]
-  };
+    "detached admission timed out"
+  );
 
-  fs.writeFileSync(path.join(evalRoot, "run-summary.json"), `${JSON.stringify({ records: [submissionFailed] })}\n`);
+  fs.writeFileSync(
+    path.join(evalRoot, "run-summary.json"),
+    `${JSON.stringify(runSummaryFromRecords([submissionFailed]))}\n`
+  );
   expect(publicEvalModelWorkEvidence(evalRoot)).toBe("unknown");
 
   // One such row is enough to make the whole journal unable to say nothing ran.
   fs.writeFileSync(
     path.join(evalRoot, "run-summary.json"),
-    `${JSON.stringify({ records: [...runSummary(0).records, submissionFailed] })}\n`
+    `${JSON.stringify(runSummaryFromRecords([...runSummary(0).records, submissionFailed]))}\n`
   );
   expect(publicEvalModelWorkEvidence(evalRoot)).toBe("unknown");
 
   // A row that did launch still outranks it: the journal knows work began.
   fs.writeFileSync(
     path.join(evalRoot, "run-summary.json"),
-    `${JSON.stringify({ records: [...runSummary(1).records, submissionFailed] })}\n`
+    `${JSON.stringify(runSummaryFromRecords([...runSummary(1).records, submissionFailed]))}\n`
   );
   expect(publicEvalModelWorkEvidence(evalRoot)).toBe("launched");
 
@@ -470,7 +643,7 @@ it("never reports no model work for a row whose submission may have landed", () 
   expect(publicEvalModelWorkEvidence(evalRoot)).toBe("unknown");
   fs.writeFileSync(
     path.join(evalRoot, "runs.jsonl"),
-    `${JSON.stringify({ ...submissionFailed, diagnostics: [{ code: "EVAL_ROW_SYNC_FAILED" }] })}\n`
+    `${JSON.stringify(failedRunRecord("row-1", "EVAL_ROW_SYNC_FAILED", "row synchronization failed"))}\n`
   );
   expect(publicEvalModelWorkEvidence(evalRoot)).toBe("none");
 });
@@ -487,17 +660,9 @@ it("keeps a submission that may have landed out of the pre-model retry budget", 
   fs.mkdirSync(evalRoot, { recursive: true });
   fs.writeFileSync(
     path.join(evalRoot, "run-summary.json"),
-    `${JSON.stringify({
-      launched: 0,
-      records: [
-        {
-          row_id: "row-1",
-          status: "failed",
-          workflow_ids: [],
-          diagnostics: [{ code: "WORKFLOW_SUBMISSION_FAILED", message: "detached admission timed out" }]
-        }
-      ]
-    })}\n`
+    `${JSON.stringify(
+      runSummaryFromRecords([failedRunRecord("row-1", "WORKFLOW_SUBMISSION_FAILED", "detached admission timed out")])
+    )}\n`
   );
   let modelWorkStarted = false;
   const writer = await WorkerResultWriter.create({
@@ -591,19 +756,12 @@ it("settles model work against a journal the eval command left behind after exit
 });
 
 it("keeps the flag raised after a nonzero exit whose journal cannot rule model work out", async () => {
-  const mayHaveLaunched = await settleAfterFailedEvalRun({
-    launched: 0,
-    records: [
+  const mayHaveLaunched = await settleAfterFailedEvalRun(
+    runSummaryFromRecords([
       ...runSummary(0).records,
-      {
-        row_id: "row-4",
-        target_id: "row-4",
-        status: "failed",
-        workflow_ids: [],
-        diagnostics: [{ code: "WORKFLOW_SUBMISSION_FAILED", message: "detached admission timed out" }]
-      }
-    ]
-  });
+      failedRunRecord("row-4", "WORKFLOW_SUBMISSION_FAILED", "detached admission timed out")
+    ])
+  );
 
   // The read happens and declines to lower the flag, which is a different fact
   // from the read never happening -- and the only one of the two that survives
@@ -621,7 +779,7 @@ it("keeps the flag raised after a nonzero exit whose journal cannot rule model w
 });
 
 it("clears the flag for a nonzero exit over an empty matrix", async () => {
-  const empty = await settleAfterFailedEvalRun({ launched: 0, records: [] });
+  const empty = await settleAfterFailedEvalRun(runSummaryFromRecords([]));
 
   expect(empty.journalReads).toBe(1);
   expect(empty.contract).toMatchObject({ model_work_started: false });
@@ -633,10 +791,7 @@ it("clears the flag for a nonzero exit over an empty matrix", async () => {
  * flag, run the command, settle the flag against the journal, then fail the run
  * the way `scoring_ready === false` does, and read the terminal contract back.
  */
-async function settleAfterFailedEvalRun(journal: {
-  launched: number;
-  records: Array<Record<string, unknown>>;
-}): Promise<{
+async function settleAfterFailedEvalRun(journal: EvalRunSummary): Promise<{
   contract: unknown;
   journalReads: number;
   workerStatus: ReturnType<typeof parseModalWorkerStatus>;
@@ -840,16 +995,85 @@ it("reports an unbuildable diagnostics document without claiming a sandbox exit 
 // missing, so `runtimeRowLauncher` threw before it compiled anything to submit.
 // A row that failed at submission is a different journal and a different answer;
 // see "never reports no model work for a row whose submission may have landed".
-function runSummary(launched: number): { launched: number; records: Array<Record<string, unknown>> } {
+function runSummary(launched: number): EvalRunSummary {
+  return runSummaryFromRecords(
+    ["row-1", "row-2", "row-3"].map((rowId, index) =>
+      index < launched
+        ? launchedRunRecord(rowId)
+        : failedRunRecord(rowId, "EVAL_TARGET_PATH_MISSING", "target path is missing")
+    )
+  );
+}
+
+function runSummaryFromRecords(records: EvalRunRecord[]): EvalRunSummary {
   return {
-    launched,
-    records: ["row-1", "row-2", "row-3"].map((rowId, index) => ({
-      row_id: rowId,
-      target_id: rowId,
-      status: index < launched ? "launched" : "failed",
-      workflow_ids: index < launched ? [`workflow-${rowId}`] : [],
-      diagnostics: index < launched ? [] : [{ code: "EVAL_TARGET_PATH_MISSING" }]
-    }))
+    schema_version: "ultrafuzz.eval.run-summary.v2",
+    eval_run_id: "eval-public-evidence",
+    launched: records.filter((record) => record.status === "launched").length,
+    failed: records.filter((record) => record.status === "failed").length,
+    incomplete: records.filter(
+      (record) =>
+        record.status === "launched" &&
+        (record.workflow?.terminal !== true ||
+          record.workflow.status === "timed-out" ||
+          record.workflow.status === "canceled")
+    ).length,
+    records
+  };
+}
+
+function launchedRunRecord(rowId: string): EvalRunRecord {
+  return {
+    ...runRecordBase(rowId),
+    ultrafuzz_run_id: `run-${rowId}`,
+    ultrafuzz_run_root: `/tmp/run-${rowId}`,
+    status: "launched",
+    workflow_ids: [`workflow-${rowId}`],
+    launcher: {
+      status: "succeeded",
+      started_at: "2026-08-09T00:00:00.000Z",
+      finished_at: "2026-08-09T00:00:01.000Z"
+    },
+    diagnostics: []
+  };
+}
+
+function failedRunRecord(
+  rowId: string,
+  diagnosticCode: string,
+  diagnosticMessage: string,
+  workflowIds: string[] = []
+): EvalRunRecord {
+  return {
+    ...runRecordBase(rowId),
+    status: "failed",
+    workflow_ids: workflowIds,
+    launcher: {
+      status: "failed",
+      started_at: "2026-08-09T00:00:00.000Z",
+      finished_at: "2026-08-09T00:00:01.000Z"
+    },
+    diagnostics: [
+      {
+        code: diagnosticCode,
+        message: diagnosticMessage,
+        severity: "error",
+        source: "eval"
+      }
+    ]
+  };
+}
+
+function runRecordBase(
+  rowId: string
+): Pick<EvalRunRecord, "schema_version" | "eval_run_id" | "row_id" | "target_id" | "variant_id" | "trial_id"> {
+  return {
+    schema_version: "ultrafuzz.eval.run.v3",
+    eval_run_id: "eval-public-evidence",
+    row_id: rowId,
+    target_id: rowId,
+    variant_id: "runner",
+    trial_id: "trial-1"
   };
 }
 
@@ -897,6 +1121,7 @@ it("publishes only bounded redacted workflow-submission messages from eval JSON"
         {
           code: "WORKFLOW_SUBMISSION_FAILED",
           message: `runner failed with api_key=${secret}\nprivate detail`,
+          severity: "error",
           details: { credential: secret }
         },
         { code: "EVAL_ROW_SYNC_FAILED", message: `must not publish ${secret}` }
@@ -917,13 +1142,20 @@ it("publishes only bounded redacted workflow-submission messages from eval JSON"
   expect(JSON.stringify(decoded)).not.toContain(secret);
   expect(JSON.stringify(decoded)).not.toContain("details");
   expect(publicEvalFailureDiagnosticLogPayload("not json", [secret])).toBeUndefined();
+  expect(
+    publicEvalFailureDiagnosticLogPayload(
+      '{"diagnostics":[],"diagnostics":[{"code":"WORKFLOW_SUBMISSION_FAILED","message":"shadowed"}]}',
+      []
+    )
+  ).toBeUndefined();
 
   const longPayload = publicEvalFailureDiagnosticLogPayload(
     JSON.stringify({
       diagnostics: [
         {
           code: "WORKFLOW_SUBMISSION_FAILED",
-          message: `${"command-prefix ".repeat(100)}stderr: decisive child failure`
+          message: `${"command-prefix ".repeat(100)}stderr: decisive child failure`,
+          severity: "error"
         }
       ]
     }),
@@ -934,6 +1166,37 @@ it("publishes only bounded redacted workflow-submission messages from eval JSON"
   }>;
   expect(longDecoded[0]!.message).toContain("stderr: decisive child failure");
   expect(Buffer.byteLength(longDecoded[0]!.message, "utf8")).toBeLessThanOrEqual(1_000);
+});
+
+it("publishes workflow-submission messages from the strict durable eval journal", () => {
+  const secret = "opaque-fixture-secret";
+  const payload = publicEvalFailureDiagnosticLogPayloadFromRecords(
+    [
+      failedRunRecord("row-1", "WORKFLOW_SUBMISSION_FAILED", `detached runner failed: ${secret}`),
+      failedRunRecord("row-2", "EVAL_ROW_LAUNCH_FAILED", `launcher threw: ${secret}`),
+      failedRunRecord("row-3", "EVAL_TARGET_PATH_MISSING", `target missing: ${secret}`)
+    ],
+    [secret]
+  );
+
+  expect(payload).toBeDefined();
+  expect(JSON.parse(Buffer.from(payload!, "base64url").toString("utf8"))).toEqual([
+    { code: "WORKFLOW_SUBMISSION_FAILED", message: "detached runner failed: <redacted>" },
+    { code: "EVAL_ROW_LAUNCH_FAILED", message: "launcher threw: <redacted>" },
+    { code: "EVAL_TARGET_PATH_MISSING", message: "target missing: <redacted>" }
+  ]);
+});
+
+it("reserves bounded capture independently for the final eval stdout envelope", () => {
+  const stdoutStream = new PassThrough();
+  const stderrStream = new PassThrough();
+  const capture = captureBoundedCommandOutput(stdoutStream, stderrStream, 32);
+
+  stderrStream.end(Buffer.alloc(64, 0x65));
+  stdoutStream.end('{"diagnostics":[{"code":"x"}]}');
+
+  expect(Buffer.concat(capture.stderr)).toEqual(Buffer.alloc(32, 0x65));
+  expect(Buffer.concat(capture.stdout).toString("utf8")).toBe('{"diagnostics":[{"code":"x"}]}');
 });
 
 it("preserves the eval run failure when no diagnostic can be built", async () => {
@@ -1245,12 +1508,8 @@ it("publishes only the final journal record for each benchmark row", () => {
   const evalRoot = path.join(controlRoot, ".ultrafuzz/evals/runs", evalRunId);
   const runRoot = path.join(root, "target-run");
   const reportRoot = path.join(runRoot, "artifacts/final-report");
-  const reportPath = path.join(reportRoot, "report.json");
   fs.mkdirSync(evalRoot, { recursive: true });
-  fs.mkdirSync(reportRoot, { recursive: true });
-  fs.writeFileSync(reportPath, '{"schema_version":"1.0","issues":[]}\n');
-  fs.writeFileSync(path.join(reportRoot, "report.md"), "# Report\n");
-  fs.writeFileSync(path.join(reportRoot, "findings.normalized.json"), "[]\n");
+  const reportPath = writeCurrentTerminalReport(runRoot);
   const record = {
     schema_version: "ultrafuzz.eval.run.v1",
     eval_run_id: evalRunId,
@@ -1283,8 +1542,7 @@ it("publishes only the final journal record for each benchmark row", () => {
   const reportSources = sources.filter((source) => source.path.startsWith("reports/"));
   expect(reportSources.map((source) => source.path)).toEqual([
     "reports/target-a-runner-trial-1/report.json",
-    "reports/target-a-runner-trial-1/report.md",
-    "reports/target-a-runner-trial-1/findings.normalized.json"
+    "reports/target-a-runner-trial-1/report.md"
   ]);
 
   writeGenuineTaskFailureFixture(runRoot);
@@ -1300,17 +1558,22 @@ it("publishes only the final journal record for each benchmark row", () => {
     publicBundleSources(controlRoot, evalRunId, diagnostics)
       .filter((source) => source.path.startsWith("reports/"))
       .map((source) => source.path)
-  ).toEqual([
-    "reports/target-a-runner-trial-1/report.json",
-    "reports/target-a-runner-trial-1/report.md",
-    "reports/target-a-runner-trial-1/findings.normalized.json"
-  ]);
+  ).toEqual(["reports/target-a-runner-trial-1/report.json", "reports/target-a-runner-trial-1/report.md"]);
+
+  const verifiedReportBytes = fs.readFileSync(reportPath);
+  fs.appendFileSync(reportPath, " \n", "utf8");
+  expect(() => publicBundleSources(controlRoot, evalRunId, diagnostics)).toThrow(
+    /no verified terminal report authority/u
+  );
+  fs.writeFileSync(reportPath, verifiedReportBytes);
 
   fs.rmSync(path.join(reportRoot, "report.md"));
-  expect(() => publicBundleSources(controlRoot, evalRunId, diagnostics)).toThrow(/missing report\.md/u);
+  expect(() => publicBundleSources(controlRoot, evalRunId, diagnostics)).toThrow(
+    /no verified terminal report authority/u
+  );
 });
 
-it("publishes smoke dedupe evidence through the trusted normalized-findings bundle path", () => {
+it("uses report.json as the sole public finding authority", () => {
   const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-worker-smoke-"));
   const controlRoot = path.join(root, "control");
   const evalRunId = "eval-smoke-dedupe";
@@ -1319,15 +1582,16 @@ it("publishes smoke dedupe evidence through the trusted normalized-findings bund
   const reportRoot = path.join(runRoot, "artifacts/final-report");
   const dedupeRoot = path.join(runRoot, "artifacts/dedupe-findings");
   fs.mkdirSync(evalRoot, { recursive: true });
-  fs.mkdirSync(reportRoot, { recursive: true });
+  writeCurrentTerminalReport(runRoot);
   fs.mkdirSync(dedupeRoot, { recursive: true });
-  fs.writeFileSync(path.join(reportRoot, "report.json"), '{"schema_version":"1.0","issues":[]}\n');
-  fs.writeFileSync(path.join(reportRoot, "report.md"), "# Report\n");
+  // These former authorities may still exist in an old workspace, but a new
+  // bundle must neither select nor publish either one.
   fs.writeFileSync(path.join(reportRoot, "findings.normalized.json"), "[]\n");
   fs.writeFileSync(path.join(dedupeRoot, "deduped-findings.json"), "[]\n");
   const rowId = "target-a-runner-trial-1";
   const record = {
     row_id: rowId,
+    ultrafuzz_run_id: "target-run",
     ultrafuzz_run_root: runRoot,
     report_json_path: path.join(reportRoot, "report.json"),
     final_status: "succeeded",
@@ -1338,17 +1602,17 @@ it("publishes smoke dedupe evidence through the trusted normalized-findings bund
   const diagnosticsPath = path.join(root, PUBLIC_EVAL_DIAGNOSTICS_FILE);
   fs.writeFileSync(diagnosticsPath, "{}\n");
 
-  const reportSources = publicBundleSources(controlRoot, evalRunId, { root, source: diagnosticsPath }, "smoke").filter(
+  const reportSources = publicBundleSources(controlRoot, evalRunId, { root, source: diagnosticsPath }).filter(
     (source) => source.path.startsWith("reports/")
   );
   expect(reportSources.map((source) => source.path)).toEqual([
     `reports/${rowId}/report.json`,
-    `reports/${rowId}/report.md`,
-    `reports/${rowId}/findings.normalized.json`
+    `reports/${rowId}/report.md`
   ]);
-  expect(reportSources.at(-1)?.source).toBe(path.join(dedupeRoot, "deduped-findings.json"));
+  expect(reportSources.some((source) => source.source.includes("findings"))).toBe(false);
 
   fs.rmSync(path.join(dedupeRoot, "deduped-findings.json"));
+  writeGenuineTaskFailureFixture(runRoot);
   fs.appendFileSync(
     path.join(evalRoot, "runs.jsonl"),
     `${JSON.stringify({
@@ -1357,13 +1621,75 @@ it("publishes smoke dedupe evidence through the trusted normalized-findings bund
       workflow: { status: "failed", terminal: true }
     })}\n`
   );
-  const failedReportSources = publicBundleSources(
-    controlRoot,
-    evalRunId,
-    { root, source: diagnosticsPath },
-    "smoke"
-  ).filter((source) => source.path.startsWith("reports/"));
-  expect(failedReportSources.at(-1)?.source).toBe(path.join(reportRoot, "findings.normalized.json"));
+  const failedReportSources = publicBundleSources(controlRoot, evalRunId, {
+    root,
+    source: diagnosticsPath
+  }).filter((source) => source.path.startsWith("reports/"));
+  expect(failedReportSources.map((source) => source.path)).toEqual([
+    `reports/${rowId}/report.json`,
+    `reports/${rowId}/report.md`
+  ]);
+});
+
+it("rejects a schema-valid report whose current semantic gates fail", () => {
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-worker-semantic-"));
+  const controlRoot = path.join(root, "control");
+  const evalRunId = "eval-semantic-invalid";
+  const evalRoot = path.join(controlRoot, ".ultrafuzz/evals/runs", evalRunId);
+  const runRoot = path.join(root, "target-run");
+  const rowId = "target-a-runner-trial-1";
+  fs.mkdirSync(evalRoot, { recursive: true });
+  const reportMetadata = {
+    run_id: "target-run",
+    source_run_id: "target-run",
+    repository: "https://github.com/example/fixture",
+    elapsed_time: "0s",
+    models_used: ["fixture-model"],
+    tokens_used: "0",
+    estimated_spend: "0",
+    partial_pricing: false,
+    strategy_loops: 0,
+    audit_profile: "full",
+    audit_profile_catalog_digest: "a".repeat(64),
+    topology_digest: "b".repeat(64),
+    prompt_digest: "c".repeat(64),
+    expanded_graph_fingerprint: "d".repeat(64)
+  };
+  const firstIssue = currentReportIssue();
+  const secondIssue = currentReportIssue({
+    id: "L-02",
+    title: "[L-02] - Second fixture finding",
+    lifecycle: { dedupe_key: "fixture-dedupe-key-2", source_artifacts: [], strategy_hits: [] }
+  });
+  const canonicalReport = currentTerminalReport({
+    run_metadata: reportMetadata,
+    issues: [firstIssue, secondIssue]
+  });
+  const duplicateIdReport = structuredClone(canonicalReport) as { issues: Array<Record<string, unknown>> };
+  duplicateIdReport.issues[1]!.id = "L-01";
+  duplicateIdReport.issues[1]!.title = "[L-01] - Second fixture finding";
+  const reportPath = writeCurrentTerminalReport(runRoot, {
+    report: duplicateIdReport,
+    markdownReport: canonicalReport
+  });
+  fs.writeFileSync(
+    path.join(evalRoot, "runs.jsonl"),
+    `${JSON.stringify({
+      row_id: rowId,
+      ultrafuzz_run_id: "target-run",
+      ultrafuzz_run_root: runRoot,
+      report_json_path: reportPath,
+      final_status: "succeeded",
+      workflow: { status: "succeeded", terminal: true }
+    })}\n`
+  );
+  fs.writeFileSync(path.join(evalRoot, "matrix.json"), `${JSON.stringify([{ id: rowId }])}\n`);
+  const diagnosticsPath = path.join(root, PUBLIC_EVAL_DIAGNOSTICS_FILE);
+  fs.writeFileSync(diagnosticsPath, "{}\n");
+
+  expect(() => publicBundleSources(controlRoot, evalRunId, { root, source: diagnosticsPath })).toThrow(
+    /no verified terminal report authority/u
+  );
 });
 
 it("rejects a persisted public bundle unless every worker lineage field matches", () => {
@@ -1376,15 +1702,11 @@ it("rejects a persisted public bundle unless every worker lineage field matches"
     auth_mode: "api-key"
   };
   const config: PublicModalBenchmarkConfig = {
-    schema_version: "ultrafuzz.modal.benchmark.v1",
+    schema_version: "ultrafuzz.modal.benchmark.v2",
     run_id: "public-worker-lineage",
     app_name: "ultrafuzz-benchmarks",
     image_name: "fixture-image",
-    braintrust: {
-      project: "fixture",
-      api_key_env: "BRAINTRUST_API_KEY",
-      judge_credential_ttl_seconds: 57_600
-    },
+    braintrust: publicBraintrustConfig(),
     node_timeout_seconds: 900,
     loops: 1,
     models: [model],
@@ -1394,6 +1716,7 @@ it("rejects a persisted public bundle unless every worker lineage field matches"
       runner_model_profile: model.slug,
       candidate_repository: "https://github.com/monad-developers/ultrafuzz",
       candidate_commit: "a".repeat(40),
+      targets: publicTargets(),
       max_runtime_seconds: 3_600
     }
   };
@@ -1474,15 +1797,11 @@ it("bounds composed public eval run IDs without losing model identity or bundle 
     auth_mode: "api-key"
   };
   const config = {
-    schema_version: "ultrafuzz.modal.benchmark.v1",
+    schema_version: "ultrafuzz.modal.benchmark.v2",
     run_id: runId,
     app_name: "ultrafuzz-benchmarks",
     image_name: "fixture-image",
-    braintrust: {
-      project: "fixture",
-      api_key_env: "BRAINTRUST_API_KEY",
-      judge_credential_ttl_seconds: 57_600
-    },
+    braintrust: publicBraintrustConfig(),
     node_timeout_seconds: 900,
     loops: 1,
     models: [model],
@@ -1492,6 +1811,7 @@ it("bounds composed public eval run IDs without losing model identity or bundle 
       runner_model_profile: model.slug,
       candidate_repository: "https://github.com/monad-developers/ultrafuzz",
       candidate_commit: "a".repeat(40),
+      targets: publicTargets(),
       max_runtime_seconds: 3_600
     }
   } satisfies PublicModalBenchmarkConfig;
@@ -1553,35 +1873,15 @@ function execGit(cwd: string, args: string[]): string {
 
 function writeGenuineTaskFailureFixture(runRoot: string): void {
   const attemptId = "task-one";
-  fs.writeFileSync(
-    path.join(runRoot, "state.json"),
-    `${JSON.stringify({
-      nodes: {
-        [attemptId]: {
-          node_id: attemptId,
-          status: "failed",
-          timed_out: false,
-          finished_at: "2026-07-20T00:00:00.000Z",
-          last_error: "task output did not pass final validation",
-          provenance: {
-            workflow: { run_id: "workflow-one", task_id: `node:${attemptId}`, state: "finished" },
-            required_artifacts: { ok: true, missing: [] },
-            terminal_disposition: {
-              schema_version: "ultrafuzz.terminal-disposition.v1",
-              kind: "task-output-validation-failure"
-            }
-          }
-        }
-      }
-    })}\n`
-  );
-  fs.mkdirSync(path.join(runRoot, "smithers"), { recursive: true });
-  fs.writeFileSync(
-    path.join(runRoot, "smithers", "tasks.json"),
-    `${JSON.stringify({
-      tasks: [{ attemptId, concreteNodeId: attemptId, smithersNodeId: `node:${attemptId}` }]
-    })}\n`
-  );
+  const currentState = JSON.parse(fs.readFileSync(path.join(runRoot, "state.json"), "utf8")) as {
+    nodes: Record<string, unknown>;
+  };
+  const failureState = currentGenuineTaskFailureState(attemptId) as {
+    nodes: Record<string, unknown>;
+  };
+  failureState.nodes["final-report"] = currentState.nodes["final-report"]!;
+  fs.writeFileSync(path.join(runRoot, "state.json"), `${JSON.stringify({ ...failureState, run_id: "target-run" })}\n`);
+  writeCurrentSmithersTaskFixture(runRoot, attemptId);
 }
 
 it("retains threat-model, goal-plan and vulnerability-database artifacts per row when the run produced them", () => {
@@ -1595,13 +1895,8 @@ it("retains threat-model, goal-plan and vulnerability-database artifacts per row
   const evalRunId = "eval-threat-model";
   const evalRoot = path.join(controlRoot, ".ultrafuzz/evals/runs", evalRunId);
   const runRoot = path.join(root, "target-run");
-  const reportRoot = path.join(runRoot, "artifacts/final-report");
-  const reportPath = path.join(reportRoot, "report.json");
   fs.mkdirSync(evalRoot, { recursive: true });
-  fs.mkdirSync(reportRoot, { recursive: true });
-  fs.writeFileSync(reportPath, '{"schema_version":"1.0","issues":[]}\n');
-  fs.writeFileSync(path.join(reportRoot, "report.md"), "# Report\n");
-  fs.writeFileSync(path.join(reportRoot, "findings.normalized.json"), "[]\n");
+  const reportPath = writeCurrentTerminalReport(runRoot);
 
   const threatModelRoot = path.join(runRoot, "artifacts/threat-model");
   fs.mkdirSync(threatModelRoot, { recursive: true });
@@ -1643,12 +1938,11 @@ it("retains threat-model, goal-plan and vulnerability-database artifacts per row
     .map((source) => source.path);
 
   // The fixed set keeps its exact shape and position; retention is additive.
-  expect(paths.slice(0, 3)).toEqual([
+  expect(paths.slice(0, 2)).toEqual([
     "reports/target-a-runner-trial-1/report.json",
-    "reports/target-a-runner-trial-1/report.md",
-    "reports/target-a-runner-trial-1/findings.normalized.json"
+    "reports/target-a-runner-trial-1/report.md"
   ]);
-  expect(paths.slice(3)).toEqual([
+  expect(paths.slice(2)).toEqual([
     "reports/target-a-runner-trial-1/artifacts/goal-planner/goal-plan.json",
     "reports/target-a-runner-trial-1/artifacts/goal-planner/vulnerability-db-manifest.json",
     "reports/target-a-runner-trial-1/artifacts/threat-model/THREAT_MODEL.md",

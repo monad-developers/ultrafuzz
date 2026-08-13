@@ -25,6 +25,9 @@ events.jsonl
 usage.jsonl
 attempts.jsonl
 plan.json
+prompt-snapshots/
+trusted-cli.json
+trusted-bin/
 artifacts/
 review/
 events.index/
@@ -37,16 +40,30 @@ indexes are JSONL files derived from `events.jsonl`; SQLite events are not part
 of the artifact contract.
 
 `usage.jsonl` is an append-only ledger of normalized workflow usage events.
-Each entry has stable event, attempt, and checkpoint-generation identifiers.
-Replaying the same continuation is idempotent, while events from later
-checkpoint generations remain distinct. The ledger stores normalized counters
-and typed usage-completeness reasons, not raw execution records.
+Each entry's immutable identity is the exact Smithers pair
+`(workflow_run_id, source_event_sequence)`; `control_generation`, node,
+iteration, and attempt remain validated evidence dimensions rather than
+surrogate identities. Replaying the same continuation is idempotent. The
+ledger stores closed normalized counters, not raw execution records.
 
 `ultrafuzz stats <run-id>` joins this ledger with `attempts.jsonl`, `state.json`,
 `graph.json`, and `run.json` to derive per-node timing and usage on demand. The
-portable report-bundle ZIP includes all five files, so
+current v3 portable report-bundle ZIP includes all five files plus the bound
+`graph.fingerprint`, so
 `ultrafuzz stats --bundle <report-bundle.zip>` can perform the same query
-offline. Statistics are not persisted as a separate `stats.json` artifact.
+offline. Present evidence is parsed with the same strict current readers as a
+local run. Local mode accepts one coherent evidence snapshot only after two
+matching complete reads and anchors it immediately after the accepted second
+read. Only a genuinely absent optional ledger can be unavailable. Missing
+usage makes both usage statistics and cumulative accounting unavailable because
+the ledger can no longer authenticate the metadata rollup. Statistics are not
+persisted as a separate `stats.json` artifact.
+
+The v3 bundle proves internal agreement among its workflow identifiers and
+control generation, but it omits `workflow-run-link-journal.json` and sealed
+workflow control files. An offline consumer therefore cannot independently
+authenticate the historical workflow-link chain; the bundle manifest is a
+snapshot inventory rather than a standalone workflow-origin attestation.
 
 ## Run Metadata
 
@@ -61,17 +78,40 @@ values are redacted before persistence, and restore metadata is written to
 `graph.json` records the planned executable graph, including logical IDs,
 concrete IDs, group, prompt path, dependencies, artifact directory, contracted
 outputs, primary output marker, loop metadata, reference revisions, and model
-fan-out provenance.
+fan-out provenance. Every JSON output also records its schema filename,
+fragment-free schema ID, schema SHA-256, schema-bundle SHA-256, and validator
+build identity. Partial bindings are invalid.
 
 `plan.json` records the run plan, graph/config fingerprints, topology summary,
 rendered prompt paths and digests, immutable prompt snapshot paths, and
 validation posture. Exact rendered prompt snapshots live under
 `prompt-snapshots/`; lifecycle recovery uses those snapshots to restore missing
 task input without consulting mutable prompt sources or current configuration.
+That recovery concerns runtime-owned control input only; it never reconstructs
+an agent-owned output.
+
+`trusted-cli.json` binds the run-owned launcher in `trusted-bin/` to the exact
+CLI entrypoint bytes, validator build, and artifact schema-bundle digest. The
+launcher precedes target-controlled directories on the producer's `PATH`.
+Before model work, Ultrafuzz uses it to validate a real known-valid fixture and
+checks the returned schema ID, schema digest, bundle digest, and build identity.
+A missing, changed, or stale launcher is a setup failure; it is not recreated
+silently when an existing run resumes. Modal images provide the equivalent
+root-owned, read-only `/usr/local/bin/ultrafuzz` entrypoint and preflight.
 
 ## State
 
-`state.json` has schema version `1.1`.
+`state.json` has schema version `ultrafuzz.run-state.v5` and schema ID
+`urn:ultrafuzz:schema:artifacts:run-state:5`. Older run-state versions are
+unsupported by the current runtime and fail explicitly rather than entering a
+compatibility reader.
+
+The v4 provenance contract is closed. Run-level provenance records the full
+sealed workflow binding. Each node provenance object is exactly one of an
+execution record, a pinned-reference record, or a dependency-block record.
+Execution records use `output_contracts` and complete Smithers agent/verifier
+identities; the former `required_artifacts` spelling and partial/generic
+provenance objects are invalid.
 
 Run statuses are:
 
@@ -170,30 +210,54 @@ timeout, host shutdown grace, and artifact-finalization reserve.
 
 Required outputs are node-specific and declared with versioned contracts in
 `.ultrafuzz/topology.yml`. Output paths are relative to the node artifact
-directory and must be safe project-local relative paths.
+directory and must be safe project-local relative paths. Each agent-authored
+JSON output has one current named contract and complete whole-document schema;
+generic JSON object/array contracts and historical contract aliases are not
+available.
 
-`artifact-manifest.json` records schema version, run ID, node ID, creation
+`artifact-manifest.json` is runtime-owned and uses the exact schema version
+`ultrafuzz.artifact-manifest.v3`. It records run and producer identity, creation
 time, artifact paths, sizes, SHA-256 digests, output contract IDs and digests,
 and provenance such as logical node, attempt index, loop index, model profile,
-model name, workflow task, and source run when available. It also records the
-exact prerequisite manifest digests consumed by the attempt so reuse can reject
-causally stale descendants.
+model name, workflow task, and source run when available. Every JSON output
+entry carries the complete `schema_file`, `schema_id`, `schema_sha256`,
+`schema_bundle_sha256`, and `validator_build` binding; non-JSON entries omit
+those fields. Optional provenance metadata is a closed union: either the exact
+pinned-reference materialization record (including its optional revision and
+operator-supplied expectation source) or the exact Smithers task concrete-node
+identity. Generic or mixed metadata objects are invalid. The manifest also
+records the exact prerequisite manifest digests consumed by the attempt so
+reuse can reject causally stale descendants. The host strictly validates this
+v3 manifest before writing, reading, reuse, or publication. It rejects every
+earlier manifest version without upgrading or converting it.
+
+The producer's rendered prompt includes one safely quoted `ultrafuzz json
+validate --schema ... --file ...` command per JSON output. The producer runs it
+after the final write and corrects an exit-`1` draft before returning. Once the
+agent session returns, declared artifact bytes are immutable. Host validation,
+semantic gates, synchronization, reporting, dashboards, and bundles may reject
+the bytes or copy them exactly, but may not normalize, convert, repair,
+synthesize, reseal, or substitute another file or final-response payload. A
+missing or invalid required output is a terminal post-agent failure, not a
+model retry or compatibility fallback.
 
 ## Findings
 
-`findings.json` must be a JSON array.
+`findings.json` must be a JSON array. The array itself has no envelope version;
+the `ultrafuzz/findings@2` contract, schema ID, bound digests, and required
+version on each finding identify the document.
 
-Each normalized finding must include:
+Each finding must include:
 
-| Field            | Meaning                                                       |
-| ---------------- | ------------------------------------------------------------- |
-| `schema_version` | Must be `1.0`.                                                |
-| `id`             | Finding ID. Missing IDs are synthesized from node provenance. |
-| `title`          | Non-empty title.                                              |
-| `status`         | Non-empty lifecycle string.                                   |
-| `severity_guess` | Non-empty severity guess.                                     |
-| `confidence`     | Non-empty confidence label.                                   |
-| `summary`        | Non-empty summary.                                            |
+| Field            | Meaning                                          |
+| ---------------- | ------------------------------------------------ |
+| `schema_version` | Exact literal `ultrafuzz.finding.v2`.            |
+| `id`             | Required non-empty producer-authored finding ID. |
+| `title`          | Required non-empty title.                        |
+| `status`         | One current canonical lifecycle value.           |
+| `severity_guess` | Preliminary `High`, `Medium`, or `Low` estimate. |
+| `confidence`     | Lowercase `high`, `medium`, or `low`.            |
+| `summary`        | Required non-empty summary.                      |
 
 Canonical finding `status` values include:
 
@@ -205,8 +269,10 @@ Canonical finding `status` values include:
 - `fixed`
 - `wont-fix`
 
-Agent-produced lifecycle statuses are also preserved when they are non-empty
-strings.
+Other status strings and old schema-version spellings are invalid. IDs,
+provenance, lists, confidence, severity, and evidence are never synthesized or
+normalized after production. Unknown fields are rejected at closed object
+boundaries.
 
 When present, `triage_classification` must be one of:
 
@@ -238,11 +304,11 @@ selectors.
 
 The property specification fan-in writes both `properties.md` and a validated
 `properties.json` catalog. The structured catalog uses schema version
-`ultrafuzz.properties.v1`:
+`ultrafuzz.properties.v2`:
 
 ```json
 {
-  "schema_version": "ultrafuzz.properties.v1",
+  "schema_version": "ultrafuzz.properties.v2",
   "properties": [
     {
       "id": "property-1",
@@ -272,18 +338,33 @@ keeps one canonical property and all distinct contributing source pairs.
 external expectations represented by the property. Fan-in must carry every
 such ID from the source lens JSON into the canonical JSON and Markdown.
 Canonical IDs are stable through one run; cross-run matching is not part of the
-v1 contract.
+v2 contract.
 
 `implemented-properties.json` uses schema version
-`ultrafuzz.implemented-properties.v1`; current invariant nodes publish it
-through the `ultrafuzz/implemented-properties@2` contract. Every record has a canonical
+`ultrafuzz.implemented-properties.v3` and the
+`ultrafuzz/implemented-properties@3` contract. Every record has a canonical
 `property_id`, a status (`implemented`, `pending`, `deferred`, or `blocked`),
 and `implementation_paths` and `test_paths` arrays. The invariant campaign's
-`recon-fuzzer-results.json` uses `ultrafuzz.property-campaign.v1`; failure
-records caused by implemented catalog properties carry `property_ids`.
-Property-derived `findings.json` entries carry the same optional
-`property_ids` and use the raw failure's ID. Setup or harness findings that do
-not originate from a catalog property omit the field.
+`recon-fuzzer-results.json` uses `ultrafuzz.property-campaign.v3`. It is a
+closed execution record that names the authenticated plan, implementation
+handoff, findings, and campaign-summary artifacts; preserves backend identity,
+command/config, worker count, timing, deadline, exit/failure evidence, and
+declared paths; types available or unavailable coverage; and contains exactly
+one result row for every implemented property. Every observed failure carries
+its raw evidence plus either a deterministic reproducer or a typed reproduction
+blocker. Failure records caused by implemented catalog properties carry
+non-empty `property_ids`; non-property failures use an empty array.
+The required `evidence_files` array is a closed, bounded manifest of exact file
+references rather than a recursive backend-directory inventory. It lists the
+log when the backend started, raw results when the document claims usable or
+reported results, and every coverage, property-result, raw-reproducer, and
+deterministic-reproducer file exactly once with byte length and SHA-256. The
+reference set itself supplies each entry's role. Verification snapshots each
+regular non-symlink, non-hard-linked file once and reuses those bytes for digest
+checks, publication, and the verification marker.
+Property-derived `findings.json` entries carry the same property IDs and use a
+representative raw failure's ID. Historical v1/v2 records are rejected without
+conversion or compatibility fallback.
 
 Current invariant implementation runs also emit a `selection` object with the
 configured `priority_threshold`, its inclusive `priorities`, and the complete
@@ -291,8 +372,8 @@ ordered `property_ids` selected from the canonical catalog. Every selected
 property has one implementation record. A selected property that is not
 implemented carries a typed `blocker` object with `code`, `summary`, and
 `next_action`; this preserves an actionable reason instead of silently
-deferring benchmark-relevant coverage. Historical artifacts may omit
-`selection` and remain readable.
+deferring benchmark-relevant coverage. `selection` is required in the current
+contract; artifacts that omit it are rejected.
 
 The final report mirrors this handoff in
 `property_implementation_coverage`, preserving the threshold, inclusive
@@ -300,8 +381,16 @@ priorities, selected IDs, ordered implemented/blocked/pending/deferred ID
 arrays, and the reference expectation property/ID arrays for analysis. A
 current report must include this object in `report.json` and render
 `## Property implementation coverage` in `report.md`; runtime checks compare
-both representations with the implementation handoff. Reports produced before
-this field existed (and without current selection metadata) use `"unavailable"`.
+both representations with the implementation handoff. Missing current
+selection metadata is a contract failure, not an `"unavailable"` compatibility
+case.
+
+Topologies that do not declare the property-implementation track use the
+required typed value `{ "status": "not-planned", "reason":
+"property-implementation-track-not-declared" }`. This value describes the
+current topology; it is not a historical fallback. The Markdown projection
+renders the same two fields, and omission or the former `"unavailable"` string
+is schema-invalid.
 
 ### Campaign outcome
 
@@ -334,15 +423,16 @@ campaign itself recorded.
 
 Runtime artifact gates reject unknown canonical IDs and campaign references to
 properties that were not recorded with `implemented` status. They validate each
-campaign result record independently, judge unexplained findings against the
-union of every campaign record in the node, reject raw campaign/finding
-reference mismatches and dangling final-report IDs, and require final joins to
-match the validated sources, implementation/test paths, and complete set of
-originating fuzzer backends. Final `report.json` stores the joined chain in
-`property_provenance`, using `fuzzer_backend` for one backend or
-`fuzzer_backends` for several, and `report.md` renders it under **Property
-provenance**. Historical artifacts without the v1 handoffs render provenance as
-`unavailable` rather than failing report generation.
+campaign result record independently; require its plan/backend/command/path and
+implemented-property joins; reconcile property results, failures, findings,
+reproducers, and summary accounting; judge unexplained findings against the
+union of every campaign record in the node; reject dangling final-report IDs;
+and require final joins to match the validated sources, implementation/test
+paths, and complete set of originating fuzzer backends. Final `report.json`
+stores the joined chain in `property_provenance`, using `fuzzer_backend` for one
+backend or `fuzzer_backends` for several, and `report.md` renders it under
+**Property provenance**. Missing or inconsistent current provenance fails the
+report gate; the host does not synthesize it from older handoffs.
 
 ## Final Report
 
@@ -355,6 +445,9 @@ artifacts/final-report/report.json
 ```
 
 If final report artifacts are missing, `ultrafuzz report <run-id>` fails.
+`report.json` must satisfy `ultrafuzz/report@2` with the exact
+`ultrafuzz.report.v2` version literal. Reporting reads the agent-authored bytes;
+it does not reconstruct, reorder, normalize, or rewrite them.
 
 When workflow usage data is available, run metadata includes
 `accounting.cumulative.tokens_used` and
@@ -381,7 +474,7 @@ events. `usage_complete` and `pricing_complete` are independent: their typed
 `*_incomplete_reasons` arrays distinguish missing or estimated usage from a
 missing component rate. Usage completeness is derived from reported component
 evidence regardless of whether catalog pricing is available. `partial_pricing`
-remains the backward-compatible inverse of pricing completeness. An event's
+is the inverse of pricing completeness. An event's
 reported total is tracked separately in `provided_cost_usd`; it does not fill
 missing component rates or make component pricing complete. Kimi-family models
 are priced from the pinned Moonshot provider entry, while DeepSeek-family
@@ -474,10 +567,10 @@ from complete cost. Usage and cost remain unavailable until the durable workflow
 is terminal. Active time is the union of node execution intervals, so parallel
 nodes are not double-counted; wait time is wall time minus that union. Runs with
 retries remain typed as unavailable when the durable state does not retain every
-attempt interval. The legacy `runtime_seconds` and `cost_estimate` row fields
-remain aliases of the structured wall-time and cost values for compatibility.
-The same fields are rendered from that structure into `summary.md`, which is
-read by `ultrafuzz eval report`.
+attempt interval. Row timing and cost exist only in the structured `efficiency`
+block; the historical `runtime_seconds` and `cost_estimate` aliases are rejected.
+Those canonical fields are rendered into `summary.md`, which is read by
+`ultrafuzz eval report`.
 The row records include graph/config and execution artifact identities when
 available. `ultrafuzz eval score` writes per-row scores to `scores.jsonl` and
 the variant ranking plus scoring lineage to `summary.json`, including the

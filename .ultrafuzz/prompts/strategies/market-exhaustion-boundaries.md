@@ -82,5 +82,6 @@ Prefer small state setups with one or two price levels so exhaustion behavior is
 observable. Classify exact rounding rules as incomplete-spec when public sources
 do not define them.
 
-Write structured findings to {{output_findings_path}}. Use an empty JSON array
-if no finding is confirmed.
+Write structured findings to {{output_findings_path}}. If no finding is
+confirmed, use only the empty form defined by the exact pinned schema in the
+central output contract.

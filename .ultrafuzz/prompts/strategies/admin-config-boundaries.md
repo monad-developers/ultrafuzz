@@ -16,8 +16,8 @@ property-catalog handoffs. When no rendered path is provided for one of those
 optional handoffs, do not treat its absence as an error: use the retained
 project discovery, actor/flow analysis, and target source directly. Prefer
 target-native tests when practical, record unavailable harness validation as
-blocked, and still emit every required artifact with valid empty arrays when
-no result can be supported.
+blocked, and still emit every required artifact using its schema-defined empty
+form when no result can be supported.
 
 Read these handoff artifacts before authoring tests:
 
@@ -130,21 +130,21 @@ Write structured JSON to:
 
 {{artifact_dir}}/admin-config-boundary-matrix.json
 
-The JSON must include:
+Read the pinned JSON Schema at
+`{{schema_path}}/admin-config-boundary-matrix.schema.json` before authoring the
+structured artifact. It is the only authority on its JSON version, fields,
+types, required and optional members, enums, and empty form. Run the exact
+`ultrafuzz json validate` command rendered for this file in the central
+Ultrafuzz Output Contract after the final write and correct it until the command
+exits 0.
 
-- `schema_version`: `"1.0"`
-- `surfaces`: array of enumerated surfaces with module family, contract or
-  interface, documented name, implementation name, selector, authorization
-  model, getter or reflection path, source evidence, selected test cases, and
-  classification
-- `selector_mismatches`: array of documented/interface/implementation selector
-  or name mismatches, or `[]`
-- `ambiguous_or_incomplete_specs`: array of rows classified as
-  `incomplete-spec` or `implementation-drift`, or `[]`
-- `generated_tests`: array of generated test file paths and the checks each
-  file covers
-- `coverage_notes`: remaining admin/config surfaces that were intentionally
-  skipped, with reasons
+Keep the Markdown and JSON views semantically aligned. They must cover the same
+documented surfaces, implementation names and selectors, authorization and
+reflection paths, source evidence, selected tests, classifications, unresolved
+specification questions, and coverage gaps. Every referenced generated test
+must be one this node actually authored. These source, test, and cross-artifact
+relationships are contextual requirements beyond JSON Schema.
 
-Write structured findings to {{output_findings_path}}. Use an empty JSON array
-if no finding is confirmed.
+Write structured findings to {{output_findings_path}}. If no finding is
+confirmed, use only the empty form defined by the exact pinned schema in the
+central output contract.

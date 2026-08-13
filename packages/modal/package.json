@@ -19,13 +19,14 @@
     "Dockerfile"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && rm -rf dist/schema && cp -R schema dist/schema && node scripts/verify-schema-registry.mjs",
     "smoke": "pnpm run build && node dist/cli.js smoke",
     "test": "vitest run",
     "typecheck": "pnpm --filter @ultrafuzz/modal^... build && tsc -p tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {
     "@ultrafuzz/artifacts": "workspace:*",
+    "@ultrafuzz/config": "workspace:*",
     "@ultrafuzz/evals": "workspace:*",
     "@ultrafuzz/runtime": "workspace:*",
     "@ultrafuzz/security": "workspace:*",

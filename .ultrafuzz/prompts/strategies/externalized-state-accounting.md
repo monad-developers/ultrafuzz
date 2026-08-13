@@ -119,5 +119,28 @@ reward capture, over-decreased active state, or public view reverts in reachable
 states. Explain which non-balance state components were included in the oracle
 and why raw balances alone would miss the issue.
 
-Write structured findings to {{output_findings_path}}. Use an empty JSON array
-if no source-backed production finding is confirmed.
+## Required accounting artifacts
+
+Write the human-readable inventory, scenarios, and oracle analysis to
+`{{artifact_dir}}/externalized-state-accounting.md`.
+
+Write `{{artifact_dir}}/externalized-state-accounting.json`. Read the pinned
+JSON Schema at
+`{{schema_path}}/externalized-state-accounting.schema.json` before authoring it.
+The schema is the only authority on the JSON version, fields, types, required
+and optional members, enums, and empty form. Run the exact
+`ultrafuzz json validate` command rendered for this file in the central
+Ultrafuzz Output Contract after the final write and correct it until the command
+exits 0.
+
+Keep the Markdown and JSON views semantically aligned. They must describe the
+same economically relevant state components, actors, mutation and settlement
+paths, scenarios, public evidence, accounting oracles, rounding policies,
+generated tests, incomplete specifications, and coverage gaps. Every scenario
+and oracle must reference the components it actually exercises, and every test
+reference must name a test this node actually authored. These relationships are
+contextual requirements beyond JSON Schema.
+
+Write structured findings to {{output_findings_path}}. If no source-backed
+production finding is confirmed, use only the empty form defined by the exact
+pinned schema in the central output contract.

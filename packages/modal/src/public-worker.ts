@@ -1,9 +1,10 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
-import { mkdir, open, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, open, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import { parseStrictJsonBytes } from "@ultrafuzz/artifacts";
 import {
   adaptBenchmarkManifestToEvalSuite,
   benchmarkLaneConcurrency,
@@ -12,15 +13,18 @@ import {
   BENCHMARK_SMOKE_MAX_PARALLEL_RUNS,
   BENCHMARK_SMOKE_MAX_PARALLEL_TARGETS,
   boundedEvalId,
+  evalSuiteInputDocument,
   evalRunRoot,
   loadBenchmarkCohortManifest,
   loadBenchmarkLanesManifest,
   publicEvalDiagnosticsFailedTargetCount,
-  resolveTerminalReportPath,
+  readEvalRunRecords,
+  readEvalRunSummary,
   type BenchmarkCohortManifest,
   type EvalRunRecord,
   type EvalSuiteSpec
 } from "@ultrafuzz/evals";
+import { loadVerifiedFinalReportSnapshot } from "@ultrafuzz/runtime";
 import { stringify } from "yaml";
 
 import { kimiSubscriptionAuthSecretValuesFromRoots, runnerApiKeyEnv } from "./auth.js";
@@ -31,6 +35,7 @@ import { remoteAuthDir } from "./layout.js";
 import type { ModalWorkerLineage } from "./launch-state.js";
 import {
   createPublicBenchmarkBundle,
+  parsePublicBenchmarkBundle,
   readPublicBenchmarkBundle,
   MAX_PUBLIC_BENCHMARK_FILE_BYTES,
   type PublicBenchmarkBundle,
@@ -56,6 +61,7 @@ import { OperationalDispositionError } from "./terminal-disposition.js";
 
 const ULTRAFUZZ_ROOT = "/opt/ultrafuzz";
 const BAKED_CANDIDATE_ARCHIVE = "/opt/ultrafuzz-source.tgz";
+export const PUBLIC_SMITHERS_SEED_ROOT = "/opt/ultrafuzz-smithers-seed";
 const CLI = path.join(ULTRAFUZZ_ROOT, "packages/cli/dist/index.js");
 const PUBLIC_BUNDLE_FILE = "public-results.json";
 const PUBLIC_WORKSPACE_ROOT = "/tmp/ultrafuzz-public-workspace";
@@ -216,16 +222,23 @@ export async function runPublicBenchmarkWorker(input: {
         }
         return [...retainedForbiddenSecretValues];
       };
-      const initialForbiddenSecretValues = await resolveForbiddenSecretValues();
-      if (fs.existsSync(bundlePath)) {
+      if (pathEntryPresent(bundlePath)) {
+        let snapshot: PublicBenchmarkBundle;
         try {
-          const bundle = readPublicBenchmarkBundle(bundlePath, initialForbiddenSecretValues);
+          snapshot = readPublicBenchmarkBundle(bundlePath);
+        } catch {
+          throw input.checkpointIncompatibleError("persisted public benchmark bundle is invalid");
+        }
+        const initialForbiddenSecretValues = await resolveForbiddenSecretValues();
+        try {
+          const bundle = parsePublicBenchmarkBundle(snapshot, initialForbiddenSecretValues);
           assertPublicWorkerBundleLineage(bundle, input.config, input.model, input.lineage);
           return "finished";
         } catch {
           throw input.checkpointIncompatibleError("persisted public benchmark bundle is invalid");
         }
       }
+      await resolveForbiddenSecretValues();
       await rm(workRoot, { recursive: true, force: true });
       await mkdir(workRoot, { recursive: true, mode: 0o700 });
       const prepared = await runWithPublicPreparationTimeout((signal) =>
@@ -279,7 +292,13 @@ export async function runPublicBenchmarkWorker(input: {
           // The eval command has finished writing its journal, so what it
           // recorded about launched rows outranks the flag this worker raised
           // before the command began (#320).
-          if (publicEvalModelWorkEvidence(evalRunRoot(prepared.controlRoot, prepared.evalRunId)) === "none") {
+          const publicEvalRoot = evalRunRoot(prepared.controlRoot, prepared.evalRunId);
+          const records = readPublicEvalRunRecords(publicEvalRoot);
+          const failurePayload = publicEvalFailureDiagnosticLogPayloadFromRecords(records ?? [], [
+            ...retainedForbiddenSecretValues
+          ]);
+          if (failurePayload !== undefined) appendPublicEvalFailureDiagnosticLogPayload(logPath, failurePayload);
+          if (publicEvalModelWorkEvidence(publicEvalRoot) === "none") {
             modelWorkStarted = false;
           }
         },
@@ -310,7 +329,7 @@ export async function runPublicBenchmarkWorker(input: {
       if (checkpoint.runError !== undefined && !publicEvalRunErrorCanBePublished(checkpoint.diagnostics)) {
         throw checkpoint.runError;
       }
-      const judgeKeyEnv = input.config.braintrust.judge_api_key_env ?? "OPENAI_API_KEY";
+      const judgeKeyEnv = input.config.braintrust.judge_api_key_env;
       await runCommand(
         ["node", CLI, "eval", "score", prepared.evalRunId, "--project", prepared.controlRoot, "--llm-judge", "--json"],
         {
@@ -342,21 +361,26 @@ export async function runPublicBenchmarkWorker(input: {
         candidateCommit: input.config.public_benchmark.candidate_commit,
         evalRunId: prepared.evalRunId,
         lineage: input.lineage,
-        files: publicBundleSources(
-          prepared.controlRoot,
-          prepared.evalRunId,
-          {
-            root: input.dataRoot,
-            source: diagnosticsPath
-          },
-          input.config.public_benchmark.lane
-        ),
+        files: publicBundleSources(prepared.controlRoot, prepared.evalRunId, {
+          root: input.dataRoot,
+          source: diagnosticsPath
+        }),
         forbiddenSecretValues: await resolveForbiddenSecretValues()
       });
       await writePublicBundleAtomic(bundlePath, bundle);
       return "finished";
     }
   });
+}
+
+function pathEntryPresent(candidate: string): boolean {
+  try {
+    fs.lstatSync(candidate);
+    return true;
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
+    throw error;
+  }
 }
 
 export function publicBenchmarkWorkRoot(dataRoot: string): string {
@@ -460,6 +484,7 @@ export type PublicEvalModelWorkEvidence = "launched" | "none" | "unknown";
  * the pre-model retry that `none` buys it.
  */
 const PUBLIC_EVAL_POST_SUBMISSION_DIAGNOSTIC_CODES: ReadonlySet<string> = new Set(["WORKFLOW_SUBMISSION_FAILED"]);
+const PUBLIC_EVAL_LOGGABLE_FAILURE_DIAGNOSTIC_CODE = /^[A-Z][A-Z0-9_]{0,127}$/u;
 
 /**
  * What the eval run's own journal records about model work having begun.
@@ -478,9 +503,10 @@ const PUBLIC_EVAL_POST_SUBMISSION_DIAGNOSTIC_CODES: ReadonlySet<string> = new Se
  * `catch`, and `runtimeRowLauncher` records `workflowIds: []` for it -- so
  * `workflow_ids` cannot answer for that row and its diagnostics have to.
  *
- * Absence of a journal is reported as `unknown`, and so is a journal that cannot
- * rule model work out: only a journal that is present and positively accounts
- * for every record is evidence that nothing ran.
+ * Absence of both current journal documents is reported as `unknown`, and so is
+ * a valid journal that cannot rule model work out. A malformed-present summary
+ * or line journal throws and is reported by the caller; it is never treated as
+ * absence or bypassed in favor of another representation.
  */
 export function publicEvalModelWorkEvidence(evalRoot: string): PublicEvalModelWorkEvidence {
   const records = readPublicEvalRunRecords(evalRoot);
@@ -490,45 +516,44 @@ export function publicEvalModelWorkEvidence(evalRoot: string): PublicEvalModelWo
   return "none";
 }
 
-function recordNamesWorkflow(record: Record<string, unknown>): boolean {
-  return record.status === "launched" || (Array.isArray(record.workflow_ids) && record.workflow_ids.length > 0);
+function recordNamesWorkflow(record: EvalRunRecord): boolean {
+  return record.status === "launched" || record.workflow_ids.length > 0;
 }
 
-function recordMayHaveSubmittedWorkflow(record: Record<string, unknown>): boolean {
-  return (
-    Array.isArray(record.diagnostics) &&
-    record.diagnostics.some(
-      (entry) =>
-        isPlainRecord(entry) &&
-        typeof entry.code === "string" &&
-        PUBLIC_EVAL_POST_SUBMISSION_DIAGNOSTIC_CODES.has(entry.code)
-    )
-  );
+function recordMayHaveSubmittedWorkflow(record: EvalRunRecord): boolean {
+  return record.diagnostics.some((diagnostic) => PUBLIC_EVAL_POST_SUBMISSION_DIAGNOSTIC_CODES.has(diagnostic.code));
 }
 
-function readPublicEvalRunRecords(evalRoot: string): Array<Record<string, unknown>> | undefined {
-  for (const [name, parse] of [
-    ["run-summary.json", (text: string) => (JSON.parse(text) as { records?: unknown }).records],
-    [
-      "runs.jsonl",
-      (text: string) =>
-        text
-          .split(/\r?\n/u)
-          .filter(Boolean)
-          .map((line) => JSON.parse(line) as unknown)
-    ]
-  ] as const) {
-    const filePath = path.join(evalRoot, name);
-    try {
-      const stats = fs.lstatSync(filePath);
-      if (!stats.isFile() || stats.size > MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES) continue;
-      const records = parse(fs.readFileSync(filePath, "utf8"));
-      if (Array.isArray(records)) return records.filter(isPlainRecord);
-    } catch {
-      // An unreadable or malformed journal is no evidence either way.
-    }
+function readPublicEvalRunRecords(evalRoot: string): EvalRunRecord[] | undefined {
+  const summaryPath = path.join(evalRoot, "run-summary.json");
+  if (publicEvalJournalFilePresent(summaryPath, "public eval run summary")) {
+    return readEvalRunSummary(summaryPath).records;
+  }
+
+  const journalPath = path.join(evalRoot, "runs.jsonl");
+  if (publicEvalJournalFilePresent(journalPath, "public eval run journal")) {
+    return readEvalRunRecords(journalPath);
   }
   return undefined;
+}
+
+function publicEvalJournalFilePresent(filePath: string, label: string): boolean {
+  let stats: fs.Stats;
+  try {
+    stats = fs.lstatSync(filePath);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") {
+      return false;
+    }
+    throw new Error(`failed to inspect ${label}: ${filePath}`, { cause: error });
+  }
+  if (!stats.isFile()) {
+    throw new Error(`${label} must be a regular file: ${filePath}`);
+  }
+  if (stats.size > MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES) {
+    throw new Error(`${label} exceeds the ${MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES}-byte limit: ${filePath}`);
+  }
+  return true;
 }
 
 /**
@@ -671,9 +696,7 @@ export async function publicBenchmarkWorkerSecretValues(
           remoteAuthDir("kimi"),
           path.join(dataRoot, "kimi-code-auth")
         );
-  return [
-    ...new Set([...runnerSecretValues, requiredEnv(config.braintrust.judge_api_key_env ?? "OPENAI_API_KEY", env)])
-  ];
+  return [...new Set([...runnerSecretValues, requiredEnv(config.braintrust.judge_api_key_env, env)])];
 }
 
 async function preparePublicBenchmark(
@@ -737,6 +760,7 @@ async function preparePublicBenchmark(
       timeoutMs: 5 * 60 * 1000,
       signal
     });
+    await seedPublicBenchmarkSmithersDependencies(destination);
     await writeFile(
       path.join(destination, "ultrafuzz.toml"),
       modalTargetToml(model, config.node_timeout_seconds, scope.lane === "smoke" ? "smoke" : "balanced"),
@@ -763,7 +787,7 @@ async function preparePublicBenchmark(
   });
   if (scope.benchmark === "evmbench") {
     await materializeEvmbenchGroundTruth(
-      controlRoot,
+      cohort,
       suite.targets.map((target) => target.id),
       groundTruthRoot,
       logPath,
@@ -776,7 +800,7 @@ async function preparePublicBenchmark(
       await writeFile(path.join(groundTruthRoot, `${target.id}.yml`), await readFile(source));
     }
   }
-  await writeFile(suitePath, stringify(suite, { lineWidth: 120 }), { mode: 0o600 });
+  await writeFile(suitePath, stringify(evalSuiteInputDocument(suite), { lineWidth: 120 }), { mode: 0o600 });
   const evalRunId = publicEvalRunId(config.run_id, model.slug);
   await runCommand(
     [
@@ -805,6 +829,41 @@ async function preparePublicBenchmark(
     matrixRows: suite.targets.length * suite.variants.length * suite.run.trials_per_variant,
     maxParallelRuns: suite.run.max_parallel_runs ?? 1
   };
+}
+
+/**
+ * Materialize the image-pinned Smithers dependency tree into one disposable
+ * public target. Public evaluation otherwise installs the same generated
+ * workspace once per row during workflow submission. In Modal that registry
+ * bootstrap can consume the entire five-minute submission deadline before any
+ * model work starts. The image build resolves the exact generated manifest
+ * once; this boundary requires byte-identical manifests before copying it, so
+ * the seed cannot silently replace a target-owned or newer dependency contract.
+ */
+export async function seedPublicBenchmarkSmithersDependencies(
+  projectRoot: string,
+  seedRoot = PUBLIC_SMITHERS_SEED_ROOT
+): Promise<void> {
+  const projectPackageRoot = path.join(projectRoot, ".smithers");
+  const projectManifest = path.join(projectPackageRoot, "package.json");
+  const seedManifest = path.join(seedRoot, "package.json");
+  const [expectedManifest, actualManifest] = await Promise.all([readFile(seedManifest), readFile(projectManifest)]);
+  if (!expectedManifest.equals(actualManifest)) {
+    throw new Error("public benchmark Smithers seed manifest does not match the generated target manifest");
+  }
+  const source = path.join(seedRoot, "node_modules");
+  const destination = path.join(projectPackageRoot, "node_modules");
+  if (pathEntryPresent(destination)) {
+    throw new Error("public benchmark target already contains Smithers dependencies before image seeding");
+  }
+  await cp(source, destination, {
+    recursive: true,
+    dereference: false,
+    errorOnExist: true,
+    force: false,
+    mode: fs.constants.COPYFILE_FICLONE,
+    verbatimSymlinks: true
+  });
 }
 
 function publicBenchmarkConfiguredTargetIds(
@@ -891,18 +950,18 @@ export function preparePublicEvalSuite(baseSuite: EvalSuiteSpec, lane: "smoke" |
 }
 
 async function materializeEvmbenchGroundTruth(
-  controlRoot: string,
+  cohort: BenchmarkCohortManifest,
   targetIds: string[],
   destination: string,
   logPath: string,
   signal: AbortSignal
 ): Promise<void> {
   throwIfAborted(signal);
-  const manifest = JSON.parse(await readFile(path.join(controlRoot, "benchmarks/evmbench-detect.json"), "utf8")) as {
-    upstream: { dataset_repository: string; dataset_revision: string };
-  };
+  if (cohort.schema_version !== "ultrafuzz.evmbench.cohort.v1") {
+    throw new Error("EVMbench ground truth requires the validated EVMbench cohort contract");
+  }
   const dataset = path.join(path.dirname(destination), "frontier-evals");
-  await cloneAtCommit(manifest.upstream.dataset_repository, manifest.upstream.dataset_revision, dataset, logPath, {
+  await cloneAtCommit(cohort.upstream.dataset_repository, cohort.upstream.dataset_revision, dataset, logPath, {
     signal
   });
   for (const targetId of targetIds) {
@@ -973,8 +1032,7 @@ async function cloneAtCommit(
 export function publicBundleSources(
   controlRoot: string,
   evalRunId: string,
-  diagnostics: { root: string; source: string },
-  lane: "smoke" | "full" = "full"
+  diagnostics: { root: string; source: string }
 ): PublicBenchmarkBundleSource[] {
   const evalRoot = path.join(controlRoot, ".ultrafuzz/evals/runs", evalRunId);
   const sources: PublicBenchmarkBundleSource[] = [
@@ -991,16 +1049,18 @@ export function publicBundleSources(
     return fs.existsSync(source) ? [{ path: `eval/${relative}`, root: evalRoot, source }] : [];
   });
   sources.push({ path: `eval/${PUBLIC_EVAL_DIAGNOSTICS_FILE}`, ...diagnostics });
-  const records = fs
-    .readFileSync(path.join(evalRoot, "runs.jsonl"), "utf8")
-    .split(/\r?\n/u)
-    .filter(Boolean)
-    .map((line) => JSON.parse(line) as EvalRunRecord);
+  const records = parsePublicSourceJsonLines(
+    fs.readFileSync(path.join(evalRoot, "runs.jsonl")),
+    "public benchmark runs.jsonl"
+  ) as EvalRunRecord[];
   const finalRecordsByRow = new Map<string, EvalRunRecord>();
   for (const record of records) {
     if (record.row_id !== undefined) finalRecordsByRow.set(record.row_id, record);
   }
-  const matrix = JSON.parse(fs.readFileSync(path.join(evalRoot, "matrix.json"), "utf8")) as unknown;
+  const matrix = parsePublicSourceJson(
+    fs.readFileSync(path.join(evalRoot, "matrix.json")),
+    "public benchmark matrix.json"
+  );
   if (
     !Array.isArray(matrix) ||
     matrix.length === 0 ||
@@ -1024,28 +1084,36 @@ export function publicBundleSources(
     if (!scoreable) {
       throw new Error(`public benchmark row is not a scoreable terminal outcome: ${row.id}`);
     }
-    const report = resolveTerminalReportPath({
-      ...(record.ultrafuzz_run_root === undefined ? {} : { runRoot: record.ultrafuzz_run_root }),
-      ...(record.report_json_path === undefined ? {} : { recordedPath: record.report_json_path })
-    }).path;
-    if (report === undefined || record.ultrafuzz_run_root === undefined) {
-      throw new Error(`public benchmark row is missing its terminal report: ${row.id}`);
+    if (
+      record.ultrafuzz_run_root === undefined ||
+      record.ultrafuzz_run_id === undefined ||
+      record.report_json_path === undefined
+    ) {
+      throw new Error(`public benchmark row is missing its terminal report authority binding: ${row.id}`);
     }
-    const reportFindingsSource = path.join(path.dirname(report), "findings.normalized.json");
-    const smokeFindingsSource = path.join(
-      record.ultrafuzz_run_root,
-      "artifacts",
-      "dedupe-findings",
-      "deduped-findings.json"
-    );
-    const normalizedFindingsSource =
-      lane === "smoke" && (!failedDatapoint || fs.existsSync(smokeFindingsSource))
-        ? smokeFindingsSource
-        : reportFindingsSource;
+    let report: ReturnType<typeof loadVerifiedFinalReportSnapshot>;
+    try {
+      report = loadVerifiedFinalReportSnapshot(record.ultrafuzz_run_root);
+    } catch (error) {
+      throw new Error(`public benchmark row has no verified terminal report authority: ${row.id}`, { cause: error });
+    }
+    if (
+      typeof report.json !== "object" ||
+      report.json === null ||
+      !("run_metadata" in report.json) ||
+      typeof report.json.run_metadata !== "object" ||
+      report.json.run_metadata === null ||
+      !("run_id" in report.json.run_metadata) ||
+      report.json.run_metadata.run_id !== record.ultrafuzz_run_id
+    ) {
+      throw new Error(`public benchmark row verified report belongs to another run: ${row.id}`);
+    }
+    if (path.resolve(record.report_json_path) !== path.resolve(report.artifacts.json_path)) {
+      throw new Error(`public benchmark row record names a different terminal report: ${row.id}`);
+    }
     const candidates = [
-      { name: "report.json", source: report },
-      { name: "report.md", source: path.join(path.dirname(report), "report.md") },
-      { name: "findings.normalized.json", source: normalizedFindingsSource }
+      { name: "report.json", source: report.artifacts.json_path, immutableContents: report.json_bytes },
+      { name: "report.md", source: report.artifacts.markdown_path, immutableContents: report.markdown_bytes }
     ];
     for (const candidate of candidates) {
       if (!fs.existsSync(candidate.source)) {
@@ -1054,12 +1122,42 @@ export function publicBundleSources(
       sources.push({
         path: `reports/${row.id}/${candidate.name}`,
         root: record.ultrafuzz_run_root,
-        source: candidate.source
+        source: candidate.source,
+        immutableContents: candidate.immutableContents
       });
     }
     sources.push(...optionalRowArtifactSources(record.ultrafuzz_run_root, row.id));
   }
   return sources;
+}
+
+function parsePublicSourceJson(contents: Buffer, label: string): unknown {
+  try {
+    return parseStrictJsonBytes(contents, {
+      maxBytes: MAX_PUBLIC_BENCHMARK_FILE_BYTES,
+      maxDepth: 128
+    });
+  } catch (error) {
+    throw new Error(`${label} is not strict JSON`, { cause: error });
+  }
+}
+
+function parsePublicSourceJsonLines(contents: Buffer, label: string): unknown[] {
+  const values: unknown[] = [];
+  let lineStart = 0;
+  for (let index = 0; index <= contents.byteLength; index += 1) {
+    if (index !== contents.byteLength && contents[index] !== 0x0a) continue;
+    let lineEnd = index;
+    if (lineEnd > lineStart && contents[lineEnd - 1] === 0x0d) lineEnd -= 1;
+    if (lineEnd === lineStart) {
+      if (index !== contents.byteLength) throw new Error(`${label} contains a blank line`);
+    } else {
+      values.push(parsePublicSourceJson(contents.subarray(lineStart, lineEnd), `${label} line ${values.length + 1}`));
+    }
+    lineStart = index + 1;
+  }
+  if (values.length === 0) throw new Error(`${label} must not be empty`);
+  return values;
 }
 
 /**
@@ -1147,18 +1245,7 @@ async function runCommand(
     env: { ...process.env, ...options.env },
     stdio: ["ignore", "pipe", "pipe"]
   });
-  const stdout: Buffer[] = [];
-  const stderr: Buffer[] = [];
-  let outputBytes = 0;
-  for (const [stream, chunks] of [
-    [child.stdout, stdout],
-    [child.stderr, stderr]
-  ] as const) {
-    stream.on("data", (chunk: Buffer) => {
-      if (outputBytes < 1024 * 1024) chunks.push(chunk.subarray(0, 1024 * 1024 - outputBytes));
-      outputBytes += chunk.byteLength;
-    });
-  }
+  const { stdout, stderr } = captureBoundedCommandOutput(child.stdout, child.stderr);
   let timedOut = false;
   let aborted = false;
   let killTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1244,6 +1331,31 @@ async function runCommand(
   return capturedStdout;
 }
 
+export function captureBoundedCommandOutput(
+  stdoutStream: NodeJS.ReadableStream,
+  stderrStream: NodeJS.ReadableStream,
+  maxBytesPerStream = 1024 * 1024
+): { stdout: Buffer[]; stderr: Buffer[] } {
+  const stdout: Buffer[] = [];
+  const stderr: Buffer[] = [];
+  // Keep the streams independently bounded. `eval run --json` writes its
+  // decisive result envelope to stdout only after all row submissions have
+  // returned, while the commands they invoke can emit substantial stderr.
+  // A shared budget lets that stderr consume the entire allowance and silently
+  // discard the allowlisted workflow-submission diagnostic we need below.
+  for (const [stream, chunks] of [
+    [stdoutStream, stdout],
+    [stderrStream, stderr]
+  ] as const) {
+    let capturedBytes = 0;
+    stream.on("data", (chunk: Buffer) => {
+      if (capturedBytes < maxBytesPerStream) chunks.push(chunk.subarray(0, maxBytesPerStream - capturedBytes));
+      capturedBytes += chunk.byteLength;
+    });
+  }
+  return { stdout, stderr };
+}
+
 /** Why an interrupted command stopped: this worker's own reason first, the signal that took it otherwise. */
 function interruptedCommandCause(input: {
   label: string;
@@ -1266,23 +1378,52 @@ export function publicEvalFailureDiagnosticLogPayload(
 ): string | undefined {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(stdout) as unknown;
+    parsed = parseStrictJsonBytes(Buffer.from(stdout, "utf8"));
   } catch {
     return undefined;
   }
   if (!isPlainRecord(parsed) || !Array.isArray(parsed.diagnostics)) return undefined;
-  const diagnostics = parsed.diagnostics
+  return publicEvalFailureDiagnosticLogPayloadFromDiagnostics(parsed.diagnostics, forbiddenSecretValues);
+}
+
+export function publicEvalFailureDiagnosticLogPayloadFromRecords(
+  records: readonly EvalRunRecord[],
+  forbiddenSecretValues: readonly string[]
+): string | undefined {
+  return publicEvalFailureDiagnosticLogPayloadFromDiagnostics(
+    records.flatMap((record) => record.diagnostics),
+    forbiddenSecretValues
+  );
+}
+
+function publicEvalFailureDiagnosticLogPayloadFromDiagnostics(
+  entries: readonly unknown[],
+  forbiddenSecretValues: readonly string[]
+): string | undefined {
+  const diagnostics = entries
     .filter(
       (entry): entry is Record<string, unknown> =>
-        isPlainRecord(entry) && entry.code === "WORKFLOW_SUBMISSION_FAILED" && typeof entry.message === "string"
+        isPlainRecord(entry) &&
+        typeof entry.code === "string" &&
+        PUBLIC_EVAL_LOGGABLE_FAILURE_DIAGNOSTIC_CODE.test(entry.code) &&
+        typeof entry.message === "string" &&
+        entry.severity === "error"
     )
     .slice(0, 3)
     .map((entry) => ({
-      code: "WORKFLOW_SUBMISSION_FAILED",
+      code: entry.code as string,
       message: sanitizeWorkerDiagnosticMessage(entry.message as string, { forbiddenSecretValues })
     }));
   if (diagnostics.length === 0) return undefined;
   return Buffer.from(JSON.stringify(diagnostics), "utf8").toString("base64url");
+}
+
+function appendPublicEvalFailureDiagnosticLogPayload(logPath: string, payload: string): void {
+  try {
+    fs.appendFileSync(logPath, `${new Date().toISOString()} eval-failure-diagnostics ${payload}\n`);
+  } catch {
+    // The diagnostic is evidence, not an outcome.
+  }
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {

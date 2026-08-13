@@ -12,14 +12,16 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "schema"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && cp ../../ultrafuzz.toml dist/ultrafuzz.toml && cp audit-profiles.yml dist/audit-profiles.yml && rm -rf dist/topologies && cp -R topologies dist/topologies",
-    "test": "pnpm --filter @ultrafuzz/security build && vitest run",
-    "typecheck": "pnpm --filter @ultrafuzz/security build && tsc -p tsconfig.json --noEmit --pretty false"
+    "build": "tsc -p tsconfig.build.json && cp ../../ultrafuzz.toml dist/ultrafuzz.toml && cp audit-profiles.yml dist/audit-profiles.yml && rm -rf dist/topologies && cp -R topologies dist/topologies && rm -rf dist/schema && cp -R schema dist/schema && node scripts/verify-schema-registry.mjs",
+    "test": "pnpm --filter @ultrafuzz/config^... build && vitest run",
+    "typecheck": "pnpm --filter @ultrafuzz/config^... build && tsc -p tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {
+    "@ultrafuzz/artifacts": "workspace:*",
     "@ultrafuzz/security": "workspace:*",
     "smol-toml": "^1.7.0",
     "yaml": "^2.8.0",

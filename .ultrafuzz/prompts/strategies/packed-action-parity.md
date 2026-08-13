@@ -111,5 +111,6 @@ payable-accounting finding instead. If only a public view is stale after a
 correct state transition, preserve it as a stale-value or view-refresh finding
 rather than a parity failure.
 
-Write structured findings to {{output_findings_path}}. Use an empty JSON array
-if no finding is confirmed.
+Write structured findings to {{output_findings_path}}. If no finding is
+confirmed, use only the empty form defined by the exact pinned schema in the
+central output contract.

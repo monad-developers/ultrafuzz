@@ -41,6 +41,7 @@ describe("public Modal benchmark configuration", () => {
       { cwd: workspace }
     );
     const manifest = JSON.parse(fs.readFileSync(path.join(output, "manifest.json"), "utf8")) as {
+      schema_version: string;
       mode: string;
       benchmark: string;
       execution: { mode: string; dry_run: boolean };
@@ -56,6 +57,7 @@ describe("public Modal benchmark configuration", () => {
         max_live_judge_rows: number;
       };
     };
+    expect(manifest.schema_version).toBe("ultrafuzz.modal.benchmark-control-manifest.v1");
     expect(manifest.mode).toBe("smoke");
     expect(manifest).not.toHaveProperty("experiment");
     expect(manifest.benchmark).toBe("ultrafuzz-bench");
@@ -135,7 +137,7 @@ describe("public Modal benchmark configuration", () => {
         path.join(workspace, "scripts/ci/prepare-modal-benchmarks.mjs"),
         "d".repeat(40),
         "https://github.com/monad-developers/ultrafuzz",
-        "full-1",
+        "23456-1",
         output,
         "full"
       ],
@@ -240,7 +242,7 @@ describe("public Modal benchmark configuration", () => {
         path.join(workspace, "scripts/ci/prepare-modal-benchmarks.mjs"),
         "c".repeat(40),
         "https://github.com/monad-developers/ultrafuzz",
-        "overrides-1",
+        "34567-1",
         output,
         "full"
       ],
@@ -288,7 +290,7 @@ describe("public Modal benchmark configuration", () => {
         path.join(workspace, "scripts/ci/prepare-modal-benchmarks.mjs"),
         "e".repeat(40),
         "https://github.com/monad-developers/ultrafuzz",
-        "smoke-override-1",
+        "45678-1",
         output,
         "smoke"
       ],
@@ -336,7 +338,7 @@ describe("public Modal benchmark configuration", () => {
         path.join(workspace, "scripts/ci/prepare-modal-benchmarks.mjs"),
         "f".repeat(40),
         "https://github.com/monad-developers/ultrafuzz",
-        "deepseek-smoke-1",
+        "56789-1",
         output,
         "smoke"
       ],
@@ -418,7 +420,7 @@ describe("public Modal benchmark configuration", () => {
           path.join(workspace, "scripts/ci/prepare-modal-benchmarks.mjs"),
           "d".repeat(40),
           "https://github.com/monad-developers/ultrafuzz",
-          `invalid-${index}`,
+          `${60_000 + index}-1`,
           output,
           testCase.mode
         ],
@@ -426,6 +428,38 @@ describe("public Modal benchmark configuration", () => {
           cwd: workspace,
           encoding: "utf8",
           env: { ...process.env, BENCHMARK_MODELS_JSON: JSON.stringify(testCase.models) }
+        }
+      );
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toMatch(testCase.message);
+      expect(fs.existsSync(path.join(output, "manifest.json"))).toBe(false);
+    }
+  }, 15_000);
+
+  it("rejects malformed-present model selection JSON instead of defaulting or converting it", () => {
+    const workspace = path.resolve("../..");
+    for (const [index, testCase] of [
+      { value: "   ", message: /must be valid strict JSON/u },
+      {
+        value: '[{"provider":"openai","provider":"anthropic","model":"gpt-5.6-luna","reasoning":"high"}]',
+        message: /duplicate/iu
+      }
+    ].entries()) {
+      const output = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-invalid-model-json-"));
+      const result = spawnSync(
+        process.execPath,
+        [
+          path.join(workspace, "scripts/ci/prepare-modal-benchmarks.mjs"),
+          "d".repeat(40),
+          "https://github.com/monad-developers/ultrafuzz",
+          `${70_000 + index}-1`,
+          output,
+          "smoke"
+        ],
+        {
+          cwd: workspace,
+          encoding: "utf8",
+          env: { ...process.env, BENCHMARK_MODELS_JSON: testCase.value }
         }
       );
       expect(result.status).not.toBe(0);
@@ -672,11 +706,23 @@ describe("public Modal benchmark configuration", () => {
     );
     expect(modalDependentLaneBuild?.if).toBe("matrix.lane == 'package-gates' || matrix.lane == 'runtime'");
     expect(modalDependentLaneBuild?.run).toBe("pnpm --filter @ultrafuzz/modal... build");
+    const releaseReporterBuild = releaseValidation?.steps.find(
+      (step) => step.name === "Build release reporter dependencies"
+    );
+    expect(releaseReporterBuild?.if).toBe("matrix.lane == 'cli-typecheck'");
+    expect(releaseReporterBuild?.run).toBe("pnpm --filter @ultrafuzz/artifacts... build");
     expect(releaseValidation?.steps.find((step) => step.name === "Validate benchmark history charts")).toBeUndefined();
-    expect(workflow.jobs["release-gates"]?.needs).toEqual(["draft-and-build-gates", "release-validation"]);
-    expect(
-      workflow.jobs["release-gates"]?.steps.find((step) => step.name === "Merge release validation report")?.run
-    ).toContain("--merge-report-dir");
+    const releaseGates = workflow.jobs["release-gates"];
+    expect(releaseGates?.needs).toEqual(["draft-and-build-gates", "release-validation"]);
+    expect(releaseGates?.steps.find((step) => step.name === "Install dependencies")?.run).toBe(
+      "pnpm install --frozen-lockfile"
+    );
+    expect(releaseGates?.steps.find((step) => step.name === "Build release reporter dependencies")?.run).toBe(
+      "pnpm --filter @ultrafuzz/artifacts... build"
+    );
+    expect(releaseGates?.steps.find((step) => step.name === "Merge release validation report")?.run).toContain(
+      "--merge-report-dir"
+    );
   });
 
   it("terminates every exact detached sandbox after either supported run becomes incomplete", () => {
@@ -752,9 +798,10 @@ describe("public Modal benchmark configuration", () => {
       "utf8"
     );
     expect(cleanupPreparation).toContain("readBenchmarkControlManifest");
+    expect(cleanupPreparation).toContain("loadModalBenchmarkConfig");
+    expect(cleanupPreparation).toContain("isPublicModalBenchmarkConfig");
     expect(cleanupPreparation).toContain("validateAutomaticPairConfig");
-    expect(cleanupPreparation).toContain("CONFIG_KEYS");
-    expect(cleanupPreparation).toContain("MODEL_KEYS");
+    expect(cleanupPreparation).not.toContain("JSON.parse");
     expect(cleanupPreparation).toContain("configs.has(configPath) || states.has(statePath)");
     const termination = cleanup.steps.find((step) => step.name === "Terminate every exact incomplete-run sandbox")!;
     expect(Object.keys(termination.env ?? {})).toEqual(
@@ -863,7 +910,8 @@ describe("public Modal benchmark configuration", () => {
     const discovery = cleanup.steps.find((step) => step.name === "Discover the exact pre-compute benchmark plan")!;
     expect(discovery.run).toContain("attempts/$SOURCE_RUN_ATTEMPT/jobs");
     expect(discovery.run).toContain("compute_may_have_started");
-    expect(discovery.run).toContain("for mode in smoke full threat-model");
+    expect(discovery.run).toContain("for mode in smoke full");
+    expect(discovery.run).not.toContain("threat-model");
     expect(discovery.run).toContain('echo "benchmark_mode=$plan_mode"');
     expect(discovery.run).toContain('echo "plan_artifact_name=$plan_artifact_name"');
 
@@ -904,7 +952,7 @@ describe("public Modal benchmark configuration", () => {
     const workspace = path.resolve("../..");
     const source = fs.readFileSync(path.join(workspace, "packages/modal/src/public-worker.ts"), "utf8");
     const preflight = source.indexOf("await input.preflight");
-    const persistedBundle = source.indexOf("if (fs.existsSync(bundlePath))");
+    const persistedBundle = source.indexOf("if (pathEntryPresent(bundlePath))");
     const readPersistedBundle = source.indexOf("readPublicBenchmarkBundle", persistedBundle);
     const assertPersistedLineage = source.indexOf("assertPublicWorkerBundleLineage", readPersistedBundle);
 
@@ -973,6 +1021,17 @@ describe("public Modal benchmark configuration", () => {
     const qualifierCheckout = qualifier.steps.find((step) => step.uses?.startsWith("actions/checkout@"));
     expect(qualifierCheckout?.with?.ref).toBe("main");
     expect(qualifierCheckout?.with?.["persist-credentials"]).toBe(false);
+    const qualifierPnpm = qualifier.steps.findIndex((step) => step.uses?.startsWith("pnpm/action-setup@"));
+    const qualifierBuild = qualifier.steps.findIndex((step) => step.name === "Build trusted qualification dependency");
+    const qualifierRun = qualifier.steps.findIndex(
+      (step) => step.name === "Qualify the exact completed producer attempt"
+    );
+    expect(qualifierPnpm).toBeGreaterThan(-1);
+    expect(qualifierBuild).toBeGreaterThan(qualifierPnpm);
+    expect(qualifierRun).toBeGreaterThan(qualifierBuild);
+    expect(qualifier.steps[qualifierBuild]?.run).toBe(
+      "pnpm install --frozen-lockfile\npnpm --filter @ultrafuzz/artifacts... build\n"
+    );
     const qualification = qualifier.steps.find(
       (step) => step.name === "Qualify the exact completed producer attempt"
     )?.run;
@@ -1201,6 +1260,7 @@ describe("public Modal benchmark configuration", () => {
       "await cloneAtCommit(target.repo, target.ref, destination, logPath, { initializeSubmodules: true"
     );
     const init = worker.indexOf('["node", CLI, "init", "--project", destination', clone);
+    const smithersSeed = worker.indexOf("await seedPublicBenchmarkSmithersDependencies(destination)", init);
     const checkout = worker.indexOf('["git", "checkout", "--detach", commit]');
     const submodules = worker.indexOf('["git", "submodule", "update", "--init", "--recursive", "--depth", "1"]');
     const timeoutCap = worker.indexOf("capModalTargetTopologyTimeouts", init);
@@ -1208,6 +1268,8 @@ describe("public Modal benchmark configuration", () => {
 
     expect(clone).toBeGreaterThan(-1);
     expect(init).toBeGreaterThan(clone);
+    expect(smithersSeed).toBeGreaterThan(init);
+    expect(timeoutCap).toBeGreaterThan(smithersSeed);
     expect(timeoutCap).toBeGreaterThan(init);
     expect(referenceSync).toBeGreaterThan(timeoutCap);
     expect(checkout).toBeGreaterThan(-1);

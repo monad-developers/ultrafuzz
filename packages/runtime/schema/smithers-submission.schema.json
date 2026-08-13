@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:runtime:smithers-submission:1",
+  "title": "Ultrafuzz Smithers submission evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "smithers_run_id", "command", "stdout", "stderr", "submitted_at"],
+  "properties": {
+    "schema_version": {
+      "const": "ultrafuzz.smithers.submission.v1"
+    },
+    "smithers_run_id": {
+      "$ref": "#/$defs/nonEmptyString"
+    },
+    "recovery": {
+      "const": "missing-workflow-run"
+    },
+    "command": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 10000,
+      "items": {
+        "type": "string",
+        "maxLength": 1048576,
+        "pattern": "^[^\\u0000]*$"
+      }
+    },
+    "stdout": {
+      "type": "string",
+      "maxLength": 2097152
+    },
+    "stderr": {
+      "type": "string",
+      "maxLength": 2097152
+    },
+    "submitted_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "$defs": {
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^[^\\u0000]+$"
+    }
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:evals:adjudication-handoff:1",
+  "title": "Ultrafuzz benchmark adjudication handoff state",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "provenance"],
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.eval.adjudication-handoff.v1" },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["outputPath"],
+      "properties": {
+        "outputPath": { "$ref": "#/$defs/canonicalRelativePath" }
+      }
+    }
+  },
+  "$defs": {
+    "canonicalRelativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$"
+    }
+  }
+}

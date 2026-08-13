@@ -1,0 +1,165 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "ultrafuzz.dynamic-enumerator-outputs.v1"
+    },
+    "enumerators": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "enumerator_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "agent_label": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "type": "string",
+            "enum": ["complete", "failed", "timed-out", "blocked"]
+          },
+          "diagnostics": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "recommendations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "strategy_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "title": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "rationale": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "coverage_gap": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "evidence_paths": {
+                  "minItems": 1,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "uniqueItems": true
+                },
+                "proposed_test_path": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "focused_command": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "priority": {
+                  "type": "string",
+                  "enum": ["high", "medium", "low"]
+                }
+              },
+              "required": [
+                "strategy_id",
+                "title",
+                "rationale",
+                "coverage_gap",
+                "evidence_paths",
+                "proposed_test_path",
+                "focused_command",
+                "priority"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "payload": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "text"
+                  },
+                  "value": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": ["kind", "value"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "json"
+                  },
+                  "value": {
+                    "$ref": "#/$defs/__schema0"
+                  }
+                },
+                "required": ["kind", "value"],
+                "additionalProperties": false
+              }
+            ]
+          }
+        },
+        "required": ["enumerator_id", "agent_label", "status", "diagnostics", "recommendations"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["schema_version", "enumerators"],
+  "additionalProperties": false,
+  "$id": "urn:ultrafuzz:schema:artifacts:dynamic-enumerator-outputs:1",
+  "title": "Ultrafuzz dynamic enumerator outputs",
+  "$defs": {
+    "__schema0": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/__schema0"
+          }
+        },
+        {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/__schema0"
+          }
+        }
+      ]
+    }
+  }
+}

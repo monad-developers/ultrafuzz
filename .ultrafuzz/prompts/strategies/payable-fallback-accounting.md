@@ -48,5 +48,6 @@ Assert internal balances, wallet balances, contract ETH balance, order state,
 and refund recipients before and after each call. Preserve red tests that show
 stale value can be spent or refunded by the wrong caller.
 
-Write structured findings to {{output_findings_path}}. Use an empty JSON array
-if no finding is confirmed.
+Write structured findings to {{output_findings_path}}. If no finding is
+confirmed, use only the empty form defined by the exact pinned schema in the
+central output contract.

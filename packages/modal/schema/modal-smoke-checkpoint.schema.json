@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:modal:smoke-checkpoint:1",
+  "title": "Ultrafuzz Modal smoke checkpoint",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "non_root", "durable_storage", "provider_auth", "completed_units"],
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.modal.smoke-checkpoint.v1" },
+    "non_root": { "type": "boolean" },
+    "durable_storage": { "type": "boolean" },
+    "provider_auth": { "enum": ["openai", "anthropic", "deepseek", "kimi"] },
+    "completed_units": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/nonNegativeInteger" }
+  }
+}

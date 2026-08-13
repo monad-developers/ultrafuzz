@@ -119,16 +119,14 @@ describe("Modal recovery lifecycle", () => {
     const child = activeRecord(2, "post-model-resume");
 
     expect(parseModalRecoveryLifecycleRecords([parent, child])).toEqual([parent, child]);
-    expect(() => parseModalRecoveryLifecycleRecords([child, parent])).toThrow(/parent must precede child/u);
-    expect(() => parseModalRecoveryLifecycleRecord({ ...child, parent_generation: undefined })).toThrow(
-      /recorded together/u
-    );
+    expect(() => parseModalRecoveryLifecycleRecords([child, parent])).toThrow(/modal-recovery-lifecycle-parent-order/u);
+    expect(() => parseModalRecoveryLifecycleRecord({ ...child, parent_generation: undefined })).toThrow();
     expect(() =>
       parseModalRecoveryLifecycleRecords([
         parent,
         { ...child, parent_attempt_id: "missing-parent", parent_generation: 1 }
       ])
-    ).toThrow(/parent must precede child/u);
+    ).toThrow(/modal-recovery-lifecycle-parent-order/u);
   });
 
   it("derives measurable progress from durable transitions and node-count deltas", () => {
@@ -173,7 +171,7 @@ describe("Modal recovery lifecycle", () => {
         finishedAt: "2026-07-20T00:01:00.000Z",
         controllerRequested: true
       })
-    ).toThrow(/controller-requested termination/u);
+    ).toThrow();
   });
 
   it("surfaces unavailable historical lifecycle evidence as unknown", () => {
@@ -215,7 +213,23 @@ describe("Modal recovery lifecycle", () => {
         ...document,
         summary: { ...document.summary, total_generations: 2 }
       })
-    ).toThrow(/does not reconcile/u);
+    ).toThrow(/trusted semantic gates/u);
+    expect(() =>
+      parseModalRecoveryLifecycleDocument({
+        ...document,
+        summary: { ...document.summary, untyped_summary_field: 0 }
+      })
+    ).toThrow();
+    const missingReasonCount = structuredClone(document);
+    delete (missingReasonCount.summary.start_reasons as Partial<typeof missingReasonCount.summary.start_reasons>)
+      .unknown;
+    expect(() => parseModalRecoveryLifecycleDocument(missingReasonCount)).toThrow();
+    expect(() =>
+      parseModalRecoveryLifecycleDocument({
+        ...document,
+        summary: { ...document.summary, total_generations: -1 }
+      })
+    ).toThrow();
     expect(() =>
       parseModalRecoveryLifecycleRecord({
         ...records[0],

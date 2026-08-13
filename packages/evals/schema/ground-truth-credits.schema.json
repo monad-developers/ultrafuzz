@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:evals:ground-truth-credits:1",
+  "title": "Ultrafuzz benchmark ground-truth credits",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "clusters"],
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.eval.ground-truth-credits.v1" },
+    "clusters": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/cluster" }
+    }
+  },
+  "$defs": {
+    "safeId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "cluster": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rootCauseClusterId", "groundTruthTpCredits"],
+      "properties": {
+        "rootCauseClusterId": { "$ref": "#/$defs/safeId" },
+        "groundTruthTpCredits": {
+          "$ref": "urn:ultrafuzz:schema:evals:common:3#/$defs/nonNegativeInteger"
+        }
+      }
+    }
+  }
+}

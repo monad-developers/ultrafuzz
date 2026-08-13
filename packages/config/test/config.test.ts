@@ -19,6 +19,9 @@ import {
   resolveConfig,
   restoreRedactedConfig,
   serializeRedactedResolvedConfigToml,
+  type ConfigDiagnostic,
+  type ProjectConfigInput,
+  validateAgentConfigs,
   validateExecutionNodeOverrides,
   validateTriageConfig
 } from "../src/index.js";
@@ -268,12 +271,15 @@ credential_env = ["CLOUD_CREDENTIAL_ONE", "CLOUD_CREDENTIAL_TWO"]
       expect(localProviderSettings.diagnostics.map((entry) => entry.code)).toContain(
         "CONFIG_EXECUTION_LOCAL_PROVIDER_SETTINGS"
       );
+      expect(localProviderSettings.diagnostics.map((entry) => entry.code)).not.toContain(
+        "CONFIG_POSITIVE_INTEGER_INVALID"
+      );
     }
   });
 
   it("applies defaults, prompt metadata, project TOML, env, then runtime overrides", () => {
     const project = parseProjectConfigToml(`
-schema_version = "1.0"
+schema_version = "ultrafuzz.config.v2"
 dynamic_strategies_enumerator = 5
 
 [run]
@@ -497,6 +503,146 @@ describe("redaction", () => {
   });
 });
 
+describe("resolved config named semantic diagnostics", () => {
+  const cases: Array<{
+    label: string;
+    projectConfig: ProjectConfigInput;
+    diagnostics: ConfigDiagnostic[];
+  }> = [
+    {
+      label: "unsupported Kimi reasoning",
+      projectConfig: {
+        models: {
+          profiles: {
+            "kimi-invalid": {
+              agent: "KimiAgent",
+              model: "kimi-k3",
+              reasoning: "xhigh"
+            }
+          }
+        }
+      },
+      diagnostics: [
+        validationDiagnostic(
+          "CONFIG_MODEL_KIMI_REASONING_UNSUPPORTED",
+          "Kimi model profile `kimi-invalid` reasoning must be low, high, or max",
+          ["models", "kimi-invalid", "reasoning"]
+        )
+      ]
+    },
+    {
+      label: "unsupported DeepSeek reasoning",
+      projectConfig: {
+        models: {
+          profiles: {
+            "deepseek-invalid": {
+              agent: "DeepSeekAgent",
+              model: "deepseek-v4-pro",
+              reasoning: "xhigh"
+            }
+          }
+        }
+      },
+      diagnostics: [
+        validationDiagnostic(
+          "CONFIG_MODEL_DEEPSEEK_REASONING_UNSUPPORTED",
+          "DeepSeek model profile `deepseek-invalid` reasoning must be low, high, or max",
+          ["models", "deepseek-invalid", "reasoning"]
+        )
+      ]
+    },
+    {
+      label: "unsupported DeepSeek subscription authentication",
+      projectConfig: {
+        agents: {
+          DeepSeekAgent: {
+            auth: "subscription"
+          }
+        }
+      },
+      diagnostics: [
+        validationDiagnostic(
+          "CONFIG_AGENT_DEEPSEEK_AUTH_UNSUPPORTED",
+          "DeepSeekAgent supports only api-key authentication",
+          ["agents", "DeepSeekAgent", "auth"]
+        )
+      ]
+    },
+    {
+      label: "a cloud provider selected for local execution",
+      projectConfig: {
+        execution: {
+          provider: "modal"
+        }
+      },
+      diagnostics: [
+        validationDiagnostic(
+          "CONFIG_EXECUTION_LOCAL_PROVIDER",
+          "execution.provider is only valid when execution.mode is cloud",
+          ["execution", "provider"]
+        )
+      ]
+    },
+    {
+      label: "cloud provider settings configured for local execution",
+      projectConfig: {
+        execution: {
+          providers: {
+            modal: {
+              app: "node-runs",
+              image: "runner:stable",
+              credentialEnv: ["CLOUD_CREDENTIAL_ONE", "CLOUD_CREDENTIAL_TWO"]
+            }
+          }
+        }
+      },
+      diagnostics: [
+        validationDiagnostic(
+          "CONFIG_EXECUTION_LOCAL_PROVIDER_SETTINGS",
+          "cloud provider settings are only valid when execution.mode is cloud",
+          ["execution", "providers", "modal"]
+        )
+      ]
+    },
+    {
+      label: "cloud execution without a provider",
+      projectConfig: {
+        execution: {
+          mode: "cloud"
+        }
+      },
+      diagnostics: [
+        validationDiagnostic("CONFIG_EXECUTION_PROVIDER_REQUIRED", "cloud execution requires an execution provider", [
+          "execution",
+          "provider"
+        ])
+      ]
+    },
+    {
+      label: "cloud execution without selected-provider settings",
+      projectConfig: {
+        execution: {
+          mode: "cloud",
+          provider: "modal"
+        }
+      },
+      diagnostics: [
+        validationDiagnostic(
+          "CONFIG_EXECUTION_PROVIDER_SETTINGS_REQUIRED",
+          "cloud execution requires settings for the selected provider",
+          ["execution", "providers", "modal"]
+        )
+      ]
+    }
+  ];
+
+  it.each(cases)("reports only the named semantic diagnostic for $label", ({ projectConfig, diagnostics }) => {
+    const resolved = resolveConfig({ env: {}, projectConfig });
+
+    expect(resolved).toEqual({ ok: false, diagnostics });
+  });
+});
+
 describe("model profile and triage validation", () => {
   it("clears default reasoning whenever an agent override switches agents", () => {
     const agentOnly = resolveConfig({ env: {} });
@@ -553,16 +699,14 @@ describe("model profile and triage validation", () => {
     });
 
     expect(resolved.ok).toBe(false);
-    expect(resolved.diagnostics.map((entry) => entry.code)).toEqual(
-      expect.arrayContaining([
-        "CONFIG_MODEL_PROFILE_ID_INVALID",
-        "CONFIG_MODEL_AGENT_INVALID",
-        "CONFIG_MODEL_DEFAULT_UNKNOWN",
-        "CONFIG_MODEL_NAME_EMPTY",
-        "CONFIG_MODEL_REASONING_EMPTY",
-        "CONFIG_MODEL_TIMEOUT_INVALID"
-      ])
-    );
+    expect(resolved.diagnostics.map(({ code, path }) => ({ code, path }))).toEqual([
+      { code: "CONFIG_MODEL_PROFILE_ID_INVALID", path: ["models", "../bad"] },
+      { code: "CONFIG_MODEL_DEFAULT_UNKNOWN", path: ["models", "default"] },
+      { code: "CONFIG_MODEL_AGENT_INVALID", path: ["models", "../bad", "agent"] },
+      { code: "CONFIG_MODEL_NAME_EMPTY", path: ["models", "../bad", "model"] },
+      { code: "CONFIG_MODEL_REASONING_EMPTY", path: ["models", "../bad", "reasoning"] },
+      { code: "CONFIG_MODEL_TIMEOUT_INVALID", path: ["models", "../bad", "timeout_seconds"] }
+    ]);
   });
 
   it("rejects Kimi reasoning values that Kimi Code cannot execute", () => {
@@ -588,6 +732,7 @@ describe("model profile and triage validation", () => {
         path: ["models", "kimi-invalid", "reasoning"]
       })
     );
+    expect(resolved.diagnostics.map((entry) => entry.code)).not.toContain("CONFIG_POSITIVE_INTEGER_INVALID");
   });
 
   it("rejects whitespace-padded Kimi reasoning values instead of normalizing them away", () => {
@@ -638,6 +783,7 @@ describe("model profile and triage validation", () => {
         path: ["models", "deepseek-invalid", "reasoning"]
       })
     );
+    expect(resolved.diagnostics.map((entry) => entry.code)).not.toContain("CONFIG_POSITIVE_INTEGER_INVALID");
   });
 
   it("rejects unsupported DeepSeek subscription authentication during config validation", () => {
@@ -657,6 +803,30 @@ describe("model profile and triage validation", () => {
       expect.objectContaining({
         code: "CONFIG_AGENT_DEEPSEEK_AUTH_UNSUPPORTED",
         path: ["agents", "DeepSeekAgent", "auth"]
+      })
+    );
+    expect(resolved.diagnostics.map((entry) => entry.code)).not.toContain("CONFIG_POSITIVE_INTEGER_INVALID");
+  });
+
+  it("rejects unknown agent and triage helper fields without stripping them", () => {
+    expect(
+      validateAgentConfigs({
+        CodexAgent: {
+          auth: "api-key",
+          apiKeyEnv: "OPENAI_API_KEY",
+          legacy: true
+        }
+      } as never)
+    ).toContainEqual(
+      expect.objectContaining({
+        code: "CONFIG_AGENT_FIELD_UNKNOWN",
+        path: ["agents", "CodexAgent", "legacy"]
+      })
+    );
+    expect(validateTriageConfig({ quorum: 3, panelSize: 4, legacy: true } as never)).toContainEqual(
+      expect.objectContaining({
+        code: "CONFIG_TRIAGE_FIELD_UNKNOWN",
+        path: ["triage", "legacy"]
       })
     );
   });
@@ -691,3 +861,13 @@ describe("model profile and triage validation", () => {
     expect(resolved.diagnostics.map((entry) => entry.code)).toContain("CONFIG_TRIAGE_QUORUM_EXCEEDS_PANEL");
   });
 });
+
+function validationDiagnostic(code: string, message: string, path: string[]): ConfigDiagnostic {
+  return {
+    code,
+    severity: "error",
+    message,
+    path,
+    source: "validation"
+  };
+}

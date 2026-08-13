@@ -4,7 +4,9 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { loadBenchmarkCohortManifest, loadBenchmarkLanesManifest } from "../../packages/evals/dist/index.js";
-import { isPublicModalBenchmarkConfig, parseModalBenchmarkConfig } from "../../packages/modal/dist/config.js";
+import { isPublicModalBenchmarkConfig, loadModalBenchmarkConfig } from "../../packages/modal/dist/config.js";
+import { MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID } from "../../packages/modal/dist/modal-contracts.js";
+import { readModalDocument } from "../../packages/modal/dist/modal-documents.js";
 import {
   PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS,
   PUBLIC_BENCHMARK_PREPARATION_TIMEOUT_SECONDS,
@@ -15,7 +17,10 @@ import {
   publicBenchmarkMaxRuntimeSeconds
 } from "../../packages/modal/dist/public-worker.js";
 
-import { readAutomaticPublicationManifest, validateAutomaticPairConfig } from "./prepare-eval-history-publication.mjs";
+import {
+  validateAutomaticPairConfig,
+  validateAutomaticPublicationManifest
+} from "./prepare-eval-history-publication.mjs";
 
 const MAX_CONTROL_FILE_BYTES = 1024 * 1024;
 const SAFE_BASENAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
@@ -26,10 +31,7 @@ export function validateModalBenchmarkLaunch(input) {
   const manifestPath = path.resolve(input.manifestPath);
   const policyRoot = path.resolve(input.policyRoot);
   assertBoundedRegularFile(manifestPath, "Modal benchmark launch manifest");
-  const rawManifest = readJson(manifestPath, "Modal benchmark launch manifest");
-  if (!isRecord(rawManifest)) {
-    throw new Error(`Modal benchmark launch manifest ${manifestPath} must be an object`);
-  }
+  const rawManifest = readModalDocument(manifestPath, MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID).value;
 
   const mode = rawManifest.mode;
   if (mode !== "smoke" && mode !== "full") {
@@ -47,11 +49,10 @@ export function validateModalBenchmarkLaunch(input) {
       `Modal benchmark launch manifest ${manifestPath} candidate commit does not match the checked-out benchmark candidate`
     );
   }
-  assertModalDispatchMode(rawManifest, manifestPath);
   const dimensions = modalBenchmarkPolicyDimensions(policyRoot, mode);
   assertConfiguredTargetCoverage(rawManifest, manifestPath, dimensions);
   const [producerRunId, producerRunAttempt] = generationParts(rawManifest.generation, manifestPath);
-  const manifest = readAutomaticPublicationManifest(manifestPath, {
+  const manifest = validateAutomaticPublicationManifest(rawManifest, {
     candidateCommit,
     repository: rawManifest.repository,
     producerRunId,
@@ -78,40 +79,9 @@ export function validateModalBenchmarkLaunch(input) {
   };
 }
 
-function assertModalDispatchMode(manifest, manifestPath) {
-  if (manifest.execution_mode !== undefined && manifest.execution_mode !== "modal") {
-    throw new Error(
-      `Modal benchmark launch manifest ${manifestPath} is local-only: execution_mode must be "modal" before dispatch`
-    );
-  }
-  if (manifest.dry_run !== undefined && manifest.dry_run !== false) {
-    throw new Error(
-      `Modal benchmark launch manifest ${manifestPath} is dry-run: dry_run must be false before dispatch`
-    );
-  }
-  const execution = isRecord(manifest.execution) ? manifest.execution : undefined;
-  if (execution?.mode !== "modal") {
-    throw new Error(
-      `Modal benchmark launch manifest ${manifestPath} is local-only or missing Modal execution mode: execution.mode must be "modal" before dispatch`
-    );
-  }
-  if (execution.dry_run !== false) {
-    throw new Error(
-      `Modal benchmark launch manifest ${manifestPath} is dry-run or missing execution.dry_run=false: dry-run must be disabled before dispatch`
-    );
-  }
-}
-
 function assertConfiguredTargetCoverage(manifest, manifestPath, dimensions) {
   const scope = dimensions.mode === "smoke" ? "canonical smoke" : dimensions.mode;
-  if (!Array.isArray(manifest.targets)) {
-    throw new Error(
-      `${scope} launch manifest ${manifestPath} is missing target metadata from benchmark config ${dimensions.cohortPath}`
-    );
-  }
-  const actualTargetIds = new Set(
-    manifest.targets.flatMap((target) => (isRecord(target) && typeof target.id === "string" ? [target.id] : []))
-  );
+  const actualTargetIds = new Set(manifest.targets.map((target) => target.id));
   const missingTargetIds = dimensions.targetIds.filter((targetId) => !actualTargetIds.has(targetId));
   if (missingTargetIds.length > 0) {
     throw new Error(
@@ -122,9 +92,6 @@ function assertConfiguredTargetCoverage(manifest, manifestPath, dimensions) {
     throw new Error(
       `${scope} launch manifest ${manifestPath} is missing configured target(s): expected ${dimensions.targetCount} target(s) from ${dimensions.cohortPath}, found ${manifest.targets.length}`
     );
-  }
-  if (!Number.isSafeInteger(manifest.matrix_rows_per_pair) || manifest.matrix_rows_per_pair < 1) {
-    throw new Error(`Modal benchmark launch manifest ${manifestPath} has invalid matrix_rows_per_pair`);
   }
   if (manifest.matrix_rows_per_pair < dimensions.expectedMatrixRowsPerPair) {
     throw new Error(
@@ -149,15 +116,13 @@ function validatePairConfigs(manifest, controlRoot, manifestPath, dimensions) {
     }
     const configPath = path.join(controlRoot, pair.config_path);
     assertBoundedRegularFile(configPath, `Modal benchmark launch config ${pair.config_path}`);
-    const rawConfig = readJson(configPath, `Modal benchmark launch config ${pair.config_path}`);
-    assertConfigDispatchMode(rawConfig, configPath, manifestPath);
-    const config = parseModalBenchmarkConfig(rawConfig);
+    const config = loadModalBenchmarkConfig(configPath);
     if (!isPublicModalBenchmarkConfig(config)) {
       throw new Error(
         `Modal benchmark launch config ${configPath} is local-only/private: expected public_benchmark for manifest ${manifestPath}`
       );
     }
-    const configTargets = config.public_benchmark.targets ?? [];
+    const configTargets = config.public_benchmark.targets;
     if (configTargets.length < dimensions.targetCount) {
       throw new Error(
         `Modal benchmark launch config ${configPath} is missing configured target(s) from manifest ${manifestPath}: expected ${dimensions.targetCount}, found ${configTargets.length}`
@@ -189,26 +154,6 @@ function validatePairConfigs(manifest, controlRoot, manifestPath, dimensions) {
         maxRuntimeSeconds: dimensions.maxRuntimeSeconds
       },
       usedModelSlugs
-    );
-  }
-}
-
-function assertConfigDispatchMode(config, configPath, manifestPath) {
-  if (!isRecord(config)) throw new Error(`Modal benchmark launch config ${configPath} must be an object`);
-  const execution = isRecord(config.execution) ? config.execution : undefined;
-  if (execution !== undefined && execution.mode !== "modal") {
-    throw new Error(
-      `Modal benchmark launch config ${configPath} is local-only: execution.mode must be "modal"; referenced by manifest ${manifestPath}`
-    );
-  }
-  if (execution !== undefined && execution.dry_run !== undefined && execution.dry_run !== false) {
-    throw new Error(
-      `Modal benchmark launch config ${configPath} is dry-run: execution.dry_run must be false; referenced by manifest ${manifestPath}`
-    );
-  }
-  if (config.dry_run !== undefined && config.dry_run !== false) {
-    throw new Error(
-      `Modal benchmark launch config ${configPath} is dry-run: dry_run must be false; referenced by manifest ${manifestPath}`
     );
   }
 }
@@ -298,24 +243,12 @@ function assertBoundedRegularFile(filePath, label) {
   }
 }
 
-function readJson(filePath, label) {
-  try {
-    return JSON.parse(fs.readFileSync(filePath, "utf8"));
-  } catch (error) {
-    throw new Error(`${label} ${filePath} is unreadable`, { cause: error });
-  }
-}
-
 function gitOutput(cwd, args, label) {
   try {
     return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
   } catch (error) {
     throw new Error(`${label} is unavailable`, { cause: error });
   }
-}
-
-function isRecord(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function main(args) {

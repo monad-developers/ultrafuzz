@@ -31,10 +31,20 @@ jobs:
           ref: main
           persist-credentials: false
 
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          version: 11.1.1
+
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
+
+      - name: Build trusted qualification dependency
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --filter @ultrafuzz/artifacts... build
 
       - name: Qualify the exact completed producer attempt
         id: qualify
@@ -149,6 +159,8 @@ jobs:
             "$BENCHMARK_MODE" \
             "$PUBLICATION_GENERATION" \
             "$PUBLICATION_PLAN"
+          publication_rows="$RUNNER_TEMP/eval-history-publication-rows.tsv"
+          node scripts/ci/prepare-eval-history-publication.mjs plan-rows "$PUBLICATION_PLAN" > "$publication_rows"
           mkdir "$PUBLICATION_UNPACKED"
           while IFS=$'\t' read -r bundle_path unpack_path eval_run_id benchmark lane model_slug; do
             metadata="$(node packages/modal/dist/cli.js unpack-public \
@@ -166,8 +178,7 @@ jobs:
                .model_slug == $model_slug and
                .candidate_commit == $candidate_commit' \
               <<< "$metadata" > /dev/null
-          done < <(jq -r '.pairs[] | [.bundle_path, .unpack_path, .eval_run_id, .benchmark, .lane, .model_slug] | @tsv' \
-            "$PUBLICATION_PLAN")
+          done < "$publication_rows"
 
       - name: Create the narrowly scoped eval-history publisher token
         id: publisher-token

@@ -1,7 +1,6 @@
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
-import { mkdir, open, readFile, rename, rm, unlink } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -10,9 +9,18 @@ import {
   PINNED_SUBMODULE_MANIFEST_LOCATION,
   pinnedSubmoduleExpectation,
   readPinnedSubmoduleSnapshot,
-  writePinnedSubmoduleSnapshot,
-  type PinnedSubmoduleExpectation
+  writePinnedSubmoduleSnapshot
 } from "@ultrafuzz/runtime";
+
+import {
+  MODAL_PINNED_HOLDOUT_SCHEMA_ID,
+  MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID,
+  type DeepReadonly,
+  type StrictModalPinnedHoldoutDocument,
+  type StrictModalPinnedHoldoutEntry,
+  type StrictModalPinnedSourceProofDocument
+} from "./modal-contracts.js";
+import { readModalDocument, writeModalDocumentAtomic } from "./modal-documents.js";
 
 export const PINNED_SOURCE_BRANCH = "ultrafuzz-pinned" as const;
 export const PINNED_SOURCE_REF = `refs/heads/${PINNED_SOURCE_BRANCH}` as const;
@@ -46,47 +54,9 @@ const HOLDOUT_COMMIT_ENVIRONMENT = {
 } as const;
 const HOLDOUT_COMMIT_MESSAGE = "Withhold benchmark reference paths";
 
-export interface PinnedHoldoutEntry {
-  path: string;
-  blob: string;
-  size: number;
-}
-
-export interface PinnedHoldout {
-  schema_version: typeof PINNED_HOLDOUT_SCHEMA_VERSION;
-  /**
-   * The upstream benchmark commit the hold-out was derived from. Recorded as
-   * provenance only: the commit is deliberately not reachable in the
-   * materialized repository, so it cannot be read back out of it.
-   */
-  source_commit: string;
-  source_tree: string;
-  /** The parentless revision the checkout was rewritten to. */
-  commit: string;
-  tree: string;
-  /** Exactly the patterns the caller declared, normalized and sorted. */
-  paths: string[];
-  /** Every tracked file the declaration removed, with its upstream identity. */
-  entries: PinnedHoldoutEntry[];
-}
-
-export interface PinnedSourceProof {
-  schema_version: typeof PINNED_SOURCE_PROOF_SCHEMA_VERSION;
-  commit: string;
-  tree: string;
-  base_ref: typeof PINNED_SOURCE_REF;
-  refs: Array<{ name: string; object: string }>;
-  remotes: string[];
-  revision_count: 1;
-  commit_object_count: 1;
-  submodules: ({ manifest_location: typeof PINNED_SUBMODULE_MANIFEST_LOCATION } & PinnedSubmoduleExpectation) | null;
-  /**
-   * Null unless the benchmark withheld reference paths. When set, `commit` and
-   * `tree` are the hold-out revision and `source_commit`/`source_tree` bind the
-   * upstream benchmark commit it descends from.
-   */
-  held_out: PinnedHoldout | null;
-}
+export type PinnedHoldoutEntry = StrictModalPinnedHoldoutEntry;
+export type PinnedHoldout = StrictModalPinnedHoldoutDocument;
+export type PinnedSourceProof = StrictModalPinnedSourceProofDocument;
 
 /**
  * Fetch exactly one pinned commit into a newly initialized repository. Unlike
@@ -170,7 +140,7 @@ export async function materializePinnedSource(input: {
 
     if (submoduleSnapshot !== undefined) writePinnedSubmoduleSnapshot(destination, submoduleSnapshot);
 
-    if (holdout !== undefined) writePinnedHoldout(destination, holdout);
+    if (holdout !== undefined) await writePinnedHoldout(destination, holdout);
 
     const proof = await inspectPinnedSource(destination, revision, input.signal);
     if (input.proofPath !== undefined) await writeProofAtomic(input.proofPath, proof);
@@ -270,7 +240,7 @@ export async function inspectPinnedSource(
     tree: normalizedTree,
     base_ref: PINNED_SOURCE_REF,
     refs,
-    remotes,
+    remotes: [],
     revision_count: 1,
     commit_object_count: 1,
     submodules:
@@ -399,33 +369,26 @@ function pinnedHoldoutPath(repositoryRoot: string): string {
   return path.join(repositoryRoot, ".git", "ultrafuzz-pinned-holdout.json");
 }
 
-function writePinnedHoldout(repositoryRoot: string, holdout: PinnedHoldout): void {
-  writeFileSync(pinnedHoldoutPath(repositoryRoot), `${JSON.stringify(holdout, null, 2)}\n`, {
-    encoding: "utf8",
-    mode: 0o600
+async function writePinnedHoldout(repositoryRoot: string, holdout: PinnedHoldout): Promise<void> {
+  const trustedRoot = path.join(repositoryRoot, ".git");
+  await writeModalDocumentAtomic(pinnedHoldoutPath(repositoryRoot), MODAL_PINNED_HOLDOUT_SCHEMA_ID, holdout, {
+    trustedRoot
   });
 }
 
 function readPinnedHoldout(repositoryRoot: string): PinnedHoldout | undefined {
-  let raw: string;
+  const recordPath = pinnedHoldoutPath(repositoryRoot);
+  if (!existsSync(recordPath)) return undefined;
   try {
-    raw = readFileSync(pinnedHoldoutPath(repositoryRoot), "utf8");
-  } catch {
-    return undefined;
+    const value = readModalDocument(recordPath, MODAL_PINNED_HOLDOUT_SCHEMA_ID).value;
+    return {
+      ...value,
+      paths: [...value.paths],
+      entries: value.entries.map((entry) => ({ ...entry }))
+    };
+  } catch (error) {
+    throw new Error("pinned benchmark hold-out record is invalid", { cause: error });
   }
-  const parsed = JSON.parse(raw) as PinnedHoldout;
-  if (
-    parsed?.schema_version !== PINNED_HOLDOUT_SCHEMA_VERSION ||
-    !fullSha.test(parsed.source_commit ?? "") ||
-    !fullSha.test(parsed.source_tree ?? "") ||
-    !Array.isArray(parsed.paths) ||
-    parsed.paths.length === 0 ||
-    !Array.isArray(parsed.entries) ||
-    parsed.entries.length === 0
-  ) {
-    throw new Error("pinned benchmark hold-out record is invalid");
-  }
-  return parsed;
 }
 
 /**
@@ -538,29 +501,12 @@ async function gitUnreachableCommitCount(cwd: string, signal?: AbortSignal): Pro
 }
 
 async function writeProofAtomic(filePath: string, proof: PinnedSourceProof): Promise<void> {
-  const absolute = path.resolve(filePath);
-  await mkdir(path.dirname(absolute), { recursive: true, mode: 0o700 });
-  const temporary = `${absolute}.${process.pid}.${randomUUID()}.tmp`;
-  let handle: Awaited<ReturnType<typeof open>> | undefined;
-  try {
-    handle = await open(temporary, "wx", 0o600);
-    await handle.writeFile(`${JSON.stringify(proof, null, 2)}\n`, "utf8");
-    await handle.sync();
-    await handle.close();
-    handle = undefined;
-    await rename(temporary, absolute);
-    const directory = await open(path.dirname(absolute), "r");
-    try {
-      await directory.sync();
-    } finally {
-      await directory.close();
-    }
-  } finally {
-    await handle?.close().catch(() => undefined);
-    await unlink(temporary).catch(() => undefined);
-  }
+  const target = path.resolve(filePath);
+  const trustedRoot = path.dirname(target);
+  await mkdir(trustedRoot, { recursive: true, mode: 0o700 });
+  await writeModalDocumentAtomic(target, MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID, proof, { trustedRoot });
 }
 
-export async function readPinnedSourceProof(filePath: string): Promise<PinnedSourceProof> {
-  return JSON.parse(await readFile(filePath, "utf8")) as PinnedSourceProof;
+export async function readPinnedSourceProof(filePath: string): Promise<DeepReadonly<PinnedSourceProof>> {
+  return readModalDocument(path.resolve(filePath), MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID).value;
 }

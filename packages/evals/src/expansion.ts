@@ -1,12 +1,16 @@
-import fs from "node:fs";
 import path from "node:path";
 
-import { NODE_STATE_STATUSES, type NodeState, type NodeStatus, type RunState } from "@ultrafuzz/artifacts";
+import {
+  NODE_STATE_STATUSES,
+  assertPlannedGraph,
+  type NodeState,
+  type NodeStatus,
+  type RunState
+} from "@ultrafuzz/artifacts";
 
+import { readStrictJsonDocument } from "./eval-durable.js";
 import type {
   EvalDynamicNode,
-  EvalExpansionCompleteness,
-  EvalExpansionReason,
   EvalNodeStatusCounts,
   EvalRunConcurrencyObservation,
   EvalRunExpansion
@@ -39,10 +43,10 @@ export const EVAL_EXPANSION_SOURCE_NODE_KEY = "source_node_id";
  * Everything here comes from `state.json` and `graph.json`, which every run
  * writes, so it needs no reporter, no provider and no network.
  */
-export function evalRunExpansion(input: { runRoot?: string; state: RunState | undefined }): EvalRunExpansion {
-  const nodes = Object.values(input.state?.nodes ?? {}).filter(isNodeState);
+export function evalRunExpansion(input: { runRoot: string; state: RunState }): EvalRunExpansion {
+  const nodes = Object.values(input.state.nodes);
   const staticNodeIds = readStaticNodeIds(input.runRoot);
-  const dynamic = staticNodeIds === undefined ? undefined : nodes.filter((node) => !staticNodeIds.has(node.node_id));
+  const dynamic = nodes.filter((node) => !staticNodeIds.has(node.node_id));
   const failedNodeIds = nodes
     .filter((node) => node.status === "failed")
     .map((node) => node.node_id)
@@ -51,15 +55,15 @@ export function evalRunExpansion(input: { runRoot?: string; state: RunState | un
     .filter((node) => node.timed_out)
     .map((node) => node.node_id)
     .sort(compareIds);
-  const dynamicNodes = dynamic?.map(describeDynamicNode).sort((left, right) => compareIds(left.node_id, right.node_id));
+  const dynamicNodes = dynamic.map(describeDynamicNode).sort((left, right) => compareIds(left.node_id, right.node_id));
 
   return {
     node_count: nodes.length,
     status_counts: statusCounts(nodes),
-    static_node_count: staticNodeIds === undefined ? null : nodes.length - (dynamic?.length ?? 0),
-    dynamic_node_count: dynamic?.length ?? null,
-    dynamic_status_counts: dynamic === undefined ? null : statusCounts(dynamic),
-    dynamic_nodes: dynamicNodes === undefined ? null : dynamicNodes.slice(0, MAX_EVAL_EXPANSION_NODE_IDS),
+    static_node_count: nodes.length - dynamic.length,
+    dynamic_node_count: dynamic.length,
+    dynamic_status_counts: statusCounts(dynamic),
+    dynamic_nodes: dynamicNodes.slice(0, MAX_EVAL_EXPANSION_NODE_IDS),
     retried_node_count: nodes.filter((node) => node.retry_count > 0).length,
     failed_node_count: failedNodeIds.length,
     failed_node_ids: failedNodeIds.slice(0, MAX_EVAL_EXPANSION_NODE_IDS),
@@ -69,22 +73,10 @@ export function evalRunExpansion(input: { runRoot?: string; state: RunState | un
     truncated:
       failedNodeIds.length > MAX_EVAL_EXPANSION_NODE_IDS ||
       timedOutNodeIds.length > MAX_EVAL_EXPANSION_NODE_IDS ||
-      (dynamicNodes?.length ?? 0) > MAX_EVAL_EXPANSION_NODE_IDS,
-    nodes: completeness(input.state === undefined ? "workflow-state-unavailable" : undefined),
-    lineage: completeness(
-      input.state === undefined
-        ? "workflow-state-unavailable"
-        : staticNodeIds === undefined
-          ? "run-graph-unavailable"
-          : undefined
-    ),
-    concurrency_evidence: completeness(
-      input.state === undefined
-        ? "workflow-state-unavailable"
-        : input.state.concurrency === undefined
-          ? "concurrency-unavailable"
-          : undefined
-    )
+      dynamicNodes.length > MAX_EVAL_EXPANSION_NODE_IDS,
+    nodes: complete(),
+    lineage: complete(),
+    concurrency_evidence: complete()
   };
 }
 
@@ -94,29 +86,17 @@ export function evalRunExpansion(input: { runRoot?: string; state: RunState | un
  * is what makes a dynamic child independently visible without the runtime
  * having to label it.
  */
-function readStaticNodeIds(runRoot: string | undefined): Set<string> | undefined {
-  if (runRoot === undefined) return undefined;
-  let graph: unknown;
-  try {
-    graph = JSON.parse(fs.readFileSync(path.join(path.resolve(runRoot), "graph.json"), "utf8"));
-  } catch {
-    return undefined;
-  }
-  if (typeof graph !== "object" || graph === null || !Array.isArray((graph as { nodes?: unknown }).nodes)) {
-    return undefined;
-  }
+function readStaticNodeIds(runRoot: string): Set<string> {
+  const graphPath = path.join(path.resolve(runRoot), "graph.json");
+  const graph = assertPlannedGraph(readStrictJsonDocument(graphPath));
   const ids = new Set<string>();
-  for (const node of (graph as { nodes: unknown[] }).nodes) {
-    if (typeof node === "object" && node !== null && typeof (node as { id?: unknown }).id === "string") {
-      ids.add((node as { id: string }).id);
-    }
-  }
+  for (const node of graph.nodes) ids.add(node.id);
   return ids;
 }
 
 function describeDynamicNode(node: NodeState): EvalDynamicNode {
   const provenance = node.provenance;
-  const source = provenance?.[EVAL_EXPANSION_SOURCE_NODE_KEY];
+  const source = provenance !== undefined && "source_node_id" in provenance ? provenance.source_node_id : undefined;
   return {
     node_id: node.node_id,
     logical_node_id: node.logical_node_id ?? null,
@@ -140,31 +120,18 @@ function statusCounts(nodes: readonly NodeState[]): EvalNodeStatusCounts {
  * alongside `ready_queue_depth` is the pair that shows a wide ready queue was
  * admitted under the configured limit rather than serialized.
  */
-function concurrencyObservation(state: RunState | undefined): EvalRunConcurrencyObservation {
-  const concurrency = state?.concurrency;
+function concurrencyObservation(state: RunState): EvalRunConcurrencyObservation {
+  const concurrency = state.concurrency;
   return {
-    requested: integerOrNull(concurrency?.requested_concurrency),
-    effective: integerOrNull(concurrency?.effective_concurrency),
-    ready_queue_depth: integerOrNull(concurrency?.ready_queue_depth),
-    active_work: integerOrNull(concurrency?.active_work)
+    requested: concurrency.requested_concurrency,
+    effective: concurrency.effective_concurrency,
+    ready_queue_depth: concurrency.ready_queue_depth,
+    active_work: concurrency.active_work
   };
 }
 
-function integerOrNull(value: unknown): number | null {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
-}
-
-function isNodeState(value: unknown): value is NodeState {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    typeof (value as { node_id?: unknown }).node_id === "string" &&
-    typeof (value as { status?: unknown }).status === "string"
-  );
-}
-
-function completeness(reason: EvalExpansionReason | undefined): EvalExpansionCompleteness {
-  return reason === undefined ? { status: "complete", reason: null } : { status: "unavailable", reason };
+function complete(): EvalRunExpansion["nodes"] {
+  return { status: "complete", reason: null };
 }
 
 function compareIds(left: string, right: string): number {

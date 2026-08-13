@@ -119,5 +119,6 @@ Report root causes separately when evidence supports separation:
 When a state label is not enough to define behavior, record the gap as
 incomplete-spec. Do not promote assumptions from source comments alone.
 
-Write structured findings to {{output_findings_path}}. Use an empty JSON array
-if no finding is confirmed.
+Write structured findings to {{output_findings_path}}. If no finding is
+confirmed, use only the empty form defined by the exact pinned schema in the
+central output contract.

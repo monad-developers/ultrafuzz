@@ -597,6 +597,16 @@ function validateOutputs(node: NormalizedTopologyNode): void {
     }
     seen.add(output.path);
   }
+  if (
+    node.outputs.some((output) => output.contract === "ultrafuzz/implemented-properties@3") &&
+    node.outputs.some((output) => output.contract === "ultrafuzz/property-campaign@3")
+  ) {
+    throw topologyError(
+      "PROPERTY_ROLE_DECLARATION_CONFLICT",
+      `Node \`${node.id}\` must not declare both ultrafuzz/implemented-properties@3 and ultrafuzz/property-campaign@3; split implementation and campaign into dependency-ordered nodes`,
+      { nodeId: node.id }
+    );
+  }
   const primaries = node.outputs.filter((output) => output.primary);
   if (primaries.length !== 1) {
     throw topologyError("INVALID_PRIMARY_OUTPUT", `Node \`${node.id}\` must declare exactly one primary output`, {

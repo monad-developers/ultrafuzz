@@ -20,7 +20,7 @@ describe("artifact handoff validation", () => {
       ...topology.nodes[2]!,
       outputs: [
         ...topology.nodes[2]!.outputs!,
-        { path: "generated-tests.json", contract: "ultrafuzz/generated-tests@1", primary: false }
+        { path: "generated-tests.json", contract: "ultrafuzz/generated-tests@3", primary: false }
       ]
     };
     expect(() =>

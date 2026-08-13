@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "ultrafuzz.differential-red-triage.v1"
+    },
+    "pass": {
+      "type": "string",
+      "enum": ["a", "b"]
+    },
+    "classifications": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "stable_failure_hash": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "classification": {
+            "type": "string",
+            "enum": [
+              "harness_bug",
+              "reference_bug",
+              "production_bug",
+              "spec_mismatch",
+              "unknown",
+              "compile_harness_defect"
+            ]
+          },
+          "rationale": {
+            "type": "string",
+            "minLength": 1
+          },
+          "public_evidence_paths": {
+            "minItems": 0,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
+          "repair_allowed": {
+            "type": "boolean"
+          }
+        },
+        "required": ["stable_failure_hash", "classification", "rationale", "public_evidence_paths", "repair_allowed"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["schema_version", "pass", "classifications"],
+  "additionalProperties": false,
+  "$id": "urn:ultrafuzz:schema:artifacts:differential-red-triage:1",
+  "title": "Ultrafuzz differential red triage"
+}

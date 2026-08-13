@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:modal:node-checkpoint-index:1",
+  "title": "Ultrafuzz Modal durable node checkpoint index",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "storage_lineage",
+    "workspace_path",
+    "run_root",
+    "execution_snapshot_root",
+    "handoff_archive",
+    "project_archive_sha256",
+    "checkpoints"
+  ],
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.modal.node-checkpoint-index.v1" },
+    "storage_lineage": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/nonEmptyString" },
+    "workspace_path": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/boundedPath" },
+    "run_root": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/boundedPath" },
+    "execution_snapshot_root": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/boundedPath" },
+    "handoff_archive": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/boundedPath" },
+    "project_archive_sha256": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/sha256" },
+    "checkpoints": {
+      "type": "array",
+      "maxItems": 100000,
+      "items": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/checkpointEntry" }
+    }
+  }
+}

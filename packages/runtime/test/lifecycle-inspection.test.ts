@@ -5,6 +5,13 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  artifactSchemaBundleDigest,
+  artifactSchemaRegistry,
+  ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
+  VALIDATOR_BUILD_IDENTITY
+} from "@ultrafuzz/artifacts";
+
+import {
   cancelRun,
   diagnoseProject,
   diagnoseRun,
@@ -32,6 +39,34 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
+function fakeUltrafuzzCliEntrypoint(project: string): string {
+  const entrypoint = path.join(project, "validator-cli.mjs");
+  const findings = artifactSchemaRegistry().find((entry) => entry.filename === "findings.schema.json");
+  assert.ok(findings);
+  const preflightResponse = {
+    schema_version: "ultrafuzz.cli.result.v2",
+    command: "json validate",
+    ok: true,
+    diagnostics: [],
+    data: {
+      status: "valid",
+      diagnostics: [],
+      schema: {
+        id: findings.id,
+        sha256: findings.sha256,
+        bundle_sha256: artifactSchemaBundleDigest(),
+        validator_build: VALIDATOR_BUILD_IDENTITY,
+        registered: true
+      },
+      artifact_sha256: ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
+      truncated: false
+    }
+  };
+  fs.writeFileSync(entrypoint, `process.stdout.write(${JSON.stringify(JSON.stringify(preflightResponse))});\n`, "utf8");
+  fs.chmodSync(entrypoint, 0o500);
+  return entrypoint;
+}
+
 function writeSmallTopology(project: string, requiredCommand?: string): void {
   fs.writeFileSync(
     path.join(project, ".ultrafuzz", "topology.yml"),
@@ -54,7 +89,7 @@ ${requiredCommand === undefined ? "" : `    required_commands:\n      - ${requir
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
   - id: __finish__
     kind: meta
     role: finish
@@ -76,6 +111,27 @@ interface FakeInspectionFixtures {
   cancelExitCode?: number;
 }
 
+function smithersEventLine(input: {
+  seq: number;
+  timestampMs: number;
+  type: string;
+  payload?: Record<string, unknown>;
+}): string {
+  const payload = {
+    type: input.type,
+    runId: WORKFLOW_RUN_ID,
+    timestampMs: input.timestampMs,
+    ...input.payload
+  };
+  return JSON.stringify({
+    runId: WORKFLOW_RUN_ID,
+    seq: input.seq,
+    timestampMs: input.timestampMs,
+    type: input.type,
+    payload
+  });
+}
+
 /**
  * A fake workflow runner that answers the inspection and lifecycle commands
  * with the exact JSON shapes the pinned engine emits.
@@ -90,10 +146,34 @@ function fakeInspectionEnv(project: string, fixtures: FakeInspectionFixtures): R
     node: path.join(project, "fake-node.json"),
     events: path.join(project, "fake-events.ndjson")
   };
-  fs.writeFileSync(files.why, `${JSON.stringify({ data: fixtures.why ?? {} })}\n`, "utf8");
-  fs.writeFileSync(files.timeline, `${JSON.stringify(fixtures.timeline ?? { timeline: { frames: [] } })}\n`, "utf8");
+  fs.writeFileSync(
+    files.why,
+    `${JSON.stringify({
+      ok: true,
+      data: fixtures.why ?? {},
+      meta: { command: "why", duration: "1ms" }
+    })}\n`,
+    "utf8"
+  );
+  fs.writeFileSync(
+    files.timeline,
+    `${JSON.stringify(
+      fixtures.timeline ?? {
+        timeline: { runId: WORKFLOW_RUN_ID, branch: null, frames: [], children: [] }
+      }
+    )}\n`,
+    "utf8"
+  );
   fs.writeFileSync(files.snapshots, `${JSON.stringify(fixtures.snapshots ?? { snapshots: [] })}\n`, "utf8");
-  fs.writeFileSync(files.node, `${JSON.stringify({ data: fixtures.node ?? {} })}\n`, "utf8");
+  fs.writeFileSync(
+    files.node,
+    `${JSON.stringify({
+      ok: true,
+      data: fixtures.node ?? {},
+      meta: { command: "node", duration: "1ms" }
+    })}\n`,
+    "utf8"
+  );
   fs.writeFileSync(files.events, fixtures.events ?? "", "utf8");
   const nodeWatchPath = path.join(project, "fake-node-watch.ndjson");
   if (fixtures.nodeWatchLines !== undefined) {
@@ -127,7 +207,7 @@ function fakeInspectionEnv(project: string, fixtures: FakeInspectionFixtures): R
       `    cat ${shellQuote(files.events)}`,
       "    ;;",
       "  cancel)",
-      `    printf '%s\\n' '{"data":{"status":"${fixtures.cancelStatus ?? "cancel-requested"}"}}'`,
+      `    printf '%s\\n' '{"ok":true,"data":{"status":"${fixtures.cancelStatus ?? "cancel-requested"}"}}'`,
       `    exit ${fixtures.cancelExitCode ?? 2}`,
       "    ;;",
       "  *)",
@@ -154,7 +234,12 @@ async function launchedProject(
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
   const env = fakeInspectionEnv(project, fixtures);
-  const run = await startRun({ projectRoot: project, runId: "inspect-run", env });
+  const run = await startRun({
+    projectRoot: project,
+    runId: "inspect-run",
+    env,
+    ultrafuzzCliEntrypoint: fakeUltrafuzzCliEntrypoint(project)
+  });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   return { project, env, runRoot: run.value!.run_root };
 }
@@ -227,7 +312,7 @@ test("lifecycle commands reject a missing product run and an unlinked run", asyn
   const metadataPath = path.join(runRoot, "run.json");
   const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as Record<string, unknown>;
   delete metadata.workflow;
-  delete metadata.workflow_ids;
+  metadata.workflow_ids = [];
   fs.writeFileSync(metadataPath, `${JSON.stringify(metadata)}\n`, "utf8");
 
   for (const command of [cancelRun, diagnoseRun, getRunTimeline, listRunSnapshots, queryWorkflowEvents]) {
@@ -281,7 +366,7 @@ test("diagnoseRun adapts the engine diagnosis without engine-branded public text
   assert.equal(diagnosis.value?.blockers[0]?.max_attempts, 3);
   assert.equal(diagnosis.value?.blockers[0]?.unblocker, "workflow runner approve");
   assert.equal(diagnosis.value?.blockers[0]?.waiting_since, new Date(1_699_999_000_000).toISOString());
-  assert.equal(diagnosis.value?.blockers[1]?.kind, "side-effect-boundary");
+  assert.equal(diagnosis.value?.blockers[1]?.kind, "side-effect-boundary-crossed");
   assert.equal(diagnosis.value?.blockers[1]?.iteration, null);
   assertNoEngineBranding(diagnosis.value);
   assert.match(smithersLog(project), new RegExp(`why ${WORKFLOW_RUN_ID} --format json`, "u"));
@@ -297,12 +382,59 @@ test("diagnoseRun rejects an unexpected engine response", async () => {
   assert.equal(diagnosis.diagnostics.at(-1)?.code, "WORKFLOW_DIAGNOSIS_INVALID");
 });
 
+test("diagnoseRun rejects aliases, extra fields, and duplicate keys instead of normalizing them", async () => {
+  const { project, env } = await launchedProject({
+    why: {
+      runId: WORKFLOW_RUN_ID,
+      status: "running",
+      summary: "blocked",
+      generatedAtMs: 1_700_000_000_000,
+      currentNodeId: "node:project-discovery",
+      information: [],
+      blockers: [
+        {
+          kind: "side-effect-boundary-crossed",
+          nodeId: "node:project-discovery",
+          iteration: 0,
+          reason: "boundary crossed",
+          waitingSince: 1_699_999_000_000,
+          unblocker: "review"
+        }
+      ]
+    }
+  });
+  const fixturePath = path.join(project, "fake-why.json");
+  const exactText = fs.readFileSync(fixturePath, "utf8");
+  const exact = JSON.parse(exactText) as { data: { blockers: Array<Record<string, unknown>> } } & Record<
+    string,
+    unknown
+  >;
+
+  exact.data.blockers[0]!.kind = "side-effect-boundary";
+  fs.writeFileSync(fixturePath, `${JSON.stringify(exact)}\n`, "utf8");
+  const alias = await diagnoseRun({ projectRoot: project, runId: "inspect-run", env });
+  assert.equal(alias.ok, false);
+  assert.equal(alias.diagnostics.at(-1)?.code, "WORKFLOW_DIAGNOSIS_INVALID");
+
+  const withExtra = JSON.parse(exactText) as Record<string, unknown>;
+  withExtra.legacy = true;
+  fs.writeFileSync(fixturePath, `${JSON.stringify(withExtra)}\n`, "utf8");
+  const extra = await diagnoseRun({ projectRoot: project, runId: "inspect-run", env });
+  assert.equal(extra.ok, false);
+  assert.equal(extra.diagnostics.at(-1)?.code, "WORKFLOW_DIAGNOSIS_INVALID");
+
+  fs.writeFileSync(fixturePath, exactText.replace('{"ok":true,', '{"ok":true,"ok":true,'), "utf8");
+  const duplicate = await diagnoseRun({ projectRoot: project, runId: "inspect-run", env });
+  assert.equal(duplicate.ok, false);
+  assert.equal(duplicate.diagnostics.at(-1)?.code, "WORKFLOW_DIAGNOSIS_INVALID");
+});
+
 test("getRunTimeline adapts frames and fork lineage in tree mode", async () => {
   const { project, env } = await launchedProject({
     timeline: {
       timeline: {
         runId: WORKFLOW_RUN_ID,
-        branch: "main",
+        branch: null,
         frames: [
           { frameNo: 1, createdAtMs: 1_700_000_000_000, contentHash: "hash-1", forks: [] },
           {
@@ -315,7 +447,14 @@ test("getRunTimeline adapts frames and fork lineage in tree mode", async () => {
         children: [
           {
             runId: `${WORKFLOW_RUN_ID}-forked`,
-            branch: "retry",
+            branch: {
+              runId: `${WORKFLOW_RUN_ID}-forked`,
+              parentRunId: WORKFLOW_RUN_ID,
+              parentFrameNo: 4,
+              branchLabel: "retry",
+              forkDescription: "smithers fork",
+              createdAtMs: 1_700_000_650_000
+            },
             frames: [{ frameNo: 5, createdAtMs: 1_700_000_700_000, contentHash: "hash-5", forks: [] }],
             children: []
           }
@@ -359,6 +498,7 @@ test("listRunSnapshots adapts the checkpoint list", async () => {
     snapshots: {
       snapshots: [
         {
+          runId: WORKFLOW_RUN_ID,
           seq: 3,
           nodeId: "node:project-discovery",
           iteration: 0,
@@ -391,22 +531,23 @@ test("listRunSnapshots adapts the checkpoint list", async () => {
 test("queryWorkflowEvents returns a bounded lifecycle array and never asks for raw chunks", async () => {
   const { project, env } = await launchedProject({
     events: [
-      JSON.stringify({
-        runId: WORKFLOW_RUN_ID,
+      smithersEventLine({
         seq: 1,
         timestampMs: 1_700_000_000_000,
-        type: "node.started",
-        payload: { nodeId: "node:project-discovery", iteration: 0, attempt: 1, state: "in-progress" }
+        type: "NodeStarted",
+        payload: { nodeId: "node:project-discovery", iteration: 0, attempt: 1 }
       }),
-      "not json",
-      JSON.stringify({
-        runId: WORKFLOW_RUN_ID,
+      smithersEventLine({
         seq: 2,
         timestampMs: 1_700_000_060_000,
-        type: "run.finished",
-        payload: { status: "smithers finished the run" }
-      }),
-      ""
+        type: "NodeCancelled",
+        payload: {
+          nodeId: "node:project-discovery",
+          iteration: 0,
+          attempt: 1,
+          reason: "smithers finished the run"
+        }
+      })
     ].join("\n")
   });
 
@@ -416,7 +557,7 @@ test("queryWorkflowEvents returns a bounded lifecycle array and never asks for r
   assert.equal(events.value?.limit, 50);
   assert.equal(events.value?.truncated, false);
   assert.equal(events.value?.events.length, 2);
-  assert.equal(events.value?.events[0]?.category, "node");
+  assert.equal(events.value?.events[0]?.category, "NodeStarted");
   assert.equal(events.value?.events[0]?.node_id, "node:project-discovery");
   assert.equal(events.value?.events[0]?.attempt, 1);
   assert.equal(events.value?.events[0]?.timestamp, new Date(1_700_000_000_000).toISOString());
@@ -428,14 +569,55 @@ test("queryWorkflowEvents returns a bounded lifecycle array and never asks for r
   assert.doesNotMatch(log, /--watch/u);
 });
 
+test("queryWorkflowEvents rejects malformed, aliased, mismatched, extra-field, duplicate-key, and blank records", async () => {
+  const { project, env } = await launchedProject({ events: "" });
+  const fixturePath = path.join(project, "fake-events.ndjson");
+  const exactLine = smithersEventLine({
+    seq: 1,
+    timestampMs: 1_700_000_000_000,
+    type: "NodeStarted",
+    payload: { nodeId: "node:project-discovery", iteration: 0, attempt: 1 }
+  });
+  const mismatched = JSON.parse(exactLine) as { payload: Record<string, unknown> };
+  mismatched.payload.runId = "another-run";
+  const extra = JSON.parse(exactLine) as Record<string, unknown>;
+  extra.legacy = true;
+  const duplicate = exactLine.replace('{"runId":', '{"runId":"duplicate","runId":');
+  const secondLine = smithersEventLine({
+    seq: 2,
+    timestampMs: 1_700_000_000_001,
+    type: "NodeFinished",
+    payload: { nodeId: "node:project-discovery", iteration: 0, attempt: 1 }
+  });
+  const cases = [
+    "not json",
+    smithersEventLine({
+      seq: 1,
+      timestampMs: 1_700_000_000_000,
+      type: "node.started",
+      payload: { nodeId: "node:project-discovery", iteration: 0, attempt: 1 }
+    }),
+    JSON.stringify(mismatched),
+    JSON.stringify(extra),
+    duplicate,
+    `${exactLine}\n\n${secondLine}`
+  ];
+
+  for (const records of cases) {
+    fs.writeFileSync(fixturePath, `${records}\n`, "utf8");
+    const events = await queryWorkflowEvents({ projectRoot: project, runId: "inspect-run", env });
+    assert.equal(events.ok, false, records);
+    assert.equal(events.diagnostics[0]?.code, "WORKFLOW_EVENTS_INVALID", records);
+  }
+});
+
 test("queryWorkflowEvents caps the limit and reports truncation", async () => {
   const lines = Array.from({ length: 5 }, (_, index) =>
-    JSON.stringify({
-      runId: WORKFLOW_RUN_ID,
+    smithersEventLine({
       seq: index,
       timestampMs: 1_700_000_000_000 + index,
-      type: "node.progress",
-      payload: { nodeId: "node:project-discovery" }
+      type: "NodePending",
+      payload: { nodeId: "node:project-discovery", iteration: 0 }
     })
   );
   const { project, env } = await launchedProject({ events: lines.join("\n") });
@@ -476,19 +658,17 @@ test("queryWorkflowEvents forwards node, type, since, and history filters", asyn
 test("watchWorkflowEvents streams each event and terminates cleanly", async () => {
   const { project, env } = await launchedProject({
     events: [
-      JSON.stringify({
-        runId: WORKFLOW_RUN_ID,
+      smithersEventLine({
         seq: 1,
         timestampMs: 1_700_000_000_000,
-        type: "node.started",
-        payload: { nodeId: "node:project-discovery" }
+        type: "NodeStarted",
+        payload: { nodeId: "node:project-discovery", iteration: 0, attempt: 1 }
       }),
-      JSON.stringify({
-        runId: WORKFLOW_RUN_ID,
+      smithersEventLine({
         seq: 2,
         timestampMs: 1_700_000_030_000,
-        type: "node.finished",
-        payload: { nodeId: "node:project-discovery", state: "succeeded" }
+        type: "NodeFinished",
+        payload: { nodeId: "node:project-discovery", iteration: 0, attempt: 1 }
       })
     ].join("\n")
   });
@@ -506,7 +686,7 @@ test("watchWorkflowEvents streams each event and terminates cleanly", async () =
 
   assert.equal(watched.ok, true, JSON.stringify(watched.diagnostics));
   assert.equal(streamed.length, 2);
-  assert.equal(streamed[1]?.detail, "succeeded");
+  assert.equal(streamed[1]?.detail, null);
   assert.match(smithersLog(project), /events ultrafuzz-inspect-run --limit 200 --watch --json --interval 1/u);
 });
 
@@ -570,12 +750,11 @@ test("event queries report a diagnostic when the engine process is killed by a s
 
 test("a truncated event stream stays successful even though the process is killed", async () => {
   const lines = Array.from({ length: 4 }, (_, index) =>
-    JSON.stringify({
-      runId: WORKFLOW_RUN_ID,
+    smithersEventLine({
       seq: index,
       timestampMs: 1_700_000_000_000 + index,
-      type: "node.progress",
-      payload: { nodeId: "node:project-discovery" }
+      type: "NodePending",
+      payload: { nodeId: "node:project-discovery", iteration: 0 }
     })
   );
   const { project, env } = await launchedProject({ events: lines.join("\n") });
@@ -601,7 +780,7 @@ test("getWorkflowNode returns focused status without attempt or tool detail by d
   assert.equal(node.value?.node_id, "node:project-discovery");
   assert.equal(node.value?.iteration, 0);
   assert.equal(node.value?.state, "finished");
-  assert.equal(node.value?.status, "succeeded");
+  assert.equal(node.value?.status, "finished");
   assert.equal(node.value?.duration_ms, 42_000);
   assert.deepEqual(node.value?.attempt_counts, { total: 2, succeeded: 1, failed: 1, cancelled: 0, waiting: 0 });
   assert.deepEqual(node.value?.models, ["gpt-test"]);
@@ -652,13 +831,10 @@ test("getWorkflowNode includes attempts on request and tool payloads only with -
   assert.doesNotMatch(JSON.stringify(call?.input), /sk-live-secret/u);
 });
 
-test("watchWorkflowNode keeps streaming past the engine's terminal clear-screen bytes", async () => {
+test("watchWorkflowNode accepts clean raw JSONL records", async () => {
   const detail = JSON.stringify(nodeDetailFixture());
-  // The engine's watch loop clears the terminal before every non-initial
-  // render, writing an ANSI sequence with no trailing newline into the same
-  // stdout stream as the JSONL payload.
   const { project, env } = await launchedProject({
-    nodeWatchLines: `${detail}\n\u001B[2J\u001B[0f${detail}\n\u001B[2J\u001B[0f${detail}\n`
+    nodeWatchLines: `${detail}\n${detail}\n${detail}\n`
   });
   const snapshots: string[] = [];
 
@@ -682,6 +858,24 @@ test("watchWorkflowNode keeps streaming past the engine's terminal clear-screen 
   );
 });
 
+test("watchWorkflowNode rejects terminal control bytes instead of repairing JSONL", async () => {
+  const detail = JSON.stringify(nodeDetailFixture());
+  const { project, env } = await launchedProject({
+    nodeWatchLines: `${detail}\n\u001B[2J\u001B[0f${detail}\n`
+  });
+
+  const watched = await watchWorkflowNode({
+    projectRoot: project,
+    runId: "inspect-run",
+    nodeId: "node:project-discovery",
+    env,
+    onSnapshot: () => undefined
+  });
+
+  assert.equal(watched.ok, false);
+  assert.equal(watched.diagnostics[0]?.code, "WORKFLOW_NODE_INVALID");
+});
+
 test("cancelRun converges when the engine reports the run is already terminal", async () => {
   const { project, env, runRoot } = await launchedProject({});
   // The engine answers RUN_NOT_ACTIVE with exit 4 once a run is cancelled, so
@@ -691,7 +885,7 @@ test("cancelRun converges when the engine reports the run is already terminal", 
     [
       "#!/bin/sh",
       'if [ "$1" = "cancel" ]; then',
-      '  printf \'%s\\n\' \'{"ok":false,"error":{"code":"RUN_NOT_ACTIVE"}}\'',
+      '  printf \'%s\\n\' \'{"ok":false,"error":{"code":"RUN_NOT_ACTIVE","message":"Run is not active"}}\'',
       "  exit 4",
       "fi",
       "printf '%s\\n' '{\"ok\":true}'",
@@ -723,12 +917,11 @@ test("cancelRun still fails on an unrelated engine error exit", async () => {
 
 test("queryWorkflowEvents does not call an exact-limit result truncated", async () => {
   const lines = Array.from({ length: 2 }, (_, index) =>
-    JSON.stringify({
-      runId: WORKFLOW_RUN_ID,
+    smithersEventLine({
       seq: index,
       timestampMs: 1_700_000_000_000 + index,
-      type: "node.progress",
-      payload: { nodeId: "node:project-discovery" }
+      type: "NodePending",
+      payload: { nodeId: "node:project-discovery", iteration: 0 }
     })
   );
   const { project, env } = await launchedProject({ events: lines.join("\n") });
@@ -742,12 +935,11 @@ test("queryWorkflowEvents does not call an exact-limit result truncated", async 
 
 test("watchWorkflowEvents stops the stream when the caller aborts mid-stream", async () => {
   const lines = Array.from({ length: 200 }, (_, index) =>
-    JSON.stringify({
-      runId: WORKFLOW_RUN_ID,
+    smithersEventLine({
       seq: index,
       timestampMs: 1_700_000_000_000 + index,
-      type: "node.progress",
-      payload: { nodeId: "node:project-discovery" }
+      type: "NodePending",
+      payload: { nodeId: "node:project-discovery", iteration: 0 }
     })
   );
   const { project, env } = await launchedProject({ events: lines.join("\n") });
@@ -1169,7 +1361,35 @@ function writeFakeInstalledEngine(project: string, input: { version: string; bin
   fs.symlinkSync(path.relative(path.dirname(shim), target), shim);
 }
 
+function nodeTokenUsage(inputTokens: number, outputTokens: number): Record<string, unknown> {
+  return {
+    inputTokens,
+    outputTokens,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    reasoningTokens: 0,
+    costUsd: null,
+    eventCount: 1,
+    models: ["gpt-test"],
+    agents: ["codex"]
+  };
+}
+
 function nodeDetailFixture(): unknown {
+  const firstUsage = nodeTokenUsage(10, 5);
+  const secondUsage = nodeTokenUsage(12, 6);
+  const firstToolCall = {
+    attempt: 1,
+    seq: 1,
+    name: "shell",
+    status: "ok",
+    startedAtMs: 1_700_000_001_000,
+    finishedAtMs: 1_700_000_002_000,
+    durationMs: 1_000,
+    input: { command: "forge build", token: "sk-live-secret-value" },
+    output: { note: "ok" },
+    error: null
+  };
   return {
     node: {
       runId: WORKFLOW_RUN_ID,
@@ -1181,7 +1401,7 @@ function nodeDetailFixture(): unknown {
       outputTable: null,
       label: null
     },
-    status: "succeeded",
+    status: "finished",
     durationMs: 42_000,
     attemptsSummary: { total: 2, failed: 1, cancelled: 0, succeeded: 1, waiting: 0 },
     attempts: [
@@ -1196,21 +1416,8 @@ function nodeDetailFixture(): unknown {
         durationMs: 20_000,
         error: "smithers attempt failed",
         errorDetail: null,
-        tokenUsage: { models: ["gpt-test"], agents: ["codex"] },
-        toolCalls: [
-          {
-            attempt: 1,
-            seq: 1,
-            name: "shell",
-            status: "ok",
-            startedAtMs: 1_700_000_001_000,
-            finishedAtMs: 1_700_000_002_000,
-            durationMs: 1_000,
-            input: { command: "forge build", token: "sk-live-secret-value" },
-            output: { note: "ok" },
-            error: null
-          }
-        ],
+        tokenUsage: firstUsage,
+        toolCalls: [firstToolCall],
         meta: null,
         responseText: null,
         cached: false,
@@ -1228,7 +1435,7 @@ function nodeDetailFixture(): unknown {
         durationMs: 22_000,
         error: null,
         errorDetail: null,
-        tokenUsage: { models: ["gpt-test"], agents: ["codex"] },
+        tokenUsage: secondUsage,
         toolCalls: [],
         meta: null,
         responseText: null,
@@ -1237,11 +1444,25 @@ function nodeDetailFixture(): unknown {
         jjCwd: null
       }
     ],
-    toolCalls: [],
-    tokenUsage: { models: ["gpt-test"], agents: ["codex"], byAttempt: [] },
+    toolCalls: [firstToolCall],
+    tokenUsage: {
+      inputTokens: 22,
+      outputTokens: 11,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      reasoningTokens: 0,
+      costUsd: null,
+      eventCount: 2,
+      models: ["gpt-test"],
+      agents: ["codex"],
+      byAttempt: [
+        { attempt: 1, usage: firstUsage },
+        { attempt: 2, usage: secondUsage }
+      ]
+    },
     scorers: [],
-    output: { validated: { ok: true }, raw: null, source: "cache", cacheKey: null },
+    output: { validated: { ok: true }, raw: null, source: "cache", cacheKey: "cache-test" },
     approval: null,
-    limits: { toolPayloadBytesHuman: 1, validatedOutputBytesHuman: 1 }
+    limits: { toolPayloadBytesHuman: 1_024, validatedOutputBytesHuman: 10_240 }
   };
 }

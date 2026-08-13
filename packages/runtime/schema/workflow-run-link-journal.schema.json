@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:runtime:workflow-run-link-journal:1",
+  "title": "Ultrafuzz workflow run link journal",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run_id", "entries"],
+  "properties": {
+    "schema_version": {
+      "const": "ultrafuzz.workflow-run-link-journal.v1"
+    },
+    "run_id": {
+      "$ref": "#/$defs/identity"
+    },
+    "entries": {
+      "type": "array",
+      "maxItems": 10000,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/entry"
+      }
+    }
+  },
+  "$defs": {
+    "identity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^[^\\u0000]+$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["link_id", "action", "workflow_run_id", "control_generation", "phase", "prepared_at", "updated_at"],
+      "properties": {
+        "link_id": {
+          "$ref": "#/$defs/identity"
+        },
+        "action": {
+          "enum": ["start", "resume", "replay", "fork"]
+        },
+        "workflow_run_id": {
+          "$ref": "#/$defs/identity"
+        },
+        "control_generation": {
+          "$ref": "#/$defs/sha256"
+        },
+        "phase": {
+          "enum": ["prepared", "committed"]
+        },
+        "prepared_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "updated_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "source_workflow_run_id": {
+          "$ref": "#/$defs/identity"
+        },
+        "source_workflow_link_id": {
+          "$ref": "#/$defs/identity"
+        },
+        "controller_invocation_id": {
+          "$ref": "#/$defs/identity"
+        },
+        "controller_invoked_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "lifecycle_result_event_id": {
+          "$ref": "#/$defs/identity"
+        },
+        "lifecycle_result_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "link_event_id": {
+          "$ref": "#/$defs/identity"
+        },
+        "link_event_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "committed_at": {
+          "$ref": "#/$defs/timestamp"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "start"
+              }
+            },
+            "required": ["action"]
+          },
+          "then": {
+            "properties": {
+              "source_workflow_run_id": false,
+              "source_workflow_link_id": false,
+              "controller_invocation_id": false,
+              "controller_invoked_at": false,
+              "lifecycle_result_event_id": false,
+              "lifecycle_result_at": false
+            }
+          },
+          "else": {
+            "properties": {
+              "source_workflow_run_id": {},
+              "source_workflow_link_id": {},
+              "controller_invocation_id": {},
+              "controller_invoked_at": {},
+              "lifecycle_result_event_id": {},
+              "lifecycle_result_at": {}
+            },
+            "required": [
+              "source_workflow_run_id",
+              "source_workflow_link_id",
+              "controller_invocation_id",
+              "controller_invoked_at",
+              "lifecycle_result_event_id",
+              "lifecycle_result_at"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "phase": {
+                "const": "committed"
+              }
+            },
+            "required": ["phase"]
+          },
+          "then": {
+            "properties": {
+              "link_event_id": {},
+              "link_event_at": {},
+              "committed_at": {}
+            },
+            "required": ["link_event_id", "link_event_at", "committed_at"]
+          },
+          "else": {
+            "properties": {
+              "link_event_id": false,
+              "link_event_at": false,
+              "committed_at": false
+            }
+          }
+        }
+      ]
+    }
+  }
+}

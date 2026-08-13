@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:modal:node-result:2",
+  "title": "Ultrafuzz Modal node result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "status",
+    "artifact_archive",
+    "artifact_sha256",
+    "storage_lineage",
+    "durable_checkpoint",
+    "durable_checkpoint_index"
+  ],
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.modal.node-result.v2" },
+    "status": { "const": "succeeded" },
+    "artifact_archive": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/boundedPath" },
+    "artifact_sha256": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/sha256" },
+    "storage_lineage": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/nonEmptyString" },
+    "durable_checkpoint": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/boundedPath" },
+    "durable_checkpoint_index": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/boundedPath" }
+  }
+}

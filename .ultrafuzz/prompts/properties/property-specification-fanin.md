@@ -26,7 +26,7 @@ Base test setup:
 
 ## 1. Consolidate
 
-Consolidate properties from these topology-required lens artifacts into a single table.
+Consolidate properties from these topology-required lens artifacts into a single catalog.
 Each lens now emits `properties/<lens>.json` alongside its Markdown table. Read
 and validate every lens JSON artifact first; it is the machine-readable source
 of truth. Use the Markdown only as a human-readable companion and parity check.
@@ -54,13 +54,24 @@ source row, preserve:
   absent.
 
 When a pinned-reference node declares a catalog with
-`ultrafuzz/reference-expectations@1`, read its declared artifact and validate it
+`ultrafuzz/reference-expectations@2`, read its declared artifact and validate it
 with `{{schema_path}}/reference-expectations.schema.json`.
 
 When several source rows describe one equivalent property, emit one canonical
 property with every distinct contributing source in `sources`. Never keep only
 the first source. Canonical IDs only need to remain stable within this run, but
 all downstream artifacts must use them unchanged.
+
+Coverage of the lens artifacts is total and machine-checked. Every property ID
+in every lens artifact must appear exactly once across the whole catalog as a
+source-node/property-ID pair in some canonical property's `sources`: the runtime rejects a lens ID that
+appears in no canonical property and rejects the same pair listed on two
+canonical properties. Deduplicating two rows therefore means listing both source
+pairs on the one merged canonical property, never dropping one. You may not drop
+a lens row because it duplicates wording inside its own lens, reads as
+non-testable, or looks out of scope; merge it into the canonical property it
+belongs to instead. Ledger entry IDs are not lens property IDs and stay under
+`ledger_ids`.
 
 ## Target-derived consolidation
 
@@ -83,28 +94,30 @@ row, retaining the copied source wording and its path plus line or symbol
 location in the description or source list. A ledger entry may be merged with an
 equivalent row only when the canonical row preserves every operand, comparison
 direction, unit, denominator, and rounding term; otherwise keep a separate row.
-For machine-verifiable provenance, add a `ledger_ids` array to every canonical
-property that represents one or more ledger entries, copying the stable ledger
-IDs exactly. Every ledger ID must appear in at least one canonical property's
-`ledger_ids`; one source statement may map to several canonical properties and
-several equivalent source statements may share one canonical property. Preserve
-the complete mapping in both `properties.json` and the Markdown table.
-In `properties.md`, render each canonical row in a delimited block beginning
-with `### Canonical property: <property-id>` and, when that property has ledger
-IDs, include its complete `ledger_ids` list in that block. Omit the `ledger_ids`
-field entirely for a property that maps to no ledger entry: `ledger_ids` is
-optional in the schema and cannot be empty, so there is nothing to render. Close
-the block with `### End canonical property: <property-id>`.
-Within each block, render `description`, `category`, and `priority` as named
-fields, render each source as `<source_node_id>:<source_property_id>` under a
-`sources` field (separate multiple sources with `<br>`), and, when present,
-render the exact ledger IDs under a `ledger_ids` field (separate multiple IDs
-with commas or `<br>`). When present, render the exact `reference_expectations`
-identifiers
-under a `reference_expectations` field (separate multiple IDs with commas or
-`<br>`). Keep these field values identical to `properties.json`.
+For machine-verifiable provenance, copy the stable ledger IDs exactly into each
+canonical property's schema-defined ledger provenance. Every ledger ID must be
+attributed to at least one canonical property; one source statement may map to
+several canonical properties and several equivalent source statements may
+share one canonical property. Preserve the complete mapping in both
+`properties.json` and its Markdown companion, and do not invent ledger IDs for
+a property that maps to no ledger entry.
+The following reversible grammar governs only the human-readable
+`properties.md` companion; the pinned properties schema remains the sole
+authority for `properties.json`. Render each canonical row between
+`### Canonical property: <json-string-id>` and
+`### End canonical property: <json-string-id>`, where both IDs are the strict
+JSON string encoding of the exact property ID, including for simple IDs. Inside
+the block, emit exactly one line for each JSON member in this order:
+`description`, `category`, `priority`, `sources`, then optional `ledger_ids` and
+`reference_expectations`. Each line is `<field>: <strict-json-value>`: scalars
+are JSON strings, sources are the exact JSON array of source objects, and ID
+lists are the exact JSON arrays of strings. Do not use Markdown backticks,
+tables, bullets, colon-delimited source pairs, comma/`<br>` lists, indented
+multiline values, aliases, or ledger-evidence suffixes. Preserve array order.
+When an optional member is absent from JSON, omit its Markdown field entirely;
+a blank field or `[]` is not omission. Do not add any other field or block.
 
-Use neutral authorized-QA language in the consolidated table. Phrase each row as
+Use neutral authorized-QA language in the consolidated catalog. Phrase each row as
 an expected property, invariant, boundary condition, state transition, or
 regression target. If an upstream lens uses misuse-oriented or sensational
 security wording, normalize it into test-focused language before copying the
@@ -122,6 +135,6 @@ Every property must have at least one source. Keep source pairs unique and
 canonical property IDs unique. The runtime validates this artifact before any
 downstream node can run.
 
-Then write a human-readable table with the same canonical IDs, descriptions,
-categories, priorities, and complete source lists to
+Then write the strict Markdown companion blocks with the same canonical IDs,
+descriptions, categories, priorities, and complete source lists to
 `{{artifact_path}}/properties.md`.

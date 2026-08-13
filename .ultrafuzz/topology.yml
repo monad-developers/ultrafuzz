@@ -94,7 +94,7 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: references/manifest.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/reference-manifest@1
   - id: reference-properties-certora-thinking
     kind: reference
     reference: properties.certora-thinking
@@ -107,7 +107,7 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: references/manifest.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/reference-manifest@1
   - id: reference-properties-certora-sanity
     kind: reference
     reference: properties.certora-sanity
@@ -120,7 +120,7 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: references/manifest.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/reference-manifest@1
   - id: reference-properties-aviggiano
     kind: reference
     reference: properties.aviggiano
@@ -133,7 +133,7 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: references/manifest.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/reference-manifest@1
   - id: reference-properties-montyly-rounding
     kind: reference
     reference: properties.montyly-rounding
@@ -146,7 +146,7 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: references/manifest.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/reference-manifest@1
   - id: reference-properties-crytic
     kind: reference
     reference: properties.crytic
@@ -159,7 +159,7 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: references/manifest.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/reference-manifest@1
   - id: reference-properties-runtime-verification
     kind: reference
     reference: properties.runtime-verification
@@ -172,7 +172,7 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: references/manifest.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/reference-manifest@1
   - id: reference-properties-a16z-erc4626
     kind: reference
     reference: properties.a16z-erc4626
@@ -185,7 +185,7 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: references/manifest.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/reference-manifest@1
   - id: reference-properties-recon
     kind: reference
     reference: properties.recon
@@ -198,7 +198,7 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: references/manifest.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/reference-manifest@1
   - id: property-specification-certora
     kind: agentic
     prompt: properties/certora-thinking-lens.md
@@ -212,9 +212,9 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: properties/certora.json
-        contract: ultrafuzz/property-lens@1
+        contract: ultrafuzz/property-lens@2
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
   - id: property-specification-crytic
     kind: agentic
     prompt: properties/property-specification-crytic.md
@@ -227,9 +227,9 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: properties/crytic.json
-        contract: ultrafuzz/property-lens@1
+        contract: ultrafuzz/property-lens@2
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
   - id: property-specification-runtime-verification
     kind: agentic
     prompt: properties/property-specification-runtime-verification.md
@@ -242,9 +242,9 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: properties/runtime-verification.json
-        contract: ultrafuzz/property-lens@1
+        contract: ultrafuzz/property-lens@2
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
   - id: property-specification-a16z
     kind: agentic
     prompt: properties/property-specification-a16z.md
@@ -257,9 +257,9 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: properties/a16z.json
-        contract: ultrafuzz/property-lens@1
+        contract: ultrafuzz/property-lens@2
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
   - id: property-specification-recon
     kind: agentic
     prompt: properties/recon-lens.md
@@ -272,9 +272,9 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: properties/recon.json
-        contract: ultrafuzz/property-lens@1
+        contract: ultrafuzz/property-lens@2
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
   - id: property-specification-aviggiano
     kind: agentic
     prompt: properties/aviggiano-lens.md
@@ -287,9 +287,9 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: properties/aviggiano.json
-        contract: ultrafuzz/property-lens@1
+        contract: ultrafuzz/property-lens@2
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
   - id: property-specification-0kn0t
     kind: agentic
     prompt: properties/0kn0t-lens.md
@@ -302,9 +302,9 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: properties/0kn0t.json
-        contract: ultrafuzz/property-lens@1
+        contract: ultrafuzz/property-lens@2
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
   - id: property-specification-josselin-feist
     kind: agentic
     prompt: properties/josselin-feist-lens.md
@@ -317,9 +317,9 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: properties/josselin-feist.json
-        contract: ultrafuzz/property-lens@1
+        contract: ultrafuzz/property-lens@2
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
   - id: property-specification-fanin
     kind: agentic
     prompt: properties/property-specification-fanin.md
@@ -338,7 +338,7 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: properties.json
-        contract: ultrafuzz/properties@1
+        contract: ultrafuzz/properties@2
   - id: boundary-tests
     kind: agentic
     prompt: strategies/boundary-tests.md
@@ -350,11 +350,11 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: boundary-recipes.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/boundary-recipes@1
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+        contract: ultrafuzz/generated-tests@3
   - id: encode-decode
     kind: agentic
     prompt: strategies/encode-decode.md
@@ -363,10 +363,10 @@ nodes:
       - property-specification-fanin
     outputs:
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+        contract: ultrafuzz/generated-tests@3
   - id: differential-library-tests
     kind: agentic
     prompt: strategies/differential-library-tests.md
@@ -375,10 +375,10 @@ nodes:
       - property-specification-fanin
     outputs:
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+        contract: ultrafuzz/generated-tests@3
     loops: 1
   - id: round-trip
     kind: agentic
@@ -388,10 +388,10 @@ nodes:
       - property-specification-fanin
     outputs:
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+        contract: ultrafuzz/generated-tests@3
   - id: workflow-property-based-tests
     kind: agentic
     prompt: strategies/workflow-property-based-tests.md
@@ -400,10 +400,10 @@ nodes:
       - property-specification-fanin
     outputs:
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+        contract: ultrafuzz/generated-tests@3
   - id: time-warp-sequences
     kind: agentic
     prompt: strategies/time-warp-sequences.md
@@ -412,10 +412,10 @@ nodes:
       - property-specification-fanin
     outputs:
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+        contract: ultrafuzz/generated-tests@3
   - id: expand-coverage
     kind: agentic
     prompt: strategies/expand-coverage.md
@@ -427,9 +427,9 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+        contract: ultrafuzz/generated-tests@3
   - id: admin-config-boundaries
     kind: agentic
     prompt: strategies/admin-config-boundaries.md
@@ -442,11 +442,11 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: admin-config-boundary-matrix.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/admin-config-boundary-matrix@1
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+        contract: ultrafuzz/generated-tests@3
   - id: external-dependency-boundaries
     kind: agentic
     prompt: strategies/external-dependency-boundaries.md
@@ -458,11 +458,11 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: dependency-scope-matrix.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/dependency-scope-matrix@1
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+        contract: ultrafuzz/generated-tests@3
   - id: externalized-state-accounting
     kind: agentic
     prompt: strategies/externalized-state-accounting.md
@@ -474,11 +474,11 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: externalized-state-accounting.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/externalized-state-accounting@1
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+        contract: ultrafuzz/generated-tests@3
   - id: amm-boundary-liquidity
     kind: agentic
     prompt: strategies/amm-boundary-liquidity.md
@@ -487,10 +487,10 @@ nodes:
       - property-specification-fanin
     outputs:
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+        contract: ultrafuzz/generated-tests@3
   - id: payable-fallback-accounting
     kind: agentic
     prompt: strategies/payable-fallback-accounting.md
@@ -499,10 +499,10 @@ nodes:
       - property-specification-fanin
     outputs:
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+        contract: ultrafuzz/generated-tests@3
   - id: packed-action-parity
     kind: agentic
     prompt: strategies/packed-action-parity.md
@@ -511,10 +511,10 @@ nodes:
       - property-specification-fanin
     outputs:
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+        contract: ultrafuzz/generated-tests@3
   - id: batch-atomicity-unsupported-actions
     kind: agentic
     prompt: strategies/batch-atomicity-unsupported-actions.md
@@ -523,10 +523,10 @@ nodes:
       - property-specification-fanin
     outputs:
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+        contract: ultrafuzz/generated-tests@3
   - id: router-exact-accounting
     kind: agentic
     prompt: strategies/router-exact-accounting.md
@@ -535,10 +535,10 @@ nodes:
       - property-specification-fanin
     outputs:
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+        contract: ultrafuzz/generated-tests@3
   - id: rounding-direction-audit
     kind: agentic
     prompt: strategies/rounding-direction-audit.md
@@ -547,10 +547,10 @@ nodes:
       - property-specification-fanin
     outputs:
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+        contract: ultrafuzz/generated-tests@3
   - id: market-exhaustion-boundaries
     kind: agentic
     prompt: strategies/market-exhaustion-boundaries.md
@@ -559,10 +559,10 @@ nodes:
       - property-specification-fanin
     outputs:
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+        contract: ultrafuzz/generated-tests@3
   - id: order-replacement-collateral
     kind: agentic
     prompt: strategies/order-replacement-collateral.md
@@ -571,10 +571,10 @@ nodes:
       - property-specification-fanin
     outputs:
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+        contract: ultrafuzz/generated-tests@3
   - id: state-machine-boundaries
     kind: agentic
     prompt: strategies/state-machine-boundaries.md
@@ -583,10 +583,10 @@ nodes:
       - property-specification-fanin
     outputs:
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+        contract: ultrafuzz/generated-tests@3
   - id: lifecycle-view-boundaries
     kind: agentic
     prompt: strategies/lifecycle-view-boundaries.md
@@ -595,10 +595,10 @@ nodes:
       - property-specification-fanin
     outputs:
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+        contract: ultrafuzz/generated-tests@3
   - id: stateful-invariant-setup
     kind: agentic
     prompt: strategies/invariants/setup.md
@@ -643,16 +643,16 @@ nodes:
     loop_mode: series
     outputs:
       - path: coverage-goal.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/coverage-goal@1
         primary: true
       - path: coverage-report.md
         contract: ultrafuzz/nonempty-markdown@1
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+        contract: ultrafuzz/generated-tests@3
       - path: harness-repairs.json
-        contract: ultrafuzz/json-array@1
+        contract: ultrafuzz/harness-repairs@1
       - path: workspace.patch
         contract: ultrafuzz/text@1
       - path: workspace-patch.json
@@ -669,11 +669,11 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: implemented-properties.json
-        contract: ultrafuzz/implemented-properties@2
+        contract: ultrafuzz/implemented-properties@3
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+        contract: ultrafuzz/generated-tests@3
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
       - path: workspace.patch
         contract: ultrafuzz/text@1
       - path: workspace-patch.json
@@ -689,18 +689,18 @@ nodes:
       - stateful-invariant-implement-properties
     outputs:
       - path: campaign-plan.json
-        contract: ultrafuzz/invariant-campaign-plan@1
+        contract: ultrafuzz/invariant-campaign-plan@2
         primary: true
       - path: campaign-report.md
         contract: ultrafuzz/nonempty-markdown@1
       - path: campaign-summary.json
-        contract: ultrafuzz/campaign-summary@1
+        contract: ultrafuzz/campaign-summary@2
       - path: recon-fuzzer-results.json
-        contract: ultrafuzz/property-campaign@1
+        contract: ultrafuzz/property-campaign@3
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+        contract: ultrafuzz/generated-tests@3
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
       - path: workspace.patch
         contract: ultrafuzz/text@1
       - path: workspace-patch.json
@@ -714,7 +714,7 @@ nodes:
       - property-specification-fanin
     outputs:
       - path: differential-plan.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/differential-plan@1
         primary: true
     loops: 1
   - id: reference-harness-author
@@ -725,10 +725,10 @@ nodes:
       - differential-oracle-planner
     outputs:
       - path: reference-harness.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/reference-harness@1
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+        contract: ultrafuzz/generated-tests@3
     loops: 1
   - id: reference-and-lane-auditor
     kind: agentic
@@ -738,7 +738,7 @@ nodes:
       - reference-harness-author
     outputs:
       - path: audited-differential-lanes.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/audited-differential-lanes@1
         primary: true
     loops: 1
   - id: differential-lane-author
@@ -749,12 +749,12 @@ nodes:
       - reference-and-lane-auditor
     outputs:
       - path: lane-result.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/differential-lane-result@1
         primary: true
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+        contract: ultrafuzz/generated-tests@3
     loops: 1
   - id: differential-red-triage
     kind: agentic
@@ -764,12 +764,12 @@ nodes:
       - differential-lane-author
     outputs:
       - path: semantic-red-registry.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/semantic-red-registry@1
         primary: true
       - path: triage-a.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/differential-red-triage@1
       - path: triage-b.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/differential-red-triage@1
     loops: 1
   - id: differential-repair-and-report-review
     kind: agentic
@@ -779,16 +779,16 @@ nodes:
       - differential-red-triage
     outputs:
       - path: repair-summary.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/differential-repair-summary@1
         primary: true
       - path: gap-review.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/differential-gap-review@1
       - path: differential-report-review.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/differential-report-review@1
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+        contract: ultrafuzz/generated-tests@3
     loops: 1
   - id: dynamic-strategy-generator
     kind: agentic
@@ -828,20 +828,18 @@ nodes:
       - differential-repair-and-report-review
     outputs:
       - path: strategy-plan.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/dynamic-strategy-plan@1
         primary: true
       - path: enumerator-outputs.json
-        contract: ultrafuzz/json-object@1
-      - path: aggregate-recommendations.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/dynamic-enumerator-outputs@1
       - path: selected-strategies.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/selected-strategies@1
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+        contract: ultrafuzz/generated-tests@3
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
       - path: provenance.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/dynamic-strategy-provenance@1
     loops: 1
   - id: dedupe-findings
     kind: agentic
@@ -882,12 +880,12 @@ nodes:
       - dynamic-strategy-generator
     outputs:
       - path: deduped-findings.json
-        contract: ultrafuzz/json-array@1
+        contract: ultrafuzz/findings@2
         primary: true
       - path: strategy-detections.json
-        contract: ultrafuzz/json-array@1
+        contract: ultrafuzz/strategy-detections@1
       - path: finding-lifecycle-ledger.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/finding-lifecycle-ledger@1
   - id: triage
     kind: agentic
     prompt: review/triage.md
@@ -896,10 +894,10 @@ nodes:
       - dedupe-findings
     outputs:
       - path: triaged-findings.json
-        contract: ultrafuzz/json-array@1
+        contract: ultrafuzz/triaged-findings@1
         primary: true
       - path: finding-lifecycle-ledger.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/finding-lifecycle-ledger@1
   - id: severity-classification
     kind: agentic
     prompt: review/severity-classification.md
@@ -908,12 +906,12 @@ nodes:
       - triage
     outputs:
       - path: severity-classified-findings.json
-        contract: ultrafuzz/json-array@1
+        contract: ultrafuzz/severity-classified-findings@1
         primary: true
       - path: strategy-detections.json
-        contract: ultrafuzz/json-array@1
+        contract: ultrafuzz/strategy-detections@1
       - path: finding-lifecycle-ledger.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/finding-lifecycle-ledger@1
   - id: aggregate-test-files
     kind: agentic
     prompt: review/aggregate-test-files.md
@@ -922,7 +920,7 @@ nodes:
       - severity-classification
     outputs:
       - path: aggregation.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/aggregation-manifest@1
         primary: true
   - id: final-report
     kind: agentic
@@ -936,4 +934,4 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: report.json
-        contract: ultrafuzz/report@1
+        contract: ultrafuzz/report@2

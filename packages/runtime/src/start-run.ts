@@ -3,17 +3,29 @@ import path from "node:path";
 
 import {
   appendEvent,
+  assertPlannedGraph,
+  assertSmithersTaskManifestMatchesPlannedGraph,
   assertNoSymlinkComponents,
   assertPathInside,
   layoutForRunRoot,
+  parseSmithersTaskManifestBytes,
+  parseStrictJsonBytes,
+  readRunMetadataDocument,
   readRunState,
   updateRunStatus,
   validateSafeId,
   writeJsonDurable,
+  writeRunMetadataDocument,
   writeRunState,
-  type RunLayout
+  type RunMetadataDocument,
+  type RunMetadataWorkflow,
+  type RunWorkflowProvenance,
+  type RunLayout,
+  type AppendEventInput,
+  type SmithersTaskManifestDocument,
+  type SmithersTaskManifestTask
 } from "@ultrafuzz/artifacts";
-import type { ResolvedConfig } from "@ultrafuzz/config";
+import { parseResolvedConfigJsonBytes, type ResolvedConfig } from "@ultrafuzz/config";
 import { assertExpandedGraphSchema, type ExpandedGraph } from "@ultrafuzz/topology";
 
 import {
@@ -26,10 +38,11 @@ import {
   type WorkflowLifecycleInput,
   type WorkflowLifecycleValue
 } from "./types.js";
-import { planRun, repairMissingRenderedPromptsFromExecutionSnapshot } from "./plan-run.js";
+import { planRun } from "./plan-run.js";
 import { probeCommandsForExecution } from "./required-commands.js";
 import { forgeGuardMetadata, prepareForgeGuardEnvironment } from "./forge-guard.js";
-import { readJsonIfExists, runtimeFailure, runtimeResult } from "./utils.js";
+import { prepareTrustedCliEnvironment, runTrustedJsonValidatorPreflight } from "./trusted-cli.js";
+import { runtimeFailure, runtimeResult } from "./utils.js";
 import {
   compileSmithersWorkflow,
   requestSmithersPause,
@@ -79,6 +92,9 @@ const WORKFLOW_CONTROLLER_ONLY_ENVIRONMENT_VARIABLES = new Set([
   "ULTRAFUZZ_CONFIG_PATH",
   "ULTRAFUZZ_MODAL_MODULE",
   "ULTRAFUZZ_RUNTIME_MODULE",
+  "ULTRAFUZZ_SCHEMA_BUNDLE_SHA256",
+  "ULTRAFUZZ_TRUSTED_BIN",
+  "ULTRAFUZZ_VALIDATOR_BUILD",
   "ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR",
   "ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT",
   "ULTRAFUZZ_SNAPSHOT_PROCESS_DESCRIPTOR",
@@ -146,6 +162,15 @@ export async function startRun(input: StartRunInput) {
       env: input.env
     });
     persistForgeGuardMetadata(plan.layout, plan.resolved_config, forgeGuard.active);
+    const trustedCli = prepareTrustedCliEnvironment({
+      layout: plan.layout,
+      cliEntrypoint: input.ultrafuzzCliEntrypoint,
+      env: forgeGuard.env,
+      required: compiled.tasks.some((task) =>
+        task.metadata.artifacts.outputs.some((output) => output.schemaFile !== undefined)
+      )
+    });
+    runTrustedJsonValidatorPreflight({ layout: plan.layout, trusted: trustedCli });
     const submission = await submitSmithersWorkflow({
       compiled,
       projectRoot: plan.validation.project_root,
@@ -153,14 +178,15 @@ export async function startRun(input: StartRunInput) {
       keepWorkspaces: plan.resolved_config.run.keepWorkspaces,
       controllerLeaseSeconds: plan.resolved_config.run.controllerLeaseSeconds,
       workflowPath: prepared.executionSnapshot.workflowPath,
-      env: { ...(forgeGuard.env ?? {}), ...prepared.executionSnapshot.env },
+      env: { ...trustedCli.env, ...prepared.executionSnapshot.env },
       environmentVariableNames: mergeEnvironmentVariableNames(
         agentEnvironmentVariableNames(
           plan.resolved_config,
           compiled.tasks.map((task) => task.agentRef),
           forgeGuard.env
         ),
-        forgeGuard.environmentVariableNames
+        forgeGuard.environmentVariableNames,
+        trustedCli.environmentVariableNames
       ),
       inputJson: prepared.executionSnapshot.inputJson
     });
@@ -190,7 +216,7 @@ export async function startRun(input: StartRunInput) {
     appendEvent(plan.layout, {
       eventType: "workflow-submit-failed",
       status: "failed",
-      payload: diagnostic
+      payload: workflowSubmissionFailureEventPayload(diagnostic)
     });
     return runtimeFailure<StartRunValue>([diagnostic]);
   } finally {
@@ -281,14 +307,25 @@ export async function pauseRun(input: PauseRunInput) {
     if (result.status === "paused") {
       updateRunStatus(evidence.layout, "paused");
     }
-    appendEvent(evidence.layout, {
-      eventType: result.status === "paused" ? "workflow-lifecycle-already-paused" : "workflow-pause-requested",
-      status: result.status === "paused" ? "paused" : "running",
-      payload: {
-        action: "pause",
-        workflow_run_id: evidence.smithersRunId
-      }
-    });
+    if (result.status === "paused") {
+      appendEvent(evidence.layout, {
+        eventType: "workflow-lifecycle-already-paused",
+        status: "paused",
+        payload: {
+          action: "pause",
+          workflow_run_id: evidence.smithersRunId
+        }
+      });
+    } else {
+      appendEvent(evidence.layout, {
+        eventType: "workflow-pause-requested",
+        status: "running",
+        payload: {
+          action: "pause",
+          workflow_run_id: evidence.smithersRunId
+        }
+      });
+    }
     return runtimeResult(true, {
       run_id: input.runId,
       workflow_run_id: evidence.smithersRunId,
@@ -299,6 +336,44 @@ export async function pauseRun(input: PauseRunInput) {
   } catch (error) {
     return runtimeFailure<PauseRunValue>([smithersDiagnostic(error, "WORKFLOW_PAUSE_FAILED")]);
   }
+}
+
+function workflowSubmissionFailureEventPayload(
+  diagnostic: RuntimeDiagnostic
+): Extract<AppendEventInput, { eventType: "workflow-submit-failed" }>["payload"] {
+  if (!isWorkflowSubmissionFailureEventPayload(diagnostic)) {
+    throw new Error("workflow submission diagnostic does not match the current event contract");
+  }
+  return diagnostic;
+}
+
+function isWorkflowSubmissionFailureEventPayload(
+  diagnostic: RuntimeDiagnostic
+): diagnostic is RuntimeDiagnostic & Extract<AppendEventInput, { eventType: "workflow-submit-failed" }>["payload"] {
+  if (
+    diagnostic.code !== "WORKFLOW_SUBMISSION_FAILED" ||
+    diagnostic.severity !== "error" ||
+    diagnostic.source !== "workflow" ||
+    Object.keys(diagnostic).some((key) => !["code", "message", "severity", "source", "details"].includes(key)) ||
+    diagnostic.details === undefined ||
+    diagnostic.details === null ||
+    Array.isArray(diagnostic.details)
+  ) {
+    return false;
+  }
+  const details = diagnostic.details;
+  if (Object.keys(details).some((key) => !["exit_code", "signal", "killed", "stdout", "stderr"].includes(key))) {
+    return false;
+  }
+  return (
+    (details.exit_code === undefined ||
+      typeof details.exit_code === "string" ||
+      (typeof details.exit_code === "number" && Number.isFinite(details.exit_code))) &&
+    (details.signal === undefined || typeof details.signal === "string") &&
+    (details.killed === undefined || typeof details.killed === "boolean") &&
+    (details.stdout === undefined || typeof details.stdout === "string") &&
+    (details.stderr === undefined || typeof details.stderr === "string")
+  );
 }
 
 async function submitLifecycleAction(input: WorkflowLifecycleInput, action: WorkflowLifecycleValue["action"]) {
@@ -325,18 +400,19 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       return runtimeFailure<WorkflowLifecycleValue>(preflightDiagnostics);
     }
     const requestedConcurrency = input.maxConcurrency ?? sealedConfig.run.maxParallelAgents;
-    await repairMissingRenderedPromptsFromExecutionSnapshot({
-      projectRoot: path.resolve(input.projectRoot),
-      runId: input.runId,
-      runRoot: evidence.layout.root,
-      executionFiles: evidence.verifiedControl.executionFiles
-    });
     const forgeGuard = prepareForgeGuardEnvironment({
       layout: evidence.layout,
       config: sealedConfig,
       env: input.env
     });
     persistForgeGuardMetadata(evidence.layout, sealedConfig, forgeGuard.active);
+    const trustedCli = prepareTrustedCliEnvironment({
+      layout: evidence.layout,
+      cliEntrypoint: input.ultrafuzzCliEntrypoint,
+      env: forgeGuard.env,
+      required: sealedTasksRequireTrustedCli(evidence.verifiedControl.contents.tasks)
+    });
+    runTrustedJsonValidatorPreflight({ layout: evidence.layout, trusted: trustedCli });
     const controllerInvocation = appendEvent(evidence.layout, {
       eventType: "workflow-lifecycle-invoking",
       status: "running",
@@ -368,10 +444,11 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       },
       keepWorkspaces: sealedConfig.run.keepWorkspaces,
       controllerLeaseSeconds: sealedConfig.run.controllerLeaseSeconds,
-      env: linkedWorkflowExecutionEnvironment(evidence, forgeGuard.env),
+      env: linkedWorkflowExecutionEnvironment(evidence, trustedCli.env),
       environmentVariableNames: mergeEnvironmentVariableNames(
         linkedWorkflowEnvironmentVariableNames(sealedConfig, evidence.verifiedControl.contents.tasks, forgeGuard.env),
-        forgeGuard.environmentVariableNames
+        forgeGuard.environmentVariableNames,
+        trustedCli.environmentVariableNames
       )
     });
     const workflowRunId = lifecycleResult.workflowRunId ?? evidence.smithersRunId;
@@ -442,6 +519,19 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
   }
 }
 
+function sealedTasksRequireTrustedCli(contents: Buffer): boolean {
+  return parseSmithersTaskManifestBytes(contents).tasks.some((task) =>
+    task.metadata.artifacts.outputs.some((output) => output.schemaFile !== undefined)
+  );
+}
+
+function parseSealedTaskManifest(contents: Readonly<{ graph: Buffer; tasks: Buffer }>): SmithersTaskManifestDocument {
+  const graph = assertPlannedGraph(parseStrictJsonBytes(contents.graph));
+  const manifest = parseSmithersTaskManifestBytes(contents.tasks);
+  assertSmithersTaskManifestMatchesPlannedGraph(manifest, graph);
+  return manifest;
+}
+
 async function persistSmithersEvidence(
   layout: RunLayout,
   graph: PlannedGraph,
@@ -462,11 +552,14 @@ async function persistSmithersEvidence(
     const taskNodeIds = tasksByConcrete.get(node.id) ?? [];
     if (taskNodeIds.length > 0) {
       node.workflow = {
-        node_id: taskNodeIds[0],
+        node_id: taskNodeIds[0]!,
         task_node_ids: taskNodeIds
       };
     }
   }
+  assertPlannedGraph(graph);
+  const taskManifest = parseSmithersTaskManifestBytes(fs.readFileSync(compiled.tasksPath));
+  assertSmithersTaskManifestMatchesPlannedGraph(taskManifest, graph);
   writeJsonDurable(layout.graphPath, graph);
 
   const executionFiles = await smithersExecutionControlFiles(compiled, layout, env);
@@ -493,10 +586,8 @@ async function persistSmithersEvidence(
     controlGeneration: verifiedControl.generation
   });
 
-  const metadata = readJsonIfExists<Record<string, unknown>>(layout.runMetadataPath) ?? {};
-  delete metadata.smithers;
-  delete metadata.smithers_inspection_ids;
-  writeJsonDurable(layout.runMetadataPath, {
+  const metadata = readRunMetadataDocument(layout.runMetadataPath, layout.runId);
+  writeRunMetadataDocument(layout.runMetadataPath, {
     ...metadata,
     workflow_ids: [compiled.smithersRunId],
     workflow: {
@@ -586,17 +677,9 @@ export async function readLinkedWorkflowEvidence(
       return { ok: false, diagnostics: [missingEvidence] };
     }
     reconcilePendingWorkflowRunLink(resolvedProjectRoot, layout);
-    const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as {
-      run_id?: unknown;
-      workflow_ids?: unknown;
-      workflow?: Record<string, unknown>;
-    };
-    if (metadata.run_id !== undefined && metadata.run_id !== runId) {
-      throw new Error("run metadata identity does not match the requested run");
-    }
-    const workflow = objectRecord(metadata.workflow);
-    const smithersRunId = workflow.run_id;
-    if (typeof smithersRunId !== "string" || smithersRunId.length === 0 || smithersRunId.includes("\0")) {
+    const metadata = readRunMetadataDocument(metadataPath, runId);
+    const workflow = metadata.workflow;
+    if (workflow === undefined) {
       return {
         ok: false,
         diagnostics: [
@@ -610,6 +693,8 @@ export async function readLinkedWorkflowEvidence(
         ]
       };
     }
+    const smithersRunId = workflow.run_id;
+    if (smithersRunId.includes("\0")) throw new Error("active workflow run ID contains a NUL byte");
     if (
       !Array.isArray(metadata.workflow_ids) ||
       metadata.workflow_ids.length !== 1 ||
@@ -619,13 +704,12 @@ export async function readLinkedWorkflowEvidence(
     }
 
     const verifiedControl = verifyWorkflowControlSnapshot(resolvedProjectRoot, layout);
-    const tasks = JSON.parse(verifiedControl.contents.tasks.toString("utf8")) as unknown;
-    const taskDocument = objectRecord(tasks);
+    const taskDocument = parseSealedTaskManifest(verifiedControl.contents);
     const compiledRunId = workflow.compiled_run_id;
     if (
       typeof compiledRunId !== "string" ||
       taskDocument.smithers_run_id !== compiledRunId ||
-      typeof taskDocument.workflow_name !== "string"
+      taskDocument.run_id !== runId
     ) {
       throw new Error("compiled workflow identity does not match the sealed task manifest");
     }
@@ -645,8 +729,9 @@ export async function readLinkedWorkflowEvidence(
       control_generation: verifiedControl.generation,
       execution_snapshot_path: runRelativePath(layout, executionSnapshot.root)
     };
+    const workflowRecord = workflow as unknown as Record<string, unknown>;
     for (const [key, expected] of Object.entries(expectedWorkflowFields)) {
-      if (workflow[key] !== expected) {
+      if (workflowRecord[key] !== expected) {
         throw new Error(`stored workflow ${key.replaceAll("_", " ")} does not match its sealed control path`);
       }
     }
@@ -777,7 +862,7 @@ async function updateLinkedWorkflowRunId(
     if (committedLink.control_generation !== input.controlGeneration) {
       throw new Error("workflow run link control generation changed before replacement");
     }
-    const metadata = readJsonIfExists<Record<string, unknown>>(layout.runMetadataPath) ?? {};
+    const metadata = readRunMetadataDocument(layout.runMetadataPath, layout.runId);
     const state = readRunState(layout);
     if (
       !metadataMatchesWorkflowRunLink(metadata, committedLink) ||
@@ -811,13 +896,12 @@ function reconcilePendingWorkflowRunLink(projectRoot: string, layout: RunLayout)
   if (pending === undefined) return;
   verifyWorkflowRunLinkAuthorization(layout, pending);
 
-  const metadata = readJsonIfExists<Record<string, unknown>>(layout.runMetadataPath) ?? {};
+  const metadata = readRunMetadataDocument(layout.runMetadataPath, layout.runId);
   const state = readRunState(layout);
   if (pending.action === "start") {
     if (history.current !== undefined) throw new Error("initial workflow run link conflicts with committed history");
     const controlSnapshot = verifyWorkflowControlSnapshot(projectRoot, layout);
-    const tasks = JSON.parse(controlSnapshot.contents.tasks.toString("utf8")) as unknown;
-    const taskDocument = objectRecord(tasks);
+    const taskDocument = parseSealedTaskManifest(controlSnapshot.contents);
     if (
       taskDocument.smithers_run_id !== pending.workflow_run_id ||
       pending.control_generation !== controlSnapshot.generation
@@ -845,13 +929,12 @@ function reconcilePendingWorkflowRunLink(projectRoot: string, layout: RunLayout)
     ) {
       throw new Error("pending initial workflow run link projections cannot be reconciled safely");
     }
-    writeJsonDurable(layout.runMetadataPath, {
+    writeRunMetadataDocument(layout.runMetadataPath, {
       ...metadata,
       workflow_ids: [pending.workflow_run_id],
       workflow: binding.metadataWorkflow
     });
-    const existingProvenance = objectRecord(state.provenance);
-    state.provenance = { ...existingProvenance, workflow: binding.stateWorkflow };
+    state.provenance = { workflow: binding.stateWorkflow };
     writeRunState(layout, state);
     finalizeWorkflowRunLink(layout, pending);
     return;
@@ -881,21 +964,11 @@ function initialWorkflowBinding(
   layout: RunLayout,
   controlSnapshot: VerifiedWorkflowControlSnapshot,
   executionSnapshotRoot: string,
-  taskDocument: Record<string, unknown>,
+  taskDocument: SmithersTaskManifestDocument,
   link: WorkflowRunLinkJournalEntry
-): { metadataWorkflow: Record<string, unknown>; stateWorkflow: Record<string, unknown> } {
+): { metadataWorkflow: RunMetadataWorkflow; stateWorkflow: RunWorkflowProvenance } {
   const workflowName = taskDocument.workflow_name;
-  const tasks = taskDocument.tasks;
-  if (typeof workflowName !== "string" || !Array.isArray(tasks)) {
-    throw new Error("sealed workflow task manifest cannot reconstruct its initial link");
-  }
-  const taskNodeIds = tasks.map((value) => {
-    const smithersNodeId = objectRecord(value).smithersNodeId;
-    if (typeof smithersNodeId !== "string" || smithersNodeId.length === 0) {
-      throw new Error("sealed workflow task manifest contains an invalid Smithers node ID");
-    }
-    return smithersNodeId;
-  });
+  const taskNodeIds = taskDocument.tasks.map((task) => task.smithersNodeId);
   const executionSnapshot = runRelativePath(layout, executionSnapshotRoot);
   return {
     metadataWorkflow: {
@@ -926,13 +999,9 @@ function initialWorkflowBinding(
   };
 }
 
-function metadataIsPristineInitialWorkflowBinding(metadata: Record<string, unknown>): boolean {
+function metadataIsPristineInitialWorkflowBinding(metadata: RunMetadataDocument): boolean {
   return (
-    Array.isArray(metadata.workflow_ids) &&
-    metadata.workflow_ids.length === 0 &&
-    !Object.hasOwn(metadata, "workflow") &&
-    !Object.hasOwn(metadata, "smithers") &&
-    !Object.hasOwn(metadata, "smithers_inspection_ids")
+    Array.isArray(metadata.workflow_ids) && metadata.workflow_ids.length === 0 && !Object.hasOwn(metadata, "workflow")
   );
 }
 
@@ -941,8 +1010,8 @@ function stateIsPristineInitialWorkflowBinding(state: ReturnType<typeof readRunS
 }
 
 function metadataMatchesInitialWorkflowBinding(
-  metadata: Record<string, unknown>,
-  expectedWorkflow: Record<string, unknown>
+  metadata: RunMetadataDocument,
+  expectedWorkflow: RunMetadataWorkflow
 ): boolean {
   return (
     Array.isArray(metadata.workflow_ids) &&
@@ -954,37 +1023,40 @@ function metadataMatchesInitialWorkflowBinding(
 
 function stateMatchesInitialWorkflowBinding(
   state: ReturnType<typeof readRunState>,
-  expectedWorkflow: Record<string, unknown>
+  expectedWorkflow: RunWorkflowProvenance
 ): boolean {
   return exactRecordMatches(objectRecord(objectRecord(state.provenance).workflow), expectedWorkflow, ["linkId"]);
 }
 
 function exactRecordMatches(
   observed: Record<string, unknown>,
-  expected: Record<string, unknown>,
+  expected: object,
   fieldsAllowedMissing: readonly string[] = []
 ): boolean {
   const allowedMissing = new Set(fieldsAllowedMissing);
+  const expectedRecord = expected as Record<string, unknown>;
   const observedKeys = Object.keys(observed);
-  const expectedKeys = Object.keys(expected);
-  if (observedKeys.some((key) => !Object.hasOwn(expected, key))) return false;
+  const expectedKeys = Object.keys(expectedRecord);
+  if (observedKeys.some((key) => !Object.hasOwn(expectedRecord, key))) return false;
   if (expectedKeys.some((key) => !Object.hasOwn(observed, key) && !allowedMissing.has(key))) return false;
   return expectedKeys.every(
     (key) =>
       (!Object.hasOwn(observed, key) && allowedMissing.has(key)) ||
-      JSON.stringify(observed[key]) === JSON.stringify(expected[key])
+      JSON.stringify(observed[key]) === JSON.stringify(expectedRecord[key])
   );
 }
 
 function writeLinkedWorkflowBinding(
   layout: RunLayout,
-  metadata: Record<string, unknown>,
+  metadata: RunMetadataDocument,
   state: ReturnType<typeof readRunState>,
   link: WorkflowRunLinkJournalEntry
 ): void {
-  const existingWorkflow = objectRecord(metadata.workflow);
-  writeJsonDurable(layout.runMetadataPath, {
-    ...metadata,
+  const existingWorkflow = metadata.workflow;
+  if (existingWorkflow === undefined) throw new Error("workflow replacement requires an existing workflow binding");
+  const { accounting: _staleAccounting, ...metadataWithoutAccounting } = metadata;
+  writeRunMetadataDocument(layout.runMetadataPath, {
+    ...metadataWithoutAccounting,
     workflow_ids: [link.workflow_run_id],
     workflow: {
       ...existingWorkflow,
@@ -993,12 +1065,11 @@ function writeLinkedWorkflowBinding(
       workflow_link_id: link.link_id
     }
   });
-  const existingProvenance = objectRecord(state.provenance);
-  const existingWorkflowProvenance = objectRecord(existingProvenance.workflow);
+  const existingProvenance = state.provenance;
+  if (existingProvenance === undefined) throw new Error("workflow replacement requires existing state provenance");
   state.provenance = {
-    ...existingProvenance,
     workflow: {
-      ...existingWorkflowProvenance,
+      ...existingProvenance.workflow,
       inspection: { runId: link.workflow_run_id },
       runId: link.workflow_run_id,
       controlGeneration: link.control_generation,
@@ -1009,7 +1080,7 @@ function writeLinkedWorkflowBinding(
 }
 
 function metadataMatchesWorkflowRunLink(
-  metadata: Record<string, unknown>,
+  metadata: RunMetadataDocument,
   link: WorkflowRunLinkJournalEntry,
   allowMissingLinkId = false
 ): boolean {
@@ -1059,22 +1130,15 @@ function linkedWorkflowEnvironmentVariableNames(
 }
 
 function linkedWorkflowTasks(contents: Buffer): Array<{
-  agentRef?: unknown;
-  execution?: unknown;
+  agentRef: string;
+  execution: SmithersTaskManifestTask["execution"];
 }> {
-  const tasks = JSON.parse(contents.toString("utf8")) as {
-    tasks?: Array<{
-      agentRef?: unknown;
-      execution?: unknown;
-    }>;
-  };
-  if (!Array.isArray(tasks.tasks)) throw new Error("sealed workflow task manifest is invalid");
-  return tasks.tasks;
+  return parseSmithersTaskManifestBytes(contents).tasks;
 }
 
 function persistForgeGuardMetadata(layout: RunLayout, config: ResolvedConfig, active: boolean): void {
-  const metadata = readJsonIfExists<Record<string, unknown>>(layout.runMetadataPath) ?? {};
-  writeJsonDurable(layout.runMetadataPath, {
+  const metadata = readRunMetadataDocument(layout.runMetadataPath, layout.runId);
+  writeRunMetadataDocument(layout.runMetadataPath, {
     ...metadata,
     forge_guard: forgeGuardMetadata(config, active)
   });
@@ -1168,21 +1232,11 @@ function parseSealedResolvedConfig(
   if (sealedConfig === undefined) {
     throw new Error("sealed workflow execution snapshot is missing its resolved configuration");
   }
-  const parsed = JSON.parse(sealedConfig.contents.toString("utf8")) as unknown;
-  const record = objectRecord(parsed);
-  if (
-    Object.keys(record).length === 0 ||
-    Object.keys(objectRecord(record.run)).length === 0 ||
-    Object.keys(objectRecord(record.agents)).length === 0 ||
-    Object.keys(objectRecord(record.permissions)).length === 0
-  ) {
-    throw new Error("sealed resolved workflow configuration is invalid");
-  }
-  return parsed as ResolvedConfig;
+  return parseResolvedConfigJsonBytes(sealedConfig.contents);
 }
 
 function parseSealedExpandedGraph(contents: Buffer): ExpandedGraph {
-  return assertExpandedGraphSchema(JSON.parse(contents.toString("utf8")) as unknown);
+  return assertExpandedGraphSchema(parseStrictJsonBytes(contents));
 }
 
 function runRelativePath(layout: RunLayout, candidate: string): string {

@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "properties": {
+      "failure_id": {
+        "type": "string",
+        "minLength": 1
+      },
+      "classification": {
+        "type": "string",
+        "const": "harness-defect"
+      },
+      "failure_summary": {
+        "type": "string",
+        "minLength": 1
+      },
+      "reproducer_path": {
+        "anyOf": [
+          {
+            "type": "string",
+            "minLength": 1
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "reproducer_unavailable_reason": {
+        "type": "string",
+        "minLength": 1
+      },
+      "repair_summary": {
+        "type": "string",
+        "minLength": 1
+      },
+      "files_changed_or_proposed": {
+        "minItems": 0,
+        "type": "array",
+        "items": {
+          "type": "string",
+          "minLength": 1
+        },
+        "uniqueItems": true
+      },
+      "commands": {
+        "minItems": 0,
+        "type": "array",
+        "items": {
+          "type": "string",
+          "minLength": 1
+        },
+        "uniqueItems": true
+      },
+      "notes": {
+        "minItems": 0,
+        "type": "array",
+        "items": {
+          "type": "string",
+          "minLength": 1
+        },
+        "uniqueItems": true
+      }
+    },
+    "required": [
+      "failure_id",
+      "classification",
+      "failure_summary",
+      "reproducer_path",
+      "repair_summary",
+      "files_changed_or_proposed",
+      "commands",
+      "notes"
+    ],
+    "additionalProperties": false,
+    "allOf": [
+      {
+        "if": {
+          "properties": {
+            "reproducer_path": {
+              "type": "null"
+            }
+          },
+          "required": ["reproducer_path"]
+        },
+        "then": {
+          "properties": {
+            "reproducer_unavailable_reason": true
+          },
+          "required": ["reproducer_unavailable_reason"]
+        },
+        "else": {
+          "not": {
+            "properties": {
+              "reproducer_unavailable_reason": true
+            },
+            "required": ["reproducer_unavailable_reason"]
+          }
+        }
+      }
+    ]
+  },
+  "$id": "urn:ultrafuzz:schema:artifacts:harness-repairs:1",
+  "title": "Ultrafuzz harness repair records"
+}

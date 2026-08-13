@@ -6,13 +6,31 @@ export interface ModalGroundTruthBug {
   severity?: string;
 }
 
+export interface ModalPublicGroundTruthDocument {
+  schema_version: "ultrafuzz.eval-ground-truth.v1";
+  bugs: ModalGroundTruthBug[];
+}
+
+export interface ModalPrivateGroundTruthDocument extends ModalPublicGroundTruthDocument {
+  subject: GroundTruthSubject;
+}
+
 const ISSUE_HEADING = /\[([A-Za-z][A-Za-z0-9_-]*-\d{1,4})\](?:\s*[-–—:]\s*|\s+)(.+)$/u;
 
 export function convertAuditMarkdownGroundTruth(
   markdown: string,
+  expectedFindings?: number
+): ModalPublicGroundTruthDocument;
+export function convertAuditMarkdownGroundTruth(
+  markdown: string,
+  expectedFindings: number | undefined,
+  subject: GroundTruthSubject
+): ModalPrivateGroundTruthDocument;
+export function convertAuditMarkdownGroundTruth(
+  markdown: string,
   expectedFindings?: number,
   subject?: GroundTruthSubject
-): { bugs: ModalGroundTruthBug[]; schema_version?: "ultrafuzz.eval-ground-truth.v1"; subject?: GroundTruthSubject } {
+): ModalPublicGroundTruthDocument | ModalPrivateGroundTruthDocument {
   const bugs = new Map<string, ModalGroundTruthBug>();
   for (const line of markdown.split(/\r?\n/u)) {
     const match = ISSUE_HEADING.exec(line);
@@ -30,10 +48,11 @@ export function convertAuditMarkdownGroundTruth(
     throw new Error(`expected ${expectedFindings} ground-truth findings, found ${bugs.size}`);
   }
   if (bugs.size === 0) throw new Error("audit Markdown did not contain any issue headings");
-  return {
-    ...(subject === undefined ? {} : { schema_version: "ultrafuzz.eval-ground-truth.v1" as const, subject }),
-    bugs: [...bugs.values()]
-  };
+  const convertedBugs = [...bugs.values()];
+  if (subject === undefined) {
+    return { schema_version: "ultrafuzz.eval-ground-truth.v1", bugs: convertedBugs };
+  }
+  return { schema_version: "ultrafuzz.eval-ground-truth.v1", subject, bugs: convertedBugs };
 }
 
 function cleanMarkdownTitle(value: string): string {

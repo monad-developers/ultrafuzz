@@ -1,7 +1,9 @@
 import fs from "node:fs";
 import { pathToFileURL } from "node:url";
 
-const MAX_DIAGNOSTICS_BYTES = 1024 * 1024;
+import { parseStrictJsonBytes, readRegularFileSnapshot } from "../../packages/artifacts/dist/index.js";
+import { MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES, parsePublicEvalDiagnostics } from "../../packages/evals/dist/index.js";
+
 const AUTOMATIC_SMOKE_SOFT_FAIL_CATEGORIES = new Set([
   "resume-required",
   "transient-operational-failure",
@@ -18,14 +20,11 @@ const AUTOMATIC_SMOKE_SOFT_FAIL_CATEGORIES = new Set([
 export function describeSmokeSoftFail(diagnosticsPath) {
   const diagnostics = readDiagnostics(diagnosticsPath);
   if (diagnostics === undefined) {
-    return { validated: false, detail: "no readable public eval diagnostics, so scoring readiness is unknown" };
+    return { validated: false, detail: "public eval diagnostics are absent, so scoring readiness is unknown" };
   }
 
-  const rows = Array.isArray(diagnostics.rows) ? diagnostics.rows.map(record) : [];
-  const summary = record(diagnostics.summary);
-  if (rows.length === 0) {
-    return { validated: false, detail: "public eval diagnostics describe no rows, so there is nothing to score" };
-  }
+  const rows = diagnostics.rows;
+  const summary = diagnostics.summary;
 
   const ready = rows.filter((row) => row.scoring_ready === true).length;
   // Recheck rather than trusting the stored flag: a document whose summary and
@@ -93,24 +92,32 @@ function reasonSummary(rows) {
 }
 
 function readDiagnostics(diagnosticsPath) {
-  let raw;
+  let entry;
   try {
-    const stats = fs.statSync(diagnosticsPath);
-    if (!stats.isFile() || stats.size > MAX_DIAGNOSTICS_BYTES) return undefined;
-    raw = fs.readFileSync(diagnosticsPath, "utf8");
+    entry = fs.lstatSync(diagnosticsPath, { throwIfNoEntry: false });
   } catch {
-    return undefined;
+    throw invalidDiagnostics(diagnosticsPath);
   }
+  if (entry === undefined) return undefined;
+  if (!entry.isFile()) throw invalidDiagnostics(diagnosticsPath);
+
   try {
-    const parsed = JSON.parse(raw);
-    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
+    const bytes = readRegularFileSnapshot(diagnosticsPath, MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES);
+    return parsePublicEvalDiagnostics(
+      parseStrictJsonBytes(bytes, {
+        maxBytes: MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES,
+        maxDepth: 128,
+        maxItems: 250_000,
+        maxProperties: 250_000
+      })
+    );
   } catch {
-    return undefined;
+    throw invalidDiagnostics(diagnosticsPath);
   }
 }
 
-function record(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value) ? value : {};
+function invalidDiagnostics(diagnosticsPath) {
+  return new Error(`public eval diagnostics are present but invalid: ${diagnosticsPath}`);
 }
 
 function main(args) {
@@ -168,6 +175,10 @@ function readOutcome(outcomePath) {
   } catch {
     return {};
   }
+}
+
+function record(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 
 function usageError() {

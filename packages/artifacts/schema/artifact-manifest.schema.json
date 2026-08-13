@@ -1,0 +1,347 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:artifacts:artifact-manifest:3",
+  "title": "Ultrafuzz artifact manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "node_id",
+    "producer_node_id",
+    "created_at",
+    "files",
+    "output_contracts",
+    "prerequisite_manifests",
+    "provenance"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "ultrafuzz.artifact-manifest.v3"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "node_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "producer_node_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "size_bytes", "sha256", "provenance"],
+        "properties": {
+          "path": {
+            "$ref": "#/$defs/safePath"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "sha256": {
+            "$ref": "#/$defs/sha256"
+          },
+          "provenance": {
+            "$ref": "#/$defs/provenance"
+          }
+        }
+      }
+    },
+    "output_contracts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "contract", "contract_digest", "primary"],
+        "properties": {
+          "path": {
+            "$ref": "#/$defs/safePath"
+          },
+          "contract": {
+            "enum": [
+              "ultrafuzz/admin-config-boundary-matrix@1",
+              "ultrafuzz/aggregation-manifest@1",
+              "ultrafuzz/audited-differential-lanes@1",
+              "ultrafuzz/boundary-recipes@1",
+              "ultrafuzz/campaign-summary@2",
+              "ultrafuzz/coverage-goal@1",
+              "ultrafuzz/dependency-scope-matrix@1",
+              "ultrafuzz/differential-gap-review@1",
+              "ultrafuzz/differential-lane-result@1",
+              "ultrafuzz/differential-plan@1",
+              "ultrafuzz/differential-red-triage@1",
+              "ultrafuzz/differential-repair-summary@1",
+              "ultrafuzz/differential-report-review@1",
+              "ultrafuzz/dynamic-enumerator-outputs@1",
+              "ultrafuzz/dynamic-strategy-plan@1",
+              "ultrafuzz/dynamic-strategy-provenance@1",
+              "ultrafuzz/externalized-state-accounting@1",
+              "ultrafuzz/finding-lifecycle-ledger@1",
+              "ultrafuzz/findings@2",
+              "ultrafuzz/generated-tests@3",
+              "ultrafuzz/harness-repairs@1",
+              "ultrafuzz/implemented-properties@3",
+              "ultrafuzz/invariant-campaign-plan@2",
+              "ultrafuzz/invariant-ledger@1",
+              "ultrafuzz/nonempty-markdown@1",
+              "ultrafuzz/properties@2",
+              "ultrafuzz/property-campaign@3",
+              "ultrafuzz/property-lens@2",
+              "ultrafuzz/reference-expectations@2",
+              "ultrafuzz/reference-harness@1",
+              "ultrafuzz/reference-manifest@1",
+              "ultrafuzz/report@2",
+              "ultrafuzz/selected-strategies@1",
+              "ultrafuzz/semantic-red-registry@1",
+              "ultrafuzz/severity-classified-findings@1",
+              "ultrafuzz/strategy-detections@1",
+              "ultrafuzz/text@1",
+              "ultrafuzz/triaged-findings@1",
+              "ultrafuzz/workspace-patch@1"
+            ]
+          },
+          "contract_digest": {
+            "$ref": "#/$defs/sha256"
+          },
+          "schema_file": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*\\.schema\\.json$"
+          },
+          "schema_id": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^urn:ultrafuzz:schema:"
+          },
+          "schema_sha256": {
+            "$ref": "#/$defs/sha256"
+          },
+          "schema_bundle_sha256": {
+            "$ref": "#/$defs/sha256"
+          },
+          "validator_build": {
+            "type": "string",
+            "pattern": "^ultrafuzz-json-validator\\.v1:[0-9a-f]{64}$"
+          },
+          "primary": {
+            "type": "boolean"
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "contract": {
+                  "enum": ["ultrafuzz/nonempty-markdown@1", "ultrafuzz/text@1"]
+                }
+              },
+              "required": ["contract"]
+            },
+            "then": {
+              "not": {
+                "anyOf": [
+                  { "properties": { "schema_file": true }, "required": ["schema_file"] },
+                  { "properties": { "schema_id": true }, "required": ["schema_id"] },
+                  { "properties": { "schema_sha256": true }, "required": ["schema_sha256"] },
+                  {
+                    "properties": { "schema_bundle_sha256": true },
+                    "required": ["schema_bundle_sha256"]
+                  },
+                  { "properties": { "validator_build": true }, "required": ["validator_build"] }
+                ]
+              }
+            },
+            "else": {
+              "properties": {
+                "schema_file": true,
+                "schema_id": true,
+                "schema_sha256": true,
+                "schema_bundle_sha256": true,
+                "validator_build": true
+              },
+              "required": ["schema_file", "schema_id", "schema_sha256", "schema_bundle_sha256", "validator_build"]
+            }
+          }
+        ]
+      }
+    },
+    "prerequisite_manifests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["node_id", "sha256"],
+        "properties": {
+          "node_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+          },
+          "sha256": {
+            "$ref": "#/$defs/sha256"
+          }
+        }
+      }
+    },
+    "provenance": {
+      "$ref": "#/$defs/provenance"
+    }
+  },
+  "$defs": {
+    "safePath": {
+      "type": "string",
+      "pattern": "^(?!\\.{1,2}(?:\\/|$))[A-Za-z0-9._@+-]{1,128}(?:\\/(?!\\.{1,2}(?:\\/|$))[A-Za-z0-9._@+-]{1,128})*$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["producer_node_id"],
+      "properties": {
+        "producer_node_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "logical_node_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "attempt_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "loop_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "model_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "model_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "agent_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "workflow_run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "workflow_task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "origin": {
+          "type": "string",
+          "minLength": 1
+        },
+        "metadata": {
+          "$ref": "#/$defs/provenanceMetadata"
+        }
+      }
+    },
+    "provenanceMetadata": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/referenceProvenanceMetadata"
+        },
+        {
+          "$ref": "#/$defs/smithersTaskProvenanceMetadata"
+        }
+      ]
+    },
+    "referenceProvenanceMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reference", "reference_artifact", "manifest_artifact"],
+      "dependentRequired": {
+        "repo": ["commit"],
+        "commit": ["repo"]
+      },
+      "properties": {
+        "reference": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]*$"
+        },
+        "repo": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        },
+        "commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "reference_artifact": {
+          "$ref": "#/$defs/nonNulString"
+        },
+        "manifest_artifact": {
+          "$ref": "#/$defs/nonNulString"
+        },
+        "reference_expectations": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source", "path", "sha256"],
+          "properties": {
+            "source": {
+              "const": "operator-supplied"
+            },
+            "path": {
+              "$ref": "#/$defs/nonNulString"
+            },
+            "sha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        }
+      }
+    },
+    "smithersTaskProvenanceMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["concrete_node_id"],
+      "properties": {
+        "concrete_node_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        }
+      }
+    },
+    "nonNulString": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^[^\\u0000]+$"
+    }
+  }
+}

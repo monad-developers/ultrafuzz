@@ -1,7 +1,7 @@
 import type { ArtifactContractId } from "@ultrafuzz/artifacts";
 
 export const TOPOLOGY_VERSION = 2 as const;
-export const GRAPH_VERSION = "2" as const;
+export const GRAPH_VERSION = "3" as const;
 export const PROJECT_TOPOLOGY_FILE = ".ultrafuzz/topology.yml";
 export const PROJECT_PROMPT_DIR = ".ultrafuzz/prompts";
 export const START_NODE_ID = "__start__";
@@ -127,7 +127,8 @@ export interface ExpandedGraph {
 }
 
 export interface FingerprintInputs {
-  config?: unknown;
+  /** SHA-256 of the redacted, canonical runtime configuration used for expansion. */
+  config?: string;
   promptDigests?: Record<string, string>;
 }
 
@@ -158,6 +159,11 @@ export interface ExpandedNode {
 
 export interface ExpandedArtifactOutput extends NormalizedArtifactOutput {
   contractDigest: string;
+  schemaFile?: string;
+  schemaId?: string;
+  schemaSha256?: string;
+  schemaBundleSha256?: string;
+  validatorBuild?: string;
 }
 
 export interface ReferenceRevision {
@@ -199,5 +205,5 @@ export interface ExpandTopologyOptions extends TopologyValidationOptions {
     version: number;
     references: Record<string, { provider: "github"; repo: string; commit: string; paths: string[] }>;
   };
-  configFingerprint?: unknown;
+  configFingerprint?: string;
 }

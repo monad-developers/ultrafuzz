@@ -1,7 +1,7 @@
 import { Command, Flags } from "@oclif/core";
 import { serveDashboard } from "@ultrafuzz/dashboard";
 
-import { projectRoot } from "../command-shared.js";
+import { cliEntrypoint, projectRoot } from "../command-shared.js";
 
 export default class Dashboard extends Command {
   static override summary = "Serve the local Ultrafuzz dashboard and API";
@@ -33,6 +33,7 @@ export default class Dashboard extends Command {
       port: flags.port,
       runId: flags["run-id"],
       liveUpdates: flags["no-live"] !== true,
+      ultrafuzzCliEntrypoint: cliEntrypoint(),
       env: process.env
     });
     this.log(`Dashboard: ${handle.url}`);

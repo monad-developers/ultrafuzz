@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
-import { artifactContractDefinition } from "@ultrafuzz/artifacts";
+import { artifactContractDefinition, artifactContractSchemaBinding } from "@ultrafuzz/artifacts";
 import { loadReferenceCatalog, type ReferenceCatalog, type ReferenceEntry } from "@ultrafuzz/references";
 
 import { topologyError } from "./errors.js";
@@ -19,6 +19,7 @@ import type {
   ReferenceRevision
 } from "./types.js";
 import { titleFromId } from "./path-utils.js";
+import { assertExpandedGraphSchema } from "./expanded-graph-schema.js";
 
 export function expandTopology(topologyInput: unknown, options: ExpandTopologyOptions = {}): ExpandedGraph {
   const { topology, effectiveLoopCounts } = validateTopology(topologyInput, options);
@@ -37,14 +38,14 @@ export function expandTopology(topologyInput: unknown, options: ExpandTopologyOp
     });
   }
 
-  return {
+  return assertExpandedGraphSchema({
     graphVersion: GRAPH_VERSION,
     ...(options.runId ? { runId: options.runId } : {}),
     topologyVersion: TOPOLOGY_VERSION,
     groups: topology.groups,
     nodes,
     fingerprintInputs: buildFingerprintInputs(topology, options)
-  };
+  });
 }
 
 function expandNode(
@@ -88,10 +89,22 @@ function expandNode(
       mode: node.loop_mode,
       attemptIndex: loopIndex
     },
-    outputs: node.outputs.map((output) => ({
-      ...output,
-      contractDigest: artifactContractDefinition(output.contract).digest
-    })),
+    outputs: node.outputs.map((output) => {
+      const binding = artifactContractSchemaBinding(output.contract);
+      return {
+        ...output,
+        contractDigest: artifactContractDefinition(output.contract).digest,
+        ...(binding === undefined
+          ? {}
+          : {
+              schemaFile: binding.schema_file,
+              schemaId: binding.schema_id,
+              schemaSha256: binding.schema_sha256,
+              schemaBundleSha256: binding.schema_bundle_sha256,
+              validatorBuild: binding.validator_build
+            })
+      };
+    }),
     modelFanout: modelFanoutFor(node, topology, loopIndex, options)
   };
 }

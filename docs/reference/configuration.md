@@ -12,7 +12,7 @@ Topology, prompts, references, runs, workspaces, and cache state live under
 ## Common Shape
 
 ```toml
-schema_version = "1.0"
+schema_version = "ultrafuzz.config.v2"
 audit_profile = "balanced"
 dynamic_strategies_enumerator = 3
 
@@ -68,11 +68,18 @@ panel_size = 4
 Unknown TOML keys fail validation. Strategy execution behavior belongs in
 `.ultrafuzz/topology.yml`, not in TOML.
 
+`schema_version` is an exact, intentionally breaking contract literal. Only
+`ultrafuzz.config.v2` is accepted; Ultrafuzz does not alias, normalize, convert,
+or repair older spellings such as `1.0`. The resolved camelCase JSON document is
+closed by `packages/config/schema/resolved-config.schema.json`. Its registered
+schema ID, per-schema SHA-256, and config-schema bundle digest identify the exact
+contract used by the CLI and runtime.
+
 ## Top-Level Keys
 
 | Key                             | Meaning                                                                    |
 | ------------------------------- | -------------------------------------------------------------------------- |
-| `schema_version`                | Config schema version string.                                              |
+| `schema_version`                | Exact config contract literal: `ultrafuzz.config.v2`.                      |
 | `audit_profile`                 | Named effort/topology preset. Defaults to `balanced`.                      |
 | `topology_path`                 | Optional project-local topology override that replaces a profile topology. |
 | `strategy_loops`                | Optional positive strategy-loop override.                                  |
@@ -278,9 +285,16 @@ Boolean values accept `1`, `true`, `yes`, `on`, `0`, `false`, `no`, and `off`.
 3. Supported environment overrides.
 4. Runtime overrides from the CLI.
 
-The resolved config is persisted for each run as
-`config.resolved.toml`. Sensitive-looking model values are redacted before
-persistence, with restore metadata written to `config.redactions.json`.
+The redacted operator-facing resolved config is persisted for each run as
+`config.resolved.toml`, with restore metadata in `config.redactions.json`. The
+unredacted workflow control contract is serialized once as camelCase JSON,
+validated against `urn:ultrafuzz:schema:config:resolved-config:2`, and published
+byte-for-byte as `smithers/resolved-config.json` before it is sealed into the
+execution snapshot. Sealed readers run the same strict parser and schema; they
+do not use historical fallbacks. That JSON document carries the audit-profile
+resolution — catalog schema version, catalog digest, declared topology path,
+profile settings, effective settings, per-setting origins, and overridden
+settings — as typed fields of the same closed contract.
 
 ## Rejected Config Surfaces
 

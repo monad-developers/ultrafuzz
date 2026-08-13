@@ -4,6 +4,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import { writeRunMetadataDocument, type RunAccountingSummary, type RunMetadataDocument } from "@ultrafuzz/artifacts";
 import { describe, expect, it, vi } from "vitest";
 
 import { OPERATIONAL_DISPOSITION_CATEGORIES, OperationalDispositionError } from "../src/terminal-disposition.js";
@@ -16,6 +17,7 @@ import {
   WorkerResultWriter,
   type WorkerResultContract
 } from "../src/worker-result.js";
+import { currentRunState } from "./current-artifact-fixtures.js";
 
 const TERMINAL_CATEGORIES = [
   "finished",
@@ -26,7 +28,7 @@ const TERMINAL_CATEGORIES = [
   "genuine-evaluation-failure"
 ] as const;
 
-describe("sanitized worker result contracts", () => {
+describe("strict worker result contracts", () => {
   it("persists only the allowlisted public diagnostics failure code in both terminal files", async () => {
     const harness = await terminalHarness();
     const privateCause = new Error("private schema detail");
@@ -61,16 +63,16 @@ describe("sanitized worker result contracts", () => {
     // just watched its eval command return, and named the fault in the same
     // contract. Naming a fault is proof the sandbox did not take the worker
     // with it, so the exit category may not claim it did (#320).
-    for (const [failure, expected] of [
-      [new Error("diagnostics could not be built"), "unreachable"],
-      [new OperationalDispositionError("capacity-unavailable"), "capacity-unavailable"],
-      [new OperationalDispositionError("sandbox-exited"), "unreachable"]
+    for (const [failure, diagnosticCode, expected] of [
+      [new Error("diagnostics could not be built"), "public-eval-diagnostics-invalid", "unreachable"],
+      [new OperationalDispositionError("capacity-unavailable"), "capacity-unavailable", "capacity-unavailable"],
+      [new OperationalDispositionError("sandbox-exited"), "public-eval-diagnostics-invalid", "unreachable"]
     ] as const) {
       const harness = await terminalHarness();
       await expect(
         runWithTerminalPersistence({
           ...harness.input,
-          diagnosticCodeForError: () => "public-eval-diagnostics-invalid",
+          diagnosticCodeForError: () => diagnosticCode,
           run: async () => {
             throw failure;
           }
@@ -78,7 +80,7 @@ describe("sanitized worker result contracts", () => {
       ).rejects.toBe(failure);
       expect(readContract(harness.resultPath)).toMatchObject({
         exit_category: expected,
-        diagnostic_code: "public-eval-diagnostics-invalid"
+        diagnostic_code: diagnosticCode
       });
     }
 
@@ -135,7 +137,7 @@ describe("sanitized worker result contracts", () => {
     ]);
   });
 
-  it("serializes only allowlisted aggregate fields with monotonic generations", async () => {
+  it("serializes the exact aggregate contract with monotonic generations", async () => {
     const root = await temporaryRoot();
     let now = 1_250;
     const writer = await WorkerResultWriter.create({
@@ -147,12 +149,7 @@ describe("sanitized worker result contracts", () => {
 
     const partial = await writer.writePartial(emptyWorkerCheckpoint());
     now = 1_500;
-    const terminal = await writer.writeTerminal("finished", {
-      ...emptyWorkerCheckpoint(),
-      counts: { succeeded: 0, failed: 0, remaining: 0, private_detail: "placeholder" },
-      checkpoint: { age_ms: null, digest: null, private_detail: "placeholder" },
-      private_detail: "placeholder"
-    } as never);
+    const terminal = await writer.writeTerminal("finished", emptyWorkerCheckpoint());
     const persistedStatus = readContract(path.join(root, "status.json"));
     const persistedResult = readContract(path.join(root, "result.json"));
 
@@ -182,7 +179,6 @@ describe("sanitized worker result contracts", () => {
     );
     expect(Object.keys(persistedResult.counts).sort()).toEqual(["failed", "remaining", "succeeded"]);
     expect(Object.keys(persistedResult.checkpoint).sort()).toEqual(["age_ms", "digest"]);
-    expect(JSON.stringify(persistedResult)).not.toContain("private_detail");
     expect(fs.statSync(path.join(root, "result.json")).mode & 0o777).toBe(0o600);
     expect(fs.readdirSync(root).filter((name) => name.includes(".tmp-"))).toEqual([]);
 
@@ -195,54 +191,102 @@ describe("sanitized worker result contracts", () => {
     expect((await restarted.writePartial(emptyWorkerCheckpoint())).generation).toBe(3);
   });
 
+  it.each([
+    ["negative counts", { ...emptyWorkerCheckpoint(), counts: { succeeded: -1, failed: 0, remaining: 0 } }],
+    [
+      "unknown checkpoint fields",
+      {
+        ...emptyWorkerCheckpoint(),
+        checkpoint: { age_ms: null, digest: null, private_detail: "must not be stripped" }
+      }
+    ],
+    [
+      "inconsistent accounting",
+      {
+        ...emptyWorkerCheckpoint(),
+        usage: {
+          input_tokens: 1,
+          output_tokens: 1,
+          cache_read_tokens: 0,
+          cache_write_tokens: 0,
+          reasoning_tokens: 0,
+          total_tokens: 9,
+          estimated_cost_usd: null,
+          partial_pricing: false,
+          event_count: 0,
+          priced_event_count: 0,
+          unpriced_event_count: 0
+        }
+      }
+    ]
+  ] as const)("rejects %s instead of repairing the snapshot", async (_label, snapshot) => {
+    const root = await temporaryRoot();
+    const writer = await WorkerResultWriter.create({
+      statusPath: path.join(root, "status.json"),
+      resultPath: path.join(root, "result.json")
+    });
+
+    await expect(writer.writePartial(snapshot as never)).rejects.toThrow(/failed|invalid/u);
+    expect(fs.existsSync(path.join(root, "status.json"))).toBe(false);
+  });
+
+  it("rejects invalid execution context instead of substituting generation one", async () => {
+    const root = await temporaryRoot();
+    const writer = await WorkerResultWriter.create({
+      statusPath: path.join(root, "status.json"),
+      resultPath: path.join(root, "result.json"),
+      executionContext: () => ({ launch_generation: 0, attempt: 0, model_work_started: false })
+    });
+
+    await expect(writer.writePartial(emptyWorkerCheckpoint())).rejects.toThrow(/failed|invalid/u);
+    expect(fs.existsSync(path.join(root, "status.json"))).toBe(false);
+  });
+
+  it("rejects malformed persisted worker results instead of resetting their generation", async () => {
+    const root = await temporaryRoot();
+    const statusPath = path.join(root, "status.json");
+    fs.writeFileSync(statusPath, '{"schema_version":"ultrafuzz.modal.worker-result.v2",');
+
+    await expect(WorkerResultWriter.create({ statusPath, resultPath: path.join(root, "result.json") })).rejects.toThrow(
+      /strict JSON|JSON document/u
+    );
+    expect(fs.readFileSync(statusPath, "utf8")).toContain("schema_version");
+  });
+
+  it("rejects duplicate keys in persisted worker results instead of resetting their generation", async () => {
+    const root = await temporaryRoot();
+    const statusPath = path.join(root, "status.json");
+    const resultPath = path.join(root, "result.json");
+    const writer = await WorkerResultWriter.create({ statusPath, resultPath });
+    await writer.writePartial(emptyWorkerCheckpoint());
+    const serialized = fs.readFileSync(statusPath, "utf8");
+    const field = '"generation": 1';
+    const duplicate = serialized.replace(field, `${field},\n  "generation": 99`);
+    expect(duplicate).not.toBe(serialized);
+    fs.writeFileSync(statusPath, duplicate, { mode: 0o600 });
+
+    await expect(WorkerResultWriter.create({ statusPath, resultPath })).rejects.toThrow(/duplicate|strict JSON/u);
+  });
+
   it("derives checkpoint counts, age, digest, aggregate usage, and pricing provenance", async () => {
     const root = await temporaryRoot();
     const runRoot = path.join(root, ".ultrafuzz", "runs", "run-one");
     fs.mkdirSync(runRoot, { recursive: true });
-    const state = {
-      nodes: {
+    const state = currentRunState(
+      {
         first: taskNode("succeeded"),
         second: taskNode("failed"),
         third: taskNode("running"),
-        setup: { status: "succeeded", private_detail: "placeholder" }
+        setup: { status: "succeeded" }
       },
-      private_detail: "placeholder"
-    };
+      { status: "running" }
+    );
     const stateContents = `${JSON.stringify(state)}\n`;
     const statePath = path.join(runRoot, "state.json");
     fs.writeFileSync(statePath, stateContents, { mode: 0o600 });
     const checkpointTime = new Date("2026-01-01T00:00:00.000Z");
     fs.utimesSync(statePath, checkpointTime, checkpointTime);
-    fs.writeFileSync(
-      path.join(runRoot, "run.json"),
-      JSON.stringify({
-        accounting: {
-          current: { total_tokens: 1 },
-          cumulative: {
-            input_tokens: 11,
-            output_tokens: 7,
-            cache_read_tokens: 3,
-            cache_write_tokens: 2,
-            reasoning_tokens: 5,
-            total_tokens: 28,
-            estimated_spend_usd: 0.125,
-            partial_pricing: true,
-            event_count: 4,
-            priced_event_count: 3,
-            unpriced_event_count: 1,
-            private_detail: "placeholder"
-          },
-          pricing_catalog: {
-            source: "configured-catalog",
-            status: "available",
-            fetched_at: "2026-01-01T00:00:01.000Z",
-            resolved_models: ["placeholder-one"],
-            unresolved_models: ["placeholder-two", "placeholder-three"],
-            model_prices: { placeholder: { private_detail: "placeholder" } }
-          }
-        }
-      })
-    );
+    writeRunMetadataDocument(path.join(runRoot, "run.json"), currentRunMetadata());
 
     const snapshot = await readWorkerCheckpoint(root, checkpointTime.getTime() + 5_000);
 
@@ -267,34 +311,13 @@ describe("sanitized worker result contracts", () => {
       },
       pricing: {
         source: "configured-catalog",
-        status: "available",
+        status: "unavailable",
         fetched_at: "2026-01-01T00:00:01.000Z",
         resolved_model_count: 1,
         unresolved_model_count: 2
       }
     });
-    expect(JSON.stringify(snapshot)).not.toContain("private_detail");
     expect(JSON.stringify(snapshot)).not.toContain("placeholder-one");
-  });
-
-  it("counts loop-expanded concrete attempts as one logical checkpoint row", async () => {
-    const root = await temporaryRoot();
-    const runRoot = path.join(root, ".ultrafuzz", "runs", "run-one");
-    fs.mkdirSync(runRoot, { recursive: true });
-    fs.writeFileSync(
-      path.join(runRoot, "state.json"),
-      `${JSON.stringify({
-        nodes: {
-          "strategy-0": { ...taskNode("succeeded"), logical_id: "strategy" },
-          "strategy-1": { ...taskNode("succeeded"), logical_id: "strategy" },
-          "strategy-2": { ...taskNode("running"), logical_id: "strategy" },
-          setup: taskNode("succeeded"),
-          review: taskNode("failed")
-        }
-      })}\n`
-    );
-
-    expect((await readWorkerCheckpoint(root)).counts).toEqual({ succeeded: 1, failed: 1, remaining: 1 });
   });
 
   it("counts durable state logical_node_id rows once across loop attempts", async () => {
@@ -303,15 +326,18 @@ describe("sanitized worker result contracts", () => {
     fs.mkdirSync(runRoot, { recursive: true });
     fs.writeFileSync(
       path.join(runRoot, "state.json"),
-      `${JSON.stringify({
-        nodes: {
-          "strategy-0": { ...taskNode("succeeded"), logical_node_id: "strategy", node_id: "strategy-0" },
-          "strategy-1": { ...taskNode("succeeded"), logical_node_id: "strategy", node_id: "strategy-1" },
-          "strategy-2": { ...taskNode("running"), logical_node_id: "strategy", node_id: "strategy-2" },
-          setup: { ...taskNode("succeeded"), logical_node_id: "setup", node_id: "setup" },
-          review: { ...taskNode("failed"), logical_node_id: "review", node_id: "review" }
-        }
-      })}\n`
+      `${JSON.stringify(
+        currentRunState(
+          {
+            "strategy-0": { ...taskNode("succeeded"), logical_node_id: "strategy", node_id: "strategy-0" },
+            "strategy-1": { ...taskNode("succeeded"), logical_node_id: "strategy", node_id: "strategy-1" },
+            "strategy-2": { ...taskNode("running"), logical_node_id: "strategy", node_id: "strategy-2" },
+            setup: { ...taskNode("succeeded"), logical_node_id: "setup", node_id: "setup" },
+            review: { ...taskNode("failed"), logical_node_id: "review", node_id: "review" }
+          },
+          { status: "running" }
+        )
+      )}\n`
     );
 
     expect((await readWorkerCheckpoint(root)).counts).toEqual({ succeeded: 1, failed: 1, remaining: 1 });
@@ -327,6 +353,49 @@ describe("sanitized worker result contracts", () => {
     } finally {
       fs.chmodSync(runsRoot, 0o700);
     }
+  });
+
+  it("rejects malformed present state instead of falling back to an older run", async () => {
+    const root = await temporaryRoot();
+    const oldRunRoot = path.join(root, ".ultrafuzz", "runs", "run-a-old");
+    const newRunRoot = path.join(root, ".ultrafuzz", "runs", "run-z-new");
+    fs.mkdirSync(oldRunRoot, { recursive: true });
+    fs.mkdirSync(newRunRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(oldRunRoot, "state.json"),
+      `${JSON.stringify(currentRunState({ old: taskNode("succeeded") }))}\n`
+    );
+    fs.writeFileSync(path.join(newRunRoot, "state.json"), '{"schema_version":"ultrafuzz.run-state.v5",');
+
+    await expect(readWorkerCheckpoint(root)).rejects.toThrow(/JSON|Unterminated|Unexpected|object-property/u);
+  });
+
+  it("rejects malformed present run metadata instead of reporting absent usage", async () => {
+    const root = await temporaryRoot();
+    const runRoot = path.join(root, ".ultrafuzz", "runs", "run-one");
+    fs.mkdirSync(runRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(runRoot, "state.json"),
+      `${JSON.stringify(currentRunState({ current: taskNode("succeeded") }))}\n`
+    );
+    fs.writeFileSync(path.join(runRoot, "run.json"), '{"schema_version":"ultrafuzz.run-metadata.v2"}');
+
+    await expect(readWorkerCheckpoint(root)).rejects.toThrow(/run metadata|schema-invalid/u);
+  });
+
+  it("treats only absent run metadata as unavailable usage", async () => {
+    const root = await temporaryRoot();
+    const runRoot = path.join(root, ".ultrafuzz", "runs", "run-one");
+    fs.mkdirSync(runRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(runRoot, "state.json"),
+      `${JSON.stringify(currentRunState({ current: taskNode("succeeded") }))}\n`
+    );
+
+    await expect(readWorkerCheckpoint(root)).resolves.toMatchObject({
+      counts: { succeeded: 1, failed: 0, remaining: 0 },
+      usage: null
+    });
   });
 
   it.each([
@@ -450,7 +519,109 @@ describe("sanitized worker result contracts", () => {
 });
 
 function taskNode(status: string): Record<string, unknown> {
-  return { status, provenance: { workflow: { task_id: "node:placeholder" } } };
+  return { status };
+}
+
+function currentRunMetadata(): RunMetadataDocument {
+  const summary = currentAccountingSummary();
+  const segment = {
+    ...summary,
+    control_generation: "b".repeat(64),
+    workflow_run_id: "workflow-current",
+    source_event_sequences: [1],
+    attempts: [{ node_id: "first", iteration: 0, attempt: 0 }]
+  };
+  return {
+    schema_version: "ultrafuzz.run-metadata.v2",
+    run_id: "fixture-run",
+    created_at: "2026-01-01T00:00:00.000Z",
+    mode: "run",
+    workflow_ids: ["workflow-current"],
+    redacted_config_fingerprint: "a".repeat(64),
+    forge_guard: {
+      enabled: true,
+      active: true,
+      virtual_memory_limit_kb: 1_048_576,
+      rayon_threads: 4
+    },
+    workflow: {
+      run_id: "workflow-current",
+      compiled_run_id: "compiled-current",
+      name: "current workflow",
+      path: "workflow.tsx",
+      evidence_path: "evidence.json",
+      expanded_graph_path: "expanded-graph.json",
+      config_path: "config.json",
+      input_path: "input.json",
+      tasks_path: "tasks.json",
+      control_integrity_path: "control-integrity.json",
+      control_generation: "b".repeat(64),
+      workflow_link_id: "123e4567-e89b-42d3-a456-426614174000",
+      execution_snapshot_path: "execution-snapshot.json",
+      task_node_ids: ["first"]
+    },
+    accounting: {
+      schema_version: "ultrafuzz.accounting.v3",
+      source: "usage-ledger",
+      workflow_run_id: "workflow-current",
+      current: structuredClone(segment),
+      segments: [structuredClone(segment)],
+      cumulative: { ...summary, source_run_ids: ["fixture-run"] },
+      checkpoint: {
+        schema_version: "ultrafuzz.accounting-checkpoint.v1",
+        ledger_event_count: 4,
+        last_source_event_sequence: 1,
+        control_generation: "b".repeat(64),
+        workflow_run_id: "workflow-current"
+      },
+      pricing_catalog: {
+        source: "configured-catalog",
+        status: "unavailable",
+        fetched_at: "2026-01-01T00:00:01.000Z",
+        resolved_models: ["placeholder-one"],
+        unresolved_models: ["placeholder-two", "placeholder-three"],
+        model_prices: {
+          "placeholder-one": { inputUsdPerMillion: 1, outputUsdPerMillion: 2 }
+        }
+      },
+      updated_at: "2026-01-01T00:00:01.000Z"
+    }
+  };
+}
+
+function currentAccountingSummary(): RunAccountingSummary {
+  return {
+    uncached_input_tokens: 8,
+    input_tokens: 11,
+    output_tokens: 7,
+    cache_read_tokens: 3,
+    cache_write_tokens: 2,
+    reasoning_tokens: 5,
+    inclusive_token_total: 28,
+    billable_token_total: 22,
+    total_tokens: 28,
+    tokens_used: "28",
+    estimated_spend: "$0.125",
+    estimated_spend_usd: 0.125,
+    component_costs_usd: {
+      uncached_input: 0.025,
+      cache_read: 0.025,
+      cache_write: 0.025,
+      output: 0.025,
+      reasoning: 0.025
+    },
+    usage_complete: true,
+    usage_incomplete_reasons: [],
+    pricing_complete: false,
+    pricing_incomplete_reasons: [{ code: "model-pricing-unavailable", model: "placeholder-two" }],
+    partial_pricing: true,
+    cache_read_pricing_estimated: false,
+    event_count: 4,
+    priced_event_count: 3,
+    unpriced_event_count: 1,
+    models: ["placeholder-one", "placeholder-two", "placeholder-three"],
+    agents: ["agent-current"]
+  };
 }
 
 async function temporaryRoot(): Promise<string> {

@@ -1,12 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/invariant-evidence-ledger",
+  "$id": "urn:ultrafuzz:schema:artifacts:invariant-evidence-ledger:1",
   "title": "Ultrafuzz invariant evidence ledger",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "entries", "inventory_rows", "scan_probes"],
   "properties": {
-    "schema_version": { "const": "ultrafuzz.invariant-evidence-ledger.v1" },
+    "schema_version": {
+      "const": "ultrafuzz.invariant-evidence-ledger.v1"
+    },
     "entries": {
       "type": "array",
       "items": {
@@ -14,9 +16,19 @@
         "additionalProperties": false,
         "required": ["id", "source_path", "source_location", "kind", "verbatim", "inventory_ids"],
         "properties": {
-          "id": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
-          "source_path": { "type": "string", "minLength": 1 },
-          "source_location": { "type": "string", "minLength": 1 },
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+          },
+          "source_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source_location": {
+            "type": "string",
+            "minLength": 1
+          },
           "kind": {
             "enum": [
               "invariant",
@@ -33,13 +45,17 @@
           "verbatim": {
             "type": "string",
             "minLength": 1,
-            "description": "Exact source slice after line-ending, terminal-line-separator, and presentation-prefix normalization; preserve all other characters, including repeated backslashes."
+            "description": "Exact source slice after line-ending and terminal-line-separator normalization; preserve all other characters, including Markdown presentation prefixes and repeated backslashes."
           },
           "inventory_ids": {
             "type": "array",
             "minItems": 1,
             "uniqueItems": true,
-            "items": { "type": "string", "minLength": 1, "pattern": "^inventory-[A-Za-z0-9._-]+$" }
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^inventory-[A-Za-z0-9._-]+$"
+            }
           }
         }
       }
@@ -51,13 +67,24 @@
         "additionalProperties": false,
         "required": ["id", "description", "ledger_ids"],
         "properties": {
-          "id": { "type": "string", "minLength": 1, "pattern": "^inventory-[A-Za-z0-9._-]+$" },
-          "description": { "type": "string", "minLength": 1 },
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^inventory-[A-Za-z0-9._-]+$"
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1
+          },
           "ledger_ids": {
             "type": "array",
             "minItems": 1,
             "uniqueItems": true,
-            "items": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" }
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+            }
           }
         }
       }
@@ -74,29 +101,72 @@
         "additionalProperties": false,
         "required": ["id", "source_path", "query", "result"],
         "properties": {
-          "id": { "type": "string", "minLength": 1, "pattern": "^probe-[A-Za-z0-9._-]+$" },
-          "source_path": { "type": "string", "minLength": 1 },
-          "query": { "type": "string", "minLength": 1 },
-          "result": { "type": "string", "minLength": 1 }
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^probe-[A-Za-z0-9._-]+$"
+          },
+          "source_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "query": {
+            "type": "string",
+            "minLength": 1
+          },
+          "result": {
+            "type": "string",
+            "minLength": 1
+          }
         }
       }
     }
   },
   "allOf": [
     {
-      "if": { "properties": { "entries": { "minItems": 1 } } },
+      "if": {
+        "properties": {
+          "entries": {
+            "type": "array",
+            "minItems": 1
+          }
+        }
+      },
       "then": {
-        "not": { "required": ["no_invariants_justification"] },
-        "properties": { "inventory_rows": { "minItems": 1 } }
+        "not": {
+          "required": ["no_invariants_justification"],
+          "properties": {
+            "no_invariants_justification": {}
+          }
+        },
+        "properties": {
+          "inventory_rows": {
+            "type": "array",
+            "minItems": 1
+          }
+        }
       }
     },
     {
-      "if": { "properties": { "entries": { "maxItems": 0 } } },
+      "if": {
+        "properties": {
+          "entries": {
+            "type": "array",
+            "maxItems": 0
+          }
+        }
+      },
       "then": {
         "required": ["no_invariants_justification"],
         "properties": {
-          "inventory_rows": { "maxItems": 0 },
-          "scan_probes": { "minItems": 1 }
+          "inventory_rows": {
+            "type": "array",
+            "maxItems": 0
+          },
+          "scan_probes": {
+            "type": "array",
+            "minItems": 1
+          }
         }
       }
     }

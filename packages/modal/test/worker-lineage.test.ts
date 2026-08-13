@@ -4,14 +4,17 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { MODAL_WORKER_LINEAGE_SCHEMA_VERSION } from "../src/defaults.js";
+import { fingerprintModalModel } from "../src/config.js";
+import { DEFAULT_BENCHMARK_MODELS, MODAL_WORKER_LINEAGE_SCHEMA_VERSION } from "../src/defaults.js";
 import type { ModalWorkerLineage } from "../src/launch-state.js";
 import {
   CheckpointIncompatibleError,
   ensurePersistentWorkerLineage,
-  guardCurrentPersistentWorkerLineage
+  guardCurrentPersistentWorkerLineage,
+  modelForModalWorkerLineage,
+  readModalWorkerLineage
 } from "../src/worker-lineage.js";
-import { WorkerResultWriter, emptyWorkerCheckpoint, runWithTerminalPersistence } from "../src/worker-result.js";
+import { emptyWorkerCheckpoint, runWithTerminalPersistence, WorkerResultWriter } from "../src/worker-result.js";
 
 const roots: string[] = [];
 
@@ -20,10 +23,34 @@ afterEach(() => {
 });
 
 describe("persistent Modal worker lineage", () => {
+  it("derives the worker model only from the exact configured lineage fingerprint", () => {
+    const model = DEFAULT_BENCHMARK_MODELS[0]!;
+    const current = { ...lineage(), model_fingerprint: fingerprintModalModel(model) };
+
+    expect(modelForModalWorkerLineage({ models: [model] }, current)).toBe(model);
+    expect(() => modelForModalWorkerLineage({ models: [model] }, lineage())).toThrow(
+      /does not identify exactly one configured model/u
+    );
+  });
+
+  it("rejects duplicate keys in persisted lineage without replacing ownership evidence", async () => {
+    const fixture = lineageFixture();
+    const current = lineage();
+    const serialized = JSON.stringify(current);
+    const field = `"logical_run_id":"${current.logical_run_id}"`;
+    const duplicate = serialized.replace(field, `${field},"logical_run_id":"shadow-run"`);
+    expect(duplicate).not.toBe(serialized);
+    fs.writeFileSync(fixture.lineagePath, duplicate, { mode: 0o600 });
+
+    await expect(ensure(fixture, current)).rejects.toThrow(/persisted lineage record is invalid/u);
+    expect(fs.readFileSync(fixture.lineagePath, "utf8")).toBe(duplicate);
+  });
+
   it("preserves a matching public workspace and rejects a recreated same-numbered attempt", async () => {
     const fixture = lineageFixture();
     const first = lineage();
     await ensure(fixture, first);
+    expect(readModalWorkerLineage(fixture.lineagePath)).toEqual(first);
     fs.mkdirSync(fixture.workspace, { recursive: true });
     fs.writeFileSync(fixture.bundle, "validated bundle\n");
 
@@ -41,8 +68,8 @@ describe("persistent Modal worker lineage", () => {
     const first = lineage();
     await ensure(fixture, first);
     fs.writeFileSync(fixture.bundle, "validated bundle\n");
-    fs.writeFileSync(fixture.statusPath, "old status\n");
-    fs.writeFileSync(fixture.resultPath, "old result\n");
+    const firstWriter = await writerFor(fixture, first);
+    await firstWriter.writeTerminal("unreachable", emptyWorkerCheckpoint());
     const second = { ...first, attempt: 2, attempt_id: "attempt-2" };
 
     await ensure(fixture, second);
@@ -55,6 +82,57 @@ describe("persistent Modal worker lineage", () => {
     expect(fs.existsSync(fixture.statusPath)).toBe(false);
     expect(fs.existsSync(fixture.resultPath)).toBe(false);
     await expect(ensure(fixture, first)).rejects.toThrow(/newer than the requested attempt/u);
+  });
+
+  it("clears only attempt results while preserving durable evidence for a same-generation retry", async () => {
+    const fixture = lineageFixture();
+    const first = lineage();
+    await ensure(fixture, first);
+    fs.mkdirSync(fixture.workspace, { recursive: true });
+    fs.writeFileSync(path.join(fixture.workspace, "progress"), "preserved workspace\n");
+    fs.writeFileSync(fixture.bundle, "preserved bundle\n");
+    fs.writeFileSync(fixture.sourceProof, "preserved source proof\n");
+
+    const firstWriter = await WorkerResultWriter.create({
+      statusPath: fixture.statusPath,
+      resultPath: fixture.resultPath,
+      executionContext: () => ({
+        launch_generation: first.generation,
+        attempt: first.attempt,
+        model_work_started: false
+      })
+    });
+    const firstResult = await firstWriter.writeTerminal("unreachable", emptyWorkerCheckpoint());
+    const second = { ...first, attempt: 2, attempt_id: "attempt-2" };
+
+    // Production constructs the writer before lineage cleanup so its generation
+    // remains monotonic even though the old attempt documents are removed.
+    const secondWriter = await WorkerResultWriter.create({
+      statusPath: fixture.statusPath,
+      resultPath: fixture.resultPath,
+      executionContext: () => ({
+        launch_generation: second.generation,
+        attempt: second.attempt,
+        model_work_started: false
+      })
+    });
+    await ensure(fixture, second);
+
+    expect(fs.existsSync(fixture.statusPath)).toBe(false);
+    expect(fs.existsSync(fixture.resultPath)).toBe(false);
+    expect(fs.readFileSync(path.join(fixture.workspace, "progress"), "utf8")).toBe("preserved workspace\n");
+    expect(fs.readFileSync(fixture.bundle, "utf8")).toBe("preserved bundle\n");
+    expect(fs.readFileSync(fixture.sourceProof, "utf8")).toBe("preserved source proof\n");
+
+    const secondStatus = await secondWriter.writePartial(emptyWorkerCheckpoint());
+    expect(secondStatus).toMatchObject({
+      result_type: "partial",
+      generation: firstResult.generation + 1,
+      launch_generation: 1,
+      attempt: 2
+    });
+    expect(JSON.parse(fs.readFileSync(fixture.statusPath, "utf8"))).toEqual(secondStatus);
+    expect(fs.existsSync(fixture.resultPath)).toBe(false);
   });
 
   it("preserves the writer generation read before a same-generation attempt handoff", async () => {
@@ -270,9 +348,10 @@ function lineageFixture(): {
   root: string;
   workspace: string;
   bundle: string;
-  lineagePath: string;
+  sourceProof: string;
   statusPath: string;
   resultPath: string;
+  lineagePath: string;
   generationFloorPath: string;
 } {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-worker-lineage-"));
@@ -281,9 +360,10 @@ function lineageFixture(): {
     root,
     workspace: path.join(root, "public-workspace"),
     bundle: path.join(root, "public-results.json"),
-    lineagePath: path.join(root, "lineage.json"),
+    sourceProof: path.join(root, "source-proof.json"),
     statusPath: path.join(root, "status.json"),
     resultPath: path.join(root, "result.json"),
+    lineagePath: path.join(root, "lineage.json"),
     generationFloorPath: path.join(root, "result-generation-floor.json")
   };
 }
@@ -305,8 +385,8 @@ async function ensure(fixture: ReturnType<typeof lineageFixture>, value: ModalWo
   await ensurePersistentWorkerLineage({
     lineagePath: fixture.lineagePath,
     lineage: value,
-    workspaceEvidencePaths: [fixture.workspace, fixture.bundle],
-    freshCleanupPaths: [fixture.workspace, fixture.bundle, fixture.statusPath, fixture.resultPath],
+    workspaceEvidencePaths: [fixture.workspace, fixture.bundle, fixture.sourceProof],
+    freshCleanupPaths: [fixture.workspace, fixture.bundle, fixture.sourceProof, fixture.statusPath, fixture.resultPath],
     attemptCleanupPaths: [fixture.statusPath, fixture.resultPath],
     resultGenerationFloorPath: fixture.generationFloorPath,
     resultGenerationFloor: 0

@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:modal:worker-lineage:1",
+  "title": "Ultrafuzz Modal worker lineage",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "logical_run_id",
+    "generation",
+    "attempt",
+    "attempt_id",
+    "workspace_mode",
+    "fingerprints",
+    "model_fingerprint"
+  ],
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.modal.worker-lineage.v1" },
+    "logical_run_id": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/safeId" },
+    "generation": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/positiveInteger" },
+    "attempt": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/positiveInteger" },
+    "attempt_id": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/safeId" },
+    "workspace_mode": { "enum": ["resume", "fresh"] },
+    "fingerprints": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/lineageFingerprints" },
+    "model_fingerprint": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/sha256" }
+  }
+}

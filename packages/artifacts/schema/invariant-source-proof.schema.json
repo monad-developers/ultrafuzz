@@ -1,16 +1,30 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/invariant-source-proof",
+  "$id": "urn:ultrafuzz:schema:artifacts:invariant-source-proof:1",
   "title": "Ultrafuzz invariant source proof",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "attempt_id", "commit", "tree", "ledger_sha256", "files"],
   "properties": {
-    "schema_version": { "const": "ultrafuzz.invariant-source-proof.v1" },
-    "attempt_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
-    "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
-    "tree": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
-    "ledger_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "schema_version": {
+      "const": "ultrafuzz.invariant-source-proof.v1"
+    },
+    "attempt_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "tree": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "ledger_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
     "files": {
       "type": "array",
       "items": {
@@ -23,13 +37,31 @@
             "minLength": 1,
             "pattern": "^[^\\\\\\u0000]+$",
             "allOf": [
-              { "not": { "pattern": "^/" } },
-              { "not": { "pattern": "^[A-Za-z]:" } },
-              { "not": { "pattern": "(^|/)\\.\\.(?:/|$)" } }
+              {
+                "not": {
+                  "pattern": "^/"
+                }
+              },
+              {
+                "not": {
+                  "pattern": "^[A-Za-z]:"
+                }
+              },
+              {
+                "not": {
+                  "pattern": "(^|/)\\.\\.(?:/|$)"
+                }
+              }
             ]
           },
-          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-          "content": { "type": "string", "pattern": "^[^\\u0000]*$" }
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "content": {
+            "type": "string",
+            "pattern": "^[^\\u0000]*$"
+          }
         }
       }
     }

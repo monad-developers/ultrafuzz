@@ -64,6 +64,77 @@ names/hashes, while payloads stay on disk unless the suite explicitly opts
 into `mode: upload`. Before an allowlisted payload is sent, its manifest and
 path containment, regular-file status, size, and SHA-256 digest are checked.
 
+### Suite contract and workflow input
+
+The current suite version is exactly `ultrafuzz.eval.v2`, validated against
+`urn:ultrafuzz:schema:evals:suite:2`. JSON Schema is canonical. The retained
+Zod parser is strict and non-transforming, and a shared acceptance corpus keeps
+it aligned with the JSON Schema. Defaults are applied only after both shape
+validators accept the operator-authored document.
+
+All eval-owned objects are closed. In particular, model profiles contain only
+`agent`, optional `model`, optional `reasoning`, and optional
+`timeout_seconds`; variants contain only `id`, optional `topology`, optional
+`workflow_input`, and optional runner/judge profile overrides; `metrics`
+contains only `recall_threshold`. Historical no-op fields such as model
+`config`, variant `prompts` or `model_profiles`, root `prompt_overlays`, and
+`metrics.primary`/`metrics.secondary` are rejected. `ground_truth_root` is
+machine-specific TOML/CLI configuration and is not a suite-YAML field.
+
+Ordinary operator-defined `workflow_input` remains an intentional extension
+seam. It must be a JSON object with nonempty, non-whitespace keys; its values
+may be nested JSON objects, arrays, strings, numbers, booleans, or null. It may
+not use the eval-owned reserved keys `benchmark_execution`, `benchmark_lane`,
+`excluded_strategy_families`, `target_frameworks`, or `ultrafuzz_eval`.
+Scalars and arrays at the `workflow_input` root are rejected instead of being
+silently discarded.
+
+Benchmark variants use one of three exact shapes. Private benchmark controls
+contain only the execution budget:
+
+```yaml
+workflow_input:
+  benchmark_execution:
+    strategy_loops: 2
+    excluded_node_ids: [optional-analysis]
+```
+
+The public full lane contains all fields below and permits neither excluded
+families nor excluded nodes:
+
+```yaml
+workflow_input:
+  benchmark_lane: full
+  target_frameworks: { target-a: foundry }
+  excluded_strategy_families: []
+  benchmark_execution:
+    strategy_loops: 1
+    excluded_node_ids: []
+```
+
+The public smoke lane fixes the workflow profile, all three excluded strategy
+families, and all four selected strategies:
+
+```yaml
+workflow_input:
+  benchmark_lane: smoke
+  target_frameworks: { target-a: foundry }
+  excluded_strategy_families: [stateful-invariant, differential, dynamic-strategy]
+  benchmark_execution:
+    workflow_profile: smoke-benchmark-v1
+    selected_strategy_ids:
+      - time-warp-sequences
+      - external-dependency-boundaries
+      - externalized-state-accounting
+      - lifecycle-view-boundaries
+    strategy_loops: 1
+    excluded_node_ids: []
+```
+
+Missing fields, extra fields, duplicate array entries, wrong lane constants,
+reserved operator keys, and historical version literals fail validation. There
+is no alias conversion, compatibility fallback, or repair pass.
+
 ### Held-out benchmark paths
 
 A benchmark that ships a reference solution beside the code under test would
@@ -168,9 +239,14 @@ the workflow runner:
 - `packages/evals/src/node-telemetry.ts` is the pump: a cursor over
   `events.jsonl` + `state.json` + artifact manifests, driven from the eval
   driver's poll loop. The cursor (byte offset + `event_id` dedup ring +
-  uploaded-artifact hashes) is persisted durably after delivery, so the driver
-  can crash and resume without double-publishing, and reporter failures always
-  degrade to warnings.
+  uploaded-artifact hashes) is reloaded and persisted under a per-cursor lease.
+  Delivery is at-least-once: callbacks happen before the durable cursor commit,
+  so a crash or cursor persistence failure can replay a callback. Reporters must
+  make those callbacks idempotent with the stable `idempotencyKey` supplied on
+  every event envelope and artifact upload. Event keys are derived from the eval
+  row plus journal `event_id`; artifact keys are derived from row, node, relative
+  path, and SHA-256. Exhausted provider delivery retries degrade to warnings;
+  cursor lock, validation, and persistence failures stop the drain.
 - `packages/evals/src/reporters/braintrust.ts` maps rows to a three-level span
   tree (row root → topology group → node attempt) with backdated
   `start`/`end` metrics. The reporter speaks the provider's REST API directly
@@ -230,6 +306,13 @@ ultrafuzz eval publish   # post-hoc replay of a recorded run to a provider
 
 The public cohort and lane manifests under `benchmarks/` adapt EVMbench detect
 and the canonical Ultrafuzz benchmark cohort into the same eval-suite types.
+Each cohort family has its own registered whole-document JSON Schema. The lane
+policy is current-only `ultrafuzz.benchmark.lanes.v2`; v1 is not read or
+converted. All three documents are accepted by the canonical JSON Schema
+validator before their retained, non-transforming Zod parsers run. Cohort
+identity joins and the pinned lane policy remain explicit named semantic gates.
+Lane trial counts are required authored fields—omitting
+`trials_per_variant` is invalid and never supplies a default.
 The bounded smoke lane selects the three Foundry, Hardhat, and Vyper
 Ultrafuzz-bench targets and pins GPT-5.6 Luna `high` for bug-finding. It selects
 the CLI-packaged `smoke` audit profile instead of filtering the production
@@ -243,7 +326,7 @@ strategy families. The full lane selects every checked-in EVMBench target, pins
 GPT-5.6 Luna `high`, Claude Sonnet 5 `high`, Kimi K3 `max`, and DeepSeek V4 Pro
 `max`, sets the same
 one strategy loop, and explicitly leaves all three disable flags off so the
-complete topology is included. Both default to one trial per variant and use
+complete topology is included. Both currently declare one trial per variant and use
 GPT-5.6 Sol `xhigh` as an independent judge. Public Modal pairs contain one
 runner variant. Repository variables may override the smoke OpenAI model and
 reasoning level, while full workflow dispatch inputs may override any full-lane

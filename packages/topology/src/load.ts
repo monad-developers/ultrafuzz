@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { parse } from "yaml";
 
@@ -19,8 +19,16 @@ export function resolveTopologyPath(projectRoot: string): string {
 
 export function loadTopology(projectRoot: string, options: LoadTopologyOptions = {}): ProjectTopology {
   const filePath = options.topologyPath ?? resolveTopologyPath(projectRoot);
-  if (!existsSync(filePath)) {
-    throw topologyError("MISSING_TOPOLOGY", `Missing topology at ${filePath}`, { path: filePath });
+  try {
+    lstatSync(filePath);
+  } catch (error) {
+    if (isErrnoException(error, "ENOENT")) {
+      throw topologyError("MISSING_TOPOLOGY", `Missing topology at ${filePath}`, { path: filePath });
+    }
+    throw topologyError("TOPOLOGY_IO", `Failed to inspect topology at ${filePath}`, {
+      path: filePath,
+      reason: error instanceof Error ? error.message : String(error)
+    });
   }
   ensureNoSymlinkComponents(filePath);
   let contents: string;
@@ -47,4 +55,8 @@ export function loadTopology(projectRoot: string, options: LoadTopologyOptions =
     validateTopology(parsed, { ...options, projectRoot });
   }
   return parsed as ProjectTopology;
+}
+
+function isErrnoException(error: unknown, code: string): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === code;
 }

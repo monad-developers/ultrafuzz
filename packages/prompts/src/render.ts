@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parsePromptFrontmatter, PromptError } from "./frontmatter.js";
@@ -16,6 +16,8 @@ export const SUPPORTED_TEMPLATE_VARIABLES = [
   "run_metadata_path",
   "output_findings_path",
   "output_patch_path",
+  "output_stage_findings_path",
+  "output_stage_findings_relative_path",
   "strategy",
   "attempt_index",
   "strategy_loop_index",
@@ -110,7 +112,6 @@ export interface PromptRenderInput {
     metadataPath: string;
   };
   outputs: {
-    findingsPath: string;
     patchPath: string;
   };
   resolvedConfig?: {
@@ -269,7 +270,7 @@ export function renderPrompt(input: PromptRenderInput): PromptRenderResult {
     }
 
     if (occurrence.name === "ancestor_generated_test_manifests") {
-      const contract = "ultrafuzz/generated-tests@1";
+      const contract = "ultrafuzz/generated-tests@3";
       const matched = ancestorArtifactsByContract(contract, graph);
       rendered += renderPathList(matched.paths);
       artifactReferences.push({ kind: "ancestor_artifacts_by_contract", logicalIds: matched.logicalIds, contract });
@@ -280,6 +281,16 @@ export function renderPrompt(input: PromptRenderInput): PromptRenderResult {
     const value = variables[occurrence.name];
     if (value === undefined) {
       throw new PromptError("missing-template-variable", `missing prompt template variable: ${occurrence.name}`);
+    }
+    if (isTopologyDerivedFindingsVariable(occurrence.name) && value === "") {
+      const contractDescription =
+        occurrence.name === "output_findings_path"
+          ? "findings@2"
+          : "findings, triaged-findings, or severity-classified-findings";
+      throw new PromptError(
+        "invalid-artifact-reference",
+        `${occurrence.name} requires exactly one declared ${contractDescription} output`
+      );
     }
     rendered += value;
     consumed = occurrence.end;
@@ -321,8 +332,29 @@ function appendOutputContract(rendered: string, input: PromptRenderInput, curren
   }
 
   const schemaDirectory = taskSchemaDirectory(input);
+  const findingsGuidance = outputs.some((output) => output.contract === "ultrafuzz/findings@2")
+    ? renderOutputContractTemplate("findings.mdx", {})
+    : "";
+  const boundaryRecipesGuidance = outputs.some((output) => output.contract === "ultrafuzz/boundary-recipes@1")
+    ? renderOutputContractTemplate("boundary-recipes.mdx", {})
+    : "";
+  const generatedTestsOutput = outputs.find((output) => output.contract === "ultrafuzz/generated-tests@3");
+  const generatedTestsGuidance =
+    generatedTestsOutput === undefined
+      ? ""
+      : renderOutputContractTemplate("generated-tests.mdx", {
+          strategy_attempt_test_dir: markdownCodeSpan(strategyAttemptTestDirectory(input)),
+          generated_tests_dir: markdownCodeSpan(path.join(input.node.artifactDir, "generated-tests")),
+          generated_tests_manifest_path: markdownCodeSpan(path.join(input.node.artifactDir, generatedTestsOutput.path)),
+          run_id: markdownCodeSpan(input.run.id),
+          logical_node_id: markdownCodeSpan(input.node.logicalId)
+        });
+  const specializedGuidance = [findingsGuidance, boundaryRecipesGuidance, generatedTestsGuidance]
+    .filter((guidance) => guidance !== "")
+    .map((guidance) => guidance.trimEnd())
+    .join("\n\n");
   const schemaGuidance = outputs.some((output) => output.schemaFile !== undefined)
-    ? `Where an entry above names a schema to validate against, that file is a JSON Schema already present in your workspace under \`${schemaDirectory}\`. Read it and check your artifact against it before you finish. It is the authority on field names, types, and which fields are required; prefer it over any example when the two appear to disagree.\n\n`
+    ? `Where an entry above names a schema to validate against, that file is an orchestrator-supplied JSON Schema under ${markdownCodeSpan(schemaDirectory)}. Read it before authoring the artifact. It is the sole authority on JSON versions, field names, types, enums, required or optional members, and empty forms. Prompt prose may add semantic or run-context requirements that JSON Schema cannot express, but it does not redefine the JSON shape.\n\n`
     : "";
   const contract = renderOutputContractTemplate("output-contract.mdx", {
     schema_guidance: schemaGuidance,
@@ -330,23 +362,68 @@ function appendOutputContract(rendered: string, input: PromptRenderInput, curren
       .map((output) => {
         const validEmptyExample = output.validEmptyExample === "" ? "<empty file>" : output.validEmptyExample;
         const empty =
-          validEmptyExample === undefined ? "Empty output is not valid." : `Valid empty form: \`${validEmptyExample}\``;
+          output.schemaFile !== undefined
+            ? "Schema-backed empty form: defined only by the pinned schema; inspect and validate it instead of copying a prose example."
+            : validEmptyExample === undefined
+              ? "Empty output is not valid."
+              : `Valid empty form: \`${validEmptyExample}\``;
         return [
           `- Path: \`${path.join(input.node.artifactDir, output.path)}\`${output.primary ? " (primary)" : ""}`,
           `  Contract: \`${output.contract}\``,
-          `  Schema: ${output.description}`,
+          `  Purpose: ${output.description}`,
           // A machine-readable schema beats prose: the producer can check the
           // file it just wrote rather than discover a bad field from a failed node.
           ...(output.schemaFile === undefined
             ? []
-            : [`  Validate against: \`${path.join(schemaDirectory, output.schemaFile)}\``]),
+            : [
+                `  Validate against: ${markdownCodeSpan(path.join(schemaDirectory, output.schemaFile))}`,
+                `  Validation command: ${validationCommand(
+                  path.join(schemaDirectory, output.schemaFile),
+                  path.join(input.node.artifactDir, output.path)
+                )}`
+              ]),
           `  ${empty}`
         ].join("\n");
       })
       .join("\n")
   });
 
-  return `${rendered.trimEnd()}\n\n${contract.trimEnd()}\n`;
+  return `${rendered.trimEnd()}\n\n${specializedGuidance === "" ? "" : `${specializedGuidance}\n\n`}${contract.trimEnd()}\n`;
+}
+
+function validationCommand(schemaPath: string, artifactPath: string): string {
+  const command = [
+    "ultrafuzz json validate",
+    "--schema",
+    shellSingleQuote(schemaPath),
+    "--file",
+    shellSingleQuote(artifactPath)
+  ].join(" ");
+  return markdownCodeSpan(command);
+}
+
+function shellSingleQuote(value: string): string {
+  if (hasControlCharacter(value)) {
+    throw new PromptError(
+      "unsafe-validation-command-path",
+      "JSON validation command paths must not contain control characters"
+    );
+  }
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function hasControlCharacter(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit <= 0x1f || (codeUnit >= 0x7f && codeUnit <= 0x9f)) return true;
+  }
+  return false;
+}
+
+function markdownCodeSpan(value: string): string {
+  const longestRun = Math.max(0, ...(value.match(/`+/gu) ?? []).map((run) => run.length));
+  const fence = "`".repeat(longestRun + 1);
+  return longestRun === 0 ? `${fence}${value}${fence}` : `${fence} ${value} ${fence}`;
 }
 
 const outputContractTemplateCache = new Map<string, string>();
@@ -372,7 +449,20 @@ function loadOutputContractTemplate(relativePath: string): string {
 }
 
 function outputContractTemplateRoot(): string {
-  return fileURLToPath(new URL("../../../.ultrafuzz/prompts/_templates/output-contract/", import.meta.url));
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    path.join(here, "prompts", "_templates", "output-contract"),
+    path.resolve(here, "../../../.ultrafuzz/prompts/_templates/output-contract")
+  ];
+  const found = candidates.find((candidate) => {
+    try {
+      return statSync(candidate).isDirectory();
+    } catch {
+      return false;
+    }
+  });
+  if (found === undefined) throw new Error(`unable to locate the packaged output contract templates from ${here}`);
+  return found;
 }
 
 export function writeRenderedPrompt(result: PromptRenderResult): string {
@@ -783,6 +873,32 @@ function taskSchemaDirectory(input: PromptRenderInput): string {
   return path.join(input.node.workspacePath, ".ultrafuzz", "schemas");
 }
 
+function strategyAttemptTestDirectory(input: PromptRenderInput): string {
+  return path.join(input.node.workspacePath, "test", "foundry", input.node.logicalId);
+}
+
+function stageFindingsOutputRelativePath(input: PromptRenderInput): string {
+  return declaredFindingsOutputRelativePath(input, (contract) =>
+    new Set(["ultrafuzz/findings@2", "ultrafuzz/triaged-findings@1", "ultrafuzz/severity-classified-findings@1"]).has(
+      contract
+    )
+  );
+}
+
+function findingsOutputRelativePath(input: PromptRenderInput): string {
+  return declaredFindingsOutputRelativePath(input, (contract) => contract === "ultrafuzz/findings@2");
+}
+
+function declaredFindingsOutputRelativePath(
+  input: PromptRenderInput,
+  acceptsContract: (contract: string) => boolean
+): string {
+  const current = input.graph.logicalNodes.filter((node) => node.id === input.node.logicalId);
+  if (current.length !== 1) return "";
+  const outputs = artifactOutputsFor(current[0]!).filter((output) => acceptsContract(output.contract));
+  return outputs.length === 1 ? outputs[0]!.path : "";
+}
+
 function buildVariableContext(input: PromptRenderInput): Record<string, string> {
   return {
     repo_path: input.node.repoPath,
@@ -791,8 +907,16 @@ function buildVariableContext(input: PromptRenderInput): Record<string, string> 
     artifact_path: input.node.artifactDir,
     artifact_dir: input.node.artifactDir,
     run_metadata_path: input.run.metadataPath,
-    output_findings_path: input.outputs.findingsPath,
+    output_findings_path: (() => {
+      const relativePath = findingsOutputRelativePath(input);
+      return relativePath === "" ? "" : path.join(input.node.artifactDir, relativePath);
+    })(),
     output_patch_path: input.outputs.patchPath,
+    output_stage_findings_path: (() => {
+      const relativePath = stageFindingsOutputRelativePath(input);
+      return relativePath === "" ? "" : path.join(input.node.artifactDir, relativePath);
+    })(),
+    output_stage_findings_relative_path: stageFindingsOutputRelativePath(input),
     strategy: input.node.logicalId,
     attempt_index: String(input.node.attemptIndex ?? 0),
     strategy_loop_index: String(input.node.loopIndex ?? 0),
@@ -805,7 +929,7 @@ function buildVariableContext(input: PromptRenderInput): Record<string, string> 
     invariant_property_priorities: input.resolvedConfig?.invariantPropertyPriorities?.join(", ") ?? "",
     invariant_testing_smoke_timeout: String(input.resolvedConfig?.invariantTestingSmokeTimeout ?? ""),
     invariant_testing_fuzzer_timeout: String(input.resolvedConfig?.invariantTestingFuzzerTimeout ?? ""),
-    strategy_attempt_test_dir: path.join(input.node.workspacePath, "test", "foundry", input.node.logicalId),
+    strategy_attempt_test_dir: strategyAttemptTestDirectory(input),
     ...Object.fromEntries(Object.entries(input.variables ?? {}).map(([key, value]) => [key, String(value)]))
   };
 }
@@ -817,7 +941,6 @@ function validateRenderInputPaths(input: PromptRenderInput): void {
     input.node.artifactDir,
     input.run.artifactsDir,
     input.run.metadataPath,
-    input.outputs.findingsPath,
     input.outputs.patchPath
   ];
   for (const absolutePath of absolutePaths) {
@@ -826,7 +949,6 @@ function validateRenderInputPaths(input: PromptRenderInput): void {
     }
   }
   ensureInsidePath(input.run.artifactsDir, input.node.artifactDir, "node artifact directory");
-  ensureInsidePath(input.node.artifactDir, input.outputs.findingsPath, "output findings path");
   ensureInsidePath(input.node.artifactDir, input.outputs.patchPath, "output patch path");
 }
 
@@ -838,8 +960,8 @@ function validateVariableOverrides(variables: PromptRenderInput["variables"]): v
     if (!isSupportedTemplateVariable(key)) {
       throw new PromptError("missing-template-variable", `unknown prompt render variable override: ${key}`);
     }
-    if (key === "schema_path") {
-      throw new PromptError("invalid-render-input", "schema_path is task-local and cannot be overridden");
+    if (key === "schema_path" || isTopologyDerivedFindingsVariable(key)) {
+      throw new PromptError("invalid-render-input", `${key} is topology-derived and cannot be overridden`);
     }
     if (!(
       typeof value === "string" ||
@@ -849,6 +971,14 @@ function validateVariableOverrides(variables: PromptRenderInput["variables"]): v
       throw new PromptError("invalid-render-input", `invalid prompt render variable value for ${key}`);
     }
   }
+}
+
+function isTopologyDerivedFindingsVariable(value: string): boolean {
+  return (
+    value === "output_findings_path" ||
+    value === "output_stage_findings_path" ||
+    value === "output_stage_findings_relative_path"
+  );
 }
 
 function resolveModelProvenance(input: PromptRenderInput): PromptModelProvenance | undefined {

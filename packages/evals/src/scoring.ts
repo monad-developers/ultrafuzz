@@ -1,18 +1,38 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { assertRegularFileInside, validateArtifactContract } from "@ultrafuzz/artifacts";
-import { z } from "zod/v4";
+import {
+  assertRegularFileInside,
+  parseStrictJson,
+  validateFindingSchema,
+  validateFindingsSchema,
+  type NormalizedFinding
+} from "@ultrafuzz/artifacts";
+import { assertVerifiedFinalReportSnapshotRemainedCurrent, type VerifiedFinalReportSnapshot } from "@ultrafuzz/runtime";
 
 import { summarizeEvalTerminal } from "./efficiency.js";
 import {
+  appendEvalRunRecord,
+  parseEvalScoreSummary,
+  readEvalMatrix,
+  readEvalRunManifest,
+  readEvalRunRecords,
+  readEvalScoreSummary,
+  serializeEvalFindingScores,
+  serializeEvalReviewQueue
+} from "./eval-durable.js";
+import {
   ADJUDICATOR_RESPONSE_FORMAT,
   buildAdjudicatorPrompt,
-  buildAdjudicatorRetryPrompt,
   canonicalBugIdForAdjudicatorAlias,
   EVAL_JUDGE_PROMPT_VERSION
 } from "./evaluator/adjudicator-prompt.js";
 import { runIndependentJudgePanel } from "./evaluator/judge-panel.js";
+import {
+  EVAL_LLM_JUDGE_RESULT_SCHEMA_ID,
+  validateEvalJsonSchema,
+  type EVAL_LLM_JUDGE_RESULT_SCHEMA_VERSION
+} from "./eval-schema-registry.js";
 import { boundedResponseText } from "./reporters/http.js";
 import { buildEvalSummaryProvenance } from "./lineage.js";
 import {
@@ -22,24 +42,29 @@ import {
   type GroundTruthSubject
 } from "./ground-truth.js";
 import {
-  classifyRecoveryEquivalence,
   reconcileEvalRunRecords,
   recoveryEquivalenceCanBeRecorded,
   withRecordedRecoveryEquivalence
 } from "./recovery-equivalence.js";
+import { loadBoundEvalReportAuthority } from "./report-authority.js";
 import { resolveJudgePanelConfig, resolveRecoveryEquivalencePolicy } from "./suite.js";
 import {
+  EVAL_FINDING_SCORE_SCHEMA_VERSION,
+  EVAL_REVIEW_QUEUE_ITEM_SCHEMA_VERSION,
+  EVAL_SCORE_SUMMARY_SCHEMA_VERSION,
   type EvalCompareValue,
   type EvalClassificationReasonCode,
   type EvalFindingScore,
   type EvalJudgePanelConfig,
   type EvalMatrixRow,
   type EvalLongitudinalCompareValue,
+  type EvalReportAuthority,
   type EvalRowScore,
   type EvalRunRecord,
-  type EvalRunProvenance,
   type EvalScoreSummary,
   type EvalSuiteSpec,
+  type EvalUnboundFindingScore,
+  type EvalUnboundRowScore,
   type EvalVariantScoreSummary,
   type FindingJudge,
   type FindingJudgeResult,
@@ -47,35 +72,21 @@ import {
   type GroundTruthBug,
   type HumanReviewQueueItem
 } from "./types.js";
-import {
-  EvalError,
-  appendJsonLine,
-  evalRunRoot,
-  isRecord,
-  jsonFile,
-  mean,
-  readJsonLines,
-  resolveTerminalReportPath,
-  roundMetric
-} from "./utils.js";
+import { EvalError, evalRunRoot, isRecord, mean, resolveTerminalReportPath, roundMetric } from "./utils.js";
 
 const DEFAULT_EVAL_JUDGE_ENDPOINT = "https://gateway.braintrust.dev/v1/chat/completions";
 const PRIVATE_DATA_JUDGE_ACK = "ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA";
-const LLM_JUDGE_MAX_ATTEMPTS = 3;
 const MIN_CONCRETE_EVIDENCE_TEXT_LENGTH = 8;
+export const EVAL_LLM_JUDGE_RESULT_ALIAS_CONTEXT_GATE = "eval-llm-judge-result-alias-membership" as const;
 
-const llmJudgeSchema = z.looseObject({
-  matched_ground_truth_bug_id: z.string().min(1).nullable().optional(),
-  score: z.number().min(0).max(1),
-  signals: z.looseObject({
-    root_cause: z.number().min(0).max(1),
-    affected_area: z.number().min(0).max(1),
-    impact: z.number().min(0).max(1),
-    evidence: z.number().min(0).max(1)
-  }),
-  rationale: z.string().min(1),
-  confidence: z.number().min(0).max(1)
-});
+interface EvalLlmJudgeResultDocument {
+  schema_version: typeof EVAL_LLM_JUDGE_RESULT_SCHEMA_VERSION;
+  matched_ground_truth_bug_id: string | null;
+  score: number;
+  signals: FindingMatchSignalScores;
+  rationale: string;
+  confidence: number;
+}
 
 export interface ScoreEvalRunInput {
   projectRoot: string;
@@ -89,7 +100,7 @@ export interface ScoreEvalRowReportInput {
   suite: EvalSuiteSpec;
   row: EvalMatrixRow;
   reportPath: string;
-  record?: EvalRunRecord;
+  record: EvalRunRecord;
   llmJudge?: boolean | FindingJudge;
   env?: Record<string, string | undefined>;
 }
@@ -104,26 +115,33 @@ export interface ScoreFindingsAgainstGroundTruthInput {
   matchMode?: "report" | "candidate";
   reportPath?: string;
   reportSchemaValid?: boolean;
-  record?: EvalRunRecord;
+  record: EvalRunRecord;
   llmJudge?: boolean | FindingJudge;
   env?: Record<string, string | undefined>;
 }
 
 export async function scoreEvalRun(input: ScoreEvalRunInput): Promise<EvalScoreSummary> {
   const root = evalRunRoot(input.projectRoot, input.evalRunId);
-  const evalManifest = jsonFile<{ suite?: EvalSuiteSpec; provenance?: EvalRunProvenance }>(
-    path.join(root, "eval.json")
-  );
-  if (evalManifest.suite === undefined) {
-    throw new EvalError("EVAL_RUN_MANIFEST_INVALID", "eval run manifest is missing suite");
-  }
+  const evalManifest = readEvalRunManifest(path.join(root, "eval.json"));
   const suite = evalManifest.suite;
-  const matrix = jsonFile<EvalMatrixRow[]>(path.join(root, "matrix.json"));
-  const records = readJsonLines<EvalRunRecord>(path.join(root, "runs.jsonl"));
+  const matrix = readEvalMatrix(path.join(root, "matrix.json"));
+  const records = readEvalRunRecords(path.join(root, "runs.jsonl"));
   const recordsByRow = reconcileEvalRunRecords(records);
+  const matrixRowIds = new Set(matrix.map((row) => row.id));
+  const unexpectedRows = [...recordsByRow.keys()].filter((rowId) => !matrixRowIds.has(rowId)).sort();
+  if (unexpectedRows.length > 0) {
+    throw new EvalError("EVAL_RUN_RECORD_LINEAGE_INVALID", "run journal contains rows outside the current matrix", {
+      row_ids: unexpectedRows
+    });
+  }
   for (const row of matrix) {
     const record = recordsByRow.get(row.id);
-    if (record === undefined) continue;
+    if (record === undefined) {
+      throw new EvalError("EVAL_RUN_RECORD_MISSING", `eval row ${row.id} has no durable run record`);
+    }
+    if (record.status !== "launched") {
+      throw new EvalError("EVAL_RUN_NOT_LAUNCHED", `eval row ${row.id} did not launch successfully`);
+    }
     const canRecordRecoveryEquivalence = recoveryEquivalenceCanBeRecorded(record);
     if (!canRecordRecoveryEquivalence) {
       throw new EvalError(
@@ -134,7 +152,7 @@ export async function scoreEvalRun(input: ScoreEvalRunInput): Promise<EvalScoreS
     const recorded = withRecordedRecoveryEquivalence(record, suite);
     recordsByRow.set(row.id, recorded);
     if (record.recovery_equivalence === undefined && canRecordRecoveryEquivalence) {
-      appendJsonLine(path.join(root, "runs.jsonl"), recorded);
+      appendEvalRunRecord(path.join(root, "runs.jsonl"), recorded);
     }
   }
   const scoresPath = path.join(root, "scores.jsonl");
@@ -142,11 +160,9 @@ export async function scoreEvalRun(input: ScoreEvalRunInput): Promise<EvalScoreS
   const judgeMode = input.llmJudge === undefined || input.llmJudge === false ? "deterministic" : "llm";
   const llmJudge = resolveJudge(input.llmJudge, input.env);
   const scoredRows = await mapLimitStable(matrix, suite.run.max_parallel_runs ?? 1, async (row) => {
-    const record = recordsByRow.get(row.id);
+    const record = recordsByRow.get(row.id)!;
     const reportResolution = resolveTerminalReportPath({
-      ...(record?.ultrafuzz_run_root === undefined ? {} : { runRoot: record.ultrafuzz_run_root }),
-      ...(record?.report_json_path === undefined ? {} : { recordedPath: record.report_json_path }),
-      fallbackPath: defaultReportPath(row)
+      runRoot: record.ultrafuzz_run_root
     });
     if (reportResolution.path === undefined) {
       throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", reportResolution.reason, { row_id: row.id });
@@ -159,6 +175,9 @@ export async function scoreEvalRun(input: ScoreEvalRunInput): Promise<EvalScoreS
       reportPath: reportResolution.path
     });
   });
+  for (const scored of scoredRows) {
+    assertVerifiedFinalReportSnapshotRemainedCurrent(scored.reportSnapshot);
+  }
   const rowScores: EvalRowScore[] = [];
   const findingScores: EvalFindingScore[] = [];
   const reviewQueue: HumanReviewQueueItem[] = [];
@@ -178,6 +197,7 @@ export async function scoreEvalRun(input: ScoreEvalRunInput): Promise<EvalScoreS
       : rowScores.filter((row) => row.recovery_equivalence.classification !== "non-comparable");
   const variants = summarizeVariants(aggregateRows);
   const summary: EvalScoreSummary = {
+    schema_version: EVAL_SCORE_SUMMARY_SCHEMA_VERSION,
     eval_run_id: input.evalRunId,
     eval_run_root: root,
     recall_threshold: suite.metrics.recall_threshold,
@@ -204,16 +224,25 @@ export async function scoreEvalRun(input: ScoreEvalRunInput): Promise<EvalScoreS
       suite,
       matrix,
       judgeMode,
-      ...(evalManifest.provenance !== undefined ? { runProvenance: evalManifest.provenance } : {})
+      runProvenance: evalManifest.provenance
     })
   };
-  replaceScoringOutputs(root, [
-    { filePath: scoresPath, contents: serializeJsonLines(findingScores) },
-    { filePath: reviewQueuePath, contents: serializeJsonLines(reviewQueue) },
-    { filePath: summaryPath, contents: `${JSON.stringify(summary, null, 2)}\n` },
-    { filePath: summaryMarkdownPath, contents: renderSummaryMarkdown(summary) }
-  ]);
-  return summary;
+  const validatedSummary = parseEvalScoreSummary(summary, summaryPath);
+  replaceScoringOutputs(
+    root,
+    [
+      { filePath: scoresPath, contents: serializeEvalFindingScores(findingScores) },
+      { filePath: reviewQueuePath, contents: serializeEvalReviewQueue(reviewQueue) },
+      { filePath: summaryPath, contents: `${JSON.stringify(validatedSummary, null, 2)}\n` },
+      { filePath: summaryMarkdownPath, contents: renderSummaryMarkdown(validatedSummary) }
+    ],
+    () => {
+      for (const scored of scoredRows) {
+        assertVerifiedFinalReportSnapshotRemainedCurrent(scored.reportSnapshot);
+      }
+    }
+  );
+  return validatedSummary;
 }
 
 async function mapLimitStable<T, U>(values: T[], limit: number, worker: (value: T) => Promise<U>): Promise<U[]> {
@@ -246,7 +275,11 @@ interface ScoringOutputFile {
  * path keeps the previous complete result set if a local filesystem operation
  * fails during the multi-file commit.
  */
-function replaceScoringOutputs(root: string, outputs: readonly ScoringOutputFile[]): void {
+function replaceScoringOutputs(
+  root: string,
+  outputs: readonly ScoringOutputFile[],
+  assertReportAuthority: () => void
+): void {
   const transactionRoot = fs.mkdtempSync(path.join(root, ".scoring-transaction-"));
   let removeTransactionRoot = true;
   const prepared = outputs.map((output, index) => ({
@@ -268,10 +301,12 @@ function replaceScoringOutputs(root: string, outputs: readonly ScoringOutputFile
         backedUp.push(output);
       }
     }
+    assertReportAuthority();
     for (const output of prepared) {
       fs.renameSync(output.stagedPath, output.filePath);
       installed.push(output);
     }
+    assertReportAuthority();
   } catch (error) {
     const rollbackErrors: unknown[] = [];
     for (const output of [...installed].reverse()) {
@@ -304,10 +339,6 @@ function replaceScoringOutputs(root: string, outputs: readonly ScoringOutputFile
   }
 }
 
-function serializeJsonLines(values: readonly unknown[]): string {
-  return values.length === 0 ? "" : `${values.map((value) => JSON.stringify(value)).join("\n")}\n`;
-}
-
 function fileSystemEntryExists(filePath: string): boolean {
   try {
     fs.lstatSync(filePath);
@@ -325,26 +356,38 @@ export async function scoreEvalRowReport(input: ScoreEvalRowReportInput): Promis
   findingScores: EvalFindingScore[];
   reviewQueue: HumanReviewQueueItem[];
 }> {
-  return scoreRow({
+  const scored = await scoreRow({
     suite: input.suite,
     row: input.row,
     record: input.record,
     reportPath: input.reportPath,
     llmJudge: resolveJudge(input.llmJudge, input.env)
   });
+  return { rowScore: scored.rowScore, findingScores: scored.findingScores, reviewQueue: scored.reviewQueue };
 }
 
 export async function scoreFindingsAgainstGroundTruth(input: ScoreFindingsAgainstGroundTruthInput): Promise<{
-  rowScore: EvalRowScore;
-  findingScores: EvalFindingScore[];
+  rowScore: EvalUnboundRowScore;
+  findingScores: EvalUnboundFindingScore[];
   reviewQueue: HumanReviewQueueItem[];
 }> {
+  const findingsValidation = validateFindingsSchema(input.findings);
+  if (!findingsValidation.ok || findingsValidation.value === undefined) {
+    throw new EvalError("EVAL_FINDINGS_INVALID", "scored findings must satisfy ultrafuzz.findings.v2", {
+      issue_count: findingsValidation.issues.length,
+      issues: findingsValidation.issues.slice(0, 8).map((issue) => ({
+        code: issue.code,
+        path: issue.path,
+        message: issue.message
+      }))
+    });
+  }
   return scoreFindings({
     suite: input.suite,
     row: input.row,
     record: input.record,
     reportPath: input.reportPath ?? "inline-findings",
-    findings: input.findings,
+    findings: findingsValidation.value,
     bugs: input.bugs,
     groundTruthSubject: input.groundTruthSubject,
     reportSchemaValid: input.reportSchemaValid ?? true,
@@ -355,7 +398,7 @@ export async function scoreFindingsAgainstGroundTruth(input: ScoreFindingsAgains
 
 export function compareEvalRun(input: { projectRoot: string; evalRunId: string; baseline: string }): EvalCompareValue {
   const root = evalRunRoot(input.projectRoot, input.evalRunId);
-  const summary = jsonFile<EvalScoreSummary>(path.join(root, "summary.json"));
+  const summary = readEvalScoreSummary(path.join(root, "summary.json"));
   const baseline = summary.variants.find((variant) => variant.variant_id === input.baseline);
   if (baseline === undefined) {
     throw new EvalError("EVAL_BASELINE_UNKNOWN", `baseline variant ${input.baseline} not found`, {
@@ -420,7 +463,7 @@ export function compareEvalRuns(input: {
 }
 
 function readEvalSummary(projectRoot: string, evalRunId: string): EvalScoreSummary {
-  return jsonFile<EvalScoreSummary>(path.join(evalRunRoot(projectRoot, evalRunId), "summary.json"));
+  return readEvalScoreSummary(path.join(evalRunRoot(projectRoot, evalRunId), "summary.json"));
 }
 
 function comparisonDifferences(baseline: EvalScoreSummary, candidate: EvalScoreSummary): string[] {
@@ -429,13 +472,9 @@ function comparisonDifferences(baseline: EvalScoreSummary, candidate: EvalScoreS
 
 function provenanceDifferences(baseline: EvalScoreSummary, candidate: EvalScoreSummary): string[] {
   const differences: string[] = [];
-  const baselineCandidate = baseline.provenance?.candidate;
-  const candidateCandidate = candidate.provenance?.candidate;
+  const baselineCandidate = baseline.provenance.candidate;
+  const candidateCandidate = candidate.provenance.candidate;
   if (
-    baselineCandidate === undefined ||
-    candidateCandidate === undefined ||
-    baselineCandidate.commit === "unavailable" ||
-    candidateCandidate.commit === "unavailable" ||
     baselineCandidate.dirty !== false ||
     candidateCandidate.dirty !== false ||
     baselineCandidate.execution_artifact_id === undefined ||
@@ -443,32 +482,21 @@ function provenanceDifferences(baseline: EvalScoreSummary, candidate: EvalScoreS
   ) {
     differences.push("candidate execution provenance is not immutable");
   }
-  const baselineBenchmark = baseline.provenance?.benchmark;
-  const candidateBenchmark = candidate.provenance?.benchmark;
-  if (baselineBenchmark === undefined || candidateBenchmark === undefined) {
-    differences.push("benchmark provenance is unavailable");
-  } else {
-    if (baselineBenchmark.availability !== "available" || candidateBenchmark.availability !== "available") {
-      differences.push("benchmark provenance is incomplete");
-    }
-    if (baselineBenchmark.cohort_fingerprint !== candidateBenchmark.cohort_fingerprint) {
-      differences.push("benchmark cohort fingerprints differ");
-    }
-    if (baselineBenchmark.execution_policy.fingerprint !== candidateBenchmark.execution_policy.fingerprint) {
-      differences.push("execution policy fingerprints differ");
-    }
+  const baselineBenchmark = baseline.provenance.benchmark;
+  const candidateBenchmark = candidate.provenance.benchmark;
+  if (baselineBenchmark.cohort_fingerprint !== candidateBenchmark.cohort_fingerprint) {
+    differences.push("benchmark cohort fingerprints differ");
   }
-  const baselineScoring = baseline.provenance?.scoring;
-  const candidateScoring = candidate.provenance?.scoring;
-  if (baselineScoring === undefined || candidateScoring === undefined) {
-    differences.push("scoring provenance is unavailable");
-  } else {
-    if (baselineScoring.implementation_dirty !== false || candidateScoring.implementation_dirty !== false) {
-      differences.push("scoring implementation provenance is not immutable");
-    }
-    if (baselineScoring.fingerprint !== candidateScoring.fingerprint) {
-      differences.push("scoring identity fingerprints differ");
-    }
+  if (baselineBenchmark.execution_policy.fingerprint !== candidateBenchmark.execution_policy.fingerprint) {
+    differences.push("execution policy fingerprints differ");
+  }
+  const baselineScoring = baseline.provenance.scoring;
+  const candidateScoring = candidate.provenance.scoring;
+  if (baselineScoring.implementation_dirty !== false || candidateScoring.implementation_dirty !== false) {
+    differences.push("scoring implementation provenance is not immutable");
+  }
+  if (baselineScoring.fingerprint !== candidateScoring.fingerprint) {
+    differences.push("scoring identity fingerprints differ");
   }
   return differences;
 }
@@ -485,15 +513,15 @@ function variantScopeDifferences(baseline: EvalScoreSummary, candidate: EvalScor
 }
 
 export function renderSummaryMarkdown(summary: EvalScoreSummary): string {
-  const candidate = summary.provenance?.candidate;
-  const benchmark = summary.provenance?.benchmark;
-  const scoring = summary.provenance?.scoring;
+  const candidate = summary.provenance.candidate;
+  const benchmark = summary.provenance.benchmark;
+  const scoring = summary.provenance.scoring;
   const lines = [
     `# Ultrafuzz Eval ${summary.eval_run_id}`,
     "",
-    `Candidate: ${candidate === undefined ? "unavailable (historical result)" : `${candidate.label} (${candidate.commit})`}`,
-    `Benchmark cohort: ${benchmark?.cohort_fingerprint ?? "unavailable (historical result)"}`,
-    `Scoring identity: ${scoring?.fingerprint ?? "unavailable"}`,
+    `Candidate: ${candidate.label} (${candidate.commit})`,
+    `Benchmark cohort: ${benchmark.cohort_fingerprint}`,
+    `Scoring identity: ${scoring.fingerprint}`,
     `Recovery aggregation: ${summary.recovery_equivalence.aggregate_non_comparable} (${summary.recovery_equivalence.included_row_count} included, ${summary.recovery_equivalence.excluded_row_count} excluded)`,
     "",
     `Recall threshold: ${summary.recall_threshold}`,
@@ -608,13 +636,6 @@ function completenessValue(value: EvalRowScore["efficiency"]["runtime"]): string
   return value.reason === null ? value.status : `${value.status} (${value.reason})`;
 }
 
-function defaultReportPath(row: EvalMatrixRow): string {
-  if (row.target.path === undefined) {
-    return `missing-target-path/${row.run_id}/report.json`;
-  }
-  return path.join(row.target.path, ".ultrafuzz", "runs", row.run_id, "artifacts", "final-report", "report.json");
-}
-
 function resolveJudge(
   llmJudge: boolean | FindingJudge | undefined,
   env: Record<string, string | undefined> | undefined
@@ -631,13 +652,14 @@ function resolveJudge(
 async function scoreRow(input: {
   suite: EvalSuiteSpec;
   row: EvalMatrixRow;
-  record?: EvalRunRecord;
+  record: EvalRunRecord;
   reportPath: string;
   llmJudge?: FindingJudge;
 }): Promise<{
   rowScore: EvalRowScore;
   findingScores: EvalFindingScore[];
   reviewQueue: HumanReviewQueueItem[];
+  reportSnapshot: VerifiedFinalReportSnapshot;
 }> {
   const groundTruth = loadGroundTruthDocument(
     input.row.target.ground_truth_path,
@@ -652,12 +674,13 @@ async function scoreRow(input: {
           revision: input.row.target.ref
         })
       : groundTruth.subject;
-  const report = readReport(input.reportPath);
-  return scoreFindings({
+  const report = readReport(input.record, input.reportPath);
+  const scored = await scoreFindings({
     suite: input.suite,
     row: input.row,
     record: input.record,
-    reportPath: input.reportPath,
+    reportPath: report.path,
+    reportAuthority: report.authority,
     findings: report.findings,
     bugs,
     groundTruthSubject,
@@ -665,12 +688,13 @@ async function scoreRow(input: {
     matchMode: "report",
     llmJudge: input.llmJudge
   });
+  return { ...scored, reportSnapshot: report.snapshot };
 }
 
-async function scoreFindings(input: {
+interface ScoreFindingsInput {
   suite: EvalSuiteSpec;
   row: EvalMatrixRow;
-  record?: EvalRunRecord;
+  record: EvalRunRecord;
   reportPath: string;
   findings: unknown[];
   bugs: GroundTruthBug[];
@@ -678,11 +702,29 @@ async function scoreFindings(input: {
   reportSchemaValid: boolean;
   matchMode: "report" | "candidate";
   llmJudge?: FindingJudge;
-}): Promise<{
+}
+
+interface BoundScoreFindingsResult {
   rowScore: EvalRowScore;
   findingScores: EvalFindingScore[];
   reviewQueue: HumanReviewQueueItem[];
-}> {
+}
+
+interface UnboundScoreFindingsResult {
+  rowScore: EvalUnboundRowScore;
+  findingScores: EvalUnboundFindingScore[];
+  reviewQueue: HumanReviewQueueItem[];
+}
+
+async function scoreFindings(
+  input: ScoreFindingsInput & { reportAuthority: EvalReportAuthority }
+): Promise<BoundScoreFindingsResult>;
+async function scoreFindings(
+  input: ScoreFindingsInput & { reportAuthority?: undefined }
+): Promise<UnboundScoreFindingsResult>;
+async function scoreFindings(
+  input: ScoreFindingsInput & { reportAuthority?: EvalReportAuthority }
+): Promise<BoundScoreFindingsResult | UnboundScoreFindingsResult> {
   if (input.row.target.sensitivity === "private" && input.groundTruthSubject === undefined) {
     throw new EvalError(
       "EVAL_GROUND_TRUTH_SUBJECT_MISSING",
@@ -697,7 +739,7 @@ async function scoreFindings(input: {
     });
   }
   const judgePanel = resolveJudgePanelConfig(input.suite.judge_panel);
-  const matches: EvalFindingScore[] = [];
+  const matches: EvalUnboundFindingScore[] = [];
   const reviewQueue: HumanReviewQueueItem[] = [];
   const matchedBugIds = new Set<string>();
   let duplicates = 0;
@@ -706,6 +748,21 @@ async function scoreFindings(input: {
   let fullMatches = 0;
   let severityChecks = 0;
   let severityMatches = 0;
+  const findingIds = input.findings.map((finding, index) => {
+    const findingId = isRecord(finding) && typeof finding.id === "string" ? finding.id : undefined;
+    if (findingId === undefined || findingId.trim().length === 0) {
+      throw new EvalError("EVAL_FINDING_ID_INVALID", "every scored finding must have a nonempty string ID", {
+        finding_index: index
+      });
+    }
+    return findingId;
+  });
+  const duplicateFindingIds = findingIds.filter((findingId, index) => findingIds.indexOf(findingId) !== index);
+  if (duplicateFindingIds.length > 0) {
+    throw new EvalError("EVAL_FINDING_ID_INVALID", "scored finding IDs must be unique", {
+      finding_ids: [...new Set(duplicateFindingIds)].sort()
+    });
+  }
 
   for (const [index, finding] of input.findings.entries()) {
     const match = await bestMatch(
@@ -729,7 +786,7 @@ async function scoreFindings(input: {
           fullMatches += 1;
         }
         const bug = input.bugs.find((candidate) => candidate.id === bugId);
-        const severity = stringField(finding, "severity_guess");
+        const severity = stringField(finding, "severity");
         if (bug?.severity && severity) {
           severityChecks += 1;
           if (bug.severity.toLowerCase() === severity.toLowerCase()) {
@@ -738,13 +795,15 @@ async function scoreFindings(input: {
         }
       }
     } else if (match.judge_result.classification === "needs-human-review") {
+      const reviewFinding = validatedReviewFinding(finding, index);
       reviewQueue.push({
+        schema_version: EVAL_REVIEW_QUEUE_ITEM_SCHEMA_VERSION,
         target_id: input.row.target_id,
         variant_id: input.row.variant_id,
         trial_id: input.row.trial_id,
-        ...(input.record?.ultrafuzz_run_id !== undefined ? { ultrafuzz_run_id: input.record.ultrafuzz_run_id } : {}),
-        workflow_ids: input.record?.workflow_ids ?? [],
-        finding,
+        ...(input.record.ultrafuzz_run_id !== undefined ? { ultrafuzz_run_id: input.record.ultrafuzz_run_id } : {}),
+        workflow_ids: input.record.workflow_ids,
+        finding: reviewFinding,
         report_path: input.reportPath,
         deterministic_match: match.deterministic_match,
         judge_result: match.judge_result,
@@ -755,8 +814,9 @@ async function scoreFindings(input: {
     }
     const findingTitle = stringField(finding, "title");
     matches.push({
+      schema_version: EVAL_FINDING_SCORE_SCHEMA_VERSION,
       row_id: input.row.id,
-      finding_id: stringField(finding, "id") ?? `finding-${index + 1}`,
+      finding_id: findingIds[index]!,
       ...(findingTitle !== undefined ? { finding_title: findingTitle } : {}),
       report_path: input.reportPath,
       deterministic_match: match.deterministic_match,
@@ -771,11 +831,8 @@ async function scoreFindings(input: {
   const f1 = precision + recall === 0 ? 0 : roundMetric((2 * precision * recall) / (precision + recall));
   const judgedFindings = truePositives + falsePositives + duplicates;
   const terminal = summarizeEvalTerminal(input.record);
-  const recoveryEquivalence =
-    input.record === undefined
-      ? classifyRecoveryEquivalence({ policy: input.suite.recovery_equivalence })
-      : withRecordedRecoveryEquivalence(input.record, input.suite).recovery_equivalence!;
-  const rowScore: EvalRowScore = {
+  const recoveryEquivalence = withRecordedRecoveryEquivalence(input.record, input.suite).recovery_equivalence!;
+  const rowScore: EvalUnboundRowScore = {
     row_id: input.row.id,
     target_id: input.row.target_id,
     variant_id: input.row.variant_id,
@@ -795,14 +852,19 @@ async function scoreFindings(input: {
     severity_accuracy: severityChecks === 0 ? null : roundMetric(severityMatches / severityChecks),
     true_positive_accuracy: input.findings.length === 0 ? 0 : roundMetric(truePositives / input.findings.length),
     duplicate_rate: judgedFindings === 0 ? 0 : roundMetric(duplicates / judgedFindings),
-    runtime_seconds: terminal.efficiency.wall_time_seconds,
-    cost_estimate: terminal.efficiency.cost_usd,
     lifecycle: terminal.lifecycle,
     efficiency: terminal.efficiency,
     expansion: terminal.expansion,
     recovery_equivalence: recoveryEquivalence
   };
-  return { rowScore, findingScores: matches, reviewQueue };
+  if (input.reportAuthority === undefined) {
+    return { rowScore, findingScores: matches, reviewQueue };
+  }
+  return {
+    rowScore: { ...rowScore, report_authority: input.reportAuthority },
+    findingScores: matches.map((score) => ({ ...score, report_authority: input.reportAuthority! })),
+    reviewQueue
+  };
 }
 
 async function bestMatch(
@@ -920,61 +982,47 @@ export function gatewayLlmJudge(
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), Math.max(1, profile?.timeout_seconds ?? 1800) * 1000);
     try {
-      let invalidContent: string | undefined;
-      let lastInvalid: EvalError | undefined;
-      for (let attempt = 1; attempt <= LLM_JUDGE_MAX_ATTEMPTS; attempt += 1) {
-        const response = await fetchImpl(endpoint.href, {
-          method: "POST",
-          redirect: "error",
-          headers: {
-            authorization: `Bearer ${apiKey}`,
-            "content-type": "application/json"
-          },
-          body: JSON.stringify({
-            model,
-            messages: [
-              ...buildAdjudicatorPrompt(input),
-              ...(invalidContent === undefined
-                ? []
-                : [
-                    {
-                      role: "user" as const,
-                      content: buildAdjudicatorRetryPrompt(invalidContent)
-                    }
-                  ])
-            ],
-            ...judgeReasoningParameters(model, input.row.judge_reasoning),
-            response_format: ADJUDICATOR_RESPONSE_FORMAT
-          }),
-          signal: controller.signal
+      const response = await fetchImpl(endpoint.href, {
+        method: "POST",
+        redirect: "error",
+        headers: {
+          authorization: `Bearer ${apiKey}`,
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({
+          model,
+          messages: buildAdjudicatorPrompt(input),
+          ...judgeReasoningParameters(model, input.row.judge_reasoning),
+          response_format: ADJUDICATOR_RESPONSE_FORMAT
+        }),
+        signal: controller.signal
+      });
+      const bodyText = await boundedResponseText(response, "LLM judge", "EVAL_LLM_JUDGE_RESPONSE_TOO_LARGE");
+      if (!response.ok) {
+        throw new EvalError("EVAL_LLM_JUDGE_REQUEST_FAILED", "LLM judge gateway request failed", {
+          status: response.status,
+          body: bodyText.slice(0, 1000)
         });
-        const bodyText = await boundedResponseText(response, "LLM judge", "EVAL_LLM_JUDGE_RESPONSE_TOO_LARGE");
-        if (!response.ok) {
-          throw new EvalError("EVAL_LLM_JUDGE_REQUEST_FAILED", "LLM judge gateway request failed", {
-            status: response.status,
-            body: bodyText.slice(0, 1000)
-          });
-        }
-        let content = "";
-        try {
-          content = chatCompletionContent(bodyText);
-          const parsed = llmJudgeSchema.safeParse(parseJsonObject(content));
-          if (parsed.success) return normalizeLlmJudgeResult(parsed.data, input);
-          lastInvalid = new EvalError("EVAL_LLM_JUDGE_INVALID", "LLM judge returned invalid JSON", {
-            attempt,
-            issues: parsed.error.issues.map((issue) => ({ path: issue.path.join("."), message: issue.message })),
-            content: content.slice(0, 1000)
-          });
-        } catch (error) {
-          lastInvalid = new EvalError("EVAL_LLM_JUDGE_INVALID", "LLM judge returned invalid JSON", {
-            attempt,
-            cause: error instanceof Error ? error.message : String(error),
-            content: content.slice(0, 1000)
-          });
-        }
-        invalidContent = content || bodyText;
       }
-      throw lastInvalid ?? new EvalError("EVAL_LLM_JUDGE_INVALID", "LLM judge returned invalid JSON");
+      let content = "";
+      try {
+        content = chatCompletionContent(bodyText);
+        const value = parseStrictJson(content);
+        const validation = validateEvalJsonSchema(EVAL_LLM_JUDGE_RESULT_SCHEMA_ID, value);
+        if (!validation.ok) {
+          throw new EvalError("EVAL_LLM_JUDGE_INVALID", "LLM judge returned invalid JSON", {
+            issues: validation.issues.map((issue) => ({ path: issue.instancePath, message: issue.message })),
+            content: content.slice(0, 1000)
+          });
+        }
+        return normalizeLlmJudgeResult(value as EvalLlmJudgeResultDocument, input);
+      } catch (error) {
+        if (error instanceof EvalError && error.code === "EVAL_LLM_JUDGE_INVALID") throw error;
+        throw new EvalError("EVAL_LLM_JUDGE_INVALID", "LLM judge returned invalid JSON", {
+          cause: error instanceof Error ? error.message : String(error),
+          content: content.slice(0, 1000)
+        });
+      }
     } finally {
       clearTimeout(timeout);
     }
@@ -991,12 +1039,22 @@ function judgeReasoningParameters(model: string, reasoning: string | undefined):
 }
 
 function normalizeLlmJudgeResult(
-  data: z.infer<typeof llmJudgeSchema>,
+  data: EvalLlmJudgeResultDocument,
   input: Parameters<FindingJudge>[0]
 ): FindingJudgeResult {
   const candidateBugId = data.matched_ground_truth_bug_id ?? undefined;
   const judgeMatchedBugId =
     candidateBugId === undefined ? undefined : canonicalBugIdForAdjudicatorAlias(candidateBugId, input.bugs);
+  if (candidateBugId !== undefined && judgeMatchedBugId === undefined) {
+    throw new EvalError(
+      "EVAL_LLM_JUDGE_INVALID",
+      `${EVAL_LLM_JUDGE_RESULT_ALIAS_CONTEXT_GATE}: LLM judge returned an unknown ground-truth candidate alias`,
+      {
+        gate: EVAL_LLM_JUDGE_RESULT_ALIAS_CONTEXT_GATE,
+        candidate_id: candidateBugId
+      }
+    );
+  }
   return applyJudgeClassificationPolicy(
     {
       ...(judgeMatchedBugId === undefined ? {} : { matched_ground_truth_bug_id: judgeMatchedBugId }),
@@ -1017,6 +1075,11 @@ function normalizeFindingJudgeResult(
   const judgeMatchedBugId = input.bugs.some((bug) => bug.id === result.matched_ground_truth_bug_id)
     ? result.matched_ground_truth_bug_id
     : undefined;
+  if (result.matched_ground_truth_bug_id !== undefined && judgeMatchedBugId === undefined) {
+    throw new EvalError("EVAL_LLM_JUDGE_INVALID", "finding judge returned an unknown ground-truth bug ID", {
+      bug_id: result.matched_ground_truth_bug_id
+    });
+  }
   return applyJudgeClassificationPolicy(
     {
       ...(judgeMatchedBugId === undefined ? {} : { matched_ground_truth_bug_id: judgeMatchedBugId }),
@@ -1106,7 +1169,7 @@ function validatedJudgeEndpoint(value: string): URL {
 }
 
 function chatCompletionContent(bodyText: string): string {
-  const parsed = JSON.parse(bodyText) as unknown;
+  const parsed = parseStrictJson(bodyText);
   if (!isRecord(parsed) || !Array.isArray(parsed.choices)) {
     throw new EvalError("EVAL_LLM_JUDGE_RESPONSE_INVALID", "LLM judge response is missing choices");
   }
@@ -1115,20 +1178,6 @@ function chatCompletionContent(bodyText: string): string {
     throw new EvalError("EVAL_LLM_JUDGE_RESPONSE_INVALID", "LLM judge response is missing message content");
   }
   return first.message.content;
-}
-
-function parseJsonObject(content: string): unknown {
-  const trimmed = content.trim();
-  if (trimmed.startsWith("{")) {
-    return JSON.parse(trimmed);
-  }
-  const fenced = /```(?:json)?\s*([\s\S]*?)\s*```/u.exec(trimmed);
-  if (fenced?.[1]) {
-    return JSON.parse(fenced[1]);
-  }
-  throw new EvalError("EVAL_LLM_JUDGE_RESPONSE_INVALID", "LLM judge content did not contain JSON", {
-    content: content.slice(0, 1000)
-  });
 }
 
 export function scoreSignals(finding: unknown, bug: GroundTruthBug): FindingMatchSignalScores {
@@ -1196,17 +1245,77 @@ function loadGroundTruthDocument(
   return readGroundTruthDocument(filePath, { requireSubject });
 }
 
-function readReport(filePath: string): { schemaValid: boolean; findings: unknown[] } {
-  if (!fs.existsSync(filePath) || !fs.lstatSync(filePath).isFile()) {
-    throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", "terminal report is missing", { path: filePath });
+function readReport(
+  record: EvalRunRecord,
+  filePath: string
+): {
+  schemaValid: boolean;
+  findings: unknown[];
+  path: string;
+  authority: EvalReportAuthority;
+  snapshot: VerifiedFinalReportSnapshot;
+} {
+  if (
+    record.ultrafuzz_run_root === undefined ||
+    record.ultrafuzz_run_id === undefined ||
+    record.report_json_path === undefined
+  ) {
+    throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", "terminal report has no bound Ultrafuzz run authority", {
+      path: filePath
+    });
   }
-  const validation = validateArtifactContract("ultrafuzz/report@1", fs.readFileSync(filePath, "utf8"), filePath);
-  if (!validation.ok || !isRecord(validation.value)) {
-    throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", "terminal report does not satisfy ultrafuzz/report@1", {
+  let bound: ReturnType<typeof loadBoundEvalReportAuthority>;
+  try {
+    bound = loadBoundEvalReportAuthority(record);
+  } catch (error) {
+    throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", "terminal report lacks current verification authority", {
+      path: filePath,
+      authority_code:
+        error instanceof Error && "code" in error && typeof error.code === "string" ? error.code : undefined,
+      cause: error instanceof Error ? error.message : String(error)
+    });
+  }
+  if (path.resolve(filePath) !== path.resolve(bound.snapshot.artifacts.json_path)) {
+    throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", "terminal report path is not the verified current report", {
+      path: filePath,
+      verified_path: bound.snapshot.artifacts.json_path
+    });
+  }
+  if (path.resolve(record.report_json_path) !== path.resolve(filePath)) {
+    throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", "eval run record names a different terminal report", {
+      path: filePath,
+      recorded_path: record.report_json_path
+    });
+  }
+  if (!isRecord(bound.snapshot.json) || !isRecord(bound.snapshot.json.run_metadata)) {
+    throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", "verified terminal report has invalid run metadata", {
+      path: filePath
+    });
+  }
+  if (bound.snapshot.json.run_metadata.run_id !== record.ultrafuzz_run_id) {
+    throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", "verified terminal report belongs to another run", {
+      path: filePath,
+      expected_run_id: record.ultrafuzz_run_id
+    });
+  }
+  return {
+    schemaValid: true,
+    findings: bound.snapshot.json.issues as unknown[],
+    path: bound.snapshot.artifacts.json_path,
+    authority: bound.authority,
+    snapshot: bound.snapshot
+  };
+}
+
+function validatedReviewFinding(value: unknown, index: number): NormalizedFinding {
+  const validation = validateFindingSchema(value, `$[${index}]`);
+  if (!validation.ok || validation.value === undefined) {
+    throw new EvalError("EVAL_REVIEW_FINDING_INVALID", "human-review findings must satisfy ultrafuzz.finding.v2", {
+      finding_index: index,
       issues: validation.issues.map((issue) => ({ code: issue.code, path: issue.path }))
     });
   }
-  return { schemaValid: true, findings: validation.value.issues as unknown[] };
+  return validation.value;
 }
 
 function summarizeVariants(rows: EvalRowScore[]): EvalVariantScoreSummary[] {
@@ -1293,9 +1402,7 @@ function hasEvidence(finding: unknown): boolean {
   if (Array.isArray(finding.evidence) && finding.evidence.some(hasConcreteEvidenceEntry)) {
     return true;
   }
-  return ["proof_of_concept", "poc", "proof", "reproduction", "trace"].some((key) =>
-    hasConcreteEvidenceValue(finding[key])
-  );
+  return hasConcreteEvidenceValue(finding.proof_of_concept);
 }
 
 function hasConcreteEvidenceEntry(value: unknown): boolean {

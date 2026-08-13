@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:artifacts:invariant-suite-manifest:2",
+  "title": "Ultrafuzz invariant suite manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "producer_node_id", "producer_attempt_id", "files", "tombstones"],
+  "properties": {
+    "schema_version": {
+      "const": "ultrafuzz.invariant-suite-manifest.v2"
+    },
+    "producer_node_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "producer_attempt_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "files": {
+      "type": "array",
+      "maxItems": 512,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "size_bytes", "sha256"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "pattern": "^(?:src|contracts|test|tests)/",
+            "allOf": [
+              {
+                "not": {
+                  "pattern": "[\\\\\\u0000]"
+                }
+              },
+              {
+                "not": {
+                  "pattern": "(?:^|/)(?:\\.|\\.\\.|\\.git|\\.ultrafuzz|\\.smithers|node_modules)(?:/|$)"
+                }
+              },
+              {
+                "not": {
+                  "pattern": "(?:^|/)(?:\\.env(?:\\..*)?|\\.envrc|\\.gitignore|\\.npmrc)(?:/|$)"
+                }
+              },
+              {
+                "not": {
+                  "pattern": "//|/$"
+                }
+              },
+              {
+                "not": {
+                  "pattern": "(?:^|/)[^/]{256}"
+                }
+              },
+              {
+                "not": {
+                  "pattern": "^(?:[^/]+/){32}"
+                }
+              }
+            ]
+          },
+          "size_bytes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 16777216
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      }
+    },
+    "tombstones": {
+      "type": "array",
+      "maxItems": 512,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "pattern": "^(?:src|contracts|test|tests)/",
+        "allOf": [
+          {
+            "not": {
+              "pattern": "[\\\\\\u0000]"
+            }
+          },
+          {
+            "not": {
+              "pattern": "(?:^|/)(?:\\.|\\.\\.|\\.git|\\.ultrafuzz|\\.smithers|node_modules)(?:/|$)"
+            }
+          },
+          {
+            "not": {
+              "pattern": "(?:^|/)(?:\\.env(?:\\..*)?|\\.envrc|\\.gitignore|\\.npmrc)(?:/|$)"
+            }
+          },
+          {
+            "not": {
+              "pattern": "//|/$"
+            }
+          },
+          {
+            "not": {
+              "pattern": "(?:^|/)[^/]{256}"
+            }
+          },
+          {
+            "not": {
+              "pattern": "^(?:[^/]+/){32}"
+            }
+          }
+        ]
+      }
+    }
+  }
+}

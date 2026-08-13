@@ -23,7 +23,7 @@ export function validTopology(overrides: Partial<ProjectTopology> = {}): Project
         prompt: "strategies/strategy.md",
         group: "strategies",
         depends_on: ["setup"],
-        outputs: [{ path: "findings.json", contract: "ultrafuzz/findings@1", primary: true }]
+        outputs: [{ path: "findings.json", contract: "ultrafuzz/findings@2", primary: true }]
       },
       {
         id: "review",

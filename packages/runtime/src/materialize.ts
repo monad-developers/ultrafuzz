@@ -1,9 +1,9 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
 import {
   appendEvent,
-  appendLineDurable,
   assertNoSymlinkComponents,
   layoutForRunRoot,
   safeResolveInside,
@@ -13,8 +13,12 @@ import {
 import { loadProjectConfig, resolveConfig } from "@ultrafuzz/config";
 import { isPathInside, validateMaterializePolicy, type MaterializeCopySelection } from "@ultrafuzz/security";
 
-const MATERIALIZE_AUDIT_SCHEMA_VERSION = "ultrafuzz.materialize.audit.v1" as const;
-
+import {
+  appendMaterializeAuditRecord,
+  MATERIALIZE_AUDIT_SCHEMA_VERSION,
+  readMaterializeAuditJournal,
+  type MaterializeAuditRecord
+} from "./audit-contracts.js";
 import type { MaterializeInput, MaterializeValue, RuntimeDiagnostic, RuntimeResult } from "./types.js";
 import { hasRuntimeErrors, policyDiagnostics, runtimeError, runtimeFailure, runtimeResult } from "./utils.js";
 
@@ -76,6 +80,7 @@ export async function materializeSelection(input: MaterializeInput): Promise<Run
   const auditPath = path.join(projectRoot, ".ultrafuzz", "materialize-audit.jsonl");
   try {
     assertNoSymlinkComponents(projectRoot, auditPath, "materialize audit");
+    readMaterializeAuditJournal(auditPath);
   } catch (error) {
     return runtimeFailure([
       runtimeError(
@@ -118,8 +123,9 @@ export async function materializeSelection(input: MaterializeInput): Promise<Run
   }
 
   const mode: "dry-run" | "unstaged-working-tree" = input.dryRun === true ? "dry-run" : "unstaged-working-tree";
-  const auditRecord = {
+  const auditRecord: MaterializeAuditRecord = {
     schema_version: MATERIALIZE_AUDIT_SCHEMA_VERSION,
+    audit_id: crypto.randomUUID(),
     run_id: layout.runId,
     timestamp: new Date().toISOString(),
     operation: "materializeSelection",
@@ -135,7 +141,7 @@ export async function materializeSelection(input: MaterializeInput): Promise<Run
     })),
     patches: []
   };
-  appendLineDurable(auditPath, JSON.stringify(auditRecord));
+  appendMaterializeAuditRecord(auditPath, auditRecord, projectRoot);
   const event = appendEvent(layout, {
     eventType: "materialize-selection",
     status: mode === "dry-run" ? "dry-run" : "succeeded",
@@ -155,6 +161,7 @@ export async function materializeSelection(input: MaterializeInput): Promise<Run
     patches: [],
     audit: {
       schema_version: MATERIALIZE_AUDIT_SCHEMA_VERSION,
+      audit_id: auditRecord.audit_id,
       mode: auditRecord.mode,
       unstaged: true,
       audit_path: auditPath,

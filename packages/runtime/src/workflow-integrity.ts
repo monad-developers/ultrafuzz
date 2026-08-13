@@ -6,24 +6,33 @@ import { pathToFileURL } from "node:url";
 import lockfile from "proper-lockfile";
 
 import {
+  assertPlannedGraph,
+  assertSmithersTaskManifestMatchesPlannedGraph,
   assertNoSymlinkComponents,
   assertPathInside,
   assertRegularFileInside,
+  parseStrictJsonBytes,
+  parseSmithersTaskManifestBytes,
   safeResolveInside,
   type RunLayout,
-  writeJsonDurable
+  type SmithersTaskManifestDocument
 } from "@ultrafuzz/artifacts";
-import { fingerprintGraph, type ExpandedGraph } from "@ultrafuzz/topology";
+import { assertExpandedGraphSchema, fingerprintGraph } from "@ultrafuzz/topology";
 
+import {
+  WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID,
+  WORKFLOW_CONTROL_INTEGRITY_SCHEMA_VERSION,
+  WORKFLOW_EXECUTION_DEPENDENCIES_JSON_SCHEMA_ID,
+  WORKFLOW_EXECUTION_DEPENDENCIES_SCHEMA_VERSION
+} from "./runtime-contracts.js";
+import { parseRuntimeDocumentBytes, writeRuntimeDocument } from "./runtime-document-codec.js";
 import { bindSmithersExecutableCapability } from "./smithers-executable-capability.js";
 import {
   bindWorkflowExecutionSnapshotCapability,
   type WorkflowExecutionSnapshotProtectedEntry
 } from "./workflow-execution-snapshot-capability.js";
 
-const WORKFLOW_CONTROL_INTEGRITY_SCHEMA_VERSION = "ultrafuzz.workflow-control-integrity.v2" as const;
 const WORKFLOW_CONTROL_INTEGRITY_FILE = "control-integrity.json";
-const WORKFLOW_EXECUTION_DEPENDENCY_MAP_SCHEMA_VERSION = "ultrafuzz.workflow-execution-dependencies.v1" as const;
 const WORKFLOW_EXECUTION_DEPENDENCY_MAP_SNAPSHOT_PATH = "dependencies/manifest.json";
 const WORKFLOW_CONTROL_LOCK = ".workflow-control";
 const MAX_WORKFLOW_CONTROL_FILE_BYTES = 64 * 1024 * 1024;
@@ -95,6 +104,14 @@ export interface VerifiedWorkflowControlSnapshot {
   integrityContents: Buffer;
 }
 
+export interface VerifiedSealedTaskManifestSnapshot {
+  tasksPath: string;
+  integrityPath: string;
+  contents: Buffer;
+  integrityContents: Buffer;
+  document: SmithersTaskManifestDocument;
+}
+
 export interface MaterializedWorkflowExecutionSnapshot {
   root: string;
   workflowPath: string;
@@ -162,7 +179,7 @@ interface WorkflowExecutionDependencyIssuer {
 }
 
 interface WorkflowExecutionDependencyMap {
-  schema_version: typeof WORKFLOW_EXECUTION_DEPENDENCY_MAP_SCHEMA_VERSION;
+  schema_version: typeof WORKFLOW_EXECUTION_DEPENDENCIES_SCHEMA_VERSION;
   modules: WorkflowExecutionDependencyTarget[];
   packages: WorkflowExecutionDependencyPackage[];
   issuers: WorkflowExecutionDependencyIssuer[];
@@ -229,12 +246,77 @@ export function sealWorkflowControlFiles(input: {
   if (pathEntryExists(paths.integrityPath)) {
     throw new Error("workflow control seal already exists");
   }
-  writeJsonDurable(paths.integrityPath, seal);
+  writeRuntimeDocument(paths.integrityPath, WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID, seal, "workflow control seal");
   return paths;
 }
 
 export function verifyWorkflowControlFiles(projectRoot: string, layout: RunLayout): WorkflowControlPaths {
   return verifyWorkflowControlSnapshot(projectRoot, layout).paths;
+}
+
+/**
+ * Read the task manifest through the workflow-control seal without needing the
+ * external project checkout that owns the generated workflow source. This is
+ * the post-finalization authority needed to rerun artifact gates safely.
+ */
+export function verifySealedTaskManifestSnapshot(layout: RunLayout): VerifiedSealedTaskManifestSnapshot {
+  const smithersRoot = safeResolveInside(layout.root, "smithers", "workflow control directory");
+  const tasksPath = safeResolveInside(smithersRoot, "tasks.json", "workflow task manifest");
+  const integrityPath = safeResolveInside(smithersRoot, WORKFLOW_CONTROL_INTEGRITY_FILE, "workflow control seal");
+  const integrityContents = readBoundedRegularFile(layout.root, integrityPath, "workflow control seal");
+  const seal = parseWorkflowControlIntegritySeal(integrityContents);
+  if (seal.run_id !== layout.runId) throw new Error(`workflow control seal run ID does not match ${layout.runId}`);
+
+  const graphContents = readBoundedRegularFile(layout.root, layout.graphPath, "run graph");
+  const contents = readBoundedRegularFile(layout.root, tasksPath, "workflow task manifest");
+  for (const [key, bytes] of [
+    ["graph", graphContents],
+    ["tasks", contents]
+  ] as const) {
+    const observed = digestBytes(bytes);
+    const expected = seal.files[key];
+    if (observed.sha256 !== expected.sha256 || observed.size_bytes !== expected.size_bytes) {
+      throw new Error(`sealed workflow control file changed: ${controlFileLabel(key)}`);
+    }
+  }
+
+  const graph = assertPlannedGraph(parseStrictJsonBytes(graphContents));
+  const document = parseSmithersTaskManifestBytes(contents);
+  assertSmithersTaskManifestMatchesPlannedGraph(document, graph);
+  if (document.run_id !== layout.runId) throw new Error("workflow task manifest run ID does not match the run root");
+
+  const graphNodeIds = sortedUniqueIds(
+    graph.nodes.map((node) => node.id),
+    "run graph node"
+  );
+  const taskAttemptIds = sortedUniqueIds(
+    document.tasks.map((task) => task.attemptId),
+    "workflow task attempt"
+  );
+  const taskNodeIds = sortedUniqueIds(
+    document.tasks.flatMap((task) => [
+      task.preparationSmithersNodeId,
+      task.smithersNodeId,
+      task.verifierSmithersNodeId
+    ]),
+    "workflow task node"
+  );
+  if (
+    JSON.stringify(graphNodeIds) !== JSON.stringify(seal.bindings.expected_state_node_ids) ||
+    JSON.stringify(taskAttemptIds) !== JSON.stringify(seal.bindings.expected_task_attempt_ids) ||
+    JSON.stringify(taskNodeIds) !== JSON.stringify(seal.bindings.expected_task_node_ids)
+  ) {
+    throw new Error("workflow task manifest no longer matches the sealed completeness binding");
+  }
+  const state = parseRecordJson(readBoundedRegularFile(layout.root, layout.statePath, "run state"), "run state");
+  if (
+    state.run_id !== layout.runId ||
+    state.graph_fingerprint !== seal.bindings.graph_fingerprint ||
+    state.config_fingerprint !== seal.bindings.config_fingerprint
+  ) {
+    throw new Error("run state identity or fingerprints no longer match the sealed task authority");
+  }
+  return { tasksPath, integrityPath, contents, integrityContents, document };
 }
 
 export function workflowControlGeneration(projectRoot: string, layout: RunLayout): string {
@@ -1375,9 +1457,10 @@ function deriveWorkflowControlBindings(
   stateContents: Buffer,
   planContents: Buffer | undefined
 ): WorkflowControlBindings {
-  const graph = parseRecordJson(contents.graph, "run graph");
-  const expandedGraph = parseRecordJson(contents.expanded_graph, "expanded workflow graph") as unknown as ExpandedGraph;
-  const tasksDocument = parseRecordJson(contents.tasks, "workflow task manifest");
+  const graph = assertPlannedGraph(parseStrictJsonBytes(contents.graph));
+  const expandedGraph = assertExpandedGraphSchema(parseStrictJsonBytes(contents.expanded_graph));
+  const tasksDocument = parseSmithersTaskManifestBytes(contents.tasks);
+  assertSmithersTaskManifestMatchesPlannedGraph(tasksDocument, graph);
   const state = parseRecordJson(stateContents, "run state");
   const graphFingerprint = contents.graph_fingerprint.toString("utf8").trim();
   if (!SHA256_PATTERN.test(graphFingerprint)) throw new Error("run graph fingerprint is invalid");
@@ -1392,12 +1475,7 @@ function deriveWorkflowControlBindings(
     throw new Error("run state config fingerprint does not match the exact resolved config");
   }
   if (!Array.isArray(graph.nodes) || !isRecord(state.nodes)) throw new Error("run graph or state node set is invalid");
-  if (
-    tasksDocument.run_id !== runId ||
-    typeof tasksDocument.smithers_run_id !== "string" ||
-    tasksDocument.smithers_run_id.length === 0 ||
-    !Array.isArray(tasksDocument.tasks)
-  ) {
+  if (tasksDocument.run_id !== runId || tasksDocument.smithers_run_id.length === 0) {
     throw new Error("workflow task manifest identity is invalid");
   }
   const graphNodeIds = sortedUniqueIds(
@@ -1418,20 +1496,9 @@ function deriveWorkflowControlBindings(
   const taskNodes: string[] = [];
   const concreteNodes: string[] = [];
   for (const task of tasksDocument.tasks) {
-    if (
-      !isRecord(task) ||
-      typeof task.attemptId !== "string" ||
-      typeof task.concreteNodeId !== "string" ||
-      typeof task.smithersNodeId !== "string" ||
-      typeof task.verifierSmithersNodeId !== "string" ||
-      task.smithersNodeId !== `node:${task.attemptId}` ||
-      task.verifierSmithersNodeId !== `verify:${task.attemptId}`
-    ) {
-      throw new Error("workflow task manifest contains an invalid task identity");
-    }
     taskAttempts.push(task.attemptId);
     concreteNodes.push(task.concreteNodeId);
-    taskNodes.push(task.smithersNodeId, task.verifierSmithersNodeId);
+    taskNodes.push(task.preparationSmithersNodeId, task.smithersNodeId, task.verifierSmithersNodeId);
   }
   const expectedTaskAttemptIds = sortedUniqueIds(taskAttempts, "workflow task attempt");
   const expectedTaskNodeIds = sortedUniqueIds(taskNodes, "workflow task node");
@@ -1450,7 +1517,7 @@ function deriveWorkflowControlBindings(
   );
   if (
     JSON.stringify(declaredTaskNodeIds) !==
-    JSON.stringify(expectedTaskNodeIds.filter((nodeId) => !nodeId.startsWith("verify:")))
+    JSON.stringify(expectedTaskNodeIds.filter((nodeId) => nodeId.startsWith("node:")))
   ) {
     throw new Error("sealed graph workflow task set does not match the task manifest");
   }
@@ -1563,9 +1630,8 @@ function compareCanonicalStrings(left: string, right: string): number {
 }
 
 function parseWorkflowControlIntegritySeal(contents: Buffer): WorkflowControlIntegritySeal {
-  const value = parseRecordJson(contents, "workflow control seal");
+  const value = parseRuntimeDocumentBytes(WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID, contents, "workflow control seal");
   if (
-    !hasExactKeys(value, ["schema_version", "run_id", "files", "execution_files", "bindings"]) ||
     value.schema_version !== WORKFLOW_CONTROL_INTEGRITY_SCHEMA_VERSION ||
     typeof value.run_id !== "string" ||
     !isRecord(value.files) ||
@@ -1671,10 +1737,13 @@ function parseWorkflowExecutionDependencyMap(
 ): WorkflowExecutionDependencyMap {
   const manifest = executionFiles.find((file) => file.snapshotPath === WORKFLOW_EXECUTION_DEPENDENCY_MAP_SNAPSHOT_PATH);
   if (manifest === undefined) throw new Error("workflow execution snapshot is missing its sealed dependency map");
-  const value = parseRecordJson(manifest.contents, "workflow execution dependency map");
+  const value = parseRuntimeDocumentBytes(
+    WORKFLOW_EXECUTION_DEPENDENCIES_JSON_SCHEMA_ID,
+    manifest.contents,
+    "workflow execution dependency map"
+  );
   if (
-    !hasExactKeys(value, ["schema_version", "modules", "packages", "issuers", "executable_paths", "smithers_bin"]) ||
-    value.schema_version !== WORKFLOW_EXECUTION_DEPENDENCY_MAP_SCHEMA_VERSION ||
+    value.schema_version !== WORKFLOW_EXECUTION_DEPENDENCIES_SCHEMA_VERSION ||
     !Array.isArray(value.modules) ||
     !Array.isArray(value.packages) ||
     !Array.isArray(value.issuers) ||
@@ -1739,7 +1808,7 @@ function parseWorkflowExecutionDependencyMap(
     throw new Error("sealed workflow runner is not a declared executable");
   }
   return {
-    schema_version: WORKFLOW_EXECUTION_DEPENDENCY_MAP_SCHEMA_VERSION,
+    schema_version: WORKFLOW_EXECUTION_DEPENDENCIES_SCHEMA_VERSION,
     modules,
     packages,
     issuers,
@@ -1861,7 +1930,7 @@ function validateIds(values: readonly unknown[], label: string): string[] {
 
 function parseRecordJson(contents: Buffer, label: string): Record<string, unknown> {
   try {
-    const value = JSON.parse(contents.toString("utf8")) as unknown;
+    const value = parseStrictJsonBytes(contents);
     if (!isRecord(value)) throw new Error(`${label} must be a JSON object`);
     return value;
   } catch (error) {

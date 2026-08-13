@@ -168,6 +168,27 @@ test("materializeSelection rejects missing confirmation and implicit bulk select
   assert.equal(fs.existsSync(path.join(project, "test/wildcard.txt")), false);
 });
 
+test("materializeSelection rejects malformed historical audit data before copying", async () => {
+  const project = tempProject();
+  const { runId, nodeId } = await plannedRunWithArtifact(project);
+  const auditPath = path.join(project, ".ultrafuzz", "materialize-audit.jsonl");
+  const destinationPath = path.join(project, "test", "blocked.txt");
+  const malformedAudit = Buffer.from('{"schema_version":"1.0"}\n', "utf8");
+  fs.writeFileSync(auditPath, malformedAudit);
+
+  const result = await materializeSelection({
+    projectRoot: project,
+    runId,
+    confirmed: true,
+    copies: [{ source: `artifacts/${nodeId}/stdout.txt`, destination: "test/blocked.txt" }]
+  });
+
+  assert.equal(result.ok, false);
+  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "MATERIALIZE_AUDIT_ROOT_UNSAFE"));
+  assert.equal(fs.existsSync(destinationPath), false);
+  assert.deepEqual(fs.readFileSync(auditPath), malformedAudit);
+});
+
 test("materializeSelection rejects patch selections until patch application is implemented", async () => {
   const project = tempProject();
   const { runId, runRoot, nodeId } = await plannedRunWithArtifact(project);

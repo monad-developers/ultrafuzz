@@ -62,6 +62,7 @@ The CLI product surface consists of:
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | `init`                 | Create root config plus `.ultrafuzz/**` product surfaces and workflow plumbing.                                            |
 | `validate`             | Validate config, topology, prompts, references, path guards, agent references, and trust posture without launching agents. |
+| `json validate`        | Validate one RFC 8259 JSON document against one local strict Draft 2020-12 schema without mutating either file.            |
 | `run`                  | Validate, render prompts, build run evidence, compile and launch a linked workflow.                                        |
 | `references status`    | Report whether pinned references are present in the local digest-checked cache.                                            |
 | `references sync`      | Explicitly fetch pinned references into the local cache.                                                                   |
@@ -75,8 +76,33 @@ The CLI product surface consists of:
 | `materialize <run-id>` | Copy selected reviewed outputs into the target project after confirmation and path checks.                                 |
 | `clean <run-id>`       | Remove selected generated run paths after confirmation and path checks.                                                    |
 
-Commands that support automation SHOULD emit a schema-versioned JSON envelope
-with `ok`, `diagnostics`, and `data`.
+Commands that support automation MUST emit `ultrafuzz.cli.result.v2` with
+`ok`, public `diagnostics`, and command-discriminated `data`. Each current
+command payload MUST be closed and schema-validated before serialization.
+Unknown invocation failures MUST use `ok: false` and `data: null`. Explicit
+operator workflow input and redacted third-party tool input/output are the only
+deliberately opaque nested JSON values. Version-1 envelopes and compatibility
+conversion are unsupported.
+
+`run` MUST use mutually exclusive `--input-json` and `--input-file` flags; it
+MUST NOT reinterpret malformed inline JSON as a path or retain the historical
+`--input` fallback. Both forms use the strict JSON parser, and file input uses
+one bounded immutable regular-file snapshot.
+
+`ultrafuzz json validate` MUST remain separate from project-wide `ultrafuzz
+validate`. Its canonical invocation is:
+
+```bash
+ultrafuzz json validate --schema <schema.json> --file <artifact.json>
+```
+
+Exit `0` means portable whole-document shape validation succeeded. Exit `1`
+means the producer-owned instance is missing, unreadable, invalid UTF-8/JSON,
+contains duplicate keys, or violates the schema. Exit `2` means schema,
+reference, invocation, resource, or tool setup failed. The CLI and host MUST use
+the same strict, offline, worker-bounded parser and Ajv configuration and MUST
+NOT coerce, default, remove, normalize, repair, or rewrite either file. Exit `0`
+does not replace named host semantic/context gates.
 
 ## Configuration
 
@@ -152,7 +178,7 @@ nodes:
       - setup
     outputs:
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
         primary: true
   - id: __finish__
     kind: meta
@@ -204,6 +230,13 @@ Concrete IDs MUST NOT collide. Expanded graphs SHOULD preserve graph version,
 topology version, groups, logical ID, concrete ID, label, kind, dependencies,
 artifact directory, loop metadata, contracted outputs, primary output marker,
 timeout, reference revision, and model fan-out provenance.
+
+Every planned JSON output MUST resolve through the checked-in schema registry.
+The planned and expanded graph representations MUST persist the schema filename,
+fragment-free schema ID, schema SHA-256, package schema-bundle SHA-256, and
+validator build identity. Missing or partial bindings MUST fail planning or host
+verification. Operators declare the versioned contract in topology; they MUST
+NOT supply these trust identities manually in YAML.
 
 ## Prompts
 
@@ -262,13 +295,28 @@ producers MUST declare a primary contracted output. Exact artifact paths MUST
 resolve to declared producer outputs. Ancestor artifact lists MUST use declared
 outputs.
 
+For every agent-authored JSON output, the centrally rendered output contract
+MUST include one safely shell-quoted command using the exact resolved paths:
+
+```text
+Validation command: `ultrafuzz json validate --schema '<absolute schema path>' --file '<absolute artifact path>'`
+```
+
+The shared prompt MUST require the producer to write the canonical document,
+run every command after its final write and before returning, correct and rerun
+an exit-`1` draft during that same session, rerun after any later change, never
+edit the supplied schema, treat exit `2` as a setup failure, and finish only
+after every command exits `0`. It MUST say that validation is non-mutating and
+that host semantic/context gates still run afterward. No validation receipt or
+message-schema extension is required.
+
 A deterministic workflow verification task MUST validate every agent output
 before downstream tasks become eligible. Artifact manifests MUST record output
 contract identities and digests plus the exact prerequisite manifest digests
 consumed by the attempt. Runtime failure evidence MUST distinguish agent,
 provider, artifact-contract, and dependency-cascade failures.
 
-The terminal structured report MUST satisfy `ultrafuzz/report@1` before scoring
+The terminal structured report MUST satisfy `ultrafuzz/report@2` before scoring
 or publication. Invalid terminal output MUST persist a typed non-publishable
 state without persisting raw output or diagnostics.
 
@@ -291,6 +339,15 @@ Runtime MUST validate product state, render prompts, create run evidence,
 compile workflow tasks, launch a linked workflow, and keep the linked workflow
 identity in run metadata. The workflow engine is an implementation choice.
 
+Before model work, a schema-backed producer MUST receive a host-managed
+Ultrafuzz launcher ahead of target-controlled `PATH` entries. Local runs MUST
+bind the launcher to the planned CLI bytes, validator build, and schema-bundle
+digest in run-owned metadata. Modal MUST provide the equivalent root-owned,
+read-only entrypoint. Both environments MUST run a real known-valid fixture and
+verify the returned schema ID, schema digest, bundle digest, and validator build;
+`command -v` alone is insufficient. A missing, tampered, or stale launcher is a
+setup failure and MUST NOT be silently repaired on resume.
+
 Before or at launch, each run MUST persist:
 
 - `run.json`
@@ -303,6 +360,7 @@ Before or at launch, each run MUST persist:
 - `events.jsonl`
 - `attempts.jsonl`
 - `plan.json`
+- `trusted-cli.json` and a run-owned trusted launcher for schema-backed producers
 - immutable rendered prompt snapshots under `prompt-snapshots/`
 - per-node artifacts under `artifacts/`
 - review artifacts under `review/`
@@ -324,20 +382,47 @@ queued, active, and idle durations. Lost-controller recovery MUST use an atomic
 takeover claim and MUST NOT repeat completed work. Workflow deadlines and
 recovery decisions MUST be testable with a fake clock.
 
+Current run state MUST use schema version `ultrafuzz.run-state.v5` and schema ID
+`urn:ultrafuzz:schema:artifacts:run-state:5`. Older persisted state and graph
+versions MAY fail to resume, inspect, or render, but the failure MUST identify
+the unsupported version. The runtime MUST NOT add a historical reader that
+coerces old state into the current contract.
+
+Run provenance MUST contain the complete sealed workflow binding. Node
+provenance, when present, MUST match exactly one closed variant: execution,
+pinned reference, or dependency blocker. Execution provenance MUST use the
+canonical `output_contracts` field and complete agent/verifier task identities;
+generic JSON values, `required_artifacts`, partial identities, and workflow-state
+aliases MUST be rejected rather than normalized.
+
 Completed node attempts MUST be appended immutably to `attempts.jsonl` with
-stable strategy-attempt, executor-retry, checkpoint-generation,
-workflow-execution, and controller-invocation identities. Entries MUST preserve
-parent and reuse relationships, lifecycle timestamps, typed outcomes, and input
-and output manifest digests. Attempt counts and terminal summaries MUST derive
-from the ledger. Failure categories MUST remain separate from raw diagnostics,
-and ledger entries MUST NOT persist raw inputs, outputs, or configuration.
+the exact Smithers identity `(workflow_run_id, source_event_sequence)`.
+Strategy-attempt, control-generation, node, iteration, attempt, and reuse-source
+coordinates MUST remain validated evidence fields and MUST NOT become surrogate
+ledger identities. Entries MUST preserve lifecycle timestamps, typed outcomes,
+reuse source coordinates, and input and output manifest digests. Attempt counts
+and terminal summaries MUST derive from the ledger. Failure categories MUST
+remain separate from raw diagnostics, and ledger entries MUST NOT persist raw
+inputs, outputs, or configuration.
 
 The CLI MUST derive per-node timing, token components, estimated cost, model,
 attempt/retry disposition, and completeness from existing run evidence without
 requiring a precomputed statistics artifact. The same projection MUST operate
-offline from a portable report bundle containing `attempts.jsonl`,
-`usage.jsonl`, `state.json`, `graph.json`, and `run.json`. Historical missing
-evidence MUST remain unavailable rather than being represented as zero.
+offline only from the registered current v3 report-bundle manifest containing
+current `state.json`, `graph.json`, `graph.fingerprint`, and `run.json`
+documents. Present attempt and usage ledgers MUST pass the same strict UTF-8,
+duplicate-key, schema, run-binding, identity, and history readers as local run
+evidence; malformed, duplicate, conflicting, or cross-run rows MUST fail the
+query. Local evidence MUST be accepted only after two byte-identical reads of
+the complete evidence set, with bounded retries for recognized mutation races;
+the snapshot timestamp MUST be taken immediately after the accepted second
+read. A capture timestamp MUST NOT precede any historical observation carried
+by the snapshot or be later than the statistics clock. A genuinely absent
+optional ledger MUST remain unavailable rather than being represented as zero.
+When usage evidence is absent from a bundle, unauthenticated metadata
+accounting MUST also remain unavailable; a local run that retains accounting
+but loses its usage ledger MUST fail closed. The CLI result MUST use the exact
+closed `ultrafuzz.stats.v1` data contract inside `ultrafuzz.cli.result.v2`.
 
 `status`, `pause`, `resume`, `replay`, and `fork` operate on the linked workflow run. They SHOULD
 perform product checks, delegate to the workflow engine, and persist updated
@@ -349,17 +434,48 @@ Node artifacts are the durable message-passing and evidence system. Required
 artifacts MUST match topology declarations. Artifact paths MUST be safe,
 project-local relative paths under the node artifact directory.
 
-Artifact manifests SHOULD record schema version, node ID, relative path, size,
-SHA-256 digest, and provenance. Event logs MUST redact secret-looking payload
-values before persistence. JSON/JSONL plus query indexes are sufficient; SQLite
-events are not required.
+Artifact manifests MUST use `ultrafuzz.artifact-manifest.v3` and record run,
+node, and producer identity; relative file paths, sizes, SHA-256 digests, and
+provenance; output contract IDs and digests; exact prerequisite manifest
+digests; and the primary marker. Every JSON output entry MUST also record the
+complete `schema_file`, `schema_id`, `schema_sha256`,
+`schema_bundle_sha256`, and `validator_build` binding. Non-JSON entries MUST
+omit those fields. Runtime-owned manifests and verification markers MUST be
+generated canonically as `ultrafuzz.artifact-manifest.v3` and
+`ultrafuzz.artifact-verification.v2` documents and strictly validated against
+their registered schemas. Manifest provenance metadata, when present, MUST be
+exactly either pinned-reference materialization metadata or Smithers task
+identity metadata; arbitrary JSON metadata bags are forbidden. The host MUST
+NOT upgrade an old manifest or marker in place.
 
-Findings MUST be arrays in `findings.json`. Each normalized finding MUST
-include `schema_version`, `id`, `title`, `status`, `severity_guess`,
-`confidence`, and `summary`.
+Each retained agent-authored JSON handoff MUST have exactly one current named
+contract, one complete Draft 2020-12 whole-document schema, and one canonical
+version spelling. `ultrafuzz/json-object@1`, `ultrafuzz/json-array@1`, old
+contract IDs, aliases, coercion readers, and compatibility fallbacks MUST NOT be
+available. Where Zod remains useful for typed access, it MUST accept the same
+shape as JSON Schema without preprocessing, transforms, defaults, coercion,
+property stripping, or normalization. Constraints that JSON Schema cannot
+express MUST remain explicit named semantic/context gates.
 
-Finding `status` MUST be a non-empty lifecycle string. Canonical values
-include:
+After the producer returns, every declared agent-owned artifact byte MUST stay
+unchanged through host validation, synchronization, reporting, dashboard reads,
+publication, and bundling. Missing or invalid output MUST be a terminal
+post-agent failure. The runtime MUST NOT invoke a correction turn or full-node
+model retry, synthesize an empty artifact or Markdown from a final response,
+normalize or convert fields, reseal changed bytes, rebuild from dependencies,
+or fall back to a sibling or historical artifact. Exact byte copying and
+explicitly runtime-owned sidecars remain permitted.
+
+Event logs MUST redact secret-looking payload values before persistence.
+JSON/JSONL plus query indexes are sufficient; SQLite events are not required.
+
+Findings MUST use `ultrafuzz/findings@2` and be arrays in `findings.json`.
+Each finding MUST include exact `schema_version` literal
+`ultrafuzz.finding.v2`, producer-authored `id`, `title`, canonical `status`,
+preliminary `severity_guess`, lowercase `confidence`, and `summary`. Missing IDs
+MUST NOT be synthesized.
+
+Finding `status` MUST be one of:
 
 - `candidate`
 - `needs-review`
@@ -369,8 +485,7 @@ include:
 - `fixed`
 - `wont-fix`
 
-Agent-produced lifecycle statuses SHOULD be preserved when they are non-empty
-strings.
+Other lifecycle strings and earlier schema-version spellings MUST be rejected.
 
 When present, `triage_classification` MUST be one of:
 

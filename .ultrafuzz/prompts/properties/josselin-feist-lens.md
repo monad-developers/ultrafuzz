@@ -32,11 +32,12 @@ the catalog, and set every property priority to `high`, `medium`, or `low`.
 The JSON catalog is the machine-readable source of truth.
 
 Populate `reference_expectations` only from exact identifiers present in the
-supplied pinned-reference artifacts. Preserve one
-identifier per named expectation and carry the supplied identifier unchanged;
-when the supplied inputs contain no named expectation, leave the field absent.
+supplied pinned-reference artifacts. Preserve one identifier per named
+expectation and carry the supplied identifier unchanged. When the supplied
+inputs contain no named expectation, do not invent expectation IDs; use the
+pinned property-lens schema's no-expectation representation.
 
-When a pinned-reference node declares a catalog with the `ultrafuzz/reference-expectations@1` contract, read its declared artifact and validate it with `{{schema_path}}/reference-expectations.schema.json` before copying identifiers.
+When a pinned-reference node declares a catalog with the `ultrafuzz/reference-expectations@2` contract, read its declared artifact and validate it with `{{schema_path}}/reference-expectations.schema.json` before copying identifiers.
 
 ## Target-derived invariant extraction
 
@@ -75,13 +76,13 @@ Keep the Markdown table readable and identical in ids, descriptions,
 categories, and priorities. Do not put findings in either property artifact.
 
 Findings discipline: property candidates are planning material, not campaign
-findings. Do not copy the property table into `findings.json`; write `[]`
-there unless you independently identify a concrete target vulnerability with
-specific evidence.
+findings. Do not copy the property table into `findings.json`; use only the
+empty form defined by its exact pinned schema unless you independently identify
+a concrete target vulnerability with specific evidence.
 
 Artifact finalization: after writing the property table, immediately write the
-required findings JSON to `{{output_findings_path}}`; use `[]` when there is no
-concrete vulnerability. Do not use Bash to validate the property catalog or
+required findings JSON to `{{output_findings_path}}`; use its schema-defined
+empty form when there is no concrete vulnerability. Do not use Bash to validate the property catalog or
 findings with `cat`, `grep`, `tr`, `wc`, pipes, redirection, or command chains.
 If you inspect the artifact after writing it, use the Read tool or one simple
 allowlisted command, then finish.

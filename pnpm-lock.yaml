@@ -54,6 +54,12 @@ importers:
       '@ultrafuzz/security':
         specifier: workspace:*
         version: link:../security
+      ajv:
+        specifier: ^8.20.0
+        version: 8.20.0
+      ajv-formats:
+        specifier: ^3.0.1
+        version: 3.0.1(ajv@8.20.0)
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -78,9 +84,15 @@ importers:
       '@ultrafuzz/evals':
         specifier: workspace:*
         version: link:../evals
+      '@ultrafuzz/evmbench':
+        specifier: workspace:*
+        version: link:../evmbench
       '@ultrafuzz/modal':
         specifier: workspace:*
         version: link:../modal
+      '@ultrafuzz/references':
+        specifier: workspace:*
+        version: link:../references
       '@ultrafuzz/runtime':
         specifier: workspace:*
         version: link:../runtime
@@ -103,6 +115,9 @@ importers:
 
   packages/config:
     dependencies:
+      '@ultrafuzz/artifacts':
+        specifier: workspace:*
+        version: link:../artifacts
       '@ultrafuzz/security':
         specifier: workspace:*
         version: link:../security
@@ -152,6 +167,12 @@ importers:
       '@xyflow/react':
         specifier: ^12.8.4
         version: 12.11.1(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(immer@11.1.15)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+      ajv:
+        specifier: ^8.20.0
+        version: 8.20.0
+      ajv-formats:
+        specifier: ^3.0.1
+        version: 3.0.1(ajv@8.20.0)
       react:
         specifier: ^19.1.0
         version: 19.2.7
@@ -173,15 +194,25 @@ importers:
       '@ultrafuzz/runtime':
         specifier: workspace:*
         version: link:../runtime
+      proper-lockfile:
+        specifier: 4.1.2
+        version: 4.1.2
       yaml:
         specifier: ^2.8.0
         version: 2.9.0
       zod:
         specifier: ^4.4.3
         version: 4.4.3
+    devDependencies:
+      '@types/proper-lockfile':
+        specifier: ^4.1.4
+        version: 4.1.4
 
   packages/evmbench:
     dependencies:
+      '@ultrafuzz/artifacts':
+        specifier: workspace:*
+        version: link:../artifacts
       yaml:
         specifier: ^2.8.0
         version: 2.9.0
@@ -194,6 +225,9 @@ importers:
       '@ultrafuzz/artifacts':
         specifier: workspace:*
         version: link:../artifacts
+      '@ultrafuzz/config':
+        specifier: workspace:*
+        version: link:../config
       '@ultrafuzz/evals':
         specifier: workspace:*
         version: link:../evals

@@ -2,6 +2,7 @@ import { Command, Flags } from "@oclif/core";
 import { resolveEvalSuitePath, runEvalSuite } from "@ultrafuzz/evals";
 
 import {
+  cliEntrypoint,
   cliIo,
   commandFailure,
   emitCommandResult,
@@ -9,6 +10,7 @@ import {
   loadEvalConfig,
   projectRoot
 } from "../../command-shared.js";
+import { toCliEvalRunData } from "../../cli-contracts.js";
 
 export default class EvalRun extends Command {
   static override summary = "Launch Ultrafuzz runs for an eval suite matrix and stream node telemetry";
@@ -54,15 +56,18 @@ export default class EvalRun extends Command {
         ...(flags.provider !== undefined ? { provider: flags.provider } : {}),
         ...(flags["no-watch"] === true ? { watch: false } : {}),
         evalProviderConfig: evalConfig,
+        ultrafuzzCliEntrypoint: cliEntrypoint(),
         env
       });
       emitCommandResult(
         this,
         "eval run",
         {
-          ok: result.failed === 0 && result.incomplete === 0,
+          // A detached launch is asked not to observe its rows, so unobserved
+          // rows are the requested outcome rather than an incomplete result.
+          ok: result.failed === 0 && (!result.watched || result.incomplete === 0),
           command: "eval run",
-          data: result,
+          data: toCliEvalRunData(result),
           text: `Eval run: ${result.eval_run_id}\nLaunched: ${result.launched}\nFailed: ${result.failed}\nIncomplete: ${result.incomplete}\nRoot: ${result.eval_run_root}\n`,
           diagnostics: [
             ...diagnostics,

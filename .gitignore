@@ -24,3 +24,4 @@ smithers.db*
 
 # Agent session artifacts written by package-level test runs
 packages/*/.ultrafuzz/
+packages/dashboard/frontend/.generated/

@@ -32,16 +32,28 @@ describe("release validation report aggregation", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-release-report-"));
     roots.push(root);
     const fragments = path.join(root, "fragments");
-    const reportPath = path.join(root, "report.json");
+    const reportRoot = fs.mkdtempSync(path.join(repoRoot, ".ultrafuzz", "release-report-test-"));
+    roots.push(reportRoot);
+    const reportPath = path.join(reportRoot, "report.json");
     fs.mkdirSync(fragments);
     fs.writeFileSync(
       path.join(fragments, "cli-typecheck.json"),
       `${JSON.stringify({
-        schema_version: "ultrafuzz.release-validation.report.v1",
+        schema_version: "ultrafuzz.release-validation.report.v2",
         package_id: "ultrafuzz",
+        generated_at: "2026-08-13T00:00:00.000Z",
+        project_root: repoRoot,
+        report_path: ".ultrafuzz/release-validation/cli-typecheck.json",
+        overall_status: "fail",
         commands: gateIds.map((id) => ({
           id,
-          status: id === "benchmark-history" ? "failed" : "passed"
+          title: id,
+          command: `test ${id}`,
+          required: true,
+          status: id === "benchmark-history" ? "failed" : "passed",
+          exit_code: id === "benchmark-history" ? 1 : 0,
+          duration_ms: 1,
+          validation_gates: ["G-TEST"]
         }))
       })}\n`,
       "utf8"
@@ -56,11 +68,9 @@ describe("release validation report aggregation", () => {
     expect(result.status).toBe(1);
     const report = JSON.parse(fs.readFileSync(reportPath, "utf8")) as {
       overall_status?: string;
-      failures?: { commands?: string[] };
       commands?: Array<{ id?: string; status?: string }>;
     };
     expect(report.overall_status).toBe("fail");
-    expect(report.failures?.commands).toEqual(["benchmark-history"]);
     expect(report.commands?.find((command) => command.id === "benchmark-history")?.status).toBe("failed");
   });
 });

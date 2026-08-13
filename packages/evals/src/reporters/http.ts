@@ -56,12 +56,25 @@ export async function boundedProviderResponseText(response: Response, provider: 
   return boundedResponseText(response, provider, "EVAL_PROVIDER_RESPONSE_TOO_LARGE");
 }
 
+export async function boundedProviderResponseBytes(response: Response, provider: string): Promise<Buffer> {
+  return boundedResponseBytes(response, provider, "EVAL_PROVIDER_RESPONSE_TOO_LARGE");
+}
+
 export async function boundedResponseText(
   response: Response,
   label: string,
   errorCode: string,
   maxBytes = MAX_PROVIDER_RESPONSE_BYTES
 ): Promise<string> {
+  return (await boundedResponseBytes(response, label, errorCode, maxBytes)).toString("utf8");
+}
+
+export async function boundedResponseBytes(
+  response: Response,
+  label: string,
+  errorCode: string,
+  maxBytes = MAX_PROVIDER_RESPONSE_BYTES
+): Promise<Buffer> {
   const declaredLength = response.headers?.get?.("content-length");
   if (declaredLength !== null && declaredLength !== undefined) {
     const declaredBytes = Number(declaredLength);
@@ -73,10 +86,11 @@ export async function boundedResponseText(
 
   if (response.body === null || response.body === undefined || typeof response.body.getReader !== "function") {
     const text = await response.text();
-    if (Buffer.byteLength(text) > maxBytes) {
+    const bytes = Buffer.from(text, "utf8");
+    if (bytes.byteLength > maxBytes) {
       throw responseTooLarge(label, errorCode, maxBytes);
     }
-    return text;
+    return bytes;
   }
 
   const chunks: Uint8Array[] = [];
@@ -98,7 +112,10 @@ export async function boundedResponseText(
   } finally {
     reader.releaseLock();
   }
-  return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString("utf8");
+  return Buffer.concat(
+    chunks.map((chunk) => Buffer.from(chunk)),
+    totalBytes
+  );
 }
 
 function responseTooLarge(label: string, code: string, maxBytes: number): EvalError {

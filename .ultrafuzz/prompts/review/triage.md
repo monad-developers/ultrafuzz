@@ -72,8 +72,10 @@ evidence:
   `reachability=generated-public-wrapper-poc`.
 - If the proof is helper-only and public entrypoints enforce stricter bounds,
   classify it as `harness-defect`, `defensive-hardening`, or `false-positive`
-  according to the evidence. Set `status` to `false-positive` for unreachable
-  false positives, and record why production reachability is absent.
+  according to the evidence. Set `status` to `false-positive` only when you
+  classify the finding as `false-positive`; for the other two classifications
+  leave `status` exactly as the deduped finding carried it. Record why
+  production reachability is absent either way.
 - If direct public reachability is unclear, classify it as `undetermined` and
   add `reachability=public-wrapper-required` plus the exact public wrapper or
   entrypoint evidence needed before severity can treat it as production
@@ -127,42 +129,36 @@ explicitly define unknown required actions as no-ops or skippable.
   missing or ambiguous, preserve the repro but classify the production claim as
   `incomplete-spec`, `spec-gated`, or `undetermined` according to the evidence.
 
-Reachability fixture examples:
-
-```json
-{
-  "title": "Helper-only arithmetic mismatch",
-  "triage_classification": "harness-defect",
-  "status": "false-positive",
-  "notes": [
-    "reachability=helper-only: direct helper fuzzing bypasses public entrypoint bounds",
-    "classification_reason=harness defect: generated proof bypasses production entrypoint preconditions"
-  ]
-}
-```
-
-```json
-{
-  "title": "Public entrypoint reaches helper mismatch",
-  "triage_classification": "true-positive",
-  "notes": [
-    "reachability=public-entrypoint-trace: external flow reaches the helper with production-like bounds",
-    "helper_proof=direct helper mismatch reproduced",
-    "public_exploitability=public entrypoint trace reproduces the same state transition"
-  ]
-}
-```
+For a helper-only arithmetic mismatch that bypasses public entrypoint bounds,
+use `harness-defect`, append a `reachability=helper-only: ...` note, and bind
+the same concrete explanation through one classification-reason note and one
+demotion-reason note. For a mismatch reached through a production-like public
+entrypoint, use `true-positive`, append
+`reachability=public-entrypoint-trace: ...`, preserve the direct helper proof,
+state the public exploitability, and bind one classification-reason note. These
+are semantic examples, not alternate JSON shapes.
 
 Do not remove findings during triage. Preserve the upstream finding fields and
-add or update `triage_classification` with the consensus value. Keep concise
-notes that summarize the votes, decisive evidence, and recommended next action.
-Every triaged finding must include a machine-readable `triage_reason=<reason>`
-or `classification_reason=<reason>` note. If triage demotes a previously
-production-looking record to a non-production class, also include
-`demotion_reason=<reason>`.
+add or update `triage_classification` with the consensus value. Triage owns only
+`triage_classification`, `notes`, and `status`; every other field must come
+through unchanged as a parsed JSON value, and record count, record order, and
+each `id` must match the deduped array position for position.
+`notes` is append-only: copy every upstream note verbatim and in its original
+order, then append your new notes at the end. Never edit, re-word, re-punctuate,
+merge, re-order, de-duplicate, or drop an inherited note; whitespace and
+punctuation changes count as edits. Keep the notes you append concise, and use
+them to summarize the votes, decisive evidence, and recommended next action.
+Every triaged finding must include exactly one machine-readable
+`triage_reason=<reason>` or `classification_reason=<reason>` note. The first
+note carrying either prefix is the one that binds downstream, so never emit a
+second reason note. For every classification other than `true-positive`, also
+include exactly one `demotion_reason=<reason>` note; for `true-positive`, emit
+no `demotion_reason=` note at all.
 When a finding is classified as `false-positive`, set `status` to
-`false-positive`; otherwise leave the status visible for downstream review unless
-the upstream evidence already supports a more specific status.
+`false-positive`. For every other classification, copy `status` from the deduped
+finding unchanged; triage may set `status` only to `false-positive`, and only
+for a `false-positive` classification. The finding schema lists the other status
+values because other stages own them, not because triage may write them.
 In particular, preserve `property_ids` unchanged for every property-derived
 finding.
 
@@ -174,13 +170,34 @@ success is not evidence that the record should be removed. Treat
 `triaged-findings.json`; triage may add consensus notes, but it must not erase
 the original classification, reproducer, blocker, or repair evidence.
 
-Save triaged findings to {{artifact_path}}/triaged-findings.json as a JSON
-array. Every object must include `triage_classification` set to exactly one of
-the classification values above.
+Save triaged findings to {{output_stage_findings_path}} using the exact pinned
+`{{schema_path}}/triaged-findings.schema.json`; it alone defines the JSON
+version, fields, types, enums, required members, and empty forms. Apply exactly
+one consensus classification from the values above to every input finding.
 
 Also save {{artifact_path}}/finding-lifecycle-ledger.json by copying the input
-ledger and updating the matching `dedupe_key` record for every triaged finding:
-set `triage_classification`, preserve or add `triage_reason`, preserve or add
-`demotion_reason` when present, and append a `triaged` stage that points to
-{{artifact_path}}/triaged-findings.json. Do not match lifecycle records by
-title when `dedupe_key` is available.
+ledger using the exact pinned
+`{{schema_path}}/finding-lifecycle-ledger.schema.json` and updating the matching
+`dedupe_key` record for every triaged finding:
+set `triage_classification` to the same value the triaged finding carries, set
+`triage_reason` to exactly the text that follows `triage_reason=` or
+`classification_reason=` in that finding's reason note, character for character
+with no re-casing, re-punctuation, trimming, or rewording, set
+`demotion_reason` the same way from that finding's `demotion_reason=` note for
+every classification other than `true-positive`, omit `demotion_reason`
+entirely for `true-positive`, and append a `triaged` stage whose
+`artifact_path` is the portable declared output-relative path
+`{{output_stage_findings_relative_path}}`. Do not match lifecycle records by title
+when `dedupe_key` is available.
+
+Preserve the input record order and every existing field and stage byte-for-byte
+in parsed JSON value terms. Add only `triage_classification`, `triage_reason`,
+the required `demotion_reason`, and one final `triaged` stage whose
+`artifact_path` is the portable declared output-relative path
+`{{output_stage_findings_relative_path}}` and whose `finding_id` is unchanged. Do not
+author severity, final disposition, or
+comparison fields in this stage.
+
+After both final writes, run every exact `ultrafuzz json validate` command
+rendered for them in the central output contract. Correct any exit-1 artifact
+yourself and rerun its command after any later edit.

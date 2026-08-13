@@ -3,13 +3,32 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 import ts from "typescript";
 
-export const AUTOMATIC_PUBLICATION_PLAN_SCHEMA_VERSION = "ultrafuzz.eval-history-automatic-publication-plan.v1";
+import { parseStrictJsonBytes, readRegularFileSnapshot } from "../../packages/artifacts/dist/index.js";
+import {
+  EVAL_HISTORY_AUTOMATIC_PUBLICATION_PLAN_SCHEMA_VERSION,
+  EVAL_HISTORY_PUBLICATION_GENERATION_SCHEMA_VERSION,
+  assertEvalHistoryPublicationHandoff,
+  parseEvalMatrix,
+  parseEvalHistoryAutomaticPublicationPlan,
+  parseEvalHistoryPublicationGeneration,
+  parseEvalScoreSummary,
+  parsePublicEvalDiagnostics,
+  readEvalHistoryAutomaticPublicationPlan,
+  readEvalHistoryPublicationGeneration
+} from "../../packages/evals/dist/index.js";
+import { isPublicModalBenchmarkConfig, loadModalBenchmarkConfig } from "../../packages/modal/dist/config.js";
+import { MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID } from "../../packages/modal/dist/modal-contracts.js";
+import { assertModalDocumentValue, parseModalDocumentBytes } from "../../packages/modal/dist/modal-documents.js";
 
-const GENERATION_SCHEMA_VERSION = "ultrafuzz.eval-history-publication-generation.v1";
+export const AUTOMATIC_PUBLICATION_PLAN_SCHEMA_VERSION = EVAL_HISTORY_AUTOMATIC_PUBLICATION_PLAN_SCHEMA_VERSION;
+
+const GENERATION_SCHEMA_VERSION = EVAL_HISTORY_PUBLICATION_GENERATION_SCHEMA_VERSION;
 const MAX_MANIFEST_BYTES = 1024 * 1024;
 const MAX_CONFIG_BYTES = 1024 * 1024;
+const MAX_BUNDLE_JSON_BYTES = 5 * 1024 * 1024;
 const MAX_POLICY_BYTES = 16 * 1024 * 1024;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const SAFE_LOWER_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/u;
@@ -19,6 +38,7 @@ const FULL_COMMIT = /^[0-9a-f]{40}$/u;
 const POSITIVE_DECIMAL = /^[1-9][0-9]*$/u;
 const PUBLIC_EVAL_DIAGNOSTICS_PATH = "eval/public-eval-diagnostics.json";
 const ROOT_KEYS = [
+  "schema_version",
   "candidate_commit",
   "repository",
   "generation",
@@ -79,12 +99,9 @@ export function validateAutomaticPublicationManifest(value, context) {
   return validateBenchmarkControlManifest(value, context);
 }
 
-/**
- * Validate immutable pre-compute control for every recoverable lane. Unlike
- * automatic publication, this boundary admits the non-publishable threat-model
- * release gate so trusted default-branch cleanup can authenticate its plan.
- */
+/** Validate immutable pre-compute control for every recoverable benchmark lane. */
 export function validateBenchmarkControlManifest(value, context) {
+  assertModalDocumentValue(MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID, value);
   const manifest = strictRecord(value, "benchmark manifest", ROOT_KEYS);
   const expected = benchmarkControlExpectations(
     context.mode === "smoke" && context.smokeProvider === undefined
@@ -107,7 +124,7 @@ export function validateBenchmarkControlManifest(value, context) {
   if (manifest.image_name !== `ufz-runner-${expected.candidateCommit}`) {
     throw new Error("benchmark manifest image name does not match the candidate commit");
   }
-  const targets = validateManifestTargets(manifest.targets, expected);
+  validateManifestTargets(manifest.targets, expected);
   if (manifest.matrix_rows_per_pair !== expected.matrixRowsPerPair) {
     throw new Error("benchmark manifest matrix row count does not match the trusted lane");
   }
@@ -123,7 +140,7 @@ export function validateBenchmarkControlManifest(value, context) {
   const seenModelSlugs = new Set();
   const seenConfigPaths = new Set();
   const seenStatePaths = new Set();
-  const pairs = manifest.pairs.map((value, index) => {
+  manifest.pairs.forEach((value, index) => {
     const pair = strictRecord(value, `benchmark pair ${index}`, PAIR_KEYS);
     const provider = expected.providers[index];
     if (pair.provider !== provider) {
@@ -149,43 +166,16 @@ export function validateBenchmarkControlManifest(value, context) {
     assertUnique(seenModelSlugs, modelSlug, "benchmark model slug");
     assertUnique(seenConfigPaths, configPath, "benchmark config path");
     assertUnique(seenStatePaths, statePath, "benchmark state path");
-    return {
-      pair: pairId,
-      benchmark: expected.benchmark,
-      mode: expected.mode,
-      lane: expected.mode,
-      model_slug: modelSlug,
-      provider,
-      config_path: configPath,
-      state_path: statePath
-    };
   });
-
-  return {
-    candidate_commit: expected.candidateCommit,
-    repository: expected.repository,
-    generation: expected.generation,
-    mode: expected.mode,
-    benchmark: expected.benchmark,
-    execution: { mode: "modal", dry_run: false },
-    image_name: manifest.image_name,
-    targets,
-    matrix_rows_per_pair: expected.matrixRowsPerPair,
-    control_timeout_seconds: expected.controlTimeoutSeconds,
-    concurrency: manifest.concurrency,
-    pairs
-  };
+  return manifest;
 }
 
 export function readAutomaticPublicationManifest(filePath, context) {
-  return validateAutomaticPublicationManifest(
-    readJsonRegular(filePath, MAX_MANIFEST_BYTES, "benchmark manifest"),
-    context
-  );
+  return validateAutomaticPublicationManifest(readBenchmarkControlManifestDocument(filePath), context);
 }
 
 export function readBenchmarkControlManifest(filePath, context) {
-  return validateBenchmarkControlManifest(readJsonRegular(filePath, MAX_MANIFEST_BYTES, "benchmark manifest"), context);
+  return validateBenchmarkControlManifest(readBenchmarkControlManifestDocument(filePath), context);
 }
 
 export function validateBenchmarkPolicyFiles(input) {
@@ -223,15 +213,13 @@ export async function prepareAutomaticPublication(input) {
     import("../../packages/modal/dist/launch-state.js")
   ]);
   const manifestPath = regularFileInside(controlRoot, "manifest.json", MAX_MANIFEST_BYTES, "benchmark manifest");
-  const producerPolicy = automaticProducerPolicyDimensions(
-    readJsonRegular(manifestPath, MAX_MANIFEST_BYTES, "benchmark manifest"),
-    controlRoot
-  );
+  const manifestDocument = readBenchmarkControlManifestDocument(manifestPath);
+  const producerPolicy = automaticProducerPolicyDimensions(manifestDocument, controlRoot);
   const context = publicationExpectations({
     ...input,
     ...benchmarkPolicyDimensions(policyRoot, identity, evalModule, producerPolicy)
   });
-  const manifest = readAutomaticPublicationManifest(manifestPath, context);
+  const manifest = validateAutomaticPublicationManifest(manifestDocument, context);
   const { loadModalBenchmarkConfig, fingerprintModalConfigFile, fingerprintModalModel } = configModule;
   const sourceFingerprint = launchStateModule.fingerprintTrackedSource(policyRoot);
   const usedModelSlugs = new Set();
@@ -341,9 +329,27 @@ export async function prepareAutomaticPublication(input) {
     benchmark: context.benchmark,
     pairs
   };
-  writeJsonExclusive(input.generationPath, generation, "publication generation");
-  writeJsonExclusive(input.planPath, plan, "automatic publication plan");
-  return { generation, plan };
+  const validatedGeneration = parseEvalHistoryPublicationGeneration(generation);
+  const validatedPlan = parseEvalHistoryAutomaticPublicationPlan(plan);
+  assertEvalHistoryPublicationHandoff(validatedPlan, validatedGeneration);
+  writeJsonExclusive(input.generationPath, validatedGeneration, "publication generation");
+  writeJsonExclusive(input.planPath, validatedPlan, "automatic publication plan");
+  if (!isDeepStrictEqual(readEvalHistoryPublicationGeneration(input.generationPath), validatedGeneration)) {
+    throw new Error("persisted publication generation does not equal its validated source document");
+  }
+  if (!isDeepStrictEqual(readEvalHistoryAutomaticPublicationPlan(input.planPath), validatedPlan)) {
+    throw new Error("persisted automatic publication plan does not equal its validated source document");
+  }
+  return { generation: validatedGeneration, plan: validatedPlan };
+}
+
+export function automaticPublicationPlanRows(filePath) {
+  const plan = readEvalHistoryAutomaticPublicationPlan(filePath);
+  return `${plan.pairs
+    .map((pair) =>
+      [pair.bundle_path, pair.unpack_path, pair.eval_run_id, pair.benchmark, pair.lane, pair.model_slug].join("\t")
+    )
+    .join("\n")}\n`;
 }
 
 function publicationExpectations(input) {
@@ -356,8 +362,8 @@ function benchmarkControlExpectations(input) {
   const repository = canonicalRepository(input.repository);
   const producerRunId = positiveDecimal(input.producerRunId, "producer run ID");
   const producerRunAttempt = positiveDecimal(input.producerRunAttempt, "producer run attempt");
-  if (input.mode !== "smoke" && input.mode !== "full" && input.mode !== "threat-model") {
-    throw new Error("benchmark control mode must be smoke, full, or threat-model");
+  if (input.mode !== "smoke" && input.mode !== "full") {
+    throw new Error("benchmark control mode must be smoke or full");
   }
   const smoke = input.mode === "smoke";
   const full = input.mode === "full";
@@ -398,11 +404,7 @@ function benchmarkControlExpectations(input) {
     "benchmark control timeout"
   );
   const maxLiveRowsPerPair = Math.min(matrixRowsPerPair, maxParallelEvalRows);
-  const providers = full
-    ? ["openai", "anthropic", "kimi", "deepseek"]
-    : smoke
-      ? [smokeProviderName(input.smokeProvider)]
-      : ["openai"];
+  const providers = full ? ["openai", "anthropic", "kimi", "deepseek"] : [smokeProviderName(input.smokeProvider)];
   return {
     candidateCommit,
     repository,
@@ -693,6 +695,7 @@ function evaluateIntegerExpression(node, identifiers, label) {
 }
 
 export function automaticProducerPolicyDimensions(value, controlRoot) {
+  assertModalDocumentValue(MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID, value);
   const root = regularDirectory(controlRoot, "benchmark control root");
   const manifest = strictRecord(value, "benchmark manifest", ROOT_KEYS);
   const matrixRowsPerPair = positiveSafeInteger(manifest.matrix_rows_per_pair, "benchmark matrix row count");
@@ -712,16 +715,16 @@ export function automaticProducerPolicyDimensions(value, controlRoot) {
   const runtimes = manifest.pairs.map((value, index) => {
     const pair = strictRecord(value, `benchmark pair ${index}`, PAIR_KEYS);
     const configPath = safeBasename(pair.config_path, `benchmark pair ${index} config path`);
-    const config = looseRecord(
-      readJsonRegular(
-        regularFileInside(root, configPath, MAX_CONFIG_BYTES, `benchmark config ${configPath}`),
-        MAX_CONFIG_BYTES,
-        `benchmark config ${configPath}`
-      ),
-      `benchmark config ${configPath}`
+    const config = loadModalBenchmarkConfig(
+      regularFileInside(root, configPath, MAX_CONFIG_BYTES, `benchmark config ${configPath}`)
     );
-    const scope = looseRecord(config.public_benchmark, `benchmark config ${configPath} public scope`);
-    return positiveSafeInteger(scope.max_runtime_seconds, `benchmark config ${configPath} maximum runtime`);
+    if (!isPublicModalBenchmarkConfig(config)) {
+      throw new Error(`benchmark config ${configPath} must be a public benchmark config`);
+    }
+    return positiveSafeInteger(
+      config.public_benchmark.max_runtime_seconds,
+      `benchmark config ${configPath} maximum runtime`
+    );
   });
   if (new Set(runtimes).size !== 1) {
     throw new Error("benchmark producer pairs must use one maximum runtime policy");
@@ -785,7 +788,7 @@ export function validateAutomaticPairConfig(config, model, pair, context, usedMo
   assertUnique(usedModelSlugs, expectedModelSlug, "derived benchmark model slug");
   const scope = config.public_benchmark;
   const mismatches = [
-    config.schema_version === "ultrafuzz.modal.benchmark.v1" ? undefined : "schema version",
+    config.schema_version === "ultrafuzz.modal.benchmark.v2" ? undefined : "schema version",
     config.run_id === expectedRunId ? undefined : "run ID",
     config.app_name === "ultrafuzz-evals" ? undefined : "app name",
     config.image_name === `ufz-runner-${context.candidateCommit}` ? undefined : "image name",
@@ -819,14 +822,9 @@ export function validateAutomaticPairConfig(config, model, pair, context, usedMo
 
 export function assertPublicBenchmarkBundleMatrixScope(bundle, expected, pair) {
   const expectedRows = positiveSafeInteger(expected.matrixRowsPerPair, "benchmark bundle matrix row count");
-  const matrixFile = bundle.files.find((file) => file.path === "eval/matrix.json");
-  if (matrixFile === undefined) throw new Error(`public benchmark bundle ${pair} is missing its matrix`);
-  let matrix;
-  try {
-    matrix = JSON.parse(Buffer.from(matrixFile.contents_base64, "base64").toString("utf8"));
-  } catch (error) {
-    throw new Error(`public benchmark bundle ${pair} matrix is invalid`, { cause: error });
-  }
+  const matrix = parseBundleFileDocument(bundle, "eval/matrix.json", pair, (value, label) =>
+    parseEvalMatrix(value, label)
+  );
   if (!Array.isArray(matrix) || matrix.length === 0) {
     throw new Error(`public benchmark bundle ${pair} matrix is not a non-empty array`);
   }
@@ -891,8 +889,12 @@ export function summarizePublicBenchmarkBundlePublication(bundle, expected, pair
   }
   const bundleTargets = validatedBundleTargets(bundle.targets, pair);
   assertBundleTargetsMatchExpected(bundleTargets, expected.targets, targetIds, pair);
-  const diagnostics = bundleFileJson(bundle, PUBLIC_EVAL_DIAGNOSTICS_PATH, pair);
-  const summary = bundleFileJson(bundle, "eval/summary.json", pair);
+  const diagnostics = parseBundleFileDocument(bundle, PUBLIC_EVAL_DIAGNOSTICS_PATH, pair, (value) =>
+    parsePublicEvalDiagnostics(value)
+  );
+  const summary = parseBundleFileDocument(bundle, "eval/summary.json", pair, (value, label) =>
+    parseEvalScoreSummary(value, label)
+  );
   const expectedRows = positiveSafeInteger(expected.matrixRowsPerPair, "benchmark bundle matrix row count");
   const evalRunId = safeLowerId(expected.evalRunId, `public benchmark bundle ${pair} eval run ID`);
   const status = safeBundleStatus(bundle.status, `public benchmark bundle ${pair} status`);
@@ -1007,13 +1009,29 @@ function safeBundleStatus(value, label) {
   return value;
 }
 
-function bundleFileJson(bundle, relativePath, pair) {
+function parseBundleFileDocument(bundle, relativePath, pair, parser) {
   const file = bundle.files.find((entry) => entry.path === relativePath);
   if (file === undefined) throw new Error(`public benchmark bundle ${pair} is missing ${relativePath}`);
+  const contents = Buffer.from(file.contents_base64, "base64");
+  if (contents.toString("base64") !== file.contents_base64) {
+    throw new Error(`public benchmark bundle ${pair} ${relativePath} is not canonical base64`);
+  }
+  const label = `public benchmark bundle ${pair} ${relativePath}`;
+  let value;
   try {
-    return JSON.parse(Buffer.from(file.contents_base64, "base64").toString("utf8"));
+    value = parseStrictJsonBytes(contents, {
+      maxBytes: MAX_BUNDLE_JSON_BYTES,
+      maxDepth: 128,
+      maxItems: 1_000_000,
+      maxProperties: 1_000_000
+    });
   } catch (error) {
-    throw new Error(`public benchmark bundle ${pair} ${relativePath} is invalid`, { cause: error });
+    throw new Error(`${label} is not strict JSON`, { cause: error });
+  }
+  try {
+    return parser(value, label);
+  } catch (error) {
+    throw new Error(`${label} does not match its current eval contract`, { cause: error });
   }
 }
 
@@ -1068,21 +1086,11 @@ function formatMatrixScopeList(keys) {
   return `${shown.join(", ")}${values.length > shown.length ? `, and ${values.length - shown.length} more` : ""}`;
 }
 
-function readJsonRegular(filePath, maxBytes, label) {
-  const absolute = path.resolve(filePath);
-  const noFollow = fs.constants.O_NOFOLLOW ?? 0;
-  const descriptor = fs.openSync(absolute, fs.constants.O_RDONLY | noFollow);
-  try {
-    const stat = fs.fstatSync(descriptor);
-    if (!stat.isFile() || stat.size < 1 || stat.size > maxBytes) {
-      throw new Error(`${label} must be a non-empty regular file within its size limit`);
-    }
-    return JSON.parse(fs.readFileSync(descriptor, "utf8"));
-  } catch (error) {
-    throw new Error(`failed to read ${label}`, { cause: error });
-  } finally {
-    fs.closeSync(descriptor);
-  }
+function readBenchmarkControlManifestDocument(filePath) {
+  return parseModalDocumentBytes(
+    MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID,
+    readRegularFileSnapshot(path.resolve(filePath), MAX_MANIFEST_BYTES)
+  ).value;
 }
 
 function regularDirectory(value, label) {
@@ -1129,13 +1137,6 @@ function strictRecord(value, label, expectedKeys) {
   const expected = [...expectedKeys].sort();
   if (JSON.stringify(keys) !== JSON.stringify(expected)) {
     throw new Error(`${label} must contain exactly ${expected.join(", ")}`);
-  }
-  return value;
-}
-
-function looseRecord(value, label) {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error(`${label} must be an object`);
   }
   return value;
 }
@@ -1217,6 +1218,14 @@ function gitOutput(cwd, args) {
 
 async function main() {
   const [command, ...args] = process.argv.slice(2);
+  if (command === "plan-rows") {
+    const [planPath, ...extra] = args;
+    if (planPath === undefined || extra.length > 0) {
+      throw new Error("usage: prepare-eval-history-publication.mjs plan-rows <publication-plan.json>");
+    }
+    process.stdout.write(automaticPublicationPlanRows(planPath));
+    return;
+  }
   if (command === "policy") {
     const [policyRoot, candidateCommit, benchmark, ...extra] = args;
     if (policyRoot === undefined || candidateCommit === undefined || benchmark === undefined || extra.length > 0) {

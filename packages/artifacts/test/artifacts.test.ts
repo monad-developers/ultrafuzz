@@ -7,38 +7,48 @@ import test from "node:test";
 
 import {
   ArtifactPathError,
+  GENERATED_TESTS_SCHEMA_VERSION,
+  MAX_GENERATED_TEST_BUNDLE_BYTES,
+  MAX_GENERATED_TEST_BUNDLE_ENTRIES,
   appendUsageEvents,
   appendNodeAttempt,
   appendEvent,
   appendLineDurable,
   createRunLayout,
   getNodeArtifactDir,
-  normalizeFindings,
   normalizeSafeRelativePath,
   manifestDigest,
   MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES,
-  normalizeEvidenceLineRangeCardinality,
   normalizeNodeAttemptFailureMessage,
   publishFileDurableExclusive,
   queryNodeAttempts,
   queryEvents,
+  readArtifactManifest,
   readEventQueryFacade,
-  readFindings,
+  readGeneratedTestManifest,
   readRunState,
   replayEvents,
   replayUsageEvents,
   safeResolveInside,
   summarizeNodeAttempts,
   updateNodeState,
+  validateArtifactManifest,
+  validateArtifactVerificationMarker,
   verifyArtifactManifestPrerequisites,
   writeArtifact,
   writeArtifactManifest,
-  writeGeneratedTestManifest,
+  writeGeneratedTestManifest as writeGeneratedTestManifestWithFramework,
   writeRunState
 } from "../src/index.js";
 
 function tempProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-artifacts-"));
+}
+
+function writeGeneratedTestManifest(
+  input: Omit<Parameters<typeof writeGeneratedTestManifestWithFramework>[0], "framework">
+): ReturnType<typeof writeGeneratedTestManifestWithFramework> {
+  return writeGeneratedTestManifestWithFramework({ ...input, framework: "foundry" });
 }
 
 function errnoError(code: string): NodeJS.ErrnoException {
@@ -54,8 +64,20 @@ test("createRunLayout persists product-owned run evidence outside checkpoints", 
     runId: "run-1",
     sourceRunId: "run-0",
     resolvedConfigToml: '[run]\noutput_dir = ".ultrafuzz/runs"\n',
-    configRedactions: { schema_version: "1.0", redactions: [{ key: "OPENAI_API_KEY" }] },
-    graph: { schema_version: "1.0", nodes: [{ id: "node-a" }] },
+    configRedactions: {
+      schemaVersion: "ultrafuzz.config-redactions.v2",
+      placeholder: "<redacted>",
+      entries: [
+        {
+          path: ["models", "profiles", "default", "model"],
+          key: "models.profiles.default.model",
+          reason: "sensitive-value",
+          restoreFrom: "current-config",
+          requiredForWorkflowLaunch: true,
+          requiredForWorkflowSubmission: true
+        }
+      ]
+    },
     graphFingerprint: "graph-fp",
     configFingerprint: "config-fp",
     stateNodes: [
@@ -85,7 +107,6 @@ test("createRunLayout persists product-owned run evidence outside checkpoints", 
     layout.eventsPath,
     layout.usageLedgerPath,
     layout.attemptLedgerPath,
-    layout.workspacesPath,
     path.join(layout.eventsIndexDir, "query-inputs.json")
   ]) {
     assert.equal(fs.existsSync(expected), true, expected);
@@ -96,19 +117,17 @@ test("createRunLayout persists product-owned run evidence outside checkpoints", 
   assert.equal(path.basename(getNodeArtifactDir(layout, "node-a", { create: true })), "node-a");
 });
 
-test("generated usage events append idempotently with stable checkpoint dimensions", () => {
+test("validated usage events append idempotently with exact Smithers identities", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-usage" });
   const generated = {
     workflowRunId: "workflow-run-usage",
-    sourceEventId: "source-event-1",
-    checkpointGenerationId: "checkpoint-1",
-    observedAt: "2026-07-18T00:00:00.000Z",
+    controlGeneration: "a".repeat(64),
+    sourceEventSequence: 7,
+    observedTimestampMs: Date.parse("2026-07-18T00:00:00.000Z"),
     nodeId: "node-a",
     iteration: 0,
     attempt: 1,
-    usage: { input_tokens: 12, output_tokens: 3, cost_usd: 0.01, model: "generated-model" },
-    usageComplete: true,
-    usageIncompleteReasons: []
+    usage: { input_tokens: 12, output_tokens: 3, model: "generated-model", agent: "generated-agent" }
   };
 
   const first = appendUsageEvents(layout, [generated]);
@@ -117,13 +136,13 @@ test("generated usage events append idempotently with stable checkpoint dimensio
 
   assert.equal(first.appended, 1);
   assert.equal(replayed.appended, 0);
-  assert.equal(replayed.entries[0]?.event_id, first.entries[0]?.event_id);
-  assert.match(ledger.entries[0]?.attempt_id ?? "", /^usage-attempt-/u);
-  assert.equal(ledger.entries[0]?.checkpoint_generation_id, "checkpoint-1");
+  assert.deepEqual(replayed.entries[0], first.entries[0]);
+  assert.equal(ledger.entries[0]?.source_event_sequence, 7);
+  assert.equal(ledger.entries[0]?.control_generation, "a".repeat(64));
   assert.equal(ledger.entries.length, 1);
 
   appendLineDurable(layout.usageLedgerPath, "{malformed", layout.root);
-  assert.equal(replayUsageEvents(layout).malformedEntries, 1);
+  assert.throws(() => replayUsageEvents(layout), /invalid strict JSON/u);
 });
 
 test("usage ledger replay rejects entries copied from another run", () => {
@@ -132,15 +151,13 @@ test("usage ledger replay rejects entries copied from another run", () => {
   const secondLayout = createRunLayout({ projectRoot: project, runId: "run-usage-second" });
   const input = {
     workflowRunId: "workflow-run-usage",
-    sourceEventId: "source-event-1",
-    checkpointGenerationId: "checkpoint-1",
-    observedAt: "2026-07-18T00:00:00.000Z",
+    controlGeneration: "b".repeat(64),
+    sourceEventSequence: 1,
+    observedTimestampMs: Date.parse("2026-07-18T00:00:00.000Z"),
     nodeId: "node-a",
     iteration: 0,
     attempt: 1,
-    usage: { input_tokens: 1 },
-    usageComplete: true,
-    usageIncompleteReasons: []
+    usage: { input_tokens: 1, output_tokens: 0, model: "model", agent: "agent" }
   };
   appendUsageEvents(firstLayout, [input]);
   appendUsageEvents(secondLayout, [input]);
@@ -150,10 +167,7 @@ test("usage ledger replay rejects entries copied from another run", () => {
     secondLayout.root
   );
 
-  const replay = replayUsageEvents(secondLayout);
-  assert.equal(replay.entries.length, 1);
-  assert.equal(replay.entries[0]?.run_id, secondLayout.runId);
-  assert.equal(replay.malformedEntries, 1);
+  assert.throws(() => replayUsageEvents(secondLayout), /run_id belongs to/u);
 });
 
 test("node attempt ledger is append-only, idempotent, independently queryable, and exactly summarized", () => {
@@ -161,12 +175,14 @@ test("node attempt ledger is append-only, idempotent, independently queryable, a
   const inputDigest = manifestDigest("generated input manifest");
   const outputDigest = manifestDigest("generated output manifest");
   const firstInput = {
+    workflowRunId: "workflow-run-attempts",
+    controlGeneration: "c".repeat(64),
     nodeId: "strategy-a",
     strategyAttemptId: "strategy-a",
-    executorRetryId: "executor-retry-1",
-    checkpointGenerationId: "checkpoint-1",
-    workflowExecutionId: "execution-1",
-    controllerInvocationId: "controller-1",
+    iteration: 0,
+    attempt: 1,
+    startedEventSequence: 1,
+    sourceEventSequence: 2,
     startedAt: "2026-07-18T10:00:00.000Z",
     finishedAt: "2026-07-18T10:01:00.000Z",
     outcome: "failed" as const,
@@ -179,7 +195,7 @@ test("node attempt ledger is append-only, idempotent, independently queryable, a
   const replayedFirst = appendNodeAttempt(layout, firstInput);
   assert.equal(first.appended, true);
   assert.equal(replayedFirst.appended, false);
-  assert.equal(replayedFirst.entry.attempt_id, first.entry.attempt_id);
+  assert.deepEqual(replayedFirst.entry, first.entry);
   assert.equal(first.entry.failure_message, replayedFirst.entry.failure_message);
   assert.ok(Buffer.byteLength(first.entry.failure_message ?? "", "utf8") <= MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES);
   assert.match(first.entry.failure_message ?? "", /<redacted>/u);
@@ -187,11 +203,9 @@ test("node attempt ledger is append-only, idempotent, independently queryable, a
 
   const second = appendNodeAttempt(layout, {
     ...firstInput,
-    executorRetryId: "executor-retry-2",
-    checkpointGenerationId: "checkpoint-2",
-    workflowExecutionId: "execution-2",
-    controllerInvocationId: "controller-2",
-    parentAttemptId: first.entry.attempt_id,
+    attempt: 2,
+    startedEventSequence: 3,
+    sourceEventSequence: 4,
     startedAt: "2026-07-18T10:02:00.000Z",
     finishedAt: "2026-07-18T10:03:00.000Z",
     outcome: "succeeded",
@@ -203,22 +217,25 @@ test("node attempt ledger is append-only, idempotent, independently queryable, a
     ...firstInput,
     nodeId: "strategy-b",
     strategyAttemptId: "strategy-b",
-    executorRetryId: "executor-retry-3",
-    checkpointGenerationId: "checkpoint-2",
-    workflowExecutionId: "execution-2",
-    controllerInvocationId: "controller-2",
+    attempt: 1,
+    startedEventSequence: 5,
+    sourceEventSequence: 6,
     startedAt: "2026-07-18T10:04:00.000Z",
     finishedAt: "2026-07-18T10:04:00.000Z",
     outcome: "reused",
-    reuse: { status: "reused", sourceAttemptId: second.entry.attempt_id },
+    reuse: {
+      status: "reused",
+      sourceWorkflowRunId: second.entry.workflow_run_id,
+      sourceEventSequence: second.entry.source_event_sequence
+    },
     outputManifestDigest: outputDigest,
     failureCategory: undefined,
     failureMessage: undefined
   });
 
-  assert.equal(queryNodeAttempts(layout, { checkpointGenerationId: "checkpoint-1" }).length, 1);
-  assert.equal(queryNodeAttempts(layout, { workflowExecutionId: "execution-2" }).length, 2);
-  assert.equal(queryNodeAttempts(layout, { controllerInvocationId: "controller-2" }).length, 2);
+  assert.equal(queryNodeAttempts(layout, { workflowRunId: "workflow-run-attempts" }).length, 3);
+  assert.equal(queryNodeAttempts(layout, { controlGeneration: "c".repeat(64) }).length, 3);
+  assert.equal(queryNodeAttempts(layout, { sourceEventSequence: 4 }).length, 1);
   assert.equal(queryNodeAttempts(layout, { reuseStatus: "reused" })[0]?.reuse.status, "reused");
 
   const summary = summarizeNodeAttempts(queryNodeAttempts(layout));
@@ -226,12 +243,10 @@ test("node attempt ledger is append-only, idempotent, independently queryable, a
     total: 3,
     executed: 2,
     reused: 1,
-    outcomes: { succeeded: 1, failed: 1, "timed-out": 0, canceled: 0, skipped: 0, reused: 1 },
+    outcomes: { succeeded: 1, failed: 1, "timed-out": 0, canceled: 0, reused: 1 },
     strategy_attempts: 2,
-    executor_retries: 3,
-    checkpoint_generations: 2,
-    workflow_executions: 2,
-    controller_invocations: 2
+    workflow_runs: 1,
+    control_generations: 1
   });
   assert.equal(fs.readFileSync(layout.attemptLedgerPath, "utf8").trim().split("\n").length, 3);
   assert.equal(normalizeNodeAttemptFailureMessage("  first\nsecond  "), "first second");
@@ -247,8 +262,10 @@ test("createRunLayout rejects symlinked run roots before creating outside writes
 });
 
 test("safe path helpers reject traversal, absolutes, unsafe IDs, and symlink escapes", () => {
+  assert.equal(normalizeSafeRelativePath(".review/report@v3+1.json"), ".review/report@v3+1.json");
   assert.throws(() => normalizeSafeRelativePath("../secret"), /traverse/);
   assert.throws(() => normalizeSafeRelativePath("/tmp/secret"), /relative/);
+  assert.throws(() => normalizeSafeRelativePath(`${"a".repeat(129)}/report.json`), /unsafe segment/);
   assert.throws(() => safeResolveInside(tempProject(), "Display Name/report.md"), /unsafe segment/);
 
   const root = tempProject();
@@ -415,15 +432,21 @@ test("failed publication cleanup detects a canonical-path replacement before acc
 
 test("artifact manifests record safe paths, sizes, digests, schema version, and provenance", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
-  const artifactPath = writeArtifact(layout, "node-a", "setup/project.md", "hello artifact\n");
+  const canonicalPath = ".setup/project@v3+1.json";
+  const artifactPath = writeArtifact(layout, "node-a", canonicalPath, "hello artifact\n");
   const manifest = writeArtifactManifest({
     layout,
     nodeId: "node-a",
     outputs: [
       {
-        path: "setup/project.md",
-        contract: "ultrafuzz/nonempty-markdown@1",
+        path: canonicalPath,
+        contract: "ultrafuzz/coverage-goal@1",
         contract_digest: "a".repeat(64),
+        schema_file: "example.schema.json",
+        schema_id: "urn:ultrafuzz:schema:test:example:1",
+        schema_sha256: "b".repeat(64),
+        schema_bundle_sha256: "c".repeat(64),
+        validator_build: `ultrafuzz-json-validator.v1:${"d".repeat(64)}`,
         primary: true
       }
     ],
@@ -436,16 +459,107 @@ test("artifact manifests record safe paths, sizes, digests, schema version, and 
     }
   });
 
-  assert.equal(manifest.schema_version, "1.0");
+  assert.equal(manifest.schema_version, "ultrafuzz.artifact-manifest.v3");
   assert.equal(manifest.files.length, 1);
-  assert.equal(manifest.files[0]!.path, "setup/project.md");
+  assert.equal(manifest.files[0]!.path, canonicalPath);
   assert.equal(manifest.files[0]!.size_bytes, fs.statSync(artifactPath).size);
   assert.equal(manifest.files[0]!.sha256, crypto.createHash("sha256").update("hello artifact\n").digest("hex"));
   assert.equal(manifest.files[0]!.provenance.producer_node_id, "node-a");
   assert.equal(manifest.files[0]!.provenance.agent_ref, "CodexAgent");
   assert.equal(manifest.files[0]!.provenance.workflow_task_id, "node:node-a");
-  assert.equal(manifest.output_contracts[0]!.contract, "ultrafuzz/nonempty-markdown@1");
+  assert.equal(manifest.output_contracts[0]!.contract, "ultrafuzz/coverage-goal@1");
+  assert.equal(manifest.output_contracts[0]!.schema_id, "urn:ultrafuzz:schema:test:example:1");
+  assert.equal(manifest.output_contracts[0]!.schema_sha256, "b".repeat(64));
+  assert.equal(manifest.output_contracts[0]!.schema_bundle_sha256, "c".repeat(64));
+  assert.equal(manifest.output_contracts[0]!.validator_build, `ultrafuzz-json-validator.v1:${"d".repeat(64)}`);
   assert.deepEqual(manifest.prerequisite_manifests, []);
+
+  const marker = {
+    schema_version: "ultrafuzz.artifact-verification.v2",
+    attempt_id: "node-a.0",
+    node_id: "node-a",
+    artifacts: [
+      {
+        ...manifest.output_contracts[0],
+        sha256: manifest.files[0]!.sha256
+      }
+    ],
+    publications: [{ path: canonicalPath, sha256: manifest.files[0]!.sha256 }]
+  };
+  assert.equal(validateArtifactVerificationMarker(marker).ok, true);
+});
+
+test("artifact manifest v3 accepts only exact reference and Smithers task provenance metadata", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-metadata" });
+  writeArtifact(layout, "node-a", "result.md", "result\n");
+  const manifest = writeArtifactManifest({
+    layout,
+    nodeId: "node-a",
+    createdAt: "2026-08-09T00:00:00.000Z"
+  });
+  const referenceMetadata = {
+    reference: "properties.example",
+    repo: "example/reference",
+    commit: "a".repeat(40),
+    reference_artifact: "/runs/run-metadata/artifacts/node-a/references/example.md",
+    manifest_artifact: "/runs/run-metadata/artifacts/node-a/references/manifest.json",
+    reference_expectations: {
+      source: "operator-supplied" as const,
+      path: "references/expectations.json",
+      sha256: "b".repeat(64)
+    }
+  };
+  const smithersTaskMetadata = { concrete_node_id: "node-a" };
+
+  const withMetadata = (metadata: unknown, location: "manifest" | "file"): unknown => {
+    const candidate = structuredClone(manifest) as unknown as {
+      provenance: { metadata?: unknown };
+      files: Array<{ provenance: { metadata?: unknown } }>;
+    };
+    if (location === "manifest") candidate.provenance.metadata = metadata;
+    else candidate.files[0]!.provenance.metadata = metadata;
+    return candidate;
+  };
+
+  for (const location of ["manifest", "file"] as const) {
+    assert.equal(validateArtifactManifest(withMetadata(referenceMetadata, location)).ok, true, location);
+    assert.equal(validateArtifactManifest(withMetadata(smithersTaskMetadata, location)).ok, true, location);
+
+    for (const invalidMetadata of [
+      { arbitrary: { nested: true } },
+      { ...referenceMetadata, concrete_node_id: "node-a" },
+      { ...referenceMetadata, extra: "not-declared" },
+      { ...referenceMetadata, commit: undefined }
+    ]) {
+      assert.equal(validateArtifactManifest(withMetadata(invalidMetadata, location)).ok, false, location);
+    }
+  }
+
+  assert.equal(validateArtifactManifest({ ...manifest, schema_version: "ultrafuzz.artifact-manifest.v2" }).ok, false);
+});
+
+test("artifact manifest reads reject v2 and generic metadata without conversion", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-current-manifest-only" });
+  const manifest = writeArtifactManifest({
+    layout,
+    nodeId: "node-a",
+    createdAt: "2026-08-09T00:00:00.000Z"
+  });
+  const manifestPath = path.join(getNodeArtifactDir(layout, "node-a"), "artifact-manifest.json");
+  const invalidManifests = [
+    { ...manifest, schema_version: "ultrafuzz.artifact-manifest.v2" },
+    {
+      ...manifest,
+      provenance: { ...manifest.provenance, metadata: { arbitrary: { nested: true } } }
+    }
+  ];
+
+  for (const invalid of invalidManifests) {
+    const bytes = `${JSON.stringify(invalid)}\n`;
+    fs.writeFileSync(manifestPath, bytes, "utf8");
+    assert.throws(() => readArtifactManifest(layout, "node-a"), /artifact manifest is schema-invalid/u);
+    assert.equal(fs.readFileSync(manifestPath, "utf8"), bytes);
+  }
 });
 
 test("artifact manifests preserve causal prerequisite digests for safe reuse", () => {
@@ -504,24 +618,28 @@ test("artifact manifest reuse checks the complete prerequisite chain", () => {
   });
 });
 
-test("events append to JSONL, redact secrets, replay, and expose query indexes", () => {
+test("events append to JSONL, replay, and expose query indexes", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
   appendEvent(layout, {
-    eventType: "node-started",
+    eventType: "node-synced",
     nodeId: "node-a",
     status: "running",
-    payload: { token: "sk-secret", nested: { api_key: "abc" } }
+    payload: { workflow_run_id: "workflow-1", workflow_task_id: "task-1", workflow_state: "in-progress" }
   });
   appendEvent(layout, {
-    eventType: "node-finished",
+    eventType: "artifact-manifest-written",
     nodeId: "node-a",
     status: "succeeded",
-    payload: { ok: true }
+    payload: { file_count: 1, path: "artifacts/node-a/artifact-manifest.json" }
   });
 
   const replay = replayEvents(layout);
   assert.equal(replay.records.length, 2);
-  assert.deepEqual(replay.records[0]!.payload, { token: "<redacted>", nested: { api_key: "<redacted>" } });
+  assert.deepEqual(replay.records[0]!.payload, {
+    workflow_run_id: "workflow-1",
+    workflow_task_id: "task-1",
+    workflow_state: "in-progress"
+  });
   assert.equal(queryEvents(layout, { nodeId: "node-a", status: "succeeded" }).length, 1);
   assert.equal(fs.existsSync(path.join(layout.eventsIndexDir, "node", "node-a.jsonl")), true);
   assert.equal(fs.existsSync(path.join(layout.eventsIndexDir, "status", "succeeded.jsonl")), true);
@@ -531,42 +649,29 @@ test("event indexes encode long IDs in a collision-free hash namespace", () => {
   const maximumRunId = "r".repeat(128);
   const layout = createRunLayout({ projectRoot: tempProject(), runId: maximumRunId });
   const facadeBeforeAppend = readEventQueryFacade(layout);
-  const secondMaximumRunId = `${"r".repeat(127)}s`;
-  const directBoundaryRunId = "d".repeat(122);
-  const longBoundaryEventType = "e".repeat(123);
-  const maximumEventType = "t".repeat(128);
   const maximumNodeId = "n".repeat(128);
-  const maximumStatus = "s".repeat(128);
-  const legacyCollisionRunId = `${maximumRunId.slice(0, 97)}-${crypto
+  const directBoundaryNodeId = "d".repeat(122);
+  const longBoundaryNodeId = "e".repeat(123);
+  const legacyCollisionNodeId = `${maximumNodeId.slice(0, 97)}-${crypto
     .createHash("sha256")
-    .update(maximumRunId, "utf8")
+    .update(maximumNodeId, "utf8")
     .digest("hex")
     .slice(0, 24)}`;
-  assert.equal(legacyCollisionRunId.length, 122);
+  assert.equal(legacyCollisionNodeId.length, 122);
 
-  appendEvent(layout, {
-    eventType: maximumEventType,
-    nodeId: maximumNodeId,
-    status: maximumStatus,
-    payload: { id: "maximum" }
-  });
-  appendEvent(layout, {
-    runId: secondMaximumRunId,
-    eventType: longBoundaryEventType,
-    nodeId: "direct-node",
-    status: "direct-status",
-    payload: { id: "second-maximum" }
-  });
-  appendEvent(layout, {
-    runId: legacyCollisionRunId,
-    eventType: "direct-event",
-    payload: { id: "legacy-collision" }
-  });
-  appendEvent(layout, {
-    runId: directBoundaryRunId,
-    eventType: "boundary-event",
-    payload: { id: "direct-boundary" }
-  });
+  const appendNodeSynced = (nodeId: string, workflowTaskId: string): void => {
+    appendEvent(layout, {
+      eventType: "node-synced",
+      nodeId,
+      status: "running",
+      payload: { workflow_run_id: "workflow-1", workflow_task_id: workflowTaskId }
+    });
+  };
+
+  appendNodeSynced(maximumNodeId, "task-maximum");
+  appendNodeSynced(longBoundaryNodeId, "task-long-boundary");
+  appendNodeSynced(legacyCollisionNodeId, "task-legacy-collision");
+  appendNodeSynced(directBoundaryNodeId, "task-direct-boundary");
 
   const hashedIndexPath = (dimension: string, value: string): string =>
     path.join(
@@ -576,19 +681,22 @@ test("event indexes encode long IDs in a collision-free hash namespace", () => {
       `${crypto.createHash("sha256").update(value, "utf8").digest("hex")}.jsonl`
     );
   const maximumRunIndex = hashedIndexPath("run", maximumRunId);
-  const secondMaximumRunIndex = hashedIndexPath("run", secondMaximumRunId);
   assert.equal(fs.existsSync(maximumRunIndex), true);
-  assert.equal(fs.existsSync(secondMaximumRunIndex), true);
-  assert.notEqual(maximumRunIndex, secondMaximumRunIndex);
-  assert.equal(fs.existsSync(path.join(layout.eventsIndexDir, "run", `${legacyCollisionRunId}.jsonl`)), true);
-  assert.equal(fs.existsSync(path.join(layout.eventsIndexDir, "run", `${directBoundaryRunId}.jsonl`)), true);
-  assert.equal(fs.existsSync(hashedIndexPath("type", longBoundaryEventType)), true);
-  assert.equal(fs.existsSync(hashedIndexPath("type", maximumEventType)), true);
+  assert.equal(fs.existsSync(path.join(layout.eventsIndexDir, "node", `${legacyCollisionNodeId}.jsonl`)), true);
+  assert.equal(fs.existsSync(path.join(layout.eventsIndexDir, "node", `${directBoundaryNodeId}.jsonl`)), true);
+  assert.equal(fs.existsSync(hashedIndexPath("node", longBoundaryNodeId)), true);
   assert.equal(fs.existsSync(hashedIndexPath("node", maximumNodeId)), true);
-  assert.equal(fs.existsSync(hashedIndexPath("status", maximumStatus)), true);
 
-  const maximumRecord = JSON.parse(fs.readFileSync(maximumRunIndex, "utf8")) as { run_id: string };
-  assert.equal(maximumRecord.run_id, maximumRunId);
+  const maximumRecords = fs
+    .readFileSync(maximumRunIndex, "utf8")
+    .trimEnd()
+    .split("\n")
+    .map((line) => JSON.parse(line) as { run_id: string });
+  assert.equal(maximumRecords.length, 4);
+  assert.equal(
+    maximumRecords.every((record) => record.run_id === maximumRunId),
+    true
+  );
   const facadeAfterAppend = readEventQueryFacade(layout) as {
     filters?: unknown;
     long_filters?: unknown;
@@ -609,7 +717,7 @@ test("event indexes encode long IDs in a collision-free hash namespace", () => {
     status: "events.index/status/sha256/<sha256-hex(status)>.jsonl"
   });
   assert.deepEqual(facadeAfterAppend.index_key_encoding, {
-    version: "1",
+    version: "ultrafuzz.event-index-key.v1",
     direct_max_id_length: 122,
     direct_id_path: "<dimension>/<id>.jsonl",
     long_id_path: "<dimension>/sha256/<sha256-hex(id)>.jsonl",
@@ -623,11 +731,17 @@ test("event redaction covers token families, AWS keys, URL credentials, and priv
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-artifacts-events-"));
   const layout = createRunLayout({ outputRoot: path.join(root, "runs"), runId: "run-redaction" });
   appendEvent(layout, {
-    eventType: "workflow-result",
+    eventType: "workflow-submit-failed",
+    status: "failed",
     payload: {
-      stdout: "Bearer eyJhbGciOiJIUzI1NiJ9.abcdefghijkl.zyxwvutsrq AKIAIOSFODNN7EXAMPLE",
-      stderr: "https://user:pass@example.com xoxb-1234567890-abcdefghi",
-      keyBlock: "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----"
+      code: "WORKFLOW_SUBMISSION_FAILED",
+      message: "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----",
+      severity: "error",
+      source: "workflow",
+      details: {
+        stdout: "Bearer eyJhbGciOiJIUzI1NiJ9.abcdefghijkl.zyxwvutsrq AKIAIOSFODNN7EXAMPLE",
+        stderr: "https://user:pass@example.com xoxb-1234567890-abcdefghi"
+      }
     }
   });
   const serialized = fs.readFileSync(layout.eventsPath, "utf8");
@@ -656,7 +770,10 @@ test("updateNodeState accepts an explicit transition timestamp", () => {
     node_id: "node-a",
     status: "pending",
     retry_count: 0,
-    timed_out: false
+    timed_out: false,
+    wait_since: initial.created_at,
+    wait_reason: "ready",
+    next_eligible_action: "dispatch"
   };
   writeRunState(layout, initial);
 
@@ -832,1037 +949,43 @@ test("durable append aggregates an operation failure with its close failure", (t
   assert.equal(fs.readFileSync(filePath, "utf8"), "");
 });
 
-test("findings normalize schema-versioned findings arrays", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
-  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
-  fs.writeFileSync(
-    path.join(nodeDir, "findings.json"),
-    JSON.stringify([
-      {
-        title: "Invariant can be broken",
-        status: "candidate",
-        severity_guess: "high",
-        confidence: "medium",
-        summary: "A generated test demonstrates the issue.",
-        affected_files: [".ultrafuzz/runs/run-1/artifacts/strategy-a/generated-tests/Invariant.t.sol"],
-        evidence: [{ kind: "test", path: ".ultrafuzz/runs/run-1/artifacts/strategy-a/generated-tests/Invariant.t.sol" }]
-      }
-    ])
-  );
-
-  const report = normalizeFindings({
-    artifactDir: nodeDir,
-    nodeId: "strategy-a",
-    provenance: {
-      strategy: "strategy-a",
-      attemptIndex: 0,
-      modelId: "test-fast",
-      model: "unit-model",
-      modelIndex: 1,
-      loopIndex: 2
-    }
-  });
-
-  assert.equal(report.count, 1);
-  assert.equal(Array.isArray(readFindings(nodeDir)), true);
-  assert.equal(report.findings[0]!.schema_version, "1.0");
-  assert.equal(report.findings[0]!.id, "strategy-a-0");
-  assert.equal(report.findings[0]!.strategy, "strategy-a");
-  assert.equal(report.findings[0]!.model_index, 1);
-  assert.deepEqual(report.findings[0]!.affected_files, [
-    ".ultrafuzz/runs/run-1/artifacts/strategy-a/generated-tests/Invariant.t.sol"
-  ]);
-  assert.deepEqual(report.findings[0]!.evidence, [
-    { kind: "test", path: ".ultrafuzz/runs/run-1/artifacts/strategy-a/generated-tests/Invariant.t.sol" }
-  ]);
-});
-
-test("findings normalize the house-style schema_version alias to the canonical literal", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
-  const nodeDir = getNodeArtifactDir(layout, "stateful-invariant-campaign", { create: true });
-  fs.writeFileSync(
-    path.join(nodeDir, "findings.json"),
-    JSON.stringify([
-      {
-        schema_version: "ultrafuzz.finding.v1",
-        id: "failure-1",
-        title: "Harness drawn-rate sync assertion ignores elapsed-time precondition",
-        status: "confirmed",
-        severity_guess: "low",
-        confidence: "high",
-        summary: "The stored drawn rate lags the recalculated one after time advances."
-      }
-    ])
-  );
-
-  const report = normalizeFindings({ artifactDir: nodeDir, nodeId: "stateful-invariant-campaign" });
-
-  assert.equal(report.count, 1);
-  assert.equal(report.findings[0]!.schema_version, "1.0");
-  assert.equal(report.findings[0]!.id, "failure-1");
-  assert.equal(readFindings(nodeDir)[0]!.schema_version, "1.0", "the alias is rewritten on disk, not preserved");
-
-  fs.writeFileSync(
-    path.join(nodeDir, "findings.json"),
-    JSON.stringify([{ schema_version: "ultrafuzz.finding.v2", id: "failure-1", title: "t", status: "confirmed" }])
-  );
-  assert.throws(
-    () => normalizeFindings({ artifactDir: nodeDir, nodeId: "stateful-invariant-campaign" }),
-    /unsupported schema_version/u
-  );
-});
-
-test("findings that omit schema_version normalize to the canonical literal", () => {
-  // The contract no longer requires the field, so the normalizer is what makes every finding on disk
-  // carry the same version regardless of whether the producer wrote one.
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
-  const nodeDir = getNodeArtifactDir(layout, "stateful-invariant-campaign", { create: true });
-  fs.writeFileSync(
-    path.join(nodeDir, "findings.json"),
-    JSON.stringify([
-      {
-        id: "failure-1",
-        title: "Harness drawn-rate sync assertion ignores elapsed-time precondition",
-        status: "confirmed",
-        severity_guess: "low",
-        confidence: "high",
-        summary: "The stored drawn rate lags the recalculated one after time advances."
-      }
-    ])
-  );
-
-  const report = normalizeFindings({ artifactDir: nodeDir, nodeId: "stateful-invariant-campaign" });
-
-  assert.equal(report.count, 1);
-  assert.equal(report.findings[0]!.schema_version, "1.0");
-  assert.equal(readFindings(nodeDir)[0]!.schema_version, "1.0", "an absent version is filled in on disk");
-});
-
-test("findings normalize bounded numeric confidence to its canonical string representation", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
-  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
-  fs.writeFileSync(
-    path.join(nodeDir, "findings.json"),
-    JSON.stringify([
-      {
-        title: "Numeric confidence issue",
-        status: "candidate",
-        severity_guess: "medium",
-        confidence: 0.85,
-        summary: "The agent emitted a bounded numeric confidence."
-      }
-    ])
-  );
-
-  const report = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
-
-  assert.equal(report.findings[0]!.confidence, "0.85");
-});
-
-test("findings normalize agent lifecycle statuses and flexible evidence references", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
-  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
-  fs.writeFileSync(
-    path.join(nodeDir, "findings.json"),
-    JSON.stringify([
-      {
-        title: "Generated test reproduces issue",
-        status: "reproduced_by_generated_test",
-        severity_guess: "high",
-        confidence: "high",
-        summary: "The generated test fails deterministically.",
-        notes: "narrow rerun confirmed the generated test",
-        evidence: [
-          "test/foundry/strategy-a/Generated.t.sol::testReproducesIssue",
-          { note: "Generated test reproduces issue" },
-          { kind: "validation", path: "forge test --match-path test/foundry/strategy-a/Generated.t.sol -vvvv" }
-        ]
-      }
-    ])
-  );
-
-  const report = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
-
-  assert.equal(report.count, 1);
-  assert.equal(report.findings[0]!.status, "reproduced_by_generated_test");
-  assert.deepEqual(report.findings[0]!.notes, ["narrow rerun confirmed the generated test"]);
-  assert.deepEqual(report.findings[0]!.evidence, [
-    "test/foundry/strategy-a/Generated.t.sol::testReproducesIssue",
-    { note: "Generated test reproduces issue" },
-    { kind: "validation", command: "forge test --match-path test/foundry/strategy-a/Generated.t.sol -vvvv" }
-  ]);
-
-  fs.writeFileSync(
-    path.join(nodeDir, "findings.json"),
-    JSON.stringify([
-      {
-        title: "Generated test reproduces issue",
-        status: "reproduced_by_generated_test",
-        severity_guess: "high",
-        confidence: "high",
-        summary: "The generated test fails deterministically.",
-        evidence: [{ kind: 123 }]
-      }
-    ])
-  );
-
-  assert.throws(() => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }), /field kind/);
-});
-
-test("findings normalize markdown evidence path fragments", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
-  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
-  fs.writeFileSync(
-    path.join(nodeDir, "findings.json"),
-    JSON.stringify([
-      {
-        title: "Recipe-backed issue",
-        status: "candidate",
-        severity_guess: "medium",
-        confidence: "medium",
-        summary: "A recipe section explains the issue.",
-        evidence: [{ kind: "recipe", path: "artifacts/strategy-a/recipes.md#bt-013" }]
-      }
-    ])
-  );
-
-  const report = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
-
-  assert.deepEqual(report.findings[0]!.evidence, [
-    { kind: "recipe", path: "artifacts/strategy-a/recipes.md", fragment: "bt-013" }
-  ]);
-
-  fs.writeFileSync(
-    path.join(nodeDir, "findings.json"),
-    JSON.stringify([
-      {
-        title: "Recipe-backed issue",
-        status: "candidate",
-        severity_guess: "medium",
-        confidence: "medium",
-        summary: "A recipe section explains the issue.",
-        evidence: [{ kind: "recipe", path: "artifacts/strategy-a/recipes.md#bt-013", fragment: "other" }]
-      }
-    ])
-  );
-
-  assert.throws(() => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }), /fragment conflicts/);
-});
-
-test("findings canonicalize a singleton typed evidence range without mutating producer metadata", () => {
-  const independentDetail = "  The source span establishes the bounded StableSwap loop.  ";
-  const evidence = [
-    "scope",
-    {
-      kind: "source",
-      path: "contracts/main/CurveStableSwapNG.vy",
-      detail: independentDetail,
-      line_ranges: [{ line: 318, end_line: 337 }]
-    }
-  ];
-  const original = structuredClone(evidence);
-
-  const canonical = normalizeEvidenceLineRangeCardinality(evidence);
-
-  assert.equal(canonical.changed, true);
-  assert.deepEqual(evidence, original, "the shared producer normalizer must be pure");
-  assert.deepEqual(canonical.value, [
-    "scope",
-    {
-      kind: "source",
-      path: "contracts/main/CurveStableSwapNG.vy",
-      detail: independentDetail,
-      line: 318,
-      end_line: 337
-    }
-  ]);
-
-  assert.deepEqual(
-    normalizeEvidenceLineRangeCardinality([
-      {
-        kind: "source",
-        path: "contracts/main/CurveStableSwapNG.vy",
-        detail: independentDetail,
-        line_ranges: [{ line: 318 }]
-      }
-    ]),
-    {
-      changed: true,
-      value: [
-        {
-          kind: "source",
-          path: "contracts/main/CurveStableSwapNG.vy",
-          detail: independentDetail,
-          line: 318
-        }
-      ]
-    }
-  );
-
-  const disjoint = [
-    {
-      kind: "source",
-      path: "contracts/main/CurveStableSwapNG.vy",
-      detail: independentDetail,
-      line_ranges: [
-        { line: 318, end_line: 337 },
-        { line: 411, end_line: 419 }
-      ]
-    }
-  ];
-  const unchanged = normalizeEvidenceLineRangeCardinality(disjoint);
-  assert.deepEqual(unchanged, { value: disjoint, changed: false });
-  assert.equal(unchanged.value, disjoint);
-
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
-  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
-  const finding = {
-    title: "StableSwap source span",
-    status: "candidate",
-    severity_guess: "Medium",
-    confidence: "medium",
-    summary: "A bounded loop is anchored to one source span.",
-    evidence
-  };
-  fs.writeFileSync(path.join(nodeDir, "findings.json"), JSON.stringify([finding]));
-  const report = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
-  assert.deepEqual(report.findings[0]!.evidence, canonical.value);
-
-  for (const invalidEvidence of [
-    { kind: "source", path: "contracts/main/CurveStableSwapNG.vy", line_ranges: [] },
-    { kind: "source", path: "contracts/main/CurveStableSwapNG.vy", line_ranges: null },
-    { kind: "source", path: "contracts/main/CurveStableSwapNG.vy", line_ranges: [{ line: 0 }] },
-    {
-      kind: "source",
-      path: "contracts/main/CurveStableSwapNG.vy",
-      line_ranges: [{ line: 337, end_line: 318 }]
-    },
-    {
-      kind: "source",
-      path: "contracts/main/CurveStableSwapNG.vy",
-      line_ranges: [{ line: Number.MAX_SAFE_INTEGER + 1 }]
-    },
-    {
-      kind: "source",
-      path: "contracts/main/CurveStableSwapNG.vy",
-      line_ranges: [{ line: 318, note: "not canonical" }]
-    },
-    {
-      kind: "source",
-      path: "contracts/main/CurveStableSwapNG.vy",
-      line: 318,
-      line_ranges: [{ line: 318, end_line: 337 }]
-    },
-    {
-      kind: "source",
-      path: "contracts/main/CurveStableSwapNG.vy",
-      end_line: 337,
-      line_ranges: [{ line: 318, end_line: 337 }]
-    },
-    {
-      kind: "source",
-      path: "contracts/main/CurveStableSwapNG.vy",
-      line: 318,
-      line_ranges: [
-        { line: 318, end_line: 337 },
-        { line: 411, end_line: 419 }
-      ]
-    },
-    {
-      kind: "source",
-      path: "../CurveStableSwapNG.vy",
-      line_ranges: [{ line: 318, end_line: 337 }]
-    },
-    {
-      kind: "source",
-      path: " contracts/main/CurveStableSwapNG.vy ",
-      line_ranges: [{ line: 318, end_line: 337 }]
-    },
-    {
-      kind: "source",
-      path: "contracts/main/CurveStableSwapNG.vy:318-337",
-      line_ranges: [{ line: 318, end_line: 337 }]
-    },
-    {
-      kind: "validation",
-      path: "forge test --match-path CurveStableSwapNG.vy",
-      line_ranges: [{ line: 318, end_line: 337 }]
-    },
-    {
-      kind: "source",
-      path: "contracts/main/CurveStableSwapNG.vy",
-      command: "forge test",
-      line_ranges: [{ line: 318, end_line: 337 }]
-    }
-  ]) {
-    fs.writeFileSync(
-      path.join(nodeDir, "findings.json"),
-      JSON.stringify([{ ...finding, evidence: ["scope", invalidEvidence] }])
-    );
-    assert.throws(
-      () => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }),
-      /./u,
-      JSON.stringify(invalidEvidence)
-    );
-  }
-});
-
-test("findings normalize source evidence line suffixes", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
-  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
-  fs.writeFileSync(
-    path.join(nodeDir, "findings.json"),
-    JSON.stringify([
-      {
-        title: "Source-backed issue",
-        status: "candidate",
-        severity_guess: "medium",
-        confidence: "medium",
-        summary: "A source line anchors the issue.",
-        evidence: [{ kind: "source", path: "src/Oracle.sol:42" }]
-      }
-    ])
-  );
-
-  const report = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
-
-  assert.deepEqual(report.findings[0]!.evidence, [{ kind: "source", path: "src/Oracle.sol", line: 42 }]);
-
-  fs.writeFileSync(
-    path.join(nodeDir, "findings.json"),
-    JSON.stringify([
-      {
-        title: "Source range-backed issue",
-        status: "candidate",
-        severity_guess: "medium",
-        confidence: "medium",
-        summary: "A source line range anchors the issue.",
-        evidence: [{ kind: "source", path: "PoolLens.sol:248-274" }]
-      }
-    ])
-  );
-
-  const rangeReport = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
-
-  assert.deepEqual(rangeReport.findings[0]!.evidence, [
-    { kind: "source", path: "PoolLens.sol", line: 248, end_line: 274 }
-  ]);
-
-  fs.writeFileSync(
-    path.join(nodeDir, "findings.json"),
-    JSON.stringify([
-      {
-        title: "Disjoint source ranges",
-        status: "candidate",
-        severity_guess: "medium",
-        confidence: "medium",
-        summary: "Two disjoint source ranges anchor the issue.",
-        evidence: [{ kind: "source", path: "VeryLiquidVault.sol:105-107,154-185" }]
-      }
-    ])
-  );
-
-  const lineListReport = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
-
-  assert.deepEqual(lineListReport.findings[0]!.evidence, [
-    {
-      kind: "source",
-      path: "VeryLiquidVault.sol",
-      line_ranges: [
-        { line: 105, end_line: 107 },
-        { line: 154, end_line: 185 }
-      ],
-      detail: "lines 105-107,154-185"
-    }
-  ]);
-
-  fs.writeFileSync(
-    path.join(nodeDir, "findings.json"),
-    JSON.stringify([
-      {
-        title: "Semicolon-separated source ranges",
-        status: "candidate",
-        severity_guess: "medium",
-        confidence: "medium",
-        summary: "Two semicolon-separated source ranges anchor the issue.",
-        evidence: [{ kind: "source", path: "CurveStableSwapNG.vy:17-19;33-35" }]
-      }
-    ])
-  );
-
-  const semicolonListReport = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
-
-  assert.deepEqual(semicolonListReport.findings[0]!.evidence, [
-    {
-      kind: "source",
-      path: "CurveStableSwapNG.vy",
-      line_ranges: [
-        { line: 17, end_line: 19 },
-        { line: 33, end_line: 35 }
-      ],
-      detail: "lines 17-19;33-35"
-    }
-  ]);
-
-  fs.writeFileSync(
-    path.join(nodeDir, "findings.json"),
-    JSON.stringify([
-      {
-        title: "Natural-language separated source ranges",
-        status: "candidate",
-        severity_guess: "medium",
-        confidence: "medium",
-        summary: "Two natural-language separated source ranges anchor the issue.",
-        evidence: [
-          { kind: "source", path: "VeryLiquidVault.sol:253-258 and 346-364" },
-          { kind: "source", path: "VToken.sol:698-728 and 1463-1478" }
-        ]
-      }
-    ])
-  );
-
-  const naturalLanguageListReport = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
-
-  assert.deepEqual(naturalLanguageListReport.findings[0]!.evidence, [
-    {
-      kind: "source",
-      path: "VeryLiquidVault.sol",
-      line_ranges: [
-        { line: 253, end_line: 258 },
-        { line: 346, end_line: 364 }
-      ],
-      detail: "lines 253-258 and 346-364"
-    },
-    {
-      kind: "source",
-      path: "VToken.sol",
-      line_ranges: [
-        { line: 698, end_line: 728 },
-        { line: 1463, end_line: 1478 }
-      ],
-      detail: "lines 698-728 and 1463-1478"
-    }
-  ]);
-
-  const inlineDetail =
-    "maxDeposit only takes the minimum of the summed strategy maxDeposit values and the meta-vault limit";
-  fs.writeFileSync(
-    path.join(nodeDir, "findings.json"),
-    JSON.stringify([
-      {
-        title: "Source range with inline detail",
-        status: "candidate",
-        severity_guess: "medium",
-        confidence: "medium",
-        summary: "A source range and inline description anchor the issue.",
-        evidence: [
-          { kind: "source", path: `VeryLiquidVault.sol:104-105: ${inlineDetail}` },
-          {
-            kind: "source",
-            path: `VeryLiquidVault.sol:104-105: ${inlineDetail}`,
-            line: 104,
-            end_line: 105,
-            detail: inlineDetail
-          }
-        ]
-      }
-    ])
-  );
-
-  const inlineDetailReport = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
-
-  assert.deepEqual(inlineDetailReport.findings[0]!.evidence, [
-    {
-      kind: "source",
-      path: "VeryLiquidVault.sol",
-      line: 104,
-      end_line: 105,
-      detail: inlineDetail
-    },
-    {
-      kind: "source",
-      path: "VeryLiquidVault.sol",
-      line: 104,
-      end_line: 105,
-      detail: inlineDetail
-    }
-  ]);
-
-  fs.writeFileSync(
-    path.join(nodeDir, "findings.json"),
-    JSON.stringify([
-      {
-        title: "Source range with semicolon-delimited detail",
-        status: "candidate",
-        severity_guess: "medium",
-        confidence: "medium",
-        summary: "A source range and short description anchor the issue.",
-        evidence: [
-          { kind: "source", path: "PoolRegistry.sol:305-327; tests" },
-          {
-            kind: "source",
-            path: "PoolRegistry.sol:305-327; tests",
-            line: 305,
-            end_line: 327,
-            detail: "tests"
-          }
-        ]
-      }
-    ])
-  );
-
-  const semicolonDetailReport = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
-
-  assert.deepEqual(semicolonDetailReport.findings[0]!.evidence, [
-    { kind: "source", path: "PoolRegistry.sol", line: 305, end_line: 327, detail: "tests" },
-    { kind: "source", path: "PoolRegistry.sol", line: 305, end_line: 327, detail: "tests" }
-  ]);
-
-  fs.writeFileSync(
-    path.join(nodeDir, "findings.json"),
-    JSON.stringify([
-      {
-        title: "Disjoint source ranges with matching detail",
-        status: "candidate",
-        severity_guess: "medium",
-        confidence: "medium",
-        summary: "Equivalent explicit detail is unambiguous.",
-        evidence: [
-          {
-            kind: "source",
-            path: "VeryLiquidVault.sol:105-107,154-185",
-            detail: "lines 105-107,154-185"
-          }
-        ]
-      }
-    ])
-  );
-
-  const matchingDetailReport = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
-
-  assert.deepEqual(matchingDetailReport.findings[0]!.evidence, [
-    {
-      kind: "source",
-      path: "VeryLiquidVault.sol",
-      line_ranges: [
-        { line: 105, end_line: 107 },
-        { line: 154, end_line: 185 }
-      ],
-      detail: "lines 105-107,154-185"
-    }
-  ]);
-
-  for (const evidence of [
-    { kind: "source", path: "VeryLiquidVault.sol:105-107,154-185", line: 105 },
-    { kind: "source", path: "VeryLiquidVault.sol:105-107,154-185", end_line: 185 }
-  ]) {
-    fs.writeFileSync(
-      path.join(nodeDir, "findings.json"),
-      JSON.stringify([
-        {
-          title: "Ambiguous disjoint source ranges",
-          status: "candidate",
-          severity_guess: "medium",
-          confidence: "medium",
-          summary: "Conflicting structured metadata must fail closed.",
-          evidence: [evidence]
-        }
-      ])
-    );
-    assert.throws(() => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }), /line list conflicts/u);
-  }
-
-  const independentDetail = "  The ranges jointly show the external-dependency boundary.  ";
-  const canonicalLineRanges = [
-    { line: 105, end_line: 107 },
-    { line: 154, end_line: 185 }
-  ];
-  fs.writeFileSync(
-    path.join(nodeDir, "findings.json"),
-    JSON.stringify([
-      {
-        title: "Disjoint source ranges with independent detail",
-        status: "candidate",
-        severity_guess: "medium",
-        confidence: "medium",
-        summary: "Structural ranges and producer prose occupy separate metadata fields.",
-        evidence: [
-          {
-            kind: "source",
-            path: "VeryLiquidVault.sol:105-107,154-185",
-            detail: independentDetail
-          },
-          {
-            kind: "source",
-            path: "VeryLiquidVault.sol:105-107,154-185",
-            detail: independentDetail,
-            line_ranges: canonicalLineRanges
-          },
-          {
-            kind: "source",
-            path: "VeryLiquidVault.sol",
-            detail: independentDetail,
-            line_ranges: canonicalLineRanges
-          }
-        ]
-      }
-    ])
-  );
-
-  const independentDetailReport = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
-
-  assert.deepEqual(independentDetailReport.findings[0]!.evidence, [
-    {
-      kind: "source",
-      path: "VeryLiquidVault.sol",
-      detail: independentDetail,
-      line_ranges: canonicalLineRanges
-    },
-    {
-      kind: "source",
-      path: "VeryLiquidVault.sol",
-      detail: independentDetail,
-      line_ranges: canonicalLineRanges
-    },
-    {
-      kind: "source",
-      path: "VeryLiquidVault.sol",
-      detail: independentDetail,
-      line_ranges: canonicalLineRanges
-    }
-  ]);
-
-  for (const lineRanges of [
-    [
-      { line: 105, end_line: 107 },
-      { line: 155, end_line: 185 }
-    ],
-    [
-      { line: 154, end_line: 185 },
-      { line: 105, end_line: 107 }
-    ],
-    [{ line: 105, end_line: 107 }],
-    [
-      { line: 105, end_line: 104 },
-      { line: 154, end_line: 185 }
-    ],
-    [
-      { line: 105, end_line: 107, note: "not canonical" },
-      { line: 154, end_line: 185 }
-    ],
-    [{ line: 0 }, { line: 154, end_line: 185 }],
-    [
-      { line: "105", end_line: 107 },
-      { line: 154, end_line: 185 }
-    ],
-    [{ line: Number.MAX_SAFE_INTEGER + 1 }, { line: 154, end_line: 185 }]
-  ]) {
-    fs.writeFileSync(
-      path.join(nodeDir, "findings.json"),
-      JSON.stringify([
-        {
-          title: "Conflicting disjoint line ranges",
-          status: "candidate",
-          severity_guess: "medium",
-          confidence: "medium",
-          summary: "Differing or malformed typed range metadata must fail closed.",
-          evidence: [
-            {
-              kind: "source",
-              path: "VeryLiquidVault.sol:105-107,154-185",
-              line_ranges: lineRanges
-            }
-          ]
-        }
-      ])
-    );
-    assert.throws(() => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }), /line_ranges/u);
-  }
-
-  for (const evidence of [
-    { kind: "source", path: `VeryLiquidVault.sol:104-105: ${inlineDetail}`, line: 103 },
-    { kind: "source", path: `VeryLiquidVault.sol:104-105: ${inlineDetail}`, end_line: 106 },
-    { kind: "source", path: `VeryLiquidVault.sol:104-105: ${inlineDetail}`, detail: "different detail" },
-    { kind: "source", path: "PoolRegistry.sol:305-327; tests", line: 304 },
-    { kind: "source", path: "PoolRegistry.sol:305-327; tests", end_line: 328 },
-    { kind: "source", path: "PoolRegistry.sol:305-327; tests", detail: "different detail" }
-  ]) {
-    fs.writeFileSync(
-      path.join(nodeDir, "findings.json"),
-      JSON.stringify([
-        {
-          title: "Conflicting inline source detail",
-          status: "candidate",
-          severity_guess: "medium",
-          confidence: "medium",
-          summary: "Conflicting structured metadata must fail closed.",
-          evidence: [evidence]
-        }
-      ])
-    );
-    assert.throws(() => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }), /conflicts/u);
-  }
-
-  for (const descendingPath of [
-    "VeryLiquidVault.sol:105-107,185-154",
-    "CurveStableSwapNG.vy:17-19;35-33",
-    "VToken.sol:698-728 and 1478-1463",
-    "VeryLiquidVault.sol:105-104: descending inline range",
-    "PoolRegistry.sol:327-305; tests"
-  ]) {
-    fs.writeFileSync(
-      path.join(nodeDir, "findings.json"),
-      JSON.stringify([
-        {
-          title: "Descending disjoint source range",
-          status: "candidate",
-          severity_guess: "medium",
-          confidence: "medium",
-          summary: "A descending member of the list must fail closed.",
-          evidence: [{ kind: "source", path: descendingPath }]
-        }
-      ])
-    );
-    assert.throws(
-      () => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }),
-      /line range must not descend/u
-    );
-  }
-
-  for (const [unsafePath, expectedError] of [
-    ["../VeryLiquidVault.sol:105-107,154-185", /traverse/u],
-    ["VeryLiquidVault.sol:105-107,latest", /unsafe segment/u],
-    ["CurveStableSwapNG.vy:17-19;33-35,40", /unsafe segment/u],
-    ["VToken.sol:698-728 and 1463-1478,1500-1501", /unsafe segment/u],
-    ["VeryLiquidVault.sol:104-105: ", /unsafe segment/u],
-    ["PoolRegistry.sol:305-327; ", /unsafe segment/u],
-    ["PoolRegistry.sol:305-327; 411-419", /unsafe segment/u],
-    ["VeryLiquidVault.sol:latest: prose", /unsafe segment/u],
-    ["PoolRegistry.sol:latest; tests", /unsafe segment/u],
-    ["../VeryLiquidVault.sol:104-105: prose", /traverse/u],
-    ["../PoolRegistry.sol:305-327; tests", /traverse/u],
-    ["VeryLiquidVault.sol:9007199254740992,154-185", /positive safe integer/u],
-    ["VeryLiquidVault.sol:9007199254740992: prose", /positive safe integer/u],
-    ["PoolRegistry.sol:9007199254740992; tests", /positive safe integer/u]
-  ] as const) {
-    fs.writeFileSync(
-      path.join(nodeDir, "findings.json"),
-      JSON.stringify([
-        {
-          title: "Invalid disjoint source ranges",
-          status: "candidate",
-          severity_guess: "medium",
-          confidence: "medium",
-          summary: "Unsafe or malformed paths must retain fail-closed behavior.",
-          evidence: [{ kind: "source", path: unsafePath }]
-        }
-      ])
-    );
-    assert.throws(() => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }), expectedError);
-  }
-
-  fs.writeFileSync(
-    path.join(nodeDir, "findings.json"),
-    JSON.stringify([
-      {
-        title: "Command-like evidence remains a command",
-        status: "candidate",
-        severity_guess: "medium",
-        confidence: "medium",
-        summary: "Command normalization takes precedence over path-reference parsing.",
-        evidence: [
-          {
-            kind: "validation",
-            path: "forge test --match-path VeryLiquidVault.sol:104-105: inline prose"
-          },
-          {
-            kind: "validation",
-            path: "forge test --match-path PoolRegistry.sol:305-327; tests"
-          }
-        ]
-      }
-    ])
-  );
-
-  const commandReport = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
-
-  assert.deepEqual(commandReport.findings[0]!.evidence, [
-    {
-      kind: "validation",
-      command: "forge test --match-path VeryLiquidVault.sol:104-105: inline prose"
-    },
-    {
-      kind: "validation",
-      command: "forge test --match-path PoolRegistry.sol:305-327; tests"
-    }
-  ]);
-
-  for (const evidence of [
-    {
-      kind: "validation",
-      path: "forge test --match-path VeryLiquidVault.sol",
-      line_ranges: canonicalLineRanges
-    },
-    { kind: "source", path: "VeryLiquidVault.sol", line_ranges: null }
-  ]) {
-    fs.writeFileSync(
-      path.join(nodeDir, "findings.json"),
-      JSON.stringify([
-        {
-          title: "Invalid typed source ranges",
-          status: "candidate",
-          severity_guess: "medium",
-          confidence: "medium",
-          summary: "Typed source ranges cannot annotate commands or contain null.",
-          evidence: [evidence]
-        }
-      ])
-    );
-    assert.throws(() => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }), /line_ranges/u);
-  }
-
-  fs.writeFileSync(
-    path.join(nodeDir, "findings.json"),
-    JSON.stringify([
-      {
-        title: "Source-backed issue",
-        status: "candidate",
-        severity_guess: "medium",
-        confidence: "medium",
-        summary: "A source line anchors the issue.",
-        evidence: [{ kind: "source", path: "src/Oracle.sol:42", line: 43 }]
-      }
-    ])
-  );
-
-  assert.throws(() => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }), /line conflicts/);
-});
-
-test("findings normalize scalar lists and affected-file line references", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
-  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
-  fs.writeFileSync(
-    path.join(nodeDir, "findings.json"),
-    JSON.stringify([
-      {
-        title: "Line-referenced metadata",
-        status: "candidate",
-        severity_guess: "medium",
-        confidence: "medium",
-        summary: "Legacy metadata includes source locations in path-only fields.",
-        affected_files: "src/Oracle.sol:42:7",
-        affected_functions: "quote",
-        patch_refs: ["test/Oracle.t.sol#L10-L18", "src/Pool.sol:21-24"],
-        property_ids: "prop-1",
-        notes: "normalized"
-      }
-    ])
-  );
-
-  const report = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
-
-  assert.deepEqual(report.findings[0]!.affected_files, ["src/Oracle.sol"]);
-  assert.deepEqual(report.findings[0]!.affected_functions, ["quote"]);
-  assert.deepEqual(report.findings[0]!.patch_refs, ["test/Oracle.t.sol", "src/Pool.sol"]);
-  assert.deepEqual(report.findings[0]!.property_ids, ["prop-1"]);
-  assert.deepEqual(report.findings[0]!.notes, ["normalized"]);
-});
-
-test("findings metadata paths allow dot-prefixed generated roots but reject traversal", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
-  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
-  fs.writeFileSync(
-    path.join(nodeDir, "findings.json"),
-    JSON.stringify([
-      {
-        title: "Traversal",
-        status: "candidate",
-        severity_guess: "medium",
-        confidence: "medium",
-        summary: "A generated test suggests a reviewable issue.",
-        affected_files: ["../outside.sol"]
-      }
-    ])
-  );
-
-  assert.throws(() => normalizeFindings({ artifactDir: nodeDir }), /traverse/);
-
-  fs.writeFileSync(
-    path.join(nodeDir, "findings.json"),
-    JSON.stringify([
-      {
-        title: "Traversal",
-        status: "candidate",
-        severity_guess: "medium",
-        confidence: "medium",
-        summary: "A generated test suggests a reviewable issue.",
-        evidence: [{ kind: "test", path: "../outside.sol" }]
-      }
-    ])
-  );
-
-  assert.throws(() => normalizeFindings({ artifactDir: nodeDir }), /traverse/);
-});
-
-test("findings normalization requires findings.json and rejects symlink sources", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
-  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
-  fs.writeFileSync(
-    path.join(nodeDir, "finding.json"),
-    JSON.stringify({
-      title: "Candidate issue",
-      status: "candidate",
-      severity_guess: "medium",
-      confidence: "medium",
-      summary: "A legacy single-object finding is no longer accepted."
-    })
-  );
-
-  assert.throws(() => normalizeFindings({ artifactDir: nodeDir }), /missing findings\.json/);
-
-  fs.writeFileSync(
-    path.join(nodeDir, "findings.json"),
-    JSON.stringify([
-      {
-        schema_version: "1.0",
-        title: "Candidate issue",
-        status: "candidate",
-        severity_guess: "medium",
-        confidence: "medium",
-        summary: "The generated test suggests a reviewable issue."
-      }
-    ])
-  );
-
-  assert.doesNotThrow(() => normalizeFindings({ artifactDir: nodeDir }));
-
-  const outside = tempProject();
-  fs.writeFileSync(path.join(outside, "findings.json"), "[]");
-  fs.unlinkSync(path.join(nodeDir, "findings.json"));
-  fs.symlinkSync(path.join(outside, "findings.json"), path.join(nodeDir, "findings.json"));
-  assert.throws(() => normalizeFindings({ artifactDir: nodeDir }), /symlink/);
-});
-
 test("generated-test manifests persist explicit generated files with provenance", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
+  const generatedContents = "contract InvariantTest {} // π\n";
+  const supportContents = "library InvariantFixture {} // café\n";
   const manifest = writeGeneratedTestManifest({
     layout,
     nodeId: "strategy-a",
     provenance: { agent_ref: "CodexAgent", workflow_task_id: "node:strategy-a", attempt_index: 0 },
     tests: [
       {
-        path: "Invariant.t.sol",
-        content: "contract InvariantTest {}\n",
-        language: "solidity",
-        framework: "foundry"
+        path: "generated-tests/Invariant.t.sol",
+        content: generatedContents,
+        language: "solidity"
+      }
+    ],
+    supportFiles: [
+      {
+        path: "generated-tests/helpers/InvariantFixture.sol",
+        content: supportContents,
+        language: "solidity"
       }
     ]
   });
 
-  assert.equal(manifest.schema_version, "1.0");
+  assert.equal(manifest.schema_version, GENERATED_TESTS_SCHEMA_VERSION);
+  assert.equal(manifest.framework, "foundry");
   assert.equal(manifest.generated_tests.length, 1);
   assert.equal(manifest.generated_tests[0]!.path, "generated-tests/Invariant.t.sol");
+  assert.equal(manifest.generated_tests[0]!.size_bytes, Buffer.byteLength(generatedContents));
+  assert.equal(
+    manifest.generated_tests[0]!.sha256,
+    crypto.createHash("sha256").update(generatedContents).digest("hex")
+  );
   assert.equal(manifest.generated_tests[0]!.provenance!.agent_ref, "CodexAgent");
+  assert.equal(manifest.support_files[0]!.path, "generated-tests/helpers/InvariantFixture.sol");
+  assert.equal(manifest.support_files[0]!.size_bytes, Buffer.byteLength(supportContents));
+  assert.equal(manifest.support_files[0]!.sha256, crypto.createHash("sha256").update(supportContents).digest("hex"));
   assert.equal(
     fs.existsSync(path.join(getNodeArtifactDir(layout, "strategy-a"), "generated-tests", "Invariant.t.sol")),
     true
@@ -1877,11 +1000,369 @@ test("generated-test manifest writer rejects zero-byte companion files", () => {
       writeGeneratedTestManifest({
         layout,
         nodeId: "strategy-a",
+        supportFiles: [],
         tests: [{ path: "generated-tests/Empty.t.sol", content: "" }]
       }),
     /generated test file must be non-empty/u
   );
   assert.equal(fs.existsSync(path.join(getNodeArtifactDir(layout, "strategy-a"), "generated-tests.json")), false);
+});
+
+test("generated-test manifest writer rejects support-only bundles before writing files", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-support-only-generated-test" });
+
+  assert.throws(
+    () =>
+      writeGeneratedTestManifest({
+        layout,
+        nodeId: "strategy-a",
+        tests: [],
+        supportFiles: [{ path: "generated-tests/Helper.sol", content: "library Helper {}\n" }]
+      }),
+    /cannot declare support files without a runnable generated test/u
+  );
+  assert.equal(fs.existsSync(path.join(getNodeArtifactDir(layout, "strategy-a"), "generated-tests.json")), false);
+  assert.equal(
+    fs.existsSync(path.join(getNodeArtifactDir(layout, "strategy-a"), "generated-tests", "Helper.sol")),
+    false
+  );
+});
+
+test("generated-test manifest writer rejects excess combined entries before creating bundle paths", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-excess-generated-test-entries" });
+
+  assert.throws(
+    () =>
+      writeGeneratedTestManifest({
+        layout,
+        nodeId: "strategy-a",
+        tests: Array.from({ length: MAX_GENERATED_TEST_BUNDLE_ENTRIES + 1 }, (_, index) => ({
+          path: `generated-tests/Test-${index}.sol`,
+          content: "x"
+        })),
+        supportFiles: []
+      }),
+    /1024-entry combined bundle limit/u
+  );
+  assert.equal(fs.existsSync(path.join(layout.artifactsDir, "strategy-a")), false);
+});
+
+test("generated-test manifest writer rejects excess cumulative existing bytes before reading companions", (t) => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-excess-generated-test-bytes" });
+  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
+  const generatedTestsDir = path.join(nodeDir, "generated-tests");
+  fs.mkdirSync(generatedTestsDir);
+  const tests = Array.from({ length: 5 }, (_, index) => {
+    const relativePath = `generated-tests/Test-${index}.sol`;
+    const absolutePath = path.join(nodeDir, relativePath);
+    fs.writeFileSync(absolutePath, "x", "utf8");
+    fs.truncateSync(absolutePath, MAX_GENERATED_TEST_BUNDLE_BYTES / 4);
+    return { path: relativePath };
+  });
+  const readSync = t.mock.method(fs, "readSync", () => {
+    throw new Error("companion content was read before cumulative resource preflight completed");
+  });
+
+  assert.throws(
+    () =>
+      writeGeneratedTestManifest({
+        layout,
+        nodeId: "strategy-a",
+        tests,
+        supportFiles: []
+      }),
+    /67108864-byte combined companion limit/u
+  );
+  assert.equal(readSync.mock.callCount(), 0);
+  assert.equal(fs.existsSync(path.join(nodeDir, "generated-tests.json")), false);
+});
+
+test("generated-test manifest writer rejects cross-array duplicate paths before changing bundle bytes", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-duplicate-generated-test" });
+  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
+  const generatedTestsDir = path.join(nodeDir, "generated-tests");
+  fs.mkdirSync(generatedTestsDir, { recursive: true });
+  const companionPath = path.join(generatedTestsDir, "Shared.sol");
+  const manifestPath = path.join(nodeDir, "generated-tests.json");
+  fs.writeFileSync(companionPath, "sentinel companion\n", "utf8");
+  fs.writeFileSync(manifestPath, "sentinel manifest\n", "utf8");
+
+  assert.throws(
+    () =>
+      writeGeneratedTestManifest({
+        layout,
+        nodeId: "strategy-a",
+        tests: [{ path: "generated-tests/Shared.sol", content: "replacement test\n" }],
+        supportFiles: [{ path: "generated-tests/Shared.sol", content: "replacement support\n" }]
+      }),
+    /repeats path "generated-tests\/Shared\.sol"/u
+  );
+  assert.equal(fs.readFileSync(companionPath, "utf8"), "sentinel companion\n");
+  assert.equal(fs.readFileSync(manifestPath, "utf8"), "sentinel manifest\n");
+});
+
+test("generated-test manifest writer preflights missing existing companions before overwriting earlier files", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-missing-support-generated-test" });
+  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
+  const generatedTestsDir = path.join(nodeDir, "generated-tests");
+  fs.mkdirSync(generatedTestsDir, { recursive: true });
+  const testPath = path.join(generatedTestsDir, "Replay.t.sol");
+  const manifestPath = path.join(nodeDir, "generated-tests.json");
+  fs.writeFileSync(testPath, "sentinel test\n", "utf8");
+  fs.writeFileSync(manifestPath, "sentinel manifest\n", "utf8");
+
+  assert.throws(
+    () =>
+      writeGeneratedTestManifest({
+        layout,
+        nodeId: "strategy-a",
+        tests: [{ path: "generated-tests/Replay.t.sol", content: "replacement test\n" }],
+        supportFiles: [{ path: "generated-tests/MissingHelper.sol" }]
+      }),
+    /generated-test support file does not exist/u
+  );
+  assert.equal(fs.readFileSync(testPath, "utf8"), "sentinel test\n");
+  assert.equal(fs.readFileSync(manifestPath, "utf8"), "sentinel manifest\n");
+});
+
+test("generated-test manifest writer preflights non-file destinations before overwriting earlier files", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-directory-support-generated-test" });
+  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
+  const generatedTestsDir = path.join(nodeDir, "generated-tests");
+  const supportDirectory = path.join(generatedTestsDir, "InvariantFixture.sol");
+  fs.mkdirSync(supportDirectory, { recursive: true });
+  const testPath = path.join(generatedTestsDir, "Replay.t.sol");
+  const manifestPath = path.join(nodeDir, "generated-tests.json");
+  fs.writeFileSync(testPath, "sentinel test\n", "utf8");
+  fs.writeFileSync(manifestPath, "sentinel manifest\n", "utf8");
+
+  assert.throws(
+    () =>
+      writeGeneratedTestManifest({
+        layout,
+        nodeId: "strategy-a",
+        tests: [{ path: "generated-tests/Replay.t.sol", content: "replacement test\n" }],
+        supportFiles: [{ path: "generated-tests/InvariantFixture.sol", content: "library InvariantFixture {}\n" }]
+      }),
+    /generated-test bundle destination must be a regular file/u
+  );
+  assert.equal(fs.readFileSync(testPath, "utf8"), "sentinel test\n");
+  assert.equal(fs.readFileSync(manifestPath, "utf8"), "sentinel manifest\n");
+  assert.deepEqual(fs.readdirSync(supportDirectory), []);
+});
+
+test("generated-test manifest writer validates entry metadata before changing bundle bytes", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-invalid-metadata-generated-test" });
+  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
+  const generatedTestsDir = path.join(nodeDir, "generated-tests");
+  fs.mkdirSync(generatedTestsDir, { recursive: true });
+  const testPath = path.join(generatedTestsDir, "Replay.t.sol");
+  const manifestPath = path.join(nodeDir, "generated-tests.json");
+  fs.writeFileSync(testPath, "sentinel test\n", "utf8");
+  fs.writeFileSync(manifestPath, "sentinel manifest\n", "utf8");
+
+  assert.throws(
+    () =>
+      writeGeneratedTestManifest({
+        layout,
+        nodeId: "strategy-a",
+        tests: [{ path: "generated-tests/Replay.t.sol", content: "replacement test\n" }],
+        supportFiles: [
+          {
+            path: "generated-tests/InvariantFixture.sol",
+            content: "library InvariantFixture {}\n",
+            language: ""
+          }
+        ]
+      }),
+    /generated tests manifest is schema-invalid/u
+  );
+  assert.equal(fs.readFileSync(testPath, "utf8"), "sentinel test\n");
+  assert.equal(fs.existsSync(path.join(generatedTestsDir, "InvariantFixture.sol")), false);
+  assert.equal(fs.readFileSync(manifestPath, "utf8"), "sentinel manifest\n");
+});
+
+test("generated-test manifest writer preflights its manifest destination before changing companion bytes", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-directory-manifest-generated-test" });
+  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
+  const generatedTestsDir = path.join(nodeDir, "generated-tests");
+  const manifestDirectory = path.join(nodeDir, "generated-tests.json");
+  fs.mkdirSync(generatedTestsDir, { recursive: true });
+  fs.mkdirSync(manifestDirectory);
+  const testPath = path.join(generatedTestsDir, "Replay.t.sol");
+  fs.writeFileSync(testPath, "sentinel test\n", "utf8");
+
+  assert.throws(
+    () =>
+      writeGeneratedTestManifest({
+        layout,
+        nodeId: "strategy-a",
+        tests: [{ path: "generated-tests/Replay.t.sol", content: "replacement test\n" }],
+        supportFiles: []
+      }),
+    /generated-test bundle destination must be a regular file/u
+  );
+  assert.equal(fs.readFileSync(testPath, "utf8"), "sentinel test\n");
+  assert.deepEqual(fs.readdirSync(manifestDirectory), []);
+});
+
+test("generated-test manifest writer rejects a hard-linked manifest destination before changing bundle bytes", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-hardlinked-manifest-generated-test" });
+  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
+  const generatedTestsDir = path.join(nodeDir, "generated-tests");
+  fs.mkdirSync(generatedTestsDir, { recursive: true });
+  const testPath = path.join(generatedTestsDir, "Replay.t.sol");
+  const manifestPath = path.join(nodeDir, "generated-tests.json");
+  const manifestAlias = path.join(tempProject(), "generated-tests-alias.json");
+  fs.writeFileSync(testPath, "sentinel test\n", "utf8");
+  fs.writeFileSync(manifestPath, "sentinel manifest\n", "utf8");
+  fs.linkSync(manifestPath, manifestAlias);
+  const manifestInode = fs.lstatSync(manifestPath).ino;
+
+  assert.throws(
+    () =>
+      writeGeneratedTestManifest({
+        layout,
+        nodeId: "strategy-a",
+        tests: [{ path: "generated-tests/Replay.t.sol", content: "replacement test\n" }],
+        supportFiles: []
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof ArtifactPathError);
+      assert.equal(error.code, "hard-link");
+      assert.match(error.message, /bundle destination must be singly linked/u);
+      return true;
+    }
+  );
+  assert.equal(fs.readFileSync(testPath, "utf8"), "sentinel test\n");
+  assert.equal(fs.readFileSync(manifestPath, "utf8"), "sentinel manifest\n");
+  assert.equal(fs.readFileSync(manifestAlias, "utf8"), "sentinel manifest\n");
+  assert.equal(fs.lstatSync(manifestPath).ino, manifestInode);
+  assert.equal(fs.lstatSync(manifestPath).nlink, 2);
+});
+
+test("generated-test manifest writer rejects a hard-linked companion before changing bundle bytes", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-hardlinked-companion-generated-test" });
+  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
+  const generatedTestsDir = path.join(nodeDir, "generated-tests");
+  fs.mkdirSync(generatedTestsDir, { recursive: true });
+  const testPath = path.join(generatedTestsDir, "Replay.t.sol");
+  const supportPath = path.join(generatedTestsDir, "InvariantFixture.sol");
+  const supportAlias = path.join(tempProject(), "InvariantFixture-alias.sol");
+  const manifestPath = path.join(nodeDir, "generated-tests.json");
+  fs.writeFileSync(testPath, "sentinel test\n", "utf8");
+  fs.writeFileSync(supportPath, "sentinel support\n", "utf8");
+  fs.linkSync(supportPath, supportAlias);
+  fs.writeFileSync(manifestPath, "sentinel manifest\n", "utf8");
+
+  assert.throws(
+    () =>
+      writeGeneratedTestManifest({
+        layout,
+        nodeId: "strategy-a",
+        tests: [{ path: "generated-tests/Replay.t.sol", content: "replacement test\n" }],
+        supportFiles: [{ path: "generated-tests/InvariantFixture.sol", content: "replacement support\n" }]
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof ArtifactPathError);
+      assert.equal(error.code, "hard-link");
+      assert.match(error.message, /bundle destination must be singly linked/u);
+      return true;
+    }
+  );
+  assert.equal(fs.readFileSync(testPath, "utf8"), "sentinel test\n");
+  assert.equal(fs.readFileSync(supportPath, "utf8"), "sentinel support\n");
+  assert.equal(fs.readFileSync(supportAlias, "utf8"), "sentinel support\n");
+  assert.equal(fs.readFileSync(manifestPath, "utf8"), "sentinel manifest\n");
+  assert.equal(fs.lstatSync(supportPath).nlink, 2);
+});
+
+test("generated-test manifest reader rejects a hard-linked manifest", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-read-hardlinked-generated-test" });
+  writeGeneratedTestManifest({
+    layout,
+    nodeId: "strategy-a",
+    tests: [{ path: "generated-tests/Replay.t.sol", content: "contract Replay {}\n" }],
+    supportFiles: []
+  });
+  const manifestPath = path.join(getNodeArtifactDir(layout, "strategy-a"), "generated-tests.json");
+  const manifestAlias = path.join(tempProject(), "generated-tests-alias.json");
+  fs.linkSync(manifestPath, manifestAlias);
+  const manifestBytes = fs.readFileSync(manifestPath);
+
+  assert.throws(
+    () => readGeneratedTestManifest(layout, "strategy-a"),
+    (error: unknown) => {
+      assert.ok(error instanceof ArtifactPathError);
+      assert.equal(error.code, "hard-link");
+      assert.match(error.message, /manifest must be a singly linked regular file/u);
+      return true;
+    }
+  );
+  assert.deepEqual(fs.readFileSync(manifestPath), manifestBytes);
+  assert.deepEqual(fs.readFileSync(manifestAlias), manifestBytes);
+});
+
+test("generated-test manifest writer rejects file-directory path collisions before creating bundle bytes", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-prefix-collision-generated-test" });
+
+  assert.throws(
+    () =>
+      writeGeneratedTestManifest({
+        layout,
+        nodeId: "strategy-a",
+        tests: [{ path: "generated-tests/Replay.t.sol", content: "contract Replay {}\n" }],
+        supportFiles: [
+          {
+            path: "generated-tests/Replay.t.sol/InvariantFixture.sol",
+            content: "library InvariantFixture {}\n"
+          }
+        ]
+      }),
+    /conflicts with file path/u
+  );
+  assert.equal(fs.existsSync(path.join(layout.artifactsDir, "strategy-a")), false);
+});
+
+test("generated-test manifest writer rejects noncanonical path aliases without rewriting them", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-noncanonical-path-generated-test" });
+
+  for (const candidate of [
+    "Replay.t.sol",
+    "generated-tests/sub/../Replay.t.sol",
+    "generated-tests/./Replay.t.sol",
+    "generated-tests/sub//Replay.t.sol"
+  ]) {
+    assert.throws(
+      () =>
+        writeGeneratedTestManifest({
+          layout,
+          nodeId: "strategy-a",
+          tests: [{ path: candidate, content: "contract Replay {}\n" }],
+          supportFiles: []
+        }),
+      /must (?:begin with|already be a normalized relative POSIX path)/u,
+      candidate
+    );
+    assert.equal(fs.existsSync(path.join(layout.artifactsDir, "strategy-a")), false, candidate);
+  }
+});
+
+test("generated-test manifest writer rejects non-UTF-8 supplied support before creating bundle bytes", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-binary-support-generated-test" });
+
+  assert.throws(
+    () =>
+      writeGeneratedTestManifest({
+        layout,
+        nodeId: "strategy-a",
+        tests: [{ path: "generated-tests/Replay.t.sol", content: "contract Replay {}\n" }],
+        supportFiles: [{ path: "generated-tests/fixture.dat", content: Buffer.from([0xff]) }]
+      }),
+    /generated-test support file must be strict UTF-8 text/u
+  );
+  assert.equal(fs.existsSync(path.join(getNodeArtifactDir(layout, "strategy-a"), "generated-tests.json")), false);
+  assert.equal(fs.existsSync(path.join(getNodeArtifactDir(layout, "strategy-a"), "generated-tests")), false);
 });
 
 test("generated-test manifest writer rejects final symlinks without touching outside files", () => {
@@ -1900,6 +1381,7 @@ test("generated-test manifest writer rejects final symlinks without touching out
       writeGeneratedTestManifest({
         layout,
         nodeId: "strategy-a",
+        supportFiles: [],
         tests: [{ path: "generated-tests/Linked.t.sol", content: "replacement\n" }]
       }),
     /symlink/u
@@ -1923,6 +1405,7 @@ test("generated-test manifest writer rejects broken final symlinks before writin
       writeGeneratedTestManifest({
         layout,
         nodeId: "strategy-a",
+        supportFiles: [],
         tests: [{ path: "generated-tests/Broken.t.sol", content: "replacement\n" }]
       }),
     /symlink/u
@@ -1939,6 +1422,7 @@ test("generated-test manifest writer rejects paths outside the generated-tests r
       writeGeneratedTestManifest({
         layout,
         nodeId: "strategy-a",
+        supportFiles: [],
         tests: [{ path: "generated-tests/../../Outside.t.sol", content: "outside\n" }]
       }),
     /cannot traverse outside/u

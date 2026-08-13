@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 
 import {
@@ -12,7 +11,6 @@ import {
   appendEventRecord,
   createEventRecord,
   createRunLayout,
-  repairTornJsonlTail,
   replayEvents,
   truncateDurable
 } from "../src/index.js";
@@ -21,14 +19,14 @@ function tempProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-events-tail-"));
 }
 
-test("a torn event append is discarded before the next record becomes an interior line", () => {
+test("a torn event journal is rejected without repair or append", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-event-torn" });
   const first = createEventRecord(layout, {
     eventType: "node-synced",
     nodeId: "node-a",
     status: "succeeded",
     timestamp: "2026-08-05T00:00:00.000Z",
-    payload: { sequence: 1 }
+    payload: { workflow_run_id: "workflow-1", workflow_task_id: "task-1", attempt: 1 }
   });
   fs.writeFileSync(layout.eventsPath, `${JSON.stringify(first)}\n{"event_id":"evt-tor`, "utf8");
   const second = createEventRecord(layout, {
@@ -36,63 +34,64 @@ test("a torn event append is discarded before the next record becomes an interio
     nodeId: "node-b",
     status: "succeeded",
     timestamp: "2026-08-05T00:00:01.000Z",
-    payload: { sequence: 2 }
+    payload: { workflow_run_id: "workflow-1", workflow_task_id: "task-2", attempt: 2 }
   });
 
-  appendEventRecord(layout.eventsPath, second);
-
-  const lines = fs.readFileSync(layout.eventsPath, "utf8").trim().split("\n");
-  assert.deepEqual(
-    lines.map((line) => (JSON.parse(line) as { event_id: string }).event_id),
-    [first.event_id, second.event_id]
-  );
-  assert.equal(replayEvents(layout).malformedRecords, 0);
+  const before = fs.readFileSync(layout.eventsPath);
+  assert.throws(() => appendEventRecord(layout.eventsPath, second), /torn or unterminated/u);
+  assert.deepEqual(fs.readFileSync(layout.eventsPath), before);
+  assert.throws(() => replayEvents(layout), /torn or unterminated/u);
 });
 
-test("a complete trailing object is terminated rather than discarded", () => {
+test("a complete but unterminated trailing object is rejected without repair", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-event-unterminated" });
   const first = createEventRecord(layout, {
     eventType: "node-synced",
     nodeId: "node-a",
-    timestamp: "2026-08-05T00:00:00.000Z"
+    status: "succeeded",
+    timestamp: "2026-08-05T00:00:00.000Z",
+    payload: { workflow_run_id: "workflow-1", workflow_task_id: "task-1" }
   });
   const second = createEventRecord(layout, {
     eventType: "node-synced",
     nodeId: "node-b",
-    timestamp: "2026-08-05T00:00:01.000Z"
+    status: "succeeded",
+    timestamp: "2026-08-05T00:00:01.000Z",
+    payload: { workflow_run_id: "workflow-1", workflow_task_id: "task-2" }
   });
   fs.writeFileSync(layout.eventsPath, JSON.stringify(first), "utf8");
 
-  appendEventRecord(layout.eventsPath, second);
-
-  const lines = fs.readFileSync(layout.eventsPath, "utf8").trim().split("\n");
-  assert.deepEqual(
-    lines.map((line) => (JSON.parse(line) as { event_id: string }).event_id),
-    [first.event_id, second.event_id]
-  );
+  const before = fs.readFileSync(layout.eventsPath);
+  assert.throws(() => appendEventRecord(layout.eventsPath, second), /torn or unterminated/u);
+  assert.deepEqual(fs.readFileSync(layout.eventsPath), before);
 });
 
-test("event indexes repair their own torn tails before appending", () => {
+test("a torn event index rejects the whole append before the canonical journal changes", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-index-torn" });
   const first = appendEvent(layout, {
     eventType: "node-synced",
     nodeId: "node-a",
-    timestamp: "2026-08-05T00:00:00.000Z"
+    status: "succeeded",
+    timestamp: "2026-08-05T00:00:00.000Z",
+    payload: { workflow_run_id: "workflow-1", workflow_task_id: "task-1" }
   });
   const indexPath = path.join(layout.eventsIndexDir, "run", `${layout.runId}.jsonl`);
   fs.appendFileSync(indexPath, '{"event_id":"evt-tor', "utf8");
 
-  const second = appendEvent(layout, {
-    eventType: "node-synced",
-    nodeId: "node-b",
-    timestamp: "2026-08-05T00:00:01.000Z"
-  });
-
-  const lines = fs.readFileSync(indexPath, "utf8").trim().split("\n");
-  assert.deepEqual(
-    lines.map((line) => (JSON.parse(line) as { event_id: string }).event_id),
-    [first.event_id, second.event_id]
+  const canonicalBefore = fs.readFileSync(layout.eventsPath);
+  assert.throws(
+    () =>
+      appendEvent(layout, {
+        eventType: "node-synced",
+        nodeId: "node-b",
+        status: "succeeded",
+        timestamp: "2026-08-05T00:00:01.000Z",
+        payload: { workflow_run_id: "workflow-1", workflow_task_id: "task-2" }
+      }),
+    /torn or unterminated/u
   );
+  assert.deepEqual(fs.readFileSync(layout.eventsPath), canonicalBefore);
+  assert.equal(replayEvents(layout).records[0]?.event_id, first.event_id);
 });
 
 test("durable repair mutations reject stale sizes and hard-linked files", () => {
@@ -118,26 +117,19 @@ test("durable repair mutations reject stale sizes and hard-linked files", () => 
   assert.equal(fs.readFileSync(filePath, "utf8"), "first\nsecond-raced\n");
 });
 
-test("the tail probe refuses symlinks and cannot block on a FIFO", () => {
+test("strict event journal reads refuse symlinks, FIFOs, and directories without blocking", () => {
   const root = tempProject();
   const outside = path.join(root, "outside.jsonl");
   const link = path.join(root, "events.jsonl");
   fs.writeFileSync(outside, "", "utf8");
   fs.symlinkSync(outside, link);
-  assert.throws(() => repairTornJsonlTail(link), /ELOOP/u);
+  assert.throws(() => replayEvents(link), /cannot open regular file/u);
   assert.equal(fs.readFileSync(outside, "utf8"), "");
 
   const fifo = path.join(root, "events-fifo.jsonl");
-  execFileSync("mkfifo", [fifo]);
+  assert.equal(spawnSync("mkfifo", [fifo]).status, 0);
   try {
-    const moduleUrl = pathToFileURL(fileURLToPath(new URL("../src/index.js", import.meta.url))).href;
-    assert.doesNotThrow(() =>
-      execFileSync(
-        process.execPath,
-        ["-e", `import(${JSON.stringify(moduleUrl)}).then((m) => m.repairTornJsonlTail(process.argv[1]));`, fifo],
-        { timeout: 15_000, stdio: "pipe" }
-      )
-    );
+    assert.throws(() => replayEvents(fifo), /not a regular file/u);
     assert.equal(fs.lstatSync(fifo).isFIFO(), true);
   } finally {
     fs.rmSync(fifo, { force: true });
@@ -145,5 +137,13 @@ test("the tail probe refuses symlinks and cannot block on a FIFO", () => {
 
   const directory = path.join(root, "events-directory.jsonl");
   fs.mkdirSync(directory);
-  assert.doesNotThrow(() => repairTornJsonlTail(directory));
+  assert.throws(() => replayEvents(directory), /not a regular file/u);
+});
+
+test("a dangling event-journal symlink is malformed-present rather than missing", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-dangling-event-link" });
+  fs.rmSync(layout.eventsPath, { force: true });
+  fs.symlinkSync(path.join(layout.root, "missing-events.jsonl"), layout.eventsPath);
+
+  assert.throws(() => replayEvents(layout), /cannot open regular file/u);
 });

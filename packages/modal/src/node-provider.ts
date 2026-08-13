@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 import {
   ModalClient,
@@ -13,7 +14,30 @@ import {
   type Secret,
   type Volume
 } from "modal";
-import { materializePromptSchemas } from "@ultrafuzz/artifacts";
+import {
+  INVARIANT_PINNED_SOURCE_BRANCH,
+  INVARIANT_PINNED_SOURCE_REF,
+  invariantPinnedSourceRefExists,
+  materializePromptSchemas,
+  publishFileDurableExclusive
+} from "@ultrafuzz/artifacts";
+import { parseRuntimeDocumentBytes, WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID } from "@ultrafuzz/runtime";
+import {
+  MODAL_EXECUTION_DEPENDENCY_MANIFEST_SCHEMA_ID,
+  MODAL_NODE_CHECKPOINT_INDEX_SCHEMA_ID,
+  MODAL_NODE_CHECKPOINT_SCHEMA_ID,
+  MODAL_NODE_INPUT_SCHEMA_ID,
+  MODAL_NODE_RESULT_SCHEMA_ID,
+  MODAL_NODE_WORKER_ERROR_SCHEMA_ID,
+  type StrictModalNodeCheckpointDocument,
+  type StrictModalNodeCheckpointIndexDocument,
+  type StrictModalNodeInputDocument,
+  type StrictModalNodeResultDocument,
+  type StrictModalNodeWorkerErrorDocument
+} from "./modal-contracts.js";
+import { writeDeterministicTarGzip } from "./deterministic-archive.js";
+import { assertModalDocumentValue, parseModalDocumentBytes, writeModalDocumentAtomic } from "./modal-documents.js";
+import { assertModalNodeCheckpointResultContext } from "./modal-semantic-gates.js";
 import { extractSafeTarArchive, sha256File } from "./safe-archive.js";
 import { getOrCreateModalV2Volume, type ModalV2VolumeClient } from "./volume.js";
 
@@ -25,7 +49,6 @@ const REMOTE_DATA_ROOT = "/data/ultrafuzz-nodes";
 const MAX_RESULT_WAIT_MS = 24 * 60 * 60 * 1000;
 const ARTIFACT_VERIFICATION_DIRECTORY = ".ultrafuzz-verification";
 const EXECUTION_DEPENDENCY_MANIFEST = "dependencies/manifest.json";
-const EXECUTION_DEPENDENCY_SCHEMA_VERSION = "ultrafuzz.workflow-execution-dependencies.v1";
 const MAX_HANDOFF_SNAPSHOT_ENTRIES = 100_000;
 const MAX_HANDOFF_SNAPSHOT_FILE_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_HANDOFF_SNAPSHOT_TOTAL_BYTES = 8 * 1024 * 1024 * 1024;
@@ -84,7 +107,10 @@ export interface ModalNodeSandboxProviderOptions {
   region?: string;
   credentialEnv: readonly string[];
   env?: Record<string, string | undefined>;
-  clientFactory?: (credentials: { tokenId: string; tokenSecret: string }) => ModalNodeClient;
+  clientFactory?: (
+    credentials: { tokenId: string; tokenSecret: string },
+    context?: { projectArchiveSha256: string }
+  ) => ModalNodeClient;
 }
 
 export interface ModalCommandProbe {
@@ -143,7 +169,7 @@ export async function probeModalCommands(
       processHandle.stdout.readText(),
       processHandle.stderr.readText()
     ]);
-    if (exitCode !== 0) throw new Error(formatWorkerExitMessage(exitCode, stdout, stderr));
+    if (exitCode !== 0) throw new Error(formatCommandProbeExitMessage(exitCode, stdout, stderr));
     return parseModalCommandProbes(stdout, uniqueCommands);
   } catch (error) {
     throw normalizedModalNodeError(error, [tokenId, tokenSecret]);
@@ -184,30 +210,8 @@ export interface NodeSandboxProvider {
   run(request: NodeSandboxProviderRequest): Promise<NodeSandboxProviderResult> | NodeSandboxProviderResult;
 }
 
-export interface ModalNodeSandboxInput {
-  schema_version: "ultrafuzz.modal.node.v1";
-  run_id: string;
-  task_id: string;
-  attempt_id: string;
-  execution_generation: string;
-  execution_snapshot_root: string;
-  workflow_path: string;
-  prompt_path?: string;
-  run_root: string;
-  artifact_dir: string;
-  workspace_dir: string;
-  dependency_artifact_dirs: string[];
-  project_archive_sha256?: string;
-  resources: {
-    cpu: number;
-    memory_mib: number;
-    timeout_seconds: number;
-  };
-  agent_credential_env: string[];
-  operator_prompt?: string;
-}
-
-export type ModalNodeWorkerInput = ModalNodeSandboxInput;
+export type ModalNodeSandboxInput = StrictModalNodeInputDocument;
+export type ModalNodeWorkerInput = StrictModalNodeInputDocument;
 
 interface ModalNodeClient {
   apps: {
@@ -255,16 +259,17 @@ async function runModalNodeSandbox(
   const tokenId = requiredCredential(env, tokenIdName);
   const tokenSecret = requiredCredential(env, tokenSecretName);
   const archive = await createModalNodeHandoffArchive(request.rootDir, input);
+  const workerInput = modalNodeWorkerInput(input, archive.sha256);
   const requestFile = path.join(path.dirname(archive.path), "request.json");
   const executionDeadline = Date.now() + input.resources.timeout_seconds * 1000;
   let client: ModalNodeClient | undefined;
   let sandbox: Sandbox | undefined;
   try {
-    fs.writeFileSync(requestFile, `${JSON.stringify(modalNodeWorkerInput(input, archive.sha256))}\n`, {
-      mode: 0o600
+    await writeModalDocumentAtomic(requestFile, MODAL_NODE_INPUT_SCHEMA_ID, workerInput, {
+      trustedRoot: path.dirname(archive.path)
     });
     client =
-      options.clientFactory?.({ tokenId, tokenSecret }) ??
+      options.clientFactory?.({ tokenId, tokenSecret }, { projectArchiveSha256: archive.sha256 }) ??
       (new ModalClient({ tokenId, tokenSecret }) as unknown as ModalNodeClient);
     const app = await client.apps.fromName(options.app, { createIfMissing: true });
     const image = await client.images.fromName(options.image);
@@ -297,7 +302,7 @@ async function runModalNodeSandbox(
         provider: "modal",
         providerExecutionId: sandbox.sandboxId
       });
-      result = await readModalNodeResult(sandbox, request, input);
+      result = await readModalNodeResult(sandbox, request, workerInput);
       if (result === undefined) {
         await sandbox.filesystem.copyFromLocal(archive.path, REMOTE_PROJECT_ARCHIVE);
         await sandbox.filesystem.copyFromLocal(requestFile, REMOTE_REQUEST);
@@ -312,7 +317,7 @@ async function runModalNodeSandbox(
           remoteAttemptRoot(request.runId, request.sandboxId, input.execution_generation)
         ]);
         const stdout = processHandle.stdout.readText().catch(() => "");
-        const stderr = processHandle.stderr.readText().catch(() => "");
+        const stderr = processHandle.stderr.readBytes();
         const exitCode = await waitForProcess(processHandle.wait(), request.signal, sandbox, executionDeadline);
         const [stdoutText, stderrText] = await Promise.all([stdout, stderr]);
         if (exitCode !== 0) {
@@ -333,7 +338,7 @@ async function runModalNodeSandbox(
       });
     }
 
-    result ??= await waitForModalNodeResult(sandbox, request, input, executionDeadline);
+    result ??= await waitForModalNodeResult(sandbox, request, workerInput, executionDeadline);
     await publishModalNodeResult(sandbox, request.rootDir, input, result);
     request.heartbeat({
       stage: "published",
@@ -416,9 +421,6 @@ export function parseModalNodeSandboxInput(value: unknown): ModalNodeSandboxInpu
 }
 
 export function parseModalNodeWorkerInput(value: unknown): ModalNodeWorkerInput {
-  if (isRecord(value) && "execution_snapshot_source_root" in value) {
-    throw new Error("cloud node worker input contains a local snapshot descriptor");
-  }
   return parseModalNodeInput(value);
 }
 
@@ -433,67 +435,12 @@ export function modalNodeWorkerInput(
 }
 
 function parseModalNodeInput(value: unknown): ModalNodeSandboxInput {
-  if (!isRecord(value) || value.schema_version !== "ultrafuzz.modal.node.v1") {
-    throw new Error("cloud node input is invalid");
+  try {
+    assertModalDocumentValue(MODAL_NODE_INPUT_SCHEMA_ID, value as StrictModalNodeInputDocument);
+  } catch (error) {
+    throw new Error("cloud node input is invalid", { cause: error });
   }
-  const resources = value.resources;
-  if (
-    !isRecord(resources) ||
-    typeof resources.cpu !== "number" ||
-    !Number.isFinite(resources.cpu) ||
-    resources.cpu <= 0 ||
-    !isPositiveInteger(resources.memory_mib) ||
-    !isPositiveInteger(resources.timeout_seconds)
-  ) {
-    throw new Error("cloud node resources are invalid");
-  }
-  const requiredStrings = [
-    "run_id",
-    "task_id",
-    "attempt_id",
-    "execution_generation",
-    "execution_snapshot_root",
-    "workflow_path",
-    "run_root",
-    "artifact_dir",
-    "workspace_dir"
-  ] as const;
-  for (const key of requiredStrings) {
-    if (typeof value[key] !== "string" || value[key].trim() === "") {
-      throw new Error(`cloud node ${key} is invalid`);
-    }
-  }
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(value.execution_generation as string)) {
-    throw new Error("cloud node execution generation is invalid");
-  }
-  if (!isSafeModalAttemptId(value.attempt_id as string)) {
-    throw new Error("cloud node attempt_id is invalid");
-  }
-  if (
-    !Array.isArray(value.agent_credential_env) ||
-    !value.agent_credential_env.every((entry) => typeof entry === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/u.test(entry))
-  ) {
-    throw new Error("cloud node credential environment configuration is invalid");
-  }
-  if (
-    !Array.isArray(value.dependency_artifact_dirs) ||
-    !value.dependency_artifact_dirs.every((entry) => typeof entry === "string" && entry.trim() !== "")
-  ) {
-    throw new Error("cloud node dependency artifact configuration is invalid");
-  }
-  if (value.prompt_path !== undefined && (typeof value.prompt_path !== "string" || value.prompt_path.trim() === "")) {
-    throw new Error("cloud node prompt path is invalid");
-  }
-  if (
-    value.project_archive_sha256 !== undefined &&
-    (typeof value.project_archive_sha256 !== "string" || !/^[0-9a-f]{64}$/u.test(value.project_archive_sha256))
-  ) {
-    throw new Error("cloud node project archive digest is invalid");
-  }
-  if (value.operator_prompt !== undefined && typeof value.operator_prompt !== "string") {
-    throw new Error("cloud node operator prompt is invalid");
-  }
-  return value as unknown as ModalNodeSandboxInput;
+  return value as StrictModalNodeInputDocument;
 }
 
 export function modalNodeTags(runId: string, sandboxId: string, executionGeneration = "base"): Record<string, string> {
@@ -539,18 +486,18 @@ export async function createModalNodeHandoffArchive(
   const archive = path.join(temporaryRoot, "project.tgz");
   fs.mkdirSync(staging, { recursive: true, mode: 0o700 });
   try {
-    const baseArchive = path.join(temporaryRoot, "base.tar");
-    execFileSync("git", ["archive", "--format=tar", "--output", baseArchive, "HEAD"], { cwd: root });
-    await extractSafeTarArchive(baseArchive, staging, { gzip: false, label: "cloud handoff" });
-    fs.rmSync(baseArchive, { force: true });
-    assertSafeTree(staging);
-    execFileSync("git", ["init", "--quiet"], { cwd: staging });
-    execFileSync("git", ["config", "user.name", "Ultrafuzz Cloud"], { cwd: staging });
-    execFileSync("git", ["config", "user.email", "cloud@invalid"], { cwd: staging });
-    execFileSync("git", ["add", "-A"], { cwd: staging });
-    execFileSync("git", ["commit", "--quiet", "-m", "immutable cloud input"], { cwd: staging });
-    for (const metadata of ["hooks", "logs", "branches", "description", "COMMIT_EDITMSG"]) {
-      fs.rmSync(path.join(staging, ".git", metadata), { recursive: true, force: true });
+    if (pinnedSourceHasGitlinks(root)) {
+      createPinnedGitBaseline(root, staging, temporaryRoot);
+    } else {
+      const baseArchive = path.join(temporaryRoot, "base.tar");
+      execFileSync("git", ["archive", "--format=tar", "--output", baseArchive, "HEAD"], {
+        cwd: root,
+        env: deterministicGitEnvironment()
+      });
+      await extractSafeTarArchive(baseArchive, staging, { gzip: false, label: "cloud handoff" });
+      fs.rmSync(baseArchive, { force: true });
+      assertSafeTree(staging);
+      createDeterministicGitBaseline(staging, temporaryRoot);
     }
     assertSafeTree(staging);
 
@@ -574,7 +521,7 @@ export async function createModalNodeHandoffArchive(
     copyDependencyVerificationMarkers(root, runRoot, dependencyArtifactDirs, staging);
     fs.mkdirSync(path.join(staging, path.relative(root, artifactDir)), { recursive: true, mode: 0o700 });
     assertSafeTree(staging);
-    execFileSync("tar", ["-czf", archive, "-C", staging, "."]);
+    await writeDeterministicTarGzip(staging, archive);
     fs.chmodSync(archive, 0o600);
     return {
       path: archive,
@@ -585,6 +532,181 @@ export async function createModalNodeHandoffArchive(
     removeHandoffTemporaryRoot(temporaryRoot);
     throw error;
   }
+}
+
+function pinnedSourceHasGitlinks(projectRoot: string): boolean {
+  if (!invariantPinnedSourceRefExists(projectRoot)) return false;
+  const entries = execFileSync("git", ["ls-tree", "-r", "--full-tree", INVARIANT_PINNED_SOURCE_REF], {
+    cwd: projectRoot,
+    env: deterministicGitEnvironment(),
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  return entries.split("\n").some((entry) => entry.startsWith("160000 commit "));
+}
+
+function createPinnedGitBaseline(sourceRoot: string, projectRoot: string, scratchRoot: string): void {
+  const environment = deterministicGitEnvironment();
+  const pinnedCommit = execFileSync("git", ["rev-parse", `${INVARIANT_PINNED_SOURCE_REF}^{commit}`], {
+    cwd: sourceRoot,
+    env: environment,
+    encoding: "utf8"
+  }).trim();
+  const sourceHead = execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: sourceRoot,
+    env: environment,
+    encoding: "utf8"
+  }).trim();
+  if (!/^[0-9a-f]{40}$/u.test(pinnedCommit) || sourceHead !== pinnedCommit) {
+    throw new Error("pinned cloud source ref does not identify HEAD");
+  }
+
+  const template = path.join(scratchRoot, "git-template");
+  fs.mkdirSync(template, { mode: 0o700 });
+  execFileSync(
+    "git",
+    [
+      "clone",
+      "--quiet",
+      "--no-tags",
+      "--no-recurse-submodules",
+      "--single-branch",
+      "--depth",
+      "1",
+      "--branch",
+      INVARIANT_PINNED_SOURCE_BRANCH,
+      `--template=${template}`,
+      pathToFileURL(sourceRoot).href,
+      projectRoot
+    ],
+    { env: environment, stdio: "ignore" }
+  );
+
+  const clonedCommit = execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: projectRoot,
+    env: environment,
+    encoding: "utf8"
+  }).trim();
+  if (clonedCommit !== pinnedCommit) throw new Error("pinned cloud source clone changed commit identity");
+
+  const gitRoot = path.join(projectRoot, ".git");
+  for (const entry of fs.readdirSync(gitRoot)) {
+    if (!["HEAD", "config", "index", "objects", "refs", "shallow"].includes(entry)) {
+      fs.rmSync(path.join(gitRoot, entry), { recursive: true, force: true });
+    }
+  }
+  fs.rmSync(path.join(gitRoot, "objects", "info"), { recursive: true, force: true });
+  fs.rmSync(path.join(gitRoot, "refs"), { recursive: true, force: true });
+  fs.mkdirSync(path.join(gitRoot, "refs", "heads"), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(gitRoot, "config"), DETERMINISTIC_GIT_CONFIG, { mode: 0o600 });
+  fs.writeFileSync(path.join(gitRoot, "HEAD"), `ref: refs/heads/${INVARIANT_PINNED_SOURCE_BRANCH}\n`, { mode: 0o600 });
+  fs.writeFileSync(path.join(gitRoot, "refs", "heads", INVARIANT_PINNED_SOURCE_BRANCH), `${pinnedCommit}\n`, {
+    mode: 0o600
+  });
+  const publishingIndex = path.join(gitRoot, "index.publishing");
+  execFileSync("git", ["read-tree", "HEAD"], {
+    cwd: projectRoot,
+    env: { ...environment, GIT_INDEX_FILE: publishingIndex },
+    stdio: "ignore"
+  });
+  fs.chmodSync(publishingIndex, 0o600);
+  fs.renameSync(publishingIndex, path.join(gitRoot, "index"));
+
+  const revisionCount = execFileSync("git", ["rev-list", "--all", "--count"], {
+    cwd: projectRoot,
+    env: environment,
+    encoding: "utf8"
+  }).trim();
+  const remotes = execFileSync("git", ["remote"], {
+    cwd: projectRoot,
+    env: environment,
+    encoding: "utf8"
+  }).trim();
+  if (revisionCount !== "1" || remotes !== "") {
+    throw new Error("pinned cloud source clone is not isolated");
+  }
+}
+
+const DETERMINISTIC_GIT_CONFIG = `[core]
+\trepositoryformatversion = 0
+\tfilemode = true
+\tbare = false
+\tlogallrefupdates = false
+\tautocrlf = false
+\tsymlinks = true
+\tignorecase = false
+`;
+
+function createDeterministicGitBaseline(projectRoot: string, scratchRoot: string): void {
+  const template = path.join(scratchRoot, "git-template");
+  fs.mkdirSync(template, { mode: 0o700 });
+  const environment = deterministicGitEnvironment();
+  execFileSync("git", ["init", "--quiet", "--initial-branch=main", "--object-format=sha1", `--template=${template}`], {
+    cwd: projectRoot,
+    env: environment,
+    stdio: "ignore"
+  });
+  const gitRoot = path.join(projectRoot, ".git");
+  fs.writeFileSync(path.join(gitRoot, "config"), DETERMINISTIC_GIT_CONFIG, { mode: 0o600 });
+  execFileSync("git", ["add", "--all", "--", "."], { cwd: projectRoot, env: environment, stdio: "ignore" });
+  const tree = execFileSync("git", ["write-tree"], {
+    cwd: projectRoot,
+    env: environment,
+    encoding: "utf8"
+  }).trim();
+  const commit = execFileSync("git", ["commit-tree", tree, "-m", "immutable cloud input"], {
+    cwd: projectRoot,
+    env: environment,
+    encoding: "utf8"
+  }).trim();
+  if (!/^[0-9a-f]{40}$/u.test(tree) || !/^[0-9a-f]{40}$/u.test(commit)) {
+    throw new Error("deterministic cloud Git baseline has an invalid object identity");
+  }
+
+  for (const entry of fs.readdirSync(gitRoot)) {
+    if (entry !== "objects") fs.rmSync(path.join(gitRoot, entry), { recursive: true, force: true });
+  }
+  for (const entry of ["info", "pack"]) {
+    fs.rmSync(path.join(gitRoot, "objects", entry), { recursive: true, force: true });
+  }
+  fs.mkdirSync(path.join(gitRoot, "refs", "heads"), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(gitRoot, "config"), DETERMINISTIC_GIT_CONFIG, { mode: 0o600 });
+  fs.writeFileSync(path.join(gitRoot, "HEAD"), "ref: refs/heads/main\n", { mode: 0o600 });
+  fs.writeFileSync(path.join(gitRoot, "refs", "heads", "main"), `${commit}\n`, { mode: 0o600 });
+  const publishingIndex = path.join(gitRoot, "index.publishing");
+  execFileSync("git", ["read-tree", "HEAD"], {
+    cwd: projectRoot,
+    env: { ...environment, GIT_INDEX_FILE: publishingIndex },
+    stdio: "ignore"
+  });
+  fs.chmodSync(publishingIndex, 0o600);
+  fs.renameSync(publishingIndex, path.join(gitRoot, "index"));
+}
+
+function deterministicGitEnvironment(): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = {};
+  for (const [name, value] of Object.entries(process.env)) {
+    if (!name.startsWith("GIT_") && value !== undefined) environment[name] = value;
+  }
+  return {
+    ...environment,
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_ATTR_NOSYSTEM: "1",
+    GIT_AUTHOR_NAME: "Ultrafuzz Cloud",
+    GIT_AUTHOR_EMAIL: "cloud@invalid",
+    GIT_AUTHOR_DATE: "2000-01-01T00:00:00+0000",
+    GIT_COMMITTER_NAME: "Ultrafuzz Cloud",
+    GIT_COMMITTER_EMAIL: "cloud@invalid",
+    GIT_COMMITTER_DATE: "2000-01-01T00:00:00+0000",
+    GIT_INDEX_VERSION: "2",
+    GIT_OPTIONAL_LOCKS: "0",
+    GIT_TERMINAL_PROMPT: "0",
+    LANG: "C",
+    LC_ALL: "C",
+    TZ: "UTC"
+  };
 }
 
 /**
@@ -604,15 +726,7 @@ function removeHandoffTemporaryRoot(temporaryRoot: string): void {
   fs.rmSync(temporaryRoot, { recursive: true, force: true });
 }
 
-interface ModalNodeResult {
-  schema_version: "ultrafuzz.modal.node-result.v1" | "ultrafuzz.modal.node-result.v2";
-  status: "succeeded";
-  artifact_archive: string;
-  artifact_sha256: string;
-  storage_lineage: string;
-  durable_checkpoint: string;
-  durable_checkpoint_index: string;
-}
+type ModalNodeResult = StrictModalNodeResultDocument;
 
 async function waitForModalNodeResult(
   sandbox: Sandbox,
@@ -649,27 +763,27 @@ async function readModalNodeResult(
 ): Promise<ModalNodeResult | undefined> {
   const attemptRoot = remoteAttemptRoot(request.runId, request.sandboxId, input.execution_generation);
   const resultPath = path.posix.join(attemptRoot, "result.json");
-  let parsed: unknown;
+  let bytes: Uint8Array;
   try {
-    parsed = JSON.parse(await sandbox.filesystem.readText(resultPath)) as unknown;
+    bytes = await sandbox.filesystem.readBytes(resultPath);
   } catch (error) {
     if (error instanceof SandboxFilesystemNotFoundError) return undefined;
     throw error;
   }
+  let parsed: ModalNodeResult;
+  try {
+    parsed = parseModalDocumentBytes(MODAL_NODE_RESULT_SCHEMA_ID, bytes).value as ModalNodeResult;
+  } catch (error) {
+    throw new Error("cloud node result is invalid", { cause: error });
+  }
   if (
-    isRecord(parsed) &&
-    (parsed.schema_version === "ultrafuzz.modal.node-result.v1" ||
-      parsed.schema_version === "ultrafuzz.modal.node-result.v2") &&
-    parsed.status === "succeeded" &&
     parsed.artifact_archive === path.posix.join(attemptRoot, "artifacts.tgz") &&
-    typeof parsed.artifact_sha256 === "string" &&
-    /^[0-9a-f]{64}$/u.test(parsed.artifact_sha256) &&
     parsed.storage_lineage === `${input.run_id}/${input.attempt_id}/${input.execution_generation}` &&
     isDurableCheckpointPath(parsed.durable_checkpoint, attemptRoot) &&
     parsed.durable_checkpoint_index === path.posix.join(attemptRoot, "checkpoints", "index.json")
   ) {
-    await validateDurableCheckpoint(sandbox, parsed as unknown as ModalNodeResult, attemptRoot, input);
-    return parsed as unknown as ModalNodeResult;
+    await validateDurableCheckpoint(sandbox, parsed, attemptRoot, input);
+    return parsed;
   }
   throw new Error("cloud node result is invalid");
 }
@@ -689,46 +803,48 @@ async function validateDurableCheckpoint(
   attemptRoot: string,
   input: ModalNodeSandboxInput
 ): Promise<void> {
-  let checkpoint: unknown;
-  let index: unknown;
+  let checkpointBytes: Uint8Array;
+  let indexBytes: Uint8Array;
   try {
-    [checkpoint, index] = await Promise.all([
-      sandbox.filesystem.readText(result.durable_checkpoint).then((value) => JSON.parse(value) as unknown),
-      sandbox.filesystem.readText(result.durable_checkpoint_index).then((value) => JSON.parse(value) as unknown)
+    [checkpointBytes, indexBytes] = await Promise.all([
+      sandbox.filesystem.readBytes(result.durable_checkpoint),
+      sandbox.filesystem.readBytes(result.durable_checkpoint_index)
     ]);
   } catch (error) {
     throw new Error("cloud node durable checkpoint is unavailable", { cause: error });
   }
+  let checkpoint: StrictModalNodeCheckpointDocument;
+  let index: StrictModalNodeCheckpointIndexDocument;
+  try {
+    checkpoint = parseModalDocumentBytes(MODAL_NODE_CHECKPOINT_SCHEMA_ID, checkpointBytes)
+      .value as StrictModalNodeCheckpointDocument;
+    index = parseModalDocumentBytes(MODAL_NODE_CHECKPOINT_INDEX_SCHEMA_ID, indexBytes)
+      .value as StrictModalNodeCheckpointIndexDocument;
+  } catch (error) {
+    throw new Error("cloud node durable checkpoint is invalid", { cause: error });
+  }
   const workspacePath = path.posix.join(attemptRoot, "workspace");
   const handoffArchive = path.posix.join(attemptRoot, "input", "project.tgz");
   const lineage = `${input.run_id}/${input.attempt_id}/${input.execution_generation}`;
-  if (
-    !isRecord(checkpoint) ||
-    checkpoint.schema_version !== "ultrafuzz.modal.node-checkpoint.v1" ||
-    checkpoint.stage !== "completed" ||
-    checkpoint.storage_lineage !== lineage ||
-    checkpoint.workspace_path !== workspacePath ||
-    checkpoint.run_root !== input.run_root ||
-    checkpoint.execution_snapshot_root !== input.execution_snapshot_root ||
-    checkpoint.handoff_archive !== handoffArchive
-  ) {
+  const projectArchiveSha256 = input.project_archive_sha256;
+  if (projectArchiveSha256 === undefined) {
     throw new Error("cloud node durable checkpoint is invalid");
   }
-  if (
-    !isRecord(index) ||
-    index.schema_version !== "ultrafuzz.modal.node-checkpoint-index.v1" ||
-    index.storage_lineage !== lineage ||
-    index.workspace_path !== workspacePath ||
-    index.run_root !== input.run_root ||
-    index.execution_snapshot_root !== input.execution_snapshot_root ||
-    index.handoff_archive !== handoffArchive ||
-    !Array.isArray(index.checkpoints) ||
-    !index.checkpoints.some(
-      (entry) => isRecord(entry) && entry.manifest === result.durable_checkpoint && entry.stage === "completed"
-    )
-  ) {
-    throw new Error("cloud node durable checkpoint index is invalid");
-  }
+  assertModalNodeCheckpointResultContext({
+    result,
+    checkpoint,
+    index,
+    expected: {
+      artifactArchive: path.posix.join(attemptRoot, "artifacts.tgz"),
+      checkpointIndex: path.posix.join(attemptRoot, "checkpoints", "index.json"),
+      storageLineage: lineage,
+      workspacePath,
+      runRoot: input.run_root,
+      executionSnapshotRoot: input.execution_snapshot_root,
+      handoffArchive,
+      projectArchiveSha256
+    }
+  });
 }
 
 async function publishModalNodeResult(
@@ -755,33 +871,24 @@ async function publishModalNodeResult(
     assertSafeTree(extracted);
     const verificationMarkerName = modalAttemptVerificationMarkerName(input.attempt_id);
     const verificationMarker = path.join(extracted, "verification", verificationMarkerName);
-    let verificationDestination: string | undefined;
-    if (fs.existsSync(verificationMarker)) {
-      const markerStat = fs.lstatSync(verificationMarker);
-      if (!markerStat.isFile() || markerStat.isSymbolicLink() || markerStat.nlink !== 1) {
-        throw new Error("cloud node result verification marker is unsafe");
-      }
-      const verificationRoot = checkedPath(
-        root,
-        path.join(input.run_root, ARTIFACT_VERIFICATION_DIRECTORY),
-        "artifact verification directory",
-        false
-      );
-      verificationDestination = path.join(verificationRoot, verificationMarkerName);
-      if (path.dirname(verificationDestination) !== verificationRoot) {
-        throw new Error("cloud node result verification marker path is unsafe");
-      }
-    } else if (result.schema_version === "ultrafuzz.modal.node-result.v2") {
+    if (!fs.existsSync(verificationMarker)) {
       throw new Error("cloud node result is missing artifact verification marker");
     }
-    // Decided here, before the artifact directory is replaced, because the answer depends on the
-    // artifacts this machine currently holds; by the time the marker is written they are the
-    // remote ones again.
-    let markerRefreshed = false;
-    if (verificationDestination !== undefined) {
-      markerRefreshed = isRefreshedVerificationMarker(verificationMarker, verificationDestination, artifactDir);
-      assertPublishedFileReplacementAllowed(verificationMarker, verificationDestination, markerRefreshed);
+    const markerStat = fs.lstatSync(verificationMarker);
+    if (!markerStat.isFile() || markerStat.isSymbolicLink() || markerStat.nlink !== 1) {
+      throw new Error("cloud node result verification marker is unsafe");
     }
+    const verificationRoot = checkedPath(
+      root,
+      path.join(input.run_root, ARTIFACT_VERIFICATION_DIRECTORY),
+      "artifact verification directory",
+      false
+    );
+    const verificationDestination = path.join(verificationRoot, verificationMarkerName);
+    if (path.dirname(verificationDestination) !== verificationRoot) {
+      throw new Error("cloud node result verification marker path is unsafe");
+    }
+    assertPublishedFileReplacementAllowed(verificationMarker, verificationDestination);
     const proofRoot = checkedPath(root, path.join(input.run_root, "source-proofs"), "source proof directory", false);
     const sourceProofs: Array<{ source: string; destination: string }> = [];
     for (const suffix of [".json", ".invariant.json"] as const) {
@@ -803,11 +910,9 @@ async function publishModalNodeResult(
     }
     replacePublishedDirectory(artifacts, artifactDir);
     for (const { source, destination } of sourceProofs) {
-      replacePublishedFile(source, destination);
+      publishImmutableFileExclusive(root, source, destination);
     }
-    if (verificationDestination !== undefined) {
-      replacePublishedFile(verificationMarker, verificationDestination, markerRefreshed);
-    }
+    publishImmutableFileExclusive(root, verificationMarker, verificationDestination);
   } finally {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
   }
@@ -888,12 +993,6 @@ function assertExecutionSnapshotRoot(runRoot: string, snapshotRoot: string): voi
   }
 }
 
-interface ModalExecutionDependencyTarget {
-  id: string;
-  name: string;
-  snapshotPath: string;
-}
-
 export interface ModalExecutionDependencyClosure {
   links: ReadonlyMap<string, string>;
   executablePaths: ReadonlySet<string>;
@@ -924,123 +1023,44 @@ export function readModalExecutionDependencyClosure(
   ) {
     throw new Error("execution dependency manifest does not match the workflow control seal");
   }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(contents.toString("utf8")) as unknown;
-  } catch (error) {
-    throw new Error("execution dependency manifest is invalid JSON", { cause: error });
-  }
-  if (
-    !isRecord(parsed) ||
-    parsed.schema_version !== EXECUTION_DEPENDENCY_SCHEMA_VERSION ||
-    !Array.isArray(parsed.modules) ||
-    !Array.isArray(parsed.packages) ||
-    !Array.isArray(parsed.issuers) ||
-    !Array.isArray(parsed.executable_paths) ||
-    typeof parsed.smithers_bin !== "string"
-  ) {
-    throw new Error("execution dependency manifest is invalid");
-  }
-
-  const modules = parsed.modules.map((value) => parseModalExecutionTarget(value, true));
-  const packages = parsed.packages.map((value, index) => {
-    const target = parseModalExecutionTarget(value, false);
-    if (
-      !isRecord(value) ||
-      typeof value.version !== "string" ||
-      value.version.length === 0 ||
-      target.id !== `package:${String(index + 1).padStart(6, "0")}` ||
-      target.snapshotPath !== `dependencies/packages/${String(index + 1).padStart(6, "0")}`
-    ) {
-      throw new Error("execution dependency manifest package is invalid");
+  const parsed = (() => {
+    try {
+      return parseModalDocumentBytes(MODAL_EXECUTION_DEPENDENCY_MANIFEST_SCHEMA_ID, contents).value;
+    } catch (error) {
+      throw new Error("execution dependency manifest is invalid", { cause: error });
     }
-    return target;
-  });
-  const targets = [...modules, ...packages];
+  })();
+
+  const targets = [...parsed.modules, ...parsed.packages].map((target) => ({
+    id: target.id,
+    snapshotPath: checkedSnapshotRelativePath(target.snapshot_path, "dependency target path")
+  }));
   const targetsById = new Map(targets.map((target) => [target.id, target]));
-  if (
-    targetsById.size !== targets.length ||
-    new Set(targets.map((target) => target.snapshotPath)).size !== targets.length
-  ) {
-    throw new Error("execution dependency manifest targets are duplicated");
-  }
 
   const links = new Map<string, string>();
-  const issuerIds = new Set<string>();
-  for (const value of parsed.issuers) {
-    if (
-      !isRecord(value) ||
-      typeof value.id !== "string" ||
-      typeof value.snapshot_path !== "string" ||
-      !isRecord(value.dependencies) ||
-      issuerIds.has(value.id)
-    ) {
-      throw new Error("execution dependency manifest issuer is invalid");
-    }
-    issuerIds.add(value.id);
+  for (const issuer of parsed.issuers) {
     const issuerRoot =
-      value.id === "root" && value.snapshot_path === "."
+      issuer.id === "root" && issuer.snapshot_path === "."
         ? ""
-        : checkedSnapshotRelativePath(value.snapshot_path, "dependency issuer path");
-    for (const [name, targetId] of Object.entries(value.dependencies)) {
-      const target = typeof targetId === "string" ? targetsById.get(targetId) : undefined;
-      if (!isModalDependencyName(name) || target === undefined) {
-        throw new Error("execution dependency manifest edge is invalid");
-      }
+        : checkedSnapshotRelativePath(issuer.snapshot_path, "dependency issuer path");
+    for (const [name, targetId] of Object.entries(issuer.dependencies)) {
+      const target = targetsById.get(targetId);
+      if (target === undefined) throw new Error("execution dependency manifest edge target is unavailable");
       const link = checkedSnapshotRelativePath(
         path.posix.join(issuerRoot, "node_modules", name),
         "dependency link path"
       );
-      if (links.has(link)) throw new Error("execution dependency manifest link is duplicated");
       links.set(link, target.snapshotPath);
     }
-  }
-  const expectedIssuerIds = new Set(["root", ...targets.map((target) => target.id)]);
-  if (
-    issuerIds.size !== expectedIssuerIds.size ||
-    [...expectedIssuerIds].some((issuerId) => !issuerIds.has(issuerId))
-  ) {
-    throw new Error("execution dependency manifest issuers are incomplete");
   }
 
   const executablePaths = new Set<string>();
   for (const value of parsed.executable_paths) {
-    if (typeof value !== "string") throw new Error("execution dependency executable path is invalid");
     const executable = checkedSnapshotRelativePath(value, "dependency executable path");
-    if (executablePaths.has(executable)) throw new Error("execution dependency executable path is duplicated");
     executablePaths.add(executable);
   }
   const smithersBin = checkedSnapshotRelativePath(parsed.smithers_bin, "sealed Smithers executable");
-  if (!executablePaths.has(smithersBin)) {
-    throw new Error("sealed Smithers executable is not declared executable");
-  }
   return { links, executablePaths, smithersBin };
-}
-
-function parseModalExecutionTarget(value: unknown, module: boolean): ModalExecutionDependencyTarget {
-  if (
-    !isRecord(value) ||
-    typeof value.id !== "string" ||
-    typeof value.name !== "string" ||
-    !isModalDependencyName(value.name) ||
-    typeof value.snapshot_path !== "string"
-  ) {
-    throw new Error("execution dependency manifest target is invalid");
-  }
-  const snapshotPath = checkedSnapshotRelativePath(value.snapshot_path, "dependency target path");
-  if (
-    module &&
-    (value.id !== `module:${value.name}` ||
-      !value.name.startsWith("@ultrafuzz/") ||
-      snapshotPath !== path.posix.join("modules", value.name))
-  ) {
-    throw new Error("execution dependency manifest module is invalid");
-  }
-  return { id: value.id, name: value.name, snapshotPath };
-}
-
-function isModalDependencyName(value: string): boolean {
-  return /^(?:@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*|[a-z0-9][a-z0-9._-]*)$/iu.test(value);
 }
 
 function checkedSnapshotRelativePath(value: string, label: string): string {
@@ -1184,21 +1204,11 @@ function readExpectedExecutionSnapshotFiles(
   if (generation !== path.basename(snapshotRoot)) {
     throw new Error("execution snapshot generation does not match its workflow control seal");
   }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(sealContents.toString("utf8")) as unknown;
-  } catch (error) {
-    throw new Error("workflow control seal is invalid JSON", { cause: error });
-  }
-  if (
-    !isRecord(parsed) ||
-    parsed.schema_version !== "ultrafuzz.workflow-control-integrity.v2" ||
-    !isRecord(parsed.files) ||
-    !isRecord(parsed.files.workflow) ||
-    !Array.isArray(parsed.execution_files)
-  ) {
-    throw new Error("workflow control seal cannot define the execution snapshot closure");
-  }
+  const parsed = parseRuntimeDocumentBytes(
+    WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID,
+    sealContents,
+    "workflow control seal"
+  );
   const expected = new Map<string, ExpectedSnapshotFile>();
   for (const value of parsed.execution_files) {
     if (!isRecord(value) || typeof value.snapshot_path !== "string") {
@@ -1365,8 +1375,9 @@ function stableSnapshotFileDigest(filePath: string): { size: bigint; sha256: str
   }
 }
 
-function parseExpectedSnapshotFile(value: Record<string, unknown>, label: string): ExpectedSnapshotFile {
+function parseExpectedSnapshotFile(value: unknown, label: string): ExpectedSnapshotFile {
   if (
+    !isRecord(value) ||
     typeof value.sha256 !== "string" ||
     !/^[0-9a-f]{64}$/u.test(value.sha256) ||
     !Number.isSafeInteger(value.size_bytes) ||
@@ -1815,113 +1826,46 @@ function assertPublishedDirectoryReplacementAllowed(source: string, destination:
   }
 }
 
-function replacePublishedFile(source: string, destination: string, refreshedMarker = false): void {
-  assertPublishedFileReplacementAllowed(source, destination, refreshedMarker);
-  fs.mkdirSync(path.dirname(destination), { recursive: true });
-  if (fs.existsSync(destination)) {
-    assertPublishedFileReplacementAllowed(source, destination, refreshedMarker);
-    if (!refreshedMarker) return;
-  }
-  const pending = `${destination}.publishing-${process.pid}-${crypto.randomBytes(6).toString("hex")}`;
-  fs.copyFileSync(source, pending);
+function publishImmutableFileExclusive(root: string, source: string, destination: string): void {
+  assertPublishedFileReplacementAllowed(source, destination);
+  const relativeDestination = path.relative(root, destination).split(path.sep).join("/");
   try {
-    fs.renameSync(pending, destination);
-  } finally {
-    if (fs.existsSync(pending)) fs.rmSync(pending, { force: true });
+    publishFileDurableExclusive(root, relativeDestination, fs.readFileSync(source));
+  } catch (error) {
+    // Preserve the cloud-publication diagnostics for an incumbent that won a
+    // race with this exclusive publisher. A dangling link is invalid present
+    // state, while an exact regular file remains the only idempotent success.
+    assertPublishedFileReplacementAllowed(source, destination);
+    throw error;
   }
+  assertPublishedFileReplacementAllowed(source, destination);
 }
 
-function assertPublishedFileReplacementAllowed(source: string, destination: string, refreshedMarker = false): void {
+function assertPublishedFileReplacementAllowed(source: string, destination: string): void {
   const sourceStat = fs.lstatSync(source);
   if (!sourceStat.isFile() || sourceStat.isSymbolicLink() || sourceStat.nlink !== 1) {
     throw new Error("cloud node result source file is unsafe");
   }
-  const destinationStat = fs.existsSync(destination) ? fs.lstatSync(destination) : undefined;
+  const destinationStat = lstatIfPresent(destination);
   if (
     destinationStat?.isSymbolicLink() ||
     (destinationStat !== undefined && (!destinationStat.isFile() || destinationStat.nlink !== 1))
   ) {
     throw new Error("cloud node result destination file is unsafe");
   }
-  if (destinationStat !== undefined && !refreshedMarker) {
+  if (destinationStat !== undefined) {
     if (!fs.readFileSync(destination).equals(fs.readFileSync(source))) {
       throw new Error("cloud node result would replace an immutable publication file");
     }
   }
 }
 
-/**
- * Published files are immutable, with one exception the runtime creates deliberately: a gate that
- * sanitizes an already-verified artifact refreshes the recorded sha256 for that path in the local
- * verification marker (`refreshVerifiedArtifactDigest`), so the marker keeps attesting the bytes on
- * disk. Republishing the same attempt — a resumed or recovered sandbox — then byte-compares that
- * refreshed marker against the original remote one. `stableAttemptId` keeps the attempt id, artifact
- * directory and marker name identical on every retry, so a plain byte compare strands the attempt
- * permanently instead of failing once.
- *
- * The only difference permitted here is a refreshed digest: every field of both markers must be
- * identical once the `sha256` of each `artifacts`/`publications` entry is blanked, at least one
- * digest must differ, and every differing local digest must be the sha256 of the artifact this
- * machine currently publishes at that entry's path. A changed path, node or attempt id, an added or
- * dropped entry, a reordered array, a digest naming no local file, or a marker that is not JSON is
- * not a refresh and stays rejected. Replacing is then safe and self-correcting: the artifact
- * directory is replaced from the same remote result moments later, so marker and artifacts stay a
- * matched pair, and the gate re-sanitizes and re-refreshes on the next sync tick.
- */
-function isRefreshedVerificationMarker(source: string, destination: string, artifactDir: string): boolean {
-  if (!fs.existsSync(destination)) return false;
-  const remote = readVerificationMarkerDigests(source);
-  const published = readVerificationMarkerDigests(destination);
-  if (remote === undefined || published === undefined) return false;
-  if (remote.skeleton !== published.skeleton) return false;
-  let refreshed = false;
-  for (const [index, entry] of published.digests.entries()) {
-    if (remote.digests[index]?.sha256 === entry.sha256) continue;
-    if (!publishedArtifactHasDigest(artifactDir, entry.path, entry.sha256)) return false;
-    refreshed = true;
-  }
-  return refreshed;
-}
-
-/**
- * A marker split into everything but its recorded artifact digests, plus those digests in document
- * order. The skeleton is compared verbatim, so any other edit fails the comparison.
- */
-function readVerificationMarkerDigests(
-  markerPath: string
-): { skeleton: string; digests: Array<{ path: string; sha256: string }> } | undefined {
-  let parsed: unknown;
+function lstatIfPresent(filePath: string): fs.Stats | undefined {
   try {
-    parsed = JSON.parse(fs.readFileSync(markerPath, "utf8"));
-  } catch {
-    return undefined;
-  }
-  if (!isRecord(parsed)) return undefined;
-  const digests: Array<{ path: string; sha256: string }> = [];
-  const skeleton: Record<string, unknown> = { ...parsed };
-  for (const key of ["artifacts", "publications"] as const) {
-    const entries = parsed[key];
-    if (!Array.isArray(entries)) continue;
-    skeleton[key] = entries.map((entry) => {
-      if (!isRecord(entry) || typeof entry.path !== "string" || typeof entry.sha256 !== "string") return entry;
-      digests.push({ path: entry.path, sha256: entry.sha256 });
-      return { ...entry, sha256: null };
-    });
-  }
-  return { skeleton: JSON.stringify(skeleton), digests };
-}
-
-function publishedArtifactHasDigest(artifactDir: string, relativePath: string, sha256: string): boolean {
-  if (!/^[0-9a-f]{64}$/u.test(sha256)) return false;
-  const resolved = path.resolve(artifactDir, relativePath);
-  if (!resolved.startsWith(`${artifactDir}${path.sep}`)) return false;
-  try {
-    const stat = fs.lstatSync(resolved);
-    if (!stat.isFile() || stat.isSymbolicLink()) return false;
-    if (fs.realpathSync(resolved) !== resolved) return false;
-    return crypto.createHash("sha256").update(fs.readFileSync(resolved)).digest("hex") === sha256;
-  } catch {
-    return false;
+    return fs.lstatSync(filePath);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined;
+    throw error;
   }
 }
 
@@ -2034,13 +1978,55 @@ function normalizedModalNodeError(error: unknown, secretValues: readonly string[
   return new Error(`Modal node execution failed: ${sanitized}`);
 }
 
-function formatWorkerExitMessage(exitCode: number, stdout: string, stderr: string): string {
-  const details = [formatWorkerStream("stdout", stdout), formatWorkerStream("stderr", stderr)]
+function formatCommandProbeExitMessage(exitCode: number, stdout: string, stderr: string): string {
+  const details = [formatWorkerStream("stderr", stderr), formatWorkerStream("stdout", stdout)]
     .filter((value) => value !== "")
     .join("; ");
-  return details === ""
-    ? `cloud node worker exited with code ${exitCode}`
-    : `cloud node worker exited with code ${exitCode}: ${details}`;
+  return `Modal command probe exited with code ${exitCode}${details === "" ? "" : `: ${details}`}`;
+}
+
+function formatWorkerExitMessage(exitCode: number, stdout: string, stderr: Uint8Array): string {
+  if (!hasNonWhitespaceBytes(stderr)) {
+    const stdoutDetail = formatWorkerStream("stdout", stdout);
+    return stdoutDetail === ""
+      ? `cloud node worker exited with code ${exitCode}`
+      : `cloud node worker exited with code ${exitCode}: ${stdoutDetail}`;
+  }
+
+  let document: StrictModalNodeWorkerErrorDocument;
+  try {
+    document = parseModalDocumentBytes(MODAL_NODE_WORKER_ERROR_SCHEMA_ID, stderr)
+      .value as StrictModalNodeWorkerErrorDocument;
+  } catch (error) {
+    const digest = crypto.createHash("sha256").update(stderr).digest("hex");
+    const validationDetail = formatWorkerStream(
+      "validation",
+      error instanceof Error ? error.message : "registered Modal validation failed"
+    );
+    const stdoutDetail = formatWorkerStream("stdout", stdout);
+    const details = [validationDetail, stdoutDetail].filter((value) => value !== "").join("; ");
+    throw new Error(
+      `cloud node worker error document is invalid (${stderr.byteLength} bytes, sha256 ${digest})${details === "" ? "" : `: ${details}`}`,
+      { cause: error }
+    );
+  }
+
+  const details = [
+    document.message,
+    ...(document.phase === undefined ? [] : [`phase: ${document.phase}`]),
+    ...(document.command === undefined ? [] : [`command: ${document.command}`]),
+    ...(document.exit_code === undefined ? [] : [`exit_code: ${document.exit_code}`]),
+    formatWorkerStream("worker stdout", document.stdout ?? ""),
+    formatWorkerStream("worker stderr", document.stderr ?? ""),
+    formatWorkerStream("process stdout", stdout)
+  ]
+    .filter((value) => value !== "")
+    .join("; ");
+  return `cloud node worker exited with code ${exitCode}: ${details}`;
+}
+
+function hasNonWhitespaceBytes(value: Uint8Array): boolean {
+  return value.some((byte) => byte !== 0x20 && byte !== 0x09 && byte !== 0x0a && byte !== 0x0d);
 }
 
 function formatWorkerStream(label: string, value: string): string {
@@ -2056,10 +2042,6 @@ function boundedIdentity(value: string): string {
       .replace(/^-+|-+$/gu, "")
       .slice(0, 32) || "run";
   return `${normalized}-${crypto.createHash("sha256").update(value).digest("hex").slice(0, 12)}`;
-}
-
-function isPositiveInteger(value: unknown): value is number {
-  return typeof value === "number" && Number.isInteger(value) && value > 0;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

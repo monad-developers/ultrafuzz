@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/run-state",
+  "$id": "urn:ultrafuzz:schema:artifacts:run-state:5",
   "title": "Ultrafuzz run state",
   "type": "object",
   "required": [
@@ -18,7 +18,7 @@
   "additionalProperties": false,
   "properties": {
     "schema_version": {
-      "const": "1.1"
+      "const": "ultrafuzz.run-state.v5"
     },
     "run_id": {
       "type": "string",
@@ -35,7 +35,8 @@
     },
     "created_at": {
       "type": "string",
-      "minLength": 1
+      "format": "date-time",
+      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
     },
     "source_run_id": {
       "type": "string",
@@ -43,19 +44,23 @@
     },
     "started_at": {
       "type": "string",
-      "minLength": 1
+      "format": "date-time",
+      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
     },
     "finished_at": {
       "type": "string",
-      "minLength": 1
+      "format": "date-time",
+      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
     },
     "workflow_deadline_at": {
       "type": "string",
-      "minLength": 1
+      "format": "date-time",
+      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
     },
     "last_transition_at": {
       "type": "string",
-      "minLength": 1
+      "format": "date-time",
+      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
     },
     "controller_lease": {
       "type": "object",
@@ -67,19 +72,23 @@
         },
         "duration_ms": {
           "type": "integer",
-          "minimum": 1000
+          "minimum": 1000,
+          "maximum": 9007199254740991
         },
         "renewed_at": {
           "type": "string",
-          "minLength": 1
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
         },
         "expires_at": {
           "type": "string",
-          "minLength": 1
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
         },
         "recovery_attempts": {
           "type": "integer",
-          "minimum": 0
+          "minimum": 0,
+          "maximum": 9007199254740991
         }
       }
     },
@@ -99,40 +108,48 @@
       "properties": {
         "requested_concurrency": {
           "type": "integer",
-          "minimum": 1
+          "minimum": 1,
+          "maximum": 9007199254740991
         },
         "effective_concurrency": {
           "type": "integer",
-          "minimum": 0
+          "minimum": 0,
+          "maximum": 9007199254740991
         },
         "ready_queue_depth": {
           "type": "integer",
-          "minimum": 0
+          "minimum": 0,
+          "maximum": 9007199254740991
         },
         "active_work": {
           "type": "integer",
-          "minimum": 0
+          "minimum": 0,
+          "maximum": 9007199254740991
         },
         "queued_duration_ms": {
           "type": "integer",
-          "minimum": 0
+          "minimum": 0,
+          "maximum": 9007199254740991
         },
         "active_duration_ms": {
           "type": "integer",
-          "minimum": 0
+          "minimum": 0,
+          "maximum": 9007199254740991
         },
         "idle_duration_ms": {
           "type": "integer",
-          "minimum": 0
+          "minimum": 0,
+          "maximum": 9007199254740991
         },
         "observed_at": {
           "type": "string",
-          "minLength": 1
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
         }
       }
     },
     "provenance": {
-      "type": "object"
+      "$ref": "#/$defs/runProvenance"
     },
     "nodes": {
       "type": "object",
@@ -152,7 +169,12 @@
               "required": ["status"]
             },
             "then": {
-              "required": ["wait_since", "wait_reason", "next_eligible_action"]
+              "required": ["wait_since", "wait_reason", "next_eligible_action"],
+              "properties": {
+                "wait_since": {},
+                "wait_reason": {},
+                "next_eligible_action": {}
+              }
             }
           }
         ],
@@ -178,7 +200,8 @@
           },
           "retry_count": {
             "type": "integer",
-            "minimum": 0
+            "minimum": 0,
+            "maximum": 9007199254740991
           },
           "timed_out": {
             "type": "boolean"
@@ -204,22 +227,44 @@
                 },
                 "contract": {
                   "enum": [
-                    "ultrafuzz/campaign-summary@1",
-                    "ultrafuzz/findings@1",
-                    "ultrafuzz/generated-tests@1",
-                    "ultrafuzz/implemented-properties@1",
-                    "ultrafuzz/implemented-properties@2",
-                    "ultrafuzz/invariant-campaign-plan@1",
+                    "ultrafuzz/admin-config-boundary-matrix@1",
+                    "ultrafuzz/aggregation-manifest@1",
+                    "ultrafuzz/audited-differential-lanes@1",
+                    "ultrafuzz/boundary-recipes@1",
+                    "ultrafuzz/campaign-summary@2",
+                    "ultrafuzz/coverage-goal@1",
+                    "ultrafuzz/dependency-scope-matrix@1",
+                    "ultrafuzz/differential-gap-review@1",
+                    "ultrafuzz/differential-lane-result@1",
+                    "ultrafuzz/differential-plan@1",
+                    "ultrafuzz/differential-red-triage@1",
+                    "ultrafuzz/differential-repair-summary@1",
+                    "ultrafuzz/differential-report-review@1",
+                    "ultrafuzz/dynamic-enumerator-outputs@1",
+                    "ultrafuzz/dynamic-strategy-plan@1",
+                    "ultrafuzz/dynamic-strategy-provenance@1",
+                    "ultrafuzz/externalized-state-accounting@1",
+                    "ultrafuzz/finding-lifecycle-ledger@1",
+                    "ultrafuzz/findings@2",
+                    "ultrafuzz/generated-tests@3",
+                    "ultrafuzz/harness-repairs@1",
+                    "ultrafuzz/implemented-properties@3",
+                    "ultrafuzz/invariant-campaign-plan@2",
                     "ultrafuzz/invariant-ledger@1",
-                    "ultrafuzz/json-array@1",
-                    "ultrafuzz/json-object@1",
                     "ultrafuzz/nonempty-markdown@1",
-                    "ultrafuzz/property-lens@1",
-                    "ultrafuzz/reference-expectations@1",
-                    "ultrafuzz/properties@1",
-                    "ultrafuzz/property-campaign@1",
-                    "ultrafuzz/report@1",
+                    "ultrafuzz/properties@2",
+                    "ultrafuzz/property-campaign@3",
+                    "ultrafuzz/property-lens@2",
+                    "ultrafuzz/reference-expectations@2",
+                    "ultrafuzz/reference-harness@1",
+                    "ultrafuzz/reference-manifest@1",
+                    "ultrafuzz/report@2",
+                    "ultrafuzz/selected-strategies@1",
+                    "ultrafuzz/semantic-red-registry@1",
+                    "ultrafuzz/severity-classified-findings@1",
+                    "ultrafuzz/strategy-detections@1",
                     "ultrafuzz/text@1",
+                    "ultrafuzz/triaged-findings@1",
                     "ultrafuzz/workspace-patch@1"
                   ]
                 },
@@ -227,19 +272,92 @@
                   "type": "string",
                   "pattern": "^[0-9a-f]{64}$"
                 },
+                "schema_file": {
+                  "type": "string",
+                  "pattern": "^[^/\\\\]+\\.schema\\.json$"
+                },
+                "schema_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "schema_sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "schema_bundle_sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "validator_build": {
+                  "type": "string",
+                  "minLength": 1
+                },
                 "primary": {
                   "type": "boolean"
                 }
-              }
+              },
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "contract": {
+                        "enum": ["ultrafuzz/nonempty-markdown@1", "ultrafuzz/text@1"]
+                      }
+                    },
+                    "required": ["contract"]
+                  },
+                  "then": {
+                    "not": {
+                      "anyOf": [
+                        {
+                          "properties": {
+                            "schema_file": true
+                          },
+                          "required": ["schema_file"]
+                        },
+                        {
+                          "properties": {
+                            "schema_id": true
+                          },
+                          "required": ["schema_id"]
+                        },
+                        {
+                          "properties": {
+                            "schema_sha256": true
+                          },
+                          "required": ["schema_sha256"]
+                        },
+                        {
+                          "properties": {
+                            "schema_bundle_sha256": true
+                          },
+                          "required": ["schema_bundle_sha256"]
+                        },
+                        {
+                          "properties": {
+                            "validator_build": true
+                          },
+                          "required": ["validator_build"]
+                        }
+                      ]
+                    }
+                  },
+                  "else": {
+                    "required": ["schema_file", "schema_id", "schema_sha256", "schema_bundle_sha256", "validator_build"]
+                  }
+                }
+              ]
             }
           },
           "attempt_index": {
             "type": "integer",
-            "minimum": 0
+            "minimum": 0,
+            "maximum": 9007199254740991
           },
           "loop_index": {
             "type": "integer",
-            "minimum": 0
+            "minimum": 0,
+            "maximum": 9007199254740991
           },
           "model_id": {
             "type": "string",
@@ -251,15 +369,18 @@
           },
           "model_index": {
             "type": "integer",
-            "minimum": 0
+            "minimum": 0,
+            "maximum": 9007199254740991
           },
           "started_at": {
             "type": "string",
-            "minLength": 1
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
           },
           "finished_at": {
             "type": "string",
-            "minLength": 1
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
           },
           "last_error": {
             "type": "string",
@@ -267,7 +388,8 @@
           },
           "wait_since": {
             "type": "string",
-            "minLength": 1
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
           },
           "wait_reason": {
             "enum": [
@@ -296,7 +418,332 @@
             ]
           },
           "provenance": {
-            "type": "object"
+            "$ref": "#/$defs/nodeProvenance"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "runProvenance": {
+      "type": "object",
+      "required": ["workflow"],
+      "additionalProperties": false,
+      "properties": {
+        "workflow": {
+          "$ref": "#/$defs/runWorkflowProvenance"
+        }
+      }
+    },
+    "runWorkflowProvenance": {
+      "type": "object",
+      "required": ["inspection", "runId", "compiledRunId", "name", "controlGeneration", "linkId", "executionSnapshot"],
+      "additionalProperties": false,
+      "properties": {
+        "inspection": {
+          "type": "object",
+          "required": ["runId"],
+          "additionalProperties": false,
+          "properties": {
+            "runId": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "runId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "compiledRunId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "controlGeneration": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "linkId": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "executionSnapshot": {
+          "type": "string",
+          "pattern": "^smithers/execution-snapshots/[0-9a-f]{64}$"
+        }
+      }
+    },
+    "nodeProvenance": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/executionNodeProvenance"
+        },
+        {
+          "$ref": "#/$defs/referenceNodeProvenance"
+        },
+        {
+          "$ref": "#/$defs/blockedNodeProvenance"
+        }
+      ]
+    },
+    "executionNodeProvenance": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": false,
+      "properties": {
+        "source_node_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "workflow": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/taskWorkflowProvenance"
+            },
+            {
+              "$ref": "#/$defs/aggregateWorkflowProvenance"
+            }
+          ]
+        },
+        "output_contracts": {
+          "$ref": "#/$defs/outputContractProvenance"
+        },
+        "findings_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "failure": {
+          "$ref": "#/$defs/failureProvenance"
+        },
+        "terminal_disposition": {
+          "$ref": "#/$defs/terminalDisposition"
+        }
+      }
+    },
+    "taskWorkflowProvenance": {
+      "type": "object",
+      "required": ["run_id", "task_id", "agent_task_id", "verifier_task_id"],
+      "additionalProperties": false,
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "agent_task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "verifier_task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "state": {
+          "enum": [
+            "pending",
+            "waiting-approval",
+            "waiting-event",
+            "waiting-timer",
+            "waiting-quota",
+            "waiting-bound",
+            "bound-stale",
+            "in-progress",
+            "finished",
+            "failed",
+            "cancelled",
+            "skipped"
+          ]
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "aggregateWorkflowProvenance": {
+      "type": "object",
+      "required": ["run_id", "aggregate_attempt_statuses"],
+      "additionalProperties": false,
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "aggregate_attempt_statuses": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "enum": [
+              "pending",
+              "ready",
+              "runnable",
+              "running",
+              "succeeded",
+              "failed",
+              "skipped",
+              "timed-out",
+              "reused-from-prior-run",
+              "invalidated"
+            ]
+          }
+        }
+      }
+    },
+    "outputContractProvenance": {
+      "type": "object",
+      "required": ["ok", "missing"],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "ok": {
+                "const": true
+              }
+            },
+            "required": ["ok"]
+          },
+          "then": {
+            "properties": {
+              "artifact_manifest_sha256": {}
+            },
+            "required": ["artifact_manifest_sha256"]
+          },
+          "else": {
+            "not": {
+              "required": ["artifact_manifest_sha256"]
+            }
+          }
+        }
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "missing": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "artifact_manifest_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "failureProvenance": {
+      "type": "object",
+      "required": ["category", "causal_task_id", "causal_failure_category", "dependent_task_ids"],
+      "additionalProperties": false,
+      "properties": {
+        "category": {
+          "enum": ["dependency-cascade", "artifact-contract", "provider-interruption", "agent-failure"]
+        },
+        "causal_task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "causal_failure_category": {
+          "enum": ["dependency-cascade", "artifact-contract", "provider-interruption", "agent-failure"]
+        },
+        "dependent_task_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "terminalDisposition": {
+      "type": "object",
+      "required": ["schema_version", "kind"],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "ultrafuzz.terminal-disposition.v1"
+        },
+        "kind": {
+          "const": "task-output-validation-failure"
+        }
+      }
+    },
+    "referenceNodeProvenance": {
+      "type": "object",
+      "required": ["origin", "reference"],
+      "additionalProperties": false,
+      "dependentRequired": {
+        "repo": ["commit"],
+        "commit": ["repo"]
+      },
+      "properties": {
+        "origin": {
+          "const": "pinned-reference"
+        },
+        "reference": {
+          "type": "string",
+          "minLength": 1
+        },
+        "repo": {
+          "type": "string",
+          "minLength": 1
+        },
+        "commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "reference_expectations": {
+          "$ref": "#/$defs/referenceExpectationProvenance"
+        }
+      }
+    },
+    "referenceExpectationProvenance": {
+      "type": "object",
+      "required": ["source", "path", "sha256"],
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "const": "operator-supplied"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "blockedNodeProvenance": {
+      "type": "object",
+      "required": ["reason_code", "blocked_by"],
+      "additionalProperties": false,
+      "properties": {
+        "reason_code": {
+          "enum": ["CAUSAL_MANIFEST_MISMATCH", "DEPENDENCY_NOT_SATISFIED"]
+        },
+        "blocked_by": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
           }
         }
       }

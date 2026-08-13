@@ -16,7 +16,8 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && node scripts/copy-prompts.mjs",
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-prompts.mjs && rm -rf dist/schema && cp -R schema dist/schema && node scripts/verify-schema-registry.mjs",
+    "schema:check": "pnpm build",
     "test": "pnpm --filter @ultrafuzz/evals^... build && vitest run",
     "typecheck": "pnpm --filter @ultrafuzz/evals^... build && tsc -p tsconfig.json --noEmit --pretty false"
   },
@@ -24,7 +25,11 @@
     "@ultrafuzz/artifacts": "workspace:*",
     "@ultrafuzz/config": "workspace:*",
     "@ultrafuzz/runtime": "workspace:*",
+    "proper-lockfile": "4.1.2",
     "yaml": "^2.8.0",
     "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/proper-lockfile": "^4.1.4"
   }
 }

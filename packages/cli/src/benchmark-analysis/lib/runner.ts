@@ -3,6 +3,12 @@ import fs from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import {
+  BENCHMARK_ANALYSIS_MANIFEST_SCHEMA_VERSION,
+  parseBenchmarkAnalysisManifest,
+  type BenchmarkAnalysisManifest
+} from "@ultrafuzz/evals";
+
 import type { AnalysisCommandName } from "../types.js";
 import { analyzeArchive } from "./analysis.js";
 import { buildComparisonChart, buildCostChart, buildScoreChart, buildUpSetChart } from "./charts.js";
@@ -58,32 +64,25 @@ export async function runAnalysisCommand(
   if (command === "table" || command === "all") outputs.push(...(await writeTableOutputs(result, output)));
   if (command === "all") outputs.push(...(await writeMethodOutputs(result, output)));
   const analysisManifestPath = path.join(output, "analysis_manifest.json");
-  await writeFile(
-    analysisManifestPath,
-    `${JSON.stringify(
-      {
-        schema_version: "ultrafuzz.benchmark-analysis.manifest.v1",
-        privacy: "private-analysis-output-do-not-commit",
-        command,
-        source_archive: result.sourceArchive,
-        source_sha256: result.sourceSha256,
-        handoff_schema_version: result.handoffSchemaVersion,
-        artifacts: outputs
-          .map((file) => {
-            const bytes = fs.readFileSync(file);
-            return {
-              path: path.basename(file),
-              size_bytes: bytes.length,
-              sha256: createHash("sha256").update(bytes).digest("hex")
-            };
-          })
-          .sort((left, right) => left.path.localeCompare(right.path))
-      },
-      null,
-      2
-    )}\n`,
-    "utf8"
-  );
+  const analysisManifest = parseBenchmarkAnalysisManifest({
+    schema_version: BENCHMARK_ANALYSIS_MANIFEST_SCHEMA_VERSION,
+    privacy: "private-analysis-output-do-not-commit",
+    command,
+    source_archive: result.sourceArchive,
+    source_sha256: result.sourceSha256,
+    handoff_schema_version: result.handoffSchemaVersion,
+    artifacts: outputs
+      .map((file) => {
+        const bytes = fs.readFileSync(file);
+        return {
+          path: path.basename(file),
+          size_bytes: bytes.length,
+          sha256: createHash("sha256").update(bytes).digest("hex")
+        };
+      })
+      .sort((left, right) => left.path.localeCompare(right.path))
+  } satisfies BenchmarkAnalysisManifest);
+  await writeFile(analysisManifestPath, `${JSON.stringify(analysisManifest, null, 2)}\n`, "utf8");
   outputs.push(analysisManifestPath);
 
   return {

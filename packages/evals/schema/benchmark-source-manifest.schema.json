@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:evals:benchmark-source-manifest:1",
+  "title": "Ultrafuzz private benchmark analysis source manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "privacy",
+    "source_archive",
+    "source_size_bytes",
+    "source_sha256",
+    "archive_root",
+    "handoff_schema_version",
+    "adjudication_output_path",
+    "rows",
+    "ground_truth_count"
+  ],
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.eval.benchmark-source-manifest.v1" },
+    "privacy": { "const": "private-analysis-output-do-not-commit" },
+    "source_archive": { "$ref": "urn:ultrafuzz:schema:evals:common:3#/$defs/nonEmptyString" },
+    "source_size_bytes": { "$ref": "urn:ultrafuzz:schema:evals:common:3#/$defs/nonNegativeInteger" },
+    "source_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "archive_root": { "type": "string" },
+    "handoff_schema_version": { "const": "ultrafuzz.eval.adjudication-handoff.v1" },
+    "adjudication_output_path": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$"
+    },
+    "rows": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/row" }
+    },
+    "ground_truth_count": { "$ref": "urn:ultrafuzz:schema:evals:common:3#/$defs/positiveInteger" }
+  },
+  "$defs": {
+    "row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["row_id", "row_label", "condition", "variant", "order"],
+      "properties": {
+        "row_id": { "$ref": "urn:ultrafuzz:schema:evals:common:3#/$defs/nonEmptyString" },
+        "row_label": { "$ref": "urn:ultrafuzz:schema:evals:common:3#/$defs/nonEmptyString" },
+        "condition": { "$ref": "urn:ultrafuzz:schema:evals:common:3#/$defs/nonEmptyString" },
+        "variant": { "$ref": "urn:ultrafuzz:schema:evals:common:3#/$defs/nonEmptyString" },
+        "order": { "$ref": "urn:ultrafuzz:schema:evals:common:3#/$defs/nonNegativeInteger" }
+      }
+    }
+  }
+}

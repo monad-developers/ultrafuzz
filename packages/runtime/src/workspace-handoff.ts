@@ -106,6 +106,15 @@ export interface WorkspacePatchCapture {
   manifest: WorkspacePatchManifest;
 }
 
+export interface WorkspacePatchGitFacts {
+  commit: string;
+  tree: string;
+  baseCommit: string;
+  baseTree: string;
+  resultTree: string;
+  patchSha256: string;
+}
+
 /** Return the tracked tree represented by the complete current worktree. */
 export function captureWorkspaceTree(workspaceRoot: string): string {
   return withTemporaryIndex(workspaceRoot, (index) => {
@@ -113,6 +122,40 @@ export function captureWorkspaceTree(workspaceRoot: string): string {
     stageWorkspaceTree(workspaceRoot, index);
     return runGit(workspaceRoot, ["write-tree"], index).trim();
   });
+}
+
+/**
+ * Reconstruct the Git facts bound by a workspace-patch manifest without using
+ * any of the manifest fields being checked. The baseline is runtime-owned,
+ * while Git computes the result tree by applying the published patch to a
+ * temporary index. Neither the repository worktree nor the patch is mutated.
+ */
+export function deriveWorkspacePatchGitFacts(
+  workspaceRoot: string,
+  baselineTree: string,
+  patch: string
+): WorkspacePatchGitFacts {
+  assertObjectId(baselineTree, "workspace patch baseline tree");
+  const commit = runGit(workspaceRoot, ["rev-parse", "HEAD"]).trim();
+  const tree = runGit(workspaceRoot, ["rev-parse", "HEAD^{tree}"]).trim();
+  assertObjectId(commit, "workspace patch base commit");
+  assertObjectId(tree, "workspace patch commit tree");
+  const resultTree = withTemporaryIndex(workspaceRoot, (index) => {
+    runGit(workspaceRoot, ["read-tree", baselineTree], index);
+    if (patch.length > 0) {
+      runGit(workspaceRoot, ["apply", "--cached", "--binary", "--whitespace=nowarn", "-"], index, patch);
+    }
+    return runGit(workspaceRoot, ["write-tree"], index).trim();
+  });
+  assertObjectId(resultTree, "workspace patch result tree");
+  return {
+    commit,
+    tree,
+    baseCommit: commit,
+    baseTree: baselineTree,
+    resultTree,
+    patchSha256: sha256(patch)
+  };
 }
 
 /** Capture only changes made after the supplied dependency baseline tree. */

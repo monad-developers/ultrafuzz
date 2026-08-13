@@ -1,3 +1,4 @@
+schema_version: ultrafuzz.eval-ground-truth.v1
 source:
   url: https://code4rena.com/reports/2023-05-venus
   retrieved_sha256: 82613207395c9a7839f3717d897c01945ba490522640ec296fe6984adbd7913e

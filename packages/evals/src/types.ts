@@ -1,9 +1,13 @@
-import type { NodeStatus, RunStatus } from "@ultrafuzz/artifacts";
+import type { NodeStatus, NormalizedFinding, RunStatus } from "@ultrafuzz/artifacts";
 import type { RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
-export const EVAL_SPEC_SCHEMA_VERSION = "ultrafuzz.eval.v1" as const;
-export const EVAL_RESULT_SCHEMA_VERSION = "ultrafuzz.eval.result.v1" as const;
-export const EVAL_RUN_SCHEMA_VERSION = "ultrafuzz.eval.run.v1" as const;
+export const EVAL_SPEC_SCHEMA_VERSION = "ultrafuzz.eval.v2" as const;
+export const EVAL_RUN_SCHEMA_VERSION = "ultrafuzz.eval.run.v3" as const;
+export const EVAL_RUN_SUMMARY_SCHEMA_VERSION = "ultrafuzz.eval.run-summary.v2" as const;
+export const EVAL_FINDING_SCORE_SCHEMA_VERSION = "ultrafuzz.eval.finding-score.v2" as const;
+export const EVAL_SCORE_SUMMARY_SCHEMA_VERSION = "ultrafuzz.eval.score-summary.v2" as const;
+export const EVAL_REVIEW_QUEUE_ITEM_SCHEMA_VERSION = "ultrafuzz.eval.review-queue-item.v2" as const;
+export const EVAL_PUBLICATION_STATE_SCHEMA_VERSION = "ultrafuzz.eval.publication.v1" as const;
 
 export type EvalClassification = "true-positive" | "false-positive" | "needs-human-review" | "missed";
 export type EvalClassificationReasonCode =
@@ -14,19 +18,72 @@ export type EvalClassificationReasonCode =
   | "panel-disagreement";
 export type ReviewerStatus = "pending" | "accepted" | "rejected" | "needs-more-evidence";
 
-export interface EvalResult<T> {
-  schema_version: typeof EVAL_RESULT_SCHEMA_VERSION;
-  ok: boolean;
-  diagnostics: RuntimeDiagnostic[];
-  value?: T;
-}
-
 export interface EvalModelProfile {
   agent: string;
   model?: string;
   reasoning?: string;
+  /** Optional LLM-judge request timeout for this profile. */
   timeout_seconds?: number;
-  config?: string[] | Record<string, unknown>;
+}
+
+/** The only intentionally opaque JSON seam in an eval suite. */
+export type EvalOperatorJsonValue =
+  null | boolean | number | string | EvalOperatorJsonValue[] | { [key: string]: EvalOperatorJsonValue };
+
+/**
+ * Operator-owned workflow values. Runtime validation forbids eval-reserved
+ * keys so this open extension point cannot shadow typed benchmark controls or
+ * the `ultrafuzz_eval` envelope added by the runner.
+ */
+export type EvalOperatorWorkflowInput = Record<string, EvalOperatorJsonValue>;
+
+export interface EvalBenchmarkExecutionInput {
+  strategy_loops: number;
+  excluded_node_ids: string[];
+}
+
+export interface EvalSmokeBenchmarkExecutionInput extends EvalBenchmarkExecutionInput {
+  workflow_profile: "smoke-benchmark-v1";
+  /** Named audit profile the smoke lane runs under; pinned to the packaged `smoke` profile. */
+  audit_profile: "smoke";
+  /** Digest of the packaged audit-profile catalog the smoke policy was read from. */
+  audit_profile_catalog_digest: string;
+  /** Digest of the packaged topology the smoke profile selects. */
+  topology_digest: string;
+  selected_strategy_ids: string[];
+}
+
+export interface EvalPrivateBenchmarkWorkflowInput {
+  benchmark_execution: EvalBenchmarkExecutionInput;
+}
+
+export interface EvalPublicFullBenchmarkWorkflowInput {
+  benchmark_lane: "full";
+  target_frameworks: Record<string, string>;
+  excluded_strategy_families: string[];
+  benchmark_execution: EvalBenchmarkExecutionInput;
+}
+
+export interface EvalPublicSmokeBenchmarkWorkflowInput {
+  benchmark_lane: "smoke";
+  target_frameworks: Record<string, string>;
+  excluded_strategy_families: string[];
+  benchmark_execution: EvalSmokeBenchmarkExecutionInput;
+}
+
+export type EvalBenchmarkWorkflowInput =
+  EvalPrivateBenchmarkWorkflowInput | EvalPublicFullBenchmarkWorkflowInput | EvalPublicSmokeBenchmarkWorkflowInput;
+
+export type EvalWorkflowInput = EvalOperatorWorkflowInput | EvalBenchmarkWorkflowInput;
+
+export function isEvalBenchmarkWorkflowInput(input: EvalWorkflowInput): input is EvalBenchmarkWorkflowInput {
+  return Object.hasOwn(input, "benchmark_execution");
+}
+
+export function isEvalPublicBenchmarkWorkflowInput(
+  input: EvalWorkflowInput
+): input is EvalPublicFullBenchmarkWorkflowInput | EvalPublicSmokeBenchmarkWorkflowInput {
+  return Object.hasOwn(input, "benchmark_lane");
 }
 
 export interface EvalTarget {
@@ -39,7 +96,7 @@ export interface EvalTarget {
   /** Relative ground-truth file resolved strictly under the operator-supplied `[eval].ground_truth_root`. */
   ground_truth: string;
   /** `private` forces manifest-only artifact reporting unless the suite explicitly opts into `upload`. */
-  sensitivity?: string;
+  sensitivity?: "public" | "private";
   /**
    * Benchmark paths the run must never read, such as a reference solution the
    * agent would otherwise copy instead of deriving. Applied when the pinned
@@ -52,8 +109,7 @@ export interface EvalVariant {
   id: string;
   /** Optional topology override; when omitted the target project's CI topology is used unmodified. */
   topology?: string;
-  model_profiles?: string[];
-  workflow_input?: unknown;
+  workflow_input?: EvalWorkflowInput;
   runner_model_profile?: string;
   judge_model_profile?: string;
 }
@@ -72,9 +128,7 @@ export interface EvalJudgePanelConfig {
 }
 
 export interface EvalMetricsConfig {
-  primary: string[];
   recall_threshold: number;
-  secondary: string[];
 }
 
 export type EvalRecoveryEquivalenceClassification =
@@ -145,8 +199,8 @@ export interface EvalSuiteSpec {
   /** Optional independent adjudicator panel; omitted suites use three judges with quorum two. */
   judge_panel?: EvalJudgePanelConfig;
   metrics: EvalMetricsConfig;
-  /** Recovery-exposure and aggregation policy; omitted suites use a zero-repeat, comparable-publication policy. */
-  recovery_equivalence?: EvalRecoveryEquivalencePolicy;
+  /** Effective recovery-exposure and aggregation policy after suite-input normalization. */
+  recovery_equivalence: EvalRecoveryEquivalencePolicy;
   /** Telemetry/artifact policy only — provider selection and credentials live in ultrafuzz.toml. */
   reporting: EvalReportingPolicy;
 }
@@ -174,13 +228,22 @@ export interface EvalMatrixRow {
   judge_model?: string;
   runner_reasoning?: string;
   judge_reasoning?: string;
-  workflow_input?: unknown;
+  workflow_input?: EvalWorkflowInput;
+}
+
+/** Closed projection persisted in eval journals and summaries. */
+export interface EvalDurableDiagnostic {
+  code: string;
+  message: string;
+  severity: "error" | "warning" | "info";
+  source: string;
+  path?: string;
 }
 
 export interface EvalCandidateProvenance {
   label: string;
   commit: string;
-  dirty: boolean | null;
+  dirty: boolean;
   execution_artifact_id?: string;
 }
 
@@ -188,7 +251,7 @@ export interface EvalBenchmarkTargetProvenance {
   id: string;
   repo: string;
   commit: string;
-  dirty: boolean | null;
+  dirty: boolean;
 }
 
 export interface EvalExecutionPolicyProvenance {
@@ -206,13 +269,13 @@ export interface EvalExecutionPolicyProvenance {
 }
 
 export interface EvalBenchmarkProvenance {
-  availability: "available" | "incomplete";
+  availability: "available";
   series: string;
   protocol_revision: string;
   cohort_fingerprint: string;
   targets: EvalBenchmarkTargetProvenance[];
   ground_truth_sha256: Record<string, string>;
-  ground_truth_subjects?: Record<string, EvalGroundTruthSubject | "unavailable">;
+  ground_truth_subjects: Record<string, EvalGroundTruthSubject>;
   execution_policy: EvalExecutionPolicyProvenance;
 }
 
@@ -223,14 +286,13 @@ export interface EvalRunProvenance {
 
 export interface EvalScoringProvenance {
   implementation_revision: string;
-  implementation_dirty: boolean | null;
+  implementation_dirty: boolean;
   judge_mode: "deterministic" | "llm";
   judge_prompt_version: string;
   judge_models: string[];
-  /** Historical scoring artifacts may omit the panel identity. */
-  judge_panel?: EvalJudgePanelConfig;
+  judge_panel: EvalJudgePanelConfig;
   ground_truth_sha256: Record<string, string>;
-  ground_truth_subjects?: Record<string, EvalGroundTruthSubject | "unavailable">;
+  ground_truth_subjects: Record<string, EvalGroundTruthSubject>;
   fingerprint: string;
 }
 
@@ -240,10 +302,21 @@ export interface EvalGroundTruthSubject {
 }
 
 export interface EvalSummaryProvenance {
-  availability: "available" | "historical-unavailable";
-  candidate?: EvalCandidateProvenance;
-  benchmark?: EvalBenchmarkProvenance;
+  availability: "available";
+  candidate: EvalCandidateProvenance;
+  benchmark: EvalBenchmarkProvenance;
   scoring: EvalScoringProvenance;
+}
+
+/** Current-only durable `eval.json` document. */
+export interface EvalRunManifest {
+  schema_version: typeof EVAL_RUN_SCHEMA_VERSION;
+  eval_run_id: string;
+  suite_path: string;
+  project_root: string;
+  created_at: string;
+  suite: EvalSuiteSpec;
+  provenance: EvalRunProvenance;
 }
 
 export interface EvalPlanValue {
@@ -255,12 +328,12 @@ export interface EvalPlanValue {
 }
 
 export interface EvalLauncherLifecycle {
-  status: "succeeded" | "failed" | "unavailable";
-  started_at: string | null;
-  finished_at: string | null;
+  status: "succeeded" | "failed";
+  started_at: string;
+  finished_at: string;
 }
 
-export type EvalWorkflowStatus = RunStatus | "unavailable";
+export type EvalWorkflowStatus = RunStatus;
 
 export interface EvalWorkflowLifecycle {
   status: EvalWorkflowStatus;
@@ -275,26 +348,15 @@ export interface EvalRowLifecycle {
 }
 
 export type EvalEfficiencyReason =
-  | "workflow-state-unavailable"
-  | "workflow-not-terminal"
-  | "workflow-timestamps-unavailable"
-  | "workflow-timestamps-invalid"
-  | "node-timestamps-unavailable"
-  | "node-timestamps-invalid"
-  | "node-attempt-timestamps-unavailable"
-  | "node-attempt-timestamps-final-attempt-only"
-  | "accounting-unavailable"
-  | "usage-incomplete"
-  | "pricing-unavailable"
-  | "pricing-incomplete";
+  "node-attempt-timestamps-final-attempt-only" | "usage-incomplete" | "pricing-incomplete";
 
 export type EvalEfficiencyCompleteness =
-  { status: "complete"; reason: null } | { status: "partial" | "unavailable"; reason: EvalEfficiencyReason };
+  { status: "complete"; reason: null } | { status: "partial"; reason: EvalEfficiencyReason };
 
 export interface EvalEfficiency {
-  wall_time_seconds: number | null;
-  active_time_seconds: number | null;
-  wait_time_seconds: number | null;
+  wall_time_seconds: number;
+  active_time_seconds: number;
+  wait_time_seconds: number;
   total_tokens: number | null;
   cost_usd: number | null;
   runtime: EvalEfficiencyCompleteness;
@@ -304,10 +366,7 @@ export interface EvalEfficiency {
 
 export type EvalNodeStatusCounts = Record<NodeStatus, number>;
 
-export type EvalExpansionReason = "workflow-state-unavailable" | "run-graph-unavailable" | "concurrency-unavailable";
-
-export type EvalExpansionCompleteness =
-  { status: "complete"; reason: null } | { status: "partial" | "unavailable"; reason: EvalExpansionReason };
+export type EvalExpansionCompleteness = { status: "complete"; reason: null };
 
 /** One node the run added after the graph was fixed, with its declared lineage. */
 export interface EvalDynamicNode {
@@ -322,10 +381,10 @@ export interface EvalDynamicNode {
 
 /** Concurrency as the run itself observed it, not as the suite requested it. */
 export interface EvalRunConcurrencyObservation {
-  requested: number | null;
-  effective: number | null;
-  ready_queue_depth: number | null;
-  active_work: number | null;
+  requested: number;
+  effective: number;
+  ready_queue_depth: number;
+  active_work: number;
 }
 
 /**
@@ -333,17 +392,17 @@ export interface EvalRunConcurrencyObservation {
  *
  * Counts are always exact. Identifier lists are capped at
  * `MAX_EVAL_EXPANSION_NODE_IDS`, and `truncated` is set when any of them was, so
- * a bounded record is never mistaken for a complete one. `dynamic_*` fields are
- * null when the run graph could not be read, because static and dynamic nodes
- * cannot be told apart without it.
+ * a bounded record is never mistaken for a complete one. Current summaries
+ * require both the authoritative run state and planned graph; missing evidence
+ * is rejected instead of being represented as an empty or unavailable view.
  */
 export interface EvalRunExpansion {
   node_count: number;
   status_counts: EvalNodeStatusCounts;
-  static_node_count: number | null;
-  dynamic_node_count: number | null;
-  dynamic_status_counts: EvalNodeStatusCounts | null;
-  dynamic_nodes: EvalDynamicNode[] | null;
+  static_node_count: number;
+  dynamic_node_count: number;
+  dynamic_status_counts: EvalNodeStatusCounts;
+  dynamic_nodes: EvalDynamicNode[];
   retried_node_count: number;
   failed_node_count: number;
   failed_node_ids: string[];
@@ -367,7 +426,7 @@ export interface EvalRunRecord {
   ultrafuzz_run_root?: string;
   report_json_path?: string;
   status: "launched" | "failed";
-  final_status?: string;
+  final_status?: "launched" | "succeeded" | "failed" | "timed-out" | "canceled";
   graph_fingerprint?: string;
   config_fingerprint?: string;
   audit_profile?: string;
@@ -378,22 +437,24 @@ export interface EvalRunRecord {
   candidate_commit?: string;
   execution_artifact_id?: string;
   workflow_ids: string[];
-  /** Explicit launcher-process lifecycle for new records. */
-  launcher?: EvalLauncherLifecycle;
+  launcher: EvalLauncherLifecycle;
   /** Last observed durable workflow lifecycle; summaries always re-read state.json. */
   workflow?: EvalWorkflowLifecycle;
-  /**
-   * Last observed node-level expansion and concurrency. Present on new records;
-   * summaries re-derive it from the run root so an older record is not a gap.
-   */
+  /** Last observed node-level expansion and concurrency, when the row was watched. */
   expansion?: EvalRunExpansion;
   /** Immutable execution-exposure classification captured from append-only run evidence. */
   recovery_equivalence?: EvalRecoveryEquivalence;
-  /** Legacy launcher timestamp retained for reading existing eval runs. */
-  started_at?: string;
-  /** Legacy launcher timestamp retained for reading existing eval runs. */
-  finished_at?: string;
-  diagnostics: RuntimeDiagnostic[];
+  diagnostics: EvalDurableDiagnostic[];
+}
+
+/** Current-only durable `run-summary.json` document. */
+export interface EvalRunSummary {
+  schema_version: typeof EVAL_RUN_SUMMARY_SCHEMA_VERSION;
+  eval_run_id: string;
+  launched: number;
+  failed: number;
+  incomplete: number;
+  records: EvalRunRecord[];
 }
 
 export interface EvalRunValue {
@@ -404,6 +465,8 @@ export interface EvalRunValue {
   launched: number;
   failed: number;
   incomplete: number;
+  /** Whether this call polled the launched rows toward a terminal observation. */
+  watched: boolean;
   records: EvalRunRecord[];
   report_url?: string;
   diagnostics: RuntimeDiagnostic[];
@@ -436,8 +499,7 @@ export interface FindingJudgeDecision {
   score: number;
   signals: FindingMatchSignalScores;
   classification: EvalClassification;
-  /** Added in judge prompt v3; historical serialized results may omit it. */
-  reason_code?: EvalClassificationReasonCode;
+  reason_code: EvalClassificationReasonCode;
   rationale: string;
   confidence: number;
   judge_model: string;
@@ -494,25 +556,63 @@ export interface FindingJudgeInput {
 export type FindingJudge = (input: FindingJudgeInput) => Promise<FindingJudgeResult>;
 
 export interface EvalFindingScore {
+  schema_version: typeof EVAL_FINDING_SCORE_SCHEMA_VERSION;
   row_id: string;
   finding_id: string;
   finding_title?: string;
   report_path: string;
+  report_authority: EvalReportAuthority;
   deterministic_match: FindingJudgeResult;
   judge_result: FindingJudgeResult;
 }
 
+/** In-memory scorer result that is never valid as a persisted score artifact. */
+export type EvalUnboundFindingScore = Omit<EvalFindingScore, "report_authority">;
+
+/** Exact verified report and run-state authority used to derive one score row. */
+export interface EvalReportAuthority {
+  ultrafuzz_run_id: string;
+  producer_attempt_id: string;
+  graph_fingerprint: string;
+  config_fingerprint: string;
+  report_json_path: string;
+  report_json_sha256: string;
+  report_markdown_path: string;
+  report_markdown_sha256: string;
+  contract: "ultrafuzz/report@2";
+  contract_digest: string;
+  schema_id: string;
+  schema_sha256: string;
+  schema_bundle_sha256: string;
+  validator_build: string;
+}
+
 export interface HumanReviewQueueItem {
+  schema_version: typeof EVAL_REVIEW_QUEUE_ITEM_SCHEMA_VERSION;
   target_id: string;
   variant_id: string;
   trial_id: string;
   ultrafuzz_run_id?: string;
   workflow_ids: string[];
-  finding: unknown;
+  finding: NormalizedFinding;
   report_path: string;
   deterministic_match: FindingJudgeResult;
   judge_result: FindingJudgeResult;
   reviewer_status: ReviewerStatus;
+}
+
+export interface EvalPublicationDiagnostic {
+  code: "TERMINAL_REPORT_NOT_PUBLISHABLE" | "RECOVERY_EQUIVALENCE_NOT_PUBLISHABLE";
+  row_id: string;
+  contract: "ultrafuzz/report@2";
+  reason: string;
+  report_path?: string;
+}
+
+export interface EvalPublicationState {
+  schema_version: typeof EVAL_PUBLICATION_STATE_SCHEMA_VERSION;
+  status: "publishable" | "non-publishable";
+  diagnostics: EvalPublicationDiagnostic[];
 }
 
 export interface EvalRowScore {
@@ -520,6 +620,7 @@ export interface EvalRowScore {
   target_id: string;
   variant_id: string;
   trial_id: string;
+  report_authority: EvalReportAuthority;
   report_schema_valid: boolean;
   ground_truth_bug_count: number;
   finding_count: number;
@@ -535,27 +636,18 @@ export interface EvalRowScore {
   severity_accuracy: number | null;
   true_positive_accuracy: number;
   duplicate_rate: number;
-  /** @deprecated Use `efficiency.wall_time_seconds`. */
-  runtime_seconds: number | null;
-  /** @deprecated Use `efficiency.cost_usd`. */
-  cost_estimate: number | null;
   lifecycle: EvalRowLifecycle;
   efficiency: EvalEfficiency;
-  /**
-   * Node-level expansion and concurrency for this row. Carried on the score so
-   * a dynamic fan-out is observable from `scores.jsonl` and `summary.json`,
-   * both of which the public bundle already retains, with no reporter involved.
-   *
-   * Optional for the same reason the record-level field is: it is derived from
-   * `EvalRunRecord.expansion`, which is absent on any row scored before this
-   * existed, and `scores.jsonl` is persisted — a required field here would make
-   * every historical score unreadable.
-   */
-  expansion?: EvalRunExpansion;
+  /** Node-level expansion and concurrency re-derived for every current score. */
+  expansion: EvalRunExpansion;
   recovery_equivalence: EvalRecoveryEquivalence;
 }
 
+/** In-memory scorer result that is never valid inside a persisted score summary. */
+export type EvalUnboundRowScore = Omit<EvalRowScore, "report_authority">;
+
 export interface EvalScoreSummary {
+  schema_version: typeof EVAL_SCORE_SUMMARY_SCHEMA_VERSION;
   eval_run_id: string;
   eval_run_root: string;
   recall_threshold: number;
@@ -565,7 +657,7 @@ export interface EvalScoreSummary {
   summary_path: string;
   review_queue_path: string;
   recovery_equivalence: EvalRecoveryEquivalenceSummary;
-  provenance?: EvalSummaryProvenance;
+  provenance: EvalSummaryProvenance;
 }
 
 export interface EvalRecoveryEquivalenceSummary {

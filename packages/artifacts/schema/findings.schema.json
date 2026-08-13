@@ -1,9 +1,10 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/findings",
-  "title": "Ultrafuzz normalized findings array",
+  "$id": "urn:ultrafuzz:schema:artifacts:findings:2",
+  "title": "Ultrafuzz findings",
   "type": "array",
+  "maxItems": 10000,
   "items": {
-    "$ref": "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/finding"
+    "$ref": "urn:ultrafuzz:schema:artifacts:finding:2"
   }
 }

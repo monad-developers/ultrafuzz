@@ -1,0 +1,784 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:modal:common:1",
+  "title": "Ultrafuzz Modal common contract definitions",
+  "$defs": {
+    "safeId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S"
+    },
+    "boundedPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16384,
+      "pattern": "\\S"
+    },
+    "snapshotRelativePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)(?!\\.$).+$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "positiveInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "nonNegativeInteger": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "nonNegativeNumber": {
+      "type": "number",
+      "minimum": 0
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "sha256Digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "gitObjectId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "environmentVariable": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+    },
+    "dependencyName": {
+      "type": "string",
+      "pattern": "^(?:@[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*|[A-Za-z0-9][A-Za-z0-9._-]*)$"
+    },
+    "lineageFingerprints": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["config", "source", "image"],
+      "properties": {
+        "config": { "$ref": "#/$defs/sha256" },
+        "source": { "$ref": "#/$defs/sha256" },
+        "image": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "recoveryFingerprints": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["config", "source", "image", "model"],
+      "properties": {
+        "config": { "$ref": "#/$defs/sha256" },
+        "source": { "$ref": "#/$defs/sha256" },
+        "image": { "$ref": "#/$defs/sha256" },
+        "model": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["slug", "model", "provider", "agent", "reasoning", "auth_mode"],
+      "properties": {
+        "slug": { "$ref": "#/$defs/safeId" },
+        "model": { "$ref": "#/$defs/nonEmptyString" },
+        "provider": { "enum": ["openai", "anthropic", "deepseek", "kimi"] },
+        "agent": { "enum": ["CodexAgent", "ClaudeAgent", "DeepSeekAgent", "KimiAgent"] },
+        "reasoning": { "$ref": "#/$defs/nonEmptyString" },
+        "auth_mode": { "enum": ["api-key", "subscription"] }
+      }
+    },
+    "nodeCounts": {
+      "type": "object",
+      "maxProperties": 64,
+      "propertyNames": { "$ref": "#/$defs/safeId" },
+      "additionalProperties": { "$ref": "#/$defs/nonNegativeInteger" }
+    },
+    "observationBoolean": {
+      "oneOf": [{ "type": "boolean" }, { "const": "unknown" }]
+    },
+    "observationTimestamp": {
+      "oneOf": [{ "$ref": "#/$defs/timestamp" }, { "const": "unknown" }]
+    },
+    "observationExitCode": {
+      "oneOf": [{ "type": "integer" }, { "type": "null" }, { "const": "unknown" }]
+    },
+    "observationDigest": {
+      "oneOf": [{ "$ref": "#/$defs/sha256" }, { "const": "unknown" }]
+    },
+    "observationNodeCounts": {
+      "oneOf": [{ "$ref": "#/$defs/nodeCounts" }, { "const": "unknown" }]
+    },
+    "recoveryLifecycleRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "logical_run_id",
+        "model_slug",
+        "generation",
+        "attempt",
+        "attempt_id",
+        "trigger_action",
+        "start_reason",
+        "terminal_reason",
+        "terminal_class",
+        "launched_at",
+        "worker_exit_code",
+        "fingerprints",
+        "model_work_started",
+        "last_durable_transition_at",
+        "node_counts_before",
+        "node_counts_after",
+        "progress_made",
+        "controller_requested",
+        "node_attempt_ledger_digest",
+        "evaluation_lineage_digest"
+      ],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.modal.recovery-lifecycle.v1" },
+        "logical_run_id": { "$ref": "#/$defs/safeId" },
+        "model_slug": { "$ref": "#/$defs/safeId" },
+        "generation": { "$ref": "#/$defs/positiveInteger" },
+        "attempt": { "$ref": "#/$defs/positiveInteger" },
+        "attempt_id": { "$ref": "#/$defs/safeId" },
+        "parent_generation": { "$ref": "#/$defs/positiveInteger" },
+        "parent_attempt_id": { "$ref": "#/$defs/safeId" },
+        "trigger_action": {
+          "enum": ["initial-launch", "retry", "resume", "replace-image", "rotate-stale-probe", "restart", "unknown"]
+        },
+        "start_reason": {
+          "enum": [
+            "initial",
+            "pre-model-retry",
+            "post-model-resume",
+            "image-rollout",
+            "stale-probe-rotation",
+            "operator-restart",
+            "unknown"
+          ]
+        },
+        "terminal_reason": {
+          "enum": [
+            "active",
+            "succeeded",
+            "genuine-worker-failure",
+            "operational-failure",
+            "image-rollout",
+            "stale-probe-rotation",
+            "operator-request",
+            "timeout",
+            "resource-termination",
+            "recovery-budget-exhausted",
+            "unknown"
+          ]
+        },
+        "terminal_class": {
+          "enum": [
+            "active",
+            "succeeded",
+            "genuine-worker-failure",
+            "operational-failure",
+            "controller-rotation",
+            "timeout",
+            "resource-termination",
+            "recovery-budget-exhausted",
+            "unknown"
+          ]
+        },
+        "launched_at": { "$ref": "#/$defs/timestamp" },
+        "finished_at": { "$ref": "#/$defs/timestamp" },
+        "worker_exit_code": { "$ref": "#/$defs/observationExitCode" },
+        "fingerprints": { "$ref": "#/$defs/recoveryFingerprints" },
+        "model_work_started": { "$ref": "#/$defs/observationBoolean" },
+        "last_durable_transition_at": { "$ref": "#/$defs/observationTimestamp" },
+        "node_counts_before": { "$ref": "#/$defs/observationNodeCounts" },
+        "node_counts_after": { "$ref": "#/$defs/observationNodeCounts" },
+        "progress_made": { "$ref": "#/$defs/observationBoolean" },
+        "controller_requested": { "$ref": "#/$defs/observationBoolean" },
+        "node_attempt_ledger_digest": { "$ref": "#/$defs/observationDigest" },
+        "evaluation_lineage_digest": { "$ref": "#/$defs/observationDigest" }
+      },
+      "dependentRequired": {
+        "parent_generation": ["parent_attempt_id"],
+        "parent_attempt_id": ["parent_generation"]
+      },
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "properties": { "start_reason": { "const": "initial" }, "trigger_action": { "const": "initial-launch" } },
+              "required": ["start_reason", "trigger_action"]
+            },
+            {
+              "properties": { "start_reason": { "const": "pre-model-retry" }, "trigger_action": { "const": "retry" } },
+              "required": ["start_reason", "trigger_action"]
+            },
+            {
+              "properties": {
+                "start_reason": { "const": "post-model-resume" },
+                "trigger_action": { "const": "resume" }
+              },
+              "required": ["start_reason", "trigger_action"]
+            },
+            {
+              "properties": {
+                "start_reason": { "const": "image-rollout" },
+                "trigger_action": { "const": "replace-image" }
+              },
+              "required": ["start_reason", "trigger_action"]
+            },
+            {
+              "properties": {
+                "start_reason": { "const": "stale-probe-rotation" },
+                "trigger_action": { "const": "rotate-stale-probe" }
+              },
+              "required": ["start_reason", "trigger_action"]
+            },
+            {
+              "properties": {
+                "start_reason": { "const": "operator-restart" },
+                "trigger_action": { "const": "restart" }
+              },
+              "required": ["start_reason", "trigger_action"]
+            },
+            {
+              "properties": { "start_reason": { "const": "unknown" }, "trigger_action": { "const": "unknown" } },
+              "required": ["start_reason", "trigger_action"]
+            }
+          ]
+        },
+        {
+          "oneOf": [
+            {
+              "properties": { "terminal_reason": { "const": "active" }, "terminal_class": { "const": "active" } },
+              "required": ["terminal_reason", "terminal_class"]
+            },
+            {
+              "properties": { "terminal_reason": { "const": "succeeded" }, "terminal_class": { "const": "succeeded" } },
+              "required": ["terminal_reason", "terminal_class"]
+            },
+            {
+              "properties": {
+                "terminal_reason": { "const": "genuine-worker-failure" },
+                "terminal_class": { "const": "genuine-worker-failure" }
+              },
+              "required": ["terminal_reason", "terminal_class"]
+            },
+            {
+              "properties": {
+                "terminal_reason": { "const": "operational-failure" },
+                "terminal_class": { "const": "operational-failure" }
+              },
+              "required": ["terminal_reason", "terminal_class"]
+            },
+            {
+              "properties": {
+                "terminal_reason": { "enum": ["image-rollout", "stale-probe-rotation", "operator-request"] },
+                "terminal_class": { "const": "controller-rotation" }
+              },
+              "required": ["terminal_reason", "terminal_class"]
+            },
+            {
+              "properties": { "terminal_reason": { "const": "timeout" }, "terminal_class": { "const": "timeout" } },
+              "required": ["terminal_reason", "terminal_class"]
+            },
+            {
+              "properties": {
+                "terminal_reason": { "const": "resource-termination" },
+                "terminal_class": { "const": "resource-termination" }
+              },
+              "required": ["terminal_reason", "terminal_class"]
+            },
+            {
+              "properties": {
+                "terminal_reason": { "const": "recovery-budget-exhausted" },
+                "terminal_class": { "const": "recovery-budget-exhausted" }
+              },
+              "required": ["terminal_reason", "terminal_class"]
+            },
+            {
+              "properties": { "terminal_reason": { "const": "unknown" }, "terminal_class": { "const": "unknown" } },
+              "required": ["terminal_reason", "terminal_class"]
+            }
+          ]
+        },
+        {
+          "if": { "properties": { "terminal_reason": { "const": "active" } }, "required": ["terminal_reason"] },
+          "then": { "properties": { "finished_at": false } }
+        },
+        {
+          "if": {
+            "properties": { "terminal_reason": { "not": { "enum": ["active", "unknown"] } } },
+            "required": ["terminal_reason"]
+          },
+          "then": { "properties": { "finished_at": {} }, "required": ["finished_at"] }
+        },
+        {
+          "if": {
+            "properties": { "terminal_class": { "const": "controller-rotation" } },
+            "required": ["terminal_class"]
+          },
+          "then": { "properties": { "controller_requested": { "const": true } } }
+        },
+        {
+          "if": { "properties": { "controller_requested": { "const": true } }, "required": ["controller_requested"] },
+          "then": { "properties": { "terminal_class": { "not": { "const": "genuine-worker-failure" } } } }
+        }
+      ]
+    },
+    "recoveryLifecycleSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "total_generations",
+        "terminal_generations",
+        "active_generations",
+        "progress_generations",
+        "no_progress_generations",
+        "unknown_progress_generations",
+        "model_work_generations",
+        "no_model_work_generations",
+        "unknown_model_work_generations",
+        "genuine_failures",
+        "rotations",
+        "resumptions",
+        "start_reasons",
+        "terminal_reasons",
+        "terminal_classes"
+      ],
+      "properties": {
+        "total_generations": { "$ref": "#/$defs/nonNegativeInteger" },
+        "terminal_generations": { "$ref": "#/$defs/nonNegativeInteger" },
+        "active_generations": { "$ref": "#/$defs/nonNegativeInteger" },
+        "progress_generations": { "$ref": "#/$defs/nonNegativeInteger" },
+        "no_progress_generations": { "$ref": "#/$defs/nonNegativeInteger" },
+        "unknown_progress_generations": { "$ref": "#/$defs/nonNegativeInteger" },
+        "model_work_generations": { "$ref": "#/$defs/nonNegativeInteger" },
+        "no_model_work_generations": { "$ref": "#/$defs/nonNegativeInteger" },
+        "unknown_model_work_generations": { "$ref": "#/$defs/nonNegativeInteger" },
+        "genuine_failures": { "$ref": "#/$defs/nonNegativeInteger" },
+        "rotations": { "$ref": "#/$defs/nonNegativeInteger" },
+        "resumptions": { "$ref": "#/$defs/nonNegativeInteger" },
+        "start_reasons": { "$ref": "#/$defs/startReasonCounts" },
+        "terminal_reasons": { "$ref": "#/$defs/terminalReasonCounts" },
+        "terminal_classes": { "$ref": "#/$defs/terminalClassCounts" }
+      }
+    },
+    "startReasonCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "initial",
+        "pre-model-retry",
+        "post-model-resume",
+        "image-rollout",
+        "stale-probe-rotation",
+        "operator-restart",
+        "unknown"
+      ],
+      "properties": {
+        "initial": { "$ref": "#/$defs/nonNegativeInteger" },
+        "pre-model-retry": { "$ref": "#/$defs/nonNegativeInteger" },
+        "post-model-resume": { "$ref": "#/$defs/nonNegativeInteger" },
+        "image-rollout": { "$ref": "#/$defs/nonNegativeInteger" },
+        "stale-probe-rotation": { "$ref": "#/$defs/nonNegativeInteger" },
+        "operator-restart": { "$ref": "#/$defs/nonNegativeInteger" },
+        "unknown": { "$ref": "#/$defs/nonNegativeInteger" }
+      }
+    },
+    "terminalReasonCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "active",
+        "succeeded",
+        "genuine-worker-failure",
+        "operational-failure",
+        "image-rollout",
+        "stale-probe-rotation",
+        "operator-request",
+        "timeout",
+        "resource-termination",
+        "recovery-budget-exhausted",
+        "unknown"
+      ],
+      "properties": {
+        "active": { "$ref": "#/$defs/nonNegativeInteger" },
+        "succeeded": { "$ref": "#/$defs/nonNegativeInteger" },
+        "genuine-worker-failure": { "$ref": "#/$defs/nonNegativeInteger" },
+        "operational-failure": { "$ref": "#/$defs/nonNegativeInteger" },
+        "image-rollout": { "$ref": "#/$defs/nonNegativeInteger" },
+        "stale-probe-rotation": { "$ref": "#/$defs/nonNegativeInteger" },
+        "operator-request": { "$ref": "#/$defs/nonNegativeInteger" },
+        "timeout": { "$ref": "#/$defs/nonNegativeInteger" },
+        "resource-termination": { "$ref": "#/$defs/nonNegativeInteger" },
+        "recovery-budget-exhausted": { "$ref": "#/$defs/nonNegativeInteger" },
+        "unknown": { "$ref": "#/$defs/nonNegativeInteger" }
+      }
+    },
+    "terminalClassCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "active",
+        "succeeded",
+        "genuine-worker-failure",
+        "operational-failure",
+        "controller-rotation",
+        "timeout",
+        "resource-termination",
+        "recovery-budget-exhausted",
+        "unknown"
+      ],
+      "properties": {
+        "active": { "$ref": "#/$defs/nonNegativeInteger" },
+        "succeeded": { "$ref": "#/$defs/nonNegativeInteger" },
+        "genuine-worker-failure": { "$ref": "#/$defs/nonNegativeInteger" },
+        "operational-failure": { "$ref": "#/$defs/nonNegativeInteger" },
+        "controller-rotation": { "$ref": "#/$defs/nonNegativeInteger" },
+        "timeout": { "$ref": "#/$defs/nonNegativeInteger" },
+        "resource-termination": { "$ref": "#/$defs/nonNegativeInteger" },
+        "recovery-budget-exhausted": { "$ref": "#/$defs/nonNegativeInteger" },
+        "unknown": { "$ref": "#/$defs/nonNegativeInteger" }
+      }
+    },
+    "launchRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "slug",
+        "model",
+        "provider",
+        "agent",
+        "reasoning",
+        "auth_mode",
+        "generation",
+        "attempt",
+        "attempt_id",
+        "model_fingerprint",
+        "volume_name",
+        "remote_root",
+        "workspace_mode",
+        "phase",
+        "reserved_at"
+      ],
+      "properties": {
+        "slug": { "$ref": "#/$defs/safeId" },
+        "model": { "$ref": "#/$defs/nonEmptyString" },
+        "provider": { "enum": ["openai", "anthropic", "deepseek", "kimi"] },
+        "agent": { "enum": ["CodexAgent", "ClaudeAgent", "DeepSeekAgent", "KimiAgent"] },
+        "reasoning": { "$ref": "#/$defs/nonEmptyString" },
+        "auth_mode": { "enum": ["api-key", "subscription"] },
+        "generation": { "$ref": "#/$defs/positiveInteger" },
+        "attempt": { "$ref": "#/$defs/positiveInteger" },
+        "attempt_id": { "$ref": "#/$defs/safeId" },
+        "model_fingerprint": { "$ref": "#/$defs/sha256" },
+        "volume_name": { "$ref": "#/$defs/nonEmptyString" },
+        "remote_root": { "$ref": "#/$defs/boundedPath" },
+        "workspace_mode": { "enum": ["resume", "fresh"] },
+        "post_model_recovery": { "enum": ["relaunch", "stop"] },
+        "phase": { "enum": ["reserved", "sandbox-created", "launched", "failed"] },
+        "reserved_at": { "$ref": "#/$defs/timestamp" },
+        "sandbox_id": { "$ref": "#/$defs/nonEmptyString" },
+        "launched_at": { "$ref": "#/$defs/timestamp" },
+        "finished_at": { "$ref": "#/$defs/timestamp" },
+        "failure_category": { "enum": ["transient-operational-failure", "permanent-operational-failure"] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "phase": { "enum": ["sandbox-created", "launched"] } }, "required": ["phase"] },
+          "then": { "properties": { "sandbox_id": {} }, "required": ["sandbox_id"] }
+        },
+        {
+          "if": { "properties": { "phase": { "const": "launched" } }, "required": ["phase"] },
+          "then": { "properties": { "launched_at": {} }, "required": ["launched_at"] }
+        },
+        {
+          "if": { "properties": { "phase": { "const": "failed" } }, "required": ["phase"] },
+          "then": {
+            "properties": { "failure_category": {}, "finished_at": {} },
+            "required": ["failure_category", "finished_at"]
+          }
+        }
+      ]
+    },
+    "attemptProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "slug",
+        "generation",
+        "attempt",
+        "attempt_id",
+        "model_fingerprint",
+        "fingerprints",
+        "workspace_mode",
+        "reserved_at",
+        "phase"
+      ],
+      "properties": {
+        "slug": { "$ref": "#/$defs/safeId" },
+        "generation": { "$ref": "#/$defs/positiveInteger" },
+        "attempt": { "$ref": "#/$defs/positiveInteger" },
+        "attempt_id": { "$ref": "#/$defs/safeId" },
+        "model_fingerprint": { "$ref": "#/$defs/sha256" },
+        "fingerprints": { "$ref": "#/$defs/lineageFingerprints" },
+        "workspace_mode": { "enum": ["resume", "fresh"] },
+        "post_model_recovery": { "enum": ["relaunch", "stop"] },
+        "reserved_at": { "$ref": "#/$defs/timestamp" },
+        "sandbox_id": { "$ref": "#/$defs/nonEmptyString" },
+        "launched_at": { "$ref": "#/$defs/timestamp" },
+        "finished_at": { "$ref": "#/$defs/timestamp" },
+        "phase": { "enum": ["reserved", "sandbox-created", "launched", "failed"] }
+      }
+    },
+    "recoveryWorker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "generation",
+        "attempt",
+        "attempt_id",
+        "name",
+        "image",
+        "phase",
+        "reserved_at",
+        "baseline_successful_nodes",
+        "made_progress",
+        "no_progress_accounted"
+      ],
+      "properties": {
+        "generation": { "$ref": "#/$defs/positiveInteger" },
+        "attempt": { "$ref": "#/$defs/positiveInteger" },
+        "attempt_id": { "$ref": "#/$defs/safeId" },
+        "name": { "$ref": "#/$defs/nonEmptyString" },
+        "image": { "$ref": "#/$defs/nonEmptyString" },
+        "phase": { "enum": ["reserved", "launched", "stopped"] },
+        "reserved_at": { "$ref": "#/$defs/timestamp" },
+        "sandbox_id": { "$ref": "#/$defs/nonEmptyString" },
+        "launched_at": { "$ref": "#/$defs/timestamp" },
+        "stopped_at": { "$ref": "#/$defs/timestamp" },
+        "stop_reason": { "enum": ["exited", "stalled", "rollout", "completed"] },
+        "baseline_successful_nodes": { "$ref": "#/$defs/nonNegativeInteger" },
+        "made_progress": { "type": "boolean" },
+        "no_progress_accounted": { "type": "boolean" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "phase": { "const": "launched" } }, "required": ["phase"] },
+          "then": { "properties": { "sandbox_id": {}, "launched_at": {} }, "required": ["sandbox_id", "launched_at"] }
+        },
+        {
+          "if": { "properties": { "phase": { "const": "stopped" } }, "required": ["phase"] },
+          "then": { "properties": { "stopped_at": {}, "stop_reason": {} }, "required": ["stopped_at", "stop_reason"] }
+        }
+      ]
+    },
+    "recoveryRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["slug", "status", "no_progress_generations", "successful_nodes", "workers"],
+      "properties": {
+        "slug": { "$ref": "#/$defs/safeId" },
+        "status": { "enum": ["idle", "healthy", "grace", "backoff", "rollout-deferred", "terminal", "completed"] },
+        "no_progress_generations": { "$ref": "#/$defs/nonNegativeInteger" },
+        "successful_nodes": { "$ref": "#/$defs/nonNegativeInteger" },
+        "last_progress_at": { "$ref": "#/$defs/timestamp" },
+        "next_eligible_at": { "$ref": "#/$defs/timestamp" },
+        "pending_image": { "$ref": "#/$defs/nonEmptyString" },
+        "terminal": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["category", "entered_at"],
+          "properties": {
+            "category": { "const": "no-progress-budget-exhausted" },
+            "entered_at": { "$ref": "#/$defs/timestamp" }
+          }
+        },
+        "workers": { "type": "array", "maxItems": 100000, "items": { "$ref": "#/$defs/recoveryWorker" } }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "terminal" } }, "required": ["status"] },
+          "then": { "properties": { "terminal": {} }, "required": ["terminal"] },
+          "else": { "properties": { "terminal": false } }
+        }
+      ]
+    },
+    "aggregateCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["succeeded", "failed", "remaining"],
+      "properties": {
+        "succeeded": { "$ref": "#/$defs/nonNegativeInteger" },
+        "failed": { "$ref": "#/$defs/nonNegativeInteger" },
+        "remaining": { "$ref": "#/$defs/nonNegativeInteger" }
+      }
+    },
+    "checkpointMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["age_ms", "digest"],
+      "properties": {
+        "age_ms": { "oneOf": [{ "$ref": "#/$defs/nonNegativeInteger" }, { "type": "null" }] },
+        "digest": { "oneOf": [{ "$ref": "#/$defs/sha256Digest" }, { "type": "null" }] }
+      }
+    },
+    "aggregateUsage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "reasoning_tokens",
+        "total_tokens",
+        "estimated_cost_usd",
+        "partial_pricing",
+        "event_count",
+        "priced_event_count",
+        "unpriced_event_count"
+      ],
+      "properties": {
+        "input_tokens": { "$ref": "#/$defs/nonNegativeInteger" },
+        "output_tokens": { "$ref": "#/$defs/nonNegativeInteger" },
+        "cache_read_tokens": { "$ref": "#/$defs/nonNegativeInteger" },
+        "cache_write_tokens": { "$ref": "#/$defs/nonNegativeInteger" },
+        "reasoning_tokens": { "$ref": "#/$defs/nonNegativeInteger" },
+        "total_tokens": { "$ref": "#/$defs/nonNegativeInteger" },
+        "estimated_cost_usd": { "oneOf": [{ "$ref": "#/$defs/nonNegativeNumber" }, { "type": "null" }] },
+        "partial_pricing": { "type": "boolean" },
+        "event_count": { "$ref": "#/$defs/nonNegativeInteger" },
+        "priced_event_count": { "$ref": "#/$defs/nonNegativeInteger" },
+        "unpriced_event_count": { "$ref": "#/$defs/nonNegativeInteger" }
+      }
+    },
+    "pricingProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "status", "resolved_model_count", "unresolved_model_count"],
+      "properties": {
+        "source": { "enum": ["models.dev", "configured-catalog", "disabled"] },
+        "status": { "enum": ["available", "disabled", "unavailable"] },
+        "fetched_at": { "$ref": "#/$defs/timestamp" },
+        "resolved_model_count": { "$ref": "#/$defs/nonNegativeInteger" },
+        "unresolved_model_count": { "$ref": "#/$defs/nonNegativeInteger" }
+      }
+    },
+    "nodeInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "run_id",
+        "task_id",
+        "attempt_id",
+        "execution_generation",
+        "execution_snapshot_root",
+        "workflow_path",
+        "run_root",
+        "artifact_dir",
+        "workspace_dir",
+        "dependency_artifact_dirs",
+        "resources",
+        "agent_credential_env"
+      ],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.modal.node.v1" },
+        "run_id": { "$ref": "#/$defs/nonEmptyString" },
+        "task_id": { "$ref": "#/$defs/nonEmptyString" },
+        "attempt_id": { "$ref": "#/$defs/safeId" },
+        "execution_generation": { "$ref": "#/$defs/safeId" },
+        "execution_snapshot_root": { "$ref": "#/$defs/boundedPath" },
+        "workflow_path": { "$ref": "#/$defs/boundedPath" },
+        "prompt_path": { "$ref": "#/$defs/boundedPath" },
+        "run_root": { "$ref": "#/$defs/boundedPath" },
+        "artifact_dir": { "$ref": "#/$defs/boundedPath" },
+        "workspace_dir": { "$ref": "#/$defs/boundedPath" },
+        "dependency_artifact_dirs": {
+          "type": "array",
+          "maxItems": 100000,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/boundedPath" }
+        },
+        "project_archive_sha256": { "$ref": "#/$defs/sha256" },
+        "resources": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cpu", "memory_mib", "timeout_seconds"],
+          "properties": {
+            "cpu": { "type": "number", "exclusiveMinimum": 0 },
+            "memory_mib": { "$ref": "#/$defs/positiveInteger" },
+            "timeout_seconds": { "$ref": "#/$defs/positiveInteger" }
+          }
+        },
+        "agent_credential_env": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/environmentVariable" }
+        },
+        "operator_prompt": { "type": "string", "maxLength": 1000000 }
+      }
+    },
+    "checkpointEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["checkpoint_id", "sequence", "stage", "created_at", "manifest"],
+      "properties": {
+        "checkpoint_id": { "$ref": "#/$defs/safeId" },
+        "sequence": { "$ref": "#/$defs/positiveInteger" },
+        "stage": { "enum": ["prepared", "running", "failed", "completed"] },
+        "created_at": { "$ref": "#/$defs/timestamp" },
+        "manifest": { "$ref": "#/$defs/boundedPath" }
+      }
+    },
+    "executionDependencyTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "snapshot_path"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmptyString" },
+        "name": { "$ref": "#/$defs/dependencyName" },
+        "snapshot_path": { "$ref": "#/$defs/snapshotRelativePath" }
+      }
+    },
+    "executionDependencyPackage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "version", "snapshot_path"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmptyString" },
+        "name": { "$ref": "#/$defs/dependencyName" },
+        "version": { "$ref": "#/$defs/nonEmptyString" },
+        "snapshot_path": { "$ref": "#/$defs/snapshotRelativePath" }
+      }
+    },
+    "executionDependencyIssuer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "snapshot_path", "dependencies"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmptyString" },
+        "snapshot_path": {
+          "oneOf": [{ "const": "." }, { "$ref": "#/$defs/snapshotRelativePath" }]
+        },
+        "dependencies": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/dependencyName" },
+          "additionalProperties": { "$ref": "#/$defs/nonEmptyString" }
+        }
+      }
+    }
+  }
+}

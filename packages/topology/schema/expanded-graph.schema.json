@@ -1,26 +1,87 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://blog.monad.xyz/blog/ultrafuzz#schema/topology/expanded-graph",
+  "$id": "urn:ultrafuzz:schema:topology:expanded-graph:3",
   "title": "Ultrafuzz expanded graph",
   "type": "object",
   "required": ["graphVersion", "topologyVersion", "groups", "nodes"],
   "additionalProperties": false,
   "properties": {
     "graphVersion": {
-      "const": "2"
+      "const": "3"
     },
     "runId": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "maxLength": 256
     },
     "topologyVersion": {
       "const": 2
     },
     "groups": {
-      "type": "object"
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z0-9_][a-z0-9_-]{0,127}$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "label": {
+            "type": "string",
+            "minLength": 1
+          },
+          "color": {
+            "type": "string",
+            "pattern": "^#[0-9a-fA-F]{6}$"
+          },
+          "defaults": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "loops": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "timeout_seconds": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "max_attempts": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "model_profiles": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9_][a-z0-9_-]{0,127}$"
+                }
+              }
+            }
+          }
+        }
+      }
     },
     "fingerprintInputs": {
-      "type": "object"
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "config": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "promptDigests": {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^(?!\\.{1,2}(?:\\/|$))[A-Za-z0-9._@+-]{1,128}(?:\\/(?!\\.{1,2}(?:\\/|$))[A-Za-z0-9._@+-]{1,128})*$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      }
     },
     "nodes": {
       "type": "array",
@@ -42,11 +103,11 @@
         "properties": {
           "id": {
             "type": "string",
-            "minLength": 1
+            "pattern": "^[a-z0-9_][a-z0-9_-]{0,127}$"
           },
           "logicalId": {
             "type": "string",
-            "minLength": 1
+            "pattern": "^[a-z0-9_][a-z0-9_-]{0,127}$"
           },
           "label": {
             "type": "string",
@@ -93,13 +154,14 @@
           },
           "group": {
             "type": "string",
-            "minLength": 1
+            "pattern": "^[a-z0-9_][a-z0-9_-]{0,127}$"
           },
           "dependsOn": {
             "type": "array",
+            "uniqueItems": true,
             "items": {
               "type": "string",
-              "minLength": 1
+              "pattern": "^[a-z0-9_][a-z0-9_-]{0,127}$"
             }
           },
           "requiredCommands": {
@@ -112,7 +174,7 @@
           },
           "artifactDir": {
             "type": "string",
-            "minLength": 1
+            "pattern": "^artifacts/[a-z0-9_][a-z0-9_-]{0,127}$"
           },
           "timeoutSeconds": {
             "type": "number",
@@ -160,26 +222,48 @@
               "properties": {
                 "path": {
                   "type": "string",
-                  "minLength": 1
+                  "pattern": "^(?!\\.{1,2}(?:\\/|$))[A-Za-z0-9._@+-]{1,128}(?:\\/(?!\\.{1,2}(?:\\/|$))[A-Za-z0-9._@+-]{1,128})*$"
                 },
                 "contract": {
                   "enum": [
-                    "ultrafuzz/campaign-summary@1",
-                    "ultrafuzz/findings@1",
-                    "ultrafuzz/generated-tests@1",
-                    "ultrafuzz/implemented-properties@1",
-                    "ultrafuzz/implemented-properties@2",
-                    "ultrafuzz/invariant-campaign-plan@1",
+                    "ultrafuzz/admin-config-boundary-matrix@1",
+                    "ultrafuzz/aggregation-manifest@1",
+                    "ultrafuzz/audited-differential-lanes@1",
+                    "ultrafuzz/boundary-recipes@1",
+                    "ultrafuzz/campaign-summary@2",
+                    "ultrafuzz/coverage-goal@1",
+                    "ultrafuzz/dependency-scope-matrix@1",
+                    "ultrafuzz/differential-gap-review@1",
+                    "ultrafuzz/differential-lane-result@1",
+                    "ultrafuzz/differential-plan@1",
+                    "ultrafuzz/differential-red-triage@1",
+                    "ultrafuzz/differential-repair-summary@1",
+                    "ultrafuzz/differential-report-review@1",
+                    "ultrafuzz/dynamic-enumerator-outputs@1",
+                    "ultrafuzz/dynamic-strategy-plan@1",
+                    "ultrafuzz/dynamic-strategy-provenance@1",
+                    "ultrafuzz/externalized-state-accounting@1",
+                    "ultrafuzz/finding-lifecycle-ledger@1",
+                    "ultrafuzz/findings@2",
+                    "ultrafuzz/generated-tests@3",
+                    "ultrafuzz/harness-repairs@1",
+                    "ultrafuzz/implemented-properties@3",
+                    "ultrafuzz/invariant-campaign-plan@2",
                     "ultrafuzz/invariant-ledger@1",
-                    "ultrafuzz/json-array@1",
-                    "ultrafuzz/json-object@1",
                     "ultrafuzz/nonempty-markdown@1",
-                    "ultrafuzz/property-lens@1",
-                    "ultrafuzz/reference-expectations@1",
-                    "ultrafuzz/properties@1",
-                    "ultrafuzz/property-campaign@1",
-                    "ultrafuzz/report@1",
+                    "ultrafuzz/properties@2",
+                    "ultrafuzz/property-campaign@3",
+                    "ultrafuzz/property-lens@2",
+                    "ultrafuzz/reference-expectations@2",
+                    "ultrafuzz/reference-harness@1",
+                    "ultrafuzz/reference-manifest@1",
+                    "ultrafuzz/report@2",
+                    "ultrafuzz/selected-strategies@1",
+                    "ultrafuzz/semantic-red-registry@1",
+                    "ultrafuzz/severity-classified-findings@1",
+                    "ultrafuzz/strategy-detections@1",
                     "ultrafuzz/text@1",
+                    "ultrafuzz/triaged-findings@1",
                     "ultrafuzz/workspace-patch@1"
                   ]
                 },
@@ -189,8 +273,79 @@
                 "contractDigest": {
                   "type": "string",
                   "pattern": "^[0-9a-f]{64}$"
+                },
+                "schemaFile": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*\\.schema\\.json$"
+                },
+                "schemaId": {
+                  "type": "string",
+                  "pattern": "^urn:ultrafuzz:schema:"
+                },
+                "schemaSha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "schemaBundleSha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "validatorBuild": {
+                  "type": "string",
+                  "pattern": "^ultrafuzz-json-validator\\.v1:[0-9a-f]{64}$"
                 }
-              }
+              },
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "contract": {
+                        "enum": ["ultrafuzz/nonempty-markdown@1", "ultrafuzz/text@1"]
+                      }
+                    },
+                    "required": ["contract"]
+                  },
+                  "then": {
+                    "not": {
+                      "anyOf": [
+                        {
+                          "properties": {
+                            "schemaFile": true
+                          },
+                          "required": ["schemaFile"]
+                        },
+                        {
+                          "properties": {
+                            "schemaId": true
+                          },
+                          "required": ["schemaId"]
+                        },
+                        {
+                          "properties": {
+                            "schemaSha256": true
+                          },
+                          "required": ["schemaSha256"]
+                        },
+                        {
+                          "properties": {
+                            "schemaBundleSha256": true
+                          },
+                          "required": ["schemaBundleSha256"]
+                        },
+                        {
+                          "properties": {
+                            "validatorBuild": true
+                          },
+                          "required": ["validatorBuild"]
+                        }
+                      ]
+                    }
+                  },
+                  "else": {
+                    "required": ["schemaFile", "schemaId", "schemaSha256", "schemaBundleSha256", "validatorBuild"]
+                  }
+                }
+              ]
             }
           },
           "modelFanout": {

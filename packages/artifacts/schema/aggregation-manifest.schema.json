@@ -1,0 +1,468 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "ultrafuzz.aggregation-manifest.v1"
+    },
+    "source_generated_tests": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65536
+    },
+    "copied_generated_tests": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65536
+    },
+    "source_support_files": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65536
+    },
+    "copied_support_files": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65536
+    },
+    "source_bundles": {
+      "maxItems": 4096,
+      "type": "array",
+      "items": {
+        "allOf": [
+          {
+            "if": {
+              "type": "object",
+              "properties": {
+                "disposition": {
+                  "const": "skipped"
+                }
+              },
+              "required": ["disposition"]
+            },
+            "then": {
+              "type": "object",
+              "properties": {
+                "reason": true
+              },
+              "required": ["reason"]
+            },
+            "else": {
+              "not": {
+                "type": "object",
+                "properties": {
+                  "reason": true
+                },
+                "required": ["reason"]
+              }
+            }
+          }
+        ],
+        "$ref": "#/$defs/aggregationSourceBundle"
+      },
+      "uniqueItems": true
+    },
+    "files": {
+      "maxItems": 65536,
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/aggregationFile"
+      },
+      "uniqueItems": true
+    },
+    "support_files": {
+      "maxItems": 65536,
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/aggregationFile"
+      },
+      "uniqueItems": true
+    },
+    "skipped_files": {
+      "maxItems": 65536,
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/skippedAggregationFile"
+      },
+      "uniqueItems": true
+    }
+  },
+  "required": [
+    "schema_version",
+    "source_generated_tests",
+    "copied_generated_tests",
+    "source_support_files",
+    "copied_support_files",
+    "source_bundles",
+    "files",
+    "support_files",
+    "skipped_files"
+  ],
+  "additionalProperties": false,
+  "$id": "urn:ultrafuzz:schema:artifacts:aggregation-manifest:1",
+  "title": "Ultrafuzz generated-test aggregation manifest",
+  "$defs": {
+    "aggregationId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "aggregationAbsolutePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16384
+    },
+    "aggregationSafeRelativePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(?!\\.{1,2}(?:\\/|$))[A-Za-z0-9._@+-]{1,128}(?:\\/(?!\\.{1,2}(?:\\/|$))[A-Za-z0-9._@+-]{1,128}){0,63}(?![\\s\\S])"
+    },
+    "generatedTestFramework": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$"
+    },
+    "aggregationReason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16384
+    },
+    "aggregationSourceBundle": {
+      "type": "object",
+      "properties": {
+        "strategy": {
+          "$ref": "#/$defs/aggregationId"
+        },
+        "node_id": {
+          "$ref": "#/$defs/aggregationId"
+        },
+        "source_attempt_id": {
+          "$ref": "#/$defs/aggregationId"
+        },
+        "attempt_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "source_manifest_path": {
+          "$ref": "#/$defs/aggregationAbsolutePath"
+        },
+        "source_manifest_relative_path": {
+          "$ref": "#/$defs/aggregationSafeRelativePath"
+        },
+        "source_manifest_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "source_run_id": {
+          "$ref": "#/$defs/aggregationId"
+        },
+        "framework": {
+          "$ref": "#/$defs/generatedTestFramework"
+        },
+        "generated_test_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1024
+        },
+        "support_file_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1024
+        },
+        "disposition": {
+          "type": "string",
+          "enum": ["empty", "copied", "skipped"]
+        },
+        "reason": {
+          "$ref": "#/$defs/aggregationReason"
+        }
+      },
+      "required": [
+        "strategy",
+        "node_id",
+        "source_attempt_id",
+        "attempt_index",
+        "source_manifest_path",
+        "source_manifest_relative_path",
+        "source_manifest_sha256",
+        "source_run_id",
+        "framework",
+        "generated_test_count",
+        "support_file_count",
+        "disposition"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "disposition": {
+                "const": "skipped"
+              }
+            },
+            "required": ["disposition"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "reason": true
+            },
+            "required": ["reason"]
+          },
+          "else": {
+            "not": {
+              "type": "object",
+              "properties": {
+                "reason": true
+              },
+              "required": ["reason"]
+            }
+          }
+        }
+      ]
+    },
+    "aggregationFile": {
+      "type": "object",
+      "properties": {
+        "strategy": {
+          "$ref": "#/$defs/aggregationId"
+        },
+        "node_id": {
+          "$ref": "#/$defs/aggregationId"
+        },
+        "source_attempt_id": {
+          "$ref": "#/$defs/aggregationId"
+        },
+        "attempt_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "source_manifest_path": {
+          "$ref": "#/$defs/aggregationAbsolutePath"
+        },
+        "source_manifest_relative_path": {
+          "$ref": "#/$defs/aggregationSafeRelativePath"
+        },
+        "source_manifest_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "source_artifact_path": {
+          "$ref": "#/$defs/aggregationAbsolutePath"
+        },
+        "source_relative_path": {
+          "$ref": "#/$defs/generatedTestPath"
+        },
+        "destination_path": {
+          "$ref": "#/$defs/aggregationAbsolutePath"
+        },
+        "destination_relative_path": {
+          "$ref": "#/$defs/aggregationSafeRelativePath"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16777216
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "language": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384
+        },
+        "provenance": {
+          "$ref": "#/$defs/generatedTestProvenance"
+        }
+      },
+      "required": [
+        "strategy",
+        "node_id",
+        "source_attempt_id",
+        "attempt_index",
+        "source_manifest_path",
+        "source_manifest_relative_path",
+        "source_manifest_sha256",
+        "source_artifact_path",
+        "source_relative_path",
+        "destination_path",
+        "destination_relative_path",
+        "size_bytes",
+        "sha256"
+      ],
+      "additionalProperties": false
+    },
+    "generatedTestPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^generated-tests\\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}(?:\\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}){0,62}(?![\\s\\S])"
+    },
+    "generatedTestProvenance": {
+      "type": "object",
+      "properties": {
+        "producer_node_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "logical_node_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "attempt_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "loop_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "model_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "model_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "agent_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "workflow_run_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "workflow_task_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "source_run_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "origin": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      },
+      "additionalProperties": false,
+      "minProperties": 1
+    },
+    "skippedAggregationFile": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["generated-test", "support-file"]
+        },
+        "strategy": {
+          "$ref": "#/$defs/aggregationId"
+        },
+        "node_id": {
+          "$ref": "#/$defs/aggregationId"
+        },
+        "source_attempt_id": {
+          "$ref": "#/$defs/aggregationId"
+        },
+        "attempt_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "source_manifest_path": {
+          "$ref": "#/$defs/aggregationAbsolutePath"
+        },
+        "source_manifest_relative_path": {
+          "$ref": "#/$defs/aggregationSafeRelativePath"
+        },
+        "source_manifest_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "source_artifact_path": {
+          "$ref": "#/$defs/aggregationAbsolutePath"
+        },
+        "source_relative_path": {
+          "$ref": "#/$defs/generatedTestPath"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16777216
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "language": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384
+        },
+        "provenance": {
+          "$ref": "#/$defs/generatedTestProvenance"
+        },
+        "reason": {
+          "$ref": "#/$defs/aggregationReason"
+        }
+      },
+      "required": [
+        "kind",
+        "strategy",
+        "node_id",
+        "source_attempt_id",
+        "attempt_index",
+        "source_manifest_path",
+        "source_manifest_relative_path",
+        "source_manifest_sha256",
+        "source_artifact_path",
+        "source_relative_path",
+        "size_bytes",
+        "sha256",
+        "reason"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

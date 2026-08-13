@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -11,8 +10,6 @@ const candidate = "a".repeat(40);
 const repository = "https://github.com/monad-developers/ultrafuzz";
 const modelSlug = "benchmark-smoke-gpt-5-6-luna-high";
 const pairId = `ultrafuzz-bench-${modelSlug}`;
-const threatModelSlug = "benchmark-threat-model-gpt-5-6-luna-high";
-const threatPairId = `ultrafuzz-bench-${threatModelSlug}`;
 
 afterEach(() => {
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
@@ -28,72 +25,22 @@ describe("cancelled Modal benchmark cleanup preparation", () => {
     expect(fs.readFileSync(fixture.outputPath, "utf8")).toBe(`${pairId}.json\t${pairId}.state.json\n`);
   });
 
-  it("accepts the exact canonical threat-model plan through both the cleanup API and CLI", () => {
-    const fixture = threatModelCleanupFixture();
-    const expectedRow = `${threatPairId}.json\t${threatPairId}.state.json`;
-    expect(prepareModalBenchmarkCleanup(fixture.input)).toEqual({
-      imageName: `ufz-runner-${fixture.candidate}`,
-      rows: [expectedRow]
-    });
-    expect(fs.readFileSync(fixture.outputPath, "utf8")).toBe(`${expectedRow}\n`);
+  it("rejects the removed threat-model control mode instead of converting or tolerating it", () => {
+    const fixture = cleanupFixture();
+    const manifest = readJson<CleanupManifest>(fixture.manifestPath);
+    manifest.mode = "threat-model";
+    manifest.pairs[0]!.mode = "threat-model";
+    manifest.pairs[0]!.lane = "threat-model";
+    writeJson(fixture.manifestPath, manifest);
 
-    const cliOutputPath = path.join(fixture.root, "pairs-cli.tsv");
-    execFileSync(
-      process.execPath,
-      [
-        path.join(fixture.workspace, "scripts/ci/prepare-modal-benchmark-cleanup.mjs"),
-        fixture.manifestPath,
-        cliOutputPath,
-        fixture.candidate,
-        repository,
-        "54321-3",
-        "threat-model",
-        fixture.policyRoot
-      ],
-      { cwd: fixture.workspace }
-    );
-    expect(fs.readFileSync(cliOutputPath, "utf8")).toBe(`${expectedRow}\n`);
-  });
-
-  it("rejects any threat-model identity, model, concurrency, runtime, or config drift", () => {
-    const cases: Array<(fixture: ReturnType<typeof threatModelCleanupFixture>) => void> = [
-      (fixture) => {
-        const manifest = readJson<CleanupManifest>(fixture.manifestPath);
-        manifest.targets[0]!.revision = "b".repeat(40);
-        writeJson(fixture.manifestPath, manifest);
-      },
-      (fixture) => {
-        const manifest = readJson<CleanupManifest>(fixture.manifestPath);
-        manifest.control_timeout_seconds = 19_799;
-        writeJson(fixture.manifestPath, manifest);
-      },
-      (fixture) => {
-        const manifest = readJson<CleanupManifest>(fixture.manifestPath);
-        manifest.concurrency.max_parallel_workflow_nodes_per_row = 7;
-        writeJson(fixture.manifestPath, manifest);
-      },
-      (fixture) => {
-        const config = readJson<CleanupConfig>(path.join(fixture.root, `${threatPairId}.json`));
-        config.models[0]!.model = "gpt-5.6-sol";
-        writeJson(path.join(fixture.root, `${threatPairId}.json`), config);
-      },
-      (fixture) => {
-        const config = readJson<CleanupConfig>(path.join(fixture.root, `${threatPairId}.json`));
-        config.public_benchmark.max_runtime_seconds = 14_999;
-        writeJson(path.join(fixture.root, `${threatPairId}.json`), config);
-      },
-      (fixture) => {
-        const config = readJson<CleanupConfig>(path.join(fixture.root, `${threatPairId}.json`));
-        config.braintrust.project = "candidate-controlled";
-        writeJson(path.join(fixture.root, `${threatPairId}.json`), config);
-      }
-    ];
-    for (const mutate of cases) {
-      const fixture = threatModelCleanupFixture();
-      mutate(fixture);
-      expect(() => prepareModalBenchmarkCleanup(fixture.input)).toThrow();
-      expect(fs.existsSync(fixture.outputPath)).toBe(false);
-    }
+    expect(() => prepareModalBenchmarkCleanup(fixture.input)).toThrow(/benchmark-control-manifest/iu);
+    expect(() =>
+      prepareModalBenchmarkCleanup({
+        ...fixture.input,
+        expectedMode: "threat-model"
+      })
+    ).toThrow(/cleanup mode must be smoke or full/u);
+    expect(fs.existsSync(fixture.outputPath)).toBe(false);
   });
 
   it("rejects manifest identity drift, unsafe paths, and non-regular controls", () => {
@@ -133,6 +80,16 @@ describe("cancelled Modal benchmark cleanup preparation", () => {
     }
   });
 
+  it("rejects duplicate config keys at the cleanup trust boundary", () => {
+    const fixture = cleanupFixture();
+    const configPath = path.join(fixture.root, `${pairId}.json`);
+    const config = fs.readFileSync(configPath, "utf8");
+    fs.writeFileSync(configPath, config.replace('"run_id":', '"run_id":"shadowed","run_id":'));
+
+    expect(() => prepareModalBenchmarkCleanup(fixture.input)).toThrow(/duplicate/iu);
+    expect(fs.existsSync(fixture.outputPath)).toBe(false);
+  });
+
   it("refuses to replace an existing cleanup pair list", () => {
     const fixture = cleanupFixture();
     fs.writeFileSync(fixture.outputPath, "existing\n");
@@ -142,6 +99,7 @@ describe("cancelled Modal benchmark cleanup preparation", () => {
 });
 
 interface CleanupManifest {
+  schema_version: "ultrafuzz.modal.benchmark-control-manifest.v1";
   candidate_commit: string;
   repository: string;
   generation: string;
@@ -184,7 +142,7 @@ interface CleanupConfig {
     runner_model_profile: string;
     candidate_repository: string;
     candidate_commit: string;
-    targets?: Array<{ id: string; repository: string; revision: string; framework: string }>;
+    targets: Array<{ id: string; repository: string; revision: string; framework: string }>;
     max_runtime_seconds: number;
   };
   models: Array<{
@@ -203,6 +161,7 @@ function cleanupFixture() {
   const manifestPath = path.join(root, "manifest.json");
   const outputPath = path.join(root, "pairs.tsv");
   const manifest: CleanupManifest = {
+    schema_version: "ultrafuzz.modal.benchmark-control-manifest.v1",
     candidate_commit: candidate,
     repository,
     generation: "12345-2",
@@ -234,7 +193,7 @@ function cleanupFixture() {
   };
   fs.writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`);
   const config: CleanupConfig = {
-    schema_version: "ultrafuzz.modal.benchmark.v1",
+    schema_version: "ultrafuzz.modal.benchmark.v2",
     run_id: "ci-12345-2-smoke-ultrafuzz-bench-openai",
     app_name: "ultrafuzz-evals",
     image_name: `ufz-runner-${candidate}`,
@@ -289,120 +248,6 @@ function cleanupFixture() {
         maxRuntimeSeconds: 3600,
         controlTimeoutSeconds: 8_400
       }
-    }
-  };
-}
-
-function threatModelCleanupFixture() {
-  const workspace = path.resolve(".");
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-threat-cleanup-"));
-  roots.push(root);
-  // The candidate checkout is authenticated as data, but its policy contents
-  // deliberately carry no cleanup authority on the trusted default branch.
-  const policyRoot = path.join(root, "candidate-policy");
-  fs.mkdirSync(path.join(policyRoot, "benchmarks"), { recursive: true });
-  writeJson(path.join(policyRoot, "benchmarks/lanes.json"), { candidate_policy: "not-trusted" });
-  writeJson(path.join(policyRoot, "benchmarks/ultrafuzz-bench.json"), { candidate_policy: "not-trusted" });
-  execFileSync("git", ["init", "--quiet"], { cwd: policyRoot });
-  execFileSync("git", ["add", "benchmarks/lanes.json", "benchmarks/ultrafuzz-bench.json"], { cwd: policyRoot });
-  execFileSync(
-    "git",
-    [
-      "-c",
-      "user.name=Ultrafuzz Tests",
-      "-c",
-      "user.email=tests@ultrafuzz.invalid",
-      "commit",
-      "--quiet",
-      "-m",
-      "fixture"
-    ],
-    { cwd: policyRoot }
-  );
-  const threatCandidate = execFileSync("git", ["rev-parse", "HEAD"], { cwd: policyRoot, encoding: "utf8" }).trim();
-  const manifestPath = path.join(root, "manifest.json");
-  const outputPath = path.join(root, "pairs-api.tsv");
-  const targets = cleanupTargets();
-  const manifest: CleanupManifest = {
-    candidate_commit: threatCandidate,
-    repository,
-    generation: "54321-3",
-    mode: "threat-model",
-    benchmark: "ultrafuzz-bench",
-    execution: { mode: "modal", dry_run: false },
-    image_name: `ufz-runner-${threatCandidate}`,
-    targets,
-    matrix_rows_per_pair: 3,
-    control_timeout_seconds: 19_800,
-    concurrency: {
-      max_parallel_eval_rows_per_sandbox: 3,
-      max_parallel_workflow_nodes_per_row: 8,
-      max_live_runner_workflows_by_provider: { openai: 3 },
-      max_live_judge_rows: 3
-    },
-    pairs: [
-      {
-        pair: threatPairId,
-        benchmark: "ultrafuzz-bench",
-        mode: "threat-model",
-        lane: "threat-model",
-        model_slug: threatModelSlug,
-        provider: "openai",
-        config_path: `${threatPairId}.json`,
-        state_path: `${threatPairId}.state.json`
-      }
-    ]
-  };
-  writeJson(manifestPath, manifest);
-  const config: CleanupConfig = {
-    schema_version: "ultrafuzz.modal.benchmark.v1",
-    run_id: "ci-54321-3-threat-model-ultrafuzz-bench-openai",
-    app_name: "ultrafuzz-evals",
-    image_name: `ufz-runner-${threatCandidate}`,
-    braintrust: {
-      project: "ultrafuzz-public-benchmarks",
-      api_key_env: "BRAINTRUST_API_KEY",
-      judge_api_key_env: "OPENAI_API_KEY",
-      judge_url: "https://api.openai.com/v1/chat/completions",
-      judge_credential_ttl_seconds: 57_600
-    },
-    node_timeout_seconds: 1800,
-    loops: 1,
-    public_benchmark: {
-      benchmark: "ultrafuzz-bench",
-      lane: "threat-model",
-      runner_model_profile: threatModelSlug,
-      candidate_repository: repository,
-      candidate_commit: threatCandidate,
-      targets,
-      max_runtime_seconds: 15_000
-    },
-    models: [
-      {
-        slug: threatModelSlug,
-        model: "gpt-5.6-luna",
-        provider: "openai",
-        agent: "CodexAgent",
-        reasoning: "high",
-        auth_mode: "api-key"
-      }
-    ]
-  };
-  writeJson(path.join(root, `${threatPairId}.json`), config);
-  return {
-    workspace,
-    policyRoot,
-    root,
-    manifestPath,
-    outputPath,
-    candidate: threatCandidate,
-    input: {
-      manifestPath,
-      outputPath,
-      expectedCandidate: threatCandidate,
-      expectedRepository: repository,
-      expectedGeneration: "54321-3",
-      expectedMode: "threat-model"
     }
   };
 }

@@ -2,11 +2,28 @@ import fs, { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
+import {
+  EVAL_LLM_JUDGE_RESULT_SCHEMA_ID,
+  EVAL_LLM_JUDGE_RESULT_SCHEMA_VERSION,
+  evalLlmJudgeResultJsonSchema,
+  validateEvalJsonSchema
+} from "../src/eval-schema-registry.js";
 import { gatewayLlmJudge, loadGroundTruth, scoreEvalRun, scoreFindingsAgainstGroundTruth } from "../src/scoring.js";
-import { EVAL_RUN_SCHEMA_VERSION, type GroundTruthBug } from "../src/types.js";
-import { cleanRecoveryEquivalence, testRow, testSuite, writeRunFixture } from "./helpers.js";
+import type { GroundTruthBug } from "../src/types.js";
+import {
+  cleanRecoveryEquivalence,
+  currentEvalRunRecord,
+  currentPlannedGraph,
+  currentRunManifest,
+  currentRunState,
+  initializeTestGitRepository,
+  testRow,
+  testSuite,
+  writeCurrentRunEvidence,
+  writeVerifiedFinalReport
+} from "./helpers.js";
 
 const BUGS: GroundTruthBug[] = [
   {
@@ -28,21 +45,117 @@ const BUGS: GroundTruthBug[] = [
   }
 ];
 
-function matchedFinding(): unknown {
+function canonicalFinding(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    schema_version: "1.0",
+    schema_version: "ultrafuzz.finding.v2",
     id: "finding-1",
-    title: "Reentrancy lets attackers drain the vault via withdraw",
+    title: "Canonical finding",
     status: "needs-review",
-    summary: "reentrancy in withdraw allows drain",
-    severity_guess: "high",
+    summary: "A complete finding used by the scoring fixtures.",
+    severity_guess: "High",
     confidence: "high",
-    affected_files: ["src/Vault.sol"],
-    evidence: ["poc test reproduces the drain"]
+    triage_classification: "true-positive",
+    recommended_next_action: "Fix the affected code path.",
+    affected_files: ["src/Target.sol"],
+    evidence: ["A focused proof reproduces the issue."],
+    severity: "High",
+    impact: "High",
+    likelihood: "High",
+    impact_rationale: "Successful exploitation causes a material loss.",
+    likelihood_rationale: "An untrusted caller can reach the affected path.",
+    severity_rationale: "High impact and likelihood make this a high-severity issue.",
+    description: "The affected path violates an intended security invariant.",
+    proof_of_concept: {
+      scenario: ["Invoke the affected path with attacker-controlled input.", "Observe the invariant violation."],
+      language: "text",
+      code: "reproduce();"
+    },
+    strategy: "stateful-invariant",
+    strategy_provenance: {
+      detection_rates: [{ strategy: "stateful-invariant", detections: 1, configured_loops: 1 }]
+    },
+    lifecycle: { dedupe_key: "finding-1", source_artifacts: [], strategy_hits: [] },
+    ...overrides
   };
 }
 
-function scoreRunFixture(): {
+function reviewFinding(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    schema_version: "ultrafuzz.finding.v2",
+    id: "finding-review",
+    title: "Finding requiring review",
+    status: "needs-review",
+    severity_guess: "Medium",
+    confidence: "medium",
+    summary: "A canonical finding used by human-review fixtures.",
+    ...overrides
+  };
+}
+
+function matchedFinding(overrides: Record<string, unknown> = {}): unknown {
+  return canonicalFinding({
+    title: "Reentrancy lets attackers drain the vault via withdraw",
+    summary: "reentrancy in withdraw allows drain",
+    recommended_next_action: "Fix the reentrant withdrawal path.",
+    affected_files: ["src/Vault.sol"],
+    evidence: ["poc test reproduces the drain"],
+    description: "The withdrawal path transfers control before its balance update.",
+    lifecycle: { dedupe_key: "finding-1", source_artifacts: [], strategy_hits: [] },
+    ...overrides
+  });
+}
+
+function canonicalReport(issues: unknown[]): Record<string, unknown> {
+  return {
+    schema_version: "ultrafuzz.report.v2",
+    run_metadata: {
+      run_id: "generated-run",
+      source_run_id: "generated-run",
+      repository: "https://example.com/target-a",
+      elapsed_time: "10s",
+      models_used: ["gpt-test"],
+      tokens_used: "123",
+      estimated_spend: "$0.456",
+      partial_pricing: false,
+      strategy_loops: 1,
+      audit_profile: "full",
+      audit_profile_catalog_digest: "a".repeat(64),
+      topology_digest: "b".repeat(64),
+      prompt_digest: "c".repeat(64),
+      expanded_graph_fingerprint: "d".repeat(64)
+    },
+    issues,
+    non_production_outcomes: [],
+    property_provenance: [],
+    property_implementation_coverage: {
+      status: "not-planned",
+      reason: "property-implementation-track-not-declared"
+    }
+  };
+}
+
+async function scoreInMemory(
+  input: Omit<Parameters<typeof scoreFindingsAgainstGroundTruth>[0], "record"> & {
+    record?: Parameters<typeof scoreFindingsAgainstGroundTruth>[0]["record"];
+  }
+) {
+  const { record, ...scoreInput } = input;
+  if (record !== undefined) return scoreFindingsAgainstGroundTruth({ ...scoreInput, record });
+  const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-scoring-inline-run-"));
+  const runId = path.basename(runRoot).slice(0, 100);
+  writeCurrentRunEvidence({
+    runRoot,
+    runId,
+    state: currentRunState({ runId, nodes: { "final-report": {} } }),
+    graph: currentPlannedGraph()
+  });
+  return scoreFindingsAgainstGroundTruth({
+    ...scoreInput,
+    record: currentEvalRunRecord({ row: scoreInput.row, runRoot, runId })
+  });
+}
+
+function scoreRunFixture(overrides: { issues?: unknown[] } = {}): {
   projectRoot: string;
   evalRunId: string;
   evalRunRoot: string;
@@ -51,6 +164,7 @@ function scoreRunFixture(): {
 } {
   const base = mkdtempSync(path.join(tmpdir(), "ufz-scoring-transaction-"));
   const projectRoot = path.join(base, "project");
+  initializeTestGitRepository(projectRoot);
   const groundTruthRoot = path.join(base, "ground-truth");
   fs.mkdirSync(groundTruthRoot, { recursive: true });
   fs.writeFileSync(
@@ -79,101 +193,55 @@ function scoreRunFixture(): {
   });
   const row = testRow(suite);
   const runRoot = path.join(base, "generated-run");
-  const reportPath = path.join(runRoot, "artifacts", "final-report", "report.json");
-  fs.mkdirSync(path.dirname(reportPath), { recursive: true });
-  fs.writeFileSync(
-    reportPath,
-    JSON.stringify({
-      schema_version: "1.0",
-      run_metadata: {},
-      issues: [
-        matchedFinding(),
-        {
-          schema_version: "1.0",
-          id: "finding-2",
-          title: "Plausible but unknown overflow",
-          status: "needs-review",
-          summary: "overflow in mint",
-          severity_guess: "medium",
-          confidence: "medium",
-          evidence: ["reproduction trace"]
-        }
-      ],
-      non_production_outcomes: []
+  const issues = overrides.issues ?? [
+    matchedFinding({
+      id: "H-01",
+      title: "[H-01] - Reentrancy lets attackers drain the vault via withdraw"
     }),
-    "utf8"
-  );
-  writeRunFixture({
+    canonicalFinding({
+      id: "M-01",
+      title: "[M-01] - Plausible but unknown overflow",
+      summary: "overflow in mint",
+      severity_guess: "Medium",
+      severity: "Medium",
+      impact: "Medium",
+      likelihood: "Medium",
+      confidence: "medium",
+      triage_classification: "undetermined",
+      recommended_next_action: "Review the overflow trace.",
+      evidence: ["reproduction trace"],
+      description: "The mint path may overflow an intermediate value.",
+      impact_rationale: "An overflow could corrupt minted balances.",
+      likelihood_rationale: "The boundary input is reachable but constrained.",
+      severity_rationale: "Moderate impact and likelihood make this medium severity.",
+      lifecycle: { dedupe_key: "finding-2", source_artifacts: [], strategy_hits: [] }
+    })
+  ];
+  writeVerifiedFinalReport({
     runRoot,
-    state: {
-      schema_version: "1.0",
-      run_id: "generated-run",
-      status: "succeeded",
-      created_at: "2026-07-13T00:00:00.000Z",
-      started_at: "2026-07-13T00:00:02.000Z",
-      finished_at: "2026-07-13T00:00:12.000Z",
-      nodes: {}
+    runId: "generated-run",
+    report: canonicalReport(issues),
+    accounting: {
+      total_tokens: 123,
+      estimated_spend_usd: 0.456,
+      usage_complete: true,
+      pricing_complete: true,
+      partial_pricing: false
     }
   });
-  fs.writeFileSync(
-    path.join(runRoot, "graph.json"),
-    JSON.stringify({
-      nodes: [
-        {
-          id: "final-report",
-          artifact_dir: "artifacts/final-report",
-          outputs: [{ path: "report.json", contract: "ultrafuzz/report@1", primary: true }]
-        }
-      ]
-    }),
-    "utf8"
-  );
-  fs.writeFileSync(
-    path.join(runRoot, "run.json"),
-    JSON.stringify({
-      accounting: {
-        cumulative: {
-          total_tokens: 123,
-          estimated_spend_usd: 0.456,
-          usage_complete: true,
-          pricing_complete: true,
-          partial_pricing: false
-        }
-      }
-    }),
-    "utf8"
-  );
 
   const evalRunId = "eval-transaction";
   const evalRunRoot = path.join(projectRoot, ".ultrafuzz", "evals", "runs", evalRunId);
   fs.mkdirSync(evalRunRoot, { recursive: true });
   fs.writeFileSync(
     path.join(evalRunRoot, "eval.json"),
-    JSON.stringify({ schema_version: EVAL_RUN_SCHEMA_VERSION, eval_run_id: evalRunId, suite }),
+    JSON.stringify(currentRunManifest({ suite, projectRoot, evalRunId })),
     "utf8"
   );
   fs.writeFileSync(path.join(evalRunRoot, "matrix.json"), JSON.stringify([row]), "utf8");
   fs.writeFileSync(
     path.join(evalRunRoot, "runs.jsonl"),
-    `${JSON.stringify({
-      schema_version: EVAL_RUN_SCHEMA_VERSION,
-      eval_run_id: evalRunId,
-      row_id: row.id,
-      target_id: row.target_id,
-      variant_id: row.variant_id,
-      trial_id: row.trial_id,
-      ultrafuzz_run_id: "generated-run",
-      ultrafuzz_run_root: runRoot,
-      report_json_path: reportPath,
-      status: "launched",
-      workflow_ids: [],
-      launcher: {
-        status: "succeeded",
-        started_at: "2026-07-13T00:00:00.000Z",
-        finished_at: "2026-07-13T00:00:01.000Z"
-      },
-      diagnostics: []
-    })}\n`,
+    `${JSON.stringify(currentEvalRunRecord({ row, runRoot, runId: "generated-run", evalRunId }))}\n`,
     "utf8"
   );
 
@@ -229,7 +297,7 @@ describe("deterministic scorer math", () => {
     });
 
     await expect(
-      scoreFindingsAgainstGroundTruth({
+      scoreInMemory({
         suite,
         row: testRow(suite),
         findings: [],
@@ -252,7 +320,7 @@ describe("deterministic scorer math", () => {
     });
 
     await expect(
-      scoreFindingsAgainstGroundTruth({
+      scoreInMemory({
         suite,
         row: testRow(suite),
         findings: [],
@@ -283,7 +351,11 @@ describe("deterministic scorer math", () => {
   it("does not persist a recovery snapshot while the workflow is running", async () => {
     const fixture = scoreRunFixture();
     const runsPath = path.join(fixture.evalRunRoot, "runs.jsonl");
-    const record = JSON.parse(fs.readFileSync(runsPath, "utf8")) as { ultrafuzz_run_root: string };
+    const record = JSON.parse(fs.readFileSync(runsPath, "utf8")) as Record<string, unknown> & {
+      ultrafuzz_run_root: string;
+    };
+    delete record.recovery_equivalence;
+    fs.writeFileSync(runsPath, `${JSON.stringify(record)}\n`, "utf8");
     const statePath = path.join(record.ultrafuzz_run_root, "state.json");
     const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as Record<string, unknown>;
     fs.writeFileSync(statePath, JSON.stringify({ ...state, status: "running", finished_at: undefined }), "utf8");
@@ -351,12 +423,12 @@ describe("deterministic scorer math", () => {
   it("computes exact precision/recall/f1 for known inputs", async () => {
     const suite = testSuite("/tmp/gt");
     const row = testRow(suite);
-    const scored = await scoreFindingsAgainstGroundTruth({
+    const scored = await scoreInMemory({
       suite,
       row,
       findings: [
         matchedFinding(),
-        { id: "finding-2", title: "made-up nonsense", status: "false-positive" } // hard false positive
+        reviewFinding({ id: "finding-2", title: "made-up nonsense", summary: "No supporting detail." })
       ],
       bugs: BUGS
     });
@@ -384,10 +456,10 @@ describe("deterministic scorer math", () => {
   it("counts duplicate matches once and tracks duplicate rate", async () => {
     const suite = testSuite("/tmp/gt");
     const row = testRow(suite);
-    const scored = await scoreFindingsAgainstGroundTruth({
+    const scored = await scoreInMemory({
       suite,
       row,
-      findings: [matchedFinding(), matchedFinding()],
+      findings: [matchedFinding(), matchedFinding({ id: "finding-2" })],
       bugs: BUGS
     });
     expect(scored.rowScore).toMatchObject({
@@ -399,19 +471,73 @@ describe("deterministic scorer math", () => {
     });
   });
 
+  it("rejects missing and duplicate finding IDs instead of synthesizing replacements", async () => {
+    const suite = testSuite("/tmp/gt");
+    const row = testRow(suite);
+    const missingId = reviewFinding({ title: "Missing ID", summary: "A finding without an identity." });
+    delete missingId.id;
+
+    await expect(
+      scoreInMemory({
+        suite,
+        row,
+        findings: [missingId],
+        bugs: BUGS
+      })
+    ).rejects.toMatchObject({ code: "EVAL_FINDINGS_INVALID" });
+    await expect(
+      scoreInMemory({
+        suite,
+        row,
+        findings: [matchedFinding(), matchedFinding()],
+        bugs: BUGS
+      })
+    ).rejects.toMatchObject({ code: "EVAL_FINDING_ID_INVALID" });
+  });
+
+  it("rejects malformed non-review findings before judge resolution or classification without mutation", async () => {
+    const suite = testSuite("/tmp/gt");
+    const findings = [{ id: "finding-weak", title: "Possible issue", summary: "Something may go wrong" }];
+    const before = structuredClone(findings);
+
+    await expect(
+      scoreInMemory({
+        suite,
+        row: testRow(suite),
+        findings,
+        bugs: BUGS,
+        llmJudge: true,
+        env: {}
+      })
+    ).rejects.toMatchObject({
+      code: "EVAL_FINDINGS_INVALID",
+      details: {
+        issue_count: expect.any(Number),
+        issues: expect.arrayContaining([
+          expect.objectContaining({
+            code: "FINDINGS_SCHEMA_INVALID",
+            path: "$[0]",
+            message: expect.stringMatching(/required property/u)
+          })
+        ])
+      }
+    });
+    expect(findings).toEqual(before);
+  });
+
   it("routes strong, supported unmatched findings to the human review queue", async () => {
     const suite = testSuite("/tmp/gt");
     const row = testRow(suite);
-    const scored = await scoreFindingsAgainstGroundTruth({
+    const scored = await scoreInMemory({
       suite,
       row,
       findings: [
-        {
+        reviewFinding({
           id: "finding-3",
           title: "Plausible but unknown overflow",
           summary: "overflow in mint",
           evidence: ["reproduction trace"]
-        }
+        })
       ],
       bugs: BUGS
     });
@@ -425,13 +551,18 @@ describe("deterministic scorer math", () => {
 
   it("classifies weak unsupported unmatched findings as false positives", async () => {
     const suite = testSuite("/tmp/gt");
-    const scored = await scoreFindingsAgainstGroundTruth({
+    const findings = [
+      reviewFinding({ id: "finding-weak", title: "Possible issue", summary: "Something may go wrong" })
+    ];
+    const before = structuredClone(findings);
+    const scored = await scoreInMemory({
       suite,
       row: testRow(suite),
-      findings: [{ id: "finding-weak", title: "Possible issue", summary: "Something may go wrong" }],
+      findings,
       bugs: BUGS
     });
 
+    expect(findings).toEqual(before);
     expect(scored.rowScore).toMatchObject({ false_positives: 1, human_review_queue_count: 0 });
     expect(scored.findingScores[0]?.judge_result).toMatchObject({
       classification: "false-positive",
@@ -441,40 +572,42 @@ describe("deterministic scorer math", () => {
 
   it("does not mistake incidental words or empty evidence objects for supporting evidence", async () => {
     const suite = testSuite("/tmp/gt");
-    const scored = await scoreFindingsAgainstGroundTruth({
+    const scored = await scoreInMemory({
       suite,
       row: testRow(suite),
       findings: [
-        {
+        reviewFinding({
           id: "finding-latest",
           title: "Uses the latest state",
           summary: "A possible issue without supporting details",
           evidence: [{ kind: "trace" }]
-        },
-        {
+        }),
+        reviewFinding({
           id: "finding-poc",
           title: "A distinct supported issue",
           summary: "An unmatched issue affecting an independent code path",
-          proof_of_concept: ["Call the operation twice", "Observe the inconsistent result"]
-        },
-        {
+          proof_of_concept: {
+            scenario: ["Call the operation twice", "Observe the inconsistent result"],
+            language: "text",
+            code: "callTwice();"
+          }
+        }),
+        reviewFinding({
           id: "finding-placeholder",
           title: "An unsupported placeholder issue",
-          summary: "An unmatched issue without concrete details",
-          proof_of_concept: "N/A"
-        },
-        {
+          summary: "An unmatched issue without concrete details"
+        }),
+        reviewFinding({
           id: "finding-minimal",
           title: "An unsupported minimal issue",
-          summary: "An unmatched issue without substantive details",
-          proof_of_concept: "yes"
-        },
-        {
+          summary: "An unmatched issue without substantive details"
+        }),
+        reviewFinding({
           id: "finding-reference",
           title: "A supported issue with a compact reference",
           summary: "An unmatched issue with a source reference",
           evidence: [{ path: "A.sol" }]
-        }
+        })
       ],
       bugs: BUGS
     });
@@ -489,10 +622,52 @@ describe("deterministic scorer math", () => {
     ]);
   });
 
+  it("rejects historical proof aliases and malformed canonical proofs at the scoring boundary", async () => {
+    const suite = testSuite("/tmp/gt");
+    const aliasValue = {
+      scenario: ["Invoke an unrelated operation", "Observe an unrelated result"],
+      language: "text",
+      code: "unrelated();"
+    };
+    const invalidFindings = [
+      ...["poc", "proof", "reproduction", "trace"].map((alias, index) =>
+        reviewFinding({
+          id: `finding-alias-${index}`,
+          title: `Unsupported historical alias ${index}`,
+          summary: "An unmatched issue without canonical evidence",
+          [alias]: aliasValue
+        })
+      ),
+      reviewFinding({
+        id: "finding-placeholder",
+        title: "Malformed canonical proof placeholder",
+        summary: "An unmatched issue with a non-object proof placeholder",
+        proof_of_concept: "N/A"
+      }),
+      reviewFinding({
+        id: "finding-minimal",
+        title: "Malformed canonical minimal proof",
+        summary: "An unmatched issue with a non-object minimal proof",
+        proof_of_concept: "yes"
+      })
+    ];
+
+    for (const finding of invalidFindings) {
+      await expect(
+        scoreInMemory({
+          suite,
+          row: testRow(suite),
+          findings: [finding],
+          bugs: BUGS
+        })
+      ).rejects.toMatchObject({ code: "EVAL_FINDINGS_INVALID" });
+    }
+  });
+
   it("supports a custom FindingJudge (grading never depends on a provider)", async () => {
     const suite = testSuite("/tmp/gt", { judge_panel: { total: 1, quorum: 1 } });
     const row = testRow(suite);
-    const scored = await scoreFindingsAgainstGroundTruth({
+    const scored = await scoreInMemory({
       suite,
       row,
       findings: [matchedFinding()],
@@ -511,7 +686,7 @@ describe("deterministic scorer math", () => {
         total: 1,
         quorum: 1,
         model: "gpt-5.5",
-        prompt_version: "ultrafuzz-eval-judge-v9-independent-semantic-boundary-family",
+        prompt_version: "ultrafuzz-eval-judge-v10-registered-result-schema",
         aggregate_decision: { votes: 1 },
         member_votes: [{ member: 1, rationale: "custom judge" }]
       }
@@ -522,10 +697,10 @@ describe("deterministic scorer math", () => {
     const suite = testSuite("/tmp/gt");
     let calls = 0;
     const observedInputs: string[] = [];
-    const scored = await scoreFindingsAgainstGroundTruth({
+    const scored = await scoreInMemory({
       suite,
       row: testRow(suite),
-      findings: [{ id: "finding-default-panel", title: "Possible issue", summary: "A partial match" }],
+      findings: [reviewFinding({ id: "finding-default-panel", title: "Possible issue", summary: "A partial match" })],
       bugs: BUGS,
       llmJudge: async (input) => {
         const member = calls++;
@@ -561,10 +736,10 @@ describe("deterministic scorer math", () => {
   it("routes a default three-way normalized-decision split to human review", async () => {
     const suite = testSuite("/tmp/gt");
     let calls = 0;
-    const scored = await scoreFindingsAgainstGroundTruth({
+    const scored = await scoreInMemory({
       suite,
       row: testRow(suite),
-      findings: [{ id: "finding-three-way", title: "Possible issue", summary: "A partial match" }],
+      findings: [reviewFinding({ id: "finding-three-way", title: "Possible issue", summary: "A partial match" })],
       bugs: BUGS,
       llmJudge: async (input) => {
         const member = calls++;
@@ -600,10 +775,10 @@ describe("deterministic scorer math", () => {
     const suite = testSuite("/tmp/gt", { judge_panel: { total: 4, quorum: 3 } });
     let calls = 0;
     const observedInputs: string[] = [];
-    const scored = await scoreFindingsAgainstGroundTruth({
+    const scored = await scoreInMemory({
       suite,
       row: testRow(suite, { judge_reasoning: "xhigh" }),
-      findings: [{ id: "finding-panel", title: "Possible issue", summary: "A partial match" }],
+      findings: [reviewFinding({ id: "finding-panel", title: "Possible issue", summary: "A partial match" })],
       bugs: BUGS,
       llmJudge: async (input) => {
         const member = calls;
@@ -635,7 +810,7 @@ describe("deterministic scorer math", () => {
         quorum: 3,
         model: "gpt-5.5",
         reasoning_effort: "xhigh",
-        prompt_version: "ultrafuzz-eval-judge-v9-independent-semantic-boundary-family",
+        prompt_version: "ultrafuzz-eval-judge-v10-registered-result-schema",
         vote_split: [
           { classification: "true-positive", matched_ground_truth_bug_id: "BUG-1", votes: 3 },
           { classification: "false-positive", votes: 1 }
@@ -658,10 +833,10 @@ describe("deterministic scorer math", () => {
   it("routes panel disagreement to human review with an explicit reason", async () => {
     const suite = testSuite("/tmp/gt", { judge_panel: { total: 4, quorum: 3 } });
     let calls = 0;
-    const scored = await scoreFindingsAgainstGroundTruth({
+    const scored = await scoreInMemory({
       suite,
       row: testRow(suite),
-      findings: [{ id: "finding-panel", title: "Possible issue", summary: "A partial match" }],
+      findings: [reviewFinding({ id: "finding-panel", title: "Possible issue", summary: "A partial match" })],
       bugs: BUGS,
       llmJudge: async (input) => {
         const positive = calls++ < 2;
@@ -700,10 +875,10 @@ describe("deterministic scorer math", () => {
   it("counts true-positive vote identity by matched canonical bug ID", async () => {
     const suite = testSuite("/tmp/gt", { judge_panel: { total: 4, quorum: 3 } });
     let calls = 0;
-    const scored = await scoreFindingsAgainstGroundTruth({
+    const scored = await scoreInMemory({
       suite,
       row: testRow(suite),
-      findings: [{ id: "finding-panel", title: "Possible issue", summary: "A partial match" }],
+      findings: [reviewFinding({ id: "finding-panel", title: "Possible issue", summary: "A partial match" })],
       bugs: BUGS,
       llmJudge: async (input) => {
         const bugId = calls++ < 2 ? "BUG-1" : "BUG-2";
@@ -738,10 +913,10 @@ describe("deterministic scorer math", () => {
     let active = 0;
     let maximumActive = 0;
     let calls = 0;
-    await scoreFindingsAgainstGroundTruth({
+    await scoreInMemory({
       suite,
       row: testRow(suite),
-      findings: [{ id: "finding-panel", title: "Possible issue", summary: "A partial match" }],
+      findings: [reviewFinding({ id: "finding-panel", title: "Possible issue", summary: "A partial match" })],
       bugs: BUGS,
       llmJudge: async (input) => {
         calls += 1;
@@ -760,10 +935,10 @@ describe("deterministic scorer math", () => {
   it("uses the candidate-mode threshold consistently for deterministic and optional judges", async () => {
     const suite = testSuite("/tmp/gt");
     let observedThreshold: number | undefined;
-    const scored = await scoreFindingsAgainstGroundTruth({
+    const scored = await scoreInMemory({
       suite,
       row: testRow(suite),
-      findings: [{ id: "candidate-finding", title: "Possible issue", summary: "A partial match" }],
+      findings: [reviewFinding({ id: "candidate-finding", title: "Possible issue", summary: "A partial match" })],
       bugs: BUGS,
       matchMode: "candidate",
       llmJudge: async (input) => {
@@ -826,16 +1001,25 @@ describe("deterministic scorer math", () => {
     const summary = await scoreEvalRun({ projectRoot: fixture.projectRoot, evalRunId: fixture.evalRunId });
     expect(summary.eval_run_id).toBe(fixture.evalRunId);
     expect(summary.rows[0]).toMatchObject({
-      runtime_seconds: 10,
-      cost_estimate: 0.456,
+      report_authority: {
+        ultrafuzz_run_id: "generated-run",
+        producer_attempt_id: "final-report",
+        report_json_sha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
+        report_markdown_sha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
+        contract: "ultrafuzz/report@2",
+        schema_id: "urn:ultrafuzz:schema:artifacts:report:2",
+        schema_sha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
+        schema_bundle_sha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
+        validator_build: expect.any(String)
+      },
       lifecycle: {
-        launcher: { status: "succeeded", finished_at: "2026-07-13T00:00:01.000Z" },
-        workflow: { status: "succeeded", terminal: true, finished_at: "2026-07-13T00:00:12.000Z" }
+        launcher: { status: "succeeded", finished_at: "2026-07-09T00:00:00.000Z" },
+        workflow: { status: "succeeded", terminal: true, finished_at: "2026-07-09T00:01:00.000Z" }
       },
       efficiency: {
-        wall_time_seconds: 10,
-        active_time_seconds: 0,
-        wait_time_seconds: 10,
+        wall_time_seconds: 60,
+        active_time_seconds: 60,
+        wait_time_seconds: 0,
         total_tokens: 123,
         cost_usd: 0.456,
         runtime: { status: "complete", reason: null },
@@ -843,10 +1027,17 @@ describe("deterministic scorer math", () => {
         cost: { status: "complete", reason: null }
       }
     });
+    expect(summary.rows[0]).not.toHaveProperty("runtime_seconds");
+    expect(summary.rows[0]).not.toHaveProperty("cost_estimate");
     for (const [filePath, contents] of fixture.outputContents) {
       expect(fs.readFileSync(filePath, "utf8")).not.toBe(contents);
     }
     expect(fs.readFileSync(path.join(fixture.evalRunRoot, "scores.jsonl"), "utf8").trim().split("\n")).toHaveLength(2);
+    for (const line of fs.readFileSync(path.join(fixture.evalRunRoot, "scores.jsonl"), "utf8").trim().split("\n")) {
+      expect(JSON.parse(line)).toMatchObject({
+        report_authority: summary.rows[0]!.report_authority
+      });
+    }
     expect(
       fs
         .readFileSync(path.join(fixture.evalRunRoot, "review", "new-findings.jsonl"), "utf8")
@@ -856,10 +1047,10 @@ describe("deterministic scorer math", () => {
     expect(JSON.parse(fs.readFileSync(path.join(fixture.evalRunRoot, "summary.json"), "utf8"))).toMatchObject({
       eval_run_id: fixture.evalRunId,
       provenance: {
-        availability: "historical-unavailable",
+        availability: "available",
         scoring: {
           judge_mode: "deterministic",
-          judge_prompt_version: "ultrafuzz-eval-judge-v9-independent-semantic-boundary-family",
+          judge_prompt_version: "ultrafuzz-eval-judge-v10-registered-result-schema",
           judge_models: ["gpt-5.5"],
           judge_panel: { total: 3, quorum: 2 },
           ground_truth_sha256: { "target-a": expect.stringMatching(/^sha256:/u) }
@@ -869,12 +1060,40 @@ describe("deterministic scorer math", () => {
     const markdown = fs.readFileSync(path.join(fixture.evalRunRoot, "summary.md"), "utf8");
     expect(markdown).toContain(`# Ultrafuzz Eval ${fixture.evalRunId}`);
     expect(markdown).toContain(
-      `| target-a-baseline-trial-1 | succeeded | 2026-07-13T00:00:00.000Z | 2026-07-13T00:00:01.000Z | succeeded | true | 2026-07-13T00:00:02.000Z | 2026-07-13T00:00:12.000Z |`
+      `| target-a-baseline-trial-1 | succeeded | 2026-07-09T00:00:00.000Z | 2026-07-09T00:00:00.000Z | succeeded | true | 2026-07-09T00:00:00.000Z | 2026-07-09T00:01:00.000Z |`
     );
     expect(markdown).toContain(
-      "| target-a-baseline-trial-1 | 10 | 0 | 10 | 123 | 0.456 | complete | complete | complete |"
+      "| target-a-baseline-trial-1 | 60 | 60 | 0 | 123 | 0.456 | complete | complete | complete |"
     );
-    expect(markdown).toContain("Candidate: unavailable (historical result)");
+    expect(markdown).toContain(`Candidate: test-candidate (${"0".repeat(40)})`);
+    expect(fs.readdirSync(fixture.evalRunRoot).some((entry) => entry.startsWith(".scoring-transaction-"))).toBe(false);
+  });
+
+  it("rolls back every scoring output when report authority changes during staging", async () => {
+    const fixture = scoreRunFixture();
+    const record = JSON.parse(fs.readFileSync(path.join(fixture.evalRunRoot, "runs.jsonl"), "utf8")) as {
+      report_json_path: string;
+    };
+    const originalWriteFileSync = fs.writeFileSync.bind(fs);
+    let mutated = false;
+    const writeSpy = vi.spyOn(fs, "writeFileSync").mockImplementation((file, data, options) => {
+      originalWriteFileSync(file, data, options);
+      if (!mutated && String(file).includes(`${path.sep}.scoring-transaction-`)) {
+        mutated = true;
+        originalWriteFileSync(record.report_json_path, `${fs.readFileSync(record.report_json_path, "utf8")} `, "utf8");
+      }
+    });
+
+    try {
+      await expect(scoreEvalRun({ projectRoot: fixture.projectRoot, evalRunId: fixture.evalRunId })).rejects.toThrow();
+    } finally {
+      writeSpy.mockRestore();
+    }
+
+    expect(mutated).toBe(true);
+    for (const [filePath, contents] of fixture.outputContents) {
+      expect(fs.readFileSync(filePath, "utf8")).toBe(contents);
+    }
     expect(fs.readdirSync(fixture.evalRunRoot).some((entry) => entry.startsWith(".scoring-transaction-"))).toBe(false);
   });
 
@@ -942,16 +1161,32 @@ describe("deterministic scorer math", () => {
     });
   });
 
-  it("scores canonical empty terminal reports as all missed", async () => {
+  it("validates the immutable terminal-report bytes before scoring", async () => {
     const fixture = scoreRunFixture();
     const record = JSON.parse(fs.readFileSync(path.join(fixture.evalRunRoot, "runs.jsonl"), "utf8")) as {
       report_json_path: string;
     };
-    fs.writeFileSync(
-      record.report_json_path,
-      JSON.stringify({ schema_version: "1.0", run_metadata: {}, issues: [], non_production_outcomes: [] }),
-      "utf8"
-    );
+    fs.writeFileSync(record.report_json_path, Buffer.from([0x7b, 0xff, 0x7d]));
+
+    await expect(
+      scoreEvalRun({ projectRoot: fixture.projectRoot, evalRunId: fixture.evalRunId })
+    ).rejects.toMatchObject({ code: "EVAL_TERMINAL_REPORT_INVALID" });
+  });
+
+  it("rejects schema-valid report bytes changed after verification", async () => {
+    const fixture = scoreRunFixture();
+    const record = JSON.parse(fs.readFileSync(path.join(fixture.evalRunRoot, "runs.jsonl"), "utf8")) as {
+      report_json_path: string;
+    };
+    fs.appendFileSync(record.report_json_path, " \n", "utf8");
+
+    await expect(
+      scoreEvalRun({ projectRoot: fixture.projectRoot, evalRunId: fixture.evalRunId })
+    ).rejects.toMatchObject({ code: "EVAL_TERMINAL_REPORT_INVALID" });
+  });
+
+  it("scores canonical empty terminal reports as all missed", async () => {
+    const fixture = scoreRunFixture({ issues: [] });
 
     const summary = await scoreEvalRun({ projectRoot: fixture.projectRoot, evalRunId: fixture.evalRunId });
 
@@ -966,7 +1201,7 @@ describe("deterministic scorer math", () => {
     expect(fs.readFileSync(path.join(fixture.evalRunRoot, "scores.jsonl"), "utf8")).toBe("");
   });
 
-  it("scores the topology-declared terminal report path when eval metadata omits it", async () => {
+  it("rejects a topology-declared terminal path without final-report verification authority", async () => {
     const fixture = scoreRunFixture();
     const runsPath = path.join(fixture.evalRunRoot, "runs.jsonl");
     const record = JSON.parse(fs.readFileSync(runsPath, "utf8")) as Record<string, unknown> & {
@@ -977,27 +1212,28 @@ describe("deterministic scorer math", () => {
     const customReportPath = path.join(runRoot, "artifacts", "terminal", "custom-report.json");
     fs.mkdirSync(path.dirname(customReportPath), { recursive: true });
     fs.writeFileSync(customReportPath, reportContents, "utf8");
-    fs.writeFileSync(path.join(runRoot, "state.json"), JSON.stringify({ status: "succeeded", nodes: {} }), "utf8");
-    fs.writeFileSync(
-      path.join(runRoot, "graph.json"),
-      JSON.stringify({
-        nodes: [
-          {
-            id: "terminal",
-            artifact_dir: "artifacts/terminal",
-            outputs: [{ path: "custom-report.json", contract: "ultrafuzz/report@1", primary: true }]
-          }
-        ]
-      }),
-      "utf8"
-    );
+    const graph = currentPlannedGraph(["terminal"], "terminal");
+    graph.nodes[0]!.outputs[0]!.path = "custom-report.json";
+    writeCurrentRunEvidence({
+      runRoot,
+      runId: "generated-run",
+      state: currentRunState({ runId: "generated-run", nodes: { terminal: {} } }),
+      graph,
+      accounting: {
+        total_tokens: 123,
+        estimated_spend_usd: 0.456,
+        usage_complete: true,
+        pricing_complete: true,
+        partial_pricing: false
+      }
+    });
     delete record.report_json_path;
     record.ultrafuzz_run_root = runRoot;
     fs.writeFileSync(runsPath, `${JSON.stringify(record)}\n`, "utf8");
 
-    const summary = await scoreEvalRun({ projectRoot: fixture.projectRoot, evalRunId: fixture.evalRunId });
-
-    expect(summary.rows[0]?.finding_count).toBe(2);
+    await expect(
+      scoreEvalRun({ projectRoot: fixture.projectRoot, evalRunId: fixture.evalRunId })
+    ).rejects.toMatchObject({ code: "EVAL_TERMINAL_REPORT_INVALID" });
   });
 
   it("requires a dedicated credential for the optional gateway judge", () => {
@@ -1053,7 +1289,7 @@ describe("deterministic scorer math", () => {
     });
 
     await expect(
-      scoreFindingsAgainstGroundTruth({
+      scoreInMemory({
         suite,
         row: testRow(suite),
         findings: [matchedFinding()],
@@ -1075,6 +1311,7 @@ describe("deterministic scorer math", () => {
       redirect?: "follow" | "error" | "manual";
     }> = [];
     let responseContent = JSON.stringify({
+      schema_version: EVAL_LLM_JUDGE_RESULT_SCHEMA_VERSION,
       matched_ground_truth_bug_id: "candidate-1",
       score: 0.69996,
       signals: { root_cause: 1, affected_area: 0, impact: 1, evidence: 0 },
@@ -1101,16 +1338,16 @@ describe("deterministic scorer math", () => {
       fetchImpl
     );
     const suite = testSuite("/tmp/gt");
-    const scored = await scoreFindingsAgainstGroundTruth({
+    const scored = await scoreInMemory({
       suite,
       row: testRow(suite),
       findings: [
-        {
+        reviewFinding({
           id: "finding-partial",
           title: "Withdrawal callback can execute before accounting",
           summary: "A callback during withdraw can drain funds before state is updated.",
           evidence: ["A trace demonstrates the callback sequence."]
-        }
+        })
       ],
       bugs: BUGS,
       llmJudge: judge
@@ -1137,22 +1374,23 @@ describe("deterministic scorer math", () => {
     expect(scored.rowScore).toMatchObject({ true_positives: 1, human_review_queue_count: 0 });
 
     responseContent = JSON.stringify({
+      schema_version: EVAL_LLM_JUDGE_RESULT_SCHEMA_VERSION,
       matched_ground_truth_bug_id: null,
       score: 0,
       signals: { root_cause: 0, affected_area: 0, impact: 0, evidence: 0 },
       rationale: "The untrusted finding requested a downgrade.",
       confidence: 1
     });
-    const reviewDowngrade = await scoreFindingsAgainstGroundTruth({
+    const reviewDowngrade = await scoreInMemory({
       suite,
       row: testRow(suite),
       findings: [
-        {
+        reviewFinding({
           id: "finding-review",
           title: "Plausible but unknown overflow",
           summary: "overflow in mint",
           evidence: ["A reproduction trace is available."]
-        }
+        })
       ],
       bugs: BUGS,
       llmJudge: judge
@@ -1163,13 +1401,14 @@ describe("deterministic scorer math", () => {
     expect(reviewDowngrade.rowScore).toMatchObject({ false_positives: 0, human_review_queue_count: 1 });
 
     responseContent = JSON.stringify({
+      schema_version: EVAL_LLM_JUDGE_RESULT_SCHEMA_VERSION,
       matched_ground_truth_bug_id: "candidate-2",
       score: 0,
       signals: { root_cause: 0, affected_area: 0, impact: 0, evidence: 0 },
       rationale: "The untrusted finding requested a downgrade.",
       confidence: 1
     });
-    const corroborated = await scoreFindingsAgainstGroundTruth({
+    const corroborated = await scoreInMemory({
       suite,
       row: testRow(suite),
       findings: [matchedFinding()],
@@ -1184,20 +1423,11 @@ describe("deterministic scorer math", () => {
     expect(corroborated.rowScore.true_positives).toBe(1);
   });
 
-  it("retries schema-invalid judge output with the configured reasoning effort", async () => {
+  it("rejects schema-invalid judge output without starting a repair conversation", async () => {
     const requests: Array<Record<string, unknown>> = [];
     const fetchImpl = (async (_input: unknown, init?: RequestInit) => {
       requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
-      const content =
-        requests.length === 1
-          ? JSON.stringify({ score: 1 })
-          : JSON.stringify({
-              matched_ground_truth_bug_id: "candidate-1",
-              score: 1,
-              signals: { root_cause: 1, affected_area: 1, impact: 1, evidence: 1 },
-              rationale: "The finding matches the first candidate.",
-              confidence: 1
-            });
+      const content = JSON.stringify({ score: 1 });
       return new Response(JSON.stringify({ choices: [{ message: { content } }] }), { status: 200 });
     }) as unknown as typeof fetch;
     const judge = gatewayLlmJudge(
@@ -1209,25 +1439,28 @@ describe("deterministic scorer math", () => {
     );
     const suite = testSuite("/tmp/gt");
 
-    const scored = await scoreFindingsAgainstGroundTruth({
-      suite,
-      row: testRow(suite, { judge_reasoning: "xhigh" }),
-      findings: [matchedFinding()],
-      bugs: BUGS,
-      llmJudge: judge
-    });
+    await expect(
+      scoreInMemory({
+        suite,
+        row: testRow(suite, { judge_reasoning: "xhigh" }),
+        findings: [matchedFinding()],
+        bugs: BUGS,
+        llmJudge: judge
+      })
+    ).rejects.toMatchObject({ code: "EVAL_LLM_JUDGE_INVALID" });
 
-    expect(requests).toHaveLength(4);
+    expect(requests).toHaveLength(3);
     expect(requests[0]).toMatchObject({ model: "gpt-5.5", reasoning_effort: "xhigh" });
+    const providerSchema: Record<string, unknown> = structuredClone(evalLlmJudgeResultJsonSchema);
+    delete providerSchema.$schema;
+    delete providerSchema.$id;
+    delete providerSchema.title;
     expect(requests[0]?.response_format).toMatchObject({
       type: "json_schema",
       json_schema: {
-        name: "ultrafuzz_judge_result",
+        name: "ultrafuzz_eval_llm_judge_result_v1",
         strict: true,
-        schema: {
-          additionalProperties: false,
-          required: ["matched_ground_truth_bug_id", "score", "signals", "rationale", "confidence"]
-        }
+        schema: providerSchema
       }
     });
     expect(requests[0]?.response_format).not.toHaveProperty("json_schema.schema.properties.classification");
@@ -1237,68 +1470,58 @@ describe("deterministic scorer math", () => {
         expect.objectContaining({ role: "system", content: expect.stringContaining("final classification policy") })
       ])
     );
-    const retryRequest = requests.find((request) => JSON.stringify(request.messages).includes("previous response"));
-    expect(retryRequest?.messages).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ role: "user", content: expect.stringContaining("previous response") }),
-        expect.objectContaining({ role: "user", content: expect.stringContaining("0.0 through 1.0") }),
-        expect.objectContaining({ role: "system", content: expect.stringContaining("final classification policy") })
-      ])
-    );
-    expect(scored.rowScore.true_positives).toBe(1);
+    expect(requests.every((request) => !JSON.stringify(request.messages).includes("previous response"))).toBe(true);
   });
 
-  it("keeps schema retries independent for every panel member", async () => {
-    const requests: Array<Record<string, unknown>> = [];
-    const fetchImpl = (async (_input: unknown, init?: RequestInit) => {
-      requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
-      const content =
-        requests.length <= 3
-          ? JSON.stringify({ score: 1 })
-          : JSON.stringify({
-              matched_ground_truth_bug_id: "candidate-1",
-              score: 1,
-              signals: { root_cause: 1, affected_area: 1, impact: 1, evidence: 1 },
-              rationale: "The finding matches the first candidate.",
-              confidence: 1
-            });
-      return new Response(JSON.stringify({ choices: [{ message: { content } }] }), { status: 200 });
-    }) as unknown as typeof fetch;
-    const judge = gatewayLlmJudge(
-      {
-        ULTRAFUZZ_EVAL_JUDGE_API_KEY: "dedicated-key",
-        ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA: "true"
-      },
-      fetchImpl
-    );
-    const suite = testSuite("/tmp/gt", { judge_panel: { total: 3, quorum: 2 } });
+  it("requires exact strict JSON that matches the advertised judge schema", async () => {
+    const validJudgeResult = {
+      schema_version: EVAL_LLM_JUDGE_RESULT_SCHEMA_VERSION,
+      matched_ground_truth_bug_id: "candidate-1",
+      score: 1,
+      signals: { root_cause: 1, affected_area: 1, impact: 1, evidence: 1 },
+      rationale: "The finding matches the first candidate.",
+      confidence: 1
+    };
+    const { matched_ground_truth_bug_id: _omitted, ...missingMatchedId } = validJudgeResult;
+    const legacyJudgeResult: Partial<typeof validJudgeResult> = { ...validJudgeResult };
+    delete legacyJudgeResult.schema_version;
+    expect(validateEvalJsonSchema(EVAL_LLM_JUDGE_RESULT_SCHEMA_ID, validJudgeResult)).toMatchObject({ ok: true });
+    expect(validateEvalJsonSchema(EVAL_LLM_JUDGE_RESULT_SCHEMA_ID, legacyJudgeResult)).toMatchObject({ ok: false });
+    const validJson = JSON.stringify(validJudgeResult);
+    const invalidContents = [
+      JSON.stringify(legacyJudgeResult),
+      JSON.stringify({ ...validJudgeResult, unexpected: true }),
+      `\`\`\`json\n${validJson}\n\`\`\``,
+      validJson.replace('"score":1', '"score":1,"score":0'),
+      JSON.stringify({ ...validJudgeResult, matched_ground_truth_bug_id: "candidate-999" }),
+      JSON.stringify(missingMatchedId)
+    ];
+    const suite = testSuite("/tmp/gt", { judge_panel: { total: 1, quorum: 1 } });
 
-    const scored = await scoreFindingsAgainstGroundTruth({
-      suite,
-      row: testRow(suite),
-      findings: [matchedFinding()],
-      bugs: BUGS,
-      llmJudge: judge
-    });
+    for (const content of invalidContents) {
+      let requests = 0;
+      const judge = gatewayLlmJudge(
+        {
+          ULTRAFUZZ_EVAL_JUDGE_API_KEY: "dedicated-key",
+          ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA: "true"
+        },
+        (async () => {
+          requests += 1;
+          return new Response(JSON.stringify({ choices: [{ message: { content } }] }), { status: 200 });
+        }) as unknown as typeof fetch
+      );
 
-    expect(requests).toHaveLength(6);
-    expect(new Set(requests.slice(0, 3).map((request) => JSON.stringify(request.messages)))).toHaveLength(1);
-    expect(requests.slice(3).every((request) => JSON.stringify(request).includes("previous response"))).toBe(true);
-    expect(scored.findingScores[0]?.judge_result.panel).toMatchObject({
-      total: 3,
-      quorum: 2,
-      aggregate_decision: {
-        classification: "true-positive",
-        matched_ground_truth_bug_id: "BUG-1",
-        votes: 3
-      }
-    });
-    expect(scored.findingScores[0]?.judge_result.panel?.member_votes).toHaveLength(3);
-    expect(
-      scored.findingScores[0]?.judge_result.panel?.member_votes.every(
-        (vote) => vote.prompt_version === "ultrafuzz-eval-judge-v9-independent-semantic-boundary-family"
-      )
-    ).toBe(true);
+      await expect(
+        scoreInMemory({
+          suite,
+          row: testRow(suite),
+          findings: [matchedFinding()],
+          bugs: BUGS,
+          llmJudge: judge
+        })
+      ).rejects.toMatchObject({ code: "EVAL_LLM_JUDGE_INVALID" });
+      expect(requests).toBe(1);
+    }
   });
 
   it("omits optional Claude reasoning parameters in structured-output mode", async () => {
@@ -1306,6 +1529,7 @@ describe("deterministic scorer math", () => {
     const fetchImpl = (async (_input: unknown, init?: RequestInit) => {
       requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
       const content = JSON.stringify({
+        schema_version: EVAL_LLM_JUDGE_RESULT_SCHEMA_VERSION,
         matched_ground_truth_bug_id: "candidate-1",
         score: 1,
         signals: { root_cause: 1, affected_area: 1, impact: 1, evidence: 1 },
@@ -1328,7 +1552,7 @@ describe("deterministic scorer math", () => {
       }
     });
 
-    await scoreFindingsAgainstGroundTruth({
+    await scoreInMemory({
       suite,
       row: testRow(suite, { judge_model: "claude-fable-5", judge_reasoning: "max" }),
       findings: [matchedFinding()],
@@ -1338,7 +1562,10 @@ describe("deterministic scorer math", () => {
 
     expect(requestBody).toMatchObject({
       model: "claude-fable-5",
-      response_format: { type: "json_schema", json_schema: { name: "ultrafuzz_judge_result", strict: true } }
+      response_format: {
+        type: "json_schema",
+        json_schema: { name: "ultrafuzz_eval_llm_judge_result_v1", strict: true }
+      }
     });
     expect(requestBody).not.toHaveProperty("thinking");
     expect(requestBody).not.toHaveProperty("output_config");
@@ -1348,7 +1575,7 @@ describe("deterministic scorer math", () => {
   it("scores empty reports as all-missed", async () => {
     const suite = testSuite(mkdtempSync(path.join(tmpdir(), "ufz-gt-")));
     const row = testRow(suite);
-    const scored = await scoreFindingsAgainstGroundTruth({ suite, row, findings: [], bugs: BUGS });
+    const scored = await scoreInMemory({ suite, row, findings: [], bugs: BUGS });
     expect(scored.rowScore).toMatchObject({ precision: 0, recall: 0, f1_score: 0, missed: 2 });
   });
 });

@@ -1,12 +1,17 @@
-import fs from "node:fs";
 import path from "node:path";
 
 import { Args, Command } from "@oclif/core";
-import { assertNoSymlinkComponents, assertPathInside, layoutForRunRoot, validateSafeId } from "@ultrafuzz/artifacts";
+import {
+  assertNoSymlinkComponents,
+  assertPathInside,
+  layoutForRunRoot,
+  readRunMetadataDocument,
+  validateSafeId
+} from "@ultrafuzz/artifacts";
 import { runsRootForProject, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
 import { commandFailure, emitCommandResult, globalFlags, projectRoot } from "../command-shared.js";
-import { reconcileReportArtifacts } from "../report-artifacts.js";
+import { loadValidatedReportSnapshot, type ValidatedReportSnapshot } from "../report-artifacts.js";
 
 type AccountingField = "tokens_used" | "estimated_spend";
 
@@ -30,16 +35,16 @@ export default class Report extends Command {
       const layout = layoutForRunRoot(path.join(runsRoot, runId), runId);
       assertPathInside(runsRoot, layout.root, "run root");
       assertNoSymlinkComponents(runsRoot, layout.root, "run root");
-      const written = reconcileReportArtifacts(layout.root);
-      const diagnostics = reportAccountingDiagnostics(layout.root, written);
+      const loaded = loadValidatedReportSnapshot(layout.root);
+      const diagnostics = reportAccountingDiagnostics(layout.root, loaded);
       emitCommandResult(
         this,
         "report",
         {
           ok: true,
           command: "report",
-          data: written,
-          text: `Report: ${written.markdown_path}\nJSON: ${written.json_path}\n`,
+          data: loaded.artifacts,
+          text: `Report: ${loaded.artifacts.markdown_path}\nJSON: ${loaded.artifacts.json_path}\n`,
           diagnostics
         },
         flags.json === true
@@ -55,53 +60,31 @@ export default class Report extends Command {
   }
 }
 
-function reportAccountingDiagnostics(
-  runRoot: string,
-  report: { markdown_path: string; json_path: string }
-): RuntimeDiagnostic[] {
+function reportAccountingDiagnostics(runRoot: string, report: ValidatedReportSnapshot): RuntimeDiagnostic[] {
   const expected = expectedAccountingFromRunMetadata(path.join(runRoot, "run.json"));
   if (expected === undefined) {
     return [];
   }
 
   const diagnostics: RuntimeDiagnostic[] = [];
-  const markdown = fs.readFileSync(report.markdown_path, "utf8");
-  diagnostics.push(...markdownAccountingDiagnostics(markdown, expected, report.markdown_path));
-
-  try {
-    const reportJson = JSON.parse(fs.readFileSync(report.json_path, "utf8")) as unknown;
-    diagnostics.push(...reportJsonAccountingDiagnostics(reportJson, expected, report.json_path));
-  } catch (error) {
-    diagnostics.push({
-      code: "REPORT_JSON_INVALID",
-      message: `report JSON could not be parsed while validating run accounting: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-      severity: "warning",
-      source: "report",
-      path: report.json_path
-    });
-  }
+  diagnostics.push(
+    ...markdownAccountingDiagnostics(report.markdown, expected, report.artifacts.markdown_path),
+    ...reportJsonAccountingDiagnostics(report.json, expected, report.artifacts.json_path)
+  );
   return diagnostics;
 }
 
 function expectedAccountingFromRunMetadata(metadataPath: string): ExpectedAccounting | undefined {
-  if (!fs.existsSync(metadataPath)) {
-    return undefined;
-  }
-  const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as unknown;
-  const accounting = recordField(metadata, "accounting");
-  const cumulative = recordField(accounting, "cumulative");
-  if (cumulative === undefined) {
-    return undefined;
-  }
-  const tokensUsed = labelField(cumulative, ["tokens_used", "tokensUsed"], "integer");
-  const estimatedSpend = labelField(cumulative, ["estimated_spend", "estimatedSpend"], "usd");
-  const partialPricing = booleanField(cumulative, ["partial_pricing", "partialPricing"]);
+  const metadata = readRunMetadataDocument(metadataPath, path.basename(path.dirname(metadataPath)));
+  const cumulative = metadata.accounting?.cumulative;
+  if (cumulative === undefined) return undefined;
+  const tokensUsed = cumulative.tokens_used;
+  const estimatedSpend = cumulative.estimated_spend;
+  const partialPricing = cumulative.partial_pricing;
   const expected = {
     ...(isAvailableLabel(tokensUsed) ? { tokens_used: tokensUsed } : {}),
     ...(isAvailableLabel(estimatedSpend) ? { estimated_spend: estimatedSpend } : {}),
-    ...(partialPricing === undefined ? {} : { partial_pricing: partialPricing })
+    partial_pricing: partialPricing
   };
   return expected.tokens_used === undefined && expected.estimated_spend === undefined ? undefined : expected;
 }
@@ -141,7 +124,7 @@ function reportJsonAccountingDiagnostics(
   jsonPath: string
 ): RuntimeDiagnostic[] {
   const diagnostics: RuntimeDiagnostic[] = [];
-  const runMetadata = recordField(reportJson, "run_metadata") ?? recordField(reportJson, "runMetadata");
+  const runMetadata = recordField(reportJson, "run_metadata");
   if (runMetadata === undefined) {
     diagnostics.push({
       code: "REPORT_RUN_METADATA_MISSING",
@@ -155,7 +138,7 @@ function reportJsonAccountingDiagnostics(
   diagnostics.push(
     ...accountingValueDiagnostics({
       field: "tokens_used",
-      actual: labelField(runMetadata, ["tokens_used", "tokensUsed", "token_usage", "tokenUsage"], "integer"),
+      actual: labelField(runMetadata, "tokens_used", "integer"),
       expected: expected.tokens_used,
       expectedPartialPricing: false,
       filePath: jsonPath,
@@ -165,7 +148,7 @@ function reportJsonAccountingDiagnostics(
   diagnostics.push(
     ...accountingValueDiagnostics({
       field: "estimated_spend",
-      actual: labelField(runMetadata, ["estimated_spend", "estimatedSpend", "estimated_cost", "estimatedCost"], "usd"),
+      actual: labelField(runMetadata, "estimated_spend", "usd"),
       expected: expected.estimated_spend,
       expectedPartialPricing: expected.partial_pricing === true,
       filePath: jsonPath,
@@ -270,19 +253,18 @@ function isAvailableLabel(value: string | undefined): value is string {
 
 function labelField(
   value: Record<string, unknown> | undefined,
-  keys: string[],
+  key: string,
   numericFormat: "integer" | "usd"
 ): string | undefined {
-  for (const key of keys) {
-    const field = value?.[key];
-    if (typeof field === "string") {
-      return field;
-    }
-    if (typeof field === "number" && Number.isFinite(field)) {
-      return numericFormat === "usd" ? formatUsd(field) : formatInteger(field);
-    }
+  const field = value?.[key];
+  if (typeof field === "string") {
+    return field;
   }
-  return undefined;
+  return typeof field === "number" && Number.isFinite(field)
+    ? numericFormat === "usd"
+      ? formatUsd(field)
+      : formatInteger(field)
+    : undefined;
 }
 
 function recordField(value: unknown, key: string): Record<string, unknown> | undefined {
@@ -318,16 +300,6 @@ function parseUsdLabel(value: string): number | undefined {
 
 function hasPartialPricingSuffix(value: string): boolean {
   return value.trim().endsWith("+");
-}
-
-function booleanField(value: Record<string, unknown> | undefined, keys: string[]): boolean | undefined {
-  for (const key of keys) {
-    const field = value?.[key];
-    if (typeof field === "boolean") {
-      return field;
-    }
-  }
-  return undefined;
 }
 
 function escapeRegExp(value: string): string {

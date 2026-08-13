@@ -1,3 +1,5 @@
+import { parseStrictJsonBytes } from "@ultrafuzz/artifacts";
+
 const DEFAULT_PRICING_CATALOG_URL = "https://models.dev/api.json";
 const DEFAULT_PRICING_TIMEOUT_MS = 5_000;
 const MAX_CATALOG_BYTES = 25 * 1024 * 1024;
@@ -66,7 +68,7 @@ export async function resolveLiveModelPricing(input: {
   signal?: AbortSignal;
   timeoutMs?: number;
 }): Promise<PricingCatalogResult> {
-  const models = uniqueNormalizedModels(input.models);
+  const models = uniqueModels(input.models);
   if (models.length === 0) {
     return {
       prices: new Map(),
@@ -108,11 +110,19 @@ export async function resolveLiveModelPricing(input: {
     if (!response.ok) {
       throw new Error(`pricing catalog returned HTTP ${response.status}`);
     }
-    const text = await response.text();
-    if (Buffer.byteLength(text, "utf8") > MAX_CATALOG_BYTES) {
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (bytes.byteLength > MAX_CATALOG_BYTES) {
       throw new Error("pricing catalog exceeded the maximum response size");
     }
-    const catalog = JSON.parse(text) as unknown;
+    // models.dev is a transient third-party envelope, not retained Ultrafuzz
+    // evidence. Its provider/model keys are intentionally dynamic, but its
+    // bytes must still meet the shared strict JSON and UTF-8 contract.
+    const catalog = parseStrictJsonBytes(bytes, {
+      maxBytes: MAX_CATALOG_BYTES,
+      maxDepth: 32,
+      maxItems: 1_000_000,
+      maxProperties: 1_000_000
+    });
     const prices = pricesForModels(catalog, models);
     const resolvedModels = models.filter((model) => prices.has(model));
     return {
@@ -154,7 +164,7 @@ function pricesForModels(catalog: unknown, models: string[]): Map<string, ModelP
       if (!isRecord(provider.models)) {
         continue;
       }
-      const match = Object.entries(provider.models).find(([id]) => normalizeModel(id) === model);
+      const match = Object.entries(provider.models).find(([id]) => id === model);
       const pricing = pricingFromCatalogModel(match?.[1]);
       if (pricing !== undefined) {
         result.set(model, pricing);
@@ -229,7 +239,7 @@ export function modelPricingFromSnapshot(value: unknown): Map<string, ModelPrici
   for (const [model, rawPricing] of Object.entries(value)) {
     const pricing = storedModelPricing(rawPricing);
     if (pricing !== undefined) {
-      result.set(normalizeModel(model), pricing);
+      result.set(model, pricing);
     }
   }
   return result;
@@ -338,12 +348,8 @@ function pinnedProviderForModel(model: string): string | undefined {
   return model.startsWith("kimi") || model.startsWith("moonshot") ? MOONSHOT_PROVIDER_ID : undefined;
 }
 
-function uniqueNormalizedModels(models: Iterable<string>): string[] {
-  return [...new Set([...models].map(normalizeModel).filter((model) => model.length > 0))].sort();
-}
-
-function normalizeModel(model: string): string {
-  return model.trim().toLowerCase();
+function uniqueModels(models: Iterable<string>): string[] {
+  return [...new Set([...models].filter((model) => model.length > 0))].sort();
 }
 
 function pricingTimeoutMs(value: string | undefined): number {

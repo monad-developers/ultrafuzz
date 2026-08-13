@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, closeSync, mkdtempSync, openSync, rmSync } from "node:fs";
-import { access, chmod, lstat, mkdir, mkdtemp, open, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { access, chmod, lstat, mkdir, mkdtemp, open, rename, rm, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -18,6 +18,7 @@ import {
 
 import {
   ANALYSIS_BUNDLE_SCHEMA_VERSION,
+  parseStrictJsonBytes,
   writeAnalysisBundle,
   type AnalysisRecoverySummary
 } from "@ultrafuzz/artifacts";
@@ -66,7 +67,6 @@ import {
   fingerprintTrackedSource,
   finishModalLaunchRecoveryLifecycle,
   hasExactModalLaunchTags,
-  isLegacyModalLaunchStateWithoutImageId,
   isModalWorkerStatusComplete,
   isModalWorkerStatusTerminal,
   isTransientModalError,
@@ -84,7 +84,6 @@ import {
   modalWorkerLineage,
   parseModalLaunchState,
   parseModalWorkerResult,
-  parseCompatibleModalLaunchState,
   readModalLaunchState,
   reserveModalLaunchAttempt,
   withModalLaunchStateLock,
@@ -97,6 +96,8 @@ import {
   type ModalSandboxState,
   type ModalWorkerStatus
 } from "./launch-state.js";
+import { MODAL_RECOVERY_LIFECYCLE_SCHEMA_ID, MODAL_WORKER_RESULT_SCHEMA_ID } from "./modal-contracts.js";
+import { parseModalDocumentBytes, serializeModalDocument } from "./modal-documents.js";
 import {
   REMOTE_CONFIG_DIR,
   REMOTE_CONFIG_PATH,
@@ -110,7 +111,7 @@ import {
 } from "./layout.js";
 import {
   MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES,
-  parsePublicBenchmarkBundle,
+  parsePublicBenchmarkBundleBytes,
   type PublicBenchmarkBundle
 } from "./public-bundle.js";
 import {
@@ -167,13 +168,27 @@ const MODAL_GENERATION_TAG = /^[1-9][0-9]*$/u;
 const MODAL_ATTEMPT_ID_TAG = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const MODAL_BUILD_SCOPE_TAG = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const MODAL_FINGERPRINT_TAG = /^[a-f0-9]{64}$/u;
+const MODAL_ARTIFACTS_MODULE_PATH = "/opt/ultrafuzz/packages/artifacts/dist/index.js";
+const CANONICAL_RUN_STATUSES = new Set([
+  "pending",
+  "running",
+  "paused",
+  "succeeded",
+  "failed",
+  "timed-out",
+  "canceled"
+]);
 const KIMI_SHARED_CREDENTIAL_SOURCE_SHA256_SUFFIX = ".ultrafuzz-source-refresh-token.sha256";
 export const KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT = `
 const fs = require("node:fs");
 const crypto = require("node:crypto");
-const [pending, destination, mode = "resume"] = process.argv.slice(1);
+const { pathToFileURL } = require("node:url");
+const [pending, destination, mode, artifactsModulePath] = process.argv.slice(1);
 if (mode !== "fresh" && mode !== "resume") {
   throw new Error("Kimi credential staging mode must be fresh or resume");
+}
+if (typeof artifactsModulePath !== "string" || artifactsModulePath === "") {
+  throw new Error("Kimi credential staging requires the Ultrafuzz artifact reader");
 }
 const sourceHashPath = destination + ${JSON.stringify(KIMI_SHARED_CREDENTIAL_SOURCE_SHA256_SUFFIX)};
 const sha256 = (value) => crypto.createHash("sha256").update(value).digest("hex");
@@ -185,60 +200,114 @@ const sourceHash = () => {
     return { ok: false };
   }
 };
-const token = (file) => {
+const isOpaqueCredential = (value) =>
+  typeof value === "string" && value !== "" && value === value.trim();
+const isPositiveSafeInteger = (value) =>
+  typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+const readBoundedFile = (file, allowAbsent) => {
+  let handle;
   try {
-    const value = JSON.parse(fs.readFileSync(file, "utf8"));
-    if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
-    const refreshToken = typeof value.refresh_token === "string" ? value.refresh_token.trim() : "";
-    return {
-      value,
-      expiresAt: typeof value.expires_at === "number" ? value.expires_at : undefined,
-      refreshToken,
-      hasRefreshToken: refreshToken !== ""
-    };
-  } catch {
-    return {};
+    const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0);
+    handle = fs.openSync(file, flags);
+  } catch (error) {
+    if (allowAbsent && error !== null && typeof error === "object" && error.code === "ENOENT") {
+      return undefined;
+    }
+    throw error;
+  }
+  try {
+    const before = fs.fstatSync(handle, { bigint: true });
+    if (!before.isFile()) throw new Error("Kimi credential evidence must be a regular file: " + file);
+    if (before.size > BigInt(64 * 1024)) {
+      throw new Error("Kimi credential evidence exceeds the 65536-byte limit: " + file);
+    }
+    const contents = fs.readFileSync(handle);
+    const after = fs.fstatSync(handle, { bigint: true });
+    if (
+      before.dev !== after.dev ||
+      before.ino !== after.ino ||
+      before.size !== after.size ||
+      before.mtimeNs !== after.mtimeNs ||
+      before.ctimeNs !== after.ctimeNs ||
+      after.size !== BigInt(contents.byteLength)
+    ) {
+      throw new Error("Kimi credential evidence changed while it was read: " + file);
+    }
+    return contents;
+  } finally {
+    fs.closeSync(handle);
   }
 };
-const pendingToken = token(pending);
-if (pendingToken.value === undefined) {
-  throw new Error("Kimi credential snapshot must be a JSON object");
-}
-if (!pendingToken.hasRefreshToken) {
-  throw new Error("Kimi credential snapshot must include a refresh token");
-}
-fs.writeFileSync(pending, JSON.stringify(pendingToken.value, null, 2) + "\\n", { mode: 0o600 });
-const pendingRefreshTokenHash = sha256(pendingToken.refreshToken);
-const stagedSourceHash = sourceHash();
-let replace = !fs.existsSync(destination);
-let destinationToken = {};
-if (!replace) {
-  destinationToken = token(destination);
-  if (destinationToken.value === undefined || !destinationToken.hasRefreshToken) {
-    replace = true;
-  } else if (pendingToken.refreshToken === destinationToken.refreshToken) {
-    replace =
-      destinationToken.expiresAt === undefined ||
-      (pendingToken.expiresAt !== undefined && pendingToken.expiresAt > destinationToken.expiresAt);
-  } else {
-    if (mode === "fresh" && !stagedSourceHash.ok) {
-      throw new Error("Kimi credential lineage is missing or invalid; refusing to replace shared credential");
+async function main() {
+  const artifacts = await import(pathToFileURL(artifactsModulePath).href);
+  if (typeof artifacts.parseStrictJsonBytes !== "function") {
+    throw new Error("Ultrafuzz strict JSON reader is unavailable for Kimi credential staging");
+  }
+  // Kimi owns this credential envelope. Ultrafuzz preserves provider-defined
+  // fields but validates every field used for staging decisions.
+  const token = (file, allowAbsent) => {
+    const contents = readBoundedFile(file, allowAbsent);
+    if (contents === undefined) return undefined;
+    let value;
+    try {
+      value = artifacts.parseStrictJsonBytes(contents, {
+        maxBytes: 64 * 1024,
+        maxDepth: 16,
+        maxItems: 1024,
+        maxProperties: 1024
+      });
+    } catch (error) {
+      throw new Error("Kimi credential evidence is not strict bounded JSON: " + file, { cause: error });
     }
-    replace = mode === "fresh" && stagedSourceHash.ok && stagedSourceHash.value !== pendingRefreshTokenHash;
+    if (
+      typeof value !== "object" ||
+      value === null ||
+      Array.isArray(value) ||
+      !isOpaqueCredential(value.access_token) ||
+      !isPositiveSafeInteger(value.expires_at) ||
+      !isPositiveSafeInteger(value.expires_in) ||
+      (value.refresh_token !== undefined && !isOpaqueCredential(value.refresh_token)) ||
+      (value.token_type !== undefined && !isOpaqueCredential(value.token_type)) ||
+      (value.scope !== undefined && typeof value.scope !== "string")
+    ) {
+      throw new Error("Kimi credential evidence has an unsupported shape: " + file);
+    }
+    return { value, expiresAt: value.expires_at, refreshToken: value.refresh_token };
+  };
+  const pendingToken = token(pending, false);
+  if (pendingToken.refreshToken === undefined) {
+    throw new Error("Kimi credential snapshot must include a refresh token");
   }
-}
-if (replace) {
-  fs.renameSync(pending, destination);
-  fs.writeFileSync(sourceHashPath, pendingRefreshTokenHash + "\\n", { mode: 0o600 });
-} else {
-  fs.rmSync(pending, { force: true });
-  if (
-    destinationToken.refreshToken === pendingToken.refreshToken ||
-    (stagedSourceHash.ok && stagedSourceHash.value === pendingRefreshTokenHash)
-  ) {
+  const destinationToken = token(destination, true);
+  const pendingRefreshTokenHash = sha256(pendingToken.refreshToken);
+  const stagedSourceHash = sourceHash();
+  let replace = destinationToken === undefined;
+  if (destinationToken !== undefined) {
+    if (destinationToken.refreshToken === undefined) {
+      replace = true;
+    } else if (pendingToken.refreshToken === destinationToken.refreshToken) {
+      replace = pendingToken.expiresAt > destinationToken.expiresAt;
+    } else {
+      if (mode === "fresh" && !stagedSourceHash.ok) {
+        throw new Error("Kimi credential lineage is missing or invalid; refusing to replace shared credential");
+      }
+      replace = mode === "fresh" && stagedSourceHash.ok && stagedSourceHash.value !== pendingRefreshTokenHash;
+    }
+  }
+  if (replace) {
+    fs.renameSync(pending, destination);
     fs.writeFileSync(sourceHashPath, pendingRefreshTokenHash + "\\n", { mode: 0o600 });
+  } else {
+    fs.rmSync(pending, { force: true });
+    if (
+      destinationToken.refreshToken === pendingToken.refreshToken ||
+      (stagedSourceHash.ok && stagedSourceHash.value === pendingRefreshTokenHash)
+    ) {
+      fs.writeFileSync(sourceHashPath, pendingRefreshTokenHash + "\\n", { mode: 0o600 });
+    }
   }
 }
+void main();
 `;
 const LEGACY_UNSAFE_COLLECT_FILES = ["failure-details.json"] as const;
 export const MODAL_COLLECT_RESULT_FILES = [
@@ -389,7 +458,7 @@ export async function launchModalBenchmark(input: {
       image: fingerprintModalImage(config.image_name, image.imageId)
     };
     return await withModalLaunchStateLock(statePath, async () => {
-      let state = await readModalLaunchState(statePath, { imageId: image.imageId, fingerprints });
+      let state = await readModalLaunchState(statePath);
       if (state === undefined) {
         state = createModalLaunchState({
           logicalRunId: config.run_id,
@@ -771,7 +840,6 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
           workdir: "/opt/ultrafuzz",
           env: {
             ULTRAFUZZ_MODAL_RUN_ID: input.state.logical_run_id,
-            ULTRAFUZZ_MODAL_MODEL: JSON.stringify(input.model),
             ULTRAFUZZ_MODAL_REMOTE_ROOT: remoteRoot,
             ULTRAFUZZ_MODAL_VOLUME_RELATIVE_ROOT: modalVolumeRelativeRoot(remoteRoot)
           },
@@ -1028,7 +1096,7 @@ async function stageKimiSharedCredential(
         "deadline=$((SECONDS + 120))",
         'until mkdir "$lock"; do if (( SECONDS >= deadline )); then echo "Kimi credential stage lock timed out" >&2; exit 70; fi; sleep 1; done',
         "trap 'rmdir \"$lock\"' EXIT",
-        `node -e ${shellQuote(KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT)} ${shellQuote(pending)} ${shellQuote(destination)} ${shellQuote(workspaceMode)}`,
+        `node -e ${shellQuote(KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT)} ${shellQuote(pending)} ${shellQuote(destination)} ${shellQuote(workspaceMode)} ${shellQuote(MODAL_ARTIFACTS_MODULE_PATH)}`,
         `chmod -R go-rwx ${shellQuote(sharedHome)}`
       ].join("; ")
     ]);
@@ -1307,7 +1375,7 @@ function modalRecoveryAnalysisSummary(summary: ModalRecoveryLifecycleSummary): A
 }
 
 export function modalImageBuildCommand(): string {
-  return "install -m 0444 -o root -g root /tmp/ultrafuzz-source.tgz /opt/ultrafuzz-source.tgz && rm -rf /opt/ultrafuzz && mkdir -p /opt/ultrafuzz && tar --no-same-owner --no-same-permissions -xzf /opt/ultrafuzz-source.tgz -C /opt/ultrafuzz && npm install -g @moonshot-ai/kimi-code@0.29.1 && cd /opt/ultrafuzz && pnpm install --frozen-lockfile && pnpm --filter @ultrafuzz/cli... build && pnpm --filter @ultrafuzz/modal build && chown -R ubuntu:ubuntu /opt/ultrafuzz";
+  return "install -m 0444 -o root -g root /tmp/ultrafuzz-source.tgz /opt/ultrafuzz-source.tgz && rm -rf /opt/ultrafuzz && mkdir -p /opt/ultrafuzz && tar --no-same-owner --no-same-permissions -xzf /opt/ultrafuzz-source.tgz -C /opt/ultrafuzz && npm install -g @moonshot-ai/kimi-code@0.29.1 && cd /opt/ultrafuzz && pnpm install --frozen-lockfile && pnpm --filter @ultrafuzz/cli... build && node packages/modal/scripts/prepare-smithers-seed.mjs && pnpm --filter @ultrafuzz/modal build && install -m 0555 -o root -g root packages/modal/scripts/ultrafuzz-launcher /usr/local/bin/ultrafuzz && /usr/local/bin/ultrafuzz json validate --schema /opt/ultrafuzz/packages/artifacts/schema/findings.schema.json --file /opt/ultrafuzz/packages/artifacts/schema/validator-smoke.valid.json --json >/dev/null && chmod -R a+rX,go-w /opt/ultrafuzz /opt/ultrafuzz-smithers-seed";
 }
 
 export function modalWorkerEntrypointCommand(subscriptionProvider?: ModelProvider): string {
@@ -1546,7 +1614,7 @@ export async function overseeModalBenchmarkOnce(
   const recoveryPolicy = modalRecoveryPolicyForNodeTimeout(config.node_timeout_seconds, input.policy);
 
   return withModalLaunchStateLock(statePath, async () => {
-    const launchState = parseModalLaunchState(JSON.parse(await readFile(statePath, "utf8")) as unknown);
+    const launchState = await requiredModalLaunchStateDocument(statePath);
     if (launchState.logical_run_id !== config.run_id) {
       throw new Error(`launch state belongs to ${launchState.logical_run_id}, not ${config.run_id}`);
     }
@@ -1632,10 +1700,7 @@ export async function overseeModalBenchmarkOnce(
           }
 
           const inspected = await inspectModalRecoveryVolume(modal, app, image, volume, launch.remote_root);
-          const workerStatus = latestModalWorkerStatus(
-            [parseJson(inspected.files["status.json"] ?? "{}"), parseJson(inspected.files["result.json"] ?? "{}")],
-            launch
-          );
+          const workerStatus = latestPersistedWorkerStatus(inspected.files, launch);
           const complete = isModalRecoveryResultComplete(inspected.canonical, workerStatus);
           const observedAt = new Date(now()).toISOString();
           const decision = reconcileModalRecoveryRow({
@@ -1975,7 +2040,6 @@ async function launchModalRecoveryWorker(input: {
         workdir: "/opt/ultrafuzz",
         env: {
           ULTRAFUZZ_MODAL_RUN_ID: input.launchState.logical_run_id,
-          ULTRAFUZZ_MODAL_MODEL: JSON.stringify(input.model),
           ULTRAFUZZ_MODAL_REMOTE_ROOT: record.remote_root,
           ULTRAFUZZ_MODAL_VOLUME_RELATIVE_ROOT: modalVolumeRelativeRoot(record.remote_root)
         },
@@ -2007,7 +2071,15 @@ async function launchModalRecoveryWorker(input: {
       if (sandbox !== undefined) await terminateRecoveryOwner(sandbox).catch(() => undefined);
       row = markModalRecoveryWorkerStopped(row, worker.generation, "exited", new Date(input.now()).toISOString());
       setModalRecoveryRow(input.recoveryState, row);
-      await writeModalRecoveryState(input.recoveryStatePath, input.recoveryState).catch(() => undefined);
+      try {
+        await writeModalRecoveryState(input.recoveryStatePath, input.recoveryState);
+      } catch (persistenceError) {
+        throw new AggregateError(
+          [error, persistenceError],
+          "Modal recovery launch and failure-state persistence both failed",
+          { cause: persistenceError }
+        );
+      }
       throw error;
     }
   } finally {
@@ -2100,103 +2172,161 @@ async function inspectModalRecoveryVolume(
     if (returnCode !== 0) {
       throw new Error(stderrText || stdoutText || `canonical recovery probe failed with exit code ${returnCode}`);
     }
-    return { files, canonical: parseCanonicalRecoveryProgress(parseJson(stdoutText)) };
+    return {
+      files,
+      canonical: parseCanonicalRecoveryProgress(parseJson(stdoutText, "canonical recovery probe output"))
+    };
   } finally {
     await inspector.terminate({ wait: true });
   }
 }
 
-export function modalCanonicalRecoveryProbeCommand(remoteRoot: string, resolvedMountRoot = "/data"): string[] {
+export function modalCanonicalRecoveryProbeCommand(
+  remoteRoot: string,
+  resolvedMountRoot = "/data",
+  artifactsModulePath = MODAL_ARTIFACTS_MODULE_PATH
+): string[] {
   const source = String.raw`
 const fs = require("node:fs");
 const path = require("node:path");
+const { pathToFileURL } = require("node:url");
 const root = process.argv[1];
+const artifactsModulePath = process.argv[2];
 const runsRoot = path.join(root, "workspace", "target", ".ultrafuzz", "runs");
 function unavailable() {
   process.stdout.write("{}");
   process.exit(0);
 }
-function readJson(file) {
+function isNotFound(error) {
+  let current = error;
+  for (let depth = 0; depth < 8 && current !== null && typeof current === "object"; depth += 1) {
+    if (current.code === "ENOENT") return true;
+    current = current.cause;
+  }
+  return false;
+}
+function readRequired(reader) {
   try {
-    return JSON.parse(fs.readFileSync(file, "utf8"));
-  } catch {
-    unavailable();
+    return reader();
+  } catch (error) {
+    if (isNotFound(error)) unavailable();
+    throw error;
   }
 }
-let candidates = [];
-try {
-  for (const name of fs.readdirSync(runsRoot)) {
-    const statePath = path.join(runsRoot, name, "state.json");
-    try {
-      candidates.push({ statePath, modified: fs.statSync(statePath).mtimeMs });
-    } catch {}
+async function main() {
+  let candidates = [];
+  try {
+    for (const name of fs.readdirSync(runsRoot)) {
+      const statePath = path.join(runsRoot, name, "state.json");
+      try {
+        candidates.push({ statePath, modified: fs.statSync(statePath).mtimeMs });
+      } catch (error) {
+        if (!isNotFound(error)) throw error;
+      }
+    }
+  } catch (error) {
+    if (isNotFound(error)) unavailable();
+    throw error;
   }
-} catch {}
-if (candidates.length === 0) {
-  process.stdout.write("{}");
-  process.exit(0);
+  if (candidates.length === 0) unavailable();
+  candidates.sort((left, right) => right.modified - left.modified);
+  const statePath = candidates[0].statePath;
+  const artifacts = await import(pathToFileURL(artifactsModulePath).href);
+  if (typeof artifacts.readRunState !== "function" || typeof artifacts.readRunPlanDocument !== "function") {
+    throw new Error("canonical artifact readers are unavailable");
+  }
+  const state = readRequired(() => artifacts.readRunState(statePath));
+  const plan = readRequired(() => artifacts.readRunPlanDocument(path.join(path.dirname(statePath), "plan.json"), state.run_id));
+  const successful = new Set(["succeeded", "reused-from-prior-run"]);
+  const logical = new Map();
+  for (const node of Object.values(state.nodes)) {
+    const logicalId = node.logical_node_id === undefined ? node.node_id : node.logical_node_id;
+    const group = logical.get(logicalId) || [];
+    group.push(node);
+    logical.set(logicalId, group);
+  }
+  const successfulNodes = Array.from(logical.values()).filter((group) =>
+    group.every((node) => successful.has(node.status))
+  );
+  const lastSuccessAt = successfulNodes
+    .flat()
+    .map((node) => node.finished_at)
+    .filter((value) => value !== undefined)
+    .sort((left, right) => Date.parse(left) - Date.parse(right))
+    .at(-1);
+  process.stdout.write(JSON.stringify({
+    status: state.status,
+    successful_nodes: successfulNodes.length,
+    total_nodes: logical.size,
+    planned_nodes: plan.topology.logical_nodes,
+    last_transition_at: state.last_transition_at,
+    ...(lastSuccessAt === undefined ? {} : { last_success_at: lastSuccessAt })
+  }));
 }
-candidates.sort((left, right) => right.modified - left.modified);
-const statePath = candidates[0].statePath;
-const state = readJson(statePath);
-const plan = readJson(path.join(path.dirname(statePath), "plan.json"));
-const nodes = state && typeof state.nodes === "object" && state.nodes !== null ? Object.values(state.nodes) : [];
-const successful = new Set(["succeeded", "reused-from-prior-run"]);
-const logical = new Map();
-for (const node of nodes) {
-  if (!node || typeof node !== "object" || typeof node.status !== "string") continue;
-  const logicalId =
-    typeof node.logical_id === "string" && node.logical_id.trim()
-      ? node.logical_id
-      : typeof node.logical_node_id === "string" && node.logical_node_id.trim()
-        ? node.logical_node_id
-        : typeof node.node_id === "string" && node.node_id.trim()
-          ? node.node_id
-          : undefined;
-  if (logicalId === undefined) continue;
-  const group = logical.get(logicalId) || [];
-  group.push(node);
-  logical.set(logicalId, group);
-}
-const successfulNodes = Array.from(logical.values()).filter((group) => group.every((node) => successful.has(node.status)));
-const lastSuccessAt = successfulNodes
-  .flat()
-  .map((node) => node.finished_at)
-  .filter((value) => typeof value === "string" && Number.isFinite(Date.parse(value)))
-  .sort()
-  .at(-1);
-process.stdout.write(JSON.stringify({
-  status: typeof state.status === "string" ? state.status : "unknown",
-  successful_nodes: successfulNodes.length,
-  total_nodes: logical.size,
-  planned_nodes: Number.isSafeInteger(plan?.topology?.logical_nodes) ? plan.topology.logical_nodes : -1,
-  last_transition_at: typeof state.last_transition_at === "string" ? state.last_transition_at : state.created_at,
-  ...(lastSuccessAt === undefined ? {} : { last_success_at: lastSuccessAt })
-}));`;
-  return ["node", "-e", source, resolvePersistentRemoteRoot(remoteRoot, resolvedMountRoot)];
+void main();`;
+  return [
+    "node",
+    "-e",
+    source,
+    resolvePersistentRemoteRoot(remoteRoot, resolvedMountRoot),
+    path.resolve(artifactsModulePath)
+  ];
 }
 
 export function isModalRecoveryResultComplete(
   canonical: ModalRecoveryCanonicalProgress | undefined,
   workerStatus: ModalWorkerStatus | undefined
 ): boolean {
-  return (
-    canonical !== undefined &&
+  if (canonical === undefined) return false;
+  if (
     canonical.successful_nodes === canonical.total_nodes &&
     isModalWorkerStatusComplete(workerStatus, canonical.total_nodes)
+  ) {
+    return true;
+  }
+
+  // A verifier-backed task-output failure is a completed task outcome, not a
+  // stalled worker. Bind the terminal worker counts to the same canonical
+  // progress snapshot before settling the overseer row so an unrelated or
+  // partial failure contract cannot suppress infrastructure recovery.
+  return (
+    canonical.status === "failed" &&
+    workerStatus?.terminal === true &&
+    workerStatus.category === "genuine-task-outcome" &&
+    workerStatus.retryable === false &&
+    workerStatus.error_code === "genuine-evaluation-failure" &&
+    workerStatus.node_counts?.succeeded === canonical.successful_nodes &&
+    workerStatus.node_counts.failed === canonical.total_nodes - canonical.successful_nodes &&
+    workerStatus.node_counts.failed > 0 &&
+    workerStatus.node_counts.remaining === 0
   );
 }
 
 function parseCanonicalRecoveryProgress(value: unknown): ModalRecoveryCanonicalProgress | undefined {
   const record = recoveryRecord(value);
+  if (record !== undefined && Object.keys(record).length === 0) return undefined;
+  const allowedKeys = new Set([
+    "status",
+    "successful_nodes",
+    "total_nodes",
+    "planned_nodes",
+    "last_transition_at",
+    "last_success_at"
+  ]);
+  const keys = record === undefined ? [] : Object.keys(record);
   const status = recoveryString(record, "status");
   const successfulNodes = recoveryCount(record, "successful_nodes");
   const totalNodes = recoveryCount(record, "total_nodes");
   const plannedNodes = recoveryCount(record, "planned_nodes");
   const lastTransitionAt = recoveryString(record, "last_transition_at");
   const lastSuccessAt = recoveryString(record, "last_success_at");
+  const hasLastSuccessAt = record !== undefined && Object.prototype.hasOwnProperty.call(record, "last_success_at");
   if (
+    record === undefined ||
+    keys.some((key) => !allowedKeys.has(key)) ||
+    keys.length !== (hasLastSuccessAt ? 6 : 5) ||
     status === undefined ||
+    !CANONICAL_RUN_STATUSES.has(status) ||
     successfulNodes === undefined ||
     totalNodes === undefined ||
     plannedNodes === undefined ||
@@ -2205,9 +2335,9 @@ function parseCanonicalRecoveryProgress(value: unknown): ModalRecoveryCanonicalP
     totalNodes > plannedNodes ||
     lastTransitionAt === undefined ||
     !Number.isFinite(Date.parse(lastTransitionAt)) ||
-    (lastSuccessAt !== undefined && !Number.isFinite(Date.parse(lastSuccessAt)))
+    (hasLastSuccessAt && (lastSuccessAt === undefined || !Number.isFinite(Date.parse(lastSuccessAt))))
   ) {
-    return undefined;
+    throw new Error("canonical recovery probe returned invalid progress evidence");
   }
   return {
     status,
@@ -2520,7 +2650,7 @@ export async function collectModalBenchmark(input: {
       const { state, app, image } = await requiredLaunchStateForInspection(input.statePath, modal);
       for (const launch of state.launches) {
         const volume = await modal.volumes.fromName(launch.volume_name, { createIfMissing: false });
-        const files = await readModalCollectResultFilesWithStatusRetry({
+        const files = await readModalCollectResultFiles({
           launch,
           readFiles: () =>
             readVolumeFiles(modal, app, image, volume, launch.remote_root, [
@@ -2591,7 +2721,10 @@ export async function collectModalBenchmark(input: {
         const selectedEvidence: { files: Readonly<Record<string, string>>; forbiddenSecretValues: string[] } = {
           files: {
             ...selectedWorkerEvidence.files,
-            [MODAL_RECOVERY_LIFECYCLE_FILE]: `${JSON.stringify(recoveryLifecycle, null, 2)}\n`
+            [MODAL_RECOVERY_LIFECYCLE_FILE]: serializeModalDocument(
+              MODAL_RECOVERY_LIFECYCLE_SCHEMA_ID,
+              recoveryLifecycle
+            ).bytes.toString("utf8")
           },
           forbiddenSecretValues: selectedWorkerEvidence.forbiddenSecretValues
         };
@@ -2631,8 +2764,8 @@ export async function collectModalBenchmark(input: {
           const contents = files[MODAL_PUBLIC_RESULT_FILE];
           if (contents === undefined) throw new Error(`public benchmark result is not ready for ${launch.slug}`);
           if (configuredModel === undefined) throw new Error(`public benchmark config is missing ${launch.slug}`);
-          const bundle = parsePublicBenchmarkBundle(
-            JSON.parse(contents) as unknown,
+          const bundle = parsePublicBenchmarkBundleBytes(
+            Buffer.from(contents, "utf8"),
             await publicBenchmarkCollectionSecretValues(
               publicCollection!.config,
               configuredModel,
@@ -2672,11 +2805,7 @@ export async function publicBenchmarkCollectionSecretValues(
       ? [requiredAnyEnv(env, runnerApiKeySourceEnv(model.provider))]
       : await kimiSubscriptionAuthSecretValues(model.model, env);
   return [
-    ...new Set([
-      ...retainedSecretValues,
-      ...runnerSecretValues,
-      requiredEnv(env, config.braintrust.judge_api_key_env ?? "OPENAI_API_KEY")
-    ])
+    ...new Set([...retainedSecretValues, ...runnerSecretValues, requiredEnv(env, config.braintrust.judge_api_key_env)])
   ];
 }
 
@@ -2930,7 +3059,7 @@ export function modalBenchmarkSecretValues(
 function secretEnvNames(config: ModalBenchmarkConfig, model: ModalModelSpec): Set<string> {
   const names = new Set<string>();
   if (isPublicModalBenchmarkConfig(config)) {
-    names.add(config.braintrust.judge_api_key_env ?? "OPENAI_API_KEY");
+    names.add(config.braintrust.judge_api_key_env);
   } else {
     if (privateEvalProvider(config) === "braintrust") names.add(config.braintrust.api_key_env);
     names.add(privateJudgeApiKeyEnv(config));
@@ -3006,17 +3135,8 @@ async function requiredLaunchStateForInspection(
   statePath: string,
   modal: ModalClient
 ): Promise<{ state: ModalLaunchState; app: App; image: Image }> {
-  const absolute = path.resolve(statePath);
-  let raw: unknown;
-  try {
-    raw = JSON.parse(await readFile(absolute, "utf8")) as unknown;
-  } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-      throw new Error(`Modal launch state not found: ${absolute}`, { cause: error });
-    }
-    throw error;
-  }
-  const { state, image } = await resolveModalLaunchStateImageForInspection(raw, modal.images);
+  const state = await requiredModalLaunchStateDocument(statePath);
+  const { image } = await resolveModalLaunchStateImageForInspection(state, modal.images);
   const app = await modal.apps.fromName(state.app, { createIfMissing: false });
   return { state, app, image };
 }
@@ -3024,32 +3144,16 @@ async function requiredLaunchStateForInspection(
 /**
  * Resolve the immutable image identity that status and collect use to inspect a launch.
  *
- * Current and previous launch states persist the exact image ID. Looking them up by the
- * published name would let a concurrent same-name build silently rebind inspection to a
- * different image before the fingerprint check runs. Only v1 states, whose schema predates
- * `image_id`, use the bounded name-based compatibility path.
+ * Current launch states persist the exact image ID. Looking them up by the published name
+ * would let a concurrent same-name build silently rebind inspection to a different image
+ * before the fingerprint check runs.
  */
 export async function resolveModalLaunchStateImageForInspection(
   value: unknown,
-  images: Pick<ModalClient["images"], "fromId" | "fromName">
+  images: Pick<ModalClient["images"], "fromId">
 ): Promise<{ state: ModalLaunchState; image: Image }> {
-  if (!isLegacyModalLaunchStateWithoutImageId(value)) {
-    const state = parseCompatibleModalLaunchState(value);
-    const image = await images.fromId(state.image_id);
-    assertStateImage(state, image);
-    return { state, image };
-  }
-
-  const metadata = launchStateMetadata(value);
-  const image = await images.fromName(metadata.image);
-  const state = parseCompatibleModalLaunchState(value, {
-    imageId: image.imageId,
-    fingerprints: {
-      config: "0".repeat(64),
-      source: "0".repeat(64),
-      image: fingerprintModalImage(metadata.image, image.imageId)
-    }
-  });
+  const state = parseModalLaunchState(value);
+  const image = await images.fromId(state.image_id);
   assertStateImage(state, image);
   return { state, image };
 }
@@ -3058,31 +3162,16 @@ async function requiredCurrentLaunchStateForTermination(
   statePath: string,
   modal: ModalClient
 ): Promise<{ state: ModalLaunchState; app: App }> {
-  const absolute = path.resolve(statePath);
-  let raw: unknown;
-  try {
-    raw = JSON.parse(await readFile(absolute, "utf8")) as unknown;
-  } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-      throw new Error(`Modal launch state not found: ${absolute}`, { cause: error });
-    }
-    throw error;
-  }
-  const state = parseModalLaunchState(raw);
+  const state = await requiredModalLaunchStateDocument(statePath);
   const app = await modal.apps.fromName(state.app, { createIfMissing: false });
   return { state, app };
 }
 
-function launchStateMetadata(value: unknown): { app: string; image: string } {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error("Modal launch state is invalid");
-  }
-  const app = (value as { app?: unknown }).app;
-  const image = (value as { image?: unknown }).image;
-  if (typeof app !== "string" || app.trim() === "" || typeof image !== "string" || image.trim() === "") {
-    throw new Error("Modal launch state is invalid");
-  }
-  return { app, image };
+async function requiredModalLaunchStateDocument(statePath: string): Promise<ModalLaunchState> {
+  const absolute = path.resolve(statePath);
+  const state = await readModalLaunchState(absolute);
+  if (state === undefined) throw new Error(`Modal launch state not found: ${absolute}`);
+  return state;
 }
 
 function assertStateImage(state: ModalLaunchState, image: Image): void {
@@ -3190,54 +3279,42 @@ export async function readOptionalModalSandboxText(
   }
 }
 
-function parseJson(value: string): unknown {
+function parseJson(value: string, label: string): unknown {
   try {
-    return JSON.parse(value) as unknown;
-  } catch {
-    return {};
+    return parseStrictJsonBytes(Buffer.from(value, "utf8"), {
+      maxBytes: 16 * 1024 * 1024,
+      maxDepth: 128,
+      maxItems: 100_000,
+      maxProperties: 100_000
+    });
+  } catch (error) {
+    throw new Error(`${label} is not strict JSON`, { cause: error });
   }
 }
 
-export async function readModalCollectResultFilesWithStatusRetry(input: {
+export async function readModalCollectResultFiles(input: {
   readFiles: () => Promise<Record<string, string>>;
   launch: Pick<ModalLaunchRecord, "generation" | "attempt">;
-  maxAttempts?: number;
-  retryDelayMs?: number;
 }): Promise<Record<string, string>> {
-  const maxAttempts = input.maxAttempts ?? 3;
-  if (!Number.isSafeInteger(maxAttempts) || maxAttempts <= 0) {
-    throw new Error("Modal collection status retry attempts must be positive");
-  }
-  const retryDelayMs = input.retryDelayMs ?? 250;
-  if (!Number.isSafeInteger(retryDelayMs) || retryDelayMs < 0) {
-    throw new Error("Modal collection status retry delay must be non-negative");
-  }
-
-  let files: Record<string, string> | undefined;
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    files = await input.readFiles();
-    if (!hasRetryableLiveStatusCollectionMismatch(files, input.launch)) return files;
-    if (attempt < maxAttempts && retryDelayMs > 0) await sleep(retryDelayMs);
-  }
-  return files!;
-}
-
-function hasRetryableLiveStatusCollectionMismatch(
-  files: Readonly<Record<string, string>>,
-  launch: Pick<ModalLaunchRecord, "generation" | "attempt">
-): boolean {
-  const status = files["status.json"];
-  return status !== undefined && parseModalWorkerResult(parseJson(status), launch) === undefined;
+  const files = await input.readFiles();
+  latestPersistedWorkerStatus(files, input.launch);
+  return files;
 }
 
 function latestPersistedWorkerStatus(
   files: Readonly<Record<string, string>>,
   launch: Pick<ModalLaunchRecord, "generation" | "attempt">
 ) {
-  return latestModalWorkerStatus(
-    [parseJson(files["status.json"] ?? "{}"), parseJson(files["result.json"] ?? "{}")],
-    launch
-  );
+  const values = (["status.json", "result.json"] as const).flatMap((name) => {
+    const contents = files[name];
+    if (contents === undefined) return [];
+    const value = parseModalDocumentBytes(MODAL_WORKER_RESULT_SCHEMA_ID, Buffer.from(contents, "utf8")).value;
+    if (parseModalWorkerResult(value, launch) === undefined) {
+      throw new Error(`Modal ${name} does not match the current launch attempt`);
+    }
+    return [value];
+  });
+  return latestModalWorkerStatus(values, launch);
 }
 
 /**
@@ -3276,7 +3353,13 @@ export function assertSanitizedModalCollectedFiles(
   for (const name of ["status.json", "result.json"] as const) {
     const contents = files[name];
     if (contents === undefined) continue;
-    const contract = parseModalWorkerResult(parseJson(contents), launch);
+    let contract: ReturnType<typeof parseModalWorkerResult>;
+    try {
+      const value = parseModalDocumentBytes(MODAL_WORKER_RESULT_SCHEMA_ID, Buffer.from(contents, "utf8")).value;
+      contract = parseModalWorkerResult(value, launch);
+    } catch (error) {
+      throw new Error(`refusing to collect an unsanitized Modal ${name}`, { cause: error });
+    }
     if (contract === undefined || (name === "result.json" && contract.result_type !== "terminal")) {
       throw new Error(`refusing to collect an unsanitized Modal ${name}`);
     }
@@ -3289,7 +3372,7 @@ export function assertSanitizedModalCollectedFiles(
   if (diagnosticsContents !== undefined) {
     let diagnostics: PublicEvalDiagnostics;
     try {
-      diagnostics = parsePublicEvalDiagnostics(JSON.parse(diagnosticsContents) as unknown);
+      diagnostics = parsePublicEvalDiagnostics(parseJson(diagnosticsContents, "public eval diagnostics"));
       assertPublicEvalDiagnosticsContainsNoSecrets(diagnostics, forbiddenSecretValues);
     } catch (error) {
       throw new Error("refusing to collect unsanitized public eval diagnostics", { cause: error });
@@ -3300,7 +3383,9 @@ export function assertSanitizedModalCollectedFiles(
   if (recoveryContents !== undefined) {
     let recovery: ReturnType<typeof parseModalRecoveryLifecycleDocument>;
     try {
-      recovery = parseModalRecoveryLifecycleDocument(JSON.parse(recoveryContents) as unknown);
+      recovery = parseModalRecoveryLifecycleDocument(
+        parseModalDocumentBytes(MODAL_RECOVERY_LIFECYCLE_SCHEMA_ID, Buffer.from(recoveryContents, "utf8")).value
+      );
       assertModalRecoveryLifecycleContainsNoSecrets(recovery, forbiddenSecretValues);
     } catch (error) {
       throw new Error("refusing to collect an unsanitized Modal recovery lifecycle", { cause: error });
@@ -3483,7 +3568,7 @@ function isGenericWorkerLifecycleLine(line: string, forbiddenSecretValues: reado
   );
   if (match === null) return false;
   try {
-    const value = JSON.parse(Buffer.from(match[1]!, "base64url").toString("utf8")) as unknown;
+    const value = parseStrictJsonBytes(Buffer.from(match[1]!, "base64url"));
     return (
       Array.isArray(value) &&
       value.length >= 1 &&
@@ -3494,7 +3579,8 @@ function isGenericWorkerLifecycleLine(line: string, forbiddenSecretValues: reado
           entry !== null &&
           !Array.isArray(entry) &&
           Object.keys(entry).sort().join(",") === "code,message" &&
-          (entry as Record<string, unknown>).code === "WORKFLOW_SUBMISSION_FAILED" &&
+          typeof (entry as Record<string, unknown>).code === "string" &&
+          /^[A-Z][A-Z0-9_]{0,127}$/u.test((entry as Record<string, string>).code!) &&
           typeof (entry as Record<string, unknown>).message === "string" &&
           Buffer.byteLength((entry as Record<string, string>).message!, "utf8") <= 1_000 &&
           redactSecretsInText((entry as Record<string, string>).message!) ===

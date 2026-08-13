@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { isDeepStrictEqual } from "node:util";
+
+import { isPublicModalBenchmarkConfig, loadModalBenchmarkConfig } from "../../packages/modal/dist/config.js";
 
 import {
   readBenchmarkControlManifest,
@@ -13,65 +14,12 @@ import { modalBenchmarkPolicyDimensions } from "./validate-modal-benchmark-launc
 const FULL_COMMIT = /^[0-9a-f]{40}$/u;
 const GENERATION = /^[1-9][0-9]*-[1-9][0-9]*$/u;
 const MAX_CONTROL_FILE_BYTES = 1024 * 1024;
-const CONFIG_KEYS = [
-  "app_name",
-  "braintrust",
-  "image_name",
-  "loops",
-  "models",
-  "node_timeout_seconds",
-  "public_benchmark",
-  "run_id",
-  "schema_version"
-];
-const MODEL_KEYS = ["agent", "auth_mode", "model", "provider", "reasoning", "slug"];
-const THREAT_MODEL_MODE = "threat-model";
-const THREAT_MODEL_SLUG = "benchmark-threat-model-gpt-5-6-luna-high";
-const THREAT_MODEL_PAIR = `ultrafuzz-bench-${THREAT_MODEL_SLUG}`;
-const THREAT_MODEL_MAX_RUNTIME_SECONDS = 15_000;
-const THREAT_MODEL_CONTROL_TIMEOUT_SECONDS =
-  THREAT_MODEL_MAX_RUNTIME_SECONDS + 5 * 60 + 45 * 60 + 5 * 60 + 20 * 60 + 5 * 60;
-const THREAT_MODEL_TARGETS = [
-  {
-    id: "very-liquid-vaults-foundry",
-    repository: "https://github.com/rheo-xyz/very-liquid-vaults",
-    revision: "e50384709a696c86ab0440bbbc3dd14a5f4ff6ec",
-    framework: "foundry"
-  },
-  {
-    id: "venus-isolated-pools-hardhat",
-    repository: "https://github.com/code-423n4/2023-05-venus",
-    revision: "9853f6f4fe906b635e214b22de9f627c6a17ba5b",
-    framework: "hardhat"
-  },
-  {
-    id: "stableswap-ng-vyper",
-    repository: "https://github.com/curvefi/stableswap-ng",
-    revision: "8c78731ed43c22e6bcdcb5d39b0a7d02f8cb0386",
-    framework: "vyper"
-  }
-];
-
-function threatModelCleanupDimensions() {
-  return {
-    targets: THREAT_MODEL_TARGETS.map((target) => ({ ...target })),
-    targetIds: THREAT_MODEL_TARGETS.map((target) => target.id),
-    targetCount: 3,
-    trialsPerVariant: 1,
-    maxParallelEvalRows: 3,
-    maxParallelWorkflowNodes: 8,
-    maxRuntimeSeconds: THREAT_MODEL_MAX_RUNTIME_SECONDS,
-    // One three-row wave: 15,000 seconds of runtime plus the generator's
-    // cleanup, scoring, reporting, preparation, and polling allowances.
-    controlTimeoutSeconds: THREAT_MODEL_CONTROL_TIMEOUT_SECONDS
-  };
-}
 
 export function prepareModalBenchmarkCleanup(input) {
   if (!FULL_COMMIT.test(input.expectedCandidate)) throw new Error("cleanup candidate must be a full commit");
   if (!GENERATION.test(input.expectedGeneration)) throw new Error("cleanup generation is invalid");
-  if (input.expectedMode !== "smoke" && input.expectedMode !== "full" && input.expectedMode !== THREAT_MODEL_MODE) {
-    throw new Error("cleanup mode must be smoke, full, or threat-model");
+  if (input.expectedMode !== "smoke" && input.expectedMode !== "full") {
+    throw new Error("cleanup mode must be smoke or full");
   }
   if (!/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(input.expectedRepository)) {
     throw new Error("cleanup repository is invalid");
@@ -85,7 +33,7 @@ export function prepareModalBenchmarkCleanup(input) {
   }
 
   const [producerRunId, producerRunAttempt] = input.expectedGeneration.split("-");
-  const dimensions = input.expectedMode === THREAT_MODEL_MODE ? threatModelCleanupDimensions() : input.policyDimensions;
+  const dimensions = input.policyDimensions;
   if (dimensions === undefined) throw new Error("cleanup policy dimensions are required");
   const manifest = readBenchmarkControlManifest(manifestPath, {
     candidateCommit: input.expectedCandidate,
@@ -118,13 +66,14 @@ export function prepareModalBenchmarkCleanup(input) {
     if (fs.realpathSync(absoluteConfig) !== absoluteConfig) {
       throw new Error(`incomplete benchmark config ${index} escapes its control root`);
     }
-    const config = JSON.parse(fs.readFileSync(absoluteConfig, "utf8"));
-    assertExactKeys(config, CONFIG_KEYS, `incomplete benchmark config ${index}`);
-    if (!Array.isArray(config.models) || config.models.length !== 1) {
-      throw new Error(`incomplete benchmark config ${index} must contain exactly one model`);
+    const config = loadModalBenchmarkConfig(absoluteConfig);
+    if (!isPublicModalBenchmarkConfig(config)) {
+      throw new Error(`incomplete benchmark config ${index} must be a public benchmark config`);
     }
     const model = config.models[0];
-    assertExactKeys(model, MODEL_KEYS, `incomplete benchmark config ${index} model`);
+    if (model === undefined || config.models.length !== 1) {
+      throw new Error(`incomplete benchmark config ${index} must contain exactly one model`);
+    }
     validateAutomaticPairConfig(
       config,
       model,
@@ -140,14 +89,6 @@ export function prepareModalBenchmarkCleanup(input) {
       },
       modelSlugs
     );
-    if (input.expectedMode === THREAT_MODEL_MODE) {
-      validateThreatModelCleanupConfig(config, model, value, {
-        candidateCommit: input.expectedCandidate,
-        repository: input.expectedRepository,
-        generation: input.expectedGeneration,
-        targets: dimensions.targets
-      });
-    }
     configs.add(configPath);
     states.add(statePath);
     rows.push(`${configPath}\t${statePath}`);
@@ -157,66 +98,10 @@ export function prepareModalBenchmarkCleanup(input) {
   return { imageName: manifest.image_name, rows };
 }
 
-function validateThreatModelCleanupConfig(config, model, pair, context) {
-  const expected = {
-    schema_version: "ultrafuzz.modal.benchmark.v1",
-    run_id: `ci-${context.generation}-threat-model-ultrafuzz-bench-openai`,
-    app_name: "ultrafuzz-evals",
-    image_name: `ufz-runner-${context.candidateCommit}`,
-    braintrust: {
-      project: "ultrafuzz-public-benchmarks",
-      api_key_env: "BRAINTRUST_API_KEY",
-      judge_api_key_env: "OPENAI_API_KEY",
-      judge_url: "https://api.openai.com/v1/chat/completions",
-      judge_credential_ttl_seconds: 57_600
-    },
-    node_timeout_seconds: 1800,
-    loops: 1,
-    models: [
-      {
-        slug: THREAT_MODEL_SLUG,
-        model: "gpt-5.6-luna",
-        provider: "openai",
-        agent: "CodexAgent",
-        reasoning: "high",
-        auth_mode: "api-key"
-      }
-    ],
-    public_benchmark: {
-      benchmark: "ultrafuzz-bench",
-      lane: THREAT_MODEL_MODE,
-      runner_model_profile: THREAT_MODEL_SLUG,
-      candidate_repository: context.repository,
-      candidate_commit: context.candidateCommit,
-      targets: context.targets,
-      max_runtime_seconds: THREAT_MODEL_MAX_RUNTIME_SECONDS
-    }
-  };
-  if (
-    pair.pair !== THREAT_MODEL_PAIR ||
-    pair.model_slug !== THREAT_MODEL_SLUG ||
-    pair.provider !== "openai" ||
-    !isDeepStrictEqual(model, expected.models[0]) ||
-    !isDeepStrictEqual(config, expected)
-  ) {
-    throw new Error("threat-model cleanup config does not match the trusted canonical release gate");
-  }
-}
-
 function assertBoundedRegularFile(filePath, label) {
   const stat = fs.lstatSync(filePath);
   if (stat.isSymbolicLink() || !stat.isFile() || stat.size < 1 || stat.size > MAX_CONTROL_FILE_BYTES) {
     throw new Error(`${label} must be a bounded regular file`);
-  }
-}
-
-function assertExactKeys(value, expected, label) {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`${label} must be an object`);
-  }
-  const actual = Object.keys(value).sort();
-  if (JSON.stringify(actual) !== JSON.stringify([...expected].sort())) {
-    throw new Error(`${label} contains unexpected fields`);
   }
 }
 
@@ -235,8 +120,8 @@ function main(args) {
     expectedMode,
     policyRoot
   ] = args;
-  if (expectedMode !== "smoke" && expectedMode !== "full" && expectedMode !== THREAT_MODEL_MODE) {
-    throw new Error("cleanup mode must be smoke, full, or threat-model");
+  if (expectedMode !== "smoke" && expectedMode !== "full") {
+    throw new Error("cleanup mode must be smoke or full");
   }
   const benchmark = expectedMode === "full" ? "evmbench" : "ultrafuzz-bench";
   const trustedPolicyRoot = validateBenchmarkPolicyFiles({
@@ -251,8 +136,7 @@ function main(args) {
     expectedRepository,
     expectedGeneration,
     expectedMode,
-    policyDimensions:
-      expectedMode === THREAT_MODEL_MODE ? undefined : modalBenchmarkPolicyDimensions(trustedPolicyRoot, expectedMode)
+    policyDimensions: modalBenchmarkPolicyDimensions(trustedPolicyRoot, expectedMode)
   });
 }
 

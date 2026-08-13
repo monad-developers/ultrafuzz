@@ -4,6 +4,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import type { PublicEvalDiagnostics, PublicEvalDiagnosticsRow } from "../../packages/evals/src/public-diagnostics.js";
+
 import {
   automaticSmokeOperationalSoftFail,
   decideSmokeSoftFail,
@@ -40,10 +42,7 @@ describe("smoke soft-fail description", () => {
     const document = diagnostics([row(false, ["terminal-report-missing"])]);
     document.summary.scoring_ready = true;
 
-    expect(describeSmokeSoftFail(write(document))).toEqual({
-      validated: false,
-      detail: "public eval diagnostics are internally inconsistent (summary scoring_ready=true against 0/1 ready rows)"
-    });
+    expect(() => describeSmokeSoftFail(write(document))).toThrow(/public eval diagnostics are present but invalid/u);
   });
 
   it("refuses to read readiness out of a document that describes no rows", () => {
@@ -51,31 +50,47 @@ describe("smoke soft-fail description", () => {
     // The vacuous shape #354 fixed: an empty row set claiming readiness.
     document.summary.scoring_ready = true;
 
-    expect(describeSmokeSoftFail(write(document))).toEqual({
+    expect(() => describeSmokeSoftFail(write(document))).toThrow(/public eval diagnostics are present but invalid/u);
+  });
+
+  it("reports only an absent diagnostics file as unknown", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "smoke-soft-fail-"));
+    roots.push(root);
+    expect(describeSmokeSoftFail(path.join(root, "absent.json"))).toEqual({
       validated: false,
-      detail: "public eval diagnostics describe no rows, so there is nothing to score"
+      detail: "public eval diagnostics are absent, so scoring readiness is unknown"
     });
   });
 
-  it("reports an absent, unparseable, or non-regular diagnostics file as unknown", () => {
+  it("rejects malformed-present, non-regular, oversized, and symlinked diagnostics", () => {
+    const invalidPath = writeBytes("{ not json");
+    expect(() => describeSmokeSoftFail(invalidPath)).toThrow(/public eval diagnostics are present but invalid/u);
+
+    const arrayPath = writeBytes("[]");
+    expect(() => describeSmokeSoftFail(arrayPath)).toThrow(/public eval diagnostics are present but invalid/u);
+
+    const invalidUtf8Path = writeBytes(Buffer.from([0x7b, 0xff, 0x7d]));
+    expect(() => describeSmokeSoftFail(invalidUtf8Path)).toThrow(/public eval diagnostics are present but invalid/u);
+
+    const duplicate = JSON.stringify(diagnostics([row(true)])).replace(
+      "{",
+      '{"schema_version":"ultrafuzz.modal.public-eval-diagnostics.v2",'
+    );
+    const duplicatePath = writeBytes(duplicate);
+    expect(() => describeSmokeSoftFail(duplicatePath)).toThrow(/public eval diagnostics are present but invalid/u);
+
+    const oversizedPath = writeBytes(Buffer.alloc(1024 * 1024 + 1, 0x20));
+    expect(() => describeSmokeSoftFail(oversizedPath)).toThrow(/public eval diagnostics are present but invalid/u);
+
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "smoke-soft-fail-"));
     roots.push(root);
-    const unknown = {
-      validated: false,
-      detail: "no readable public eval diagnostics, so scoring readiness is unknown"
-    };
+    expect(() => describeSmokeSoftFail(root)).toThrow(/public eval diagnostics are present but invalid/u);
 
-    expect(describeSmokeSoftFail(path.join(root, "absent.json"))).toEqual(unknown);
-
-    const invalidPath = path.join(root, "invalid.json");
-    fs.writeFileSync(invalidPath, "{ not json");
-    expect(describeSmokeSoftFail(invalidPath)).toEqual(unknown);
-
-    const arrayPath = path.join(root, "array.json");
-    fs.writeFileSync(arrayPath, "[]");
-    expect(describeSmokeSoftFail(arrayPath)).toEqual(unknown);
-
-    expect(describeSmokeSoftFail(root)).toEqual(unknown);
+    const targetPath = path.join(root, "target.json");
+    fs.writeFileSync(targetPath, `${JSON.stringify(diagnostics([row(true)]))}\n`);
+    const symlinkPath = path.join(root, "diagnostics.json");
+    fs.symlinkSync(targetPath, symlinkPath);
+    expect(() => describeSmokeSoftFail(symlinkPath)).toThrow(/public eval diagnostics are present but invalid/u);
   });
 });
 
@@ -213,22 +228,80 @@ describe("smoke soft-fail ref policy", () => {
   });
 });
 
-type Row = { scoring_ready: boolean; reason_codes: string[] };
-type Diagnostics = { summary: { scoring_ready: boolean }; rows: Row[] };
+type Row = Pick<PublicEvalDiagnosticsRow, "scoring_ready" | "reason_codes" | "terminal_report_present">;
 
-function row(scoringReady: boolean, reasonCodes: string[] = []): Row {
-  return { scoring_ready: scoringReady, reason_codes: reasonCodes };
+function row(scoringReady: boolean, reasonCodes: PublicEvalDiagnosticsRow["reason_codes"] = []): Row {
+  return {
+    scoring_ready: scoringReady,
+    reason_codes: reasonCodes,
+    terminal_report_present: !reasonCodes.includes("terminal-report-missing")
+  };
 }
 
-function diagnostics(rows: Row[]): Diagnostics {
-  return { summary: { scoring_ready: rows.length > 0 && rows.every((entry) => entry.scoring_ready) }, rows };
+function diagnostics(rows: Row[]): PublicEvalDiagnostics {
+  const completeRows: PublicEvalDiagnosticsRow[] = rows.map((entry, index) => ({
+    row_id: `row-${index + 1}`,
+    target_id: `target-${index + 1}`,
+    variant_id: "variant-one",
+    trial_id: `trial-${index + 1}`,
+    run_status: "launched",
+    final_status: "succeeded",
+    workflow_status: "succeeded",
+    workflow_terminal: true,
+    terminal_disposition: "clean",
+    terminal_report_present: entry.terminal_report_present,
+    workflow_ids: [`workflow-${index + 1}`],
+    diagnostic_codes: [],
+    failed_nodes: [],
+    scoring_ready: entry.scoring_ready,
+    reason_codes: entry.reason_codes
+  }));
+  return {
+    schema_version: "ultrafuzz.modal.public-eval-diagnostics.v2",
+    stage: "post-eval-pre-score",
+    benchmark: "evmbench",
+    lane: "smoke",
+    model_slug: "model-one",
+    model: "model-one",
+    reasoning: "high",
+    candidate_commit: "a".repeat(40),
+    eval_run_id: "logical-run-model-one",
+    created_at: "2026-01-01T00:00:00.000Z",
+    lineage: {
+      logical_run_id: "logical-run",
+      generation: 1,
+      attempt: 1,
+      attempt_id: "attempt-one",
+      config_fingerprint: "b".repeat(64),
+      source_fingerprint: "c".repeat(64),
+      image_fingerprint: "d".repeat(64),
+      model_fingerprint: "e".repeat(64)
+    },
+    summary: {
+      planned: completeRows.length,
+      launched: completeRows.length,
+      launch_failed: 0,
+      run_records_missing: 0,
+      workflow_succeeded: completeRows.length,
+      workflow_failed: 0,
+      workflow_nonterminal: 0,
+      genuine_task_failure_rows: 0,
+      terminal_reports_present: completeRows.filter((entry) => entry.terminal_report_present).length,
+      scoring_ready: completeRows.length > 0 && completeRows.every((entry) => entry.scoring_ready)
+    },
+    rows: completeRows
+  };
 }
 
-function write(document: Diagnostics): string {
+function write(document: unknown): string {
+  return writeBytes(`${JSON.stringify(document)}\n`);
+}
+
+function writeBytes(contents: string | Buffer): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "smoke-soft-fail-"));
   roots.push(root);
   const diagnosticsPath = path.join(root, "public-eval-diagnostics.json");
-  fs.writeFileSync(diagnosticsPath, `${JSON.stringify(document)}\n`);
+  fs.writeFileSync(diagnosticsPath, contents);
   return diagnosticsPath;
 }
 

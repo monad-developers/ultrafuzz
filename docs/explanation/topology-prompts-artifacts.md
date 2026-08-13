@@ -63,15 +63,35 @@ This makes handoffs explicit:
 
 - The prompt tells the agent what to write.
 - The topology declares a named, versioned contract for the file.
+- Planning binds that contract to an exact schema ID, schema digest, bundle
+  digest, and validator build.
+- Every JSON producer runs the displayed schema-validation command after its
+  final write and before returning.
 - A deterministic workflow task validates the artifact before dependents start.
 - Ultrafuzz persists contract identities, content hashes, and prerequisite
   manifest digests.
 - Downstream prompts reference it through typed template helpers.
 
-Findings are normalized as arrays in `findings.json`. Final reports live in
-agent-written final-report artifacts such as
+The displayed command resolves through a host-managed launcher placed before
+target-controlled `PATH` entries. A real fixture preflight checks that launcher,
+the schema registry, and the validator build before model work. The command is
+producer feedback, not a new inter-node message or validation-receipt schema.
+The runtime repeats shape validation and then applies contextual gates.
+
+Findings are strict arrays in `findings.json`; Ultrafuzz does not normalize or
+repair them after the agent returns. Final reports live in agent-written
+final-report artifacts such as
 `artifacts/final-report/report.md` and `artifacts/final-report/report.json`.
-The structured terminal report is validated before scoring or publication.
+The structured terminal report is validated without rewriting before scoring
+or publication. Missing or malformed required output is terminal for that node;
+it is not synthesized from another artifact or from the model's final message.
+
+Runtime-owned `ultrafuzz.artifact-manifest.v3` files and
+`ultrafuzz.artifact-verification.v2` markers record the exact output contract,
+schema binding, content digest, and prerequisite digests. They can describe or
+reject agent bytes, but they do not authorize rewriting those bytes. Old
+manifest versions and old contract IDs are not upgraded through a compatibility
+path.
 
 ## Runtime Owns Product Evidence
 

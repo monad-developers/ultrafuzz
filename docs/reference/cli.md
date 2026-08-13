@@ -3,7 +3,7 @@
 The CLI binary is `ultrafuzz`.
 
 Every command accepts `--project <path>`. Commands that support automation
-accept `--json` and emit the `ultrafuzz.cli.result.v1` envelope.
+accept `--json` and emit the `ultrafuzz.cli.result.v2` envelope.
 
 ## Commands
 
@@ -11,6 +11,7 @@ accept `--json` and emit the `ultrafuzz.cli.result.v1` envelope.
 | --------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
 | `ultrafuzz init`                        | Create root config plus `.ultrafuzz/**` product surfaces and workflow plumbing.                                |
 | `ultrafuzz validate`                    | Validate config, topology, prompts, path guards, agent references, and trust posture without launching agents. |
+| `ultrafuzz json validate`               | Validate one JSON document against a strict local Draft 2020-12 schema without mutation.                       |
 | `ultrafuzz run`                         | Validate, render prompts, build run evidence, compile a workflow, and launch a linked workflow run.            |
 | `ultrafuzz config audit-profiles`       | List shipped audit profiles, intended uses, and selected topologies.                                           |
 | `ultrafuzz config audit-profile <name>` | Show one profile's effective project topology and settings.                                                    |
@@ -64,15 +65,26 @@ JSON output has this shape:
 
 ```json
 {
-  "schema_version": "ultrafuzz.cli.result.v1",
-  "command": "validate",
+  "schema_version": "ultrafuzz.cli.result.v2",
+  "command": "init",
   "ok": true,
   "diagnostics": [],
-  "data": {}
+  "data": {
+    "project_root": "/project",
+    "created": [],
+    "preserved": [],
+    "overwritten": []
+  }
 }
 ```
 
-Machine consumers should read `ok`, `diagnostics`, and `data`.
+Machine consumers should read `ok`, `diagnostics`, and `data`. The v2 envelope
+is intentionally breaking and command-discriminated: every known command has a
+closed `data` shape, public diagnostics omit private implementation details,
+and unknown invocation failures can emit only `ok: false` with `data: null`.
+Only explicit operator workflow input and redacted third-party tool
+input/output retain deliberately open nested JSON. Version 1 is not accepted
+or converted.
 
 ## Init
 
@@ -110,13 +122,65 @@ Validation covers typed TOML config, `.ultrafuzz/topology.yml`, project prompt
 copies, safe paths, reference nodes, agent references, and trusted local
 execution posture. It does not launch agents.
 
+## JSON Validate
+
+```bash
+ultrafuzz json validate \
+  --schema <schema.json> \
+  --file <artifact.json> \
+  [--ref <local-schema.json>] \
+  [--max-errors <1-1000>] \
+  [--json]
+```
+
+This is a single-document validator, separate from project-wide `ultrafuzz
+validate`. It uses strict Draft 2020-12 Ajv validation, standard formats, strict
+UTF-8 and JSON parsing, duplicate-key rejection, offline local references, and
+bounded worker execution. `--ref` may be repeated. No stdin, YAML, JSON5,
+remote schema fetching, coercion, defaults, property removal, or repair is
+supported.
+
+The exit contract is:
+
+| Exit | Meaning                                                                                               |
+| ---: | ----------------------------------------------------------------------------------------------------- |
+|    0 | The artifact conforms to the schema.                                                                  |
+|    1 | The artifact is unreadable, malformed, has duplicate keys, or violates the schema.                    |
+|    2 | Invocation, schema/reference loading, schema compilation, resource limits, or validator setup failed. |
+
+Human-readable failures go to stderr. `--json` emits the standard
+`ultrafuzz.cli.result.v2` envelope. Neither success nor failure changes the
+schema or artifact bytes.
+
+Checked-in artifact, eval, Modal, and topology schemas are loaded from composed
+package-local registries. A registered schema whose filename or bytes differ
+from its pinned entry is a setup failure. Successful JSON output reports
+whether the schema was registered plus its fragment-free ID, schema SHA-256,
+owning package's bundle SHA-256, validator build identity, and the artifact
+SHA-256. These identities bind the producer command to the later host check;
+they are not a mutable validation receipt.
+
+For schema-backed producer tasks, Ultrafuzz places a run-owned trusted launcher
+before target-controlled `PATH` entries and validates a real known-valid fixture
+before model work. Modal uses a root-owned, read-only
+`/usr/local/bin/ultrafuzz`. Missing, stale, shadowed, or tampered validator
+identity is an exit-`2` setup failure, not a reason to use another binary or
+edit the supplied schema.
+
+Producer prompts display one exact command per JSON output. The producer must
+run every command after its final write and before returning; an exit `1` draft
+is corrected and rerun in the same session. Once the session returns, the host
+checks the same bytes and then applies named semantic/context gates. It never
+repairs, converts, normalizes, synthesizes, or falls back to another artifact,
+and post-session shape failure is terminal rather than a model retry.
+
 ## Run
 
 ```bash
 ultrafuzz run \
   [--project <path>] \
   [--run-id <id>] \
-  [--input <json-or-path>] \
+  [--input-json <strict-json> | --input-file <json-path>] \
   [--prompt <text>] \
   [--agent <agent-ref>] \
   [--model <model>] \
@@ -126,10 +190,17 @@ ultrafuzz run \
   [--json]
 ```
 
-`--input` accepts inline JSON or a project-relative JSON file path. Model-only
-overrides keep the configured agent and reasoning. When `--agent` selects
-another agent, backend-specific reasoning is cleared, including when `--model`
-also pins a replacement model.
+`--input-json` and `--input-file` are mutually exclusive. Inline input is
+always strict RFC 8259 JSON and is never retried as a path after a parse error.
+Relative file paths resolve from the project root. File input is read from one
+bounded, non-symlink regular-file snapshot and is rejected if it changes
+during the read. Both forms reject invalid UTF-8,
+duplicate keys, malformed JSON, and non-finite numbers. Their application data
+is explicitly operator-defined; Ultrafuzz validates that it is JSON but does
+not infer, repair, normalize, or convert its domain shape. Model-only overrides
+keep the configured agent and reasoning. When `--agent` selects another agent,
+backend-specific reasoning is cleared, including when `--model` also pins a
+replacement model.
 `--max-concurrency` caps workflow task submission concurrency.
 `--audit-profile` selects a profile for one command, while `--topology-path`
 atomically replaces the project or profile topology for that command.
@@ -238,25 +309,48 @@ Pace: 4 finished in the last 10m
 `--watch` re-polls every `--interval` seconds (default 30) until the run
 reaches a terminal state (`succeeded`, `failed`, `timed-out`, or `canceled`)
 or the poll fails. With `--json --watch`, every poll writes one
-newline-delimited `ultrafuzz.cli.result.v1` envelope so the stream pipes into
+newline-delimited `ultrafuzz.cli.result.v2` envelope so the stream pipes into
 `jq` and other line-oriented tools; without `--watch`, `--json` keeps the
 existing pretty-printed single envelope.
 
 `stats` derives its snapshot on demand; it does not read or write a precomputed
 statistics artifact. Local-run mode synchronizes linked workflow evidence when
-available, then joins `attempts.jsonl`, `usage.jsonl`, `state.json`,
-`graph.json`, and `run.json`. The table shows each node's status, completed and
-currently elapsed execution time, token components, estimated spend, model,
-and attempt count. JSON output uses `ultrafuzz.stats.v1` inside the normal CLI
-envelope and additionally exposes retries, executed/reused counts, outcomes,
-failure categories, completeness, unattributed usage, and cumulative run
-accounting.
+available, then reads `attempts.jsonl`, `usage.jsonl`, `state.json`,
+`graph.json`, `graph.fingerprint`, and `run.json` twice as one evidence set.
+The command accepts the bytes only when both complete reads match, retries a
+recognized mutation race at most three times, and timestamps the snapshot
+immediately after the accepted second read. The table shows each node's status,
+completed and currently elapsed execution time, token components, estimated
+spend, model, and attempt count. JSON output uses `ultrafuzz.stats.v1` inside
+the normal CLI envelope and additionally exposes retries, executed/reused
+counts, outcomes, failure categories, completeness, unattributed usage, and
+cumulative run accounting.
 
 `stats --bundle` reads an `ultrafuzz report bundle` ZIP directly without
 extracting it and without the original checkout, workflow backend, provider,
-or network. Report bundles already carry the required top-level ledgers.
-Historical bundles with missing ledgers produce warnings and `null` statistics
-instead of invented zeroes. An `artifacts/` subtree by itself is not sufficient.
+or network. It accepts only the registered
+`ultrafuzz.report-bundle-manifest.v3` contract and validates the current run,
+state, graph, graph-fingerprint, and ledger contracts against the manifest run
+ID. The manifest creation time anchors live elapsed calculations and must not
+precede any historical timestamp in the included state, attempts, usage, or
+accounting evidence, or be later than the host statistics clock.
+
+A genuinely absent attempt ledger produces a warning and unavailable attempt
+counts and durations. A genuinely absent usage ledger produces warnings and
+`null` usage; metadata cumulative accounting is also hidden because the
+missing ledger cannot authenticate it. A local run that still claims
+accounting after losing `usage.jsonl`, a present-but-empty usage ledger paired
+with accounting, invalid UTF-8, duplicate JSON keys, malformed rows, duplicate
+or conflicting ledger identities, cross-run rows, and aliased or duplicate ZIP
+members fail the command. An `artifacts/` subtree by itself is not sufficient.
+
+Bundle creation requires current sealed workflow authority, but manifest v3
+does not archive `workflow-run-link-journal.json` or the sealed workflow
+control files. Offline statistics therefore prove agreement among the bundled
+workflow IDs, control generation, state provenance, graph tasks, and ledgers;
+they cannot independently prove the historical backend link that originally
+authorized those IDs. The v3 manifest is a snapshot contract, not a standalone
+attestation of workflow-link history.
 
 The JSON envelope carries stable machine-readable fields alongside the existing
 counts:
@@ -345,7 +439,7 @@ Without `--watch` it returns a bounded typed array with `limit` and
 `truncated`;
 `--limit` defaults to 200 and is capped at 2000. `--watch` streams new events
 incrementally rather than buffering the run, printing one redacted event per
-line in human mode and one newline-delimited `ultrafuzz.cli.result.v1` envelope
+line in human mode and one newline-delimited `ultrafuzz.cli.result.v2` envelope
 per event with `--json`. `--history` replays existing history before streaming.
 
 `node` takes a workflow node ID as already reported by `ultrafuzz inspect`. It
@@ -522,14 +616,45 @@ ultrafuzz eval history [eval-run-id] \
   [--json]
 ```
 
-`eval analyze` reads a finalized handoff ZIP directly and discovers its
-adjudication output through `handoff/current-state.json`. Available report
-types are `all`, `upset` (`upsert` alias), `scores`
+`eval analyze` reads a finalized handoff ZIP directly. It accepts only the
+current, closed benchmark-analysis contracts. The archive contains an exact
+`handoff/current-state.json` member, optionally below one canonical top-level
+directory. That document uses
+`ultrafuzz.eval.adjudication-handoff.v1` and declares the exact adjudication
+output path. The declared directory must contain these versioned documents:
+
+- `finding-manifest.json` — `ultrafuzz.eval.finding-manifest.v1`, with typed row
+  descriptors, explicit candidate labels/titles, explicit finding IDs and
+  severities, and declared row archive/run metadata paths;
+- `instance-to-cluster.json` — `ultrafuzz.eval.instance-clusters.v1`, with an
+  `instances` array and explicit nullable match/duplicate fields; and
+- `ground-truth-tp-credits.json` —
+  `ultrafuzz.eval.ground-truth-credits.v1`, with a typed `clusters` array.
+
+Each declared row archive and nested run metadata member is read by exact path.
+Nested `run.json` must be `ultrafuzz.run-metadata.v2`, must identify the row's
+declared `runId`, and must contain validated `accounting.cumulative` evidence.
+The CLI rejects unmatched findings, rows, candidates, clusters or credits;
+count drift; duplicate projected identities; inconsistent duplicate targets;
+and duplicate-reference cycles before analysis.
+
+Historical field names and shapes are not compatibility inputs. In particular,
+`schemaVersion`, unversioned array/map payloads, candidate `heading`, lowercase
+severity aliases, titles containing an inferred finding label, current-only
+accounting, and malformed source references are rejected. The CLI does not
+rewrite slashes, search ZIP/tar suffixes, supply metadata defaults, parse IDs
+from titles, normalize severity, filter invalid rows/references, or repair a
+document. A prior handoff must be regenerated against the current schemas.
+
+Available report types are `all`, `upset` (`upsert` alias), `scores`
 (`precision-recall-f1` alias), `provenance`, `table`, `cost`, and `pairwise`.
 The pairwise chart connects matched Ultrafuzz/no-fuzz rows across ground-truth
 TP credits, F1, and total tokens. Charts are written as PNG and editable SVG
-alongside CSV, JSON, and Markdown reports. Condition score summaries report
-the mean, median, and sample standard deviation across completed rows.
+alongside CSV, JSON, and Markdown reports. `provenance.json`,
+`source_manifest.json`, and `analysis_manifest.json` are validated against
+their current JSON Schemas and semantic joins before they are written.
+Condition score summaries report the mean, median, and sample standard
+deviation across the declared rows.
 
 The input and output paths are required to be outside `--project`. Handoff
 archives and generated reports may contain private target details,

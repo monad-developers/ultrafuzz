@@ -3,8 +3,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { parseStrictJsonBytes } from "../../packages/artifacts/dist/index.js";
 import { loadBenchmarkCohortManifest, loadBenchmarkLanesManifest } from "../../packages/evals/dist/index.js";
 import { parseModalBenchmarkConfig } from "../../packages/modal/dist/config.js";
+import { MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID } from "../../packages/modal/dist/modal-contracts.js";
+import { serializeModalDocument } from "../../packages/modal/dist/modal-documents.js";
 import {
   PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS,
   PUBLIC_BENCHMARK_PREPARATION_TIMEOUT_SECONDS,
@@ -17,6 +20,7 @@ import {
 
 const PUBLIC_NODE_TIMEOUT_SECONDS = 1800;
 const PUBLIC_CONTROL_POLLING_GRACE_SECONDS = 5 * 60;
+const MAX_BENCHMARK_MODELS_JSON_BYTES = 64 * 1024;
 const SAFE_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const SAFE_REASONING = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
 const MODEL_KEYS = ["model", "provider", "reasoning"];
@@ -38,7 +42,7 @@ if (!/^[0-9a-f]{40}$/.test(candidateCommit ?? "")) throw new Error("candidate co
 if (!/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository ?? "")) {
   throw new Error("candidate repository must be a canonical public GitHub URL");
 }
-if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(generation ?? "")) throw new Error("generation is invalid");
+if (!/^[1-9][0-9]*-[1-9][0-9]*$/.test(generation ?? "")) throw new Error("generation is invalid");
 if (mode !== "smoke" && mode !== "full") throw new Error("benchmark mode must be smoke or full");
 if (!outputDirectory) throw new Error("output directory is required");
 
@@ -97,8 +101,9 @@ for (const model of models) {
     `${candidateCommit}:${generation}:${mode}:${benchmark}:${model.provider}`
   );
   const config = parseModalBenchmarkConfig({
-    schema_version: "ultrafuzz.modal.benchmark.v1",
+    schema_version: "ultrafuzz.modal.benchmark.v2",
     run_id: runId,
+    app_name: "ultrafuzz-evals",
     image_name: imageName,
     public_benchmark: {
       benchmark,
@@ -113,7 +118,8 @@ for (const model of models) {
       project: "ultrafuzz-public-benchmarks",
       api_key_env: "BRAINTRUST_API_KEY",
       judge_api_key_env: "OPENAI_API_KEY",
-      judge_url: "https://api.openai.com/v1/chat/completions"
+      judge_url: "https://api.openai.com/v1/chat/completions",
+      judge_credential_ttl_seconds: 57_600
     },
     node_timeout_seconds: PUBLIC_NODE_TIMEOUT_SECONDS,
     loops: 1,
@@ -136,6 +142,7 @@ for (const model of models) {
 
 const maxLiveRowsPerPair = Math.min(matrixRowsPerPair, maxParallelEvalRows);
 const manifest = {
+  schema_version: "ultrafuzz.modal.benchmark-control-manifest.v1",
   candidate_commit: candidateCommit,
   repository,
   generation,
@@ -162,13 +169,14 @@ const manifest = {
   },
   pairs
 };
-fs.writeFileSync(path.join(root, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
+const serializedManifest = serializeModalDocument(MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID, manifest);
+fs.writeFileSync(path.join(root, "manifest.json"), serializedManifest.bytes, { mode: 0o600 });
 console.log(JSON.stringify(manifest));
 
 function benchmarkModels(benchmarkMode, checkedInProfiles) {
-  const configured = process.env.BENCHMARK_MODELS_JSON?.trim();
+  const configured = process.env.BENCHMARK_MODELS_JSON;
   let requested;
-  if (configured === undefined || configured === "") {
+  if (configured === undefined) {
     requested = checkedInProfiles.map((profile) => ({
       provider: providerForAgent(profile.agent),
       model: profile.model,
@@ -176,16 +184,21 @@ function benchmarkModels(benchmarkMode, checkedInProfiles) {
     }));
   } else {
     try {
-      requested = JSON.parse(configured);
+      requested = parseStrictJsonBytes(Buffer.from(configured, "utf8"), {
+        maxBytes: MAX_BENCHMARK_MODELS_JSON_BYTES,
+        maxDepth: 8,
+        maxItems: 16,
+        maxProperties: 64
+      });
     } catch (error) {
-      throw new Error("BENCHMARK_MODELS_JSON must be valid JSON", { cause: error });
+      throw new Error("BENCHMARK_MODELS_JSON must be valid strict JSON", { cause: error });
     }
   }
   if (!Array.isArray(requested)) throw new Error("BENCHMARK_MODELS_JSON must be an array");
 
   const validated = requested.map((entry, index) => validateModelEntry(entry, index));
   const expectedProviders =
-    benchmarkMode === "smoke" && configured !== undefined && configured !== ""
+    benchmarkMode === "smoke" && configured !== undefined
       ? validated.length === 1
         ? [validated[0].provider]
         : []

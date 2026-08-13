@@ -11,20 +11,14 @@ export interface DefaultProfileOverrides {
 const MODEL_TIMEOUT_SECONDS = 86_400;
 const KIMI_REASONING_EFFORTS = new Set(["low", "high", "max"]);
 const DEEPSEEK_REASONING_EFFORTS = new Set(["low", "high", "max"]);
-const PROFILE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-const SAFE_AGENT_REF_PATTERN = /^[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/;
+const PROFILE_ID_PATTERN = /^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+const SAFE_AGENT_REF_PATTERN = /^(?!.*\.\.)[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/u;
 
-const profileIdSchema = z
-  .string()
-  .regex(PROFILE_ID_PATTERN)
-  .refine((value) => !value.split(/[\\/]/).some((segment) => segment === "..") && !value.includes(".."));
+const profileIdSchema = z.string().regex(PROFILE_ID_PATTERN);
 
-const safeAgentRefSchema = z
-  .string()
-  .regex(SAFE_AGENT_REF_PATTERN)
-  .refine((value) => !value.includes(".."));
+const safeAgentRefSchema = z.string().regex(SAFE_AGENT_REF_PATTERN);
 
-const modelProfileSchema = z.object({
+const modelProfileSchema = z.strictObject({
   id: z.string(),
   agent: safeAgentRefSchema,
   model: z
@@ -38,44 +32,15 @@ const modelProfileSchema = z.object({
   timeoutSeconds: z.number().int().min(1).max(MODEL_TIMEOUT_SECONDS).optional()
 });
 
-const modelProfileIdsSchema = z.record(profileIdSchema, z.unknown());
-const modelProfileValuesSchema = z.record(z.string(), modelProfileSchema);
+const modelProfilesSchema = z.record(profileIdSchema, modelProfileSchema);
 
-const modelDefaultReferenceSchema = z
-  .object({
-    default: z.string(),
-    profiles: z.record(z.string(), z.unknown())
-  })
-  .superRefine((models, context) => {
-    if (models.profiles[models.default] === undefined) {
-      context.addIssue({
-        code: "custom",
-        path: ["default"],
-        message: "CONFIG_MODEL_DEFAULT_UNKNOWN"
-      });
-    }
-  });
-
-const modelProfileIdMatchSchema = z
-  .record(z.string(), z.object({ id: z.string() }).passthrough())
-  .superRefine((profiles, context) => {
-    for (const [id, profile] of Object.entries(profiles).sort()) {
-      if (profile.id !== id) {
-        context.addIssue({
-          code: "custom",
-          path: [id, "id"],
-          message: "CONFIG_MODEL_PROFILE_ID_MISMATCH"
-        });
-      }
-    }
-  });
+type ModelProfileIssue = Pick<ZodIssue, "code" | "message" | "path">;
 
 export function validateModelProfiles(config: ResolvedConfig): ConfigDiagnostic[] {
   const issues = [
-    ...schemaIssues(modelDefaultReferenceSchema, config.models),
-    ...schemaIssues(modelProfileIdMatchSchema, config.models.profiles),
-    ...schemaIssues(modelProfileIdsSchema, config.models.profiles),
-    ...schemaIssues(modelProfileValuesSchema, config.models.profiles)
+    ...modelProfileSemanticIssues(config),
+    ...schemaIssues(modelProfilesSchema, config.models.profiles),
+    ...invalidKeyProfileValueIssues(config)
   ].sort(compareModelProfileIssues);
   return [...issues.map((issue) => modelProfileDiagnostic(issue, config)), ...validateProviderModelProfiles(config)];
 }
@@ -125,12 +90,35 @@ export function applyDefaultProfileOverrides(config: ResolvedConfig, overrides: 
   }
 }
 
-function schemaIssues(schema: z.ZodType, value: unknown): ZodIssue[] {
+function modelProfileSemanticIssues(config: ResolvedConfig): ModelProfileIssue[] {
+  const issues: ModelProfileIssue[] = [];
+  if (config.models.profiles[config.models.default] === undefined) {
+    issues.push({ code: "custom", path: ["default"], message: "CONFIG_MODEL_DEFAULT_UNKNOWN" });
+  }
+  for (const [id, profile] of Object.entries(config.models.profiles).sort()) {
+    if (profile.id !== id) {
+      issues.push({ code: "custom", path: [id, "id"], message: "CONFIG_MODEL_PROFILE_ID_MISMATCH" });
+    }
+  }
+  return issues;
+}
+
+function invalidKeyProfileValueIssues(config: ResolvedConfig): ModelProfileIssue[] {
+  return Object.entries(config.models.profiles).flatMap(([id, profile]) => {
+    if (profileIdSchema.safeParse(id).success) return [];
+    return schemaIssues(modelProfileSchema, profile).map((issue) => ({
+      ...issue,
+      path: [id, ...issue.path]
+    }));
+  });
+}
+
+function schemaIssues(schema: z.ZodType, value: unknown): ModelProfileIssue[] {
   const parsed = schema.safeParse(value);
   return parsed.success ? [] : parsed.error.issues;
 }
 
-function modelProfileDiagnostic(issue: ZodIssue, config: ResolvedConfig): ConfigDiagnostic {
+function modelProfileDiagnostic(issue: ModelProfileIssue, config: ResolvedConfig): ConfigDiagnostic {
   const code = modelProfileDiagnosticCode(issue);
   return diagnostic(
     code,
@@ -140,7 +128,7 @@ function modelProfileDiagnostic(issue: ZodIssue, config: ResolvedConfig): Config
   );
 }
 
-function modelProfileDiagnosticCode(issue: ZodIssue): string {
+function modelProfileDiagnosticCode(issue: ModelProfileIssue): string {
   if (issue.code === "custom" && issue.message.startsWith("CONFIG_")) {
     return issue.message;
   }
@@ -161,7 +149,7 @@ function modelProfileDiagnosticCode(issue: ZodIssue): string {
   }
 }
 
-function modelProfileDiagnosticMessage(code: string, issue: ZodIssue, config: ResolvedConfig): string {
+function modelProfileDiagnosticMessage(code: string, issue: ModelProfileIssue, config: ResolvedConfig): string {
   const id = modelProfileId(issue);
   const profile = id === undefined ? undefined : config.models.profiles[id];
   switch (code) {
@@ -182,7 +170,7 @@ function modelProfileDiagnosticMessage(code: string, issue: ZodIssue, config: Re
   }
 }
 
-function modelProfileDiagnosticPath(issue: ZodIssue): string[] {
+function modelProfileDiagnosticPath(issue: ModelProfileIssue): string[] {
   if (issue.path[0] === "default") {
     return ["models", "default"];
   }
@@ -194,7 +182,7 @@ function modelProfilePathSegment(segment: string): string {
   return segment === "timeoutSeconds" ? "timeout_seconds" : segment;
 }
 
-function modelProfileId(issue: ZodIssue): string | undefined {
+function modelProfileId(issue: ModelProfileIssue): string | undefined {
   if (issue.path[0] === "default") {
     return undefined;
   }
@@ -239,7 +227,7 @@ function validateProviderModelProfiles(config: ResolvedConfig): ConfigDiagnostic
   return diagnostics;
 }
 
-function compareModelProfileIssues(left: ZodIssue, right: ZodIssue): number {
+function compareModelProfileIssues(left: ModelProfileIssue, right: ModelProfileIssue): number {
   const leftRank = modelProfileIssueRank(left);
   const rightRank = modelProfileIssueRank(right);
   return (
@@ -247,7 +235,7 @@ function compareModelProfileIssues(left: ZodIssue, right: ZodIssue): number {
   );
 }
 
-function modelProfileIssueRank(issue: ZodIssue): { section: number; id: string; field: number } {
+function modelProfileIssueRank(issue: ModelProfileIssue): { section: number; id: string; field: number } {
   if (issue.path[0] === "default") {
     return { section: 0, id: "", field: 0 };
   }
@@ -258,7 +246,7 @@ function modelProfileIssueRank(issue: ZodIssue): { section: number; id: string; 
   };
 }
 
-function modelProfileFieldRank(issue: ZodIssue): number {
+function modelProfileFieldRank(issue: ModelProfileIssue): number {
   const code = modelProfileDiagnosticCode(issue);
   switch (code) {
     case "CONFIG_MODEL_PROFILE_ID_MISMATCH":

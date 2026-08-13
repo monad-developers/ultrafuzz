@@ -77,5 +77,6 @@ Use strict assertions for returned amounts, balances, reserves, emitted public
 events, and revert behavior. If a red test depends on undocumented dust policy,
 record it as incomplete-spec instead of silently dropping it.
 
-Write structured findings to {{output_findings_path}}. Use an empty JSON array
-if no finding is confirmed.
+Write structured findings to {{output_findings_path}}. If no finding is
+confirmed, use only the empty form defined by the exact pinned schema in the
+central output contract.

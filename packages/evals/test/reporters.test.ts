@@ -13,6 +13,8 @@ import { EvalError } from "../src/utils.js";
 import type { EvalRunProvenance, EvalScoreSummary } from "../src/types.js";
 import {
   cleanRecoveryEquivalence,
+  currentPlannedGraph,
+  currentRowScore,
   recoveryEquivalenceSummary,
   testReportingPolicy,
   testRow,
@@ -180,30 +182,26 @@ describe("provider transport", () => {
 
 describe("graphFromPlannedGraph", () => {
   it("maps planned nodes into the provider row graph with group inference", () => {
-    const graph = graphFromPlannedGraph(
-      {
-        schema_version: "1.0",
-        groups: { setup: {}, strategies: {} },
-        nodes: [
-          {
-            id: "setup-1-a1",
-            logical_id: "setup-1",
-            kind: "agentic",
-            depends_on: [],
-            loop: { index: 0, count: 1 },
-            model_fanout: [{ model_profile_id: "eval-runner", model_name: "gpt-5.4-mini" }]
-          },
-          {
-            id: "strategies-fuzz-a1",
-            logical_id: "strategies-fuzz",
-            kind: "agentic",
-            depends_on: ["setup-1-a1"]
-          },
-          { id: "mystery", logical_id: "mystery", kind: "reference", depends_on: [] }
-        ]
-      },
-      "row-1"
-    );
+    const planned = currentPlannedGraph(["setup-1-a1", "strategies-fuzz-a1", "mystery"], undefined);
+    planned.groups = { setup: {}, strategies: {} };
+    planned.nodes[0]!.logical_id = "setup-1";
+    planned.nodes[0]!.model_fanout[0]!.model_profile_id = "eval-runner";
+    planned.nodes[0]!.model_fanout[0]!.model_name = "gpt-5.4-mini";
+    planned.nodes[1]!.depends_on = ["setup-1-a1"];
+    Object.assign(planned.nodes[2]!, {
+      kind: "reference",
+      prompt_path: "",
+      model_fanout: [],
+      reference: "monad-developers/ultrafuzz",
+      reference_revision: {
+        provider: "github",
+        repo: "monad-developers/ultrafuzz",
+        commit: "a".repeat(40),
+        paths: ["README.md"]
+      }
+    });
+
+    const graph = graphFromPlannedGraph(planned, "row-1");
     expect(graph.rowId).toBe("row-1");
     expect(graph.nodes).toHaveLength(3);
     expect(graph.nodes[0]).toMatchObject({
@@ -218,13 +216,73 @@ describe("graphFromPlannedGraph", () => {
     expect(graph.nodes[2]).toMatchObject({ group: "default", kind: "reference" });
   });
 
-  it("degrades unknown shapes to an empty graph", () => {
+  it("uses an empty graph only when graph.json is absent", () => {
     expect(graphFromPlannedGraph(undefined, "row-1")).toEqual({ rowId: "row-1", nodes: [] });
-    expect(graphFromPlannedGraph({ nodes: "nope" }, "row-1")).toEqual({ rowId: "row-1", nodes: [] });
+  });
+
+  it("rejects every malformed, schema-invalid, or semantically invalid present graph", () => {
+    expect(() => graphFromPlannedGraph({ nodes: "nope" }, "row-1")).toThrow("planned graph is schema-invalid");
+
+    const missingLogicalId = currentPlannedGraph(["setup-1"], undefined);
+    Reflect.deleteProperty(missingLogicalId.nodes[0]!, "logical_id");
+    expect(() => graphFromPlannedGraph(missingLogicalId, "row-1")).toThrow("planned graph is schema-invalid");
+
+    const unknownDependency = currentPlannedGraph(["setup-1"], undefined);
+    unknownDependency.nodes[0]!.depends_on = ["missing-node"];
+    expect(() => graphFromPlannedGraph(unknownDependency, "row-1")).toThrow(
+      'planned graph node "setup-1" depends on unknown node "missing-node"'
+    );
   });
 });
 
 describe("BraintrustReporter", () => {
+  it.each(["", "{", '{"id":"first","id":"shadow"}', "[]"])(
+    "rejects a non-strict Braintrust success response instead of substituting an empty object: %j",
+    async (payload) => {
+      const suite = testSuite("/tmp/gt");
+      const reporter = new BraintrustReporter({
+        apiKey: "secret",
+        project: "ultrafuzz-evals",
+        evalRunId: "eval-invalid-response",
+        policy: testReportingPolicy(),
+        fetchImpl: (async () => new Response(payload, { status: 200 })) as typeof fetch
+      });
+
+      await expect(
+        reporter.onPlan({
+          suite_path: "suite.yml",
+          project_root: "/tmp/project",
+          suite,
+          matrix: [testRow(suite)]
+        })
+      ).rejects.toMatchObject({ code: "EVAL_BRAINTRUST_RESPONSE_INVALID" });
+    }
+  );
+
+  it("requires every successful Braintrust response to be a JSON object", async () => {
+    const suite = testSuite("/tmp/gt");
+    let request = 0;
+    const reporter = new BraintrustReporter({
+      apiKey: "secret",
+      project: "ultrafuzz-evals",
+      evalRunId: "eval-invalid-insert-response",
+      policy: testReportingPolicy(),
+      fetchImpl: (async () => {
+        request += 1;
+        return new Response(request < 3 ? `{"id":"provider-${request}"}` : "[]", { status: 200 });
+      }) as typeof fetch
+    });
+
+    await expect(
+      reporter.onPlan({
+        suite_path: "suite.yml",
+        project_root: "/tmp/project",
+        suite,
+        matrix: [testRow(suite)]
+      })
+    ).rejects.toMatchObject({ code: "EVAL_BRAINTRUST_RESPONSE_INVALID" });
+  });
+
   it("mirrors comparison lineage and runtime fingerprints into provider metadata", async () => {
     const { requests, fetchImpl } = fakeFetch();
     const suite = testSuite("/tmp/generated-ground-truth");
@@ -238,6 +296,12 @@ describe("BraintrustReporter", () => {
         cohort_fingerprint: "cohort-generated",
         targets: [{ id: "target-a", repo: "https://example.com/generated", commit: "b".repeat(40), dirty: false }],
         ground_truth_sha256: { "target-a": "ground-truth-generated" },
+        ground_truth_subjects: {
+          "target-a": {
+            repository: "https://example.com/generated",
+            revision: "b".repeat(40)
+          }
+        },
         execution_policy: {
           revision: "ultrafuzz.eval-controller.v1",
           fingerprint: "policy-generated",
@@ -274,6 +338,7 @@ describe("BraintrustReporter", () => {
       recoveryEquivalence: cleanRecoveryEquivalence()
     });
     const summary: EvalScoreSummary = {
+      schema_version: "ultrafuzz.eval.score-summary.v2",
       eval_run_id: "eval-lineage",
       eval_run_root: "/tmp/generated-run",
       recall_threshold: 0.7,
@@ -294,12 +359,12 @@ describe("BraintrustReporter", () => {
           judge_models: ["judge-generated"],
           judge_panel: { total: 4, quorum: 3 },
           ground_truth_sha256: provenance.benchmark.ground_truth_sha256,
+          ground_truth_subjects: provenance.benchmark.ground_truth_subjects,
           fingerprint: "scoring-generated"
         }
       }
     };
-    const rowScore = {
-      row_id: row.id,
+    const rowScore = currentRowScore(row, {
       precision: 1,
       recall: 1,
       f1_score: 1,
@@ -309,7 +374,7 @@ describe("BraintrustReporter", () => {
       missed: 0,
       human_review_queue_count: 0,
       recovery_equivalence: cleanRecoveryEquivalence()
-    } as EvalScoreSummary["rows"][number];
+    });
     await reporter.onScores([rowScore], summary);
 
     const inserts = requests.filter((request) => request.url.includes("/insert"));
@@ -370,6 +435,7 @@ describe("BraintrustReporter", () => {
     });
     await reporter.onNodeEvent({
       eventId: "evt-4",
+      idempotencyKey: "ultrafuzz-event-stable-evt-4",
       rowId: row.id,
       nodeId: "setup-1",
       event: {
@@ -405,7 +471,7 @@ describe("BraintrustReporter", () => {
     expect(nodeInsert).toBeDefined();
     const nodeEvent = (nodeInsert?.body as { events: Array<Record<string, unknown>> }).events[0]!;
     expect(nodeEvent).toMatchObject({
-      id: "evt-4",
+      id: "ultrafuzz-event-stable-evt-4",
       span_parents: [`span-group-${row.id}-setup`],
       metrics: {
         start: Date.parse("2026-07-09T00:00:00.000Z") / 1000,

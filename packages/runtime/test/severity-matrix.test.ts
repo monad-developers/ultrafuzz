@@ -1,72 +1,45 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  expectedSeverityFromMatrix,
-  normalizeFinalReportSeverityRecord,
-  validateSeverityMatrixArtifact
-} from "../src/severity-matrix.js";
+import { expectedSeverityFromMatrix, validateSeverityMatrixArtifact } from "../src/severity-matrix.js";
 
-test("severity matrix caps low-likelihood findings", () => {
+test("severity matrix accepts only exact canonical levels", () => {
   assert.equal(expectedSeverityFromMatrix("High", "Low"), "Medium");
   assert.equal(expectedSeverityFromMatrix("Medium", "Low"), "Low");
   assert.equal(expectedSeverityFromMatrix("High", "Medium"), "High");
   assert.equal(expectedSeverityFromMatrix("Low", "High"), "Low");
+  assert.equal(expectedSeverityFromMatrix("high", "Low"), undefined);
+  assert.equal(expectedSeverityFromMatrix("High ", "Low"), undefined);
 });
 
-test("final report normalization reconciles severity aliases to the declared matrix", () => {
-  const result = normalizeFinalReportSeverityRecord({
-    severity: "High",
-    final_severity: "high",
-    severity_guess: "medium",
-    impact: "high",
-    likelihood: "low"
-  });
-
-  assert.equal(result.changed, true);
-  assert.deepEqual(result.value, {
-    severity: "Medium",
-    final_severity: "Medium",
-    severity_guess: "Medium",
-    impact: "High",
-    likelihood: "Low"
-  });
-  assert.deepEqual(
-    validateSeverityMatrixArtifact({
-      kind: "final-report",
-      artifactPath: "/tmp/report.json",
-      artifact: { issues: [result.value] }
-    }),
-    []
-  );
-});
-
-test("final report normalization does not infer missing matrix evidence", () => {
-  const issue = { severity: "High", impact: "High" };
-  assert.deepEqual(normalizeFinalReportSeverityRecord(issue), { value: issue, changed: false });
-});
-
-test("final report validation blocks matrix-inconsistent production issues", () => {
+test("final report validation accepts canonical matrix fields and ignores a preliminary severity guess", () => {
   const diagnostics = validateSeverityMatrixArtifact({
     kind: "final-report",
     artifactPath: "/tmp/report.json",
     artifact: {
-      schema_version: "1.0",
       issues: [
         {
-          title: "[H-01] - High impact low likelihood issue",
-          severity: "High",
+          severity: "Medium",
+          severity_guess: "High",
           impact: "High",
           likelihood: "Low"
-        },
-        {
-          title: "[M-01] - Medium impact low likelihood issue",
-          severity: "Medium",
-          impact: "Medium",
-          likelihood: "Low"
         }
-      ],
-      non_production_outcomes: []
+      ]
+    }
+  });
+
+  assert.deepEqual(diagnostics, []);
+});
+
+test("final report validation blocks matrix-inconsistent issues", () => {
+  const diagnostics = validateSeverityMatrixArtifact({
+    kind: "final-report",
+    artifactPath: "/tmp/report.json",
+    artifact: {
+      issues: [
+        { severity: "High", impact: "High", likelihood: "Low" },
+        { severity: "Medium", impact: "Medium", likelihood: "Low" }
+      ]
     }
   });
 
@@ -75,75 +48,55 @@ test("final report validation blocks matrix-inconsistent production issues", () 
   assert.match(diagnostics[1]?.message ?? "", /expected Low/);
 });
 
-test("final report validation accepts legacy adapter issue shape", () => {
-  const issue = {
-    schema_version: "1.0",
-    id: "finding-001",
-    title: "Source-backed protocol condition",
-    severity_guess: "medium",
-    confidence: "high",
-    status: "needs-review",
-    summary: "A concrete condition is supported by source and test evidence.",
-    affected_files: ["src/Example.sol"],
-    evidence: [{ kind: "generated-test", path: "generated-tests/Example.t.sol" }],
-    notes: ["impact=Medium", "likelihood=Medium"]
-  };
-  const diagnostics = validateSeverityMatrixArtifact({
-    kind: "final-report",
-    artifactPath: "/tmp/report.json",
-    artifact: {
-      schema_version: "ultrafuzz.e2e.report.v1",
-      issues: [issue],
-      findings: [issue]
-    }
-  });
-
-  assert.deepEqual(diagnostics, []);
-});
-
-test("severity classification validation rejects Critical and missing matrix fields", () => {
+test("severity validation rejects lowercase levels and legacy field aliases", () => {
   const diagnostics = validateSeverityMatrixArtifact({
     kind: "severity-classification",
     artifactPath: "/tmp/severity-classified-findings.json",
     artifact: [
       {
-        schema_version: "1.0",
-        id: "finding-1",
-        title: "No critical labels",
-        status: "needs-review",
-        final_severity: "Critical",
-        severity: "Critical",
-        severity_guess: "Critical"
+        severity: "medium",
+        impact: "High",
+        likelihood: "Low",
+        final_severity: "Medium",
+        impact_level: "High",
+        likelihood_level: "Low",
+        severity_classification: { impact: "High", likelihood: "Low" }
       }
     ]
   });
 
   assert.ok(diagnostics.some((diagnostic) => diagnostic.code === "SEVERITY_LEVEL_INVALID"));
-  assert.ok(diagnostics.some((diagnostic) => diagnostic.code === "SEVERITY_MATRIX_FIELD_MISSING"));
+  assert.equal(diagnostics.filter((diagnostic) => diagnostic.code === "SEVERITY_FIELD_ALIAS_UNSUPPORTED").length, 4);
 });
 
-test("severity classification accepts matrix-consistent final severity aliases", () => {
+test("severity classification rejects wrappers and does not parse matrix values from notes", () => {
+  const wrapped = validateSeverityMatrixArtifact({
+    kind: "severity-classification",
+    artifactPath: "/tmp/severity-classified-findings.json",
+    artifact: { findings: [{ severity: "Medium", impact: "High", likelihood: "Low" }] }
+  });
+  assert.deepEqual(
+    wrapped.map((diagnostic) => diagnostic.code),
+    ["SEVERITY_ARTIFACT_SHAPE_INVALID"]
+  );
+
+  const notesOnly = validateSeverityMatrixArtifact({
+    kind: "severity-classification",
+    artifactPath: "/tmp/severity-classified-findings.json",
+    artifact: [{ severity: "Medium", notes: ["impact=High", "likelihood=Low"] }]
+  });
+  assert.equal(notesOnly.filter((diagnostic) => diagnostic.code === "SEVERITY_MATRIX_FIELD_MISSING").length, 2);
+});
+
+test("severity validation reports non-object records instead of silently dropping them", () => {
   const diagnostics = validateSeverityMatrixArtifact({
     kind: "severity-classification",
     artifactPath: "/tmp/severity-classified-findings.json",
-    artifact: {
-      findings: [
-        {
-          schema_version: "1.0",
-          id: "finding-1",
-          title: "Consistent labels",
-          status: "needs-review",
-          final_severity: "Medium",
-          severity: "Medium",
-          severity_guess: "Medium",
-          impact: "High",
-          likelihood: "Low",
-          confidence: "High",
-          notes: ["impact=high", "likelihood=low"]
-        }
-      ]
-    }
+    artifact: [null]
   });
 
-  assert.deepEqual(diagnostics, []);
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => diagnostic.code),
+    ["SEVERITY_RECORD_SHAPE_INVALID"]
+  );
 });

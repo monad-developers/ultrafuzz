@@ -1,7 +1,12 @@
 import fs from "node:fs";
+import path from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { parseStrictJsonBytes, readRegularFileSnapshot } from "../../packages/artifacts/dist/index.js";
+
 const FULL_COMMIT = /^[0-9a-f]{40}$/u;
+const MAX_GITHUB_EVENT_BYTES = 4 * 1024 * 1024;
+const MAX_GITHUB_API_ENVELOPE_BYTES = 16 * 1024 * 1024;
 const PRODUCER_WORKFLOW_PATH = ".github/workflows/eval-benchmarks.yml";
 const SUPPORTED_EVENTS = new Set(["push", "workflow_dispatch"]);
 const SUPPORTED_BENCHMARK_MODES = ["smoke", "full"];
@@ -109,13 +114,16 @@ async function main(args) {
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(repository)) {
     throw new Error("repository must be an owner/name identifier");
   }
-  const eventValue = JSON.parse(fs.readFileSync(eventPath, "utf8"));
+  // GitHub owns these transient event/REST envelopes. They are not retained
+  // Ultrafuzz evidence, so we strictly parse bounded bytes and project only the
+  // fields needed for qualification instead of registering their dynamic whole shape.
+  const eventValue = readGitHubEnvelope(eventPath, MAX_GITHUB_EVENT_BYTES, "GitHub workflow-run event");
   const artifactsValue = artifactsPath
-    ? JSON.parse(fs.readFileSync(artifactsPath, "utf8"))
+    ? readGitHubEnvelope(artifactsPath, MAX_GITHUB_API_ENVELOPE_BYTES, "GitHub artifacts response")
     : await fetchProducerArtifacts(eventValue, repository);
   const result = qualifyModalBenchmarkPublication(
     eventValue,
-    JSON.parse(fs.readFileSync(jobsPath, "utf8")),
+    readGitHubEnvelope(jobsPath, MAX_GITHUB_API_ENVELOPE_BYTES, "GitHub jobs response"),
     artifactsValue,
     repository
   );
@@ -146,7 +154,32 @@ async function fetchProducerArtifacts(eventValue, repository) {
   if (!response.ok) {
     throw new Error(`could not list producer artifacts: GitHub returned ${response.status}`);
   }
-  return response.json();
+  const bytes = Buffer.from(await response.arrayBuffer());
+  return parseGitHubEnvelopeBytes(bytes, MAX_GITHUB_API_ENVELOPE_BYTES, "GitHub artifacts response");
+}
+
+function readGitHubEnvelope(filePath, maxBytes, label) {
+  let bytes;
+  try {
+    bytes = readRegularFileSnapshot(path.resolve(filePath), maxBytes);
+  } catch (error) {
+    throw new Error(`${label} must be a bounded regular file`, { cause: error });
+  }
+  return parseGitHubEnvelopeBytes(bytes, maxBytes, label);
+}
+
+function parseGitHubEnvelopeBytes(bytes, maxBytes, label) {
+  if (bytes.byteLength > maxBytes) throw new Error(`${label} exceeds its byte limit`);
+  try {
+    return parseStrictJsonBytes(bytes, {
+      maxBytes,
+      maxDepth: 64,
+      maxItems: 100_000,
+      maxProperties: 100_000
+    });
+  } catch (error) {
+    throw new Error(`${label} must be strict JSON`, { cause: error });
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

@@ -2,9 +2,10 @@ import { Readable } from "node:stream";
 import { createGunzip } from "node:zlib";
 
 import AdmZip from "adm-zip";
+import { parseStrictJsonBytes } from "@ultrafuzz/artifacts";
 import tar from "tar-stream";
 
-const HANDOFF_SUFFIX = "handoff/current-state.json";
+const HANDOFF_PATH = "handoff/current-state.json";
 const MAX_JSON_BYTES = 64 * 1024 * 1024;
 const MAX_NESTED_ARCHIVE_BYTES = 512 * 1024 * 1024;
 const MAX_NESTED_UNCOMPRESSED_BYTES = 8 * 1024 * 1024 * 1024;
@@ -20,30 +21,24 @@ export class BundleArchive {
     if (entries.length > MAX_ZIP_ENTRIES) {
       throw new Error(`Benchmark handoff has too many ZIP entries: ${entries.length}/${MAX_ZIP_ENTRIES}`);
     }
-    const matches = entries.filter((entry) => !entry.isDirectory && entry.entryName.endsWith(HANDOFF_SUFFIX));
+    const matches = entries.filter(
+      (entry) =>
+        !entry.isDirectory &&
+        (entry.entryName === HANDOFF_PATH || /^[A-Za-z0-9_.-]+\/handoff\/current-state\.json$/u.test(entry.entryName))
+    );
     if (matches.length !== 1) {
-      throw new Error(`Expected exactly one ${HANDOFF_SUFFIX}, found ${matches.length}`);
+      throw new Error(`Expected exactly one canonical ${HANDOFF_PATH}, found ${matches.length}`);
     }
     const entryName = matches[0]?.entryName ?? "";
-    this.root = entryName.slice(0, -HANDOFF_SUFFIX.length);
-  }
-
-  has(relativePath: string): boolean {
-    return this.zip.getEntry(this.entryName(relativePath)) !== null;
-  }
-
-  list(relativePrefix = ""): string[] {
-    const prefix = this.entryName(relativePrefix);
-    return this.zip
-      .getEntries()
-      .filter((entry) => !entry.isDirectory && entry.entryName.startsWith(prefix))
-      .map((entry) => entry.entryName.slice(this.root.length));
+    this.root = entryName.slice(0, -HANDOFF_PATH.length);
   }
 
   readBuffer(relativePath: string, maximumBytes = MAX_JSON_BYTES): Buffer {
     const entryName = this.entryName(relativePath);
-    const entry = this.zip.getEntry(entryName);
-    if (!entry || entry.isDirectory) throw new Error(`Archive member not found: ${entryName}`);
+    const matches = this.zip.getEntries().filter((entry) => !entry.isDirectory && entry.entryName === entryName);
+    if (matches.length !== 1)
+      throw new Error(`Expected exactly one archive member ${entryName}, found ${matches.length}`);
+    const entry = matches[0]!;
     if (entry.header.size > maximumBytes) {
       throw new Error(`Archive member exceeds ${maximumBytes} bytes: ${entryName}`);
     }
@@ -52,51 +47,41 @@ export class BundleArchive {
     return data;
   }
 
-  readJson<T = unknown>(relativePath: string): T {
-    const text = this.readBuffer(relativePath).toString("utf8");
+  readJson(relativePath: string): unknown {
     try {
-      return JSON.parse(text) as T;
+      return parseStrictJsonBytes(this.readBuffer(relativePath));
     } catch (error) {
       throw new Error(`Invalid JSON in ${this.entryName(relativePath)}: ${(error as Error).message}`, { cause: error });
     }
   }
 
-  findRowArchive(rowId: string): { relativePath: string; variant: string } {
-    const escaped = rowId.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-    const pattern = new RegExp(`^rows/([^/]+)/${escaped}/row-artifacts\\.tar\\.gz$`, "u");
-    const matches = this.list("rows/").flatMap((relativePath) => {
-      const match = pattern.exec(relativePath);
-      return match ? [{ relativePath, variant: match[1] as string }] : [];
-    });
-    if (matches.length !== 1) throw new Error(`Expected one row archive for ${rowId}, found ${matches.length}`);
-    return matches[0] as { relativePath: string; variant: string };
-  }
-
   async readNestedJson(
     relativeTarGzPath: string,
-    selectedSuffixes: Record<string, string>
+    selectedPaths: Record<string, string>
   ): Promise<Record<string, unknown>> {
     const compressed = this.readBuffer(relativeTarGzPath, MAX_NESTED_ARCHIVE_BYTES);
-    return extractSelectedJson(compressed, selectedSuffixes, relativeTarGzPath);
+    for (const selectedPath of Object.values(selectedPaths)) assertCanonicalRelativePath(selectedPath);
+    return extractSelectedJson(compressed, selectedPaths, relativeTarGzPath);
   }
 
   private entryName(relativePath: string): string {
-    const normalized = normalizeRelativePath(relativePath);
-    return this.root + normalized;
+    assertCanonicalRelativePath(relativePath);
+    return this.root + relativePath;
   }
 }
 
-export function normalizeRelativePath(value: string): string {
-  const normalized = value.replaceAll("\\", "/").replace(/^\.\//u, "");
-  if (!normalized || normalized.startsWith("/") || normalized.split("/").includes("..")) {
+export function assertCanonicalRelativePath(value: string): void {
+  if (
+    !/^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*$/u.test(value) ||
+    value.split("/").some((segment) => segment === "." || segment === "..")
+  ) {
     throw new Error(`Unsafe archive-relative path: ${value}`);
   }
-  return normalized;
 }
 
 async function extractSelectedJson(
   compressed: Buffer,
-  selectedSuffixes: Record<string, string>,
+  selectedPaths: Record<string, string>,
   label: string
 ): Promise<Record<string, unknown>> {
   const output: Record<string, unknown> = {};
@@ -113,7 +98,7 @@ async function extractSelectedJson(
     };
 
     extract.on("entry", (header, stream, next) => {
-      const match = Object.entries(selectedSuffixes).find(([, suffix]) => header.name.endsWith(suffix));
+      const match = Object.entries(selectedPaths).find(([, selectedPath]) => header.name === selectedPath);
       if (!match || header.type !== "file") {
         stream.resume();
         stream.on("end", next);
@@ -137,7 +122,7 @@ async function extractSelectedJson(
       stream.on("end", () => {
         try {
           if (key in output) throw new Error(`Duplicate nested JSON match for ${key}`);
-          output[key] = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+          output[key] = parseStrictJsonBytes(Buffer.concat(chunks));
           next();
         } catch (error) {
           fail(new Error(`Invalid nested JSON (${header.name}) in ${label}: ${(error as Error).message}`));
@@ -146,7 +131,7 @@ async function extractSelectedJson(
     });
     extract.on("finish", () => {
       if (settled) return;
-      const missing = Object.keys(selectedSuffixes).filter((key) => !(key in output));
+      const missing = Object.keys(selectedPaths).filter((key) => !(key in output));
       if (missing.length > 0) {
         fail(new Error(`Nested archive ${label} is missing: ${missing.join(", ")}`));
         return;

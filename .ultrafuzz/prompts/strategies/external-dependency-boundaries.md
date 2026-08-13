@@ -136,22 +136,22 @@ Write structured JSON to:
 
 {{artifact_dir}}/dependency-scope-matrix.json
 
-The JSON must include:
+Read the pinned JSON Schema at
+`{{schema_path}}/dependency-scope-matrix.schema.json` before authoring the
+structured artifact. It is the only authority on its JSON version, fields,
+types, required and optional members, enums, and empty form. Run the exact
+`ultrafuzz json validate` command rendered for this file in the central
+Ultrafuzz Output Contract after the final write and correct it until the command
+exits 0.
 
-- `schema_version`: `"1.0"`
-- `dependencies`: array of enumerated dependency or callback surfaces with
-  contract or interface, dependency type, touched functions, classification,
-  source evidence, source-backed scope claim, in-scope rationale, selected test
-  cases, expected classification if red, scope notes, and harness notes
-- `in_scope_test_targets`: array of rows eligible for production-bug tests, or
-  `[]`
-- `non_finding_rows`: array of trusted, assumed-correct, out-of-scope,
-  known-risk, unknown, or ambiguous rows, with reasons
-- `generated_tests`: array of generated test file paths and the checks each
-  file covers, or `[]`
-- `source_backed_in_scope_rationales`: array of finding candidate ids mapped
-  to the exact evidence that makes the dependency behavior in scope, or `[]`
-- `coverage_notes`: dependency surfaces intentionally skipped, with reasons
+Keep the Markdown and JSON views semantically aligned. They must cover the same
+dependencies, touched public workflows, source evidence, scope decisions,
+source-backed rationales, selected tests, non-finding decisions, harness notes,
+and coverage gaps. Every referenced generated test must be one this node
+actually authored, and every production finding must retain the source-backed
+in-scope rationale that makes it reportable. These relationships are contextual
+requirements beyond JSON Schema.
 
-Write structured findings to {{output_findings_path}}. Use an empty JSON array
-if no source-backed in-scope production finding is confirmed.
+Write structured findings to {{output_findings_path}}. If no source-backed
+in-scope production finding is confirmed, use only the empty form defined by
+the exact pinned schema in the central output contract.

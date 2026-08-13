@@ -37,15 +37,20 @@ executed. Do not report generic best practices, intended behavior, or a theory
 without a reachable failure mode.
 
 Write at most the strongest few normalized findings to
-`{{output_findings_path}}`. Every entry must include a stable `id`, `title`,
-`status`, `severity_guess`, `confidence`, `summary`,
-`source_node_id: "{{strategy}}"`, `strategy: "{{strategy}}"`, affected source
-paths/functions, and concrete evidence. `schema_version` is optional. Write `confidence` as one of the
-strings `high`, `medium`, or `low`. Use `[]` only when no finding is
-supportable; never fabricate a CI canary.
+`{{output_findings_path}}` using the exact pinned
+`{{schema_path}}/findings.schema.json`; it alone defines the JSON version,
+fields, types, enums, required members, and empty form. Bind every finding's
+source node and strategy to `{{strategy}}`, retain affected source paths and
+functions plus concrete evidence, and calibrate confidence to the evidence.
+Use the schema-defined empty form when no finding is supportable; never
+fabricate a CI canary.
 
 If you create a target-native test, keep it under
 `{{strategy_attempt_test_dir}}`, mirror it byte-for-byte beneath
 the `generated-tests/` directory under `{{artifact_path}}`, and list that safe artifact-relative path
-in `{{artifact_path}}/generated-tests.json`. Otherwise write the contract-valid
-empty generated-test manifest. Run only focused validation, then stop.
+in `{{artifact_path}}/generated-tests.json`. Otherwise use the empty form
+defined by the exact pinned generated-test schema. Read the exact pinned
+`{{schema_path}}/generated-tests.schema.json` and run every exact
+`ultrafuzz json validate` command rendered in the central output contract.
+Correct any exit-1 artifact yourself and rerun its command after any later
+edit; run only focused validation, then stop.

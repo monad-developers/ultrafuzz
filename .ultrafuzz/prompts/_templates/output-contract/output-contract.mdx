@@ -4,10 +4,18 @@ Before finishing, you MUST ensure every artifact below exists and satisfies its 
 
 {{artifact_contracts}}
 
-{{schema_guidance}}Artifact writing is part of the task, not optional final-response metadata. Create parent directories before writing, write each artifact to the exact absolute path shown above, and then verify each path exists, is non-empty unless its contract explicitly allows an empty form, and matches its JSON or Markdown contract. Do not write required artifacts only under the repository root, a relative working directory, or a different similarly named path.
+{{schema_guidance}}Artifact writing is part of the task, not optional final-response metadata. Create parent directories before writing and write each artifact to the exact absolute path shown above. Also verify every path exists, is non-empty unless its contract explicitly allows an empty form, and matches its JSON or Markdown contract. Do not write required artifacts only under the repository root, a relative working directory, or a different similarly named path.
 
-After completing the work and writing every required artifact, your final response MUST contain ONLY one raw, valid JSON object in exactly this form:
+For every schema-backed JSON artifact:
 
-{"summary":"A concise description of the completed work and written artifacts."}
+1. Write the artifact in its canonical schema.
+2. After your final write and before returning the node's final response, run every exact `Validation command` shown above.
+3. If a command exits 1, correct that artifact yourself and rerun the same command during this session.
+4. If you change an artifact after it passes validation, rerun its command.
+5. Never edit a supplied schema. Its bytes are pinned and the command accepts it only when they match the trusted digest.
+6. Exit 2 is a setup or tool failure. Do not edit the schema or claim validation succeeded.
+7. Finish only after every displayed validation command exits 0.
+8. The validation command never modifies the artifact.
+9. Host semantic and context verification still runs after you finish.
 
-The `summary` field is REQUIRED and MUST be a JSON string. Do NOT include Markdown fences, introductory text, explanations, or any other content before or after the JSON object. Do NOT omit the JSON object even when the work succeeds.
+After completing the work and writing every required artifact, return only the structured task result requested by the runtime. The runtime's output schema alone owns that response's keys, types, and envelope. Put a concise description of the completed work and written artifacts in its schema-defined summary value. Do not add Markdown fences, introductory text, explanations, or any content outside the structured result, and do not omit the result when the work succeeds.

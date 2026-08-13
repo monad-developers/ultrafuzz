@@ -1,5 +1,5 @@
 {
-  "schema_version": "ultrafuzz.benchmark.lanes.v1",
+  "schema_version": "ultrafuzz.benchmark.lanes.v2",
   "smoke": {
     "trials_per_variant": 1,
     "strategy_loops": 1,

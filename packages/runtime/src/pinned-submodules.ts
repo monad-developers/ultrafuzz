@@ -6,13 +6,23 @@ import path from "node:path";
 import {
   assertNoSymlinkComponents,
   assertRegularFileInside,
+  parseStrictJsonBytes,
   safeResolveInside,
   writeFileDurable
 } from "@ultrafuzz/artifacts";
-import { z } from "zod/v4";
 
-export const PINNED_SUBMODULE_SNAPSHOT_SCHEMA_VERSION = "ultrafuzz.pinned-submodules.v2" as const;
-export const PINNED_SUBMODULE_EXPECTATION_SCHEMA_VERSION = "ultrafuzz.pinned-submodules-expectation.v1" as const;
+import {
+  PINNED_SUBMODULE_EXPECTATION_JSON_SCHEMA_ID,
+  PINNED_SUBMODULE_EXPECTATION_SCHEMA_VERSION,
+  PINNED_SUBMODULE_SNAPSHOT_JSON_SCHEMA_ID,
+  PINNED_SUBMODULE_SNAPSHOT_SCHEMA_VERSION,
+  type PinnedSubmoduleExpectationDocument,
+  type PinnedSubmoduleSnapshotDocument,
+  type PinnedSubmoduleSnapshotEntryDocument
+} from "./runtime-contracts.js";
+import { assertRuntimeDocument } from "./runtime-document-codec.js";
+
+export { PINNED_SUBMODULE_EXPECTATION_SCHEMA_VERSION, PINNED_SUBMODULE_SNAPSHOT_SCHEMA_VERSION };
 export const PINNED_SUBMODULE_MANIFEST_LOCATION = "git-common-dir" as const;
 export const PINNED_SUBMODULE_EXECUTION_ROOT = "controls/pinned-submodules" as const;
 
@@ -21,7 +31,6 @@ const MANIFEST_SNAPSHOT_PATH = `${PINNED_SUBMODULE_EXECUTION_ROOT}/manifest.json
 const TREE_SNAPSHOT_ROOT = `${PINNED_SUBMODULE_EXECUTION_ROOT}/tree`;
 const TRANSACTION_PREFIX = ".ultrafuzz-submodule-transaction-";
 const FULL_SHA = /^[0-9a-f]{40}$/u;
-const SHA256 = /^[0-9a-f]{64}$/u;
 const MAX_ENTRIES = 100_000;
 const MAX_PATH_BYTES = 4_096;
 const MAX_PATH_DEPTH = 128;
@@ -33,54 +42,9 @@ const MAX_TOTAL_FILE_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_GIT_OUTPUT_BYTES = 64 * 1024 * 1024;
 const FILE_OPEN_FLAGS = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0);
 
-const relativePathSchema = z.string().min(1).refine(isSafeRelativePath, "must be a safe normalized relative path");
-const gitlinkSchema = z.strictObject({
-  path: relativePathSchema,
-  commit: z.string().regex(FULL_SHA),
-  tree: z.string().regex(FULL_SHA)
-});
-const directoryEntrySchema = z.strictObject({
-  path: relativePathSchema,
-  type: z.literal("directory"),
-  mode: z.literal(0o755)
-});
-const fileEntrySchema = z.strictObject({
-  path: relativePathSchema,
-  type: z.literal("file"),
-  mode: z.union([z.literal(0o644), z.literal(0o755)]),
-  size_bytes: z.number().int().nonnegative().max(MAX_FILE_BYTES),
-  sha256: z.string().regex(SHA256)
-});
-const symlinkEntrySchema = z.strictObject({
-  path: relativePathSchema,
-  type: z.literal("symlink"),
-  target: z.string().min(1)
-});
-const snapshotSchema = z.strictObject({
-  schema_version: z.literal(PINNED_SUBMODULE_SNAPSHOT_SCHEMA_VERSION),
-  source_commit: z.string().regex(FULL_SHA),
-  source_tree: z.string().regex(FULL_SHA),
-  top_level_roots: z.array(relativePathSchema).max(MAX_ENTRIES),
-  recursive_gitlinks: z.array(gitlinkSchema).max(MAX_ENTRIES),
-  entries: z
-    .array(z.discriminatedUnion("type", [directoryEntrySchema, fileEntrySchema, symlinkEntrySchema]))
-    .max(MAX_ENTRIES)
-});
-const expectationSchema = z.strictObject({
-  schema_version: z.literal(PINNED_SUBMODULE_EXPECTATION_SCHEMA_VERSION),
-  source_commit: z.string().regex(FULL_SHA),
-  source_tree: z.string().regex(FULL_SHA),
-  manifest_sha256: z.string().regex(SHA256),
-  top_level_roots: z.array(relativePathSchema).max(MAX_ENTRIES),
-  recursive_gitlinks: z.array(gitlinkSchema).max(MAX_ENTRIES),
-  entry_count: z.number().int().positive().max(MAX_ENTRIES),
-  file_count: z.number().int().nonnegative().max(MAX_ENTRIES),
-  total_file_bytes: z.number().int().nonnegative().max(MAX_TOTAL_FILE_BYTES)
-});
-
-export type PinnedSubmoduleSnapshot = z.infer<typeof snapshotSchema>;
-export type PinnedSubmoduleSnapshotEntry = PinnedSubmoduleSnapshot["entries"][number];
-export type PinnedSubmoduleExpectation = z.infer<typeof expectationSchema>;
+export type PinnedSubmoduleSnapshot = PinnedSubmoduleSnapshotDocument;
+export type PinnedSubmoduleSnapshotEntry = PinnedSubmoduleSnapshotEntryDocument;
+export type PinnedSubmoduleExpectation = PinnedSubmoduleExpectationDocument;
 
 export interface PinnedSubmoduleExecutionFile {
   sourcePath: string;
@@ -103,6 +67,13 @@ interface CaptureState {
   entries: PinnedSubmoduleSnapshotEntry[];
   recursiveGitlinks: PinnedSubmoduleSnapshot["recursive_gitlinks"];
   totalFileBytes: number;
+}
+
+class PinnedSubmoduleRollbackError extends AggregateError {
+  constructor(failures: readonly unknown[]) {
+    super(failures, "pinned submodule transaction rollback is incomplete");
+    this.name = "PinnedSubmoduleRollbackError";
+  }
 }
 
 interface TaskGitDirectories {
@@ -162,7 +133,7 @@ export function writePinnedSubmoduleSnapshot(projectRootInput: string, value: Pi
 
   const manifestPath = pinnedSubmoduleManifestPath(projectRoot, snapshot.source_commit);
   const bytes = Buffer.from(canonicalSnapshotBytes(snapshot), "utf8");
-  if (fs.existsSync(manifestPath)) {
+  if (pathEntryExists(manifestPath)) {
     assertRegularFileInside(commonGitDirectory(projectRoot), manifestPath, "pinned submodule manifest");
     if (!fs.readFileSync(manifestPath).equals(bytes)) {
       throw new Error("pinned submodule manifest already exists with different bytes");
@@ -181,7 +152,7 @@ export function readPinnedSubmoduleSnapshot(projectRootInput: string): PinnedSub
   const projectRoot = canonicalDirectory(projectRootInput, "pinned source root");
   const sourceCommit = gitSha(projectRoot, ["rev-parse", "HEAD"], "pinned submodule source commit");
   const manifestPath = pinnedSubmoduleManifestPath(projectRoot, sourceCommit);
-  if (!fs.existsSync(manifestPath)) return undefined;
+  if (!pathEntryExists(manifestPath)) return undefined;
   const commonGitRoot = commonGitDirectory(projectRoot);
   assertRegularFileInside(commonGitRoot, manifestPath, "pinned submodule manifest");
   const bytes = readBoundedRegularFile(manifestPath, MAX_GIT_OUTPUT_BYTES, "pinned submodule manifest");
@@ -295,14 +266,18 @@ export function hydratePinnedSubmodulesFromExecutionSnapshot(input: {
   const backupRoot = path.join(transactionRoot, "backup");
   fs.mkdirSync(stagingRoot, { mode: 0o700 });
   fs.mkdirSync(backupRoot, { mode: 0o700 });
+  let preserveTransaction = false;
   try {
     materializeStagedTree(stagingRoot, loaded);
     verifySnapshotBytes(stagingRoot, loaded.snapshot, { allowChildGitMetadata: false, skipSourceIdentity: true });
     replaceTaskRootsTransactionally(workspaceRoot, stagingRoot, backupRoot, loaded.snapshot);
     assertTaskSubmoduleIsolation(workspaceRoot, loaded.snapshot);
     return loaded.snapshot;
+  } catch (error) {
+    preserveTransaction = error instanceof PinnedSubmoduleRollbackError;
+    throw error;
   } finally {
-    fs.rmSync(transactionRoot, { recursive: true, force: true });
+    if (!preserveTransaction) fs.rmSync(transactionRoot, { recursive: true, force: true });
   }
 }
 
@@ -434,7 +409,7 @@ function materializeStagedTree(stagingRoot: string, loaded: LoadedSealedSnapshot
     const destination = trackedPath(stagingRoot, entry.path, "staged submodule entry");
     assertPhysicalParents(stagingRoot, destination, "staged submodule entry");
     if (entry.type === "symlink") {
-      assertSafeSymlinkTarget(entry.path, entry.target, loaded.snapshot.top_level_roots);
+      assertSafeSymlinkTarget(entry.path, entry.target, [owningRepositoryPath(loaded.snapshot, entry.path)]);
       fs.symlinkSync(entry.target, destination);
       continue;
     }
@@ -476,7 +451,7 @@ function replaceTaskRootsTransactionally(
       assertPhysicalParents(backupRoot, backup, "backup submodule root");
 
       let hadOriginal = false;
-      if (fs.existsSync(destination)) {
+      if (pathEntryExists(destination)) {
         const stat = fs.lstatSync(destination);
         if (stat.isSymbolicLink() || !stat.isDirectory()) {
           throw new Error(`task submodule root is not a physical directory: ${root}`);
@@ -487,19 +462,38 @@ function replaceTaskRootsTransactionally(
       try {
         fs.renameSync(staged, destination);
       } catch (error) {
-        if (hadOriginal) fs.renameSync(backup, destination);
+        if (hadOriginal) {
+          try {
+            fs.renameSync(backup, destination);
+          } catch (rollbackError) {
+            throw new PinnedSubmoduleRollbackError([error, rollbackError]);
+          }
+        }
         throw error;
       }
       replaced.push({ root, hadOriginal });
     }
     verifySnapshotBytes(workspaceRoot, snapshot, { allowChildGitMetadata: false });
   } catch (error) {
+    const rollbackFailures: unknown[] = [];
     for (const entry of [...replaced].reverse()) {
       const destination = trackedPath(workspaceRoot, entry.root, "task submodule rollback root");
       const backup = trackedPath(backupRoot, entry.root, "backup submodule rollback root");
-      fs.rmSync(destination, { recursive: true, force: true });
-      if (entry.hadOriginal) fs.renameSync(backup, destination);
+      try {
+        fs.rmSync(destination, { recursive: true, force: true });
+      } catch (rollbackError) {
+        rollbackFailures.push(rollbackError);
+        continue;
+      }
+      if (entry.hadOriginal) {
+        try {
+          fs.renameSync(backup, destination);
+        } catch (rollbackError) {
+          rollbackFailures.push(rollbackError);
+        }
+      }
     }
+    if (rollbackFailures.length > 0) throw new PinnedSubmoduleRollbackError([error, ...rollbackFailures]);
     throw error;
   }
 }
@@ -514,7 +508,7 @@ function verifySnapshotBytes(
     assertSourceIdentity(root, snapshot);
     if (!options.allowChildGitMetadata) assertNoSharedSubmoduleMetadata(root, commonGitDirectory(root));
   }
-  const observed = collectFilesystemEntries(root, snapshot.top_level_roots, options.allowChildGitMetadata);
+  const observed = collectFilesystemEntries(root, snapshot, options.allowChildGitMetadata);
   if (JSON.stringify(observed) !== JSON.stringify(snapshot.entries)) {
     throw new Error("pinned submodule byte tree changed");
   }
@@ -522,7 +516,7 @@ function verifySnapshotBytes(
 
 function collectFilesystemEntries(
   root: string,
-  topLevelRoots: readonly string[],
+  snapshot: PinnedSubmoduleSnapshot,
   allowChildGitMetadata: boolean
 ): PinnedSubmoduleSnapshotEntry[] {
   const entries: PinnedSubmoduleSnapshotEntry[] = [];
@@ -543,7 +537,7 @@ function collectFilesystemEntries(
     }
     if (stat.isSymbolicLink()) {
       const target = fs.readlinkSync(absolute);
-      assertSafeSymlinkTarget(relative, target, topLevelRoots);
+      assertSafeSymlinkTarget(relative, target, [owningRepositoryPath(snapshot, relative)]);
       entries.push({ path: relative, type: "symlink", target });
       return;
     }
@@ -559,7 +553,7 @@ function collectFilesystemEntries(
       sha256: sha256(bytes)
     });
   };
-  for (const rootPath of topLevelRoots) walk(rootPath);
+  for (const rootPath of snapshot.top_level_roots) walk(rootPath);
   return sortByPath(entries);
 }
 
@@ -578,7 +572,7 @@ function verifySealedFileClosure(executionSnapshotRoot: string, snapshot: Pinned
   const treeRoot = executionSnapshotPath(executionSnapshotRoot, TREE_SNAPSHOT_ROOT, "sealed submodule tree");
   const observedFiles: string[] = [];
   const observedDirectories: string[] = [];
-  if (fs.existsSync(treeRoot)) {
+  if (pathEntryExists(treeRoot)) {
     assertPhysicalDirectoryWithin(executionSnapshotRoot, treeRoot, "sealed submodule tree");
     const walk = (directory: string, prefix: string): void => {
       for (const name of fs.readdirSync(directory).sort(compareStrings)) {
@@ -1008,7 +1002,9 @@ function assertSnapshotShape(snapshot: PinnedSubmoduleSnapshot): void {
     ) {
       throw new Error(`pinned submodule non-directory is a path prefix: ${entry.path}`);
     }
-    if (entry.type === "symlink") assertSafeSymlinkTarget(entry.path, entry.target, snapshot.top_level_roots);
+    if (entry.type === "symlink") {
+      assertSafeSymlinkTarget(entry.path, entry.target, [owningRepositoryPath(snapshot, entry.path)]);
+    }
   }
   for (const root of snapshot.top_level_roots) {
     if (entryByPath.get(root)?.type !== "directory" || !gitlinkPaths.has(root)) {
@@ -1033,11 +1029,18 @@ function assertExpectationMatchesSnapshot(
 }
 
 function parseSnapshot(value: unknown): PinnedSubmoduleSnapshot {
-  return snapshotSchema.parse(value);
+  return assertRuntimeDocument(PINNED_SUBMODULE_SNAPSHOT_JSON_SCHEMA_ID, value, "pinned submodule snapshot");
 }
 
 function parseCanonicalSnapshot(bytes: Buffer): PinnedSubmoduleSnapshot {
-  const snapshot = parseSnapshot(JSON.parse(decodeUtf8(bytes, "pinned submodule manifest")));
+  const snapshot = parseSnapshot(
+    parseStrictJsonBytes(bytes, {
+      maxBytes: MAX_MANIFEST_BYTES,
+      maxDepth: MAX_PATH_DEPTH + 8,
+      maxItems: 4 * MAX_ENTRIES,
+      maxProperties: 8 * MAX_ENTRIES
+    })
+  );
   assertSnapshotShape(snapshot);
   if (!bytes.equals(Buffer.from(canonicalSnapshotBytes(snapshot), "utf8"))) {
     throw new Error("pinned submodule manifest is not canonical JSON");
@@ -1046,7 +1049,11 @@ function parseCanonicalSnapshot(bytes: Buffer): PinnedSubmoduleSnapshot {
 }
 
 function parseExpectation(value: unknown): PinnedSubmoduleExpectation {
-  const expectation = expectationSchema.parse(value);
+  const expectation = assertRuntimeDocument(
+    PINNED_SUBMODULE_EXPECTATION_JSON_SCHEMA_ID,
+    value,
+    "pinned submodule expectation"
+  );
   if (
     JSON.stringify(expectation.top_level_roots) !==
       JSON.stringify(sortedUnique(expectation.top_level_roots, "roots")) ||
@@ -1089,6 +1096,14 @@ function assertSafeSymlinkTarget(relativePath: string, target: string, roots: re
   if (!isAtOrBelow(resolved, root) || resolved.split("/").includes(".git")) {
     throw new Error(`pinned submodule symlink escapes its root: ${relativePath}`);
   }
+}
+
+function owningRepositoryPath(snapshot: PinnedSubmoduleSnapshot, entryPath: string): string {
+  const owner = snapshot.recursive_gitlinks
+    .filter((candidate) => isAtOrBelow(entryPath, candidate.path))
+    .sort((left, right) => pathDepth(right.path) - pathDepth(left.path) || compareStrings(left.path, right.path))[0];
+  if (owner === undefined) throw new Error(`pinned submodule entry has no owning repository: ${entryPath}`);
+  return owner.path;
 }
 
 function isSafeRelativePath(value: string): boolean {
@@ -1241,7 +1256,7 @@ function ensurePhysicalParents(root: string, candidate: string, label: string): 
     .split(path.sep)
     .filter((entry) => entry !== "." && entry !== "")) {
     current = path.join(current, segment);
-    if (!fs.existsSync(current)) fs.mkdirSync(current, { mode: 0o700 });
+    if (!pathEntryExists(current)) fs.mkdirSync(current, { mode: 0o700 });
     const stat = fs.lstatSync(current);
     if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error(`${label} crosses a non-directory parent`);
   }

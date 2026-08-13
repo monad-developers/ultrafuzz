@@ -24,17 +24,6 @@ const reportSummaryFields = [
 const severityOrder = ["High", "Medium", "Low"] as const;
 type ReportSeverity = (typeof severityOrder)[number];
 
-const alternateSeverityFields = new Set([
-  "canonical_severity",
-  "classified_severity",
-  "final_severity",
-  "original_severity",
-  "report_severity",
-  "severity_final",
-  "severity_level",
-  "upstream_severity"
-]);
-
 interface RenderedIssue {
   issue: JsonRecord;
   id: string;
@@ -43,10 +32,9 @@ interface RenderedIssue {
 }
 
 interface RenderableProof {
-  introduction?: string;
   steps: string[];
-  code?: string;
-  language?: string;
+  code: string;
+  language: string;
 }
 
 export interface CanonicalFinalReportProjection {
@@ -76,9 +64,10 @@ export function supportsCanonicalFinalReportProjection(report: unknown): report 
 }
 
 /**
- * Canonicalize final-review issue presentation and render its allowlisted
- * public Markdown. This function is intentionally filesystem-free so the CLI
- * and generated runtime use exactly the same projection.
+ * Validate final-review issue presentation and render its allowlisted public
+ * Markdown without repairing, reordering, or rewriting the validated report.
+ * This function is intentionally filesystem-free so the CLI and generated
+ * runtime use exactly the same checks and rendering.
  */
 export function projectCanonicalFinalReport(report: unknown): CanonicalFinalReportProjection {
   assertReportJsonWithinBound(report);
@@ -90,22 +79,20 @@ export function projectCanonicalFinalReport(report: unknown): CanonicalFinalRepo
     throw new Error("final report is not renderable under the final-review report contract");
   }
 
-  const canonicalReport = reconcileIssuePresentation(input);
-  assertReportJsonWithinBound(canonicalReport);
-  validateReport(canonicalReport);
+  assertCanonicalIssuePresentation(input);
 
-  const markdown = renderCanonicalReport(canonicalReport);
+  const markdown = renderCanonicalReport(input);
   if (Buffer.byteLength(markdown, "utf8") > MAX_FINAL_REPORT_MARKDOWN_BYTES) {
     throw new Error(`canonical final report Markdown exceeds ${MAX_FINAL_REPORT_MARKDOWN_BYTES} bytes`);
   }
-  if (!isDirectiveConformingFinalReportMarkdown(markdown, canonicalReport)) {
+  if (!isDirectiveConformingFinalReportMarkdown(markdown, input)) {
     throw new Error("canonical final report Markdown does not satisfy the final-review report shape");
   }
   const markdownValidation = validateArtifactContract("ultrafuzz/nonempty-markdown@1", markdown, "report.md");
   if (!markdownValidation.ok) {
     throw new Error(reportValidationMessage(markdownValidation.issues));
   }
-  return { report: canonicalReport, markdown };
+  return { report: input, markdown };
 }
 
 export function isDirectiveConformingFinalReportMarkdown(
@@ -142,26 +129,30 @@ export function isDirectiveConformingFinalReportMarkdown(
   ) {
     return false;
   }
-  const issueCount = Array.isArray(report.issues) ? report.issues.length : 0;
-  const headings = [...markdown.matchAll(/^## \[[HML]-\d{2}\] - .+$/gmu)];
-  if (headings.length !== issueCount) {
+  const rendered = renderedIssues(Array.isArray(report.issues) ? report.issues.filter(isRecord) : []);
+  const expectedHeadings = rendered.map(renderedIssueHeading);
+  const headings = markdown.split("\n").filter((line) => line.startsWith("## ["));
+  if (
+    headings.length !== expectedHeadings.length ||
+    headings.some((heading, index) => heading !== expectedHeadings[index])
+  ) {
     return false;
   }
-  if (requireImplementationCoverage) {
-    const expectedHeadings = renderedIssues(Array.isArray(report.issues) ? report.issues.filter(isRecord) : []).map(
-      (issue) => `## [${issue.id}] - ${publicProse(issue.title)}`
-    );
-    if (headings.some((heading, index) => heading[0] !== expectedHeadings[index])) {
-      return false;
-    }
-  }
-  if (issueCount === 0) {
+  // Exact equality above proves the Markdown kept the validated JSON order,
+  // IDs, and titles. Presentation never assigns severity-local identities.
+  if (expectedHeadings.length === 0) {
     return !markdown.includes("| Issue id | Title |");
   }
   if (!markdown.startsWith("# Ultrafuzz report\n\n| Issue id | Title |\n| --- | --- |\n")) {
     return false;
   }
-  const issueBlocks = markdown.split(/(?=^## \[[HML]-\d{2}\] - )/gmu).slice(1);
+  const issueBlocks = expectedHeadings.map((heading, index) => {
+    const start = markdown.indexOf(`${heading}\n`);
+    const nextHeading = expectedHeadings[index + 1];
+    const end =
+      nextHeading === undefined ? markdown.length : markdown.indexOf(`${nextHeading}\n`, start + heading.length);
+    return markdown.slice(start, end < 0 ? markdown.length : end);
+  });
   return issueBlocks.every((block) => {
     const severityIndex = block.indexOf("\n### Severity\n");
     const proofIndex = block.indexOf("\n### Proof of Concept\n");
@@ -177,7 +168,7 @@ export function isDirectiveConformingFinalReportMarkdown(
 
 function validateReport(report: unknown): JsonRecord {
   const serialized = `${JSON.stringify(report)}\n`;
-  const validation = validateArtifactContract("ultrafuzz/report@1", serialized, "report.json");
+  const validation = validateArtifactContract("ultrafuzz/report@2", serialized, "report.json");
   if (!validation.ok || !isRecord(validation.value)) {
     throw new Error(reportValidationMessage(validation.issues));
   }
@@ -212,110 +203,75 @@ function isCanonicalEmptyReport(value: JsonRecord): boolean {
   );
 }
 
-function reconcileIssuePresentation(report: JsonRecord): JsonRecord {
-  if (!Array.isArray(report.issues)) {
-    return report;
-  }
-  const issues = report.issues.map((issue) => {
-    if (!isRecord(issue)) {
-      throw new Error("final report contains a non-object production issue");
-    }
-    const impact = requiredAssessment(issue, "impact");
-    const likelihood = requiredAssessment(issue, "likelihood");
-    return {
-      issue,
-      impact,
-      likelihood,
-      severity: matrixSeverity(impact.label, likelihood.label)
-    };
-  });
+function assertCanonicalIssuePresentation(report: JsonRecord): void {
+  if (!Array.isArray(report.issues)) return;
   const counters: Record<ReportSeverity, number> = { High: 0, Medium: 0, Low: 0 };
-  const idRemap = new Map<string, string>();
-  const normalizedIssues = issues
-    .map((entry, index) => ({ ...entry, index }))
-    .sort(
-      (left, right) =>
-        severityOrder.indexOf(left.severity) - severityOrder.indexOf(right.severity) || left.index - right.index
-    )
-    .map(({ issue, impact, likelihood, severity }) => {
-      counters[severity] += 1;
-      const id = `${severity[0]}-${String(counters[severity]).padStart(2, "0")}`;
-      for (const candidate of [issue.id, issue.upstream_id, issue.source_finding_id]) {
-        if (typeof candidate === "string" && candidate.trim() !== "") {
-          idRemap.set(candidate, id);
-        }
-      }
-      const previousId = firstAvailableString(issue.id);
-      const normalizedIssue = removeAlternateSeverityFields(issue, true);
-      return {
-        ...normalizedIssue,
-        ...(previousId !== undefined && !/^[HML]-\d{2}$/u.test(previousId) && issue.upstream_id === undefined
-          ? { upstream_id: previousId }
-          : {}),
-        id,
-        title: `[${id}] - ${cleanIssueTitle(recordTitle(issue, "Untitled issue"))}`,
-        severity,
-        severity_guess: severity,
-        impact: impact.label,
-        likelihood: likelihood.label,
-        ...(impact.rationale === undefined ? {} : { impact_rationale: impact.rationale }),
-        ...(likelihood.rationale === undefined ? {} : { likelihood_rationale: likelihood.rationale })
-      };
-    });
-
-  const propertyProvenance = Array.isArray(report.property_provenance)
-    ? report.property_provenance.map((entry) => {
-        if (!isRecord(entry)) {
-          return entry;
-        }
-        const findingId = firstAvailableString(entry.finding_id);
-        const publicId = findingId === undefined ? undefined : idRemap.get(findingId);
-        const issue =
-          publicId === undefined ? undefined : normalizedIssues.find((candidate) => candidate.id === publicId);
-        return issue === undefined
-          ? entry
-          : { ...entry, finding_id: publicId, title: firstAvailableString(issue.title) ?? entry.title };
-      })
-    : report.property_provenance;
-
-  return {
-    ...report,
-    issues: normalizedIssues,
-    ...(propertyProvenance === undefined ? {} : { property_provenance: propertyProvenance })
-  };
-}
-
-function removeAlternateSeverityFields(value: JsonRecord, preserveCanonical: boolean): JsonRecord {
-  const normalized: JsonRecord = {};
-  for (const [key, entry] of Object.entries(value)) {
-    const normalizedKey = key.replace(/([a-z0-9])([A-Z])/gu, "$1_$2").toLowerCase();
-    if (alternateSeverityFields.has(normalizedKey)) {
-      continue;
+  let priorSeverityIndex = -1;
+  const findingsById = new Map<string, JsonRecord>();
+  for (const [index, candidate] of report.issues.entries()) {
+    if (!isRecord(candidate)) {
+      throw new Error(`final report production issue ${index} is not an object`);
     }
-    if (!preserveCanonical && (key === "severity" || key === "severity_guess")) {
-      continue;
+    const impact = requiredAssessment(candidate, "impact");
+    const likelihood = requiredAssessment(candidate, "likelihood");
+    const severity = requiredSeverity(candidate);
+    const expectedSeverity = matrixSeverity(impact.label, likelihood.label);
+    if (severity !== expectedSeverity) {
+      throw new Error(
+        `final report production issue ${index} has severity ${severity}; expected ${expectedSeverity} from impact ${impact.label} and likelihood ${likelihood.label}`
+      );
     }
-    if (Array.isArray(entry)) {
-      normalized[key] = entry.map((item) => (isRecord(item) ? removeAlternateSeverityFields(item, false) : item));
-      continue;
+    const severityIndex = severityOrder.indexOf(severity);
+    if (severityIndex < priorSeverityIndex) {
+      throw new Error("final report production issues are not ordered High, Medium, then Low");
     }
-    normalized[key] = isRecord(entry) ? removeAlternateSeverityFields(entry, false) : entry;
+    priorSeverityIndex = severityIndex;
+    counters[severity] += 1;
+    const findingId = `${severity[0]}-${String(counters[severity]).padStart(2, "0")}`;
+    if (candidate.id !== findingId) {
+      throw new Error(`final report production issue ${index} must use canonical ID ${findingId}`);
+    }
+    const title = recordTitle(candidate, "");
+    const expectedTitle = `[${findingId}] - ${cleanIssueTitle(title)}`;
+    if (title !== expectedTitle || cleanIssueTitle(title) === "") {
+      throw new Error(`final report production issue ${findingId} must use title ${JSON.stringify(expectedTitle)}`);
+    }
+    findingsById.set(findingId, candidate);
   }
-  return normalized;
+
+  for (const candidate of Array.isArray(report.non_production_outcomes) ? report.non_production_outcomes : []) {
+    if (isRecord(candidate) && typeof candidate.id === "string") findingsById.set(candidate.id, candidate);
+  }
+  for (const [index, candidate] of (Array.isArray(report.property_provenance)
+    ? report.property_provenance
+    : []
+  ).entries()) {
+    if (!isRecord(candidate) || typeof candidate.finding_id !== "string") continue;
+    const finding = findingsById.get(candidate.finding_id);
+    if (finding === undefined) {
+      throw new Error(
+        `final report property provenance ${index} references unknown finding ${JSON.stringify(candidate.finding_id)}`
+      );
+    }
+    if (candidate.title !== finding.title) {
+      throw new Error(`final report property provenance ${index} title does not equal its referenced finding title`);
+    }
+  }
 }
 
 function requiredAssessment(
   issue: JsonRecord,
   field: "impact" | "likelihood"
-): { label: ReportSeverity; rationale?: string } {
-  const raw = issue[field];
-  const label = normalizedSeverity(raw);
+): { label: ReportSeverity; rationale: string } {
+  const label = exactSeverity(issue[field]);
   if (label === undefined) {
     throw new Error(`production issue is missing a High, Medium, or Low ${field}`);
   }
-  const embedded = typeof raw === "string" ? raw.replace(/^\s*(?:high|medium|low)\s*:\s*/iu, "").trim() : undefined;
-  const rationale = firstAvailableString(issue[`${field}_rationale`], embedded);
-  return { label, ...(rationale === undefined ? {} : { rationale }) };
+  const rationale = issue[`${field}_rationale`];
+  if (typeof rationale !== "string" || rationale.length === 0) {
+    throw new Error(`production issue is missing its canonical ${field}_rationale`);
+  }
+  return { label, rationale };
 }
 
 function matrixSeverity(impact: ReportSeverity, likelihood: ReportSeverity): ReportSeverity {
@@ -329,45 +285,27 @@ function matrixSeverity(impact: ReportSeverity, likelihood: ReportSeverity): Rep
 }
 
 function requiredAssessmentIfPresent(issue: JsonRecord, field: "impact" | "likelihood"): ReportSeverity | undefined {
-  return normalizedSeverity(issue[field]);
+  return exactSeverity(issue[field]);
 }
 
 function proofOfConcept(issue: JsonRecord): RenderableProof | undefined {
-  const rawProof = issue.proof_of_concept;
-  const proof = isRecord(rawProof) ? rawProof : {};
-  const candidateSteps = [proof.scenario, proof.steps, proof.execution_trace, proof.trace, rawProof];
-  let steps: string[] | undefined;
-  for (const candidate of candidateSteps) {
-    if (!Array.isArray(candidate)) {
-      continue;
-    }
-    const available = candidate.filter((entry): entry is string => typeof entry === "string" && isAvailable(entry));
-    if (available.length > 0) {
-      steps = available;
-      break;
-    }
-  }
-  const introduction = firstAvailableString(
-    typeof proof.scenario === "string" ? proof.scenario : undefined,
-    proof.description,
-    typeof proof.execution_trace === "string" ? proof.execution_trace : undefined,
-    typeof proof.trace === "string" ? proof.trace : undefined,
-    typeof rawProof === "string" ? rawProof : undefined
-  );
-  const normalizedSteps = steps?.map((step) => step.trim()).filter((step) => step.length > 0) ?? [];
-  if (normalizedSteps.length === 0 && introduction !== undefined) {
-    normalizedSteps.push(introduction);
-  }
-  if (normalizedSteps.length === 0) {
+  const proof = issue.proof_of_concept;
+  if (
+    !isRecord(proof) ||
+    !Array.isArray(proof.scenario) ||
+    !proof.scenario.every((step): step is string => typeof step === "string" && step.length > 0) ||
+    proof.scenario.length === 0 ||
+    typeof proof.code !== "string" ||
+    proof.code.length === 0 ||
+    typeof proof.language !== "string" ||
+    proof.language.length === 0
+  ) {
     return undefined;
   }
-  const code = firstAvailableString(proof.code, proof.reproducer, proof.source);
-  const language = firstAvailableString(proof.language);
   return {
-    ...(introduction !== undefined && steps !== undefined && steps.length > 0 ? { introduction } : {}),
-    steps: normalizedSteps,
-    ...(code === undefined ? {} : { code }),
-    ...(language === undefined ? {} : { language })
+    steps: [...proof.scenario],
+    code: proof.code,
+    language: proof.language
   };
 }
 
@@ -407,8 +345,8 @@ function renderCanonicalReport(report: JsonRecord): string {
   if (issues.length > 0) {
     lines.push("| Issue id | Title |", "| --- | --- |");
     for (const issue of issues) {
-      const heading = `[${issue.id}] - ${issue.title}`;
-      const linkLabel = `[${issue.id}] - ${publicProse(issue.title)}`;
+      const heading = renderedIssueLabel(issue);
+      const linkLabel = renderedIssueLabel(issue);
       lines.push(`| ${issue.id} | [${escapeTable(linkLabel)}](#${markdownAnchor(heading)}) |`);
     }
     lines.push("", issueCountSentence(issues), "");
@@ -446,22 +384,20 @@ function renderCanonicalReport(report: JsonRecord): string {
 }
 
 function renderedIssues(issues: JsonRecord[]): RenderedIssue[] {
-  const counters: Record<ReportSeverity, number> = { High: 0, Medium: 0, Low: 0 };
-  return issues
-    .map((issue, index) => ({ issue, index, severity: requiredSeverity(issue) }))
-    .sort(
-      (left, right) =>
-        severityOrder.indexOf(left.severity) - severityOrder.indexOf(right.severity) || left.index - right.index
-    )
-    .map(({ issue, severity }) => {
-      counters[severity] += 1;
-      return {
-        issue,
-        severity,
-        id: `${severity[0]}-${String(counters[severity]).padStart(2, "0")}`,
-        title: cleanIssueTitle(recordTitle(issue, "Untitled issue"))
-      };
-    });
+  return issues.map((issue) => ({
+    issue,
+    severity: requiredSeverity(issue),
+    id: typeof issue.id === "string" ? issue.id : "",
+    title: cleanIssueTitle(recordTitle(issue, ""))
+  }));
+}
+
+function renderedIssueLabel(issue: RenderedIssue): string {
+  return `[${publicProse(issue.id)}] - ${publicProse(issue.title)}`;
+}
+
+function renderedIssueHeading(issue: RenderedIssue): string {
+  return `## ${renderedIssueLabel(issue)}`;
 }
 
 /** Outcomes that mean the campaign fuzzed to completion. */
@@ -509,18 +445,10 @@ function appendRunSummary(lines: string[], metadata: JsonRecord): void {
 }
 
 function appendProductionIssue(lines: string[], rendered: RenderedIssue): void {
-  const { issue, id, severity, title } = rendered;
-  lines.push(
-    "",
-    `## [${id}] - ${publicProse(title)}`,
-    "",
-    publicProse(issueDescription(issue)),
-    "",
-    "### Severity",
-    ""
-  );
-  const impact = riskAssessment(issue, "impact", severity);
-  const likelihood = riskAssessment(issue, "likelihood", severity);
+  const { issue } = rendered;
+  lines.push("", renderedIssueHeading(rendered), "", publicProse(issueDescription(issue)), "", "### Severity", "");
+  const impact = riskAssessment(issue, "impact");
+  const likelihood = riskAssessment(issue, "likelihood");
   lines.push(`- **Impact**: ${impact.label}: ${publicProse(impact.rationale)}`);
   lines.push(`- **Likelihood**: ${likelihood.label}: ${publicProse(likelihood.rationale)}`);
   lines.push("", "### Proof of Concept", "");
@@ -537,18 +465,13 @@ function appendProofOfConcept(lines: string[], issue: JsonRecord): void {
   if (proof === undefined) {
     throw new Error("production issue proof of concept is missing a human-readable scenario or execution trace");
   }
-  if (proof.introduction !== undefined) {
-    lines.push(publicProse(proof.introduction), "");
-  }
   for (const [index, step] of proof.steps.entries()) {
     lines.push(`${index + 1}. ${publicProse(step)}`);
   }
-  if (proof.code !== undefined) {
-    const code = publicCode(proof.code);
-    const language = safeFenceLanguage(proof.language ?? "text");
-    const fence = codeFence(code);
-    lines.push("", `${fence}${language}`, code, fence);
-  }
+  const code = publicCode(proof.code);
+  const language = safeFenceLanguage(proof.language);
+  const fence = codeFence(code);
+  lines.push("", `${fence}${language}`, code, fence);
 }
 
 function appendFamilyVariants(lines: string[], value: unknown): void {
@@ -577,34 +500,27 @@ function strategyRows(issue: JsonRecord): Array<{ strategy: string; rate: string
 
 function collectStrategyRows(issue: JsonRecord): Array<{ strategy: string; rate: string }> | undefined {
   const provenance = isRecord(issue.strategy_provenance) ? issue.strategy_provenance : {};
-  const rates = Array.isArray(provenance.detection_rates)
-    ? provenance.detection_rates.filter(isRecord)
-    : Array.isArray(provenance.strategies)
-      ? provenance.strategies.filter(isRecord)
-      : [];
+  const rates = Array.isArray(provenance.detection_rates) ? provenance.detection_rates.filter(isRecord) : [];
   const rows: Array<{ strategy: string; rate: string }> = [];
   for (const rate of rates) {
-    const strategy = firstAvailableString(rate.strategy);
-    if (strategy === undefined) {
+    const strategy = rate.strategy;
+    if (typeof strategy !== "string" || strategy.length === 0) {
       return undefined;
     }
-    const detected = firstDetectionCount(
-      rate.detections,
-      rate.detected_loops,
-      rate.hits,
-      rate.matches,
-      rate.loop_attempts
-    );
-    const configured = firstPositiveInteger(rate.configured_loops);
-    const explicit = firstAvailableString(rate.rate, rate.detection_rate);
-    const exact =
-      detected !== undefined && configured !== undefined && detected <= configured
-        ? `${detected}/${configured}`
-        : exactRate(explicit);
-    if (exact === undefined) {
+    const detected = rate.detections;
+    const configured = rate.configured_loops;
+    if (
+      typeof detected !== "number" ||
+      !Number.isInteger(detected) ||
+      detected < 0 ||
+      typeof configured !== "number" ||
+      !Number.isInteger(configured) ||
+      configured <= 0 ||
+      detected > configured
+    ) {
       return undefined;
     }
-    rows.push({ strategy, rate: exact });
+    rows.push({ strategy, rate: `${detected}/${configured}` });
   }
   return rows;
 }
@@ -648,12 +564,12 @@ function appendPropertyProvenance(
 
 function appendPropertyImplementationCoverage(lines: string[], value: unknown): void {
   lines.push("", "## Property implementation coverage", "");
-  if (isUnavailable(value)) {
-    lines.push("unavailable");
-    return;
-  }
   if (!isRecord(value)) {
-    lines.push("unavailable");
+    throw new Error("Validated final report is missing typed property implementation coverage");
+  }
+  if (value.status === "not-planned") {
+    lines.push("- Status: `not-planned`");
+    lines.push("- Reason: `property-implementation-track-not-declared`");
     return;
   }
   const priorities = Array.isArray(value.priorities) ? value.priorities : [];
@@ -743,46 +659,33 @@ function issueCountSentence(issues: RenderedIssue[]): string {
 }
 
 function requiredSeverity(issue: JsonRecord): ReportSeverity {
-  const raw = firstDefined(issue.severity, issue.severity_guess);
-  const severity = normalizedSeverity(raw);
+  const severity = exactSeverity(issue.severity);
   if (severity === undefined) {
     throw new Error("production issue is missing a High, Medium, or Low report severity");
   }
   return severity;
 }
 
-function riskAssessment(
-  issue: JsonRecord,
-  field: "impact" | "likelihood",
-  fallback: ReportSeverity
-): { label: ReportSeverity; rationale: string } {
-  const raw = issue[field];
-  const label = normalizedSeverity(raw) ?? fallback;
-  const embedded = typeof raw === "string" ? raw.replace(/^\s*(?:high|medium|low)\s*:\s*/iu, "").trim() : "";
-  const rationale = firstAvailableString(issue[`${field}_rationale`], embedded, issue.description, issue.summary);
-  return { label, rationale: rationale ?? "No additional rationale was recorded." };
+function cleanIssueTitle(value: string): string {
+  return value
+    .replace(/^\s*\[[HML]-\d{2,}\]\s*-\s*/iu, "")
+    .replace(/\s+/gu, " ")
+    .trim();
 }
 
-function normalizedSeverity(value: unknown): ReportSeverity | undefined {
-  if (typeof value !== "string") {
-    return undefined;
-  }
-  const match = value
-    .trim()
-    .match(/^(high|medium|low)(?:\s*:|$)/iu)?.[1]
-    ?.toLowerCase();
-  return match === "high" ? "High" : match === "medium" ? "Medium" : match === "low" ? "Low" : undefined;
+function riskAssessment(
+  issue: JsonRecord,
+  field: "impact" | "likelihood"
+): { label: ReportSeverity; rationale: string } {
+  return requiredAssessment(issue, field);
+}
+
+function exactSeverity(value: unknown): ReportSeverity | undefined {
+  return value === "High" || value === "Medium" || value === "Low" ? value : undefined;
 }
 
 function issueDescription(issue: JsonRecord): string {
   return firstAvailableString(issue.description, issue.summary) ?? "No public issue description was recorded.";
-}
-
-function cleanIssueTitle(value: string): string {
-  return value
-    .replace(/^\s*\[[HML]-\d{2}\]\s*-\s*/iu, "")
-    .replace(/\s+/gu, " ")
-    .trim();
 }
 
 function markdownAnchor(heading: string): string {
@@ -795,15 +698,11 @@ function markdownAnchor(heading: string): string {
 
 function propertyFindingLabel(entry: JsonRecord, issues: RenderedIssue[], outcomes: JsonRecord[]): string {
   const findingId = firstAvailableString(entry.finding_id);
-  const issue = issues.find(({ issue: candidate }) =>
-    [candidate.id, candidate.upstream_id, candidate.source_finding_id].some((value) => value === findingId)
-  );
+  const issue = issues.find(({ issue: candidate }) => candidate.id === findingId);
   if (issue !== undefined) {
     return `[${issue.id}] - ${issue.title}`;
   }
-  const outcome = outcomes.find((candidate) =>
-    [candidate.id, candidate.upstream_id, candidate.source_finding_id].some((value) => value === findingId)
-  );
+  const outcome = outcomes.find((candidate) => candidate.id === findingId);
   return outcome === undefined
     ? (firstAvailableString(entry.title, findingId) ?? "unavailable")
     : recordTitle(outcome, findingId ?? "Untitled outcome");
@@ -852,35 +751,6 @@ function strategySummary(record: JsonRecord): string {
     return firstAvailableString(record.strategy) ?? "unavailable";
   }
   return rows.map((row) => `${row.strategy} (${row.rate})`).join(", ");
-}
-
-function exactRate(value: string | undefined): string | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-  const match = /^(\d+)\/(\d+)$/u.exec(value.trim());
-  if (match === null) {
-    return undefined;
-  }
-  const detected = Number(match[1]);
-  const configured = Number(match[2]);
-  return configured > 0 && detected <= configured ? `${detected}/${configured}` : undefined;
-}
-
-function firstPositiveInteger(...values: unknown[]): number | undefined {
-  return values.find((value): value is number => typeof value === "number" && Number.isInteger(value) && value > 0);
-}
-
-function firstDetectionCount(...values: unknown[]): number | undefined {
-  for (const value of values) {
-    if (typeof value === "number" && Number.isInteger(value) && value >= 0) {
-      return value;
-    }
-    if (Array.isArray(value)) {
-      return value.length;
-    }
-  }
-  return undefined;
 }
 
 function inlineValue(value: unknown): string {
@@ -984,10 +854,6 @@ function privatePathPatterns(): RegExp[] {
 
 function recordField(value: unknown, key: string): JsonRecord | undefined {
   return isRecord(value) && isRecord(value[key]) ? value[key] : undefined;
-}
-
-function firstDefined(...values: unknown[]): unknown {
-  return values.find((value) => value !== undefined && value !== null);
 }
 
 function uniqueStrings(value: unknown[]): string[] {

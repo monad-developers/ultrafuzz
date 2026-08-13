@@ -28,40 +28,48 @@ Finding lifecycle ledger:
 
 ## Output contract
 
-Write reportable severity records to
-{{artifact_path}}/severity-classified-findings.json as JSON. Each kept object
-must preserve upstream provenance fields and assign a stable `id`. Use
-`schema_version: "1.0"` on every emitted finding object.
-Preserve each property-derived finding's `property_ids` unchanged.
+Write severity records to
+{{output_stage_findings_path}} using the exact pinned
+`{{schema_path}}/severity-classified-findings.schema.json`; it alone defines
+the JSON version, fields, types, enums, required members, and empty forms. The
+output holds exactly one object per
+triaged finding, in the same order, with the same `id`. Never drop, add, merge,
+split, or reorder a record: exclusion from the production report happens later,
+through the lifecycle `final_disposition`, not by deleting a record here.
 
-For every production report candidate, include these machine-readable fields:
+You own exactly six fields on each record and may write nothing else:
+`severity`, `impact`, `likelihood`, `impact_rationale`, `likelihood_rationale`,
+and `severity_rationale`. Copy every other field of the triaged record
+byte-for-byte, including `id`, `title`, `status`, `confidence`, `notes`,
+`severity_guess`, `summary`,
+`triage_classification`, evidence, provenance, and each property-derived
+finding's `property_ids`. Do not touch `status`, `notes`, or `confidence`; they
+belong to triage, and any difference from the triaged record fails the upstream
+preservation check.
 
-- `severity_guess`: compatibility field for the final classified severity.
-  Keep this field; do not replace it with `severity`.
-- `final_severity`: final matrix severity, exactly `High`, `Medium`, or `Low`.
-- `severity`: compatibility alias for `final_severity`, exactly `High`,
-  `Medium`, or `Low`, for the current final-report renderer.
-- `impact`: exactly `High`, `Medium`, or `Low`.
-- `likelihood`: exactly `High`, `Medium`, or `Low`.
-- `confidence`: `High`, `Medium`, or `Low`, based on evidence quality.
-- `impact_rationale`, `likelihood_rationale`, and `severity_rationale`: concise
-  source-backed explanations.
+For every production report candidate, preserve the upstream preliminary
+severity estimate and lowercase confidence unchanged. Decide impact and
+likelihood from evidence, derive the one final severity mechanically from the
+matrix below, and add concise source-backed impact, likelihood, and severity
+rationales. Never emit a final-severity alias or re-rate confidence.
 
-If the upstream object already had `severity`, `final_severity`,
-`severity_guess`, `impact`, or `likelihood`, preserve those original values only
-under explicit upstream provenance fields such as `upstream_severity` or
-`upstream_severity_guess` when they differ from the final classification. Do
-not carry an upstream severity value through as the classified top-level
-severity. Include exact machine-readable note tokens
-`likelihood=<low|medium|high>` and `impact=<low|medium|high>` in `notes` for
-legacy consumers.
+If the upstream object already had an unauthorized final `severity`, reject the
+upstream handoff instead of copying it into aliases. Preserve `severity_guess`
+unchanged, decide `impact` and `likelihood`, and write only the canonical final
+`severity` plus the three rationale fields. Do not emit `final_severity`,
+`upstream_severity`, note-token aliases, or compatibility fields.
 
 Also copy the strategy detection provenance to
-{{artifact_path}}/strategy-detections.json without dropping or rewriting hits,
-so the final report can compute per-strategy detection rates from loop
-provenance.
+{{artifact_path}}/strategy-detections.json using the exact pinned
+`{{schema_path}}/strategy-detections.schema.json`, without dropping or
+rewriting hits, so the final report can compute per-strategy detection rates
+from loop provenance.
 
-Also save {{artifact_path}}/finding-lifecycle-ledger.json. Copy the triage
+Copy the complete strategy-detections array exactly, including entry order and
+every optional field; do not regenerate it from findings or the ledger.
+
+Also save {{artifact_path}}/finding-lifecycle-ledger.json using the exact
+pinned `{{schema_path}}/finding-lifecycle-ledger.schema.json`. Copy the triage
 ledger and update every `dedupe_key` record that was severity-classified:
 
 - set `canonical_severity` to the final top-level `severity` for promoted
@@ -71,8 +79,17 @@ ledger and update every `dedupe_key` record that was severity-classified:
 - set `demotion_reason` for `non-production` or `dropped` outcomes;
 - preserve `source_artifacts`, `strategy_hits`, duplicate ids, family variant
   keys, and all earlier stage records;
-- append a `severity-classified` stage pointing to
-  {{artifact_path}}/severity-classified-findings.json.
+- append a `severity-classified` stage whose `artifact_path` is the portable
+  declared output-relative path `{{output_stage_findings_relative_path}}`.
+
+Preserve the triage ledger record order and every upstream field and stage
+exactly. Add only `canonical_severity`, `final_disposition`, optional
+`comparison_disposition`, and one final `severity-classified` stage whose
+artifact path and finding ID exactly identify the current severity output.
+`true-positive` records are `promoted` and copy their top-level `severity` into
+`canonical_severity`; `false-positive` records are `dropped`; every other
+classification is `non-production`. Non-promoted records omit
+`canonical_severity`.
 
 If a prior-run lifecycle comparison is available in the prompt context, set
 `comparison_disposition` to exactly `promoted-again`,
@@ -81,11 +98,13 @@ stable `dedupe_key` first, then family ids; do not use title matching.
 
 ## Reportability gate
 
-Exclude invalid, out-of-scope, duplicate-only, and unreachable false-positive
-records from production report entries. If a record must remain structured for a
-non-production appendix, keep its upstream `triage_classification`, use a
-canonical `status` such as `needs-review` or `false-positive`, and do not
-describe it as a production bug.
+Invalid, out-of-scope, duplicate-only, and unreachable false-positive records
+stay in `severity-classified-findings.json` like every other triaged record.
+Keep them out of the production report entries through their lifecycle record
+instead: give the matching `dedupe_key` a `final_disposition` of `dropped` or
+`non-production` with a `demotion_reason`. Copy their upstream
+`triage_classification` and `status` unchanged, and do not describe them as
+production bugs.
 
 Preserve stateful invariant context notes exactly, including
 `stateful_failure_classification=<classification>`. Use them as root-cause
@@ -103,8 +122,8 @@ test-only adapter. Production severity requires either a public/external
 entrypoint trace or a generated public wrapper PoC that reaches the same
 behavior under production-like preconditions.
 
-For every helper-level finding that remains in the output, record one of these
-exact reachability tokens:
+For every helper-level finding, record one of these exact reachability tokens in
+`severity_rationale`, which you own:
 
 - `reachability=public-entrypoint-trace`
 - `reachability=generated-public-wrapper-poc`
@@ -112,9 +131,12 @@ exact reachability tokens:
 - `reachability=public-wrapper-required`
 
 Also include concise `helper_proof=<summary>` and
-`public_exploitability=<summary>` notes when they are relevant. Helper-only
-failures without public exploitability are harness defects, defensive
-hardening, or false positives; they are not production bugs.
+`public_exploitability=<summary>` clauses in the same rationale when they are
+relevant. Never append these tokens to `notes`: triage owns `notes`, and you
+must copy the upstream array unchanged, including any reachability tokens triage
+already recorded there. Helper-only failures without public exploitability are
+harness defects, defensive hardening, or false positives; they are not
+production bugs.
 
 ## Severity classification
 
@@ -132,8 +154,8 @@ Apply the matrix mechanically after deciding impact and likelihood:
 - High impact + Low likelihood is Medium, not High.
 - Medium impact + Low likelihood is Low, not Medium.
 - Low impact is always Low.
-- If impact and likelihood are available, `final_severity`, `severity`, and
-  compatibility `severity_guess` must equal the matrix result.
+- If impact and likelihood are available, `severity` must equal the matrix
+  result. `severity_guess` remains the preliminary upstream estimate.
 - If impact or likelihood cannot be supported by evidence, do not guess. Demote
   the finding to a non-production lifecycle outcome such as `incomplete-spec`,
   `spec-gated`, `undetermined`, `defensive-hardening`, or
@@ -187,114 +209,42 @@ Use these caps and invalidation rules:
 
 ## Self-check before writing output
 
-Before saving `severity-classified-findings.json`, check every emitted object:
+Before saving `severity-classified-findings.json`, check the array as a whole:
 
-- `schema_version` is exactly `"1.0"`.
-- `final_severity`, `severity`, `impact`, and `likelihood` use only `High`,
-  `Medium`, or `Low`.
+- It has exactly one object per triaged finding, in the same order, and each
+  `id` equals the `id` at the same index in `triaged-findings.json`.
+- Only `severity`, `impact`, `likelihood`, `impact_rationale`,
+  `likelihood_rationale`, and `severity_rationale` differ from the triaged
+  record. Every other field, `status`, `notes`, and `confidence` included, is
+  byte-for-byte identical.
+
+Then check every emitted object:
+
+- `severity`, `impact`, and `likelihood` use only `High`, `Medium`, or `Low`.
 - No field used as a severity label contains `Critical`.
-- `final_severity == matrix(impact, likelihood)`.
-- `severity == final_severity`.
-- `severity_guess == final_severity`.
-- `notes` contains `impact=<low|medium|high>` and
-  `likelihood=<low|medium|high>` tokens matching the fields.
-- Every kept finding retains provenance, evidence references, lifecycle status,
+- `severity == matrix(impact, likelihood)`.
+- `severity_guess` is preserved even when the final matrix differs.
+- `confidence` is the preserved upstream lowercase `high`, `medium`, or `low`.
+- Neither `final_severity` nor a compatibility/upstream severity alias exists.
+- Every finding retains provenance, evidence references, lifecycle status,
   triage classification, confidence, and rationale.
 - Non-production records keep their lifecycle and triage disposition instead of
   being forced into a Low production finding.
 
 ## Examples
 
-High:
+Copy every unowned value verbatim from the triaged record in each case. A
+public withdrawal that reliably drains assets is High impact and High
+likelihood, hence High severity. Accounting drift that can lock claimable funds
+only in a narrow state is High impact and Low likelihood, hence Medium. Rounding
+dust reached only at a low-probability boundary is at most Medium impact and
+Low likelihood, hence Low. An unsupported fee-on-transfer-token claim is a
+false positive when support is not documented.
 
-```json
-{
-  "schema_version": "1.0",
-  "title": "Public withdrawal path drains vault assets",
-  "triage_classification": "true-positive",
-  "status": "needs-review",
-  "severity": "High",
-  "final_severity": "High",
-  "severity_guess": "High",
-  "impact": "High",
-  "likelihood": "High",
-  "confidence": "High",
-  "impact_rationale": "External withdrawal path directly steals protocol assets.",
-  "likelihood_rationale": "The public withdrawal path is reliably reachable from realistic state.",
-  "severity_rationale": "Impact High x Likelihood High maps to High.",
-  "notes": [
-    "likelihood=high",
-    "impact=high",
-    "classification_reason=external withdrawal path directly steals protocol assets"
-  ]
-}
-```
-
-Medium:
-
-```json
-{
-  "schema_version": "1.0",
-  "title": "Integration-specific accounting drift blocks redemptions",
-  "triage_classification": "true-positive",
-  "status": "needs-review",
-  "severity": "Medium",
-  "final_severity": "Medium",
-  "severity_guess": "Medium",
-  "impact": "High",
-  "likelihood": "Low",
-  "confidence": "Medium",
-  "impact_rationale": "Claimable funds can be locked for affected users.",
-  "likelihood_rationale": "The path requires a narrow production state and timing sequence.",
-  "severity_rationale": "Impact High x Likelihood Low maps to Medium.",
-  "notes": [
-    "likelihood=low",
-    "impact=high",
-    "classification_reason=availability and accounting impact requires specific production state"
-  ]
-}
-```
-
-Low:
-
-```json
-{
-  "schema_version": "1.0",
-  "title": "Rounding dust can be stranded",
-  "triage_classification": "defensive-hardening",
-  "status": "needs-review",
-  "severity": "Low",
-  "final_severity": "Low",
-  "severity_guess": "Low",
-  "impact": "Medium",
-  "likelihood": "Low",
-  "confidence": "Medium",
-  "impact_rationale": "The effect is bounded to limited accounting drift without direct asset theft.",
-  "likelihood_rationale": "The path requires a narrow low-probability boundary state.",
-  "severity_rationale": "Impact Medium x Likelihood Low maps to Low.",
-  "notes": [
-    "likelihood=low",
-    "impact=medium",
-    "classification_reason=low-risk dust impact without meaningful asset loss"
-  ]
-}
-```
-
-Invalid or out of scope:
-
-```json
-{
-  "title": "Unsupported fee-on-transfer token breaks accounting",
-  "triage_classification": "false-positive",
-  "status": "false-positive",
-  "notes": [
-    "classification_reason=out of scope: token behavior is not documented as supported"
-  ]
-}
-```
-
-Do not include invalid or out-of-scope records like the example above in the
-production report entries.
+Keep invalid or out-of-scope records in
+`severity-classified-findings.json` with their triaged fields intact, and mark
+them `dropped` in the lifecycle ledger. Their `final_disposition` is what keeps
+them out of the production report entries.
 
 Make sure compilation is passing but do not fix any failing tests. If Foundry
 dependencies are missing, restore project-pinned dependencies first, such as
@@ -305,8 +255,12 @@ verification is not a target workspace change; do not include lockfile or
 dependency-vendor drift in the reported artifacts.
 
 Save severity-classified findings to
-{{artifact_path}}/severity-classified-findings.json as JSON.
+{{output_stage_findings_path}} as JSON.
 Also copy the strategy detection provenance to
 {{artifact_path}}/strategy-detections.json without dropping or rewriting hits,
 so the final report can compute per-strategy detection rates from loop
 provenance.
+
+After all three final writes, run every exact `ultrafuzz json validate` command
+rendered for them in the central output contract. Correct any exit-1 artifact
+yourself and rerun its command after any later edit.

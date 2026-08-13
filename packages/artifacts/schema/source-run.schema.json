@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:artifacts:source-run:2",
+  "title": "Ultrafuzz source run link",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run_id", "source_run_id", "created_at"],
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.source-run.v2" },
+    "run_id": { "$ref": "#/$defs/safeId" },
+    "source_run_id": { "$ref": "#/$defs/safeId" },
+    "created_at": { "type": "string", "format": "date-time" }
+  },
+  "$defs": {
+    "safeId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    }
+  }
+}

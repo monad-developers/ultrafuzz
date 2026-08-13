@@ -7,6 +7,9 @@ import path from "node:path";
 import lockfile from "proper-lockfile";
 import { parse, stringify } from "smol-toml";
 
+import { parseStrictJsonBytes, readRegularFileSnapshot } from "@ultrafuzz/artifacts";
+
+import { readBoundedResponseBytes } from "./bounded-response.js";
 import type { ModalModelSpec, ModelProvider } from "./defaults.js";
 import { remoteAuthDir, remoteAuthPath } from "./layout.js";
 
@@ -63,7 +66,7 @@ export async function prepareSubscriptionAuthCopy(
   const snapshot = await mkdtemp(path.join(os.tmpdir(), "ultrafuzz-kimi-auth-"));
   try {
     const config = kimiConfig(await readFile(path.join(source, "config.toml"), "utf8"));
-    const token = kimiOAuthToken(await readFile(credentialPath, "utf8"), credentialPath);
+    const token = readKimiOAuthToken(credentialPath);
     await writeFile(path.join(snapshot, "config.toml"), kimiSnapshotConfig(config, model.model), {
       encoding: "utf8",
       mode: 0o600
@@ -108,11 +111,12 @@ export async function refreshKimiSubscriptionAuth(
 
   const release = await acquireKimiRefreshLock(source, credential.lockName);
   try {
-    const token = kimiOAuthToken(await readFile(credentialPath, "utf8"), credentialPath);
+    const token = readKimiOAuthToken(credentialPath);
     const now = Math.floor((options.now?.() ?? Date.now()) / 1000);
-    const threshold = Math.max(300, Math.floor((token.expires_in ?? 0) * 0.5));
+    if (!isPositiveSafeInteger(now)) throw new Error("Kimi OAuth refresh clock is outside the supported range");
+    const threshold = Math.max(300, Math.floor(token.expires_in * 0.5));
     if (token.expires_at - threshold > now) return credentialPath;
-    if (token.refresh_token.trim() === "") {
+    if (token.refresh_token === undefined) {
       throw new Error("Kimi subscription token is near expiry and has no refresh token; run `kimi login`");
     }
     const fetchImpl = options.fetch ?? fetch;
@@ -134,19 +138,22 @@ export async function refreshKimiSubscriptionAuth(
         refresh_token: token.refresh_token
       })
     });
-    const payload = await response.json().catch(() => undefined);
     if (!response.ok) {
       throw new Error(`Kimi subscription token refresh failed with HTTP ${response.status}`);
     }
+    const payload = await readBoundedResponseBytes(response, MAX_KIMI_OAUTH_JSON_BYTES, "Kimi OAuth refresh response");
     const refreshed = kimiOAuthRefresh(payload);
+    const expiresAt = now + refreshed.expires_in;
+    if (!isPositiveSafeInteger(expiresAt)) {
+      throw new Error("Kimi subscription token refresh returned an unsupported expiration");
+    }
     const next = {
-      ...token,
+      ...token.providerEnvelope,
+      ...refreshed.providerEnvelope,
       access_token: refreshed.access_token,
       refresh_token: refreshed.refresh_token,
-      expires_at: now + refreshed.expires_in,
-      expires_in: refreshed.expires_in,
-      token_type: refreshed.token_type ?? token.token_type ?? "Bearer",
-      scope: refreshed.scope ?? token.scope ?? ""
+      expires_at: expiresAt,
+      expires_in: refreshed.expires_in
     };
     await writeJsonAtomic(credentialPath, next);
     return credentialPath;
@@ -182,10 +189,12 @@ export async function kimiSubscriptionAuthSecretValuesFromRoots(
   const config = kimiConfig(await readFile(path.join(configRoot, "config.toml"), "utf8"));
   const credentialFile = path.basename(kimiCredentialPath(configRoot, config, model));
   const credentialPath = path.join(credentialRoot, "credentials", credentialFile);
-  const token = kimiOAuthToken(await readFile(credentialPath, "utf8"), credentialPath, {
+  const token = readKimiOAuthToken(credentialPath, {
     requireRefreshToken: false
   });
-  return [...new Set([token.access_token, token.refresh_token].filter((value) => value.length > 0))];
+  return [
+    ...new Set([token.access_token, token.refresh_token].filter((value): value is string => value !== undefined))
+  ];
 }
 
 export async function reconcileKimiSubscriptionAuthCredential(
@@ -202,15 +211,15 @@ export async function reconcileKimiSubscriptionAuthCredential(
   const remoteToken = kimiOAuthToken(remoteCredential, `Modal volume ${path.basename(credentialPath)}`, {
     requireRefreshToken: false
   });
-  if (remoteToken.refresh_token.trim() === "") return false;
+  if (remoteToken.refresh_token === undefined) return false;
   await access(credentialPath, constants.R_OK | constants.W_OK);
   await access(path.join(source, "device_id"), constants.R_OK);
 
   const release = await acquireKimiRefreshLock(source, credential.lockName);
   try {
-    const localToken = kimiOAuthToken(await readFile(credentialPath, "utf8"), credentialPath);
+    const localToken = readKimiOAuthToken(credentialPath);
     if (!shouldReplaceKimiCredential(localToken, remoteToken, options)) return false;
-    await writeJsonAtomic(credentialPath, remoteToken);
+    await writeJsonAtomic(credentialPath, remoteToken.providerEnvelope);
     return true;
   } finally {
     await release();
@@ -266,14 +275,23 @@ interface KimiConfig {
 }
 
 interface KimiOAuthToken {
+  /** Provider-owned credential envelope, retained field-for-field when Ultrafuzz rewrites the token. */
+  providerEnvelope: Record<string, unknown>;
   access_token: string;
-  refresh_token: string;
+  refresh_token?: string;
   expires_at: number;
-  expires_in?: number;
+  expires_in: number;
   token_type?: string;
   scope?: string;
-  [key: string]: unknown;
 }
+
+const MAX_KIMI_OAUTH_JSON_BYTES = 64 * 1024;
+const KIMI_OAUTH_JSON_LIMITS = Object.freeze({
+  maxBytes: MAX_KIMI_OAUTH_JSON_BYTES,
+  maxDepth: 16,
+  maxItems: 1_024,
+  maxProperties: 1_024
+});
 
 function kimiConfig(text: string): KimiConfig {
   const value = parse(text) as unknown;
@@ -347,52 +365,76 @@ function kimiModelProvider(
 }
 
 function kimiWorkerOAuthSnapshot(token: KimiOAuthToken): Record<string, unknown> {
-  return { ...token };
+  return { ...token.providerEnvelope };
 }
 
 function kimiOAuthToken(
-  text: string,
+  contents: Uint8Array | string,
   credentialPath: string,
   options: { requireRefreshToken?: boolean } = {}
 ): KimiOAuthToken {
   let value: unknown;
   try {
-    value = JSON.parse(text) as unknown;
-  } catch {
-    throw new Error(`Kimi subscription credentials are invalid JSON: ${credentialPath}`);
+    value = parseStrictJsonBytes(
+      typeof contents === "string" ? Buffer.from(contents, "utf8") : contents,
+      KIMI_OAUTH_JSON_LIMITS
+    );
+  } catch (error) {
+    throw new Error(`Kimi subscription credentials are not strict bounded JSON: ${credentialPath}`, { cause: error });
   }
-  const refreshToken = isRecord(value) && typeof value.refresh_token === "string" ? value.refresh_token : "";
   if (
     !isRecord(value) ||
-    typeof value.access_token !== "string" ||
-    typeof value.expires_at !== "number" ||
-    ((options.requireRefreshToken ?? true) && typeof value.refresh_token !== "string")
+    !isOpaqueCredential(value.access_token) ||
+    !isPositiveSafeInteger(value.expires_at) ||
+    !isPositiveSafeInteger(value.expires_in) ||
+    (value.refresh_token !== undefined && !isOpaqueCredential(value.refresh_token)) ||
+    ((options.requireRefreshToken ?? true) && value.refresh_token === undefined) ||
+    (value.token_type !== undefined && !isOpaqueCredential(value.token_type)) ||
+    (value.scope !== undefined && typeof value.scope !== "string")
   ) {
     throw new Error(`Kimi subscription credentials have an unsupported shape: ${credentialPath}`);
   }
-  return { ...value, refresh_token: refreshToken } as KimiOAuthToken;
+  return {
+    providerEnvelope: { ...value },
+    access_token: value.access_token,
+    ...(value.refresh_token === undefined ? {} : { refresh_token: value.refresh_token }),
+    expires_at: value.expires_at,
+    expires_in: value.expires_in,
+    ...(value.token_type === undefined ? {} : { token_type: value.token_type }),
+    ...(value.scope === undefined ? {} : { scope: value.scope })
+  };
 }
 
-function kimiOAuthRefresh(value: unknown): {
+function readKimiOAuthToken(credentialPath: string, options: { requireRefreshToken?: boolean } = {}): KimiOAuthToken {
+  return kimiOAuthToken(readRegularFileSnapshot(credentialPath, MAX_KIMI_OAUTH_JSON_BYTES), credentialPath, options);
+}
+
+function kimiOAuthRefresh(contents: Uint8Array): {
+  providerEnvelope: Record<string, unknown>;
   access_token: string;
   refresh_token: string;
   expires_in: number;
   token_type?: string;
   scope?: string;
 } {
+  let value: unknown;
+  try {
+    value = parseStrictJsonBytes(contents, KIMI_OAUTH_JSON_LIMITS);
+  } catch (error) {
+    throw new Error("Kimi subscription token refresh response is not strict bounded JSON", { cause: error });
+  }
   if (
     !isRecord(value) ||
-    typeof value.access_token !== "string" ||
-    value.access_token === "" ||
-    typeof value.refresh_token !== "string" ||
-    value.refresh_token === "" ||
-    typeof value.expires_in !== "number" ||
-    !Number.isFinite(value.expires_in) ||
-    value.expires_in <= 0
+    !isOpaqueCredential(value.access_token) ||
+    !isOpaqueCredential(value.refresh_token) ||
+    !isPositiveSafeInteger(value.expires_in) ||
+    (value.token_type !== undefined && !isOpaqueCredential(value.token_type)) ||
+    (value.scope !== undefined && typeof value.scope !== "string")
   ) {
     throw new Error("Kimi subscription token refresh returned an unsupported response");
   }
   return {
+    providerEnvelope: { ...value },
     access_token: value.access_token,
     refresh_token: value.refresh_token,
     expires_in: value.expires_in,
@@ -436,15 +478,16 @@ function shouldReplaceKimiCredential(
   remoteToken: KimiOAuthToken,
   options: { sourceRefreshTokenSha256?: string } = {}
 ): boolean {
-  const localHasRefresh = localToken.refresh_token.trim() !== "";
-  const remoteHasRefresh = remoteToken.refresh_token.trim() !== "";
-  if (remoteHasRefresh && !localHasRefresh) return true;
-  if (!remoteHasRefresh) return false;
-  if (remoteToken.refresh_token === localToken.refresh_token) {
+  const localRefreshToken = localToken.refresh_token;
+  const remoteRefreshToken = remoteToken.refresh_token;
+  if (remoteRefreshToken !== undefined && localRefreshToken === undefined) return true;
+  if (remoteRefreshToken === undefined) return false;
+  if (remoteRefreshToken === localRefreshToken) {
     return remoteToken.expires_at > localToken.expires_at;
   }
   if (options.sourceRefreshTokenSha256 === undefined) return false;
-  if (kimiRefreshTokenSha256(localToken.refresh_token) !== options.sourceRefreshTokenSha256) return false;
+  if (localRefreshToken === undefined) return false;
+  if (kimiRefreshTokenSha256(localRefreshToken) !== options.sourceRefreshTokenSha256) return false;
   return remoteToken.expires_at > localToken.expires_at;
 }
 
@@ -501,4 +544,12 @@ async function writeJsonAtomic(filePath: string, value: Record<string, unknown>)
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isOpaqueCredential(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value === value.trim();
+}
+
+function isPositiveSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 }

@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:runtime:agent-adapter-recovery:1",
+  "title": "Ultrafuzz agent adapter publication recovery marker",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "target_basename", "temporary_basename", "temporary_dev", "temporary_ino"],
+  "properties": {
+    "schema_version": {
+      "const": "ultrafuzz.agent-adapter-recovery.v1"
+    },
+    "target_basename": {
+      "type": "string"
+    },
+    "temporary_basename": {
+      "type": "string"
+    },
+    "temporary_dev": {
+      "$ref": "#/$defs/unsignedDeviceIdentity"
+    },
+    "temporary_ino": {
+      "$ref": "#/$defs/unsignedDeviceIdentity"
+    }
+  },
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "target_basename": { "const": "claude.ts" },
+        "temporary_basename": { "const": ".claude.ts.ultrafuzz-init-prepared" }
+      }
+    },
+    {
+      "type": "object",
+      "properties": {
+        "target_basename": { "const": "codex.ts" },
+        "temporary_basename": { "const": ".codex.ts.ultrafuzz-init-prepared" }
+      }
+    },
+    {
+      "type": "object",
+      "properties": {
+        "target_basename": { "const": "deepseek.ts" },
+        "temporary_basename": { "const": ".deepseek.ts.ultrafuzz-init-prepared" }
+      }
+    },
+    {
+      "type": "object",
+      "properties": {
+        "target_basename": { "const": "kimi.ts" },
+        "temporary_basename": { "const": ".kimi.ts.ultrafuzz-init-prepared" }
+      }
+    }
+  ],
+  "$defs": {
+    "unsignedDeviceIdentity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 20,
+      "pattern": "^(?:0|[1-9][0-9]*)$"
+    }
+  }
+}

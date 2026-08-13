@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:artifacts:json-validator-preflight-success:1",
+  "title": "Ultrafuzz JSON validator preflight success envelope",
+  "allOf": [
+    { "$ref": "#/$defs/validationSuccessEnvelope" },
+    {
+      "type": "object",
+      "required": ["data"],
+      "properties": {
+        "data": {
+          "type": "object",
+          "required": ["schema"],
+          "properties": {
+            "schema": {
+              "type": "object",
+              "required": ["id", "registered"],
+              "properties": {
+                "id": { "type": "string", "minLength": 1 },
+                "registered": { "const": true }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "emptyDiagnostics": { "type": "array", "maxItems": 0, "items": false },
+    "validationSchemaIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "sha256", "bundle_sha256", "validator_build", "registered"],
+      "properties": {
+        "id": { "type": ["string", "null"] },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "bundle_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "validator_build": { "type": "string", "minLength": 1 },
+        "registered": { "type": "boolean" }
+      }
+    },
+    "validationSuccessData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "diagnostics", "schema", "artifact_sha256", "truncated"],
+      "properties": {
+        "status": { "const": "valid" },
+        "diagnostics": { "$ref": "#/$defs/emptyDiagnostics" },
+        "schema": { "$ref": "#/$defs/validationSchemaIdentity" },
+        "artifact_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "truncated": { "const": false }
+      }
+    },
+    "validationSuccessEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "command", "ok", "diagnostics", "data"],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.cli.result.v2" },
+        "command": { "const": "json validate" },
+        "ok": { "const": true },
+        "diagnostics": { "$ref": "#/$defs/emptyDiagnostics" },
+        "data": { "$ref": "#/$defs/validationSuccessData" }
+      }
+    }
+  }
+}

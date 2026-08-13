@@ -26,42 +26,65 @@ and never invent a finding to satisfy CI.
 Use only High, Medium, or Low for severity, impact, and likelihood. Recompute
 severity from evidence with this exact matrix: Low impact is Low; Medium impact
 with Low likelihood is Low and otherwise Medium; High impact with Low
-likelihood is Medium and otherwise High. Set both `severity` and
-`severity_guess` to that matrix result. Normalize each production issue to
-include at least:
+likelihood is Medium and otherwise High. Set the final `severity` to that
+matrix result while preserving each finding's preliminary `severity_guess`.
+Each production issue must preserve the normalized finding identity,
+preliminary severity, confidence, summary, originating strategy, affected
+code, evidence, strategy provenance, and matching lifecycle record. Add final
+severity, impact, likelihood, their source-backed rationales, and a non-empty
+proof-of-concept scenario in the target's native language. These preservation
+and evidence requirements are semantic; the pinned schema owns their shape.
 
-- `schema_version: "1.0"`, stable `id`, concise `title`, `status`,
-  `severity_guess`, `confidence`, and `summary`;
-- `strategy` as one originating strategy string, affected files/functions, and
-  concrete evidence;
-- `severity`, `impact`, `likelihood`, `description`, and a reproducible
-  `proof_of_concept` or precise execution trace; and
-- structured `strategy_provenance` and its matching lifecycle record when
-available.
+Write `{{artifact_path}}/report.json` using the exact pinned
+`{{schema_path}}/report.schema.json`; it alone defines the JSON version, fields,
+types, enums, required members, and empty forms. Copy the public run metadata
+from the supplied run record, preserve matching lifecycle records with
+production and non-production findings, emit no property provenance rows, and
+use the schema's typed `not-planned` property-implementation coverage variant
+because the smoke topology declares no property implementation track. Never
+synthesize that variant to hide missing or malformed evidence in a topology
+that does declare the track.
 
-Write every issue's `confidence` as one of the strings `high`, `medium`, or
-`low`; never use a numeric confidence in the normalized report.
+This smoke topology declares no campaign-summary ancestor, so omit
+`campaign_outcome`; never synthesize an agent-authored campaign status.
 
-Write `{{artifact_path}}/report.json` with `schema_version: "1.0"`, a
-`run_metadata` object, normalized production `issues`,
-`non_production_outcomes`, and `property_provenance: []`. The `issues` array is
-the scoring source of truth and must remain non-empty whenever at least one
-deduped finding is supported as a production bug.
+The `issues` array is the scoring source of truth and must remain non-empty
+whenever at least one deduped finding is supported as a production bug.
 
-Copy the effective audit policy from the supplied run metadata into
-`report.json.run_metadata`: `audit_profile`,
-`audit_profile_catalog_digest`, `topology_digest`, `prompt_digest`, and
-`expanded_graph_fingerprint`. Use the runtime-recorded values exactly and show
+Every non-production outcome preserves every upstream finding field exactly and
+adds the report-context classification, recommendation, and lifecycle values
+required by the pinned report schema.
+
+Copy the effective audit policy from the supplied run metadata into the same
+closed `run_metadata` object: `audit_profile`, `audit_profile_catalog_digest`,
+`topology_digest`, `prompt_digest`, and `expanded_graph_fingerprint`. Use the
+runtime-recorded values exactly, never reconstruct them from paths, and show
 them in the Markdown Run summary.
 
-Write the exact same normalized production issue array to
-`{{artifact_path}}/findings.normalized.json`. Use `[]` only when the bounded
-final review supports no production issue; this is a required smoke terminal
-artifact and must never contain synthetic findings.
+After `report.json` passes its exact rendered validation command, generate the
+required byte-exact canonical Markdown with this producer command:
 
-Write `{{artifact_path}}/report.md` beginning with `# Ultrafuzz report`. Include
-a concise run summary, an issue index, and for each production issue its
-severity reasoning, evidence/PoC, affected code, and strategy detections. Add a
-short non-production outcomes table when needed. State `No issues reported.`
-only when the evidence supports no production issue. Validate all three
-required files against their output contracts, then stop.
+```sh
+ultrafuzz report render --file '{{artifact_path}}/report.json' --output '{{artifact_path}}/report.md'
+```
+
+The command fails instead of inventing missing final-review evidence. Treat
+exit 1 as a report JSON authoring failure: correct `report.json`, rerun its exact
+validation command, and rerun this renderer. Do not author or hand-edit
+`report.md` after the renderer succeeds.
+
+The rendered `report.md` begins with `# Ultrafuzz report` and includes a concise
+run summary, an issue index, and for each production issue its severity
+reasoning, evidence/PoC, affected code, and strategy detections. It includes a
+short non-production outcomes table when needed and states `No issues reported.`
+only when the evidence supports no production issue. Under
+`## Property implementation coverage`, render exactly:
+
+```markdown
+- Status: `not-planned`
+- Reason: `property-implementation-track-not-declared`
+```
+
+Run every exact `ultrafuzz json validate` command rendered in the central
+output contract; correct an exit-1 JSON artifact yourself and rerun its command
+after any later edit. Then run the canonical Markdown renderer above and stop.

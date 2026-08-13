@@ -1,32 +1,45 @@
-import { isDeepStrictEqual } from "node:util";
-
 import {
-  stableUsageDimension,
-  validateNodeAttemptLedgerEntry,
-  validateUsageLedgerEntry,
+  type NodeAttemptFailureCategory,
   type NodeAttemptLedgerEntry,
+  type NodeAttemptOutcome,
+  type NodeState,
+  type NodeStatus,
+  type PlannedGraphDocument,
+  type PlannedGraphNodeDocument,
+  type RunMetadataDocument,
+  type RunState,
+  type RunStatus,
   type UsageLedgerEntry
 } from "@ultrafuzz/artifacts";
 import {
+  assertRunMetadataAccountingUsageAuthority,
   modelPricingFromSnapshot,
   projectNormalizedUsageAccounting,
+  roundAccountingUsd,
   type ModelPricing,
   type RuntimeDiagnostic
 } from "@ultrafuzz/runtime";
 
 export const RUN_STATISTICS_SCHEMA_VERSION = "ultrafuzz.stats.v1" as const;
 
+export interface StatisticsSource {
+  kind: "local-run" | "report-bundle";
+  path: string;
+}
+
 export interface StatisticsEvidence {
   runId: string;
-  source: {
-    kind: "local-run" | "report-bundle";
-    path: string;
-  };
-  runMetadata?: unknown;
-  state?: unknown;
-  graph?: unknown;
-  attemptsJsonl?: string;
-  usageJsonl?: string;
+  source: StatisticsSource;
+  runMetadata: RunMetadataDocument;
+  state: RunState;
+  graph: PlannedGraphDocument;
+  graphFingerprint: string;
+  /** Point in time represented by the immutable evidence snapshot. */
+  capturedAtMs?: number;
+  /** Undefined means the ledger was genuinely absent; an empty array means it was present and empty. */
+  attempts?: readonly NodeAttemptLedgerEntry[];
+  /** Undefined means the ledger was genuinely absent; an empty array means it was present and empty. */
+  usage?: readonly UsageLedgerEntry[];
 }
 
 export interface TokenStatistics {
@@ -43,61 +56,67 @@ export interface TokenStatistics {
   models: string[];
 }
 
+export type NodeStatisticsStatus = NodeStatus | "unknown";
+
 export interface NodeStatistics {
   node_id: string;
   logical_node_id: string | null;
-  kind: string | null;
-  status: string;
-  outcome: string | null;
-  model: string | null;
+  kind: PlannedGraphNodeDocument["kind"] | null;
+  status: NodeStatisticsStatus;
+  outcome: NodeAttemptOutcome | "mixed" | null;
+  model: string | "mixed" | null;
   duration_ms: number | null;
   current_elapsed_ms: number | null;
   attempt_count: number | null;
   retry_count: number | null;
   executed_attempt_count: number | null;
   reused_attempt_count: number | null;
-  failure_categories: string[] | null;
+  failure_categories: NodeAttemptFailureCategory[] | null;
   output_count: number;
   usage: TokenStatistics | null;
+}
+
+export interface AccountingCumulativeStatistics {
+  input_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  output_tokens: number;
+  reasoning_tokens: number;
+  total_tokens: number;
+  estimated_spend_usd: number | null;
+  usage_complete: boolean;
+  pricing_complete: boolean;
+  event_count: number;
+  models: string[];
+  agents: string[];
+  source_run_ids: string[];
 }
 
 export interface RunStatisticsValue {
   schema_version: typeof RUN_STATISTICS_SCHEMA_VERSION;
   run_id: string;
   generated_at: string;
-  source: StatisticsEvidence["source"];
-  status: string;
-  run_elapsed_ms: number | null;
+  source: StatisticsSource;
+  status: RunStatus;
+  run_elapsed_ms: number;
   nodes: NodeStatistics[];
   totals: {
     node_count: number;
-    status_counts: Record<string, number>;
+    status_counts: Record<NodeStatisticsStatus, number>;
     duration_ms: number | null;
     attempts_complete: boolean;
     usage: TokenStatistics | null;
-    accounting_cumulative: Record<string, unknown> | null;
+    accounting_cumulative: AccountingCumulativeStatistics | null;
   };
   unattributed_usage: TokenStatistics | null;
 }
 
-interface ParsedJsonLines {
-  records: Record<string, unknown>[];
-  malformed: number;
-  duplicates: number;
-  crossRun: number;
-}
-
-const MAX_IDENTITY_COMBINATIONS = 1_000_000;
-
 interface NodeDescriptor {
   nodeId: string;
   logicalNodeId: string | null;
-  kind: string | null;
-  graph: Record<string, unknown> | undefined;
-  states: Record<string, unknown>[];
+  graph: PlannedGraphNodeDocument | undefined;
+  states: NodeState[];
   workflowNodeIds: string[];
-  iterations: number[];
-  attempts: number[];
 }
 
 interface UsageAccumulator {
@@ -125,85 +144,47 @@ export function deriveRunStatistics(
   evidence: StatisticsEvidence,
   nowMs = Date.now()
 ): { value: RunStatisticsValue; diagnostics: RuntimeDiagnostic[] } {
-  const diagnostics: RuntimeDiagnostic[] = [];
-  const storedMetadata = record(evidence.runMetadata);
-  const storedState = record(evidence.state);
-  const metadataRunId = stringField(storedMetadata, "run_id");
-  const stateRunId = stringField(storedState, "run_id");
-  const metadata = metadataRunId !== undefined && metadataRunId !== evidence.runId ? undefined : storedMetadata;
-  const state = stateRunId !== undefined && stateRunId !== evidence.runId ? undefined : storedState;
-  const graph = record(evidence.graph);
-  const parsedAttempts = parseAttemptLines(evidence.attemptsJsonl, evidence.runId);
-  const parsedUsage = parseUsageLines(evidence.usageJsonl, evidence.runId);
+  if (!Number.isSafeInteger(nowMs)) throw new Error("statistics clock must be a safe-integer millisecond timestamp");
+  const evidenceTimeMs = evidence.capturedAtMs ?? nowMs;
+  if (!Number.isSafeInteger(evidenceTimeMs)) {
+    throw new Error("statistics evidence clock must be a safe-integer millisecond timestamp");
+  }
+  if (evidenceTimeMs > nowMs) {
+    throw new Error("statistics evidence capture cannot be in the future");
+  }
+  assertEvidenceBindings(evidence);
 
-  for (const [label, storedRunId] of [
-    ["run.json", metadataRunId],
-    ["state.json", stateRunId]
-  ] as const) {
-    if (storedRunId !== undefined && storedRunId !== evidence.runId) {
+  const diagnostics: RuntimeDiagnostic[] = [];
+  if (evidence.attempts === undefined) {
+    diagnostics.push(
+      warning("STATS_ATTEMPTS_UNAVAILABLE", "attempts.jsonl is unavailable; node durations may be incomplete")
+    );
+  }
+  if (evidence.usage === undefined) {
+    diagnostics.push(warning("STATS_USAGE_UNAVAILABLE", "usage.jsonl is unavailable; node token usage is unavailable"));
+    if (evidence.runMetadata.accounting !== undefined) {
       diagnostics.push(
-        warning("STATS_RUN_ID_MISMATCH", `${label} belongs to ${storedRunId}, expected ${evidence.runId}`)
+        warning(
+          "STATS_ACCOUNTING_UNVERIFIED",
+          "run.json accounting is unavailable because usage.jsonl cannot authenticate it"
+        )
       );
     }
   }
 
-  if (evidence.attemptsJsonl === undefined) {
-    diagnostics.push(
-      warning("STATS_ATTEMPTS_UNAVAILABLE", "attempts.jsonl is unavailable; node durations may be incomplete")
-    );
-  } else if (parsedAttempts.malformed > 0) {
-    diagnostics.push(
-      warning(
-        "STATS_ATTEMPTS_MALFORMED",
-        `ignored ${parsedAttempts.malformed} malformed attempts.jsonl entr${parsedAttempts.malformed === 1 ? "y" : "ies"}`
-      )
-    );
-  }
-  if (parsedAttempts.duplicates > 0) {
-    diagnostics.push(
-      warning("STATS_ATTEMPTS_DUPLICATE", `ignored ${parsedAttempts.duplicates} duplicate attempt ledger entries`)
-    );
-  }
-  if (parsedAttempts.crossRun > 0) {
-    diagnostics.push(
-      warning("STATS_ATTEMPTS_CROSS_RUN", `ignored ${parsedAttempts.crossRun} attempt entries from another run`)
-    );
-  }
-  if (evidence.usageJsonl === undefined) {
-    diagnostics.push(warning("STATS_USAGE_UNAVAILABLE", "usage.jsonl is unavailable; node token usage is unavailable"));
-  } else if (parsedUsage.malformed > 0) {
-    diagnostics.push(
-      warning(
-        "STATS_USAGE_MALFORMED",
-        `ignored ${parsedUsage.malformed} malformed usage.jsonl entr${parsedUsage.malformed === 1 ? "y" : "ies"}`
-      )
-    );
-  }
-  if (parsedUsage.duplicates > 0) {
-    diagnostics.push(
-      warning("STATS_USAGE_DUPLICATE", `ignored ${parsedUsage.duplicates} duplicate usage ledger entries`)
-    );
-  }
-  if (parsedUsage.crossRun > 0) {
-    diagnostics.push(
-      warning("STATS_USAGE_CROSS_RUN", `ignored ${parsedUsage.crossRun} usage entries from another run`)
-    );
-  }
-
-  const descriptors = nodeDescriptors(graph, state, parsedAttempts.records);
-  const descriptorById = new Map(descriptors.map((descriptor) => [descriptor.nodeId, descriptor]));
-  const usageIdentity = usageIdentityMap(descriptors, parsedUsage.records, diagnostics);
-  const pricing = modelPricing(metadata);
+  const attempts = evidence.attempts ?? [];
+  const usageEvents = evidence.usage ?? [];
+  const descriptors = nodeDescriptors(evidence.graph, evidence.state, attempts);
+  const aliases = usageNodeAliases(descriptors, diagnostics);
+  const pricing = modelPricing(evidence.runMetadata);
   const usageByNode = new Map<string, UsageAccumulator>();
   const unattributed = emptyUsageAccumulator();
 
-  for (const event of parsedUsage.records) {
-    const nodeId = usageNodeId(event, descriptorById, usageIdentity);
+  for (const event of usageEvents) {
+    const nodeId = aliases.get(event.node_id);
     const target = nodeId === undefined ? unattributed : (usageByNode.get(nodeId) ?? emptyUsageAccumulator());
-    accumulateUsage(target, event, pricing, cacheReadRatio(metadata));
-    if (nodeId !== undefined) {
-      usageByNode.set(nodeId, target);
-    }
+    accumulateUsage(target, event, pricing, cacheReadRatio(evidence.runMetadata));
+    if (nodeId !== undefined) usageByNode.set(nodeId, target);
   }
 
   if (unattributed.eventCount > 0) {
@@ -214,265 +195,305 @@ export function deriveRunStatistics(
       )
     );
   }
-  if (parsedUsage.malformed > 0) {
-    for (const accumulator of [...usageByNode.values(), unattributed]) {
-      if (accumulator.eventCount > 0) {
-        accumulator.usageComplete = false;
-        accumulator.pricingComplete = false;
-      }
-    }
-  }
 
-  const attemptsByNode = groupByStringField(parsedAttempts.records, "node_id");
-  const attemptMetricsAvailable =
-    evidence.attemptsJsonl !== undefined && parsedAttempts.malformed === 0 && parsedAttempts.crossRun === 0;
+  const attemptsByNode = groupAttemptsByNode(attempts);
+  const attemptsAvailable = evidence.attempts !== undefined;
   const nodes = descriptors.map((descriptor) =>
     nodeStatistics(
       descriptor,
       attemptsByNode.get(descriptor.nodeId) ?? [],
       usageByNode.get(descriptor.nodeId),
-      attemptMetricsAvailable,
-      nowMs
+      attemptsAvailable,
+      evidenceTimeMs
     )
   );
   const allUsage = mergeUsageAccumulators([...usageByNode.values(), unattributed]);
-
-  const stateStatus = stringField(state, "status") ?? stringField(metadata, "status") ?? "unknown";
-  const stateStart = timestampField(state, "started_at") ?? timestampField(state, "created_at");
-  const stateEnd = timestampField(state, "finished_at");
-  const runElapsedMs = stateStart === undefined ? null : Math.max(0, (stateEnd ?? nowMs) - stateStart);
-  const statusCounts: Record<string, number> = {};
-  for (const node of nodes) {
-    statusCounts[node.status] = (statusCounts[node.status] ?? 0) + 1;
-  }
+  const stateStart = Date.parse(evidence.state.started_at ?? evidence.state.created_at);
+  const stateEnd = evidence.state.finished_at === undefined ? evidenceTimeMs : Date.parse(evidence.state.finished_at);
+  const statusCounts = emptyStatusCounts();
+  for (const node of nodes) statusCounts[node.status] += 1;
 
   const value: RunStatisticsValue = {
     schema_version: RUN_STATISTICS_SCHEMA_VERSION,
     run_id: evidence.runId,
     generated_at: new Date(nowMs).toISOString(),
     source: evidence.source,
-    status: stateStatus,
-    run_elapsed_ms: runElapsedMs,
+    status: evidence.state.status,
+    run_elapsed_ms: safeElapsed(stateStart, stateEnd, "run elapsed time"),
     nodes,
     totals: {
       node_count: nodes.length,
       status_counts: statusCounts,
-      duration_ms: attemptMetricsAvailable
-        ? nodes.reduce((total, node) => total + (node.duration_ms ?? 0) + (node.current_elapsed_ms ?? 0), 0)
+      duration_ms: attemptsAvailable
+        ? nodes.reduce(
+            (total, node) =>
+              safeAdd(
+                total,
+                safeAdd(node.duration_ms ?? 0, node.current_elapsed_ms ?? 0, "node duration"),
+                "run duration"
+              ),
+            0
+          )
         : null,
-      attempts_complete:
-        evidence.attemptsJsonl !== undefined && parsedAttempts.malformed === 0 && parsedAttempts.crossRun === 0,
+      attempts_complete: attemptsAvailable,
       usage: usageStatistics(allUsage),
-      accounting_cumulative: accountingCumulative(metadata)
+      accounting_cumulative: evidence.usage === undefined ? null : accountingCumulative(evidence.runMetadata)
     },
     unattributed_usage: usageStatistics(unattributed)
   };
   return { value, diagnostics };
 }
 
+function assertEvidenceBindings(evidence: StatisticsEvidence): void {
+  if (evidence.runMetadata.run_id !== evidence.runId) {
+    throw new Error(
+      `run metadata belongs to ${JSON.stringify(evidence.runMetadata.run_id)}, expected ${JSON.stringify(evidence.runId)}`
+    );
+  }
+  if (evidence.state.run_id !== evidence.runId) {
+    throw new Error(
+      `run state belongs to ${JSON.stringify(evidence.state.run_id)}, expected ${JSON.stringify(evidence.runId)}`
+    );
+  }
+  if (evidence.state.graph_fingerprint !== evidence.graphFingerprint) {
+    throw new Error("run state graph fingerprint does not match graph.fingerprint");
+  }
+  if (!/^[a-f0-9]{64}$/u.test(evidence.graphFingerprint)) {
+    throw new Error("graph.fingerprint must be a lowercase SHA-256 digest");
+  }
+  if (evidence.runMetadata.created_at !== evidence.state.created_at) {
+    throw new Error("run metadata and state creation timestamps do not match");
+  }
+  if (evidence.runMetadata.source_run_id !== evidence.state.source_run_id) {
+    throw new Error("run metadata and state source_run_id values do not match");
+  }
+  if (evidence.capturedAtMs !== undefined) {
+    const timestamps: Array<readonly [string, number]> = [];
+    const addTimestamp = (label: string, timestamp: string | undefined): void => {
+      if (timestamp !== undefined) timestamps.push([label, Date.parse(timestamp)]);
+    };
+    addTimestamp("state created_at", evidence.state.created_at);
+    addTimestamp("state started_at", evidence.state.started_at);
+    addTimestamp("state last_transition_at", evidence.state.last_transition_at);
+    addTimestamp("state finished_at", evidence.state.finished_at);
+    addTimestamp("controller lease renewed_at", evidence.state.controller_lease.renewed_at);
+    addTimestamp("concurrency observed_at", evidence.state.concurrency.observed_at);
+    addTimestamp("accounting updated_at", evidence.runMetadata.accounting?.updated_at);
+    addTimestamp("pricing catalog fetched_at", evidence.runMetadata.accounting?.pricing_catalog.fetched_at);
+    for (const [nodeKey, node] of Object.entries(evidence.state.nodes)) {
+      for (const [field, timestamp] of [
+        ["started_at", node.started_at],
+        ["finished_at", node.finished_at],
+        ["wait_since", node.wait_since]
+      ] as const) {
+        addTimestamp(`node ${JSON.stringify(nodeKey)} ${field}`, timestamp);
+      }
+    }
+    for (const [index, entry] of (evidence.attempts ?? []).entries()) {
+      timestamps.push([`attempt ledger entry ${index} lifecycle finished_at`, Date.parse(entry.lifecycle.finished_at)]);
+    }
+    for (const [index, entry] of (evidence.usage ?? []).entries()) {
+      timestamps.push([`usage ledger entry ${index} observed_timestamp_ms`, entry.observed_timestamp_ms]);
+    }
+    for (const [label, timestampMs] of timestamps) {
+      if (evidence.capturedAtMs < timestampMs) {
+        throw new Error(`statistics evidence capture precedes ${label}`);
+      }
+    }
+  }
+  if (
+    evidence.runMetadata.audit_profile !== undefined &&
+    evidence.runMetadata.audit_profile.expanded_graph_fingerprint !== evidence.graphFingerprint
+  ) {
+    throw new Error("run metadata audit profile graph fingerprint does not match graph.fingerprint");
+  }
+  const graphWorkflowTaskIds = uniqueStrings(
+    evidence.graph.nodes.flatMap((node) => node.workflow?.task_node_ids ?? [])
+  ).sort();
+  const metadataWorkflowTaskIds = [...(evidence.runMetadata.workflow?.task_node_ids ?? [])].sort();
+  if (evidence.runMetadata.workflow !== undefined) {
+    if (
+      evidence.runMetadata.workflow_ids.length !== 1 ||
+      evidence.runMetadata.workflow_ids[0] !== evidence.runMetadata.workflow.run_id
+    ) {
+      throw new Error("run metadata workflow IDs do not exactly identify the active workflow");
+    }
+    if (!sameStrings(graphWorkflowTaskIds, metadataWorkflowTaskIds)) {
+      throw new Error("planned graph workflow task IDs do not match run metadata");
+    }
+    const provenance = evidence.state.provenance?.workflow;
+    const workflow = evidence.runMetadata.workflow;
+    if (
+      provenance === undefined ||
+      provenance.inspection.runId !== workflow.run_id ||
+      provenance.runId !== workflow.run_id ||
+      provenance.compiledRunId !== workflow.compiled_run_id ||
+      provenance.name !== workflow.name ||
+      provenance.controlGeneration !== workflow.control_generation ||
+      provenance.linkId !== workflow.workflow_link_id ||
+      provenance.executionSnapshot !== workflow.execution_snapshot_path
+    ) {
+      throw new Error("run state workflow provenance does not match run metadata");
+    }
+  } else if (
+    evidence.runMetadata.workflow_ids.length > 0 ||
+    evidence.runMetadata.accounting !== undefined ||
+    graphWorkflowTaskIds.length > 0 ||
+    evidence.state.provenance !== undefined
+  ) {
+    throw new Error("unlinked run evidence cannot carry workflow IDs, graph bindings, or state provenance");
+  }
+  const knownAttemptNodeIds = new Set([
+    ...evidence.graph.nodes.map((node) => node.id),
+    ...Object.keys(evidence.state.nodes),
+    ...Object.values(evidence.state.nodes).map((node) => node.node_id)
+  ]);
+  if (evidence.runMetadata.workflow === undefined && (evidence.attempts?.length ?? 0) > 0) {
+    throw new Error("unlinked run evidence cannot carry node attempts");
+  }
+  for (const entry of evidence.attempts ?? []) {
+    if (entry.run_id !== evidence.runId) {
+      throw new Error(
+        `attempt ledger entry belongs to ${JSON.stringify(entry.run_id)}, expected ${JSON.stringify(evidence.runId)}`
+      );
+    }
+    if (
+      evidence.runMetadata.workflow !== undefined &&
+      entry.control_generation !== evidence.runMetadata.workflow.control_generation
+    ) {
+      throw new Error("attempt ledger control generation does not match run metadata");
+    }
+    if (!knownAttemptNodeIds.has(entry.node_id)) {
+      throw new Error(`attempt ledger node ${JSON.stringify(entry.node_id)} is absent from the graph and state`);
+    }
+  }
+  for (const entry of evidence.usage ?? []) {
+    if (entry.run_id !== evidence.runId) {
+      throw new Error(
+        `usage ledger entry belongs to ${JSON.stringify(entry.run_id)}, expected ${JSON.stringify(evidence.runId)}`
+      );
+    }
+    if (
+      evidence.runMetadata.workflow !== undefined &&
+      entry.control_generation !== evidence.runMetadata.workflow.control_generation
+    ) {
+      throw new Error("usage ledger control generation does not match run metadata");
+    }
+  }
+  if (
+    evidence.source.kind === "local-run" &&
+    evidence.usage === undefined &&
+    evidence.runMetadata.accounting !== undefined
+  ) {
+    throw new Error("local run accounting cannot be authenticated without usage.jsonl");
+  }
+  assertRunMetadataAccountingUsageAuthority(evidence.runMetadata, evidence.usage);
+}
+
 function nodeDescriptors(
-  graph: Record<string, unknown> | undefined,
-  state: Record<string, unknown> | undefined,
-  attempts: Record<string, unknown>[]
+  graph: PlannedGraphDocument,
+  state: RunState,
+  attempts: readonly NodeAttemptLedgerEntry[]
 ): NodeDescriptor[] {
-  const graphNodes = arrayField(graph, "nodes").filter(isRecord);
-  const stateNodes = recordField(state, "nodes") ?? {};
-  const stateEntries = Object.entries(stateNodes).flatMap(([key, value]) => {
-    const nodeState = record(value);
-    return nodeState === undefined
-      ? []
-      : [[key, { ...nodeState, node_id: stringField(nodeState, "node_id") ?? key }] as const];
-  });
+  const stateEntries = Object.entries(state.nodes);
   const claimedStateKeys = new Set<string>();
   const descriptors: NodeDescriptor[] = [];
 
-  for (const graphNode of graphNodes) {
-    const nodeId = stringField(graphNode, "id");
-    if (nodeId === undefined) continue;
-    const workflow = recordField(graphNode, "workflow");
+  for (const graphNode of graph.nodes) {
     const initialWorkflowNodeIds = uniqueStrings([
-      stringField(workflow, "node_id"),
-      ...stringArrayField(workflow, "task_node_ids"),
-      `node:${nodeId}`
+      graphNode.workflow?.node_id,
+      ...(graphNode.workflow?.task_node_ids ?? []),
+      `node:${graphNode.id}`
     ]);
-    const stateAliases = new Set([nodeId, ...initialWorkflowNodeIds, ...initialWorkflowNodeIds.map(stripNodePrefix)]);
+    const stateAliases = new Set([
+      graphNode.id,
+      ...initialWorkflowNodeIds,
+      ...initialWorkflowNodeIds.map(stripNodePrefix)
+    ]);
     const states = stateEntries.flatMap(([stateKey, nodeState]) => {
-      const storedNodeId = stringField(nodeState, "node_id") ?? stateKey;
-      if (!stateAliases.has(stateKey) && !stateAliases.has(storedNodeId)) return [];
+      if (!stateAliases.has(stateKey) && !stateAliases.has(nodeState.node_id)) return [];
       claimedStateKeys.add(stateKey);
       return [nodeState];
     });
-    const workflowNodeIds = uniqueStrings([
-      ...initialWorkflowNodeIds,
-      ...states.map((nodeState) =>
-        stringField(recordField(recordField(nodeState, "provenance"), "workflow"), "agent_task_id")
-      )
-    ]);
-    const loop = recordField(graphNode, "loop");
-    const modelFanout = arrayField(graphNode, "model_fanout").filter(isRecord);
-    const iterations = uniqueNonNegativeIntegers([
-      0,
-      numberField(loop, "index"),
-      ...states.map((nodeState) => numberField(nodeState, "loop_index")),
-      ...modelFanout.map((entry) => numberField(entry, "loop_index"))
-    ]);
-    const loopCount = numberField(loop, "count");
-    if (loopCount !== undefined && loopCount <= 100) {
-      for (let index = 0; index < loopCount; index += 1) iterations.push(index);
-    }
-    const recordedAttempts = states.map((nodeState) =>
-      numberField(recordField(recordField(nodeState, "provenance"), "workflow"), "attempt")
-    );
-    const maximumAttempt = Math.min(
-      100,
-      Math.max(
-        2,
-        ...states.map((nodeState) => (numberField(nodeState, "retry_count") ?? 0) + 2),
-        ...recordedAttempts.map((attempt) => attempt ?? 0),
-        ...modelFanout.map((entry) => numberField(entry, "attempt_index") ?? 0)
-      )
-    );
-    const attemptNumbers = Array.from({ length: maximumAttempt + 1 }, (_, index) => index);
     descriptors.push({
-      nodeId,
-      logicalNodeId:
-        stringField(graphNode, "logical_id") ??
-        states.map((nodeState) => stringField(nodeState, "logical_node_id"))[0] ??
-        null,
-      kind: stringField(graphNode, "kind") ?? null,
+      nodeId: graphNode.id,
+      logicalNodeId: graphNode.logical_id,
       graph: graphNode,
       states,
-      workflowNodeIds,
-      iterations: uniqueNonNegativeIntegers(iterations),
-      attempts: uniqueNonNegativeIntegers([
-        ...attemptNumbers,
-        ...recordedAttempts,
-        ...modelFanout.map((entry) => numberField(entry, "attempt_index"))
+      workflowNodeIds: uniqueStrings([
+        ...initialWorkflowNodeIds,
+        ...states.map((nodeState) => taskWorkflowAgentId(nodeState))
       ])
     });
   }
 
   const describedIds = new Set(descriptors.map((descriptor) => descriptor.nodeId));
   for (const [stateKey, nodeState] of stateEntries) {
-    if (claimedStateKeys.has(stateKey)) continue;
-    const nodeId = stringField(nodeState, "node_id") ?? stateKey;
-    if (describedIds.has(nodeId)) continue;
-    const provenanceWorkflow = recordField(recordField(nodeState, "provenance"), "workflow");
-    descriptors.push(orphanDescriptor(nodeId, nodeState, stringField(provenanceWorkflow, "agent_task_id")));
-    describedIds.add(nodeId);
+    if (claimedStateKeys.has(stateKey) || describedIds.has(nodeState.node_id)) continue;
+    descriptors.push(orphanDescriptor(nodeState.node_id, nodeState));
+    describedIds.add(nodeState.node_id);
   }
   for (const attempt of attempts) {
-    const nodeId = stringField(attempt, "node_id");
-    if (nodeId === undefined || describedIds.has(nodeId)) continue;
-    descriptors.push(orphanDescriptor(nodeId));
-    describedIds.add(nodeId);
+    if (describedIds.has(attempt.node_id)) continue;
+    descriptors.push(orphanDescriptor(attempt.node_id));
+    describedIds.add(attempt.node_id);
   }
   return descriptors;
 }
 
-function orphanDescriptor(
-  nodeId: string,
-  nodeState?: Record<string, unknown>,
-  workflowNodeId?: string
-): NodeDescriptor {
-  const provenanceWorkflow = recordField(recordField(nodeState, "provenance"), "workflow");
-  const recordedAttempt = numberField(provenanceWorkflow, "attempt");
-  const maximumAttempt = Math.min(
-    100,
-    Math.max(2, (numberField(nodeState, "retry_count") ?? 0) + 2, recordedAttempt ?? 0)
-  );
+function orphanDescriptor(nodeId: string, nodeState?: NodeState): NodeDescriptor {
   return {
     nodeId,
-    logicalNodeId: stringField(nodeState, "logical_node_id") ?? null,
-    kind: null,
+    logicalNodeId: nodeState?.logical_node_id ?? null,
     graph: undefined,
     states: nodeState === undefined ? [] : [nodeState],
-    workflowNodeIds: uniqueStrings([workflowNodeId, `node:${nodeId}`]),
-    iterations: uniqueNonNegativeIntegers([0, numberField(nodeState, "loop_index")]),
-    attempts: uniqueNonNegativeIntegers([
-      ...Array.from({ length: maximumAttempt + 1 }, (_, index) => index),
-      recordedAttempt
-    ])
+    workflowNodeIds: uniqueStrings([taskWorkflowAgentId(nodeState), `node:${nodeId}`])
   };
 }
 
-function usageIdentityMap(
-  descriptors: NodeDescriptor[],
-  usageEvents: Record<string, unknown>[],
+function taskWorkflowAgentId(nodeState: NodeState | undefined): string | undefined {
+  const provenance = nodeState?.provenance;
+  if (provenance === undefined || !("workflow" in provenance) || provenance.workflow === undefined) return undefined;
+  return "agent_task_id" in provenance.workflow ? provenance.workflow.agent_task_id : undefined;
+}
+
+function usageNodeAliases(
+  descriptors: readonly NodeDescriptor[],
   diagnostics: RuntimeDiagnostic[]
 ): Map<string, string> {
-  const workflowRunIds = uniqueStrings(usageEvents.map((entry) => stringField(entry, "workflow_run_id")));
-  const identities = new Map<string, string>();
+  const aliases = new Map<string, string>();
   const ambiguous = new Set<string>();
-  let combinations = 0;
-  let capped = false;
-  let collisions = 0;
-  outer: for (const workflowRunId of workflowRunIds) {
-    for (const descriptor of descriptors) {
-      for (const workflowNodeId of descriptor.workflowNodeIds) {
-        for (const iteration of descriptor.iterations) {
-          for (const attempt of descriptor.attempts) {
-            combinations += 1;
-            if (combinations > MAX_IDENTITY_COMBINATIONS) {
-              capped = true;
-              break outer;
-            }
-            const identity = stableUsageDimension("usage-attempt", [workflowRunId, workflowNodeId, iteration, attempt]);
-            if (ambiguous.has(identity)) continue;
-            const existing = identities.get(identity);
-            if (existing !== undefined && existing !== descriptor.nodeId) {
-              identities.delete(identity);
-              ambiguous.add(identity);
-              collisions += 1;
-            } else {
-              identities.set(identity, descriptor.nodeId);
-            }
-          }
-        }
+  for (const descriptor of descriptors) {
+    for (const alias of uniqueStrings([
+      descriptor.nodeId,
+      `node:${descriptor.nodeId}`,
+      ...descriptor.workflowNodeIds,
+      ...descriptor.workflowNodeIds.map(stripNodePrefix)
+    ])) {
+      if (ambiguous.has(alias)) continue;
+      const existing = aliases.get(alias);
+      if (existing !== undefined && existing !== descriptor.nodeId) {
+        aliases.delete(alias);
+        ambiguous.add(alias);
+      } else {
+        aliases.set(alias, descriptor.nodeId);
       }
     }
   }
-  if (capped) {
+  if (ambiguous.size > 0) {
     diagnostics.push(
       warning(
-        "STATS_USAGE_IDENTITY_LIMIT",
-        `usage attribution stopped after ${MAX_IDENTITY_COMBINATIONS.toLocaleString("en-US")} identity combinations`
+        "STATS_USAGE_NODE_ALIAS_COLLISION",
+        `${ambiguous.size} workflow node alias${ambiguous.size === 1 ? " is" : "es are"} ambiguous and cannot receive usage attribution`
       )
     );
   }
-  if (collisions > 0) {
-    diagnostics.push(
-      warning(
-        "STATS_USAGE_IDENTITY_COLLISION",
-        `${collisions} usage identities mapped ambiguously and were not attributed`
-      )
-    );
-  }
-  return identities;
-}
-
-function usageNodeId(
-  event: Record<string, unknown>,
-  descriptors: Map<string, NodeDescriptor>,
-  identityMap: Map<string, string>
-): string | undefined {
-  const explicit = stringField(event, "node_id") ?? stringField(event, "nodeId");
-  if (explicit !== undefined) {
-    if (descriptors.has(explicit)) return explicit;
-    if (explicit.startsWith("node:") && descriptors.has(explicit.slice("node:".length))) {
-      return explicit.slice("node:".length);
-    }
-    for (const descriptor of descriptors.values()) {
-      if (descriptor.workflowNodeIds.includes(explicit)) return descriptor.nodeId;
-    }
-  }
-  const attemptId = stringField(event, "attempt_id");
-  return attemptId === undefined ? undefined : identityMap.get(attemptId);
+  return aliases;
 }
 
 function nodeStatistics(
   descriptor: NodeDescriptor,
-  attempts: Record<string, unknown>[],
+  attempts: readonly NodeAttemptLedgerEntry[],
   usage: UsageAccumulator | undefined,
   attemptsAvailable: boolean,
   nowMs: number
@@ -481,69 +502,70 @@ function nodeStatistics(
   let validDurations = 0;
   let executedAttempts = 0;
   let reusedAttempts = 0;
-  const failureCategories = new Set<string>();
+  const failureCategories = new Set<NodeAttemptFailureCategory>();
   for (const attempt of attempts) {
-    const lifecycle = recordField(attempt, "lifecycle");
-    const startedAt = timestampField(lifecycle, "started_at");
-    const finishedAt = timestampField(lifecycle, "finished_at");
-    if (startedAt !== undefined && finishedAt !== undefined && finishedAt >= startedAt) {
-      durationMs += finishedAt - startedAt;
-      validDurations += 1;
-    }
-    const reuse = recordField(attempt, "reuse");
-    if (stringField(reuse, "status") === "reused") reusedAttempts += 1;
+    durationMs = safeAdd(
+      durationMs,
+      safeElapsed(
+        Date.parse(attempt.lifecycle.started_at),
+        Date.parse(attempt.lifecycle.finished_at),
+        "attempt duration"
+      ),
+      "node attempt duration"
+    );
+    validDurations += 1;
+    if (attempt.reuse.status === "reused") reusedAttempts += 1;
     else executedAttempts += 1;
-    const failureCategory = stringField(attempt, "failure_category");
-    if (failureCategory !== undefined) failureCategories.add(failureCategory);
+    if (attempt.failure_category !== undefined) failureCategories.add(attempt.failure_category);
   }
 
   const canonicalState =
-    descriptor.states.find((nodeState) => stringField(nodeState, "node_id") === descriptor.nodeId) ??
-    descriptor.states[0];
-  const status = stringField(canonicalState, "status") ?? aggregateNodeStatus(descriptor.states);
-  const strategyStates = descriptor.states.filter(
-    (nodeState) => stringField(nodeState, "node_id") !== descriptor.nodeId
-  );
+    descriptor.states.find((nodeState) => nodeState.node_id === descriptor.nodeId) ?? descriptor.states[0];
+  const status = canonicalState?.status ?? aggregateNodeStatus(descriptor.states);
+  const strategyStates = descriptor.states.filter((nodeState) => nodeState.node_id !== descriptor.nodeId);
   const timedStates = strategyStates.length > 0 ? strategyStates : descriptor.states;
-  const activeElapsed = timedStates.flatMap((nodeState) => {
-    if (stringField(nodeState, "status") !== "running" || stringField(nodeState, "wait_reason") !== "active") return [];
-    const startedAt = timestampField(nodeState, "started_at");
-    return startedAt === undefined ? [] : [Math.max(0, nowMs - startedAt)];
-  });
-  const currentElapsedMs = activeElapsed.length === 0 ? null : activeElapsed.reduce((total, value) => total + value, 0);
-  if (validDurations === 0 && descriptor.kind !== "agentic") {
+  const currentElapsedMs = timedStates.reduce<number | null>((total, nodeState) => {
+    if (nodeState.status !== "running" || nodeState.wait_reason !== "active" || nodeState.started_at === undefined) {
+      return total;
+    }
+    const elapsed = safeElapsed(Date.parse(nodeState.started_at), nowMs, "active node elapsed time");
+    return total === null ? elapsed : safeAdd(total, elapsed, "active node elapsed time");
+  }, null);
+  if (validDurations === 0 && descriptor.graph?.kind !== "agentic") {
     for (const nodeState of timedStates) {
-      const stateStartedAt = timestampField(nodeState, "started_at");
-      const stateFinishedAt = timestampField(nodeState, "finished_at");
-      if (stateStartedAt !== undefined && stateFinishedAt !== undefined && stateFinishedAt >= stateStartedAt) {
-        durationMs += stateFinishedAt - stateStartedAt;
-        validDurations += 1;
-      }
+      if (nodeState.started_at === undefined || nodeState.finished_at === undefined) continue;
+      durationMs = safeAdd(
+        durationMs,
+        safeElapsed(Date.parse(nodeState.started_at), Date.parse(nodeState.finished_at), "state duration"),
+        "node state duration"
+      );
+      validDurations += 1;
     }
   }
+
   const executedByStrategy = new Map<string, number>();
   for (const attempt of attempts) {
-    if (stringField(recordField(attempt, "reuse"), "status") !== "executed") continue;
-    const strategyAttemptId = stringField(attempt, "strategy_attempt_id");
-    if (strategyAttemptId !== undefined) {
-      executedByStrategy.set(strategyAttemptId, (executedByStrategy.get(strategyAttemptId) ?? 0) + 1);
-    }
+    if (attempt.reuse.status !== "executed") continue;
+    executedByStrategy.set(attempt.strategy_attempt_id, (executedByStrategy.get(attempt.strategy_attempt_id) ?? 0) + 1);
   }
-  const retryCount = [...executedByStrategy.values()].reduce((total, count) => total + Math.max(0, count - 1), 0);
+  const retryCount = [...executedByStrategy.values()].reduce(
+    (total, count) => safeAdd(total, Math.max(0, count - 1), "retry count"),
+    0
+  );
   const outputCount = Math.max(
-    arrayField(descriptor.graph, "outputs").length,
-    ...descriptor.states.map((nodeState) => arrayField(nodeState, "outputs").length)
+    descriptor.graph?.outputs.length ?? 0,
+    ...descriptor.states.map((nodeState) => nodeState.outputs?.length ?? 0)
   );
   const usageValue = usageStatistics(usage);
   const models = uniqueStrings([
-    ...descriptor.states.map((nodeState) => stringField(nodeState, "model")),
+    ...descriptor.states.map((nodeState) => nodeState.model),
     ...(usageValue?.models ?? []),
-    ...graphModels(descriptor.graph)
+    ...(descriptor.graph?.model_fanout.map((entry) => entry.model_name) ?? [])
   ]);
   return {
     node_id: descriptor.nodeId,
     logical_node_id: descriptor.logicalNodeId,
-    kind: descriptor.kind,
+    kind: descriptor.graph?.kind ?? null,
     status,
     outcome: attemptsAvailable ? aggregateAttemptOutcome(attempts) : null,
     model: models.length > 1 ? "mixed" : (models[0] ?? null),
@@ -561,15 +583,12 @@ function nodeStatistics(
 
 function accumulateUsage(
   accumulator: UsageAccumulator,
-  event: Record<string, unknown>,
+  event: UsageLedgerEntry,
   pricing: ReadonlyMap<string, ModelPricing>,
   cacheReadRatioValue: number | undefined
 ): void {
-  const entry = event as unknown as UsageLedgerEntry;
   const projected = projectNormalizedUsageAccounting({
-    usage: entry.usage,
-    usageComplete: entry.usage_complete,
-    usageIncompleteReasons: entry.usage_incomplete_reasons,
+    usage: event.usage,
     modelPricing: pricing,
     ...(cacheReadRatioValue === undefined ? {} : { cacheReadRatio: cacheReadRatioValue })
   });
@@ -586,8 +605,7 @@ function accumulateUsage(
   accumulator.usageComplete &&= projected.usage_complete;
   accumulator.pricingComplete &&= projected.pricing_complete;
   accumulator.eventCount += 1;
-  const model = entry.usage.model;
-  if (model !== undefined) accumulator.models.add(model);
+  accumulator.models.add(event.usage.model);
 }
 
 function addUsageComponent(
@@ -602,33 +620,30 @@ function addUsageComponent(
     | "totalAvailable",
   value: number | null
 ): void {
-  if (value === null) {
-    accumulator[availableKey] = false;
-  } else {
-    accumulator[valueKey] += value;
-  }
+  if (value === null) accumulator[availableKey] = false;
+  else accumulator[valueKey] = safeAdd(accumulator[valueKey], value, "token total");
 }
 
-function mergeUsageAccumulators(accumulators: UsageAccumulator[]): UsageAccumulator {
+function mergeUsageAccumulators(accumulators: readonly UsageAccumulator[]): UsageAccumulator {
   const merged = emptyUsageAccumulator();
   for (const accumulator of accumulators) {
-    merged.inputTokens += accumulator.inputTokens;
+    merged.inputTokens = safeAdd(merged.inputTokens, accumulator.inputTokens, "input token total");
     merged.inputAvailable &&= accumulator.inputAvailable;
-    merged.cacheReadTokens += accumulator.cacheReadTokens;
+    merged.cacheReadTokens = safeAdd(merged.cacheReadTokens, accumulator.cacheReadTokens, "cache-read token total");
     merged.cacheReadAvailable &&= accumulator.cacheReadAvailable;
-    merged.cacheWriteTokens += accumulator.cacheWriteTokens;
+    merged.cacheWriteTokens = safeAdd(merged.cacheWriteTokens, accumulator.cacheWriteTokens, "cache-write token total");
     merged.cacheWriteAvailable &&= accumulator.cacheWriteAvailable;
-    merged.outputTokens += accumulator.outputTokens;
+    merged.outputTokens = safeAdd(merged.outputTokens, accumulator.outputTokens, "output token total");
     merged.outputAvailable &&= accumulator.outputAvailable;
-    merged.reasoningTokens += accumulator.reasoningTokens;
+    merged.reasoningTokens = safeAdd(merged.reasoningTokens, accumulator.reasoningTokens, "reasoning token total");
     merged.reasoningAvailable &&= accumulator.reasoningAvailable;
-    merged.totalTokens += accumulator.totalTokens;
+    merged.totalTokens = safeAdd(merged.totalTokens, accumulator.totalTokens, "inclusive token total");
     merged.totalAvailable &&= accumulator.totalAvailable;
     merged.estimatedSpendUsd = addUsd(merged.estimatedSpendUsd, accumulator.estimatedSpendUsd);
     merged.hasEstimatedSpend ||= accumulator.hasEstimatedSpend;
     merged.usageComplete &&= accumulator.usageComplete;
     merged.pricingComplete &&= accumulator.pricingComplete;
-    merged.eventCount += accumulator.eventCount;
+    merged.eventCount = safeAdd(merged.eventCount, accumulator.eventCount, "usage event count");
     for (const model of accumulator.models) merged.models.add(model);
   }
   return merged;
@@ -674,121 +689,96 @@ function emptyUsageAccumulator(): UsageAccumulator {
   };
 }
 
-function modelPricing(metadata: Record<string, unknown> | undefined): Map<string, ModelPricing> {
-  const accounting = recordField(metadata, "accounting");
-  const catalog = recordField(accounting, "pricing_catalog");
-  return modelPricingFromSnapshot(catalog?.model_prices);
+function modelPricing(metadata: RunMetadataDocument): Map<string, ModelPricing> {
+  return modelPricingFromSnapshot(metadata.accounting?.pricing_catalog.model_prices);
 }
 
-function accountingCumulative(metadata: Record<string, unknown> | undefined): Record<string, unknown> | null {
-  return recordField(recordField(metadata, "accounting"), "cumulative") ?? null;
+function accountingCumulative(metadata: RunMetadataDocument): AccountingCumulativeStatistics | null {
+  const cumulative = metadata.accounting?.cumulative;
+  if (cumulative === undefined) return null;
+  return {
+    input_tokens: cumulative.input_tokens,
+    cache_read_tokens: cumulative.cache_read_tokens,
+    cache_write_tokens: cumulative.cache_write_tokens,
+    output_tokens: cumulative.output_tokens,
+    reasoning_tokens: cumulative.reasoning_tokens,
+    total_tokens: cumulative.total_tokens,
+    estimated_spend_usd: cumulative.estimated_spend_usd ?? null,
+    usage_complete: cumulative.usage_complete,
+    pricing_complete: cumulative.pricing_complete,
+    event_count: cumulative.event_count,
+    models: [...cumulative.models],
+    agents: [...cumulative.agents],
+    source_run_ids: [...cumulative.source_run_ids]
+  };
 }
 
-function graphModels(graphNode: Record<string, unknown> | undefined): string[] {
-  return uniqueStrings(arrayField(graphNode, "model_fanout").map((entry) => stringField(record(entry), "model_name")));
+function cacheReadRatio(metadata: RunMetadataDocument): number | undefined {
+  const accounting = metadata.accounting;
+  if (accounting === undefined) return undefined;
+  return (
+    accounting.current.cache_read_ratio_used ??
+    accounting.segments.find((segment) => segment.cache_read_ratio_used !== undefined)?.cache_read_ratio_used
+  );
 }
 
-function parseAttemptLines(text: string | undefined, expectedRunId: string): ParsedJsonLines {
-  return parseValidatedJsonLines(text, expectedRunId, "attempt_id", validateNodeAttemptLedgerEntry);
-}
-
-function parseUsageLines(text: string | undefined, expectedRunId: string): ParsedJsonLines {
-  return parseValidatedJsonLines(text, expectedRunId, "event_id", validateUsageLedgerEntry);
-}
-
-function parseValidatedJsonLines<T extends NodeAttemptLedgerEntry | UsageLedgerEntry>(
-  text: string | undefined,
-  expectedRunId: string,
-  idField: "attempt_id" | "event_id",
-  validate: (value: unknown, path?: string) => { ok: boolean; value?: T }
-): ParsedJsonLines {
-  if (text === undefined) return { records: [], malformed: 0, duplicates: 0, crossRun: 0 };
-  const records: Record<string, unknown>[] = [];
-  const byId = new Map<string, T>();
-  let malformed = 0;
-  let duplicates = 0;
-  let crossRun = 0;
-  for (const [index, line] of text.split(/\r?\n/u).entries()) {
-    if (line.trim().length === 0) continue;
-    try {
-      const value = JSON.parse(line) as unknown;
-      const validated = validate(value, `$[${index}]`);
-      if (!validated.ok || validated.value === undefined) throw new Error("ledger entry failed schema validation");
-      const entry = validated.value;
-      if (entry.run_id !== expectedRunId) {
-        crossRun += 1;
-        continue;
-      }
-      const recordEntry = entry as unknown as Record<string, unknown>;
-      const id = stringField(recordEntry, idField);
-      if (id === undefined) throw new Error("ledger entry is missing its immutable ID");
-      const existing = byId.get(id);
-      if (existing !== undefined) {
-        if (isDeepStrictEqual(existing, entry)) duplicates += 1;
-        else malformed += 1;
-        continue;
-      }
-      byId.set(id, entry);
-      records.push(recordEntry);
-    } catch {
-      malformed += 1;
-    }
-  }
-  return { records, malformed, duplicates, crossRun };
-}
-
-function groupByStringField(records: Record<string, unknown>[], field: string): Map<string, Record<string, unknown>[]> {
-  const groups = new Map<string, Record<string, unknown>[]>();
-  for (const entry of records) {
-    const key = stringField(entry, field);
-    if (key === undefined) continue;
-    const group = groups.get(key) ?? [];
+function groupAttemptsByNode(attempts: readonly NodeAttemptLedgerEntry[]): Map<string, NodeAttemptLedgerEntry[]> {
+  const groups = new Map<string, NodeAttemptLedgerEntry[]>();
+  for (const entry of attempts) {
+    const group = groups.get(entry.node_id) ?? [];
     group.push(entry);
-    groups.set(key, group);
+    groups.set(entry.node_id, group);
   }
   return groups;
 }
 
-function warning(code: string, message: string): RuntimeDiagnostic {
-  return { code, message, severity: "warning", source: "stats" };
-}
-
-function cacheReadRatio(metadata: Record<string, unknown> | undefined): number | undefined {
-  const accounting = recordField(metadata, "accounting");
-  const summaries = [
-    recordField(accounting, "cumulative"),
-    recordField(accounting, "current"),
-    ...arrayField(accounting, "segments").map(record)
-  ];
-  for (const summary of summaries) {
-    const ratio = numberField(summary, "cache_read_ratio_used");
-    if (ratio !== undefined && ratio >= 0 && ratio <= 1) return ratio;
-  }
-  return undefined;
-}
-
-function aggregateNodeStatus(states: Record<string, unknown>[]): string {
-  const statuses = states
-    .map((nodeState) => stringField(nodeState, "status"))
-    .filter((value): value is string => value !== undefined);
+function aggregateNodeStatus(states: readonly NodeState[]): NodeStatisticsStatus {
+  const statuses = states.map((nodeState) => nodeState.status);
   if (statuses.length === 0) return "unknown";
   if (statuses.every((status) => status === statuses[0])) return statuses[0]!;
-  for (const status of ["failed", "timed-out", "running", "runnable", "ready", "pending", "invalidated", "skipped"]) {
+  for (const status of [
+    "failed",
+    "timed-out",
+    "running",
+    "runnable",
+    "ready",
+    "pending",
+    "invalidated",
+    "skipped",
+    "reused-from-prior-run",
+    "succeeded"
+  ] as const) {
     if (statuses.includes(status)) return status;
   }
   return statuses[0]!;
 }
 
-function aggregateAttemptOutcome(attempts: Record<string, unknown>[]): string | null {
-  const latestByStrategy = new Map<string, string>();
-  for (const attempt of attempts) {
-    const strategyAttemptId = stringField(attempt, "strategy_attempt_id");
-    const outcome = stringField(attempt, "outcome");
-    if (strategyAttemptId !== undefined && outcome !== undefined) latestByStrategy.set(strategyAttemptId, outcome);
-  }
+function aggregateAttemptOutcome(attempts: readonly NodeAttemptLedgerEntry[]): NodeAttemptOutcome | "mixed" | null {
+  const latestByStrategy = new Map<string, NodeAttemptOutcome>();
+  for (const attempt of attempts) latestByStrategy.set(attempt.strategy_attempt_id, attempt.outcome);
   const outcomes = [...new Set(latestByStrategy.values())];
   if (outcomes.length === 0) return null;
   return outcomes.length === 1 ? outcomes[0]! : "mixed";
+}
+
+function emptyStatusCounts(): Record<NodeStatisticsStatus, number> {
+  return {
+    pending: 0,
+    ready: 0,
+    runnable: 0,
+    running: 0,
+    succeeded: 0,
+    failed: 0,
+    skipped: 0,
+    "timed-out": 0,
+    "reused-from-prior-run": 0,
+    invalidated: 0,
+    unknown: 0
+  };
+}
+
+function warning(code: string, message: string): RuntimeDiagnostic {
+  return { code, message, severity: "warning", source: "stats" };
 }
 
 function stripNodePrefix(value: string): string {
@@ -796,53 +786,28 @@ function stripNodePrefix(value: string): string {
 }
 
 function addUsd(left: number, right: number): number {
-  return Number((left + right).toFixed(6));
+  const value = roundAccountingUsd(left + right);
+  if (!Number.isFinite(value) || value < 0) throw new Error("statistics cost total is outside the supported range");
+  return value;
+}
+
+function safeAdd(left: number, right: number, label: string): number {
+  const value = left + right;
+  if (!Number.isSafeInteger(value) || value < 0) throw new Error(`${label} exceeds the safe-integer range`);
+  return value;
+}
+
+function safeElapsed(startMs: number, endMs: number, label: string): number {
+  if (!Number.isSafeInteger(startMs) || !Number.isSafeInteger(endMs)) {
+    throw new Error(`${label} contains an unsupported timestamp`);
+  }
+  return safeAdd(0, Math.max(0, endMs - startMs), label);
 }
 
 function uniqueStrings(values: Array<string | undefined>): string[] {
   return [...new Set(values.filter((value): value is string => value !== undefined && value.length > 0))];
 }
 
-function uniqueNonNegativeIntegers(values: Array<number | undefined>): number[] {
-  return [
-    ...new Set(values.filter((value): value is number => value !== undefined && Number.isInteger(value) && value >= 0))
-  ].sort((left, right) => left - right);
-}
-
-function timestampField(value: Record<string, unknown> | undefined, key: string): number | undefined {
-  const timestamp = stringField(value, key);
-  if (timestamp === undefined) return undefined;
-  const parsed = Date.parse(timestamp);
-  return Number.isFinite(parsed) ? parsed : undefined;
-}
-
-function numberField(value: Record<string, unknown> | undefined, key: string): number | undefined {
-  const field = value?.[key];
-  return typeof field === "number" && Number.isFinite(field) ? field : undefined;
-}
-
-function stringField(value: Record<string, unknown> | undefined, key: string): string | undefined {
-  const field = value?.[key];
-  return typeof field === "string" && field.length > 0 ? field : undefined;
-}
-
-function stringArrayField(value: Record<string, unknown> | undefined, key: string): string[] {
-  return arrayField(value, key).filter((entry): entry is string => typeof entry === "string" && entry.length > 0);
-}
-
-function arrayField(value: Record<string, unknown> | undefined, key: string): unknown[] {
-  const field = value?.[key];
-  return Array.isArray(field) ? field : [];
-}
-
-function recordField(value: Record<string, unknown> | undefined, key: string): Record<string, unknown> | undefined {
-  return record(value?.[key]);
-}
-
-function record(value: unknown): Record<string, unknown> | undefined {
-  return isRecord(value) ? value : undefined;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+function sameStrings(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }

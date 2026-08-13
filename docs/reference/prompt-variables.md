@@ -41,21 +41,27 @@ timeouts, backend settings, or artifact requirements.
 
 ## Core Variables
 
-| Variable                    | Meaning                                                                |
-| --------------------------- | ---------------------------------------------------------------------- |
-| `repo_path`                 | Absolute path to the target repository being fuzzed.                   |
-| `workspace_path`            | Absolute path to this node attempt workspace.                          |
-| `schema_path`               | Absolute path to the task-local checked-in JSON schema bundle.         |
-| `artifact_path`             | Absolute path to this node attempt artifact directory.                 |
-| `artifact_dir`              | Alias for `artifact_path`.                                             |
-| `run_metadata_path`         | Absolute path to this run's `run.json`.                                |
-| `output_findings_path`      | Absolute path where the agent should write `findings.json`.            |
-| `output_patch_path`         | Absolute path reserved for a patch evidence file.                      |
-| `strategy`                  | Current logical topology node ID.                                      |
-| `attempt_index`             | Zero-based attempt index for this concrete attempt.                    |
-| `strategy_loop_index`       | Zero-based loop index for this logical node.                           |
-| `strategy_loop_count`       | Total loop count for this logical node.                                |
-| `strategy_attempt_test_dir` | Absolute workspace path for generated Foundry tests from this attempt. |
+| Variable                    | Meaning                                                                            |
+| --------------------------- | ---------------------------------------------------------------------------------- |
+| `repo_path`                 | Absolute path to the target repository being fuzzed.                               |
+| `workspace_path`            | Absolute path to this node attempt workspace.                                      |
+| `schema_path`               | Absolute path to the task-local checked-in JSON schema bundle.                     |
+| `artifact_path`             | Absolute path to this node attempt artifact directory.                             |
+| `artifact_dir`              | Alias for `artifact_path`.                                                         |
+| `run_metadata_path`         | Absolute path to this run's `run.json`.                                            |
+| `output_findings_path`      | Absolute path of this node's sole topology-declared `ultrafuzz/findings@2` output. |
+| `output_patch_path`         | Absolute path reserved for a patch evidence file.                                  |
+| `strategy`                  | Current logical topology node ID.                                                  |
+| `attempt_index`             | Zero-based attempt index for this concrete attempt.                                |
+| `strategy_loop_index`       | Zero-based loop index for this logical node.                                       |
+| `strategy_loop_count`       | Total loop count for this logical node.                                            |
+| `strategy_attempt_test_dir` | Absolute workspace path for generated Foundry tests from this attempt.             |
+
+`output_findings_path` is topology authority, not a configurable filename.
+Rendering fails unless the current node declares exactly one
+`ultrafuzz/findings@2` output, and callers cannot override the variable through
+prompt variables. Change the topology output declaration when a different path
+is required.
 
 ## Triage And Invariant Variables
 
@@ -107,3 +113,27 @@ forms to the rendered prompt. The same registry drives runtime validation.
 
 Agents should write durable cross-node handoff files under `{{artifact_path}}`
 and list those files in topology `outputs` with a named contract.
+
+Every agent-authored JSON output also receives one safely shell-quoted command
+of this form:
+
+```bash
+ultrafuzz json validate --schema '<trusted absolute schema path>' --file '<absolute artifact path>'
+```
+
+After its final write and before returning, the agent must run every displayed
+command. Exit `1` means it must correct that draft and rerun the command in the
+same session; exit `2` is a tool/setup failure, not successful validation. Any
+later edit requires another validation run. Supplied schema files must not be
+edited, and the command never modifies the artifact. The host still applies
+named semantic and contextual gates after the session returns.
+
+The schema filename, fragment-free schema ID, schema SHA-256, schema-bundle
+SHA-256, and validator build identity are fixed during planning and persisted
+with the output contract. The agent command runs through a trusted launcher that
+is preflighted with a real fixture before model work; it must not select a
+target-repository shadow binary. Once the session returns, Ultrafuzz does not
+repair, normalize, convert, synthesize, or substitute required output and does
+not request a correction turn. Missing or invalid post-session output is a
+terminal attempt failure even if another file or the final response contains
+similar data.

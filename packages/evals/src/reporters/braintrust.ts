@@ -1,3 +1,5 @@
+import { parseStrictJsonBytes } from "@ultrafuzz/artifacts";
+
 import type {
   EvalArtifactUpload,
   EvalNodeEventEnvelope,
@@ -10,7 +12,7 @@ import type {
 import { groupsInGraph } from "../reporter.js";
 import type { EvalMatrixRow, EvalReportingPolicy, EvalRowScore } from "../types.js";
 import { EvalError, isRecord } from "../utils.js";
-import { boundedProviderResponseText, PROVIDER_REQUEST_TIMEOUT_MS, trustedProviderOrigin } from "./http.js";
+import { boundedProviderResponseBytes, PROVIDER_REQUEST_TIMEOUT_MS, trustedProviderOrigin } from "./http.js";
 
 export interface BraintrustReporterOptions {
   apiKey: string;
@@ -165,7 +167,7 @@ export class BraintrustReporter implements EvalReporter {
         const endEpoch = epochSeconds(event.at);
         await this.insertEvents([
           {
-            id: envelope.eventId,
+            id: envelope.idempotencyKey,
             span_id: this.nodeSpanId(envelope.rowId, envelope.nodeId, event.attempt),
             root_span_id: this.rowSpanId(envelope.rowId),
             span_parents: [this.groupSpanId(envelope.rowId, this.groupForNode(envelope.rowId, envelope.nodeId))],
@@ -203,7 +205,7 @@ export class BraintrustReporter implements EvalReporter {
       case "node-artifacts": {
         await this.insertEvents([
           {
-            id: envelope.eventId,
+            id: envelope.idempotencyKey,
             span_id: this.nodeArtifactSpanId(envelope.rowId, envelope.nodeId),
             root_span_id: this.rowSpanId(envelope.rowId),
             span_parents: [this.groupSpanId(envelope.rowId, this.groupForNode(envelope.rowId, envelope.nodeId))],
@@ -234,7 +236,7 @@ export class BraintrustReporter implements EvalReporter {
         : undefined;
     await this.insertEvents([
       {
-        id: `artifact-${artifact.nodeId}-${artifact.relativePath}-${artifact.sha256}`,
+        id: artifact.idempotencyKey,
         span_id: this.nodeArtifactSpanId(artifact.rowId, artifact.nodeId),
         root_span_id: this.rowSpanId(artifact.rowId),
         _is_merge: true,
@@ -429,23 +431,47 @@ export class BraintrustReporter implements EvalReporter {
       },
       body: JSON.stringify(body)
     });
-    const text = await boundedProviderResponseText(response, "Braintrust");
+    const bytes = await boundedProviderResponseBytes(response, "Braintrust");
     if (!response.ok) {
       throw new EvalError("EVAL_BRAINTRUST_REQUEST_FAILED", `Braintrust ${method} ${requestPath} failed`, {
         status: response.status,
-        body: text.slice(0, 500)
+        body: bytes.toString("utf8").slice(0, 500)
       });
     }
+    let value: unknown;
     try {
-      return text.length > 0 ? JSON.parse(text) : {};
-    } catch {
-      return {};
+      value = parseStrictJsonBytes(bytes, {
+        maxBytes: 1024 * 1024,
+        maxDepth: 32,
+        maxItems: 100_000,
+        maxProperties: 100_000
+      });
+    } catch (error) {
+      throw new EvalError(
+        "EVAL_BRAINTRUST_RESPONSE_INVALID",
+        `Braintrust ${method} ${requestPath} response is not strict JSON`,
+        { reason: error instanceof Error ? error.message : String(error) }
+      );
     }
+    if (!isRecord(value)) {
+      throw new EvalError(
+        "EVAL_BRAINTRUST_RESPONSE_INVALID",
+        `Braintrust ${method} ${requestPath} response must be a JSON object`
+      );
+    }
+    return value;
   }
 }
 
 function idOf(value: unknown, label: string): string {
-  if (isRecord(value) && typeof value.id === "string" && value.id.length > 0) {
+  if (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    value.id === value.id.trim() &&
+    value.id.length > 0 &&
+    [...value.id].length <= 256 &&
+    [...value.id].every((character) => character.charCodeAt(0) >= 32 && character.charCodeAt(0) !== 127)
+  ) {
     return value.id;
   }
   throw new EvalError("EVAL_BRAINTRUST_RESPONSE_INVALID", `Braintrust ${label} response is missing an id`);

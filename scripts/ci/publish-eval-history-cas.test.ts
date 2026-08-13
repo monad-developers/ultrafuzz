@@ -197,20 +197,32 @@ describe("eval history Git CAS publisher", () => {
       candidate_commit: "a".repeat(40),
       candidate_repository_url: "https://github.com/monad-developers/ultrafuzz",
       source_artifact: "https://github.com/monad-developers/ultrafuzz/actions/runs/123",
-      runs: [{ eval_run_id: "run-a", benchmark: "evmbench", lane: "smoke", input_path: "runs/run-a" }]
+      runs: [
+        {
+          eval_run_id: "run-a",
+          benchmark: "ultrafuzz-bench",
+          lane: "smoke",
+          status: "succeeded",
+          input_path: "runs/run-a",
+          target_ids: ["target-a"],
+          executed_case_count: 1,
+          graded_case_count: 1,
+          publication_url: "https://github.com/monad-developers/ultrafuzz/actions/runs/123/artifacts"
+        }
+      ]
     };
     expect(() =>
       parseEvalHistoryPublicationGeneration({
         ...valid,
         runs: [{ ...valid.runs[0], input_path: "../run-a" }]
       })
-    ).toThrow(/safe path segments/u);
+    ).toThrow(/schema validation/u);
     expect(() =>
       parseEvalHistoryPublicationGeneration({
         ...valid,
         source_artifact: "https://attacker.invalid/actions/runs/123"
       })
-    ).toThrow(/GitHub Actions run URL/u);
+    ).toThrow(/schema validation/u);
   });
 
   it("accepts enriched automatic generation rows and rejects invalid case counts", () => {
@@ -251,13 +263,13 @@ describe("eval history Git CAS publisher", () => {
         ...valid,
         runs: [{ ...valid.runs[0], executed_case_count: 0 }]
       })
-    ).toThrow(/executed_case_count must be a positive safe integer/u);
+    ).toThrow(/schema validation/u);
     expect(() =>
       parseEvalHistoryPublicationGeneration({
         ...valid,
         runs: [{ ...valid.runs[0], graded_case_count: 2 }]
       })
-    ).toThrow(/case counts do not cover its target set/u);
+    ).toThrow(/semantic validation/u);
   });
 
   it("rejects an eval artifact from a different candidate commit", () => {
@@ -413,9 +425,14 @@ function writeGeneration(root: string, file: string, evalRunIds: string[], candi
         source_artifact: "https://github.com/monad-developers/ultrafuzz/actions/runs/123",
         runs: evalRunIds.map((evalRunId) => ({
           eval_run_id: evalRunId,
-          benchmark: "evmbench",
+          benchmark: "ultrafuzz-bench",
           lane: "smoke",
-          input_path: evalRunId
+          status: "succeeded",
+          input_path: evalRunId,
+          target_ids: ["target-a"],
+          executed_case_count: 1,
+          graded_case_count: 1,
+          publication_url: "https://github.com/monad-developers/ultrafuzz/actions/runs/123/artifacts"
         }))
       },
       null,

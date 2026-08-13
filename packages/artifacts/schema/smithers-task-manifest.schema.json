@@ -1,0 +1,805 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:artifacts:smithers-task-manifest:3",
+  "title": "Ultrafuzz sealed Smithers task manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run_id", "smithers_run_id", "workflow_name", "pinned_submodules", "tasks"],
+  "properties": {
+    "schema_version": {
+      "const": "ultrafuzz.smithers.workflow.v3"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "smithers_run_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^[^\\u0000]+$"
+    },
+    "workflow_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^[^\\u0000]+$"
+    },
+    "pinned_submodules": {
+      "anyOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "source_commit",
+            "source_tree",
+            "manifest_sha256",
+            "top_level_roots",
+            "recursive_gitlinks",
+            "entry_count",
+            "file_count",
+            "total_file_bytes"
+          ],
+          "properties": {
+            "schema_version": { "const": "ultrafuzz.pinned-submodules-expectation.v1" },
+            "source_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+            "source_tree": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+            "manifest_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "top_level_roots": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 100000,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*(?:^|/)\\.git(?:/|$))[^\\u0000-\\u001f\\u007f]+$"
+              }
+            },
+            "recursive_gitlinks": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 100000,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["path", "commit", "tree"],
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*(?:^|/)\\.git(?:/|$))[^\\u0000-\\u001f\\u007f]+$"
+                  },
+                  "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+                  "tree": { "type": "string", "pattern": "^[0-9a-f]{40}$" }
+                }
+              }
+            },
+            "entry_count": { "type": "integer", "minimum": 1, "maximum": 100000 },
+            "file_count": { "type": "integer", "minimum": 0, "maximum": 100000 },
+            "total_file_bytes": { "type": "integer", "minimum": 0, "maximum": 2147483648 }
+          }
+        }
+      ]
+    },
+    "tasks": {
+      "type": "array",
+      "maxItems": 100000,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "attemptId",
+          "concreteNodeId",
+          "logicalNodeId",
+          "preparationSmithersNodeId",
+          "smithersNodeId",
+          "verifierSmithersNodeId",
+          "agentRef",
+          "dependencies",
+          "dependencySmithersNodeIds",
+          "timeoutMs",
+          "heartbeatTimeoutMs",
+          "retries",
+          "retryPolicy",
+          "workspacePath",
+          "artifactDir",
+          "dependencyArtifactDirs",
+          "execution",
+          "metadata"
+        ],
+        "properties": {
+          "attemptId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+          },
+          "concreteNodeId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+          },
+          "logicalNodeId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+          },
+          "preparationSmithersNodeId": {
+            "type": "string",
+            "pattern": "^prepare:[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+          },
+          "smithersNodeId": {
+            "type": "string",
+            "pattern": "^node:[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+          },
+          "verifierSmithersNodeId": {
+            "type": "string",
+            "pattern": "^verify:[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+          },
+          "agentRef": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "pattern": "^[^\\u0000]+$"
+          },
+          "modelName": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "pattern": "^[^\\u0000]+$"
+          },
+          "reasoningEffort": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "pattern": "^[^\\u0000]+$"
+          },
+          "dependencies": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+            }
+          },
+          "dependencySmithersNodeIds": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^verify:[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+            }
+          },
+          "timeoutMs": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "heartbeatTimeoutMs": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "retries": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "retryPolicy": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["backoff", "initialDelayMs", "maxDelayMs"],
+            "properties": {
+              "backoff": {
+                "const": "exponential"
+              },
+              "initialDelayMs": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "maxDelayMs": {
+                "type": "integer",
+                "minimum": 1
+              }
+            }
+          },
+          "workspacePath": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "pattern": "^[^\\u0000]+$"
+          },
+          "artifactDir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "pattern": "^[^\\u0000]+$"
+          },
+          "dependencyArtifactDirs": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "pattern": "^[^\\u0000]+$"
+            }
+          },
+          "renderedPromptPath": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "pattern": "^[^\\u0000]+$"
+          },
+          "execution": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["mode", "resources", "agentCredentialEnv"],
+            "properties": {
+              "mode": {
+                "enum": ["local", "cloud"]
+              },
+              "provider": {
+                "const": "modal"
+              },
+              "resources": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["cpu", "memoryMiB", "timeoutSeconds"],
+                "properties": {
+                  "cpu": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "maximum": 256
+                  },
+                  "memoryMiB": {
+                    "type": "integer",
+                    "minimum": 128,
+                    "maximum": 4194304
+                  },
+                  "timeoutSeconds": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 604800
+                  }
+                }
+              },
+              "modal": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["app", "image", "credentialEnv"],
+                "properties": {
+                  "app": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "pattern": "^[^\\u0000]+$"
+                  },
+                  "image": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "pattern": "^[^\\u0000]+$"
+                  },
+                  "region": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "pattern": "^[^\\u0000]+$"
+                  },
+                  "credentialEnv": {
+                    "type": "array",
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$"
+                    }
+                  }
+                }
+              },
+              "agentCredentialEnv": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$"
+                }
+              }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "mode": {
+                      "const": "cloud"
+                    }
+                  },
+                  "required": ["mode"]
+                },
+                "then": {
+                  "properties": {
+                    "provider": {},
+                    "modal": {}
+                  },
+                  "required": ["provider", "modal"]
+                },
+                "else": {
+                  "not": {
+                    "anyOf": [
+                      {
+                        "properties": {
+                          "provider": true
+                        },
+                        "required": ["provider"]
+                      },
+                      {
+                        "properties": {
+                          "modal": true
+                        },
+                        "required": ["modal"]
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          "metadata": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "schemaVersion",
+              "run",
+              "node",
+              "dependencies",
+              "loop",
+              "model",
+              "workspace",
+              "artifacts",
+              "retryPolicy",
+              "timeout",
+              "execution"
+            ],
+            "properties": {
+              "schemaVersion": {
+                "const": "ultrafuzz.smithers.task.v2"
+              },
+              "run": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["ultrafuzzRunId", "smithersWorkflowName", "graphVersion", "topologyVersion"],
+                "properties": {
+                  "ultrafuzzRunId": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+                  },
+                  "smithersWorkflowName": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "pattern": "^[^\\u0000]+$"
+                  },
+                  "graphVersion": {
+                    "const": "3"
+                  },
+                  "topologyVersion": {
+                    "const": 2
+                  }
+                }
+              },
+              "node": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["concreteNodeId", "logicalNodeId", "attemptId", "label", "kind"],
+                "properties": {
+                  "concreteNodeId": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+                  },
+                  "logicalNodeId": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+                  },
+                  "attemptId": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+                  },
+                  "label": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "pattern": "^[^\\u0000]+$"
+                  },
+                  "kind": {
+                    "const": "agentic"
+                  },
+                  "promptPath": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "pattern": "^[^\\u0000]+$"
+                  },
+                  "group": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+                  }
+                }
+              },
+              "dependencies": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["concreteNodeIds", "attemptIds", "smithersNodeIds"],
+                "properties": {
+                  "concreteNodeIds": {
+                    "type": "array",
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string",
+                      "pattern": "^(?:__(?:start|finish)__|[A-Za-z0-9][A-Za-z0-9._-]{0,127})$"
+                    }
+                  },
+                  "attemptIds": {
+                    "type": "array",
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+                    }
+                  },
+                  "smithersNodeIds": {
+                    "type": "array",
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string",
+                      "pattern": "^verify:[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+                    }
+                  }
+                }
+              },
+              "loop": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["index", "count", "mode", "attemptIndex"],
+                "properties": {
+                  "index": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "count": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "mode": {
+                    "enum": ["parallel", "series"]
+                  },
+                  "attemptIndex": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              },
+              "model": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["profileId", "agentRef", "modelIndex", "attemptIndex"],
+                "properties": {
+                  "profileId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "pattern": "^[^\\u0000]+$"
+                  },
+                  "agentRef": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "pattern": "^[^\\u0000]+$"
+                  },
+                  "modelName": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "pattern": "^[^\\u0000]+$"
+                  },
+                  "reasoningEffort": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "pattern": "^[^\\u0000]+$"
+                  },
+                  "modelIndex": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "attemptIndex": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              },
+              "workspace": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["primitive", "path", "repoPath", "trustModel"],
+                "properties": {
+                  "primitive": {
+                    "const": "worktree"
+                  },
+                  "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "pattern": "^[^\\u0000]+$"
+                  },
+                  "repoPath": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "pattern": "^[^\\u0000]+$"
+                  },
+                  "trustModel": {
+                    "const": "skip-permissions"
+                  }
+                }
+              },
+              "artifacts": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["dir", "outputs", "manifestPath"],
+                "properties": {
+                  "dir": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "pattern": "^[^\\u0000]+$"
+                  },
+                  "outputs": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["path", "contract", "contractDigest", "primary"],
+                      "properties": {
+                        "path": {
+                          "type": "string",
+                          "pattern": "^(?!\\.{1,2}(?:\\/|$))[A-Za-z0-9._@+-]{1,128}(?:\\/(?!\\.{1,2}(?:\\/|$))[A-Za-z0-9._@+-]{1,128})*$"
+                        },
+                        "contract": {
+                          "enum": [
+                            "ultrafuzz/admin-config-boundary-matrix@1",
+                            "ultrafuzz/aggregation-manifest@1",
+                            "ultrafuzz/audited-differential-lanes@1",
+                            "ultrafuzz/boundary-recipes@1",
+                            "ultrafuzz/campaign-summary@2",
+                            "ultrafuzz/coverage-goal@1",
+                            "ultrafuzz/dependency-scope-matrix@1",
+                            "ultrafuzz/differential-gap-review@1",
+                            "ultrafuzz/differential-lane-result@1",
+                            "ultrafuzz/differential-plan@1",
+                            "ultrafuzz/differential-red-triage@1",
+                            "ultrafuzz/differential-repair-summary@1",
+                            "ultrafuzz/differential-report-review@1",
+                            "ultrafuzz/dynamic-enumerator-outputs@1",
+                            "ultrafuzz/dynamic-strategy-plan@1",
+                            "ultrafuzz/dynamic-strategy-provenance@1",
+                            "ultrafuzz/externalized-state-accounting@1",
+                            "ultrafuzz/finding-lifecycle-ledger@1",
+                            "ultrafuzz/findings@2",
+                            "ultrafuzz/generated-tests@3",
+                            "ultrafuzz/harness-repairs@1",
+                            "ultrafuzz/implemented-properties@3",
+                            "ultrafuzz/invariant-campaign-plan@2",
+                            "ultrafuzz/invariant-ledger@1",
+                            "ultrafuzz/nonempty-markdown@1",
+                            "ultrafuzz/properties@2",
+                            "ultrafuzz/property-campaign@3",
+                            "ultrafuzz/property-lens@2",
+                            "ultrafuzz/reference-expectations@2",
+                            "ultrafuzz/reference-harness@1",
+                            "ultrafuzz/reference-manifest@1",
+                            "ultrafuzz/report@2",
+                            "ultrafuzz/selected-strategies@1",
+                            "ultrafuzz/semantic-red-registry@1",
+                            "ultrafuzz/severity-classified-findings@1",
+                            "ultrafuzz/strategy-detections@1",
+                            "ultrafuzz/text@1",
+                            "ultrafuzz/triaged-findings@1",
+                            "ultrafuzz/workspace-patch@1"
+                          ]
+                        },
+                        "contractDigest": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{64}$"
+                        },
+                        "schemaFile": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*\\.schema\\.json$"
+                        },
+                        "schemaId": {
+                          "type": "string",
+                          "pattern": "^urn:ultrafuzz:schema:",
+                          "minLength": 1
+                        },
+                        "schemaSha256": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{64}$"
+                        },
+                        "schemaBundleSha256": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{64}$"
+                        },
+                        "validatorBuild": {
+                          "type": "string",
+                          "pattern": "^ultrafuzz-json-validator\\.v1:[0-9a-f]{64}$"
+                        },
+                        "primary": {
+                          "type": "boolean"
+                        }
+                      },
+                      "allOf": [
+                        {
+                          "if": {
+                            "properties": {
+                              "contract": {
+                                "enum": ["ultrafuzz/nonempty-markdown@1", "ultrafuzz/text@1"]
+                              }
+                            },
+                            "required": ["contract"]
+                          },
+                          "then": {
+                            "not": {
+                              "anyOf": [
+                                {
+                                  "properties": {
+                                    "schemaFile": true
+                                  },
+                                  "required": ["schemaFile"]
+                                },
+                                {
+                                  "properties": {
+                                    "schemaId": true
+                                  },
+                                  "required": ["schemaId"]
+                                },
+                                {
+                                  "properties": {
+                                    "schemaSha256": true
+                                  },
+                                  "required": ["schemaSha256"]
+                                },
+                                {
+                                  "properties": {
+                                    "schemaBundleSha256": true
+                                  },
+                                  "required": ["schemaBundleSha256"]
+                                },
+                                {
+                                  "properties": {
+                                    "validatorBuild": true
+                                  },
+                                  "required": ["validatorBuild"]
+                                }
+                              ]
+                            }
+                          },
+                          "else": {
+                            "required": [
+                              "schemaFile",
+                              "schemaId",
+                              "schemaSha256",
+                              "schemaBundleSha256",
+                              "validatorBuild"
+                            ]
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  "manifestPath": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "pattern": "^[^\\u0000]+$"
+                  }
+                }
+              },
+              "retryPolicy": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["maxAttempts", "smithersRetries"],
+                "properties": {
+                  "maxAttempts": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "smithersRetries": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              },
+              "timeout": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["milliseconds", "seconds", "heartbeatTimeoutMs"],
+                "properties": {
+                  "milliseconds": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "seconds": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "heartbeatTimeoutMs": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                }
+              },
+              "execution": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["mode", "resources"],
+                "properties": {
+                  "mode": {
+                    "enum": ["local", "cloud"]
+                  },
+                  "provider": {
+                    "const": "modal"
+                  },
+                  "resources": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["cpu", "memoryMiB", "timeoutSeconds"],
+                    "properties": {
+                      "cpu": {
+                        "type": "number",
+                        "exclusiveMinimum": 0,
+                        "maximum": 256
+                      },
+                      "memoryMiB": {
+                        "type": "integer",
+                        "minimum": 128,
+                        "maximum": 4194304
+                      },
+                      "timeoutSeconds": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 604800
+                      }
+                    }
+                  }
+                },
+                "allOf": [
+                  {
+                    "if": {
+                      "properties": {
+                        "mode": {
+                          "const": "cloud"
+                        }
+                      },
+                      "required": ["mode"]
+                    },
+                    "then": {
+                      "properties": {
+                        "provider": {}
+                      },
+                      "required": ["provider"]
+                    },
+                    "else": {
+                      "not": {
+                        "properties": {
+                          "provider": true
+                        },
+                        "required": ["provider"]
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

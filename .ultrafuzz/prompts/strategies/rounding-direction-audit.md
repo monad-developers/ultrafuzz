@@ -61,5 +61,6 @@ delta. A confirmed finding must include clear evidence for both the expected
 rounding direction and the observed violation, plus the repeated-operation
 count and final cumulative drift when applicable.
 
-Write structured findings to {{output_findings_path}}. Use an empty JSON array
-if no finding is confirmed.
+Write structured findings to {{output_findings_path}}. If no finding is
+confirmed, use only the empty form defined by the exact pinned schema in the
+central output contract.

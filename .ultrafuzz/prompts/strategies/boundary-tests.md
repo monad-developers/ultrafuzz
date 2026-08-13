@@ -62,10 +62,17 @@ Write structured JSON to:
 
 {{artifact_dir}}/boundary-recipes.json
 
-The JSON should include `schema_version`, `recipes`, `deferred_or_spec_gated`,
-and `coverage_priorities`. Each recipe should name the workflow, public support,
-setup, action sequence, oracle, negative/boundary values, expected classification
-if red, and preferred downstream lane.
+Read the pinned JSON Schema at
+`{{schema_path}}/boundary-recipes.schema.json` before authoring the structured
+artifact. It is the only authority on the JSON version, field names, types,
+required and optional members, and empty form. The central Ultrafuzz Output
+Contract below repeats that exact path and renders the exact
+`ultrafuzz json validate` command for this artifact. Run that displayed command
+after the final write and correct the artifact until it exits 0.
 
-Validate JSON with one direct Bash call when needed. Do not use command
-substitution, pipes, or chained shell commands for post-write validation.
+Keep the Markdown matrix and structured artifact semantically aligned: they
+must describe the same source-backed workflows, deliberate boundary setups,
+oracles, public support, classifications, and downstream priorities. This
+cross-artifact correspondence is a contextual requirement beyond JSON Schema.
+Run validation as one direct command; do not use command substitution, pipes,
+or chained shell commands for post-write validation.

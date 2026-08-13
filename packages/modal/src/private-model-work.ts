@@ -1,11 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { validateRunStateSchema } from "@ultrafuzz/artifacts";
+import { readPlannedGraphDocument, readRunState } from "@ultrafuzz/artifacts";
 
 export type PrivateEvalModelWorkEvidence = "started" | "none" | "unknown";
 
-const MAX_PRIVATE_MODEL_WORK_SOURCE_BYTES = 16 * 1024 * 1024;
 const UNTOUCHED_MODEL_NODE_STATUSES = new Set(["pending", "skipped"]);
 
 /**
@@ -22,45 +21,38 @@ export function privateEvalModelWorkEvidence(projectRoot: string): PrivateEvalMo
   let entries: fs.Dirent[];
   try {
     const stats = fs.lstatSync(runsRoot);
-    if (!stats.isDirectory() || stats.isSymbolicLink()) return "unknown";
+    if (!stats.isDirectory() || stats.isSymbolicLink()) {
+      throw new Error("private eval runs root must be a real directory");
+    }
     entries = fs.readdirSync(runsRoot, { withFileTypes: true });
   } catch (error) {
-    return isNodeError(error, "ENOENT") ? "none" : "unknown";
+    if (isNodeError(error, "ENOENT")) return "none";
+    throw error;
   }
   if (entries.length === 0) return "none";
-  if (entries.length !== 1 || !entries[0]!.isDirectory() || entries[0]!.isSymbolicLink()) return "unknown";
+  if (entries.length !== 1 || !entries[0]!.isDirectory() || entries[0]!.isSymbolicLink()) {
+    throw new Error("private eval model-work evidence must contain exactly one real run directory");
+  }
 
   const runRoot = path.join(runsRoot, entries[0]!.name);
-  const graph = readJsonRecord(path.join(runRoot, "graph.json"));
-  const stateResult = validateRunStateSchema(readJsonRecord(path.join(runRoot, "state.json")));
-  if (graph === undefined || !Array.isArray(graph.nodes) || !stateResult.ok || stateResult.value === undefined) {
-    return "unknown";
-  }
-  const state = stateResult.value;
-
-  const graphNodeIds = new Set<string>();
-  const modelNodeIds = new Set<string>();
-  for (const value of graph.nodes) {
-    const node = record(value);
-    const id = stringField(node, "id");
-    const kind = stringField(node, "kind");
-    const modelFanout = node?.model_fanout;
-    if (
-      id === undefined ||
-      graphNodeIds.has(id) ||
-      (kind !== "agentic" && kind !== "meta" && kind !== "reference") ||
-      !Array.isArray(modelFanout)
-    ) {
-      return "unknown";
-    }
-    if ((kind === "meta" || kind === "reference") && modelFanout.length > 0) return "unknown";
-    graphNodeIds.add(id);
-    if (kind === "agentic" || modelFanout.length > 0) modelNodeIds.add(id);
+  let graph: ReturnType<typeof readPlannedGraphDocument>;
+  let state: ReturnType<typeof readRunState>;
+  try {
+    graph = readPlannedGraphDocument(path.join(runRoot, "graph.json"));
+    state = readRunState(path.join(runRoot, "state.json"));
+  } catch (error) {
+    if (isNodeError(error, "ENOENT")) return "unknown";
+    throw error;
   }
 
-  for (const id of graphNodeIds) {
-    if (state.nodes[id] === undefined) return "unknown";
+  const graphNodeIds = new Set(graph.nodes.map((node) => node.id));
+  const stateNodeIds = Object.keys(state.nodes);
+  if (graphNodeIds.size !== stateNodeIds.length || stateNodeIds.some((id) => !graphNodeIds.has(id))) {
+    throw new Error("private eval run state must exactly match its planned graph nodes");
   }
+  const modelNodeIds = new Set(
+    graph.nodes.filter((node) => node.kind === "agentic" || node.model_fanout.length > 0).map((node) => node.id)
+  );
 
   if (state.status === "succeeded" && modelNodeIds.size > 0) return "started";
   for (const id of modelNodeIds) {
@@ -98,44 +90,32 @@ export async function runWithPrivateModelWorkCorroboration<T>(input: {
   checkpoint: () => Promise<void>;
   flush: () => Promise<void>;
 }): Promise<T> {
+  let outcome: { ok: true; value: T } | { ok: false; error: unknown };
   try {
-    return await input.run();
-  } finally {
-    let evidence: PrivateEvalModelWorkEvidence = "unknown";
-    try {
-      evidence = input.evidence();
-    } catch {
-      // A failed corroboration read cannot buy another model execution.
-    }
-    if (evidence === "none") input.clearStarted();
-    await input.checkpoint();
-    await input.flush();
+    outcome = { ok: true, value: await input.run() };
+  } catch (error) {
+    outcome = { ok: false, error };
   }
-}
 
-function readJsonRecord(filePath: string): Record<string, unknown> | undefined {
+  let evidence: { ok: true; value: PrivateEvalModelWorkEvidence } | { ok: false; error: unknown };
   try {
-    const stats = fs.lstatSync(filePath);
-    if (!stats.isFile() || stats.isSymbolicLink() || stats.size > MAX_PRIVATE_MODEL_WORK_SOURCE_BYTES) {
-      return undefined;
-    }
-    return record(JSON.parse(fs.readFileSync(filePath, "utf8")) as unknown);
-  } catch {
-    return undefined;
+    evidence = { ok: true, value: input.evidence() };
+  } catch (error) {
+    evidence = { ok: false, error };
   }
-}
+  if (evidence.ok && evidence.value === "none") input.clearStarted();
+  await input.checkpoint();
+  await input.flush();
 
-function record(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
-
-function stringField(value: Record<string, unknown> | undefined, key: string): string | undefined {
-  const field = value?.[key];
-  return typeof field === "string" && field.length > 0 ? field : undefined;
+  const errors = [...(outcome.ok ? [] : [outcome.error]), ...(evidence.ok ? [] : [evidence.error])];
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) throw new AggregateError(errors, "private model-work execution and evidence both failed");
+  if (!outcome.ok) throw outcome.error;
+  return outcome.value;
 }
 
 function isNodeError(error: unknown, code: string): boolean {
-  return error instanceof Error && "code" in error && error.code === code;
+  if (!(error instanceof Error)) return false;
+  if ("code" in error && error.code === code) return true;
+  return "cause" in error && isNodeError(error.cause, code);
 }

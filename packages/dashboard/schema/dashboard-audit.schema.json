@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:dashboard:audit:1",
+  "title": "Ultrafuzz dashboard audit record",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/configEdit"
+    },
+    {
+      "$ref": "#/$defs/topologyEdit"
+    },
+    {
+      "$ref": "#/$defs/promptEdit"
+    }
+  ],
+  "$defs": {
+    "configEdit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "audit_id", "timestamp", "kind", "path", "content_hash"],
+      "properties": {
+        "schema_version": {
+          "const": "ultrafuzz.dashboard.audit.v1"
+        },
+        "audit_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "kind": {
+          "const": "config-edit"
+        },
+        "path": {
+          "const": "ultrafuzz.toml"
+        },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "topologyEdit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "audit_id", "timestamp", "kind", "path", "content_hash"],
+      "properties": {
+        "schema_version": {
+          "const": "ultrafuzz.dashboard.audit.v1"
+        },
+        "audit_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "kind": {
+          "const": "topology-edit"
+        },
+        "path": {
+          "const": ".ultrafuzz/topology.yml"
+        },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "promptEdit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "audit_id", "timestamp", "kind", "path", "content_hash"],
+      "properties": {
+        "schema_version": {
+          "const": "ultrafuzz.dashboard.audit.v1"
+        },
+        "audit_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "kind": {
+          "const": "prompt-edit"
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^\\.ultrafuzz/prompts/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+\\.mdx?$"
+        },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    }
+  }
+}

@@ -22,6 +22,7 @@ import {
 } from "./auth.js";
 import { DEFAULT_MODAL_APP, DEFAULT_MODAL_IMAGE, type ModelProvider } from "./defaults.js";
 import { remoteAuthPath } from "./layout.js";
+import { parseModalSmokeCheckpointBytes, parseModalSmokeCompletionBytes } from "./smoke-evidence.js";
 import {
   cloudFailureResult,
   MODAL_SMOKE_DATA_ROOT,
@@ -144,8 +145,7 @@ class RealModalSmokeDriver implements ModalSmokeDriver {
 
   async waitForCheckpoint(launch: ModalSmokeLaunch): Promise<ModalSmokeCheckpoint> {
     this.failureStage = "checkpoint";
-    const value = await this.readEvidence(launch, CHECKPOINT_PATH);
-    return parseCheckpoint(value);
+    return parseModalSmokeCheckpointBytes(await this.readEvidenceBytes(launch, CHECKPOINT_PATH));
   }
 
   async terminate(launch: ModalSmokeLaunch): Promise<void> {
@@ -161,8 +161,7 @@ class RealModalSmokeDriver implements ModalSmokeDriver {
   async waitForCompletion(launch: ModalSmokeLaunch): Promise<ModalSmokeCompletion> {
     this.failureStage = "completion";
     const sandbox = this.sandboxFor(launch);
-    const value = await this.readEvidence(launch, RESULT_PATH);
-    const result = parseCompletion(value);
+    const result = parseModalSmokeCompletionBytes(await this.readEvidenceBytes(launch, RESULT_PATH));
     const exitCode = await sandbox.wait();
     this.sandboxes.delete(sandbox.sandboxId);
     if (exitCode !== 0) throw new Error("smoke worker did not finish");
@@ -194,17 +193,17 @@ class RealModalSmokeDriver implements ModalSmokeDriver {
     }
   }
 
-  private async readEvidence(launch: ModalSmokeLaunch, filePath: string): Promise<unknown> {
+  private async readEvidenceBytes(launch: ModalSmokeLaunch, filePath: string): Promise<Uint8Array> {
     const sandbox = this.sandboxFor(launch);
     const deadline = Date.now() + POLL_TIMEOUT_MS;
     while (Date.now() < deadline) {
-      let contents: string | undefined;
+      let contents: Uint8Array | undefined;
       try {
-        contents = await sandbox.filesystem.readText(filePath);
+        contents = await sandbox.filesystem.readBytes(filePath);
       } catch (error) {
         if (!(error instanceof SandboxFilesystemNotFoundError)) throw error;
       }
-      if (contents !== undefined) return JSON.parse(contents) as unknown;
+      if (contents !== undefined) return contents;
       const exitCode = await sandbox.poll();
       if (exitCode !== null) throw new Error("smoke worker exited before evidence was ready");
       await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
@@ -287,41 +286,6 @@ async function drain(stream: ReadableStream<string>): Promise<void> {
   }
 }
 
-function parseCheckpoint(value: unknown): ModalSmokeCheckpoint {
-  const record = recordValue(value);
-  return {
-    nonRoot: booleanValue(record.non_root),
-    durableStorage: booleanValue(record.durable_storage),
-    providerAuth: providerValue(record.provider_auth),
-    completedUnits: integerValue(record.completed_units)
-  };
-}
-
-function parseCompletion(value: unknown): ModalSmokeCompletion {
-  const record = recordValue(value);
-  return {
-    ...parseCheckpoint(record),
-    repeatedUnits: integerValue(record.repeated_units)
-  };
-}
-
-function recordValue(value: unknown): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("smoke evidence is invalid");
-  return value as Record<string, unknown>;
-}
-
-function booleanValue(value: unknown): boolean {
-  if (typeof value !== "boolean") throw new Error("smoke evidence is invalid");
-  return value;
-}
-
-function providerValue(value: unknown): ModelProvider {
-  if (value !== "openai" && value !== "anthropic" && value !== "deepseek" && value !== "kimi") {
-    throw new Error("smoke evidence is invalid");
-  }
-  return value;
-}
-
 async function prepareDeepSeekSmokeAuth(apiKey: string | undefined): Promise<SubscriptionAuthCopy> {
   if (apiKey === undefined || apiKey.trim() === "") throw new Error("DeepSeek smoke requires DEEPSEEK_API_KEY");
   const temporary = await mkdtemp(path.join(tmpdir(), "ultrafuzz-modal-smoke-deepseek-auth-"));
@@ -339,11 +303,6 @@ async function prepareDeepSeekSmokeAuth(apiKey: string | undefined): Promise<Sub
     await rm(temporary, { recursive: true, force: true });
     throw error;
   }
-}
-
-function integerValue(value: unknown): number {
-  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) throw new Error("smoke evidence is invalid");
-  return value;
 }
 
 function required<T>(value: T | undefined): T {

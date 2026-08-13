@@ -4,8 +4,14 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { layoutForRunRoot } from "@ultrafuzz/artifacts";
-import { evalRunRoot } from "@ultrafuzz/evals";
+import { layoutForRunRoot, writeRunMetadataDocument, type RunMetadataDocument } from "@ultrafuzz/artifacts";
+import {
+  evalRunRoot,
+  readEvalRunSummary,
+  writeEvalRunManifest,
+  type EvalRunManifest,
+  type EvalRunRecord
+} from "@ultrafuzz/evals";
 
 import {
   findModalResumeWorkspace,
@@ -15,28 +21,180 @@ import {
   modalDurableRunNeedsResume,
   modalEvalRunCommand,
   NonResumableTerminalRunError,
-  repairModalEvalRunRecord
+  finalizeModalEvalRunRecord,
+  readModalDurableRunState
 } from "../src/resume.js";
+import { currentRunState } from "./current-artifact-fixtures.js";
 
 const T0 = "2026-07-19T00:00:00.000Z";
 const T1 = "2026-07-19T00:01:00.000Z";
 const T2 = "2026-07-19T00:02:00.000Z";
 
+function currentRunMetadata(runId: string, linked: boolean): RunMetadataDocument {
+  return {
+    schema_version: "ultrafuzz.run-metadata.v2",
+    run_id: runId,
+    created_at: T0,
+    mode: "run",
+    workflow_ids: linked ? ["wf-1"] : [],
+    redacted_config_fingerprint: "a".repeat(64),
+    forge_guard: {
+      enabled: false,
+      active: false,
+      virtual_memory_limit_kb: 1,
+      rayon_threads: 1
+    },
+    ...(linked
+      ? {
+          workflow: {
+            run_id: "wf-1",
+            compiled_run_id: "compiled-wf-1",
+            name: "modal-resume-fixture",
+            path: "workflow.tsx",
+            evidence_path: "smithers/workflow.json",
+            expanded_graph_path: "smithers/expanded-graph.json",
+            config_path: "smithers/config.json",
+            input_path: "smithers/input.json",
+            tasks_path: "smithers/tasks.json",
+            control_integrity_path: "smithers/control-integrity.json",
+            control_generation: "b".repeat(64),
+            workflow_link_id: "11111111-1111-4111-8111-111111111111",
+            execution_snapshot_path: "smithers/execution-snapshot.json",
+            task_node_ids: ["node:fixture"]
+          }
+        }
+      : {})
+  };
+}
+
 function writeRunRoot(target: string, runId: string, options: { linked: boolean }) {
   const runRoot = path.join(target, ".ultrafuzz", "runs", runId);
   fs.mkdirSync(runRoot, { recursive: true });
-  fs.writeFileSync(path.join(runRoot, "state.json"), JSON.stringify({ run_id: runId, nodes: {} }));
-  if (options.linked) {
-    // The workflow link `resume` requires, at the path the RUNTIME writes it to. Derived from
-    // `layoutForRunRoot`, never spelled out: an earlier revision invented the filename here and in the
-    // source, so the suite agreed with the bug and all tests passed while every real run root was
-    // misclassified as unresumable -- and therefore deletable.
-    fs.writeFileSync(
-      layoutForRunRoot(runRoot).runMetadataPath,
-      JSON.stringify({ workflow: { run_id: "wf-1", path: "workflow.tsx" } })
-    );
-  }
+  fs.writeFileSync(
+    path.join(runRoot, "state.json"),
+    JSON.stringify(currentRunState({}, { run_id: runId, status: "pending" }))
+  );
+  // The workflow link `resume` requires, at the path the runtime writes it to. The fixture is always a
+  // complete current run document; an unlinked run is represented by the canonical empty workflow_ids
+  // projection, never by missing or historical metadata.
+  writeRunMetadataDocument(layoutForRunRoot(runRoot).runMetadataPath, currentRunMetadata(runId, options.linked));
   return runRoot;
+}
+
+function currentEvalRunRecord(
+  target: string,
+  evalRunId: string,
+  options: { rowId?: string; runId?: string } = {}
+): EvalRunRecord {
+  const rowId = options.rowId ?? "row-one";
+  const runId = options.runId;
+  return {
+    schema_version: "ultrafuzz.eval.run.v3",
+    eval_run_id: evalRunId,
+    row_id: rowId,
+    target_id: "target-one",
+    variant_id: "variant-one",
+    trial_id: "trial-one",
+    ...(runId === undefined
+      ? {
+          status: "failed",
+          final_status: "failed",
+          launcher: { status: "failed", started_at: T0, finished_at: T1 }
+        }
+      : {
+          ultrafuzz_run_id: runId,
+          ultrafuzz_run_root: path.join(target, ".ultrafuzz", "runs", runId),
+          status: "launched",
+          final_status: "launched",
+          launcher: { status: "succeeded", started_at: T0, finished_at: T1 },
+          workflow: { status: "running", terminal: false, started_at: T0, finished_at: null }
+        }),
+    workflow_ids: [],
+    diagnostics: []
+  };
+}
+
+function currentEvalRunManifest(control: string, evalRunId: string): EvalRunManifest {
+  const sha40 = "a".repeat(40);
+  const sha256 = "b".repeat(64);
+  const repository = "https://example.invalid/target-one.git";
+  return {
+    schema_version: "ultrafuzz.eval.run.v3",
+    eval_run_id: evalRunId,
+    suite_path: path.join(control, "modal-suite.yml"),
+    project_root: control,
+    created_at: T0,
+    suite: {
+      schema_version: "ultrafuzz.eval.v2",
+      suite: "modal-resume-test",
+      model_profiles: {
+        runner: { agent: "CodexAgent", model: "runner-model" },
+        judge: { agent: "CodexAgent", model: "judge-model" }
+      },
+      targets: [
+        {
+          id: "target-one",
+          repo: repository,
+          ref: "main",
+          ground_truth: "target-one.json"
+        }
+      ],
+      variants: [{ id: "variant-one" }],
+      run: {
+        runner_model_profile: "runner",
+        judge_model_profile: "judge",
+        trials_per_variant: 1,
+        max_parallel_runs: 1
+      },
+      metrics: { recall_threshold: 1 },
+      recovery_equivalence: {
+        max_repeated_model_executions: 0,
+        aggregate_non_comparable: "include",
+        publication: "clean"
+      },
+      reporting: {
+        node_telemetry: true,
+        heartbeat_interval_seconds: 60,
+        artifacts: {
+          mode: "manifest-only",
+          include: ["report.json"],
+          max_file_bytes: 1_000_000,
+          mode_explicit: false
+        }
+      }
+    },
+    provenance: {
+      candidate: { label: "candidate", commit: sha40, dirty: false },
+      benchmark: {
+        availability: "available",
+        series: "modal-resume-test",
+        protocol_revision: "strict-json-v2",
+        cohort_fingerprint: sha256,
+        targets: [{ id: "target-one", repo: repository, commit: sha40, dirty: false }],
+        ground_truth_sha256: { "target-one": sha256 },
+        ground_truth_subjects: { "target-one": { repository, revision: "main" } },
+        execution_policy: {
+          revision: "strict-json-v2",
+          fingerprint: sha256,
+          max_parallel_targets: null,
+          max_parallel_runs: 1,
+          node_telemetry: true,
+          heartbeat_interval_seconds: 60,
+          controller_mode: "watch",
+          watch_timeout_seconds: 79_200,
+          poll_interval_ms: 5_000,
+          recovery_equivalence_fingerprint: sha256
+        }
+      }
+    }
+  };
+}
+
+function writeUnlinkedEvalJournal(value: ReturnType<typeof fixture>): void {
+  fs.writeFileSync(
+    path.join(value.evalDir, "runs.jsonl"),
+    `${JSON.stringify(currentEvalRunRecord(value.target, value.evalRunId))}\n`
+  );
 }
 
 function fixture() {
@@ -47,16 +205,10 @@ function fixture() {
   const evalDir = path.join(control, ".ultrafuzz", "evals", "runs", evalRunId);
   fs.mkdirSync(target, { recursive: true });
   fs.mkdirSync(evalDir, { recursive: true });
-  fs.writeFileSync(path.join(evalDir, "eval.json"), "{}\n");
+  writeEvalRunManifest(path.join(evalDir, "eval.json"), currentEvalRunManifest(control, evalRunId));
   fs.writeFileSync(
     path.join(evalDir, "runs.jsonl"),
-    `${JSON.stringify({
-      row_id: "row-one",
-      ultrafuzz_run_id: "durable-run-one",
-      status: "launched",
-      final_status: "launched",
-      workflow: { status: "running", terminal: false, started_at: T0, finished_at: null }
-    })}\n`
+    `${JSON.stringify(currentEvalRunRecord(target, evalRunId, { runId: "durable-run-one" }))}\n`
   );
   return { workRoot, target, control, evalRunId, evalDir };
 }
@@ -104,7 +256,20 @@ describe("Modal durable evaluation resume", () => {
     ]);
   });
 
-  it("resumes terminal checkpoints that still have failed or unfinished logical rows", () => {
+  it("treats only an absent durable run state as unavailable", async () => {
+    const target = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-durable-state-"));
+    await expect(readModalDurableRunState(target, "run-one")).resolves.toBeUndefined();
+
+    const runsRoot = path.join(target, ".ultrafuzz", "runs");
+    fs.mkdirSync(runsRoot, { recursive: true });
+    const malformedRunRoot = path.join(runsRoot, "run-one");
+    fs.writeFileSync(malformedRunRoot, "not a directory\n", "utf8");
+
+    await expect(readModalDurableRunState(target, "run-one")).rejects.toMatchObject({ code: "ENOTDIR" });
+    expect(fs.readFileSync(malformedRunRoot, "utf8")).toBe("not a directory\n");
+  });
+
+  it("resumes operational checkpoints but never retries a terminal task outcome", () => {
     expect(
       modalDurableRunNeedsResume(
         { run_id: "durable-run-one", status: "failed" },
@@ -120,9 +285,17 @@ describe("Modal durable evaluation resume", () => {
     expect(
       modalDurableRunNeedsResume(
         { run_id: "durable-run-one", status: "failed" },
-        { succeeded: 58, failed: 1, remaining: 0 }
+        { succeeded: 58, failed: 1, remaining: 0 },
+        { kind: "operational-failure", failedTasks: 0, operationalFailures: 1 }
       )
     ).toBe(true);
+    expect(
+      modalDurableRunNeedsResume(
+        { run_id: "durable-run-one", status: "failed" },
+        { succeeded: 58, failed: 1, remaining: 0 },
+        { kind: "genuine-task-failures", failedTasks: 1, operationalFailures: 0 }
+      )
+    ).toBe(false);
     expect(
       modalDurableRunNeedsResume(
         { run_id: "durable-run-one", status: "succeeded" },
@@ -172,39 +345,114 @@ describe("Modal durable evaluation resume", () => {
     });
     fs.appendFileSync(
       path.join(value.evalDir, "runs.jsonl"),
-      `${JSON.stringify({ row_id: "row-two", ultrafuzz_run_id: "durable-run-two" })}\n`
+      `${JSON.stringify(currentEvalRunRecord(value.target, value.evalRunId, { rowId: "row-two", runId: "durable-run-two" }))}\n`
     );
     await expect(locateModalResumeWorkspace(value.workRoot)).rejects.toThrow("exactly one linked durable run");
   });
 
-  it("resumes a durable run that exists on disk but was never linked in the journal (#378)", async () => {
+  it("validates the exact current eval manifest and refuses historical, mismatched, or symlinked manifests", async () => {
     const value = fixture();
-    // The R54 state, and the one that matters most: the launcher created the run, wrote state.json,
-    // compiled and submitted -- and died before the link was appended. Nine nodes had already succeeded.
-    // Reading the journal alone this looks identical to "never started"; restarting would abandon that
-    // work and would fail anyway, because row run ids are deterministic.
+    const manifestPath = path.join(value.evalDir, "eval.json");
+    const current = fs.readFileSync(manifestPath, "utf8");
     fs.writeFileSync(
-      path.join(value.evalDir, "runs.jsonl"),
-      `${JSON.stringify({ row_id: "row-one", status: "failed", final_status: "failed" })}\n`
+      manifestPath,
+      current.replace(
+        '"schema_version": "ultrafuzz.eval.run.v3"',
+        '"schema_version": "ultrafuzz.eval.run.v3",\n  "schema_version": "ultrafuzz.eval.run.v3"'
+      )
     );
+    await expect(findModalResumeWorkspace(value.workRoot)).rejects.toThrow(/durable JSON is invalid/u);
+
+    fs.writeFileSync(
+      manifestPath,
+      `${JSON.stringify({ ...currentEvalRunManifest(value.control, value.evalRunId), schema_version: "ultrafuzz.eval.run.v1" })}\n`
+    );
+    await expect(findModalResumeWorkspace(value.workRoot)).rejects.toThrow(/unsupported schema_version/u);
+
+    writeEvalRunManifest(manifestPath, currentEvalRunManifest(value.control, "another-evaluation"));
+    await expect(findModalResumeWorkspace(value.workRoot)).rejects.toThrow(
+      "evaluation manifest identifies another-evaluation"
+    );
+
+    const elsewhere = path.join(value.workRoot, "eval-elsewhere.json");
+    writeEvalRunManifest(elsewhere, currentEvalRunManifest(value.control, value.evalRunId));
+    fs.rmSync(manifestPath);
+    fs.symlinkSync(elsewhere, manifestPath);
+    await expect(findModalResumeWorkspace(value.workRoot)).rejects.toThrow("evaluation manifest");
+  });
+
+  it("reads the eval journal as strict current JSONL without historical or symlink fallbacks", async () => {
+    const value = fixture();
+    const journalPath = path.join(value.evalDir, "runs.jsonl");
+    const current = JSON.stringify(currentEvalRunRecord(value.target, value.evalRunId, { runId: "durable-run-one" }));
+    fs.writeFileSync(
+      journalPath,
+      `${current.replace('"row_id":"row-one"', '"row_id":"row-one","row_id":"row-two"')}\n`
+    );
+    await expect(findModalResumeWorkspace(value.workRoot)).rejects.toThrow(/JSONL record is invalid/u);
+
+    const historical = {
+      ...currentEvalRunRecord(value.target, value.evalRunId, { runId: "durable-run-one" }),
+      schema_version: "ultrafuzz.eval.run.v1"
+    };
+    fs.writeFileSync(journalPath, `${JSON.stringify(historical)}\n`);
+    await expect(findModalResumeWorkspace(value.workRoot)).rejects.toThrow(/unsupported schema_version/u);
+
+    fs.writeFileSync(journalPath, Buffer.from([0x7b, 0x22, 0x78, 0x22, 0x3a, 0xff, 0x7d, 0x0a]));
+    await expect(findModalResumeWorkspace(value.workRoot)).rejects.toThrow(/not valid UTF-8/u);
+
+    const elsewhere = path.join(value.workRoot, "runs-elsewhere.jsonl");
+    fs.writeFileSync(elsewhere, `${current}\n`);
+    fs.rmSync(journalPath);
+    fs.symlinkSync(elsewhere, journalPath);
+    await expect(findModalResumeWorkspace(value.workRoot)).rejects.toThrow(/failed to read durable JSONL/u);
+  });
+
+  it("fails closed when a durable run exists on disk but was never linked in the journal", async () => {
+    const value = fixture();
+    writeUnlinkedEvalJournal(value);
     writeRunRoot(value.target, "durable-run-one", { linked: true });
-    await expect(findModalResumeWorkspace(value.workRoot)).resolves.toEqual({
-      kind: "resumable",
-      workspace: {
-        target: value.target,
-        control: value.control,
-        evalRunId: value.evalRunId,
-        productRunId: "durable-run-one"
-      }
-    });
+    await expect(findModalResumeWorkspace(value.workRoot)).rejects.toThrow("refusing to infer a missing link");
+  });
+
+  it("rejects duplicate keys and historical aliases in durable run metadata", async () => {
+    const value = fixture();
+    writeUnlinkedEvalJournal(value);
+    const runRoot = writeRunRoot(value.target, "durable-run-one", { linked: true });
+    const metadataPath = layoutForRunRoot(runRoot).runMetadataPath;
+    const current = fs.readFileSync(metadataPath, "utf8");
+    fs.writeFileSync(
+      metadataPath,
+      current.replace('"run_id": "durable-run-one"', '"run_id": "durable-run-one",\n  "run_id": "another-run"')
+    );
+    await expect(findModalResumeWorkspace(value.workRoot)).rejects.toThrow("is not a valid current run document");
+
+    const historical = structuredClone(currentRunMetadata("durable-run-one", true)) as unknown as Record<
+      string,
+      unknown
+    >;
+    const workflow = historical.workflow as Record<string, unknown>;
+    delete workflow.run_id;
+    workflow.workflowRunId = "wf-1";
+    fs.writeFileSync(metadataPath, `${JSON.stringify(historical)}\n`);
+    await expect(findModalResumeWorkspace(value.workRoot)).rejects.toThrow("is not a valid current run document");
+  });
+
+  it("refuses a symlinked durable run metadata file", async () => {
+    const value = fixture();
+    writeUnlinkedEvalJournal(value);
+    const runRoot = writeRunRoot(value.target, "durable-run-one", { linked: true });
+    const metadataPath = layoutForRunRoot(runRoot).runMetadataPath;
+    const elsewhere = path.join(value.workRoot, "run-metadata-elsewhere.json");
+    fs.writeFileSync(elsewhere, `${JSON.stringify(currentRunMetadata("durable-run-one", true))}\n`);
+    fs.rmSync(metadataPath);
+    fs.symlinkSync(elsewhere, metadataPath);
+    await expect(findModalResumeWorkspace(value.workRoot)).rejects.toThrow("must be a regular file");
   });
 
   it("reports not started, and names the directory to clear, when no durable run exists (#378)", async () => {
     const value = fixture();
-    fs.writeFileSync(
-      path.join(value.evalDir, "runs.jsonl"),
-      `${JSON.stringify({ row_id: "row-one", status: "failed", final_status: "failed" })}\n`
-    );
+    writeUnlinkedEvalJournal(value);
     const found = await findModalResumeWorkspace(value.workRoot);
     expect(found.kind).toBe("not-started");
     // Naming it is the point: eval run ids are deterministic and `runEvalSuite` refuses to reuse one, so a
@@ -212,19 +460,21 @@ describe("Modal durable evaluation resume", () => {
     expect(found.kind === "not-started" && found.staleEvalRunIds).toEqual([value.evalRunId]);
   });
 
-  it("classifies a journal that was never written, rather than crashing on it (#378)", async () => {
+  it("rejects an evaluation manifest whose required runs.jsonl journal is missing (#378)", async () => {
     const value = fixture();
-    // `eval.json` is written before the first journal append, so a kill in between leaves no runs.jsonl.
+    // Current durable evaluation state requires both documents. Absence is not an empty journal and must
+    // never be converted into a restartable "not started" classification.
     fs.rmSync(path.join(value.evalDir, "runs.jsonl"));
-    const found = await findModalResumeWorkspace(value.workRoot);
-    expect(found.kind).toBe("not-started");
+    await expect(findModalResumeWorkspace(value.workRoot)).rejects.toThrow(
+      /failed to read durable JSONL .*runs\.jsonl/u
+    );
   });
 
-  it("refuses to guess when several durable runs are on disk and none is linked", async () => {
+  it("refuses to infer journal links for several durable runs on disk", async () => {
     const value = fixture();
-    fs.writeFileSync(path.join(value.evalDir, "runs.jsonl"), `${JSON.stringify({ row_id: "row-one" })}\n`);
+    writeUnlinkedEvalJournal(value);
     for (const runId of ["durable-run-one", "durable-run-two"]) writeRunRoot(value.target, runId, { linked: true });
-    await expect(findModalResumeWorkspace(value.workRoot)).rejects.toThrow("exactly one durable run on disk");
+    await expect(findModalResumeWorkspace(value.workRoot)).rejects.toThrow("refusing to infer a missing link");
   });
 
   it("reports a workspace with no eval run directory at all as not started", async () => {
@@ -245,25 +495,18 @@ describe("Modal durable evaluation resume", () => {
     await expect(findModalResumeWorkspace(value.workRoot)).rejects.toThrow("persistent workspace is incomplete");
   });
 
-  it("treats a non-directory eval runs path as not started, and clears nothing", async () => {
+  it("rejects a non-directory eval runs path instead of treating malformed present state as absence", async () => {
     const value = fixture();
-    // ENOTDIR is classified like absence, deliberately: there is no evaluation to resume. What matters is
-    // that it names nothing to delete, so the not-started path cannot remove anything on this route.
     const evalRoot = path.join(value.control, ".ultrafuzz", "evals", "runs");
     fs.rmSync(evalRoot, { recursive: true });
     fs.writeFileSync(evalRoot, "not a directory\n");
-    const found = await findModalResumeWorkspace(value.workRoot);
-    expect(found.kind).toBe("not-started");
-    expect(found.kind === "not-started" && found.staleEvalRunIds).toBeUndefined();
-    expect(found.kind === "not-started" && found.staleRunRootIds).toBeUndefined();
+    await expect(findModalResumeWorkspace(value.workRoot)).rejects.toMatchObject({ code: "ENOTDIR" });
+    expect(fs.readFileSync(evalRoot, "utf8")).toBe("not a directory\n");
   });
 
   it("refuses to call a run root resumable when no workflow was ever linked to it (#378)", async () => {
     const value = fixture();
-    fs.writeFileSync(
-      path.join(value.evalDir, "runs.jsonl"),
-      `${JSON.stringify({ row_id: "row-one", status: "failed", final_status: "failed" })}\n`
-    );
+    writeUnlinkedEvalJournal(value);
     // A run killed while compiling has state.json but no workflow link, and `resume` refuses it forever with
     // WORKFLOW_RUN_ID_MISSING. Calling it resumable would relocate the wedge rather than remove it; it has
     // to be named for clearing, or the restart trips RUN_ALREADY_EXISTS on its deterministic run id.
@@ -286,53 +529,30 @@ describe("Modal durable evaluation resume", () => {
     });
     fs.appendFileSync(
       path.join(value.evalDir, "runs.jsonl"),
-      `${JSON.stringify({ row_id: "row-two", ultrafuzz_run_id: "durable-run-two" })}\n`
+      `${JSON.stringify(currentEvalRunRecord(value.target, value.evalRunId, { rowId: "row-two", runId: "durable-run-two" }))}\n`
     );
     await expect(findModalResumeWorkspace(value.workRoot)).rejects.toThrow("exactly one linked durable run");
   });
 
-  it("writes back the durable run link the journal never recorded (#378)", async () => {
+  it("refuses to create a durable run link the journal never recorded", async () => {
     const value = fixture();
-    // Resume rediscovered the run from disk; finalizing must repair the journal rather than refuse a run
-    // that plainly ran, or the next generation would have to rediscover it all over again.
-    fs.writeFileSync(
-      path.join(value.evalDir, "runs.jsonl"),
-      `${JSON.stringify({ row_id: "row-one", status: "failed", final_status: "failed" })}\n`
-    );
-    await repairModalEvalRunRecord(
-      { target: value.target, control: value.control, evalRunId: value.evalRunId, productRunId: "durable-run-one" },
-      { run_id: "durable-run-one", status: "succeeded", started_at: T0, finished_at: T1 },
-      undefined
-    );
-    const rows = fs
-      .readFileSync(path.join(value.evalDir, "runs.jsonl"), "utf8")
-      .split("\n")
-      .filter((line) => line.trim() !== "")
-      .map((line) => JSON.parse(line) as Record<string, unknown>);
-    // The link alone is not enough. `scoreEvalRun` resolves the terminal report through
-    // `ultrafuzz_run_root`, and without it falls back to a path built from `row.run_id`, which is a
-    // different directory from the bounded run id on disk -- so the run would succeed and then fail
-    // scoring. `status` matters too: efficiency and status reporting read it, not `final_status`.
-    expect(rows[rows.length - 1]).toMatchObject({
-      row_id: "row-one",
-      ultrafuzz_run_id: "durable-run-one",
-      ultrafuzz_run_root: path.join(value.target, ".ultrafuzz", "runs", "durable-run-one"),
-      status: "launched",
-      final_status: "succeeded"
-    });
-    // And the repaired journal must now be resumable on its own, without consulting the disk again.
-    await expect(findModalResumeWorkspace(value.workRoot)).resolves.toMatchObject({
-      kind: "resumable",
-      workspace: { productRunId: "durable-run-one" }
-    });
+    writeUnlinkedEvalJournal(value);
+    const before = fs.readFileSync(path.join(value.evalDir, "runs.jsonl"));
+    await expect(
+      finalizeModalEvalRunRecord(
+        { target: value.target, control: value.control, evalRunId: value.evalRunId, productRunId: "durable-run-one" },
+        { run_id: "durable-run-one", status: "succeeded", started_at: T0, finished_at: T1 },
+        undefined
+      )
+    ).rejects.toThrow("does not reference durable run");
+    expect(fs.readFileSync(path.join(value.evalDir, "runs.jsonl"))).toEqual(before);
   });
 
   it("refuses to adopt a row when the journal points at a different durable run", async () => {
     const value = fixture();
-    // The fixture row links durable-run-one. Finalizing a DIFFERENT run must stay a hard mismatch: this is
-    // the guard that keeps link repair from attaching a run to somebody else's row.
+    // The fixture row links durable-run-one. Finalizing a different run must stay a hard mismatch.
     await expect(
-      repairModalEvalRunRecord(
+      finalizeModalEvalRunRecord(
         { target: value.target, control: value.control, evalRunId: value.evalRunId, productRunId: "durable-run-two" },
         { run_id: "durable-run-two", status: "succeeded", started_at: T0, finished_at: T1 },
         undefined
@@ -342,10 +562,7 @@ describe("Modal durable evaluation resume", () => {
 
   it("names a stale directory that is exactly the one runEvalSuite refuses to reuse (#378)", async () => {
     const value = fixture();
-    fs.writeFileSync(
-      path.join(value.evalDir, "runs.jsonl"),
-      `${JSON.stringify({ row_id: "row-one", status: "failed", final_status: "failed" })}\n`
-    );
+    writeUnlinkedEvalJournal(value);
     const found = await findModalResumeWorkspace(value.workRoot);
     expect(found.kind).toBe("not-started");
     const stale = found.kind === "not-started" ? found.staleEvalRunIds?.[0] : undefined;
@@ -363,10 +580,6 @@ describe("Modal durable evaluation resume", () => {
 
   it("reads the workflow link from the path the runtime actually writes it to (#378)", async () => {
     const value = fixture();
-    fs.writeFileSync(
-      path.join(value.evalDir, "runs.jsonl"),
-      `${JSON.stringify({ row_id: "row-one", status: "failed", final_status: "failed" })}\n`
-    );
     const runRoot = writeRunRoot(value.target, "durable-run-one", { linked: true });
     // Pin the coupling itself, not just the behaviour. The metadata file is `run.json`, and the only reason
     // this predicate is trustworthy is that it derives the path instead of naming it -- when it named it,
@@ -389,10 +602,7 @@ describe("Modal durable evaluation resume", () => {
 
   it("reports a linked run with no state as damage rather than deleting it (#378)", async () => {
     const value = fixture();
-    fs.writeFileSync(
-      path.join(value.evalDir, "runs.jsonl"),
-      `${JSON.stringify({ row_id: "row-one", status: "failed", final_status: "failed" })}\n`
-    );
+    writeUnlinkedEvalJournal(value);
     const runRoot = writeRunRoot(value.target, "durable-run-one", { linked: true });
     fs.rmSync(path.join(runRoot, "state.json"));
     // The link is written before submission, so a linked root is one a workflow may have run from. It must
@@ -409,10 +619,6 @@ describe("Modal durable evaluation resume", () => {
 
   it("does not let a damaged run root preempt resuming a perfectly good one (#378)", async () => {
     const value = fixture();
-    fs.writeFileSync(
-      path.join(value.evalDir, "runs.jsonl"),
-      `${JSON.stringify({ row_id: "row-one", status: "failed", final_status: "failed" })}\n`
-    );
     writeRunRoot(value.target, "durable-run-one", { linked: true });
     const broken = writeRunRoot(value.target, "durable-run-two", { linked: true });
     fs.rmSync(path.join(broken, "state.json"));
@@ -426,10 +632,7 @@ describe("Modal durable evaluation resume", () => {
 
   it("refuses a run root whose name the runtime layout cannot address, instead of throwing forever", async () => {
     const value = fixture();
-    fs.writeFileSync(
-      path.join(value.evalDir, "runs.jsonl"),
-      `${JSON.stringify({ row_id: "row-one", status: "failed", final_status: "failed" })}\n`
-    );
+    writeUnlinkedEvalJournal(value);
     // `layoutForRunRoot` rejects ids outside its safe-id rule. Letting that throw escape would strand the
     // run permanently, since the lookup would fail before naming anything a restart could clear.
     fs.mkdirSync(path.join(value.target, ".ultrafuzz", "runs", ".tmp-junk"), { recursive: true });
@@ -438,10 +641,7 @@ describe("Modal durable evaluation resume", () => {
 
   it("names every eval run directory that would block a restart, not just the candidate", async () => {
     const value = fixture();
-    fs.writeFileSync(
-      path.join(value.evalDir, "runs.jsonl"),
-      `${JSON.stringify({ row_id: "row-one", status: "failed", final_status: "failed" })}\n`
-    );
+    writeUnlinkedEvalJournal(value);
     // A directory with no eval.json is not a candidate, but `runEvalSuite` still refuses to reuse its id.
     fs.mkdirSync(path.join(value.control, ".ultrafuzz", "evals", "runs", "leftover-run"), { recursive: true });
     const found = await findModalResumeWorkspace(value.workRoot);
@@ -453,10 +653,7 @@ describe("Modal durable evaluation resume", () => {
 
   it("refuses an eval run entry that is not a directory, instead of silently skipping it", async () => {
     const value = fixture();
-    fs.writeFileSync(
-      path.join(value.evalDir, "runs.jsonl"),
-      `${JSON.stringify({ row_id: "row-one", status: "failed", final_status: "failed" })}\n`
-    );
+    writeUnlinkedEvalJournal(value);
     // `runEvalSuite` refuses on `existsSync`, which follows symlinks and ignores entry type, so an entry
     // dropped here would block the restart with nothing able to clear it -- the same asymmetry that the
     // run-root loop closes. Refusing is the conservative half: it never deletes what it cannot classify.
@@ -467,18 +664,13 @@ describe("Modal durable evaluation resume", () => {
   it("finalizes succeeded and genuine task outcomes without resetting completed nodes", async () => {
     const value = fixture();
     const workspace = await locateModalResumeWorkspace(value.workRoot);
-    await repairModalEvalRunRecord(
+    await finalizeModalEvalRunRecord(
       workspace,
       { run_id: "durable-run-one", status: "succeeded", started_at: T0, finished_at: T1 },
       undefined
     );
-    let summary = JSON.parse(fs.readFileSync(path.join(value.evalDir, "run-summary.json"), "utf8")) as {
-      incomplete: number;
-      records: Array<{
-        final_status: string;
-        workflow?: { status?: string; terminal?: boolean; started_at?: string | null; finished_at?: string | null };
-      }>;
-    };
+    let summary = readEvalRunSummary(path.join(value.evalDir, "run-summary.json"));
+    expect(summary.schema_version).toBe("ultrafuzz.eval.run-summary.v2");
     expect(summary.records[0]?.final_status).toBe("succeeded");
     expect(summary.records[0]?.workflow).toEqual({
       status: "succeeded",
@@ -486,20 +678,15 @@ describe("Modal durable evaluation resume", () => {
       started_at: T0,
       finished_at: T1
     });
+    expect(summary.records[0]).not.toHaveProperty("finished_at");
     expect(summary.incomplete).toBe(0);
 
-    await repairModalEvalRunRecord(
+    await finalizeModalEvalRunRecord(
       workspace,
-      { run_id: "durable-run-one", status: "failed", finished_at: T2 },
+      { run_id: "durable-run-one", status: "failed", started_at: T0, finished_at: T2 },
       { kind: "genuine-task-failures", failedTasks: 1, operationalFailures: 0 }
     );
-    summary = JSON.parse(fs.readFileSync(path.join(value.evalDir, "run-summary.json"), "utf8")) as {
-      incomplete: number;
-      records: Array<{
-        final_status: string;
-        workflow?: { status?: string; terminal?: boolean; started_at?: string | null; finished_at?: string | null };
-      }>;
-    };
+    summary = readEvalRunSummary(path.join(value.evalDir, "run-summary.json"));
     expect(summary.records[0]?.final_status).toBe("failed");
     expect(summary.records[0]?.workflow).toEqual({
       status: "failed",
@@ -513,7 +700,7 @@ describe("Modal durable evaluation resume", () => {
   it("fails closed for operational terminal states and unrelated runs", async () => {
     const value = fixture();
     const workspace = await locateModalResumeWorkspace(value.workRoot);
-    const rejected = repairModalEvalRunRecord(
+    const rejected = finalizeModalEvalRunRecord(
       workspace,
       { run_id: "durable-run-one", status: "failed" },
       { kind: "operational-failure", failedTasks: 0, operationalFailures: 1 }
@@ -521,7 +708,7 @@ describe("Modal durable evaluation resume", () => {
     await expect(rejected).rejects.toBeInstanceOf(NonResumableTerminalRunError);
     await expect(rejected).rejects.toMatchObject({ code: "TERMINAL_RUN_NON_RESUMABLE" });
     await expect(
-      repairModalEvalRunRecord(workspace, { run_id: "unrelated-run", status: "succeeded" }, undefined)
+      finalizeModalEvalRunRecord(workspace, { run_id: "unrelated-run", status: "succeeded" }, undefined)
     ).rejects.toThrow("unrelated run");
   });
 });

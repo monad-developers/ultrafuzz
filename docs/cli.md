@@ -1,12 +1,13 @@
 # Ultrafuzz CLI
 
 Every command accepts `--project <path>`. Commands that support automation
-accept `--json` and emit the `ultrafuzz.cli.result.v1` envelope.
+accept `--json` and emit the `ultrafuzz.cli.result.v2` envelope.
 
 | Command                   | Purpose                                                                                                                   |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
 | `init`                    | Create project config/topology, pinned references, `.ultrafuzz/**` run surfaces, editable prompts, and workflow plumbing. |
 | `validate`                | Validate config, topology, prompts, safe paths, trust posture, and agent references.                                      |
+| `json validate`           | Validate one JSON document against a strict Draft 2020-12 schema without modifying either file.                           |
 | `run`                     | Plan, render prompts, launch a fuzzing workflow, and persist product evidence.                                            |
 | `references status`       | Show whether pinned references are present in the local digest-checked cache.                                             |
 | `references sync`         | Explicitly fetch pinned references into the local cache.                                                                  |
@@ -51,7 +52,8 @@ references, run evidence, and materialized outputs remain under root
 ## Run Flags
 
 - `--run-id <id>`
-- `--input <json-or-path>`
+- `--input-json <strict-json>`
+- `--input-file <json-path>`
 - `--prompt <text>`
 - `--agent <agent-ref>`
 - `--model <model>`
@@ -61,6 +63,37 @@ references, run evidence, and materialized outputs remain under root
 Model-only overrides keep the configured agent and reasoning. When `--agent`
 selects another agent, backend-specific reasoning is cleared, including when
 `--model` also pins a replacement model.
+
+`--input-json` and `--input-file` are mutually exclusive. Inline input is
+always parsed as strict RFC 8259 JSON and is never reinterpreted as a path.
+Relative file input is resolved from the project root, then read once from a
+bounded, non-symlink regular-file snapshot.
+Duplicate keys, invalid UTF-8, malformed JSON, symlinks, nonregular files, and
+files that change during the read are rejected. Ultrafuzz does not infer or
+normalize the application-defined operator payload.
+
+## JSON Schema Validation
+
+```bash
+ultrafuzz json validate \
+  --schema /absolute/path/to/schema.json \
+  --file /absolute/path/to/artifact.json \
+  [--ref /absolute/path/to/local-ref.json] \
+  [--max-errors 50] \
+  [--json]
+```
+
+The command accepts Draft 2020-12 JSON Schema and RFC 8259 JSON only. It rejects
+invalid UTF-8, duplicate object keys, remote references, schema traversal, and
+symlinked schema or artifact files. `--ref` is repeatable for explicit local
+schema dependencies; bundled schema references resolve from Ultrafuzz's pinned
+offline registry.
+
+Exit `0` means the document conforms to the schema. Exit `1` means the artifact
+is missing, malformed, or violates the schema and should be corrected by its
+author. Exit `2` means invocation, schema, reference, resource, or validator
+setup failed. Validation never repairs, normalizes, coerces, or rewrites the
+document. `--json` uses the usual `ultrafuzz.cli.result.v2` envelope.
 
 ## Run Lifecycle
 
@@ -72,7 +105,7 @@ selects another agent, backend-specific reasoning is cleared, including when
   linked workflow tasks while the current step counts durable Ultrafuzz nodes,
   so the two can legitimately disagree. `--watch` refreshes
   every `--interval` seconds (default 30) until the run is terminal; with
-  `--json` each poll is one newline-delimited `ultrafuzz.cli.result.v1`
+  `--json` each poll is one newline-delimited `ultrafuzz.cli.result.v2`
   envelope.
 - `pause <run-id>` stops new task scheduling and lets in-flight work settle
   before the run becomes `paused`.
@@ -93,8 +126,10 @@ selects another agent, backend-specific reasoning is cleared, including when
   require explicit `--tools`.
 - `stats <run-id> [--json]` derives node timing and usage directly from the
   run ledgers. `stats --bundle <report-bundle.zip>` performs the same query
-  offline from a portable ZIP. Neither mode creates a `stats.json` artifact;
-  missing historical evidence is reported as unavailable rather than zero.
+  offline from a current `ultrafuzz.report-bundle-manifest.v3` ZIP. Neither
+  mode creates a `stats.json` artifact. A genuinely absent optional ledger is
+  reported as unavailable rather than zero; absent usage also makes cumulative
+  accounting unavailable. Malformed present evidence fails the command.
 - `doctor` reports validation, toolchain, and pinned workflow engine install
   posture without changing project or run state or installing dependencies. It
   is the operational superset of `validate`. A cloud check may create the
@@ -176,7 +211,16 @@ reports and execution-local data.
 
 `eval analyze all` reads an already-finalized private benchmark handoff and
 generates CSV, JSON, Markdown, PNG, and editable SVG reports. Score summaries
-include the mean, median, and sample standard deviation across completed rows.
+include the mean, median, and sample standard deviation across declared rows.
+The handoff, finding manifest, instance clusters, ground-truth credits, and
+nested run metadata must use their exact current versioned schemas. Row archive
+and nested `run.json` members are read only at their declared paths, and cost
+comes only from validated run-metadata v2 `accounting.cumulative` evidence.
+Historical field names, unversioned array/map shapes, severity aliases, title
+parsing, path rewriting, missing-field defaults, malformed-row filtering, and
+current-accounting fallback are not supported. Regenerate older handoffs; the
+command does not convert or repair them. Generated provenance and source/output
+manifests are schema- and semantics-validated before writing.
 Individual report commands are `upset`, `scores`, `provenance`, `table`, and
 `cost`, plus `pairwise` for matched Ultrafuzz/no-fuzz row comparisons;
 `upsert` and `precision-recall-f1` are compatibility aliases. Because the
@@ -188,13 +232,23 @@ committed.
 
 ```json
 {
-  "schema_version": "ultrafuzz.cli.result.v1",
-  "command": "validate",
+  "schema_version": "ultrafuzz.cli.result.v2",
+  "command": "init",
   "ok": true,
   "diagnostics": [],
-  "data": {}
+  "data": {
+    "project_root": "/project",
+    "created": [],
+    "preserved": [],
+    "overwritten": []
+  }
 }
 ```
 
 Machine consumers should read `ok`, `diagnostics`, and `data`; human text is
-not the stable automation contract.
+not the stable automation contract. Version 2 is intentionally breaking: each
+known command has a closed, command-specific `data` schema, diagnostics expose
+only their public fields, and unknown invocation failures can emit only
+`ok: false` with `data: null`. The only deliberately opaque JSON values are
+explicit operator workflow input and redacted third-party tool input/output.
+There is no version-1 compatibility reader or automatic conversion.

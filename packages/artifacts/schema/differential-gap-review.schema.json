@@ -1,0 +1,270 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "ultrafuzz.differential-gap-review.v1"
+    },
+    "ready_lanes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "lane_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "attempt_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "auditor_attempt_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "source_auditor_artifact": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": ["lane_id", "attempt_index", "auditor_attempt_index", "source_auditor_artifact"],
+        "additionalProperties": false
+      }
+    },
+    "lane_results_seen": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "lane_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "attempt_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "auditor_attempt_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "source_auditor_artifact": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "type": "string",
+            "enum": ["green", "semantic_red_frozen", "compile_or_harness_defect", "no_assigned_lane"]
+          }
+        },
+        "required": ["lane_id", "attempt_index", "auditor_attempt_index", "source_auditor_artifact", "status"],
+        "additionalProperties": false
+      }
+    },
+    "missing_lane_work_orders": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "lane_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "attempt_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "auditor_attempt_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "source_auditor_artifact": {
+            "type": "string",
+            "minLength": 1
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence_paths": {
+            "minItems": 0,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "lane_id",
+          "attempt_index",
+          "auditor_attempt_index",
+          "source_auditor_artifact",
+          "summary",
+          "evidence_paths"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "incomplete_campaign_work_orders": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "lane_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "attempt_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "auditor_attempt_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "source_auditor_artifact": {
+            "type": "string",
+            "minLength": 1
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence_paths": {
+            "minItems": 0,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "lane_id",
+          "attempt_index",
+          "auditor_attempt_index",
+          "source_auditor_artifact",
+          "summary",
+          "evidence_paths"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "green_suite_evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "lane_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "attempt_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "auditor_attempt_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "source_auditor_artifact": {
+            "type": "string",
+            "minLength": 1
+          },
+          "command": {
+            "type": "string",
+            "minLength": 1
+          },
+          "matched_test_count": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "lane_id",
+          "attempt_index",
+          "auditor_attempt_index",
+          "source_auditor_artifact",
+          "command",
+          "matched_test_count"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "report_blockers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "category": {
+            "type": "string",
+            "minLength": 1
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence_paths": {
+            "minItems": 0,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          }
+        },
+        "required": ["category", "summary", "evidence_paths"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "ready_lanes",
+    "lane_results_seen",
+    "missing_lane_work_orders",
+    "incomplete_campaign_work_orders",
+    "green_suite_evidence",
+    "report_blockers"
+  ],
+  "additionalProperties": false,
+  "$id": "urn:ultrafuzz:schema:artifacts:differential-gap-review:1",
+  "title": "Ultrafuzz differential gap review"
+}

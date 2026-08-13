@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "ultrafuzz.differential-repair-summary.v1"
+    },
+    "repairs_attempted": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "stable_failure_hash": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "repair_kind": {
+            "type": "string",
+            "enum": ["harness", "reference"]
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": ["stable_failure_hash", "repair_kind", "summary"],
+        "additionalProperties": false
+      }
+    },
+    "repaired_failures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "stable_failure_hash": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "result": {
+            "type": "string",
+            "enum": ["repaired", "still-red"]
+          },
+          "evidence_paths": {
+            "minItems": 0,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          }
+        },
+        "required": ["stable_failure_hash", "result", "evidence_paths"],
+        "additionalProperties": false
+      }
+    },
+    "preserved_production_or_unknown_reds": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "stable_failure_hash": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "classification": {
+            "type": "string",
+            "enum": ["production_bug", "spec_mismatch", "unknown"]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": ["stable_failure_hash", "classification", "reason"],
+        "additionalProperties": false
+      }
+    },
+    "commands": {
+      "minItems": 0,
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "semantic_red_registry_regenerated": {
+      "type": "boolean"
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "repairs_attempted",
+    "repaired_failures",
+    "preserved_production_or_unknown_reds",
+    "commands",
+    "semantic_red_registry_regenerated",
+    "notes"
+  ],
+  "additionalProperties": false,
+  "$id": "urn:ultrafuzz:schema:artifacts:differential-repair-summary:1",
+  "title": "Ultrafuzz differential repair summary"
+}

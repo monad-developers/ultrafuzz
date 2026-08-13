@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { assertRegularFileInside } from "@ultrafuzz/artifacts";
+import { assertRegularFileInside, parseStrictJsonBytes, readRegularFileSnapshot } from "@ultrafuzz/artifacts";
 import { z } from "zod/v4";
 
 import {
@@ -12,10 +12,10 @@ import {
   type BenchmarkModelProfileManifest
 } from "./benchmark-manifest.js";
 import {
+  isEvalPublicBenchmarkWorkflowInput,
   type EvalEfficiencyCompleteness,
   type EvalFindingScore,
   type EvalMatrixRow,
-  type EvalRunProvenance,
   type EvalScoreSummary,
   type EvalSuiteSpec
 } from "./types.js";
@@ -25,16 +25,15 @@ import {
   parsePublicEvalDiagnostics
 } from "./public-diagnostics.js";
 import { parseRecoveryEquivalence } from "./recovery-equivalence.js";
-import { EvalError, evalRunRoot, jsonFile, readJsonLines, safeEvalId } from "./utils.js";
+import { EVAL_HISTORY_SCHEMA_ID, validateEvalJsonSchema } from "./eval-schema-registry.js";
+import { readEvalFindingScores, readEvalMatrix, readEvalRunManifest, readEvalScoreSummary } from "./eval-durable.js";
+import { EvalError, evalRunRoot, safeEvalId } from "./utils.js";
 
-export const EVAL_HISTORY_SCHEMA_VERSION = "ultrafuzz.eval.history.v1" as const;
-export const EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v5" as const;
-const EVAL_HISTORY_PREVIOUS_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v4" as const;
-const EVAL_HISTORY_LEGACY_PUBLICATION_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v3" as const;
-const EVAL_HISTORY_PUBLISHED_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v2" as const;
-const EVAL_HISTORY_LEGACY_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v1" as const;
+export const EVAL_HISTORY_SCHEMA_VERSION = "ultrafuzz.eval.history.v2" as const;
+export const EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v6" as const;
 const EVAL_HISTORY_PUBLIC_BUNDLE_FILE = "public-results.json";
-const EVAL_HISTORY_PUBLIC_REPORT_FILES = ["report.md", "report.json", "findings.normalized.json"] as const;
+const EVAL_HISTORY_PUBLIC_REPORT_FILES = ["report.md", "report.json"] as const;
+const MAX_EVAL_HISTORY_BYTES = 64 * 1024 * 1024;
 
 export type EvalHistoryBenchmark = "evmbench" | "ultrafuzz-bench";
 export type EvalHistoryLane = "smoke" | "full";
@@ -61,16 +60,11 @@ export interface EvalHistoryTargetPublication {
 }
 
 export interface EvalHistoryObservation {
-  schema_version:
-    | typeof EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION
-    | typeof EVAL_HISTORY_PREVIOUS_OBSERVATION_SCHEMA_VERSION
-    | typeof EVAL_HISTORY_LEGACY_PUBLICATION_OBSERVATION_SCHEMA_VERSION
-    | typeof EVAL_HISTORY_PUBLISHED_OBSERVATION_SCHEMA_VERSION
-    | typeof EVAL_HISTORY_LEGACY_OBSERVATION_SCHEMA_VERSION;
+  schema_version: typeof EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION;
   id: string;
   benchmark: EvalHistoryBenchmark;
   lane: EvalHistoryLane;
-  status?: EvalHistoryObservationStatus;
+  status: EvalHistoryObservationStatus;
   target: string;
   variant: string;
   trial_count: number;
@@ -88,15 +82,15 @@ export interface EvalHistoryObservation {
   recall: number;
   f1: number;
   cumulative_unique_true_positives: number;
-  ground_truth_bug_count?: number;
+  ground_truth_bug_count: number;
   wall_clock_seconds: number | null;
   wall_clock_completeness: EvalHistoryCompleteness;
   cost_usd: number | null;
   cost_completeness: EvalHistoryCompleteness;
-  executed_case_count?: number;
-  graded_case_count?: number;
-  publication_url?: string;
-  target_publication?: EvalHistoryTargetPublication;
+  executed_case_count: number;
+  graded_case_count: number;
+  publication_url: string;
+  target_publication: EvalHistoryTargetPublication;
   source_eval_run_id: string;
   source_artifact: string;
 }
@@ -122,54 +116,51 @@ const shaSchema = z.string().regex(/^[0-9a-f]{40}$/u);
 const fingerprintSchema = z.string().regex(/^(?:sha256:)?[0-9a-f]{64}$/u);
 const finiteNonNegative = z.number().finite().nonnegative();
 const ratio = z.number().finite().min(0).max(1);
-const safeText = z
-  .string()
-  .min(1)
-  .max(500)
-  .refine((value) => [...value].every((character) => character.charCodeAt(0) >= 32 && character.charCodeAt(0) !== 127));
-const sourceArtifactSchema = z
-  .string()
-  .min(1)
-  .max(500)
-  .regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/u);
-const issueUrlSchema = z
-  .string()
-  .max(1_000)
-  .regex(/^https:\/\/github\.com\/monad-developers\/ultrafuzz\/issues\/[1-9][0-9]*$/u);
-const publicationUrlSchema = z
-  .string()
-  .url()
-  .max(1_000)
-  .regex(/^https:\/\//u);
-const githubRepositoryUrl = z
-  .string()
-  .url()
-  .regex(/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/?$/u);
+// eslint-disable-next-line no-control-regex -- matches the canonical JSON Schema control-character exclusion
+const safeTextPattern = /^[^\u0000-\u001f\u007f]+$/u;
+export const EVAL_HISTORY_TIMESTAMP_PATTERN_SOURCE =
+  "^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$" as const;
+export const EVAL_HISTORY_CANDIDATE_REPOSITORY_PATTERN_SOURCE =
+  "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" as const;
+const timestampPattern = new RegExp(EVAL_HISTORY_TIMESTAMP_PATTERN_SOURCE, "u");
+const relativePathPattern =
+  // eslint-disable-next-line no-control-regex -- matches the canonical JSON Schema path-character exclusion
+  /^(?!\/)(?![A-Za-z]:\/)(?!.*\/\/)(?!\.?\.?$)(?!\.\.?\/)(?!.*\/\.\.?(?:\/|$))[^\\\u0000-\u001f\u007f]+$/u;
+
+function boundedCodePointString(maximum: number, pattern: RegExp): z.ZodType<string> {
+  return z
+    .string()
+    .min(1)
+    .regex(pattern)
+    .refine((value) => [...value].length <= maximum, `must contain at most ${maximum} Unicode code points`);
+}
+
+const safeText = boundedCodePointString(500, safeTextPattern);
+const sourceArtifactSchema = boundedCodePointString(500, /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/u);
+const issueUrlSchema = boundedCodePointString(
+  1_000,
+  /^https:\/\/github\.com\/monad-developers\/ultrafuzz\/issues\/[1-9][0-9]*$/u
+);
+const publicationUrlSchema = boundedCodePointString(1_000, /^https:\/\/[^\s]+$/u);
+const repositoryUrlSchema = boundedCodePointString(2_048, /^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s]+$/u);
+const githubRepositoryUrl = boundedCodePointString(
+  2_048,
+  new RegExp(EVAL_HISTORY_CANDIDATE_REPOSITORY_PATTERN_SOURCE, "u")
+);
+const timestampSchema = z.string().regex(timestampPattern);
 const publicationStatusSchema = z.enum(["succeeded", "genuine-task-failures", "failed"]);
-const legacyPublicationStatusSchema = z.enum(["succeeded", "genuine-task-failures"]);
-const positiveInteger = z.number().int().positive();
-const nonNegativeInteger = z.number().int().nonnegative();
-const relativePathSchema = z
-  .string()
-  .min(1)
-  .max(512)
-  .refine(
-    (value) =>
-      !path.posix.isAbsolute(value) &&
-      !path.win32.isAbsolute(value) &&
-      !value.includes("\\") &&
-      !value.split("/").some((part) => part === "" || part === "." || part === ".."),
-    "must be a canonical relative POSIX path"
-  );
+const positiveInteger = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
+const nonNegativeInteger = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const relativePathSchema = boundedCodePointString(512, relativePathPattern);
 
 const completenessSchema = z.strictObject({
   status: z.enum(["complete", "partial", "unavailable"]),
-  reasons: z.array(safeText)
+  reasons: z.array(safeText).max(64)
 });
 
 const targetPublicationIdentityShape = {
   target: safeText,
-  repository: z.string().url().max(2_048),
+  repository: repositoryUrlSchema,
   revision: shaSchema,
   framework: safeText.optional()
 } as const;
@@ -179,19 +170,13 @@ const targetPublicationResultShape = {
   graded_case_count: positiveInteger,
   publication_location: z.strictObject({
     bundle_path: relativePathSchema,
-    report_paths: z.array(relativePathSchema).min(1)
+    report_paths: z.array(relativePathSchema).min(1).max(64)
   })
 } as const;
 
 const targetPublicationSchema = z.strictObject({
   ...targetPublicationIdentityShape,
   status: publicationStatusSchema,
-  ...targetPublicationResultShape
-});
-
-const legacyTargetPublicationSchema = z.strictObject({
-  ...targetPublicationIdentityShape,
-  status: legacyPublicationStatusSchema,
   ...targetPublicationResultShape
 });
 
@@ -202,11 +187,14 @@ const observationBaseShape = {
   target: safeText,
   variant: safeText,
   trial_count: positiveInteger,
-  run_timestamp: z.string().datetime({ offset: true }),
+  run_timestamp: timestampSchema,
   candidate_commit: shaSchema,
   candidate_repository_url: githubRepositoryUrl,
   cohort_fingerprint: fingerprintSchema,
-  target_revisions: z.array(z.strictObject({ target: safeText, revision: shaSchema })).min(1),
+  target_revisions: z
+    .array(z.strictObject({ target: safeText, revision: shaSchema }))
+    .min(1)
+    .max(10_000),
   model_profile: safeText,
   model: safeText,
   reasoning_effort: safeText,
@@ -215,7 +203,7 @@ const observationBaseShape = {
   precision: ratio,
   recall: ratio,
   f1: ratio,
-  cumulative_unique_true_positives: z.number().int().nonnegative(),
+  cumulative_unique_true_positives: nonNegativeInteger,
   wall_clock_seconds: finiteNonNegative.nullable(),
   wall_clock_completeness: completenessSchema,
   cost_usd: finiteNonNegative.nullable(),
@@ -235,53 +223,7 @@ const currentObservationSchema = z.strictObject({
   target_publication: targetPublicationSchema
 });
 
-const previousObservationSchema = z.strictObject({
-  schema_version: z.literal(EVAL_HISTORY_PREVIOUS_OBSERVATION_SCHEMA_VERSION),
-  ...observationBaseShape,
-  ground_truth_bug_count: nonNegativeInteger,
-  status: publicationStatusSchema,
-  executed_case_count: positiveInteger,
-  graded_case_count: positiveInteger,
-  publication_url: publicationUrlSchema,
-  target_publication: targetPublicationSchema
-});
-
-const legacyPublicationObservationSchema = z.strictObject({
-  schema_version: z.literal(EVAL_HISTORY_LEGACY_PUBLICATION_OBSERVATION_SCHEMA_VERSION),
-  ...observationBaseShape,
-  ground_truth_bug_count: nonNegativeInteger,
-  status: legacyPublicationStatusSchema,
-  executed_case_count: positiveInteger,
-  graded_case_count: positiveInteger,
-  publication_url: publicationUrlSchema,
-  target_publication: legacyTargetPublicationSchema
-});
-
-const publishedObservationSchema = z.strictObject({
-  schema_version: z.union([
-    z.literal(EVAL_HISTORY_PUBLISHED_OBSERVATION_SCHEMA_VERSION),
-    z.literal(EVAL_HISTORY_LEGACY_OBSERVATION_SCHEMA_VERSION)
-  ]),
-  ...observationBaseShape,
-  status: legacyPublicationStatusSchema,
-  executed_case_count: positiveInteger,
-  graded_case_count: positiveInteger,
-  publication_url: publicationUrlSchema,
-  target_publication: legacyTargetPublicationSchema
-});
-
-const legacyObservationSchema = z.strictObject({
-  schema_version: z.literal(EVAL_HISTORY_LEGACY_OBSERVATION_SCHEMA_VERSION),
-  ...observationBaseShape
-});
-
-const observationSchema = z.union([
-  currentObservationSchema,
-  previousObservationSchema,
-  legacyPublicationObservationSchema,
-  publishedObservationSchema,
-  legacyObservationSchema
-]);
+const observationSchema = currentObservationSchema;
 
 const supersessionSchema = z.strictObject({
   superseded_source_eval_run_id: safeText,
@@ -291,19 +233,15 @@ const supersessionSchema = z.strictObject({
       superseded_cohort_fingerprint: fingerprintSchema,
       replacement_cohort_fingerprint: fingerprintSchema
     })
-    .refine(
-      (transition) => transition.superseded_cohort_fingerprint !== transition.replacement_cohort_fingerprint,
-      "a cohort transition must name distinct superseded and replacement fingerprints"
-    )
     .optional(),
   reason: safeText,
   issue_url: issueUrlSchema
 });
 
-const historySchema = z.strictObject({
+export const evalHistoryZodSchema = z.strictObject({
   schema_version: z.literal(EVAL_HISTORY_SCHEMA_VERSION),
-  supersessions: z.array(supersessionSchema).default([]),
-  observations: z.array(observationSchema)
+  supersessions: z.array(supersessionSchema).max(10_000),
+  observations: z.array(observationSchema).max(100_000)
 });
 
 export const EVAL_HISTORY_CHARTS = [
@@ -337,80 +275,120 @@ export function emptyEvalHistory(): EvalHistory {
 }
 
 export function parseEvalHistory(value: unknown, source = "eval history"): EvalHistory {
-  const parsed = historySchema.safeParse(value);
-  if (!parsed.success) {
+  const canonical = validateEvalJsonSchema(EVAL_HISTORY_SCHEMA_ID, value);
+  if (!canonical.ok) {
     throw new EvalError("EVAL_HISTORY_INVALID", `${source} failed schema validation`, {
-      issues: parsed.error.issues.map((issue) => ({ path: issue.path.join("."), message: issue.message }))
+      schema_id: EVAL_HISTORY_SCHEMA_ID,
+      issues: canonical.issues,
+      truncated: canonical.truncated
     });
   }
-  const history = parsed.data as EvalHistory;
+  const retained = evalHistoryZodSchema.safeParse(value);
+  if (!retained.success) {
+    throw new EvalError("EVAL_HISTORY_SCHEMA_DRIFT", "canonical eval-history schema and retained Zod parser disagree");
+  }
+  const history = retained.data as EvalHistory;
   assertHistoryIntegrity(history);
   return history;
 }
 
 export function readEvalHistory(filePath: string): EvalHistory {
-  if (!fs.existsSync(filePath)) return emptyEvalHistory();
-  let value: unknown;
   try {
-    value = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    fs.lstatSync(filePath);
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") return emptyEvalHistory();
+    throw new EvalError("EVAL_HISTORY_INVALID", `failed to inspect eval history ${filePath}`, {
+      reason: error instanceof Error ? error.message : String(error)
+    });
+  }
+  let bytes: Buffer;
+  try {
+    bytes = readRegularFileSnapshot(filePath, MAX_EVAL_HISTORY_BYTES);
   } catch (error) {
     throw new EvalError("EVAL_HISTORY_INVALID", `failed to read eval history ${filePath}`, {
       reason: error instanceof Error ? error.message : String(error)
     });
   }
-  return parseEvalHistory(value, filePath);
+  return parseEvalHistoryBytes(bytes, filePath);
+}
+
+export function parseEvalHistoryBytes(bytes: Uint8Array, source = "eval history"): EvalHistory {
+  let value: unknown;
+  try {
+    value = parseStrictJsonBytes(bytes, {
+      maxBytes: MAX_EVAL_HISTORY_BYTES,
+      maxDepth: 128,
+      maxItems: 1_000_000,
+      maxProperties: 1_000_000
+    });
+  } catch (error) {
+    throw new EvalError("EVAL_HISTORY_INVALID", `failed to parse eval history ${source}`, {
+      reason: error instanceof Error ? error.message : String(error)
+    });
+  }
+  return parseEvalHistory(value, source);
+}
+
+export interface EvalHistorySemanticIssue {
+  path: string;
+  message: string;
+}
+
+export function evalHistorySemanticIssues(history: EvalHistory): EvalHistorySemanticIssue[] {
+  try {
+    assertHistoryIntegrity(history);
+    return [];
+  } catch (error) {
+    return [{ path: "$", message: error instanceof Error ? error.message : String(error) }];
+  }
 }
 
 function assertHistoryIntegrity(history: EvalHistory): void {
   const byId = new Map<string, string>();
   for (const observation of history.observations) {
+    if (!isValidTimestamp(observation.run_timestamp)) {
+      throw new EvalError("EVAL_HISTORY_INVALID", `observation ${observation.id} has an invalid run timestamp`);
+    }
+    for (const [label, value] of [
+      ["candidate repository", observation.candidate_repository_url],
+      ["publication URL", observation.publication_url],
+      ["target repository", observation.target_publication.repository]
+    ] as const) {
+      if (!isValidAbsoluteUrl(value)) {
+        throw new EvalError("EVAL_HISTORY_INVALID", `observation ${observation.id} has an invalid ${label}`);
+      }
+    }
     assertCompletenessValue(
       observation.wall_clock_seconds,
       observation.wall_clock_completeness,
-      `${observation.id}.wall_clock_seconds`,
-      observation.schema_version === EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION
+      `${observation.id}.wall_clock_seconds`
     );
-    assertCompletenessValue(
-      observation.cost_usd,
-      observation.cost_completeness,
-      `${observation.id}.cost_usd`,
-      observation.schema_version === EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION
-    );
+    assertCompletenessValue(observation.cost_usd, observation.cost_completeness, `${observation.id}.cost_usd`);
     const targetKeys = observation.target_revisions.map((target) => target.target);
     if (new Set(targetKeys).size !== targetKeys.length) {
       throw new EvalError("EVAL_HISTORY_INVALID", `observation ${observation.id} repeats a target revision`);
     }
-    if (
-      observation.ground_truth_bug_count !== undefined &&
-      observation.cumulative_unique_true_positives > observation.ground_truth_bug_count
-    ) {
+    if (observation.cumulative_unique_true_positives > observation.ground_truth_bug_count) {
       throw new EvalError(
         "EVAL_HISTORY_INVALID",
         `observation ${observation.id} finds more unique true positives than its ground truth contains`
       );
     }
-    if (hasPublicationMetadata(observation)) {
-      const targetRevision = observation.target_revisions.find((target) => target.target === observation.target);
-      if (
-        observation.status === undefined ||
-        observation.executed_case_count === undefined ||
-        observation.graded_case_count === undefined ||
-        observation.publication_url === undefined ||
-        observation.target_publication === undefined ||
-        targetRevision === undefined ||
-        observation.target_publication.target !== observation.target ||
-        observation.target_publication.revision !== targetRevision.revision ||
-        observation.target_publication.status !== observation.status ||
-        observation.target_publication.executed_case_count !== observation.executed_case_count ||
-        observation.target_publication.graded_case_count !== observation.graded_case_count ||
-        observation.executed_case_count !== observation.trial_count ||
-        observation.graded_case_count !== observation.trial_count
-      ) {
-        throw new EvalError(
-          "EVAL_HISTORY_INVALID",
-          `observation ${observation.id} has inconsistent publication metadata`
-        );
-      }
+    const targetRevision = observation.target_revisions.find((target) => target.target === observation.target);
+    if (
+      targetRevision === undefined ||
+      observation.target_publication.target !== observation.target ||
+      observation.target_publication.revision !== targetRevision.revision ||
+      observation.target_publication.status !== observation.status ||
+      observation.target_publication.executed_case_count !== observation.executed_case_count ||
+      observation.target_publication.graded_case_count !== observation.graded_case_count ||
+      observation.executed_case_count !== observation.trial_count ||
+      observation.graded_case_count !== observation.trial_count
+    ) {
+      throw new EvalError(
+        "EVAL_HISTORY_INVALID",
+        `observation ${observation.id} has inconsistent publication metadata`
+      );
     }
     const canonical = stableStringify(observation);
     const previous = byId.get(observation.id);
@@ -513,6 +491,13 @@ function assertSupersessionIntegrity(history: EvalHistory): void {
   }
   const supersededSourceRuns = new Set<string>();
   for (const supersession of history.supersessions) {
+    if (
+      supersession.cohort_transition !== undefined &&
+      supersession.cohort_transition.superseded_cohort_fingerprint ===
+        supersession.cohort_transition.replacement_cohort_fingerprint
+    ) {
+      throw new EvalError("EVAL_HISTORY_INVALID", "a cohort transition must name distinct fingerprints");
+    }
     if (supersededSourceRuns.has(supersession.superseded_source_eval_run_id)) {
       throw new EvalError(
         "EVAL_HISTORY_INVALID",
@@ -562,32 +547,10 @@ function assertSupersessionIntegrity(history: EvalHistory): void {
   }
 }
 
-function hasPublicationMetadata(observation: EvalHistoryObservation): boolean {
-  return (
-    observation.schema_version === EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION ||
-    observation.status !== undefined ||
-    observation.executed_case_count !== undefined ||
-    observation.graded_case_count !== undefined ||
-    observation.publication_url !== undefined ||
-    observation.target_publication !== undefined
-  );
-}
-
-function assertCompletenessValue(
-  value: number | null,
-  completeness: EvalHistoryCompleteness,
-  field: string,
-  currentSemantics: boolean
-): void {
+function assertCompletenessValue(value: number | null, completeness: EvalHistoryCompleteness, field: string): void {
   if (completeness.status === "complete") {
     if (value === null || completeness.reasons.length > 0) {
       throw new EvalError("EVAL_HISTORY_INVALID", `${field} must have a value and no reasons when complete`);
-    }
-    return;
-  }
-  if (!currentSemantics) {
-    if (value !== null || completeness.reasons.length === 0) {
-      throw new EvalError("EVAL_HISTORY_INVALID", `${field} must be unavailable with at least one reason`);
     }
     return;
   }
@@ -619,8 +582,8 @@ export interface EvalHistoryGenerationInput {
 
 export function createEvalHistoryObservations(input: EvalHistoryGenerationInput): EvalHistoryObservation[] {
   const provenance = completeProvenance(input.summary);
-  const timestamp = normalizedTimestamp(input.runTimestamp);
-  const repositoryUrl = normalizedRepositoryUrl(input.candidateRepositoryUrl);
+  const timestamp = requiredCanonicalTimestamp(input.runTimestamp);
+  const repositoryUrl = requiredCanonicalRepositoryUrl(input.candidateRepositoryUrl);
   if (!sourceArtifactSchema.safeParse(input.sourceArtifact).success) {
     throw new EvalError("EVAL_HISTORY_SOURCE_INVALID", "source artifact reference must be a safe opaque ID or URL");
   }
@@ -926,11 +889,11 @@ function targetPublicationForRows(
 }
 
 function matrixRowTargetFramework(row: EvalMatrixRow): string | undefined {
-  const workflowInput = recordValue(row.workflow_input);
-  const frameworks = recordValue(workflowInput?.target_frameworks);
-  if (frameworks === undefined || !(row.target_id in frameworks)) return undefined;
-  const value = frameworks?.[row.target_id];
-  if (typeof value !== "string" || value.length === 0) {
+  const workflowInput = row.workflow_input;
+  if (workflowInput === undefined || !isEvalPublicBenchmarkWorkflowInput(workflowInput)) return undefined;
+  const value = workflowInput.target_frameworks[row.target_id];
+  if (value === undefined) return undefined;
+  if (value.length === 0) {
     throw new EvalError("EVAL_HISTORY_LINEAGE_INCOMPLETE", `target framework is invalid for ${row.target_id}`);
   }
   return value;
@@ -1151,26 +1114,17 @@ export function publishEvalRunToHistory(input: PublishEvalHistoryInput): {
   chartPaths: string[];
 } {
   const root = evalRunRoot(input.projectRoot, input.evalRunId);
-  const manifest = jsonFile<{
-    eval_run_id?: string;
-    created_at?: string;
-    suite?: EvalSuiteSpec;
-    provenance?: EvalRunProvenance;
-  }>(path.join(root, "eval.json"));
-  if (manifest.suite === undefined || manifest.created_at === undefined) {
-    throw new EvalError("EVAL_HISTORY_GENERATION_INCOMPLETE", "eval manifest is missing suite or timestamp");
-  }
-  const matrix = jsonFile<EvalMatrixRow[]>(path.join(root, "matrix.json"));
-  const summary = jsonFile<EvalScoreSummary>(path.join(root, "summary.json"));
-  const scores = readJsonLines<EvalFindingScore>(path.join(root, "scores.jsonl"));
+  const manifest = readEvalRunManifest(path.join(root, "eval.json"));
+  const matrix = readEvalMatrix(path.join(root, "matrix.json"));
+  const summary = readEvalScoreSummary(path.join(root, "summary.json"));
+  const scores = readEvalFindingScores(path.join(root, "scores.jsonl"));
   const publicEvalDiagnostics = readOptionalPublicEvalDiagnostics(root);
   if (manifest.eval_run_id !== input.evalRunId || summary.eval_run_id !== input.evalRunId) {
     throw new EvalError("EVAL_HISTORY_GENERATION_INCOMPLETE", "eval artifact IDs do not match the requested run");
   }
   if (
-    manifest.provenance === undefined ||
-    stableStringify(manifest.provenance.candidate) !== stableStringify(summary.provenance?.candidate) ||
-    stableStringify(manifest.provenance.benchmark) !== stableStringify(summary.provenance?.benchmark)
+    stableStringify(manifest.provenance.candidate) !== stableStringify(summary.provenance.candidate) ||
+    stableStringify(manifest.provenance.benchmark) !== stableStringify(summary.provenance.benchmark)
   ) {
     throw new EvalError("EVAL_HISTORY_LINEAGE_INCOMPATIBLE", "run and scoring lineage do not match");
   }
@@ -1226,7 +1180,12 @@ function readOptionalPublicEvalDiagnostics(root: string): unknown | undefined {
       throw new EvalError("EVAL_HISTORY_GENERATION_INCOMPLETE", "public eval diagnostics exceed the size limit");
     }
     try {
-      return JSON.parse(fs.readFileSync(descriptor, "utf8")) as unknown;
+      return parseStrictJsonBytes(fs.readFileSync(descriptor), {
+        maxBytes: MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES,
+        maxDepth: 128,
+        maxItems: 250_000,
+        maxProperties: 250_000
+      });
     } catch (error) {
       throw new EvalError("EVAL_HISTORY_GENERATION_INCOMPLETE", "failed to read public eval diagnostics", {
         reason: error instanceof Error ? error.message : String(error)
@@ -1377,7 +1336,7 @@ function publicVariantScope(variant: EvalMatrixRow["variant"]): Omit<EvalMatrixR
 
 function normalizedPublicationUrl(value: string): string {
   const parsed = publicationUrlSchema.safeParse(value);
-  if (!parsed.success) {
+  if (!parsed.success || !isValidAbsoluteUrl(value)) {
     throw new EvalError("EVAL_HISTORY_SOURCE_INVALID", "publication URL must be a valid public URL");
   }
   return parsed.data;
@@ -1402,10 +1361,21 @@ function matchedGroundTruthByRow(
 ): Map<string, ReadonlySet<string>> {
   const result = new Map<string, Set<string>>(matrix.map((row) => [row.id, new Set<string>()]));
   const evidenceCounts = new Map<string, number>(matrix.map((row) => [row.id, 0]));
+  const rowScoreById = new Map(rowScores.map((score) => [score.row_id, score]));
+  if (rowScoreById.size !== rowScores.length) {
+    throw new EvalError("EVAL_HISTORY_GENERATION_INCOMPLETE", "score summary contains duplicate row identities");
+  }
   for (const score of scores) {
     const matches = result.get(score.row_id);
-    if (matches === undefined) {
+    const rowScore = rowScoreById.get(score.row_id);
+    if (matches === undefined || rowScore === undefined) {
       throw new EvalError("EVAL_HISTORY_GENERATION_INCOMPLETE", `score references unknown row ${score.row_id}`);
+    }
+    if (stableStringify(score.report_authority) !== stableStringify(rowScore.report_authority)) {
+      throw new EvalError(
+        "EVAL_HISTORY_GENERATION_INCOMPLETE",
+        `finding score authority does not match summary authority for row ${score.row_id}`
+      );
     }
     evidenceCounts.set(score.row_id, (evidenceCounts.get(score.row_id) ?? 0) + 1);
     const judge = score.judge_result;
@@ -2627,18 +2597,21 @@ function observationId(evalRunId: string, target: string, variant: string, profi
   return [evalRunId, target, variant, profile].join(":");
 }
 
-function normalizedTimestamp(value: string): string {
-  const timestamp = Date.parse(value);
-  if (!Number.isFinite(timestamp)) throw new EvalError("EVAL_HISTORY_TIMESTAMP_INVALID", "run timestamp is invalid");
-  return new Date(timestamp).toISOString();
+function requiredCanonicalTimestamp(value: string): string {
+  if (!timestampSchema.safeParse(value).success || !isValidTimestamp(value)) {
+    throw new EvalError("EVAL_HISTORY_TIMESTAMP_INVALID", "run timestamp must be a canonical UTC calendar instant");
+  }
+  return value;
 }
 
-function normalizedRepositoryUrl(value: string): string {
-  const normalized = value.replace(/\/$/u, "");
-  if (!githubRepositoryUrl.safeParse(normalized).success) {
-    throw new EvalError("EVAL_HISTORY_REPOSITORY_INVALID", "candidate repository must be a public GitHub URL");
+function requiredCanonicalRepositoryUrl(value: string): string {
+  if (!githubRepositoryUrl.safeParse(value).success || !isValidAbsoluteUrl(value)) {
+    throw new EvalError(
+      "EVAL_HISTORY_REPOSITORY_INVALID",
+      "candidate repository must be a canonical public GitHub URL without a trailing slash"
+    );
   }
-  return normalized;
+  return value;
 }
 
 function mean(values: number[]): number {
@@ -2691,14 +2664,26 @@ function stableStringify(value: unknown): string {
   return JSON.stringify(value);
 }
 
-function recordValue(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
-
 function compareText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function isValidTimestamp(value: string): boolean {
+  const milliseconds = Date.parse(value);
+  return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === value;
+}
+
+function isValidAbsoluteUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol.length > 1 && parsed.hostname.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
 }
 
 function format(value: number): string {

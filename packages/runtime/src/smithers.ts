@@ -7,17 +7,28 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import {
+  assertValidSmithersTaskManifest,
   assertNoSymlinkComponents,
   assertPathInside,
   assertRegularFileInside,
   getNodeArtifactDir,
   getNodeWorkspaceDir,
   invariantPinnedSourceRefExists,
+  parseStrictJsonBytes,
+  readRegularFileSnapshot,
+  readRunPlanDocument,
+  SMITHERS_NODE_STATES,
+  SMITHERS_RUN_STATES,
+  SMITHERS_RUN_STATUSES,
+  SMITHERS_TASK_MANIFEST_SCHEMA_VERSION,
+  SMITHERS_TASK_METADATA_SCHEMA_VERSION as REGISTERED_SMITHERS_TASK_METADATA_SCHEMA_VERSION,
   writeFileDurable,
-  writeJsonDurable,
-  type RunLayout
+  type RunLayout,
+  type SmithersTaskManifestDocument,
+  type SmithersTaskManifestMetadata,
+  type SmithersTaskManifestTask
 } from "@ultrafuzz/artifacts";
-import { resolveExecutionResources, type ResolvedConfig } from "@ultrafuzz/config";
+import { resolveExecutionResources, serializeResolvedConfigJsonBytes, type ResolvedConfig } from "@ultrafuzz/config";
 import { redactSecretsInText, redactSecretsInValue } from "@ultrafuzz/security";
 import type { ExpandedGraph, ExpandedNode, ModelFanoutProvenance } from "@ultrafuzz/topology";
 
@@ -30,6 +41,17 @@ import {
 } from "./pinned-submodules.js";
 import { renderRuntimeTemplate } from "./runtime-template.js";
 import { topologyRuntimeBudgetForTimeout } from "./topology-runtime-budget.js";
+import {
+  CLOUD_EXECUTION_GENERATION_JSON_SCHEMA_ID,
+  CLOUD_EXECUTION_GENERATION_SCHEMA_VERSION,
+  SMITHERS_RESET_NODE_JSON_SCHEMA_ID,
+  SMITHERS_RESET_NODE_SCHEMA_VERSION,
+  SMITHERS_SUBMISSION_JSON_SCHEMA_ID,
+  SMITHERS_SUBMISSION_SCHEMA_VERSION,
+  WORKFLOW_EXECUTION_DEPENDENCIES_JSON_SCHEMA_ID,
+  WORKFLOW_EXECUTION_DEPENDENCIES_SCHEMA_VERSION
+} from "./runtime-contracts.js";
+import { assertRuntimeDocument, parseRuntimeDocumentBytes, writeRuntimeDocument } from "./runtime-document-codec.js";
 import {
   acquireSmithersExecutableAnchor,
   bindSmithersExecutableCapability,
@@ -44,21 +66,28 @@ import {
 } from "./workflow-execution-snapshot-capability.js";
 import {
   assertSmithersPackageManifest,
-  migrateLegacySmithersPackageManifest,
   SMITHERS_ORCHESTRATOR_BIN_PATH,
   SMITHERS_ORCHESTRATOR_VERSION,
   smithersDependencyInstallArgs
 } from "./smithers-package.js";
 import type { RenderedPromptPlan, RuntimeDiagnostic } from "./types.js";
+import {
+  ULTRAFUZZ_SCHEMA_BUNDLE_SHA256_ENV,
+  ULTRAFUZZ_TRUSTED_BIN_ENV,
+  ULTRAFUZZ_VALIDATOR_BUILD_ENV
+} from "./trusted-cli.js";
 import { stableJson } from "./utils.js";
 
 const execFileAsync = promisify(execFile);
 const SMITHERS_CLI_MAX_BUFFER_BYTES = 1024 * 1024 * 128;
+const MAX_PACKAGE_MANAGER_MANIFEST_BYTES = 1024 * 1024;
+const MAX_PACKAGE_MANAGER_MANIFEST_DEPTH = 32;
+const MAX_PACKAGE_MANAGER_MANIFEST_ITEMS = 10_000;
+const MAX_PACKAGE_MANAGER_MANIFEST_PROPERTIES = 10_000;
 const SMITHERS_DEPENDENCY_INSTALL_TIMEOUT_MS = 300_000;
 const STREAM_TERMINATION_GRACE_MS = 5_000;
 const SMITHERS_EVIDENCE_TEXT_LIMIT_CHARACTERS = 1024 * 1024;
 const ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH";
-const WORKFLOW_EXECUTION_DEPENDENCY_MAP_SCHEMA_VERSION = "ultrafuzz.workflow-execution-dependencies.v1" as const;
 const WORKFLOW_EXECUTION_DEPENDENCY_MAP_SNAPSHOT_PATH = "dependencies/manifest.json";
 const WORKFLOW_DIRECT_EXTERNAL_DEPENDENCIES = [
   "@smithers-orchestrator/tool-context",
@@ -972,6 +1001,9 @@ const SMITHERS_BASE_ENVIRONMENT_VARIABLES = new Set([
   "ULTRAFUZZ_CONFIG_PATH",
   "ULTRAFUZZ_MODAL_MODULE",
   "ULTRAFUZZ_RUNTIME_MODULE",
+  ULTRAFUZZ_SCHEMA_BUNDLE_SHA256_ENV,
+  ULTRAFUZZ_TRUSTED_BIN_ENV,
+  ULTRAFUZZ_VALIDATOR_BUILD_ENV,
   ULTRAFUZZ_WORKFLOW_PERSISTED_PATH,
   "USER",
   "USERPROFILE",
@@ -989,24 +1021,36 @@ const SMITHERS_EXECUTION_CONTEXT_ENVIRONMENT_VARIABLES = new Set([
   "SMITHERS_RUN_ID",
   "SMITHERS_SNAPSHOT_SOCK"
 ]);
-const SMITHERS_ACTIVE_RUN_STATES = new Set([
+export type SmithersRunStatus = (typeof SMITHERS_RUN_STATUSES)[number];
+export type SmithersRunState = Exclude<(typeof SMITHERS_RUN_STATES)[number], "unknown">;
+export type SmithersNodeState = (typeof SMITHERS_NODE_STATES)[number];
+
+export interface CurrentSmithersInspectNode {
+  nodeId: string;
+  state: SmithersNodeState;
+  attempt: number;
+  label: string;
+}
+
+export interface CurrentSmithersInspect {
+  runStatus: SmithersRunStatus;
+  runState: SmithersRunState;
+  nodes: CurrentSmithersInspectNode[];
+  failedChildKeys: string[];
+}
+
+const SMITHERS_ACTIVE_RUN_STATES = new Set<SmithersRunState>([
   "running",
-  "in-progress",
-  "started",
-  "retrying",
-  "queued",
   "waiting-approval",
   "waiting-event",
-  "waiting-timer"
+  "waiting-timer",
+  "waiting-quota",
+  "recovering"
 ]);
 
-// `smithers up` exits 4 with code RUN_EXISTS when a non-resume submission names an existing run.
-const SMITHERS_RUN_EXISTS_EXIT_CODE = 4;
-
-export const SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION = "ultrafuzz.smithers.workflow.v1" as const;
-export const SMITHERS_TASK_METADATA_SCHEMA_VERSION = "ultrafuzz.smithers.task.v1" as const;
-export const SMITHERS_SUBMISSION_SCHEMA_VERSION = "ultrafuzz.smithers.submission.v1" as const;
-export const SMITHERS_RESET_NODE_MARKER_SCHEMA_VERSION = "ultrafuzz.smithers.reset-node.v1" as const;
+export const SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION = SMITHERS_TASK_MANIFEST_SCHEMA_VERSION;
+export const SMITHERS_TASK_METADATA_SCHEMA_VERSION = REGISTERED_SMITHERS_TASK_METADATA_SCHEMA_VERSION;
+export { SMITHERS_RESET_NODE_SCHEMA_VERSION, SMITHERS_SUBMISSION_SCHEMA_VERSION } from "./runtime-contracts.js";
 
 export interface SmithersCompileInput {
   config: ResolvedConfig;
@@ -1028,115 +1072,9 @@ export interface NodeAttemptProvenance {
   model?: ModelFanoutProvenance;
 }
 
-export interface CompiledSmithersTask {
-  attemptId: string;
-  concreteNodeId: string;
-  logicalNodeId: string;
-  smithersNodeId: string;
-  verifierSmithersNodeId: string;
-  agentRef: string;
-  modelName?: string;
-  reasoningEffort?: string;
-  dependencies: readonly string[];
-  dependencySmithersNodeIds: readonly string[];
-  timeoutMs: number;
-  heartbeatTimeoutMs: number;
-  retries: number;
-  retryPolicy: {
-    backoff: "exponential";
-    initialDelayMs: number;
-    maxDelayMs: number;
-  };
-  workspacePath: string;
-  artifactDir: string;
-  dependencyArtifactDirs: readonly string[];
-  renderedPromptPath?: string;
-  execution: {
-    mode: "local" | "cloud";
-    provider?: "modal";
-    resources: {
-      cpu: number;
-      memoryMiB: number;
-      timeoutSeconds: number;
-    };
-    modal?: {
-      app: string;
-      image: string;
-      region?: string;
-      credentialEnv: string[];
-    };
-    agentCredentialEnv: string[];
-  };
-  metadata: SmithersTaskMetadata;
-}
+export type CompiledSmithersTask = SmithersTaskManifestTask;
 
-export interface SmithersTaskMetadata {
-  schemaVersion: typeof SMITHERS_TASK_METADATA_SCHEMA_VERSION;
-  run: {
-    ultrafuzzRunId: string;
-    smithersWorkflowName: string;
-    graphVersion: string;
-    topologyVersion: number;
-  };
-  node: {
-    concreteNodeId: string;
-    logicalNodeId: string;
-    attemptId: string;
-    label: string;
-    kind: string;
-    role?: string;
-    promptPath?: string;
-    group?: string;
-  };
-  dependencies: {
-    concreteNodeIds: readonly string[];
-    attemptIds: readonly string[];
-    smithersNodeIds: readonly string[];
-  };
-  loop: {
-    index: number;
-    count: number;
-    mode: string;
-    attemptIndex: number;
-  };
-  model?: {
-    profileId: string;
-    agentRef: string;
-    modelName?: string;
-    reasoningEffort?: string;
-    modelIndex: number;
-    attemptIndex: number;
-  };
-  workspace: {
-    primitive: "worktree";
-    path: string;
-    repoPath: string;
-    trustModel: string;
-  };
-  artifacts: {
-    dir: string;
-    outputs: ExpandedNode["outputs"];
-    manifestPath: string;
-  };
-  retryPolicy: {
-    maxAttempts: number;
-    smithersRetries: number;
-  };
-  timeout: {
-    milliseconds: number;
-    seconds: number;
-    heartbeatTimeoutMs: number;
-  };
-  execution: {
-    mode: "local" | "cloud";
-    provider?: "modal";
-    resources: {
-      cpu: number;
-      memoryMiB: number;
-      timeoutSeconds: number;
-    };
-  };
-}
+export type SmithersTaskMetadata = SmithersTaskManifestMetadata;
 
 export interface CompiledSmithersWorkflow {
   schemaVersion: typeof SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION;
@@ -1232,6 +1170,11 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
   const projectRoot = path.resolve(input.projectRoot ?? inferProjectRootFromRunLayout(input.runLayout));
   const workflowName = input.workflowName ?? `ultrafuzz-${input.runLayout.runId}`;
   const smithersRunId = `ultrafuzz-${input.runLayout.runId}`;
+  if (!isCompatibleSmithersRunId(smithersRunId)) {
+    throw new Error(
+      `run ID ${JSON.stringify(input.runLayout.runId)} does not produce a current Smithers run ID matching ^[a-z0-9_-]{1,64}$`
+    );
+  }
   const agenticAttemptsByNodeId = new Map<string, string[]>();
   const attemptsByNodeId = new Map<string, string[]>();
   for (const node of input.graph.nodes.filter((candidate) => candidate.kind !== "meta")) {
@@ -1247,7 +1190,7 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     );
   }
   const renderedByAttempt = new Map(
-    input.renderedPrompts.map((prompt) => [prompt.attempt_id ?? prompt.node_id, prompt.rendered_prompt_path])
+    input.renderedPrompts.map((prompt) => [prompt.attempt_id, prompt.rendered_prompt_path])
   );
   const tasks = input.graph.nodes.flatMap((node) =>
     nodeAttemptsFor(node)
@@ -1277,6 +1220,7 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
   const expandedGraphPath = path.join(smithersDir, "expanded-graph.json");
   const configPath = path.join(smithersDir, "config.fingerprint-input");
   const resolvedConfigPath = path.join(smithersDir, "resolved-config.json");
+  const resolvedConfigBytes = serializeResolvedConfigJsonBytes(input.config);
   const workflowPath = path.join(
     projectRoot,
     ".smithers",
@@ -1286,10 +1230,13 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
   const inputPath = path.join(smithersDir, "input.json");
   const tasksPath = path.join(smithersDir, "tasks.json");
   const logsDir = path.join(smithersDir, "logs");
-  const pinnedSubmodules =
-    tasks.some((task) => task.execution.mode === "local") && invariantPinnedSourceRefExists(projectRoot)
-      ? pinnedSubmoduleExpectationForProject(projectRoot)
-      : undefined;
+  // Cloud handoffs seal the same pinned dependency bytes as local runs, so the
+  // expectation is computed for every execution mode. Every task worktree is
+  // created locally, so Git's shared worktree-config prerequisite is enabled
+  // whenever a pinned expectation exists.
+  const pinnedSubmodules = invariantPinnedSourceRefExists(projectRoot)
+    ? pinnedSubmoduleExpectationForProject(projectRoot)
+    : undefined;
   enablePinnedSubmoduleWorktreeConfig(projectRoot, pinnedSubmodules);
   const compiled: CompiledSmithersWorkflow = {
     schemaVersion: SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION,
@@ -1321,27 +1268,20 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     stableJson(input.config),
     "workflow config fingerprint input"
   );
-  writePreparedWorkflowFile(
-    input.runLayout.root,
-    resolvedConfigPath,
-    `${JSON.stringify(input.config, null, 2)}\n`,
-    "resolved workflow config"
-  );
+  writePreparedWorkflowFile(input.runLayout.root, resolvedConfigPath, resolvedConfigBytes, "resolved workflow config");
+  const taskManifest: SmithersTaskManifestDocument = {
+    schema_version: SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION,
+    run_id: input.runLayout.runId,
+    smithers_run_id: smithersRunId,
+    workflow_name: workflowName,
+    pinned_submodules: pinnedSubmodules ?? null,
+    tasks
+  };
+  assertValidSmithersTaskManifest(taskManifest);
   writePreparedWorkflowFile(
     input.runLayout.root,
     tasksPath,
-    `${JSON.stringify(
-      {
-        schema_version: SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION,
-        run_id: input.runLayout.runId,
-        smithers_run_id: smithersRunId,
-        workflow_name: workflowName,
-        pinned_submodules: pinnedSubmodules ?? null,
-        tasks
-      },
-      null,
-      2
-    )}\n`,
+    `${JSON.stringify(taskManifest, null, 2)}\n`,
     "workflow task manifest"
   );
   writePreparedWorkflowFile(
@@ -1354,7 +1294,12 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     )}\n`,
     "workflow input"
   );
-  writePreparedWorkflowFile(projectRoot, workflowPath, renderWorkflowSource(compiled), "generated Smithers workflow");
+  writePreparedWorkflowFile(
+    projectRoot,
+    workflowPath,
+    renderWorkflowSource(compiled, input.config),
+    "generated Smithers workflow"
+  );
   writePreparedWorkflowFile(
     input.runLayout.root,
     evidenceWorkflowPath,
@@ -1410,10 +1355,7 @@ export async function smithersExecutionControlFiles(
 
   const planPath = path.join(layout.root, "plan.json");
   add(planPath, "controls/plan.json");
-  const plan = JSON.parse(fs.readFileSync(planPath, "utf8")) as { run_id?: unknown; rendered_prompts?: unknown };
-  if (plan.run_id !== layout.runId || !Array.isArray(plan.rendered_prompts)) {
-    throw new Error("persisted run plan cannot define the workflow execution closure");
-  }
+  const plan = readRunPlanDocument(planPath, layout.runId);
   const plannedPrompts = new Map<string, Record<string, unknown>>();
   for (const value of plan.rendered_prompts) {
     if (isObjectRecord(value) && typeof value.attempt_id === "string") plannedPrompts.set(value.attempt_id, value);
@@ -1500,7 +1442,12 @@ export async function smithersExecutionControlFiles(
     add
   });
   const dependencyMapPath = path.join(layout.root, "smithers", "execution-dependencies.json");
-  writeFileDurable(dependencyMapPath, `${stableWorkflowDependencyJson(dependencyMap)}\n`);
+  const validatedDependencyMap = assertRuntimeDocument(
+    WORKFLOW_EXECUTION_DEPENDENCIES_JSON_SCHEMA_ID,
+    dependencyMap,
+    "workflow execution dependency map"
+  );
+  writeFileDurable(dependencyMapPath, `${stableWorkflowDependencyJson(validatedDependencyMap)}\n`);
   add(dependencyMapPath, WORKFLOW_EXECUTION_DEPENDENCY_MAP_SNAPSHOT_PATH);
   return [...files.values()].sort((left, right) =>
     compareWorkflowExecutionStrings(left.snapshotPath, right.snapshotPath)
@@ -1508,13 +1455,13 @@ export async function smithersExecutionControlFiles(
 }
 
 interface WorkflowPackageManifest {
-  name?: unknown;
-  version?: unknown;
-  bin?: unknown;
-  dependencies?: unknown;
-  optionalDependencies?: unknown;
-  peerDependencies?: unknown;
-  peerDependenciesMeta?: unknown;
+  name?: string;
+  version?: string;
+  bin?: string | Readonly<Record<string, string>>;
+  dependencies?: Readonly<Record<string, string>>;
+  optionalDependencies?: Readonly<Record<string, string>>;
+  peerDependencies?: Readonly<Record<string, string>>;
+  peerDependenciesMeta?: Readonly<Record<string, Readonly<{ optional?: boolean }>>>;
 }
 
 interface WorkflowExecutionModule {
@@ -1553,6 +1500,9 @@ function collectWorkflowExecutionDependencies(input: {
   const rootPackageJson = path.join(smithersRoot, "package.json");
   const rootManifest = fs.existsSync(rootPackageJson) ? readWorkflowPackageManifest(rootPackageJson) : {};
   if (fs.existsSync(rootPackageJson)) input.add(rootPackageJson, "dependencies/root-package.json");
+  // An explicit local runner replaces only the root Smithers dependency set.
+  // Module issuers still need their external runtime dependencies in the
+  // sealed closure because the runner loads those modules from the snapshot.
   const rootDependencies = input.externalRunner
     ? []
     : [...new Set([...requiredWorkflowDependencies(rootManifest), ...WORKFLOW_DIRECT_EXTERNAL_DEPENDENCIES])].sort();
@@ -1574,7 +1524,6 @@ function collectWorkflowExecutionDependencies(input: {
         dependencies[dependency.name] = module.id;
         continue;
       }
-      if (input.externalRunner) continue;
       const dependencyRoot = resolveWorkflowPackageDependency(issuer.root, dependency.name);
       if (dependencyRoot === undefined) {
         if (dependency.optional) continue;
@@ -1633,7 +1582,7 @@ function collectWorkflowExecutionDependencies(input: {
     executablePaths.add(smithersBin);
   }
   return {
-    schema_version: WORKFLOW_EXECUTION_DEPENDENCY_MAP_SCHEMA_VERSION,
+    schema_version: WORKFLOW_EXECUTION_DEPENDENCIES_SCHEMA_VERSION,
     modules: modules.map((module) => ({ id: module.id, name: module.name, snapshot_path: module.snapshotPath })),
     packages: packages.map((entry) => ({
       id: entry.id,
@@ -1648,9 +1597,16 @@ function collectWorkflowExecutionDependencies(input: {
 }
 
 function readWorkflowPackageManifest(packageJsonPath: string): WorkflowPackageManifest {
-  const value = JSON.parse(fs.readFileSync(packageJsonPath, "utf8")) as unknown;
-  if (!isObjectRecord(value)) throw new Error(`workflow package manifest is invalid: ${packageJsonPath}`);
-  return value;
+  const envelope = readPackageManagerOwnedManifestEnvelope(packageJsonPath, "workflow package manifest");
+  return {
+    ...projectOptionalPackageManifestString(envelope, "name", packageJsonPath),
+    ...projectOptionalPackageManifestString(envelope, "version", packageJsonPath),
+    ...projectOptionalPackageManifestBin(envelope, packageJsonPath),
+    ...projectOptionalPackageManifestStringMap(envelope, "dependencies", packageJsonPath),
+    ...projectOptionalPackageManifestStringMap(envelope, "optionalDependencies", packageJsonPath),
+    ...projectOptionalPackageManifestStringMap(envelope, "peerDependencies", packageJsonPath),
+    ...projectOptionalPackageManifestPeerMetadata(envelope, packageJsonPath)
+  };
 }
 
 function requiredWorkflowDependencies(manifest: WorkflowPackageManifest): string[] {
@@ -1783,7 +1739,9 @@ function smithersInputDocument(
 ): Record<string, unknown> {
   return {
     schema_version: SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION,
-    run_id: compiled.runId,
+    // The workflow runner owns `run_id` in its input table, so the Ultrafuzz run
+    // identity this envelope is bound to travels under its own key.
+    ultrafuzz_run_id: compiled.runId,
     ...(operatorPrompt ? { operator_prompt: operatorPrompt } : {}),
     ...(operatorInput !== undefined ? { operator_input: operatorInput } : {}),
     tasks: compiled.tasks.map((task) => ({
@@ -1826,14 +1784,19 @@ export async function submitSmithersWorkflow(input: SubmitSmithersInput): Promis
     environmentVariableNames: input.environmentVariableNames,
     keepWorkspaces: input.keepWorkspaces
   });
-  writeJsonDurable(path.join(path.dirname(input.compiled.inputPath), "submission.json"), {
-    schema_version: SMITHERS_SUBMISSION_SCHEMA_VERSION,
-    smithers_run_id: input.compiled.smithersRunId,
-    command: displayCommand,
-    stdout: redactedEvidenceText(stdout),
-    stderr: redactedEvidenceText(stderr),
-    submitted_at: new Date().toISOString()
-  });
+  writeRuntimeDocument(
+    path.join(path.dirname(input.compiled.inputPath), "submission.json"),
+    SMITHERS_SUBMISSION_JSON_SCHEMA_ID,
+    {
+      schema_version: SMITHERS_SUBMISSION_SCHEMA_VERSION,
+      smithers_run_id: input.compiled.smithersRunId,
+      command: displayCommand,
+      stdout: redactedEvidenceText(stdout),
+      stderr: redactedEvidenceText(stderr),
+      submitted_at: new Date().toISOString()
+    },
+    "Smithers submission evidence"
+  );
   return {
     smithersRunId: input.compiled.smithersRunId,
     command: displayCommand,
@@ -1848,14 +1811,19 @@ export async function requestSmithersPause(input: {
   env?: Record<string, string | undefined>;
 }): Promise<SmithersPauseResult> {
   const result = await execSmithersCli({
-    args: ["pause", input.smithersRunId, "--format", "json"],
+    // `--full-output` is what makes the runner emit the `{ok, data, meta}`
+    // envelope this result is read as.
+    args: ["pause", input.smithersRunId, "--format", "json", "--full-output"],
     projectRoot: input.projectRoot,
     env: input.env,
     acceptedExitCodes: [2]
   });
-  const reportedStatus = firstStringField(jsonField(result.stdout).json, ["status"]);
-  const status = result.exitCode === 0 && reportedStatus === "paused" ? "paused" : "pause-requested";
-  return { ...result, status };
+  const payload = commandPayload(jsonField(result.stdout).json);
+  const reportedStatus = payload?.status;
+  if (reportedStatus !== "paused" && reportedStatus !== "pause-requested") {
+    throw new Error("workflow runner pause did not return the current JSON status contract");
+  }
+  return { ...result, status: reportedStatus };
 }
 
 export async function requestSmithersCancel(input: {
@@ -1868,7 +1836,7 @@ export async function requestSmithersCancel(input: {
   // a failure: rerunning `cancel` to confirm an in-flight request must converge
   // rather than error.
   const result = await execSmithersCli({
-    args: ["cancel", input.smithersRunId, "--format", "json"],
+    args: ["cancel", input.smithersRunId, "--format", "json", "--full-output"],
     projectRoot: input.projectRoot,
     env: input.env,
     acceptedExitCodes: [2, 4]
@@ -1879,19 +1847,17 @@ export async function requestSmithersCancel(input: {
   if (result.exitCode === 4) {
     return { ...result, status: "cancelled", reportedStatus: "already-terminal" };
   }
-  const reportedStatus = firstStringField(commandPayload(jsonField(result.stdout).json), ["status"]);
-  // The engine reports `cancelled`; Ultrafuzz keeps `cancel-requested` until a
-  // confirmed terminal cancellation so a durable request never looks finished.
-  const status = isConfirmedCancelStatus(reportedStatus) ? "cancelled" : "cancel-requested";
-  return { ...result, status, ...(reportedStatus === undefined ? {} : { reportedStatus }) };
+  const payload = commandPayload(jsonField(result.stdout).json);
+  const reportedStatus = payload?.status;
+  if (reportedStatus !== "cancelled" && reportedStatus !== "cancel-requested") {
+    throw new Error("workflow runner cancel did not return the current JSON status contract");
+  }
+  return { ...result, status: reportedStatus, reportedStatus };
 }
 
 function smithersStdoutHasErrorCode(stdout: string, code: string): boolean {
-  return jsonHasErrorCode(jsonField(stdout).json, code) || stdout.includes(code);
-}
-
-function isConfirmedCancelStatus(value: string | undefined): boolean {
-  return value === "cancelled" || value === "canceled";
+  const parsed = jsonField(stdout).json;
+  return isObjectRecord(parsed) && parsed.ok === false && isObjectRecord(parsed.error) && parsed.error.code === code;
 }
 
 /**
@@ -2006,7 +1972,7 @@ export async function streamSmithersCommand(input: {
         });
       });
       reader.on("line", (line) => {
-        if (truncated || line.trim().length === 0) {
+        if (truncated) {
           return;
         }
         lines += 1;
@@ -2078,14 +2044,14 @@ export function inspectSmithersInstallation(projectRoot: string): SmithersInstal
   let installedBinTarget: string | null = null;
   try {
     const packageJson = path.join(resolveInstalledSmithersPackageRoot(resolvedRoot), "package.json");
-    const metadata = JSON.parse(fs.readFileSync(packageJson, "utf8")) as unknown;
-    if (isObjectRecord(metadata)) {
-      installedVersion = typeof metadata.version === "string" ? metadata.version : null;
-      const bin = metadata.bin;
-      installedBinTarget = isObjectRecord(bin) && typeof bin.smithers === "string" ? bin.smithers : null;
-    }
+    const metadata = readPackageManagerOwnedManifestEnvelope(packageJson, "installed Smithers package manifest");
+    const candidateVersion = optionalPackageManifestString(metadata, "version", packageJson) ?? null;
+    const bin = optionalPackageManifestBin(metadata, packageJson);
+    const candidateBinTarget = typeof bin === "object" && bin !== null ? (bin.smithers ?? null) : null;
+    installedVersion = candidateVersion;
+    installedBinTarget = candidateBinTarget;
   } catch {
-    installedVersion = null;
+    // The detailed layout error below reports malformed or missing manifests.
   }
   return {
     bundled_version: SMITHERS_ORCHESTRATOR_VERSION,
@@ -2168,10 +2134,10 @@ function patchPosture(sourcePath: string, patched: string, patchable: string): S
 }
 
 export function commandPayload(value: unknown): Record<string, unknown> | undefined {
-  if (!isObjectRecord(value)) {
+  if (!isObjectRecord(value) || value.ok !== true || !isObjectRecord(value.data)) {
     return undefined;
   }
-  return isObjectRecord(value.data) ? value.data : value;
+  return value.data;
 }
 
 export async function runSmithersLifecycleCommand(input: {
@@ -2232,11 +2198,11 @@ export async function runSmithersLifecycleCommand(input: {
   let preResumeStderr = "";
   if (input.action === "resume" && input.relaunchPaths !== undefined) {
     const inspection = await runSmithersInspectionCommand({
-      args: ["inspect", input.smithersRunId, "--format", "json"],
+      args: ["inspect", input.smithersRunId, "--format", "json", "--full-output"],
       projectRoot: input.projectRoot,
       env: input.env
     });
-    if (smithersSnapshotHasErrorCode(inspection, "RUN_NOT_FOUND") || smithersSnapshotHasMissingRunHistory(inspection)) {
+    if (smithersSnapshotHasErrorCode(inspection, "RUN_NOT_FOUND")) {
       const recoveryLogDirArgs = workflowLogDirArgs();
       const inputJson = workflowRelaunchInputJson();
       const recoveryCommand = [
@@ -2262,15 +2228,20 @@ export async function runSmithersLifecycleCommand(input: {
         environmentVariableNames: input.environmentVariableNames,
         keepWorkspaces: input.keepWorkspaces
       });
-      writeJsonDurable(path.join(path.dirname(input.relaunchPaths.inputPath), "recovery-submission.json"), {
-        schema_version: SMITHERS_SUBMISSION_SCHEMA_VERSION,
-        smithers_run_id: input.smithersRunId,
-        recovery: "missing-workflow-run",
-        command: recoveryResult.command,
-        stdout: redactedEvidenceText(recoveryResult.stdout),
-        stderr: redactedEvidenceText(recoveryResult.stderr),
-        submitted_at: new Date().toISOString()
-      });
+      writeRuntimeDocument(
+        path.join(path.dirname(input.relaunchPaths.inputPath), "recovery-submission.json"),
+        SMITHERS_SUBMISSION_JSON_SCHEMA_ID,
+        {
+          schema_version: SMITHERS_SUBMISSION_SCHEMA_VERSION,
+          smithers_run_id: input.smithersRunId,
+          recovery: "missing-workflow-run",
+          command: recoveryResult.command,
+          stdout: redactedEvidenceText(recoveryResult.stdout),
+          stderr: redactedEvidenceText(recoveryResult.stderr),
+          submitted_at: new Date().toISOString()
+        },
+        "Smithers recovery submission evidence"
+      );
       return { ...recoveryResult, recoveredMissingRun: true };
     }
     if (!inspection.ok) {
@@ -2278,7 +2249,8 @@ export async function runSmithersLifecycleCommand(input: {
         `workflow inspection failed before resume: ${inspection.error ?? (inspection.stderr.trim() || "unknown error")}`
       );
     }
-    if (smithersSnapshotRunStateIsActive(inspection) && input.resetNode === undefined && input.force !== true) {
+    const currentInspection = parseCurrentSmithersInspect(inspection, input.smithersRunId);
+    if (smithersRunStateIsActive(currentInspection) && input.resetNode === undefined && input.force !== true) {
       return {
         stdout: inspection.stdout,
         stderr: inspection.stderr,
@@ -2287,8 +2259,8 @@ export async function runSmithersLifecycleCommand(input: {
       };
     }
     const failedTasks =
-      input.retryFailed === true && !smithersSnapshotRunStateIsActive(inspection)
-        ? smithersSnapshotFailedTasks(inspection)
+      input.retryFailed === true && !smithersRunStateIsActive(currentInspection)
+        ? smithersFailedTasks(currentInspection)
         : [];
     if (failedTasks.length > 0) {
       const resetStderr: string[] = [];
@@ -2320,78 +2292,14 @@ export async function runSmithersLifecycleCommand(input: {
     if (
       failedTasks.length === 0 &&
       input.retryFailed === true &&
-      (smithersSnapshotRunStateIsFailed(inspection) || smithersSnapshotRunStateIsStale(inspection))
+      input.resetNode === undefined &&
+      (currentInspection.runState === "failed" || currentInspection.runState === "stale") &&
+      smithersSnapshotHasErrorCode(inspection, "WORKFLOW_RENDER_FAILED") &&
+      !isCompatibleSmithersRunId(input.smithersRunId)
     ) {
-      // A rewind to the latest timeline frame is a no-op upstream: `jumpToFrame` returns early
-      // without touching the run row or any node, and `up --resume` already un-terminalizes a
-      // failed run on its own. So the only recovery worth issuing here is the replacement lineage
-      // for a run id the backend can no longer resume in place.
-      if (
-        input.resetNode === undefined &&
-        smithersSnapshotHasErrorCode(inspection, "WORKFLOW_RENDER_FAILED") &&
-        !isCompatibleSmithersRunId(input.smithersRunId)
-      ) {
-        const relaunchPaths = input.relaunchPaths;
-        const replacementLogDirArgs = workflowLogDirArgs();
-        const replacementRunId = compatibleRecoveryRunId(input.smithersRunId);
-        const replacementInputJson = workflowRelaunchInputJson();
-        const replacementArgs = (adoptExisting: boolean) => [
-          "up",
-          input.workflowPath,
-          "--detach",
-          ...(adoptExisting ? ["--resume", replacementRunId] : []),
-          "--run-id",
-          replacementRunId,
-          ...(adoptExisting && input.force === true ? ["--force"] : []),
-          ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
-          "--root",
-          input.projectRoot,
-          ...replacementLogDirArgs,
-          "--input",
-          replacementInputJson,
-          "--format",
-          "json",
-          ...supervisorCommandArgs(input.controllerLeaseSeconds)
-        ];
-        let recovery = await execSmithersCli({
-          args: replacementArgs(false),
-          projectRoot: input.projectRoot,
-          env: input.env,
-          environmentVariableNames: input.environmentVariableNames,
-          keepWorkspaces: input.keepWorkspaces,
-          acceptedExitCodes: [SMITHERS_RUN_EXISTS_EXIT_CODE]
-        });
-        let appliedRecovery = "incompatible-workflow-run-id";
-        if (recovery.exitCode !== 0) {
-          if (!smithersOutputRejectsExistingRun(recovery)) {
-            throw new Error(
-              `replacement workflow lineage submission failed: ${recovery.stderr.trim() || recovery.stdout.trim() || `exit ${recovery.exitCode}`}`
-            );
-          }
-          // An earlier recovery generation created this replacement run and then died before the
-          // new lineage was persisted, so the durable run still points at the old id and every
-          // later generation recomputes the same replacement id. Adopt the orphan by resuming it
-          // instead of wedging on RUN_EXISTS forever.
-          recovery = await execSmithersCli({
-            args: replacementArgs(true),
-            projectRoot: input.projectRoot,
-            env: input.env,
-            environmentVariableNames: input.environmentVariableNames,
-            keepWorkspaces: input.keepWorkspaces
-          });
-          appliedRecovery = "incompatible-workflow-run-id-adopted";
-        }
-        writeJsonDurable(path.join(path.dirname(relaunchPaths.inputPath), "recovery-submission.json"), {
-          schema_version: SMITHERS_SUBMISSION_SCHEMA_VERSION,
-          smithers_run_id: replacementRunId,
-          recovery: appliedRecovery,
-          command: recovery.command,
-          stdout: redactedEvidenceText(recovery.stdout),
-          stderr: redactedEvidenceText(recovery.stderr),
-          submitted_at: new Date().toISOString()
-        });
-        return { ...recovery, workflowRunId: replacementRunId };
-      }
+      throw new Error(
+        `persisted workflow run ID ${JSON.stringify(input.smithersRunId)} is unsupported by the pinned workflow runner; historical runs are not converted or transferred`
+      );
     }
   }
 
@@ -2423,18 +2331,28 @@ export async function runSmithersLifecycleCommand(input: {
       resetStderr = resetResult.stderr;
       if (resetMarkerPath !== undefined) {
         const appliedAt = new Date().toISOString();
-        writeJsonDurable(resetMarkerPath, {
-          schema_version: SMITHERS_RESET_NODE_MARKER_SCHEMA_VERSION,
-          smithers_run_id: input.smithersRunId,
-          node_id: input.resetNode,
-          applied_at: appliedAt
-        });
-        writeJsonDurable(path.join(path.dirname(input.relaunchPaths!.inputPath), "cloud-execution-generation.json"), {
-          schema_version: "ultrafuzz.cloud.execution-generation.v1",
-          generation: crypto.randomUUID(),
-          reset_node: input.resetNode,
-          applied_at: appliedAt
-        });
+        writeRuntimeDocument(
+          resetMarkerPath,
+          SMITHERS_RESET_NODE_JSON_SCHEMA_ID,
+          {
+            schema_version: SMITHERS_RESET_NODE_SCHEMA_VERSION,
+            smithers_run_id: input.smithersRunId,
+            node_id: input.resetNode,
+            applied_at: appliedAt
+          },
+          "Smithers reset-node marker"
+        );
+        writeRuntimeDocument(
+          path.join(path.dirname(input.relaunchPaths!.inputPath), "cloud-execution-generation.json"),
+          CLOUD_EXECUTION_GENERATION_JSON_SCHEMA_ID,
+          {
+            schema_version: CLOUD_EXECUTION_GENERATION_SCHEMA_VERSION,
+            generation: crypto.randomUUID(),
+            reset_node: input.resetNode,
+            applied_at: appliedAt
+          },
+          "cloud execution generation evidence"
+        );
       }
     }
     let resumeResult: Awaited<ReturnType<typeof execSmithersCli>>;
@@ -2489,7 +2407,8 @@ export async function runSmithersLifecycleCommand(input: {
       ...(input.resetNode === undefined ? [] : ["--reset-node", input.resetNode]),
       ...(input.label === undefined ? [] : ["--label", input.label]),
       "--format",
-      "json"
+      "json",
+      "--full-output"
     ];
     const forkResult = await execSmithersCli({
       args: forkCommand,
@@ -2550,8 +2469,17 @@ export async function runSmithersLifecycleCommand(input: {
           ...supervisorCommandArgs(input.controllerLeaseSeconds)
         ]
       : input.action === "fork"
-        ? [input.action, input.workflowPath, "--run-id", input.smithersRunId, "--run", "--format", "json"]
-        : [input.action, input.workflowPath, "--run-id", input.smithersRunId, "--format", "json"];
+        ? [
+            input.action,
+            input.workflowPath,
+            "--run-id",
+            input.smithersRunId,
+            "--run",
+            "--format",
+            "json",
+            "--full-output"
+          ]
+        : [input.action, input.workflowPath, "--run-id", input.smithersRunId, "--format", "json", "--full-output"];
   const result = await execSmithersCli({
     args: command,
     projectRoot: input.projectRoot,
@@ -2606,98 +2534,325 @@ export async function runSmithersInspectionCommand(input: {
 }
 
 function smithersSnapshotHasErrorCode(snapshot: SmithersCommandSnapshot, code: string): boolean {
-  return (
-    jsonHasErrorCode(snapshot.json, code) ||
-    [snapshot.stdout, snapshot.stderr, snapshot.error ?? ""].some((value) => value.includes(code))
-  );
-}
-
-function smithersSnapshotHasMissingRunHistory(snapshot: SmithersCommandSnapshot): boolean {
-  const evidence = [
-    snapshot.stdout,
-    snapshot.stderr,
-    snapshot.error ?? "",
-    snapshot.json === undefined ? "" : JSON.stringify(snapshot.json)
-  ].join("\n");
-  return evidence.includes("No Smithers run history found") || evidence.includes("No workflow run history found");
-}
-
-function smithersSnapshotRunState(snapshot: SmithersCommandSnapshot): string | undefined {
-  const parsed = isObjectRecord(snapshot.json) ? snapshot.json : {};
-  const data = isObjectRecord(parsed.data) ? parsed.data : parsed;
-  const runState = isObjectRecord(data.runState) ? data.runState.state : undefined;
-  if (typeof runState === "string") {
-    return runState;
+  if (!isObjectRecord(snapshot.json)) return false;
+  if (snapshot.json.ok === false && isObjectRecord(snapshot.json.error)) {
+    return snapshot.json.error.code === code;
   }
-  const runStatus = isObjectRecord(data.run) ? data.run.status : undefined;
-  if (typeof runStatus === "string") {
-    return runStatus;
-  }
-  // Some run-state and task-output snapshot variants report the state at the top level of `data`
-  // with no `runState`/`run` wrapper; without this fallback a terminal failed run reads as unknown
-  // and resume proceeds in place.
-  return [data.state, data.status].find((value): value is string => typeof value === "string");
+  if (snapshot.json.ok !== true || !isObjectRecord(snapshot.json.data)) return false;
+  const run = snapshot.json.data.run;
+  return isObjectRecord(run) && isObjectRecord(run.error) && run.error.code === code;
 }
 
-function smithersSnapshotRunStateIsActive(snapshot: SmithersCommandSnapshot): boolean {
-  const state = smithersSnapshotRunState(snapshot);
-  return state !== undefined && SMITHERS_ACTIVE_RUN_STATES.has(state.toLowerCase());
+function smithersRunStateIsActive(inspect: CurrentSmithersInspect): boolean {
+  return SMITHERS_ACTIVE_RUN_STATES.has(inspect.runState);
 }
 
-function smithersSnapshotRunStateIsFailed(snapshot: SmithersCommandSnapshot): boolean {
-  const state = smithersSnapshotRunState(snapshot);
-  return state !== undefined && ["failed", "error", "timed-out", "timeout"].includes(state.toLowerCase());
-}
-
-function smithersSnapshotRunStateIsStale(snapshot: SmithersCommandSnapshot): boolean {
-  return smithersSnapshotRunState(snapshot)?.toLowerCase() === "stale";
-}
-
-function smithersSnapshotFailedTasks(snapshot: SmithersCommandSnapshot): Array<{ nodeId: string; iteration: number }> {
-  const parsed = isObjectRecord(snapshot.json) ? snapshot.json : {};
-  const data = isObjectRecord(parsed.data) ? parsed.data : parsed;
+function smithersFailedTasks(inspect: CurrentSmithersInspect): Array<{ nodeId: string; iteration: number }> {
   const failedTasks = new Map<string, { nodeId: string; iteration: number }>();
-  const failedChildKeys = [data.failedChildKeys, parsed.failedChildKeys].find(Array.isArray) ?? [];
-  for (const key of failedChildKeys) {
-    if (typeof key !== "string") continue;
+  for (const key of inspect.failedChildKeys) {
     const separator = key.lastIndexOf("::");
-    const nodeId = separator < 0 ? key : key.slice(0, separator);
-    const iteration = separator < 0 ? 0 : Number(key.slice(separator + 2));
-    if (nodeId.trim() === "" || !Number.isSafeInteger(iteration) || iteration < 0) continue;
-    failedTasks.set(`${nodeId}::${iteration}`, { nodeId, iteration });
+    const nodeId = key.slice(0, separator);
+    const iteration = Number(key.slice(separator + 2));
+    failedTasks.set(key, { nodeId, iteration });
   }
   if (failedTasks.size > 0) return [...failedTasks.values()];
-  const collections = [data.steps, data.nodes, parsed.steps, parsed.nodes];
-  const failedStates = new Set(["failed", "error", "timed-out", "timeout", "canceled", "cancelled"]);
-  for (const collection of collections) {
-    const entries = Array.isArray(collection)
-      ? collection
-      : isObjectRecord(collection)
-        ? Object.entries(collection).map(([id, value]) =>
-            isObjectRecord(value) && typeof value.id !== "string" ? { ...value, id } : value
-          )
-        : [];
-    for (const entry of entries) {
-      if (!isObjectRecord(entry)) continue;
-      const state = [entry.state, entry.status].find((value): value is string => typeof value === "string");
-      const nodeId = [entry.nodeId, entry.node_id, entry.id].find(
-        (value): value is string => typeof value === "string" && value.trim() !== ""
-      );
-      const iteration =
-        typeof entry.iteration === "number" && Number.isSafeInteger(entry.iteration) && entry.iteration >= 0
-          ? entry.iteration
-          : 0;
-      if (state !== undefined && nodeId !== undefined && failedStates.has(state.toLowerCase())) {
-        const key = `${nodeId}::${iteration}`;
-        if (!failedTasks.has(key)) failedTasks.set(key, { nodeId, iteration });
-      }
-    }
+  // The runner derives `failedChildKeys` only for a success-terminal run, so a
+  // genuinely failed run never carries them and retrying one used to throw. Its
+  // canonical `nodes` array still names every failed node exactly. Topology
+  // expansion gives each loop iteration its own concrete node, so a generated
+  // workflow runs every node at iteration 0 and the node id alone identifies the
+  // attempt to reset.
+  for (const entry of inspect.nodes) {
+    if (entry.state !== "failed") continue;
+    failedTasks.set(`${entry.nodeId}::0`, { nodeId: entry.nodeId, iteration: 0 });
   }
   return [...failedTasks.values()];
 }
 
-function smithersOutputRejectsExistingRun(snapshot: { stdout: string; stderr: string }): boolean {
-  return [snapshot.stdout, snapshot.stderr].some((value) => value.includes("RUN_EXISTS"));
+export function parseCurrentSmithersInspect(
+  snapshot: SmithersCommandSnapshot,
+  expectedWorkflowRunId: string
+): CurrentSmithersInspect {
+  const envelope = snapshot.json;
+  if (!isObjectRecord(envelope) || !hasExactObjectKeys(envelope, ["ok", "data", "meta"])) {
+    throw new Error("Smithers inspect output must use the exact current full-output envelope");
+  }
+  if (envelope.ok !== true) {
+    throw new Error("Smithers inspect full-output envelope must report ok: true");
+  }
+  validateCurrentSmithersInspectMeta(envelope.meta);
+  if (!isObjectRecord(envelope.data)) {
+    throw new Error("Smithers inspect data must be an object");
+  }
+  const data = envelope.data;
+  const removedAliases = ["tasks", "status", "state"].filter((key) => Object.hasOwn(data, key));
+  if (removedAliases.length > 0) {
+    throw new Error(`Smithers inspect data contains removed field aliases: ${removedAliases.join(", ")}`);
+  }
+  assertCurrentInspectObjectKeys(
+    data,
+    ["run", "runState", "steps", "nodes"],
+    [
+      "run",
+      "runState",
+      "failedChildren",
+      "failedChildKeys",
+      "steps",
+      "nodes",
+      "approvals",
+      "timers",
+      "loops",
+      "config"
+    ],
+    "Smithers inspect data"
+  );
+  if (!Array.isArray(data.steps)) {
+    throw new Error("Smithers inspect data.steps must be the ignored compatibility array emitted by the pinned runner");
+  }
+  for (const key of ["approvals", "timers", "loops"] as const) {
+    if (data[key] !== undefined && !Array.isArray(data[key])) {
+      throw new Error(`Smithers inspect data.${key} must be an array`);
+    }
+  }
+  if (data.config !== undefined && !isObjectRecord(data.config)) {
+    throw new Error("Smithers inspect data.config must be an object");
+  }
+
+  const run = data.run;
+  if (!isObjectRecord(run)) {
+    throw new Error("Smithers inspect data.run must be an object");
+  }
+  if (Object.hasOwn(run, "startedAt") || Object.hasOwn(run, "finishedAt")) {
+    throw new Error("Smithers inspect data.run contains removed timestamp aliases");
+  }
+  assertCurrentInspectObjectKeys(
+    run,
+    ["id", "workflow", "status", "started", "elapsed"],
+    [
+      "id",
+      "workflow",
+      "status",
+      "parentRunId",
+      "started",
+      "elapsed",
+      "finished",
+      "activeDescendantRunId",
+      "error",
+      "startedBy",
+      "continuedFrom",
+      "continuedFromDisplay"
+    ],
+    "Smithers inspect data.run"
+  );
+  if (requiredCurrentInspectString(run.id, "Smithers inspect data.run.id") !== expectedWorkflowRunId) {
+    throw new Error("Smithers inspect data.run.id does not match the requested workflow run");
+  }
+  const runStatus = requiredCurrentInspectEnum(run.status, SMITHERS_RUN_STATUSES, "Smithers inspect data.run.status");
+  requiredCurrentInspectString(run.workflow, "Smithers inspect data.run.workflow");
+  requiredCurrentInspectString(run.started, "Smithers inspect data.run.started");
+  requiredCurrentInspectString(run.elapsed, "Smithers inspect data.run.elapsed");
+  for (const key of ["parentRunId", "finished", "activeDescendantRunId", "continuedFromDisplay"] as const) {
+    if (run[key] !== undefined) requiredCurrentInspectString(run[key], `Smithers inspect data.run.${key}`);
+  }
+  if (run.finished !== undefined && !isCanonicalDateTime(run.finished as string)) {
+    throw new Error("Smithers inspect data.run.finished must be a canonical timestamp");
+  }
+  if (run.continuedFrom !== undefined) {
+    if (!Array.isArray(run.continuedFrom)) {
+      throw new Error("Smithers inspect data.run.continuedFrom must be an array");
+    }
+    for (const [index, value] of run.continuedFrom.entries()) {
+      requiredCurrentInspectString(value, `Smithers inspect data.run.continuedFrom[${index}]`);
+    }
+  }
+  if (run.startedBy !== undefined) validateCurrentSmithersStartedBy(run.startedBy);
+
+  const runState = data.runState;
+  if (!isObjectRecord(runState)) {
+    throw new Error("Smithers inspect data.runState must be an object");
+  }
+  assertCurrentInspectObjectKeys(
+    runState,
+    ["runId", "state", "computedAt"],
+    ["runId", "state", "computedAt", "blocked", "unhealthy"],
+    "Smithers inspect data.runState"
+  );
+  if (requiredCurrentInspectString(runState.runId, "Smithers inspect data.runState.runId") !== expectedWorkflowRunId) {
+    throw new Error("Smithers inspect data.runState.runId does not match the requested workflow run");
+  }
+  const computedAt = requiredCurrentInspectString(runState.computedAt, "Smithers inspect data.runState.computedAt");
+  if (!isCanonicalDateTime(computedAt)) {
+    throw new Error("Smithers inspect data.runState.computedAt must be a canonical timestamp");
+  }
+  for (const key of ["blocked", "unhealthy"] as const) {
+    if (runState[key] !== undefined && !isObjectRecord(runState[key])) {
+      throw new Error(`Smithers inspect data.runState.${key} must be an object`);
+    }
+  }
+  const parsedRunState = requiredCurrentInspectEnum(
+    runState.state,
+    SMITHERS_RUN_STATES,
+    "Smithers inspect data.runState.state"
+  );
+  if (parsedRunState === "unknown") {
+    throw new Error("Smithers inspect data.runState.state is unknown and cannot drive resume");
+  }
+
+  if (!Array.isArray(data.nodes)) {
+    throw new Error("Smithers inspect data.nodes must be the canonical node array");
+  }
+  const nodeIds = new Set<string>();
+  const nodes = data.nodes.map((value, index): CurrentSmithersInspectNode => {
+    const label = `Smithers inspect data.nodes[${index}]`;
+    if (!isObjectRecord(value) || !hasExactObjectKeys(value, ["nodeId", "state", "attempt", "label"])) {
+      throw new Error(`${label} must use the exact current node shape`);
+    }
+    const nodeId = requiredCurrentInspectString(value.nodeId, `${label}.nodeId`);
+    if (nodeIds.has(nodeId)) {
+      throw new Error(`${label}.nodeId duplicates an earlier canonical node`);
+    }
+    nodeIds.add(nodeId);
+    return {
+      nodeId,
+      state: requiredCurrentInspectEnum(value.state, SMITHERS_NODE_STATES, `${label}.state`),
+      attempt: requiredCurrentInspectCount(value.attempt, `${label}.attempt`),
+      label: requiredCurrentInspectString(value.label, `${label}.label`)
+    };
+  });
+
+  const failedChildKeys = parseCurrentSmithersFailedChildKeys(data, nodeIds);
+  return { runStatus, runState: parsedRunState, nodes, failedChildKeys };
+}
+
+function validateCurrentSmithersInspectMeta(value: unknown): void {
+  if (
+    !isObjectRecord(value) ||
+    !Object.hasOwn(value, "command") ||
+    !Object.hasOwn(value, "duration") ||
+    Object.keys(value).some((key) => !["command", "duration", "cta"].includes(key))
+  ) {
+    throw new Error("Smithers inspect metadata must use the exact current full-output shape");
+  }
+  if (value.command !== "inspect") {
+    throw new Error("Smithers inspect metadata command must be inspect");
+  }
+  requiredCurrentInspectString(value.duration, "Smithers inspect metadata duration");
+  if (value.cta === undefined) return;
+  if (!isObjectRecord(value.cta) || !hasExactObjectKeys(value.cta, ["description", "commands"])) {
+    throw new Error("Smithers inspect metadata CTA must use the exact current shape");
+  }
+  requiredCurrentInspectString(value.cta.description, "Smithers inspect metadata CTA description");
+  if (!Array.isArray(value.cta.commands) || value.cta.commands.length === 0) {
+    throw new Error("Smithers inspect metadata CTA commands must be a non-empty array");
+  }
+  for (const [index, command] of value.cta.commands.entries()) {
+    const label = `Smithers inspect metadata CTA commands[${index}]`;
+    if (
+      !isObjectRecord(command) ||
+      !Object.hasOwn(command, "command") ||
+      Object.keys(command).some((key) => !["command", "description"].includes(key))
+    ) {
+      throw new Error(`${label} must use the exact current shape`);
+    }
+    requiredCurrentInspectString(command.command, `${label}.command`);
+    if (command.description !== undefined) {
+      requiredCurrentInspectString(command.description, `${label}.description`);
+    }
+  }
+}
+
+function validateCurrentSmithersStartedBy(value: unknown): void {
+  if (!isObjectRecord(value)) {
+    throw new Error("Smithers inspect data.run.startedBy must be an object");
+  }
+  assertCurrentInspectObjectKeys(
+    value,
+    [],
+    ["harness", "sessionId", "prompt", "detected"],
+    "Smithers inspect data.run.startedBy"
+  );
+  for (const key of ["harness", "sessionId", "prompt"] as const) {
+    if (value[key] !== undefined) {
+      requiredCurrentInspectString(value[key], `Smithers inspect data.run.startedBy.${key}`);
+    }
+  }
+  if (value.detected !== undefined && value.detected !== true) {
+    throw new Error("Smithers inspect data.run.startedBy.detected must be true when present");
+  }
+  if (Object.keys(value).length === 0) {
+    throw new Error("Smithers inspect data.run.startedBy must not be empty");
+  }
+}
+
+function parseCurrentSmithersFailedChildKeys(data: Record<string, unknown>, nodeIds: ReadonlySet<string>): string[] {
+  const hasFailedChildren = Object.hasOwn(data, "failedChildren");
+  const hasFailedChildKeys = Object.hasOwn(data, "failedChildKeys");
+  if (hasFailedChildren !== hasFailedChildKeys) {
+    throw new Error("Smithers inspect failedChildren and failedChildKeys must be present together");
+  }
+  if (!hasFailedChildren) return [];
+  const count = requiredCurrentInspectCount(data.failedChildren, "Smithers inspect data.failedChildren");
+  if (count === 0 || !Array.isArray(data.failedChildKeys) || data.failedChildKeys.length !== count) {
+    throw new Error("Smithers inspect failed child count and keys do not use the current paired shape");
+  }
+  const keys = new Set<string>();
+  for (const [index, value] of data.failedChildKeys.entries()) {
+    const key = requiredCurrentInspectString(value, `Smithers inspect data.failedChildKeys[${index}]`);
+    const match = /^(.*)::(0|[1-9][0-9]*)$/u.exec(key);
+    if (match === null || match[1] === undefined || match[1].length === 0) {
+      throw new Error(`Smithers inspect data.failedChildKeys[${index}] is not a current task state key`);
+    }
+    if (!nodeIds.has(match[1])) {
+      throw new Error(`Smithers inspect data.failedChildKeys[${index}] does not name a canonical node`);
+    }
+    requiredCurrentInspectCount(Number(match[2]), `Smithers inspect data.failedChildKeys[${index}] iteration`);
+    if (keys.has(key)) {
+      throw new Error(`Smithers inspect data.failedChildKeys[${index}] duplicates an earlier key`);
+    }
+    keys.add(key);
+  }
+  return [...keys];
+}
+
+function assertCurrentInspectObjectKeys(
+  value: Record<string, unknown>,
+  required: readonly string[],
+  allowed: readonly string[],
+  label: string
+): void {
+  const missing = required.filter((key) => !Object.hasOwn(value, key));
+  if (missing.length > 0) {
+    throw new Error(`${label} is missing current required fields: ${missing.join(", ")}`);
+  }
+  const unknown = Object.keys(value).filter((key) => !allowed.includes(key));
+  if (unknown.length > 0) {
+    throw new Error(`${label} contains fields outside the pinned 0.32.0 shape: ${unknown.join(", ")}`);
+  }
+}
+
+function requiredCurrentInspectString(value: unknown, label: string): string {
+  if (typeof value !== "string" || value.length === 0 || value.length > 4_096 || value.includes("\0")) {
+    throw new Error(`${label} must be a non-empty string`);
+  }
+  return value;
+}
+
+function requiredCurrentInspectCount(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${label} must be a non-negative safe integer`);
+  }
+  return value;
+}
+
+function requiredCurrentInspectEnum<const Values extends readonly string[]>(
+  value: unknown,
+  values: Values,
+  label: string
+): Values[number] {
+  if (typeof value !== "string" || !(values as readonly string[]).includes(value)) {
+    throw new Error(`${label} is not a current supported value`);
+  }
+  return value as Values[number];
 }
 
 /**
@@ -2730,33 +2885,37 @@ function isCompatibleSmithersRunId(value: string): boolean {
   return /^[a-z0-9_-]{1,64}$/u.test(value);
 }
 
-function compatibleRecoveryRunId(value: string): string {
-  return `ufz-recovery-${crypto.createHash("sha256").update(value).digest("hex").slice(0, 32)}`;
-}
-
 function resetNodeMarkerMatches(markerPath: string | undefined, smithersRunId: string, nodeId: string): boolean {
-  if (markerPath === undefined || !fs.existsSync(markerPath)) {
-    return false;
-  }
+  if (markerPath === undefined) return false;
   try {
-    const parsed: unknown = JSON.parse(fs.readFileSync(markerPath, "utf8"));
-    return isObjectRecord(parsed) && parsed.smithers_run_id === smithersRunId && parsed.node_id === nodeId;
-  } catch {
-    return false;
+    fs.lstatSync(markerPath);
+  } catch (error) {
+    if (isCausalEnoent(error)) return false;
+    throw error;
   }
+  const parsed = parseRuntimeDocumentBytes(
+    SMITHERS_RESET_NODE_JSON_SCHEMA_ID,
+    readRegularFileSnapshot(markerPath, 64 * 1024),
+    "persisted Smithers reset marker"
+  );
+  if (
+    !isObjectRecord(parsed) ||
+    !hasExactObjectKeys(parsed, ["schema_version", "smithers_run_id", "node_id", "applied_at"]) ||
+    parsed.schema_version !== SMITHERS_RESET_NODE_SCHEMA_VERSION ||
+    typeof parsed.smithers_run_id !== "string" ||
+    parsed.smithers_run_id.length === 0 ||
+    typeof parsed.node_id !== "string" ||
+    parsed.node_id.length === 0 ||
+    typeof parsed.applied_at !== "string" ||
+    !isCanonicalDateTime(parsed.applied_at)
+  ) {
+    throw new Error("persisted Smithers reset marker does not match the current strict contract");
+  }
+  return parsed.smithers_run_id === smithersRunId && parsed.node_id === nodeId;
 }
 
-function jsonHasErrorCode(value: unknown, code: string): boolean {
-  if (Array.isArray(value)) {
-    return value.some((entry) => jsonHasErrorCode(entry, code));
-  }
-  if (!isObjectRecord(value)) {
-    return false;
-  }
-  if (value.code === code) {
-    return true;
-  }
-  return Object.values(value).some((entry) => jsonHasErrorCode(entry, code));
+function isCausalEnoent(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 
 async function execSmithersCli(input: {
@@ -2876,29 +3035,12 @@ function supervisorCommandArgs(controllerLeaseSeconds: number): string[] {
   ];
 }
 
-function parseForkedRunId(stdout: string): string | undefined {
-  const parsed = jsonField(stdout).json;
-  return firstStringField(parsed, ["forkedRunId", "replayedRunId", "runId", "workflow_run_id"]);
-}
-
-function firstStringField(value: unknown, keys: readonly string[]): string | undefined {
-  if (value === null || typeof value !== "object") {
-    return undefined;
+function parseForkedRunId(stdout: string): string {
+  const payload = commandPayload(jsonField(stdout).json);
+  if (typeof payload?.forkedRunId !== "string" || payload.forkedRunId.length === 0) {
+    throw new Error("workflow runner fork/replay did not return the current forkedRunId contract");
   }
-  const record = value as Record<string, unknown>;
-  for (const key of keys) {
-    const candidate = record[key];
-    if (typeof candidate === "string" && candidate.length > 0) {
-      return candidate;
-    }
-  }
-  for (const key of ["data", "result", "value"]) {
-    const nested = firstStringField(record[key], keys);
-    if (nested !== undefined) {
-      return nested;
-    }
-  }
-  return undefined;
+  return payload.forkedRunId;
 }
 
 export function smithersDiagnostic(error: unknown, code: string): RuntimeDiagnostic {
@@ -3004,12 +3146,8 @@ async function ensureSmithersDependencies(
   }
   assertNoSymlinkComponents(projectRoot, packageRoot, "Smithers package");
   assertNoSymlinkComponents(projectRoot, packageJson, "Smithers package manifest");
-  const parsedManifest = JSON.parse(fs.readFileSync(packageJson, "utf8")) as unknown;
-  const migration = migrateLegacySmithersPackageManifest(parsedManifest);
-  if (migration.migrated) {
-    writeFileDurable(packageJson, `${JSON.stringify(migration.manifest, null, 2)}\n`);
-  }
-  assertSmithersPackageManifest(migration.manifest);
+  const parsedManifest = readPackageManagerOwnedManifestEnvelope(packageJson, "generated Smithers package manifest");
+  assertSmithersPackageManifest(parsedManifest);
   const nodeModules = path.join(packageRoot, "node_modules");
   if (fs.existsSync(nodeModules)) {
     assertNoSymlinkComponents(projectRoot, nodeModules, "Smithers dependencies");
@@ -3108,8 +3246,8 @@ function applySmithersCompatibilityPatches(projectRoot: string): void {
   assertRegularFileInside(nodeModules, admissionSource, "installed Smithers detached admission implementation");
   assertRegularFileInside(nodeModules, cliSource, "installed Smithers CLI implementation");
   assertRegularFileInside(nodeModules, resumeDetachedSource, "installed Smithers detached resume implementation");
-  const metadata = JSON.parse(fs.readFileSync(packageJson, "utf8")) as unknown;
-  if (!isObjectRecord(metadata) || metadata.version !== SMITHERS_ORCHESTRATOR_VERSION) {
+  const metadata = readPackageManagerOwnedManifestEnvelope(packageJson, "installed Smithers CLI package manifest");
+  if (optionalPackageManifestString(metadata, "version", packageJson) !== SMITHERS_ORCHESTRATOR_VERSION) {
     throw new Error(`installed Smithers CLI package version must be ${SMITHERS_ORCHESTRATOR_VERSION}`);
   }
   const admissionContents = fs.readFileSync(admissionSource, "utf8");
@@ -3183,8 +3321,14 @@ function applySmithersCompatibilityPatches(projectRoot: string): void {
   ] as const) {
     assertRegularFileInside(nodeModules, dependencyPackageJson, `installed Smithers ${label} package metadata`);
     assertRegularFileInside(nodeModules, dependencySource, `installed Smithers ${label} implementation`);
-    const dependencyMetadata = JSON.parse(fs.readFileSync(dependencyPackageJson, "utf8")) as unknown;
-    if (!isObjectRecord(dependencyMetadata) || dependencyMetadata.version !== SMITHERS_ORCHESTRATOR_VERSION) {
+    const dependencyMetadata = readPackageManagerOwnedManifestEnvelope(
+      dependencyPackageJson,
+      `installed Smithers ${label} package manifest`
+    );
+    if (
+      optionalPackageManifestString(dependencyMetadata, "version", dependencyPackageJson) !==
+      SMITHERS_ORCHESTRATOR_VERSION
+    ) {
       throw new Error(`installed Smithers ${label} package version must be ${SMITHERS_ORCHESTRATOR_VERSION}`);
     }
   }
@@ -3274,11 +3418,12 @@ function installedSmithersValidationError(projectRoot: string): string | undefin
       return "installed package metadata is missing";
     }
     assertRegularFileInside(packageRoot, packageJson, "installed Smithers package metadata");
-    const metadata = JSON.parse(fs.readFileSync(packageJson, "utf8")) as unknown;
-    if (!isObjectRecord(metadata) || metadata.version !== SMITHERS_ORCHESTRATOR_VERSION) {
+    const metadata = readPackageManagerOwnedManifestEnvelope(packageJson, "installed Smithers package manifest");
+    if (optionalPackageManifestString(metadata, "version", packageJson) !== SMITHERS_ORCHESTRATOR_VERSION) {
       return `installed package version must be ${SMITHERS_ORCHESTRATOR_VERSION}`;
     }
-    if (!isObjectRecord(metadata.bin) || !isExpectedSmithersBinTarget(metadata.bin.smithers)) {
+    const bin = optionalPackageManifestBin(metadata, packageJson);
+    if (typeof bin !== "object" || bin === null || !isExpectedSmithersBinTarget(bin.smithers)) {
       return "installed package metadata has an unexpected workflow runner target";
     }
     assertRegularFileInside(packageRoot, expectedBin, "installed Smithers workflow runner");
@@ -3320,6 +3465,141 @@ function isExpectedSmithersBinTarget(value: unknown): boolean {
   return value === SMITHERS_ORCHESTRATOR_BIN_PATH || value === `./${SMITHERS_ORCHESTRATOR_BIN_PATH}`;
 }
 
+/**
+ * `package.json` is an open package-manager-owned envelope, not an Ultrafuzz
+ * durable document. Capture and strictly parse one bounded immutable snapshot,
+ * then let each caller project only the package-manager fields it consumes.
+ */
+function readPackageManagerOwnedManifestEnvelope(
+  packageJsonPath: string,
+  label: string
+): Readonly<Record<string, unknown>> {
+  const value = parseStrictJsonBytes(readRegularFileSnapshot(packageJsonPath, MAX_PACKAGE_MANAGER_MANIFEST_BYTES), {
+    maxBytes: MAX_PACKAGE_MANAGER_MANIFEST_BYTES,
+    maxDepth: MAX_PACKAGE_MANAGER_MANIFEST_DEPTH,
+    maxItems: MAX_PACKAGE_MANAGER_MANIFEST_ITEMS,
+    maxProperties: MAX_PACKAGE_MANAGER_MANIFEST_PROPERTIES
+  });
+  if (!isObjectRecord(value)) throw new Error(`${label} must be a JSON object: ${packageJsonPath}`);
+  return value;
+}
+
+function optionalPackageManifestString(
+  manifest: Readonly<Record<string, unknown>>,
+  key: string,
+  packageJsonPath: string
+): string | undefined {
+  const value = manifest[key];
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`package-manager manifest ${key} must be a non-empty string: ${packageJsonPath}`);
+  }
+  return value;
+}
+
+function optionalPackageManifestBin(
+  manifest: Readonly<Record<string, unknown>>,
+  packageJsonPath: string
+): string | Readonly<Record<string, string>> | undefined {
+  const value = manifest.bin;
+  if (value === undefined) return undefined;
+  if (typeof value === "string") {
+    if (value.length === 0) {
+      throw new Error(`package-manager manifest bin must be a non-empty string: ${packageJsonPath}`);
+    }
+    return value;
+  }
+  return packageManifestStringMap(value, "bin", packageJsonPath);
+}
+
+function projectOptionalPackageManifestString<Key extends "name" | "version">(
+  manifest: Readonly<Record<string, unknown>>,
+  key: Key,
+  packageJsonPath: string
+): Partial<Pick<WorkflowPackageManifest, Key>> {
+  const value = optionalPackageManifestString(manifest, key, packageJsonPath);
+  return value === undefined ? {} : ({ [key]: value } as Pick<WorkflowPackageManifest, Key>);
+}
+
+function projectOptionalPackageManifestBin(
+  manifest: Readonly<Record<string, unknown>>,
+  packageJsonPath: string
+): Pick<WorkflowPackageManifest, "bin"> | Record<never, never> {
+  const value = optionalPackageManifestBin(manifest, packageJsonPath);
+  return value === undefined ? {} : { bin: value };
+}
+
+function projectOptionalPackageManifestStringMap<
+  Key extends "dependencies" | "optionalDependencies" | "peerDependencies"
+>(
+  manifest: Readonly<Record<string, unknown>>,
+  key: Key,
+  packageJsonPath: string
+): Partial<Pick<WorkflowPackageManifest, Key>> {
+  const value = manifest[key];
+  if (value === undefined) return {};
+  return { [key]: packageManifestStringMap(value, key, packageJsonPath) } as Pick<WorkflowPackageManifest, Key>;
+}
+
+function packageManifestStringMap(
+  value: unknown,
+  field: string,
+  packageJsonPath: string
+): Readonly<Record<string, string>> {
+  if (!isObjectRecord(value)) {
+    throw new Error(`package-manager manifest ${field} must be an object: ${packageJsonPath}`);
+  }
+  const projected = nullPrototypeRecord<string>();
+  for (const [key, entry] of Object.entries(value)) {
+    if (typeof entry !== "string" || entry.length === 0) {
+      throw new Error(`package-manager manifest ${field}.${key} must be a non-empty string: ${packageJsonPath}`);
+    }
+    defineProjectedPackageManifestField(projected, key, entry);
+  }
+  return projected;
+}
+
+function projectOptionalPackageManifestPeerMetadata(
+  manifest: Readonly<Record<string, unknown>>,
+  packageJsonPath: string
+): Pick<WorkflowPackageManifest, "peerDependenciesMeta"> | Record<never, never> {
+  const value = manifest.peerDependenciesMeta;
+  if (value === undefined) return {};
+  if (!isObjectRecord(value)) {
+    throw new Error(`package-manager manifest peerDependenciesMeta must be an object: ${packageJsonPath}`);
+  }
+  const projected = nullPrototypeRecord<Readonly<{ optional?: boolean }>>();
+  for (const [key, entry] of Object.entries(value)) {
+    if (!isObjectRecord(entry)) {
+      throw new Error(`package-manager manifest peerDependenciesMeta.${key} must be an object: ${packageJsonPath}`);
+    }
+    if (entry.optional !== undefined && typeof entry.optional !== "boolean") {
+      throw new Error(
+        `package-manager manifest peerDependenciesMeta.${key}.optional must be a boolean: ${packageJsonPath}`
+      );
+    }
+    defineProjectedPackageManifestField(
+      projected,
+      key,
+      entry.optional === undefined ? {} : { optional: entry.optional }
+    );
+  }
+  return { peerDependenciesMeta: projected };
+}
+
+function nullPrototypeRecord<Value>(): Record<string, Value> {
+  return Object.create(null) as Record<string, Value>;
+}
+
+function defineProjectedPackageManifestField<Value>(target: Record<string, Value>, key: string, value: Value): void {
+  Object.defineProperty(target, key, {
+    value,
+    enumerable: true,
+    configurable: false,
+    writable: false
+  });
+}
+
 function installedSmithersPackageRoot(projectRoot: string): string {
   return path.join(projectRoot, ".smithers", "node_modules", "smithers-orchestrator");
 }
@@ -3336,6 +3616,18 @@ function resolveInstalledSmithersPackageRoot(projectRoot: string): string {
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasExactObjectKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const canonical = [...expected].sort();
+  return actual.length === canonical.length && actual.every((key, index) => key === canonical[index]);
+}
+
+function isCanonicalDateTime(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(value)) return false;
+  const milliseconds = Date.parse(value);
+  return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === value;
 }
 
 function assertAndCloseSmithersExecutableAnchor(anchor: SmithersExecutableAnchor | undefined): void {
@@ -3389,11 +3681,9 @@ function smithersCommandEnv(
   }
   const forwarded = new Set(environmentVariableNames.map((name) => name.toUpperCase()));
   const merged: NodeJS.ProcessEnv = {};
-  let sourcePath: string | undefined;
   for (const [key, value] of Object.entries(source)) {
     const normalizedKey = key.toUpperCase();
     if (normalizedKey === "PATH") {
-      sourcePath = value;
       continue;
     }
     if (
@@ -3406,14 +3696,23 @@ function smithersCommandEnv(
       merged[key] = value;
     }
   }
+  merged.PATH = composeSmithersCommandPath(projectRoot, source);
+  return merged;
+}
+
+export function composeSmithersCommandPath(
+  projectRoot: string,
+  source: Readonly<Record<string, string | undefined>>
+): string {
+  const trustedBin = source[ULTRAFUZZ_TRUSTED_BIN_ENV];
   const localBin = path.join(projectRoot, ".smithers", "node_modules", ".bin");
-  // Preserve the caller's PATH representation for workflow-engine compatibility.
+  // Preserve the caller's PATH representation for workflow-engine compatibility,
+  // while keeping the authenticated CLI and project-local Smithers binaries first.
   // Required-command preflight intentionally accepts only stable absolute entries,
   // because task commands execute from fresh worktrees rather than this checkout.
-  merged.PATH = [localBin, sourcePath]
+  return [trustedBin, localBin, source.PATH]
     .filter((entry): entry is string => typeof entry === "string")
     .join(path.delimiter);
-  return merged;
 }
 
 function smithersBinaryName(): string {
@@ -3478,14 +3777,13 @@ function compileTask(input: {
       logicalNodeId: input.node.logicalId,
       attemptId: input.attempt.attemptId,
       label: input.node.label,
-      kind: input.node.kind,
-      ...(input.node.role ? { role: input.node.role } : {}),
+      kind: "agentic",
       ...(input.node.promptPath ? { promptPath: input.node.promptPath } : {}),
       ...(input.node.group ? { group: input.node.group } : {})
     },
     dependencies: {
-      concreteNodeIds: input.node.dependsOn,
-      attemptIds: input.dependencyAttemptIds,
+      concreteNodeIds: [...input.node.dependsOn],
+      attemptIds: [...input.dependencyAttemptIds],
       smithersNodeIds: dependencySmithersNodeIds
     },
     loop: {
@@ -3532,12 +3830,13 @@ function compileTask(input: {
     attemptId: input.attempt.attemptId,
     concreteNodeId: input.node.id,
     logicalNodeId: input.node.logicalId,
+    preparationSmithersNodeId: `prepare:${input.attempt.attemptId}`,
     smithersNodeId: smithersNodeIdForAttempt(input.attempt.attemptId),
     verifierSmithersNodeId: verifierSmithersNodeIdForAttempt(input.attempt.attemptId),
     agentRef: profile.agent,
     ...(profile.model ? { modelName: profile.model } : {}),
     ...(profile.reasoning ? { reasoningEffort: profile.reasoning } : {}),
-    dependencies: input.dependencyAttemptIds,
+    dependencies: [...input.dependencyAttemptIds],
     dependencySmithersNodeIds,
     timeoutMs,
     heartbeatTimeoutMs,
@@ -3552,11 +3851,12 @@ function compileTask(input: {
   };
 }
 
-const INVARIANT_CAMPAIGN_LOGICAL_NODE_IDS = new Set([
-  "stateful-invariant-campaign",
-  "stateful-invariant-recon-campaign"
-]);
 const INVARIANT_CAMPAIGN_HOST_SHUTDOWN_GRACE_SECONDS = 300;
+const INVARIANT_CAMPAIGN_ROLE_CONTRACTS = new Set([
+  "ultrafuzz/invariant-campaign-plan@2",
+  "ultrafuzz/property-campaign@3",
+  "ultrafuzz/campaign-summary@2"
+]);
 
 function assertInvariantCampaignTimeoutBudget(
   input: {
@@ -3565,7 +3865,7 @@ function assertInvariantCampaignTimeoutBudget(
   },
   timeoutMs: number
 ): void {
-  if (!INVARIANT_CAMPAIGN_LOGICAL_NODE_IDS.has(input.node.logicalId)) {
+  if (!input.node.outputs.some((output) => output.contract === "ultrafuzz/invariant-campaign-plan@2")) {
     return;
   }
   const runtimeBudget = topologyRuntimeBudgetForTimeout(timeoutMs);
@@ -3668,25 +3968,32 @@ function inferProjectRootFromRunLayout(runLayout: RunLayout): string {
 }
 
 function workflowFileStem(runId: string): string {
-  return `ultrafuzz-${runId.replace(/[^A-Za-z0-9._-]/gu, "-")}`;
+  const stem = `ultrafuzz-${runId}`;
+  if (!isCompatibleSmithersRunId(stem)) {
+    throw new Error(
+      `run ID ${JSON.stringify(runId)} does not produce a current Smithers workflow name matching ^[a-z0-9_-]{1,64}$`
+    );
+  }
+  return stem;
 }
 
-function writePreparedWorkflowFile(root: string, filePath: string, contents: string, label: string): void {
+function writePreparedWorkflowFile(root: string, filePath: string, contents: string | Uint8Array, label: string): void {
   const resolvedRoot = path.resolve(root);
   const resolvedPath = path.resolve(filePath);
+  const contentsBytes = typeof contents === "string" ? Buffer.from(contents, "utf8") : Buffer.from(contents);
   assertPathInside(resolvedRoot, resolvedPath, label);
   fs.mkdirSync(path.dirname(resolvedPath), { recursive: true });
   assertNoSymlinkComponents(resolvedRoot, resolvedPath, label);
   if (fs.existsSync(resolvedPath)) {
     assertRegularFileInside(resolvedRoot, resolvedPath, label);
-    if (!fs.readFileSync(resolvedPath).equals(Buffer.from(contents))) {
+    if (!fs.readFileSync(resolvedPath).equals(contentsBytes)) {
       throw new Error(`existing ${label} conflicts with the prepared workflow start`);
     }
     return;
   }
-  writeFileDurable(resolvedPath, contents);
+  writeFileDurable(resolvedPath, contentsBytes);
   assertRegularFileInside(resolvedRoot, resolvedPath, label);
-  if (!fs.readFileSync(resolvedPath).equals(Buffer.from(contents))) {
+  if (!fs.readFileSync(resolvedPath).equals(contentsBytes)) {
     throw new Error(`${label} changed while the prepared workflow start was written`);
   }
 }
@@ -3713,7 +4020,14 @@ function jsonField(stdout: string): { json?: unknown } {
     return {};
   }
   try {
-    return { json: JSON.parse(trimmed) as unknown };
+    return {
+      json: parseStrictJsonBytes(Buffer.from(trimmed, "utf8"), {
+        maxBytes: SMITHERS_CLI_MAX_BUFFER_BYTES,
+        maxDepth: 128,
+        maxItems: 1_000_000,
+        maxProperties: 1_000_000
+      })
+    };
   } catch {
     return {};
   }
@@ -3749,11 +4063,11 @@ export function topologyRuntimeContextForTimeout(timeoutMs: number): string {
   ].join("\n");
 }
 
-function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
+function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: ResolvedConfig): string {
   const taskSpecs = JSON.stringify(
     compiled.tasks.map((task) => ({
       id: task.smithersNodeId,
-      preparationId: `prepare:${task.attemptId}`,
+      preparationId: task.preparationSmithersNodeId,
       verifierId: task.verifierSmithersNodeId,
       attemptId: task.attemptId,
       dependsOn: task.dependencySmithersNodeIds,
@@ -3776,13 +4090,22 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
       branch: `ultrafuzz/${compiled.runId}/${task.attemptId}`,
       timeoutMs: task.timeoutMs,
       runtimeContext: topologyRuntimeContextForTimeout(task.timeoutMs),
+      campaignTimeoutExpectations: task.metadata.artifacts.outputs.some((output) =>
+        INVARIANT_CAMPAIGN_ROLE_CONTRACTS.has(output.contract)
+      )
+        ? {
+            configuredFuzzerTimeoutSeconds: config.invariants.invariantTestingFuzzerTimeoutSeconds,
+            plannedTimeoutSeconds: task.metadata.timeout.seconds,
+            finalizationReserveSeconds: topologyRuntimeBudgetForTimeout(task.timeoutMs).finalizationReserveSeconds
+          }
+        : null,
       heartbeatTimeoutMs: task.heartbeatTimeoutMs,
       retries: task.retries,
       retryPolicy: task.retryPolicy,
       metadata: executionMetadata(compiled.projectRoot, task),
       outputs: task.metadata.artifacts.outputs,
       execution: task.execution,
-      pinnedSubmodules: task.execution.mode === "local" ? (compiled.pinnedSubmodules ?? null) : null,
+      pinnedSubmodules: compiled.pinnedSubmodules ?? null,
       productionSourceRoots: compiled.productionSourceRoots ?? ["src", "contracts"]
     })),
     null,

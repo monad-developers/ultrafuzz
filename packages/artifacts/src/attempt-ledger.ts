@@ -1,20 +1,32 @@
-import crypto from "node:crypto";
-import fs from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 
-import { z } from "zod/v4";
 import { redactSecretsInText, SENSITIVE_REDACTION_PLACEHOLDER } from "@ultrafuzz/security";
+import { z } from "zod/v4";
 
+import {
+  MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES,
+  MAX_NODE_ATTEMPT_FAILURE_MESSAGE_CODE_POINTS
+} from "./artifact-limits.js";
+import {
+  canonicalTimestampJsonSchema,
+  canonicalTimestampSchema,
+  hasAtMostCodePoints
+} from "./portable-json-primitives.js";
 import { type RunLayout } from "./run-layout.js";
-import { appendLineDurable, sha256Bytes, validateSafeId } from "./safe-paths.js";
+import { SAFE_ID_PATTERN, sha256Bytes, validateSafeId } from "./safe-paths.js";
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
+import {
+  appendStrictJsonlRecords,
+  parseStrictJsonlBytes,
+  readStrictJsonlSnapshot,
+  type StrictJsonlCodec
+} from "./strict-jsonl.js";
 
-export const NODE_ATTEMPT_LEDGER_SCHEMA_VERSION = "1.0" as const;
-export const MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES = 1_000;
-export const NODE_ATTEMPT_LEDGER_JSON_SCHEMA_ID =
-  "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/node-attempt-ledger" as const;
+export const NODE_ATTEMPT_LEDGER_SCHEMA_VERSION = "ultrafuzz.node-attempt-ledger.v1" as const;
+export { MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES } from "./artifact-limits.js";
+export const NODE_ATTEMPT_LEDGER_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:node-attempt-ledger:1" as const;
 
-export const NODE_ATTEMPT_OUTCOMES = ["succeeded", "failed", "timed-out", "canceled", "skipped", "reused"] as const;
+export const NODE_ATTEMPT_OUTCOMES = ["succeeded", "failed", "timed-out", "canceled", "reused"] as const;
 export type NodeAttemptOutcome = (typeof NODE_ATTEMPT_OUTCOMES)[number];
 
 export const NODE_ATTEMPT_FAILURE_CATEGORIES = [
@@ -28,33 +40,34 @@ export const NODE_ATTEMPT_FAILURE_CATEGORIES = [
 ] as const;
 export type NodeAttemptFailureCategory = (typeof NODE_ATTEMPT_FAILURE_CATEGORIES)[number];
 
-declare const attemptIdBrand: unique symbol;
 declare const strategyAttemptIdBrand: unique symbol;
-declare const executorRetryIdBrand: unique symbol;
-declare const checkpointGenerationIdBrand: unique symbol;
-declare const workflowExecutionIdBrand: unique symbol;
-declare const controllerInvocationIdBrand: unique symbol;
 declare const manifestDigestBrand: unique symbol;
 
-export type NodeAttemptId = string & { readonly [attemptIdBrand]: true };
 export type StrategyAttemptId = string & { readonly [strategyAttemptIdBrand]: true };
-export type ExecutorRetryId = string & { readonly [executorRetryIdBrand]: true };
-export type CheckpointGenerationId = string & { readonly [checkpointGenerationIdBrand]: true };
-export type WorkflowExecutionId = string & { readonly [workflowExecutionIdBrand]: true };
-export type ControllerInvocationId = string & { readonly [controllerInvocationIdBrand]: true };
 export type ManifestDigest = string & { readonly [manifestDigestBrand]: true };
 
+export interface AttemptSourceIdentity {
+  workflow_run_id: string;
+  source_event_sequence: number;
+}
+
+/**
+ * Canonical evidence for one actual Smithers attempt occurrence. Its immutable
+ * identity is (workflow_run_id, source_event_sequence), where the sequence is
+ * the terminal Smithers event. No controller, checkpoint, execution, retry, or
+ * surrogate attempt identifiers are synthesized.
+ */
 export interface NodeAttemptLedgerEntry {
   schema_version: typeof NODE_ATTEMPT_LEDGER_SCHEMA_VERSION;
-  attempt_id: NodeAttemptId;
   run_id: string;
+  workflow_run_id: string;
+  control_generation: string;
   node_id: string;
   strategy_attempt_id: StrategyAttemptId;
-  executor_retry_id: ExecutorRetryId;
-  checkpoint_generation_id: CheckpointGenerationId;
-  workflow_execution_id: WorkflowExecutionId;
-  controller_invocation_id: ControllerInvocationId;
-  parent_attempt_id?: NodeAttemptId;
+  iteration: number;
+  attempt: number;
+  started_event_sequence: number;
+  source_event_sequence: number;
   lifecycle: {
     started_at: string;
     finished_at: string;
@@ -64,7 +77,7 @@ export interface NodeAttemptLedgerEntry {
     | { status: "executed" }
     | {
         status: "reused";
-        source_attempt_id: NodeAttemptId;
+        source: AttemptSourceIdentity;
       };
   manifests: {
     input_sha256: ManifestDigest;
@@ -76,17 +89,18 @@ export interface NodeAttemptLedgerEntry {
 
 export interface AppendNodeAttemptInput {
   runId?: string;
+  workflowRunId: string;
+  controlGeneration: string;
   nodeId: string;
   strategyAttemptId: string;
-  executorRetryId: string;
-  checkpointGenerationId: string;
-  workflowExecutionId: string;
-  controllerInvocationId: string;
-  parentAttemptId?: string;
+  iteration: number;
+  attempt: number;
+  startedEventSequence: number;
+  sourceEventSequence: number;
   startedAt: string;
   finishedAt: string;
   outcome: NodeAttemptOutcome;
-  reuse?: { status: "executed" } | { status: "reused"; sourceAttemptId: string };
+  reuse?: { status: "executed" } | { status: "reused"; sourceWorkflowRunId: string; sourceEventSequence: number };
   inputManifestDigest: string;
   outputManifestDigest?: string | null;
   failureCategory?: NodeAttemptFailureCategory;
@@ -100,18 +114,18 @@ export interface AppendNodeAttemptResult {
 
 export interface NodeAttemptReplay {
   entries: NodeAttemptLedgerEntry[];
-  malformedEntries: number;
-  duplicateEntries: number;
+  malformedEntries: 0;
+  duplicateEntries: 0;
 }
 
 export interface NodeAttemptQuery {
   nodeId?: string;
-  attemptId?: string;
   strategyAttemptId?: string;
-  executorRetryId?: string;
-  checkpointGenerationId?: string;
-  workflowExecutionId?: string;
-  controllerInvocationId?: string;
+  workflowRunId?: string;
+  controlGeneration?: string;
+  iteration?: number;
+  attempt?: number;
+  sourceEventSequence?: number;
   outcome?: NodeAttemptOutcome;
   reuseStatus?: "executed" | "reused";
 }
@@ -122,48 +136,48 @@ export interface NodeAttemptLedgerSummary {
   reused: number;
   outcomes: Record<NodeAttemptOutcome, number>;
   strategy_attempts: number;
-  executor_retries: number;
-  checkpoint_generations: number;
-  workflow_executions: number;
-  controller_invocations: number;
+  workflow_runs: number;
+  control_generations: number;
 }
 
-const safeId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u);
-const dimensionId = z
-  .string()
-  .min(1)
-  .max(512)
-  .regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/u);
-const digest = z.string().regex(/^[a-f0-9]{64}$/u);
-const timestamp = z.string().datetime({ offset: true });
+const DIMENSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/u;
+const DIMENSION_ID_MAX_LENGTH = 512;
+const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
+const safeId = z.string().regex(SAFE_ID_PATTERN);
+const dimensionId = z.string().min(1).max(DIMENSION_ID_MAX_LENGTH).regex(DIMENSION_ID_PATTERN);
+const digest = z.string().regex(SHA256_PATTERN);
+const count = z.number().int().nonnegative().safe();
 const failureMessage = z
   .string()
   .min(1)
-  .max(MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES)
-  .refine((value) => Buffer.byteLength(value, "utf8") <= MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES, {
-    message: `failure message must not exceed ${MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES} bytes`
+  .refine((value) => hasAtMostCodePoints(value, MAX_NODE_ATTEMPT_FAILURE_MESSAGE_CODE_POINTS), {
+    message: `Failure message must not exceed ${MAX_NODE_ATTEMPT_FAILURE_MESSAGE_CODE_POINTS} Unicode code points`
   });
 const executedReuseSchema = z.strictObject({ status: z.literal("executed") });
+const attemptSourceIdentitySchema = z.strictObject({
+  workflow_run_id: dimensionId,
+  source_event_sequence: count
+});
 const reusedReuseSchema = z.strictObject({
   status: z.literal("reused"),
-  source_attempt_id: dimensionId
+  source: attemptSourceIdentitySchema
 });
 
 export const nodeAttemptLedgerEntrySchema = z
   .strictObject({
     schema_version: z.literal(NODE_ATTEMPT_LEDGER_SCHEMA_VERSION),
-    attempt_id: dimensionId,
     run_id: safeId,
+    workflow_run_id: dimensionId,
+    control_generation: digest,
     node_id: safeId,
     strategy_attempt_id: dimensionId,
-    executor_retry_id: dimensionId,
-    checkpoint_generation_id: dimensionId,
-    workflow_execution_id: dimensionId,
-    controller_invocation_id: dimensionId,
-    parent_attempt_id: dimensionId.optional(),
+    iteration: count,
+    attempt: count,
+    started_event_sequence: count,
+    source_event_sequence: count,
     lifecycle: z.strictObject({
-      started_at: timestamp,
-      finished_at: timestamp
+      started_at: canonicalTimestampSchema,
+      finished_at: canonicalTimestampSchema
     }),
     outcome: z.enum(NODE_ATTEMPT_OUTCOMES),
     reuse: z.union([executedReuseSchema, reusedReuseSchema]),
@@ -175,24 +189,14 @@ export const nodeAttemptLedgerEntrySchema = z
     failure_message: failureMessage.optional()
   })
   .superRefine((entry, ctx) => {
-    if (Date.parse(entry.lifecycle.finished_at) < Date.parse(entry.lifecycle.started_at)) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["lifecycle", "finished_at"],
-        message: "finished_at must not precede started_at"
-      });
+    if ((entry.outcome === "reused") !== (entry.reuse.status === "reused")) {
+      ctx.addIssue({ code: "custom", path: ["reuse", "status"], message: "outcome and reuse status must agree" });
     }
-    if (entry.outcome === "reused" && entry.reuse.status !== "reused") {
-      ctx.addIssue({ code: "custom", path: ["reuse", "status"], message: "reused outcomes require reused status" });
-    }
-    if (entry.outcome !== "reused" && entry.reuse.status !== "executed") {
-      ctx.addIssue({ code: "custom", path: ["reuse", "status"], message: "executed outcomes require executed status" });
-    }
-    if (entry.outcome === "succeeded" && entry.manifests.output_sha256 === null) {
+    if (["succeeded", "reused"].includes(entry.outcome) && entry.manifests.output_sha256 === null) {
       ctx.addIssue({
         code: "custom",
         path: ["manifests", "output_sha256"],
-        message: "succeeded attempts require an output manifest digest"
+        message: "succeeded and reused attempts require an output manifest digest"
       });
     }
     const failed = ["failed", "timed-out", "canceled"].includes(entry.outcome);
@@ -203,27 +207,24 @@ export const nodeAttemptLedgerEntrySchema = z
         message: "failed attempts require a failure category"
       });
     }
-    if (!failed && entry.failure_category !== undefined) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["failure_category"],
-        message: "successful, skipped, and reused attempts cannot have a failure category"
-      });
-    }
-    if (!failed && entry.failure_message !== undefined) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["failure_message"],
-        message: "successful, skipped, and reused attempts cannot have a failure message"
-      });
-    }
-    if (entry.parent_attempt_id === entry.attempt_id) {
-      ctx.addIssue({ code: "custom", path: ["parent_attempt_id"], message: "an attempt cannot parent itself" });
-    }
-    if (entry.reuse.status === "reused" && entry.reuse.source_attempt_id === entry.attempt_id) {
-      ctx.addIssue({ code: "custom", path: ["reuse", "source_attempt_id"], message: "an attempt cannot reuse itself" });
+    if (!failed && (entry.failure_category !== undefined || entry.failure_message !== undefined)) {
+      ctx.addIssue({ code: "custom", path: [], message: "non-failed attempts cannot carry failure details" });
     }
   });
+
+const dimensionJsonSchema = {
+  type: "string",
+  minLength: 1,
+  maxLength: DIMENSION_ID_MAX_LENGTH,
+  pattern: DIMENSION_ID_PATTERN.source
+} as const;
+const safeIdJsonSchema = {
+  type: "string",
+  minLength: 1,
+  maxLength: 128,
+  pattern: SAFE_ID_PATTERN.source
+} as const;
+const countJsonSchema = { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER } as const;
 
 export const nodeAttemptLedgerJsonSchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
@@ -232,14 +233,15 @@ export const nodeAttemptLedgerJsonSchema = {
   type: "object",
   required: [
     "schema_version",
-    "attempt_id",
     "run_id",
+    "workflow_run_id",
+    "control_generation",
     "node_id",
     "strategy_attempt_id",
-    "executor_retry_id",
-    "checkpoint_generation_id",
-    "workflow_execution_id",
-    "controller_invocation_id",
+    "iteration",
+    "attempt",
+    "started_event_sequence",
+    "source_event_sequence",
     "lifecycle",
     "outcome",
     "reuse",
@@ -248,22 +250,22 @@ export const nodeAttemptLedgerJsonSchema = {
   additionalProperties: false,
   properties: {
     schema_version: { const: NODE_ATTEMPT_LEDGER_SCHEMA_VERSION },
-    attempt_id: { type: "string", minLength: 1 },
-    run_id: { type: "string", minLength: 1 },
-    node_id: { type: "string", minLength: 1 },
-    strategy_attempt_id: { type: "string", minLength: 1 },
-    executor_retry_id: { type: "string", minLength: 1 },
-    checkpoint_generation_id: { type: "string", minLength: 1 },
-    workflow_execution_id: { type: "string", minLength: 1 },
-    controller_invocation_id: { type: "string", minLength: 1 },
-    parent_attempt_id: { type: "string", minLength: 1 },
+    run_id: safeIdJsonSchema,
+    workflow_run_id: dimensionJsonSchema,
+    control_generation: { type: "string", pattern: SHA256_PATTERN.source },
+    node_id: safeIdJsonSchema,
+    strategy_attempt_id: dimensionJsonSchema,
+    iteration: countJsonSchema,
+    attempt: countJsonSchema,
+    started_event_sequence: countJsonSchema,
+    source_event_sequence: countJsonSchema,
     lifecycle: {
       type: "object",
       required: ["started_at", "finished_at"],
       additionalProperties: false,
       properties: {
-        started_at: { type: "string", format: "date-time" },
-        finished_at: { type: "string", format: "date-time" }
+        started_at: canonicalTimestampJsonSchema,
+        finished_at: canonicalTimestampJsonSchema
       }
     },
     outcome: { enum: [...NODE_ATTEMPT_OUTCOMES] },
@@ -277,11 +279,19 @@ export const nodeAttemptLedgerJsonSchema = {
         },
         {
           type: "object",
-          required: ["status", "source_attempt_id"],
+          required: ["status", "source"],
           additionalProperties: false,
           properties: {
             status: { const: "reused" },
-            source_attempt_id: { type: "string", minLength: 1 }
+            source: {
+              type: "object",
+              required: ["workflow_run_id", "source_event_sequence"],
+              additionalProperties: false,
+              properties: {
+                workflow_run_id: dimensionJsonSchema,
+                source_event_sequence: countJsonSchema
+              }
+            }
           }
         }
       ]
@@ -291,15 +301,84 @@ export const nodeAttemptLedgerJsonSchema = {
       required: ["input_sha256", "output_sha256"],
       additionalProperties: false,
       properties: {
-        input_sha256: { type: "string", pattern: "^[a-f0-9]{64}$" },
+        input_sha256: { type: "string", pattern: SHA256_PATTERN.source },
         output_sha256: {
-          anyOf: [{ type: "string", pattern: "^[a-f0-9]{64}$" }, { type: "null" }]
+          anyOf: [{ type: "string", pattern: SHA256_PATTERN.source }, { type: "null" }]
         }
       }
     },
     failure_category: { enum: [...NODE_ATTEMPT_FAILURE_CATEGORIES] },
-    failure_message: { type: "string", minLength: 1, maxLength: MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES }
-  }
+    failure_message: {
+      type: "string",
+      minLength: 1,
+      maxLength: MAX_NODE_ATTEMPT_FAILURE_MESSAGE_CODE_POINTS
+    }
+  },
+  allOf: [
+    {
+      if: { type: "object", properties: { outcome: { const: "reused" } }, required: ["outcome"] },
+      then: {
+        type: "object",
+        properties: {
+          reuse: {
+            type: "object",
+            properties: { status: { const: "reused" } },
+            required: ["status"]
+          }
+        }
+      },
+      else: {
+        type: "object",
+        properties: {
+          reuse: {
+            type: "object",
+            properties: { status: { const: "executed" } },
+            required: ["status"]
+          }
+        }
+      }
+    },
+    {
+      if: {
+        type: "object",
+        properties: { outcome: { enum: ["succeeded", "reused"] } },
+        required: ["outcome"]
+      },
+      then: {
+        type: "object",
+        properties: {
+          manifests: {
+            type: "object",
+            properties: {
+              output_sha256: { type: "string", pattern: SHA256_PATTERN.source }
+            },
+            required: ["output_sha256"]
+          }
+        }
+      }
+    },
+    {
+      if: {
+        type: "object",
+        properties: { outcome: { enum: ["failed", "timed-out", "canceled"] } },
+        required: ["outcome"]
+      },
+      then: {
+        type: "object",
+        properties: { failure_category: { enum: [...NODE_ATTEMPT_FAILURE_CATEGORIES] } },
+        required: ["failure_category"]
+      },
+      else: {
+        type: "object",
+        not: {
+          anyOf: [
+            { type: "object", properties: { failure_category: {} }, required: ["failure_category"] },
+            { type: "object", properties: { failure_message: {} }, required: ["failure_message"] }
+          ]
+        }
+      }
+    }
+  ]
 } as const;
 
 export function manifestDigest(value: string | Uint8Array): ManifestDigest {
@@ -316,8 +395,8 @@ export function validateNodeAttemptLedgerEntry(
   });
 }
 
-export function assertNodeAttemptLedgerEntry(value: unknown): NodeAttemptLedgerEntry {
-  const result = validateNodeAttemptLedgerEntry(value);
+export function assertNodeAttemptLedgerEntry(value: unknown, path = "$"): NodeAttemptLedgerEntry {
+  const result = validateNodeAttemptLedgerEntry(value, path);
   if (!result.ok || result.value === undefined) {
     throw new Error(schemaErrorMessage("node attempt ledger entry", result.issues));
   }
@@ -355,51 +434,35 @@ export function normalizeNodeAttemptFailureMessage(
   return bounded;
 }
 
-export function createNodeAttemptLedgerEntry(layout: Pick<RunLayout, "runId">, input: AppendNodeAttemptInput) {
-  const runId = validateSafeId(input.runId ?? layout.runId, "run ID");
-  const nodeId = validateSafeId(input.nodeId, "node ID");
-  const strategyAttemptId = normalizeDimensionId(input.strategyAttemptId, "strategy attempt ID");
-  const executorRetryId = normalizeDimensionId(input.executorRetryId, "executor retry ID");
-  const checkpointGenerationId = normalizeDimensionId(input.checkpointGenerationId, "checkpoint generation ID");
-  const workflowExecutionId = normalizeDimensionId(input.workflowExecutionId, "workflow execution ID");
-  const controllerInvocationId = normalizeDimensionId(input.controllerInvocationId, "controller invocation ID");
-  const attemptId = stableAttemptId({
-    runId,
-    nodeId,
-    strategyAttemptId,
-    executorRetryId,
-    checkpointGenerationId,
-    workflowExecutionId,
-    controllerInvocationId
-  });
-  const reuse =
-    input.reuse?.status === "reused"
-      ? {
-          status: "reused" as const,
-          source_attempt_id: normalizeDimensionId(input.reuse.sourceAttemptId, "source attempt ID") as NodeAttemptId
-        }
-      : { status: "executed" as const };
+export function createNodeAttemptLedgerEntry(
+  layout: Pick<RunLayout, "runId">,
+  input: AppendNodeAttemptInput
+): NodeAttemptLedgerEntry {
   const normalizedFailureMessage =
     input.failureMessage === undefined ? undefined : normalizeNodeAttemptFailureMessage(input.failureMessage);
-  const entry = {
+  return assertNodeAttemptLedgerEntry({
     schema_version: NODE_ATTEMPT_LEDGER_SCHEMA_VERSION,
-    attempt_id: attemptId,
-    run_id: runId,
-    node_id: nodeId,
-    strategy_attempt_id: strategyAttemptId as StrategyAttemptId,
-    executor_retry_id: executorRetryId as ExecutorRetryId,
-    checkpoint_generation_id: checkpointGenerationId as CheckpointGenerationId,
-    workflow_execution_id: workflowExecutionId as WorkflowExecutionId,
-    controller_invocation_id: controllerInvocationId as ControllerInvocationId,
-    ...(input.parentAttemptId === undefined
-      ? {}
-      : { parent_attempt_id: normalizeDimensionId(input.parentAttemptId, "parent attempt ID") as NodeAttemptId }),
-    lifecycle: {
-      started_at: input.startedAt,
-      finished_at: input.finishedAt
-    },
+    run_id: validateSafeId(input.runId ?? layout.runId, "run ID"),
+    workflow_run_id: input.workflowRunId,
+    control_generation: input.controlGeneration,
+    node_id: input.nodeId,
+    strategy_attempt_id: input.strategyAttemptId,
+    iteration: input.iteration,
+    attempt: input.attempt,
+    started_event_sequence: input.startedEventSequence,
+    source_event_sequence: input.sourceEventSequence,
+    lifecycle: { started_at: input.startedAt, finished_at: input.finishedAt },
     outcome: input.outcome,
-    reuse,
+    reuse:
+      input.reuse?.status === "reused"
+        ? {
+            status: "reused",
+            source: {
+              workflow_run_id: input.reuse.sourceWorkflowRunId,
+              source_event_sequence: input.reuse.sourceEventSequence
+            }
+          }
+        : { status: "executed" },
     manifests: {
       input_sha256: normalizeDigest(input.inputManifestDigest, "input manifest digest"),
       output_sha256:
@@ -409,8 +472,7 @@ export function createNodeAttemptLedgerEntry(layout: Pick<RunLayout, "runId">, i
     },
     ...(input.failureCategory === undefined ? {} : { failure_category: input.failureCategory }),
     ...(normalizedFailureMessage === undefined ? {} : { failure_message: normalizedFailureMessage })
-  };
-  return assertNodeAttemptLedgerEntry(entry);
+  });
 }
 
 export function appendNodeAttempt(
@@ -424,77 +486,65 @@ export function appendNodeAttempts(
   layout: Pick<RunLayout, "runId" | "root" | "attemptLedgerPath">,
   inputs: readonly AppendNodeAttemptInput[]
 ): AppendNodeAttemptResult[] {
-  if (inputs.length === 0) {
-    return [];
-  }
-  const entries = inputs.map((input) => createNodeAttemptLedgerEntry(layout, input));
-  const replay = replayNodeAttempts(layout);
-  if (replay.malformedEntries > 0) {
-    throw new Error(
-      `node attempt ledger contains ${replay.malformedEntries} malformed entr${replay.malformedEntries === 1 ? "y" : "ies"}`
-    );
-  }
-  const entriesById = new Map(replay.entries.map((entry) => [entry.attempt_id, entry]));
+  if (inputs.length === 0) return [];
+  const codec = nodeAttemptLedgerCodec(layout.runId);
+  const existing = readStrictJsonlSnapshot(layout.attemptLedgerPath, codec).records;
+  const byIdentity = new Map(existing.map((entry) => [nodeAttemptLedgerIdentity(entry), entry]));
   const pending: NodeAttemptLedgerEntry[] = [];
-  const results = entries.map((entry): AppendNodeAttemptResult => {
-    const existing = entriesById.get(entry.attempt_id);
-    if (existing !== undefined) {
-      if (!isDeepStrictEqual(existing, entry)) {
-        throw new Error(`node attempt ${entry.attempt_id} was already recorded with different immutable data`);
+  const results = inputs.map((input): AppendNodeAttemptResult => {
+    const candidate = createNodeAttemptLedgerEntry(layout, input);
+    const identity = nodeAttemptLedgerIdentity(candidate);
+    const prior = byIdentity.get(identity);
+    if (prior !== undefined) {
+      if (!isDeepStrictEqual(prior, candidate)) {
+        throw new Error(`node attempt ${identity} was already recorded with different immutable data`);
       }
-      return { entry: existing, appended: false };
+      return { entry: prior, appended: false };
     }
-    entriesById.set(entry.attempt_id, entry);
-    pending.push(entry);
-    return { entry, appended: true };
+    byIdentity.set(identity, candidate);
+    pending.push(candidate);
+    return { entry: candidate, appended: true };
   });
-  for (const entry of pending) {
-    appendLineDurable(layout.attemptLedgerPath, JSON.stringify(entry), layout.root);
+  if (pending.length > 0) {
+    appendStrictJsonlRecords(layout.attemptLedgerPath, pending, codec, layout.root);
   }
   return results;
 }
 
-export function replayNodeAttempts(layoutOrPath: Pick<RunLayout, "attemptLedgerPath"> | string): NodeAttemptReplay {
+export function replayNodeAttempts(
+  layoutOrPath: (Pick<RunLayout, "attemptLedgerPath"> & Partial<Pick<RunLayout, "runId">>) | string
+): NodeAttemptReplay {
   const ledgerPath = typeof layoutOrPath === "string" ? layoutOrPath : layoutOrPath.attemptLedgerPath;
-  if (!fs.existsSync(ledgerPath)) {
-    return { entries: [], malformedEntries: 0, duplicateEntries: 0 };
-  }
-  const entries: NodeAttemptLedgerEntry[] = [];
-  const seen = new Set<string>();
-  let malformedEntries = 0;
-  let duplicateEntries = 0;
-  for (const line of fs.readFileSync(ledgerPath, "utf8").split(/\r?\n/u)) {
-    if (line.trim().length === 0) {
-      continue;
-    }
-    try {
-      const parsed = assertNodeAttemptLedgerEntry(JSON.parse(line) as unknown);
-      if (seen.has(parsed.attempt_id)) {
-        duplicateEntries += 1;
-        continue;
-      }
-      seen.add(parsed.attempt_id);
-      entries.push(parsed);
-    } catch {
-      malformedEntries += 1;
-    }
-  }
-  return { entries, malformedEntries, duplicateEntries };
+  const expectedRunId = typeof layoutOrPath === "string" ? undefined : layoutOrPath.runId;
+  return {
+    entries: readStrictJsonlSnapshot(ledgerPath, nodeAttemptLedgerCodec(expectedRunId)).records,
+    malformedEntries: 0,
+    duplicateEntries: 0
+  };
+}
+
+/** Replay an immutable attempt-ledger snapshot captured outside the filesystem. */
+export function parseNodeAttemptLedgerBytes(bytes: Uint8Array, expectedRunId?: string): NodeAttemptReplay {
+  return {
+    entries: parseStrictJsonlBytes(bytes, nodeAttemptLedgerCodec(expectedRunId)).records,
+    malformedEntries: 0,
+    duplicateEntries: 0
+  };
 }
 
 export function queryNodeAttempts(
-  layoutOrPath: Pick<RunLayout, "attemptLedgerPath"> | string,
+  layoutOrPath: (Pick<RunLayout, "attemptLedgerPath"> & Partial<Pick<RunLayout, "runId">>) | string,
   query: NodeAttemptQuery = {}
 ): NodeAttemptLedgerEntry[] {
   return replayNodeAttempts(layoutOrPath).entries.filter((entry) => {
     return (
       (query.nodeId === undefined || entry.node_id === query.nodeId) &&
-      (query.attemptId === undefined || entry.attempt_id === query.attemptId) &&
       (query.strategyAttemptId === undefined || entry.strategy_attempt_id === query.strategyAttemptId) &&
-      (query.executorRetryId === undefined || entry.executor_retry_id === query.executorRetryId) &&
-      (query.checkpointGenerationId === undefined || entry.checkpoint_generation_id === query.checkpointGenerationId) &&
-      (query.workflowExecutionId === undefined || entry.workflow_execution_id === query.workflowExecutionId) &&
-      (query.controllerInvocationId === undefined || entry.controller_invocation_id === query.controllerInvocationId) &&
+      (query.workflowRunId === undefined || entry.workflow_run_id === query.workflowRunId) &&
+      (query.controlGeneration === undefined || entry.control_generation === query.controlGeneration) &&
+      (query.iteration === undefined || entry.iteration === query.iteration) &&
+      (query.attempt === undefined || entry.attempt === query.attempt) &&
+      (query.sourceEventSequence === undefined || entry.source_event_sequence === query.sourceEventSequence) &&
       (query.outcome === undefined || entry.outcome === query.outcome) &&
       (query.reuseStatus === undefined || entry.reuse.status === query.reuseStatus)
     );
@@ -507,21 +557,15 @@ export function summarizeNodeAttempts(entries: readonly NodeAttemptLedgerEntry[]
     number
   >;
   const strategyAttempts = new Set<string>();
-  const executorRetries = new Set<string>();
-  const checkpointGenerations = new Set<string>();
-  const workflowExecutions = new Set<string>();
-  const controllerInvocations = new Set<string>();
+  const workflowRuns = new Set<string>();
+  const controlGenerations = new Set<string>();
   let reused = 0;
   for (const entry of entries) {
     outcomes[entry.outcome] += 1;
     strategyAttempts.add(entry.strategy_attempt_id);
-    executorRetries.add(entry.executor_retry_id);
-    checkpointGenerations.add(entry.checkpoint_generation_id);
-    workflowExecutions.add(entry.workflow_execution_id);
-    controllerInvocations.add(entry.controller_invocation_id);
-    if (entry.reuse.status === "reused") {
-      reused += 1;
-    }
+    workflowRuns.add(entry.workflow_run_id);
+    controlGenerations.add(entry.control_generation);
+    if (entry.reuse.status === "reused") reused += 1;
   }
   return {
     total: entries.length,
@@ -529,49 +573,65 @@ export function summarizeNodeAttempts(entries: readonly NodeAttemptLedgerEntry[]
     reused,
     outcomes,
     strategy_attempts: strategyAttempts.size,
-    executor_retries: executorRetries.size,
-    checkpoint_generations: checkpointGenerations.size,
-    workflow_executions: workflowExecutions.size,
-    controller_invocations: controllerInvocations.size
+    workflow_runs: workflowRuns.size,
+    control_generations: controlGenerations.size
   };
 }
 
-function stableAttemptId(input: {
-  runId: string;
-  nodeId: string;
-  strategyAttemptId: string;
-  executorRetryId: string;
-  checkpointGenerationId: string;
-  workflowExecutionId: string;
-  controllerInvocationId: string;
-}): NodeAttemptId {
-  const digest = crypto
-    .createHash("sha256")
-    .update(
-      JSON.stringify({
-        runId: input.runId,
-        nodeId: input.nodeId,
-        strategyAttemptId: input.strategyAttemptId,
-        executorRetryId: input.executorRetryId
-      })
-    )
-    .digest("hex")
-    .slice(0, 32);
-  return `attempt-${digest}` as NodeAttemptId;
+export function nodeAttemptLedgerIdentity(
+  entry: Pick<NodeAttemptLedgerEntry, "workflow_run_id" | "source_event_sequence">
+): string {
+  return JSON.stringify([entry.workflow_run_id, entry.source_event_sequence]);
 }
 
-function normalizeDimensionId(value: string, label: string): string {
-  const parsed = dimensionId.safeParse(value);
-  if (!parsed.success) {
-    throw new Error(`${label} must be a stable non-empty identifier`);
+function nodeAttemptLedgerCodec(expectedRunId?: string): StrictJsonlCodec<NodeAttemptLedgerEntry> {
+  return {
+    label: "node attempt ledger",
+    parseRecord: (value, recordPath) => {
+      const entry = assertNodeAttemptLedgerEntry(value, recordPath);
+      assertNodeAttemptLedgerReadSemantics(entry, recordPath);
+      if (expectedRunId !== undefined && entry.run_id !== expectedRunId) {
+        throw new Error(
+          `${recordPath}.run_id belongs to ${JSON.stringify(entry.run_id)}, expected ${JSON.stringify(expectedRunId)}`
+        );
+      }
+      return entry;
+    },
+    identity: nodeAttemptLedgerIdentity,
+    validateHistory: validateNodeAttemptLedgerHistory
+  };
+}
+
+function assertNodeAttemptLedgerReadSemantics(entry: NodeAttemptLedgerEntry, recordPath: string): void {
+  if (entry.started_event_sequence >= entry.source_event_sequence) {
+    throw new Error(`${recordPath}.started_event_sequence must precede source_event_sequence`);
   }
-  return parsed.data;
+  if (Date.parse(entry.lifecycle.started_at) > Date.parse(entry.lifecycle.finished_at)) {
+    throw new Error(`${recordPath}.lifecycle.finished_at cannot precede lifecycle.started_at`);
+  }
+  if (
+    entry.failure_message !== undefined &&
+    Buffer.byteLength(entry.failure_message, "utf8") > MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES
+  ) {
+    throw new Error(`${recordPath}.failure_message exceeds ${MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES} UTF-8 bytes`);
+  }
+}
+
+function validateNodeAttemptLedgerHistory(entries: readonly NodeAttemptLedgerEntry[]): void {
+  const controlGenerationByWorkflow = new Map<string, string>();
+  for (const [index, entry] of entries.entries()) {
+    const prior = controlGenerationByWorkflow.get(entry.workflow_run_id);
+    if (prior !== undefined && prior !== entry.control_generation) {
+      throw new Error(
+        `node attempt ledger changes control_generation for workflow ${JSON.stringify(entry.workflow_run_id)} at record ${index + 1}`
+      );
+    }
+    controlGenerationByWorkflow.set(entry.workflow_run_id, entry.control_generation);
+  }
 }
 
 function normalizeDigest(value: string, label: string): ManifestDigest {
   const parsed = digest.safeParse(value);
-  if (!parsed.success) {
-    throw new Error(`${label} must be a lowercase SHA-256 digest`);
-  }
+  if (!parsed.success) throw new Error(`${label} must be a lowercase SHA-256 digest`);
   return parsed.data as ManifestDigest;
 }

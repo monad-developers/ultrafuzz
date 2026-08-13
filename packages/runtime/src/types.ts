@@ -1,11 +1,15 @@
 import type {
-  ArtifactContractId,
   EventQuery,
   EventRecord,
   NodeAttemptLedgerSummary,
   NodeStateInput,
+  PlannedGraphDocument,
+  PlannedGraphNodeDocument,
+  PlannedGraphOutput,
   RunLayout,
-  RunState
+  RunMetadataAuditProfile,
+  RunState,
+  RunWorkflowProvenance
 } from "@ultrafuzz/artifacts";
 import type {
   AuditProfileSettingOrigin,
@@ -13,6 +17,7 @@ import type {
   ResolvedConfig,
   RuntimeConfigOverrides
 } from "@ultrafuzz/config";
+import type { PromptArtifactReference } from "@ultrafuzz/prompts";
 import type { MaterializeCopySelection } from "@ultrafuzz/security";
 import type { ExpandedGraph } from "@ultrafuzz/topology";
 
@@ -109,7 +114,7 @@ export interface ValidateProjectResult {
     digest?: string;
     logical_nodes: number;
     expanded_nodes: number;
-    required_commands?: string[];
+    required_commands: string[];
   };
   prompts?: {
     prompt_dir: string;
@@ -118,6 +123,8 @@ export interface ValidateProjectResult {
 }
 
 export interface PlanRunInput extends ValidateProjectInput {
+  /** Absolute entrypoint of the invoking CLI, used to create the producer-visible trusted launcher. */
+  ultrafuzzCliEntrypoint?: string;
   runId?: string;
   sourceRunId?: string;
   /** Optional trusted benchmark catalog copied into pinned reference inputs. */
@@ -128,76 +135,20 @@ export interface PlanRunInput extends ValidateProjectInput {
   maxConcurrency?: number;
 }
 
-export interface PlannedGraphNode {
-  id: string;
-  logical_id: string;
-  display_name: string;
-  kind: string;
-  depends_on: string[];
-  artifact_dir: string;
-  /** The topology-resolved node timeout sealed into the persisted run graph. */
-  timeout_seconds?: number;
-  outputs: PlannedArtifactOutput[];
-  prompt_id: string;
-  prompt_path: string;
-  reference?: string;
-  reference_revision?: {
-    provider: "github";
-    repo: string;
-    commit: string;
-    paths: string[];
-  };
-  role?: string;
-  loop: {
-    index: number;
-    count: number;
-    mode: string;
-    attempt_index: number;
-  };
-  model_fanout: Array<{
-    /** Explicit in current plans; optional so historical planned graphs remain readable. */
-    attempt_id?: string;
-    model_profile_id: string;
-    agent_ref: string;
-    model_name?: string;
-    reasoning_effort?: string;
-    /** Effective profile or run-default timeout for this model attempt. */
-    timeout_seconds?: number;
-    model_index: number;
-    loop_index: number;
-    attempt_index: number;
-  }>;
-  workflow?: {
-    node_id?: string;
-    task_node_ids?: string[];
-  };
-}
-
-export interface PlannedArtifactOutput {
-  path: string;
-  contract: ArtifactContractId;
-  contract_digest: string;
-  primary: boolean;
-}
-
-export interface PlannedGraph {
-  schema_version: "1.0";
-  graph_version: string;
-  topology_version: number;
-  groups: Record<string, unknown>;
-  nodes: PlannedGraphNode[];
-}
+export type PlannedGraphNode = PlannedGraphNodeDocument;
+export type PlannedArtifactOutput = PlannedGraphOutput;
+export type PlannedGraph = PlannedGraphDocument;
 
 export interface RenderedPromptPlan {
   node_id: string;
   logical_node_id: string;
-  attempt_id?: string;
+  attempt_id: string;
   prompt_id: string;
   prompt_path: string;
   rendered_prompt_path: string;
   rendered_prompt_digest: string;
   variables_used: string[];
-  artifact_references: unknown[];
+  artifact_references: PromptArtifactReference[];
 }
 
 export interface PlanRunValue {
@@ -266,8 +217,14 @@ export interface WorkflowCommandSummary {
   has_json: boolean;
 }
 
+export type PublicRunWorkflowProvenance = Omit<RunWorkflowProvenance, "executionSnapshot">;
+
+export type PublicRunState = Omit<RunState, "provenance"> & {
+  provenance?: { workflow: PublicRunWorkflowProvenance };
+};
+
 export interface RunStatusValue extends RunListEntry {
-  state?: RunState;
+  state?: PublicRunState;
   events: number;
   attempts: NodeAttemptLedgerSummary;
   graph?: unknown;
@@ -350,7 +307,9 @@ export interface RunProgressSummary {
 
 export interface RunHealthValue extends RunListEntry, RunProgressSummary {
   workflow_run_id: string;
-  audit_profile?: Record<string, unknown>;
+  // The run's recorded audit profile, typed rather than a loose record so a
+  // reader gets the same shape the run metadata persisted.
+  audit_profile?: RunMetadataAuditProfile;
   workflow_status: string;
   verdict: RunHealthVerdict;
   reason: string;
@@ -405,6 +364,7 @@ export interface MaterializeValue {
   patches: string[];
   audit: {
     schema_version: "ultrafuzz.materialize.audit.v1";
+    audit_id: string;
     mode: "dry-run" | "unstaged-working-tree";
     unstaged: true;
     audit_path: string;
@@ -484,6 +444,7 @@ export interface CleanGeneratedValue {
   removed: string[];
   audit: {
     schema_version: "ultrafuzz.clean.audit.v1";
+    audit_id: string;
     audit_path: string;
     selections: string[];
   };
@@ -492,6 +453,7 @@ export interface CleanGeneratedValue {
 export interface WorkflowLifecycleInput {
   projectRoot: string;
   runId: string;
+  ultrafuzzCliEntrypoint?: string;
   maxConcurrency?: number;
   forkFrame?: number;
   resetNode?: string;
@@ -550,22 +512,24 @@ export type RunBlockerKind =
   | "waiting-approval"
   | "waiting-event"
   | "waiting-timer"
+  | "bound-stale"
+  | "binding-missing"
+  | "stale-task-heartbeat"
   | "retry-backoff"
   | "retries-exhausted"
   | "dependency-failed"
   | "stale-heartbeat"
   | "engine-busy"
-  | "binding"
-  | "side-effect-boundary"
-  | "other";
+  | "approval-decided-resume-required"
+  | "side-effect-boundary-crossed";
 
 export interface RunBlocker {
   kind: RunBlockerKind;
-  node_id: string | null;
+  node_id: string;
   iteration: number | null;
   reason: string;
-  unblocker: string | null;
-  waiting_since: string | null;
+  unblocker: string;
+  waiting_since: string;
   attempt: number | null;
   max_attempts: number | null;
 }
@@ -590,8 +554,8 @@ export interface RunTimelineForkPoint {
 
 export interface RunTimelineFrame {
   frame: number;
-  created_at: string | null;
-  content_hash: string | null;
+  created_at: string;
+  content_hash: string;
   forks: RunTimelineForkPoint[];
 }
 
@@ -622,8 +586,8 @@ export interface WorkflowEventsQueryInput extends WorkflowRunQueryInput {
 }
 
 export interface WorkflowLifecycleEvent {
-  sequence: number | null;
-  timestamp: string | null;
+  sequence: number;
+  timestamp: string;
   category: string;
   node_id: string | null;
   iteration: number | null;
@@ -648,10 +612,10 @@ export interface WorkflowNodeQueryInput extends WorkflowRunQueryInput {
 }
 
 export interface WorkflowNodeToolCall {
-  attempt: number | null;
-  sequence: number | null;
+  attempt: number;
+  sequence: number;
   name: string;
-  status: string | null;
+  status: string;
   duration_ms: number | null;
   error: string | null;
   input?: unknown;
@@ -659,10 +623,10 @@ export interface WorkflowNodeToolCall {
 }
 
 export interface WorkflowNodeAttempt {
-  attempt: number | null;
-  iteration: number | null;
-  state: string | null;
-  started_at: string | null;
+  attempt: number;
+  iteration: number;
+  state: string;
+  started_at: string;
   finished_at: string | null;
   duration_ms: number | null;
   error: string | null;
@@ -676,9 +640,9 @@ export interface WorkflowNodeValue {
   run_id: string;
   workflow_run_id: string;
   node_id: string;
-  iteration: number | null;
-  state: string | null;
-  status: string | null;
+  iteration: number;
+  state: string;
+  status: string;
   duration_ms: number | null;
   updated_at: string | null;
   attempt_counts: {
@@ -691,7 +655,7 @@ export interface WorkflowNodeValue {
   models: string[];
   agents: string[];
   output: {
-    source: string | null;
+    source: "cache" | "output-table" | "none";
     present: boolean;
   };
   attempts: WorkflowNodeAttempt[];
@@ -699,15 +663,15 @@ export interface WorkflowNodeValue {
 }
 
 export interface RunSnapshot {
-  sequence: number | null;
-  node_id: string | null;
-  iteration: number | null;
-  attempt: number | null;
+  sequence: number;
+  node_id: string;
+  iteration: number;
+  attempt: number;
   /** Durability tier the engine records as an integer. */
-  tier: number | null;
-  source: string | null;
+  tier: number;
+  source: string;
   label: string | null;
-  created_at: string | null;
+  created_at: string;
 }
 
 export interface RunSnapshotsValue {

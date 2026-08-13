@@ -60,6 +60,38 @@ describe("EVMBench definition", () => {
     ).rejects.toThrow("duplicate finding ID");
   });
 
+  it("rejects duplicate-key and symlinked definition snapshots", async () => {
+    const duplicate = createHarnessFixture();
+    const duplicateDefinition = await generateEvmbenchDefinition({
+      harnessRoot: duplicate.harnessRoot,
+      resolveTargetCommit: async () => "a".repeat(40)
+    });
+    writeEvmbenchDefinition(duplicate.benchmarkDir, duplicateDefinition);
+    const lockPath = path.join(duplicate.benchmarkDir, "benchmark.lock.json");
+    const lockText = fs.readFileSync(lockPath, "utf8");
+    fs.writeFileSync(
+      lockPath,
+      lockText.replace(
+        '  "schema_version": "ultrafuzz.evmbench.lock.v2",',
+        '  "schema_version": "ultrafuzz.evmbench.lock.v2",\n  "schema_version": "ultrafuzz.evmbench.lock.v2",'
+      ),
+      "utf8"
+    );
+    expect(() => loadEvmbenchDefinition(duplicate.benchmarkDir)).toThrow("duplicate property name");
+
+    const symlinked = createHarnessFixture();
+    const symlinkedDefinition = await generateEvmbenchDefinition({
+      harnessRoot: symlinked.harnessRoot,
+      resolveTargetCommit: async () => "a".repeat(40)
+    });
+    writeEvmbenchDefinition(symlinked.benchmarkDir, symlinkedDefinition);
+    const catalogPath = path.join(symlinked.benchmarkDir, "audit-catalog.json");
+    const displaced = path.join(path.dirname(symlinked.benchmarkDir), "displaced-catalog.json");
+    fs.renameSync(catalogPath, displaced);
+    fs.symlinkSync(displaced, catalogPath);
+    expect(() => loadEvmbenchDefinition(symlinked.benchmarkDir)).toThrow("cannot open regular file");
+  });
+
   it("reports a missing audit directory with the audit ID", async () => {
     const fixture = createHarnessFixture();
     fs.rmSync(fixture.auditDir, { recursive: true });

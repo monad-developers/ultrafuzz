@@ -4,6 +4,7 @@ import fs from "node:fs";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   NotFoundError,
@@ -67,7 +68,7 @@ import {
   modalBenchmarkStatusRow,
   observeTerminalModalRecoveryLifecycle,
   publicBenchmarkCollectionSecretValues,
-  readModalCollectResultFilesWithStatusRetry,
+  readModalCollectResultFiles,
   overseeModalBenchmarks,
   readOptionalModalSandboxText,
   publicEvalDiagnosticsDroppedFromEvidence,
@@ -78,6 +79,7 @@ import {
   terminateModalBenchmarkSandboxes,
   terminateModalBenchmarkTagScopes
 } from "../src/runner.js";
+import { currentRunState } from "./current-artifact-fixtures.js";
 
 const MODEL: ModalModelSpec = {
   slug: "model-one",
@@ -87,6 +89,11 @@ const MODEL: ModalModelSpec = {
   reasoning: "high",
   auth_mode: "api-key"
 };
+const ARTIFACTS_MODULE_PATH = fileURLToPath(new URL("../../artifacts/dist/index.js", import.meta.url));
+
+function stageKimiCredential(pending: string, destination: string, mode = "resume"): void {
+  execFileSync("node", ["-e", KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT, pending, destination, mode, ARTIFACTS_MODULE_PATH]);
+}
 
 describe("Modal benchmark capacity", () => {
   it("forwards the high-capacity resource profile to sandbox creation", async () => {
@@ -179,7 +186,7 @@ describe("Modal pinned launch image inspection", () => {
     expect(images.fromName).not.toHaveBeenCalled();
   });
 
-  it("uses the published name only for the exact v1 schema that has no persisted image ID", async () => {
+  it("rejects the historical v1 schema instead of resolving its mutable published name", async () => {
     const legacy = legacyImageInspectionState();
     const image = { imageId: "legacy-image-id" } as Image;
     const images = {
@@ -187,12 +194,9 @@ describe("Modal pinned launch image inspection", () => {
       fromName: vi.fn(async () => image)
     };
 
-    const inspected = await resolveModalLaunchStateImageForInspection(legacy, images);
+    await expect(resolveModalLaunchStateImageForInspection(legacy, images)).rejects.toThrow();
 
-    expect(inspected.state.image_id).toBe("legacy-image-id");
-    expect(inspected.state.fingerprints.image).toBe(fingerprintModalImage("shared-image", "legacy-image-id"));
-    expect(images.fromName).toHaveBeenCalledOnce();
-    expect(images.fromName).toHaveBeenCalledWith("shared-image");
+    expect(images.fromName).not.toHaveBeenCalled();
     expect(images.fromId).not.toHaveBeenCalled();
   });
 
@@ -209,7 +213,7 @@ describe("Modal pinned launch image inspection", () => {
     expect(images.fromName).not.toHaveBeenCalled();
   });
 
-  it("does not use the legacy name fallback for an invalid v1-shaped document", async () => {
+  it("also rejects a malformed v1 document without consulting either image lookup", async () => {
     const malformed = { ...legacyImageInspectionState(), launches: "not-an-array" };
     const images = {
       fromId: vi.fn(async () => ({ imageId: "image-a" }) as Image),
@@ -332,16 +336,29 @@ describe("Modal benchmark termination", () => {
 
   it("uses stable config lineage to terminate every valid generation and reject malformed candidates", async () => {
     const config = parseModalBenchmarkConfig({
-      schema_version: "ultrafuzz.modal.benchmark.v1",
+      schema_version: "ultrafuzz.modal.benchmark.v2",
       run_id: "immutable-run",
+      app_name: "ultrafuzz-evals",
+      image_name: "ultrafuzz-security-runner:latest",
       target: { repo: "https://github.com/example/target", ref: "main" },
       ground_truth: {
         repo: "https://github.com/example/ground-truth",
         ref: "main",
-        file: "findings.yml"
+        file: "findings.yml",
+        format: "ultrafuzz"
       },
-      braintrust: { project: "termination-test" },
-      models: [MODEL]
+      braintrust: {
+        project: "termination-test",
+        api_key_env: "BRAINTRUST_API_KEY",
+        judge_api_key_env: "OPENAI_API_KEY",
+        judge_url: "https://api.openai.com/v1/chat/completions",
+        judge_credential_ttl_seconds: 57_600
+      },
+      node_timeout_seconds: 7_200,
+      loops: 3,
+      models: [MODEL],
+      benchmark_execution: { excluded_node_ids: [] },
+      eval_reporting: { provider: "braintrust" }
     });
     const scopes = modalTerminationScopesForConfig(config, {
       config: "a".repeat(64),
@@ -730,6 +747,32 @@ describe("Modal result collection", () => {
         context
       )
     ).not.toThrow();
+    const runtimeDiagnosticPayload = Buffer.from(
+      JSON.stringify([{ code: "WORKFLOW_DEPENDENCY_INSTALL_FAILED", message: "registry request timed out" }]),
+      "utf8"
+    ).toString("base64url");
+    expect(() =>
+      assertSanitizedModalCollectedFiles(
+        {
+          ...files,
+          "worker.log": `2026-01-01T00:00:00.000Z eval-failure-diagnostics ${runtimeDiagnosticPayload}\n`
+        },
+        context
+      )
+    ).not.toThrow();
+    const launcherDiagnosticPayload = Buffer.from(
+      JSON.stringify([{ code: "EVAL_ROW_LAUNCH_FAILED", message: "launcher threw before returning a result" }]),
+      "utf8"
+    ).toString("base64url");
+    expect(() =>
+      assertSanitizedModalCollectedFiles(
+        {
+          ...files,
+          "worker.log": `2026-01-01T00:00:00.000Z eval-failure-diagnostics ${launcherDiagnosticPayload}\n`
+        },
+        context
+      )
+    ).not.toThrow();
     const secretLikePayload = Buffer.from(
       JSON.stringify([{ code: "WORKFLOW_SUBMISSION_FAILED", message: "api_key=sk-secret-value" }]),
       "utf8"
@@ -757,121 +800,24 @@ describe("Modal result collection", () => {
         ["opaque-secret-that-is-not-pattern-shaped"]
       )
     ).toThrow(/unsanitized Modal worker log/u);
+    const duplicateKeyPayload = Buffer.from(
+      '[{"code":"WORKFLOW_SUBMISSION_FAILED","message":"first","message":"shadowed"}]',
+      "utf8"
+    ).toString("base64url");
+    expect(() =>
+      assertSanitizedModalCollectedFiles(
+        {
+          ...files,
+          "worker.log": `2026-01-01T00:00:00.000Z eval-failure-diagnostics ${duplicateKeyPayload}\n`
+        },
+        context
+      )
+    ).toThrow(/unsanitized Modal worker log/u);
   });
 
-  it("retries transient invalid live status reads before collecting", async () => {
+  it("rejects the removed worker-status shape without retrying", async () => {
     const context = { generation: 1, attempt: 2 };
-    const validStatus = {
-      schema_version: "ultrafuzz.modal.worker-result.v2",
-      result_type: "partial",
-      generation: 8,
-      launch_generation: 1,
-      attempt: 2,
-      model_work_started: true,
-      counts: { succeeded: 12, failed: 0, remaining: 20 },
-      checkpoint: { age_ms: 0, digest: `sha256:${"a".repeat(64)}` },
-      exit_category: "live",
-      runtime_ms: 100,
-      usage: null,
-      diagnostic_code: "worker-live"
-    };
-    const transientStatus = {
-      schema_version: "ultrafuzz.modal.worker-status.v2",
-      updated_at: "2026-08-06T04:54:04.000Z",
-      stage: "partial",
-      category: "model-work",
-      model_work_started: true,
-      retryable: false,
-      generation: 1,
-      attempt: 2,
-      node_counts: { succeeded: 12, failed: 0, remaining: 20 },
-      error_code: "worker-live"
-    };
-    const readFiles = vi
-      .fn()
-      .mockResolvedValueOnce({
-        "status.json": `${JSON.stringify(transientStatus)}\n`,
-        "worker.log": ""
-      })
-      .mockResolvedValueOnce({
-        "status.json": `${JSON.stringify(validStatus)}\n`,
-        "worker.log": ""
-      });
-
-    const files = await readModalCollectResultFilesWithStatusRetry({
-      readFiles,
-      launch: context,
-      maxAttempts: 2,
-      retryDelayMs: 0
-    });
-
-    expect(readFiles).toHaveBeenCalledTimes(2);
-    expect(() => assertSanitizedModalCollectedFiles(files, context)).not.toThrow();
-  });
-
-  it("retries transient invalid status reads even when a terminal result is present", async () => {
-    const context = { generation: 1, attempt: 2 };
-    const partialStatus = {
-      schema_version: "ultrafuzz.modal.worker-result.v2",
-      result_type: "partial",
-      generation: 8,
-      launch_generation: 1,
-      attempt: 2,
-      model_work_started: true,
-      counts: { succeeded: 12, failed: 0, remaining: 20 },
-      checkpoint: { age_ms: 0, digest: `sha256:${"a".repeat(64)}` },
-      exit_category: "live",
-      runtime_ms: 100,
-      usage: null,
-      diagnostic_code: "worker-live"
-    };
-    const terminalResult = {
-      ...partialStatus,
-      result_type: "terminal",
-      generation: 9,
-      counts: { succeeded: 32, failed: 0, remaining: 0 },
-      exit_category: "finished",
-      diagnostic_code: "worker-finished"
-    };
-    const staleStatus = {
-      schema_version: "ultrafuzz.modal.worker-status.v2",
-      updated_at: "2026-08-06T04:54:04.000Z",
-      stage: "partial",
-      category: "model-work",
-      model_work_started: true,
-      retryable: false,
-      generation: 1,
-      attempt: 2,
-      node_counts: { succeeded: 12, failed: 0, remaining: 20 },
-      error_code: "worker-live"
-    };
-    const readFiles = vi
-      .fn()
-      .mockResolvedValueOnce({
-        "status.json": `${JSON.stringify(staleStatus)}\n`,
-        "result.json": `${JSON.stringify(terminalResult)}\n`,
-        "worker.log": ""
-      })
-      .mockResolvedValueOnce({
-        "status.json": `${JSON.stringify(partialStatus)}\n`,
-        "result.json": `${JSON.stringify(terminalResult)}\n`,
-        "worker.log": ""
-      });
-
-    const files = await readModalCollectResultFilesWithStatusRetry({
-      readFiles,
-      launch: context,
-      maxAttempts: 2,
-      retryDelayMs: 0
-    });
-
-    expect(readFiles).toHaveBeenCalledTimes(2);
-    expect(() => assertSanitizedModalCollectedFiles(files, context)).not.toThrow();
-  });
-
-  it("keeps rejecting permanently invalid collected status after bounded retries", async () => {
-    const context = { generation: 1, attempt: 2 };
-    const staleStatus = {
+    const removedStatus = {
       schema_version: "ultrafuzz.modal.worker-status.v2",
       updated_at: "2026-08-06T04:54:04.000Z",
       stage: "partial",
@@ -884,19 +830,109 @@ describe("Modal result collection", () => {
       error_code: "worker-live"
     };
     const readFiles = vi.fn().mockResolvedValue({
+      "status.json": `${JSON.stringify(removedStatus)}\n`,
+      "worker.log": ""
+    });
+
+    await expect(
+      readModalCollectResultFiles({
+        readFiles,
+        launch: context
+      })
+    ).rejects.toThrow(/worker-result|failed/u);
+    expect(readFiles).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects an invalid current status even when a terminal result is present", async () => {
+    const context = { generation: 1, attempt: 2 };
+    const terminalResult = {
+      schema_version: "ultrafuzz.modal.worker-result.v2",
+      result_type: "terminal",
+      generation: 9,
+      launch_generation: 1,
+      attempt: 2,
+      model_work_started: true,
+      counts: { succeeded: 32, failed: 0, remaining: 0 },
+      checkpoint: { age_ms: 0, digest: `sha256:${"a".repeat(64)}` },
+      exit_category: "finished",
+      runtime_ms: 100,
+      usage: null,
+      diagnostic_code: "worker-finished"
+    };
+    const readFiles = vi.fn().mockResolvedValue({
+      "status.json": '{"schema_version":"ultrafuzz.modal.worker-result.v2",',
+      "result.json": `${JSON.stringify(terminalResult)}\n`,
+      "worker.log": ""
+    });
+
+    await expect(
+      readModalCollectResultFiles({
+        readFiles,
+        launch: context
+      })
+    ).rejects.toThrow(/strict JSON|JSON document/u);
+    expect(readFiles).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a current worker result from another attempt without retrying", async () => {
+    const context = { generation: 1, attempt: 2 };
+    const staleStatus = {
+      schema_version: "ultrafuzz.modal.worker-result.v2",
+      result_type: "partial",
+      generation: 8,
+      launch_generation: 1,
+      attempt: 1,
+      model_work_started: true,
+      counts: { succeeded: 12, failed: 0, remaining: 20 },
+      checkpoint: { age_ms: 0, digest: `sha256:${"a".repeat(64)}` },
+      exit_category: "live",
+      runtime_ms: 100,
+      usage: null,
+      diagnostic_code: "worker-live"
+    };
+    const readFiles = vi.fn().mockResolvedValue({
       "status.json": `${JSON.stringify(staleStatus)}\n`,
       "worker.log": ""
     });
 
-    const files = await readModalCollectResultFilesWithStatusRetry({
-      readFiles,
-      launch: context,
-      maxAttempts: 2,
-      retryDelayMs: 0
-    });
+    await expect(
+      readModalCollectResultFiles({
+        readFiles,
+        launch: context
+      })
+    ).rejects.toThrow(/current launch attempt/u);
+    expect(readFiles).toHaveBeenCalledTimes(1);
+  });
 
-    expect(readFiles).toHaveBeenCalledTimes(2);
-    expect(() => assertSanitizedModalCollectedFiles(files, context)).toThrow(/unsanitized Modal status/u);
+  it("accepts current worker results with one exact read", async () => {
+    const context = { generation: 1, attempt: 2 };
+    const currentStatus = {
+      schema_version: "ultrafuzz.modal.worker-result.v2",
+      result_type: "partial",
+      generation: 8,
+      launch_generation: 1,
+      attempt: 2,
+      model_work_started: true,
+      counts: { succeeded: 12, failed: 0, remaining: 20 },
+      checkpoint: { age_ms: 0, digest: `sha256:${"a".repeat(64)}` },
+      exit_category: "live",
+      runtime_ms: 100,
+      usage: null,
+      diagnostic_code: "worker-live"
+    };
+    const expected = {
+      "status.json": `${JSON.stringify(currentStatus)}\n`,
+      "worker.log": ""
+    };
+    const readFiles = vi.fn().mockResolvedValue(expected);
+
+    await expect(
+      readModalCollectResultFiles({
+        readFiles,
+        launch: context
+      })
+    ).resolves.toEqual(expected);
+    expect(readFiles).toHaveBeenCalledTimes(1);
   });
 
   it("collects only an exactly reconciled privacy-safe recovery lifecycle", () => {
@@ -916,6 +952,13 @@ describe("Modal result collection", () => {
     const files = { "recovery-lifecycle.json": `${JSON.stringify(document)}\n` };
 
     expect(() => assertSanitizedModalCollectedFiles(files, context)).not.toThrow();
+    const serialized = files["recovery-lifecycle.json"];
+    const field = '"schema_version":"ultrafuzz.modal.recovery-lifecycle.v1"';
+    const duplicate = serialized.replace(field, `${field},"schema_version":"shadow-version"`);
+    expect(duplicate).not.toBe(serialized);
+    expect(() => assertSanitizedModalCollectedFiles({ "recovery-lifecycle.json": duplicate }, context)).toThrow(
+      /unsanitized Modal recovery lifecycle/u
+    );
     expect(() =>
       assertSanitizedModalCollectedFiles(
         {
@@ -1170,16 +1213,31 @@ function publicCollectionLineage(): Parameters<typeof assertPublicBenchmarkBundl
   const candidateCommit = "d".repeat(40);
   const configFingerprint = "a".repeat(64);
   const config = parseModalBenchmarkConfig({
-    schema_version: "ultrafuzz.modal.benchmark.v1",
+    schema_version: "ultrafuzz.modal.benchmark.v2",
     run_id: "public-eval",
+    app_name: "ultrafuzz-evals",
     image_name: "public-image",
-    braintrust: { project: "public-evals", api_key_env: "BRAINTRUST_API_KEY" },
+    braintrust: {
+      project: "public-evals",
+      api_key_env: "BRAINTRUST_API_KEY",
+      judge_api_key_env: "OPENAI_API_KEY",
+      judge_url: "https://api.openai.com/v1/chat/completions",
+      judge_credential_ttl_seconds: 57_600
+    },
     public_benchmark: {
       benchmark: "evmbench",
       lane: "smoke",
       runner_model_profile: MODEL.slug,
       candidate_repository: "https://github.com/monad-developers/ultrafuzz",
       candidate_commit: candidateCommit,
+      targets: [
+        {
+          id: "target-one",
+          repository: "https://github.com/example/target-one",
+          revision: "e".repeat(40),
+          framework: "foundry"
+        }
+      ],
       max_runtime_seconds: 3600
     },
     node_timeout_seconds: 900,
@@ -1231,7 +1289,64 @@ function publicCollectionLineage(): Parameters<typeof assertPublicBenchmarkBundl
   };
 }
 
+function writeCanonicalRecoveryPlan(runRoot: string, runId: string, logicalNodes: number): void {
+  fs.writeFileSync(
+    path.join(runRoot, "plan.json"),
+    JSON.stringify({
+      schema_version: "ultrafuzz.run-plan.v2",
+      run_id: runId,
+      mode: "run",
+      graph_fingerprint: "a".repeat(64),
+      config_fingerprint: "b".repeat(64),
+      redacted_config_fingerprint: "c".repeat(64),
+      execution: {
+        mode: "local",
+        retentionDays: 30,
+        resources: { cpu: 1, memoryMiB: 512, timeoutSeconds: 300 },
+        nodes: {},
+        providers: {}
+      },
+      topology: { path: "topology.json", logical_nodes: logicalNodes, expanded_nodes: logicalNodes },
+      rendered_prompts: [],
+      policy_posture: {
+        config: "pass",
+        topology: "pass",
+        prompts: "pass",
+        paths: "pass",
+        agents: "pass",
+        trust: "pass"
+      }
+    })
+  );
+}
+
+function writeRecoveryProbeArtifactsModule(root: string): string {
+  const modulePath = path.join(root, "recovery-probe-artifacts.mjs");
+  fs.writeFileSync(
+    modulePath,
+    `import fs from "node:fs";
+export function readRunState(filePath) {
+  return JSON.parse(fs.readFileSync(filePath, "utf8"));
+}
+export function readRunPlanDocument(filePath, expectedRunId) {
+  const plan = JSON.parse(fs.readFileSync(filePath, "utf8"));
+  if (plan.run_id !== expectedRunId) throw new Error("run plan identity mismatch");
+  return plan;
+}
+`
+  );
+  return modulePath;
+}
+
 describe("Modal canonical recovery probe", () => {
+  it("uses the pinned current artifact readers in the worker image", () => {
+    const command = modalCanonicalRecoveryProbeCommand("/data/logical-run/model-one");
+
+    expect(command.at(-1)).toBe("/opt/ultrafuzz/packages/artifacts/dist/index.js");
+    expect(command[2]).toContain("artifacts.readRunState(statePath)");
+    expect(command[2]).toContain("artifacts.readRunPlanDocument");
+  });
+
   it("reads durable transitions and completions independently of a stale mirrored status", () => {
     const mount = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-recovery-probe-"));
     const remoteRoot = "/data/logical-run/model-one";
@@ -1244,35 +1359,37 @@ describe("Modal canonical recovery probe", () => {
     );
     fs.writeFileSync(
       path.join(runRoot, "state.json"),
-      JSON.stringify({
-        status: "running",
-        created_at: "2026-01-01T00:00:00.000Z",
-        last_transition_at: "2026-01-01T00:09:50.000Z",
-        nodes: {
-          "complete-0": {
-            node_id: "complete-0",
-            logical_node_id: "complete",
-            status: "succeeded",
-            finished_at: "2026-01-01T00:09:40.000Z"
+      JSON.stringify(
+        currentRunState(
+          {
+            "complete-0": {
+              logical_node_id: "complete",
+              status: "succeeded",
+              finished_at: "2026-01-01T00:09:40.000Z"
+            },
+            "complete-1": {
+              logical_node_id: "complete",
+              status: "succeeded",
+              finished_at: "2026-01-01T00:09:45.000Z"
+            },
+            "pending-0": {
+              logical_node_id: "pending",
+              status: "succeeded",
+              finished_at: "2026-01-01T00:09:30.000Z"
+            },
+            "pending-1": { logical_node_id: "pending", status: "pending" }
           },
-          "complete-1": {
-            node_id: "complete-1",
-            logical_node_id: "complete",
-            status: "succeeded",
-            finished_at: "2026-01-01T00:09:45.000Z"
-          },
-          "pending-0": {
-            node_id: "pending-0",
-            logical_node_id: "pending",
-            status: "succeeded",
-            finished_at: "2026-01-01T00:09:30.000Z"
-          },
-          "pending-1": { node_id: "pending-1", logical_node_id: "pending", status: "pending" }
-        }
-      })
+          {
+            run_id: "durable-run",
+            status: "running",
+            created_at: "2026-01-01T00:00:00.000Z",
+            last_transition_at: "2026-01-01T00:09:50.000Z"
+          }
+        )
+      )
     );
-    fs.writeFileSync(path.join(runRoot, "plan.json"), JSON.stringify({ topology: { logical_nodes: 3 } }));
-    const command = modalCanonicalRecoveryProbeCommand(remoteRoot, mount);
+    writeCanonicalRecoveryPlan(runRoot, "durable-run", 3);
+    const command = modalCanonicalRecoveryProbeCommand(remoteRoot, mount, writeRecoveryProbeArtifactsModule(mount));
 
     expect(JSON.parse(execFileSync(command[0]!, command.slice(1), { encoding: "utf8" }))).toEqual({
       status: "running",
@@ -1284,7 +1401,7 @@ describe("Modal canonical recovery probe", () => {
     });
   });
 
-  it("treats a transient partial durable state read as unavailable canonical progress", () => {
+  it("rejects malformed present durable state instead of reporting unavailable canonical progress", () => {
     const mount = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-recovery-probe-partial-"));
     const remoteRoot = "/data/logical-run/model-one";
     const runRoot = path.join(
@@ -1299,13 +1416,59 @@ describe("Modal canonical recovery probe", () => {
     );
     fs.mkdirSync(runRoot, { recursive: true });
     fs.writeFileSync(path.join(runRoot, "state.json"), "\0".repeat(16));
-    fs.writeFileSync(path.join(runRoot, "plan.json"), JSON.stringify({ topology: { logical_nodes: 3 } }));
-    const command = modalCanonicalRecoveryProbeCommand(remoteRoot, mount);
+    writeCanonicalRecoveryPlan(runRoot, "durable-run", 3);
+    const command = modalCanonicalRecoveryProbeCommand(remoteRoot, mount, writeRecoveryProbeArtifactsModule(mount));
+
+    expect(() => execFileSync(command[0]!, command.slice(1), { encoding: "utf8" })).toThrow();
+  });
+
+  it("rejects malformed present durable plan instead of reporting unavailable canonical progress", () => {
+    const mount = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-recovery-probe-plan-"));
+    const remoteRoot = "/data/logical-run/model-one";
+    const runRoot = path.join(
+      mount,
+      "logical-run",
+      "model-one",
+      "workspace",
+      "target",
+      ".ultrafuzz",
+      "runs",
+      "durable-run"
+    );
+    fs.mkdirSync(runRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(runRoot, "state.json"),
+      JSON.stringify(currentRunState({}, { run_id: "durable-run", status: "running" }))
+    );
+    fs.writeFileSync(path.join(runRoot, "plan.json"), "{not-json");
+    const command = modalCanonicalRecoveryProbeCommand(remoteRoot, mount, writeRecoveryProbeArtifactsModule(mount));
+
+    expect(() => execFileSync(command[0]!, command.slice(1), { encoding: "utf8" })).toThrow();
+  });
+
+  it("reports unavailable canonical progress only when the durable run directory is absent", () => {
+    const mount = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-recovery-probe-absent-"));
+    const command = modalCanonicalRecoveryProbeCommand(
+      "/data/logical-run/model-one",
+      mount,
+      writeRecoveryProbeArtifactsModule(mount)
+    );
 
     expect(JSON.parse(execFileSync(command[0]!, command.slice(1), { encoding: "utf8" }))).toEqual({});
   });
 
-  it("uses durable worker rows instead of topology-only nodes for strict completion", () => {
+  it("rejects non-ENOENT durable run discovery errors", () => {
+    const mount = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-recovery-probe-discovery-"));
+    const remoteRoot = "/data/logical-run/model-one";
+    const runsRoot = path.join(mount, "logical-run", "model-one", "workspace", "target", ".ultrafuzz", "runs");
+    fs.mkdirSync(path.dirname(runsRoot), { recursive: true });
+    fs.writeFileSync(runsRoot, "not-a-directory");
+    const command = modalCanonicalRecoveryProbeCommand(remoteRoot, mount, writeRecoveryProbeArtifactsModule(mount));
+
+    expect(() => execFileSync(command[0]!, command.slice(1), { encoding: "utf8" })).toThrow();
+  });
+
+  it("settles only exact clean or genuine terminal worker rows", () => {
     const canonical = {
       status: "succeeded",
       successful_nodes: 2,
@@ -1328,6 +1491,28 @@ describe("Modal canonical recovery probe", () => {
 
     expect(isModalRecoveryResultComplete(canonical, workerStatus)).toBe(true);
     expect(isModalRecoveryResultComplete({ ...canonical, successful_nodes: 1 }, workerStatus)).toBe(false);
+
+    const genuineFailure: ModalWorkerStatus = {
+      ...workerStatus,
+      category: "genuine-task-outcome",
+      error_code: "genuine-evaluation-failure",
+      node_counts: { succeeded: 1, failed: 1, remaining: 0 }
+    };
+    const failedCanonical = { ...canonical, status: "failed", successful_nodes: 1 };
+    expect(isModalRecoveryResultComplete(failedCanonical, genuineFailure)).toBe(true);
+    expect(
+      isModalRecoveryResultComplete(failedCanonical, {
+        ...genuineFailure,
+        node_counts: { succeeded: 1, failed: 0, remaining: 1 }
+      })
+    ).toBe(false);
+    expect(
+      isModalRecoveryResultComplete(failedCanonical, {
+        ...genuineFailure,
+        category: "permanent-operational-failure",
+        error_code: "terminal-run-non-resumable"
+      })
+    ).toBe(false);
   });
 });
 
@@ -1353,8 +1538,14 @@ describe("Modal worker identity", () => {
     ).toBe("permanent-operational-failure");
   });
 
-  it("makes the compiled source tree readable by the non-root worker", () => {
-    expect(modalImageBuildCommand()).toContain("chown -R ubuntu:ubuntu /opt/ultrafuzz");
+  it("keeps the validator toolchain root-owned and installs a trusted image entrypoint", () => {
+    expect(modalImageBuildCommand()).not.toContain("chown -R ubuntu:ubuntu /opt/ultrafuzz");
+    expect(modalImageBuildCommand()).toContain("install -m 0555 -o root -g root");
+    expect(modalImageBuildCommand()).toContain("/usr/local/bin/ultrafuzz json validate");
+    expect(modalImageBuildCommand()).toContain("validator-smoke.valid.json");
+    expect(modalImageBuildCommand()).toContain("chmod -R a+rX,go-w /opt/ultrafuzz");
+    expect(modalImageBuildCommand()).toContain("node packages/modal/scripts/prepare-smithers-seed.mjs");
+    expect(modalImageBuildCommand()).toContain("/opt/ultrafuzz-smithers-seed");
     expect(modalImageBuildCommand()).toContain("@moonshot-ai/kimi-code@0.29.1");
   });
 
@@ -1408,7 +1599,7 @@ describe("Modal worker identity", () => {
       "utf8"
     );
 
-    execFileSync("node", ["-e", KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT, pending, destination]);
+    stageKimiCredential(pending, destination);
 
     const staged = JSON.parse(fs.readFileSync(destination, "utf8")) as {
       access_token?: string;
@@ -1422,6 +1613,83 @@ describe("Modal worker identity", () => {
     });
     expect(fs.existsSync(pending)).toBe(false);
     expect(fs.existsSync(lineage)).toBe(false);
+  });
+
+  it.each([
+    ["pending malformed", "pending", '{"access_token":"pending"'],
+    [
+      "pending duplicate",
+      "pending",
+      '{"access_token":"pending","refresh_token":"first","refresh_token":"shadow","expires_at":2100000,"expires_in":900}\n'
+    ],
+    ["destination malformed", "destination", '{"access_token":"destination"'],
+    [
+      "destination duplicate",
+      "destination",
+      '{"access_token":"destination","refresh_token":"first","refresh_token":"shadow","expires_at":2100000,"expires_in":900}\n'
+    ],
+    ["destination unsupported", "destination", "{}\n"]
+  ] as const)(
+    "rejects %s Kimi credential evidence without replacing or normalizing either file",
+    (_name, target, bytes) => {
+      const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-kimi-stage-invalid-"));
+      const pending = path.join(root, "kimi-code.json.pending");
+      const destination = path.join(root, "kimi-code.json");
+      const validPending =
+        '{"access_token":"pending-access","refresh_token":"pending-refresh","expires_at":2100000,"expires_in":900}\n';
+      const validDestination =
+        '{"access_token":"destination-access","refresh_token":"destination-refresh","expires_at":2200000,"expires_in":900}\n';
+      fs.writeFileSync(pending, target === "pending" ? bytes : validPending, { mode: 0o600 });
+      fs.writeFileSync(destination, target === "destination" ? bytes : validDestination, { mode: 0o600 });
+      const pendingBefore = fs.readFileSync(pending);
+      const destinationBefore = fs.readFileSync(destination);
+
+      expect(() => stageKimiCredential(pending, destination)).toThrow(/strict bounded JSON|unsupported shape/u);
+
+      expect(fs.readFileSync(pending)).toEqual(pendingBefore);
+      expect(fs.readFileSync(destination)).toEqual(destinationBefore);
+      expect(fs.existsSync(`${destination}.ultrafuzz-source-refresh-token.sha256`)).toBe(false);
+    }
+  );
+
+  it("moves a strict new Kimi provider envelope byte-for-byte without normalizing it", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-kimi-stage-new-"));
+    const pending = path.join(root, "kimi-code.json.pending");
+    const destination = path.join(root, "kimi-code.json");
+    const bytes = Buffer.from(
+      '{ "provider_state": { "generation": 2 }, "expires_in": 900, "expires_at": 2100000, "refresh_token": "fresh-refresh", "access_token": "fresh-access" }',
+      "utf8"
+    );
+    fs.writeFileSync(pending, bytes, { mode: 0o600 });
+
+    stageKimiCredential(pending, destination);
+
+    expect(fs.readFileSync(destination)).toEqual(bytes);
+    expect(fs.existsSync(pending)).toBe(false);
+  });
+
+  it("rejects symlinked Kimi credential evidence without following or replacing it", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-kimi-stage-symlink-"));
+    const pending = path.join(root, "kimi-code.json.pending");
+    const destination = path.join(root, "kimi-code.json");
+    const outside = path.join(root, "outside.json");
+    const pendingBytes = Buffer.from(
+      '{"access_token":"pending-access","refresh_token":"pending-refresh","expires_at":2100000,"expires_in":900}\n',
+      "utf8"
+    );
+    const outsideBytes = Buffer.from(
+      '{"access_token":"outside-access","refresh_token":"outside-refresh","expires_at":2200000,"expires_in":900}\n',
+      "utf8"
+    );
+    fs.writeFileSync(pending, pendingBytes, { mode: 0o600 });
+    fs.writeFileSync(outside, outsideBytes, { mode: 0o600 });
+    fs.symlinkSync(outside, destination);
+
+    expect(() => stageKimiCredential(pending, destination)).toThrow();
+
+    expect(fs.readFileSync(pending)).toEqual(pendingBytes);
+    expect(fs.lstatSync(destination).isSymbolicLink()).toBe(true);
+    expect(fs.readFileSync(outside)).toEqual(outsideBytes);
   });
 
   it("does not replace a rotated shared Modal Kimi credential with a stale ancestor", () => {
@@ -1451,7 +1719,7 @@ describe("Modal worker identity", () => {
     );
     fs.writeFileSync(lineage, `${createHash("sha256").update("ancestor-refresh").digest("hex")}\n`, "utf8");
 
-    execFileSync("node", ["-e", KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT, pending, destination]);
+    stageKimiCredential(pending, destination);
 
     expect(JSON.parse(fs.readFileSync(destination, "utf8"))).toMatchObject({
       access_token: "rotated-volume-access",
@@ -1489,7 +1757,7 @@ describe("Modal worker identity", () => {
     );
     fs.writeFileSync(lineage, `${createHash("sha256").update("previous-host-refresh").digest("hex")}\n`, "utf8");
 
-    execFileSync("node", ["-e", KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT, pending, destination, "fresh"]);
+    stageKimiCredential(pending, destination, "fresh");
 
     expect(JSON.parse(fs.readFileSync(destination, "utf8"))).toMatchObject({
       access_token: "current-host-access",
@@ -1531,9 +1799,9 @@ describe("Modal worker identity", () => {
       if (lineageCase === "corrupt") fs.writeFileSync(lineage, "not-a-sha\n", "utf8");
       if (lineageCase === "unreadable") fs.mkdirSync(lineage);
 
-      expect(() =>
-        execFileSync("node", ["-e", KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT, pending, destination, "fresh"])
-      ).toThrow(/Kimi credential lineage is missing or invalid/u);
+      expect(() => stageKimiCredential(pending, destination, "fresh")).toThrow(
+        /Kimi credential lineage is missing or invalid/u
+      );
       expect(JSON.parse(fs.readFileSync(destination, "utf8"))).toMatchObject({
         access_token: "rotated-volume-access",
         refresh_token: "rotated-volume-refresh",
@@ -1567,7 +1835,7 @@ describe("Modal worker identity", () => {
       "utf8"
     );
 
-    execFileSync("node", ["-e", KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT, pending, destination]);
+    stageKimiCredential(pending, destination);
 
     expect(JSON.parse(fs.readFileSync(destination, "utf8"))).toMatchObject({
       access_token: "fresh-access",

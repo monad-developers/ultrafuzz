@@ -1,7 +1,14 @@
 import { Args, Command } from "@oclif/core";
 import { replayRun } from "@ultrafuzz/runtime";
 
-import { cliIo, commandFromRuntime, emitCommandResult, globalFlags, projectRoot } from "../command-shared.js";
+import {
+  cliEntrypoint,
+  cliIo,
+  commandFromRuntime,
+  emitCommandResult,
+  globalFlags,
+  projectRoot
+} from "../command-shared.js";
 
 export default class Replay extends Command {
   static override summary = "Replay a linked run";
@@ -10,7 +17,12 @@ export default class Replay extends Command {
 
   async run(): Promise<void> {
     const { args, flags } = await this.parse(Replay);
-    const result = await replayRun({ projectRoot: projectRoot(flags), runId: args.runId, env: cliIo().env });
+    const result = await replayRun({
+      projectRoot: projectRoot(flags),
+      runId: args.runId,
+      ultrafuzzCliEntrypoint: cliEntrypoint(),
+      env: cliIo().env
+    });
     emitCommandResult(
       this,
       "replay",

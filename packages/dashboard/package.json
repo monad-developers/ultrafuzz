@@ -15,9 +15,9 @@
     "dist"
   ],
   "scripts": {
-    "build": "vite build --config frontend/vite.config.ts && tsc -p tsconfig.json && node scripts/copy-assets.mjs",
+    "build": "node scripts/generate-frontend-validators.mjs && vite build --config frontend/vite.config.ts && tsc -p tsconfig.json && node scripts/copy-assets.mjs && rm -rf dist/schema && cp -R schema dist/schema && node scripts/verify-schema-registry.mjs",
     "test": "pnpm --filter @ultrafuzz/dashboard... build && rm -rf dist-test && tsc -p tsconfig.test.json && node --test --test-concurrency=1 dist-test/test/*.test.js",
-    "typecheck": "pnpm --filter @ultrafuzz/dashboard^... build && tsc -p tsconfig.json --noEmit --pretty false && tsc -p frontend/tsconfig.json --noEmit --pretty false"
+    "typecheck": "pnpm --filter @ultrafuzz/dashboard^... build && node scripts/generate-frontend-validators.mjs && tsc -p tsconfig.json --noEmit --pretty false && tsc -p frontend/tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {
     "@ultrafuzz/artifacts": "workspace:*",
@@ -33,6 +33,8 @@
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^5.0.0",
     "@xyflow/react": "^12.8.4",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "vite": "^7.0.0"
