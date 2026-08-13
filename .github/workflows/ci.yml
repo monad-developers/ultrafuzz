@@ -98,6 +98,10 @@ jobs:
         if: matrix.lane == 'package-gates' || matrix.lane == 'runtime'
         run: pnpm --filter @ultrafuzz/modal... build
 
+      - name: Build release reporter dependencies
+        if: matrix.lane == 'cli-typecheck'
+        run: pnpm --filter @ultrafuzz/artifacts... build
+
       - name: Validate release lane
         run: >-
           pnpm -w validate:release --

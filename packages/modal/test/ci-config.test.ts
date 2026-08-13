@@ -706,6 +706,11 @@ describe("public Modal benchmark configuration", () => {
     );
     expect(modalDependentLaneBuild?.if).toBe("matrix.lane == 'package-gates' || matrix.lane == 'runtime'");
     expect(modalDependentLaneBuild?.run).toBe("pnpm --filter @ultrafuzz/modal... build");
+    const releaseReporterBuild = releaseValidation?.steps.find(
+      (step) => step.name === "Build release reporter dependencies"
+    );
+    expect(releaseReporterBuild?.if).toBe("matrix.lane == 'cli-typecheck'");
+    expect(releaseReporterBuild?.run).toBe("pnpm --filter @ultrafuzz/artifacts... build");
     expect(releaseValidation?.steps.find((step) => step.name === "Validate benchmark history charts")).toBeUndefined();
     expect(workflow.jobs["release-gates"]?.needs).toEqual(["draft-and-build-gates", "release-validation"]);
     expect(
