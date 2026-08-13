@@ -199,6 +199,7 @@ describe("artifact handoff validation", () => {
       "The command prints result=42.",
       "Run forge test --root=.",
       "Evidence: root=0xabc classification=error result=pass.",
+      "Record evidence using helper contracts in each finding note.",
       "risK=non-semantic Unicode evidence."
     ]) {
       expect(() =>
@@ -243,6 +244,22 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
             "review/triage.md": `Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.\n${standalone}`
           }
         })
+      ).toThrow(expect.objectContaining({ code: "DUPLICATED_REPORT_VOCABULARY" }));
+    }
+    for (const proseAlias of [
+      "For every finding, set the reachability token to renamed-public-trace.",
+      "Use renamed-public-trace for reachability.",
+      "Every finding must include reachability_note renamed-public-trace.",
+      "Write helper evidence under helperEvidence in every finding note."
+    ]) {
+      expect(
+        () =>
+          validateTopology(topology, {
+            promptTexts: {
+              "review/triage.md": `Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}. ${proseAlias}`
+            }
+          }),
+        proseAlias
       ).toThrow(expect.objectContaining({ code: "DUPLICATED_REPORT_VOCABULARY" }));
     }
     expect(() =>

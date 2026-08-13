@@ -1094,12 +1094,12 @@
         },
         {
           "not": {
-            "pattern": "(?=^[ \\t]*(?:(?:-|\\*|>|\\x60|\"|'|\\(|\\[|\\{|<|:)+[ \\t]*)*[-_0-9A-Za-z]{1,128}\\s*={1,2})[\\s\\S]*?(?:^|[^\\p{L}\\p{N}\\p{M}_%\\-])(?!(?:reachability|helper_proof|public_exploitability|dependency_scope|triage_reason|classification_reason|demotion_reason|stateful_failure_classification|likelihood|impact)[ \\t]*=(?!=)[ \\t]*(?![\"'([{<\\x60])(?=\\S))((?:[rR][eE][aA][cC][hH][aA][bB][iI][lL][iI][tT][yY]|[hH][eE][lL][pP][eE][rR]_[pP][rR][oO][oO][fF]|[pP][uU][bB][lL][iI][cC]_[eE][xX][pP][lL][oO][iI][tT][aA][bB][iI][lL][iI][tT][yY]|[dD][eE][pP][eE][nN][dD][eE][nN][cC][yY]_[sS][cC][oO][pP][eE]|[tT][rR][iI][aA][gG][eE]_[rR][eE][aA][sS][oO][nN]|[cC][lL][aA][sS][sS][iI][fF][iI][cC][aA][tT][iI][oO][nN]_[rR][eE][aA][sS][oO][nN]|[dD][eE][mM][oO][tT][iI][oO][nN]_[rR][eE][aA][sS][oO][nN]|[sS][tT][aA][tT][eE][fF][uU][lL]_[fF][aA][iI][lL][uU][rR][eE]_[cC][lL][aA][sS][sS][iI][fF][iI][cC][aA][tT][iI][oO][nN]|[lL][iI][kK][eE][lL][iI][hH][oO][oO][dD]|[iI][mM][pP][aA][cC][tT]))\\s*={1,2}\\s*"
+            "pattern": "(?:^|[^\\p{L}\\p{N}\\p{M}_%\\-])(?!(?:reachability|helper_proof|public_exploitability|dependency_scope|triage_reason|classification_reason|demotion_reason|stateful_failure_classification|likelihood|impact)[ \\t]*=(?!=)[ \\t]*(?![\"'([{<\\x60])(?=\\S))((?:[rR][eE][aA][cC][hH][aA][bB][iI][lL][iI][tT][yY]|[hH][eE][lL][pP][eE][rR]_[pP][rR][oO][oO][fF]|[pP][uU][bB][lL][iI][cC]_[eE][xX][pP][lL][oO][iI][tT][aA][bB][iI][lL][iI][tT][yY]|[dD][eE][pP][eE][nN][dD][eE][nN][cC][yY]_[sS][cC][oO][pP][eE]|[tT][rR][iI][aA][gG][eE]_[rR][eE][aA][sS][oO][nN]|[cC][lL][aA][sS][sS][iI][fF][iI][cC][aA][tT][iI][oO][nN]_[rR][eE][aA][sS][oO][nN]|[dD][eE][mM][oO][tT][iI][oO][nN]_[rR][eE][aA][sS][oO][nN]|[sS][tT][aA][tT][eE][fF][uU][lL]_[fF][aA][iI][lL][uU][rR][eE]_[cC][lL][aA][sS][sS][iI][fF][iI][cC][aA][tT][iI][oO][nN]))\\s*={1,2}\\s*"
           }
         },
         {
           "not": {
-            "pattern": "(?=^[ \\t]*(?:(?:-|\\*|>|\\x60|\"|'|\\(|\\[|\\{|<|:)+[ \\t]*)*[-_0-9A-Za-z]{1,128}\\s*={1,2})[\\s\\S]*?(?:^|[^\\p{L}\\p{N}\\p{M}_%\\-])(?!(?:reachability|helper_proof|public_exploitability|dependency_scope|triage_reason|classification_reason|demotion_reason|stateful_failure_classification|likelihood|impact)[ \\t]*=(?!=))([-_0-9A-Za-z]{1,128})[ \\t]*=(?!=)[ \\t]*(?:(?:\"|'|\\(|\\[|\\{|<|\\x60)[ \\t]*)*(?:public-entrypoint-trace|generated-public-wrapper-poc|helper-only|public-wrapper-required|production-bug|harness-defect|incomplete-spec|false-positive|blocked-unreproduced)(?::|[.;,*`\\s&)\\]}>\"']|$)"
+            "pattern": "(?:^|[^\\p{L}\\p{N}\\p{M}_%\\-])(?!(?:reachability|helper_proof|public_exploitability|dependency_scope|triage_reason|classification_reason|demotion_reason|stateful_failure_classification|likelihood|impact)[ \\t]*=(?!=))([-_0-9A-Za-z]{1,128})[ \\t]*=(?!=)[ \\t]*(?:(?:\"|'|\\(|\\[|\\{|<|\\x60)[ \\t]*)*(?:public-entrypoint-trace|generated-public-wrapper-poc|helper-only|public-wrapper-required|production-bug|harness-defect|incomplete-spec|false-positive|blocked-unreproduced)(?::|[.;,*`\\s&)\\]}>\"']|$)"
           }
         },
         {
@@ -1109,12 +1109,12 @@
         },
         {
           "not": {
-            "pattern": "(?=^[ \\t]*(?:(?:-|\\*|>|\\x60|\"|'|\\(|\\[|\\{|<|:)+[ \\t]*)*[-_0-9A-Za-z]{1,128}\\s*={1,2})[\\s\\S]*?(?:^|[^\\p{L}\\p{N}\\p{M}_%\\-])(reachability)[ \\t]*=(?!=)(?![ \\t]*(?:public-entrypoint-trace|generated-public-wrapper-poc|helper-only|public-wrapper-required)(?::|[.;,*`\\s&)\\]}>\"']|$))[ \\t]*"
+            "pattern": "(?:^|[^\\p{L}\\p{N}\\p{M}_%\\-])(reachability)[ \\t]*=(?!=)(?![ \\t]*(?:public-entrypoint-trace|generated-public-wrapper-poc|helper-only|public-wrapper-required)(?::|[.;,*`\\s&)\\]}>\"']|$))[ \\t]*"
           }
         },
         {
           "not": {
-            "pattern": "(?=^[ \\t]*(?:(?:-|\\*|>|\\x60|\"|'|\\(|\\[|\\{|<|:)+[ \\t]*)*[-_0-9A-Za-z]{1,128}\\s*={1,2})[\\s\\S]*?(?:^|[^\\p{L}\\p{N}\\p{M}_%\\-])(stateful_failure_classification)[ \\t]*=(?!=)(?![ \\t]*(?:production-bug|harness-defect|incomplete-spec|false-positive|blocked-unreproduced)(?::|[.;,*`\\s&)\\]}>\"']|$))[ \\t]*"
+            "pattern": "(?:^|[^\\p{L}\\p{N}\\p{M}_%\\-])(stateful_failure_classification)[ \\t]*=(?!=)(?![ \\t]*(?:production-bug|harness-defect|incomplete-spec|false-positive|blocked-unreproduced)(?::|[.;,*`\\s&)\\]}>\"']|$))[ \\t]*"
           }
         },
         {

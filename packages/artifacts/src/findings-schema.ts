@@ -11,12 +11,12 @@ import {
 } from "./findings.js";
 import {
   FINDING_NOTE_KEYS,
-  FINDING_NOTE_KEYS_ASCII_CASE_INSENSITIVE_PATTERN,
   FINDING_REACHABILITY_VALUES,
   FINDING_REPORT_ASSIGNMENT_KEY_PATTERN,
   FINDING_RISK_VALUES,
   STATEFUL_FAILURE_CLASSIFICATION_VALUES,
-  canonicalFindingNoteKey
+  canonicalFindingNoteKey,
+  isFindingReportMetadataKey
 } from "./finding-note-vocabulary.js";
 import { validateRegisteredJsonSchema } from "./json-schema-validator.js";
 import { hasAtMostCodePoints } from "./portable-json-primitives.js";
@@ -59,6 +59,11 @@ const uniqueTypedValuePattern = `(?:${[...FINDING_REACHABILITY_VALUES, ...STATEF
 )})`;
 const riskValuePattern = `(?:${FINDING_RISK_VALUES.join("|")})`;
 const valueWrapperPattern = `(?:(?:"|'|\\(|\\[|\\{|<|\\x60)[ \\t]*)*`;
+const globallyValidatedNoteKeyPattern = `(?:${FINDING_NOTE_KEYS.filter(
+  (key) => key !== "likelihood" && key !== "impact"
+)
+  .map(asciiCaseInsensitivePattern)
+  .join("|")})`;
 
 /** A report-bound note is assignment-shaped at its first meaningful token.
  * This lets free-form evidence retain ordinary code, command, and trace text
@@ -124,14 +129,18 @@ const unsupportedAliasAssignmentPatterns = reportAliasPatternGroups.map((pattern
   return `${assignmentBoundaryPattern}(?!(${supportedNoteKeyPattern})[ \\t]*={1,2})(?:(${aliasKeyPattern}))${anyAssignmentOperatorPattern}`;
 });
 const unsupportedBareHelperAliasPattern = `${assignmentBoundaryPattern}(_*[hH][eE][lL][pP][eE][rR]_*)${anyAssignmentOperatorPattern}`;
-const invalidCanonicalGrammarPattern = `${reportNoteSearchPrefixPattern}${assignmentBoundaryPattern}(?!${validCanonicalAssignmentPrefixPattern})(${FINDING_NOTE_KEYS_ASCII_CASE_INSENSITIVE_PATTERN})${anyAssignmentOperatorPattern}`;
-const unsupportedUniqueTypedAliasPattern = `${reportNoteSearchPrefixPattern}${assignmentBoundaryPattern}(?!${supportedNoteKeyPattern}[ \\t]*=(?!=))(${assignmentKeyPattern})${assignmentOperatorPrefixPattern}[ \\t]*${valueWrapperPattern}${uniqueTypedValuePattern}${typedValueBoundaryPattern}`;
+const invalidCanonicalGrammarPattern = `${assignmentBoundaryPattern}(?!${validCanonicalAssignmentPrefixPattern})(${globallyValidatedNoteKeyPattern})${anyAssignmentOperatorPattern}`;
+const unsupportedUniqueTypedAliasPattern = `${assignmentBoundaryPattern}(?!${supportedNoteKeyPattern}[ \\t]*=(?!=))(${assignmentKeyPattern})${assignmentOperatorPrefixPattern}[ \\t]*${valueWrapperPattern}${uniqueTypedValuePattern}${typedValueBoundaryPattern}`;
 const riskAliasKeyPattern =
   "(?:risk|severity|rating|risk_level|severity_level|impact_level|likelihood_level|impact_rating|likelihood_rating)";
 const unsupportedRiskTypedAliasPattern = `${reportNoteSearchPrefixPattern}${assignmentBoundaryPattern}(${riskAliasKeyPattern})${assignmentOperatorPrefixPattern}[ \\t]*${valueWrapperPattern}${riskValuePattern}${typedValueBoundaryPattern}`;
 
 function invalidTypedAssignmentPattern(key: string, values: readonly string[]): string {
   return `${reportNoteSearchPrefixPattern}${assignmentBoundaryPattern}(${key})${assignmentOperatorPrefixPattern}(?![ \\t]*(?:${values.join("|")})${typedValueBoundaryPattern})[ \\t]*`;
+}
+
+function invalidGlobalTypedAssignmentPattern(key: string, values: readonly string[]): string {
+  return `${assignmentBoundaryPattern}(${key})${assignmentOperatorPrefixPattern}(?![ \\t]*(?:${values.join("|")})${typedValueBoundaryPattern})[ \\t]*`;
 }
 
 function chunkPatternAlternatives(patterns: readonly string[]): string[][] {
@@ -159,6 +168,17 @@ const reportNoteKeyReference =
   /(?:(?:`|"|'|<|\(|\[))?([A-Za-z][-_0-9A-Za-z]{0,127})(?:(?:`|"|'|>|\)|\]))?\s+note(\s+key)?\b/giu;
 const reachabilityNoteValueReference =
   /(?:(?:`|"|'|<|\(|\[))?([A-Za-z0-9]+(?:-[A-Za-z0-9]+)+)(?:(?:`|"|'|>|\)|\]))?\s+(?:as\s+the\s+)?reachability\s+(?:classification|note|token|value)\b/iu;
+const reachabilityTokenValuePattern = "[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+";
+const reachabilityKeyWithValueReference = new RegExp(
+  `\\b(reachability(?:[_-](?:classification|note|token|value))?)\\b(?:[ \\t]+(?:classification|note|token|value))?[ \\t]*(?:=|:|is|to|as)?[ \\t]*(?:\\x60|"|'|<|\\(|\\[)?(${reachabilityTokenValuePattern})`,
+  "iu"
+);
+const valueForReachabilityReference = new RegExp(
+  `(?:\\x60|"|'|<|\\(|\\[)?(${reachabilityTokenValuePattern})(?:\\x60|"|'|>|\\)|\\])?[ \\t]+(?:as|for|to|under)[ \\t]+(?:the[ \\t]+)?(reachability(?:[_-](?:classification|note|token|value))?|reachability[ \\t]+(?:classification|note|token|value))\\b`,
+  "iu"
+);
+const directedNoteKeyReference =
+  /\b(?:under|using|via|(?:key|field)\s+(?:named|called))\s+(?:the\s+)?(?:`|"|'|<|\(|\[)?([A-Za-z][-_0-9A-Za-z]{0,127})(?:`|"|'|>|\)|\])?(?=[^.;\n]{0,120}\b(?:(?:all|each|every)\s+)?(?:(?:finding|issue|report)\s+)?notes?\b)/giu;
 const literalReachabilityValue = new RegExp(
   `(?<![-_0-9A-Za-z])(${FINDING_REACHABILITY_VALUES.join("|")})(?![-_0-9A-Za-z])`,
   "u"
@@ -178,6 +198,34 @@ export function findingReportSemanticAssignment(text: string): FindingReportSema
   const reachabilityReference = reachabilityNoteValueReference.exec(text);
   if (reachabilityReference !== null) {
     return { key: "reachability", operator: "=", value: reachabilityReference[1]! };
+  }
+
+  const keyedReachabilityReference = reachabilityKeyWithValueReference.exec(text);
+  if (keyedReachabilityReference !== null) {
+    return {
+      key: keyedReachabilityReference[1]!,
+      operator: "=",
+      value: keyedReachabilityReference[2]!
+    };
+  }
+
+  const reverseReachabilityReference = valueForReachabilityReference.exec(text);
+  if (reverseReachabilityReference !== null) {
+    return {
+      key: reverseReachabilityReference[2]!.replace(/[ \t]+/gu, "_"),
+      operator: "=",
+      value: reverseReachabilityReference[1]!
+    };
+  }
+
+  directedNoteKeyReference.lastIndex = 0;
+  for (const reference of text.matchAll(directedNoteKeyReference)) {
+    const identifier = reference[1]!;
+    const assignmentShaped =
+      canonicalFindingNoteKey(identifier) !== undefined || /[-_]/u.test(identifier) || /[a-z][A-Z]/u.test(identifier);
+    if (assignmentShaped && isFindingReportMetadataKey(identifier)) {
+      return { key: identifier, operator: "=", value: "<note-key>" };
+    }
   }
 
   reportNoteKeyReference.lastIndex = 0;
@@ -235,11 +283,11 @@ const findingNoteConstraintRules = [
   findingNoteConstraint(unsupportedUniqueTypedAliasPattern, "Unsupported report-bound finding note key"),
   findingNoteConstraint(unsupportedRiskTypedAliasPattern, "Unsupported report-bound finding note key"),
   findingNoteConstraint(
-    invalidTypedAssignmentPattern("reachability", FINDING_REACHABILITY_VALUES),
+    invalidGlobalTypedAssignmentPattern("reachability", FINDING_REACHABILITY_VALUES),
     "Unsupported finding reachability token"
   ),
   findingNoteConstraint(
-    invalidTypedAssignmentPattern("stateful_failure_classification", STATEFUL_FAILURE_CLASSIFICATION_VALUES),
+    invalidGlobalTypedAssignmentPattern("stateful_failure_classification", STATEFUL_FAILURE_CLASSIFICATION_VALUES),
     "Unsupported finding stateful_failure_classification token"
   ),
   findingNoteConstraint(

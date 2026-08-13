@@ -1307,7 +1307,13 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
     "((production_path=(public-entrypoint-trace)))",
     "  : outcome=[helper-only]",
     'attainability="helper-only"',
-    "attainability=(helper-only)"
+    "attainability=(helper-only)",
+    "Evidence follows; reachability=renamed-public-trace",
+    "prefix reachability=renamed-public-trace",
+    "The reachability=renamed-public-trace annotation is invalid",
+    "Observed. stateful_failure_classification=renamed",
+    'Evidence: helper_proof="quoted"',
+    "Observed. outcome=helper-only"
   ]) {
     assertNoteParity(semanticAlias, false);
     assert.notEqual(findingNoteAssignmentIssue(semanticAlias), undefined, semanticAlias);
