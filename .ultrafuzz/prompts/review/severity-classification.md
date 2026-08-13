@@ -59,7 +59,7 @@ unchanged, decide `impact` and `likelihood`, and write only the canonical final
 `severity` plus the three rationale fields. Do not emit `final_severity`,
 `upstream_severity`, note-token aliases, or compatibility fields.
 
-Also copy the strategy detection provenance to
+Also write the exact strategy detection provenance to
 {{artifact_path}}/strategy-detections.json using the exact pinned
 `{{schema_path}}/strategy-detections.schema.json`, without dropping or
 rewriting hits, so the final report can compute per-strategy detection rates
@@ -255,7 +255,7 @@ dependency-vendor drift in the reported artifacts.
 
 Save severity-classified findings to
 {{output_stage_findings_path}} as JSON.
-Also copy the strategy detection provenance to
+Also write the exact strategy detection provenance to
 {{artifact_path}}/strategy-detections.json without dropping or rewriting hits,
 so the final report can compute per-strategy detection rates from loop
 provenance.

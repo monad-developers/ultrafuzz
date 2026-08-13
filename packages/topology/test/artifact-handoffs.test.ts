@@ -71,6 +71,9 @@ describe("artifact handoff validation", () => {
       "Never do these things.\n- Change tests.\n- Write findings to {{output_findings_path}}.",
       "Never do these things.\n- Be sure to write findings to {{output_findings_path}}.",
       "Optional:\n- Be sure to write findings to {{output_findings_path}}.",
+      "## Optional\n\nWrite findings to {{output_findings_path}}.",
+      "## Never do this\n\nWrite findings to {{output_findings_path}}.",
+      "Optional output:\nReview the instructions.\nWrite findings to {{output_findings_path}}.",
       "Do not perform the following:\n1. Write findings to {{output_findings_path}}.",
       "It is forbidden:\n1. Write findings to {{output_findings_path}}.",
       "It is forbidden to do the following:\n\n- Write findings to {{output_findings_path}}.",
@@ -654,7 +657,8 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       "Final output:\nWrite findings to {{output_findings_path}}.",
       "Steps:\nWrite findings to {{output_findings_path}}.",
       "Actions:\nWrite findings to {{output_findings_path}}.",
-      "Artifact finalization:\nWrite findings to {{output_findings_path}}."
+      "Artifact finalization:\nWrite findings to {{output_findings_path}}.",
+      "## Optional\n\n## Required output\n\nWrite findings to {{output_findings_path}}."
     ]) {
       expect(() =>
         validateTopology(validTopology(), { promptTexts: { "strategies/strategy.md": prompt } })
@@ -748,7 +752,9 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
     for (const prompt of [
       "Write a result somewhere in {{artifact_dir}}.",
       "Write {{artifact_dir}}/results.txt.",
-      "Write findings to {{output_findings_path}}."
+      "Write findings to {{output_findings_path}}.",
+      "The destination is {{artifact_path}}/nested/results.txt. Write logs to {{artifact_path}}/other.txt.",
+      "Do not write {{artifact_path}}/nested/results.txt. Write logs to {{artifact_path}}/other.txt."
     ]) {
       expect(() => validateTopology(topology, { promptTexts: { "strategies/strategy.md": prompt } })).toThrow(
         expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" })
@@ -766,14 +772,81 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
     ).not.toThrow();
   });
 
-  it("does not duplicate destination checks for outputs governed by separate publication gates", () => {
+  it("requires destinations for primary and properties valid-empty outputs", () => {
+    const primaryTopology = validTopology();
+    primaryTopology.nodes[2] = {
+      ...primaryTopology.nodes[2]!,
+      outputs: [{ path: "result.txt", contract: "ultrafuzz/text@1", primary: true }]
+    };
+    expect(() =>
+      validateTopology(primaryTopology, {
+        promptTexts: { "strategies/strategy.md": "Produce the required result." }
+      })
+    ).toThrow(expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" }));
+    expect(() =>
+      validateTopology(primaryTopology, {
+        promptTexts: { "strategies/strategy.md": "Write {{artifact_path}}/result.txt." }
+      })
+    ).not.toThrow();
+
+    const propertiesTopology = validTopology();
+    propertiesTopology.nodes[2] = {
+      ...propertiesTopology.nodes[2]!,
+      outputs: [
+        { path: "report.md", contract: "ultrafuzz/nonempty-markdown@1", primary: true },
+        { path: "properties.json", contract: "ultrafuzz/properties@2", primary: false }
+      ]
+    };
+    expect(() =>
+      validateTopology(propertiesTopology, {
+        promptTexts: { "strategies/strategy.md": "Produce the required report." }
+      })
+    ).toThrow(expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" }));
+    expect(() =>
+      validateTopology(propertiesTopology, {
+        promptTexts: { "strategies/strategy.md": "Write {{artifact_path}}/properties.json." }
+      })
+    ).not.toThrow();
+  });
+
+  it("requires topology-derived findings destinations to resolve uniquely", () => {
+    const findingsTopology = validTopology();
+    findingsTopology.nodes[2] = {
+      ...findingsTopology.nodes[2]!,
+      outputs: [
+        { path: "first-findings.json", contract: "ultrafuzz/findings@2", primary: true },
+        { path: "second-findings.json", contract: "ultrafuzz/findings@2", primary: false }
+      ]
+    };
+    expect(() =>
+      validateTopology(findingsTopology, {
+        promptTexts: { "strategies/strategy.md": "Write findings to {{output_findings_path}}." }
+      })
+    ).toThrow(expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" }));
+
+    const stageTopology = validTopology();
+    stageTopology.nodes[2] = {
+      ...stageTopology.nodes[2]!,
+      outputs: [
+        { path: "triaged-findings.json", contract: "ultrafuzz/triaged-findings@1", primary: true },
+        { path: "findings.json", contract: "ultrafuzz/findings@2", primary: false }
+      ]
+    };
+    expect(() =>
+      validateTopology(stageTopology, {
+        promptTexts: { "strategies/strategy.md": "Write findings to {{output_stage_findings_path}}." }
+      })
+    ).toThrow(expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" }));
+  });
+
+  it("exempts only the canonical runtime-owned workspace patch output", () => {
     const topology = validTopology();
     topology.nodes[2] = {
       ...topology.nodes[2]!,
       outputs: [
         { path: "report.json", contract: "ultrafuzz/report@2", primary: true },
-        { path: "properties.json", contract: "ultrafuzz/properties@2", primary: false },
-        { path: "workspace.patch", contract: "ultrafuzz/text@1", primary: false }
+        { path: "workspace.patch", contract: "ultrafuzz/text@1", primary: false },
+        { path: "workspace-patch.json", contract: "ultrafuzz/workspace-patch@1", primary: false }
       ]
     };
     expect(() =>

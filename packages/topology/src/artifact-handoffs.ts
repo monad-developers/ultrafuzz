@@ -85,8 +85,8 @@ function validateOutputInstructions(
 ): void {
   const promptPath = node.prompt ?? (node.group ? `${node.group}/${node.id}.md` : `${node.id}.md`);
   for (const output of node.outputs) {
-    if (!needsExplicitValidEmptyDestination(output)) continue;
-    if (promptReferencesCurrentOutput(promptText, variables, output.path, output.contract)) continue;
+    if (!needsExplicitValidEmptyDestination(node, output)) continue;
+    if (promptReferencesCurrentOutput(node, promptText, variables, output.path, output.contract)) continue;
     throw topologyError(
       "MISSING_PROMPT_OUTPUT_INSTRUCTION",
       `Node \`${node.id}\` prompt \`${promptPath}\` must instruct the agent to write declared output \`${output.path}\`; contract \`${output.contract}\` accepts a valid-empty artifact, so omitting its destination would silently masquerade as an observed empty result`,
@@ -95,44 +95,69 @@ function validateOutputInstructions(
   }
 }
 
-function needsExplicitValidEmptyDestination(output: NormalizedTopologyNode["outputs"][number]): boolean {
-  // Patch captures and provenance-completeness catalogs have independent
-  // publication gates. Primary non-findings outputs likewise fail through
-  // their primary-output gate instead of this valid-empty prompt guard.
-  if (output.path === "workspace.patch" || output.path === "workspace-patch.json") return false;
-  if (output.contract === "ultrafuzz/invariant-ledger@1" || output.contract === "ultrafuzz/properties@2") return false;
-  if (output.primary && output.contract !== "ultrafuzz/findings@2") return false;
+function needsExplicitValidEmptyDestination(
+  node: NormalizedTopologyNode,
+  output: NormalizedTopologyNode["outputs"][number]
+): boolean {
+  // The runtime, rather than the agent, owns the canonical workspace patch
+  // pair. Requiring its prompt to tell the model to write either member would
+  // contradict the publication boundary that rejects agent-authored patches.
+  if (
+    output.path === "workspace.patch" &&
+    output.contract === "ultrafuzz/text@1" &&
+    node.outputs.some(
+      (candidate) => candidate.path === "workspace-patch.json" && candidate.contract === "ultrafuzz/workspace-patch@1"
+    )
+  ) {
+    return false;
+  }
   return artifactContractDefinition(output.contract).validEmptyExample !== undefined;
 }
 
 function promptReferencesCurrentOutput(
+  node: NormalizedTopologyNode,
   promptText: string,
   variables: PromptVariableReference[],
   outputPath: string,
   contract: string
 ): boolean {
-  if (
-    contract === "ultrafuzz/findings@2" &&
-    variables.some(
-      (variable) => variable.name === "output_findings_path" || variable.name === "output_stage_findings_path"
-    )
-  ) {
-    return (
-      hasWriteInstruction(promptText, "output_findings_path") ||
-      hasWriteInstruction(promptText, "output_stage_findings_path")
-    );
+  const findingsOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/findings@2");
+  if (contract === "ultrafuzz/findings@2" && findingsOutputs.length === 1 && findingsOutputs[0]!.path === outputPath) {
+    if (
+      variables.some((variable) => variable.name === "output_findings_path") &&
+      hasWriteInstruction(promptText, "output_findings_path")
+    ) {
+      return true;
+    }
   }
+  const stageFindingsOutputs = node.outputs.filter((output) =>
+    new Set(["ultrafuzz/findings@2", "ultrafuzz/triaged-findings@1", "ultrafuzz/severity-classified-findings@1"]).has(
+      output.contract
+    )
+  );
+  if (stageFindingsOutputs.length === 1 && stageFindingsOutputs[0]!.path === outputPath) {
+    if (
+      variables.some((variable) => variable.name === "output_stage_findings_path") &&
+      hasWriteInstruction(promptText, "output_stage_findings_path")
+    ) {
+      return true;
+    }
+  }
+  const escapedPath = escapeRegExp(outputPath);
+  const destinationBoundary = `(?=$|[\\s\\x60'".,;:!?)}\\]])`;
   if (
     variables.some(
       (variable) => variable.name === "artifact_path" && variable.argument === undefined && variable.path === outputPath
     )
   ) {
-    return hasWriteInstruction(promptText, "artifact_path");
+    return hasAffirmativeWriteInstruction(
+      promptText,
+      `\\{\\{\\s*artifact_path\\s*\\}\\}/${escapedPath}${destinationBoundary}`
+    );
   }
-  const escapedPath = escapeRegExp(outputPath);
   return hasAffirmativeWriteInstruction(
     promptText,
-    `\\{\\{\\s*artifact_dir\\s*\\}\\}/${escapedPath}(?=$|[\\s\\x60'".,;:!?)}\\]])`
+    `\\{\\{\\s*artifact_dir\\s*\\}\\}/${escapedPath}${destinationBoundary}`
   );
 }
 
@@ -274,6 +299,17 @@ function hasNonRequiredDirectiveScope(
     .filter((line) => line.trim() !== "" && !/^\s*(?:[-*+>]|\d+\.)\s+/u.test(line))
     .at(-1)
     ?.trim();
+  const markdownScopeHeading = nearestMarkdownDirectiveHeading(structuralPrefix);
+  const blockScopeHeading = lines
+    .filter((line) => /:\s*$/u.test(line.trim()))
+    .at(-1)
+    ?.trim();
+  if (
+    (markdownScopeHeading !== undefined && isNonRequiredDirectiveHeading(markdownScopeHeading)) ||
+    (blockScopeHeading !== undefined && isNonRequiredDirectiveHeading(blockScopeHeading))
+  ) {
+    return true;
+  }
   if (ignoreCompletedSentence && previousStructuralLine !== undefined && /[.!?]\s*$/u.test(previousStructuralLine)) {
     return false;
   }
@@ -289,6 +325,15 @@ function hasNonRequiredDirectiveScope(
       : undefined) ??
     "";
   return isNonRequiredDirectiveHeading(structuralHeading);
+}
+
+function nearestMarkdownDirectiveHeading(promptPrefix: string): string | undefined {
+  for (const line of promptPrefix.split(/\r?\n/u).reverse()) {
+    const trimmed = line.trim();
+    const markdownHeading = trimmed.match(/^#{1,6}\s+(.+?)(?:\s+#+)?$/u);
+    if (markdownHeading !== null) return markdownHeading[1]!.trim();
+  }
+  return undefined;
 }
 
 function isNonRequiredDirectiveHeading(heading: string): boolean {
