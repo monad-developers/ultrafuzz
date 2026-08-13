@@ -99,11 +99,27 @@ const catalogSchema = z
     profiles: z.record(safeIdSchema, profileSchema)
   })
   .superRefine((catalog, context) => {
-    if (catalog.profiles[DEFAULT_AUDIT_PROFILE_ID] === undefined) {
+    const defaultProfile = catalog.profiles[DEFAULT_AUDIT_PROFILE_ID];
+    if (defaultProfile === undefined) {
       context.addIssue({
         code: "custom",
         path: ["profiles", DEFAULT_AUDIT_PROFILE_ID],
         message: `required default audit profile \`${DEFAULT_AUDIT_PROFILE_ID}\` is not defined; define profiles.${DEFAULT_AUDIT_PROFILE_ID}`
+      });
+      return;
+    }
+    if (Object.keys(defaultProfile.settings).length > 0) {
+      context.addIssue({
+        code: "custom",
+        path: ["profiles", DEFAULT_AUDIT_PROFILE_ID, "settings"],
+        message: "default audit profile must not override settings"
+      });
+    }
+    if (defaultProfile.topology_path !== undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["profiles", DEFAULT_AUDIT_PROFILE_ID, "topology_path"],
+        message: "default audit profile must use the project topology"
       });
     }
   });
