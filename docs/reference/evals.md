@@ -145,7 +145,7 @@ targets:
   - id: target
     repo: "https://github.com/scfuzzbench/aave-v4-scfuzzbench"
     ref: "edd6c82721512540c8c90e7a36a4a8e19fd7bdf3"
-    ground_truth: aave-v4-scfuzzbench/findings.yml
+    ground_truth: aave-v4/findings.yml
     held_out_paths: ["tests/recon"]
 ```
 
