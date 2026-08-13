@@ -84,3 +84,9 @@ Use only the authoritative report-bound note vocabulary:
 {{finding_reachability_vocabulary}}
 
 {{finding_note_key_vocabulary}}
+
+Write the normalized findings JSON to `{{output_findings_path}}`; use `[]` when no concrete finding is supportable.
+
+Write the generated-test manifest to `{{artifact_dir}}/generated-tests.json`.
+Use a contract-valid manifest with an empty `generated_tests` array when no
+test file was produced.

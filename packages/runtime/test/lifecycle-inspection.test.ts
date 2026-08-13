@@ -100,7 +100,7 @@ ${requiredCommand === undefined ? "" : `    required_commands:\n      - ${requir
   );
   fs.appendFileSync(
     path.join(project, ".ultrafuzz", "prompts", "setup", "project-discovery.md"),
-    "\n{{finding_reachability_vocabulary}}\n{{finding_note_key_vocabulary}}\n",
+    "\n{{finding_reachability_vocabulary}}\n{{finding_note_key_vocabulary}}\nWrite findings to {{output_findings_path}}.\n",
     "utf8"
   );
 }

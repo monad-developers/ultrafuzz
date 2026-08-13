@@ -85,3 +85,10 @@ and stderr. Do not append `2>&1`, `| head`, `| tail`, or any other shell
 shortening syntax.
 
 Make sure compilation is passing but do not fix any failing tests.
+
+Write structured findings to `{{output_findings_path}}`. Use an empty JSON
+array if no source-backed production finding is confirmed.
+
+Write the generated-test manifest to `{{artifact_dir}}/generated-tests.json`.
+Use a contract-valid manifest with an empty `generated_tests` array when no
+test file was produced.

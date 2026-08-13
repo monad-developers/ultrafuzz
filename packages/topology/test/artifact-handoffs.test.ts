@@ -505,4 +505,187 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       })
     ).toThrow(expect.objectContaining({ code: "DUPLICATED_REPORT_VOCABULARY" }));
   });
+  it("requires explicit destinations for outputs the runtime can replace with valid-empty artifacts", () => {
+    expect(() =>
+      validateTopology(validTopology(), {
+        promptTexts: { "strategies/strategy.md": "Investigate the target and report your result." }
+      })
+    ).toThrow(
+      expect.objectContaining({
+        code: "MISSING_PROMPT_OUTPUT_INSTRUCTION",
+        message: expect.stringMatching(/strategy.*strategies\/strategy\.md.*findings\.json.*valid-empty/iu),
+        details: expect.objectContaining({
+          nodeId: "strategy",
+          promptPath: "strategies/strategy.md",
+          path: "findings.json",
+          contract: "ultrafuzz/findings@1"
+        })
+      })
+    );
+
+    expect(() =>
+      validateTopology(validTopology(), {
+        promptTexts: { "strategies/strategy.md": "Write findings to {{output_findings_path}}." }
+      })
+    ).not.toThrow();
+    for (const prompt of [
+      "Write confirmed findings, if any, to {{output_findings_path}}.",
+      "Do not fail to write findings to {{output_findings_path}}.",
+      "Never forget to write findings to {{output_findings_path}}.",
+      "Do not omit writing findings to {{output_findings_path}}.",
+      "Without fail, write findings to {{output_findings_path}}.",
+      "Instructions:\nWrite findings to {{output_findings_path}}.",
+      "At completion:\nWrite findings to {{output_findings_path}}.",
+      "Final deliverable:\n- Write findings to {{output_findings_path}}.",
+      "Results:\n- Write findings to {{output_findings_path}}.",
+      "Strategy: {{strategy}}\nCurrent artifact dir: {{artifact_path}}\nWrite findings to {{output_findings_path}}.",
+      "Investigate the project and write findings to {{output_findings_path}}.",
+      "Please write findings to {{output_findings_path}}.",
+      "Always write findings to {{output_findings_path}}.",
+      "Ensure you write findings to {{output_findings_path}}.",
+      "You should write findings to {{output_findings_path}}.",
+      "Remember to write findings to {{output_findings_path}}.",
+      "You need to write findings to {{output_findings_path}}.",
+      "Be sure to write findings to {{output_findings_path}}.",
+      "Make sure to write findings to {{output_findings_path}}.",
+      "The agent is required to write findings to {{output_findings_path}}.",
+      "- Do not edit source files\n- Write findings to {{output_findings_path}}.",
+      "Do not perform any of the following:\n- Modify source files.\n\nRequired output: Write findings to {{output_findings_path}}.",
+      "Do not write findings to {{output_findings_path}}. Write findings to {{output_findings_path}}.",
+      "Do not write findings to {{output_findings_path}}.\nWrite findings to {{output_findings_path}}.",
+      "Write all confirmed findings except duplicates to {{output_findings_path}}.",
+      "Required output: write findings to {{output_findings_path}}.",
+      "Required output:\n- Write findings to {{output_findings_path}}.",
+      "Required output:\n* Write findings to {{output_findings_path}}.",
+      "Required output:\n> Write findings to {{output_findings_path}}.",
+      "Deliverables:\nWrite findings to {{output_findings_path}}.",
+      "Mandatory output:\nWrite findings to {{output_findings_path}}.",
+      "You must:\nWrite findings to {{output_findings_path}}.",
+      "Required deliverables:\nWrite findings to {{output_findings_path}}.",
+      "Mandatory deliverable:\nWrite findings to {{output_findings_path}}."
+    ]) {
+      expect(() =>
+        validateTopology(validTopology(), { promptTexts: { "strategies/strategy.md": prompt } })
+      ).not.toThrow();
+    }
+
+    expect(() =>
+      validateTopology(validTopology(), {
+        promptTexts: {
+          "strategies/strategy.md":
+            "Do not perform any of the following:\n- Write findings to {{output_findings_path}}.\n\nRequired output:\n- Write findings to {{output_findings_path}}."
+        }
+      })
+    ).not.toThrow();
+
+    for (const prompt of [
+      "Output is discretionary:\nWrite findings to {{output_findings_path}}.",
+      "Discouraged outputs:\n- Write findings to {{output_findings_path}}.",
+      "Suggested output:\nWrite findings to {{output_findings_path}}.",
+      "Recommended output:\nWrite findings to {{output_findings_path}}.",
+      "Example output:\nWrite findings to {{output_findings_path}}.",
+      "Output is elective:\nWrite findings to {{output_findings_path}}.",
+      "Output is merely illustrative:\nWrite findings to {{output_findings_path}}.",
+      "Write findings to {{output_findings_path}} when convenient.",
+      "Write findings to {{output_findings_path}} at your discretion.",
+      "Write findings to {{output_findings_path}} when appropriate.",
+      "Write findings to {{output_findings_path}} as needed.",
+      "Write findings to {{output_findings_path}} where helpful.",
+      "Write findings to {{output_findings_path}} should you wish.",
+      "Possible output:\nWrite findings to {{output_findings_path}}.",
+      "For reference only:\nWrite findings to {{output_findings_path}}.",
+      "Recommendation output:\nWrite findings to {{output_findings_path}}.",
+      "Nonessential output:\nWrite findings to {{output_findings_path}}.",
+      "Candidate output:\nWrite findings to {{output_findings_path}}.",
+      "Investigate. Write findings to {{output_findings_path}} when useful.",
+      "Write findings to {{output_findings_path}} when warranted.",
+      "Write findings to {{output_findings_path}} where beneficial.",
+      "Write findings to {{output_findings_path}} as appropriate.",
+      "Write findings to {{output_findings_path}} on request.",
+      "Required output:\nBe sure to write findings to {{output_findings_path}} if useful.",
+      "Results:\nMake sure to write findings to {{output_findings_path}} when warranted.",
+      "Write findings to {{output_findings_path}} upon request.",
+      "Write findings to {{output_findings_path}} unless unnecessary.",
+      "Write findings to {{output_findings_path}} provided they are useful.",
+      "Write findings to {{output_findings_path}} only as warranted.",
+      "Write findings to {{output_findings_path}} contingent on usefulness.",
+      "Write findings to {{output_findings_path}} subject to need.",
+      "Write findings to {{output_findings_path}} whenever beneficial.",
+      "Write findings to {{output_findings_path}} depending on circumstances.",
+      "Write findings to {{output_findings_path}} in case they help.",
+      "Write findings to {{output_findings_path}}. This is optional.",
+      "Write findings to {{output_findings_path}}, should findings exist.",
+      "Write findings to {{output_findings_path}} except when unnecessary.",
+      "Write findings to {{output_findings_path}} at need.",
+      "Write findings to {{output_findings_path}} depending upon circumstances.",
+      "Write findings to {{output_findings_path}} to the extent helpful.",
+      "Write findings to {{output_findings_path}}. Publication is optional.",
+      "Write findings to {{output_findings_path}}; omit when unnecessary.",
+      "Write findings to {{output_findings_path}} only when valuable.",
+      "Write findings to {{output_findings_path}} assuming findings exist.",
+      "Write findings to {{output_findings_path}} in the event findings exist.",
+      "Investigate first. Write an assessment of the existing file at {{output_findings_path}}.",
+      "Investigate first. Write findings to {{output_findings_path}} if a finding exists."
+    ]) {
+      expect(
+        () => validateTopology(validTopology(), { promptTexts: { "strategies/strategy.md": prompt } }),
+        prompt
+      ).toThrow(expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" }));
+    }
+
+    expect(() =>
+      validateTopology(validTopology(), {
+        promptTexts: {
+          "strategies/strategy.md":
+            "---\nid: strategy\ndisplay_name: Write findings to {{output_findings_path}}\n---\nInvestigate the target."
+        }
+      })
+    ).toThrow(expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" }));
+  });
+
+  it("applies valid-empty checks generically and accepts only the exact current output destination", () => {
+    const topology = validTopology();
+    topology.nodes[2] = {
+      ...topology.nodes[2]!,
+      outputs: [
+        { path: "report.md", contract: "ultrafuzz/nonempty-markdown@1", primary: true },
+        { path: "nested/results.json", contract: "ultrafuzz/json-array@1", primary: false }
+      ]
+    };
+
+    for (const prompt of [
+      "Write a result somewhere in {{artifact_dir}}.",
+      "Write {{artifact_dir}}/results.json.",
+      "Write findings to {{output_findings_path}}."
+    ]) {
+      expect(() => validateTopology(topology, { promptTexts: { "strategies/strategy.md": prompt } })).toThrow(
+        expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" })
+      );
+    }
+    expect(() =>
+      validateTopology(topology, {
+        promptTexts: { "strategies/strategy.md": "Write {{artifact_path}}/nested/results.json." }
+      })
+    ).not.toThrow();
+    expect(() =>
+      validateTopology(topology, {
+        promptTexts: { "strategies/strategy.md": "Write {{artifact_dir}}/nested/results.json." }
+      })
+    ).not.toThrow();
+  });
+
+  it("does not demand instructions for outputs the runtime never synthesizes", () => {
+    const topology = validTopology();
+    topology.nodes[2] = {
+      ...topology.nodes[2]!,
+      outputs: [
+        { path: "report.json", contract: "ultrafuzz/report@1", primary: true },
+        { path: "properties.json", contract: "ultrafuzz/properties@1", primary: false },
+        { path: "workspace.patch", contract: "ultrafuzz/text@1", primary: false }
+      ]
+    };
+    expect(() =>
+      validateTopology(topology, { promptTexts: { "strategies/strategy.md": "Produce the required report." } })
+    ).not.toThrow();
+  });
 });
