@@ -2255,6 +2255,7 @@
         },
         "files": {
           "minItems": 1,
+          "maxItems": 10000,
           "type": "array",
           "items": {
             "type": "object",
@@ -2290,6 +2291,7 @@
           }
         },
         "counted_ranges": {
+          "maxItems": 100000,
           "type": "array",
           "items": {
             "type": "object",
@@ -2325,6 +2327,7 @@
         },
         "zero_coverage_components": {
           "minItems": 0,
+          "maxItems": 10000,
           "type": "array",
           "items": {
             "type": "object",
