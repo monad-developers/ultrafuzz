@@ -6745,7 +6745,17 @@ function unscopedCoverageScoreKinds(line: string, requireCoverageContext: boolea
       );
       const scoped = scopes.some((scope) => {
         const midpoint = scope.index! + scope[0].length / 2;
-        return midpoint >= regionStart && midpoint < regionEnd;
+        if (midpoint < regionStart || midpoint >= regionEnd) return false;
+        if (scope.index! >= start) return true;
+        const scopeEnd = scope.index! + scope[0].length;
+        const colon = clause.indexOf(":", scopeEnd);
+        return !(
+          colon >= scopeEnd &&
+          colon < start &&
+          /\b(?:coverage|lcov|covg-eval|standardized[ \t]+(?:measurement|rate|result|score))\b/iu.test(
+            clause.slice(colon + 1, start)
+          )
+        );
       });
       if (scoped) continue;
       if (requireCoverageContext && !coverageMetricScoreLanguageContext(contextRegion)) continue;
@@ -6757,9 +6767,11 @@ function unscopedCoverageScoreKinds(line: string, requireCoverageContext: boolea
 
 function coverageMetricScoreLanguageContext(value: string): boolean {
   const score = "(?:\\b(?:100(?:\\.0+)?|\\d{1,2}(?:\\.\\d+)?)\\s*%|\\b\\d+\\s*\\/\\s*\\d+\\b)";
-  const coverageMetric = "(?:coverage|lcov|covg-eval|standardized[ \\t]+(?:measurement|rate|result|score))";
+  const coverageMetric =
+    "(?:(?<!insurance[ \\t])coverage|lcov|covg-eval|standardized[ \\t]+(?:measurement|rate|result|score))";
   const metricQualifier = "(?:branch|code|function|line|overall|range|source|standardized|test)";
-  const metricLink = "(?::|=|at\\b|is\\b|measured\\b|of\\b|reached\\b|remained\\b|was\\b|stood[ \\t]+at\\b)?";
+  const approximation = "(?:about|approximately|nearly|roughly)";
+  const metricLink = `(?::|=|at\\b|of\\b|(?:is|was|measured|reached|remained|hit|registered|reported|totaled|yielded)\\b(?:[ \\t]+${approximation})?|came[ \\t]+to\\b|accounted[ \\t]+for\\b|stood[ \\t]+at\\b)?`;
   return new RegExp(
     `(?:${coverageMetric}[ \\t]*(?:(?:measurement|percentage|rate|result|score)[ \\t]*)?${metricLink}[ \\t]*${score}|${score}[ \\t]*(?:${metricQualifier}[ \\t]+)?${coverageMetric})`,
     "iu"
