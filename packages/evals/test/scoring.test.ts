@@ -133,6 +133,7 @@ function canonicalReport(issues: unknown[]): Record<string, unknown> {
     },
     coverage_evidence: {
       schema_version: "ultrafuzz.coverage-evidence.v1",
+      lcov: { path: "echidna/covered.test.lcov", sha256: "a".repeat(64) },
       views: [
         { scope: "selected-range", covered_ranges: 1, total_ranges: 1 },
         { scope: "production-source", covered_ranges: 1, total_ranges: 2 }
@@ -172,7 +173,7 @@ function canonicalReport(issues: unknown[]): Record<string, unknown> {
           covered: false
         }
       ],
-      zero_coverage_components: [{ path: "src/Untouched.sol", kind: "production" }]
+      zero_coverage_components: [{ path: "src/Untouched.sol", kind: "production", start_line: 1, line_count: 1 }]
     }
   };
 }
@@ -743,7 +744,7 @@ describe("deterministic scorer math", () => {
         total: 1,
         quorum: 1,
         model: "gpt-5.5",
-        prompt_version: "ultrafuzz-eval-judge-v11-scoped-coverage-evidence",
+        prompt_version: "ultrafuzz-eval-judge-v12-complete-coverage-evidence",
         aggregate_decision: { votes: 1 },
         member_votes: [{ member: 1, rationale: "custom judge" }]
       }
@@ -867,7 +868,7 @@ describe("deterministic scorer math", () => {
         quorum: 3,
         model: "gpt-5.5",
         reasoning_effort: "xhigh",
-        prompt_version: "ultrafuzz-eval-judge-v11-scoped-coverage-evidence",
+        prompt_version: "ultrafuzz-eval-judge-v12-complete-coverage-evidence",
         vote_split: [
           { classification: "true-positive", matched_ground_truth_bug_id: "BUG-1", votes: 3 },
           { classification: "false-positive", votes: 1 }
@@ -1107,7 +1108,7 @@ describe("deterministic scorer math", () => {
         availability: "available",
         scoring: {
           judge_mode: "deterministic",
-          judge_prompt_version: "ultrafuzz-eval-judge-v11-scoped-coverage-evidence",
+          judge_prompt_version: "ultrafuzz-eval-judge-v12-complete-coverage-evidence",
           judge_models: ["gpt-5.5"],
           judge_panel: { total: 3, quorum: 2 },
           ground_truth_sha256: { "target-a": expect.stringMatching(/^sha256:/u) }

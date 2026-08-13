@@ -123,6 +123,10 @@
     "schema_file": "coverage-evidence.schema.json",
     "valid": {
       "schema_version": "ultrafuzz.coverage-evidence.v1",
+      "lcov": {
+        "path": "echidna/covered.test.lcov",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
       "views": [
         { "scope": "selected-range", "covered_ranges": 1, "total_ranges": 1 },
         { "scope": "production-source", "covered_ranges": 1, "total_ranges": 2 }
@@ -162,10 +166,21 @@
           "covered": false
         }
       ],
-      "zero_coverage_components": [{ "path": "src/Critical.sol", "kind": "production" }]
+      "zero_coverage_components": [
+        {
+          "path": "src/Critical.sol",
+          "kind": "production",
+          "start_line": 1,
+          "line_count": 1
+        }
+      ]
     },
     "invalid": {
       "schema_version": "ultrafuzz.coverage-evidence.v1",
+      "lcov": {
+        "path": "echidna/covered.test.lcov",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
       "views": [
         { "scope": "selected-range", "covered_ranges": 1, "total_ranges": 1 },
         { "scope": "production-source", "covered_ranges": 1, "total_ranges": 2 }
@@ -205,7 +220,14 @@
           "covered": false
         }
       ],
-      "zero_coverage_components": [{ "path": "src/Critical.sol", "kind": "production" }],
+      "zero_coverage_components": [
+        {
+          "path": "src/Critical.sol",
+          "kind": "production",
+          "start_line": 1,
+          "line_count": 1
+        }
+      ],
       "__unexpected_fixture_field": true
     }
   },

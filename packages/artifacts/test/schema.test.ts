@@ -2811,7 +2811,7 @@ test("artifact schema snapshots are present and aligned with exported schema con
   };
   assert.equal(boundedCoverageSnapshot.properties.files.maxItems, MAX_COVERAGE_EVIDENCE_FILES);
   assert.equal(boundedCoverageSnapshot.properties.counted_ranges.maxItems, MAX_COVERAGE_EVIDENCE_RANGES);
-  assert.equal(boundedCoverageSnapshot.properties.zero_coverage_components.maxItems, MAX_COVERAGE_EVIDENCE_FILES);
+  assert.equal(boundedCoverageSnapshot.properties.zero_coverage_components.maxItems, MAX_COVERAGE_EVIDENCE_RANGES);
   assert.deepEqual(generatedTestsSnapshot, generatedTestsJsonSchema);
   assert.deepEqual(invariantLedgerSnapshot, invariantLedgerJsonSchema);
   assert.deepEqual(invariantSourceProofSnapshot, invariantSourceProofJsonSchema);

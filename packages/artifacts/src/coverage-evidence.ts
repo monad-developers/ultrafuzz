@@ -68,10 +68,21 @@ const view = z
   .refine((value) => value.covered_ranges <= value.total_ranges, {
     message: "covered_ranges cannot exceed total_ranges"
   });
+const lcov = z.strictObject({
+  path: safePath,
+  sha256: z.string().regex(/^[0-9a-f]{64}$/u, "sha256 must be 64 lowercase hexadecimal characters")
+});
+const zeroCoverageComponent = z.strictObject({
+  path: safePath,
+  kind: sourceKind,
+  start_line: z.number().int().positive(),
+  line_count: z.number().int().positive()
+});
 
 export const coverageEvidenceSchema = z
   .strictObject({
     schema_version: z.literal(COVERAGE_EVIDENCE_SCHEMA_VERSION),
+    lcov,
     views: z
       .array(view)
       .length(2)
@@ -88,10 +99,7 @@ export const coverageEvidenceSchema = z
       }),
     files: z.array(file).min(1).max(MAX_COVERAGE_EVIDENCE_FILES),
     counted_ranges: z.array(range).max(MAX_COVERAGE_EVIDENCE_RANGES),
-    zero_coverage_components: z
-      .array(z.strictObject({ path: safePath, kind: sourceKind }))
-      .min(0)
-      .max(MAX_COVERAGE_EVIDENCE_FILES)
+    zero_coverage_components: z.array(zeroCoverageComponent).min(0).max(MAX_COVERAGE_EVIDENCE_RANGES)
   })
   .superRefine((value, context) => {
     const fileByPath = new Map<string, (typeof value.files)[number]>();
@@ -107,6 +115,7 @@ export const coverageEvidenceSchema = z
     }
 
     const rangesByFile = new Map<string, (typeof value.counted_ranges)[number][]>();
+    const rangeByIdentity = new Map<string, (typeof value.counted_ranges)[number]>();
     for (const [index, entry] of value.counted_ranges.entries()) {
       const declared = fileByPath.get(entry.file);
       if (declared === undefined) {
@@ -141,6 +150,7 @@ export const coverageEvidenceSchema = z
       const entries = rangesByFile.get(entry.file) ?? [];
       entries.push(entry);
       rangesByFile.set(entry.file, entries);
+      rangeByIdentity.set(`${entry.file}\0${entry.kind}\0${entry.start_line}\0${entry.line_count}`, entry);
     }
 
     for (const [filePath, entries] of rangesByFile) {
@@ -206,8 +216,8 @@ export const coverageEvidenceSchema = z
     }
     const actualZero = new Set<string>();
     for (const [index, component] of value.zero_coverage_components.entries()) {
-      const key = `${component.path}\0${component.kind}`;
-      const declared = fileByPath.get(component.path);
+      const key = `${component.path}\0${component.kind}\0${component.start_line}\0${component.line_count}`;
+      const declared = rangeByIdentity.get(key);
       if (actualZero.has(key)) {
         context.addIssue({
           code: "custom",
@@ -216,26 +226,21 @@ export const coverageEvidenceSchema = z
         });
       }
       actualZero.add(key);
-      if (
-        declared === undefined ||
-        declared.kind !== component.kind ||
-        declared.total_ranges === 0 ||
-        declared.covered_ranges !== 0
-      ) {
+      if (declared === undefined || declared.covered) {
         context.addIssue({
           code: "custom",
-          message: "zero-coverage component must match a zero-covered material file",
+          message: "zero-coverage component must match an uncovered material range",
           path: ["zero_coverage_components", index]
         });
       }
     }
-    const expectedZero = value.files
-      .filter((entry) => entry.total_ranges > 0 && entry.covered_ranges === 0)
-      .map((entry) => `${entry.path}\0${entry.kind}`);
+    const expectedZero = value.counted_ranges
+      .filter((entry) => !entry.covered)
+      .map((entry) => `${entry.file}\0${entry.kind}\0${entry.start_line}\0${entry.line_count}`);
     if (expectedZero.some((key) => !actualZero.has(key)) || actualZero.size !== expectedZero.length) {
       context.addIssue({
         code: "custom",
-        message: "zero-coverage components must enumerate every zero-covered material file",
+        message: "zero-coverage components must enumerate every uncovered material range",
         path: ["zero_coverage_components"]
       });
     }
@@ -248,12 +253,21 @@ export const coverageEvidenceJsonSchema = {
   $id: COVERAGE_EVIDENCE_JSON_SCHEMA_ID,
   title: "Ultrafuzz complete coverage denominator",
   description:
-    "Producer contract. Each range uses a positive start_line plus positive line_count, so reversed ranges are unrepresentable. Semantic validation additionally requires: every counted range joins a declared file with the same kind; selected ranges are production-only and may join only an included file; ranges within each file do not overlap; file totals equal all selected and unselected counted ranges; selected-range totals equal selected counted ranges; production-source totals equal production-file totals; and zero_coverage_components exactly enumerates every material file with no covered ranges. Runtime binds every source path and production declaration boundary to the trusted workspace inventory, and binds each selection flag to overlap with the generated Recon coverage map.",
+    "Producer contract. The exact LCOV input is identified by a safe workspace-relative path and SHA-256. Each range uses a positive start_line plus positive line_count, so reversed ranges are unrepresentable. Semantic validation additionally requires: every counted range joins a declared file with the same kind; selected ranges are production-only and may join only an included file; ranges within each file do not overlap; file totals equal all selected and unselected counted ranges; selected-range totals equal selected counted ranges; production-source totals equal production-file totals; and zero_coverage_components exactly enumerates every uncovered material range. Runtime authenticates the LCOV snapshot and source attribution, binds every production declaration boundary to the trusted workspace inventory, derives covered flags from LCOV DA hits, and binds each selection flag to overlap with the generated Recon coverage map.",
   type: "object",
   additionalProperties: false,
-  required: ["schema_version", "views", "files", "counted_ranges", "zero_coverage_components"],
+  required: ["schema_version", "lcov", "views", "files", "counted_ranges", "zero_coverage_components"],
   properties: {
     schema_version: { const: COVERAGE_EVIDENCE_SCHEMA_VERSION },
+    lcov: {
+      type: "object",
+      additionalProperties: false,
+      required: ["path", "sha256"],
+      properties: {
+        path: { type: "string", minLength: 1, pattern: safePathPattern },
+        sha256: { type: "string", pattern: "^[0-9a-f]{64}$" }
+      }
+    },
     views: {
       type: "array",
       minItems: 2,
@@ -316,14 +330,16 @@ export const coverageEvidenceJsonSchema = {
     },
     zero_coverage_components: {
       type: "array",
-      maxItems: MAX_COVERAGE_EVIDENCE_FILES,
+      maxItems: MAX_COVERAGE_EVIDENCE_RANGES,
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["path", "kind"],
+        required: ["path", "kind", "start_line", "line_count"],
         properties: {
           path: { type: "string", minLength: 1, pattern: safePathPattern },
-          kind: { enum: sourceKinds }
+          kind: { enum: sourceKinds },
+          start_line: { type: "integer", minimum: 1 },
+          line_count: { type: "integer", minimum: 1 }
         }
       }
     }

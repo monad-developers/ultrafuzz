@@ -49,6 +49,23 @@ function tempProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-runtime-gates-"));
 }
 
+function writeCoverageLcov(
+  workspace: string,
+  sources: Readonly<Record<string, Readonly<Record<number, number>>>>
+): { path: string; sha256: string } {
+  const relativePath = "echidna/covered.test.lcov";
+  const lcovPath = path.join(workspace, relativePath);
+  fs.mkdirSync(path.dirname(lcovPath), { recursive: true });
+  const lines = Object.entries(sources).flatMap(([source, hits]) => [
+    `SF:${source}`,
+    ...Object.entries(hits).map(([line, count]) => `DA:${line},${count}`),
+    "end_of_record"
+  ]);
+  const bytes = Buffer.from(lines.length === 0 ? "" : `${lines.join("\n")}\n`, "utf8");
+  fs.writeFileSync(lcovPath, bytes);
+  return { path: relativePath, sha256: createHash("sha256").update(bytes).digest("hex") };
+}
+
 const FIXTURE_WORKFLOW_RUN_ID = "workflow-artifact-gates";
 const FIXTURE_AGENT_TASK_ID = "agent-artifact-gates";
 const FIXTURE_VERIFIER_TASK_ID = "verifier-artifact-gates";
@@ -10314,7 +10331,7 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
   const layout = createRunLayout({
     projectRoot: tempProject(),
     runId: "run-scoped-coverage",
-    resolvedConfigToml: '[permissions]\nproduction_source_roots = ["src"]\n'
+    resolvedConfigToml: '[permissions]\nproduction_source_roots = ["src", "contracts"]\n'
   });
   const node = {
     ...plannedNode(["coverage-goal.json", "coverage-report.md", "coverage-evidence.json"]),
@@ -10347,8 +10364,13 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
   );
   fs.mkdirSync(path.join(workspace, "magic"), { recursive: true });
   fs.writeFileSync(path.join(workspace, "magic/recon-coverage.json"), JSON.stringify({ "src/Core.sol": ["2"] }));
+  const lcov = writeCoverageLcov(workspace, {
+    "src/Core.sol": { 2: 1, 3: 0 },
+    "src/Critical.sol": { 4: 0, 5: 0, 6: 0, 7: 0 }
+  });
   const evidence = {
     schema_version: "ultrafuzz.coverage-evidence.v1",
+    lcov,
     views: [
       { scope: "selected-range", covered_ranges: 1, total_ranges: 1 },
       { scope: "production-source", covered_ranges: 1, total_ranges: 6 }
@@ -10420,12 +10442,20 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
         covered: false
       }
     ],
-    zero_coverage_components: [{ path: "src/Critical.sol", kind: "production" }]
+    zero_coverage_components: [
+      { path: "src/Core.sol", kind: "production", start_line: 3, line_count: 1 },
+      { path: "src/Critical.sol", kind: "production", start_line: 4, line_count: 1 },
+      { path: "src/Critical.sol", kind: "production", start_line: 5, line_count: 1 },
+      { path: "src/Critical.sol", kind: "production", start_line: 6, line_count: 1 },
+      { path: "src/Critical.sol", kind: "production", start_line: 7, line_count: 1 }
+    ]
   };
   const scopedMarkdown =
     "# Coverage\n\n## Scoped coverage evidence\n\n- selected-range: `1/1`\n- production-source: `1/6`\n\n" +
     "Excluded components:\n- `src/Critical.sol` (production): not selected\n\n" +
-    "Zero-coverage components:\n- `src/Critical.sol` (production)\n";
+    "Zero-coverage components:\n- `src/Core.sol:3-3` (production)\n" +
+    "- `src/Critical.sol:4-4` (production)\n- `src/Critical.sol:5-5` (production)\n" +
+    "- `src/Critical.sol:6-6` (production)\n- `src/Critical.sol:7-7` (production)\n";
   const goal = {
     schema_version: "ultrafuzz.coverage-goal.v1",
     target: { scope: "selected-range", minimum_percent: 90 },
@@ -10446,6 +10476,105 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
   publish(evidence);
   const valid = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
+
+  const incompleteZeroRanges = structuredClone(evidence);
+  incompleteZeroRanges.zero_coverage_components.shift();
+  publish(incompleteZeroRanges, scopedMarkdown.replace("- `src/Core.sol:3-3` (production)\n", ""));
+  const missingPartialFileGap = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(missingPartialFileGap.ok, false);
+  assert.ok(
+    missingPartialFileGap.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
+        diagnostic.details?.gate === "coverage-evidence-reconciliation"
+    ),
+    JSON.stringify(missingPartialFileGap.diagnostics)
+  );
+
+  const inventedCoveredFlag = structuredClone(evidence);
+  inventedCoveredFlag.counted_ranges[1]!.covered = true;
+  inventedCoveredFlag.files[0]!.covered_ranges = 2;
+  inventedCoveredFlag.views[1]!.covered_ranges = 2;
+  inventedCoveredFlag.zero_coverage_components.shift();
+  publish(
+    inventedCoveredFlag,
+    scopedMarkdown
+      .replace("production-source: `1/6`", "production-source: `2/6`")
+      .replace("- `src/Core.sol:3-3` (production)\n", "")
+  );
+  const forgedCoverage = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(forgedCoverage.ok, false);
+  assert.ok(
+    forgedCoverage.diagnostics.some((diagnostic) => diagnostic.code === "COVERAGE_RANGE_RESULT_MISMATCH"),
+    JSON.stringify(forgedCoverage.diagnostics)
+  );
+
+  const missingLcov = structuredClone(evidence);
+  missingLcov.lcov.path = "echidna/missing.lcov";
+  publish(missingLcov);
+  const missingRawAuthority = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(missingRawAuthority.ok, false);
+  assert.ok(
+    missingRawAuthority.diagnostics.some((diagnostic) => diagnostic.code === "COVERAGE_LCOV_INVALID"),
+    JSON.stringify(missingRawAuthority.diagnostics)
+  );
+
+  const staleLcovDigest = structuredClone(evidence);
+  staleLcovDigest.lcov.sha256 = "f".repeat(64);
+  publish(staleLcovDigest);
+  const staleRawAuthority = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(staleRawAuthority.ok, false);
+  assert.ok(
+    staleRawAuthority.diagnostics.some((diagnostic) => diagnostic.code === "COVERAGE_LCOV_INVALID"),
+    JSON.stringify(staleRawAuthority.diagnostics)
+  );
+
+  fs.mkdirSync(path.join(workspace, "test/recon"), { recursive: true });
+  fs.writeFileSync(
+    path.join(workspace, "test/recon/Harness.sol"),
+    "contract Harness { function fuzz() external {} }\n"
+  );
+  const lcovWithHarness = writeCoverageLcov(workspace, {
+    "src/Core.sol": { 2: 1, 3: 0 },
+    "src/Critical.sol": { 4: 0, 5: 0, 6: 0, 7: 0 },
+    "test/recon/Harness.sol": { 1: 1 }
+  });
+  const omittedHarness = structuredClone(evidence);
+  omittedHarness.lcov = lcovWithHarness;
+  publish(omittedHarness);
+  const missingAttribution = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(missingAttribution.ok, false);
+  assert.ok(
+    missingAttribution.diagnostics.some((diagnostic) => diagnostic.code === "COVERAGE_LCOV_SOURCE_OMITTED"),
+    JSON.stringify(missingAttribution.diagnostics)
+  );
+
+  const relabeledHarness = structuredClone(omittedHarness);
+  relabeledHarness.files.push({
+    path: "test/recon/Harness.sol",
+    kind: "test",
+    included: false,
+    exclusion_reason: "not selected",
+    covered_ranges: 0,
+    total_ranges: 0
+  });
+  publish(
+    relabeledHarness,
+    scopedMarkdown.replace(
+      "- `src/Critical.sol` (production): not selected",
+      "- `src/Critical.sol` (production): not selected\n- `test/recon/Harness.sol` (test): not selected"
+    )
+  );
+  const spoofedAttribution = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(spoofedAttribution.ok, false);
+  assert.ok(
+    spoofedAttribution.diagnostics.some((diagnostic) => diagnostic.code === "COVERAGE_SOURCE_ATTRIBUTION_MISMATCH"),
+    JSON.stringify(spoofedAttribution.diagnostics)
+  );
+  evidence.lcov = writeCoverageLcov(workspace, {
+    "src/Core.sol": { 2: 1, 3: 0 },
+    "src/Critical.sol": { 4: 0, 5: 0, 6: 0, 7: 0 }
+  });
 
   fs.writeFileSync(path.join(workspace, "magic/recon-coverage.json"), "{}");
   publish(evidence);
@@ -10476,7 +10605,12 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
     selected: false,
     covered: false
   });
-  inventedNonProduction.zero_coverage_components.push({ path: "test/Fake.sol", kind: "test" });
+  inventedNonProduction.zero_coverage_components.push({
+    path: "test/Fake.sol",
+    kind: "test",
+    start_line: 1,
+    line_count: 1
+  });
   publish(
     inventedNonProduction,
     scopedMarkdown
@@ -10484,7 +10618,10 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
         "- `src/Critical.sol` (production): not selected",
         "- `src/Critical.sol` (production): not selected\n- `test/Fake.sol` (test): not selected"
       )
-      .replace("- `src/Critical.sol` (production)\n", "- `src/Critical.sol` (production)\n- `test/Fake.sol` (test)\n")
+      .replace(
+        "- `src/Critical.sol:7-7` (production)\n",
+        "- `src/Critical.sol:7-7` (production)\n- `test/Fake.sol:1-1` (test)\n"
+      )
   );
   const fakeSource = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(fakeSource.ok, false);
@@ -10519,18 +10656,34 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
   incidentallyCoveredUnselected.counted_ranges[1]!.covered = true;
   incidentallyCoveredUnselected.files[0]!.covered_ranges = 2;
   incidentallyCoveredUnselected.views[1]!.covered_ranges = 2;
+  incidentallyCoveredUnselected.lcov = writeCoverageLcov(workspace, {
+    "src/Core.sol": { 2: 1, 3: 1 },
+    "src/Critical.sol": { 4: 0, 5: 0, 6: 0, 7: 0 }
+  });
+  incidentallyCoveredUnselected.zero_coverage_components =
+    incidentallyCoveredUnselected.zero_coverage_components.filter((entry) => entry.path !== "src/Core.sol");
   publish(
     incidentallyCoveredUnselected,
-    scopedMarkdown.replace("production-source: `1/6`", "production-source: `2/6`")
+    scopedMarkdown
+      .replace("production-source: `1/6`", "production-source: `2/6`")
+      .replace("- `src/Core.sol:3-3` (production)\n", "")
   );
   const independentViews = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(independentViews.ok, true, JSON.stringify(independentViews.diagnostics));
+  evidence.lcov = writeCoverageLcov(workspace, {
+    "src/Core.sol": { 2: 1, 3: 0 },
+    "src/Critical.sol": { 4: 0, 5: 0, 6: 0, 7: 0 }
+  });
 
   const inventedSelection = structuredClone(evidence);
   inventedSelection.counted_ranges[0]!.selected = false;
   inventedSelection.counted_ranges[0]!.covered = false;
   inventedSelection.counted_ranges[1]!.selected = true;
   inventedSelection.counted_ranges[1]!.covered = true;
+  inventedSelection.zero_coverage_components = [
+    { path: "src/Core.sol", kind: "production", start_line: 2, line_count: 1 },
+    ...inventedSelection.zero_coverage_components.filter((entry) => entry.path !== "src/Core.sol")
+  ];
   publish(inventedSelection);
   const wrongSelection = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(wrongSelection.ok, false);
@@ -10563,6 +10716,10 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
   const percentage = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(percentage.ok, false);
   assert.ok(percentage.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"));
+
+  publish(evidence, `${scopedMarkdown}\n## Notes\n\nselected-range coverage: 100%.\n`);
+  const namedPercentage = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(namedPercentage.ok, true, JSON.stringify(namedPercentage.diagnostics));
 
   const staleGoal = structuredClone(goal);
   staleGoal.current_measurement.covered_ranges = 0;
@@ -10608,8 +10765,13 @@ test("coverage gate groups same-line Solidity declarations into one representabl
     path.join(workspace, "magic/recon-coverage.json"),
     JSON.stringify({ "src/Minified.sol": ["1"], "lib/Dependency.sol": ["1"] })
   );
+  const lcov = writeCoverageLcov(workspace, {
+    "src/Minified.sol": { 1: 1 },
+    "lib/Dependency.sol": { 1: 1 }
+  });
   const evidence = {
     schema_version: "ultrafuzz.coverage-evidence.v1",
+    lcov,
     views: [
       { scope: "selected-range", covered_ranges: 1, total_ranges: 1 },
       { scope: "production-source", covered_ranges: 1, total_ranges: 1 }
@@ -10717,8 +10879,10 @@ test("coverage gate fails closed when every configured production root is missin
   const workspace = path.join(layout.workspacesDir, node.id);
   fs.mkdirSync(path.join(workspace, "test"), { recursive: true });
   fs.writeFileSync(path.join(workspace, "test/Harness.sol"), "contract Harness {}\n");
+  const lcov = writeCoverageLcov(workspace, {});
   const evidence = {
     schema_version: "ultrafuzz.coverage-evidence.v1",
+    lcov,
     views: [
       { scope: "selected-range", covered_ranges: 0, total_ranges: 0 },
       { scope: "production-source", covered_ranges: 0, total_ranges: 0 }
@@ -10813,9 +10977,13 @@ test("coverage gate authenticates Vyper declaration boundaries outside the Solid
     ].join("\n")
   );
   fs.writeFileSync(path.join(workspace, "magic/recon-coverage.json"), "{}");
+  const lcov = writeCoverageLcov(workspace, {
+    "src/Module.vy": { 5: 0, 8: 0, 15: 0, 19: 0 }
+  });
 
   const evidence = {
     schema_version: "ultrafuzz.coverage-evidence.v1",
+    lcov,
     views: [
       { scope: "selected-range", covered_ranges: 0, total_ranges: 0 },
       { scope: "production-source", covered_ranges: 0, total_ranges: 4 }
@@ -10864,7 +11032,12 @@ test("coverage gate authenticates Vyper declaration boundaries outside the Solid
         covered: false
       }
     ],
-    zero_coverage_components: [{ path: "src/Module.vy", kind: "production" }]
+    zero_coverage_components: [
+      { path: "src/Module.vy", kind: "production", start_line: 5, line_count: 1 },
+      { path: "src/Module.vy", kind: "production", start_line: 8, line_count: 4 },
+      { path: "src/Module.vy", kind: "production", start_line: 15, line_count: 2 },
+      { path: "src/Module.vy", kind: "production", start_line: 19, line_count: 2 }
+    ]
   };
   const goal = {
     schema_version: "ultrafuzz.coverage-goal.v1",
@@ -10881,7 +11054,9 @@ test("coverage gate authenticates Vyper declaration boundaries outside the Solid
     "# Coverage\n\n## Scoped coverage evidence\n\n- selected-range: `0/0`\n" +
     "- production-source: `0/4`\n\nExcluded components:\n" +
     "- `src/Module.vy` (production): Recon coverage-map generation is Solidity-only\n\n" +
-    "Zero-coverage components:\n- `src/Module.vy` (production)\n";
+    "Zero-coverage components:\n- `src/Module.vy:5-5` (production)\n" +
+    "- `src/Module.vy:8-11` (production)\n- `src/Module.vy:15-16` (production)\n" +
+    "- `src/Module.vy:19-20` (production)\n";
   const publish = (value: unknown, rendered = markdown): void => {
     writeArtifact(layout, node.id, "coverage-goal.json", JSON.stringify(goal));
     writeArtifact(layout, node.id, "coverage-report.md", rendered);
@@ -10914,11 +11089,15 @@ test("coverage gate authenticates Vyper declaration boundaries outside the Solid
   } as (typeof inventedSelection.files)[number];
   inventedSelection.views[0] = { scope: "selected-range", covered_ranges: 1, total_ranges: 1 };
   inventedSelection.views[1] = { scope: "production-source", covered_ranges: 1, total_ranges: 4 };
-  inventedSelection.zero_coverage_components = [];
+  inventedSelection.zero_coverage_components = inventedSelection.zero_coverage_components.filter(
+    (entry) => entry.start_line !== 8
+  );
   publish(
     inventedSelection,
     "# Coverage\n\n## Scoped coverage evidence\n\n- selected-range: `1/1`\n" +
-      "- production-source: `1/4`\n\nExcluded components:\n- None\n\nZero-coverage components:\n- None\n"
+      "- production-source: `1/4`\n\nExcluded components:\n- None\n\nZero-coverage components:\n" +
+      "- `src/Module.vy:5-5` (production)\n- `src/Module.vy:15-16` (production)\n" +
+      "- `src/Module.vy:19-20` (production)\n"
   );
   const wrongSelection = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(wrongSelection.ok, false);
@@ -10948,11 +11127,14 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
     depends_on: [coverageNode.id]
   };
   writePlannedGraph(layout, [coverageNode, reportNode]);
-  const workspace = path.join(layout.workspacesDir, coverageNode.id, "src");
+  const coverageWorkspace = path.join(layout.workspacesDir, coverageNode.id);
+  const workspace = path.join(coverageWorkspace, "src");
   fs.mkdirSync(workspace, { recursive: true });
   fs.writeFileSync(path.join(workspace, "Core.sol"), "contract Core { function core() external {} }\n");
+  const lcov = writeCoverageLcov(coverageWorkspace, { "src/Core.sol": { 1: 1 } });
   const evidence = {
     schema_version: "ultrafuzz.coverage-evidence.v1",
+    lcov,
     views: [
       { scope: "selected-range", covered_ranges: 1, total_ranges: 1 },
       { scope: "production-source", covered_ranges: 1, total_ranges: 1 }
@@ -10994,6 +11176,15 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
 
   const valid = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
   assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
+
+  writeArtifact(
+    layout,
+    reportNode.id,
+    "report.md",
+    `${scopedMarkdown}\n## Notes\n\nproduction-source coverage: 100%.\n`
+  );
+  const namedPercentage = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+  assert.equal(namedPercentage.ok, true, JSON.stringify(namedPercentage.diagnostics));
 
   writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\nThe selected-range was 1/1.\n`);
   const misplaced = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
@@ -11094,6 +11285,23 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
   });
   const percentageReportValidation = validateArtifactContract("ultrafuzz/report@2", JSON.stringify(percentageReport));
   assert.equal(percentageReportValidation.ok, true, JSON.stringify(percentageReportValidation.issues));
+
+  const strategyFractionIssue = {
+    ...structuredClone(percentageIssue),
+    notes: ["triage_reason=public path is reachable", "stateful-invariant-coverage detection rate was 1/1."]
+  };
+  const strategyFractionReport = currentReport(layout.runId, {
+    coverage_evidence: evidence,
+    issues: [strategyFractionIssue]
+  });
+  writeArtifact(layout, reportNode.id, "report.json", JSON.stringify(strategyFractionReport));
+  const nestedStrategyFraction = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+  assert.equal(
+    nestedStrategyFraction.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_FRACTION"),
+    false,
+    JSON.stringify(nestedStrategyFraction.diagnostics)
+  );
+
   writeArtifact(layout, reportNode.id, "report.json", JSON.stringify(percentageReport));
   const prosePercentage = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
   assert.equal(prosePercentage.ok, false);

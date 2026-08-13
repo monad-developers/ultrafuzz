@@ -2,13 +2,29 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:ultrafuzz:schema:artifacts:coverage-evidence:1",
   "title": "Ultrafuzz complete coverage denominator",
-  "description": "Producer contract. Each range uses a positive start_line plus positive line_count, so reversed ranges are unrepresentable. Semantic validation additionally requires: every counted range joins a declared file with the same kind; selected ranges are production-only and may join only an included file; ranges within each file do not overlap; file totals equal all selected and unselected counted ranges; selected-range totals equal selected counted ranges; production-source totals equal production-file totals; and zero_coverage_components exactly enumerates every material file with no covered ranges. Runtime binds every source path and production declaration boundary to the trusted workspace inventory, and binds each selection flag to overlap with the generated Recon coverage map.",
+  "description": "Producer contract. The exact LCOV input is identified by a safe workspace-relative path and SHA-256. Each range uses a positive start_line plus positive line_count, so reversed ranges are unrepresentable. Semantic validation additionally requires: every counted range joins a declared file with the same kind; selected ranges are production-only and may join only an included file; ranges within each file do not overlap; file totals equal all selected and unselected counted ranges; selected-range totals equal selected counted ranges; production-source totals equal production-file totals; and zero_coverage_components exactly enumerates every uncovered material range. Runtime authenticates the LCOV snapshot and source attribution, binds every production declaration boundary to the trusted workspace inventory, derives covered flags from LCOV DA hits, and binds each selection flag to overlap with the generated Recon coverage map.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "views", "files", "counted_ranges", "zero_coverage_components"],
+  "required": ["schema_version", "lcov", "views", "files", "counted_ranges", "zero_coverage_components"],
   "properties": {
     "schema_version": {
       "const": "ultrafuzz.coverage-evidence.v1"
+    },
+    "lcov": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[^\\\\\\u0000]+$"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
     },
     "views": {
       "type": "array",
@@ -126,11 +142,11 @@
     },
     "zero_coverage_components": {
       "type": "array",
-      "maxItems": 10000,
+      "maxItems": 100000,
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["path", "kind"],
+        "required": ["path", "kind", "start_line", "line_count"],
         "properties": {
           "path": {
             "type": "string",
@@ -139,6 +155,14 @@
           },
           "kind": {
             "enum": ["production", "test", "harness", "dependency"]
+          },
+          "start_line": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "line_count": {
+            "type": "integer",
+            "minimum": 1
           }
         }
       }
