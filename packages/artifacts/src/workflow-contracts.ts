@@ -6,6 +6,7 @@ import {
   findingLifecycleSchema,
   findingLifecycleStageSchema,
   findingNoteSchema,
+  findingReportBoundTextSchema,
   findingSchema,
   findingStrategyHitSchema,
   findingTextSchema
@@ -253,15 +254,15 @@ const severityClassifiedFindingSchema = findingSchema
   .safeExtend({
     triage_classification: z.enum(TRIAGE_CLASSIFICATIONS),
     // Severity review must preserve the already-validated triage notes byte for
-    // byte. Keep this stage's structural copy lightweight; triage is the last
-    // stage allowed to append report-bound notes.
-    notes: z.array(findingTextSchema).max(MAX_FINDING_NESTED_ITEMS).optional(),
+    // byte, but the copied values remain inside the report-vocabulary trust
+    // boundary and are therefore validated again at this contract boundary.
+    notes: z.array(findingNoteSchema).max(MAX_FINDING_NESTED_ITEMS).optional(),
     severity: z.enum(FINDING_SEVERITIES).optional(),
     impact: z.enum(FINDING_SEVERITIES).optional(),
     likelihood: z.enum(FINDING_SEVERITIES).optional(),
-    impact_rationale: findingTextSchema.optional(),
-    likelihood_rationale: findingTextSchema.optional(),
-    severity_rationale: findingTextSchema.optional()
+    impact_rationale: findingReportBoundTextSchema.optional(),
+    likelihood_rationale: findingReportBoundTextSchema.optional(),
+    severity_rationale: findingReportBoundTextSchema.optional()
   })
   .meta({
     allOf: [
@@ -1601,16 +1602,14 @@ const reportCoverageNotPlannedSchema = z.strictObject({
 });
 
 const reportIssueSchema = findingSchema.safeExtend({
-  // Report projection copies notes from severity-classified findings and may
-  // not author new report-bound note assignments.
-  notes: z.array(findingTextSchema).max(MAX_FINDING_NESTED_ITEMS).optional(),
+  notes: z.array(findingNoteSchema).max(MAX_FINDING_NESTED_ITEMS).optional(),
   description: nonEmptyString,
   severity: z.enum(FINDING_SEVERITIES),
   likelihood: z.enum(FINDING_SEVERITIES),
   impact: z.enum(FINDING_SEVERITIES),
-  impact_rationale: nonEmptyString,
-  likelihood_rationale: nonEmptyString,
-  severity_rationale: nonEmptyString,
+  impact_rationale: findingReportBoundTextSchema,
+  likelihood_rationale: findingReportBoundTextSchema,
+  severity_rationale: findingReportBoundTextSchema,
   proof_of_concept: z.strictObject({
     scenario: z.array(nonEmptyString).min(1),
     language: nonEmptyString,
@@ -1620,7 +1619,7 @@ const reportIssueSchema = findingSchema.safeExtend({
 });
 
 const reportNonProductionOutcomeSchema = findingSchema.safeExtend({
-  notes: z.array(findingTextSchema).max(MAX_FINDING_NESTED_ITEMS).optional(),
+  notes: z.array(findingNoteSchema).max(MAX_FINDING_NESTED_ITEMS).optional(),
   triage_classification: z.enum(TRIAGE_CLASSIFICATIONS),
   recommended_next_action: nonEmptyString,
   lifecycle: findingLifecycleSchema

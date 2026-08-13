@@ -1,5 +1,5 @@
-import { findingNoteAssignmentIssue } from "@ultrafuzz/artifacts";
-import { PromptError, extractPromptVariables } from "@ultrafuzz/prompts";
+import { findingReportSemanticAssignment } from "@ultrafuzz/artifacts";
+import { PromptError, extractPromptVariables, parsePromptFrontmatter } from "@ultrafuzz/prompts";
 import type { PromptVariableReference } from "@ultrafuzz/prompts";
 import { START_NODE_ID } from "./types.js";
 import type { NormalizedProjectTopology, NormalizedTopologyNode } from "./types.js";
@@ -33,8 +33,9 @@ export function validateArtifactHandoffs(
     if (promptText === undefined) {
       continue;
     }
-    validateReportVocabularyVariables(node, promptText);
-    for (const variable of extractPromptVariablesForNode(node, promptText)) {
+    const promptBody = promptBodyForNode(node, promptText);
+    validateReportVocabularyVariables(node, promptBody);
+    for (const variable of extractPromptVariablesForNode(node, promptBody)) {
       validatePromptVariable(node, variable, nodeById);
     }
   }
@@ -43,15 +44,6 @@ export function validateArtifactHandoffs(
 function validateReportVocabularyVariables(node: NormalizedTopologyNode, promptText: string): void {
   const publishesReportVocabulary = node.outputs.some((output) => REPORT_VOCABULARY_CONTRACTS.has(output.contract));
   if (!publishesReportVocabulary) return;
-  const duplicated = promptText
-    .split(/(?<=[.!?])\s+|\r?\n/gu)
-    .filter((scope) =>
-      /\b(?:put|set|assign|use|define|mark|treat|require|mandate|enforce|return|record|write|emit|save|persist|include|attach|add|plus)\b|\b(?:finding|issue|result|report|note|triage|severity|reachability|classification|helper|proof|exploitability|likelihood|impact)\w*\b/iu.test(
-        scope
-      )
-    )
-    .map((scope) => findingNoteAssignmentIssue(scope))
-    .find((issue) => issue !== undefined);
   for (const variable of ["finding_reachability_vocabulary", "finding_note_key_vocabulary"]) {
     if (!promptText.includes(`{{${variable}}}`)) {
       throw topologyError(
@@ -61,12 +53,22 @@ function validateReportVocabularyVariables(node: NormalizedTopologyNode, promptT
       );
     }
   }
+  const duplicated = findingReportSemanticAssignment(promptText);
   if (duplicated !== undefined) {
     throw topologyError(
       "DUPLICATED_REPORT_VOCABULARY",
       `Node \`${node.id}\` prompt duplicates unsupported report-bound key \`${duplicated.key}\`; use the authoritative rendered variables`,
       { nodeId: node.id, key: duplicated.key }
     );
+  }
+}
+
+function promptBodyForNode(node: NormalizedTopologyNode, promptText: string): string {
+  try {
+    return parsePromptFrontmatter(promptText).body;
+  } catch (error) {
+    if (error instanceof PromptError) throw topologyErrorForPromptError(node, error);
+    throw error;
   }
 }
 

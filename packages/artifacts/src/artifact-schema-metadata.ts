@@ -348,6 +348,7 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
   "report.schema.json": artifact("ultrafuzz/report@2", "reportJsonSchema", "reportSchema", [
     "report-finding-evidence-span-consistency",
     "report-finding-id-uniqueness",
+    "report-finding-report-vocabulary",
     "report-campaign-outcome-authority",
     "report-severity-classification-preservation",
     "report-property-provenance-join"
@@ -383,6 +384,7 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     [
       "severity-finding-evidence-span-consistency",
       "severity-finding-id-uniqueness",
+      "severity-finding-report-vocabulary",
       "severity-classification-matrix",
       "severity-classification-upstream-preservation"
     ]

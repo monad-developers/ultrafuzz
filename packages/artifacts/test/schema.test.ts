@@ -58,6 +58,7 @@ import {
   reportSchema,
   runStateJsonSchema,
   semanticRedRegistrySchema,
+  severityClassifiedFindingsSchema,
   validateAnalysisBundleManifestSchema,
   usageLedgerJsonSchema,
   workspacePatchJsonSchema,
@@ -1168,6 +1169,9 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
   }
 
   for (const evidenceAssignment of [
+    "Observed balance=0 after withdrawal; expected balance=1.",
+    "Evidence: https://example.test/trace?block=latest",
+    "The invariant was amount == expectedAmount.",
     "Evidence: https://example.test/trace?tx=abc",
     "Evidence: https://example.test/trace;session=abc",
     "ipfs://root/path?filename=proof.json",
@@ -1180,7 +1184,12 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
     "request_id=abc123",
     "RISK_FREE_RATE=0.05 impact_price=123 helper_address=0xabc",
     "--dependency-version=1.2.3 STATEFUL_RUNS=1000 scope_id=request-7",
-    "https://x.test/?impact_price=123"
+    "https://x.test/?impact_price=123",
+    "_=non-semantic evidence",
+    "根因=non-semantic evidence",
+    "Δ=non-semantic evidence",
+    "💣=non-semantic evidence",
+    "https://x.test/?root%5Fcause=encoded-query-key"
   ]) {
     assertNoteParity(evidenceAssignment, true);
   }
@@ -1197,11 +1206,10 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
     "_root_cause=renamed",
     "__root_cause=renamed",
     "___Helper=renamed",
-    "_=renamed",
-    "根因=renamed",
-    "Δ=renamed",
-    "root_causé=renamed",
-    "💣=renamed",
+    "\u0301_root_cause=renamed",
+    "root_cause\u0301=renamed",
+    "r_\u0301o-o_t__cause=renamed",
+    "root_cause__=renamed",
     "<root_cause=renamed>",
     "-root_cause=renamed",
     "--root_cause=renamed",
@@ -1218,7 +1226,7 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
     "root_cause==renamed",
     "reachability==helper-only",
     "9root_cause=renamed",
-    "https://x.test/?root%5Fcause=renamed",
+    "_9\u0301_root_cause=renamed",
     "helperEvidence=renamed",
     "dependencyScope=renamed",
     "resolution=confirmed",
@@ -1239,6 +1247,11 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
     assert.notEqual(findingNoteAssignmentIssue(semanticAlias), undefined, semanticAlias);
   }
 
+  assert.deepEqual(findingNoteAssignmentIssue("triage_reason=ok root_cause=renamed"), {
+    key: "root_cause",
+    message: "Unsupported report-bound finding note key"
+  });
+
   assertNoteParity("helper_context is prose, not an assignment", true);
 
   const triaged = {
@@ -1251,6 +1264,31 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
   const triagedAlias = { ...triaged, notes: [...triaged.notes, "root_cause=renamed"] };
   assert.equal(triagedFindingsSchema.safeParse([triagedAlias]).success, false);
   assert.equal(validateArtifactContract("ultrafuzz/triaged-findings@1", JSON.stringify([triagedAlias])).ok, false);
+
+  const validSeverity = {
+    ...triaged,
+    severity: "Medium",
+    impact: "Medium",
+    likelihood: "Medium",
+    impact_rationale: "impact=Medium: the affected balance can be recovered",
+    likelihood_rationale: "likelihood=Medium: the path requires a specific caller",
+    severity_rationale: "reachability=public-entrypoint-trace: reproduced; observed balance=0"
+  };
+  assert.equal(severityClassifiedFindingsSchema.safeParse([validSeverity]).success, true);
+  assert.equal(
+    validateArtifactContract("ultrafuzz/severity-classified-findings@1", JSON.stringify([validSeverity])).ok,
+    true
+  );
+  for (const invalidSeverity of [
+    { ...validSeverity, severity_rationale: "reachability=renamed-public-trace" },
+    { ...validSeverity, notes: [...validSeverity.notes, "helper_evidence=renamed"] }
+  ]) {
+    assert.equal(severityClassifiedFindingsSchema.safeParse([invalidSeverity]).success, false);
+    assert.equal(
+      validateArtifactContract("ultrafuzz/severity-classified-findings@1", JSON.stringify([invalidSeverity])).ok,
+      false
+    );
+  }
 });
 
 test("the findings v2 schema validates closed typed evidence spans without repair", () => {
@@ -1522,6 +1560,14 @@ test("finding and report v2 schemas require their current canonical shapes", () 
   };
   const reportWithTypedEvidence = { ...report, non_production_outcomes: [nonProductionOutcome] };
   assert.equal(validateArtifactContract("ultrafuzz/report@2", JSON.stringify(reportWithTypedEvidence)).ok, true);
+  for (const invalidOutcome of [
+    { ...nonProductionOutcome, notes: ["reachability=renamed-public-trace"] },
+    { ...nonProductionOutcome, severity_rationale: "helper_evidence=renamed" }
+  ]) {
+    const invalidReport = { ...report, non_production_outcomes: [invalidOutcome] };
+    assert.equal(reportSchema.safeParse(invalidReport).success, false);
+    assert.equal(validateArtifactContract("ultrafuzz/report@2", JSON.stringify(invalidReport)).ok, false);
+  }
   const reportWithEmptyEvidence = {
     ...report,
     non_production_outcomes: [{ ...nonProductionOutcome, evidence: [{}] }]

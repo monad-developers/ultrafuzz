@@ -10,11 +10,12 @@ import {
   TRIAGE_CLASSIFICATIONS
 } from "./findings.js";
 import {
-  FINDING_EVIDENCE_ASSIGNMENT_KEYS,
   FINDING_NOTE_KEYS,
   FINDING_REACHABILITY_VALUES,
+  FINDING_REPORT_SEMANTIC_KEY_PATTERNS,
   FINDING_RISK_VALUES,
-  STATEFUL_FAILURE_CLASSIFICATION_VALUES
+  STATEFUL_FAILURE_CLASSIFICATION_VALUES,
+  isFindingReportSemanticKey
 } from "./finding-note-vocabulary.js";
 import { validateRegisteredJsonSchema } from "./json-schema-validator.js";
 import { hasAtMostCodePoints } from "./portable-json-primitives.js";
@@ -47,14 +48,37 @@ const findingPath = z
 const nonNegativeInteger = z.number().int().nonnegative().max(MAX_FINDING_COUNT);
 const positiveSafeInteger = z.number().int().positive().max(MAX_FINDING_COUNT);
 const supportedNoteKeyPattern = `(?:${FINDING_NOTE_KEYS.join("|")})`;
-const assignmentKeyPattern = "-{0,2}[\\p{L}\\p{N}\\p{M}\\p{Sc}\\p{Sk}\\p{So}_-]+";
+const assignmentKeyCharacters = "\\p{L}\\p{N}\\p{M}\\p{Sc}\\p{Sk}\\p{So}_-";
+const assignmentKeyPattern = `[${assignmentKeyCharacters}]+`;
 const assignmentBoundaryPattern = "(?:^|[^\\p{L}\\p{N}\\p{M}\\p{Sc}\\p{Sk}\\p{So}_-])";
-const evidenceAssignmentKeyPattern = `(?:${FINDING_EVIDENCE_ASSIGNMENT_KEYS.map((key) => key.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")).join("|")})`;
 const assignmentOperatorPattern = "(?:\\s+=(?!=)\\s*|=(?!=)\\s*)";
 const anyAssignmentOperatorPattern = "(?:\\s*={1,2}\\s*)";
-const unsupportedAssignmentPattern = `${assignmentBoundaryPattern}(?!${supportedNoteKeyPattern}${assignmentOperatorPattern})(?!${evidenceAssignmentKeyPattern}${anyAssignmentOperatorPattern})${assignmentKeyPattern}${anyAssignmentOperatorPattern}`;
-const invalidTypedAssignmentPattern = `${assignmentBoundaryPattern}(?:reachability${assignmentOperatorPattern}(?!(?:${FINDING_REACHABILITY_VALUES.join("|")})(?::|[;,*\`\\s]|$))|stateful_failure_classification${assignmentOperatorPattern}(?!(?:${STATEFUL_FAILURE_CLASSIFICATION_VALUES.join("|")})(?::|[;,*\`\\s]|$))|(?:likelihood|impact)${assignmentOperatorPattern}(?!(?:${FINDING_RISK_VALUES.join("|")})(?::|[;,*\`\\s]|$)))`;
-const unsupportedAssignment = new RegExp(unsupportedAssignmentPattern, "u");
+const unsupportedAssignmentPatterns = FINDING_REPORT_SEMANTIC_KEY_PATTERNS.map(
+  (semanticKeyPattern) =>
+    `${assignmentBoundaryPattern}(?!${supportedNoteKeyPattern}${assignmentOperatorPattern})${semanticKeyPattern}${anyAssignmentOperatorPattern}`
+);
+const typedValueBoundaryPattern = "(?::|[;,*`\\s&]|$)";
+const invalidTypedAssignmentPattern = `${assignmentBoundaryPattern}(?:reachability${assignmentOperatorPattern}(?!(?:${FINDING_REACHABILITY_VALUES.join("|")})${typedValueBoundaryPattern})|stateful_failure_classification${assignmentOperatorPattern}(?!(?:${STATEFUL_FAILURE_CLASSIFICATION_VALUES.join("|")})${typedValueBoundaryPattern})|(?:likelihood|impact)${assignmentOperatorPattern}(?!(?:${FINDING_RISK_VALUES.join("|")})${typedValueBoundaryPattern}))`;
+const findingNoteAssignment = new RegExp(
+  `(?<![${assignmentKeyCharacters}])(${assignmentKeyPattern})(\\s*(={1,2})\\s*)`,
+  "gu"
+);
+
+export interface FindingReportSemanticAssignment {
+  key: string;
+  operator: "=" | "==";
+  value: string;
+}
+
+export function findingReportSemanticAssignment(text: string): FindingReportSemanticAssignment | undefined {
+  for (const assignment of text.matchAll(findingNoteAssignment)) {
+    const key = assignment[1]!;
+    if (!isFindingReportSemanticKey(key)) continue;
+    const value = text.slice(assignment.index + assignment[0].length).match(/^[^;,*`\s:&]*/u)?.[0] ?? "";
+    return { key, operator: assignment[3] as "=" | "==", value };
+  }
+  return undefined;
+}
 
 export interface FindingNoteAssignmentIssue {
   key: string;
@@ -62,18 +86,13 @@ export interface FindingNoteAssignmentIssue {
 }
 
 export function findingNoteAssignmentIssue(note: string): FindingNoteAssignmentIssue | undefined {
-  if (unsupportedAssignment.test(note)) {
-    const key =
-      note.match(
-        new RegExp(`${assignmentBoundaryPattern}(${assignmentKeyPattern})${assignmentOperatorPattern}`, "u")
-      )?.[1] ?? "unknown";
-    return { key, message: "Unsupported report-bound finding note key" };
-  }
-  for (const assignment of note.matchAll(
-    /(?<![\p{L}\p{N}\p{M}\p{Sc}\p{Sk}\p{So}_-])(-{0,2}[\p{L}\p{M}\p{Sc}\p{Sk}\p{So}_][\p{L}\p{N}\p{M}\p{Sc}\p{Sk}\p{So}_-]*)(?:\s+=(?!=)\s*|=(?!=)\s*)/gu
-  )) {
+  for (const assignment of note.matchAll(findingNoteAssignment)) {
     const key = assignment[1]!;
-    const value = note.slice(assignment.index + assignment[0].length).match(/^[^;,*`\s:]*/u)?.[0] ?? "";
+    if (!isFindingReportSemanticKey(key)) continue;
+    if (!FINDING_NOTE_KEYS.includes(key as (typeof FINDING_NOTE_KEYS)[number]) || assignment[3] !== "=") {
+      return { key, message: "Unsupported report-bound finding note key" };
+    }
+    const value = note.slice(assignment.index + assignment[0].length).match(/^[^;,*`\s:&]*/u)?.[0] ?? "";
     const allowed =
       key === "reachability"
         ? FINDING_REACHABILITY_VALUES
@@ -90,15 +109,16 @@ export function findingNoteAssignmentIssue(note: string): FindingNoteAssignmentI
 }
 
 const findingNoteJsonSchemaConstraints = [
-  { not: { pattern: unsupportedAssignmentPattern } },
+  ...unsupportedAssignmentPatterns.map((pattern) => ({ not: { pattern } })),
   { not: { pattern: invalidTypedAssignmentPattern } }
-] as const;
-export const findingNoteSchema = nonEmptyString
+];
+export const findingReportBoundTextSchema = nonEmptyString
   .superRefine((note, context) => {
     const issue = findingNoteAssignmentIssue(note);
     if (issue !== undefined) context.addIssue({ code: "custom", message: issue.message });
   })
-  .meta({ allOf: findingNoteJsonSchemaConstraints });
+  .meta({ id: "findingReportBoundText", allOf: findingNoteJsonSchemaConstraints });
+export const findingNoteSchema = findingReportBoundTextSchema;
 const findingNotesSchema = z.array(findingNoteSchema).max(MAX_FINDING_NESTED_ITEMS);
 const uniqueNonEmptyStrings = z
   .array(nonEmptyString)
@@ -300,9 +320,9 @@ export const findingSchema = z
     severity: z.enum(FINDING_SEVERITIES).optional(),
     impact: z.enum(FINDING_SEVERITIES).optional(),
     likelihood: z.enum(FINDING_SEVERITIES).optional(),
-    impact_rationale: nonEmptyString.optional(),
-    likelihood_rationale: nonEmptyString.optional(),
-    severity_rationale: nonEmptyString.optional(),
+    impact_rationale: findingReportBoundTextSchema.optional(),
+    likelihood_rationale: findingReportBoundTextSchema.optional(),
+    severity_rationale: findingReportBoundTextSchema.optional(),
     description: nonEmptyString.optional(),
     proof_of_concept: proofOfConceptSchema.optional(),
     recommendation: nonEmptyString.optional(),

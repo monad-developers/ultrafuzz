@@ -1102,6 +1102,21 @@ const fixtures = {
       non_production_outcomes: [{ evidence: [{ line_ranges: [{ line: 5 }, { line: 3 }] }] }]
     }
   },
+  "report-finding-report-vocabulary": {
+    positive: {
+      issues: [
+        {
+          notes: ["Observed balance=0 after withdrawal."],
+          severity_rationale: "reachability=public-entrypoint-trace: reproduced"
+        }
+      ],
+      non_production_outcomes: []
+    },
+    negative: {
+      issues: [],
+      non_production_outcomes: [{ notes: ["reachability=renamed-public-trace"] }]
+    }
+  },
   "run-metadata-accounting-workflow-identity": {
     positive: {
       workflow: { run_id: "workflow-a" },
@@ -1245,6 +1260,10 @@ const fixtures = {
       }
     ]
   },
+  "severity-finding-report-vocabulary": {
+    positive: [{ severity_rationale: "reachability=helper-only: public entrypoints reject the input" }],
+    negative: [{ severity_rationale: "reachability=renamed-public-trace" }]
+  },
   "triaged-finding-id-uniqueness": {
     positive: [{ id: "a" }],
     negative: [{ id: "a" }, { id: "a" }]
@@ -1296,6 +1315,25 @@ test("every document-local gate has a passing and failing non-mutating fixture",
     assert.deepEqual(fixture.positive, positiveBefore, `${name}:positive mutated`);
     assert.deepEqual(fixture.negative, negativeBefore, `${name}:negative mutated`);
   }
+});
+
+test("severity and report vocabulary gates reject renamed reachability tokens at both boundaries", () => {
+  const invalid = { severity_rationale: "reachability=renamed-public-trace" };
+  const severity = executeSemanticGate("severity-finding-report-vocabulary", { document: [invalid] });
+  assert.equal(severity.status, "failed");
+  assert.deepEqual(
+    severity.issues.map((entry) => entry.path),
+    ["$[0].severity_rationale"]
+  );
+
+  const report = executeSemanticGate("report-finding-report-vocabulary", {
+    document: { issues: [invalid], non_production_outcomes: [{ notes: ["helper_evidence=renamed"] }] }
+  });
+  assert.equal(report.status, "failed");
+  assert.deepEqual(
+    report.issues.map((entry) => entry.path),
+    ["$.issues[0].severity_rationale", "$.non_production_outcomes[0].notes[0]"]
+  );
 });
 
 test("property references alone do not claim fuzzer campaign provenance", () => {

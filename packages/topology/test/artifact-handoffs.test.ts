@@ -173,6 +173,42 @@ describe("artifact handoff validation", () => {
         }
       })
     ).not.toThrow();
+
+    expect(() =>
+      validateTopology(topology, {
+        promptTexts: {
+          "review/triage.md": `---
+id: triage
+display_name: "{{finding_reachability_vocabulary}} {{finding_note_key_vocabulary}}"
+---
+No vocabulary references exist in the rendered prompt body.
+`
+        }
+      })
+    ).toThrow(expect.objectContaining({ code: "MISSING_REPORT_VOCABULARY_REFERENCE" }));
+
+    expect(() =>
+      validateTopology(topology, {
+        promptTexts: {
+          "review/triage.md": `---
+id: triage
+display_name: "root_cause=frontmatter-is-metadata"
+---
+Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
+`
+        }
+      })
+    ).not.toThrow();
+
+    for (const standalone of ["root_cause=renamed", "reachability=public-entrypoint-trace"]) {
+      expect(() =>
+        validateTopology(topology, {
+          promptTexts: {
+            "review/triage.md": `Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.\n${standalone}`
+          }
+        })
+      ).toThrow(expect.objectContaining({ code: "DUPLICATED_REPORT_VOCABULARY" }));
+    }
     expect(() =>
       validateTopology(topology, {
         promptTexts: {
