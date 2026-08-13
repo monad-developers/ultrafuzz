@@ -4073,6 +4073,40 @@ test("validate accepts separately exported frozen registries with static compute
   assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
 });
 
+test("validate and init accept canonical registries composed from local factory spreads", async () => {
+  const project = tempProject();
+  const initialized = initProject({ projectRoot: project, force: true });
+  assert.equal(initialized.ok, true, JSON.stringify(initialized.diagnostics));
+  writeSmallTopology(project);
+  fs.writeFileSync(
+    path.join(project, ".smithers/agents/index.ts"),
+    "const createAgent = () => null;\n" +
+      "const coreFactories = Object.freeze({\n" +
+      "  ClaudeAgent: createAgent,\n" +
+      "  CodexAgent: createAgent\n" +
+      "});\n" +
+      "const additionalFactories = {\n" +
+      "  DeepSeekAgent: createAgent,\n" +
+      "  KimiAgent: createAgent\n" +
+      "};\n" +
+      "export const agentFactories = {\n" +
+      "  ...coreFactories,\n" +
+      "  ...additionalFactories\n" +
+      "};\n",
+    "utf8"
+  );
+
+  const validate = await validateProject({ projectRoot: project, env: {} });
+  const preserved = initProject({ projectRoot: project });
+
+  assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
+  assert.equal(preserved.ok, true, JSON.stringify(preserved.diagnostics));
+  assert.equal(
+    preserved.diagnostics.some((diagnostic) => diagnostic.code === "INIT_AGENT_REGISTRY_STALE"),
+    false
+  );
+});
+
 test("validate accepts quoted factory keys for current custom agent IDs", async () => {
   const project = tempProject();
   const init = initProject({ projectRoot: project, force: true });
