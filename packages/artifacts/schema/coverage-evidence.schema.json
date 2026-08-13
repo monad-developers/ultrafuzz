@@ -2,24 +2,34 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:ultrafuzz:schema:artifacts:coverage-evidence:1",
   "title": "Ultrafuzz complete coverage denominator",
-  "description": "Producer contract. Semantic validation additionally requires: every counted range joins a declared included file with the same kind; ranges within each file do not overlap; included-file totals equal their counted ranges; selected-range, production-source, and declared-critical-path view totals equal their applicable file totals; and zero_coverage_components exactly enumerates every material file with no covered ranges. Runtime binds excluded production totals and included ranges to the trusted source inventory.",
+  "description": "Producer contract. Each range uses a positive start_line plus positive line_count, so reversed ranges are unrepresentable. Semantic validation additionally requires: every counted range joins a declared file with the same kind; selected ranges are production-only and may join only an included file; ranges within each file do not overlap; file totals equal all selected and unselected counted ranges; selected-range totals equal selected counted ranges; production-source totals equal production-file totals; and zero_coverage_components exactly enumerates every material file with no covered ranges. Runtime binds every source path and production declaration boundary to the trusted workspace inventory, and binds each selection flag to overlap with the generated Recon coverage map.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "views", "files", "counted_ranges", "zero_coverage_components"],
   "properties": {
-    "schema_version": { "const": "ultrafuzz.coverage-evidence.v1" },
+    "schema_version": {
+      "const": "ultrafuzz.coverage-evidence.v1"
+    },
     "views": {
       "type": "array",
       "minItems": 2,
-      "maxItems": 3,
+      "maxItems": 2,
       "items": {
         "type": "object",
         "additionalProperties": false,
         "required": ["scope", "covered_ranges", "total_ranges"],
         "properties": {
-          "scope": { "enum": ["selected-range", "production-source", "declared-critical-path"] },
-          "covered_ranges": { "type": "integer", "minimum": 0 },
-          "total_ranges": { "type": "integer", "minimum": 0 }
+          "scope": {
+            "enum": ["selected-range", "production-source"]
+          },
+          "covered_ranges": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "total_ranges": {
+            "type": "integer",
+            "minimum": 0
+          }
         }
       }
     },
@@ -29,32 +39,53 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["path", "kind", "included", "critical", "covered_ranges", "total_ranges"],
+        "required": ["path", "kind", "included", "covered_ranges", "total_ranges"],
         "properties": {
           "path": {
             "type": "string",
             "minLength": 1,
             "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[^\\\\\\u0000]+$"
           },
-          "kind": { "enum": ["production", "test", "harness", "dependency"] },
-          "included": { "type": "boolean" },
-          "critical": { "type": "boolean" },
-          "exclusion_reason": { "type": "string", "minLength": 1 },
-          "covered_ranges": { "type": "integer", "minimum": 0 },
-          "total_ranges": { "type": "integer", "minimum": 0 }
+          "kind": {
+            "enum": ["production", "test", "harness", "dependency"]
+          },
+          "included": {
+            "type": "boolean"
+          },
+          "exclusion_reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "covered_ranges": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "total_ranges": {
+            "type": "integer",
+            "minimum": 0
+          }
         },
         "allOf": [
           {
-            "if": { "properties": { "included": { "const": false } }, "required": ["included"] },
+            "if": {
+              "properties": {
+                "included": {
+                  "const": false
+                }
+              },
+              "required": ["included"]
+            },
             "then": {
               "required": ["exclusion_reason"],
-              "properties": { "exclusion_reason": true, "covered_ranges": { "const": 0 } }
+              "properties": {
+                "exclusion_reason": true
+              }
             },
-            "else": { "not": { "required": ["exclusion_reason"] } }
-          },
-          {
-            "if": { "properties": { "critical": { "const": true } }, "required": ["critical"] },
-            "then": { "properties": { "total_ranges": { "type": "integer", "minimum": 1 } } }
+            "else": {
+              "not": {
+                "required": ["exclusion_reason"]
+              }
+            }
           }
         ]
       }
@@ -64,17 +95,30 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["file", "kind", "start_line", "end_line", "covered"],
+        "required": ["file", "kind", "start_line", "line_count", "selected", "covered"],
         "properties": {
           "file": {
             "type": "string",
             "minLength": 1,
             "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[^\\\\\\u0000]+$"
           },
-          "kind": { "enum": ["production", "test", "harness", "dependency"] },
-          "start_line": { "type": "integer", "minimum": 1 },
-          "end_line": { "type": "integer", "minimum": 1 },
-          "covered": { "type": "boolean" }
+          "kind": {
+            "enum": ["production", "test", "harness", "dependency"]
+          },
+          "start_line": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "line_count": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "selected": {
+            "type": "boolean"
+          },
+          "covered": {
+            "type": "boolean"
+          }
         }
       }
     },
@@ -90,7 +134,9 @@
             "minLength": 1,
             "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[^\\\\\\u0000]+$"
           },
-          "kind": { "enum": ["production", "test", "harness", "dependency"] }
+          "kind": {
+            "enum": ["production", "test", "harness", "dependency"]
+          }
         }
       }
     }

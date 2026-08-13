@@ -640,17 +640,53 @@ export function writeVerifiedFinalReport(input: {
   const reportBytes = Buffer.from(`${JSON.stringify(projection.report, null, 2)}\n`, "utf8");
   const markdownBytes = Buffer.from(projection.markdown, "utf8");
   const outputs = verifiedFinalReportOutputs(input.reportJsonRelativePath);
-  const graph = currentPlannedGraph();
-  graph.nodes[0]!.outputs = outputs;
-  graph.nodes[0]!.workflow = {
+  const coverageEvidence = projection.report.coverage_evidence;
+  const coverageOutputs =
+    coverageEvidence === undefined
+      ? undefined
+      : ([verifiedCoverageEvidenceOutput()] satisfies ArtifactManifestOutputContract[]);
+  const graph = currentPlannedGraph(
+    coverageOutputs === undefined ? ["final-report"] : ["coverage", "final-report"],
+    "final-report"
+  );
+  const reportNode = graph.nodes.find((node) => node.id === "final-report")!;
+  reportNode.outputs = outputs;
+  reportNode.depends_on = coverageOutputs === undefined ? [] : ["coverage"];
+  reportNode.workflow = {
     node_id: "node:final-report",
     task_node_ids: ["node:final-report"]
   };
+  const coverageNode = graph.nodes.find((node) => node.id === "coverage");
+  if (coverageNode !== undefined && coverageOutputs !== undefined) {
+    coverageNode.outputs = coverageOutputs;
+    coverageNode.workflow = {
+      node_id: "node:coverage",
+      task_node_ids: ["node:coverage"]
+    };
+  }
   const workflowRunId = `workflow-${runId}`;
-  const agentTaskId = "node:final-report";
-  const verifierTaskId = "verify:final-report";
 
   const layout = layoutForRunRoot(input.runRoot, runId);
+  const nodeStates: Record<string, Partial<NodeState>> = {};
+  if (coverageNode !== undefined && coverageOutputs !== undefined) {
+    const coverageBytes = Buffer.from(`${JSON.stringify(coverageEvidence, null, 2)}\n`, "utf8");
+    const coveragePath = path.join(layout.artifactsDir, coverageNode.id, coverageOutputs[0]!.path);
+    writeFileDurable(coveragePath, coverageBytes);
+    writeArtifactManifest({
+      layout,
+      nodeId: coverageNode.id,
+      include: coverageOutputs.map((output) => output.path),
+      outputs: coverageOutputs,
+      provenance: verifiedOutputProvenance(coverageNode.id, workflowRunId)
+    });
+    writeVerificationMarker(
+      layout,
+      coverageNode.id,
+      coverageOutputs,
+      new Map([[coverageOutputs[0]!.path, coverageBytes]])
+    );
+    nodeStates[coverageNode.id] = verifiedNodeState(layout, coverageNode.id, coverageOutputs, workflowRunId);
+  }
   const reportPath = path.join(layout.artifactsDir, "final-report", input.reportJsonRelativePath ?? "report.json");
   const markdownPath = path.join(layout.artifactsDir, "final-report", "report.md");
   writeFileDurable(reportPath, reportBytes);
@@ -660,58 +696,22 @@ export function writeVerifiedFinalReport(input: {
     nodeId: "final-report",
     include: outputs.map((output) => output.path),
     outputs,
-    provenance: {
-      producer_node_id: "final-report",
-      logical_node_id: "final-report",
-      attempt_index: 0,
-      loop_index: 0,
-      model_index: 0,
-      agent_ref: "CodexAgent",
-      workflow_run_id: workflowRunId,
-      workflow_task_id: agentTaskId,
-      origin: "workflow",
-      metadata: { concrete_node_id: "final-report" }
-    }
+    prerequisiteNodeIds: reportNode.depends_on,
+    provenance: verifiedOutputProvenance("final-report", workflowRunId)
   });
-  const marker: ArtifactVerificationMarker = {
-    schema_version: ARTIFACT_VERIFICATION_SCHEMA_VERSION,
-    attempt_id: "final-report",
-    node_id: "final-report",
-    artifacts: outputs.map((output) => ({
-      ...output,
-      sha256: sha256Bytes(output.contract === "ultrafuzz/report@2" ? reportBytes : markdownBytes)
-    })),
-    publications: outputs.map((output) => ({
-      path: output.path,
-      sha256: sha256Bytes(output.contract === "ultrafuzz/report@2" ? reportBytes : markdownBytes)
-    }))
-  };
-  writeJsonDurable(path.join(layout.root, ".ultrafuzz-verification", "final-report.json"), marker);
-  const manifestPath = path.join(layout.artifactsDir, "final-report", "artifact-manifest.json");
+  writeVerificationMarker(
+    layout,
+    "final-report",
+    outputs,
+    new Map([
+      [input.reportJsonRelativePath ?? "report.json", reportBytes],
+      ["report.md", markdownBytes]
+    ])
+  );
+  nodeStates[reportNode.id] = verifiedNodeState(layout, reportNode.id, outputs, workflowRunId);
   const state = currentRunState({
     runId,
-    nodes: {
-      "final-report": {
-        logical_node_id: "final-report",
-        artifact_dir: "artifacts/final-report",
-        outputs,
-        provenance: {
-          workflow: {
-            run_id: workflowRunId,
-            task_id: verifierTaskId,
-            agent_task_id: agentTaskId,
-            verifier_task_id: verifierTaskId,
-            state: "finished",
-            attempt: 0
-          },
-          output_contracts: {
-            ok: true,
-            missing: [],
-            artifact_manifest_sha256: sha256Bytes(fs.readFileSync(manifestPath))
-          }
-        }
-      }
-    }
+    nodes: nodeStates
   });
   writeCurrentRunEvidence({
     runRoot: input.runRoot,
@@ -720,104 +720,178 @@ export function writeVerifiedFinalReport(input: {
     graph,
     ...(input.accounting === undefined ? {} : { accounting: input.accounting })
   });
-  writeSealedFinalReportAuthority(layout, graph, outputs, workflowRunId);
+  writeSealedFinalReportAuthority(layout, graph, workflowRunId);
   return { reportPath, markdownPath, reportBytes, markdownBytes };
 }
 
-function writeSealedFinalReportAuthority(
+function verifiedOutputProvenance(nodeId: string, workflowRunId: string) {
+  return {
+    producer_node_id: nodeId,
+    logical_node_id: nodeId,
+    attempt_index: 0,
+    loop_index: 0,
+    model_index: 0,
+    agent_ref: "CodexAgent",
+    workflow_run_id: workflowRunId,
+    workflow_task_id: `node:${nodeId}`,
+    origin: "workflow" as const,
+    metadata: { concrete_node_id: nodeId }
+  };
+}
+
+function writeVerificationMarker(
   layout: RunLayout,
-  graph: PlannedGraphDocument,
+  nodeId: string,
+  outputs: ArtifactManifestOutputContract[],
+  bytesByPath: ReadonlyMap<string, Buffer>
+): void {
+  const marker: ArtifactVerificationMarker = {
+    schema_version: ARTIFACT_VERIFICATION_SCHEMA_VERSION,
+    attempt_id: nodeId,
+    node_id: nodeId,
+    artifacts: outputs.map((output) => ({ ...output, sha256: sha256Bytes(bytesByPath.get(output.path)!) })),
+    publications: outputs.map((output) => ({ path: output.path, sha256: sha256Bytes(bytesByPath.get(output.path)!) }))
+  };
+  writeJsonDurable(path.join(layout.root, ".ultrafuzz-verification", `${nodeId}.json`), marker);
+}
+
+function verifiedNodeState(
+  layout: RunLayout,
+  nodeId: string,
   outputs: ArtifactManifestOutputContract[],
   workflowRunId: string
-): void {
-  const node = graph.nodes[0]!;
-  const model = node.model_fanout[0]!;
-  const artifactDir = path.join(layout.artifactsDir, "final-report");
-  const workspacePath = path.join(layout.workspacesDir, "final-report");
-  const taskOutputs = outputs.map((output) => ({
-    path: output.path,
-    contract: output.contract,
-    contractDigest: output.contract_digest,
-    ...(output.schema_file === undefined
-      ? {}
-      : {
-          schemaFile: output.schema_file,
-          schemaId: output.schema_id,
-          schemaSha256: output.schema_sha256,
-          schemaBundleSha256: output.schema_bundle_sha256,
-          validatorBuild: output.validator_build
-        }),
-    primary: output.primary
-  }));
-  const resources = { cpu: 2, memoryMiB: 1_024, timeoutSeconds: 60 };
-  const agentChain = [
-    {
-      profileId: model.model_profile_id,
-      agentRef: model.agent_ref,
-      role: "primary" as const
-    }
-  ];
-  const task: SmithersTaskManifestTask = {
-    attemptId: "final-report",
-    concreteNodeId: node.id,
-    logicalNodeId: node.logical_id,
-    preparationSmithersNodeId: "prepare:final-report",
-    smithersNodeId: "node:final-report",
-    verifierSmithersNodeId: "verify:final-report",
-    agentRef: model.agent_ref,
-    agentChain,
-    dependencies: [],
-    dependencySmithersNodeIds: [],
-    timeoutMs: 60_000,
-    heartbeatTimeoutMs: 60_000,
-    retries: 0,
-    retryPolicy: { backoff: "exponential", initialDelayMs: 1_000 },
-    workspacePath,
-    artifactDir,
-    dependencyArtifactDirs: [],
-    renderedPromptPath: path.join(layout.root, "prompts", "final-report.md"),
-    execution: { mode: "local", resources, agentCredentialEnv: [] },
-    metadata: {
-      schemaVersion: SMITHERS_TASK_METADATA_SCHEMA_VERSION,
-      run: {
-        ultrafuzzRunId: layout.runId,
-        smithersWorkflowName: workflowRunId,
-        graphVersion: "4",
-        topologyVersion: 2
+): Partial<NodeState> {
+  return {
+    logical_node_id: nodeId,
+    artifact_dir: `artifacts/${nodeId}`,
+    outputs,
+    provenance: {
+      workflow: {
+        run_id: workflowRunId,
+        task_id: `verify:${nodeId}`,
+        agent_task_id: `node:${nodeId}`,
+        verifier_task_id: `verify:${nodeId}`,
+        state: "finished",
+        attempt: 0
       },
-      node: {
-        concreteNodeId: node.id,
-        logicalNodeId: node.logical_id,
-        attemptId: "final-report",
-        label: node.display_name,
-        kind: "agentic",
-        promptPath: node.prompt_path
-      },
-      dependencies: { concreteNodeIds: [], attemptIds: [], smithersNodeIds: [] },
-      loop: {
-        index: node.loop.index,
-        count: node.loop.count,
-        mode: node.loop.mode,
-        attemptIndex: node.loop.attempt_index
-      },
-      model: {
-        profileId: model.model_profile_id,
-        agentRef: model.agent_ref,
-        modelIndex: model.model_index,
-        attemptIndex: model.attempt_index,
-        agentChain
-      },
-      workspace: { primitive: "worktree", path: workspacePath, repoPath: "/repo", trustModel: "skip-permissions" },
-      artifacts: {
-        dir: artifactDir,
-        outputs: taskOutputs,
-        manifestPath: path.join(artifactDir, "artifact-manifest.json")
-      },
-      retryPolicy: { maxAttempts: 1, sameAgentAttempts: 1, smithersRetries: 0 },
-      timeout: { milliseconds: 60_000, seconds: 60, heartbeatTimeoutMs: 60_000 },
-      execution: { mode: "local", resources }
+      output_contracts: {
+        ok: true,
+        missing: [],
+        artifact_manifest_sha256: sha256Bytes(
+          fs.readFileSync(path.join(layout.artifactsDir, nodeId, "artifact-manifest.json"))
+        )
+      }
     }
   };
+}
+
+function writeSealedFinalReportAuthority(layout: RunLayout, graph: PlannedGraphDocument, workflowRunId: string): void {
+  const resources = { cpu: 2, memoryMiB: 1_024, timeoutSeconds: 60 };
+  const ancestorIds = (nodeId: string): string[] => {
+    const nodesById = new Map(graph.nodes.map((node) => [node.id, node] as const));
+    const ancestors = new Set<string>();
+    const pending = [...(nodesById.get(nodeId)?.depends_on ?? [])];
+    while (pending.length > 0) {
+      const dependencyId = pending.shift()!;
+      if (ancestors.has(dependencyId)) continue;
+      ancestors.add(dependencyId);
+      pending.push(...(nodesById.get(dependencyId)?.depends_on ?? []));
+    }
+    return [...ancestors];
+  };
+  const tasks: SmithersTaskManifestTask[] = graph.nodes.map((node) => {
+    const model = node.model_fanout[0]!;
+    const agentChain = [
+      {
+        profileId: model.model_profile_id,
+        agentRef: model.agent_ref,
+        role: "primary" as const
+      }
+    ];
+    const artifactDir = path.join(layout.artifactsDir, node.id);
+    const workspacePath = path.join(layout.workspacesDir, node.id);
+    const dependencySmithersNodeIds = node.depends_on.map((dependencyId) => `verify:${dependencyId}`);
+    const taskOutputs = node.outputs.map((output) => ({
+      path: output.path,
+      contract: output.contract,
+      contractDigest: output.contract_digest,
+      ...(output.schema_file === undefined
+        ? {}
+        : {
+            schemaFile: output.schema_file,
+            schemaId: output.schema_id,
+            schemaSha256: output.schema_sha256,
+            schemaBundleSha256: output.schema_bundle_sha256,
+            validatorBuild: output.validator_build
+          }),
+      primary: output.primary
+    }));
+    return {
+      attemptId: node.id,
+      concreteNodeId: node.id,
+      logicalNodeId: node.logical_id,
+      preparationSmithersNodeId: `prepare:${node.id}`,
+      smithersNodeId: `node:${node.id}`,
+      verifierSmithersNodeId: `verify:${node.id}`,
+      agentRef: model.agent_ref,
+      agentChain,
+      dependencies: node.depends_on,
+      dependencySmithersNodeIds,
+      timeoutMs: 60_000,
+      heartbeatTimeoutMs: 60_000,
+      retries: 0,
+      retryPolicy: { backoff: "exponential", initialDelayMs: 1_000 },
+      workspacePath,
+      artifactDir,
+      dependencyArtifactDirs: ancestorIds(node.id).map((dependencyId) => path.join(layout.artifactsDir, dependencyId)),
+      renderedPromptPath: path.join(layout.root, "prompts", `${node.id}.md`),
+      execution: { mode: "local", resources, agentCredentialEnv: [] },
+      metadata: {
+        schemaVersion: SMITHERS_TASK_METADATA_SCHEMA_VERSION,
+        run: {
+          ultrafuzzRunId: layout.runId,
+          smithersWorkflowName: workflowRunId,
+          graphVersion: "4",
+          topologyVersion: 2
+        },
+        node: {
+          concreteNodeId: node.id,
+          logicalNodeId: node.logical_id,
+          attemptId: node.id,
+          label: node.display_name,
+          kind: "agentic",
+          promptPath: node.prompt_path
+        },
+        dependencies: {
+          concreteNodeIds: node.depends_on,
+          attemptIds: node.depends_on,
+          smithersNodeIds: dependencySmithersNodeIds
+        },
+        loop: {
+          index: node.loop.index,
+          count: node.loop.count,
+          mode: node.loop.mode,
+          attemptIndex: node.loop.attempt_index
+        },
+        model: {
+          profileId: model.model_profile_id,
+          agentRef: model.agent_ref,
+          modelIndex: model.model_index,
+          attemptIndex: model.attempt_index,
+          agentChain
+        },
+        workspace: { primitive: "worktree", path: workspacePath, repoPath: "/repo", trustModel: "skip-permissions" },
+        artifacts: {
+          dir: artifactDir,
+          outputs: taskOutputs,
+          manifestPath: path.join(artifactDir, "artifact-manifest.json")
+        },
+        retryPolicy: { maxAttempts: 1, sameAgentAttempts: 1, smithersRetries: 0 },
+        timeout: { milliseconds: 60_000, seconds: 60, heartbeatTimeoutMs: 60_000 },
+        execution: { mode: "local", resources }
+      }
+    };
+  });
   const smithersRoot = path.join(layout.root, "smithers");
   const tasksPath = path.join(smithersRoot, "tasks.json");
   const document: SmithersTaskManifestDocument = {
@@ -826,7 +900,7 @@ function writeSealedFinalReportAuthority(
     smithers_run_id: `ultrafuzz-${layout.runId}`,
     workflow_name: workflowRunId,
     pinned_submodules: null,
-    tasks: [task]
+    tasks
   };
   writeJsonDurable(tasksPath, document);
 
@@ -851,11 +925,26 @@ function writeSealedFinalReportAuthority(
       run_id: layout.runId,
       graph_fingerprint: TEST_SHA256,
       config_fingerprint: TEST_SHA256,
-      expected_state_node_ids: ["final-report"],
-      expected_task_attempt_ids: ["final-report"],
-      expected_task_node_ids: ["node:final-report", "prepare:final-report", "verify:final-report"].sort()
+      expected_state_node_ids: graph.nodes.map((node) => node.id).sort(),
+      expected_task_attempt_ids: graph.nodes.map((node) => node.id).sort(),
+      expected_task_node_ids: graph.nodes
+        .flatMap((node) => [`node:${node.id}`, `prepare:${node.id}`, `verify:${node.id}`])
+        .sort()
     }
   });
+}
+
+function verifiedCoverageEvidenceOutput(): ArtifactManifestOutputContract {
+  const contract = "ultrafuzz/coverage-evidence@1";
+  const binding = artifactContractSchemaBinding(contract);
+  if (binding === undefined) throw new Error("missing current coverage evidence schema binding");
+  return {
+    path: "coverage-evidence.json",
+    contract,
+    contract_digest: artifactContractDefinition(contract).digest,
+    ...binding,
+    primary: true
+  };
 }
 
 function verifiedFinalReportOutputs(reportJsonRelativePath = "report.json"): ArtifactManifestOutputContract[] {

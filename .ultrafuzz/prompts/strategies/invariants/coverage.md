@@ -161,15 +161,19 @@ Apply these Recon/Chimera rules:
   `ultrafuzz/coverage-evidence@1` contract and validate it against
   `{{schema_path}}/coverage-evidence.schema.json`. Set `schema_version` to
   `ultrafuzz.coverage-evidence.v1`. Every file entry must include `path`,
-  `kind`, `included`, `critical`, `covered_ranges`, and `total_ranges`; excluded
+  `kind`, `included`, `covered_ranges`, and `total_ranges`; excluded
   entries also require `exclusion_reason`. It must name every included and
   excluded file with production/test/harness/dependency attribution and an
-  exclusion reason. `counted_ranges` must enumerate the selected functions or
-  ranges and may reference only files with `included: true`. For an excluded
-  production file, publish no selected counted range; set `total_ranges` to its
-  actual material declaration count so the `production-source` denominator
-  still discloses it. List material zero-coverage components, and publish both `selected-range` and
-  `production-source` views (plus `declared-critical-path` when declared).
+  exclusion reason. `counted_ranges` must enumerate every material production
+  declaration, including declarations Recon excludes, and each range must carry
+  the exact `selected` boolean plus its coverage result. Set `selected` from
+  overlap with the generated `magic/recon-coverage.json` ranges; do not infer it
+  from source visibility, and use `false` for every range when that map was not
+  generated. A file is `included`
+  exactly when at least one of its ranges is selected. Recon-excluded files and
+  ranges still contribute to the full `production-source` denominator, including
+  incidentally covered declarations. List every material zero-coverage component,
+  and publish exactly the `selected-range` and `production-source` views.
   After the structural JSON Schema check, run
   `ultrafuzz artifact validate ultrafuzz/coverage-evidence@1 {{artifact_dir}}/coverage-evidence.json`.
   This standalone artifact validator must pass before finishing; it enforces
@@ -178,8 +182,10 @@ Apply these Recon/Chimera rules:
   reconciles the declared production files and ranges against the trusted
   workspace source inventory; do not treat the standalone command as that
   workspace-aware publication check.
-  Never publish a bare percentage: render each score as
-  `<scope>: <covered_ranges>/<total_ranges>` in `coverage-report.md`.
+  Never publish a bare percentage. In `coverage-report.md`, include exactly one
+  `## Scoped coverage evidence` section that renders each score as
+  `<scope>: <covered_ranges>/<total_ranges>` and names every excluded and
+  zero-coverage component, matching `coverage-evidence.json` exactly.
 - Recon Magic coverage excludes ABI view/pure functions before evaluation and
   filters internal/private missing reports; use that standardized result.
 - Chase at least 90% standardized line coverage of core production contracts.
@@ -190,9 +196,9 @@ Apply these Recon/Chimera rules:
   sweep/surface handlers.
 - Use clamped or shortcut handlers only with concrete rationale.
 - If coverage remains below 90% when the finalization reserve begins, stop
-  fuzzing and document the exact standardized percentage, remaining gap
+  fuzzing and document the exact scoped covered/total denominator, remaining gap
   categories, attempted handler/setup improvements, and next recommended
-  target. A below-target report with concrete blockers is a valid node output;
+  target. A sub-target report with concrete blockers is a valid node output;
   a timed-out node with no report is not.
 - For every fuzzer-discovered failure, create a deterministic
   `CryticToFoundry` reproducer that hardcodes the generated input and fails as a
@@ -206,12 +212,16 @@ Apply these Recon/Chimera rules:
    - Write `{{artifact_dir}}/coverage-goal.json` using the exact pinned schema
      at `{{schema_path}}/coverage-goal.schema.json`; it alone defines the JSON
      version, fields, types, enums, required members, blocker categories, and
-     empty forms. Set the goal to 90 percent standardized core line coverage
+     empty forms. Set the scoped goal to 90 percent selected-range coverage
      and record the actual planned commands, timeout, and finalization reserve.
      Select the schema-defined status, measurement, and blocker variant that
-     exactly matches the work and evidence observed so far. Never present an
+     exactly matches the work and evidence observed so far. Any non-null
+     `current_measurement` must exactly copy the `selected-range` view from
+     `coverage-evidence.json`; never convert it to a bare number. Never present an
      unmeasured, sub-target, or blocked result as stronger progress than the
-     run actually achieved.
+     run actually achieved. Run
+     `ultrafuzz artifact validate ultrafuzz/coverage-goal@1 {{artifact_dir}}/coverage-goal.json`
+     after the structural schema check so scoped-count reconciliation also runs.
    - Immediately write initial checkpoint `{{artifact_dir}}/coverage-report.md`,
      `{{output_findings_path}}`, `{{artifact_dir}}/generated-tests.json`, and
      `{{artifact_dir}}/harness-repairs.json` before starting Recon or any
