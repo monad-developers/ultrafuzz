@@ -88,5 +88,5 @@ Use only the authoritative report-bound note vocabulary:
 Write the normalized findings JSON to `{{output_findings_path}}`; use `[]` when no concrete finding is supportable.
 
 Write the generated-test manifest to `{{artifact_dir}}/generated-tests.json`.
-Use a contract-valid manifest with an empty `generated_tests` array when no
-test file was produced.
+Use the exact pinned schema's contract-valid empty bundle when no test file was
+produced.

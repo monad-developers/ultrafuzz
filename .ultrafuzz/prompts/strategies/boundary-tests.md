@@ -82,3 +82,7 @@ oracles, public support, classifications, and downstream priorities. This
 cross-artifact correspondence is a contextual requirement beyond JSON Schema.
 Run validation as one direct command; do not use command substitution, pipes,
 or chained shell commands for post-write validation.
+
+Write structured findings to `{{output_findings_path}}` using the exact pinned
+findings schema. Use its schema-defined empty form when no source-backed
+production finding is confirmed.

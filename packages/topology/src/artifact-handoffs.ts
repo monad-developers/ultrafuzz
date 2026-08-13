@@ -85,7 +85,7 @@ function validateOutputInstructions(
 ): void {
   const promptPath = node.prompt ?? (node.group ? `${node.group}/${node.id}.md` : `${node.id}.md`);
   for (const output of node.outputs) {
-    if (!canSilentlyMaterializeValidEmpty(output)) continue;
+    if (!needsExplicitValidEmptyDestination(output)) continue;
     if (promptReferencesCurrentOutput(promptText, variables, output.path, output.contract)) continue;
     throw topologyError(
       "MISSING_PROMPT_OUTPUT_INSTRUCTION",
@@ -95,13 +95,13 @@ function validateOutputInstructions(
   }
 }
 
-function canSilentlyMaterializeValidEmpty(output: NormalizedTopologyNode["outputs"][number]): boolean {
-  // This is the validation-side form of the runtime's canonicalEmptyArtifact
-  // policy. Runtime-owned patches and provenance-completeness artifacts are
-  // never synthesized, nor are primary outputs other than findings.
+function needsExplicitValidEmptyDestination(output: NormalizedTopologyNode["outputs"][number]): boolean {
+  // Patch captures and provenance-completeness catalogs have independent
+  // publication gates. Primary non-findings outputs likewise fail through
+  // their primary-output gate instead of this valid-empty prompt guard.
   if (output.path === "workspace.patch" || output.path === "workspace-patch.json") return false;
-  if (output.contract === "ultrafuzz/invariant-ledger@1" || output.contract === "ultrafuzz/properties@1") return false;
-  if (output.primary && output.contract !== "ultrafuzz/findings@1") return false;
+  if (output.contract === "ultrafuzz/invariant-ledger@1" || output.contract === "ultrafuzz/properties@2") return false;
+  if (output.primary && output.contract !== "ultrafuzz/findings@2") return false;
   return artifactContractDefinition(output.contract).validEmptyExample !== undefined;
 }
 
@@ -112,11 +112,15 @@ function promptReferencesCurrentOutput(
   contract: string
 ): boolean {
   if (
-    outputPath === "findings.json" &&
-    contract === "ultrafuzz/findings@1" &&
-    variables.some((variable) => variable.name === "output_findings_path")
+    contract === "ultrafuzz/findings@2" &&
+    variables.some(
+      (variable) => variable.name === "output_findings_path" || variable.name === "output_stage_findings_path"
+    )
   ) {
-    return hasWriteInstruction(promptText, "output_findings_path");
+    return (
+      hasWriteInstruction(promptText, "output_findings_path") ||
+      hasWriteInstruction(promptText, "output_stage_findings_path")
+    );
   }
   if (
     variables.some(
@@ -138,46 +142,31 @@ function hasWriteInstruction(promptText: string, variable: string): boolean {
 }
 
 function hasAffirmativeWriteInstruction(promptText: string, destinationPattern: string): boolean {
-  const independentSentence = new RegExp(
-    `(?<!\\d)[.!?]\\s+(?:write|emit|save|persist|produce|create|mirror|list|record)\\b(?!\\s+(?:whether|if)\\b)[^.!?]{0,200}${destinationPattern}`,
-    "gimu"
-  );
-  for (const match of promptText.matchAll(independentSentence)) {
-    const directiveStart =
-      match.index + match[0].search(/\b(?:write|emit|save|persist|produce|create|mirror|list|record)\b/iu);
-    const sentence = promptText
-      .slice(directiveStart, directiveStart + match[0].length + 100)
-      .split(/[.!?](?:\s|$)/u, 1)[0]!;
-    const nonRequired =
-      /\b(?:at\s+your\s+discretion|discretionary|optional|optionally|should\s+you\s+wish|whether|if|when|where|unless|provided|upon\s+request|only\s+as|as\s+(?:appropriate|needed)|on\s+(?:request|demand))\b/iu.test(
-        sentence
-      ) ||
-      /\b(?:assessment|answer|decision|description|note|report|summary)\b[^.!?]{0,120}\b(?:about|of|on|regarding)\b/iu.test(
-        sentence
-      );
-    if (!nonRequired) return true;
-  }
   const requiredException = new RegExp(
     `(?:^|[.!?]\\s+|\\n\\s*)(?:(?:(?:do\\s+not|never)\\s+(?:fail|forget)\\s+to|without\\s+fail,)\\s*(?:write|emit|save|persist|produce|create|mirror|list|record)\\b|(?:do\\s+not|never)\\s+omit\\s+writing\\b|(?:be\\s+sure\\s+to|make\\s+sure\\s+to|the\\s+agent\\s+is\\s+required\\s+to|you\\s+need\\s+to)\\s+(?:write|emit|save|persist|produce|create|mirror|list|record)\\b)[^.!?]{0,200}${destinationPattern}`,
     "gimu"
   );
   for (const match of promptText.matchAll(requiredException)) {
-    const directiveIndex = match.index + directiveVerbOffset(match[0]);
-    const sentence = promptText
-      .slice(directiveIndex, directiveIndex + match[0].length + 100)
-      .split(/[.!?](?:\s|$)/u, 1)[0]!;
-    const conditionalTail =
-      /\b(?:at\s+your\s+discretion|contingent\s+on|depending\s+on|discretionary|in\s+case|optional|optionally|should\s+(?:you\s+wish|\w+\s+\w+)|subject\s+to|whether|whenever|if|when|where|unless|provided|upon\s+request|only\s+as|as\s+(?:appropriate|needed)|on\s+(?:request|demand))\b/iu.test(
-        sentence
-      );
-    if (!conditionalTail && !hasNonRequiredDirectiveScope(promptText, directiveIndex, undefined, true)) return true;
+    const directiveIndex = match.index + instructionVerbOffset(match[0]);
+    const prefix = promptText.slice(0, directiveIndex);
+    const normalizedMatchStart = match[0].replace(/^[.!?][ \t]*(?=\r?\n)/u, "");
+    const startsMarkdownItem = /^\r?\n[ \t]*[-*+>][ \t]+/u.test(normalizedMatchStart);
+    const precedingLine = prefix.trimEnd().split(/\r?\n/u).at(-1)?.trim() ?? "";
+    const startsIndependentSentence =
+      !startsMarkdownItem &&
+      (/^[.!?]\s+/u.test(match[0]) || (/^\r?\n/u.test(normalizedMatchStart) && /[.!?]\s*$/u.test(precedingLine)));
+    if (
+      !hasNonRequiredDirectiveMeaning(promptText, match[0], match.index, directiveIndex) &&
+      !hasNonRequiredDirectiveScope(promptText, directiveIndex, undefined, true, startsIndependentSentence)
+    )
+      return true;
   }
   const directive = new RegExp(
     `(?:^|[.!?]\\s+|\\n\\s*|\\band\\s+|(?:required\\s+output|output):\\s+|,\\s+(?=immediately\\b))(?:[-*+>]\\s+)?(?:(?:also|always|immediately|otherwise|please|then)\\s+)?(?:(?:ensure(?:\\s+you)?|remember\\s+to|you\\s+(?:must|shall|should))\\s+)?(?:write|emit|save|persist|produce|create|mirror|list|record)\\b(?!\\s+(?:whether|if)\\b)[^.!?]{0,200}${destinationPattern}`,
     "gimu"
   );
   for (const match of promptText.matchAll(directive)) {
-    const directiveIndex = match.index + directiveVerbOffset(match[0]);
+    const directiveIndex = match.index + instructionVerbOffset(match[0]);
     const prefix = promptText.slice(0, directiveIndex);
     const startsOrderedListItem = /(?:^|\r?\n)[ \t]*\d+$/u.test(prefix) && /^\.[ \t]+/u.test(match[0]);
     const normalizedMatchStart = startsOrderedListItem ? match[0] : match[0].replace(/^[.!?][ \t]*(?=\r?\n)/u, "");
@@ -208,59 +197,71 @@ function hasAffirmativeWriteInstruction(promptText: string, destinationPattern: 
       previousNonemptyLine === undefined;
     const startsAfterSentenceBoundary = /^[.!?]\s+/u.test(match[0]);
     const startsIndependentSentence =
-      startsAfterSentenceBoundary || (startsOnContinuationLine && /[.!?]\s*$/u.test(precedingHeading));
+      (!startsMarkdownItem && startsAfterSentenceBoundary) ||
+      (startsOnContinuationLine && !startsMarkdownItem && /[.!?]\s*$/u.test(precedingHeading));
     if (
       !allowedLineBoundary ||
       hasNonRequiredDirectiveScope(
         promptText,
         directiveIndex,
         startsIndependentSentence ? undefined : listIntroducer || undefined,
+        startsIndependentSentence,
         startsIndependentSentence
       )
     )
       continue;
     if (startsOrderedListItem && listIntroducer !== "" && isNonRequiredDirectiveHeading(listIntroducer)) continue;
-    const negativeObject =
-      /\b(?:write|emit|save|persist|produce|create|mirror|list|record)\s+(?:no\b|nothing\b|zero\b|anything\s+except\b)/iu.test(
-        match[0]
-      );
-    const followingSentence = promptText
-      .slice(directiveIndex, directiveIndex + match[0].length + 100)
-      .split(/[.!?](?:\s|$)/u, 1)[0]!;
-    const directiveText = followingSentence.replace(/,\s*if\s+any\s*,/giu, ",");
-    const descriptiveClause =
-      /\b(?:whether|if)\b/iu.test(directiveText) ||
-      /\b(?:assessment|answer|decision|description|note|report|summary)\b[^.!?]{0,120}\b(?:about|of|on|regarding)\b/iu.test(
-        directiveText
-      );
-    const trailingClause =
-      promptText
-        .slice(match.index + match[0].length)
-        .match(/^[^.!?]*/u)?.[0]
-        .trim() ?? "";
-    const discretionaryClause =
-      /^[,;]?\s*(?:at\s+(?:need|your\s+discretion)|assuming|contingent\s+on|depending\s+(?:on|upon)|discretionary|except\s+when|in\s+(?:case|the\s+event)|optional|optionally|should\s+(?:you\s+wish|\w+\s+\w+)|subject\s+to|to\s+the\s+extent|whether|whenever|if|when|where|unless|provided|upon\s+request|only\s+(?:as|when)|as\s+(?:appropriate|needed)|on\s+(?:request|demand))\b/iu.test(
-        trailingClause
-      ) ||
-      /^(?:[.;]\s*)?(?:(?:this|that|the\s+output|publication)\s+is\s+optional|omit\s+when)\b/iu.test(
-        promptText.slice(match.index + match[0].length)
-      );
-    if (!negativeObject && !descriptiveClause && !discretionaryClause && allowedLineBoundary) {
+    if (!hasNonRequiredDirectiveMeaning(promptText, match[0], match.index, directiveIndex) && allowedLineBoundary) {
       return true;
     }
   }
   return false;
 }
 
-function directiveVerbOffset(value: string): number {
-  return value.search(/\b(?:write|emit|save|persist|produce|create|mirror|list|record)\b/iu);
+function hasNonRequiredDirectiveMeaning(
+  promptText: string,
+  matchText: string,
+  matchIndex: number,
+  directiveIndex: number
+): boolean {
+  const negativeObject =
+    /\b(?:write|writing|emit|save|persist|produce|create|mirror|list|record)\s+(?:no\b|nothing\b|zero\b|anything\s+except\b)/iu.test(
+      matchText
+    );
+  const followingSentence = promptText
+    .slice(directiveIndex, directiveIndex + matchText.length + 100)
+    .split(/[.!?](?:\s|$)/u, 1)[0]!;
+  const directiveText = followingSentence.replace(/,\s*if\s+any\s*,/giu, ",");
+  const descriptiveClause =
+    /\b(?:whether|if)\b/iu.test(directiveText) ||
+    /\b(?:assessment|answer|decision|description|note|report|summary)\b[^.!?]{0,120}\b(?:about|of|on|regarding)\b/iu.test(
+      directiveText
+    );
+  const trailingClause =
+    promptText
+      .slice(matchIndex + matchText.length)
+      .match(/^[^.!?]*/u)?.[0]
+      .trim() ?? "";
+  const discretionaryClause =
+    /^[,;]?\s*(?:at\s+(?:need|your\s+discretion)|assuming|contingent\s+on|depending\s+(?:on|upon)|discretionary|except\s+when|in\s+(?:case|the\s+event)|optional|optionally|should\s+(?:you\s+wish|\w+\s+\w+)|subject\s+to|to\s+the\s+extent|whether|whenever|if|when|where|unless|provided|upon\s+request|only\s+(?:as|when)|as\s+(?:appropriate|needed)|on\s+(?:request|demand))\b/iu.test(
+      trailingClause
+    ) ||
+    /^(?:[.;]\s*)?(?:(?:this|that|the\s+output|publication)\s+is\s+optional|omit\s+when)\b/iu.test(
+      promptText.slice(matchIndex + matchText.length)
+    );
+  return negativeObject || descriptiveClause || discretionaryClause;
+}
+
+function instructionVerbOffset(value: string): number {
+  return value.search(/\b(?:write|writing|emit|save|persist|produce|create|mirror|list|record)\b/iu);
 }
 
 function hasNonRequiredDirectiveScope(
   promptText: string,
   matchIndex: number,
   listIntroducer?: string,
-  ignoreCurrentLine = false
+  ignoreCurrentLine = false,
+  ignoreCompletedSentence = false
 ): boolean {
   const prefix = promptText.slice(0, matchIndex);
   const lineStart = prefix.lastIndexOf("\n") + 1;
@@ -273,6 +274,9 @@ function hasNonRequiredDirectiveScope(
     .filter((line) => line.trim() !== "" && !/^\s*(?:[-*+>]|\d+\.)\s+/u.test(line))
     .at(-1)
     ?.trim();
+  if (ignoreCompletedSentence && previousStructuralLine !== undefined && /[.!?]\s*$/u.test(previousStructuralLine)) {
+    return false;
+  }
   const structuralHeading =
     listIntroducer ??
     (!ignoreCurrentLine && /[\p{L}\p{N}]/u.test(currentLinePrefix) ? currentLinePrefix : undefined) ??
@@ -284,21 +288,12 @@ function hasNonRequiredDirectiveScope(
       ? previousStructuralLine
       : undefined) ??
     "";
-  if (/:\s*$/u.test(structuralHeading)) {
-    return !isRequiredDirectiveHeading(structuralHeading);
-  }
   return isNonRequiredDirectiveHeading(structuralHeading);
-}
-
-function isRequiredDirectiveHeading(heading: string): boolean {
-  return /^\s*(?:instructions|at\s+completion|(?:(?:final|mandatory|required)\s+)?deliverables?|results|(?:mandatory|required)\s+output|you\s+must)\s*:\s*$/iu.test(
-    heading
-  );
 }
 
 function isNonRequiredDirectiveHeading(heading: string): boolean {
   return (
-    /(?:\b(?:advisory|avoid|banned|barred|cannot|decline|disallowed|discourage|discouraged|discretionary|elective|example|except|exclude|forbidden|illegal|ignore|ignored|illustrative|never|no|not|omit|optional|optionally|prevent|prohibited|recommended|refuse|refrain|skip|suggested|unnecessary|unauthorized|without)\b|(?:aren|don|mayn|mustn|shouldn|can)['’]t|\bif\s+(?:needed|useful)\b|\bwhen\s+(?:appropriate|convenient|useful)\b|\bas\s+needed\b|\bat\s+your\s+discretion\b)/iu.test(
+    /(?:\b(?:advisory|avoid|banned|barred|candidate|cannot|decline|disallowed|discourage|discouraged|discretionary|elective|example|except|exclude|forbidden|illegal|ignore|ignored|illustrative|never|no|nonessential|not|omit|optional|optionally|prevent|prohibited|recommended|refuse|refrain|skip|suggested|unnecessary|unauthorized|without)\b|(?:aren|don|mayn|mustn|shouldn|can)['’]t|\bif\s+(?:needed|useful)\b|\bwhen\s+(?:appropriate|convenient|useful)\b|\bas\s+needed\b|\bat\s+your\s+discretion\b)/iu.test(
       heading
     ) || /^(?:possible\s+output|for\s+reference\s+only|recommendation\s+output)\s*:/iu.test(heading)
   );

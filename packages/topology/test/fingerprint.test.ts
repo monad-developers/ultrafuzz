@@ -16,7 +16,8 @@ describe("fingerprintGraph", () => {
       expandTopology(validTopology(), {
         configFingerprint: "a".repeat(64),
         promptTexts: {
-          "strategies/strategy.md": "original {{finding_reachability_vocabulary}} {{finding_note_key_vocabulary}}"
+          "strategies/strategy.md":
+            "Write original {{output_findings_path}} {{finding_reachability_vocabulary}} {{finding_note_key_vocabulary}}"
         }
       })
     );
@@ -29,7 +30,8 @@ describe("fingerprintGraph", () => {
         expandTopology(validTopology(), {
           configFingerprint: "a".repeat(64),
           promptTexts: {
-            "strategies/strategy.md": "changed {{finding_reachability_vocabulary}} {{finding_note_key_vocabulary}}"
+            "strategies/strategy.md":
+              "Write changed {{output_findings_path}} {{finding_reachability_vocabulary}} {{finding_note_key_vocabulary}}"
           }
         })
       )
@@ -40,7 +42,8 @@ describe("fingerprintGraph", () => {
         expandTopology(validTopology(), {
           configFingerprint: "b".repeat(64),
           promptTexts: {
-            "strategies/strategy.md": "original {{finding_reachability_vocabulary}} {{finding_note_key_vocabulary}}"
+            "strategies/strategy.md":
+              "Write original {{output_findings_path}} {{finding_reachability_vocabulary}} {{finding_note_key_vocabulary}}"
           }
         })
       )

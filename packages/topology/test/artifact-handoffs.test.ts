@@ -12,6 +12,92 @@ describe("artifact handoff validation", () => {
         }
       })
     ).not.toThrow();
+    for (const prompt of [
+      "Do not write {{output_findings_path}}.",
+      "Avoid writing findings to {{output_findings_path}}.",
+      "You must not write findings to {{output_findings_path}}.",
+      "Writing findings to {{output_findings_path}} is forbidden.",
+      "It is forbidden to write findings to {{output_findings_path}}.",
+      "Under no circumstances write findings to {{output_findings_path}}.",
+      "No agent should write findings to {{output_findings_path}}.",
+      "The previous worker failed to write findings to {{output_findings_path}}.",
+      "You need not write findings to {{output_findings_path}}.",
+      "You should not write findings to {{output_findings_path}}.",
+      "Do not ever write findings to {{output_findings_path}}.",
+      "Do not: write findings to {{output_findings_path}}.",
+      "Never; emit findings to {{output_findings_path}}.",
+      "Under no circumstances: write findings to {{output_findings_path}}.",
+      "Do not\nwrite findings to {{output_findings_path}}.",
+      "Never\nwrite findings to {{output_findings_path}}.",
+      "Under no circumstances\n- Write findings to {{output_findings_path}}.",
+      "Record whether the existing file at {{output_findings_path}} was produced by another tool.",
+      "Write no findings to {{output_findings_path}}.",
+      "Write nothing to {{output_findings_path}}.",
+      "Write zero output to {{output_findings_path}}.",
+      "Write anything except findings to {{output_findings_path}}.",
+      "Investigate. Write nothing to {{output_findings_path}}.",
+      "Be sure to write nothing to {{output_findings_path}}.",
+      "Do not fail to write anything except findings to {{output_findings_path}}.",
+      "You must not\nwrite findings to {{output_findings_path}}.",
+      "You should not\nwrite findings to {{output_findings_path}}.",
+      "Do not ever\nwrite findings to {{output_findings_path}}.",
+      "Avoid:\nWrite findings to {{output_findings_path}}.",
+      "There is no need to:\nwrite findings to {{output_findings_path}}.",
+      "Do not under any circumstances:\nwrite findings to {{output_findings_path}}.",
+      "It is forbidden to:\nwrite findings to {{output_findings_path}}.",
+      "You are prohibited from doing this:\nwrite findings to {{output_findings_path}}.",
+      "Refrain from:\nwrite findings to {{output_findings_path}}.",
+      "Don't\nwrite findings to {{output_findings_path}}.",
+      "No agent should\nwrite findings to {{output_findings_path}}.",
+      "You mustn't:\nWrite findings to {{output_findings_path}}.",
+      "You cannot:\nWrite findings to {{output_findings_path}}.",
+      "Exclude the following:\n- Write findings to {{output_findings_path}}.",
+      "The following is disallowed:\n- Write findings to {{output_findings_path}}.",
+      "Omit this action:\nWrite findings to {{output_findings_path}}.",
+      "Skip:\n1. Write findings to {{output_findings_path}}.",
+      "You aren't allowed to:\nWrite findings to {{output_findings_path}}.",
+      "You aren't permitted to:\nWrite findings to {{output_findings_path}}.",
+      "You are barred from doing this:\nWrite findings to {{output_findings_path}}.",
+      "The following actions are barred:\n- Modify source files.\n- Write findings to {{output_findings_path}}.",
+      "Prevent the following:\n- Write findings to {{output_findings_path}}.",
+      "Refuse to:\nWrite findings to {{output_findings_path}}.",
+      "The following is banned:\nWrite findings to {{output_findings_path}}.",
+      "It is illegal to:\nWrite findings to {{output_findings_path}}.",
+      "Decline to:\nWrite findings to {{output_findings_path}}.",
+      "Do everything except:\nWrite findings to {{output_findings_path}}.",
+      "You mayn't:\nWrite findings to {{output_findings_path}}.",
+      "Do not perform any of the following:\n- Modify source files.\n- Write findings to {{output_findings_path}}.",
+      "Never do these things\n- Change tests.\n- Write findings to {{output_findings_path}}.",
+      "Never do these things.\n- Change tests.\n- Write findings to {{output_findings_path}}.",
+      "Never do these things.\n- Be sure to write findings to {{output_findings_path}}.",
+      "Optional:\n- Be sure to write findings to {{output_findings_path}}.",
+      "Do not perform the following:\n1. Write findings to {{output_findings_path}}.",
+      "It is forbidden:\n1. Write findings to {{output_findings_path}}.",
+      "It is forbidden to do the following:\n\n- Write findings to {{output_findings_path}}.",
+      "Do not perform this action:\n\nWrite findings to {{output_findings_path}}.",
+      `Do not perform the following action under any circumstances because it would violate the required safety policy and corrupt the audit result irreversibly:\nWrite findings to {{output_findings_path}}.`,
+      "There is no need to write findings to {{output_findings_path}}.",
+      "The path {{output_findings_path}} exists for another tool.",
+      "Write findings to findings.json.",
+      "Write an assessment of whether {{output_findings_path}} was produced by another tool.",
+      "Write a note stating if {{output_findings_path}} already exists.",
+      "Record your decision whether to write {{output_findings_path}}.",
+      "Write a summary explaining whether {{output_findings_path}} was produced by another tool.",
+      "Write a report stating if {{output_findings_path}} already exists.",
+      "Write a description of whether {{output_findings_path}} should be created.",
+      "Write an assessment of the existing file at {{output_findings_path}}.",
+      "Write findings to {{output_findings_path}} if a finding exists.",
+      "If any findings are confirmed, write them to {{output_findings_path}}.",
+      "Optional:\n- Write findings to {{output_findings_path}}.",
+      "Unnecessary output:\nWrite findings to {{output_findings_path}}.",
+      "Ignore this step:\nWrite findings to {{output_findings_path}}.",
+      "If useful:\n- Write findings to {{output_findings_path}}."
+    ]) {
+      expect(
+        () => validateTopology(validTopology(), { promptTexts: { "strategies/strategy.md": prompt } }),
+        prompt
+      ).toThrow(expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" }));
+    }
   });
 
   it("requires an ancestor generated-test manifest for the contract-derived handoff", () => {
@@ -505,7 +591,7 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       })
     ).toThrow(expect.objectContaining({ code: "DUPLICATED_REPORT_VOCABULARY" }));
   });
-  it("requires explicit destinations for outputs the runtime can replace with valid-empty artifacts", () => {
+  it("requires explicit destinations for valid-empty output declarations", () => {
     expect(() =>
       validateTopology(validTopology(), {
         promptTexts: { "strategies/strategy.md": "Investigate the target and report your result." }
@@ -518,7 +604,7 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
           nodeId: "strategy",
           promptPath: "strategies/strategy.md",
           path: "findings.json",
-          contract: "ultrafuzz/findings@1"
+          contract: "ultrafuzz/findings@2"
         })
       })
     );
@@ -547,6 +633,7 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       "Remember to write findings to {{output_findings_path}}.",
       "You need to write findings to {{output_findings_path}}.",
       "Be sure to write findings to {{output_findings_path}}.",
+      "Do not edit source files.\nBe sure to write findings to {{output_findings_path}}.",
       "Make sure to write findings to {{output_findings_path}}.",
       "The agent is required to write findings to {{output_findings_path}}.",
       "- Do not edit source files\n- Write findings to {{output_findings_path}}.",
@@ -562,7 +649,12 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       "Mandatory output:\nWrite findings to {{output_findings_path}}.",
       "You must:\nWrite findings to {{output_findings_path}}.",
       "Required deliverables:\nWrite findings to {{output_findings_path}}.",
-      "Mandatory deliverable:\nWrite findings to {{output_findings_path}}."
+      "Mandatory deliverable:\nWrite findings to {{output_findings_path}}.",
+      "Output:\nWrite findings to {{output_findings_path}}.",
+      "Final output:\nWrite findings to {{output_findings_path}}.",
+      "Steps:\nWrite findings to {{output_findings_path}}.",
+      "Actions:\nWrite findings to {{output_findings_path}}.",
+      "Artifact finalization:\nWrite findings to {{output_findings_path}}."
     ]) {
       expect(() =>
         validateTopology(validTopology(), { promptTexts: { "strategies/strategy.md": prompt } })
@@ -649,13 +741,13 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       ...topology.nodes[2]!,
       outputs: [
         { path: "report.md", contract: "ultrafuzz/nonempty-markdown@1", primary: true },
-        { path: "nested/results.json", contract: "ultrafuzz/json-array@1", primary: false }
+        { path: "nested/results.txt", contract: "ultrafuzz/text@1", primary: false }
       ]
     };
 
     for (const prompt of [
       "Write a result somewhere in {{artifact_dir}}.",
-      "Write {{artifact_dir}}/results.json.",
+      "Write {{artifact_dir}}/results.txt.",
       "Write findings to {{output_findings_path}}."
     ]) {
       expect(() => validateTopology(topology, { promptTexts: { "strategies/strategy.md": prompt } })).toThrow(
@@ -664,23 +756,23 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
     }
     expect(() =>
       validateTopology(topology, {
-        promptTexts: { "strategies/strategy.md": "Write {{artifact_path}}/nested/results.json." }
+        promptTexts: { "strategies/strategy.md": "Write {{artifact_path}}/nested/results.txt." }
       })
     ).not.toThrow();
     expect(() =>
       validateTopology(topology, {
-        promptTexts: { "strategies/strategy.md": "Write {{artifact_dir}}/nested/results.json." }
+        promptTexts: { "strategies/strategy.md": "Write {{artifact_dir}}/nested/results.txt." }
       })
     ).not.toThrow();
   });
 
-  it("does not demand instructions for outputs the runtime never synthesizes", () => {
+  it("does not duplicate destination checks for outputs governed by separate publication gates", () => {
     const topology = validTopology();
     topology.nodes[2] = {
       ...topology.nodes[2]!,
       outputs: [
-        { path: "report.json", contract: "ultrafuzz/report@1", primary: true },
-        { path: "properties.json", contract: "ultrafuzz/properties@1", primary: false },
+        { path: "report.json", contract: "ultrafuzz/report@2", primary: true },
+        { path: "properties.json", contract: "ultrafuzz/properties@2", primary: false },
         { path: "workspace.patch", contract: "ultrafuzz/text@1", primary: false }
       ]
     };

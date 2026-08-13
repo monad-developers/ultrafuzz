@@ -1153,7 +1153,7 @@ nodes:
   if (discoveryMarkdownPath === GENERIC_RUNTIME_MARKDOWN_PATH) writeNeutralRuntimeFixturePrompt(project);
   fs.appendFileSync(
     path.join(project, ".ultrafuzz", "prompts", discoveryPromptPath),
-    REPORT_VOCABULARY_PROMPT_REFERENCES,
+    `${REPORT_VOCABULARY_PROMPT_REFERENCES}Write findings to {{output_findings_path}}.\n`,
     "utf8"
   );
 }
@@ -1316,7 +1316,8 @@ display_name: Project Discovery
 Reference:
 {{artifact_handoff:reference-properties-example}}
 
-Write output to {{artifact_path}}/setup/project-discovery.md and findings to {{output_findings_path}}.
+Write output to {{artifact_path}}/setup/project-discovery.md.
+Write findings to {{output_findings_path}}.
 {{finding_reachability_vocabulary}}
 {{finding_note_key_vocabulary}}
 `,
@@ -1473,7 +1474,7 @@ display_name: Project Discovery
 
 Strategy: {{strategy}}
 Current artifact dir: {{artifact_path}}
-Findings: {{output_findings_path}}
+Write findings to {{output_findings_path}}.
 {{finding_reachability_vocabulary}}
 {{finding_note_key_vocabulary}}
 `,
@@ -1489,7 +1490,7 @@ display_name: Target Signal
 Ancestor snapshots:
 {{artifact_path:project-discovery}}/${discoveryMarkdownPath}
 
-Current findings: {{output_findings_path}}
+Write current findings to {{output_findings_path}}.
 {{finding_reachability_vocabulary}}
 {{finding_note_key_vocabulary}}
 `,
@@ -4014,6 +4015,34 @@ test("validate rejects unknown agent references before launch", async () => {
   assert.ok(run.diagnostics.some((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN"));
 });
 
+test("validate rejects effective project prompts that omit valid-empty output destinations", async () => {
+  const project = tempProject();
+  const init = initProject({ projectRoot: project, force: true });
+  assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+  writeSmallTopology(project);
+  const promptPath = path.join(project, ".ultrafuzz", "prompts", "setup", "project-discovery.md");
+  fs.writeFileSync(promptPath, "---\nid: project-discovery\n---\n\nInvestigate the project.\n", "utf8");
+
+  const missing = await validateProject({ projectRoot: project, env: {} });
+  assert.equal(missing.ok, false);
+  assert.ok(
+    missing.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "MISSING_PROMPT_OUTPUT_INSTRUCTION" &&
+        /project-discovery.*setup\/project-discovery\.md.*findings\.json.*valid-empty/iu.test(diagnostic.message)
+    ),
+    JSON.stringify(missing.diagnostics)
+  );
+
+  fs.writeFileSync(
+    promptPath,
+    "---\nid: project-discovery\n---\n\nInvestigate the project and write findings to {{output_findings_path}}.\n",
+    "utf8"
+  );
+  const instructed = await validateProject({ projectRoot: project, env: {} });
+  assert.equal(instructed.ok, true, JSON.stringify(instructed.diagnostics));
+});
+
 test("validate requires agentFactories entries for every configured model profile", async () => {
   const project = tempProject();
   const init = initProject({ projectRoot: project, force: true });
@@ -4417,6 +4446,7 @@ display_name: Priority plumbing test
 Threshold={{invariant_property_priority_threshold}}
 Filter={{invariant_property_priority_filter}}
 Priorities={{invariant_property_priorities}}
+Write findings to {{output_findings_path}}.
 {{finding_reachability_vocabulary}}
 {{finding_note_key_vocabulary}}
 `,
@@ -7379,6 +7409,8 @@ display_name: Project Discovery
 ${`${marker} `.repeat(2000)}
 {{finding_reachability_vocabulary}}
 {{finding_note_key_vocabulary}}
+
+Write findings to {{output_findings_path}}.
 `,
     "utf8"
   );

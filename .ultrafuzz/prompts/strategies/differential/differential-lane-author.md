@@ -112,3 +112,6 @@ lane-local helpers, mocks, fixtures, scripts, or data dependencies as
 non-runnable support. Write the schema-defined empty findings form unless this
 lane produced a confirmed production-bug red that should already be consumable
 by downstream dedupe.
+
+Write those findings to `{{output_findings_path}}` using the exact pinned
+findings schema and its rendered validation command.
