@@ -12,6 +12,7 @@ import {
   projectRoot,
   type CommandResult
 } from "../command-shared.js";
+import { formatStatusDuration } from "../status-rendering.js";
 
 const DEFAULT_WATCH_INTERVAL_SECONDS = 30;
 
@@ -126,7 +127,7 @@ function renderEta(eta: RunHealthValue["eta"]): string {
   if (eta.seconds === null) {
     return `unavailable (${eta.unavailable_reason ?? "unknown"})`;
   }
-  return eta.seconds === 0 ? "no remaining nodes" : formatDuration(eta.seconds);
+  return eta.seconds === 0 ? "no remaining nodes" : formatStatusDuration(eta.seconds);
 }
 
 function renderCurrentStep(step: RunHealthValue["current_step"]): string {
@@ -137,7 +138,7 @@ function renderCurrentStep(step: RunHealthValue["current_step"]): string {
   if (step.elapsed_seconds === null || step.node_id === null) {
     return `unavailable (no recorded start)${others}`;
   }
-  return `${formatDuration(step.elapsed_seconds)} on ${step.node_id}${others}`;
+  return `${formatStatusDuration(step.elapsed_seconds)} on ${step.node_id}${others}`;
 }
 
 /** Keeps the Progress line's buckets summing to `total` when nodes are waiting. */
@@ -150,19 +151,4 @@ function extraBuckets(value: RunHealthValue): string {
     counts.other > 0 ? `${counts.other} other` : undefined
   ].filter((entry): entry is string => entry !== undefined);
   return entries.length === 0 ? "" : ` / ${entries.join(" / ")}`;
-}
-
-function formatDuration(seconds: number): string {
-  if (seconds < 60) {
-    return "less than a minute";
-  }
-  const minutes = Math.round(seconds / 60);
-  if (minutes < 90) {
-    return `${minutes} minute${minutes === 1 ? "" : "s"}`;
-  }
-  const hours = Math.floor(minutes / 60);
-  if (hours < 48) {
-    return `${hours}h ${String(minutes % 60).padStart(2, "0")}m`;
-  }
-  return `${Math.floor(hours / 24)}d ${String(hours % 24).padStart(2, "0")}h`;
 }

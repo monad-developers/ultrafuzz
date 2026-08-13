@@ -4041,8 +4041,14 @@ test("validate accepts a typed aliased registry composed from static spreads", a
   );
 
   const validate = await validateProject({ projectRoot: project, env: {} });
+  const preserved = initProject({ projectRoot: project });
 
   assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
+  assert.equal(preserved.ok, true, JSON.stringify(preserved.diagnostics));
+  assert.equal(
+    preserved.diagnostics.some((diagnostic) => diagnostic.code === "INIT_AGENT_REGISTRY_STALE"),
+    false
+  );
 });
 
 test("validate applies registry overwrite order and rejects nullish or shadowed factories", async () => {
@@ -4159,6 +4165,48 @@ test("validate ignores textual, type-only, and cyclic agentFactories lookalikes"
     4,
     JSON.stringify(cyclic.diagnostics)
   );
+
+  fs.writeFileSync(
+    path.join(project, ".smithers/agents/index.ts"),
+    "const registry = { ClaudeAgent: factory, CodexAgent: factory, DeepSeekAgent: factory, KimiAgent: factory };\n" +
+      "export { type registry as agentFactories };\n",
+    "utf8"
+  );
+  const typeSpecifier = await validateProject({ projectRoot: project, env: {} });
+  assert.equal(typeSpecifier.ok, false);
+  assert.equal(
+    typeSpecifier.diagnostics.filter((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN").length,
+    4,
+    JSON.stringify(typeSpecifier.diagnostics)
+  );
+});
+
+test("validate accepts quoted factory keys for current custom agent IDs", async () => {
+  const project = tempProject();
+  const init = initProject({ projectRoot: project, force: true });
+  assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+  writeSmallTopology(project);
+  const configPath = path.join(project, "ultrafuzz.toml");
+  fs.writeFileSync(
+    configPath,
+    fs.readFileSync(configPath, "utf8").replace('agent = "CodexAgent"', 'agent = "custom.agent:v1-beta"'),
+    "utf8"
+  );
+  const registryPath = path.join(project, ".smithers/agents/index.ts");
+  fs.writeFileSync(
+    registryPath,
+    fs
+      .readFileSync(registryPath, "utf8")
+      .replace(
+        "  KimiAgent: createKimiAgent\n",
+        '  KimiAgent: createKimiAgent,\n  "custom.agent:v1-beta": createCodexAgent\n'
+      ),
+    "utf8"
+  );
+
+  const validate = await validateProject({ projectRoot: project, env: {} });
+
+  assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
 });
 
 test("validate does not fall back to .smithers/agents.ts", async () => {

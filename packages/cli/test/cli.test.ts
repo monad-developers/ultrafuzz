@@ -33,6 +33,7 @@ import AdmZip from "adm-zip";
 
 import { validateReportBundleManifest } from "../src/cli-schema-registry.js";
 import { runCli } from "../src/index.js";
+import { formatStatusDuration } from "../src/status-rendering.js";
 
 interface Capture {
   stdout: string;
@@ -495,9 +496,32 @@ function assertNoSmithersSurface(value: unknown): void {
     return;
   }
   if (typeof value === "string") {
-    assert.doesNotMatch(value, /smithers/i);
+    // `.smithers/agents/index.ts` is the canonical project-owned agent
+    // registry path, not leaked orchestration-engine terminology.
+    const withoutCanonicalRegistryPath = value.replace(/(^|\s)\.smithers\/agents\/index\.ts(?=$|\s)/gu, "$1");
+    assert.doesNotMatch(withoutCanonicalRegistryPath, /smithers/i);
   }
 }
+
+test("product surface checks permit only the standalone canonical agent registry path", () => {
+  assert.doesNotThrow(() => assertNoSmithersSurface(".smithers/agents/index.ts"));
+  assert.doesNotThrow(() =>
+    assertNoSmithersSurface("agent is not registered by .smithers/agents/index.ts and must be regenerated")
+  );
+  for (const leakedSurface of [
+    ".smithers/agents/index.ts.bak",
+    "prefix.smithers/agents/index.ts",
+    ".smithers/agents/index.ts/child",
+    String.raw`C:\project\.smithers/agents/index.ts`,
+    String.raw`.smithers/agents/index.ts\child`,
+    "前.smithers/agents/index.ts",
+    ".smithers/agents/index.tsé",
+    ".smithers/agents/other.ts",
+    "Smithers"
+  ]) {
+    assert.throws(() => assertNoSmithersSurface(leakedSurface));
+  }
+});
 
 function writeRunAccounting(
   runRoot: string,
@@ -1103,25 +1127,15 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   assert.match(statusText.stdout, /^ETA: 20 minutes$/mu);
   assert.match(statusText.stdout, /^Time on current step: 10 minutes on \S+$/mu);
 
-  // Long-running steps roll over into hours and then days.
-  for (const [elapsedMs, expected] of [
-    [30_000, "less than a minute"],
-    [60_000, "1 minute"],
-    [5_400_000, "1h 30m"],
-    [3 * 86_400_000, "3d 00h"]
+  // Duration rendering is pure; exercise its boundaries without repeatedly
+  // synchronizing synthetic node clocks through the fake workflow runner.
+  for (const [elapsedSeconds, expected] of [
+    [30, "less than a minute"],
+    [60, "1 minute"],
+    [5_400, "1h 30m"],
+    [3 * 86_400, "3d 00h"]
   ] as const) {
-    const rolled = JSON.parse(fs.readFileSync(statePath, "utf8")) as {
-      nodes: Record<string, Record<string, unknown>>;
-    };
-    rolled.nodes[firstNodeId] = {
-      ...rolled.nodes[firstNodeId],
-      status: "running",
-      started_at: new Date(Date.now() - elapsedMs).toISOString()
-    };
-    fs.writeFileSync(statePath, `${JSON.stringify(rolled, null, 2)}\n`, "utf8");
-    const rolledText = await cli(project, ["status", runData.run_id], env);
-    assert.equal(rolledText.code, 0, rolledText.stderr);
-    assert.match(rolledText.stdout, new RegExp(`^Time on current step: ${expected} on \\S+$`, "mu"));
+    assert.equal(formatStatusDuration(elapsedSeconds), expected);
   }
 
   // Restore the 10-minute step for the watch assertions below.
