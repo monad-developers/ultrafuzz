@@ -143,7 +143,7 @@ function extraBuckets(value: RunHealthValue): string {
   return entries.length === 0 ? "" : ` / ${entries.join(" / ")}`;
 }
 
-function formatDuration(seconds: number): string {
+export function formatDuration(seconds: number): string {
   if (seconds < 60) {
     return "less than a minute";
   }

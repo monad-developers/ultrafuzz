@@ -32,6 +32,7 @@ import { loadVerifiedRunOutputSnapshots, projectCanonicalFinalReport, syncRun } 
 import AdmZip from "adm-zip";
 
 import { validateReportBundleManifest } from "../src/cli-schema-registry.js";
+import { formatDuration as formatStatusDuration } from "../src/commands/status.js";
 import { runCli } from "../src/index.js";
 
 interface Capture {
@@ -1117,25 +1118,15 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   assert.match(statusText.stdout, /^ETA: 20 minutes$/mu);
   assert.match(statusText.stdout, /^Time on current step: 10 minutes on \S+$/mu);
 
-  // Long-running steps roll over into hours and then days.
-  for (const [elapsedMs, expected] of [
-    [30_000, "less than a minute"],
-    [60_000, "1 minute"],
-    [5_400_000, "1h 30m"],
-    [3 * 86_400_000, "3d 00h"]
+  // Duration rendering is pure; exercise its boundaries without repeatedly
+  // synchronizing synthetic node clocks through the fake workflow runner.
+  for (const [elapsedSeconds, expected] of [
+    [30, "less than a minute"],
+    [60, "1 minute"],
+    [5_400, "1h 30m"],
+    [3 * 86_400, "3d 00h"]
   ] as const) {
-    const rolled = JSON.parse(fs.readFileSync(statePath, "utf8")) as {
-      nodes: Record<string, Record<string, unknown>>;
-    };
-    rolled.nodes[firstNodeId] = {
-      ...rolled.nodes[firstNodeId],
-      status: "running",
-      started_at: new Date(Date.now() - elapsedMs).toISOString()
-    };
-    fs.writeFileSync(statePath, `${JSON.stringify(rolled, null, 2)}\n`, "utf8");
-    const rolledText = await cli(project, ["status", runData.run_id], env);
-    assert.equal(rolledText.code, 0, rolledText.stderr);
-    assert.match(rolledText.stdout, new RegExp(`^Time on current step: ${expected} on \\S+$`, "mu"));
+    assert.equal(formatStatusDuration(elapsedSeconds), expected);
   }
 
   // Restore the 10-minute step for the watch assertions below.
