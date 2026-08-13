@@ -486,7 +486,9 @@ function assertNoSmithersSurface(value: unknown): void {
     return;
   }
   if (typeof value === "string") {
-    assert.doesNotMatch(value, /smithers/i);
+    // `.smithers/agents/index.ts` is the canonical project-owned agent
+    // registry path, not leaked orchestration-engine terminology.
+    assert.doesNotMatch(value.replaceAll(".smithers/agents/index.ts", ""), /smithers/i);
   }
 }
 
