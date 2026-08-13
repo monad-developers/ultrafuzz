@@ -386,14 +386,36 @@ function renderCanonicalReport(report: JsonRecord): string {
 
 function appendCoverageEvidence(lines: string[], value: unknown): void {
   if (!isRecord(value) || !Array.isArray(value.views)) return;
-  lines.push("", "## Scoped coverage evidence", "");
+  lines.push("", ...renderCoverageEvidenceMarkdownSection(value));
+}
+
+export function renderCoverageEvidenceMarkdownSection(value: unknown): string[] {
+  if (!isRecord(value) || !Array.isArray(value.views)) return [];
+  const lines = ["## Scoped coverage evidence", ""];
   for (const view of value.views.filter(isRecord)) {
     lines.push(
       `- ${inlineValue(view.scope)}: \`${inlineValue(view.covered_ranges)}/${inlineValue(view.total_ranges)}\``
     );
   }
+  const excluded = Array.isArray(value.files)
+    ? value.files.filter((entry): entry is JsonRecord => isRecord(entry) && entry.included === false)
+    : [];
+  lines.push("", "Excluded components:");
+  if (excluded.length === 0) lines.push("- None");
+  else {
+    for (const entry of excluded) {
+      lines.push(
+        `- \`${inlineValue(entry.path)}\` (${inlineValue(entry.kind)}): ${inlineValue(entry.exclusion_reason)}`
+      );
+    }
+  }
   const zero = Array.isArray(value.zero_coverage_components) ? value.zero_coverage_components.filter(isRecord) : [];
-  lines.push(`- Zero-coverage components: \`${zero.length}\``);
+  lines.push("", "Zero-coverage components:");
+  if (zero.length === 0) lines.push("- None");
+  else {
+    for (const entry of zero) lines.push(`- \`${inlineValue(entry.path)}\` (${inlineValue(entry.kind)})`);
+  }
+  return lines;
 }
 
 function renderedIssues(issues: JsonRecord[]): RenderedIssue[] {

@@ -17,6 +17,7 @@ import {
 } from "./artifact-limits.js";
 import { MAX_PROPERTY_CAMPAIGN_EVIDENCE_TOTAL_BYTES } from "./property-provenance.js";
 import { readSinglyLinkedRegularFileSnapshotInside } from "./safe-paths.js";
+import { coverageGoalSchema } from "./workflow-contracts.js";
 
 export const MAX_SEMANTIC_GATE_ISSUES = 1_000;
 export const MAX_SEMANTIC_GATE_DIAGNOSTIC_BYTES = 64 * 1_024;
@@ -317,6 +318,13 @@ function issue(pathValue: string, message: string): SemanticGateIssue {
 function coverageEvidenceReconciliationIssues(document: unknown): SemanticGateIssue[] {
   const validation = validateCoverageEvidence(document, "$");
   return validation.issues.map((entry) => issue(entry.path, entry.message));
+}
+
+function coverageGoalReconciliationIssues(document: unknown): SemanticGateIssue[] {
+  const validation = coverageGoalSchema.safeParse(document);
+  return validation.success
+    ? []
+    : validation.error.issues.map((entry) => issue(`$.${entry.path.join(".")}`, entry.message));
 }
 
 function reportCoverageEvidenceReconciliationIssues(document: unknown): SemanticGateIssue[] {
@@ -6241,6 +6249,7 @@ const gateSpecifications = {
   ),
   "dynamic-strategy-selection-coherence": documentGate(dynamicSelectionCoherenceIssues),
   "coverage-evidence-reconciliation": documentGate(coverageEvidenceReconciliationIssues),
+  "coverage-goal-reconciliation": documentGate(coverageGoalReconciliationIssues),
   "externalized-state-id-uniqueness": documentGate((document, context) => [
     ...uniqueFieldGate([["state_components"]], "component_id", "state component ID")(document, context),
     ...uniqueFieldGate([["scenarios"]], "scenario_id", "state scenario ID")(document, context),

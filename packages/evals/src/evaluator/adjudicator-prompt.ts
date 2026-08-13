@@ -7,7 +7,7 @@ import type { FindingJudgeInput, FindingJudgeResult, GroundTruthBug } from "../t
  * Versioned adjudicator instructions. Bump this whenever any prompt content,
  * candidate aliasing, truncation, or structured-output contract changes.
  */
-export const EVAL_JUDGE_PROMPT_VERSION = "ultrafuzz-eval-judge-v10-registered-result-schema";
+export const EVAL_JUDGE_PROMPT_VERSION = "ultrafuzz-eval-judge-v11-scoped-coverage-evidence";
 
 const SYSTEM_PROMPT = loadPrompt("adjudicator-system.mdx");
 const USER_PROMPT = loadPrompt("adjudicator-user.mdx");
@@ -51,7 +51,9 @@ export function buildAdjudicatorPrompt(input: FindingJudgeInput): AdjudicatorMes
         threshold: String(input.threshold),
         deterministic_result: boundedJson(aliasedDeterministicResult, 4000),
         ground_truth_candidates: boundedJson(aliasedBugs, 12000),
-        finding: boundedJson(input.finding, 12000)
+        finding: boundedJson(input.finding, 12000),
+        coverage_evidence:
+          input.coverageEvidence === undefined ? "unavailable" : boundedJson(input.coverageEvidence, 12000)
       })
     }
   ];

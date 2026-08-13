@@ -145,6 +145,28 @@ test("coverage evidence reconciles scoped denominators and keeps excluded ranges
   const valid = structuredClone(contractFixtures["ultrafuzz/coverage-evidence@1"]!.valid) as Record<string, unknown>;
   assert.equal(executeSemanticGate("coverage-evidence-reconciliation", { document: valid }).status, "passed");
 
+  const independentlyScoped = structuredClone(valid) as {
+    files: Array<{ path: string; covered_ranges: number; total_ranges: number }>;
+    views: Array<{ scope: string; covered_ranges: number; total_ranges: number }>;
+    counted_ranges: Array<Record<string, unknown>>;
+  };
+  independentlyScoped.counted_ranges.push({
+    file: "src/Core.sol",
+    kind: "production",
+    start_line: 2,
+    line_count: 1,
+    selected: false,
+    covered: true
+  });
+  independentlyScoped.files.find((entry) => entry.path === "src/Core.sol")!.covered_ranges = 2;
+  independentlyScoped.files.find((entry) => entry.path === "src/Core.sol")!.total_ranges = 2;
+  independentlyScoped.views.find((entry) => entry.scope === "production-source")!.covered_ranges = 2;
+  independentlyScoped.views.find((entry) => entry.scope === "production-source")!.total_ranges = 3;
+  assert.equal(
+    executeSemanticGate("coverage-evidence-reconciliation", { document: independentlyScoped }).status,
+    "passed"
+  );
+
   const hiddenExcludedRange = structuredClone(valid) as {
     counted_ranges: Array<Record<string, unknown>>;
   };
@@ -152,7 +174,8 @@ test("coverage evidence reconciles scoped denominators and keeps excluded ranges
     file: "src/Critical.sol",
     kind: "production",
     start_line: 1,
-    end_line: 1,
+    line_count: 1,
+    selected: true,
     covered: false
   });
   const rejected = executeSemanticGate("coverage-evidence-reconciliation", { document: hiddenExcludedRange });
@@ -160,6 +183,27 @@ test("coverage evidence reconciles scoped denominators and keeps excluded ranges
   assert.ok(
     rejected.status === "failed" &&
       rejected.issues.some((issue) => /included in the selected-range scope/u.test(issue.message))
+  );
+
+  const legacyReversedRange = structuredClone(valid) as {
+    counted_ranges: Array<Record<string, unknown>>;
+  };
+  delete legacyReversedRange.counted_ranges[0]!.line_count;
+  legacyReversedRange.counted_ranges[0]!.end_line = 0;
+  assert.equal(
+    validateArtifactContract("ultrafuzz/coverage-evidence@1", JSON.stringify(legacyReversedRange)).ok,
+    false
+  );
+
+  const emptyRange = structuredClone(valid) as { counted_ranges: Array<{ line_count: number }> };
+  emptyRange.counted_ranges[0]!.line_count = 0;
+  assert.equal(validateArtifactContract("ultrafuzz/coverage-evidence@1", JSON.stringify(emptyRange)).ok, false);
+
+  const unauthenticatedCriticalFlag = structuredClone(valid) as { files: Array<Record<string, unknown>> };
+  unauthenticatedCriticalFlag.files[0]!.critical = false;
+  assert.equal(
+    validateArtifactContract("ultrafuzz/coverage-evidence@1", JSON.stringify(unauthenticatedCriticalFlag)).ok,
+    false
   );
 });
 

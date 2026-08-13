@@ -341,8 +341,8 @@ const validCoverageEvidence = {
     {
       path: "src/Core.sol",
       kind: "production",
-      included: true,
-      critical: false,
+      included: false,
+      exclusion_reason: "no material declarations",
       covered_ranges: 0,
       total_ranges: 0
     }
@@ -678,14 +678,46 @@ const fixtures = {
           path: "src/Core.sol",
           kind: "production",
           included: false,
-          critical: false,
           exclusion_reason: "not selected",
           covered_ranges: 0,
           total_ranges: 1
         }
       ],
-      counted_ranges: [{ file: "src/Core.sol", kind: "production", start_line: 1, end_line: 1, covered: false }],
+      counted_ranges: [
+        {
+          file: "src/Core.sol",
+          kind: "production",
+          start_line: 1,
+          line_count: 1,
+          selected: true,
+          covered: false
+        }
+      ],
       zero_coverage_components: [{ path: "src/Core.sol", kind: "production" }]
+    }
+  },
+  "coverage-goal-reconciliation": {
+    positive: {
+      schema_version: "ultrafuzz.coverage-goal.v1",
+      target: { scope: "selected-range", minimum_percent: 90 },
+      current_measurement: { scope: "selected-range", covered_ranges: 1, total_ranges: 1 },
+      current_status: "measured",
+      planned_commands: [],
+      stop_conditions: ["reserve time for finalization"],
+      timeout_seconds: 60,
+      finalization_reserve_seconds: 10,
+      blockers: []
+    },
+    negative: {
+      schema_version: "ultrafuzz.coverage-goal.v1",
+      target: { scope: "selected-range", minimum_percent: 90 },
+      current_measurement: { scope: "selected-range", covered_ranges: 2, total_ranges: 1 },
+      current_status: "measured",
+      planned_commands: [],
+      stop_conditions: ["reserve time for finalization"],
+      timeout_seconds: 60,
+      finalization_reserve_seconds: 10,
+      blockers: []
     }
   },
   "dependency-id-uniqueness": {

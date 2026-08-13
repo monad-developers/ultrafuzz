@@ -132,7 +132,6 @@
           "path": "src/Core.sol",
           "kind": "production",
           "included": true,
-          "critical": false,
           "covered_ranges": 1,
           "total_ranges": 1
         },
@@ -140,14 +139,28 @@
           "path": "src/Critical.sol",
           "kind": "production",
           "included": false,
-          "critical": false,
           "exclusion_reason": "not selected",
           "covered_ranges": 0,
           "total_ranges": 1
         }
       ],
       "counted_ranges": [
-        { "file": "src/Core.sol", "kind": "production", "start_line": 1, "end_line": 1, "covered": true }
+        {
+          "file": "src/Core.sol",
+          "kind": "production",
+          "start_line": 1,
+          "line_count": 1,
+          "selected": true,
+          "covered": true
+        },
+        {
+          "file": "src/Critical.sol",
+          "kind": "production",
+          "start_line": 1,
+          "line_count": 1,
+          "selected": false,
+          "covered": false
+        }
       ],
       "zero_coverage_components": [{ "path": "src/Critical.sol", "kind": "production" }]
     },
@@ -162,7 +175,6 @@
           "path": "src/Core.sol",
           "kind": "production",
           "included": true,
-          "critical": false,
           "covered_ranges": 1,
           "total_ranges": 1
         },
@@ -170,14 +182,28 @@
           "path": "src/Critical.sol",
           "kind": "production",
           "included": false,
-          "critical": false,
           "exclusion_reason": "not selected",
           "covered_ranges": 0,
           "total_ranges": 1
         }
       ],
       "counted_ranges": [
-        { "file": "src/Core.sol", "kind": "production", "start_line": 1, "end_line": 1, "covered": true }
+        {
+          "file": "src/Core.sol",
+          "kind": "production",
+          "start_line": 1,
+          "line_count": 1,
+          "selected": true,
+          "covered": true
+        },
+        {
+          "file": "src/Critical.sol",
+          "kind": "production",
+          "start_line": 1,
+          "line_count": 1,
+          "selected": false,
+          "covered": false
+        }
       ],
       "zero_coverage_components": [{ "path": "src/Critical.sol", "kind": "production" }],
       "__unexpected_fixture_field": true
@@ -188,8 +214,8 @@
     "valid": {
       "schema_version": "ultrafuzz.coverage-goal.v1",
       "target": {
-        "metric": "standardized-core-line-coverage-percent",
-        "value": 90
+        "scope": "selected-range",
+        "minimum_percent": 90
       },
       "current_measurement": null,
       "current_status": "not-run",
@@ -202,8 +228,8 @@
     "invalid": {
       "schema_version": "ultrafuzz.coverage-goal.v1",
       "target": {
-        "metric": "standardized-core-line-coverage-percent",
-        "value": 90
+        "scope": "selected-range",
+        "minimum_percent": 90
       },
       "current_measurement": null,
       "current_status": "not-run",

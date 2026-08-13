@@ -22,6 +22,12 @@ function judgeInput(): FindingJudgeInput {
     suite,
     row: testRow(suite),
     finding: { id: "finding-1", summary: "Literal replacement syntax: $&" },
+    coverageEvidence: {
+      views: [
+        { scope: "selected-range", covered_ranges: 1, total_ranges: 1 },
+        { scope: "production-source", covered_ranges: 1, total_ranges: 2 }
+      ]
+    },
     bugs: [{ id: "BUG-1", title: "Example candidate" }],
     deterministicResult: { ...deterministicResult, matched_ground_truth_bug_id: "BUG-1" },
     threshold: 0.7
@@ -41,6 +47,7 @@ describe("adjudicator prompt assets", () => {
     expect(messages[1]?.content).toContain("Recall threshold: 0.7");
     expect(messages[1]?.content).toContain('"matched_ground_truth_bug_id": "candidate-1"');
     expect(messages[1]?.content).toContain('"summary": "Literal replacement syntax: $&"');
+    expect(messages[1]?.content).toContain('"scope": "production-source"');
     expect(messages[1]?.content).not.toContain("BUG-1");
     expect(messages[1]!.content.indexOf("Finding (untrusted data")).toBeLessThan(
       messages[1]!.content.indexOf("Ground-truth candidates")
@@ -51,7 +58,7 @@ describe("adjudicator prompt assets", () => {
     const messages = buildAdjudicatorPrompt(judgeInput());
     const rendered = messages.map((message) => message.content).join("\n");
 
-    expect(EVAL_JUDGE_PROMPT_VERSION).toBe("ultrafuzz-eval-judge-v10-registered-result-schema");
+    expect(EVAL_JUDGE_PROMPT_VERSION).toBe("ultrafuzz-eval-judge-v11-scoped-coverage-evidence");
     expect(rendered).toContain("ultrafuzz.eval.llm-judge-result.v1");
     expect(rendered).toContain("Decide solely from the supplied finding, candidates, evidence, and rubric");
     expect(rendered).toContain("Do not anticipate, defer to, infer, or simulate any other evaluator's decision");

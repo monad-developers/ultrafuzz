@@ -17,7 +17,6 @@ const validCoverageEvidence = {
       path: "src/Core.sol",
       kind: "production",
       included: true,
-      critical: false,
       covered_ranges: 1,
       total_ranges: 1
     },
@@ -25,13 +24,29 @@ const validCoverageEvidence = {
       path: "src/Critical.sol",
       kind: "production",
       included: false,
-      critical: false,
       exclusion_reason: "not selected",
       covered_ranges: 0,
       total_ranges: 1
     }
   ],
-  counted_ranges: [{ file: "src/Core.sol", kind: "production", start_line: 1, end_line: 1, covered: true }],
+  counted_ranges: [
+    {
+      file: "src/Core.sol",
+      kind: "production",
+      start_line: 1,
+      line_count: 1,
+      selected: true,
+      covered: true
+    },
+    {
+      file: "src/Critical.sol",
+      kind: "production",
+      start_line: 1,
+      line_count: 1,
+      selected: false,
+      covered: false
+    }
+  ],
   zero_coverage_components: [{ path: "src/Critical.sol", kind: "production" }]
 };
 
@@ -60,7 +75,8 @@ test("artifact validate executes document-local coverage evidence gates", async 
       file: "src/Critical.sol",
       kind: "production",
       start_line: 1,
-      end_line: 1,
+      line_count: 1,
+      selected: true,
       covered: false
     });
     fs.writeFileSync(invalidPath, JSON.stringify(invalidDocument));
@@ -102,6 +118,34 @@ test("artifact validate executes document-local coverage evidence gates", async 
     assert.equal(invalidUtf8Envelope.ok, false);
     assert.match(invalidUtf8Envelope.diagnostics[0]?.code ?? "", /ARTIFACT_(?:JSON|UTF8)_INVALID/u);
     assert.match(invalidUtf8Envelope.diagnostics[0]?.message ?? "", /UTF-8/u);
+
+    const invalidGoalPath = path.join(temporary, "invalid-goal.json");
+    fs.writeFileSync(
+      invalidGoalPath,
+      JSON.stringify({
+        schema_version: "ultrafuzz.coverage-goal.v1",
+        target: { scope: "selected-range", minimum_percent: 90 },
+        current_measurement: { scope: "selected-range", covered_ranges: 2, total_ranges: 1 },
+        current_status: "measured",
+        planned_commands: [],
+        stop_conditions: ["reserve time for finalization"],
+        timeout_seconds: 60,
+        finalization_reserve_seconds: 10,
+        blockers: []
+      })
+    );
+    const invalidGoal = await capture(["artifact", "validate", "ultrafuzz/coverage-goal@1", invalidGoalPath, "--json"]);
+    assert.equal(invalidGoal.code, 1);
+    const invalidGoalEnvelope = JSON.parse(invalidGoal.stdout) as {
+      diagnostics: Array<{ code: string; message: string }>;
+    };
+    assert.ok(
+      invalidGoalEnvelope.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
+          /covered_ranges cannot exceed total_ranges/u.test(diagnostic.message)
+      )
+    );
   } finally {
     fs.rmSync(temporary, { recursive: true, force: true });
   }
