@@ -4246,7 +4246,7 @@ test("project and runtime topology paths override a profile topology atomically"
     fs
       .readFileSync(configPath, "utf8")
       .replace(
-        'audit_profile = "balanced"',
+        'audit_profile = "default"',
         'audit_profile = "smoke"\ntopology_path = ".ultrafuzz/project-override.yml"'
       ),
     "utf8"
@@ -4274,7 +4274,7 @@ test("audit profile selects its packaged topology and records portable provenanc
   const configPath = path.join(project, "ultrafuzz.toml");
   fs.writeFileSync(
     configPath,
-    fs.readFileSync(configPath, "utf8").replace('audit_profile = "balanced"', 'audit_profile = "smoke"'),
+    fs.readFileSync(configPath, "utf8").replace('audit_profile = "default"', 'audit_profile = "smoke"'),
     "utf8"
   );
   fs.writeFileSync(path.join(project, ".ultrafuzz", "topology.yml"), "not: [valid\n", "utf8");
@@ -4306,7 +4306,7 @@ test("audit profile selects its packaged topology and records portable provenanc
   assert.deepEqual(metadata.audit_profile, {
     requested: "smoke",
     effective: "smoke",
-    catalog_schema_version: 1,
+    catalog_schema_version: 2,
     catalog_digest: plan.value!.resolved_config.auditProfileResolution.catalogDigest,
     settings: plan.value!.resolved_config.auditProfileResolution.settings,
     effective_settings: plan.value!.resolved_config.auditProfileResolution.effectiveSettings,

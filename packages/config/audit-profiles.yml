@@ -1,5 +1,4 @@
-schema_version: 1
-default: balanced
+schema_version: 2
 
 profiles:
   smoke:
@@ -25,8 +24,8 @@ profiles:
       triage_quorum: 2
       triage_panel_size: 3
 
-  balanced:
-    description: Recommended default for normal audits.
+  default:
+    description: Applies no settings overrides and uses the editable project topology.
     intended_use: General-purpose audits using the editable project topology.
     settings: {}
 

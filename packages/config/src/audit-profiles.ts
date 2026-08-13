@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 import YAML from "yaml";
 import { z } from "zod/v4";
 
-export const AUDIT_PROFILE_CATALOG_SCHEMA_VERSION = 1 as const;
+export const AUDIT_PROFILE_CATALOG_SCHEMA_VERSION = 2 as const;
+export const DEFAULT_AUDIT_PROFILE_ID = "default" as const;
 
 export type DynamicStrategiesEnumerator = number | "unlimited";
 
@@ -33,7 +34,7 @@ export interface AuditProfileDefinition {
 
 export interface AuditProfileCatalog {
   schemaVersion: typeof AUDIT_PROFILE_CATALOG_SCHEMA_VERSION;
-  defaultProfile: string;
+  defaultProfile: typeof DEFAULT_AUDIT_PROFILE_ID;
   digest: string;
   path: string;
   profiles: Record<string, AuditProfileDefinition>;
@@ -96,12 +97,31 @@ const profileSchema = z.strictObject({
 const catalogSchema = z
   .strictObject({
     schema_version: z.literal(AUDIT_PROFILE_CATALOG_SCHEMA_VERSION),
-    default: safeIdSchema,
     profiles: z.record(safeIdSchema, profileSchema)
   })
   .superRefine((catalog, context) => {
-    if (catalog.profiles[catalog.default] === undefined) {
-      context.addIssue({ code: "custom", path: ["default"], message: "default profile is not defined" });
+    const defaultProfile = catalog.profiles[DEFAULT_AUDIT_PROFILE_ID];
+    if (defaultProfile === undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["profiles", DEFAULT_AUDIT_PROFILE_ID],
+        message: `required default audit profile \`${DEFAULT_AUDIT_PROFILE_ID}\` is not defined; define profiles.${DEFAULT_AUDIT_PROFILE_ID}`
+      });
+      return;
+    }
+    if (Object.keys(defaultProfile.settings).length > 0) {
+      context.addIssue({
+        code: "custom",
+        path: ["profiles", DEFAULT_AUDIT_PROFILE_ID, "settings"],
+        message: "default audit profile must not override settings"
+      });
+    }
+    if (defaultProfile.topology_path !== undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["profiles", DEFAULT_AUDIT_PROFILE_ID, "topology_path"],
+        message: "default audit profile must use the project topology"
+      });
     }
   });
 
@@ -145,7 +165,7 @@ export function loadAuditProfileCatalog(catalogPath = defaultAuditProfileCatalog
   );
   return {
     schemaVersion: parsed.data.schema_version,
-    defaultProfile: parsed.data.default,
+    defaultProfile: DEFAULT_AUDIT_PROFILE_ID,
     digest: crypto.createHash("sha256").update(source).digest("hex"),
     path: absoluteCatalogPath,
     profiles

@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import { describe, expect, it } from "vitest";
@@ -16,9 +17,9 @@ import {
 describe("audit profile catalog", () => {
   it("loads the complete shipped vocabulary and resolves packaged topologies", () => {
     const catalog = loadAuditProfileCatalog();
-    expect(catalog.defaultProfile).toBe("balanced");
+    expect(catalog.defaultProfile).toBe("default");
     expect(Object.keys(catalog.profiles)).toEqual([
-      "balanced",
+      "default",
       "exhaustive",
       "fuzz-only",
       "invariant-only",
@@ -49,8 +50,106 @@ describe("audit profile catalog", () => {
     expect(fs.readFileSync(packagedTopologyPath(invariantOnly, catalog)!, "utf8")).toContain(
       "id: stateful-invariant-campaign"
     );
-    expect(packagedTopologyPath(auditProfile("balanced", catalog), catalog)).toBeUndefined();
+    expect(packagedTopologyPath(auditProfile("default", catalog), catalog)).toBeUndefined();
     expect(auditProfile("exhaustive", catalog).settings.dynamic_strategies_enumerator).toBe("unlimited");
+  });
+
+  it("resolves the reserved default profile as the unmodified project workflow", () => {
+    const catalog = loadAuditProfileCatalog();
+    const profile = auditProfile(catalog.defaultProfile, catalog);
+    expect(profile.description).toContain("no settings overrides");
+    expect(profile.description).toContain("project topology");
+    expect(profile.settings).toEqual({});
+    expect(profile.topologyPath).toBeUndefined();
+    expect(packagedTopologyPath(profile, catalog)).toBeUndefined();
+
+    const resolved = resolveConfig({ env: {} });
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.value.auditProfile).toBe("default");
+    expect(resolved.value.topologyPath).toBeUndefined();
+    expect(resolved.value.auditProfileResolution.declaredTopologyPath).toBeUndefined();
+    expect(resolved.value.auditProfileResolution.settings).toEqual({});
+    expect(resolved.value.auditProfileResolution.overriddenSettings).toEqual([]);
+  });
+
+  it("fails closed when the catalog omits the reserved default profile", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-audit-profiles-"));
+    const catalogPath = path.join(directory, "audit-profiles.yml");
+    try {
+      fs.writeFileSync(
+        catalogPath,
+        `schema_version: 2
+profiles:
+  smoke:
+    description: Smoke profile.
+    intended_use: Tests.
+    settings: {}
+`,
+        "utf8"
+      );
+      expect(() => loadAuditProfileCatalog(catalogPath)).toThrow(
+        /profiles\.default: required default audit profile `default` is not defined; define profiles\.default/u
+      );
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    {
+      label: "settings overrides",
+      profile: `    settings:
+      strategy_loops: 2`,
+      diagnostic: /profiles\.default\.settings: default audit profile must not override settings/u
+    },
+    {
+      label: "a topology override",
+      profile: `    topology_path: topologies/smoke.yml
+    settings: {}`,
+      diagnostic: /profiles\.default\.topology_path: default audit profile must use the project topology/u
+    }
+  ])("fails closed when the reserved default profile declares $label", ({ profile, diagnostic }) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-audit-profiles-"));
+    const catalogPath = path.join(directory, "audit-profiles.yml");
+    try {
+      fs.writeFileSync(
+        catalogPath,
+        `schema_version: 2
+profiles:
+  default:
+    description: Default profile.
+    intended_use: General audits.
+${profile}
+`,
+        "utf8"
+      );
+      expect(() => loadAuditProfileCatalog(catalogPath)).toThrow(diagnostic);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects the legacy top-level default pointer", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-audit-profiles-"));
+    const catalogPath = path.join(directory, "audit-profiles.yml");
+    try {
+      fs.writeFileSync(
+        catalogPath,
+        `schema_version: 2
+default: default
+profiles:
+  default:
+    description: Default profile.
+    intended_use: General audits.
+    settings: {}
+`,
+        "utf8"
+      );
+      expect(() => loadAuditProfileCatalog(catalogPath)).toThrow(/Unrecognized key.*default/u);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("parses and serializes the unlimited dynamic strategy enumerator", () => {
@@ -65,8 +164,8 @@ describe("audit profile catalog", () => {
   });
 
   it("fails unknown names with the available profile vocabulary", () => {
-    expect(() => auditProfile("fastest")).toThrow(
-      /available profiles: balanced, exhaustive, fuzz-only, invariant-only/u
+    expect(() => auditProfile("balanced")).toThrow(
+      /available profiles: default, exhaustive, fuzz-only, invariant-only/u
     );
   });
 
@@ -131,7 +230,7 @@ max_parallel_agents = 6
   });
 
   it("fails unknown audit profiles during typed resolution", () => {
-    const resolved = resolveConfig({ env: {}, projectConfig: { auditProfile: "fastest" } });
+    const resolved = resolveConfig({ env: {}, projectConfig: { auditProfile: "balanced" } });
     expect(resolved.ok).toBe(false);
     if (resolved.ok) return;
     expect(resolved.diagnostics[0]).toMatchObject({

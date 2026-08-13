@@ -8,7 +8,7 @@ import {
 } from "./defaults.js";
 import { remoteAuthDir } from "./layout.js";
 
-export function modalTargetToml(model: ModalModelSpec, nodeTimeoutSeconds: number, auditProfile = "balanced"): string {
+export function modalTargetToml(model: ModalModelSpec, nodeTimeoutSeconds: number, auditProfile = "default"): string {
   const selectedProfile = modelProfileToml(model);
   const dynamicStrategiesEnumerator = auditProfile === "smoke" ? "" : "dynamic_strategies_enumerator = 3\n";
   const codex = agentToml(model, "CodexAgent", "openai");

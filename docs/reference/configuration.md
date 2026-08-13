@@ -13,7 +13,7 @@ Topology, prompts, references, runs, workspaces, and cache state live under
 
 ```toml
 schema_version = "1.0"
-audit_profile = "balanced"
+audit_profile = "default"
 dynamic_strategies_enumerator = 3
 
 [project]
@@ -74,7 +74,7 @@ Unknown TOML keys fail validation. Strategy execution behavior belongs in
 | Key                             | Meaning                                                                    |
 | ------------------------------- | -------------------------------------------------------------------------- |
 | `schema_version`                | Config schema version string.                                              |
-| `audit_profile`                 | Named effort/topology preset. Defaults to `balanced`.                      |
+| `audit_profile`                 | Named effort/topology preset. Defaults to `default`.                       |
 | `topology_path`                 | Optional project-local topology override that replaces a profile topology. |
 | `strategy_loops`                | Optional positive strategy-loop override.                                  |
 | `dynamic_strategies_enumerator` | Non-negative integer or `"unlimited"` used by dynamic-strategy prompts.    |
