@@ -106,8 +106,8 @@ instead: give the matching `dedupe_key` a `final_disposition` of `dropped` or
 `triage_classification` and `status` unchanged, and do not describe them as
 production bugs.
 
-Preserve stateful invariant context notes exactly, including
-the authoritative `stateful_failure_classification` key. Use them as root-cause
+Preserve stateful invariant context notes exactly, including the typed
+stateful-failure classification entry from the authoritative note-key list. Use them as root-cause
 context, not as permission to promote invalid or blocked records. Do not
 promote `blocked-unreproduced` records without replayable evidence. Do not
 promote source-comment-only assumptions to production bugs without support from

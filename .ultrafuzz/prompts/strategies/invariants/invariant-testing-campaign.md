@@ -259,7 +259,8 @@ Use this configured invariant testing fuzzer timeout:
    - A unique failure is one distinct root cause, not one entry in the backend
      record: a fuzzer reports the same violation many times while shrinking. For
      each unique failure, write one finding object in `findings.json` and
-   include the authoritative `stateful_failure_classification` key in `notes`,
+     include the typed stateful-failure classification entry from the
+     authoritative note-key list in `notes`,
      using exactly one of `production-bug`, `harness-defect`,
      `incomplete-spec`, `false-positive`, or `blocked-unreproduced`.
    - Keep harness defects, incomplete specifications, false positives, and

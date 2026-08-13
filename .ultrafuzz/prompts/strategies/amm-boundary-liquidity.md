@@ -52,7 +52,7 @@ residual-reserve state.
 The matrix must include the target's documented public market, orderbook, quote,
 price-ladder, level, reserve, liquidity, and derived-price view/read functions
 when those functions exist. Use the documented ABI surface for the target rather
-than inventing helper-only reads.
+than inventing reads that exist only on internal helpers.
 
 Include reachable sentinel and edge states in the matrix:
 

@@ -1196,6 +1196,18 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
     "The trace entered scope=global before reverting.",
     "The shell printed outcome=success.",
     "The proof checks risk=0 after withdrawal.",
+    "const result = await run();",
+    "bytes32 root = tree.root();",
+    "verifyProof(root=0xabc, leaf=0xdef)",
+    "proof_type=merkle",
+    "command prints result=42",
+    "forge test --root=.",
+    "The Merkle proof used root=0xabc.",
+    "The compiler printed classification=error.",
+    "Audit log: result=pass.",
+    "The HTTP body contains report_status=200.",
+    "The analyzer reports vulnerability severity=High.",
+    "The call returned impact=amountOut.",
     "https://x.test/?tx=abc&status=200",
     "emit Status(status=200)",
     "_=non-semantic evidence",
@@ -1275,6 +1287,25 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
     "stateful_failure_classification=renamed",
     "likelihood=likely",
     "impact=critical",
+    'triage_reason="summary"',
+    "triage_reason=(summary)",
+    "triage_reason=[summary]",
+    'helper_proof="proof"',
+    "helper_proof=(proof)",
+    "helper_proof=",
+    "attainability=renamed reachability=helper-only",
+    "triage_reason=ok RISK_FREE_RATE=0.05 attainability=renamed",
+    "reachability_key=helper-only",
+    "helper_proof_key=renamed",
+    "helper_proof_url=renamed",
+    "outcome=helper-only",
+    "call_path=helper-only",
+    "production_path=public-entrypoint-trace",
+    "exploit_path=public-wrapper-required",
+    "helper_address=helper-only",
+    "`call_path=<helper-only>`",
+    "((production_path=(public-entrypoint-trace)))",
+    "  : outcome=[helper-only]",
     'attainability="helper-only"',
     "attainability=(helper-only)"
   ]) {
@@ -1657,6 +1688,25 @@ test("finding and report v2 schemas require their current canonical shapes", () 
   };
   const reportWithTypedEvidence = { ...report, non_production_outcomes: [nonProductionOutcome] };
   assert.equal(validateArtifactContract("ultrafuzz/report@2", JSON.stringify(reportWithTypedEvidence)).ok, true);
+  for (const invalidNote of [
+    'triage_reason="summary"',
+    "helper_proof=(proof)",
+    "reachability_key=helper-only",
+    "outcome=helper-only"
+  ]) {
+    for (const collection of ["issues", "non_production_outcomes"] as const) {
+      const invalidReport = {
+        ...report,
+        [collection]: [{ ...nonProductionOutcome, notes: [invalidNote] }]
+      };
+      assert.equal(reportSchema.safeParse(invalidReport).success, false, `${collection} Zod parity for ${invalidNote}`);
+      assert.equal(
+        validateArtifactContract("ultrafuzz/report@2", JSON.stringify(invalidReport)).ok,
+        false,
+        `${collection} bundled parity for ${invalidNote}`
+      );
+    }
+  }
   for (const invalidOutcome of [
     { ...nonProductionOutcome, notes: ["reachability=renamed-public-trace"] },
     { ...nonProductionOutcome, severity_rationale: "helper_evidence=renamed" }

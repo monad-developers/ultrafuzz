@@ -193,7 +193,8 @@ Preserve actionable non-production classifications such as `incomplete-spec`,
 the production issue list.
 
 For stateful invariant records, preserve every upstream finding whose `notes`
-contain the authoritative `stateful_failure_classification` note key. Production-bug
+contain the typed stateful-failure classification entry from the authoritative
+note-key list. Production-bug
 records with generated target-native reproducers belong in the normal issue
 list. Preserve
 stateful `harness-defect` and `incomplete-spec` records through the

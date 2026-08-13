@@ -252,7 +252,8 @@ Apply these Recon/Chimera rules:
      has a structured record.
    - For every fuzzer-discovered failure and every deterministic reproducer,
      write exactly one durable classification in `{{output_findings_path}}`
-     using the authoritative `stateful_failure_classification` note key, where
+     using the typed stateful-failure classification entry from the authoritative
+     note-key list, where
      `<classification>` is exactly one of `production-bug`, `harness-defect`,
      `incomplete-spec`, `false-positive`, or `blocked-unreproduced`.
    - Use `production-bug` when public evidence supports a target-contract bug.
@@ -299,8 +300,8 @@ This is the same topology-required artifact as:
 
 Read `{{schema_path}}/findings.schema.json`; it alone defines the findings JSON
 shape. Every fuzzer-discovered failure and every deterministic reproducer must
-appear as a finding with a classification under the authoritative
-`stateful_failure_classification` key in `notes`, even when the final
+appear as a finding with the typed stateful-failure classification entry from
+the authoritative note-key list in `notes`, even when the final
 classification is `false-positive`, `incomplete-spec`, or
 `blocked-unreproduced`.
 

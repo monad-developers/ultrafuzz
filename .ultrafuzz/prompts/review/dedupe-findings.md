@@ -135,7 +135,8 @@ Use the authoritative reachability tokens and report-bound note keys below for e
 {{finding_note_key_vocabulary}}
 
 Stateful invariant failure records are first-class findings. If a finding's
-`notes` contain the `stateful_failure_classification` key, preserve
+`notes` contain the typed stateful-failure classification entry from the
+authoritative note-key list, preserve
 that token, its reproducer command/path, raw evidence, status, and notes on the
 kept finding. Do not drop or merge away distinct stateful records merely because
 the same coverage campaign later reached its coverage target. Include the
