@@ -1189,6 +1189,7 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
     "RISK_FREE_RATE=0.05 impact_price=123 helper_address=0xabc",
     "--dependency-version=1.2.3 STATEFUL_RUNS=1000 scope_id=request-7",
     "https://x.test/?impact_price=123",
+    "triage_reason=ok x=y status=200",
     "The HTTP response had status=200.",
     "The oracle returned confidence=0.95.",
     "The trace entered scope=global before reverting.",
@@ -1226,6 +1227,7 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
     "-root_cause=renamed",
     "--root_cause=renamed",
     "root-cause=renamed",
+    "triage_reason=public evidence root_cause=renamed",
     "triage_reason=ok;root_cause=renamed",
     "triage_reason=ok,root_cause=renamed",
     "triage_reason=ok*root_cause=renamed",
@@ -1333,7 +1335,14 @@ test("max-length adversarial report notes preserve Zod and isolated JSON Schema 
     { label: "long leading separators", note: maxNote("", "_", "root_cause=x"), expected: true },
     { label: "long leading marks", note: maxNote("", "\u0301", "root_cause=x"), expected: true },
     { label: "long internal separators", note: maxNote("r", "_", "oot_cause=x"), expected: true },
-    { label: "long clause separator", note: maxNote("", "x", ";root_cause=x"), expected: false }
+    { label: "long clause separator", note: maxNote("", "x", ";root_cause=x"), expected: false },
+    {
+      label: "repeated canonical assignments",
+      note: "impact=High x "
+        .repeat(Math.ceil(MAX_FINDING_STRING_CODE_POINTS / 14))
+        .slice(0, MAX_FINDING_STRING_CODE_POINTS),
+      expected: true
+    }
   ] as const;
 
   for (const { label, note, expected } of cases) {

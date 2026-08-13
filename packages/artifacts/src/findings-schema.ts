@@ -65,9 +65,13 @@ const unsupportedMetadataAssignmentPatterns = FINDING_REPORT_METADATA_KEY_PATTER
   (metadataKeyPattern) =>
     `${clauseAssignmentBoundaryPattern}(?!${evidenceAssignmentKeyPattern}${anyAssignmentOperatorPattern})(?!${supportedNoteKeyPattern}${assignmentOperatorPattern})${metadataKeyPattern}${anyAssignmentOperatorPattern}`
 );
+// The gap cannot cross another assignment operator and consumes at most 4,097
+// code points. Consecutive assignment gaps are therefore disjoint, keeping all
+// chained-alias scans linear in the note length even at the 65,536-point limit.
+const chainedAssignmentGapPattern = "(?:[^\\n;,*|&=]{0,4096}[ \\t])?";
 const chainedMetadataAssignmentPatterns = FINDING_REPORT_METADATA_KEY_PATTERNS.map(
   (metadataKeyPattern) =>
-    `${assignmentBoundaryPattern}${supportedNoteKeyPattern}${assignmentOperatorPattern}[^\\n;,*|&]{0,4096}\\s+(?!${evidenceAssignmentKeyPattern}${anyAssignmentOperatorPattern})(?!${supportedNoteKeyPattern}${assignmentOperatorPattern})${metadataKeyPattern}${anyAssignmentOperatorPattern}`
+    `${assignmentBoundaryPattern}${supportedNoteKeyPattern}${assignmentOperatorPattern}${chainedAssignmentGapPattern}(?!${evidenceAssignmentKeyPattern}${anyAssignmentOperatorPattern})(?!${supportedNoteKeyPattern}${assignmentOperatorPattern})${metadataKeyPattern}${anyAssignmentOperatorPattern}`
 );
 const typedValueBoundaryPattern = "(?::|[.;,*`\\s&]|$)";
 const invalidTypedAssignmentPattern = `${assignmentBoundaryPattern}(?:reachability${assignmentOperatorPrefixPattern}(?![ \\t]*(?:${FINDING_REACHABILITY_VALUES.join("|")})${typedValueBoundaryPattern})[ \\t]*|stateful_failure_classification${assignmentOperatorPrefixPattern}(?![ \\t]*(?:${STATEFUL_FAILURE_CLASSIFICATION_VALUES.join("|")})${typedValueBoundaryPattern})[ \\t]*|(?:likelihood|impact)${assignmentOperatorPrefixPattern}(?![ \\t]*(?:${FINDING_RISK_VALUES.join("|")})${typedValueBoundaryPattern})[ \\t]*)`;
@@ -76,6 +80,7 @@ const findingNoteAssignment = new RegExp(
   "gu"
 );
 const findingNoteClauseBoundary = /(?:^|[\n;,*|&<])[ \t]*$/u;
+const chainedFindingReportAssignmentGap = new RegExp(`^${chainedAssignmentGapPattern}$`, "u");
 const findingReportDirective =
   /(?:^|[^A-Za-z])(?:add|append|assign|define|emit|enforce|include|mandate|mark|plus|put|record|require|returns?|set|treat|use|write)(?:\s+(?:an?|the))?\s+$/iu;
 
@@ -113,9 +118,10 @@ export function findingNoteAssignmentIssue(note: string): FindingNoteAssignmentI
     const key = assignment[1]!;
     const canonical = canonicalFindingNoteKey(key);
     const prefix = note.slice(0, assignment.index);
-    const clauseAssignment =
-      findingNoteClauseBoundary.test(prefix) ||
-      (previousReportAssignmentEnd !== undefined && assignment.index - previousReportAssignmentEnd <= 4097);
+    const followsReportAssignment =
+      previousReportAssignmentEnd !== undefined &&
+      chainedFindingReportAssignmentGap.test(note.slice(previousReportAssignmentEnd, assignment.index));
+    const clauseAssignment = findingNoteClauseBoundary.test(prefix) || followsReportAssignment;
     const reportMetadata =
       canonical !== undefined ||
       (clauseAssignment && isFindingReportMetadataKey(key) && !isFindingReportEvidenceAssignmentKey(key));
