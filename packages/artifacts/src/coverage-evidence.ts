@@ -17,21 +17,19 @@ const safePath = z
       value.split("/").every((segment) => segment.length > 0 && segment !== "." && segment !== ".."),
     { message: "path must be a safe relative forward-slash path" }
   );
-const range = z
-  .strictObject({
-    file: safePath,
-    kind: sourceKind,
-    start_line: z.number().int().positive(),
-    end_line: z.number().int().positive(),
-    covered: z.boolean()
-  })
-  .refine((value) => value.end_line >= value.start_line, { message: "end_line must not precede start_line" });
+const range = z.strictObject({
+  file: safePath,
+  kind: sourceKind,
+  start_line: z.number().int().positive(),
+  line_count: z.number().int().positive(),
+  selected: z.boolean(),
+  covered: z.boolean()
+});
 const file = z
   .strictObject({
     path: safePath,
     kind: sourceKind,
     included: z.boolean(),
-    critical: z.boolean(),
     exclusion_reason: z.string().min(1).optional(),
     covered_ranges: z.number().int().nonnegative(),
     total_ranges: z.number().int().nonnegative()
@@ -51,20 +49,6 @@ const file = z
         path: ["exclusion_reason"]
       });
     }
-    if (!value.included && value.covered_ranges !== 0) {
-      context.addIssue({
-        code: "custom",
-        message: "excluded files cannot claim covered ranges",
-        path: ["covered_ranges"]
-      });
-    }
-    if (value.critical && value.total_ranges === 0) {
-      context.addIssue({
-        code: "custom",
-        message: "declared critical files must contribute a material denominator",
-        path: ["total_ranges"]
-      });
-    }
     if (value.covered_ranges > value.total_ranges) {
       context.addIssue({
         code: "custom",
@@ -75,7 +59,7 @@ const file = z
   });
 const view = z
   .strictObject({
-    scope: z.enum(["selected-range", "production-source", "declared-critical-path"]),
+    scope: z.enum(["selected-range", "production-source"]),
     covered_ranges: z.number().int().nonnegative(),
     total_ranges: z.number().int().nonnegative()
   })
@@ -88,7 +72,7 @@ export const coverageEvidenceSchema = z
     schema_version: z.literal(COVERAGE_EVIDENCE_SCHEMA_VERSION),
     views: z
       .array(view)
-      .min(2)
+      .length(2)
       .superRefine((views, context) => {
         const scopes = new Set(views.map((entry) => entry.scope));
         if (!scopes.has("selected-range") || !scopes.has("production-source")) {
@@ -135,11 +119,18 @@ export const coverageEvidenceSchema = z
           path: ["counted_ranges", index, "kind"]
         });
       }
-      if (!declared.included) {
+      if (entry.selected && entry.kind !== "production") {
         context.addIssue({
           code: "custom",
-          message: "counted ranges must belong to files included in the selected-range scope",
-          path: ["counted_ranges", index, "file"]
+          message: "selected-range coverage may contain only production source ranges",
+          path: ["counted_ranges", index, "selected"]
+        });
+      }
+      if (!declared.included && entry.selected) {
+        context.addIssue({
+          code: "custom",
+          message: "selected counted ranges must belong to files included in the selected-range scope",
+          path: ["counted_ranges", index, "selected"]
         });
       }
       const entries = rangesByFile.get(entry.file) ?? [];
@@ -149,10 +140,11 @@ export const coverageEvidenceSchema = z
 
     for (const [filePath, entries] of rangesByFile) {
       const sorted = [...entries].sort(
-        (left, right) => left.start_line - right.start_line || left.end_line - right.end_line
+        (left, right) => left.start_line - right.start_line || left.line_count - right.line_count
       );
       for (let index = 1; index < sorted.length; index += 1) {
-        if (sorted[index]!.start_line <= sorted[index - 1]!.end_line) {
+        const previousEnd = sorted[index - 1]!.start_line + sorted[index - 1]!.line_count - 1;
+        if (sorted[index]!.start_line <= previousEnd) {
           context.addIssue({
             code: "custom",
             message: `counted ranges overlap for ${filePath}`,
@@ -166,10 +158,18 @@ export const coverageEvidenceSchema = z
     for (const [index, entry] of value.files.entries()) {
       const entries = rangesByFile.get(entry.path) ?? [];
       const covered = entries.filter((candidate) => candidate.covered).length;
-      if (entry.included && (entry.total_ranges !== entries.length || entry.covered_ranges !== covered)) {
+      const hasSelectedRanges = entries.some((candidate) => candidate.selected);
+      if (entry.included !== hasSelectedRanges) {
         context.addIssue({
           code: "custom",
-          message: "included file totals must equal their counted ranges",
+          message: "file included status must equal whether it contributes selected counted ranges",
+          path: ["files", index, "included"]
+        });
+      }
+      if (entry.total_ranges !== entries.length || entry.covered_ranges !== covered) {
+        context.addIssue({
+          code: "custom",
+          message: "file totals must equal all of their selected and unselected counted ranges",
           path: ["files", index]
         });
       }
@@ -180,10 +180,11 @@ export const coverageEvidenceSchema = z
       covered_ranges: entries.reduce((sum, entry) => sum + entry.covered_ranges, 0),
       total_ranges: entries.reduce((sum, entry) => sum + entry.total_ranges, 0)
     });
-    expectedViews.set("selected-range", aggregate(value.files.filter((entry) => entry.included)));
+    expectedViews.set("selected-range", {
+      covered_ranges: value.counted_ranges.filter((entry) => entry.selected && entry.covered).length,
+      total_ranges: value.counted_ranges.filter((entry) => entry.selected).length
+    });
     expectedViews.set("production-source", aggregate(value.files.filter((entry) => entry.kind === "production")));
-    const criticalFiles = value.files.filter((entry) => entry.critical);
-    if (criticalFiles.length > 0) expectedViews.set("declared-critical-path", aggregate(criticalFiles));
     for (const [index, entry] of value.views.entries()) {
       const expected = expectedViews.get(entry.scope);
       if (
@@ -198,14 +199,6 @@ export const coverageEvidenceSchema = z
         });
       }
     }
-    if (criticalFiles.length > 0 && !value.views.some((entry) => entry.scope === "declared-critical-path")) {
-      context.addIssue({
-        code: "custom",
-        message: "declared critical files require a declared-critical-path view",
-        path: ["views"]
-      });
-    }
-
     const actualZero = new Set<string>();
     for (const [index, component] of value.zero_coverage_components.entries()) {
       const key = `${component.path}\0${component.kind}`;
@@ -250,7 +243,7 @@ export const coverageEvidenceJsonSchema = {
   $id: COVERAGE_EVIDENCE_JSON_SCHEMA_ID,
   title: "Ultrafuzz complete coverage denominator",
   description:
-    "Producer contract. Semantic validation additionally requires: every counted range joins a declared included file with the same kind; ranges within each file do not overlap; included-file totals equal their counted ranges; selected-range, production-source, and declared-critical-path view totals equal their applicable file totals; and zero_coverage_components exactly enumerates every material file with no covered ranges. Runtime binds excluded production totals and included ranges to the trusted source inventory.",
+    "Producer contract. Each range uses a positive start_line plus positive line_count, so reversed ranges are unrepresentable. Semantic validation additionally requires: every counted range joins a declared file with the same kind; selected ranges are production-only and may join only an included file; ranges within each file do not overlap; file totals equal all selected and unselected counted ranges; selected-range totals equal selected counted ranges; production-source totals equal production-file totals; and zero_coverage_components exactly enumerates every material file with no covered ranges. Runtime binds every source path and production declaration boundary to the trusted workspace inventory, and binds each selection flag to overlap with the generated Recon coverage map.",
   type: "object",
   additionalProperties: false,
   required: ["schema_version", "views", "files", "counted_ranges", "zero_coverage_components"],
@@ -259,13 +252,13 @@ export const coverageEvidenceJsonSchema = {
     views: {
       type: "array",
       minItems: 2,
-      maxItems: 3,
+      maxItems: 2,
       items: {
         type: "object",
         additionalProperties: false,
         required: ["scope", "covered_ranges", "total_ranges"],
         properties: {
-          scope: { enum: ["selected-range", "production-source", "declared-critical-path"] },
+          scope: { enum: ["selected-range", "production-source"] },
           covered_ranges: { type: "integer", minimum: 0 },
           total_ranges: { type: "integer", minimum: 0 }
         }
@@ -277,12 +270,11 @@ export const coverageEvidenceJsonSchema = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["path", "kind", "included", "critical", "covered_ranges", "total_ranges"],
+        required: ["path", "kind", "included", "covered_ranges", "total_ranges"],
         properties: {
           path: { type: "string", minLength: 1, pattern: safePathPattern },
           kind: { enum: sourceKinds },
           included: { type: "boolean" },
-          critical: { type: "boolean" },
           exclusion_reason: { type: "string", minLength: 1 },
           covered_ranges: { type: "integer", minimum: 0 },
           total_ranges: { type: "integer", minimum: 0 }
@@ -292,13 +284,9 @@ export const coverageEvidenceJsonSchema = {
             if: { properties: { included: { const: false } }, required: ["included"] },
             then: {
               required: ["exclusion_reason"],
-              properties: { exclusion_reason: true, covered_ranges: { const: 0 } }
+              properties: { exclusion_reason: true }
             },
             else: { not: { required: ["exclusion_reason"] } }
-          },
-          {
-            if: { properties: { critical: { const: true } }, required: ["critical"] },
-            then: { properties: { total_ranges: { type: "integer", minimum: 1 } } }
           }
         ]
       }
@@ -308,12 +296,13 @@ export const coverageEvidenceJsonSchema = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["file", "kind", "start_line", "end_line", "covered"],
+        required: ["file", "kind", "start_line", "line_count", "selected", "covered"],
         properties: {
           file: { type: "string", minLength: 1, pattern: safePathPattern },
           kind: { enum: sourceKinds },
           start_line: { type: "integer", minimum: 1 },
-          end_line: { type: "integer", minimum: 1 },
+          line_count: { type: "integer", minimum: 1 },
+          selected: { type: "boolean" },
           covered: { type: "boolean" }
         }
       }

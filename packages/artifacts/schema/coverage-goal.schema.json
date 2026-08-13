@@ -9,24 +9,40 @@
     "target": {
       "type": "object",
       "properties": {
-        "metric": {
+        "scope": {
           "type": "string",
-          "const": "standardized-core-line-coverage-percent"
+          "const": "selected-range"
         },
-        "value": {
+        "minimum_percent": {
           "type": "number",
           "const": 90
         }
       },
-      "required": ["metric", "value"],
+      "required": ["scope", "minimum_percent"],
       "additionalProperties": false
     },
     "current_measurement": {
       "anyOf": [
         {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 100
+          "type": "object",
+          "properties": {
+            "scope": {
+              "type": "string",
+              "const": "selected-range"
+            },
+            "covered_ranges": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "total_ranges": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": ["scope", "covered_ranges", "total_ranges"],
+          "additionalProperties": false
         },
         {
           "type": "null"
@@ -35,7 +51,7 @@
     },
     "current_status": {
       "type": "string",
-      "enum": ["not-run", "in-progress", "target-met", "below-target", "blocked"]
+      "enum": ["not-run", "in-progress", "measured", "blocked"]
     },
     "planned_commands": {
       "minItems": 0,
@@ -156,7 +172,7 @@
       "if": {
         "properties": {
           "current_status": {
-            "const": "target-met"
+            "const": "measured"
           }
         },
         "required": ["current_status"]
@@ -164,32 +180,11 @@
       "then": {
         "properties": {
           "current_measurement": {
-            "type": "number",
-            "minimum": 90,
-            "maximum": 100
+            "type": "object"
           },
           "blockers": {
             "type": "array",
             "maxItems": 0
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "current_status": {
-            "const": "below-target"
-          }
-        },
-        "required": ["current_status"]
-      },
-      "then": {
-        "properties": {
-          "current_measurement": {
-            "type": "number",
-            "minimum": 0,
-            "exclusiveMaximum": 90
           }
         }
       }

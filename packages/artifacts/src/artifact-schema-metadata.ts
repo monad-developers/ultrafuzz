@@ -133,7 +133,9 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "config-redactions-path-key-equality",
     "config-redactions-path-uniqueness"
   ]),
-  "coverage-goal.schema.json": artifact("ultrafuzz/coverage-goal@1", "coverageGoalJsonSchema", "coverageGoalSchema"),
+  "coverage-goal.schema.json": artifact("ultrafuzz/coverage-goal@1", "coverageGoalJsonSchema", "coverageGoalSchema", [
+    "coverage-goal-reconciliation"
+  ]),
   "coverage-evidence.schema.json": artifact(
     "ultrafuzz/coverage-evidence@1",
     "coverageEvidenceJsonSchema",

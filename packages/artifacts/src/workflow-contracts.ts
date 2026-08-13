@@ -36,7 +36,6 @@ import { validateWithZod, type SchemaValidationResult } from "./schema-validatio
 const nonEmptyString = z.string().min(1);
 const nonNegativeInteger = z.number().int().nonnegative();
 const positiveInteger = z.number().int().positive();
-const percentage = z.number().finite().min(0).max(100);
 const timestamp = canonicalTimestampSchema;
 const sha256 = z.string().regex(/^[a-f0-9]{64}$/u);
 const gitCommit = z.string().regex(/^[0-9a-f]{40}$/u);
@@ -542,11 +541,20 @@ export const coverageGoalSchema = withDocumentMetadata(
     .strictObject({
       schema_version: z.literal(COVERAGE_GOAL_SCHEMA_VERSION),
       target: z.strictObject({
-        metric: z.literal("standardized-core-line-coverage-percent"),
-        value: z.literal(90)
+        scope: z.literal("selected-range"),
+        minimum_percent: z.literal(90)
       }),
-      current_measurement: percentage.nullable(),
-      current_status: z.enum(["not-run", "in-progress", "target-met", "below-target", "blocked"]),
+      current_measurement: z
+        .strictObject({
+          scope: z.literal("selected-range"),
+          covered_ranges: z.number().int().nonnegative(),
+          total_ranges: z.number().int().nonnegative()
+        })
+        .refine((measurement) => measurement.covered_ranges <= measurement.total_ranges, {
+          message: "covered_ranges cannot exceed total_ranges"
+        })
+        .nullable(),
+      current_status: z.enum(["not-run", "in-progress", "measured", "blocked"]),
       planned_commands: uniqueStrings(),
       stop_conditions: uniqueStrings(1),
       timeout_seconds: positiveInteger,
@@ -571,17 +579,13 @@ export const coverageGoalSchema = withDocumentMetadata(
           then: { properties: { blockers: { type: "array", maxItems: 0 } } }
         },
         {
-          if: { properties: { current_status: { const: "target-met" } }, required: ["current_status"] },
+          if: { properties: { current_status: { const: "measured" } }, required: ["current_status"] },
           then: {
             properties: {
-              current_measurement: { type: "number", minimum: 90, maximum: 100 },
+              current_measurement: { type: "object" },
               blockers: { type: "array", maxItems: 0 }
             }
           }
-        },
-        {
-          if: { properties: { current_status: { const: "below-target" } }, required: ["current_status"] },
-          then: { properties: { current_measurement: { type: "number", minimum: 0, exclusiveMaximum: 90 } } }
         },
         {
           if: { properties: { current_status: { const: "blocked" } }, required: ["current_status"] },
@@ -603,16 +607,12 @@ export const coverageGoalSchema = withDocumentMetadata(
         if (goal.blockers.length > 0) {
           addIssue("blockers", "In-progress coverage cannot report terminal blockers; use blocked status");
         }
-      } else if (goal.current_status === "target-met") {
-        if (goal.current_measurement === null || goal.current_measurement < goal.target.value) {
-          addIssue("current_measurement", "Target-met coverage requires a measurement at or above the target");
+      } else if (goal.current_status === "measured") {
+        if (goal.current_measurement === null) {
+          addIssue("current_measurement", "Measured coverage requires exact scoped counts");
         }
         if (goal.blockers.length > 0) {
-          addIssue("blockers", "Target-met coverage cannot carry blockers");
-        }
-      } else if (goal.current_status === "below-target") {
-        if (goal.current_measurement === null || goal.current_measurement >= goal.target.value) {
-          addIssue("current_measurement", "Below-target coverage requires a measurement below the target");
+          addIssue("blockers", "Measured coverage cannot carry blockers");
         }
       } else if (goal.blockers.length === 0) {
         addIssue("blockers", "Blocked coverage requires at least one typed blocker");
@@ -1818,7 +1818,7 @@ export const WORKFLOW_CONTRACT_DESCRIPTIONS: Record<WorkflowContractId, string> 
   "ultrafuzz/admin-config-boundary-matrix@1": "Typed admin/config surface and selector audit rows.",
   "ultrafuzz/dependency-scope-matrix@1": "Typed external-dependency scope decisions and evidence.",
   "ultrafuzz/externalized-state-accounting@1": "State components, value scenarios, and accounting oracles.",
-  "ultrafuzz/coverage-goal@1": "A bounded standardized-coverage goal and blocker record.",
+  "ultrafuzz/coverage-goal@1": "A bounded scoped-count coverage goal and blocker record.",
   "ultrafuzz/invariant-campaign-plan@2":
     "The current v2 invariant backend, CPU, full configured Recon interval, supervised deadlines, reserve, paths, and commands.",
   "ultrafuzz/campaign-summary@2": "A strict invariant campaign accounting summary.",

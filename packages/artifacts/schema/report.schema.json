@@ -2229,13 +2229,14 @@
         },
         "views": {
           "minItems": 2,
+          "maxItems": 2,
           "type": "array",
           "items": {
             "type": "object",
             "properties": {
               "scope": {
                 "type": "string",
-                "enum": ["selected-range", "production-source", "declared-critical-path"]
+                "enum": ["selected-range", "production-source"]
               },
               "covered_ranges": {
                 "type": "integer",
@@ -2269,9 +2270,6 @@
               "included": {
                 "type": "boolean"
               },
-              "critical": {
-                "type": "boolean"
-              },
               "exclusion_reason": {
                 "type": "string",
                 "minLength": 1
@@ -2287,7 +2285,7 @@
                 "maximum": 9007199254740991
               }
             },
-            "required": ["path", "kind", "included", "critical", "covered_ranges", "total_ranges"],
+            "required": ["path", "kind", "included", "covered_ranges", "total_ranges"],
             "additionalProperties": false
           }
         },
@@ -2309,16 +2307,19 @@
                 "exclusiveMinimum": 0,
                 "maximum": 9007199254740991
               },
-              "end_line": {
+              "line_count": {
                 "type": "integer",
                 "exclusiveMinimum": 0,
                 "maximum": 9007199254740991
+              },
+              "selected": {
+                "type": "boolean"
               },
               "covered": {
                 "type": "boolean"
               }
             },
-            "required": ["file", "kind", "start_line", "end_line", "covered"],
+            "required": ["file", "kind", "start_line", "line_count", "selected", "covered"],
             "additionalProperties": false
           }
         },

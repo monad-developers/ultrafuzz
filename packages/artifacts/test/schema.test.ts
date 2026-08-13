@@ -46,6 +46,7 @@ import {
   assertPlannedGraphSemantics,
   derivePropertyImplementationCoverage,
   findingNoteAssignmentIssue,
+  executeSemanticGate,
   findingJsonSchema,
   findingSchema,
   generatedTestsJsonSchema,
@@ -2208,11 +2209,15 @@ test("present generated-test aggregation provenance cannot be an empty object", 
   assert.equal(validateArtifactContract("ultrafuzz/aggregation-manifest@1", JSON.stringify(manifest)).ok, false);
 });
 
-test("coverage goal status, measurement, target, and blocker evidence stay coupled in JSON Schema and Zod", () => {
+test("coverage goal status, scoped measurement, target, and blocker evidence stay coupled", () => {
   const base = {
     schema_version: "ultrafuzz.coverage-goal.v1",
-    target: { metric: "standardized-core-line-coverage-percent", value: 90 },
-    current_measurement: null as number | null,
+    target: { scope: "selected-range", minimum_percent: 90 },
+    current_measurement: null as null | {
+      scope: "selected-range";
+      covered_ranges: number;
+      total_ranges: number;
+    },
     current_status: "not-run",
     planned_commands: [],
     stop_conditions: ["reserve time for finalization"],
@@ -2223,10 +2228,21 @@ test("coverage goal status, measurement, target, and blocker evidence stay coupl
   const blocker = { category: "coverage-tooling-blocked", summary: "covg-eval unavailable", evidence_paths: [] };
   const cases = [
     { name: "not run", value: base, expected: true },
-    { name: "not run with measurement", value: { ...base, current_measurement: 0 }, expected: false },
+    {
+      name: "not run with measurement",
+      value: {
+        ...base,
+        current_measurement: { scope: "selected-range", covered_ranges: 0, total_ranges: 1 }
+      },
+      expected: false
+    },
     {
       name: "in progress",
-      value: { ...base, current_status: "in-progress", current_measurement: 50 },
+      value: {
+        ...base,
+        current_status: "in-progress",
+        current_measurement: { scope: "selected-range", covered_ranges: 1, total_ranges: 2 }
+      },
       expected: true
     },
     {
@@ -2234,32 +2250,54 @@ test("coverage goal status, measurement, target, and blocker evidence stay coupl
       value: { ...base, current_status: "in-progress", blockers: [blocker] },
       expected: false
     },
-    { name: "target met", value: { ...base, current_status: "target-met", current_measurement: 90 }, expected: true },
     {
-      name: "target met without measurement",
-      value: { ...base, current_status: "target-met" },
-      expected: false
-    },
-    {
-      name: "below target",
-      value: { ...base, current_status: "below-target", current_measurement: 89.9 },
+      name: "measured",
+      value: {
+        ...base,
+        current_status: "measured",
+        current_measurement: { scope: "selected-range", covered_ranges: 9, total_ranges: 10 }
+      },
       expected: true
     },
     {
-      name: "below target at threshold",
-      value: { ...base, current_status: "below-target", current_measurement: 90 },
+      name: "measured without measurement",
+      value: { ...base, current_status: "measured" },
+      expected: false
+    },
+    {
+      name: "measurement numerator exceeds denominator",
+      value: {
+        ...base,
+        current_status: "measured",
+        current_measurement: { scope: "selected-range", covered_ranges: 2, total_ranges: 1 }
+      },
       expected: false
     },
     { name: "blocked", value: { ...base, current_status: "blocked", blockers: [blocker] }, expected: true },
     { name: "blocked without blocker", value: { ...base, current_status: "blocked" }, expected: false },
-    { name: "noncanonical target", value: { ...base, target: { ...base.target, value: 80 } }, expected: false }
+    {
+      name: "noncanonical target",
+      value: { ...base, target: { ...base.target, minimum_percent: 80 } },
+      expected: false
+    },
+    {
+      name: "legacy bare percentage",
+      value: { ...base, current_status: "measured", current_measurement: 90 },
+      expected: false
+    }
   ] as const;
   for (const candidate of cases) {
     assert.equal(coverageGoalSchema.safeParse(candidate.value).success, candidate.expected, `${candidate.name}:zod`);
+    const structurallyExpected = candidate.name === "measurement numerator exceeds denominator" || candidate.expected;
     assert.equal(
       validateArtifactContract("ultrafuzz/coverage-goal@1", JSON.stringify(candidate.value)).ok,
-      candidate.expected,
+      structurallyExpected,
       `${candidate.name}:json-schema`
+    );
+    assert.equal(
+      executeSemanticGate("coverage-goal-reconciliation", { document: candidate.value }).status === "passed",
+      candidate.expected,
+      `${candidate.name}:semantic`
     );
   }
 });

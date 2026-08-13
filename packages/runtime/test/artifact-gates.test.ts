@@ -19,6 +19,7 @@ import {
   SMITHERS_TASK_MANIFEST_SCHEMA_VERSION,
   SMITHERS_TASK_METADATA_SCHEMA_VERSION,
   updateNodeState,
+  validateArtifactContract,
   validateRegisteredJsonFileSync,
   writeArtifact as writeArtifactFile,
   writeArtifactManifest,
@@ -255,6 +256,7 @@ function fixtureDeclaredContract(artifactPath: string): PlannedGraphNode["output
   }
   if (artifactPath === "campaign-plan.json") return "ultrafuzz/invariant-campaign-plan@2";
   if (artifactPath === "campaign-summary.json") return "ultrafuzz/campaign-summary@2";
+  if (artifactPath === "coverage-goal.json") return "ultrafuzz/coverage-goal@1";
   if (artifactPath === "coverage-evidence.json") return "ultrafuzz/coverage-evidence@1";
   if (artifactPath === "findings.json") return "ultrafuzz/findings@2";
   if (artifactPath === "triaged-findings.json") return "ultrafuzz/triaged-findings@1";
@@ -1042,11 +1044,13 @@ function plannedNode(paths: string[]): PlannedGraphNode {
                           ? "ultrafuzz/invariant-campaign-plan@2"
                           : outputPath === "campaign-summary.json"
                             ? "ultrafuzz/campaign-summary@2"
-                            : outputPath === "coverage-evidence.json"
-                              ? "ultrafuzz/coverage-evidence@1"
-                              : outputPath === "report.json"
-                                ? "ultrafuzz/report@2"
-                                : "ultrafuzz/nonempty-markdown@1";
+                            : outputPath === "coverage-goal.json"
+                              ? "ultrafuzz/coverage-goal@1"
+                              : outputPath === "coverage-evidence.json"
+                                ? "ultrafuzz/coverage-evidence@1"
+                                : outputPath === "report.json"
+                                  ? "ultrafuzz/report@2"
+                                  : "ultrafuzz/nonempty-markdown@1";
       return boundOutput(outputPath, contract, index === 0);
     }),
     prompt_id: "strategy-a",
@@ -10306,14 +10310,14 @@ test("properties Markdown parity accepts a description that ends with a pipe", (
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
 });
 
-test("coverage gate binds selected ranges and excluded totals to the trusted production inventory", () => {
+test("coverage gate binds selected and unselected ranges to the trusted production inventory", () => {
   const layout = createRunLayout({
     projectRoot: tempProject(),
     runId: "run-scoped-coverage",
     resolvedConfigToml: '[permissions]\nproduction_source_roots = ["src"]\n'
   });
   const node = {
-    ...plannedNode(["coverage-report.md", "coverage-evidence.json"]),
+    ...plannedNode(["coverage-goal.json", "coverage-report.md", "coverage-evidence.json"]),
     id: "stateful-invariant-coverage",
     logical_id: "stateful-invariant-coverage",
     artifact_dir: "artifacts/stateful-invariant-coverage"
@@ -10321,47 +10325,100 @@ test("coverage gate binds selected ranges and excluded totals to the trusted pro
   writePlannedGraph(layout, [node]);
   const workspace = path.join(layout.workspacesDir, node.id);
   fs.mkdirSync(path.join(workspace, "src"), { recursive: true });
-  fs.writeFileSync(path.join(workspace, "src/Core.sol"), "contract Core { function core() external {} }\n");
+  fs.writeFileSync(
+    path.join(workspace, "src/Core.sol"),
+    "contract Core {\n  function core() external {}\n  function read() external view returns (uint256) { return 1; }\n}\n"
+  );
   fs.writeFileSync(
     path.join(workspace, "src/Critical.sol"),
     [
       "contract Critical {",
       "  struct Inner { uint256 x; }",
       "  struct Outer { Inner inner; }",
+      "  function helper() private {}",
       "  Outer public state = Outer({inner: Inner({x: 1})});",
       "}",
       ""
     ].join("\n")
   );
+  fs.mkdirSync(path.join(workspace, "magic"), { recursive: true });
+  fs.writeFileSync(path.join(workspace, "magic/recon-coverage.json"), JSON.stringify({ "src/Core.sol": ["2"] }));
   const evidence = {
     schema_version: "ultrafuzz.coverage-evidence.v1",
     views: [
       { scope: "selected-range", covered_ranges: 1, total_ranges: 1 },
-      { scope: "production-source", covered_ranges: 1, total_ranges: 2 }
+      { scope: "production-source", covered_ranges: 1, total_ranges: 4 }
     ],
     files: [
       {
         path: "src/Core.sol",
         kind: "production",
         included: true,
-        critical: false,
         covered_ranges: 1,
-        total_ranges: 1
+        total_ranges: 2
       },
       {
         path: "src/Critical.sol",
         kind: "production",
         included: false,
-        critical: false,
         exclusion_reason: "not selected",
         covered_ranges: 0,
-        total_ranges: 1
+        total_ranges: 2
       }
     ],
-    counted_ranges: [{ file: "src/Core.sol", kind: "production", start_line: 1, end_line: 1, covered: true }],
+    counted_ranges: [
+      {
+        file: "src/Core.sol",
+        kind: "production",
+        start_line: 2,
+        line_count: 1,
+        selected: true,
+        covered: true
+      },
+      {
+        file: "src/Core.sol",
+        kind: "production",
+        start_line: 3,
+        line_count: 1,
+        selected: false,
+        covered: false
+      },
+      {
+        file: "src/Critical.sol",
+        kind: "production",
+        start_line: 4,
+        line_count: 1,
+        selected: false,
+        covered: false
+      },
+      {
+        file: "src/Critical.sol",
+        kind: "production",
+        start_line: 5,
+        line_count: 1,
+        selected: false,
+        covered: false
+      }
+    ],
     zero_coverage_components: [{ path: "src/Critical.sol", kind: "production" }]
   };
-  const publish = (value: unknown, markdown = "# Coverage\n\nselected-range: 1/1\n"): void => {
+  const scopedMarkdown =
+    "# Coverage\n\n## Scoped coverage evidence\n\n- selected-range: `1/1`\n- production-source: `1/4`\n\n" +
+    "Excluded components:\n- `src/Critical.sol` (production): not selected\n\n" +
+    "Zero-coverage components:\n- `src/Critical.sol` (production)\n";
+  const goal = {
+    schema_version: "ultrafuzz.coverage-goal.v1",
+    target: { scope: "selected-range", minimum_percent: 90 },
+    current_measurement: { scope: "selected-range", covered_ranges: 1, total_ranges: 1 },
+    current_status: "measured",
+    planned_commands: [],
+    stop_conditions: ["reserve time for finalization"],
+    timeout_seconds: 60,
+    finalization_reserve_seconds: 10,
+    blockers: []
+  };
+  const publish = (value: unknown, markdown = scopedMarkdown, goalValue: unknown = goal): void => {
+    writeArtifact(layout, node.id, "coverage-goal.json", JSON.stringify(goalValue));
     writeArtifact(layout, node.id, "coverage-report.md", markdown);
     writeArtifact(layout, node.id, "coverage-evidence.json", JSON.stringify(value));
   };
@@ -10370,14 +10427,51 @@ test("coverage gate binds selected ranges and excluded totals to the trusted pro
   const valid = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
 
-  const hiddenExcludedRange = structuredClone(evidence);
-  hiddenExcludedRange.counted_ranges.push({
-    file: "src/Critical.sol",
-    kind: "production",
-    start_line: 4,
-    end_line: 4,
+  fs.writeFileSync(path.join(workspace, "magic/recon-coverage.json"), "{}");
+  publish(evidence);
+  const missingSelectionAuthority = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(missingSelectionAuthority.ok, false);
+  assert.ok(
+    missingSelectionAuthority.diagnostics.some(
+      (diagnostic) => diagnostic.code === "COVERAGE_PRODUCTION_RANGE_SELECTION_MISMATCH"
+    ),
+    JSON.stringify(missingSelectionAuthority.diagnostics)
+  );
+  fs.writeFileSync(path.join(workspace, "magic/recon-coverage.json"), JSON.stringify({ "src/Core.sol": ["2"] }));
+
+  const inventedNonProduction = structuredClone(evidence);
+  inventedNonProduction.files.push({
+    path: "test/Fake.sol",
+    kind: "test",
+    included: false,
+    exclusion_reason: "not selected",
+    covered_ranges: 0,
+    total_ranges: 1
+  });
+  inventedNonProduction.counted_ranges.push({
+    file: "test/Fake.sol",
+    kind: "test",
+    start_line: 1,
+    line_count: 1,
+    selected: false,
     covered: false
   });
+  inventedNonProduction.zero_coverage_components.push({ path: "test/Fake.sol", kind: "test" });
+  publish(
+    inventedNonProduction,
+    scopedMarkdown
+      .replace(
+        "- `src/Critical.sol` (production): not selected",
+        "- `src/Critical.sol` (production): not selected\n- `test/Fake.sol` (test): not selected"
+      )
+      .replace("- `src/Critical.sol` (production)\n", "- `src/Critical.sol` (production)\n- `test/Fake.sol` (test)\n")
+  );
+  const fakeSource = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(fakeSource.ok, false);
+  assert.ok(fakeSource.diagnostics.some((diagnostic) => diagnostic.code === "COVERAGE_NON_PRODUCTION_FILE_UNKNOWN"));
+
+  const hiddenExcludedRange = structuredClone(evidence);
+  hiddenExcludedRange.counted_ranges[3]!.selected = true;
   publish(hiddenExcludedRange);
   const hidden = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(hidden.ok, false);
@@ -10391,18 +10485,52 @@ test("coverage gate binds selected ranges and excluded totals to the trusted pro
   );
 
   const inventedExcludedTotal = structuredClone(evidence);
-  inventedExcludedTotal.files[1]!.total_ranges = 2;
-  inventedExcludedTotal.views[1]!.total_ranges = 3;
+  inventedExcludedTotal.files[1]!.total_ranges = 3;
+  inventedExcludedTotal.views[1]!.total_ranges = 5;
   publish(inventedExcludedTotal);
   const invented = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(invented.ok, false);
   assert.ok(
-    invented.diagnostics.some((diagnostic) => diagnostic.code === "COVERAGE_EXCLUDED_FILE_DENOMINATOR_MISMATCH"),
+    invented.diagnostics.some((diagnostic) => diagnostic.code === "COVERAGE_PRODUCTION_FILE_DENOMINATOR_MISMATCH"),
     JSON.stringify(invented.diagnostics)
   );
 
+  const incidentallyCoveredUnselected = structuredClone(evidence);
+  incidentallyCoveredUnselected.counted_ranges[1]!.covered = true;
+  incidentallyCoveredUnselected.files[0]!.covered_ranges = 2;
+  incidentallyCoveredUnselected.views[1]!.covered_ranges = 2;
+  publish(
+    incidentallyCoveredUnselected,
+    scopedMarkdown.replace("production-source: `1/4`", "production-source: `2/4`")
+  );
+  const independentViews = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(independentViews.ok, true, JSON.stringify(independentViews.diagnostics));
+
+  const inventedSelection = structuredClone(evidence);
+  inventedSelection.counted_ranges[0]!.selected = false;
+  inventedSelection.counted_ranges[0]!.covered = false;
+  inventedSelection.counted_ranges[1]!.selected = true;
+  inventedSelection.counted_ranges[1]!.covered = true;
+  publish(inventedSelection);
+  const wrongSelection = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(wrongSelection.ok, false);
+  assert.ok(
+    wrongSelection.diagnostics.some((diagnostic) => diagnostic.code === "COVERAGE_PRODUCTION_RANGE_SELECTION_MISMATCH"),
+    JSON.stringify(wrongSelection.diagnostics)
+  );
+
+  const wrongBoundary = structuredClone(evidence);
+  wrongBoundary.counted_ranges[3]!.line_count = 2;
+  publish(wrongBoundary);
+  const staleBoundary = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(staleBoundary.ok, false);
+  assert.ok(
+    staleBoundary.diagnostics.some((diagnostic) => diagnostic.code === "COVERAGE_PRODUCTION_RANGE_BOUNDARY_MISMATCH"),
+    JSON.stringify(staleBoundary.diagnostics)
+  );
+
   const outOfBounds = structuredClone(evidence);
-  outOfBounds.counted_ranges[0]!.end_line = 999;
+  outOfBounds.counted_ranges[0]!.line_count = 999;
   publish(outOfBounds);
   const impossible = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(impossible.ok, false);
@@ -10415,6 +10543,239 @@ test("coverage gate binds selected ranges and excluded totals to the trusted pro
   const percentage = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(percentage.ok, false);
   assert.ok(percentage.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"));
+
+  const staleGoal = structuredClone(goal);
+  staleGoal.current_measurement.covered_ranges = 0;
+  publish(evidence, scopedMarkdown, staleGoal);
+  const contradictoryGoal = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(contradictoryGoal.ok, false);
+  assert.ok(
+    contradictoryGoal.diagnostics.some((diagnostic) => diagnostic.code === "COVERAGE_GOAL_MEASUREMENT_MISMATCH")
+  );
+});
+
+test("coverage gate fails closed when every configured production root is missing", () => {
+  const layout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-missing-coverage-roots",
+    resolvedConfigToml: '[permissions]\nproduction_source_roots = ["missing-production"]\n'
+  });
+  const node = {
+    ...plannedNode(["coverage-goal.json", "coverage-report.md", "coverage-evidence.json"]),
+    id: "stateful-invariant-coverage",
+    logical_id: "stateful-invariant-coverage",
+    artifact_dir: "artifacts/stateful-invariant-coverage"
+  };
+  writePlannedGraph(layout, [node]);
+  const workspace = path.join(layout.workspacesDir, node.id);
+  fs.mkdirSync(path.join(workspace, "test"), { recursive: true });
+  fs.writeFileSync(path.join(workspace, "test/Harness.sol"), "contract Harness {}\n");
+  const evidence = {
+    schema_version: "ultrafuzz.coverage-evidence.v1",
+    views: [
+      { scope: "selected-range", covered_ranges: 0, total_ranges: 0 },
+      { scope: "production-source", covered_ranges: 0, total_ranges: 0 }
+    ],
+    files: [
+      {
+        path: "test/Harness.sol",
+        kind: "harness",
+        included: false,
+        exclusion_reason: "not a production source",
+        covered_ranges: 0,
+        total_ranges: 0
+      }
+    ],
+    counted_ranges: [],
+    zero_coverage_components: []
+  };
+  writeArtifact(
+    layout,
+    node.id,
+    "coverage-goal.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.coverage-goal.v1",
+      target: { scope: "selected-range", minimum_percent: 90 },
+      current_measurement: null,
+      current_status: "not-run",
+      planned_commands: [],
+      stop_conditions: ["reserve time for finalization"],
+      timeout_seconds: 60,
+      finalization_reserve_seconds: 10,
+      blockers: []
+    })
+  );
+  writeArtifact(
+    layout,
+    node.id,
+    "coverage-report.md",
+    "# Coverage\n\n## Scoped coverage evidence\n\n- selected-range: `0/0`\n" +
+      "- production-source: `0/0`\n\nExcluded components:\n" +
+      "- `test/Harness.sol` (harness): not a production source\n\nZero-coverage components:\n- None\n"
+  );
+  writeArtifact(layout, node.id, "coverage-evidence.json", JSON.stringify(evidence));
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, false);
+  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "COVERAGE_SOURCE_INVENTORY_UNSAFE"));
+});
+
+test("coverage gate authenticates Vyper declaration boundaries outside the Solidity-only Recon selection", () => {
+  const layout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-vyper-scoped-coverage",
+    resolvedConfigToml: '[permissions]\nproduction_source_roots = ["src"]\n'
+  });
+  const node = {
+    ...plannedNode(["coverage-goal.json", "coverage-report.md", "coverage-evidence.json"]),
+    id: "stateful-invariant-coverage",
+    logical_id: "stateful-invariant-coverage",
+    artifact_dir: "artifacts/stateful-invariant-coverage"
+  };
+  writePlannedGraph(layout, [node]);
+  const workspace = path.join(layout.workspacesDir, node.id);
+  fs.mkdirSync(path.join(workspace, "src"), { recursive: true });
+  fs.mkdirSync(path.join(workspace, "magic"), { recursive: true });
+  fs.writeFileSync(
+    path.join(workspace, "src/Module.vy"),
+    [
+      '"""module docs',
+      "def fake():",
+      "    pass",
+      '"""',
+      "value: public(uint256)",
+      "",
+      "@external",
+      "def mutate(",
+      "    amount: uint256,",
+      "):",
+      "    self.value = amount",
+      "",
+      "@external",
+      "@view",
+      "def read() -> uint256:",
+      "    return self.value",
+      "",
+      "@internal",
+      "def helper():",
+      "    pass",
+      ""
+    ].join("\n")
+  );
+  fs.writeFileSync(path.join(workspace, "magic/recon-coverage.json"), "{}");
+
+  const evidence = {
+    schema_version: "ultrafuzz.coverage-evidence.v1",
+    views: [
+      { scope: "selected-range", covered_ranges: 0, total_ranges: 0 },
+      { scope: "production-source", covered_ranges: 0, total_ranges: 4 }
+    ],
+    files: [
+      {
+        path: "src/Module.vy",
+        kind: "production",
+        included: false,
+        exclusion_reason: "Recon coverage-map generation is Solidity-only",
+        covered_ranges: 0,
+        total_ranges: 4
+      }
+    ],
+    counted_ranges: [
+      {
+        file: "src/Module.vy",
+        kind: "production",
+        start_line: 5,
+        line_count: 1,
+        selected: false,
+        covered: false
+      },
+      {
+        file: "src/Module.vy",
+        kind: "production",
+        start_line: 8,
+        line_count: 4,
+        selected: false,
+        covered: false
+      },
+      {
+        file: "src/Module.vy",
+        kind: "production",
+        start_line: 15,
+        line_count: 2,
+        selected: false,
+        covered: false
+      },
+      {
+        file: "src/Module.vy",
+        kind: "production",
+        start_line: 19,
+        line_count: 2,
+        selected: false,
+        covered: false
+      }
+    ],
+    zero_coverage_components: [{ path: "src/Module.vy", kind: "production" }]
+  };
+  const goal = {
+    schema_version: "ultrafuzz.coverage-goal.v1",
+    target: { scope: "selected-range", minimum_percent: 90 },
+    current_measurement: { scope: "selected-range", covered_ranges: 0, total_ranges: 0 },
+    current_status: "measured",
+    planned_commands: [],
+    stop_conditions: ["reserve time for finalization"],
+    timeout_seconds: 60,
+    finalization_reserve_seconds: 10,
+    blockers: []
+  };
+  const markdown =
+    "# Coverage\n\n## Scoped coverage evidence\n\n- selected-range: `0/0`\n" +
+    "- production-source: `0/4`\n\nExcluded components:\n" +
+    "- `src/Module.vy` (production): Recon coverage-map generation is Solidity-only\n\n" +
+    "Zero-coverage components:\n- `src/Module.vy` (production)\n";
+  const publish = (value: unknown, rendered = markdown): void => {
+    writeArtifact(layout, node.id, "coverage-goal.json", JSON.stringify(goal));
+    writeArtifact(layout, node.id, "coverage-report.md", rendered);
+    writeArtifact(layout, node.id, "coverage-evidence.json", JSON.stringify(value));
+  };
+
+  publish(evidence);
+  const valid = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
+
+  const wrongBoundary = structuredClone(evidence);
+  wrongBoundary.counted_ranges[1]!.line_count = 3;
+  publish(wrongBoundary);
+  const staleBoundary = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(staleBoundary.ok, false);
+  assert.ok(
+    staleBoundary.diagnostics.some((diagnostic) => diagnostic.code === "COVERAGE_PRODUCTION_RANGE_BOUNDARY_MISMATCH"),
+    JSON.stringify(staleBoundary.diagnostics)
+  );
+
+  const inventedSelection = structuredClone(evidence);
+  inventedSelection.counted_ranges[1]!.selected = true;
+  inventedSelection.counted_ranges[1]!.covered = true;
+  inventedSelection.files[0] = {
+    path: "src/Module.vy",
+    kind: "production",
+    included: true,
+    covered_ranges: 1,
+    total_ranges: 4
+  } as (typeof inventedSelection.files)[number];
+  inventedSelection.views[0] = { scope: "selected-range", covered_ranges: 1, total_ranges: 1 };
+  inventedSelection.views[1] = { scope: "production-source", covered_ranges: 1, total_ranges: 4 };
+  inventedSelection.zero_coverage_components = [];
+  publish(
+    inventedSelection,
+    "# Coverage\n\n## Scoped coverage evidence\n\n- selected-range: `1/1`\n" +
+      "- production-source: `1/4`\n\nExcluded components:\n- None\n\nZero-coverage components:\n- None\n"
+  );
+  const wrongSelection = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(wrongSelection.ok, false);
+  assert.ok(
+    wrongSelection.diagnostics.some((diagnostic) => diagnostic.code === "COVERAGE_PRODUCTION_RANGE_SELECTION_MISMATCH"),
+    JSON.stringify(wrongSelection.diagnostics)
+  );
 });
 
 test("final report preserves finalized scoped coverage evidence and rejects bare percentages", () => {
@@ -10451,18 +10812,28 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
         path: "src/Core.sol",
         kind: "production",
         included: true,
-        critical: false,
         covered_ranges: 1,
         total_ranges: 1
       }
     ],
-    counted_ranges: [{ file: "src/Core.sol", kind: "production", start_line: 1, end_line: 1, covered: true }],
+    counted_ranges: [
+      {
+        file: "src/Core.sol",
+        kind: "production",
+        start_line: 1,
+        line_count: 1,
+        selected: true,
+        covered: true
+      }
+    ],
     zero_coverage_components: []
   };
   writeArtifact(layout, coverageNode.id, "coverage-report.md", "# Coverage\n\nselected-range: 1/1\n");
   writeArtifact(layout, coverageNode.id, "coverage-evidence.json", JSON.stringify(evidence));
   const scopedMarkdown =
-    "# Ultrafuzz report\n\n## Scoped coverage evidence\n\n- selected-range: `1/1`\n- production-source: `1/1`\n- Zero-coverage components: `0`\n";
+    "# Ultrafuzz report\n\n## Scoped coverage evidence\n\n- selected-range: `1/1`\n" +
+    "- production-source: `1/1`\n\nExcluded components:\n- None\n\n" +
+    "Zero-coverage components:\n- None\n";
   writeArtifact(layout, reportNode.id, "report.md", scopedMarkdown);
   writeArtifact(
     layout,
@@ -10476,13 +10847,21 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
 
   writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\nThe selected-range was 1/1.\n`);
   const misplaced = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
-  assert.equal(misplaced.ok, true, JSON.stringify(misplaced.diagnostics));
+  assert.equal(misplaced.ok, false);
+  assert.ok(
+    misplaced.diagnostics.some((diagnostic) => diagnostic.code === "REPORT_COVERAGE_EVIDENCE_MARKDOWN_MISSING")
+  );
+
+  writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\nStandardized score: 100%.\n`);
+  const disguisedPercentage = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+  assert.equal(disguisedPercentage.ok, false);
+  assert.ok(disguisedPercentage.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"));
 
   writeArtifact(
     layout,
     reportNode.id,
     "report.md",
-    "# Ultrafuzz report\n\n## Notes\n\n- selected-range: `1/1`\n- production-source: `1/1`\n- Zero-coverage components: `0`\n"
+    "# Ultrafuzz report\n\n## Notes\n\n- selected-range: `1/1`\n- production-source: `1/1`\n"
   );
   const wrongSection = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
   assert.equal(wrongSection.ok, false);
@@ -10502,10 +10881,68 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
     contradictory.diagnostics.some((diagnostic) => diagnostic.code === "REPORT_COVERAGE_EVIDENCE_MARKDOWN_MISSING")
   );
 
+  writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n${scopedMarkdown}`);
+  const duplicateSection = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+  assert.equal(duplicateSection.ok, false);
+  assert.ok(
+    duplicateSection.diagnostics.some((diagnostic) => diagnostic.code === "REPORT_COVERAGE_EVIDENCE_MARKDOWN_MISSING")
+  );
+
   writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n100% standardized coverage\n`);
   const percentage = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
   assert.equal(percentage.ok, false);
   assert.ok(percentage.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"));
+
+  writeArtifact(layout, reportNode.id, "report.md", scopedMarkdown);
+  const percentageIssue = {
+    ...currentFinding("M-01", {
+      title: "[M-01] - Property failure",
+      dedupe_key: "root-coverage-percentage",
+      triage_classification: "true-positive",
+      notes: ["triage_reason=public path is reachable", "Standardized coverage was 100%."],
+      severity: "Medium",
+      impact: "High",
+      likelihood: "Low",
+      impact_rationale: "The reachable path can lock assets.",
+      likelihood_rationale: "The path requires narrow timing.",
+      severity_rationale: "High impact x Low likelihood maps to Medium."
+    }),
+    description: "The public path can lock user assets.",
+    proof_of_concept: {
+      scenario: ["Call the public path in the affected state."],
+      language: "solidity",
+      code: "assertTrue(locked);"
+    },
+    strategy_provenance: {
+      detection_rates: [{ strategy: "stateful-invariant-coverage", detections: 1, configured_loops: 1 }]
+    },
+    lifecycle: {
+      dedupe_key: "root-coverage-percentage",
+      source_artifacts: [],
+      strategy_hits: [{ strategy: "stateful-invariant-coverage", attempt_index: 0 }],
+      triage_classification: "true-positive",
+      triage_reason: "public path is reachable",
+      canonical_severity: "Medium",
+      final_disposition: "promoted",
+      stages: [
+        {
+          stage: "severity-classified",
+          artifact_path: "severity-classified-findings.json",
+          finding_id: "finding-coverage-percentage"
+        }
+      ]
+    }
+  };
+  const percentageReport = currentReport(layout.runId, {
+    coverage_evidence: evidence,
+    issues: [percentageIssue]
+  });
+  const percentageReportValidation = validateArtifactContract("ultrafuzz/report@2", JSON.stringify(percentageReport));
+  assert.equal(percentageReportValidation.ok, true, JSON.stringify(percentageReportValidation.issues));
+  writeArtifact(layout, reportNode.id, "report.json", JSON.stringify(percentageReport));
+  const prosePercentage = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+  assert.equal(prosePercentage.ok, false);
+  assert.ok(prosePercentage.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"));
 
   writeArtifact(layout, reportNode.id, "report.md", scopedMarkdown);
   writeArtifact(
