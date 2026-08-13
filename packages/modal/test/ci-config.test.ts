@@ -993,6 +993,7 @@ describe("public Modal benchmark configuration", () => {
           steps: Array<{
             id?: string;
             name?: string;
+            if?: string;
             uses?: string;
             run?: string;
             env?: Record<string, string>;
@@ -1076,6 +1077,23 @@ describe("public Modal benchmark configuration", () => {
       expect(download.with?.["run-id"]).toBe("${{ github.event.workflow_run.id }}");
       expect(download.with?.["github-token"]).toBe("${{ github.token }}");
       expect(download.with?.name).toContain("${{ github.event.workflow_run.run_attempt }}");
+    }
+    expect(downloads.find((step) => step.name === "Download exact benchmark control metadata")?.with?.name).toContain(
+      "modal-benchmark-control-"
+    );
+    const readiness = automatic.steps.find((step) => step.id === "publication-readiness");
+    expect(readiness?.run).toContain("classify-modal-benchmark-publication.mjs");
+    expect(readiness?.env?.BENCHMARK_CONTROL).toContain("/control/benchmark-control");
+    for (const stepName of [
+      "Check out the exact candidate benchmark policy",
+      "Verify the candidate remains reachable from main",
+      "Validate the atomic Modal benchmark generation",
+      "Create the narrowly scoped eval-history publisher token",
+      "Publish the validated generation with remote-tip compare-and-swap retries"
+    ]) {
+      expect(automatic.steps.find((step) => step.name === stepName)?.if).toBe(
+        "steps.publication-readiness.outputs.ready == 'true'"
+      );
     }
     const reachability = automatic.steps.find(
       (step) => step.name === "Verify the candidate remains reachable from main"
