@@ -21,6 +21,8 @@ import {
   findingFuzzerBackendProvenance,
   invariantPinnedSourceRefExists,
   IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
+  MAX_COVERAGE_EVIDENCE_FILES,
+  MAX_COVERAGE_EVIDENCE_RANGES,
   MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILE_BYTES,
   PROPERTIES_SCHEMA_VERSION,
   readArtifactManifest,
@@ -4449,9 +4451,7 @@ function verifyCoverageProductionInventory(
   if (!isRecord(evidence) || !Array.isArray(evidence.files) || !Array.isArray(evidence.counted_ranges)) return [];
 
   const diagnostics =
-    markdownBytes === undefined
-      ? []
-      : unscopedCoveragePercentageDiagnostics(markdownBytes.toString("utf8"), markdownPath);
+    markdownBytes === undefined ? [] : unscopedCoverageScoreDiagnostics(markdownBytes.toString("utf8"), markdownPath);
   if (markdownBytes !== undefined) {
     diagnostics.push(
       ...coverageEvidenceMarkdownProjectionDiagnostics(
@@ -4482,6 +4482,19 @@ function verifyCoverageProductionInventory(
     if (entry.kind === "production") declaredProductionFiles.set(entry.path, entry);
     else declaredNonProductionFiles.set(entry.path, entry);
   }
+  const declaredFiles = new Map([...declaredProductionFiles, ...declaredNonProductionFiles]);
+  const sourceSnapshots = new Map<string, { text: string; lineCount: number }>();
+  const sourceSnapshot = (relativePath: string, label: string): { text: string; lineCount: number } => {
+    const cached = sourceSnapshots.get(relativePath);
+    if (cached !== undefined) return cached;
+    const sourcePath = safeResolveInside(workspacePath, relativePath, label);
+    assertRegularFileInside(workspacePath, sourcePath, label);
+    const text = readRegularFileSnapshot(sourcePath, MAX_ARTIFACT_SNAPSHOT_BYTES).toString("utf8");
+    const normalized = text.replace(/\r?\n$/u, "");
+    const snapshot = { text, lineCount: normalized === "" ? 0 : normalized.split(/\r?\n/u).length };
+    sourceSnapshots.set(relativePath, snapshot);
+    return snapshot;
+  };
   let inventory: Set<string>;
   try {
     inventory = new Set(productionContractSourceFiles(workspacePath, productionRoots));
@@ -4520,10 +4533,8 @@ function verifyCoverageProductionInventory(
   }
 
   for (const relativePath of declaredNonProductionFiles.keys()) {
-    let sourcePath: string;
     try {
-      sourcePath = safeResolveInside(workspacePath, relativePath, "non-production coverage source");
-      assertRegularFileInside(workspacePath, sourcePath, "non-production coverage source");
+      sourceSnapshot(relativePath, "non-production coverage source");
     } catch {
       diagnostics.push({
         code: "COVERAGE_NON_PRODUCTION_FILE_UNKNOWN",
@@ -4535,21 +4546,21 @@ function verifyCoverageProductionInventory(
     }
   }
 
+  const productionRangesByFile = new Map<string, Record<string, unknown>[]>();
   for (const [index, candidate] of evidence.counted_ranges.entries()) {
     if (!isRecord(candidate) || typeof candidate.file !== "string") continue;
-    const declaredFile = [...declaredProductionFiles, ...declaredNonProductionFiles].find(
-      ([relativePath]) => relativePath === candidate.file
-    );
-    if (declaredFile === undefined) continue;
-    const sourcePath = safeResolveInside(workspacePath, candidate.file, "coverage range");
+    if (candidate.kind === "production") {
+      const ranges = productionRangesByFile.get(candidate.file) ?? [];
+      ranges.push(candidate);
+      productionRangesByFile.set(candidate.file, ranges);
+    }
+    if (!declaredFiles.has(candidate.file)) continue;
+    let lineCount: number;
     try {
-      assertRegularFileInside(workspacePath, sourcePath, "coverage range");
+      lineCount = sourceSnapshot(candidate.file, "coverage range").lineCount;
     } catch {
       continue;
     }
-    const sourceText = readRegularFileSnapshot(sourcePath, MAX_ARTIFACT_SNAPSHOT_BYTES).toString("utf8");
-    const normalizedSource = sourceText.replace(/\r?\n$/u, "");
-    const lineCount = normalizedSource === "" ? 0 : normalizedSource.split(/\r?\n/u).length;
     const candidateEndLine =
       typeof candidate.start_line === "number" && typeof candidate.line_count === "number"
         ? candidate.start_line + candidate.line_count - 1
@@ -4566,18 +4577,13 @@ function verifyCoverageProductionInventory(
   }
 
   for (const relativePath of inventory) {
-    const sourcePath = safeResolveInside(workspacePath, relativePath, "production coverage source");
-    assertRegularFileInside(workspacePath, sourcePath, "production coverage source");
-    const sourceText = readRegularFileSnapshot(sourcePath, MAX_ARTIFACT_SNAPSHOT_BYTES).toString("utf8");
-    const declarations = materialCoverageDeclarations(relativePath, sourceText, evidencePath, diagnostics);
+    const sourceText = sourceSnapshot(relativePath, "production coverage source").text;
+    const declarations = materialCoverageDeclarations(relativePath, sourceText);
     const declarationLines = declarations.map((declaration) => declaration.line);
     const declarationLineSet = new Set(declarationLines);
     const declaredFile = declaredProductionFiles.get(relativePath);
     if (declaredFile === undefined) continue;
-    const declaredRanges = evidence.counted_ranges.filter(
-      (candidate): candidate is Record<string, unknown> =>
-        isRecord(candidate) && candidate.kind === "production" && candidate.file === relativePath
-    );
+    const declaredRanges = productionRangesByFile.get(relativePath) ?? [];
 
     if (declaredFile.total_ranges !== declarationLines.length) {
       diagnostics.push({
@@ -4654,12 +4660,7 @@ type ReconCoverageSelection = {
   diagnostics: RuntimeDiagnostic[];
 };
 
-function materialCoverageDeclarations(
-  relativePath: string,
-  source: string,
-  evidencePath: string,
-  diagnostics: RuntimeDiagnostic[]
-): MaterialCoverageDeclaration[] {
+function materialCoverageDeclarations(relativePath: string, source: string): MaterialCoverageDeclaration[] {
   const declarationsByLine = new Map<number, MaterialCoverageDeclaration[]>();
   if (path.extname(relativePath) === ".sol") {
     const lexicalSource = stripCoverageSourceCommentsAndStrings(source);
@@ -4680,6 +4681,10 @@ function materialCoverageDeclarations(
       scannedThrough = match.index ?? scannedThrough;
       if (parenthesisDepth > 0 || braceDepth > 1) continue;
       const signatureEnd = solidityDeclarationSignatureEnd(lexicalSource, match.index ?? 0);
+      // Interface and abstract signatures end in `;` and have no executable
+      // range that LCOV can cover. Only declarations with an implementation
+      // body belong in the production-source denominator.
+      if (lexicalSource[signatureEnd - 1] !== "{") continue;
       const declarations = declarationsByLine.get(currentLine) ?? [];
       declarations.push({
         line: currentLine,
@@ -4704,20 +4709,17 @@ function materialCoverageDeclarations(
     }
   }
 
-  const declarations: MaterialCoverageDeclaration[] = [];
-  for (const [line, declarationsAtLine] of [...declarationsByLine.entries()].sort(([left], [right]) => left - right)) {
-    if (declarationsAtLine.length > 1) {
-      diagnostics.push({
-        code: "COVERAGE_PRODUCTION_DECLARATIONS_AMBIGUOUS",
-        message: `Multiple material declarations share ${relativePath}:${line}; coverage ranges require one declaration per source line`,
-        severity: "error",
-        source: "coverage-evidence",
-        path: evidencePath
-      });
-    }
-    declarations.push(...declarationsAtLine);
-  }
-  return declarations;
+  // The portable evidence contract addresses ranges by line, not column. Treat
+  // every material declaration that begins on one physical line as one trusted
+  // range whose boundary covers the furthest declaration on that line. This
+  // keeps minified/generated sources representable without weakening the
+  // complete production-source denominator.
+  return [...declarationsByLine.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([line, declarationsAtLine]) => ({
+      line,
+      endLine: Math.max(...declarationsAtLine.map((declaration) => declaration.endLine))
+    }));
 }
 
 function solidityDeclarationSignatureEnd(source: string, start: number): number {
@@ -4816,6 +4818,9 @@ function vyperMaterialCoverageDeclarations(sourceLines: readonly string[]): Mate
     const definition = /^(\s*)(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/u.exec(sourceLine);
     if (definition !== null) {
       const indentation = definition[1]!.length;
+      // Executable Vyper functions are module-level. Indented `def` rows are
+      // interface signatures and cannot receive runtime coverage.
+      if (indentation !== 0) continue;
       const signatureEndIndex = vyperSignatureEndLineIndex(sourceLines, lineIndex, definition.index);
       let endIndex = signatureEndIndex;
       for (let candidateIndex = signatureEndIndex + 1; candidateIndex < sourceLines.length; candidateIndex += 1) {
@@ -4997,7 +5002,12 @@ function productionContractSourceFiles(workspacePath: string, productionRoots: r
       if (entry.isSymbolicLink())
         throw new Error(`Coverage production source inventory contains symlink ${relativePath}`);
       if (entry.isDirectory()) visit(path.join(directory, entry.name), relativePath);
-      else if (entry.isFile() && productionExtensions.has(path.extname(entry.name))) results.push(relativePath);
+      else if (entry.isFile() && productionExtensions.has(path.extname(entry.name))) {
+        if (results.length >= MAX_COVERAGE_EVIDENCE_FILES) {
+          throw new Error(`Coverage production source inventory exceeds ${MAX_COVERAGE_EVIDENCE_FILES} files`);
+        }
+        results.push(relativePath);
+      }
     }
   };
   for (const root of productionRoots) {
@@ -5051,21 +5061,46 @@ function readReconCoverageSelection(workspacePath: string, inventory: ReadonlySe
 
   const ranges = new Map<string, ReconCoverageRange[]>();
   const diagnostics: RuntimeDiagnostic[] = [];
+  let selectedRangeCount = 0;
   for (const [relativePath, rawRanges] of Object.entries(document)) {
-    if (!inventory.has(relativePath)) {
+    const safeRelativePath =
+      !path.isAbsolute(relativePath) &&
+      !relativePath.includes("\\") &&
+      !relativePath.includes("\u0000") &&
+      !/^[A-Za-z]:/u.test(relativePath) &&
+      relativePath.split("/").every((segment) => segment.length > 0 && segment !== "." && segment !== "..");
+    if (!safeRelativePath) {
       diagnostics.push({
-        code: "COVERAGE_RECON_SELECTION_FILE_UNKNOWN",
-        message: `Recon coverage selection map includes non-production or nonexistent source ${relativePath}`,
+        code: "COVERAGE_RECON_SELECTION_INVALID",
+        message: `Recon coverage selection map includes unsafe source path ${JSON.stringify(relativePath)}`,
         severity: "error",
         source: "coverage-evidence",
         path: selectionPath
       });
       continue;
     }
+    if (!inventory.has(relativePath)) {
+      // Recon recursively follows calls into dependencies. Those paths are
+      // outside the configured production-source authority and therefore do
+      // not authenticate selected production ranges; dependency evidence is
+      // still reconciled independently against declared workspace files.
+      continue;
+    }
     if (!Array.isArray(rawRanges) || rawRanges.length === 0) {
       diagnostics.push({
         code: "COVERAGE_RECON_SELECTION_INVALID",
         message: `Recon coverage selection for ${relativePath} must contain at least one line range`,
+        severity: "error",
+        source: "coverage-evidence",
+        path: selectionPath
+      });
+      continue;
+    }
+    selectedRangeCount += rawRanges.length;
+    if (selectedRangeCount > MAX_COVERAGE_EVIDENCE_RANGES) {
+      diagnostics.push({
+        code: "COVERAGE_RECON_SELECTION_INVALID",
+        message: `Recon coverage selection exceeds ${MAX_COVERAGE_EVIDENCE_RANGES} line ranges`,
         severity: "error",
         source: "coverage-evidence",
         path: selectionPath
@@ -6208,10 +6243,10 @@ function verifyFinalReportCoverageEvidence(
   attemptAuthority?: ArtifactGateAttemptAuthority,
   authenticated?: AuthenticatedArtifactGateSnapshots
 ): RuntimeDiagnostic[] {
-  const diagnostics = unscopedCoveragePercentageDiagnosticsInJson(report, reportPath);
+  const diagnostics = unscopedCoverageScoreDiagnosticsInJson(report, reportPath);
   const markdownBytes = readCurrentArtifactSnapshot(artifactDir, markdownPath, authenticated);
   const markdown = markdownBytes?.toString("utf8") ?? "";
-  diagnostics.push(...unscopedReportCoveragePercentageDiagnostics(markdown, markdownPath));
+  diagnostics.push(...unscopedReportCoverageScoreDiagnostics(markdown, markdownPath));
 
   const producerStatus = plannedContractProducerStatus(layout, node, "ultrafuzz/coverage-evidence@1", attemptAuthority);
   if (producerStatus === "absent") {
@@ -6298,45 +6333,68 @@ function coverageEvidenceMarkdownProjectionDiagnostics(
       ];
 }
 
-function unscopedCoveragePercentageDiagnostics(contents: string, artifactPath: string): RuntimeDiagnostic[] {
+function unscopedCoverageScoreDiagnostics(contents: string, artifactPath: string): RuntimeDiagnostic[] {
   const percentage = /\b(?:100(?:\.0+)?|\d{1,2}(?:\.\d+)?)\s*%/u;
+  const fraction = /\b\d+\s*\/\s*\d+\b/u;
+  const namedScope = /\b(?:selected-range|production-source)\b/iu;
   return contents
     .split(/\r?\n/u)
     .map((line, index) => ({ line, lineNumber: index + 1 }))
-    .filter(({ line }) => percentage.test(line))
-    .map(({ lineNumber }) => ({
-      code: "UNSCOPED_COVERAGE_PERCENTAGE",
-      message: "Coverage must use an exact named-scope covered/total denominator; percentages are not accepted",
+    .map(({ line, lineNumber }) => ({
+      lineNumber,
+      kind: percentage.test(line)
+        ? "percentage"
+        : fraction.test(line) && !namedScope.test(line)
+          ? "fraction"
+          : undefined
+    }))
+    .filter((entry): entry is { lineNumber: number; kind: "percentage" | "fraction" } => entry.kind !== undefined)
+    .map(({ lineNumber, kind }) => ({
+      code: kind === "percentage" ? "UNSCOPED_COVERAGE_PERCENTAGE" : "UNSCOPED_COVERAGE_FRACTION",
+      message:
+        kind === "percentage"
+          ? "Coverage must use an exact named-scope covered/total denominator; percentages are not accepted"
+          : "Coverage fractions must name the exact selected-range or production-source scope",
       severity: "error" as const,
       source: "coverage-evidence",
       path: `${artifactPath}:${lineNumber}`
     }));
 }
 
-function unscopedReportCoveragePercentageDiagnostics(contents: string, artifactPath: string): RuntimeDiagnostic[] {
+function unscopedReportCoverageScoreDiagnostics(contents: string, artifactPath: string): RuntimeDiagnostic[] {
   const percentage = /\b(?:100(?:\.0+)?|\d{1,2}(?:\.\d+)?)\s*%/u;
+  const fraction = /\b\d+\s*\/\s*\d+\b/u;
+  const namedScope = /\b(?:selected-range|production-source)\b/iu;
   let fenced = false;
   let coverageSection = false;
   return contents
     .split(/\r?\n/u)
     .map((line, index) => ({ line, lineNumber: index + 1 }))
-    .filter(({ line }) => {
+    .map(({ line, lineNumber }) => {
       const trimmed = line.trim();
       if (/^(?:`{3,}|~{3,})/u.test(trimmed)) {
         fenced = !fenced;
-        return false;
+        return { lineNumber, kind: undefined };
       }
-      if (fenced) return false;
+      if (fenced) return { lineNumber, kind: undefined };
       if (/^##\s+/u.test(trimmed)) coverageSection = /coverage/iu.test(trimmed);
-      return (
-        (coverageSection ||
-          /\b(?:coverage|lcov|covg-eval|selected-range|production-source|standardized)\b/iu.test(line)) &&
-        percentage.test(line)
-      );
+      const coverageContext =
+        coverageSection || /\b(?:coverage|lcov|covg-eval|selected-range|production-source|standardized)\b/iu.test(line);
+      const kind =
+        coverageContext && percentage.test(line)
+          ? "percentage"
+          : coverageContext && fraction.test(line) && !namedScope.test(line)
+            ? "fraction"
+            : undefined;
+      return { lineNumber, kind };
     })
-    .map(({ lineNumber }) => ({
-      code: "UNSCOPED_COVERAGE_PERCENTAGE",
-      message: "Coverage must use an exact named-scope covered/total denominator; percentages are not accepted",
+    .filter((entry): entry is { lineNumber: number; kind: "percentage" | "fraction" } => entry.kind !== undefined)
+    .map(({ lineNumber, kind }) => ({
+      code: kind === "percentage" ? "UNSCOPED_COVERAGE_PERCENTAGE" : "UNSCOPED_COVERAGE_FRACTION",
+      message:
+        kind === "percentage"
+          ? "Coverage must use an exact named-scope covered/total denominator; percentages are not accepted"
+          : "Coverage fractions must name the exact selected-range or production-source scope",
       severity: "error" as const,
       source: "coverage-evidence",
       path: `${artifactPath}:${lineNumber}`
@@ -6386,7 +6444,7 @@ function unfencedMarkdownLines(contents: string): string[] {
   });
 }
 
-function unscopedCoveragePercentageDiagnosticsInJson(
+function unscopedCoverageScoreDiagnosticsInJson(
   report: Record<string, unknown>,
   reportPath: string
 ): RuntimeDiagnostic[] {
@@ -6397,7 +6455,7 @@ function unscopedCoveragePercentageDiagnosticsInJson(
         coverageContext ||
         /\b(?:coverage|lcov|covg-eval|selected-range|production-source|standardized)\b/iu.test(value)
       ) {
-        diagnostics.push(...unscopedCoveragePercentageDiagnostics(value, `${reportPath}#${jsonPath}`));
+        diagnostics.push(...unscopedCoverageScoreDiagnostics(value, `${reportPath}#${jsonPath}`));
       }
       return;
     }

@@ -4,6 +4,8 @@ import { validateWithZod, type SchemaValidationResult } from "./schema-validatio
 
 export const COVERAGE_EVIDENCE_SCHEMA_VERSION = "ultrafuzz.coverage-evidence.v1" as const;
 export const COVERAGE_EVIDENCE_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:coverage-evidence:1" as const;
+export const MAX_COVERAGE_EVIDENCE_FILES = 10_000;
+export const MAX_COVERAGE_EVIDENCE_RANGES = 100_000;
 
 const sourceKind = z.enum(["production", "test", "harness", "dependency"]);
 const safePath = z
@@ -84,9 +86,12 @@ export const coverageEvidenceSchema = z
         if (scopes.size !== views.length)
           context.addIssue({ code: "custom", message: "coverage view scopes must be unique" });
       }),
-    files: z.array(file).min(1),
-    counted_ranges: z.array(range),
-    zero_coverage_components: z.array(z.strictObject({ path: safePath, kind: sourceKind })).min(0)
+    files: z.array(file).min(1).max(MAX_COVERAGE_EVIDENCE_FILES),
+    counted_ranges: z.array(range).max(MAX_COVERAGE_EVIDENCE_RANGES),
+    zero_coverage_components: z
+      .array(z.strictObject({ path: safePath, kind: sourceKind }))
+      .min(0)
+      .max(MAX_COVERAGE_EVIDENCE_FILES)
   })
   .superRefine((value, context) => {
     const fileByPath = new Map<string, (typeof value.files)[number]>();
@@ -267,6 +272,7 @@ export const coverageEvidenceJsonSchema = {
     files: {
       type: "array",
       minItems: 1,
+      maxItems: MAX_COVERAGE_EVIDENCE_FILES,
       items: {
         type: "object",
         additionalProperties: false,
@@ -293,6 +299,7 @@ export const coverageEvidenceJsonSchema = {
     },
     counted_ranges: {
       type: "array",
+      maxItems: MAX_COVERAGE_EVIDENCE_RANGES,
       items: {
         type: "object",
         additionalProperties: false,
@@ -309,6 +316,7 @@ export const coverageEvidenceJsonSchema = {
     },
     zero_coverage_components: {
       type: "array",
+      maxItems: MAX_COVERAGE_EVIDENCE_FILES,
       items: {
         type: "object",
         additionalProperties: false,
