@@ -181,6 +181,31 @@ describe("eval suite loading and planning", () => {
     });
   });
 
+  it.each(["prompts", "prompt_overlays"])(
+    "rejects unsupported per-variant %s with the supported topology mechanism",
+    (field) => {
+      const { projectRoot, groundTruthRoot, suitePath } = setup();
+      const declaration =
+        field === "prompts" ? "prompts: .ultrafuzz/prompts-treatment" : "prompt_overlays: [overlays/treatment]";
+      fs.writeFileSync(
+        suitePath,
+        SUITE_YAML.replace("  - id: baseline", `  - id: baseline\n    ${declaration}`),
+        "utf8"
+      );
+
+      try {
+        planEvalSuite({ projectRoot, suitePath, groundTruthRoot, validateTargets: false });
+        expect.unreachable("expected unsupported variant prompts to fail schema validation");
+      } catch (error) {
+        expect(error).toBeInstanceOf(EvalError);
+        expect(error).toMatchObject({ code: "EVAL_SUITE_INVALID" });
+        expect((error as Error).message).toContain(`variants.0.${field}`);
+        expect((error as Error).message).toContain("use variant topology");
+        expect((error as Error).message).toContain("intended prompt files");
+      }
+    }
+  );
+
   it("plans targets x variants x trials with the ground-truth root from ultrafuzz.toml", () => {
     const { projectRoot, groundTruthRoot, suitePath } = setup();
     const plan = planEvalSuite({

@@ -56,6 +56,7 @@ import {
   WORKER_STDERR_TAIL_BYTES
 } from "./worker-diagnostics.js";
 import { emptyWorkerCheckpoint, runWithTerminalPersistence, WorkerResultWriter } from "./worker-result.js";
+import { guardCurrentPersistentWorkerLineage } from "./worker-lineage.js";
 import { OperationalDispositionError } from "./terminal-disposition.js";
 
 const ULTRAFUZZ_ROOT = "/opt/ultrafuzz";
@@ -155,6 +156,8 @@ export async function runPublicBenchmarkWorker(input: {
     workspaceEvidencePaths: string[];
     freshCleanupPaths: string[];
     attemptCleanupPaths: string[];
+    resultGenerationFloorPath: string;
+    resultGenerationFloor: number;
   }) => Promise<void>;
   isCheckpointIncompatible: (error: unknown) => boolean;
   checkpointIncompatibleError: (message: string) => Error;
@@ -162,6 +165,7 @@ export async function runPublicBenchmarkWorker(input: {
   const logPath = path.join(input.dataRoot, "worker.log");
   const statusPath = path.join(input.dataRoot, "status.json");
   const resultPath = path.join(input.dataRoot, "result.json");
+  const resultGenerationFloorPath = path.join(input.dataRoot, "result-generation-floor.json");
   const bundlePath = path.join(input.dataRoot, PUBLIC_BUNDLE_FILE);
   const diagnosticsPath = path.join(input.dataRoot, PUBLIC_EVAL_DIAGNOSTICS_FILE);
   const legacyPersistentWorkRoot = path.join(input.dataRoot, "public-workspace");
@@ -171,6 +175,8 @@ export async function runPublicBenchmarkWorker(input: {
   const writer = await WorkerResultWriter.create({
     statusPath,
     resultPath,
+    generationFloorPath: resultGenerationFloorPath,
+    writeGuard: guardCurrentPersistentWorkerLineage(path.join(input.dataRoot, "lineage.json"), input.lineage),
     executionContext: () => ({
       launch_generation: input.lineage.generation,
       attempt: input.lineage.attempt,
@@ -201,7 +207,9 @@ export async function runPublicBenchmarkWorker(input: {
           path.join(input.dataRoot, "failure-details.json"),
           path.join(input.dataRoot, "outcome")
         ],
-        attemptCleanupPaths: [statusPath, resultPath]
+        attemptCleanupPaths: [statusPath, resultPath],
+        resultGenerationFloorPath,
+        resultGenerationFloor: writer.currentGeneration()
       });
       await writeFile(logPath, `${new Date().toISOString()} worker-started\n`, { mode: 0o600 });
       await writer.writePartial(emptyWorkerCheckpoint());

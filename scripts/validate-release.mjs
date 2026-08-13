@@ -1,9 +1,14 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { serializeReleaseValidationReport } from "../packages/artifacts/dist/index.js";
+import {
+  assertReleaseValidationReport,
+  parseStrictJsonBytes,
+  readRegularFileSnapshot,
+  serializeReleaseValidationReport
+} from "../packages/artifacts/dist/index.js";
 
 const root = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const reportPath = releaseReportPath(readOption("--report") ?? ".ultrafuzz/release-validation.report.json");
@@ -26,10 +31,16 @@ const gates = [
   gate("evals", "Evals package tests", "pnpm", ["--filter", "@ultrafuzz/evals", "test"], ["G-EVALS"]),
   gate("modal", "Modal package tests", "pnpm", ["--filter", "@ultrafuzz/modal", "test"], ["G-MODAL"]),
   gate("cli", "CLI package tests", "pnpm", ["--filter", "@ultrafuzz/cli", "test"], ["G-CLI"]),
+  gate("benchmark-history", "Benchmark history charts", "pnpm", ["-w", "benchmark:check:prebuilt"], ["G-CLI"]),
   gate("workspace-typecheck", "Workspace typecheck", "pnpm", ["-w", "typecheck"], ["G-WORKSPACE-TYPECHECK"])
 ];
 
-const commands = gates.map(runGate);
+const mergeReportDir = readOption("--merge-report-dir");
+if (mergeReportDir !== undefined && readOption("--gates") !== undefined) {
+  throw new Error("--merge-report-dir and --gates cannot be combined");
+}
+
+const commands = mergeReportDir === undefined ? selectedGates().map(runGate) : mergeReports(mergeReportDir);
 const failedCommands = commands.filter((command) => command.status === "failed");
 const overallStatus = failedCommands.length === 0 ? "pass" : "fail";
 
@@ -60,6 +71,18 @@ function gate(id, title, command, args, validationGates) {
   };
 }
 
+function selectedGates() {
+  const value = readOption("--gates");
+  if (value === undefined) return gates;
+  const ids = value.split(",");
+  if (ids.some((id) => id.length === 0)) throw new Error("--gates must be a comma-separated list of gate IDs");
+  const selected = new Set(ids);
+  if (selected.size !== ids.length) throw new Error("--gates must not contain duplicate gate IDs");
+  const unknown = ids.filter((id) => !gates.some((item) => item.id === id));
+  if (unknown.length > 0) throw new Error(`unknown release validation gates: ${unknown.join(", ")}`);
+  return gates.filter((item) => selected.has(item.id));
+}
+
 function runGate(item) {
   const started = Date.now();
   const result = spawnSync(item.command, item.args, {
@@ -68,6 +91,44 @@ function runGate(item) {
     stdio: "inherit"
   });
   const exitCode = result.status ?? 1;
+  return commandResult(item, exitCode, Date.now() - started);
+}
+
+function mergeReports(relativeDirectory) {
+  const directory = path.resolve(root, relativeDirectory);
+  const files = readdirSync(directory, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+    .map((entry) => entry.name)
+    .sort();
+  const commandsById = new Map();
+  const knownIds = new Set(gates.map((item) => item.id));
+
+  for (const file of files) {
+    const fragment = parseStrictJsonBytes(readRegularFileSnapshot(path.join(directory, file), 1024 * 1024), {
+      maxBytes: 1024 * 1024,
+      maxDepth: 32,
+      maxItems: 10_000,
+      maxProperties: 10_000
+    });
+    try {
+      assertReleaseValidationReport(fragment);
+    } catch (error) {
+      throw new Error(`${file} is not a current Ultrafuzz release validation report`, { cause: error });
+    }
+    for (const command of fragment.commands) {
+      if (!knownIds.has(command?.id)) throw new Error(`${file} contains an unknown release validation gate`);
+      if (commandsById.has(command.id)) throw new Error(`duplicate release validation gate: ${command.id}`);
+      if (command.status !== "passed" && command.status !== "failed") {
+        throw new Error(`${file} contains an invalid status for ${command.id}`);
+      }
+      commandsById.set(command.id, command);
+    }
+  }
+
+  return gates.map((item) => commandsById.get(item.id) ?? missingCommandResult(item));
+}
+
+function commandResult(item, exitCode, durationMs) {
   return {
     id: item.id,
     title: item.title,
@@ -75,8 +136,15 @@ function runGate(item) {
     required: item.required,
     status: exitCode === 0 ? "passed" : "failed",
     exit_code: exitCode,
-    duration_ms: Date.now() - started,
+    duration_ms: durationMs,
     validation_gates: item.validationGates
+  };
+}
+
+function missingCommandResult(item) {
+  return {
+    ...commandResult(item, 1, 0),
+    command: "missing release validation lane result"
   };
 }
 

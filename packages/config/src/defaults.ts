@@ -245,7 +245,8 @@ function normalizePermissions(permissions: Partial<PermissionConfig>, filePath: 
       permissions.materializeOutputsAsUnstaged,
       "permissions.materialize_outputs_as_unstaged",
       filePath
-    )
+    ),
+    productionSourceRoots: required(permissions.productionSourceRoots, "permissions.production_source_roots", filePath)
   };
 }
 

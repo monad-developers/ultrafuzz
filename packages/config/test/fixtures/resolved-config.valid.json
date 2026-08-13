@@ -107,7 +107,11 @@
   "permissions": {
     "trustModel": "skip-permissions",
     "promptReviewRequired": true,
-    "materializeOutputsAsUnstaged": true
+    "materializeOutputsAsUnstaged": true,
+    "productionSourceRoots": [
+      "src",
+      "contracts"
+    ]
   },
   "invariants": {
     "propertyPriorityThreshold": "high",

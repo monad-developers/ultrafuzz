@@ -1092,6 +1092,7 @@ export interface CompiledSmithersWorkflow {
   tasksPath: string;
   logsDir: string;
   pinnedSubmodules?: PinnedSubmoduleExpectation;
+  productionSourceRoots?: string[];
 }
 
 export interface SubmitSmithersInput {
@@ -1252,6 +1253,7 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     inputPath,
     tasksPath,
     logsDir,
+    productionSourceRoots: input.config.permissions.productionSourceRoots,
     ...(pinnedSubmodules === undefined ? {} : { pinnedSubmodules })
   };
   writePreparedWorkflowFile(
@@ -4103,7 +4105,8 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
       metadata: executionMetadata(compiled.projectRoot, task),
       outputs: task.metadata.artifacts.outputs,
       execution: task.execution,
-      pinnedSubmodules: compiled.pinnedSubmodules ?? null
+      pinnedSubmodules: compiled.pinnedSubmodules ?? null,
+      productionSourceRoots: compiled.productionSourceRoots ?? ["src", "contracts"]
     })),
     null,
     2

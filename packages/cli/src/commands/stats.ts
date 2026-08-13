@@ -75,6 +75,8 @@ interface ReportBundleManifest {
   created_at: string;
   included_roots: string[];
   excluded_roots: ["workspaces"];
+  excluded_patterns: ["artifacts/final-report/report.json.pre-*"];
+  path_mappings: Array<{ source_path: string; archive_path: string }>;
   entry_count_without_manifest: number;
 }
 

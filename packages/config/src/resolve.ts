@@ -187,7 +187,8 @@ export function serializeResolvedConfigToml(
   pushTable(lines, "permissions", {
     trust_model: clone.permissions.trustModel,
     prompt_review_required: clone.permissions.promptReviewRequired,
-    materialize_outputs_as_unstaged: clone.permissions.materializeOutputsAsUnstaged
+    materialize_outputs_as_unstaged: clone.permissions.materializeOutputsAsUnstaged,
+    production_source_roots: clone.permissions.productionSourceRoots
   });
   pushTable(lines, "invariants", {
     property_priority_threshold: clone.invariants.propertyPriorityThreshold,
@@ -633,6 +634,9 @@ function applyRunConfig(target: ResolvedConfig["run"], source: Partial<ResolvedC
 
 function applyPermissionConfig(target: PermissionConfig, source: Partial<PermissionConfig>): void {
   Object.assign(target, definedOnly(source));
+  if (source.productionSourceRoots !== undefined) {
+    target.productionSourceRoots = [...source.productionSourceRoots];
+  }
 }
 
 function normalizeAgentConfig(source: Partial<AgentConfig>, base?: AgentConfig): AgentConfig {

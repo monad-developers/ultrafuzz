@@ -289,6 +289,7 @@ export function loadEvalSuite(input: Pick<PlanEvalSuiteInput, "projectRoot" | "s
       reason: error instanceof Error ? error.message : String(error)
     });
   }
+  rejectUnsupportedVariantPrompts(parsed, suitePath);
   const canonical = validateEvalJsonSchema(EVAL_SUITE_SCHEMA_ID, parsed);
   if (!canonical.ok) {
     throw new EvalError("EVAL_SUITE_INVALID", `eval suite ${suitePath} failed schema validation`, {
@@ -308,6 +309,29 @@ export function loadEvalSuite(input: Pick<PlanEvalSuiteInput, "projectRoot" | "s
   }
   validateSuiteInputSemantics(parsedWithZod.data, suitePath);
   return { suitePath, suite: normalizeSuiteInput(parsedWithZod.data) };
+}
+
+function rejectUnsupportedVariantPrompts(value: unknown, suitePath: string): void {
+  if (!isRecord(value) || !Array.isArray(value.variants)) return;
+  for (const [index, candidate] of value.variants.entries()) {
+    if (!isRecord(candidate)) continue;
+    for (const field of ["prompts", "prompt_overlays"] as const) {
+      if (!Object.hasOwn(candidate, field)) continue;
+      const issue = {
+        path: `variants.${index}.${field}`,
+        message: `variant ${field} is unsupported; use variant topology with nodes that reference the intended prompt files`
+      };
+      throw new EvalError(
+        "EVAL_SUITE_INVALID",
+        `eval suite ${suitePath} failed schema validation: ${issue.path}: ${issue.message}`,
+        { path: suitePath, issues: [issue] }
+      );
+    }
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 type EvalSuiteInput = z.infer<typeof evalSuiteInputSchema>;

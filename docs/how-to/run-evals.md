@@ -195,13 +195,13 @@ timing or cost value is retained and visibly labeled `partial` with its target
 coverage. A value with no usable evidence renders as `n/a` and `unavailable`;
 neither case is converted to zero.
 
-Every non-deletion push to a branch in this repository launches the real
-three-target Ultrafuzz-bench smoke as detached Modal work, including pushes to
-branches whose pull requests are still drafts. Fork pull-request events do not
-run the workflow. Repository write access that is allowed to receive Actions
-secrets is inside the benchmark credential and cost trust boundary, so push
-access, provider credentials, and provider/Modal budgets must be tightly scoped.
-A newer commit on the same branch cancels the older smoke. GPT-5.6 Luna `high`
+Every non-deletion push to `main` launches the real three-target
+Ultrafuzz-bench smoke as detached Modal work. Feature-branch and pull-request
+events, including drafts, do not run the workflow. Repository access that can
+merge or push to `main` is inside the benchmark credential and cost trust
+boundary, so write access, provider credentials, and provider/Modal budgets
+must be tightly scoped. A newer commit on `main` cancels the older smoke.
+GPT-5.6 Luna `high`
 is the default smoke runner; repository variable
 `BENCHMARK_SMOKE_OPENAI_MODEL` can override its model while retaining the
 single OpenAI/Codex lane and selected reasoning level across every smoke node.
@@ -210,19 +210,19 @@ commit fails without allocating the benchmark matrix. GitHub Actions still
 performs the build, control, and collection work; benchmark and model compute
 itself runs only on Modal.
 
-Cancellation is latest-wins only within one branch. A recovery workflow runs
+Cancellation is latest-wins on `main`. A recovery workflow runs
 only trusted default-branch tooling, uses the exact candidate checkout as data
 for its source fingerprint, and validates the preserved plan before terminating
-an exact failed, timed-out, or cancelled Modal generation. Different branches
-and independent full dispatches can still overlap, so enforce provider and
-Modal budgets across all concurrent runs.
+an exact failed, timed-out, or cancelled Modal generation. Independent manual
+dispatches can still overlap the automatic smoke, so enforce provider and Modal
+budgets across all concurrent runs.
 
-A manual workflow dispatch launches the full EVMBench cohort instead, with
-GPT-5.6 Luna `high`, Claude Sonnet 5 `high`, Kimi K3 `max`, and DeepSeek V4 Pro
-`max` by default. Its
-model and reasoning inputs can override all full-lane runners. Full runs only
-through that manual dispatch; pushes always select smoke. Both modes retain
-the standard Modal CPU and memory allocation. Smoke rows receive a
+A manual workflow dispatch selects the full EVMBench cohort by default and can
+explicitly select smoke for an ad hoc run. Full uses GPT-5.6 Luna `high`, Claude
+Sonnet 5 `high`, Kimi K3 `max`, and DeepSeek V4 Pro `max` by default. Its model
+and reasoning inputs can override all full-lane runners. Full runs only through
+that manual dispatch; pushes always select smoke. Both modes retain the standard
+Modal CPU and memory allocation. Smoke rows receive a
 15,000-second watchdog, covering both allowed attempts across the smoke graph's
 four sequential agent stages plus transition slack. Full-lane rows retain the
 3,600-second watchdog, and both publish ordinary 30-day Actions artifacts. Missing
@@ -248,10 +248,9 @@ benchmark matrix.
 
 Publication accepts only successful Modal benchmark producers from the
 repository's default `main` branch and rechecks that the exact candidate commit
-remains reachable from `main` before minting the bypass-capable token.
-Feature-branch runs remain useful CI evidence but cannot write history or
-charts; their merged successor on `main` performs publication. The publisher
-does not expose a free-form manual artifact replay path.
+remains reachable from `main` before minting the bypass-capable token. The
+automatic run for the merged commit performs publication. The publisher does
+not expose a free-form manual artifact replay path.
 
 The eval summary and comparison record Ultrafuzz runner tokens and runner cost
 with explicit completeness. Judge usage in Braintrust and sandbox spend in

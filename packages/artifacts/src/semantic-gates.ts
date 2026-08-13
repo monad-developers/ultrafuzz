@@ -4312,6 +4312,9 @@ function smithersPlannedDependencyJoinIssues(document: unknown, context: Semanti
 function workspacePatchPathIssues(document: unknown): SemanticGateIssue[] {
   const included = arrayAt(document, ["files"]);
   const excluded = arrayAt(document, ["excluded_files"]);
+  const protectedRoots = stringArray(at(document, ["source_snapshot", "protected_roots"]));
+  const protectedPath = (candidate: string): boolean =>
+    protectedRoots.some((root) => candidate === root || candidate.startsWith(`${root}/`));
   const issues: SemanticGateIssue[] = [];
   const includedPaths = new Set<string>();
   for (const [index, row] of included.entries()) {
@@ -4319,6 +4322,11 @@ function workspacePatchPathIssues(document: unknown): SemanticGateIssue[] {
     if (rowPath === undefined) continue;
     if (includedPaths.has(rowPath)) {
       issues.push(issue(`$.files[${index}].path`, `Duplicate workspace patch path ${JSON.stringify(rowPath)}`));
+    }
+    if (protectedPath(rowPath)) {
+      issues.push(
+        issue(`$.files[${index}].path`, "Protected production source cannot appear in workspace patch files")
+      );
     }
     includedPaths.add(rowPath);
   }
@@ -4337,6 +4345,11 @@ function workspacePatchPathIssues(document: unknown): SemanticGateIssue[] {
           `$.excluded_files[${index}].path`,
           `Workspace patch path is both included and excluded ${JSON.stringify(rowPath)}`
         )
+      );
+    }
+    if (protectedPath(rowPath)) {
+      issues.push(
+        issue(`$.excluded_files[${index}].path`, "Protected production source cannot be hidden by overflow exclusion")
       );
     }
     excludedPaths.add(rowPath);

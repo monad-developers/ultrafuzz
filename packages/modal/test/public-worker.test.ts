@@ -62,6 +62,7 @@ import {
 import type { PublicBenchmarkBundle } from "../src/public-bundle.js";
 import { createExactCandidateSourceArchive } from "../src/runner.js";
 import { OperationalDispositionError } from "../src/terminal-disposition.js";
+import { ensurePersistentWorkerLineage } from "../src/worker-lineage.js";
 import { emptyWorkerCheckpoint, runWithTerminalPersistence, WorkerResultWriter } from "../src/worker-result.js";
 import {
   currentGenuineTaskFailureState,
@@ -254,6 +255,7 @@ it("rejects a present dangling public bundle without starting replacement model 
     fingerprints: { config: "b".repeat(64), source: "c".repeat(64), image: "d".repeat(64) },
     model_fingerprint: "e".repeat(64)
   };
+  fs.writeFileSync(path.join(dataRoot, "lineage.json"), `${JSON.stringify(lineage)}\n`, { mode: 0o600 });
   fs.symlinkSync("missing-public-results.json", path.join(dataRoot, "public-results.json"));
   const incompatible = new Error("checkpoint-incompatible: persisted public benchmark bundle is invalid");
   let preflightCalls = 0;
@@ -337,7 +339,12 @@ it("accepts the bounded full lane before reading paid-run credentials", async ()
         model,
         lineage,
         dataRoot,
-        preflight: async () => undefined,
+        preflight: (context) =>
+          ensurePersistentWorkerLineage({
+            lineagePath: path.join(dataRoot, "lineage.json"),
+            lineage,
+            ...context
+          }),
         isCheckpointIncompatible: () => false,
         checkpointIncompatibleError: (message) => new Error(message)
       })

@@ -227,7 +227,7 @@ class Parser {
     }
     const value = Number(matched);
     if (!Number.isFinite(value)) this.syntax("JSON number is outside the supported finite range");
-    if (!sameDecimalValue(matched, String(value)) || !sameIntegerValue(matched, value)) {
+    if (!sameNumericValue(matched, value)) {
       this.syntax("JSON number cannot be represented without changing its value");
     }
     return value;
@@ -281,11 +281,11 @@ function sameDecimalValue(left: string, right: string): boolean {
   );
 }
 
-function sameIntegerValue(input: string, parsed: number): boolean {
+function sameNumericValue(input: string, parsed: number): boolean {
   const normalized = normalizeDecimal(input);
-  if (normalized === undefined || normalized.exponent < 0) return true;
-  if (!Number.isInteger(parsed)) return false;
-  return sameDecimalValue(input, BigInt(parsed).toString());
+  if (normalized === undefined) return false;
+  if (normalized.exponent < 0) return sameDecimalValue(input, String(parsed));
+  return Number.isInteger(parsed) && sameDecimalValue(input, BigInt(parsed).toString());
 }
 
 function normalizeDecimal(value: string): NormalizedDecimal | undefined {

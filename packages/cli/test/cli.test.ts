@@ -1927,6 +1927,11 @@ test("report bundle creates a portable ZIP without workspaces", async () => {
   const engineLogDir = path.join(runData.run_root, "smithers", "logs");
   fs.mkdirSync(engineLogDir, { recursive: true });
   fs.writeFileSync(path.join(engineLogDir, "stream.ndjson"), '{"event":"retry"}\n', "utf8");
+  fs.writeFileSync(path.join(engineLogDir, "node:project-discovery-0-1.ndjson"), '{"event":"agent"}\n', "utf8");
+  fs.writeFileSync(path.join(engineLogDir, "node%3Aproject-discovery-0-1.ndjson"), '{"event":"literal"}\n', "utf8");
+  fs.writeFileSync(path.join(engineLogDir, "CON.log"), '{"event":"device"}\n', "utf8");
+  fs.writeFileSync(path.join(engineLogDir, "Trace.log"), '{"event":"uppercase"}\n', "utf8");
+  fs.writeFileSync(path.join(engineLogDir, "trace.log"), '{"event":"lowercase"}\n', "utf8");
 
   const bundled = await cli(project, ["report", "bundle", runData.run_id, "--json"]);
   assert.equal(bundled.code, 0, bundled.stderr);
@@ -1979,8 +1984,30 @@ test("report bundle creates a portable ZIP without workspaces", async () => {
   );
   // Engine retry/validation evidence must reach an operator bundle, under a
   // neutral prefix so the archive never names the orchestration engine.
-  assert.equal(entries.includes("engine-logs/stream.ndjson"), true);
-  assert.equal(zip.readAsText("engine-logs/stream.ndjson"), '{"event":"retry"}\n');
+  const portableEnginePath = (name: string): string =>
+    `engine-logs/entry-${crypto.createHash("sha256").update(name, "utf8").digest("hex")}`;
+  const expectedEngineLogs = new Map([
+    ["stream.ndjson", '{"event":"retry"}\n'],
+    ["node:project-discovery-0-1.ndjson", '{"event":"agent"}\n'],
+    ["node%3Aproject-discovery-0-1.ndjson", '{"event":"literal"}\n'],
+    ["CON.log", '{"event":"device"}\n'],
+    ["Trace.log", '{"event":"uppercase"}\n'],
+    ["trace.log", '{"event":"lowercase"}\n']
+  ]);
+  for (const [name, content] of expectedEngineLogs) {
+    assert.equal(entries.includes(portableEnginePath(name)), true);
+    assert.equal(zip.readAsText(portableEnginePath(name)), content);
+  }
+  assert.equal(new Set([...expectedEngineLogs.keys()].map(portableEnginePath)).size, expectedEngineLogs.size);
+  const mappedManifest = JSON.parse(zip.readAsText("bundle-manifest.json")) as {
+    path_mappings: Array<{ source_path: string; archive_path: string }>;
+  };
+  assert.deepEqual(
+    mappedManifest.path_mappings,
+    [...expectedEngineLogs.keys()]
+      .map((name) => ({ source_path: `engine-logs/${name}`, archive_path: portableEnginePath(name) }))
+      .sort((left, right) => left.archive_path.localeCompare(right.archive_path))
+  );
   assert.equal(
     entries.some((entry) => /smithers/iu.test(entry)),
     false
@@ -3035,6 +3062,8 @@ function writeStatsBundle(
     created_at: "2026-08-11T10:02:00.000Z",
     included_roots: REPORT_BUNDLE_INCLUDED_ROOTS,
     excluded_roots: ["workspaces"],
+    excluded_patterns: ["artifacts/final-report/report.json.pre-*"],
+    path_mappings: [],
     entry_count_without_manifest: entryCount
   };
   zip.addFile("bundle-manifest.json", options.manifestBytes ?? Buffer.from(`${JSON.stringify(manifest)}\n`, "utf8"));
@@ -3053,6 +3082,8 @@ function statsBundleManifestBytes(
       created_at: createdAt,
       included_roots: REPORT_BUNDLE_INCLUDED_ROOTS,
       excluded_roots: ["workspaces"],
+      excluded_patterns: ["artifacts/final-report/report.json.pre-*"],
+      path_mappings: [],
       entry_count_without_manifest: entryCountWithoutManifest
     })}\n`,
     "utf8"

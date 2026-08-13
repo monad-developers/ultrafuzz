@@ -45,6 +45,8 @@ const reportBundleManifest = validateReportBundleManifest({
     "engine-logs"
   ],
   excluded_roots: ["workspaces"],
+  excluded_patterns: ["artifacts/final-report/report.json.pre-*"],
+  path_mappings: [],
   entry_count_without_manifest: 1
 });
 if (!reportBundleManifest.ok) {

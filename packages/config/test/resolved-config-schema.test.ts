@@ -24,8 +24,8 @@ import {
   validateResolvedConfigJson
 } from "../src/index.js";
 
-const EXPECTED_SCHEMA_SHA256 = "184677878b9a4361dc20642513aa92aa64a7287b76c61e3ada28c794e5824faa";
-const EXPECTED_BUNDLE_SHA256 = "c8b1a1906275f98d50ef237cc5cd9470e03725dc0e9408f477dbef406b5b6576";
+const EXPECTED_SCHEMA_SHA256 = "1769195f8d7c435d3e09be6782474014d6f39de449197c5eb6b89e5800fa4889";
+const EXPECTED_BUNDLE_SHA256 = "05a348eb7f16019f81687a5c65483e1724fc9eff4e666ed4879737c6355cb609";
 
 describe("resolved config JSON contract", () => {
   it("registers the exact checked-in Draft 2020-12 schema and stable digests", () => {
@@ -131,6 +131,14 @@ describe("resolved config JSON contract", () => {
       },
       { label: "empty agents", mutate: (value) => void (value.agents = {}) },
       { label: "bad trust model", mutate: (value) => void (record(value.permissions).trustModel = "sandbox") },
+      {
+        label: "missing production source roots",
+        mutate: (value) => void delete record(value.permissions).productionSourceRoots
+      },
+      {
+        label: "traversing production source root",
+        mutate: (value) => void (record(value.permissions).productionSourceRoots = ["../src"])
+      },
       { label: "bad endpoint", mutate: (value) => void (evalProvider(value, "braintrust").endpoint = "http://local") },
       { label: "old 1.0 version", mutate: (value) => void (value.schemaVersion = "1.0") },
       { label: "old namespaced version", mutate: (value) => void (value.schemaVersion = "ultrafuzz.config.v1") },

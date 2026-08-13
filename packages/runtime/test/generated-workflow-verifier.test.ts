@@ -4014,6 +4014,16 @@ test("generated Smithers verification publishes its exact workspace patch baseli
   assert.match(capture, /parsed\.baseline_tree !== expectedTree/u);
 });
 
+test("generated Smithers workspace handoff enforces declared production source roots", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function materializeWorkspacePatch");
+  const helperEnd = source.indexOf("\n\n/**", helperStart);
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+  const helper = source.slice(helperStart, helperEnd);
+  assert.match(helper, /captureWorkspacePatch\(workspaceRoot, baselineTree, task\.productionSourceRoots\)/u);
+});
+
 test("runtime workspace patch publication replaces empty placeholders but rejects non-empty agent patches", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function writeWorkspacePatchArtifact");
@@ -5775,7 +5785,10 @@ test("generated Smithers preserves setup-patch baselines across post-agent prepa
   // Every capture is validated even when replay skips it: the manifest schema, object ids, digest and
   // sensitive-path checks all live inside `applyWorkspacePatch`, so a skipped patch would otherwise go
   // entirely unchecked while its `result_tree` steered the skip decision.
-  assert.match(helper, /for \(const capture of captures\) validateWorkspacePatchCapture\(workspaceRoot, capture\);/u);
+  assert.match(
+    helper,
+    /for \(const capture of captures\) validateWorkspacePatchCapture\(workspaceRoot, capture, task\.productionSourceRoots\);/u
+  );
   // The skip is only sound when the skipped prefix is a real chain; a sibling fan-in must replay.
   assert.match(source, /return chained \? index \+ 1 : 0;/u);
   assert.match(helper, /captures\.slice\(replayFrom\)/u);

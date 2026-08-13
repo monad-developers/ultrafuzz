@@ -267,7 +267,8 @@ export const resolvedConfigZodSchema: z.ZodType<ResolvedConfig> = z
       .object({
         trustModel: z.literal("skip-permissions"),
         promptReviewRequired: z.boolean(),
-        materializeOutputsAsUnstaged: z.boolean()
+        materializeOutputsAsUnstaged: z.boolean(),
+        productionSourceRoots: z.array(projectLocalPathSchema).min(1)
       })
       .strict(),
     invariants: z

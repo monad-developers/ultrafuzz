@@ -489,7 +489,7 @@ describe("public Modal benchmark configuration", () => {
       >;
     };
     expect(Object.hasOwn(workflow.on, "push")).toBe(true);
-    expect(workflow.on.push.branches).toEqual(["**"]);
+    expect(workflow.on.push.branches).toEqual(["main"]);
     expect(Object.hasOwn(workflow.on, "pull_request")).toBe(false);
     expect(workflow.on.workflow_dispatch.inputs).toEqual({
       benchmark_mode: expect.objectContaining({ default: "full", type: "choice", options: ["full", "smoke"] }),
@@ -644,14 +644,73 @@ describe("public Modal benchmark configuration", () => {
     }
   });
 
-  it("cancels superseded CI work on the same branch", () => {
+  it("uses a fast draft lane and cancels superseded CI work for the same pull request", () => {
     const workspace = path.resolve("../..");
     const workflow = parse(fs.readFileSync(path.join(workspace, ".github/workflows/ci.yml"), "utf8")) as {
+      on: {
+        push: { branches: string[] };
+        pull_request: { types: string[] };
+      };
       concurrency: { group: string; "cancel-in-progress": boolean };
+      jobs: Record<
+        string,
+        {
+          if?: string;
+          needs?: string[];
+          strategy?: {
+            "fail-fast": boolean;
+            "max-parallel": number;
+            matrix: { include: Array<{ lane: string; gates: string }> };
+          };
+          steps: Array<{ name?: string; if?: string; run?: string }>;
+        }
+      >;
     };
 
+    expect(workflow.on.push.branches).toEqual(["main"]);
+    expect(workflow.on.pull_request.types).toEqual([
+      "opened",
+      "synchronize",
+      "reopened",
+      "ready_for_review",
+      "converted_to_draft"
+    ]);
+    expect(workflow.concurrency.group).toContain("github.event.pull_request.number");
     expect(workflow.concurrency.group).toContain("github.ref");
     expect(workflow.concurrency["cancel-in-progress"]).toBe(true);
+
+    const steps = workflow.jobs["draft-and-build-gates"]?.steps ?? [];
+    for (const name of ["Check formatting", "Lint", "Build"]) {
+      expect(steps.find((step) => step.name === name)?.if, `${name} must run for drafts`).toBeUndefined();
+    }
+    const fullLane = "github.event_name == 'push' || github.event.pull_request.draft == false";
+    const releaseValidation = workflow.jobs["release-validation"];
+    expect(releaseValidation?.if).toBe(fullLane);
+    expect(releaseValidation?.strategy).toEqual({
+      "fail-fast": false,
+      "max-parallel": 3,
+      matrix: {
+        include: [
+          {
+            lane: "package-gates",
+            gates: "docs,config,audit-profile-package,security,topology,prompts,artifacts,evals,modal"
+          },
+          { lane: "runtime", gates: "runtime" },
+          { lane: "cli-typecheck", gates: "cli,benchmark-history,workspace-typecheck" }
+        ]
+      }
+    });
+    expect(releaseValidation?.steps.find((step) => step.name === "Validate release lane")?.run).toContain("--gates");
+    const modalDependentLaneBuild = releaseValidation?.steps.find(
+      (step) => step.name === "Build Modal-dependent lane dependencies"
+    );
+    expect(modalDependentLaneBuild?.if).toBe("matrix.lane == 'package-gates' || matrix.lane == 'runtime'");
+    expect(modalDependentLaneBuild?.run).toBe("pnpm --filter @ultrafuzz/modal... build");
+    expect(releaseValidation?.steps.find((step) => step.name === "Validate benchmark history charts")).toBeUndefined();
+    expect(workflow.jobs["release-gates"]?.needs).toEqual(["draft-and-build-gates", "release-validation"]);
+    expect(
+      workflow.jobs["release-gates"]?.steps.find((step) => step.name === "Merge release validation report")?.run
+    ).toContain("--merge-report-dir");
   });
 
   it("terminates every exact detached sandbox after either supported run becomes incomplete", () => {
@@ -662,6 +721,7 @@ describe("public Modal benchmark configuration", () => {
         {
           if?: string;
           needs?: string[];
+          outputs?: Record<string, string>;
           "timeout-minutes"?: number;
           steps: Array<{
             name?: string;
@@ -679,10 +739,12 @@ describe("public Modal benchmark configuration", () => {
     expect(cleanup.if).toContain("!cancelled()");
     expect(cleanup.if).toContain("needs.launch.result == 'failure'");
     expect(cleanup.if).toContain("needs.collect.result == 'failure'");
+    expect(cleanup.if).toContain("needs.collect.outputs.incomplete == 'true'");
     expect(cleanup.if).not.toContain("always()");
     expect(cleanup.if).not.toContain("github.event_name");
     expect(cleanup.needs).toEqual(["launch", "collect"]);
     expect(cleanup["timeout-minutes"]).toBeGreaterThanOrEqual(75);
+    expect(workflow.jobs.collect?.outputs?.incomplete).toBe("${{ steps.final_gate.outputs.incomplete }}");
     const launch = workflow.jobs.launch!;
     const planUploadIndex = launch.steps.findIndex(
       (step) => step.name === "Persist immutable benchmark plan before starting Modal compute"
@@ -761,12 +823,14 @@ describe("public Modal benchmark configuration", () => {
     const workspace = path.resolve("../..");
     const recoveryText = fs.readFileSync(path.join(workspace, ".github/workflows/eval-benchmark-recovery.yml"), "utf8");
     const recovery = parse(recoveryText) as {
+      "run-name": string;
       on: { workflow_run: { workflows: string[]; types: string[] } };
       permissions: Record<string, string>;
       concurrency: { group: string; "cancel-in-progress": boolean };
       jobs: Record<
         string,
         {
+          name?: string;
           if?: string;
           env?: Record<string, string>;
           "timeout-minutes"?: number;
@@ -784,10 +848,18 @@ describe("public Modal benchmark configuration", () => {
     };
 
     expect(recovery.on.workflow_run).toEqual({ workflows: ["Modal Eval Benchmarks"], types: ["completed"] });
+    expect(recovery["run-name"]).toBe(
+      "Recover Modal benchmark candidate ${{ github.event.workflow_run.head_sha }} " +
+        "from source run ${{ github.event.workflow_run.id }} attempt ${{ github.event.workflow_run.run_attempt }}"
+    );
     expect(recovery.permissions).toEqual({ actions: "read", contents: "read" });
     expect(recovery.concurrency.group).toContain("github.event.workflow_run.id");
     expect(recovery.concurrency["cancel-in-progress"]).toBe(false);
     const cleanup = recovery.jobs.cleanup_incomplete_run!;
+    expect(cleanup.name).toBe(
+      "Recover candidate ${{ github.event.workflow_run.head_sha }} " +
+        "from source run ${{ github.event.workflow_run.id }} attempt ${{ github.event.workflow_run.run_attempt }}"
+    );
     expect(cleanup.if).toContain("github.event.workflow_run.conclusion == 'cancelled'");
     expect(cleanup.if).toContain("github.event.workflow_run.conclusion == 'failure'");
     expect(cleanup.if).toContain("github.event.workflow_run.conclusion == 'timed_out'");
@@ -798,6 +870,12 @@ describe("public Modal benchmark configuration", () => {
     expect(cleanup.env?.BENCHMARK_CANDIDATE).toBe("${{ github.event.workflow_run.head_sha }}");
     expect(cleanup.env).not.toHaveProperty("BENCHMARK_MODE");
     expect(cleanup["timeout-minutes"]).toBeGreaterThanOrEqual(75);
+
+    const attribution = cleanup.steps.find((step) => step.name === "Publish candidate attribution")!;
+    expect(attribution.run).toContain("$GITHUB_STEP_SUMMARY");
+    expect(attribution.run).toContain("$BENCHMARK_CANDIDATE");
+    expect(attribution.run).toContain("actions/runs/$SOURCE_RUN_ID/attempts/$SOURCE_RUN_ATTEMPT");
+    expect(attribution.run).toContain("$GITHUB_SHA");
 
     const checkouts = cleanup.steps.filter((step) => step.uses?.startsWith("actions/checkout@"));
     expect(checkouts).toHaveLength(2);
@@ -1023,7 +1101,7 @@ describe("public Modal benchmark configuration", () => {
     const producer = parse(fs.readFileSync(path.join(workspace, ".github/workflows/eval-benchmarks.yml"), "utf8")) as {
       on: { push: { branches: string[]; "paths-ignore": string[] } };
     };
-    expect(producer.on.push.branches).toEqual(["**"]);
+    expect(producer.on.push.branches).toEqual(["main"]);
     expect(producer.on.push["paths-ignore"]).toEqual([
       "benchmarks/history.json",
       "benchmarks/public-results/**",
@@ -1044,8 +1122,10 @@ describe("public Modal benchmark configuration", () => {
         string,
         {
           if?: string;
+          outputs?: Record<string, string>;
           "timeout-minutes"?: number;
           steps: Array<{
+            id?: string;
             name?: string;
             run?: string;
             if?: string;
@@ -1135,76 +1215,30 @@ describe("public Modal benchmark configuration", () => {
     expect(resultUpload.with?.["if-no-files-found"]).toBe("warn");
     expect(diagnosticsUpload.if).toBe("always()");
     expect(finalGate.if).toBe("always()");
+    expect(finalGate.id).toBe("final_gate");
     expect(finalGate.env).toMatchObject({
       CI_EVENT_NAME: "${{ github.event_name }}",
-      CI_REF_NAME: "${{ github.ref_name }}",
-      CI_DEFAULT_BRANCH: "${{ github.event.repository.default_branch }}"
+      CI_REF_NAME: "${{ github.ref_name }}"
     });
     expect(collect.steps.indexOf(finalGate)).toBeGreaterThan(collect.steps.indexOf(resultUpload));
     expect(collect.steps.indexOf(finalGate)).toBeGreaterThan(collect.steps.indexOf(diagnosticsUpload));
-    expect(finalGate.run).toContain("smoke_model_soft_fail=false");
-    expect(finalGate.run).toContain('[ "$BENCHMARK_MODE" = smoke ]');
-    expect(finalGate.run).toContain('[ "$CI_EVENT_NAME" = push ]');
-    expect(finalGate.run).toContain('[ "$CI_REF_NAME" != "$CI_DEFAULT_BRANCH" ]');
-    expect(finalGate.run).toContain("not blocking non-default branch smoke gate");
+    expect(collect.outputs?.incomplete).toBe("${{ steps.final_gate.outputs.incomplete }}");
     expect(finalGate.run).toContain("describe-smoke-soft-fail.mjs --json");
+    expect(finalGate.run).toContain("matrix_incomplete=true");
+    expect(finalGate.run).toContain('echo "incomplete=$matrix_incomplete" >> "$GITHUB_OUTPUT"');
     expect(finalGate.run).toContain('--ref "$CI_REF_NAME"');
+    expect(finalGate.run).toContain('--mode "$BENCHMARK_MODE"');
+    expect(finalGate.run).toContain('--event "$CI_EVENT_NAME"');
+    expect(finalGate.run).toContain('--outcome "$outcome_file"');
+    expect(finalGate.run).toContain(".soft_fail != true");
     expect(finalGate.run).toContain(".blocks_gate == true");
     expect(finalGate.run).toContain(".scoring_ready_required == true");
     expect(finalGate.run).toContain("blocking validation-ref smoke gate because scoring readiness is required");
     expect(finalGate.run).toContain("not blocking validation-ref smoke gate because scoring readiness was validated");
+    expect(finalGate.run).toContain("not blocking automatic smoke gate");
     expect(finalGate.run).toContain("exit 1");
-
-    // The soft-fail rule lives in exactly one jq filter, and the gate applies
-    // that filter rather than restating a condition of its own.
-    const softFailFilter = /^\s*smoke_soft_fail_filter='(?<filter>[^']+)'$/mu.exec(finalGate.run ?? "")?.groups?.filter;
-    expect(softFailFilter).toBeTypeOf("string");
-    expect(finalGate.run).toContain('jq -e "$smoke_soft_fail_filter" "$outcome_file"');
-    expect(finalGate.run?.match(/smoke_soft_fail_filter=/gu)).toHaveLength(1);
     // A forgiven pair still announces itself as a run annotation.
     expect(finalGate.run).toContain("::warning::Modal smoke pair $pair failed operationally");
-
-    const softFails = (outcome: Record<string, unknown>): boolean =>
-      spawnSync("jq", ["-e", softFailFilter as string], { input: JSON.stringify(outcome), encoding: "utf8" }).status ===
-      0;
-    // #255: model work started and diagnostics survived.
-    expect(
-      softFails({
-        pair: "openai-one",
-        terminal_status: "failed",
-        category: "resume-required",
-        diagnostic_collection_status: "succeeded"
-      })
-    ).toBe(true);
-    // #321: the same pair broke operationally and diagnostics did not survive.
-    expect(
-      softFails({
-        pair: "openai-one",
-        terminal_status: "failed",
-        category: "permanent-operational-failure",
-        diagnostic_collection_status: "failed"
-      })
-    ).toBe(true);
-    for (const category of ["control-plane-timeout", "collection-failed", "launch-state-missing"]) {
-      expect(softFails({ pair: "openai-one", terminal_status: "failed", category })).toBe(true);
-    }
-    // A genuine target outcome is scoring evidence and still hard-fails.
-    expect(
-      softFails({
-        pair: "openai-one",
-        terminal_status: "failed",
-        category: "genuine-task-outcome",
-        diagnostic_collection_status: "succeeded"
-      })
-    ).toBe(false);
-    expect(
-      softFails({
-        pair: "openai-one",
-        terminal_status: "succeeded",
-        category: "succeeded",
-        collection_status: "succeeded"
-      })
-    ).toBe(false);
   });
 
   it("hydrates pinned target submodules before initializing a public benchmark", () => {

@@ -80,6 +80,8 @@ test("the CLI registry owns and compiles every CLI schema", () => {
         "engine-logs"
       ],
       excluded_roots: ["workspaces"],
+      excluded_patterns: ["artifacts/final-report/report.json.pre-*"],
+      path_mappings: [],
       entry_count_without_manifest: 1
     }).ok,
     true

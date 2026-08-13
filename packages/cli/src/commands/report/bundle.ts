@@ -68,6 +68,7 @@ interface BundleFile {
   absolutePath: string;
   archivePath: string;
   contents: Buffer;
+  sourceArchivePath?: string;
 }
 
 interface ReportBundleManifest {
@@ -76,6 +77,8 @@ interface ReportBundleManifest {
   created_at: string;
   included_roots: string[];
   excluded_roots: ["workspaces"];
+  excluded_patterns: ["artifacts/final-report/report.json.pre-*"];
+  path_mappings: Array<{ source_path: string; archive_path: string }>;
   entry_count_without_manifest: number;
 }
 
@@ -149,6 +152,12 @@ export default class ReportBundle extends Command {
           ...RENAMED_DIRECTORIES.map((entry) => entry.archive)
         ],
         excluded_roots: ["workspaces"],
+        excluded_patterns: ["artifacts/final-report/report.json.pre-*"],
+        path_mappings: files.flatMap((file) =>
+          file.sourceArchivePath === undefined
+            ? []
+            : [{ source_path: file.sourceArchivePath, archive_path: file.archivePath }]
+        ),
         entry_count_without_manifest: files.length
       };
       const manifestValidation = validateReportBundleManifest(manifest);
@@ -451,8 +460,15 @@ function collectDirectory(
       const archivePath =
         rename === undefined
           ? displayRelativePath(runRoot, absolutePath)
+          : `${rename.archiveRoot}/${portableArchiveRelativePath(displayRelativePath(rename.sourceRoot, absolutePath))}`;
+      if (shouldExcludeArchivePath(archivePath)) {
+        continue;
+      }
+      const sourceArchivePath =
+        rename === undefined
+          ? undefined
           : `${rename.archiveRoot}/${displayRelativePath(rename.sourceRoot, absolutePath)}`;
-      addBundleFile(runRoot, absolutePath, archivePath, files, diagnostics);
+      addBundleFile(runRoot, absolutePath, archivePath, files, diagnostics, sourceArchivePath);
     }
   }
 }
@@ -462,14 +478,17 @@ function addBundleFile(
   absolutePath: string,
   archivePath: string,
   files: BundleFile[],
-  diagnostics: RuntimeDiagnostic[]
+  diagnostics: RuntimeDiagnostic[],
+  sourceArchivePath?: string
 ): void {
   try {
     assertRegularFileInside(runRoot, absolutePath, "bundle file");
+    const normalizedArchivePath = normalizeArchivePath(archivePath);
     files.push({
       absolutePath,
-      archivePath: normalizeArchivePath(archivePath),
-      contents: readRegularFileSnapshot(absolutePath, MAX_BUNDLE_FILE_BYTES)
+      archivePath: normalizedArchivePath,
+      contents: readRegularFileSnapshot(absolutePath, MAX_BUNDLE_FILE_BYTES),
+      ...(sourceArchivePath !== undefined && sourceArchivePath !== normalizedArchivePath ? { sourceArchivePath } : {})
     });
   } catch (error) {
     diagnostics.push({
@@ -480,6 +499,17 @@ function addBundleFile(
       path: absolutePath
     });
   }
+}
+
+function portableArchiveRelativePath(relativePath: string): string {
+  return relativePath
+    .split("/")
+    .map((segment) => `entry-${crypto.createHash("sha256").update(segment, "utf8").digest("hex")}`)
+    .join("/");
+}
+
+function shouldExcludeArchivePath(archivePath: string): boolean {
+  return /^artifacts\/final-report\/report\.json\.pre-/u.test(archivePath);
 }
 
 function normalizeArchivePath(relativePath: string): string {

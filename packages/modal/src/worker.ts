@@ -80,7 +80,8 @@ import {
   CheckpointIncompatibleError,
   ensurePersistentWorkerLineage,
   modelForModalWorkerLineage,
-  readModalWorkerLineage
+  readModalWorkerLineage,
+  guardCurrentPersistentWorkerLineage
 } from "./worker-lineage.js";
 
 const CLI = "/opt/ultrafuzz/packages/cli/dist/index.js";
@@ -98,6 +99,7 @@ const LOG_PATH = path.join(DATA_ROOT, "worker.log");
 const STATUS_PATH = path.join(DATA_ROOT, "status.json");
 const RESULT_PATH = path.join(DATA_ROOT, "result.json");
 const LINEAGE_PATH = path.join(DATA_ROOT, PERSISTED_LINEAGE_FILE);
+const RESULT_GENERATION_FLOOR_PATH = path.join(DATA_ROOT, "result-generation-floor.json");
 const SOURCE_PROOF_PATH = path.join(DATA_ROOT, "source-proof.json");
 let modelWorkStarted = false;
 
@@ -112,6 +114,8 @@ async function main(): Promise<void> {
   const writer = await WorkerResultWriter.create({
     statusPath: STATUS_PATH,
     resultPath: RESULT_PATH,
+    generationFloorPath: RESULT_GENERATION_FLOOR_PATH,
+    writeGuard: guardCurrentPersistentWorkerLineage(LINEAGE_PATH, LINEAGE),
     executionContext: () => ({
       launch_generation: LINEAGE.generation,
       attempt: LINEAGE.attempt,
@@ -151,7 +155,9 @@ async function main(): Promise<void> {
           path.join(DATA_ROOT, "failure-details.json"),
           path.join(DATA_ROOT, "outcome")
         ],
-        attemptCleanupPaths: [STATUS_PATH, RESULT_PATH]
+        attemptCleanupPaths: [STATUS_PATH, RESULT_PATH],
+        resultGenerationFloorPath: RESULT_GENERATION_FLOOR_PATH,
+        resultGenerationFloor: writer.currentGeneration()
       });
       await writeFile(LOG_PATH, "", { mode: 0o600 });
       await appendGenericLog("worker-started");

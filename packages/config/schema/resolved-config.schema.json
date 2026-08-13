@@ -238,7 +238,7 @@
     "permissions": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["trustModel", "promptReviewRequired", "materializeOutputsAsUnstaged"],
+      "required": ["trustModel", "promptReviewRequired", "materializeOutputsAsUnstaged", "productionSourceRoots"],
       "properties": {
         "trustModel": {
           "const": "skip-permissions"
@@ -248,6 +248,13 @@
         },
         "materializeOutputsAsUnstaged": {
           "type": "boolean"
+        },
+        "productionSourceRoots": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/projectLocalPath"
+          }
         }
       }
     },

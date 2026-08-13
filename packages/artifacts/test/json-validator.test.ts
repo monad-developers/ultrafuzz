@@ -46,6 +46,8 @@ test("strict JSON parsing rejects number lexemes whose numeric value would chang
   assert.equal(parseStrictJson("0e9999999"), 0);
   assert.equal(parseStrictJson("9007199254740991"), 9_007_199_254_740_991);
   assert.equal(parseStrictJson("9007199254740992"), 9_007_199_254_740_992);
+  assert.equal(parseStrictJson("99999999999999991611392"), 1e23);
+  assert.equal(parseStrictJson("-99999999999999991611392"), -1e23);
 
   for (const value of [
     "9007199254740991.4",

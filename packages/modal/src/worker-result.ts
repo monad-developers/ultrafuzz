@@ -2,7 +2,14 @@ import crypto from "node:crypto";
 import { mkdir, readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 
-import { readRunMetadataDocument, readRunState, type RunMetadataDocument, type RunState } from "@ultrafuzz/artifacts";
+import {
+  parseStrictJsonBytes,
+  readRegularFileSnapshot,
+  readRunMetadataDocument,
+  readRunState,
+  type RunMetadataDocument,
+  type RunState
+} from "@ultrafuzz/artifacts";
 
 import { MODAL_WORKER_RESULT_SCHEMA_ID } from "./modal-contracts.js";
 import { readModalDocument, writeModalDocumentAtomic } from "./modal-documents.js";
@@ -137,6 +144,8 @@ export class WorkerResultWriter {
     private readonly startedAtMs: number,
     private readonly now: () => number,
     private readonly executionContext: () => WorkerExecutionContext,
+    private readonly generationFloorPath: string | undefined,
+    private readonly writeGuard: WorkerResultWriteGuard | undefined,
     generation: number
   ) {
     this.generation = generation;
@@ -148,11 +157,14 @@ export class WorkerResultWriter {
     startedAtMs?: number;
     now?: () => number;
     executionContext?: () => WorkerExecutionContext;
+    generationFloorPath?: string;
+    writeGuard?: WorkerResultWriteGuard;
   }): Promise<WorkerResultWriter> {
     const now = input.now ?? Date.now;
     const generation = Math.max(
       await persistedGeneration(input.statusPath),
-      await persistedGeneration(input.resultPath)
+      await persistedGeneration(input.resultPath),
+      input.generationFloorPath === undefined ? 0 : await persistedGenerationFloor(input.generationFloorPath)
     );
     return new WorkerResultWriter(
       input.statusPath,
@@ -160,12 +172,19 @@ export class WorkerResultWriter {
       input.startedAtMs ?? now(),
       now,
       input.executionContext ?? (() => ({ launch_generation: 1, attempt: 1, model_work_started: false })),
+      input.generationFloorPath,
+      input.writeGuard,
       generation
     );
   }
 
+  currentGeneration(): number {
+    return this.generation;
+  }
+
   async writePartial(snapshot: WorkerCheckpointSnapshot): Promise<WorkerResultContract> {
     return this.enqueue(async () => {
+      await this.refreshGenerationFloor();
       const contract = this.contract("partial", "live", snapshot);
       await writeJsonAtomic(this.statusPath, contract);
       return contract;
@@ -178,6 +197,7 @@ export class WorkerResultWriter {
     diagnosticCode?: WorkerDiagnosticCode
   ): Promise<WorkerResultContract> {
     return this.enqueue(async () => {
+      await this.refreshGenerationFloor();
       const contract = this.contract("terminal", category, snapshot, diagnosticCode);
       await writeJsonAtomic(this.resultPath, contract);
       await writeJsonAtomic(this.statusPath, contract);
@@ -186,12 +206,22 @@ export class WorkerResultWriter {
   }
 
   private enqueue<T>(write: () => Promise<T>): Promise<T> {
-    const queued = this.pendingWrite.then(write, write);
+    const guardedWrite = this.writeGuard === undefined ? write : () => this.writeGuard!(write);
+    const queued = this.pendingWrite.then(guardedWrite, guardedWrite);
     this.pendingWrite = queued.then(
       () => undefined,
       () => undefined
     );
     return queued;
+  }
+
+  private async refreshGenerationFloor(): Promise<void> {
+    this.generation = Math.max(
+      this.generation,
+      await persistedGeneration(this.statusPath),
+      await persistedGeneration(this.resultPath),
+      this.generationFloorPath === undefined ? 0 : await persistedGenerationFloor(this.generationFloorPath)
+    );
   }
 
   private contract(
@@ -220,6 +250,7 @@ export class WorkerResultWriter {
   }
 }
 
+export type WorkerResultWriteGuard = <T>(write: () => Promise<T>) => Promise<T>;
 export async function runWithTerminalPersistence(input: {
   writer: WorkerResultWriter;
   snapshot: () => Promise<WorkerCheckpointSnapshot>;
@@ -349,6 +380,26 @@ async function persistedGeneration(filePath: string): Promise<number> {
   } catch (error) {
     if (isNodeError(error, "ENOENT")) return 0;
     throw error;
+  }
+}
+
+async function persistedGenerationFloor(filePath: string): Promise<number> {
+  try {
+    const parsed = parseStrictJsonBytes(readRegularFileSnapshot(filePath, 4096), {
+      maxBytes: 4096,
+      maxDepth: 4,
+      maxItems: 4,
+      maxProperties: 4
+    });
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed) || Object.keys(parsed).length !== 1) {
+      throw new Error("persisted result generation floor is invalid");
+    }
+    const generation = (parsed as Record<string, unknown>).generation;
+    if (typeof generation === "number" && Number.isSafeInteger(generation) && generation >= 0) return generation;
+    throw new Error("persisted result generation floor is invalid");
+  } catch (error) {
+    if (isNodeError(error, "ENOENT")) return 0;
+    throw new Error("persisted result generation floor is invalid", { cause: error });
   }
 }
 

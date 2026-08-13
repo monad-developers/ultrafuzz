@@ -79,6 +79,7 @@ describe("config loading and resolution", () => {
     expect(resolved.value.run.forgeGuardEnabled).toBe(true);
     expect(resolved.value.run.forgeVmemLimitKb).toBe(12_582_912);
     expect(resolved.value.run.forgeRayonThreads).toBe(1);
+    expect(resolved.value.permissions.productionSourceRoots).toEqual(["src", "contracts"]);
     expect(resolved.value.execution).toEqual({
       mode: "local",
       retentionDays: 30,
@@ -90,6 +91,22 @@ describe("config loading and resolution", () => {
       nodes: {},
       providers: {}
     });
+  });
+
+  it("loads and serializes declared production source roots", () => {
+    const parsed = parseProjectConfigToml(`
+[permissions]
+production_source_roots = ["protocol", "packages/core/src"]
+`);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const resolved = resolveConfig({ env: {}, projectConfig: parsed.value });
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.value.permissions.productionSourceRoots).toEqual(["protocol", "packages/core/src"]);
+    expect(serializeRedactedResolvedConfigToml(resolved.value)).toContain(
+      'production_source_roots = ["protocol", "packages/core/src"]'
+    );
   });
 
   it("accepts a target-sized invariant Recon smoke timeout", () => {

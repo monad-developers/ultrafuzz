@@ -2217,6 +2217,7 @@ function canonicalWorkspacePatch() {
     base_tree: "b".repeat(40),
     result_tree: "c".repeat(40),
     patch_sha256: "d".repeat(64),
+    source_snapshot: { status: "preserved" as const, protected_roots: ["contracts", "src"] },
     files: [{ path: "foundry.toml" }]
   };
 }

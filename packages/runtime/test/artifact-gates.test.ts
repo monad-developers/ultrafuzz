@@ -1980,6 +1980,7 @@ test("contextual semantic gates fail closed when trusted host facts are unavaila
       base_tree: "b".repeat(40),
       result_tree: "c".repeat(40),
       patch_sha256: "d".repeat(64),
+      source_snapshot: { status: "preserved", protected_roots: ["contracts", "src"] },
       files: []
     }),
     "utf8"
