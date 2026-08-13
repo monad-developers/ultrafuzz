@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { validateModalBenchmarkLaunch } from "./validate-modal-benchmark-launch.mjs";
+import { modalBenchmarkPolicyDimensions, validateModalBenchmarkLaunch } from "./validate-modal-benchmark-launch.mjs";
 
 const roots: string[] = [];
 const candidate = execFileSync("git", ["rev-parse", "HEAD"], {
@@ -28,6 +28,39 @@ describe("Modal benchmark launch guardrails", () => {
       matrix_rows_per_pair: 3,
       pair_count: 1
     });
+  });
+
+  it("derives cleanup dimensions from a legacy candidate policy without accepting mixed paths", () => {
+    const workspace = path.resolve(".");
+    const policyRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-legacy-policy-"));
+    roots.push(policyRoot);
+    fs.mkdirSync(path.join(policyRoot, "benchmarks"));
+    fs.copyFileSync(
+      path.join(workspace, "benchmarks", "ultrafuzzbench", "cohort.json"),
+      path.join(policyRoot, "benchmarks", "ultrafuzz-bench.json")
+    );
+    fs.copyFileSync(
+      path.join(workspace, "benchmarks", "ultrafuzzbench", "lanes.json"),
+      path.join(policyRoot, "benchmarks", "lanes.json")
+    );
+
+    expect(modalBenchmarkPolicyDimensions(policyRoot, "smoke")).toMatchObject({
+      mode: "smoke",
+      benchmark: "ultrafuzz-bench",
+      cohortPath: path.join(policyRoot, "benchmarks", "ultrafuzz-bench.json"),
+      lanesPath: path.join(policyRoot, "benchmarks", "lanes.json"),
+      targetCount: 3,
+      trialsPerVariant: 1
+    });
+
+    fs.mkdirSync(path.join(policyRoot, "benchmarks", "ultrafuzzbench"));
+    fs.copyFileSync(
+      path.join(workspace, "benchmarks", "ultrafuzzbench", "lanes.json"),
+      path.join(policyRoot, "benchmarks", "ultrafuzzbench", "lanes.json")
+    );
+    expect(() => modalBenchmarkPolicyDimensions(policyRoot, "smoke")).toThrow(
+      /exactly one complete canonical benchmark policy layout/u
+    );
   });
 
   it("rejects one-target canonical smoke manifests before dispatch", () => {
