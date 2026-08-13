@@ -489,7 +489,7 @@ function assertNoSmithersSurface(value: unknown): void {
     // `.smithers/agents/index.ts` is the canonical project-owned agent
     // registry path, not leaked orchestration-engine terminology.
     const withoutCanonicalRegistryPath = value.replace(
-      /(^|[^A-Za-z0-9_./-])\.smithers\/agents\/index\.ts(?![A-Za-z0-9_./-])/gu,
+      /(^|[^A-Za-z0-9_./\\-])\.smithers\/agents\/index\.ts(?![A-Za-z0-9_./\\-])/gu,
       "$1"
     );
     assert.doesNotMatch(withoutCanonicalRegistryPath, /smithers/i);
@@ -505,6 +505,8 @@ test("product surface checks permit only the standalone canonical agent registry
     ".smithers/agents/index.ts.bak",
     "prefix.smithers/agents/index.ts",
     ".smithers/agents/index.ts/child",
+    String.raw`C:\project\.smithers/agents/index.ts`,
+    String.raw`.smithers/agents/index.ts\child`,
     ".smithers/agents/other.ts",
     "Smithers"
   ]) {
