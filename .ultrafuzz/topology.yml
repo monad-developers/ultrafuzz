@@ -878,8 +878,6 @@ nodes:
       - differential-red-triage
       - differential-repair-and-report-review
       - dynamic-strategy-generator
-      - project-discovery
-      - base-test-setup
     outputs:
       - path: deduped-findings.json
         contract: ultrafuzz/findings@2
@@ -931,13 +929,6 @@ nodes:
     depends_on:
       - aggregate-test-files
       - dedupe-findings
-      - severity-classification
-      - property-specification-fanin
-      - stateful-invariant-implement-properties
-      - stateful-invariant-campaign
-      - project-discovery
-      - setup-foundry
-      - base-test-setup
     outputs:
       - path: report.md
         contract: ultrafuzz/nonempty-markdown@1

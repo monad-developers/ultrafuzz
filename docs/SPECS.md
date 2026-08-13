@@ -289,11 +289,14 @@ The prompt variable set includes:
 - `artifact_path:<logical-node-id>`
 - `artifact_handoff:<logical-node-id>`
 - `ancestor_artifacts:<logical-node-id>[,<logical-node-id>...]`
+- `ancestor_artifacts_by_path:<path>[,<path>...]`
 
 Artifact handoff variables MUST resolve only to ancestor nodes. Handoff
 producers MUST declare a primary contracted output. Exact artifact paths MUST
 resolve to declared producer outputs. Ancestor artifact lists MUST use declared
-outputs.
+outputs. Path-filtered ancestor artifact lists MUST resolve only exact declared
+ancestor output paths and MUST render an explicit no-match sentinel when none
+are declared.
 
 For every agent-authored JSON output, the centrally rendered output contract
 MUST include one safely shell-quoted command using the exact resolved paths:

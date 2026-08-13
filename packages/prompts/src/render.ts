@@ -148,6 +148,7 @@ export type PromptArtifactReference =
   | { kind: "artifact_path"; logicalId?: string; suffix?: string }
   | { kind: "artifact_handoff"; logicalId: string }
   | { kind: "ancestor_artifacts"; logicalIds: string[] | "direct" }
+  | { kind: "ancestor_artifacts_by_path"; logicalIds: string[]; relativePaths: string[] }
   | { kind: "ancestor_artifacts_by_contract"; logicalIds: string[]; contract: string };
 
 type ArtifactProducer =
@@ -195,6 +196,11 @@ export function parsePromptVariableReference(rawName: string): PromptVariableRef
       : { raw, name: "ancestor_artifacts", argument: ancestorArtifacts.join(",") };
   }
 
+  const ancestorArtifactPaths = parseAncestorArtifactPathsSelector(raw);
+  if (ancestorArtifactPaths) {
+    return { raw, name: "ancestor_artifacts_by_path", argument: ancestorArtifactPaths.join(",") };
+  }
+
   if (!isSupportedTemplateVariable(raw)) {
     throw new PromptError("missing-template-variable", `unknown prompt template variable: ${raw}`, { variable: raw });
   }
@@ -225,6 +231,10 @@ function validatePromptVariableOccurrence(occurrence: TemplateOccurrence, templa
   }
   const ancestorArtifacts = parseAncestorArtifactsSelector(occurrence.name);
   if (ancestorArtifacts) {
+    rejectAncestorArtifactsSuffix(template.slice(occurrence.end));
+  }
+  const ancestorArtifactPaths = parseAncestorArtifactPathsSelector(occurrence.name);
+  if (ancestorArtifactPaths) {
     rejectAncestorArtifactsSuffix(template.slice(occurrence.end));
   }
   return reference;
@@ -264,6 +274,20 @@ export function renderPrompt(input: PromptRenderInput): PromptRenderResult {
       artifactReferences.push({
         kind: "ancestor_artifacts",
         logicalIds: ancestorArtifacts === "direct" ? "direct" : ancestorArtifacts
+      });
+      consumed = occurrence.end;
+      continue;
+    }
+
+    const ancestorArtifactPaths = parseAncestorArtifactPathsSelector(occurrence.name);
+    if (ancestorArtifactPaths) {
+      rejectAncestorArtifactsSuffix(body.slice(occurrence.end));
+      const matched = ancestorArtifactsByPath(ancestorArtifactPaths, graph);
+      rendered += renderOptionalPathList(matched.paths);
+      artifactReferences.push({
+        kind: "ancestor_artifacts_by_path",
+        logicalIds: matched.logicalIds,
+        relativePaths: ancestorArtifactPaths
       });
       consumed = occurrence.end;
       continue;
@@ -589,6 +613,26 @@ function parseAncestorArtifactsSelector(name: string): "direct" | string[] | und
   return ids;
 }
 
+function parseAncestorArtifactPathsSelector(name: string): string[] | undefined {
+  const selected = name.match(/^ancestor_artifacts_by_path:(.+)$/u);
+  if (!selected) {
+    return undefined;
+  }
+  const seen = new Set<string>();
+  const relativePaths = (selected[1] ?? "").split(",").map((part) => part.trim());
+  for (const relativePath of relativePaths) {
+    validateArtifactRelativePath(relativePath);
+    if (seen.has(relativePath)) {
+      throw new PromptError(
+        "invalid-artifact-reference",
+        `duplicate ancestor_artifacts_by_path target: ${relativePath}`
+      );
+    }
+    seen.add(relativePath);
+  }
+  return relativePaths;
+}
+
 function validateArtifactReferenceId(id: string): void {
   if (!/^[a-z0-9][a-z0-9_-]*$/.test(id)) {
     throw new PromptError("invalid-artifact-reference", `invalid artifact reference target: ${id}`);
@@ -842,11 +886,35 @@ function ancestorArtifactsByContract(contract: string, graph: GraphIndex): { log
   return { logicalIds, paths: paths.sort() };
 }
 
+function ancestorArtifactsByPath(
+  relativePaths: readonly string[],
+  graph: GraphIndex
+): { logicalIds: string[]; paths: string[] } {
+  const requested = new Set(relativePaths);
+  const logicalIds = new Set<string>();
+  const paths: string[] = [];
+  for (const logicalId of [...graph.ancestorIds].sort()) {
+    const node = graph.logicalNodes.get(logicalId);
+    if (node === undefined) continue;
+    const outputs = artifactOutputsFor(node).filter((output) => requested.has(output.path));
+    if (outputs.length === 0) continue;
+    logicalIds.add(logicalId);
+    for (const dir of graph.artifactDirsByLogicalId.get(logicalId) ?? []) {
+      for (const output of outputs) paths.push(path.join(dir, output.path));
+    }
+  }
+  return { logicalIds: [...logicalIds], paths: paths.sort() };
+}
+
 function renderPathList(paths: string[]): string {
   if (paths.length === 1) {
     return paths[0]!;
   }
   return paths.map((artifactPath) => `- ${artifactPath}`).join("\n");
+}
+
+function renderOptionalPathList(paths: string[]): string {
+  return paths.length === 0 ? "None declared by this topology." : renderPathList(paths);
 }
 
 function referenceForProducer(producer: ArtifactProducer, suffix: string | undefined): PromptArtifactReference {

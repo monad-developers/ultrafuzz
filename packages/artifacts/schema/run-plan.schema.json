@@ -457,6 +457,33 @@
         {
           "type": "object",
           "additionalProperties": false,
+          "required": ["kind", "logicalIds", "relativePaths"],
+          "properties": {
+            "kind": {
+              "const": "ancestor_artifacts_by_path"
+            },
+            "logicalIds": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/safeId"
+              }
+            },
+            "relativePaths": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?(/|$))(?!.*//)[A-Za-z0-9._/@+\\-]+$"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
           "required": ["kind", "logicalIds", "contract"],
           "properties": {
             "kind": {

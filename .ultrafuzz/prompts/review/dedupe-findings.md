@@ -11,12 +11,17 @@ The declared outputs are `deduped-findings.json`, `strategy-detections.json`,
 and `finding-lifecycle-ledger.json`. Do not write prompt-only `findings.json`,
 `duplicates.json`, or alternate compatibility handoffs.
 
-Inspect every rendered input before deduping. The list is derived from the
-effective topology and includes every direct producer's declared handoffs:
+Inspect every rendered strategy input before deduping. The list is derived from
+the effective topology and includes every direct producer's declared handoffs:
 
 {{ancestor_artifacts}}
 
-When the list includes project-discovery or base-test setup handoffs, read them
+Optional native-validation context, filtered from all ancestors without
+rendering setup patches or unrelated setup outputs:
+
+{{ancestor_artifacts_by_path:setup/project-discovery.md,setup/base-test-setup.md}}
+
+When this list includes project-discovery or base-test setup handoffs, read them
 before validation so the repository's checked-in test framework and native test
 root determine the runner. A bounded topology may intentionally omit those
 handoffs. When they are absent, do not treat the omission as an error and do not

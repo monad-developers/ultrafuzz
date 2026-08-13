@@ -50,7 +50,10 @@ describe("packaged smoke topology", () => {
     expect(topology.nodes.find((node) => node.id === "dedupe-findings")?.outputs).toContainEqual(
       expect.objectContaining({ path: "deduped-findings.json", contract: "ultrafuzz/findings@2", primary: true })
     );
-    expect(topology.nodes.find((node) => node.id === "final-report")?.depends_on).toEqual(["dedupe-findings"]);
+    expect(topology.nodes.find((node) => node.id === "final-report")?.depends_on).toEqual([
+      "dedupe-findings",
+      "smoke-context"
+    ]);
     expect(topology.nodes.find((node) => node.id === "final-report")?.outputs).toEqual([
       expect.objectContaining({ path: "report.md", contract: "ultrafuzz/nonempty-markdown@1", primary: true }),
       expect.objectContaining({ path: "report.json", contract: "ultrafuzz/report@2" })

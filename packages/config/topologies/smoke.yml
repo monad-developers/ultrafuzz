@@ -127,6 +127,7 @@ nodes:
     group: review
     depends_on:
       - dedupe-findings
+      - smoke-context
     outputs:
       - path: report.md
         contract: ultrafuzz/nonempty-markdown@1

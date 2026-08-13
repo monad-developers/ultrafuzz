@@ -714,7 +714,7 @@ describe("prompt semantic anchors", () => {
     const dedupe = prompt("review/dedupe-findings.md");
 
     expect(dedupe).toContain("{{ancestor_artifacts}}");
-    expect(dedupe).toContain("When the list includes project-discovery or base-test setup handoffs");
+    expect(dedupe).toContain("When this list includes project-discovery or base-test setup handoffs");
     expect(dedupe).toMatch(
       /When they are absent, do not treat the omission as an error and do not\s+run native tests/u
     );
@@ -846,7 +846,7 @@ describe("prompt semantic anchors", () => {
     expect(markdown).toContain("{{schema_path}}/report.schema.json");
     expect(markdown).toContain("run the exact `ultrafuzz json validate` command");
     expect(markdown).toContain("`severity_guess`, `severity`, `impact`, and");
-    expect(markdown).toContain("canonical originating strategy name when one is available");
+    expect(markdown).toMatch(/canonical originating strategy name\s+when one is available/u);
     expect(markdown).toContain("`strategy_provenance` when\nthe upstream finding has it");
     expect(flatMarkdown).toContain(
       "Derive structured detection rates from the exact strategy hits and configured loop counts"
@@ -868,10 +868,19 @@ describe("prompt semantic anchors", () => {
     );
     // Presentation identity is report-owned; substantive upstream fields stay
     // byte-identical and lifecycle metadata authenticates the source join.
-    expect(markdown).toContain("Copy every field the severity-classified finding already carries");
+    expect(markdown).toMatch(
+      /In strict severity-handoff mode, copy every field the severity-classified\s+finding already carries/u
+    );
     expect(markdown).toContain("byte-for-byte");
     expect(flatMarkdown).toContain("except the report-owned `id` and `title`");
-    expect(flatMarkdown).toContain("Apart from authoring canonical report `id` and `title`, you may only ADD fields");
+    expect(flatMarkdown).toContain(
+      "In bounded classification mode, apply the same byte-for-byte rule to every field already carried by the normalized deduped finding"
+    );
+    expect(flatMarkdown).toContain("In bounded classification mode, compute and author the matrix result");
+    expect(flatMarkdown).toContain(
+      "In strict severity-handoff mode, reject a mismatch instead of correcting the artifact"
+    );
+    expect(markdown).not.toContain("bounded-final-review");
     expect(markdown).toMatch(/`summary`, `family_variants`, and `recommended_next_action` stay byte-identical/u);
     // `ultrafuzz json validate` is schema-only, so ordering is undetectable
     // before the host gate rejects the artifact.
@@ -879,7 +888,7 @@ describe("prompt semantic anchors", () => {
     expect(markdown).toMatch(/greater than the previous\s+entry's `end_line`/u);
     // Every severity finding carries its own key; the finding_id fallback the
     // prompt used to allow is unreachable and contradicts the gate.
-    expect(markdown).toContain("has a `dedupe_key` exactly equal\n  to its lifecycle record's corresponding value");
+    expect(markdown).toMatch(/source finding you render has a `dedupe_key` exactly equal to its\s+lifecycle record/iu);
     expect(markdown).toContain("never fall back to `finding_id`");
     expect(markdown).not.toContain("when the finding has no dedupe key");
   });
@@ -918,13 +927,15 @@ describe("prompt semantic anchors", () => {
   it("reuses the shared review prompts in the smoke topology", () => {
     const topologyPath = fileURLToPath(new URL("../../config/topologies/smoke.yml", import.meta.url));
     const topology = YAML.parse(readFileSync(topologyPath, "utf8")) as {
-      nodes: Array<{ id: string; prompt?: string }>;
+      nodes: Array<{ id: string; prompt?: string; depends_on?: string[] }>;
     };
     const prompts = new Map(topology.nodes.map((node) => [node.id, node.prompt]));
+    const finalReport = topology.nodes.find((node) => node.id === "final-report");
     const assets = loadBuiltInPromptAssets().map((asset) => asset.relativePath);
 
     expect(prompts.get("dedupe-findings")).toBe("review/dedupe-findings.md");
     expect(prompts.get("final-report")).toBe("review/final-report.md");
+    expect(finalReport?.depends_on).toContain("smoke-context");
     expect(assets).not.toContain("smoke/smoke-dedupe-findings.md");
     expect(assets).not.toContain("smoke/smoke-final-report.md");
   });
