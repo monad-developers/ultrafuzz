@@ -132,22 +132,39 @@ describe("artifact handoff validation", () => {
       ...topology.nodes[3]!,
       id: "triage",
       prompt: "review/triage.md",
-      outputs: [{ path: "reviewed-findings.json", contract: "ultrafuzz/findings@1", primary: true }]
+      outputs: [{ path: "reviewed-findings.json", contract: "ultrafuzz/findings@2", primary: true }]
     };
     topology.nodes[4] = { ...topology.nodes[4]!, depends_on: ["triage"] };
 
-    expect(() =>
-      validateTopology(topology, {
-        promptTexts: { "review/triage.md": "Hard-code reachability=renamed-public-trace." }
-      })
-    ).toThrow(expect.objectContaining({ code: "MISSING_REPORT_VOCABULARY_REFERENCE" }));
-    expect(() =>
-      validateTopology(topology, {
-        promptTexts: {
-          "review/triage.md": "Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}."
-        }
-      })
-    ).not.toThrow();
+    for (const contract of [
+      "ultrafuzz/findings@2",
+      "ultrafuzz/triaged-findings@1",
+      "ultrafuzz/severity-classified-findings@1",
+      "ultrafuzz/report@2"
+    ] as const) {
+      topology.nodes[3] = {
+        ...topology.nodes[3]!,
+        outputs:
+          contract === "ultrafuzz/findings@2" || contract === "ultrafuzz/report@2"
+            ? [
+                { path: "report.md", contract: "ultrafuzz/nonempty-markdown@1", primary: true },
+                { path: contract === "ultrafuzz/report@2" ? "report.json" : "findings.json", contract }
+              ]
+            : [{ path: "reviewed-findings.json", contract, primary: true }]
+      };
+      expect(() =>
+        validateTopology(topology, {
+          promptTexts: { "review/triage.md": "Hard-code reachability=renamed-public-trace." }
+        })
+      ).toThrow(expect.objectContaining({ code: "MISSING_REPORT_VOCABULARY_REFERENCE" }));
+      expect(() =>
+        validateTopology(topology, {
+          promptTexts: {
+            "review/triage.md": "Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}."
+          }
+        })
+      ).not.toThrow();
+    }
     expect(() =>
       validateTopology(topology, {
         promptTexts: {

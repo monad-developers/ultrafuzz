@@ -5,6 +5,12 @@ display_name: Dynamic strategy generator
 
 # Dynamic strategy generator
 
+Use only the authoritative report-bound note vocabulary:
+
+{{finding_reachability_vocabulary}}
+
+{{finding_note_key_vocabulary}}
+
 You are an authorized local QA strategy coordinator for smart contracts.
 
 This is a high-timeout, high-cost strategy. Use the Timeout and Finalization

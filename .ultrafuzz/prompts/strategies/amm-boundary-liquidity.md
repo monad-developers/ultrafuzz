@@ -80,3 +80,9 @@ record it as incomplete-spec instead of silently dropping it.
 Write structured findings to {{output_findings_path}}. If no finding is
 confirmed, use only the empty form defined by the exact pinned schema in the
 central output contract.
+
+Use only the authoritative report-bound note vocabulary:
+
+{{finding_reachability_vocabulary}}
+
+{{finding_note_key_vocabulary}}

@@ -5,6 +5,7 @@ import {
   MAX_FINDING_NESTED_ITEMS,
   findingLifecycleSchema,
   findingLifecycleStageSchema,
+  findingNoteSchema,
   findingSchema,
   findingStrategyHitSchema,
   findingTextSchema
@@ -181,7 +182,7 @@ export const strategyDetectionsSchema = withDocumentMetadata(
 const triagedFindingSchema = findingSchema
   .safeExtend({
     triage_classification: z.enum(TRIAGE_CLASSIFICATIONS),
-    notes: z.array(findingTextSchema).min(1).max(MAX_FINDING_NESTED_ITEMS)
+    notes: z.array(findingNoteSchema).min(1).max(MAX_FINDING_NESTED_ITEMS)
   })
   .meta({
     allOf: [
@@ -251,6 +252,10 @@ export const triagedFindingsSchema = withDocumentMetadata(
 const severityClassifiedFindingSchema = findingSchema
   .safeExtend({
     triage_classification: z.enum(TRIAGE_CLASSIFICATIONS),
+    // Severity review must preserve the already-validated triage notes byte for
+    // byte. Keep this stage's structural copy lightweight; triage is the last
+    // stage allowed to append report-bound notes.
+    notes: z.array(findingTextSchema).max(MAX_FINDING_NESTED_ITEMS).optional(),
     severity: z.enum(FINDING_SEVERITIES).optional(),
     impact: z.enum(FINDING_SEVERITIES).optional(),
     likelihood: z.enum(FINDING_SEVERITIES).optional(),
@@ -1596,6 +1601,9 @@ const reportCoverageNotPlannedSchema = z.strictObject({
 });
 
 const reportIssueSchema = findingSchema.safeExtend({
+  // Report projection copies notes from severity-classified findings and may
+  // not author new report-bound note assignments.
+  notes: z.array(findingTextSchema).max(MAX_FINDING_NESTED_ITEMS).optional(),
   description: nonEmptyString,
   severity: z.enum(FINDING_SEVERITIES),
   likelihood: z.enum(FINDING_SEVERITIES),
@@ -1612,6 +1620,7 @@ const reportIssueSchema = findingSchema.safeExtend({
 });
 
 const reportNonProductionOutcomeSchema = findingSchema.safeExtend({
+  notes: z.array(findingTextSchema).max(MAX_FINDING_NESTED_ITEMS).optional(),
   triage_classification: z.enum(TRIAGE_CLASSIFICATIONS),
   recommended_next_action: nonEmptyString,
   lifecycle: findingLifecycleSchema

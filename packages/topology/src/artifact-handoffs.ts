@@ -13,6 +13,13 @@ export interface ArtifactHandoffValidationOptions {
   promptTexts?: Record<string, string>;
 }
 
+const REPORT_VOCABULARY_CONTRACTS = new Set([
+  "ultrafuzz/findings@2",
+  "ultrafuzz/triaged-findings@1",
+  "ultrafuzz/severity-classified-findings@1",
+  "ultrafuzz/report@2"
+]);
+
 export function validateArtifactHandoffs(
   topology: NormalizedProjectTopology,
   options: ArtifactHandoffValidationOptions = {}
@@ -34,9 +41,8 @@ export function validateArtifactHandoffs(
 }
 
 function validateReportVocabularyVariables(node: NormalizedTopologyNode, promptText: string): void {
-  const publishesFindings = node.outputs.some(
-    (output) => output.contract === "ultrafuzz/findings@1" && output.primary === true
-  );
+  const publishesReportVocabulary = node.outputs.some((output) => REPORT_VOCABULARY_CONTRACTS.has(output.contract));
+  if (!publishesReportVocabulary) return;
   const duplicated = promptText
     .split(/(?<=[.!?])\s+|\r?\n/gu)
     .filter((scope) =>
@@ -46,7 +52,6 @@ function validateReportVocabularyVariables(node: NormalizedTopologyNode, promptT
     )
     .map((scope) => findingNoteAssignmentIssue(scope))
     .find((issue) => issue !== undefined);
-  if (!publishesFindings) return;
   for (const variable of ["finding_reachability_vocabulary", "finding_note_key_vocabulary"]) {
     if (!promptText.includes(`{{${variable}}}`)) {
       throw topologyError(

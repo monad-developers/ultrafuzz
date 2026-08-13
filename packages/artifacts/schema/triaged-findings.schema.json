@@ -531,7 +531,19 @@
         "items": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 65536
+          "maxLength": 65536,
+          "allOf": [
+            {
+              "not": {
+                "pattern": "(?:^|[^\\p{L}\\p{N}\\p{M}\\p{Sc}\\p{Sk}\\p{So}_-])(?!(?:reachability|helper_proof|public_exploitability|dependency_scope|triage_reason|classification_reason|demotion_reason|stateful_failure_classification|likelihood|impact)(?:\\s+=(?!=)\\s*|=(?!=)\\s*))(?!(?:FOUNDRY_PROFILE|RUST_LOG|RISK_FREE_RATE|STATEFUL_RUNS|seed|runs|request_id|tx|filename|session|impact_price|helper_address|scope_id|x|--signal|--kill-after|--dependency-version)(?:\\s*={1,2}\\s*))-{0,2}[\\p{L}\\p{N}\\p{M}\\p{Sc}\\p{Sk}\\p{So}_-]+(?:\\s*={1,2}\\s*)"
+              }
+            },
+            {
+              "not": {
+                "pattern": "(?:^|[^\\p{L}\\p{N}\\p{M}\\p{Sc}\\p{Sk}\\p{So}_-])(?:reachability(?:\\s+=(?!=)\\s*|=(?!=)\\s*)(?!(?:public-entrypoint-trace|generated-public-wrapper-poc|helper-only|public-wrapper-required)(?::|[;,*`\\s]|$))|stateful_failure_classification(?:\\s+=(?!=)\\s*|=(?!=)\\s*)(?!(?:production-bug|harness-defect|incomplete-spec|false-positive|blocked-unreproduced)(?::|[;,*`\\s]|$))|(?:likelihood|impact)(?:\\s+=(?!=)\\s*|=(?!=)\\s*)(?!(?:High|Medium|Low)(?::|[;,*`\\s]|$)))"
+              }
+            }
+          ]
         }
       },
       "evidence": {

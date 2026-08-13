@@ -5,6 +5,12 @@ display_name: Differential Repair And Report Review
 
 # Differential Repair And Report Review
 
+Use only the authoritative report-bound note vocabulary:
+
+{{finding_reachability_vocabulary}}
+
+{{finding_note_key_vocabulary}}
+
 Repair only consensus harness or reference defects from the looped triage outputs:
 
 Semantic red registries:

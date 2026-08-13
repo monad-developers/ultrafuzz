@@ -58,7 +58,6 @@ tool result before the next command. Never combine validation commands with
 
 Make sure compilation is passing but do not fix any failing tests.
 
-
 Use only the authoritative report-bound note vocabulary:
 
 {{finding_reachability_vocabulary}}

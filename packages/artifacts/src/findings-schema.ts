@@ -9,6 +9,13 @@ import {
   FINDINGS_SCHEMA_VERSION,
   TRIAGE_CLASSIFICATIONS
 } from "./findings.js";
+import {
+  FINDING_EVIDENCE_ASSIGNMENT_KEYS,
+  FINDING_NOTE_KEYS,
+  FINDING_REACHABILITY_VALUES,
+  FINDING_RISK_VALUES,
+  STATEFUL_FAILURE_CLASSIFICATION_VALUES
+} from "./finding-note-vocabulary.js";
 import { validateRegisteredJsonSchema } from "./json-schema-validator.js";
 import { hasAtMostCodePoints } from "./portable-json-primitives.js";
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
@@ -39,6 +46,60 @@ const findingPath = z
   .meta({ maxLength: MAX_FINDING_PATH_CODE_POINTS });
 const nonNegativeInteger = z.number().int().nonnegative().max(MAX_FINDING_COUNT);
 const positiveSafeInteger = z.number().int().positive().max(MAX_FINDING_COUNT);
+const supportedNoteKeyPattern = `(?:${FINDING_NOTE_KEYS.join("|")})`;
+const assignmentKeyPattern = "-{0,2}[\\p{L}\\p{N}\\p{M}\\p{Sc}\\p{Sk}\\p{So}_-]+";
+const assignmentBoundaryPattern = "(?:^|[^\\p{L}\\p{N}\\p{M}\\p{Sc}\\p{Sk}\\p{So}_-])";
+const evidenceAssignmentKeyPattern = `(?:${FINDING_EVIDENCE_ASSIGNMENT_KEYS.map((key) => key.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")).join("|")})`;
+const assignmentOperatorPattern = "(?:\\s+=(?!=)\\s*|=(?!=)\\s*)";
+const anyAssignmentOperatorPattern = "(?:\\s*={1,2}\\s*)";
+const unsupportedAssignmentPattern = `${assignmentBoundaryPattern}(?!${supportedNoteKeyPattern}${assignmentOperatorPattern})(?!${evidenceAssignmentKeyPattern}${anyAssignmentOperatorPattern})${assignmentKeyPattern}${anyAssignmentOperatorPattern}`;
+const invalidTypedAssignmentPattern = `${assignmentBoundaryPattern}(?:reachability${assignmentOperatorPattern}(?!(?:${FINDING_REACHABILITY_VALUES.join("|")})(?::|[;,*\`\\s]|$))|stateful_failure_classification${assignmentOperatorPattern}(?!(?:${STATEFUL_FAILURE_CLASSIFICATION_VALUES.join("|")})(?::|[;,*\`\\s]|$))|(?:likelihood|impact)${assignmentOperatorPattern}(?!(?:${FINDING_RISK_VALUES.join("|")})(?::|[;,*\`\\s]|$)))`;
+const unsupportedAssignment = new RegExp(unsupportedAssignmentPattern, "u");
+
+export interface FindingNoteAssignmentIssue {
+  key: string;
+  message: string;
+}
+
+export function findingNoteAssignmentIssue(note: string): FindingNoteAssignmentIssue | undefined {
+  if (unsupportedAssignment.test(note)) {
+    const key =
+      note.match(
+        new RegExp(`${assignmentBoundaryPattern}(${assignmentKeyPattern})${assignmentOperatorPattern}`, "u")
+      )?.[1] ?? "unknown";
+    return { key, message: "Unsupported report-bound finding note key" };
+  }
+  for (const assignment of note.matchAll(
+    /(?<![\p{L}\p{N}\p{M}\p{Sc}\p{Sk}\p{So}_-])(-{0,2}[\p{L}\p{M}\p{Sc}\p{Sk}\p{So}_][\p{L}\p{N}\p{M}\p{Sc}\p{Sk}\p{So}_-]*)(?:\s+=(?!=)\s*|=(?!=)\s*)/gu
+  )) {
+    const key = assignment[1]!;
+    const value = note.slice(assignment.index + assignment[0].length).match(/^[^;,*`\s:]*/u)?.[0] ?? "";
+    const allowed =
+      key === "reachability"
+        ? FINDING_REACHABILITY_VALUES
+        : key === "stateful_failure_classification"
+          ? STATEFUL_FAILURE_CLASSIFICATION_VALUES
+          : key === "likelihood" || key === "impact"
+            ? FINDING_RISK_VALUES
+            : undefined;
+    if (allowed !== undefined && !allowed.includes(value as never)) {
+      return { key, message: `Unsupported finding ${key} token ${JSON.stringify(value)}` };
+    }
+  }
+  return undefined;
+}
+
+const findingNoteJsonSchemaConstraints = [
+  { not: { pattern: unsupportedAssignmentPattern } },
+  { not: { pattern: invalidTypedAssignmentPattern } }
+] as const;
+export const findingNoteSchema = nonEmptyString
+  .superRefine((note, context) => {
+    const issue = findingNoteAssignmentIssue(note);
+    if (issue !== undefined) context.addIssue({ code: "custom", message: issue.message });
+  })
+  .meta({ allOf: findingNoteJsonSchemaConstraints });
+const findingNotesSchema = z.array(findingNoteSchema).max(MAX_FINDING_NESTED_ITEMS);
 const uniqueNonEmptyStrings = z
   .array(nonEmptyString)
   .max(MAX_FINDING_NESTED_ITEMS)
@@ -234,7 +295,7 @@ export const findingSchema = z
     family_id: nonEmptyString.optional(),
     family_variants: z.array(familyVariantSchema).max(MAX_FINDING_NESTED_ITEMS).optional(),
     related_findings: z.array(relatedFindingSchema).max(MAX_FINDING_NESTED_ITEMS).optional(),
-    notes: z.array(nonEmptyString).max(MAX_FINDING_NESTED_ITEMS).optional(),
+    notes: findingNotesSchema.optional(),
     evidence: z.array(findingEvidenceSchema).max(MAX_FINDING_NESTED_ITEMS).optional(),
     severity: z.enum(FINDING_SEVERITIES).optional(),
     impact: z.enum(FINDING_SEVERITIES).optional(),

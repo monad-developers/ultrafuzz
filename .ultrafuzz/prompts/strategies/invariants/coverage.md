@@ -5,6 +5,13 @@ display_name: Stateful Invariant Coverage
 
 # Role
 
+Use the authoritative reachability tokens and report-bound note keys below for
+every finding; do not copy or rename them locally:
+
+{{finding_reachability_vocabulary}}
+
+{{finding_note_key_vocabulary}}
+
 You are an Invariant Testing specialist for Solidity smart contracts.
 
 Use recon-fuzzer and Recon Magic style coverage evidence to iterate on setup
@@ -245,8 +252,7 @@ Apply these Recon/Chimera rules:
      has a structured record.
    - For every fuzzer-discovered failure and every deterministic reproducer,
      write exactly one durable classification in `{{output_findings_path}}`
-     using a `notes` token
-     `stateful_failure_classification=<classification>`, where
+     using the authoritative `stateful_failure_classification` note key, where
      `<classification>` is exactly one of `production-bug`, `harness-defect`,
      `incomplete-spec`, `false-positive`, or `blocked-unreproduced`.
    - Use `production-bug` when public evidence supports a target-contract bug.
@@ -293,9 +299,9 @@ This is the same topology-required artifact as:
 
 Read `{{schema_path}}/findings.schema.json`; it alone defines the findings JSON
 shape. Every fuzzer-discovered failure and every deterministic reproducer must
-appear as a finding with a
-`stateful_failure_classification=<classification>` token in `notes`, even when
-the final classification is `false-positive`, `incomplete-spec`, or
+appear as a finding with a classification under the authoritative
+`stateful_failure_classification` key in `notes`, even when the final
+classification is `false-positive`, `incomplete-spec`, or
 `blocked-unreproduced`.
 
 Write generated-test and replay records to:

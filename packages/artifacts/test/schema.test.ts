@@ -43,7 +43,9 @@ import {
   assertPlannedGraph,
   assertPlannedGraphSemantics,
   derivePropertyImplementationCoverage,
+  findingNoteAssignmentIssue,
   findingJsonSchema,
+  findingSchema,
   generatedTestsJsonSchema,
   invariantLedgerJsonSchema,
   invariantSourceProofJsonSchema,
@@ -83,6 +85,7 @@ import {
   type PlannedGraphDocument,
   type PlannedGraphNodeDocument,
   smithersTaskManifestJsonSchema,
+  triagedFindingsSchema,
   trustedCliMetadataJsonSchema
 } from "../src/index.js";
 
@@ -1127,6 +1130,127 @@ test("the findings v2 contract rejects aliases, omissions, lowercase severities,
   };
   assert.equal(validateFindingSchema(removedStrategyAlias).ok, false);
   assert.equal(validateArtifactContract("ultrafuzz/findings@2", JSON.stringify([removedStrategyAlias])).ok, false);
+});
+
+test("the findings v2 schema enforces one authoritative report-note vocabulary with parser and bundle parity", () => {
+  const finding = {
+    schema_version: FINDINGS_SCHEMA_VERSION,
+    id: "reachability-1",
+    title: "Helper reachability",
+    status: "candidate",
+    severity_guess: "Medium",
+    confidence: "high",
+    summary: "A helper-level proof needs a recognized reachability classification."
+  };
+  const assertNoteParity = (note: string, expected: boolean): void => {
+    const candidate = { ...finding, notes: [note] };
+    assert.equal(findingSchema.safeParse(candidate).success, expected, `Zod parser parity for ${note}`);
+    assert.equal(validateFindingSchema(candidate).ok, expected, `registered schema parity for ${note}`);
+    assert.equal(
+      validateArtifactContract("ultrafuzz/findings@2", JSON.stringify([candidate])).ok,
+      expected,
+      `bundled contract parity for ${note}`
+    );
+  };
+
+  for (const note of [
+    "reachability=public-entrypoint-trace: verified",
+    "reachability=generated-public-wrapper-poc: verified",
+    "reachability=helper-only: public entrypoints reject the input",
+    "reachability=public-wrapper-required: add a wrapper proof",
+    "stateful_failure_classification=production-bug: reproduced",
+    "likelihood=High",
+    "impact=Low",
+    "triage_reason=public evidence supports the issue",
+    "helper_proof=direct helper mismatch reproduced"
+  ]) {
+    assertNoteParity(note, true);
+  }
+
+  for (const evidenceAssignment of [
+    "Evidence: https://example.test/trace?tx=abc",
+    "Evidence: https://example.test/trace;session=abc",
+    "ipfs://root/path?filename=proof.json",
+    "timeout --signal=TERM --kill-after=300s",
+    "x==y",
+    "Reproducer: FOUNDRY_PROFILE=ci forge test",
+    "Run RUST_LOG=debug cargo test",
+    "forge test --match-test repro seed=123 runs=1000",
+    "Evidence: <https://x.test/?tx=abc>",
+    "request_id=abc123",
+    "RISK_FREE_RATE=0.05 impact_price=123 helper_address=0xabc",
+    "--dependency-version=1.2.3 STATEFUL_RUNS=1000 scope_id=request-7",
+    "https://x.test/?impact_price=123"
+  ]) {
+    assertNoteParity(evidenceAssignment, true);
+  }
+
+  for (const semanticAlias of [
+    "helper_evidence=renamed producer key",
+    "classification_evidence=renamed producer key",
+    "root_cause_reason=renamed",
+    "finding_classification=renamed",
+    "scope_decision=renamed",
+    "ROOT_CAUSE=renamed",
+    "rootCause=renamed",
+    "Helper_Proof=renamed",
+    "_root_cause=renamed",
+    "__root_cause=renamed",
+    "___Helper=renamed",
+    "_=renamed",
+    "根因=renamed",
+    "Δ=renamed",
+    "root_causé=renamed",
+    "💣=renamed",
+    "<root_cause=renamed>",
+    "-root_cause=renamed",
+    "--root_cause=renamed",
+    "triage_reason=ok;root_cause=renamed",
+    "triage_reason=ok,root_cause=renamed",
+    "triage_reason=ok*root_cause=renamed",
+    "triage_reason=ok|root_cause=renamed",
+    "https://example.test/trace;root_cause=renamed",
+    "RISK_SCORE=high",
+    "SeverityAlias=critical",
+    "https://x.test/?tx=abc&root_cause=renamed",
+    "https://x.test/?tx=abc&HELPER_PROOF_ALIAS=renamed",
+    "seed=123&classification_alias=renamed",
+    "root_cause==renamed",
+    "reachability==helper-only",
+    "9root_cause=renamed",
+    "https://x.test/?root%5Fcause=renamed",
+    "helperEvidence=renamed",
+    "dependencyScope=renamed",
+    "resolution=confirmed",
+    "disposition=accepted",
+    "final_severity=high",
+    "severity_guess=high",
+    "confidence_score=high",
+    "finding_status=confirmed",
+    "triage_result=accepted",
+    "classification_result=bug",
+    "proof_kind=public",
+    "reachability=renamed-public-trace",
+    "stateful_failure_classification=renamed",
+    "likelihood=likely",
+    "impact=critical"
+  ]) {
+    assertNoteParity(semanticAlias, false);
+    assert.notEqual(findingNoteAssignmentIssue(semanticAlias), undefined, semanticAlias);
+  }
+
+  assertNoteParity("helper_context is prose, not an assignment", true);
+
+  const triaged = {
+    ...finding,
+    triage_classification: "true-positive",
+    notes: ["triage_reason=public evidence supports the issue", "reachability=public-entrypoint-trace"]
+  };
+  assert.equal(triagedFindingsSchema.safeParse([triaged]).success, true);
+  assert.equal(validateArtifactContract("ultrafuzz/triaged-findings@1", JSON.stringify([triaged])).ok, true);
+  const triagedAlias = { ...triaged, notes: [...triaged.notes, "root_cause=renamed"] };
+  assert.equal(triagedFindingsSchema.safeParse([triagedAlias]).success, false);
+  assert.equal(validateArtifactContract("ultrafuzz/triaged-findings@1", JSON.stringify([triagedAlias])).ok, false);
 });
 
 test("the findings v2 schema validates closed typed evidence spans without repair", () => {

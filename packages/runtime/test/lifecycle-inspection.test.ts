@@ -98,6 +98,11 @@ ${requiredCommand === undefined ? "" : `    required_commands:\n      - ${requir
 `,
     "utf8"
   );
+  fs.appendFileSync(
+    path.join(project, ".ultrafuzz", "prompts", "setup", "project-discovery.md"),
+    "\n{{finding_reachability_vocabulary}}\n{{finding_note_key_vocabulary}}\n",
+    "utf8"
+  );
 }
 
 interface FakeInspectionFixtures {
