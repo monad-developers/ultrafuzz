@@ -57,9 +57,9 @@ const assignmentOperatorPrefixPattern = "[ \\t]*=(?!=)";
 const anyAssignmentOperatorPattern = "\\s*={1,2}\\s*";
 const assignmentKeyCloseWrapperPattern = "(?:(?:\\*{1,2}|~{1,2}|[\\x60\"'>)}\\]])[ \\t]*)*";
 const metadataKeyCloseWrapperPattern = "[`\"'>)}*~\\]]{0,4}";
-const htmlKeyCloseWrapperPattern = "(?:</(?:b|code|em|i|strong)>[ \\t]*)*";
+const htmlKeyCloseWrapperPattern = "(?:</(?:b|code|em|i|mark|span|strong|u)>\\s*)*";
 const assignmentKeyTrailingWrapperPattern = `${assignmentKeyCloseWrapperPattern}${htmlKeyCloseWrapperPattern}`;
-const colonAssignmentOperatorPattern = "[ \\t]*:[ \\t]*";
+const colonAssignmentOperatorPattern = "\\s*:\\s*";
 const typedValueBoundaryPattern = "(?::|[.;,*`\\s&)\\]}>\"']|$)";
 const uniqueTypedValuePattern = `(?:${[...FINDING_REACHABILITY_VALUES, ...STATEFUL_FAILURE_CLASSIFICATION_VALUES].join(
   "|"
@@ -152,7 +152,9 @@ const riskAliasKeyPattern =
 const unsupportedRiskTypedAliasPattern = `${reportNoteSearchPrefixPattern}${assignmentBoundaryPattern}(${riskAliasKeyPattern})[ \\t]*${assignmentKeyTrailingWrapperPattern}${assignmentOperatorPrefixPattern}[ \\t]*${valueWrapperPattern}${riskValuePattern}${typedValueBoundaryPattern}`;
 const canonicalColonAssignmentPattern = `${assignmentBoundaryPattern}${valueWrapperPattern}(${globallyValidatedNoteKeyPattern})[ \\t]*${assignmentKeyTrailingWrapperPattern}${colonAssignmentOperatorPattern}${valueWrapperPattern}(?=\\S)`;
 const canonicalDirectMappingPattern = `${assignmentBoundaryPattern}[ \\t]*${valueWrapperPattern}(${globallyValidatedNoteKeyPattern})[ \\t]*${assignmentKeyTrailingWrapperPattern}(?::[ \\t]*\\r?\\n[ \\t]*|\\|[ \\t]*|(?:-|=)>[ \\t]*|→[ \\t]*)${valueWrapperPattern}(?=\\S)`;
+const canonicalReachabilityUnicodeMappingPattern = `${assignmentBoundaryPattern}[ \\t]*${valueWrapperPattern}(${asciiCaseInsensitivePattern("reachability")})[ \\t]*${assignmentKeyTrailingWrapperPattern}(?:↦|⟶|≔)[ \\t]*${valueWrapperPattern}(?=\\S)`;
 const canonicalReachabilityMappingPattern = `${assignmentBoundaryPattern}[ \\t]*${valueWrapperPattern}(${asciiCaseInsensitivePattern("reachability")})[ \\t]*${assignmentKeyTrailingWrapperPattern}[ \\t]+maps?[ \\t]+to[ \\t]+${valueWrapperPattern}(?=\\S)`;
+const obfuscatedReachabilityAssignmentPattern = `${assignmentBoundaryPattern}(${asciiCaseInsensitivePattern("reachability")})(?:<!--[\\s\\S]{0,256}?-->|\\u200B)+[ \\t]*={1,2}\\s*`;
 const unsupportedMetadataPairColonPatterns = FINDING_REPORT_MULTITERM_METADATA_KEY_PATTERNS.map(
   (pattern) =>
     `${assignmentBoundaryPattern}${valueWrapperPattern}(?!${supportedNoteKeyPattern}[ \\t]*${metadataKeyCloseWrapperPattern}${colonAssignmentOperatorPattern})(?!${evidenceAssignmentKeyPattern}[ \\t]*${metadataKeyCloseWrapperPattern}${colonAssignmentOperatorPattern})(?:((?=${assignmentKeyPattern}[ \\t]*${metadataKeyCloseWrapperPattern}${colonAssignmentOperatorPattern})${pattern}))[ \\t]*${metadataKeyCloseWrapperPattern}${colonAssignmentOperatorPattern}${valueWrapperPattern}(?=\\S)`
@@ -188,27 +190,41 @@ const quantifiedFindingTarget =
 const quantifiedFindingAction =
   /\b(?:all|each|every)\s+(?:finding|issue|output(?:\s+object)?|record|result)s?\b[^\n]{0,160}\b(?:contain|emit|get|have|include|return|store|use)s?\b/iu;
 const vocabularyDirectiveActionPattern =
-  "(?:add|annotate|append|assign|classify|define|emit|include|label|mark|populate|put|record|return|set|store|use|write)s?";
+  "(?:add|annotate|append|assign|classify|define|emit|ensure|include|label|mark|output|populate|put|record|return|set|store|treat|use|write)s?";
 const directReachabilityAssignmentActionPattern = "(?:assign|emit|include|mark|record|require|set|store|write)s?";
+const broadReachabilityAssignmentActionPattern =
+  "(?:assign|emit|include|mark|output|record|require|set|store|treat|use|write)s?";
 const promptVocabularyIdentifierPattern = "[A-Za-z0-9][-_0-9A-Za-z]{0,127}";
 const promptVocabularyOpenWrapperPattern = "(?:(?:\\x60|\"|'|<|\\(|\\[|\\{|\\*|~)[ \\t]*)*";
 const promptVocabularyCloseWrapperPattern = "(?:(?:\\x60|\"|'|>|\\)|\\]|\\}|\\*|~)[ \\t]*)*";
 const promptVocabularyCloseWrappersPattern = promptVocabularyCloseWrapperPattern;
 const promptFindingTargetPattern =
   "(?:all|each|every)[ \\t]+(?:finding|issue|output(?:[ \\t]+object)?|record|result)s?";
-const promptAssignmentTerminatorPattern = `(?=[ \\t]*(?:(?:on|to|for)[ \\t]+${promptFindingTargetPattern})?[ \\t]*(?:[.;]|$))`;
+const promptAssignmentTerminatorPattern = `(?=\\s*(?:(?:on|to|for)\\s+${promptFindingTargetPattern})?\\s*(?:[.;|}\\]]|$))`;
 const promptReachabilityFieldPattern =
-  "reachability(?:['’]s[ \\t]+value|[_-](?:classification|field|note|token|value)|[ \\t]+(?:classification|field|note|token|value))?";
+  "reachability(?:['’]s\\s+value|[_-](?:classification|field|note|token|value)|\\s+(?:classification|field|note|token|value)(?:['’]s\\s+value)?)?";
 const findingReportColonAssignment = new RegExp(
-  `${assignmentBoundaryPattern}[ \\t]*(?:(?:\\x60|"|'|\\*|_|\\[|\\{|\\(|<)+[ \\t]*)?(${assignmentKeyPattern})(?:[ \\t]*(?:\\x60|"|'|\\*|_|\\]|\\}|\\)|>)+)?[ \\t]*:[ \\t]*(?:(?:\\x60|"|'|\\*|_|\\[|\\{|\\(|<)+[ \\t]*)?(${promptVocabularyIdentifierPattern})${promptVocabularyCloseWrappersPattern}${promptAssignmentTerminatorPattern}`,
+  `${assignmentBoundaryPattern}\\s*(?:(?:\\x60|"|'|\\*|_|\\[|\\{|\\(|<)+\\s*)?(${assignmentKeyPattern})(?:\\s*(?:\\x60|"|'|\\*|_|\\]|\\}|\\)|>)+)?\\s*:\\s*(?:(?:\\x60|"|'|\\*|_|\\[|\\{|\\(|<)+\\s*)?(${promptVocabularyIdentifierPattern})${promptVocabularyCloseWrappersPattern}${promptAssignmentTerminatorPattern}`,
   "giu"
 );
 const findingReportDirectMapping = new RegExp(
-  `${assignmentBoundaryPattern}[ \\t]*${promptVocabularyOpenWrapperPattern}(${assignmentKeyPattern})${promptVocabularyCloseWrapperPattern}[ \\t]*(?::=|(?:-|=)>|→)[ \\t]*${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})${promptVocabularyCloseWrappersPattern}${promptAssignmentTerminatorPattern}`,
+  `${assignmentBoundaryPattern}\\s*${promptVocabularyOpenWrapperPattern}(${assignmentKeyPattern})${promptVocabularyCloseWrapperPattern}\\s*(?::=|≔|(?:-|=)>|→|↦|⟶)\\s*${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})${promptVocabularyCloseWrappersPattern}${promptAssignmentTerminatorPattern}`,
   "giu"
 );
 const findingReportReachabilityMapping = new RegExp(
   `${assignmentBoundaryPattern}[ \\t]*${promptVocabularyOpenWrapperPattern}(reachability)${promptVocabularyCloseWrapperPattern}[ \\t]+maps?[ \\t]+to[ \\t]+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})${promptVocabularyCloseWrappersPattern}${promptAssignmentTerminatorPattern}`,
+  "giu"
+);
+const findingReportHtmlMapping = new RegExp(
+  `${assignmentBoundaryPattern}\\s*<(?:b|code|em|i|mark|span|strong|u)>\\s*(${assignmentKeyPattern})\\s*</(?:b|code|em|i|mark|span|strong|u)>\\s*(?::=|≔|(?:-|=)>|→|↦|⟶)\\s*${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})`,
+  "giu"
+);
+const findingReportTableMapping = new RegExp(
+  `(?:^|\\n|[.!?][ \\t]+)\\s*\\|\\s*(${assignmentKeyPattern})\\s*\\|\\s*(${promptVocabularyIdentifierPattern})\\s*\\|`,
+  "giu"
+);
+const findingReportBareReachability = new RegExp(
+  `(?:^|\\n|[.!?][ \\t]+)\\s*${promptVocabularyOpenWrapperPattern}(reachability)${promptVocabularyCloseWrapperPattern}\\s+(?:=|is|equals?)\\s+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})${promptVocabularyCloseWrappersPattern}${promptAssignmentTerminatorPattern}`,
   "giu"
 );
 const findingReportStandaloneAssignment = new RegExp(
@@ -216,7 +232,7 @@ const findingReportStandaloneAssignment = new RegExp(
   "gimu"
 );
 const connectedReachabilityValueDirective = new RegExp(
-  `\\b${vocabularyDirectiveActionPattern}\\b[^.;\\n]{0,160}?\\b(${promptReachabilityFieldPattern})\\b${promptVocabularyCloseWrapperPattern}(?:[ \\t]+(?:on|for|to)[ \\t]+${promptFindingTargetPattern})?[ \\t]+(?:=|:|is|to|as)[ \\t]+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})`,
+  `\\b${vocabularyDirectiveActionPattern}\\b[^.;\\n]{0,160}?\\b(${promptReachabilityFieldPattern})\\b${promptVocabularyCloseWrapperPattern}(?:\\s+(?:on|for|to)\\s+${promptFindingTargetPattern})?\\s+(?:=|:|is|to|as|equals?(?:\\s+to)?)[ \\t]+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})`,
   "giu"
 );
 const directReachabilityAliasDirective = new RegExp(
@@ -227,16 +243,32 @@ const directReachabilityValueDirective = new RegExp(
   `\\b${directReachabilityAssignmentActionPattern}\\b[^.;\\n]{0,160}?\\b(reachability)\\b${promptVocabularyCloseWrapperPattern}[ \\t]+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})${promptVocabularyCloseWrappersPattern}${promptAssignmentTerminatorPattern}`,
   "giu"
 );
+const broadReachabilityValueDirective = new RegExp(
+  `\\b${broadReachabilityAssignmentActionPattern}\\b[^.;\\n]{0,160}?\\b(reachability)\\b${promptVocabularyCloseWrapperPattern}[ \\t]+(?:=|:|is|to|as|in)[ \\t]+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})`,
+  "giu"
+);
 const reverseReachabilityValueDirective = new RegExp(
-  `\\b${vocabularyDirectiveActionPattern}\\b[ \\t]+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})${promptVocabularyCloseWrapperPattern}[ \\t]+(?:as|for|in|to|under)[ \\t]+(?:the[ \\t]+)?${promptVocabularyOpenWrapperPattern}(${promptReachabilityFieldPattern})\\b${promptVocabularyCloseWrapperPattern}`,
+  `\\b${vocabularyDirectiveActionPattern}\\b\\s+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})${promptVocabularyCloseWrapperPattern}\\s+(?:as|for|in|into|to|under)\\s+(?:the\\s+)?${promptVocabularyOpenWrapperPattern}(${promptReachabilityFieldPattern})\\b${promptVocabularyCloseWrapperPattern}`,
   "giu"
 );
 const mandatoryReachabilityValueDirective = new RegExp(
-  `\\b(${promptReachabilityFieldPattern})\\b${promptVocabularyCloseWrapperPattern}[ \\t]+(?:must|shall|should|is[ \\t]+required[ \\t]+to)[ \\t]+be[ \\t]+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})${promptVocabularyCloseWrappersPattern}${promptAssignmentTerminatorPattern}`,
+  `\\b(${promptReachabilityFieldPattern})\\b${promptVocabularyCloseWrapperPattern}\\s+(?:must|shall|should|is\\s+required\\s+to)\\s+(?:be|equal(?:\\s+to)?)\\s+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})${promptVocabularyCloseWrappersPattern}${promptAssignmentTerminatorPattern}`,
   "giu"
 );
 const quantifiedReachabilityValueDirective = new RegExp(
   `\\b${promptFindingTargetPattern}\\b[^.;\\n]{0,80}?\\b(?:has|have|include|use)s?\\b[ \\t]+${promptVocabularyOpenWrapperPattern}(reachability)${promptVocabularyCloseWrapperPattern}[ \\t]+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})${promptVocabularyCloseWrappersPattern}${promptAssignmentTerminatorPattern}`,
+  "giu"
+);
+const quantifiedReachabilityIsDirective = new RegExp(
+  `\\b${promptFindingTargetPattern}\\b[^.;\\n]{0,100}?\\b(reachability)\\b${promptVocabularyCloseWrapperPattern}\\s+(?:=|is|equals?)\\s+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})`,
+  "giu"
+);
+const fieldFirstReachabilityDirective = new RegExp(
+  `\\b${promptReachabilityFieldPattern}\\b${promptVocabularyCloseWrapperPattern}[^.;\\n]{0,60}?\\b(?:on|for)\\s+${promptFindingTargetPattern}\\s+(?:=|is|equals?|to)\\s+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})`,
+  "giu"
+);
+const quantifiedReverseReachabilityValueDirective = new RegExp(
+  `\\b${promptFindingTargetPattern}\\b[^.;\\n]{0,100}?\\b(?:has|have|include|is|use|uses|using)\\b[^.;\\n]{0,40}?${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})${promptVocabularyCloseWrapperPattern}\\s+(?:(?:for|in|under|as)\\s+(?:the\\s+)?)?${promptVocabularyOpenWrapperPattern}(reachability)\\b`,
   "giu"
 );
 const directedNoteKeyReference =
@@ -246,11 +278,15 @@ const directedReportNoteKeyReference = new RegExp(
   "giu"
 );
 const findingReportRenameDirective = new RegExp(
-  `\\b(?:change|map|rename|replace|switch)\\b[ \\t]+(?:the[ \\t]+)?${promptVocabularyOpenWrapperPattern}(${promptReachabilityFieldPattern}|${promptVocabularyIdentifierPattern})${promptVocabularyCloseWrapperPattern}(?:[ \\t]+(?:field|key|note[ \\t]+key))?[ \\t]+(?:as|by|into|onto|over[ \\t]+to|to|using|with|(?:-|=)>|→)[ \\t]+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})`,
+  `\\b(?:alias|call|change|convert|map|relabel|rename|replace|retitle|switch)\\b\\s+(?:the\\s+)?${promptVocabularyOpenWrapperPattern}(${promptReachabilityFieldPattern}|${promptVocabularyIdentifierPattern})${promptVocabularyCloseWrapperPattern}(?:\\s+(?:field|key|note\\s+key))?\\s+(?:as|by|into|onto|over\\s+to|to|using|with|(?:-|=)>|→)?\\s*${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})`,
   "giu"
 );
 const findingReportReplacementDirective = new RegExp(
-  `\\buse\\b[ \\t]+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})${promptVocabularyCloseWrapperPattern}[ \\t]+(?:in[ \\t]+place[ \\t]+of|instead[ \\t]+of|rather[ \\t]+than)[ \\t]+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})`,
+  `\\b(?:use|write)\\b\\s+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})${promptVocabularyCloseWrapperPattern}\\s+(?:in\\s+(?:lieu|place)\\s+of|instead\\s+of|rather\\s+than)\\s+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})`,
+  "giu"
+);
+const findingReportBecomesDirective = new RegExp(
+  `\\b${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})${promptVocabularyCloseWrapperPattern}[ \\t]+becomes?[ \\t]+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})`,
   "giu"
 );
 const promptClause = /[^.;\n]*(?:[.;\n]|$)/gu;
@@ -262,6 +298,7 @@ export interface FindingReportSemanticAssignment {
 }
 
 export function findingReportSemanticAssignment(text: string): FindingReportSemanticAssignment | undefined {
+  text = maskNonLiveFindingReportText(text);
   findingReportStandaloneAssignment.lastIndex = 0;
   for (const assignment of text.matchAll(findingReportStandaloneAssignment)) {
     if (hasNonLiveDirectivePrefix(text, assignment.index)) continue;
@@ -280,7 +317,13 @@ export function findingReportSemanticAssignment(text: string): FindingReportSema
     }
   }
 
-  for (const mappingPattern of [findingReportDirectMapping, findingReportReachabilityMapping]) {
+  for (const mappingPattern of [
+    findingReportDirectMapping,
+    findingReportReachabilityMapping,
+    findingReportHtmlMapping,
+    findingReportTableMapping,
+    findingReportBareReachability
+  ]) {
     mappingPattern.lastIndex = 0;
     for (const mapping of text.matchAll(mappingPattern)) {
       if (hasNonLiveDirectivePrefix(text, mapping.index)) continue;
@@ -295,9 +338,12 @@ export function findingReportSemanticAssignment(text: string): FindingReportSema
     [connectedReachabilityValueDirective, 1, 2],
     [directReachabilityAliasDirective, 1, 2],
     [directReachabilityValueDirective, 1, 2],
+    [broadReachabilityValueDirective, 1, 2],
     [reverseReachabilityValueDirective, 2, 1],
     [mandatoryReachabilityValueDirective, 1, 2],
-    [quantifiedReachabilityValueDirective, 1, 2]
+    [quantifiedReachabilityValueDirective, 1, 2],
+    [quantifiedReachabilityIsDirective, 1, 2],
+    [quantifiedReverseReachabilityValueDirective, 2, 1]
   ] as const) {
     pattern.lastIndex = 0;
     for (const reference of text.matchAll(pattern)) {
@@ -310,7 +356,17 @@ export function findingReportSemanticAssignment(text: string): FindingReportSema
     }
   }
 
-  for (const renamePattern of [findingReportRenameDirective, findingReportReplacementDirective]) {
+  fieldFirstReachabilityDirective.lastIndex = 0;
+  for (const reference of text.matchAll(fieldFirstReachabilityDirective)) {
+    if (hasNonLiveDirectivePrefix(text, reference.index)) continue;
+    return { key: "reachability", operator: "=", value: reference[1]! };
+  }
+
+  for (const renamePattern of [
+    findingReportRenameDirective,
+    findingReportReplacementDirective,
+    findingReportBecomesDirective
+  ]) {
     renamePattern.lastIndex = 0;
     for (const rename of text.matchAll(renamePattern)) {
       if (hasNonLiveDirectivePrefix(text, rename.index)) continue;
@@ -324,6 +380,7 @@ export function findingReportSemanticAssignment(text: string): FindingReportSema
 
   directedNoteKeyReference.lastIndex = 0;
   for (const reference of text.matchAll(directedNoteKeyReference)) {
+    if (hasNonLiveDirectivePrefix(text, reference.index)) continue;
     const identifier = reference[1]!;
     if (reference[2] !== undefined || isPromptReportVocabularyKey(identifier)) {
       return { key: identifier, operator: "=", value: "<note-key>" };
@@ -332,6 +389,7 @@ export function findingReportSemanticAssignment(text: string): FindingReportSema
 
   directedReportNoteKeyReference.lastIndex = 0;
   for (const reference of text.matchAll(directedReportNoteKeyReference)) {
+    if (hasNonLiveDirectivePrefix(text, reference.index)) continue;
     const identifier = reference[1]!;
     if (identifier.toLowerCase() !== "report-bound" && isPromptReportVocabularyKey(identifier)) {
       return { key: identifier, operator: "=", value: "<note-key>" };
@@ -363,6 +421,21 @@ export function findingReportSemanticAssignment(text: string): FindingReportSema
   return undefined;
 }
 
+function maskNonLiveFindingReportText(text: string): string {
+  return text
+    .replace(/<!--[\s\S]*?-->/gu, (match) => match.replace(/[^\r\n]/gu, " "))
+    .replace(/(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:\n[ \t]*\1[^\n]*(?=\n|$)|$)/gu, (match) =>
+      match.replace(/[^\r\n]/gu, " ")
+    )
+    .replace(/\b(?:examples?|quoted?[ \t]+examples?)[ \t]*:[ \t]*\r?\n[^\n]*/giu, (match) =>
+      match.replace(/[^\r\n]/gu, " ")
+    )
+    .replace(/\b(?:examples?(?:[ \t]+output)?|quoted?[ \t]+examples?)[ \t]*:[^\n]*/giu, (match) =>
+      match.replace(/[^\r\n]/gu, " ")
+    )
+    .replace(/(^|\n)[^\n]*\bwould[ \t]+be[ \t]+incorrect\b[^\n]*/giu, (match) => match.replace(/[^\r\n]/gu, " "));
+}
+
 function hasNonLiveDirectivePrefix(text: string, directiveStart: number): boolean {
   const prefix = text.slice(Math.max(0, text.lastIndexOf("\n", directiveStart - 1) + 1), directiveStart);
   if (
@@ -373,15 +446,26 @@ function hasNonLiveDirectivePrefix(text: string, directiveStart: number): boolea
     return false;
   }
   return (
+    /(?:^|[.!?][ \t]+)(?:<!--|examples?(?:[ \t]+output)?[ \t]*:|(?:the[ \t]+)?documentation(?:[ \t]+contains?)?|an?[ \t]+external[ \t]+report[ \t]+says?)\b[^.;\n]{0,160}$/iu.test(
+      prefix
+    ) ||
+    /(?:^|[ \t])(?:previously|formerly)[,]?[ \t]+(?:the[ \t]+)?(?:agent|worker|model|prompt)?\b[^.;\n]{0,120}$/iu.test(
+      prefix
+    ) ||
+    /\b(?:legacy|deprecated|old|previous|prior|earlier|historical)\s+(?:agent|worker|model|prompt|instructions?)\b[^.;\n]{0,160}$/iu.test(
+      prefix
+    ) ||
+    /\b(?:discuss|explain|forbid|forbidden|incorrect|wrong|how\s+to|phrase)\b[^.;\n]{0,160}$/iu.test(prefix) ||
+    /(?:^|\n)\s*(?:```|~~~)[^\n]*$/u.test(prefix) ||
     /\b(?:do[ \t]+not|never|must[ \t]+not|shall[ \t]+not|should[ \t]+not)\b[^.;\n]{0,120}$/iu.test(prefix) ||
     /\b(?:old|previous|prior|earlier|historical)[ \t]+(?:(?:version[ \t]+of[ \t]+)?the[ \t]+)?prompts?\b[^.;\n]{0,120}$/iu.test(
       prefix
     ) ||
     /\bhistorically\b[^.;\n]{0,120}\bprompts?\b[^.;\n]{0,120}$/iu.test(prefix) ||
-    /\b(?:instruction|phrase|prompt|quotation|quote)\b[^.;\n]{0,120}\b(?:reads?|says?|stated?|used?)\b[^.;\n]{0,80}["'“‘][^"'”’]*$/iu.test(
+    /\b(?:instruction|phrase|prompt|quotation|quote)\b[^.;\n]{0,120}\b(?:reads?|says?|stated?|used?)\b[^.;\n]{0,80}[`"'“‘][^`"'”’]*$/iu.test(
       prefix
     ) ||
-    /\b(?:reject|quote|describe|mention)\b[^.;\n]{0,120}["'“‘][^"'”’]*$/iu.test(prefix)
+    /\b(?:reject|quote|describe|mention)\b[^.;\n]{0,120}[`"'“‘][^`"'”’]*$/iu.test(prefix)
   );
 }
 
@@ -417,7 +501,9 @@ const findingNoteConstraintRules = [
   ),
   findingNoteConstraint(canonicalColonAssignmentPattern, "Unsupported report-bound finding note key"),
   findingNoteConstraint(canonicalDirectMappingPattern, "Unsupported report-bound finding note key"),
+  findingNoteConstraint(canonicalReachabilityUnicodeMappingPattern, "Unsupported report-bound finding note key"),
   findingNoteConstraint(canonicalReachabilityMappingPattern, "Unsupported report-bound finding note key"),
+  findingNoteConstraint(obfuscatedReachabilityAssignmentPattern, "Unsupported report-bound finding note key"),
   ...unsupportedMetadataPairColonPatterns.map((pattern) =>
     findingNoteConstraint(pattern, "Unsupported report-bound finding note key")
   ),
