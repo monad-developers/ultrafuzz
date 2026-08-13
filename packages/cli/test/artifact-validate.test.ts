@@ -8,6 +8,7 @@ import { runCli } from "../src/index.js";
 
 const validCoverageEvidence = {
   schema_version: "ultrafuzz.coverage-evidence.v1",
+  lcov: { path: "echidna/covered.test.lcov", sha256: "a".repeat(64) },
   views: [
     { scope: "selected-range", covered_ranges: 1, total_ranges: 1 },
     { scope: "production-source", covered_ranges: 1, total_ranges: 2 }
@@ -47,7 +48,7 @@ const validCoverageEvidence = {
       covered: false
     }
   ],
-  zero_coverage_components: [{ path: "src/Critical.sol", kind: "production" }]
+  zero_coverage_components: [{ path: "src/Critical.sol", kind: "production", start_line: 1, line_count: 1 }]
 };
 
 test("artifact validate executes document-local coverage evidence gates", async () => {

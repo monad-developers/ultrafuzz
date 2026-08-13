@@ -54,11 +54,24 @@ describe("adjudicator prompt assets", () => {
     );
   });
 
+  it("preserves complete coverage evidence beyond the former 12k prompt limit", () => {
+    const input = judgeInput();
+    input.coverageEvidence = {
+      schema_version: "ultrafuzz.coverage-evidence.v1",
+      padding: "x".repeat(13_000),
+      tail_marker: "complete-coverage-tail"
+    };
+
+    const rendered = buildAdjudicatorPrompt(input)[1]!.content;
+    expect(rendered).toContain('"tail_marker": "complete-coverage-tail"');
+    expect(rendered).not.toContain("... truncated ...");
+  });
+
   it("defines candidate-first semantic canonical-family containment", () => {
     const messages = buildAdjudicatorPrompt(judgeInput());
     const rendered = messages.map((message) => message.content).join("\n");
 
-    expect(EVAL_JUDGE_PROMPT_VERSION).toBe("ultrafuzz-eval-judge-v11-scoped-coverage-evidence");
+    expect(EVAL_JUDGE_PROMPT_VERSION).toBe("ultrafuzz-eval-judge-v12-complete-coverage-evidence");
     expect(rendered).toContain("ultrafuzz.eval.llm-judge-result.v1");
     expect(rendered).toContain("Decide solely from the supplied finding, candidates, evidence, and rubric");
     expect(rendered).toContain("Do not anticipate, defer to, infer, or simulate any other evaluator's decision");

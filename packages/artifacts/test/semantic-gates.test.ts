@@ -333,6 +333,7 @@ const differentialTriageBBinding = differentialBinding(
 
 const validCoverageEvidence = {
   schema_version: "ultrafuzz.coverage-evidence.v1",
+  lcov: { path: "echidna/covered.test.lcov", sha256: "a".repeat(64) },
   views: [
     { scope: "selected-range", covered_ranges: 0, total_ranges: 0 },
     { scope: "production-source", covered_ranges: 0, total_ranges: 0 }
@@ -669,6 +670,7 @@ const fixtures = {
     positive: validCoverageEvidence,
     negative: {
       schema_version: "ultrafuzz.coverage-evidence.v1",
+      lcov: { path: "echidna/covered.test.lcov", sha256: "a".repeat(64) },
       views: [
         { scope: "selected-range", covered_ranges: 0, total_ranges: 0 },
         { scope: "production-source", covered_ranges: 0, total_ranges: 1 }
@@ -693,7 +695,7 @@ const fixtures = {
           covered: false
         }
       ],
-      zero_coverage_components: [{ path: "src/Core.sol", kind: "production" }]
+      zero_coverage_components: [{ path: "src/Core.sol", kind: "production", start_line: 1, line_count: 1 }]
     }
   },
   "coverage-goal-reconciliation": {

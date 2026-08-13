@@ -2337,6 +2337,21 @@
           "type": "string",
           "const": "ultrafuzz.coverage-evidence.v1"
         },
+        "lcov": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "required": ["path", "sha256"],
+          "additionalProperties": false
+        },
         "views": {
           "minItems": 2,
           "maxItems": 2,
@@ -2437,7 +2452,7 @@
         },
         "zero_coverage_components": {
           "minItems": 0,
-          "maxItems": 10000,
+          "maxItems": 100000,
           "type": "array",
           "items": {
             "type": "object",
@@ -2449,14 +2464,24 @@
               "kind": {
                 "type": "string",
                 "enum": ["production", "test", "harness", "dependency"]
+              },
+              "start_line": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "line_count": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
               }
             },
-            "required": ["path", "kind"],
+            "required": ["path", "kind", "start_line", "line_count"],
             "additionalProperties": false
           }
         }
       },
-      "required": ["schema_version", "views", "files", "counted_ranges", "zero_coverage_components"],
+      "required": ["schema_version", "lcov", "views", "files", "counted_ranges", "zero_coverage_components"],
       "additionalProperties": false
     },
     "property_provenance": {
