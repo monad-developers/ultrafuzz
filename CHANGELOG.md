@@ -4,7 +4,7 @@
 
 ### Breaking changes
 
-- **[config] [docs]** Renames the unmodified built-in audit profile from `balanced` to `default` and removes the separate default pointer. Configurations that select `balanced` now fail with the standard unknown-profile diagnostic and must select `default` or omit `audit_profile`. Historical run metadata remains unchanged, and reporting treats the two recorded ids as distinct profile cohorts (#534).
+- **[config] [docs]** Renames the unmodified built-in audit profile from `balanced` to `default` and removes the separate default pointer. Configurations that select `balanced` now fail with the standard unknown-profile diagnostic and must select `default` or omit `audit_profile`. Historical run metadata retains its exact recorded id; eval-history and benchmark reporting do not key cohorts by audit-profile id, so otherwise matching runs remain in the same reporting cohort across the migration boundary (#534).
 
 ### Other changes
 

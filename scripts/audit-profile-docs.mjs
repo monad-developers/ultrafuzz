@@ -48,7 +48,7 @@ Topology selection is atomic rather than merged:
 
 The \`default\` profile is reserved for the unmodified project workflow: it has no settings overrides and uses the project topology. Catalogs without \`profiles.default\` are rejected.
 
-There is no alias for the former \`balanced\` name. Existing configurations that select \`balanced\` fail with the standard unknown-profile diagnostic and must select \`default\` or omit \`audit_profile\`. Historical run metadata is not rewritten; reporting uses recorded profile ids exactly, so \`balanced\` and \`default\` remain distinct profile cohorts across the migration boundary.
+There is no alias for the former \`balanced\` name. Existing configurations that select \`balanced\` fail with the standard unknown-profile diagnostic and must select \`default\` or omit \`audit_profile\`. Historical run metadata is not rewritten, so its recorded profile ids remain exact. Eval-history and benchmark reporting do not use audit-profile ids as cohort keys; historical \`balanced\` runs and new \`default\` runs therefore remain in the same reporting cohort when their other provenance dimensions match.
 
 Use \`ultrafuzz config audit-profiles\` for the catalog, \`ultrafuzz config audit-profile <name>\` for effective project settings, and \`ultrafuzz run --audit-profile <name>\` for a one-run override.
 
