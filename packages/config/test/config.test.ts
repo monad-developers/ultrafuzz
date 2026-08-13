@@ -145,6 +145,93 @@ agents = ["sol-xhigh", "gpt55-xhigh"]
     }
   });
 
+  it("emits one exact retry-owned diagnostic for each invalid retry field", () => {
+    const cases: Array<{
+      retry: NonNullable<ProjectConfigInput["retry"]>;
+      expected: Pick<ConfigDiagnostic, "code" | "message" | "path">;
+    }> = [
+      {
+        retry: { sameAgentAttempts: 0 },
+        expected: {
+          code: "CONFIG_RETRY_ATTEMPTS_INVALID",
+          message: "retry.same_agent_attempts must be a positive safe integer",
+          path: ["retry", "same_agent_attempts"]
+        }
+      },
+      {
+        retry: { sameAgentAttempts: 101 },
+        expected: {
+          code: "CONFIG_RETRY_ATTEMPTS_MAX_EXCEEDED",
+          message: "retry.same_agent_attempts must not exceed 100",
+          path: ["retry", "same_agent_attempts"]
+        }
+      },
+      {
+        retry: { agents: ["../invalid"] },
+        expected: {
+          code: "CONFIG_RETRY_AGENT_ID_INVALID",
+          message: "retry.agents entry 0 must be a valid model profile ID",
+          path: ["retry", "agents", "0"]
+        }
+      },
+      {
+        retry: { agents: ["default", "default"] },
+        expected: {
+          code: "CONFIG_RETRY_AGENT_DUPLICATE",
+          message: "retry.agents repeats model profile `default`",
+          path: ["retry", "agents", "1"]
+        }
+      },
+      {
+        retry: { agents: ["missing"] },
+        expected: {
+          code: "CONFIG_RETRY_AGENT_UNKNOWN",
+          message: "retry.agents references unknown model profile `missing`",
+          path: ["retry", "agents", "0"]
+        }
+      }
+    ];
+
+    for (const { retry, expected } of cases) {
+      const result = resolveConfig({ env: {}, projectConfig: { retry } });
+      expect(result.ok).toBe(false);
+      if (result.ok) continue;
+      expect(result.diagnostics.map(({ code, message, path }) => ({ code, message, path }))).toEqual([expected]);
+    }
+  });
+
+  it("accepts a 100-attempt retry chain and rejects an expanded chain of 101 exactly once", () => {
+    const profiles = {
+      primary: { agent: "CodexAgent", model: "gpt-5.5" },
+      fallback: { agent: "CodexAgent", model: "gpt-5.6-sol" }
+    };
+    const boundary = resolveConfig({
+      env: {},
+      projectConfig: {
+        models: { profiles },
+        retry: { sameAgentAttempts: 99, agents: ["primary", "fallback"] }
+      }
+    });
+    expect(boundary.ok).toBe(true);
+
+    const exceeded = resolveConfig({
+      env: {},
+      projectConfig: {
+        models: { profiles },
+        retry: { sameAgentAttempts: 100, agents: ["primary", "fallback"] }
+      }
+    });
+    expect(exceeded.ok).toBe(false);
+    if (exceeded.ok) return;
+    expect(exceeded.diagnostics.map(({ code, message, path }) => ({ code, message, path }))).toEqual([
+      {
+        code: "CONFIG_RETRY_CHAIN_MAX_EXCEEDED",
+        message: "retry expands to 101 attempts; maximum is 100",
+        path: ["retry"]
+      }
+    ]);
+  });
+
   it("loads and serializes declared production source roots", () => {
     const parsed = parseProjectConfigToml(`
 [permissions]

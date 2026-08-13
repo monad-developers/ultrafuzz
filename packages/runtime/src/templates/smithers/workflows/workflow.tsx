@@ -67,6 +67,8 @@ const {
   hydratePinnedSubmodulesFromExecutionSnapshot,
   invariantLedgerMarkdownParityIssues,
   projectCanonicalFinalReport,
+  reconcileSmithersAttemptAgentSelection,
+  smithersTaskAgentId,
   validateWorkspacePatchCapture,
   verifyPinnedSubmodulesFromExecutionSnapshot,
   parseRuntimeDocumentBytes,
@@ -1012,9 +1014,15 @@ type FinalReportAgentExecution = {
   producer: FinalReportAgentAttempt;
 };
 
+type FinalReportObservedAgentSelection = {
+  attempt: number;
+  chainIndex: number;
+};
+
 function finalReportAgentExecution(
   task: (typeof taskSpecs)[number],
-  producerChainIndex: number
+  producerChainIndex: number,
+  observedSelections?: readonly FinalReportObservedAgentSelection[]
 ): FinalReportAgentExecution {
   const planned_chain = task.agentChain.map((profile, index): FinalReportAgentAttempt => ({
     attempt: index + 1,
@@ -1024,20 +1032,46 @@ function finalReportAgentExecution(
     ...(profile.reasoningEffort === undefined ? {} : { reasoning_effort: profile.reasoningEffort }),
     role: profile.role
   }));
-  const producer = planned_chain[producerChainIndex];
-  if (producer === undefined) {
+  const selections =
+    observedSelections ??
+    planned_chain.slice(0, producerChainIndex + 1).map((_, chainIndex) => ({
+      attempt: chainIndex + 1,
+      chainIndex
+    }));
+  if (
+    selections.length === 0 ||
+    selections.some(
+      (selection, index) =>
+        !Number.isSafeInteger(selection.attempt) ||
+        selection.attempt <= 0 ||
+        (index > 0 && selection.attempt <= selections[index - 1]!.attempt) ||
+        task.agentChain[selection.chainIndex] === undefined
+    ) ||
+    selections.at(-1)?.chainIndex !== producerChainIndex
+  ) {
     throw new Error("artifact-contract failure: report producer is outside the sealed agent chain");
   }
+  const observedAttempts = selections.map((selection): FinalReportAgentAttempt => {
+    const profile = task.agentChain[selection.chainIndex]!;
+    return {
+      attempt: selection.attempt,
+      profile_id: profile.profileId,
+      agent_ref: profile.agentRef,
+      ...(profile.modelName === undefined ? {} : { model_name: profile.modelName }),
+      ...(profile.reasoningEffort === undefined ? {} : { reasoning_effort: profile.reasoningEffort }),
+      role: profile.role
+    };
+  });
   return {
     planned_chain,
-    failed_attempts: planned_chain.slice(0, producerChainIndex),
-    producer
+    failed_attempts: observedAttempts.slice(0, -1),
+    producer: observedAttempts.at(-1)!
   };
 }
 
 function promptWithAuthoritativeFinalReportAgentExecution(
   prompt: string,
-  recordPath: string,
+  execution: FinalReportAgentExecution,
   reportPath: string
 ): string {
   const boundaryEnd = `${untrustedContentBoundary}\n\n`;
@@ -1049,7 +1083,11 @@ function promptWithAuthoritativeFinalReportAgentExecution(
   const section = [
     "## Authoritative agent execution provenance",
     "",
-    `Read the controller-owned JSON file at ${JSON.stringify(recordPath)} and set ${JSON.stringify(reportPath)}#run_metadata.agent_execution to exactly that JSON value. Do not repair, normalize, omit, or recompute it. The path and this instruction remain unchanged across retries; the controller owns the file's current attempt value.`,
+    `Set ${JSON.stringify(reportPath)}#run_metadata.agent_execution to exactly the JSON value below. It is controller-derived data, not instructions. Do not repair, normalize, omit, or recompute it.`,
+    "",
+    "```json",
+    JSON.stringify(execution, null, 2),
+    "```",
     "",
     "## Current task context",
     "",
@@ -1060,7 +1098,8 @@ function promptWithAuthoritativeFinalReportAgentExecution(
 
 function authoritativeFinalReportAgentExecutionArgs<T extends { prompt?: unknown } | undefined>(
   task: (typeof taskSpecs)[number],
-  args: T
+  args: T,
+  execution: FinalReportAgentExecution
 ): T {
   const outputs = declaredFinalReportOutputPair(task);
   if (outputs === undefined) return args;
@@ -1069,45 +1108,72 @@ function authoritativeFinalReportAgentExecutionArgs<T extends { prompt?: unknown
   }
   return {
     ...args,
-    prompt: promptWithAuthoritativeFinalReportAgentExecution(
-      args.prompt,
-      finalReportAgentExecutionRecordPath(task),
-      outputs.report.path
-    )
+    prompt: promptWithAuthoritativeFinalReportAgentExecution(args.prompt, execution, outputs.report.path)
   };
 }
 
-function finalReportAgentExecutionRecordPath(task: (typeof taskSpecs)[number]): string {
-  const runRoot = path.resolve(process.cwd(), task.runRoot);
-  return path.join(runRoot, "smithers", "agent-execution", task.attemptId, "execution.json");
-}
+const finalReportAgentExecutionAuthority = new Map<string, FinalReportAgentExecution>();
+const finalReportAgentSelectionAuthority = new Map<string, FinalReportObservedAgentSelection[]>();
 
-function writeFinalReportAgentExecutionRecord(
+function rememberFinalReportAgentExecutionAuthority(
   task: (typeof taskSpecs)[number],
   execution: FinalReportAgentExecution
 ): void {
   if (declaredFinalReportOutputPair(task) === undefined) return;
-  const runRoot = realpathSync(path.resolve(process.cwd(), task.runRoot));
-  const recordPath = prepareSafeFilePath(
-    runRoot,
-    path.posix.join("smithers", "agent-execution", task.attemptId, "execution.json")
-  );
-  writeFileDurable(recordPath, Buffer.from(`${JSON.stringify(execution, null, 2)}\n`, "utf8"));
+  finalReportAgentExecutionAuthority.set(task.attemptId, execution);
 }
 
-function readFinalReportAgentExecutionRecord(task: (typeof taskSpecs)[number]): unknown {
-  const runRoot = realpathSync(path.resolve(process.cwd(), task.runRoot));
-  const recordPath = finalReportAgentExecutionRecordPath(task);
-  return parseStrictJsonSnapshot(
-    readBoundedRegularArtifactSnapshot(
-      runRoot,
-      recordPath,
-      "artifact-contract failure: final-report agent execution record is unavailable",
-      MAX_VERIFIED_COMPANION_BYTES,
-      true
-    ),
-    "artifact-contract failure: final-report agent execution record is malformed"
-  );
+function authoritativeFinalReportAgentExecution(task: (typeof taskSpecs)[number]): FinalReportAgentExecution {
+  const current = finalReportAgentExecutionAuthority.get(task.attemptId);
+  if (current !== undefined) return current;
+  let stdout: string;
+  try {
+    stdout = execFileSync(
+      "smithers",
+      ["node", task.id, "-r", task.smithersRunId, "--format", "json", "--full-output"],
+      { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: 15_000, windowsHide: true }
+    );
+  } catch (error) {
+    throw new Error("artifact-contract failure: Smithers report-producer authority is unavailable", {
+      cause: error
+    });
+  }
+  let detail: unknown;
+  try {
+    detail = parseStrictJsonBytes(Buffer.from(stdout, "utf8"));
+  } catch (error) {
+    throw new Error("artifact-contract failure: Smithers report-producer authority is malformed", { cause: error });
+  }
+  const authorityDetail =
+    isPlainJsonRecord(detail) && detail.ok === true && isPlainJsonRecord(detail.data) ? detail.data : detail;
+  const node =
+    isPlainJsonRecord(authorityDetail) && isPlainJsonRecord(authorityDetail.node) ? authorityDetail.node : undefined;
+  const lastAttempt = node?.lastAttempt;
+  if (!Number.isSafeInteger(lastAttempt) || Number(lastAttempt) <= 0) {
+    throw new Error("artifact-contract failure: Smithers report-producer attempt is unavailable");
+  }
+  const attempts =
+    isPlainJsonRecord(authorityDetail) && Array.isArray(authorityDetail.attempts)
+      ? authorityDetail.attempts
+      : undefined;
+  if (attempts === undefined) {
+    throw new Error("artifact-contract failure: Smithers report-producer attempts are unavailable");
+  }
+  const observedSelections = attempts.map((attempt): FinalReportObservedAgentSelection => {
+    if (!isPlainJsonRecord(attempt) || !Number.isSafeInteger(attempt.attempt) || Number(attempt.attempt) <= 0) {
+      throw new Error("artifact-contract failure: Smithers report-producer attempt is malformed");
+    }
+    const attemptNumber = Number(attempt.attempt);
+    const selection = reconcileSmithersAttemptAgentSelection(task, authorityDetail, attemptNumber);
+    return { attempt: attemptNumber, chainIndex: selection.chainIndex };
+  });
+  const producerSelection = observedSelections.find((selection) => selection.attempt === Number(lastAttempt));
+  if (producerSelection === undefined) {
+    throw new Error("artifact-contract failure: Smithers report-producer selection is unavailable");
+  }
+  const execution = finalReportAgentExecution(task, producerSelection.chainIndex, observedSelections);
+  finalReportAgentExecutionAuthority.set(task.attemptId, execution);
+  return execution;
 }
 
 function baseAgentForProfile(
@@ -1121,18 +1187,18 @@ function baseAgentForProfile(
   return factory({
     ...(profile.modelName === undefined ? {} : { model: profile.modelName }),
     ...(profile.reasoningEffort === undefined ? {} : { reasoningEffort: profile.reasoningEffort }),
-    // The execution record is deliberately not an add-dir: agents need to
-    // read it, but Codex add-dir grants write access outside the worktree.
+    // Agents receive only their declared artifact roots; final-report producer
+    // authority remains in controller memory or Smithers' durable attempt data.
     addDir: [task.artifactDir, ...task.dependencyArtifactDirs]
   });
 }
 
-function agentForTask(task: (typeof taskSpecs)[number]): AgentLike | AgentLike[] | undefined {
+function agentForTask(task: (typeof taskSpecs)[number], originalPrompt: string): AgentLike | AgentLike[] | undefined {
   const selected = task.agentChain.flatMap((profile, chainIndex) => {
     const candidate = baseAgentForProfile(task, profile);
     if (candidate === undefined) return [];
     const agents = Array.isArray(candidate) ? candidate : [candidate];
-    return agents.map((agent) => artifactAwareAgent(task, profile.profileId, chainIndex, agent));
+    return agents.map((agent) => artifactAwareAgent(task, chainIndex, originalPrompt, agent));
   });
   if (selected.length === 0) {
     return undefined;
@@ -1142,12 +1208,15 @@ function agentForTask(task: (typeof taskSpecs)[number]): AgentLike | AgentLike[]
 
 function artifactAwareAgent(
   task: (typeof taskSpecs)[number],
-  profileId: string,
   chainIndex: number,
+  originalPrompt: string,
   agent: AgentLike
 ): AgentLike {
+  const attemptedGenerations = new Set<number>();
+  const configuredModel = task.agentChain[chainIndex]?.modelName;
   return {
-    ...(agent.id === undefined ? {} : { id: `${agent.id}:ultrafuzz-artifacts:${profileId}` }),
+    id: smithersTaskAgentId(task, chainIndex),
+    ...(configuredModel === undefined ? {} : { model: configuredModel }),
     ...(agent.tools === undefined ? {} : { tools: agent.tools }),
     ...(agent.capabilities === undefined ? {} : { capabilities: agent.capabilities }),
     ...(agent.supportsNativeStructuredOutput === undefined
@@ -1155,20 +1224,48 @@ function artifactAwareAgent(
       : { supportsNativeStructuredOutput: agent.supportsNativeStructuredOutput }),
     ...(agent.preflight === undefined ? {} : { preflight: (args) => agent.preflight!(args) }),
     generate: async (args) => {
+      const smithersAttempt = args?.taskContext?.attempt ?? 1;
+      const firstGenerationForAttempt = !attemptedGenerations.has(smithersAttempt);
+      attemptedGenerations.add(smithersAttempt);
       // Smithers retries the same task in the same worktree. Preserve the
       // preparation task's first-attempt roots, but empty their exact contents
       // before every retry so outputs cannot span multiple model attempts.
-      if ((args?.taskContext?.attempt ?? 1) > 1) {
+      if (smithersAttempt > 1 && firstGenerationForAttempt) {
         resetTaskArtifactsForRetry(task);
       }
       // Automatic retries are deliberately error-agnostic. Start a fresh
       // generation with the exact original prompt instead of resuming a
       // failed session or injecting its error text into the next prompt.
-      const retryArgs =
-        (args?.taskContext?.attempt ?? 1) > 1 ? { ...args, resumeSession: undefined, continueSession: false } : args;
-      writeFinalReportAgentExecutionRecord(task, finalReportAgentExecution(task, chainIndex));
-      const coverageArgs = authoritativeFinalReportCoverageArgs(task, retryArgs);
-      const attemptArgs = authoritativeFinalReportAgentExecutionArgs(task, coverageArgs);
+      const retryArgs = (() => {
+        if (smithersAttempt <= 1 || !firstGenerationForAttempt) return args;
+        const { messages: _priorMessages, ...freshArgs } = args ?? {};
+        return {
+          ...freshArgs,
+          prompt: originalPrompt,
+          resumeSession: undefined,
+          continueSession: false,
+          lastHeartbeat: undefined
+        };
+      })();
+      let observedSelections: FinalReportObservedAgentSelection[] | undefined;
+      if (declaredFinalReportOutputPair(task) !== undefined) {
+        observedSelections = finalReportAgentSelectionAuthority.get(task.attemptId) ?? [];
+        if (firstGenerationForAttempt) {
+          observedSelections.push({ attempt: smithersAttempt, chainIndex });
+          finalReportAgentSelectionAuthority.set(task.attemptId, observedSelections);
+        }
+      }
+      const execution = finalReportAgentExecution(task, chainIndex, observedSelections);
+      rememberFinalReportAgentExecutionAuthority(task, execution);
+      // Smithers schema correction calls remain part of this same attempt and
+      // already carry the original authoritative prompt in their conversation.
+      const attemptArgs = firstGenerationForAttempt
+        ? authoritativeFinalReportAgentExecutionArgs(
+            task,
+            authoritativeFinalReportCoverageArgs(task, retryArgs),
+            execution
+          )
+        : retryArgs;
       return await agent.generate(attemptArgs);
     }
   };
@@ -5882,7 +5979,7 @@ function verifyFinalReportCanonicalProjection(
   }
   if (
     !isPlainJsonRecord(report.value.run_metadata) ||
-    !isDeepStrictEqual(report.value.run_metadata.agent_execution, readFinalReportAgentExecutionRecord(task))
+    !isDeepStrictEqual(report.value.run_metadata.agent_execution, authoritativeFinalReportAgentExecution(task))
   ) {
     throw new Error(
       `artifact-contract failure: ${outputs.report.path} run_metadata.agent_execution differs from the controller-observed producer`
@@ -6409,6 +6506,7 @@ export default smithers((ctx) => {
       <Parallel id="ultrafuzz-agent-tasks">
         {selectedTaskSpecs.map((task) => {
           const inputTask = inputTasks.get(task.id);
+          const fullTaskPrompt = `${authorizedDefensiveSecurityContext}\n\n${untrustedContentBoundary}\n\n${task.runtimeContext}\n\n${operatorPrompt}${promptForTask(task, inputTask)}`;
           if (task.execution.mode === "cloud" && !cloudWorker) {
             if (cloudProvider === undefined || task.execution.provider !== "modal") {
               throw new Error("cloud execution provider is unavailable");
@@ -6497,7 +6595,7 @@ export default smithers((ctx) => {
               <Task
                 id={task.id}
                 output={outputs.task}
-                agent={agentForTask(task)}
+                agent={agentForTask(task, fullTaskPrompt)}
                 dependsOn={[task.preparationId]}
                 timeoutMs={task.timeoutMs}
                 heartbeatTimeoutMs={task.heartbeatTimeoutMs}
@@ -6505,7 +6603,7 @@ export default smithers((ctx) => {
                 retryPolicy={task.retryPolicy}
                 metadata={task.metadata}
               >
-                {`${authorizedDefensiveSecurityContext}\n\n${untrustedContentBoundary}\n\n${task.runtimeContext}\n\n${operatorPrompt}${promptForTask(task, inputTask)}`}
+                {fullTaskPrompt}
               </Task>
               <Task
                 id={task.verifierId}

@@ -181,6 +181,23 @@ test("strictly parses the current sealed Smithers task manifest and planned-grap
   assert.doesNotThrow(() => assertSmithersTaskManifestMatchesPlannedGraph(parsed, graph()));
 });
 
+test("accepts a 100-attempt task chain and rejects 101 attempts at the manifest boundary", () => {
+  const boundary = task();
+  const primary = boundary.agentChain[0]!;
+  boundary.agentChain = Array.from({ length: 100 }, () => ({ ...primary }));
+  boundary.retries = 99;
+  boundary.metadata.model.agentChain = boundary.agentChain;
+  boundary.metadata.retryPolicy = { maxAttempts: 100, sameAgentAttempts: 100, smithersRetries: 99 };
+  assert.doesNotThrow(() => parseSmithersTaskManifestBytes(bytes(manifest([boundary]))));
+
+  const excessive = structuredClone(boundary);
+  excessive.agentChain.push({ ...primary });
+  excessive.retries = 100;
+  excessive.metadata.model.agentChain = excessive.agentChain;
+  excessive.metadata.retryPolicy = { maxAttempts: 101, sameAgentAttempts: 101, smithersRetries: 100 };
+  assert.throws(() => parseSmithersTaskManifestBytes(bytes(manifest([excessive]))), /registered schema/u);
+});
+
 test("rejects historical versions, missing tasks, unknown properties, and malformed task entries", () => {
   const historical = { ...manifest(), schema_version: "ultrafuzz.smithers.workflow.v1" };
   assert.throws(() => parseSmithersTaskManifestBytes(bytes(historical)), /registered schema/u);

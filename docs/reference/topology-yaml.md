@@ -89,7 +89,8 @@ profiles, the node uses the configured default model profile only.
 does not override it. Values greater than one retry the same agent task for
 retryable provider or execution failures that occur before agent completion
 under Smithers' bounded policy. A node value overrides its group and the project
-retry count. Optional project fallback profiles run only after this primary
+retry count. `max_attempts` and the complete chain after optional project
+fallback profiles are added are capped at 100. Fallback profiles run only after this primary
 budget. These settings do not retry a completed agent session whose required
 output is missing or schema-invalid; that post-agent contract failure is
 terminal.

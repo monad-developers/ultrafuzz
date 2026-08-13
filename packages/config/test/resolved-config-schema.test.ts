@@ -24,8 +24,8 @@ import {
   validateResolvedConfigJson
 } from "../src/index.js";
 
-const EXPECTED_SCHEMA_SHA256 = "c1a417b831d3cd20b2f2d0f8075bb390f011b1c57771252d19779e603f58420b";
-const EXPECTED_BUNDLE_SHA256 = "96a75ca47d8d686dc530392508ff947537d5001ec2926bf07f75f8c7d0ade82d";
+const EXPECTED_SCHEMA_SHA256 = "19d90f213e1a873b09a112c6253fc418bfc6d29fa1ac00623c5dca9744377f52";
+const EXPECTED_BUNDLE_SHA256 = "d7e43eb96286fe5c5f622f97f12ebede7134e2efc78fea10ddb4581cc37018f3";
 
 describe("resolved config JSON contract", () => {
   it("registers the exact checked-in Draft 2020-12 schema and stable digests", () => {
@@ -187,6 +187,32 @@ describe("resolved config JSON contract", () => {
     expect(validateResolvedConfigJson(value).ok).toBe(true);
     expect(resolvedConfigZodSchema.safeParse(value).success).toBe(true);
     expect(resolvedConfigValidatorsAgree(value)).toBe(true);
+  });
+
+  it("enforces the 100-attempt expanded retry-chain boundary in both resolved validators", () => {
+    const boundary = validFixture();
+    record(boundary.retry).sameAgentAttempts = 99;
+    record(boundary.retry).agents = ["default", "kimi"];
+    expect(validateResolvedConfigJson(boundary)).toEqual({ ok: true, issues: [], truncated: false });
+    expect(resolvedConfigZodSchema.safeParse(boundary).success).toBe(true);
+
+    const excessive = structuredClone(boundary);
+    record(excessive.retry).sameAgentAttempts = 100;
+    const ajv = validateResolvedConfigJson(excessive);
+    expect(ajv).toEqual({
+      ok: false,
+      issues: [
+        {
+          instancePath: "/retry",
+          schemaPath: "#/semantic/resolved-config-retry-chain-maximum",
+          keyword: "resolved-config-retry-chain-maximum",
+          message: "expanded retry chain must not exceed 100 attempts"
+        }
+      ],
+      truncated: false
+    });
+    expect(resolvedConfigZodSchema.safeParse(excessive).success).toBe(false);
+    expect(resolvedConfigValidatorsAgree(excessive)).toBe(true);
   });
 
   it("rejects duplicate keys and invalid UTF-8 before schema validation", () => {

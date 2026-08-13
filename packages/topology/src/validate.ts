@@ -1,7 +1,12 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
-import { ARTIFACT_MANIFEST_FILE, isArtifactContractId, type ArtifactContractId } from "@ultrafuzz/artifacts";
+import {
+  ARTIFACT_MANIFEST_FILE,
+  MAX_RETRY_CHAIN_ATTEMPTS,
+  isArtifactContractId,
+  type ArtifactContractId
+} from "@ultrafuzz/artifacts";
 import { RUN_REFERENCE_MANIFEST_FILE } from "@ultrafuzz/references";
 
 import { validateArtifactHandoffs } from "./artifact-handoffs.js";
@@ -363,10 +368,12 @@ function validateNodeShape(
       nodeId: node.id
     });
   }
-  if (node.max_attempts !== undefined && node.max_attempts <= 0) {
-    throw topologyError("INVALID_TOPOLOGY_SHAPE", `Node \`${node.id}\` max_attempts must be greater than zero`, {
-      nodeId: node.id
-    });
+  if (node.max_attempts !== undefined && (node.max_attempts <= 0 || node.max_attempts > MAX_RETRY_CHAIN_ATTEMPTS)) {
+    throw topologyError(
+      "INVALID_TOPOLOGY_SHAPE",
+      `Node \`${node.id}\` max_attempts must be between 1 and ${MAX_RETRY_CHAIN_ATTEMPTS}`,
+      { nodeId: node.id }
+    );
   }
   if (node.group !== undefined) {
     validateGroupId(node.group);
@@ -407,10 +414,15 @@ function validateGroups(
         group: groupId
       });
     }
-    if (group.defaults?.max_attempts !== undefined && group.defaults.max_attempts <= 0) {
-      throw topologyError("INVALID_TOPOLOGY_SHAPE", `Group \`${groupId}\` max_attempts must be greater than zero`, {
-        group: groupId
-      });
+    if (
+      group.defaults?.max_attempts !== undefined &&
+      (group.defaults.max_attempts <= 0 || group.defaults.max_attempts > MAX_RETRY_CHAIN_ATTEMPTS)
+    ) {
+      throw topologyError(
+        "INVALID_TOPOLOGY_SHAPE",
+        `Group \`${groupId}\` max_attempts must be between 1 and ${MAX_RETRY_CHAIN_ATTEMPTS}`,
+        { group: groupId }
+      );
     }
     for (const modelProfile of group.defaults?.model_profiles ?? []) {
       if (!isSafeId(modelProfile)) {

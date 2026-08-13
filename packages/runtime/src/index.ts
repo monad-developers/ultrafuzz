@@ -22,6 +22,7 @@ export * from "./semantic-artifact-context.js";
 export * from "./semantic-gates.js";
 export * from "./severity-matrix.js";
 export * from "./smithers-package.js";
+export * from "./smithers-attempt-authority.js";
 export * from "./start-run.js";
 export * from "./trusted-cli.js";
 export * from "./state-export.js";

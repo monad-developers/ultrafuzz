@@ -146,6 +146,7 @@
           "agentChain": {
             "type": "array",
             "minItems": 1,
+            "maxItems": 100,
             "items": {
               "type": "object",
               "additionalProperties": false,
@@ -217,7 +218,8 @@
           },
           "retries": {
             "type": "integer",
-            "minimum": 0
+            "minimum": 0,
+            "maximum": 99
           },
           "retryPolicy": {
             "type": "object",
@@ -548,6 +550,7 @@
                   "agentChain": {
                     "type": "array",
                     "minItems": 1,
+                    "maxItems": 100,
                     "items": {
                       "type": "object",
                       "additionalProperties": false,
@@ -777,15 +780,18 @@
                 "properties": {
                   "maxAttempts": {
                     "type": "integer",
-                    "minimum": 1
+                    "minimum": 1,
+                    "maximum": 100
                   },
                   "sameAgentAttempts": {
                     "type": "integer",
-                    "minimum": 1
+                    "minimum": 1,
+                    "maximum": 100
                   },
                   "smithersRetries": {
                     "type": "integer",
-                    "minimum": 0
+                    "minimum": 0,
+                    "maximum": 99
                   }
                 }
               },

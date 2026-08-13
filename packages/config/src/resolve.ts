@@ -1,4 +1,5 @@
 import type { ZodIssue, ZodType } from "zod/v4";
+import { MAX_RETRY_CHAIN_ATTEMPTS } from "@ultrafuzz/artifacts";
 import {
   DEFAULT_AGENT,
   DEFAULT_MODEL_PROFILE_ID,
@@ -94,7 +95,9 @@ export function validateResolvedConfig(
   env: Record<string, string | undefined> = process.env
 ): ConfigDiagnostic[] {
   const diagnostics = schemaIssues(resolvedConfigZodSchema, config)
-    .filter((issue) => !isNamedSemanticSchemaIssue(issue) && !isModelProfileSchemaIssue(issue))
+    .filter(
+      (issue) => !isNamedSemanticSchemaIssue(issue) && !isModelProfileSchemaIssue(issue) && !isRetrySchemaIssue(issue)
+    )
     .map((issue) => resolvedConfigDiagnostic(issue, config));
   diagnostics.push(...validateAgentConfigs(config.agents));
   diagnostics.push(...validateTriageConfig(config.triage));
@@ -662,7 +665,8 @@ function normalizeAgentConfig(source: Partial<AgentConfig>, base?: AgentConfig):
 
 function validateRetryConfig(config: ResolvedConfig): ConfigDiagnostic[] {
   const diagnostics: ConfigDiagnostic[] = [];
-  if (!Number.isSafeInteger(config.retry.sameAgentAttempts) || config.retry.sameAgentAttempts <= 0) {
+  const sameAgentAttempts = config.retry.sameAgentAttempts;
+  if (!Number.isSafeInteger(sameAgentAttempts) || sameAgentAttempts <= 0) {
     diagnostics.push(
       diagnostic(
         "CONFIG_RETRY_ATTEMPTS_INVALID",
@@ -671,9 +675,40 @@ function validateRetryConfig(config: ResolvedConfig): ConfigDiagnostic[] {
         "validation"
       )
     );
+  } else if (sameAgentAttempts > MAX_RETRY_CHAIN_ATTEMPTS) {
+    diagnostics.push(
+      diagnostic(
+        "CONFIG_RETRY_ATTEMPTS_MAX_EXCEEDED",
+        `retry.same_agent_attempts must not exceed ${MAX_RETRY_CHAIN_ATTEMPTS}`,
+        ["retry", "same_agent_attempts"],
+        "validation"
+      )
+    );
+  }
+  if (!Array.isArray(config.retry.agents)) {
+    diagnostics.push(
+      diagnostic(
+        "CONFIG_RETRY_AGENTS_INVALID",
+        "retry.agents must be an array of model profile IDs",
+        ["retry", "agents"],
+        "validation"
+      )
+    );
+    return diagnostics;
   }
   const seen = new Set<string>();
   for (const [index, profileId] of config.retry.agents.entries()) {
+    if (typeof profileId !== "string" || !validProfileId(profileId)) {
+      diagnostics.push(
+        diagnostic(
+          "CONFIG_RETRY_AGENT_ID_INVALID",
+          `retry.agents entry ${index} must be a valid model profile ID`,
+          ["retry", "agents", String(index)],
+          "validation"
+        )
+      );
+      continue;
+    }
     if (seen.has(profileId)) {
       diagnostics.push(
         diagnostic(
@@ -692,6 +727,23 @@ function validateRetryConfig(config: ResolvedConfig): ConfigDiagnostic[] {
           "CONFIG_RETRY_AGENT_UNKNOWN",
           `retry.agents references unknown model profile \`${profileId}\``,
           ["retry", "agents", String(index)],
+          "validation"
+        )
+      );
+    }
+  }
+  if (
+    Number.isSafeInteger(sameAgentAttempts) &&
+    sameAgentAttempts > 0 &&
+    sameAgentAttempts <= MAX_RETRY_CHAIN_ATTEMPTS
+  ) {
+    const expandedAttempts = sameAgentAttempts + Math.max(0, config.retry.agents.length - 1);
+    if (expandedAttempts > MAX_RETRY_CHAIN_ATTEMPTS) {
+      diagnostics.push(
+        diagnostic(
+          "CONFIG_RETRY_CHAIN_MAX_EXCEEDED",
+          `retry expands to ${expandedAttempts} attempts; maximum is ${MAX_RETRY_CHAIN_ATTEMPTS}`,
+          ["retry"],
           "validation"
         )
       );
@@ -740,6 +792,10 @@ function isNamedSemanticSchemaIssue(issue: ZodIssue): boolean {
 
 function isModelProfileSchemaIssue(issue: ZodIssue): boolean {
   return issue.path[0] === "models" && issue.path[1] === "profiles";
+}
+
+function isRetrySchemaIssue(issue: ZodIssue): boolean {
+  return issue.path[0] === "retry";
 }
 
 function sameDiagnosticIdentity(left: ConfigDiagnostic, right: ConfigDiagnostic): boolean {

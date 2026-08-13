@@ -4,6 +4,7 @@ import {
   type ArtifactContractId
 } from "./artifact-contract-ids.js";
 import { CANONICAL_ARTIFACT_RELATIVE_PATH_PATTERN } from "./artifact-path-primitives.js";
+import { MAX_RETRY_CHAIN_ATTEMPTS } from "./artifact-limits.js";
 import { artifactContractDefinition, artifactContractSchemaBinding } from "./artifact-contracts.js";
 import { validateRegisteredJsonSchema, type JsonSchemaValidationResult } from "./json-schema-validator.js";
 import { readRegularFileSnapshot } from "./schema-registry.js";
@@ -201,7 +202,7 @@ export const plannedGraphJsonSchema = {
           properties: {
             loops: { type: "integer", minimum: 1 },
             timeout_seconds: { type: "integer", minimum: 1 },
-            max_attempts: { type: "integer", minimum: 1 },
+            max_attempts: { type: "integer", minimum: 1, maximum: MAX_RETRY_CHAIN_ATTEMPTS },
             model_profiles: { type: "array", uniqueItems: true, items: { type: "string", minLength: 1 } }
           }
         }

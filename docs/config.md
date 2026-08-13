@@ -44,11 +44,12 @@ reasoning = "xhigh"
 `same_agent_attempts` includes the first attempt. `agents[0]` becomes the
 default primary profile, and each later profile receives one attempt after the
 primary budget is exhausted. A node or group `max_attempts` overrides the
-project primary count. Omitting `agents`, or leaving it empty, keeps model
-fallback disabled. Retries use bounded exponential backoff, a fresh session,
-and the unchanged original prompt; Ultrafuzz does not inspect provider error
-text. The planned chain and actual producer are recorded in the task manifest,
-attempt ledger, and final report.
+project primary count. The complete primary-plus-fallback chain may contain at
+most 100 attempts. Omitting `agents`, or leaving it empty, keeps model fallback
+disabled. Retries use bounded exponential backoff, a fresh session, and the
+unchanged original prompt; Ultrafuzz does not inspect provider error text. The
+planned chain and actual producer are recorded in the task manifest, attempt
+ledger, and final report.
 
 Validation checks the agents selected by the resolved topology and command-line
 overrides, the default profile when nothing selects an agent, and every fallback
@@ -87,9 +88,11 @@ auth = "subscription"
 
 Select it per node or group in `.ultrafuzz/topology.yml`
 (`model_profiles = ["claude"]`). `--agent` and `--model` override fields of the
-default profile rather than selecting a profile by id, so a one-off Claude run
-is `ultrafuzz run --agent ClaudeAgent`; add `--model claude-sonnet-5` to pin a
-model, otherwise the Claude CLI default is used.
+active primary profile rather than selecting a profile by ID. That profile is
+`retry.agents[0]` when a retry list is configured, and `models.default`
+otherwise. A one-off Claude run is `ultrafuzz run --agent ClaudeAgent`; add
+`--model claude-sonnet-5` to pin a model, otherwise the Claude CLI default is
+used.
 
 Set `auth = "subscription"` to run against your logged-in Claude Code CLI
 session with no API key — `ClaudeAgent` clears `ANTHROPIC_API_KEY` so the

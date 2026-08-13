@@ -1,5 +1,7 @@
 export const MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES = 1_000;
 export const MAX_NODE_ATTEMPT_FAILURE_MESSAGE_CODE_POINTS = 1_000;
+/** Maximum number of primary and fallback generations in one agent task. */
+export const MAX_RETRY_CHAIN_ATTEMPTS = 100;
 export const MAX_GENERATED_TEST_BUNDLE_ENTRIES = 1_024;
 export const MAX_GENERATED_TEST_BUNDLE_BYTES = 64 * 1024 * 1024;
 export const MAX_GENERATED_TEST_COMPANION_BYTES = 16 * 1024 * 1024;

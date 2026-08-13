@@ -1,5 +1,6 @@
 import { z } from "zod/v4";
 
+import { MAX_RETRY_CHAIN_ATTEMPTS } from "@ultrafuzz/artifacts";
 import { MAX_TIMEOUT_SECONDS } from "./constants.js";
 import { RESOLVED_CONFIG_SCHEMA_VERSION, type ResolvedConfig } from "./types.js";
 
@@ -264,8 +265,11 @@ export const resolvedConfigZodSchema: z.ZodType<ResolvedConfig> = z
       .strict(),
     retry: z
       .object({
-        sameAgentAttempts: positiveIntegerSchema,
-        agents: z.array(z.string().regex(PROFILE_ID_PATTERN)).refine((ids) => new Set(ids).size === ids.length)
+        sameAgentAttempts: positiveIntegerSchema.max(MAX_RETRY_CHAIN_ATTEMPTS),
+        agents: z
+          .array(z.string().regex(PROFILE_ID_PATTERN))
+          .max(MAX_RETRY_CHAIN_ATTEMPTS)
+          .refine((ids) => new Set(ids).size === ids.length)
       })
       .strict(),
     agents: agentConfigsSchema,
@@ -300,7 +304,17 @@ export const resolvedConfigZodSchema: z.ZodType<ResolvedConfig> = z
       })
       .strict()
   })
-  .strict();
+  .strict()
+  .superRefine((config, context) => {
+    const expandedAttempts = config.retry.sameAgentAttempts + Math.max(0, config.retry.agents.length - 1);
+    if (expandedAttempts > MAX_RETRY_CHAIN_ATTEMPTS) {
+      context.addIssue({
+        code: "custom",
+        message: "CONFIG_RETRY_CHAIN_MAX_EXCEEDED",
+        path: ["retry"]
+      });
+    }
+  });
 
 export function assertResolvedConfigZod(
   value: unknown,

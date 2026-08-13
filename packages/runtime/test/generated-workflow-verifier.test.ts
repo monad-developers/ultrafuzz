@@ -130,8 +130,8 @@ function loadArtifactAwareAgent(
   options: { onReset?: () => void } = {}
 ): (
   task: unknown,
-  profileId: string,
   chainIndex: number,
+  originalPrompt: string,
   agent: { generate(args: unknown): Promise<unknown> }
 ) => { generate(args: unknown): Promise<unknown> } {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
@@ -146,19 +146,27 @@ function loadArtifactAwareAgent(
     "resetTaskArtifactsForRetry",
     "authoritativeFinalReportCoverageArgs",
     "authoritativeFinalReportAgentExecutionArgs",
-    "writeFinalReportAgentExecutionRecord",
+    "rememberFinalReportAgentExecutionAuthority",
     "finalReportAgentExecution",
+    "declaredFinalReportOutputPair",
+    "smithersTaskAgentId",
     `${helper}; return artifactAwareAgent;`
   )(
     () => options.onReset?.(),
     (_task: unknown, args: unknown) => args,
     (_task: unknown, args: unknown) => args,
     () => undefined,
-    () => ({ planned_chain: [], failed_attempts: [], producer: {} })
+    () => ({ planned_chain: [], failed_attempts: [], producer: {} }),
+    () => undefined,
+    () => "ultrafuzz-agent:test"
   ) as ReturnType<typeof loadArtifactAwareAgent>;
 }
 
-function loadFinalReportAgentExecution(): (task: unknown, producerChainIndex: number) => unknown {
+function loadFinalReportAgentExecution(): (
+  task: unknown,
+  producerChainIndex: number,
+  observedSelections?: ReadonlyArray<{ attempt: number; chainIndex: number }>
+) => unknown {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function finalReportAgentExecution");
   const helperEnd = source.indexOf("\n\nfunction promptWithAuthoritativeFinalReportAgentExecution", helperStart);
@@ -174,7 +182,7 @@ function loadFinalReportAgentExecution(): (task: unknown, producerChainIndex: nu
 
 function loadPromptWithAuthoritativeFinalReportAgentExecution(): (
   prompt: string,
-  recordPath: string,
+  execution: unknown,
   reportPath: string
 ) => string {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
@@ -189,6 +197,53 @@ function loadPromptWithAuthoritativeFinalReportAgentExecution(): (
     "untrustedContentBoundary",
     `${helper}; return promptWithAuthoritativeFinalReportAgentExecution;`
   )("UNTRUSTED CONTENT BOUNDARY") as ReturnType<typeof loadPromptWithAuthoritativeFinalReportAgentExecution>;
+}
+
+function loadFinalReportAgentExecutionAuthority(
+  options: {
+    smithersDetail?: unknown;
+    chainIndex?: number;
+    execution?: unknown;
+  } = {}
+): {
+  remember(task: unknown, execution: unknown): void;
+  read(task: unknown): unknown;
+  smithersReads(): number;
+} {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("const finalReportAgentExecutionAuthority");
+  const helperEnd = source.indexOf("\n\nfunction baseAgentForProfile", helperStart);
+  assert.ok(helperStart >= 0 && helperEnd > helperStart, source);
+  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  let reads = 0;
+  const loaded = new Function(
+    "declaredFinalReportOutputPair",
+    "execFileSync",
+    "parseStrictJsonBytes",
+    "isPlainJsonRecord",
+    "reconcileSmithersAttemptAgentSelection",
+    "finalReportAgentExecution",
+    `${helper}; return {
+      remember: rememberFinalReportAgentExecutionAuthority,
+      read: authoritativeFinalReportAgentExecution
+    };`
+  )(
+    () => ({}),
+    () => {
+      reads += 1;
+      if (options.smithersDetail === undefined) {
+        throw new Error("Smithers fallback should not be needed");
+      }
+      return JSON.stringify(options.smithersDetail);
+    },
+    (bytes: Uint8Array) => JSON.parse(Buffer.from(bytes).toString("utf8")),
+    (value: unknown) => typeof value === "object" && value !== null && !Array.isArray(value),
+    () => ({ chainIndex: options.chainIndex ?? 0 }),
+    () => options.execution ?? {}
+  ) as { remember(task: unknown, execution: unknown): void; read(task: unknown): unknown };
+  return { ...loaded, smithersReads: () => reads };
 }
 
 function loadPromptWithAuthoritativeFinalReportCoverage(): (
@@ -4630,15 +4685,14 @@ test("agent retries are error-agnostic fresh generations with the original promp
   const calls: Array<Record<string, unknown> | undefined> = [];
   const arbitraryFailure = { provider: "opaque", detail: { code: 731 } };
   const artifactAwareAgent = loadArtifactAwareAgent({ onReset: () => (resets += 1) });
-  const wrapped = artifactAwareAgent({}, "primary", 0, {
+  const prompt = "the original task prompt";
+  const wrapped = artifactAwareAgent({ agentChain: [{}] }, 0, prompt, {
     async generate(args: unknown): Promise<unknown> {
       calls.push(args as Record<string, unknown> | undefined);
       if (calls.length === 1) throw arbitraryFailure;
       return { ok: true };
     }
   });
-  const prompt = "the original task prompt";
-
   await assert.rejects(
     () =>
       wrapped.generate({
@@ -4650,17 +4704,31 @@ test("agent retries are error-agnostic fresh generations with the original promp
     (error) => error === arbitraryFailure
   );
   const result = await wrapped.generate({
-    prompt,
+    messages: [
+      { role: "user", content: "prior prompt" },
+      { role: "assistant", content: "prior failed response" }
+    ],
     resumeSession: "failed-session",
     continueSession: true,
+    lastHeartbeat: { agentResume: "failed-session", agentConversation: ["prior"] },
     taskContext: { attempt: 2 }
   });
 
   assert.deepEqual(result, { ok: true });
   assert.equal(resets, 1);
   assert.equal(calls[1]?.prompt, prompt);
+  assert.equal("messages" in (calls[1] ?? {}), false);
   assert.equal(calls[1]?.resumeSession, undefined);
   assert.equal(calls[1]?.continueSession, false);
+  assert.equal(calls[1]?.lastHeartbeat, undefined);
+
+  await wrapped.generate({
+    messages: [{ role: "user", content: "repair the schema" }],
+    taskContext: { attempt: 2 }
+  });
+  assert.equal(resets, 1);
+  assert.deepEqual(calls[2]?.messages, [{ role: "user", content: "repair the schema" }]);
+  assert.equal(calls[2]?.prompt, undefined);
 });
 
 test("authoritative final-report coverage is injected as exact untrusted data before agent generation", () => {
@@ -4771,30 +4839,124 @@ test("final-report provenance seals the planned retry chain, failed attempts, an
       role: "fallback"
     }
   });
+  assert.deepEqual(executionFor(task, 2, [{ attempt: 1, chainIndex: 2 }]), {
+    planned_chain: [
+      {
+        attempt: 1,
+        profile_id: "sol-xhigh",
+        agent_ref: "CodexAgent",
+        model_name: "gpt-5.6-sol",
+        reasoning_effort: "xhigh",
+        role: "primary"
+      },
+      {
+        attempt: 2,
+        profile_id: "sol-xhigh",
+        agent_ref: "CodexAgent",
+        model_name: "gpt-5.6-sol",
+        reasoning_effort: "xhigh",
+        role: "primary"
+      },
+      {
+        attempt: 3,
+        profile_id: "gpt55-xhigh",
+        agent_ref: "CodexAgent",
+        model_name: "gpt-5.5",
+        reasoning_effort: "xhigh",
+        role: "fallback"
+      }
+    ],
+    failed_attempts: [],
+    producer: {
+      attempt: 1,
+      profile_id: "gpt55-xhigh",
+      agent_ref: "CodexAgent",
+      model_name: "gpt-5.5",
+      reasoning_effort: "xhigh",
+      role: "fallback"
+    }
+  });
 
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const verification = source.slice(
     source.indexOf("function verifyFinalReportCanonicalProjection"),
     source.indexOf("function readInvariantSourceSnapshot")
   );
-  assert.match(verification, /readFinalReportAgentExecutionRecord\(task\)/u);
+  assert.match(verification, /authoritativeFinalReportAgentExecution\(task\)/u);
   assert.match(verification, /controller-observed producer/u);
-  const agentFactory = source.slice(
-    source.indexOf("function baseAgentForProfile"),
-    source.indexOf("function agentForTask")
-  );
-  assert.doesNotMatch(agentFactory, /path\.dirname\(finalReportAgentExecutionRecordPath/u);
+  assert.doesNotMatch(source, /agent-execution|execution\.json|readFinalReportAgentExecutionRecord/u);
+  assert.match(source, /reconcileSmithersAttemptAgentSelection\(task, authorityDetail/u);
+  assert.match(source, /detail\.ok === true && isPlainJsonRecord\(detail\.data\)/u);
+  assert.match(source, /finalReportAgentExecutionAuthority\.get\(task\.attemptId\)/u);
 
   const promptWithExecution = loadPromptWithAuthoritativeFinalReportAgentExecution();
   const originalPrompt = "trusted preamble\n\nUNTRUSTED CONTENT BOUNDARY\n\ntrusted runtime\n\nrendered task";
-  const recordPath = "/run/smithers/agent-execution/final-report.json";
-  const firstAttemptPrompt = promptWithExecution(originalPrompt, recordPath, "report.json");
-  const fallbackAttemptPrompt = promptWithExecution(originalPrompt, recordPath, "report.json");
+  const execution = executionFor(task, 2);
+  const firstAttemptPrompt = promptWithExecution(originalPrompt, execution, "report.json");
+  const fallbackAttemptPrompt = promptWithExecution(originalPrompt, execution, "report.json");
   assert.equal(fallbackAttemptPrompt, firstAttemptPrompt);
-  assert.match(firstAttemptPrompt, /controller-owned JSON file/u);
-  assert.match(firstAttemptPrompt, /path and this instruction remain unchanged across retries/u);
-  assert.match(firstAttemptPrompt, new RegExp(recordPath.replaceAll("/", "\\/"), "u"));
-  assert.doesNotMatch(firstAttemptPrompt, /gpt-5\.5|failed_attempts/u);
+  assert.match(firstAttemptPrompt, /controller-derived data/u);
+  assert.match(firstAttemptPrompt, /"profile_id": "gpt55-xhigh"/u);
+  assert.match(firstAttemptPrompt, /"failed_attempts"/u);
+});
+
+test("a non-Codex fallback cannot forge final-report producer authority through the run filesystem", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-forged-producer-"));
+  try {
+    const task = {
+      id: "node:final-report",
+      attemptId: "final-report",
+      runRoot: root,
+      smithersRunId: "ultrafuzz-authority-recovery"
+    };
+    const actual = {
+      planned_chain: [{ attempt: 1, profile_id: "deepseek", agent_ref: "DeepSeekAgent", role: "fallback" }],
+      failed_attempts: [],
+      producer: { attempt: 1, profile_id: "deepseek", agent_ref: "DeepSeekAgent", role: "fallback" }
+    };
+    const forged = {
+      ...actual,
+      producer: { attempt: 1, profile_id: "forged", agent_ref: "CodexAgent", role: "primary" }
+    };
+    const legacyRecord = path.join(root, "smithers", "agent-execution", "final-report", "execution.json");
+    fs.mkdirSync(path.dirname(legacyRecord), { recursive: true });
+    fs.writeFileSync(legacyRecord, `${JSON.stringify(forged)}\n`, "utf8");
+
+    const authority = loadFinalReportAgentExecutionAuthority();
+    authority.remember(task, actual);
+    assert.deepEqual(authority.read(task), actual);
+    assert.equal(authority.smithersReads(), 0);
+    assert.notDeepEqual(authority.read(task), JSON.parse(fs.readFileSync(legacyRecord, "utf8")));
+
+    const recovered = loadFinalReportAgentExecutionAuthority({
+      smithersDetail: {
+        ok: true,
+        data: {
+          node: { nodeId: task.id, lastAttempt: 1 },
+          attempts: [
+            {
+              nodeId: task.id,
+              attempt: 1,
+              state: "finished",
+              meta: {
+                agentChainIndex: 0,
+                agentId: "ultrafuzz-agent:final-report:0:deepseek",
+                agentModel: "deepseek-chat"
+              }
+            }
+          ]
+        },
+        meta: { command: "node", duration: "1ms" }
+      },
+      chainIndex: 0,
+      execution: actual
+    });
+    assert.deepEqual(recovered.read(task), actual);
+    assert.equal(recovered.smithersReads(), 1);
+    assert.notDeepEqual(recovered.read(task), JSON.parse(fs.readFileSync(legacyRecord, "utf8")));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("generated retries do not inspect or inject previous failure text", () => {
@@ -4805,7 +4967,11 @@ test("generated retries do not inspect or inject previous failure text", () => {
   );
   assert.doesNotMatch(source, /retryFailureAwareArgs|retryFailureText|Untrusted prior-attempt failure/u);
   assert.doesNotMatch(agent, /catch \(|previousFailure|error\.message|String\(error\)/u);
-  assert.match(agent, /resumeSession: undefined, continueSession: false/u);
+  assert.match(agent, /prompt: originalPrompt/u);
+  assert.match(agent, /resumeSession: undefined/u);
+  assert.match(agent, /continueSession: false/u);
+  assert.match(agent, /lastHeartbeat: undefined/u);
+  assert.match(agent, /messages: _priorMessages/u);
   assert.match(agent, /return await agent\.generate\(attemptArgs\)/u);
 });
 
@@ -4869,7 +5035,7 @@ test("generated Smithers retries reset exact task-owned artifact contents after 
   assert.ok(preparationStart > rootsStart, source);
 
   const agent = source.slice(agentStart, rootsStart);
-  assert.match(agent, /if \(\(args\?\.taskContext\?\.attempt \?\? 1\) > 1\)/u);
+  assert.match(agent, /if \(smithersAttempt > 1 && firstGenerationForAttempt\)/u);
   assert.ok(
     agent.indexOf("resetTaskArtifactsForRetry(task)") < agent.indexOf("return await agent.generate(attemptArgs)"),
     agent
@@ -5065,7 +5231,7 @@ function loadFinalReportCanonicalProjectionHarness(): (
     "authoritativeFinalReportCoverage",
     "isDeepStrictEqual",
     "projectCanonicalFinalReport",
-    "readFinalReportAgentExecutionRecord",
+    "authoritativeFinalReportAgentExecution",
     "Buffer",
     `${emitted}; return verifyFinalReportCanonicalProjection;`
   )(

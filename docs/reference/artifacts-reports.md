@@ -162,10 +162,11 @@ outcome, executed-versus-reused status, and SHA-256 digests for input and output
 manifests.
 
 Each new attempt also records its selected Smithers chain index, model-profile
-ID, agent reference, optional model/reasoning values, primary-or-fallback role,
-and whether the model selection was observed from token telemetry or projected
-from the sealed retry order. Failed primaries therefore remain visible even
-when a later fallback produces the accepted output.
+ID, agent reference, optional model/reasoning values, and
+primary-or-fallback role. Selection is reconciled against Smithers' durable
+attempt metadata and the sealed task chain; it is never inferred from the retry
+number or token model. Failed primaries therefore remain visible even when a
+later fallback produces the accepted output.
 
 Attempt summaries and retry counts are derived from this ledger. Replaying a
 known transition does not append it again, so resume, replay, checkpoint
@@ -177,8 +178,9 @@ outputs, or configuration.
 For terminal report producers, `report.json#run_metadata.agent_execution`
 contains the full planned attempt chain, the attempts that failed before the
 successful generation, and the actual producing profile/model. The workflow
-verifier compares that field with a controller-owned per-attempt record before
-accepting the report, so downstream evals can detect mixed-model runs.
+verifier compares that field with controller memory or independently persisted
+Smithers attempt authority before accepting the report, so downstream evals can
+detect mixed-model runs without trusting a model-writable file.
 
 ## Node Artifacts
 

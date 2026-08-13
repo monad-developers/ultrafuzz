@@ -201,7 +201,8 @@ agents = ["sol-xhigh", "gpt55-xhigh"]
 `same_agent_attempts` is a positive integer counting the first primary attempt.
 The optional `agents` array contains unique existing model-profile IDs. Its
 first entry is the default primary profile; later entries each receive one
-fallback attempt in order. Profile names are opaque: `gpt55-xhigh` maps to
+fallback attempt in order. Neither `same_agent_attempts` nor the expanded
+primary-plus-fallback chain may exceed 100 attempts. Profile names are opaque: `gpt55-xhigh` maps to
 `model = "gpt-5.5"` and `reasoning = "xhigh"` only through its explicit
 `[models.gpt55-xhigh]` table.
 

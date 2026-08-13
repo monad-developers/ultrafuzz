@@ -129,6 +129,14 @@ describe("expanded graph schema", () => {
     };
     expect(validateExpandedGraphSchema(valid).ok).toBe(true);
 
+    const boundary = structuredClone(valid);
+    boundary.groups.review!.defaults!.max_attempts = 100;
+    expect(validateExpandedGraphSchema(boundary).ok).toBe(true);
+
+    const excessive = structuredClone(valid);
+    excessive.groups.review!.defaults!.max_attempts = 101;
+    expect(validateExpandedGraphSchema(excessive).ok).toBe(false);
+
     const invalidDocuments = [
       { ...valid, groups: { review: { label: "Review", legacy: true } } },
       { ...valid, groups: { review: { defaults: { model_profiles: [1] } } } },
@@ -173,6 +181,15 @@ describe("expanded graph schema", () => {
       nodes: [node]
     };
     expect(assertExpandedGraphSchema(graph)).toEqual(graph);
+
+    const retryBoundary = structuredClone(graph);
+    retryBoundary.nodes[0]!.retryPolicy.maxAttempts = 100;
+    expect(validateExpandedGraphSchema(retryBoundary).ok).toBe(true);
+
+    const excessiveRetry = structuredClone(graph);
+    excessiveRetry.nodes[0]!.retryPolicy.maxAttempts = 101;
+    expect(validateExpandedGraphSchema(excessiveRetry).ok).toBe(false);
+
     expect(() => assertExpandedGraphSchema({ ...graph, nodes: [node, structuredClone(node)] })).toThrow(
       /repeats node ID/u
     );

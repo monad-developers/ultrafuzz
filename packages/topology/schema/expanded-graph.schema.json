@@ -48,7 +48,8 @@
               },
               "max_attempts": {
                 "type": "integer",
-                "minimum": 1
+                "minimum": 1,
+                "maximum": 100
               },
               "model_profiles": {
                 "type": "array",
@@ -187,7 +188,8 @@
             "properties": {
               "maxAttempts": {
                 "type": "integer",
-                "minimum": 1
+                "minimum": 1,
+                "maximum": 100
               }
             }
           },

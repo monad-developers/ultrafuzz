@@ -10,6 +10,7 @@ import {
 import {
   ARTIFACT_CONTRACT_IDS,
   CANONICAL_ARTIFACT_RELATIVE_PATH_PATTERN,
+  MAX_RETRY_CHAIN_ATTEMPTS,
   NON_JSON_ARTIFACT_CONTRACT_IDS,
   createStrictAjv,
   runValidator,
@@ -55,7 +56,7 @@ const topologyGroupJsonSchema = {
       properties: {
         loops: { type: "integer", minimum: 1 },
         timeout_seconds: { type: "integer", minimum: 1 },
-        max_attempts: { type: "integer", minimum: 1 },
+        max_attempts: { type: "integer", minimum: 1, maximum: MAX_RETRY_CHAIN_ATTEMPTS },
         model_profiles: {
           type: "array",
           uniqueItems: true,
@@ -182,7 +183,7 @@ export const expandedGraphJsonSchema = {
             required: ["maxAttempts"],
             additionalProperties: false,
             properties: {
-              maxAttempts: { type: "integer", minimum: 1 }
+              maxAttempts: { type: "integer", minimum: 1, maximum: MAX_RETRY_CHAIN_ATTEMPTS }
             }
           },
           loop: {

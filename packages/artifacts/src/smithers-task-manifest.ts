@@ -4,6 +4,7 @@ import {
   type ArtifactContractId
 } from "./artifact-contract-ids.js";
 import { CANONICAL_ARTIFACT_RELATIVE_PATH_PATTERN } from "./artifact-path-primitives.js";
+import { MAX_RETRY_CHAIN_ATTEMPTS } from "./artifact-limits.js";
 import { validateRegisteredJsonSchema, type JsonSchemaValidationResult } from "./json-schema-validator.js";
 import type { PlannedGraphDocument, PlannedGraphNodeDocument, PlannedGraphOutput } from "./planned-graph.js";
 import { parseStrictJsonBytes } from "./strict-json.js";
@@ -306,7 +307,12 @@ const smithersTaskMetadataJsonSchema = {
         reasoningEffort: nonEmptyStringJsonSchema,
         modelIndex: { type: "integer", minimum: 0 },
         attemptIndex: { type: "integer", minimum: 0 },
-        agentChain: { type: "array", minItems: 1, items: taskAgentChainEntryJsonSchema }
+        agentChain: {
+          type: "array",
+          minItems: 1,
+          maxItems: MAX_RETRY_CHAIN_ATTEMPTS,
+          items: taskAgentChainEntryJsonSchema
+        }
       }
     },
     workspace: {
@@ -335,9 +341,9 @@ const smithersTaskMetadataJsonSchema = {
       additionalProperties: false,
       required: ["maxAttempts", "sameAgentAttempts", "smithersRetries"],
       properties: {
-        maxAttempts: { type: "integer", minimum: 1 },
-        sameAgentAttempts: { type: "integer", minimum: 1 },
-        smithersRetries: { type: "integer", minimum: 0 }
+        maxAttempts: { type: "integer", minimum: 1, maximum: MAX_RETRY_CHAIN_ATTEMPTS },
+        sameAgentAttempts: { type: "integer", minimum: 1, maximum: MAX_RETRY_CHAIN_ATTEMPTS },
+        smithersRetries: { type: "integer", minimum: 0, maximum: MAX_RETRY_CHAIN_ATTEMPTS - 1 }
       }
     },
     timeout: {
@@ -408,7 +414,12 @@ export const smithersTaskManifestJsonSchema = {
             pattern: "^verify:[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
           },
           agentRef: nonEmptyStringJsonSchema,
-          agentChain: { type: "array", minItems: 1, items: taskAgentChainEntryJsonSchema },
+          agentChain: {
+            type: "array",
+            minItems: 1,
+            maxItems: MAX_RETRY_CHAIN_ATTEMPTS,
+            items: taskAgentChainEntryJsonSchema
+          },
           modelName: nonEmptyStringJsonSchema,
           reasoningEffort: nonEmptyStringJsonSchema,
           dependencies: {
@@ -423,7 +434,7 @@ export const smithersTaskManifestJsonSchema = {
           },
           timeoutMs: { type: "integer", minimum: 1 },
           heartbeatTimeoutMs: { type: "integer", minimum: 1 },
-          retries: { type: "integer", minimum: 0 },
+          retries: { type: "integer", minimum: 0, maximum: MAX_RETRY_CHAIN_ATTEMPTS - 1 },
           retryPolicy: {
             type: "object",
             additionalProperties: false,
@@ -685,6 +696,7 @@ export function assertSmithersTaskManifestSemantics(manifest: SmithersTaskManife
       role: "primary"
     };
     if (
+      task.agentChain.length > MAX_RETRY_CHAIN_ATTEMPTS ||
       task.agentChain.length !== task.retries + 1 ||
       primaryChain.length !== task.metadata.retryPolicy.sameAgentAttempts ||
       primaryChain.some((entry) => !sameJson(entry, selectedProfile)) ||
@@ -704,6 +716,9 @@ export function assertSmithersTaskManifestSemantics(manifest: SmithersTaskManife
       `Smithers task ${JSON.stringify(task.attemptId)} dependency workflow metadata`
     );
     if (
+      task.metadata.retryPolicy.maxAttempts > MAX_RETRY_CHAIN_ATTEMPTS ||
+      task.metadata.retryPolicy.sameAgentAttempts > MAX_RETRY_CHAIN_ATTEMPTS ||
+      task.metadata.retryPolicy.smithersRetries >= MAX_RETRY_CHAIN_ATTEMPTS ||
       task.timeoutMs !== task.metadata.timeout.milliseconds ||
       task.heartbeatTimeoutMs !== task.metadata.timeout.heartbeatTimeoutMs ||
       task.retries !== task.metadata.retryPolicy.smithersRetries ||

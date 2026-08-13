@@ -1558,6 +1558,15 @@ test("planned graph v3 validates whole documents and executes every registered d
 
   assert.equal(validatePlannedGraph(graph).ok, true);
   assert.deepEqual(assertPlannedGraph(graph), graph);
+
+  const retryBoundary = structuredClone(graph);
+  retryBoundary.groups.review = { defaults: { max_attempts: 100 } };
+  assert.equal(validatePlannedGraph(retryBoundary).ok, true);
+
+  const excessiveRetry = structuredClone(graph);
+  excessiveRetry.groups.review = { defaults: { max_attempts: 101 } };
+  assert.equal(validatePlannedGraph(excessiveRetry).ok, false);
+
   assert.equal(validatePlannedGraph({ ...graph, schema_version: "2.0" }).ok, false);
   assert.equal(validatePlannedGraph({ ...graph, legacy: true }).ok, false);
   const findingsOutput = {

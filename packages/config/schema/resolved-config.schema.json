@@ -215,10 +215,13 @@
       "required": ["sameAgentAttempts", "agents"],
       "properties": {
         "sameAgentAttempts": {
-          "$ref": "#/$defs/positiveInteger"
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
         },
         "agents": {
           "type": "array",
+          "maxItems": 100,
           "uniqueItems": true,
           "items": {
             "$ref": "#/$defs/profileId"

@@ -14,6 +14,7 @@ import {
   getNodeArtifactDir,
   getNodeWorkspaceDir,
   invariantPinnedSourceRefExists,
+  MAX_RETRY_CHAIN_ATTEMPTS,
   parseStrictJsonBytes,
   readRegularFileSnapshot,
   readRunPlanDocument,
@@ -3886,10 +3887,20 @@ function agentChainForTask(
     role
   });
   const configuredPrimaryIndex = config.retry.agents.indexOf(primary.id);
-  const fallbackProfileIds = configuredPrimaryIndex < 0 ? [] : config.retry.agents.slice(configuredPrimaryIndex + 1);
+  const fallbackProfileCount =
+    configuredPrimaryIndex < 0 ? 0 : Math.max(0, config.retry.agents.length - configuredPrimaryIndex - 1);
+  if (!Number.isSafeInteger(sameAgentAttempts) || sameAgentAttempts <= 0) {
+    throw new Error("retry chain same-agent attempt count must be a positive safe integer");
+  }
+  const expandedAttempts = sameAgentAttempts + fallbackProfileCount;
+  if (sameAgentAttempts > MAX_RETRY_CHAIN_ATTEMPTS || expandedAttempts > MAX_RETRY_CHAIN_ATTEMPTS) {
+    throw new Error(`retry chain expands to ${expandedAttempts} attempts; maximum is ${MAX_RETRY_CHAIN_ATTEMPTS}`);
+  }
   return [
     ...Array.from({ length: sameAgentAttempts }, () => entry(primary, "primary")),
-    ...fallbackProfileIds.map((profileId) => entry(config.models.profiles[profileId]!, "fallback"))
+    ...config.retry.agents
+      .slice(configuredPrimaryIndex < 0 ? config.retry.agents.length : configuredPrimaryIndex + 1)
+      .map((profileId) => entry(config.models.profiles[profileId]!, "fallback"))
   ];
 }
 
@@ -4109,6 +4120,7 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
   const taskSpecs = JSON.stringify(
     compiled.tasks.map((task) => ({
       id: task.smithersNodeId,
+      smithersRunId: compiled.smithersRunId,
       preparationId: task.preparationSmithersNodeId,
       verifierId: task.verifierSmithersNodeId,
       attemptId: task.attemptId,
