@@ -177,6 +177,21 @@ const valueForReachabilityReference = new RegExp(
   `(?:\\x60|"|'|<|\\(|\\[)?(${reachabilityTokenValuePattern})(?:\\x60|"|'|>|\\)|\\])?[ \\t]+(?:as|for|to|under)[ \\t]+(?:the[ \\t]+)?(reachability(?:[_-](?:classification|note|token|value))?|reachability[ \\t]+(?:classification|note|token|value))\\b`,
   "iu"
 );
+const vocabularyDirectiveActionPattern =
+  "(?:add|annotate|append|assign|define|emit|include|label|mark|populate|put|record|return|set|store|use|write)";
+const promptVocabularyIdentifierPattern = "[A-Za-z0-9][-_0-9A-Za-z]{0,127}";
+const connectedReachabilityValueDirective = new RegExp(
+  `\\b${vocabularyDirectiveActionPattern}\\b[^.;\\n]{0,160}?\\b(reachability(?:[_-](?:classification|note|token|value))?)\\b(?:[ \\t]+(?:classification|note|token|value))?[ \\t]+(?:=|:|is|to|as)[ \\t]+(?:\\x60|"|'|<|\\(|\\[)?(${promptVocabularyIdentifierPattern})`,
+  "iu"
+);
+const directReachabilityAliasDirective = new RegExp(
+  `\\b${vocabularyDirectiveActionPattern}\\b[^.;\\n]{0,160}?\\b(reachability[_-](?:classification|note|token|value))\\b[ \\t]+(?:\\x60|"|'|<|\\(|\\[)?(${promptVocabularyIdentifierPattern})`,
+  "iu"
+);
+const reverseReachabilityValueDirective = new RegExp(
+  `\\b${vocabularyDirectiveActionPattern}\\b[^.;\\n]{0,160}?(?:\\x60|"|'|<|\\(|\\[)?(${promptVocabularyIdentifierPattern})(?:\\x60|"|'|>|\\)|\\])?[ \\t]+(?:as|for|to|under)[ \\t]+(?:the[ \\t]+)?(reachability(?:[_-](?:classification|note|token|value))?|reachability[ \\t]+(?:classification|note|token|value))\\b`,
+  "iu"
+);
 const directedNoteKeyReference =
   /\b(?:under|using|via|(?:key|field)\s+(?:named|called))\s+(?:the\s+)?(?:`|"|'|<|\(|\[)?([A-Za-z][-_0-9A-Za-z]{0,127})(?:`|"|'|>|\)|\])?(?=[^.;\n]{0,120}\b(?:(?:all|each|every)\s+)?(?:(?:finding|issue|report)\s+)?notes?\b)/giu;
 const literalReachabilityValue = new RegExp(
@@ -216,6 +231,21 @@ export function findingReportSemanticAssignment(text: string): FindingReportSema
       operator: "=",
       value: reverseReachabilityReference[1]!
     };
+  }
+
+  for (const [pattern, keyIndex, valueIndex] of [
+    [connectedReachabilityValueDirective, 1, 2],
+    [directReachabilityAliasDirective, 1, 2],
+    [reverseReachabilityValueDirective, 2, 1]
+  ] as const) {
+    const reference = pattern.exec(text);
+    if (reference !== null) {
+      return {
+        key: reference[keyIndex]!.replace(/[ \t]+/gu, "_"),
+        operator: "=",
+        value: reference[valueIndex]!
+      };
+    }
   }
 
   directedNoteKeyReference.lastIndex = 0;

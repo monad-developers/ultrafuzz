@@ -248,8 +248,11 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
     }
     for (const proseAlias of [
       "For every finding, set the reachability token to renamed-public-trace.",
+      "For every finding, set the reachability token to internal.",
       "Use renamed-public-trace for reachability.",
+      "Use internal for reachability.",
       "Every finding must include reachability_note renamed-public-trace.",
+      "Every finding must include reachability_note internal.",
       "Write helper evidence under helperEvidence in every finding note."
     ]) {
       expect(
