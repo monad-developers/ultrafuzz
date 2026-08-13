@@ -10,6 +10,7 @@ run("pnpm", ["--filter", "@ultrafuzz/prompts", "build"], root);
 const expectedConfigFiles = [
   "dist/audit-profiles.yml",
   "dist/topologies/full.yml",
+  "dist/topologies/fuzz-only.yml",
   "dist/topologies/invariant-only.yml",
   "dist/topologies/smoke.yml"
 ];

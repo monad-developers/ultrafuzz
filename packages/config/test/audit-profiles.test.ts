@@ -20,6 +20,7 @@ describe("audit profile catalog", () => {
     expect(Object.keys(catalog.profiles)).toEqual([
       "balanced",
       "exhaustive",
+      "fuzz-only",
       "invariant-only",
       "low-cost",
       "smoke",
@@ -35,6 +36,13 @@ describe("audit profile catalog", () => {
     expect(smokePath).toBeDefined();
     expect(fs.readFileSync(smokePath!, "utf8")).toContain("id: smoke-context");
     expect(packagedTopologyDigest(smoke, catalog)).toMatch(/^[0-9a-f]{64}$/u);
+
+    const fuzzOnly = auditProfile("fuzz-only", catalog);
+    expect(fuzzOnly.topologyPath).toBe("topologies/fuzz-only.yml");
+    expect(fuzzOnly.settings).toEqual({});
+    expect(fs.readFileSync(packagedTopologyPath(fuzzOnly, catalog)!, "utf8")).toContain(
+      "id: stateful-invariant-campaign"
+    );
 
     const invariantOnly = auditProfile("invariant-only", catalog);
     expect(invariantOnly.settings.dynamic_strategies_enumerator).toBe(0);
@@ -57,7 +65,9 @@ describe("audit profile catalog", () => {
   });
 
   it("fails unknown names with the available profile vocabulary", () => {
-    expect(() => auditProfile("fastest")).toThrow(/available profiles: balanced, exhaustive, invariant-only/u);
+    expect(() => auditProfile("fastest")).toThrow(
+      /available profiles: balanced, exhaustive, fuzz-only, invariant-only/u
+    );
   });
 
   it("ships every declared topology beside the built catalog", () => {

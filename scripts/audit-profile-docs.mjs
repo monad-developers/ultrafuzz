@@ -48,7 +48,7 @@ Topology selection is atomic rather than merged:
 
 Use \`ultrafuzz config audit-profiles\` for the catalog, \`ultrafuzz config audit-profile <name>\` for effective project settings, and \`ultrafuzz run --audit-profile <name>\` for a one-run override.
 
-Ultrafuzz ships \`full\`, \`smoke\`, and \`invariant-only\` topology files. Inspect them with \`ultrafuzz topology list\` and \`ultrafuzz topology show <name>\`, or safely copy one into a project with \`ultrafuzz topology copy <name> <path>\`.
+Ultrafuzz ships \`full\`, \`fuzz-only\`, \`smoke\`, and \`invariant-only\` topology files. Inspect them with \`ultrafuzz topology list\` and \`ultrafuzz topology show <name>\`, or safely copy one into a project with \`ultrafuzz topology copy <name> <path>\`.
 `;
 }
 
