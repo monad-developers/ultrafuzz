@@ -372,14 +372,23 @@ function hasAffirmativeWriteInstruction(
     ) {
       continue;
     }
+    const followingClause = boundedFollowingClause(promptText, destinationEnd).split(";", 1)[0]!;
+    const mandatoryEmptyFallback = hasMandatoryEmptyFallback(followingClause);
     if (
-      hasConditionalSuffix(promptText, destinationEnd) ||
-      hasNonMandatoryCondition(boundedFollowingClause(promptText, destinationEnd).split(";", 1)[0]!)
+      (hasConditionalSuffix(promptText, destinationEnd) || hasNonMandatoryCondition(followingClause)) &&
+      !mandatoryEmptyFallback
     )
       continue;
     return true;
   }
   return false;
+}
+
+function hasMandatoryEmptyFallback(value: string): boolean {
+  return (
+    /\b(?:empty\s+(?:(?:findings?|json)\s+)?(?:array|form|list)|\[\])\b/iu.test(value) &&
+    /\b(?:if|when)\s+(?:there\s+(?:are|is)\s+)?(?:none|no\s+findings?|no\s+result)\b|\bif\s+none\s+exist/iu.test(value)
+  );
 }
 
 const OUTPUT_ACTION_PATTERN =
@@ -434,6 +443,14 @@ function isQuotedOrCodeLikeDirective(promptText: string, destinationStart: numbe
 
   const before = line.slice(0, destinationOffset);
   const after = line.slice(destinationOffset + (destinationEnd - destinationStart));
+  if (
+    new RegExp(
+      `\\b(?:phrase|quotation|quote|string|text|wording)\\b[^.!?;]{0,80}(?:"|“|‘)[^"”’]{0,120}${OUTPUT_ACTION_PATTERN.source}[^"”’]{0,120}(?:"|”|’)[^.!?;]{0,120}$`,
+      "iu"
+    ).test(before)
+  ) {
+    return true;
+  }
   for (const [open, close] of [
     ['"', '"'],
     ["“", "”"],
@@ -552,6 +569,7 @@ function hasConditionalPreamble(beforeAction: string): boolean {
   if (/^(?:after\s+completing\s+(?:the\s+)?(?:analysis|audit|task|work)|once\s+complete)\b/iu.test(value)) {
     return false;
   }
+  if (/^upon\s+(?!complet(?:e|ed|ing|ion)\b)/iu.test(value)) return true;
   const conditionalLead =
     "(?:if|unless|only\\s+(?:if|when|after|as)|assuming|provided|whenever|wherever|where|when|once|" +
     "as\\s+(?:applicable|appropriate|needed|long\\s+as)|at\\s+(?:need|your\\s+discretion)|" +
@@ -582,6 +600,7 @@ function hasNonDirectiveActionPreamble(beforeAction: string): boolean {
 
 function hasDescriptiveWrapper(beforeAction: string): boolean {
   return (
+    /\b(?:here|this)\s+(?:is|shows?)\s+how\s+to\b[^.!?;]*$/iu.test(beforeAction) ||
     /\b(?:analysis|assessment|answer|decision|description|explanation|note|report|summary|tutorial|example|quotation|quote|command|instruction)\b[^.!?;]{0,180}\b(?:about|of|on|regarding|whether|if|how|why|explaining|stating|showing|that|to)\b[^.!?;]*$/iu.test(
       beforeAction
     ) ||
@@ -628,7 +647,12 @@ function hasActiveDestinationBinding(
   expectedContentPattern: string,
   requireExplicitContent: boolean
 ): boolean {
-  const normalized = binding.replace(/,\s*if\s+any\s*,/giu, ",");
+  const normalized = binding
+    .replace(/,\s*if\s+any\s*,/giu, ",")
+    .replace(
+      /,\s*or\s+(?:an?\s+)?(?:schema[- ]defined\s+)?empty\s+(?:findings?\s+)?(?:array|form|list)\s+if\s+(?:there\s+(?:are|is)\s+)?(?:none|no\s+findings?)\s*,?(?=\s*\b(?:to|at|in|into|under|as)\b)/giu,
+      ""
+    );
   if (
     /\b(?:if|unless|when|whenever|wherever|only\s+(?:if|when|after)|assuming|provided|should|as\s+(?:appropriate|applicable|needed))\b/iu.test(
       normalized
@@ -739,7 +763,7 @@ function hasDestinationFirstDirective(
     return false;
   }
   const allowedPrefix =
-    /^(?:(?:always|also|finally|immediately|otherwise|please|then)\s*,?\s+)*(?:(?:ensure|make\s+sure)(?:\s+that)?|(?:in|at|into|to)|(?:place|store|put|return|append|populate|copy|document)(?:\s+(?:in|at|into|to|via))?|the\s+(?:declared\s+)?(?:destination|output|artifact|file))?$/iu;
+    /^(?:(?:always|also|finally|immediately|otherwise|please|then)\s*,?\s+)*(?:(?:ensure|make\s+sure)(?:\s+that)?|(?:in|at|into|to)|(?:place|store|put|return|append|populate|copy|document)(?:\s+(?:in|at|into|to|via))?|the\s+(?:declared\s+)?(?:destination|output|artifact|file)(?:\s+(?:at|in))?)?$/iu;
   if (!allowedPrefix.test(prefix)) return false;
   const following = boundedFollowingClause(promptText, destinationEnd).replace(/^\s*[`'"\])}]+/u, "");
   const passive = following.match(
@@ -809,7 +833,7 @@ function hasConditionalSuffix(promptText: string, destinationEnd: number): boole
     return false;
   }
   if (/^\s*only\s*[.!?]?\s*$/iu.test(beforeSemicolon)) return true;
-  return /^\s*(?:,\s*)?(?:if|unless|when|whenever|once\s+(?!complete\b)|only\s+(?:if|when|after|as)|as\s+(?:applicable|appropriate|needed|long\s+as|an?\s+example)|for\s+example|at\s+(?:need|your\s+discretion)|where\s+(?:helpful|beneficial)|should\b|on\s+request|upon\s+request|assuming|provided|contingent\s+on|subject\s+to|depending\s+(?:on|upon)|in\s+(?:case|the\s+event)|to\s+the\s+extent|except\s+(?:if|when))\b/iu.test(
+  return /^\s*(?:,\s*)?(?:if|unless|when|whenever|once\s+(?!complete\b)|after\s+(?!complet(?:e|ed|ing|ion)\b)|only\s+(?:if|when|after|as)|as\s+(?:applicable|appropriate|needed|long\s+as|an?\s+example)|for\s+example|at\s+(?:need|your\s+discretion)|where\s+(?:helpful|beneficial)|should\b|on\s+request|upon\s+(?!complet(?:e|ed|ing|ion)\b)|assuming|provided|contingent\s+on|subject\s+to|depending\s+(?:on|upon)|in\s+(?:case|the\s+event)|to\s+the\s+extent|except\s+(?:if|when))\b/iu.test(
     beforeSemicolon
   );
 }
@@ -840,6 +864,24 @@ function hasNonRequiredDirectiveScope(promptText: string, destinationStart: numb
   const structuralPrefix = promptText.slice(structuralStart, lineStart);
   const block = structuralPrefix.split(/\r?\n\s*\r?\n/u).at(-1) ?? "";
   const lines = block.split(/\r?\n/u);
+  const previousLine =
+    structuralPrefix
+      .replace(/\r?\n$/u, "")
+      .split(/\r?\n/u)
+      .at(-1) ?? "";
+  if (!startsListItem) {
+    const quotedHeading = /^\s*>\s*(.+?:)\s*$/u.exec(previousLine)?.[1];
+    if (quotedHeading !== undefined && isNonRequiredDirectiveHeading(quotedHeading, true)) return true;
+    const listHeading = /^(\s*(?:[-*+]|\d+[.)])\s+)(.+?:)\s*$/u.exec(previousLine);
+    if (
+      listHeading !== null &&
+      markdownIndentWidth(currentLinePrefix) >=
+        markdownIndentWidth(listHeading[1]!) + listHeading[1]!.trimStart().length &&
+      isNonRequiredDirectiveHeading(listHeading[2]!, true)
+    ) {
+      return true;
+    }
+  }
   const markdownHeading = [...structuralPrefix.matchAll(/^\s*#{1,6}\s+(.+?)(?:\s+#+)?\s*$/gmu)].at(-1)?.[1];
   if (markdownHeading !== undefined && isNonRequiredDirectiveHeading(markdownHeading, true)) return true;
   const previousStructuralLine = structuralPrefix

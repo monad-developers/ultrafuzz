@@ -873,7 +873,13 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       "## Example output\n\nWrite findings to {{output_findings_path}}.",
       "## Never write findings\n\nWrite findings to {{output_findings_path}}.",
       "Example: Write findings to {{output_findings_path}}.",
-      "Historical output:\nWrite findings to {{output_findings_path}}."
+      "Historical output:\nWrite findings to {{output_findings_path}}.",
+      "> Example instruction:\nWrite findings to {{output_findings_path}}.",
+      "- Example instruction:\n  Write findings to {{output_findings_path}}.",
+      "The phrase “write findings” appears next to {{output_findings_path}}.",
+      "Here is how to write findings to {{output_findings_path}}.",
+      "Upon confirming a finding, write findings to {{output_findings_path}}.",
+      "Write findings to {{output_findings_path}} after confirming one."
     ]) {
       expect(
         () => validateTopology(validTopology(), { promptTexts: { "strategies/strategy.md": prompt } }),
@@ -956,7 +962,10 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       "Write the findings.json artifact to {{output_findings_path}}.",
       "Write confirmed findings from src/Foo.sol to {{output_findings_path}}.",
       "Do not modify source code, but write findings to {{output_findings_path}}.",
-      "Write findings to {{output_findings_path}}; if possible, validate the JSON."
+      "Write findings to {{output_findings_path}}; if possible, validate the JSON.",
+      "Write findings, or an empty array if there are none, to {{output_findings_path}}.",
+      "Always write findings to {{output_findings_path}}, using the schema-defined empty form if none exist.",
+      "The output at {{output_findings_path}} must contain all findings."
     ]) {
       expect(
         () => validateTopology(validTopology(), { promptTexts: { "strategies/strategy.md": prompt } }),
