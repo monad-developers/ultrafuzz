@@ -44,10 +44,7 @@ describe("workspace workflow-engine overrides", () => {
 
   it("pins the version the pinned runner itself declares", () => {
     const runnerManifest = JSON.parse(
-      fs.readFileSync(
-        path.join(repoRoot, "packages", "runtime", "node_modules", "smithers-orchestrator", "package.json"),
-        "utf8"
-      )
+      fs.readFileSync(path.join(repoRoot, "packages", "runtime", "node_modules", "smthrs", "package.json"), "utf8")
     ) as { dependencies?: Record<string, string> };
     expect(workspaceOverrides?.effect).toBe(runnerManifest.dependencies?.effect);
   });

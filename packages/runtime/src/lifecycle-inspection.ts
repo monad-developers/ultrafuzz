@@ -1403,7 +1403,7 @@ function parseCurrentNodeLimits(value: unknown): CurrentNodeDetail["limits"] {
     )
   };
   if (limits.toolPayloadBytesHuman !== 1_024 || limits.validatedOutputBytesHuman !== 10 * 1_024) {
-    contractError("workflow node limits do not match the pinned 0.32.0 contract");
+    contractError("workflow node limits do not match the pinned 0.34.0 contract");
   }
   return limits;
 }

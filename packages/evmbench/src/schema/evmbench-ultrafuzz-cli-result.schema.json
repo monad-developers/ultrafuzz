@@ -311,6 +311,7 @@
         "verdict": {
           "enum": [
             "done",
+            "degraded",
             "running-healthy",
             "progressing",
             "stalled",

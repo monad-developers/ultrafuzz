@@ -239,6 +239,7 @@ export interface RunStatusValue extends RunListEntry {
 
 export type RunHealthVerdict =
   | "done"
+  | "degraded"
   | "running-healthy"
   | "progressing"
   | "stalled"
@@ -711,8 +712,6 @@ export interface DoctorValue {
     installed_bin_target: string | null;
     bin_path: string | null;
     latest_published_version: string | "unknown";
-    /** The newest release is published under a renamed upstream package. */
-    latest_published_is_renamed_package: boolean;
     layout_status: DoctorCheckStatus;
     layout_detail: string | null;
     compatibility_patches: Record<string, string>;

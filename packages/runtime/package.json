@@ -28,11 +28,12 @@
     "@ultrafuzz/security": "workspace:*",
     "@ultrafuzz/topology": "workspace:*",
     "proper-lockfile": "4.1.2",
+    "typescript": "6.0.3",
     "zod": "4.4.3"
   },
   "devDependencies": {
     "@moonshot-ai/kimi-code": "0.29.1",
     "@types/proper-lockfile": "^4.1.4",
-    "smithers-orchestrator": "0.32.0"
+    "smthrs": "0.34.0"
   }
 }

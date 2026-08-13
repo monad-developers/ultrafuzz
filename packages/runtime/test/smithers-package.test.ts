@@ -15,7 +15,7 @@ test("historical Smithers dependency manifests fail instead of being migrated", 
   const manifest = currentManifest();
   manifest.dependencies = {
     ...(manifest.dependencies as Record<string, unknown>),
-    "smithers-orchestrator": "0.31.0"
+    smthrs: "0.31.0"
   };
 
   assert.throws(() => assertSmithersPackageManifest(manifest), /must retain Ultrafuzz's exact runner versions/u);

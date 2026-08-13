@@ -1,26 +1,21 @@
-export const SMITHERS_ORCHESTRATOR_VERSION = "0.32.0";
-export const SMITHERS_ORCHESTRATOR_PACKAGE_NAME = "smithers-orchestrator";
-// Upstream renamed the npm package after 0.32.0, the newest release published
-// under the name Ultrafuzz pins. Nothing further will ever ship as
-// `smithers-orchestrator`, so any future upgrade means moving to this name.
-export const SMITHERS_SUCCESSOR_PACKAGE_NAME = "smthrs";
-export const SMITHERS_ORCHESTRATOR_BIN_PATH = "src/bin/smithers.js";
-// Smithers 0.32.0 migrated its runtime from Effect 3 to Effect 4 and pins
-// exactly this version across its own packages. Track what Smithers declares:
-// left unpinned, npm installs two Effect copies side by side and the engine
-// loses the single Effect module identity its services are keyed on.
-export const SMITHERS_EFFECT_VERSION = "4.0.0-beta.102";
+export const SMITHERS_VERSION = "0.34.0";
+export const SMITHERS_PACKAGE_NAME = "smthrs";
+export const SMITHERS_BIN_PATH = "src/bin/smithers.js";
+// Smithers 0.34.0 pins this Effect build across its own packages. Track what
+// Smithers declares: left unpinned, npm installs two Effect copies side by side
+// and the engine loses the single Effect module identity its services are keyed on.
+export const SMITHERS_EFFECT_VERSION = "4.0.0-beta.105";
 export const KIMI_CODE_VERSION = "0.29.1";
 
 // The `@effect/*` packages Smithers pulls in must be pinned alongside Effect
 // itself, not just deduplicated. `@effect/platform-bun` asks for
-// `@effect/platform-node-shared: ^4.0.0-beta.102`, an open caret over
+// `@effect/platform-node-shared: ^4.0.0-beta.105`, an open caret over
 // prereleases, and the generated workspace is installed with
 // `--package-lock=false`. Unpinned, two cloud containers resuming the same run
 // at different times install different `@effect/*` builds, and a newer beta that
 // needs Effect APIs absent from the pinned core breaks every run including
 // in-flight resumes. Every entry below publishes at SMITHERS_EFFECT_VERSION and
-// peers `^4.0.0-beta.102`, so the pinned set is internally consistent.
+// peers `^4.0.0-beta.105`, so the pinned set is internally consistent.
 const SMITHERS_EFFECT_PACKAGE_NAMES = [
   "@effect/opentelemetry",
   "@effect/platform-bun",
@@ -36,7 +31,7 @@ export const REQUIRED_SMITHERS_OVERRIDES: Readonly<Record<string, string>> = {
 const REQUIRED_SMITHERS_DEPENDENCIES = {
   dependencies: {
     "@moonshot-ai/kimi-code": KIMI_CODE_VERSION,
-    "smithers-orchestrator": SMITHERS_ORCHESTRATOR_VERSION,
+    smthrs: SMITHERS_VERSION,
     zod: "4.4.3"
   },
   devDependencies: {
@@ -51,13 +46,13 @@ const REQUIRED_SMITHERS_DEPENDENCIES = {
 // an entry for every `name@version` the manifest pins, so raising a pin without
 // recording its publish instant fails the build rather than a launch.
 const SMITHERS_PIN_PUBLISH_TIMES: Readonly<Record<string, string>> = {
-  "@effect/opentelemetry@4.0.0-beta.102": "2026-07-26T22:24:29.050Z",
-  "@effect/platform-bun@4.0.0-beta.102": "2026-07-26T22:24:35.293Z",
-  "@effect/platform-node-shared@4.0.0-beta.102": "2026-07-26T22:24:39.301Z",
-  "@effect/sql-sqlite-bun@4.0.0-beta.102": "2026-07-26T22:24:42.599Z",
+  "@effect/opentelemetry@4.0.0-beta.105": "2026-08-07T01:12:53.761Z",
+  "@effect/platform-bun@4.0.0-beta.105": "2026-08-07T01:13:10.227Z",
+  "@effect/platform-node-shared@4.0.0-beta.105": "2026-08-07T01:16:00.798Z",
+  "@effect/sql-sqlite-bun@4.0.0-beta.105": "2026-08-07T01:13:00.629Z",
   "@moonshot-ai/kimi-code@0.29.1": "2026-07-24T05:27:08.545Z",
-  "effect@4.0.0-beta.102": "2026-07-26T22:24:42.705Z",
-  "smithers-orchestrator@0.32.0": "2026-08-01T05:00:25.735Z",
+  "effect@4.0.0-beta.105": "2026-08-07T01:37:58.225Z",
+  "smthrs@0.34.0": "2026-08-13T03:21:30.904Z",
   "typescript@6.0.3": "2026-04-16T23:38:27.905Z",
   "zod@4.4.3": "2026-05-04T07:06:40.819Z"
 };
@@ -85,7 +80,7 @@ const SMITHERS_PIN_PUBLISH_TIMES: Readonly<Record<string, string>> = {
 // must never precede a pinned version's own publish instant -- npm would fail to
 // find the pin at all -- and dating it a day back keeps every selectable tarball
 // well past propagation.
-export const SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF = "2026-08-02T00:00:00Z";
+export const SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF = "2026-08-14T00:00:00Z";
 
 /**
  * Fails when a pinned version has no recorded publish instant, or when the

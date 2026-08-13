@@ -11,6 +11,7 @@ import {
 } from "@ultrafuzz/config";
 import { loadPromptCatalog, projectPromptDir } from "@ultrafuzz/prompts";
 import { expandTopology, loadTopology, resolveTopologyPath, type ModelProfileSelection } from "@ultrafuzz/topology";
+import * as ts from "typescript";
 
 import type {
   PolicyPosture,
@@ -28,6 +29,8 @@ import {
   postureFromDiagnostics,
   runtimeResult
 } from "./utils.js";
+
+const SAFE_AGENT_REF_PATTERN = /^(?!.*\.\.)[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/u;
 
 export async function validateProject(input: ValidateProjectInput) {
   const projectRoot = path.resolve(input.projectRoot);
@@ -52,7 +55,7 @@ export async function validateProject(input: ValidateProjectInput) {
   }
 
   if (resolved.config) {
-    const policy = evaluatePolicies(projectRoot, resolved.config, input.env ?? process.env, topologyCheck.agentRefs);
+    const policy = evaluatePolicies(projectRoot, resolved.config, resolved.configuredAgentRefs ?? []);
     Object.assign(posture, policy.posture);
   } else {
     const blocked = postureFromDiagnostics("policy", "policy checks need valid config", [
@@ -84,6 +87,7 @@ export async function validateProject(input: ValidateProjectInput) {
 export async function loadResolvedProject(input: ValidateProjectInput): Promise<{
   config?: ResolvedConfig;
   configPath?: string;
+  configuredAgentRefs?: readonly string[];
   diagnostics: RuntimeDiagnostic[];
 }> {
   const loaded = await loadProjectConfig(path.resolve(input.projectRoot));
@@ -101,10 +105,14 @@ export async function loadResolvedProject(input: ValidateProjectInput): Promise<
       diagnostics: configDiagnostics(redactDiagnostics([...loaded.diagnostics, ...resolved.diagnostics]))
     };
   }
+  const configuredAgentRefs = [
+    ...new Set(Object.values(resolved.value.models.profiles).map((profile) => profile.agent))
+  ];
   applyAgentOverrides(resolved.value, input);
   return {
     config: resolved.value,
     configPath: loaded.value.path,
+    configuredAgentRefs,
     diagnostics: configDiagnostics(redactDiagnostics([...loaded.diagnostics, ...resolved.diagnostics]))
   };
 }
@@ -206,7 +214,6 @@ function validateTopologySurface(
 ): {
   posture: PostureItem;
   summary?: ValidateProjectResult["topology"];
-  agentRefs?: Set<string>;
 } {
   try {
     const policy =
@@ -278,8 +285,7 @@ function validateTopologySurface(
         logical_nodes: topology.nodes.length,
         expanded_nodes: expanded.nodes.length,
         required_commands: [...new Set(expanded.nodes.flatMap((node) => node.requiredCommands ?? []))].sort()
-      },
-      agentRefs: selectedAgents
+      }
     };
   } catch (error) {
     return {
@@ -293,12 +299,11 @@ function validateTopologySurface(
 function evaluatePolicies(
   projectRoot: string,
   config: ResolvedConfig,
-  _env: Record<string, string | undefined>,
-  selectedAgentRefs: Set<string> | undefined
+  configuredAgentRefs: readonly string[]
 ): {
   posture: Omit<PolicyPosture, "config" | "topology" | "prompts">;
 } {
-  const agentRegistry = validateAgentReferences(projectRoot, config, selectedAgentRefs);
+  const agentRegistry = validateAgentReferences(projectRoot, config, configuredAgentRefs);
   return {
     posture: {
       paths: postureFromDiagnostics("paths", "product files are written through project-local path guards", []),
@@ -315,47 +320,171 @@ function evaluatePolicies(
 function validateAgentReferences(
   projectRoot: string,
   config: ResolvedConfig,
-  selectedAgentRefs: Set<string> | undefined
+  configuredAgentRefs: readonly string[]
 ): RuntimeDiagnostic[] {
   const diagnostics: RuntimeDiagnostic[] = [];
-  const defaultProfile = config.models.profiles[config.models.default];
-  const agentRefs = selectedAgentRefs ?? new Set(defaultProfile === undefined ? [] : [defaultProfile.agent]);
-  const candidates = [
-    path.join(projectRoot, ".smithers", "agents.ts"),
-    path.join(projectRoot, ".smithers", "agents", "index.ts")
-  ];
-  const existing = candidates.filter((candidate) => fs.existsSync(candidate));
-  if (existing.length === 0) {
+  const agentRefs = new Set([
+    ...configuredAgentRefs,
+    ...Object.values(config.models.profiles).map((profile) => profile.agent)
+  ]);
+  const registryPath = path.join(projectRoot, ".smithers", "agents", "index.ts");
+  if (!fs.existsSync(registryPath)) {
     return [
       {
         code: "AGENT_REGISTRY_MISSING",
-        message: "project agent registry is missing; rerun ultrafuzz init to restore it",
+        message:
+          "canonical project agent registry .smithers/agents/index.ts is missing; rerun ultrafuzz init to restore it",
         severity: "error",
         source: "agents",
-        path: "agent registry"
+        path: ".smithers/agents/index.ts"
       }
     ];
   }
-  const registryText = existing.map((candidate) => fs.readFileSync(candidate, "utf8")).join("\n");
+  const registryText = fs.readFileSync(registryPath, "utf8");
   for (const agentRef of [...agentRefs].sort()) {
-    if (!agentRefExported(registryText, agentRef)) {
+    if (!registersAgentFactory(registryText, agentRef)) {
       diagnostics.push({
         code: "AGENT_REFERENCE_UNKNOWN",
-        message: `agent reference ${agentRef} is not exported by the project agent registry`,
+        message: `agent reference ${agentRef} is not registered in agentFactories by .smithers/agents/index.ts`,
         severity: "error",
         source: "agents",
-        path: "agent registry"
+        path: ".smithers/agents/index.ts"
       });
     }
   }
   return diagnostics;
 }
 
-function agentRefExported(registryText: string, agentRef: string): boolean {
-  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(agentRef)) {
-    return false;
+function registersAgentFactory(registryText: string, agentRef: string): boolean {
+  if (!SAFE_AGENT_REF_PATTERN.test(agentRef)) return false;
+  const source = ts.createSourceFile(
+    ".smithers/agents/index.ts",
+    registryText,
+    ts.ScriptTarget.Latest,
+    false,
+    ts.ScriptKind.TS
+  );
+  const parseDiagnostics = (source as ts.SourceFile & { parseDiagnostics: readonly ts.Diagnostic[] }).parseDiagnostics;
+  if (parseDiagnostics.length > 0) return false;
+  const localNames = exportedAgentFactoriesLocalNames(source);
+  const bindings = topLevelConstBindings(source);
+  return [...localNames].some((localName) => {
+    const initializer = bindings.get(localName);
+    return initializer !== undefined && registryMemberNames(initializer, bindings, new Set()).has(agentRef);
+  });
+}
+
+function exportedAgentFactoriesLocalNames(source: ts.SourceFile): ReadonlySet<string> {
+  const localNames = new Set<string>();
+  for (const statement of source.statements) {
+    if (ts.isVariableStatement(statement) && hasExportModifier(statement)) {
+      for (const declaration of statement.declarationList.declarations) {
+        if (ts.isIdentifier(declaration.name) && declaration.name.text === "agentFactories") {
+          localNames.add(declaration.name.text);
+        }
+      }
+      continue;
+    }
+    if (
+      !ts.isExportDeclaration(statement) ||
+      statement.isTypeOnly ||
+      statement.moduleSpecifier !== undefined ||
+      statement.exportClause === undefined ||
+      !ts.isNamedExports(statement.exportClause)
+    ) {
+      continue;
+    }
+    for (const element of statement.exportClause.elements) {
+      if (!element.isTypeOnly && moduleExportNameText(element.name) === "agentFactories") {
+        localNames.add(
+          element.propertyName === undefined ? "agentFactories" : moduleExportNameText(element.propertyName)
+        );
+      }
+    }
   }
-  return new RegExp(`\\b${agentRef}\\b`, "u").test(registryText);
+  return localNames;
+}
+
+function topLevelConstBindings(source: ts.SourceFile): ReadonlyMap<string, ts.Expression> {
+  const bindings = new Map<string, ts.Expression>();
+  for (const statement of source.statements) {
+    if (!ts.isVariableStatement(statement) || (statement.declarationList.flags & ts.NodeFlags.Const) === 0) continue;
+    for (const declaration of statement.declarationList.declarations) {
+      if (ts.isIdentifier(declaration.name) && declaration.initializer !== undefined) {
+        bindings.set(declaration.name.text, declaration.initializer);
+      }
+    }
+  }
+  return bindings;
+}
+
+function registryMemberNames(
+  expression: ts.Expression,
+  bindings: ReadonlyMap<string, ts.Expression>,
+  visiting: ReadonlySet<string>
+): ReadonlySet<string> {
+  const current = unwrapTypeExpressions(expression);
+  if (ts.isIdentifier(current)) {
+    if (visiting.has(current.text)) return new Set();
+    const initializer = bindings.get(current.text);
+    if (initializer === undefined) return new Set();
+    return registryMemberNames(initializer, bindings, new Set([...visiting, current.text]));
+  }
+  if (
+    ts.isCallExpression(current) &&
+    current.arguments.length === 1 &&
+    ts.isPropertyAccessExpression(current.expression) &&
+    ts.isIdentifier(current.expression.expression) &&
+    current.expression.expression.text === "Object" &&
+    current.expression.name.text === "freeze"
+  ) {
+    return registryMemberNames(current.arguments[0]!, bindings, visiting);
+  }
+  if (!ts.isObjectLiteralExpression(current)) return new Set();
+
+  const names = new Set<string>();
+  for (const property of current.properties) {
+    if (ts.isSpreadAssignment(property)) {
+      for (const name of registryMemberNames(property.expression, bindings, visiting)) names.add(name);
+      continue;
+    }
+    const name = objectMemberName(property);
+    if (name !== undefined) names.add(name);
+  }
+  return names;
+}
+
+function hasExportModifier(node: ts.VariableStatement): boolean {
+  return ts.getModifiers(node)?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword) ?? false;
+}
+
+function moduleExportNameText(name: ts.ModuleExportName): string {
+  return name.text;
+}
+
+function unwrapTypeExpressions(expression: ts.Expression): ts.Expression {
+  let current = expression;
+  while (ts.isAsExpression(current) || ts.isSatisfiesExpression(current) || ts.isParenthesizedExpression(current)) {
+    current = current.expression;
+  }
+  return current;
+}
+
+function objectMemberName(property: ts.ObjectLiteralElementLike): string | undefined {
+  if (
+    !ts.isPropertyAssignment(property) &&
+    !ts.isShorthandPropertyAssignment(property) &&
+    !ts.isMethodDeclaration(property)
+  ) {
+    return undefined;
+  }
+  const name = property.name;
+  if (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNoSubstitutionTemplateLiteral(name)) return name.text;
+  if (ts.isComputedPropertyName(name)) {
+    const expression = unwrapTypeExpressions(name.expression);
+    if (ts.isStringLiteral(expression) || ts.isNoSubstitutionTemplateLiteral(expression)) return expression.text;
+  }
+  return undefined;
 }
 
 function applyAgentOverrides(config: ResolvedConfig, input: ValidateProjectInput): void {

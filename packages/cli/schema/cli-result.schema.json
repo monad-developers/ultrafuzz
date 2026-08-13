@@ -768,7 +768,6 @@
             "installed_bin_target",
             "bin_path",
             "latest_published_version",
-            "latest_published_is_renamed_package",
             "layout_status",
             "layout_detail",
             "compatibility_patches"
@@ -780,7 +779,6 @@
             "installed_bin_target": { "type": ["string", "null"] },
             "bin_path": { "type": ["string", "null"] },
             "latest_published_version": { "type": "string" },
-            "latest_published_is_renamed_package": { "type": "boolean" },
             "layout_status": { "$ref": "#/$defs/doctorStatus" },
             "layout_detail": { "type": ["string", "null"] },
             "compatibility_patches": {

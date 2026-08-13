@@ -42,6 +42,7 @@ export interface EvmbenchResumeData {
 
 export type EvmbenchStatusVerdict =
   | "done"
+  | "degraded"
   | "running-healthy"
   | "progressing"
   | "stalled"

@@ -45,8 +45,8 @@ import {
   REQUIRED_SMITHERS_OVERRIDES,
   SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF,
   SMITHERS_EFFECT_VERSION,
-  SMITHERS_ORCHESTRATOR_BIN_PATH,
-  SMITHERS_ORCHESTRATOR_VERSION,
+  SMITHERS_BIN_PATH,
+  SMITHERS_VERSION,
   smithersDependencyInstallArgs
 } from "../src/smithers-package.js";
 import { isTransientNpmRegistryFailure } from "../src/npm-install-retry.js";
@@ -190,7 +190,7 @@ async function loadGeneratedKimiAgent(project: string): Promise<{
   fs.mkdirSync(fixture, { recursive: true });
   const agentsDir = path.join(project, ".smithers", "agents");
   const smithersUrl = pathToFileURL(
-    fs.realpathSync(path.join(process.cwd(), "node_modules", "smithers-orchestrator", "src", "index.js"))
+    fs.realpathSync(path.join(process.cwd(), "node_modules", "smthrs", "src", "index.js"))
   ).href;
   const transpile = (source: string): string =>
     ts.transpileModule(source, {
@@ -202,7 +202,7 @@ async function loadGeneratedKimiAgent(project: string): Promise<{
     }).outputText;
   const kimiSource = fs
     .readFileSync(path.join(agentsDir, "kimi.ts"), "utf8")
-    .replace('from "smithers-orchestrator"', `from ${JSON.stringify(smithersUrl)}`)
+    .replace('from "smthrs"', `from ${JSON.stringify(smithersUrl)}`)
     .replace('from "./toml"', 'from "./toml.mjs"')
     .replace('from "./strict-json"', 'from "./strict-json.mjs"')
     .replace('from "./environment"', 'from "./environment.mjs"');
@@ -263,7 +263,7 @@ async function loadGeneratedCodexAgent(project: string): Promise<{
   fs.mkdirSync(fixture, { recursive: true });
   const agentsDir = path.join(project, ".smithers", "agents");
   const smithersUrl = pathToFileURL(
-    fs.realpathSync(path.join(process.cwd(), "node_modules", "smithers-orchestrator", "src", "index.js"))
+    fs.realpathSync(path.join(process.cwd(), "node_modules", "smthrs", "src", "index.js"))
   ).href;
   const transpile = (source: string): string =>
     ts.transpileModule(source, {
@@ -275,7 +275,7 @@ async function loadGeneratedCodexAgent(project: string): Promise<{
     }).outputText;
   const codexSource = fs
     .readFileSync(path.join(agentsDir, "codex.ts"), "utf8")
-    .replace('from "smithers-orchestrator"', `from ${JSON.stringify(smithersUrl)}`)
+    .replace('from "smthrs"', `from ${JSON.stringify(smithersUrl)}`)
     .replace('from "./toml"', 'from "./toml.mjs"')
     .replace('from "./environment"', 'from "./environment.mjs"');
   fs.writeFileSync(path.join(fixture, "codex.mjs"), transpile(codexSource), "utf8");
@@ -335,7 +335,7 @@ async function loadGeneratedDeepSeekAgent(project: string): Promise<{
   fs.mkdirSync(fixture, { recursive: true });
   const agentsDir = path.join(project, ".smithers", "agents");
   const smithersUrl = pathToFileURL(
-    fs.realpathSync(path.join(process.cwd(), "node_modules", "smithers-orchestrator", "src", "index.js"))
+    fs.realpathSync(path.join(process.cwd(), "node_modules", "smthrs", "src", "index.js"))
   ).href;
   const transpile = (source: string): string =>
     ts.transpileModule(source, {
@@ -347,7 +347,7 @@ async function loadGeneratedDeepSeekAgent(project: string): Promise<{
     }).outputText;
   const deepSeekSource = fs
     .readFileSync(path.join(agentsDir, "deepseek.ts"), "utf8")
-    .replace('from "smithers-orchestrator"', `from ${JSON.stringify(smithersUrl)}`)
+    .replace('from "smthrs"', `from ${JSON.stringify(smithersUrl)}`)
     .replace('from "./toml"', 'from "./toml.mjs"')
     .replace('from "./strict-json"', 'from "./strict-json.mjs"')
     .replace('from "./environment"', 'from "./environment.mjs"');
@@ -399,11 +399,11 @@ function fakeInstalledSmithersPaths(project: string): {
   target: string;
   shim: string;
 } {
-  const packageRoot = path.join(project, ".smithers", "node_modules", "smithers-orchestrator");
+  const packageRoot = path.join(project, ".smithers", "node_modules", "smthrs");
   return {
     packageRoot,
     packageJson: path.join(packageRoot, "package.json"),
-    target: path.join(packageRoot, ...SMITHERS_ORCHESTRATOR_BIN_PATH.split("/")),
+    target: path.join(packageRoot, ...SMITHERS_BIN_PATH.split("/")),
     shim: path.join(project, ".smithers", "node_modules", ".bin", "smithers")
   };
 }
@@ -411,7 +411,7 @@ function fakeInstalledSmithersPaths(project: string): {
 function writeFakeInstalledSmithersDependencies(project: string): void {
   const dependencies = [
     ["@moonshot-ai/kimi-code", KIMI_CODE_VERSION],
-    ["@smithers-orchestrator/tool-context", SMITHERS_ORCHESTRATOR_VERSION],
+    ["@smthrs/tool-context", SMITHERS_VERSION],
     ["react", "19.2.4"],
     ["zod", "4.4.3"]
   ] as const;
@@ -437,9 +437,9 @@ function writeFakeInstalledSmithers(
   fs.writeFileSync(
     paths.packageJson,
     `${JSON.stringify({
-      name: "smithers-orchestrator",
-      version: input.version ?? SMITHERS_ORCHESTRATOR_VERSION,
-      bin: { smithers: input.binTarget ?? SMITHERS_ORCHESTRATOR_BIN_PATH }
+      name: "smthrs",
+      version: input.version ?? SMITHERS_VERSION,
+      bin: { smithers: input.binTarget ?? SMITHERS_BIN_PATH }
     })}\n`,
     "utf8"
   );
@@ -457,25 +457,17 @@ function writeFakeInstalledSmithers(
 
 function writeFakePnpmInstalledSmithers(project: string): ReturnType<typeof fakeInstalledSmithersPaths> {
   const paths = fakeInstalledSmithersPaths(project);
-  const storeRoot = path.join(
-    project,
-    ".smithers",
-    "node_modules",
-    ".pnpm",
-    "smithers-orchestrator@unit",
-    "node_modules",
-    "smithers-orchestrator"
-  );
+  const storeRoot = path.join(project, ".smithers", "node_modules", ".pnpm", "smthrs@unit", "node_modules", "smthrs");
   const storePackageJson = path.join(storeRoot, "package.json");
-  const storeTarget = path.join(storeRoot, ...SMITHERS_ORCHESTRATOR_BIN_PATH.split("/"));
+  const storeTarget = path.join(storeRoot, ...SMITHERS_BIN_PATH.split("/"));
   fs.mkdirSync(path.dirname(storeTarget), { recursive: true });
   fs.mkdirSync(path.dirname(paths.shim), { recursive: true });
   fs.writeFileSync(
     storePackageJson,
     `${JSON.stringify({
-      name: "smithers-orchestrator",
-      version: SMITHERS_ORCHESTRATOR_VERSION,
-      bin: { smithers: SMITHERS_ORCHESTRATOR_BIN_PATH }
+      name: "smthrs",
+      version: SMITHERS_VERSION,
+      bin: { smithers: SMITHERS_BIN_PATH }
     })}\n`,
     "utf8"
   );
@@ -526,9 +518,9 @@ function writeFakeNpmInstaller(
       `mkdir -p ${shellQuote(path.dirname(paths.target))} ${shellQuote(path.dirname(paths.shim))}`,
       `cat > ${shellQuote(paths.packageJson)} <<'EOS'`,
       JSON.stringify({
-        name: "smithers-orchestrator",
-        version: SMITHERS_ORCHESTRATOR_VERSION,
-        bin: { smithers: SMITHERS_ORCHESTRATOR_BIN_PATH }
+        name: "smthrs",
+        version: SMITHERS_VERSION,
+        bin: { smithers: SMITHERS_BIN_PATH }
       }),
       "EOS",
       `cat > ${shellQuote(paths.target)} <<'EOS'`,
@@ -589,6 +581,9 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       "fi",
       'if [ -n "$SMITHERS_FAKE_KEEP_WORKTREES_LOG" ]; then',
       '  printf \'%s\\n\' "$SMITHERS_KEEP_WORKTREES" > "$SMITHERS_FAKE_KEEP_WORKTREES_LOG"',
+      "fi",
+      'if [ -n "$SMITHERS_FAKE_ADMISSION_TIMEOUT_LOG" ]; then',
+      '  printf \'%s\\n\' "$SMITHERS_DETACHED_ADMISSION_TIMEOUT_MS" > "$SMITHERS_FAKE_ADMISSION_TIMEOUT_LOG"',
       "fi",
       'if [ -n "$SMITHERS_FAKE_FORGE_GUARD_LOG" ]; then',
       '  command -v forge > "$SMITHERS_FAKE_FORGE_GUARD_LOG"',
@@ -1335,7 +1330,13 @@ function writeFanoutProject(project: string, discoveryMarkdownPath = "setup/proj
   fs.mkdirSync(path.join(project, ".smithers", "agents"), { recursive: true });
   fs.writeFileSync(
     path.join(project, ".smithers", "agents", "index.ts"),
-    "export const CodexAgent = {};\nexport const ClaudeAgent = {};\n",
+    "const createAgent = () => null;\n" +
+      "export const agentFactories = {\n" +
+      "  ClaudeAgent: createAgent,\n" +
+      "  CodexAgent: createAgent,\n" +
+      "  DeepSeekAgent: createAgent,\n" +
+      "  KimiAgent: createAgent\n" +
+      "};\n",
     "utf8"
   );
   fs.writeFileSync(
@@ -1435,7 +1436,7 @@ Current findings: {{output_findings_path}}
 }
 
 const V0_0_2_STOCK_CODEX_ADAPTER = [
-  'import { CodexAgent as SmithersCodexAgent } from "smithers-orchestrator";',
+  'import { CodexAgent as SmithersCodexAgent } from "smthrs";',
   "",
   "export const CodexAgent = new SmithersCodexAgent({",
   '  model: "gpt-5.5",',
@@ -1542,7 +1543,7 @@ test("init preserves existing project-owned files and validate exposes launch po
     overrides?: Record<string, string>;
   };
   assert.equal(smithersPackage.dependencies?.["@moonshot-ai/kimi-code"], KIMI_CODE_VERSION);
-  assert.equal(smithersPackage.dependencies?.["smithers-orchestrator"], SMITHERS_ORCHESTRATOR_VERSION);
+  assert.equal(smithersPackage.dependencies?.["smthrs"], SMITHERS_VERSION);
   assert.equal(smithersPackage.overrides?.effect, SMITHERS_EFFECT_VERSION);
   const codexAgentText = fs.readFileSync(path.join(project, ".smithers/agents/codex.ts"), "utf8");
   assert.doesNotMatch(codexAgentText, /cwd:\s*process\.cwd/);
@@ -2949,9 +2950,7 @@ default_effort = "high"
     };
 
     const smithersModule = (await import(
-      pathToFileURL(
-        fs.realpathSync(path.join(process.cwd(), "node_modules", "smithers-orchestrator", "src", "index.js"))
-      ).href
+      pathToFileURL(fs.realpathSync(path.join(process.cwd(), "node_modules", "smthrs", "src", "index.js"))).href
     )) as {
       KimiAgent: new (options: Record<string, unknown>) => {
         buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
@@ -2966,7 +2965,7 @@ default_effort = "high"
       cwd: "/workspace/target",
       options: {}
     });
-    assert.equal(SMITHERS_ORCHESTRATOR_VERSION, "0.32.0");
+    assert.equal(SMITHERS_VERSION, "0.34.0");
     assert.ok(pinnedCommand.args.includes("--final-message-only"));
     assert.ok(pinnedCommand.args.includes("--print"));
     assert.ok(pinnedCommand.args.includes("--work-dir"));
@@ -4419,13 +4418,11 @@ test(
 );
 
 test(
-  "generated Kimi completed-event usage is what pinned Smithers 0.32.0 consumes",
+  "generated Kimi completed-event usage is what pinned Smithers 0.34.0 consumes",
   { skip: !runningUnderBun },
   async () => {
-    const smithersEntry = fs.realpathSync(
-      path.join(process.cwd(), "node_modules", "smithers-orchestrator", "src", "index.js")
-    );
-    const resolved = createRequire(smithersEntry).resolve("@smithers-orchestrator/agents/BaseCliAgent");
+    const smithersEntry = fs.realpathSync(path.join(process.cwd(), "node_modules", "smthrs", "src", "index.js"));
+    const resolved = createRequire(smithersEntry).resolve("@smthrs/agents/BaseCliAgent");
     const baseCliAgent = (await import(pathToFileURL(resolved).href)) as {
       extractUsageFromOutput: (raw: string) => unknown;
     };
@@ -4496,7 +4493,7 @@ test("validate rejects unknown agent references before launch", async () => {
   assert.ok(run.diagnostics.some((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN"));
 });
 
-test("validate ignores unused opt-in model profiles in older agent registries", async () => {
+test("validate requires agentFactories entries for every configured model profile", async () => {
   const project = tempProject();
   const init = initProject({ projectRoot: project, force: true });
   assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
@@ -4504,12 +4501,24 @@ test("validate ignores unused opt-in model profiles in older agent registries", 
   fs.writeFileSync(
     path.join(project, ".smithers/agents/index.ts"),
     'export { createCodexAgent } from "./codex";\n' +
-      "export const agentFactories = { CodexAgent: createCodexAgent };\n",
+      'export { ClaudeAgent } from "./claude";\n' +
+      "export const agentFactories = {\n" +
+      "  CodexAgent: createCodexAgent,\n" +
+      "  // DeepSeekAgent: createDeepSeekAgent,\n" +
+      '  note: "KimiAgent:"\n' +
+      "};\n",
     "utf8"
   );
 
   const validate = await validateProject({ projectRoot: project, env: {} });
-  assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
+  assert.equal(validate.ok, false);
+  const unknownAgents = validate.diagnostics
+    .filter((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN")
+    .map((diagnostic) => diagnostic.message);
+  assert.equal(unknownAgents.length, 3, JSON.stringify(validate.diagnostics));
+  assert.match(unknownAgents.join("\n"), /ClaudeAgent/u);
+  assert.match(unknownAgents.join("\n"), /DeepSeekAgent/u);
+  assert.match(unknownAgents.join("\n"), /KimiAgent/u);
 
   const kimiRun = await startRun({
     projectRoot: project,
@@ -4519,6 +4528,109 @@ test("validate ignores unused opt-in model profiles in older agent registries", 
   });
   assert.equal(kimiRun.ok, false);
   assert.ok(kimiRun.diagnostics.some((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN"));
+});
+
+test("validate requires every configured agent factory after a default agent override", async () => {
+  const project = tempProject();
+  const init = initProject({ projectRoot: project, force: true });
+  assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+  writeSmallTopology(project);
+  const registryPath = path.join(project, ".smithers/agents/index.ts");
+  fs.writeFileSync(
+    registryPath,
+    fs.readFileSync(registryPath, "utf8").replace("  CodexAgent: createCodexAgent,\n", ""),
+    "utf8"
+  );
+
+  const validate = await validateProject({ projectRoot: project, agent: "ClaudeAgent", env: {} });
+
+  assert.equal(validate.ok, false);
+  assert.deepEqual(
+    validate.diagnostics
+      .filter((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN")
+      .map((diagnostic) => diagnostic.message.match(/agent reference (\w+)/u)?.[1]),
+    ["CodexAgent"]
+  );
+});
+
+test("validate accepts a typed aliased registry composed from static spreads", async () => {
+  const project = tempProject();
+  const init = initProject({ projectRoot: project, force: true });
+  assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+  writeSmallTopology(project);
+  fs.writeFileSync(
+    path.join(project, ".smithers/agents/index.ts"),
+    "type Factory = () => unknown;\n" +
+      "const ClaudeAgent: Factory = () => null;\n" +
+      "const CodexAgent: Factory = () => null;\n" +
+      "const createAgent: Factory = () => null;\n" +
+      "const core = Object.freeze({\n" +
+      "  ClaudeAgent,\n" +
+      '  ["CodexAgent"]: CodexAgent\n' +
+      "} as const);\n" +
+      "const optIn = {\n" +
+      '  "DeepSeekAgent": createAgent,\n' +
+      "  KimiAgent: createAgent\n" +
+      "};\n" +
+      "const registry: Record<string, Factory> = { ...core, ...optIn };\n" +
+      "export { registry as agentFactories };\n",
+    "utf8"
+  );
+
+  const validate = await validateProject({ projectRoot: project, env: {} });
+
+  assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
+});
+
+test("validate ignores textual, type-only, and cyclic agentFactories lookalikes", async () => {
+  const project = tempProject();
+  const init = initProject({ projectRoot: project, force: true });
+  assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+  writeSmallTopology(project);
+  fs.writeFileSync(
+    path.join(project, ".smithers/agents/index.ts"),
+    'export const decoy = "export const agentFactories = { ClaudeAgent: fake, CodexAgent: fake, DeepSeekAgent: fake, KimiAgent: fake }";\n' +
+      "const first = { ...second };\n" +
+      "const second = { ...first };\n" +
+      "export type { first as agentFactories };\n",
+    "utf8"
+  );
+
+  const validate = await validateProject({ projectRoot: project, env: {} });
+
+  assert.equal(validate.ok, false);
+  assert.deepEqual(
+    validate.diagnostics
+      .filter((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN")
+      .map((diagnostic) => diagnostic.message.match(/agent reference (\w+)/u)?.[1]),
+    ["ClaudeAgent", "CodexAgent", "DeepSeekAgent", "KimiAgent"]
+  );
+
+  fs.writeFileSync(
+    path.join(project, ".smithers/agents/index.ts"),
+    "const first = { ...second };\n" + "const second = { ...first };\n" + "export { first as agentFactories };\n",
+    "utf8"
+  );
+  const cyclic = await validateProject({ projectRoot: project, env: {} });
+  assert.equal(cyclic.ok, false);
+  assert.equal(
+    cyclic.diagnostics.filter((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN").length,
+    4,
+    JSON.stringify(cyclic.diagnostics)
+  );
+});
+
+test("validate does not fall back to .smithers/agents.ts", async () => {
+  const project = tempProject();
+  const init = initProject({ projectRoot: project, force: true });
+  assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+  writeSmallTopology(project);
+  fs.renameSync(path.join(project, ".smithers/agents/index.ts"), path.join(project, ".smithers/agents.ts"));
+
+  const validate = await validateProject({ projectRoot: project, env: {} });
+
+  assert.equal(validate.ok, false);
+  assert.ok(validate.diagnostics.some((diagnostic) => diagnostic.code === "AGENT_REGISTRY_MISSING"));
 });
 
 test("init and run layout reject symlinked project-owned roots before writes", async () => {
@@ -5112,6 +5224,8 @@ test("compileSmithersWorkflow gates native dependencies on deterministic artifac
   assert.doesNotMatch(workflowSource, /const layers =/);
   assert.doesNotMatch(workflowSource, /<Sequence\b/);
   assert.match(workflowSource, /<Parallel\b/);
+  assert.doesNotMatch(workflowSource, /agentRegistry/u);
+  assert.match(workflowSource, /agent factory is not registered/u);
 
   const smithersTasks = JSON.parse(fs.readFileSync(compiled.tasksPath, "utf8")) as {
     layers?: unknown;
@@ -5714,7 +5828,7 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
     "a pure-local workflow may keep using its explicit controller runner without sealing the pinned package"
   );
   assert.equal(
-    localDependencyManifest.packages?.some((entry) => entry.name === "smithers-orchestrator"),
+    localDependencyManifest.packages?.some((entry) => entry.name === "smthrs"),
     false,
     "the explicit controller runner must not be copied into the execution snapshot"
   );
@@ -5737,15 +5851,15 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
     "utf8"
   );
   const expectedArtifactDir = path.join(run.value!.run_root, "artifacts", "project-discovery");
-  assert.match(workflowSource, /smithers-orchestrator/);
+  assert.match(workflowSource, /smthrs/);
   assert.match(workflowSource, /const taskOutput = z\.strictObject\(/u);
   assert.match(workflowSource, /const preparationOutput = z\.strictObject\(/u);
   assert.match(workflowSource, /const verificationOutput = z\.strictObject\(/u);
   assert.doesNotMatch(workflowSource, /z\.object\(/u);
   // Explicit index path: a sibling .smithers/agents.ts scaffolded by Smithers
   // would otherwise shadow the .smithers/agents/ directory under bun.
-  assert.match(workflowSource, /import \* as projectAgents from "\.\.\/agents\/index\.ts";/);
-  assert.doesNotMatch(workflowSource, /import \* as projectAgents from "\.\.\/agents";/);
+  assert.match(workflowSource, /import \{ agentFactories as projectAgentFactories \} from "\.\.\/agents\/index\.ts";/);
+  assert.doesNotMatch(workflowSource, /from "\.\.\/agents";/);
   assert.match(workflowSource, /agent=\{agentForTask\(task\)\}/);
   assert.match(workflowSource, /addDir:\s*\[task\.artifactDir, \.\.\.task\.dependencyArtifactDirs\]/);
   assert.match(workflowSource, /const schemaDirectory = path\.join\(workspaceRoot, "\.ultrafuzz", "schemas"\)/u);
@@ -6035,6 +6149,36 @@ test("getRunHealth adapts the workflow health summary to the Ultrafuzz run", asy
   );
 });
 
+test("getRunHealth accepts the terminal degraded verdict without converting it to done", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeSmithersEnv(project);
+  const run = await startRun({ projectRoot: project, runId: "degraded-health-run", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const envelope = currentStatusEnvelope("ultrafuzz-degraded-health-run");
+  const data = envelope.data as Record<string, unknown>;
+  env.SMITHERS_FAKE_STATUS_JSON = JSON.stringify({
+    ...envelope,
+    data: {
+      ...data,
+      status: "finished",
+      verdict: "degraded",
+      reason: "loop review exhausted before its until condition passed",
+      liveness: { state: "finished" },
+      finishedAtMs: 2_000
+    }
+  });
+
+  const health = await getRunHealth({ projectRoot: project, runId: "degraded-health-run", env });
+
+  assert.equal(health.ok, true, JSON.stringify(health.diagnostics));
+  assert.equal(health.value?.verdict, "degraded");
+  assert.equal(health.value?.workflow_status, "finished");
+  assert.match(health.value?.reason ?? "", /until condition/u);
+});
+
 test("getRunHealth binds the workflow health summary to the run it asked about", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -6188,6 +6332,23 @@ test("startRun maps keep_workspaces to the Smithers worktree retention environme
     assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
     assert.equal(fs.readFileSync(keepLog, "utf8"), keepWorkspaces ? "1\n" : "\n");
   }
+});
+
+test("startRun fixes detached admission at the supported five-minute timeout", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const timeoutLog = path.join(project, "detached-admission-timeout.log");
+  const env = {
+    ...fakeSmithersEnv(project),
+    SMITHERS_DETACHED_ADMISSION_TIMEOUT_MS: "1",
+    SMITHERS_FAKE_ADMISSION_TIMEOUT_LOG: timeoutLog
+  };
+
+  const run = await startRun({ projectRoot: project, runId: "detached-admission-timeout", env });
+
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.equal(fs.readFileSync(timeoutLog, "utf8"), "300000\n");
 });
 
 test("startRun injects the configured Forge guard into the workflow environment and metadata", async () => {
@@ -7334,7 +7495,7 @@ test("startRun patches every described runner compatibility workaround", async (
     fs.mkdirSync(path.dirname(source), { recursive: true });
     fs.writeFileSync(
       path.join(packageRoot, "package.json"),
-      `${JSON.stringify({ name: patch.packageName, version: SMITHERS_ORCHESTRATOR_VERSION })}\n`,
+      `${JSON.stringify({ name: patch.packageName, version: SMITHERS_VERSION })}\n`,
       "utf8"
     );
   }
@@ -8044,7 +8205,7 @@ function addEvidencePids(pids: Set<number>, evidence: TransferEvidence, ...keys:
 test("every runner compatibility patch still anchors in the pinned Smithers release", async () => {
   const { SMITHERS_COMPATIBILITY_PATCHES, SMITHERS_ENGINE_RESUME_RESET_ORDERING } = await import("../src/smithers.js");
   const resolveFromPinnedRunner = createRequire(
-    fs.realpathSync(path.join(process.cwd(), "node_modules", "smithers-orchestrator", "src", "index.js"))
+    fs.realpathSync(path.join(process.cwd(), "node_modules", "smthrs", "src", "index.js"))
   );
   const sourceByPatchId = new Map<string, string>();
 
@@ -8064,7 +8225,7 @@ test("every runner compatibility patch still anchors in the pinned Smithers rele
         version?: string;
       }
     ).version;
-    assert.equal(packageVersion, SMITHERS_ORCHESTRATOR_VERSION, `${label} belongs to an unpinned release`);
+    assert.equal(packageVersion, SMITHERS_VERSION, `${label} belongs to an unpinned release`);
 
     const contents = fs.readFileSync(sourcePath, "utf8");
     sourceByPatchId.set(patch.id, contents);
@@ -8077,17 +8238,25 @@ test("every runner compatibility patch still anchors in the pinned Smithers rele
       contents.split(patch.patchable).length,
       2,
       `${label} no longer contains exactly one copy of the patched upstream shape; ` +
-        `re-check whether Smithers ${SMITHERS_ORCHESTRATOR_VERSION} fixed this itself`
+        `re-check whether Smithers ${SMITHERS_VERSION} fixed this itself`
     );
     for (const absent of patch.upstreamAbsent) {
       assert.equal(
         contents.includes(absent),
         false,
-        `${label} now contains ${JSON.stringify(absent)}, so Smithers ${SMITHERS_ORCHESTRATOR_VERSION} may have ` +
+        `${label} now contains ${JSON.stringify(absent)}, so Smithers ${SMITHERS_VERSION} may have ` +
           `addressed this itself; re-justify or retire the ${patch.id} workaround`
       );
     }
   }
+
+  // Preserve the upstream 0.34 MDX/non-module leaf guard while adding stable
+  // path identity to the graph hash. Dropping extname here would reintroduce
+  // import scanning inside prompt prose and make otherwise valid resumes fail.
+  const workflowHashSource = sourceByPatchId.get("workflow_hash_import");
+  const workflowHashImportPatch = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "workflow_hash_import");
+  assert.ok(workflowHashSource?.includes("SCANNABLE_MODULE_EXTENSIONS"));
+  assert.match(workflowHashImportPatch?.patched ?? "", /extname, relative/u);
 
   // Ordering, not just presence: both attempt resets must still run inside the
   // deferred run-startup closure, which is what puts them ahead of the hydration the
@@ -8117,7 +8286,7 @@ test("every runner compatibility patch still anchors in the pinned Smithers rele
   // The Effect override only dedupes correctly while it tracks what the pinned
   // runner declares, and nothing else in the tree enforces that.
   const runnerManifest = JSON.parse(
-    fs.readFileSync(path.join(process.cwd(), "node_modules", "smithers-orchestrator", "package.json"), "utf8")
+    fs.readFileSync(path.join(process.cwd(), "node_modules", "smthrs", "package.json"), "utf8")
   ) as { dependencies?: Record<string, string> };
   assert.equal(
     runnerManifest.dependencies?.effect,
@@ -8138,7 +8307,7 @@ test("startRun accepts the published Smithers bin target with its leading dot se
   writeSmallTopology(project);
 
   const logPath = path.join(project, "published-smithers.log");
-  writeFakeInstalledSmithers(project, { binTarget: `./${SMITHERS_ORCHESTRATOR_BIN_PATH}` });
+  writeFakeInstalledSmithers(project, { binTarget: `./${SMITHERS_BIN_PATH}` });
 
   const run = await startRun({
     projectRoot: project,
@@ -8154,32 +8323,32 @@ test("package-manager-owned Smithers manifests use bounded strict parsing and na
   const project = tempProject();
   const paths = writeFakeInstalledSmithers(project);
   const valid = {
-    name: "smithers-orchestrator",
-    version: SMITHERS_ORCHESTRATOR_VERSION,
-    bin: { smithers: SMITHERS_ORCHESTRATOR_BIN_PATH },
+    name: "smthrs",
+    version: SMITHERS_VERSION,
+    bin: { smithers: SMITHERS_BIN_PATH },
     future_package_manager_field: { retained_by_owner: true }
   };
   fs.writeFileSync(paths.packageJson, `${JSON.stringify(valid)}\n`, "utf8");
   const validPosture = inspectSmithersInstallation(project);
-  assert.equal(validPosture.bundled_version, SMITHERS_ORCHESTRATOR_VERSION);
-  assert.equal(validPosture.required_version, SMITHERS_ORCHESTRATOR_VERSION);
-  assert.equal(validPosture.installed_version, SMITHERS_ORCHESTRATOR_VERSION);
-  assert.equal(validPosture.installed_bin_target, SMITHERS_ORCHESTRATOR_BIN_PATH);
+  assert.equal(validPosture.bundled_version, SMITHERS_VERSION);
+  assert.equal(validPosture.required_version, SMITHERS_VERSION);
+  assert.equal(validPosture.installed_version, SMITHERS_VERSION);
+  assert.equal(validPosture.installed_bin_target, SMITHERS_BIN_PATH);
   assert.equal(validPosture.bin_path, paths.shim);
   assert.equal(validPosture.layout_error, null);
 
   fs.writeFileSync(
     paths.packageJson,
-    `{"name":"smithers-orchestrator","version":${JSON.stringify(
-      SMITHERS_ORCHESTRATOR_VERSION
+    `{"name":"smthrs","version":${JSON.stringify(
+      SMITHERS_VERSION
     )},"bin":{"__proto__":"literal-package-manager-key","smithers":${JSON.stringify(
-      SMITHERS_ORCHESTRATOR_BIN_PATH
+      SMITHERS_BIN_PATH
     )}},"peerDependencies":{"__proto__":"1.0.0"},"peerDependenciesMeta":{"__proto__":{"optional":true}}}\n`,
     "utf8"
   );
   const prototypeKeyPosture = inspectSmithersInstallation(project);
-  assert.equal(prototypeKeyPosture.installed_version, SMITHERS_ORCHESTRATOR_VERSION);
-  assert.equal(prototypeKeyPosture.installed_bin_target, SMITHERS_ORCHESTRATOR_BIN_PATH);
+  assert.equal(prototypeKeyPosture.installed_version, SMITHERS_VERSION);
+  assert.equal(prototypeKeyPosture.installed_bin_target, SMITHERS_BIN_PATH);
   assert.equal(prototypeKeyPosture.layout_error, null);
   assert.equal(({} as { optional?: unknown }).optional, undefined);
 
@@ -8188,7 +8357,7 @@ test("package-manager-owned Smithers manifests use bounded strict parsing and na
     {
       label: "duplicate key",
       bytes: Buffer.from(
-        `{"version":"${SMITHERS_ORCHESTRATOR_VERSION}","version":"${SMITHERS_ORCHESTRATOR_VERSION}","bin":{"smithers":"${SMITHERS_ORCHESTRATOR_BIN_PATH}"}}`
+        `{"version":"${SMITHERS_VERSION}","version":"${SMITHERS_VERSION}","bin":{"smithers":"${SMITHERS_BIN_PATH}"}}`
       ),
       expected: /duplicate/iu
     },
@@ -8196,12 +8365,12 @@ test("package-manager-owned Smithers manifests use bounded strict parsing and na
     { label: "oversize", bytes: Buffer.alloc(1024 * 1024 + 1, 0x20), expected: /1048576-byte limit/iu },
     {
       label: "excessive depth",
-      bytes: Buffer.from(`{"version":"${SMITHERS_ORCHESTRATOR_VERSION}","future":${tooDeep}}`),
+      bytes: Buffer.from(`{"version":"${SMITHERS_VERSION}","future":${tooDeep}}`),
       expected: /nesting-depth limit of 32/iu
     },
     {
       label: "empty string bin",
-      bytes: Buffer.from(`{"version":"${SMITHERS_ORCHESTRATOR_VERSION}","bin":""}`),
+      bytes: Buffer.from(`{"version":"${SMITHERS_VERSION}","bin":""}`),
       expected: /bin must be a non-empty string/iu
     }
   ];
@@ -8427,7 +8596,7 @@ test("startRun reinstalls a stale target-local Smithers package before launch", 
   const installed = JSON.parse(fs.readFileSync(fakeInstalledSmithersPaths(project).packageJson, "utf8")) as {
     version: string;
   };
-  assert.equal(installed.version, SMITHERS_ORCHESTRATOR_VERSION);
+  assert.equal(installed.version, SMITHERS_VERSION);
 });
 
 test("startRun repairs a target-local Smithers shim that points outside the pinned package", async () => {
@@ -8460,7 +8629,7 @@ test("generated workflow dependencies require exact runner pins while allowing t
     () =>
       assertSmithersPackageManifest({
         dependencies: {
-          "smithers-orchestrator": "^0.27.0",
+          smthrs: "^0.27.0",
           zod: "4.4.3"
         },
         devDependencies: { typescript: "6.0.3" }
@@ -8471,7 +8640,7 @@ test("generated workflow dependencies require exact runner pins while allowing t
     () =>
       assertSmithersPackageManifest({
         dependencies: {
-          "smithers-orchestrator": SMITHERS_ORCHESTRATOR_VERSION,
+          smthrs: SMITHERS_VERSION,
           zod: "4.4.3"
         },
         devDependencies: { typescript: "6.0.3" }
@@ -8486,7 +8655,7 @@ test("generated workflow dependencies require exact runner pins while allowing t
       assertSmithersPackageManifest({
         dependencies: {
           "@moonshot-ai/kimi-code": KIMI_CODE_VERSION,
-          "smithers-orchestrator": SMITHERS_ORCHESTRATOR_VERSION,
+          smthrs: SMITHERS_VERSION,
           zod: "4.4.3"
         },
         devDependencies: { typescript: "6.0.3" },
@@ -12473,7 +12642,7 @@ function realSmithersGraphUnavailable(): string | false {
   } catch {
     return "smithers CLI is not installed";
   }
-  if (!fs.existsSync(path.join(workspaceRoot(), ".smithers", "node_modules", "smithers-orchestrator"))) {
+  if (!fs.existsSync(path.join(workspaceRoot(), ".smithers", "node_modules", "smthrs"))) {
     return ".smithers Smithers dependencies are not installed";
   }
   return false;

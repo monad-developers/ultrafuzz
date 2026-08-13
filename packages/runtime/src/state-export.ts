@@ -745,6 +745,7 @@ function parseRunHealth(
 
 const RUN_HEALTH_VERDICTS = new Set<RunHealthVerdict>([
   "done",
+  "degraded",
   "running-healthy",
   "progressing",
   "stalled",

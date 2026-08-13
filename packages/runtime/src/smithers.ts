@@ -66,8 +66,8 @@ import {
 } from "./workflow-execution-snapshot-capability.js";
 import {
   assertSmithersPackageManifest,
-  SMITHERS_ORCHESTRATOR_BIN_PATH,
-  SMITHERS_ORCHESTRATOR_VERSION,
+  SMITHERS_BIN_PATH,
+  SMITHERS_VERSION,
   smithersDependencyInstallArgs
 } from "./smithers-package.js";
 import type { RenderedPromptPlan, RuntimeDiagnostic } from "./types.js";
@@ -85,18 +85,12 @@ const MAX_PACKAGE_MANAGER_MANIFEST_DEPTH = 32;
 const MAX_PACKAGE_MANAGER_MANIFEST_ITEMS = 10_000;
 const MAX_PACKAGE_MANAGER_MANIFEST_PROPERTIES = 10_000;
 const SMITHERS_DEPENDENCY_INSTALL_TIMEOUT_MS = 300_000;
+const SMITHERS_DETACHED_ADMISSION_TIMEOUT_MS = "300000";
 const STREAM_TERMINATION_GRACE_MS = 5_000;
 const SMITHERS_EVIDENCE_TEXT_LIMIT_CHARACTERS = 1024 * 1024;
 const ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH";
 const WORKFLOW_EXECUTION_DEPENDENCY_MAP_SNAPSHOT_PATH = "dependencies/manifest.json";
-const WORKFLOW_DIRECT_EXTERNAL_DEPENDENCIES = [
-  "@smithers-orchestrator/tool-context",
-  "react",
-  "smithers-orchestrator",
-  "zod"
-] as const;
-const SMITHERS_CLI_DETACHED_ADMISSION_SOURCE = "export const DETACHED_ADMISSION_TIMEOUT_MS = 30_000;";
-const SMITHERS_CLI_DETACHED_ADMISSION_PATCH = "export const DETACHED_ADMISSION_TIMEOUT_MS = 300_000;";
+const WORKFLOW_DIRECT_EXTERNAL_DEPENDENCIES = ["@smthrs/tool-context", "react", "smthrs", "zod"] as const;
 const SMITHERS_CLI_DETACHED_SNAPSHOT_TRANSFER_SOURCE = `        child = spawn("bun", [cliPath, ...childArgs], {
           detached: true,
           stdio: ["ignore", fd, fd],
@@ -150,7 +144,7 @@ const SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH = `        const supervisorSnapshotTra
         }
         supervisor.unref();
         supervisorPid = supervisor.pid;`;
-const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_SOURCE = `    const child = spawn("bun", args, {
+const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_SOURCE = `    const child = spawn(options.executable ?? "bun", args, {
       cwd,
       stdio: logFd === null ? "ignore" : ["ignore", logFd, logFd],
       env: process.env,
@@ -206,7 +200,7 @@ const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PATCH = `    const snapshotDescripto
       }
       return value;
     };
-    const child = spawn("bun", args.map(rewriteSnapshotArgument), {
+    const child = spawn(options.executable ?? "bun", args.map(rewriteSnapshotArgument), {
       cwd,
       stdio:
         snapshotDescriptor === undefined
@@ -418,16 +412,16 @@ function anchorUltrafuzzExecutionSnapshotForProcess() {
 }
 
 anchorUltrafuzzExecutionSnapshotForProcess();`;
-const SMITHERS_CLI_POST_FAILURE_PATH_SOURCE = `        launchPostFailureAutopsy({
-          failedRunId: result.runId,
-          workflowPath: resolvedWorkflowPath,
-          enabled: options.postFailure !== false,
-        });`;
-const SMITHERS_CLI_POST_FAILURE_PATH_PATCH = `        launchPostFailureAutopsy({
-          failedRunId: result.runId,
-          workflowPath: persistedWorkflowPath,
-          enabled: options.postFailure !== false,
-        });`;
+const SMITHERS_CLI_POST_FAILURE_PATH_SOURCE = `            launchPostFailureAutopsy({
+              failedRunId: result.runId,
+              workflowPath: resolvedWorkflowPath,
+              enabled: true,
+            });`;
+const SMITHERS_CLI_POST_FAILURE_PATH_PATCH = `            launchPostFailureAutopsy({
+              failedRunId: result.runId,
+              workflowPath: persistedWorkflowPath,
+              enabled: true,
+            });`;
 const SMITHERS_CLI_REPLAY_WORKFLOW_PATH_SOURCE =
   "          const resolvedReplayWorkflowPath = resolve(c.args.workflow);";
 const SMITHERS_CLI_REPLAY_WORKFLOW_PATH_PATCH = `          const resolvedReplayWorkflowPath = resolve(c.args.workflow);
@@ -551,8 +545,8 @@ const SMITHERS_ENGINE_CONTINUATION_WORKFLOW_PATH_SOURCE =
   "          workflowPath: resolvedWorkflowPath ?? opts.workflowPath ?? latestRun?.workflowPath ?? null,";
 const SMITHERS_ENGINE_CONTINUATION_WORKFLOW_PATH_PATCH =
   "          workflowPath: persistedWorkflowPath ?? opts.workflowPath ?? latestRun?.workflowPath ?? null,";
-const SMITHERS_ENGINE_WORKFLOW_HASH_IMPORT_SOURCE = 'import { dirname, resolve } from "node:path";';
-const SMITHERS_ENGINE_WORKFLOW_HASH_IMPORT_PATCH = 'import { dirname, relative, resolve } from "node:path";';
+const SMITHERS_ENGINE_WORKFLOW_HASH_IMPORT_SOURCE = 'import { dirname, extname, resolve } from "node:path";';
+const SMITHERS_ENGINE_WORKFLOW_HASH_IMPORT_PATCH = 'import { dirname, extname, relative, resolve } from "node:path";';
 const SMITHERS_ENGINE_WORKFLOW_HASH_COLLECT_SOURCE = `/**
  * @param {string} workflowPath
  * @returns {Promise<string[]>}
@@ -618,8 +612,8 @@ const SMITHERS_SCHEDULER_TERMINAL_RESTORE_PATCH = `    restoreTerminalTaskStates
 // to `pending`. Hydrating before that reset would restore a node as finished and
 // then let the reset flip the durable row to pending, leaving the in-memory
 // session and the database disagreeing for the whole resume. Smithers 0.31 ran
-// that reset eagerly, before the renderer existed; 0.32.0 deferred it into the
-// first render of a resume, so the anchor has to follow it. The enclosing
+// that reset eagerly, before the renderer existed; current Smithers defers it
+// into the first render of a resume, so the anchor has to follow it. The enclosing
 // `resumeWorkflowNameValidated` guard also makes this run exactly once, still
 // before the rendered graph reaches the scheduler.
 const SMITHERS_ENGINE_RESUME_HYDRATION_SOURCE = `          resumeWorkflowNameValidated = true;
@@ -654,7 +648,6 @@ const SMITHERS_ENGINE_RESUME_HYDRATION_PATCH = `          resumeWorkflowNameVali
         }`;
 
 export type SmithersCompatibilityPatchId =
-  | "detached_admission"
   | "detached_snapshot_transfer"
   | "supervisor_descriptor"
   | "resume_snapshot_transfer"
@@ -704,22 +697,13 @@ export interface SmithersCompatibilityPatch {
 }
 
 // The durability workarounds Ultrafuzz applies to the pinned runner. Every entry
-// is still unfixed upstream as of SMITHERS_ORCHESTRATOR_VERSION, so a runner bump
+// is still unfixed upstream as of SMITHERS_VERSION, so a runner bump
 // must re-verify each anchor against the newly pinned release instead of assuming
 // the workaround still lands.
 export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch[] = [
   {
-    id: "detached_admission",
-    packageName: "@smithers-orchestrator/cli",
-    sourceRelativePath: "src/detached-admission.js",
-    patchable: SMITHERS_CLI_DETACHED_ADMISSION_SOURCE,
-    patched: SMITHERS_CLI_DETACHED_ADMISSION_PATCH,
-    // A configurable ceiling retires this patch instead of raising it by hand.
-    upstreamAbsent: ["SMITHERS_DETACHED_ADMISSION_TIMEOUT_MS"]
-  },
-  {
     id: "detached_snapshot_transfer",
-    packageName: "@smithers-orchestrator/cli",
+    packageName: "@smthrs/cli",
     sourceRelativePath: "src/index.js",
     patchable: SMITHERS_CLI_DETACHED_SNAPSHOT_TRANSFER_SOURCE,
     patched: SMITHERS_CLI_DETACHED_SNAPSHOT_TRANSFER_PATCH,
@@ -727,7 +711,7 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
   },
   {
     id: "supervisor_descriptor",
-    packageName: "@smithers-orchestrator/cli",
+    packageName: "@smthrs/cli",
     sourceRelativePath: "src/index.js",
     patchable: SMITHERS_CLI_SUPERVISOR_SPAWN_SOURCE,
     patched: SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH,
@@ -735,7 +719,7 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
   },
   {
     id: "resume_snapshot_transfer",
-    packageName: "@smithers-orchestrator/cli",
+    packageName: "@smthrs/cli",
     sourceRelativePath: "src/resume-detached.js",
     patchable: SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_SOURCE,
     patched: SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PATCH,
@@ -743,7 +727,7 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
   },
   {
     id: "terminal_state_restore",
-    packageName: "@smithers-orchestrator/scheduler",
+    packageName: "@smthrs/scheduler",
     sourceRelativePath: "src/makeWorkflowSession.js",
     patchable: SMITHERS_SCHEDULER_TERMINAL_RESTORE_SOURCE,
     patched: SMITHERS_SCHEDULER_TERMINAL_RESTORE_PATCH,
@@ -752,7 +736,7 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
   },
   {
     id: "resume_hydration",
-    packageName: "@smithers-orchestrator/engine",
+    packageName: "@smthrs/engine",
     sourceRelativePath: "src/engine.js",
     patchable: SMITHERS_ENGINE_RESUME_HYDRATION_SOURCE,
     patched: SMITHERS_ENGINE_RESUME_HYDRATION_PATCH,
@@ -761,7 +745,7 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
   },
   {
     id: "workflow_path_import",
-    packageName: "@smithers-orchestrator/cli",
+    packageName: "@smthrs/cli",
     sourceRelativePath: "src/index.js",
     patchable: SMITHERS_CLI_WORKFLOW_PATH_IMPORT_SOURCE,
     patched: SMITHERS_CLI_WORKFLOW_PATH_IMPORT_PATCH,
@@ -769,7 +753,7 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
   },
   {
     id: "workflow_path_persistence",
-    packageName: "@smithers-orchestrator/cli",
+    packageName: "@smthrs/cli",
     sourceRelativePath: "src/index.js",
     patchable: SMITHERS_CLI_WORKFLOW_PATH_SOURCE,
     patched: SMITHERS_CLI_WORKFLOW_PATH_PATCH,
@@ -777,7 +761,7 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
   },
   {
     id: "process_snapshot_anchor",
-    packageName: "@smithers-orchestrator/cli",
+    packageName: "@smthrs/cli",
     sourceRelativePath: "src/index.js",
     patchable: SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_SOURCE,
     patched: SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PATCH,
@@ -785,7 +769,7 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
   },
   {
     id: "post_failure_workflow_path",
-    packageName: "@smithers-orchestrator/cli",
+    packageName: "@smthrs/cli",
     sourceRelativePath: "src/index.js",
     patchable: SMITHERS_CLI_POST_FAILURE_PATH_SOURCE,
     patched: SMITHERS_CLI_POST_FAILURE_PATH_PATCH,
@@ -793,7 +777,7 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
   },
   {
     id: "replay_workflow_path",
-    packageName: "@smithers-orchestrator/cli",
+    packageName: "@smthrs/cli",
     sourceRelativePath: "src/index.js",
     patchable: SMITHERS_CLI_REPLAY_WORKFLOW_PATH_SOURCE,
     patched: SMITHERS_CLI_REPLAY_WORKFLOW_PATH_PATCH,
@@ -801,7 +785,7 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
   },
   {
     id: "replay_workflow_metadata",
-    packageName: "@smithers-orchestrator/cli",
+    packageName: "@smthrs/cli",
     sourceRelativePath: "src/index.js",
     patchable: SMITHERS_CLI_REPLAY_WORKFLOW_METADATA_SOURCE,
     patched: SMITHERS_CLI_REPLAY_WORKFLOW_METADATA_PATCH,
@@ -809,7 +793,7 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
   },
   {
     id: "fork_workflow_path",
-    packageName: "@smithers-orchestrator/cli",
+    packageName: "@smthrs/cli",
     sourceRelativePath: "src/index.js",
     patchable: SMITHERS_CLI_FORK_WORKFLOW_PATH_SOURCE,
     patched: SMITHERS_CLI_FORK_WORKFLOW_PATH_PATCH,
@@ -817,7 +801,7 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
   },
   {
     id: "fork_workflow_metadata",
-    packageName: "@smithers-orchestrator/cli",
+    packageName: "@smthrs/cli",
     sourceRelativePath: "src/index.js",
     patchable: SMITHERS_CLI_FORK_WORKFLOW_METADATA_SOURCE,
     patched: SMITHERS_CLI_FORK_WORKFLOW_METADATA_PATCH,
@@ -825,7 +809,7 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
   },
   {
     id: "engine_workflow_path",
-    packageName: "@smithers-orchestrator/engine",
+    packageName: "@smthrs/engine",
     sourceRelativePath: "src/engine.js",
     patchable: SMITHERS_ENGINE_WORKFLOW_PATH_SOURCE,
     patched: SMITHERS_ENGINE_WORKFLOW_PATH_PATCH,
@@ -833,7 +817,7 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
   },
   {
     id: "engine_durability_metadata",
-    packageName: "@smithers-orchestrator/engine",
+    packageName: "@smthrs/engine",
     sourceRelativePath: "src/engine.js",
     patchable: SMITHERS_ENGINE_DURABILITY_METADATA_SOURCE,
     patched: SMITHERS_ENGINE_DURABILITY_METADATA_PATCH,
@@ -841,7 +825,7 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
   },
   {
     id: "engine_run_metadata",
-    packageName: "@smithers-orchestrator/engine",
+    packageName: "@smthrs/engine",
     sourceRelativePath: "src/engine.js",
     patchable: SMITHERS_ENGINE_RUN_METADATA_SOURCE,
     patched: SMITHERS_ENGINE_RUN_METADATA_PATCH,
@@ -849,7 +833,7 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
   },
   {
     id: "engine_resume_identity",
-    packageName: "@smithers-orchestrator/engine",
+    packageName: "@smthrs/engine",
     sourceRelativePath: "src/engine.js",
     patchable: SMITHERS_ENGINE_RESUME_IDENTITY_SOURCE,
     patched: SMITHERS_ENGINE_RESUME_IDENTITY_PATCH,
@@ -857,7 +841,7 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
   },
   {
     id: "engine_insert_workflow_path",
-    packageName: "@smithers-orchestrator/engine",
+    packageName: "@smthrs/engine",
     sourceRelativePath: "src/engine.js",
     patchable: SMITHERS_ENGINE_INSERT_WORKFLOW_PATH_SOURCE,
     patched: SMITHERS_ENGINE_INSERT_WORKFLOW_PATH_PATCH,
@@ -865,7 +849,7 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
   },
   {
     id: "engine_activate_workflow_path",
-    packageName: "@smithers-orchestrator/engine",
+    packageName: "@smthrs/engine",
     sourceRelativePath: "src/engine.js",
     patchable: SMITHERS_ENGINE_ACTIVATE_WORKFLOW_PATH_SOURCE,
     patched: SMITHERS_ENGINE_ACTIVATE_WORKFLOW_PATH_PATCH,
@@ -873,7 +857,7 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
   },
   {
     id: "engine_update_workflow_path",
-    packageName: "@smithers-orchestrator/engine",
+    packageName: "@smthrs/engine",
     sourceRelativePath: "src/engine.js",
     patchable: SMITHERS_ENGINE_UPDATE_WORKFLOW_PATH_SOURCE,
     patched: SMITHERS_ENGINE_UPDATE_WORKFLOW_PATH_PATCH,
@@ -881,7 +865,7 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
   },
   {
     id: "engine_continuation_workflow_path",
-    packageName: "@smithers-orchestrator/engine",
+    packageName: "@smthrs/engine",
     sourceRelativePath: "src/engine.js",
     patchable: SMITHERS_ENGINE_CONTINUATION_WORKFLOW_PATH_SOURCE,
     patched: SMITHERS_ENGINE_CONTINUATION_WORKFLOW_PATH_PATCH,
@@ -889,7 +873,7 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
   },
   {
     id: "workflow_hash_import",
-    packageName: "@smithers-orchestrator/engine",
+    packageName: "@smthrs/engine",
     sourceRelativePath: "src/workflow-hash.js",
     patchable: SMITHERS_ENGINE_WORKFLOW_HASH_IMPORT_SOURCE,
     patched: SMITHERS_ENGINE_WORKFLOW_HASH_IMPORT_PATCH,
@@ -897,7 +881,7 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
   },
   {
     id: "workflow_hash_collect",
-    packageName: "@smithers-orchestrator/engine",
+    packageName: "@smthrs/engine",
     sourceRelativePath: "src/workflow-hash.js",
     patchable: SMITHERS_ENGINE_WORKFLOW_HASH_COLLECT_SOURCE,
     patched: SMITHERS_ENGINE_WORKFLOW_HASH_COLLECT_PATCH,
@@ -905,7 +889,7 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
   },
   {
     id: "workflow_hash_entry",
-    packageName: "@smithers-orchestrator/engine",
+    packageName: "@smthrs/engine",
     sourceRelativePath: "src/workflow-hash.js",
     patchable: SMITHERS_ENGINE_WORKFLOW_HASH_ENTRY_SOURCE,
     patched: SMITHERS_ENGINE_WORKFLOW_HASH_ENTRY_PATCH,
@@ -913,7 +897,7 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
   },
   {
     id: "workflow_hash_recursion",
-    packageName: "@smithers-orchestrator/engine",
+    packageName: "@smthrs/engine",
     sourceRelativePath: "src/workflow-hash.js",
     patchable: SMITHERS_ENGINE_WORKFLOW_HASH_RECURSION_SOURCE,
     patched: SMITHERS_ENGINE_WORKFLOW_HASH_RECURSION_PATCH,
@@ -921,7 +905,7 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
   },
   {
     id: "workflow_hash_public",
-    packageName: "@smithers-orchestrator/engine",
+    packageName: "@smthrs/engine",
     sourceRelativePath: "src/workflow-hash.js",
     patchable: SMITHERS_ENGINE_WORKFLOW_HASH_PUBLIC_SOURCE,
     patched: SMITHERS_ENGINE_WORKFLOW_HASH_PUBLIC_PATCH,
@@ -932,13 +916,13 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
 export const SMITHERS_REQUIRED_ENGINE_ANCHORS = [
   {
     id: "engine_descriptor_execution_path",
-    packageName: "@smithers-orchestrator/engine",
+    packageName: "@smthrs/engine",
     sourceRelativePath: "src/engine.js",
     anchor: SMITHERS_ENGINE_DESCRIPTOR_EXECUTION_PATH_ANCHOR
   },
   {
     id: "engine_descriptor_driver_path",
-    packageName: "@smithers-orchestrator/engine",
+    packageName: "@smthrs/engine",
     sourceRelativePath: "src/engine.js",
     anchor: SMITHERS_ENGINE_DESCRIPTOR_DRIVER_PATH_ANCHOR
   }
@@ -1569,13 +1553,13 @@ function collectWorkflowExecutionDependencies(input: {
   }
 
   const rootIssuer = issuers.find((issuer) => issuer.id === "root");
-  const runnerId = rootIssuer?.dependencies["smithers-orchestrator"];
+  const runnerId = rootIssuer?.dependencies["smthrs"];
   const runner = runnerId === undefined ? undefined : packages.find((candidate) => candidate.id === runnerId);
   let smithersBin: string | null = null;
   if (!input.externalRunner) {
     if (runner === undefined) throw new Error("workflow dependency snapshot is missing the pinned runner package");
     const binTarget = workflowPackageBinTarget(runner.manifest, "smithers");
-    if (binTarget !== SMITHERS_ORCHESTRATOR_BIN_PATH && binTarget !== `./${SMITHERS_ORCHESTRATOR_BIN_PATH}`) {
+    if (binTarget !== SMITHERS_BIN_PATH && binTarget !== `./${SMITHERS_BIN_PATH}`) {
       throw new Error("workflow dependency snapshot has an unexpected runner executable");
     }
     smithersBin = path.posix.join(runner.snapshotPath, binTarget.replace(/^\.\//u, ""));
@@ -2054,8 +2038,8 @@ export function inspectSmithersInstallation(projectRoot: string): SmithersInstal
     // The detailed layout error below reports malformed or missing manifests.
   }
   return {
-    bundled_version: SMITHERS_ORCHESTRATOR_VERSION,
-    required_version: SMITHERS_ORCHESTRATOR_VERSION,
+    bundled_version: SMITHERS_VERSION,
+    required_version: SMITHERS_VERSION,
     installed_version: installedVersion,
     installed_bin_target: installedBinTarget,
     bin_path: fs.existsSync(binPath) ? binPath : null,
@@ -2106,10 +2090,9 @@ function inspectSmithersCompatibilityPatches(
 // let callers decide what an absent or ambiguous result means.
 function smithersDependencyRootCandidates(nodeModules: string, packageName: string): string[] {
   const segments = packageName.split("/");
-  return [
-    path.join(nodeModules, ...segments),
-    path.join(nodeModules, "smithers-orchestrator", "node_modules", ...segments)
-  ].filter((candidate) => fs.existsSync(candidate));
+  return [path.join(nodeModules, ...segments), path.join(nodeModules, "smthrs", "node_modules", ...segments)].filter(
+    (candidate) => fs.existsSync(candidate)
+  );
 }
 
 function patchPosture(sourcePath: string, patched: string, patchable: string): SmithersPatchPosture {
@@ -2826,7 +2809,7 @@ function assertCurrentInspectObjectKeys(
   }
   const unknown = Object.keys(value).filter((key) => !allowed.includes(key));
   if (unknown.length > 0) {
-    throw new Error(`${label} contains fields outside the pinned 0.32.0 shape: ${unknown.join(", ")}`);
+    throw new Error(`${label} contains fields outside the pinned 0.34.0 shape: ${unknown.join(", ")}`);
   }
 }
 
@@ -3123,7 +3106,7 @@ async function prepareSmithersExecutableEnvironment(
   // platform-specific .bin shim, which also keeps the capability portable to
   // Windows where the shim is a command file without a shebang.
   const packageRoot = resolveInstalledSmithersPackageRoot(projectRoot);
-  const executable = path.join(packageRoot, ...SMITHERS_ORCHESTRATOR_BIN_PATH.split("/"));
+  const executable = path.join(packageRoot, ...SMITHERS_BIN_PATH.split("/"));
   return bindSmithersExecutableCapability({ ...(env ?? {}) }, executable);
 }
 
@@ -3165,7 +3148,7 @@ async function ensureSmithersDependencies(
       // `installedSmithersValidationError` only inspects the top-level runner, so
       // a half-reified tree passes it and then fails to patch: an interrupted
       // upgrade install can leave the new top-level runner beside stale or
-      // missing `@smithers-orchestrator/*` packages. Reinstalling repairs that;
+      // missing `@smthrs/*` packages. Reinstalling repairs that;
       // returning here would make every later resume of a durable run fail
       // identically with no way back short of deleting `.smithers/node_modules`
       // by hand. Repair once per project root per process: when the source shape
@@ -3222,9 +3205,9 @@ const repairedSmithersInstalls = new Set<string>();
 
 function applySmithersCompatibilityPatches(projectRoot: string): void {
   const nodeModules = path.join(projectRoot, ".smithers", "node_modules");
-  const cliRoots = smithersDependencyRootCandidates(nodeModules, "@smithers-orchestrator/cli");
-  const schedulerRoots = smithersDependencyRootCandidates(nodeModules, "@smithers-orchestrator/scheduler");
-  const engineRoots = smithersDependencyRootCandidates(nodeModules, "@smithers-orchestrator/engine");
+  const cliRoots = smithersDependencyRootCandidates(nodeModules, "@smthrs/cli");
+  const schedulerRoots = smithersDependencyRootCandidates(nodeModules, "@smthrs/scheduler");
+  const engineRoots = smithersDependencyRootCandidates(nodeModules, "@smthrs/engine");
   // Unit-test installers intentionally provide only the public runner shim, so a
   // tree with none of these packages is tolerated. A registry installation always
   // carries all three, so a tree holding some but not all of them is a broken
@@ -3239,35 +3222,14 @@ function applySmithersCompatibilityPatches(projectRoot: string): void {
   }
   const packageRoot = cliRoots[0]!;
   const packageJson = path.join(packageRoot, "package.json");
-  const admissionSource = path.join(packageRoot, "src", "detached-admission.js");
   const cliSource = path.join(packageRoot, "src", "index.js");
   const resumeDetachedSource = path.join(packageRoot, "src", "resume-detached.js");
   assertRegularFileInside(nodeModules, packageJson, "installed Smithers CLI package metadata");
-  assertRegularFileInside(nodeModules, admissionSource, "installed Smithers detached admission implementation");
   assertRegularFileInside(nodeModules, cliSource, "installed Smithers CLI implementation");
   assertRegularFileInside(nodeModules, resumeDetachedSource, "installed Smithers detached resume implementation");
   const metadata = readPackageManagerOwnedManifestEnvelope(packageJson, "installed Smithers CLI package manifest");
-  if (optionalPackageManifestString(metadata, "version", packageJson) !== SMITHERS_ORCHESTRATOR_VERSION) {
-    throw new Error(`installed Smithers CLI package version must be ${SMITHERS_ORCHESTRATOR_VERSION}`);
-  }
-  const admissionContents = fs.readFileSync(admissionSource, "utf8");
-  if (!admissionContents.includes(SMITHERS_CLI_DETACHED_ADMISSION_PATCH)) {
-    if (admissionContents.split(SMITHERS_CLI_DETACHED_ADMISSION_SOURCE).length !== 2) {
-      throw new Error("pinned workflow runner detached admission implementation is incompatible");
-    }
-    // Smithers waits for a durable RunStarted admission marker, but through
-    // 0.32.0 its hard-coded 30-second ceiling is shorter than cold startup for
-    // the public smoke graph. On a resume the marker now also waits on the
-    // workflow transpile and first render, because 0.32.0 defers RunStarted into
-    // the renderer, so the raised ceiling covers more than engine boot. Retain the
-    // stronger admission proof while allowing bounded initialization time. The
-    // successor `smthrs` package adds SMITHERS_DETACHED_ADMISSION_TIMEOUT_MS in
-    // 0.33.1, so this patch can retire when we migrate to that package name; it
-    // will never appear under `smithers-orchestrator`.
-    writeFileDurable(
-      admissionSource,
-      admissionContents.replace(SMITHERS_CLI_DETACHED_ADMISSION_SOURCE, SMITHERS_CLI_DETACHED_ADMISSION_PATCH)
-    );
+  if (optionalPackageManifestString(metadata, "version", packageJson) !== SMITHERS_VERSION) {
+    throw new Error(`installed Smithers CLI package version must be ${SMITHERS_VERSION}`);
   }
   let cliContents = fs.readFileSync(cliSource, "utf8");
   for (const [source, patched, label] of [
@@ -3325,11 +3287,8 @@ function applySmithersCompatibilityPatches(projectRoot: string): void {
       dependencyPackageJson,
       `installed Smithers ${label} package manifest`
     );
-    if (
-      optionalPackageManifestString(dependencyMetadata, "version", dependencyPackageJson) !==
-      SMITHERS_ORCHESTRATOR_VERSION
-    ) {
-      throw new Error(`installed Smithers ${label} package version must be ${SMITHERS_ORCHESTRATOR_VERSION}`);
+    if (optionalPackageManifestString(dependencyMetadata, "version", dependencyPackageJson) !== SMITHERS_VERSION) {
+      throw new Error(`installed Smithers ${label} package version must be ${SMITHERS_VERSION}`);
     }
   }
   assertRegularFileInside(nodeModules, engineWorkflowHashSource, "installed Smithers workflow hash implementation");
@@ -3412,15 +3371,15 @@ function installedSmithersValidationError(projectRoot: string): string | undefin
     }
     const packageRoot = resolveInstalledSmithersPackageRoot(projectRoot);
     const packageJson = path.join(packageRoot, "package.json");
-    const expectedBin = path.join(packageRoot, ...SMITHERS_ORCHESTRATOR_BIN_PATH.split("/"));
-    const expectedLinkedBin = path.join(linkedPackageRoot, ...SMITHERS_ORCHESTRATOR_BIN_PATH.split("/"));
+    const expectedBin = path.join(packageRoot, ...SMITHERS_BIN_PATH.split("/"));
+    const expectedLinkedBin = path.join(linkedPackageRoot, ...SMITHERS_BIN_PATH.split("/"));
     if (!fs.existsSync(packageJson)) {
       return "installed package metadata is missing";
     }
     assertRegularFileInside(packageRoot, packageJson, "installed Smithers package metadata");
     const metadata = readPackageManagerOwnedManifestEnvelope(packageJson, "installed Smithers package manifest");
-    if (optionalPackageManifestString(metadata, "version", packageJson) !== SMITHERS_ORCHESTRATOR_VERSION) {
-      return `installed package version must be ${SMITHERS_ORCHESTRATOR_VERSION}`;
+    if (optionalPackageManifestString(metadata, "version", packageJson) !== SMITHERS_VERSION) {
+      return `installed package version must be ${SMITHERS_VERSION}`;
     }
     const bin = optionalPackageManifestBin(metadata, packageJson);
     if (typeof bin !== "object" || bin === null || !isExpectedSmithersBinTarget(bin.smithers)) {
@@ -3462,7 +3421,7 @@ function installedSmithersValidationError(projectRoot: string): string | undefin
 }
 
 function isExpectedSmithersBinTarget(value: unknown): boolean {
-  return value === SMITHERS_ORCHESTRATOR_BIN_PATH || value === `./${SMITHERS_ORCHESTRATOR_BIN_PATH}`;
+  return value === SMITHERS_BIN_PATH || value === `./${SMITHERS_BIN_PATH}`;
 }
 
 /**
@@ -3601,7 +3560,7 @@ function defineProjectedPackageManifestField<Value>(target: Record<string, Value
 }
 
 function installedSmithersPackageRoot(projectRoot: string): string {
-  return path.join(projectRoot, ".smithers", "node_modules", "smithers-orchestrator");
+  return path.join(projectRoot, ".smithers", "node_modules", "smthrs");
 }
 
 function resolveInstalledSmithersPackageRoot(projectRoot: string): string {
@@ -3676,6 +3635,7 @@ function smithersCommandEnv(
   keepWorkspaces?: boolean
 ): NodeJS.ProcessEnv {
   const source: NodeJS.ProcessEnv = { ...process.env, ...(env ?? {}) };
+  source.SMITHERS_DETACHED_ADMISSION_TIMEOUT_MS = SMITHERS_DETACHED_ADMISSION_TIMEOUT_MS;
   if (keepWorkspaces !== undefined) {
     source.SMITHERS_KEEP_WORKTREES = keepWorkspaces ? "1" : undefined;
   }

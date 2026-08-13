@@ -3964,7 +3964,7 @@ function parseWorkflowEvents(stdout: string, expectedWorkflowRunId: string): Wor
       );
     }
     if (!isRecord(parsed) || !hasOnlyKeys(parsed, ["runId", "seq", "timestampMs", "type", "payload"])) {
-      throw new Error(`Smithers event record ${index + 1} must use the exact five-key 0.32.0 envelope`);
+      throw new Error(`Smithers event record ${index + 1} must use the exact five-key 0.34.0 envelope`);
     }
     const workflowRunId = requiredWorkflowEventString(parsed.runId, `Smithers event record ${index + 1} runId`);
     const sourceEventSequence = requiredWorkflowEventCount(parsed.seq, `Smithers event record ${index + 1} seq`);

@@ -51,6 +51,9 @@ export async function runEvmbenchAdapter(options: AdapterOptions): Promise<{ run
   const runRoot = path.join(auditRoot, ".ultrafuzz", "runs", runId);
   if (fs.existsSync(runRoot)) {
     const existing = commandData("status", execute(["status", runId, "--project", auditRoot, "--json"]));
+    if (existing.verdict === "degraded") {
+      throw degradedRunError(runId, existing.reason);
+    }
     if (existing.verdict !== "done") {
       commandData(
         "resume",
@@ -90,6 +93,9 @@ export async function runEvmbenchAdapter(options: AdapterOptions): Promise<{ run
     const status = commandData("status", execute(["status", runId, "--project", auditRoot, "--json"]));
     const verdict = status.verdict;
     if (verdict === "done") break;
+    if (verdict === "degraded") {
+      throw degradedRunError(runId, status.reason);
+    }
     if (verdict === "failed" || verdict === "cancelled") {
       throw new Error(`Ultrafuzz run ${runId} ended with ${verdict}; inspect the run before retrying`);
     }
@@ -248,3 +254,9 @@ function assertInside(root: string, target: string, label: string): void {
 }
 
 const WAITABLE_VERDICTS = new Set(["running-healthy", "progressing", "stalled", "waiting-quota"]);
+
+function degradedRunError(runId: string, reason: string): Error {
+  return new Error(
+    `Ultrafuzz run ${runId} ended degraded without converging${reason === "" ? "" : `: ${reason}`}; explicit operator review is required`
+  );
+}
