@@ -1416,20 +1416,6 @@ describe("longitudinal eval history", () => {
       assertPublicBenchmarkGeneration(REPOSITORY_ROOT, "ultrafuzz-bench", "smoke", suite, matrix)
     ).not.toThrow();
 
-    const legacyPolicyRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-legacy-benchmark-policy-"));
-    fs.mkdirSync(path.join(legacyPolicyRoot, "benchmarks"));
-    fs.copyFileSync(
-      path.join(REPOSITORY_ROOT, "benchmarks", "ultrafuzzbench", "cohort.json"),
-      path.join(legacyPolicyRoot, "benchmarks", "ultrafuzz-bench.json")
-    );
-    fs.copyFileSync(
-      path.join(REPOSITORY_ROOT, "benchmarks", "ultrafuzzbench", "lanes.json"),
-      path.join(legacyPolicyRoot, "benchmarks", "lanes.json")
-    );
-    expect(() =>
-      assertPublicBenchmarkGeneration(legacyPolicyRoot, "ultrafuzz-bench", "smoke", suite, matrix)
-    ).not.toThrow();
-
     const noncanonicalSmokeSuite = structuredClone(suite);
     noncanonicalSmokeSuite.targets[0]!.ref = "b".repeat(40);
     expect(() =>

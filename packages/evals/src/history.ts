@@ -9,7 +9,6 @@ import {
   adaptBenchmarkManifestToEvalSuite,
   loadBenchmarkCohortManifest,
   loadBenchmarkLanesManifest,
-  resolveBenchmarkPolicyManifestPaths,
   type BenchmarkModelProfileManifest
 } from "./benchmark-manifest.js";
 import {
@@ -1204,9 +1203,10 @@ export function assertPublicBenchmarkGeneration(
   suite: EvalSuiteSpec,
   matrix: EvalMatrixRow[]
 ): void {
-  const policyPaths = resolveBenchmarkPolicyManifestPaths(projectRoot, benchmark);
-  const cohort = loadBenchmarkCohortManifest(path.join(projectRoot, policyPaths.cohortRelativePath));
-  const lanes = loadBenchmarkLanesManifest(path.join(projectRoot, policyPaths.lanesRelativePath));
+  const cohort = loadBenchmarkCohortManifest(
+    path.join(projectRoot, "benchmarks", benchmark === "evmbench" ? "evmbench" : "ultrafuzzbench", "cohort.json")
+  );
+  const lanes = loadBenchmarkLanesManifest(path.join(projectRoot, "benchmarks", "ultrafuzzbench", "lanes.json"));
   const actualRunnerProfiles = [
     ...new Set(suite.variants.map((variant) => variant.runner_model_profile ?? suite.run.runner_model_profile))
   ];

@@ -17,8 +17,7 @@ import {
   parseEvalScoreSummary,
   parsePublicEvalDiagnostics,
   readEvalHistoryAutomaticPublicationPlan,
-  readEvalHistoryPublicationGeneration,
-  resolveBenchmarkPolicyManifestPaths
+  readEvalHistoryPublicationGeneration
 } from "../../packages/evals/dist/index.js";
 import { isPublicModalBenchmarkConfig, loadModalBenchmarkConfig } from "../../packages/modal/dist/config.js";
 import { MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID } from "../../packages/modal/dist/modal-contracts.js";
@@ -190,8 +189,9 @@ export function validateBenchmarkPolicyFiles(input) {
   if (gitOutput(policyRoot, ["status", "--porcelain=v1", "--untracked-files=no"]) !== "") {
     throw new Error("benchmark policy checkout has tracked modifications");
   }
-  const policyPaths = resolveBenchmarkPolicyManifestPaths(policyRoot, input.benchmark);
-  for (const relative of [policyPaths.lanesRelativePath, policyPaths.cohortRelativePath]) {
+  const cohortPath =
+    input.benchmark === "evmbench" ? "benchmarks/evmbench/cohort.json" : "benchmarks/ultrafuzzbench/cohort.json";
+  for (const relative of ["benchmarks/ultrafuzzbench/lanes.json", cohortPath]) {
     regularFileInside(policyRoot, relative, MAX_POLICY_BYTES, `benchmark policy ${relative}`);
   }
   return policyRoot;
@@ -475,9 +475,16 @@ function validateConcurrency(value, expected) {
 }
 
 function benchmarkPolicyDimensions(policyRoot, identity, evalModule, producerPolicy) {
-  const policyPaths = evalModule.resolveBenchmarkPolicyManifestPaths(policyRoot, identity.benchmark);
-  const cohort = evalModule.loadBenchmarkCohortManifest(path.join(policyRoot, policyPaths.cohortRelativePath));
-  const lanes = evalModule.loadBenchmarkLanesManifest(path.join(policyRoot, policyPaths.lanesRelativePath));
+  const cohortPath = path.join(
+    policyRoot,
+    "benchmarks",
+    identity.benchmark === "evmbench" ? "evmbench" : "ultrafuzzbench",
+    "cohort.json"
+  );
+  const cohort = evalModule.loadBenchmarkCohortManifest(cohortPath);
+  const lanes = evalModule.loadBenchmarkLanesManifest(
+    path.join(policyRoot, "benchmarks", "ultrafuzzbench", "lanes.json")
+  );
   if (
     (identity.benchmark === "evmbench" && cohort.schema_version !== evalModule.EVMBENCH_COHORT_SCHEMA_VERSION) ||
     (identity.benchmark === "ultrafuzz-bench" &&

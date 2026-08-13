@@ -3,11 +3,7 @@ import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import {
-  loadBenchmarkCohortManifest,
-  loadBenchmarkLanesManifest,
-  resolveBenchmarkPolicyManifestPaths
-} from "../../packages/evals/dist/index.js";
+import { loadBenchmarkCohortManifest, loadBenchmarkLanesManifest } from "../../packages/evals/dist/index.js";
 import { isPublicModalBenchmarkConfig, loadModalBenchmarkConfig } from "../../packages/modal/dist/config.js";
 import { MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID } from "../../packages/modal/dist/modal-contracts.js";
 import { readModalDocument } from "../../packages/modal/dist/modal-documents.js";
@@ -164,9 +160,13 @@ function validatePairConfigs(manifest, controlRoot, manifestPath, dimensions) {
 
 export function modalBenchmarkPolicyDimensions(policyRoot, mode) {
   const benchmark = mode === "smoke" ? "ultrafuzz-bench" : "evmbench";
-  const policyPaths = resolveBenchmarkPolicyManifestPaths(policyRoot, benchmark);
-  const cohortPath = path.join(policyRoot, policyPaths.cohortRelativePath);
-  const lanesPath = path.join(policyRoot, policyPaths.lanesRelativePath);
+  const cohortPath = path.join(
+    policyRoot,
+    "benchmarks",
+    benchmark === "evmbench" ? "evmbench" : "ultrafuzzbench",
+    "cohort.json"
+  );
+  const lanesPath = path.join(policyRoot, "benchmarks", "ultrafuzzbench", "lanes.json");
   const cohort = loadBenchmarkCohortManifest(cohortPath);
   const lanes = loadBenchmarkLanesManifest(lanesPath);
   const selectedTargets =

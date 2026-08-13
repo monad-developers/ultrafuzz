@@ -1,6 +1,3 @@
-import fs from "node:fs";
-import path from "node:path";
-
 import { auditProfile, loadAuditProfileCatalog, packagedTopologyDigest } from "@ultrafuzz/config";
 import { z } from "zod/v4";
 
@@ -122,63 +119,6 @@ export interface BenchmarkLanesManifest {
   schema_version: typeof BENCHMARK_LANES_SCHEMA_VERSION;
   smoke: BenchmarkLaneManifest;
   full: BenchmarkLaneManifest;
-}
-
-export interface BenchmarkPolicyManifestPaths {
-  layout: "benchmark-family" | "legacy-root";
-  cohortRelativePath: string;
-  lanesRelativePath: string;
-}
-
-/**
- * Resolve policy paths from the immutable candidate tree. Trusted publication
- * tooling may be newer than an already-running benchmark candidate, so it must
- * understand the one pre-family layout without accepting mixed policy sources.
- */
-export function resolveBenchmarkPolicyManifestPaths(
-  projectRoot: string,
-  benchmark: "evmbench" | "ultrafuzz-bench"
-): BenchmarkPolicyManifestPaths {
-  const layouts: BenchmarkPolicyManifestPaths[] = [
-    {
-      layout: "benchmark-family",
-      cohortRelativePath:
-        benchmark === "evmbench" ? "benchmarks/evmbench/cohort.json" : "benchmarks/ultrafuzzbench/cohort.json",
-      lanesRelativePath: "benchmarks/ultrafuzzbench/lanes.json"
-    },
-    {
-      layout: "legacy-root",
-      cohortRelativePath:
-        benchmark === "evmbench" ? "benchmarks/evmbench-detect.json" : "benchmarks/ultrafuzz-bench.json",
-      lanesRelativePath: "benchmarks/lanes.json"
-    }
-  ];
-  const states = layouts.map((layout) => {
-    const present = [layout.cohortRelativePath, layout.lanesRelativePath].map((relative) =>
-      policyPathEntryExists(path.join(projectRoot, relative))
-    );
-    return { layout, complete: present.every(Boolean), hasAny: present.some(Boolean) };
-  });
-  const complete = states.filter((state) => state.complete);
-  if (complete.length === 1 && states.every((state) => state === complete[0] || !state.hasAny)) {
-    return complete[0]!.layout;
-  }
-  throw new EvalError(
-    "EVAL_BENCHMARK_MANIFEST_INVALID",
-    `${projectRoot} must contain exactly one complete canonical benchmark policy layout`
-  );
-}
-
-function policyPathEntryExists(filePath: string): boolean {
-  try {
-    fs.lstatSync(filePath);
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-    throw new EvalError("EVAL_BENCHMARK_MANIFEST_INVALID", `failed to inspect benchmark policy path ${filePath}`, {
-      reason: error instanceof Error ? error.message : String(error)
-    });
-  }
 }
 
 const safeId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/u);
