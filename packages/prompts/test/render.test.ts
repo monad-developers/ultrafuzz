@@ -457,6 +457,63 @@ describe("prompt rendering", () => {
     }
   });
 
+  it("renders smoke final review with bounded classification semantics and context", () => {
+    const topologyPath = fileURLToPath(new URL("../../config/topologies/smoke.yml", import.meta.url));
+    const topology = YAML.parse(readFileSync(topologyPath, "utf8")) as TopologyDocument;
+    const report = topology.nodes.find((node) => node.id === "final-report");
+    expect(report?.prompt).toBe("review/final-report.md");
+    expect(report?.depends_on).toContain("smoke-context");
+
+    const promptMarkdown = loadBuiltInPromptAssets().find((asset) => asset.relativePath === report!.prompt)?.markdown;
+    expect(promptMarkdown).toBeDefined();
+    const root = path.join(os.tmpdir(), "ultrafuzz-smoke-final-report");
+    const runArtifacts = path.join(root, "runs", "smoke-render", "artifacts");
+    const artifactDir = path.join(runArtifacts, "final-report");
+    const workspacePath = path.join(root, "workspaces", "final-report");
+    const logicalNodes = topology.nodes.map((node) => ({
+      id: node.id,
+      dependsOn: node.depends_on ?? [],
+      artifactDir: path.join(runArtifacts, node.id),
+      outputs: (node.outputs ?? []).map((output, index) => ({
+        path: output.path,
+        contract: output.contract,
+        primary: output.primary ?? index === 0,
+        description: `${output.contract} smoke output.`,
+        ...(output.contract === "ultrafuzz/report@2" ? { schemaFile: "report.schema.json" } : {})
+      }))
+    }));
+
+    const rendered = renderPrompt({
+      prompt: promptMarkdown!,
+      graph: { logicalNodes },
+      node: {
+        logicalId: report!.id,
+        concreteId: report!.id,
+        artifactDir,
+        workspacePath,
+        repoPath: path.join(root, "repo"),
+        attemptIndex: 0,
+        loopIndex: 0,
+        loopCount: 1
+      },
+      run: {
+        id: "smoke-render",
+        artifactsDir: runArtifacts,
+        metadataPath: path.join(root, "runs", "smoke-render", "run.json")
+      },
+      outputs: { patchPath: path.join(artifactDir, "workspace.patch") }
+    }).renderedMarkdown;
+
+    expect(rendered).toContain(path.join(runArtifacts, "smoke-context", "smoke-context.md"));
+    expect(rendered).toContain(path.join(runArtifacts, "dedupe-findings", "deduped-findings.json"));
+    expect(rendered).toContain("In bounded classification mode");
+    expect(rendered).toContain("compute `severity` from the matrix");
+    expect(rendered).toContain("Strict severity-handoff mode");
+    expect(rendered).toMatch(/applies when\s+`severity-classified-findings\.json` is rendered/u);
+    expect(rendered).not.toContain("bounded-final-review");
+    expect(rendered).not.toContain("workspace-patch.json");
+  });
+
   it("renders boundary recipes from the pinned schema without a prose-owned JSON shape", () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-boundary-recipes-"));
     tmpDirs.push(tmp);
@@ -764,6 +821,29 @@ describe("prompt rendering", () => {
       logicalIds: ["boundary-tests"],
       contract: "ultrafuzz/generated-tests@3"
     });
+  });
+
+  it("filters optional ancestor handoffs by exact declared output path", () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    tmpDirs.push(tmp);
+    const input = baseRenderInput(tmp);
+    input.prompt =
+      "Setup:\n{{ancestor_artifacts_by_path:setup/project-discovery.md,setup/base-test-setup.md,missing.json}}";
+
+    const result = renderPrompt(input);
+
+    expect(result.renderedMarkdown).toContain(path.join("project-discovery", "setup", "project-discovery.md"));
+    expect(result.renderedMarkdown).toContain(path.join("base-test-setup", "setup", "base-test-setup.md"));
+    expect(result.renderedMarkdown).not.toContain("references/expectations.json");
+    expect(result.renderedMarkdown).not.toContain("missing.json");
+    expect(result.artifactReferences).toContainEqual({
+      kind: "ancestor_artifacts_by_path",
+      logicalIds: ["base-test-setup", "project-discovery"],
+      relativePaths: ["setup/project-discovery.md", "setup/base-test-setup.md", "missing.json"]
+    });
+
+    input.prompt = "Optional:\n{{ancestor_artifacts_by_path:missing.json}}";
+    expect(renderPrompt(input).renderedMarkdown).toContain("None declared by this topology.");
   });
 
   it("does not ask agents to author runtime-owned workspace patch outputs", () => {

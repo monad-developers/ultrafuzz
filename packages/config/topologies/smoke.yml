@@ -105,7 +105,7 @@ nodes:
         contract: ultrafuzz/generated-tests@3
   - id: dedupe-findings
     kind: agentic
-    prompt: smoke/smoke-dedupe-findings.md
+    prompt: review/dedupe-findings.md
     group: review
     depends_on:
       - json-validation-correction
@@ -123,10 +123,11 @@ nodes:
         contract: ultrafuzz/finding-lifecycle-ledger@1
   - id: final-report
     kind: agentic
-    prompt: smoke/smoke-final-report.md
+    prompt: review/final-report.md
     group: review
     depends_on:
       - dedupe-findings
+      - smoke-context
     outputs:
       - path: report.md
         contract: ultrafuzz/nonempty-markdown@1

@@ -65,6 +65,7 @@ export type RunPlanArtifactReference =
   | { kind: "artifact_path"; logicalId?: string; suffix?: string }
   | { kind: "artifact_handoff"; logicalId: string }
   | { kind: "ancestor_artifacts"; logicalIds: string[] | "direct" }
+  | { kind: "ancestor_artifacts_by_path"; logicalIds: string[]; relativePaths: string[] }
   | { kind: "ancestor_artifacts_by_contract"; logicalIds: string[]; contract: string };
 
 export interface RunPlanRenderedPrompt {

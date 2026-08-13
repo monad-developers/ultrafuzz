@@ -713,8 +713,11 @@ describe("prompt semantic anchors", () => {
   it("validates deduped native reproducers without hydrating isolated workspaces", () => {
     const dedupe = prompt("review/dedupe-findings.md");
 
-    expect(dedupe).toContain("{{artifact_path:project-discovery}}/setup/project-discovery.md");
-    expect(dedupe).toContain("{{artifact_path:base-test-setup}}/setup/base-test-setup.md");
+    expect(dedupe).toContain("{{ancestor_artifacts}}");
+    expect(dedupe).toContain("When this list includes project-discovery or base-test setup handoffs");
+    expect(dedupe).toMatch(
+      /When they are absent, do not treat the omission as an error and do not\s+run native tests/u
+    );
     expect(dedupe).toContain("For Foundry");
     expect(dedupe).toContain("For Hardhat");
     expect(dedupe).toContain("For Vyper");
@@ -739,7 +742,7 @@ describe("prompt semantic anchors", () => {
     expect(dedupe).toMatch(
       /key, finding identity, title, optional family identity, and complete\s+strategy-hit provenance must agree with the kept finding and lifecycle record/u
     );
-    expect(dedupe).toContain("same order, `dedupe_key`, finding ID, title, optional family ID, and\nexact hit array");
+    expect(dedupe).toMatch(/same order, `dedupe_key`, finding\s+ID, title, optional family ID, and exact hit array/u);
     expect(dedupe).toContain("Never install, fetch, restore, or update dependencies during dedupe");
     expect(dedupe).not.toContain("restore project-pinned dependencies first");
     expect(dedupe).not.toContain("Dependency hydration used only");
@@ -843,7 +846,7 @@ describe("prompt semantic anchors", () => {
     expect(markdown).toContain("{{schema_path}}/report.schema.json");
     expect(markdown).toContain("run the exact `ultrafuzz json validate` command");
     expect(markdown).toContain("`severity_guess`, `severity`, `impact`, and");
-    expect(markdown).toContain("canonical originating strategy name when one is available");
+    expect(markdown).toMatch(/canonical originating strategy name\s+when one is available/u);
     expect(markdown).toContain("`strategy_provenance` when\nthe upstream finding has it");
     expect(flatMarkdown).toContain(
       "Derive structured detection rates from the exact strategy hits and configured loop counts"
@@ -865,10 +868,19 @@ describe("prompt semantic anchors", () => {
     );
     // Presentation identity is report-owned; substantive upstream fields stay
     // byte-identical and lifecycle metadata authenticates the source join.
-    expect(markdown).toContain("Copy every field the severity-classified finding already carries");
+    expect(markdown).toMatch(
+      /In strict severity-handoff mode, copy every field the severity-classified\s+finding already carries/u
+    );
     expect(markdown).toContain("byte-for-byte");
     expect(flatMarkdown).toContain("except the report-owned `id` and `title`");
-    expect(flatMarkdown).toContain("Apart from authoring canonical report `id` and `title`, you may only ADD fields");
+    expect(flatMarkdown).toContain(
+      "In bounded classification mode, apply the same byte-for-byte rule to every field already carried by the normalized deduped finding"
+    );
+    expect(flatMarkdown).toContain("In bounded classification mode, compute and author the matrix result");
+    expect(flatMarkdown).toContain(
+      "In strict severity-handoff mode, reject a mismatch instead of correcting the artifact"
+    );
+    expect(markdown).not.toContain("bounded-final-review");
     expect(markdown).toMatch(/`summary`, `family_variants`, and `recommended_next_action` stay byte-identical/u);
     // `ultrafuzz json validate` is schema-only, so ordering is undetectable
     // before the host gate rejects the artifact.
@@ -876,7 +888,7 @@ describe("prompt semantic anchors", () => {
     expect(markdown).toMatch(/greater than the previous\s+entry's `end_line`/u);
     // Every severity finding carries its own key; the finding_id fallback the
     // prompt used to allow is unreachable and contradicts the gate.
-    expect(markdown).toContain("has a `dedupe_key` exactly equal\n  to its lifecycle record's corresponding value");
+    expect(markdown).toMatch(/source finding you render has a `dedupe_key` exactly equal to its\s+lifecycle record/iu);
     expect(markdown).toContain("never fall back to `finding_id`");
     expect(markdown).not.toContain("when the finding has no dedupe key");
   });
@@ -898,20 +910,34 @@ describe("prompt semantic anchors", () => {
   });
 
   it("gives the final-report producer the canonical Markdown renderer", () => {
-    for (const promptPath of ["review/final-report.md", "smoke/smoke-final-report.md"]) {
-      const markdown = prompt(promptPath);
-      expect(markdown, promptPath).toContain(
-        "ultrafuzz report render --file '{{artifact_path}}/report.json' --output '{{artifact_path}}/report.md'"
-      );
-      expect(markdown, promptPath).toMatch(/Do not (?:author or )?hand-edit\s+`report\.md` after/u);
-      expect(markdown, promptPath).toContain("the renderer succeeds");
-    }
+    const markdown = prompt("review/final-report.md");
+    expect(markdown).toContain(
+      "ultrafuzz report render --file '{{artifact_path}}/report.json' --output '{{artifact_path}}/report.md'"
+    );
+    expect(markdown).toMatch(/Do not (?:author or )?hand-edit\s+`report\.md` after/u);
+    expect(markdown).toContain("the renderer succeeds");
   });
 
-  it("keeps smoke dedupe lifecycle records free of later-stage ownership", () => {
-    const markdown = prompt("smoke/smoke-dedupe-findings.md");
-    expect(markdown).toContain("fields owned by later\ntriage, severity, or final-review stages");
-    expect(markdown).toContain("remove\n`triage_classification` from a dedupe lifecycle record");
+  it("keeps dedupe lifecycle records free of later-stage ownership", () => {
+    const markdown = prompt("review/dedupe-findings.md");
+    expect(markdown).toContain("Do not write triage, severity, disposition, comparison, or later\nstage fields");
+    expect(markdown).toContain("remove `triage_classification` from\na dedupe lifecycle record");
+  });
+
+  it("reuses the shared review prompts in the smoke topology", () => {
+    const topologyPath = fileURLToPath(new URL("../../config/topologies/smoke.yml", import.meta.url));
+    const topology = YAML.parse(readFileSync(topologyPath, "utf8")) as {
+      nodes: Array<{ id: string; prompt?: string; depends_on?: string[] }>;
+    };
+    const prompts = new Map(topology.nodes.map((node) => [node.id, node.prompt]));
+    const finalReport = topology.nodes.find((node) => node.id === "final-report");
+    const assets = loadBuiltInPromptAssets().map((asset) => asset.relativePath);
+
+    expect(prompts.get("dedupe-findings")).toBe("review/dedupe-findings.md");
+    expect(prompts.get("final-report")).toBe("review/final-report.md");
+    expect(finalReport?.depends_on).toContain("smoke-context");
+    expect(assets).not.toContain("smoke/smoke-dedupe-findings.md");
+    expect(assets).not.toContain("smoke/smoke-final-report.md");
   });
 
   it("delegates the boundary-recipes JSON shape to its pinned schema", () => {

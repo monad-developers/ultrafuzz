@@ -104,7 +104,12 @@ function canonicalRunPlan(): RunPlanDocument {
         variables_used: ["run_id"],
         artifact_references: [
           { kind: "artifact_path", logicalId: "node-a", suffix: "result.json" },
-          { kind: "ancestor_artifacts", logicalIds: "direct" }
+          { kind: "ancestor_artifacts", logicalIds: "direct" },
+          {
+            kind: "ancestor_artifacts_by_path",
+            logicalIds: [],
+            relativePaths: ["optional/context.md"]
+          }
         ]
       }
     ],

@@ -11,10 +11,17 @@ generated-test aggregation outputs.
 
 A bounded benchmark topology may intentionally omit triage, severity, test
 aggregation, property, or harness handoffs. When no rendered path is provided,
-do not treat the omitted handoff as an error. When the severity-classification
-handoff is absent, perform one source-backed bounded classification pass over
-each deduplicated finding and enrich its matching dedupe lifecycle record in
-memory before selecting report entries:
+do not treat the omitted handoff as an error. Use exactly one of these modes:
+
+- **Strict severity-handoff mode** applies when
+  `severity-classified-findings.json` is rendered. Preserve and validate that
+  handoff as described below; never recompute its classification fields.
+- **Bounded classification mode** applies only when that handoff is absent.
+  Perform one source-backed classification pass over each deduplicated finding
+  and enrich its matching dedupe lifecycle record only in the report object
+  before selecting report entries.
+
+In bounded classification mode:
 
 - choose exactly one `triage_classification` from `true-positive`,
   `false-positive`, `undetermined`, `incomplete-spec`, `harness-defect`,
@@ -25,25 +32,46 @@ memory before selecting report entries:
   `false-positive`, and to `non-production` for every other actionable class;
 - set a concise `demotion_reason` for every `non-production` or `dropped`
   record, and set `canonical_severity` after applying the matrix to every
-  promoted record; and
-- append a `bounded-final-review` lifecycle stage pointing to the generated
-  `report.json`, while preserving all dedupe source artifacts and strategy
-  hits.
+  promoted record;
+- for every promoted finding, author source-backed `impact`, `likelihood`, and
+  their rationales, compute `severity` from the matrix, and set a concise
+  `severity_rationale`; and
+- preserve the dedupe lifecycle record's source artifacts, strategy hits, and
+  `stages` array byte-for-byte. Do not append a report-only lifecycle stage;
+  report schemas admit only stages backed by actual review artifacts.
 
 If evidence is insufficient for `true-positive`, use `undetermined`; never
-guess missing validation. Treat these enriched records as the lifecycle source
-of truth and copy them into the matching report objects. Render unavailable
-provenance fields as `unavailable`, and emit a schema-valid report even when the
-resulting issue list is empty.
+guess missing validation. Copy every normalized deduped-finding field
+byte-for-byte into the selected report row before adding only report-schema
+fields. Preserve `severity_guess` as preliminary provenance. Treat the enriched
+lifecycle records as the bounded lifecycle source of truth and copy them into
+the matching report objects. Render unavailable provenance fields as
+`unavailable`, and emit a schema-valid report even when the resulting issue
+list is empty.
 
 ## Required Inputs
 
-Read these review handoffs before writing the report:
+Read every rendered input below before writing the report. The list is filtered
+to the exact report handoffs declared by ancestors, so a bounded topology can
+omit stages without leaving stale paths or exposing unrelated patches, raw
+campaign plans, or generated-test bundles:
 
-Aggregation manifest:
-`{{artifact_path:aggregate-test-files}}/aggregation.json`
+{{ancestor_artifacts_by_path:aggregation.json,severity-classified-findings.json,deduped-findings.json,strategy-detections.json,finding-lifecycle-ledger.json,properties.json,implemented-properties.json,recon-fuzzer-results.json,campaign-summary.json,setup/project-discovery.md,setup/setup-foundry.md,setup/base-test-setup.md,smoke-context.md}}
 
-Validate it against the exact pinned
+Use exact declared filenames to identify the available handoffs. When
+`severity-classified-findings.json`, its `strategy-detections.json`, and its
+`finding-lifecycle-ledger.json` are present, treat them as the review source of
+truth. Validate the severity artifact against the exact pinned
+`{{schema_path}}/severity-classified-findings.schema.json`; that schema alone
+defines its JSON shape. Preserve its complete ordered finding population and
+never substitute a legacy or converted artifact.
+
+When the severity-classification handoffs are absent, use the rendered
+`deduped-findings.json`, `strategy-detections.json`, and
+`finding-lifecycle-ledger.json` as the exact dedupe-stage fallbacks. Do not
+invent a missing path or legacy filename.
+
+When `aggregation.json` is present, validate it against the exact pinned
 `{{schema_path}}/aggregation-manifest.schema.json`; that schema alone defines
 its JSON shape. Use copied runnable-test rows when matching generated or copied
 destinations. Bind each row through its exact authenticated source-bundle and
@@ -52,45 +80,9 @@ and never infer a framework from an extension or mix different bundles. These
 joins and byte-preservation rules are contextual requirements beyond JSON
 Schema.
 
-Severity-classified findings:
-`{{artifact_path:severity-classification}}/severity-classified-findings.json`
-
-Validate the severity artifact against the exact pinned
-`{{schema_path}}/severity-classified-findings.schema.json`; that schema alone
-defines its JSON shape. Preserve its complete ordered finding population and
-never substitute a legacy or converted artifact.
-
-Strategy detection provenance:
-`{{artifact_path:severity-classification}}/strategy-detections.json`
-
-Finding lifecycle ledger:
-`{{artifact_path:severity-classification}}/finding-lifecycle-ledger.json`
-
-When the severity-classification handoff is absent in a bounded topology, use
-these exact dedupe-stage fallbacks instead:
-
-Dedupe strategy detection provenance:
-`{{artifact_path:dedupe-findings}}/strategy-detections.json`
-
-Dedupe finding lifecycle ledger:
-`{{artifact_path:dedupe-findings}}/finding-lifecycle-ledger.json`
-
-Dedupe report:
-`{{artifact_path:dedupe-findings}}/deduped-findings.json`
-
-Use these property provenance handoffs when they exist:
-
-Canonical property catalog:
-`{{artifact_path:property-specification-fanin}}/properties.json`
-
-Implemented property records:
-`{{artifact_path:stateful-invariant-implement-properties}}/implemented-properties.json`
-
-Invariant campaign results:
-`{{artifact_path:stateful-invariant-campaign}}/recon-fuzzer-results.json`
-
-Authoritative invariant campaign summary:
-`{{artifact_path:stateful-invariant-campaign}}/campaign-summary.json`
+Use `properties.json`, `implemented-properties.json`,
+`recon-fuzzer-results.json`, and `campaign-summary.json` as property provenance
+handoffs when they are present in the rendered list.
 
 The catalog, implementation records, and campaign results form the provenance
 join from a finding's `property_ids` to its canonical properties, source lens
@@ -109,27 +101,14 @@ and its `reason` when present, exactly as parsed JSON values, into the report's
 files, or an agent-authored fallback. This authoritative ancestor join is
 semantic and remains required in addition to report-schema validation.
 
-Use these setup handoffs:
+Use project-discovery, Foundry setup, and base-test setup handoffs when their
+declared Markdown files are present. Preserve every exact rendered filename
+when mentioning an input internally or in `report.json` provenance. Do not
+invent legacy filenames such as `dedupe-findings/findings.json` when the
+rendered filename differs.
 
-Project discovery:
-`{{artifact_path:project-discovery}}/setup/project-discovery.md`
-
-Foundry setup (when rendered):
-`{{artifact_path:setup-foundry}}/setup/setup-foundry.md`
-
-Base test setup:
-`{{artifact_path:base-test-setup}}/setup/base-test-setup.md`
-
-Use exactly the rendered filenames above when reading prior-node outputs. When
-you mention an input internally or in `report.json` provenance, preserve the
-exact source filename where useful, for example
-`{{artifact_path:aggregate-test-files}}/aggregation.json`,
-`{{artifact_path:severity-classification}}/severity-classified-findings.json`,
-`{{artifact_path:severity-classification}}/strategy-detections.json`,
-`{{artifact_path:severity-classification}}/finding-lifecycle-ledger.json`, and
-`{{artifact_path:dedupe-findings}}/deduped-findings.json`. Do not invent legacy
-filenames such as `dedupe-findings/findings.json` when the exact rendered
-filename differs.
+When `smoke-context.md` is present, use it as the authoritative bounded source,
+harness, and reachability context for the classification pass.
 
 The base test setup handoff is the source of truth for reusable fixture paths.
 Read it before writing or minimizing PoCs, and use the exact fixture path it
@@ -230,9 +209,12 @@ only to the examples below.
 
 The report severity, impact, and likelihood vocabularies are closed: High,
 Medium, and Low. Never render or preserve another label or an alternate severity
-field. Copy the strict severity artifact's `severity`, `impact`, `likelihood`,
-and rationale fields exactly. If they are missing, invalid, or fail the matrix,
-reject the upstream artifact; do not normalize, recompute, or rewrite it.
+field. In strict severity-handoff mode, copy the severity artifact's `severity`,
+`impact`, `likelihood`, and rationale fields exactly. If they are missing,
+invalid, or fail the matrix, reject the upstream artifact; do not normalize,
+recompute, or rewrite it. In bounded classification mode, author those fields
+once from the supplied evidence and the boundaries below, then preserve the
+authored values consistently throughout the report.
 
 Use these risk boundaries before applying the matrix:
 
@@ -268,9 +250,10 @@ Apply this Impact x Likelihood matrix before publishing any production issue:
 | Medium | Medium | Medium | Low |
 | Low | Low | Low | Low |
 
-For every production issue, verify that the upstream final `severity` equals
-the matrix result for its `impact` and `likelihood`. Reject a mismatch instead
-of correcting the artifact. In particular:
+For every production issue, require final `severity` to equal the matrix result
+for its `impact` and `likelihood`. In strict severity-handoff mode, reject a
+mismatch instead of correcting the artifact. In bounded classification mode,
+compute and author the matrix result. In particular:
 
 - High impact + Low likelihood must render as Medium.
 - Medium impact + Low likelihood must render as Low.
@@ -287,7 +270,7 @@ descriptions, Severity explanations, PoC steps, family variant bullets,
 non-production outcome text, and recommended next actions as rendered there,
 plus the `report.json` fields that exist only in the report, which are
 `description` and `proof_of_concept`. This rule never licenses rewriting a
-field you copy from the severity-classified handoff. In `report.json`,
+field you copy from the selected strict or bounded source finding. In `report.json`,
 `summary`, `family_variants`, and `recommended_next_action` stay byte-identical
 to the upstream finding even when their wording is weaker than the prose you
 write around them. Choose actor wording from the evidence and reuse it
@@ -393,10 +376,10 @@ fallback callers could...`. Tighten copied upstream text into a clean actor,
 action, and outcome. The title prefix is report-owned; all substantive copied
 fields keep the upstream wording byte-for-byte.
 
-Use the upstream canonical final `severity` consistently for issue IDs,
-ordering, counts, Markdown, and JSON after verifying the matrix. Preserve
-`severity_guess` as preliminary provenance, and reject `final_severity` or any
-other alias.
+Use the final `severity` selected by the active strict or bounded mode
+consistently for issue IDs, ordering, counts, Markdown, and JSON after verifying
+the matrix. Preserve `severity_guess` as preliminary provenance, and reject
+`final_severity` or any other alias.
 
 Impact and Likelihood must each render as exactly High, Medium, or Low followed
 by a colon and concise explanation, for example
@@ -414,7 +397,7 @@ scenario before or alongside the code. Prefer meaningful actor names such as
 they improve understanding; otherwise use generic names such as `Alice` and
 `Bob`.
 
-Use the severity finding's explicit generated test path first, then the
+Use the selected source finding's explicit generated test path first, then the
 aggregation manifest, to locate generated or copied tests. Prefer an aggregation
 record that matches the same source artifact path, source relative path,
 strategy, and attempt index as the finding. If the aggregation manifest is
@@ -458,11 +441,10 @@ Compute the Strategy section from `strategy-detections.json`, the lifecycle
 ledger, and configured strategy loop counts. For each strategy that found the
 same deduped bug instance or same-root family variant, count matching loop
 attempts for that strategy and divide by the total configured loops for that
-strategy. Every severity-classified finding carries its own top-level
-`dedupe_key`, identical to its lifecycle record and its strategy-detections row,
-so match strategy detections by that key. Stop and report an invalid upstream
-artifact when a finding has no `dedupe_key`; never fall back to `finding_id` and
-never invent a key.
+strategy. Every selected source finding carries `dedupe_key`, identical to its
+lifecycle record and its strategy-detections row, so match strategy detections
+by that key. Stop and report an invalid upstream artifact when a finding has no
+`dedupe_key`; never fall back to `finding_id` and never invent a key.
 
 Render the human-readable Strategy section as a Markdown table with columns
 `Strategy` and `Detection rate`. Detection rates must be exact `M/N` counts
@@ -623,16 +605,18 @@ historical compatibility value. Use stable unions when several properties
 contribute and emit no property-provenance records when there are no
 property-derived findings.
 
-Copy every field the severity-classified finding already carries into its
-`report.json` issue object byte-for-byte except the report-owned `id` and
-`title`, including `summary`,
+In strict severity-handoff mode, copy every field the severity-classified
+finding already carries into its `report.json` issue object byte-for-byte except
+the report-owned `id` and `title`, including `summary`,
 `recommended_next_action`, `family_variants` and their nested summaries,
 `severity`, `impact`, `likelihood`, `evidence`, and `strategy_provenance` when
-the upstream finding has it. Apart from authoring canonical report `id` and
-`title`, you may only ADD fields the upstream finding does not carry, using
-only report-owned additions admitted by the pinned report schema. Rewriting,
-tightening, or re-voicing any other copied field fails the report. Keep the
-canonical originating strategy name when one is available.
+the upstream finding has it. In bounded classification mode, apply the same
+byte-for-byte rule to every field already carried by the normalized deduped
+finding, then ADD the bounded classification and report-owned fields it lacks.
+Apart from authoring canonical report `id` and `title`, only add fields admitted
+by the pinned report schema. Rewriting, tightening, or re-voicing any other
+copied field fails the report. Keep the canonical originating strategy name
+when one is available.
 Derive structured detection rates from the exact strategy hits and configured
 loop counts, and preserve optional attempt provenance from the canonical hit
 records. Do not emit removed or compatibility aliases.
@@ -644,7 +628,7 @@ vocabulary. Never add `final_severity` or upstream/compatibility aliases. The
 production issue `id`, `title`, and cross-severity order are report-owned.
 Author them in canonical presentation form before validation; the renderer
 only validates and renders them. Use exact lifecycle and source metadata—not
-presentation identity—to retain the corresponding severity-classified finding.
+presentation identity—to retain the corresponding source finding.
 Whenever a property-derived finding is assigned a different report presentation
 ID, set its `property_provenance.source_finding_id` to the exact authenticated
 upstream campaign finding ID and keep `property_provenance.finding_id` equal to
@@ -690,14 +674,18 @@ Before finishing, verify that:
 - Every production issue severity equals the Impact x Likelihood matrix result.
 - `report.json` passes the exact rendered validation command for its pinned
   schema.
-- Every `report.json` production issue preserves the complete normalized
-  severity-classified finding except for report-owned `id` and `title`.
+- In strict severity-handoff mode, every `report.json` production issue
+  preserves the complete normalized severity-classified finding except for
+  report-owned `id` and `title`.
+- In bounded classification mode, every `report.json` production issue
+  preserves every normalized deduped-finding field byte-for-byte and adds the
+  source-backed classification and report-owned fields required by the schema.
 - Every `report.json` production issue reproduces every non-presentation field
-  of its severity-classified source byte-for-byte, including `summary`,
-  `recommended_next_action`, and `family_variants`, and adds only fields that
-  source does not carry.
-- Every severity-classified finding you render has a `dedupe_key` exactly equal
-  to its lifecycle record's corresponding value.
+  already present on its selected source byte-for-byte, including `summary`,
+  `recommended_next_action`, and `family_variants` when present, and adds only
+  fields that source does not carry.
+- Every source finding you render has a `dedupe_key` exactly equal to its
+  lifecycle record's corresponding value.
 - Every `line_ranges` array is sorted by ascending `line`, with each entry's
   `line` greater than the previous entry's `end_line`.
 - Every `report.json` production issue preserves the canonical originating

@@ -84,6 +84,7 @@ is required.
 | `artifact_path:<logical-node-id>`                             | Absolute artifact directory path for an ancestor producer.                  |
 | `artifact_handoff:<logical-node-id>`                          | Absolute path to an ancestor producer's primary contracted output.          |
 | `ancestor_artifacts:<logical-node-id>[,<logical-node-id>...]` | Markdown list of required artifact files from selected ancestor producers.  |
+| `ancestor_artifacts_by_path:<path>[,<path>...]`               | Markdown list of matching declared outputs from any ancestor producer.      |
 
 Artifact variables may reference only ancestor nodes. Handoff producers must
 declare exactly one `outputs` entry with `primary: true`.
@@ -97,6 +98,9 @@ Read the setup notes at {{artifact_path:setup-foundry}}/setup/setup-foundry.md.
 `artifact_handoff` resolves to a file and does not accept a suffix.
 `ancestor_artifacts` resolves to declared contracted outputs and does not
 accept a suffix.
+`ancestor_artifacts_by_path` accepts safe, exact output-relative paths and
+renders `None declared by this topology.` when no ancestor declares a match.
+This makes optional handoffs explicit without rendering unrelated outputs.
 
 Looped producers render as a Markdown bullet list of concrete attempt paths.
 Use deterministic split-work assignment for looped strategies:

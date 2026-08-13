@@ -36,6 +36,23 @@ describe("artifact handoff validation", () => {
     ).toThrow(expect.objectContaining({ code: "INVALID_PROMPT_ARTIFACT_REFERENCE" }));
   });
 
+  it("accepts optional ancestor handoffs filtered by exact output path", () => {
+    expect(() =>
+      validateTopology(validTopology(), {
+        promptTexts: {
+          "review/review.md":
+            "Read {{ancestor_artifacts_by_path:findings.json,setup/project-discovery.md,optional.json}}."
+        }
+      })
+    ).not.toThrow();
+
+    expect(() =>
+      validateTopology(validTopology(), {
+        promptTexts: { "review/review.md": "Read {{ancestor_artifacts_by_path:../secret}}." }
+      })
+    ).toThrow(expect.objectContaining({ code: "INVALID_PROMPT_ARTIFACT_REFERENCE" }));
+  });
+
   it("prefers an explicit prompt path over a colliding node-id catalog entry", () => {
     expect(() =>
       validateTopology(validTopology(), {
