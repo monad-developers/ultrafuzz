@@ -4538,6 +4538,83 @@ test("validate rejects incomplete current agent registries even when missing pro
   assert.ok(kimiRun.diagnostics.some((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN"));
 });
 
+test("validate ignores agentFactories lookalikes inside registry strings", async () => {
+  const project = tempProject();
+  const init = initProject({ projectRoot: project, force: true });
+  assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+  writeSmallTopology(project);
+  fs.writeFileSync(
+    path.join(project, ".smithers/agents/index.ts"),
+    'export const decoy = "export const agentFactories = { ClaudeAgent: fake, CodexAgent: fake, DeepSeekAgent: fake, KimiAgent: fake }";\n',
+    "utf8"
+  );
+
+  const validate = await validateProject({ projectRoot: project, env: {} });
+
+  assert.equal(validate.ok, false);
+  assert.deepEqual(
+    validate.diagnostics
+      .filter((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN")
+      .map((diagnostic) => diagnostic.message.match(/agent reference (\w+)/u)?.[1]),
+    ["ClaudeAgent", "CodexAgent", "DeepSeekAgent", "KimiAgent"]
+  );
+});
+
+test("validate accepts typed current registries with shorthand factory entries", async () => {
+  const project = tempProject();
+  const init = initProject({ projectRoot: project, force: true });
+  assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+  writeSmallTopology(project);
+  fs.writeFileSync(
+    path.join(project, ".smithers/agents/index.ts"),
+    "type Factory = () => unknown;\n" +
+      "const ClaudeAgent: Factory = () => null;\n" +
+      "const CodexAgent: Factory = () => null;\n" +
+      "const createDeepSeek: Factory = () => null;\n" +
+      "const createKimi: Factory = () => null;\n" +
+      "export const agentFactories: Record<string, Factory> = {\n" +
+      "  ClaudeAgent,\n" +
+      "  CodexAgent,\n" +
+      "  DeepSeekAgent: createDeepSeek,\n" +
+      '  "KimiAgent": createKimi\n' +
+      "};\n",
+    "utf8"
+  );
+
+  const validate = await validateProject({ projectRoot: project, env: {} });
+
+  assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
+});
+
+test("validate accepts quoted factory keys for current custom agent IDs", async () => {
+  const project = tempProject();
+  const init = initProject({ projectRoot: project, force: true });
+  assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+  writeSmallTopology(project);
+  const configPath = path.join(project, "ultrafuzz.toml");
+  fs.writeFileSync(
+    configPath,
+    fs.readFileSync(configPath, "utf8").replace('agent = "CodexAgent"', 'agent = "custom.agent:v1-beta"'),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(project, ".smithers/agents/index.ts"),
+    "const createAgent = () => null;\n" +
+      "export const agentFactories = {\n" +
+      "  ClaudeAgent: createAgent,\n" +
+      "  CodexAgent: createAgent,\n" +
+      "  DeepSeekAgent: createAgent,\n" +
+      "  KimiAgent: createAgent,\n" +
+      '  "custom.agent:v1-beta": createAgent\n' +
+      "};\n",
+    "utf8"
+  );
+
+  const validate = await validateProject({ projectRoot: project, env: {} });
+
+  assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
+});
+
 test("validate rejects the historical single-file agent registry location", async () => {
   const project = tempProject();
   const init = initProject({ projectRoot: project, force: true });
@@ -5143,6 +5220,8 @@ test("compileSmithersWorkflow gates native dependencies on deterministic artifac
   assert.doesNotMatch(workflowSource, /const layers =/);
   assert.doesNotMatch(workflowSource, /<Sequence\b/);
   assert.match(workflowSource, /<Parallel\b/);
+  assert.doesNotMatch(workflowSource, /agentRegistry/u);
+  assert.match(workflowSource, /agent factory is not registered/u);
 
   const smithersTasks = JSON.parse(fs.readFileSync(compiled.tasksPath, "utf8")) as {
     layers?: unknown;

@@ -11,6 +11,7 @@ import {
 } from "@ultrafuzz/config";
 import { loadPromptCatalog, projectPromptDir } from "@ultrafuzz/prompts";
 import { expandTopology, loadTopology, resolveTopologyPath, type ModelProfileSelection } from "@ultrafuzz/topology";
+import * as ts from "typescript";
 
 import type {
   PolicyPosture,
@@ -28,6 +29,8 @@ import {
   postureFromDiagnostics,
   runtimeResult
 } from "./utils.js";
+
+const SAFE_AGENT_REF_PATTERN = /^(?!.*\.\.)[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/u;
 
 export async function validateProject(input: ValidateProjectInput) {
   const projectRoot = path.resolve(input.projectRoot);
@@ -340,12 +343,56 @@ function validateAgentReferences(projectRoot: string, config: ResolvedConfig): R
 }
 
 function registersAgentFactory(registryText: string, agentRef: string): boolean {
-  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(agentRef)) {
-    return false;
+  if (!SAFE_AGENT_REF_PATTERN.test(agentRef)) return false;
+  const source = ts.createSourceFile(
+    ".smithers/agents/index.ts",
+    registryText,
+    ts.ScriptTarget.Latest,
+    false,
+    ts.ScriptKind.TS
+  );
+  const parseDiagnostics = (source as ts.SourceFile & { parseDiagnostics: readonly ts.Diagnostic[] }).parseDiagnostics;
+  if (parseDiagnostics.length > 0) return false;
+  const registry = source.statements.find(
+    (statement): statement is ts.VariableStatement =>
+      ts.isVariableStatement(statement) &&
+      (ts.getModifiers(statement)?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword) ?? false) &&
+      (statement.declarationList.flags & ts.NodeFlags.Const) !== 0 &&
+      statement.declarationList.declarations.some(
+        (declaration) => ts.isIdentifier(declaration.name) && declaration.name.text === "agentFactories"
+      )
+  );
+  const declaration = registry?.declarationList.declarations.find(
+    (candidate) => ts.isIdentifier(candidate.name) && candidate.name.text === "agentFactories"
+  );
+  const initializer =
+    declaration?.initializer === undefined ? undefined : unwrapTypeExpressions(declaration.initializer);
+  return (
+    initializer !== undefined &&
+    ts.isObjectLiteralExpression(initializer) &&
+    initializer.properties.some((property) => objectMemberName(property) === agentRef)
+  );
+}
+
+function unwrapTypeExpressions(expression: ts.Expression): ts.Expression {
+  let current = expression;
+  while (ts.isAsExpression(current) || ts.isSatisfiesExpression(current) || ts.isParenthesizedExpression(current)) {
+    current = current.expression;
   }
-  const uncommented = registryText.replace(/\/\*[\s\S]*?\*\//gu, "").replace(/\/\/[^\r\n]*/gu, "");
-  const factories = /\bexport\s+const\s+agentFactories\s*=\s*\{([^}]*)\}/u.exec(uncommented);
-  return factories !== null && new RegExp(`(?:^|,)\\s*${agentRef}\\s*:`, "u").test(factories[1] ?? "");
+  return current;
+}
+
+function objectMemberName(property: ts.ObjectLiteralElementLike): string | undefined {
+  if (
+    !ts.isPropertyAssignment(property) &&
+    !ts.isShorthandPropertyAssignment(property) &&
+    !ts.isMethodDeclaration(property)
+  ) {
+    return undefined;
+  }
+  const name = property.name;
+  if (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNoSubstitutionTemplateLiteral(name)) return name.text;
+  return undefined;
 }
 
 function applyAgentOverrides(config: ResolvedConfig, input: ValidateProjectInput): void {
