@@ -4765,6 +4765,35 @@ function verifyCoverageProductionInventory(
 }
 
 type CoverageSourceKind = "production" | "test" | "harness" | "dependency";
+const COVERAGE_DEPENDENCY_DIRECTORY_NAMES = new Set([
+  "lib",
+  "libs",
+  "vendor",
+  "vendors",
+  "dependency",
+  "dependencies",
+  "node_modules"
+]);
+const COVERAGE_TEST_DIRECTORY_NAMES = new Set(["test", "tests"]);
+const COVERAGE_HARNESS_DIRECTORY_NAMES = new Set([
+  "recon",
+  "echidna",
+  "fuzz",
+  "fuzzing",
+  "invariant",
+  "invariants",
+  "harness",
+  "harnesses",
+  "script",
+  "scripts"
+]);
+function coverageDirectoryKind(segment: string): Exclude<CoverageSourceKind, "production"> | undefined {
+  const normalized = segment.toLowerCase();
+  if (COVERAGE_DEPENDENCY_DIRECTORY_NAMES.has(normalized)) return "dependency";
+  if (COVERAGE_TEST_DIRECTORY_NAMES.has(normalized)) return "test";
+  if (COVERAGE_HARNESS_DIRECTORY_NAMES.has(normalized)) return "harness";
+  return undefined;
+}
 type TrustedLcovCoverage = {
   hitsBySource: ReadonlyMap<string, ReadonlyMap<number, bigint>>;
   coveredLinesBySource: ReadonlyMap<string, readonly number[]>;
@@ -4864,26 +4893,10 @@ function trustedCoverageSourceKind(
 ): CoverageSourceKind | undefined {
   if (productionInventory.has(relativePath)) return "production";
   const segments = relativePath.split("/").map((segment) => segment.toLowerCase());
-  const dependencyRoots = new Set(["lib", "libs", "vendor", "vendors", "dependency", "dependencies"]);
-  const testRoots = new Set(["test", "tests"]);
-  const harnessRoots = new Set([
-    "recon",
-    "echidna",
-    "fuzz",
-    "fuzzing",
-    "invariant",
-    "invariants",
-    "harness",
-    "harnesses",
-    "script",
-    "scripts"
-  ]);
   const rootedKinds = segments
     .map((segment, index): { index: number; kind: CoverageSourceKind } | undefined => {
-      if (dependencyRoots.has(segment) || segment === "node_modules") return { index, kind: "dependency" };
-      if (testRoots.has(segment)) return { index, kind: "test" };
-      if (harnessRoots.has(segment)) return { index, kind: "harness" };
-      return undefined;
+      const kind = coverageDirectoryKind(segment);
+      return kind === undefined ? undefined : { index, kind };
     })
     .filter((entry): entry is { index: number; kind: CoverageSourceKind } => entry !== undefined);
   const root = rootedKinds[0];
@@ -5279,8 +5292,10 @@ function productionContractSourceFiles(workspacePath: string, productionRoots: r
       const relativePath = relativeDirectory === "" ? entry.name : `${relativeDirectory}/${entry.name}`;
       if (entry.isSymbolicLink())
         throw new Error(`Coverage production source inventory contains symlink ${relativePath}`);
-      if (entry.isDirectory()) visit(path.join(directory, entry.name), relativePath);
-      else if (entry.isFile() && productionExtensions.has(path.extname(entry.name))) {
+      if (entry.isDirectory()) {
+        if (coverageDirectoryKind(entry.name) !== undefined) continue;
+        visit(path.join(directory, entry.name), relativePath);
+      } else if (entry.isFile() && productionExtensions.has(path.extname(entry.name))) {
         if (results.length >= MAX_COVERAGE_EVIDENCE_FILES) {
           throw new Error(`Coverage production source inventory exceeds ${MAX_COVERAGE_EVIDENCE_FILES} files`);
         }
