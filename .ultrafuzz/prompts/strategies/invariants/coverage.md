@@ -160,19 +160,31 @@ Apply these Recon/Chimera rules:
 - Write `{{artifact_dir}}/coverage-evidence.json` using the
   `ultrafuzz/coverage-evidence@1` contract and validate it against
   `{{schema_path}}/coverage-evidence.schema.json`. Set `schema_version` to
-  `ultrafuzz.coverage-evidence.v1`. Every file entry must include `path`,
+  `ultrafuzz.coverage-evidence.v1`. Set `lcov.path` to the exact safe
+  workspace-relative path of the selected raw LCOV file and `lcov.sha256` to
+  its lowercase SHA-256; the runtime reads and authenticates that exact file.
+  Every file entry must include `path`,
   `kind`, `included`, `covered_ranges`, and `total_ranges`; excluded
   entries also require `exclusion_reason`. It must name every included and
-  excluded file with production/test/harness/dependency attribution and an
-  exclusion reason. `counted_ranges` must enumerate every material production
+  excluded production file and every LCOV `SF:` file with authenticated
+  production/test/harness/dependency attribution and an exclusion reason.
+  Production attribution comes from the configured production roots;
+  dependency attribution comes from deterministic dependency roots such as
+  `lib/`, `vendor/`, and `node_modules/`; Recon/invariant test roots are
+  harnesses; and remaining `test/` or `tests/` sources are tests. Do not omit
+  an LCOV source or relabel it to change a denominator. `counted_ranges` must enumerate every material production
   declaration, including declarations Recon excludes, and each range must carry
-  the exact `selected` boolean plus its coverage result. Set `selected` from
+  the exact `selected` boolean plus its coverage result. Set every `covered`
+  flag exclusively from authenticated LCOV `DA:` hits within that trusted
+  declaration range; a range without a positive hit is uncovered. Set `selected` from
   overlap with the generated `magic/recon-coverage.json` ranges; do not infer it
   from source visibility, and use `false` for every range when that map was not
   generated. A file is `included`
   exactly when at least one of its ranges is selected. Recon-excluded files and
   ranges still contribute to the full `production-source` denominator, including
-  incidentally covered declarations. List every material zero-coverage component,
+  incidentally covered declarations. List every uncovered material range in
+  `zero_coverage_components`, including uncovered functions in partially
+  covered files, using the exact `path`, `kind`, `start_line`, and `line_count`,
   and publish exactly the `selected-range` and `production-source` views.
   After the structural JSON Schema check, run
   `ultrafuzz artifact validate ultrafuzz/coverage-evidence@1 {{artifact_dir}}/coverage-evidence.json`.

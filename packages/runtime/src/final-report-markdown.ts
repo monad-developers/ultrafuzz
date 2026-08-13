@@ -413,7 +413,16 @@ export function renderCoverageEvidenceMarkdownSection(value: unknown): string[] 
   lines.push("", "Zero-coverage components:");
   if (zero.length === 0) lines.push("- None");
   else {
-    for (const entry of zero) lines.push(`- \`${inlineValue(entry.path)}\` (${inlineValue(entry.kind)})`);
+    for (const entry of zero) {
+      const startLine = entry.start_line;
+      const endLine =
+        typeof entry.start_line === "number" && typeof entry.line_count === "number"
+          ? entry.start_line + entry.line_count - 1
+          : "?";
+      lines.push(
+        `- \`${inlineValue(entry.path)}:${inlineValue(startLine)}-${inlineValue(endLine)}\` (${inlineValue(entry.kind)})`
+      );
+    }
   }
   return lines;
 }

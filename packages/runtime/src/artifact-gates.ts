@@ -4511,39 +4511,94 @@ function verifyCoverageProductionInventory(
   const reconSelection = readReconCoverageSelection(workspacePath, inventory);
   diagnostics.push(...reconSelection.diagnostics);
 
-  for (const relativePath of inventory) {
-    if (declaredProductionFiles.has(relativePath)) continue;
+  let lcovCoverage: TrustedLcovCoverage | undefined;
+  try {
+    lcovCoverage = readTrustedLcovCoverage(workspacePath, evidence.lcov);
+  } catch (error) {
     diagnostics.push({
-      code: "COVERAGE_PRODUCTION_FILE_OMITTED",
-      message: `Coverage denominator omits production source ${relativePath}`,
+      code: "COVERAGE_LCOV_INVALID",
+      message: `Coverage evidence LCOV source is unsafe, stale, or invalid: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
       severity: "error",
       source: "coverage-evidence",
-      path: `${evidencePath}#$.files`
-    });
-  }
-  for (const relativePath of declaredProductionFiles.keys()) {
-    if (inventory.has(relativePath)) continue;
-    diagnostics.push({
-      code: "COVERAGE_PRODUCTION_FILE_UNKNOWN",
-      message: `Coverage denominator includes nonexistent production source ${relativePath}`,
-      severity: "error",
-      source: "coverage-evidence",
-      path: `${evidencePath}#$.files`
+      path: `${evidencePath}#$.lcov`
     });
   }
 
-  for (const relativePath of declaredNonProductionFiles.keys()) {
-    try {
-      sourceSnapshot(relativePath, "non-production coverage source");
-    } catch {
+  const expectedSourceKinds = new Map<string, CoverageSourceKind>();
+  for (const relativePath of inventory) expectedSourceKinds.set(relativePath, "production");
+  if (lcovCoverage !== undefined) {
+    for (const [relativePath, hitLines] of lcovCoverage.hitsBySource) {
+      const kind = trustedCoverageSourceKind(relativePath, inventory);
+      if (kind === undefined) {
+        diagnostics.push({
+          code: "COVERAGE_LCOV_SOURCE_KIND_UNKNOWN",
+          message: `LCOV source ${relativePath} is outside every trusted production, dependency, test, or harness root`,
+          severity: "error",
+          source: "coverage-evidence",
+          path: `${evidencePath}#$.lcov`
+        });
+        continue;
+      }
+      expectedSourceKinds.set(relativePath, kind);
+      let lineCount: number;
+      try {
+        lineCount = sourceSnapshot(relativePath, "LCOV source").lineCount;
+      } catch (error) {
+        diagnostics.push({
+          code: "COVERAGE_LCOV_SOURCE_UNKNOWN",
+          message: `LCOV source ${relativePath} is nonexistent or unsafe: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+          severity: "error",
+          source: "coverage-evidence",
+          path: `${evidencePath}#$.lcov`
+        });
+        continue;
+      }
+      if ([...hitLines.keys()].some((line) => line > lineCount)) {
+        diagnostics.push({
+          code: "COVERAGE_LCOV_LINE_OUT_OF_BOUNDS",
+          message: `LCOV source ${relativePath} contains a DA line beyond its ${lineCount}-line trusted source`,
+          severity: "error",
+          source: "coverage-evidence",
+          path: `${evidencePath}#$.lcov`
+        });
+      }
+    }
+  }
+
+  for (const [relativePath, expectedKind] of expectedSourceKinds) {
+    const declared = declaredFiles.get(relativePath);
+    if (declared === undefined) {
       diagnostics.push({
-        code: "COVERAGE_NON_PRODUCTION_FILE_UNKNOWN",
-        message: `Coverage denominator includes nonexistent or unsafe non-production source ${relativePath}`,
+        code: expectedKind === "production" ? "COVERAGE_PRODUCTION_FILE_OMITTED" : "COVERAGE_LCOV_SOURCE_OMITTED",
+        message: `Coverage denominator omits trusted ${expectedKind} source ${relativePath}`,
+        severity: "error",
+        source: "coverage-evidence",
+        path: `${evidencePath}#$.files`
+      });
+    } else if (declared.kind !== expectedKind) {
+      diagnostics.push({
+        code: "COVERAGE_SOURCE_ATTRIBUTION_MISMATCH",
+        message: `Coverage source ${relativePath} must be attributed as ${expectedKind}, not ${String(declared.kind)}`,
         severity: "error",
         source: "coverage-evidence",
         path: `${evidencePath}#$.files`
       });
     }
+  }
+  for (const [relativePath, declared] of declaredFiles) {
+    if (expectedSourceKinds.has(relativePath)) continue;
+    diagnostics.push({
+      code:
+        declared.kind === "production" ? "COVERAGE_PRODUCTION_FILE_UNKNOWN" : "COVERAGE_NON_PRODUCTION_FILE_UNKNOWN",
+      message: `Coverage denominator includes ${String(declared.kind)} source ${relativePath} that is absent from the trusted production inventory and LCOV source set`,
+      severity: "error",
+      source: "coverage-evidence",
+      path: `${evidencePath}#$.files`
+    });
   }
 
   const productionRangesByFile = new Map<
@@ -4584,6 +4639,29 @@ function verifyCoverageProductionInventory(
         source: "coverage-evidence",
         path: `${evidencePath}#$.counted_ranges[${index}].line_count`
       });
+    }
+    if (
+      lcovCoverage !== undefined &&
+      typeof candidate.start_line === "number" &&
+      candidateEndLine !== undefined &&
+      typeof candidate.covered === "boolean"
+    ) {
+      const coveredByLcov = lcovRangeCovered(
+        lcovCoverage.coveredLinesBySource.get(candidate.file),
+        candidate.start_line,
+        candidateEndLine
+      );
+      if (candidate.covered !== coveredByLcov) {
+        diagnostics.push({
+          code: "COVERAGE_RANGE_RESULT_MISMATCH",
+          message: `Coverage result for ${candidate.file}:${candidate.start_line}-${candidateEndLine} must be ${String(
+            coveredByLcov
+          )} according to the authenticated LCOV DA hits`,
+          severity: "error",
+          source: "coverage-evidence",
+          path: `${evidencePath}#$.counted_ranges[${index}].covered`
+        });
+      }
     }
   }
 
@@ -4682,6 +4760,142 @@ function verifyCoverageProductionInventory(
     }
   }
   return diagnostics;
+}
+
+type CoverageSourceKind = "production" | "test" | "harness" | "dependency";
+type TrustedLcovCoverage = {
+  hitsBySource: ReadonlyMap<string, ReadonlyMap<number, bigint>>;
+  coveredLinesBySource: ReadonlyMap<string, readonly number[]>;
+};
+
+function readTrustedLcovCoverage(workspacePath: string, descriptor: unknown): TrustedLcovCoverage {
+  if (
+    !isRecord(descriptor) ||
+    typeof descriptor.path !== "string" ||
+    typeof descriptor.sha256 !== "string" ||
+    !/^[0-9a-f]{64}$/u.test(descriptor.sha256)
+  ) {
+    throw new Error("LCOV descriptor must contain an exact safe path and lowercase SHA-256");
+  }
+  const lcovPath = safeResolveInside(workspacePath, descriptor.path, "coverage LCOV source");
+  const bytes = readSinglyLinkedRegularFileSnapshotInside(
+    workspacePath,
+    lcovPath,
+    MAX_ARTIFACT_SNAPSHOT_BYTES,
+    "coverage LCOV source"
+  );
+  const digest = sha256Bytes(bytes);
+  if (digest !== descriptor.sha256) {
+    throw new Error(`LCOV SHA-256 mismatch: expected ${descriptor.sha256}, observed ${digest}`);
+  }
+
+  const hitsBySource = new Map<string, Map<number, bigint>>();
+  let distinctDaLineCount = 0;
+  let currentSource: string | undefined;
+  for (const [index, line] of bytes.toString("utf8").split(/\r?\n/u).entries()) {
+    if (line.startsWith("SF:")) {
+      if (currentSource !== undefined) throw new Error(`LCOV line ${index + 1} starts a nested SF record`);
+      currentSource = trustedLcovRelativeSourcePath(workspacePath, line.slice(3));
+      if (!hitsBySource.has(currentSource)) {
+        if (hitsBySource.size >= MAX_COVERAGE_EVIDENCE_FILES) {
+          throw new Error(`LCOV exceeds ${MAX_COVERAGE_EVIDENCE_FILES} distinct source files`);
+        }
+        hitsBySource.set(currentSource, new Map());
+      }
+      continue;
+    }
+    if (line === "end_of_record") {
+      if (currentSource === undefined) throw new Error(`LCOV line ${index + 1} ends no active SF record`);
+      currentSource = undefined;
+      continue;
+    }
+    if (!line.startsWith("DA:")) continue;
+    if (currentSource === undefined) throw new Error(`LCOV line ${index + 1} contains DA outside an SF record`);
+    const match = /^DA:([1-9][0-9]*),([0-9]+)(?:,[^,\r\n]+)?$/u.exec(line);
+    if (match === null) throw new Error(`LCOV line ${index + 1} contains an invalid DA record`);
+    const sourceLine = Number(match[1]);
+    if (!Number.isSafeInteger(sourceLine)) throw new Error(`LCOV line ${index + 1} has an unsafe DA line number`);
+    const count = BigInt(match[2]!);
+    const sourceHits = hitsBySource.get(currentSource)!;
+    if (!sourceHits.has(sourceLine)) {
+      distinctDaLineCount += 1;
+      if (distinctDaLineCount > MAX_COVERAGE_EVIDENCE_RANGES) {
+        throw new Error(`LCOV exceeds ${MAX_COVERAGE_EVIDENCE_RANGES} distinct DA line records`);
+      }
+    }
+    sourceHits.set(sourceLine, (sourceHits.get(sourceLine) ?? 0n) + count);
+  }
+  if (currentSource !== undefined) throw new Error(`LCOV SF record for ${currentSource} lacks end_of_record`);
+
+  return {
+    hitsBySource,
+    coveredLinesBySource: new Map(
+      [...hitsBySource].map(([source, hits]) => [
+        source,
+        [...hits]
+          .filter(([, count]) => count > 0n)
+          .map(([line]) => line)
+          .sort((left, right) => left - right)
+      ])
+    )
+  };
+}
+
+function trustedLcovRelativeSourcePath(workspacePath: string, sourcePath: string): string {
+  if (sourcePath.length === 0 || sourcePath.includes("\0") || sourcePath.includes("\\")) {
+    throw new Error("LCOV SF paths must be nonempty forward-slash paths without NUL bytes");
+  }
+  const workspaceAbsolute = path.resolve(workspacePath);
+  const absoluteSource = path.isAbsolute(sourcePath)
+    ? path.resolve(sourcePath)
+    : safeResolveInside(workspaceAbsolute, sourcePath, "LCOV SF source");
+  const relativeSource = path.relative(workspaceAbsolute, absoluteSource).split(path.sep).join("/");
+  const canonicalSource = safeResolveInside(workspaceAbsolute, relativeSource, "LCOV SF source");
+  if (canonicalSource !== absoluteSource) throw new Error(`LCOV SF source is not canonical: ${sourcePath}`);
+  assertRegularFileInside(workspaceAbsolute, canonicalSource, "LCOV SF source");
+  return relativeSource;
+}
+
+function trustedCoverageSourceKind(
+  relativePath: string,
+  productionInventory: ReadonlySet<string>
+): CoverageSourceKind | undefined {
+  if (productionInventory.has(relativePath)) return "production";
+  const segments = relativePath.split("/");
+  const first = segments[0]!.toLowerCase();
+  const dependencyRoots = new Set(["lib", "libs", "vendor", "vendors", "dependency", "dependencies"]);
+  if (dependencyRoots.has(first) || segments.some((segment) => segment.toLowerCase() === "node_modules")) {
+    return "dependency";
+  }
+  if (first === "test" || first === "tests") {
+    const harnessRoots = new Set(["recon", "echidna", "fuzz", "fuzzing", "invariant", "invariants", "harness"]);
+    return segments.slice(1).some((segment) => harnessRoots.has(segment.toLowerCase())) ? "harness" : "test";
+  }
+  const harnessRoots = new Set([
+    "recon",
+    "echidna",
+    "fuzz",
+    "fuzzing",
+    "invariant",
+    "invariants",
+    "harness",
+    "harnesses",
+    "script",
+    "scripts"
+  ]);
+  return harnessRoots.has(first) ? "harness" : undefined;
+}
+
+function lcovRangeCovered(coveredLines: readonly number[] | undefined, startLine: number, endLine: number): boolean {
+  if (coveredLines === undefined) return false;
+  let low = 0;
+  let high = coveredLines.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (coveredLines[middle]! < startLine) low = middle + 1;
+    else high = middle;
+  }
+  return low < coveredLines.length && coveredLines[low]! <= endLine;
 }
 
 type MaterialCoverageDeclaration = { line: number; endLine: number };
@@ -5054,6 +5268,7 @@ function configuredProductionSourceRoots(layout: RunLayout): string[] | undefine
 function productionContractSourceFiles(workspacePath: string, productionRoots: readonly string[]): string[] {
   const productionExtensions = new Set([".sol", ".vy"]);
   const results: string[] = [];
+  let existingRootCount = 0;
   const visit = (directory: string, relativeDirectory: string): void => {
     for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
       const relativePath = relativeDirectory === "" ? entry.name : `${relativeDirectory}/${entry.name}`;
@@ -5070,16 +5285,29 @@ function productionContractSourceFiles(workspacePath: string, productionRoots: r
   };
   for (const root of productionRoots) {
     const absoluteRoot = safeResolveInside(workspacePath, root, "production source root");
-    if (!fs.existsSync(absoluteRoot)) throw new Error(`Coverage production source root is missing: ${root}`);
-    const rootStat = fs.lstatSync(absoluteRoot);
+    let rootStat: fs.Stats;
+    try {
+      rootStat = fs.lstatSync(absoluteRoot);
+    } catch (error) {
+      if (isMissingFileError(error)) continue;
+      throw error;
+    }
     if (rootStat.isSymbolicLink()) throw new Error(`Coverage production source root is a symlink: ${root}`);
     if (!rootStat.isDirectory()) throw new Error(`Coverage production source root is not a directory: ${root}`);
+    existingRootCount += 1;
     visit(absoluteRoot, root);
+  }
+  if (existingRootCount === 0) {
+    throw new Error(`Every configured coverage production source root is missing: ${productionRoots.join(", ")}`);
   }
   if (results.length === 0) {
     throw new Error("Coverage production source roots contain no Solidity or Vyper production sources");
   }
   return results.sort();
+}
+
+function isMissingFileError(error: unknown): boolean {
+  return isRecord(error) && error.code === "ENOENT";
 }
 
 function readReconCoverageSelection(workspacePath: string, inventory: ReadonlySet<string>): ReconCoverageSelection {
@@ -6442,18 +6670,19 @@ function unscopedCoverageScoreDiagnostics(contents: string, artifactPath: string
     .map((line, index) => ({ line, lineNumber: index + 1 }))
     .map(({ line, lineNumber }) => ({
       lineNumber,
-      kind: percentage.test(line)
-        ? "percentage"
-        : fraction.test(line) && !namedScope.test(line)
-          ? "fraction"
-          : undefined
+      kind:
+        percentage.test(line) && !namedScope.test(line)
+          ? "percentage"
+          : fraction.test(line) && !namedScope.test(line)
+            ? "fraction"
+            : undefined
     }))
     .filter((entry): entry is { lineNumber: number; kind: "percentage" | "fraction" } => entry.kind !== undefined)
     .map(({ lineNumber, kind }) => ({
       code: kind === "percentage" ? "UNSCOPED_COVERAGE_PERCENTAGE" : "UNSCOPED_COVERAGE_FRACTION",
       message:
         kind === "percentage"
-          ? "Coverage must use an exact named-scope covered/total denominator; percentages are not accepted"
+          ? "Coverage percentages must name the exact selected-range or production-source scope on the same line"
           : "Coverage fractions must name the exact selected-range or production-source scope",
       severity: "error" as const,
       source: "coverage-evidence",
@@ -6477,11 +6706,13 @@ function unscopedReportCoverageScoreDiagnostics(contents: string, artifactPath: 
         return { lineNumber, kind: undefined };
       }
       if (fenced) return { lineNumber, kind: undefined };
-      if (/^##\s+/u.test(trimmed)) coverageSection = /coverage/iu.test(trimmed);
-      const coverageContext =
-        coverageSection || /\b(?:coverage|lcov|covg-eval|selected-range|production-source|standardized)\b/iu.test(line);
+      if (/^##\s+/u.test(trimmed)) {
+        coverageSection =
+          /^##\s+(?:scoped coverage evidence|coverage(?:\s+(?:evidence|report|results?|summary))?)\s*$/iu.test(trimmed);
+      }
+      const coverageContext = coverageSection || coverageMetricLanguageContext(line);
       const kind =
-        coverageContext && percentage.test(line)
+        coverageContext && percentage.test(line) && !namedScope.test(line)
           ? "percentage"
           : coverageContext && fraction.test(line) && !namedScope.test(line)
             ? "fraction"
@@ -6493,7 +6724,7 @@ function unscopedReportCoverageScoreDiagnostics(contents: string, artifactPath: 
       code: kind === "percentage" ? "UNSCOPED_COVERAGE_PERCENTAGE" : "UNSCOPED_COVERAGE_FRACTION",
       message:
         kind === "percentage"
-          ? "Coverage must use an exact named-scope covered/total denominator; percentages are not accepted"
+          ? "Coverage percentages must name the exact selected-range or production-source scope on the same line"
           : "Coverage fractions must name the exact selected-range or production-source scope",
       severity: "error" as const,
       source: "coverage-evidence",
@@ -6549,27 +6780,36 @@ function unscopedCoverageScoreDiagnosticsInJson(
   reportPath: string
 ): RuntimeDiagnostic[] {
   const diagnostics: RuntimeDiagnostic[] = [];
-  const visit = (value: unknown, jsonPath: string, coverageContext: boolean): void => {
+  const visit = (value: unknown, jsonPath: string, directCoverageField: boolean): void => {
     if (typeof value === "string") {
-      if (
-        coverageContext ||
-        /\b(?:coverage|lcov|covg-eval|selected-range|production-source|standardized)\b/iu.test(value)
-      ) {
+      if (directCoverageField || coverageMetricLanguageContext(value)) {
         diagnostics.push(...unscopedCoverageScoreDiagnostics(value, `${reportPath}#${jsonPath}`));
       }
       return;
     }
     if (Array.isArray(value)) {
-      value.forEach((entry, index) => visit(entry, `${jsonPath}[${index}]`, coverageContext));
+      value.forEach((entry, index) => visit(entry, `${jsonPath}[${index}]`, directCoverageField));
       return;
     }
     if (!isRecord(value)) return;
     for (const [key, entry] of Object.entries(value)) {
-      visit(entry, `${jsonPath}.${key}`, coverageContext || /coverage/iu.test(key));
+      visit(entry, `${jsonPath}.${key}`, directCoverageField || coverageMetricFieldName(key));
     }
   };
   visit(report, "$", false);
   return diagnostics;
+}
+
+function coverageMetricLanguageContext(value: string): boolean {
+  return /(?<![A-Za-z0-9_-])(?:coverage|lcov|selected-range|production-source)(?![A-Za-z0-9_-])|(?<![A-Za-z0-9_-])covg-eval(?![A-Za-z0-9_-])|\bstandardized\s+(?:measurement|rate|result|score)\b/iu.test(
+    value
+  );
+}
+
+function coverageMetricFieldName(key: string): boolean {
+  return /^(?:coverage|coverage_(?:fraction|measurement|percentage|rate|result|score|summary)|lcov|standardized_coverage)$/iu.test(
+    key
+  );
 }
 
 /** Require the final report to preserve the current implementation selection. */
