@@ -763,7 +763,51 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       "Save a checksum at {{output_findings_path}}.",
       "Record the number of findings in {{output_findings_path}}.",
       "{{output_findings_path}} must be written with the number of findings.",
-      "List source files in {{output_findings_path}}."
+      "List source files in {{output_findings_path}}.",
+      "If findings exist, then write findings to {{output_findings_path}}.",
+      "Unless no findings exist, also write findings to {{output_findings_path}}.",
+      "If findings exist, write them to {{output_findings_path}}. Otherwise do nothing.",
+      "Where helpful, write findings to {{output_findings_path}}.",
+      "Where helpful, validate the JSON, then write findings to {{output_findings_path}}.",
+      "On request, write findings to {{output_findings_path}}.",
+      "At your discretion, write findings to {{output_findings_path}}.",
+      "As needed, write findings to {{output_findings_path}}.",
+      "Depending on circumstances, write findings to {{output_findings_path}}.",
+      "In case findings exist, write findings to {{output_findings_path}}.",
+      "Only when valuable, write findings to {{output_findings_path}}.",
+      "Should findings exist, write findings to {{output_findings_path}}.",
+      "Review the target and, if useful, write findings to {{output_findings_path}}.",
+      "You may choose to write findings to {{output_findings_path}}.",
+      "You can write findings to {{output_findings_path}}.",
+      "Consider writing findings to {{output_findings_path}}.",
+      "The previous worker attempted to write findings to {{output_findings_path}}.",
+      "The agent isn't required to write findings to {{output_findings_path}}.",
+      "Mention findings in the plan. Collect compiler logs. Write them to {{output_findings_path}}.",
+      "If findings exist, write them to {{output_findings_path}}. Otherwise write an empty report elsewhere.",
+      "Collect compiler logs. Write them to {{output_findings_path}}.",
+      "{{output_findings_path}} must be written with compiler logs, not findings.",
+      "Create a findings placeholder at {{output_findings_path}}.",
+      "Write findings, but not to {{output_findings_path}}.",
+      "Write findings to somewhere other than {{output_findings_path}}.",
+      "Write an empty list of findings to {{output_findings_path}}.",
+      "Write findings to stdout, not {{output_findings_path}}.",
+      "Write findings to another destination; the declared path {{output_findings_path}} exists for another tool.",
+      "{{output_findings_path}} must be written with no findings.",
+      "Write anything but findings to {{output_findings_path}}.",
+      "Write findings to {{output_findings_path}} only after confirming one.",
+      "Write findings to {{output_findings_path}} once a finding is confirmed.",
+      "Write findings to {{output_findings_path}} as applicable.",
+      "Write empty findings to {{output_findings_path}}.",
+      "Write a zero-findings result to {{output_findings_path}}.",
+      "Write a findings array with zero entries to {{output_findings_path}}.",
+      "Write findings containing no entries to {{output_findings_path}}.",
+      "Write findings to {{output_findings_path}}. Never actually create it.",
+      "Write findings to {{output_findings_path}}. However, never actually create it.",
+      "Write findings to {{output_findings_path}}, but this output is optional.",
+      "If possible:\nWrite findings to {{output_findings_path}}.",
+      "Suggestion:\nWrite findings to {{output_findings_path}}.",
+      "Recommendation:\nWrite findings to {{output_findings_path}}.",
+      "Potential action:\nWrite findings to {{output_findings_path}}."
     ]) {
       expect(
         () => validateTopology(validTopology(), { promptTexts: { "strategies/strategy.md": prompt } }),
@@ -775,6 +819,7 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
   it("accepts mandatory empty-result clauses, affirmative negation headings, and ordinary output verbs", () => {
     for (const prompt of [
       "Write findings to {{output_findings_path}} even if there are none.",
+      "If findings exist, write them to {{output_findings_path}}. Otherwise write an empty findings array there.",
       "Write findings to {{output_findings_path}} whether or not any findings exist.",
       "Write findings to {{output_findings_path}} whether any findings exist or not.",
       "Whether or not any findings exist, write findings to {{output_findings_path}}.",
@@ -794,6 +839,9 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       "{{output_findings_path}} must be written with all findings.",
       "`{{output_findings_path}}` must be written with all findings.",
       "Write the findings. They must be saved to {{output_findings_path}}.",
+      "Collect confirmed findings. Write them to {{output_findings_path}}.",
+      "Collect confirmed findings, then write them to {{output_findings_path}}.",
+      "Write all findings discovered during the audit to {{output_findings_path}}.",
       "The required findings are to be written to {{output_findings_path}}.",
       "Do not write logs; write findings to {{output_findings_path}}.",
       "Do not write logs, but write findings to {{output_findings_path}}.",
@@ -801,7 +849,27 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       "Regardless of outcome, write findings to {{output_findings_path}}.",
       "In every case, write findings to {{output_findings_path}}.",
       "At completion, write findings to {{output_findings_path}}.",
-      "Finally, write findings to {{output_findings_path}}."
+      "Finally, write findings to {{output_findings_path}}.",
+      "Ensure findings are written to {{output_findings_path}}.",
+      "Make sure findings are saved to {{output_findings_path}}.",
+      "You have to write findings to {{output_findings_path}}.",
+      "It is required that findings be written to {{output_findings_path}}.",
+      "Findings have to be written to {{output_findings_path}}.",
+      "Findings need to be written to {{output_findings_path}}.",
+      "When analysis is complete, write findings to {{output_findings_path}}.",
+      "After completing the audit, write findings to {{output_findings_path}}.",
+      "Once complete, write findings to {{output_findings_path}}.",
+      "Submit findings to {{output_findings_path}}.",
+      "Create {{output_findings_path}} containing all findings.",
+      "Export findings to {{output_findings_path}}.",
+      "Without fail:\nWrite findings to {{output_findings_path}}.",
+      "## Do not edit source files\n\nWrite findings to {{output_findings_path}}.",
+      "## Optional dependency behavior\n\nAlways write findings to {{output_findings_path}}.",
+      "## No-findings handling\n\nWrite findings to {{output_findings_path}} even if none exist.",
+      "Write the findings.json artifact to {{output_findings_path}}.",
+      "Write confirmed findings from src/Foo.sol to {{output_findings_path}}.",
+      "Do not modify source code, but write findings to {{output_findings_path}}.",
+      "Write findings to {{output_findings_path}}; if possible, validate the JSON."
     ]) {
       expect(
         () => validateTopology(validTopology(), { promptTexts: { "strategies/strategy.md": prompt } }),
@@ -939,7 +1007,58 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
         }
       })
     ).not.toThrow();
+
+    for (const prompt of [
+      "Write compiler logs to {{artifact_path}}/generated-tests.json.",
+      "Write findings to {{artifact_path}}/generated-tests.json.",
+      "Save a checksum to {{artifact_path}}/generated-tests.json.",
+      "Write the report to {{artifact_path}}/generated-tests.json."
+    ]) {
+      expect(() => validateTopology(topology, { promptTexts: { "strategies/strategy.md": prompt } }), prompt).toThrow(
+        expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" })
+      );
+    }
+    expect(() =>
+      validateTopology(topology, {
+        promptTexts: {
+          "strategies/strategy.md": "Write the generated-test manifest to {{artifact_path}}/generated-tests.json."
+        }
+      })
+    ).not.toThrow();
   });
+
+  it("matches declared output destinations case-sensitively", () => {
+    expect(() =>
+      validateTopology(validTopology(), {
+        promptTexts: { "strategies/strategy.md": "Write findings to {{artifact_dir}}/FINDINGS.JSON." }
+      })
+    ).toThrow(expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" }));
+
+    const topology = validTopology();
+    topology.nodes[2] = {
+      ...topology.nodes[2]!,
+      outputs: [
+        { path: "report.md", contract: "ultrafuzz/nonempty-markdown@1", primary: true },
+        { path: "generated-tests.json", contract: "ultrafuzz/generated-tests@3", primary: false }
+      ]
+    };
+    expect(() =>
+      validateTopology(topology, {
+        promptTexts: {
+          "strategies/strategy.md": "Write the generated-test manifest to {{artifact_dir}}/Generated-Tests.json."
+        }
+      })
+    ).toThrow(expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" }));
+  });
+
+  it("validates candidate-heavy prompts without rescanning each full prefix", () => {
+    const prompt = "Write findings to {{output_findings_path}} when useful.\n".repeat(8_000);
+    const started = performance.now();
+    expect(() => validateTopology(validTopology(), { promptTexts: { "strategies/strategy.md": prompt } })).toThrow(
+      expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" })
+    );
+    expect(performance.now() - started).toBeLessThan(2_000);
+  }, 5_000);
 
   it("requires destinations for primary and properties valid-empty outputs", () => {
     const primaryTopology = validTopology();
