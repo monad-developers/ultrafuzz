@@ -10,6 +10,7 @@ import {
 } from "@ultrafuzz/config";
 import { builtInPromptRelativePaths, scaffoldPrompts } from "@ultrafuzz/prompts";
 import { defaultReferenceCatalogYaml } from "@ultrafuzz/references";
+import { registeredAgentFactoryNames } from "./agent-registry.js";
 import { loadRuntimeTemplate } from "./runtime-template.js";
 import { renderSmithersPackageJson } from "./smithers-package.js";
 import type { InitProjectInput, InitProjectResult, RuntimeDiagnostic } from "./types.js";
@@ -316,10 +317,11 @@ function staleAgentRegistryDiagnostics(projectRoot: string): RuntimeDiagnostic[]
     return [manualAgentRegistryReviewDiagnostic("could not be safely inspected during post-init review")];
   }
   try {
+    const registeredFactories = registeredAgentFactoryNames(registryText);
     return AGENT_TEMPLATES.filter(
       (agent) =>
         namedPathExistsNoFollow(path.join(projectRoot, ".smithers", "agents", agent.file)) &&
-        !registersAgentFactory(registryText, agent.ref)
+        !registeredFactories.has(agent.ref)
     ).map((agent) => ({
       code: "INIT_AGENT_REGISTRY_STALE",
       message: `${AGENT_REGISTRY_FILE} does not register ${agent.ref} in agentFactories, so runs cannot select it; rerun ultrafuzz init --force to regenerate the registry, or add the entry by hand`,
@@ -350,15 +352,6 @@ function namedPathExistsNoFollow(filePath: string): boolean {
     if (isNodeError(error) && error.code === "ENOENT") return false;
     throw error;
   }
-}
-
-// Generated adapters export only their factory, so agentFactories is the sole
-// path that resolves them. Merely naming the agent elsewhere in the registry --
-// an `export { ClaudeAgent }` left over from an older adapter, say -- does not
-// make it selectable, so match the factory entry rather than the bare name.
-function registersAgentFactory(registryText: string, ref: string): boolean {
-  const factories = /agentFactories\s*=\s*\{([^}]*)\}/u.exec(registryText);
-  return factories === null ? false : new RegExp(`\\b${ref}\\s*:`, "u").test(factories[1] ?? "");
 }
 
 function writeProjectFile(
