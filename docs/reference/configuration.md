@@ -13,7 +13,7 @@ Topology, prompts, references, runs, workspaces, and cache state live under
 
 ```toml
 schema_version = "ultrafuzz.config.v2"
-audit_profile = "balanced"
+audit_profile = "default"
 dynamic_strategies_enumerator = 3
 
 [project]
@@ -80,7 +80,7 @@ contract used by the CLI and runtime.
 | Key                             | Meaning                                                                    |
 | ------------------------------- | -------------------------------------------------------------------------- |
 | `schema_version`                | Exact config contract literal: `ultrafuzz.config.v2`.                      |
-| `audit_profile`                 | Named effort/topology preset. Defaults to `balanced`.                      |
+| `audit_profile`                 | Named effort/topology preset. Defaults to `default`.                       |
 | `topology_path`                 | Optional project-local topology override that replaces a profile topology. |
 | `strategy_loops`                | Optional positive strategy-loop override.                                  |
 | `dynamic_strategies_enumerator` | Non-negative integer or `"unlimited"` used by dynamic-strategy prompts.    |

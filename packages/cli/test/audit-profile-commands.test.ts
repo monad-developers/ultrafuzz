@@ -50,22 +50,30 @@ test("profile list and detail expose the catalog and effective project policy", 
 
   const listed = await cli(project, ["config", "audit-profiles", "--json"]);
   assert.equal(listed.code, 0, listed.stderr);
-  const listData = data(listed) as { default_profile: string; catalog_digest: string; profiles: Array<{ id: string }> };
-  assert.equal(listData.default_profile, "balanced");
+  const listData = data(listed) as {
+    schema_version: number;
+    default_profile: string;
+    catalog_digest: string;
+    profiles: Array<{ id: string }>;
+  };
+  assert.equal(listData.schema_version, 2);
+  assert.equal(listData.default_profile, "default");
   assert.match(listData.catalog_digest, /^[0-9a-f]{64}$/u);
   assert.deepEqual(
     listData.profiles.map((profile) => profile.id),
-    ["balanced", "exhaustive", "invariant-only", "low-cost", "smoke", "thorough"]
+    ["default", "exhaustive", "invariant-only", "low-cost", "smoke", "thorough"]
   );
 
   const detailed = await cli(project, ["config", "audit-profile", "smoke", "--json"]);
   assert.equal(detailed.code, 0, detailed.stderr);
   const detailData = data(detailed) as {
+    catalog_schema_version: number;
     declared_topology_path: string;
     effective_topology_path: string;
     topology_path_origin: string;
     effective_settings: Record<string, number>;
   };
+  assert.equal(detailData.catalog_schema_version, 2);
   assert.equal(detailData.declared_topology_path, "topologies/smoke.yml");
   assert.equal(detailData.effective_topology_path, "topologies/smoke.yml");
   assert.equal(detailData.topology_path_origin, "audit-profile");

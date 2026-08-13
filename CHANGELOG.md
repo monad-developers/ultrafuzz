@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Breaking changes
+
+- **[config] [docs]** Renames the unmodified built-in audit profile from `balanced` to `default` and removes the separate default pointer. Configurations that select `balanced` now fail with the standard unknown-profile diagnostic and must select `default` or omit `audit_profile`. Historical run metadata remains unchanged, and reporting treats the two recorded ids as distinct profile cohorts (#534).
+
+### Other changes
+
 - `eval status` now names active and waiting nodes, preserves their wait reason and next eligible action in JSON, and shows whether the linked workflow is running or stopped, so controller-loss stalls identify the exact takeover work instead of appearing only as stale checkpoints (#497).
 - Fail workflow launch before run creation when an active topology's required campaign executables are unavailable, expose those requirements through `ultrafuzz doctor`, and probe cloud requirements inside the configured provider image (#498).
 

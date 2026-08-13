@@ -763,7 +763,7 @@ async function preparePublicBenchmark(
     await seedPublicBenchmarkSmithersDependencies(destination);
     await writeFile(
       path.join(destination, "ultrafuzz.toml"),
-      modalTargetToml(model, config.node_timeout_seconds, scope.lane === "smoke" ? "smoke" : "balanced"),
+      modalTargetToml(model, config.node_timeout_seconds, scope.lane === "smoke" ? "smoke" : "default"),
       { mode: 0o600 }
     );
     if (scope.lane !== "smoke") {
