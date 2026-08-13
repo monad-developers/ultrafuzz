@@ -84,15 +84,145 @@ function validateOutputInstructions(
   variables: PromptVariableReference[]
 ): void {
   const promptPath = node.prompt ?? (node.group ? `${node.group}/${node.id}.md` : `${node.id}.md`);
+  const directiveText = directivePromptBody(promptText);
   for (const output of node.outputs) {
     if (!needsExplicitValidEmptyDestination(node, output)) continue;
-    if (promptReferencesCurrentOutput(node, promptText, variables, output.path, output.contract)) continue;
+    if (promptReferencesCurrentOutput(node, directiveText, variables, output.path, output.contract)) continue;
     throw topologyError(
       "MISSING_PROMPT_OUTPUT_INSTRUCTION",
       `Node \`${node.id}\` prompt \`${promptPath}\` must instruct the agent to write declared output \`${output.path}\`; contract \`${output.contract}\` accepts a valid-empty artifact, so omitting its destination would silently masquerade as an observed empty result`,
       { nodeId: node.id, promptPath, path: output.path, contract: output.contract }
     );
   }
+}
+
+/**
+ * Remove Markdown regions that describe or quote commands instead of issuing
+ * them. The replacement is byte-for-byte length preserving so destination
+ * offsets still identify the same source line. A code span containing only a
+ * rendered destination remains visible because backticks are the conventional
+ * way prompts quote a path; a code span containing prose is never a directive.
+ */
+function directivePromptBody(promptText: string): string {
+  const characters = promptText.split("");
+  let inHtmlComment = false;
+  let fence: { marker: string; size: number } | undefined;
+  let inlineCode: { start: number; contentStart: number; size: number } | undefined;
+  let listContentIndent: number | undefined;
+  let offset = 0;
+  for (const line of promptText.split(/(?<=\n)/u)) {
+    const lineWithoutEnding = line.replace(/\r?\n$/u, "");
+    const fenceMatch = /^\s*(`{3,}|~{3,})/u.exec(lineWithoutEnding);
+    if (fence !== undefined) {
+      inlineCode = undefined;
+      maskPromptRange(characters, offset, offset + line.length);
+      if (fenceMatch !== null && fenceMatch[1]![0] === fence.marker && fenceMatch[1]!.length >= fence.size) {
+        fence = undefined;
+      }
+      offset += line.length;
+      continue;
+    }
+    if (fenceMatch !== null) {
+      inlineCode = undefined;
+      fence = { marker: fenceMatch[1]![0]!, size: fenceMatch[1]!.length };
+      maskPromptRange(characters, offset, offset + line.length);
+      offset += line.length;
+      continue;
+    }
+    const listMarker = /^([ \t]*(?:[-*+]|\d+[.)])[ \t]+)/u.exec(lineWithoutEnding);
+    if (listMarker !== null) {
+      listContentIndent = markdownIndentWidth(listMarker[1]!);
+    } else if (lineWithoutEnding.trim() !== "" && markdownIndentWidth(lineWithoutEnding) === 0) {
+      listContentIndent = undefined;
+    }
+    const indent = markdownIndentWidth(lineWithoutEnding);
+    if (
+      listMarker === null &&
+      /^(?: {4,}|\t)\S/u.test(lineWithoutEnding) &&
+      (listContentIndent === undefined || indent >= listContentIndent + 4)
+    ) {
+      inlineCode = undefined;
+      maskPromptRange(characters, offset, offset + line.length);
+      offset += line.length;
+      continue;
+    }
+    if (lineWithoutEnding.trim() === "") inlineCode = undefined;
+
+    let index = 0;
+    while (index < line.length) {
+      const absolute = offset + index;
+      if (inlineCode !== undefined) {
+        if (line[index] !== "`") {
+          index += 1;
+          continue;
+        }
+        let tickCount = 1;
+        while (line[index + tickCount] === "`") tickCount += 1;
+        if (tickCount !== inlineCode.size) {
+          index += tickCount;
+          continue;
+        }
+        const spanEnd = absolute + tickCount;
+        const content = promptText.slice(inlineCode.contentStart, absolute);
+        if (isDestinationOnlyCodeSpan(content)) {
+          maskPromptRange(characters, inlineCode.start, inlineCode.contentStart);
+          maskPromptRange(characters, absolute, spanEnd);
+        } else {
+          maskPromptRange(characters, inlineCode.start, spanEnd);
+        }
+        inlineCode = undefined;
+        index += tickCount;
+        continue;
+      }
+      if (inHtmlComment) {
+        const close = line.indexOf("-->", index);
+        if (close === -1) {
+          maskPromptRange(characters, absolute, offset + line.length);
+          break;
+        }
+        maskPromptRange(characters, absolute, offset + close + 3);
+        inHtmlComment = false;
+        index = close + 3;
+        continue;
+      }
+      if (line.startsWith("<!--", index)) {
+        inHtmlComment = true;
+        continue;
+      }
+      if (line[index] !== "`") {
+        index += 1;
+        continue;
+      }
+      let tickCount = 1;
+      while (line[index + tickCount] === "`") tickCount += 1;
+      inlineCode = { start: absolute, contentStart: absolute + tickCount, size: tickCount };
+      index += tickCount;
+    }
+    offset += line.length;
+  }
+  return characters.join("");
+}
+
+function markdownIndentWidth(line: string): number {
+  let width = 0;
+  for (const character of line) {
+    if (character === " ") width += 1;
+    else if (character === "\t") width += 4 - (width % 4);
+    else break;
+  }
+  return width;
+}
+
+function maskPromptRange(characters: string[], start: number, end: number): void {
+  for (let index = start; index < end; index += 1) {
+    if (characters[index] !== "\n" && characters[index] !== "\r") characters[index] = " ";
+  }
+}
+
+function isDestinationOnlyCodeSpan(content: string): boolean {
+  return /^\s*\{\{\s*(?:output_findings_path|output_stage_findings_path|artifact_path|artifact_dir)\s*\}\}(?:\/[A-Za-z0-9._/-]+)?[.,;:]?\s*$/u.test(
+    content
+  );
 }
 
 function needsExplicitValidEmptyDestination(
@@ -188,15 +318,32 @@ function hasAffirmativeWriteInstruction(
   for (const occurrence of promptText.matchAll(destination)) {
     const destinationStart = occurrence.index;
     const destinationEnd = destinationStart + occurrence[0].length;
+    if (isQuotedOrCodeLikeDirective(promptText, destinationStart, destinationEnd)) continue;
     if (hasNonRequiredDirectiveScope(promptText, destinationStart)) continue;
     if (hasTrailingCancellation(promptText, destinationEnd)) continue;
 
     const clause = directiveClauseBefore(promptText, destinationStart);
-    if (hasDestinationFirstPassive(clause, promptText, destinationEnd, expectedContentPattern)) return true;
+    if (
+      hasDestinationFirstDirective(
+        clause,
+        promptText,
+        destinationStart,
+        destinationEnd,
+        expectedContentPattern,
+        requireExplicitContent
+      )
+    )
+      return true;
 
     const action = nearestOutputAction(clause, expectedContentPattern);
     if (action === undefined) continue;
     const beforeAction = clause.slice(0, action.index);
+    if (/\b(?:agent|worker|model|tool|system)\s+(?:will|would|could|can|may)\s+$/iu.test(beforeAction)) continue;
+    if (
+      action.text.toLocaleLowerCase("en-US") === "writing" &&
+      !/\b(?:do\s+not|never)\s+(?:omit|skip|forget)\s+$/iu.test(beforeAction)
+    )
+      continue;
     if (
       hasNegatedAction(beforeAction) ||
       hasNonDirectiveActionPreamble(beforeAction) ||
@@ -225,20 +372,24 @@ function hasAffirmativeWriteInstruction(
     ) {
       continue;
     }
-    if (hasConditionalSuffix(promptText, destinationEnd)) continue;
+    if (
+      hasConditionalSuffix(promptText, destinationEnd) ||
+      hasNonMandatoryCondition(boundedFollowingClause(promptText, destinationEnd).split(";", 1)[0]!)
+    )
+      continue;
     return true;
   }
   return false;
 }
 
 const OUTPUT_ACTION_PATTERN =
-  /\b(write|writing|emit|save|persist|produce|create|mirror|list|record|store|put|publish|serialize|output|deliver|submit|export|place|written|emitted|saved|persisted|produced|created|mirrored|listed|recorded|stored|published|serialized|delivered|submitted|exported|placed)\b/giu;
+  /\b(write|writing|emit|save|persist|produce|create|mirror|list|record|store|put|publish|serialize|output|deliver|submit|export|place|copy|return|populate|append|document|written|emitted|saved|persisted|produced|created|mirrored|listed|recorded|stored|published|serialized|delivered|submitted|exported|placed|copied|returned|populated|appended|documented)\b/giu;
 const PASSIVE_OUTPUT_ACTION_PATTERN =
-  /^(?:written|emitted|saved|persisted|produced|created|mirrored|listed|recorded|stored|published|serialized|delivered|submitted|exported|placed)$/iu;
+  /^(?:written|emitted|saved|persisted|produced|created|mirrored|listed|recorded|stored|published|serialized|delivered|submitted|exported|placed|copied|returned|populated|appended|documented)$/iu;
 const EMPTY_OR_PLACEHOLDER_CONTENT_PATTERN =
   /(?:\b(?:placeholder|dummy|stub|sentinel)\b|\[\]|\{\}|\b(?:empty|blank)\s+(?:(?:json|findings?|generated[- ]tests?)\s+)?(?:array|list|object|file|artifact|manifest|bundle|findings?)\b|\bempty\s+findings?\b|\bzero[- ]findings?\b|\bzero[- ](?:entries|entry|items|item)\b|\bno\s+(?:entries|findings?)\b|\bfindings?\s+(?:containing|with)\s+no\s+entries\b)/iu;
 const PROJECTED_CONTENT_PATTERN =
-  /\b(?:number|count|total|checksum|digest|hash|metadata|summary|description|assessment)\s+(?:of\s+)?|\s+(?:number|count|total|checksum|digest|hash|metadata|summary|description|assessment)\b/iu;
+  /\b(?:number|count|total|checksum|digest|hash|metadata|summary|description|assessment|documentation|guide|tutorial|example|quotation|quote|command|instruction|string|word|text|name|filename|path|reference|list|link)\s+(?:of\s+)?|\s+(?:number|count|total|checksum|digest|hash|metadata|summary|description|assessment|documentation|guide|tutorial|example|quotation|quote|command|instruction|string|word|text|name|filename|path|reference|list|link)\b/iu;
 
 interface OutputAction {
   index: number;
@@ -251,7 +402,7 @@ function expectedOutputContentPattern(outputPath: string, contract: string): str
       contract
     )
   ) {
-    return "findings?(?:\\.json)?";
+    return "(?:findings?(?:\\.json)?|bugs?|issues?|vulnerabilit(?:y|ies))";
   }
   const contractName = contract.slice(contract.indexOf("/") + 1, contract.lastIndexOf("@"));
   const filename = outputPath.split("/").at(-1) ?? outputPath;
@@ -271,6 +422,52 @@ function expectedOutputContentPattern(outputPath: string, contract: string): str
   return `(?:${[...phrases, ...words].join(
     "|"
   )}|artifacts?|outputs?|files?|documents?|records?|catalogs?|ledgers?|manifests?|bundles?|matri(?:x|ces)|plans?|summaries?|registr(?:y|ies)|json)`;
+}
+
+function isQuotedOrCodeLikeDirective(promptText: string, destinationStart: number, destinationEnd: number): boolean {
+  const lineStart = promptText.lastIndexOf("\n", destinationStart - 1) + 1;
+  const lineEndCandidate = promptText.indexOf("\n", destinationEnd);
+  const lineEnd = lineEndCandidate === -1 ? promptText.length : lineEndCandidate;
+  const line = promptText.slice(lineStart, lineEnd);
+  const destinationOffset = destinationStart - lineStart;
+  if (/^\s*>/u.test(line)) return true;
+
+  const before = line.slice(0, destinationOffset);
+  const after = line.slice(destinationOffset + (destinationEnd - destinationStart));
+  for (const [open, close] of [
+    ['"', '"'],
+    ["“", "”"],
+    ["‘", "’"]
+  ] as const) {
+    const opening = before.lastIndexOf(open);
+    if (opening === -1 || after.indexOf(close) === -1) continue;
+    const quotedPrefix = before.slice(opening + open.length);
+    if (new RegExp(OUTPUT_ACTION_PATTERN.source, "iu").test(quotedPrefix)) return true;
+  }
+  if (hasStraightSingleQuotedDirective(before, after)) return true;
+  const contextStart = Math.max(0, destinationStart - 512);
+  const contextBefore = promptText.slice(contextStart, destinationStart);
+  const contextAfter = promptText.slice(destinationEnd, Math.min(promptText.length, destinationEnd + 256));
+  for (const [open, close] of [
+    ['"', '"'],
+    ["“", "”"],
+    ["‘", "’"]
+  ] as const) {
+    const opening = contextBefore.lastIndexOf(open);
+    if (opening === -1 || contextAfter.indexOf(close) === -1) continue;
+    if (new RegExp(OUTPUT_ACTION_PATTERN.source, "iu").test(contextBefore.slice(opening + open.length))) return true;
+  }
+  if (hasStraightSingleQuotedDirective(contextBefore, contextAfter)) return true;
+  return false;
+}
+
+function hasStraightSingleQuotedDirective(before: string, after: string): boolean {
+  const openings = [...before.matchAll(/(?:^|[\s([{=:])'(?=[\p{L}\p{N}])/gmu)];
+  const opening = openings.at(-1);
+  const closing = /'(?=$|[\s.,;:!?)}\]])/mu.exec(after);
+  if (opening === undefined || closing === null) return false;
+  const start = opening.index + opening[0].length;
+  return new RegExp(OUTPUT_ACTION_PATTERN.source, "iu").test(before.slice(start));
 }
 
 function directiveClauseBefore(promptText: string, destinationStart: number): string {
@@ -368,14 +565,36 @@ function hasConditionalPreamble(beforeAction: string): boolean {
 
 function hasNonDirectiveActionPreamble(beforeAction: string): boolean {
   const value = beforeAction.replace(/[:;,]\s*$/u, "").trimEnd();
-  return /(?:\b(?:may|might|can|could|would)(?:\s+(?:choose|decide|opt)\s+to)?|\b(?:attempt|attempted|attempting|plan|planned|planning|intend|intended|intending|try|tried|trying)(?:\s+to)?|\b(?:consider|considered|considering)|\b(?:feel\s+free|is\s+free|are\s+free|is\s+allowed|are\s+allowed|is\s+permitted|are\s+permitted)\s+to)$/iu.test(
-    value
+  if (/^\s*(?:perhaps|ideally|optionally|possibly)\b/iu.test(value)) return true;
+  if (/\b(?:agent|worker|model|tool|system)\s+(?:will|would|could|can|may)\s+[^.!?;]{0,80}$/iu.test(value)) return true;
+  return (
+    /(?:\b(?:may|might|can|could|would)(?:\s+(?:choose|decide|opt)\s+to)?|\b(?:attempt|attempted|attempting|plan|planned|planning|intend|intended|intending|try|tried|trying)(?:\s+to)?|\b(?:consider|considered|considering)|\b(?:feel\s+free|is\s+free|are\s+free|is\s+allowed|are\s+allowed|is\s+permitted|are\s+permitted)\s+to)$/iu.test(
+      value
+    ) ||
+    /(?:\b(?:may|might|can|could|would)\b[^.!?;]{0,80}\bto|\bit\s+(?:is|would\s+be)\s+(?:possible|advisable|recommended|useful|helpful)\s+to|\b(?:we|i)\s+(?:recommend|suggest)\s+(?:that\s+)?(?:you\s+)?[^.!?;]{0,80}|\b(?:perhaps|ideally|optionally|possibly)\s+[^.!?;]{0,80}|\b(?:agent|worker|model|tool|system)\s+(?:will|would|could|can|may)\s+)$/iu.test(
+      value
+    ) ||
+    /\b(?:previous(?:ly)?|historically|earlier|formerly|used\s+to|the\s+(?:previous|prior|earlier)\s+(?:agent|worker|prompt|version)|was\s+(?:asked|required|expected|supposed)\s+to|had\s+to)\b[^.!?;]{0,180}$/iu.test(
+      value
+    )
   );
 }
 
 function hasDescriptiveWrapper(beforeAction: string): boolean {
-  return /\b(?:assessment|answer|decision|description|note|report|summary)\b[^.!?;]{0,160}\b(?:about|of|on|regarding|whether|if|explaining|stating)\b[^.!?;]*$/iu.test(
-    beforeAction
+  return (
+    /\b(?:analysis|assessment|answer|decision|description|explanation|note|report|summary|tutorial|example|quotation|quote|command|instruction)\b[^.!?;]{0,180}\b(?:about|of|on|regarding|whether|if|how|why|explaining|stating|showing|that|to)\b[^.!?;]*$/iu.test(
+      beforeAction
+    ) ||
+    /\b(?:assess|decide|determine|describe|explain|mention|quote|recall|say|show|state|summarize|tell)\b[^.!?;]{0,180}\b(?:how|why|whether|if|that|to)\b[^.!?;]*$/iu.test(
+      beforeAction
+    ) ||
+    /\b(?:docs?|documentation|prompt|example|text|message|instructions?)\b[^.!?;]{0,120}\b(?:says?|states?|reads?|shows?|instructs?|requires?|required)\b[^.!?;]*$/iu.test(
+      beforeAction
+    ) ||
+    /(?:\bfor\s+(?:documentation|reference|illustration|an?\s+example)|^\s*to\s+(?:describe|document|explain|illustrate|show|demonstrate)\b)[^.!?;]*$/iu.test(
+      beforeAction
+    ) ||
+    /\b(?:for\s+example|e\.g\.|such\s+as)\b[^.!?;]*$/iu.test(beforeAction)
   );
 }
 
@@ -410,6 +629,13 @@ function hasActiveDestinationBinding(
   requireExplicitContent: boolean
 ): boolean {
   const normalized = binding.replace(/,\s*if\s+any\s*,/giu, ",");
+  if (
+    /\b(?:if|unless|when|whenever|wherever|only\s+(?:if|when|after)|assuming|provided|should|as\s+(?:appropriate|applicable|needed))\b/iu.test(
+      normalized
+    )
+  ) {
+    return false;
+  }
   if (
     /\b(?:parent\s+)?(?:directory|folder)\s+(?:for|at|containing)\s*$/iu.test(normalized.trimEnd()) ||
     /\b(?:summary|report|note|description|assessment|logs?|message|explanation|account)\b[^.!?]{0,100}\b(?:that|whether|if|mentioning|saying|stating|containing|including|citing|quoting|about|regarding|on)\b/iu.test(
@@ -495,26 +721,85 @@ function passiveSubject(beforeAction: string): string {
   return introduced.split(/\b(?:after|before|while|by|following|about|regarding|reviewing)\b/iu, 1)[0]!.trim();
 }
 
-function hasDestinationFirstPassive(
+function hasDestinationFirstDirective(
   clause: string,
   promptText: string,
+  destinationStart: number,
   destinationEnd: number,
-  expectedContentPattern: string
+  expectedContentPattern: string,
+  requireExplicitContent: boolean
 ): boolean {
-  if (/[\p{L}\p{N}]/u.test(clause)) return false;
+  const prefix = clause.replace(/^\s*(?:[-*+] |\d+\. )/u, "").trim();
+  if (
+    hasConditionalPreamble(prefix) ||
+    hasNonDirectiveActionPreamble(prefix) ||
+    hasDescriptiveWrapper(prefix) ||
+    /\b(?:do\s+not|never|must\s+not|shall\s+not|should\s+not|avoid|skip|omit|optional|optionally)\b/iu.test(prefix)
+  ) {
+    return false;
+  }
+  const allowedPrefix =
+    /^(?:(?:always|also|finally|immediately|otherwise|please|then)\s*,?\s+)*(?:(?:ensure|make\s+sure)(?:\s+that)?|(?:in|at|into|to)|(?:place|store|put|return|append|populate|copy|document)(?:\s+(?:in|at|into|to|via))?|the\s+(?:declared\s+)?(?:destination|output|artifact|file))?$/iu;
+  if (!allowedPrefix.test(prefix)) return false;
   const following = boundedFollowingClause(promptText, destinationEnd).replace(/^\s*[`'"\])}]+/u, "");
   const passive = following.match(
-    /^\s*(?:(?:must|shall|should)\s+be|(?:is|are)\s+(?:(?:required|mandated)\s+to\s+)?be)\s+(?:written|emitted|saved|persisted|produced|created|mirrored|listed|recorded|stored|published|serialized|output|delivered|submitted|exported|placed)\b([^.!?;]{0,200})/iu
+    /^\s*(?:(?:must|shall|should)\s+be|(?:is|are)\s+(?:(?:required|mandated)\s+to\s+)?be)\s+(?:written|emitted|saved|persisted|produced|created|mirrored|listed|recorded|stored|published|serialized|output|delivered|submitted|exported|placed|copied|returned|populated|appended|documented)\b([^.!?;]{0,200})/iu
   );
-  if (passive === null) return false;
-  const content = passive[1]!.match(/^\s*(?:with|containing|as)\s+(.+)$/iu)?.[1];
-  return content !== undefined && contentMatchesExpected(content, promptText, destinationEnd, expectedContentPattern);
+  if (passive !== null) {
+    const content = passive[1]!.match(/^\s*(?:with|containing|as)\s+(.+)$/iu)?.[1];
+    return (
+      content !== undefined &&
+      !hasNonMandatoryCondition(content) &&
+      contentMatchesExpected(content, promptText, destinationStart, expectedContentPattern)
+    );
+  }
+
+  const contains = following.match(
+    /^\s*(?:(?:must|shall|should|needs?\s+to|is\s+required\s+to)\s+)?(?:contain|contains|include|includes|hold|holds)\s+([^.!?;]{1,200})/iu
+  );
+  if (contains !== null && /^(?:ensure|make\s+sure|the\s+)/iu.test(prefix)) {
+    return (
+      !hasNonMandatoryCondition(contains[1]!) &&
+      contentMatchesExpected(contains[1]!, promptText, destinationStart, expectedContentPattern)
+    );
+  }
+
+  const destinationFirstAction = following.match(
+    /^\s*[,]?\s*(?:must\s+|shall\s+|should\s+)?(?:write|emit|save|persist|produce|create|mirror|list|record|store|put|publish|serialize|output|deliver|submit|export|place|copy|return|populate|append|document)\s+([^.!?;]{1,200})/iu
+  );
+  if (destinationFirstAction !== null && /^(?:in|at|into|to)$/iu.test(prefix)) {
+    return (
+      !hasNonMandatoryCondition(destinationFirstAction[1]!) &&
+      contentMatchesExpected(destinationFirstAction[1]!, promptText, destinationStart, expectedContentPattern)
+    );
+  }
+
+  if (/\b(?:place|store|put|return|append|populate|copy|document)\b/iu.test(prefix)) {
+    const content = following.replace(/^\s*[,]?\s*/u, "");
+    return (
+      content !== "" &&
+      !hasNonMandatoryCondition(content) &&
+      contentMatchesExpected(content, promptText, destinationStart, expectedContentPattern)
+    );
+  }
+  return (
+    !requireExplicitContent &&
+    /^(?:ensure|make\s+sure)$/iu.test(prefix) &&
+    /^\s*(?:exists|is\s+created)\b/iu.test(following)
+  );
+}
+
+function hasNonMandatoryCondition(value: string): boolean {
+  const normalized = value.replace(/\b(?:even\s+if|whether\s+or\s+not|regardless\s+of\s+whether)\b[^,;]*/giu, "");
+  return /\b(?:if|unless|only\s+(?:if|when|after)|when\s+(?!the\s+(?:analysis|audit|task|work)\s+is\s+complete)|whenever|wherever|assuming|provided|should\s+you|as\s+(?:needed|appropriate|applicable)|at\s+your\s+discretion|on\s+request)\b/iu.test(
+    normalized
+  );
 }
 
 function boundedFollowingClause(promptText: string, destinationEnd: number): string {
   return promptText
     .slice(destinationEnd, Math.min(promptText.length, destinationEnd + 256))
-    .split(/[.!?](?=\s|$)/u, 1)[0]!;
+    .split(/\r?\n\s*\r?\n|[.!?](?=\s|$)/u, 1)[0]!;
 }
 
 function hasConditionalSuffix(promptText: string, destinationEnd: number): boolean {
@@ -523,7 +808,8 @@ function hasConditionalSuffix(promptText: string, destinationEnd: number): boole
   if (/^\s*(?:even\s+if|whether\s+or\s+not|whether\b[^,;]{0,100}\bor\s+not)\b/iu.test(beforeSemicolon)) {
     return false;
   }
-  return /^\s*(?:,\s*)?(?:if|unless|when|whenever|once\s+(?!complete\b)|only\s+(?:if|when|after|as)|as\s+(?:applicable|appropriate|needed|long\s+as)|at\s+(?:need|your\s+discretion)|where\s+(?:helpful|beneficial)|should\b|on\s+request|upon\s+request|assuming|provided|contingent\s+on|subject\s+to|depending\s+(?:on|upon)|in\s+(?:case|the\s+event)|to\s+the\s+extent|except\s+(?:if|when))\b/iu.test(
+  if (/^\s*only\s*[.!?]?\s*$/iu.test(beforeSemicolon)) return true;
+  return /^\s*(?:,\s*)?(?:if|unless|when|whenever|once\s+(?!complete\b)|only\s+(?:if|when|after|as)|as\s+(?:applicable|appropriate|needed|long\s+as|an?\s+example)|for\s+example|at\s+(?:need|your\s+discretion)|where\s+(?:helpful|beneficial)|should\b|on\s+request|upon\s+request|assuming|provided|contingent\s+on|subject\s+to|depending\s+(?:on|upon)|in\s+(?:case|the\s+event)|to\s+the\s+extent|except\s+(?:if|when))\b/iu.test(
     beforeSemicolon
   );
 }
@@ -535,6 +821,9 @@ function hasTrailingCancellation(promptText: string, destinationEnd: number): bo
       following
     ) ||
     /^\s*(?:[.;]\s*)?(?:is|are)\s+(?:forbidden|prohibited|not\s+(?:allowed|permitted|required))\b/iu.test(following) ||
+    /^\s*(?:[.;,]\s*)?(?:(?:which|and\s+this|but\s+this)\s+)?(?:is|are)\s+(?:optional|discretionary|not\s+required)\b/iu.test(
+      following
+    ) ||
     /^\s*(?:[.;]\s*)?(?:(?:but|however|yet)\s*,?\s*)?(?:do\s+not|never|must\s+not|shall\s+not)\s+(?:actually\s+)?(?:create|write|save|persist|produce|emit|publish|deliver|submit|export)\s+(?:it|this|that|the\s+(?:file|artifact|output)|destination)\b/iu.test(
       following
     )
@@ -590,18 +879,40 @@ function isNonRequiredDirectiveHeading(heading: string, markdown: boolean): bool
     return false;
   }
   if (
-    /^(?:optional|if\s+possible|suggestions?|recommendations?|potential\s+actions?|possible\s+output|for\s+reference\s+only|recommendation\s+output|suggested\s+output|recommended\s+output|example\s+output|nonessential\s+output|candidate\s+output|unnecessary\s+output)$/iu.test(
+    /^(?:optional|if\s+possible|suggestions?|recommendations?|examples?|illustrations?|quoted?\s+(?:example|instruction|text)|potential\s+actions?|possible\s+output|for\s+reference\s+only|recommendation\s+output|suggested\s+output|recommended\s+output|example\s+output|nonessential\s+output|candidate\s+output|unnecessary\s+output)$/iu.test(
+      normalized
+    )
+  ) {
+    return true;
+  }
+  if (
+    /^(?:if|unless|when|whenever|wherever|only\s+(?:if|when|after)|assuming|provided|should)\b/iu.test(normalized) ||
+    /\b(?:historical|previous|prior|earlier|quoted|quotation)\b[^:\r\n]{0,80}\b(?:output|instruction|action|behavior|example|text)\b/iu.test(
       normalized
     )
   ) {
     return true;
   }
   if (markdown) {
-    return /^(?:never\s+do\s+this|do\s+not\s+(?:perform\s+)?(?:this|the\s+following)|avoid\s+(?:this|the\s+following)|skip\s+(?:this|the\s+following))$/iu.test(
-      normalized
+    if (
+      /^(?:never\s+do\s+(?:this|these\s+things)|do\s+not\s+(?:perform\s+)?(?:this|the\s+following)|avoid\s+(?:this|the\s+following)|skip\s+(?:this|the\s+following))$/iu.test(
+        normalized
+      )
+    ) {
+      return true;
+    }
+    const outputScoped =
+      /\b(?:output|deliverable|artifact|file|finding|result|publication|instruction|action|step|write|emit|save|persist|produce|create|copy|return|populate|append|document)\b/iu.test(
+        normalized
+      );
+    return (
+      outputScoped &&
+      /\b(?:advisory|avoid|candidate|conditional|discretionary|elective|example|illustrative|nonessential|optional|recommended|suggested|unnecessary|forbidden|prohibited|never|do\s+not|must\s+not|shall\s+not)\b/iu.test(
+        normalized
+      )
     );
   }
-  return /(?:\b(?:advisory|avoid|banned|barred|candidate|cannot|decline|disallowed|discourage|discouraged|discretionary|elective|example|except|exclude|forbidden|illegal|ignore|ignored|illustrative|never|no|nonessential|not|omit|optional|optionally|prevent|prohibited|recommended|refuse|refrain|skip|suggested|unnecessary|unauthorized)\b|(?:aren|don|mayn|mustn|shouldn|can)['’]t|\bif\s+(?:needed|useful|possible)\b|\bwhen\s+(?:appropriate|convenient|useful)\b|\bas\s+needed\b|\bat\s+your\s+discretion\b)/iu.test(
+  return /(?:\b(?:advisory|avoid|banned|barred|candidate|cannot|conditional|decline|disallowed|discourage|discouraged|discretionary|elective|example|except|exclude|forbidden|historical|illegal|ignore|ignored|illustrative|never|no|nonessential|not|omit|optional|optionally|prevent|prohibited|quoted|recommended|refuse|refrain|skip|suggested|unnecessary|unauthorized)\b|(?:aren|don|mayn|mustn|shouldn|can)['’]t|\bif\s+(?:needed|useful|possible)\b|\bwhen\s+(?:appropriate|convenient|useful)\b|\bas\s+needed\b|\bat\s+your\s+discretion\b)/iu.test(
     normalized
   );
 }

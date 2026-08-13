@@ -657,7 +657,6 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       "Required output: write findings to {{output_findings_path}}.",
       "Required output:\n- Write findings to {{output_findings_path}}.",
       "Required output:\n* Write findings to {{output_findings_path}}.",
-      "Required output:\n> Write findings to {{output_findings_path}}.",
       "Deliverables:\nWrite findings to {{output_findings_path}}.",
       "Mandatory output:\nWrite findings to {{output_findings_path}}.",
       "You must:\nWrite findings to {{output_findings_path}}.",
@@ -807,12 +806,100 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       "If possible:\nWrite findings to {{output_findings_path}}.",
       "Suggestion:\nWrite findings to {{output_findings_path}}.",
       "Recommendation:\nWrite findings to {{output_findings_path}}.",
-      "Potential action:\nWrite findings to {{output_findings_path}}."
+      "Potential action:\nWrite findings to {{output_findings_path}}.",
+      "Required output:\n> Write findings to {{output_findings_path}}."
     ]) {
       expect(
         () => validateTopology(validTopology(), { promptTexts: { "strategies/strategy.md": prompt } }),
         prompt
       ).toThrow(expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" }));
+    }
+  });
+
+  it("rejects conditional, descriptive, historical, quoted, code, comment, and example contexts", () => {
+    for (const prompt of [
+      "Write findings, if they exist, to {{output_findings_path}}.",
+      "Write findings if confirmed to {{output_findings_path}}.",
+      "Write findings if useful in {{output_findings_path}}.",
+      "Write an explanation of how to save findings to {{output_findings_path}}.",
+      "Write an analysis of how to persist findings to {{output_findings_path}}.",
+      "Explain why you should write findings to {{output_findings_path}}.",
+      "Determine whether to write findings to {{output_findings_path}}.",
+      "Decide whether to write findings to {{output_findings_path}}.",
+      "Assess whether to write findings to {{output_findings_path}}.",
+      "The docs say you must write findings to {{output_findings_path}}.",
+      "Write a note saying to write findings to {{output_findings_path}}.",
+      "The prior agent was required to write findings to {{output_findings_path}}.",
+      "Previously, the worker had to write findings to {{output_findings_path}}.",
+      'The example says: "Write findings to {{output_findings_path}}."',
+      "The example says: 'Write findings to {{output_findings_path}}.'",
+      "The example says: ‘Write findings to {{output_findings_path}}.’",
+      'The example says: "Write findings to\n{{output_findings_path}}."',
+      "> Write findings to {{output_findings_path}}.",
+      "`Write findings to {{output_findings_path}}.`",
+      "`Write findings to\n{{output_findings_path}}.`",
+      "```markdown\nWrite findings to {{output_findings_path}}.\n```",
+      "~~~text\nWrite findings to {{output_findings_path}}.\n~~~",
+      "<!-- Write findings to {{output_findings_path}}. -->",
+      "<!--\nWrite findings to {{output_findings_path}}.\n-->",
+      "Investigate. <!-- Write findings to {{output_findings_path}}. -->",
+      "Writing findings to {{output_findings_path}} is optional.",
+      "Write findings to {{output_findings_path}}, for example.",
+      "Write findings to {{output_findings_path}}. This output is optional.",
+      "Write findings documentation to {{output_findings_path}}.",
+      "Copy the string 'findings' to {{output_findings_path}}.",
+      "If useful, ensure {{output_findings_path}} contains all findings.",
+      "Ensure {{output_findings_path}} contains all findings if useful.",
+      "Populate {{output_findings_path}} with findings if useful.",
+      "It may be useful to write findings to {{output_findings_path}}.",
+      "It is possible to write findings to {{output_findings_path}}.",
+      "We recommend you write findings to {{output_findings_path}}.",
+      "For documentation, write findings to {{output_findings_path}}.",
+      "To explain the workflow, write findings to {{output_findings_path}}.",
+      "Write findings as appropriate to {{output_findings_path}}.",
+      "Write findings to {{output_findings_path}} only.",
+      "Perhaps write findings to {{output_findings_path}}.",
+      "Ideally write findings to {{output_findings_path}}.",
+      "Optionally write findings to {{output_findings_path}}.",
+      "The worker will write findings to {{output_findings_path}}.",
+      "    Write findings to {{output_findings_path}}.",
+      "- Example:\n\n      Write findings to {{output_findings_path}}.",
+      "Write a list mentioning findings to {{output_findings_path}}.",
+      "Write the filename of findings to {{output_findings_path}}.",
+      "Write a link to findings to {{output_findings_path}}.",
+      "## Optional output\n\nWrite findings to {{output_findings_path}}.",
+      "## If findings exist\n\nWrite findings to {{output_findings_path}}.",
+      "## When appropriate\n\nWrite findings to {{output_findings_path}}.",
+      "## Example output\n\nWrite findings to {{output_findings_path}}.",
+      "## Never write findings\n\nWrite findings to {{output_findings_path}}.",
+      "Example: Write findings to {{output_findings_path}}.",
+      "Historical output:\nWrite findings to {{output_findings_path}}."
+    ]) {
+      expect(
+        () => validateTopology(validTopology(), { promptTexts: { "strategies/strategy.md": prompt } }),
+        prompt
+      ).toThrow(expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" }));
+    }
+  });
+
+  it("accepts explicit imperative findings variants while preserving path-only code spans", () => {
+    for (const prompt of [
+      "Copy all confirmed findings to {{output_findings_path}}.",
+      "Write all confirmed bugs to `{{output_findings_path}}`.",
+      "Ensure {{output_findings_path}} contains all confirmed findings.",
+      "In {{output_findings_path}}, place all confirmed findings.",
+      "Place in {{output_findings_path}} all confirmed findings.",
+      "Return all confirmed findings in {{output_findings_path}}.",
+      "Populate {{output_findings_path}} with all confirmed findings.",
+      "Append all confirmed findings to {{output_findings_path}}.",
+      "Document all confirmed findings in {{output_findings_path}}.",
+      "1. Required outputs:\n   - Write structured findings to:\n     {{output_findings_path}}",
+      "Write structured findings to:\n\n{{output_findings_path}}\n\nReview details when useful."
+    ]) {
+      expect(
+        () => validateTopology(validTopology(), { promptTexts: { "strategies/strategy.md": prompt } }),
+        prompt
+      ).not.toThrow();
     }
   });
 
@@ -1012,7 +1099,19 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       "Write compiler logs to {{artifact_path}}/generated-tests.json.",
       "Write findings to {{artifact_path}}/generated-tests.json.",
       "Save a checksum to {{artifact_path}}/generated-tests.json.",
-      "Write the report to {{artifact_path}}/generated-tests.json."
+      "Write the report to {{artifact_path}}/generated-tests.json.",
+      "Write generated tests, if any exist, to {{artifact_path}}/generated-tests.json.",
+      "Explain how to write the generated-test manifest to {{artifact_path}}/generated-tests.json.",
+      "The prior agent wrote the generated-test manifest to {{artifact_path}}/generated-tests.json.",
+      "Writing generated tests to {{artifact_path}}/generated-tests.json is optional.",
+      "Ensure {{artifact_path}}/generated-tests.json contains the generated-test manifest if useful.",
+      'The example says: "Write the generated-test manifest to {{artifact_path}}/generated-tests.json."',
+      "> Write the generated-test manifest to {{artifact_path}}/generated-tests.json.",
+      "`Write the generated-test manifest to {{artifact_path}}/generated-tests.json.`",
+      "```markdown\nWrite the generated-test manifest to {{artifact_path}}/generated-tests.json.\n```",
+      "<!-- Write the generated-test manifest to {{artifact_path}}/generated-tests.json. -->",
+      "## Optional output\n\nWrite the generated-test manifest to {{artifact_path}}/generated-tests.json.",
+      "## Example output\n\nWrite the generated-test manifest to {{artifact_path}}/generated-tests.json."
     ]) {
       expect(() => validateTopology(topology, { promptTexts: { "strategies/strategy.md": prompt } }), prompt).toThrow(
         expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" })
@@ -1025,6 +1124,21 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
         }
       })
     ).not.toThrow();
+    for (const prompt of [
+      "Copy the generated-test manifest to {{artifact_path}}/generated-tests.json.",
+      "Ensure {{artifact_path}}/generated-tests.json contains the generated-test manifest.",
+      "In {{artifact_path}}/generated-tests.json, place the generated-test manifest.",
+      "Place in {{artifact_path}}/generated-tests.json the generated-test manifest.",
+      "Return the generated-test manifest in {{artifact_path}}/generated-tests.json.",
+      "Populate `{{artifact_path}}/generated-tests.json` with the generated-test manifest.",
+      "Append generated tests to {{artifact_path}}/generated-tests.json.",
+      "Document the generated-test bundle in {{artifact_path}}/generated-tests.json."
+    ]) {
+      expect(
+        () => validateTopology(topology, { promptTexts: { "strategies/strategy.md": prompt } }),
+        prompt
+      ).not.toThrow();
+    }
   });
 
   it("matches declared output destinations case-sensitively", () => {

@@ -240,6 +240,8 @@ dust reached only at a low-probability boundary is at most Medium impact and
 Low likelihood, hence Low. An unsupported fee-on-transfer-token claim is a
 false positive when support is not documented.
 
+## Finalization
+
 Keep invalid or out-of-scope records in
 `severity-classified-findings.json` with their triaged fields intact, and mark
 them `dropped` in the lifecycle ledger. Their `final_disposition` is what keeps

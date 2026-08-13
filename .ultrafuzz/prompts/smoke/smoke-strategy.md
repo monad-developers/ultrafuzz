@@ -51,11 +51,11 @@ Use only the authoritative report-bound note vocabulary:
 
 {{finding_note_key_vocabulary}}
 
-If you create a target-native test, keep it under
+Write the generated-test manifest to `{{artifact_path}}/generated-tests.json`
+using the exact pinned generated-test schema. If you create a target-native test, keep it under
 `{{strategy_attempt_test_dir}}`, mirror it byte-for-byte beneath
 the `generated-tests/` directory under `{{artifact_path}}`, and list that safe artifact-relative path
-in `{{artifact_path}}/generated-tests.json`. Otherwise use the empty form
-defined by the exact pinned generated-test schema. Read the exact pinned
+in the manifest. Otherwise use the schema-defined empty form. Read the exact pinned
 `{{schema_path}}/generated-tests.schema.json` and run every exact
 `ultrafuzz json validate` command rendered in the central output contract.
 Correct any exit-1 artifact yourself and rerun its command after any later
