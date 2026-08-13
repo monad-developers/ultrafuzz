@@ -141,6 +141,28 @@ test("every JSON contract has canonical positive and negative fixtures and valid
   }
 });
 
+test("coverage evidence reconciles scoped denominators and keeps excluded ranges out of selected scope", () => {
+  const valid = structuredClone(contractFixtures["ultrafuzz/coverage-evidence@1"]!.valid) as Record<string, unknown>;
+  assert.equal(executeSemanticGate("coverage-evidence-reconciliation", { document: valid }).status, "passed");
+
+  const hiddenExcludedRange = structuredClone(valid) as {
+    counted_ranges: Array<Record<string, unknown>>;
+  };
+  hiddenExcludedRange.counted_ranges.push({
+    file: "src/Critical.sol",
+    kind: "production",
+    start_line: 1,
+    end_line: 1,
+    covered: false
+  });
+  const rejected = executeSemanticGate("coverage-evidence-reconciliation", { document: hiddenExcludedRange });
+  assert.equal(rejected.status, "failed");
+  assert.ok(
+    rejected.status === "failed" &&
+      rejected.issues.some((issue) => /included in the selected-range scope/u.test(issue.message))
+  );
+});
+
 test("strict contract parsing rejects duplicate keys in every object-shaped canonical fixture", () => {
   for (const contract of JSON_ARTIFACT_CONTRACT_IDS) {
     const fixture = contractFixtures[contract]!;

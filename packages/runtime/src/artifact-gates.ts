@@ -17,6 +17,7 @@ import {
   derivePropertyImplementationCoverage,
   executeSemanticGate,
   getNodeArtifactDir,
+  getNodeWorkspaceDir,
   findingFuzzerBackendProvenance,
   invariantPinnedSourceRefExists,
   IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
@@ -4311,6 +4312,7 @@ function verifyPropertyProvenanceArtifacts(
 ): RuntimeDiagnostic[] {
   const isPropertyLens = node.outputs.some((output) => output.contract === "ultrafuzz/property-lens@2");
   const isFinalReport = node.outputs.some((output) => output.contract === "ultrafuzz/report@2");
+  const isCoverageEvidence = node.outputs.some((output) => output.contract === "ultrafuzz/coverage-evidence@1");
   const isImplementation = node.outputs.some((output) => output.contract === "ultrafuzz/implemented-properties@3");
   const isCampaign = node.outputs.some((output) => output.contract === "ultrafuzz/property-campaign@3");
   const diagnostics: RuntimeDiagnostic[] = [];
@@ -4326,6 +4328,9 @@ function verifyPropertyProvenanceArtifacts(
     diagnostics.push(
       ...verifyFinalReportPropertyReferences(layout, artifactDir, node, attemptAuthority, authenticated)
     );
+  }
+  if (isCoverageEvidence) {
+    diagnostics.push(...verifyCoverageProductionInventory(layout, artifactDir, node, attemptId, authenticated));
   }
   if (!isImplementation && !isCampaign) return diagnostics;
 
@@ -4359,6 +4364,378 @@ function verifyPropertyProvenanceArtifacts(
     );
   }
   return diagnostics;
+}
+
+function verifyCoverageProductionInventory(
+  layout: RunLayout,
+  artifactDir: string,
+  node: PlannedGraphNode,
+  attemptId: string,
+  authenticated?: AuthenticatedArtifactGateSnapshots
+): RuntimeDiagnostic[] {
+  const coverageOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/coverage-evidence@1");
+  if (coverageOutputs.length !== 1) {
+    return [
+      {
+        code: "COVERAGE_EVIDENCE_DECLARATION_AMBIGUOUS",
+        message: `Coverage producer must declare exactly one ultrafuzz/coverage-evidence@1 output; found ${coverageOutputs.length}`,
+        severity: "error",
+        source: "coverage-evidence",
+        path: layout.graphPath
+      }
+    ];
+  }
+  const markdownOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/nonempty-markdown@1");
+  if (markdownOutputs.length !== 1) {
+    return [
+      {
+        code: "COVERAGE_MARKDOWN_DECLARATION_AMBIGUOUS",
+        message: `Coverage producer must declare exactly one scoped Markdown output; found ${markdownOutputs.length}`,
+        severity: "error",
+        source: "coverage-evidence",
+        path: layout.graphPath
+      }
+    ];
+  }
+
+  const evidencePath = safeResolveInside(artifactDir, coverageOutputs[0]!.path, "coverage evidence output");
+  const markdownPath = safeResolveInside(artifactDir, markdownOutputs[0]!.path, "coverage Markdown output");
+  const evidence = parseCurrentArtifactJson(artifactDir, evidencePath, authenticated);
+  const markdownBytes = readCurrentArtifactSnapshot(artifactDir, markdownPath, authenticated);
+  if (!isRecord(evidence) || !Array.isArray(evidence.files) || !Array.isArray(evidence.counted_ranges)) return [];
+
+  const diagnostics =
+    markdownBytes === undefined
+      ? []
+      : unscopedCoveragePercentageDiagnostics(markdownBytes.toString("utf8"), markdownPath);
+  const workspacePath = getNodeWorkspaceDir(layout, attemptId);
+  const productionRoots = configuredProductionSourceRoots(layout);
+  if (!fs.existsSync(workspacePath) || productionRoots === undefined) {
+    diagnostics.push({
+      code: "COVERAGE_SOURCE_INVENTORY_UNAVAILABLE",
+      message: "Coverage evidence requires the trusted node workspace and configured production source roots",
+      severity: "error",
+      source: "coverage-evidence",
+      path: evidencePath
+    });
+    return diagnostics;
+  }
+
+  const declaredProductionFiles = new Map<string, Record<string, unknown>>();
+  for (const entry of evidence.files.filter(isRecord)) {
+    if (entry.kind !== "production" || typeof entry.path !== "string") continue;
+    declaredProductionFiles.set(entry.path, entry);
+  }
+  let inventory: Set<string>;
+  try {
+    inventory = new Set(productionContractSourceFiles(workspacePath, productionRoots));
+  } catch (error) {
+    diagnostics.push({
+      code: "COVERAGE_SOURCE_INVENTORY_UNSAFE",
+      message: error instanceof Error ? error.message : "Coverage production source inventory is unsafe",
+      severity: "error",
+      source: "coverage-evidence",
+      path: evidencePath
+    });
+    return diagnostics;
+  }
+
+  for (const relativePath of inventory) {
+    if (declaredProductionFiles.has(relativePath)) continue;
+    diagnostics.push({
+      code: "COVERAGE_PRODUCTION_FILE_OMITTED",
+      message: `Coverage denominator omits production source ${relativePath}`,
+      severity: "error",
+      source: "coverage-evidence",
+      path: `${evidencePath}#$.files`
+    });
+  }
+  for (const relativePath of declaredProductionFiles.keys()) {
+    if (inventory.has(relativePath)) continue;
+    diagnostics.push({
+      code: "COVERAGE_PRODUCTION_FILE_UNKNOWN",
+      message: `Coverage denominator includes nonexistent production source ${relativePath}`,
+      severity: "error",
+      source: "coverage-evidence",
+      path: `${evidencePath}#$.files`
+    });
+  }
+
+  for (const [index, candidate] of evidence.counted_ranges.entries()) {
+    if (!isRecord(candidate) || candidate.kind !== "production" || typeof candidate.file !== "string") continue;
+    if (!inventory.has(candidate.file)) continue;
+    const sourcePath = safeResolveInside(workspacePath, candidate.file, "production coverage range");
+    assertRegularFileInside(workspacePath, sourcePath, "production coverage range");
+    const sourceText = readRegularFileSnapshot(sourcePath, MAX_ARTIFACT_SNAPSHOT_BYTES).toString("utf8");
+    const normalizedSource = sourceText.replace(/\r?\n$/u, "");
+    const lineCount = normalizedSource === "" ? 0 : normalizedSource.split(/\r?\n/u).length;
+    if (typeof candidate.end_line === "number" && candidate.end_line > lineCount) {
+      diagnostics.push({
+        code: "COVERAGE_PRODUCTION_RANGE_OUT_OF_BOUNDS",
+        message: `Coverage range for ${candidate.file} ends past its ${lineCount}-line source file`,
+        severity: "error",
+        source: "coverage-evidence",
+        path: `${evidencePath}#$.counted_ranges[${index}].end_line`
+      });
+    }
+  }
+
+  for (const relativePath of inventory) {
+    const sourcePath = safeResolveInside(workspacePath, relativePath, "production coverage source");
+    assertRegularFileInside(workspacePath, sourcePath, "production coverage source");
+    const sourceText = readRegularFileSnapshot(sourcePath, MAX_ARTIFACT_SNAPSHOT_BYTES).toString("utf8");
+    const declarationLines = materialCoverageDeclarationLines(relativePath, sourceText, evidencePath, diagnostics);
+    const declarationLineSet = new Set(declarationLines);
+    const declaredFile = declaredProductionFiles.get(relativePath);
+    if (declaredFile === undefined) continue;
+    const declaredRanges = evidence.counted_ranges.filter(
+      (candidate): candidate is Record<string, unknown> =>
+        isRecord(candidate) && candidate.kind === "production" && candidate.file === relativePath
+    );
+
+    if (declaredFile.included === false) {
+      if (declaredRanges.length > 0) {
+        diagnostics.push({
+          code: "COVERAGE_EXCLUDED_FILE_HAS_SELECTED_RANGES",
+          message: `Excluded production source ${relativePath} cannot contribute counted selected-range entries`,
+          severity: "error",
+          source: "coverage-evidence",
+          path: `${evidencePath}#$.counted_ranges`
+        });
+      }
+      if (declaredFile.total_ranges !== declarationLines.length) {
+        diagnostics.push({
+          code: "COVERAGE_EXCLUDED_FILE_DENOMINATOR_MISMATCH",
+          message: `Excluded production source ${relativePath} declares ${String(declaredFile.total_ranges)} material ranges but the trusted source contains ${declarationLines.length}`,
+          severity: "error",
+          source: "coverage-evidence",
+          path: `${evidencePath}#$.files`
+        });
+      }
+      continue;
+    }
+
+    for (const line of declarationLines) {
+      if (declaredRanges.filter((candidate) => candidate.start_line === line).length === 1) continue;
+      diagnostics.push({
+        code: "COVERAGE_PRODUCTION_RANGE_OMITTED",
+        message: `Coverage denominator must contain exactly one range starting at material declaration ${relativePath}:${line}`,
+        severity: "error",
+        source: "coverage-evidence",
+        path: `${evidencePath}#$.counted_ranges`
+      });
+    }
+    for (const candidate of declaredRanges) {
+      if (typeof candidate.start_line !== "number" || declarationLineSet.has(candidate.start_line)) continue;
+      diagnostics.push({
+        code: "COVERAGE_PRODUCTION_RANGE_NOT_DECLARATION",
+        message: `Coverage range for ${relativePath}:${candidate.start_line} does not start at a material declaration`,
+        severity: "error",
+        source: "coverage-evidence",
+        path: `${evidencePath}#$.counted_ranges`
+      });
+    }
+  }
+  return diagnostics;
+}
+
+function materialCoverageDeclarationLines(
+  relativePath: string,
+  source: string,
+  evidencePath: string,
+  diagnostics: RuntimeDiagnostic[]
+): number[] {
+  const lexicalSource = stripCoverageSourceCommentsAndStrings(source);
+  const sourceLines = lexicalSource.replace(/\r?\n$/u, "").split(/\r?\n/u);
+  const declarationsByLine = new Map<number, number>();
+  let parenthesisDepth = 0;
+  let braceDepth = 0;
+  let scannedThrough = 0;
+  let currentLine = 1;
+  for (const match of lexicalSource.matchAll(
+    /\b(?:function(?:\s+[A-Za-z_$][A-Za-z0-9_$]*\s*\(|\s*\([^;{}]*\)[^;{}]*\{)|constructor\s*\(|fallback\s*\(|receive\s*\(|modifier\s+[A-Za-z_$][A-Za-z0-9_$]*)/gu
+  )) {
+    for (const character of lexicalSource.slice(scannedThrough, match.index)) {
+      if (character === "(") parenthesisDepth += 1;
+      if (character === ")") parenthesisDepth = Math.max(0, parenthesisDepth - 1);
+      if (character === "{") braceDepth += 1;
+      if (character === "}") braceDepth = Math.max(0, braceDepth - 1);
+      if (character === "\n") currentLine += 1;
+    }
+    scannedThrough = match.index ?? scannedThrough;
+    if (parenthesisDepth > 0 || braceDepth > 1) continue;
+    declarationsByLine.set(currentLine, (declarationsByLine.get(currentLine) ?? 0) + 1);
+  }
+  if (path.extname(relativePath) === ".sol") {
+    for (const declarationLine of solidityPublicGetterDeclarationLines(lexicalSource)) {
+      declarationsByLine.set(declarationLine, (declarationsByLine.get(declarationLine) ?? 0) + 1);
+    }
+  }
+  if (path.extname(relativePath) === ".vy") {
+    for (const [lineIndex, sourceLine] of sourceLines.entries()) {
+      const declarationCount = [
+        ...sourceLine.matchAll(/(?:^|;)\s*(?:(?:async\s+)?def\s+|[A-Za-z_][A-Za-z0-9_]*\s*:\s*public\s*\()/gu)
+      ].length;
+      if (declarationCount > 0) {
+        declarationsByLine.set(lineIndex + 1, (declarationsByLine.get(lineIndex + 1) ?? 0) + declarationCount);
+      }
+    }
+  }
+
+  const declarationLines: number[] = [];
+  for (const [line, declarationCount] of [...declarationsByLine.entries()].sort(([left], [right]) => left - right)) {
+    if (declarationCount > 1) {
+      diagnostics.push({
+        code: "COVERAGE_PRODUCTION_DECLARATIONS_AMBIGUOUS",
+        message: `Multiple material declarations share ${relativePath}:${line}; coverage ranges require one declaration per source line`,
+        severity: "error",
+        source: "coverage-evidence",
+        path: evidencePath
+      });
+    }
+    declarationLines.push(line);
+  }
+  return declarationLines;
+}
+
+function solidityPublicGetterDeclarationLines(source: string): number[] {
+  const lines: number[] = [];
+  let structuralBraceDepth = 0;
+  let initializerBraceDepth = 0;
+  let line = 1;
+  let statementStart = 0;
+  let statementLine = 1;
+
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index]!;
+    if (character === "\n") line += 1;
+    if (character === "{") {
+      if (initializerBraceDepth > 0) {
+        initializerBraceDepth += 1;
+        continue;
+      }
+      if (structuralBraceDepth === 0) {
+        statementStart = index + 1;
+        statementLine = line;
+      } else if (structuralBraceDepth === 1) {
+        const prefix = source.slice(statementStart, index);
+        if (/=/u.test(prefix)) {
+          initializerBraceDepth = 1;
+          continue;
+        }
+        statementStart = index + 1;
+        statementLine = line;
+      }
+      structuralBraceDepth += 1;
+      continue;
+    }
+    if (character === "}") {
+      if (initializerBraceDepth > 0) {
+        initializerBraceDepth -= 1;
+        continue;
+      }
+      structuralBraceDepth = Math.max(0, structuralBraceDepth - 1);
+      if (structuralBraceDepth === 1) {
+        statementStart = index + 1;
+        statementLine = line;
+      }
+      continue;
+    }
+    if (character !== ";" || structuralBraceDepth !== 1 || initializerBraceDepth !== 0) continue;
+
+    const statement = source.slice(statementStart, index + 1);
+    const leadingWhitespace = statement.match(/^\s*/u)?.[0] ?? "";
+    const declarationLine = statementLine + (leadingWhitespace.match(/\n/gu)?.length ?? 0);
+    if (
+      /\bpublic\b/u.test(statement) &&
+      !/\b(?:function\s+[A-Za-z_$][A-Za-z0-9_$]*\s*\(|constructor\s*\(|fallback\s*\(|receive\s*\(|modifier\s+)/u.test(
+        statement
+      )
+    ) {
+      lines.push(declarationLine);
+    }
+    statementStart = index + 1;
+    statementLine = line;
+  }
+  return lines;
+}
+
+function stripCoverageSourceCommentsAndStrings(source: string): string {
+  let state: "code" | "line-comment" | "block-comment" | "single-string" | "double-string" = "code";
+  let escaped = false;
+  let result = "";
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index]!;
+    const next = source[index + 1];
+    if (state === "code") {
+      if (character === "/" && next === "/") {
+        state = "line-comment";
+        result += "  ";
+        index += 1;
+      } else if (character === "/" && next === "*") {
+        state = "block-comment";
+        result += "  ";
+        index += 1;
+      } else if (character === "'") {
+        state = "single-string";
+        result += " ";
+      } else if (character === '"') {
+        state = "double-string";
+        result += " ";
+      } else result += character;
+      continue;
+    }
+    if (state === "line-comment" && (character === "\n" || character === "\r")) {
+      state = "code";
+      result += character;
+    } else if (state === "block-comment" && character === "*" && next === "/") {
+      state = "code";
+      result += "  ";
+      index += 1;
+    } else if (
+      (state === "single-string" || state === "double-string") &&
+      !escaped &&
+      ((state === "single-string" && character === "'") || (state === "double-string" && character === '"'))
+    ) {
+      state = "code";
+      result += " ";
+    } else {
+      escaped = (state === "single-string" || state === "double-string") && !escaped && character === "\\";
+      if (character !== "\\") escaped = false;
+      result += character === "\n" || character === "\r" ? character : " ";
+    }
+  }
+  return result;
+}
+
+function configuredProductionSourceRoots(layout: RunLayout): string[] | undefined {
+  if (!fs.existsSync(layout.resolvedConfigPath)) return undefined;
+  const parsed = parseProjectConfigToml(fs.readFileSync(layout.resolvedConfigPath, "utf8"), layout.resolvedConfigPath);
+  const roots = parsed.ok ? parsed.value.permissions?.productionSourceRoots : undefined;
+  return roots === undefined || roots.length === 0 ? undefined : roots;
+}
+
+function productionContractSourceFiles(workspacePath: string, productionRoots: readonly string[]): string[] {
+  const productionExtensions = new Set([".sol", ".vy"]);
+  const results: string[] = [];
+  const visit = (directory: string, relativeDirectory: string): void => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const relativePath = relativeDirectory === "" ? entry.name : `${relativeDirectory}/${entry.name}`;
+      if (entry.isSymbolicLink())
+        throw new Error(`Coverage production source inventory contains symlink ${relativePath}`);
+      if (entry.isDirectory()) visit(path.join(directory, entry.name), relativePath);
+      else if (entry.isFile() && productionExtensions.has(path.extname(entry.name))) results.push(relativePath);
+    }
+  };
+  for (const root of productionRoots) {
+    const absoluteRoot = safeResolveInside(workspacePath, root, "production source root");
+    if (!fs.existsSync(absoluteRoot)) continue;
+    const rootStat = fs.lstatSync(absoluteRoot);
+    if (rootStat.isSymbolicLink()) throw new Error(`Coverage production source root is a symlink: ${root}`);
+    if (!rootStat.isDirectory()) throw new Error(`Coverage production source root is not a directory: ${root}`);
+    visit(absoluteRoot, root);
+  }
+  return results.sort();
 }
 
 type ImplementedPropertiesRead = {
@@ -5396,6 +5773,18 @@ function verifyFinalReportPropertyReferences(
     attemptAuthority,
     authenticated
   );
+  diagnostics.push(
+    ...verifyFinalReportCoverageEvidence(
+      layout,
+      artifactDir,
+      node,
+      report,
+      reportPath,
+      markdownPath,
+      attemptAuthority,
+      authenticated
+    )
+  );
   if (!Array.isArray(report.property_provenance)) {
     return diagnostics;
   }
@@ -5440,6 +5829,191 @@ function verifyFinalReportPropertyReferences(
       reportPath
     )
   );
+  return diagnostics;
+}
+
+function verifyFinalReportCoverageEvidence(
+  layout: RunLayout,
+  artifactDir: string,
+  node: PlannedGraphNode,
+  report: Record<string, unknown>,
+  reportPath: string,
+  markdownPath: string,
+  attemptAuthority?: ArtifactGateAttemptAuthority,
+  authenticated?: AuthenticatedArtifactGateSnapshots
+): RuntimeDiagnostic[] {
+  const diagnostics = unscopedCoveragePercentageDiagnosticsInJson(report, reportPath);
+  const markdownBytes = readCurrentArtifactSnapshot(artifactDir, markdownPath, authenticated);
+  const markdown = markdownBytes?.toString("utf8") ?? "";
+  diagnostics.push(...unscopedReportCoveragePercentageDiagnostics(markdown, markdownPath));
+
+  const producerStatus = plannedContractProducerStatus(layout, node, "ultrafuzz/coverage-evidence@1", attemptAuthority);
+  if (producerStatus === "absent") {
+    if (report.coverage_evidence !== undefined) {
+      diagnostics.push({
+        code: "REPORT_COVERAGE_EVIDENCE_UNPLANNED",
+        message: "Final report must not invent coverage evidence without a planned typed producer",
+        severity: "error",
+        source: "coverage-evidence",
+        path: `${reportPath}#$.coverage_evidence`
+      });
+    }
+    return diagnostics;
+  }
+  if (producerStatus === "unknown" && report.coverage_evidence === undefined) return diagnostics;
+  const evidence = finalizedSingletonAncestorOutput(
+    layout,
+    node,
+    "ultrafuzz/coverage-evidence@1",
+    "coverage evidence semantic context",
+    attemptAuthority
+  );
+  if (evidence === undefined) {
+    diagnostics.push({
+      code: "REPORT_COVERAGE_EVIDENCE_UNAVAILABLE",
+      message: "Final report cannot verify the planned coverage denominator without finalized producer authority",
+      severity: "error",
+      source: "coverage-evidence",
+      path: `${reportPath}#$.coverage_evidence`
+    });
+    return diagnostics;
+  }
+  if (!isDeepStrictEqual(report.coverage_evidence, evidence.value)) {
+    diagnostics.push({
+      code: "REPORT_COVERAGE_EVIDENCE_MISMATCH",
+      message: "Final report must preserve the complete scoped coverage denominator",
+      severity: "error",
+      source: "coverage-evidence",
+      path: `${reportPath}#$.coverage_evidence`
+    });
+    return diagnostics;
+  }
+
+  const views =
+    isRecord(evidence.value) && Array.isArray(evidence.value.views) ? evidence.value.views.filter(isRecord) : [];
+  const sectionLines = markdownSectionLines(markdown, "## Scoped coverage evidence");
+  const zeroCoverageComponents =
+    isRecord(evidence.value) && Array.isArray(evidence.value.zero_coverage_components)
+      ? evidence.value.zero_coverage_components.length
+      : 0;
+  const expectedLines = [
+    ...views.map((view) => {
+      const scope = typeof view.scope === "string" ? view.scope : "";
+      return `- ${scope}: \`${String(view.covered_ranges)}/${String(view.total_ranges)}\``;
+    }),
+    `- Zero-coverage components: \`${zeroCoverageComponents}\``
+  ];
+  const renderedLines = sectionLines?.filter((line) => line.length > 0);
+  if (renderedLines === undefined || !sameStringSequence(renderedLines, expectedLines)) {
+    diagnostics.push({
+      code: "REPORT_COVERAGE_EVIDENCE_MARKDOWN_MISSING",
+      message:
+        "Final report Markdown must render every coverage view with its scope and denominator plus the zero-coverage component count",
+      severity: "error",
+      source: "coverage-evidence",
+      path: markdownPath
+    });
+  }
+  return diagnostics;
+}
+
+function unscopedCoveragePercentageDiagnostics(contents: string, artifactPath: string): RuntimeDiagnostic[] {
+  const percentage = /\b(?:100(?:\.0+)?|\d{1,2}(?:\.\d+)?)\s*%/u;
+  return contents
+    .split(/\r?\n/u)
+    .map((line, index) => ({ line, lineNumber: index + 1 }))
+    .filter(({ line }) => percentage.test(line))
+    .map(({ lineNumber }) => ({
+      code: "UNSCOPED_COVERAGE_PERCENTAGE",
+      message: "Coverage must use an exact named-scope covered/total denominator; percentages are not accepted",
+      severity: "error" as const,
+      source: "coverage-evidence",
+      path: `${artifactPath}:${lineNumber}`
+    }));
+}
+
+function unscopedReportCoveragePercentageDiagnostics(contents: string, artifactPath: string): RuntimeDiagnostic[] {
+  const percentage = /\b(?:100(?:\.0+)?|\d{1,2}(?:\.\d+)?)\s*%/u;
+  let fenced = false;
+  let coverageSection = false;
+  return contents
+    .split(/\r?\n/u)
+    .map((line, index) => ({ line, lineNumber: index + 1 }))
+    .filter(({ line }) => {
+      const trimmed = line.trim();
+      if (/^(?:`{3,}|~{3,})/u.test(trimmed)) {
+        fenced = !fenced;
+        return false;
+      }
+      if (fenced) return false;
+      if (/^##\s+/u.test(trimmed)) coverageSection = /coverage/iu.test(trimmed);
+      return (coverageSection || /coverage/iu.test(line)) && percentage.test(line);
+    })
+    .map(({ lineNumber }) => ({
+      code: "UNSCOPED_COVERAGE_PERCENTAGE",
+      message: "Coverage must use an exact named-scope covered/total denominator; percentages are not accepted",
+      severity: "error" as const,
+      source: "coverage-evidence",
+      path: `${artifactPath}:${lineNumber}`
+    }));
+}
+
+function markdownSectionLines(contents: string, heading: string): string[] | undefined {
+  const lines = contents.split(/\r?\n/u);
+  let fenced = false;
+  let headingIndex = -1;
+  for (const [index, line] of lines.entries()) {
+    const trimmed = line.trim();
+    if (/^(?:`{3,}|~{3,})/u.test(trimmed)) {
+      fenced = !fenced;
+      continue;
+    }
+    if (!fenced && trimmed === heading) {
+      headingIndex = index;
+      break;
+    }
+  }
+  if (headingIndex < 0) return undefined;
+
+  fenced = false;
+  const sectionLines: string[] = [];
+  for (let index = headingIndex + 1; index < lines.length; index += 1) {
+    const trimmed = lines[index]!.trim();
+    if (/^(?:`{3,}|~{3,})/u.test(trimmed)) {
+      fenced = !fenced;
+      continue;
+    }
+    if (fenced) continue;
+    if (!fenced && trimmed.startsWith("## ")) {
+      break;
+    }
+    sectionLines.push(trimmed);
+  }
+  return sectionLines;
+}
+
+function unscopedCoveragePercentageDiagnosticsInJson(
+  report: Record<string, unknown>,
+  reportPath: string
+): RuntimeDiagnostic[] {
+  const diagnostics: RuntimeDiagnostic[] = [];
+  const visit = (value: unknown, jsonPath: string, coverageContext: boolean): void => {
+    if (typeof value === "string") {
+      if (coverageContext) {
+        diagnostics.push(...unscopedCoveragePercentageDiagnostics(value, `${reportPath}#${jsonPath}`));
+      }
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach((entry, index) => visit(entry, `${jsonPath}[${index}]`, coverageContext));
+      return;
+    }
+    if (!isRecord(value)) return;
+    for (const [key, entry] of Object.entries(value)) {
+      visit(entry, `${jsonPath}.${key}`, coverageContext || /coverage/iu.test(key));
+    }
+  };
+  visit(report, "$", false);
   return diagnostics;
 }
 

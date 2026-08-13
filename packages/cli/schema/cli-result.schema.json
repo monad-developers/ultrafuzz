@@ -64,6 +64,7 @@
     { "$ref": "#/$defs/eventsCommand" },
     { "$ref": "#/$defs/nodeCommand" },
     { "$ref": "#/$defs/snapshotsCommand" },
+    { "$ref": "#/$defs/artifactValidateCommand" },
     { "$ref": "#/$defs/jsonValidateCommand" },
     { "$ref": "#/$defs/evalPlanCommand" },
     { "$ref": "#/$defs/evalRunCommand" },
@@ -111,6 +112,7 @@
         "events",
         "node",
         "snapshots",
+        "artifact validate",
         "json validate",
         "eval plan",
         "eval run",
@@ -1184,6 +1186,15 @@
         }
       }
     },
+    "artifactValidationData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "path"],
+      "properties": {
+        "contract": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 }
+      }
+    },
     "jsonValidationFailureData": {
       "type": "object",
       "additionalProperties": false,
@@ -1924,6 +1935,7 @@
     "eventsCommand": { "$ref": "#/$defs/command-events" },
     "nodeCommand": { "$ref": "#/$defs/command-node" },
     "snapshotsCommand": { "$ref": "#/$defs/command-snapshots" },
+    "artifactValidateCommand": { "$ref": "#/$defs/command-artifact-validate" },
     "jsonValidateCommand": { "$ref": "#/$defs/command-json-validate" },
     "evalPlanCommand": { "$ref": "#/$defs/command-eval-plan" },
     "evalRunCommand": { "$ref": "#/$defs/command-eval-run" },
@@ -2004,6 +2016,7 @@
     "command-events": { "$ref": "#/$defs/commandTemplate-events" },
     "command-node": { "$ref": "#/$defs/commandTemplate-node" },
     "command-snapshots": { "$ref": "#/$defs/commandTemplate-snapshots" },
+    "command-artifact-validate": { "$ref": "#/$defs/commandTemplate-artifact-validate" },
     "command-json-validate": { "$ref": "#/$defs/commandTemplate-json-validate" },
     "command-eval-plan": { "$ref": "#/$defs/commandTemplate-eval-plan" },
     "command-eval-run": { "$ref": "#/$defs/commandTemplate-eval-run" },
@@ -2238,6 +2251,17 @@
       "then": {
         "type": "object",
         "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/snapshotsData" }] } }
+      }
+    },
+    "commandTemplate-artifact-validate": {
+      "if": {
+        "type": "object",
+        "properties": { "command": { "const": "artifact validate" } },
+        "required": ["command"]
+      },
+      "then": {
+        "type": "object",
+        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/artifactValidationData" }] } }
       }
     },
     "commandTemplate-json-validate": {

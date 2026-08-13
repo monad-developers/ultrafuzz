@@ -6,6 +6,7 @@ import { isDeepStrictEqual } from "node:util";
 import { artifactContractDefinition, artifactContractSchemaBinding } from "./artifact-contracts.js";
 import { ARTIFACT_SCHEMA_METADATA, type ArtifactSchemaFilename } from "./artifact-schema-metadata.js";
 import { findingNoteAssignmentIssue } from "./findings-schema.js";
+import { validateCoverageEvidence } from "./coverage-evidence.js";
 import {
   MAX_AGGREGATION_DECLARED_BYTES,
   MAX_AGGREGATION_SOURCE_ENTRIES,
@@ -311,6 +312,17 @@ function contextualGate(
 
 function issue(pathValue: string, message: string): SemanticGateIssue {
   return { path: pathValue, message };
+}
+
+function coverageEvidenceReconciliationIssues(document: unknown): SemanticGateIssue[] {
+  const validation = validateCoverageEvidence(document, "$");
+  return validation.issues.map((entry) => issue(entry.path, entry.message));
+}
+
+function reportCoverageEvidenceReconciliationIssues(document: unknown): SemanticGateIssue[] {
+  if (!isRecord(document) || document.coverage_evidence === undefined) return [];
+  const validation = validateCoverageEvidence(document.coverage_evidence, "$.coverage_evidence");
+  return validation.issues.map((entry) => issue(entry.path, entry.message));
 }
 
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
@@ -6228,6 +6240,7 @@ const gateSpecifications = {
     dynamicStrategyArtifactReconciliationIssues
   ),
   "dynamic-strategy-selection-coherence": documentGate(dynamicSelectionCoherenceIssues),
+  "coverage-evidence-reconciliation": documentGate(coverageEvidenceReconciliationIssues),
   "externalized-state-id-uniqueness": documentGate((document, context) => [
     ...uniqueFieldGate([["state_components"]], "component_id", "state component ID")(document, context),
     ...uniqueFieldGate([["scenarios"]], "scenario_id", "state scenario ID")(document, context),
@@ -6403,6 +6416,7 @@ const gateSpecifications = {
   "report-finding-id-uniqueness": documentGate(reportFindingIdIssues),
   "report-finding-evidence-span-consistency": documentGate(reportFindingEvidenceSpanIssues),
   "report-finding-report-vocabulary": documentGate(reportFindingReportVocabularyIssues),
+  "report-coverage-evidence-reconciliation": documentGate(reportCoverageEvidenceReconciliationIssues),
   "report-severity-classification-preservation": contextualGate(
     "cross-artifact",
     ["artifactSet.severityClassifiedFindings"],
