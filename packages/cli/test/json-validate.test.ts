@@ -291,14 +291,14 @@ test("json validate diagnostics project exactly through the production planned-o
         code: "JSON_SCHEMA_VIOLATION",
         message: "must NOT have additional properties",
         instancePath: "/0",
-        schemaPath: "urn:ultrafuzz:schema:artifacts:finding:2/additionalProperties",
+        schemaPath: "#/additionalProperties",
         keyword: "additionalProperties"
       },
       {
         code: "JSON_SCHEMA_VIOLATION",
         message: "must be equal to one of the allowed values",
         instancePath: "/0/status",
-        schemaPath: "urn:ultrafuzz:schema:artifacts:finding:2/properties/status/enum",
+        schemaPath: "#/properties/status/enum",
         keyword: "enum"
       }
     ]);
