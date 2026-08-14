@@ -127,6 +127,15 @@ export function isFindingReportMetadataKey(key: string): boolean {
   return FINDING_REPORT_METADATA_TERMS.some((term) => normalized.includes(term));
 }
 
+/** Unenumerated producer-local report aliases contain multiple metadata terms,
+ * or a metadata term paired with the conventional alias marker. */
+export function isFindingReportMetadataAliasKey(key: string): boolean {
+  if (!findingReportAssignmentKey.test(key)) return false;
+  const normalized = key.replace(/[A-Z]/gu, (character) => character.toLowerCase());
+  const terms = FINDING_REPORT_METADATA_TERMS.filter((term) => normalized.includes(term));
+  return new Set(terms).size >= 2 || (terms.length > 0 && normalized.includes("alias"));
+}
+
 export function isFindingReportEvidenceAssignmentKey(key: string): boolean {
   return FINDING_REPORT_EVIDENCE_ASSIGNMENT_KEYS.includes(
     key as (typeof FINDING_REPORT_EVIDENCE_ASSIGNMENT_KEYS)[number]

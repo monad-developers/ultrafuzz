@@ -299,6 +299,10 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
     ).toThrow(expect.objectContaining({ code: "DUPLICATED_REPORT_VOCABULARY" }));
     for (const proseAlias of [
       "Record access -> internal evidence on each finding.",
+      "Record the reachability -> helper-only evidence on each finding.",
+      "Record root_reason -> renamed evidence on each finding.",
+      "Record severity_alias_v2 -> critical evidence on each finding.",
+      "Record access | internal evidence on each finding.",
       "Record root_cause: renamed evidence on each finding.",
       "Record reachability -> helper-only evidence on each finding.",
       "Record verification ↦ summary evidence on each finding.",

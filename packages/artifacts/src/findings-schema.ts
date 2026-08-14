@@ -18,6 +18,7 @@ import {
   FINDING_RISK_VALUES,
   STATEFUL_FAILURE_CLASSIFICATION_VALUES,
   canonicalFindingNoteKey,
+  isFindingReportMetadataAliasKey,
   isFindingReportMetadataKey
 } from "./finding-note-vocabulary.js";
 import { validateRegisteredJsonSchema } from "./json-schema-validator.js";
@@ -235,7 +236,7 @@ const findingReportLooseAliasColonAssignment = new RegExp(
   "giu"
 );
 const findingReportLooseDirectMapping = new RegExp(
-  `${assignmentBoundaryPattern}\\s*${promptVocabularyOpenWrapperPattern}(${assignmentKeyPattern})${promptVocabularyCloseWrapperPattern}\\s*(?::=|≔|(?:-|=)>|→|↦|⟶)\\s*${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})`,
+  `${assignmentBoundaryPattern}\\s*${promptVocabularyOpenWrapperPattern}(${assignmentKeyPattern})${promptVocabularyCloseWrapperPattern}\\s*(?:\\||:=|≔|(?:-|=)>|→|↦|⟶)\\s*${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})`,
   "giu"
 );
 const findingReportDirectMapping = new RegExp(
@@ -530,10 +531,11 @@ function isLoosePromptReportVocabularyKey(identifier: string, text: string, inde
   const canonicalKey = canonicalFindingNoteKey(identifier);
   return (
     explicitReportAliasKeySet.has(identifier.toLowerCase()) ||
+    (canonicalKey === undefined && isFindingReportMetadataAliasKey(identifier)) ||
     (canonicalKey !== undefined &&
       canonicalKey !== "impact" &&
       canonicalKey !== "likelihood" &&
-      /\b(?:add|annotate|append|assign|define|emit|enforce|include|label|mandate|mark|populate|put|record|require|return|set|store|write)s?\s*$/iu.test(
+      /\b(?:add|annotate|append|assign|define|emit|enforce|include|label|mandate|mark|populate|put|record|require|return|set|store|write)s?(?:\s+the)?\s*$/iu.test(
         text.slice(Math.max(0, index - 160), index)
       ))
   );
