@@ -88,8 +88,21 @@ function compileRegisteredValidators(schemas: readonly RegisteredSchemaSnapshot[
   getSchema: (id: string) => ReturnType<ReturnType<typeof createStrictAjv>["getSchema"]>;
 } {
   const ajv = createStrictAjv();
-  for (const entry of schemas) ajv.addSchema(structuredClone(entry.schema), entry.id);
+  addAndCompileRegisteredSchemas(ajv, schemas);
   return { getSchema: (id: string) => ajv.getSchema(id) };
+}
+
+function addAndCompileRegisteredSchemas(
+  ajv: ReturnType<typeof createStrictAjv>,
+  schemas: readonly RegisteredSchemaSnapshot[]
+): void {
+  for (const entry of schemas) ajv.addSchema(structuredClone(entry.schema), entry.id);
+  // Compile in registry order so referenced-schema diagnostics retain their
+  // canonical registered IDs instead of depending on which root is requested
+  // first. The host and one-shot worker must project identical schema paths.
+  for (const entry of schemas) {
+    if (ajv.getSchema(entry.id) === undefined) throw new Error(`failed to compile registered schema ${entry.id}`);
+  }
 }
 
 function validateRegisteredInstance(
@@ -125,7 +138,7 @@ function validateOnce(request: WorkerRequest): void {
 
     const ajv = createStrictAjv();
     const registeredSchemas = request.registeredSchemas ?? artifactSchemaRegistry();
-    for (const entry of registeredSchemas) ajv.addSchema(structuredClone(entry.schema), entry.id);
+    addAndCompileRegisteredSchemas(ajv, registeredSchemas);
     let validator;
     if (request.registeredSchemaId !== undefined) {
       validator = ajv.getSchema(request.registeredSchemaId);
