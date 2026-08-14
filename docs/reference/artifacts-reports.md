@@ -459,7 +459,7 @@ SHA-256. Unavailable evidence carries typed blockers and no measurement.
 
 `report.md` and the coverage producer's Markdown use exactly one canonical
 section. Preserve array order and apply the standard public-inline sanitization
-to dynamic values: redact secrets and private absolute paths, collapse and trim
+to dynamic values: redact secrets and private paths, collapse and trim
 whitespace, replace backticks with apostrophes, and use `unavailable` for a
 blank value. Measured evidence uses:
 
