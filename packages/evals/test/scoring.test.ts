@@ -130,6 +130,50 @@ function canonicalReport(issues: unknown[]): Record<string, unknown> {
     property_implementation_coverage: {
       status: "not-planned",
       reason: "property-implementation-track-not-declared"
+    },
+    coverage_evidence: {
+      schema_version: "ultrafuzz.coverage-evidence.v1",
+      lcov: { path: "echidna/covered.test.lcov", sha256: "a".repeat(64) },
+      views: [
+        { scope: "selected-range", covered_ranges: 1, total_ranges: 1 },
+        { scope: "production-source", covered_ranges: 1, total_ranges: 2 }
+      ],
+      files: [
+        {
+          path: "src/Vault.sol",
+          kind: "production",
+          included: true,
+          covered_ranges: 1,
+          total_ranges: 1
+        },
+        {
+          path: "src/Untouched.sol",
+          kind: "production",
+          included: false,
+          exclusion_reason: "not selected by Recon",
+          covered_ranges: 0,
+          total_ranges: 1
+        }
+      ],
+      counted_ranges: [
+        {
+          file: "src/Vault.sol",
+          kind: "production",
+          start_line: 1,
+          line_count: 1,
+          selected: true,
+          covered: true
+        },
+        {
+          file: "src/Untouched.sol",
+          kind: "production",
+          start_line: 1,
+          line_count: 1,
+          selected: false,
+          covered: false
+        }
+      ],
+      zero_coverage_components: [{ path: "src/Untouched.sol", kind: "production", start_line: 1, line_count: 1 }]
     }
   };
 }
@@ -671,12 +715,26 @@ describe("deterministic scorer math", () => {
       suite,
       row,
       findings: [matchedFinding()],
+      coverageEvidence: {
+        views: [
+          { scope: "selected-range", covered_ranges: 1, total_ranges: 1 },
+          { scope: "production-source", covered_ranges: 1, total_ranges: 2 }
+        ]
+      },
       bugs: BUGS,
-      llmJudge: async (input) => ({
-        ...input.deterministicResult,
-        judge_kind: "llm",
-        rationale: "custom judge"
-      })
+      llmJudge: async (input) => {
+        expect(input.coverageEvidence).toMatchObject({
+          views: [
+            { scope: "selected-range", covered_ranges: 1, total_ranges: 1 },
+            { scope: "production-source", covered_ranges: 1, total_ranges: 2 }
+          ]
+        });
+        return {
+          ...input.deterministicResult,
+          judge_kind: "llm",
+          rationale: "custom judge"
+        };
+      }
     });
     expect(scored.findingScores[0]?.judge_result.judge_kind).toBe("llm");
     expect(scored.findingScores[0]?.deterministic_match.judge_kind).toBe("deterministic");
@@ -686,7 +744,7 @@ describe("deterministic scorer math", () => {
         total: 1,
         quorum: 1,
         model: "gpt-5.5",
-        prompt_version: "ultrafuzz-eval-judge-v10-registered-result-schema",
+        prompt_version: "ultrafuzz-eval-judge-v12-complete-coverage-evidence",
         aggregate_decision: { votes: 1 },
         member_votes: [{ member: 1, rationale: "custom judge" }]
       }
@@ -810,7 +868,7 @@ describe("deterministic scorer math", () => {
         quorum: 3,
         model: "gpt-5.5",
         reasoning_effort: "xhigh",
-        prompt_version: "ultrafuzz-eval-judge-v10-registered-result-schema",
+        prompt_version: "ultrafuzz-eval-judge-v12-complete-coverage-evidence",
         vote_split: [
           { classification: "true-positive", matched_ground_truth_bug_id: "BUG-1", votes: 3 },
           { classification: "false-positive", votes: 1 }
@@ -1050,7 +1108,7 @@ describe("deterministic scorer math", () => {
         availability: "available",
         scoring: {
           judge_mode: "deterministic",
-          judge_prompt_version: "ultrafuzz-eval-judge-v10-registered-result-schema",
+          judge_prompt_version: "ultrafuzz-eval-judge-v12-complete-coverage-evidence",
           judge_models: ["gpt-5.5"],
           judge_panel: { total: 3, quorum: 2 },
           ground_truth_sha256: { "target-a": expect.stringMatching(/^sha256:/u) }
@@ -1103,16 +1161,27 @@ describe("deterministic scorer math", () => {
       projectRoot: fixture.projectRoot,
       evalRunId: fixture.evalRunId
     });
+    let observedCoverageEvidence: unknown;
     const judged = await scoreEvalRun({
       projectRoot: fixture.projectRoot,
       evalRunId: fixture.evalRunId,
-      llmJudge: async (input) => ({
-        ...input.deterministicResult,
-        judge_kind: "llm",
-        rationale: "generated judge result"
-      })
+      llmJudge: async (input) => {
+        observedCoverageEvidence = input.coverageEvidence;
+        return {
+          ...input.deterministicResult,
+          judge_kind: "llm",
+          rationale: "generated judge result"
+        };
+      }
     });
 
+    expect(observedCoverageEvidence).toMatchObject({
+      schema_version: "ultrafuzz.coverage-evidence.v1",
+      views: [
+        { scope: "selected-range", covered_ranges: 1, total_ranges: 1 },
+        { scope: "production-source", covered_ranges: 1, total_ranges: 2 }
+      ]
+    });
     expect(deterministic.provenance?.scoring.judge_mode).toBe("deterministic");
     expect(judged.provenance?.scoring.judge_mode).toBe("llm");
     expect(judged.provenance?.scoring.fingerprint).not.toBe(deterministic.provenance?.scoring.fingerprint);
