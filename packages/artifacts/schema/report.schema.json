@@ -2440,10 +2440,12 @@
                 "maximum": 9007199254740991
               },
               "selected": {
-                "type": "boolean"
+                "type": "boolean",
+                "description": "Whether this trusted declaration range overlaps the authenticated Recon selection map."
               },
               "covered": {
-                "type": "boolean"
+                "type": "boolean",
+                "description": "Declaration completeness: true only when the authenticated LCOV contains at least one DA row in the range and every in-range DA row has a positive hit count."
               }
             },
             "required": ["file", "kind", "start_line", "line_count", "selected", "covered"],

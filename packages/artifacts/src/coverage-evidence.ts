@@ -24,8 +24,14 @@ const range = z.strictObject({
   kind: sourceKind,
   start_line: z.number().int().positive(),
   line_count: z.number().int().positive(),
-  selected: z.boolean(),
-  covered: z.boolean()
+  selected: z
+    .boolean()
+    .describe("Whether this trusted declaration range overlaps the authenticated Recon selection map."),
+  covered: z
+    .boolean()
+    .describe(
+      "Declaration completeness: true only when the authenticated LCOV contains at least one DA row in the range and every in-range DA row has a positive hit count."
+    )
 });
 const file = z
   .strictObject({
@@ -229,20 +235,10 @@ export const coverageEvidenceSchema = z
       if (declared === undefined || declared.covered) {
         context.addIssue({
           code: "custom",
-          message: "zero-coverage component must match an uncovered material range",
+          message: "zero-coverage component must match an incomplete material range",
           path: ["zero_coverage_components", index]
         });
       }
-    }
-    const expectedZero = value.counted_ranges
-      .filter((entry) => !entry.covered)
-      .map((entry) => `${entry.file}\0${entry.kind}\0${entry.start_line}\0${entry.line_count}`);
-    if (expectedZero.some((key) => !actualZero.has(key)) || actualZero.size !== expectedZero.length) {
-      context.addIssue({
-        code: "custom",
-        message: "zero-coverage components must enumerate every uncovered material range",
-        path: ["zero_coverage_components"]
-      });
     }
   });
 
@@ -253,7 +249,7 @@ export const coverageEvidenceJsonSchema = {
   $id: COVERAGE_EVIDENCE_JSON_SCHEMA_ID,
   title: "Ultrafuzz complete coverage denominator",
   description:
-    "Producer contract. The exact LCOV input is identified by a safe workspace-relative path and SHA-256. Each range uses a positive start_line plus positive line_count, so reversed ranges are unrepresentable. Semantic validation additionally requires: every counted range joins a declared file with the same kind; selected ranges are production-only and may join only an included file; ranges within each file do not overlap; file totals equal all selected and unselected counted ranges; selected-range totals equal selected counted ranges; production-source totals equal production-file totals; and zero_coverage_components exactly enumerates every uncovered material range. Runtime authenticates the LCOV snapshot and source attribution, binds every production declaration boundary to the trusted workspace inventory, derives covered flags from LCOV DA hits, and binds each selection flag to overlap with the generated Recon coverage map.",
+    "Producer contract. The exact LCOV input is identified by a safe workspace-relative path and SHA-256. Each range uses a positive start_line plus positive line_count, so reversed ranges are unrepresentable. Semantic validation additionally requires: every counted range joins a declared file with the same kind; selected ranges are production-only and may join only an included file; ranges within each file do not overlap; file totals equal all selected and unselected counted ranges; selected-range totals equal selected counted ranges; production-source totals equal production-file totals; and each zero_coverage_components entry names an incomplete material range. Runtime authenticates the LCOV snapshot and source attribution, binds every production declaration boundary to the trusted workspace inventory, defines covered as at least one in-range LCOV DA row with every in-range DA row positive, requires zero_coverage_components to enumerate exactly the ranges with no positive hit, and binds each selection flag to overlap with the generated Recon coverage map. The two views are declaration-completeness metrics and do not claim to reproduce covg-eval's evaluator-specific function identity or filtering semantics.",
   type: "object",
   additionalProperties: false,
   required: ["schema_version", "lcov", "views", "files", "counted_ranges", "zero_coverage_components"],
@@ -323,8 +319,15 @@ export const coverageEvidenceJsonSchema = {
           kind: { enum: sourceKinds },
           start_line: { type: "integer", minimum: 1 },
           line_count: { type: "integer", minimum: 1 },
-          selected: { type: "boolean" },
-          covered: { type: "boolean" }
+          selected: {
+            type: "boolean",
+            description: "Whether this trusted declaration range overlaps the authenticated Recon selection map."
+          },
+          covered: {
+            type: "boolean",
+            description:
+              "Declaration completeness: true only when the authenticated LCOV contains at least one DA row in the range and every in-range DA row has a positive hit count."
+          }
         }
       }
     },

@@ -10495,9 +10495,7 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
   assert.equal(missingPartialFileGap.ok, false);
   assert.ok(
     missingPartialFileGap.diagnostics.some(
-      (diagnostic) =>
-        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
-        diagnostic.details?.gate === "coverage-evidence-reconciliation"
+      (diagnostic) => diagnostic.code === "COVERAGE_ZERO_COMPONENT_RESULT_MISMATCH"
     ),
     JSON.stringify(missingPartialFileGap.diagnostics)
   );
@@ -10788,6 +10786,131 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
   assert.equal(contradictoryGoal.ok, false);
   assert.ok(
     contradictoryGoal.diagnostics.some((diagnostic) => diagnostic.code === "COVERAGE_GOAL_MEASUREMENT_MISMATCH")
+  );
+});
+
+test("coverage gate rejects a selected declaration with any uncovered instrumented line", () => {
+  const layout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-partial-declaration-coverage",
+    resolvedConfigToml: '[permissions]\nproduction_source_roots = ["src"]\n'
+  });
+  const node = {
+    ...plannedNode(["coverage-goal.json", "coverage-report.md", "coverage-evidence.json"]),
+    id: "stateful-invariant-coverage",
+    logical_id: "stateful-invariant-coverage",
+    artifact_dir: "artifacts/stateful-invariant-coverage"
+  };
+  writePlannedGraph(layout, [node]);
+  const workspace = path.join(layout.workspacesDir, node.id);
+  fs.mkdirSync(path.join(workspace, "src"), { recursive: true });
+  fs.mkdirSync(path.join(workspace, "magic"), { recursive: true });
+  fs.writeFileSync(
+    path.join(workspace, "src/Core.sol"),
+    [
+      "contract Core {",
+      "  function core() external {",
+      "    uint256 value = 1;",
+      "    if (value == 1) value = 2;",
+      "  }",
+      "}",
+      ""
+    ].join("\n")
+  );
+  fs.writeFileSync(path.join(workspace, "magic/recon-coverage.json"), JSON.stringify({ "src/Core.sol": ["2-5"] }));
+  const lcov = writeCoverageLcov(workspace, { "src/Core.sol": { 3: 1, 4: 0 } });
+  const evidence = {
+    schema_version: "ultrafuzz.coverage-evidence.v1",
+    lcov,
+    views: [
+      { scope: "selected-range", covered_ranges: 1, total_ranges: 1 },
+      { scope: "production-source", covered_ranges: 1, total_ranges: 1 }
+    ],
+    files: [{ path: "src/Core.sol", kind: "production", included: true, covered_ranges: 1, total_ranges: 1 }],
+    counted_ranges: [
+      {
+        file: "src/Core.sol",
+        kind: "production",
+        start_line: 2,
+        line_count: 4,
+        selected: true,
+        covered: true
+      }
+    ],
+    zero_coverage_components: [] as Array<{
+      path: string;
+      kind: string;
+      start_line: number;
+      line_count: number;
+    }>
+  };
+  const goal = {
+    schema_version: "ultrafuzz.coverage-goal.v1",
+    target: { scope: "selected-range", minimum_percent: 90 },
+    current_measurement: { scope: "selected-range", covered_ranges: 1, total_ranges: 1 },
+    current_status: "measured",
+    planned_commands: [],
+    stop_conditions: ["reserve time for finalization"],
+    timeout_seconds: 60,
+    finalization_reserve_seconds: 10,
+    blockers: []
+  };
+  writeArtifact(layout, node.id, "coverage-goal.json", JSON.stringify(goal));
+  writeArtifact(
+    layout,
+    node.id,
+    "coverage-report.md",
+    "# Coverage\n\n## Scoped coverage evidence\n\n- selected-range: `1/1`\n- production-source: `1/1`\n\n" +
+      "Excluded components:\n- None\n\nZero-coverage components:\n- None\n"
+  );
+  writeArtifact(layout, node.id, "coverage-evidence.json", JSON.stringify(evidence));
+
+  const partial = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(partial.ok, false);
+  assert.ok(
+    partial.diagnostics.some((diagnostic) => diagnostic.code === "COVERAGE_RANGE_RESULT_MISMATCH"),
+    JSON.stringify(partial.diagnostics)
+  );
+
+  evidence.counted_ranges[0]!.covered = false;
+  evidence.files[0]!.covered_ranges = 0;
+  evidence.views[0]!.covered_ranges = 0;
+  evidence.views[1]!.covered_ranges = 0;
+  goal.current_measurement.covered_ranges = 0;
+  writeArtifact(layout, node.id, "coverage-goal.json", JSON.stringify(goal));
+  writeArtifact(
+    layout,
+    node.id,
+    "coverage-report.md",
+    "# Coverage\n\n## Scoped coverage evidence\n\n- selected-range: `0/1`\n- production-source: `0/1`\n\n" +
+      "Excluded components:\n- None\n\nZero-coverage components:\n- None\n"
+  );
+  writeArtifact(layout, node.id, "coverage-evidence.json", JSON.stringify(evidence));
+
+  const completeMetric = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(completeMetric.ok, true, JSON.stringify(completeMetric.diagnostics));
+
+  evidence.zero_coverage_components.push({
+    path: "src/Core.sol",
+    kind: "production",
+    start_line: 2,
+    line_count: 4
+  });
+  writeArtifact(
+    layout,
+    node.id,
+    "coverage-report.md",
+    "# Coverage\n\n## Scoped coverage evidence\n\n- selected-range: `0/1`\n- production-source: `0/1`\n\n" +
+      "Excluded components:\n- None\n\nZero-coverage components:\n- `src/Core.sol:2-5` (production)\n"
+  );
+  writeArtifact(layout, node.id, "coverage-evidence.json", JSON.stringify(evidence));
+  const partialMislabeledAsZero = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(partialMislabeledAsZero.ok, false);
+  assert.ok(
+    partialMislabeledAsZero.diagnostics.some(
+      (diagnostic) => diagnostic.code === "COVERAGE_ZERO_COMPONENT_RESULT_MISMATCH"
+    ),
+    JSON.stringify(partialMislabeledAsZero.diagnostics)
   );
 });
 
