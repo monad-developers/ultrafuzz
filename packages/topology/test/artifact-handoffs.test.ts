@@ -995,6 +995,68 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
     );
   });
 
+  it("rejects advisory, historical, revoked, conditional, and formatted pseudo-directives", () => {
+    for (const prompt of [
+      "You are encouraged to write findings to {{output_findings_path}}.",
+      "Try your best to write findings to {{output_findings_path}}.",
+      "Aim to write findings to {{output_findings_path}}.",
+      "Outline how to write findings to {{output_findings_path}}.",
+      "Discuss how to write findings to {{output_findings_path}}.",
+      "In the past, agents were required to write findings to {{output_findings_path}}.",
+      "Write findings to {{output_findings_path}}. Skip this step.",
+      "Write findings to {{output_findings_path}}. This requirement no longer applies.",
+      "Write findings to {{output_findings_path}}. Don't write it after all.",
+      "Write findings to {{output_findings_path}}. Ignore the foregoing.",
+      "Write findings to {{output_findings_path}}. Omit that output.",
+      "Write findings to {{output_findings_path}}. This instruction is void.",
+      "Write findings to {{output_findings_path}}. Use backup.json instead.",
+      "Write findings to {{output_findings_path}} or backup.json.",
+      "Write findings to {{output_findings_path}}. Actually save findings to backup.json instead.",
+      "Write findings to {{output_findings_path}} where possible.",
+      "Write findings to {{output_findings_path}} where feasible.",
+      "Write findings to {{output_findings_path}} on demand.",
+      "Write findings to {{output_findings_path}} as circumstances permit.",
+      "If findings exist, write them to {{output_findings_path}}. Otherwise it is acceptable to write an empty findings array there.",
+      "## Historical context\n\nWrite findings to {{output_findings_path}}.",
+      "## Hypothetical scenario\n\nWrite findings to {{output_findings_path}}.",
+      "## Tutorial\n\nWrite findings to {{output_findings_path}}.",
+      "Do **not** write findings to {{output_findings_path}}.",
+      "You may *optionally* write findings to {{output_findings_path}}.",
+      "[Optional](https://example.invalid/guidance): Write findings to {{output_findings_path}}.",
+      "Historical context\n---\nWrite findings to {{output_findings_path}}.",
+      `The example quotation is: "\n${"background ".repeat(70)}\nWrite findings to {{output_findings_path}}.\n"`
+    ]) {
+      expect(() => validateFindingsStrategyPrompt(prompt), prompt).toThrow(
+        expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" })
+      );
+    }
+  });
+
+  it("rejects optional and historical pseudo-directives for a second valid-empty output", () => {
+    const topology = validTopology();
+    topology.nodes[2] = {
+      ...topology.nodes[2]!,
+      outputs: [
+        ...topology.nodes[2]!.outputs!,
+        { path: "generated-tests.json", contract: "ultrafuzz/generated-tests@3", primary: false }
+      ]
+    };
+    for (const prompt of [
+      "Write findings to {{output_findings_path}}. For optional generated tests, write the generated-test manifest to {{artifact_path}}/generated-tests.json.",
+      "Write findings to {{output_findings_path}}. Generated tests are optional, but write the generated-test manifest to {{artifact_path}}/generated-tests.json.",
+      "Write findings to {{output_findings_path}}. ## Optional guidance\n\nWrite the generated-test manifest to {{artifact_path}}/generated-tests.json.",
+      "Write findings to {{output_findings_path}}. ## Historical context\n\nWrite the generated-test manifest to {{artifact_path}}/generated-tests.json."
+    ]) {
+      expect(
+        () =>
+          validateTopology(topology, {
+            promptTexts: { "strategies/strategy.md": `${prompt}${FINDING_VOCABULARY_REFERENCES}` }
+          }),
+        prompt
+      ).toThrow(expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" }));
+    }
+  });
+
   it("accepts explicit imperative findings variants while preserving path-only code spans", () => {
     for (const prompt of [
       "Copy all confirmed findings to {{output_findings_path}}.",
@@ -1007,7 +1069,25 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       "Append all confirmed findings to {{output_findings_path}}.",
       "Document all confirmed findings in {{output_findings_path}}.",
       "1. Required outputs:\n   - Write structured findings to:\n     {{output_findings_path}}",
-      "Write structured findings to:\n\n{{output_findings_path}}\n\nReview details when useful."
+      "Write structured findings to:\n\n{{output_findings_path}}\n\nReview details when useful.",
+      "Write all findings to {{output_findings_path}}.\nStart the optional deployment.\nCancel that instruction."
+    ]) {
+      expect(() => validateFindingsStrategyPrompt(prompt), prompt).not.toThrow();
+    }
+  });
+
+  it("accepts mandatory complete-or-empty findings directives and long direct objects", () => {
+    for (const prompt of [
+      "Write a schema-valid findings array, including `[]` when no findings exist, to {{output_findings_path}}.",
+      "Always write the findings artifact, with `[]` representing no findings, to {{output_findings_path}}.",
+      "Write one complete findings artifact—use `[]` when the audit finds none—to {{output_findings_path}}.",
+      "Write a complete or empty findings array to {{output_findings_path}}.",
+      "Output:\nWrite a schema-valid findings array, including `[]` when none exist, to {{output_findings_path}}.",
+      "Final output:\nAlways write the complete findings array (use `[]` when empty) to {{output_findings_path}}.",
+      "Steps:\nWrite one complete findings artifact—use `[]` when none exist—to {{output_findings_path}}.",
+      "Actions:\nWrite a complete or empty findings array to {{output_findings_path}}.",
+      `Write all confirmed findings ${"with exact supporting evidence ".repeat(24)}to {{output_findings_path}}.`,
+      "Write findings to {{output_findings_path}}. Then run the optional broad test suite. Cancel that instruction."
     ]) {
       expect(() => validateFindingsStrategyPrompt(prompt), prompt).not.toThrow();
     }

@@ -230,8 +230,13 @@ function directivePromptBody(promptText: string): string {
   for (const image of promptText.matchAll(/!\[[^\]\r\n]*\]\[[^\]\r\n]*\]/gu)) {
     maskPromptRange(characters, image.index, image.index + image[0].length);
   }
-  for (const link of promptText.matchAll(/(?<!!)\[[^\]\r\n]*\](?:\([^)\r\n]*\)|\[[^\]\r\n]*\])/gu)) {
-    maskPromptRange(characters, link.index, link.index + link[0].length);
+  for (const link of promptText.matchAll(/(?<!!)\[([^\]\r\n]*)\](?:\([^)\r\n]*\)|\[[^\]\r\n]*\])/gu)) {
+    if (link[1]!.includes("{{")) {
+      maskPromptRange(characters, link.index, link.index + link[0].length);
+      continue;
+    }
+    maskPromptRange(characters, link.index, link.index + 1);
+    maskPromptRange(characters, link.index + 1 + link[1]!.length, link.index + link[0].length);
   }
   for (const deleted of promptText.matchAll(/~~[^\r\n]*?~~/gu)) {
     maskPromptRange(characters, deleted.index, deleted.index + deleted[0].length);
@@ -239,7 +244,19 @@ function directivePromptBody(promptText: string): string {
   for (const tag of promptText.matchAll(/<[^>\r\n]*>/gu)) {
     maskPromptRange(characters, tag.index, tag.index + tag[0].length);
   }
+  maskDescriptiveQuotedRegions(characters, promptText);
   return characters.join("");
+}
+
+function maskDescriptiveQuotedRegions(characters: string[], promptText: string): void {
+  const introduction = /\b(?:example\s+quotation|example|quotation|quote)\s+(?:is|reads?|says?)\s*:\s*(["“‘])/giu;
+  for (const match of promptText.matchAll(introduction)) {
+    const open = match[1]!;
+    const close = open === "“" ? "”" : open === "‘" ? "’" : open;
+    const contentStart = match.index + match[0].length;
+    const closeIndex = promptText.indexOf(close, contentStart);
+    if (closeIndex !== -1) maskPromptRange(characters, match.index, closeIndex + close.length);
+  }
 }
 
 function markdownIndentWidth(line: string): number {
@@ -259,8 +276,10 @@ function maskPromptRange(characters: string[], start: number, end: number): void
 }
 
 function isDestinationOnlyCodeSpan(content: string): boolean {
-  return /^\s*\{\{\s*(?:output_findings_path|output_stage_findings_path|artifact_path|artifact_dir)\s*\}\}(?:\/[A-Za-z0-9._/-]+)?[.,;:]?\s*$/u.test(
-    content
+  return (
+    /^\s*\{\{\s*(?:output_findings_path|output_stage_findings_path|artifact_path|artifact_dir)\s*\}\}(?:\/[A-Za-z0-9._/-]+)?[.,;:]?\s*$/u.test(
+      content
+    ) || /^\s*(?:\[\]|\{\})\s*$/u.test(content)
   );
 }
 
@@ -355,17 +374,26 @@ function hasAffirmativeWriteInstruction(
   // a different file. Language checks below remain case-insensitive.
   const destination = new RegExp(destinationPattern, "gmu");
   const inheritedNonRequiredScopes = inheritedNonRequiredDirectiveScopes(promptText);
+  const clauseStarts = directiveClauseStarts(promptText);
   for (const occurrence of promptText.matchAll(destination)) {
     const destinationStart = occurrence.index;
     const destinationEnd = destinationStart + occurrence[0].length;
     if (isQuotedOrCodeLikeDirective(promptText, destinationStart, destinationEnd)) continue;
     if (hasNonRequiredDirectiveScope(promptText, destinationStart, inheritedNonRequiredScopes)) continue;
     if (hasTrailingCancellation(promptText, destinationEnd)) continue;
-    if (hasMandatoryEmptyThenCompleteDirective(promptText, destinationStart, destinationEnd, expectedContentPattern)) {
+    if (
+      hasMandatoryEmptyThenCompleteDirective(
+        promptText,
+        destinationStart,
+        destinationEnd,
+        expectedContentPattern,
+        clauseStarts
+      )
+    ) {
       return true;
     }
 
-    const clause = directiveClauseBefore(promptText, destinationStart);
+    const clause = directiveClauseBefore(promptText, destinationStart, clauseStarts);
     if (
       hasDestinationFirstDirective(
         clause,
@@ -454,9 +482,10 @@ function hasMandatoryEmptyThenCompleteDirective(
   promptText: string,
   destinationStart: number,
   destinationEnd: number,
-  expectedContentPattern: string
+  expectedContentPattern: string,
+  clauseStarts: readonly number[]
 ): boolean {
-  const before = directiveClauseBefore(promptText, destinationStart).trim();
+  const before = directiveClauseBefore(promptText, destinationStart, clauseStarts).trim();
   if (
     !/^(?:if|when)\s+(?:there\s+(?:are|is)\s+)?(?:no\s+(?:findings?|results?)|none)\b[^,;]*,\s*(?:write|emit|save|persist|produce|create)\s+(?:an?\s+)?(?:schema[- ]defined\s+)?empty\s+(?:(?:findings?|json)\s+)?(?:array|form|list)\s+(?:to|at|in|into|inside|within)\s*$/iu.test(
       before
@@ -642,17 +671,31 @@ function hasStraightSingleQuotedDirective(before: string, after: string): boolea
   return new RegExp(OUTPUT_ACTION_PATTERN.source, "iu").test(before.slice(start));
 }
 
-function directiveClauseBefore(promptText: string, destinationStart: number): string {
-  const windowStart = Math.max(0, destinationStart - 512);
-  const window = promptText.slice(windowStart, destinationStart);
-  let boundary = 0;
-  for (const match of window.matchAll(/[.!?](?=\s|$)|;|\r?\n\s*(?:[-*+>]|\d+\.)\s+/gu)) {
-    if (match[0] === ";" && /\b(?:never|do\s+not|must\s+not|shall\s+not)\s*$/iu.test(window.slice(0, match.index))) {
+function directiveClauseStarts(promptText: string): number[] {
+  const starts = [0];
+  let priorStart = 0;
+  for (const match of promptText.matchAll(/[.!?](?=\s|$)|;|\r?\n\s*(?:[-*+>]|\d+\.)\s+/gu)) {
+    if (
+      match[0] === ";" &&
+      /\b(?:never|do\s+not|must\s+not|shall\s+not)\s*$/iu.test(promptText.slice(priorStart, match.index))
+    ) {
       continue;
     }
-    boundary = match.index + match[0].length;
+    priorStart = match.index + match[0].length;
+    starts.push(priorStart);
   }
-  return window.slice(boundary);
+  return starts;
+}
+
+function directiveClauseBefore(promptText: string, destinationStart: number, starts: readonly number[]): string {
+  let low = 0;
+  let high = starts.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (starts[middle]! <= destinationStart) low = middle + 1;
+    else high = middle;
+  }
+  return promptText.slice(starts[Math.max(0, low - 1)]!, destinationStart);
 }
 
 function nearestOutputAction(clause: string, expectedContentPattern: string): OutputAction | undefined {
@@ -674,6 +717,9 @@ function nearestOutputAction(clause: string, expectedContentPattern: string): Ou
     ((nearest?.text.toLocaleLowerCase("en-US") === "output" &&
       (new RegExp(`\\b${expectedContentPattern}\\b\\s*$`, "iu").test(betweenActions) ||
         (!/[,;]\s*$|\b(?:and|then)\s*$/iu.test(betweenActions) && /[\p{L}\p{N}]/u.test(betweenActions)))) ||
+      (nearest?.text.toLocaleLowerCase("en-US") === "use" &&
+        new RegExp(`\\b${expectedContentPattern}\\b`, "iu").test(betweenActions) &&
+        EMPTY_OR_PLACEHOLDER_CONTENT_PATTERN.test(clause.slice(nearest.index + nearest.text.length))) ||
       (/^(?:list|record|store|output)$/iu.test(nearest?.text ?? "") &&
         /\b(?:a|an|the|empty|blank|structured|normalized)\s*$/iu.test(betweenActions)))
   ) {
@@ -687,7 +733,7 @@ function isPassiveOutputAction(action: string): boolean {
 }
 
 function hasNegatedAction(beforeAction: string): boolean {
-  const normalizedBeforeAction = beforeAction.replace(/[:;]\s*$/u, " ");
+  const normalizedBeforeAction = beforeAction.replace(/[*_~]+/gu, "").replace(/[:;]\s*$/u, " ");
   if (
     /\b(?:do\s+not|never|must\s+not|shall\s+not|cannot)\s+(?:(?:fail|forget)\s+to|omit(?:\s+writing)?)\s*$/iu.test(
       normalizedBeforeAction
@@ -741,7 +787,10 @@ function hasConditionalPreamble(beforeAction: string): boolean {
 }
 
 function hasNonDirectiveActionPreamble(beforeAction: string): boolean {
-  const value = beforeAction.replace(/[:;,]\s*$/u, "").trimEnd();
+  const value = beforeAction
+    .replace(/[*_~]+/gu, "")
+    .replace(/[:;,]\s*$/u, "")
+    .trimEnd();
   const unwrapped = value.replace(/^\s*[([{]\s*|\s*[)\]}]\s*$/gu, "").trim();
   if (/^\s*[([]?\s*(?:optional|deprecated|obsolete)\s*[)\]]?\s*$/iu.test(value)) return true;
   if (/^\s*either\s*$|\bor\s*$/iu.test(value)) return true;
@@ -757,13 +806,16 @@ function hasNonDirectiveActionPreamble(beforeAction: string): boolean {
     /(?:\b(?:is|are)\s+(?:merely\s+)?(?:optional|unnecessary|not\s+mandatory)\s+to|\b(?:has|have)\s+(?:the\s+)?option\s+to|\b(?:do|does)\s+not\s+have\s+to|\bneedn['’]t|\b(?:is|are)\s+under\s+no\s+obligation\s+to|\bthere\s+is\s+no\s+requirement\s+to|\ban?\s+optional\s+step\s+is\s+to)\s*$/iu.test(
       value
     ) ||
-    /(?:\b(?:may|might|can|could|would)(?:\s+(?:always|still))?(?:\s+(?:choose|decide|opt)\s+to)?|\b(?:attempt|attempted|attempting|plan|planned|planning|intend|intended|intending|try|tried|trying)(?:\s+to)?|\b(?:consider|considered|considering)|\b(?:feel\s+free|is\s+free|are\s+free|is\s+allowed|are\s+allowed|is\s+permitted|are\s+permitted|is\s+welcome|are\s+welcome)\s+to)$/iu.test(
+    /(?:\b(?:may|might|can|could|would)(?:\s+(?:always|still|optionally))?(?:\s+(?:choose|decide|opt)\s+to)?|\b(?:aim|attempt|attempted|attempting|plan|planned|planning|intend|intended|intending|try|tried|trying)(?:\s+(?:your\s+best\s+)?to)?|\b(?:consider|considered|considering)|\b(?:feel\s+free|is\s+free|are\s+free|is\s+allowed|are\s+allowed|is\s+permitted|are\s+permitted|is\s+welcome|are\s+welcome|is\s+encouraged|are\s+encouraged)\s+to)$/iu.test(
       value
     ) ||
-    /(?:\b(?:may|might|can|could|would)\b[^.!?;]{0,80}\bto|\bit\s+(?:is|would\s+be)\s+(?:possible|advisable|recommended|useful|helpful)\s+to|\b(?:we|i)\s+(?:recommend|suggest)\s+(?:that\s+)?(?:you\s+)?[^.!?;]{0,80}|\b(?:perhaps|ideally|optionally|possibly)\s+[^.!?;]{0,80}|\b(?:agent|worker|model|tool|system)\s+(?:will|would|could|can|may)\s+)$/iu.test(
+    /(?:\b(?:may|might|can|could|would)\b[^.!?;]{0,80}\bto|\bit\s+(?:is|would\s+be)\s+(?:acceptable|possible|advisable|recommended|useful|helpful)\s+to|\b(?:we|i)\s+(?:recommend|suggest)\s+(?:that\s+)?(?:you\s+)?[^.!?;]{0,80}|\b(?:perhaps|ideally|optionally|possibly)\s+[^.!?;]{0,80}|\b(?:agent|worker|model|tool|system)\s+(?:will|would|could|can|may)\s+)$/iu.test(
       value
     ) ||
-    /\b(?:previous(?:ly)?|historically|earlier|formerly|used\s+to|in\s+(?:19|20)\d{2}|the\s+(?:old|legacy|previous|prior|earlier)\s+(?:agent|auditor|worker|prompt|version)|(?:old|legacy|previous|prior|earlier)\s+instructions?|was\s+(?:asked|instructed|required|expected|supposed)\s+to|had\s+to|deprecated|obsolete)\b[^.!?;]{0,180}$/iu.test(
+    /\b(?:previous(?:ly)?|historically|earlier|formerly|used\s+to|in\s+the\s+past|in\s+(?:19|20)\d{2}|the\s+(?:old|legacy|previous|prior|earlier)\s+(?:agent|auditor|worker|prompt|version)|(?:old|legacy|previous|prior|earlier)\s+instructions?|was\s+(?:asked|instructed|required|expected|supposed)\s+to|had\s+to|deprecated|obsolete)\b[^.!?;]{0,180}$/iu.test(
+      value
+    ) ||
+    /(?:^|\bfor\s+)optional\s+[^.!?;]{0,120}$|\b[^.!?;]{0,120}\s+(?:is|are)\s+optional\s*,?\s*(?:but\s*)?$/iu.test(
       value
     )
   );
@@ -779,7 +831,7 @@ function hasDescriptiveWrapper(beforeAction: string): boolean {
     /\b(?:analysis|assessment|answer|decision|description|explanation|note|report|summary|tutorial|example|quotation|quote|command|instruction)\b[^.!?;]{0,180}\b(?:about|of|on|regarding|whether|if|how|why|explaining|stating|showing|that|to)\b[^.!?;]*$/iu.test(
       beforeAction
     ) ||
-    /\b(?:assess|decide|determine|describe|explain|mention|quote|recall|say|show|state|summarize|tell)\b[^.!?;]{0,180}\b(?:how|why|whether|if|that|to)\b[^.!?;]*$/iu.test(
+    /\b(?:assess|decide|determine|describe|discuss|explain|mention|outline|quote|recall|say|show|state|summarize|tell)\b[^.!?;]{0,180}\b(?:how|why|whether|if|that|to)\b[^.!?;]*$/iu.test(
       beforeAction
     ) ||
     /\b(?:docs?|documentation|prompt|example|text|message|instructions?)\b[^.!?;]{0,120}\b(?:says?|said|states?|stated|reads?|shows?|instructs?|requires?|required)\b[^.!?;]*$/iu.test(
@@ -880,7 +932,8 @@ function hasActiveDestinationBinding(
   if (
     /\b(?:if|unless|when|whenever|wherever|only\s+(?:if|when|after)|assuming|provided|should|as\s+(?:appropriate|applicable|needed))\b/iu.test(
       normalized
-    )
+    ) &&
+    !mandatoryCompleteOrEmptyContent(normalized, new RegExp(`\\b${expectedContentPattern}\\b`, "iu"))
   ) {
     return false;
   }
@@ -945,6 +998,19 @@ function contentMatchesExpected(
 }
 
 function mandatoryCompleteOrEmptyContent(content: string, expected: RegExp): boolean {
+  const normalized = content.replace(/[*_~]+/gu, " ");
+  if (
+    expected.test(normalized) &&
+    (/\b(?:complete|schema[- ]valid|all|final|structured|normalized)\b/iu.test(normalized) ||
+      /\bwith\b[^.!?;]{0,100}(?:\[\]|\{\}|\bempty\b)[^.!?;]{0,100}\brepresent(?:s|ing)\s+no\b/iu.test(normalized)) &&
+    (/(?:\b(?:including|using|use|with)\b|[—–-])[^.!?;]{0,160}(?:\[\]|\{\}|\bempty\b)[^.!?;]{0,100}\b(?:when|if|represent(?:s|ing))\b/iu.test(
+      normalized
+    ) ||
+      /\bcomplete\s+or\s+empty\b/iu.test(normalized)) &&
+    !/\b(?:optional|optionally|placeholder|dummy|stub|sentinel|not|except|excluding)\b/iu.test(normalized)
+  ) {
+    return true;
+  }
   const alternatives = content
     .replace(/^\s*either\s+/iu, "")
     .split(/\s+\bor\b\s+/iu)
@@ -1082,7 +1148,7 @@ function hasDestinationFirstDirective(
 
 function hasNonMandatoryCondition(value: string): boolean {
   const normalized = value.replace(/\b(?:even\s+if|whether\s+or\s+not|regardless\s+of\s+whether)\b[^,;]*/giu, "");
-  return /\b(?:if|unless|only\s+(?:if|when|after)|when\s+(?!the\s+(?:analysis|audit|task|work)\s+is\s+complete)|whenever|wherever|where\s+(?:applicable|appropriate|beneficial|helpful)|assuming|provided|should\s+you|as\s+(?:needed|appropriate|applicable)|at\s+(?:will|your\s+discretion)|on\s+request)\b/iu.test(
+  return /\b(?:if|unless|only\s+(?:if|when|after)|when\s+(?!the\s+(?:analysis|audit|task|work)\s+is\s+complete)|whenever|wherever|where\s+(?:applicable|appropriate|beneficial|feasible|helpful|possible)|assuming|provided|should\s+you|as\s+(?:circumstances\s+permit|needed|appropriate|applicable)|at\s+(?:will|your\s+discretion)|on\s+(?:demand|request))\b/iu.test(
     normalized
   );
 }
@@ -1100,17 +1166,14 @@ function hasConditionalSuffix(promptText: string, destinationEnd: number): boole
     return false;
   }
   if (/^\s*only\s*[.!?]?\s*$/iu.test(beforeSemicolon)) return false;
-  return /^\s*(?:,\s*)?(?:if|unless|when|whenever|once\s+(?!complete\b)|after\s+(?!complet(?:e|ed|ing|ion)\b)|only\s+(?:if|when|after|as)|as\s+(?:applicable|appropriate|needed|long\s+as|an?\s+example)|for\s+example|at\s+(?:need|will|your\s+discretion)|where\s+(?:applicable|appropriate|helpful|beneficial)|should\b|on\s+request|upon\s+(?!complet(?:e|ed|ing|ion)\b)|assuming|provided|contingent\s+on|subject\s+to|depending\s+(?:on|upon)|in\s+(?:case|the\s+event)|to\s+the\s+extent|except\s+(?:if|when))\b/iu.test(
+  return /^\s*(?:,\s*)?(?:if|unless|when|whenever|once\s+(?!complete\b)|after\s+(?!complet(?:e|ed|ing|ion)\b)|only\s+(?:if|when|after|as)|as\s+(?:applicable|appropriate|circumstances\s+permit|needed|long\s+as|an?\s+example)|for\s+example|at\s+(?:need|will|your\s+discretion)|where\s+(?:applicable|appropriate|helpful|beneficial|feasible|possible)|should\b|on\s+(?:demand|request)|upon\s+(?!complet(?:e|ed|ing|ion)\b)|assuming|provided|contingent\s+on|subject\s+to|depending\s+(?:on|upon)|in\s+(?:case|the\s+event)|to\s+the\s+extent|except\s+(?:if|when))\b/iu.test(
     beforeSemicolon
   );
 }
 
 function hasTrailingCancellation(promptText: string, destinationEnd: number): boolean {
   const following = promptText.slice(destinationEnd);
-  const laterExplicitCancellation =
-    /(?:^|[.!?;]\s+)(?:then\s+)?(?:(?:cancel|disregard|ignore|retract|revoke|withdraw)\s+(?:that|this|the\s+(?:previous|prior|preceding)?)\s*(?:instruction|directive|requirement|step)|scratch\s+that|(?:that|this|the\s+(?:previous|prior|preceding)?)\s*(?:instruction|directive|requirement|step)\s+(?:is|was|has\s+been)\s+(?:canceled|cancelled|disregarded|ignored|retracted|revoked|withdrawn))\b/iu.test(
-      following
-    );
+  const laterExplicitCancellation = explicitCancellationTargetsCurrentInstruction(following);
   return (
     laterExplicitCancellation ||
     /^\s*(?:[.;,]\s*)?(?:or|alternatively)\s+(?:do\s+nothing|skip|omit|ignore)\b/iu.test(following) ||
@@ -1121,10 +1184,19 @@ function hasTrailingCancellation(promptText: string, destinationEnd: number): bo
       following
     ) ||
     /^\s*(?:[.;,]\s*)?(?:do\s+not|never)\s+do\s+so\b/iu.test(following) ||
+    /^\s*(?:[.;,]\s*)?(?:skip\s+(?:this|that|the)\s+(?:instruction|requirement|step)|(?:this|that|the)\s+(?:instruction|requirement|step)\s+(?:is\s+void|no\s+longer\s+applies)|(?:don['’]t|do\s+not|never)\s+(?:write|create|emit|save|persist|produce)\s+(?:it|this|that|the\s+(?:file|artifact|output))(?:\s+after\s+all)?|ignore\s+(?:the\s+)?foregoing|omit\s+(?:that|this|the)\s+(?:file|artifact|output))\b/iu.test(
+      following
+    ) ||
     /^[\s.;,]*(?:actually\s+)?(?:use|write|emit|save|persist|publish|send|deliver)\b[^.!?;]{0,180}\{\{[^{}]+\}\}(?:\/[^\s,;!?]+)*\s+instead\b/iu.test(
       following
     ) ||
+    /^[\s.;,]*(?:actually\s+)?(?:use|write|emit|save|persist|publish|send|deliver)\b[^.!?;]{0,180}\b[A-Za-z0-9_-]+(?:\/[A-Za-z0-9._-]+)*\.[A-Za-z0-9_-]+\s+instead\b/iu.test(
+      following
+    ) ||
     /^\s*(?:or|alternatively)\s+(?:(?:write|emit|save|persist|publish|send|deliver)\b[^.!?;]{0,120})?\{\{[^{}]+\}\}/iu.test(
+      following
+    ) ||
+    /^\s*(?:or|alternatively)\s+(?:(?:write|emit|save|persist|publish|send|deliver)\b[^.!?;]{0,120})?[A-Za-z0-9_-]+(?:\/[A-Za-z0-9._-]+)*\.[A-Za-z0-9_-]+\b/iu.test(
       following
     ) ||
     /^\s*(?:[.;,]\s*)?(?:\(\s*)?(?:or|alternatively)\s+(?:(?:write|emit|save|persist|publish|send|deliver)\b[^.!?;]{0,100}\b(?:elsewhere|stdout|stderr|another|different)\b|(?:to\s+)?(?:elsewhere|stdout|stderr|another\s+(?:file|path|destination)|a\s+different\s+(?:file|path|destination))\b|(?:skip|omit|ignore)\s+(?:it|this|that|the\s+(?:file|artifact|output|instruction))\b)/iu.test(
@@ -1160,6 +1232,25 @@ function hasTrailingCancellation(promptText: string, destinationEnd: number): bo
   );
 }
 
+function explicitCancellationTargetsCurrentInstruction(following: string): boolean {
+  const cancellation =
+    /(?:^|[.!?;]\s+)(?:then\s+)?(?:(?:cancel|disregard|ignore|retract|revoke|withdraw)\s+(?:that|this|the\s+(?:previous|prior|preceding)?)\s*(?:instruction|directive|requirement|step)|scratch\s+that|(?:that|this|the\s+(?:previous|prior|preceding)?)\s*(?:instruction|directive|requirement|step)\s+(?:is|was|has\s+been)\s+(?:canceled|cancelled|disregarded|ignored|retracted|revoked|withdrawn))\b/giu;
+  for (const match of following.matchAll(cancellation)) {
+    const between = following.slice(0, match.index);
+    if (!hasInterveningInstruction(between)) return true;
+  }
+  return false;
+}
+
+function hasInterveningInstruction(value: string): boolean {
+  const action =
+    "(?:add|analy[sz]e|build|check|close|compile|continue|copy|create|delete|deploy|document|emit|execute|export|generate|inspect|install|open|perform|prepare|publish|read|record|remove|render|report|review|run|save|send|start|stop|store|submit|test|update|validate|verify|write)";
+  return new RegExp(
+    `(?:^|[.!?;]\\s+)(?:(?:always|also|finally|immediately|next|now|please|then)\\s*,?\\s+)*(?:(?:you\\s+)?(?:must|shall|should|need\\s+to|are\\s+required\\s+to)\\s+)?${action}\\b`,
+    "iu"
+  ).test(value);
+}
+
 function hasNonRequiredDirectiveScope(
   promptText: string,
   destinationStart: number,
@@ -1192,8 +1283,12 @@ function hasNonRequiredDirectiveScope(
       return true;
     }
   }
-  const markdownHeading = [...structuralPrefix.matchAll(/^\s*#{1,6}\s+(.+?)(?:\s+#+)?\s*$/gmu)].at(-1)?.[1];
+  const markdownHeading = [...structuralPrefix.matchAll(/(?:^|[^#\r\n])#{1,6}\s+([^\r\n]+?)(?:\s+#+)?\s*$/gmu)].at(
+    -1
+  )?.[1];
   if (markdownHeading !== undefined && isNonRequiredDirectiveHeading(markdownHeading, true)) return true;
+  const setextHeading = [...structuralPrefix.matchAll(/^\s*([^\r\n]+?)\s*\r?\n\s*(?:={3,}|-{3,})\s*$/gmu)].at(-1)?.[1];
+  if (setextHeading !== undefined && isNonRequiredDirectiveHeading(setextHeading, true)) return true;
   const previousStructuralLine = structuralPrefix
     .split(/\r?\n/u)
     .filter((line) => line.trim() !== "" && !/^\s*(?:[-*+>]|\d+\.)\s+/u.test(line))
@@ -1202,7 +1297,7 @@ function hasNonRequiredDirectiveScope(
   if (
     !startsListItem &&
     previousStructuralLine !== undefined &&
-    /^(?:examples?|deprecated|obsolete|historical(?:\s+(?:examples?|instructions?|output))?)\s*:?$/iu.test(
+    /^(?:examples?|deprecated|obsolete|historical(?:\s+(?:context|examples?|instructions?|output))?|hypothetical\s+scenario|tutorial)\s*:?$/iu.test(
       previousStructuralLine
     )
   ) {
@@ -1293,7 +1388,7 @@ function isNonRequiredDirectiveHeading(heading: string, markdown: boolean): bool
     return false;
   }
   if (
-    /^(?:optional|deprecated|obsolete|if\s+possible|suggestions?|recommendations?|examples?(?:\s+and\s+output)?|counterexamples?|sample\s+output|illustrations?|quoted?\s+(?:example|instruction|text)|potential\s+actions?|possible\s+output|for\s+reference\s+only|recommendation\s+output|suggested\s+output|recommended\s+output|example\s+output|nonessential\s+output|candidate\s+output|unnecessary\s+output|historical\s+examples?|archived\s+instructions?)$/iu.test(
+    /^(?:optional(?:\s+(?:guidance|output))?|deprecated|obsolete|if\s+possible|suggestions?|recommendations?|examples?(?:\s+and\s+output)?|counterexamples?|sample\s+output|illustrations?|quoted?\s+(?:example|instruction|text)|potential\s+actions?|possible\s+output|for\s+reference\s+only|recommendation\s+output|suggested\s+output|recommended\s+output|example\s+output|nonessential\s+output|candidate\s+output|unnecessary\s+output|historical(?:\s+(?:context|examples?))?|hypothetical\s+scenario|tutorial|archived\s+instructions?)$/iu.test(
       normalized
     )
   ) {
