@@ -9101,6 +9101,33 @@ test("current campaign timeout gate rejects reserve subtraction and ambiguous Re
   }
 });
 
+test("current campaign timeout gate accepts safe output redirections", () => {
+  for (const redirection of ["> /tmp/recon.log 2>&1", ">> /tmp/recon.log", "1> /tmp/recon.log", "&> /tmp/recon.log"]) {
+    const result = runCampaignTimeoutGate((fixture) => {
+      const command = `${fixture.backend.exact_command} ${redirection}`;
+      fixture.backend.exact_command = command;
+      fixture.plan.backend.exact_shell_escaped_command = command;
+      fixture.plan.command_plan[0]!.command = command;
+    });
+    assert.equal(result.ok, true, `${redirection}: ${JSON.stringify(result.diagnostics)}`);
+  }
+});
+
+test("current campaign timeout gate rejects shell operators after output redirection", () => {
+  for (const operator of [";", "|", "&&", "&", "`", "$(echo unsafe)", "<"]) {
+    const result = runCampaignTimeoutGate((fixture) => {
+      const command = `${fixture.backend.exact_command} > /tmp/recon.log 2>&1${operator} echo unsafe`;
+      fixture.backend.exact_command = command;
+      fixture.plan.backend.exact_shell_escaped_command = command;
+    });
+    assert.equal(result.ok, false, operator);
+    assert.ok(
+      result.diagnostics.some((diagnostic) => diagnostic.code === "CAMPAIGN_TIMEOUT_COMMAND_INVALID"),
+      `${operator}: ${JSON.stringify(result.diagnostics)}`
+    );
+  }
+});
+
 test("current campaign timeout gate verifies deadline arithmetic", () => {
   for (const field of ["fuzzing_deadline_utc", "force_kill_deadline_utc", "final_artifact_deadline_utc"] as const) {
     const result = runCampaignTimeoutGate((fixture) => {
