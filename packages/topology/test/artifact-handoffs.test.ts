@@ -289,6 +289,14 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
         })
       ).toThrow(expect.objectContaining({ code: "DUPLICATED_REPORT_VOCABULARY" }));
     }
+    expect(() =>
+      validateTopology(topology, {
+        promptTexts: {
+          "review/triage.md":
+            "Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}. Record access: internal evidence on each finding."
+        }
+      })
+    ).toThrow(expect.objectContaining({ code: "DUPLICATED_REPORT_VOCABULARY" }));
     for (const proseAlias of [
       "For every finding, set the reachability token to renamed-public-trace.",
       "For every finding, set the reachability token to internal.",

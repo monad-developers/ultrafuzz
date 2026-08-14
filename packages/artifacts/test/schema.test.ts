@@ -1249,6 +1249,11 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
     operator: "=",
     value: "internal"
   });
+  assert.deepEqual(findingReportSemanticAssignment("Record access: internal evidence on each finding."), {
+    key: "access",
+    operator: "=",
+    value: "internal"
+  });
 
   for (const evidenceAssignment of [
     "Observed balance=0 after withdrawal; expected balance=1.",

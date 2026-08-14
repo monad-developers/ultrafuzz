@@ -224,6 +224,16 @@ const findingReportColonAssignment = new RegExp(
   `${assignmentBoundaryPattern}\\s*(?:(?:\\x60|"|'|\\*|_|\\[|\\{|\\(|<)+\\s*)?(${assignmentKeyPattern})(?:\\s*(?:\\x60|"|'|\\*|_|\\]|\\}|\\)|>)+)?\\s*:\\s*(?:(?:\\x60|"|'|\\*|_|\\[|\\{|\\(|<)+\\s*)?(${promptVocabularyIdentifierPattern})${promptVocabularyCloseWrappersPattern}${promptAssignmentTerminatorPattern}`,
   "giu"
 );
+// A report alias can be followed by prose after its mapped value. Keep the
+// alias key independent from the single-identifier terminator used by the
+// stricter prompt assignment grammar so `access: internal evidence` is still
+// recognized as a duplicated report vocabulary directive.
+const findingReportLooseAliasColonAssignment = new RegExp(
+  `${assignmentBoundaryPattern}\\s*(?:${promptVocabularyOpenWrapperPattern})(${shortReportAliasKeyPatterns.join(
+    "|"
+  )})${promptVocabularyCloseWrapperPattern}\\s*:\\s*${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})`,
+  "giu"
+);
 const findingReportDirectMapping = new RegExp(
   `${assignmentBoundaryPattern}\\s*${promptVocabularyOpenWrapperPattern}(${assignmentKeyPattern})${promptVocabularyCloseWrapperPattern}\\s*(?::=|≔|(?:-|=)>|→|↦|⟶)\\s*${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})${promptVocabularyCloseWrappersPattern}${promptAssignmentTerminatorPattern}`,
   "giu"
@@ -332,6 +342,12 @@ export function findingReportSemanticAssignment(text: string): FindingReportSema
     if (isPromptReportVocabularyKey(key)) {
       return { key, operator: "=", value: assignment[2]! };
     }
+  }
+
+  findingReportLooseAliasColonAssignment.lastIndex = 0;
+  for (const assignment of text.matchAll(findingReportLooseAliasColonAssignment)) {
+    if (hasNonLiveDirectivePrefix(text, assignment.index)) continue;
+    return { key: assignment[1]!, operator: "=", value: assignment[2]! };
   }
 
   for (const mappingPattern of [
