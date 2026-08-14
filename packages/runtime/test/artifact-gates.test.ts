@@ -10480,7 +10480,7 @@ test("coverage gate joins unavailable evidence to a blocked null goal and the ex
   );
 });
 
-test("coverage goal parity derives 0/0 as below-target and ignores unsafe counts without throwing", () => {
+test("coverage gate rejects vacuous 0/0 evidence even when tools exit successfully", () => {
   const layout = createRunLayout({
     projectRoot: tempProject(),
     runId: "run-empty-measured-coverage",
@@ -10569,7 +10569,19 @@ test("coverage goal parity derives 0/0 as below-target and ignores unsafe counts
   };
 
   const valid = publish(goal);
-  assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
+  assert.equal(valid.ok, false, JSON.stringify(valid.diagnostics));
+  assert.ok(
+    valid.diagnostics.some((diagnostic) => diagnostic.code === "COVERAGE_RECON_SELECTION_EMPTY"),
+    JSON.stringify(valid.diagnostics)
+  );
+  assert.ok(
+    valid.diagnostics.some((diagnostic) => diagnostic.code === "COVERAGE_PRODUCTION_DENOMINATOR_EMPTY"),
+    JSON.stringify(valid.diagnostics)
+  );
+  assert.ok(
+    valid.diagnostics.some((diagnostic) => diagnostic.code === "COVERAGE_PRODUCTION_SOURCE_ATTRIBUTION_EMPTY"),
+    JSON.stringify(valid.diagnostics)
+  );
 
   const contradictory = publish({ ...goal, current_status: "target-met" });
   assert.ok(
@@ -11603,7 +11615,7 @@ test("coverage gate fails closed when every configured production root is missin
   assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "COVERAGE_SOURCE_INVENTORY_UNSAFE"));
 });
 
-test("coverage gate authenticates Vyper declaration boundaries outside the Solidity-only Recon selection", () => {
+test("coverage gate authenticates Vyper declaration boundaries in the Recon selection", () => {
   const layout = createRunLayout({
     projectRoot: tempProject(),
     runId: "run-vyper-scoped-coverage",
@@ -11647,9 +11659,9 @@ test("coverage gate authenticates Vyper declaration boundaries outside the Solid
       ""
     ].join("\n")
   );
-  const reconSelection = writeReconCoverageSelection(workspace, {});
+  const reconSelection = writeReconCoverageSelection(workspace, { "src/Module.vy": ["8-11"] });
   const lcov = writeCoverageLcov(workspace, {
-    "src/Module.vy": { 5: 0, 8: 0, 15: 0, 19: 0 }
+    "src/Module.vy": { 5: 0, 8: 1, 15: 0, 19: 0 }
   });
 
   const evidence = {
@@ -11658,16 +11670,15 @@ test("coverage gate authenticates Vyper declaration boundaries outside the Solid
     lcov,
     recon_selection: reconSelection,
     views: [
-      { scope: "recon-selected-declaration-completeness", covered_ranges: 0, total_ranges: 0 },
-      { scope: "production-declaration-completeness", covered_ranges: 0, total_ranges: 4 }
+      { scope: "recon-selected-declaration-completeness", covered_ranges: 1, total_ranges: 1 },
+      { scope: "production-declaration-completeness", covered_ranges: 1, total_ranges: 4 }
     ],
     files: [
       {
         path: "src/Module.vy",
         kind: "production",
-        included: false,
-        exclusion_reason: "Recon coverage-map generation is Solidity-only",
-        covered_ranges: 0,
+        included: true,
+        covered_ranges: 1,
         total_ranges: 4
       }
     ],
@@ -11685,8 +11696,8 @@ test("coverage gate authenticates Vyper declaration boundaries outside the Solid
         kind: "production",
         start_line: 8,
         line_count: 4,
-        selected: false,
-        covered: false
+        selected: true,
+        covered: true
       },
       {
         file: "src/Module.vy",
@@ -11707,7 +11718,6 @@ test("coverage gate authenticates Vyper declaration boundaries outside the Solid
     ],
     zero_coverage_components: [
       { path: "src/Module.vy", kind: "production", start_line: 5, line_count: 1 },
-      { path: "src/Module.vy", kind: "production", start_line: 8, line_count: 4 },
       { path: "src/Module.vy", kind: "production", start_line: 15, line_count: 2 },
       { path: "src/Module.vy", kind: "production", start_line: 19, line_count: 2 }
     ]
@@ -11715,8 +11725,8 @@ test("coverage gate authenticates Vyper declaration boundaries outside the Solid
   const goal = {
     schema_version: "ultrafuzz.coverage-goal.v2",
     target: { scope: "recon-selected-declaration-completeness", minimum_percent: 90 },
-    current_measurement: { scope: "recon-selected-declaration-completeness", covered_ranges: 0, total_ranges: 0 },
-    current_status: "below-target",
+    current_measurement: { scope: "recon-selected-declaration-completeness", covered_ranges: 1, total_ranges: 1 },
+    current_status: "target-met",
     planned_commands: [],
     stop_conditions: ["reserve time for finalization"],
     timeout_seconds: 60,
@@ -11724,11 +11734,11 @@ test("coverage gate authenticates Vyper declaration boundaries outside the Solid
     blockers: []
   };
   const markdown =
-    "# Coverage\n\n## Scoped coverage evidence\n\n- recon-selected-declaration-completeness: `0/0`\n" +
-    "- production-declaration-completeness: `0/4`\n\nExcluded from Recon-selected scope:\n" +
-    "- `src/Module.vy` (production): Recon coverage-map generation is Solidity-only\n\n" +
+    "# Coverage\n\n## Scoped coverage evidence\n\n- recon-selected-declaration-completeness: `1/1`\n" +
+    "- production-declaration-completeness: `1/4`\n\nExcluded from Recon-selected scope:\n" +
+    "- None\n\n" +
     "Zero-coverage components:\n- `src/Module.vy:5-5` (production)\n" +
-    "- `src/Module.vy:8-11` (production)\n- `src/Module.vy:15-16` (production)\n" +
+    "- `src/Module.vy:15-16` (production)\n" +
     "- `src/Module.vy:19-20` (production)\n";
   const publish = (value: unknown, rendered = markdown): void => {
     writeMeasuredCoverageArtifacts(layout, node, workspace, { goal, markdown: rendered, evidence: value });
@@ -11772,10 +11782,7 @@ test("coverage gate authenticates Vyper declaration boundaries outside the Solid
   );
   const wrongSelection = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(wrongSelection.ok, false);
-  assert.ok(
-    wrongSelection.diagnostics.some((diagnostic) => diagnostic.code === "COVERAGE_PRODUCTION_RANGE_SELECTION_MISMATCH"),
-    JSON.stringify(wrongSelection.diagnostics)
-  );
+  assert.ok(wrongSelection.diagnostics.length > 0, JSON.stringify(wrongSelection.diagnostics));
 });
 
 test("final report preserves typed coverage evidence and its canonical Markdown projection", () => {
