@@ -1,7 +1,7 @@
 import type { ArtifactContractId } from "@ultrafuzz/artifacts";
 
 export const TOPOLOGY_VERSION = 2 as const;
-export const GRAPH_VERSION = "3" as const;
+export const GRAPH_VERSION = "4" as const;
 export const PROJECT_TOPOLOGY_FILE = ".ultrafuzz/topology.yml";
 export const PROJECT_PROMPT_DIR = ".ultrafuzz/prompts";
 export const START_NODE_ID = "__start__";

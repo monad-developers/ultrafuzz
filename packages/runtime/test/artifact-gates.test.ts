@@ -379,8 +379,8 @@ function writePlannedGraph(layout: ReturnType<typeof createRunLayout>, nodes: re
   fs.writeFileSync(
     layout.graphPath,
     JSON.stringify({
-      schema_version: "ultrafuzz.planned-graph.v3",
-      graph_version: "3",
+      schema_version: "ultrafuzz.planned-graph.v4",
+      graph_version: "4",
       topology_version: 2,
       groups: {},
       nodes
@@ -701,7 +701,7 @@ function smithersTaskForNode(input: {
       run: {
         ultrafuzzRunId: input.layout.runId,
         smithersWorkflowName: "workflow-artifact-gates",
-        graphVersion: "3",
+        graphVersion: "4",
         topologyVersion: 2
       },
       node: {

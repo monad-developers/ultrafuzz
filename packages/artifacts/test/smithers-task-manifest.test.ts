@@ -66,7 +66,7 @@ function task(overrides: Partial<SmithersTaskManifestTask> = {}): SmithersTaskMa
       run: {
         ultrafuzzRunId: "run-1",
         smithersWorkflowName: "workflow-1",
-        graphVersion: "3",
+        graphVersion: "4",
         topologyVersion: 2
       },
       node: {
@@ -131,8 +131,8 @@ function manifest(tasks: SmithersTaskManifestTask[] = [task()]): SmithersTaskMan
 
 function graph(): PlannedGraphDocument {
   return {
-    schema_version: "ultrafuzz.planned-graph.v3",
-    graph_version: "3",
+    schema_version: "ultrafuzz.planned-graph.v4",
+    graph_version: "4",
     topology_version: 2,
     groups: {},
     nodes: [

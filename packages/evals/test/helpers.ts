@@ -313,7 +313,7 @@ export function currentPlannedGraph(
 ): PlannedGraphDocument {
   return {
     schema_version: PLANNED_GRAPH_SCHEMA_VERSION,
-    graph_version: "3",
+    graph_version: "4",
     topology_version: 2,
     groups: { default: {} },
     nodes: nodeIds.map((nodeId) => {
@@ -782,7 +782,7 @@ function writeSealedFinalReportAuthority(
       run: {
         ultrafuzzRunId: layout.runId,
         smithersWorkflowName: workflowRunId,
-        graphVersion: "3",
+        graphVersion: "4",
         topologyVersion: 2
       },
       node: {

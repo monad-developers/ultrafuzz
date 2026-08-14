@@ -22,6 +22,7 @@ import {
   fail,
   hasErrors,
   ok,
+  PROJECT_CONFIG_SCHEMA_VERSION,
   type AgentConfig,
   type ConfigDiagnostic,
   type ConfigResult,
@@ -121,7 +122,7 @@ export function serializeResolvedConfigToml(
   const lines: string[] = [];
 
   pushAssignments(lines, {
-    schema_version: clone.schemaVersion,
+    schema_version: PROJECT_CONFIG_SCHEMA_VERSION,
     audit_profile: clone.auditProfile,
     topology_path: clone.topologyPath,
     strategy_loops: omitProfileSettings ? undefined : clone.strategyLoops,
@@ -460,9 +461,8 @@ function applyProjectConfigLayer(
   diagnostics: ConfigDiagnostic[],
   source: "project-toml" | "runtime"
 ): void {
-  if (layer.schemaVersion !== undefined) {
-    config.schemaVersion = layer.schemaVersion;
-  }
+  // `schema_version` describes the user-authored TOML contract. Resolved JSON has
+  // its own exact identity and is assigned when the default resolved config is built.
   if (layer.auditProfile !== undefined) {
     config.auditProfile = layer.auditProfile;
   }

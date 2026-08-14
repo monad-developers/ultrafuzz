@@ -29,7 +29,7 @@ export interface TopologySchemaValidationResult<T> {
   value?: T;
 }
 
-export const EXPANDED_GRAPH_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:topology:expanded-graph:3" as const;
+export const EXPANDED_GRAPH_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:topology:expanded-graph:4" as const;
 
 const SAFE_ID_PATTERN = "^[a-z0-9_][a-z0-9_-]{0,127}$";
 const SAFE_PATH_PATTERN = CANONICAL_ARTIFACT_RELATIVE_PATH_PATTERN;

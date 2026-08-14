@@ -634,7 +634,7 @@ test("stats rejects an evidence capture later than the statistics clock", () => 
 function graphDocument(nodeId: string, taskNodeIds: string[], models = ["gpt-test"]): PlannedGraphDocument {
   return {
     schema_version: PLANNED_GRAPH_SCHEMA_VERSION,
-    graph_version: "3",
+    graph_version: "4",
     topology_version: 2,
     groups: {},
     nodes: [

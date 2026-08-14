@@ -47,9 +47,15 @@ primary budget is exhausted. A node or group `max_attempts` overrides the
 project primary count. The complete primary-plus-fallback chain may contain at
 most 100 attempts. Omitting `agents`, or leaving it empty, keeps model fallback
 disabled. Retries use bounded exponential backoff, a fresh session, and the
-unchanged original prompt; Ultrafuzz does not inspect provider error text. The
+same effective task prompt, including Smithers' safety contracts; Ultrafuzz does
+not inspect provider error text. The
 planned chain and actual producer are recorded in the task manifest, attempt
 ledger, and final report.
+
+Retry chains currently require local execution. Cloud planning accepts one
+effective attempt, and local fallback across different agent implementations
+cannot include an API-key-authenticated rung until per-rung credential isolation
+is available.
 
 Validation requires every configured model profile to name a factory in the
 canonical `.smithers/agents/index.ts` registry. A noncanonical or incomplete registry

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ultrafuzz:schema:config:resolved-config:2",
-  "title": "Ultrafuzz Resolved Configuration v2",
+  "$id": "urn:ultrafuzz:schema:config:resolved-config:3",
+  "title": "Ultrafuzz Resolved Configuration v3",
   "description": "Closed camelCase runtime contract for the exact resolved Ultrafuzz configuration published to a workflow execution snapshot.",
   "type": "object",
   "additionalProperties": false,
@@ -23,7 +23,7 @@
   ],
   "properties": {
     "schemaVersion": {
-      "const": "ultrafuzz.config.v2"
+      "const": "ultrafuzz.resolved-config.v3"
     },
     "auditProfile": {
       "$ref": "#/$defs/auditProfileId"

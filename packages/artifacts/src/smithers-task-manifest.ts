@@ -9,9 +9,9 @@ import { validateRegisteredJsonSchema, type JsonSchemaValidationResult } from ".
 import type { PlannedGraphDocument, PlannedGraphNodeDocument, PlannedGraphOutput } from "./planned-graph.js";
 import { parseStrictJsonBytes } from "./strict-json.js";
 
-export const SMITHERS_TASK_MANIFEST_SCHEMA_VERSION = "ultrafuzz.smithers.workflow.v3" as const;
-export const SMITHERS_TASK_METADATA_SCHEMA_VERSION = "ultrafuzz.smithers.task.v2" as const;
-export const SMITHERS_TASK_MANIFEST_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:smithers-task-manifest:3" as const;
+export const SMITHERS_TASK_MANIFEST_SCHEMA_VERSION = "ultrafuzz.smithers.workflow.v4" as const;
+export const SMITHERS_TASK_METADATA_SCHEMA_VERSION = "ultrafuzz.smithers.task.v3" as const;
+export const SMITHERS_TASK_MANIFEST_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:smithers-task-manifest:4" as const;
 
 const MAX_SMITHERS_TASK_MANIFEST_BYTES = 64 * 1024 * 1024;
 const MAX_SMITHERS_TASKS = 100_000;
@@ -245,7 +245,7 @@ const smithersTaskMetadataJsonSchema = {
       properties: {
         ultrafuzzRunId: { type: "string", pattern: SAFE_ID_PATTERN },
         smithersWorkflowName: nonEmptyStringJsonSchema,
-        graphVersion: { const: "3" },
+        graphVersion: { const: "4" },
         topologyVersion: { const: 2 }
       }
     },
@@ -496,7 +496,7 @@ export interface SmithersTaskManifestMetadata {
   run: {
     ultrafuzzRunId: string;
     smithersWorkflowName: string;
-    graphVersion: "3";
+    graphVersion: "4";
     topologyVersion: 2;
   };
   node: {
@@ -885,7 +885,7 @@ function assertTaskMatchesPlannedNode(
     task.logicalNodeId !== node.logical_id ||
     task.metadata.node.logicalNodeId !== node.logical_id ||
     task.metadata.node.label !== node.display_name ||
-    task.metadata.run.graphVersion !== "3" ||
+    task.metadata.run.graphVersion !== "4" ||
     task.metadata.run.topologyVersion !== 2 ||
     task.metadata.loop.index !== node.loop.index ||
     task.metadata.loop.count !== node.loop.count ||

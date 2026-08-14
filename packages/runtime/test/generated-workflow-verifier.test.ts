@@ -76,7 +76,7 @@ function loadGeneratedWorkflowInputSchema(): { safeParse(value: unknown): { succ
 test("generated workflow input is an exact current-only envelope with bounded JSON operator data", () => {
   const inputSchema = loadGeneratedWorkflowInputSchema();
   const local = {
-    schema_version: "ultrafuzz.smithers.workflow.v3",
+    schema_version: "ultrafuzz.smithers.workflow.v4",
     ultrafuzz_run_id: "run-1",
     tasks: [{ id: "node:one", prompt_path: ".ultrafuzz/prompts/one.md" }],
     operator_prompt: "focus",
@@ -4678,7 +4678,7 @@ test("generated Smithers pinned source proof rejects any previously published by
   }
 });
 
-test("agent retries are error-agnostic fresh generations with the original prompt", async () => {
+test("agent retries are error-agnostic fresh generations with Smithers' effective prompt", async () => {
   let resets = 0;
   const calls: Array<Record<string, unknown> | undefined> = [];
   const arbitraryFailure = { provider: "opaque", detail: { code: 731 } };
@@ -4702,6 +4702,7 @@ test("agent retries are error-agnostic fresh generations with the original promp
     (error) => error === arbitraryFailure
   );
   const result = await wrapped.generate({
+    prompt: "worktree isolation\n\nthe original task prompt\n\nstructured output contract",
     messages: [
       { role: "user", content: "prior prompt" },
       { role: "assistant", content: "prior failed response" }
@@ -4713,8 +4714,8 @@ test("agent retries are error-agnostic fresh generations with the original promp
   });
 
   assert.deepEqual(result, { ok: true });
-  assert.equal(resets, 1);
-  assert.equal(calls[1]?.prompt, prompt);
+  assert.equal(resets, 2);
+  assert.equal(calls[1]?.prompt, "worktree isolation\n\nthe original task prompt\n\nstructured output contract");
   assert.equal("messages" in (calls[1] ?? {}), false);
   assert.equal(calls[1]?.resumeSession, undefined);
   assert.equal(calls[1]?.continueSession, false);
@@ -4724,7 +4725,7 @@ test("agent retries are error-agnostic fresh generations with the original promp
     messages: [{ role: "user", content: "repair the schema" }],
     taskContext: { attempt: 2 }
   });
-  assert.equal(resets, 1);
+  assert.equal(resets, 2);
   assert.deepEqual(calls[2]?.messages, [{ role: "user", content: "repair the schema" }]);
   assert.equal(calls[2]?.prompt, undefined);
 });
@@ -4905,7 +4906,8 @@ test("a non-Codex fallback cannot forge final-report producer authority through 
       id: "node:final-report",
       attemptId: "final-report",
       runRoot: root,
-      smithersRunId: "ultrafuzz-authority-recovery"
+      smithersRunId: "ultrafuzz-authority-recovery",
+      agentChain: [{ profileId: "primary" }, { profileId: "deepseek" }]
     };
     const actual = {
       planned_chain: [{ attempt: 1, profile_id: "deepseek", agent_ref: "DeepSeekAgent", role: "fallback" }],
@@ -4957,6 +4959,17 @@ test("a non-Codex fallback cannot forge final-report producer authority through 
   }
 });
 
+test("single-rung final-report authority survives a worker restart without a run-ID lookup", () => {
+  const execution = {
+    planned_chain: [{ attempt: 1, profile_id: "primary", agent_ref: "CodexAgent", role: "primary" }],
+    failed_attempts: [],
+    producer: { attempt: 1, profile_id: "primary", agent_ref: "CodexAgent", role: "primary" }
+  };
+  const authority = loadFinalReportAgentExecutionAuthority({ execution });
+  assert.deepEqual(authority.read({ attemptId: "final-report", agentChain: [{ profileId: "primary" }] }), execution);
+  assert.equal(authority.smithersReads(), 0);
+});
+
 test("generated retries do not inspect or inject previous failure text", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const agent = source.slice(
@@ -4965,7 +4978,7 @@ test("generated retries do not inspect or inject previous failure text", () => {
   );
   assert.doesNotMatch(source, /retryFailureAwareArgs|retryFailureText|Untrusted prior-attempt failure/u);
   assert.doesNotMatch(agent, /catch \(|previousFailure|error\.message|String\(error\)/u);
-  assert.match(agent, /prompt: originalPrompt/u);
+  assert.match(agent, /prompt: typeof args\?\.prompt === "string" \? args\.prompt : originalPrompt/u);
   assert.match(agent, /resumeSession: undefined/u);
   assert.match(agent, /continueSession: false/u);
   assert.match(agent, /lastHeartbeat: undefined/u);
@@ -5022,7 +5035,7 @@ test("retry cleanup preserves only a task-owned prompt and accepts a sealed snap
   }
 });
 
-test("generated Smithers retries reset exact task-owned artifact contents after the first attempt", () => {
+test("generated Smithers resets exact task-owned artifact contents before every selected attempt", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const agentStart = source.indexOf("function artifactAwareAgent");
   const rootsStart = source.indexOf("function resetTaskArtifactsForRetry");
@@ -5033,7 +5046,7 @@ test("generated Smithers retries reset exact task-owned artifact contents after 
   assert.ok(preparationStart > rootsStart, source);
 
   const agent = source.slice(agentStart, rootsStart);
-  assert.match(agent, /if \(smithersAttempt > 1 && firstGenerationForAttempt\)/u);
+  assert.match(agent, /if \(firstGenerationForAttempt\)/u);
   assert.ok(
     agent.indexOf("resetTaskArtifactsForRetry(task)") < agent.indexOf("return await agent.generate(attemptArgs)"),
     agent

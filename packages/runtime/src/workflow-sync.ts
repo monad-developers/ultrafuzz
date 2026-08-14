@@ -796,13 +796,8 @@ async function inspectTerminalAttemptAuthorities(input: {
   control: WorkflowSynchronizationControl;
 }): Promise<SmithersNodeAttemptAuthorities> {
   const tasksByNodeId = new Map(input.tasks.map((task) => [task.smithersNodeId, task]));
-  const recordedSources = new Set(
-    replayNodeAttempts(input.layout)
-      .entries.filter((entry) => entry.workflow_run_id === input.workflowRunId)
-      .map((entry) => entry.source_event_sequence)
-  );
   const pending = terminalWorkflowAttempts(input.events, { tolerateMissingStarts: true }).filter(
-    (attempt) => tasksByNodeId.has(attempt.nodeId) && !recordedSources.has(attempt.finishedSequence)
+    (attempt) => tasksByNodeId.get(attempt.nodeId)?.execution.mode === "local"
   );
   const grouped = new Map<string, TerminalWorkflowAttempt[]>();
   for (const attempt of pending) {
@@ -3286,11 +3281,6 @@ function appendTerminalTaskAttempts(input: {
   const allExisting = replayNodeAttempts(input.layout).entries;
   const existing = allExisting.filter((entry) => entry.strategy_attempt_id === input.task.attemptId);
   const existingByIdentity = new Map(allExisting.map((entry) => [nodeAttemptLedgerIdentity(entry), entry] as const));
-  const existingBySourceSequence = new Map(
-    allExisting
-      .filter((entry) => entry.workflow_run_id === input.workflowRunId)
-      .map((entry) => [entry.source_event_sequence, entry] as const)
-  );
   const sourceEntries = sourceNodeAttempts(input.layout, state.source_run_id, input.task.attemptId);
   const currentTerminalAttempt =
     input.currentAttempt === undefined
@@ -3347,7 +3337,6 @@ function appendTerminalTaskAttempts(input: {
           };
     const normalizedFailureMessage =
       failureMessage === undefined ? undefined : normalizeNodeAttemptFailureMessage(failureMessage);
-    const recordedAgent = existingBySourceSequence.get(attempt.finishedSequence)?.agent;
     const appendInput: AppendNodeAttemptInput = {
       workflowRunId: input.workflowRunId,
       controlGeneration: input.controlGeneration,
@@ -3361,7 +3350,9 @@ function appendTerminalTaskAttempts(input: {
       finishedAt: attempt.finishedAt,
       outcome,
       inputManifestDigest,
-      agent: recordedAgent ?? nodeAttemptAgentProvenance(input.task, attempt, input.attemptAuthorities),
+      ...(input.task.execution.mode === "local"
+        ? { agent: nodeAttemptAgentProvenance(input.task, attempt, input.attemptAuthorities) }
+        : {}),
       ...(outputDigest === undefined ? {} : { outputManifestDigest: outputDigest }),
       ...(reuse === undefined ? {} : { reuse }),
       ...(failureCategory === undefined ? {} : { failureCategory }),

@@ -14,7 +14,6 @@ import {
   getNodeArtifactDir,
   getNodeWorkspaceDir,
   invariantPinnedSourceRefExists,
-  MAX_RETRY_CHAIN_ATTEMPTS,
   parseStrictJsonBytes,
   readRegularFileSnapshot,
   readRunPlanDocument,
@@ -42,6 +41,7 @@ import {
   type PinnedSubmoduleExpectation
 } from "./pinned-submodules.js";
 import { renderRuntimeTemplate } from "./runtime-template.js";
+import { retryChainAttemptCount, retryFallbackProfileIds } from "./retry-chain.js";
 import { topologyRuntimeBudgetForTimeout } from "./topology-runtime-budget.js";
 import {
   CLOUD_EXECUTION_GENERATION_JSON_SCHEMA_ID,
@@ -3938,21 +3938,12 @@ function agentChainForTask(
     ...(profile.reasoning === undefined ? {} : { reasoningEffort: profile.reasoning }),
     role
   });
-  const configuredPrimaryIndex = config.retry.agents.indexOf(primary.id);
-  const fallbackProfileCount =
-    configuredPrimaryIndex < 0 ? 0 : Math.max(0, config.retry.agents.length - configuredPrimaryIndex - 1);
-  if (!Number.isSafeInteger(sameAgentAttempts) || sameAgentAttempts <= 0) {
-    throw new Error("retry chain same-agent attempt count must be a positive safe integer");
-  }
-  const expandedAttempts = sameAgentAttempts + fallbackProfileCount;
-  if (sameAgentAttempts > MAX_RETRY_CHAIN_ATTEMPTS || expandedAttempts > MAX_RETRY_CHAIN_ATTEMPTS) {
-    throw new Error(`retry chain expands to ${expandedAttempts} attempts; maximum is ${MAX_RETRY_CHAIN_ATTEMPTS}`);
-  }
+  retryChainAttemptCount(config, primary.id, sameAgentAttempts);
   return [
     ...Array.from({ length: sameAgentAttempts }, () => entry(primary, "primary")),
-    ...config.retry.agents
-      .slice(configuredPrimaryIndex < 0 ? config.retry.agents.length : configuredPrimaryIndex + 1)
-      .map((profileId) => entry(config.models.profiles[profileId]!, "fallback"))
+    ...retryFallbackProfileIds(config, primary.id).map((profileId) =>
+      entry(config.models.profiles[profileId]!, "fallback")
+    )
   ];
 }
 

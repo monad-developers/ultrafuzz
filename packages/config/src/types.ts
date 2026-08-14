@@ -71,7 +71,11 @@ export type TrustModel = "skip-permissions";
 
 export type AgentAuthMode = "api-key" | "subscription";
 
-export const RESOLVED_CONFIG_SCHEMA_VERSION = "ultrafuzz.config.v2" as const;
+/** User-authored `ultrafuzz.toml` contract. The optional retry table does not break v2 inputs. */
+export const PROJECT_CONFIG_SCHEMA_VERSION = "ultrafuzz.config.v2" as const;
+
+/** Closed persisted resolved-config JSON contract. */
+export const RESOLVED_CONFIG_SCHEMA_VERSION = "ultrafuzz.resolved-config.v3" as const;
 
 export interface ProjectConfig {
   repo: string;
@@ -234,7 +238,7 @@ export interface PromptMetadataLayer {
 }
 
 export interface ProjectConfigInput {
-  schemaVersion?: typeof RESOLVED_CONFIG_SCHEMA_VERSION;
+  schemaVersion?: typeof PROJECT_CONFIG_SCHEMA_VERSION;
   auditProfile?: string;
   topologyPath?: string;
   strategyLoops?: number;

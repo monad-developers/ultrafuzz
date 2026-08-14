@@ -4,7 +4,7 @@ import { MAX_RETRY_CHAIN_ATTEMPTS } from "@ultrafuzz/artifacts";
 import { MAX_TIMEOUT_SECONDS } from "./constants.js";
 import { RESOLVED_CONFIG_SCHEMA_VERSION, type ResolvedConfig } from "./types.js";
 
-export const RESOLVED_CONFIG_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:config:resolved-config:2" as const;
+export const RESOLVED_CONFIG_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:config:resolved-config:3" as const;
 export const RESOLVED_CONFIG_SCHEMA_FILENAME = "resolved-config.schema.json" as const;
 
 const NON_WHITESPACE_PATTERN = /.*\S.*/u;

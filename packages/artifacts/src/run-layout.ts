@@ -105,7 +105,7 @@ export function createRunLayout(input: CreateRunLayoutInput): RunLayout {
   const graph = assertPlannedGraph(
     input.graph ?? {
       schema_version: PLANNED_GRAPH_SCHEMA_VERSION,
-      graph_version: "3",
+      graph_version: "4",
       topology_version: 2,
       groups: {},
       nodes: []

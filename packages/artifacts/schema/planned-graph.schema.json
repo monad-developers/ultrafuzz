@@ -1,16 +1,16 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ultrafuzz:schema:artifacts:planned-graph:3",
+  "$id": "urn:ultrafuzz:schema:artifacts:planned-graph:4",
   "title": "Ultrafuzz planned graph",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "graph_version", "topology_version", "groups", "nodes"],
   "properties": {
     "schema_version": {
-      "const": "ultrafuzz.planned-graph.v3"
+      "const": "ultrafuzz.planned-graph.v4"
     },
     "graph_version": {
-      "const": "3"
+      "const": "4"
     },
     "topology_version": {
       "const": 2

@@ -1550,7 +1550,7 @@ test("planned graph v3 validates whole documents and executes every registered d
   };
   const graph: PlannedGraphDocument = {
     schema_version: PLANNED_GRAPH_SCHEMA_VERSION,
-    graph_version: "3" as const,
+    graph_version: "4" as const,
     topology_version: 2 as const,
     groups: {},
     nodes: [node]

@@ -219,7 +219,7 @@ test("post-finalization property fan-in remains readable through sealed fanout a
   ];
   const graph: PlannedGraphDocument = {
     schema_version: PLANNED_GRAPH_SCHEMA_VERSION,
-    graph_version: "3",
+    graph_version: "4",
     topology_version: 2,
     groups: {},
     nodes: [
@@ -752,7 +752,7 @@ function createSelectionLayout(runId: string, nodes: PlannedGraphDocument["nodes
   const outputRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-verified-output-selection-"));
   const graph: PlannedGraphDocument = {
     schema_version: PLANNED_GRAPH_SCHEMA_VERSION,
-    graph_version: "3",
+    graph_version: "4",
     topology_version: 2,
     groups: {},
     nodes
@@ -845,7 +845,7 @@ function createVerifiedReportFixture(
       : modelFanout.map((model) => `${REPORT_ATTEMPT_ID}__model_${model.model_index}__attempt_${model.attempt_index}`);
   const graph: PlannedGraphDocument = {
     schema_version: PLANNED_GRAPH_SCHEMA_VERSION,
-    graph_version: "3",
+    graph_version: "4",
     topology_version: 2,
     groups: {},
     nodes: [
@@ -1206,7 +1206,7 @@ function smithersTaskForNode(
       run: {
         ultrafuzzRunId: layout.runId,
         smithersWorkflowName: WORKFLOW_RUN_ID,
-        graphVersion: "3",
+        graphVersion: "4",
         topologyVersion: 2
       },
       node: {
@@ -1372,7 +1372,7 @@ function createVerifiedCampaignFixture(
   ];
   const graph: PlannedGraphDocument = {
     schema_version: PLANNED_GRAPH_SCHEMA_VERSION,
-    graph_version: "3",
+    graph_version: "4",
     topology_version: 2,
     groups: {},
     nodes: [

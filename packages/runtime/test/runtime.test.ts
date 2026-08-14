@@ -4846,7 +4846,7 @@ test("compileSmithersWorkflow gates native dependencies on deterministic artifac
 
   const resolvedConfigBytes = fs.readFileSync(compiled.resolvedConfigPath);
   assert.deepEqual(resolvedConfigBytes, serializeResolvedConfigJsonBytes(plan.value!.resolved_config));
-  assert.equal(parseResolvedConfigJsonBytes(resolvedConfigBytes).schemaVersion, "ultrafuzz.config.v2");
+  assert.equal(parseResolvedConfigJsonBytes(resolvedConfigBytes).schemaVersion, "ultrafuzz.resolved-config.v3");
 
   const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
   assert.equal(compiled.pinnedSubmodules, undefined);
@@ -4896,12 +4896,6 @@ test("compileSmithersWorkflow gates native dependencies on deterministic artifac
 test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes", async () => {
   const project = tempProject();
   writeFanoutProject(project);
-  const configPath = path.join(project, "ultrafuzz.toml");
-  fs.writeFileSync(
-    configPath,
-    fs.readFileSync(configPath, "utf8").replace("[models]", "[retry]\nsame_agent_attempts = 2\n\n[models]"),
-    "utf8"
-  );
   const promptMarker = "CLOUD_PROMPT_ONLY_PRIVATE_MARKER";
   fs.appendFileSync(
     path.join(project, ".ultrafuzz", "prompts", "setup", "project-discovery.md"),
@@ -4948,7 +4942,7 @@ test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes
 
   const discovery = compiled.tasks.find((task) => task.metadata.node.logicalNodeId === "project-discovery");
   assert.ok(discovery);
-  assert.equal(discovery.retries, 1);
+  assert.equal(discovery.retries, 0);
   assert.deepEqual(discovery.execution.resources, {
     cpu: 8,
     memoryMiB: 16384,
@@ -5241,6 +5235,70 @@ test("compileSmithersWorkflow enforces the 100-rung retry cap before expanding t
   assert.ok(discovery);
   discovery.retryPolicy.maxAttempts = 100;
   assert.throws(compile, /retry chain expands to 101 attempts; maximum is 100/u);
+});
+
+test("planRun rejects an oversized topology retry override before creating the run directory", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const configPath = path.join(project, "ultrafuzz.toml");
+  fs.writeFileSync(
+    configPath,
+    fs
+      .readFileSync(configPath, "utf8")
+      .replace("same_agent_attempts = 1", 'same_agent_attempts = 1\nagents = ["primary", "fallback"]')
+      .replace(
+        "[models.claude]",
+        '[models.primary]\nagent = "CodexAgent"\nmodel = "gpt-5.5"\nreasoning = "xhigh"\n\n' +
+          '[models.fallback]\nagent = "CodexAgent"\nmodel = "gpt-5.6-sol"\nreasoning = "xhigh"\n\n' +
+          "[models.claude]"
+      ),
+    "utf8"
+  );
+  const topologyPath = path.join(project, ".ultrafuzz", "topology.yml");
+  fs.writeFileSync(
+    topologyPath,
+    fs
+      .readFileSync(topologyPath, "utf8")
+      .replace(
+        "    prompt: setup/project-discovery.md",
+        "    prompt: setup/project-discovery.md\n    max_attempts: 100"
+      ),
+    "utf8"
+  );
+
+  const runId = "retry-chain-preflight-limit";
+  const result = await planRun({ projectRoot: project, runId, topologyPath: ".ultrafuzz/topology.yml", env: {} });
+  assert.equal(result.ok, false, JSON.stringify(result.value?.expanded_graph.nodes));
+  assert.match(JSON.stringify(result.diagnostics), /retry chain expands to 101 attempts; maximum is 100/u);
+  assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", runId)), false);
+});
+
+test("planRun rejects cloud retry chains before creating the run directory", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const configPath = path.join(project, "ultrafuzz.toml");
+  const config = fs
+    .readFileSync(configPath, "utf8")
+    .replace('[execution]\nmode = "local"', '[execution]\nmode = "cloud"\nprovider = "modal"')
+    .replace("same_agent_attempts = 1", "same_agent_attempts = 2");
+  fs.writeFileSync(
+    configPath,
+    `${config}\n[execution.providers.modal]\napp = "ultrafuzz-test"\nimage = "ultrafuzz-test"\ncredential_env = ["UFZ_PROVIDER_ONE", "UFZ_PROVIDER_TWO"]\n`,
+    "utf8"
+  );
+
+  const runId = "cloud-retry-chain-rejected";
+  const result = await planRun({
+    projectRoot: project,
+    runId,
+    env: { UFZ_PROVIDER_ONE: "provider-one", UFZ_PROVIDER_TWO: "provider-two", OPENAI_API_KEY: "agent-key" }
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.diagnostics[0]?.message ?? "", /cloud execution currently requires one model attempt/u);
+  assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", runId)), false);
 });
 
 test("runtime model overrides apply to the retry policy's configured primary profile", async () => {
@@ -6450,7 +6508,7 @@ test("startRun forwards only the configured DeepSeek API key for DeepSeek runs",
   assert.equal(fs.readFileSync(deepSeekEnvironmentLog, "utf8"), "deepseek-agent-key|\n");
 });
 
-test("startRun forwards API keys for every agent in a local retry chain", async () => {
+test("startRun rejects cross-agent API-key retry chains before submission", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -6474,8 +6532,13 @@ test("startRun forwards API keys for every agent in a local retry chain", async 
     }
   });
 
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  assert.equal(fs.readFileSync(credentialLog, "utf8"), "primary-key|fallback-key\n");
+  assert.equal(run.ok, false);
+  assert.match(
+    run.diagnostics[0]?.message ?? "",
+    /cannot include API-key authentication until every rung has an isolated credential boundary/u
+  );
+  assert.equal(fs.existsSync(credentialLog), false);
+  assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", "local-retry-agent-credentials")), false);
 });
 
 test("startRun forwards Moonshot fallback credentials for Kimi API-key auth", async () => {
@@ -11279,6 +11342,106 @@ test("syncRun fails closed when Smithers selection does not match the sealed cha
   );
   assert.match(sync.diagnostics[0]?.message ?? "", /agent ID does not match sealed chain rung 0/u);
   assert.equal(fs.readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8"), "");
+});
+
+test("syncRun rejects forged provenance in an existing immutable attempt", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+  const workflowRunId = "ultrafuzz-forged-recorded-provenance";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "forged-recorded-provenance", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
+
+  const firstSync = await syncRun({ projectRoot: project, runId: "forged-recorded-provenance", env });
+  assert.equal(firstSync.ok, true, JSON.stringify(firstSync.diagnostics));
+  const ledgerPath = path.join(run.value!.run_root, "attempts.jsonl");
+  const entry = JSON.parse(fs.readFileSync(ledgerPath, "utf8")) as Record<string, unknown>;
+  entry.agent = {
+    chain_index: 0,
+    profile_id: "default",
+    agent_ref: "CodexAgent",
+    model_name: "forged-model",
+    reasoning_effort: "xhigh",
+    role: "primary",
+    selection: "observed"
+  };
+  const forgedLedger = `${JSON.stringify(entry)}\n`;
+  fs.writeFileSync(ledgerPath, forgedLedger, "utf8");
+
+  const replayed = await syncRun({ projectRoot: project, runId: "forged-recorded-provenance", env });
+
+  assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
+  assert.ok(replayed.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
+  assert.match(
+    replayed.diagnostics.find((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED")?.message ?? "",
+    /already recorded with different immutable data/u
+  );
+  assert.equal(fs.readFileSync(ledgerPath, "utf8"), forgedLedger);
+  assert.equal(
+    fs
+      .readFileSync(env.SMITHERS_FAKE_LOG!, "utf8")
+      .split("\n")
+      .filter((line) => line.startsWith("node node:project-discovery ")).length,
+    2
+  );
+});
+
+test("syncRun rejects a legacy agentless immutable local attempt", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+  const workflowRunId = "ultrafuzz-agentless-recorded-provenance";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "agentless-recorded-provenance", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
+
+  const firstSync = await syncRun({ projectRoot: project, runId: "agentless-recorded-provenance", env });
+  assert.equal(firstSync.ok, true, JSON.stringify(firstSync.diagnostics));
+  const ledgerPath = path.join(run.value!.run_root, "attempts.jsonl");
+  const entry = JSON.parse(fs.readFileSync(ledgerPath, "utf8")) as Record<string, unknown>;
+  delete entry.agent;
+  const legacyLedger = `${JSON.stringify(entry)}\n`;
+  fs.writeFileSync(ledgerPath, legacyLedger, "utf8");
+
+  const replayed = await syncRun({ projectRoot: project, runId: "agentless-recorded-provenance", env });
+
+  assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
+  assert.ok(replayed.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
+  assert.match(
+    replayed.diagnostics.find((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED")?.message ?? "",
+    /already recorded with different immutable data/u
+  );
+  assert.equal(fs.readFileSync(ledgerPath, "utf8"), legacyLedger);
+  assert.equal(
+    fs
+      .readFileSync(env.SMITHERS_FAKE_LOG!, "utf8")
+      .split("\n")
+      .filter((line) => line.startsWith("node node:project-discovery ")).length,
+    2
+  );
 });
 
 test("syncRun records a terminal attempt when its start event arrives later", async () => {

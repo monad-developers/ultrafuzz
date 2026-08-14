@@ -118,8 +118,8 @@ export function writeCurrentTerminalReport(
   fs.writeFileSync(
     path.join(runRoot, "graph.json"),
     `${JSON.stringify({
-      schema_version: "ultrafuzz.planned-graph.v3",
-      graph_version: "3",
+      schema_version: "ultrafuzz.planned-graph.v4",
+      graph_version: "4",
       topology_version: 2,
       groups: {},
       nodes: [
@@ -381,8 +381,8 @@ export function writeCurrentSmithersTaskFixture(runRoot: string, attemptId: stri
   fs.writeFileSync(
     path.join(runRoot, "graph.json"),
     `${JSON.stringify({
-      schema_version: "ultrafuzz.planned-graph.v3",
-      graph_version: "3",
+      schema_version: "ultrafuzz.planned-graph.v4",
+      graph_version: "4",
       topology_version: 2,
       groups: {},
       nodes: taskSpecifications.map((task) => ({
@@ -482,7 +482,7 @@ function writeCurrentTaskAuthority(runRoot: string, taskSpecifications: readonly
         run: {
           ultrafuzzRunId: state.run_id,
           smithersWorkflowName: "fixture-workflow",
-          graphVersion: "3",
+          graphVersion: "4",
           topologyVersion: 2
         },
         node: {

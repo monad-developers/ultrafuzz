@@ -209,9 +209,16 @@ primary-plus-fallback chain may exceed 100 attempts. Profile names are opaque: `
 Fallback is disabled when `agents` is absent or empty. A topology node
 `max_attempts` overrides its group, and a group value overrides
 `retry.same_agent_attempts`. Automatic retries are generic Smithers-retryable
-failures: Ultrafuzz neither parses the error nor changes the prompt. Each retry
-uses a fresh session and bounded exponential backoff. Benchmark/eval rows reject
+failures: Ultrafuzz neither parses the error nor changes the effective task
+prompt. Each retry uses a fresh session and bounded exponential backoff.
+Benchmark/eval rows reject
 configured fallback so a row cannot silently change models.
+
+Automatic retry chains are currently supported only for local execution. Cloud
+planning requires one effective attempt until every retry rung can receive a
+fresh sandbox and an isolated credential boundary. Local fallback across
+different agent implementations is also rejected when any rung uses API-key
+authentication; profiles on the same agent may safely select different models.
 
 ## Permissions
 
@@ -312,10 +319,13 @@ Boolean values accept `1`, `true`, `yes`, `on`, `0`, `false`, `no`, and `off`.
 3. Supported environment overrides.
 4. Runtime overrides from the CLI.
 
-The redacted operator-facing resolved config is persisted for each run as
+The user-authored TOML contract remains `ultrafuzz.config.v2`: adding the
+optional `[retry]` table does not invalidate existing project files. The
+redacted operator-facing resolved config is persisted for each run as
 `config.resolved.toml`, with restore metadata in `config.redactions.json`. The
 unredacted workflow control contract is serialized once as camelCase JSON,
-validated against `urn:ultrafuzz:schema:config:resolved-config:2`, and published
+identified as `ultrafuzz.resolved-config.v3`, validated against
+`urn:ultrafuzz:schema:config:resolved-config:3`, and published
 byte-for-byte as `smithers/resolved-config.json` before it is sealed into the
 execution snapshot. Sealed readers run the same strict parser and schema; they
 do not use historical fallbacks. That JSON document carries the audit-profile

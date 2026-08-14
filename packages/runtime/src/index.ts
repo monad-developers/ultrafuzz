@@ -13,6 +13,7 @@ export * from "./npm-install-retry.js";
 export * from "./plan-run.js";
 export * from "./pinned-submodules.js";
 export * from "./references.js";
+export * from "./retry-chain.js";
 export * from "./run-progress.js";
 export * from "./runtime-contracts.js";
 export * from "./runtime-document-codec.js";

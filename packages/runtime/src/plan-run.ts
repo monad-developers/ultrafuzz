@@ -75,6 +75,7 @@ import {
 import { checkDependencyLegality } from "./artifact-gates.js";
 import { effectiveAuditPolicy } from "./audit-profile-policy.js";
 import { forgeGuardMetadata } from "./forge-guard.js";
+import { assertExpandedGraphRetryChains } from "./retry-chain.js";
 import { transformTopologyForRun } from "./topology-transform.js";
 
 const RENDERED_PROMPT_SNAPSHOT_DIR = "prompt-snapshots";
@@ -169,6 +170,7 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
       defaultModelProfileId: resolved.config.retry.agents[0] ?? resolved.config.models.default,
       configFingerprint: redactedConfigFingerprint
     });
+    assertExpandedGraphRetryChains(resolved.config, expandedGraph);
   } catch (error) {
     return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "RUN_PLAN_INVALID")]);
   }

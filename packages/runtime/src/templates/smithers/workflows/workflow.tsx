@@ -170,7 +170,7 @@ const CLOUD_WORKER_INPUT_KEYS = ["cloud_worker", "task_id"] as const;
  */
 const inputSchema = z
   .strictObject({
-    schema_version: z.literal("ultrafuzz.smithers.workflow.v3").optional(),
+    schema_version: z.literal("ultrafuzz.smithers.workflow.v4").optional(),
     // Not `run_id`: the workflow runner reserves that column for its own run
     // identity, and a colliding field corrupts its input primary key.
     ultrafuzz_run_id: z.literal(__ULTRAFUZZ_RUN_ID_LITERAL__).optional(),
@@ -1124,6 +1124,10 @@ function rememberFinalReportAgentExecutionAuthority(
 function authoritativeFinalReportAgentExecution(task: (typeof taskSpecs)[number]): FinalReportAgentExecution {
   const current = finalReportAgentExecutionAuthority.get(task.attemptId);
   if (current !== undefined) return current;
+  // A single-rung chain has only one possible producer. This remains
+  // authoritative after a cloud-worker process restart without coupling the
+  // inner worker to the controller's distinct Smithers run ID.
+  if (task.agentChain.length === 1) return finalReportAgentExecution(task, 0);
   let stdout: string;
   try {
     stdout = execFileSync(
@@ -1232,10 +1236,10 @@ function artifactAwareAgent(
       const smithersAttempt = args?.taskContext?.attempt ?? 1;
       const firstGenerationForAttempt = !attemptedGenerations.has(smithersAttempt);
       attemptedGenerations.add(smithersAttempt);
-      // Smithers retries the same task in the same worktree. Preserve the
-      // preparation task's first-attempt roots, but empty their exact contents
-      // before every retry so outputs cannot span multiple model attempts.
-      if (smithersAttempt > 1 && firstGenerationForAttempt) {
+      // Smithers can preflight more than one chain rung in the same worktree.
+      // Restore the prepared roots immediately before each selected attempt so
+      // preflight side effects and prior outputs cannot cross producer bounds.
+      if (firstGenerationForAttempt) {
         resetTaskArtifactsForRetry(task);
       }
       // Automatic retries are deliberately error-agnostic. Start a fresh
@@ -1246,7 +1250,10 @@ function artifactAwareAgent(
         const { messages: _priorMessages, ...freshArgs } = args ?? {};
         return {
           ...freshArgs,
-          prompt: originalPrompt,
+          // Smithers 0.34 adds worktree-isolation and structured-output
+          // contracts before calling the agent. Preserve that effective prompt
+          // while dropping prior conversation/session state.
+          prompt: typeof args?.prompt === "string" ? args.prompt : originalPrompt,
           resumeSession: undefined,
           continueSession: false,
           lastHeartbeat: undefined

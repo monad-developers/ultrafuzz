@@ -1,13 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ultrafuzz:schema:artifacts:smithers-task-manifest:3",
+  "$id": "urn:ultrafuzz:schema:artifacts:smithers-task-manifest:4",
   "title": "Ultrafuzz sealed Smithers task manifest",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "run_id", "smithers_run_id", "workflow_name", "pinned_submodules", "tasks"],
   "properties": {
     "schema_version": {
-      "const": "ultrafuzz.smithers.workflow.v3"
+      "const": "ultrafuzz.smithers.workflow.v4"
     },
     "run_id": {
       "type": "string",
@@ -394,7 +394,7 @@
             ],
             "properties": {
               "schemaVersion": {
-                "const": "ultrafuzz.smithers.task.v2"
+                "const": "ultrafuzz.smithers.task.v3"
               },
               "run": {
                 "type": "object",
@@ -412,7 +412,7 @@
                     "pattern": "^[^\\u0000]+$"
                   },
                   "graphVersion": {
-                    "const": "3"
+                    "const": "4"
                   },
                   "topologyVersion": {
                     "const": 2

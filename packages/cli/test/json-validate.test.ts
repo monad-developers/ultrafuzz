@@ -596,7 +596,7 @@ test("json validate recognizes the pinned topology schema and rejects a same-nam
     const graph = path.join(temporary, "expanded-graph.json");
     fs.writeFileSync(
       graph,
-      `${JSON.stringify({ graphVersion: "3", topologyVersion: 2, groups: {}, nodes: [] })}\n`,
+      `${JSON.stringify({ graphVersion: "4", topologyVersion: 2, groups: {}, nodes: [] })}\n`,
       "utf8"
     );
 
@@ -954,8 +954,8 @@ function createSealedHostFixture(
     graphFingerprint: HOST_GRAPH_FINGERPRINT,
     configFingerprint: HOST_CONFIG_FINGERPRINT,
     graph: {
-      schema_version: "ultrafuzz.planned-graph.v3",
-      graph_version: "3",
+      schema_version: "ultrafuzz.planned-graph.v4",
+      graph_version: "4",
       topology_version: 2,
       groups: {},
       nodes: [...nodes]
@@ -1076,7 +1076,7 @@ function sealedHostTask(
       run: {
         ultrafuzzRunId: layout.runId,
         smithersWorkflowName: HOST_WORKFLOW_RUN_ID,
-        graphVersion: "3",
+        graphVersion: "4",
         topologyVersion: 2
       },
       node: {

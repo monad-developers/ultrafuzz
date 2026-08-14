@@ -313,8 +313,8 @@ The expanded graph, run state, verification marker, and
 partial, stale, or mismatched binding before publication.
 
 Topology YAML remains version `2`; the persisted expanded graph uses
-`graphVersion: "3"` and schema ID
-`urn:ultrafuzz:schema:topology:expanded-graph:3` for this binding-bearing shape.
+`graphVersion: "4"` and schema ID
+`urn:ultrafuzz:schema:topology:expanded-graph:4` for this binding-bearing shape.
 
 The rendered output contract gives the producer one safely quoted command per
 JSON output:

@@ -1,13 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ultrafuzz:schema:topology:expanded-graph:3",
+  "$id": "urn:ultrafuzz:schema:topology:expanded-graph:4",
   "title": "Ultrafuzz expanded graph",
   "type": "object",
   "required": ["graphVersion", "topologyVersion", "groups", "nodes"],
   "additionalProperties": false,
   "properties": {
     "graphVersion": {
-      "const": "3"
+      "const": "4"
     },
     "runId": {
       "type": "string",
