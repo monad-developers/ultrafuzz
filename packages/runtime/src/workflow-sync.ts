@@ -568,7 +568,13 @@ export async function synchronizeLinkedWorkflowRun(
     Object.entries(readRunState(layout).nodes).map(([nodeId, node]) => [nodeId, node.status])
   );
   for (const [nodeId, status] of syncResult.nodeStatuses) attributionStatuses.set(nodeId, status);
-  const unattributedFailure = unattributedTerminalWorkflowFailure(inspect, attributionStatuses);
+  const unattributedFailure = unattributedTerminalWorkflowFailure(inspect, attributionStatuses, {
+    recovery: readRunState(layout).provenance?.recovery,
+    workflowRunId: evidence.smithersRunId,
+    workflowLinkId: evidence.workflowLinkId,
+    controlGeneration: evidence.controlGeneration,
+    evidenceComplete: syncResult.syncedNodes >= loaded.tasks.length
+  });
   if (unattributedFailure !== undefined) {
     diagnostics.push(unattributedFailure);
   }
@@ -3894,7 +3900,6 @@ function finalRunStatus(
     (workflowStatus === "failed" &&
       !(
         options.recovery?.prior_status === "failed" &&
-        options.recovery.recovered === false &&
         options.recovery.workflow_run_id === options.workflowRunId &&
         options.recovery.workflow_link_id === options.workflowLinkId &&
         options.recovery.control_generation === options.controlGeneration &&
@@ -3936,13 +3941,32 @@ function finalRunStatus(
 // leaving the run indistinguishable from an idle one.
 function unattributedTerminalWorkflowFailure(
   inspect: WorkflowInspect,
-  nodeStatuses: Map<string, NodeStatus>
+  nodeStatuses: Map<string, NodeStatus>,
+  options: {
+    evidenceComplete: boolean;
+    recovery?: RunRecoveryProvenance;
+    workflowRunId?: string;
+    workflowLinkId?: string;
+    controlGeneration?: string;
+  }
 ): UnattributedWorkflowFailureDiagnostic | undefined {
   const workflowState = inspect.runState;
   if (workflowState !== "failed") {
     return undefined;
   }
-  if ([...nodeStatuses.values()].some((status) => ["failed", "timed-out", "skipped", "invalidated"].includes(status))) {
+  const statuses = [...nodeStatuses.values()];
+  if (statuses.some((status) => ["failed", "timed-out", "skipped", "invalidated"].includes(status))) {
+    return undefined;
+  }
+  if (
+    options.recovery?.prior_status === "failed" &&
+    options.recovery.workflow_run_id === options.workflowRunId &&
+    options.recovery.workflow_link_id === options.workflowLinkId &&
+    options.recovery.control_generation === options.controlGeneration &&
+    options.evidenceComplete &&
+    statuses.length > 0 &&
+    statuses.every((status) => status === "succeeded" || status === "reused-from-prior-run")
+  ) {
     return undefined;
   }
   const failedWorkflowTasks = inspect.failedWorkflowTaskIds;

@@ -12544,7 +12544,7 @@ test("retry recovery remains stable across repeated syncs and records durable pr
   });
   const run = await startRun({ projectRoot: project, runId: "recovery-stable-status", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md"]);
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
 
   const resumed = await resumeRun({
     projectRoot: project,
