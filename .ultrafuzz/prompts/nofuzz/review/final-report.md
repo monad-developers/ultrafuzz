@@ -10,7 +10,7 @@ finding, triage, severity classification, lifecycle, and strategy detection
 outputs.
 
 A bounded benchmark topology may intentionally omit triage, severity,
-property, or harness handoffs. When no rendered path is provided,
+or harness handoffs. When no rendered path is provided,
 do not treat the omitted handoff as an error. When the severity-classification
 handoff is absent, perform one source-backed bounded classification pass over
 each deduplicated finding and enrich its matching dedupe lifecycle record in
@@ -66,20 +66,13 @@ Dedupe finding lifecycle ledger:
 Dedupe report:
 `{{artifact_path:dedupe-findings}}/deduped-findings.json`
 
-Use these property provenance handoffs when they exist:
-
-Canonical property catalog:
-`{{artifact_path:property-specification-fanin}}/properties.json`
-
-This file, together with each finding's recorded source evidence, forms the
-provenance join from a finding's `property_ids` to its canonical properties,
-source lens rows, and cited source locations. Treat references to an unknown
-canonical property as an invalid current-run artifact. This topology renders no
-implemented-property handoff, so the provenance join can never be completed
-here. Exactly one behaviour therefore applies to every run under this topology,
-whether or not any finding carries `property_ids`: emit the empty array (`[]`)
-for `report.json.property_provenance`, render the Property provenance body as
-`No property-derived findings.` in `report.md`, and continue report generation.
+This topology renders no property catalog and no implemented-property handoff,
+so no provenance join from a finding's `property_ids` to canonical properties
+exists. Exactly one behaviour therefore applies to every run under this
+topology, whether or not any finding carries `property_ids`: emit the empty
+array (`[]`) for `report.json.property_provenance`, render the Property
+provenance body as `No property-derived findings.` in `report.md`, and
+continue report generation.
 
 Use these setup handoffs:
 
@@ -432,13 +425,12 @@ human-readable Strategy section. Do not call this metric Temperature.
 ## Additional Sections
 
 Add `## Property implementation coverage` after the production issue entries
-and before `## Property provenance`. The default topology declares no
-property-implementation handoff, and the canonical `properties.json` contract
-carries only `schema_version` and `properties`, so it cannot supply a
+and before `## Property provenance`. This topology renders no property catalog
+at all and declares no property-implementation handoff, so nothing can supply a
 `selection` object. This run therefore has no implementation-coverage lineage:
 render the literal `unavailable` under that heading in `report.md`, and emit the
 string `unavailable` for `report.json.property_implementation_coverage`. Do not
-synthesize a coverage object from the property catalog, the findings, or the
+synthesize a coverage object from the findings, the lifecycle ledger, or the
 source tree.
 
 Only a topology that renders an implemented-property handoff supplying a
@@ -529,8 +521,8 @@ regenerates `report.md` from `report.json`, so writing anything else here is
 overwritten on publish and only creates a mismatch.
 
 Do not render a provenance table and do not synthesize provenance rows,
-`implementation_paths`, `test_paths`, or backend fields from the property
-catalog, the findings, the lifecycle ledger, or the source tree. Reserve the
+`implementation_paths`, `test_paths`, or backend fields from the findings,
+the lifecycle ledger, or the source tree. Reserve the
 literal `unavailable` for the individual public-facing fields that are genuinely
 unavailable; it is never a valid `report.json.property_provenance` value and it
 is not the body of this heading under this topology.

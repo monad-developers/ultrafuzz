@@ -24,7 +24,7 @@ step:
   independent. The topology gives this review node an extended timeout so the
   independent passes can finish.
 - Each pass must independently inspect the finding, relevant target code,
-  public specifications, property context, and any upstream evidence.
+  public specifications, and any upstream evidence.
 - Each pass must choose exactly one classification:
   - `true-positive`: credible production issue.
   - `false-positive`: invalid issue with no useful follow-up.
@@ -44,7 +44,7 @@ step:
 - If no classification reaches {{triage_quorum}}-of-{{triage_panel_size}}
   agreement, classify the finding as `undetermined`.
 
-Use source, specification, property, and artifact evidence for triage.
+Use source, specification, and artifact evidence for triage.
 
 Run source inspection as separate Bash calls, waiting for each tool result
 before the next command. Do not use command substitution, shell conditionals,
@@ -157,8 +157,6 @@ production-looking record to a non-production class, also include
 When a finding is classified as `false-positive`, set `status` to
 `false-positive`; otherwise leave the status visible for downstream review unless
 the upstream evidence already supports a more specific status.
-In particular, preserve `property_ids` unchanged for every property-derived
-finding.
 
 For upstream records, preserve existing classification and evidence fields
 exactly. Triage may add consensus notes, but it must keep the original

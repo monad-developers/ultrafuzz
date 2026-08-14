@@ -17,7 +17,7 @@ schema, treat them as the materialized dedupe result for this node, refresh only
 missing required files, and finish unless one of those files is missing,
 invalid, or clearly contradicts the required schema.
 
-Dedupe from written findings, property artifacts, source evidence, and
+Dedupe from written findings, source evidence, and
 current-run strategy summaries.
 
 Never install, fetch, restore, or update dependencies during dedupe. This
@@ -28,7 +28,7 @@ target workspace's dependency state.
 
 Inspect every direct strategy handoff before deduping. This list is derived
 from the effective topology and includes each producer's declared findings,
-property artifacts, source evidence, and supporting outputs:
+source evidence, and supporting outputs:
 
 {{ancestor_artifacts}}
 
@@ -64,13 +64,12 @@ Do not hide adverse evidence. Dedupe is only for equivalent findings or proven
 same-root family variants, not for minimizing uncomfortable evidence.
 
 Stateful-analysis records are first-class findings. Preserve raw evidence,
-status, notes, and property context on the kept finding. Keep distinct stateful
+status, and notes on the kept finding. Keep distinct stateful
 records visible when they describe different behavior.
 
-Preserve `property_ids` on every property-derived finding. When deduplicating
-several records into one root or family, use the stable union of their canonical
-property IDs on the kept record and relevant family variants; do not discard a
-property reference during deduplication.
+Preserve any upstream provenance fields unchanged on the kept record and
+relevant family variants; do not discard upstream provenance during
+deduplication.
 
 For every deduped finding, preserve the strategy and loop-attempt provenance of
 the kept finding plus every matching duplicate or family variant for the same
