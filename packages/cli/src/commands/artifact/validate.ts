@@ -16,10 +16,12 @@ import {
 import { cliIo, diagnosticsText, emitCommandResult, globalFlags } from "../../command-shared.js";
 
 export default class ArtifactValidate extends Command {
-  static override summary = "Validate artifact contents against the standalone contract";
+  static override summary = "Validate an artifact's schema and document-local contract semantics";
+  static override description =
+    "Use the contract ID and artifact path declared in the rendered Ultrafuzz Output Contract. This command runs the registered JSON Schema and every document-local semantic gate. It cannot authenticate workspace inputs or cross-artifact/run context; the runtime performs those checks at publication.";
   static override args = {
-    contract: Args.string({ required: true, description: "Artifact contract ID" }),
-    artifactPath: Args.string({ required: true, description: "Artifact file to validate" })
+    contract: Args.string({ required: true, description: "Declared registered artifact contract ID" }),
+    artifactPath: Args.string({ required: true, description: "Declared artifact file to validate" })
   };
   static override flags = globalFlags;
 
