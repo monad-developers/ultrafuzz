@@ -64,7 +64,7 @@ Use this configured invariant testing fuzzer timeout:
      protocol action uses a typed direct call with checked return values and a
      documented precondition; repair the handler and rerun the smoke when the
      audit cannot explain its failure behavior.
-   - Build the schema-defined `intended_entrypoints` set from the selected
+   - Build an intended-property-entrypoint set (`intended_entrypoints`) from the selected
      implemented records and generated suite/ABI, and the
      `admitted_entrypoints` set from the backend's discovered test names and
      result records. Each entry is `{entrypoint, property_id}` and every
@@ -285,6 +285,7 @@ Use this configured invariant testing fuzzer timeout:
      absent from the admitted set, when an entrypoint maps to multiple property
      IDs, when an implemented property has no result record, or when any
      implemented property's terminal status is `not-executed`/`inconclusive`.
+     record an independent terminal status for every implemented property.
      Mark the run `partial` or `blocked` as appropriate, emit a precise
      diagnostic naming every omitted or ambiguous property, and retain the
      independent `property_results` statuses.

@@ -283,8 +283,9 @@ export interface PropertyCampaignArtifact {
   };
   evidence_files: PropertyCampaignEvidenceFile[];
   coverage: PropertyCampaignCoverage;
-  intended_entrypoints: PropertyCampaignEntrypoint[];
-  admitted_entrypoints: PropertyCampaignEntrypoint[];
+  /** Optional for compatibility with v3 records written before coverage provenance was added. */
+  intended_entrypoints?: PropertyCampaignEntrypoint[];
+  admitted_entrypoints?: PropertyCampaignEntrypoint[];
   property_results: PropertyCampaignPropertyResult[];
   failures: PropertyCampaignFailure[];
 }
@@ -1078,8 +1079,8 @@ export const propertyCampaignSchema = z
     }),
     evidence_files: z.array(propertyCampaignEvidenceFileSchema).max(MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILES),
     coverage: propertyCampaignCoverageSchema,
-    intended_entrypoints: z.array(propertyCampaignEntrypointSchema).max(MAX_PROPERTY_CAMPAIGN_RECORDS),
-    admitted_entrypoints: z.array(propertyCampaignEntrypointSchema).max(MAX_PROPERTY_CAMPAIGN_RECORDS),
+    intended_entrypoints: z.array(propertyCampaignEntrypointSchema).max(MAX_PROPERTY_CAMPAIGN_RECORDS).optional(),
+    admitted_entrypoints: z.array(propertyCampaignEntrypointSchema).max(MAX_PROPERTY_CAMPAIGN_RECORDS).optional(),
     property_results: z.array(propertyCampaignPropertyResultSchema).max(MAX_PROPERTY_CAMPAIGN_RECORDS),
     failures: z.array(propertyCampaignFailureSchema).max(MAX_PROPERTY_CAMPAIGN_RECORDS)
   })

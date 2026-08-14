@@ -897,8 +897,6 @@
     "paths",
     "evidence_files",
     "coverage",
-    "intended_entrypoints",
-    "admitted_entrypoints",
     "property_results",
     "failures"
   ],

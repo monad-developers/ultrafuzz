@@ -4130,15 +4130,21 @@ function verifyCurrentCampaignTimeoutEvidence(
       )
     );
   }
+  const hasEntrypointCoverage =
+    Array.isArray(resultValue.intended_entrypoints) || Array.isArray(resultValue.admitted_entrypoints);
+  const admittedOutsideIntended = admittedEntrypoints.filter((entrypoint) => !intendedEntrypoints.includes(entrypoint));
   if (
-    intendedEntrypoints.length > 0 &&
+    hasEntrypointCoverage &&
+    (campaignOutcome === "complete" || admittedOutsideIntended.length > 0) &&
     (intendedEntrypoints.length !== admittedEntrypoints.length ||
       intendedEntrypoints.some((entrypoint) => !admittedEntrypoints.includes(entrypoint)))
   ) {
     diagnostics.push(
       campaignTimeoutDiagnostic(
         "CAMPAIGN_PROPERTY_COVERAGE_INCOMPLETE",
-        "Every intended property entrypoint must be present in the admitted entrypoint set",
+        admittedOutsideIntended.length > 0
+          ? "Every admitted property entrypoint must be present in the intended entrypoint set"
+          : "Every intended property entrypoint must be present in the admitted entrypoint set",
         `${resultPath}#$.admitted_entrypoints`
       )
     );
@@ -6289,9 +6295,11 @@ function verifyCampaignPropertyReferences(
   for (const campaign of campaigns) {
     const campaignPath = campaign.path;
     const seenEntrypoints = new Map<string, string>();
+    const intendedEntrypoints = campaign.value.intended_entrypoints;
+    const admittedEntrypoints = campaign.value.admitted_entrypoints;
     for (const [setName, entries] of [
-      ["intended_entrypoints", campaign.value.intended_entrypoints],
-      ["admitted_entrypoints", campaign.value.admitted_entrypoints]
+      ["intended_entrypoints", intendedEntrypoints ?? []],
+      ["admitted_entrypoints", admittedEntrypoints ?? []]
     ] as const) {
       for (const [index, entry] of entries.entries()) {
         const previousPropertyId = seenEntrypoints.get(entry.entrypoint);
@@ -6327,6 +6335,37 @@ function verifyCampaignPropertyReferences(
           source: "property-provenance",
           path: `${campaignPath}#$.property_results`
         });
+      }
+    }
+    if (intendedEntrypoints !== undefined || admittedEntrypoints !== undefined) {
+      const intendedIds = new Set((intendedEntrypoints ?? []).map((entry) => entry.property_id));
+      const admittedIds = new Set((admittedEntrypoints ?? []).map((entry) => entry.property_id));
+      for (const propertyId of implementedIds) {
+        if (!intendedIds.has(propertyId)) {
+          diagnostics.push({
+            code: "PROPERTY_CAMPAIGN_INTENDED_PROPERTY_MISSING",
+            message: `Campaign intended_entrypoints must cover implemented property ${JSON.stringify(propertyId)}`,
+            severity: "error",
+            source: "property-provenance",
+            path: `${campaignPath}#$.intended_entrypoints`
+          });
+        }
+        if (admittedIds.has(propertyId)) continue;
+        const result = campaign.value.property_results.find((candidate) => candidate.property_id === propertyId);
+        if (
+          campaign.value.campaign_outcome === "complete" ||
+          result === undefined ||
+          !["inconclusive", "not-executed"].includes(result.status) ||
+          !["not-admitted", "not-observed", "ambiguous-entrypoint"].includes(result.reason_code ?? "")
+        ) {
+          diagnostics.push({
+            code: "PROPERTY_CAMPAIGN_ADMISSION_MISSING",
+            message: `Implemented property ${JSON.stringify(propertyId)} is not admitted and must have a typed not-executed or inconclusive result`,
+            severity: "error",
+            source: "property-provenance",
+            path: `${campaignPath}#$.admitted_entrypoints`
+          });
+        }
       }
     }
   }
