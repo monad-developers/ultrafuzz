@@ -256,6 +256,10 @@ const measuredCoverageEvidenceSchema = z
         });
       }
     }
+    // `covered: false` means declaration-incomplete, not necessarily zero-hit:
+    // a range with mixed positive and zero DA rows is incomplete but must not be
+    // listed as zero coverage. Exact reverse membership requires authenticated
+    // LCOV context and is therefore enforced by the runtime publication gate.
     const actualZero = new Set<string>();
     for (const [index, component] of value.zero_coverage_components.entries()) {
       const key = `${component.path}\0${component.kind}\0${component.start_line}\0${component.line_count}`;

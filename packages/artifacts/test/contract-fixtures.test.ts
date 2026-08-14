@@ -171,6 +171,25 @@ test("coverage evidence reconciles scoped denominators and keeps excluded ranges
     "passed"
   );
 
+  const incompleteButNotNecessarilyZero = structuredClone(valid) as {
+    files: Array<{ path: string; covered_ranges: number }>;
+    views: Array<{ scope: string; covered_ranges: number }>;
+    counted_ranges: Array<{ file: string; covered: boolean }>;
+  };
+  incompleteButNotNecessarilyZero.counted_ranges.find((entry) => entry.file === "src/Core.sol")!.covered = false;
+  incompleteButNotNecessarilyZero.files.find((entry) => entry.path === "src/Core.sol")!.covered_ranges = 0;
+  incompleteButNotNecessarilyZero.views.find(
+    (entry) => entry.scope === "recon-selected-declaration-completeness"
+  )!.covered_ranges = 0;
+  incompleteButNotNecessarilyZero.views.find(
+    (entry) => entry.scope === "production-declaration-completeness"
+  )!.covered_ranges = 0;
+  assert.equal(
+    executeSemanticGate("coverage-evidence-reconciliation", { document: incompleteButNotNecessarilyZero }).status,
+    "passed",
+    "document-local validation cannot infer zero hits from an incomplete declaration"
+  );
+
   const hiddenExcludedRange = structuredClone(valid) as {
     counted_ranges: Array<Record<string, unknown>>;
   };
