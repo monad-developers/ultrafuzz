@@ -10427,10 +10427,13 @@ test("coverage gate joins unavailable evidence to a blocked null goal and the ex
     "# Coverage\n\n## Scoped coverage evidence\n\n- Status: unavailable\n\nBlockers:\n" +
     "- coverage-tooling-blocked: Recon &lt;span hidden&gt;could not&lt;/span&gt; produce an authenticated coverage map.\n" +
     "  - Evidence: `logs/recon-coverage.log`\n";
-  const publish = (goalValue: unknown): ReturnType<typeof verifyRequiredArtifactsForAttempt> => {
+  const publish = (
+    goalValue: unknown,
+    markdownValue = markdown
+  ): ReturnType<typeof verifyRequiredArtifactsForAttempt> => {
     writeDeclaredArtifactNode(layout, node.id, node.outputs, {
       "coverage-goal.json": JSON.stringify(goalValue),
-      "coverage-report.md": markdown,
+      "coverage-report.md": markdownValue,
       "coverage-evidence.json": JSON.stringify(evidence)
     });
     return verifyRequiredArtifactsForAttempt(layout, node, node.id);
@@ -10438,6 +10441,15 @@ test("coverage gate joins unavailable evidence to a blocked null goal and the ex
 
   const valid = publish(goal);
   assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
+
+  const flattenedBlockerEvidence = publish(goal, markdown.replace("  - Evidence:", "- Evidence:"));
+  assert.equal(flattenedBlockerEvidence.ok, false);
+  assert.ok(
+    flattenedBlockerEvidence.diagnostics.some(
+      (diagnostic) => diagnostic.code === "COVERAGE_EVIDENCE_MARKDOWN_MISMATCH"
+    ),
+    JSON.stringify(flattenedBlockerEvidence.diagnostics)
+  );
 
   const nonBlocked = publish({ ...goal, current_status: "not-run", blockers: [] });
   assert.ok(
@@ -11844,6 +11856,21 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
 
   const valid = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
   assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
+
+  const indentedMeasuredBody = scopedMarkdown
+    .split("\n")
+    .map((line, index) => (index > 2 && line.length > 0 ? `    ${line}` : line))
+    .join("\n");
+  writeArtifact(layout, reportNode.id, "report.md", indentedMeasuredBody);
+  const measuredBodyAsCode = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+  assert.equal(measuredBodyAsCode.ok, false);
+  assert.ok(
+    measuredBodyAsCode.diagnostics.some(
+      (diagnostic) => diagnostic.code === "REPORT_COVERAGE_EVIDENCE_MARKDOWN_MISSING"
+    ),
+    JSON.stringify(measuredBodyAsCode.diagnostics)
+  );
+  writeArtifact(layout, reportNode.id, "report.md", scopedMarkdown);
 
   for (const stylesheetReport of [
     `<style>h2,ul { display: none }</style>\n${scopedMarkdown}`,

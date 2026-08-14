@@ -6791,12 +6791,14 @@ function coverageEvidenceMarkdownProjectionDiagnostics(
   markdownPath: string,
   code: string
 ): RuntimeDiagnostic[] {
+  // Leading whitespace is part of the projection contract: it distinguishes
+  // list nesting from peer rows and ordinary lists from indented code blocks.
   const expectedLines = renderCoverageEvidenceMarkdownSection(evidence)
     .slice(1)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
+    .map((line) => line.trimEnd())
+    .filter((line) => line.trim().length > 0);
   const sections = markdownSectionOccurrences(markdown, "## Scoped coverage evidence");
-  const renderedLines = sections[0]?.filter((line) => line.length > 0);
+  const renderedLines = sections[0]?.filter((line) => line.trim().length > 0);
   const renderedDocument = renderedMarkdownDocument(markdown);
   const visibleHeadingCount = renderedDocument.blocks.filter(
     (block) => block.headingDepth === 2 && block.text.trim() === "Scoped coverage evidence"
@@ -8012,7 +8014,7 @@ function markdownSectionOccurrences(contents: string, heading: string): string[]
       }
       if (fenced) continue;
       if (trimmed.startsWith("## ")) break;
-      sectionLines.push(trimmed);
+      sectionLines.push(lines[index]!.trimEnd());
     }
     return sectionLines;
   });
