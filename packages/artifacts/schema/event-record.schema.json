@@ -121,6 +121,34 @@
     {
       "type": "object",
       "additionalProperties": false,
+      "required": ["schema_version", "event_id", "timestamp", "run_id", "event_type", "status", "payload"],
+      "properties": {
+        "schema_version": {
+          "const": "ultrafuzz.event-record.v2"
+        },
+        "event_id": {
+          "$ref": "#/$defs/eventId"
+        },
+        "timestamp": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "run_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "event_type": {
+          "const": "run-recovered"
+        },
+        "status": {
+          "const": "succeeded"
+        },
+        "payload": {
+          "$ref": "#/$defs/runRecoveredPayload"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
       "required": ["schema_version", "event_id", "timestamp", "run_id", "event_type", "node_id", "status", "payload"],
       "properties": {
         "schema_version": {
@@ -938,7 +966,16 @@
                 "$ref": "#/$defs/nonNegativeSafeInteger"
               },
               "max_iterations": {
-                "anyOf": [{ "type": "null" }, { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }]
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991
+                  }
+                ]
               }
             }
           }
@@ -989,6 +1026,32 @@
               "reused-from-prior-run",
               "invalidated"
             ]
+          }
+        }
+      }
+    },
+    "runRecoveredPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prior_status", "failed_nodes"],
+      "properties": {
+        "prior_status": {
+          "const": "failed"
+        },
+        "failed_nodes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["node_id"],
+            "additionalProperties": false,
+            "properties": {
+              "node_id": {
+                "$ref": "#/$defs/nonEmptyString"
+              },
+              "failure_category": {
+                "$ref": "#/$defs/nonEmptyString"
+              }
+            }
           }
         }
       }

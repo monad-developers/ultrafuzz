@@ -493,6 +493,26 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       state.last_transition_at = submittedAt;
       writeRunState(evidence.layout, state);
     }
+    const stateBeforeLifecycle = readRunState(evidence.layout);
+    if (action === "resume" && input.retryFailed === true && stateBeforeLifecycle.status === "failed") {
+      const failedNodes = Object.values(stateBeforeLifecycle.nodes)
+        .filter((node) => node.status === "failed")
+        .map((node) => {
+          const provenance = node.provenance as Record<string, unknown> | undefined;
+          const failure = provenance?.failure as Record<string, unknown> | undefined;
+          return {
+            node_id: node.node_id,
+            ...(typeof failure?.category === "string" ? { failure_category: failure.category } : {})
+          };
+        });
+      writeRunState(evidence.layout, {
+        ...stateBeforeLifecycle,
+        provenance: {
+          ...stateBeforeLifecycle.provenance!,
+          recovery: { recovered: false, prior_status: "failed", failed_nodes: failedNodes }
+        }
+      });
+    }
     updateRunStatus(evidence.layout, "running", submittedAt);
     appendEvent(evidence.layout, {
       eventType: lifecycleResult.alreadyRunning ? "workflow-lifecycle-already-running" : "workflow-lifecycle-submitted",

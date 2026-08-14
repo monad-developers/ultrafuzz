@@ -433,6 +433,45 @@
       "properties": {
         "workflow": {
           "$ref": "#/$defs/runWorkflowProvenance"
+        },
+        "recovery": {
+          "$ref": "#/$defs/runRecoveryProvenance"
+        }
+      }
+    },
+    "runRecoveryProvenance": {
+      "type": "object",
+      "required": ["recovered", "prior_status", "failed_nodes"],
+      "additionalProperties": false,
+      "properties": {
+        "recovered": {
+          "type": "boolean"
+        },
+        "recovered_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "prior_status": {
+          "const": "failed"
+        },
+        "failed_nodes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["node_id"],
+            "additionalProperties": false,
+            "properties": {
+              "node_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "failure_category": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
         }
       }
     },

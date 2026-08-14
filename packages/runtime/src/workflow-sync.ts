@@ -595,9 +595,11 @@ export async function synchronizeLinkedWorkflowRun(
   }
 
   const finalStatus = finalRunStatus(inspect, syncResult.nodeStatuses, readRunState(layout).status, {
-    evidenceComplete: syncResult.syncedNodes >= loaded.tasks.length
+    evidenceComplete: syncResult.syncedNodes >= loaded.tasks.length,
+    recoveryPending: readRunState(layout).provenance?.recovery?.recovered === false
   });
-  const previousRunStatus = readRunState(layout).status;
+  const stateBeforeStatusUpdate = readRunState(layout);
+  const previousRunStatus = stateBeforeStatusUpdate.status;
   const runStatusChanged = previousRunStatus !== finalStatus;
   if (runStatusChanged) {
     const preStatusWriteBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationClock(control));
@@ -605,6 +607,23 @@ export async function synchronizeLinkedWorkflowRun(
       return { ok: false, diagnostics: [preStatusWriteBudgetDiagnostic] };
     }
     updateRunStatus(layout, finalStatus);
+  }
+  const recovery = stateBeforeStatusUpdate.provenance?.recovery;
+  if (finalStatus === "succeeded" && recovery?.prior_status === "failed" && recovery.recovered === false) {
+    const state = readRunState(layout);
+    const recovered = {
+      ...recovery,
+      recovered: true,
+      recovered_at: new Date(synchronizationClock(control)).toISOString()
+    };
+    writeRunState(layout, { ...state, provenance: { ...state.provenance!, recovery: recovered } });
+    if (!replayEvents(layout).records.some((event) => event.event_type === "run-recovered")) {
+      appendEvent(layout, {
+        eventType: "run-recovered",
+        status: "succeeded",
+        payload: { prior_status: "failed", failed_nodes: recovery.failed_nodes }
+      });
+    }
   }
   const observedAtMs = synchronizationClock(control);
   const workflowControl = projectWorkflowControlState({
@@ -3828,7 +3847,7 @@ function finalRunStatus(
   inspect: WorkflowInspect,
   nodeStatuses: Map<string, NodeStatus>,
   currentStatus: RunStatus,
-  options: { evidenceComplete: boolean } = { evidenceComplete: true }
+  options: { evidenceComplete: boolean; recoveryPending?: boolean } = { evidenceComplete: true }
 ): RunStatus {
   const statuses = [...nodeStatuses.values()];
   const workflowStatus = inspect.runState;
@@ -3853,8 +3872,7 @@ function finalRunStatus(
     return "running";
   }
   if (
-    inspect.exhaustedLoops.length > 0 ||
-    workflowStatus === "failed" ||
+    ((inspect.exhaustedLoops.length > 0 || workflowStatus === "failed") && !options.recoveryPending) ||
     statuses.some((status) => ["failed", "skipped", "invalidated"].includes(status))
   ) {
     return "failed";
@@ -3872,6 +3890,13 @@ function finalRunStatus(
       ? "succeeded"
       : "failed";
   }
+  if (
+    options.recoveryPending &&
+    options.evidenceComplete &&
+    statuses.length > 0 &&
+    statuses.every((status) => status === "succeeded" || status === "reused-from-prior-run")
+  )
+    return "succeeded";
   return currentStatus;
 }
 

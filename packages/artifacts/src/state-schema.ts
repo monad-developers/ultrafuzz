@@ -46,7 +46,16 @@ const runWorkflowProvenanceSchema = z.strictObject({
   linkId: canonicalUuidSchema,
   executionSnapshot: z.string().regex(/^smithers\/execution-snapshots\/[0-9a-f]{64}$/u)
 });
-const runProvenanceSchema = z.strictObject({ workflow: runWorkflowProvenanceSchema });
+const runRecoveryProvenanceSchema = z.strictObject({
+  recovered: z.boolean(),
+  recovered_at: canonicalTimestampSchema.optional(),
+  prior_status: z.literal("failed"),
+  failed_nodes: z.array(z.strictObject({ node_id: nonEmptyString, failure_category: nonEmptyString.optional() }))
+});
+const runProvenanceSchema = z.strictObject({
+  workflow: runWorkflowProvenanceSchema,
+  recovery: runRecoveryProvenanceSchema.optional()
+});
 const taskWorkflowProvenanceSchema = z.strictObject({
   run_id: nonEmptyString,
   task_id: nonEmptyString,
@@ -434,7 +443,32 @@ export const runStateJsonSchema = {
       type: "object",
       required: ["workflow"],
       additionalProperties: false,
-      properties: { workflow: { $ref: "#/$defs/runWorkflowProvenance" } }
+      properties: {
+        workflow: { $ref: "#/$defs/runWorkflowProvenance" },
+        recovery: { $ref: "#/$defs/runRecoveryProvenance" }
+      }
+    },
+    runRecoveryProvenance: {
+      type: "object",
+      required: ["recovered", "prior_status", "failed_nodes"],
+      additionalProperties: false,
+      properties: {
+        recovered: { type: "boolean" },
+        recovered_at: canonicalTimestampJsonSchema,
+        prior_status: { const: "failed" },
+        failed_nodes: {
+          type: "array",
+          items: {
+            type: "object",
+            required: ["node_id"],
+            additionalProperties: false,
+            properties: {
+              node_id: { type: "string", minLength: 1 },
+              failure_category: { type: "string", minLength: 1 }
+            }
+          }
+        }
+      }
     },
     runWorkflowProvenance: {
       type: "object",

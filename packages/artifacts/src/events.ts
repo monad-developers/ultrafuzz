@@ -54,6 +54,7 @@ export const EVENT_RECORD_TYPES = [
   "workflow-deadline-exceeded",
   "workflow-synced",
   "workflow-failure-unattributed",
+  "run-recovered",
   "node-synced",
   "node-artifacts-verified",
   "node-artifacts-missing",
@@ -209,6 +210,12 @@ const workflowFailureUnattributedPayloadSchema = z.strictObject({
   workflow_state: z.literal("failed"),
   failed_workflow_tasks: z.array(nonEmptyStringSchema),
   durable_node_statuses: z.array(nodeStatusSchema)
+});
+const runRecoveredPayloadSchema = z.strictObject({
+  prior_status: z.literal("failed"),
+  failed_nodes: z.array(
+    z.strictObject({ node_id: nonEmptyStringSchema, failure_category: nonEmptyStringSchema.optional() })
+  )
 });
 const nodeSyncedPayloadSchema = z.strictObject({
   workflow_run_id: nonEmptyStringSchema,
@@ -368,6 +375,7 @@ export const eventRecordSchema = z.discriminatedUnion("event_type", [
     z.enum(["failed", "timed-out"]),
     workflowFailureUnattributedPayloadSchema
   ),
+  runEventVariant("run-recovered", z.literal("succeeded"), runRecoveredPayloadSchema),
   nodeEventVariant("node-synced", nodeStatusSchema, nodeSyncedPayloadSchema),
   nodeEventVariant("node-artifacts-verified", z.literal("succeeded"), nodeArtifactsPayloadSchema),
   nodeEventVariant("node-artifacts-missing", z.literal("failed"), nodeArtifactsPayloadSchema),
@@ -566,6 +574,26 @@ const eventRecordJsonSchemaDefinitions = {
       workflow_state: { const: "failed" },
       failed_workflow_tasks: { type: "array", items: { $ref: "#/$defs/nonEmptyString" } },
       durable_node_statuses: { type: "array", items: { enum: NODE_STATE_STATUSES } }
+    }
+  },
+  runRecoveredPayload: {
+    type: "object",
+    additionalProperties: false,
+    required: ["prior_status", "failed_nodes"],
+    properties: {
+      prior_status: { const: "failed" },
+      failed_nodes: {
+        type: "array",
+        items: {
+          type: "object",
+          required: ["node_id"],
+          additionalProperties: false,
+          properties: {
+            node_id: { $ref: "#/$defs/nonEmptyString" },
+            failure_category: { $ref: "#/$defs/nonEmptyString" }
+          }
+        }
+      }
     }
   },
   nodeSyncedPayload: {
@@ -861,6 +889,7 @@ export const eventRecordJsonSchema = {
       { enum: ["failed", "timed-out"] },
       "workflowFailureUnattributedPayload"
     ),
+    eventRecordJsonSchemaVariant("run-recovered", { const: "succeeded" }, "runRecoveredPayload"),
     eventRecordJsonSchemaVariant("node-synced", { enum: NODE_STATE_STATUSES }, "nodeSyncedPayload", true),
     eventRecordJsonSchemaVariant("node-artifacts-verified", { const: "succeeded" }, "nodeArtifactsPayload", true),
     eventRecordJsonSchemaVariant("node-artifacts-missing", { const: "failed" }, "nodeArtifactsPayload", true),
