@@ -350,7 +350,7 @@ function hasAffirmativeWriteInstruction(
       (hasConditionalPreamble(beforeAction) &&
         !(
           hasFindingsExistenceConditionalPreamble(beforeAction) &&
-          hasMandatoryEmptyAlternative(promptText, destinationEnd, expectedContentPattern)
+          hasMandatoryEmptyAlternative(promptText, destinationEnd, expectedContentPattern, destinationPattern)
         ))
     ) {
       continue;
@@ -377,10 +377,14 @@ function hasAffirmativeWriteInstruction(
     }
     const followingClause = boundedFollowingClause(promptText, destinationEnd);
     const destinationClause = followingClause.split(";", 1)[0]!;
-    const mandatoryEmptyFallback = hasMandatoryEmptyFallback(followingClause);
+    const mandatoryEmptyFallback = hasMandatoryEmptyFallback(
+      followingClause,
+      expectedContentPattern,
+      destinationPattern
+    );
     if (
       (hasConditionalSuffix(promptText, destinationEnd) || hasNonMandatoryCondition(destinationClause)) &&
-      !(mandatoryEmptyFallback && !hasOptionalConditionOutsideEmptyFallback(followingClause))
+      !mandatoryEmptyFallback
     )
       continue;
     return true;
@@ -388,14 +392,25 @@ function hasAffirmativeWriteInstruction(
   return false;
 }
 
-function hasMandatoryEmptyFallback(value: string): boolean {
+function hasMandatoryEmptyFallback(value: string, expectedContentPattern: string, destinationPattern: string): boolean {
+  const alternative = emptyAlternativeAfterExistenceCondition(value);
+  if (alternative !== undefined) {
+    return isMandatoryEmptyAlternative(alternative, expectedContentPattern, destinationPattern);
+  }
   return (
     /\b(?:empty\s+(?:(?:findings?|json)\s+)?(?:array|form|list)|\[\])\b/iu.test(value) &&
     (/\b(?:if|when)\s+(?:there\s+(?:are|is)\s+)?(?:none|no\s+findings?|no\s+result)\b|\bif\s+none\s+exist/iu.test(
       value
     ) ||
-      /\bif\s+(?:(?:any(?:\s+findings?)?|findings?)\s+)?exist\b[^;.!?]*[;.!?]\s*(?:otherwise|else)\b/iu.test(value))
+      /\bif\s+(?:(?:any(?:\s+findings?)?|findings?)\s+)?exist\b[^;.!?]*[;.!?]\s*(?:otherwise|else)\b/iu.test(value)) &&
+    !hasOptionalConditionOutsideEmptyFallback(value)
   );
+}
+
+function emptyAlternativeAfterExistenceCondition(value: string): string | undefined {
+  return value.match(
+    /^\s*(?:,\s*)?if\s+(?:(?:any(?:\s+findings?)?|findings?)\s+)?exist\b[^;.!?]*[;.!?]\s*(?:otherwise|else)\b([^;.!?]{0,220})/iu
+  )?.[1];
 }
 
 function hasFindingsExistenceConditionalPreamble(value: string): boolean {
@@ -409,13 +424,6 @@ function hasFindingsExistenceConditionalPreamble(value: string): boolean {
 }
 
 function hasOptionalConditionOutsideEmptyFallback(value: string): boolean {
-  if (
-    /^\s*(?:,\s*)?if\s+(?:(?:any(?:\s+findings?)?|findings?)\s+)?exist\b[^;.!?]*[;.!?]\s*(?:otherwise|else)\b[^;.!?]*\bempty\b/iu.test(
-      value
-    )
-  ) {
-    return false;
-  }
   const withoutEmptyFallback = value
     .replace(
       /(?:,?\s*(?:or|otherwise|else|using)?\s*(?:use|write|create|produce|emit|save)?\s*(?:an?\s+)?(?:schema[- ]defined\s+)?empty\s+(?:(?:findings?|json)\s+)?(?:array|form|list)\s+(?:if|when)\s+(?:there\s+(?:are|is)\s+)?(?:none|no\s+findings?|no\s+result)(?:\s+exist)?)/giu,
@@ -668,16 +676,47 @@ function hasDescriptiveWrapper(beforeAction: string): boolean {
 function hasMandatoryEmptyAlternative(
   promptText: string,
   destinationEnd: number,
-  expectedContentPattern: string
+  expectedContentPattern: string,
+  destinationPattern: string
 ): boolean {
   const following = promptText.slice(destinationEnd, Math.min(promptText.length, destinationEnd + 256));
   const alternative = following.match(/^\s*[`'"\])}]*[.!?;]\s*(?:otherwise|else)\b([^.!?;]{0,220})/iu)?.[1];
   if (alternative === undefined) return false;
+  return isMandatoryEmptyAlternative(alternative, expectedContentPattern, destinationPattern);
+}
+
+function isMandatoryEmptyAlternative(
+  alternative: string,
+  expectedContentPattern: string,
+  destinationPattern: string
+): boolean {
   if (/\b(?:elsewhere|stdout|stderr|another|different)\b/iu.test(alternative)) return false;
   if (!/\b(?:use|write|create|produce|emit|save)\b/iu.test(alternative)) return false;
   if (!/(?:\bempty\b|\[\]|\{\}|\bzero[- ](?:findings?|entries|items)\b)/iu.test(alternative)) return false;
+  if (hasNonMandatoryCondition(alternative)) return false;
+  const action = nearestOutputAction(alternative, expectedContentPattern);
+  if (action === undefined || hasNonDirectiveActionPreamble(alternative.slice(0, action.index))) return false;
+  if (
+    !new RegExp(`\\b${expectedContentPattern}\\b`, "iu").test(alternative) &&
+    !/\bempty\s+form\b/iu.test(alternative)
+  ) {
+    return false;
+  }
+  return emptyAlternativeTargetsDestination(alternative, destinationPattern);
+}
+
+function emptyAlternativeTargetsDestination(alternative: string, destinationPattern: string): boolean {
+  const destination = new RegExp(destinationPattern, "mu").exec(alternative);
+  if (destination !== null) {
+    if (hasExcludedDestinationBinding(alternative.slice(0, destination.index))) return false;
+    const withoutDestination =
+      alternative.slice(0, destination.index) + alternative.slice(destination.index + destination[0].length);
+    return !/\{\{[^{}]+\}\}/u.test(withoutDestination);
+  }
+  if (/\{\{[^{}]+\}\}/u.test(alternative)) return false;
   return (
-    new RegExp(`\\b${expectedContentPattern}\\b`, "iu").test(alternative) || /\bempty\s+form\b/iu.test(alternative)
+    /\bthere\b(?!\s+(?:are|is|was|were)\b)/iu.test(alternative) ||
+    /\b(?:same|declared|required)\s+(?:destination|output|artifact|file|path)\b/iu.test(alternative)
   );
 }
 
