@@ -12527,6 +12527,66 @@ test("resume derives reset identities from the canonical nodes of a failed workf
   );
 });
 
+test("retry recovery remains stable across repeated syncs and records durable provenance", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-recovery-stable-status";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      error: { message: "Task failed: node:project-discovery" },
+      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
+    }),
+    events: ""
+  });
+  const run = await startRun({ projectRoot: project, runId: "recovery-stable-status", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md"]);
+
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId: run.value!.run_id,
+    force: true,
+    retryFailed: true,
+    env
+  });
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+
+  const successfulInspect = workflowInspect({
+    workflowRunId,
+    status: "failed",
+    state: "failed",
+    error: { message: "stale aggregate remains failed" },
+    steps: [{ id: "node:project-discovery", state: "finished", attempt: 2 }]
+  });
+  fs.writeFileSync(env.SMITHERS_FAKE_INSPECT!, `${JSON.stringify(successfulInspect, null, 2)}\n`, "utf8");
+  fs.writeFileSync(
+    env.SMITHERS_FAKE_EVENTS!,
+    workflowEvents(workflowRunId, [{ type: "NodeFinished", nodeId: "node:project-discovery", attempt: 2 }]),
+    "utf8"
+  );
+
+  const first = await syncRun({ projectRoot: project, runId: run.value!.run_id, env });
+  assert.equal(first.ok, true, JSON.stringify(first.diagnostics));
+  assert.equal(first.value?.status, "succeeded");
+  const second = await syncRun({ projectRoot: project, runId: run.value!.run_id, env });
+  assert.equal(second.ok, true, JSON.stringify(second.diagnostics));
+  assert.equal(second.value?.status, "succeeded");
+
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as RunState;
+  assert.equal(state.status, "succeeded");
+  assert.equal(state.provenance?.recovery?.recovered, true);
+  assert.equal(state.provenance?.recovery?.failed_nodes.length, 1);
+  const recoveredEvents = replayEvents(layoutForRunRoot(run.value!.run_root)).records.filter(
+    (event) => event.event_type === "run-recovered"
+  );
+  assert.equal(recoveredEvents.length, 1);
+  assert.equal(recoveredEvents[0]?.payload.recovery_id, state.provenance?.recovery?.recovery_id);
+});
+
 test("resume retries failed tasks reported inside a successful terminal workflow", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
