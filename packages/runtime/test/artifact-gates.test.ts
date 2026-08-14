@@ -8162,6 +8162,7 @@ function currentCampaign(
   }
   return {
     schema_version: "ultrafuzz.property-campaign.v3",
+    property_provenance_version: 1,
     campaign_plan_ref: "campaign-plan.json",
     implemented_properties_ref: "implemented-properties.json",
     findings_ref: "findings.json",
@@ -9162,11 +9163,15 @@ test("current campaign timeout gate derives early-exit outcome from recorded dur
   const fullConfiguredPartial = runCampaignTimeoutGate((fixture) => {
     fixture.backend.campaign_outcome = "partial";
     fixture.summary.outcome = "partial";
+    fixture.backend.property_results[0] = {
+      ...fixture.backend.property_results[0],
+      status: "inconclusive",
+      failure_ids: [],
+      reason_code: "execution-inconclusive",
+      reason: "The campaign did not establish a pass."
+    };
   });
-  assert.equal(fullConfiguredPartial.ok, false);
-  assert.ok(
-    fullConfiguredPartial.diagnostics.some((diagnostic) => diagnostic.code === "CAMPAIGN_TIMEOUT_OUTCOME_MISMATCH")
-  );
+  assert.equal(fullConfiguredPartial.ok, true, JSON.stringify(fullConfiguredPartial.diagnostics));
 
   const fullDurationProcessExit = runCampaignTimeoutGate((fixture) => {
     fixture.backend.termination_reason = "process-exit";

@@ -76,6 +76,10 @@
       "type": "string",
       "enum": ["complete", "partial", "blocked"]
     },
+    "property_provenance_version": {
+      "type": "number",
+      "const": 1
+    },
     "usable_results": {
       "type": "boolean"
     },
@@ -660,15 +664,7 @@
             ]
           }
         },
-        "required": [
-          "property_id",
-          "status",
-          "failure_ids",
-          "coverage_metric_names",
-          "evidence_refs",
-          "reason_code",
-          "reason"
-        ],
+        "required": ["property_id", "status", "failure_ids", "coverage_metric_names", "evidence_refs"],
         "additionalProperties": false,
         "allOf": [
           {
@@ -897,7 +893,6 @@
     "paths",
     "evidence_files",
     "coverage",
-    "property_results",
     "failures"
   ],
   "additionalProperties": false,

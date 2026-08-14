@@ -4280,7 +4280,8 @@ function verifyCurrentCampaignTimeoutEvidence(
         !endedEarly &&
         terminationReason === "configured-timeout" &&
         usableResults === true &&
-        campaignOutcome !== "complete"
+        campaignOutcome !== "complete" &&
+        !incompletePropertyResults
       ) {
         diagnostics.push(
           campaignTimeoutDiagnostic(
@@ -6295,8 +6296,20 @@ function verifyCampaignPropertyReferences(
   for (const campaign of campaigns) {
     const campaignPath = campaign.path;
     const seenEntrypoints = new Map<string, string>();
+    const provenanceIsCurrent = campaign.value.property_provenance_version !== undefined;
     const intendedEntrypoints = campaign.value.intended_entrypoints;
     const admittedEntrypoints = campaign.value.admitted_entrypoints;
+    const propertyResults = campaign.value.property_results ?? [];
+    if (provenanceIsCurrent && (intendedEntrypoints === undefined || admittedEntrypoints === undefined)) {
+      diagnostics.push({
+        code: "PROPERTY_CAMPAIGN_PROVENANCE_MISSING",
+        message:
+          "Newly-produced campaigns must include both authenticated intended_entrypoints and admitted_entrypoints",
+        severity: "error",
+        source: "property-provenance",
+        path: `${campaignPath}#$.property_provenance_version`
+      });
+    }
     for (const [setName, entries] of [
       ["intended_entrypoints", intendedEntrypoints ?? []],
       ["admitted_entrypoints", admittedEntrypoints ?? []]
@@ -6325,7 +6338,43 @@ function verifyCampaignPropertyReferences(
         }
       }
     }
-    const resultIds = new Set(campaign.value.property_results.map((result) => result.property_id));
+    const resultIds = new Set<string>();
+    for (const [index, result] of propertyResults.entries()) {
+      const reasonFieldsValid =
+        result.reason_code !== undefined &&
+        result.reason !== undefined &&
+        (result.status === "passed" || result.status === "failed"
+          ? result.reason_code === null && result.reason === null
+          : typeof result.reason_code === "string" && typeof result.reason === "string");
+      if (provenanceIsCurrent && !reasonFieldsValid) {
+        diagnostics.push({
+          code: "PROPERTY_CAMPAIGN_RESULT_REASON_MISSING",
+          message: `Newly-produced campaign result ${JSON.stringify(result.property_id)} must carry the complete typed reason projection`,
+          severity: "error",
+          source: "property-provenance",
+          path: `${campaignPath}#$.property_results[${index}]`
+        });
+      }
+      if (resultIds.has(result.property_id)) {
+        diagnostics.push({
+          code: "PROPERTY_CAMPAIGN_RESULT_DUPLICATE",
+          message: `Campaign property_results must contain exactly one terminal result for ${JSON.stringify(result.property_id)}`,
+          severity: "error",
+          source: "property-provenance",
+          path: `${campaignPath}#$.property_results[${index}].property_id`
+        });
+      }
+      resultIds.add(result.property_id);
+      if (!implementedIds.has(result.property_id)) {
+        diagnostics.push({
+          code: "PROPERTY_CAMPAIGN_RESULT_PROPERTY_INVALID",
+          message: `Campaign property_results names a property outside the exact implemented set: ${JSON.stringify(result.property_id)}`,
+          severity: "error",
+          source: "property-provenance",
+          path: `${campaignPath}#$.property_results[${index}].property_id`
+        });
+      }
+    }
     for (const propertyId of implementedIds) {
       if (!resultIds.has(propertyId)) {
         diagnostics.push({
@@ -6337,9 +6386,42 @@ function verifyCampaignPropertyReferences(
         });
       }
     }
-    if (intendedEntrypoints !== undefined || admittedEntrypoints !== undefined) {
+    if (provenanceIsCurrent || intendedEntrypoints !== undefined || admittedEntrypoints !== undefined) {
       const intendedIds = new Set((intendedEntrypoints ?? []).map((entry) => entry.property_id));
       const admittedIds = new Set((admittedEntrypoints ?? []).map((entry) => entry.property_id));
+      for (const [index, entry] of (admittedEntrypoints ?? []).entries()) {
+        if (
+          !(intendedEntrypoints ?? []).some(
+            (candidate) => candidate.entrypoint === entry.entrypoint && candidate.property_id === entry.property_id
+          )
+        ) {
+          diagnostics.push({
+            code: "PROPERTY_CAMPAIGN_ADMISSION_UNAUTHENTICATED",
+            message: `Admitted entrypoint ${JSON.stringify(entry.entrypoint)} is not present in the authenticated intended entrypoint set`,
+            severity: "error",
+            source: "property-provenance",
+            path: `${campaignPath}#$.admitted_entrypoints[${index}]`
+          });
+        }
+      }
+      if (intendedEntrypoints !== undefined && intendedIds.size !== implementedIds.size) {
+        diagnostics.push({
+          code: "PROPERTY_CAMPAIGN_INTENDED_PROPERTY_DUPLICATE",
+          message: "intended_entrypoints must contain exactly one canonical entrypoint for every implemented property",
+          severity: "error",
+          source: "property-provenance",
+          path: `${campaignPath}#$.intended_entrypoints`
+        });
+      }
+      if (admittedEntrypoints !== undefined && admittedIds.size !== admittedEntrypoints.length) {
+        diagnostics.push({
+          code: "PROPERTY_CAMPAIGN_ENTRYPOINT_DUPLICATE",
+          message: "admitted_entrypoints must not contain duplicate property observations",
+          severity: "error",
+          source: "property-provenance",
+          path: `${campaignPath}#$.admitted_entrypoints`
+        });
+      }
       for (const propertyId of implementedIds) {
         if (!intendedIds.has(propertyId)) {
           diagnostics.push({
@@ -6351,12 +6433,19 @@ function verifyCampaignPropertyReferences(
           });
         }
         if (admittedIds.has(propertyId)) continue;
-        const result = campaign.value.property_results.find((candidate) => candidate.property_id === propertyId);
+        const result = propertyResults.find((candidate) => candidate.property_id === propertyId);
         if (
           campaign.value.campaign_outcome === "complete" ||
           result === undefined ||
           !["inconclusive", "not-executed"].includes(result.status) ||
-          !["not-admitted", "not-observed", "ambiguous-entrypoint"].includes(result.reason_code ?? "")
+          ![
+            "not-admitted",
+            "not-observed",
+            "ambiguous-entrypoint",
+            "campaign-ended",
+            "backend-unavailable",
+            "execution-inconclusive"
+          ].includes(result.reason_code ?? "")
         ) {
           diagnostics.push({
             code: "PROPERTY_CAMPAIGN_ADMISSION_MISSING",

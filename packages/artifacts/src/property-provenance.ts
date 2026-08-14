@@ -14,6 +14,7 @@ export const PROPERTIES_SCHEMA_VERSION = "ultrafuzz.properties.v2" as const;
 export const PROPERTY_LENS_SCHEMA_VERSION = "ultrafuzz.property-lens.v2" as const;
 export const IMPLEMENTED_PROPERTIES_SCHEMA_VERSION = "ultrafuzz.implemented-properties.v3" as const;
 export const PROPERTY_CAMPAIGN_SCHEMA_VERSION = "ultrafuzz.property-campaign.v3" as const;
+export const PROPERTY_CAMPAIGN_PROVENANCE_VERSION = 1 as const;
 export const REFERENCE_EXPECTATIONS_SCHEMA_VERSION = "ultrafuzz.reference-expectations.v2" as const;
 export const PROPERTIES_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:properties:2" as const;
 export const PROPERTY_LENS_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:property-lens:2" as const;
@@ -230,8 +231,8 @@ export interface PropertyCampaignPropertyResult {
   failure_ids: string[];
   coverage_metric_names: string[];
   evidence_refs: string[];
-  reason_code: PropertyCampaignPropertyResultReasonCode | null;
-  reason: string | null;
+  reason_code?: PropertyCampaignPropertyResultReasonCode | null;
+  reason?: string | null;
 }
 
 export interface PropertyCampaignEntrypoint {
@@ -272,6 +273,8 @@ export interface PropertyCampaignArtifact {
   end_timestamp?: string;
   termination_reason?: "configured-timeout" | "test-limit" | "process-exit" | "launch-error" | "host-force-kill";
   campaign_outcome?: "complete" | "partial" | "blocked";
+  /** Present on newly-produced v3 artifacts; absent v3 artifacts use legacy parsing. */
+  property_provenance_version?: typeof PROPERTY_CAMPAIGN_PROVENANCE_VERSION;
   usable_results?: boolean;
   execution: PropertyCampaignExecution;
   paths: {
@@ -286,7 +289,7 @@ export interface PropertyCampaignArtifact {
   /** Optional for compatibility with v3 records written before coverage provenance was added. */
   intended_entrypoints?: PropertyCampaignEntrypoint[];
   admitted_entrypoints?: PropertyCampaignEntrypoint[];
-  property_results: PropertyCampaignPropertyResult[];
+  property_results?: PropertyCampaignPropertyResult[];
   failures: PropertyCampaignFailure[];
 }
 
@@ -885,8 +888,8 @@ const propertyCampaignPropertyResultSchema = z
     failure_ids: uniquePropertyCampaignStrings,
     coverage_metric_names: uniquePropertyCampaignStrings,
     evidence_refs: uniquePropertyCampaignPaths,
-    reason_code: z.enum(PROPERTY_CAMPAIGN_PROPERTY_RESULT_REASON_CODES).nullable(),
-    reason: propertyCampaignNonEmptyString.nullable()
+    reason_code: z.enum(PROPERTY_CAMPAIGN_PROPERTY_RESULT_REASON_CODES).nullable().optional(),
+    reason: propertyCampaignNonEmptyString.nullable().optional()
   })
   .meta({
     allOf: [
@@ -930,9 +933,9 @@ const propertyCampaignPropertyResultSchema = z
           path: ["failure_ids"],
           message: "failed property result requires failure IDs"
         });
-      if (result.reason !== null)
+      if (result.reason !== null && result.reason !== undefined)
         context.addIssue({ code: "custom", path: ["reason"], message: "failed property result cannot carry a reason" });
-      if (result.reason_code !== null)
+      if (result.reason_code !== null && result.reason_code !== undefined)
         context.addIssue({
           code: "custom",
           path: ["reason_code"],
@@ -945,9 +948,9 @@ const propertyCampaignPropertyResultSchema = z
           path: ["failure_ids"],
           message: "passed property result cannot carry failure IDs"
         });
-      if (result.reason !== null)
+      if (result.reason !== null && result.reason !== undefined)
         context.addIssue({ code: "custom", path: ["reason"], message: "passed property result cannot carry a reason" });
-      if (result.reason_code !== null)
+      if (result.reason_code !== null && result.reason_code !== undefined)
         context.addIssue({
           code: "custom",
           path: ["reason_code"],
@@ -960,13 +963,13 @@ const propertyCampaignPropertyResultSchema = z
           path: ["failure_ids"],
           message: `${result.status} property result cannot carry failure IDs`
         });
-      if (result.reason === null)
+      if (result.reason === null || result.reason === undefined)
         context.addIssue({
           code: "custom",
           path: ["reason"],
           message: `${result.status} property result requires a reason`
         });
-      if (result.reason_code === null)
+      if (result.reason_code === null || result.reason_code === undefined)
         context.addIssue({
           code: "custom",
           path: ["reason_code"],
@@ -1068,6 +1071,7 @@ export const propertyCampaignSchema = z
       .enum(["configured-timeout", "test-limit", "process-exit", "launch-error", "host-force-kill"])
       .optional(),
     campaign_outcome: z.enum(["complete", "partial", "blocked"]).optional(),
+    property_provenance_version: z.literal(PROPERTY_CAMPAIGN_PROVENANCE_VERSION).optional(),
     usable_results: z.boolean().optional(),
     execution: propertyCampaignExecutionSchema,
     paths: z.strictObject({
@@ -1081,7 +1085,7 @@ export const propertyCampaignSchema = z
     coverage: propertyCampaignCoverageSchema,
     intended_entrypoints: z.array(propertyCampaignEntrypointSchema).max(MAX_PROPERTY_CAMPAIGN_RECORDS).optional(),
     admitted_entrypoints: z.array(propertyCampaignEntrypointSchema).max(MAX_PROPERTY_CAMPAIGN_RECORDS).optional(),
-    property_results: z.array(propertyCampaignPropertyResultSchema).max(MAX_PROPERTY_CAMPAIGN_RECORDS),
+    property_results: z.array(propertyCampaignPropertyResultSchema).max(MAX_PROPERTY_CAMPAIGN_RECORDS).optional(),
     failures: z.array(propertyCampaignFailureSchema).max(MAX_PROPERTY_CAMPAIGN_RECORDS)
   })
   .meta({
