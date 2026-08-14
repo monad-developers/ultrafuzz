@@ -53,7 +53,10 @@ const runRecoveryProvenanceSchema = z.strictObject({
   prior_status: z.literal("failed"),
   failed_nodes: z
     .array(z.strictObject({ node_id: nonEmptyString, failure_category: z.enum(NODE_PROVENANCE_FAILURE_CATEGORIES) }))
-    .min(1)
+    .min(1),
+  workflow_run_id: nonEmptyString.optional(),
+  workflow_link_id: canonicalUuidSchema.optional(),
+  control_generation: sha256.optional()
 });
 const runProvenanceSchema = z.strictObject({
   workflow: runWorkflowProvenanceSchema,
@@ -458,9 +461,9 @@ export const runStateJsonSchema = {
       required: ["recovery_id", "recovered", "prior_status", "failed_nodes"],
       additionalProperties: false,
       properties: {
-        recovery_id: canonicalUuidJsonSchema,
+        recovery_id: { $ref: "#/$defs/runWorkflowProvenance/properties/linkId" },
         recovered: { type: "boolean" },
-        recovered_at: canonicalTimestampJsonSchema,
+        recovered_at: { $ref: "#/properties/created_at" },
         prior_status: { const: "failed" },
         failed_nodes: {
           type: "array",
@@ -474,7 +477,10 @@ export const runStateJsonSchema = {
               failure_category: { enum: NODE_PROVENANCE_FAILURE_CATEGORIES }
             }
           }
-        }
+        },
+        workflow_run_id: { type: "string", minLength: 1 },
+        workflow_link_id: { $ref: "#/$defs/runWorkflowProvenance/properties/linkId" },
+        control_generation: { $ref: "#/$defs/runWorkflowProvenance/properties/controlGeneration" }
       }
     },
     runWorkflowProvenance: {

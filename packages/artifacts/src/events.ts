@@ -585,7 +585,7 @@ const eventRecordJsonSchemaDefinitions = {
     additionalProperties: false,
     required: ["recovery_id", "prior_status", "failed_nodes"],
     properties: {
-      recovery_id: canonicalUuidJsonSchema,
+      recovery_id: { $ref: "#/$defs/workflowLinkId" },
       prior_status: { const: "failed" },
       failed_nodes: {
         type: "array",

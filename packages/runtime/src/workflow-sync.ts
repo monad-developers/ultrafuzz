@@ -597,7 +597,10 @@ export async function synchronizeLinkedWorkflowRun(
 
   const finalStatus = finalRunStatus(inspect, syncResult.nodeStatuses, readRunState(layout).status, {
     evidenceComplete: syncResult.syncedNodes >= loaded.tasks.length,
-    recovery: readRunState(layout).provenance?.recovery
+    recovery: readRunState(layout).provenance?.recovery,
+    workflowRunId: evidence.smithersRunId,
+    workflowLinkId: evidence.workflowLinkId,
+    controlGeneration: evidence.controlGeneration
   });
   const stateBeforeStatusUpdate = readRunState(layout);
   const previousRunStatus = stateBeforeStatusUpdate.status;
@@ -2641,7 +2644,11 @@ async function synchronizeTasks(input: {
     }
     const aggregateStatus = aggregateAttemptStatuses(statuses);
     const previous = readRunState(input.layout).nodes[concreteNodeId];
-    if (previous !== undefined && terminalStatus(previous.status)) {
+    if (
+      previous !== undefined &&
+      terminalStatus(previous.status) &&
+      !(previous.status === "failed" && aggregateStatus === "succeeded")
+    ) {
       nodeStatuses.set(concreteNodeId, previous.status);
       continue;
     }
@@ -3852,7 +3859,13 @@ function finalRunStatus(
   inspect: WorkflowInspect,
   nodeStatuses: Map<string, NodeStatus>,
   currentStatus: RunStatus,
-  options: { evidenceComplete: boolean; recovery?: RunRecoveryProvenance } = { evidenceComplete: true }
+  options: {
+    evidenceComplete: boolean;
+    recovery?: RunRecoveryProvenance;
+    workflowRunId?: string;
+    workflowLinkId?: string;
+    controlGeneration?: string;
+  } = { evidenceComplete: true }
 ): RunStatus {
   const statuses = [...nodeStatuses.values()];
   const workflowStatus = inspect.runState;
@@ -3881,6 +3894,10 @@ function finalRunStatus(
     (workflowStatus === "failed" &&
       !(
         options.recovery?.prior_status === "failed" &&
+        options.recovery.recovered === false &&
+        options.recovery.workflow_run_id === options.workflowRunId &&
+        options.recovery.workflow_link_id === options.workflowLinkId &&
+        options.recovery.control_generation === options.controlGeneration &&
         options.evidenceComplete &&
         statuses.length > 0 &&
         statuses.every((status) => status === "succeeded" || status === "reused-from-prior-run")
