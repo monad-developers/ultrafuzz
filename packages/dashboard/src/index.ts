@@ -972,8 +972,9 @@ class DashboardApp {
         projectRoot: this.projectRoot,
         requirePromptFiles: true,
         defaultTimeoutSeconds: resolved.value.run.defaultTimeoutSeconds,
+        defaultMaxAttempts: resolved.value.retry.sameAgentAttempts,
         modelProfiles: modelProfilesForTopology(resolved.value),
-        defaultModelProfileId: resolved.value.models.default
+        defaultModelProfileId: resolved.value.retry.agents[0] ?? resolved.value.models.default
       });
     } catch (error) {
       return {
@@ -1054,8 +1055,9 @@ class DashboardApp {
         promptTexts: options.promptTexts,
         requirePromptFiles,
         defaultTimeoutSeconds: resolved?.run.defaultTimeoutSeconds,
+        defaultMaxAttempts: resolved?.retry.sameAgentAttempts,
         modelProfiles: resolved ? modelProfilesForTopology(resolved) : undefined,
-        defaultModelProfileId: resolved?.models.default
+        defaultModelProfileId: resolved?.retry.agents[0] ?? resolved?.models.default
       });
       return {
         valid: true,
@@ -1521,8 +1523,9 @@ class DashboardApp {
       projectRoot: this.projectRoot,
       requirePromptFiles: false,
       defaultTimeoutSeconds: resolved?.run.defaultTimeoutSeconds,
+      defaultMaxAttempts: resolved?.retry.sameAgentAttempts,
       modelProfiles: resolved ? modelProfilesForTopology(resolved) : undefined,
-      defaultModelProfileId: resolved?.models.default
+      defaultModelProfileId: resolved?.retry.agents[0] ?? resolved?.models.default
     });
   }
 

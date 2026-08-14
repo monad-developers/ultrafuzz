@@ -197,7 +197,8 @@ describe("public benchmark manifests", () => {
       )
     ).toEqual({
       runtimeOverrides: {
-        auditProfile: "smoke"
+        auditProfile: "smoke",
+        forbidModelFallback: true
       }
     });
 
@@ -363,7 +364,8 @@ describe("public benchmark manifests", () => {
       )
     ).toEqual({
       runtimeOverrides: {
-        auditProfile: "smoke"
+        auditProfile: "smoke",
+        forbidModelFallback: true
       }
     });
 
@@ -392,7 +394,8 @@ describe("public benchmark manifests", () => {
       )
     ).toEqual({
       runtimeOverrides: {
-        auditProfile: "smoke"
+        auditProfile: "smoke",
+        forbidModelFallback: true
       }
     });
   });

@@ -86,3 +86,9 @@ review and dedupe: `strategy` as `"{{strategy}}"`, `node_id` as `"{{strategy}}"`
 `attempt_index` as `{{attempt_index}}`, `loop_index` as
 `{{strategy_loop_index}}`, the selected time-sensitive surface, the tested time
 deltas, and the generated test file path.
+
+Use only the authoritative report-bound note vocabulary:
+
+{{finding_reachability_vocabulary}}
+
+{{finding_note_key_vocabulary}}

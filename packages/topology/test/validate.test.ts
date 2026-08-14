@@ -82,6 +82,25 @@ describe("validateTopology", () => {
     zeroAttempts.nodes[1] = { ...zeroAttempts.nodes[1]!, max_attempts: 0 };
     expect(() => validateTopology(zeroAttempts)).toThrow(expect.objectContaining({ code: "INVALID_TOPOLOGY_SHAPE" }));
 
+    const maximumAttempts = validTopology();
+    maximumAttempts.nodes[1] = { ...maximumAttempts.nodes[1]!, max_attempts: 100 };
+    expect(validateTopology(maximumAttempts).topology.nodes[1]?.max_attempts).toBe(100);
+
+    const excessiveNodeAttempts = validTopology();
+    excessiveNodeAttempts.nodes[1] = { ...excessiveNodeAttempts.nodes[1]!, max_attempts: 101 };
+    expect(() => validateTopology(excessiveNodeAttempts)).toThrow(
+      expect.objectContaining({ code: "INVALID_TOPOLOGY_SHAPE" })
+    );
+
+    const excessiveGroupAttempts = validTopology();
+    excessiveGroupAttempts.groups = {
+      ...excessiveGroupAttempts.groups,
+      setup: { label: "Setup", defaults: { max_attempts: 101 } }
+    };
+    expect(() => validateTopology(excessiveGroupAttempts)).toThrow(
+      expect.objectContaining({ code: "INVALID_TOPOLOGY_SHAPE" })
+    );
+
     const unsafeArtifact = validTopology();
     unsafeArtifact.nodes[1] = {
       ...unsafeArtifact.nodes[1]!,

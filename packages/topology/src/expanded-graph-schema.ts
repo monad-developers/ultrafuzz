@@ -10,6 +10,7 @@ import {
 import {
   ARTIFACT_CONTRACT_IDS,
   CANONICAL_ARTIFACT_RELATIVE_PATH_PATTERN,
+  MAX_RETRY_CHAIN_ATTEMPTS,
   NON_JSON_ARTIFACT_CONTRACT_IDS,
   createStrictAjv,
   runValidator,
@@ -28,7 +29,7 @@ export interface TopologySchemaValidationResult<T> {
   value?: T;
 }
 
-export const EXPANDED_GRAPH_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:topology:expanded-graph:3" as const;
+export const EXPANDED_GRAPH_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:topology:expanded-graph:4" as const;
 
 const SAFE_ID_PATTERN = "^[a-z0-9_][a-z0-9_-]{0,127}$";
 const SAFE_PATH_PATTERN = CANONICAL_ARTIFACT_RELATIVE_PATH_PATTERN;
@@ -55,7 +56,7 @@ const topologyGroupJsonSchema = {
       properties: {
         loops: { type: "integer", minimum: 1 },
         timeout_seconds: { type: "integer", minimum: 1 },
-        max_attempts: { type: "integer", minimum: 1 },
+        max_attempts: { type: "integer", minimum: 1, maximum: MAX_RETRY_CHAIN_ATTEMPTS },
         model_profiles: {
           type: "array",
           uniqueItems: true,
@@ -182,7 +183,7 @@ export const expandedGraphJsonSchema = {
             required: ["maxAttempts"],
             additionalProperties: false,
             properties: {
-              maxAttempts: { type: "integer", minimum: 1 }
+              maxAttempts: { type: "integer", minimum: 1, maximum: MAX_RETRY_CHAIN_ATTEMPTS }
             }
           },
           loop: {

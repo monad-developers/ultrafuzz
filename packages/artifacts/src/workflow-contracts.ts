@@ -5,6 +5,8 @@ import {
   MAX_FINDING_NESTED_ITEMS,
   findingLifecycleSchema,
   findingLifecycleStageSchema,
+  findingNoteSchema,
+  findingReportBoundTextSchema,
   findingSchema,
   findingStrategyHitSchema,
   findingTextSchema
@@ -181,7 +183,7 @@ export const strategyDetectionsSchema = withDocumentMetadata(
 const triagedFindingSchema = findingSchema
   .safeExtend({
     triage_classification: z.enum(TRIAGE_CLASSIFICATIONS),
-    notes: z.array(findingTextSchema).min(1).max(MAX_FINDING_NESTED_ITEMS)
+    notes: z.array(findingNoteSchema).min(1).max(MAX_FINDING_NESTED_ITEMS)
   })
   .meta({
     allOf: [
@@ -251,12 +253,16 @@ export const triagedFindingsSchema = withDocumentMetadata(
 const severityClassifiedFindingSchema = findingSchema
   .safeExtend({
     triage_classification: z.enum(TRIAGE_CLASSIFICATIONS),
+    // Severity review must preserve the already-validated triage notes byte for
+    // byte, but the copied values remain inside the report-vocabulary trust
+    // boundary and are therefore validated again at this contract boundary.
+    notes: z.array(findingNoteSchema).max(MAX_FINDING_NESTED_ITEMS).optional(),
     severity: z.enum(FINDING_SEVERITIES).optional(),
     impact: z.enum(FINDING_SEVERITIES).optional(),
     likelihood: z.enum(FINDING_SEVERITIES).optional(),
-    impact_rationale: findingTextSchema.optional(),
-    likelihood_rationale: findingTextSchema.optional(),
-    severity_rationale: findingTextSchema.optional()
+    impact_rationale: findingReportBoundTextSchema.optional(),
+    likelihood_rationale: findingReportBoundTextSchema.optional(),
+    severity_rationale: findingReportBoundTextSchema.optional()
   })
   .meta({
     allOf: [
@@ -1596,13 +1602,14 @@ const reportCoverageNotPlannedSchema = z.strictObject({
 });
 
 const reportIssueSchema = findingSchema.safeExtend({
+  notes: z.array(findingNoteSchema).max(MAX_FINDING_NESTED_ITEMS).optional(),
   description: nonEmptyString,
   severity: z.enum(FINDING_SEVERITIES),
   likelihood: z.enum(FINDING_SEVERITIES),
   impact: z.enum(FINDING_SEVERITIES),
-  impact_rationale: nonEmptyString,
-  likelihood_rationale: nonEmptyString,
-  severity_rationale: nonEmptyString,
+  impact_rationale: findingReportBoundTextSchema,
+  likelihood_rationale: findingReportBoundTextSchema,
+  severity_rationale: findingReportBoundTextSchema,
   proof_of_concept: z.strictObject({
     scenario: z.array(nonEmptyString).min(1),
     language: nonEmptyString,
@@ -1612,9 +1619,25 @@ const reportIssueSchema = findingSchema.safeExtend({
 });
 
 const reportNonProductionOutcomeSchema = findingSchema.safeExtend({
+  notes: z.array(findingNoteSchema).max(MAX_FINDING_NESTED_ITEMS).optional(),
   triage_classification: z.enum(TRIAGE_CLASSIFICATIONS),
   recommended_next_action: nonEmptyString,
   lifecycle: findingLifecycleSchema
+});
+
+const reportAgentAttemptSchema = z.strictObject({
+  attempt: positiveInteger,
+  profile_id: nonEmptyString,
+  agent_ref: nonEmptyString,
+  model_name: nonEmptyString.optional(),
+  reasoning_effort: nonEmptyString.optional(),
+  role: z.enum(["primary", "fallback"])
+});
+
+const reportAgentExecutionSchema = z.strictObject({
+  planned_chain: z.array(reportAgentAttemptSchema).min(1),
+  failed_attempts: z.array(reportAgentAttemptSchema),
+  producer: reportAgentAttemptSchema
 });
 
 export const reportSchema = withDocumentMetadata(
@@ -1637,6 +1660,7 @@ export const reportSchema = withDocumentMetadata(
       topology_digest: sha256,
       prompt_digest: sha256,
       expanded_graph_fingerprint: nonEmptyString,
+      agent_execution: reportAgentExecutionSchema.optional(),
       source_run_ids: uniqueStrings().optional()
     }),
     campaign_outcome: z

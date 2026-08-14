@@ -6,17 +6,19 @@ import { CONFIG_FILE_NAME } from "./constants.js";
 import { loadAuditProfileCatalog } from "./audit-profiles.js";
 import { validateResolvedConfigJson } from "./config-schema-registry.js";
 import { parseProjectConfigToml } from "./loader.js";
-import type {
-  AgentConfig,
-  EvalConfig,
-  EvalConfigInput,
-  ExecutionConfig,
-  ModelProfile,
-  PermissionConfig,
-  ProjectConfigInput,
-  PromptMetadataLayer,
-  ResolvedConfig,
-  RunConfig
+import {
+  RESOLVED_CONFIG_SCHEMA_VERSION,
+  type AgentConfig,
+  type EvalConfig,
+  type EvalConfigInput,
+  type ExecutionConfig,
+  type ModelProfile,
+  type PermissionConfig,
+  type ProjectConfigInput,
+  type PromptMetadataLayer,
+  type RetryConfig,
+  type ResolvedConfig,
+  type RunConfig
 } from "./types.js";
 
 export { CONFIG_FILE_NAME } from "./constants.js";
@@ -89,6 +91,7 @@ function normalizeDefaultConfig(input: ProjectConfigInput, filePath: string): Re
   const project = requiredRecord(input.project, "project", filePath);
   const run = requiredRecord(input.run, "run", filePath);
   const models = requiredRecord(input.models, "models", filePath);
+  const retry = requiredRecord(input.retry, "retry", filePath);
   const agents = requiredRecord(input.agents, "agents", filePath);
   const execution = requiredRecord(input.execution, "execution", filePath);
   const permissions = requiredRecord(input.permissions, "permissions", filePath);
@@ -96,7 +99,7 @@ function normalizeDefaultConfig(input: ProjectConfigInput, filePath: string): Re
   const triage = requiredRecord(input.triage, "triage", filePath);
 
   return {
-    schemaVersion: required(input.schemaVersion, "schema_version", filePath),
+    schemaVersion: RESOLVED_CONFIG_SCHEMA_VERSION,
     auditProfile: input.auditProfile ?? profileCatalog.defaultProfile,
     ...(input.topologyPath === undefined ? {} : { topologyPath: input.topologyPath }),
     ...(input.strategyLoops === undefined ? {} : { strategyLoops: input.strategyLoops }),
@@ -125,6 +128,7 @@ function normalizeDefaultConfig(input: ProjectConfigInput, filePath: string): Re
         ])
       )
     },
+    retry: normalizeRetryConfig(retry, filePath),
     agents: Object.fromEntries(
       Object.entries(agents).map(([id, agent]) => [id, normalizeAgentConfig(id, agent, filePath)])
     ),
@@ -156,6 +160,13 @@ function normalizeDefaultConfig(input: ProjectConfigInput, filePath: string): Re
       panelSize: required(triage.panelSize, "triage.panel_size", filePath)
     },
     eval: normalizeEvalConfig(input.eval)
+  };
+}
+
+function normalizeRetryConfig(retry: Partial<RetryConfig>, filePath: string): RetryConfig {
+  return {
+    sameAgentAttempts: required(retry.sameAgentAttempts, "retry.same_agent_attempts", filePath),
+    agents: [...required(retry.agents, "retry.agents", filePath)]
   };
 }
 

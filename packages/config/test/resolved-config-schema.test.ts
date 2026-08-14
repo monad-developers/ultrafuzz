@@ -24,8 +24,8 @@ import {
   validateResolvedConfigJson
 } from "../src/index.js";
 
-const EXPECTED_SCHEMA_SHA256 = "b0e99445134a24c3a2ecbce12221bcae0e2bd414ee441f0dcfc78eff6fb7d314";
-const EXPECTED_BUNDLE_SHA256 = "55c4a39be2c2178a247f33d36622ac0e8cd030c2cec4f65b2828af5cae5cf9a2";
+const EXPECTED_SCHEMA_SHA256 = "694bfb866468a09209296041ce404933927d4ddeaa5b44b4ae0b57ba71f58843";
+const EXPECTED_BUNDLE_SHA256 = "71f90f2b5f4c21ec45dba4a4afa1efcb5d521ed36a2747727b466f32ea9f7dda";
 
 describe("resolved config JSON contract", () => {
   it("registers the exact checked-in Draft 2020-12 schema and stable digests", () => {
@@ -119,6 +119,11 @@ describe("resolved config JSON contract", () => {
         }
       },
       { label: "empty profiles", mutate: (value) => void (record(value.models).profiles = {}) },
+      { label: "zero retry attempts", mutate: (value) => void (record(value.retry).sameAgentAttempts = 0) },
+      {
+        label: "duplicate retry profiles",
+        mutate: (value) => void (record(value.retry).agents = ["default", "default"])
+      },
       { label: "unknown profile property", mutate: (value) => void (profile(value, "default").temperature = 1) },
       { label: "unsupported Kimi reasoning", mutate: (value) => void (profile(value, "kimi").reasoning = "xhigh") },
       {
@@ -208,13 +213,39 @@ describe("resolved config JSON contract", () => {
     expect(profile(value, "openrouter").model).toBe(model);
   });
 
+  it("enforces the 100-attempt expanded retry-chain boundary in both resolved validators", () => {
+    const boundary = validFixture();
+    record(boundary.retry).sameAgentAttempts = 99;
+    record(boundary.retry).agents = ["default", "kimi"];
+    expect(validateResolvedConfigJson(boundary)).toEqual({ ok: true, issues: [], truncated: false });
+    expect(resolvedConfigZodSchema.safeParse(boundary).success).toBe(true);
+
+    const excessive = structuredClone(boundary);
+    record(excessive.retry).sameAgentAttempts = 100;
+    const ajv = validateResolvedConfigJson(excessive);
+    expect(ajv).toEqual({
+      ok: false,
+      issues: [
+        {
+          instancePath: "/retry",
+          schemaPath: "#/semantic/resolved-config-retry-chain-maximum",
+          keyword: "resolved-config-retry-chain-maximum",
+          message: "expanded retry chain must not exceed 100 attempts"
+        }
+      ],
+      truncated: false
+    });
+    expect(resolvedConfigZodSchema.safeParse(excessive).success).toBe(false);
+    expect(resolvedConfigValidatorsAgree(excessive)).toBe(true);
+  });
+
   it("rejects duplicate keys and invalid UTF-8 before schema validation", () => {
     const duplicate = Buffer.from(
       readFixture("resolved-config.valid.json")
         .toString("utf8")
         .replace(
-          '"schemaVersion": "ultrafuzz.config.v2",',
-          '"schemaVersion": "ultrafuzz.config.v2",\n  "schemaVersion": "ultrafuzz.config.v2",'
+          '"schemaVersion": "ultrafuzz.resolved-config.v3",',
+          '"schemaVersion": "ultrafuzz.resolved-config.v3",\n  "schemaVersion": "ultrafuzz.resolved-config.v3",'
         ),
       "utf8"
     );

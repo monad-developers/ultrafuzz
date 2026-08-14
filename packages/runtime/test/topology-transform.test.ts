@@ -88,7 +88,7 @@ test("planned prompt binding never falls back from the declared path to a matchi
     orderedIds: ["declared-node"]
   };
   const expanded: ExpandedGraph = {
-    graphVersion: "3",
+    graphVersion: "4",
     topologyVersion: 2,
     groups: {},
     nodes: [

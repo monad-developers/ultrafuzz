@@ -16,7 +16,7 @@ import {
   type LoadedProjectConfig,
   type ModelProfile,
   type ProjectConfigInput,
-  RESOLVED_CONFIG_SCHEMA_VERSION,
+  PROJECT_CONFIG_SCHEMA_VERSION,
   type WorkspaceMode
 } from "./types.js";
 
@@ -30,6 +30,7 @@ const TOP_LEVEL_KEYS = new Set([
   "run",
   "execution",
   "models",
+  "retry",
   "agents",
   "permissions",
   "invariants",
@@ -57,6 +58,7 @@ const EXECUTION_NODE_KEYS = ["resources"] as const;
 const EXECUTION_PROVIDER_KEYS = ["modal"] as const;
 const MODAL_EXECUTION_PROVIDER_KEYS = ["app", "image", "region", "credential_env"] as const;
 const MODEL_PROFILE_KEYS = ["agent", "model", "reasoning", "timeout_seconds"] as const;
+const RETRY_KEYS = ["same_agent_attempts", "agents"] as const;
 const AGENT_KEYS = ["auth", "api_key_env", "config_dir"] as const;
 const PERMISSION_KEYS = [
   "trust_model",
@@ -129,11 +131,11 @@ export function parseProjectConfigToml(text: string, file = CONFIG_FILE_NAME): C
 
   const config: ProjectConfigInput = {};
   readString(root, "schema_version", ["schema_version"], diagnostics, (value) => {
-    if (value !== RESOLVED_CONFIG_SCHEMA_VERSION) {
+    if (value !== PROJECT_CONFIG_SCHEMA_VERSION) {
       diagnostics.push(
         diagnostic(
           "CONFIG_SCHEMA_VERSION_UNSUPPORTED",
-          `schema_version must be exactly ${RESOLVED_CONFIG_SCHEMA_VERSION}`,
+          `schema_version must be exactly ${PROJECT_CONFIG_SCHEMA_VERSION}`,
           ["schema_version"],
           "project-toml",
           { file }
@@ -141,7 +143,7 @@ export function parseProjectConfigToml(text: string, file = CONFIG_FILE_NAME): C
       );
       return;
     }
-    config.schemaVersion = RESOLVED_CONFIG_SCHEMA_VERSION;
+    config.schemaVersion = PROJECT_CONFIG_SCHEMA_VERSION;
   });
   readString(root, "audit_profile", ["audit_profile"], diagnostics, (value) => {
     config.auditProfile = value;
@@ -449,6 +451,28 @@ export function parseProjectConfigToml(text: string, file = CONFIG_FILE_NAME): C
         [key]: modelProfile
       };
     }
+  }
+
+  const retry = readConfigTable(root, "retry", RETRY_KEYS, diagnostics);
+  if (retry) {
+    const retryConfig: NonNullable<ProjectConfigInput["retry"]> = {};
+    config.retry = retryConfig;
+    readScalarFields(retry, ["retry"], diagnostics, [
+      {
+        key: "same_agent_attempts",
+        type: "integer",
+        assign: (value) => {
+          retryConfig.sameAgentAttempts = value;
+        }
+      },
+      {
+        key: "agents",
+        type: "string-array",
+        assign: (value) => {
+          retryConfig.agents = value;
+        }
+      }
+    ]);
   }
 
   const agents = readTable(root, "agents", ["agents"], diagnostics);

@@ -392,7 +392,7 @@ function createNoGeneratedProducerFixture(runId: string): {
   );
   const graph: PlannedGraphDocument = {
     schema_version: PLANNED_GRAPH_SCHEMA_VERSION,
-    graph_version: "3",
+    graph_version: "4",
     topology_version: 2,
     groups: {},
     nodes: [seedNode, aggregationNode]
@@ -483,7 +483,7 @@ function createAggregationAuthorityFixture(runId: string): AggregationAuthorityF
   const aggregationNode = plannedNode("aggregate-test-files", [producerNode.id], aggregationOutput);
   const graph: PlannedGraphDocument = {
     schema_version: PLANNED_GRAPH_SCHEMA_VERSION,
-    graph_version: "3",
+    graph_version: "4",
     topology_version: 2,
     groups: {},
     nodes: [originNode, seedNode, producerNode, unrelatedNode, aggregationNode]

@@ -182,7 +182,7 @@ export async function startRun(input: StartRunInput) {
       environmentVariableNames: mergeEnvironmentVariableNames(
         agentEnvironmentVariableNames(
           plan.resolved_config,
-          compiled.tasks.map((task) => task.agentRef),
+          compiled.tasks.flatMap((task) => task.agentChain.map((profile) => profile.agentRef)),
           forgeGuard.env
         ),
         forgeGuard.environmentVariableNames,
@@ -1145,7 +1145,7 @@ function linkedWorkflowEnvironmentVariableNames(
   const tasks = linkedWorkflowTasks(taskContents);
   const names = agentEnvironmentVariableNames(
     config,
-    tasks.map((task) => task.agentRef).filter((agentRef): agentRef is string => typeof agentRef === "string"),
+    tasks.flatMap((task) => task.agentChain.map((profile) => profile.agentRef)),
     env
   );
   for (const task of tasks) {
@@ -1157,10 +1157,7 @@ function linkedWorkflowEnvironmentVariableNames(
   return [...new Set(names)].sort();
 }
 
-function linkedWorkflowTasks(contents: Buffer): Array<{
-  agentRef: string;
-  execution: SmithersTaskManifestTask["execution"];
-}> {
+function linkedWorkflowTasks(contents: Buffer): SmithersTaskManifestTask[] {
   return parseSmithersTaskManifestBytes(contents).tasks;
 }
 

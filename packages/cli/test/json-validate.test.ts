@@ -286,19 +286,21 @@ test("json validate diagnostics project exactly through the production planned-o
     assert.equal(envelope.ok, false);
     assert.equal(envelope.data.schema?.registered, true);
     assert.equal(envelope.data.artifact_sha256, digestHostBytes(bytes));
+    // The expanded finding schema is compiled as its own referenced resource,
+    // so Ajv reports keyword locations relative to that resource root.
     assert.deepEqual(envelope.data.diagnostics, [
       {
         code: "JSON_SCHEMA_VIOLATION",
         message: "must NOT have additional properties",
         instancePath: "/0",
-        schemaPath: "urn:ultrafuzz:schema:artifacts:finding:2/additionalProperties",
+        schemaPath: "#/additionalProperties",
         keyword: "additionalProperties"
       },
       {
         code: "JSON_SCHEMA_VIOLATION",
         message: "must be equal to one of the allowed values",
         instancePath: "/0/status",
-        schemaPath: "urn:ultrafuzz:schema:artifacts:finding:2/properties/status/enum",
+        schemaPath: "#/properties/status/enum",
         keyword: "enum"
       }
     ]);
@@ -596,7 +598,7 @@ test("json validate recognizes the pinned topology schema and rejects a same-nam
     const graph = path.join(temporary, "expanded-graph.json");
     fs.writeFileSync(
       graph,
-      `${JSON.stringify({ graphVersion: "3", topologyVersion: 2, groups: {}, nodes: [] })}\n`,
+      `${JSON.stringify({ graphVersion: "4", topologyVersion: 2, groups: {}, nodes: [] })}\n`,
       "utf8"
     );
 
@@ -954,8 +956,8 @@ function createSealedHostFixture(
     graphFingerprint: HOST_GRAPH_FINGERPRINT,
     configFingerprint: HOST_CONFIG_FINGERPRINT,
     graph: {
-      schema_version: "ultrafuzz.planned-graph.v3",
-      graph_version: "3",
+      schema_version: "ultrafuzz.planned-graph.v4",
+      graph_version: "4",
       topology_version: 2,
       groups: {},
       nodes: [...nodes]
@@ -1036,6 +1038,15 @@ function sealedHostTask(
     ...(output.validator_build === undefined ? {} : { validatorBuild: output.validator_build }),
     primary: output.primary
   }));
+  const agentChain = [
+    {
+      profileId: "default",
+      agentRef: "CodexAgent",
+      modelName: "gpt-test",
+      reasoningEffort: "high",
+      role: "primary" as const
+    }
+  ];
   return {
     attemptId: node.id,
     concreteNodeId: node.id,
@@ -1044,6 +1055,7 @@ function sealedHostTask(
     smithersNodeId: `node:${node.id}`,
     verifierSmithersNodeId: `verify:${node.id}`,
     agentRef: "CodexAgent",
+    agentChain,
     modelName: "gpt-test",
     reasoningEffort: "high",
     dependencies: [...node.depends_on],
@@ -1051,7 +1063,7 @@ function sealedHostTask(
     timeoutMs: 60_000,
     heartbeatTimeoutMs: 60_000,
     retries: 0,
-    retryPolicy: { backoff: "exponential", initialDelayMs: 1_000, maxDelayMs: 30_000 },
+    retryPolicy: { backoff: "exponential", initialDelayMs: 1_000 },
     workspacePath,
     artifactDir,
     dependencyArtifactDirs,
@@ -1066,7 +1078,7 @@ function sealedHostTask(
       run: {
         ultrafuzzRunId: layout.runId,
         smithersWorkflowName: HOST_WORKFLOW_RUN_ID,
-        graphVersion: "3",
+        graphVersion: "4",
         topologyVersion: 2
       },
       node: {
@@ -1094,11 +1106,12 @@ function sealedHostTask(
         modelName: "gpt-test",
         reasoningEffort: "high",
         modelIndex: 0,
-        attemptIndex: node.loop.attempt_index
+        attemptIndex: node.loop.attempt_index,
+        agentChain
       },
       workspace: { primitive: "worktree", path: workspacePath, repoPath: "/repo", trustModel: "skip-permissions" },
       artifacts: { dir: artifactDir, outputs, manifestPath: path.join(artifactDir, "artifact-manifest.json") },
-      retryPolicy: { maxAttempts: 1, smithersRetries: 0 },
+      retryPolicy: { maxAttempts: 1, sameAgentAttempts: 1, smithersRetries: 0 },
       timeout: { milliseconds: 60_000, seconds: 60, heartbeatTimeoutMs: 60_000 },
       execution: { mode: "local", resources: { cpu: 2, memoryMiB: 1_024, timeoutSeconds: 60 } }
     }

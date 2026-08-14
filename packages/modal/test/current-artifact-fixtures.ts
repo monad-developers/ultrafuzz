@@ -118,8 +118,8 @@ export function writeCurrentTerminalReport(
   fs.writeFileSync(
     path.join(runRoot, "graph.json"),
     `${JSON.stringify({
-      schema_version: "ultrafuzz.planned-graph.v3",
-      graph_version: "3",
+      schema_version: "ultrafuzz.planned-graph.v4",
+      graph_version: "4",
       topology_version: 2,
       groups: {},
       nodes: [
@@ -381,8 +381,8 @@ export function writeCurrentSmithersTaskFixture(runRoot: string, attemptId: stri
   fs.writeFileSync(
     path.join(runRoot, "graph.json"),
     `${JSON.stringify({
-      schema_version: "ultrafuzz.planned-graph.v3",
-      graph_version: "3",
+      schema_version: "ultrafuzz.planned-graph.v4",
+      graph_version: "4",
       topology_version: 2,
       groups: {},
       nodes: taskSpecifications.map((task) => ({
@@ -442,6 +442,15 @@ function writeCurrentTaskAuthority(runRoot: string, taskSpecifications: readonly
     if (graphNode === undefined) throw new Error(`current task authority fixture has no graph node ${task.id}`);
     const workspacePath = path.join(runRoot, "workspaces", task.id);
     const artifactDir = path.join(runRoot, "artifacts", task.id);
+    const agentChain = [
+      {
+        profileId: "fixture-model",
+        agentRef: "CodexAgent",
+        modelName: "gpt-fixture",
+        reasoningEffort: "high",
+        role: "primary" as const
+      }
+    ];
     return {
       attemptId: task.id,
       concreteNodeId: task.id,
@@ -450,6 +459,7 @@ function writeCurrentTaskAuthority(runRoot: string, taskSpecifications: readonly
       smithersNodeId: `node:${task.id}`,
       verifierSmithersNodeId: `verify:${task.id}`,
       agentRef: "CodexAgent",
+      agentChain,
       modelName: "gpt-fixture",
       reasoningEffort: "high",
       dependencies: [],
@@ -457,7 +467,7 @@ function writeCurrentTaskAuthority(runRoot: string, taskSpecifications: readonly
       timeoutMs: 60_000,
       heartbeatTimeoutMs: 60_000,
       retries: 0,
-      retryPolicy: { backoff: "exponential", initialDelayMs: 1_000, maxDelayMs: 30_000 },
+      retryPolicy: { backoff: "exponential", initialDelayMs: 1_000 },
       workspacePath,
       artifactDir,
       dependencyArtifactDirs: [],
@@ -472,7 +482,7 @@ function writeCurrentTaskAuthority(runRoot: string, taskSpecifications: readonly
         run: {
           ultrafuzzRunId: state.run_id,
           smithersWorkflowName: "fixture-workflow",
-          graphVersion: "3",
+          graphVersion: "4",
           topologyVersion: 2
         },
         node: {
@@ -491,7 +501,8 @@ function writeCurrentTaskAuthority(runRoot: string, taskSpecifications: readonly
           modelName: "gpt-fixture",
           reasoningEffort: "high",
           modelIndex: 0,
-          attemptIndex: 0
+          attemptIndex: 0,
+          agentChain
         },
         workspace: {
           primitive: "worktree",
@@ -508,7 +519,7 @@ function writeCurrentTaskAuthority(runRoot: string, taskSpecifications: readonly
           })),
           manifestPath: `${artifactDir}/artifact-manifest.json`
         },
-        retryPolicy: { maxAttempts: 1, smithersRetries: 0 },
+        retryPolicy: { maxAttempts: 1, sameAgentAttempts: 1, smithersRetries: 0 },
         timeout: { milliseconds: 60_000, seconds: 60, heartbeatTimeoutMs: 60_000 },
         execution: {
           mode: "local",

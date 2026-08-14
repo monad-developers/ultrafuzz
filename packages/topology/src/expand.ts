@@ -82,7 +82,7 @@ function expandNode(
     ...(node.required_commands.length === 0 ? {} : { requiredCommands: [...node.required_commands] }),
     artifactDir: deterministicArtifactDir(concreteId),
     ...timeoutSecondsFor(node, topology),
-    retryPolicy: { maxAttempts: maxAttemptsFor(node, topology) },
+    retryPolicy: { maxAttempts: maxAttemptsFor(node, topology, options) },
     loop: {
       index: loopIndex,
       count: loopCount,
@@ -191,11 +191,20 @@ function timeoutSecondsFor(
   return timeoutSeconds === undefined ? {} : { timeoutSeconds };
 }
 
-function maxAttemptsFor(node: NormalizedTopologyNode, topology: NormalizedProjectTopology): number {
+function maxAttemptsFor(
+  node: NormalizedTopologyNode,
+  topology: NormalizedProjectTopology,
+  options: ExpandTopologyOptions
+): number {
   if (node.kind !== "agentic") {
     return 1;
   }
-  return node.max_attempts ?? (node.group ? topology.groups[node.group]?.defaults?.max_attempts : undefined) ?? 1;
+  return (
+    node.max_attempts ??
+    (node.group ? topology.groups[node.group]?.defaults?.max_attempts : undefined) ??
+    options.defaultMaxAttempts ??
+    1
+  );
 }
 
 function modelFanoutFor(

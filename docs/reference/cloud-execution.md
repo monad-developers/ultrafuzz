@@ -51,10 +51,13 @@ receives the override. Unknown node IDs fail validation before launch.
 
 ## Execution and Retry Model
 
-Each expanded agentic attempt maps to one Smithers sandbox node. A new Modal VM
-is created for its first execution and for every retry. The task and its
-artifact-contract verifier run in that same VM; the controller independently
-verifies the published artifacts before dependent nodes can start.
+Each expanded agentic attempt maps to one Smithers sandbox node. Cloud execution
+currently accepts only a one-rung model chain (`same_agent_attempts = 1` with no
+applicable fallback). Planning rejects longer chains before creating run state;
+this avoids running nominally isolated retry rungs in one VM or sharing sibling
+agent credentials. The task and its artifact-contract verifier run in the same
+VM; the controller independently verifies the published artifacts before
+dependent nodes can start.
 
 The image installs a root-owned, non-writable `/usr/local/bin/ultrafuzz`
 launcher for the same source build under `/opt/ultrafuzz`. Before model work,
@@ -77,10 +80,11 @@ Custom images must preserve that procfs view; the worker fails closed when the
 cross-process descriptor anchor is unavailable.
 
 Cancellation terminates the current sandbox. Retryable provider failures and
-timeouts become provider-scoped workflow errors, then Smithers applies the
-existing node retry policy with a fresh VM. Once an agent session returns,
-however, a missing or schema-invalid required artifact is terminal. It does not
-trigger a correction turn, full-node model retry, or compatibility recovery.
+timeouts become provider-scoped workflow errors. Automatic model retries remain
+local-only until each cloud retry can be projected to a fresh VM with a sealed
+per-rung credential boundary. Once an agent session returns, a missing or
+schema-invalid required artifact is terminal. It does not trigger a correction
+turn, full-node model retry, or compatibility recovery.
 
 `resume` keeps the same workflow run and execution generation, so live attempts
 are reattached and proven publications are reused. `--reset-node` advances a

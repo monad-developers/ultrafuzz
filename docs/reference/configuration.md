@@ -50,6 +50,9 @@ model = "gpt-5.5"
 reasoning = "xhigh"
 timeout_seconds = 1800
 
+[retry]
+same_agent_attempts = 1
+
 [permissions]
 trust_model = "skip-permissions"
 prompt_review_required = true
@@ -88,6 +91,7 @@ contract used by the CLI and runtime.
 | `[run]`                         | Run output, parallelism, workspace, and timeout settings.                  |
 | `[execution]`                   | Local or provider-backed execution and node resource defaults.             |
 | `[models]` and `[models.<id>]`  | Default model profile and model profile definitions.                       |
+| `[retry]`                       | Bounded primary retries and opt-in ordered model fallback.                 |
 | `[permissions]`                 | Trusted local execution posture and materialization defaults.              |
 | `[invariants]`                  | Invariant prompt defaults.                                                 |
 | `[triage]`                      | Triage quorum and panel size.                                              |
@@ -208,6 +212,36 @@ start with `~` and suffix variants such as `:free` are valid. OpenRouter IDs
 must be non-empty, no longer than 256 characters, and contain no whitespace or
 control characters. Subscription auth is rejected.
 
+## Retry Policy
+
+```toml
+[retry]
+same_agent_attempts = 3
+agents = ["sol-xhigh", "gpt55-xhigh"]
+```
+
+`same_agent_attempts` is a positive integer counting the first primary attempt.
+The optional `agents` array contains unique existing model-profile IDs. Its
+first entry is the default primary profile; later entries each receive one
+fallback attempt in order. Neither `same_agent_attempts` nor the expanded
+primary-plus-fallback chain may exceed 100 attempts. Profile names are opaque: `gpt55-xhigh` maps to
+`model = "gpt-5.5"` and `reasoning = "xhigh"` only through its explicit
+`[models.gpt55-xhigh]` table.
+
+Fallback is disabled when `agents` is absent or empty. A topology node
+`max_attempts` overrides its group, and a group value overrides
+`retry.same_agent_attempts`. Automatic retries are generic Smithers-retryable
+failures: Ultrafuzz neither parses the error nor changes the effective task
+prompt. Each retry uses a fresh session and bounded exponential backoff.
+Benchmark/eval rows reject
+configured fallback so a row cannot silently change models.
+
+Automatic retry chains are currently supported only for local execution. Cloud
+planning requires one effective attempt until every retry rung can receive a
+fresh sandbox and an isolated credential boundary. Local fallback across
+different agent implementations is also rejected when any rung uses API-key
+authentication; profiles on the same agent may safely select different models.
+
 ## Permissions
 
 ```toml
@@ -307,10 +341,13 @@ Boolean values accept `1`, `true`, `yes`, `on`, `0`, `false`, `no`, and `off`.
 3. Supported environment overrides.
 4. Runtime overrides from the CLI.
 
-The redacted operator-facing resolved config is persisted for each run as
+The user-authored TOML contract remains `ultrafuzz.config.v2`: adding the
+optional `[retry]` table does not invalidate existing project files. The
+redacted operator-facing resolved config is persisted for each run as
 `config.resolved.toml`, with restore metadata in `config.redactions.json`. The
 unredacted workflow control contract is serialized once as camelCase JSON,
-validated against `urn:ultrafuzz:schema:config:resolved-config:2`, and published
+identified as `ultrafuzz.resolved-config.v3`, validated against
+`urn:ultrafuzz:schema:config:resolved-config:3`, and published
 byte-for-byte as `smithers/resolved-config.json` before it is sealed into the
 execution snapshot. Sealed readers run the same strict parser and schema; they
 do not use historical fallbacks. That JSON document carries the audit-profile

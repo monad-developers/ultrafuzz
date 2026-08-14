@@ -15,7 +15,9 @@ describe("fingerprintGraph", () => {
     const base = fingerprintGraph(
       expandTopology(validTopology(), {
         configFingerprint: "a".repeat(64),
-        promptTexts: { "strategies/strategy.md": "original" }
+        promptTexts: {
+          "strategies/strategy.md": "original {{finding_reachability_vocabulary}} {{finding_note_key_vocabulary}}"
+        }
       })
     );
 
@@ -26,7 +28,9 @@ describe("fingerprintGraph", () => {
       fingerprintGraph(
         expandTopology(validTopology(), {
           configFingerprint: "a".repeat(64),
-          promptTexts: { "strategies/strategy.md": "changed" }
+          promptTexts: {
+            "strategies/strategy.md": "changed {{finding_reachability_vocabulary}} {{finding_note_key_vocabulary}}"
+          }
         })
       )
     ).not.toBe(base);
@@ -35,7 +39,9 @@ describe("fingerprintGraph", () => {
       fingerprintGraph(
         expandTopology(validTopology(), {
           configFingerprint: "b".repeat(64),
-          promptTexts: { "strategies/strategy.md": "original" }
+          promptTexts: {
+            "strategies/strategy.md": "original {{finding_reachability_vocabulary}} {{finding_note_key_vocabulary}}"
+          }
         })
       )
     ).not.toBe(base);

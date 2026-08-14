@@ -83,6 +83,7 @@ describe("config loading and resolution", () => {
       model: "anthropic/claude-sonnet-4.6",
       reasoning: "high"
     });
+    expect(resolved.value.retry).toEqual({ sameAgentAttempts: 1, agents: [] });
     expect(resolved.value.run.workflowDeadlineSeconds).toBe(86_400);
     expect(resolved.value.run.controllerLeaseSeconds).toBe(30);
     expect(resolved.value.invariants.invariantTestingSmokeTimeoutSeconds).toBe(600);
@@ -101,6 +102,144 @@ describe("config loading and resolution", () => {
       nodes: {},
       providers: {}
     });
+  });
+
+  it("resolves an error-agnostic retry policy through explicit model profile IDs", () => {
+    const parsed = parseProjectConfigToml(`
+[models.sol-xhigh]
+agent = "CodexAgent"
+model = "gpt-5.6-sol"
+reasoning = "xhigh"
+
+[models.gpt55-xhigh]
+agent = "CodexAgent"
+model = "gpt-5.5"
+reasoning = "xhigh"
+
+[retry]
+same_agent_attempts = 3
+agents = ["sol-xhigh", "gpt55-xhigh"]
+`);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const resolved = resolveConfig({ env: {}, projectConfig: parsed.value });
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) throw new Error(JSON.stringify(resolved.diagnostics, null, 2));
+    expect(resolved.value.retry).toEqual({
+      sameAgentAttempts: 3,
+      agents: ["sol-xhigh", "gpt55-xhigh"]
+    });
+    expect(resolved.value.models.profiles["gpt55-xhigh"]).toMatchObject({
+      agent: "CodexAgent",
+      model: "gpt-5.5",
+      reasoning: "xhigh"
+    });
+    expect(serializeRedactedResolvedConfigToml(resolved.value)).toContain('agents = ["sol-xhigh", "gpt55-xhigh"]');
+  });
+
+  it("rejects unknown and duplicate retry profile IDs without parsing provider errors", () => {
+    const unknown = resolveConfig({
+      env: {},
+      projectConfig: { retry: { sameAgentAttempts: 2, agents: ["missing"] } }
+    });
+    expect(unknown.ok).toBe(false);
+    if (!unknown.ok) expect(unknown.diagnostics.map((entry) => entry.code)).toContain("CONFIG_RETRY_AGENT_UNKNOWN");
+
+    const duplicate = resolveConfig({
+      env: {},
+      projectConfig: { retry: { agents: ["default", "default"] } }
+    });
+    expect(duplicate.ok).toBe(false);
+    if (!duplicate.ok) {
+      expect(duplicate.diagnostics.map((entry) => entry.code)).toContain("CONFIG_RETRY_AGENT_DUPLICATE");
+    }
+  });
+
+  it("emits one exact retry-owned diagnostic for each invalid retry field", () => {
+    const cases: Array<{
+      retry: NonNullable<ProjectConfigInput["retry"]>;
+      expected: Pick<ConfigDiagnostic, "code" | "message" | "path">;
+    }> = [
+      {
+        retry: { sameAgentAttempts: 0 },
+        expected: {
+          code: "CONFIG_RETRY_ATTEMPTS_INVALID",
+          message: "retry.same_agent_attempts must be a positive safe integer",
+          path: ["retry", "same_agent_attempts"]
+        }
+      },
+      {
+        retry: { sameAgentAttempts: 101 },
+        expected: {
+          code: "CONFIG_RETRY_ATTEMPTS_MAX_EXCEEDED",
+          message: "retry.same_agent_attempts must not exceed 100",
+          path: ["retry", "same_agent_attempts"]
+        }
+      },
+      {
+        retry: { agents: ["../invalid"] },
+        expected: {
+          code: "CONFIG_RETRY_AGENT_ID_INVALID",
+          message: "retry.agents entry 0 must be a valid model profile ID",
+          path: ["retry", "agents", "0"]
+        }
+      },
+      {
+        retry: { agents: ["default", "default"] },
+        expected: {
+          code: "CONFIG_RETRY_AGENT_DUPLICATE",
+          message: "retry.agents repeats model profile `default`",
+          path: ["retry", "agents", "1"]
+        }
+      },
+      {
+        retry: { agents: ["missing"] },
+        expected: {
+          code: "CONFIG_RETRY_AGENT_UNKNOWN",
+          message: "retry.agents references unknown model profile `missing`",
+          path: ["retry", "agents", "0"]
+        }
+      }
+    ];
+
+    for (const { retry, expected } of cases) {
+      const result = resolveConfig({ env: {}, projectConfig: { retry } });
+      expect(result.ok).toBe(false);
+      if (result.ok) continue;
+      expect(result.diagnostics.map(({ code, message, path }) => ({ code, message, path }))).toEqual([expected]);
+    }
+  });
+
+  it("accepts a 100-attempt retry chain and rejects an expanded chain of 101 exactly once", () => {
+    const profiles = {
+      primary: { agent: "CodexAgent", model: "gpt-5.5" },
+      fallback: { agent: "CodexAgent", model: "gpt-5.6-sol" }
+    };
+    const boundary = resolveConfig({
+      env: {},
+      projectConfig: {
+        models: { profiles },
+        retry: { sameAgentAttempts: 99, agents: ["primary", "fallback"] }
+      }
+    });
+    expect(boundary.ok).toBe(true);
+
+    const exceeded = resolveConfig({
+      env: {},
+      projectConfig: {
+        models: { profiles },
+        retry: { sameAgentAttempts: 100, agents: ["primary", "fallback"] }
+      }
+    });
+    expect(exceeded.ok).toBe(false);
+    if (exceeded.ok) return;
+    expect(exceeded.diagnostics.map(({ code, message, path }) => ({ code, message, path }))).toEqual([
+      {
+        code: "CONFIG_RETRY_CHAIN_MAX_EXCEEDED",
+        message: "retry expands to 101 attempts; maximum is 100",
+        path: ["retry"]
+      }
+    ]);
   });
 
   it("loads and serializes declared production source roots", () => {
