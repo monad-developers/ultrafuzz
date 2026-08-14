@@ -118,19 +118,21 @@ forms to the rendered prompt. The same registry drives runtime validation.
 Agents should write durable cross-node handoff files under `{{artifact_path}}`
 and list those files in topology `outputs` with a named contract.
 
-Every agent-authored JSON output also receives one safely shell-quoted command
-of this form:
+Every agent-authored JSON output also receives safely shell-quoted schema and
+contract validation commands of these forms:
 
 ```bash
 ultrafuzz json validate --schema '<trusted absolute schema path>' --file '<absolute artifact path>'
+ultrafuzz artifact validate '<contract-id>' '<absolute artifact path>'
 ```
 
 After its final write and before returning, the agent must run every displayed
 command. Exit `1` means it must correct that draft and rerun the command in the
 same session; exit `2` is a tool/setup failure, not successful validation. Any
 later edit requires another validation run. Supplied schema files must not be
-edited, and the command never modifies the artifact. The host still applies
-named semantic and contextual gates after the session returns.
+edited, and neither command modifies the artifact. Contract validation covers
+document-local semantics; the host still applies named contextual gates after
+the session returns.
 
 The schema filename, fragment-free schema ID, schema SHA-256, schema-bundle
 SHA-256, and validator build identity are fixed during planning and persisted

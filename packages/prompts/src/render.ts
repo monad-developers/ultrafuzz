@@ -409,6 +409,10 @@ function appendOutputContract(rendered: string, input: PromptRenderInput, curren
                 `  Validation command: ${validationCommand(
                   path.join(schemaDirectory, output.schemaFile),
                   path.join(input.node.artifactDir, output.path)
+                )}`,
+                `  Contract validation command: ${contractValidationCommand(
+                  output.contract,
+                  path.join(input.node.artifactDir, output.path)
                 )}`
               ]),
           `  ${empty}`
@@ -428,6 +432,11 @@ function validationCommand(schemaPath: string, artifactPath: string): string {
     "--file",
     shellSingleQuote(artifactPath)
   ].join(" ");
+  return markdownCodeSpan(command);
+}
+
+function contractValidationCommand(contract: string, artifactPath: string): string {
+  const command = ["ultrafuzz artifact validate", shellSingleQuote(contract), shellSingleQuote(artifactPath)].join(" ");
   return markdownCodeSpan(command);
 }
 

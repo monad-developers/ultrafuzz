@@ -231,15 +231,16 @@ reuse can reject causally stale descendants. The host strictly validates this
 v3 manifest before writing, reading, reuse, or publication. It rejects every
 earlier manifest version without upgrading or converting it.
 
-The producer's rendered prompt includes one safely quoted `ultrafuzz json
-validate --schema ... --file ...` command per JSON output. The producer runs it
-after the final write and corrects an exit-`1` draft before returning. Once the
-agent session returns, declared artifact bytes are immutable. Host validation,
-semantic gates, synchronization, reporting, dashboards, and bundles may reject
-the bytes or copy them exactly, but may not normalize, convert, repair,
-synthesize, reseal, or substitute another file or final-response payload. A
-missing or invalid required output is a terminal post-agent failure, not a
-model retry or compatibility fallback.
+The producer's rendered prompt includes safely quoted schema and contract
+validation commands per JSON output. The first validates the pinned schema; the
+second applies the registered schema plus document-local semantic gates. The
+producer runs both after the final write and corrects an exit-`1` draft before
+returning. Once the agent session returns, declared artifact bytes are
+immutable. Host validation, contextual gates, synchronization, reporting,
+dashboards, and bundles may reject the bytes or copy them exactly, but may not
+normalize, convert, repair, synthesize, reseal, or substitute another file or
+final-response payload. A missing or invalid required output is a terminal
+post-agent failure, not a model retry or compatibility fallback.
 
 ## Findings
 

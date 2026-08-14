@@ -112,12 +112,14 @@ an earlier run. The checked-in JSON Schema is the canonical whole-document
 shape; prompt prose should explain the domain task without inventing aliases or
 alternate empty forms.
 
-Ultrafuzz centrally appends the resolved schema, valid-empty form, and one exact
-command for every declared JSON output. You do not need to hard-code a schema
-path in the editable prompt. The rendered instruction looks like:
+Ultrafuzz centrally appends the resolved schema, valid-empty form, and exact
+schema and contract validation commands for every declared JSON output. You do
+not need to hard-code either command in the editable prompt. The rendered
+instructions look like:
 
 ```bash
 ultrafuzz json validate --schema '<trusted absolute schema path>' --file '<absolute artifact path>'
+ultrafuzz artifact validate '<contract-id>' '<absolute artifact path>'
 ```
 
 Tell the producer to finish the file, run every displayed command, correct and
