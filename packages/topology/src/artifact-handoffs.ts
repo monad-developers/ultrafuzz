@@ -1063,10 +1063,17 @@ function isNonRequiredDirectiveHeading(heading: string, markdown: boolean): bool
       /\b(?:output|deliverable|artifact|file|finding|result|publication|instruction|action|step|write|emit|save|persist|produce|create|copy|return|populate|append|document)\b/iu.test(
         normalized
       );
+    const clauses = normalized.split(/\s*[;.!?]\s*/u).filter(Boolean);
     return (
       outputScoped &&
-      /\b(?:advisory|avoid|candidate|conditional|discretionary|elective|example|illustrative|nonessential|optional|recommended|suggested|unnecessary|forbidden|prohibited|never|do\s+not|must\s+not|shall\s+not)\b/iu.test(
-        normalized
+      clauses.some(
+        (clause) =>
+          /\b(?:output|deliverable|artifact|file|finding|result|publication|instruction|action|step|write|emit|save|persist|produce|create|copy|return|populate|append|document)\b/iu.test(
+            clause
+          ) &&
+          /\b(?:advisory|avoid|candidate|conditional|discretionary|elective|example|illustrative|nonessential|optional|recommended|suggested|unnecessary|forbidden|prohibited|never|do\s+not|must\s+not|shall\s+not)\b/iu.test(
+            clause
+          )
       )
     );
   }

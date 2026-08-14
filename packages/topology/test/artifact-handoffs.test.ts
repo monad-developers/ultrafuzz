@@ -990,6 +990,7 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       "Without fail:\nWrite findings to {{output_findings_path}}.",
       "## Do not edit source files\n\nWrite findings to {{output_findings_path}}.",
       "## Optional dependency behavior\n\nAlways write findings to {{output_findings_path}}.",
+      "## Write findings; do not modify source files\n\nWrite findings to {{output_findings_path}}.",
       "## No-findings handling\n\nWrite findings to {{output_findings_path}} even if none exist.",
       "Write the findings.json artifact to {{output_findings_path}}.",
       "Write confirmed findings from src/Foo.sol to {{output_findings_path}}.",
