@@ -692,6 +692,7 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       "Example output:\nWrite findings to {{output_findings_path}}.",
       "Output is elective:\nWrite findings to {{output_findings_path}}.",
       "Output is merely illustrative:\nWrite findings to {{output_findings_path}}.",
+      "## Write findings; optional\n\nWrite findings to {{output_findings_path}}.",
       "Write findings to {{output_findings_path}} when convenient.",
       "Write findings to {{output_findings_path}} at your discretion.",
       "Write findings to {{output_findings_path}} when appropriate.",

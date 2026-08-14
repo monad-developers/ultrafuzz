@@ -1064,17 +1064,21 @@ function isNonRequiredDirectiveHeading(heading: string, markdown: boolean): bool
         normalized
       );
     const clauses = normalized.split(/\s*[;.!?]\s*/u).filter(Boolean);
+    const nonRequiredQualifier =
+      /\b(?:advisory|avoid|candidate|conditional|discretionary|elective|example|illustrative|nonessential|optional|recommended|suggested|unnecessary|forbidden|prohibited|never|do\s+not|must\s+not|shall\s+not)\b/iu;
     return (
       outputScoped &&
-      clauses.some(
+      (clauses.some(
         (clause) =>
           /\b(?:output|deliverable|artifact|file|finding|result|publication|instruction|action|step|write|emit|save|persist|produce|create|copy|return|populate|append|document)\b/iu.test(
             clause
-          ) &&
-          /\b(?:advisory|avoid|candidate|conditional|discretionary|elective|example|illustrative|nonessential|optional|recommended|suggested|unnecessary|forbidden|prohibited|never|do\s+not|must\s+not|shall\s+not)\b/iu.test(
-            clause
+          ) && nonRequiredQualifier.test(clause)
+      ) ||
+        clauses.some((clause) =>
+          /^(?:advisory|candidate|conditional|discretionary|elective|example|illustrative|nonessential|optional|recommended|suggested|unnecessary|forbidden|prohibited)$/iu.test(
+            clause.trim()
           )
-      )
+        ))
     );
   }
   return /(?:\b(?:advisory|avoid|banned|barred|candidate|cannot|conditional|decline|disallowed|discourage|discouraged|discretionary|elective|example|except|exclude|forbidden|historical|illegal|ignore|ignored|illustrative|never|no|nonessential|not|omit|optional|optionally|prevent|prohibited|quoted|recommended|refuse|refrain|skip|suggested|unnecessary|unauthorized)\b|(?:aren|don|mayn|mustn|shouldn|can)['’]t|\bif\s+(?:needed|useful|possible)\b|\bwhen\s+(?:appropriate|convenient|useful)\b|\bas\s+needed\b|\bat\s+your\s+discretion\b)/iu.test(
