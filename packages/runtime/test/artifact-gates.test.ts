@@ -10488,16 +10488,21 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
   const valid = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
 
-  publish(
-    evidence,
-    `${scopedMarkdown}\n## Notes\n\nCoverage was 100% <span style="opacity: 0">selected-range</span>.\n`
-  );
-  const hiddenProducerScope = verifyRequiredArtifactsForAttempt(layout, node, node.id);
-  assert.equal(hiddenProducerScope.ok, false);
-  assert.ok(
-    hiddenProducerScope.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"),
-    JSON.stringify(hiddenProducerScope.diagnostics)
-  );
+  for (const unscopedProducerScore of [
+    'Coverage was 100% <span style="opacity: 0">selected-range</span>.',
+    'Coverage was 100% <span style="clip-path: inset(100%)">selected-range</span>.',
+    "covg_eval=39/39."
+  ]) {
+    publish(evidence, `${scopedMarkdown}\n## Notes\n\n${unscopedProducerScore}\n`);
+    const hiddenProducerScope = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+    assert.equal(hiddenProducerScope.ok, false, unscopedProducerScore);
+    assert.ok(
+      hiddenProducerScope.diagnostics.some((diagnostic) =>
+        /^UNSCOPED_COVERAGE_(?:FRACTION|PERCENTAGE)$/u.test(diagnostic.code)
+      ),
+      JSON.stringify(hiddenProducerScope.diagnostics)
+    );
+  }
 
   const incompleteZeroRanges = structuredClone(evidence);
   incompleteZeroRanges.zero_coverage_components.shift();
@@ -11592,7 +11597,13 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
     "Selected-range coverage was 100% — overall coverage was 25%.",
     "Selected-range coverage was 100% overall coverage was 25%.",
     "Selected-range coverage was 100% and overall was 25%.",
+    "Selected-range coverage was 100%; its overall value was 25%.",
+    "Selected-range coverage was 100%; the overall metric was 25%.",
+    "Selected-range coverage was 100% plus overall 25%.",
     "Coverage was 100% selected-range and 25% overall.",
+    "Coverage was 100% selected-range plus 25% overall.",
+    "Coverage was 99% selected-range 25%.",
+    "Coverage was 100% in the selected-range methodology.",
     "Overall coverage is approximately 25%.",
     "Overall coverage came to 25%.",
     "Overall coverage hit 25%.",
@@ -11602,9 +11613,22 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
     "Coverage is above 90%.",
     "Coverage now shows 100%.",
     "coverage_rate=100%.",
+    "coverage.percent=100%.",
+    "Coverage percent was 100%.",
+    "covg_eval=39/39.",
     "Coverage was 100 percent.",
+    "Coverage was 100 per cent.",
+    "Coverage was one hundred percent.",
+    "Coverage was ninety-nine percent.",
+    "Coverage was one hundred per cent.",
+    "LCOV result was one hundred percent.",
+    "Coverage was .5%.",
+    "Coverage was 1e2%.",
     "Coverage accounted for 39/39 ranges.",
     "Coverage was 39 out of 39 ranges.",
+    "Coverage was 39 of 39 ranges.",
+    "Coverage was 1,000/1,000 lines.",
+    "Coverage was thirty-nine out of thirty-nine ranges.",
     "Unlike selected-range measurements: overall coverage was 25%.",
     "Coverage was **100%**.",
     "Coverage was *100%*.",
@@ -11621,6 +11645,9 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
     "Coverage was 39⧸39 ranges.",
     "Coverage was 39／39 ranges.",
     "Coverage was ١٠٠%.",
+    "Coverage was १००%.",
+    "Coverage was ১০০%.",
+    "Coverage was ١٠٠٫٠٪.",
     "Coverage was 100٪.",
     "Coverage was **39/39** ranges.",
     "Coverage was 100\\%.",
@@ -11636,8 +11663,14 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
     'Coverage was 100% <span aria-hidden="true">selected-range</span>.',
     'Coverage was 100% <span style="display: none">selected-range</span>.',
     'Coverage was 100% <span style="opacity: 0">selected-range</span>.',
+    'Coverage was 100% <span style="opacity: 0%">selected-range</span>.',
     'Coverage was 100% <span style="font-size: 0">selected-range</span>.',
     'Coverage was 100% <span style="color: transparent">selected-range</span>.',
+    'Coverage was 100% <span style="color: hsla(0, 0%, 0%, 0)">selected-range</span>.',
+    'Coverage was 100% <span style="clip-path: inset(100%)">selected-range</span>.',
+    'Coverage was 100% <span style="position:absolute;left:-9999px">selected-range</span>.',
+    'Coverage was 100% <span style="display:/**/none">selected-range</span>.',
+    'Coverage was 100% <span style="transform: scale(0)">selected-range</span>.',
     "Coverage was 100% <span inert>selected-range</span>.",
     "Coverage was 100% ![selected-range](https://example.invalid/chart.svg).",
     "![Coverage was 100%.](https://example.invalid/chart.svg)",
@@ -11674,9 +11707,9 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
       mixed.diagnostics.some(
         (diagnostic) =>
           diagnostic.code ===
-          (/\b\d+\s*(?:\/|\\\/|&#47;|out\s+of)\s*\d+\b/u.test(normalizedMixedScore)
-            ? "UNSCOPED_COVERAGE_FRACTION"
-            : "UNSCOPED_COVERAGE_PERCENTAGE")
+          (/%|٪|&(?:percnt|#0*37|#x0*25);|\bper[ -]?cent(?:age)?\b/iu.test(normalizedMixedScore)
+            ? "UNSCOPED_COVERAGE_PERCENTAGE"
+            : "UNSCOPED_COVERAGE_FRACTION")
       ),
       mixedScore
     );
@@ -11692,6 +11725,7 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
     '<span aria-hidden="true">Coverage was 100%.</span>',
     '<span style="visibility: hidden">Coverage was 100%.</span>',
     '<span style="opacity: 0">Coverage was 100%.</span>',
+    '<span style="opacity: 0%">Coverage was 100%.</span>',
     '<span style="font-size: 0">Coverage was 100%.</span>',
     '<span style="color: transparent">Coverage was 100%.</span>',
     "<span inert>Coverage was 100%.</span>",
@@ -11743,11 +11777,29 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
 
   for (const unrelatedPercentage of [
     "Selected-range coverage was 100%, while the insurance payout was 25%.",
-    "Selected-range coverage was 100% and interest was 25%."
+    "Selected-range coverage was 100% and interest was 25%.",
+    "The insurance policy coverage was 25%.",
+    "The insurance policy coverage was twenty-five percent.",
+    "The flood insurance's coverage was 25%.",
+    "The warranty coverage was 25% of the repair cost."
   ]) {
     writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\n${unrelatedPercentage}\n`);
     const unrelatedProse = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
     assert.equal(unrelatedProse.ok, true, `${unrelatedPercentage}: ${JSON.stringify(unrelatedProse.diagnostics)}`);
+  }
+
+  for (const coverageSectionProse of [
+    "Retry 1/2 after the transient failure.",
+    "At 25% utilization, insurance coverage is exhausted.",
+    "The campaign used 25% of its time budget."
+  ]) {
+    writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Coverage\n\n${coverageSectionProse}\n`);
+    const unrelatedSectionProse = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+    assert.equal(
+      unrelatedSectionProse.ok,
+      true,
+      `${coverageSectionProse}: ${JSON.stringify(unrelatedSectionProse.diagnostics)}`
+    );
   }
 
   writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\nThe selected-range was 1/1.\n`);
