@@ -544,6 +544,8 @@ export interface FindingJudgeInput {
   suite: EvalSuiteSpec;
   row: EvalMatrixRow;
   finding: unknown;
+  /** Complete scoped denominator copied from the verified terminal report. */
+  coverageEvidence?: unknown;
   bugs: GroundTruthBug[];
   deterministicResult: FindingJudgeResult;
   threshold: number;
