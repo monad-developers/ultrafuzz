@@ -19,7 +19,7 @@ function git(cwd: string, args: string[]): string {
 function writeSmallTopology(project: string): void {
   fs.writeFileSync(
     path.join(project, ".ultrafuzz", "prompts", "setup", "test-output.md"),
-    "Write the result to `{{artifact_path}}/stdout.txt`.\n",
+    "Write stdout content to `{{artifact_path}}/stdout.txt`.\n",
     "utf8"
   );
   fs.writeFileSync(

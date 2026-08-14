@@ -4021,7 +4021,12 @@ test("validate rejects effective project prompts that omit valid-empty output de
   assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
   writeSmallTopology(project);
   const promptPath = path.join(project, ".ultrafuzz", "prompts", "setup", "project-discovery.md");
-  fs.writeFileSync(promptPath, "---\nid: project-discovery\n---\n\nInvestigate the project.\n", "utf8");
+  fs.writeFileSync(
+    promptPath,
+    "---\nid: project-discovery\n---\n\nInvestigate the project.\n" +
+      "Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.\n",
+    "utf8"
+  );
 
   const missing = await validateProject({ projectRoot: project, env: {} });
   assert.equal(missing.ok, false);
@@ -4036,7 +4041,8 @@ test("validate rejects effective project prompts that omit valid-empty output de
 
   fs.writeFileSync(
     promptPath,
-    "---\nid: project-discovery\n---\n\nInvestigate the project and write findings to {{output_findings_path}}.\n",
+    "---\nid: project-discovery\n---\n\nInvestigate the project and write findings to {{output_findings_path}}.\n" +
+      "Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.\n",
     "utf8"
   );
   const instructed = await validateProject({ projectRoot: project, env: {} });

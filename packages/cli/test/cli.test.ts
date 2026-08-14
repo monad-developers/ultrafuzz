@@ -264,7 +264,12 @@ function fakeSmithersEnv(
 function writeSyntheticOutputPrompt(project: string, outputPaths: string[]): void {
   fs.writeFileSync(
     path.join(project, ".ultrafuzz", "prompts", "setup", "test-output.md"),
-    `${outputPaths.map((outputPath) => `Write the declared output to \`{{artifact_path}}/${outputPath}\`.`).join("\n")}\n`,
+    `${outputPaths
+      .map((outputPath) => {
+        const outputName = outputPath.replace(/\.[^.]+$/u, "").replace(/[-_.]+/gu, " ");
+        return `Write the ${outputName} artifact to \`{{artifact_path}}/${outputPath}\`.`;
+      })
+      .join("\n")}\n`,
     "utf8"
   );
 }
@@ -300,9 +305,9 @@ nodes:
   );
 }
 
-function appendReportVocabularyPromptReferences(project: string): void {
+function appendReportVocabularyPromptReferences(project: string, promptPath = "setup/project-discovery.md"): void {
   fs.appendFileSync(
-    path.join(project, ".ultrafuzz", "prompts", "setup", "project-discovery.md"),
+    path.join(project, ".ultrafuzz", "prompts", promptPath),
     "\n{{finding_reachability_vocabulary}}\n{{finding_note_key_vocabulary}}\n",
     "utf8"
   );
@@ -349,7 +354,7 @@ nodes:
 `,
     "utf8"
   );
-  appendReportVocabularyPromptReferences(project);
+  appendReportVocabularyPromptReferences(project, "setup/test-output.md");
 }
 
 function writeCustomReportTopology(project: string): void {
@@ -434,7 +439,7 @@ nodes:
 `,
     "utf8"
   );
-  appendReportVocabularyPromptReferences(project);
+  appendReportVocabularyPromptReferences(project, "setup/test-output.md");
 }
 
 async function cli(
