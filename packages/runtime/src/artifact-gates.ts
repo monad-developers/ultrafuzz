@@ -7129,6 +7129,8 @@ const COVERAGE_EXPLICIT_RATIO_AFTER_PATTERN = new RegExp(
   `^[^.!?;\\r\\n]{0,64}${COVERAGE_EXPLICIT_RATIO_LABEL_PATTERN_SOURCE}`,
   "iu"
 );
+const COVERAGE_CLOCK_CONTEXT_BEFORE_PATTERN =
+  /\b(?:created|generated|published|recorded|timestamped|updated)[ \t]+(?:at|around)[ \t]*$/iu;
 const COVERAGE_METRIC_PATTERN_SOURCE =
   "(?:coverage(?:[._-]?(?:fraction|measurement|metric|pct|percent(?:age)?|rate|ratio|result|score|summary|value))?|lcov|covg[-_ \\t]?eval|standardized[ \\t]+(?:measurement|metric|percent(?:age)?|rate|result|score|value))";
 const COVERAGE_APPROXIMATION_PATTERN_SOURCE = "(?:about|approximately|nearly|roughly)";
@@ -7167,6 +7169,15 @@ function coverageScoreUsesUnambiguousSyntax(line: string, match: RegExpMatchArra
   if (!match[0].includes(":")) return true;
   const before = line.slice(Math.max(0, match.index! - 96), match.index!);
   const after = line.slice(match.index! + match[0].length, match.index! + match[0].length + 96);
+  const clock = /^\s*(\d{1,2})\s*:\s*(\d{2})\s*$/u.exec(match[0]);
+  if (
+    clock !== null &&
+    Number(clock[1]) <= 23 &&
+    Number(clock[2]) <= 59 &&
+    COVERAGE_CLOCK_CONTEXT_BEFORE_PATTERN.test(before)
+  ) {
+    return false;
+  }
   return COVERAGE_EXPLICIT_RATIO_BEFORE_PATTERN.test(before) || COVERAGE_EXPLICIT_RATIO_AFTER_PATTERN.test(after);
 }
 
@@ -7339,7 +7350,6 @@ const HTML_NON_TEXT_INPUT_TYPES = new Set([
   "file",
   "hidden",
   "month",
-  "number",
   "password",
   "radio",
   "range",
@@ -7650,19 +7660,22 @@ function htmlScopeIsStyled(state: HtmlVisibilityState): boolean {
 }
 
 function maskStyledCoverageScopeFragments(value: string): string {
-  const scoreSpans = [...value.matchAll(new RegExp(COVERAGE_SCORE_PATTERN_SOURCE, "giu"))].map((match) => ({
-    start: match.index!,
-    end: match.index! + match[0].length
-  }));
-  let scoreSpanIndex = 0;
+  const scoreMatches = value.matchAll(new RegExp(COVERAGE_SCORE_PATTERN_SOURCE, "giu"));
+  let scoreMatch = scoreMatches.next();
   return value.replace(
     /&(?:#(?:[xX][0-9A-Fa-f]+|\d+)|[A-Za-z][A-Za-z0-9]+);?|[\p{L}-]+/gu,
     (fragment, offset: number) => {
-      while (scoreSpans[scoreSpanIndex] !== undefined && scoreSpans[scoreSpanIndex]!.end <= offset) {
-        scoreSpanIndex += 1;
+      while (!scoreMatch.done && scoreMatch.value.index! + scoreMatch.value[0].length <= offset) {
+        scoreMatch = scoreMatches.next();
       }
-      const scoreSpan = scoreSpans[scoreSpanIndex];
-      if (scoreSpan !== undefined && offset < scoreSpan.end && offset + fragment.length > scoreSpan.start) {
+      const scoreStart = scoreMatch.done ? undefined : scoreMatch.value.index!;
+      const scoreEnd = scoreMatch.done ? undefined : scoreStart! + scoreMatch.value[0].length;
+      if (
+        scoreStart !== undefined &&
+        scoreEnd !== undefined &&
+        offset < scoreEnd &&
+        offset + fragment.length > scoreStart
+      ) {
         return fragment;
       }
       const decodedFragment = fragment.startsWith("&") ? decodeHTML(fragment) : fragment;

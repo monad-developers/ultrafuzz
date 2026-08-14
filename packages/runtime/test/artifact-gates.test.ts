@@ -12099,6 +12099,7 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
     '<input type="button" value="Overall coverage was 100%">',
     '<input type="text" value="Overall coverage was 100%">',
     '<input type="text" placeholder="Overall coverage was 100%">',
+    '<input type="number" placeholder="Overall coverage was 100%">',
     '<input type="image" alt="Overall coverage was 100%">',
     '<input type="&#116;ext" value="Overall coverage was 100%">',
     '<input type="unknown" value="Overall coverage was 100%">',
@@ -12157,23 +12158,25 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
   }
 
   const denseScopedScores = Array.from({ length: 12_000 }, () => "production-declaration-completeness: 1/1").join("; ");
-  const denseBindingStartedAt = process.cpuUsage();
-  writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\n${denseScopedScores}\n`);
-  const denseBinding = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
-  const denseBindingUsage = process.cpuUsage(denseBindingStartedAt);
-  const denseBindingElapsedMs = (denseBindingUsage.user + denseBindingUsage.system) / 1_000;
-  assert.equal(denseBinding.ok, false);
-  assert.ok(denseBindingElapsedMs < 5_000, `dense scope binding took ${denseBindingElapsedMs}ms`);
-  assert.equal(
-    denseBinding.diagnostics.filter((diagnostic) => diagnostic.code === "COVERAGE_SCORE_SCAN_LIMIT_EXCEEDED").length,
-    1,
-    JSON.stringify(denseBinding.diagnostics)
-  );
-  assert.ok(denseBinding.diagnostics.length < 10, JSON.stringify(denseBinding.diagnostics));
-  assert.ok(
-    !denseBinding.diagnostics.some((diagnostic) => diagnostic.code.startsWith("UNSCOPED_")),
-    JSON.stringify(denseBinding.diagnostics)
-  );
+  for (const denseScoreBlock of [denseScopedScores, `<span class="metric">${denseScopedScores}</span>`]) {
+    const denseBindingStartedAt = process.cpuUsage();
+    writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\n${denseScoreBlock}\n`);
+    const denseBinding = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+    const denseBindingUsage = process.cpuUsage(denseBindingStartedAt);
+    const denseBindingElapsedMs = (denseBindingUsage.user + denseBindingUsage.system) / 1_000;
+    assert.equal(denseBinding.ok, false);
+    assert.ok(denseBindingElapsedMs < 5_000, `dense scope binding took ${denseBindingElapsedMs}ms`);
+    assert.equal(
+      denseBinding.diagnostics.filter((diagnostic) => diagnostic.code === "COVERAGE_SCORE_SCAN_LIMIT_EXCEEDED").length,
+      1,
+      JSON.stringify(denseBinding.diagnostics)
+    );
+    assert.ok(denseBinding.diagnostics.length < 10, JSON.stringify(denseBinding.diagnostics));
+    assert.ok(
+      !denseBinding.diagnostics.some((diagnostic) => diagnostic.code.startsWith("UNSCOPED_")),
+      JSON.stringify(denseBinding.diagnostics)
+    );
+  }
 
   for (const nonRenderedScore of [
     "<!--\nCoverage was 100%.\n-->",
@@ -12395,6 +12398,7 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
 
   for (const coverageTimestamp of [
     "Coverage report generated at 10:30.",
+    "Coverage score generated at 10:30 UTC.",
     "Coverage ran for 1:30 before stopping.",
     "Coverage report generated at 10:30:45 UTC.",
     "LCOV generated at 10:30."
