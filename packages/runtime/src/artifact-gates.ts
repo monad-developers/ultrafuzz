@@ -17,9 +17,12 @@ import {
   derivePropertyImplementationCoverage,
   executeSemanticGate,
   getNodeArtifactDir,
+  getNodeWorkspaceDir,
   findingFuzzerBackendProvenance,
   invariantPinnedSourceRefExists,
   IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
+  MAX_COVERAGE_EVIDENCE_FILES,
+  MAX_COVERAGE_EVIDENCE_RANGES,
   MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILE_BYTES,
   PROPERTIES_SCHEMA_VERSION,
   readArtifactManifest,
@@ -73,6 +76,8 @@ import {
   type WorkspacePatchManifest
 } from "@ultrafuzz/artifacts";
 import { parseProjectConfigToml } from "@ultrafuzz/config";
+import { decodeHTML } from "entities";
+import { fromMarkdown } from "mdast-util-from-markdown";
 
 import { authenticatedAggregationSemanticContext } from "./aggregation-semantic-context.js";
 import {
@@ -93,6 +98,7 @@ import { diagnosticFromError } from "./utils.js";
 import { validateSeverityMatrixArtifact, type SeverityArtifactKind } from "./severity-matrix.js";
 import { deriveWorkspacePatchGitFacts } from "./workspace-handoff.js";
 import { loadFinalizedNodeOutputSnapshot, type VerifiedOutputArtifactSnapshot } from "./verified-output.js";
+import { renderCoverageEvidenceMarkdownSection } from "./final-report-markdown.js";
 
 const MAX_ARTIFACT_SNAPSHOT_BYTES = 64 * 1024 * 1024;
 const PROPERTY_LENS_CONTRACT = "ultrafuzz/property-lens@2" as const;
@@ -3425,7 +3431,7 @@ function severityArtifactForNode(node: PlannedGraphNode): { kind: SeverityArtifa
   if (logicalId === "severity-classification") {
     return { kind: "severity-classification", path: "severity-classified-findings.json" };
   }
-  const reportOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/report@2");
+  const reportOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/report@3");
   if (reportOutputs.length === 1) {
     return { kind: "final-report", path: reportOutputs[0]!.path };
   }
@@ -4310,7 +4316,8 @@ function verifyPropertyProvenanceArtifacts(
   authenticated?: AuthenticatedArtifactGateSnapshots
 ): RuntimeDiagnostic[] {
   const isPropertyLens = node.outputs.some((output) => output.contract === "ultrafuzz/property-lens@2");
-  const isFinalReport = node.outputs.some((output) => output.contract === "ultrafuzz/report@2");
+  const isFinalReport = node.outputs.some((output) => output.contract === "ultrafuzz/report@3");
+  const isCoverageEvidence = node.outputs.some((output) => output.contract === "ultrafuzz/coverage-evidence@1");
   const isImplementation = node.outputs.some((output) => output.contract === "ultrafuzz/implemented-properties@3");
   const isCampaign = node.outputs.some((output) => output.contract === "ultrafuzz/property-campaign@3");
   const diagnostics: RuntimeDiagnostic[] = [];
@@ -4326,6 +4333,10 @@ function verifyPropertyProvenanceArtifacts(
     diagnostics.push(
       ...verifyFinalReportPropertyReferences(layout, artifactDir, node, attemptAuthority, authenticated)
     );
+  }
+  if (isCoverageEvidence) {
+    diagnostics.push(...verifyCoverageProductionInventory(layout, artifactDir, node, attemptId, authenticated));
+    diagnostics.push(...verifyCoverageGoalEvidenceParity(artifactDir, node, authenticated));
   }
   if (!isImplementation && !isCampaign) return diagnostics;
 
@@ -4359,6 +4370,1254 @@ function verifyPropertyProvenanceArtifacts(
     );
   }
   return diagnostics;
+}
+
+function verifyCoverageGoalEvidenceParity(
+  artifactDir: string,
+  node: PlannedGraphNode,
+  authenticated?: AuthenticatedArtifactGateSnapshots
+): RuntimeDiagnostic[] {
+  const goalOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/coverage-goal@2");
+  const evidenceOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/coverage-evidence@1");
+  if (goalOutputs.length !== 1 || evidenceOutputs.length !== 1) {
+    return [
+      {
+        code: "COVERAGE_GOAL_EVIDENCE_DECLARATION_AMBIGUOUS",
+        message: `Coverage producer must declare exactly one coverage goal and one coverage evidence output; found ${goalOutputs.length} goal and ${evidenceOutputs.length} evidence outputs`,
+        severity: "error",
+        source: "coverage-evidence",
+        path: node.id
+      }
+    ];
+  }
+  const goalPath = safeResolveInside(artifactDir, goalOutputs[0]!.path, "coverage goal output");
+  const evidencePath = safeResolveInside(artifactDir, evidenceOutputs[0]!.path, "coverage evidence output");
+  const goal = parseCurrentArtifactJson(artifactDir, goalPath, authenticated);
+  const evidence = parseCurrentArtifactJson(artifactDir, evidencePath, authenticated);
+  if (!isRecord(goal) || !isRecord(evidence)) return [];
+  if (evidence.status === "unavailable") {
+    return goal.current_status === "blocked" &&
+      goal.current_measurement === null &&
+      isDeepStrictEqual(goal.blockers, evidence.blockers)
+      ? []
+      : [
+          {
+            code: "COVERAGE_GOAL_BLOCKER_MISMATCH",
+            message:
+              "Unavailable coverage evidence requires a blocked goal with no measurement and the exact same blockers",
+            severity: "error",
+            source: "coverage-evidence",
+            path: goalPath
+          }
+        ];
+  }
+  if (evidence.status !== "measured" || !Array.isArray(evidence.views)) return [];
+  const selected = evidence.views.find(
+    (view): view is Record<string, unknown> =>
+      isRecord(view) && view.scope === "recon-selected-declaration-completeness"
+  );
+  if (selected === undefined) return [];
+  const coveredRanges = selected.covered_ranges;
+  const totalRanges = selected.total_ranges;
+  if (
+    typeof coveredRanges !== "number" ||
+    typeof totalRanges !== "number" ||
+    !Number.isSafeInteger(coveredRanges) ||
+    !Number.isSafeInteger(totalRanges) ||
+    coveredRanges < 0 ||
+    totalRanges < 0
+  )
+    return [];
+  const expectedStatus =
+    totalRanges > 0 && BigInt(coveredRanges) * 100n >= BigInt(totalRanges) * 90n ? "target-met" : "below-target";
+  if (!isDeepStrictEqual(goal.current_measurement, selected) || goal.current_status !== expectedStatus) {
+    return [
+      {
+        code: "COVERAGE_GOAL_MEASUREMENT_MISMATCH",
+        message: `Measured coverage requires the exact Recon-selected declaration view and derived ${expectedStatus} status; 0/0 is below-target`,
+        severity: "error",
+        source: "coverage-evidence",
+        path: goalPath
+      }
+    ];
+  }
+  return [];
+}
+
+function verifyCoverageProductionInventory(
+  layout: RunLayout,
+  artifactDir: string,
+  node: PlannedGraphNode,
+  attemptId: string,
+  authenticated?: AuthenticatedArtifactGateSnapshots
+): RuntimeDiagnostic[] {
+  const coverageOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/coverage-evidence@1");
+  if (coverageOutputs.length !== 1) {
+    return [
+      {
+        code: "COVERAGE_EVIDENCE_DECLARATION_AMBIGUOUS",
+        message: `Coverage producer must declare exactly one ultrafuzz/coverage-evidence@1 output; found ${coverageOutputs.length}`,
+        severity: "error",
+        source: "coverage-evidence",
+        path: layout.graphPath
+      }
+    ];
+  }
+  const markdownOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/nonempty-markdown@1");
+  if (markdownOutputs.length !== 1) {
+    return [
+      {
+        code: "COVERAGE_MARKDOWN_DECLARATION_AMBIGUOUS",
+        message: `Coverage producer must declare exactly one scoped Markdown output; found ${markdownOutputs.length}`,
+        severity: "error",
+        source: "coverage-evidence",
+        path: layout.graphPath
+      }
+    ];
+  }
+
+  const evidencePath = safeResolveInside(artifactDir, coverageOutputs[0]!.path, "coverage evidence output");
+  const markdownPath = safeResolveInside(artifactDir, markdownOutputs[0]!.path, "coverage Markdown output");
+  const evidence = parseCurrentArtifactJson(artifactDir, evidencePath, authenticated);
+  const markdownBytes = readCurrentArtifactSnapshot(artifactDir, markdownPath, authenticated);
+  if (!isRecord(evidence)) return [];
+
+  const diagnostics: RuntimeDiagnostic[] = [];
+  if (markdownBytes !== undefined) {
+    diagnostics.push(...unscopedCoverageScoreDiagnostics(markdownBytes.toString("utf8"), markdownPath, true));
+    diagnostics.push(
+      ...coverageEvidenceMarkdownProjectionDiagnostics(
+        evidence,
+        markdownBytes.toString("utf8"),
+        markdownPath,
+        "COVERAGE_EVIDENCE_MARKDOWN_MISMATCH"
+      )
+    );
+  }
+  if (evidence.status === "unavailable") return diagnostics;
+  if (
+    evidence.status !== "measured" ||
+    !Array.isArray(evidence.files) ||
+    !Array.isArray(evidence.counted_ranges) ||
+    !Array.isArray(evidence.zero_coverage_components)
+  )
+    return diagnostics;
+  const workspacePath = getNodeWorkspaceDir(layout, attemptId);
+  const productionRoots = configuredProductionSourceRoots(layout);
+  if (!fs.existsSync(workspacePath) || productionRoots === undefined) {
+    diagnostics.push({
+      code: "COVERAGE_SOURCE_INVENTORY_UNAVAILABLE",
+      message: "Coverage evidence requires the trusted node workspace and configured production source roots",
+      severity: "error",
+      source: "coverage-evidence",
+      path: evidencePath
+    });
+    return diagnostics;
+  }
+
+  const declaredProductionFiles = new Map<string, Record<string, unknown>>();
+  const declaredNonProductionFiles = new Map<string, Record<string, unknown>>();
+  for (const entry of evidence.files.filter(isRecord)) {
+    if (typeof entry.path !== "string") continue;
+    if (entry.kind === "production") declaredProductionFiles.set(entry.path, entry);
+    else declaredNonProductionFiles.set(entry.path, entry);
+  }
+  const declaredFiles = new Map([...declaredProductionFiles, ...declaredNonProductionFiles]);
+  const sourceSnapshots = new Map<string, { text: string; lineCount: number }>();
+  const sourceSnapshot = (relativePath: string, label: string): { text: string; lineCount: number } => {
+    const cached = sourceSnapshots.get(relativePath);
+    if (cached !== undefined) return cached;
+    const sourcePath = safeResolveInside(workspacePath, relativePath, label);
+    assertRegularFileInside(workspacePath, sourcePath, label);
+    const text = readRegularFileSnapshot(sourcePath, MAX_ARTIFACT_SNAPSHOT_BYTES).toString("utf8");
+    const normalized = text.replace(/\r?\n$/u, "");
+    const snapshot = { text, lineCount: normalized === "" ? 0 : normalized.split(/\r?\n/u).length };
+    sourceSnapshots.set(relativePath, snapshot);
+    return snapshot;
+  };
+  let inventory: Set<string>;
+  try {
+    inventory = new Set(productionContractSourceFiles(workspacePath, productionRoots));
+  } catch (error) {
+    diagnostics.push({
+      code: "COVERAGE_SOURCE_INVENTORY_UNSAFE",
+      message: error instanceof Error ? error.message : "Coverage production source inventory is unsafe",
+      severity: "error",
+      source: "coverage-evidence",
+      path: evidencePath
+    });
+    return diagnostics;
+  }
+  let reconSelection: ReconCoverageSelection = { diagnostics: [] };
+  try {
+    const input = readCoverageInputSnapshot(
+      artifactDir,
+      node,
+      evidence.recon_selection,
+      "Recon coverage selection",
+      authenticated
+    );
+    reconSelection = readReconCoverageSelection(workspacePath, inventory, input.bytes, input.path);
+    diagnostics.push(...reconSelection.diagnostics);
+  } catch (error) {
+    diagnostics.push({
+      code: "COVERAGE_RECON_SELECTION_INVALID",
+      message: `Coverage evidence Recon selection input is unsafe, stale, or invalid: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+      severity: "error",
+      source: "coverage-evidence",
+      path: `${evidencePath}#$.recon_selection`
+    });
+  }
+
+  let lcovCoverage: TrustedLcovCoverage | undefined;
+  try {
+    const input = readCoverageInputSnapshot(artifactDir, node, evidence.lcov, "LCOV", authenticated);
+    lcovCoverage = readTrustedLcovCoverage(workspacePath, input.bytes);
+  } catch (error) {
+    diagnostics.push({
+      code: "COVERAGE_LCOV_INVALID",
+      message: `Coverage evidence LCOV source is unsafe, stale, or invalid: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+      severity: "error",
+      source: "coverage-evidence",
+      path: `${evidencePath}#$.lcov`
+    });
+  }
+
+  const expectedSourceKinds = new Map<string, CoverageSourceKind>();
+  for (const relativePath of inventory) expectedSourceKinds.set(relativePath, "production");
+  if (lcovCoverage !== undefined) {
+    for (const [relativePath, hitLines] of lcovCoverage.hitsBySource) {
+      const kind = trustedCoverageSourceKind(relativePath, inventory);
+      if (kind === undefined) {
+        diagnostics.push({
+          code: "COVERAGE_LCOV_SOURCE_KIND_UNKNOWN",
+          message: `LCOV source ${relativePath} is outside every trusted production, dependency, test, or harness root`,
+          severity: "error",
+          source: "coverage-evidence",
+          path: `${evidencePath}#$.lcov`
+        });
+        continue;
+      }
+      expectedSourceKinds.set(relativePath, kind);
+      let lineCount: number;
+      try {
+        lineCount = sourceSnapshot(relativePath, "LCOV source").lineCount;
+      } catch (error) {
+        diagnostics.push({
+          code: "COVERAGE_LCOV_SOURCE_UNKNOWN",
+          message: `LCOV source ${relativePath} is nonexistent or unsafe: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+          severity: "error",
+          source: "coverage-evidence",
+          path: `${evidencePath}#$.lcov`
+        });
+        continue;
+      }
+      if ([...hitLines.keys()].some((line) => line > lineCount)) {
+        diagnostics.push({
+          code: "COVERAGE_LCOV_LINE_OUT_OF_BOUNDS",
+          message: `LCOV source ${relativePath} contains a DA line beyond its ${lineCount}-line trusted source`,
+          severity: "error",
+          source: "coverage-evidence",
+          path: `${evidencePath}#$.lcov`
+        });
+      }
+    }
+  }
+
+  for (const [relativePath, expectedKind] of expectedSourceKinds) {
+    const declared = declaredFiles.get(relativePath);
+    if (declared === undefined) {
+      diagnostics.push({
+        code: expectedKind === "production" ? "COVERAGE_PRODUCTION_FILE_OMITTED" : "COVERAGE_LCOV_SOURCE_OMITTED",
+        message: `Coverage denominator omits trusted ${expectedKind} source ${relativePath}`,
+        severity: "error",
+        source: "coverage-evidence",
+        path: `${evidencePath}#$.files`
+      });
+    } else if (declared.kind !== expectedKind) {
+      diagnostics.push({
+        code: "COVERAGE_SOURCE_ATTRIBUTION_MISMATCH",
+        message: `Coverage source ${relativePath} must be attributed as ${expectedKind}, not ${String(declared.kind)}`,
+        severity: "error",
+        source: "coverage-evidence",
+        path: `${evidencePath}#$.files`
+      });
+    }
+  }
+  for (const [relativePath, declared] of declaredFiles) {
+    if (expectedSourceKinds.has(relativePath)) continue;
+    diagnostics.push({
+      code:
+        declared.kind === "production" ? "COVERAGE_PRODUCTION_FILE_UNKNOWN" : "COVERAGE_NON_PRODUCTION_FILE_UNKNOWN",
+      message: `Coverage denominator includes ${String(declared.kind)} source ${relativePath} that is absent from the trusted production inventory and LCOV source set`,
+      severity: "error",
+      source: "coverage-evidence",
+      path: `${evidencePath}#$.files`
+    });
+  }
+
+  const productionRangesByFile = new Map<
+    string,
+    { all: Record<string, unknown>[]; byStartLine: Map<number, Record<string, unknown>[]> }
+  >();
+  const declaredZeroCoverageComponents = new Set(
+    evidence.zero_coverage_components
+      .filter(isRecord)
+      .map((component) =>
+        coverageRangeIdentity(component.path, component.kind, component.start_line, component.line_count)
+      )
+  );
+  for (const [index, candidate] of evidence.counted_ranges.entries()) {
+    if (!isRecord(candidate) || typeof candidate.file !== "string") continue;
+    if (candidate.kind === "production") {
+      const ranges = productionRangesByFile.get(candidate.file) ?? {
+        all: [] as Record<string, unknown>[],
+        byStartLine: new Map<number, Record<string, unknown>[]>()
+      };
+      ranges.all.push(candidate);
+      if (typeof candidate.start_line === "number") {
+        const sameLine = ranges.byStartLine.get(candidate.start_line) ?? [];
+        sameLine.push(candidate);
+        ranges.byStartLine.set(candidate.start_line, sameLine);
+      }
+      productionRangesByFile.set(candidate.file, ranges);
+    }
+    if (!declaredFiles.has(candidate.file)) continue;
+    let lineCount: number;
+    try {
+      lineCount = sourceSnapshot(candidate.file, "coverage range").lineCount;
+    } catch {
+      continue;
+    }
+    const candidateEndLine =
+      typeof candidate.start_line === "number" && typeof candidate.line_count === "number"
+        ? candidate.start_line + candidate.line_count - 1
+        : undefined;
+    if (candidateEndLine !== undefined && candidateEndLine > lineCount) {
+      diagnostics.push({
+        code: "COVERAGE_PRODUCTION_RANGE_OUT_OF_BOUNDS",
+        message: `Coverage range for ${candidate.file} ends past its ${lineCount}-line source file`,
+        severity: "error",
+        source: "coverage-evidence",
+        path: `${evidencePath}#$.counted_ranges[${index}].line_count`
+      });
+    }
+    if (
+      lcovCoverage !== undefined &&
+      typeof candidate.start_line === "number" &&
+      candidateEndLine !== undefined &&
+      typeof candidate.covered === "boolean"
+    ) {
+      const coveredByLcov = lcovRangeCovered(
+        lcovCoverage.instrumentedLinesBySource.get(candidate.file),
+        lcovCoverage.uncoveredLinesBySource.get(candidate.file),
+        candidate.start_line,
+        candidateEndLine
+      );
+      if (candidate.covered !== coveredByLcov) {
+        diagnostics.push({
+          code: "COVERAGE_RANGE_RESULT_MISMATCH",
+          message: `Coverage result for ${candidate.file}:${candidate.start_line}-${candidateEndLine} must be ${String(
+            coveredByLcov
+          )} according to the authenticated LCOV DA hits`,
+          severity: "error",
+          source: "coverage-evidence",
+          path: `${evidencePath}#$.counted_ranges[${index}].covered`
+        });
+      }
+      const hasPositiveHit = rangeContainsSortedLine(
+        lcovCoverage.coveredLinesBySource.get(candidate.file),
+        candidate.start_line,
+        candidateEndLine
+      );
+      const declaredZeroCoverage = declaredZeroCoverageComponents.has(
+        coverageRangeIdentity(candidate.file, candidate.kind, candidate.start_line, candidate.line_count)
+      );
+      if (declaredZeroCoverage !== !hasPositiveHit) {
+        diagnostics.push({
+          code: "COVERAGE_ZERO_COMPONENT_RESULT_MISMATCH",
+          message: `Zero-coverage component status for ${candidate.file}:${candidate.start_line}-${candidateEndLine} must be ${String(
+            !hasPositiveHit
+          )} according to the authenticated LCOV DA hits`,
+          severity: "error",
+          source: "coverage-evidence",
+          path: `${evidencePath}#$.zero_coverage_components`
+        });
+      }
+    }
+  }
+
+  let materialRangeCount = 0;
+  for (const relativePath of inventory) {
+    const sourceText = sourceSnapshot(relativePath, "production coverage source").text;
+    let declarations: MaterialCoverageDeclaration[];
+    try {
+      declarations = materialCoverageDeclarations(
+        relativePath,
+        sourceText,
+        MAX_COVERAGE_EVIDENCE_RANGES - materialRangeCount
+      );
+    } catch (error) {
+      diagnostics.push({
+        code: "COVERAGE_SOURCE_INVENTORY_UNSAFE",
+        message: error instanceof Error ? error.message : "Coverage production range inventory is unsafe",
+        severity: "error",
+        source: "coverage-evidence",
+        path: evidencePath
+      });
+      return diagnostics;
+    }
+    materialRangeCount += declarations.length;
+    const declarationLines = declarations.map((declaration) => declaration.line);
+    const declarationLineSet = new Set(declarationLines);
+    const declaredFile = declaredProductionFiles.get(relativePath);
+    if (declaredFile === undefined) continue;
+    const declaredRangeIndex = productionRangesByFile.get(relativePath);
+    const declaredRanges = declaredRangeIndex?.all ?? [];
+
+    if (declaredFile.total_ranges !== declarationLines.length) {
+      diagnostics.push({
+        code: "COVERAGE_PRODUCTION_FILE_DENOMINATOR_MISMATCH",
+        message: `Production source ${relativePath} declares ${String(declaredFile.total_ranges)} material ranges but the trusted source contains ${declarationLines.length}`,
+        severity: "error",
+        source: "coverage-evidence",
+        path: `${evidencePath}#$.files`
+      });
+    }
+
+    if (declaredFile.included === false && declaredRanges.some((candidate) => candidate.selected === true)) {
+      diagnostics.push({
+        code: "COVERAGE_EXCLUDED_FILE_HAS_SELECTED_RANGES",
+        message: `Excluded production source ${relativePath} cannot contribute counted recon-selected-declaration-completeness entries`,
+        severity: "error",
+        source: "coverage-evidence",
+        path: `${evidencePath}#$.counted_ranges`
+      });
+    }
+    for (const declaration of declarations) {
+      const matching = declaredRangeIndex?.byStartLine.get(declaration.line) ?? [];
+      if (matching.length !== 1) {
+        diagnostics.push({
+          code: "COVERAGE_PRODUCTION_RANGE_OMITTED",
+          message: `Coverage denominator must contain exactly one range starting at material declaration ${relativePath}:${declaration.line}`,
+          severity: "error",
+          source: "coverage-evidence",
+          path: `${evidencePath}#$.counted_ranges`
+        });
+        continue;
+      }
+      const selectedByRecon = reconCoverageRangesOverlap(
+        reconSelection.ranges?.get(relativePath),
+        declaration.line,
+        declaration.endLine
+      );
+      if (reconSelection.ranges !== undefined && matching[0]!.selected !== selectedByRecon) {
+        diagnostics.push({
+          code: "COVERAGE_PRODUCTION_RANGE_SELECTION_MISMATCH",
+          message: `Coverage selection for ${relativePath}:${declaration.line} does not match trusted Recon selection semantics`,
+          severity: "error",
+          source: "coverage-evidence",
+          path: `${evidencePath}#$.counted_ranges`
+        });
+      }
+      if (matching[0]!.line_count !== declaration.endLine - declaration.line + 1) {
+        diagnostics.push({
+          code: "COVERAGE_PRODUCTION_RANGE_BOUNDARY_MISMATCH",
+          message: `Coverage range for ${relativePath}:${declaration.line} must end at trusted declaration boundary ${declaration.endLine}`,
+          severity: "error",
+          source: "coverage-evidence",
+          path: `${evidencePath}#$.counted_ranges`
+        });
+      }
+    }
+    for (const candidate of declaredRanges) {
+      if (typeof candidate.start_line !== "number" || declarationLineSet.has(candidate.start_line)) continue;
+      diagnostics.push({
+        code: "COVERAGE_PRODUCTION_RANGE_NOT_DECLARATION",
+        message: `Coverage range for ${relativePath}:${candidate.start_line} does not start at a material declaration`,
+        severity: "error",
+        source: "coverage-evidence",
+        path: `${evidencePath}#$.counted_ranges`
+      });
+    }
+  }
+  return diagnostics;
+}
+
+type CoverageSourceKind = "production" | "test" | "harness" | "dependency";
+const COVERAGE_DEPENDENCY_DIRECTORY_NAMES = new Set([
+  "lib",
+  "libs",
+  "vendor",
+  "vendors",
+  "dependency",
+  "dependencies",
+  "node_modules"
+]);
+const COVERAGE_TEST_DIRECTORY_NAMES = new Set(["test", "tests"]);
+const COVERAGE_HARNESS_DIRECTORY_NAMES = new Set([
+  "recon",
+  "echidna",
+  "fuzz",
+  "fuzzing",
+  "invariant",
+  "invariants",
+  "harness",
+  "harnesses",
+  "mock",
+  "mocks",
+  "script",
+  "scripts"
+]);
+function coverageDirectoryKind(segment: string): Exclude<CoverageSourceKind, "production"> | undefined {
+  const normalized = segment.toLowerCase();
+  if (COVERAGE_DEPENDENCY_DIRECTORY_NAMES.has(normalized)) return "dependency";
+  if (COVERAGE_TEST_DIRECTORY_NAMES.has(normalized)) return "test";
+  if (COVERAGE_HARNESS_DIRECTORY_NAMES.has(normalized)) return "harness";
+  return undefined;
+}
+type TrustedLcovCoverage = {
+  hitsBySource: ReadonlyMap<string, ReadonlyMap<number, boolean>>;
+  instrumentedLinesBySource: ReadonlyMap<string, readonly number[]>;
+  coveredLinesBySource: ReadonlyMap<string, readonly number[]>;
+  uncoveredLinesBySource: ReadonlyMap<string, readonly number[]>;
+};
+
+function readCoverageInputSnapshot(
+  artifactDir: string,
+  node: PlannedGraphNode,
+  descriptor: unknown,
+  label: string,
+  authenticated?: AuthenticatedArtifactGateSnapshots
+): { bytes: Buffer; path: string } {
+  if (
+    !isRecord(descriptor) ||
+    typeof descriptor.path !== "string" ||
+    typeof descriptor.sha256 !== "string" ||
+    !/^[0-9a-f]{64}$/u.test(descriptor.sha256)
+  ) {
+    throw new Error(`${label} descriptor must contain an exact safe path and lowercase SHA-256`);
+  }
+  const declarations = node.outputs.filter(
+    (output) => output.path === descriptor.path && output.contract === "ultrafuzz/text@1"
+  );
+  if (declarations.length !== 1) {
+    throw new Error(`${label} path must name exactly one declared sibling ultrafuzz/text@1 output`);
+  }
+  const inputPath = safeResolveInside(artifactDir, descriptor.path, `${label} sibling output`);
+  const bytes = readCurrentArtifactSnapshot(artifactDir, inputPath, authenticated);
+  if (bytes === undefined) throw new Error(`${label} sibling output is unavailable`);
+  const digest = sha256Bytes(bytes);
+  if (digest !== descriptor.sha256) {
+    throw new Error(`${label} SHA-256 mismatch: expected ${descriptor.sha256}, observed ${digest}`);
+  }
+  return { bytes, path: inputPath };
+}
+
+function readTrustedLcovCoverage(workspacePath: string, bytes: Buffer): TrustedLcovCoverage {
+  const hitsBySource = new Map<string, Map<number, boolean>>();
+  let distinctDaLineCount = 0;
+  let currentSource: string | undefined;
+  for (const [index, line] of bytes.toString("utf8").split(/\r?\n/u).entries()) {
+    if (line.startsWith("SF:")) {
+      if (currentSource !== undefined) throw new Error(`LCOV line ${index + 1} starts a nested SF record`);
+      currentSource = trustedLcovRelativeSourcePath(workspacePath, line.slice(3));
+      if (!hitsBySource.has(currentSource)) {
+        if (hitsBySource.size >= MAX_COVERAGE_EVIDENCE_FILES) {
+          throw new Error(`LCOV exceeds ${MAX_COVERAGE_EVIDENCE_FILES} distinct source files`);
+        }
+        hitsBySource.set(currentSource, new Map());
+      }
+      continue;
+    }
+    if (line === "end_of_record") {
+      if (currentSource === undefined) throw new Error(`LCOV line ${index + 1} ends no active SF record`);
+      currentSource = undefined;
+      continue;
+    }
+    if (!line.startsWith("DA:")) continue;
+    if (currentSource === undefined) throw new Error(`LCOV line ${index + 1} contains DA outside an SF record`);
+    const match = /^DA:([1-9][0-9]*),([0-9]+)(?:,[^,\r\n]+)?$/u.exec(line);
+    if (match === null) throw new Error(`LCOV line ${index + 1} contains an invalid DA record`);
+    const sourceLine = Number(match[1]);
+    if (!Number.isSafeInteger(sourceLine)) throw new Error(`LCOV line ${index + 1} has an unsafe DA line number`);
+    const counted = !/^0+$/u.test(match[2]!);
+    const sourceHits = hitsBySource.get(currentSource)!;
+    if (!sourceHits.has(sourceLine)) {
+      distinctDaLineCount += 1;
+      if (distinctDaLineCount > MAX_COVERAGE_EVIDENCE_RANGES) {
+        throw new Error(`LCOV exceeds ${MAX_COVERAGE_EVIDENCE_RANGES} distinct DA line records`);
+      }
+    }
+    sourceHits.set(sourceLine, (sourceHits.get(sourceLine) ?? false) || counted);
+  }
+  if (currentSource !== undefined) throw new Error(`LCOV SF record for ${currentSource} lacks end_of_record`);
+
+  const sortedLines = (predicate: (hits: boolean) => boolean): ReadonlyMap<string, readonly number[]> =>
+    new Map(
+      [...hitsBySource].map(([source, hits]) => [
+        source,
+        [...hits]
+          .filter(([, count]) => predicate(count))
+          .map(([line]) => line)
+          .sort((left, right) => left - right)
+      ])
+    );
+  return {
+    hitsBySource,
+    instrumentedLinesBySource: sortedLines(() => true),
+    coveredLinesBySource: sortedLines((hits) => hits),
+    uncoveredLinesBySource: sortedLines((hits) => !hits)
+  };
+}
+
+function trustedLcovRelativeSourcePath(workspacePath: string, sourcePath: string): string {
+  if (sourcePath.length === 0 || sourcePath.includes("\0") || sourcePath.includes("\\")) {
+    throw new Error("LCOV SF paths must be nonempty forward-slash paths without NUL bytes");
+  }
+  const workspaceAbsolute = path.resolve(workspacePath);
+  const absoluteSource = path.isAbsolute(sourcePath)
+    ? path.resolve(sourcePath)
+    : safeResolveInside(workspaceAbsolute, sourcePath, "LCOV SF source");
+  const relativeSource = path.relative(workspaceAbsolute, absoluteSource).split(path.sep).join("/");
+  const canonicalSource = safeResolveInside(workspaceAbsolute, relativeSource, "LCOV SF source");
+  if (canonicalSource !== absoluteSource) throw new Error(`LCOV SF source is not canonical: ${sourcePath}`);
+  assertRegularFileInside(workspaceAbsolute, canonicalSource, "LCOV SF source");
+  return relativeSource;
+}
+
+function trustedCoverageSourceKind(
+  relativePath: string,
+  productionInventory: ReadonlySet<string>
+): CoverageSourceKind | undefined {
+  if (productionInventory.has(relativePath)) return "production";
+  const segments = relativePath.split("/").map((segment) => segment.toLowerCase());
+  const rootedKinds = segments
+    .map((segment, index): { index: number; kind: CoverageSourceKind } | undefined => {
+      const kind = coverageDirectoryKind(segment);
+      return kind === undefined ? undefined : { index, kind };
+    })
+    .filter((entry): entry is { index: number; kind: CoverageSourceKind } => entry !== undefined);
+  const root = rootedKinds[0];
+  if (root?.kind !== "test") return root?.kind;
+  return rootedKinds.some((entry) => entry.index > root.index && entry.kind === "harness") ? "harness" : "test";
+}
+
+// This is the declaration-completeness metric published by coverage evidence,
+// not covg-eval's separate function-identity and filtering model.
+function lcovRangeCovered(
+  instrumentedLines: readonly number[] | undefined,
+  uncoveredLines: readonly number[] | undefined,
+  startLine: number,
+  endLine: number
+): boolean {
+  return (
+    rangeContainsSortedLine(instrumentedLines, startLine, endLine) &&
+    !rangeContainsSortedLine(uncoveredLines, startLine, endLine)
+  );
+}
+
+function rangeContainsSortedLine(lines: readonly number[] | undefined, startLine: number, endLine: number): boolean {
+  if (lines === undefined) return false;
+  let low = 0;
+  let high = lines.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (lines[middle]! < startLine) low = middle + 1;
+    else high = middle;
+  }
+  return low < lines.length && lines[low]! <= endLine;
+}
+
+function coverageRangeIdentity(file: unknown, kind: unknown, startLine: unknown, lineCount: unknown): string {
+  return `${String(file)}\0${String(kind)}\0${String(startLine)}\0${String(lineCount)}`;
+}
+
+type MaterialCoverageDeclaration = { line: number; endLine: number };
+type ReconCoverageRange = { startLine: number; endLine: number };
+type ReconCoverageSelection = {
+  ranges?: ReadonlyMap<string, readonly ReconCoverageRange[]>;
+  diagnostics: RuntimeDiagnostic[];
+};
+
+function materialCoverageDeclarations(
+  relativePath: string,
+  source: string,
+  maximumRanges: number
+): MaterialCoverageDeclaration[] {
+  const declarationsByLine = new Map<number, number>();
+  const recordDeclaration = (declaration: MaterialCoverageDeclaration): void => {
+    const previousEndLine = declarationsByLine.get(declaration.line);
+    if (previousEndLine === undefined && declarationsByLine.size >= maximumRanges) {
+      throw new Error(`Coverage production source inventory exceeds ${MAX_COVERAGE_EVIDENCE_RANGES} material ranges`);
+    }
+    declarationsByLine.set(declaration.line, Math.max(previousEndLine ?? declaration.endLine, declaration.endLine));
+  };
+  if (path.extname(relativePath) === ".sol") {
+    const lexicalSource = stripCoverageSourceCommentsAndStrings(source);
+    let parenthesisDepth = 0;
+    let braceDepth = 0;
+    let scannedThrough = 0;
+    let currentLine = 1;
+    for (const match of lexicalSource.matchAll(
+      /\b(?:function(?:\s+[A-Za-z_$][A-Za-z0-9_$]*\s*\(|\s*\([^;{}]*\)[^;{}]*\{)|constructor\s*\(|fallback\s*\(|receive\s*\(|modifier\s+[A-Za-z_$][A-Za-z0-9_$]*)/gu
+    )) {
+      for (const character of lexicalSource.slice(scannedThrough, match.index)) {
+        if (character === "(") parenthesisDepth += 1;
+        if (character === ")") parenthesisDepth = Math.max(0, parenthesisDepth - 1);
+        if (character === "{") braceDepth += 1;
+        if (character === "}") braceDepth = Math.max(0, braceDepth - 1);
+        if (character === "\n") currentLine += 1;
+      }
+      scannedThrough = match.index ?? scannedThrough;
+      if (parenthesisDepth > 0 || braceDepth > 1) continue;
+      const signatureEnd = solidityDeclarationSignatureEnd(lexicalSource, match.index ?? 0, currentLine);
+      // Interface and abstract signatures end in `;` and have no executable
+      // range that LCOV can cover. Only declarations with an implementation
+      // body belong in the production-declaration-completeness denominator.
+      if (lexicalSource[signatureEnd.index - 1] !== "{") continue;
+      recordDeclaration({
+        line: currentLine,
+        endLine: solidityDeclarationEndLine(lexicalSource, signatureEnd.index, signatureEnd.line)
+      });
+    }
+    for (const getter of solidityPublicGetterDeclarations(lexicalSource)) {
+      recordDeclaration(getter);
+    }
+  }
+  if (path.extname(relativePath) === ".vy") {
+    const vyperLines = stripVyperCoverageSourceCommentsAndStrings(source)
+      .replace(/\r?\n$/u, "")
+      .split(/\r?\n/u);
+    for (const declaration of vyperMaterialCoverageDeclarations(vyperLines)) {
+      recordDeclaration(declaration);
+    }
+  }
+
+  // The portable evidence contract addresses ranges by line, not column. Treat
+  // every material declaration that begins on one physical line as one trusted
+  // range whose boundary covers the furthest declaration on that line. This
+  // keeps minified/generated sources representable without weakening the
+  // complete production-declaration-completeness denominator.
+  return [...declarationsByLine.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([line, endLine]) => ({ line, endLine }));
+}
+
+function solidityDeclarationSignatureEnd(
+  source: string,
+  start: number,
+  startLine: number
+): { index: number; line: number } {
+  let parenthesisDepth = 0;
+  let line = startLine;
+  for (let index = start; index < source.length; index += 1) {
+    const character = source[index]!;
+    if (character === "(") parenthesisDepth += 1;
+    else if (character === ")") parenthesisDepth = Math.max(0, parenthesisDepth - 1);
+    else if (parenthesisDepth === 0 && (character === "{" || character === ";")) return { index: index + 1, line };
+    if (character === "\n") line += 1;
+  }
+  return { index: source.length, line };
+}
+
+function solidityDeclarationEndLine(source: string, signatureEnd: number, signatureEndLine: number): number {
+  if (source[signatureEnd - 1] !== "{") return signatureEndLine;
+  let depth = 1;
+  let line = signatureEndLine;
+  for (let index = signatureEnd; index < source.length; index += 1) {
+    const character = source[index];
+    if (character === "\n") line += 1;
+    else if (character === "{") depth += 1;
+    else if (character === "}") {
+      depth -= 1;
+      if (depth === 0) return line;
+    }
+  }
+  return signatureEndLine;
+}
+
+function solidityPublicGetterDeclarations(source: string): MaterialCoverageDeclaration[] {
+  const declarations: MaterialCoverageDeclaration[] = [];
+  let structuralBraceDepth = 0;
+  let initializerBraceDepth = 0;
+  let line = 1;
+  let statementStart = 0;
+  let statementLine = 1;
+
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index]!;
+    if (character === "\n") line += 1;
+    if (character === "{") {
+      if (initializerBraceDepth > 0) {
+        initializerBraceDepth += 1;
+        continue;
+      }
+      if (structuralBraceDepth === 0) {
+        statementStart = index + 1;
+        statementLine = line;
+      } else if (structuralBraceDepth === 1) {
+        const prefix = source.slice(statementStart, index);
+        if (solidityStatementHasTopLevelInitializer(prefix)) {
+          initializerBraceDepth = 1;
+          continue;
+        }
+        statementStart = index + 1;
+        statementLine = line;
+      }
+      structuralBraceDepth += 1;
+      continue;
+    }
+    if (character === "}") {
+      if (initializerBraceDepth > 0) {
+        initializerBraceDepth -= 1;
+        continue;
+      }
+      structuralBraceDepth = Math.max(0, structuralBraceDepth - 1);
+      if (structuralBraceDepth === 1) {
+        statementStart = index + 1;
+        statementLine = line;
+      }
+      continue;
+    }
+    if (character !== ";" || structuralBraceDepth !== 1 || initializerBraceDepth !== 0) continue;
+
+    const statement = source.slice(statementStart, index + 1);
+    const leadingWhitespace = statement.match(/^\s*/u)?.[0] ?? "";
+    const declarationLine = statementLine + (leadingWhitespace.match(/\n/gu)?.length ?? 0);
+    if (
+      /\bpublic\b/u.test(statement) &&
+      !/\b(?:function\s+[A-Za-z_$][A-Za-z0-9_$]*\s*\(|constructor\s*\(|fallback\s*\(|receive\s*\(|modifier\s+)/u.test(
+        statement
+      )
+    ) {
+      declarations.push({ line: declarationLine, endLine: line });
+    }
+    statementStart = index + 1;
+    statementLine = line;
+  }
+  return declarations;
+}
+
+function solidityStatementHasTopLevelInitializer(statementPrefix: string): boolean {
+  let parenthesisDepth = 0;
+  let bracketDepth = 0;
+  for (let index = 0; index < statementPrefix.length; index += 1) {
+    const character = statementPrefix[index]!;
+    if (character === "(") parenthesisDepth += 1;
+    else if (character === ")") parenthesisDepth = Math.max(0, parenthesisDepth - 1);
+    else if (character === "[") bracketDepth += 1;
+    else if (character === "]") bracketDepth = Math.max(0, bracketDepth - 1);
+    else if (character === "=" && parenthesisDepth === 0 && bracketDepth === 0) {
+      const previous = statementPrefix[index - 1];
+      const next = statementPrefix[index + 1];
+      if (previous !== "=" && previous !== "!" && previous !== "<" && previous !== ">" && next !== "=") {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function vyperMaterialCoverageDeclarations(sourceLines: readonly string[]): MaterialCoverageDeclaration[] {
+  const declarations: MaterialCoverageDeclaration[] = [];
+  for (const [lineIndex, sourceLine] of sourceLines.entries()) {
+    const definition = /^(\s*)(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/u.exec(sourceLine);
+    if (definition !== null) {
+      const indentation = definition[1]!.length;
+      // Executable Vyper functions are module-level. Indented `def` rows are
+      // interface signatures and cannot receive runtime coverage.
+      if (indentation !== 0) continue;
+      const signatureEndIndex = vyperSignatureEndLineIndex(sourceLines, lineIndex, definition.index);
+      let endIndex = signatureEndIndex;
+      for (let candidateIndex = signatureEndIndex + 1; candidateIndex < sourceLines.length; candidateIndex += 1) {
+        const candidate = sourceLines[candidateIndex]!;
+        if (candidate.trim().length === 0) continue;
+        const candidateIndentation = /^\s*/u.exec(candidate)?.[0].length ?? 0;
+        if (candidateIndentation <= indentation) break;
+        endIndex = candidateIndex;
+      }
+
+      declarations.push({ line: lineIndex + 1, endLine: endIndex + 1 });
+      continue;
+    }
+
+    const publicGetter = /^(\s*)[A-Za-z_][A-Za-z0-9_]*\s*:\s*public\s*\(/u.exec(sourceLine);
+    if (publicGetter === null || publicGetter[1]!.length !== 0) continue;
+    declarations.push({
+      line: lineIndex + 1,
+      endLine: vyperBalancedDeclarationEndLineIndex(sourceLines, lineIndex, publicGetter.index) + 1
+    });
+  }
+  return declarations;
+}
+
+function stripVyperCoverageSourceCommentsAndStrings(source: string): string {
+  let state: "code" | "comment" | "single" | "double" | "triple-single" | "triple-double" = "code";
+  let escaped = false;
+  let result = "";
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index]!;
+    const triple = source.slice(index, index + 3);
+    if (state === "code") {
+      if (character === "#") {
+        state = "comment";
+        result += " ";
+      } else if (triple === "'''" || triple === '"""') {
+        state = triple === "'''" ? "triple-single" : "triple-double";
+        result += "   ";
+        index += 2;
+      } else if (character === "'" || character === '"') {
+        state = character === "'" ? "single" : "double";
+        result += " ";
+      } else result += character;
+      continue;
+    }
+    if (state === "comment" && (character === "\n" || character === "\r")) {
+      state = "code";
+      result += character;
+      continue;
+    }
+    if ((state === "triple-single" && triple === "'''") || (state === "triple-double" && triple === '"""')) {
+      state = "code";
+      result += "   ";
+      index += 2;
+      continue;
+    }
+    if (
+      (state === "single" || state === "double") &&
+      !escaped &&
+      ((state === "single" && character === "'") || (state === "double" && character === '"'))
+    ) {
+      state = "code";
+      result += " ";
+      continue;
+    }
+    escaped = (state === "single" || state === "double") && !escaped && character === "\\";
+    if (character !== "\\") escaped = false;
+    result += character === "\n" || character === "\r" ? character : " ";
+  }
+  return result;
+}
+
+function vyperSignatureEndLineIndex(sourceLines: readonly string[], startIndex: number, startColumn: number): number {
+  let parenthesisDepth = 0;
+  let bracketDepth = 0;
+  for (let lineIndex = startIndex; lineIndex < sourceLines.length; lineIndex += 1) {
+    const line = sourceLines[lineIndex]!;
+    const columnStart = lineIndex === startIndex ? startColumn : 0;
+    for (let column = columnStart; column < line.length; column += 1) {
+      const character = line[column]!;
+      if (character === "(") parenthesisDepth += 1;
+      else if (character === ")") parenthesisDepth = Math.max(0, parenthesisDepth - 1);
+      else if (character === "[") bracketDepth += 1;
+      else if (character === "]") bracketDepth = Math.max(0, bracketDepth - 1);
+      else if (character === ":" && parenthesisDepth === 0 && bracketDepth === 0) return lineIndex;
+    }
+  }
+  return startIndex;
+}
+
+function vyperBalancedDeclarationEndLineIndex(
+  sourceLines: readonly string[],
+  startIndex: number,
+  startColumn: number
+): number {
+  let parenthesisDepth = 0;
+  let bracketDepth = 0;
+  let sawDelimiter = false;
+  for (let lineIndex = startIndex; lineIndex < sourceLines.length; lineIndex += 1) {
+    const line = sourceLines[lineIndex]!;
+    const columnStart = lineIndex === startIndex ? startColumn : 0;
+    for (let column = columnStart; column < line.length; column += 1) {
+      const character = line[column]!;
+      if (character === "(") {
+        parenthesisDepth += 1;
+        sawDelimiter = true;
+      } else if (character === ")") parenthesisDepth = Math.max(0, parenthesisDepth - 1);
+      else if (character === "[") {
+        bracketDepth += 1;
+        sawDelimiter = true;
+      } else if (character === "]") bracketDepth = Math.max(0, bracketDepth - 1);
+    }
+    if (sawDelimiter && parenthesisDepth === 0 && bracketDepth === 0) return lineIndex;
+  }
+  return startIndex;
+}
+
+function stripCoverageSourceCommentsAndStrings(source: string): string {
+  let state: "code" | "line-comment" | "block-comment" | "single-string" | "double-string" = "code";
+  let escaped = false;
+  let result = "";
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index]!;
+    const next = source[index + 1];
+    if (state === "code") {
+      if (character === "/" && next === "/") {
+        state = "line-comment";
+        result += "  ";
+        index += 1;
+      } else if (character === "/" && next === "*") {
+        state = "block-comment";
+        result += "  ";
+        index += 1;
+      } else if (character === "'") {
+        state = "single-string";
+        result += " ";
+      } else if (character === '"') {
+        state = "double-string";
+        result += " ";
+      } else result += character;
+      continue;
+    }
+    if (state === "line-comment" && (character === "\n" || character === "\r")) {
+      state = "code";
+      result += character;
+    } else if (state === "block-comment" && character === "*" && next === "/") {
+      state = "code";
+      result += "  ";
+      index += 1;
+    } else if (
+      (state === "single-string" || state === "double-string") &&
+      !escaped &&
+      ((state === "single-string" && character === "'") || (state === "double-string" && character === '"'))
+    ) {
+      state = "code";
+      result += " ";
+    } else {
+      escaped = (state === "single-string" || state === "double-string") && !escaped && character === "\\";
+      if (character !== "\\") escaped = false;
+      result += character === "\n" || character === "\r" ? character : " ";
+    }
+  }
+  return result;
+}
+
+function configuredProductionSourceRoots(layout: RunLayout): string[] | undefined {
+  if (!fs.existsSync(layout.resolvedConfigPath)) return undefined;
+  const parsed = parseProjectConfigToml(fs.readFileSync(layout.resolvedConfigPath, "utf8"), layout.resolvedConfigPath);
+  const roots = parsed.ok ? parsed.value.permissions?.productionSourceRoots : undefined;
+  return roots === undefined || roots.length === 0 ? undefined : roots;
+}
+
+function productionContractSourceFiles(workspacePath: string, productionRoots: readonly string[]): string[] {
+  const productionExtensions = new Set([".sol", ".vy"]);
+  const results: string[] = [];
+  let existingRootCount = 0;
+  const visit = (directory: string, relativeDirectory: string): void => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const relativePath = relativeDirectory === "" ? entry.name : `${relativeDirectory}/${entry.name}`;
+      if (entry.isSymbolicLink())
+        throw new Error(`Coverage production source inventory contains symlink ${relativePath}`);
+      if (entry.isDirectory()) {
+        if (nestedProductionDirectoryIsExcluded(entry.name)) continue;
+        visit(path.join(directory, entry.name), relativePath);
+      } else if (entry.isFile() && productionExtensions.has(path.extname(entry.name))) {
+        if (results.length >= MAX_COVERAGE_EVIDENCE_FILES) {
+          throw new Error(`Coverage production source inventory exceeds ${MAX_COVERAGE_EVIDENCE_FILES} files`);
+        }
+        results.push(relativePath);
+      }
+    }
+  };
+  for (const root of productionRoots) {
+    const absoluteRoot = safeResolveInside(workspacePath, root, "production source root");
+    let rootStat: fs.Stats;
+    try {
+      rootStat = fs.lstatSync(absoluteRoot);
+    } catch (error) {
+      if (isMissingFileError(error)) continue;
+      throw error;
+    }
+    if (rootStat.isSymbolicLink()) throw new Error(`Coverage production source root is a symlink: ${root}`);
+    if (!rootStat.isDirectory()) throw new Error(`Coverage production source root is not a directory: ${root}`);
+    existingRootCount += 1;
+    visit(absoluteRoot, root);
+  }
+  if (existingRootCount === 0) {
+    throw new Error(`Every configured coverage production source root is missing: ${productionRoots.join(", ")}`);
+  }
+  if (results.length === 0) {
+    throw new Error("Coverage production source roots contain no Solidity or Vyper production sources");
+  }
+  return results.sort();
+}
+
+function nestedProductionDirectoryIsExcluded(directoryName: string): boolean {
+  const normalized = directoryName.toLowerCase();
+  return (
+    (COVERAGE_DEPENDENCY_DIRECTORY_NAMES.has(normalized) && normalized !== "lib" && normalized !== "libs") ||
+    COVERAGE_TEST_DIRECTORY_NAMES.has(normalized) ||
+    COVERAGE_HARNESS_DIRECTORY_NAMES.has(normalized)
+  );
+}
+
+function isMissingFileError(error: unknown): boolean {
+  return isRecord(error) && error.code === "ENOENT";
+}
+
+function readReconCoverageSelection(
+  workspacePath: string,
+  inventory: ReadonlySet<string>,
+  bytes: Buffer,
+  selectionPath: string
+): ReconCoverageSelection {
+  let document: unknown;
+  try {
+    document = parseStrictJsonBytes(bytes);
+  } catch (error) {
+    return {
+      diagnostics: [
+        {
+          code: "COVERAGE_RECON_SELECTION_INVALID",
+          message: `Recon coverage selection map is unsafe or invalid: ${error instanceof Error ? error.message : String(error)}`,
+          severity: "error",
+          source: "coverage-evidence",
+          path: selectionPath
+        }
+      ]
+    };
+  }
+  if (!isRecord(document)) {
+    return {
+      diagnostics: [
+        {
+          code: "COVERAGE_RECON_SELECTION_INVALID",
+          message: "Recon coverage selection map must be a JSON object from production source paths to line ranges",
+          severity: "error",
+          source: "coverage-evidence",
+          path: selectionPath
+        }
+      ]
+    };
+  }
+
+  const ranges = new Map<string, ReconCoverageRange[]>();
+  const diagnostics: RuntimeDiagnostic[] = [];
+  let selectedRangeCount = 0;
+  for (const [relativePath, rawRanges] of Object.entries(document)) {
+    const safeRelativePath =
+      !path.isAbsolute(relativePath) &&
+      !relativePath.includes("\\") &&
+      !relativePath.includes("\u0000") &&
+      !/^[A-Za-z]:/u.test(relativePath) &&
+      relativePath.split("/").every((segment) => segment.length > 0 && segment !== "." && segment !== "..");
+    if (!safeRelativePath) {
+      diagnostics.push({
+        code: "COVERAGE_RECON_SELECTION_INVALID",
+        message: `Recon coverage selection map includes unsafe source path ${JSON.stringify(relativePath)}`,
+        severity: "error",
+        source: "coverage-evidence",
+        path: selectionPath
+      });
+      continue;
+    }
+    if (!inventory.has(relativePath)) {
+      // Recon recursively follows calls into dependencies. Those paths are
+      // outside the configured production-declaration-completeness authority and therefore do
+      // not authenticate selected production ranges; dependency evidence is
+      // still reconciled independently against declared workspace files.
+      try {
+        const sourcePath = safeResolveInside(workspacePath, relativePath, "Recon-selected non-production source");
+        assertRegularFileInside(workspacePath, sourcePath, "Recon-selected non-production source");
+      } catch {
+        diagnostics.push({
+          code: "COVERAGE_RECON_SELECTION_FILE_UNKNOWN",
+          message: `Recon coverage selection map includes nonexistent or unsafe non-production source ${relativePath}`,
+          severity: "error",
+          source: "coverage-evidence",
+          path: selectionPath
+        });
+      }
+      continue;
+    }
+    if (!Array.isArray(rawRanges) || rawRanges.length === 0) {
+      diagnostics.push({
+        code: "COVERAGE_RECON_SELECTION_INVALID",
+        message: `Recon coverage selection for ${relativePath} must contain at least one line range`,
+        severity: "error",
+        source: "coverage-evidence",
+        path: selectionPath
+      });
+      continue;
+    }
+    selectedRangeCount += rawRanges.length;
+    if (selectedRangeCount > MAX_COVERAGE_EVIDENCE_RANGES) {
+      diagnostics.push({
+        code: "COVERAGE_RECON_SELECTION_INVALID",
+        message: `Recon coverage selection exceeds ${MAX_COVERAGE_EVIDENCE_RANGES} line ranges`,
+        severity: "error",
+        source: "coverage-evidence",
+        path: selectionPath
+      });
+      continue;
+    }
+    const sourcePath = safeResolveInside(workspacePath, relativePath, "Recon-selected production source");
+    const source = readRegularFileSnapshot(sourcePath, MAX_ARTIFACT_SNAPSHOT_BYTES).toString("utf8");
+    const normalizedSource = source.replace(/\r?\n$/u, "");
+    const sourceLineCount = normalizedSource === "" ? 0 : normalizedSource.split(/\r?\n/u).length;
+    const parsedRanges: ReconCoverageRange[] = [];
+    for (const [index, rawRange] of rawRanges.entries()) {
+      const match = typeof rawRange === "string" ? /^([1-9]\d*)(?:-([1-9]\d*))?$/u.exec(rawRange) : null;
+      const startLine = match === null ? Number.NaN : Number(match[1]);
+      const endLine = match === null ? Number.NaN : Number(match[2] ?? match[1]);
+      if (
+        match === null ||
+        !Number.isSafeInteger(startLine) ||
+        !Number.isSafeInteger(endLine) ||
+        endLine < startLine ||
+        endLine > sourceLineCount
+      ) {
+        diagnostics.push({
+          code: "COVERAGE_RECON_SELECTION_INVALID",
+          message: `Recon coverage selection ${relativePath}[${index}] is not a valid in-bounds positive line range`,
+          severity: "error",
+          source: "coverage-evidence",
+          path: selectionPath
+        });
+        continue;
+      }
+      parsedRanges.push({ startLine, endLine });
+    }
+    ranges.set(relativePath, coalesceReconCoverageRanges(parsedRanges));
+  }
+  return diagnostics.length === 0 ? { ranges, diagnostics } : { diagnostics };
+}
+
+function coalesceReconCoverageRanges(ranges: readonly ReconCoverageRange[]): ReconCoverageRange[] {
+  const sorted = [...ranges].sort((left, right) => left.startLine - right.startLine || left.endLine - right.endLine);
+  const coalesced: ReconCoverageRange[] = [];
+  for (const range of sorted) {
+    const previous = coalesced.at(-1);
+    if (previous === undefined || range.startLine > previous.endLine + 1) {
+      coalesced.push({ ...range });
+      continue;
+    }
+    previous.endLine = Math.max(previous.endLine, range.endLine);
+  }
+  return coalesced;
+}
+
+function reconCoverageRangesOverlap(
+  ranges: readonly ReconCoverageRange[] | undefined,
+  startLine: number,
+  endLine: number
+): boolean {
+  if (ranges === undefined || ranges.length === 0) return false;
+  let low = 0;
+  let high = ranges.length;
+  while (low < high) {
+    const middle = low + Math.floor((high - low) / 2);
+    if (ranges[middle]!.startLine <= endLine) low = middle + 1;
+    else high = middle;
+  }
+  return low > 0 && ranges[low - 1]!.endLine >= startLine;
 }
 
 type ImplementedPropertiesRead = {
@@ -5355,12 +6614,12 @@ function verifyFinalReportPropertyReferences(
   attemptAuthority?: ArtifactGateAttemptAuthority,
   authenticated?: AuthenticatedArtifactGateSnapshots
 ): RuntimeDiagnostic[] {
-  const reportOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/report@2");
+  const reportOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/report@3");
   if (reportOutputs.length !== 1) {
     return [
       {
         code: "PROPERTY_REPORT_DECLARATION_AMBIGUOUS",
-        message: `Final report must declare exactly one ultrafuzz/report@2 output; found ${reportOutputs.length}`,
+        message: `Final report must declare exactly one ultrafuzz/report@3 output; found ${reportOutputs.length}`,
         severity: "error",
         source: "property-provenance",
         path: layout.graphPath
@@ -5395,6 +6654,18 @@ function verifyFinalReportPropertyReferences(
     markdownPath,
     attemptAuthority,
     authenticated
+  );
+  diagnostics.push(
+    ...verifyFinalReportCoverageEvidence(
+      layout,
+      artifactDir,
+      node,
+      report,
+      reportPath,
+      markdownPath,
+      attemptAuthority,
+      authenticated
+    )
   );
   if (!Array.isArray(report.property_provenance)) {
     return diagnostics;
@@ -5441,6 +6712,1408 @@ function verifyFinalReportPropertyReferences(
     )
   );
   return diagnostics;
+}
+
+function verifyFinalReportCoverageEvidence(
+  layout: RunLayout,
+  artifactDir: string,
+  node: PlannedGraphNode,
+  report: Record<string, unknown>,
+  reportPath: string,
+  markdownPath: string,
+  attemptAuthority?: ArtifactGateAttemptAuthority,
+  authenticated?: AuthenticatedArtifactGateSnapshots
+): RuntimeDiagnostic[] {
+  const diagnostics = unscopedCoverageScoreDiagnosticsInJson(report, reportPath);
+  const markdownBytes = readCurrentArtifactSnapshot(artifactDir, markdownPath, authenticated);
+  const markdown = markdownBytes?.toString("utf8") ?? "";
+  diagnostics.push(...unscopedReportCoverageScoreDiagnostics(markdown, markdownPath));
+
+  const producerStatus = plannedContractProducerStatus(layout, node, "ultrafuzz/coverage-evidence@1", attemptAuthority);
+  if (producerStatus === "absent") {
+    const markdownClaimsCoverage = markdownCoverageScoreOccurrences(markdown).some((occurrence) =>
+      coverageScoreHasContext(occurrence, false)
+    );
+    if (report.coverage_evidence !== undefined || markdownClaimsCoverage) {
+      diagnostics.push({
+        code: "REPORT_COVERAGE_EVIDENCE_UNPLANNED",
+        message: "Final report must not invent typed or Markdown coverage evidence without a planned producer",
+        severity: "error",
+        source: "coverage-evidence",
+        path: report.coverage_evidence === undefined ? markdownPath : `${reportPath}#$.coverage_evidence`
+      });
+    }
+    return diagnostics;
+  }
+  if (producerStatus === "unknown" && report.coverage_evidence === undefined) return diagnostics;
+  const evidence = finalizedSingletonAncestorOutput(
+    layout,
+    node,
+    "ultrafuzz/coverage-evidence@1",
+    "coverage evidence semantic context",
+    attemptAuthority
+  );
+  if (evidence === undefined) {
+    diagnostics.push({
+      code: "REPORT_COVERAGE_EVIDENCE_UNAVAILABLE",
+      message: "Final report cannot verify the planned coverage denominator without finalized producer authority",
+      severity: "error",
+      source: "coverage-evidence",
+      path: `${reportPath}#$.coverage_evidence`
+    });
+    return diagnostics;
+  }
+  if (!isDeepStrictEqual(report.coverage_evidence, evidence.value)) {
+    diagnostics.push({
+      code: "REPORT_COVERAGE_EVIDENCE_MISMATCH",
+      message: "Final report must preserve the complete scoped coverage denominator",
+      severity: "error",
+      source: "coverage-evidence",
+      path: `${reportPath}#$.coverage_evidence`
+    });
+    return diagnostics;
+  }
+
+  diagnostics.push(
+    ...coverageEvidenceMarkdownProjectionDiagnostics(
+      evidence.value,
+      markdown,
+      markdownPath,
+      "REPORT_COVERAGE_EVIDENCE_MARKDOWN_MISSING"
+    )
+  );
+  return diagnostics;
+}
+
+function coverageEvidenceMarkdownProjectionDiagnostics(
+  evidence: unknown,
+  markdown: string,
+  markdownPath: string,
+  code: string
+): RuntimeDiagnostic[] {
+  // Leading whitespace is part of the projection contract: it distinguishes
+  // list nesting from peer rows and ordinary lists from indented code blocks.
+  const expectedLines = renderCoverageEvidenceMarkdownSection(evidence)
+    .slice(1)
+    .map((line) => line.trimEnd())
+    .filter((line) => line.trim().length > 0);
+  const sections = markdownSectionOccurrences(markdown, "## Scoped coverage evidence");
+  const renderedLines = sections[0]?.filter((line) => line.trim().length > 0);
+  const renderedDocument = renderedMarkdownDocument(markdown);
+  const visibleHeadingCount = renderedDocument.blocks.filter(
+    (block) => block.headingDepth === 2 && block.text.trim() === "Scoped coverage evidence"
+  ).length;
+  const globalScoresMatch = coverageEvidenceGlobalScoresMatch(evidence, markdownCoverageScoreOccurrences(markdown));
+  return !renderedDocument.stylesheet &&
+    !renderedDocument.unsupportedSelect &&
+    visibleHeadingCount === 1 &&
+    sections.length === 1 &&
+    renderedLines !== undefined &&
+    sameStringSequence(renderedLines, expectedLines) &&
+    globalScoresMatch
+    ? []
+    : [
+        {
+          code,
+          message:
+            "Markdown must contain exactly one canonical scoped coverage section with the complete typed evidence body",
+          severity: "error",
+          source: "coverage-evidence",
+          path: markdownPath
+        }
+      ];
+}
+
+const exactCoverageScopes = ["recon-selected-declaration-completeness", "production-declaration-completeness"] as const;
+type ExactCoverageScope = (typeof exactCoverageScopes)[number];
+const exactCoverageScopePatternSource = exactCoverageScopes.join("|");
+const normalizedCoverageScopeStrings = exactCoverageScopes.map((scope) =>
+  scope.normalize("NFKC").toLocaleLowerCase("en-US")
+);
+const MAX_PUBLISHED_COVERAGE_SCORE_CANDIDATES = 2_048;
+type MarkdownCoverageScoreOccurrence = {
+  line: number;
+  score: string;
+  kind: "percentage" | "fraction";
+  scopes: ExactCoverageScope[];
+  hasCoverageContext: boolean;
+  overflow?: true;
+};
+
+type CoverageScoreScanBudget = {
+  remainingScoreCandidates: number;
+  remainingScopeCandidates: number;
+  overflowed: boolean;
+};
+
+function coverageScoreScanBudget(): CoverageScoreScanBudget {
+  return {
+    remainingScoreCandidates: MAX_PUBLISHED_COVERAGE_SCORE_CANDIDATES,
+    remainingScopeCandidates: MAX_PUBLISHED_COVERAGE_SCORE_CANDIDATES,
+    overflowed: false
+  };
+}
+
+function coverageScoreScanOverflowOccurrence(line: number): MarkdownCoverageScoreOccurrence {
+  return { line, score: "", kind: "fraction", scopes: [], hasCoverageContext: true, overflow: true };
+}
+
+function markdownCoverageScoreOccurrences(
+  contents: string,
+  initialCoverageSectionContext = false,
+  budget = coverageScoreScanBudget()
+): MarkdownCoverageScoreOccurrence[] {
+  if (budget.overflowed) return [];
+  let coverageHeadingDepth: number | undefined;
+  let coverageLabelSection = initialCoverageSectionContext;
+  const occurrences: MarkdownCoverageScoreOccurrence[] = [];
+  for (const block of renderedMarkdownBlocks(contents)) {
+    if (block.headingDepth !== undefined) {
+      if (coverageHeadingText(block.text)) {
+        coverageHeadingDepth = block.headingDepth;
+      } else if (coverageHeadingDepth === undefined || block.headingDepth <= coverageHeadingDepth) {
+        coverageHeadingDepth = undefined;
+      }
+      coverageLabelSection = false;
+    }
+    if (standaloneCoverageLabel(block.text)) coverageLabelSection = true;
+    const coverageSectionContext =
+      coverageHeadingDepth !== undefined || coverageLabelSection || coverageTableLabel(block.text);
+    occurrences.push(
+      ...coverageScoreOccurrencesInRenderedLine(block.text, block.lineNumber, coverageSectionContext, budget)
+    );
+    if (budget.overflowed) return [coverageScoreScanOverflowOccurrence(block.lineNumber)];
+  }
+  return occurrences;
+}
+
+function coverageEvidenceGlobalScoresMatch(
+  evidence: unknown,
+  occurrences: readonly MarkdownCoverageScoreOccurrence[]
+): boolean {
+  if (!isRecord(evidence)) return false;
+  if (occurrences.some((occurrence) => occurrence.overflow === true)) return false;
+  const expected = new Map<ExactCoverageScope, string>();
+  if (evidence.status === "measured" && Array.isArray(evidence.views)) {
+    for (const view of evidence.views) {
+      if (
+        !isRecord(view) ||
+        !exactCoverageScopes.includes(view.scope as ExactCoverageScope) ||
+        typeof view.covered_ranges !== "number" ||
+        typeof view.total_ranges !== "number" ||
+        !Number.isSafeInteger(view.covered_ranges) ||
+        !Number.isSafeInteger(view.total_ranges) ||
+        view.covered_ranges < 0 ||
+        view.total_ranges < 0
+      )
+        return false;
+      expected.set(view.scope as ExactCoverageScope, `${view.covered_ranges}/${view.total_ranges}`);
+    }
+  } else if (evidence.status !== "unavailable") {
+    return false;
+  }
+
+  const scoped = occurrences.filter((occurrence) => occurrence.scopes.length === 1);
+  if (scoped.length !== expected.size) return false;
+  return [...expected].every(
+    ([scope, score]) =>
+      scoped.filter((occurrence) => occurrence.scopes[0] === scope && occurrence.score === score).length === 1
+  );
+}
+
+function unscopedCoverageScoreDiagnostics(
+  contents: string,
+  artifactPath: string,
+  everyScoreIsCoverage: boolean
+): RuntimeDiagnostic[] {
+  const diagnostics = unscopedCoverageScoreOccurrences(contents, everyScoreIsCoverage).flatMap((occurrence) =>
+    occurrence.overflow === true
+      ? [reportCoverageScoreDiagnostic(occurrence, artifactPath)]
+      : [
+          {
+            code: "UNSCOPED_COVERAGE_SCORE",
+            message: "Published coverage scores must name an exact declaration-completeness scope on the same line",
+            severity: "error" as const,
+            source: "coverage-evidence",
+            path: `${artifactPath}:${occurrence.line}`
+          },
+          reportCoverageScoreDiagnostic(occurrence, artifactPath)
+        ]
+  );
+  const renderedDocument = renderedMarkdownDocument(contents);
+  if (renderedDocument.stylesheet) {
+    diagnostics.unshift({
+      code: "COVERAGE_MARKDOWN_STYLESHEET_UNSUPPORTED",
+      message: "Published coverage Markdown must not include a stylesheet that can alter score visibility",
+      severity: "error",
+      source: "coverage-evidence",
+      path: artifactPath
+    });
+  }
+  if (renderedDocument.unsupportedSelect) {
+    diagnostics.unshift({
+      code: "COVERAGE_MARKDOWN_SELECT_UNSUPPORTED",
+      message: "Published coverage Markdown must not use a select control with ambiguous visible option text",
+      severity: "error",
+      source: "coverage-evidence",
+      path: artifactPath
+    });
+  }
+  return diagnostics;
+}
+
+function unscopedReportCoverageScoreDiagnostics(contents: string, artifactPath: string): RuntimeDiagnostic[] {
+  return unscopedCoverageScoreDiagnostics(contents, artifactPath, false);
+}
+
+function reportCoverageScoreDiagnostics(
+  contents: string,
+  artifactPath: string,
+  everyScoreIsCoverage: boolean,
+  initialCoverageSectionContext = false,
+  budget = coverageScoreScanBudget()
+): RuntimeDiagnostic[] {
+  return unscopedCoverageScoreOccurrences(contents, everyScoreIsCoverage, initialCoverageSectionContext, budget).map(
+    (occurrence) => reportCoverageScoreDiagnostic(occurrence, artifactPath)
+  );
+}
+
+function reportCoverageScoreDiagnostic(
+  occurrence: MarkdownCoverageScoreOccurrence,
+  artifactPath: string
+): RuntimeDiagnostic {
+  if (occurrence.overflow === true) {
+    return {
+      code: "COVERAGE_SCORE_SCAN_LIMIT_EXCEEDED",
+      message: `Published coverage text exceeds the ${MAX_PUBLISHED_COVERAGE_SCORE_CANDIDATES}-candidate scan limit`,
+      severity: "error",
+      source: "coverage-evidence",
+      path: `${artifactPath}:${occurrence.line}`
+    };
+  }
+  const percentage = occurrence.kind === "percentage";
+  return {
+    code: percentage ? "UNSCOPED_COVERAGE_PERCENTAGE" : "UNSCOPED_COVERAGE_FRACTION",
+    message: percentage
+      ? "Coverage percentages must name an exact declaration-completeness scope on the same rendered line"
+      : "Coverage fractions must name an exact declaration-completeness scope on the same rendered line",
+    severity: "error",
+    source: "coverage-evidence",
+    path: `${artifactPath}:${occurrence.line}`
+  };
+}
+
+function unscopedCoverageScoreOccurrences(
+  contents: string,
+  everyScoreIsCoverage: boolean,
+  initialCoverageSectionContext = false,
+  budget = coverageScoreScanBudget()
+): MarkdownCoverageScoreOccurrence[] {
+  return markdownCoverageScoreOccurrences(contents, initialCoverageSectionContext, budget).filter(
+    (occurrence) => coverageScoreHasContext(occurrence, everyScoreIsCoverage) && occurrence.scopes.length !== 1
+  );
+}
+
+function coverageScoreOccurrencesInRenderedLine(
+  line: string,
+  lineNumber: number,
+  coverageSectionContext: boolean,
+  budget: CoverageScoreScanBudget
+): MarkdownCoverageScoreOccurrence[] {
+  const score = new RegExp(COVERAGE_SCORE_PATTERN_SOURCE, "giu");
+  const namedScope = new RegExp(`\\b(?:${exactCoverageScopePatternSource})\\b`, "giu");
+  const normalizedLine = normalizeCoverageScoreText(line);
+  const scores: RegExpMatchArray[] = [];
+  for (const match of normalizedLine.matchAll(score)) {
+    if (budget.remainingScoreCandidates === 0) {
+      budget.overflowed = true;
+      return [];
+    }
+    budget.remainingScoreCandidates -= 1;
+    if (coverageScoreUsesUnambiguousSyntax(normalizedLine, match)) scores.push(match);
+  }
+  if (scores.length === 0) return [];
+  const scopes: RegExpMatchArray[] = [];
+  for (const match of normalizedLine.matchAll(namedScope)) {
+    if (budget.remainingScopeCandidates === 0) {
+      budget.overflowed = true;
+      return [];
+    }
+    budget.remainingScopeCandidates -= 1;
+    scopes.push(match);
+  }
+  const scopesByScore = exactCoverageScopeBindings(normalizedLine, scopes, scores);
+  const scoreHasCoverageContext: boolean[] = [];
+  return scores.map((match, index) => {
+    const previous = scores[index - 1];
+    const next = scores[index + 1];
+    const contextRegion = normalizedLine.slice(
+      previous === undefined ? 0 : previous.index! + previous[0].length,
+      next === undefined ? normalizedLine.length : next.index!
+    );
+    const boundScopes = scopesByScore[index]!;
+    const hasCoverageContext =
+      boundScopes.length > 0 ||
+      coverageMetricScoreLanguageContext(contextRegion) ||
+      (scoreHasCoverageContext[index - 1] === true && coverageContinuationScoreLanguageContext(contextRegion)) ||
+      (coverageSectionContext && coverageSectionScoreLanguageContext(contextRegion));
+    scoreHasCoverageContext.push(hasCoverageContext);
+    return {
+      line: lineNumber,
+      score: match[0].replace(/\s+/gu, ""),
+      kind: /%|\bpct\b\.?|\bper[ -]?cent(?:age)?\b/iu.test(match[0]) ? "percentage" : "fraction",
+      scopes: boundScopes,
+      hasCoverageContext
+    };
+  });
+}
+
+function coverageScoreHasContext(occurrence: MarkdownCoverageScoreOccurrence, everyScoreIsCoverage: boolean): boolean {
+  return everyScoreIsCoverage || occurrence.hasCoverageContext;
+}
+
+function coverageContinuationScoreLanguageContext(value: string): boolean {
+  return COVERAGE_CONTINUATION_SCORE_CONTEXT_PATTERNS.some((pattern) => pattern.test(value));
+}
+
+function coverageSectionScoreLanguageContext(value: string): boolean {
+  return COVERAGE_SECTION_SCORE_CONTEXT_PATTERNS.some((pattern) => pattern.test(value));
+}
+
+const COVERAGE_PERCENT_VALUE_PATTERN_SOURCE =
+  "(?:(?:(?:\\d+(?:\\.\\d+)?|\\.\\d+)(?:e[+-]?\\d+)?)|(?:(?:a|one)[ -]+hundred|(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[ -]+(?:one|two|three|four|five|six|seven|eight|nine))?|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen))";
+const COVERAGE_INTEGER_PATTERN_SOURCE = `(?:\\d{1,3}(?:,\\d{3})+|\\d+|${COVERAGE_PERCENT_VALUE_PATTERN_SOURCE})`;
+const COVERAGE_SLASH_FRACTION_PATTERN_SOURCE = `(?<![\\p{L}\\p{N}_/\\\\])${COVERAGE_INTEGER_PATTERN_SOURCE}\\s*/\\s*${COVERAGE_INTEGER_PATTERN_SOURCE}(?![\\p{L}\\p{N}_/\\\\])`;
+const COVERAGE_WORD_FRACTION_PATTERN_SOURCE = `(?<![\\p{L}\\p{N}_])${COVERAGE_INTEGER_PATTERN_SOURCE}\\s*(?:out[ \\t]+)?of\\s*${COVERAGE_INTEGER_PATTERN_SOURCE}(?![\\p{L}\\p{N}_])`;
+const COVERAGE_COLON_FRACTION_PATTERN_SOURCE = `(?<![\\p{L}\\p{N}_:])${COVERAGE_INTEGER_PATTERN_SOURCE}\\s*:\\s*${COVERAGE_INTEGER_PATTERN_SOURCE}(?![\\p{L}\\p{N}_:])`;
+const COVERAGE_OVER_FRACTION_PATTERN_SOURCE = `(?<![\\p{L}\\p{N}_])${COVERAGE_INTEGER_PATTERN_SOURCE}\\s*over\\s*${COVERAGE_INTEGER_PATTERN_SOURCE}(?![\\p{L}\\p{N}_])`;
+const COVERAGE_RATIO_FRACTION_PATTERN_SOURCE = `(?:${COVERAGE_COLON_FRACTION_PATTERN_SOURCE}|${COVERAGE_OVER_FRACTION_PATTERN_SOURCE})`;
+const COVERAGE_SCORE_PATTERN_SOURCE = `(?:(?<![\\p{L}\\p{N}_.])${COVERAGE_PERCENT_VALUE_PATTERN_SOURCE}\\s*%|(?<![\\p{L}\\p{N}_.])${COVERAGE_PERCENT_VALUE_PATTERN_SOURCE}\\s*(?:pct\\b\\.?|per[ -]?cent(?:age)?\\b)|${COVERAGE_SLASH_FRACTION_PATTERN_SOURCE}|${COVERAGE_WORD_FRACTION_PATTERN_SOURCE}|${COVERAGE_RATIO_FRACTION_PATTERN_SOURCE})`;
+const COVERAGE_METRIC_QUALIFIER_PATTERN_SOURCE =
+  "(?:aggregate|blocks?|branch(?:es)?|class(?:es)?|code|conditions?|decisions?|functions?|global|instructions?|lines?|methods?|overall|paths?|ranges?|source|standardized|statements?|tests?|total|unscoped)";
+const COVERAGE_CONTINUATION_QUALIFIER_PATTERN_SOURCE = `(?:${COVERAGE_METRIC_QUALIFIER_PATTERN_SOURCE}|${exactCoverageScopePatternSource})`;
+const COVERAGE_CONTINUATION_DETERMINER_PATTERN_SOURCE = "(?:(?:its|that|the|their|this)[ \\t]+)?";
+const COVERAGE_CONTINUATION_CONJUNCTION_PATTERN_SOURCE =
+  "(?:(?:(?:and|but|plus|versus|vs\\.?|whereas|while|with)[ \\t]+|compared[ \\t]+(?:to|with)[ \\t]+|[&+][ \\t]*))?";
+const COVERAGE_CONTINUATION_PRIOR_SCOPE_PATTERN_SOURCE = `(?:(?:${exactCoverageScopePatternSource})[ \\t]+)?`;
+const COVERAGE_CONTINUATION_LINK_PATTERN_SOURCE =
+  "(?:(?:coverage|measurement|metric|percent(?:age)?|rate|result|score|value)[ \\t]+)?(?:(?::|=)|(?:is|was|measured|reached|remained|registered|reported|totaled|yielded|came[ \\t]+to|stood[ \\t]+at)\\b)?";
+const COVERAGE_CONTINUATION_SCORE_CONTEXT_PATTERNS = [
+  new RegExp(
+    `^[\\s,;:()[\\]{}\\u2013\\u2014-]*${COVERAGE_CONTINUATION_PRIOR_SCOPE_PATTERN_SOURCE}${COVERAGE_CONTINUATION_CONJUNCTION_PATTERN_SOURCE}${COVERAGE_CONTINUATION_DETERMINER_PATTERN_SOURCE}${COVERAGE_CONTINUATION_QUALIFIER_PATTERN_SOURCE}[ \\t]*${COVERAGE_CONTINUATION_LINK_PATTERN_SOURCE}[ \\t]*${COVERAGE_SCORE_PATTERN_SOURCE}`,
+    "iu"
+  ),
+  new RegExp(
+    `^[\\s,;:()[\\]{}\\u2013\\u2014-]*${COVERAGE_CONTINUATION_PRIOR_SCOPE_PATTERN_SOURCE}${COVERAGE_CONTINUATION_CONJUNCTION_PATTERN_SOURCE}${COVERAGE_SCORE_PATTERN_SOURCE}[ \\t]+(?:for[ \\t]+|of[ \\t]+|in[ \\t]+|at[ \\t]+)?(?:the[ \\t]+)?${COVERAGE_CONTINUATION_QUALIFIER_PATTERN_SOURCE}\\b`,
+    "iu"
+  ),
+  new RegExp(`^[\\s,;:()[\\]{}\\u2013\\u2014-]*(?:from|to)[ \\t]+${COVERAGE_SCORE_PATTERN_SOURCE}`, "iu")
+] as const;
+const COVERAGE_SECTION_QUALIFIER_PATTERN_SOURCE = `(?:${COVERAGE_METRIC_QUALIFIER_PATTERN_SOURCE}[ \\t]+)?`;
+const COVERAGE_SECTION_LABEL_PATTERN_SOURCE =
+  "(?:(?:coverage|measurement|metric|percent(?:age)?|rate|result|score|value)[ \\t]*(?::|=|is\\b|was\\b)?[ \\t]*)?";
+const COVERAGE_SECTION_UNIT_PATTERN_SOURCE =
+  "(?:(?:of[ \\t]+)?(?:branches?|code|covered|functions?|lines?|ranges?|source|tests?))?";
+const COVERAGE_SECTION_SCORE_CONTEXT_PATTERNS = [
+  new RegExp(
+    `^[\\s|*_\\x60()[\\]{}:;,.=\\u2013\\u2014-]*${COVERAGE_SECTION_QUALIFIER_PATTERN_SOURCE}${COVERAGE_SECTION_LABEL_PATTERN_SOURCE}${COVERAGE_SCORE_PATTERN_SOURCE}[ \\t]*${COVERAGE_SECTION_UNIT_PATTERN_SOURCE}[\\s|*_\\x60()[\\]{}:;,.!?=\\u2013\\u2014-]*$`,
+    "iu"
+  ),
+  new RegExp(`(?:^|\\|)[ \\t]*${COVERAGE_SCORE_PATTERN_SOURCE}[ \\t]*(?:\\||$)`, "iu")
+] as const;
+const COVERAGE_EXPLICIT_RATIO_LABEL_PATTERN_SOURCE =
+  "(?:\\b(?:fraction|ratio|score)\\b|\\bcoverage(?:[._ -]*(?:fraction|ratio|score))\\b|\\b(?:covg[-_ \\t]?eval|lcov)[._ -]+(?:fraction|ratio|score)\\b|\\bstandardized[._ -]+(?:fraction|ratio|score)\\b)";
+const COVERAGE_EXPLICIT_RATIO_BEFORE_PATTERN = new RegExp(
+  `${COVERAGE_EXPLICIT_RATIO_LABEL_PATTERN_SOURCE}[^.!?;\\r\\n]{0,64}$`,
+  "iu"
+);
+const COVERAGE_EXPLICIT_RATIO_AFTER_PATTERN = new RegExp(
+  `^[^.!?;\\r\\n]{0,64}${COVERAGE_EXPLICIT_RATIO_LABEL_PATTERN_SOURCE}`,
+  "iu"
+);
+const COVERAGE_CLOCK_CONTEXT_BEFORE_PATTERN =
+  /\b(?:created|generated|published|recorded|timestamped|updated)[ \t]+(?:at|around)[ \t]*$/iu;
+const COVERAGE_METRIC_PATTERN_SOURCE =
+  "(?:coverage(?:[._-]?(?:fraction|measurement|metric|pct|percent(?:age)?|rate|ratio|result|score|summary|value))?|lcov|covg[-_ \\t]?eval|standardized[ \\t]+(?:measurement|metric|percent(?:age)?|rate|result|score|value))";
+const COVERAGE_APPROXIMATION_PATTERN_SOURCE = "(?:about|approximately|nearly|roughly)";
+const COVERAGE_CHANGE_VERB_PATTERN_SOURCE =
+  "(?:(?:has|had)[ \\t]+)?(?:averag(?:e|es|ed|ing)|decreas(?:e|es|ed|ing)|declin(?:e|es|ed|ing)|drop(?:s|ped|ping)?|fell|fall(?:s|ing)?|improv(?:e|es|ed|ing)|increas(?:e|es|ed|ing)|rose|risen|ris(?:e|es|ing)|grew|grown|grow(?:s|ing)?|climb(?:s|ed|ing)?|advanc(?:e|es|ed|ing)|jump(?:s|ed|ing)?|mov(?:e|es|ed|ing))";
+const COVERAGE_METRIC_LINK_PATTERN_SOURCE = `(?::+|=+>?|at\\b|of\\b|(?:is|was|measured|reached|remained|hit|registered|reported|totaled|yielded)\\b(?:[ \\t]+(?:${COVERAGE_APPROXIMATION_PATTERN_SOURCE}|above|below|over|under))?|${COVERAGE_CHANGE_VERB_PATTERN_SOURCE}\\b(?:[ \\t]+(?:by|from|to|at)\\b)?|(?:now[ \\t]+)?(?:shows?|showed|indicates?|indicated|exceeds?|exceeded|surpasses?|surpassed|tops?|topped)\\b|came[ \\t]+to\\b|accounted[ \\t]+for\\b|stood[ \\t]+at\\b|[\\p{L}-]+(?:[ \\t]+(?:up|down))?[ \\t]+(?:to|at)\\b)?`;
+const COVERAGE_METRIC_SCORE_CONTEXT_PATTERNS = [
+  new RegExp(
+    `(?:${COVERAGE_METRIC_PATTERN_SOURCE}[ \\t]*(?:(?:measurement|metric|percent(?:age)?|rate|result|score|value)[ \\t]*)?${COVERAGE_METRIC_LINK_PATTERN_SOURCE}[ \\t]*${COVERAGE_SCORE_PATTERN_SOURCE}|${COVERAGE_SCORE_PATTERN_SOURCE}[ \\t]*(?:${COVERAGE_METRIC_QUALIFIER_PATTERN_SOURCE}[ \\t]+)?${COVERAGE_METRIC_PATTERN_SOURCE})`,
+    "iu"
+  ),
+  new RegExp(
+    `\\b(?:branch(?:es)?|code|functions?|lines?|production|ranges?|source|tests?)(?:[ \\t]+[\\p{L}\\p{N}_-]+){0,4}[ \\t]+(?:is|are|was|were)[ \\t]+covered[ \\t]*\\(?[ \\t]*${COVERAGE_SCORE_PATTERN_SOURCE}`,
+    "iu"
+  ),
+  new RegExp(`\\bcoverage\\b[^.!?;\\r\\n]{0,160}${COVERAGE_SCORE_PATTERN_SOURCE}`, "iu"),
+  new RegExp(
+    `\\b(?:covered|exercised|tested)[ \\t]+${COVERAGE_SCORE_PATTERN_SOURCE}[ \\t]+of[ \\t]+(?:the[ \\t]+)?(?:production[ \\t]+)?(?:branches?|code|functions?|lines?|ranges?|source|tests?)\\b`,
+    "iu"
+  ),
+  new RegExp(
+    `\\b(?:branch|code|function|line|range|source|test)[ \\t]+(?:execution|measurement|result|score)[ \\t]*(?::|=|is\\b|was\\b)[ \\t]*${COVERAGE_SCORE_PATTERN_SOURCE}`,
+    "iu"
+  )
+] as const;
+const COVERAGE_HEADING_TEXT_PATTERN = new RegExp(
+  `^(?:${COVERAGE_METRIC_QUALIFIER_PATTERN_SOURCE}[ \\t]+)?coverage(?:[ \\t]+(?:evidence|overview|report|results?|summary))?\\s*$`,
+  "iu"
+);
+const COVERAGE_STANDALONE_LABEL_PATTERN = new RegExp(
+  `^(?:${COVERAGE_METRIC_QUALIFIER_PATTERN_SOURCE}[ \\t]+)?coverage(?:[ \\t]+(?:evidence|overview|report|results?|summary))?\\s*:?\\s*$`,
+  "iu"
+);
+
+function coverageScoreUsesUnambiguousSyntax(line: string, match: RegExpMatchArray): boolean {
+  if (!match[0].includes(":")) return true;
+  const before = line.slice(Math.max(0, match.index! - 96), match.index!);
+  const after = line.slice(match.index! + match[0].length, match.index! + match[0].length + 96);
+  const clock = /^\s*(\d{1,2})\s*:\s*(\d{2})\s*$/u.exec(match[0]);
+  if (
+    clock !== null &&
+    Number(clock[1]) <= 23 &&
+    Number(clock[2]) <= 59 &&
+    COVERAGE_CLOCK_CONTEXT_BEFORE_PATTERN.test(before)
+  ) {
+    return false;
+  }
+  return COVERAGE_EXPLICIT_RATIO_BEFORE_PATTERN.test(before) || COVERAGE_EXPLICIT_RATIO_AFTER_PATTERN.test(after);
+}
+
+const UNICODE_DECIMAL_ZERO_CODE_POINTS = [
+  0x30, 0x660, 0x6f0, 0x7c0, 0x966, 0x9e6, 0xa66, 0xae6, 0xb66, 0xbe6, 0xc66, 0xce6, 0xd66, 0xde6, 0xe50, 0xed0, 0xf20,
+  0x1040, 0x1090, 0x17e0, 0x1810, 0x1946, 0x19d0, 0x1a80, 0x1a90, 0x1b50, 0x1bb0, 0x1c40, 0x1c50, 0xa620, 0xa8d0,
+  0xa900, 0xa9d0, 0xa9f0, 0xaa50, 0xabf0, 0xff10, 0x104a0, 0x10d30, 0x11066, 0x110f0, 0x11136, 0x111d0, 0x112f0,
+  0x11450, 0x114d0, 0x11650, 0x116c0, 0x11730, 0x118e0, 0x11950, 0x11c50, 0x11d50, 0x11da0, 0x11f50, 0x16a60, 0x16ac0,
+  0x16b50, 0x1e140, 0x1e2f0, 0x1e4f0, 0x1e950, 0x1fbf0
+] as const;
+
+function normalizeCoverageScoreText(value: string): string {
+  return value
+    .normalize("NFKC")
+    .replace(/\p{Decimal_Number}/gu, (digit) => {
+      const codePoint = digit.codePointAt(0)!;
+      const zero = UNICODE_DECIMAL_ZERO_CODE_POINTS.find(
+        (candidate) => codePoint >= candidate && codePoint <= candidate + 9
+      );
+      return zero === undefined ? digit : String(codePoint - zero);
+    })
+    .replace(/\u066b/gu, ".")
+    .replace(/(\d),(?=\d{1,2}\s*(?:%|pct\b\.?|per[ -]?cent(?:age)?\b))/giu, "$1.")
+    .replace(/[\u2044\u2215\u29f8]/gu, "/")
+    .replace(/[\u066a\ufe6a]/gu, "%")
+    .replace(/\p{Default_Ignorable_Code_Point}/gu, "");
+}
+
+type CoverageBindingToken =
+  { kind: "scope"; match: RegExpMatchArray } | { kind: "score"; match: RegExpMatchArray; scoreIndex: number };
+
+function exactCoverageScopeBindings(
+  line: string,
+  scopes: readonly RegExpMatchArray[],
+  scores: readonly RegExpMatchArray[]
+): ExactCoverageScope[][] {
+  const bindings = scores.map((): ExactCoverageScope[] => []);
+  const tokens: CoverageBindingToken[] = [];
+  let scopeIndex = 0;
+  let scoreIndex = 0;
+  while (scopeIndex < scopes.length || scoreIndex < scores.length) {
+    const scope = scopes[scopeIndex];
+    const score = scores[scoreIndex];
+    if (score === undefined || (scope !== undefined && scope.index! < score.index!)) {
+      tokens.push({ kind: "scope", match: scope! });
+      scopeIndex += 1;
+    } else {
+      tokens.push({ kind: "score", match: score, scoreIndex });
+      scoreIndex += 1;
+    }
+  }
+
+  for (const [tokenIndex, token] of tokens.entries()) {
+    if (token.kind !== "scope") continue;
+    const scopeMidpoint = token.match.index! + token.match[0].length / 2;
+    const candidates = [tokens[tokenIndex - 1], tokens[tokenIndex + 1]].filter(
+      (candidate): candidate is Extract<CoverageBindingToken, { kind: "score" }> =>
+        candidate?.kind === "score" &&
+        coverageScopeBindingIsSyntacticallyValid(line, token.match, candidate.match, scores[candidate.scoreIndex + 1])
+    );
+    if (candidates.length === 0) continue;
+    const distances = candidates.map((candidate) =>
+      Math.abs(candidate.match.index! + candidate.match[0].length / 2 - scopeMidpoint)
+    );
+    const nearestDistance = Math.min(...distances);
+    const nearest = candidates.filter((_, index) => distances[index] === nearestDistance);
+    if (nearest.length !== 1) continue;
+    bindings[nearest[0]!.scoreIndex]!.push(token.match[0].toLowerCase() as ExactCoverageScope);
+  }
+  return bindings;
+}
+
+function coverageScopeBindingIsSyntacticallyValid(
+  line: string,
+  scope: RegExpMatchArray,
+  score: RegExpMatchArray,
+  nextScore: RegExpMatchArray | undefined
+): boolean {
+  const scopeStart = scope.index!;
+  const scopeEnd = scopeStart + scope[0].length;
+  const scoreStart = score.index!;
+  const scoreEnd = scoreStart + score[0].length;
+  if (scopeEnd <= scoreStart) {
+    const binding = line.slice(scopeEnd, scoreStart);
+    return /^[\s,:=`'"()[\]-]*(?:(?:coverage|measurement|metric|percent(?:age)?|rate|result|score|value)\s*)?(?:(?::|=)|(?:is|was|measured|reached|remained|hit|registered|reported|totaled|yielded|came\s+to|stood\s+at)\b)?\s*$/iu.test(
+      binding
+    );
+  }
+  if (scopeStart >= scoreEnd) {
+    const binding = line.slice(scoreEnd, scopeStart);
+    if (!/^\s*(?:(?:for|of|in|at)\s+(?:the\s+)?(?:exact\s+)?)?$/iu.test(binding)) return false;
+    const suffix = line.slice(scopeEnd, nextScore?.index ?? line.length);
+    const metric = "(?:coverage|measurement|metric|percent(?:age)?|rate|result|score|value)";
+    if (new RegExp(`^\\s*(?:${metric}\\s*)?[\\x60'"()[\\]{},.;:!?-]*\\s*$`, "iu").test(suffix)) return true;
+    return (
+      nextScore !== undefined &&
+      new RegExp(
+        `^\\s*(?:${metric}[ \\t]+)?(?:(?:and|but|plus|versus|vs\\.?|whereas|while|with)[ \\t]*|[&+][ \\t]*)$`,
+        "iu"
+      ).test(suffix)
+    );
+  }
+  return false;
+}
+
+interface RenderedMarkdownBlock {
+  text: string;
+  lineNumber: number;
+  headingDepth?: number;
+}
+
+interface MarkdownNode {
+  type: string;
+  value?: string;
+  alt?: string;
+  depth?: number;
+  children?: MarkdownNode[];
+  position?: { start?: { line?: number } };
+}
+
+type HtmlVisibilityElement = {
+  tagName: string;
+  hidden: boolean;
+  accessibilityHidden: boolean;
+  styled: boolean;
+  flowContainer: boolean;
+  closedDetails: boolean;
+  detailsSummarySeen: boolean;
+  revealsClosedDetails: boolean;
+};
+
+interface HtmlVisibilityState {
+  elements: HtmlVisibilityElement[];
+  elementIndexesByTag: Map<string, number[]>;
+  nonFlowElementIndexes: number[];
+  hiddenElementCount: number;
+  accessibilityHiddenElementCount: number;
+  styledElementCount: number;
+  closedDetailsElementCount: number;
+  revealedClosedDetailsCount: number;
+  stylesheet: boolean;
+}
+
+const RENDERED_LINE_BREAK = "\uE000";
+
+const HTML_VOID_ELEMENTS = new Set([
+  "area",
+  "base",
+  "br",
+  "col",
+  "embed",
+  "hr",
+  "img",
+  "input",
+  "link",
+  "meta",
+  "param",
+  "source",
+  "track",
+  "wbr"
+]);
+
+const HTML_HIDDEN_TEXT_ELEMENTS = new Set(["head", "script", "style", "template"]);
+const HTML_RAW_TEXT_ELEMENTS = new Set(["script", "style", "textarea", "xmp"]);
+const HTML_NON_TEXT_INPUT_TYPES = new Set([
+  "checkbox",
+  "color",
+  "date",
+  "datetime-local",
+  "file",
+  "hidden",
+  "month",
+  "password",
+  "radio",
+  "range",
+  "time",
+  "week"
+]);
+const HTML_HEADING_ELEMENTS = new Set(["h1", "h2", "h3", "h4", "h5", "h6"]);
+const HTML_DESCRIPTION_ELEMENTS = new Set(["dt", "dd"]);
+const HTML_RUBY_ANNOTATION_ELEMENTS = new Set(["rt", "rp"]);
+const HTML_TABLE_SECTION_ELEMENTS = new Set(["thead", "tbody", "tfoot"]);
+const HTML_TABLE_CELL_ELEMENTS = new Set(["td", "th"]);
+const HTML_P_IMPLICIT_CLOSE_START_ELEMENTS = new Set([
+  "address",
+  "article",
+  "aside",
+  "blockquote",
+  "center",
+  "dd",
+  "details",
+  "dialog",
+  "dir",
+  "div",
+  "dl",
+  "dt",
+  "fieldset",
+  "figcaption",
+  "figure",
+  "footer",
+  "form",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "header",
+  "hgroup",
+  "hr",
+  "li",
+  "listing",
+  "main",
+  "menu",
+  "nav",
+  "ol",
+  "p",
+  "pre",
+  "plaintext",
+  "search",
+  "section",
+  "summary",
+  "table",
+  "ul",
+  "xmp"
+]);
+
+const HTML_FLOW_CONTAINER_ELEMENTS = new Set([
+  "address",
+  "article",
+  "aside",
+  "blockquote",
+  "body",
+  "dd",
+  "details",
+  "dialog",
+  "div",
+  "dl",
+  "dt",
+  "fieldset",
+  "figure",
+  "footer",
+  "form",
+  "head",
+  "header",
+  "li",
+  "main",
+  "menu",
+  "nav",
+  "ol",
+  "noscript",
+  "search",
+  "section",
+  "script",
+  "style",
+  "summary",
+  "table",
+  "tbody",
+  "td",
+  "tfoot",
+  "th",
+  "thead",
+  "template",
+  "textarea",
+  "tr",
+  "ul",
+  "xmp"
+]);
+
+const HTML_RENDERED_LINE_BREAK_ELEMENTS = new Set([
+  ...HTML_FLOW_CONTAINER_ELEMENTS,
+  "br",
+  "figcaption",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "hr",
+  "p",
+  "pre"
+]);
+
+function markdownContainsHtmlStylesheet(node: MarkdownNode): boolean {
+  return markdownContainsHtmlElement(node, "style");
+}
+
+function markdownContainsHtmlElement(node: MarkdownNode, elementName: string): boolean {
+  if (node.type === "html" && htmlContainsElement(node.value ?? "", elementName)) return true;
+  return node.children?.some((child) => markdownContainsHtmlElement(child, elementName)) ?? false;
+}
+
+function htmlContainsElement(html: string, elementName: string): boolean {
+  let index = 0;
+  while (index < html.length) {
+    if (html.startsWith("<!--", index)) {
+      const commentEnd = html.indexOf("-->", index + 4);
+      index = commentEnd === -1 ? html.length : commentEnd + 3;
+      continue;
+    }
+    const tagStart = html.indexOf("<", index);
+    if (tagStart === -1) return false;
+    const tagEnd = htmlTagEnd(html, tagStart + 1);
+    if (tagEnd === -1) return false;
+    const tag = html.slice(tagStart + 1, tagEnd);
+    const tagName = /^\s*\/?\s*([A-Za-z][A-Za-z0-9:-]*)/u.exec(tag)?.[1]?.toLowerCase();
+    const closingTag = /^\s*\//u.test(tag);
+    const selfClosingTag = /\/\s*$/u.test(tag);
+    if (tagName === elementName && !closingTag) return true;
+    if (tagName !== undefined && !closingTag && !selfClosingTag && HTML_RAW_TEXT_ELEMENTS.has(tagName)) {
+      const closingTagStart = rawTextClosingTagStart(html, tagEnd + 1, tagName);
+      if (closingTagStart === undefined) return false;
+      const closingTagEnd = htmlTagEnd(html, closingTagStart + 1);
+      if (closingTagEnd === -1) return false;
+      index = closingTagEnd + 1;
+      continue;
+    }
+    index = tagEnd + 1;
+  }
+  return false;
+}
+
+function renderedMarkdownDocument(contents: string): {
+  blocks: RenderedMarkdownBlock[];
+  stylesheet: boolean;
+  unsupportedSelect: boolean;
+} {
+  const root = fromMarkdown(contents) as MarkdownNode;
+  const blocks: RenderedMarkdownBlock[] = [];
+  const stylesheet = markdownContainsHtmlStylesheet(root);
+  const unsupportedSelect = markdownContainsHtmlElement(root, "select");
+  const visibilityState: HtmlVisibilityState = {
+    elements: [],
+    elementIndexesByTag: new Map(),
+    nonFlowElementIndexes: [],
+    hiddenElementCount: 0,
+    accessibilityHiddenElementCount: 0,
+    styledElementCount: 0,
+    closedDetailsElementCount: 0,
+    revealedClosedDetailsCount: 0,
+    stylesheet
+  };
+  const visit = (node: MarkdownNode): void => {
+    if (node.type === "definition" || node.type === "thematicBreak") return;
+    if (node.type === "paragraph" || node.type === "heading" || node.type === "html" || node.type === "code") {
+      if (node.type !== "html") closeNonFlowHtmlElementsAtMarkdownBlockBoundary(visibilityState);
+      const renderedText = (
+        node.type === "code"
+          ? visibleMarkdownText((node.value ?? "").replace(/\r?\n/gu, RENDERED_LINE_BREAK), visibilityState)
+          : renderedMarkdownNodeText(node, visibilityState)
+      )
+        .replace(/\r?\n/gu, " ")
+        .replace(/\p{Default_Ignorable_Code_Point}/gu, "");
+      const headingDepth =
+        node.type === "heading" && node.depth !== undefined
+          ? node.depth
+          : node.type === "html"
+            ? rawHtmlHeadingDepth(node.value ?? "")
+            : undefined;
+      for (const [renderedLineOffset, text] of renderedText.split(RENDERED_LINE_BREAK).entries()) {
+        if (text.length === 0) continue;
+        blocks.push({
+          text,
+          lineNumber: (node.position?.start?.line ?? 1) + renderedLineOffset,
+          ...(headingDepth !== undefined ? { headingDepth } : {})
+        });
+      }
+      return;
+    }
+    node.children?.forEach(visit);
+  };
+  visit(root);
+  return { blocks, stylesheet, unsupportedSelect };
+}
+
+function renderedMarkdownBlocks(contents: string): RenderedMarkdownBlock[] {
+  return renderedMarkdownDocument(contents).blocks;
+}
+
+function renderedMarkdownNodeText(node: MarkdownNode, state: HtmlVisibilityState): string {
+  if (node.type === "text") return visibleMarkdownText(node.value ?? "", state);
+  if (node.type === "inlineCode") return visibleMarkdownText(node.value ?? "", state);
+  if (node.type === "html") return visibleHtmlText(node.value ?? "", state);
+  if (node.type === "image" || node.type === "imageReference") {
+    const alt = visibleMarkdownText(node.alt ?? "", state).trim();
+    return alt === "" ? "" : `. ${alt}.`;
+  }
+  if (node.type === "break") return htmlTextIsHidden(state) ? "" : RENDERED_LINE_BREAK;
+  return node.children?.map((child) => renderedMarkdownNodeText(child, state)).join("") ?? "";
+}
+
+function visibleMarkdownText(value: string, state: HtmlVisibilityState): string {
+  if (htmlTextIsHidden(state)) return "";
+  return htmlScopeIsStyled(state) ? maskStyledCoverageScopeFragments(value) : value;
+}
+
+function pushHtmlVisibilityElement(state: HtmlVisibilityState, element: HtmlVisibilityElement): void {
+  const index = state.elements.length;
+  state.elements.push(element);
+  const tagIndexes = state.elementIndexesByTag.get(element.tagName);
+  if (tagIndexes === undefined) state.elementIndexesByTag.set(element.tagName, [index]);
+  else tagIndexes.push(index);
+  if (!element.flowContainer) state.nonFlowElementIndexes.push(index);
+  if (element.hidden) state.hiddenElementCount += 1;
+  if (element.accessibilityHidden) state.accessibilityHiddenElementCount += 1;
+  if (element.styled) state.styledElementCount += 1;
+  if (element.closedDetails) state.closedDetailsElementCount += 1;
+  if (element.revealsClosedDetails) state.revealedClosedDetailsCount += 1;
+}
+
+function truncateHtmlVisibilityElements(state: HtmlVisibilityState, firstRemovedIndex: number): void {
+  for (let index = state.elements.length - 1; index >= firstRemovedIndex; index -= 1) {
+    const element = state.elements[index]!;
+    const tagIndexes = state.elementIndexesByTag.get(element.tagName)!;
+    tagIndexes.pop();
+    if (tagIndexes.length === 0) state.elementIndexesByTag.delete(element.tagName);
+    if (!element.flowContainer) state.nonFlowElementIndexes.pop();
+    if (element.hidden) state.hiddenElementCount -= 1;
+    if (element.accessibilityHidden) state.accessibilityHiddenElementCount -= 1;
+    if (element.styled) state.styledElementCount -= 1;
+    if (element.closedDetails) state.closedDetailsElementCount -= 1;
+    if (element.revealsClosedDetails) state.revealedClosedDetailsCount -= 1;
+  }
+  state.elements.length = firstRemovedIndex;
+}
+
+function closeHtmlVisibilityElement(state: HtmlVisibilityState, tagName: string): void {
+  const tagIndexes = state.elementIndexesByTag.get(tagName);
+  const matchingIndex = tagIndexes?.[tagIndexes.length - 1];
+  if (matchingIndex !== undefined) truncateHtmlVisibilityElements(state, matchingIndex);
+}
+
+function closeLatestHtmlVisibilityElement(state: HtmlVisibilityState, tagNames: ReadonlySet<string>): void {
+  let latestIndex: number | undefined;
+  for (const tagName of tagNames) {
+    const indexes = state.elementIndexesByTag.get(tagName);
+    const candidate = indexes?.[indexes.length - 1];
+    if (candidate !== undefined && (latestIndex === undefined || candidate > latestIndex)) latestIndex = candidate;
+  }
+  if (latestIndex !== undefined) truncateHtmlVisibilityElements(state, latestIndex);
+}
+
+function closeImplicitHtmlElementsForStartTag(state: HtmlVisibilityState, tagName: string): void {
+  if (HTML_P_IMPLICIT_CLOSE_START_ELEMENTS.has(tagName)) closeHtmlVisibilityElement(state, "p");
+  if (HTML_HEADING_ELEMENTS.has(tagName)) closeLatestHtmlVisibilityElement(state, HTML_HEADING_ELEMENTS);
+  if (tagName === "li") closeHtmlVisibilityElement(state, "li");
+  if (tagName === "dt" || tagName === "dd") closeLatestHtmlVisibilityElement(state, HTML_DESCRIPTION_ELEMENTS);
+  if (tagName === "rt" || tagName === "rp") closeLatestHtmlVisibilityElement(state, HTML_RUBY_ANNOTATION_ELEMENTS);
+  if (tagName === "option") closeHtmlVisibilityElement(state, "option");
+  if (tagName === "optgroup") {
+    closeHtmlVisibilityElement(state, "option");
+    closeHtmlVisibilityElement(state, "optgroup");
+  }
+  if (tagName === "thead" || tagName === "tbody" || tagName === "tfoot") {
+    closeLatestHtmlVisibilityElement(state, HTML_TABLE_SECTION_ELEMENTS);
+  }
+  if (tagName === "tr") closeHtmlVisibilityElement(state, "tr");
+  if (tagName === "td" || tagName === "th") closeLatestHtmlVisibilityElement(state, HTML_TABLE_CELL_ELEMENTS);
+}
+
+function closeNonFlowHtmlElementsAtMarkdownBlockBoundary(state: HtmlVisibilityState): void {
+  const firstNonFlowIndex = state.nonFlowElementIndexes[0];
+  if (firstNonFlowIndex !== undefined) truncateHtmlVisibilityElements(state, firstNonFlowIndex);
+}
+
+function htmlTextIsHidden(state: HtmlVisibilityState, prospectiveDetailsReveal = 0): boolean {
+  return (
+    state.hiddenElementCount > 0 ||
+    state.closedDetailsElementCount > state.revealedClosedDetailsCount + prospectiveDetailsReveal
+  );
+}
+
+function htmlAccessibilityTextIsHidden(state: HtmlVisibilityState): boolean {
+  return state.accessibilityHiddenElementCount > 0;
+}
+
+function htmlScopeIsStyled(state: HtmlVisibilityState): boolean {
+  return state.styledElementCount > 0;
+}
+
+function maskStyledCoverageScopeFragments(value: string): string {
+  const scoreMatches = value.matchAll(new RegExp(COVERAGE_SCORE_PATTERN_SOURCE, "giu"));
+  let scoreMatch = scoreMatches.next();
+  return value.replace(
+    /&(?:#(?:[xX][0-9A-Fa-f]+|\d+)|[A-Za-z][A-Za-z0-9]+);?|[\p{L}-]+/gu,
+    (fragment, offset: number) => {
+      while (!scoreMatch.done && scoreMatch.value.index! + scoreMatch.value[0].length <= offset) {
+        scoreMatch = scoreMatches.next();
+      }
+      const scoreStart = scoreMatch.done ? undefined : scoreMatch.value.index!;
+      const scoreEnd = scoreMatch.done ? undefined : scoreStart! + scoreMatch.value[0].length;
+      if (
+        scoreStart !== undefined &&
+        scoreEnd !== undefined &&
+        offset < scoreEnd &&
+        offset + fragment.length > scoreStart
+      ) {
+        return fragment;
+      }
+      const decodedFragment = fragment.startsWith("&") ? decodeHTML(fragment) : fragment;
+      const normalizedFragment = decodedFragment.normalize("NFKC").toLocaleLowerCase("en-US");
+      return normalizedFragment !== "" &&
+        normalizedCoverageScopeStrings.some(
+          (scope) => scope.includes(normalizedFragment) || normalizedFragment.includes(scope)
+        )
+        ? "styled-scope"
+        : fragment;
+    }
+  );
+}
+
+function rawHtmlHeadingDepth(html: string): number | undefined {
+  const match = /^\s*<h([1-6])(?:\s[^>]*)?>[\s\S]*<\/h\1\s*>\s*$/iu.exec(html);
+  return match === null ? undefined : Number(match[1]);
+}
+
+function coverageHeadingText(value: string): boolean {
+  return COVERAGE_HEADING_TEXT_PATTERN.test(value.trim());
+}
+
+function standaloneCoverageLabel(value: string): boolean {
+  return COVERAGE_STANDALONE_LABEL_PATTERN.test(value.trim());
+}
+
+function coverageTableLabel(value: string): boolean {
+  return /(?:^|\|)\s*coverage\s*\|/iu.test(value);
+}
+
+function visibleHtmlText(html: string, state: HtmlVisibilityState): string {
+  let visible = "";
+  let index = 0;
+  while (index < html.length) {
+    const currentElement = state.elements[state.elements.length - 1];
+    if (currentElement !== undefined && HTML_RAW_TEXT_ELEMENTS.has(currentElement.tagName)) {
+      const closingTagStart = rawTextClosingTagStart(html, index, currentElement.tagName);
+      const rawTextEnd = closingTagStart ?? html.length;
+      visible += visibleMarkdownText(html.slice(index, rawTextEnd).replace(/\r?\n/gu, RENDERED_LINE_BREAK), state);
+      if (closingTagStart === undefined) break;
+      index = rawTextEnd;
+    }
+    if (html.startsWith("<!--", index)) {
+      const commentEnd = html.indexOf("-->", index + 4);
+      index = commentEnd === -1 ? html.length : commentEnd + 3;
+      continue;
+    }
+    if (html[index] !== "<") {
+      const nextTag = html.indexOf("<", index);
+      const end = nextTag === -1 ? html.length : nextTag;
+      const text = html.slice(index, end);
+      visible += visibleMarkdownText(
+        state.elementIndexesByTag.has("pre") ? text.replace(/\r?\n/gu, RENDERED_LINE_BREAK) : text,
+        state
+      );
+      index = end;
+      continue;
+    }
+
+    const tagEnd = htmlTagEnd(html, index + 1);
+    if (tagEnd === -1) {
+      visible += visibleMarkdownText("<", state);
+      index += 1;
+      continue;
+    }
+    const tag = html.slice(index + 1, tagEnd);
+    const tagName = /^\s*\/?\s*([A-Za-z][A-Za-z0-9:-]*)/u.exec(tag)?.[1]?.toLowerCase();
+    const closingTag = /^\s*\//u.test(tag);
+    const selfClosingTag = /\/\s*$/u.test(tag);
+    const attributes = htmlAttributes(tag);
+    const style = attributes.get("style");
+    const styledTag = state.stylesheet || style !== undefined || attributes.has("class") || attributes.has("id");
+    const hiddenTag =
+      tagName !== undefined &&
+      (HTML_HIDDEN_TEXT_ELEMENTS.has(tagName) ||
+        attributes.has("hidden") ||
+        (tagName === "dialog" && !attributes.has("open")) ||
+        htmlStyleHidesText(style));
+    const accessibilityHiddenTag =
+      attributes.has("inert") || attributes.get("aria-hidden")?.trim().toLowerCase() === "true";
+    if (tagName !== undefined && !closingTag) closeImplicitHtmlElementsForStartTag(state, tagName);
+    const parentElement = state.elements[state.elements.length - 1];
+    const revealsClosedDetails =
+      tagName === "summary" &&
+      parentElement?.tagName === "details" &&
+      parentElement.closedDetails &&
+      !parentElement.detailsSummarySeen;
+    if (revealsClosedDetails) parentElement.detailsSummarySeen = true;
+    if (tagName !== undefined && HTML_RENDERED_LINE_BREAK_ELEMENTS.has(tagName)) {
+      visible += RENDERED_LINE_BREAK;
+    }
+    if (tagName !== undefined && !closingTag && !hiddenTag && !htmlTextIsHidden(state, revealsClosedDetails ? 1 : 0)) {
+      const visibleLabels = [
+        !accessibilityHiddenTag && !htmlAccessibilityTextIsHidden(state) ? attributes.get("aria-label") : undefined,
+        tagName === "img" ? attributes.get("alt") : undefined,
+        tagName === "input" ? htmlVisibleInputText(attributes) : undefined
+      ].filter((label, index, labels): label is string => label !== undefined && labels.indexOf(label) === index);
+      for (const visibleLabel of visibleLabels) {
+        if (visibleLabel.trim() === "") continue;
+        visible += `. ${
+          htmlScopeIsStyled(state) || styledTag ? maskStyledCoverageScopeFragments(visibleLabel) : visibleLabel
+        }.`;
+      }
+    }
+    if (tagName !== undefined) {
+      if (closingTag) {
+        if (HTML_HEADING_ELEMENTS.has(tagName)) closeLatestHtmlVisibilityElement(state, HTML_HEADING_ELEMENTS);
+        else closeHtmlVisibilityElement(state, tagName);
+      } else if (!selfClosingTag && !HTML_VOID_ELEMENTS.has(tagName)) {
+        pushHtmlVisibilityElement(state, {
+          tagName,
+          hidden: hiddenTag,
+          accessibilityHidden: accessibilityHiddenTag,
+          styled: styledTag,
+          flowContainer: HTML_FLOW_CONTAINER_ELEMENTS.has(tagName),
+          closedDetails: tagName === "details" && !attributes.has("open"),
+          detailsSummarySeen: false,
+          revealsClosedDetails
+        });
+      }
+    }
+    index = tagEnd + 1;
+  }
+  return decodeHTML(visible);
+}
+
+function htmlAttributes(tag: string): Map<string, string | undefined> {
+  const attributes = new Map<string, string | undefined>();
+  let index = /^\s*\/?\s*[A-Za-z][A-Za-z0-9:-]*/u.exec(tag)?.[0].length ?? tag.length;
+  while (index < tag.length) {
+    while (/\s/u.test(tag[index] ?? "")) index += 1;
+    if (tag[index] === "/" || index >= tag.length) break;
+    const nameStart = index;
+    while (index < tag.length && !/[\s"'<>/=\x60]/u.test(tag[index]!)) index += 1;
+    if (index === nameStart) {
+      index += 1;
+      continue;
+    }
+    const name = tag.slice(nameStart, index).toLowerCase();
+    while (/\s/u.test(tag[index] ?? "")) index += 1;
+    let value: string | undefined;
+    if (tag[index] === "=") {
+      index += 1;
+      while (/\s/u.test(tag[index] ?? "")) index += 1;
+      const quote = tag[index];
+      if (quote === '"' || quote === "'") {
+        index += 1;
+        const valueStart = index;
+        while (index < tag.length && tag[index] !== quote) index += 1;
+        value = tag.slice(valueStart, index);
+        if (tag[index] === quote) index += 1;
+      } else {
+        const valueStart = index;
+        while (index < tag.length && !/[\s"'=<>\x60]/u.test(tag[index]!)) index += 1;
+        value = tag.slice(valueStart, index);
+      }
+    }
+    if (!attributes.has(name)) attributes.set(name, value);
+  }
+  return attributes;
+}
+
+function htmlVisibleInputText(attributes: ReadonlyMap<string, string | undefined>): string | undefined {
+  const type = decodeHTML(attributes.get("type") ?? "text")
+    .trim()
+    .toLowerCase();
+  if (type === "image") return attributes.get("alt");
+  if (type === "button" || type === "reset" || type === "submit") return attributes.get("value");
+  if (HTML_NON_TEXT_INPUT_TYPES.has(type)) return undefined;
+  const value = attributes.get("value");
+  return value !== undefined && value !== "" ? value : attributes.get("placeholder");
+}
+
+function htmlStyleHidesText(style: string | undefined): boolean {
+  if (style === undefined) return false;
+  const effectiveDeclarations = new Map<string, { value: string; important: boolean }>();
+  for (const declaration of cssInlineDeclarations(style)) {
+    const match = /^\s*([-A-Za-z]+)\s*:\s*(.*?)\s*$/u.exec(declaration);
+    if (match === null) continue;
+    const property = match[1]!.toLowerCase();
+    const important = /\s*!important\s*$/iu.test(match[2]!);
+    const value = match[2]!
+      .replace(/\s*!important\s*$/iu, "")
+      .trim()
+      .toLowerCase();
+    const current = effectiveDeclarations.get(property);
+    if (current?.important === true && !important) continue;
+    effectiveDeclarations.set(property, { value, important });
+  }
+  return [...effectiveDeclarations].some(([property, declaration]) => {
+    const { value } = declaration;
+    if (property === "display") return value === "none";
+    if (property === "visibility") return /^(?:hidden|collapse)$/u.test(value);
+    if (property === "opacity") return /^0(?:\.0+)?%?$/u.test(value);
+    if (property === "font-size") return /^0(?:\.0+)?(?:[a-z%]+)?$/u.test(value);
+    if (property === "color" || property === "-webkit-text-fill-color") {
+      return (
+        value === "transparent" ||
+        /^#[0-9a-f]{3}0$/u.test(value) ||
+        /^#[0-9a-f]{6}00$/u.test(value) ||
+        /^(?:rgb|hsl)a?\([^)]*(?:,|\/)\s*0(?:\.0+)?%?\s*\)$/u.test(value)
+      );
+    }
+    return property === "filter" && /^opacity\(\s*0(?:%|\.0+)?\s*\)$/u.test(value);
+  });
+}
+
+function cssInlineDeclarations(style: string): string[] {
+  const declarations: string[] = [];
+  let declaration = "";
+  let quote: '"' | "'" | undefined;
+  let escaped = false;
+  let escapedOutsideQuote = false;
+  let comment = false;
+  const groups: string[] = [];
+  for (let index = 0; index < style.length; index += 1) {
+    const character = style[index]!;
+    const next = style[index + 1];
+    if (comment) {
+      if (character === "*" && next === "/") {
+        comment = false;
+        declaration += " ";
+        index += 1;
+      }
+      continue;
+    }
+    if (quote !== undefined) {
+      declaration += character;
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === quote) quote = undefined;
+      continue;
+    }
+    if (escapedOutsideQuote) {
+      declaration += character;
+      escapedOutsideQuote = false;
+      continue;
+    }
+    if (character === "\\") {
+      declaration += character;
+      escapedOutsideQuote = true;
+      continue;
+    }
+    if (character === "/" && next === "*") {
+      comment = true;
+      index += 1;
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+      declaration += character;
+      continue;
+    }
+    if (character === "(" || character === "[" || character === "{") {
+      groups.push(character);
+      declaration += character;
+      continue;
+    }
+    const expectedGroup = character === ")" ? "(" : character === "]" ? "[" : character === "}" ? "{" : undefined;
+    if (expectedGroup !== undefined && groups[groups.length - 1] === expectedGroup) {
+      groups.pop();
+      declaration += character;
+      continue;
+    }
+    if (character === ";" && groups.length === 0) {
+      declarations.push(declaration);
+      declaration = "";
+      continue;
+    }
+    declaration += character;
+  }
+  declarations.push(declaration);
+  return declarations;
+}
+
+function rawTextClosingTagStart(html: string, start: number, tagName: string): number | undefined {
+  const closingTag = new RegExp(`</\\s*${tagName}(?=[\\s/>])`, "giu");
+  closingTag.lastIndex = start;
+  return closingTag.exec(html)?.index;
+}
+
+function htmlTagEnd(html: string, start: number): number {
+  let quote: '"' | "'" | undefined;
+  for (let index = start; index < html.length; index += 1) {
+    const character = html[index]!;
+    if (quote !== undefined) {
+      if (character === quote) quote = undefined;
+    } else if (character === '"' || character === "'") {
+      quote = character;
+    } else if (character === ">") {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function coverageMetricScoreLanguageContext(value: string): boolean {
+  const metricText = value
+    .replace(/\binsurance(?:[ \t]+[\p{L}\p{N}_-]+){0,5}(?:['’]s)?[ \t]+coverage\b/giu, "insurance policy")
+    .replace(
+      /\b(?:benefit|cellular|dental|geographic|health(?:care)?|insurance|medical|media|network|news|policy|press|service|signal|vision|warranty|wireless)(?:['’]s)?(?:[ \t]+[\p{L}\p{N}_-]+){0,4}[ \t]+coverage\b/giu,
+      "non-code protection"
+    )
+    .replace(
+      /\bcoverage\b(?=[^.!?\r\n]{0,80}\b(?:for|from|through|under)\s+(?:the\s+)?(?:insurance|policy|warranty)\b)/giu,
+      "non-code protection"
+    );
+  return COVERAGE_METRIC_SCORE_CONTEXT_PATTERNS.some((pattern) => pattern.test(metricText));
+}
+
+function markdownSectionOccurrences(contents: string, heading: string): string[][] {
+  const lines = contents.split(/\r?\n/u);
+  let fenced = false;
+  const headingIndexes: number[] = [];
+  for (const [index, line] of lines.entries()) {
+    const trimmed = line.trim();
+    if (/^(?:`{3,}|~{3,})/u.test(trimmed)) {
+      fenced = !fenced;
+      continue;
+    }
+    if (!fenced && trimmed === heading) {
+      headingIndexes.push(index);
+    }
+  }
+  return headingIndexes.map((headingIndex) => {
+    fenced = false;
+    const sectionLines: string[] = [];
+    for (let index = headingIndex + 1; index < lines.length; index += 1) {
+      const trimmed = lines[index]!.trim();
+      if (/^(?:`{3,}|~{3,})/u.test(trimmed)) {
+        fenced = !fenced;
+        continue;
+      }
+      if (fenced) continue;
+      if (trimmed.startsWith("## ")) break;
+      sectionLines.push(lines[index]!.trimEnd());
+    }
+    return sectionLines;
+  });
+}
+
+function unscopedCoverageScoreDiagnosticsInJson(
+  report: Record<string, unknown>,
+  reportPath: string
+): RuntimeDiagnostic[] {
+  const diagnostics: RuntimeDiagnostic[] = [];
+  const budget = coverageScoreScanBudget();
+  const visit = (
+    value: unknown,
+    jsonPath: string,
+    directCoverageField: boolean,
+    inheritedCoverageLabelContext = false
+  ): void => {
+    if (budget.overflowed) return;
+    if (typeof value === "string") {
+      if (directCoverageField || inheritedCoverageLabelContext || coverageMetricLanguageContext(value)) {
+        const nextDiagnostics = reportCoverageScoreDiagnostics(
+          value,
+          `${reportPath}#${jsonPath}`,
+          directCoverageField,
+          inheritedCoverageLabelContext,
+          budget
+        );
+        if (budget.overflowed) diagnostics.length = 0;
+        diagnostics.push(...nextDiagnostics);
+      }
+      return;
+    }
+    if (Array.isArray(value)) {
+      let coverageHeadingDepth: number | undefined;
+      let coverageLabelSection = inheritedCoverageLabelContext;
+      value.forEach((entry, index) => {
+        if (budget.overflowed) return;
+        visit(
+          entry,
+          `${jsonPath}[${index}]`,
+          directCoverageField,
+          coverageHeadingDepth !== undefined || coverageLabelSection
+        );
+        if (typeof entry !== "string") {
+          coverageHeadingDepth = undefined;
+          coverageLabelSection = false;
+          return;
+        }
+        for (const block of renderedMarkdownBlocks(entry)) {
+          if (block.headingDepth !== undefined) {
+            if (coverageHeadingText(block.text)) {
+              coverageHeadingDepth = block.headingDepth;
+            } else if (coverageHeadingDepth === undefined || block.headingDepth <= coverageHeadingDepth) {
+              coverageHeadingDepth = undefined;
+            }
+            coverageLabelSection = false;
+          }
+          if (standaloneCoverageLabel(block.text)) {
+            coverageLabelSection = true;
+          } else if (jsonArraySectionBoundaryLabel(block.text)) {
+            coverageHeadingDepth = undefined;
+            coverageLabelSection = false;
+          }
+        }
+      });
+      return;
+    }
+    if (!isRecord(value)) return;
+    for (const [key, entry] of Object.entries(value)) {
+      if (budget.overflowed) break;
+      const lcovMetadata = /^lcov$/iu.test(key) && isRecord(entry);
+      visit(entry, `${jsonPath}.${key}`, lcovMetadata ? false : directCoverageField || coverageMetricFieldName(key));
+    }
+  };
+  visit(report, "$", false);
+  return diagnostics;
+}
+
+function jsonArraySectionBoundaryLabel(value: string): boolean {
+  const trimmed = value.trim();
+  return /^[\p{L}\p{N}][^:\r\n]{0,80}:$/u.test(trimmed) && !coverageMetricLanguageContext(trimmed);
+}
+
+function coverageMetricLanguageContext(value: string): boolean {
+  const exactScope = exactCoverageScopePatternSource;
+  return new RegExp(
+    `(?<![A-Za-z0-9_-])(?:coverage(?:[._-]?(?:fraction|measurement|metric|pct|percent(?:age)?|rate|ratio|result|score|summary|value))?|lcov|${exactScope})(?![A-Za-z0-9_-])|(?<![A-Za-z0-9_-])covg[-_ \\t]?eval(?![A-Za-z0-9_-])|\\bstandardized(?:[._ -]+)(?:coverage|measurement|metric|percent(?:age)?|rate|result|score|value)\\b`,
+    "iu"
+  ).test(value);
+}
+
+function coverageMetricFieldName(key: string): boolean {
+  return (
+    coverageMetricLanguageContext(key) &&
+    new RegExp(
+      `^(?:coverage(?:[._-]?(?:fraction|measurement|metric|pct|percent(?:age)?|rate|ratio|result|score|summary|value))?|covg[-_ ]?eval|lcov|standardized[._-]coverage|${exactCoverageScopePatternSource})$`,
+      "iu"
+    ).test(key)
+  );
 }
 
 /** Require the final report to preserve the current implementation selection. */

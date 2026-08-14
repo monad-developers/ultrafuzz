@@ -168,7 +168,7 @@ export function isDirectiveConformingFinalReportMarkdown(
 
 function validateReport(report: unknown): JsonRecord {
   const serialized = `${JSON.stringify(report)}\n`;
-  const validation = validateArtifactContract("ultrafuzz/report@2", serialized, "report.json");
+  const validation = validateArtifactContract("ultrafuzz/report@3", serialized, "report.json");
   if (!validation.ok || !isRecord(validation.value)) {
     throw new Error(reportValidationMessage(validation.issues));
   }
@@ -377,10 +377,66 @@ function renderCanonicalReport(report: JsonRecord): string {
   }
 
   appendPropertyImplementationCoverage(lines, report.property_implementation_coverage);
+  appendCoverageEvidence(lines, report.coverage_evidence);
   appendPropertyProvenance(lines, report.property_provenance, issues, outcomes);
   appendPriorFindingDisposition(lines, issues, outcomes);
   appendNonProductionOutcomes(lines, outcomes);
   return `${trimTrailingBlankLines(lines).join("\n")}\n`;
+}
+
+function appendCoverageEvidence(lines: string[], value: unknown): void {
+  if (!isRecord(value) || (value.status !== "measured" && value.status !== "unavailable")) return;
+  lines.push("", ...renderCoverageEvidenceMarkdownSection(value));
+}
+
+export function renderCoverageEvidenceMarkdownSection(value: unknown): string[] {
+  if (!isRecord(value)) return [];
+  const lines = ["## Scoped coverage evidence", ""];
+  if (value.status === "unavailable" && Array.isArray(value.blockers)) {
+    lines.push("- Status: unavailable", "", "Blockers:");
+    for (const blocker of value.blockers.filter(isRecord)) {
+      lines.push(
+        `- ${inlineValue(blocker.category)}: ${isAvailable(blocker.summary) ? publicProse(String(blocker.summary)) : "unavailable"}`
+      );
+      const evidencePaths = Array.isArray(blocker.evidence_paths) ? blocker.evidence_paths : [];
+      for (const evidencePath of evidencePaths) lines.push(`  - Evidence: \`${inlineValue(evidencePath)}\``);
+    }
+    return lines;
+  }
+  if (value.status !== "measured" || !Array.isArray(value.views)) return [];
+  for (const view of value.views.filter(isRecord)) {
+    lines.push(
+      `- ${inlineValue(view.scope)}: \`${inlineValue(view.covered_ranges)}/${inlineValue(view.total_ranges)}\``
+    );
+  }
+  const excluded = Array.isArray(value.files)
+    ? value.files.filter((entry): entry is JsonRecord => isRecord(entry) && entry.included === false)
+    : [];
+  lines.push("", "Excluded from Recon-selected scope:");
+  if (excluded.length === 0) lines.push("- None");
+  else {
+    for (const entry of excluded) {
+      lines.push(
+        `- \`${inlineValue(entry.path)}\` (${inlineValue(entry.kind)}): ${isAvailable(entry.exclusion_reason) ? publicProse(String(entry.exclusion_reason)) : "unavailable"}`
+      );
+    }
+  }
+  const zero = Array.isArray(value.zero_coverage_components) ? value.zero_coverage_components.filter(isRecord) : [];
+  lines.push("", "Zero-coverage components:");
+  if (zero.length === 0) lines.push("- None");
+  else {
+    for (const entry of zero) {
+      const startLine = entry.start_line;
+      const endLine =
+        typeof entry.start_line === "number" && typeof entry.line_count === "number"
+          ? entry.start_line + entry.line_count - 1
+          : "?";
+      lines.push(
+        `- \`${inlineValue(entry.path)}:${inlineValue(startLine)}-${inlineValue(endLine)}\` (${inlineValue(entry.kind)})`
+      );
+    }
+  }
+  return lines;
 }
 
 function renderedIssues(issues: JsonRecord[]): RenderedIssue[] {
@@ -811,6 +867,7 @@ function publicProse(value: string): string {
     .replaceAll("]", "\\]")
     .replaceAll("!", "\\!")
     .replaceAll("#", "\\#")
+    .replaceAll("~", "\\~")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;");
 }

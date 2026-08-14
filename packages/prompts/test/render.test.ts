@@ -133,7 +133,7 @@ function occurrences(haystack: string, needle: string): number {
 }
 
 describe("prompt rendering", () => {
-  it("renders output-contract guidance from an installed package layout", async () => {
+  it("renders output-contract guidance and prompt partials from an installed package layout", async () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-installed-prompts-"));
     tmpDirs.push(tmp);
     const repoRoot = fileURLToPath(new URL("../../..", import.meta.url));
@@ -167,10 +167,15 @@ describe("prompt rendering", () => {
     const installed = (await import(
       `${pathToFileURL(path.join(distRoot, "render.js")).href}?installed-layout=${Date.now()}`
     )) as { renderPrompt: typeof renderPrompt };
-    const rendered = installed.renderPrompt(baseRenderInput(tmp)).renderedMarkdown;
+    const input = baseRenderInput(tmp);
+    input.prompt = `${input.prompt}\n{{coverage_evidence_markdown_projection}}`;
+    const rendered = installed.renderPrompt(input).renderedMarkdown;
 
     expect(rendered).toContain("For every output declared with `Contract: ultrafuzz/findings@2`");
     expect(rendered).toContain("Validation command: `ultrafuzz json validate --schema");
+    expect(rendered).toContain("Contract validation command: `ultrafuzz artifact validate");
+    expect(rendered).toContain("- <scope>: `<covered_ranges>/<total_ranges>`");
+    expect(rendered).toContain("- Status: unavailable");
   });
 
   it("rejects unknown variables before launch", () => {
@@ -300,6 +305,9 @@ describe("prompt rendering", () => {
     expect(result.renderedMarkdown).toContain(
       `Validation command: \`ultrafuzz json validate --schema '${path.join(schemaDirectory, "findings.schema.json")}' --file '${path.join(input.node.artifactDir, "findings.json")}'\``
     );
+    expect(result.renderedMarkdown).toContain(
+      `Contract validation command: \`ultrafuzz artifact validate 'ultrafuzz/findings@2' '${path.join(input.node.artifactDir, "findings.json")}'\``
+    );
     expect(result.renderedMarkdown).toContain(`orchestrator-supplied JSON Schema under \`${schemaDirectory}\``);
     expect(result.renderedMarkdown).toContain("It is the sole authority on JSON versions");
     expect(result.renderedMarkdown).toContain("Prompt prose may add semantic or run-context requirements");
@@ -361,7 +369,7 @@ describe("prompt rendering", () => {
     expect(rendered).not.toContain("For `findings.json`");
   });
 
-  it("renders the pinned schema and exact validation command for every agent-authored JSON output", () => {
+  it("renders the pinned schema and exact validation commands for every agent-authored JSON output", () => {
     const topologyPaths = [
       fileURLToPath(new URL("../../../.ultrafuzz/topology.yml", import.meta.url)),
       fileURLToPath(new URL("../../config/topologies/full.yml", import.meta.url)),
@@ -443,6 +451,9 @@ describe("prompt rendering", () => {
         expect(occurrences(rendered, "Validation command:"), `${topologyPath}:${node.id}`).toBe(
           schemaBackedOutputs.length
         );
+        expect(occurrences(rendered, "Contract validation command:"), `${topologyPath}:${node.id}`).toBe(
+          schemaBackedOutputs.length
+        );
         for (const output of schemaBackedOutputs) {
           const schemaPath = path.join(workspacePath, ".ultrafuzz", "schemas", output.schemaFile);
           const outputPath = path.join(artifactDir, output.path);
@@ -451,6 +462,9 @@ describe("prompt rendering", () => {
           );
           expect(rendered, `${topologyPath}:${node.id}:${output.path}`).toContain(
             `Validation command: \`ultrafuzz json validate --schema '${schemaPath}' --file '${outputPath}'\``
+          );
+          expect(rendered, `${topologyPath}:${node.id}:${output.path}`).toContain(
+            `Contract validation command: \`ultrafuzz artifact validate '${output.contract}' '${outputPath}'\``
           );
         }
       }
@@ -479,7 +493,7 @@ describe("prompt rendering", () => {
         contract: output.contract,
         primary: output.primary ?? index === 0,
         description: `${output.contract} smoke output.`,
-        ...(output.contract === "ultrafuzz/report@2" ? { schemaFile: "report.schema.json" } : {})
+        ...(output.contract === "ultrafuzz/report@3" ? { schemaFile: "report.schema.json" } : {})
       }))
     }));
 
@@ -748,9 +762,10 @@ describe("prompt rendering", () => {
 
     expect(result.renderedMarkdown).not.toContain("Validate against:");
     expect(result.renderedMarkdown).not.toContain("Validation command:");
+    expect(result.renderedMarkdown).not.toContain("Contract validation command:");
   });
 
-  it("renders one shell-safe validation command per schema-backed output", () => {
+  it("renders both shell-safe validation commands per schema-backed output", () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
     tmpDirs.push(tmp);
     const specialRoot = path.join(tmp, "path with spaces, '$dollar', and `ticks`");
@@ -758,9 +773,11 @@ describe("prompt rendering", () => {
     const result = renderPrompt(input);
 
     expect(result.renderedMarkdown.match(/Validation command:/gu)).toHaveLength(2);
+    expect(result.renderedMarkdown.match(/Contract validation command:/gu)).toHaveLength(2);
     expect(result.renderedMarkdown).toContain("'\"'\"'");
     expect(result.renderedMarkdown).toContain("$dollar");
     expect(result.renderedMarkdown).toContain("`` ultrafuzz json validate");
+    expect(result.renderedMarkdown).toContain("`` ultrafuzz artifact validate");
     expect(result.renderedMarkdown).toContain("generated-tests.schema.json");
   });
 
@@ -983,7 +1000,7 @@ describe("prompt rendering", () => {
     expect(readFileSync(renderedPath, "utf8")).toBe(result.renderedMarkdown);
   });
 
-  it("renders report-bound finding vocabularies from the shared authority", () => {
+  it("renders authoritative prompt fragments from their shared authorities", () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
@@ -996,6 +1013,8 @@ describe("prompt rendering", () => {
     expect(rendered).not.toContain("reachability=<summary>");
     expect(rendered).toContain("stateful_failure_classification=<production-bug|harness-defect|");
     input.variables = { finding_reachability_vocabulary: "reachability=renamed" };
+    expect(() => renderPrompt(input)).toThrow(/authoritative and cannot be overridden/u);
+    input.variables = { coverage_evidence_markdown_projection: "replacement" };
     expect(() => renderPrompt(input)).toThrow(/authoritative and cannot be overridden/u);
   });
 });

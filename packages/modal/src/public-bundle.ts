@@ -320,7 +320,7 @@ function parseTerminalReports(
   runRecords: Map<string, PublicBundleRunRecord>,
   contentsByPath: Map<string, Buffer>
 ): Map<string, TerminalReport> {
-  const binding = artifactContractSchemaBinding("ultrafuzz/report@2");
+  const binding = artifactContractSchemaBinding("ultrafuzz/report@3");
   if (binding === undefined) throw new Error("terminal report schema binding is unavailable");
   const reports = new Map<string, TerminalReport>();
   for (const rowId of matrixRows.keys()) {

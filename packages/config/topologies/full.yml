@@ -643,10 +643,16 @@ nodes:
     loop_mode: series
     outputs:
       - path: coverage-goal.json
-        contract: ultrafuzz/coverage-goal@1
+        contract: ultrafuzz/coverage-goal@2
         primary: true
       - path: coverage-report.md
         contract: ultrafuzz/nonempty-markdown@1
+      - path: coverage-evidence.json
+        contract: ultrafuzz/coverage-evidence@1
+      - path: coverage-input.lcov
+        contract: ultrafuzz/text@1
+      - path: recon-coverage.json
+        contract: ultrafuzz/text@1
       - path: findings.json
         contract: ultrafuzz/findings@2
       - path: generated-tests.json
@@ -934,4 +940,4 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: report.json
-        contract: ultrafuzz/report@2
+        contract: ultrafuzz/report@3

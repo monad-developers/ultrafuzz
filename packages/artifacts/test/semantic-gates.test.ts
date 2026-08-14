@@ -331,6 +331,29 @@ const differentialTriageBBinding = differentialBinding(
   "differential-red-triage:0"
 );
 
+const validCoverageEvidence = {
+  schema_version: "ultrafuzz.coverage-evidence.v1",
+  status: "measured",
+  lcov: { path: "coverage-input.lcov", sha256: "a".repeat(64) },
+  recon_selection: { path: "recon-coverage.json", sha256: "b".repeat(64) },
+  views: [
+    { scope: "recon-selected-declaration-completeness", covered_ranges: 0, total_ranges: 0 },
+    { scope: "production-declaration-completeness", covered_ranges: 0, total_ranges: 0 }
+  ],
+  files: [
+    {
+      path: "src/Core.sol",
+      kind: "production",
+      included: false,
+      exclusion_reason: "no material declarations",
+      covered_ranges: 0,
+      total_ranges: 0
+    }
+  ],
+  counted_ranges: [],
+  zero_coverage_components: []
+};
+
 const fixtures = {
   "admin-config-surface-id-uniqueness": {
     positive: { surfaces: [{ surface_id: "a" }] },
@@ -643,6 +666,64 @@ const fixtures = {
     },
     negative: {
       entries: [{ path: ["models", "profiles", "a", "model"] }, { path: ["models", "profiles", "a", "model"] }]
+    }
+  },
+  "coverage-evidence-reconciliation": {
+    positive: validCoverageEvidence,
+    negative: {
+      schema_version: "ultrafuzz.coverage-evidence.v1",
+      status: "measured",
+      lcov: { path: "coverage-input.lcov", sha256: "a".repeat(64) },
+      recon_selection: { path: "recon-coverage.json", sha256: "b".repeat(64) },
+      views: [
+        { scope: "recon-selected-declaration-completeness", covered_ranges: 0, total_ranges: 0 },
+        { scope: "production-declaration-completeness", covered_ranges: 0, total_ranges: 1 }
+      ],
+      files: [
+        {
+          path: "src/Core.sol",
+          kind: "production",
+          included: false,
+          exclusion_reason: "not selected",
+          covered_ranges: 0,
+          total_ranges: 1
+        }
+      ],
+      counted_ranges: [
+        {
+          file: "src/Core.sol",
+          kind: "production",
+          start_line: 1,
+          line_count: 1,
+          selected: true,
+          covered: false
+        }
+      ],
+      zero_coverage_components: [{ path: "src/Core.sol", kind: "production", start_line: 1, line_count: 1 }]
+    }
+  },
+  "coverage-goal-reconciliation": {
+    positive: {
+      schema_version: "ultrafuzz.coverage-goal.v2",
+      target: { scope: "recon-selected-declaration-completeness", minimum_percent: 90 },
+      current_measurement: { scope: "recon-selected-declaration-completeness", covered_ranges: 1, total_ranges: 1 },
+      current_status: "target-met",
+      planned_commands: [],
+      stop_conditions: ["reserve time for finalization"],
+      timeout_seconds: 60,
+      finalization_reserve_seconds: 10,
+      blockers: []
+    },
+    negative: {
+      schema_version: "ultrafuzz.coverage-goal.v2",
+      target: { scope: "recon-selected-declaration-completeness", minimum_percent: 90 },
+      current_measurement: { scope: "recon-selected-declaration-completeness", covered_ranges: 2, total_ranges: 1 },
+      current_status: "target-met",
+      planned_commands: [],
+      stop_conditions: ["reserve time for finalization"],
+      timeout_seconds: 60,
+      finalization_reserve_seconds: 10,
+      blockers: []
     }
   },
   "dependency-id-uniqueness": {
@@ -1121,6 +1202,18 @@ const fixtures = {
       non_production_outcomes: [{ notes: ["reachability=renamed-public-trace"] }]
     }
   },
+  "report-coverage-evidence-reconciliation": {
+    positive: { coverage_evidence: validCoverageEvidence },
+    negative: {
+      coverage_evidence: {
+        ...validCoverageEvidence,
+        views: [
+          { scope: "recon-selected-declaration-completeness", covered_ranges: 0, total_ranges: 1 },
+          { scope: "production-declaration-completeness", covered_ranges: 0, total_ranges: 1 }
+        ]
+      }
+    }
+  },
   "run-metadata-accounting-workflow-identity": {
     positive: {
       workflow: { run_id: "workflow-a" },
@@ -1319,6 +1412,37 @@ test("every document-local gate has a passing and failing non-mutating fixture",
     assert.deepEqual(fixture.positive, positiveBefore, `${name}:positive mutated`);
     assert.deepEqual(fixture.negative, negativeBefore, `${name}:negative mutated`);
   }
+});
+
+test("coverage goal reconciliation treats an empty denominator as below target", () => {
+  const base = {
+    schema_version: "ultrafuzz.coverage-goal.v2",
+    target: { scope: "recon-selected-declaration-completeness", minimum_percent: 90 },
+    current_measurement: {
+      scope: "recon-selected-declaration-completeness",
+      covered_ranges: 0,
+      total_ranges: 0
+    },
+    planned_commands: [],
+    stop_conditions: ["reserve time for finalization"],
+    timeout_seconds: 60,
+    finalization_reserve_seconds: 10,
+    blockers: []
+  };
+  assert.equal(
+    executeSemanticGate("coverage-goal-reconciliation", {
+      document: { ...base, current_status: "below-target" }
+    }).status,
+    "passed"
+  );
+  const incorrectlyMet = executeSemanticGate("coverage-goal-reconciliation", {
+    document: { ...base, current_status: "target-met" }
+  });
+  assert.equal(incorrectlyMet.status, "failed");
+  assert.ok(
+    incorrectlyMet.status === "failed" &&
+      incorrectlyMet.issues.some((entry) => /0\/0 is below-target/u.test(entry.message))
+  );
 });
 
 test("severity and report vocabulary gates reject renamed reachability tokens at both boundaries", () => {

@@ -1197,7 +1197,7 @@
       "properties": {
         "code": { "enum": ["TERMINAL_REPORT_NOT_PUBLISHABLE", "RECOVERY_EQUIVALENCE_NOT_PUBLISHABLE"] },
         "row_id": { "$ref": "#/$defs/nonEmptyString" },
-        "contract": { "const": "ultrafuzz/report@2" },
+        "contract": { "const": "ultrafuzz/report@3" },
         "reason": { "$ref": "#/$defs/nonEmptyString" },
         "report_path": { "$ref": "#/$defs/nonEmptyString" }
       }
@@ -1301,7 +1301,7 @@
         "report_json_sha256": { "$ref": "#/$defs/sha256" },
         "report_markdown_path": { "$ref": "#/$defs/nonEmptyString" },
         "report_markdown_sha256": { "$ref": "#/$defs/sha256" },
-        "contract": { "const": "ultrafuzz/report@2" },
+        "contract": { "const": "ultrafuzz/report@3" },
         "contract_digest": { "$ref": "#/$defs/sha256" },
         "schema_id": { "$ref": "#/$defs/nonEmptyString" },
         "schema_sha256": { "$ref": "#/$defs/sha256" },

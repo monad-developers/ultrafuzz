@@ -58,6 +58,7 @@ describe("prompt semantic anchors", () => {
     );
     for (const filename of [
       "boundary-recipes.mdx",
+      "coverage-evidence-markdown.mdx",
       "findings.mdx",
       "generated-tests.mdx",
       "output-contract.mdx"
@@ -352,6 +353,9 @@ describe("prompt semantic anchors", () => {
     const coverage = prompt("strategies/invariants/coverage.md");
 
     expect(coverage).toContain("`recon-generate coverage`");
+    expect(coverage.split("\n").length).toBeLessThan(180);
+    expect(coverage.match(/official documentation or direct CLI `--help`/gu)).toHaveLength(1);
+    expect(coverage).not.toContain("The tool expects a Magic directory");
     expect(coverage).not.toContain("npx -y recon-generate");
     expect(coverage).not.toContain("recon-generate@latest");
   });
@@ -571,9 +575,30 @@ describe("prompt semantic anchors", () => {
       expect(invariantPrompt).toContain("machine-readable source of truth");
       expect(invariantPrompt).toContain("source-only properties");
     }
-    expect(coverage).toContain("{{schema_path}}/coverage-goal.schema.json");
-    expect(coverage).toContain("schema-defined status, measurement, and blocker variant");
-    expect(coverage).toContain("Never present an\n     unmeasured, sub-target, or blocked result as stronger progress");
+    expect(coverage).toMatch(/Confirm their exact shapes and empty\s+forms with the rendered output contract/u);
+    expect(coverage).toContain("never overstate the result");
+    expect(coverage).not.toContain("it alone defines");
+  });
+
+  it("renders the canonical coverage projection into both portable prompts", () => {
+    const placeholder = "{{coverage_evidence_markdown_projection}}";
+    for (const relativePath of ["strategies/invariants/coverage.md", "review/final-report.md"] as const) {
+      const markdown = prompt(relativePath);
+      expect(markdown, relativePath).toContain(placeholder);
+      expect(markdown.split(placeholder), relativePath).toHaveLength(2);
+      expect(markdown, relativePath).not.toContain("docs/reference/artifacts-reports.md");
+    }
+
+    const partialPath = fileURLToPath(
+      new URL("../../../.ultrafuzz/prompts/_templates/output-contract/coverage-evidence-markdown.mdx", import.meta.url)
+    );
+    const docsPath = fileURLToPath(new URL("../../../docs/reference/artifacts-reports.md", import.meta.url));
+    const partial = readFileSync(partialPath, "utf8").trim();
+    const docs = readFileSync(docsPath, "utf8");
+
+    expect(partial.match(/Raw `covg-eval` output is for iteration only/gu)).toHaveLength(1);
+    expect(partial).toMatch(/Apply public-prose\s+sanitization to `<summary>` and `<exclusion_reason>`/u);
+    expect(docs).toContain(partial);
   });
 
   it("documents status-dependent differential and dynamic evidence beside pinned schemas", () => {

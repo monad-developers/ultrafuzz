@@ -10,6 +10,7 @@ import {
   ARTIFACT_CONTRACT_IDS,
   ARTIFACT_CONTRACT_SCHEMA_FILES,
   ARTIFACT_SCHEMA_METADATA,
+  COVERAGE_EVIDENCE_JSON_SCHEMA_ID,
   JSON_ARTIFACT_CONTRACT_IDS,
   MAX_FINDINGS,
   MAX_FINDING_COUNT,
@@ -39,6 +40,7 @@ import {
   assertAnalysisRecoverySummary,
   assertAnalysisTerminalStatus,
   createInitialRunState,
+  coverageEvidenceSchema,
   executeSemanticGate,
   invariantLedgerSchema,
   invariantSourceProofSchema,
@@ -74,6 +76,7 @@ const contractFixtures = JSON.parse(fs.readFileSync(fixturePath, "utf8")) as Rec
 
 const removedContractIds = [
   "ultrafuzz/campaign-summary@1",
+  "ultrafuzz/coverage-goal@1",
   "ultrafuzz/findings@1",
   "ultrafuzz/generated-tests@1",
   "ultrafuzz/generated-tests@2",
@@ -87,7 +90,8 @@ const removedContractIds = [
   "ultrafuzz/property-campaign@2",
   "ultrafuzz/property-lens@1",
   "ultrafuzz/reference-expectations@1",
-  "ultrafuzz/report@1"
+  "ultrafuzz/report@1",
+  "ultrafuzz/report@2"
 ] as const;
 
 test("the registry, schema metadata, mappings, and fixtures cover every current contract exactly once", () => {
@@ -138,6 +142,269 @@ test("every JSON contract has canonical positive and negative fixtures and valid
     assert.equal(JSON.stringify(fixture.valid), validBytes, `${contract} valid bytes changed`);
     assert.equal(JSON.stringify(fixture.invalid), invalidBytes, `${contract} invalid bytes changed`);
     assert.deepEqual(parseStrictJson(validBytes), fixture.valid, contract);
+  }
+});
+
+test("coverage evidence reconciles scoped denominators and keeps excluded ranges out of selected scope", () => {
+  const valid = structuredClone(contractFixtures["ultrafuzz/coverage-evidence@1"]!.valid) as Record<string, unknown>;
+  assert.equal(executeSemanticGate("coverage-evidence-reconciliation", { document: valid }).status, "passed");
+
+  const independentlyScoped = structuredClone(valid) as {
+    files: Array<{ path: string; covered_ranges: number; total_ranges: number }>;
+    views: Array<{ scope: string; covered_ranges: number; total_ranges: number }>;
+    counted_ranges: Array<Record<string, unknown>>;
+  };
+  independentlyScoped.counted_ranges.push({
+    file: "src/Core.sol",
+    kind: "production",
+    start_line: 2,
+    line_count: 1,
+    selected: false,
+    covered: true
+  });
+  independentlyScoped.files.find((entry) => entry.path === "src/Core.sol")!.covered_ranges = 2;
+  independentlyScoped.files.find((entry) => entry.path === "src/Core.sol")!.total_ranges = 2;
+  independentlyScoped.views.find((entry) => entry.scope === "production-declaration-completeness")!.covered_ranges = 2;
+  independentlyScoped.views.find((entry) => entry.scope === "production-declaration-completeness")!.total_ranges = 3;
+  assert.equal(
+    executeSemanticGate("coverage-evidence-reconciliation", { document: independentlyScoped }).status,
+    "passed"
+  );
+
+  const incompleteButNotNecessarilyZero = structuredClone(valid) as {
+    files: Array<{ path: string; covered_ranges: number }>;
+    views: Array<{ scope: string; covered_ranges: number }>;
+    counted_ranges: Array<{ file: string; covered: boolean }>;
+  };
+  incompleteButNotNecessarilyZero.counted_ranges.find((entry) => entry.file === "src/Core.sol")!.covered = false;
+  incompleteButNotNecessarilyZero.files.find((entry) => entry.path === "src/Core.sol")!.covered_ranges = 0;
+  incompleteButNotNecessarilyZero.views.find(
+    (entry) => entry.scope === "recon-selected-declaration-completeness"
+  )!.covered_ranges = 0;
+  incompleteButNotNecessarilyZero.views.find(
+    (entry) => entry.scope === "production-declaration-completeness"
+  )!.covered_ranges = 0;
+  assert.equal(
+    executeSemanticGate("coverage-evidence-reconciliation", { document: incompleteButNotNecessarilyZero }).status,
+    "passed",
+    "document-local validation cannot infer zero hits from an incomplete declaration"
+  );
+
+  const hiddenExcludedRange = structuredClone(valid) as {
+    counted_ranges: Array<Record<string, unknown>>;
+  };
+  hiddenExcludedRange.counted_ranges.push({
+    file: "src/Critical.sol",
+    kind: "production",
+    start_line: 1,
+    line_count: 1,
+    selected: true,
+    covered: false
+  });
+  const rejected = executeSemanticGate("coverage-evidence-reconciliation", { document: hiddenExcludedRange });
+  assert.equal(rejected.status, "failed");
+  assert.ok(
+    rejected.status === "failed" &&
+      rejected.issues.some((issue) =>
+        /included in the recon-selected-declaration-completeness scope/u.test(issue.message)
+      )
+  );
+
+  const legacyReversedRange = structuredClone(valid) as {
+    counted_ranges: Array<Record<string, unknown>>;
+  };
+  delete legacyReversedRange.counted_ranges[0]!.line_count;
+  legacyReversedRange.counted_ranges[0]!.end_line = 0;
+  assert.equal(
+    validateArtifactContract("ultrafuzz/coverage-evidence@1", JSON.stringify(legacyReversedRange)).ok,
+    false
+  );
+
+  const emptyRange = structuredClone(valid) as { counted_ranges: Array<{ line_count: number }> };
+  emptyRange.counted_ranges[0]!.line_count = 0;
+  assert.equal(validateArtifactContract("ultrafuzz/coverage-evidence@1", JSON.stringify(emptyRange)).ok, false);
+
+  const unauthenticatedCriticalFlag = structuredClone(valid) as { files: Array<Record<string, unknown>> };
+  unauthenticatedCriticalFlag.files[0]!.critical = false;
+  assert.equal(
+    validateArtifactContract("ultrafuzz/coverage-evidence@1", JSON.stringify(unauthenticatedCriticalFlag)).ok,
+    false
+  );
+});
+
+test("coverage unavailability requires a blocked null goal with the same typed blockers", () => {
+  const blocker = {
+    category: "coverage-tooling-blocked",
+    summary: "covg-eval was unavailable",
+    evidence_paths: ["coverage-report.md"]
+  };
+  const evidence = {
+    schema_version: "ultrafuzz.coverage-evidence.v1",
+    status: "unavailable",
+    blockers: [blocker]
+  };
+  const goalFixture = contractFixtures["ultrafuzz/coverage-goal@2"]!.valid as Record<string, unknown>;
+  const goal = {
+    ...structuredClone(goalFixture),
+    current_measurement: null,
+    current_status: "blocked",
+    blockers: [structuredClone(blocker)]
+  };
+
+  assert.equal(validateArtifactContract("ultrafuzz/coverage-evidence@1", JSON.stringify(evidence)).ok, true);
+  assert.equal(executeSemanticGate("coverage-evidence-reconciliation", { document: evidence }).status, "passed");
+  assert.equal(validateArtifactContract("ultrafuzz/coverage-goal@2", JSON.stringify(goal)).ok, true);
+  assert.equal(executeSemanticGate("coverage-goal-reconciliation", { document: goal }).status, "passed");
+  assert.deepEqual(goal.blockers, evidence.blockers);
+
+  const unavailableWithoutBlockers = { ...evidence, blockers: [] };
+  assert.equal(
+    validateArtifactContract("ultrafuzz/coverage-evidence@1", JSON.stringify(unavailableWithoutBlockers)).ok,
+    false
+  );
+  const blockedWithMeasurement = {
+    ...goal,
+    current_measurement: {
+      scope: "recon-selected-declaration-completeness",
+      covered_ranges: 0,
+      total_ranges: 1
+    }
+  };
+  assert.equal(validateArtifactContract("ultrafuzz/coverage-goal@2", JSON.stringify(blockedWithMeasurement)).ok, false);
+  assert.equal(
+    executeSemanticGate("coverage-goal-reconciliation", { document: blockedWithMeasurement }).status,
+    "failed"
+  );
+
+  const duplicateEvidencePaths = {
+    ...blocker,
+    evidence_paths: ["coverage-report.md", "coverage-report.md"]
+  };
+  assert.equal(
+    validateArtifactContract(
+      "ultrafuzz/coverage-evidence@1",
+      JSON.stringify({ ...evidence, blockers: [duplicateEvidencePaths] })
+    ).ok,
+    false
+  );
+  assert.equal(
+    validateArtifactContract(
+      "ultrafuzz/coverage-goal@2",
+      JSON.stringify({ ...goal, blockers: [duplicateEvidencePaths] })
+    ).ok,
+    false
+  );
+});
+
+test("measured coverage requires safe distinct durable input descriptors", () => {
+  const valid = structuredClone(contractFixtures["ultrafuzz/coverage-evidence@1"]!.valid) as {
+    lcov: { path: string; sha256: string };
+    recon_selection: { path: string; sha256: string };
+  };
+  const structuralCases = [
+    {
+      name: "missing Recon selection descriptor",
+      mutate(value: Record<string, unknown>) {
+        delete value.recon_selection;
+      }
+    },
+    {
+      name: "absolute LCOV path",
+      mutate(value: typeof valid) {
+        value.lcov.path = "/tmp/coverage.lcov";
+      }
+    },
+    {
+      name: "traversing Recon selection path",
+      mutate(value: typeof valid) {
+        value.recon_selection.path = "../recon-coverage.json";
+      }
+    },
+    {
+      name: "noncanonical LCOV digest",
+      mutate(value: typeof valid) {
+        value.lcov.sha256 = "A".repeat(64);
+      }
+    }
+  ] as const;
+  for (const candidate of structuralCases) {
+    const value = structuredClone(valid) as typeof valid & Record<string, unknown>;
+    candidate.mutate(value);
+    assert.equal(
+      validateArtifactContract("ultrafuzz/coverage-evidence@1", JSON.stringify(value)).ok,
+      false,
+      candidate.name
+    );
+  }
+
+  const sameInputPath = structuredClone(valid);
+  sameInputPath.recon_selection.path = sameInputPath.lcov.path;
+  assert.equal(
+    validateArtifactContract("ultrafuzz/coverage-evidence@1", JSON.stringify(sameInputPath)).ok,
+    true,
+    "distinct input paths are a document-semantic constraint"
+  );
+  const semantic = executeSemanticGate("coverage-evidence-reconciliation", { document: sameInputPath });
+  assert.equal(semantic.status, "failed");
+  assert.ok(
+    semantic.status === "failed" && semantic.issues.some((entry) => entry.path.endsWith("recon_selection.path"))
+  );
+});
+
+test("coverage evidence keeps JSON Schema path and integer bounds in Zod parity", () => {
+  type MeasuredCoverageFixture = {
+    lcov: { path: string };
+    views: Array<{ covered_ranges: number; total_ranges: number }>;
+    files: Array<{ path: string; covered_ranges: number; total_ranges: number }>;
+    counted_ranges: Array<{ file: string; start_line: number; line_count: number }>;
+    zero_coverage_components: Array<{ path: string; start_line: number; line_count: number }>;
+  };
+  const valid = structuredClone(contractFixtures["ultrafuzz/coverage-evidence@1"]!.valid) as MeasuredCoverageFixture;
+  const assertParityRejection = (value: MeasuredCoverageFixture, label: string): void => {
+    assert.equal(
+      validateRegisteredJsonSchema(COVERAGE_EVIDENCE_JSON_SCHEMA_ID, value).ok,
+      false,
+      `${label}: JSON Schema`
+    );
+    assert.equal(coverageEvidenceSchema.safeParse(value).success, false, `${label}: Zod`);
+  };
+
+  assert.equal(validateRegisteredJsonSchema(COVERAGE_EVIDENCE_JSON_SCHEMA_ID, valid).ok, true);
+  assert.equal(coverageEvidenceSchema.safeParse(valid).success, true);
+
+  for (const invalidPath of [".", "src/./Core.sol", "src/Core.sol/", "src\n/../Core.sol"]) {
+    const durableInput = structuredClone(valid);
+    durableInput.lcov.path = invalidPath;
+    assertParityRejection(durableInput, `durable path ${JSON.stringify(invalidPath)}`);
+
+    const sourcePaths = structuredClone(valid);
+    sourcePaths.files[1]!.path = invalidPath;
+    sourcePaths.counted_ranges[1]!.file = invalidPath;
+    sourcePaths.zero_coverage_components[0]!.path = invalidPath;
+    assertParityRejection(sourcePaths, `source path ${JSON.stringify(invalidPath)}`);
+  }
+
+  const unsafeInteger = Number.MAX_SAFE_INTEGER + 1;
+  const unsafeIntegerCases = [
+    ["view covered_ranges", (value: MeasuredCoverageFixture) => (value.views[0]!.covered_ranges = unsafeInteger)],
+    ["view total_ranges", (value: MeasuredCoverageFixture) => (value.views[0]!.total_ranges = unsafeInteger)],
+    ["file covered_ranges", (value: MeasuredCoverageFixture) => (value.files[0]!.covered_ranges = unsafeInteger)],
+    ["file total_ranges", (value: MeasuredCoverageFixture) => (value.files[0]!.total_ranges = unsafeInteger)],
+    ["range start_line", (value: MeasuredCoverageFixture) => (value.counted_ranges[0]!.start_line = unsafeInteger)],
+    ["range line_count", (value: MeasuredCoverageFixture) => (value.counted_ranges[0]!.line_count = unsafeInteger)],
+    [
+      "zero component start_line",
+      (value: MeasuredCoverageFixture) => (value.zero_coverage_components[0]!.start_line = unsafeInteger)
+    ],
+    [
+      "zero component line_count",
+      (value: MeasuredCoverageFixture) => (value.zero_coverage_components[0]!.line_count = unsafeInteger)
+    ]
+  ] as const;
+  for (const [label, mutate] of unsafeIntegerCases) {
+    const value = structuredClone(valid);
+    mutate(value);
+    assertParityRejection(value, label);
   }
 });
 
@@ -1254,7 +1521,7 @@ test("Ajv and retained Zod parsers agree on canonical unique-array constraints",
   implementedWithDuplicateTestPaths.properties[0]!.test_paths = ["test/Property.t.sol", "test/Property.t.sol"];
 
   const report = {
-    ...(structuredClone(contractFixtures["ultrafuzz/report@2"]!.valid) as Record<string, unknown>),
+    ...(structuredClone(contractFixtures["ultrafuzz/report@3"]!.valid) as Record<string, unknown>),
     property_implementation_coverage: {
       priority_threshold: "high",
       priorities: ["high", "high"],

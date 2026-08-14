@@ -4,29 +4,45 @@
   "properties": {
     "schema_version": {
       "type": "string",
-      "const": "ultrafuzz.coverage-goal.v1"
+      "const": "ultrafuzz.coverage-goal.v2"
     },
     "target": {
       "type": "object",
       "properties": {
-        "metric": {
+        "scope": {
           "type": "string",
-          "const": "standardized-core-line-coverage-percent"
+          "const": "recon-selected-declaration-completeness"
         },
-        "value": {
+        "minimum_percent": {
           "type": "number",
           "const": 90
         }
       },
-      "required": ["metric", "value"],
+      "required": ["scope", "minimum_percent"],
       "additionalProperties": false
     },
     "current_measurement": {
       "anyOf": [
         {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 100
+          "type": "object",
+          "properties": {
+            "scope": {
+              "type": "string",
+              "const": "recon-selected-declaration-completeness"
+            },
+            "covered_ranges": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100000
+            },
+            "total_ranges": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100000
+            }
+          },
+          "required": ["scope", "covered_ranges", "total_ranges"],
+          "additionalProperties": false
         },
         {
           "type": "null"
@@ -86,7 +102,6 @@
             "minLength": 1
           },
           "evidence_paths": {
-            "minItems": 0,
             "type": "array",
             "items": {
               "type": "string",
@@ -156,7 +171,7 @@
       "if": {
         "properties": {
           "current_status": {
-            "const": "target-met"
+            "enum": ["target-met", "below-target"]
           }
         },
         "required": ["current_status"]
@@ -164,32 +179,11 @@
       "then": {
         "properties": {
           "current_measurement": {
-            "type": "number",
-            "minimum": 90,
-            "maximum": 100
+            "type": "object"
           },
           "blockers": {
             "type": "array",
             "maxItems": 0
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "current_status": {
-            "const": "below-target"
-          }
-        },
-        "required": ["current_status"]
-      },
-      "then": {
-        "properties": {
-          "current_measurement": {
-            "type": "number",
-            "minimum": 0,
-            "exclusiveMaximum": 90
           }
         }
       }
@@ -205,6 +199,9 @@
       },
       "then": {
         "properties": {
+          "current_measurement": {
+            "type": "null"
+          },
           "blockers": {
             "type": "array",
             "minItems": 1
@@ -213,6 +210,6 @@
       }
     }
   ],
-  "$id": "urn:ultrafuzz:schema:artifacts:coverage-goal:1",
+  "$id": "urn:ultrafuzz:schema:artifacts:coverage-goal:2",
   "title": "Ultrafuzz invariant coverage goal"
 }

@@ -440,7 +440,7 @@ test("artifact manifests record safe paths, sizes, digests, schema version, and 
     outputs: [
       {
         path: canonicalPath,
-        contract: "ultrafuzz/coverage-goal@1",
+        contract: "ultrafuzz/coverage-goal@2",
         contract_digest: "a".repeat(64),
         schema_file: "example.schema.json",
         schema_id: "urn:ultrafuzz:schema:test:example:1",
@@ -467,7 +467,7 @@ test("artifact manifests record safe paths, sizes, digests, schema version, and 
   assert.equal(manifest.files[0]!.provenance.producer_node_id, "node-a");
   assert.equal(manifest.files[0]!.provenance.agent_ref, "CodexAgent");
   assert.equal(manifest.files[0]!.provenance.workflow_task_id, "node:node-a");
-  assert.equal(manifest.output_contracts[0]!.contract, "ultrafuzz/coverage-goal@1");
+  assert.equal(manifest.output_contracts[0]!.contract, "ultrafuzz/coverage-goal@2");
   assert.equal(manifest.output_contracts[0]!.schema_id, "urn:ultrafuzz:schema:test:example:1");
   assert.equal(manifest.output_contracts[0]!.schema_sha256, "b".repeat(64));
   assert.equal(manifest.output_contracts[0]!.schema_bundle_sha256, "c".repeat(64));

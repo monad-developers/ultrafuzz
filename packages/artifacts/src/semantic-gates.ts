@@ -6,6 +6,7 @@ import { isDeepStrictEqual } from "node:util";
 import { artifactContractDefinition, artifactContractSchemaBinding } from "./artifact-contracts.js";
 import { ARTIFACT_SCHEMA_METADATA, type ArtifactSchemaFilename } from "./artifact-schema-metadata.js";
 import { findingNoteAssignmentIssue } from "./findings-schema.js";
+import { validateCoverageEvidence } from "./coverage-evidence.js";
 import {
   MAX_AGGREGATION_DECLARED_BYTES,
   MAX_AGGREGATION_SOURCE_ENTRIES,
@@ -16,6 +17,7 @@ import {
 } from "./artifact-limits.js";
 import { MAX_PROPERTY_CAMPAIGN_EVIDENCE_TOTAL_BYTES } from "./property-provenance.js";
 import { readSinglyLinkedRegularFileSnapshotInside } from "./safe-paths.js";
+import { coverageGoalSchema } from "./workflow-contracts.js";
 
 export const MAX_SEMANTIC_GATE_ISSUES = 1_000;
 export const MAX_SEMANTIC_GATE_DIAGNOSTIC_BYTES = 64 * 1_024;
@@ -311,6 +313,24 @@ function contextualGate(
 
 function issue(pathValue: string, message: string): SemanticGateIssue {
   return { path: pathValue, message };
+}
+
+function coverageEvidenceReconciliationIssues(document: unknown): SemanticGateIssue[] {
+  const validation = validateCoverageEvidence(document, "$");
+  return validation.issues.map((entry) => issue(entry.path, entry.message));
+}
+
+function coverageGoalReconciliationIssues(document: unknown): SemanticGateIssue[] {
+  const validation = coverageGoalSchema.safeParse(document);
+  return validation.success
+    ? []
+    : validation.error.issues.map((entry) => issue(`$.${entry.path.join(".")}`, entry.message));
+}
+
+function reportCoverageEvidenceReconciliationIssues(document: unknown): SemanticGateIssue[] {
+  if (!isRecord(document) || document.coverage_evidence === undefined) return [];
+  const validation = validateCoverageEvidence(document.coverage_evidence, "$.coverage_evidence");
+  return validation.issues.map((entry) => issue(entry.path, entry.message));
 }
 
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
@@ -6228,6 +6248,8 @@ const gateSpecifications = {
     dynamicStrategyArtifactReconciliationIssues
   ),
   "dynamic-strategy-selection-coherence": documentGate(dynamicSelectionCoherenceIssues),
+  "coverage-evidence-reconciliation": documentGate(coverageEvidenceReconciliationIssues),
+  "coverage-goal-reconciliation": documentGate(coverageGoalReconciliationIssues),
   "externalized-state-id-uniqueness": documentGate((document, context) => [
     ...uniqueFieldGate([["state_components"]], "component_id", "state component ID")(document, context),
     ...uniqueFieldGate([["scenarios"]], "scenario_id", "state scenario ID")(document, context),
@@ -6403,6 +6425,7 @@ const gateSpecifications = {
   "report-finding-id-uniqueness": documentGate(reportFindingIdIssues),
   "report-finding-evidence-span-consistency": documentGate(reportFindingEvidenceSpanIssues),
   "report-finding-report-vocabulary": documentGate(reportFindingReportVocabularyIssues),
+  "report-coverage-evidence-reconciliation": documentGate(reportCoverageEvidenceReconciliationIssues),
   "report-severity-classification-preservation": contextualGate(
     "cross-artifact",
     ["artifactSet.severityClassifiedFindings"],

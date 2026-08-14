@@ -107,7 +107,7 @@ function matchedFinding(overrides: Record<string, unknown> = {}): unknown {
 
 function canonicalReport(issues: unknown[]): Record<string, unknown> {
   return {
-    schema_version: "ultrafuzz.report.v2",
+    schema_version: "ultrafuzz.report.v3",
     run_metadata: {
       run_id: "generated-run",
       source_run_id: "generated-run",
@@ -1006,8 +1006,8 @@ describe("deterministic scorer math", () => {
         producer_attempt_id: "final-report",
         report_json_sha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
         report_markdown_sha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
-        contract: "ultrafuzz/report@2",
-        schema_id: "urn:ultrafuzz:schema:artifacts:report:2",
+        contract: "ultrafuzz/report@3",
+        schema_id: "urn:ultrafuzz:schema:artifacts:report:3",
         schema_sha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
         schema_bundle_sha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
         validator_build: expect.any(String)

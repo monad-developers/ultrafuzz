@@ -329,7 +329,7 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: report.json
-        contract: ultrafuzz/report@2
+        contract: ultrafuzz/report@3
   - id: __finish__
     kind: meta
     role: finish
@@ -363,7 +363,7 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: deliverables/current-audit.json
-        contract: ultrafuzz/report@2
+        contract: ultrafuzz/report@3
   - id: __finish__
     kind: meta
     role: finish
@@ -414,7 +414,7 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: report.json
-        contract: ultrafuzz/report@2
+        contract: ultrafuzz/report@3
   - id: __finish__
     kind: meta
     role: finish

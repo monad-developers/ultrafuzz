@@ -138,9 +138,9 @@ export function resolveTerminalReportPath(input: { runRoot?: string }): Terminal
     };
   }
   if (candidates.length > 1) {
-    return { reason: "run graph declares more than one ultrafuzz/report@2 output" };
+    return { reason: "run graph declares more than one ultrafuzz/report@3 output" };
   }
-  return { reason: "run graph does not declare ultrafuzz/report@2" };
+  return { reason: "run graph does not declare ultrafuzz/report@3" };
 }
 
 function terminalReportCandidates(runRoot: string, graph: unknown): Array<{ path: string; relativePath: string }> {
@@ -153,7 +153,7 @@ function terminalReportCandidates(runRoot: string, graph: unknown): Array<{ path
       continue;
     }
     for (const output of node.outputs) {
-      if (!isRecord(output) || output.contract !== "ultrafuzz/report@2" || typeof output.path !== "string") {
+      if (!isRecord(output) || output.contract !== "ultrafuzz/report@3" || typeof output.path !== "string") {
         continue;
       }
       try {

@@ -140,15 +140,15 @@ describe("artifact handoff validation", () => {
       "ultrafuzz/findings@2",
       "ultrafuzz/triaged-findings@1",
       "ultrafuzz/severity-classified-findings@1",
-      "ultrafuzz/report@2"
+      "ultrafuzz/report@3"
     ] as const) {
       topology.nodes[3] = {
         ...topology.nodes[3]!,
         outputs:
-          contract === "ultrafuzz/findings@2" || contract === "ultrafuzz/report@2"
+          contract === "ultrafuzz/findings@2" || contract === "ultrafuzz/report@3"
             ? [
                 { path: "report.md", contract: "ultrafuzz/nonempty-markdown@1", primary: true },
-                { path: contract === "ultrafuzz/report@2" ? "report.json" : "findings.json", contract }
+                { path: contract === "ultrafuzz/report@3" ? "report.json" : "findings.json", contract }
               ]
             : [{ path: "reviewed-findings.json", contract, primary: true }]
       };

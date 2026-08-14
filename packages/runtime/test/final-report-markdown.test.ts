@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   isDirectiveConformingFinalReportMarkdown,
   projectCanonicalFinalReport,
+  renderCoverageEvidenceMarkdownSection,
   supportsCanonicalFinalReportProjection
 } from "../src/final-report-markdown.js";
 
@@ -28,7 +29,7 @@ function runMetadata(runId: string): Record<string, unknown> {
 
 function renderableReport(): Record<string, unknown> {
   return {
-    schema_version: "ultrafuzz.report.v2",
+    schema_version: "ultrafuzz.report.v3",
     run_metadata: runMetadata("projection-test"),
     issues: [
       {
@@ -211,7 +212,7 @@ test("canonical final-report validation accepts mixed severities and minimum-two
 
 test("canonical final-report projection supports a meaningful zero-issue report", () => {
   const projection = projectCanonicalFinalReport({
-    schema_version: "ultrafuzz.report.v2",
+    schema_version: "ultrafuzz.report.v3",
     run_metadata: runMetadata("zero-issue"),
     issues: [],
     non_production_outcomes: [],
@@ -232,11 +233,78 @@ test("canonical final-report projection supports a meaningful zero-issue report"
   assert.doesNotMatch(projection.markdown, /\| Issue id \| Title \|/u);
 });
 
+test("canonical final-report projection renders unavailable coverage evidence and typed blockers", () => {
+  const coverageEvidence = {
+    schema_version: "ultrafuzz.coverage-evidence.v1",
+    status: "unavailable",
+    blockers: [
+      {
+        category: "coverage-tooling-blocked",
+        summary: "Recon <span hidden>could not</span> ~~produce~~ an authenticated coverage map.",
+        evidence_paths: ["logs/recon-coverage.log", "campaign-summary.json"]
+      }
+    ]
+  };
+  const report = renderableReport();
+  report.coverage_evidence = coverageEvidence;
+
+  assert.deepEqual(renderCoverageEvidenceMarkdownSection(coverageEvidence), [
+    "## Scoped coverage evidence",
+    "",
+    "- Status: unavailable",
+    "",
+    "Blockers:",
+    "- coverage-tooling-blocked: Recon &lt;span hidden&gt;could not&lt;/span&gt; \\~\\~produce\\~\\~ an authenticated coverage map.",
+    "  - Evidence: `logs/recon-coverage.log`",
+    "  - Evidence: `campaign-summary.json`"
+  ]);
+
+  const projection = projectCanonicalFinalReport(report);
+  assert.deepEqual(projection.report.coverage_evidence, coverageEvidence);
+  assert.match(
+    projection.markdown,
+    /## Scoped coverage evidence\n\n- Status: unavailable\n\nBlockers:\n- coverage-tooling-blocked: Recon &lt;span hidden&gt;could not&lt;\/span&gt; \\~\\~produce\\~\\~ an authenticated coverage map\.\n {2}- Evidence: `logs\/recon-coverage\.log`\n {2}- Evidence: `campaign-summary\.json`/u
+  );
+});
+
+test("canonical coverage projection escapes exclusion-reason HTML as public prose", () => {
+  assert.deepEqual(
+    renderCoverageEvidenceMarkdownSection({
+      status: "measured",
+      views: [
+        { scope: "recon-selected-declaration-completeness", covered_ranges: 1, total_ranges: 1 },
+        { scope: "production-declaration-completeness", covered_ranges: 1, total_ranges: 2 }
+      ],
+      files: [
+        {
+          path: "src/Excluded.sol",
+          kind: "production",
+          included: false,
+          exclusion_reason: "Not <span hidden>selected</span> ~~by~~ Recon"
+        }
+      ],
+      zero_coverage_components: []
+    }),
+    [
+      "## Scoped coverage evidence",
+      "",
+      "- recon-selected-declaration-completeness: `1/1`",
+      "- production-declaration-completeness: `1/2`",
+      "",
+      "Excluded from Recon-selected scope:",
+      "- `src/Excluded.sol` (production): Not &lt;span hidden&gt;selected&lt;/span&gt; \\~\\~by\\~\\~ Recon",
+      "",
+      "Zero-coverage components:",
+      "- None"
+    ]
+  );
+});
+
 test("canonical final-report projection rejects empty, invalid, and unrenderable structured output", () => {
   assert.throws(
     () =>
       projectCanonicalFinalReport({
-        schema_version: "ultrafuzz.report.v2",
+        schema_version: "ultrafuzz.report.v3",
         run_metadata: {},
         issues: [],
         non_production_outcomes: [],
@@ -354,7 +422,7 @@ test("directive validation scans tilde-fenced code for secrets and private paths
 
 test("a campaign that never fuzzed is disclosed instead of reading as a clean result", () => {
   const empty = (): Record<string, unknown> => ({
-    schema_version: "ultrafuzz.report.v2",
+    schema_version: "ultrafuzz.report.v3",
     run_metadata: runMetadata("campaign-outcome-test"),
     issues: [],
     non_production_outcomes: [],

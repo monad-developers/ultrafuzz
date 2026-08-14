@@ -1352,7 +1352,7 @@ function loadVerifyArtifactsHarness(
       ),
     declaredAncestorOutputsByContract,
     (task: VerifyArtifactsTask) => {
-      const report = task.outputs.filter((output) => output.contract === "ultrafuzz/report@2");
+      const report = task.outputs.filter((output) => output.contract === "ultrafuzz/report@3");
       const markdown = task.outputs.filter((output) => output.contract === "ultrafuzz/nonempty-markdown@1");
       return report.length === 1 && markdown.length === 1 ? { report: report[0]!, markdown: markdown[0]! } : undefined;
     },
@@ -3593,7 +3593,7 @@ test("generated review authority uses declared relative identity across snapshot
     "attempt-report",
     [severity],
     [severity, unrelatedLedger, triage, dedupe],
-    [{ path: "deliverables/report.json", contract: "ultrafuzz/report@2" }]
+    [{ path: "deliverables/report.json", contract: "ultrafuzz/report@3" }]
   );
   const documents = new Map<string, unknown>();
   const remember = (producer: ReviewAuthorityHarnessTask, outputPath: string, contract: string, value: unknown) => {
@@ -3752,7 +3752,7 @@ test("generated review authority uses declared relative identity across snapshot
     "attempt-wrong-ledger-report",
     [wrongLedgerSeverity],
     [wrongLedgerSeverity],
-    [{ path: "deliverables/report.json", contract: "ultrafuzz/report@2" }]
+    [{ path: "deliverables/report.json", contract: "ultrafuzz/report@3" }]
   );
   const wrongLedgerHarness = loadGeneratedReviewAuthorityHarness(
     [wrongLedgerSeverity, wrongLedgerReport],
@@ -3801,7 +3801,7 @@ test("generated final-severity gates share one producer epoch and reject a cross
     artifactDir: "/run/artifacts/attempt-report",
     dependencyArtifactDirs: [producer.artifactDir],
     metadata: { node: { logicalNodeId: "report" }, dependencies: { attemptIds: [producer.attemptId] } },
-    outputs: [{ path: "report.json", contract: "ultrafuzz/report@2" }]
+    outputs: [{ path: "report.json", contract: "ultrafuzz/report@3" }]
   };
   let authorityGeneration = 1;
   let authenticationCount = 0;
@@ -5258,7 +5258,7 @@ test("generated canonical report verification selects renamed producers and cust
   const verifyProjection = loadFinalReportCanonicalProjectionHarness();
   const task = {
     outputs: [
-      { path: "deliverables/security-audit.json", contract: "ultrafuzz/report@2" },
+      { path: "deliverables/security-audit.json", contract: "ultrafuzz/report@3" },
       { path: "deliverables/security-audit.md", contract: "ultrafuzz/nonempty-markdown@1" }
     ]
   };
@@ -5289,11 +5289,11 @@ test("generated canonical report verification selects renamed producers and cust
     () =>
       verifyProjection(
         {
-          outputs: [...task.outputs, { path: "deliverables/second-audit.json", contract: "ultrafuzz/report@2" }]
+          outputs: [...task.outputs, { path: "deliverables/second-audit.json", contract: "ultrafuzz/report@3" }]
         },
         verified
       ),
-    /exactly one current ultrafuzz\/report@2 output/iu
+    /exactly one current ultrafuzz\/report@3 output/iu
   );
 });
 

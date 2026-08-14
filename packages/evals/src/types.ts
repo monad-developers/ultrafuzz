@@ -579,7 +579,7 @@ export interface EvalReportAuthority {
   report_json_sha256: string;
   report_markdown_path: string;
   report_markdown_sha256: string;
-  contract: "ultrafuzz/report@2";
+  contract: "ultrafuzz/report@3";
   contract_digest: string;
   schema_id: string;
   schema_sha256: string;
@@ -604,7 +604,7 @@ export interface HumanReviewQueueItem {
 export interface EvalPublicationDiagnostic {
   code: "TERMINAL_REPORT_NOT_PUBLISHABLE" | "RECOVERY_EQUIVALENCE_NOT_PUBLISHABLE";
   row_id: string;
-  contract: "ultrafuzz/report@2";
+  contract: "ultrafuzz/report@3";
   reason: string;
   report_path?: string;
 }

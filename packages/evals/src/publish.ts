@@ -328,7 +328,7 @@ function assertPublishableTerminalReports(
       diagnostics.push({
         code: "TERMINAL_REPORT_NOT_PUBLISHABLE",
         row_id: row.id,
-        contract: "ultrafuzz/report@2",
+        contract: "ultrafuzz/report@3",
         reason: report.failure,
         ...(reportResolution.relativePath === undefined ? {} : { report_path: reportResolution.relativePath })
       });
@@ -343,7 +343,7 @@ function assertPublishableTerminalReports(
       diagnostics.push({
         code: "RECOVERY_EQUIVALENCE_NOT_PUBLISHABLE",
         row_id: row.id,
-        contract: "ultrafuzz/report@2",
+        contract: "ultrafuzz/report@3",
         reason:
           recoveryEquivalence?.reason ??
           (recoveryEquivalence === undefined
@@ -370,7 +370,7 @@ function assertPublishableTerminalReports(
         diagnostics.push({
           code: "TERMINAL_REPORT_NOT_PUBLISHABLE",
           row_id: row.id,
-          contract: "ultrafuzz/report@2",
+          contract: "ultrafuzz/report@3",
           reason
         });
       }
@@ -441,7 +441,7 @@ function failChangedTerminalReportPublication(evalRunRoot: string, row: EvalMatr
   const diagnostic: EvalPublicationDiagnostic = {
     code: "TERMINAL_REPORT_NOT_PUBLISHABLE",
     row_id: row.id,
-    contract: "ultrafuzz/report@2",
+    contract: "ultrafuzz/report@3",
     reason: `terminal report changed after publication preflight: ${error instanceof Error ? error.message : String(error)}`
   };
   writeEvalPublicationState(path.join(evalRunRoot, "publication-state.json"), {

@@ -90,7 +90,7 @@ function terminalRunFixture(runRoot: string, status: "succeeded" | "timed-out" |
       "final-report": {
         "report.md": "# report",
         "report.json": JSON.stringify({
-          schema_version: "ultrafuzz.report.v2",
+          schema_version: "ultrafuzz.report.v3",
           run_metadata: {
             run_id: "run-1",
             source_run_id: "run-1",
@@ -1707,7 +1707,7 @@ describe("eval publish (post-hoc replay)", () => {
     expect(contacted).toBe(false);
     expect(JSON.parse(fs.readFileSync(path.join(evalRunRoot, "publication-state.json"), "utf8"))).toMatchObject({
       status: "non-publishable",
-      diagnostics: [{ code: "TERMINAL_REPORT_NOT_PUBLISHABLE", contract: "ultrafuzz/report@2" }]
+      diagnostics: [{ code: "TERMINAL_REPORT_NOT_PUBLISHABLE", contract: "ultrafuzz/report@3" }]
     });
   });
 

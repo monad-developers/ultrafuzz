@@ -245,15 +245,16 @@ reuse can reject causally stale descendants. The host strictly validates this
 v3 manifest before writing, reading, reuse, or publication. It rejects every
 earlier manifest version without upgrading or converting it.
 
-The producer's rendered prompt includes one safely quoted `ultrafuzz json
-validate --schema ... --file ...` command per JSON output. The producer runs it
-after the final write and corrects an exit-`1` draft before returning. Once the
-agent session returns, declared artifact bytes are immutable. Host validation,
-semantic gates, synchronization, reporting, dashboards, and bundles may reject
-the bytes or copy them exactly, but may not normalize, convert, repair,
-synthesize, reseal, or substitute another file or final-response payload. A
-missing or invalid required output is a terminal post-agent failure, not a
-model retry or compatibility fallback.
+The producer's rendered prompt includes safely quoted schema and contract
+validation commands per JSON output. The first validates the pinned schema; the
+second applies the registered schema plus document-local semantic gates. The
+producer runs both after the final write and corrects an exit-`1` draft before
+returning. Once the agent session returns, declared artifact bytes are
+immutable. Host validation, contextual gates, synchronization, reporting,
+dashboards, and bundles may reject the bytes or copy them exactly, but may not
+normalize, convert, repair, synthesize, reseal, or substitute another file or
+final-response payload. A missing or invalid required output is a terminal
+post-agent failure, not a model retry or compatibility fallback.
 
 ## Findings
 
@@ -459,9 +460,58 @@ artifacts/final-report/report.json
 ```
 
 If final report artifacts are missing, `ultrafuzz report <run-id>` fails.
-`report.json` must satisfy `ultrafuzz/report@2` with the exact
-`ultrafuzz.report.v2` version literal. Reporting reads the agent-authored bytes;
+`report.json` must satisfy `ultrafuzz/report@3` with the exact
+`ultrafuzz.report.v3` version literal. Reporting reads the agent-authored bytes;
 it does not reconstruct, reorder, normalize, or rewrite them.
+
+### Coverage evidence
+
+When coverage is planned, `report.json.coverage_evidence` is the exact finalized
+`ultrafuzz/coverage-evidence@1` handoff. Measured evidence authenticates its raw
+`coverage-input.lcov` and `recon-coverage.json` sibling outputs by path and
+SHA-256. Unavailable evidence carries typed blockers and no measurement.
+
+`report.md` and the coverage producer's Markdown use exactly one canonical
+section and preserve array order. Apply public-inline sanitization to code-like
+fields: redact secrets and private paths, collapse whitespace, replace
+backticks with apostrophes, and use `unavailable` when blank. Apply public-prose
+sanitization to `<summary>` and `<exclusion_reason>`: use the same redaction,
+whitespace, and fallback rules, then escape backslashes and Markdown code,
+emphasis, link, image, heading, and strikethrough delimiters plus HTML angle
+brackets. Measured evidence uses:
+
+```text
+## Scoped coverage evidence
+
+- <scope>: `<covered_ranges>/<total_ranges>`
+
+Excluded from Recon-selected scope:
+- None
+
+Zero-coverage components:
+- None
+```
+
+Repeat the scoped row for every view. Replace `- None` with one row per entry:
+``- `<path>` (<kind>): <exclusion_reason>`` for excluded files and
+``- `<path>:<start_line>-<end_line>` (<kind>)`` for zero-coverage ranges.
+
+Unavailable evidence uses:
+
+```text
+## Scoped coverage evidence
+
+- Status: unavailable
+
+Blockers:
+- <category>: <summary>
+  - Evidence: `<path>`
+```
+
+Repeat blocker and evidence rows in artifact order. Runtime publication compares
+this section with the typed handoff and rejects missing, duplicated, reordered,
+or bare coverage scores. Raw `covg-eval` output is for iteration only and
+defines neither published declaration-completeness view.
 
 When workflow usage data is available, run metadata includes
 `accounting.cumulative.tokens_used` and
