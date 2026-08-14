@@ -4453,7 +4453,9 @@ function verifyCoverageProductionInventory(
   if (!isRecord(evidence) || !Array.isArray(evidence.files) || !Array.isArray(evidence.counted_ranges)) return [];
 
   const diagnostics =
-    markdownBytes === undefined ? [] : unscopedCoverageScoreDiagnostics(markdownBytes.toString("utf8"), markdownPath);
+    markdownBytes === undefined
+      ? []
+      : unscopedCoverageScoreDiagnostics(markdownBytes.toString("utf8"), markdownPath, true);
   if (markdownBytes !== undefined) {
     diagnostics.push(
       ...coverageEvidenceMarkdownProjectionDiagnostics(
@@ -4784,6 +4786,8 @@ const COVERAGE_HARNESS_DIRECTORY_NAMES = new Set([
   "invariants",
   "harness",
   "harnesses",
+  "mock",
+  "mocks",
   "script",
   "scripts"
 ]);
@@ -5293,7 +5297,6 @@ function productionContractSourceFiles(workspacePath: string, productionRoots: r
       if (entry.isSymbolicLink())
         throw new Error(`Coverage production source inventory contains symlink ${relativePath}`);
       if (entry.isDirectory()) {
-        if (coverageDirectoryKind(entry.name) !== undefined) continue;
         visit(path.join(directory, entry.name), relativePath);
       } else if (entry.isFile() && productionExtensions.has(path.extname(entry.name))) {
         if (results.length >= MAX_COVERAGE_EVIDENCE_FILES) {
@@ -6743,7 +6746,7 @@ function unscopedReportCoverageScoreDiagnostics(contents: string, artifactPath: 
 }
 
 function unscopedCoverageScoreKinds(line: string, requireCoverageContext: boolean): ("percentage" | "fraction")[] {
-  const score = /\b(?:100(?:\.0+)?|\d{1,2}(?:\.\d+)?)\s*%|\b\d+\s*\/\s*\d+\b/gu;
+  const score = /\b(?:100(?:\.0+)?|\d{1,2}(?:\.\d+)?)\s*[%％]|\b\d+\s*\/\s*\d+\b/gu;
   const namedScope = /\b(?:selected-range|production-source)\b/giu;
   const kinds = new Set<"percentage" | "fraction">();
   const normalizedLine = line.replace(/\p{Default_Ignorable_Code_Point}/gu, "");
@@ -6755,7 +6758,7 @@ function unscopedCoverageScoreKinds(line: string, requireCoverageContext: boolea
       !/\b(?:selected-range|production-source)\b/iu.test(coverageClause)
     ) {
       for (const match of coverageClause.matchAll(score)) {
-        kinds.add(match[0].includes("%") ? "percentage" : "fraction");
+        kinds.add(/[%％]/u.test(match[0]) ? "percentage" : "fraction");
       }
     }
   }
@@ -6791,7 +6794,7 @@ function unscopedCoverageScoreKinds(line: string, requireCoverageContext: boolea
       });
       if (scoped) continue;
       if (requireCoverageContext && !coverageMetricScoreLanguageContext(contextRegion)) continue;
-      kinds.add(match[0].includes("%") ? "percentage" : "fraction");
+      kinds.add(/[%％]/u.test(match[0]) ? "percentage" : "fraction");
     }
   }
   return [...kinds];
@@ -6815,6 +6818,23 @@ interface MarkdownNode {
 interface HtmlVisibilityState {
   hiddenElements: string[];
 }
+
+const HTML_VOID_ELEMENTS = new Set([
+  "area",
+  "base",
+  "br",
+  "col",
+  "embed",
+  "hr",
+  "img",
+  "input",
+  "link",
+  "meta",
+  "param",
+  "source",
+  "track",
+  "wbr"
+]);
 
 function renderedMarkdownBlocks(contents: string): RenderedMarkdownBlock[] {
   const root = fromMarkdown(contents) as MarkdownNode;
@@ -6913,7 +6933,7 @@ function visibleHtmlText(html: string, state: HtmlVisibilityState): string {
       if (/^\s*\//u.test(tag)) {
         const matchingIndex = state.hiddenElements.lastIndexOf(tagName);
         if (matchingIndex !== -1) state.hiddenElements.splice(matchingIndex, 1);
-      } else if (!/\/\s*$/u.test(tag)) {
+      } else if (!/\/\s*$/u.test(tag) && !HTML_VOID_ELEMENTS.has(tagName)) {
         state.hiddenElements.push(tagName);
       }
     }
@@ -6938,12 +6958,12 @@ function htmlTagEnd(html: string, start: number): number {
 }
 
 function coverageMetricScoreLanguageContext(value: string): boolean {
-  const score = "(?:\\b(?:100(?:\\.0+)?|\\d{1,2}(?:\\.\\d+)?)\\s*%|\\b\\d+\\s*\\/\\s*\\d+\\b)";
+  const score = "(?:\\b(?:100(?:\\.0+)?|\\d{1,2}(?:\\.\\d+)?)\\s*[%％]|\\b\\d+\\s*\\/\\s*\\d+\\b)";
   const coverageMetric =
     "(?:(?<!insurance[ \\t])coverage|lcov|covg-eval|standardized[ \\t]+(?:measurement|rate|result|score))";
   const metricQualifier = "(?:branch|code|function|line|overall|range|source|standardized|test)";
   const approximation = "(?:about|approximately|nearly|roughly)";
-  const metricLink = `(?::|=|at\\b|of\\b|(?:is|was|measured|reached|remained|hit|registered|reported|totaled|yielded)\\b(?:[ \\t]+${approximation})?|came[ \\t]+to\\b|accounted[ \\t]+for\\b|stood[ \\t]+at\\b)?`;
+  const metricLink = `(?::|=|at\\b|of\\b|(?:is|was|measured|reached|remained|hit|registered|reported|totaled|yielded)\\b(?:[ \\t]+${approximation})?|came[ \\t]+to\\b|accounted[ \\t]+for\\b|stood[ \\t]+at\\b|[\\p{L}-]+(?:[ \\t]+(?:up|down))?[ \\t]+(?:to|at)\\b)?`;
   const directCoverageScore = new RegExp(
     `(?:${coverageMetric}[ \\t]*(?:(?:measurement|percentage|rate|result|score)[ \\t]*)?${metricLink}[ \\t]*${score}|${score}[ \\t]*(?:${metricQualifier}[ \\t]+)?${coverageMetric})`,
     "iu"
