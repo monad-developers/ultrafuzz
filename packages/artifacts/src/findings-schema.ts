@@ -142,6 +142,9 @@ const reportAliasPatternGroups = chunkPatternAlternatives([
   ...explicitReportAliasFragmentGroups,
   ...shortReportAliasKeys
 ]);
+const explicitReportAliasMappingKeyPattern = `[-_0-9A-Za-z]*(?:${explicitReportAliasKeyValues.join(
+  "|"
+)})[-_0-9A-Za-z]*`;
 /*
  * Short aliases such as `access` and `verification` are report vocabulary
  * only as complete identifiers. Keeping them out of the fragment matcher
@@ -169,7 +172,9 @@ const riskAliasKeyPattern =
 const unsupportedRiskTypedAliasPattern = `${reportNoteSearchPrefixPattern}${assignmentBoundaryPattern}(${riskAliasKeyPattern})[ \\t]*${assignmentKeyTrailingWrapperPattern}${assignmentOperatorPrefixPattern}[ \\t]*${valueWrapperPattern}${riskValuePattern}${typedValueBoundaryPattern}`;
 const canonicalColonAssignmentPattern = `${assignmentBoundaryPattern}${valueWrapperPattern}(${globallyValidatedNoteKeyPattern})[ \\t]*${assignmentKeyTrailingWrapperPattern}${colonAssignmentOperatorPattern}${valueWrapperPattern}(?=\\S)`;
 const canonicalDirectMappingPattern = `${assignmentBoundaryPattern}[ \\t]*${valueWrapperPattern}(${globallyValidatedNoteKeyPattern})[ \\t]*${assignmentKeyTrailingWrapperPattern}(?::[ \\t]*\\r?\\n[ \\t]*|\\|[ \\t]*|(?:-|=)>[ \\t]*|→[ \\t]*)${valueWrapperPattern}(?=\\S)`;
-const explicitReportAliasVocabularyPattern = `${assignmentBoundaryPattern}[ \\t]*${valueWrapperPattern}((?:${shortReportAliasKeys.join("|")}))[ \\t]*${assignmentKeyTrailingWrapperPattern}(?::[ \\t]*\\r?\\n[ \\t]*|:[ \\t]*|\\|[ \\t]*|(?::=|(?:-|=)>|→|↦|⟶|≔)[ \\t]*)${valueWrapperPattern}(?=\\S)`;
+const explicitReportAliasVocabularyPattern = `${assignmentBoundaryPattern}[ \\t]*${valueWrapperPattern}((?:${explicitReportAliasMappingKeyPattern}|${shortReportAliasKeys.join(
+  "|"
+)}))[ \\t]*${assignmentKeyTrailingWrapperPattern}(?::[ \\t]*\\r?\\n[ \\t]*|:[ \\t]*|\\|[ \\t]*|(?::=|(?:-|=)>|→|↦|⟶|≔)[ \\t]*)${valueWrapperPattern}(?=\\S)`;
 const canonicalReachabilityUnicodeMappingPattern = `${assignmentBoundaryPattern}[ \\t]*${valueWrapperPattern}(${asciiCaseInsensitivePattern("reachability")})[ \\t]*${assignmentKeyTrailingWrapperPattern}(?:↦|⟶|≔)[ \\t]*${valueWrapperPattern}(?=\\S)`;
 const canonicalReachabilityMappingPattern = `${assignmentBoundaryPattern}[ \\t]*${valueWrapperPattern}(${asciiCaseInsensitivePattern("reachability")})[ \\t]*${assignmentKeyTrailingWrapperPattern}[ \\t]+maps?[ \\t]+to[ \\t]+${valueWrapperPattern}(?=\\S)`;
 const obfuscatedReachabilityAssignmentPattern = `${assignmentBoundaryPattern}(${asciiCaseInsensitivePattern("reachability")})(?:<!--[\\s\\S]{0,256}?-->|\\u200B)+[ \\t]*={1,2}\\s*`;

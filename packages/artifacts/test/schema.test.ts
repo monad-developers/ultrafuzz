@@ -1211,9 +1211,15 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
     "access ↦ internal",
     "verification ⟶ summary",
     "access ≔ internal",
-    "verification: \nsummary"
+    "verification: \nsummary",
+    "attainability ↦ helper-only",
+    "severity_alias -> critical"
   ]) {
     assertNoteParity(mappedAlias, false);
+  }
+
+  for (const colonAlias of ["rating: critical", "attainability: helper-only"]) {
+    assertNoteParity(colonAlias, false);
   }
 
   assert.deepEqual(findingReportSemanticAssignment("access: internal"), {

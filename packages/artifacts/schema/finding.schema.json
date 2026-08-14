@@ -1194,7 +1194,7 @@
         },
         {
           "not": {
-            "pattern": "(?:^|[^\\p{L}\\p{N}\\p{M}_%\\-])[ \\t]*(?:(?:\"|'|\\(|\\[|\\{|<|\\x60|\\*|~)[ \\t]*)*((?:[aA][cC][cC][eE][sS][sS]|[vV][eE][rR][iI][fF][iI][cC][aA][tT][iI][oO][nN]))[ \\t]*(?:(?:\\*{1,2}|~{1,2}|[\\x60\"'>)}\\]])[ \\t]*)*(?:</(?:b|code|em|i|mark|span|strong|u)>\\s*)*(?::[ \\t]*\\r?\\n[ \\t]*|:[ \\t]*|\\|[ \\t]*|(?::=|(?:-|=)>|→|↦|⟶|≔)[ \\t]*)(?:(?:\"|'|\\(|\\[|\\{|<|\\x60|\\*|~)[ \\t]*)*(?=\\S)"
+            "pattern": "(?:^|[^\\p{L}\\p{N}\\p{M}_%\\-])[ \\t]*(?:(?:\"|'|\\(|\\[|\\{|<|\\x60|\\*|~)[ \\t]*)*((?:[-_0-9A-Za-z]*(?:access|attainability|attainment|audit_decision|audit_status|classification_evidence|classification_alias|classification_note|classification_notes|classification_result|confidence_score|dependencyScope|disposition|exposure|final_severity|finding_classification|finding_outcome|finding_status|helperEvidence|helper_evidence|helper_summary|proof_kind|rating|resolution|report_verdict|risk_score|root-cause|rootCause|root_cause|root_cause_reason|scope_decision|severityAlias|severity_alias|severity_guess|stateful_failure_alias|triage_result|verification)[-_0-9A-Za-z]*|[aA][cC][cC][eE][sS][sS]|[vV][eE][rR][iI][fF][iI][cC][aA][tT][iI][oO][nN]))[ \\t]*(?:(?:\\*{1,2}|~{1,2}|[\\x60\"'>)}\\]])[ \\t]*)*(?:</(?:b|code|em|i|mark|span|strong|u)>\\s*)*(?::[ \\t]*\\r?\\n[ \\t]*|:[ \\t]*|\\|[ \\t]*|(?::=|(?:-|=)>|→|↦|⟶|≔)[ \\t]*)(?:(?:\"|'|\\(|\\[|\\{|<|\\x60|\\*|~)[ \\t]*)*(?=\\S)"
           }
         },
         {
