@@ -6807,66 +6807,95 @@ function unscopedReportCoverageScoreDiagnostics(contents: string, artifactPath: 
 }
 
 function unscopedCoverageScoreKinds(line: string, requireCoverageContext: boolean): ("percentage" | "fraction")[] {
-  const score = /\b(?:100(?:\.0+)?|\d{1,2}(?:\.\d+)?)\s*[%％]|\b\d+\s*\/\s*\d+\b/gu;
+  const score = new RegExp(COVERAGE_SCORE_PATTERN_SOURCE, "giu");
   const namedScope = /\b(?:selected-range|production-source)\b/giu;
   const kinds = new Set<"percentage" | "fraction">();
-  const normalizedLine = line
-    .normalize("NFKC")
-    .replace(/\u2044/gu, "/")
-    .replace(/\p{Default_Ignorable_Code_Point}/gu, "");
-  for (const coverageClause of normalizedLine.split(
-    /\s*(?:[,!?;[\]{}]|\u2013|\u2014|(?<!\d)\.|\.(?!\d)|\b(?:and|but|whereas|while)\b)\s*/iu
-  )) {
-    if (
-      coverageMetricScoreLanguageContext(coverageClause) &&
-      !/\b(?:selected-range|production-source)\b/iu.test(coverageClause)
-    ) {
-      for (const match of coverageClause.matchAll(score)) {
-        kinds.add(/[%％]/u.test(match[0]) ? "percentage" : "fraction");
-      }
-    }
-  }
-  for (const clause of normalizedLine.split(
-    /\s*(?:[,!?;()[\]{}]|\u2013|\u2014|(?<!\d)\.|\.(?!\d)|\b(?:and|but|whereas|while)\b)\s*/iu
-  )) {
-    const scores = [...clause.matchAll(score)];
-    const scopes = [...clause.matchAll(namedScope)];
-    for (const [index, match] of scores.entries()) {
-      const start = match.index!;
-      const end = start + match[0].length;
-      const previous = scores[index - 1];
-      const next = scores[index + 1];
-      const regionStart = previous === undefined ? 0 : Math.floor((previous.index! + previous[0].length + start) / 2);
-      const regionEnd = next === undefined ? clause.length : Math.ceil((end + next.index!) / 2);
-      const contextRegion = clause.slice(
-        previous === undefined ? 0 : previous.index! + previous[0].length,
-        next === undefined ? clause.length : next.index!
-      );
-      const scoped = scopes.some((scope) => {
-        const midpoint = scope.index! + scope[0].length / 2;
-        if (midpoint < regionStart || midpoint >= regionEnd) return false;
-        const scopeEnd = scope.index! + scope[0].length;
-        const competingCoverageMetric =
-          /\b(?:branch|code|function|line|overall|range|source|standardized|test)[ \t]+coverage\b/iu;
-        if (scope.index! >= start) {
-          return !competingCoverageMetric.test(clause.slice(regionStart, start));
-        }
-        if (competingCoverageMetric.test(clause.slice(scopeEnd, start))) return false;
-        const colon = clause.indexOf(":", scopeEnd);
-        return !(
-          colon >= scopeEnd &&
-          colon < start &&
-          /\b(?:coverage|lcov|covg-eval|standardized[ \t]+(?:measurement|rate|result|score))\b/iu.test(
-            clause.slice(colon + 1, start)
-          )
-        );
-      });
-      if (scoped) continue;
-      if (requireCoverageContext && !coverageMetricScoreLanguageContext(contextRegion)) continue;
-      kinds.add(/[%％]/u.test(match[0]) ? "percentage" : "fraction");
-    }
+  const normalizedLine = normalizeCoverageScoreText(line);
+  const scores = [...normalizedLine.matchAll(score)];
+  const scopes = [...normalizedLine.matchAll(namedScope)];
+  const scoreHasCoverageContext: boolean[] = [];
+  for (const [index, match] of scores.entries()) {
+    const previous = scores[index - 1];
+    const next = scores[index + 1];
+    const contextRegion = normalizedLine.slice(
+      previous === undefined ? 0 : previous.index! + previous[0].length,
+      next === undefined ? normalizedLine.length : next.index!
+    );
+    const hasCoverageContext =
+      coverageMetricScoreLanguageContext(contextRegion) ||
+      (scoreHasCoverageContext[index - 1] === true && coverageContinuationScoreLanguageContext(contextRegion));
+    scoreHasCoverageContext.push(hasCoverageContext);
+    if (requireCoverageContext && !hasCoverageContext) continue;
+    if (scopes.some((scope) => exactCoverageScopeBindsScore(normalizedLine, scope, match, scores))) continue;
+    kinds.add(/%|\bpercent(?:age)?\b/iu.test(match[0]) ? "percentage" : "fraction");
   }
   return [...kinds];
+}
+
+function coverageContinuationScoreLanguageContext(value: string): boolean {
+  const qualifier =
+    "(?:aggregate|branch|code|function|global|line|overall|range|selected-range|source|test|total|unscoped|production-source)";
+  const conjunction = "(?:(?:and|but|whereas|while)[ \\t]+)?";
+  const priorScope = "(?:(?:selected-range|production-source)[ \\t]+)?";
+  const link =
+    "(?:(?:coverage|measurement|percentage|rate|result|score)[ \\t]+)?(?:(?::|=)|(?:is|was|measured|reached|remained|registered|reported|totaled|yielded|came[ \\t]+to|stood[ \\t]+at)\\b)?";
+  return (
+    new RegExp(
+      `^[\\s,;:()[\\]{}\\u2013\\u2014-]*${priorScope}${conjunction}(?:the[ \\t]+)?${qualifier}[ \\t]*${link}[ \\t]*${COVERAGE_SCORE_PATTERN_SOURCE}`,
+      "iu"
+    ).test(value) ||
+    new RegExp(
+      `^[\\s,;:()[\\]{}\\u2013\\u2014-]*${priorScope}${conjunction}${COVERAGE_SCORE_PATTERN_SOURCE}[ \\t]+(?:for[ \\t]+|of[ \\t]+|in[ \\t]+|at[ \\t]+)?(?:the[ \\t]+)?${qualifier}\\b`,
+      "iu"
+    ).test(value)
+  );
+}
+
+const COVERAGE_SCORE_PATTERN_SOURCE =
+  "(?:\\b(?:100(?:\\.0+)?|\\d{1,2}(?:\\.\\d+)?)\\s*%|\\b(?:100(?:\\.0+)?|\\d{1,2}(?:\\.\\d+)?)\\s*percent(?:age)?\\b|\\b\\d+\\s*(?:/|out[ \\t]+of)\\s*\\d+\\b)";
+
+function normalizeCoverageScoreText(value: string): string {
+  return value
+    .normalize("NFKC")
+    .replace(/[\u0660-\u0669]/gu, (digit) => String(digit.codePointAt(0)! - 0x0660))
+    .replace(/[\u06f0-\u06f9]/gu, (digit) => String(digit.codePointAt(0)! - 0x06f0))
+    .replace(/[\u2044\u2215\u29f8]/gu, "/")
+    .replace(/[\u066a\ufe6a]/gu, "%")
+    .replace(/\p{Default_Ignorable_Code_Point}/gu, "");
+}
+
+function exactCoverageScopeBindsScore(
+  line: string,
+  scope: RegExpMatchArray,
+  score: RegExpMatchArray,
+  scores: readonly RegExpMatchArray[]
+): boolean {
+  const scopeStart = scope.index!;
+  const scopeEnd = scopeStart + scope[0].length;
+  const scoreStart = score.index!;
+  const scoreEnd = scoreStart + score[0].length;
+  const scopeMidpoint = scopeStart + scope[0].length / 2;
+  const scoreMidpoint = scoreStart + score[0].length / 2;
+  if (
+    scores.some(
+      (candidate) =>
+        candidate !== score &&
+        Math.abs(candidate.index! + candidate[0].length / 2 - scopeMidpoint) < Math.abs(scoreMidpoint - scopeMidpoint)
+    )
+  ) {
+    return false;
+  }
+  if (scopeEnd <= scoreStart) {
+    const binding = line.slice(scopeEnd, scoreStart);
+    return /^[\s,:=`'"()[\]-]*(?:(?:coverage|measurement|percentage|rate|result|score)\s*)?(?:(?::|=)|(?:is|was|measured|reached|remained|hit|registered|reported|totaled|yielded|came\s+to|stood\s+at)\b)?\s*$/iu.test(
+      binding
+    );
+  }
+  if (scopeStart >= scoreEnd) {
+    const binding = line.slice(scoreEnd, scopeStart);
+    return /^\s*(?:(?:for|of|in|at)\s+(?:the\s+)?(?:exact\s+)?)?$/iu.test(binding);
+  }
+  return false;
 }
 
 interface RenderedMarkdownBlock {
@@ -7000,7 +7029,7 @@ function visibleHtmlText(html: string, state: HtmlVisibilityState): string {
       (/^(?:head|noscript|script|style|template|textarea|xmp)$/u.test(tagName) ||
         /(?:^|\s)(?:hidden|inert)(?:\s|=|$)/iu.test(tag) ||
         /(?:^|\s)aria-hidden\s*=\s*(?:["']?true\b)/iu.test(tag) ||
-        /(?:^|\s)style\s*=\s*(["'])[^"']*(?:display\s*:\s*none|visibility\s*:\s*hidden)[^"']*\1/iu.test(tag));
+        htmlStyleHidesText(tag));
     if (tagName !== undefined && !hiddenTag && state.hiddenElements.length === 0 && !/^\s*\//u.test(tag)) {
       const accessibleLabel =
         htmlAttributeValue(tag, "aria-label") ?? (tagName === "img" ? htmlAttributeValue(tag, "alt") : undefined);
@@ -7021,9 +7050,28 @@ function visibleHtmlText(html: string, state: HtmlVisibilityState): string {
   return decodeHTML(visible);
 }
 
-function htmlAttributeValue(tag: string, attribute: "alt" | "aria-label"): string | undefined {
+function htmlAttributeValue(tag: string, attribute: "alt" | "aria-label" | "style"): string | undefined {
   const match = new RegExp(`(?:^|\\s)${attribute}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'=<>\\x60]+))`, "iu").exec(tag);
   return match?.[1] ?? match?.[2] ?? match?.[3];
+}
+
+function htmlStyleHidesText(tag: string): boolean {
+  const style = htmlAttributeValue(tag, "style");
+  if (style === undefined) return false;
+  return style.split(";").some((declaration) => {
+    const match = /^\s*([-A-Za-z]+)\s*:\s*(.*?)\s*(?:!important\s*)?$/iu.exec(declaration);
+    if (match === null) return false;
+    const property = match[1]!.toLowerCase();
+    const value = match[2]!.trim().toLowerCase();
+    if (property === "display") return value === "none";
+    if (property === "visibility") return /^(?:hidden|collapse)$/u.test(value);
+    if (property === "opacity") return /^0(?:\.0+)?$/u.test(value);
+    if (property === "font-size") return /^0(?:\.0+)?(?:[a-z%]+)?$/u.test(value);
+    if (property === "color" || property === "-webkit-text-fill-color") {
+      return value === "transparent" || /^rgba\([^)]*,\s*0(?:\.0+)?\s*\)$/u.test(value);
+    }
+    return property === "filter" && /^opacity\(\s*0(?:%|\.0+)?\s*\)$/u.test(value);
+  });
 }
 
 function htmlTagEnd(html: string, start: number): number {
@@ -7042,9 +7090,9 @@ function htmlTagEnd(html: string, start: number): number {
 }
 
 function coverageMetricScoreLanguageContext(value: string): boolean {
-  const score = "(?:\\b(?:100(?:\\.0+)?|\\d{1,2}(?:\\.\\d+)?)\\s*[%％]|\\b\\d+\\s*\\/\\s*\\d+\\b)";
+  const score = COVERAGE_SCORE_PATTERN_SOURCE;
   const coverageMetric =
-    "(?:(?<!insurance[ \\t])coverage|lcov|covg-eval|standardized[ \\t]+(?:measurement|rate|result|score))";
+    "(?:(?<!insurance[ \\t])coverage(?:[_-](?:fraction|measurement|percentage|rate|result|score|summary))?|lcov|covg-eval|standardized[ \\t]+(?:measurement|rate|result|score))";
   const metricQualifier = "(?:branch|code|function|line|overall|range|source|standardized|test)";
   const approximation = "(?:about|approximately|nearly|roughly)";
   const metricLink = `(?::|=|at\\b|of\\b|(?:is|was|measured|reached|remained|hit|registered|reported|totaled|yielded)\\b(?:[ \\t]+(?:${approximation}|above|below|over|under))?|(?:improved|increased|rose|grew|climbed|advanced|jumped|moved)[ \\t]+from\\b|(?:now[ \\t]+)?(?:shows?|showed|indicates?|indicated|exceeds?|exceeded|surpasses?|surpassed|tops?|topped)\\b|came[ \\t]+to\\b|accounted[ \\t]+for\\b|stood[ \\t]+at\\b|[\\p{L}-]+(?:[ \\t]+(?:up|down))?[ \\t]+(?:to|at)\\b)?`;
@@ -7128,7 +7176,7 @@ function unscopedCoverageScoreDiagnosticsInJson(
 }
 
 function coverageMetricLanguageContext(value: string): boolean {
-  return /(?<![A-Za-z0-9_-])(?:coverage|lcov|selected-range|production-source)(?![A-Za-z0-9_-])|(?<![A-Za-z0-9_-])covg-eval(?![A-Za-z0-9_-])|\bstandardized\s+(?:measurement|rate|result|score)\b/iu.test(
+  return /(?<![A-Za-z0-9_-])(?:coverage(?:_(?:fraction|measurement|percentage|rate|result|score|summary))?|lcov|selected-range|production-source)(?![A-Za-z0-9_-])|(?<![A-Za-z0-9_-])covg-eval(?![A-Za-z0-9_-])|\bstandardized\s+(?:measurement|rate|result|score)\b/iu.test(
     value
   );
 }
