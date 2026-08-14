@@ -11672,11 +11672,17 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
     'Coverage was 100% <span style="display:/**/none">selected-range</span>.',
     'Coverage was 100% <span style="transform: scale(0)">selected-range</span>.',
     "Coverage was 100% <span inert>selected-range</span>.",
+    '<style>.hidden-scope { display:none }</style>\nCoverage was 100% <span class="hidden-scope">selected-range</span>.',
+    'Coverage was 100% selected-<span style="clip-path: inset(100%)">range</span>.',
     "Coverage was 100% ![selected-range](https://example.invalid/chart.svg).",
     "![Coverage was 100%.](https://example.invalid/chart.svg)",
     '<img src="https://example.invalid/chart.svg" alt="Coverage was 100%.">',
     '<span aria-label="Coverage was 100%."></span>',
     "Coverage was 10\uFE0F0%.",
+    "Coverage was 99,5%.",
+    "coverage_ratio=39/39.",
+    "covgEval=39/39.",
+    "coveragePct=100%.",
     "Covera\u034Fge was 100%.",
     "<h2>Coverage</h2>\n\n100%.",
     "### Coverage\n\n100%.",
@@ -11697,7 +11703,14 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
     "The selected-range methodology was discussed because coverage was 100%.",
     "The selected-range trend differed from total coverage at 100%.",
     "Selected-range context differs from production coverage at 100%.",
-    "<input hidden>\n\nCoverage was 100%."
+    "<input hidden>\n\nCoverage was 100%.",
+    "The campaign ended with complete coverage (100%).",
+    "Coverage reached a perfect 100%.",
+    "The coverage result after the campaign came in at 100%.",
+    "The campaign covered 100% of production code.",
+    "We exercised 100% of production functions.",
+    "Line execution: 100%.",
+    "Coverage, which we measured after the campaign, was 100%."
   ]) {
     writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\n${mixedScore}\n`);
     const mixed = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
@@ -11761,6 +11774,24 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
     layout,
     reportNode.id,
     "report.md",
+    `${scopedMarkdown}\n## Notes\n\nCoverage was 100% for selected-range and production-source.\n`
+  );
+  const sharedVisibleScope = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+  assert.equal(sharedVisibleScope.ok, true, JSON.stringify(sharedVisibleScope.diagnostics));
+
+  for (const exactScopedScore of [
+    "Coverage was 100% for the selected-range view.",
+    "Coverage was 100% (selected-range)."
+  ]) {
+    writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\n${exactScopedScore}\n`);
+    const exactScoped = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+    assert.equal(exactScoped.ok, true, `${exactScopedScore}: ${JSON.stringify(exactScoped.diagnostics)}`);
+  }
+
+  writeArtifact(
+    layout,
+    reportNode.id,
+    "report.md",
     `${scopedMarkdown}\n## Notes\n\nAt 100% utilization, insurance coverage is exhausted.\n`
   );
   const insuranceProse = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
@@ -11779,6 +11810,8 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
     "Selected-range coverage was 100%, while the insurance payout was 25%.",
     "Selected-range coverage was 100% and interest was 25%.",
     "The insurance policy coverage was 25%.",
+    "Coverage was 25% under the insurance policy.",
+    "The policy provided coverage of 25%.",
     "The insurance policy coverage was twenty-five percent.",
     "The flood insurance's coverage was 25%.",
     "The warranty coverage was 25% of the repair cost."
@@ -11799,6 +11832,26 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
       unrelatedSectionProse.ok,
       true,
       `${coverageSectionProse}: ${JSON.stringify(unrelatedSectionProse.diagnostics)}`
+    );
+  }
+
+  for (const unscopedCoverageSectionScore of [
+    "Result: 100% of functions.",
+    "coverage_ratio=39/39.",
+    "covgEval=39/39.",
+    "coveragePct=100%."
+  ]) {
+    writeArtifact(
+      layout,
+      reportNode.id,
+      "report.md",
+      `${scopedMarkdown}\n## Coverage\n\n${unscopedCoverageSectionScore}\n`
+    );
+    const unscopedSectionScore = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+    assert.equal(
+      unscopedSectionScore.ok,
+      false,
+      `${unscopedCoverageSectionScore}: ${JSON.stringify(unscopedSectionScore.diagnostics)}`
     );
   }
 
