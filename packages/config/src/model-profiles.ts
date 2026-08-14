@@ -63,10 +63,18 @@ export function validProfileId(id: string): boolean {
 }
 
 export function applyDefaultProfileOverrides(config: ResolvedConfig, overrides: DefaultProfileOverrides): void {
+  applyModelProfileOverrides(config, config.models.default, overrides);
+}
+
+export function applyModelProfileOverrides(
+  config: ResolvedConfig,
+  profileId: string,
+  overrides: DefaultProfileOverrides
+): void {
   if (overrides.agent === undefined && overrides.model === undefined && overrides.reasoning === undefined) {
     return;
   }
-  const profile = config.models.profiles[config.models.default];
+  const profile = config.models.profiles[profileId];
   if (profile === undefined) {
     return;
   }

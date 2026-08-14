@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import {
   createStrictAjv,
   DEFAULT_MAX_JSON_INSTANCE_BYTES,
+  MAX_RETRY_CHAIN_ATTEMPTS,
   parseStrictJsonBytes,
   readRegularFileSnapshot,
   runValidator,
@@ -70,6 +71,7 @@ export const CONFIG_SCHEMA_METADATA: Readonly<Record<string, ConfigSchemaMetadat
     semanticGates: Object.freeze([
       "resolved-config-model-default-reference",
       "resolved-config-model-profile-key-id",
+      "resolved-config-retry-chain-maximum",
       "resolved-config-triage-quorum-panel",
       "resolved-config-execution-node-topology",
       "resolved-config-credential-environment",
@@ -150,7 +152,23 @@ export function validateResolvedConfigJson(value: unknown): JsonSchemaValidation
   const validator = configValidator().getSchema(RESOLVED_CONFIG_JSON_SCHEMA_ID);
   if (validator === undefined)
     throw new Error(`registered config schema is unavailable: ${RESOLVED_CONFIG_JSON_SCHEMA_ID}`);
-  return runValidator(validator, value);
+  const structural = runValidator(validator, value);
+  if (!structural.ok) return structural;
+  const config = value as ResolvedConfig;
+  const expandedAttempts = config.retry.sameAgentAttempts + Math.max(0, config.retry.agents.length - 1);
+  if (expandedAttempts <= MAX_RETRY_CHAIN_ATTEMPTS) return structural;
+  return {
+    ok: false,
+    issues: [
+      {
+        instancePath: "/retry",
+        schemaPath: "#/semantic/resolved-config-retry-chain-maximum",
+        keyword: "resolved-config-retry-chain-maximum",
+        message: `expanded retry chain must not exceed ${MAX_RETRY_CHAIN_ATTEMPTS} attempts`
+      }
+    ],
+    truncated: false
+  };
 }
 
 export function parseResolvedConfigJsonBytes(bytes: Uint8Array): ResolvedConfig {

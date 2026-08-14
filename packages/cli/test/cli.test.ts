@@ -223,6 +223,10 @@ function fakeSmithersEnv(
       "        ;;",
       "    esac",
       "    ;;",
+      "  node)",
+      "    attempt_id=${2#node:}",
+      `    printf '{"ok":true,"data":{"node":{"nodeId":"%s","lastAttempt":1},"attempts":[{"nodeId":"%s","attempt":1,"state":"finished","meta":{"agentChainIndex":0,"agentId":"ultrafuzz-agent:%s:0:default","agentModel":"gpt-5.5"}}]}}\\n' "$2" "$2" "$attempt_id"`,
+      "    ;;",
       "  fork)",
       '    printf \'%s\\n\' \'{"ok":true,"data":{"forkedRunId":"ultrafuzz-cli-run-forked"}}\'',
       "    ;;",
@@ -2934,8 +2938,8 @@ function writeStatsFixture(
     graphFingerprint,
     configFingerprint: "b".repeat(64),
     graph: {
-      schema_version: "ultrafuzz.planned-graph.v3",
-      graph_version: "3",
+      schema_version: "ultrafuzz.planned-graph.v4",
+      graph_version: "4",
       topology_version: 2,
       groups: {},
       nodes: [

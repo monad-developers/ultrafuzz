@@ -4,13 +4,14 @@ import {
   type ArtifactContractId
 } from "./artifact-contract-ids.js";
 import { CANONICAL_ARTIFACT_RELATIVE_PATH_PATTERN } from "./artifact-path-primitives.js";
+import { MAX_RETRY_CHAIN_ATTEMPTS } from "./artifact-limits.js";
 import { artifactContractDefinition, artifactContractSchemaBinding } from "./artifact-contracts.js";
 import { validateRegisteredJsonSchema, type JsonSchemaValidationResult } from "./json-schema-validator.js";
 import { readRegularFileSnapshot } from "./schema-registry.js";
 import { parseStrictJsonBytes } from "./strict-json.js";
 
-export const PLANNED_GRAPH_SCHEMA_VERSION = "ultrafuzz.planned-graph.v3" as const;
-export const PLANNED_GRAPH_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:planned-graph:3" as const;
+export const PLANNED_GRAPH_SCHEMA_VERSION = "ultrafuzz.planned-graph.v4" as const;
+export const PLANNED_GRAPH_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:planned-graph:4" as const;
 
 const SAFE_ID_PATTERN = "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$";
 const SAFE_PATH_PATTERN = CANONICAL_ARTIFACT_RELATIVE_PATH_PATTERN;
@@ -65,7 +66,7 @@ export const plannedGraphJsonSchema = {
   required: ["schema_version", "graph_version", "topology_version", "groups", "nodes"],
   properties: {
     schema_version: { const: PLANNED_GRAPH_SCHEMA_VERSION },
-    graph_version: { const: "3" },
+    graph_version: { const: "4" },
     topology_version: { const: 2 },
     groups: {
       type: "object",
@@ -201,7 +202,7 @@ export const plannedGraphJsonSchema = {
           properties: {
             loops: { type: "integer", minimum: 1 },
             timeout_seconds: { type: "integer", minimum: 1 },
-            max_attempts: { type: "integer", minimum: 1 },
+            max_attempts: { type: "integer", minimum: 1, maximum: MAX_RETRY_CHAIN_ATTEMPTS },
             model_profiles: { type: "array", uniqueItems: true, items: { type: "string", minLength: 1 } }
           }
         }
@@ -263,7 +264,7 @@ export interface PlannedGraphNodeDocument {
 
 export interface PlannedGraphDocument {
   schema_version: typeof PLANNED_GRAPH_SCHEMA_VERSION;
-  graph_version: "3";
+  graph_version: "4";
   topology_version: 2;
   groups: Record<string, PlannedGraphGroup>;
   nodes: PlannedGraphNodeDocument[];

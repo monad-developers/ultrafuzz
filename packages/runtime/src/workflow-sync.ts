@@ -53,6 +53,7 @@ import {
   type ArtifactVerificationMarker,
   type AppendUsageEventInput,
   type NodeAttemptFailureCategory,
+  type NodeAttemptAgentProvenance,
   type NodeAttemptLedgerEntry,
   type NodeAttemptOutcome,
   type NormalizedUsage,
@@ -101,6 +102,7 @@ import {
 import { runsRootForProject } from "./validate.js";
 import { projectWorkflowControlState } from "./workflow-control.js";
 import { runtimeSemanticGateDiagnostics } from "./semantic-gates.js";
+import { reconcileSmithersAttemptAgentSelection } from "./smithers-attempt-authority.js";
 
 type StoredWorkflowTask = SmithersTaskManifestTask;
 
@@ -146,6 +148,8 @@ interface TerminalWorkflowAttempt {
   failureCategory?: NodeAttemptFailureCategory;
   failureMessage?: string;
 }
+
+type SmithersNodeAttemptAuthorities = ReadonlyMap<string, unknown>;
 
 interface AccountingSummary {
   uncached_input_tokens: number;
@@ -506,6 +510,25 @@ export async function synchronizeLinkedWorkflowRun(
       diagnostics: [diagnosticFromError(error, "workflow", "WORKFLOW_TOKEN_EVENTS_INVALID")]
     };
   }
+  let attemptAuthorities: SmithersNodeAttemptAuthorities;
+  try {
+    attemptAuthorities = await inspectTerminalAttemptAuthorities({
+      projectRoot,
+      workflowRunId: evidence.smithersRunId,
+      tasks: loaded.tasks,
+      events,
+      layout,
+      env: linkedWorkflowExecutionEnvironment(evidence, input.env),
+      control
+    });
+  } catch (error) {
+    const interrupted = synchronizationInterruptionDiagnostic(error);
+    if (interrupted !== undefined) return { ok: false, diagnostics: [interrupted] };
+    return {
+      ok: false,
+      diagnostics: [diagnosticFromError(error, "workflow", "WORKFLOW_ATTEMPT_INSPECT_FAILED")]
+    };
+  }
   let syncResult;
   try {
     syncResult = await synchronizeTasks({
@@ -516,6 +539,7 @@ export async function synchronizeLinkedWorkflowRun(
       controlGeneration: evidence.controlGeneration,
       inspect,
       events,
+      attemptAuthorities,
       control
     });
   } catch (error) {
@@ -760,6 +784,66 @@ function inspectionExecutionControl(
     ...(control.signal === undefined ? {} : { signal: control.signal }),
     ...(timeoutMs === undefined ? {} : { timeoutMs })
   };
+}
+
+async function inspectTerminalAttemptAuthorities(input: {
+  projectRoot: string;
+  workflowRunId: string;
+  tasks: StoredWorkflowTask[];
+  events: WorkflowEvent[];
+  layout: RunLayout;
+  env: Record<string, string | undefined>;
+  control: WorkflowSynchronizationControl;
+}): Promise<SmithersNodeAttemptAuthorities> {
+  const tasksByNodeId = new Map(input.tasks.map((task) => [task.smithersNodeId, task]));
+  const pending = terminalWorkflowAttempts(input.events, { tolerateMissingStarts: true }).filter(
+    (attempt) => tasksByNodeId.get(attempt.nodeId)?.execution.mode === "local"
+  );
+  const grouped = new Map<string, TerminalWorkflowAttempt[]>();
+  for (const attempt of pending) {
+    const key = smithersNodeAttemptAuthorityKey(attempt.nodeId, attempt.iteration);
+    const entries = grouped.get(key) ?? [];
+    entries.push(attempt);
+    grouped.set(key, entries);
+  }
+  if (grouped.size > input.tasks.length) {
+    throw new Error("Smithers attempt authority inspection exceeds the sealed task bound");
+  }
+  const authorities = new Map<string, unknown>();
+  for (const [key, attempts] of grouped) {
+    assertSynchronizationBudget(input.control);
+    const first = attempts[0]!;
+    const snapshot = await runSmithersInspectionCommand({
+      args: [
+        "node",
+        first.nodeId,
+        "-r",
+        input.workflowRunId,
+        "-i",
+        String(first.iteration),
+        "--format",
+        "json",
+        "--full-output"
+      ],
+      projectRoot: input.projectRoot,
+      env: input.env,
+      ...inspectionExecutionControl(input.control, synchronizationClock(input.control))
+    });
+    assertSynchronizationBudget(input.control);
+    if (!snapshot.ok || snapshot.json === undefined) {
+      throw new Error(workflowSnapshotDiagnostic(snapshot, "WORKFLOW_ATTEMPT_INSPECT_FAILED").message);
+    }
+    const task = tasksByNodeId.get(first.nodeId)!;
+    for (const attempt of attempts) {
+      reconcileSmithersAttemptAgentSelection(task, snapshot.json, attempt.retry);
+    }
+    authorities.set(key, snapshot.json);
+  }
+  return authorities;
+}
+
+function smithersNodeAttemptAuthorityKey(nodeId: string, iteration: number): string {
+  return JSON.stringify([nodeId, iteration]);
 }
 
 async function synchronizeWorkflowAccounting(input: {
@@ -2360,6 +2444,7 @@ async function synchronizeTasks(input: {
   controlGeneration: string;
   inspect: WorkflowInspect;
   events: WorkflowEvent[];
+  attemptAuthorities: SmithersNodeAttemptAuthorities;
   control: WorkflowSynchronizationControl;
 }): Promise<{
   diagnostics: RuntimeDiagnostic[];
@@ -2458,7 +2543,8 @@ async function synchronizeTasks(input: {
         events: eventsByNode.get(task.smithersNodeId) ?? [],
         currentAttempt: evidence.attempt,
         currentStatus: patchStatus,
-        finalization
+        finalization,
+        attemptAuthorities: input.attemptAuthorities
       });
       retryCount = Math.max(0, ledger.executedAttempts - (ledger.currentAttemptExecuted ? 1 : 0));
       changed ||= ledger.appended;
@@ -3177,6 +3263,7 @@ function appendTerminalTaskAttempts(input: {
   currentAttempt?: number;
   currentStatus: NodeStatus;
   finalization: NodeFinalization;
+  attemptAuthorities: SmithersNodeAttemptAuthorities;
 }): { appended: boolean; executedAttempts: number; currentAttemptExecuted: boolean } {
   const terminalAttempts = terminalWorkflowAttempts(input.events);
   const state = readRunState(input.layout);
@@ -3263,6 +3350,9 @@ function appendTerminalTaskAttempts(input: {
       finishedAt: attempt.finishedAt,
       outcome,
       inputManifestDigest,
+      ...(input.task.execution.mode === "local"
+        ? { agent: nodeAttemptAgentProvenance(input.task, attempt, input.attemptAuthorities) }
+        : {}),
       ...(outputDigest === undefined ? {} : { outputManifestDigest: outputDigest }),
       ...(reuse === undefined ? {} : { reuse }),
       ...(failureCategory === undefined ? {} : { failureCategory }),
@@ -3329,7 +3419,36 @@ function appendTerminalTaskAttempts(input: {
   };
 }
 
-function terminalWorkflowAttempts(events: WorkflowEvent[]): TerminalWorkflowAttempt[] {
+function nodeAttemptAgentProvenance(
+  task: StoredWorkflowTask,
+  attempt: Pick<TerminalWorkflowAttempt, "nodeId" | "iteration" | "retry">,
+  authorities: SmithersNodeAttemptAuthorities
+): NodeAttemptAgentProvenance {
+  const detail = authorities.get(smithersNodeAttemptAuthorityKey(attempt.nodeId, attempt.iteration));
+  if (detail === undefined) {
+    throw new Error(
+      `Smithers attempt authority is unavailable for attempt ${attempt.retry} of ${JSON.stringify(attempt.nodeId)}`
+    );
+  }
+  const selection = reconcileSmithersAttemptAgentSelection(task, detail, attempt.retry);
+  const agent = selection.profile;
+  return {
+    chain_index: selection.chainIndex,
+    profile_id: agent.profileId,
+    agent_ref: agent.agentRef,
+    ...(selection.agentModel === undefined && agent.modelName === undefined
+      ? {}
+      : { model_name: selection.agentModel ?? agent.modelName }),
+    ...(agent.reasoningEffort === undefined ? {} : { reasoning_effort: agent.reasoningEffort }),
+    role: agent.role,
+    selection: "observed"
+  };
+}
+
+function terminalWorkflowAttempts(
+  events: WorkflowEvent[],
+  options: { tolerateMissingStarts?: boolean } = {}
+): TerminalWorkflowAttempt[] {
   const active = new Map<
     string,
     Pick<TerminalWorkflowAttempt, "retry" | "iteration" | "nodeId" | "startedSequence" | "startedAt">
@@ -3357,7 +3476,10 @@ function terminalWorkflowAttempts(events: WorkflowEvent[]): TerminalWorkflowAtte
     const terminal = terminalOutcomeForEvent(event);
     if (terminal === undefined) continue;
     const started = active.get(identity);
-    if (started === undefined) throw new Error(`Smithers terminal event has no preceding NodeStarted for ${identity}`);
+    if (started === undefined) {
+      if (options.tolerateMissingStarts === true) continue;
+      throw new Error(`Smithers terminal event has no preceding NodeStarted for ${identity}`);
+    }
     active.delete(identity);
     attempts.push({
       ...started,
