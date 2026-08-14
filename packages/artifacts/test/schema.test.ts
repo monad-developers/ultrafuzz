@@ -707,6 +707,8 @@ test("canonical property, implementation, and campaign validators are registered
       metrics: [{ name: "runs", value: 10, unit: "count", source_ref: "backends/recon-fuzzer/results.json" }],
       unavailable_reason: null
     },
+    intended_entrypoints: [{ entrypoint: "property_property-1", property_id: "property-1" }],
+    admitted_entrypoints: [{ entrypoint: "property_property-1", property_id: "property-1" }],
     property_results: [
       {
         property_id: "property-1",
@@ -714,6 +716,7 @@ test("canonical property, implementation, and campaign validators are registered
         failure_ids: ["failure-1"],
         coverage_metric_names: ["runs"],
         evidence_refs: ["backends/recon-fuzzer/results.json"],
+        reason_code: null,
         reason: null
       }
     ],
@@ -842,6 +845,8 @@ test("property implementation and campaign schemas retain canonical references",
       metrics: [{ name: "runs", value: 10, unit: "count", source_ref: "backends/recon-fuzzer/results.json" }],
       unavailable_reason: null
     },
+    intended_entrypoints: [{ entrypoint: "property_property-1", property_id: "property-1" }],
+    admitted_entrypoints: [{ entrypoint: "property_property-1", property_id: "property-1" }],
     property_results: [
       {
         property_id: "property-1",
@@ -849,6 +854,7 @@ test("property implementation and campaign schemas retain canonical references",
         failure_ids: ["failure-1"],
         coverage_metric_names: ["runs"],
         evidence_refs: ["backends/recon-fuzzer/results.json"],
+        reason_code: null,
         reason: null
       }
     ],

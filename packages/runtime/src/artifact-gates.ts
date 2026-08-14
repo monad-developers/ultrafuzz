@@ -4102,6 +4102,71 @@ function verifyCurrentCampaignTimeoutEvidence(
     );
   }
 
+  const entrypointSet = (field: "intended_entrypoints" | "admitted_entrypoints") =>
+    Array.isArray(resultValue[field])
+      ? resultValue[field].flatMap((entry) => {
+          if (!isRecord(entry) || typeof entry.entrypoint !== "string" || typeof entry.property_id !== "string")
+            return [];
+          return [`${entry.entrypoint}\u0000${entry.property_id}`];
+        })
+      : [];
+  const intendedEntrypoints = entrypointSet("intended_entrypoints");
+  const admittedEntrypoints = entrypointSet("admitted_entrypoints");
+  if (new Set(intendedEntrypoints).size !== intendedEntrypoints.length) {
+    diagnostics.push(
+      campaignTimeoutDiagnostic(
+        "CAMPAIGN_PROPERTY_ENTRYPOINT_AMBIGUOUS",
+        "Each intended property entrypoint must identify exactly one canonical property",
+        `${resultPath}#$.intended_entrypoints`
+      )
+    );
+  }
+  if (new Set(admittedEntrypoints).size !== admittedEntrypoints.length) {
+    diagnostics.push(
+      campaignTimeoutDiagnostic(
+        "CAMPAIGN_PROPERTY_ENTRYPOINT_AMBIGUOUS",
+        "Each admitted property entrypoint must identify exactly one canonical property",
+        `${resultPath}#$.admitted_entrypoints`
+      )
+    );
+  }
+  if (
+    intendedEntrypoints.length > 0 &&
+    (intendedEntrypoints.length !== admittedEntrypoints.length ||
+      intendedEntrypoints.some((entrypoint) => !admittedEntrypoints.includes(entrypoint)))
+  ) {
+    diagnostics.push(
+      campaignTimeoutDiagnostic(
+        "CAMPAIGN_PROPERTY_COVERAGE_INCOMPLETE",
+        "Every intended property entrypoint must be present in the admitted entrypoint set",
+        `${resultPath}#$.admitted_entrypoints`
+      )
+    );
+  }
+  const propertyResults = Array.isArray(resultValue.property_results) ? resultValue.property_results : [];
+  const resultPropertyIds = propertyResults.flatMap((result) =>
+    isRecord(result) && typeof result.property_id === "string" ? [result.property_id] : []
+  );
+  const intendedPropertyIds = intendedEntrypoints.flatMap((entrypoint) => {
+    const propertyId = entrypoint.split("\u0000")[1];
+    return propertyId === undefined ? [] : [propertyId];
+  });
+  const incompletePropertyResults =
+    intendedPropertyIds.length > 0 &&
+    (intendedPropertyIds.some((propertyId) => !resultPropertyIds.includes(propertyId)) ||
+      propertyResults.some(
+        (result) => isRecord(result) && ["inconclusive", "not-executed"].includes(String(result.status))
+      ));
+  if (campaignOutcome === "complete" && incompletePropertyResults) {
+    diagnostics.push(
+      campaignTimeoutDiagnostic(
+        "CAMPAIGN_PROPERTY_COVERAGE_INCOMPLETE",
+        "A campaign with incomplete property coverage must not be complete",
+        `${resultPath}#$.campaign_outcome`
+      )
+    );
+  }
+
   const executionValue = isRecord(resultValue.execution) ? resultValue.execution : undefined;
   if (executionValue === undefined) {
     diagnostics.push(
@@ -6221,6 +6286,50 @@ function verifyCampaignPropertyReferences(
       .filter((record) => record.status === "implemented")
       .map((record) => record.property_id)
   );
+  for (const campaign of campaigns) {
+    const campaignPath = campaign.path;
+    const seenEntrypoints = new Map<string, string>();
+    for (const [setName, entries] of [
+      ["intended_entrypoints", campaign.value.intended_entrypoints],
+      ["admitted_entrypoints", campaign.value.admitted_entrypoints]
+    ] as const) {
+      for (const [index, entry] of entries.entries()) {
+        const previousPropertyId = seenEntrypoints.get(entry.entrypoint);
+        if (previousPropertyId !== undefined && previousPropertyId !== entry.property_id) {
+          diagnostics.push({
+            code: "PROPERTY_CAMPAIGN_ENTRYPOINT_AMBIGUOUS",
+            message: `${setName} entrypoint ${JSON.stringify(entry.entrypoint)} represents multiple canonical properties`,
+            severity: "error",
+            source: "property-provenance",
+            path: `${campaignPath}#$.${setName}[${index}].entrypoint`
+          });
+        } else {
+          seenEntrypoints.set(entry.entrypoint, entry.property_id);
+        }
+        if (!implementedIds.has(entry.property_id)) {
+          diagnostics.push({
+            code: "PROPERTY_CAMPAIGN_ENTRYPOINT_PROPERTY_INVALID",
+            message: `Campaign ${setName} entrypoint ${JSON.stringify(entry.entrypoint)} names a property outside the implemented set`,
+            severity: "error",
+            source: "property-provenance",
+            path: `${campaignPath}#$.${setName}[${index}].property_id`
+          });
+        }
+      }
+    }
+    const resultIds = new Set(campaign.value.property_results.map((result) => result.property_id));
+    for (const propertyId of implementedIds) {
+      if (!resultIds.has(propertyId)) {
+        diagnostics.push({
+          code: "PROPERTY_CAMPAIGN_RESULT_MISSING",
+          message: `Campaign property_results must contain an independent terminal result for implemented property ${JSON.stringify(propertyId)}`,
+          severity: "error",
+          source: "property-provenance",
+          path: `${campaignPath}#$.property_results`
+        });
+      }
+    }
+  }
   for (const reference of references) {
     for (const propertyId of reference.propertyIds) {
       if (!implementedIds.has(propertyId)) {

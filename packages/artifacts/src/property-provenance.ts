@@ -159,6 +159,14 @@ export const PROPERTY_CAMPAIGN_FAILURE_CATEGORIES = [
 ] as const;
 export const PROPERTY_CAMPAIGN_FAILURE_STATUSES = ["reproduced", "blocked-unreproduced"] as const;
 export const PROPERTY_CAMPAIGN_PROPERTY_RESULT_STATUSES = ["passed", "failed", "inconclusive", "not-executed"] as const;
+export const PROPERTY_CAMPAIGN_PROPERTY_RESULT_REASON_CODES = [
+  "not-admitted",
+  "not-observed",
+  "campaign-ended",
+  "ambiguous-entrypoint",
+  "backend-unavailable",
+  "execution-inconclusive"
+] as const;
 export const PROPERTY_CAMPAIGN_COVERAGE_STATUSES = ["reported", "unavailable"] as const;
 export const PROPERTY_CAMPAIGN_COVERAGE_UNITS = [
   "count",
@@ -181,6 +189,7 @@ export type PropertyCampaignExecutionStatus = (typeof PROPERTY_CAMPAIGN_EXECUTIO
 export type PropertyCampaignFailureCategory = (typeof PROPERTY_CAMPAIGN_FAILURE_CATEGORIES)[number];
 export type PropertyCampaignFailureStatus = (typeof PROPERTY_CAMPAIGN_FAILURE_STATUSES)[number];
 export type PropertyCampaignPropertyResultStatus = (typeof PROPERTY_CAMPAIGN_PROPERTY_RESULT_STATUSES)[number];
+export type PropertyCampaignPropertyResultReasonCode = (typeof PROPERTY_CAMPAIGN_PROPERTY_RESULT_REASON_CODES)[number];
 export type PropertyCampaignCoverageStatus = (typeof PROPERTY_CAMPAIGN_COVERAGE_STATUSES)[number];
 export type PropertyCampaignCoverageUnit = (typeof PROPERTY_CAMPAIGN_COVERAGE_UNITS)[number];
 
@@ -221,7 +230,13 @@ export interface PropertyCampaignPropertyResult {
   failure_ids: string[];
   coverage_metric_names: string[];
   evidence_refs: string[];
+  reason_code: PropertyCampaignPropertyResultReasonCode | null;
   reason: string | null;
+}
+
+export interface PropertyCampaignEntrypoint {
+  entrypoint: string;
+  property_id: string;
 }
 
 export interface PropertyCampaignFailure {
@@ -268,6 +283,8 @@ export interface PropertyCampaignArtifact {
   };
   evidence_files: PropertyCampaignEvidenceFile[];
   coverage: PropertyCampaignCoverage;
+  intended_entrypoints: PropertyCampaignEntrypoint[];
+  admitted_entrypoints: PropertyCampaignEntrypoint[];
   property_results: PropertyCampaignPropertyResult[];
   failures: PropertyCampaignFailure[];
 }
@@ -867,23 +884,37 @@ const propertyCampaignPropertyResultSchema = z
     failure_ids: uniquePropertyCampaignStrings,
     coverage_metric_names: uniquePropertyCampaignStrings,
     evidence_refs: uniquePropertyCampaignPaths,
+    reason_code: z.enum(PROPERTY_CAMPAIGN_PROPERTY_RESULT_REASON_CODES).nullable(),
     reason: propertyCampaignNonEmptyString.nullable()
   })
   .meta({
     allOf: [
       {
         if: { properties: { status: { const: "failed" } }, required: ["status"] },
-        then: { properties: { failure_ids: { type: "array", minItems: 1 }, reason: { type: "null" } } }
+        then: {
+          properties: {
+            failure_ids: { type: "array", minItems: 1 },
+            reason_code: { type: "null" },
+            reason: { type: "null" }
+          }
+        }
       },
       {
         if: { properties: { status: { enum: ["passed"] } }, required: ["status"] },
-        then: { properties: { failure_ids: { type: "array", maxItems: 0 }, reason: { type: "null" } } }
+        then: {
+          properties: {
+            failure_ids: { type: "array", maxItems: 0 },
+            reason_code: { type: "null" },
+            reason: { type: "null" }
+          }
+        }
       },
       {
         if: { properties: { status: { enum: ["inconclusive", "not-executed"] } }, required: ["status"] },
         then: {
           properties: {
             failure_ids: { type: "array", maxItems: 0 },
+            reason_code: { type: "string", minLength: 1 },
             reason: { type: "string", minLength: 1 }
           }
         }
@@ -900,6 +931,12 @@ const propertyCampaignPropertyResultSchema = z
         });
       if (result.reason !== null)
         context.addIssue({ code: "custom", path: ["reason"], message: "failed property result cannot carry a reason" });
+      if (result.reason_code !== null)
+        context.addIssue({
+          code: "custom",
+          path: ["reason_code"],
+          message: "failed property result cannot carry a reason code"
+        });
     } else if (result.status === "passed") {
       if (result.failure_ids.length !== 0)
         context.addIssue({
@@ -909,6 +946,12 @@ const propertyCampaignPropertyResultSchema = z
         });
       if (result.reason !== null)
         context.addIssue({ code: "custom", path: ["reason"], message: "passed property result cannot carry a reason" });
+      if (result.reason_code !== null)
+        context.addIssue({
+          code: "custom",
+          path: ["reason_code"],
+          message: "passed property result cannot carry a reason code"
+        });
     } else {
       if (result.failure_ids.length !== 0)
         context.addIssue({
@@ -922,8 +965,19 @@ const propertyCampaignPropertyResultSchema = z
           path: ["reason"],
           message: `${result.status} property result requires a reason`
         });
+      if (result.reason_code === null)
+        context.addIssue({
+          code: "custom",
+          path: ["reason_code"],
+          message: `${result.status} property result requires a typed reason code`
+        });
     }
   });
+
+const propertyCampaignEntrypointSchema = z.strictObject({
+  entrypoint: propertyCampaignNonEmptyString,
+  property_id: propertyCampaignNonEmptyString
+});
 
 const propertyCampaignFailureSchema = z
   .strictObject({
@@ -1024,6 +1078,8 @@ export const propertyCampaignSchema = z
     }),
     evidence_files: z.array(propertyCampaignEvidenceFileSchema).max(MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILES),
     coverage: propertyCampaignCoverageSchema,
+    intended_entrypoints: z.array(propertyCampaignEntrypointSchema).max(MAX_PROPERTY_CAMPAIGN_RECORDS),
+    admitted_entrypoints: z.array(propertyCampaignEntrypointSchema).max(MAX_PROPERTY_CAMPAIGN_RECORDS),
     property_results: z.array(propertyCampaignPropertyResultSchema).max(MAX_PROPERTY_CAMPAIGN_RECORDS),
     failures: z.array(propertyCampaignFailureSchema).max(MAX_PROPERTY_CAMPAIGN_RECORDS)
   })

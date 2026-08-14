@@ -560,6 +560,32 @@
         }
       ]
     },
+    "intended_entrypoints": {
+      "maxItems": 10000,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "entrypoint": { "type": "string", "minLength": 1, "maxLength": 65536 },
+          "property_id": { "type": "string", "minLength": 1, "maxLength": 65536 }
+        },
+        "required": ["entrypoint", "property_id"],
+        "additionalProperties": false
+      }
+    },
+    "admitted_entrypoints": {
+      "maxItems": 10000,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "entrypoint": { "type": "string", "minLength": 1, "maxLength": 65536 },
+          "property_id": { "type": "string", "minLength": 1, "maxLength": 65536 }
+        },
+        "required": ["entrypoint", "property_id"],
+        "additionalProperties": false
+      }
+    },
     "property_results": {
       "maxItems": 10000,
       "type": "array",
@@ -605,6 +631,22 @@
             },
             "uniqueItems": true
           },
+          "reason_code": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "not-admitted",
+                  "not-observed",
+                  "campaign-ended",
+                  "ambiguous-entrypoint",
+                  "backend-unavailable",
+                  "execution-inconclusive"
+                ]
+              },
+              { "type": "null" }
+            ]
+          },
           "reason": {
             "anyOf": [
               {
@@ -618,7 +660,15 @@
             ]
           }
         },
-        "required": ["property_id", "status", "failure_ids", "coverage_metric_names", "evidence_refs", "reason"],
+        "required": [
+          "property_id",
+          "status",
+          "failure_ids",
+          "coverage_metric_names",
+          "evidence_refs",
+          "reason_code",
+          "reason"
+        ],
         "additionalProperties": false,
         "allOf": [
           {
@@ -636,6 +686,7 @@
                   "type": "array",
                   "minItems": 1
                 },
+                "reason_code": { "type": "null" },
                 "reason": {
                   "type": "null"
                 }
@@ -657,6 +708,7 @@
                   "type": "array",
                   "maxItems": 0
                 },
+                "reason_code": { "type": "null" },
                 "reason": {
                   "type": "null"
                 }
@@ -678,6 +730,7 @@
                   "type": "array",
                   "maxItems": 0
                 },
+                "reason_code": { "type": "string", "minLength": 1 },
                 "reason": {
                   "type": "string",
                   "minLength": 1
@@ -844,6 +897,8 @@
     "paths",
     "evidence_files",
     "coverage",
+    "intended_entrypoints",
+    "admitted_entrypoints",
     "property_results",
     "failures"
   ],

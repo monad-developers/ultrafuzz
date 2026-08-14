@@ -8201,6 +8201,14 @@ function currentCampaign(
       metrics: [{ name: "executions", value: 1, unit: "count", source_ref: campaignFixturePaths.raw_results }],
       unavailable_reason: null
     },
+    intended_entrypoints: implementedPropertyIds.map((propertyId) => ({
+      entrypoint: `property_${propertyId}`,
+      property_id: propertyId
+    })),
+    admitted_entrypoints: implementedPropertyIds.map((propertyId) => ({
+      entrypoint: `property_${propertyId}`,
+      property_id: propertyId
+    })),
     property_results: implementedPropertyIds.map((propertyId) => {
       const failureIds = failures.flatMap((failure) =>
         Array.isArray(failure.property_ids) &&
@@ -8216,6 +8224,7 @@ function currentCampaign(
             failure_ids: failureIds,
             coverage_metric_names: ["executions"],
             evidence_refs: [campaignFixturePaths.raw_results],
+            reason_code: null,
             reason: null
           }
         : executionStatus === "complete"
@@ -8225,6 +8234,7 @@ function currentCampaign(
               failure_ids: [],
               coverage_metric_names: ["executions"],
               evidence_refs: [campaignFixturePaths.raw_results],
+              reason_code: null,
               reason: null
             }
           : {
@@ -8233,6 +8243,7 @@ function currentCampaign(
               failure_ids: [],
               coverage_metric_names: ["executions"],
               evidence_refs: [campaignFixturePaths.raw_results],
+              reason_code: "execution-inconclusive",
               reason: "The partial fixture campaign did not establish a pass."
             };
     }),
@@ -8560,6 +8571,7 @@ function synchronizeStrictCampaignTimeoutFixture(fixture: CampaignTimeoutFixture
       failure_ids: [],
       coverage_metric_names: [],
       evidence_refs: [],
+      reason_code: "backend-unavailable",
       reason: "The timeout-evidence fixture produced no usable results."
     }));
     fixture.backend.evidence_files = fixture.backend.evidence_files.filter(
@@ -8570,6 +8582,7 @@ function synchronizeStrictCampaignTimeoutFixture(fixture: CampaignTimeoutFixture
       ...result,
       status: "inconclusive",
       failure_ids: [],
+      reason_code: "execution-inconclusive",
       reason: "The timeout-evidence fixture ended before establishing a pass."
     }));
   }
