@@ -112,6 +112,7 @@ export const SMITHERS_RUN_STATES = [
   "stale",
   "orphaned",
   "failed",
+  "cancel-pending",
   "cancelled",
   "succeeded",
   "unknown"

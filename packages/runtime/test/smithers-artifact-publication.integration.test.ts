@@ -28,9 +28,7 @@ test("verified ignored artifacts survive a real successful Smithers worktree rea
     execGit(root, ["add", ".gitignore", "README.md"]);
     execGit(root, ["commit", "--quiet", "-m", "synthetic fixture"]);
 
-    const smithersPackageRoot = fs.realpathSync(
-      path.join(runtimePackageRoot(), "node_modules", "smithers-orchestrator")
-    );
+    const smithersPackageRoot = fs.realpathSync(path.join(runtimePackageRoot(), "node_modules", "smthrs"));
     fs.symlinkSync(path.dirname(smithersPackageRoot), path.join(root, ".smithers", "node_modules"), "dir");
     fs.writeFileSync(
       workflowPath,
@@ -71,10 +69,10 @@ function syntheticWorkflowSource(input: {
   canonicalRoot: string;
   worktreePath: string;
 }): string {
-  return `/** @jsxImportSource smithers-orchestrator */
+  return `/** @jsxImportSource smthrs */
 import fs from "node:fs";
 import path from "node:path";
-import { createSmithers } from "smithers-orchestrator";
+import { createSmithers } from "smthrs";
 import { z } from "zod/v4";
 
 const { publishFileDurableExclusive } = await import(${JSON.stringify(input.artifactModule)});

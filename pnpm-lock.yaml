@@ -5,11 +5,11 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  effect: 4.0.0-beta.102
-  '@effect/opentelemetry': 4.0.0-beta.102
-  '@effect/platform-bun': 4.0.0-beta.102
-  '@effect/platform-node-shared': 4.0.0-beta.102
-  '@effect/sql-sqlite-bun': 4.0.0-beta.102
+  effect: 4.0.0-beta.105
+  '@effect/opentelemetry': 4.0.0-beta.105
+  '@effect/platform-bun': 4.0.0-beta.105
+  '@effect/platform-node-shared': 4.0.0-beta.105
+  '@effect/sql-sqlite-bun': 4.0.0-beta.105
 
 importers:
 
@@ -314,9 +314,9 @@ importers:
       '@types/proper-lockfile':
         specifier: ^4.1.4
         version: 4.1.4
-      smithers-orchestrator:
-        specifier: 0.32.0
-        version: 0.32.0(58d79a073fab4aa1d549c4cefd132c73)
+      smthrs:
+        specifier: 0.34.0
+        version: 0.34.0(58d79a073fab4aa1d549c4cefd132c73)
 
   packages/security: {}
 
@@ -591,20 +591,20 @@ packages:
   '@codemirror/view@6.43.6':
     resolution: {integrity: sha512-EVunGSYN1wz1p75WY1s3Xg7t3i8Yol0kGZGizNdX9BUFgMFILYVe8/u6EVpo7Ff5PwbZuILb4QAq7IZoKzIEQA==}
 
-  '@effect/opentelemetry@4.0.0-beta.102':
-    resolution: {integrity: sha512-U15cxJ1uf3+HMnZB0BUQe3U4TuyIPYxSHJ+wEzkF4ZjteN224hsgeTgsyXSFjSIpWDVWfujdGPqmtkDpcMzf6w==}
+  '@effect/opentelemetry@4.0.0-beta.105':
+    resolution: {integrity: sha512-1OzmjmhzwSzixTZS3d2to/EIcAlpfnCrkYuqp2pTlropmPGJ2cB/E2VUDz30mXQJ4Uh+05ntw7upvtp3voZYlQ==}
     engines: {node: '>=18.0.0'}
     peerDependencies:
-      '@opentelemetry/api': ^1.9
+      '@opentelemetry/api': '>=1.9.0 <2.0.0'
       '@opentelemetry/api-logs': '>=0.203.0 <0.300.0'
-      '@opentelemetry/resources': ^2.0.0
+      '@opentelemetry/resources': '>=2.0.0 <3.0.0'
       '@opentelemetry/sdk-logs': '>=0.203.0 <0.300.0'
-      '@opentelemetry/sdk-metrics': ^2.0.0
-      '@opentelemetry/sdk-trace-base': ^2.0.0
-      '@opentelemetry/sdk-trace-node': ^2.0.0
-      '@opentelemetry/sdk-trace-web': ^2.0.0
-      '@opentelemetry/semantic-conventions': ^1.33.0
-      effect: 4.0.0-beta.102
+      '@opentelemetry/sdk-metrics': '>=2.0.0 <3.0.0'
+      '@opentelemetry/sdk-trace-base': '>=2.0.0 <3.0.0'
+      '@opentelemetry/sdk-trace-node': '>=2.0.0 <3.0.0'
+      '@opentelemetry/sdk-trace-web': '>=2.0.0 <3.0.0'
+      '@opentelemetry/semantic-conventions': '>=1.33.0 <2.0.0'
+      effect: 4.0.0-beta.105
     peerDependenciesMeta:
       '@opentelemetry/api':
         optional: true
@@ -623,21 +623,21 @@ packages:
       '@opentelemetry/sdk-trace-web':
         optional: true
 
-  '@effect/platform-bun@4.0.0-beta.102':
-    resolution: {integrity: sha512-hTIb0jjTfXhNgnDq2OX5wrigc0OSvTT0VWWb1PLpMM395RJPu8rCIbTlGhy0NS7kZOd8FfgNi9e0sDhgyu+5Ag==}
+  '@effect/platform-bun@4.0.0-beta.105':
+    resolution: {integrity: sha512-5eCuMLxfkLbVK5If5zFybyKduQvhYofy0oPsbTH8UiIrYqyx5QqK9G9PZ1SfBsbqHfykwLEpMCdzQczFGERw2w==}
     peerDependencies:
-      effect: 4.0.0-beta.102
+      effect: 4.0.0-beta.105
 
-  '@effect/platform-node-shared@4.0.0-beta.102':
-    resolution: {integrity: sha512-gVd793I72MrkX4dXo7eYtRKfNj0RW4eMRfVEKEJI16h2+mBDCzQ+gqMrog2hSTHQnaIbvbYShNQ4TVGuRCYZeQ==}
+  '@effect/platform-node-shared@4.0.0-beta.105':
+    resolution: {integrity: sha512-UfeC8cFm4sP+XW14OO66CcOGJ8PcD102hH0kLwj8xUVL6nYIDGE/SJvlfVmFx+9OWF6rnjfXjMV6vyl6mCdhCQ==}
     engines: {node: '>=18.0.0'}
     peerDependencies:
-      effect: 4.0.0-beta.102
+      effect: 4.0.0-beta.105
 
-  '@effect/sql-sqlite-bun@4.0.0-beta.102':
-    resolution: {integrity: sha512-pBO6FBJ+a21j2qHmzJDK1DeJsxm7HpUQBgucw6prHQXLMUBkhOsfZofhw1FKEdGRDEhO0sGTjffa2KP7iOuDIg==}
+  '@effect/sql-sqlite-bun@4.0.0-beta.105':
+    resolution: {integrity: sha512-wKdkRWA6dYQmJL5YeSDxbvTRC6PUui+kfdpHpK36h96CwzXuWBx99MtZ97MzwfhjOVLgXBQDJE4OT7y9BD9FDA==}
     peerDependencies:
-      effect: 4.0.0-beta.102
+      effect: 4.0.0-beta.105
 
   '@electric-sql/client@1.5.24':
     resolution: {integrity: sha512-ItOjBFTfiZvYosglF9Dn4TSqE59yL/psoemHJ7vX8gvEUmElHB2QdP5eQC6q9/lswyv7oqhkZT0Kk8kuq2P5vA==}
@@ -2305,15 +2305,15 @@ packages:
   '@shikijs/vscode-textmate@10.0.2':
     resolution: {integrity: sha512-83yeghZ2xxin3Nj8z1NMd/NCuca+gsYXswywDy5bHvwlWL8tpTQmzGeUuHd9FC3E/SBEMvzJRwWEOz5gGes9Qg==}
 
-  '@smithers-orchestrator/accounts@0.32.0':
-    resolution: {integrity: sha512-9s1h47uPBfGbz99Sry1UTwGiBzDsYNlKwnI1JSiQMs+hgoH/3H+hX9QkndZSeYTCVAbyaMTDxIw/LyqQXrO0WA==}
+  '@smthrs/accounts@0.34.0':
+    resolution: {integrity: sha512-X1miFfRImRs3CoHGjrHANiCZRtrDLAXPwZ30f8dYfToISDUBzwuicqmV1ZXyArUKcfAUVJyj8HvW78VOv/Rpeg==}
 
-  '@smithers-orchestrator/agents@0.32.0':
-    resolution: {integrity: sha512-lVyzrurLnLPAGQvwaaTklaPI8E0I3757GCX2UPPWPIgeCaaMbK7lAWgwKliRpWCv7iUWxFi8eqpI1kOJXl/f+w==}
+  '@smthrs/agents@0.34.0':
+    resolution: {integrity: sha512-GZAZ2wZd30x+Qi83aw7Sg7XqK/pC/IvP7/HcCrgjPQdIMlvmHAAIZW0KY9rWxLcSVWAd+aw7uUTq4z7HKjpILw==}
     engines: {bun: '>=1.3.0', node: '>=22'}
 
-  '@smithers-orchestrator/aws@0.32.0':
-    resolution: {integrity: sha512-GwgNUvH4uHMqfGXZsSIW1/xk0/WBH61l2VhCrQeQC3B8bKshXO236eepfs6Vs8P+seiH24BROkJtltf0rNvTeA==}
+  '@smthrs/aws@0.34.0':
+    resolution: {integrity: sha512-uP/fOpMaagtB+FDTX5k1eKA0NMlLbPFHutzOJHSlwU9oS/iy1gYtJ5VB/jwqzKT96DQAbWfDikpFXbXCjnzONg==}
     peerDependencies:
       '@aws-sdk/client-cloudwatch-logs': ^3.700.0
       '@aws-sdk/client-codebuild': ^3.700.0
@@ -2329,70 +2329,70 @@ packages:
       '@aws-sdk/client-s3':
         optional: true
 
-  '@smithers-orchestrator/cli@0.32.0':
-    resolution: {integrity: sha512-r6i/1spXBxCuvuTPfnAuP6dnLYjWmAfigyCjsbeTF4MkM2FfkPzY2NcBOWhP/FHuEG3grZVyQl2y/Em1Visg7A==}
+  '@smthrs/cli@0.34.0':
+    resolution: {integrity: sha512-RrzYwUmVQmWEWl3YKOR70B7LFAwfXsfDdAlVoVR87EPpOV9v85KzRs/FqglZyfe16iJeUPufAmA6FRdjjUsDBQ==}
 
-  '@smithers-orchestrator/cloudflare@0.32.0':
-    resolution: {integrity: sha512-1lkIUkKNNTejNWxLefAv6HNxpBZJJcy452Q2HjhFvYKdCZlRsA3vW06zwes2rwioVNSqln0pk8edrzlRRKrnwA==}
+  '@smthrs/cloudflare@0.34.0':
+    resolution: {integrity: sha512-KGtehNyKY2yxRVNZK2hOSLyqYLKQ6lr/YycANQ+3PwMDfpUGbc9C92tdfi+Qm6JwTRoArLP8mDi2Ukbf5aPiUQ==}
     peerDependencies:
       '@cloudflare/sandbox': ^0.12.3
     peerDependenciesMeta:
       '@cloudflare/sandbox':
         optional: true
 
-  '@smithers-orchestrator/components@0.32.0':
-    resolution: {integrity: sha512-D80rg2jgGb/g65jh/noe0yxYMaPGQAhrcCoi/vcC6r1x1O7S4vNbRntfhRTUwBfCBbc61l2eT4Udkb+69tDr9w==}
+  '@smthrs/components@0.34.0':
+    resolution: {integrity: sha512-IDQDHKoHMnPFLLluirOyT6hRFeAQRh4Yfwf+XLunhJ59Rw3b3j6S3aXCqGNYrqDzFO4wqWYG3dGuN0qOKQW5AQ==}
 
-  '@smithers-orchestrator/control-plane@0.32.0':
-    resolution: {integrity: sha512-NMavuMHR9ZghnvGYXR0jnc0kuRRoK0r1BJbACeywHRgfMClbRWPEM9nhwaWH+j6xApW1e25TstKEH24ObHlSWA==}
+  '@smthrs/control-plane@0.34.0':
+    resolution: {integrity: sha512-tfS2SfUD8wX9yoti49eNkz8ahLu0nHO4ytA3qeKks4+1Q0NkrlhWJESHV39CrJYqv8tlk1adCkQevJ1stlj7WA==}
 
-  '@smithers-orchestrator/daytona@0.32.0':
-    resolution: {integrity: sha512-befh7nfRMhx6Cq1bs7tbEBvSnchyRpn3k2zqqs1wYbporOcJsiIyloR4ayDkW5Vo4TMflqqaV+Q9xBQTE2tqIw==}
+  '@smthrs/daytona@0.34.0':
+    resolution: {integrity: sha512-+Ibbz1AQWfhmdEj2m6I0yD3KC583JSweQspaZixKEvgVdA1yBaZp7T0FWgA6cWK1LRZ7MetH+kctUgofw7DXCQ==}
     peerDependencies:
       '@daytonaio/sdk': ^0.194.0
     peerDependenciesMeta:
       '@daytonaio/sdk':
         optional: true
 
-  '@smithers-orchestrator/db@0.32.0':
-    resolution: {integrity: sha512-ye3GegwLv0F3F0c6HZ4V/BtU4mLEVd8Jda2fYMGUoctRje/8mBrbEcTN1RPpPIgBDC2tkA8G39PkZMq+if0G6g==}
+  '@smthrs/db@0.34.0':
+    resolution: {integrity: sha512-ZV7nqILfk8uj1LWqE82K/Md6uWkZOWrQsTKwxpr8VovNNIw3GtPni0iGJo93/sf72kyVyM4BNvT1kIkPv6PnmQ==}
 
-  '@smithers-orchestrator/devtools@0.32.0':
-    resolution: {integrity: sha512-BiRzMX13nR027dswW1yIYCfLGV006ySAmaNQ1tV1pgjEQTEDxeaomDOTbYmzh+bui/UCQd3iMNfLrI8ziHM16A==}
+  '@smthrs/devtools@0.34.0':
+    resolution: {integrity: sha512-Yt64jTeTaCdeqBv8dWMqmrl6IF7y3aKiMjL4reR01oIN2gdaXZJ7BC6ACi3Rg9xuQ6uczrg1o9sT/Ey0WyBcdA==}
 
-  '@smithers-orchestrator/driver@0.32.0':
-    resolution: {integrity: sha512-Y0ln2j/iRkxb+ARJowC006wTN1xG5t3epu/yREk6GpDWFvdSmLuLxx5aD5EhXtQqf/s7ZZEanTOZo/bVPkd5Sg==}
+  '@smthrs/driver@0.34.0':
+    resolution: {integrity: sha512-f3Bi59BtagVadnj+jJA5wQQkHJ/qyA4hwAoqtTNpNRxadXWshX9KDirUZSKqPwIWMjS/2iZUel/WZPk/sokExw==}
 
-  '@smithers-orchestrator/electric-proxy@0.32.0':
-    resolution: {integrity: sha512-xXlm6FfW70hybH1ofpmH+qL2gz8jJ38VNeQkAlLNeVwqB2Ug24e/PUqkCNwO81XXPf7SxwIMs0rPkaiY1RWdNQ==}
+  '@smthrs/electric-proxy@0.34.0':
+    resolution: {integrity: sha512-byR2lby/gTZKFwszBa+bgS5VQ060AichJX27cnExzwbq48js6lFC4Nb1Oay8/yXdREMQLS0WETbeOEx1VHtkIw==}
     hasBin: true
 
-  '@smithers-orchestrator/engine@0.32.0':
-    resolution: {integrity: sha512-31WFayeMF/ELBI/12WEGIKAjH0iYWO90sAFqgFLyt/xmLX/X4yIZEmU8KysaH675eR1Sqdu5b7F8gS1qBTOgvQ==}
+  '@smthrs/engine@0.34.0':
+    resolution: {integrity: sha512-UdsqIuWtMImrd5FOQRze4Hoi3UMB05zG7lOYV69VEWwkaidhDHjXvivJD3sUQbHZ+h6nd01rHsbn2OMzS2U1HA==}
 
-  '@smithers-orchestrator/errors@0.32.0':
-    resolution: {integrity: sha512-FGAE8xZ5lf4l7N27AitYli69suz1VMBjYkmsHl/s1HY9/cv/QRh9gK2tcb2hzsTjMZW+0QyGyuUBSWUlleEBWA==}
+  '@smthrs/errors@0.34.0':
+    resolution: {integrity: sha512-Eesq9jUfEmL89xxoatln9tGiKQcBcUPHE55WB4osnJSTTs0obaNxNm9U4v/4rU9xnvJjqLmtDMDW/6HDV5+hjQ==}
 
-  '@smithers-orchestrator/gateway-client@0.32.0':
-    resolution: {integrity: sha512-eaIuDCFUMgM8TQrNTjTiTHVIRlYdDHf6r3xQW/YSlc4FZyjdK6vGfKIUz8cfRSolrRbSqV/Sts0gtzaDOb3YWA==}
+  '@smthrs/gateway-client@0.34.0':
+    resolution: {integrity: sha512-pmcEer2WwAo2ebZdj54bYEnQpaeIkGh7EvAYDfm4LzpulTuRVbhAShIH+CRldKVUpBbjUg4jme+RoIhRlgq28g==}
 
-  '@smithers-orchestrator/gateway-react@0.32.0':
-    resolution: {integrity: sha512-5FCfdTffeYhomSKj5HkY58GR6j84Y6t5a4G/o7S6IXxYQudFwFlfrQt9tyRuUDTx7vHHTVqDuRnfnS5bnYSxrQ==}
+  '@smthrs/gateway-react@0.34.0':
+    resolution: {integrity: sha512-ZyEzjVwWQK8xFFVInjloBW1ZOfFvepr1G332WvEMchdK1KKW5MHa1jl6buwKmxkbrkF8WEFMGM07YSVdKOlnzw==}
     peerDependencies:
       react: ^19.0.0
       react-dom: ^19.0.0
 
-  '@smithers-orchestrator/gateway-ui@0.32.0':
-    resolution: {integrity: sha512-A5hHfxphF8VSXyfhGwRVu4W260zzmJmzkS3paf8BsFzsvLqW6nJ/V/cACev2u3teZpf2DGmIcwB8MJJen2Z28g==}
+  '@smthrs/gateway-ui@0.34.0':
+    resolution: {integrity: sha512-RHUifX7sOdzxM5V/2zmeq1UK9fO2fax5i2ebjlkYt3jDuRmzeiq2WazeW0d1CfdwJ1ovMWxicJYzuNRVyseYXw==}
     peerDependencies:
       react: ^19.0.0
       react-dom: ^19.0.0
 
-  '@smithers-orchestrator/gateway@0.32.0':
-    resolution: {integrity: sha512-+yHVXWdMsOYbafi9/iJD02AExCMo16SjQNndFoYRdN/WSGhtlMKL1EzbQY22jiyutjds2kKEfaE4XD2KeMH3aA==}
+  '@smthrs/gateway@0.34.0':
+    resolution: {integrity: sha512-XsL+oJzzuk0FlxqGJu2FVgWUfgAhnbupgxi8NBeTsx3+nVgpjWQbewbYdt6/8T+g8zuPBcgqiYOabK7aFDPRDA==}
 
-  '@smithers-orchestrator/gcp@0.32.0':
-    resolution: {integrity: sha512-ptmr9Azqj4+ajXwN2bNWC8FLRK+at3d6GKgfJFcRtPAcIvFe0ZEHDEtXxPf7mdyWgLSWuXmcoz6jVGC81heu/Q==}
+  '@smthrs/gcp@0.34.0':
+    resolution: {integrity: sha512-Av6zB5/opsgggnC94NB6RagHuq9dQYykWjWrzRfvwfmZsAShPPQwoROppkRzl3UAgi6NUxKvD7Gc8lKxayjPjg==}
     peerDependencies:
       '@google-cloud/run': ^2.0.0
       '@google-cloud/storage': ^7.0.0
@@ -2402,143 +2402,149 @@ packages:
       '@google-cloud/storage':
         optional: true
 
-  '@smithers-orchestrator/graph@0.32.0':
-    resolution: {integrity: sha512-zxN2IpSslMm+3iK1GYmJYfpnAwgmzctsXZpilzE1I4rCg/uV+Y8TFaswngeAY6QWDNUy8sa/YqXMHAqYRkRGEg==}
+  '@smthrs/graph@0.34.0':
+    resolution: {integrity: sha512-yPByKTXEn2PnzoUBYxK0gHrDl3dQLO52QIFAmUJHel45MkJTACUT9htT0hthPaPv1OVUjYx2ykPgo1wE6ZuaWQ==}
 
-  '@smithers-orchestrator/integrations@0.32.0':
-    resolution: {integrity: sha512-YteUswbFeLJhT87N6HK2jXk8otXl5O73Qe9hL+JDD9EL6+7qvPT0Hy9JNRwXQ7sQDWG2Uywk1fp4kz9ctxujhA==}
+  '@smthrs/herdr@0.34.0':
+    resolution: {integrity: sha512-zhjf/taAo5Bga4YgyMnV1qFK5gwg+EpOpGjTUkupCfFhhcQ6xFz+aWNhpPf7jvjmMzVtuwdumOZvRZg94jdwgw==}
 
-  '@smithers-orchestrator/jj-darwin-arm64@0.32.0':
-    resolution: {integrity: sha512-Y+HiDr4k4DTw7q3h0Gz9klKD1WkqDrwJsiQawrm+o9yVU0RbndoEYkmxrWpautMueUEGZOypVEfJ4Z0TJyMh9Q==}
+  '@smthrs/integrations@0.34.0':
+    resolution: {integrity: sha512-Xxm+q2M6pQD9xs5yMl1mNiPv6kBK6/0a+3/vcl5nQ3C/DZDYmCbVjUMKKdMwh2hPIBORqciaTJKWn8yZW5eH2Q==}
+
+  '@smthrs/jj-darwin-arm64@0.34.0':
+    resolution: {integrity: sha512-pE8B8yiQ1C9CJs7O1NdjwN6+z3sz1GAW4gmuOf0/NP1uMuhsxLhoXfdKeqQllcAnUJtZ8BkE5Jqk1LoL4iTQxg==}
     cpu: [arm64]
     os: [darwin]
     hasBin: true
 
-  '@smithers-orchestrator/jj-darwin-x64@0.32.0':
-    resolution: {integrity: sha512-8kMmkHhiPfIo26s8BjBWTb8JhjWdSZClBMb4ARny+0QBOl+asqOAHms+LSuldidqQe5qBl1citDFNGdxSqXp3Q==}
+  '@smthrs/jj-darwin-x64@0.34.0':
+    resolution: {integrity: sha512-RX6X+xSj6FxSLAz8S/h61Xs7cgdlnlmLglbTGRWNK8SPtMtZsvgQyHY/1gkjEyfoyj9uQvtuDhGEBQG124fzjg==}
     cpu: [x64]
     os: [darwin]
     hasBin: true
 
-  '@smithers-orchestrator/jj-linux-arm64@0.32.0':
-    resolution: {integrity: sha512-tcI+Y6nbkVPxhK4YyZLB0rZBIotPCw5LYx8A6IWbnYlInpRIrAoA57pLzBPOdNrPqLprHAtlKmalALWZp8QZCw==}
+  '@smthrs/jj-linux-arm64@0.34.0':
+    resolution: {integrity: sha512-fCP3o0ov2tcGnYiPejkYgCwKN/xQ1+47iDgTAqTL7BtegjRvNJThx09K+5LFWOwElukXjdTYsqQY0ihnoXPPRw==}
     cpu: [arm64]
     os: [linux]
     hasBin: true
 
-  '@smithers-orchestrator/jj-linux-x64@0.32.0':
-    resolution: {integrity: sha512-PPdLneaZsg1UtWDrtzysrq89kf27Y0Egp3pKJhK1fVc81tFAx4ytuIUq4rucqKy5IEH3dPF9NO6ZosQCb2D5HA==}
+  '@smthrs/jj-linux-x64@0.34.0':
+    resolution: {integrity: sha512-YNU7taTmzSDqwlqSqu0RVzkgXQbeSxxNkImUbfHzVUBnuE9Jz+BoX9rNvPuXzmDYJBVB2eSAhg9IDHAceAYsdg==}
     cpu: [x64]
     os: [linux]
     hasBin: true
 
-  '@smithers-orchestrator/jj-win32-x64@0.32.0':
-    resolution: {integrity: sha512-L8gyqMgg2+zlbU4/i2t1O/doeBKWCxpHl+yfWHVCXUWCXdMS3LC22g9AEqQg7Tvlrn6K/WBte83sNGVZ2Vt/3A==}
+  '@smthrs/jj-win32-x64@0.34.0':
+    resolution: {integrity: sha512-9EIPQoZ1BV8JledMetGFmA4iagX4dtFM8hEkV993qIn22Vuu2G8h6yTMpV+S9UUiIYSz4/yg+oDkyL27P6w1TA==}
     cpu: [x64]
     os: [win32]
     hasBin: true
 
-  '@smithers-orchestrator/memory@0.32.0':
-    resolution: {integrity: sha512-Xi993TpfelkhhfUvpm55XyevbSvu4qkePYiqx0q63YSY2P7SPEllh/bTLth3OljmOmW2vtt+5OVecnmk2blZbw==}
+  '@smthrs/memory@0.34.0':
+    resolution: {integrity: sha512-3rirGbJmaJOg2wtzVW4m12iUe1DT0hndJ8pVhZJgdgFyC/bCqLIQgEWrTV6Sr+gO3DkrxFPrN2DjtcXVzs7RkA==}
 
-  '@smithers-orchestrator/microsandbox@0.32.0':
-    resolution: {integrity: sha512-lL6C66nRINM4w8IVHYw7BtpOtSlpTq+nGRRikcKFCH/bhdKCSMpJ4Y3rWuWrNF3WbaIT/maIWs8SCgvqOxkksQ==}
+  '@smthrs/microsandbox@0.34.0':
+    resolution: {integrity: sha512-j1+KPR6zEQ0TiVwX/mMpRSwox+LR8Srz2Fxscqfw7uL9dwJubuazwe1DpOP82xqXzqZwS38oyo2NCH/RP9GrkQ==}
     peerDependencies:
       microsandbox: 0.6.6
     peerDependenciesMeta:
       microsandbox:
         optional: true
 
-  '@smithers-orchestrator/observability@0.32.0':
-    resolution: {integrity: sha512-Kb4nbdbWqmW8ppDezYIRRtsnt21aveCTcP7lMolxnmLQAf29jEpRbyvQWGpA/GtPKBwURc02l3M9Ptro2UttCQ==}
+  '@smthrs/observability@0.34.0':
+    resolution: {integrity: sha512-t5udSPtCyQy7HBC9ua6tFulQaocvvCOjzARWB9THuc8XU8Bsb1C68AZGSUMBjwZhWVgOvOJUKTGg3qC2z5E9ng==}
 
-  '@smithers-orchestrator/openapi@0.32.0':
-    resolution: {integrity: sha512-T5W83yPf9kseMl314BTmWL8a6rbh4QzdR4U8F9O0LXGXpRq+mZR300sASNGlDz++N6rncERJn84ZDpavGx6EIA==}
+  '@smthrs/openapi@0.34.0':
+    resolution: {integrity: sha512-Mco3q9qAKRboudupzd9eXg63yLQl5V0TRIEj0K9DYjppoYuu+9Xxg/VGppYjvy9TH/DKaz0MDrdSlpZ+amzBaw==}
     engines: {bun: '>=1.3.0', node: '>=22'}
 
-  '@smithers-orchestrator/protocol@0.32.0':
-    resolution: {integrity: sha512-lkg09apQorEvUYRAsSEyViOqj961+HX1AFHYqmsPy0dzruo8JJjdVBeu9qKcn0V1ZKgdDVTpfADEy8DQmlm2EQ==}
+  '@smthrs/protocol@0.34.0':
+    resolution: {integrity: sha512-UeYL9fEgnGg9UElkluo2Fp07ewRfDQlCnIlBwT08pwNL0GDhJqhPNPqyTH0OcG3uei99U2JDmgXF+/l8+poNug==}
 
-  '@smithers-orchestrator/react-reconciler@0.32.0':
-    resolution: {integrity: sha512-B/G+2Pm9AWx1QrQR8rHhF7haY9c7PxdwXDAQiljZzifiJRAipiJ7ol/cTT/Q9z17eluZuRCzDuRV0cCNKwFMhg==}
+  '@smthrs/react-reconciler@0.34.0':
+    resolution: {integrity: sha512-UiLP59M3WyR/jRq/5Q1ZSaBqgW49YqHSXElP7hXbumOnxarPnAYRRFRqB5CZkwPxxik1euRP9omcivW4GYkBtw==}
 
-  '@smithers-orchestrator/review@0.32.0':
-    resolution: {integrity: sha512-4VAeGq/Q/Eg/SFkjPcvPjSlamatxsgfYW/peFK+9+g8QYyRlVrb+/5d8ZlpVlvj9pZAtLDYya3CY9PmSTj/N9Q==}
+  '@smthrs/review@0.34.0':
+    resolution: {integrity: sha512-cO+d+JLPJTinRbDJ1R8p77xrdStmuHf6JRVXnd5J/AT/ooHSstPfKywqJcnRxCzliN+2P+RmCu3Rv1FZ3RqYWg==}
     hasBin: true
 
-  '@smithers-orchestrator/sandbox@0.32.0':
-    resolution: {integrity: sha512-2l+l47bA0UjeD2yJ+730mreM1Ch+VpQ2l/bZrsEfAgYeZpmeB/WckvqJGIcQvBkgy67P/ISIlqjJ7TMxn/QawQ==}
+  '@smthrs/sandbox@0.34.0':
+    resolution: {integrity: sha512-Actg0eNEpbEukrChtgSqpHOBRJtCzCW8b8Tt+DM/3wQQCI8jLw6o/aRj5fT54yT7NPejz2RMiNqSqcrh6SJ01w==}
 
-  '@smithers-orchestrator/scheduler@0.32.0':
-    resolution: {integrity: sha512-M0MavRdQLgTgurlh5UpgZgWxrXpZsKiwxZGnMYt1jM9CGihHA8Mpa8cjp1iWqsPIXA1YgyN0ImpPfIh4owU+GA==}
+  '@smthrs/scheduler@0.34.0':
+    resolution: {integrity: sha512-L9tlNfiVvER7sEFw14Bt7ykrP5UPPK+ZeYxa/i5HwtteuwlwC6Q1sJMbnHExezZS+DXJW7LhAq2Oxkt5a5spfA==}
 
-  '@smithers-orchestrator/scorers@0.32.0':
-    resolution: {integrity: sha512-Ix7xq9rEAEKPhJbYt8XuM4a4nq4iugbBVGzAwQyTE57JZnmahWSDKqUkJzFArvd0cmVQgU0kG6BvjslCQA/8OA==}
+  '@smthrs/scorers@0.34.0':
+    resolution: {integrity: sha512-cnpgSmZqW83kHtEc+ZZ7n7g01ON9LATud6KOCHMSQvO2oW50FIUXZG7p2J50MWGvlPydUT0rSa3gf4c2L8zauw==}
 
-  '@smithers-orchestrator/server@0.32.0':
-    resolution: {integrity: sha512-QC2zG00GyrkvHWIhkroOwAwRVwwCmJ65RPVO9My3CCCgQWGLWnpIPcj5PMJ1w1jXaimCDyuNChOnisulcOIecQ==}
+  '@smthrs/server@0.34.0':
+    resolution: {integrity: sha512-zN36QNxaTS60c6vLFNOokxKOD0Gh7QhrdwQNAniCFKBckV1uf//VDCBzkAJtt24AimMyRXJJ5vogSFOw6F0m4w==}
     peerDependencies:
       playwright: ^1.61.1
     peerDependenciesMeta:
       playwright:
         optional: true
 
-  '@smithers-orchestrator/telegram@0.32.0':
-    resolution: {integrity: sha512-ULeLavWXJ9eilJPUN3YLvHUKZcUXExu6ZP5LNxJNNwpxHqk4Y5mTOT/43DJHVOJSzOeGiIpxuf6YU/zrZawgSQ==}
+  '@smthrs/telegram@0.34.0':
+    resolution: {integrity: sha512-8h7uhgc9I7KVUaQxVInL9+tqfcjaI1wXDEuyQEuF2sDJrH1yikjiWl5TkA5hbXAeKKj5wYiQloEp8xM3w2E02A==}
     engines: {bun: '>=1.3.0', node: '>=22'}
 
-  '@smithers-orchestrator/testing@0.32.0':
-    resolution: {integrity: sha512-SNq55Mc0aRyXjS1i+ROA1iQZVx4NsdUrbNWGV734cEen0seKR5DXnDwIL281ditC6IwPBvzr/ZyYTstAhZwliw==}
+  '@smthrs/testing@0.34.0':
+    resolution: {integrity: sha512-uHziGJ+YdPsngUgQqpZKQ8haeiLpX5UqETL0Ro7ul0reYorfrWC/xwQTWtjiSTX5KRaYMPWtSjtE3l61BGq4JA==}
     engines: {bun: '>=1.3.0', node: '>=22'}
     peerDependencies:
       koffi: ^2.16.2
+      smthrs: ^0.34.0
     peerDependenciesMeta:
       koffi:
         optional: true
+      smthrs:
+        optional: true
 
-  '@smithers-orchestrator/time-travel@0.32.0':
-    resolution: {integrity: sha512-O2V5W4B3Fn60PLKrv1hhh5B5ijIO5eCsAa4+DLWV9g6N1edo2RJFmkjORQiHtqCh1yl6mKhpjAovGs6HR6x8YQ==}
+  '@smthrs/time-travel@0.34.0':
+    resolution: {integrity: sha512-X70eifNjZXlAEs/+xvnocPgYaTUqkLkIMp1tzmGimKgD0B08Xq0O104Z4x6xUj4cpsGPB8/ErcpiFdxIYhBJJQ==}
 
-  '@smithers-orchestrator/tool-context@0.32.0':
-    resolution: {integrity: sha512-20DKIU2vLY5dpQCw+pdLPbzE9OlB05cKWYIsqX8tQ2ZK90BVkee1ElPVyYoZmJvWCCnggIjO44/YkLQjSBL3Iw==}
+  '@smthrs/tool-context@0.34.0':
+    resolution: {integrity: sha512-6yxgRN+PqI1Egae1gKHJ4QfragPLtJf6xTqNUCxDTLTjr2gOwqyt6vnv6A342u+/bzRWjRfbGqw6UTErKo98Mg==}
 
-  '@smithers-orchestrator/tui-ui@0.32.0':
-    resolution: {integrity: sha512-xAssZwUw9R+hVXr0kqysKdTt4hQejHWuI7YrKvrpNl1AHeieUEVaE13vUdc3/ejxHyk1754MIUWbpuATt6MmOg==}
+  '@smthrs/tui-ui@0.34.0':
+    resolution: {integrity: sha512-nIzyiPCOtC4Z3VCptXvaT1XZF1ExMxzAk8PbsHkgkimPnLUr2fs3FRwpP6X8WzeZ6CfBDvXmoBWmCN6s8GnKWA==}
 
-  '@smithers-orchestrator/tui@0.32.0':
-    resolution: {integrity: sha512-incDLRd81ftc4LZfV1FQt6QXlNMF6jEpnK7uxFeoj6NJ1uI9mFs1oo6Vq4s+FI0XbwhRNg14kUO9lGVPJdELag==}
+  '@smthrs/tui@0.34.0':
+    resolution: {integrity: sha512-G6793MCwduXBzkmAQ17jJwF2xHaRyiy1NojtSPnT1SsWpkEgn3j5BmTPYsWW+Cd7+x9djpAdoxxPsfTsNXwZIg==}
     hasBin: true
 
-  '@smithers-orchestrator/ui-core@0.32.0':
-    resolution: {integrity: sha512-KnA/VTt5kCvBXuLyNzRDxudrw6Y21qzVtXseQd0iUZhKuS/syvThLRoP3HDc7fHsr0zCnWJK29jqJQh3G+pRaA==}
+  '@smthrs/ui-core@0.34.0':
+    resolution: {integrity: sha512-LugZhMZ87A4PuZHo8hMvHY/S/JzTpudvppjqZ5EOQdlEoJnN1A89SEG9l3qHUK37gFOE2fi6HTh1ZJ1DBLM4mQ==}
     peerDependencies:
       react: ^19.0.0
 
-  '@smithers-orchestrator/ui-styleguide@0.32.0':
-    resolution: {integrity: sha512-t9Hq5HhyJdXdKzQCUJhdA4rrdTgMs7NLFxBHKN5xq2WrBaA7hFgYawbe7RU2SAADVnP3TH0uHIqxk4BCMeQIjw==}
+  '@smthrs/ui-styleguide@0.34.0':
+    resolution: {integrity: sha512-syuZ7ojCB4DvWRP/JkOZ1sqFEbXNpPdjNmJFqLLiz39DWa7sS8km7piFpMmwjiv2S4FShkT9Gj9CXhBj00DIgQ==}
 
-  '@smithers-orchestrator/ui@0.32.0':
-    resolution: {integrity: sha512-HJ3Z8qxN3+IF4s1pk53qnnMAG/AQ5XuNRg0Y9+7DmXkmWtVLcQt89+h/0RT5vDSy1IcZtZd/BYtk8i5I7lJKXQ==}
+  '@smthrs/ui@0.34.0':
+    resolution: {integrity: sha512-HfBtKSpg+AbL3Yjl4Ht+diA4yAEYyyCSKUXu2tI4WmPl2U68ieQTH1g/I7606K4W5ipxa9J45xOBYYH2IO3Pxw==}
     peerDependencies:
       react: ^19.0.0
       react-dom: ^19.0.0
 
-  '@smithers-orchestrator/usage@0.32.0':
-    resolution: {integrity: sha512-cIGXXXFhI3mmR0EBxtrUgiU7Q8qt25TDXNtla2WG016ElcTpJ/6jAk6EUQIhZ2inLjrm5eGLcn3te6pjrUWJJg==}
+  '@smthrs/usage@0.34.0':
+    resolution: {integrity: sha512-C0wGkFBypKyvhv9MquyGPq5UDWE+PLD0TkUp9e0HaljIJvCyv73fWu64LM2cUOSZoZs9u9c7lwUER3tQeN6Bdw==}
 
-  '@smithers-orchestrator/vcs@0.32.0':
-    resolution: {integrity: sha512-TjZoISXGQU0guCIGN807JA8vKgGyKFOzM8Ogl35R6lMvH1lOkCwzgoyEygztBto1QlkIWB+bpEzHPeo0+d/YOQ==}
+  '@smthrs/vcs@0.34.0':
+    resolution: {integrity: sha512-AY0hHYf/dlYD/TNqOBeRCi9GyJhgIM3PFJZNBG+s5RAsKtgLlifrzl9Tctvr3Ud6diZxKz0k1FL5TlmGzoAfkg==}
 
-  '@smithers-orchestrator/vercel@0.32.0':
-    resolution: {integrity: sha512-CREHuLdfiUyiE1innoMa0cJmd3YZdm93t4kQP5Y8BZx5sM8R3/WmUEWVElSlxe17i1WpABD/xF5ec5ljFgqWiA==}
+  '@smthrs/vercel@0.34.0':
+    resolution: {integrity: sha512-RqM62AZR0Tmo6qNZG4kzTTdB08N2nSzWbz3Sea0kIPnIuTOfzxM+2aD0lzvMpRIClCXpKCfSifqeMBvIsbgOSA==}
     peerDependencies:
       '@vercel/sandbox': ^2.0.0
     peerDependenciesMeta:
       '@vercel/sandbox':
         optional: true
 
-  '@smithers-orchestrator/xstate@0.32.0':
-    resolution: {integrity: sha512-C2CFrXvK3jucqtYsSO1EiwPOa7qH0PGJI7upyrFq4rt8/V1PhHk/m7UmudOBNr5iP1fKtjTkPaVlqBuUzs3N3Q==}
+  '@smthrs/xstate@0.34.0':
+    resolution: {integrity: sha512-ZCPl9GqdnnW+BiYF+jb8cAd2OW/p0jnu2IKNhaRp4511UdtRWLue1gmF4QjrCDgqRl91v+kd/3gIw6upuS08Gg==}
     engines: {bun: '>=1.3.0', node: '>=22'}
     peerDependencies:
       xstate: ^5.19.0
@@ -3566,8 +3572,8 @@ packages:
   ee-first@1.1.1:
     resolution: {integrity: sha512-WMwm9LhRUo+WUaRN+vRuETqG89IgZphVSNkdFgeb6sS/E4OrDIN7t48CAewSHXc6C8lefD8KKfr5vY61brQlow==}
 
-  effect@4.0.0-beta.102:
-    resolution: {integrity: sha512-z8Y+Q76Hh/kjLFZrXu8tGn6e+tDsg45R+UHhxd190pXxD53OGwf/G/zDxXTkse4HJ5mobNZfitLfUCp4fMvu6w==}
+  effect@4.0.0-beta.105:
+    resolution: {integrity: sha512-7U5OzWVNlpnZFvXiZfOeu8V+dCQUa3Om569HnYG2Dx8C8V6uoKS920kFJkIDEYVhlSGhzkRqaGKmYY9bPkBMMQ==}
 
   ejs@3.1.10:
     resolution: {integrity: sha512-UeJmFfOrAQS8OJWPZ4qtgHyWExa088/MtK5UEyoJGFH67cDEXkZSviOiKRCZ4Xij0zxI3JECgYs3oKx+AizQBA==}
@@ -3790,9 +3796,6 @@ packages:
     resolution: {integrity: sha512-S8KoZgRZN+a5rNwqTxlZZePjT/4cnm0ROV70LedRHZ0p8u9fRID0hJUZQpkKLzro8LfmC8sx23bY6tVNxv8pQA==}
     engines: {node: '>= 18.0.0'}
 
-  find-my-way-ts@0.1.6:
-    resolution: {integrity: sha512-a85L9ZoXtNAey3Y6Z+eBWW658kO/MwR7zIafkIUPUMf3isZG0NCs2pjW2wtjxAKuJPxMAsHUIP4ZPGv0o5gyTA==}
-
   find-up@5.0.0:
     resolution: {integrity: sha512-78/PXT1wlLLDgTzDs7sjq9hzz0vXD+zn+7wypEe4fXQxCmdmqfGsEPQxmiCSQI3ajFV91bVSsvNtrJRiW6nGng==}
     engines: {node: '>=10'}
@@ -3945,10 +3948,6 @@ packages:
 
   inherits@2.0.4:
     resolution: {integrity: sha512-k/vGaX4/Yla3WzyMCvTQOXYeIHvqOKtnqBduzTHpzpQZzAskKMhZ2K+EnBiSM9zGSoIFeMpXKxa4dYeZIQqewQ==}
-
-  ini@7.0.0:
-    resolution: {integrity: sha512-ifK0CgjALofS5bkrcTy4RaQ9Vx2Knf/eLeIO+NaswQEpH1UblrtTSCIvN71qQDMq0PeQ/SSPojvEJp9vvvfr+w==}
-    engines: {node: ^22.22.2 || ^24.15.0 || >=26.0.0}
 
   inline-style-parser@0.2.7:
     resolution: {integrity: sha512-Nb2ctOyNR8DqQoR0OwRG95uNWIC0C1lCgf5Naz5H6Ji72KZ8OcFZLz2P5sNgwlyoJ8Yif11oMuYs5pBQa86csA==}
@@ -4341,9 +4340,6 @@ packages:
 
   msgpackr@2.0.5:
     resolution: {integrity: sha512-cef05H/dSYpLpqp3sj/qyZh5vhUYCalnaLO7j1yOmpsR0y/XwLVtK7r5gn+U/F7CTEfMowcGhlUQJDLcLf7jcA==}
-
-  multipasta@0.2.8:
-    resolution: {integrity: sha512-ZPWuMKyv0cSO29f7hozp+k6+crZbQijV8ipMvxNxRf2SwtYGTX1ZX89Kd20VV4H9Znonx+EQn+iy1wGQsJ+b+Q==}
 
   nanoid@3.3.15:
     resolution: {integrity: sha512-y7Wygv/7mEOvxTuEQDB8StXdMRBWf1kR/tlhAzBRUFkB2jfcLOAxO/SHmOO2zgz1pVgK29/kyupn059/bCHdjA==}
@@ -4883,14 +4879,14 @@ packages:
   sisteransi@1.0.5:
     resolution: {integrity: sha512-bLGGlR1QxBcynn2d5YmDX4MGjlZvy2MRBDRNHLJ8VI6l6+9FUiyTFNJ0IveOSP0bcXgVDPRcfGqA0pjaqUpfVg==}
 
-  smithers-orchestrator@0.32.0:
-    resolution: {integrity: sha512-oWUgcrit2O1b9TrHyFGe6kPRhUFvlNILvAblvvr2019Fma21Ir+9UgS9gu69HR1d9OKEZ09i21zpcyDXOk8Fjg==}
-    engines: {bun: '>=1.3.0', node: '>=22'}
-    hasBin: true
-
   smol-toml@1.7.0:
     resolution: {integrity: sha512-aqVvWoyO21L23mb+drl4RmMXbf6N7FdHjAhTRA9ZBL7apWBgfWC16KjrASI+1p9GAroljyMHj6fK67i0UiTNvQ==}
     engines: {node: '>= 18'}
+
+  smthrs@0.34.0:
+    resolution: {integrity: sha512-TkkTazvfbMy5sWuQG5PhfdlJhSSSLHje7rBXYmW3DoaITCmAP6VQLTJYTvBxuMPo4620M7wwa7UKuifODEbtoA==}
+    engines: {bun: '>=1.3.0', node: '>=22'}
+    hasBin: true
 
   sorted-btree@1.8.1:
     resolution: {integrity: sha512-395+XIP+wqNn3USkFSrNz7G3Ss/MXlZEqesxvzCRFwL14h6e8LukDHdLBePn5pwbm5OQ9vGu8mDyz2lLDIqamQ==}
@@ -5009,10 +5005,6 @@ packages:
 
   tokenx@1.3.0:
     resolution: {integrity: sha512-NLdXTEZkKiO0gZuLtMoZKjCXTREXeZZt8nnnNeyoXtNZAfG/GKGSbQtLU5STspc0rMSwcA+UJfWZkbNU01iKmQ==}
-
-  toml@4.3.0:
-    resolution: {integrity: sha512-lVb8X9BsPVuH0M4BKeS91tXAmJvCjQ5UIyAbQFaxkKGyUFK2RPkhwaFSQH8vbpl1d23eu/IBH+dwVMHWaq9A5A==}
-    engines: {node: '>=20'}
 
   trim-lines@3.0.1:
     resolution: {integrity: sha512-kRj8B+YHZCc9kQYdWfJB2/oUl9rA99qbowYYBtr4ui4mZyAQ2JpvVBd/6U2YloATfqBhBTSMhTpgBHtU0Mf3Rg==}
@@ -5811,31 +5803,31 @@ snapshots:
       style-mod: 4.1.3
       w3c-keyname: 2.2.8
 
-  '@effect/opentelemetry@4.0.0-beta.102(@opentelemetry/semantic-conventions@1.43.0)(effect@4.0.0-beta.102)':
+  '@effect/opentelemetry@4.0.0-beta.105(@opentelemetry/semantic-conventions@1.43.0)(effect@4.0.0-beta.105)':
     dependencies:
       '@opentelemetry/semantic-conventions': 1.43.0
-      effect: 4.0.0-beta.102
+      effect: 4.0.0-beta.105
 
-  '@effect/platform-bun@4.0.0-beta.102(effect@4.0.0-beta.102)':
+  '@effect/platform-bun@4.0.0-beta.105(effect@4.0.0-beta.105)':
     dependencies:
-      '@effect/platform-node-shared': 4.0.0-beta.102(effect@4.0.0-beta.102)
-      effect: 4.0.0-beta.102
+      '@effect/platform-node-shared': 4.0.0-beta.105(effect@4.0.0-beta.105)
+      effect: 4.0.0-beta.105
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
 
-  '@effect/platform-node-shared@4.0.0-beta.102(effect@4.0.0-beta.102)':
+  '@effect/platform-node-shared@4.0.0-beta.105(effect@4.0.0-beta.105)':
     dependencies:
       '@types/ws': 8.18.1
-      effect: 4.0.0-beta.102
+      effect: 4.0.0-beta.105
       ws: 8.21.1
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
 
-  '@effect/sql-sqlite-bun@4.0.0-beta.102(effect@4.0.0-beta.102)':
+  '@effect/sql-sqlite-bun@4.0.0-beta.105(effect@4.0.0-beta.105)':
     dependencies:
-      effect: 4.0.0-beta.102
+      effect: 4.0.0-beta.105
 
   '@electric-sql/client@1.5.24':
     dependencies:
@@ -7661,20 +7653,21 @@ snapshots:
 
   '@shikijs/vscode-textmate@10.0.2': {}
 
-  '@smithers-orchestrator/accounts@0.32.0':
+  '@smthrs/accounts@0.34.0':
     dependencies:
-      '@smithers-orchestrator/errors': 0.32.0
+      '@smthrs/errors': 0.34.0
 
-  '@smithers-orchestrator/agents@0.32.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
+  '@smthrs/agents@0.34.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
     dependencies:
       '@ai-sdk/anthropic': 4.0.21(zod@4.4.3)
       '@ai-sdk/openai': 4.0.20(zod@4.4.3)
       '@modelcontextprotocol/sdk': 1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
-      '@smithers-orchestrator/driver': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/errors': 0.32.0
-      '@smithers-orchestrator/observability': 0.32.0(@opentelemetry/semantic-conventions@1.43.0)
+      '@smthrs/accounts': 0.34.0
+      '@smthrs/driver': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/errors': 0.34.0
+      '@smthrs/observability': 0.34.0(@opentelemetry/semantic-conventions@1.43.0)
       ai: 7.0.37(zod@4.4.3)
-      effect: 4.0.0-beta.102
+      effect: 4.0.0-beta.105
       zod: 4.4.3
     transitivePeerDependencies:
       - '@aws-sdk/client-rds-data'
@@ -7719,10 +7712,10 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@smithers-orchestrator/aws@0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
+  '@smthrs/aws@0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
     dependencies:
-      '@smithers-orchestrator/errors': 0.32.0
-      '@smithers-orchestrator/sandbox': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/errors': 0.34.0
+      '@smthrs/sandbox': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
     transitivePeerDependencies:
       - '@aws-sdk/client-rds-data'
       - '@cloudflare/workers-types'
@@ -7764,7 +7757,7 @@ snapshots:
       - sqlite3
       - utf-8-validate
 
-  '@smithers-orchestrator/cli@0.32.0(9b1c5d03ce03fd4f1516df174e50f8db)':
+  '@smthrs/cli@0.34.0(9b1c5d03ce03fd4f1516df174e50f8db)':
     dependencies:
       '@clack/core': 1.4.3
       '@clack/prompts': 1.7.0
@@ -7773,37 +7766,38 @@ snapshots:
       '@opentui/core': 0.4.5(typescript@6.0.3)(web-tree-sitter@0.25.10)
       '@opentui/react': 0.4.5(react-devtools-core@7.0.1)(react@19.2.7)(typescript@6.0.3)(web-tree-sitter@0.25.10)(ws@8.21.1)
       '@pierre/diffs': 1.2.12(@shikijs/themes@4.3.1)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
-      '@smithers-orchestrator/accounts': 0.32.0
-      '@smithers-orchestrator/agents': 0.32.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/components': 0.32.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/db': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/devtools': 0.32.0
-      '@smithers-orchestrator/driver': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/engine': 0.32.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@opentelemetry/semantic-conventions@1.43.0)
-      '@smithers-orchestrator/errors': 0.32.0
-      '@smithers-orchestrator/graph': 0.32.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
-      '@smithers-orchestrator/memory': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/observability': 0.32.0(@opentelemetry/semantic-conventions@1.43.0)
-      '@smithers-orchestrator/openapi': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/protocol': 0.32.0
-      '@smithers-orchestrator/review': 0.32.0(@cfworker/json-schema@4.1.1)(@codemirror/language@6.12.4)(@codemirror/state@6.7.1)(@codemirror/view@6.43.6)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(@shikijs/themes@4.3.1)(@tanstack/query-core@5.101.2)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(esbuild@0.28.1)(immer@11.1.15)(pg@8.22.0)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-view@1.42.2)(react-dom@19.2.7(react@19.2.7))(react-is@19.2.8)(react@19.2.7)(redux@5.0.1)(typescript@6.0.3)
-      '@smithers-orchestrator/scheduler': 0.32.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
-      '@smithers-orchestrator/scorers': 0.32.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/server': 0.32.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/time-travel': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/tui': 0.32.0(@tanstack/query-core@5.101.2)(@types/react@19.2.17)(immer@11.1.15)(react-devtools-core@7.0.1)(typescript@6.0.3)(use-sync-external-store@1.6.0(react@19.2.7))(web-tree-sitter@0.25.10)(ws@8.21.1)
-      '@smithers-orchestrator/usage': 0.32.0
-      '@smithers-orchestrator/vcs': 0.32.0(@opentelemetry/semantic-conventions@1.43.0)
+      '@smthrs/accounts': 0.34.0
+      '@smthrs/agents': 0.34.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/components': 0.34.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/db': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/devtools': 0.34.0
+      '@smthrs/driver': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/engine': 0.34.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@opentelemetry/semantic-conventions@1.43.0)
+      '@smthrs/errors': 0.34.0
+      '@smthrs/graph': 0.34.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
+      '@smthrs/herdr': 0.34.0
+      '@smthrs/memory': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/observability': 0.34.0(@opentelemetry/semantic-conventions@1.43.0)
+      '@smthrs/openapi': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/protocol': 0.34.0
+      '@smthrs/review': 0.34.0(@cfworker/json-schema@4.1.1)(@codemirror/language@6.12.4)(@codemirror/state@6.7.1)(@codemirror/view@6.43.6)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(@shikijs/themes@4.3.1)(@tanstack/query-core@5.101.2)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(esbuild@0.28.1)(immer@11.1.15)(pg@8.22.0)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-view@1.42.2)(react-dom@19.2.7(react@19.2.7))(react-is@19.2.8)(react@19.2.7)(redux@5.0.1)(typescript@6.0.3)
+      '@smthrs/scheduler': 0.34.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
+      '@smthrs/scorers': 0.34.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/server': 0.34.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/time-travel': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/tui': 0.34.0(@tanstack/query-core@5.101.2)(@types/react@19.2.17)(immer@11.1.15)(react-devtools-core@7.0.1)(typescript@6.0.3)(use-sync-external-store@1.6.0(react@19.2.7))(web-tree-sitter@0.25.10)(ws@8.21.1)
+      '@smthrs/usage': 0.34.0
+      '@smthrs/vcs': 0.34.0(@opentelemetry/semantic-conventions@1.43.0)
       '@toon-format/toon': 2.3.0
       '@xterm/addon-fit': 0.11.0
       '@xterm/xterm': 6.0.0
       cron-parser: 5.6.2
       drizzle-orm: 0.45.2(@electric-sql/pglite@0.5.4)(pg@8.22.0)
-      effect: 4.0.0-beta.102
+      effect: 4.0.0-beta.105
       incur: 0.4.19
       picocolors: 1.1.1
       react: 19.2.7
-      smithers-orchestrator: 0.32.0(58d79a073fab4aa1d549c4cefd132c73)
+      smthrs: 0.34.0(58d79a073fab4aa1d549c4cefd132c73)
       yaml: 2.9.0
       zod: 4.4.3
     transitivePeerDependencies:
@@ -7890,9 +7884,9 @@ snapshots:
       - ws
       - xstate
 
-  '@smithers-orchestrator/cloudflare@0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
+  '@smthrs/cloudflare@0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
     dependencies:
-      '@smithers-orchestrator/sandbox': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/sandbox': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
     transitivePeerDependencies:
       - '@aws-sdk/client-rds-data'
       - '@cloudflare/workers-types'
@@ -7934,17 +7928,17 @@ snapshots:
       - sqlite3
       - utf-8-validate
 
-  '@smithers-orchestrator/components@0.32.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
+  '@smthrs/components@0.34.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
     dependencies:
-      '@smithers-orchestrator/agents': 0.32.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/db': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/driver': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/errors': 0.32.0
-      '@smithers-orchestrator/graph': 0.32.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
-      '@smithers-orchestrator/memory': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/observability': 0.32.0(@opentelemetry/semantic-conventions@1.43.0)
-      '@smithers-orchestrator/react-reconciler': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/scheduler': 0.32.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
+      '@smthrs/agents': 0.34.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/db': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/driver': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/errors': 0.34.0
+      '@smthrs/graph': 0.34.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
+      '@smthrs/memory': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/observability': 0.34.0(@opentelemetry/semantic-conventions@1.43.0)
+      '@smthrs/react-reconciler': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/scheduler': 0.34.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
       bippy: 0.5.43(react@19.2.7)
       react: 19.2.7
       react-dom: 19.2.7(react@19.2.7)
@@ -7992,14 +7986,14 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@smithers-orchestrator/control-plane@0.32.0':
+  '@smthrs/control-plane@0.34.0':
     dependencies:
-      '@smithers-orchestrator/errors': 0.32.0
+      '@smthrs/errors': 0.34.0
 
-  '@smithers-orchestrator/daytona@0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
+  '@smthrs/daytona@0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
     dependencies:
-      '@smithers-orchestrator/errors': 0.32.0
-      '@smithers-orchestrator/sandbox': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/errors': 0.34.0
+      '@smthrs/sandbox': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
     transitivePeerDependencies:
       - '@aws-sdk/client-rds-data'
       - '@cloudflare/workers-types'
@@ -8041,15 +8035,15 @@ snapshots:
       - sqlite3
       - utf-8-validate
 
-  '@smithers-orchestrator/db@0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
+  '@smthrs/db@0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
     dependencies:
-      '@smithers-orchestrator/errors': 0.32.0
-      '@smithers-orchestrator/graph': 0.32.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
-      '@smithers-orchestrator/observability': 0.32.0(@opentelemetry/semantic-conventions@1.43.0)
-      '@smithers-orchestrator/scheduler': 0.32.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
+      '@smthrs/errors': 0.34.0
+      '@smthrs/graph': 0.34.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
+      '@smthrs/observability': 0.34.0(@opentelemetry/semantic-conventions@1.43.0)
+      '@smthrs/scheduler': 0.34.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
       drizzle-orm: 0.45.2(@electric-sql/pglite@0.5.4)(pg@8.22.0)
       drizzle-zod: 0.8.3(drizzle-orm@0.45.2(@electric-sql/pglite@0.5.4)(pg@8.22.0))(zod@4.4.3)
-      effect: 4.0.0-beta.102
+      effect: 4.0.0-beta.105
       zod: 4.4.3
     transitivePeerDependencies:
       - '@aws-sdk/client-rds-data'
@@ -8092,16 +8086,16 @@ snapshots:
       - sqlite3
       - utf-8-validate
 
-  '@smithers-orchestrator/devtools@0.32.0': {}
+  '@smthrs/devtools@0.34.0': {}
 
-  '@smithers-orchestrator/driver@0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
+  '@smthrs/driver@0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
     dependencies:
-      '@smithers-orchestrator/db': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/errors': 0.32.0
-      '@smithers-orchestrator/graph': 0.32.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
-      '@smithers-orchestrator/observability': 0.32.0(@opentelemetry/semantic-conventions@1.43.0)
-      '@smithers-orchestrator/scheduler': 0.32.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
-      effect: 4.0.0-beta.102
+      '@smthrs/db': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/errors': 0.34.0
+      '@smthrs/graph': 0.34.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
+      '@smthrs/observability': 0.34.0(@opentelemetry/semantic-conventions@1.43.0)
+      '@smthrs/scheduler': 0.34.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
+      effect: 4.0.0-beta.105
       zod: 4.4.3
     transitivePeerDependencies:
       - '@aws-sdk/client-rds-data'
@@ -8144,31 +8138,32 @@ snapshots:
       - sqlite3
       - utf-8-validate
 
-  '@smithers-orchestrator/electric-proxy@0.32.0':
+  '@smthrs/electric-proxy@0.34.0':
     dependencies:
-      '@smithers-orchestrator/gateway': 0.32.0
+      '@smthrs/gateway': 0.34.0
 
-  '@smithers-orchestrator/engine@0.32.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@opentelemetry/semantic-conventions@1.43.0)':
+  '@smthrs/engine@0.34.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@opentelemetry/semantic-conventions@1.43.0)':
     dependencies:
-      '@effect/platform-bun': 4.0.0-beta.102(effect@4.0.0-beta.102)
-      '@effect/sql-sqlite-bun': 4.0.0-beta.102(effect@4.0.0-beta.102)
-      '@smithers-orchestrator/agents': 0.32.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/components': 0.32.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/db': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/driver': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/errors': 0.32.0
-      '@smithers-orchestrator/graph': 0.32.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
-      '@smithers-orchestrator/observability': 0.32.0(@opentelemetry/semantic-conventions@1.43.0)
-      '@smithers-orchestrator/react-reconciler': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/sandbox': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/scheduler': 0.32.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
-      '@smithers-orchestrator/scorers': 0.32.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/time-travel': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/tool-context': 0.32.0
-      '@smithers-orchestrator/vcs': 0.32.0(@opentelemetry/semantic-conventions@1.43.0)
+      '@effect/platform-bun': 4.0.0-beta.105(effect@4.0.0-beta.105)
+      '@effect/platform-node-shared': 4.0.0-beta.105(effect@4.0.0-beta.105)
+      '@effect/sql-sqlite-bun': 4.0.0-beta.105(effect@4.0.0-beta.105)
+      '@smthrs/agents': 0.34.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/components': 0.34.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/db': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/driver': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/errors': 0.34.0
+      '@smthrs/graph': 0.34.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
+      '@smthrs/observability': 0.34.0(@opentelemetry/semantic-conventions@1.43.0)
+      '@smthrs/react-reconciler': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/sandbox': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/scheduler': 0.34.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
+      '@smthrs/scorers': 0.34.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/time-travel': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/tool-context': 0.34.0
+      '@smthrs/vcs': 0.34.0(@opentelemetry/semantic-conventions@1.43.0)
       diff: 9.0.0
       drizzle-orm: 0.45.2(@electric-sql/pglite@0.5.4)(pg@8.22.0)
-      effect: 4.0.0-beta.102
+      effect: 4.0.0-beta.105
       react: 19.2.7
       react-dom: 19.2.7(react@19.2.7)
       zod: 4.4.3
@@ -8225,16 +8220,16 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@smithers-orchestrator/errors@0.32.0':
+  '@smthrs/errors@0.34.0':
     dependencies:
-      effect: 4.0.0-beta.102
+      effect: 4.0.0-beta.105
 
-  '@smithers-orchestrator/gateway-client@0.32.0(@tanstack/query-core@5.101.2)(react@19.2.7)(typescript@6.0.3)':
+  '@smthrs/gateway-client@0.34.0(@tanstack/query-core@5.101.2)(react@19.2.7)(typescript@6.0.3)':
     dependencies:
-      '@smithers-orchestrator/electric-proxy': 0.32.0
-      '@smithers-orchestrator/gateway': 0.32.0
-      '@smithers-orchestrator/protocol': 0.32.0
-      '@smithers-orchestrator/usage': 0.32.0
+      '@smthrs/electric-proxy': 0.34.0
+      '@smthrs/gateway': 0.34.0
+      '@smthrs/protocol': 0.34.0
+      '@smthrs/usage': 0.34.0
       '@tanstack/db': 0.6.13(typescript@6.0.3)
       '@tanstack/electric-db-collection': 0.3.11(typescript@6.0.3)
       '@tanstack/query-db-collection': 1.0.45(@tanstack/query-core@5.101.2)(typescript@6.0.3)
@@ -8245,12 +8240,12 @@ snapshots:
       - supports-color
       - typescript
 
-  '@smithers-orchestrator/gateway-react@0.32.0(@tanstack/query-core@5.101.2)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(typescript@6.0.3)':
+  '@smthrs/gateway-react@0.34.0(@tanstack/query-core@5.101.2)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(typescript@6.0.3)':
     dependencies:
-      '@smithers-orchestrator/gateway-client': 0.32.0(@tanstack/query-core@5.101.2)(react@19.2.7)(typescript@6.0.3)
+      '@smthrs/gateway-client': 0.34.0(@tanstack/query-core@5.101.2)(react@19.2.7)(typescript@6.0.3)
       '@tanstack/react-db': 0.1.91(react@19.2.7)(typescript@6.0.3)
       '@tanstack/react-query': 5.101.2(react@19.2.7)
-      effect: 4.0.0-beta.102
+      effect: 4.0.0-beta.105
       react: 19.2.7
       react-dom: 19.2.7(react@19.2.7)
     transitivePeerDependencies:
@@ -8258,12 +8253,12 @@ snapshots:
       - supports-color
       - typescript
 
-  '@smithers-orchestrator/gateway-ui@0.32.0(@codemirror/language@6.12.4)(@codemirror/state@6.7.1)(@codemirror/view@6.43.6)(@shikijs/themes@4.3.1)(@tanstack/query-core@5.101.2)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(immer@11.1.15)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-view@1.42.2)(react-dom@19.2.7(react@19.2.7))(react-is@19.2.8)(react@19.2.7)(redux@5.0.1)(typescript@6.0.3)':
+  '@smthrs/gateway-ui@0.34.0(@codemirror/language@6.12.4)(@codemirror/state@6.7.1)(@codemirror/view@6.43.6)(@shikijs/themes@4.3.1)(@tanstack/query-core@5.101.2)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(immer@11.1.15)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-view@1.42.2)(react-dom@19.2.7(react@19.2.7))(react-is@19.2.8)(react@19.2.7)(redux@5.0.1)(typescript@6.0.3)':
     dependencies:
-      '@smithers-orchestrator/gateway-client': 0.32.0(@tanstack/query-core@5.101.2)(react@19.2.7)(typescript@6.0.3)
-      '@smithers-orchestrator/gateway-react': 0.32.0(@tanstack/query-core@5.101.2)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(typescript@6.0.3)
-      '@smithers-orchestrator/ui': 0.32.0(@codemirror/language@6.12.4)(@codemirror/state@6.7.1)(@codemirror/view@6.43.6)(@shikijs/themes@4.3.1)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-view@1.42.2)(react-dom@19.2.7(react@19.2.7))(react-is@19.2.8)(react@19.2.7)(redux@5.0.1)(typescript@6.0.3)
-      '@smithers-orchestrator/ui-styleguide': 0.32.0
+      '@smthrs/gateway-client': 0.34.0(@tanstack/query-core@5.101.2)(react@19.2.7)(typescript@6.0.3)
+      '@smthrs/gateway-react': 0.34.0(@tanstack/query-core@5.101.2)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(typescript@6.0.3)
+      '@smthrs/ui': 0.34.0(@codemirror/language@6.12.4)(@codemirror/state@6.7.1)(@codemirror/view@6.43.6)(@shikijs/themes@4.3.1)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-view@1.42.2)(react-dom@19.2.7(react@19.2.7))(react-is@19.2.8)(react@19.2.7)(redux@5.0.1)(typescript@6.0.3)
+      '@smthrs/ui-styleguide': 0.34.0
       '@xyflow/react': 12.11.1(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(immer@11.1.15)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       dagre: 0.8.5
       react: 19.2.7
@@ -8285,14 +8280,14 @@ snapshots:
       - supports-color
       - typescript
 
-  '@smithers-orchestrator/gateway@0.32.0':
+  '@smthrs/gateway@0.34.0':
     dependencies:
-      '@smithers-orchestrator/protocol': 0.32.0
+      '@smthrs/protocol': 0.34.0
 
-  '@smithers-orchestrator/gcp@0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
+  '@smthrs/gcp@0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
     dependencies:
-      '@smithers-orchestrator/errors': 0.32.0
-      '@smithers-orchestrator/sandbox': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/errors': 0.34.0
+      '@smthrs/sandbox': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
     transitivePeerDependencies:
       - '@aws-sdk/client-rds-data'
       - '@cloudflare/workers-types'
@@ -8334,9 +8329,9 @@ snapshots:
       - sqlite3
       - utf-8-validate
 
-  '@smithers-orchestrator/graph@0.32.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)':
+  '@smthrs/graph@0.34.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)':
     dependencies:
-      '@smithers-orchestrator/errors': 0.32.0
+      '@smthrs/errors': 0.34.0
       drizzle-orm: 0.45.2(@electric-sql/pglite@0.5.4)(pg@8.22.0)
       zod: 4.4.3
     transitivePeerDependencies:
@@ -8370,16 +8365,18 @@ snapshots:
       - sql.js
       - sqlite3
 
-  '@smithers-orchestrator/integrations@0.32.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
+  '@smthrs/herdr@0.34.0': {}
+
+  '@smthrs/integrations@0.34.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
     dependencies:
-      '@smithers-orchestrator/components': 0.32.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/db': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/engine': 0.32.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@opentelemetry/semantic-conventions@1.43.0)
-      '@smithers-orchestrator/errors': 0.32.0
-      '@smithers-orchestrator/observability': 0.32.0(@opentelemetry/semantic-conventions@1.43.0)
-      '@smithers-orchestrator/react-reconciler': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/scheduler': 0.32.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
-      effect: 4.0.0-beta.102
+      '@smthrs/components': 0.34.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/db': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/engine': 0.34.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@opentelemetry/semantic-conventions@1.43.0)
+      '@smthrs/errors': 0.34.0
+      '@smthrs/observability': 0.34.0(@opentelemetry/semantic-conventions@1.43.0)
+      '@smthrs/react-reconciler': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/scheduler': 0.34.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
+      effect: 4.0.0-beta.105
       react: 19.2.7
       zod: 4.4.3
     transitivePeerDependencies:
@@ -8433,31 +8430,31 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@smithers-orchestrator/jj-darwin-arm64@0.32.0':
+  '@smthrs/jj-darwin-arm64@0.34.0':
     optional: true
 
-  '@smithers-orchestrator/jj-darwin-x64@0.32.0':
+  '@smthrs/jj-darwin-x64@0.34.0':
     optional: true
 
-  '@smithers-orchestrator/jj-linux-arm64@0.32.0':
+  '@smthrs/jj-linux-arm64@0.34.0':
     optional: true
 
-  '@smithers-orchestrator/jj-linux-x64@0.32.0':
+  '@smthrs/jj-linux-x64@0.34.0':
     optional: true
 
-  '@smithers-orchestrator/jj-win32-x64@0.32.0':
+  '@smthrs/jj-win32-x64@0.34.0':
     optional: true
 
-  '@smithers-orchestrator/memory@0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
+  '@smthrs/memory@0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
     dependencies:
-      '@smithers-orchestrator/db': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/errors': 0.32.0
-      '@smithers-orchestrator/graph': 0.32.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
-      '@smithers-orchestrator/observability': 0.32.0(@opentelemetry/semantic-conventions@1.43.0)
-      '@smithers-orchestrator/scheduler': 0.32.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
+      '@smthrs/db': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/errors': 0.34.0
+      '@smthrs/graph': 0.34.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
+      '@smthrs/observability': 0.34.0(@opentelemetry/semantic-conventions@1.43.0)
+      '@smthrs/scheduler': 0.34.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
       '@vectorize-io/hindsight-client': 0.8.4
       drizzle-orm: 0.45.2(@electric-sql/pglite@0.5.4)(pg@8.22.0)
-      effect: 4.0.0-beta.102
+      effect: 4.0.0-beta.105
       zod: 4.4.3
     transitivePeerDependencies:
       - '@aws-sdk/client-rds-data'
@@ -8500,10 +8497,10 @@ snapshots:
       - sqlite3
       - utf-8-validate
 
-  '@smithers-orchestrator/microsandbox@0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
+  '@smthrs/microsandbox@0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
     dependencies:
-      '@smithers-orchestrator/errors': 0.32.0
-      '@smithers-orchestrator/sandbox': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/errors': 0.34.0
+      '@smthrs/sandbox': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
     transitivePeerDependencies:
       - '@aws-sdk/client-rds-data'
       - '@cloudflare/workers-types'
@@ -8545,11 +8542,12 @@ snapshots:
       - sqlite3
       - utf-8-validate
 
-  '@smithers-orchestrator/observability@0.32.0(@opentelemetry/semantic-conventions@1.43.0)':
+  '@smthrs/observability@0.34.0(@opentelemetry/semantic-conventions@1.43.0)':
     dependencies:
-      '@effect/opentelemetry': 4.0.0-beta.102(@opentelemetry/semantic-conventions@1.43.0)(effect@4.0.0-beta.102)
-      '@effect/platform-bun': 4.0.0-beta.102(effect@4.0.0-beta.102)
-      effect: 4.0.0-beta.102
+      '@effect/opentelemetry': 4.0.0-beta.105(@opentelemetry/semantic-conventions@1.43.0)(effect@4.0.0-beta.105)
+      '@effect/platform-bun': 4.0.0-beta.105(effect@4.0.0-beta.105)
+      '@effect/platform-node-shared': 4.0.0-beta.105(effect@4.0.0-beta.105)
+      effect: 4.0.0-beta.105
     transitivePeerDependencies:
       - '@opentelemetry/api'
       - '@opentelemetry/api-logs'
@@ -8563,13 +8561,13 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
-  '@smithers-orchestrator/openapi@0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
+  '@smthrs/openapi@0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
     dependencies:
-      '@smithers-orchestrator/errors': 0.32.0
-      '@smithers-orchestrator/observability': 0.32.0(@opentelemetry/semantic-conventions@1.43.0)
-      '@smithers-orchestrator/scheduler': 0.32.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
+      '@smthrs/errors': 0.34.0
+      '@smthrs/observability': 0.34.0(@opentelemetry/semantic-conventions@1.43.0)
+      '@smthrs/scheduler': 0.34.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
       ai: 7.0.37(zod@4.4.3)
-      effect: 4.0.0-beta.102
+      effect: 4.0.0-beta.105
       yaml: 2.9.0
       zod: 4.4.3
     transitivePeerDependencies:
@@ -8613,14 +8611,14 @@ snapshots:
       - sqlite3
       - utf-8-validate
 
-  '@smithers-orchestrator/protocol@0.32.0': {}
+  '@smthrs/protocol@0.34.0': {}
 
-  '@smithers-orchestrator/react-reconciler@0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
+  '@smthrs/react-reconciler@0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
     dependencies:
-      '@smithers-orchestrator/devtools': 0.32.0
-      '@smithers-orchestrator/driver': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/errors': 0.32.0
-      '@smithers-orchestrator/graph': 0.32.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
+      '@smthrs/devtools': 0.34.0
+      '@smthrs/driver': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/errors': 0.34.0
+      '@smthrs/graph': 0.34.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
       bippy: 0.5.43(react@19.2.7)
       react: 19.2.7
       react-reconciler: 0.33.0(react@19.2.7)
@@ -8665,16 +8663,16 @@ snapshots:
       - sqlite3
       - utf-8-validate
 
-  '@smithers-orchestrator/review@0.32.0(@cfworker/json-schema@4.1.1)(@codemirror/language@6.12.4)(@codemirror/state@6.7.1)(@codemirror/view@6.43.6)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(@shikijs/themes@4.3.1)(@tanstack/query-core@5.101.2)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(esbuild@0.28.1)(immer@11.1.15)(pg@8.22.0)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-view@1.42.2)(react-dom@19.2.7(react@19.2.7))(react-is@19.2.8)(react@19.2.7)(redux@5.0.1)(typescript@6.0.3)':
+  '@smthrs/review@0.34.0(@cfworker/json-schema@4.1.1)(@codemirror/language@6.12.4)(@codemirror/state@6.7.1)(@codemirror/view@6.43.6)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(@shikijs/themes@4.3.1)(@tanstack/query-core@5.101.2)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(esbuild@0.28.1)(immer@11.1.15)(pg@8.22.0)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-view@1.42.2)(react-dom@19.2.7(react@19.2.7))(react-is@19.2.8)(react@19.2.7)(redux@5.0.1)(typescript@6.0.3)':
     dependencies:
       '@pierre/diffs': 1.2.12(@shikijs/themes@4.3.1)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
-      '@smithers-orchestrator/agents': 0.32.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/db': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/engine': 0.32.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@opentelemetry/semantic-conventions@1.43.0)
-      '@smithers-orchestrator/ui-styleguide': 0.32.0
-      effect: 4.0.0-beta.102
+      '@smthrs/agents': 0.34.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/db': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/engine': 0.34.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@opentelemetry/semantic-conventions@1.43.0)
+      '@smthrs/ui-styleguide': 0.34.0
+      effect: 4.0.0-beta.105
       mermaid: 11.16.0
-      smithers-orchestrator: 0.32.0(58d79a073fab4aa1d549c4cefd132c73)
+      smthrs: 0.34.0(58d79a073fab4aa1d549c4cefd132c73)
       zod: 4.4.3
     transitivePeerDependencies:
       - '@aws-sdk/client-cloudwatch-logs'
@@ -8757,14 +8755,14 @@ snapshots:
       - utf-8-validate
       - xstate
 
-  '@smithers-orchestrator/sandbox@0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
+  '@smthrs/sandbox@0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
     dependencies:
-      '@smithers-orchestrator/db': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/driver': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/errors': 0.32.0
-      '@smithers-orchestrator/observability': 0.32.0(@opentelemetry/semantic-conventions@1.43.0)
-      '@smithers-orchestrator/scheduler': 0.32.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
-      effect: 4.0.0-beta.102
+      '@smthrs/db': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/driver': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/errors': 0.34.0
+      '@smthrs/observability': 0.34.0(@opentelemetry/semantic-conventions@1.43.0)
+      '@smthrs/scheduler': 0.34.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
+      effect: 4.0.0-beta.105
     transitivePeerDependencies:
       - '@aws-sdk/client-rds-data'
       - '@cloudflare/workers-types'
@@ -8806,11 +8804,11 @@ snapshots:
       - sqlite3
       - utf-8-validate
 
-  '@smithers-orchestrator/scheduler@0.32.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)':
+  '@smthrs/scheduler@0.34.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)':
     dependencies:
-      '@smithers-orchestrator/errors': 0.32.0
-      '@smithers-orchestrator/graph': 0.32.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
-      effect: 4.0.0-beta.102
+      '@smthrs/errors': 0.34.0
+      '@smthrs/graph': 0.34.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
+      effect: 4.0.0-beta.105
     transitivePeerDependencies:
       - '@aws-sdk/client-rds-data'
       - '@cloudflare/workers-types'
@@ -8842,16 +8840,16 @@ snapshots:
       - sql.js
       - sqlite3
 
-  '@smithers-orchestrator/scorers@0.32.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
+  '@smthrs/scorers@0.34.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
     dependencies:
-      '@smithers-orchestrator/agents': 0.32.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/db': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/errors': 0.32.0
-      '@smithers-orchestrator/graph': 0.32.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
-      '@smithers-orchestrator/observability': 0.32.0(@opentelemetry/semantic-conventions@1.43.0)
-      '@smithers-orchestrator/scheduler': 0.32.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
+      '@smthrs/agents': 0.34.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/db': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/errors': 0.34.0
+      '@smthrs/graph': 0.34.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
+      '@smthrs/observability': 0.34.0(@opentelemetry/semantic-conventions@1.43.0)
+      '@smthrs/scheduler': 0.34.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
       drizzle-orm: 0.45.2(@electric-sql/pglite@0.5.4)(pg@8.22.0)
-      effect: 4.0.0-beta.102
+      effect: 4.0.0-beta.105
       typescript: 6.0.3
       zod: 4.4.3
     transitivePeerDependencies:
@@ -8897,27 +8895,27 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@smithers-orchestrator/server@0.32.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
+  '@smthrs/server@0.34.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
     dependencies:
-      '@smithers-orchestrator/accounts': 0.32.0
-      '@smithers-orchestrator/components': 0.32.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/db': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/devtools': 0.32.0
-      '@smithers-orchestrator/driver': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/engine': 0.32.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@opentelemetry/semantic-conventions@1.43.0)
-      '@smithers-orchestrator/errors': 0.32.0
-      '@smithers-orchestrator/gateway': 0.32.0
-      '@smithers-orchestrator/graph': 0.32.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
-      '@smithers-orchestrator/integrations': 0.32.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/observability': 0.32.0(@opentelemetry/semantic-conventions@1.43.0)
-      '@smithers-orchestrator/protocol': 0.32.0
-      '@smithers-orchestrator/scheduler': 0.32.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
-      '@smithers-orchestrator/time-travel': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/ui-styleguide': 0.32.0
-      '@smithers-orchestrator/usage': 0.32.0
+      '@smthrs/accounts': 0.34.0
+      '@smthrs/components': 0.34.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/db': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/devtools': 0.34.0
+      '@smthrs/driver': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/engine': 0.34.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@opentelemetry/semantic-conventions@1.43.0)
+      '@smthrs/errors': 0.34.0
+      '@smthrs/gateway': 0.34.0
+      '@smthrs/graph': 0.34.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
+      '@smthrs/integrations': 0.34.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/observability': 0.34.0(@opentelemetry/semantic-conventions@1.43.0)
+      '@smthrs/protocol': 0.34.0
+      '@smthrs/scheduler': 0.34.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
+      '@smthrs/time-travel': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/ui-styleguide': 0.34.0
+      '@smthrs/usage': 0.34.0
       cron-parser: 5.6.2
       drizzle-orm: 0.45.2(@electric-sql/pglite@0.5.4)(pg@8.22.0)
-      effect: 4.0.0-beta.102
+      effect: 4.0.0-beta.105
       hono: 4.12.32
       react: 19.2.7
       react-dom: 19.2.7(react@19.2.7)
@@ -8973,19 +8971,22 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@smithers-orchestrator/telegram@0.32.0': {}
+  '@smthrs/telegram@0.34.0': {}
 
-  '@smithers-orchestrator/testing@0.32.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
+  '@smthrs/testing@0.34.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)(smthrs@0.34.0(58d79a073fab4aa1d549c4cefd132c73))':
     dependencies:
-      '@smithers-orchestrator/components': 0.32.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/db': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/driver': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/engine': 0.32.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@opentelemetry/semantic-conventions@1.43.0)
-      '@smithers-orchestrator/graph': 0.32.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
-      '@smithers-orchestrator/react-reconciler': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/scheduler': 0.32.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
-      effect: 4.0.0-beta.102
+      '@smthrs/components': 0.34.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/db': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/driver': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/engine': 0.34.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@opentelemetry/semantic-conventions@1.43.0)
+      '@smthrs/graph': 0.34.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
+      '@smthrs/herdr': 0.34.0
+      '@smthrs/react-reconciler': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/scheduler': 0.34.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
+      effect: 4.0.0-beta.105
       zod: 4.4.3
+    optionalDependencies:
+      smthrs: 0.34.0(58d79a073fab4aa1d549c4cefd132c73)
     transitivePeerDependencies:
       - '@aws-sdk/client-rds-data'
       - '@cfworker/json-schema'
@@ -9037,19 +9038,20 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@smithers-orchestrator/time-travel@0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
+  '@smthrs/time-travel@0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
     dependencies:
-      '@effect/platform-bun': 4.0.0-beta.102(effect@4.0.0-beta.102)
-      '@smithers-orchestrator/db': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/driver': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/errors': 0.32.0
-      '@smithers-orchestrator/graph': 0.32.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
-      '@smithers-orchestrator/observability': 0.32.0(@opentelemetry/semantic-conventions@1.43.0)
-      '@smithers-orchestrator/react-reconciler': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/scheduler': 0.32.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
-      '@smithers-orchestrator/vcs': 0.32.0(@opentelemetry/semantic-conventions@1.43.0)
+      '@effect/platform-bun': 4.0.0-beta.105(effect@4.0.0-beta.105)
+      '@effect/platform-node-shared': 4.0.0-beta.105(effect@4.0.0-beta.105)
+      '@smthrs/db': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/driver': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/errors': 0.34.0
+      '@smthrs/graph': 0.34.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
+      '@smthrs/observability': 0.34.0(@opentelemetry/semantic-conventions@1.43.0)
+      '@smthrs/react-reconciler': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/scheduler': 0.34.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
+      '@smthrs/vcs': 0.34.0(@opentelemetry/semantic-conventions@1.43.0)
       drizzle-orm: 0.45.2(@electric-sql/pglite@0.5.4)(pg@8.22.0)
-      effect: 4.0.0-beta.102
+      effect: 4.0.0-beta.105
       picocolors: 1.1.1
     transitivePeerDependencies:
       - '@aws-sdk/client-rds-data'
@@ -9092,12 +9094,12 @@ snapshots:
       - sqlite3
       - utf-8-validate
 
-  '@smithers-orchestrator/tool-context@0.32.0':
+  '@smthrs/tool-context@0.34.0':
     dependencies:
       ai: 7.0.37(zod@4.4.3)
       zod: 4.4.3
 
-  '@smithers-orchestrator/tui-ui@0.32.0(react-devtools-core@7.0.1)(typescript@6.0.3)(web-tree-sitter@0.25.10)(ws@8.21.1)':
+  '@smthrs/tui-ui@0.34.0(react-devtools-core@7.0.1)(typescript@6.0.3)(web-tree-sitter@0.25.10)(ws@8.21.1)':
     dependencies:
       '@opentui/core': 0.4.5(typescript@6.0.3)(web-tree-sitter@0.25.10)
       '@opentui/react': 0.4.5(react-devtools-core@7.0.1)(react@19.2.7)(typescript@6.0.3)(web-tree-sitter@0.25.10)(ws@8.21.1)
@@ -9108,14 +9110,14 @@ snapshots:
       - web-tree-sitter
       - ws
 
-  '@smithers-orchestrator/tui@0.32.0(@tanstack/query-core@5.101.2)(@types/react@19.2.17)(immer@11.1.15)(react-devtools-core@7.0.1)(typescript@6.0.3)(use-sync-external-store@1.6.0(react@19.2.7))(web-tree-sitter@0.25.10)(ws@8.21.1)':
+  '@smthrs/tui@0.34.0(@tanstack/query-core@5.101.2)(@types/react@19.2.17)(immer@11.1.15)(react-devtools-core@7.0.1)(typescript@6.0.3)(use-sync-external-store@1.6.0(react@19.2.7))(web-tree-sitter@0.25.10)(ws@8.21.1)':
     dependencies:
       '@opentui/core': 0.4.5(typescript@6.0.3)(web-tree-sitter@0.25.10)
       '@opentui/react': 0.4.5(react-devtools-core@7.0.1)(react@19.2.7)(typescript@6.0.3)(web-tree-sitter@0.25.10)(ws@8.21.1)
-      '@smithers-orchestrator/gateway-client': 0.32.0(@tanstack/query-core@5.101.2)(react@19.2.7)(typescript@6.0.3)
-      '@smithers-orchestrator/gateway-react': 0.32.0(@tanstack/query-core@5.101.2)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(typescript@6.0.3)
-      '@smithers-orchestrator/tui-ui': 0.32.0(react-devtools-core@7.0.1)(typescript@6.0.3)(web-tree-sitter@0.25.10)(ws@8.21.1)
-      '@smithers-orchestrator/ui-core': 0.32.0(@tanstack/query-core@5.101.2)(@types/react@19.2.17)(immer@11.1.15)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(typescript@6.0.3)(use-sync-external-store@1.6.0(react@19.2.7))
+      '@smthrs/gateway-client': 0.34.0(@tanstack/query-core@5.101.2)(react@19.2.7)(typescript@6.0.3)
+      '@smthrs/gateway-react': 0.34.0(@tanstack/query-core@5.101.2)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(typescript@6.0.3)
+      '@smthrs/tui-ui': 0.34.0(react-devtools-core@7.0.1)(typescript@6.0.3)(web-tree-sitter@0.25.10)(ws@8.21.1)
+      '@smthrs/ui-core': 0.34.0(@tanstack/query-core@5.101.2)(@types/react@19.2.17)(immer@11.1.15)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(typescript@6.0.3)(use-sync-external-store@1.6.0(react@19.2.7))
       react: 19.2.7
       react-dom: 19.2.7(react@19.2.7)
     transitivePeerDependencies:
@@ -9129,10 +9131,10 @@ snapshots:
       - web-tree-sitter
       - ws
 
-  '@smithers-orchestrator/ui-core@0.32.0(@tanstack/query-core@5.101.2)(@types/react@19.2.17)(immer@11.1.15)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(typescript@6.0.3)(use-sync-external-store@1.6.0(react@19.2.7))':
+  '@smthrs/ui-core@0.34.0(@tanstack/query-core@5.101.2)(@types/react@19.2.17)(immer@11.1.15)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(typescript@6.0.3)(use-sync-external-store@1.6.0(react@19.2.7))':
     dependencies:
-      '@smithers-orchestrator/gateway-client': 0.32.0(@tanstack/query-core@5.101.2)(react@19.2.7)(typescript@6.0.3)
-      '@smithers-orchestrator/gateway-react': 0.32.0(@tanstack/query-core@5.101.2)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(typescript@6.0.3)
+      '@smthrs/gateway-client': 0.34.0(@tanstack/query-core@5.101.2)(react@19.2.7)(typescript@6.0.3)
+      '@smthrs/gateway-react': 0.34.0(@tanstack/query-core@5.101.2)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(typescript@6.0.3)
       react: 19.2.7
       zustand: 5.0.14(@types/react@19.2.17)(immer@11.1.15)(react@19.2.7)(use-sync-external-store@1.6.0(react@19.2.7))
     transitivePeerDependencies:
@@ -9144,15 +9146,15 @@ snapshots:
       - typescript
       - use-sync-external-store
 
-  '@smithers-orchestrator/ui-styleguide@0.32.0': {}
+  '@smthrs/ui-styleguide@0.34.0': {}
 
-  '@smithers-orchestrator/ui@0.32.0(@codemirror/language@6.12.4)(@codemirror/state@6.7.1)(@codemirror/view@6.43.6)(@shikijs/themes@4.3.1)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-view@1.42.2)(react-dom@19.2.7(react@19.2.7))(react-is@19.2.8)(react@19.2.7)(redux@5.0.1)(typescript@6.0.3)':
+  '@smthrs/ui@0.34.0(@codemirror/language@6.12.4)(@codemirror/state@6.7.1)(@codemirror/view@6.43.6)(@shikijs/themes@4.3.1)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-view@1.42.2)(react-dom@19.2.7(react@19.2.7))(react-is@19.2.8)(react@19.2.7)(redux@5.0.1)(typescript@6.0.3)':
     dependencies:
       '@milkdown/crepe': 7.21.2(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-view@1.42.2)(typescript@6.0.3)
       '@milkdown/kit': 7.21.2(@codemirror/language@6.12.4)(@codemirror/state@6.7.1)(@codemirror/view@6.43.6)(typescript@6.0.3)
       '@milkdown/plugin-listener': 7.21.2
       '@pierre/diffs': 1.2.12(@shikijs/themes@4.3.1)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
-      '@smithers-orchestrator/ui-styleguide': 0.32.0
+      '@smthrs/ui-styleguide': 0.34.0
       '@xterm/addon-fit': 0.11.0
       '@xterm/xterm': 6.0.0
       class-variance-authority: 0.7.1
@@ -9177,20 +9179,21 @@ snapshots:
       - supports-color
       - typescript
 
-  '@smithers-orchestrator/usage@0.32.0':
+  '@smthrs/usage@0.34.0':
     dependencies:
-      '@smithers-orchestrator/accounts': 0.32.0
+      '@smthrs/accounts': 0.34.0
 
-  '@smithers-orchestrator/vcs@0.32.0(@opentelemetry/semantic-conventions@1.43.0)':
+  '@smthrs/vcs@0.34.0(@opentelemetry/semantic-conventions@1.43.0)':
     dependencies:
-      '@smithers-orchestrator/observability': 0.32.0(@opentelemetry/semantic-conventions@1.43.0)
-      effect: 4.0.0-beta.102
+      '@effect/platform-node-shared': 4.0.0-beta.105(effect@4.0.0-beta.105)
+      '@smthrs/observability': 0.34.0(@opentelemetry/semantic-conventions@1.43.0)
+      effect: 4.0.0-beta.105
     optionalDependencies:
-      '@smithers-orchestrator/jj-darwin-arm64': 0.32.0
-      '@smithers-orchestrator/jj-darwin-x64': 0.32.0
-      '@smithers-orchestrator/jj-linux-arm64': 0.32.0
-      '@smithers-orchestrator/jj-linux-x64': 0.32.0
-      '@smithers-orchestrator/jj-win32-x64': 0.32.0
+      '@smthrs/jj-darwin-arm64': 0.34.0
+      '@smthrs/jj-darwin-x64': 0.34.0
+      '@smthrs/jj-linux-arm64': 0.34.0
+      '@smthrs/jj-linux-x64': 0.34.0
+      '@smthrs/jj-win32-x64': 0.34.0
     transitivePeerDependencies:
       - '@opentelemetry/api'
       - '@opentelemetry/api-logs'
@@ -9204,10 +9207,10 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
-  '@smithers-orchestrator/vercel@0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
+  '@smthrs/vercel@0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
     dependencies:
-      '@smithers-orchestrator/errors': 0.32.0
-      '@smithers-orchestrator/sandbox': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/errors': 0.34.0
+      '@smthrs/sandbox': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
     transitivePeerDependencies:
       - '@aws-sdk/client-rds-data'
       - '@cloudflare/workers-types'
@@ -9249,10 +9252,10 @@ snapshots:
       - sqlite3
       - utf-8-validate
 
-  '@smithers-orchestrator/xstate@0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
+  '@smthrs/xstate@0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)':
     dependencies:
-      '@smithers-orchestrator/errors': 0.32.0
-      '@smithers-orchestrator/react-reconciler': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/errors': 0.34.0
+      '@smthrs/react-reconciler': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
       react: 19.2.7
     transitivePeerDependencies:
       - '@aws-sdk/client-rds-data'
@@ -10338,18 +10341,13 @@ snapshots:
 
   ee-first@1.1.1: {}
 
-  effect@4.0.0-beta.102:
+  effect@4.0.0-beta.105:
     dependencies:
       '@standard-schema/spec': 1.1.0
       fast-check: 4.9.0
-      find-my-way-ts: 0.1.6
-      ini: 7.0.0
       kubernetes-types: 1.30.0
       msgpackr: 2.0.5
-      multipasta: 0.2.8
-      toml: 4.3.0
       uuid: 14.0.1
-      yaml: 2.9.0
 
   ejs@3.1.10:
     dependencies:
@@ -10639,8 +10637,6 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  find-my-way-ts@0.1.6: {}
-
   find-up@5.0.0:
     dependencies:
       locate-path: 6.0.0
@@ -10818,8 +10814,6 @@ snapshots:
   indent-string@4.0.0: {}
 
   inherits@2.0.4: {}
-
-  ini@7.0.0: {}
 
   inline-style-parser@0.2.7: {}
 
@@ -11162,7 +11156,7 @@ snapshots:
       roughjs: 4.6.6
       stylis: 4.4.0
       ts-dedent: 2.3.0
-      uuid: 11.1.1
+      uuid: 14.0.1
 
   micromark-core-commonmark@2.0.3:
     dependencies:
@@ -11478,8 +11472,6 @@ snapshots:
   msgpackr@2.0.5:
     optionalDependencies:
       msgpackr-extract: 3.0.4
-
-  multipasta@0.2.8: {}
 
   nanoid@3.3.15: {}
 
@@ -12219,46 +12211,48 @@ snapshots:
 
   sisteransi@1.0.5: {}
 
-  smithers-orchestrator@0.32.0(58d79a073fab4aa1d549c4cefd132c73):
+  smol-toml@1.7.0: {}
+
+  smthrs@0.34.0(58d79a073fab4aa1d549c4cefd132c73):
     dependencies:
       '@mdx-js/esbuild': 3.1.1(esbuild@0.28.1)
-      '@smithers-orchestrator/agents': 0.32.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/aws': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/cli': 0.32.0(9b1c5d03ce03fd4f1516df174e50f8db)
-      '@smithers-orchestrator/cloudflare': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/components': 0.32.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/control-plane': 0.32.0
-      '@smithers-orchestrator/daytona': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/db': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/driver': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/engine': 0.32.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@opentelemetry/semantic-conventions@1.43.0)
-      '@smithers-orchestrator/errors': 0.32.0
-      '@smithers-orchestrator/gateway-client': 0.32.0(@tanstack/query-core@5.101.2)(react@19.2.7)(typescript@6.0.3)
-      '@smithers-orchestrator/gateway-react': 0.32.0(@tanstack/query-core@5.101.2)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(typescript@6.0.3)
-      '@smithers-orchestrator/gateway-ui': 0.32.0(@codemirror/language@6.12.4)(@codemirror/state@6.7.1)(@codemirror/view@6.43.6)(@shikijs/themes@4.3.1)(@tanstack/query-core@5.101.2)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(immer@11.1.15)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-view@1.42.2)(react-dom@19.2.7(react@19.2.7))(react-is@19.2.8)(react@19.2.7)(redux@5.0.1)(typescript@6.0.3)
-      '@smithers-orchestrator/gcp': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/graph': 0.32.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
-      '@smithers-orchestrator/memory': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/microsandbox': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/observability': 0.32.0(@opentelemetry/semantic-conventions@1.43.0)
-      '@smithers-orchestrator/openapi': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/react-reconciler': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/sandbox': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/scheduler': 0.32.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
-      '@smithers-orchestrator/scorers': 0.32.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/server': 0.32.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/telegram': 0.32.0
-      '@smithers-orchestrator/testing': 0.32.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/time-travel': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/tool-context': 0.32.0
-      '@smithers-orchestrator/ui': 0.32.0(@codemirror/language@6.12.4)(@codemirror/state@6.7.1)(@codemirror/view@6.43.6)(@shikijs/themes@4.3.1)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-view@1.42.2)(react-dom@19.2.7(react@19.2.7))(react-is@19.2.8)(react@19.2.7)(redux@5.0.1)(typescript@6.0.3)
-      '@smithers-orchestrator/vcs': 0.32.0(@opentelemetry/semantic-conventions@1.43.0)
-      '@smithers-orchestrator/vercel': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/xstate': 0.32.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/agents': 0.34.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/aws': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/cli': 0.34.0(9b1c5d03ce03fd4f1516df174e50f8db)
+      '@smthrs/cloudflare': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/components': 0.34.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/control-plane': 0.34.0
+      '@smthrs/daytona': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/db': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/driver': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/engine': 0.34.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@opentelemetry/semantic-conventions@1.43.0)
+      '@smthrs/errors': 0.34.0
+      '@smthrs/gateway-client': 0.34.0(@tanstack/query-core@5.101.2)(react@19.2.7)(typescript@6.0.3)
+      '@smthrs/gateway-react': 0.34.0(@tanstack/query-core@5.101.2)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(typescript@6.0.3)
+      '@smthrs/gateway-ui': 0.34.0(@codemirror/language@6.12.4)(@codemirror/state@6.7.1)(@codemirror/view@6.43.6)(@shikijs/themes@4.3.1)(@tanstack/query-core@5.101.2)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(immer@11.1.15)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-view@1.42.2)(react-dom@19.2.7(react@19.2.7))(react-is@19.2.8)(react@19.2.7)(redux@5.0.1)(typescript@6.0.3)
+      '@smthrs/gcp': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/graph': 0.34.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
+      '@smthrs/memory': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/microsandbox': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/observability': 0.34.0(@opentelemetry/semantic-conventions@1.43.0)
+      '@smthrs/openapi': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/react-reconciler': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/sandbox': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/scheduler': 0.34.0(@electric-sql/pglite@0.5.4)(pg@8.22.0)
+      '@smthrs/scorers': 0.34.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/server': 0.34.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/telegram': 0.34.0
+      '@smthrs/testing': 0.34.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)(smthrs@0.34.0(58d79a073fab4aa1d549c4cefd132c73))
+      '@smthrs/time-travel': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/tool-context': 0.34.0
+      '@smthrs/ui': 0.34.0(@codemirror/language@6.12.4)(@codemirror/state@6.7.1)(@codemirror/view@6.43.6)(@shikijs/themes@4.3.1)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-view@1.42.2)(react-dom@19.2.7(react@19.2.7))(react-is@19.2.8)(react@19.2.7)(redux@5.0.1)(typescript@6.0.3)
+      '@smthrs/vcs': 0.34.0(@opentelemetry/semantic-conventions@1.43.0)
+      '@smthrs/vercel': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
+      '@smthrs/xstate': 0.34.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
       ai: 7.0.37(zod@4.4.3)
       diff: 9.0.0
       drizzle-orm: 0.45.2(@electric-sql/pglite@0.5.4)(pg@8.22.0)
-      effect: 4.0.0-beta.102
+      effect: 4.0.0-beta.105
       incur: 0.4.19
       react: 19.2.7
       zod: 4.4.3
@@ -12347,8 +12341,6 @@ snapshots:
       - web-tree-sitter
       - ws
       - xstate
-
-  smol-toml@1.7.0: {}
 
   sorted-btree@1.8.1: {}
 
@@ -12471,8 +12463,6 @@ snapshots:
   toidentifier@1.0.1: {}
 
   tokenx@1.3.0: {}
-
-  toml@4.3.0: {}
 
   trim-lines@3.0.1: {}
 

@@ -56,6 +56,15 @@ canonical `.smithers/agents/index.ts` registry. A noncanonical or incomplete reg
 fails before launch even when the missing agent belongs only to an opt-in
 profile; regenerate it explicitly with `ultrafuzz init --force`.
 
+The registry is intentionally a bounded inline-static contract: export one
+top-level `const` as `agentFactories`, and compose object literals with local
+`const` aliases, static properties, static spreads, and an unshadowed
+`Object.freeze(...)`. Source-order overwrites apply. Imported or re-exported
+registry objects and dynamic computed properties are not inspected; keep
+factory imports as property values inside the canonical file. Nullish factories
+and unknown overriding spreads fail validation. The workflow also rejects a
+non-callable factory or a factory that returns no agents at execution time.
+
 Codex agent authentication is configured in TOML instead of in generated
 workflow adapter code:
 

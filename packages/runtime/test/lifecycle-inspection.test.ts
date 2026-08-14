@@ -27,7 +27,7 @@ import {
   type WorkflowLifecycleEvent
 } from "../src/index.js";
 import { SMITHERS_COMPATIBILITY_PATCHES } from "../src/smithers.js";
-import { SMITHERS_ORCHESTRATOR_BIN_PATH, SMITHERS_ORCHESTRATOR_VERSION } from "../src/smithers-package.js";
+import { SMITHERS_BIN_PATH, SMITHERS_VERSION } from "../src/smithers-package.js";
 
 const WORKFLOW_RUN_ID = "ultrafuzz-inspect-run";
 
@@ -981,13 +981,13 @@ test("getWorkflowNode rejects an unexpected engine response", async () => {
 
 test("diagnoseProject reports a healthy pinned install and the latest published version", async () => {
   const { project, env } = await launchedProject({});
-  writeFakeInstalledEngine(project, { version: SMITHERS_ORCHESTRATOR_VERSION });
+  writeFakeInstalledEngine(project, { version: SMITHERS_VERSION });
 
   const doctor = await diagnoseProject({ projectRoot: project, env, offline: true });
 
-  assert.equal(doctor.value?.workflow_engine.installed_version, SMITHERS_ORCHESTRATOR_VERSION);
-  assert.equal(doctor.value?.workflow_engine.required_version, SMITHERS_ORCHESTRATOR_VERSION);
-  assert.equal(doctor.value?.workflow_engine.installed_bin_target, SMITHERS_ORCHESTRATOR_BIN_PATH);
+  assert.equal(doctor.value?.workflow_engine.installed_version, SMITHERS_VERSION);
+  assert.equal(doctor.value?.workflow_engine.required_version, SMITHERS_VERSION);
+  assert.equal(doctor.value?.workflow_engine.installed_bin_target, SMITHERS_BIN_PATH);
   assert.equal(doctor.value?.workflow_engine.layout_status, "ok");
   assert.equal(doctor.value?.workflow_engine.layout_detail, null);
   assert.equal(doctor.value?.checks.find((check) => check.name === "workflow-engine-install")?.status, "ok");
@@ -999,7 +999,7 @@ test("diagnoseProject reports commands required by the active topology", async (
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project, "recon");
-  writeFakeInstalledEngine(project, { version: SMITHERS_ORCHESTRATOR_VERSION });
+  writeFakeInstalledEngine(project, { version: SMITHERS_VERSION });
 
   const doctor = await diagnoseProject({
     projectRoot: project,
@@ -1019,7 +1019,7 @@ test("diagnoseProject rejects cwd-dependent PATH entries that are unavailable in
     const project = tempProject();
     initProject({ projectRoot: project, force: true });
     writeSmallTopology(project, "recon");
-    writeFakeInstalledEngine(project, { version: SMITHERS_ORCHESTRATOR_VERSION });
+    writeFakeInstalledEngine(project, { version: SMITHERS_VERSION });
     const executableDir = searchPath === "" ? project : path.join(project, searchPath);
     fs.mkdirSync(executableDir, { recursive: true });
     const executable = path.join(executableDir, "recon");
@@ -1037,7 +1037,7 @@ test("diagnoseProject includes the project-local bin inherited by task execution
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project, "recon");
-  writeFakeInstalledEngine(project, { version: SMITHERS_ORCHESTRATOR_VERSION });
+  writeFakeInstalledEngine(project, { version: SMITHERS_VERSION });
   const executable = path.join(project, ".smithers", "node_modules", ".bin", "recon");
   fs.writeFileSync(executable, "#!/bin/sh\necho recon test\n", "utf8");
   fs.chmodSync(executable, 0o755);
@@ -1171,7 +1171,7 @@ test("diagnoseProject probes topology commands in the configured cloud execution
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project, "recon");
-  writeFakeInstalledEngine(project, { version: SMITHERS_ORCHESTRATOR_VERSION });
+  writeFakeInstalledEngine(project, { version: SMITHERS_VERSION });
   const configPath = path.join(project, "ultrafuzz.toml");
   fs.writeFileSync(
     configPath,
@@ -1217,7 +1217,7 @@ credential_env = ["UFZ_PROVIDER_ONE", "UFZ_PROVIDER_TWO"]
 // workaround, not just the CLI pair.
 test("diagnoseProject reports a posture for every tracked compatibility patch", async () => {
   const { project, env } = await launchedProject({});
-  writeFakeInstalledEngine(project, { version: SMITHERS_ORCHESTRATOR_VERSION });
+  writeFakeInstalledEngine(project, { version: SMITHERS_VERSION });
   const nodeModules = path.join(project, ".smithers", "node_modules");
   // Group by source because many workflow-path workarounds patch the same file.
   // Shared files can mix applied and missing anchors; incompatible and unknown
@@ -1297,7 +1297,7 @@ test("diagnoseProject reports a missing install and a version mismatch", async (
 
 test("diagnoseProject reports a modified installed manifest", async () => {
   const { project, env } = await launchedProject({});
-  writeFakeInstalledEngine(project, { version: SMITHERS_ORCHESTRATOR_VERSION, binTarget: "dist/other.js" });
+  writeFakeInstalledEngine(project, { version: SMITHERS_VERSION, binTarget: "dist/other.js" });
 
   const doctor = await diagnoseProject({ projectRoot: project, env, offline: true });
 
@@ -1309,7 +1309,7 @@ test("diagnoseProject reports a modified installed manifest", async () => {
 
 test("diagnoseProject keeps an offline registry lookup non-fatal", async () => {
   const { project, env } = await launchedProject({});
-  writeFakeInstalledEngine(project, { version: SMITHERS_ORCHESTRATOR_VERSION });
+  writeFakeInstalledEngine(project, { version: SMITHERS_VERSION });
   const failingBin = path.join(project, "offline-bin");
   fs.mkdirSync(failingBin, { recursive: true });
   const npm = path.join(failingBin, "npm");
@@ -1331,8 +1331,8 @@ test("diagnoseProject keeps an offline registry lookup non-fatal", async () => {
 
 test("diagnoseProject does not mutate the installed dependency layout", async () => {
   const { project, env } = await launchedProject({});
-  writeFakeInstalledEngine(project, { version: SMITHERS_ORCHESTRATOR_VERSION });
-  const manifestPath = path.join(project, ".smithers", "node_modules", "smithers-orchestrator", "package.json");
+  writeFakeInstalledEngine(project, { version: SMITHERS_VERSION });
+  const manifestPath = path.join(project, ".smithers", "node_modules", "smthrs", "package.json");
   const before = fs.readFileSync(manifestPath, "utf8");
 
   await diagnoseProject({ projectRoot: project, env, offline: true });
@@ -1341,17 +1341,17 @@ test("diagnoseProject does not mutate the installed dependency layout", async ()
 });
 
 function writeFakeInstalledEngine(project: string, input: { version: string; binTarget?: string }): void {
-  const packageRoot = path.join(project, ".smithers", "node_modules", "smithers-orchestrator");
-  const target = path.join(packageRoot, ...SMITHERS_ORCHESTRATOR_BIN_PATH.split("/"));
+  const packageRoot = path.join(project, ".smithers", "node_modules", "smthrs");
+  const target = path.join(packageRoot, ...SMITHERS_BIN_PATH.split("/"));
   const shim = path.join(project, ".smithers", "node_modules", ".bin", "smithers");
   fs.mkdirSync(path.dirname(target), { recursive: true });
   fs.mkdirSync(path.dirname(shim), { recursive: true });
   fs.writeFileSync(
     path.join(packageRoot, "package.json"),
     `${JSON.stringify({
-      name: "smithers-orchestrator",
+      name: "smthrs",
       version: input.version,
-      bin: { smithers: input.binTarget ?? SMITHERS_ORCHESTRATOR_BIN_PATH }
+      bin: { smithers: input.binTarget ?? SMITHERS_BIN_PATH }
     })}\n`,
     "utf8"
   );

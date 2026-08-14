@@ -190,6 +190,15 @@ const workflowSyncedPayloadSchema = z.strictObject({
   workflow_run_id: nonEmptyStringSchema,
   workflow_status: smithersRunStatusSchema,
   workflow_state: smithersRunStateSchema,
+  exhausted_loops: z
+    .array(
+      z.strictObject({
+        id: nonEmptyStringSchema,
+        iteration: nonNegativeSafeIntegerSchema,
+        max_iterations: z.number().int().positive().nullable()
+      })
+    )
+    .optional(),
   synced_nodes: nonNegativeSafeIntegerSchema,
   accounting_available: z.boolean(),
   recovery_due: z.boolean(),
@@ -527,6 +536,21 @@ const eventRecordJsonSchemaDefinitions = {
       workflow_run_id: { $ref: "#/$defs/nonEmptyString" },
       workflow_status: { enum: SMITHERS_RUN_STATUSES },
       workflow_state: { enum: SMITHERS_RUN_STATES },
+      exhausted_loops: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["id", "iteration", "max_iterations"],
+          properties: {
+            id: { $ref: "#/$defs/nonEmptyString" },
+            iteration: { $ref: "#/$defs/nonNegativeSafeInteger" },
+            max_iterations: {
+              anyOf: [{ type: "null" }, { type: "integer", minimum: 1, maximum: Number.MAX_SAFE_INTEGER }]
+            }
+          }
+        }
+      },
       synced_nodes: { $ref: "#/$defs/nonNegativeSafeInteger" },
       accounting_available: { type: "boolean" },
       recovery_due: { type: "boolean" },

@@ -23,7 +23,7 @@ import {
 } from "node:fs";
 import type { Dirent } from "node:fs";
 import path from "node:path";
-import { KimiAgent as SmithersKimiAgent } from "smithers-orchestrator";
+import { KimiAgent as SmithersKimiAgent } from "smthrs";
 import { workflowControlChildEnvironment, workflowControlCredentialValue } from "./environment";
 import { parseStrictJson, parseStrictJsonBytes, readRegularFileSnapshot } from "./strict-json";
 import { readStringTable, stringField } from "./toml";

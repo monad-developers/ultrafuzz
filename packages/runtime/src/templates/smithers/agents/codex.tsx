@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { CodexAgent as SmithersCodexAgent } from "smithers-orchestrator";
+import { CodexAgent as SmithersCodexAgent } from "smthrs";
 import { workflowControlChildEnvironment, workflowControlCredentialValue } from "./environment";
 import { readRootStringTable, readStringTable, stringField } from "./toml";
 
