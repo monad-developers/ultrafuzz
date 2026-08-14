@@ -11532,6 +11532,19 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
   const valid = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
   assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
 
+  const commentedScopedMarkdown = scopedMarkdown
+    .replace("## Scoped coverage evidence", "<!--\n## Scoped coverage evidence")
+    .replace("Zero-coverage components:\n- None\n", "Zero-coverage components:\n- None\n## Hidden boundary\n-->\n");
+  writeArtifact(layout, reportNode.id, "report.md", commentedScopedMarkdown);
+  const commentedScopedSection = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+  assert.equal(commentedScopedSection.ok, false);
+  assert.ok(
+    commentedScopedSection.diagnostics.some(
+      (diagnostic) => diagnostic.code === "REPORT_COVERAGE_EVIDENCE_MARKDOWN_MISSING"
+    ),
+    JSON.stringify(commentedScopedSection.diagnostics)
+  );
+
   writeArtifact(
     layout,
     reportNode.id,
@@ -11560,6 +11573,10 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
     "Overall coverage came to 25%.",
     "Overall coverage hit 25%.",
     "Coverage climbed to 100%.",
+    "Coverage improved from 25% to 100%.",
+    "Coverage exceeded 90%.",
+    "Coverage is above 90%.",
+    "Coverage now shows 100%.",
     "Coverage accounted for 39/39 ranges.",
     "Unlike selected-range measurements: overall coverage was 25%.",
     "Coverage was **100%**.",
@@ -11570,6 +11587,10 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
     "Coverage was 100<!-- rendered -->%.",
     "Coverage was 100\u200b%.",
     "Coverage was 100％.",
+    "Coverage was １００%.",
+    "Coverage was １００％.",
+    "Coverage was 39⁄39 ranges.",
+    "Coverage was 39／39 ranges.",
     "Coverage was **39/39** ranges.",
     "Coverage was 100\\%.",
     "Coverage was 39\\/39 ranges.",
@@ -11585,6 +11606,9 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
     'Coverage was 100% <span style="display: none">selected-range</span>.',
     "Coverage was 100% <span inert>selected-range</span>.",
     "Coverage was 100% ![selected-range](https://example.invalid/chart.svg).",
+    "![Coverage was 100%.](https://example.invalid/chart.svg)",
+    '<img src="https://example.invalid/chart.svg" alt="Coverage was 100%.">',
+    '<span aria-label="Coverage was 100%."></span>',
     "Coverage was 10\uFE0F0%.",
     "Covera\u034Fge was 100%.",
     "<h2>Coverage</h2>\n\n100%.",
@@ -11601,16 +11625,19 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
     "Cover&#97;ge was 100%.",
     'Coverage was <strong title="x>y">100%</strong>.',
     'Coverage was 100% <a href="selected-range">details</a>.',
+    "The selected-range trend differed from overall coverage at 100%.",
+    "In selected-range context overall coverage reached 100%.",
     "<input hidden>\n\nCoverage was 100%."
   ]) {
     writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\n${mixedScore}\n`);
     const mixed = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
     assert.equal(mixed.ok, false, mixedScore);
+    const normalizedMixedScore = mixedScore.normalize("NFKC").replace(/\u2044/gu, "/");
     assert.ok(
       mixed.diagnostics.some(
         (diagnostic) =>
           diagnostic.code ===
-          (/\b\d+\s*(?:\/|\\\/|&#47;)\s*\d+\b/u.test(mixedScore)
+          (/\b\d+\s*(?:\/|\\\/|&#47;)\s*\d+\b/u.test(normalizedMixedScore)
             ? "UNSCOPED_COVERAGE_FRACTION"
             : "UNSCOPED_COVERAGE_PERCENTAGE")
       ),
@@ -11628,6 +11655,8 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
     '<span aria-hidden="true">Coverage was 100%.</span>',
     '<span style="visibility: hidden">Coverage was 100%.</span>',
     "<span inert>Coverage was 100%.</span>",
+    '<img hidden alt="Coverage was 100%.">',
+    '<span aria-hidden="true" aria-label="Coverage was 100%."></span>',
     "<template>\n\nCoverage was 100%.\n\n</template>",
     "Coverage was 100&amp;#37;."
   ]) {
