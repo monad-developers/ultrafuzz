@@ -525,30 +525,26 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
             failure_category: failureCategory
           };
         });
-      if (failedNodes.length === 0) {
-        failedNodes.push({
-          node_id: `run:${input.runId}`,
-          failure_category: "agent-failure"
+      if (failedNodes.length > 0) {
+        const priorRecovery = stateBeforeLifecycle.provenance?.recovery;
+        const recoveryHistory = [
+          ...(stateBeforeLifecycle.provenance?.recovery_history ?? []),
+          ...(priorRecovery === undefined ? [] : [priorRecovery])
+        ];
+        writeRunState(evidence.layout, {
+          ...stateBeforeLifecycle,
+          provenance: {
+            ...stateBeforeLifecycle.provenance!,
+            recovery_history: recoveryHistory,
+            recovery: {
+              recovery_id: crypto.randomUUID(),
+              recovered: false,
+              prior_status: "failed",
+              failed_nodes: failedNodes
+            }
+          }
         });
       }
-      const priorRecovery = stateBeforeLifecycle.provenance?.recovery;
-      const recoveryHistory = [
-        ...(stateBeforeLifecycle.provenance?.recovery_history ?? []),
-        ...(priorRecovery === undefined ? [] : [priorRecovery])
-      ];
-      writeRunState(evidence.layout, {
-        ...stateBeforeLifecycle,
-        provenance: {
-          ...stateBeforeLifecycle.provenance!,
-          recovery_history: recoveryHistory,
-          recovery: {
-            recovery_id: crypto.randomUUID(),
-            recovered: false,
-            prior_status: "failed",
-            failed_nodes: failedNodes
-          }
-        }
-      });
     }
     updateRunStatus(evidence.layout, "running", submittedAt);
     appendEvent(evidence.layout, {
