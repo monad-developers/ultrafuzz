@@ -93,6 +93,7 @@ const reportAliasCanonicalFragments = FINDING_NOTE_KEYS.filter((key) => key !== 
   asciiCaseInsensitivePattern
 );
 const explicitReportAliasKeys = [
+  "access",
   "attainability",
   "attainment",
   "audit_decision",
@@ -127,7 +128,8 @@ const explicitReportAliasKeys = [
   "severity_alias",
   "severity_guess",
   "stateful_failure_alias",
-  "triage_result"
+  "triage_result",
+  "verification"
 ].map(asciiCaseInsensitivePattern);
 const reportAliasPatternGroups = chunkPatternAlternatives([
   ...reportAliasCanonicalFragments,

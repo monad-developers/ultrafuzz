@@ -1345,6 +1345,8 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
     "call_path=helper-only",
     "production_path=public-entrypoint-trace",
     "exploit_path=public-wrapper-required",
+    "verification=summary",
+    "access=internal",
     "helper_address=helper-only",
     "`call_path=<helper-only>`",
     "((production_path=(public-entrypoint-trace)))",
