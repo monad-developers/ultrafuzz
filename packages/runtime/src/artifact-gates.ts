@@ -4881,7 +4881,7 @@ function coverageDirectoryKind(segment: string): Exclude<CoverageSourceKind, "pr
   return undefined;
 }
 type TrustedLcovCoverage = {
-  hitsBySource: ReadonlyMap<string, ReadonlyMap<number, bigint>>;
+  hitsBySource: ReadonlyMap<string, ReadonlyMap<number, boolean>>;
   instrumentedLinesBySource: ReadonlyMap<string, readonly number[]>;
   coveredLinesBySource: ReadonlyMap<string, readonly number[]>;
   uncoveredLinesBySource: ReadonlyMap<string, readonly number[]>;
@@ -4919,7 +4919,7 @@ function readCoverageInputSnapshot(
 }
 
 function readTrustedLcovCoverage(workspacePath: string, bytes: Buffer): TrustedLcovCoverage {
-  const hitsBySource = new Map<string, Map<number, bigint>>();
+  const hitsBySource = new Map<string, Map<number, boolean>>();
   let distinctDaLineCount = 0;
   let currentSource: string | undefined;
   for (const [index, line] of bytes.toString("utf8").split(/\r?\n/u).entries()) {
@@ -4945,7 +4945,7 @@ function readTrustedLcovCoverage(workspacePath: string, bytes: Buffer): TrustedL
     if (match === null) throw new Error(`LCOV line ${index + 1} contains an invalid DA record`);
     const sourceLine = Number(match[1]);
     if (!Number.isSafeInteger(sourceLine)) throw new Error(`LCOV line ${index + 1} has an unsafe DA line number`);
-    const count = BigInt(match[2]!);
+    const counted = !/^0+$/u.test(match[2]!);
     const sourceHits = hitsBySource.get(currentSource)!;
     if (!sourceHits.has(sourceLine)) {
       distinctDaLineCount += 1;
@@ -4953,11 +4953,11 @@ function readTrustedLcovCoverage(workspacePath: string, bytes: Buffer): TrustedL
         throw new Error(`LCOV exceeds ${MAX_COVERAGE_EVIDENCE_RANGES} distinct DA line records`);
       }
     }
-    sourceHits.set(sourceLine, (sourceHits.get(sourceLine) ?? 0n) + count);
+    sourceHits.set(sourceLine, (sourceHits.get(sourceLine) ?? false) || counted);
   }
   if (currentSource !== undefined) throw new Error(`LCOV SF record for ${currentSource} lacks end_of_record`);
 
-  const sortedLines = (predicate: (hits: bigint) => boolean): ReadonlyMap<string, readonly number[]> =>
+  const sortedLines = (predicate: (hits: boolean) => boolean): ReadonlyMap<string, readonly number[]> =>
     new Map(
       [...hitsBySource].map(([source, hits]) => [
         source,
@@ -4970,8 +4970,8 @@ function readTrustedLcovCoverage(workspacePath: string, bytes: Buffer): TrustedL
   return {
     hitsBySource,
     instrumentedLinesBySource: sortedLines(() => true),
-    coveredLinesBySource: sortedLines((hits) => hits > 0n),
-    uncoveredLinesBySource: sortedLines((hits) => hits === 0n)
+    coveredLinesBySource: sortedLines((hits) => hits),
+    uncoveredLinesBySource: sortedLines((hits) => !hits)
   };
 }
 

@@ -10716,6 +10716,35 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
   const valid = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
 
+  const longHitCount = "9".repeat(100_000);
+  const longHitLcov = Buffer.from(
+    [
+      "SF:src/Core.sol",
+      "DA:2,0",
+      `DA:2,${longHitCount}`,
+      "DA:3,0",
+      "end_of_record",
+      "SF:src/Critical.sol",
+      "DA:4,0",
+      "DA:5,0",
+      "DA:6,0",
+      "DA:7,0",
+      "end_of_record",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+  fs.writeFileSync(path.join(workspace, "coverage-input.lcov"), longHitLcov);
+  const longHitEvidence = structuredClone(evidence);
+  longHitEvidence.lcov.sha256 = createHash("sha256").update(longHitLcov).digest("hex");
+  publish(longHitEvidence);
+  const boundedLongHit = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(boundedLongHit.ok, true, JSON.stringify(boundedLongHit.diagnostics));
+  writeCoverageLcov(workspace, {
+    "src/Core.sol": { 2: 1, 3: 0 },
+    "src/Critical.sol": { 4: 0, 5: 0, 6: 0, 7: 0 }
+  });
+
   const incompleteZeroRanges = structuredClone(evidence);
   incompleteZeroRanges.zero_coverage_components.shift();
   publish(incompleteZeroRanges, scopedMarkdown.replace("- `src/Core.sol:3-3` (production)\n", ""));
