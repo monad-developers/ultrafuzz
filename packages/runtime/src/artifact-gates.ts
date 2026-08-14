@@ -3578,6 +3578,9 @@ function constrainedShellTokens(command: string): string[] | undefined {
         index += 1;
         continue;
       }
+      if (character === "`" || (character === "$" && command[index + 1] === "(")) {
+        return undefined;
+      }
       if (quote !== undefined) {
         if (character === quote) quote = undefined;
         index += 1;
@@ -3609,11 +3612,12 @@ function constrainedShellTokens(command: string): string[] | undefined {
 
   skipWhitespace();
   while (index < command.length) {
-    const duplication = command.slice(index).match(/^[0-9]+>&[0-9]+/u);
+    const duplication = command.slice(index).match(/^[0-9]+>&[0-9]+(?=$|[\s>])/u);
     const redirection = duplication === null ? command.slice(index).match(/^(?:[0-9]+)?(?:>>|>|&>)/u) : null;
     if (redirection !== null || duplication !== null) {
       index += (redirection ?? duplication)![0].length;
       if (redirection !== null) {
+        if (command[index] === "(") return undefined;
         skipWhitespace();
         if (readWord() === undefined) return undefined;
       }
