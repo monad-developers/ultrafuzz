@@ -109,7 +109,6 @@ export interface ScoreFindingsAgainstGroundTruthInput {
   suite: EvalSuiteSpec;
   row: EvalMatrixRow;
   findings: unknown[];
-  coverageEvidence?: unknown;
   bugs: GroundTruthBug[];
   /** Validated document metadata for callers that score an in-memory report. */
   groundTruthSubject?: GroundTruthSubject;
@@ -389,7 +388,6 @@ export async function scoreFindingsAgainstGroundTruth(input: ScoreFindingsAgains
     record: input.record,
     reportPath: input.reportPath ?? "inline-findings",
     findings: findingsValidation.value,
-    coverageEvidence: input.coverageEvidence,
     bugs: input.bugs,
     groundTruthSubject: input.groundTruthSubject,
     reportSchemaValid: input.reportSchemaValid ?? true,
@@ -684,7 +682,6 @@ async function scoreRow(input: {
     reportPath: report.path,
     reportAuthority: report.authority,
     findings: report.findings,
-    coverageEvidence: report.coverageEvidence,
     bugs,
     groundTruthSubject,
     reportSchemaValid: report.schemaValid,
@@ -700,7 +697,6 @@ interface ScoreFindingsInput {
   record: EvalRunRecord;
   reportPath: string;
   findings: unknown[];
-  coverageEvidence?: unknown;
   bugs: GroundTruthBug[];
   groundTruthSubject?: GroundTruthSubject;
   reportSchemaValid: boolean;
@@ -777,7 +773,6 @@ async function scoreFindings(
       input.suite,
       input.matchMode,
       judgePanel,
-      input.coverageEvidence,
       input.llmJudge
     );
     const bugId = match.judge_result.matched_ground_truth_bug_id;
@@ -880,7 +875,6 @@ async function bestMatch(
   suite: EvalSuiteSpec,
   matchMode: "report" | "candidate",
   judgePanel: EvalJudgePanelConfig,
-  coverageEvidence: unknown,
   llmJudge?: FindingJudge
 ): Promise<{ deterministic_match: FindingJudgeResult; judge_result: FindingJudgeResult }> {
   let bestBug: GroundTruthBug | undefined;
@@ -936,7 +930,6 @@ async function bestMatch(
         suite,
         row,
         finding,
-        ...(coverageEvidence === undefined ? {} : { coverageEvidence }),
         bugs,
         deterministicResult: result,
         threshold: effectiveThreshold
@@ -1258,7 +1251,6 @@ function readReport(
 ): {
   schemaValid: boolean;
   findings: unknown[];
-  coverageEvidence: unknown;
   path: string;
   authority: EvalReportAuthority;
   snapshot: VerifiedFinalReportSnapshot;
@@ -1309,7 +1301,6 @@ function readReport(
   return {
     schemaValid: true,
     findings: bound.snapshot.json.issues as unknown[],
-    coverageEvidence: bound.snapshot.json.coverage_evidence,
     path: bound.snapshot.artifacts.json_path,
     authority: bound.authority,
     snapshot: bound.snapshot
