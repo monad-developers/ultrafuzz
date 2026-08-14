@@ -11754,7 +11754,12 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
     retryConfigPath,
     fs
       .readFileSync(retryConfigPath, "utf8")
-      .replace("same_agent_attempts = 1", 'same_agent_attempts = 1\nagents = ["default", "deepseek"]'),
+      .replace("same_agent_attempts = 1", 'same_agent_attempts = 1\nagents = ["default", "lifecycle-fallback"]')
+      .replace(
+        "[models.claude]",
+        '[models.lifecycle-fallback]\nagent = "CodexAgent"\nmodel = "gpt-5.6-sol"\nreasoning = "xhigh"\n\n' +
+          "[models.claude]"
+      ),
     "utf8"
   );
   const env = fakeSmithersEnv(project);
@@ -11768,7 +11773,7 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   env.SMITHERS_FAKE_RETRY_CREDENTIAL_ENV_LOG = retryCredentialLog;
   const run = await startRun({ projectRoot: project, runId: "lifecycle-run", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  assert.equal(fs.readFileSync(retryCredentialLog, "utf8"), "sealed-primary-key|sealed-fallback-key\n");
+  assert.equal(fs.readFileSync(retryCredentialLog, "utf8"), "sealed-primary-key|\n");
   fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
   fs.writeFileSync(credentialLog, "", "utf8");
   fs.writeFileSync(retryCredentialLog, "", "utf8");
@@ -11807,7 +11812,7 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
   assert.equal(resumed.value?.workflow_run_id, "ultrafuzz-lifecycle-run");
   assert.equal(resumed.value?.submitted, true);
-  assert.equal(fs.readFileSync(retryCredentialLog, "utf8"), "sealed-primary-key|sealed-fallback-key\n");
+  assert.equal(fs.readFileSync(retryCredentialLog, "utf8"), "sealed-primary-key|\n");
   assert.equal(fs.existsSync(missingPrompt.rendered_prompt_path), false);
   assert.doesNotMatch(fs.readFileSync(credentialLog, "utf8"), new RegExp(hostileCredential, "u"));
   const resumedState = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as RunState;
