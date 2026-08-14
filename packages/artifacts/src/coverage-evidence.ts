@@ -7,6 +7,25 @@ export const COVERAGE_EVIDENCE_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:
 export const MAX_COVERAGE_EVIDENCE_FILES = 10_000;
 export const MAX_COVERAGE_EVIDENCE_RANGES = 100_000;
 
+export const COVERAGE_BLOCKER_CATEGORIES = [
+  "coverage-tooling-blocked",
+  "production-source-attribution-blocked",
+  "harness-build-blocked",
+  "dependency-blocked",
+  "time-budget-exhausted",
+  "no-reachable-target"
+] as const;
+
+export const coverageBlockerCategorySchema = z.enum(COVERAGE_BLOCKER_CATEGORIES);
+export const coverageBlockerSchema = z.strictObject({
+  category: coverageBlockerCategorySchema,
+  summary: z.string().min(1),
+  evidence_paths: z
+    .array(z.string().min(1))
+    .meta({ uniqueItems: true })
+    .refine((paths) => new Set(paths).size === paths.length, { message: "Evidence paths must be unique" })
+});
+
 const sourceKind = z.enum(["production", "test", "harness", "dependency"]);
 const safePath = z
   .string()
@@ -67,7 +86,10 @@ const file = z
   });
 const view = z
   .strictObject({
-    scope: z.enum(["selected-range", "production-source"]),
+    scope: z.enum([
+      "recon-selected-declaration-completeness",
+      "production-declaration-completeness"
+    ]),
     covered_ranges: z.number().int().nonnegative(),
     total_ranges: z.number().int().nonnegative()
   })
@@ -85,19 +107,24 @@ const zeroCoverageComponent = z.strictObject({
   line_count: z.number().int().positive()
 });
 
-export const coverageEvidenceSchema = z
+const measuredCoverageEvidenceSchema = z
   .strictObject({
     schema_version: z.literal(COVERAGE_EVIDENCE_SCHEMA_VERSION),
+    status: z.literal("measured"),
     lcov,
     views: z
       .array(view)
       .length(2)
       .superRefine((views, context) => {
         const scopes = new Set(views.map((entry) => entry.scope));
-        if (!scopes.has("selected-range") || !scopes.has("production-source")) {
+        if (
+          !scopes.has("recon-selected-declaration-completeness") ||
+          !scopes.has("production-declaration-completeness")
+        ) {
           context.addIssue({
             code: "custom",
-            message: "coverage views require selected-range and production-source scopes"
+            message:
+              "coverage views require recon-selected-declaration-completeness and production-declaration-completeness scopes"
           });
         }
         if (scopes.size !== views.length)
@@ -142,14 +169,15 @@ export const coverageEvidenceSchema = z
       if (entry.selected && entry.kind !== "production") {
         context.addIssue({
           code: "custom",
-          message: "selected-range coverage may contain only production source ranges",
+          message: "recon-selected-declaration-completeness coverage may contain only production source ranges",
           path: ["counted_ranges", index, "selected"]
         });
       }
       if (!declared.included && entry.selected) {
         context.addIssue({
           code: "custom",
-          message: "selected counted ranges must belong to files included in the selected-range scope",
+          message:
+            "selected counted ranges must belong to files included in the recon-selected-declaration-completeness scope",
           path: ["counted_ranges", index, "selected"]
         });
       }
@@ -201,11 +229,14 @@ export const coverageEvidenceSchema = z
       covered_ranges: entries.reduce((sum, entry) => sum + entry.covered_ranges, 0),
       total_ranges: entries.reduce((sum, entry) => sum + entry.total_ranges, 0)
     });
-    expectedViews.set("selected-range", {
+    expectedViews.set("recon-selected-declaration-completeness", {
       covered_ranges: value.counted_ranges.filter((entry) => entry.selected && entry.covered).length,
       total_ranges: value.counted_ranges.filter((entry) => entry.selected).length
     });
-    expectedViews.set("production-source", aggregate(value.files.filter((entry) => entry.kind === "production")));
+    expectedViews.set(
+      "production-declaration-completeness",
+      aggregate(value.files.filter((entry) => entry.kind === "production"))
+    );
     for (const [index, entry] of value.views.entries()) {
       const expected = expectedViews.get(entry.scope);
       if (
@@ -242,19 +273,41 @@ export const coverageEvidenceSchema = z
     }
   });
 
+const unavailableCoverageEvidenceSchema = z.strictObject({
+  schema_version: z.literal(COVERAGE_EVIDENCE_SCHEMA_VERSION),
+  status: z.literal("unavailable"),
+  blockers: z.array(coverageBlockerSchema).min(1)
+});
+
+export const coverageEvidenceSchema = z.discriminatedUnion("status", [
+  measuredCoverageEvidenceSchema,
+  unavailableCoverageEvidenceSchema
+]);
+
 const sourceKinds = ["production", "test", "harness", "dependency"] as const;
 const safePathPattern = "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[^\\\\\\u0000]+$";
-export const coverageEvidenceJsonSchema = {
-  $schema: "https://json-schema.org/draft/2020-12/schema",
-  $id: COVERAGE_EVIDENCE_JSON_SCHEMA_ID,
-  title: "Ultrafuzz complete coverage denominator",
-  description:
-    "Producer contract. The exact LCOV input is identified by a safe workspace-relative path and SHA-256. Each range uses a positive start_line plus positive line_count, so reversed ranges are unrepresentable. Semantic validation additionally requires: every counted range joins a declared file with the same kind; selected ranges are production-only and may join only an included file; ranges within each file do not overlap; file totals equal all selected and unselected counted ranges; selected-range totals equal selected counted ranges; production-source totals equal production-file totals; and each zero_coverage_components entry names an incomplete material range. Runtime authenticates the LCOV snapshot and source attribution, binds every production declaration boundary to the trusted workspace inventory, defines covered as at least one in-range LCOV DA row with every in-range DA row positive, requires zero_coverage_components to enumerate exactly the ranges with no positive hit, and binds each selection flag to overlap with the generated Recon coverage map. The two views are declaration-completeness metrics and do not claim to reproduce covg-eval's evaluator-specific function identity or filtering semantics.",
+const coverageBlockerJsonSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["schema_version", "lcov", "views", "files", "counted_ranges", "zero_coverage_components"],
+  required: ["category", "summary", "evidence_paths"],
+  properties: {
+    category: { enum: COVERAGE_BLOCKER_CATEGORIES },
+    summary: { type: "string", minLength: 1 },
+    evidence_paths: {
+      type: "array",
+      uniqueItems: true,
+      items: { type: "string", minLength: 1 }
+    }
+  }
+} as const;
+
+const measuredCoverageEvidenceJsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["schema_version", "status", "lcov", "views", "files", "counted_ranges", "zero_coverage_components"],
   properties: {
     schema_version: { const: COVERAGE_EVIDENCE_SCHEMA_VERSION },
+    status: { const: "measured" },
     lcov: {
       type: "object",
       additionalProperties: false,
@@ -273,7 +326,9 @@ export const coverageEvidenceJsonSchema = {
         additionalProperties: false,
         required: ["scope", "covered_ranges", "total_ranges"],
         properties: {
-          scope: { enum: ["selected-range", "production-source"] },
+          scope: {
+            enum: ["recon-selected-declaration-completeness", "production-declaration-completeness"]
+          },
           covered_ranges: { type: "integer", minimum: 0 },
           total_ranges: { type: "integer", minimum: 0 }
         }
@@ -347,6 +402,26 @@ export const coverageEvidenceJsonSchema = {
       }
     }
   }
+} as const;
+
+const unavailableCoverageEvidenceJsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["schema_version", "status", "blockers"],
+  properties: {
+    schema_version: { const: COVERAGE_EVIDENCE_SCHEMA_VERSION },
+    status: { const: "unavailable" },
+    blockers: { type: "array", minItems: 1, items: coverageBlockerJsonSchema }
+  }
+} as const;
+
+export const coverageEvidenceJsonSchema = {
+  $schema: "https://json-schema.org/draft/2020-12/schema",
+  $id: COVERAGE_EVIDENCE_JSON_SCHEMA_ID,
+  title: "Ultrafuzz coverage evidence",
+  description:
+    "Producer contract for either authenticated declaration-completeness measurements or typed blockers that made measurement unavailable. Measured evidence identifies the exact LCOV input and reconciles trusted declaration ranges; unavailable evidence cannot claim measurements.",
+  oneOf: [measuredCoverageEvidenceJsonSchema, unavailableCoverageEvidenceJsonSchema]
 } as const;
 
 export type CoverageEvidence = z.infer<typeof coverageEvidenceSchema>;
