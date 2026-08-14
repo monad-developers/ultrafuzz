@@ -699,7 +699,7 @@ describe("public Modal benchmark configuration", () => {
             gates: "docs,config,audit-profile-package,security,topology,prompts,artifacts,evals,modal",
             timeout_minutes: 30
           },
-          { lane: "runtime", gates: "runtime", timeout_minutes: 45 },
+          { lane: "runtime", gates: "runtime", timeout_minutes: 75 },
           {
             lane: "cli-typecheck",
             gates: "cli,benchmark-history,workspace-typecheck",
