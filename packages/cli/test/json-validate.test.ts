@@ -286,19 +286,21 @@ test("json validate diagnostics project exactly through the production planned-o
     assert.equal(envelope.ok, false);
     assert.equal(envelope.data.schema?.registered, true);
     assert.equal(envelope.data.artifact_sha256, digestHostBytes(bytes));
+    // The expanded finding schema is compiled as its own referenced resource,
+    // so Ajv reports keyword locations relative to that resource root.
     assert.deepEqual(envelope.data.diagnostics, [
       {
         code: "JSON_SCHEMA_VIOLATION",
         message: "must NOT have additional properties",
         instancePath: "/0",
-        schemaPath: "urn:ultrafuzz:schema:artifacts:finding:2/additionalProperties",
+        schemaPath: "#/additionalProperties",
         keyword: "additionalProperties"
       },
       {
         code: "JSON_SCHEMA_VIOLATION",
         message: "must be equal to one of the allowed values",
         instancePath: "/0/status",
-        schemaPath: "urn:ultrafuzz:schema:artifacts:finding:2/properties/status/enum",
+        schemaPath: "#/properties/status/enum",
         keyword: "enum"
       }
     ]);
