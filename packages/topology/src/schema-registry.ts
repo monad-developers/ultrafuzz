@@ -13,7 +13,7 @@ import {
 
 const metadataByFilename = Object.freeze({
   "expanded-graph.schema.json": {
-    id: "urn:ultrafuzz:schema:topology:expanded-graph:3",
+    id: "urn:ultrafuzz:schema:topology:expanded-graph:4",
     typescriptExport: "expandedGraphJsonSchema",
     semanticGates: [
       "expanded-graph-node-id-uniqueness",

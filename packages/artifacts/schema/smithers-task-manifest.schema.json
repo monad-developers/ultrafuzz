@@ -1,13 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ultrafuzz:schema:artifacts:smithers-task-manifest:3",
+  "$id": "urn:ultrafuzz:schema:artifacts:smithers-task-manifest:4",
   "title": "Ultrafuzz sealed Smithers task manifest",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "run_id", "smithers_run_id", "workflow_name", "pinned_submodules", "tasks"],
   "properties": {
     "schema_version": {
-      "const": "ultrafuzz.smithers.workflow.v3"
+      "const": "ultrafuzz.smithers.workflow.v4"
     },
     "run_id": {
       "type": "string",
@@ -99,6 +99,7 @@
           "smithersNodeId",
           "verifierSmithersNodeId",
           "agentRef",
+          "agentChain",
           "dependencies",
           "dependencySmithersNodeIds",
           "timeoutMs",
@@ -142,6 +143,43 @@
             "maxLength": 4096,
             "pattern": "^[^\\u0000]+$"
           },
+          "agentChain": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["profileId", "agentRef", "role"],
+              "properties": {
+                "profileId": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+                },
+                "agentRef": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "^[^\\u0000]+$"
+                },
+                "modelName": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "^[^\\u0000]+$"
+                },
+                "reasoningEffort": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "^[^\\u0000]+$"
+                },
+                "role": {
+                  "enum": ["primary", "fallback"]
+                }
+              }
+            }
+          },
           "modelName": {
             "type": "string",
             "minLength": 1,
@@ -180,21 +218,18 @@
           },
           "retries": {
             "type": "integer",
-            "minimum": 0
+            "minimum": 0,
+            "maximum": 99
           },
           "retryPolicy": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["backoff", "initialDelayMs", "maxDelayMs"],
+            "required": ["backoff", "initialDelayMs"],
             "properties": {
               "backoff": {
                 "const": "exponential"
               },
               "initialDelayMs": {
-                "type": "integer",
-                "minimum": 1
-              },
-              "maxDelayMs": {
                 "type": "integer",
                 "minimum": 1
               }
@@ -359,7 +394,7 @@
             ],
             "properties": {
               "schemaVersion": {
-                "const": "ultrafuzz.smithers.task.v2"
+                "const": "ultrafuzz.smithers.task.v3"
               },
               "run": {
                 "type": "object",
@@ -377,7 +412,7 @@
                     "pattern": "^[^\\u0000]+$"
                   },
                   "graphVersion": {
-                    "const": "3"
+                    "const": "4"
                   },
                   "topologyVersion": {
                     "const": 2
@@ -478,7 +513,7 @@
               "model": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["profileId", "agentRef", "modelIndex", "attemptIndex"],
+                "required": ["profileId", "agentRef", "modelIndex", "attemptIndex", "agentChain"],
                 "properties": {
                   "profileId": {
                     "type": "string",
@@ -511,6 +546,43 @@
                   "attemptIndex": {
                     "type": "integer",
                     "minimum": 0
+                  },
+                  "agentChain": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 100,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["profileId", "agentRef", "role"],
+                      "properties": {
+                        "profileId": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+                        },
+                        "agentRef": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 4096,
+                          "pattern": "^[^\\u0000]+$"
+                        },
+                        "modelName": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 4096,
+                          "pattern": "^[^\\u0000]+$"
+                        },
+                        "reasoningEffort": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 4096,
+                          "pattern": "^[^\\u0000]+$"
+                        },
+                        "role": {
+                          "enum": ["primary", "fallback"]
+                        }
+                      }
+                    }
                   }
                 }
               },
@@ -704,15 +776,22 @@
               "retryPolicy": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["maxAttempts", "smithersRetries"],
+                "required": ["maxAttempts", "sameAgentAttempts", "smithersRetries"],
                 "properties": {
                   "maxAttempts": {
                     "type": "integer",
-                    "minimum": 1
+                    "minimum": 1,
+                    "maximum": 100
+                  },
+                  "sameAgentAttempts": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100
                   },
                   "smithersRetries": {
                     "type": "integer",
-                    "minimum": 0
+                    "minimum": 0,
+                    "maximum": 99
                   }
                 }
               },

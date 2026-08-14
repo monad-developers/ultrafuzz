@@ -1,4 +1,5 @@
 import type { ZodIssue, ZodType } from "zod/v4";
+import { MAX_RETRY_CHAIN_ATTEMPTS } from "@ultrafuzz/artifacts";
 import {
   DEFAULT_AGENT,
   DEFAULT_MODEL_PROFILE_ID,
@@ -21,6 +22,7 @@ import {
   fail,
   hasErrors,
   ok,
+  PROJECT_CONFIG_SCHEMA_VERSION,
   type AgentConfig,
   type ConfigDiagnostic,
   type ConfigResult,
@@ -94,11 +96,14 @@ export function validateResolvedConfig(
   env: Record<string, string | undefined> = process.env
 ): ConfigDiagnostic[] {
   const diagnostics = schemaIssues(resolvedConfigZodSchema, config)
-    .filter((issue) => !isNamedSemanticSchemaIssue(issue) && !isModelProfileSchemaIssue(issue))
+    .filter(
+      (issue) => !isNamedSemanticSchemaIssue(issue) && !isModelProfileSchemaIssue(issue) && !isRetrySchemaIssue(issue)
+    )
     .map((issue) => resolvedConfigDiagnostic(issue, config));
   diagnostics.push(...validateAgentConfigs(config.agents));
   diagnostics.push(...validateTriageConfig(config.triage));
   diagnostics.push(...validateModelProfiles(config));
+  diagnostics.push(...validateRetryConfig(config));
   diagnostics.push(...validateExecutionConfig(config, env));
   return diagnostics;
 }
@@ -117,7 +122,7 @@ export function serializeResolvedConfigToml(
   const lines: string[] = [];
 
   pushAssignments(lines, {
-    schema_version: clone.schemaVersion,
+    schema_version: PROJECT_CONFIG_SCHEMA_VERSION,
     audit_profile: clone.auditProfile,
     topology_path: clone.topologyPath,
     strategy_loops: omitProfileSettings ? undefined : clone.strategyLoops,
@@ -177,6 +182,10 @@ export function serializeResolvedConfigToml(
       timeout_seconds: profile.timeoutSeconds
     });
   }
+  pushTable(lines, "retry", {
+    same_agent_attempts: clone.retry.sameAgentAttempts,
+    agents: clone.retry.agents.length === 0 ? undefined : clone.retry.agents
+  });
   for (const [id, agent] of Object.entries(clone.agents)) {
     pushTable(lines, tableName(["agents", id]), {
       auth: agent.auth,
@@ -452,9 +461,8 @@ function applyProjectConfigLayer(
   diagnostics: ConfigDiagnostic[],
   source: "project-toml" | "runtime"
 ): void {
-  if (layer.schemaVersion !== undefined) {
-    config.schemaVersion = layer.schemaVersion;
-  }
+  // `schema_version` describes the user-authored TOML contract. Resolved JSON has
+  // its own exact identity and is assigned when the default resolved config is built.
   if (layer.auditProfile !== undefined) {
     config.auditProfile = layer.auditProfile;
   }
@@ -506,6 +514,14 @@ function applyProjectConfigLayer(
           timeoutSeconds: profile.timeoutSeconds ?? existing?.timeoutSeconds
         };
       }
+    }
+  }
+  if (layer.retry) {
+    if (layer.retry.sameAgentAttempts !== undefined) {
+      config.retry.sameAgentAttempts = layer.retry.sameAgentAttempts;
+    }
+    if (layer.retry.agents !== undefined) {
+      config.retry.agents = [...layer.retry.agents];
     }
   }
   if (layer.agents) {
@@ -647,6 +663,95 @@ function normalizeAgentConfig(source: Partial<AgentConfig>, base?: AgentConfig):
   };
 }
 
+function validateRetryConfig(config: ResolvedConfig): ConfigDiagnostic[] {
+  const diagnostics: ConfigDiagnostic[] = [];
+  const sameAgentAttempts = config.retry.sameAgentAttempts;
+  if (!Number.isSafeInteger(sameAgentAttempts) || sameAgentAttempts <= 0) {
+    diagnostics.push(
+      diagnostic(
+        "CONFIG_RETRY_ATTEMPTS_INVALID",
+        "retry.same_agent_attempts must be a positive safe integer",
+        ["retry", "same_agent_attempts"],
+        "validation"
+      )
+    );
+  } else if (sameAgentAttempts > MAX_RETRY_CHAIN_ATTEMPTS) {
+    diagnostics.push(
+      diagnostic(
+        "CONFIG_RETRY_ATTEMPTS_MAX_EXCEEDED",
+        `retry.same_agent_attempts must not exceed ${MAX_RETRY_CHAIN_ATTEMPTS}`,
+        ["retry", "same_agent_attempts"],
+        "validation"
+      )
+    );
+  }
+  if (!Array.isArray(config.retry.agents)) {
+    diagnostics.push(
+      diagnostic(
+        "CONFIG_RETRY_AGENTS_INVALID",
+        "retry.agents must be an array of model profile IDs",
+        ["retry", "agents"],
+        "validation"
+      )
+    );
+    return diagnostics;
+  }
+  const seen = new Set<string>();
+  for (const [index, profileId] of config.retry.agents.entries()) {
+    if (typeof profileId !== "string" || !validProfileId(profileId)) {
+      diagnostics.push(
+        diagnostic(
+          "CONFIG_RETRY_AGENT_ID_INVALID",
+          `retry.agents entry ${index} must be a valid model profile ID`,
+          ["retry", "agents", String(index)],
+          "validation"
+        )
+      );
+      continue;
+    }
+    if (seen.has(profileId)) {
+      diagnostics.push(
+        diagnostic(
+          "CONFIG_RETRY_AGENT_DUPLICATE",
+          `retry.agents repeats model profile \`${profileId}\``,
+          ["retry", "agents", String(index)],
+          "validation"
+        )
+      );
+      continue;
+    }
+    seen.add(profileId);
+    if (config.models.profiles[profileId] === undefined) {
+      diagnostics.push(
+        diagnostic(
+          "CONFIG_RETRY_AGENT_UNKNOWN",
+          `retry.agents references unknown model profile \`${profileId}\``,
+          ["retry", "agents", String(index)],
+          "validation"
+        )
+      );
+    }
+  }
+  if (
+    Number.isSafeInteger(sameAgentAttempts) &&
+    sameAgentAttempts > 0 &&
+    sameAgentAttempts <= MAX_RETRY_CHAIN_ATTEMPTS
+  ) {
+    const expandedAttempts = sameAgentAttempts + Math.max(0, config.retry.agents.length - 1);
+    if (expandedAttempts > MAX_RETRY_CHAIN_ATTEMPTS) {
+      diagnostics.push(
+        diagnostic(
+          "CONFIG_RETRY_CHAIN_MAX_EXCEEDED",
+          `retry expands to ${expandedAttempts} attempts; maximum is ${MAX_RETRY_CHAIN_ATTEMPTS}`,
+          ["retry"],
+          "validation"
+        )
+      );
+    }
+  }
+  return diagnostics;
+}
+
 function applyIntegerEnv(
   _config: ResolvedConfig,
   env: Record<string, string | undefined>,
@@ -687,6 +792,10 @@ function isNamedSemanticSchemaIssue(issue: ZodIssue): boolean {
 
 function isModelProfileSchemaIssue(issue: ZodIssue): boolean {
   return issue.path[0] === "models" && issue.path[1] === "profiles";
+}
+
+function isRetrySchemaIssue(issue: ZodIssue): boolean {
+  return issue.path[0] === "retry";
 }
 
 function sameDiagnosticIdentity(left: ConfigDiagnostic, right: ConfigDiagnostic): boolean {

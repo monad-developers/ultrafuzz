@@ -1673,7 +1673,28 @@ test("finding and report v2 schemas require their current canonical shapes", () 
       audit_profile_catalog_digest: "a".repeat(64),
       topology_digest: "b".repeat(64),
       prompt_digest: "c".repeat(64),
-      expanded_graph_fingerprint: "d".repeat(64)
+      expanded_graph_fingerprint: "d".repeat(64),
+      agent_execution: {
+        planned_chain: [
+          {
+            attempt: 1,
+            profile_id: "gpt55-xhigh",
+            agent_ref: "CodexAgent",
+            model_name: "gpt-5.5",
+            reasoning_effort: "xhigh",
+            role: "primary"
+          }
+        ],
+        failed_attempts: [],
+        producer: {
+          attempt: 1,
+          profile_id: "gpt55-xhigh",
+          agent_ref: "CodexAgent",
+          model_name: "gpt-5.5",
+          reasoning_effort: "xhigh",
+          role: "primary"
+        }
+      }
     },
     issues: [],
     non_production_outcomes: [],
@@ -1891,7 +1912,7 @@ test("planned graph v3 validates whole documents and executes every registered d
   };
   const graph: PlannedGraphDocument = {
     schema_version: PLANNED_GRAPH_SCHEMA_VERSION,
-    graph_version: "3" as const,
+    graph_version: "4" as const,
     topology_version: 2 as const,
     groups: {},
     nodes: [node]
@@ -1899,6 +1920,15 @@ test("planned graph v3 validates whole documents and executes every registered d
 
   assert.equal(validatePlannedGraph(graph).ok, true);
   assert.deepEqual(assertPlannedGraph(graph), graph);
+
+  const retryBoundary = structuredClone(graph);
+  retryBoundary.groups.review = { defaults: { max_attempts: 100 } };
+  assert.equal(validatePlannedGraph(retryBoundary).ok, true);
+
+  const excessiveRetry = structuredClone(graph);
+  excessiveRetry.groups.review = { defaults: { max_attempts: 101 } };
+  assert.equal(validatePlannedGraph(excessiveRetry).ok, false);
+
   assert.equal(validatePlannedGraph({ ...graph, schema_version: "2.0" }).ok, false);
   assert.equal(validatePlannedGraph({ ...graph, legacy: true }).ok, false);
   const findingsOutput = {

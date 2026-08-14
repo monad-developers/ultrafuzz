@@ -22,6 +22,41 @@ The agent name must have a factory entry in the project agent registry generated
 the selected profile's `model` and `reasoning`, so runtime model overrides and
 profile-specific reasoning are applied to the spawned Codex command.
 
+Bounded automatic retries and optional model fallback use profile IDs rather
+than parsing names:
+
+```toml
+[retry]
+same_agent_attempts = 3
+agents = ["sol-xhigh", "gpt55-xhigh"]
+
+[models.sol-xhigh]
+agent = "CodexAgent"
+model = "gpt-5.6-sol"
+reasoning = "xhigh"
+
+[models.gpt55-xhigh]
+agent = "CodexAgent"
+model = "gpt-5.5"
+reasoning = "xhigh"
+```
+
+`same_agent_attempts` includes the first attempt. `agents[0]` becomes the
+default primary profile, and each later profile receives one attempt after the
+primary budget is exhausted. A node or group `max_attempts` overrides the
+project primary count. The complete primary-plus-fallback chain may contain at
+most 100 attempts. Omitting `agents`, or leaving it empty, keeps model fallback
+disabled. Retries use bounded exponential backoff, a fresh session, and the
+same effective task prompt, including Smithers' safety contracts; Ultrafuzz does
+not inspect provider error text. The
+planned chain and actual producer are recorded in the task manifest, attempt
+ledger, and final report.
+
+Retry chains currently require local execution. Cloud planning accepts one
+effective attempt, and local fallback across different agent implementations
+cannot include an API-key-authenticated rung until per-rung credential isolation
+is available.
+
 Validation requires every configured model profile to name a factory in the
 canonical `.smithers/agents/index.ts` registry. A noncanonical or incomplete registry
 fails before launch even when the missing agent belongs only to an opt-in
@@ -67,9 +102,11 @@ auth = "subscription"
 
 Select it per node or group in `.ultrafuzz/topology.yml`
 (`model_profiles = ["claude"]`). `--agent` and `--model` override fields of the
-default profile rather than selecting a profile by id, so a one-off Claude run
-is `ultrafuzz run --agent ClaudeAgent`; add `--model claude-sonnet-5` to pin a
-model, otherwise the Claude CLI default is used.
+active primary profile rather than selecting a profile by ID. That profile is
+`retry.agents[0]` when a retry list is configured, and `models.default`
+otherwise. A one-off Claude run is `ultrafuzz run --agent ClaudeAgent`; add
+`--model claude-sonnet-5` to pin a model, otherwise the Claude CLI default is
+used.
 
 Set `auth = "subscription"` to run against your logged-in Claude Code CLI
 session with no API key — `ClaudeAgent` clears `ANTHROPIC_API_KEY` so the

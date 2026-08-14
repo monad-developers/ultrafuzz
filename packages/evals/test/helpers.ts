@@ -313,7 +313,7 @@ export function currentPlannedGraph(
 ): PlannedGraphDocument {
   return {
     schema_version: PLANNED_GRAPH_SCHEMA_VERSION,
-    graph_version: "3",
+    graph_version: "4",
     topology_version: 2,
     groups: { default: {} },
     nodes: nodeIds.map((nodeId) => {
@@ -750,6 +750,13 @@ function writeSealedFinalReportAuthority(
     primary: output.primary
   }));
   const resources = { cpu: 2, memoryMiB: 1_024, timeoutSeconds: 60 };
+  const agentChain = [
+    {
+      profileId: model.model_profile_id,
+      agentRef: model.agent_ref,
+      role: "primary" as const
+    }
+  ];
   const task: SmithersTaskManifestTask = {
     attemptId: "final-report",
     concreteNodeId: node.id,
@@ -758,12 +765,13 @@ function writeSealedFinalReportAuthority(
     smithersNodeId: "node:final-report",
     verifierSmithersNodeId: "verify:final-report",
     agentRef: model.agent_ref,
+    agentChain,
     dependencies: [],
     dependencySmithersNodeIds: [],
     timeoutMs: 60_000,
     heartbeatTimeoutMs: 60_000,
     retries: 0,
-    retryPolicy: { backoff: "exponential", initialDelayMs: 1_000, maxDelayMs: 30_000 },
+    retryPolicy: { backoff: "exponential", initialDelayMs: 1_000 },
     workspacePath,
     artifactDir,
     dependencyArtifactDirs: [],
@@ -774,7 +782,7 @@ function writeSealedFinalReportAuthority(
       run: {
         ultrafuzzRunId: layout.runId,
         smithersWorkflowName: workflowRunId,
-        graphVersion: "3",
+        graphVersion: "4",
         topologyVersion: 2
       },
       node: {
@@ -796,7 +804,8 @@ function writeSealedFinalReportAuthority(
         profileId: model.model_profile_id,
         agentRef: model.agent_ref,
         modelIndex: model.model_index,
-        attemptIndex: model.attempt_index
+        attemptIndex: model.attempt_index,
+        agentChain
       },
       workspace: { primitive: "worktree", path: workspacePath, repoPath: "/repo", trustModel: "skip-permissions" },
       artifacts: {
@@ -804,7 +813,7 @@ function writeSealedFinalReportAuthority(
         outputs: taskOutputs,
         manifestPath: path.join(artifactDir, "artifact-manifest.json")
       },
-      retryPolicy: { maxAttempts: 1, smithersRetries: 0 },
+      retryPolicy: { maxAttempts: 1, sameAgentAttempts: 1, smithersRetries: 0 },
       timeout: { milliseconds: 60_000, seconds: 60, heartbeatTimeoutMs: 60_000 },
       execution: { mode: "local", resources }
     }
