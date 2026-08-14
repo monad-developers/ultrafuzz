@@ -6720,11 +6720,15 @@ function coverageEvidenceMarkdownProjectionDiagnostics(
     .filter((line) => line.length > 0);
   const sections = markdownSectionOccurrences(markdown, "## Scoped coverage evidence");
   const renderedLines = sections[0]?.filter((line) => line.length > 0);
+  const visibleHeadingCount = renderedMarkdownBlocks(markdown).filter(
+    (block) => block.headingDepth === 2 && block.text.trim() === "Scoped coverage evidence"
+  ).length;
   const containsScopedFraction = (line: string): boolean =>
     /\b(?:selected-range|production-source)\b/u.test(line) && /\b\d+\s*\/\s*\d+\b/u.test(line);
   const scopedFractions = unfencedMarkdownLines(markdown).filter(containsScopedFraction);
   const expectedFractions = expectedLines.filter(containsScopedFraction);
-  return sections.length === 1 &&
+  return visibleHeadingCount === 1 &&
+    sections.length === 1 &&
     renderedLines !== undefined &&
     sameStringSequence(renderedLines, expectedLines) &&
     sameStringSequence(scopedFractions, expectedFractions)
@@ -6806,7 +6810,10 @@ function unscopedCoverageScoreKinds(line: string, requireCoverageContext: boolea
   const score = /\b(?:100(?:\.0+)?|\d{1,2}(?:\.\d+)?)\s*[%％]|\b\d+\s*\/\s*\d+\b/gu;
   const namedScope = /\b(?:selected-range|production-source)\b/giu;
   const kinds = new Set<"percentage" | "fraction">();
-  const normalizedLine = line.replace(/\p{Default_Ignorable_Code_Point}/gu, "");
+  const normalizedLine = line
+    .normalize("NFKC")
+    .replace(/\u2044/gu, "/")
+    .replace(/\p{Default_Ignorable_Code_Point}/gu, "");
   for (const coverageClause of normalizedLine.split(
     /\s*(?:[,!?;[\]{}]|\u2013|\u2014|(?<!\d)\.|\.(?!\d)|\b(?:and|but|whereas|while)\b)\s*/iu
   )) {
@@ -6838,8 +6845,13 @@ function unscopedCoverageScoreKinds(line: string, requireCoverageContext: boolea
       const scoped = scopes.some((scope) => {
         const midpoint = scope.index! + scope[0].length / 2;
         if (midpoint < regionStart || midpoint >= regionEnd) return false;
-        if (scope.index! >= start) return true;
         const scopeEnd = scope.index! + scope[0].length;
+        const competingCoverageMetric =
+          /\b(?:branch|code|function|line|overall|range|source|standardized|test)[ \t]+coverage\b/iu;
+        if (scope.index! >= start) {
+          return !competingCoverageMetric.test(clause.slice(regionStart, start));
+        }
+        if (competingCoverageMetric.test(clause.slice(scopeEnd, start))) return false;
         const colon = clause.indexOf(":", scopeEnd);
         return !(
           colon >= scopeEnd &&
@@ -6933,7 +6945,10 @@ function renderedMarkdownNodeText(node: MarkdownNode, state: HtmlVisibilityState
   if (node.type === "text") return state.hiddenElements.length === 0 ? (node.value ?? "") : "";
   if (node.type === "inlineCode") return state.hiddenElements.length === 0 ? (node.value ?? "") : "";
   if (node.type === "html") return visibleHtmlText(node.value ?? "", state);
-  if (node.type === "image" || node.type === "imageReference") return "";
+  if (node.type === "image" || node.type === "imageReference") {
+    const alt = state.hiddenElements.length === 0 ? (node.alt ?? "").trim() : "";
+    return alt === "" ? "" : `. ${alt}.`;
+  }
   if (node.type === "break") return state.hiddenElements.length === 0 ? "\n" : "";
   return node.children?.map((child) => renderedMarkdownNodeText(child, state)).join("") ?? "";
 }
@@ -6986,6 +7001,13 @@ function visibleHtmlText(html: string, state: HtmlVisibilityState): string {
         /(?:^|\s)(?:hidden|inert)(?:\s|=|$)/iu.test(tag) ||
         /(?:^|\s)aria-hidden\s*=\s*(?:["']?true\b)/iu.test(tag) ||
         /(?:^|\s)style\s*=\s*(["'])[^"']*(?:display\s*:\s*none|visibility\s*:\s*hidden)[^"']*\1/iu.test(tag));
+    if (tagName !== undefined && !hiddenTag && state.hiddenElements.length === 0 && !/^\s*\//u.test(tag)) {
+      const accessibleLabel =
+        htmlAttributeValue(tag, "aria-label") ?? (tagName === "img" ? htmlAttributeValue(tag, "alt") : undefined);
+      if (accessibleLabel !== undefined && accessibleLabel.trim() !== "") {
+        visible += `. ${decodeHTML(accessibleLabel)}.`;
+      }
+    }
     if (tagName !== undefined && (hiddenTag || state.hiddenElements.includes(tagName))) {
       if (/^\s*\//u.test(tag)) {
         const matchingIndex = state.hiddenElements.lastIndexOf(tagName);
@@ -6997,6 +7019,11 @@ function visibleHtmlText(html: string, state: HtmlVisibilityState): string {
     index = tagEnd + 1;
   }
   return decodeHTML(visible);
+}
+
+function htmlAttributeValue(tag: string, attribute: "alt" | "aria-label"): string | undefined {
+  const match = new RegExp(`(?:^|\\s)${attribute}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'=<>\\x60]+))`, "iu").exec(tag);
+  return match?.[1] ?? match?.[2] ?? match?.[3];
 }
 
 function htmlTagEnd(html: string, start: number): number {
@@ -7020,7 +7047,7 @@ function coverageMetricScoreLanguageContext(value: string): boolean {
     "(?:(?<!insurance[ \\t])coverage|lcov|covg-eval|standardized[ \\t]+(?:measurement|rate|result|score))";
   const metricQualifier = "(?:branch|code|function|line|overall|range|source|standardized|test)";
   const approximation = "(?:about|approximately|nearly|roughly)";
-  const metricLink = `(?::|=|at\\b|of\\b|(?:is|was|measured|reached|remained|hit|registered|reported|totaled|yielded)\\b(?:[ \\t]+${approximation})?|came[ \\t]+to\\b|accounted[ \\t]+for\\b|stood[ \\t]+at\\b|[\\p{L}-]+(?:[ \\t]+(?:up|down))?[ \\t]+(?:to|at)\\b)?`;
+  const metricLink = `(?::|=|at\\b|of\\b|(?:is|was|measured|reached|remained|hit|registered|reported|totaled|yielded)\\b(?:[ \\t]+(?:${approximation}|above|below|over|under))?|(?:improved|increased|rose|grew|climbed|advanced|jumped|moved)[ \\t]+from\\b|(?:now[ \\t]+)?(?:shows?|showed|indicates?|indicated|exceeds?|exceeded|surpasses?|surpassed|tops?|topped)\\b|came[ \\t]+to\\b|accounted[ \\t]+for\\b|stood[ \\t]+at\\b|[\\p{L}-]+(?:[ \\t]+(?:up|down))?[ \\t]+(?:to|at)\\b)?`;
   const directCoverageScore = new RegExp(
     `(?:${coverageMetric}[ \\t]*(?:(?:measurement|percentage|rate|result|score)[ \\t]*)?${metricLink}[ \\t]*${score}|${score}[ \\t]*(?:${metricQualifier}[ \\t]+)?${coverageMetric})`,
     "iu"
