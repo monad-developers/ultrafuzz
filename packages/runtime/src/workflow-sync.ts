@@ -63,6 +63,7 @@ import {
   type NodeState,
   type NodeStatus,
   type RunLayout,
+  type RunRecoveryProvenance,
   type RunMetadataAccounting,
   type RunMetadataDocument,
   type RunStatus,
@@ -596,7 +597,7 @@ export async function synchronizeLinkedWorkflowRun(
 
   const finalStatus = finalRunStatus(inspect, syncResult.nodeStatuses, readRunState(layout).status, {
     evidenceComplete: syncResult.syncedNodes >= loaded.tasks.length,
-    recoveryPending: readRunState(layout).provenance?.recovery?.recovered === false
+    recovery: readRunState(layout).provenance?.recovery
   });
   const stateBeforeStatusUpdate = readRunState(layout);
   const previousRunStatus = stateBeforeStatusUpdate.status;
@@ -617,11 +618,15 @@ export async function synchronizeLinkedWorkflowRun(
       recovered_at: new Date(synchronizationClock(control)).toISOString()
     };
     writeRunState(layout, { ...state, provenance: { ...state.provenance!, recovery: recovered } });
-    if (!replayEvents(layout).records.some((event) => event.event_type === "run-recovered")) {
+    if (
+      !replayEvents(layout).records.some(
+        (event) => event.event_type === "run-recovered" && event.payload.recovery_id === recovery.recovery_id
+      )
+    ) {
       appendEvent(layout, {
         eventType: "run-recovered",
         status: "succeeded",
-        payload: { prior_status: "failed", failed_nodes: recovery.failed_nodes }
+        payload: { recovery_id: recovery.recovery_id, prior_status: "failed", failed_nodes: recovery.failed_nodes }
       });
     }
   }
@@ -3847,7 +3852,7 @@ function finalRunStatus(
   inspect: WorkflowInspect,
   nodeStatuses: Map<string, NodeStatus>,
   currentStatus: RunStatus,
-  options: { evidenceComplete: boolean; recoveryPending?: boolean } = { evidenceComplete: true }
+  options: { evidenceComplete: boolean; recovery?: RunRecoveryProvenance } = { evidenceComplete: true }
 ): RunStatus {
   const statuses = [...nodeStatuses.values()];
   const workflowStatus = inspect.runState;
@@ -3872,7 +3877,8 @@ function finalRunStatus(
     return "running";
   }
   if (
-    ((inspect.exhaustedLoops.length > 0 || workflowStatus === "failed") && !options.recoveryPending) ||
+    inspect.exhaustedLoops.length > 0 ||
+    (workflowStatus === "failed" && options.recovery?.recovered !== true) ||
     statuses.some((status) => ["failed", "skipped", "invalidated"].includes(status))
   ) {
     return "failed";
@@ -3891,7 +3897,7 @@ function finalRunStatus(
       : "failed";
   }
   if (
-    options.recoveryPending &&
+    options.recovery?.recovered === true &&
     options.evidenceComplete &&
     statuses.length > 0 &&
     statuses.every((status) => status === "succeeded" || status === "reused-from-prior-run")

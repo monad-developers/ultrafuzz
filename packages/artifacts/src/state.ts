@@ -164,13 +164,15 @@ export interface RunWorkflowProvenance {
 export interface RunProvenance {
   workflow: RunWorkflowProvenance;
   recovery?: RunRecoveryProvenance;
+  recovery_history?: RunRecoveryProvenance[];
 }
 
 export interface RunRecoveryProvenance {
+  recovery_id: string;
   recovered: boolean;
   recovered_at?: string;
   prior_status: "failed";
-  failed_nodes: Array<{ node_id: string; failure_category?: string }>;
+  failed_nodes: Array<{ node_id: string; failure_category: (typeof NODE_PROVENANCE_FAILURE_CATEGORIES)[number] }>;
 }
 
 export interface TaskNodeWorkflowProvenance {

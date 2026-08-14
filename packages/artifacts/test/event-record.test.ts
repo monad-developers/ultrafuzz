@@ -61,6 +61,7 @@ const validVariantFixtures: Record<string, Record<string, unknown>> = Object.fro
       "reference-node"
     ),
     event("run-recovered", "succeeded", {
+      recovery_id: LINK_ID,
       prior_status: "failed",
       failed_nodes: [{ node_id: "node-1", failure_category: "agent-failure" }]
     }),

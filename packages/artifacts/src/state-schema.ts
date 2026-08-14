@@ -47,14 +47,18 @@ const runWorkflowProvenanceSchema = z.strictObject({
   executionSnapshot: z.string().regex(/^smithers\/execution-snapshots\/[0-9a-f]{64}$/u)
 });
 const runRecoveryProvenanceSchema = z.strictObject({
+  recovery_id: canonicalUuidSchema,
   recovered: z.boolean(),
   recovered_at: canonicalTimestampSchema.optional(),
   prior_status: z.literal("failed"),
-  failed_nodes: z.array(z.strictObject({ node_id: nonEmptyString, failure_category: nonEmptyString.optional() }))
+  failed_nodes: z
+    .array(z.strictObject({ node_id: nonEmptyString, failure_category: z.enum(NODE_PROVENANCE_FAILURE_CATEGORIES) }))
+    .min(1)
 });
 const runProvenanceSchema = z.strictObject({
   workflow: runWorkflowProvenanceSchema,
-  recovery: runRecoveryProvenanceSchema.optional()
+  recovery: runRecoveryProvenanceSchema.optional(),
+  recovery_history: z.array(runRecoveryProvenanceSchema).optional()
 });
 const taskWorkflowProvenanceSchema = z.strictObject({
   run_id: nonEmptyString,
@@ -445,26 +449,29 @@ export const runStateJsonSchema = {
       additionalProperties: false,
       properties: {
         workflow: { $ref: "#/$defs/runWorkflowProvenance" },
-        recovery: { $ref: "#/$defs/runRecoveryProvenance" }
+        recovery: { $ref: "#/$defs/runRecoveryProvenance" },
+        recovery_history: { type: "array", items: { $ref: "#/$defs/runRecoveryProvenance" } }
       }
     },
     runRecoveryProvenance: {
       type: "object",
-      required: ["recovered", "prior_status", "failed_nodes"],
+      required: ["recovery_id", "recovered", "prior_status", "failed_nodes"],
       additionalProperties: false,
       properties: {
+        recovery_id: canonicalUuidJsonSchema,
         recovered: { type: "boolean" },
         recovered_at: canonicalTimestampJsonSchema,
         prior_status: { const: "failed" },
         failed_nodes: {
           type: "array",
+          minItems: 1,
           items: {
             type: "object",
-            required: ["node_id"],
+            required: ["node_id", "failure_category"],
             additionalProperties: false,
             properties: {
               node_id: { type: "string", minLength: 1 },
-              failure_category: { type: "string", minLength: 1 }
+              failure_category: { enum: NODE_PROVENANCE_FAILURE_CATEGORIES }
             }
           }
         }

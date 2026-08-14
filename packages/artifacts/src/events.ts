@@ -34,7 +34,8 @@ import {
   RUN_STATE_STATUSES,
   SMITHERS_NODE_STATES,
   SMITHERS_RUN_STATES,
-  SMITHERS_RUN_STATUSES
+  SMITHERS_RUN_STATUSES,
+  NODE_PROVENANCE_FAILURE_CATEGORIES
 } from "./state.js";
 export { SMITHERS_NODE_STATES, SMITHERS_RUN_STATES, SMITHERS_RUN_STATUSES } from "./state.js";
 
@@ -212,10 +213,13 @@ const workflowFailureUnattributedPayloadSchema = z.strictObject({
   durable_node_statuses: z.array(nodeStatusSchema)
 });
 const runRecoveredPayloadSchema = z.strictObject({
+  recovery_id: canonicalUuidSchema,
   prior_status: z.literal("failed"),
-  failed_nodes: z.array(
-    z.strictObject({ node_id: nonEmptyStringSchema, failure_category: nonEmptyStringSchema.optional() })
-  )
+  failed_nodes: z
+    .array(
+      z.strictObject({ node_id: nonEmptyStringSchema, failure_category: z.enum(NODE_PROVENANCE_FAILURE_CATEGORIES) })
+    )
+    .min(1)
 });
 const nodeSyncedPayloadSchema = z.strictObject({
   workflow_run_id: nonEmptyStringSchema,
@@ -579,18 +583,20 @@ const eventRecordJsonSchemaDefinitions = {
   runRecoveredPayload: {
     type: "object",
     additionalProperties: false,
-    required: ["prior_status", "failed_nodes"],
+    required: ["recovery_id", "prior_status", "failed_nodes"],
     properties: {
+      recovery_id: canonicalUuidJsonSchema,
       prior_status: { const: "failed" },
       failed_nodes: {
         type: "array",
+        minItems: 1,
         items: {
           type: "object",
-          required: ["node_id"],
+          required: ["node_id", "failure_category"],
           additionalProperties: false,
           properties: {
             node_id: { $ref: "#/$defs/nonEmptyString" },
-            failure_category: { $ref: "#/$defs/nonEmptyString" }
+            failure_category: { enum: NODE_PROVENANCE_FAILURE_CATEGORIES }
           }
         }
       }

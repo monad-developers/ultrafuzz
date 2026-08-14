@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -20,6 +21,7 @@ import {
   type RunMetadataDocument,
   type RunMetadataWorkflow,
   type RunWorkflowProvenance,
+  type RunRecoveryProvenance,
   type RunLayout,
   type AppendEventInput,
   type SmithersTaskManifestDocument,
@@ -399,6 +401,12 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
     if (preflightDiagnostics.length > 0) {
       return runtimeFailure<WorkflowLifecycleValue>(preflightDiagnostics);
     }
+    // Reconcile Smithers before retrying so a stale local running state cannot
+    // hide the failed run that this retry is recovering.
+    if (action === "resume" && input.retryFailed === true) {
+      const { syncRun } = await import("./workflow-sync.js");
+      await syncRun({ projectRoot: input.projectRoot, runId: input.runId, env: input.env });
+    }
     const requestedConcurrency = input.maxConcurrency ?? sealedConfig.run.maxParallelAgents;
     const forgeGuard = prepareForgeGuardEnvironment({
       layout: evidence.layout,
@@ -496,20 +504,40 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
     const stateBeforeLifecycle = readRunState(evidence.layout);
     if (action === "resume" && input.retryFailed === true && stateBeforeLifecycle.status === "failed") {
       const failedNodes = Object.values(stateBeforeLifecycle.nodes)
-        .filter((node) => node.status === "failed")
+        .filter((node) => node.status === "failed" || node.status === "timed-out")
         .map((node) => {
           const provenance = node.provenance as Record<string, unknown> | undefined;
           const failure = provenance?.failure as Record<string, unknown> | undefined;
+          const category = failure?.category;
+          const failureCategory: RunRecoveryProvenance["failed_nodes"][number]["failure_category"] =
+            category === "dependency-cascade"
+              ? "dependency-cascade"
+              : category === "artifact-contract"
+                ? "artifact-contract"
+                : category === "provider-interruption" || node.status === "timed-out"
+                  ? "provider-interruption"
+                  : "agent-failure";
           return {
             node_id: node.node_id,
-            ...(typeof failure?.category === "string" ? { failure_category: failure.category } : {})
+            failure_category: failureCategory
           };
         });
+      const priorRecovery = stateBeforeLifecycle.provenance?.recovery;
+      const recoveryHistory = [
+        ...(stateBeforeLifecycle.provenance?.recovery_history ?? []),
+        ...(priorRecovery === undefined ? [] : [priorRecovery])
+      ];
       writeRunState(evidence.layout, {
         ...stateBeforeLifecycle,
         provenance: {
           ...stateBeforeLifecycle.provenance!,
-          recovery: { recovered: false, prior_status: "failed", failed_nodes: failedNodes }
+          recovery_history: recoveryHistory,
+          recovery: {
+            recovery_id: crypto.randomUUID(),
+            recovered: false,
+            prior_status: "failed",
+            failed_nodes: failedNodes
+          }
         }
       });
     }
