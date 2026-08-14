@@ -982,4 +982,20 @@ describe("prompt rendering", () => {
     expect(path.basename(renderedPath)).toBe("prompt.rendered.md");
     expect(readFileSync(renderedPath, "utf8")).toBe(result.renderedMarkdown);
   });
+
+  it("renders report-bound finding vocabularies from the shared authority", () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    tmpDirs.push(tmp);
+    const input = baseRenderInput(tmp);
+    input.prompt = "{{finding_reachability_vocabulary}}\n{{finding_note_key_vocabulary}}";
+
+    const rendered = renderPrompt(input).renderedMarkdown;
+    expect(rendered).toContain("reachability=public-entrypoint-trace");
+    expect(rendered).toContain("reachability=public-wrapper-required");
+    expect(rendered).toContain("helper_proof=<summary>");
+    expect(rendered).not.toContain("reachability=<summary>");
+    expect(rendered).toContain("stateful_failure_classification=<production-bug|harness-defect|");
+    input.variables = { finding_reachability_vocabulary: "reachability=renamed" };
+    expect(() => renderPrompt(input)).toThrow(/authoritative and cannot be overridden/u);
+  });
 });

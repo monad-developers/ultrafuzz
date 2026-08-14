@@ -816,7 +816,7 @@ describe("prompt semantic anchors", () => {
     expect(markdown).toContain("| High | High | High | Medium |");
     expect(markdown.toLowerCase()).toContain("public reachability");
     expect(markdown).toContain("incomplete-spec");
-    expect(markdown).toContain("severity == matrix(impact, likelihood)");
+    expect(markdown).toContain("Severity must equal the matrix result for impact and likelihood");
     expect(markdown).toContain("Never emit a final-severity alias or re-rate confidence");
     expect(markdown).toContain(
       "Do not emit `final_severity`,\n`upstream_severity`, note-token aliases, or compatibility fields"

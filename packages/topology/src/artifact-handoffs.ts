@@ -1,4 +1,5 @@
-import { PromptError, extractPromptVariables } from "@ultrafuzz/prompts";
+import { findingReportSemanticAssignment } from "@ultrafuzz/artifacts";
+import { PromptError, extractPromptVariables, parsePromptFrontmatter } from "@ultrafuzz/prompts";
 import type { PromptVariableReference } from "@ultrafuzz/prompts";
 import { START_NODE_ID } from "./types.js";
 import type { NormalizedProjectTopology, NormalizedTopologyNode } from "./types.js";
@@ -11,6 +12,13 @@ export type { PromptVariableReference };
 export interface ArtifactHandoffValidationOptions {
   promptTexts?: Record<string, string>;
 }
+
+const REPORT_VOCABULARY_CONTRACTS = new Set([
+  "ultrafuzz/findings@2",
+  "ultrafuzz/triaged-findings@1",
+  "ultrafuzz/severity-classified-findings@1",
+  "ultrafuzz/report@2"
+]);
 
 export function validateArtifactHandoffs(
   topology: NormalizedProjectTopology,
@@ -25,9 +33,47 @@ export function validateArtifactHandoffs(
     if (promptText === undefined) {
       continue;
     }
-    for (const variable of extractPromptVariablesForNode(node, promptText)) {
+    const promptBody = promptBodyForNode(node, promptText);
+    const variables = extractPromptVariablesForNode(node, promptBody);
+    validateReportVocabularyVariables(node, promptBody, variables);
+    for (const variable of variables) {
       validatePromptVariable(node, variable, nodeById);
     }
+  }
+}
+
+function validateReportVocabularyVariables(
+  node: NormalizedTopologyNode,
+  promptText: string,
+  variables: PromptVariableReference[]
+): void {
+  const publishesReportVocabulary = node.outputs.some((output) => REPORT_VOCABULARY_CONTRACTS.has(output.contract));
+  if (!publishesReportVocabulary) return;
+  for (const variable of ["finding_reachability_vocabulary", "finding_note_key_vocabulary"]) {
+    if (!variables.some((reference) => reference.name === variable)) {
+      throw topologyError(
+        "MISSING_REPORT_VOCABULARY_REFERENCE",
+        `Node \`${node.id}\` prompt must reference authoritative report vocabulary \`{{${variable}}}\``,
+        { nodeId: node.id, variable }
+      );
+    }
+  }
+  const duplicated = findingReportSemanticAssignment(promptText);
+  if (duplicated !== undefined) {
+    throw topologyError(
+      "DUPLICATED_REPORT_VOCABULARY",
+      `Node \`${node.id}\` prompt duplicates unsupported report-bound key \`${duplicated.key}\`; use the authoritative rendered variables`,
+      { nodeId: node.id, key: duplicated.key }
+    );
+  }
+}
+
+function promptBodyForNode(node: NormalizedTopologyNode, promptText: string): string {
+  try {
+    return parsePromptFrontmatter(promptText).body;
+  } catch (error) {
+    if (error instanceof PromptError) throw topologyErrorForPromptError(node, error);
+    throw error;
   }
 }
 

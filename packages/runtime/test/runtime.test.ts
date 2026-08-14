@@ -1116,6 +1116,7 @@ function writeCurrentArtifactVerificationMarker(runRoot: string, attemptId: stri
 }
 
 const GENERIC_RUNTIME_MARKDOWN_PATH = "setup/runtime-fixture.md";
+const REPORT_VOCABULARY_PROMPT_REFERENCES = "\n{{finding_reachability_vocabulary}}\n{{finding_note_key_vocabulary}}\n";
 
 function writeSmallTopology(project: string, discoveryMarkdownPath = "setup/project-discovery.md"): void {
   const discoveryPromptPath =
@@ -1150,6 +1151,11 @@ nodes:
     "utf8"
   );
   if (discoveryMarkdownPath === GENERIC_RUNTIME_MARKDOWN_PATH) writeNeutralRuntimeFixturePrompt(project);
+  fs.appendFileSync(
+    path.join(project, ".ultrafuzz", "prompts", discoveryPromptPath),
+    REPORT_VOCABULARY_PROMPT_REFERENCES,
+    "utf8"
+  );
 }
 
 async function compileInvariantCampaignBudgetFixture(input: {
@@ -1311,6 +1317,8 @@ Reference:
 {{artifact_handoff:reference-properties-example}}
 
 Write output to {{artifact_path}}/setup/project-discovery.md and findings to {{output_findings_path}}.
+{{finding_reachability_vocabulary}}
+{{finding_note_key_vocabulary}}
 `,
     "utf8"
   );
@@ -1466,6 +1474,8 @@ display_name: Project Discovery
 Strategy: {{strategy}}
 Current artifact dir: {{artifact_path}}
 Findings: {{output_findings_path}}
+{{finding_reachability_vocabulary}}
+{{finding_note_key_vocabulary}}
 `,
     "utf8"
   );
@@ -1480,6 +1490,8 @@ Ancestor snapshots:
 {{artifact_path:project-discovery}}/${discoveryMarkdownPath}
 
 Current findings: {{output_findings_path}}
+{{finding_reachability_vocabulary}}
+{{finding_note_key_vocabulary}}
 `,
     "utf8"
   );
@@ -4351,6 +4363,8 @@ display_name: Project Discovery
 ---
 
 Write findings to {{output_findings_path}}.
+{{finding_reachability_vocabulary}}
+{{finding_note_key_vocabulary}}
 `,
     "utf8"
   );
@@ -4403,6 +4417,8 @@ display_name: Priority plumbing test
 Threshold={{invariant_property_priority_threshold}}
 Filter={{invariant_property_priority_filter}}
 Priorities={{invariant_property_priorities}}
+{{finding_reachability_vocabulary}}
+{{finding_note_key_vocabulary}}
 `,
     "utf8"
   );
@@ -7361,6 +7377,8 @@ display_name: Project Discovery
 ---
 
 ${`${marker} `.repeat(2000)}
+{{finding_reachability_vocabulary}}
+{{finding_note_key_vocabulary}}
 `,
     "utf8"
   );

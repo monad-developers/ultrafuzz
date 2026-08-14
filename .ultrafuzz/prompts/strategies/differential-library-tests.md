@@ -41,7 +41,11 @@ When a mismatch is only proven through a helper, internal function, library, or
 generated wrapper, audit whether a production public/external entrypoint can
 reach that same behavior. If direct reachability is unclear, keep the
 library-level proof, but do not present it as production exploitable on its own.
-Emit the finding with `reachability=public-wrapper-required` in `notes` and
+Use the appropriate authoritative reachability token in `notes`:
+
+{{finding_reachability_vocabulary}}
+
+Use authoritative note keys {{finding_note_key_vocabulary}} and
 spell out the wrapper or entrypoint evidence required. Route lifecycle/read
 requirements toward `lifecycle-view-boundaries`, market/exhaustion requirements
 toward `market-exhaustion-boundaries`, and broader user-flow requirements

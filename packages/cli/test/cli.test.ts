@@ -291,6 +291,14 @@ nodes:
   );
 }
 
+function appendReportVocabularyPromptReferences(project: string): void {
+  fs.appendFileSync(
+    path.join(project, ".ultrafuzz", "prompts", "setup", "project-discovery.md"),
+    "\n{{finding_reachability_vocabulary}}\n{{finding_note_key_vocabulary}}\n",
+    "utf8"
+  );
+}
+
 function writeReportTopology(project: string): void {
   fs.writeFileSync(
     path.join(project, ".ultrafuzz", "topology.yml"),
@@ -331,6 +339,7 @@ nodes:
 `,
     "utf8"
   );
+  appendReportVocabularyPromptReferences(project);
 }
 
 function writeCustomReportTopology(project: string): void {
@@ -363,6 +372,7 @@ nodes:
 `,
     "utf8"
   );
+  appendReportVocabularyPromptReferences(project);
 }
 
 function writeByteIdentityTopology(project: string): void {
@@ -413,6 +423,7 @@ nodes:
 `,
     "utf8"
   );
+  appendReportVocabularyPromptReferences(project);
 }
 
 async function cli(

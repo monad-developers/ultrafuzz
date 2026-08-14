@@ -106,8 +106,8 @@ instead: give the matching `dedupe_key` a `final_disposition` of `dropped` or
 `triage_classification` and `status` unchanged, and do not describe them as
 production bugs.
 
-Preserve stateful invariant context notes exactly, including
-`stateful_failure_classification=<classification>`. Use them as root-cause
+Preserve stateful invariant context notes exactly, including the typed
+stateful-failure classification entry from the authoritative note-key list. Use them as root-cause
 context, not as permission to promote invalid or blocked records. Do not
 promote `blocked-unreproduced` records without replayable evidence. Do not
 promote source-comment-only assumptions to production bugs without support from
@@ -122,21 +122,20 @@ test-only adapter. Production severity requires either a public/external
 entrypoint trace or a generated public wrapper PoC that reaches the same
 behavior under production-like preconditions.
 
-For every helper-level finding, record one of these exact reachability tokens in
+For every helper-level finding, record one authoritative reachability token in
 `severity_rationale`, which you own:
 
-- `reachability=public-entrypoint-trace`
-- `reachability=generated-public-wrapper-poc`
-- `reachability=helper-only`
-- `reachability=public-wrapper-required`
+{{finding_reachability_vocabulary}}
 
-Also include concise `helper_proof=<summary>` and
-`public_exploitability=<summary>` clauses in the same rationale when they are
-relevant. Never append these tokens to `notes`: triage owns `notes`, and you
-must copy the upstream array unchanged, including any reachability tokens triage
-already recorded there. Helper-only failures without public exploitability are
-harness defects, defensive hardening, or false positives; they are not
-production bugs.
+Use the authoritative report-bound keys below for concise helper proof and
+public exploitability clauses in the same rationale when they are relevant:
+
+{{finding_note_key_vocabulary}}
+
+Never append these tokens to `notes`: triage owns `notes`, and you must copy the
+upstream array unchanged, including any reachability tokens triage already
+recorded there. Helper-only failures without public exploitability are harness
+defects, defensive hardening, or false positives; they are not production bugs.
 
 ## Severity classification
 
@@ -222,7 +221,7 @@ Then check every emitted object:
 
 - `severity`, `impact`, and `likelihood` use only `High`, `Medium`, or `Low`.
 - No field used as a severity label contains `Critical`.
-- `severity == matrix(impact, likelihood)`.
+- Severity must equal the matrix result for impact and likelihood.
 - `severity_guess` is preserved even when the final matrix differs.
 - `confidence` is the preserved upstream lowercase `high`, `medium`, or `low`.
 - Neither `final_severity` nor a compatibility/upstream severity alias exists.

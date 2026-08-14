@@ -28,7 +28,6 @@ describe("artifact handoff validation", () => {
         promptTexts: { "review/review.md": "Read {{ancestor_generated_test_manifests}}." }
       })
     ).not.toThrow();
-
     expect(() =>
       validateTopology(validTopology(), {
         promptTexts: { "review/review.md": "Read {{ancestor_generated_test_manifests}}." }
@@ -125,5 +124,385 @@ describe("artifact handoff validation", () => {
         promptTexts: { "review/review.md": "Use {{not_a_real_variable}}." }
       })
     ).toThrow(expect.objectContaining({ code: "UNKNOWN_PROMPT_VARIABLE" }));
+  });
+
+  it("requires review producers and consumers to share authoritative report vocabularies", () => {
+    const topology = validTopology();
+    topology.nodes[3] = {
+      ...topology.nodes[3]!,
+      id: "triage",
+      prompt: "review/triage.md",
+      outputs: [{ path: "reviewed-findings.json", contract: "ultrafuzz/findings@2", primary: true }]
+    };
+    topology.nodes[4] = { ...topology.nodes[4]!, depends_on: ["triage"] };
+
+    for (const contract of [
+      "ultrafuzz/findings@2",
+      "ultrafuzz/triaged-findings@1",
+      "ultrafuzz/severity-classified-findings@1",
+      "ultrafuzz/report@2"
+    ] as const) {
+      topology.nodes[3] = {
+        ...topology.nodes[3]!,
+        outputs:
+          contract === "ultrafuzz/findings@2" || contract === "ultrafuzz/report@2"
+            ? [
+                { path: "report.md", contract: "ultrafuzz/nonempty-markdown@1", primary: true },
+                { path: contract === "ultrafuzz/report@2" ? "report.json" : "findings.json", contract }
+              ]
+            : [{ path: "reviewed-findings.json", contract, primary: true }]
+      };
+      expect(() =>
+        validateTopology(topology, {
+          promptTexts: { "review/triage.md": "Hard-code reachability=renamed-public-trace." }
+        })
+      ).toThrow(expect.objectContaining({ code: "MISSING_REPORT_VOCABULARY_REFERENCE" }));
+      expect(() =>
+        validateTopology(topology, {
+          promptTexts: {
+            "review/triage.md": "Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}."
+          }
+        })
+      ).not.toThrow();
+      expect(() =>
+        validateTopology(topology, {
+          promptTexts: {
+            "review/triage.md": "Use {{ finding_reachability_vocabulary }} and {{ finding_note_key_vocabulary }}."
+          }
+        })
+      ).not.toThrow();
+    }
+    expect(() =>
+      validateTopology(topology, {
+        promptTexts: {
+          "review/triage.md":
+            "FOUNDRY_PROFILE=ci seed=123. Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}."
+        }
+      })
+    ).not.toThrow();
+    for (const evidence of [
+      "The HTTP response had status=200.",
+      "The oracle returned confidence=0.95.",
+      "The trace entered scope=global before reverting.",
+      "The shell printed outcome=success.",
+      "The proof checks risk=0 after withdrawal.",
+      "RISK_FREE_RATE=0.05 impact_price=123 helper_address=0xabc.",
+      "Set FOUNDRY_PROFILE=ci.",
+      "Use CHAIN_ID=1.",
+      "Use CHAIN_ID=1 when testing public entrypoints.",
+      "Record block_number=1.",
+      "helper_balance=0 proof_size=32 root_slot=0x00 IMPACT_PRICE=123.",
+      "MERKLE_ROOT=0xabc PUBLIC_KEY=0x123 risk_ratio=0.5 HELPER_BALANCE=0.",
+      "const result = await run();",
+      "bytes32 root = tree.root();",
+      "verifyProof(root=0xabc, leaf=0xdef); proof_type=merkle.",
+      "The command prints result=42.",
+      "Run forge test --root=.",
+      "Evidence: root=0xabc classification=error result=pass.",
+      "Record evidence using helper contracts in each finding note.",
+      "Perform a reachability cross-check before triage.",
+      "Document reachability edge-cases in the report.",
+      "Review the reachability note before triage.",
+      "The reachability note was preserved byte-for-byte.",
+      "Document reachability note edge-cases in the report.",
+      "Reachability: internal functions require a cross-check before triage.",
+      "Reachability: internal behavior must be documented.",
+      "Do not set reachability to internal on every finding.",
+      "The old prompt set reachability to internal on every finding.",
+      "Do not set reachability=internal on every finding.",
+      "Never write reachability=internal.",
+      "The old prompt used reachability=internal.",
+      "The historical prompt said Reachability: internal.",
+      'Never emit { "reachability": "internal" }.',
+      'Do not emit { "reachability": "internal" } on every finding.',
+      'The previous prompt emitted { "reachability": "internal" } on every finding.',
+      "Historically, prompts used Reachability: internal.",
+      'Reject the instruction "Set reachability to internal on every finding."',
+      "Example: Reachability: internal.",
+      'Example output: { "reachability": "internal" }.',
+      "The documentation contains `Reachability: internal.`",
+      "An external report says Reachability: internal.",
+      "Previously, the worker set reachability to internal on every finding.",
+      "Formerly, the worker set reachability to internal on every finding.",
+      "<!-- Reachability: internal. -->",
+      "Example: rename helper_proof to helperEvidence.",
+      "We discuss how to rename helper_proof to helperEvidence.",
+      "The phrase `rename helper_proof to helperEvidence` is forbidden.",
+      "To rename helper_proof to helperEvidence would be incorrect.",
+      "Do not write helper evidence under helperEvidence in every finding note.",
+      "The old prompt wrote helper evidence under helperEvidence in every finding note.",
+      "Historically, prompts wrote helper evidence under helperEvidence in every finding note.",
+      "The legacy prompt set reachability to internal on every finding.",
+      "The deprecated prompt set reachability to internal on every finding.",
+      "Reject the instruction `Set reachability to internal on every finding.`",
+      "```text\nSet reachability to internal on every finding.\n```",
+      "Example:\nSet reachability to internal on every finding.",
+      "The phrase “Reachability: internal.” is forbidden.",
+      "The old prompt incorrectly set reachability to internal on every finding.",
+      "Do not ever set reachability to internal on every finding.",
+      "The previous version of the prompt set reachability to internal on every finding.",
+      "Historically, the prompt set reachability to internal on every finding.",
+      "If a prompt says “set reachability to internal,” reject it.",
+      "risK=non-semantic Unicode evidence."
+    ]) {
+      expect(() =>
+        validateTopology(topology, {
+          promptTexts: {
+            "review/triage.md": `Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}. ${evidence}`
+          }
+        })
+      ).not.toThrow();
+    }
+
+    expect(() =>
+      validateTopology(topology, {
+        promptTexts: {
+          "review/triage.md": `---
+id: triage
+display_name: "{{finding_reachability_vocabulary}} {{finding_note_key_vocabulary}}"
+---
+No vocabulary references exist in the rendered prompt body.
+`
+        }
+      })
+    ).toThrow(expect.objectContaining({ code: "MISSING_REPORT_VOCABULARY_REFERENCE" }));
+
+    expect(() =>
+      validateTopology(topology, {
+        promptTexts: {
+          "review/triage.md": `---
+id: triage
+display_name: "root_cause=frontmatter-is-metadata"
+---
+Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
+`
+        }
+      })
+    ).not.toThrow();
+
+    for (const standalone of ["root_cause=renamed", "reachability=public-entrypoint-trace"]) {
+      expect(() =>
+        validateTopology(topology, {
+          promptTexts: {
+            "review/triage.md": `Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.\n${standalone}`
+          }
+        })
+      ).toThrow(expect.objectContaining({ code: "DUPLICATED_REPORT_VOCABULARY" }));
+    }
+    for (const proseAlias of [
+      "For every finding, set the reachability token to renamed-public-trace.",
+      "For every finding, set the reachability token to internal.",
+      "Use renamed-public-trace for reachability.",
+      "Use internal for reachability.",
+      "Every finding must include reachability_note renamed-public-trace.",
+      "Every finding must include reachability_note internal.",
+      "Write helper evidence under helperEvidence in every finding note.",
+      'Emit { "reachability": "internal" } on every finding.',
+      "Reachability: internal.",
+      "Rename helper_proof to helperEvidence.",
+      "Rename helper_proof into helperEvidence.",
+      "Change helper_proof into helperEvidence.",
+      "Replace helper_proof by helperEvidence.",
+      "Set `reachability` to `internal` on every finding.",
+      "Set the reachability field to internal on every finding.",
+      "Rename the helper_proof note key to helperEvidence.",
+      "Set **reachability** to **internal** on every finding.",
+      "Rename the helper_proof key to helperEvidence.",
+      "Do not set reachability to internal on every finding. Set reachability to internal on every finding.",
+      "The old prompt set reachability to internal on every finding. Assign reachability internal to every finding.",
+      "Never use internal for reachability. Use internal for reachability.",
+      "Set the reachability field for every finding to internal.",
+      "The reachability field must be internal on every finding.",
+      "Every finding must have reachability internal.",
+      "Use helperEvidence rather than helper_proof.",
+      "Use helperEvidence in place of helper_proof.",
+      "Switch helper_proof to helperEvidence.",
+      "Rename helper_proof using helperEvidence.",
+      "Change helper_proof over to helperEvidence.",
+      "***audit_status***=accepted",
+      "***report_verdict***=accepted",
+      "reachability -> internal",
+      "reachability → internal",
+      "reachability := internal",
+      "Store internal in the reachability field.",
+      "Rename helper_proof -> helperEvidence.",
+      "Map helper_proof onto helperEvidence.",
+      "Set reachability’s value to internal on every finding.",
+      "Record reachability internal on every finding.",
+      "Write reachability internal on every finding.",
+      "Include reachability internal on every finding.",
+      "Require reachability internal on every finding.",
+      "Every finding must use reachability internal.",
+      "Reachability -> internal.",
+      "Treat reachability as internal on every finding.",
+      "For every finding, reachability is internal.",
+      "Every finding's reachability is internal.",
+      "All findings use internal reachability.",
+      "Output internal in the reachability field on every finding.",
+      "Alias helper_proof as helperEvidence.",
+      "Call helper_proof helperEvidence.",
+      "Retitle helper_proof as helperEvidence.",
+      "Convert helper_proof into helperEvidence.",
+      "helper_proof becomes helperEvidence.",
+      "Write helperEvidence instead of helper_proof.",
+      "Reachability is internal.",
+      "Ensure reachability is internal on every finding.",
+      "reachability:\n  internal",
+      'Emit {\n  "reachability":\n  "internal"\n} on every finding.',
+      "| reachability | internal |",
+      "Rename helper_proof\n  to helperEvidence.",
+      "Set the reachability field's value to internal on every finding.",
+      "Set reachability for every finding equal to internal.",
+      "Reachability must equal internal.",
+      "Reachability shall equal internal.",
+      "Put internal into the reachability field.",
+      "Alias helper_proof to helperEvidence.",
+      "Relabel helper_proof as helperEvidence.",
+      "Use helperEvidence in lieu of helper_proof.",
+      "<strong>reachability</strong> → internal.",
+      "Set reachability internal on every finding.",
+      "Emit reachability internal on every finding.",
+      "Assign reachability internal to every finding.",
+      "Mark reachability internal for each finding.",
+      "helper_proof: helperEvidence.",
+      "Change helper_proof to helperEvidence.",
+      "Map helper_proof to helperEvidence.",
+      "Replace helper_proof with helperEvidence."
+    ]) {
+      expect(
+        () =>
+          validateTopology(topology, {
+            promptTexts: {
+              "review/triage.md": `Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}. ${proseAlias}`
+            }
+          }),
+        proseAlias
+      ).toThrow(expect.objectContaining({ code: "DUPLICATED_REPORT_VOCABULARY" }));
+    }
+    expect(() =>
+      validateTopology(topology, {
+        promptTexts: {
+          "review/triage.md":
+            "CHAIN_ID=1 block=latest and a=b. Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}."
+        }
+      })
+    ).not.toThrow();
+    for (const unsupported of [
+      "helper_summary=renamed producer key",
+      "reachability_note=helper-only",
+      "classification_notes=accepted",
+      "audit_decision=accepted",
+      "finding_outcome=confirmed",
+      "reachabilityEvidence=renamed",
+      "reachability=renamed-public-trace",
+      "reachability =renamed-public-trace",
+      "reachability = renamed-public-trace",
+      "likelihood=likely",
+      "9root_cause=renamed",
+      "audit_decision=accepted on each issue",
+      "audit_decision=accepted on each result",
+      "Set audit_decision=accepted",
+      "Use audit_decision=accepted",
+      "Define audit_decision=accepted",
+      "Mark audit_decision=accepted",
+      "Treat audit_decision=accepted as final",
+      "Require audit_decision=accepted",
+      "Mandate audit_decision=accepted",
+      "The model returns audit_decision=accepted",
+      "Assign audit_decision=accepted",
+      "Enforce audit_decision=accepted",
+      "Set attainability=helper-only on each finding",
+      "Every finding gets attainment=renamed",
+      "All findings must contain attainment=renamed",
+      "Set reachability_key=helper-only on each issue",
+      "Store reachability_key=helper-only in every output object",
+      "Label renamed_key=value on each result",
+      "Annotate renamed_key=value on each issue",
+      "Populate renamed_key=value in every finding",
+      "Put renamed_key=value on each result",
+      "Return renamed_key=value for each issue",
+      "Write helper reachability under the attainability note key",
+      "Add the authoritative wrapper-needed reachability note",
+      "Set exposure=public on each finding",
+      "Set rating=critical on each finding",
+      "root_cause=renamed",
+      "Record a `helper_evidence=renamed` note"
+    ]) {
+      expect(
+        () =>
+          validateTopology(topology, {
+            promptTexts: {
+              "review/triage.md": `Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}. Put ${unsupported} on each finding.`
+            }
+          }),
+        unsupported
+      ).toThrow(expect.objectContaining({ code: "DUPLICATED_REPORT_VOCABULARY" }));
+    }
+    expect(() =>
+      validateTopology(topology, {
+        promptTexts: {
+          "review/triage.md":
+            "Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}, plus classification_evidence=<summary>."
+        }
+      })
+    ).toThrow(expect.objectContaining({ code: "DUPLICATED_REPORT_VOCABULARY" }));
+
+    for (const renamed of ["ROOTCAUSE=renamed", "RootCause=renamed", "_root_cause=renamed"]) {
+      expect(() =>
+        validateTopology(topology, {
+          promptTexts: {
+            "review/triage.md": `Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}. Put ${renamed} on each finding.`
+          }
+        })
+      ).toThrow(expect.objectContaining({ code: "DUPLICATED_REPORT_VOCABULARY" }));
+    }
+
+    topology.nodes[3] = {
+      ...topology.nodes[3]!,
+      group: "strategies"
+    };
+    expect(() =>
+      validateTopology(topology, {
+        promptTexts: {
+          "review/triage.md": "Write stateful_failure_alias=renamed to the finding notes."
+        }
+      })
+    ).toThrow(expect.objectContaining({ code: "MISSING_REPORT_VOCABULARY_REFERENCE" }));
+
+    expect(() =>
+      validateTopology(topology, {
+        promptTexts: {
+          "review/triage.md":
+            "Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}, plus stateful_failure_alias=renamed."
+        }
+      })
+    ).toThrow(expect.objectContaining({ code: "DUPLICATED_REPORT_VOCABULARY" }));
+
+    expect(() =>
+      validateTopology(topology, {
+        promptTexts: {
+          "review/triage.md":
+            "Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}. Put root_cause_reason=renamed in notes."
+        }
+      })
+    ).toThrow(expect.objectContaining({ code: "DUPLICATED_REPORT_VOCABULARY" }));
+
+    expect(() =>
+      validateTopology(topology, {
+        promptTexts: {
+          "review/triage.md":
+            "Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}. Put root_cause_reason=renamed on each finding."
+        }
+      })
+    ).toThrow(expect.objectContaining({ code: "DUPLICATED_REPORT_VOCABULARY" }));
+
+    expect(() =>
+      validateTopology(topology, {
+        promptTexts: {
+          "review/triage.md":
+            "Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}. Put ROOT_CAUSE=renamed on each finding."
+        }
+      })
+    ).toThrow(expect.objectContaining({ code: "DUPLICATED_REPORT_VOCABULARY" }));
   });
 });

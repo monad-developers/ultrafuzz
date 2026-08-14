@@ -45,6 +45,12 @@ functions plus concrete evidence, and calibrate confidence to the evidence.
 Use the schema-defined empty form when no finding is supportable; never
 fabricate a CI canary.
 
+Use only the authoritative report-bound note vocabulary:
+
+{{finding_reachability_vocabulary}}
+
+{{finding_note_key_vocabulary}}
+
 If you create a target-native test, keep it under
 `{{strategy_attempt_test_dir}}`, mirror it byte-for-byte beneath
 the `generated-tests/` directory under `{{artifact_path}}`, and list that safe artifact-relative path

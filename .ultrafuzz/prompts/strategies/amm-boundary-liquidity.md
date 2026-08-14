@@ -52,7 +52,7 @@ residual-reserve state.
 The matrix must include the target's documented public market, orderbook, quote,
 price-ladder, level, reserve, liquidity, and derived-price view/read functions
 when those functions exist. Use the documented ABI surface for the target rather
-than inventing helper-only reads.
+than inventing reads that exist only on internal helpers.
 
 Include reachable sentinel and edge states in the matrix:
 
@@ -80,3 +80,9 @@ record it as incomplete-spec instead of silently dropping it.
 Write structured findings to {{output_findings_path}}. If no finding is
 confirmed, use only the empty form defined by the exact pinned schema in the
 central output contract.
+
+Use only the authoritative report-bound note vocabulary:
+
+{{finding_reachability_vocabulary}}
+
+{{finding_note_key_vocabulary}}
