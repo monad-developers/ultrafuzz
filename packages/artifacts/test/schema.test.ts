@@ -1254,6 +1254,16 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
     operator: "=",
     value: "internal"
   });
+  for (const proseMapping of [
+    "Record access -> internal evidence on each finding.",
+    "Record root_cause: renamed evidence on each finding.",
+    "Record reachability -> helper-only evidence on each finding.",
+    "Record verification ↦ summary evidence on each finding.",
+    "Record root_cause ⟶ renamed evidence on each finding.",
+    "Record access ≔ internal evidence on each finding."
+  ]) {
+    assert.notEqual(findingReportSemanticAssignment(proseMapping), undefined, proseMapping);
+  }
 
   for (const evidenceAssignment of [
     "Observed balance=0 after withdrawal; expected balance=1.",

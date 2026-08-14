@@ -227,11 +227,15 @@ const findingReportColonAssignment = new RegExp(
 // A report alias can be followed by prose after its mapped value. Keep the
 // alias key independent from the single-identifier terminator used by the
 // stricter prompt assignment grammar so `access: internal evidence` is still
-// recognized as a duplicated report vocabulary directive.
+// recognized as a duplicated report vocabulary directive. The same applies to
+// every supported mapping operator and report-bound alias, including
+// multi-term keys such as `root_cause`.
 const findingReportLooseAliasColonAssignment = new RegExp(
-  `${assignmentBoundaryPattern}\\s*(?:${promptVocabularyOpenWrapperPattern})(${shortReportAliasKeyPatterns.join(
-    "|"
-  )})${promptVocabularyCloseWrapperPattern}\\s*:\\s*${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})`,
+  `${assignmentBoundaryPattern}\\s*${promptVocabularyOpenWrapperPattern}(${assignmentKeyPattern})${promptVocabularyCloseWrapperPattern}\\s*:\\s*${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})`,
+  "giu"
+);
+const findingReportLooseDirectMapping = new RegExp(
+  `${assignmentBoundaryPattern}\\s*${promptVocabularyOpenWrapperPattern}(${assignmentKeyPattern})${promptVocabularyCloseWrapperPattern}\\s*(?::=|≔|(?:-|=)>|→|↦|⟶)\\s*${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})`,
   "giu"
 );
 const findingReportDirectMapping = new RegExp(
@@ -347,7 +351,19 @@ export function findingReportSemanticAssignment(text: string): FindingReportSema
   findingReportLooseAliasColonAssignment.lastIndex = 0;
   for (const assignment of text.matchAll(findingReportLooseAliasColonAssignment)) {
     if (hasNonLiveDirectivePrefix(text, assignment.index)) continue;
-    return { key: assignment[1]!, operator: "=", value: assignment[2]! };
+    const key = assignment[1]!;
+    if (isLoosePromptReportVocabularyKey(key, text, assignment.index)) {
+      return { key, operator: "=", value: assignment[2]! };
+    }
+  }
+
+  findingReportLooseDirectMapping.lastIndex = 0;
+  for (const assignment of text.matchAll(findingReportLooseDirectMapping)) {
+    if (hasNonLiveDirectivePrefix(text, assignment.index)) continue;
+    const key = assignment[1]!;
+    if (isLoosePromptReportVocabularyKey(key, text, assignment.index)) {
+      return { key, operator: "=", value: assignment[2]! };
+    }
   }
 
   for (const mappingPattern of [
@@ -507,6 +523,19 @@ function isPromptReportVocabularyKey(identifier: string): boolean {
     canonicalFindingNoteKey(identifier) !== undefined ||
     explicitReportAliasKeySet.has(identifier.toLowerCase()) ||
     ((/[-_]/u.test(identifier) || /[a-z][A-Z]/u.test(identifier)) && isFindingReportMetadataKey(identifier))
+  );
+}
+
+function isLoosePromptReportVocabularyKey(identifier: string, text: string, index: number): boolean {
+  const canonicalKey = canonicalFindingNoteKey(identifier);
+  return (
+    explicitReportAliasKeySet.has(identifier.toLowerCase()) ||
+    (canonicalKey !== undefined &&
+      canonicalKey !== "impact" &&
+      canonicalKey !== "likelihood" &&
+      /\b(?:add|annotate|append|assign|define|emit|enforce|include|label|mandate|mark|populate|put|record|require|return|set|store|write)s?\s*$/iu.test(
+        text.slice(Math.max(0, index - 160), index)
+      ))
   );
 }
 
