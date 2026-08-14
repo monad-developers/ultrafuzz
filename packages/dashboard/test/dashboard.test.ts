@@ -97,6 +97,9 @@ test("does not replace a malformed present topology with an empty preview", asyn
 
 test("creates a topology node prompt as terminal work before finish", async () => {
   const projectRoot = makeProject();
+  const prompt =
+    "---\nid: added-check\ndisplay_name: Added check\n---\n\n# Added check\n\n" +
+    "{{finding_reachability_vocabulary}}\n\n{{finding_note_key_vocabulary}}\n";
   const handle = await serveDashboard({ projectRoot, port: 0 });
   try {
     const response = await fetch(apiUrl(handle.url, "/api/prompts/nodes"), {
@@ -107,7 +110,7 @@ test("creates a topology node prompt as terminal work before finish", async () =
       },
       body: JSON.stringify(
         dashboardRequest("prompt-create", {
-          content: "---\nid: added-check\ndisplay_name: Added check\n---\n\n# Added check\n",
+          content: prompt,
           group: "strategies",
           dependsOn: []
         })
@@ -121,7 +124,7 @@ test("creates a topology node prompt as terminal work before finish", async () =
     assert.equal(saved.path, ".ultrafuzz/prompts/strategies/added-check.md");
     assert.equal(
       fs.readFileSync(path.join(projectRoot, ".ultrafuzz", "prompts", "strategies", "added-check.md"), "utf8"),
-      "---\nid: added-check\ndisplay_name: Added check\n---\n\n# Added check\n"
+      prompt
     );
 
     const topology = await getJson<TopologyResponse>(apiUrl(handle.url, "/api/topology"), "topologyDetailResponse");
@@ -807,16 +810,17 @@ async function createDashboardFindingsFixture(
   const projectRoot = makeProject();
   const runId = "dashboard-declared-findings";
   const promptDirectory = path.join(projectRoot, ".ultrafuzz", "prompts", "review");
+  const reportVocabulary = "{{finding_reachability_vocabulary}}\n\n{{finding_note_key_vocabulary}}\n\n";
   fs.mkdirSync(promptDirectory, { recursive: true });
   fs.writeFileSync(
     path.join(promptDirectory, "renamed-review.md"),
-    "---\nid: renamed-review\ndisplay_name: Renamed review\n---\n\nProduce the declared review artifacts.\n",
+    `---\nid: renamed-review\ndisplay_name: Renamed review\n---\n\n${reportVocabulary}Produce the declared review artifacts.\n`,
     "utf8"
   );
   if (options.includeFinalReport === true) {
     fs.writeFileSync(
       path.join(promptDirectory, "summary-review.md"),
-      "---\nid: summary-review\ndisplay_name: Summary review\n---\n\nProduce the declared report artifacts.\n",
+      `---\nid: summary-review\ndisplay_name: Summary review\n---\n\n${reportVocabulary}Produce the declared report artifacts.\n`,
       "utf8"
     );
   }

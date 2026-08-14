@@ -497,7 +497,7 @@ export function testReportAuthority(
     report_markdown_sha256: TEST_SHA256,
     contract: "ultrafuzz/report@3",
     contract_digest: TEST_SHA256,
-    schema_id: "urn:ultrafuzz:schema:artifacts:final-report:2",
+    schema_id: "urn:ultrafuzz:schema:artifacts:report:3",
     schema_sha256: TEST_SHA256,
     schema_bundle_sha256: TEST_SHA256,
     validator_build: "ultrafuzz-test-validator",

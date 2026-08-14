@@ -1893,7 +1893,7 @@ test("run state schema covers all required node states and rejects malformed sta
   assert.ok(invalidWait.issues.some((issue) => issue.path.endsWith(".wait_since")));
 });
 
-test("planned graph v3 validates whole documents and executes every registered document semantic gate", () => {
+test("planned graph v4 validates whole documents and executes every registered document semantic gate", () => {
   const node: PlannedGraphNodeDocument = {
     id: "node-a",
     logical_id: "node-a",
