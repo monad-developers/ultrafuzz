@@ -10926,6 +10926,27 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
   const nestedAttribution = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(nestedAttribution.ok, true, JSON.stringify(nestedAttribution.diagnostics));
 
+  const harnessOnly = structuredClone(nestedSources);
+  harnessOnly.lcov = writeCoverageLcov(workspace, {
+    "packages/core/test/recon/NestedHarness.sol": { 1: 1 }
+  });
+  publish(
+    harnessOnly,
+    scopedMarkdown.replace(
+      "- `src/Critical.sol` (production): not selected",
+      "- `src/Critical.sol` (production): not selected\n" +
+        "- `packages/core/lib/Dep.sol` (dependency): not selected\n" +
+        "- `packages/core/test/recon/NestedHarness.sol` (harness): not selected"
+    )
+  );
+  const harnessOnlyCoverage = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.ok(
+    harnessOnlyCoverage.diagnostics.some(
+      (diagnostic) => diagnostic.code === "COVERAGE_PRODUCTION_SOURCE_ATTRIBUTION_EMPTY"
+    ),
+    JSON.stringify(harnessOnlyCoverage.diagnostics)
+  );
+
   evidence.lcov = writeCoverageLcov(workspace, {
     "src/Core.sol": { 2: 1, 3: 0 },
     "src/Critical.sol": { 4: 0, 5: 0, 6: 0, 7: 0 }
@@ -11570,7 +11591,7 @@ test("coverage gate fails closed when every configured production root is missin
   fs.mkdirSync(path.join(workspace, "test"), { recursive: true });
   fs.writeFileSync(path.join(workspace, "test/Harness.sol"), "contract Harness {}\n");
   const reconSelection = writeReconCoverageSelection(workspace, {});
-  const lcov = writeCoverageLcov(workspace, {});
+  const lcov = writeCoverageLcov(workspace, { "test/Harness.sol": { 1: 1 } });
   const evidence = {
     schema_version: "ultrafuzz.coverage-evidence.v1",
     status: "measured",
@@ -11759,30 +11780,26 @@ test("coverage gate authenticates Vyper declaration boundaries in the Recon sele
   );
 
   const inventedSelection = structuredClone(evidence);
-  inventedSelection.counted_ranges[1]!.selected = true;
-  inventedSelection.counted_ranges[1]!.covered = true;
-  inventedSelection.files[0] = {
-    path: "src/Module.vy",
-    kind: "production",
-    included: true,
-    covered_ranges: 1,
-    total_ranges: 4
-  } as (typeof inventedSelection.files)[number];
-  inventedSelection.views[0] = { scope: "recon-selected-declaration-completeness", covered_ranges: 1, total_ranges: 1 };
-  inventedSelection.views[1] = { scope: "production-declaration-completeness", covered_ranges: 1, total_ranges: 4 };
-  inventedSelection.zero_coverage_components = inventedSelection.zero_coverage_components.filter(
-    (entry) => entry.start_line !== 8
-  );
+  inventedSelection.counted_ranges[1]!.selected = false;
+  inventedSelection.counted_ranges[1]!.covered = false;
+  inventedSelection.views[0] = { scope: "recon-selected-declaration-completeness", covered_ranges: 0, total_ranges: 1 };
+  inventedSelection.zero_coverage_components = [
+    { path: "src/Module.vy", kind: "production", start_line: 8, line_count: 4 },
+    ...inventedSelection.zero_coverage_components
+  ];
   publish(
     inventedSelection,
-    "# Coverage\n\n## Scoped coverage evidence\n\n- recon-selected-declaration-completeness: `1/1`\n" +
+    "# Coverage\n\n## Scoped coverage evidence\n\n- recon-selected-declaration-completeness: `0/1`\n" +
       "- production-declaration-completeness: `1/4`\n\nExcluded from Recon-selected scope:\n- None\n\nZero-coverage components:\n" +
-      "- `src/Module.vy:5-5` (production)\n- `src/Module.vy:15-16` (production)\n" +
+      "- `src/Module.vy:5-5` (production)\n- `src/Module.vy:8-11` (production)\n- `src/Module.vy:15-16` (production)\n" +
       "- `src/Module.vy:19-20` (production)\n"
   );
   const wrongSelection = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(wrongSelection.ok, false);
-  assert.ok(wrongSelection.diagnostics.length > 0, JSON.stringify(wrongSelection.diagnostics));
+  assert.ok(
+    wrongSelection.diagnostics.some((diagnostic) => diagnostic.code === "COVERAGE_PRODUCTION_RANGE_SELECTION_MISMATCH"),
+    JSON.stringify(wrongSelection.diagnostics)
+  );
 });
 
 test("final report preserves typed coverage evidence and its canonical Markdown projection", () => {
