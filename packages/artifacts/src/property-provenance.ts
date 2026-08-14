@@ -963,13 +963,13 @@ const propertyCampaignPropertyResultSchema = z
           path: ["failure_ids"],
           message: `${result.status} property result cannot carry failure IDs`
         });
-      if (result.reason === null || result.reason === undefined)
+      if (result.reason === null)
         context.addIssue({
           code: "custom",
           path: ["reason"],
           message: `${result.status} property result requires a reason`
         });
-      if (result.reason_code === null || result.reason_code === undefined)
+      if (result.reason_code === null)
         context.addIssue({
           code: "custom",
           path: ["reason_code"],
@@ -1088,9 +1088,49 @@ export const propertyCampaignSchema = z
     property_results: z.array(propertyCampaignPropertyResultSchema).max(MAX_PROPERTY_CAMPAIGN_RECORDS).optional(),
     failures: z.array(propertyCampaignFailureSchema).max(MAX_PROPERTY_CAMPAIGN_RECORDS)
   })
+  .superRefine((campaign, context) => {
+    if (campaign.property_provenance_version === undefined) return;
+    for (const [index, result] of (campaign.property_results ?? []).entries()) {
+      const terminal = result.status === "passed" || result.status === "failed";
+      const valid = terminal
+        ? result.reason_code === null && result.reason === null
+        : typeof result.reason_code === "string" && typeof result.reason === "string";
+      if (!valid) {
+        context.addIssue({
+          code: "custom",
+          path: ["property_results", index],
+          message: "Current property campaign results require a complete typed reason projection"
+        });
+      }
+    }
+  })
   .meta({
     $id: PROPERTY_CAMPAIGN_JSON_SCHEMA_ID,
-    title: "Ultrafuzz property campaign result"
+    title: "Ultrafuzz property campaign result",
+    allOf: [
+      {
+        if: { properties: { property_provenance_version: {} }, required: ["property_provenance_version"] },
+        then: {
+          properties: {
+            property_results: {
+              type: "array",
+              items: {
+                if: {
+                  type: "object",
+                  properties: { status: { enum: ["inconclusive", "not-executed"] } },
+                  required: ["status"]
+                },
+                then: {
+                  type: "object",
+                  properties: { reason_code: {}, reason: {} },
+                  required: ["reason_code", "reason"]
+                }
+              }
+            }
+          }
+        }
+      }
+    ]
   });
 
 export const propertiesJsonSchema = z.toJSONSchema(propertiesSchema);

@@ -6296,7 +6296,12 @@ function verifyCampaignPropertyReferences(
   for (const campaign of campaigns) {
     const campaignPath = campaign.path;
     const seenEntrypoints = new Map<string, string>();
-    const provenanceIsCurrent = campaign.value.property_provenance_version !== undefined;
+    const provenanceIsCurrent =
+      campaign.value.property_provenance_version !== undefined ||
+      campaign.value.intended_entrypoints !== undefined ||
+      campaign.value.admitted_entrypoints !== undefined ||
+      campaign.value.property_results !== undefined ||
+      campaign.value.campaign_outcome !== undefined;
     const intendedEntrypoints = campaign.value.intended_entrypoints;
     const admittedEntrypoints = campaign.value.admitted_entrypoints;
     const propertyResults = campaign.value.property_results ?? [];

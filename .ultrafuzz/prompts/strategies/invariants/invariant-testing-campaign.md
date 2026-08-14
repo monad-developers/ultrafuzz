@@ -78,6 +78,10 @@ Use this configured invariant testing fuzzer timeout:
      `campaign-ended`, `ambiguous-entrypoint`, `backend-unavailable`, or
      `execution-inconclusive`) and a precise reason. A property must never
      inherit a sibling property's pass, failure, or omission status.
+     Set `property_provenance_version` to `1`. Preserve the generated suite/ABI
+     identity and the backend's authenticated discovery/result records as
+     evidence, and derive both entrypoint sets from those records; never copy
+     them from the campaign summary or another producer-authored projection.
    - Record every reached protocol revert, panic, or out-of-gas failure as a
      raw backend failure with its entrypoint, sequence, precondition evidence,
      and exact property IDs when the failure exercises an implemented catalog

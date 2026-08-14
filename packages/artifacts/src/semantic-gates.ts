@@ -5170,6 +5170,11 @@ function propertyCampaignTimeoutEvidenceIssues(document: unknown, context: Seman
   const planPath = "$.campaign_plan_ref";
   const summaryPath = "$.campaign_summary_ref";
   const execution = at(document, ["execution"]);
+  const propertyResults = arrayAt(document, ["property_results"]);
+  const incompletePropertyCoverage = propertyResults.some((result) => {
+    const status = stringField(result, "status");
+    return status === "inconclusive" || status === "not-executed";
+  });
   const configuredTimeoutSeconds = expectations.configuredFuzzerTimeoutSeconds;
   const plannedTimeoutSeconds = expectations.plannedTimeoutSeconds;
   const finalizationReserveSeconds = expectations.finalizationReserveSeconds;
@@ -5377,7 +5382,8 @@ function propertyCampaignTimeoutEvidenceIssues(document: unknown, context: Seman
         !endedEarly &&
         terminationReason === "configured-timeout" &&
         usableResults === true &&
-        campaignOutcome !== "complete"
+        campaignOutcome !== "complete" &&
+        !incompletePropertyCoverage
       ) {
         issues.push(issue("$.campaign_outcome", "A completed configured-timeout campaign must report complete"));
       }

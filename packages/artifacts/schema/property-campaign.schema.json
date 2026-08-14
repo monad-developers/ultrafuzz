@@ -881,6 +881,40 @@
       }
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "property_provenance_version": {}
+        },
+        "required": ["property_provenance_version"]
+      },
+      "then": {
+        "properties": {
+          "property_results": {
+            "type": "array",
+            "items": {
+              "if": {
+                "type": "object",
+                "properties": {
+                  "status": {"enum": ["inconclusive", "not-executed"]}
+                },
+                "required": ["status"]
+              },
+              "then": {
+                "type": "object",
+                "properties": {
+                  "reason_code": {},
+                  "reason": {}
+                },
+                "required": ["reason_code", "reason"]
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
   "required": [
     "schema_version",
     "campaign_plan_ref",
