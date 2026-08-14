@@ -5,6 +5,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import { artifactContractDefinition, artifactContractSchemaBinding } from "./artifact-contracts.js";
 import { ARTIFACT_SCHEMA_METADATA, type ArtifactSchemaFilename } from "./artifact-schema-metadata.js";
+import { findingNoteAssignmentIssue } from "./findings-schema.js";
 import {
   MAX_AGGREGATION_DECLARED_BYTES,
   MAX_AGGREGATION_SOURCE_ENTRIES,
@@ -442,6 +443,47 @@ function uniqueCompositeGate(
 
 function stringArray(value: unknown): readonly string[] {
   return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
+const FINDING_REPORT_BOUND_TEXT_FIELDS = ["impact_rationale", "likelihood_rationale", "severity_rationale"] as const;
+
+function findingReportVocabularyIssues(finding: unknown, findingPath: string): SemanticGateIssue[] {
+  if (!isRecord(finding)) return [];
+  const issues: SemanticGateIssue[] = [];
+  for (const [index, note] of stringArray(finding.notes).entries()) {
+    const assignmentIssue = findingNoteAssignmentIssue(note);
+    if (assignmentIssue !== undefined) {
+      issues.push(
+        issue(`${findingPath}.notes[${index}]`, `${assignmentIssue.message}: ${JSON.stringify(assignmentIssue.key)}`)
+      );
+    }
+  }
+  for (const field of FINDING_REPORT_BOUND_TEXT_FIELDS) {
+    const text = stringField(finding, field);
+    if (text === undefined) continue;
+    const assignmentIssue = findingNoteAssignmentIssue(text);
+    if (assignmentIssue !== undefined) {
+      issues.push(
+        issue(`${findingPath}.${field}`, `${assignmentIssue.message}: ${JSON.stringify(assignmentIssue.key)}`)
+      );
+    }
+  }
+  return issues;
+}
+
+function severityFindingReportVocabularyIssues(document: unknown): SemanticGateIssue[] {
+  return arrayAt(document, []).flatMap((finding, index) => findingReportVocabularyIssues(finding, `$[${index}]`));
+}
+
+function reportFindingReportVocabularyIssues(document: unknown): SemanticGateIssue[] {
+  return [
+    ...arrayAt(document, ["issues"]).flatMap((finding, index) =>
+      findingReportVocabularyIssues(finding, `$.issues[${index}]`)
+    ),
+    ...arrayAt(document, ["non_production_outcomes"]).flatMap((finding, index) =>
+      findingReportVocabularyIssues(finding, `$.non_production_outcomes[${index}]`)
+    )
+  ];
 }
 
 function sortedUnique(values: readonly string[]): string[] {
@@ -6360,6 +6402,7 @@ const gateSpecifications = {
   "release-validation-report-reconciliation": documentGate(releaseValidationReportIssues),
   "report-finding-id-uniqueness": documentGate(reportFindingIdIssues),
   "report-finding-evidence-span-consistency": documentGate(reportFindingEvidenceSpanIssues),
+  "report-finding-report-vocabulary": documentGate(reportFindingReportVocabularyIssues),
   "report-severity-classification-preservation": contextualGate(
     "cross-artifact",
     ["artifactSet.severityClassifiedFindings"],
@@ -6426,6 +6469,7 @@ const gateSpecifications = {
   ),
   "severity-finding-id-uniqueness": documentGate(uniqueFieldGate([[]], "id", "severity finding ID")),
   "severity-finding-evidence-span-consistency": documentGate(findingArrayEvidenceSpanIssues),
+  "severity-finding-report-vocabulary": documentGate(severityFindingReportVocabularyIssues),
   "severity-classification-matrix": documentGate(severityClassificationMatrixIssues),
   "severity-classification-upstream-preservation": contextualGate(
     "cross-artifact",

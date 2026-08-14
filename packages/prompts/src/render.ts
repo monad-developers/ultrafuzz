@@ -1,6 +1,9 @@
 import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { findingNoteKeyPromptVocabulary, findingReachabilityPromptVocabulary } from "@ultrafuzz/artifacts";
+
 import { parsePromptFrontmatter, PromptError } from "./frontmatter.js";
 
 export const RENDERED_PROMPT_FILE = "prompt.rendered.md";
@@ -30,7 +33,9 @@ export const SUPPORTED_TEMPLATE_VARIABLES = [
   "invariant_property_priorities",
   "invariant_testing_smoke_timeout",
   "invariant_testing_fuzzer_timeout",
-  "strategy_attempt_test_dir"
+  "strategy_attempt_test_dir",
+  "finding_reachability_vocabulary",
+  "finding_note_key_vocabulary"
 ] as const;
 
 export type SupportedTemplateVariable = (typeof SUPPORTED_TEMPLATE_VARIABLES)[number];
@@ -998,6 +1003,8 @@ function buildVariableContext(input: PromptRenderInput): Record<string, string> 
     invariant_testing_smoke_timeout: String(input.resolvedConfig?.invariantTestingSmokeTimeout ?? ""),
     invariant_testing_fuzzer_timeout: String(input.resolvedConfig?.invariantTestingFuzzerTimeout ?? ""),
     strategy_attempt_test_dir: strategyAttemptTestDirectory(input),
+    finding_reachability_vocabulary: findingReachabilityPromptVocabulary(),
+    finding_note_key_vocabulary: findingNoteKeyPromptVocabulary(),
     ...Object.fromEntries(Object.entries(input.variables ?? {}).map(([key, value]) => [key, String(value)]))
   };
 }
@@ -1030,6 +1037,9 @@ function validateVariableOverrides(variables: PromptRenderInput["variables"]): v
     }
     if (key === "schema_path" || isTopologyDerivedFindingsVariable(key)) {
       throw new PromptError("invalid-render-input", `${key} is topology-derived and cannot be overridden`);
+    }
+    if (key === "finding_reachability_vocabulary" || key === "finding_note_key_vocabulary") {
+      throw new PromptError("invalid-render-input", `${key} is authoritative and cannot be overridden`);
     }
     if (!(
       typeof value === "string" ||

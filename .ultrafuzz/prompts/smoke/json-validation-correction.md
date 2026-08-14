@@ -28,3 +28,10 @@ The validator must leave both drafts byte-for-byte untouched. The invalid
 draft and its diagnostic exist only to prove that the agent receives useful
 schema feedback before returning; the final published artifact is the
 schema-defined empty form.
+
+If this acceptance probe ever emits a finding, use only the authoritative
+report-bound note vocabulary:
+
+{{finding_reachability_vocabulary}}
+
+{{finding_note_key_vocabulary}}

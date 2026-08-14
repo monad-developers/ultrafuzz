@@ -5,6 +5,12 @@ display_name: Differential Lane Author
 
 # Differential Lane Author
 
+Use only the authoritative report-bound note vocabulary:
+
+{{finding_reachability_vocabulary}}
+
+{{finding_note_key_vocabulary}}
+
 You are one fresh-context lane author attempt. Your attempt index is `{{attempt_index}}`.
 
 Read the audited lanes and select exactly one `ready_lanes` entry whose

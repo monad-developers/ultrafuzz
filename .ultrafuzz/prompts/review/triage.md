@@ -67,19 +67,23 @@ evidence:
 
 - If a public/external entrypoint trace or generated public wrapper PoC reaches
   the same helper behavior under production-like preconditions, the finding may
-  remain `true-positive`. Add a note with
-  `reachability=public-entrypoint-trace` or
-  `reachability=generated-public-wrapper-poc`.
-- If the proof is helper-only and public entrypoints enforce stricter bounds,
+  remain `true-positive`. Add the matching reachability entry from the authority below.
+- If the proof reaches the behavior only through a helper and public entrypoints enforce stricter bounds,
   classify it as `harness-defect`, `defensive-hardening`, or `false-positive`
   according to the evidence. Set `status` to `false-positive` only when you
   classify the finding as `false-positive`; for the other two classifications
   leave `status` exactly as the deduped finding carried it. Record why
   production reachability is absent either way.
 - If direct public reachability is unclear, classify it as `undetermined` and
-  add `reachability=public-wrapper-required` plus the exact public wrapper or
+  add the authority-listed reachability entry for a required public wrapper plus the exact public wrapper or
   entrypoint evidence needed before severity can treat it as production
   exploitable.
+
+Authoritative reachability tokens:
+
+{{finding_reachability_vocabulary}}
+
+Authoritative report-bound note keys: {{finding_note_key_vocabulary}}
 
 ## External dependency scope audit
 
@@ -90,8 +94,8 @@ before treating that dependency behavior as production evidence.
 
 - If the finding depends only on `trusted-boundary-failure`, such as making a trusted oracle lie or a trusted third-party protocol malfunction, classify it
   as `false-positive` unless public docs, interfaces, tests, specs, or comments
-  explicitly say the protocol promises to tolerate that behavior. Add
-  `dependency_scope=ambiguous-or-out-of-scope`.
+  explicitly say the protocol promises to tolerate that behavior. Add the
+  dependency-scope entry from the authoritative note-key list with value `ambiguous-or-out-of-scope`.
 - If the proof relies on `undocumented-external-misbehavior`, an explicitly
   unsupported token breaking ERC-20 semantics, or an out-of-scope callback
   acting maliciously, classify it as `false-positive`, `incomplete-spec`, or
@@ -100,8 +104,8 @@ before treating that dependency behavior as production evidence.
 - If the finding tests project-owned validation, wrapper, adapter,
   authorization, bounds, staleness, sanitization, rollback, or error-handling
   logic and cites explicit public evidence that the protocol promises that
-  guard, it may remain eligible for `true-positive`. Add
-  `dependency_scope=source-backed-in-scope` and cite the source-backed
+  guard, it may remain eligible for `true-positive`. Add the dependency-scope
+  entry from the authoritative note-key list with value `source-backed-in-scope` and cite the source-backed
   in-scope rationale.
 - If the dependency scope is ambiguous, preserve the useful scope note or
   harness note, but classify the production claim as `incomplete-spec`,
@@ -129,14 +133,16 @@ explicitly define unknown required actions as no-ops or skippable.
   missing or ambiguous, preserve the repro but classify the production claim as
   `incomplete-spec`, `spec-gated`, or `undetermined` according to the evidence.
 
-For a helper-only arithmetic mismatch that bypasses public entrypoint bounds,
-use `harness-defect`, append a `reachability=helper-only: ...` note, and bind
-the same concrete explanation through one classification-reason note and one
-demotion-reason note. For a mismatch reached through a production-like public
-entrypoint, use `true-positive`, append
-`reachability=public-entrypoint-trace: ...`, preserve the direct helper proof,
-state the public exploitability, and bind one classification-reason note. These
-are semantic examples, not alternate JSON shapes.
+For an arithmetic mismatch reachable only through a helper that bypasses public entrypoint bounds,
+use `harness-defect`, append the matching non-public reachability entry from the
+authority above, and bind the same concrete explanation through one
+classification-reason entry and one demotion-reason entry from the authoritative
+note-key list. For a mismatch reached through a production-like public
+entrypoint, use `true-positive`, append the matching production-entrypoint
+reachability entry from the authority above, preserve the direct helper proof,
+state the public exploitability, and bind one classification-reason entry from
+the authoritative note-key list.
+These are semantic examples, not alternate JSON shapes.
 
 Do not remove findings during triage. Preserve the upstream finding fields and
 add or update `triage_classification` with the consensus value. Triage owns only
@@ -148,12 +154,12 @@ order, then append your new notes at the end. Never edit, re-word, re-punctuate,
 merge, re-order, de-duplicate, or drop an inherited note; whitespace and
 punctuation changes count as edits. Keep the notes you append concise, and use
 them to summarize the votes, decisive evidence, and recommended next action.
-Every triaged finding must include exactly one machine-readable
-`triage_reason=<reason>` or `classification_reason=<reason>` note. The first
-note carrying either prefix is the one that binds downstream, so never emit a
-second reason note. For every classification other than `true-positive`, also
-include exactly one `demotion_reason=<reason>` note; for `true-positive`, emit
-no `demotion_reason=` note at all.
+Every triaged finding must include exactly one machine-readable reason entry
+using one of the two authoritative reason keys in the note-key list.
+The first note carrying either key is the one that binds downstream, so never
+emit a second reason note. For every classification other than `true-positive`,
+also include exactly one entry using the authoritative demotion key;
+for `true-positive`, emit no demotion entry at all.
 When a finding is classified as `false-positive`, set `status` to
 `false-positive`. For every other classification, copy `status` from the deduped
 finding unchanged; triage may set `status` only to `false-positive`, and only
@@ -162,8 +168,8 @@ values because other stages own them, not because triage may write them.
 In particular, preserve `property_ids` unchanged for every property-derived
 finding.
 
-For stateful invariant records, preserve any upstream
-`stateful_failure_classification=<classification>` note exactly. Coverage-only
+For stateful invariant records, preserve any upstream typed stateful-failure
+classification entry from the authoritative note-key list exactly. Coverage-only
 success is not evidence that the record should be removed. Treat
 `production-bug`, `harness-defect`, `incomplete-spec`, `false-positive`, and
 `blocked-unreproduced` as distinct upstream outcomes that must remain visible in
@@ -180,10 +186,10 @@ ledger using the exact pinned
 `{{schema_path}}/finding-lifecycle-ledger.schema.json` and updating the matching
 `dedupe_key` record for every triaged finding:
 set `triage_classification` to the same value the triaged finding carries, set
-`triage_reason` to exactly the text that follows `triage_reason=` or
-`classification_reason=` in that finding's reason note, character for character
-with no re-casing, re-punctuation, trimming, or rewording, set
-`demotion_reason` the same way from that finding's `demotion_reason=` note for
+`triage_reason` to exactly the assigned value of the finding's first
+authoritative reason entry, character for character with no re-casing,
+re-punctuation, trimming, or rewording, set `demotion_reason` the same way from
+that finding's authoritative demotion entry for
 every classification other than `true-positive`, omit `demotion_reason`
 entirely for `true-positive`, and append a `triaged` stage whose
 `artifact_path` is the portable declared output-relative path

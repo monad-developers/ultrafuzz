@@ -16,6 +16,7 @@ import {
   INVARIANT_LEDGER_SCHEMA_VERSION,
   INVARIANT_SOURCE_PROOF_SCHEMA_VERSION,
   IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
+  MAX_FINDING_STRING_CODE_POINTS,
   NODE_ATTEMPT_LEDGER_SCHEMA_VERSION,
   NODE_STATE_STATUSES,
   RUN_STATE_STATUSES,
@@ -43,7 +44,9 @@ import {
   assertPlannedGraph,
   assertPlannedGraphSemantics,
   derivePropertyImplementationCoverage,
+  findingNoteAssignmentIssue,
   findingJsonSchema,
+  findingSchema,
   generatedTestsJsonSchema,
   invariantLedgerJsonSchema,
   invariantSourceProofJsonSchema,
@@ -56,6 +59,7 @@ import {
   reportSchema,
   runStateJsonSchema,
   semanticRedRegistrySchema,
+  severityClassifiedFindingsSchema,
   validateAnalysisBundleManifestSchema,
   usageLedgerJsonSchema,
   workspacePatchJsonSchema,
@@ -83,6 +87,7 @@ import {
   type PlannedGraphDocument,
   type PlannedGraphNodeDocument,
   smithersTaskManifestJsonSchema,
+  triagedFindingsSchema,
   trustedCliMetadataJsonSchema
 } from "../src/index.js";
 
@@ -1129,6 +1134,336 @@ test("the findings v2 contract rejects aliases, omissions, lowercase severities,
   assert.equal(validateArtifactContract("ultrafuzz/findings@2", JSON.stringify([removedStrategyAlias])).ok, false);
 });
 
+test("the findings v2 schema enforces one authoritative report-note vocabulary with parser and bundle parity", () => {
+  const finding = {
+    schema_version: FINDINGS_SCHEMA_VERSION,
+    id: "reachability-1",
+    title: "Helper reachability",
+    status: "candidate",
+    severity_guess: "Medium",
+    confidence: "high",
+    summary: "A helper-level proof needs a recognized reachability classification."
+  };
+  const assertNoteParity = (note: string, expected: boolean): void => {
+    const candidate = { ...finding, notes: [note] };
+    assert.equal(findingSchema.safeParse(candidate).success, expected, `Zod parser parity for ${note}`);
+    assert.equal(validateFindingSchema(candidate).ok, expected, `registered schema parity for ${note}`);
+    assert.equal(
+      validateArtifactContract("ultrafuzz/findings@2", JSON.stringify([candidate])).ok,
+      expected,
+      `bundled contract parity for ${note}`
+    );
+  };
+
+  for (const note of [
+    "reachability=public-entrypoint-trace: verified",
+    "reachability = public-entrypoint-trace: verified",
+    "reachability=generated-public-wrapper-poc: verified",
+    "reachability=helper-only: public entrypoints reject the input",
+    "reachability=helper-only.",
+    "reachability=public-wrapper-required: add a wrapper proof",
+    "stateful_failure_classification=production-bug: reproduced",
+    "likelihood=High",
+    "likelihood = High",
+    "impact=Low",
+    "triage_reason=public evidence supports the issue",
+    "helper_proof=direct helper mismatch reproduced"
+  ]) {
+    assertNoteParity(note, true);
+  }
+
+  for (const evidenceAssignment of [
+    "Observed balance=0 after withdrawal; expected balance=1.",
+    "Evidence: https://example.test/trace?block=latest",
+    "The invariant was amount == expectedAmount.",
+    "Evidence: https://example.test/trace?tx=abc",
+    "Evidence: https://example.test/trace;session=abc",
+    "ipfs://root/path?filename=proof.json",
+    "timeout --signal=TERM --kill-after=300s",
+    "x==y",
+    "Reproducer: FOUNDRY_PROFILE=ci forge test",
+    "Run RUST_LOG=debug cargo test",
+    "forge test --match-test repro seed=123 runs=1000",
+    "Evidence: <https://x.test/?tx=abc>",
+    "request_id=abc123",
+    "RISK_FREE_RATE=0.05 impact_price=123 helper_address=0xabc",
+    "helper_balance=0 proof_size=32 root_slot=0x00 IMPACT_PRICE=123",
+    "MERKLE_ROOT=0xabc PUBLIC_KEY=0x123 risk_ratio=0.5 HELPER_BALANCE=0",
+    "--dependency-version=1.2.3 STATEFUL_RUNS=1000 scope_id=request-7",
+    "https://x.test/?impact_price=123",
+    "The HTTP response had status=200.",
+    "The oracle returned confidence=0.95.",
+    "The trace entered scope=global before reverting.",
+    "The shell printed outcome=success.",
+    "The proof checks risk=0 after withdrawal.",
+    "const result = await run();",
+    "bytes32 root = tree.root();",
+    "verifyProof(root=0xabc, leaf=0xdef)",
+    "proof_type=merkle",
+    "command prints result=42",
+    "forge test --root=.",
+    "The Merkle proof used root=0xabc.",
+    "The compiler printed classification=error.",
+    "Audit log: result=pass.",
+    "The HTTP body contains report_status=200.",
+    "The HTTP body contains report_status: 200.",
+    "The analyzer reports vulnerability severity=High.",
+    "The call returned impact=amountOut.",
+    "https://x.test/?tx=abc&status=200",
+    "emit Status(status=200)",
+    "_=non-semantic evidence",
+    "根因=non-semantic evidence",
+    "Δ=non-semantic evidence",
+    "💣=non-semantic evidence",
+    "risK=non-semantic Unicode evidence",
+    "liKelihood=non-semantic Unicode evidence",
+    "https://x.test/?root%5Fcause=encoded-query-key"
+  ]) {
+    assertNoteParity(evidenceAssignment, true);
+  }
+
+  for (const wrappedCanonical of ["(reachability=helper-only)", "[reachability=helper-only]"]) {
+    assertNoteParity(wrappedCanonical, true);
+  }
+
+  for (const semanticAlias of [
+    "helper_summary=renamed producer key",
+    "reachability_note=helper-only",
+    "classification_notes=accepted",
+    "helper_evidence=renamed producer key",
+    "classification_evidence=renamed producer key",
+    "root_cause_reason=renamed",
+    "root_reason=renamed",
+    "audit_status=accepted",
+    "finding_result=accepted",
+    "report_summary=renamed",
+    "helper_verdict=renamed",
+    "public_reason=renamed",
+    "triage_status=accepted",
+    "cause_note=renamed",
+    "severity_decision=High",
+    "finding_classification=renamed",
+    "scope_decision=renamed",
+    "ROOT_CAUSE=renamed",
+    "rootCause=renamed",
+    "Helper_Proof=renamed",
+    "_root_cause=renamed",
+    "__root_cause=renamed",
+    "___Helper=renamed",
+    "root_cause__=renamed",
+    "<root_cause=renamed>",
+    "`root_cause=renamed`",
+    '"root_cause=renamed"',
+    "Triage: root_cause=renamed",
+    "Observed. root_cause=renamed",
+    "> root_cause=renamed",
+    "Set report field root_cause=renamed",
+    "Record a `helper_evidence=renamed` note",
+    "-root_cause=renamed",
+    "--root_cause=renamed",
+    "root-cause=renamed",
+    "triage_reason=public evidence root_cause=renamed",
+    "triage_reason=ok x=y root_cause=renamed",
+    "triage_reason=ok RISK_FREE_RATE=0.05 root_cause=renamed",
+    "triage_reason=ok (root_cause=renamed)",
+    "triage_reason=ok/root_cause=renamed",
+    "triage_reason=ok attainability=renamed",
+    `triage_reason=ok ${"a".repeat(4100)} root_cause=renamed`,
+    "triage_reason=ok;root_cause=renamed",
+    "triage_reason=ok,root_cause=renamed",
+    "triage_reason=ok*root_cause=renamed",
+    "triage_reason=ok|root_cause=renamed",
+    "https://example.test/trace;root_cause=renamed",
+    "RISK_SCORE=high",
+    "SeverityAlias=critical",
+    "https://x.test/?tx=abc&root_cause=renamed",
+    "https://x.test/?tx=abc&HELPER_PROOF_ALIAS=renamed",
+    "seed=123&classification_alias=renamed",
+    "root_cause==renamed",
+    "reachability==helper-only",
+    "9root_cause=renamed",
+    "helperEvidence=renamed",
+    "dependencyScope=renamed",
+    "resolution=confirmed",
+    "disposition=accepted",
+    "final_severity=high",
+    "severity_guess=high",
+    "confidence_score=high",
+    "finding_status=confirmed",
+    "triage_result=accepted",
+    "classification_result=bug",
+    "proof_kind=public",
+    "reachability=renamed-public-trace",
+    "`reachability` = `internal`",
+    "**reachability** = **internal**",
+    "~~reachability~~ = ~~internal~~",
+    "***audit_status***=accepted",
+    "***report_verdict***=accepted",
+    "`**audit_status**`=accepted",
+    "<code>audit_status</code>=accepted",
+    "<strong>reachability</strong> = internal",
+    "<span>audit_status</span>=accepted",
+    "<u>audit_status</u>=accepted",
+    "<mark>reachability</mark> = internal",
+    "The note contains <span>reachability</span>=internal in prose.",
+    "reachability<!--comment-->=internal",
+    "reachability\u200b=internal",
+    "Reachability:\ninternal",
+    "| reachability | internal |",
+    "reachability -> internal",
+    "reachability → internal",
+    "reachability ↦ internal",
+    "reachability ⟶ internal",
+    "reachability ≔ internal",
+    "reachability maps to internal",
+    '{ "reachability"\n: "internal" }',
+    'Embedded JSON: {\n  "reachability"\n  :\n  "internal"\n}',
+    "Reachability: internal",
+    "reachability : internal",
+    '"reachability": "internal"',
+    'Evidence: { "reachability": "internal" }',
+    "root_reason: renamed",
+    "stateful_failure_classification=renamed",
+    "likelihood=likely",
+    "impact=critical",
+    'triage_reason="summary"',
+    "triage_reason=(summary)",
+    "triage_reason=[summary]",
+    'helper_proof="proof"',
+    "helper_proof=(proof)",
+    "helper_proof=",
+    "attainability=renamed reachability=helper-only",
+    "triage_reason=ok RISK_FREE_RATE=0.05 attainability=renamed",
+    "reachability_key=helper-only",
+    "helper_proof_key=renamed",
+    "helper_proof_url=renamed",
+    "outcome=helper-only",
+    "call_path=helper-only",
+    "production_path=public-entrypoint-trace",
+    "exploit_path=public-wrapper-required",
+    "helper_address=helper-only",
+    "`call_path=<helper-only>`",
+    "((production_path=(public-entrypoint-trace)))",
+    "  : outcome=[helper-only]",
+    'attainability="helper-only"',
+    "attainability=(helper-only)",
+    "Evidence follows; reachability=renamed-public-trace",
+    "prefix reachability=renamed-public-trace",
+    "The reachability=renamed-public-trace annotation is invalid",
+    "Observed. stateful_failure_classification=renamed",
+    'Evidence: helper_proof="quoted"',
+    "Observed. outcome=helper-only"
+  ]) {
+    assertNoteParity(semanticAlias, false);
+    assert.notEqual(findingNoteAssignmentIssue(semanticAlias), undefined, semanticAlias);
+  }
+
+  for (const unsupportedAssignmentWhitespace of [
+    "reachability\n=helper-only",
+    "reachability=\nhelper-only",
+    "reachability\u00a0=\u00a0helper-only"
+  ]) {
+    assertNoteParity(unsupportedAssignmentWhitespace, false);
+  }
+
+  for (const nonAsciiIdentifier of [
+    "\u0301_root_cause=non-semantic Unicode evidence",
+    "root_cause\u0301=non-semantic Unicode evidence",
+    "r_\u0301o-o_t__cause=non-semantic Unicode evidence",
+    "_9\u0301_root_cause=non-semantic Unicode evidence"
+  ]) {
+    assertNoteParity(nonAsciiIdentifier, true);
+  }
+
+  assert.deepEqual(findingNoteAssignmentIssue("triage_reason=ok root_cause=renamed"), {
+    key: "root_cause",
+    message: "Unsupported report-bound finding note key"
+  });
+
+  assertNoteParity("helper_context is prose, not an assignment", true);
+
+  const triaged = {
+    ...finding,
+    triage_classification: "true-positive",
+    notes: ["triage_reason=public evidence supports the issue", "reachability=public-entrypoint-trace"]
+  };
+  assert.equal(triagedFindingsSchema.safeParse([triaged]).success, true);
+  assert.equal(validateArtifactContract("ultrafuzz/triaged-findings@1", JSON.stringify([triaged])).ok, true);
+  const triagedAlias = { ...triaged, notes: [...triaged.notes, "root_cause=renamed"] };
+  assert.equal(triagedFindingsSchema.safeParse([triagedAlias]).success, false);
+  assert.equal(validateArtifactContract("ultrafuzz/triaged-findings@1", JSON.stringify([triagedAlias])).ok, false);
+
+  const validSeverity = {
+    ...triaged,
+    severity: "Medium",
+    impact: "Medium",
+    likelihood: "Medium",
+    impact_rationale: "impact=Medium: the affected balance can be recovered",
+    likelihood_rationale: "likelihood=Medium: the path requires a specific caller",
+    severity_rationale: "reachability=public-entrypoint-trace: reproduced; observed balance=0"
+  };
+  assert.equal(severityClassifiedFindingsSchema.safeParse([validSeverity]).success, true);
+  assert.equal(
+    validateArtifactContract("ultrafuzz/severity-classified-findings@1", JSON.stringify([validSeverity])).ok,
+    true
+  );
+  for (const invalidSeverity of [
+    { ...validSeverity, severity_rationale: "reachability=renamed-public-trace" },
+    { ...validSeverity, notes: [...validSeverity.notes, "helper_evidence=renamed"] }
+  ]) {
+    assert.equal(severityClassifiedFindingsSchema.safeParse([invalidSeverity]).success, false);
+    assert.equal(
+      validateArtifactContract("ultrafuzz/severity-classified-findings@1", JSON.stringify([invalidSeverity])).ok,
+      false
+    );
+  }
+});
+
+test("max-length adversarial report notes preserve Zod and isolated JSON Schema parity", () => {
+  const finding = {
+    schema_version: FINDINGS_SCHEMA_VERSION,
+    id: "semantic-key-performance",
+    title: "Semantic key validation remains bounded",
+    status: "candidate",
+    severity_guess: "Low",
+    confidence: "low",
+    summary: "Adversarial notes must not exhaust the isolated validator deadline."
+  };
+  const maxNote = (prefix: string, repeated: string, suffix: string): string => {
+    const fixedCodePoints = [...prefix, ...suffix].length;
+    return `${prefix}${repeated.repeat(MAX_FINDING_STRING_CODE_POINTS - fixedCodePoints)}${suffix}`;
+  };
+  const cases = [
+    { label: "separator-only", note: "_".repeat(MAX_FINDING_STRING_CODE_POINTS), expected: true },
+    { label: "mark-only", note: "\u0301".repeat(MAX_FINDING_STRING_CODE_POINTS), expected: true },
+    { label: "long near-miss", note: maxNote("", "_", "root_causx=x"), expected: true },
+    { label: "long leading separators", note: maxNote("", "_", "root_cause=x"), expected: true },
+    { label: "long leading marks", note: maxNote("", "\u0301", "root_cause=x"), expected: true },
+    { label: "long internal separators", note: maxNote("r", "_", "oot_cause=x"), expected: true },
+    { label: "long clause separator", note: maxNote("", "x", ";root_cause=x"), expected: false },
+    {
+      label: "repeated canonical assignments",
+      note: "impact=High x "
+        .repeat(Math.ceil(MAX_FINDING_STRING_CODE_POINTS / 14))
+        .slice(0, MAX_FINDING_STRING_CODE_POINTS),
+      expected: true
+    }
+  ] as const;
+
+  for (const { label, note, expected } of cases) {
+    assert.equal([...note].length, MAX_FINDING_STRING_CODE_POINTS, `${label}: fixture length`);
+    const candidate = { ...finding, notes: [note] };
+    assert.equal(findingSchema.safeParse(candidate).success, expected, `${label}: Zod parser`);
+    const bundled = validateArtifactContract("ultrafuzz/findings@2", JSON.stringify([candidate]));
+    assert.equal(bundled.ok, expected, `${label}: bundled contract`);
+    assert.equal(
+      bundled.issues.some((issue) => issue.code === "ARTIFACT_VALIDATOR_FAILED"),
+      false,
+      `${label}: isolated validator deadline`
+    );
+  }
+});
+
 test("the findings v2 schema validates closed typed evidence spans without repair", () => {
   const finding = {
     schema_version: FINDINGS_SCHEMA_VERSION,
@@ -1398,6 +1733,33 @@ test("finding and report v2 schemas require their current canonical shapes", () 
   };
   const reportWithTypedEvidence = { ...report, non_production_outcomes: [nonProductionOutcome] };
   assert.equal(validateArtifactContract("ultrafuzz/report@2", JSON.stringify(reportWithTypedEvidence)).ok, true);
+  for (const invalidNote of [
+    'triage_reason="summary"',
+    "helper_proof=(proof)",
+    "reachability_key=helper-only",
+    "outcome=helper-only"
+  ]) {
+    for (const collection of ["issues", "non_production_outcomes"] as const) {
+      const invalidReport = {
+        ...report,
+        [collection]: [{ ...nonProductionOutcome, notes: [invalidNote] }]
+      };
+      assert.equal(reportSchema.safeParse(invalidReport).success, false, `${collection} Zod parity for ${invalidNote}`);
+      assert.equal(
+        validateArtifactContract("ultrafuzz/report@2", JSON.stringify(invalidReport)).ok,
+        false,
+        `${collection} bundled parity for ${invalidNote}`
+      );
+    }
+  }
+  for (const invalidOutcome of [
+    { ...nonProductionOutcome, notes: ["reachability=renamed-public-trace"] },
+    { ...nonProductionOutcome, severity_rationale: "helper_evidence=renamed" }
+  ]) {
+    const invalidReport = { ...report, non_production_outcomes: [invalidOutcome] };
+    assert.equal(reportSchema.safeParse(invalidReport).success, false);
+    assert.equal(validateArtifactContract("ultrafuzz/report@2", JSON.stringify(invalidReport)).ok, false);
+  }
   const reportWithEmptyEvidence = {
     ...report,
     non_production_outcomes: [{ ...nonProductionOutcome, evidence: [{}] }]
