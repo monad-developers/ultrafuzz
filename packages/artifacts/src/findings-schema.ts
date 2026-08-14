@@ -54,7 +54,7 @@ const supportedNoteKeyPattern = `(?:${FINDING_NOTE_KEYS.join("|")})`;
 const assignmentKeyPattern = FINDING_REPORT_ASSIGNMENT_KEY_PATTERN;
 const assignmentBoundaryPattern = "(?:^|[^\\p{L}\\p{N}\\p{M}_%\\-])";
 const assignmentOperatorPrefixPattern = "[ \\t]*=(?!=)";
-const anyAssignmentOperatorPattern = "\\s*={1,2}\\s*";
+const anyAssignmentOperatorPattern = "\\s*(?:={1,2}|[:|→↦⟶≔]|[-=]>)";
 const assignmentKeyCloseWrapperPattern = "(?:(?:\\*{1,2}|~{1,2}|[\\x60\"'>)}\\]])[ \\t]*)*";
 const metadataKeyCloseWrapperPattern = "[`\"'>)}*~\\]]{0,4}";
 const htmlKeyCloseWrapperPattern = "(?:</(?:b|code|em|i|mark|span|strong|u)>\\s*)*";
@@ -131,20 +131,14 @@ const explicitReportAliasKeyValues = [
   "triage_result",
   "verification"
 ] as const;
-const shortReportAliasKeys = ["access", "verification"].map(asciiCaseInsensitivePattern);
-const explicitReportAliasFragmentGroups = chunkPatternAlternatives(
-  explicitReportAliasKeyValues
-    .filter((key) => key !== "access" && key !== "verification")
-    .map(asciiCaseInsensitivePattern)
-).map((patterns) => `[-_0-9A-Za-z]*(?:${patterns.join("|")})[-_0-9A-Za-z]*`);
+const shortReportAliasKeys = ["access", "verification"];
+const explicitReportAliasKeys = explicitReportAliasKeyValues
+  .filter((key) => key !== "access" && key !== "verification")
+  .map(asciiCaseInsensitivePattern);
 const reportAliasPatternGroups = chunkPatternAlternatives([
-  ...reportAliasCanonicalFragments.map((pattern) => `[-_0-9A-Za-z]*${pattern}[-_0-9A-Za-z]*`),
-  ...explicitReportAliasFragmentGroups,
-  ...shortReportAliasKeys
+  ...reportAliasCanonicalFragments,
+  ...explicitReportAliasKeys
 ]);
-const explicitReportAliasMappingKeyPattern = `[-_0-9A-Za-z]*(?:${explicitReportAliasKeyValues.join(
-  "|"
-)})[-_0-9A-Za-z]*`;
 /*
  * Short aliases such as `access` and `verification` are report vocabulary
  * only as complete identifiers. Keeping them out of the fragment matcher
@@ -154,7 +148,7 @@ const explicitReportAliasMappingKeyPattern = `[-_0-9A-Za-z]*(?:${explicitReportA
 const explicitReportAliasKeySet = new Set(explicitReportAliasKeyValues.map((key) => key.toLowerCase()));
 
 const unsupportedAliasAssignmentPatterns = reportAliasPatternGroups.map((patterns) => {
-  const aliasKeyPattern = `(?=${assignmentKeyPattern}[ \\t]*${assignmentKeyTrailingWrapperPattern}\\s*={1,2})(?:${patterns.join("|")})`;
+  const aliasKeyPattern = `(?:[-_0-9A-Za-z]*(?:${patterns.join("|")})[-_0-9A-Za-z]*|${shortReportAliasKeys.join("|")})`;
   return `${assignmentBoundaryPattern}(?!(${supportedNoteKeyPattern})[ \\t]*${assignmentKeyTrailingWrapperPattern}[ \\t]*={1,2})(?:(${aliasKeyPattern}))[ \\t]*${assignmentKeyTrailingWrapperPattern}${anyAssignmentOperatorPattern}`;
 });
 const unsupportedBareHelperAliasPattern = `${assignmentBoundaryPattern}(_*[hH][eE][lL][pP][eE][rR]_*)[ \\t]*${assignmentKeyTrailingWrapperPattern}${anyAssignmentOperatorPattern}`;
@@ -171,8 +165,7 @@ const riskAliasKeyPattern =
   "(?:risk|severity|rating|risk_level|severity_level|impact_level|likelihood_level|impact_rating|likelihood_rating)";
 const unsupportedRiskTypedAliasPattern = `${reportNoteSearchPrefixPattern}${assignmentBoundaryPattern}(${riskAliasKeyPattern})[ \\t]*${assignmentKeyTrailingWrapperPattern}${assignmentOperatorPrefixPattern}[ \\t]*${valueWrapperPattern}${riskValuePattern}${typedValueBoundaryPattern}`;
 const canonicalColonAssignmentPattern = `${assignmentBoundaryPattern}${valueWrapperPattern}(${globallyValidatedNoteKeyPattern})[ \\t]*${assignmentKeyTrailingWrapperPattern}${colonAssignmentOperatorPattern}${valueWrapperPattern}(?=\\S)`;
-const canonicalDirectMappingPattern = `${assignmentBoundaryPattern}[ \\t]*${valueWrapperPattern}(${globallyValidatedNoteKeyPattern})[ \\t]*${assignmentKeyTrailingWrapperPattern}(?::[ \\t]*\\r?\\n[ \\t]*|\\|[ \\t]*|(?:-|=)>[ \\t]*|→[ \\t]*)${valueWrapperPattern}(?=\\S)`;
-const explicitReportAliasVocabularyPattern = `${assignmentBoundaryPattern}[ \\t]*${valueWrapperPattern}((?:${explicitReportAliasMappingKeyPattern}|${shortReportAliasKeys.join(
+const canonicalDirectMappingPattern = `${assignmentBoundaryPattern}[ \\t]*${valueWrapperPattern}((?:${globallyValidatedNoteKeyPattern}|${shortReportAliasKeys.join(
   "|"
 )}))[ \\t]*${assignmentKeyTrailingWrapperPattern}(?::[ \\t]*\\r?\\n[ \\t]*|:[ \\t]*|\\|[ \\t]*|(?::=|(?:-|=)>|→|↦|⟶|≔)[ \\t]*)${valueWrapperPattern}(?=\\S)`;
 const canonicalReachabilityUnicodeMappingPattern = `${assignmentBoundaryPattern}[ \\t]*${valueWrapperPattern}(${asciiCaseInsensitivePattern("reachability")})[ \\t]*${assignmentKeyTrailingWrapperPattern}(?:↦|⟶|≔)[ \\t]*${valueWrapperPattern}(?=\\S)`;
@@ -191,12 +184,12 @@ function invalidGlobalTypedAssignmentPattern(key: string, values: readonly strin
   return `${assignmentBoundaryPattern}(${key})[ \\t]*${assignmentKeyTrailingWrapperPattern}${assignmentOperatorPrefixPattern}(?![ \\t]*(?:${values.join("|")})${typedValueBoundaryPattern})[ \\t]*`;
 }
 
-function chunkPatternAlternatives(patterns: readonly string[]): string[][] {
+function chunkPatternAlternatives(patterns: readonly string[], maxLength = 420): string[][] {
   const groups: string[][] = [];
   for (const pattern of patterns) {
     const current = groups.at(-1);
     const nextLength = (current?.join("|").length ?? 0) + (current === undefined ? 0 : 1) + pattern.length;
-    if (current === undefined || nextLength > 420) groups.push([pattern]);
+    if (current === undefined || nextLength > maxLength) groups.push([pattern]);
     else current.push(pattern);
   }
   return groups;
@@ -525,7 +518,6 @@ const findingNoteConstraintRules = [
   ),
   findingNoteConstraint(canonicalColonAssignmentPattern, "Unsupported report-bound finding note key"),
   findingNoteConstraint(canonicalDirectMappingPattern, "Unsupported report-bound finding note key"),
-  findingNoteConstraint(explicitReportAliasVocabularyPattern, "Unsupported report-bound finding note key"),
   findingNoteConstraint(canonicalReachabilityUnicodeMappingPattern, "Unsupported report-bound finding note key"),
   findingNoteConstraint(canonicalReachabilityMappingPattern, "Unsupported report-bound finding note key"),
   findingNoteConstraint(obfuscatedReachabilityAssignmentPattern, "Unsupported report-bound finding note key"),
