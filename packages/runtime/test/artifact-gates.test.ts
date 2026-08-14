@@ -10766,6 +10766,10 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
   const namedPercentage = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(namedPercentage.ok, true, JSON.stringify(namedPercentage.diagnostics));
 
+  publish(evidence, `${scopedMarkdown}\n## Notes\n\nRetry 1/2 reproduced the same revert.\n`);
+  const ordinaryFraction = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(ordinaryFraction.ok, true, JSON.stringify(ordinaryFraction.diagnostics));
+
   const staleGoal = structuredClone(goal);
   staleGoal.current_measurement.covered_ranges = 0;
   publish(evidence, scopedMarkdown, staleGoal);
@@ -10776,11 +10780,11 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
   );
 });
 
-test("coverage gate prunes nested dependency, test, and harness roots from production inventory", () => {
+test("coverage gate treats configured roots as production and classifies external source roots", () => {
   const layout = createRunLayout({
     projectRoot: tempProject(),
     runId: "run-scoped-coverage-nested-roots",
-    resolvedConfigToml: '[permissions]\nproduction_source_roots = ["src"]\n'
+    resolvedConfigToml: '[permissions]\nproduction_source_roots = ["contracts"]\n'
   });
   const node = {
     ...plannedNode(["coverage-goal.json", "coverage-report.md", "coverage-evidence.json"]),
@@ -10791,37 +10795,46 @@ test("coverage gate prunes nested dependency, test, and harness roots from produ
   writePlannedGraph(layout, [node]);
   const workspace = path.join(layout.workspacesDir, node.id);
   for (const relativePath of [
-    "src/Core.sol",
-    "src/Dependencies/Dep.sol",
-    "src/test/Test.sol",
-    "src/test/recon/Harness.sol"
+    "contracts/Core.sol",
+    "contracts/lib/ProductionLibrary.sol",
+    "lib/Dep.sol",
+    "test/Test.sol",
+    "test/recon/Harness.sol",
+    "mocks/Mock.sol"
   ]) {
     const absolutePath = path.join(workspace, relativePath);
     fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
     fs.writeFileSync(absolutePath, `contract ${path.basename(relativePath, ".sol")} { function run() external {} }\n`);
   }
   fs.mkdirSync(path.join(workspace, "magic"), { recursive: true });
-  fs.writeFileSync(
-    path.join(workspace, "magic/recon-coverage.json"),
-    JSON.stringify({ "src/Core.sol": ["1"], "src/Dependencies/Dep.sol": ["1"] })
-  );
+  fs.writeFileSync(path.join(workspace, "magic/recon-coverage.json"), JSON.stringify({ "contracts/Core.sol": ["1"] }));
   const lcov = writeCoverageLcov(workspace, {
-    "src/Core.sol": { 1: 1 },
-    "src/Dependencies/Dep.sol": { 1: 1 },
-    "src/test/Test.sol": { 1: 1 },
-    "src/test/recon/Harness.sol": { 1: 1 }
+    "contracts/Core.sol": { 1: 1 },
+    "contracts/lib/ProductionLibrary.sol": { 1: 1 },
+    "lib/Dep.sol": { 1: 1 },
+    "test/Test.sol": { 1: 1 },
+    "test/recon/Harness.sol": { 1: 1 },
+    "mocks/Mock.sol": { 1: 1 }
   });
   const evidence = {
     schema_version: "ultrafuzz.coverage-evidence.v1",
     lcov,
     views: [
       { scope: "selected-range", covered_ranges: 1, total_ranges: 1 },
-      { scope: "production-source", covered_ranges: 1, total_ranges: 1 }
+      { scope: "production-source", covered_ranges: 2, total_ranges: 2 }
     ],
     files: [
-      { path: "src/Core.sol", kind: "production", included: true, covered_ranges: 1, total_ranges: 1 },
+      { path: "contracts/Core.sol", kind: "production", included: true, covered_ranges: 1, total_ranges: 1 },
       {
-        path: "src/Dependencies/Dep.sol",
+        path: "contracts/lib/ProductionLibrary.sol",
+        kind: "production",
+        included: false,
+        exclusion_reason: "not selected",
+        covered_ranges: 1,
+        total_ranges: 1
+      },
+      {
+        path: "lib/Dep.sol",
         kind: "dependency",
         included: false,
         exclusion_reason: "nested dependency source",
@@ -10829,7 +10842,7 @@ test("coverage gate prunes nested dependency, test, and harness roots from produ
         total_ranges: 1
       },
       {
-        path: "src/test/Test.sol",
+        path: "test/Test.sol",
         kind: "test",
         included: false,
         exclusion_reason: "nested test source",
@@ -10837,17 +10850,25 @@ test("coverage gate prunes nested dependency, test, and harness roots from produ
         total_ranges: 1
       },
       {
-        path: "src/test/recon/Harness.sol",
+        path: "test/recon/Harness.sol",
         kind: "harness",
         included: false,
         exclusion_reason: "nested harness source",
+        covered_ranges: 1,
+        total_ranges: 1
+      },
+      {
+        path: "mocks/Mock.sol",
+        kind: "harness",
+        included: false,
+        exclusion_reason: "mock harness source",
         covered_ranges: 1,
         total_ranges: 1
       }
     ],
     counted_ranges: [
       {
-        file: "src/Core.sol",
+        file: "contracts/Core.sol",
         kind: "production",
         start_line: 1,
         line_count: 1,
@@ -10855,7 +10876,15 @@ test("coverage gate prunes nested dependency, test, and harness roots from produ
         covered: true
       },
       {
-        file: "src/Dependencies/Dep.sol",
+        file: "contracts/lib/ProductionLibrary.sol",
+        kind: "production",
+        start_line: 1,
+        line_count: 1,
+        selected: false,
+        covered: true
+      },
+      {
+        file: "lib/Dep.sol",
         kind: "dependency",
         start_line: 1,
         line_count: 1,
@@ -10863,7 +10892,7 @@ test("coverage gate prunes nested dependency, test, and harness roots from produ
         covered: true
       },
       {
-        file: "src/test/Test.sol",
+        file: "test/Test.sol",
         kind: "test",
         start_line: 1,
         line_count: 1,
@@ -10871,7 +10900,15 @@ test("coverage gate prunes nested dependency, test, and harness roots from produ
         covered: true
       },
       {
-        file: "src/test/recon/Harness.sol",
+        file: "test/recon/Harness.sol",
+        kind: "harness",
+        start_line: 1,
+        line_count: 1,
+        selected: false,
+        covered: true
+      },
+      {
+        file: "mocks/Mock.sol",
         kind: "harness",
         start_line: 1,
         line_count: 1,
@@ -10901,10 +10938,12 @@ test("coverage gate prunes nested dependency, test, and harness roots from produ
     layout,
     node.id,
     "coverage-report.md",
-    "# Coverage\n\n## Scoped coverage evidence\n\n- selected-range: `1/1`\n- production-source: `1/1`\n\n" +
-      "Excluded components:\n- `src/Dependencies/Dep.sol` (dependency): nested dependency source\n" +
-      "- `src/test/Test.sol` (test): nested test source\n" +
-      "- `src/test/recon/Harness.sol` (harness): nested harness source\n\n" +
+    "# Coverage\n\n## Scoped coverage evidence\n\n- selected-range: `1/1`\n- production-source: `2/2`\n\n" +
+      "Excluded components:\n- `contracts/lib/ProductionLibrary.sol` (production): not selected\n" +
+      "- `lib/Dep.sol` (dependency): nested dependency source\n" +
+      "- `test/Test.sol` (test): nested test source\n" +
+      "- `test/recon/Harness.sol` (harness): nested harness source\n" +
+      "- `mocks/Mock.sol` (harness): mock harness source\n\n" +
       "Zero-coverage components:\n- None\n"
   );
   writeArtifact(layout, node.id, "coverage-evidence.json", JSON.stringify(evidence));
@@ -10913,8 +10952,8 @@ test("coverage gate prunes nested dependency, test, and harness roots from produ
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
 
   const relabeled = structuredClone(evidence);
-  relabeled.files[1]!.kind = "production";
-  relabeled.counted_ranges[1]!.kind = "production";
+  relabeled.files[2]!.kind = "production";
+  relabeled.counted_ranges[2]!.kind = "production";
   writeArtifact(layout, node.id, "coverage-evidence.json", JSON.stringify(relabeled));
   const spoofed = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(spoofed.ok, false);
@@ -11397,6 +11436,7 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
     "Overall coverage is approximately 25%.",
     "Overall coverage came to 25%.",
     "Overall coverage hit 25%.",
+    "Coverage climbed to 100%.",
     "Coverage accounted for 39/39 ranges.",
     "Unlike selected-range measurements: overall coverage was 25%.",
     "Coverage was **100%**.",
@@ -11406,6 +11446,7 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
     "Coverage was [100%](https://example.invalid/coverage).",
     "Coverage was 100<!-- rendered -->%.",
     "Coverage was 100\u200b%.",
+    "Coverage was 100％.",
     "Coverage was **39/39** ranges.",
     "Coverage was 100\\%.",
     "Coverage was 39\\/39 ranges.",
@@ -11436,7 +11477,8 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
     "Coverage was 100<wbr>%.",
     "Cover&#97;ge was 100%.",
     'Coverage was <strong title="x>y">100%</strong>.',
-    'Coverage was 100% <a href="selected-range">details</a>.'
+    'Coverage was 100% <a href="selected-range">details</a>.',
+    "<input hidden>\n\nCoverage was 100%."
   ]) {
     writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\n${mixedScore}\n`);
     const mixed = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
