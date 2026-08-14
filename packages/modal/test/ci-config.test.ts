@@ -659,10 +659,11 @@ describe("public Modal benchmark configuration", () => {
         {
           if?: string;
           needs?: string[];
+          "timeout-minutes"?: number | string;
           strategy?: {
             "fail-fast": boolean;
             "max-parallel": number;
-            matrix: { include: Array<{ lane: string; gates: string }> };
+            matrix: { include: Array<{ lane: string; gates: string; timeout_minutes: number }> };
           };
           steps: Array<{ name?: string; if?: string; run?: string }>;
         }
@@ -695,13 +696,19 @@ describe("public Modal benchmark configuration", () => {
         include: [
           {
             lane: "package-gates",
-            gates: "docs,config,audit-profile-package,security,topology,prompts,artifacts,evals,modal"
+            gates: "docs,config,audit-profile-package,security,topology,prompts,artifacts,evals,modal",
+            timeout_minutes: 30
           },
-          { lane: "runtime", gates: "runtime" },
-          { lane: "cli-typecheck", gates: "cli,benchmark-history,workspace-typecheck" }
+          { lane: "runtime", gates: "runtime", timeout_minutes: 45 },
+          {
+            lane: "cli-typecheck",
+            gates: "cli,benchmark-history,workspace-typecheck",
+            timeout_minutes: 30
+          }
         ]
       }
     });
+    expect(releaseValidation?.["timeout-minutes"]).toBe("${{ matrix.timeout_minutes }}");
     expect(releaseValidation?.steps.find((step) => step.name === "Validate release lane")?.run).toContain("--gates");
     const modalDependentLaneBuild = releaseValidation?.steps.find(
       (step) => step.name === "Build Modal-dependent lane dependencies"

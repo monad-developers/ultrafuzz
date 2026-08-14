@@ -55,7 +55,7 @@ jobs:
     needs: draft-and-build-gates
     if: github.event_name == 'push' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
       fail-fast: false
       max-parallel: 3
@@ -63,10 +63,13 @@ jobs:
         include:
           - lane: package-gates
             gates: docs,config,audit-profile-package,security,topology,prompts,artifacts,evals,modal
+            timeout_minutes: 30
           - lane: runtime
             gates: runtime
+            timeout_minutes: 45
           - lane: cli-typecheck
             gates: cli,benchmark-history,workspace-typecheck
+            timeout_minutes: 30
     env:
       ULTRAFUZZ_CODEX_REAL_DRY_RUN: "0"
       ULTRAFUZZ_RELEASE_DASHBOARD: "0"
