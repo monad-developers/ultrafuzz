@@ -405,7 +405,10 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
     // hide the failed run that this retry is recovering.
     if (action === "resume" && input.retryFailed === true) {
       const { syncRun } = await import("./workflow-sync.js");
-      await syncRun({ projectRoot: input.projectRoot, runId: input.runId, env: input.env });
+      const synchronization = await syncRun({ projectRoot: input.projectRoot, runId: input.runId, env: input.env });
+      if (!synchronization.ok) {
+        return runtimeFailure<WorkflowLifecycleValue>(synchronization.diagnostics);
+      }
     }
     const requestedConcurrency = input.maxConcurrency ?? sealedConfig.run.maxParallelAgents;
     const forgeGuard = prepareForgeGuardEnvironment({
@@ -522,6 +525,12 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
             failure_category: failureCategory
           };
         });
+      if (failedNodes.length === 0) {
+        failedNodes.push({
+          node_id: `run:${input.runId}`,
+          failure_category: "agent-failure"
+        });
+      }
       const priorRecovery = stateBeforeLifecycle.provenance?.recovery;
       const recoveryHistory = [
         ...(stateBeforeLifecycle.provenance?.recovery_history ?? []),

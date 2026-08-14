@@ -611,13 +611,6 @@ export async function synchronizeLinkedWorkflowRun(
   }
   const recovery = stateBeforeStatusUpdate.provenance?.recovery;
   if (finalStatus === "succeeded" && recovery?.prior_status === "failed" && recovery.recovered === false) {
-    const state = readRunState(layout);
-    const recovered = {
-      ...recovery,
-      recovered: true,
-      recovered_at: new Date(synchronizationClock(control)).toISOString()
-    };
-    writeRunState(layout, { ...state, provenance: { ...state.provenance!, recovery: recovered } });
     if (
       !replayEvents(layout).records.some(
         (event) => event.event_type === "run-recovered" && event.payload.recovery_id === recovery.recovery_id
@@ -629,6 +622,13 @@ export async function synchronizeLinkedWorkflowRun(
         payload: { recovery_id: recovery.recovery_id, prior_status: "failed", failed_nodes: recovery.failed_nodes }
       });
     }
+    const state = readRunState(layout);
+    const recovered = {
+      ...recovery,
+      recovered: true,
+      recovered_at: new Date(synchronizationClock(control)).toISOString()
+    };
+    writeRunState(layout, { ...state, provenance: { ...state.provenance!, recovery: recovered } });
   }
   const observedAtMs = synchronizationClock(control);
   const workflowControl = projectWorkflowControlState({
@@ -3878,7 +3878,13 @@ function finalRunStatus(
   }
   if (
     inspect.exhaustedLoops.length > 0 ||
-    (workflowStatus === "failed" && options.recovery?.recovered !== true) ||
+    (workflowStatus === "failed" &&
+      !(
+        options.recovery?.prior_status === "failed" &&
+        options.evidenceComplete &&
+        statuses.length > 0 &&
+        statuses.every((status) => status === "succeeded" || status === "reused-from-prior-run")
+      )) ||
     statuses.some((status) => ["failed", "skipped", "invalidated"].includes(status))
   ) {
     return "failed";
@@ -3897,7 +3903,7 @@ function finalRunStatus(
       : "failed";
   }
   if (
-    options.recovery?.recovered === true &&
+    options.recovery?.prior_status === "failed" &&
     options.evidenceComplete &&
     statuses.length > 0 &&
     statuses.every((status) => status === "succeeded" || status === "reused-from-prior-run")
