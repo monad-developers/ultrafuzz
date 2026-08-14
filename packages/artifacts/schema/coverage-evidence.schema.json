@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:ultrafuzz:schema:artifacts:coverage-evidence:1",
   "title": "Ultrafuzz complete coverage denominator",
-  "description": "Producer contract. The exact LCOV input is identified by a safe workspace-relative path and SHA-256. Each range uses a positive start_line plus positive line_count, so reversed ranges are unrepresentable. Semantic validation additionally requires: every counted range joins a declared file with the same kind; selected ranges are production-only and may join only an included file; ranges within each file do not overlap; file totals equal all selected and unselected counted ranges; selected-range totals equal selected counted ranges; production-source totals equal production-file totals; and zero_coverage_components exactly enumerates every uncovered material range. Runtime authenticates the LCOV snapshot and source attribution, binds every production declaration boundary to the trusted workspace inventory, derives covered flags from LCOV DA hits, and binds each selection flag to overlap with the generated Recon coverage map.",
+  "description": "Producer contract. The exact LCOV input is identified by a safe workspace-relative path and SHA-256. Each range uses a positive start_line plus positive line_count, so reversed ranges are unrepresentable. Semantic validation additionally requires: every counted range joins a declared file with the same kind; selected ranges are production-only and may join only an included file; ranges within each file do not overlap; file totals equal all selected and unselected counted ranges; selected-range totals equal selected counted ranges; production-source totals equal production-file totals; and each zero_coverage_components entry names an incomplete material range. Runtime authenticates the LCOV snapshot and source attribution, binds every production declaration boundary to the trusted workspace inventory, defines covered as at least one in-range LCOV DA row with every in-range DA row positive, requires zero_coverage_components to enumerate exactly the ranges with no positive hit, and binds each selection flag to overlap with the generated Recon coverage map. The two views are declaration-completeness metrics and do not claim to reproduce covg-eval's evaluator-specific function identity or filtering semantics.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "lcov", "views", "files", "counted_ranges", "zero_coverage_components"],
@@ -132,10 +132,12 @@
             "minimum": 1
           },
           "selected": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Whether this trusted declaration range overlaps the authenticated Recon selection map."
           },
           "covered": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Declaration completeness: true only when the authenticated LCOV contains at least one DA row in the range and every in-range DA row has a positive hit count."
           }
         }
       }

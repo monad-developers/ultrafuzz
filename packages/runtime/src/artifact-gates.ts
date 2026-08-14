@@ -4450,7 +4450,13 @@ function verifyCoverageProductionInventory(
   const markdownPath = safeResolveInside(artifactDir, markdownOutputs[0]!.path, "coverage Markdown output");
   const evidence = parseCurrentArtifactJson(artifactDir, evidencePath, authenticated);
   const markdownBytes = readCurrentArtifactSnapshot(artifactDir, markdownPath, authenticated);
-  if (!isRecord(evidence) || !Array.isArray(evidence.files) || !Array.isArray(evidence.counted_ranges)) return [];
+  if (
+    !isRecord(evidence) ||
+    !Array.isArray(evidence.files) ||
+    !Array.isArray(evidence.counted_ranges) ||
+    !Array.isArray(evidence.zero_coverage_components)
+  )
+    return [];
 
   const diagnostics =
     markdownBytes === undefined
@@ -4609,6 +4615,13 @@ function verifyCoverageProductionInventory(
     string,
     { all: Record<string, unknown>[]; byStartLine: Map<number, Record<string, unknown>[]> }
   >();
+  const declaredZeroCoverageComponents = new Set(
+    evidence.zero_coverage_components
+      .filter(isRecord)
+      .map((component) =>
+        coverageRangeIdentity(component.path, component.kind, component.start_line, component.line_count)
+      )
+  );
   for (const [index, candidate] of evidence.counted_ranges.entries()) {
     if (!isRecord(candidate) || typeof candidate.file !== "string") continue;
     if (candidate.kind === "production") {
@@ -4651,7 +4664,8 @@ function verifyCoverageProductionInventory(
       typeof candidate.covered === "boolean"
     ) {
       const coveredByLcov = lcovRangeCovered(
-        lcovCoverage.coveredLinesBySource.get(candidate.file),
+        lcovCoverage.instrumentedLinesBySource.get(candidate.file),
+        lcovCoverage.uncoveredLinesBySource.get(candidate.file),
         candidate.start_line,
         candidateEndLine
       );
@@ -4664,6 +4678,25 @@ function verifyCoverageProductionInventory(
           severity: "error",
           source: "coverage-evidence",
           path: `${evidencePath}#$.counted_ranges[${index}].covered`
+        });
+      }
+      const hasPositiveHit = rangeContainsSortedLine(
+        lcovCoverage.coveredLinesBySource.get(candidate.file),
+        candidate.start_line,
+        candidateEndLine
+      );
+      const declaredZeroCoverage = declaredZeroCoverageComponents.has(
+        coverageRangeIdentity(candidate.file, candidate.kind, candidate.start_line, candidate.line_count)
+      );
+      if (declaredZeroCoverage !== !hasPositiveHit) {
+        diagnostics.push({
+          code: "COVERAGE_ZERO_COMPONENT_RESULT_MISMATCH",
+          message: `Zero-coverage component status for ${candidate.file}:${candidate.start_line}-${candidateEndLine} must be ${String(
+            !hasPositiveHit
+          )} according to the authenticated LCOV DA hits`,
+          severity: "error",
+          source: "coverage-evidence",
+          path: `${evidencePath}#$.zero_coverage_components`
         });
       }
     }
@@ -4800,7 +4833,9 @@ function coverageDirectoryKind(segment: string): Exclude<CoverageSourceKind, "pr
 }
 type TrustedLcovCoverage = {
   hitsBySource: ReadonlyMap<string, ReadonlyMap<number, bigint>>;
+  instrumentedLinesBySource: ReadonlyMap<string, readonly number[]>;
   coveredLinesBySource: ReadonlyMap<string, readonly number[]>;
+  uncoveredLinesBySource: ReadonlyMap<string, readonly number[]>;
 };
 
 function readTrustedLcovCoverage(workspacePath: string, descriptor: unknown): TrustedLcovCoverage {
@@ -4862,17 +4897,21 @@ function readTrustedLcovCoverage(workspacePath: string, descriptor: unknown): Tr
   }
   if (currentSource !== undefined) throw new Error(`LCOV SF record for ${currentSource} lacks end_of_record`);
 
-  return {
-    hitsBySource,
-    coveredLinesBySource: new Map(
+  const sortedLines = (predicate: (hits: bigint) => boolean): ReadonlyMap<string, readonly number[]> =>
+    new Map(
       [...hitsBySource].map(([source, hits]) => [
         source,
         [...hits]
-          .filter(([, count]) => count > 0n)
+          .filter(([, count]) => predicate(count))
           .map(([line]) => line)
           .sort((left, right) => left - right)
       ])
-    )
+    );
+  return {
+    hitsBySource,
+    instrumentedLinesBySource: sortedLines(() => true),
+    coveredLinesBySource: sortedLines((hits) => hits > 0n),
+    uncoveredLinesBySource: sortedLines((hits) => hits === 0n)
   };
 }
 
@@ -4908,16 +4947,34 @@ function trustedCoverageSourceKind(
   return rootedKinds.some((entry) => entry.index > root.index && entry.kind === "harness") ? "harness" : "test";
 }
 
-function lcovRangeCovered(coveredLines: readonly number[] | undefined, startLine: number, endLine: number): boolean {
-  if (coveredLines === undefined) return false;
+// This is the declaration-completeness metric published by coverage evidence,
+// not covg-eval's separate function-identity and filtering model.
+function lcovRangeCovered(
+  instrumentedLines: readonly number[] | undefined,
+  uncoveredLines: readonly number[] | undefined,
+  startLine: number,
+  endLine: number
+): boolean {
+  return (
+    rangeContainsSortedLine(instrumentedLines, startLine, endLine) &&
+    !rangeContainsSortedLine(uncoveredLines, startLine, endLine)
+  );
+}
+
+function rangeContainsSortedLine(lines: readonly number[] | undefined, startLine: number, endLine: number): boolean {
+  if (lines === undefined) return false;
   let low = 0;
-  let high = coveredLines.length;
+  let high = lines.length;
   while (low < high) {
     const middle = Math.floor((low + high) / 2);
-    if (coveredLines[middle]! < startLine) low = middle + 1;
+    if (lines[middle]! < startLine) low = middle + 1;
     else high = middle;
   }
-  return low < coveredLines.length && coveredLines[low]! <= endLine;
+  return low < lines.length && lines[low]! <= endLine;
+}
+
+function coverageRangeIdentity(file: unknown, kind: unknown, startLine: unknown, lineCount: unknown): string {
+  return `${String(file)}\0${String(kind)}\0${String(startLine)}\0${String(lineCount)}`;
 }
 
 type MaterialCoverageDeclaration = { line: number; endLine: number };
