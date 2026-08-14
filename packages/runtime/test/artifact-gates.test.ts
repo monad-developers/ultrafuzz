@@ -10477,6 +10477,17 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
   const valid = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
 
+  publish(
+    evidence,
+    `${scopedMarkdown}\n## Notes\n\nCoverage was 100% <span style="opacity: 0">selected-range</span>.\n`
+  );
+  const hiddenProducerScope = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(hiddenProducerScope.ok, false);
+  assert.ok(
+    hiddenProducerScope.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"),
+    JSON.stringify(hiddenProducerScope.diagnostics)
+  );
+
   const incompleteZeroRanges = structuredClone(evidence);
   incompleteZeroRanges.zero_coverage_components.shift();
   publish(incompleteZeroRanges, scopedMarkdown.replace("- `src/Core.sol:3-3` (production)\n", ""));
@@ -11569,6 +11580,8 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
     "The selected-range score was 100% (overall coverage was 25%).",
     "Selected-range coverage was 100% — overall coverage was 25%.",
     "Selected-range coverage was 100% overall coverage was 25%.",
+    "Selected-range coverage was 100% and overall was 25%.",
+    "Coverage was 100% selected-range and 25% overall.",
     "Overall coverage is approximately 25%.",
     "Overall coverage came to 25%.",
     "Overall coverage hit 25%.",
@@ -11577,7 +11590,10 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
     "Coverage exceeded 90%.",
     "Coverage is above 90%.",
     "Coverage now shows 100%.",
+    "coverage_rate=100%.",
+    "Coverage was 100 percent.",
     "Coverage accounted for 39/39 ranges.",
+    "Coverage was 39 out of 39 ranges.",
     "Unlike selected-range measurements: overall coverage was 25%.",
     "Coverage was **100%**.",
     "Coverage was *100%*.",
@@ -11590,7 +11606,11 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
     "Coverage was １００%.",
     "Coverage was １００％.",
     "Coverage was 39⁄39 ranges.",
+    "Coverage was 39∕39 ranges.",
+    "Coverage was 39⧸39 ranges.",
     "Coverage was 39／39 ranges.",
+    "Coverage was ١٠٠%.",
+    "Coverage was 100٪.",
     "Coverage was **39/39** ranges.",
     "Coverage was 100\\%.",
     "Coverage was 39\\/39 ranges.",
@@ -11604,6 +11624,9 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
     "Coverage was 100% <span hidden>selected-range</span>.",
     'Coverage was 100% <span aria-hidden="true">selected-range</span>.',
     'Coverage was 100% <span style="display: none">selected-range</span>.',
+    'Coverage was 100% <span style="opacity: 0">selected-range</span>.',
+    'Coverage was 100% <span style="font-size: 0">selected-range</span>.',
+    'Coverage was 100% <span style="color: transparent">selected-range</span>.',
     "Coverage was 100% <span inert>selected-range</span>.",
     "Coverage was 100% ![selected-range](https://example.invalid/chart.svg).",
     "![Coverage was 100%.](https://example.invalid/chart.svg)",
@@ -11627,17 +11650,20 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
     'Coverage was 100% <a href="selected-range">details</a>.',
     "The selected-range trend differed from overall coverage at 100%.",
     "In selected-range context overall coverage reached 100%.",
+    "The selected-range methodology was discussed because coverage was 100%.",
+    "The selected-range trend differed from total coverage at 100%.",
+    "Selected-range context differs from production coverage at 100%.",
     "<input hidden>\n\nCoverage was 100%."
   ]) {
     writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\n${mixedScore}\n`);
     const mixed = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
     assert.equal(mixed.ok, false, mixedScore);
-    const normalizedMixedScore = mixedScore.normalize("NFKC").replace(/\u2044/gu, "/");
+    const normalizedMixedScore = mixedScore.normalize("NFKC").replace(/[\u2044\u2215\u29f8]/gu, "/");
     assert.ok(
       mixed.diagnostics.some(
         (diagnostic) =>
           diagnostic.code ===
-          (/\b\d+\s*(?:\/|\\\/|&#47;)\s*\d+\b/u.test(normalizedMixedScore)
+          (/\b\d+\s*(?:\/|\\\/|&#47;|out\s+of)\s*\d+\b/u.test(normalizedMixedScore)
             ? "UNSCOPED_COVERAGE_FRACTION"
             : "UNSCOPED_COVERAGE_PERCENTAGE")
       ),
@@ -11654,6 +11680,9 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
     "<span hidden>Coverage was 100%.</span>",
     '<span aria-hidden="true">Coverage was 100%.</span>',
     '<span style="visibility: hidden">Coverage was 100%.</span>',
+    '<span style="opacity: 0">Coverage was 100%.</span>',
+    '<span style="font-size: 0">Coverage was 100%.</span>',
+    '<span style="color: transparent">Coverage was 100%.</span>',
     "<span inert>Coverage was 100%.</span>",
     '<img hidden alt="Coverage was 100%.">',
     '<span aria-hidden="true" aria-label="Coverage was 100%."></span>',
@@ -11700,6 +11729,15 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
   );
   const insuranceProseWithoutComma = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
   assert.equal(insuranceProseWithoutComma.ok, true, JSON.stringify(insuranceProseWithoutComma.diagnostics));
+
+  for (const unrelatedPercentage of [
+    "Selected-range coverage was 100%, while the insurance payout was 25%.",
+    "Selected-range coverage was 100% and interest was 25%."
+  ]) {
+    writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\n${unrelatedPercentage}\n`);
+    const unrelatedProse = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+    assert.equal(unrelatedProse.ok, true, `${unrelatedPercentage}: ${JSON.stringify(unrelatedProse.diagnostics)}`);
+  }
 
   writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\nThe selected-range was 1/1.\n`);
   const misplaced = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
@@ -11841,6 +11879,20 @@ test("final report preserves finalized scoped coverage evidence and rejects bare
   const prosePercentage = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
   assert.equal(prosePercentage.ok, false);
   assert.ok(prosePercentage.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"));
+
+  const continuationIssue = {
+    ...structuredClone(percentageIssue),
+    notes: ["triage_reason=public path is reachable", "Selected-range coverage was 100% and overall was 25%."]
+  };
+  writeArtifact(
+    layout,
+    reportNode.id,
+    "report.json",
+    JSON.stringify(currentReport(layout.runId, { coverage_evidence: evidence, issues: [continuationIssue] }))
+  );
+  const nestedContinuation = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+  assert.equal(nestedContinuation.ok, false);
+  assert.ok(nestedContinuation.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"));
 
   const fractionIssue = {
     ...structuredClone(percentageIssue),
