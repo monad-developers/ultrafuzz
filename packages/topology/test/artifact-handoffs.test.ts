@@ -3,6 +3,14 @@ import { describe, expect, it } from "vitest";
 import { extractPromptVariables, validateTopology } from "../src/index.js";
 import { validTopology } from "./helpers.js";
 
+const FINDING_VOCABULARY_REFERENCES = "\n{{finding_reachability_vocabulary}}\n{{finding_note_key_vocabulary}}\n";
+
+function validateFindingsStrategyPrompt(prompt: string): void {
+  validateTopology(validTopology(), {
+    promptTexts: { "strategies/strategy.md": `${prompt}${FINDING_VOCABULARY_REFERENCES}` }
+  });
+}
+
 describe("artifact handoff validation", () => {
   it("accepts ancestor handoffs to primary artifacts", () => {
     expect(() =>
@@ -99,10 +107,9 @@ describe("artifact handoff validation", () => {
       "Ignore this step:\nWrite findings to {{output_findings_path}}.",
       "If useful:\n- Write findings to {{output_findings_path}}."
     ]) {
-      expect(
-        () => validateTopology(validTopology(), { promptTexts: { "strategies/strategy.md": prompt } }),
-        prompt
-      ).toThrow(expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" }));
+      expect(() => validateFindingsStrategyPrompt(prompt), prompt).toThrow(
+        expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" })
+      );
     }
   });
 
@@ -234,6 +241,12 @@ describe("artifact handoff validation", () => {
       "ultrafuzz/severity-classified-findings@1",
       "ultrafuzz/report@2"
     ] as const) {
+      const outputInstruction =
+        contract === "ultrafuzz/findings@2"
+          ? " Write findings to {{artifact_path}}/findings.json."
+          : contract === "ultrafuzz/triaged-findings@1" || contract === "ultrafuzz/severity-classified-findings@1"
+            ? " Write findings to {{artifact_path}}/reviewed-findings.json."
+            : "";
       topology.nodes[3] = {
         ...topology.nodes[3]!,
         outputs:
@@ -252,14 +265,14 @@ describe("artifact handoff validation", () => {
       expect(() =>
         validateTopology(topology, {
           promptTexts: {
-            "review/triage.md": "Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}."
+            "review/triage.md": `Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.${outputInstruction}`
           }
         })
       ).not.toThrow();
       expect(() =>
         validateTopology(topology, {
           promptTexts: {
-            "review/triage.md": "Use {{ finding_reachability_vocabulary }} and {{ finding_note_key_vocabulary }}."
+            "review/triage.md": `Use {{ finding_reachability_vocabulary }} and {{ finding_note_key_vocabulary }}.${outputInstruction}`
           }
         })
       ).not.toThrow();
@@ -598,11 +611,7 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
     ).toThrow(expect.objectContaining({ code: "DUPLICATED_REPORT_VOCABULARY" }));
   });
   it("requires explicit destinations for valid-empty output declarations", () => {
-    expect(() =>
-      validateTopology(validTopology(), {
-        promptTexts: { "strategies/strategy.md": "Investigate the target and report your result." }
-      })
-    ).toThrow(
+    expect(() => validateFindingsStrategyPrompt("Investigate the target and report your result.")).toThrow(
       expect.objectContaining({
         code: "MISSING_PROMPT_OUTPUT_INSTRUCTION",
         message: expect.stringMatching(/strategy.*strategies\/strategy\.md.*findings\.json.*valid-empty/iu),
@@ -615,11 +624,7 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       })
     );
 
-    expect(() =>
-      validateTopology(validTopology(), {
-        promptTexts: { "strategies/strategy.md": "Write findings to {{output_findings_path}}." }
-      })
-    ).not.toThrow();
+    expect(() => validateFindingsStrategyPrompt("Write findings to {{output_findings_path}}.")).not.toThrow();
     for (const prompt of [
       "Write confirmed findings, if any, to {{output_findings_path}}.",
       "Do not fail to write findings to {{output_findings_path}}.",
@@ -669,19 +674,13 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       "Artifact finalization:\nWrite findings to {{output_findings_path}}.",
       "## Optional\n\n## Required output\n\nWrite findings to {{output_findings_path}}."
     ]) {
-      expect(
-        () => validateTopology(validTopology(), { promptTexts: { "strategies/strategy.md": prompt } }),
-        prompt
-      ).not.toThrow();
+      expect(() => validateFindingsStrategyPrompt(prompt), prompt).not.toThrow();
     }
 
     expect(() =>
-      validateTopology(validTopology(), {
-        promptTexts: {
-          "strategies/strategy.md":
-            "Do not perform any of the following:\n- Write findings to {{output_findings_path}}.\n\nRequired output:\n- Write findings to {{output_findings_path}}."
-        }
-      })
+      validateFindingsStrategyPrompt(
+        "Do not perform any of the following:\n- Write findings to {{output_findings_path}}.\n\nRequired output:\n- Write findings to {{output_findings_path}}."
+      )
     ).not.toThrow();
 
     for (const prompt of [
@@ -734,19 +733,15 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       "Investigate first. Write an assessment of the existing file at {{output_findings_path}}.",
       "Investigate first. Write findings to {{output_findings_path}} if a finding exists."
     ]) {
-      expect(
-        () => validateTopology(validTopology(), { promptTexts: { "strategies/strategy.md": prompt } }),
-        prompt
-      ).toThrow(expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" }));
+      expect(() => validateFindingsStrategyPrompt(prompt), prompt).toThrow(
+        expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" })
+      );
     }
 
     expect(() =>
-      validateTopology(validTopology(), {
-        promptTexts: {
-          "strategies/strategy.md":
-            "---\nid: strategy\ndisplay_name: Write findings to {{output_findings_path}}\n---\nInvestigate the target."
-        }
-      })
+      validateFindingsStrategyPrompt(
+        "---\nid: strategy\ndisplay_name: Write findings to {{output_findings_path}}\n---\nInvestigate the target."
+      )
     ).toThrow(expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" }));
   });
 
@@ -811,10 +806,9 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       "Potential action:\nWrite findings to {{output_findings_path}}.",
       "Required output:\n> Write findings to {{output_findings_path}}."
     ]) {
-      expect(
-        () => validateTopology(validTopology(), { promptTexts: { "strategies/strategy.md": prompt } }),
-        prompt
-      ).toThrow(expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" }));
+      expect(() => validateFindingsStrategyPrompt(prompt), prompt).toThrow(
+        expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" })
+      );
     }
   });
 
@@ -914,10 +908,9 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       "As an example, write findings to {{output_findings_path}}.",
       "Hypothetically, write findings to {{output_findings_path}}."
     ]) {
-      expect(
-        () => validateTopology(validTopology(), { promptTexts: { "strategies/strategy.md": prompt } }),
-        prompt
-      ).toThrow(expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" }));
+      expect(() => validateFindingsStrategyPrompt(prompt), prompt).toThrow(
+        expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" })
+      );
     }
   });
 
@@ -935,10 +928,7 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       "1. Required outputs:\n   - Write structured findings to:\n     {{output_findings_path}}",
       "Write structured findings to:\n\n{{output_findings_path}}\n\nReview details when useful."
     ]) {
-      expect(
-        () => validateTopology(validTopology(), { promptTexts: { "strategies/strategy.md": prompt } }),
-        prompt
-      ).not.toThrow();
+      expect(() => validateFindingsStrategyPrompt(prompt), prompt).not.toThrow();
     }
   });
 
@@ -1014,10 +1004,7 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       "No omissions:\nWrite findings to {{output_findings_path}}.",
       "Mandatory no-result behavior:\nWrite findings to {{output_findings_path}} even if none exist."
     ]) {
-      expect(
-        () => validateTopology(validTopology(), { promptTexts: { "strategies/strategy.md": prompt } }),
-        prompt
-      ).not.toThrow();
+      expect(() => validateFindingsStrategyPrompt(prompt), prompt).not.toThrow();
     }
   });
 
@@ -1094,10 +1081,9 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       "Write a note saying {{output_findings_path}} already exists.",
       "Write logs containing {{output_findings_path}}."
     ]) {
-      expect(
-        () => validateTopology(validTopology(), { promptTexts: { "strategies/strategy.md": prompt } }),
-        prompt
-      ).toThrow(expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" }));
+      expect(() => validateFindingsStrategyPrompt(prompt), prompt).toThrow(
+        expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" })
+      );
     }
 
     const textTopology = validTopology();
@@ -1202,11 +1188,9 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
   });
 
   it("matches declared output destinations case-sensitively", () => {
-    expect(() =>
-      validateTopology(validTopology(), {
-        promptTexts: { "strategies/strategy.md": "Write findings to {{artifact_dir}}/FINDINGS.JSON." }
-      })
-    ).toThrow(expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" }));
+    expect(() => validateFindingsStrategyPrompt("Write findings to {{artifact_dir}}/FINDINGS.JSON.")).toThrow(
+      expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" })
+    );
 
     const topology = validTopology();
     topology.nodes[2] = {
@@ -1228,7 +1212,7 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
   it("validates candidate-heavy prompts without rescanning each full prefix", () => {
     const prompt = "Write findings to {{output_findings_path}} when useful.\n".repeat(8_000);
     const started = performance.now();
-    expect(() => validateTopology(validTopology(), { promptTexts: { "strategies/strategy.md": prompt } })).toThrow(
+    expect(() => validateFindingsStrategyPrompt(prompt)).toThrow(
       expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" })
     );
     expect(performance.now() - started).toBeLessThan(2_000);
@@ -1292,7 +1276,9 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
     };
     expect(() =>
       validateTopology(findingsTopology, {
-        promptTexts: { "strategies/strategy.md": "Write findings to {{output_findings_path}}." }
+        promptTexts: {
+          "strategies/strategy.md": `Write findings to {{output_findings_path}}.${FINDING_VOCABULARY_REFERENCES}`
+        }
       })
     ).toThrow(expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" }));
 
@@ -1306,7 +1292,9 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
     };
     expect(() =>
       validateTopology(stageTopology, {
-        promptTexts: { "strategies/strategy.md": "Write findings to {{output_stage_findings_path}}." }
+        promptTexts: {
+          "strategies/strategy.md": `Write findings to {{output_stage_findings_path}}.${FINDING_VOCABULARY_REFERENCES}`
+        }
       })
     ).toThrow(expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" }));
   });
@@ -1322,7 +1310,9 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       ]
     };
     expect(() =>
-      validateTopology(topology, { promptTexts: { "strategies/strategy.md": "Produce the required report." } })
+      validateTopology(topology, {
+        promptTexts: { "strategies/strategy.md": `Produce the required report.${FINDING_VOCABULARY_REFERENCES}` }
+      })
     ).not.toThrow();
   });
 });
