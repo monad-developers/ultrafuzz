@@ -4,13 +4,14 @@ import {
   type ArtifactContractId
 } from "./artifact-contract-ids.js";
 import { CANONICAL_ARTIFACT_RELATIVE_PATH_PATTERN } from "./artifact-path-primitives.js";
+import { MAX_RETRY_CHAIN_ATTEMPTS } from "./artifact-limits.js";
 import { validateRegisteredJsonSchema, type JsonSchemaValidationResult } from "./json-schema-validator.js";
 import type { PlannedGraphDocument, PlannedGraphNodeDocument, PlannedGraphOutput } from "./planned-graph.js";
 import { parseStrictJsonBytes } from "./strict-json.js";
 
-export const SMITHERS_TASK_MANIFEST_SCHEMA_VERSION = "ultrafuzz.smithers.workflow.v3" as const;
-export const SMITHERS_TASK_METADATA_SCHEMA_VERSION = "ultrafuzz.smithers.task.v2" as const;
-export const SMITHERS_TASK_MANIFEST_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:smithers-task-manifest:3" as const;
+export const SMITHERS_TASK_MANIFEST_SCHEMA_VERSION = "ultrafuzz.smithers.workflow.v4" as const;
+export const SMITHERS_TASK_METADATA_SCHEMA_VERSION = "ultrafuzz.smithers.task.v3" as const;
+export const SMITHERS_TASK_MANIFEST_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:smithers-task-manifest:4" as const;
 
 const MAX_SMITHERS_TASK_MANIFEST_BYTES = 64 * 1024 * 1024;
 const MAX_SMITHERS_TASKS = 100_000;
@@ -188,6 +189,19 @@ const taskExecutionJsonSchema = {
   ]
 } as const;
 
+const taskAgentChainEntryJsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["profileId", "agentRef", "role"],
+  properties: {
+    profileId: { type: "string", pattern: SAFE_ID_PATTERN },
+    agentRef: nonEmptyStringJsonSchema,
+    modelName: nonEmptyStringJsonSchema,
+    reasoningEffort: nonEmptyStringJsonSchema,
+    role: { enum: ["primary", "fallback"] }
+  }
+} as const;
+
 const metadataExecutionJsonSchema = {
   type: "object",
   additionalProperties: false,
@@ -231,7 +245,7 @@ const smithersTaskMetadataJsonSchema = {
       properties: {
         ultrafuzzRunId: { type: "string", pattern: SAFE_ID_PATTERN },
         smithersWorkflowName: nonEmptyStringJsonSchema,
-        graphVersion: { const: "3" },
+        graphVersion: { const: "4" },
         topologyVersion: { const: 2 }
       }
     },
@@ -285,14 +299,20 @@ const smithersTaskMetadataJsonSchema = {
     model: {
       type: "object",
       additionalProperties: false,
-      required: ["profileId", "agentRef", "modelIndex", "attemptIndex"],
+      required: ["profileId", "agentRef", "modelIndex", "attemptIndex", "agentChain"],
       properties: {
         profileId: nonEmptyStringJsonSchema,
         agentRef: nonEmptyStringJsonSchema,
         modelName: nonEmptyStringJsonSchema,
         reasoningEffort: nonEmptyStringJsonSchema,
         modelIndex: { type: "integer", minimum: 0 },
-        attemptIndex: { type: "integer", minimum: 0 }
+        attemptIndex: { type: "integer", minimum: 0 },
+        agentChain: {
+          type: "array",
+          minItems: 1,
+          maxItems: MAX_RETRY_CHAIN_ATTEMPTS,
+          items: taskAgentChainEntryJsonSchema
+        }
       }
     },
     workspace: {
@@ -319,10 +339,11 @@ const smithersTaskMetadataJsonSchema = {
     retryPolicy: {
       type: "object",
       additionalProperties: false,
-      required: ["maxAttempts", "smithersRetries"],
+      required: ["maxAttempts", "sameAgentAttempts", "smithersRetries"],
       properties: {
-        maxAttempts: { type: "integer", minimum: 1 },
-        smithersRetries: { type: "integer", minimum: 0 }
+        maxAttempts: { type: "integer", minimum: 1, maximum: MAX_RETRY_CHAIN_ATTEMPTS },
+        sameAgentAttempts: { type: "integer", minimum: 1, maximum: MAX_RETRY_CHAIN_ATTEMPTS },
+        smithersRetries: { type: "integer", minimum: 0, maximum: MAX_RETRY_CHAIN_ATTEMPTS - 1 }
       }
     },
     timeout: {
@@ -366,6 +387,7 @@ export const smithersTaskManifestJsonSchema = {
           "smithersNodeId",
           "verifierSmithersNodeId",
           "agentRef",
+          "agentChain",
           "dependencies",
           "dependencySmithersNodeIds",
           "timeoutMs",
@@ -392,6 +414,12 @@ export const smithersTaskManifestJsonSchema = {
             pattern: "^verify:[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
           },
           agentRef: nonEmptyStringJsonSchema,
+          agentChain: {
+            type: "array",
+            minItems: 1,
+            maxItems: MAX_RETRY_CHAIN_ATTEMPTS,
+            items: taskAgentChainEntryJsonSchema
+          },
           modelName: nonEmptyStringJsonSchema,
           reasoningEffort: nonEmptyStringJsonSchema,
           dependencies: {
@@ -406,15 +434,14 @@ export const smithersTaskManifestJsonSchema = {
           },
           timeoutMs: { type: "integer", minimum: 1 },
           heartbeatTimeoutMs: { type: "integer", minimum: 1 },
-          retries: { type: "integer", minimum: 0 },
+          retries: { type: "integer", minimum: 0, maximum: MAX_RETRY_CHAIN_ATTEMPTS - 1 },
           retryPolicy: {
             type: "object",
             additionalProperties: false,
-            required: ["backoff", "initialDelayMs", "maxDelayMs"],
+            required: ["backoff", "initialDelayMs"],
             properties: {
               backoff: { const: "exponential" },
-              initialDelayMs: { type: "integer", minimum: 1 },
-              maxDelayMs: { type: "integer", minimum: 1 }
+              initialDelayMs: { type: "integer", minimum: 1 }
             }
           },
           workspacePath: safePathValueJsonSchema,
@@ -469,7 +496,7 @@ export interface SmithersTaskManifestMetadata {
   run: {
     ultrafuzzRunId: string;
     smithersWorkflowName: string;
-    graphVersion: "3";
+    graphVersion: "4";
     topologyVersion: 2;
   };
   node: {
@@ -499,6 +526,7 @@ export interface SmithersTaskManifestMetadata {
     reasoningEffort?: string;
     modelIndex: number;
     attemptIndex: number;
+    agentChain: SmithersTaskManifestAgentChainEntry[];
   };
   workspace: {
     primitive: "worktree";
@@ -513,6 +541,7 @@ export interface SmithersTaskManifestMetadata {
   };
   retryPolicy: {
     maxAttempts: number;
+    sameAgentAttempts: number;
     smithersRetries: number;
   };
   timeout: {
@@ -527,6 +556,14 @@ export interface SmithersTaskManifestMetadata {
   };
 }
 
+export interface SmithersTaskManifestAgentChainEntry {
+  profileId: string;
+  agentRef: string;
+  modelName?: string;
+  reasoningEffort?: string;
+  role: "primary" | "fallback";
+}
+
 export interface SmithersTaskManifestTask {
   attemptId: string;
   concreteNodeId: string;
@@ -535,6 +572,7 @@ export interface SmithersTaskManifestTask {
   smithersNodeId: string;
   verifierSmithersNodeId: string;
   agentRef: string;
+  agentChain: SmithersTaskManifestAgentChainEntry[];
   modelName?: string;
   reasoningEffort?: string;
   dependencies: string[];
@@ -545,7 +583,6 @@ export interface SmithersTaskManifestTask {
   retryPolicy: {
     backoff: "exponential";
     initialDelayMs: number;
-    maxDelayMs: number;
   };
   workspacePath: string;
   artifactDir: string;
@@ -646,6 +683,28 @@ export function assertSmithersTaskManifestSemantics(manifest: SmithersTaskManife
     ) {
       throw new Error(`Smithers task ${JSON.stringify(task.attemptId)} has mismatched model metadata`);
     }
+    if (!sameJson(task.agentChain, task.metadata.model.agentChain)) {
+      throw new Error(`Smithers task ${JSON.stringify(task.attemptId)} has mismatched agent-chain metadata`);
+    }
+    const primaryChain = task.agentChain.slice(0, task.metadata.retryPolicy.sameAgentAttempts);
+    const fallbackChain = task.agentChain.slice(task.metadata.retryPolicy.sameAgentAttempts);
+    const selectedProfile = {
+      profileId: task.metadata.model.profileId,
+      agentRef: task.agentRef,
+      ...(task.modelName === undefined ? {} : { modelName: task.modelName }),
+      ...(task.reasoningEffort === undefined ? {} : { reasoningEffort: task.reasoningEffort }),
+      role: "primary"
+    };
+    if (
+      task.agentChain.length > MAX_RETRY_CHAIN_ATTEMPTS ||
+      task.agentChain.length !== task.retries + 1 ||
+      primaryChain.length !== task.metadata.retryPolicy.sameAgentAttempts ||
+      primaryChain.some((entry) => !sameJson(entry, selectedProfile)) ||
+      fallbackChain.some((entry) => entry.role !== "fallback") ||
+      new Set(fallbackChain.map((entry) => entry.profileId)).size !== fallbackChain.length
+    ) {
+      throw new Error(`Smithers task ${JSON.stringify(task.attemptId)} has an invalid retry agent chain`);
+    }
     assertSameStringArray(
       task.dependencies,
       task.metadata.dependencies.attemptIds,
@@ -657,10 +716,14 @@ export function assertSmithersTaskManifestSemantics(manifest: SmithersTaskManife
       `Smithers task ${JSON.stringify(task.attemptId)} dependency workflow metadata`
     );
     if (
+      task.metadata.retryPolicy.maxAttempts > MAX_RETRY_CHAIN_ATTEMPTS ||
+      task.metadata.retryPolicy.sameAgentAttempts > MAX_RETRY_CHAIN_ATTEMPTS ||
+      task.metadata.retryPolicy.smithersRetries >= MAX_RETRY_CHAIN_ATTEMPTS ||
       task.timeoutMs !== task.metadata.timeout.milliseconds ||
       task.heartbeatTimeoutMs !== task.metadata.timeout.heartbeatTimeoutMs ||
       task.retries !== task.metadata.retryPolicy.smithersRetries ||
       task.metadata.retryPolicy.maxAttempts !== task.retries + 1 ||
+      task.metadata.retryPolicy.sameAgentAttempts > task.metadata.retryPolicy.maxAttempts ||
       task.metadata.timeout.seconds !== Math.ceil(task.timeoutMs / 1_000)
     ) {
       throw new Error(`Smithers task ${JSON.stringify(task.attemptId)} has mismatched timeout or retry metadata`);
@@ -822,7 +885,7 @@ function assertTaskMatchesPlannedNode(
     task.logicalNodeId !== node.logical_id ||
     task.metadata.node.logicalNodeId !== node.logical_id ||
     task.metadata.node.label !== node.display_name ||
-    task.metadata.run.graphVersion !== "3" ||
+    task.metadata.run.graphVersion !== "4" ||
     task.metadata.run.topologyVersion !== 2 ||
     task.metadata.loop.index !== node.loop.index ||
     task.metadata.loop.count !== node.loop.count ||

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import {
-  applyDefaultProfileOverrides,
+  applyModelProfileOverrides,
   loadProjectConfig,
   redactDiagnostics,
   resolveConfig,
@@ -146,7 +146,7 @@ export function modelProfilesForTopology(
 }
 
 export function summarizeConfig(config: ResolvedConfig): ValidateProjectResult["resolved_config"] {
-  const defaultProfile = config.models.profiles[config.models.default];
+  const defaultProfile = config.models.profiles[config.retry.agents[0] ?? config.models.default];
   return {
     schema_version: config.schemaVersion,
     audit_profile: config.auditProfile,
@@ -249,10 +249,19 @@ function validateTopologySurface(
       projectRoot,
       requirePromptFiles: true,
       defaultTimeoutSeconds: config?.run.defaultTimeoutSeconds,
+      defaultMaxAttempts: config?.retry.sameAgentAttempts,
       modelProfiles: config ? modelProfilesForTopology(config) : undefined,
-      defaultModelProfileId: config?.models.default
+      defaultModelProfileId: config?.retry.agents[0] ?? config?.models.default
     });
     const selectedAgents = new Set(expanded.nodes.flatMap((node) => node.modelFanout.map((model) => model.agentRef)));
+    for (const model of expanded.nodes.flatMap((node) => node.modelFanout)) {
+      if (config === undefined) continue;
+      const configuredIndex = config.retry.agents.indexOf(model.modelProfileId);
+      if (configuredIndex < 0) continue;
+      for (const profileId of config.retry.agents.slice(configuredIndex + 1)) {
+        selectedAgents.add(config.models.profiles[profileId]!.agent);
+      }
+    }
     if (config?.execution.mode === "cloud") {
       for (const agentId of [...selectedAgents].sort()) {
         if (config.agents[agentId]?.auth === "subscription") {
@@ -358,5 +367,9 @@ function validateAgentReferences(
 }
 
 function applyAgentOverrides(config: ResolvedConfig, input: ValidateProjectInput): void {
-  applyDefaultProfileOverrides(config, { agent: input.agent, model: input.model, reasoning: input.reasoning });
+  applyModelProfileOverrides(config, config.retry.agents[0] ?? config.models.default, {
+    agent: input.agent,
+    model: input.model,
+    reasoning: input.reasoning
+  });
 }

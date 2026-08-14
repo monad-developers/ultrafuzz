@@ -251,10 +251,10 @@
         },
         "artifactDir": { "$ref": "#/$defs/nonEmptyString" },
         "loop": {
-          "$ref": "urn:ultrafuzz:schema:topology:expanded-graph:3#/properties/nodes/items/properties/loop"
+          "$ref": "urn:ultrafuzz:schema:topology:expanded-graph:4#/properties/nodes/items/properties/loop"
         },
         "modelFanout": {
-          "$ref": "urn:ultrafuzz:schema:topology:expanded-graph:3#/properties/nodes/items/properties/modelFanout"
+          "$ref": "urn:ultrafuzz:schema:topology:expanded-graph:4#/properties/nodes/items/properties/modelFanout"
         }
       }
     },
@@ -602,7 +602,7 @@
         "schema_version": { "const": "ultrafuzz.dashboard.http.v1" },
         "document_type": { "const": "graph" },
         "topology": { "$ref": "#/$defs/projectTopology" },
-        "expandedGraph": { "$ref": "urn:ultrafuzz:schema:topology:expanded-graph:3" },
+        "expandedGraph": { "$ref": "urn:ultrafuzz:schema:topology:expanded-graph:4" },
         "logicalNodes": { "$ref": "#/$defs/nonNegativeSafeInteger" },
         "expandedNodes": { "$ref": "#/$defs/nonNegativeSafeInteger" }
       }
@@ -818,7 +818,7 @@
         "contentHash": { "$ref": "#/$defs/sha256" },
         "content": { "type": "string" },
         "topology": { "$ref": "#/$defs/projectTopology" },
-        "expandedGraph": { "$ref": "urn:ultrafuzz:schema:topology:expanded-graph:3" },
+        "expandedGraph": { "$ref": "urn:ultrafuzz:schema:topology:expanded-graph:4" },
         "validation": { "$ref": "#/$defs/validation" }
       },
       "allOf": [

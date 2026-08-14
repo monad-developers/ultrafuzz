@@ -19,6 +19,22 @@ function task(overrides: Partial<SmithersTaskManifestTask> = {}): SmithersTaskMa
   const logicalNodeId = overrides.logicalNodeId ?? "producer";
   const dependencies = overrides.dependencies ?? ["meta-start"];
   const dependencySmithersNodeIds = overrides.dependencySmithersNodeIds ?? [];
+  const agentChain = [
+    {
+      profileId: "default",
+      agentRef: "CodexAgent",
+      modelName: "gpt-test",
+      reasoningEffort: "high",
+      role: "primary" as const
+    },
+    {
+      profileId: "default",
+      agentRef: "CodexAgent",
+      modelName: "gpt-test",
+      reasoningEffort: "high",
+      role: "primary" as const
+    }
+  ];
   return {
     attemptId,
     concreteNodeId,
@@ -27,6 +43,7 @@ function task(overrides: Partial<SmithersTaskManifestTask> = {}): SmithersTaskMa
     smithersNodeId: `node:${attemptId}`,
     verifierSmithersNodeId: `verify:${attemptId}`,
     agentRef: "CodexAgent",
+    agentChain,
     modelName: "gpt-test",
     reasoningEffort: "high",
     dependencies,
@@ -34,7 +51,7 @@ function task(overrides: Partial<SmithersTaskManifestTask> = {}): SmithersTaskMa
     timeoutMs: 60_000,
     heartbeatTimeoutMs: 60_000,
     retries: 1,
-    retryPolicy: { backoff: "exponential", initialDelayMs: 1_000, maxDelayMs: 30_000 },
+    retryPolicy: { backoff: "exponential", initialDelayMs: 1_000 },
     workspacePath: `/runs/run-1/workspaces/${attemptId}`,
     artifactDir: `/runs/run-1/artifacts/${attemptId}`,
     dependencyArtifactDirs: [],
@@ -49,7 +66,7 @@ function task(overrides: Partial<SmithersTaskManifestTask> = {}): SmithersTaskMa
       run: {
         ultrafuzzRunId: "run-1",
         smithersWorkflowName: "workflow-1",
-        graphVersion: "3",
+        graphVersion: "4",
         topologyVersion: 2
       },
       node: {
@@ -72,7 +89,8 @@ function task(overrides: Partial<SmithersTaskManifestTask> = {}): SmithersTaskMa
         modelName: "gpt-test",
         reasoningEffort: "high",
         modelIndex: 0,
-        attemptIndex: 0
+        attemptIndex: 0,
+        agentChain
       },
       workspace: {
         primitive: "worktree",
@@ -92,7 +110,7 @@ function task(overrides: Partial<SmithersTaskManifestTask> = {}): SmithersTaskMa
         ],
         manifestPath: `/runs/run-1/artifacts/${attemptId}/artifact-manifest.json`
       },
-      retryPolicy: { maxAttempts: 2, smithersRetries: 1 },
+      retryPolicy: { maxAttempts: 2, sameAgentAttempts: 2, smithersRetries: 1 },
       timeout: { milliseconds: 60_000, seconds: 60, heartbeatTimeoutMs: 60_000 },
       execution: { mode: "local", resources: { cpu: 2, memoryMiB: 1_024, timeoutSeconds: 60 } }
     },
@@ -113,8 +131,8 @@ function manifest(tasks: SmithersTaskManifestTask[] = [task()]): SmithersTaskMan
 
 function graph(): PlannedGraphDocument {
   return {
-    schema_version: "ultrafuzz.planned-graph.v3",
-    graph_version: "3",
+    schema_version: "ultrafuzz.planned-graph.v4",
+    graph_version: "4",
     topology_version: 2,
     groups: {},
     nodes: [
@@ -161,6 +179,23 @@ test("strictly parses the current sealed Smithers task manifest and planned-grap
   const parsed = parseSmithersTaskManifestBytes(bytes(manifest()));
   assert.equal(parsed.schema_version, SMITHERS_TASK_MANIFEST_SCHEMA_VERSION);
   assert.doesNotThrow(() => assertSmithersTaskManifestMatchesPlannedGraph(parsed, graph()));
+});
+
+test("accepts a 100-attempt task chain and rejects 101 attempts at the manifest boundary", () => {
+  const boundary = task();
+  const primary = boundary.agentChain[0]!;
+  boundary.agentChain = Array.from({ length: 100 }, () => ({ ...primary }));
+  boundary.retries = 99;
+  boundary.metadata.model.agentChain = boundary.agentChain;
+  boundary.metadata.retryPolicy = { maxAttempts: 100, sameAgentAttempts: 100, smithersRetries: 99 };
+  assert.doesNotThrow(() => parseSmithersTaskManifestBytes(bytes(manifest([boundary]))));
+
+  const excessive = structuredClone(boundary);
+  excessive.agentChain.push({ ...primary });
+  excessive.retries = 100;
+  excessive.metadata.model.agentChain = excessive.agentChain;
+  excessive.metadata.retryPolicy = { maxAttempts: 101, sameAgentAttempts: 101, smithersRetries: 100 };
+  assert.throws(() => parseSmithersTaskManifestBytes(bytes(manifest([excessive]))), /registered schema/u);
 });
 
 test("rejects historical versions, missing tasks, unknown properties, and malformed task entries", () => {

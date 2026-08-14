@@ -17,7 +17,6 @@ import {
   MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILES,
   MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILE_BYTES,
   MAX_PROPERTY_CAMPAIGN_EVIDENCE_TOTAL_BYTES,
-  MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES,
   normalizeNodeAttemptFailureMessage,
   parseStrictJsonBytes,
   PROPERTIES_SCHEMA_VERSION,
@@ -77,7 +76,7 @@ function loadGeneratedWorkflowInputSchema(): { safeParse(value: unknown): { succ
 test("generated workflow input is an exact current-only envelope with bounded JSON operator data", () => {
   const inputSchema = loadGeneratedWorkflowInputSchema();
   const local = {
-    schema_version: "ultrafuzz.smithers.workflow.v3",
+    schema_version: "ultrafuzz.smithers.workflow.v4",
     ultrafuzz_run_id: "run-1",
     tasks: [{ id: "node:one", prompt_path: ".ultrafuzz/prompts/one.md" }],
     operator_prompt: "focus",
@@ -125,21 +124,124 @@ test("the workflow runner can project the generated workflow input into its inpu
   assert.notEqual(zodToTable("ultrafuzz_workflow_input", inputSchema, { isInput: true }), undefined);
 });
 
-function loadRetryFailureAwareArgs(): (
-  args: { prompt?: unknown } | undefined,
-  previousFailure: string | undefined
-) => { prompt?: unknown } | undefined {
+function loadArtifactAwareAgent(
+  options: { onReset?: () => void } = {}
+): (
+  task: unknown,
+  chainIndex: number,
+  originalPrompt: string,
+  agent: { generate(args: unknown): Promise<unknown> }
+) => { generate(args: unknown): Promise<unknown> } {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const helperStart = source.indexOf("function retryFailureAwareArgs");
+  const helperStart = source.indexOf("function artifactAwareAgent");
   const helperEnd = source.indexOf("\n\nfunction isStrictlyInsideDirectory", helperStart);
   assert.ok(helperStart >= 0, source);
   assert.ok(helperEnd > helperStart, source);
   const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
     compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
   }).outputText;
-  return new Function("untrustedContentBoundary", `${helper}; return retryFailureAwareArgs;`)(
-    "UNTRUSTED CONTENT BOUNDARY"
-  ) as ReturnType<typeof loadRetryFailureAwareArgs>;
+  return new Function(
+    "resetTaskArtifactsForRetry",
+    "authoritativeFinalReportCoverageArgs",
+    "authoritativeFinalReportAgentExecutionArgs",
+    "rememberFinalReportAgentExecutionAuthority",
+    "finalReportAgentExecution",
+    "declaredFinalReportOutputPair",
+    "smithersTaskAgentId",
+    `${helper}; return artifactAwareAgent;`
+  )(
+    () => options.onReset?.(),
+    (_task: unknown, args: unknown) => args,
+    (_task: unknown, args: unknown) => args,
+    () => undefined,
+    () => ({ planned_chain: [], failed_attempts: [], producer: {} }),
+    () => undefined,
+    () => "ultrafuzz-agent:test"
+  ) as ReturnType<typeof loadArtifactAwareAgent>;
+}
+
+function loadFinalReportAgentExecution(): (
+  task: unknown,
+  producerChainIndex: number,
+  observedSelections?: ReadonlyArray<{ attempt: number; chainIndex: number }>
+) => unknown {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function finalReportAgentExecution");
+  const helperEnd = source.indexOf("\n\nfunction promptWithAuthoritativeFinalReportAgentExecution", helperStart);
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  return new Function(`${helper}; return finalReportAgentExecution;`)() as ReturnType<
+    typeof loadFinalReportAgentExecution
+  >;
+}
+
+function loadPromptWithAuthoritativeFinalReportAgentExecution(): (
+  prompt: string,
+  execution: unknown,
+  reportPath: string
+) => string {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function promptWithAuthoritativeFinalReportAgentExecution");
+  const helperEnd = source.indexOf("\n\nfunction authoritativeFinalReportAgentExecutionArgs", helperStart);
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  return new Function(
+    "untrustedContentBoundary",
+    `${helper}; return promptWithAuthoritativeFinalReportAgentExecution;`
+  )("UNTRUSTED CONTENT BOUNDARY") as ReturnType<typeof loadPromptWithAuthoritativeFinalReportAgentExecution>;
+}
+
+function loadFinalReportAgentExecutionAuthority(
+  options: {
+    smithersDetail?: unknown;
+    chainIndex?: number;
+    execution?: unknown;
+  } = {}
+): {
+  remember(task: unknown, execution: unknown): void;
+  read(task: unknown): unknown;
+  smithersReads(): number;
+} {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("const finalReportAgentExecutionAuthority");
+  const helperEnd = source.indexOf("\n\nfunction baseAgentForProfile", helperStart);
+  assert.ok(helperStart >= 0 && helperEnd > helperStart, source);
+  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  let reads = 0;
+  const loaded = new Function(
+    "declaredFinalReportOutputPair",
+    "execFileSync",
+    "parseStrictJsonBytes",
+    "isPlainJsonRecord",
+    "reconcileSmithersAttemptAgentSelection",
+    "finalReportAgentExecution",
+    `${helper}; return {
+      remember: rememberFinalReportAgentExecutionAuthority,
+      read: authoritativeFinalReportAgentExecution
+    };`
+  )(
+    () => ({}),
+    () => {
+      reads += 1;
+      if (options.smithersDetail === undefined) {
+        throw new Error("Smithers fallback should not be needed");
+      }
+      return JSON.stringify(options.smithersDetail);
+    },
+    (bytes: Uint8Array) => JSON.parse(Buffer.from(bytes).toString("utf8")),
+    (value: unknown) => typeof value === "object" && value !== null && !Array.isArray(value),
+    () => ({ chainIndex: options.chainIndex ?? 0 }),
+    () => options.execution ?? {}
+  ) as { remember(task: unknown, execution: unknown): void; read(task: unknown): unknown };
+  return { ...loaded, smithersReads: () => reads };
 }
 
 function loadPromptWithAuthoritativeFinalReportCoverage(): (
@@ -4576,26 +4678,56 @@ test("generated Smithers pinned source proof rejects any previously published by
   }
 });
 
-test("retry feedback changes only the execution-time prompt section inside the untrusted boundary", () => {
-  const retryFailureAwareArgs = loadRetryFailureAwareArgs();
-  const renderedPrompt = "trusted preamble\n\nUNTRUSTED CONTENT BOUNDARY\n\ntrusted runtime\n\nrendered task";
-  const firstAttempt = retryFailureAwareArgs({ prompt: renderedPrompt }, undefined);
-  const secondAttempt = retryFailureAwareArgs({ prompt: renderedPrompt }, "Error: deterministic verifier failure");
+test("agent retries are error-agnostic fresh generations with Smithers' effective prompt", async () => {
+  let resets = 0;
+  const calls: Array<Record<string, unknown> | undefined> = [];
+  const arbitraryFailure = { provider: "opaque", detail: { code: 731 } };
+  const artifactAwareAgent = loadArtifactAwareAgent({ onReset: () => (resets += 1) });
+  const prompt = "the original task prompt";
+  const wrapped = artifactAwareAgent({ agentChain: [{}] }, 0, prompt, {
+    async generate(args: unknown): Promise<unknown> {
+      calls.push(args as Record<string, unknown> | undefined);
+      if (calls.length === 1) throw arbitraryFailure;
+      return { ok: true };
+    }
+  });
+  await assert.rejects(
+    () =>
+      wrapped.generate({
+        prompt,
+        resumeSession: "failed-session",
+        continueSession: true,
+        taskContext: { attempt: 1 }
+      }),
+    (error) => error === arbitraryFailure
+  );
+  const result = await wrapped.generate({
+    prompt: "worktree isolation\n\nthe original task prompt\n\nstructured output contract",
+    messages: [
+      { role: "user", content: "prior prompt" },
+      { role: "assistant", content: "prior failed response" }
+    ],
+    resumeSession: "failed-session",
+    continueSession: true,
+    lastHeartbeat: { agentResume: "failed-session", agentConversation: ["prior"] },
+    taskContext: { attempt: 2 }
+  });
 
-  assert.deepEqual(firstAttempt, { prompt: renderedPrompt });
-  assert.equal(typeof secondAttempt?.prompt, "string");
-  const injected = String(secondAttempt?.prompt);
-  assert.ok(injected.startsWith("trusted preamble\n\nUNTRUSTED CONTENT BOUNDARY\n\n"), injected);
-  assert.match(injected, /## Untrusted prior-attempt failure[\s\S]*deterministic verifier failure/u);
-  assert.ok(injected.indexOf("deterministic verifier failure") < injected.indexOf("trusted runtime"), injected);
-  assert.equal(
-    injected.replace(/## Untrusted prior-attempt failure[\s\S]*?## Current task instructions\n\n/u, ""),
-    renderedPrompt
-  );
-  assert.throws(
-    () => retryFailureAwareArgs({ prompt: "prompt without boundary" }, "failure"),
-    /cannot locate the untrusted-content boundary/u
-  );
+  assert.deepEqual(result, { ok: true });
+  assert.equal(resets, 2);
+  assert.equal(calls[1]?.prompt, "worktree isolation\n\nthe original task prompt\n\nstructured output contract");
+  assert.equal("messages" in (calls[1] ?? {}), false);
+  assert.equal(calls[1]?.resumeSession, undefined);
+  assert.equal(calls[1]?.continueSession, false);
+  assert.equal(calls[1]?.lastHeartbeat, undefined);
+
+  await wrapped.generate({
+    messages: [{ role: "user", content: "repair the schema" }],
+    taskContext: { attempt: 2 }
+  });
+  assert.equal(resets, 2);
+  assert.deepEqual(calls[2]?.messages, [{ role: "user", content: "repair the schema" }]);
+  assert.equal(calls[2]?.prompt, undefined);
 });
 
 test("authoritative final-report coverage is injected as exact untrusted data before agent generation", () => {
@@ -4624,24 +4756,234 @@ test("authoritative final-report coverage is injected as exact untrusted data be
   );
 });
 
-test("retry feedback diagnostics are secret-redacted and UTF-8 byte bounded before prompt injection", () => {
-  const diagnostic = normalizeNodeAttemptFailureMessage(
-    `verifier rejected token=sk-${"x".repeat(48)} ${"界".repeat(MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES)}`
-  );
-  assert.ok(diagnostic);
-  assert.match(diagnostic, /<redacted>/u);
-  assert.doesNotMatch(diagnostic, /sk-x/u);
-  assert.ok(Buffer.byteLength(diagnostic, "utf8") <= MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES);
+test("final-report provenance seals the planned retry chain, failed attempts, and actual producer", () => {
+  const executionFor = loadFinalReportAgentExecution();
+  const task = {
+    agentChain: [
+      {
+        profileId: "sol-xhigh",
+        agentRef: "CodexAgent",
+        modelName: "gpt-5.6-sol",
+        reasoningEffort: "xhigh",
+        role: "primary"
+      },
+      {
+        profileId: "sol-xhigh",
+        agentRef: "CodexAgent",
+        modelName: "gpt-5.6-sol",
+        reasoningEffort: "xhigh",
+        role: "primary"
+      },
+      {
+        profileId: "gpt55-xhigh",
+        agentRef: "CodexAgent",
+        modelName: "gpt-5.5",
+        reasoningEffort: "xhigh",
+        role: "fallback"
+      }
+    ]
+  };
 
+  assert.deepEqual(executionFor(task, 2), {
+    planned_chain: [
+      {
+        attempt: 1,
+        profile_id: "sol-xhigh",
+        agent_ref: "CodexAgent",
+        model_name: "gpt-5.6-sol",
+        reasoning_effort: "xhigh",
+        role: "primary"
+      },
+      {
+        attempt: 2,
+        profile_id: "sol-xhigh",
+        agent_ref: "CodexAgent",
+        model_name: "gpt-5.6-sol",
+        reasoning_effort: "xhigh",
+        role: "primary"
+      },
+      {
+        attempt: 3,
+        profile_id: "gpt55-xhigh",
+        agent_ref: "CodexAgent",
+        model_name: "gpt-5.5",
+        reasoning_effort: "xhigh",
+        role: "fallback"
+      }
+    ],
+    failed_attempts: [
+      {
+        attempt: 1,
+        profile_id: "sol-xhigh",
+        agent_ref: "CodexAgent",
+        model_name: "gpt-5.6-sol",
+        reasoning_effort: "xhigh",
+        role: "primary"
+      },
+      {
+        attempt: 2,
+        profile_id: "sol-xhigh",
+        agent_ref: "CodexAgent",
+        model_name: "gpt-5.6-sol",
+        reasoning_effort: "xhigh",
+        role: "primary"
+      }
+    ],
+    producer: {
+      attempt: 3,
+      profile_id: "gpt55-xhigh",
+      agent_ref: "CodexAgent",
+      model_name: "gpt-5.5",
+      reasoning_effort: "xhigh",
+      role: "fallback"
+    }
+  });
+  assert.deepEqual(executionFor(task, 2, [{ attempt: 1, chainIndex: 2 }]), {
+    planned_chain: [
+      {
+        attempt: 1,
+        profile_id: "sol-xhigh",
+        agent_ref: "CodexAgent",
+        model_name: "gpt-5.6-sol",
+        reasoning_effort: "xhigh",
+        role: "primary"
+      },
+      {
+        attempt: 2,
+        profile_id: "sol-xhigh",
+        agent_ref: "CodexAgent",
+        model_name: "gpt-5.6-sol",
+        reasoning_effort: "xhigh",
+        role: "primary"
+      },
+      {
+        attempt: 3,
+        profile_id: "gpt55-xhigh",
+        agent_ref: "CodexAgent",
+        model_name: "gpt-5.5",
+        reasoning_effort: "xhigh",
+        role: "fallback"
+      }
+    ],
+    failed_attempts: [],
+    producer: {
+      attempt: 1,
+      profile_id: "gpt55-xhigh",
+      agent_ref: "CodexAgent",
+      model_name: "gpt-5.5",
+      reasoning_effort: "xhigh",
+      role: "fallback"
+    }
+  });
+
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const verification = source.slice(
+    source.indexOf("function verifyFinalReportCanonicalProjection"),
+    source.indexOf("function readInvariantSourceSnapshot")
+  );
+  assert.match(verification, /authoritativeFinalReportAgentExecution\(task\)/u);
+  assert.match(verification, /controller-observed producer/u);
+  assert.doesNotMatch(source, /agent-execution|execution\.json|readFinalReportAgentExecutionRecord/u);
+  assert.match(source, /reconcileSmithersAttemptAgentSelection\(task, authorityDetail/u);
+  assert.match(source, /detail\.ok === true && isPlainJsonRecord\(detail\.data\)/u);
+  assert.match(source, /finalReportAgentExecutionAuthority\.get\(task\.attemptId\)/u);
+
+  const promptWithExecution = loadPromptWithAuthoritativeFinalReportAgentExecution();
+  const originalPrompt = "trusted preamble\n\nUNTRUSTED CONTENT BOUNDARY\n\ntrusted runtime\n\nrendered task";
+  const execution = executionFor(task, 2);
+  const firstAttemptPrompt = promptWithExecution(originalPrompt, execution, "report.json");
+  const fallbackAttemptPrompt = promptWithExecution(originalPrompt, execution, "report.json");
+  assert.equal(fallbackAttemptPrompt, firstAttemptPrompt);
+  assert.match(firstAttemptPrompt, /controller-derived data/u);
+  assert.match(firstAttemptPrompt, /"profile_id": "gpt55-xhigh"/u);
+  assert.match(firstAttemptPrompt, /"failed_attempts"/u);
+});
+
+test("a non-Codex fallback cannot forge final-report producer authority through the run filesystem", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-forged-producer-"));
+  try {
+    const task = {
+      id: "node:final-report",
+      attemptId: "final-report",
+      runRoot: root,
+      smithersRunId: "ultrafuzz-authority-recovery",
+      agentChain: [{ profileId: "primary" }, { profileId: "deepseek" }]
+    };
+    const actual = {
+      planned_chain: [{ attempt: 1, profile_id: "deepseek", agent_ref: "DeepSeekAgent", role: "fallback" }],
+      failed_attempts: [],
+      producer: { attempt: 1, profile_id: "deepseek", agent_ref: "DeepSeekAgent", role: "fallback" }
+    };
+    const forged = {
+      ...actual,
+      producer: { attempt: 1, profile_id: "forged", agent_ref: "CodexAgent", role: "primary" }
+    };
+    const legacyRecord = path.join(root, "smithers", "agent-execution", "final-report", "execution.json");
+    fs.mkdirSync(path.dirname(legacyRecord), { recursive: true });
+    fs.writeFileSync(legacyRecord, `${JSON.stringify(forged)}\n`, "utf8");
+
+    const authority = loadFinalReportAgentExecutionAuthority();
+    authority.remember(task, actual);
+    assert.deepEqual(authority.read(task), actual);
+    assert.equal(authority.smithersReads(), 0);
+    assert.notDeepEqual(authority.read(task), JSON.parse(fs.readFileSync(legacyRecord, "utf8")));
+
+    const recovered = loadFinalReportAgentExecutionAuthority({
+      smithersDetail: {
+        ok: true,
+        data: {
+          node: { nodeId: task.id, lastAttempt: 1 },
+          attempts: [
+            {
+              nodeId: task.id,
+              attempt: 1,
+              state: "finished",
+              meta: {
+                agentChainIndex: 0,
+                agentId: "ultrafuzz-agent:final-report:0:deepseek",
+                agentModel: "deepseek-chat"
+              }
+            }
+          ]
+        },
+        meta: { command: "node", duration: "1ms" }
+      },
+      chainIndex: 0,
+      execution: actual
+    });
+    assert.deepEqual(recovered.read(task), actual);
+    assert.equal(recovered.smithersReads(), 1);
+    assert.notDeepEqual(recovered.read(task), JSON.parse(fs.readFileSync(legacyRecord, "utf8")));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("single-rung final-report authority survives a worker restart without a run-ID lookup", () => {
+  const execution = {
+    planned_chain: [{ attempt: 1, profile_id: "primary", agent_ref: "CodexAgent", role: "primary" }],
+    failed_attempts: [],
+    producer: { attempt: 1, profile_id: "primary", agent_ref: "CodexAgent", role: "primary" }
+  };
+  const authority = loadFinalReportAgentExecutionAuthority({ execution });
+  assert.deepEqual(authority.read({ attemptId: "final-report", agentChain: [{ profileId: "primary" }] }), execution);
+  assert.equal(authority.smithersReads(), 0);
+});
+
+test("generated retries do not inspect or inject previous failure text", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const agent = source.slice(
     source.indexOf("function artifactAwareAgent"),
-    source.indexOf("function retryFailureText")
+    source.indexOf("function isStrictlyInsideDirectory")
   );
-  assert.match(agent, /catch \(error\)[\s\S]*normalizeNodeAttemptFailureMessage\(retryFailureText\(error\)\)/u);
-  assert.ok(
-    agent.indexOf("retryFailureAwareArgs(args, previousFailure)") < agent.indexOf("agent.generate(attemptArgs)")
-  );
+  assert.doesNotMatch(source, /retryFailureAwareArgs|retryFailureText|Untrusted prior-attempt failure/u);
+  assert.doesNotMatch(agent, /catch \(|previousFailure|error\.message|String\(error\)/u);
+  assert.match(agent, /prompt: typeof args\?\.prompt === "string" \? args\.prompt : originalPrompt/u);
+  assert.match(agent, /resumeSession: undefined/u);
+  assert.match(agent, /continueSession: false/u);
+  assert.match(agent, /lastHeartbeat: undefined/u);
+  assert.match(agent, /messages: _priorMessages/u);
+  assert.match(agent, /return await agent\.generate\(attemptArgs\)/u);
 });
 
 test("retry cleanup preserves only a task-owned prompt and accepts a sealed snapshot prompt", () => {
@@ -4693,7 +5035,7 @@ test("retry cleanup preserves only a task-owned prompt and accepts a sealed snap
   }
 });
 
-test("generated Smithers retries reset exact task-owned artifact contents after the first attempt", () => {
+test("generated Smithers resets exact task-owned artifact contents before every selected attempt", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const agentStart = source.indexOf("function artifactAwareAgent");
   const rootsStart = source.indexOf("function resetTaskArtifactsForRetry");
@@ -4704,9 +5046,9 @@ test("generated Smithers retries reset exact task-owned artifact contents after 
   assert.ok(preparationStart > rootsStart, source);
 
   const agent = source.slice(agentStart, rootsStart);
-  assert.match(agent, /if \(\(args\?\.taskContext\?\.attempt \?\? 1\) > 1\)/u);
+  assert.match(agent, /if \(firstGenerationForAttempt\)/u);
   assert.ok(
-    agent.indexOf("resetTaskArtifactsForRetry(task)") < agent.indexOf("await agent.generate(attemptArgs)"),
+    agent.indexOf("resetTaskArtifactsForRetry(task)") < agent.indexOf("return await agent.generate(attemptArgs)"),
     agent
   );
 
@@ -4802,7 +5144,7 @@ test("post-agent snapshot restoration keeps modified, deleted, and new source st
 test("generated Smithers agent boundary performs no post-completion artifact work", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const agentStart = source.indexOf("function artifactAwareAgent");
-  const agentEnd = source.indexOf("\n\nfunction retryFailureText", agentStart);
+  const agentEnd = source.indexOf("\n\nfunction isStrictlyInsideDirectory", agentStart);
 
   assert.ok(agentStart >= 0, source);
   assert.ok(agentEnd > agentStart, source);
@@ -4875,6 +5217,12 @@ test("generated Smithers verifier treats the final-report projector only as a no
   assert.doesNotMatch(source, /return "unavailable"/u);
 });
 
+const FINAL_REPORT_AGENT_EXECUTION_FIXTURE = {
+  planned_chain: [{ attempt: 1, profile_id: "default", agent_ref: "CodexAgent", role: "primary" }],
+  failed_attempts: [],
+  producer: { attempt: 1, profile_id: "default", agent_ref: "CodexAgent", role: "primary" }
+};
+
 function loadFinalReportCanonicalProjectionHarness(): (
   task: { outputs: Array<{ path: string; contract: string }> },
   verifiedOutputs: ReadonlyMap<string, { value: unknown; file: { bytes: Buffer } }>
@@ -4894,12 +5242,14 @@ function loadFinalReportCanonicalProjectionHarness(): (
     "authoritativeFinalReportCoverage",
     "isDeepStrictEqual",
     "projectCanonicalFinalReport",
+    "authoritativeFinalReportAgentExecution",
     "Buffer",
     `${emitted}; return verifyFinalReportCanonicalProjection;`
   )(
     () => ({ status: "not-planned", reason: "property-implementation-track-not-declared" }),
     isDeepStrictEqual,
     (report: unknown) => ({ report, markdown: "# Canonical custom report\n" }),
+    () => FINAL_REPORT_AGENT_EXECUTION_FIXTURE,
     Buffer
   ) as ReturnType<typeof loadFinalReportCanonicalProjectionHarness>;
 }
@@ -4913,6 +5263,7 @@ test("generated canonical report verification selects renamed producers and cust
     ]
   };
   const report = {
+    run_metadata: { agent_execution: FINAL_REPORT_AGENT_EXECUTION_FIXTURE },
     property_implementation_coverage: {
       status: "not-planned",
       reason: "property-implementation-track-not-declared"

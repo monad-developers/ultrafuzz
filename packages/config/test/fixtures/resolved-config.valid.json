@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "ultrafuzz.config.v2",
+  "schemaVersion": "ultrafuzz.resolved-config.v3",
   "auditProfile": "default",
   "auditProfileResolution": {
     "catalogSchemaVersion": 2,
@@ -87,6 +87,10 @@
         "reasoning": "max"
       }
     }
+  },
+  "retry": {
+    "sameAgentAttempts": 1,
+    "agents": []
   },
   "agents": {
     "ClaudeAgent": {

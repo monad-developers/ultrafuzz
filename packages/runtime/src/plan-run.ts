@@ -29,7 +29,7 @@ import {
   type RunLayout
 } from "@ultrafuzz/artifacts";
 import {
-  applyDefaultProfileOverrides,
+  applyModelProfileOverrides,
   invariantPropertyPrioritySelection,
   redactResolvedConfig,
   serializeRedactedResolvedConfigToml
@@ -75,6 +75,7 @@ import {
 import { checkDependencyLegality } from "./artifact-gates.js";
 import { effectiveAuditPolicy } from "./audit-profile-policy.js";
 import { forgeGuardMetadata } from "./forge-guard.js";
+import { assertExpandedGraphRetryChains } from "./retry-chain.js";
 import { transformTopologyForRun } from "./topology-transform.js";
 
 const RENDERED_PROMPT_SNAPSHOT_DIR = "prompt-snapshots";
@@ -98,6 +99,18 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
     return runtimeFailure<PlanRunValue>(resolved.diagnostics);
   }
   applyWorkflowRunOverrides(resolved.config, input);
+  if (input.runtimeOverrides?.forbidModelFallback === true && resolved.config.retry.agents.length > 1) {
+    return runtimeFailure<PlanRunValue>([
+      {
+        code: "MODEL_FALLBACK_FORBIDDEN",
+        message:
+          "this run forbids model fallback, but retry.agents configures fallback profiles; remove every entry after retry.agents[0]",
+        severity: "error",
+        source: "runtime",
+        path: "retry.agents"
+      }
+    ]);
+  }
 
   let auditPolicy: ReturnType<typeof effectiveAuditPolicy>;
   try {
@@ -152,10 +165,12 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
       requirePromptFiles: true,
       promptTexts: promptTextsForCatalog(catalog),
       defaultTimeoutSeconds: resolved.config.run.defaultTimeoutSeconds,
+      defaultMaxAttempts: resolved.config.retry.sameAgentAttempts,
       modelProfiles: modelProfilesForTopology(resolved.config),
-      defaultModelProfileId: resolved.config.models.default,
+      defaultModelProfileId: resolved.config.retry.agents[0] ?? resolved.config.models.default,
       configFingerprint: redactedConfigFingerprint
     });
+    assertExpandedGraphRetryChains(resolved.config, expandedGraph);
   } catch (error) {
     return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "RUN_PLAN_INVALID")]);
   }
@@ -799,7 +814,11 @@ function renderPromptsForPlan(input: {
 }
 
 function applyWorkflowRunOverrides(config: PlanRunValue["resolved_config"], input: PlanRunInput): void {
-  applyDefaultProfileOverrides(config, { agent: input.agent, model: input.model, reasoning: input.reasoning });
+  applyModelProfileOverrides(config, config.retry.agents[0] ?? config.models.default, {
+    agent: input.agent,
+    model: input.model,
+    reasoning: input.reasoning
+  });
 }
 
 function promptLogicalNodes(graph: PlannedGraph, layout: PlanRunValue["layout"]): PromptGraphNode[] {

@@ -1,7 +1,7 @@
 import type { ArtifactContractId } from "@ultrafuzz/artifacts";
 
 export const TOPOLOGY_VERSION = 2 as const;
-export const GRAPH_VERSION = "3" as const;
+export const GRAPH_VERSION = "4" as const;
 export const PROJECT_TOPOLOGY_FILE = ".ultrafuzz/topology.yml";
 export const PROJECT_PROMPT_DIR = ".ultrafuzz/prompts";
 export const START_NODE_ID = "__start__";
@@ -198,6 +198,8 @@ export interface TopologyValidationResult {
 export interface ExpandTopologyOptions extends TopologyValidationOptions {
   runId?: string;
   defaultTimeoutSeconds?: number;
+  /** Project-level primary attempt count used when neither a node nor its group overrides max_attempts. */
+  defaultMaxAttempts?: number;
   modelProfiles?: ModelProfileSelection[] | Record<string, Omit<ModelProfileSelection, "profileId">>;
   modelProfilesByNode?: Record<string, ModelProfileSelection[]>;
   defaultModelProfileId?: string;

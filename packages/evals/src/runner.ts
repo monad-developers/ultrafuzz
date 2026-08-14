@@ -439,16 +439,19 @@ export function benchmarkModelProfileOverrides(
   runnerProfile: EvalModelProfile | undefined
 ): { runtimeOverrides?: RuntimeConfigOverrides } {
   const input = validatedBenchmarkWorkflowInput(row.workflow_input);
-  if (input === undefined) return {};
+  if (input === undefined) return { runtimeOverrides: { forbidModelFallback: true } };
   const execution = input.benchmark_execution;
-  if (!("workflow_profile" in execution) || execution.workflow_profile !== BENCHMARK_SMOKE_WORKFLOW_PROFILE) return {};
+  if (!("workflow_profile" in execution) || execution.workflow_profile !== BENCHMARK_SMOKE_WORKFLOW_PROFILE) {
+    return { runtimeOverrides: { forbidModelFallback: true } };
+  }
   assertSmokeAuditPolicy(execution);
   if (runnerProfile === undefined) {
     throw new EvalError("EVAL_MODEL_PROFILE_UNKNOWN", "smoke benchmark runner profile is missing");
   }
   return {
     runtimeOverrides: {
-      auditProfile: "smoke"
+      auditProfile: "smoke",
+      forbidModelFallback: true
     }
   };
 }

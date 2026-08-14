@@ -313,7 +313,7 @@ export function currentPlannedGraph(
 ): PlannedGraphDocument {
   return {
     schema_version: PLANNED_GRAPH_SCHEMA_VERSION,
-    graph_version: "3",
+    graph_version: "4",
     topology_version: 2,
     groups: { default: {} },
     nodes: nodeIds.map((nodeId) => {
@@ -819,6 +819,13 @@ function writeSealedFinalReportAuthority(layout: RunLayout, graph: PlannedGraphD
           }),
       primary: output.primary
     }));
+    const agentChain = [
+      {
+        profileId: model.model_profile_id,
+        agentRef: model.agent_ref,
+        role: "primary" as const
+      }
+    ];
     return {
       attemptId: node.id,
       concreteNodeId: node.id,
@@ -827,12 +834,13 @@ function writeSealedFinalReportAuthority(layout: RunLayout, graph: PlannedGraphD
       smithersNodeId: `node:${node.id}`,
       verifierSmithersNodeId: `verify:${node.id}`,
       agentRef: model.agent_ref,
+      agentChain,
       dependencies: node.depends_on,
       dependencySmithersNodeIds,
       timeoutMs: 60_000,
       heartbeatTimeoutMs: 60_000,
       retries: 0,
-      retryPolicy: { backoff: "exponential", initialDelayMs: 1_000, maxDelayMs: 30_000 },
+      retryPolicy: { backoff: "exponential", initialDelayMs: 1_000 },
       workspacePath,
       artifactDir,
       dependencyArtifactDirs: ancestorIds(node.id).map((dependencyId) => path.join(layout.artifactsDir, dependencyId)),
@@ -843,7 +851,7 @@ function writeSealedFinalReportAuthority(layout: RunLayout, graph: PlannedGraphD
         run: {
           ultrafuzzRunId: layout.runId,
           smithersWorkflowName: workflowRunId,
-          graphVersion: "3",
+          graphVersion: "4",
           topologyVersion: 2
         },
         node: {
@@ -869,7 +877,8 @@ function writeSealedFinalReportAuthority(layout: RunLayout, graph: PlannedGraphD
           profileId: model.model_profile_id,
           agentRef: model.agent_ref,
           modelIndex: model.model_index,
-          attemptIndex: model.attempt_index
+          attemptIndex: model.attempt_index,
+          agentChain
         },
         workspace: { primitive: "worktree", path: workspacePath, repoPath: "/repo", trustModel: "skip-permissions" },
         artifacts: {
@@ -877,7 +886,7 @@ function writeSealedFinalReportAuthority(layout: RunLayout, graph: PlannedGraphD
           outputs: taskOutputs,
           manifestPath: path.join(artifactDir, "artifact-manifest.json")
         },
-        retryPolicy: { maxAttempts: 1, smithersRetries: 0 },
+        retryPolicy: { maxAttempts: 1, sameAgentAttempts: 1, smithersRetries: 0 },
         timeout: { milliseconds: 60_000, seconds: 60, heartbeatTimeoutMs: 60_000 },
         execution: { mode: "local", resources }
       }

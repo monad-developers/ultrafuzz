@@ -57,6 +57,7 @@ const smithersIdentityTask = {
   smithersNodeId: "node:attempt-a",
   verifierSmithersNodeId: "verify:attempt-a",
   agentRef: "agent-a",
+  agentChain: [{ profileId: "profile-a", agentRef: "agent-a", role: "primary" }],
   dependencies: [] as string[],
   dependencySmithersNodeIds: [] as string[],
   timeoutMs: 1_000,
@@ -72,10 +73,13 @@ const smithersIdentityTask = {
       logicalNodeId: "logical-a",
       label: "Node A"
     },
-    model: { agentRef: "agent-a" },
+    model: {
+      agentRef: "agent-a",
+      agentChain: [{ profileId: "profile-a", agentRef: "agent-a", role: "primary" }]
+    },
     dependencies: { attemptIds: [] as string[], smithersNodeIds: [] as string[], concreteNodeIds: [] as string[] },
     timeout: { milliseconds: 1_000, seconds: 1, heartbeatTimeoutMs: 500 },
-    retryPolicy: { maxAttempts: 1, smithersRetries: 0 },
+    retryPolicy: { maxAttempts: 1, sameAgentAttempts: 1, smithersRetries: 0 },
     execution: { mode: "local", resources: { cpu: 1, memoryMiB: 512, timeoutSeconds: 1 } },
     artifacts: { dir: "artifacts/node-a", outputs: [smithersManifestOutput] },
     loop: { index: 0, count: 1, mode: "parallel", attemptIndex: 0 }

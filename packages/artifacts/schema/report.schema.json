@@ -68,6 +68,116 @@
           "type": "string",
           "minLength": 1
         },
+        "agent_execution": {
+          "type": "object",
+          "properties": {
+            "planned_chain": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "attempt": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "profile_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "agent_ref": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "model_name": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "reasoning_effort": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "role": {
+                    "type": "string",
+                    "enum": ["primary", "fallback"]
+                  }
+                },
+                "required": ["attempt", "profile_id", "agent_ref", "role"],
+                "additionalProperties": false
+              }
+            },
+            "failed_attempts": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "attempt": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "profile_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "agent_ref": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "model_name": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "reasoning_effort": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "role": {
+                    "type": "string",
+                    "enum": ["primary", "fallback"]
+                  }
+                },
+                "required": ["attempt", "profile_id", "agent_ref", "role"],
+                "additionalProperties": false
+              }
+            },
+            "producer": {
+              "type": "object",
+              "properties": {
+                "attempt": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "profile_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "agent_ref": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "model_name": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "reasoning_effort": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "role": {
+                  "type": "string",
+                  "enum": ["primary", "fallback"]
+                }
+              },
+              "required": ["attempt", "profile_id", "agent_ref", "role"],
+              "additionalProperties": false
+            }
+          },
+          "required": ["planned_chain", "failed_attempts", "producer"],
+          "additionalProperties": false
+        },
         "source_run_ids": {
           "minItems": 0,
           "type": "array",

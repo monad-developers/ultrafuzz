@@ -297,8 +297,8 @@ function tasksFor(graph: PlannedGraph): WorkflowControlTask[] {
 
 function syntheticGraph(nodes: PlannedGraphNode[]): PlannedGraph {
   return {
-    schema_version: "ultrafuzz.planned-graph.v3",
-    graph_version: "3",
+    schema_version: "ultrafuzz.planned-graph.v4",
+    graph_version: "4",
     topology_version: 2,
     groups: {},
     nodes

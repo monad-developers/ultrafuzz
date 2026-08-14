@@ -659,6 +659,7 @@ describe("public Modal benchmark configuration", () => {
         {
           if?: string;
           needs?: string[];
+          "timeout-minutes"?: number;
           strategy?: {
             "fail-fast": boolean;
             "max-parallel": number;
@@ -688,6 +689,7 @@ describe("public Modal benchmark configuration", () => {
     const fullLane = "github.event_name == 'push' || github.event.pull_request.draft == false";
     const releaseValidation = workflow.jobs["release-validation"];
     expect(releaseValidation?.if).toBe(fullLane);
+    expect(releaseValidation?.["timeout-minutes"]).toBe(40);
     expect(releaseValidation?.strategy).toEqual({
       "fail-fast": false,
       "max-parallel": 3,
