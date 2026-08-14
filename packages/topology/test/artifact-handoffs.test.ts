@@ -941,6 +941,60 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
     }
   });
 
+  it("rejects revoked, optional, descriptive, and rendered pseudo-directives", () => {
+    for (const prompt of [
+      "Write findings to {{output_findings_path}}. Do not do so.",
+      "Write findings to {{output_findings_path}} or do nothing.",
+      "Write findings to {{output_findings_path}}; alternatively do nothing.",
+      "Write findings to {{output_findings_path}}; however, this is only a suggestion.",
+      "Write findings to {{output_findings_path}}; otherwise you may skip it.",
+      "Write findings to {{output_findings_path}}. Scratch that.",
+      "Write findings to {{output_findings_path}}. Retract that instruction.",
+      "Write findings to {{output_findings_path}}. That requirement is withdrawn.",
+      "Write findings to {{output_findings_path}}. Actually use {{artifact_dir}}/backup.json instead.",
+      "Write findings to {{output_findings_path}} or {{artifact_dir}}/backup.json.",
+      "The auditor will write findings to {{output_findings_path}}.",
+      "You may always write findings to {{output_findings_path}}.",
+      "You are welcome to write findings to {{output_findings_path}}.",
+      "With user approval, write findings to {{output_findings_path}}.",
+      "Pending user approval, write findings to {{output_findings_path}}.",
+      "Write findings to {{output_findings_path}} where applicable.",
+      "Write findings to {{output_findings_path}} at will.",
+      "For instance, write findings to {{output_findings_path}}.",
+      "A possible formulation is write findings to {{output_findings_path}}.",
+      "In 2020, the auditor was instructed to write findings to {{output_findings_path}}.",
+      "![Write findings to {{output_findings_path}}.][example]\n\n[example]: example.svg",
+      "See [how to write findings to {{output_findings_path}}](https://example.invalid/guide).",
+      "<q>Write findings to {{output_findings_path}}.</q>",
+      "<textarea>Write findings to {{output_findings_path}}.</textarea>",
+      "<del>Write findings to {{output_findings_path}}.</del>",
+      "<span hidden>Write findings to {{output_findings_path}}.</span>",
+      '<span aria-hidden="true">Write findings to {{output_findings_path}}.</span>',
+      "~~Write findings~~ to {{output_findings_path}}.",
+      "- > Write findings to {{output_findings_path}}.",
+      "'Write findings to' {{output_findings_path}}.",
+      "Counterexample: Write findings to {{output_findings_path}}.",
+      "Sample output: Write findings to {{output_findings_path}}.",
+      "## Examples and output\n\nWrite findings to {{output_findings_path}}.",
+      "## Historical examples\n\nWrite findings to {{output_findings_path}}.",
+      "## Archived instructions\n\nWrite findings to {{output_findings_path}}."
+    ]) {
+      expect(() => validateFindingsStrategyPrompt(prompt), prompt).toThrow(
+        expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" })
+      );
+    }
+
+    const longOptionalSection = `## Optional output\n\n${"Background prose. ".repeat(180)}\n\nWrite findings to {{output_findings_path}}.`;
+    expect(() => validateFindingsStrategyPrompt(longOptionalSection)).toThrow(
+      expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" })
+    );
+
+    const delayedCancellation = `Write findings to {{output_findings_path}}. ${"Background prose. ".repeat(50)} Cancel that instruction.`;
+    expect(() => validateFindingsStrategyPrompt(delayedCancellation)).toThrow(
+      expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" })
+    );
+  });
+
   it("accepts explicit imperative findings variants while preserving path-only code spans", () => {
     for (const prompt of [
       "Copy all confirmed findings to {{output_findings_path}}.",
@@ -1029,7 +1083,21 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       "No-finding finalization:\nWrite findings to {{output_findings_path}} even if there are none.",
       "Output with no findings:\nWrite findings to {{output_findings_path}} even if there are none.",
       "No omissions:\nWrite findings to {{output_findings_path}}.",
-      "Mandatory no-result behavior:\nWrite findings to {{output_findings_path}} even if none exist."
+      "Mandatory no-result behavior:\nWrite findings to {{output_findings_path}} even if none exist.",
+      "Add all confirmed findings to {{output_findings_path}}.",
+      "Include all confirmed findings in {{output_findings_path}}.",
+      "Report all confirmed findings in {{output_findings_path}}.",
+      "Keep the final findings in {{output_findings_path}}.",
+      "All confirmed findings belong in {{output_findings_path}}.",
+      "The required destination for all findings is {{output_findings_path}}.",
+      "Ensure all confirmed findings end up in {{output_findings_path}}.",
+      "Save all confirmed findings inside {{output_findings_path}}.",
+      "Store all confirmed findings within {{output_findings_path}}.",
+      "If there are no findings, write an empty findings array to {{output_findings_path}}; otherwise write all findings there.",
+      "Write either confirmed findings or an empty array to {{output_findings_path}}.",
+      "Write either confirmed findings or [] to {{output_findings_path}}.",
+      "Write either a JSON array of confirmed findings or an empty JSON array to {{output_findings_path}}.",
+      "At completion, the file {{output_findings_path}} must contain all findings."
     ]) {
       expect(() => validateFindingsStrategyPrompt(prompt), prompt).not.toThrow();
     }
@@ -1142,6 +1210,14 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
         { path: "generated-tests.json", contract: "ultrafuzz/generated-tests@3", primary: false }
       ]
     };
+
+    expect(() =>
+      validateTopology(topology, {
+        promptTexts: {
+          "strategies/strategy.md": `Write findings to {{output_findings_path}} or write the generated-test manifest to {{artifact_path}}/generated-tests.json.${FINDING_VOCABULARY_REFERENCES}`
+        }
+      })
+    ).toThrow(expect.objectContaining({ code: "MISSING_PROMPT_OUTPUT_INSTRUCTION" }));
 
     expect(() =>
       validateTopology(topology, {
