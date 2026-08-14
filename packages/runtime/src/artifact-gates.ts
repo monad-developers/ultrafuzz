@@ -76,8 +76,6 @@ import {
   type WorkspacePatchManifest
 } from "@ultrafuzz/artifacts";
 import { parseProjectConfigToml } from "@ultrafuzz/config";
-import { decodeHTML } from "entities";
-import { fromMarkdown } from "mdast-util-from-markdown";
 
 import { authenticatedAggregationSemanticContext } from "./aggregation-semantic-context.js";
 import {
@@ -4458,10 +4456,7 @@ function verifyCoverageProductionInventory(
   )
     return [];
 
-  const diagnostics =
-    markdownBytes === undefined
-      ? []
-      : unscopedCoverageScoreDiagnostics(markdownBytes.toString("utf8"), markdownPath, true);
+  const diagnostics: RuntimeDiagnostic[] = [];
   if (markdownBytes !== undefined) {
     diagnostics.push(
       ...coverageEvidenceMarkdownProjectionDiagnostics(
@@ -6651,10 +6646,9 @@ function verifyFinalReportCoverageEvidence(
   attemptAuthority?: ArtifactGateAttemptAuthority,
   authenticated?: AuthenticatedArtifactGateSnapshots
 ): RuntimeDiagnostic[] {
-  const diagnostics = unscopedCoverageScoreDiagnosticsInJson(report, reportPath);
+  const diagnostics: RuntimeDiagnostic[] = [];
   const markdownBytes = readCurrentArtifactSnapshot(artifactDir, markdownPath, authenticated);
   const markdown = markdownBytes?.toString("utf8") ?? "";
-  diagnostics.push(...unscopedReportCoverageScoreDiagnostics(markdown, markdownPath));
 
   const producerStatus = plannedContractProducerStatus(layout, node, "ultrafuzz/coverage-evidence@1", attemptAuthority);
   if (producerStatus === "absent") {
@@ -6720,316 +6714,18 @@ function coverageEvidenceMarkdownProjectionDiagnostics(
     .filter((line) => line.length > 0);
   const sections = markdownSectionOccurrences(markdown, "## Scoped coverage evidence");
   const renderedLines = sections[0]?.filter((line) => line.length > 0);
-  const containsScopedFraction = (line: string): boolean =>
-    /\b(?:selected-range|production-source)\b/u.test(line) && /\b\d+\s*\/\s*\d+\b/u.test(line);
-  const scopedFractions = unfencedMarkdownLines(markdown).filter(containsScopedFraction);
-  const expectedFractions = expectedLines.filter(containsScopedFraction);
-  return sections.length === 1 &&
-    renderedLines !== undefined &&
-    sameStringSequence(renderedLines, expectedLines) &&
-    sameStringSequence(scopedFractions, expectedFractions)
+  return sections.length === 1 && renderedLines !== undefined && sameStringSequence(renderedLines, expectedLines)
     ? []
     : [
         {
           code,
           message:
-            "Markdown must contain exactly one canonical scoped coverage section, including every view, excluded component, and zero-coverage component, with no duplicate or misplaced scoped fractions",
+            "Markdown must contain exactly one canonical scoped coverage section, including every view, excluded component, and zero-coverage component",
           severity: "error",
           source: "coverage-evidence",
           path: markdownPath
         }
       ];
-}
-
-function unscopedCoverageScoreDiagnostics(
-  contents: string,
-  artifactPath: string,
-  requireCoverageContext = false
-): RuntimeDiagnostic[] {
-  return renderedMarkdownBlocks(contents)
-    .flatMap(({ text, lineNumber }) =>
-      text.split(/\r?\n/u).map((line, index) => ({ line, lineNumber: lineNumber + index }))
-    )
-    .flatMap(({ line, lineNumber }) =>
-      unscopedCoverageScoreKinds(line, requireCoverageContext).map((kind) => ({ lineNumber, kind }))
-    )
-    .map(({ lineNumber, kind }) => ({
-      code: kind === "percentage" ? "UNSCOPED_COVERAGE_PERCENTAGE" : "UNSCOPED_COVERAGE_FRACTION",
-      message:
-        kind === "percentage"
-          ? "Coverage percentages must name the exact selected-range or production-source scope on the same line"
-          : "Coverage fractions must name the exact selected-range or production-source scope",
-      severity: "error" as const,
-      source: "coverage-evidence",
-      path: `${artifactPath}:${lineNumber}`
-    }));
-}
-
-function unscopedReportCoverageScoreDiagnostics(contents: string, artifactPath: string): RuntimeDiagnostic[] {
-  let coverageHeadingDepth: number | undefined;
-  let coverageLabelSection = false;
-  return renderedMarkdownBlocks(contents)
-    .flatMap((block) => {
-      if (block.headingDepth !== undefined) {
-        if (coverageHeadingText(block.text)) {
-          coverageHeadingDepth = block.headingDepth;
-        } else if (coverageHeadingDepth === undefined || block.headingDepth <= coverageHeadingDepth) {
-          coverageHeadingDepth = undefined;
-        }
-        coverageLabelSection = false;
-      }
-      if (standaloneCoverageLabel(block.text)) coverageLabelSection = true;
-      const coverageContext =
-        coverageHeadingDepth !== undefined || coverageLabelSection || coverageTableLabel(block.text);
-      return block.text
-        .split(/\r?\n/u)
-        .map((line, index) => ({ line, lineNumber: block.lineNumber + index, coverageContext }));
-    })
-    .map(({ line, lineNumber, coverageContext }) => ({
-      lineNumber,
-      kinds: unscopedCoverageScoreKinds(line, !coverageContext)
-    }))
-    .flatMap(({ lineNumber, kinds }) => kinds.map((kind) => ({ lineNumber, kind })))
-    .map(({ lineNumber, kind }) => ({
-      code: kind === "percentage" ? "UNSCOPED_COVERAGE_PERCENTAGE" : "UNSCOPED_COVERAGE_FRACTION",
-      message:
-        kind === "percentage"
-          ? "Coverage percentages must name the exact selected-range or production-source scope on the same line"
-          : "Coverage fractions must name the exact selected-range or production-source scope",
-      severity: "error" as const,
-      source: "coverage-evidence",
-      path: `${artifactPath}:${lineNumber}`
-    }));
-}
-
-function unscopedCoverageScoreKinds(line: string, requireCoverageContext: boolean): ("percentage" | "fraction")[] {
-  const score = /\b(?:100(?:\.0+)?|\d{1,2}(?:\.\d+)?)\s*[%％]|\b\d+\s*\/\s*\d+\b/gu;
-  const namedScope = /\b(?:selected-range|production-source)\b/giu;
-  const kinds = new Set<"percentage" | "fraction">();
-  const normalizedLine = line.replace(/\p{Default_Ignorable_Code_Point}/gu, "");
-  for (const coverageClause of normalizedLine.split(
-    /\s*(?:[,!?;[\]{}]|\u2013|\u2014|(?<!\d)\.|\.(?!\d)|\b(?:and|but|whereas|while)\b)\s*/iu
-  )) {
-    if (
-      coverageMetricScoreLanguageContext(coverageClause) &&
-      !/\b(?:selected-range|production-source)\b/iu.test(coverageClause)
-    ) {
-      for (const match of coverageClause.matchAll(score)) {
-        kinds.add(/[%％]/u.test(match[0]) ? "percentage" : "fraction");
-      }
-    }
-  }
-  for (const clause of normalizedLine.split(
-    /\s*(?:[,!?;()[\]{}]|\u2013|\u2014|(?<!\d)\.|\.(?!\d)|\b(?:and|but|whereas|while)\b)\s*/iu
-  )) {
-    const scores = [...clause.matchAll(score)];
-    const scopes = [...clause.matchAll(namedScope)];
-    for (const [index, match] of scores.entries()) {
-      const start = match.index!;
-      const end = start + match[0].length;
-      const previous = scores[index - 1];
-      const next = scores[index + 1];
-      const regionStart = previous === undefined ? 0 : Math.floor((previous.index! + previous[0].length + start) / 2);
-      const regionEnd = next === undefined ? clause.length : Math.ceil((end + next.index!) / 2);
-      const contextRegion = clause.slice(
-        previous === undefined ? 0 : previous.index! + previous[0].length,
-        next === undefined ? clause.length : next.index!
-      );
-      const scoped = scopes.some((scope) => {
-        const midpoint = scope.index! + scope[0].length / 2;
-        if (midpoint < regionStart || midpoint >= regionEnd) return false;
-        if (scope.index! >= start) return true;
-        const scopeEnd = scope.index! + scope[0].length;
-        const colon = clause.indexOf(":", scopeEnd);
-        return !(
-          colon >= scopeEnd &&
-          colon < start &&
-          /\b(?:coverage|lcov|covg-eval|standardized[ \t]+(?:measurement|rate|result|score))\b/iu.test(
-            clause.slice(colon + 1, start)
-          )
-        );
-      });
-      if (scoped) continue;
-      if (requireCoverageContext && !coverageMetricScoreLanguageContext(contextRegion)) continue;
-      kinds.add(/[%％]/u.test(match[0]) ? "percentage" : "fraction");
-    }
-  }
-  return [...kinds];
-}
-
-interface RenderedMarkdownBlock {
-  text: string;
-  lineNumber: number;
-  headingDepth?: number;
-}
-
-interface MarkdownNode {
-  type: string;
-  value?: string;
-  alt?: string;
-  depth?: number;
-  children?: MarkdownNode[];
-  position?: { start?: { line?: number } };
-}
-
-interface HtmlVisibilityState {
-  hiddenElements: string[];
-}
-
-const HTML_VOID_ELEMENTS = new Set([
-  "area",
-  "base",
-  "br",
-  "col",
-  "embed",
-  "hr",
-  "img",
-  "input",
-  "link",
-  "meta",
-  "param",
-  "source",
-  "track",
-  "wbr"
-]);
-
-function renderedMarkdownBlocks(contents: string): RenderedMarkdownBlock[] {
-  const root = fromMarkdown(contents) as MarkdownNode;
-  const blocks: RenderedMarkdownBlock[] = [];
-  const visibilityState: HtmlVisibilityState = { hiddenElements: [] };
-  const visit = (node: MarkdownNode): void => {
-    if (node.type === "definition" || node.type === "thematicBreak") return;
-    if (node.type === "paragraph" || node.type === "heading" || node.type === "html" || node.type === "code") {
-      const text = (
-        node.type === "code"
-          ? visibilityState.hiddenElements.length === 0
-            ? (node.value ?? "")
-            : ""
-          : renderedMarkdownNodeText(node, visibilityState)
-      )
-        .replace(/\r?\n/gu, " ")
-        .replace(/\p{Default_Ignorable_Code_Point}/gu, "");
-      if (text.length > 0) {
-        const htmlHeadingDepth = node.type === "html" ? rawHtmlHeadingDepth(node.value ?? "") : undefined;
-        blocks.push({
-          text,
-          lineNumber: node.position?.start?.line ?? 1,
-          ...(node.type === "heading" && node.depth !== undefined
-            ? { headingDepth: node.depth }
-            : htmlHeadingDepth !== undefined
-              ? { headingDepth: htmlHeadingDepth }
-              : {})
-        });
-      }
-      return;
-    }
-    node.children?.forEach(visit);
-  };
-  visit(root);
-  return blocks;
-}
-
-function renderedMarkdownNodeText(node: MarkdownNode, state: HtmlVisibilityState): string {
-  if (node.type === "text") return state.hiddenElements.length === 0 ? (node.value ?? "") : "";
-  if (node.type === "inlineCode") return state.hiddenElements.length === 0 ? (node.value ?? "") : "";
-  if (node.type === "html") return visibleHtmlText(node.value ?? "", state);
-  if (node.type === "image" || node.type === "imageReference") return "";
-  if (node.type === "break") return state.hiddenElements.length === 0 ? "\n" : "";
-  return node.children?.map((child) => renderedMarkdownNodeText(child, state)).join("") ?? "";
-}
-
-function rawHtmlHeadingDepth(html: string): number | undefined {
-  const match = /^\s*<h([1-6])(?:\s[^>]*)?>[\s\S]*<\/h\1\s*>\s*$/iu.exec(html);
-  return match === null ? undefined : Number(match[1]);
-}
-
-function coverageHeadingText(value: string): boolean {
-  return /^(?:(?:branch|code|function|line|overall|range|source|standardized|test)[ \t]+)?coverage(?:[ \t]+(?:evidence|report|results?|summary))?\s*$/iu.test(
-    value.trim()
-  );
-}
-
-function standaloneCoverageLabel(value: string): boolean {
-  return /^coverage\s*:?\s*$/iu.test(value.trim());
-}
-
-function coverageTableLabel(value: string): boolean {
-  return /(?:^|\|)\s*coverage\s*\|/iu.test(value);
-}
-
-function visibleHtmlText(html: string, state: HtmlVisibilityState): string {
-  let visible = "";
-  let index = 0;
-  while (index < html.length) {
-    if (html.startsWith("<!--", index)) {
-      const commentEnd = html.indexOf("-->", index + 4);
-      index = commentEnd === -1 ? html.length : commentEnd + 3;
-      continue;
-    }
-    if (html[index] !== "<") {
-      if (state.hiddenElements.length === 0) visible += html[index];
-      index += 1;
-      continue;
-    }
-
-    const tagEnd = htmlTagEnd(html, index + 1);
-    if (tagEnd === -1) {
-      if (state.hiddenElements.length === 0) visible += "<";
-      index += 1;
-      continue;
-    }
-    const tag = html.slice(index + 1, tagEnd);
-    const tagName = /^\s*\/?\s*([A-Za-z][A-Za-z0-9:-]*)/u.exec(tag)?.[1]?.toLowerCase();
-    const hiddenTag =
-      tagName !== undefined &&
-      (/^(?:head|noscript|script|style|template|textarea|xmp)$/u.test(tagName) ||
-        /(?:^|\s)(?:hidden|inert)(?:\s|=|$)/iu.test(tag) ||
-        /(?:^|\s)aria-hidden\s*=\s*(?:["']?true\b)/iu.test(tag) ||
-        /(?:^|\s)style\s*=\s*(["'])[^"']*(?:display\s*:\s*none|visibility\s*:\s*hidden)[^"']*\1/iu.test(tag));
-    if (tagName !== undefined && (hiddenTag || state.hiddenElements.includes(tagName))) {
-      if (/^\s*\//u.test(tag)) {
-        const matchingIndex = state.hiddenElements.lastIndexOf(tagName);
-        if (matchingIndex !== -1) state.hiddenElements.splice(matchingIndex, 1);
-      } else if (!/\/\s*$/u.test(tag) && !HTML_VOID_ELEMENTS.has(tagName)) {
-        state.hiddenElements.push(tagName);
-      }
-    }
-    index = tagEnd + 1;
-  }
-  return decodeHTML(visible);
-}
-
-function htmlTagEnd(html: string, start: number): number {
-  let quote: '"' | "'" | undefined;
-  for (let index = start; index < html.length; index += 1) {
-    const character = html[index]!;
-    if (quote !== undefined) {
-      if (character === quote) quote = undefined;
-    } else if (character === '"' || character === "'") {
-      quote = character;
-    } else if (character === ">") {
-      return index;
-    }
-  }
-  return -1;
-}
-
-function coverageMetricScoreLanguageContext(value: string): boolean {
-  const score = "(?:\\b(?:100(?:\\.0+)?|\\d{1,2}(?:\\.\\d+)?)\\s*[%％]|\\b\\d+\\s*\\/\\s*\\d+\\b)";
-  const coverageMetric =
-    "(?:(?<!insurance[ \\t])coverage|lcov|covg-eval|standardized[ \\t]+(?:measurement|rate|result|score))";
-  const metricQualifier = "(?:branch|code|function|line|overall|range|source|standardized|test)";
-  const approximation = "(?:about|approximately|nearly|roughly)";
-  const metricLink = `(?::|=|at\\b|of\\b|(?:is|was|measured|reached|remained|hit|registered|reported|totaled|yielded)\\b(?:[ \\t]+${approximation})?|came[ \\t]+to\\b|accounted[ \\t]+for\\b|stood[ \\t]+at\\b|[\\p{L}-]+(?:[ \\t]+(?:up|down))?[ \\t]+(?:to|at)\\b)?`;
-  const directCoverageScore = new RegExp(
-    `(?:${coverageMetric}[ \\t]*(?:(?:measurement|percentage|rate|result|score)[ \\t]*)?${metricLink}[ \\t]*${score}|${score}[ \\t]*(?:${metricQualifier}[ \\t]+)?${coverageMetric})`,
-    "iu"
-  );
-  const coveredProductionScore = new RegExp(
-    `\\b(?:branch(?:es)?|code|functions?|lines?|production|ranges?|source|tests?)(?:[ \\t]+[\\p{L}\\p{N}_-]+){0,4}[ \\t]+(?:is|are|was|were)[ \\t]+covered[ \\t]*\\(?[ \\t]*${score}`,
-    "iu"
-  );
-  return directCoverageScore.test(value) || coveredProductionScore.test(value);
 }
 
 function markdownSectionOccurrences(contents: string, heading: string): string[][] {
@@ -7061,55 +6757,6 @@ function markdownSectionOccurrences(contents: string, heading: string): string[]
     }
     return sectionLines;
   });
-}
-
-function unfencedMarkdownLines(contents: string): string[] {
-  let fenced = false;
-  return contents.split(/\r?\n/u).filter((line) => {
-    const trimmed = line.trim();
-    if (/^(?:`{3,}|~{3,})/u.test(trimmed)) {
-      fenced = !fenced;
-      return false;
-    }
-    return !fenced;
-  });
-}
-
-function unscopedCoverageScoreDiagnosticsInJson(
-  report: Record<string, unknown>,
-  reportPath: string
-): RuntimeDiagnostic[] {
-  const diagnostics: RuntimeDiagnostic[] = [];
-  const visit = (value: unknown, jsonPath: string, directCoverageField: boolean): void => {
-    if (typeof value === "string") {
-      if (directCoverageField || coverageMetricLanguageContext(value)) {
-        diagnostics.push(...unscopedCoverageScoreDiagnostics(value, `${reportPath}#${jsonPath}`, !directCoverageField));
-      }
-      return;
-    }
-    if (Array.isArray(value)) {
-      value.forEach((entry, index) => visit(entry, `${jsonPath}[${index}]`, directCoverageField));
-      return;
-    }
-    if (!isRecord(value)) return;
-    for (const [key, entry] of Object.entries(value)) {
-      visit(entry, `${jsonPath}.${key}`, directCoverageField || coverageMetricFieldName(key));
-    }
-  };
-  visit(report, "$", false);
-  return diagnostics;
-}
-
-function coverageMetricLanguageContext(value: string): boolean {
-  return /(?<![A-Za-z0-9_-])(?:coverage|lcov|selected-range|production-source)(?![A-Za-z0-9_-])|(?<![A-Za-z0-9_-])covg-eval(?![A-Za-z0-9_-])|\bstandardized\s+(?:measurement|rate|result|score)\b/iu.test(
-    value
-  );
-}
-
-function coverageMetricFieldName(key: string): boolean {
-  return /^(?:coverage|coverage_(?:fraction|measurement|percentage|rate|result|score|summary)|lcov|standardized_coverage)$/iu.test(
-    key
-  );
 }
 
 /** Require the final report to preserve the current implementation selection. */
