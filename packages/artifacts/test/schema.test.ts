@@ -1184,6 +1184,9 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
   for (const reportAlias of [
     "access=internal",
     "verification=summary",
+    "Access=internal",
+    "ACCESS=internal",
+    "Verification=summary",
     "access: internal",
     "verification: summary",
     '"access": "internal"',
@@ -1216,6 +1219,15 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
     "severity_alias -> critical"
   ]) {
     assertNoteParity(mappedAlias, false);
+  }
+
+  for (const mappedMetadataAlias of [
+    "root_reason -> renamed",
+    "root_reason ↦ renamed",
+    "helper_verdict -> renamed",
+    "HELPER_VERDICT ↦ renamed"
+  ]) {
+    assertNoteParity(mappedMetadataAlias, false);
   }
 
   for (const colonAlias of ["rating: critical", "attainability: helper-only"]) {

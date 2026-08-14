@@ -132,6 +132,7 @@ const explicitReportAliasKeyValues = [
   "verification"
 ] as const;
 const shortReportAliasKeys = ["access", "verification"];
+const shortReportAliasKeyPatterns = shortReportAliasKeys.map(asciiCaseInsensitivePattern);
 const explicitReportAliasKeys = explicitReportAliasKeyValues
   .filter((key) => key !== "access" && key !== "verification")
   .map(asciiCaseInsensitivePattern);
@@ -148,7 +149,7 @@ const reportAliasPatternGroups = chunkPatternAlternatives([
 const explicitReportAliasKeySet = new Set(explicitReportAliasKeyValues.map((key) => key.toLowerCase()));
 
 const unsupportedAliasAssignmentPatterns = reportAliasPatternGroups.map((patterns) => {
-  const aliasKeyPattern = `(?:[-_0-9A-Za-z]*(?:${patterns.join("|")})[-_0-9A-Za-z]*|${shortReportAliasKeys.join("|")})`;
+  const aliasKeyPattern = `(?![-_0-9A-Za-z]{129})(?:[-_0-9A-Za-z]*(?:${patterns.join("|")})[-_0-9A-Za-z]*|${shortReportAliasKeyPatterns.join("|")})`;
   return `${assignmentBoundaryPattern}(?!(${supportedNoteKeyPattern})[ \\t]*${assignmentKeyTrailingWrapperPattern}[ \\t]*={1,2})(?:(${aliasKeyPattern}))[ \\t]*${assignmentKeyTrailingWrapperPattern}${anyAssignmentOperatorPattern}`;
 });
 const unsupportedBareHelperAliasPattern = `${assignmentBoundaryPattern}(_*[hH][eE][lL][pP][eE][rR]_*)[ \\t]*${assignmentKeyTrailingWrapperPattern}${anyAssignmentOperatorPattern}`;
@@ -157,7 +158,7 @@ const evidenceAssignmentKeyPattern = `(?:${FINDING_REPORT_EVIDENCE_ASSIGNMENT_KE
 ).join("|")})`;
 const unsupportedMetadataPairAliasPatterns = FINDING_REPORT_MULTITERM_METADATA_KEY_PATTERNS.map(
   (pattern) =>
-    `${assignmentBoundaryPattern}(?!(${supportedNoteKeyPattern})[ \\t]*${metadataKeyCloseWrapperPattern}[ \\t]*={1,2})(?!${evidenceAssignmentKeyPattern}[ \\t]*${metadataKeyCloseWrapperPattern}[ \\t]*={1,2})(?:((?=${assignmentKeyPattern}[ \\t]*${metadataKeyCloseWrapperPattern}\\s*={1,2})${pattern}))[ \\t]*${metadataKeyCloseWrapperPattern}${anyAssignmentOperatorPattern}`
+    `${assignmentBoundaryPattern}(?!(${supportedNoteKeyPattern})[ \\t]*${metadataKeyCloseWrapperPattern}${anyAssignmentOperatorPattern})(?!${evidenceAssignmentKeyPattern}[ \\t]*${metadataKeyCloseWrapperPattern}${anyAssignmentOperatorPattern})(?:((?![-_0-9A-Za-z]{129})${pattern}))[ \\t]*${metadataKeyCloseWrapperPattern}${anyAssignmentOperatorPattern}`
 );
 const invalidCanonicalGrammarPattern = `${assignmentBoundaryPattern}(?!${validCanonicalAssignmentPrefixPattern})(${globallyValidatedNoteKeyPattern})[ \\t]*${assignmentKeyTrailingWrapperPattern}${anyAssignmentOperatorPattern}`;
 const unsupportedUniqueTypedAliasPattern = `${assignmentBoundaryPattern}(?!${supportedNoteKeyPattern}[ \\t]*${assignmentKeyTrailingWrapperPattern}[ \\t]*=(?!=))(${assignmentKeyPattern})[ \\t]*${assignmentKeyTrailingWrapperPattern}${assignmentOperatorPrefixPattern}[ \\t]*${valueWrapperPattern}${uniqueTypedValuePattern}${typedValueBoundaryPattern}`;
@@ -165,7 +166,7 @@ const riskAliasKeyPattern =
   "(?:risk|severity|rating|risk_level|severity_level|impact_level|likelihood_level|impact_rating|likelihood_rating)";
 const unsupportedRiskTypedAliasPattern = `${reportNoteSearchPrefixPattern}${assignmentBoundaryPattern}(${riskAliasKeyPattern})[ \\t]*${assignmentKeyTrailingWrapperPattern}${assignmentOperatorPrefixPattern}[ \\t]*${valueWrapperPattern}${riskValuePattern}${typedValueBoundaryPattern}`;
 const canonicalColonAssignmentPattern = `${assignmentBoundaryPattern}${valueWrapperPattern}(${globallyValidatedNoteKeyPattern})[ \\t]*${assignmentKeyTrailingWrapperPattern}${colonAssignmentOperatorPattern}${valueWrapperPattern}(?=\\S)`;
-const canonicalDirectMappingPattern = `${assignmentBoundaryPattern}[ \\t]*${valueWrapperPattern}((?:${globallyValidatedNoteKeyPattern}|${shortReportAliasKeys.join(
+const canonicalDirectMappingPattern = `${assignmentBoundaryPattern}[ \\t]*${valueWrapperPattern}((?:${globallyValidatedNoteKeyPattern}|${shortReportAliasKeyPatterns.join(
   "|"
 )}))[ \\t]*${assignmentKeyTrailingWrapperPattern}(?::[ \\t]*\\r?\\n[ \\t]*|:[ \\t]*|\\|[ \\t]*|(?::=|(?:-|=)>|→|↦|⟶|≔)[ \\t]*)${valueWrapperPattern}(?=\\S)`;
 const canonicalReachabilityUnicodeMappingPattern = `${assignmentBoundaryPattern}[ \\t]*${valueWrapperPattern}(${asciiCaseInsensitivePattern("reachability")})[ \\t]*${assignmentKeyTrailingWrapperPattern}(?:↦|⟶|≔)[ \\t]*${valueWrapperPattern}(?=\\S)`;
