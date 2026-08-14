@@ -3429,7 +3429,7 @@ function severityArtifactForNode(node: PlannedGraphNode): { kind: SeverityArtifa
   if (logicalId === "severity-classification") {
     return { kind: "severity-classification", path: "severity-classified-findings.json" };
   }
-  const reportOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/report@2");
+  const reportOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/report@3");
   if (reportOutputs.length === 1) {
     return { kind: "final-report", path: reportOutputs[0]!.path };
   }
@@ -4314,7 +4314,7 @@ function verifyPropertyProvenanceArtifacts(
   authenticated?: AuthenticatedArtifactGateSnapshots
 ): RuntimeDiagnostic[] {
   const isPropertyLens = node.outputs.some((output) => output.contract === "ultrafuzz/property-lens@2");
-  const isFinalReport = node.outputs.some((output) => output.contract === "ultrafuzz/report@2");
+  const isFinalReport = node.outputs.some((output) => output.contract === "ultrafuzz/report@3");
   const isCoverageEvidence = node.outputs.some((output) => output.contract === "ultrafuzz/coverage-evidence@1");
   const isImplementation = node.outputs.some((output) => output.contract === "ultrafuzz/implemented-properties@3");
   const isCampaign = node.outputs.some((output) => output.contract === "ultrafuzz/property-campaign@3");
@@ -4375,7 +4375,7 @@ function verifyCoverageGoalEvidenceParity(
   node: PlannedGraphNode,
   authenticated?: AuthenticatedArtifactGateSnapshots
 ): RuntimeDiagnostic[] {
-  const goalOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/coverage-goal@1");
+  const goalOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/coverage-goal@2");
   const evidenceOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/coverage-evidence@1");
   if (goalOutputs.length !== 1 || evidenceOutputs.length !== 1) {
     return [
@@ -4392,20 +4392,50 @@ function verifyCoverageGoalEvidenceParity(
   const evidencePath = safeResolveInside(artifactDir, evidenceOutputs[0]!.path, "coverage evidence output");
   const goal = parseCurrentArtifactJson(artifactDir, goalPath, authenticated);
   const evidence = parseCurrentArtifactJson(artifactDir, evidencePath, authenticated);
-  if (!isRecord(goal) || !isRecord(evidence) || !Array.isArray(evidence.views)) return [];
+  if (!isRecord(goal) || !isRecord(evidence)) return [];
+  if (evidence.status === "unavailable") {
+    return goal.current_status === "blocked" &&
+      goal.current_measurement === null &&
+      isDeepStrictEqual(goal.blockers, evidence.blockers)
+      ? []
+      : [
+          {
+            code: "COVERAGE_GOAL_BLOCKER_MISMATCH",
+            message:
+              "Unavailable coverage evidence requires a blocked goal with no measurement and the exact same blockers",
+            severity: "error",
+            source: "coverage-evidence",
+            path: goalPath
+          }
+        ];
+  }
+  if (evidence.status !== "measured" || !Array.isArray(evidence.views)) return [];
   const selected = evidence.views.find(
-    (view): view is Record<string, unknown> => isRecord(view) && view.scope === "selected-range"
+    (view): view is Record<string, unknown> =>
+      isRecord(view) && view.scope === "recon-selected-declaration-completeness"
   );
   if (selected === undefined) return [];
-  const measurement = goal.current_measurement;
-  if (measurement !== null && !isDeepStrictEqual(measurement, selected)) {
+  const coveredRanges = selected.covered_ranges;
+  const totalRanges = selected.total_ranges;
+  if (
+    typeof coveredRanges !== "number" ||
+    typeof totalRanges !== "number" ||
+    !Number.isSafeInteger(coveredRanges) ||
+    !Number.isSafeInteger(totalRanges) ||
+    coveredRanges < 0 ||
+    totalRanges < 0
+  )
+    return [];
+  const expectedStatus =
+    totalRanges > 0 && BigInt(coveredRanges) * 100n >= BigInt(totalRanges) * 90n ? "target-met" : "below-target";
+  if (!isDeepStrictEqual(goal.current_measurement, selected) || goal.current_status !== expectedStatus) {
     return [
       {
         code: "COVERAGE_GOAL_MEASUREMENT_MISMATCH",
-        message: "Terminal coverage goal measurement must exactly equal the selected-range coverage evidence view",
+        message: `Measured coverage requires the exact Recon-selected declaration view and derived ${expectedStatus} status; 0/0 is below-target`,
         severity: "error",
         source: "coverage-evidence",
-        path: `${goalPath}#$.current_measurement`
+        path: goalPath
       }
     ];
   }
@@ -4448,16 +4478,11 @@ function verifyCoverageProductionInventory(
   const markdownPath = safeResolveInside(artifactDir, markdownOutputs[0]!.path, "coverage Markdown output");
   const evidence = parseCurrentArtifactJson(artifactDir, evidencePath, authenticated);
   const markdownBytes = readCurrentArtifactSnapshot(artifactDir, markdownPath, authenticated);
-  if (
-    !isRecord(evidence) ||
-    !Array.isArray(evidence.files) ||
-    !Array.isArray(evidence.counted_ranges) ||
-    !Array.isArray(evidence.zero_coverage_components)
-  )
-    return [];
+  if (!isRecord(evidence)) return [];
 
   const diagnostics: RuntimeDiagnostic[] = [];
   if (markdownBytes !== undefined) {
+    diagnostics.push(...unscopedCoverageScoreDiagnostics(markdownBytes.toString("utf8"), markdownPath, true));
     diagnostics.push(
       ...coverageEvidenceMarkdownProjectionDiagnostics(
         evidence,
@@ -4467,6 +4492,14 @@ function verifyCoverageProductionInventory(
       )
     );
   }
+  if (evidence.status === "unavailable") return diagnostics;
+  if (
+    evidence.status !== "measured" ||
+    !Array.isArray(evidence.files) ||
+    !Array.isArray(evidence.counted_ranges) ||
+    !Array.isArray(evidence.zero_coverage_components)
+  )
+    return diagnostics;
   const workspacePath = getNodeWorkspaceDir(layout, attemptId);
   const productionRoots = configuredProductionSourceRoots(layout);
   if (!fs.existsSync(workspacePath) || productionRoots === undefined) {
@@ -4513,12 +4546,33 @@ function verifyCoverageProductionInventory(
     });
     return diagnostics;
   }
-  const reconSelection = readReconCoverageSelection(workspacePath, inventory);
-  diagnostics.push(...reconSelection.diagnostics);
+  let reconSelection: ReconCoverageSelection = { diagnostics: [] };
+  try {
+    const input = readCoverageInputSnapshot(
+      artifactDir,
+      node,
+      evidence.recon_selection,
+      "Recon coverage selection",
+      authenticated
+    );
+    reconSelection = readReconCoverageSelection(workspacePath, inventory, input.bytes, input.path);
+    diagnostics.push(...reconSelection.diagnostics);
+  } catch (error) {
+    diagnostics.push({
+      code: "COVERAGE_RECON_SELECTION_INVALID",
+      message: `Coverage evidence Recon selection input is unsafe, stale, or invalid: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+      severity: "error",
+      source: "coverage-evidence",
+      path: `${evidencePath}#$.recon_selection`
+    });
+  }
 
   let lcovCoverage: TrustedLcovCoverage | undefined;
   try {
-    lcovCoverage = readTrustedLcovCoverage(workspacePath, evidence.lcov);
+    const input = readCoverageInputSnapshot(artifactDir, node, evidence.lcov, "LCOV", authenticated);
+    lcovCoverage = readTrustedLcovCoverage(workspacePath, input.bytes);
   } catch (error) {
     diagnostics.push({
       code: "COVERAGE_LCOV_INVALID",
@@ -4738,7 +4792,7 @@ function verifyCoverageProductionInventory(
     if (declaredFile.included === false && declaredRanges.some((candidate) => candidate.selected === true)) {
       diagnostics.push({
         code: "COVERAGE_EXCLUDED_FILE_HAS_SELECTED_RANGES",
-        message: `Excluded production source ${relativePath} cannot contribute counted selected-range entries`,
+        message: `Excluded production source ${relativePath} cannot contribute counted recon-selected-declaration-completeness entries`,
         severity: "error",
         source: "coverage-evidence",
         path: `${evidencePath}#$.counted_ranges`
@@ -4833,27 +4887,38 @@ type TrustedLcovCoverage = {
   uncoveredLinesBySource: ReadonlyMap<string, readonly number[]>;
 };
 
-function readTrustedLcovCoverage(workspacePath: string, descriptor: unknown): TrustedLcovCoverage {
+function readCoverageInputSnapshot(
+  artifactDir: string,
+  node: PlannedGraphNode,
+  descriptor: unknown,
+  label: string,
+  authenticated?: AuthenticatedArtifactGateSnapshots
+): { bytes: Buffer; path: string } {
   if (
     !isRecord(descriptor) ||
     typeof descriptor.path !== "string" ||
     typeof descriptor.sha256 !== "string" ||
     !/^[0-9a-f]{64}$/u.test(descriptor.sha256)
   ) {
-    throw new Error("LCOV descriptor must contain an exact safe path and lowercase SHA-256");
+    throw new Error(`${label} descriptor must contain an exact safe path and lowercase SHA-256`);
   }
-  const lcovPath = safeResolveInside(workspacePath, descriptor.path, "coverage LCOV source");
-  const bytes = readSinglyLinkedRegularFileSnapshotInside(
-    workspacePath,
-    lcovPath,
-    MAX_ARTIFACT_SNAPSHOT_BYTES,
-    "coverage LCOV source"
+  const declarations = node.outputs.filter(
+    (output) => output.path === descriptor.path && output.contract === "ultrafuzz/text@1"
   );
+  if (declarations.length !== 1) {
+    throw new Error(`${label} path must name exactly one declared sibling ultrafuzz/text@1 output`);
+  }
+  const inputPath = safeResolveInside(artifactDir, descriptor.path, `${label} sibling output`);
+  const bytes = readCurrentArtifactSnapshot(artifactDir, inputPath, authenticated);
+  if (bytes === undefined) throw new Error(`${label} sibling output is unavailable`);
   const digest = sha256Bytes(bytes);
   if (digest !== descriptor.sha256) {
-    throw new Error(`LCOV SHA-256 mismatch: expected ${descriptor.sha256}, observed ${digest}`);
+    throw new Error(`${label} SHA-256 mismatch: expected ${descriptor.sha256}, observed ${digest}`);
   }
+  return { bytes, path: inputPath };
+}
 
+function readTrustedLcovCoverage(workspacePath: string, bytes: Buffer): TrustedLcovCoverage {
   const hitsBySource = new Map<string, Map<number, bigint>>();
   let distinctDaLineCount = 0;
   let currentSource: string | undefined;
@@ -5013,7 +5078,7 @@ function materialCoverageDeclarations(
       const signatureEnd = solidityDeclarationSignatureEnd(lexicalSource, match.index ?? 0, currentLine);
       // Interface and abstract signatures end in `;` and have no executable
       // range that LCOV can cover. Only declarations with an implementation
-      // body belong in the production-source denominator.
+      // body belong in the production-declaration-completeness denominator.
       if (lexicalSource[signatureEnd.index - 1] !== "{") continue;
       recordDeclaration({
         line: currentLine,
@@ -5037,7 +5102,7 @@ function materialCoverageDeclarations(
   // every material declaration that begins on one physical line as one trusted
   // range whose boundary covers the furthest declaration on that line. This
   // keeps minified/generated sources representable without weakening the
-  // complete production-source denominator.
+  // complete production-declaration-completeness denominator.
   return [...declarationsByLine.entries()]
     .sort(([left], [right]) => left - right)
     .map(([line, endLine]) => ({ line, endLine }));
@@ -5385,14 +5450,15 @@ function isMissingFileError(error: unknown): boolean {
   return isRecord(error) && error.code === "ENOENT";
 }
 
-function readReconCoverageSelection(workspacePath: string, inventory: ReadonlySet<string>): ReconCoverageSelection {
-  const selectionPath = safeResolveInside(workspacePath, "magic/recon-coverage.json", "Recon coverage selection map");
-  if (!fs.existsSync(selectionPath)) return { ranges: new Map(), diagnostics: [] };
-
+function readReconCoverageSelection(
+  workspacePath: string,
+  inventory: ReadonlySet<string>,
+  bytes: Buffer,
+  selectionPath: string
+): ReconCoverageSelection {
   let document: unknown;
   try {
-    assertRegularFileInside(workspacePath, selectionPath, "Recon coverage selection map");
-    document = parseStrictJsonBytes(readRegularFileSnapshot(selectionPath, MAX_ARTIFACT_SNAPSHOT_BYTES));
+    document = parseStrictJsonBytes(bytes);
   } catch (error) {
     return {
       diagnostics: [
@@ -5442,7 +5508,7 @@ function readReconCoverageSelection(workspacePath: string, inventory: ReadonlySe
     }
     if (!inventory.has(relativePath)) {
       // Recon recursively follows calls into dependencies. Those paths are
-      // outside the configured production-source authority and therefore do
+      // outside the configured production-declaration-completeness authority and therefore do
       // not authenticate selected production ranges; dependency evidence is
       // still reconciled independently against declared workspace files.
       try {
@@ -6536,12 +6602,12 @@ function verifyFinalReportPropertyReferences(
   attemptAuthority?: ArtifactGateAttemptAuthority,
   authenticated?: AuthenticatedArtifactGateSnapshots
 ): RuntimeDiagnostic[] {
-  const reportOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/report@2");
+  const reportOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/report@3");
   if (reportOutputs.length !== 1) {
     return [
       {
         code: "PROPERTY_REPORT_DECLARATION_AMBIGUOUS",
-        message: `Final report must declare exactly one ultrafuzz/report@2 output; found ${reportOutputs.length}`,
+        message: `Final report must declare exactly one ultrafuzz/report@3 output; found ${reportOutputs.length}`,
         severity: "error",
         source: "property-provenance",
         path: layout.graphPath
@@ -6646,19 +6712,23 @@ function verifyFinalReportCoverageEvidence(
   attemptAuthority?: ArtifactGateAttemptAuthority,
   authenticated?: AuthenticatedArtifactGateSnapshots
 ): RuntimeDiagnostic[] {
-  const diagnostics: RuntimeDiagnostic[] = [];
   const markdownBytes = readCurrentArtifactSnapshot(artifactDir, markdownPath, authenticated);
   const markdown = markdownBytes?.toString("utf8") ?? "";
+  const diagnostics = unscopedCoverageScoreDiagnostics(markdown, markdownPath, false);
 
   const producerStatus = plannedContractProducerStatus(layout, node, "ultrafuzz/coverage-evidence@1", attemptAuthority);
   if (producerStatus === "absent") {
-    if (report.coverage_evidence !== undefined) {
+    const markdownLines = markdown.split(/\r?\n/u);
+    const markdownClaimsCoverage = markdownCoverageScoreOccurrences(markdown).some((occurrence) =>
+      coverageScoreHasContext(markdownLines[occurrence.line - 1] ?? "", occurrence, false)
+    );
+    if (report.coverage_evidence !== undefined || markdownClaimsCoverage) {
       diagnostics.push({
         code: "REPORT_COVERAGE_EVIDENCE_UNPLANNED",
-        message: "Final report must not invent coverage evidence without a planned typed producer",
+        message: "Final report must not invent typed or Markdown coverage evidence without a planned producer",
         severity: "error",
         source: "coverage-evidence",
-        path: `${reportPath}#$.coverage_evidence`
+        path: report.coverage_evidence === undefined ? markdownPath : `${reportPath}#$.coverage_evidence`
       });
     }
     return diagnostics;
@@ -6711,21 +6781,138 @@ function coverageEvidenceMarkdownProjectionDiagnostics(
 ): RuntimeDiagnostic[] {
   const expectedLines = renderCoverageEvidenceMarkdownSection(evidence)
     .slice(1)
+    .map((line) => line.trim())
     .filter((line) => line.length > 0);
   const sections = markdownSectionOccurrences(markdown, "## Scoped coverage evidence");
   const renderedLines = sections[0]?.filter((line) => line.length > 0);
-  return sections.length === 1 && renderedLines !== undefined && sameStringSequence(renderedLines, expectedLines)
+  const globalScoresMatch = coverageEvidenceGlobalScoresMatch(evidence, markdownCoverageScoreOccurrences(markdown));
+  return sections.length === 1 &&
+    renderedLines !== undefined &&
+    sameStringSequence(renderedLines, expectedLines) &&
+    globalScoresMatch
     ? []
     : [
         {
           code,
           message:
-            "Markdown must contain exactly one canonical scoped coverage section, including every view, excluded component, and zero-coverage component",
+            "Markdown must contain exactly one canonical scoped coverage section with the complete typed evidence body",
           severity: "error",
           source: "coverage-evidence",
           path: markdownPath
         }
       ];
+}
+
+const exactCoverageScopes = ["recon-selected-declaration-completeness", "production-declaration-completeness"] as const;
+type ExactCoverageScope = (typeof exactCoverageScopes)[number];
+type MarkdownCoverageScoreOccurrence = {
+  line: number;
+  score: string;
+  scopes: ExactCoverageScope[];
+};
+
+function markdownCoverageScoreOccurrences(contents: string): MarkdownCoverageScoreOccurrence[] {
+  const occurrences: MarkdownCoverageScoreOccurrence[] = [];
+  let fence: { marker: "`" | "~"; length: number } | undefined;
+  for (const [lineIndex, line] of contents.split(/\r?\n/u).entries()) {
+    const delimiter = /^ {0,3}([`~]{3,})(.*)$/u.exec(line);
+    if (fence === undefined && delimiter !== null && new Set(delimiter[1]).size === 1) {
+      fence = { marker: delimiter[1]![0] as "`" | "~", length: delimiter[1]!.length };
+      continue;
+    }
+    if (fence !== undefined) {
+      const closing = /^ {0,3}([`~]{3,})[ \t]*$/u.exec(line);
+      if (
+        closing !== null &&
+        closing[1]![0] === fence.marker &&
+        closing[1]!.length >= fence.length &&
+        new Set(closing[1]).size === 1
+      ) {
+        fence = undefined;
+      }
+      continue;
+    }
+
+    let previousScoreEnd = 0;
+    for (const match of line.matchAll(/\b(?:100(?:\.0+)?|\d{1,2}(?:\.\d+)?)\s*[%％]|\b\d+\s*\/\s*\d+\b/gu)) {
+      const scoreIndex = match.index ?? 0;
+      const association = line.slice(previousScoreEnd, scoreIndex).toLowerCase();
+      occurrences.push({
+        line: lineIndex + 1,
+        score: match[0].replace(/\s+/gu, ""),
+        scopes: exactCoverageScopes.filter((scope) => association.includes(scope))
+      });
+      previousScoreEnd = scoreIndex + match[0].length;
+    }
+  }
+  return occurrences;
+}
+
+function coverageEvidenceGlobalScoresMatch(
+  evidence: unknown,
+  occurrences: readonly MarkdownCoverageScoreOccurrence[]
+): boolean {
+  if (!isRecord(evidence)) return false;
+  const expected = new Map<ExactCoverageScope, string>();
+  if (evidence.status === "measured" && Array.isArray(evidence.views)) {
+    for (const view of evidence.views) {
+      if (
+        !isRecord(view) ||
+        !exactCoverageScopes.includes(view.scope as ExactCoverageScope) ||
+        typeof view.covered_ranges !== "number" ||
+        typeof view.total_ranges !== "number" ||
+        !Number.isSafeInteger(view.covered_ranges) ||
+        !Number.isSafeInteger(view.total_ranges) ||
+        view.covered_ranges < 0 ||
+        view.total_ranges < 0
+      )
+        return false;
+      expected.set(view.scope as ExactCoverageScope, `${view.covered_ranges}/${view.total_ranges}`);
+    }
+  } else if (evidence.status !== "unavailable") {
+    return false;
+  }
+
+  const scoped = occurrences.filter((occurrence) => occurrence.scopes.length === 1);
+  if (scoped.length !== expected.size) return false;
+  return [...expected].every(
+    ([scope, score]) =>
+      scoped.filter((occurrence) => occurrence.scopes[0] === scope && occurrence.score === score).length === 1
+  );
+}
+
+function unscopedCoverageScoreDiagnostics(
+  contents: string,
+  artifactPath: string,
+  everyScoreIsCoverage: boolean
+): RuntimeDiagnostic[] {
+  const diagnostics: RuntimeDiagnostic[] = [];
+  const lines = contents.split(/\r?\n/u);
+  for (const occurrence of markdownCoverageScoreOccurrences(contents)) {
+    const line = lines[occurrence.line - 1] ?? "";
+    if (!coverageScoreHasContext(line, occurrence, everyScoreIsCoverage) || occurrence.scopes.length === 1) continue;
+    diagnostics.push({
+      code: "UNSCOPED_COVERAGE_SCORE",
+      message: "Published coverage scores must name an exact declaration-completeness scope on the same line",
+      severity: "error",
+      source: "coverage-evidence",
+      path: `${artifactPath}:${occurrence.line}`
+    });
+  }
+  return diagnostics;
+}
+
+function coverageScoreHasContext(
+  line: string,
+  occurrence: MarkdownCoverageScoreOccurrence,
+  everyScoreIsCoverage: boolean
+): boolean {
+  return (
+    everyScoreIsCoverage ||
+    occurrence.scopes.length > 0 ||
+    exactCoverageScopes.some((scope) => line.toLowerCase().includes(scope)) ||
+    /(?<!insurance[ \t])\b(?:coverage|lcov|covg-eval|declaration completeness)\b/iu.test(line)
+  );
 }
 
 function markdownSectionOccurrences(contents: string, heading: string): string[][] {

@@ -58,6 +58,7 @@ describe("prompt semantic anchors", () => {
     );
     for (const filename of [
       "boundary-recipes.mdx",
+      "coverage-evidence-markdown.mdx",
       "findings.mdx",
       "generated-tests.mdx",
       "output-contract.mdx"
@@ -571,9 +572,28 @@ describe("prompt semantic anchors", () => {
       expect(invariantPrompt).toContain("machine-readable source of truth");
       expect(invariantPrompt).toContain("source-only properties");
     }
-    expect(coverage).toContain("{{schema_path}}/coverage-goal.schema.json");
-    expect(coverage).toContain("schema-defined status, measurement, and blocker variant");
-    expect(coverage).toContain("Never present an\n     unmeasured, sub-target, or blocked result as stronger progress");
+    expect(coverage).toContain("Follow the pinned schemas, rendered validation commands");
+    expect(coverage).toContain("schema variant matching the evidence");
+    expect(coverage).toContain("never overstate an unmeasured, sub-target, or blocked result");
+  });
+
+  it("renders the canonical coverage projection into both portable prompts", () => {
+    const placeholder = "{{coverage_evidence_markdown_projection}}";
+    for (const relativePath of ["strategies/invariants/coverage.md", "review/final-report.md"] as const) {
+      const markdown = prompt(relativePath);
+      expect(markdown, relativePath).toContain(placeholder);
+      expect(markdown.split(placeholder), relativePath).toHaveLength(2);
+      expect(markdown, relativePath).not.toContain("docs/reference/artifacts-reports.md");
+    }
+
+    const partialPath = fileURLToPath(
+      new URL("../../../.ultrafuzz/prompts/_templates/output-contract/coverage-evidence-markdown.mdx", import.meta.url)
+    );
+    const docsPath = fileURLToPath(new URL("../../../docs/reference/artifacts-reports.md", import.meta.url));
+    const partial = readFileSync(partialPath, "utf8").trim();
+    const docs = readFileSync(docsPath, "utf8");
+
+    expect(docs).toContain(partial);
   });
 
   it("documents status-dependent differential and dynamic evidence beside pinned schemas", () => {

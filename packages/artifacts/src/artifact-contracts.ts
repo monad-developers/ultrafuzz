@@ -66,7 +66,7 @@ const existingJsonContracts = {
   },
   "ultrafuzz/coverage-evidence@1": {
     description:
-      "Complete scoped coverage evidence with selected-range and production-source views, explicit source inclusion, attributed counted ranges, and material zero-coverage components.",
+      "Complete scoped coverage evidence with recon-selected-declaration-completeness and production-declaration-completeness views, explicit source inclusion, attributed counted ranges, and material zero-coverage components.",
     schemaFile: "coverage-evidence.schema.json"
   },
   "ultrafuzz/implemented-properties@3": {

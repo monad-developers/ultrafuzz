@@ -446,9 +446,55 @@ artifacts/final-report/report.json
 ```
 
 If final report artifacts are missing, `ultrafuzz report <run-id>` fails.
-`report.json` must satisfy `ultrafuzz/report@2` with the exact
-`ultrafuzz.report.v2` version literal. Reporting reads the agent-authored bytes;
+`report.json` must satisfy `ultrafuzz/report@3` with the exact
+`ultrafuzz.report.v3` version literal. Reporting reads the agent-authored bytes;
 it does not reconstruct, reorder, normalize, or rewrite them.
+
+### Coverage evidence
+
+When coverage is planned, `report.json.coverage_evidence` is the exact finalized
+`ultrafuzz/coverage-evidence@1` handoff. Measured evidence authenticates its raw
+`coverage-input.lcov` and `recon-coverage.json` sibling outputs by path and
+SHA-256. Unavailable evidence carries typed blockers and no measurement.
+
+`report.md` and the coverage producer's Markdown use exactly one canonical
+section. Preserve array order and apply the standard public-inline sanitization
+to dynamic values: redact secrets and private absolute paths, collapse and trim
+whitespace, replace backticks with apostrophes, and use `unavailable` for a
+blank value. Measured evidence uses:
+
+```text
+## Scoped coverage evidence
+
+- <scope>: `<covered_ranges>/<total_ranges>`
+
+Excluded components:
+- None
+
+Zero-coverage components:
+- None
+```
+
+Repeat the scoped row for every view. Replace `- None` with one row per entry:
+``- `<path>` (<kind>): <exclusion_reason>`` for excluded files and
+``- `<path>:<start_line>-<end_line>` (<kind>)`` for zero-coverage ranges.
+
+Unavailable evidence uses:
+
+```text
+## Scoped coverage evidence
+
+- Status: unavailable
+
+Blockers:
+- <category>: <summary>
+  - Evidence: `<path>`
+```
+
+Repeat blocker and evidence rows in artifact order. Runtime publication compares
+this section with the typed handoff and rejects missing, duplicated, reordered,
+or bare coverage scores. Raw `covg-eval` output remains separate evaluator
+evidence and does not define either declaration-completeness view.
 
 When workflow usage data is available, run metadata includes
 `accounting.cumulative.tokens_used` and

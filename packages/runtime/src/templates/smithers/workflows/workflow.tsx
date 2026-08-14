@@ -854,11 +854,11 @@ function declaredFinalReportOutputPair(task: (typeof taskSpecs)[number]):
       markdown: (typeof taskSpecs)[number]["outputs"][number];
     }
   | undefined {
-  const reportOutputs = task.outputs.filter((output) => output.contract === "ultrafuzz/report@2");
+  const reportOutputs = task.outputs.filter((output) => output.contract === "ultrafuzz/report@3");
   if (reportOutputs.length === 0) return undefined;
   if (reportOutputs.length !== 1) {
     throw new Error(
-      `artifact-contract failure: report producer must declare exactly one current ultrafuzz/report@2 output; found ${reportOutputs.length}`
+      `artifact-contract failure: report producer must declare exactly one current ultrafuzz/report@3 output; found ${reportOutputs.length}`
     );
   }
   const markdownOutputs = task.outputs.filter((output) => output.contract === "ultrafuzz/nonempty-markdown@1");

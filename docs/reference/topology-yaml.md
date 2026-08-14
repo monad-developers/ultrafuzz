@@ -51,7 +51,7 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: report.json
-        contract: ultrafuzz/report@2
+        contract: ultrafuzz/report@3
   - id: __finish__
     kind: meta
     role: finish
@@ -136,7 +136,7 @@ Current JSON contracts include `ultrafuzz/findings@2`,
 `ultrafuzz/generated-tests@3`, `ultrafuzz/properties@2`,
 `ultrafuzz/implemented-properties@3`, `ultrafuzz/property-campaign@3`,
 `ultrafuzz/invariant-campaign-plan@2`, `ultrafuzz/property-lens@2`,
-`ultrafuzz/reference-expectations@2`, and `ultrafuzz/report@2`, plus named
+`ultrafuzz/reference-expectations@2`, and `ultrafuzz/report@3`, plus named
 contracts for the other workflow-specific JSON documents.
 `ultrafuzz/json-object@1` and `ultrafuzz/json-array@1` were removed; they are not
 generic escape hatches. See the

@@ -123,13 +123,18 @@
     "schema_file": "coverage-evidence.schema.json",
     "valid": {
       "schema_version": "ultrafuzz.coverage-evidence.v1",
+      "status": "measured",
       "lcov": {
-        "path": "echidna/covered.test.lcov",
+        "path": "coverage-input.lcov",
         "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
       },
+      "recon_selection": {
+        "path": "recon-coverage.json",
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
       "views": [
-        { "scope": "selected-range", "covered_ranges": 1, "total_ranges": 1 },
-        { "scope": "production-source", "covered_ranges": 1, "total_ranges": 2 }
+        { "scope": "recon-selected-declaration-completeness", "covered_ranges": 1, "total_ranges": 1 },
+        { "scope": "production-declaration-completeness", "covered_ranges": 1, "total_ranges": 2 }
       ],
       "files": [
         {
@@ -177,13 +182,18 @@
     },
     "invalid": {
       "schema_version": "ultrafuzz.coverage-evidence.v1",
+      "status": "measured",
       "lcov": {
-        "path": "echidna/covered.test.lcov",
+        "path": "coverage-input.lcov",
         "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
       },
+      "recon_selection": {
+        "path": "recon-coverage.json",
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
       "views": [
-        { "scope": "selected-range", "covered_ranges": 1, "total_ranges": 1 },
-        { "scope": "production-source", "covered_ranges": 1, "total_ranges": 2 }
+        { "scope": "recon-selected-declaration-completeness", "covered_ranges": 1, "total_ranges": 1 },
+        { "scope": "production-declaration-completeness", "covered_ranges": 1, "total_ranges": 2 }
       ],
       "files": [
         {
@@ -231,12 +241,12 @@
       "__unexpected_fixture_field": true
     }
   },
-  "ultrafuzz/coverage-goal@1": {
+  "ultrafuzz/coverage-goal@2": {
     "schema_file": "coverage-goal.schema.json",
     "valid": {
-      "schema_version": "ultrafuzz.coverage-goal.v1",
+      "schema_version": "ultrafuzz.coverage-goal.v2",
       "target": {
-        "scope": "selected-range",
+        "scope": "recon-selected-declaration-completeness",
         "minimum_percent": 90
       },
       "current_measurement": null,
@@ -248,9 +258,9 @@
       "blockers": []
     },
     "invalid": {
-      "schema_version": "ultrafuzz.coverage-goal.v1",
+      "schema_version": "ultrafuzz.coverage-goal.v2",
       "target": {
-        "scope": "selected-range",
+        "scope": "recon-selected-declaration-completeness",
         "minimum_percent": 90
       },
       "current_measurement": null,
@@ -984,10 +994,10 @@
       "__unexpected_fixture_field": true
     }
   },
-  "ultrafuzz/report@2": {
+  "ultrafuzz/report@3": {
     "schema_file": "report.schema.json",
     "valid": {
-      "schema_version": "ultrafuzz.report.v2",
+      "schema_version": "ultrafuzz.report.v3",
       "run_metadata": {
         "run_id": "x",
         "source_run_id": "x",
@@ -1013,7 +1023,7 @@
       }
     },
     "invalid": {
-      "schema_version": "ultrafuzz.report.v2",
+      "schema_version": "ultrafuzz.report.v3",
       "run_metadata": {
         "run_id": "x",
         "source_run_id": "x",

@@ -318,7 +318,7 @@ export function currentPlannedGraph(
     groups: { default: {} },
     nodes: nodeIds.map((nodeId) => {
       const isReport = nodeId === reportNodeId;
-      const contract = isReport ? "ultrafuzz/report@2" : "ultrafuzz/text@1";
+      const contract = isReport ? "ultrafuzz/report@3" : "ultrafuzz/text@1";
       const binding = artifactContractSchemaBinding(contract);
       return {
         id: nodeId,
@@ -495,7 +495,7 @@ export function testReportAuthority(
     report_json_sha256: TEST_SHA256,
     report_markdown_path: path.join(reportRoot, "final-report.md"),
     report_markdown_sha256: TEST_SHA256,
-    contract: "ultrafuzz/report@2",
+    contract: "ultrafuzz/report@3",
     contract_digest: TEST_SHA256,
     schema_id: "urn:ultrafuzz:schema:artifacts:final-report:2",
     schema_sha256: TEST_SHA256,
@@ -611,7 +611,7 @@ export function writeVerifiedFinalReport(input: {
   const report =
     input.report ??
     ({
-      schema_version: "ultrafuzz.report.v2",
+      schema_version: "ultrafuzz.report.v3",
       run_metadata: {
         run_id: runId,
         source_run_id: runId,
@@ -939,7 +939,7 @@ function verifiedCoverageEvidenceOutput(): ArtifactManifestOutputContract {
 }
 
 function verifiedFinalReportOutputs(reportJsonRelativePath = "report.json"): ArtifactManifestOutputContract[] {
-  const reportBinding = artifactContractSchemaBinding("ultrafuzz/report@2");
+  const reportBinding = artifactContractSchemaBinding("ultrafuzz/report@3");
   if (reportBinding === undefined) throw new Error("missing current report schema binding");
   return [
     {
@@ -950,8 +950,8 @@ function verifiedFinalReportOutputs(reportJsonRelativePath = "report.json"): Art
     },
     {
       path: reportJsonRelativePath,
-      contract: "ultrafuzz/report@2",
-      contract_digest: artifactContractDefinition("ultrafuzz/report@2").digest,
+      contract: "ultrafuzz/report@3",
+      contract_digest: artifactContractDefinition("ultrafuzz/report@3").digest,
       ...reportBinding,
       primary: false
     }

@@ -64,7 +64,7 @@ export function currentReportIssue(overrides: Record<string, unknown> = {}): Rec
 
 export function currentTerminalReport(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    schema_version: "ultrafuzz.report.v2",
+    schema_version: "ultrafuzz.report.v3",
     run_metadata: {
       run_id: "fixture-run",
       source_run_id: "fixture-source-run",
@@ -209,7 +209,7 @@ export function writeCurrentTerminalReport(
       id: "final-report",
       outputs: [
         { path: "report.md", contract: "ultrafuzz/nonempty-markdown@1", primary: true },
-        { path: "report.json", contract: "ultrafuzz/report@2", primary: false }
+        { path: "report.json", contract: "ultrafuzz/report@3", primary: false }
       ]
     }
   ]);
@@ -225,7 +225,7 @@ function currentFinalReportOutputs(): ArtifactManifestOutputContract[] {
     },
     {
       path: "report.json",
-      ...currentArtifactBinding("ultrafuzz/report@2"),
+      ...currentArtifactBinding("ultrafuzz/report@3"),
       primary: false
     }
   ];
@@ -374,7 +374,7 @@ export function writeCurrentSmithersTaskFixture(runRoot: string, attemptId: stri
       id: "final-report",
       outputs: [
         { path: "report.md", contract: "ultrafuzz/nonempty-markdown@1", primary: true },
-        { path: "report.json", contract: "ultrafuzz/report@2", primary: false }
+        { path: "report.json", contract: "ultrafuzz/report@3", primary: false }
       ]
     }
   ];

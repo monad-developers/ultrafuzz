@@ -1,173 +1,259 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:ultrafuzz:schema:artifacts:coverage-evidence:1",
-  "title": "Ultrafuzz complete coverage denominator",
-  "description": "Producer contract. The exact LCOV input is identified by a safe workspace-relative path and SHA-256. Each range uses a positive start_line plus positive line_count, so reversed ranges are unrepresentable. Semantic validation additionally requires: every counted range joins a declared file with the same kind; selected ranges are production-only and may join only an included file; ranges within each file do not overlap; file totals equal all selected and unselected counted ranges; selected-range totals equal selected counted ranges; production-source totals equal production-file totals; and each zero_coverage_components entry names an incomplete material range. Runtime authenticates the LCOV snapshot and source attribution, binds every production declaration boundary to the trusted workspace inventory, defines covered as at least one in-range LCOV DA row with every in-range DA row positive, requires zero_coverage_components to enumerate exactly the ranges with no positive hit, and binds each selection flag to overlap with the generated Recon coverage map. The two views are declaration-completeness metrics and do not claim to reproduce covg-eval's evaluator-specific function identity or filtering semantics.",
-  "type": "object",
-  "additionalProperties": false,
-  "required": ["schema_version", "lcov", "views", "files", "counted_ranges", "zero_coverage_components"],
-  "properties": {
-    "schema_version": {
-      "const": "ultrafuzz.coverage-evidence.v1"
-    },
-    "lcov": {
+  "title": "Ultrafuzz coverage evidence",
+  "description": "Producer contract for either authenticated declaration-completeness measurements or typed blockers that made measurement unavailable. Measured evidence identifies durable sibling snapshots of its LCOV and Recon selection inputs and reconciles trusted declaration ranges; unavailable evidence cannot claim measurements.",
+  "oneOf": [
+    {
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "sha256"],
+      "required": [
+        "schema_version",
+        "status",
+        "lcov",
+        "recon_selection",
+        "views",
+        "files",
+        "counted_ranges",
+        "zero_coverage_components"
+      ],
       "properties": {
-        "path": {
-          "type": "string",
-          "minLength": 1,
-          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[^\\\\\\u0000]+$"
+        "schema_version": {
+          "const": "ultrafuzz.coverage-evidence.v1"
         },
-        "sha256": {
-          "type": "string",
-          "pattern": "^[0-9a-f]{64}$"
-        }
-      }
-    },
-    "views": {
-      "type": "array",
-      "minItems": 2,
-      "maxItems": 2,
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["scope", "covered_ranges", "total_ranges"],
-        "properties": {
-          "scope": {
-            "enum": ["selected-range", "production-source"]
-          },
-          "covered_ranges": {
-            "type": "integer",
-            "minimum": 0
-          },
-          "total_ranges": {
-            "type": "integer",
-            "minimum": 0
-          }
-        }
-      }
-    },
-    "files": {
-      "type": "array",
-      "minItems": 1,
-      "maxItems": 10000,
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["path", "kind", "included", "covered_ranges", "total_ranges"],
-        "properties": {
-          "path": {
-            "type": "string",
-            "minLength": 1,
-            "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[^\\\\\\u0000]+$"
-          },
-          "kind": {
-            "enum": ["production", "test", "harness", "dependency"]
-          },
-          "included": {
-            "type": "boolean"
-          },
-          "exclusion_reason": {
-            "type": "string",
-            "minLength": 1
-          },
-          "covered_ranges": {
-            "type": "integer",
-            "minimum": 0
-          },
-          "total_ranges": {
-            "type": "integer",
-            "minimum": 0
+        "status": {
+          "const": "measured"
+        },
+        "lcov": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256"],
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^(?!\\.{1,2}(?:/|$))[^/\\\\\\u0000]+(?:/(?!\\.{1,2}(?:/|$))[^/\\\\\\u0000]+)*$"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
           }
         },
-        "allOf": [
-          {
-            "if": {
-              "properties": {
-                "included": {
-                  "const": false
-                }
+        "recon_selection": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256"],
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^(?!\\.{1,2}(?:/|$))[^/\\\\\\u0000]+(?:/(?!\\.{1,2}(?:/|$))[^/\\\\\\u0000]+)*$"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        },
+        "views": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["scope", "covered_ranges", "total_ranges"],
+            "properties": {
+              "scope": {
+                "enum": ["recon-selected-declaration-completeness", "production-declaration-completeness"]
               },
-              "required": ["included"]
-            },
-            "then": {
-              "required": ["exclusion_reason"],
-              "properties": {
-                "exclusion_reason": true
-              }
-            },
-            "else": {
-              "not": {
-                "required": ["exclusion_reason"]
+              "covered_ranges": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "total_ranges": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
               }
             }
           }
-        ]
-      }
-    },
-    "counted_ranges": {
-      "type": "array",
-      "maxItems": 100000,
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["file", "kind", "start_line", "line_count", "selected", "covered"],
-        "properties": {
-          "file": {
-            "type": "string",
-            "minLength": 1,
-            "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[^\\\\\\u0000]+$"
-          },
-          "kind": {
-            "enum": ["production", "test", "harness", "dependency"]
-          },
-          "start_line": {
-            "type": "integer",
-            "minimum": 1
-          },
-          "line_count": {
-            "type": "integer",
-            "minimum": 1
-          },
-          "selected": {
-            "type": "boolean",
-            "description": "Whether this trusted declaration range overlaps the authenticated Recon selection map."
-          },
-          "covered": {
-            "type": "boolean",
-            "description": "Declaration completeness: true only when the authenticated LCOV contains at least one DA row in the range and every in-range DA row has a positive hit count."
+        },
+        "files": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10000,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "kind", "included", "covered_ranges", "total_ranges"],
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^(?!\\.{1,2}(?:/|$))[^/\\\\\\u0000]+(?:/(?!\\.{1,2}(?:/|$))[^/\\\\\\u0000]+)*$"
+              },
+              "kind": {
+                "enum": ["production", "test", "harness", "dependency"]
+              },
+              "included": {
+                "type": "boolean"
+              },
+              "exclusion_reason": {
+                "type": "string",
+                "minLength": 1
+              },
+              "covered_ranges": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "total_ranges": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "included": {
+                      "const": false
+                    }
+                  },
+                  "required": ["included"]
+                },
+                "then": {
+                  "required": ["exclusion_reason"],
+                  "properties": {
+                    "exclusion_reason": true
+                  }
+                },
+                "else": {
+                  "not": {
+                    "required": ["exclusion_reason"]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "counted_ranges": {
+          "type": "array",
+          "maxItems": 100000,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["file", "kind", "start_line", "line_count", "selected", "covered"],
+            "properties": {
+              "file": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^(?!\\.{1,2}(?:/|$))[^/\\\\\\u0000]+(?:/(?!\\.{1,2}(?:/|$))[^/\\\\\\u0000]+)*$"
+              },
+              "kind": {
+                "enum": ["production", "test", "harness", "dependency"]
+              },
+              "start_line": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "line_count": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "selected": {
+                "type": "boolean",
+                "description": "Whether this trusted declaration range overlaps the authenticated Recon selection map."
+              },
+              "covered": {
+                "type": "boolean",
+                "description": "Declaration completeness: true only when the authenticated LCOV contains at least one DA row in the range and every in-range DA row has a positive hit count."
+              }
+            }
+          }
+        },
+        "zero_coverage_components": {
+          "type": "array",
+          "maxItems": 100000,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "kind", "start_line", "line_count"],
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^(?!\\.{1,2}(?:/|$))[^/\\\\\\u0000]+(?:/(?!\\.{1,2}(?:/|$))[^/\\\\\\u0000]+)*$"
+              },
+              "kind": {
+                "enum": ["production", "test", "harness", "dependency"]
+              },
+              "start_line": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "line_count": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              }
+            }
           }
         }
       }
     },
-    "zero_coverage_components": {
-      "type": "array",
-      "maxItems": 100000,
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["path", "kind", "start_line", "line_count"],
-        "properties": {
-          "path": {
-            "type": "string",
-            "minLength": 1,
-            "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[^\\\\\\u0000]+$"
-          },
-          "kind": {
-            "enum": ["production", "test", "harness", "dependency"]
-          },
-          "start_line": {
-            "type": "integer",
-            "minimum": 1
-          },
-          "line_count": {
-            "type": "integer",
-            "minimum": 1
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "status", "blockers"],
+      "properties": {
+        "schema_version": {
+          "const": "ultrafuzz.coverage-evidence.v1"
+        },
+        "status": {
+          "const": "unavailable"
+        },
+        "blockers": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["category", "summary", "evidence_paths"],
+            "properties": {
+              "category": {
+                "enum": [
+                  "coverage-tooling-blocked",
+                  "production-source-attribution-blocked",
+                  "harness-build-blocked",
+                  "dependency-blocked",
+                  "time-budget-exhausted",
+                  "no-reachable-target"
+                ]
+              },
+              "summary": {
+                "type": "string",
+                "minLength": 1
+              },
+              "evidence_paths": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
           }
         }
       }
     }
-  }
+  ]
 }

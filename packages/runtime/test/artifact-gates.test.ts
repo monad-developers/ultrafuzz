@@ -52,7 +52,7 @@ function writeCoverageLcov(
   workspace: string,
   sources: Readonly<Record<string, Readonly<Record<number, number>>>>
 ): { path: string; sha256: string } {
-  const relativePath = "echidna/covered.test.lcov";
+  const relativePath = "coverage-input.lcov";
   const lcovPath = path.join(workspace, relativePath);
   fs.mkdirSync(path.dirname(lcovPath), { recursive: true });
   const lines = Object.entries(sources).flatMap(([source, hits]) => [
@@ -63,6 +63,17 @@ function writeCoverageLcov(
   const bytes = Buffer.from(lines.length === 0 ? "" : `${lines.join("\n")}\n`, "utf8");
   fs.writeFileSync(lcovPath, bytes);
   return { path: relativePath, sha256: createHash("sha256").update(bytes).digest("hex") };
+}
+
+function writeReconCoverageSelection(workspace: string, selection: unknown): { path: string; sha256: string } {
+  const contents = JSON.stringify(selection);
+  const selectionPath = path.join(workspace, "magic/recon-coverage.json");
+  fs.mkdirSync(path.dirname(selectionPath), { recursive: true });
+  fs.writeFileSync(selectionPath, contents);
+  return {
+    path: "recon-coverage.json",
+    sha256: createHash("sha256").update(contents).digest("hex")
+  };
 }
 
 const FIXTURE_WORKFLOW_RUN_ID = "workflow-artifact-gates";
@@ -272,11 +283,11 @@ function fixtureDeclaredContract(artifactPath: string): PlannedGraphNode["output
   }
   if (artifactPath === "campaign-plan.json") return "ultrafuzz/invariant-campaign-plan@2";
   if (artifactPath === "campaign-summary.json") return "ultrafuzz/campaign-summary@2";
-  if (artifactPath === "coverage-goal.json") return "ultrafuzz/coverage-goal@1";
+  if (artifactPath === "coverage-goal.json") return "ultrafuzz/coverage-goal@2";
   if (artifactPath === "coverage-evidence.json") return "ultrafuzz/coverage-evidence@1";
   if (artifactPath === "findings.json") return "ultrafuzz/findings@2";
   if (artifactPath === "triaged-findings.json") return "ultrafuzz/triaged-findings@1";
-  if (artifactPath === "report.json") return "ultrafuzz/report@2";
+  if (artifactPath === "report.json") return "ultrafuzz/report@3";
   return undefined;
 }
 
@@ -333,6 +344,22 @@ function writeDeclaredArtifactNode(
   finalizeArtifactNode(layout, nodeId, outputs, {}, [
     ...new Set([...campaignEvidencePaths, ...declaredFixtureCampaignEvidencePaths(layout, nodeId, outputs)])
   ]);
+}
+
+function writeMeasuredCoverageArtifacts(
+  layout: ReturnType<typeof createRunLayout>,
+  node: PlannedGraphNode,
+  workspace: string,
+  artifacts: { goal?: unknown; markdown: string; evidence: unknown }
+): void {
+  const contents: Record<string, string> = {
+    "coverage-report.md": artifacts.markdown,
+    "coverage-evidence.json": JSON.stringify(artifacts.evidence),
+    "coverage-input.lcov": fs.readFileSync(path.join(workspace, "coverage-input.lcov"), "utf8"),
+    "recon-coverage.json": fs.readFileSync(path.join(workspace, "magic/recon-coverage.json"), "utf8")
+  };
+  if (artifacts.goal !== undefined) contents["coverage-goal.json"] = JSON.stringify(artifacts.goal);
+  writeDeclaredArtifactNode(layout, node.id, node.outputs, contents);
 }
 
 function writeMinimalPropertyFaninFixture(
@@ -424,7 +451,7 @@ function inferredFixtureDependencies(
   if (contracts.has("ultrafuzz/property-campaign@3")) {
     requiredContracts.add("ultrafuzz/implemented-properties@3");
   }
-  if (contracts.has("ultrafuzz/report@2")) {
+  if (contracts.has("ultrafuzz/report@3")) {
     requiredContracts.add("ultrafuzz/properties@2");
     requiredContracts.add("ultrafuzz/implemented-properties@3");
     requiredContracts.add("ultrafuzz/property-campaign@3");
@@ -910,7 +937,7 @@ function currentFinding(id: string, overrides: Record<string, unknown> = {}): Re
 
 function currentReport(runId: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    schema_version: "ultrafuzz.report.v2",
+    schema_version: "ultrafuzz.report.v3",
     run_metadata: {
       run_id: runId,
       source_run_id: runId,
@@ -1061,11 +1088,11 @@ function plannedNode(paths: string[]): PlannedGraphNode {
                           : outputPath === "campaign-summary.json"
                             ? "ultrafuzz/campaign-summary@2"
                             : outputPath === "coverage-goal.json"
-                              ? "ultrafuzz/coverage-goal@1"
+                              ? "ultrafuzz/coverage-goal@2"
                               : outputPath === "coverage-evidence.json"
                                 ? "ultrafuzz/coverage-evidence@1"
                                 : outputPath === "report.json"
-                                  ? "ultrafuzz/report@2"
+                                  ? "ultrafuzz/report@3"
                                   : "ultrafuzz/nonempty-markdown@1";
       return boundOutput(outputPath, contract, index === 0);
     }),
@@ -1078,6 +1105,19 @@ function plannedNode(paths: string[]): PlannedGraphNode {
       attempt_index: 0
     },
     model_fanout: []
+  };
+}
+
+function plannedMeasuredCoverageNode(
+  paths: string[] = ["coverage-goal.json", "coverage-report.md", "coverage-evidence.json"]
+): PlannedGraphNode {
+  const rawPaths = ["coverage-input.lcov", "recon-coverage.json"];
+  const node = plannedNode([...paths, ...rawPaths.filter((artifactPath) => !paths.includes(artifactPath))]);
+  return {
+    ...node,
+    outputs: node.outputs.map((output) =>
+      rawPaths.includes(output.path) ? boundOutput(output.path, "ultrafuzz/text@1", false) : output
+    )
   };
 }
 
@@ -2419,7 +2459,7 @@ test("final report gates preserve severity records and ledger dispositions under
     depends_on: [severityNode.id],
     artifact_dir: "artifacts/report-review-attempt",
     outputs: [
-      boundOutput(reportArtifactPath, "ultrafuzz/report@2", true),
+      boundOutput(reportArtifactPath, "ultrafuzz/report@3", true),
       boundOutput(reportMarkdownPath, "ultrafuzz/nonempty-markdown@1")
     ]
   };
@@ -2896,7 +2936,7 @@ test("renamed report producers gate their exact declared JSON and Markdown paths
       ]
     })
   );
-  const reportOutput = boundOutput("custom/final/document.json", "ultrafuzz/report@2");
+  const reportOutput = boundOutput("custom/final/document.json", "ultrafuzz/report@3");
   const markdownOutput = boundOutput("rendered/security-review.md", "ultrafuzz/nonempty-markdown@1", true);
   const node: PlannedGraphNode = {
     ...plannedNode([]),
@@ -7151,7 +7191,7 @@ test("producer-free final reports require the exact not-planned implementation c
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-producer-free-report" });
   const outputs = [
     boundOutput("deliverables/report.md", "ultrafuzz/nonempty-markdown@1", true),
-    boundOutput("deliverables/report.json", "ultrafuzz/report@2")
+    boundOutput("deliverables/report.json", "ultrafuzz/report@3")
   ];
   const node: PlannedGraphNode = {
     ...plannedNode([]),
@@ -7171,16 +7211,25 @@ test("producer-free final reports require the exact not-planned implementation c
   const valid = verifyRuntimeRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
 
-  writeArtifactFile(
-    layout,
-    node.id,
-    "deliverables/report.json",
-    JSON.stringify(
+  writeDeclaredArtifactNode(layout, node.id, outputs, {
+    "deliverables/report.md": "# Ultrafuzz report\n\nrecon-selected-declaration-completeness: `1/1`\n",
+    "deliverables/report.json": JSON.stringify(currentReport(layout.runId))
+  });
+  const inventedCoverage = verifyRuntimeRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(inventedCoverage.ok, false, JSON.stringify(inventedCoverage.diagnostics));
+  assert.ok(
+    inventedCoverage.diagnostics.some((diagnostic) => diagnostic.code === "REPORT_COVERAGE_EVIDENCE_UNPLANNED"),
+    JSON.stringify(inventedCoverage.diagnostics)
+  );
+
+  writeDeclaredArtifactNode(layout, node.id, outputs, {
+    "deliverables/report.md": "# Ultrafuzz report\n",
+    "deliverables/report.json": JSON.stringify(
       currentReport(layout.runId, {
         property_implementation_coverage: currentImplementedCoverage([])
       })
     )
-  );
+  });
   const mismatched = verifyRuntimeRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(mismatched.ok, false, JSON.stringify(mismatched.diagnostics));
   assert.ok(
@@ -10326,6 +10375,187 @@ test("properties Markdown parity accepts a description that ends with a pipe", (
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
 });
 
+test("coverage gate joins unavailable evidence to a blocked null goal and the exact typed blockers", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-unavailable-coverage" });
+  const node = {
+    ...plannedNode(["coverage-goal.json", "coverage-report.md", "coverage-evidence.json"]),
+    id: "stateful-invariant-coverage",
+    logical_id: "stateful-invariant-coverage",
+    artifact_dir: "artifacts/stateful-invariant-coverage"
+  };
+  writePlannedGraph(layout, [node]);
+
+  const blockers = [
+    {
+      category: "coverage-tooling-blocked",
+      summary: "Recon could not produce an authenticated coverage map.",
+      evidence_paths: ["logs/recon-coverage.log"]
+    }
+  ];
+  const evidence = {
+    schema_version: "ultrafuzz.coverage-evidence.v1",
+    status: "unavailable",
+    blockers
+  };
+  const goal = {
+    schema_version: "ultrafuzz.coverage-goal.v2",
+    target: { scope: "recon-selected-declaration-completeness", minimum_percent: 90 },
+    current_measurement: null,
+    current_status: "blocked",
+    planned_commands: [],
+    stop_conditions: ["reserve time for finalization"],
+    timeout_seconds: 60,
+    finalization_reserve_seconds: 10,
+    blockers
+  };
+  const markdown =
+    "# Coverage\n\n## Scoped coverage evidence\n\n- Status: unavailable\n\nBlockers:\n" +
+    "- coverage-tooling-blocked: Recon could not produce an authenticated coverage map.\n" +
+    "  - Evidence: `logs/recon-coverage.log`\n";
+  const publish = (goalValue: unknown): ReturnType<typeof verifyRequiredArtifactsForAttempt> => {
+    writeDeclaredArtifactNode(layout, node.id, node.outputs, {
+      "coverage-goal.json": JSON.stringify(goalValue),
+      "coverage-report.md": markdown,
+      "coverage-evidence.json": JSON.stringify(evidence)
+    });
+    return verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  };
+
+  const valid = publish(goal);
+  assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
+
+  const nonBlocked = publish({ ...goal, current_status: "not-run", blockers: [] });
+  assert.ok(
+    nonBlocked.diagnostics.some((diagnostic) => diagnostic.code === "COVERAGE_GOAL_BLOCKER_MISMATCH"),
+    JSON.stringify(nonBlocked.diagnostics)
+  );
+
+  const measuredBlocked = publish({
+    ...goal,
+    current_measurement: {
+      scope: "recon-selected-declaration-completeness",
+      covered_ranges: 0,
+      total_ranges: 0
+    }
+  });
+  assert.ok(
+    measuredBlocked.diagnostics.some((diagnostic) => diagnostic.code === "COVERAGE_GOAL_BLOCKER_MISMATCH"),
+    JSON.stringify(measuredBlocked.diagnostics)
+  );
+
+  const mismatchedBlocker = publish({
+    ...goal,
+    blockers: [{ ...blockers[0], summary: "A different blocker was reported." }]
+  });
+  assert.ok(
+    mismatchedBlocker.diagnostics.some((diagnostic) => diagnostic.code === "COVERAGE_GOAL_BLOCKER_MISMATCH"),
+    JSON.stringify(mismatchedBlocker.diagnostics)
+  );
+});
+
+test("coverage goal parity derives 0/0 as below-target and ignores unsafe counts without throwing", () => {
+  const layout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-empty-measured-coverage",
+    resolvedConfigToml: '[permissions]\nproduction_source_roots = ["src"]\n'
+  });
+  const rawLcov = "";
+  const rawReconSelection = "{}\n";
+  const digest = (contents: string): string => createHash("sha256").update(contents).digest("hex");
+  const rawPaths = new Set(["coverage-input.lcov", "recon-coverage.json"]);
+  const node = {
+    ...plannedNode([
+      "coverage-goal.json",
+      "coverage-report.md",
+      "coverage-evidence.json",
+      "coverage-input.lcov",
+      "recon-coverage.json"
+    ]),
+    id: "stateful-invariant-coverage",
+    logical_id: "stateful-invariant-coverage",
+    artifact_dir: "artifacts/stateful-invariant-coverage"
+  };
+  node.outputs = node.outputs.map((output) =>
+    rawPaths.has(output.path) ? boundOutput(output.path, "ultrafuzz/text@1", false) : output
+  );
+  writePlannedGraph(layout, [node]);
+  const workspace = path.join(layout.workspacesDir, node.id);
+  fs.mkdirSync(path.join(workspace, "src"), { recursive: true });
+  fs.writeFileSync(
+    path.join(workspace, "src/Interfaces.sol"),
+    "interface ExternalApi { function quote(uint256 value) external view returns (uint256); }\n"
+  );
+
+  const selectedMeasurement = {
+    scope: "recon-selected-declaration-completeness",
+    covered_ranges: 0,
+    total_ranges: 0
+  };
+  const evidence = {
+    schema_version: "ultrafuzz.coverage-evidence.v1",
+    status: "measured",
+    lcov: { path: "coverage-input.lcov", sha256: digest(rawLcov) },
+    recon_selection: { path: "recon-coverage.json", sha256: digest(rawReconSelection) },
+    views: [selectedMeasurement, { scope: "production-declaration-completeness", covered_ranges: 0, total_ranges: 0 }],
+    files: [
+      {
+        path: "src/Interfaces.sol",
+        kind: "production",
+        included: false,
+        exclusion_reason: "contains no executable declarations",
+        covered_ranges: 0,
+        total_ranges: 0
+      }
+    ],
+    counted_ranges: [],
+    zero_coverage_components: []
+  };
+  const goal = {
+    schema_version: "ultrafuzz.coverage-goal.v2",
+    target: { scope: "recon-selected-declaration-completeness", minimum_percent: 90 },
+    current_measurement: selectedMeasurement,
+    current_status: "below-target",
+    planned_commands: [],
+    stop_conditions: ["reserve time for finalization"],
+    timeout_seconds: 60,
+    finalization_reserve_seconds: 10,
+    blockers: []
+  };
+  const markdown =
+    "# Coverage\n\n## Scoped coverage evidence\n\n" +
+    "- recon-selected-declaration-completeness: `0/0`\n" +
+    "- production-declaration-completeness: `0/0`\n\n" +
+    "Excluded components:\n- `src/Interfaces.sol` (production): contains no executable declarations\n\n" +
+    "Zero-coverage components:\n- None\n";
+  const publish = (
+    goalValue: unknown,
+    evidenceValue: unknown = evidence
+  ): ReturnType<typeof verifyRequiredArtifactsForAttempt> => {
+    writeDeclaredArtifactNode(layout, node.id, node.outputs, {
+      "coverage-goal.json": JSON.stringify(goalValue),
+      "coverage-report.md": markdown,
+      "coverage-evidence.json": JSON.stringify(evidenceValue),
+      "coverage-input.lcov": rawLcov,
+      "recon-coverage.json": rawReconSelection
+    });
+    return verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  };
+
+  const valid = publish(goal);
+  assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
+
+  const contradictory = publish({ ...goal, current_status: "target-met" });
+  assert.ok(
+    contradictory.diagnostics.some((diagnostic) => diagnostic.code === "COVERAGE_GOAL_MEASUREMENT_MISMATCH"),
+    JSON.stringify(contradictory.diagnostics)
+  );
+
+  const unsafeEvidence = structuredClone(evidence);
+  unsafeEvidence.views[0]!.covered_ranges = Number.MAX_SAFE_INTEGER + 1;
+  const unsafe = publish(goal, unsafeEvidence);
+  assert.equal(unsafe.ok, false);
+});
+
 test("coverage gate binds selected and unselected ranges to the trusted production inventory", () => {
   const layout = createRunLayout({
     projectRoot: tempProject(),
@@ -10333,7 +10563,7 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
     resolvedConfigToml: '[permissions]\nproduction_source_roots = ["src", "contracts"]\n'
   });
   const node = {
-    ...plannedNode(["coverage-goal.json", "coverage-report.md", "coverage-evidence.json"]),
+    ...plannedMeasuredCoverageNode(),
     id: "stateful-invariant-coverage",
     logical_id: "stateful-invariant-coverage",
     artifact_dir: "artifacts/stateful-invariant-coverage"
@@ -10361,18 +10591,19 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
       ""
     ].join("\n")
   );
-  fs.mkdirSync(path.join(workspace, "magic"), { recursive: true });
-  fs.writeFileSync(path.join(workspace, "magic/recon-coverage.json"), JSON.stringify({ "src/Core.sol": ["2"] }));
+  const reconSelection = writeReconCoverageSelection(workspace, { "src/Core.sol": ["2"] });
   const lcov = writeCoverageLcov(workspace, {
     "src/Core.sol": { 2: 1, 3: 0 },
     "src/Critical.sol": { 4: 0, 5: 0, 6: 0, 7: 0 }
   });
   const evidence = {
     schema_version: "ultrafuzz.coverage-evidence.v1",
+    status: "measured",
     lcov,
+    recon_selection: reconSelection,
     views: [
-      { scope: "selected-range", covered_ranges: 1, total_ranges: 1 },
-      { scope: "production-source", covered_ranges: 1, total_ranges: 6 }
+      { scope: "recon-selected-declaration-completeness", covered_ranges: 1, total_ranges: 1 },
+      { scope: "production-declaration-completeness", covered_ranges: 1, total_ranges: 6 }
     ],
     files: [
       {
@@ -10450,16 +10681,16 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
     ]
   };
   const scopedMarkdown =
-    "# Coverage\n\n## Scoped coverage evidence\n\n- selected-range: `1/1`\n- production-source: `1/6`\n\n" +
+    "# Coverage\n\n## Scoped coverage evidence\n\n- recon-selected-declaration-completeness: `1/1`\n- production-declaration-completeness: `1/6`\n\n" +
     "Excluded components:\n- `src/Critical.sol` (production): not selected\n\n" +
     "Zero-coverage components:\n- `src/Core.sol:3-3` (production)\n" +
     "- `src/Critical.sol:4-4` (production)\n- `src/Critical.sol:5-5` (production)\n" +
     "- `src/Critical.sol:6-6` (production)\n- `src/Critical.sol:7-7` (production)\n";
   const goal = {
-    schema_version: "ultrafuzz.coverage-goal.v1",
-    target: { scope: "selected-range", minimum_percent: 90 },
-    current_measurement: { scope: "selected-range", covered_ranges: 1, total_ranges: 1 },
-    current_status: "measured",
+    schema_version: "ultrafuzz.coverage-goal.v2",
+    target: { scope: "recon-selected-declaration-completeness", minimum_percent: 90 },
+    current_measurement: { scope: "recon-selected-declaration-completeness", covered_ranges: 1, total_ranges: 1 },
+    current_status: "target-met",
     planned_commands: [],
     stop_conditions: ["reserve time for finalization"],
     timeout_seconds: 60,
@@ -10467,9 +10698,7 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
     blockers: []
   };
   const publish = (value: unknown, markdown = scopedMarkdown, goalValue: unknown = goal): void => {
-    writeArtifact(layout, node.id, "coverage-goal.json", JSON.stringify(goalValue));
-    writeArtifact(layout, node.id, "coverage-report.md", markdown);
-    writeArtifact(layout, node.id, "coverage-evidence.json", JSON.stringify(value));
+    writeMeasuredCoverageArtifacts(layout, node, workspace, { goal: goalValue, markdown, evidence: value });
   };
 
   publish(evidence);
@@ -10496,7 +10725,7 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
   publish(
     inventedCoveredFlag,
     scopedMarkdown
-      .replace("production-source: `1/6`", "production-source: `2/6`")
+      .replace("production-declaration-completeness: `1/6`", "production-declaration-completeness: `2/6`")
       .replace("- `src/Core.sol:3-3` (production)\n", "")
   );
   const forgedCoverage = verifyRequiredArtifactsForAttempt(layout, node, node.id);
@@ -10618,7 +10847,7 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
     "src/Critical.sol": { 4: 0, 5: 0, 6: 0, 7: 0 }
   });
 
-  fs.writeFileSync(path.join(workspace, "magic/recon-coverage.json"), "{}");
+  evidence.recon_selection = writeReconCoverageSelection(workspace, {});
   publish(evidence);
   const missingSelectionAuthority = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(missingSelectionAuthority.ok, false);
@@ -10628,7 +10857,7 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
     ),
     JSON.stringify(missingSelectionAuthority.diagnostics)
   );
-  fs.writeFileSync(path.join(workspace, "magic/recon-coverage.json"), JSON.stringify({ "src/Core.sol": ["2"] }));
+  evidence.recon_selection = writeReconCoverageSelection(workspace, { "src/Core.sol": ["2"] });
 
   const inventedNonProduction = structuredClone(evidence);
   inventedNonProduction.files.push({
@@ -10707,7 +10936,7 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
   publish(
     incidentallyCoveredUnselected,
     scopedMarkdown
-      .replace("production-source: `1/6`", "production-source: `2/6`")
+      .replace("production-declaration-completeness: `1/6`", "production-declaration-completeness: `2/6`")
       .replace("- `src/Core.sol:3-3` (production)\n", "")
   );
   const independentViews = verifyRequiredArtifactsForAttempt(layout, node, node.id);
@@ -10763,13 +10992,31 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
     )
   );
 
-  publish(evidence, `${scopedMarkdown}\n## Notes\n\nselected-range coverage: 100%.\n`);
+  publish(evidence, `${scopedMarkdown}\n## Notes\n\nrecon-selected-declaration-completeness coverage: 100%.\n`);
   const namedPercentage = verifyRequiredArtifactsForAttempt(layout, node, node.id);
-  assert.equal(namedPercentage.ok, true, JSON.stringify(namedPercentage.diagnostics));
+  assert.equal(namedPercentage.ok, false);
+  assert.ok(
+    namedPercentage.diagnostics.some((diagnostic) => diagnostic.code === "COVERAGE_EVIDENCE_MARKDOWN_MISMATCH"),
+    JSON.stringify(namedPercentage.diagnostics)
+  );
+
+  publish(evidence, `${scopedMarkdown}\n## Notes\n\nrecon-selected-declaration-completeness: 0/1.\n`);
+  const contradictoryScopedFraction = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(contradictoryScopedFraction.ok, false);
+  assert.ok(
+    contradictoryScopedFraction.diagnostics.some(
+      (diagnostic) => diagnostic.code === "COVERAGE_EVIDENCE_MARKDOWN_MISMATCH"
+    ),
+    JSON.stringify(contradictoryScopedFraction.diagnostics)
+  );
 
   publish(evidence, `${scopedMarkdown}\n## Notes\n\nRetry 1/2 reproduced the same revert.\n`);
   const ordinaryFraction = verifyRequiredArtifactsForAttempt(layout, node, node.id);
-  assert.equal(ordinaryFraction.ok, true, JSON.stringify(ordinaryFraction.diagnostics));
+  assert.equal(ordinaryFraction.ok, false);
+  assert.ok(
+    ordinaryFraction.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_SCORE"),
+    JSON.stringify(ordinaryFraction.diagnostics)
+  );
 
   const staleGoal = structuredClone(goal);
   staleGoal.current_measurement.covered_ranges = 0;
@@ -10788,7 +11035,7 @@ test("coverage gate rejects a selected declaration with any uncovered instrument
     resolvedConfigToml: '[permissions]\nproduction_source_roots = ["src"]\n'
   });
   const node = {
-    ...plannedNode(["coverage-goal.json", "coverage-report.md", "coverage-evidence.json"]),
+    ...plannedMeasuredCoverageNode(),
     id: "stateful-invariant-coverage",
     logical_id: "stateful-invariant-coverage",
     artifact_dir: "artifacts/stateful-invariant-coverage"
@@ -10796,7 +11043,6 @@ test("coverage gate rejects a selected declaration with any uncovered instrument
   writePlannedGraph(layout, [node]);
   const workspace = path.join(layout.workspacesDir, node.id);
   fs.mkdirSync(path.join(workspace, "src"), { recursive: true });
-  fs.mkdirSync(path.join(workspace, "magic"), { recursive: true });
   fs.writeFileSync(
     path.join(workspace, "src/Core.sol"),
     [
@@ -10809,14 +11055,16 @@ test("coverage gate rejects a selected declaration with any uncovered instrument
       ""
     ].join("\n")
   );
-  fs.writeFileSync(path.join(workspace, "magic/recon-coverage.json"), JSON.stringify({ "src/Core.sol": ["2-5"] }));
+  const reconSelection = writeReconCoverageSelection(workspace, { "src/Core.sol": ["2-5"] });
   const lcov = writeCoverageLcov(workspace, { "src/Core.sol": { 3: 1, 4: 0 } });
   const evidence = {
     schema_version: "ultrafuzz.coverage-evidence.v1",
+    status: "measured",
     lcov,
+    recon_selection: reconSelection,
     views: [
-      { scope: "selected-range", covered_ranges: 1, total_ranges: 1 },
-      { scope: "production-source", covered_ranges: 1, total_ranges: 1 }
+      { scope: "recon-selected-declaration-completeness", covered_ranges: 1, total_ranges: 1 },
+      { scope: "production-declaration-completeness", covered_ranges: 1, total_ranges: 1 }
     ],
     files: [{ path: "src/Core.sol", kind: "production", included: true, covered_ranges: 1, total_ranges: 1 }],
     counted_ranges: [
@@ -10837,25 +11085,23 @@ test("coverage gate rejects a selected declaration with any uncovered instrument
     }>
   };
   const goal = {
-    schema_version: "ultrafuzz.coverage-goal.v1",
-    target: { scope: "selected-range", minimum_percent: 90 },
-    current_measurement: { scope: "selected-range", covered_ranges: 1, total_ranges: 1 },
-    current_status: "measured",
+    schema_version: "ultrafuzz.coverage-goal.v2",
+    target: { scope: "recon-selected-declaration-completeness", minimum_percent: 90 },
+    current_measurement: { scope: "recon-selected-declaration-completeness", covered_ranges: 1, total_ranges: 1 },
+    current_status: "target-met",
     planned_commands: [],
     stop_conditions: ["reserve time for finalization"],
     timeout_seconds: 60,
     finalization_reserve_seconds: 10,
     blockers: []
   };
-  writeArtifact(layout, node.id, "coverage-goal.json", JSON.stringify(goal));
-  writeArtifact(
-    layout,
-    node.id,
-    "coverage-report.md",
-    "# Coverage\n\n## Scoped coverage evidence\n\n- selected-range: `1/1`\n- production-source: `1/1`\n\n" +
-      "Excluded components:\n- None\n\nZero-coverage components:\n- None\n"
-  );
-  writeArtifact(layout, node.id, "coverage-evidence.json", JSON.stringify(evidence));
+  writeMeasuredCoverageArtifacts(layout, node, workspace, {
+    goal,
+    markdown:
+      "# Coverage\n\n## Scoped coverage evidence\n\n- recon-selected-declaration-completeness: `1/1`\n- production-declaration-completeness: `1/1`\n\n" +
+      "Excluded components:\n- None\n\nZero-coverage components:\n- None\n",
+    evidence
+  });
 
   const partial = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(partial.ok, false);
@@ -10869,15 +11115,14 @@ test("coverage gate rejects a selected declaration with any uncovered instrument
   evidence.views[0]!.covered_ranges = 0;
   evidence.views[1]!.covered_ranges = 0;
   goal.current_measurement.covered_ranges = 0;
-  writeArtifact(layout, node.id, "coverage-goal.json", JSON.stringify(goal));
-  writeArtifact(
-    layout,
-    node.id,
-    "coverage-report.md",
-    "# Coverage\n\n## Scoped coverage evidence\n\n- selected-range: `0/1`\n- production-source: `0/1`\n\n" +
-      "Excluded components:\n- None\n\nZero-coverage components:\n- None\n"
-  );
-  writeArtifact(layout, node.id, "coverage-evidence.json", JSON.stringify(evidence));
+  goal.current_status = "below-target";
+  writeMeasuredCoverageArtifacts(layout, node, workspace, {
+    goal,
+    markdown:
+      "# Coverage\n\n## Scoped coverage evidence\n\n- recon-selected-declaration-completeness: `0/1`\n- production-declaration-completeness: `0/1`\n\n" +
+      "Excluded components:\n- None\n\nZero-coverage components:\n- None\n",
+    evidence
+  });
 
   const completeMetric = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(completeMetric.ok, true, JSON.stringify(completeMetric.diagnostics));
@@ -10888,14 +11133,13 @@ test("coverage gate rejects a selected declaration with any uncovered instrument
     start_line: 2,
     line_count: 4
   });
-  writeArtifact(
-    layout,
-    node.id,
-    "coverage-report.md",
-    "# Coverage\n\n## Scoped coverage evidence\n\n- selected-range: `0/1`\n- production-source: `0/1`\n\n" +
-      "Excluded components:\n- None\n\nZero-coverage components:\n- `src/Core.sol:2-5` (production)\n"
-  );
-  writeArtifact(layout, node.id, "coverage-evidence.json", JSON.stringify(evidence));
+  writeMeasuredCoverageArtifacts(layout, node, workspace, {
+    goal,
+    markdown:
+      "# Coverage\n\n## Scoped coverage evidence\n\n- recon-selected-declaration-completeness: `0/1`\n- production-declaration-completeness: `0/1`\n\n" +
+      "Excluded components:\n- None\n\nZero-coverage components:\n- `src/Core.sol:2-5` (production)\n",
+    evidence
+  });
   const partialMislabeledAsZero = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(partialMislabeledAsZero.ok, false);
   assert.ok(
@@ -10913,7 +11157,7 @@ test("coverage gate treats configured roots as production and classifies externa
     resolvedConfigToml: '[permissions]\nproduction_source_roots = ["contracts"]\n'
   });
   const node = {
-    ...plannedNode(["coverage-goal.json", "coverage-report.md", "coverage-evidence.json"]),
+    ...plannedMeasuredCoverageNode(),
     id: "stateful-invariant-coverage",
     logical_id: "stateful-invariant-coverage",
     artifact_dir: "artifacts/stateful-invariant-coverage"
@@ -10932,8 +11176,7 @@ test("coverage gate treats configured roots as production and classifies externa
     fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
     fs.writeFileSync(absolutePath, `contract ${path.basename(relativePath, ".sol")} { function run() external {} }\n`);
   }
-  fs.mkdirSync(path.join(workspace, "magic"), { recursive: true });
-  fs.writeFileSync(path.join(workspace, "magic/recon-coverage.json"), JSON.stringify({ "contracts/Core.sol": ["1"] }));
+  const reconSelection = writeReconCoverageSelection(workspace, { "contracts/Core.sol": ["1"] });
   const lcov = writeCoverageLcov(workspace, {
     "contracts/Core.sol": { 1: 1 },
     "contracts/lib/ProductionLibrary.sol": { 1: 1 },
@@ -10944,10 +11187,12 @@ test("coverage gate treats configured roots as production and classifies externa
   });
   const evidence = {
     schema_version: "ultrafuzz.coverage-evidence.v1",
+    status: "measured",
     lcov,
+    recon_selection: reconSelection,
     views: [
-      { scope: "selected-range", covered_ranges: 1, total_ranges: 1 },
-      { scope: "production-source", covered_ranges: 2, total_ranges: 2 }
+      { scope: "recon-selected-declaration-completeness", covered_ranges: 1, total_ranges: 1 },
+      { scope: "production-declaration-completeness", covered_ranges: 2, total_ranges: 2 }
     ],
     files: [
       { path: "contracts/Core.sol", kind: "production", included: true, covered_ranges: 1, total_ranges: 1 },
@@ -11044,35 +11289,26 @@ test("coverage gate treats configured roots as production and classifies externa
     ],
     zero_coverage_components: []
   };
-  writeArtifact(
-    layout,
-    node.id,
-    "coverage-goal.json",
-    JSON.stringify({
-      schema_version: "ultrafuzz.coverage-goal.v1",
-      target: { scope: "selected-range", minimum_percent: 90 },
-      current_measurement: { scope: "selected-range", covered_ranges: 1, total_ranges: 1 },
-      current_status: "measured",
-      planned_commands: [],
-      stop_conditions: ["reserve time for finalization"],
-      timeout_seconds: 60,
-      finalization_reserve_seconds: 10,
-      blockers: []
-    })
-  );
-  writeArtifact(
-    layout,
-    node.id,
-    "coverage-report.md",
-    "# Coverage\n\n## Scoped coverage evidence\n\n- selected-range: `1/1`\n- production-source: `2/2`\n\n" +
-      "Excluded components:\n- `contracts/lib/ProductionLibrary.sol` (production): not selected\n" +
-      "- `lib/Dep.sol` (dependency): nested dependency source\n" +
-      "- `test/Test.sol` (test): nested test source\n" +
-      "- `test/recon/Harness.sol` (harness): nested harness source\n" +
-      "- `mocks/Mock.sol` (harness): mock harness source\n\n" +
-      "Zero-coverage components:\n- None\n"
-  );
-  writeArtifact(layout, node.id, "coverage-evidence.json", JSON.stringify(evidence));
+  const goal = {
+    schema_version: "ultrafuzz.coverage-goal.v2",
+    target: { scope: "recon-selected-declaration-completeness", minimum_percent: 90 },
+    current_measurement: { scope: "recon-selected-declaration-completeness", covered_ranges: 1, total_ranges: 1 },
+    current_status: "target-met",
+    planned_commands: [],
+    stop_conditions: ["reserve time for finalization"],
+    timeout_seconds: 60,
+    finalization_reserve_seconds: 10,
+    blockers: []
+  };
+  const markdown =
+    "# Coverage\n\n## Scoped coverage evidence\n\n- recon-selected-declaration-completeness: `1/1`\n- production-declaration-completeness: `2/2`\n\n" +
+    "Excluded components:\n- `contracts/lib/ProductionLibrary.sol` (production): not selected\n" +
+    "- `lib/Dep.sol` (dependency): nested dependency source\n" +
+    "- `test/Test.sol` (test): nested test source\n" +
+    "- `test/recon/Harness.sol` (harness): nested harness source\n" +
+    "- `mocks/Mock.sol` (harness): mock harness source\n\n" +
+    "Zero-coverage components:\n- None\n";
+  writeMeasuredCoverageArtifacts(layout, node, workspace, { goal, markdown, evidence });
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
@@ -11080,7 +11316,7 @@ test("coverage gate treats configured roots as production and classifies externa
   const relabeled = structuredClone(evidence);
   relabeled.files[2]!.kind = "production";
   relabeled.counted_ranges[2]!.kind = "production";
-  writeArtifact(layout, node.id, "coverage-evidence.json", JSON.stringify(relabeled));
+  writeMeasuredCoverageArtifacts(layout, node, workspace, { goal, markdown, evidence: relabeled });
   const spoofed = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(spoofed.ok, false);
   assert.ok(
@@ -11096,7 +11332,7 @@ test("coverage gate groups same-line Solidity declarations into one representabl
     resolvedConfigToml: '[permissions]\nproduction_source_roots = ["src"]\n'
   });
   const node = {
-    ...plannedNode(["coverage-goal.json", "coverage-report.md", "coverage-evidence.json"]),
+    ...plannedMeasuredCoverageNode(),
     id: "stateful-invariant-coverage",
     logical_id: "stateful-invariant-coverage",
     artifact_dir: "artifacts/stateful-invariant-coverage"
@@ -11105,7 +11341,6 @@ test("coverage gate groups same-line Solidity declarations into one representabl
   const workspace = path.join(layout.workspacesDir, node.id);
   fs.mkdirSync(path.join(workspace, "src"), { recursive: true });
   fs.mkdirSync(path.join(workspace, "lib"), { recursive: true });
-  fs.mkdirSync(path.join(workspace, "magic"), { recursive: true });
   fs.writeFileSync(
     path.join(workspace, "src/Minified.sol"),
     "contract Minified { uint256 public a; uint256 public b; function set(uint256 value) external { a = value; } }\n"
@@ -11119,20 +11354,22 @@ test("coverage gate groups same-line Solidity declarations into one representabl
     path.join(workspace, "lib/Dependency.sol"),
     "library Dependency { function normalize(uint256 value) internal pure returns (uint256) { return value; } }\n"
   );
-  fs.writeFileSync(
-    path.join(workspace, "magic/recon-coverage.json"),
-    JSON.stringify({ "src/Minified.sol": ["1"], "lib/Dependency.sol": ["1"] })
-  );
+  const reconSelection = writeReconCoverageSelection(workspace, {
+    "src/Minified.sol": ["1"],
+    "lib/Dependency.sol": ["1"]
+  });
   const lcov = writeCoverageLcov(workspace, {
     "src/Minified.sol": { 1: 1 },
     "lib/Dependency.sol": { 1: 1 }
   });
   const evidence = {
     schema_version: "ultrafuzz.coverage-evidence.v1",
+    status: "measured",
     lcov,
+    recon_selection: reconSelection,
     views: [
-      { scope: "selected-range", covered_ranges: 1, total_ranges: 1 },
-      { scope: "production-source", covered_ranges: 1, total_ranges: 1 }
+      { scope: "recon-selected-declaration-completeness", covered_ranges: 1, total_ranges: 1 },
+      { scope: "production-declaration-completeness", covered_ranges: 1, total_ranges: 1 }
     ],
     files: [
       {
@@ -11179,40 +11416,32 @@ test("coverage gate groups same-line Solidity declarations into one representabl
     ],
     zero_coverage_components: []
   };
-  writeArtifact(
-    layout,
-    node.id,
-    "coverage-goal.json",
-    JSON.stringify({
-      schema_version: "ultrafuzz.coverage-goal.v1",
-      target: { scope: "selected-range", minimum_percent: 90 },
-      current_measurement: { scope: "selected-range", covered_ranges: 1, total_ranges: 1 },
-      current_status: "measured",
-      planned_commands: [],
-      stop_conditions: ["reserve time for finalization"],
-      timeout_seconds: 60,
-      finalization_reserve_seconds: 10,
-      blockers: []
-    })
-  );
-  writeArtifact(
-    layout,
-    node.id,
-    "coverage-report.md",
-    "# Coverage\n\n## Scoped coverage evidence\n\n- selected-range: `1/1`\n- production-source: `1/1`\n\n" +
-      "Excluded components:\n- `lib/Dependency.sol` (dependency): outside configured production roots\n" +
-      "- `src/Interfaces.sol` (production): contains no executable declarations\n\n" +
-      "Zero-coverage components:\n- None\n"
-  );
-  writeArtifact(layout, node.id, "coverage-evidence.json", JSON.stringify(evidence));
+  const goal = {
+    schema_version: "ultrafuzz.coverage-goal.v2",
+    target: { scope: "recon-selected-declaration-completeness", minimum_percent: 90 },
+    current_measurement: { scope: "recon-selected-declaration-completeness", covered_ranges: 1, total_ranges: 1 },
+    current_status: "target-met",
+    planned_commands: [],
+    stop_conditions: ["reserve time for finalization"],
+    timeout_seconds: 60,
+    finalization_reserve_seconds: 10,
+    blockers: []
+  };
+  const markdown =
+    "# Coverage\n\n## Scoped coverage evidence\n\n- recon-selected-declaration-completeness: `1/1`\n- production-declaration-completeness: `1/1`\n\n" +
+    "Excluded components:\n- `lib/Dependency.sol` (dependency): outside configured production roots\n" +
+    "- `src/Interfaces.sol` (production): contains no executable declarations\n\n" +
+    "Zero-coverage components:\n- None\n";
+  writeMeasuredCoverageArtifacts(layout, node, workspace, { goal, markdown, evidence });
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
 
-  fs.writeFileSync(
-    path.join(workspace, "magic/recon-coverage.json"),
-    JSON.stringify({ "src/Minified.sol": ["1"], "lib/Missing.sol": ["1"] })
-  );
+  evidence.recon_selection = writeReconCoverageSelection(workspace, {
+    "src/Minified.sol": ["1"],
+    "lib/Missing.sol": ["1"]
+  });
+  writeMeasuredCoverageArtifacts(layout, node, workspace, { goal, markdown, evidence });
   const nonexistentDependency = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(nonexistentDependency.ok, false);
   assert.ok(
@@ -11228,7 +11457,7 @@ test("coverage gate fails closed when every configured production root is missin
     resolvedConfigToml: '[permissions]\nproduction_source_roots = ["missing-production"]\n'
   });
   const node = {
-    ...plannedNode(["coverage-goal.json", "coverage-report.md", "coverage-evidence.json"]),
+    ...plannedMeasuredCoverageNode(),
     id: "stateful-invariant-coverage",
     logical_id: "stateful-invariant-coverage",
     artifact_dir: "artifacts/stateful-invariant-coverage"
@@ -11237,13 +11466,16 @@ test("coverage gate fails closed when every configured production root is missin
   const workspace = path.join(layout.workspacesDir, node.id);
   fs.mkdirSync(path.join(workspace, "test"), { recursive: true });
   fs.writeFileSync(path.join(workspace, "test/Harness.sol"), "contract Harness {}\n");
+  const reconSelection = writeReconCoverageSelection(workspace, {});
   const lcov = writeCoverageLcov(workspace, {});
   const evidence = {
     schema_version: "ultrafuzz.coverage-evidence.v1",
+    status: "measured",
     lcov,
+    recon_selection: reconSelection,
     views: [
-      { scope: "selected-range", covered_ranges: 0, total_ranges: 0 },
-      { scope: "production-source", covered_ranges: 0, total_ranges: 0 }
+      { scope: "recon-selected-declaration-completeness", covered_ranges: 0, total_ranges: 0 },
+      { scope: "production-declaration-completeness", covered_ranges: 0, total_ranges: 0 }
     ],
     files: [
       {
@@ -11258,31 +11490,22 @@ test("coverage gate fails closed when every configured production root is missin
     counted_ranges: [],
     zero_coverage_components: []
   };
-  writeArtifact(
-    layout,
-    node.id,
-    "coverage-goal.json",
-    JSON.stringify({
-      schema_version: "ultrafuzz.coverage-goal.v1",
-      target: { scope: "selected-range", minimum_percent: 90 },
-      current_measurement: null,
-      current_status: "not-run",
-      planned_commands: [],
-      stop_conditions: ["reserve time for finalization"],
-      timeout_seconds: 60,
-      finalization_reserve_seconds: 10,
-      blockers: []
-    })
-  );
-  writeArtifact(
-    layout,
-    node.id,
-    "coverage-report.md",
-    "# Coverage\n\n## Scoped coverage evidence\n\n- selected-range: `0/0`\n" +
-      "- production-source: `0/0`\n\nExcluded components:\n" +
-      "- `test/Harness.sol` (harness): not a production source\n\nZero-coverage components:\n- None\n"
-  );
-  writeArtifact(layout, node.id, "coverage-evidence.json", JSON.stringify(evidence));
+  const goal = {
+    schema_version: "ultrafuzz.coverage-goal.v2",
+    target: { scope: "recon-selected-declaration-completeness", minimum_percent: 90 },
+    current_measurement: { scope: "recon-selected-declaration-completeness", covered_ranges: 0, total_ranges: 0 },
+    current_status: "below-target",
+    planned_commands: [],
+    stop_conditions: ["reserve time for finalization"],
+    timeout_seconds: 60,
+    finalization_reserve_seconds: 10,
+    blockers: []
+  };
+  const markdown =
+    "# Coverage\n\n## Scoped coverage evidence\n\n- recon-selected-declaration-completeness: `0/0`\n" +
+    "- production-declaration-completeness: `0/0`\n\nExcluded components:\n" +
+    "- `test/Harness.sol` (harness): not a production source\n\nZero-coverage components:\n- None\n";
+  writeMeasuredCoverageArtifacts(layout, node, workspace, { goal, markdown, evidence });
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(result.ok, false);
@@ -11296,7 +11519,7 @@ test("coverage gate authenticates Vyper declaration boundaries outside the Solid
     resolvedConfigToml: '[permissions]\nproduction_source_roots = ["src"]\n'
   });
   const node = {
-    ...plannedNode(["coverage-goal.json", "coverage-report.md", "coverage-evidence.json"]),
+    ...plannedMeasuredCoverageNode(),
     id: "stateful-invariant-coverage",
     logical_id: "stateful-invariant-coverage",
     artifact_dir: "artifacts/stateful-invariant-coverage"
@@ -11304,7 +11527,6 @@ test("coverage gate authenticates Vyper declaration boundaries outside the Solid
   writePlannedGraph(layout, [node]);
   const workspace = path.join(layout.workspacesDir, node.id);
   fs.mkdirSync(path.join(workspace, "src"), { recursive: true });
-  fs.mkdirSync(path.join(workspace, "magic"), { recursive: true });
   fs.writeFileSync(
     path.join(workspace, "src/Module.vy"),
     [
@@ -11334,17 +11556,19 @@ test("coverage gate authenticates Vyper declaration boundaries outside the Solid
       ""
     ].join("\n")
   );
-  fs.writeFileSync(path.join(workspace, "magic/recon-coverage.json"), "{}");
+  const reconSelection = writeReconCoverageSelection(workspace, {});
   const lcov = writeCoverageLcov(workspace, {
     "src/Module.vy": { 5: 0, 8: 0, 15: 0, 19: 0 }
   });
 
   const evidence = {
     schema_version: "ultrafuzz.coverage-evidence.v1",
+    status: "measured",
     lcov,
+    recon_selection: reconSelection,
     views: [
-      { scope: "selected-range", covered_ranges: 0, total_ranges: 0 },
-      { scope: "production-source", covered_ranges: 0, total_ranges: 4 }
+      { scope: "recon-selected-declaration-completeness", covered_ranges: 0, total_ranges: 0 },
+      { scope: "production-declaration-completeness", covered_ranges: 0, total_ranges: 4 }
     ],
     files: [
       {
@@ -11398,10 +11622,10 @@ test("coverage gate authenticates Vyper declaration boundaries outside the Solid
     ]
   };
   const goal = {
-    schema_version: "ultrafuzz.coverage-goal.v1",
-    target: { scope: "selected-range", minimum_percent: 90 },
-    current_measurement: { scope: "selected-range", covered_ranges: 0, total_ranges: 0 },
-    current_status: "measured",
+    schema_version: "ultrafuzz.coverage-goal.v2",
+    target: { scope: "recon-selected-declaration-completeness", minimum_percent: 90 },
+    current_measurement: { scope: "recon-selected-declaration-completeness", covered_ranges: 0, total_ranges: 0 },
+    current_status: "below-target",
     planned_commands: [],
     stop_conditions: ["reserve time for finalization"],
     timeout_seconds: 60,
@@ -11409,16 +11633,14 @@ test("coverage gate authenticates Vyper declaration boundaries outside the Solid
     blockers: []
   };
   const markdown =
-    "# Coverage\n\n## Scoped coverage evidence\n\n- selected-range: `0/0`\n" +
-    "- production-source: `0/4`\n\nExcluded components:\n" +
+    "# Coverage\n\n## Scoped coverage evidence\n\n- recon-selected-declaration-completeness: `0/0`\n" +
+    "- production-declaration-completeness: `0/4`\n\nExcluded components:\n" +
     "- `src/Module.vy` (production): Recon coverage-map generation is Solidity-only\n\n" +
     "Zero-coverage components:\n- `src/Module.vy:5-5` (production)\n" +
     "- `src/Module.vy:8-11` (production)\n- `src/Module.vy:15-16` (production)\n" +
     "- `src/Module.vy:19-20` (production)\n";
   const publish = (value: unknown, rendered = markdown): void => {
-    writeArtifact(layout, node.id, "coverage-goal.json", JSON.stringify(goal));
-    writeArtifact(layout, node.id, "coverage-report.md", rendered);
-    writeArtifact(layout, node.id, "coverage-evidence.json", JSON.stringify(value));
+    writeMeasuredCoverageArtifacts(layout, node, workspace, { goal, markdown: rendered, evidence: value });
   };
 
   publish(evidence);
@@ -11445,15 +11667,15 @@ test("coverage gate authenticates Vyper declaration boundaries outside the Solid
     covered_ranges: 1,
     total_ranges: 4
   } as (typeof inventedSelection.files)[number];
-  inventedSelection.views[0] = { scope: "selected-range", covered_ranges: 1, total_ranges: 1 };
-  inventedSelection.views[1] = { scope: "production-source", covered_ranges: 1, total_ranges: 4 };
+  inventedSelection.views[0] = { scope: "recon-selected-declaration-completeness", covered_ranges: 1, total_ranges: 1 };
+  inventedSelection.views[1] = { scope: "production-declaration-completeness", covered_ranges: 1, total_ranges: 4 };
   inventedSelection.zero_coverage_components = inventedSelection.zero_coverage_components.filter(
     (entry) => entry.start_line !== 8
   );
   publish(
     inventedSelection,
-    "# Coverage\n\n## Scoped coverage evidence\n\n- selected-range: `1/1`\n" +
-      "- production-source: `1/4`\n\nExcluded components:\n- None\n\nZero-coverage components:\n" +
+    "# Coverage\n\n## Scoped coverage evidence\n\n- recon-selected-declaration-completeness: `1/1`\n" +
+      "- production-declaration-completeness: `1/4`\n\nExcluded components:\n- None\n\nZero-coverage components:\n" +
       "- `src/Module.vy:5-5` (production)\n- `src/Module.vy:15-16` (production)\n" +
       "- `src/Module.vy:19-20` (production)\n"
   );
@@ -11472,7 +11694,7 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
     resolvedConfigToml: '[permissions]\nproduction_source_roots = ["src"]\n'
   });
   const coverageNode = {
-    ...plannedNode(["coverage-report.md", "coverage-evidence.json"]),
+    ...plannedMeasuredCoverageNode(["coverage-report.md", "coverage-evidence.json"]),
     id: "stateful-invariant-coverage",
     logical_id: "stateful-invariant-coverage",
     artifact_dir: "artifacts/stateful-invariant-coverage"
@@ -11489,13 +11711,16 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
   const workspace = path.join(coverageWorkspace, "src");
   fs.mkdirSync(workspace, { recursive: true });
   fs.writeFileSync(path.join(workspace, "Core.sol"), "contract Core { function core() external {} }\n");
+  const reconSelection = writeReconCoverageSelection(coverageWorkspace, { "src/Core.sol": ["1"] });
   const lcov = writeCoverageLcov(coverageWorkspace, { "src/Core.sol": { 1: 1 } });
   const evidence = {
     schema_version: "ultrafuzz.coverage-evidence.v1",
+    status: "measured",
     lcov,
+    recon_selection: reconSelection,
     views: [
-      { scope: "selected-range", covered_ranges: 1, total_ranges: 1 },
-      { scope: "production-source", covered_ranges: 1, total_ranges: 1 }
+      { scope: "recon-selected-declaration-completeness", covered_ranges: 1, total_ranges: 1 },
+      { scope: "production-declaration-completeness", covered_ranges: 1, total_ranges: 1 }
     ],
     files: [
       {
@@ -11518,11 +11743,13 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
     ],
     zero_coverage_components: []
   };
-  writeArtifact(layout, coverageNode.id, "coverage-report.md", "# Coverage\n\nselected-range: 1/1\n");
-  writeArtifact(layout, coverageNode.id, "coverage-evidence.json", JSON.stringify(evidence));
+  writeMeasuredCoverageArtifacts(layout, coverageNode, coverageWorkspace, {
+    markdown: "# Coverage\n\nrecon-selected-declaration-completeness: 1/1\n",
+    evidence
+  });
   const scopedMarkdown =
-    "# Ultrafuzz report\n\n## Scoped coverage evidence\n\n- selected-range: `1/1`\n" +
-    "- production-source: `1/1`\n\nExcluded components:\n- None\n\n" +
+    "# Ultrafuzz report\n\n## Scoped coverage evidence\n\n- recon-selected-declaration-completeness: `1/1`\n" +
+    "- production-declaration-completeness: `1/1`\n\nExcluded components:\n- None\n\n" +
     "Zero-coverage components:\n- None\n";
   writeArtifact(layout, reportNode.id, "report.md", scopedMarkdown);
   writeArtifact(
@@ -11539,16 +11766,20 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
     layout,
     reportNode.id,
     "report.md",
-    `${scopedMarkdown}\n## Notes\n\nOverall coverage was 25%; the selected-range result was 1/1.\n`
+    `${scopedMarkdown}\n## Notes\n\nOverall coverage was 25%; the recon-selected-declaration-completeness result was 1/1.\n`
   );
   const additionalProse = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
-  assert.equal(additionalProse.ok, true, JSON.stringify(additionalProse.diagnostics));
+  assert.equal(additionalProse.ok, false);
+  assert.ok(
+    additionalProse.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_SCORE"),
+    JSON.stringify(additionalProse.diagnostics)
+  );
 
   writeArtifact(
     layout,
     reportNode.id,
     "report.md",
-    "# Ultrafuzz report\n\n## Notes\n\n- selected-range: `1/1`\n- production-source: `1/1`\n"
+    "# Ultrafuzz report\n\n## Notes\n\n- recon-selected-declaration-completeness: `1/1`\n- production-declaration-completeness: `1/1`\n"
   );
   const wrongSection = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
   assert.equal(wrongSection.ok, false);
@@ -11560,7 +11791,10 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
     layout,
     reportNode.id,
     "report.md",
-    scopedMarkdown.replace("- production-source: `1/1`", "- production-source: `1/1`\n- production-source: `0/1`")
+    scopedMarkdown.replace(
+      "- production-declaration-completeness: `1/1`",
+      "- production-declaration-completeness: `1/1`\n- production-declaration-completeness: `0/1`"
+    )
   );
   const contradictory = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
   assert.equal(contradictory.ok, false);
@@ -11633,8 +11867,8 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
         coverage_evidence: {
           ...evidence,
           views: [
-            { scope: "selected-range", covered_ranges: 0, total_ranges: 1 },
-            { scope: "production-source", covered_ranges: 0, total_ranges: 1 }
+            { scope: "recon-selected-declaration-completeness", covered_ranges: 0, total_ranges: 1 },
+            { scope: "production-declaration-completeness", covered_ranges: 0, total_ranges: 1 }
           ]
         }
       })

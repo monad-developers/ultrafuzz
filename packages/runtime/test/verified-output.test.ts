@@ -704,7 +704,7 @@ test("verified final-report selection rejects absent and ambiguous declared repo
 });
 
 test("verified final-report selection rejects missing or ambiguous report output contracts", () => {
-  const report = finalReportOutputs().find((output) => output.contract === "ultrafuzz/report@2")!;
+  const report = finalReportOutputs().find((output) => output.contract === "ultrafuzz/report@3")!;
   const missingMarkdown = createVerifiedReportFixture("verified-report-markdown-missing", {
     outputs: [{ ...report, primary: true }]
   });
@@ -918,7 +918,7 @@ function createVerifiedReportFixture(
   const reportPath = path.join(
     layout.artifactsDir,
     attemptId,
-    outputs.find((output) => output.contract === "ultrafuzz/report@2")?.path ?? REPORT_JSON_PATH
+    outputs.find((output) => output.contract === "ultrafuzz/report@3")?.path ?? REPORT_JSON_PATH
   );
   const markdownPath = path.join(
     layout.artifactsDir,
@@ -928,7 +928,7 @@ function createVerifiedReportFixture(
   for (const output of outputs) {
     writeFileDurable(
       path.join(layout.artifactsDir, attemptId, output.path),
-      output.contract === "ultrafuzz/report@2" ? reportBytes : markdownBytes
+      output.contract === "ultrafuzz/report@3" ? reportBytes : markdownBytes
     );
   }
 
@@ -979,11 +979,11 @@ function createVerifiedReportFixture(
     node_id: REPORT_LOGICAL_ID,
     artifacts: outputs.map((output) => ({
       ...output,
-      sha256: digest(output.contract === "ultrafuzz/report@2" ? reportBytes : markdownBytes)
+      sha256: digest(output.contract === "ultrafuzz/report@3" ? reportBytes : markdownBytes)
     })),
     publications: outputs.map((output) => ({
       path: output.path,
-      sha256: digest(output.contract === "ultrafuzz/report@2" ? reportBytes : markdownBytes)
+      sha256: digest(output.contract === "ultrafuzz/report@3" ? reportBytes : markdownBytes)
     }))
   };
   writeJsonDurable(path.join(layout.root, ".ultrafuzz-verification", `${attemptId}.json`), marker);
@@ -1288,7 +1288,7 @@ function writeSealedTaskAuthority(
 }
 
 function finalReportOutputs(): ArtifactManifestOutputContract[] {
-  const reportBinding = artifactContractSchemaBinding("ultrafuzz/report@2");
+  const reportBinding = artifactContractSchemaBinding("ultrafuzz/report@3");
   assert.ok(reportBinding);
   return [
     {
@@ -1299,8 +1299,8 @@ function finalReportOutputs(): ArtifactManifestOutputContract[] {
     },
     {
       path: REPORT_JSON_PATH,
-      contract: "ultrafuzz/report@2",
-      contract_digest: artifactContractDefinition("ultrafuzz/report@2").digest,
+      contract: "ultrafuzz/report@3",
+      contract_digest: artifactContractDefinition("ultrafuzz/report@3").digest,
       ...reportBinding,
       primary: false
     }
@@ -1582,7 +1582,7 @@ function plannedAgentNode(
 
 function currentReport(runId: string, issues: Record<string, unknown>[] = []): Record<string, unknown> {
   return {
-    schema_version: "ultrafuzz.report.v2",
+    schema_version: "ultrafuzz.report.v3",
     run_metadata: {
       run_id: runId,
       source_run_id: runId,

@@ -461,12 +461,10 @@ human-readable Strategy section. Do not call this metric Temperature.
 ## Additional Sections
 
 When `stateful-invariant-coverage` published `coverage-evidence.json`, copy it
-exactly into `report.json` as `coverage_evidence`. Add `## Scoped coverage
-evidence` to `report.md` and render every view as
-`- <scope>: \`<covered_ranges>/<total_ranges>\``. In that same section, name
-every excluded component with its kind and exclusion reason and name every
-zero-coverage component with its kind. Emit the section exactly once, and do not
-repeat scoped fractions elsewhere. Never render a bare coverage percentage.
+exactly into `report.json` as `coverage_evidence`. Use the canonical coverage
+projection rendered below.
+
+{{coverage_evidence_markdown_projection}}
 
 Add `## Property implementation coverage` after the production issue entries
 and before `## Property provenance`. The runtime supplies the authoritative

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -6,12 +7,21 @@ import test from "node:test";
 
 import { runCli } from "../src/index.js";
 
+const coverageInputBytes = Buffer.from("TN:\nSF:src/Core.sol\nDA:1,1\nend_of_record\n", "utf8");
+const reconSelectionBytes = Buffer.from(
+  `${JSON.stringify({ files: [{ path: "src/Core.sol", ranges: [{ start_line: 1, line_count: 1 }] }] })}\n`,
+  "utf8"
+);
+const sha256 = (bytes: Uint8Array): string => crypto.createHash("sha256").update(bytes).digest("hex");
+
 const validCoverageEvidence = {
   schema_version: "ultrafuzz.coverage-evidence.v1",
-  lcov: { path: "echidna/covered.test.lcov", sha256: "a".repeat(64) },
+  status: "measured",
+  lcov: { path: "coverage-input.lcov", sha256: sha256(coverageInputBytes) },
+  recon_selection: { path: "recon-coverage.json", sha256: sha256(reconSelectionBytes) },
   views: [
-    { scope: "selected-range", covered_ranges: 1, total_ranges: 1 },
-    { scope: "production-source", covered_ranges: 1, total_ranges: 2 }
+    { scope: "recon-selected-declaration-completeness", covered_ranges: 1, total_ranges: 1 },
+    { scope: "production-declaration-completeness", covered_ranges: 1, total_ranges: 2 }
   ],
   files: [
     {
@@ -54,6 +64,17 @@ const validCoverageEvidence = {
 test("artifact validate executes document-local coverage evidence gates", async () => {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-artifact-validate-"));
   try {
+    fs.writeFileSync(path.join(temporary, validCoverageEvidence.lcov.path), coverageInputBytes);
+    fs.writeFileSync(path.join(temporary, validCoverageEvidence.recon_selection.path), reconSelectionBytes);
+    assert.equal(
+      validCoverageEvidence.lcov.sha256,
+      sha256(fs.readFileSync(path.join(temporary, validCoverageEvidence.lcov.path)))
+    );
+    assert.equal(
+      validCoverageEvidence.recon_selection.sha256,
+      sha256(fs.readFileSync(path.join(temporary, validCoverageEvidence.recon_selection.path)))
+    );
+
     const validPath = path.join(temporary, "valid.json");
     fs.writeFileSync(validPath, JSON.stringify(validCoverageEvidence));
 
@@ -67,6 +88,40 @@ test("artifact validate executes document-local coverage evidence gates", async 
       diagnostics: [],
       data: { contract: "ultrafuzz/coverage-evidence@1", path: validPath }
     });
+
+    const missingSelection = structuredClone(validCoverageEvidence) as Record<string, unknown>;
+    delete missingSelection.recon_selection;
+    const aliasedInputs = structuredClone(validCoverageEvidence);
+    aliasedInputs.recon_selection = { ...aliasedInputs.lcov };
+    const unsafeInputPath = structuredClone(validCoverageEvidence);
+    unsafeInputPath.lcov.path = "../coverage-input.lcov";
+    const malformedInputHash = structuredClone(validCoverageEvidence);
+    malformedInputHash.recon_selection.sha256 = "not-a-sha256";
+    for (const invalidInput of [
+      { name: "missing-selection", document: missingSelection, diagnostic: /recon_selection/u },
+      { name: "aliased-inputs", document: aliasedInputs, diagnostic: /distinct sibling artifacts/u },
+      { name: "unsafe-input-path", document: unsafeInputPath, diagnostic: /pattern|safe relative/u },
+      { name: "malformed-input-hash", document: malformedInputHash, diagnostic: /sha256|pattern/u }
+    ]) {
+      const invalidInputPath = path.join(temporary, `${invalidInput.name}.json`);
+      fs.writeFileSync(invalidInputPath, JSON.stringify(invalidInput.document));
+      const invalidInputResult = await capture([
+        "artifact",
+        "validate",
+        "ultrafuzz/coverage-evidence@1",
+        invalidInputPath,
+        "--json"
+      ]);
+      assert.equal(invalidInputResult.code, 1, invalidInput.name);
+      const invalidInputEnvelope = JSON.parse(invalidInputResult.stdout) as {
+        diagnostics: Array<{ message: string }>;
+      };
+      assert.match(
+        invalidInputEnvelope.diagnostics.map((diagnostic) => diagnostic.message).join("\n"),
+        invalidInput.diagnostic,
+        invalidInput.name
+      );
+    }
 
     const invalidPath = path.join(temporary, "excluded-range.json");
     const invalidDocument = structuredClone(validCoverageEvidence) as {
@@ -98,7 +153,7 @@ test("artifact validate executes document-local coverage evidence gates", async 
       envelope.diagnostics.some(
         (diagnostic) =>
           diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
-          /included in the selected-range scope/u.test(diagnostic.message)
+          /included in the recon-selected-declaration-completeness scope/u.test(diagnostic.message)
       )
     );
 
@@ -124,10 +179,10 @@ test("artifact validate executes document-local coverage evidence gates", async 
     fs.writeFileSync(
       invalidGoalPath,
       JSON.stringify({
-        schema_version: "ultrafuzz.coverage-goal.v1",
-        target: { scope: "selected-range", minimum_percent: 90 },
-        current_measurement: { scope: "selected-range", covered_ranges: 2, total_ranges: 1 },
-        current_status: "measured",
+        schema_version: "ultrafuzz.coverage-goal.v2",
+        target: { scope: "recon-selected-declaration-completeness", minimum_percent: 90 },
+        current_measurement: { scope: "recon-selected-declaration-completeness", covered_ranges: 2, total_ranges: 1 },
+        current_status: "target-met",
         planned_commands: [],
         stop_conditions: ["reserve time for finalization"],
         timeout_seconds: 60,
@@ -135,7 +190,7 @@ test("artifact validate executes document-local coverage evidence gates", async 
         blockers: []
       })
     );
-    const invalidGoal = await capture(["artifact", "validate", "ultrafuzz/coverage-goal@1", invalidGoalPath, "--json"]);
+    const invalidGoal = await capture(["artifact", "validate", "ultrafuzz/coverage-goal@2", invalidGoalPath, "--json"]);
     assert.equal(invalidGoal.code, 1);
     const invalidGoalEnvelope = JSON.parse(invalidGoal.stdout) as {
       diagnostics: Array<{ code: string; message: string }>;

@@ -375,8 +375,8 @@ describe("public Modal benchmark bundles", () => {
     });
     const reportPath = `reports/${rowId}/report.json`;
     const report = bundleFileText(bundle, reportPath).replace(
-      '"schema_version": "ultrafuzz.report.v2"',
-      '"schema_version": "ultrafuzz.report.v2",\n  "schema_version": "ultrafuzz.report.v2"'
+      '"schema_version": "ultrafuzz.report.v3"',
+      '"schema_version": "ultrafuzz.report.v3",\n  "schema_version": "ultrafuzz.report.v3"'
     );
     expect(() => parsePublicBenchmarkBundle(replaceBundleContents(bundle, reportPath, report))).toThrow(
       /invalid strict report JSON/u

@@ -867,7 +867,7 @@ async function createDashboardFindingsFixture(
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: deliverables/current-report.json
-        contract: ultrafuzz/report@2
+        contract: ultrafuzz/report@3
         primary: false
 `
       : "";
@@ -966,7 +966,7 @@ ${options.includeFinalReport === true ? "      - summary-review\n" : ""}
     const reportTask = compiled.tasks.find((candidate) => candidate.concreteNodeId === reportNode.id);
     assert.ok(reportTask);
     const report = {
-      schema_version: "ultrafuzz.report.v2",
+      schema_version: "ultrafuzz.report.v3",
       run_metadata: {
         run_id: runId,
         source_run_id: runId,
@@ -996,7 +996,7 @@ ${options.includeFinalReport === true ? "      - summary-review\n" : ""}
     for (const output of reportNode.outputs) {
       reportBytesByPath.set(
         output.path,
-        output.contract === "ultrafuzz/report@2"
+        output.contract === "ultrafuzz/report@3"
           ? Buffer.from(`${JSON.stringify(projection.report, null, 2)}\n`, "utf8")
           : Buffer.from(projection.markdown, "utf8")
       );

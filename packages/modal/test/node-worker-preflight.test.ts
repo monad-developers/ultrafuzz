@@ -43,11 +43,12 @@ function fakeValidator(root: string, stdout: string): string {
   return cliPath;
 }
 
-function withRootOwnedFileStats(run: () => void): void {
+function withModalImageFileStats(run: () => void): void {
   const originalLstat = fs.lstatSync.bind(fs);
   const lstat = vi.spyOn(fs, "lstatSync").mockImplementation(((candidate: fs.PathLike) => {
     const stat = originalLstat(candidate);
     Object.defineProperty(stat, "uid", { configurable: true, value: 0 });
+    Object.defineProperty(stat, "mode", { configurable: true, value: stat.mode & ~0o022 });
     return stat;
   }) as typeof fs.lstatSync);
   try {
@@ -62,7 +63,7 @@ describe("Modal JSON validator startup preflight", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-validator-"));
     try {
       const cliPath = fakeValidator(root, preflightEnvelope());
-      withRootOwnedFileStats(() => expect(() => preflightModalJsonValidator(cliPath)).not.toThrow());
+      withModalImageFileStats(() => expect(() => preflightModalJsonValidator(cliPath)).not.toThrow());
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
@@ -76,7 +77,7 @@ describe("Modal JSON validator startup preflight", () => {
         '{"schema_version":"ultrafuzz.cli.result.v2","schema_version":'
       );
       const cliPath = fakeValidator(root, duplicateKeyEnvelope);
-      withRootOwnedFileStats(() =>
+      withModalImageFileStats(() =>
         expect(() => preflightModalJsonValidator(cliPath)).toThrow(/returned an invalid success envelope/u)
       );
     } finally {
@@ -102,7 +103,7 @@ describe("Modal JSON validator startup preflight", () => {
       const value = JSON.parse(preflightEnvelope()) as Record<string, unknown>;
       mutate(value);
       const cliPath = fakeValidator(root, JSON.stringify(value));
-      withRootOwnedFileStats(() =>
+      withModalImageFileStats(() =>
         expect(() => preflightModalJsonValidator(cliPath)).toThrow(/returned an invalid success envelope/u)
       );
     } finally {

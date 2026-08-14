@@ -708,7 +708,7 @@ export function loadVerifiedFinalReportSnapshot(runRoot: string): VerifiedFinalR
     logicalNodeId: producer.logicalNodeId,
     attemptId: producer.attemptId
   });
-  const report = requiredContractOutput(authority, "ultrafuzz/report@2", "JSON report");
+  const report = requiredContractOutput(authority, "ultrafuzz/report@3", "JSON report");
   const markdown = requiredContractOutput(authority, "ultrafuzz/nonempty-markdown@1", "Markdown report");
   const layout = layoutForRunRoot(authority.run_root);
   if (
@@ -757,14 +757,14 @@ function declaredFinalReportProducer(runRoot: string): { attemptId: string; logi
   const layout = layoutForRunRoot(root);
   const graph = readPlannedGraphDocument(layout.graphPath);
   const producers = graph.nodes.filter((node) =>
-    node.outputs.some((output) => output.contract === "ultrafuzz/report@2")
+    node.outputs.some((output) => output.contract === "ultrafuzz/report@3")
   );
   if (producers.length === 0) {
-    throw unavailableAuthority("no current planned node declares an ultrafuzz/report@2 output");
+    throw unavailableAuthority("no current planned node declares an ultrafuzz/report@3 output");
   }
   if (producers.length !== 1) {
     throw invalidAuthority(
-      `current planned ultrafuzz/report@2 producer is ambiguous: ${producers.map((node) => node.id).join(", ")}`
+      `current planned ultrafuzz/report@3 producer is ambiguous: ${producers.map((node) => node.id).join(", ")}`
     );
   }
   const producer = producers[0]!;

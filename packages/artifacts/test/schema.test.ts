@@ -223,7 +223,7 @@ test("rejects a schema destination that crosses an intermediate symlink", () => 
 });
 
 test("artifact contract registry exposes only current typed contracts", () => {
-  const definition = artifactContractDefinition("ultrafuzz/report@2");
+  const definition = artifactContractDefinition("ultrafuzz/report@3");
   assert.match(definition.digest, /^[0-9a-f]{64}$/u);
   assert.equal(validateArtifactContract("ultrafuzz/findings@2", "[]").ok, true);
   assert.equal(validateArtifactContract("ultrafuzz/nonempty-markdown@1", " \n").ok, false);
@@ -1648,7 +1648,7 @@ test("the current invariant campaign plan contract requires v2 timeout evidence"
   }
 });
 
-test("finding and report v2 schemas require their current canonical shapes", () => {
+test("finding v2 and report v3 schemas require their current canonical shapes", () => {
   const nonPropertyFinding = {
     schema_version: FINDINGS_SCHEMA_VERSION,
     id: "finding-setup",
@@ -1687,34 +1687,34 @@ test("finding and report v2 schemas require their current canonical shapes", () 
       reason: "property-implementation-track-not-declared"
     }
   };
-  assert.equal(validateArtifactContract("ultrafuzz/report@2", JSON.stringify(report)).ok, true);
+  assert.equal(validateArtifactContract("ultrafuzz/report@3", JSON.stringify(report)).ok, true);
   assert.equal(
     validateArtifactContract(
-      "ultrafuzz/report@2",
+      "ultrafuzz/report@3",
       JSON.stringify({ ...report, campaign_outcome: { outcome: "blocked", reason: "recon was unavailable" } })
     ).ok,
     true
   );
   assert.equal(
     validateArtifactContract(
-      "ultrafuzz/report@2",
+      "ultrafuzz/report@3",
       JSON.stringify({ ...report, campaign_outcome: { outcome: "blocked", unexpected: true } })
     ).ok,
     false
   );
   assert.equal(
-    validateArtifactContract("ultrafuzz/report@2", JSON.stringify({ ...report, schema_version: "1.0" })).ok,
+    validateArtifactContract("ultrafuzz/report@3", JSON.stringify({ ...report, schema_version: "1.0" })).ok,
     false
   );
   const withoutProvenance = { ...report } as Partial<typeof report>;
   delete withoutProvenance.property_provenance;
-  assert.equal(validateArtifactContract("ultrafuzz/report@2", JSON.stringify(withoutProvenance)).ok, false);
+  assert.equal(validateArtifactContract("ultrafuzz/report@3", JSON.stringify(withoutProvenance)).ok, false);
   const withoutCoverage = { ...report } as Partial<typeof report>;
   delete withoutCoverage.property_implementation_coverage;
-  assert.equal(validateArtifactContract("ultrafuzz/report@2", JSON.stringify(withoutCoverage)).ok, false);
+  assert.equal(validateArtifactContract("ultrafuzz/report@3", JSON.stringify(withoutCoverage)).ok, false);
   assert.equal(
     validateArtifactContract(
-      "ultrafuzz/report@2",
+      "ultrafuzz/report@3",
       JSON.stringify({ ...report, property_implementation_coverage: "unavailable" })
     ).ok,
     false
@@ -1736,7 +1736,7 @@ test("finding and report v2 schemas require their current canonical shapes", () 
     lifecycle: { dedupe_key: "harness-setup", source_artifacts: [], strategy_hits: [] }
   };
   const reportWithTypedEvidence = { ...report, non_production_outcomes: [nonProductionOutcome] };
-  assert.equal(validateArtifactContract("ultrafuzz/report@2", JSON.stringify(reportWithTypedEvidence)).ok, true);
+  assert.equal(validateArtifactContract("ultrafuzz/report@3", JSON.stringify(reportWithTypedEvidence)).ok, true);
   for (const invalidNote of [
     'triage_reason="summary"',
     "helper_proof=(proof)",
@@ -1750,7 +1750,7 @@ test("finding and report v2 schemas require their current canonical shapes", () 
       };
       assert.equal(reportSchema.safeParse(invalidReport).success, false, `${collection} Zod parity for ${invalidNote}`);
       assert.equal(
-        validateArtifactContract("ultrafuzz/report@2", JSON.stringify(invalidReport)).ok,
+        validateArtifactContract("ultrafuzz/report@3", JSON.stringify(invalidReport)).ok,
         false,
         `${collection} bundled parity for ${invalidNote}`
       );
@@ -1762,17 +1762,17 @@ test("finding and report v2 schemas require their current canonical shapes", () 
   ]) {
     const invalidReport = { ...report, non_production_outcomes: [invalidOutcome] };
     assert.equal(reportSchema.safeParse(invalidReport).success, false);
-    assert.equal(validateArtifactContract("ultrafuzz/report@2", JSON.stringify(invalidReport)).ok, false);
+    assert.equal(validateArtifactContract("ultrafuzz/report@3", JSON.stringify(invalidReport)).ok, false);
   }
   const reportWithEmptyEvidence = {
     ...report,
     non_production_outcomes: [{ ...nonProductionOutcome, evidence: [{}] }]
   };
-  assert.equal(validateArtifactContract("ultrafuzz/report@2", JSON.stringify(reportWithEmptyEvidence)).ok, false);
+  assert.equal(validateArtifactContract("ultrafuzz/report@3", JSON.stringify(reportWithEmptyEvidence)).ok, false);
   assert.equal(reportSchema.safeParse(reportWithEmptyEvidence).success, false);
   assert.equal(
     validateArtifactContract(
-      "ultrafuzz/report@2",
+      "ultrafuzz/report@3",
       JSON.stringify({
         ...reportWithTypedEvidence,
         non_production_outcomes: [
@@ -2213,10 +2213,10 @@ test("present generated-test aggregation provenance cannot be an empty object", 
 
 test("coverage goal status, scoped measurement, target, and blocker evidence stay coupled", () => {
   const base = {
-    schema_version: "ultrafuzz.coverage-goal.v1",
-    target: { scope: "selected-range", minimum_percent: 90 },
+    schema_version: "ultrafuzz.coverage-goal.v2",
+    target: { scope: "recon-selected-declaration-completeness", minimum_percent: 90 },
     current_measurement: null as null | {
-      scope: "selected-range";
+      scope: "recon-selected-declaration-completeness";
       covered_ranges: number;
       total_ranges: number;
     },
@@ -2234,7 +2234,7 @@ test("coverage goal status, scoped measurement, target, and blocker evidence sta
       name: "not run with measurement",
       value: {
         ...base,
-        current_measurement: { scope: "selected-range", covered_ranges: 0, total_ranges: 1 }
+        current_measurement: { scope: "recon-selected-declaration-completeness", covered_ranges: 0, total_ranges: 1 }
       },
       expected: false
     },
@@ -2243,7 +2243,7 @@ test("coverage goal status, scoped measurement, target, and blocker evidence sta
       value: {
         ...base,
         current_status: "in-progress",
-        current_measurement: { scope: "selected-range", covered_ranges: 1, total_ranges: 2 }
+        current_measurement: { scope: "recon-selected-declaration-completeness", covered_ranges: 1, total_ranges: 2 }
       },
       expected: true
     },
@@ -2253,29 +2253,69 @@ test("coverage goal status, scoped measurement, target, and blocker evidence sta
       expected: false
     },
     {
-      name: "measured",
+      name: "target met",
       value: {
         ...base,
-        current_status: "measured",
-        current_measurement: { scope: "selected-range", covered_ranges: 9, total_ranges: 10 }
+        current_status: "target-met",
+        current_measurement: { scope: "recon-selected-declaration-completeness", covered_ranges: 9, total_ranges: 10 }
       },
       expected: true
     },
     {
-      name: "measured without measurement",
-      value: { ...base, current_status: "measured" },
-      expected: false
+      name: "below target",
+      value: {
+        ...base,
+        current_status: "below-target",
+        current_measurement: { scope: "recon-selected-declaration-completeness", covered_ranges: 8, total_ranges: 10 }
+      },
+      expected: true
+    },
+    {
+      name: "empty denominator is below target",
+      value: {
+        ...base,
+        current_status: "below-target",
+        current_measurement: { scope: "recon-selected-declaration-completeness", covered_ranges: 0, total_ranges: 0 }
+      },
+      expected: true
+    },
+    {
+      name: "target met with empty denominator",
+      value: {
+        ...base,
+        current_status: "target-met",
+        current_measurement: { scope: "recon-selected-declaration-completeness", covered_ranges: 0, total_ranges: 0 }
+      },
+      expected: false,
+      structurallyExpected: true
+    },
+    {
+      name: "terminal measurement without counts",
+      value: { ...base, current_status: "target-met" },
+      expected: false,
+      structurallyExpected: false
     },
     {
       name: "measurement numerator exceeds denominator",
       value: {
         ...base,
-        current_status: "measured",
-        current_measurement: { scope: "selected-range", covered_ranges: 2, total_ranges: 1 }
+        current_status: "target-met",
+        current_measurement: { scope: "recon-selected-declaration-completeness", covered_ranges: 2, total_ranges: 1 }
+      },
+      expected: false,
+      structurallyExpected: true
+    },
+    { name: "blocked", value: { ...base, current_status: "blocked", blockers: [blocker] }, expected: true },
+    {
+      name: "blocked with measurement",
+      value: {
+        ...base,
+        current_status: "blocked",
+        current_measurement: { scope: "recon-selected-declaration-completeness", covered_ranges: 0, total_ranges: 1 },
+        blockers: [blocker]
       },
       expected: false
     },
-    { name: "blocked", value: { ...base, current_status: "blocked", blockers: [blocker] }, expected: true },
     { name: "blocked without blocker", value: { ...base, current_status: "blocked" }, expected: false },
     {
       name: "noncanonical target",
@@ -2284,15 +2324,17 @@ test("coverage goal status, scoped measurement, target, and blocker evidence sta
     },
     {
       name: "legacy bare percentage",
-      value: { ...base, current_status: "measured", current_measurement: 90 },
-      expected: false
+      value: { ...base, current_status: "target-met", current_measurement: 90 },
+      expected: false,
+      structurallyExpected: false
     }
   ] as const;
   for (const candidate of cases) {
     assert.equal(coverageGoalSchema.safeParse(candidate.value).success, candidate.expected, `${candidate.name}:zod`);
-    const structurallyExpected = candidate.name === "measurement numerator exceeds denominator" || candidate.expected;
+    const structurallyExpected =
+      "structurallyExpected" in candidate ? candidate.structurallyExpected : candidate.expected;
     assert.equal(
-      validateArtifactContract("ultrafuzz/coverage-goal@1", JSON.stringify(candidate.value)).ok,
+      validateArtifactContract("ultrafuzz/coverage-goal@2", JSON.stringify(candidate.value)).ok,
       structurallyExpected,
       `${candidate.name}:json-schema`
     );
@@ -2803,15 +2845,18 @@ test("artifact schema snapshots are present and aligned with exported schema con
   assert.deepEqual(findingSnapshot, findingJsonSchema);
   assert.deepEqual(coverageEvidenceSnapshot, coverageEvidenceJsonSchema);
   const boundedCoverageSnapshot = coverageEvidenceSnapshot as {
-    properties: {
-      files: { maxItems: number };
-      counted_ranges: { maxItems: number };
-      zero_coverage_components: { maxItems: number };
-    };
+    oneOf: ReadonlyArray<{
+      properties?: {
+        files?: { maxItems: number };
+        counted_ranges?: { maxItems: number };
+        zero_coverage_components?: { maxItems: number };
+      };
+    }>;
   };
-  assert.equal(boundedCoverageSnapshot.properties.files.maxItems, MAX_COVERAGE_EVIDENCE_FILES);
-  assert.equal(boundedCoverageSnapshot.properties.counted_ranges.maxItems, MAX_COVERAGE_EVIDENCE_RANGES);
-  assert.equal(boundedCoverageSnapshot.properties.zero_coverage_components.maxItems, MAX_COVERAGE_EVIDENCE_RANGES);
+  const measuredCoverage = boundedCoverageSnapshot.oneOf[0]!.properties!;
+  assert.equal(measuredCoverage.files!.maxItems, MAX_COVERAGE_EVIDENCE_FILES);
+  assert.equal(measuredCoverage.counted_ranges!.maxItems, MAX_COVERAGE_EVIDENCE_RANGES);
+  assert.equal(measuredCoverage.zero_coverage_components!.maxItems, MAX_COVERAGE_EVIDENCE_RANGES);
   assert.deepEqual(generatedTestsSnapshot, generatedTestsJsonSchema);
   assert.deepEqual(invariantLedgerSnapshot, invariantLedgerJsonSchema);
   assert.deepEqual(invariantSourceProofSnapshot, invariantSourceProofJsonSchema);

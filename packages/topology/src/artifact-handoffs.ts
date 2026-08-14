@@ -17,7 +17,7 @@ const REPORT_VOCABULARY_CONTRACTS = new Set([
   "ultrafuzz/findings@2",
   "ultrafuzz/triaged-findings@1",
   "ultrafuzz/severity-classified-findings@1",
-  "ultrafuzz/report@2"
+  "ultrafuzz/report@3"
 ]);
 
 export function validateArtifactHandoffs(

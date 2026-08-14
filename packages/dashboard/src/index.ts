@@ -157,7 +157,7 @@ const DASHBOARD_FINDINGS_CONTRACTS = [
   "ultrafuzz/severity-classified-findings@1",
   "ultrafuzz/triaged-findings@1",
   "ultrafuzz/findings@2",
-  "ultrafuzz/report@2"
+  "ultrafuzz/report@3"
 ] as const satisfies readonly ArtifactContractId[];
 type DashboardFindingsContract = (typeof DASHBOARD_FINDINGS_CONTRACTS)[number];
 const DASHBOARD_FINDINGS_STAGE_PRIORITY = ["severity-classified", "triaged", "deduped", "report", "raw"] as const;
@@ -1573,7 +1573,7 @@ class DashboardApp {
       renderedPrompt: exists("prompt.rendered.md"),
       findings: DASHBOARD_FINDINGS_CONTRACTS.some((contract) => verifiedContracts.has(contract)),
       patch: paths.some((artifactPath) => /\.(patch|diff)$/u.test(artifactPath)),
-      report: verifiedContracts.has("ultrafuzz/report@2"),
+      report: verifiedContracts.has("ultrafuzz/report@3"),
       metadata: exists("metadata.json")
     };
   }
@@ -2092,7 +2092,7 @@ function dashboardDeclaredReportAvailability(runRoot: string): DashboardReportAv
   const graph = readPlannedGraphDocument(layout.graphPath);
   const state = readRunState(layout);
   const producers = graph.nodes.filter((node) =>
-    node.outputs.some((output) => output.contract === "ultrafuzz/report@2")
+    node.outputs.some((output) => output.contract === "ultrafuzz/report@3")
   );
   let sealedTasks: ReturnType<typeof verifySealedTaskManifestSnapshot>["document"]["tasks"] = [];
   const controlAuthority = dashboardControlAuthorityPresence(layout);
@@ -2104,7 +2104,7 @@ function dashboardDeclaredReportAvailability(runRoot: string): DashboardReportAv
   let claimedSuccess = false;
   let invalidDeclaration = producers.length > 1;
   for (const producer of producers) {
-    const reportOutputs = producer.outputs.filter((output) => output.contract === "ultrafuzz/report@2");
+    const reportOutputs = producer.outputs.filter((output) => output.contract === "ultrafuzz/report@3");
     const markdownOutputs = producer.outputs.filter((output) => output.contract === "ultrafuzz/nonempty-markdown@1");
     invalidDeclaration ||= reportOutputs.length !== 1 || markdownOutputs.length !== 1;
     const reportPaths = [...reportOutputs, ...markdownOutputs].map((output) => output.path);
@@ -2329,7 +2329,7 @@ function readVerifiedFindingsDeclaration(
   if (matches.length !== 1) {
     throw new Error(`dashboard findings declaration is not one exact verified output: ${declaration.source}`);
   }
-  if (declaration.output.contract === "ultrafuzz/report@2") {
+  if (declaration.output.contract === "ultrafuzz/report@3") {
     const report = matches[0]!;
     const markdown = node.outputs.filter((output) => output.contract === "ultrafuzz/nonempty-markdown@1");
     if (markdown.length !== 1) {
@@ -2368,7 +2368,7 @@ function dashboardFindingsStage(
       return "severity-classified";
     case "ultrafuzz/triaged-findings@1":
       return "triaged";
-    case "ultrafuzz/report@2":
+    case "ultrafuzz/report@3":
       return "report";
     case "ultrafuzz/findings@2":
       return outputs.some((output) => output.contract === "ultrafuzz/finding-lifecycle-ledger@1") ? "deduped" : "raw";

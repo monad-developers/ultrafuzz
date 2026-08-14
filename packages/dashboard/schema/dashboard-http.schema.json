@@ -451,7 +451,7 @@
         { "$ref": "urn:ultrafuzz:schema:artifacts:finding:2" },
         { "$ref": "urn:ultrafuzz:schema:artifacts:triaged-findings:1#/items" },
         { "$ref": "urn:ultrafuzz:schema:artifacts:severity-classified-findings:1#/items" },
-        { "$ref": "urn:ultrafuzz:schema:artifacts:report:2#/properties/issues/items" }
+        { "$ref": "urn:ultrafuzz:schema:artifacts:report:3#/properties/issues/items" }
       ]
     },
     "artifactEntry": {
@@ -751,7 +751,7 @@
         "markdown_path": { "$ref": "#/$defs/nonEmptyString" },
         "markdown": { "$ref": "#/$defs/nonEmptyString" },
         "json_path": { "$ref": "#/$defs/nonEmptyString" },
-        "json": { "$ref": "urn:ultrafuzz:schema:artifacts:report:2" }
+        "json": { "$ref": "urn:ultrafuzz:schema:artifacts:report:3" }
       }
     },
     "eventsResponse": {

@@ -540,7 +540,7 @@ export class NodeTelemetryPump {
     const nodeDir = getNodeArtifactDir(layout, nodeId);
     const requiredSnapshot = this.input.requiredFinalReportSnapshot;
     const manifestDeclaresFinalReport = manifest.output_contracts.some(
-      (output) => output.contract === "ultrafuzz/report@2"
+      (output) => output.contract === "ultrafuzz/report@3"
     );
     const isRequiredFinalReportProducer = requiredSnapshot?.authority.attempt_id === nodeId;
     const publishesFinalReport = manifestDeclaresFinalReport || isRequiredFinalReportProducer;
@@ -772,7 +772,7 @@ interface VerifiedFinalReportFile {
 function verifiedFinalReportFiles(snapshot: VerifiedFinalReportSnapshot): Map<string, VerifiedFinalReportFile> {
   const bindings = [
     {
-      contract: "ultrafuzz/report@2",
+      contract: "ultrafuzz/report@3",
       policyPath: "report.json",
       absolutePath: snapshot.artifacts.json_path,
       bytes: snapshot.json_bytes
@@ -842,7 +842,7 @@ function finalReportDeclarations(
   outputs: readonly (ArtifactManifestOutputContract | VerifiedOutputArtifactSnapshot)[]
 ): ArtifactManifestOutputContract[] {
   return outputs
-    .filter((output) => output.contract === "ultrafuzz/report@2" || output.contract === "ultrafuzz/nonempty-markdown@1")
+    .filter((output) => output.contract === "ultrafuzz/report@3" || output.contract === "ultrafuzz/nonempty-markdown@1")
     .map((output) => ({
       path: output.path,
       contract: output.contract,

@@ -168,7 +168,7 @@ export function isDirectiveConformingFinalReportMarkdown(
 
 function validateReport(report: unknown): JsonRecord {
   const serialized = `${JSON.stringify(report)}\n`;
-  const validation = validateArtifactContract("ultrafuzz/report@2", serialized, "report.json");
+  const validation = validateArtifactContract("ultrafuzz/report@3", serialized, "report.json");
   if (!validation.ok || !isRecord(validation.value)) {
     throw new Error(reportValidationMessage(validation.issues));
   }
@@ -385,13 +385,23 @@ function renderCanonicalReport(report: JsonRecord): string {
 }
 
 function appendCoverageEvidence(lines: string[], value: unknown): void {
-  if (!isRecord(value) || !Array.isArray(value.views)) return;
+  if (!isRecord(value) || (value.status !== "measured" && value.status !== "unavailable")) return;
   lines.push("", ...renderCoverageEvidenceMarkdownSection(value));
 }
 
 export function renderCoverageEvidenceMarkdownSection(value: unknown): string[] {
-  if (!isRecord(value) || !Array.isArray(value.views)) return [];
+  if (!isRecord(value)) return [];
   const lines = ["## Scoped coverage evidence", ""];
+  if (value.status === "unavailable" && Array.isArray(value.blockers)) {
+    lines.push("- Status: unavailable", "", "Blockers:");
+    for (const blocker of value.blockers.filter(isRecord)) {
+      lines.push(`- ${inlineValue(blocker.category)}: ${inlineValue(blocker.summary)}`);
+      const evidencePaths = Array.isArray(blocker.evidence_paths) ? blocker.evidence_paths : [];
+      for (const evidencePath of evidencePaths) lines.push(`  - Evidence: \`${inlineValue(evidencePath)}\``);
+    }
+    return lines;
+  }
+  if (value.status !== "measured" || !Array.isArray(value.views)) return [];
   for (const view of value.views.filter(isRecord)) {
     lines.push(
       `- ${inlineValue(view.scope)}: \`${inlineValue(view.covered_ranges)}/${inlineValue(view.total_ranges)}\``

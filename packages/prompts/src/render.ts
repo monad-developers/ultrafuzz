@@ -35,7 +35,8 @@ export const SUPPORTED_TEMPLATE_VARIABLES = [
   "invariant_testing_fuzzer_timeout",
   "strategy_attempt_test_dir",
   "finding_reachability_vocabulary",
-  "finding_note_key_vocabulary"
+  "finding_note_key_vocabulary",
+  "coverage_evidence_markdown_projection"
 ] as const;
 
 export type SupportedTemplateVariable = (typeof SUPPORTED_TEMPLATE_VARIABLES)[number];
@@ -1014,6 +1015,7 @@ function buildVariableContext(input: PromptRenderInput): Record<string, string> 
     strategy_attempt_test_dir: strategyAttemptTestDirectory(input),
     finding_reachability_vocabulary: findingReachabilityPromptVocabulary(),
     finding_note_key_vocabulary: findingNoteKeyPromptVocabulary(),
+    coverage_evidence_markdown_projection: renderOutputContractTemplate("coverage-evidence-markdown.mdx", {}),
     ...Object.fromEntries(Object.entries(input.variables ?? {}).map(([key, value]) => [key, String(value)]))
   };
 }
@@ -1047,7 +1049,11 @@ function validateVariableOverrides(variables: PromptRenderInput["variables"]): v
     if (key === "schema_path" || isTopologyDerivedFindingsVariable(key)) {
       throw new PromptError("invalid-render-input", `${key} is topology-derived and cannot be overridden`);
     }
-    if (key === "finding_reachability_vocabulary" || key === "finding_note_key_vocabulary") {
+    if (
+      key === "finding_reachability_vocabulary" ||
+      key === "finding_note_key_vocabulary" ||
+      key === "coverage_evidence_markdown_projection"
+    ) {
       throw new PromptError("invalid-render-input", `${key} is authoritative and cannot be overridden`);
     }
     if (!(

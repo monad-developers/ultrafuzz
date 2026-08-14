@@ -322,7 +322,7 @@ contract identities and digests plus the exact prerequisite manifest digests
 consumed by the attempt. Runtime failure evidence MUST distinguish agent,
 provider, artifact-contract, and dependency-cascade failures.
 
-The terminal structured report MUST satisfy `ultrafuzz/report@2` before scoring
+The terminal structured report MUST satisfy `ultrafuzz/report@3` before scoring
 or publication. Invalid terminal output MUST persist a typed non-publishable
 state without persisting raw output or diagnostics.
 

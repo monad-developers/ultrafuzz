@@ -133,7 +133,7 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "config-redactions-path-key-equality",
     "config-redactions-path-uniqueness"
   ]),
-  "coverage-goal.schema.json": artifact("ultrafuzz/coverage-goal@1", "coverageGoalJsonSchema", "coverageGoalSchema", [
+  "coverage-goal.schema.json": artifact("ultrafuzz/coverage-goal@2", "coverageGoalJsonSchema", "coverageGoalSchema", [
     "coverage-goal-reconciliation"
   ]),
   "coverage-evidence.schema.json": artifact(
@@ -353,7 +353,7 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
   "release-validation-report.schema.json": runtime("releaseValidationReportJsonSchema", undefined, [
     "release-validation-report-reconciliation"
   ]),
-  "report.schema.json": artifact("ultrafuzz/report@2", "reportJsonSchema", "reportSchema", [
+  "report.schema.json": artifact("ultrafuzz/report@3", "reportJsonSchema", "reportSchema", [
     "report-finding-evidence-span-consistency",
     "report-finding-id-uniqueness",
     "report-finding-report-vocabulary",

@@ -86,18 +86,15 @@ const file = z
   });
 const view = z
   .strictObject({
-    scope: z.enum([
-      "recon-selected-declaration-completeness",
-      "production-declaration-completeness"
-    ]),
+    scope: z.enum(["recon-selected-declaration-completeness", "production-declaration-completeness"]),
     covered_ranges: z.number().int().nonnegative(),
     total_ranges: z.number().int().nonnegative()
   })
   .refine((value) => value.covered_ranges <= value.total_ranges, {
     message: "covered_ranges cannot exceed total_ranges"
   });
-const lcov = z.strictObject({
-  path: safePath,
+const durableInput = z.strictObject({
+  path: safePath.describe("Path to a declared sibling artifact preserved with this evidence."),
   sha256: z.string().regex(/^[0-9a-f]{64}$/u, "sha256 must be 64 lowercase hexadecimal characters")
 });
 const zeroCoverageComponent = z.strictObject({
@@ -111,7 +108,8 @@ const measuredCoverageEvidenceSchema = z
   .strictObject({
     schema_version: z.literal(COVERAGE_EVIDENCE_SCHEMA_VERSION),
     status: z.literal("measured"),
-    lcov,
+    lcov: durableInput,
+    recon_selection: durableInput,
     views: z
       .array(view)
       .length(2)
@@ -135,6 +133,13 @@ const measuredCoverageEvidenceSchema = z
     zero_coverage_components: z.array(zeroCoverageComponent).min(0).max(MAX_COVERAGE_EVIDENCE_RANGES)
   })
   .superRefine((value, context) => {
+    if (value.lcov.path === value.recon_selection.path) {
+      context.addIssue({
+        code: "custom",
+        message: "LCOV and Recon selection inputs must use distinct sibling artifacts",
+        path: ["recon_selection", "path"]
+      });
+    }
     const fileByPath = new Map<string, (typeof value.files)[number]>();
     for (const [index, entry] of value.files.entries()) {
       if (fileByPath.has(entry.path)) {
@@ -285,7 +290,17 @@ export const coverageEvidenceSchema = z.discriminatedUnion("status", [
 ]);
 
 const sourceKinds = ["production", "test", "harness", "dependency"] as const;
-const safePathPattern = "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[^\\\\\\u0000]+$";
+const safePathPattern = "^(?!\\.{1,2}(?:/|$))[^/\\\\\\u0000]+(?:/(?!\\.{1,2}(?:/|$))[^/\\\\\\u0000]+)*$";
+const nonNegativeSafeIntegerJsonSchema = {
+  type: "integer",
+  minimum: 0,
+  maximum: Number.MAX_SAFE_INTEGER
+} as const;
+const positiveSafeIntegerJsonSchema = {
+  type: "integer",
+  minimum: 1,
+  maximum: Number.MAX_SAFE_INTEGER
+} as const;
 const coverageBlockerJsonSchema = {
   type: "object",
   additionalProperties: false,
@@ -304,11 +319,29 @@ const coverageBlockerJsonSchema = {
 const measuredCoverageEvidenceJsonSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["schema_version", "status", "lcov", "views", "files", "counted_ranges", "zero_coverage_components"],
+  required: [
+    "schema_version",
+    "status",
+    "lcov",
+    "recon_selection",
+    "views",
+    "files",
+    "counted_ranges",
+    "zero_coverage_components"
+  ],
   properties: {
     schema_version: { const: COVERAGE_EVIDENCE_SCHEMA_VERSION },
     status: { const: "measured" },
     lcov: {
+      type: "object",
+      additionalProperties: false,
+      required: ["path", "sha256"],
+      properties: {
+        path: { type: "string", minLength: 1, pattern: safePathPattern },
+        sha256: { type: "string", pattern: "^[0-9a-f]{64}$" }
+      }
+    },
+    recon_selection: {
       type: "object",
       additionalProperties: false,
       required: ["path", "sha256"],
@@ -329,8 +362,8 @@ const measuredCoverageEvidenceJsonSchema = {
           scope: {
             enum: ["recon-selected-declaration-completeness", "production-declaration-completeness"]
           },
-          covered_ranges: { type: "integer", minimum: 0 },
-          total_ranges: { type: "integer", minimum: 0 }
+          covered_ranges: nonNegativeSafeIntegerJsonSchema,
+          total_ranges: nonNegativeSafeIntegerJsonSchema
         }
       }
     },
@@ -347,8 +380,8 @@ const measuredCoverageEvidenceJsonSchema = {
           kind: { enum: sourceKinds },
           included: { type: "boolean" },
           exclusion_reason: { type: "string", minLength: 1 },
-          covered_ranges: { type: "integer", minimum: 0 },
-          total_ranges: { type: "integer", minimum: 0 }
+          covered_ranges: nonNegativeSafeIntegerJsonSchema,
+          total_ranges: nonNegativeSafeIntegerJsonSchema
         },
         allOf: [
           {
@@ -372,8 +405,8 @@ const measuredCoverageEvidenceJsonSchema = {
         properties: {
           file: { type: "string", minLength: 1, pattern: safePathPattern },
           kind: { enum: sourceKinds },
-          start_line: { type: "integer", minimum: 1 },
-          line_count: { type: "integer", minimum: 1 },
+          start_line: positiveSafeIntegerJsonSchema,
+          line_count: positiveSafeIntegerJsonSchema,
           selected: {
             type: "boolean",
             description: "Whether this trusted declaration range overlaps the authenticated Recon selection map."
@@ -396,8 +429,8 @@ const measuredCoverageEvidenceJsonSchema = {
         properties: {
           path: { type: "string", minLength: 1, pattern: safePathPattern },
           kind: { enum: sourceKinds },
-          start_line: { type: "integer", minimum: 1 },
-          line_count: { type: "integer", minimum: 1 }
+          start_line: positiveSafeIntegerJsonSchema,
+          line_count: positiveSafeIntegerJsonSchema
         }
       }
     }
@@ -420,7 +453,7 @@ export const coverageEvidenceJsonSchema = {
   $id: COVERAGE_EVIDENCE_JSON_SCHEMA_ID,
   title: "Ultrafuzz coverage evidence",
   description:
-    "Producer contract for either authenticated declaration-completeness measurements or typed blockers that made measurement unavailable. Measured evidence identifies the exact LCOV input and reconciles trusted declaration ranges; unavailable evidence cannot claim measurements.",
+    "Producer contract for either authenticated declaration-completeness measurements or typed blockers that made measurement unavailable. Measured evidence identifies durable sibling snapshots of its LCOV and Recon selection inputs and reconciles trusted declaration ranges; unavailable evidence cannot claim measurements.",
   oneOf: [measuredCoverageEvidenceJsonSchema, unavailableCoverageEvidenceJsonSchema]
 } as const;
 

@@ -12,7 +12,7 @@ import {
   findingTextSchema
 } from "./findings-schema.js";
 import { FINDING_SEVERITIES, TRIAGE_CLASSIFICATIONS } from "./findings.js";
-import { coverageEvidenceSchema } from "./coverage-evidence.js";
+import { MAX_COVERAGE_EVIDENCE_RANGES, coverageBlockerSchema, coverageEvidenceSchema } from "./coverage-evidence.js";
 import {
   MAX_AGGREGATION_ABSOLUTE_PATH_CHARS,
   MAX_AGGREGATION_REASON_CHARS,
@@ -92,7 +92,7 @@ export const BOUNDARY_RECIPES_SCHEMA_VERSION = "ultrafuzz.boundary-recipes.v1" a
 export const ADMIN_CONFIG_BOUNDARY_MATRIX_SCHEMA_VERSION = "ultrafuzz.admin-config-boundary-matrix.v1" as const;
 export const DEPENDENCY_SCOPE_MATRIX_SCHEMA_VERSION = "ultrafuzz.dependency-scope-matrix.v1" as const;
 export const EXTERNALIZED_STATE_ACCOUNTING_SCHEMA_VERSION = "ultrafuzz.externalized-state-accounting.v1" as const;
-export const COVERAGE_GOAL_SCHEMA_VERSION = "ultrafuzz.coverage-goal.v1" as const;
+export const COVERAGE_GOAL_SCHEMA_VERSION = "ultrafuzz.coverage-goal.v2" as const;
 export const INVARIANT_CAMPAIGN_PLAN_SCHEMA_VERSION = "ultrafuzz.invariant-campaign-plan.v2" as const;
 export const CAMPAIGN_SUMMARY_SCHEMA_VERSION = "ultrafuzz.campaign-summary.v2" as const;
 export const DIFFERENTIAL_PLAN_SCHEMA_VERSION = "ultrafuzz.differential-plan.v1" as const;
@@ -110,7 +110,7 @@ export const SELECTED_STRATEGIES_SCHEMA_VERSION = "ultrafuzz.selected-strategies
 export const DYNAMIC_STRATEGY_PROVENANCE_SCHEMA_VERSION = "ultrafuzz.dynamic-strategy-provenance.v1" as const;
 export const FINDING_LIFECYCLE_LEDGER_SCHEMA_VERSION = "ultrafuzz.finding-lifecycle-ledger.v1" as const;
 export const AGGREGATION_MANIFEST_SCHEMA_VERSION = "ultrafuzz.aggregation-manifest.v1" as const;
-export const REPORT_SCHEMA_VERSION = "ultrafuzz.report.v2" as const;
+export const REPORT_SCHEMA_VERSION = "ultrafuzz.report.v3" as const;
 
 const harnessRepairEntrySchema = z
   .strictObject({
@@ -527,41 +527,30 @@ export const externalizedStateAccountingSchema = withDocumentMetadata(
   "Ultrafuzz externalized-state accounting model"
 );
 
-const coverageBlockerCategory = z.enum([
-  "coverage-tooling-blocked",
-  "production-source-attribution-blocked",
-  "harness-build-blocked",
-  "dependency-blocked",
-  "time-budget-exhausted",
-  "no-reachable-target"
-]);
-
 export const coverageGoalSchema = withDocumentMetadata(
   z
     .strictObject({
       schema_version: z.literal(COVERAGE_GOAL_SCHEMA_VERSION),
       target: z.strictObject({
-        scope: z.literal("selected-range"),
+        scope: z.literal("recon-selected-declaration-completeness"),
         minimum_percent: z.literal(90)
       }),
       current_measurement: z
         .strictObject({
-          scope: z.literal("selected-range"),
-          covered_ranges: z.number().int().nonnegative(),
-          total_ranges: z.number().int().nonnegative()
+          scope: z.literal("recon-selected-declaration-completeness"),
+          covered_ranges: z.number().int().nonnegative().max(MAX_COVERAGE_EVIDENCE_RANGES),
+          total_ranges: z.number().int().nonnegative().max(MAX_COVERAGE_EVIDENCE_RANGES)
         })
         .refine((measurement) => measurement.covered_ranges <= measurement.total_ranges, {
           message: "covered_ranges cannot exceed total_ranges"
         })
         .nullable(),
-      current_status: z.enum(["not-run", "in-progress", "measured", "blocked"]),
+      current_status: z.enum(["not-run", "in-progress", "target-met", "below-target", "blocked"]),
       planned_commands: uniqueStrings(),
       stop_conditions: uniqueStrings(1),
       timeout_seconds: positiveInteger,
       finalization_reserve_seconds: nonNegativeInteger,
-      blockers: z.array(
-        z.strictObject({ category: coverageBlockerCategory, summary: nonEmptyString, evidence_paths: uniqueStrings() })
-      )
+      blockers: z.array(coverageBlockerSchema)
     })
     .meta({
       allOf: [
@@ -579,7 +568,10 @@ export const coverageGoalSchema = withDocumentMetadata(
           then: { properties: { blockers: { type: "array", maxItems: 0 } } }
         },
         {
-          if: { properties: { current_status: { const: "measured" } }, required: ["current_status"] },
+          if: {
+            properties: { current_status: { enum: ["target-met", "below-target"] } },
+            required: ["current_status"]
+          },
           then: {
             properties: {
               current_measurement: { type: "object" },
@@ -589,7 +581,12 @@ export const coverageGoalSchema = withDocumentMetadata(
         },
         {
           if: { properties: { current_status: { const: "blocked" } }, required: ["current_status"] },
-          then: { properties: { blockers: { type: "array", minItems: 1 } } }
+          then: {
+            properties: {
+              current_measurement: { type: "null" },
+              blockers: { type: "array", minItems: 1 }
+            }
+          }
         }
       ]
     })
@@ -607,19 +604,35 @@ export const coverageGoalSchema = withDocumentMetadata(
         if (goal.blockers.length > 0) {
           addIssue("blockers", "In-progress coverage cannot report terminal blockers; use blocked status");
         }
-      } else if (goal.current_status === "measured") {
+      } else if (goal.current_status === "target-met" || goal.current_status === "below-target") {
         if (goal.current_measurement === null) {
-          addIssue("current_measurement", "Measured coverage requires exact scoped counts");
+          addIssue("current_measurement", "Terminal measured coverage requires exact scoped counts");
+        } else {
+          const targetMet =
+            goal.current_measurement.total_ranges > 0 &&
+            BigInt(goal.current_measurement.covered_ranges) * 100n >=
+              BigInt(goal.current_measurement.total_ranges) * BigInt(goal.target.minimum_percent);
+          if ((goal.current_status === "target-met") !== targetMet) {
+            addIssue(
+              "current_measurement",
+              `Coverage status must be ${targetMet ? "target-met" : "below-target"} for the exact scoped counts; 0/0 is below-target`
+            );
+          }
         }
         if (goal.blockers.length > 0) {
-          addIssue("blockers", "Measured coverage cannot carry blockers");
+          addIssue("blockers", "Terminal measured coverage cannot carry blockers; use blocked status");
         }
-      } else if (goal.blockers.length === 0) {
-        addIssue("blockers", "Blocked coverage requires at least one typed blocker");
+      } else {
+        if (goal.current_measurement !== null) {
+          addIssue("current_measurement", "Blocked coverage cannot report a measurement");
+        }
+        if (goal.blockers.length === 0) {
+          addIssue("blockers", "Blocked coverage requires at least one typed blocker");
+        }
       }
     }),
   "coverage-goal",
-  1,
+  2,
   "Ultrafuzz invariant coverage goal"
 );
 
@@ -1661,7 +1674,7 @@ export const reportSchema = withDocumentMetadata(
     property_implementation_coverage: z.union([reportCoverageNotPlannedSchema, reportCoverageSchema])
   }),
   "report",
-  2,
+  3,
   "Ultrafuzz terminal report"
 );
 
@@ -1675,7 +1688,7 @@ export const workflowContractSchemas = {
   "ultrafuzz/admin-config-boundary-matrix@1": adminConfigBoundaryMatrixSchema,
   "ultrafuzz/dependency-scope-matrix@1": dependencyScopeMatrixSchema,
   "ultrafuzz/externalized-state-accounting@1": externalizedStateAccountingSchema,
-  "ultrafuzz/coverage-goal@1": coverageGoalSchema,
+  "ultrafuzz/coverage-goal@2": coverageGoalSchema,
   "ultrafuzz/invariant-campaign-plan@2": invariantCampaignPlanSchema,
   "ultrafuzz/campaign-summary@2": campaignSummarySchema,
   "ultrafuzz/differential-plan@1": differentialPlanSchema,
@@ -1693,7 +1706,7 @@ export const workflowContractSchemas = {
   "ultrafuzz/dynamic-strategy-provenance@1": dynamicStrategyProvenanceSchema,
   "ultrafuzz/finding-lifecycle-ledger@1": findingLifecycleLedgerSchema,
   "ultrafuzz/aggregation-manifest@1": aggregationManifestSchema,
-  "ultrafuzz/report@2": reportSchema
+  "ultrafuzz/report@3": reportSchema
 } as const;
 
 export type WorkflowContractId = keyof typeof workflowContractSchemas;
@@ -1714,7 +1727,7 @@ export const adminConfigBoundaryMatrixJsonSchema =
 export const dependencyScopeMatrixJsonSchema = workflowContractJsonSchemas["ultrafuzz/dependency-scope-matrix@1"];
 export const externalizedStateAccountingJsonSchema =
   workflowContractJsonSchemas["ultrafuzz/externalized-state-accounting@1"];
-export const coverageGoalJsonSchema = workflowContractJsonSchemas["ultrafuzz/coverage-goal@1"];
+export const coverageGoalJsonSchema = workflowContractJsonSchemas["ultrafuzz/coverage-goal@2"];
 export const invariantCampaignPlanJsonSchema = workflowContractJsonSchemas["ultrafuzz/invariant-campaign-plan@2"];
 export const campaignSummaryJsonSchema = workflowContractJsonSchemas["ultrafuzz/campaign-summary@2"];
 export const differentialPlanJsonSchema = workflowContractJsonSchemas["ultrafuzz/differential-plan@1"];
@@ -1734,7 +1747,7 @@ export const dynamicStrategyProvenanceJsonSchema =
   workflowContractJsonSchemas["ultrafuzz/dynamic-strategy-provenance@1"];
 export const findingLifecycleLedgerJsonSchema = workflowContractJsonSchemas["ultrafuzz/finding-lifecycle-ledger@1"];
 export const aggregationManifestJsonSchema = workflowContractJsonSchemas["ultrafuzz/aggregation-manifest@1"];
-export const reportJsonSchema = workflowContractJsonSchemas["ultrafuzz/report@2"];
+export const reportJsonSchema = workflowContractJsonSchemas["ultrafuzz/report@3"];
 
 export function validateWorkflowContract(
   contract: WorkflowContractId,
@@ -1786,7 +1799,7 @@ export const WORKFLOW_SCHEMA_FILES = {
   "ultrafuzz/admin-config-boundary-matrix@1": "admin-config-boundary-matrix.schema.json",
   "ultrafuzz/dependency-scope-matrix@1": "dependency-scope-matrix.schema.json",
   "ultrafuzz/externalized-state-accounting@1": "externalized-state-accounting.schema.json",
-  "ultrafuzz/coverage-goal@1": "coverage-goal.schema.json",
+  "ultrafuzz/coverage-goal@2": "coverage-goal.schema.json",
   "ultrafuzz/invariant-campaign-plan@2": "invariant-campaign-plan-v2.schema.json",
   "ultrafuzz/campaign-summary@2": "campaign-summary.schema.json",
   "ultrafuzz/differential-plan@1": "differential-plan.schema.json",
@@ -1804,7 +1817,7 @@ export const WORKFLOW_SCHEMA_FILES = {
   "ultrafuzz/dynamic-strategy-provenance@1": "dynamic-strategy-provenance.schema.json",
   "ultrafuzz/finding-lifecycle-ledger@1": "finding-lifecycle-ledger.schema.json",
   "ultrafuzz/aggregation-manifest@1": "aggregation-manifest.schema.json",
-  "ultrafuzz/report@2": "report.schema.json"
+  "ultrafuzz/report@3": "report.schema.json"
 } as const satisfies Record<WorkflowContractId, string>;
 
 export const WORKFLOW_CONTRACT_DESCRIPTIONS: Record<WorkflowContractId, string> = {
@@ -1818,7 +1831,7 @@ export const WORKFLOW_CONTRACT_DESCRIPTIONS: Record<WorkflowContractId, string> 
   "ultrafuzz/admin-config-boundary-matrix@1": "Typed admin/config surface and selector audit rows.",
   "ultrafuzz/dependency-scope-matrix@1": "Typed external-dependency scope decisions and evidence.",
   "ultrafuzz/externalized-state-accounting@1": "State components, value scenarios, and accounting oracles.",
-  "ultrafuzz/coverage-goal@1": "A bounded scoped-count coverage goal and blocker record.",
+  "ultrafuzz/coverage-goal@2": "A bounded scoped-count coverage goal and blocker record.",
   "ultrafuzz/invariant-campaign-plan@2":
     "The current v2 invariant backend, CPU, full configured Recon interval, supervised deadlines, reserve, paths, and commands.",
   "ultrafuzz/campaign-summary@2": "A strict invariant campaign accounting summary.",
@@ -1839,7 +1852,7 @@ export const WORKFLOW_CONTRACT_DESCRIPTIONS: Record<WorkflowContractId, string> 
     "Dynamic agents, models, commands, files, validation, and excluded context.",
   "ultrafuzz/finding-lifecycle-ledger@1": "The typed evolving lifecycle keyed by dedupe key.",
   "ultrafuzz/aggregation-manifest@1": "Typed generated-test aggregation counts, files, support files, and skips.",
-  "ultrafuzz/report@2": "A strict terminal report with canonical production and non-production findings."
+  "ultrafuzz/report@3": "A strict terminal report with canonical production and non-production findings."
 };
 
 export const WORKFLOW_VALID_EMPTY_EXAMPLES: Partial<Record<WorkflowContractId, string>> = {

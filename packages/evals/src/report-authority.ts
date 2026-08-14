@@ -62,7 +62,7 @@ export function loadBoundEvalReportAuthority(
     throw invalidReportAuthority(record, "verified report names a different run than current run-state authority");
   }
 
-  const report = exactSnapshotOutput(snapshot, snapshot.artifacts.json_path, "ultrafuzz/report@2", "JSON report");
+  const report = exactSnapshotOutput(snapshot, snapshot.artifacts.json_path, "ultrafuzz/report@3", "JSON report");
   const markdown = exactSnapshotOutput(
     snapshot,
     snapshot.artifacts.markdown_path,
@@ -93,7 +93,7 @@ export function loadBoundEvalReportAuthority(
       report_json_sha256: report.sha256,
       report_markdown_path: snapshot.artifacts.markdown_path,
       report_markdown_sha256: markdown.sha256,
-      contract: "ultrafuzz/report@2",
+      contract: "ultrafuzz/report@3",
       contract_digest: report.contract_digest,
       schema_id: report.schema_id,
       schema_sha256: report.schema_sha256,

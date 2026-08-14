@@ -133,7 +133,7 @@ function occurrences(haystack: string, needle: string): number {
 }
 
 describe("prompt rendering", () => {
-  it("renders output-contract guidance from an installed package layout", async () => {
+  it("renders output-contract guidance and prompt partials from an installed package layout", async () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-installed-prompts-"));
     tmpDirs.push(tmp);
     const repoRoot = fileURLToPath(new URL("../../..", import.meta.url));
@@ -167,11 +167,15 @@ describe("prompt rendering", () => {
     const installed = (await import(
       `${pathToFileURL(path.join(distRoot, "render.js")).href}?installed-layout=${Date.now()}`
     )) as { renderPrompt: typeof renderPrompt };
-    const rendered = installed.renderPrompt(baseRenderInput(tmp)).renderedMarkdown;
+    const input = baseRenderInput(tmp);
+    input.prompt = `${input.prompt}\n{{coverage_evidence_markdown_projection}}`;
+    const rendered = installed.renderPrompt(input).renderedMarkdown;
 
     expect(rendered).toContain("For every output declared with `Contract: ultrafuzz/findings@2`");
     expect(rendered).toContain("Validation command: `ultrafuzz json validate --schema");
     expect(rendered).toContain("Contract validation command: `ultrafuzz artifact validate");
+    expect(rendered).toContain("- <scope>: `<covered_ranges>/<total_ranges>`");
+    expect(rendered).toContain("- Status: unavailable");
   });
 
   it("rejects unknown variables before launch", () => {
@@ -489,7 +493,7 @@ describe("prompt rendering", () => {
         contract: output.contract,
         primary: output.primary ?? index === 0,
         description: `${output.contract} smoke output.`,
-        ...(output.contract === "ultrafuzz/report@2" ? { schemaFile: "report.schema.json" } : {})
+        ...(output.contract === "ultrafuzz/report@3" ? { schemaFile: "report.schema.json" } : {})
       }))
     }));
 
@@ -996,7 +1000,7 @@ describe("prompt rendering", () => {
     expect(readFileSync(renderedPath, "utf8")).toBe(result.renderedMarkdown);
   });
 
-  it("renders report-bound finding vocabularies from the shared authority", () => {
+  it("renders authoritative prompt fragments from their shared authorities", () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
@@ -1009,6 +1013,8 @@ describe("prompt rendering", () => {
     expect(rendered).not.toContain("reachability=<summary>");
     expect(rendered).toContain("stateful_failure_classification=<production-bug|harness-defect|");
     input.variables = { finding_reachability_vocabulary: "reachability=renamed" };
+    expect(() => renderPrompt(input)).toThrow(/authoritative and cannot be overridden/u);
+    input.variables = { coverage_evidence_markdown_projection: "replacement" };
     expect(() => renderPrompt(input)).toThrow(/authoritative and cannot be overridden/u);
   });
 });

@@ -133,4 +133,4 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: report.json
-        contract: ultrafuzz/report@2
+        contract: ultrafuzz/report@3
