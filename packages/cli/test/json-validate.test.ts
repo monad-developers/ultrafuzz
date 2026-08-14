@@ -286,6 +286,8 @@ test("json validate diagnostics project exactly through the production planned-o
     assert.equal(envelope.ok, false);
     assert.equal(envelope.data.schema?.registered, true);
     assert.equal(envelope.data.artifact_sha256, digestHostBytes(bytes));
+    // The expanded finding schema is compiled as its own referenced resource,
+    // so Ajv reports keyword locations relative to that resource root.
     assert.deepEqual(envelope.data.diagnostics, [
       {
         code: "JSON_SCHEMA_VIOLATION",
