@@ -171,6 +171,7 @@ describe("prompt rendering", () => {
 
     expect(rendered).toContain("For every output declared with `Contract: ultrafuzz/findings@2`");
     expect(rendered).toContain("Validation command: `ultrafuzz json validate --schema");
+    expect(rendered).toContain("Contract validation command: `ultrafuzz artifact validate");
   });
 
   it("rejects unknown variables before launch", () => {
@@ -300,6 +301,9 @@ describe("prompt rendering", () => {
     expect(result.renderedMarkdown).toContain(
       `Validation command: \`ultrafuzz json validate --schema '${path.join(schemaDirectory, "findings.schema.json")}' --file '${path.join(input.node.artifactDir, "findings.json")}'\``
     );
+    expect(result.renderedMarkdown).toContain(
+      `Contract validation command: \`ultrafuzz artifact validate 'ultrafuzz/findings@2' '${path.join(input.node.artifactDir, "findings.json")}'\``
+    );
     expect(result.renderedMarkdown).toContain(`orchestrator-supplied JSON Schema under \`${schemaDirectory}\``);
     expect(result.renderedMarkdown).toContain("It is the sole authority on JSON versions");
     expect(result.renderedMarkdown).toContain("Prompt prose may add semantic or run-context requirements");
@@ -361,7 +365,7 @@ describe("prompt rendering", () => {
     expect(rendered).not.toContain("For `findings.json`");
   });
 
-  it("renders the pinned schema and exact validation command for every agent-authored JSON output", () => {
+  it("renders the pinned schema and exact validation commands for every agent-authored JSON output", () => {
     const topologyPaths = [
       fileURLToPath(new URL("../../../.ultrafuzz/topology.yml", import.meta.url)),
       fileURLToPath(new URL("../../config/topologies/full.yml", import.meta.url)),
@@ -443,6 +447,9 @@ describe("prompt rendering", () => {
         expect(occurrences(rendered, "Validation command:"), `${topologyPath}:${node.id}`).toBe(
           schemaBackedOutputs.length
         );
+        expect(occurrences(rendered, "Contract validation command:"), `${topologyPath}:${node.id}`).toBe(
+          schemaBackedOutputs.length
+        );
         for (const output of schemaBackedOutputs) {
           const schemaPath = path.join(workspacePath, ".ultrafuzz", "schemas", output.schemaFile);
           const outputPath = path.join(artifactDir, output.path);
@@ -451,6 +458,9 @@ describe("prompt rendering", () => {
           );
           expect(rendered, `${topologyPath}:${node.id}:${output.path}`).toContain(
             `Validation command: \`ultrafuzz json validate --schema '${schemaPath}' --file '${outputPath}'\``
+          );
+          expect(rendered, `${topologyPath}:${node.id}:${output.path}`).toContain(
+            `Contract validation command: \`ultrafuzz artifact validate '${output.contract}' '${outputPath}'\``
           );
         }
       }
@@ -748,9 +758,10 @@ describe("prompt rendering", () => {
 
     expect(result.renderedMarkdown).not.toContain("Validate against:");
     expect(result.renderedMarkdown).not.toContain("Validation command:");
+    expect(result.renderedMarkdown).not.toContain("Contract validation command:");
   });
 
-  it("renders one shell-safe validation command per schema-backed output", () => {
+  it("renders both shell-safe validation commands per schema-backed output", () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
     tmpDirs.push(tmp);
     const specialRoot = path.join(tmp, "path with spaces, '$dollar', and `ticks`");
@@ -758,9 +769,11 @@ describe("prompt rendering", () => {
     const result = renderPrompt(input);
 
     expect(result.renderedMarkdown.match(/Validation command:/gu)).toHaveLength(2);
+    expect(result.renderedMarkdown.match(/Contract validation command:/gu)).toHaveLength(2);
     expect(result.renderedMarkdown).toContain("'\"'\"'");
     expect(result.renderedMarkdown).toContain("$dollar");
     expect(result.renderedMarkdown).toContain("`` ultrafuzz json validate");
+    expect(result.renderedMarkdown).toContain("`` ultrafuzz artifact validate");
     expect(result.renderedMarkdown).toContain("generated-tests.schema.json");
   });
 

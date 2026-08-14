@@ -316,19 +316,21 @@ Topology YAML remains version `2`; the persisted expanded graph uses
 `graphVersion: "4"` and schema ID
 `urn:ultrafuzz:schema:topology:expanded-graph:4` for this binding-bearing shape.
 
-The rendered output contract gives the producer one safely quoted command per
+The rendered output contract gives the producer two safely quoted commands per
 JSON output:
 
 ```bash
 ultrafuzz json validate --schema '<trusted absolute schema path>' --file '<absolute artifact path>'
+ultrafuzz artifact validate '<contract-id>' '<absolute artifact path>'
 ```
 
-The producer runs every command after its final write and before returning.
-Exit `1` means it must correct its own draft and rerun during that same agent
-session; exit `2` is a setup failure; all commands must exit `0`. Any later edit
-requires another run. After the session returns, Ultrafuzz validates the exact
-bytes again and applies named filesystem, Git, digest, uniqueness, and
-cross-artifact gates. It never converts, normalizes, synthesizes, or repairs a
-missing or invalid agent output, and it does not fall back to another file or
+The first checks the pinned schema and the second adds document-local contract
+semantics. The producer runs every command after its final write and before
+returning. Exit `1` means it must correct its own draft and rerun during that
+same agent session; exit `2` is a setup failure; all commands must exit `0`. Any
+later edit requires another run. After the session returns, Ultrafuzz validates
+the exact bytes again and applies named filesystem, Git, digest, uniqueness,
+and cross-artifact gates. It never converts, normalizes, synthesizes, or repairs
+a missing or invalid agent output, and it does not fall back to another file or
 the model's final message. A post-session shape failure is terminal for that
 attempt.

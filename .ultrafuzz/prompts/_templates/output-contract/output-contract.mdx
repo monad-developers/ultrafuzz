@@ -9,13 +9,13 @@ Before finishing, you MUST ensure every artifact below exists and satisfies its 
 For every schema-backed JSON artifact:
 
 1. Write the artifact in its canonical schema.
-2. After your final write and before returning the node's final response, run every exact `Validation command` shown above.
+2. After your final write and before returning the node's final response, run every exact `Validation command` and `Contract validation command` shown above.
 3. If a command exits 1, correct that artifact yourself and rerun the same command during this session.
 4. If you change an artifact after it passes validation, rerun its command.
 5. Never edit a supplied schema. Its bytes are pinned and the command accepts it only when they match the trusted digest.
 6. Exit 2 is a setup or tool failure. Do not edit the schema or claim validation succeeded.
 7. Finish only after every displayed validation command exits 0.
 8. The validation command never modifies the artifact.
-9. Host semantic and context verification still runs after you finish.
+9. Contract validation covers document-local semantics only. Host semantic and context verification still runs after you finish.
 
 After completing the work and writing every required artifact, return only the structured task result requested by the runtime. The runtime's output schema alone owns that response's keys, types, and envelope. Put a concise description of the completed work and written artifacts in its schema-defined summary value. Do not add Markdown fences, introductory text, explanations, or any content outside the structured result, and do not omit the result when the work succeeds.

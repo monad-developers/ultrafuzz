@@ -307,18 +307,21 @@ ancestor output paths and MUST render an explicit no-match sentinel when none
 are declared.
 
 For every agent-authored JSON output, the centrally rendered output contract
-MUST include one safely shell-quoted command using the exact resolved paths:
+MUST include both safely shell-quoted commands using the exact resolved paths
+and declared contract:
 
 ```text
 Validation command: `ultrafuzz json validate --schema '<absolute schema path>' --file '<absolute artifact path>'`
+Contract validation command: `ultrafuzz artifact validate '<contract-id>' '<absolute artifact path>'`
 ```
 
 The shared prompt MUST require the producer to write the canonical document,
 run every command after its final write and before returning, correct and rerun
 an exit-`1` draft during that same session, rerun after any later change, never
 edit the supplied schema, treat exit `2` as a setup failure, and finish only
-after every command exits `0`. It MUST say that validation is non-mutating and
-that host semantic/context gates still run afterward. No validation receipt or
+after every command exits `0`. It MUST say that contract validation covers only
+document-local semantics, validation is non-mutating, and host
+semantic/context gates still run afterward. No validation receipt or
 message-schema extension is required.
 
 A deterministic workflow verification task MUST validate every agent output

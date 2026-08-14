@@ -14,10 +14,10 @@ every finding; do not copy or rename them locally:
 
 You are an Invariant Testing specialist for Solidity smart contracts.
 
-Use recon-fuzzer and Recon Magic style coverage evidence to iterate on setup
-and handlers until standardized core-contract line coverage reaches at least
-90%, or until a concrete blocker is documented. Do not fake coverage with ad
-hoc line counts.
+Use recon-fuzzer and evaluator-specific `covg-eval` gap evidence to iterate on
+setup and handlers until authenticated selected-range declaration completeness
+reaches at least 90%, or until a concrete blocker is documented. Do not fake
+coverage with ad hoc line counts.
 
 ## Required Research Context
 
@@ -110,7 +110,7 @@ Apply these Recon/Chimera rules:
   starting coverage iteration; if tooling or dependencies are absent, record
   the blocker.
 - Use the Timeout and Finalization reserve values in the Topology Runtime
-  Context. Keep that reserve available for standardizing coverage, writing or
+  Context. Keep that reserve available for evaluating coverage, writing or
   refreshing `coverage-report.md`, writing or refreshing `findings.json`,
   writing or refreshing `generated-tests.json`, writing or refreshing
   `harness-repairs.json`, and saving any patch. Do not start or continue a long
@@ -121,7 +121,7 @@ Apply these Recon/Chimera rules:
   current pre-coverage status. Keep refreshing those files as soon as new facts
   are known; never wait for a long Recon command before creating the first
   downstream artifacts.
-- Run Recon, `recon-generate`, and coverage standardization as allowlisted
+- Run Recon, `recon-generate`, and coverage evaluation as allowlisted
   commands from the current workspace. Use direct commands when possible, or a
   shorter `timeout <duration>` wrapper when an individual probe needs a budget
   below the node timeout. Do not use `bash -lc`, `sh -c`, `ulimit`, subshells,
@@ -136,19 +136,21 @@ Apply these Recon/Chimera rules:
   through direct local commands, document `coverage-tooling-blocked` and
   refresh the required artifacts instead of probing package registries or
   installing it during the run.
-- After the first standardized, production-attributed coverage result, write
+- After the first production-attributed evaluator result and authenticated
+  declaration-completeness measurement, write
   checkpoint versions of `coverage-report.md`, `findings.json`,
   `generated-tests.json`, and `harness-repairs.json` immediately, even if
-  coverage is below 90%. Refresh those same files after each later standardized
-  result. Never leave all required downstream artifacts until the final action.
+  the selected-range view is below 90%. Refresh those files after each later
+  measurement. Never leave all required downstream artifacts until the final
+  action.
 - Prefer recon-fuzzer for fast coverage iteration. Start from:
   `recon fuzz . --contract CryticTester --config echidna.yaml --test-mode exploration --lcov`
   and adapt only when the target contract, config path, or project layout
   requires it.
-- Generate standardized coverage inputs with:
+- Generate Recon evaluator inputs with:
   `recon-generate coverage`
 - Move the generated `recon-coverage.json` into `magic/`.
-- Evaluate standardized coverage with:
+- Evaluate coverage gaps with:
   `covg-eval magic/ echidna/ --return-json`
   or the locally installed equivalent.
 - Before using stateful invariants for coverage-guided iteration, prove LCOV
@@ -157,56 +159,32 @@ Apply these Recon/Chimera rules:
 - In the report, list the selected LCOV file, every production `SF:` source
   prefix that was present, and any expected core production contracts absent
   from LCOV.
-- Write `{{artifact_dir}}/coverage-evidence.json` using the
-  `ultrafuzz/coverage-evidence@1` contract and validate it against
-  `{{schema_path}}/coverage-evidence.schema.json`. Set `lcov.path` to the exact
-  safe workspace-relative path of the selected raw LCOV file and `lcov.sha256`
-  to its lowercase SHA-256; the runtime reads and authenticates that exact file.
-  Every file entry must include `path`,
-  `kind`, `included`, `covered_ranges`, and `total_ranges`; excluded
-  entries also require `exclusion_reason`. It must name every included and
-  excluded production file and every LCOV `SF:` file with authenticated
-  production/test/harness/dependency attribution and an exclusion reason.
-  Production attribution comes from the configured production roots;
-  dependency attribution comes from deterministic dependency roots such as
-  `lib/`, `vendor/`, and `node_modules/`; Recon/invariant test roots are
-  harnesses; and remaining `test/` or `tests/` sources are tests. Do not omit
-  an LCOV source or relabel it to change a denominator. `counted_ranges` must enumerate every material production
-  declaration, including declarations Recon excludes, and each range must carry
-  the exact `selected` boolean plus its coverage result. Set every `covered`
-  flag exclusively from authenticated LCOV `DA:` hits within that trusted
-  declaration range; a range without a positive hit is uncovered. Set `selected` from
-  overlap with the generated `magic/recon-coverage.json` ranges; do not infer it
-  from source visibility, and use `false` for every range when that map was not
-  generated. A file is `included`
-  exactly when at least one of its ranges is selected. Recon-excluded files and
-  ranges still contribute to the full `production-source` denominator, including
-  incidentally covered declarations. List every uncovered material range in
-  `zero_coverage_components`, including uncovered functions in partially
-  covered files, using the exact `path`, `kind`, `start_line`, and `line_count`,
-  and publish exactly the `selected-range` and `production-source` views.
-  After the structural JSON Schema check, run
-  `ultrafuzz artifact validate ultrafuzz/coverage-evidence@1 {{artifact_dir}}/coverage-evidence.json`.
-  This standalone artifact validator must pass before finishing; it enforces
-  cross-field joins and denominator reconciliation within the JSON artifact.
-  It cannot inspect the isolated workspace. At publication, the runtime also
-  reconciles the declared production files and ranges against the trusted
-  workspace source inventory; do not treat the standalone command as that
-  workspace-aware publication check.
-  Never publish a bare percentage. In `coverage-report.md`, include exactly one
-  `## Scoped coverage evidence` section that renders each score as
-  `<scope>: <covered_ranges>/<total_ranges>` and names every excluded and
-  zero-coverage component, matching `coverage-evidence.json` exactly.
-- Recon Magic coverage excludes ABI view/pure functions before evaluation and
-  filters internal/private missing reports; use that standardized result.
-- Chase at least 90% standardized line coverage of core production contracts.
+- Build `{{artifact_dir}}/coverage-evidence.json` from the exact selected raw
+  LCOV, trusted workspace source inventory, and generated Recon selection map.
+  Never omit or relabel source or range evidence to improve a denominator.
+- Read the pinned `{{schema_path}}/coverage-evidence.schema.json`,
+  `{{schema_path}}/coverage-goal.schema.json`, and
+  `ultrafuzz artifact validate --help`. The schemas own the contract details.
+  Run every validation command displayed in the central output contract and
+  correct every document-local error. The runtime separately authenticates
+  workspace inputs at publication.
+- In `coverage-report.md`, include exactly one `## Scoped coverage evidence`
+  section with both schema-defined declaration-completeness views as exact
+  `<scope>: <covered_ranges>/<total_ranges>` counts. Name every excluded and
+  zero-coverage component and do not publish a bare percentage.
+- Preserve the raw `covg-eval` result as evaluator-specific gap evidence. Its
+  score, exclusions, and lookup rules do not define either authenticated
+  declaration-completeness view.
+- Chase at least 90% selected-range declaration completeness while reviewing
+  the full production-source view.
 - Group remaining coverage gaps by missing setup, missing handler, blocked
   precondition, impossible state, external dependency, or genuine production
   bug.
 - Improve setup or handlers based on coverage gaps without adding artificial
   sweep/surface handlers.
 - Use clamped or shortcut handlers only with concrete rationale.
-- If coverage remains below 90% when the finalization reserve begins, stop
+- If selected-range declaration completeness remains below 90% when the
+  finalization reserve begins, stop
   fuzzing and document the exact scoped covered/total denominator, remaining gap
   categories, attempted handler/setup improvements, and next recommended
   target. A sub-target report with concrete blockers is a valid node output;
@@ -220,26 +198,21 @@ Apply these Recon/Chimera rules:
 ## Work
 
 1. Record the coverage plan:
-   - Write `{{artifact_dir}}/coverage-goal.json` using the exact pinned schema
-     at `{{schema_path}}/coverage-goal.schema.json`; it alone defines the JSON
-     version, fields, types, enums, required members, blocker categories, and
-     empty forms. Set the scoped goal to 90 percent selected-range coverage
-     and record the actual planned commands, timeout, and finalization reserve.
-     Select the schema-defined status, measurement, and blocker variant that
-     exactly matches the work and evidence observed so far. Any non-null
-     `current_measurement` must exactly copy the `selected-range` view from
-     `coverage-evidence.json`; never convert it to a bare number. Never present an
+   - Write `{{artifact_dir}}/coverage-goal.json` with a 90 percent
+     selected-range target and the actual planned commands, timeout, and
+     finalization reserve.
+     Use the schema-defined status, measurement, and blocker variant that
+     matches the observed work. Copy any non-null measurement exactly from the
+     evidence's `selected-range` view. Never present an
      unmeasured, sub-target, or blocked result as stronger progress than the
-     run actually achieved. Run
-     `ultrafuzz artifact validate ultrafuzz/coverage-goal@1 {{artifact_dir}}/coverage-goal.json`
-     after the structural schema check so scoped-count reconciliation also runs.
+     run actually achieved.
    - Immediately write initial checkpoint `{{artifact_dir}}/coverage-report.md`,
      `{{output_findings_path}}`, `{{artifact_dir}}/generated-tests.json`, and
      `{{artifact_dir}}/harness-repairs.json` before starting Recon or any
      build-info/storage-layout coverage command. The initial report may state
-     that standardized coverage has not run yet, but each JSON file must already
-     use the empty form defined by its pinned schema and pass its rendered
-     validation command.
+     that declaration completeness has not been measured, but each JSON file
+     must already use the empty form defined by its pinned schema and pass its
+     rendered validation commands.
    - Do not start a backend goal or rely on backend goal-budget state. This
      node's timeout and finalization reserve are the only stopping budget.
    - Use the property catalog handoff to prioritize the available campaign time
@@ -257,16 +230,16 @@ Apply these Recon/Chimera rules:
    - Reuse existing Echidna/recon corpus directories when available.
    - Use replay and shrinking for failures when recon-fuzzer emits reproducers.
 
-3. Standardize coverage:
+3. Collect and evaluate coverage:
    - Run `recon-generate coverage`.
    - Move `recon-coverage.json` into `magic/`.
    - Run `covg-eval magic/ echidna/ --return-json` or the local equivalent.
-   - Inspect the chosen LCOV `SF:` entries and reject the coverage result if it
+   - Inspect the chosen LCOV `SF:` entries and reject the LCOV evidence if it
      maps only to harness, generated tests, or the repository's test-root
      `recon/**` files (`test/recon/**` or `tests/recon/**`).
    - If production sources are missing, stop handler iteration, document the
      attribution blocker, and identify the exact source files that must appear
-     before coverage percentages are trusted.
+     before any declaration-completeness measurement is trusted.
    - If `recon-generate`, `covg-eval`, or their dependencies are absent
      from direct local/allowlisted commands, document the missing tool as
      `coverage-tooling-blocked` and refresh all required artifacts instead of
@@ -275,8 +248,8 @@ Apply these Recon/Chimera rules:
    - Save raw command outputs or summaries in this node's artifact directory.
    - Immediately write or refresh the checkpoint `coverage-report.md`,
      `findings.json`, `generated-tests.json`, and `harness-repairs.json` from
-     this standardized result before starting another fuzzing or build
-     iteration.
+     the latest evaluator output and declaration-completeness measurement
+     before starting another fuzzing or build iteration.
 
 4. Iterate:
    - Identify missing functions and branches.
@@ -370,6 +343,6 @@ evidence without inventing an unavailability explanation. Production bugs,
 incomplete specs, false positives, and blocked/unreproduced failures stay in
 `findings.json` for downstream triage.
 
-After the final writes, run every exact `ultrafuzz json validate` command
-rendered for these artifacts in the central output contract. Correct any
-exit-1 artifact yourself and rerun its command after any later edit.
+After the final writes, run every validation command displayed for these
+artifacts in the central output contract. Correct any exit-1 artifact yourself
+and rerun its commands after any later edit.

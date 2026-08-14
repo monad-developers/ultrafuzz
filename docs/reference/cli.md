@@ -12,6 +12,7 @@ accept `--json` and emit the `ultrafuzz.cli.result.v2` envelope.
 | `ultrafuzz init`                        | Create root config plus `.ultrafuzz/**` product surfaces and workflow plumbing.                                |
 | `ultrafuzz validate`                    | Validate config, topology, prompts, path guards, agent references, and trust posture without launching agents. |
 | `ultrafuzz json validate`               | Validate one JSON document against a strict local Draft 2020-12 schema without mutation.                       |
+| `ultrafuzz artifact validate`           | Validate a declared artifact's registered schema and document-local semantic gates.                            |
 | `ultrafuzz run`                         | Validate, render prompts, build run evidence, compile a workflow, and launch a linked workflow run.            |
 | `ultrafuzz config audit-profiles`       | List shipped audit profiles, intended uses, and selected topologies.                                           |
 | `ultrafuzz config audit-profile <name>` | Show one profile's effective project topology and settings.                                                    |
@@ -168,12 +169,27 @@ before model work. Modal uses a root-owned, read-only
 identity is an exit-`2` setup failure, not a reason to use another binary or
 edit the supplied schema.
 
-Producer prompts display one exact command per JSON output. The producer must
-run every command after its final write and before returning; an exit `1` draft
-is corrected and rerun in the same session. Once the session returns, the host
-checks the same bytes and then applies named semantic/context gates. It never
-repairs, converts, normalizes, synthesizes, or falls back to another artifact,
-and post-session shape failure is terminal rather than a model retry.
+Producer prompts display exact schema and contract validation commands for each
+JSON output. The producer must run every command after its final write and
+before returning; an exit `1` draft is corrected and rerun in the same session.
+Once the session returns, the host checks the same bytes and then applies named
+semantic/context gates. It never repairs, converts, normalizes, synthesizes, or
+falls back to another artifact, and post-session shape failure is terminal
+rather than a model retry.
+
+## Artifact Validate
+
+```bash
+ultrafuzz artifact validate <contract-id> <artifact-path> [--json]
+```
+
+Use the contract ID and path declared in the rendered Ultrafuzz Output Contract.
+The command applies the contract's registered JSON Schema and every
+document-local semantic gate, reporting failures without modifying the file.
+It does not authenticate workspace inputs or evaluate cross-artifact or run
+context. The runtime performs those publication checks after the producer
+finishes. Run `ultrafuzz artifact validate --help` for the current positional
+arguments.
 
 ## Run
 
