@@ -1,15 +1,18 @@
 `report.md` and the coverage producer's Markdown use exactly one canonical
-section. Preserve array order and apply the standard public-inline sanitization
-to dynamic values: redact secrets and private paths, collapse and trim
-whitespace, replace backticks with apostrophes, and use `unavailable` for a
-blank value. Measured evidence uses:
+section and preserve array order. Apply public-inline sanitization to code-like
+fields: redact secrets and private paths, collapse whitespace, replace
+backticks with apostrophes, and use `unavailable` when blank. Apply public-prose
+sanitization to `<summary>` and `<exclusion_reason>`: use the same redaction,
+whitespace, and fallback rules, then escape backslashes and Markdown code,
+emphasis, link, image, heading, and strikethrough delimiters plus HTML angle
+brackets. Measured evidence uses:
 
 ```text
 ## Scoped coverage evidence
 
 - <scope>: `<covered_ranges>/<total_ranges>`
 
-Excluded components:
+Excluded from Recon-selected scope:
 - None
 
 Zero-coverage components:
@@ -34,5 +37,5 @@ Blockers:
 
 Repeat blocker and evidence rows in artifact order. Runtime publication compares
 this section with the typed handoff and rejects missing, duplicated, reordered,
-or bare coverage scores. Raw `covg-eval` output remains separate evaluator
-evidence and does not define either declaration-completeness view.
+or bare coverage scores. Raw `covg-eval` output is for iteration only and
+defines neither published declaration-completeness view.

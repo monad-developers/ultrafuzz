@@ -395,7 +395,9 @@ export function renderCoverageEvidenceMarkdownSection(value: unknown): string[] 
   if (value.status === "unavailable" && Array.isArray(value.blockers)) {
     lines.push("- Status: unavailable", "", "Blockers:");
     for (const blocker of value.blockers.filter(isRecord)) {
-      lines.push(`- ${inlineValue(blocker.category)}: ${inlineValue(blocker.summary)}`);
+      lines.push(
+        `- ${inlineValue(blocker.category)}: ${isAvailable(blocker.summary) ? publicProse(String(blocker.summary)) : "unavailable"}`
+      );
       const evidencePaths = Array.isArray(blocker.evidence_paths) ? blocker.evidence_paths : [];
       for (const evidencePath of evidencePaths) lines.push(`  - Evidence: \`${inlineValue(evidencePath)}\``);
     }
@@ -410,12 +412,12 @@ export function renderCoverageEvidenceMarkdownSection(value: unknown): string[] 
   const excluded = Array.isArray(value.files)
     ? value.files.filter((entry): entry is JsonRecord => isRecord(entry) && entry.included === false)
     : [];
-  lines.push("", "Excluded components:");
+  lines.push("", "Excluded from Recon-selected scope:");
   if (excluded.length === 0) lines.push("- None");
   else {
     for (const entry of excluded) {
       lines.push(
-        `- \`${inlineValue(entry.path)}\` (${inlineValue(entry.kind)}): ${inlineValue(entry.exclusion_reason)}`
+        `- \`${inlineValue(entry.path)}\` (${inlineValue(entry.kind)}): ${isAvailable(entry.exclusion_reason) ? publicProse(String(entry.exclusion_reason)) : "unavailable"}`
       );
     }
   }
@@ -865,6 +867,7 @@ function publicProse(value: string): string {
     .replaceAll("]", "\\]")
     .replaceAll("!", "\\!")
     .replaceAll("#", "\\#")
+    .replaceAll("~", "\\~")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;");
 }

@@ -5416,6 +5416,7 @@ function productionContractSourceFiles(workspacePath: string, productionRoots: r
       if (entry.isSymbolicLink())
         throw new Error(`Coverage production source inventory contains symlink ${relativePath}`);
       if (entry.isDirectory()) {
+        if (nestedProductionDirectoryIsExcluded(entry.name)) continue;
         visit(path.join(directory, entry.name), relativePath);
       } else if (entry.isFile() && productionExtensions.has(path.extname(entry.name))) {
         if (results.length >= MAX_COVERAGE_EVIDENCE_FILES) {
@@ -5446,6 +5447,15 @@ function productionContractSourceFiles(workspacePath: string, productionRoots: r
     throw new Error("Coverage production source roots contain no Solidity or Vyper production sources");
   }
   return results.sort();
+}
+
+function nestedProductionDirectoryIsExcluded(directoryName: string): boolean {
+  const normalized = directoryName.toLowerCase();
+  return (
+    (COVERAGE_DEPENDENCY_DIRECTORY_NAMES.has(normalized) && normalized !== "lib" && normalized !== "libs") ||
+    COVERAGE_TEST_DIRECTORY_NAMES.has(normalized) ||
+    COVERAGE_HARNESS_DIRECTORY_NAMES.has(normalized)
+  );
 }
 
 function isMissingFileError(error: unknown): boolean {
@@ -6787,11 +6797,14 @@ function coverageEvidenceMarkdownProjectionDiagnostics(
     .filter((line) => line.length > 0);
   const sections = markdownSectionOccurrences(markdown, "## Scoped coverage evidence");
   const renderedLines = sections[0]?.filter((line) => line.length > 0);
-  const visibleHeadingCount = renderedMarkdownBlocks(markdown).filter(
+  const renderedDocument = renderedMarkdownDocument(markdown);
+  const visibleHeadingCount = renderedDocument.blocks.filter(
     (block) => block.headingDepth === 2 && block.text.trim() === "Scoped coverage evidence"
   ).length;
   const globalScoresMatch = coverageEvidenceGlobalScoresMatch(evidence, markdownCoverageScoreOccurrences(markdown));
-  return visibleHeadingCount === 1 &&
+  return !renderedDocument.stylesheet &&
+    !renderedDocument.unsupportedSelect &&
+    visibleHeadingCount === 1 &&
     sections.length === 1 &&
     renderedLines !== undefined &&
     sameStringSequence(renderedLines, expectedLines) &&
@@ -6812,18 +6825,47 @@ function coverageEvidenceMarkdownProjectionDiagnostics(
 const exactCoverageScopes = ["recon-selected-declaration-completeness", "production-declaration-completeness"] as const;
 type ExactCoverageScope = (typeof exactCoverageScopes)[number];
 const exactCoverageScopePatternSource = exactCoverageScopes.join("|");
+const normalizedCoverageScopeStrings = exactCoverageScopes.map((scope) =>
+  scope.normalize("NFKC").toLocaleLowerCase("en-US")
+);
+const MAX_PUBLISHED_COVERAGE_SCORE_CANDIDATES = 2_048;
 type MarkdownCoverageScoreOccurrence = {
   line: number;
   score: string;
   kind: "percentage" | "fraction";
   scopes: ExactCoverageScope[];
   hasCoverageContext: boolean;
+  overflow?: true;
 };
 
-function markdownCoverageScoreOccurrences(contents: string): MarkdownCoverageScoreOccurrence[] {
+type CoverageScoreScanBudget = {
+  remainingScoreCandidates: number;
+  remainingScopeCandidates: number;
+  overflowed: boolean;
+};
+
+function coverageScoreScanBudget(): CoverageScoreScanBudget {
+  return {
+    remainingScoreCandidates: MAX_PUBLISHED_COVERAGE_SCORE_CANDIDATES,
+    remainingScopeCandidates: MAX_PUBLISHED_COVERAGE_SCORE_CANDIDATES,
+    overflowed: false
+  };
+}
+
+function coverageScoreScanOverflowOccurrence(line: number): MarkdownCoverageScoreOccurrence {
+  return { line, score: "", kind: "fraction", scopes: [], hasCoverageContext: true, overflow: true };
+}
+
+function markdownCoverageScoreOccurrences(
+  contents: string,
+  initialCoverageSectionContext = false,
+  budget = coverageScoreScanBudget()
+): MarkdownCoverageScoreOccurrence[] {
+  if (budget.overflowed) return [];
   let coverageHeadingDepth: number | undefined;
-  let coverageLabelSection = false;
-  return renderedMarkdownBlocks(contents).flatMap((block) => {
+  let coverageLabelSection = initialCoverageSectionContext;
+  const occurrences: MarkdownCoverageScoreOccurrence[] = [];
+  for (const block of renderedMarkdownBlocks(contents)) {
     if (block.headingDepth !== undefined) {
       if (coverageHeadingText(block.text)) {
         coverageHeadingDepth = block.headingDepth;
@@ -6835,8 +6877,12 @@ function markdownCoverageScoreOccurrences(contents: string): MarkdownCoverageSco
     if (standaloneCoverageLabel(block.text)) coverageLabelSection = true;
     const coverageSectionContext =
       coverageHeadingDepth !== undefined || coverageLabelSection || coverageTableLabel(block.text);
-    return coverageScoreOccurrencesInRenderedLine(block.text, block.lineNumber, coverageSectionContext);
-  });
+    occurrences.push(
+      ...coverageScoreOccurrencesInRenderedLine(block.text, block.lineNumber, coverageSectionContext, budget)
+    );
+    if (budget.overflowed) return [coverageScoreScanOverflowOccurrence(block.lineNumber)];
+  }
+  return occurrences;
 }
 
 function coverageEvidenceGlobalScoresMatch(
@@ -6844,6 +6890,7 @@ function coverageEvidenceGlobalScoresMatch(
   occurrences: readonly MarkdownCoverageScoreOccurrence[]
 ): boolean {
   if (!isRecord(evidence)) return false;
+  if (occurrences.some((occurrence) => occurrence.overflow === true)) return false;
   const expected = new Map<ExactCoverageScope, string>();
   if (evidence.status === "measured" && Array.isArray(evidence.views)) {
     for (const view of evidence.views) {
@@ -6877,16 +6924,40 @@ function unscopedCoverageScoreDiagnostics(
   artifactPath: string,
   everyScoreIsCoverage: boolean
 ): RuntimeDiagnostic[] {
-  return unscopedCoverageScoreOccurrences(contents, everyScoreIsCoverage).flatMap((occurrence) => [
-    {
-      code: "UNSCOPED_COVERAGE_SCORE",
-      message: "Published coverage scores must name an exact declaration-completeness scope on the same line",
-      severity: "error" as const,
+  const diagnostics = unscopedCoverageScoreOccurrences(contents, everyScoreIsCoverage).flatMap((occurrence) =>
+    occurrence.overflow === true
+      ? [reportCoverageScoreDiagnostic(occurrence, artifactPath)]
+      : [
+          {
+            code: "UNSCOPED_COVERAGE_SCORE",
+            message: "Published coverage scores must name an exact declaration-completeness scope on the same line",
+            severity: "error" as const,
+            source: "coverage-evidence",
+            path: `${artifactPath}:${occurrence.line}`
+          },
+          reportCoverageScoreDiagnostic(occurrence, artifactPath)
+        ]
+  );
+  const renderedDocument = renderedMarkdownDocument(contents);
+  if (renderedDocument.stylesheet) {
+    diagnostics.unshift({
+      code: "COVERAGE_MARKDOWN_STYLESHEET_UNSUPPORTED",
+      message: "Published coverage Markdown must not include a stylesheet that can alter score visibility",
+      severity: "error",
       source: "coverage-evidence",
-      path: `${artifactPath}:${occurrence.line}`
-    },
-    reportCoverageScoreDiagnostic(occurrence, artifactPath)
-  ]);
+      path: artifactPath
+    });
+  }
+  if (renderedDocument.unsupportedSelect) {
+    diagnostics.unshift({
+      code: "COVERAGE_MARKDOWN_SELECT_UNSUPPORTED",
+      message: "Published coverage Markdown must not use a select control with ambiguous visible option text",
+      severity: "error",
+      source: "coverage-evidence",
+      path: artifactPath
+    });
+  }
+  return diagnostics;
 }
 
 function unscopedReportCoverageScoreDiagnostics(contents: string, artifactPath: string): RuntimeDiagnostic[] {
@@ -6896,10 +6967,12 @@ function unscopedReportCoverageScoreDiagnostics(contents: string, artifactPath: 
 function reportCoverageScoreDiagnostics(
   contents: string,
   artifactPath: string,
-  everyScoreIsCoverage: boolean
+  everyScoreIsCoverage: boolean,
+  initialCoverageSectionContext = false,
+  budget = coverageScoreScanBudget()
 ): RuntimeDiagnostic[] {
-  return unscopedCoverageScoreOccurrences(contents, everyScoreIsCoverage).map((occurrence) =>
-    reportCoverageScoreDiagnostic(occurrence, artifactPath)
+  return unscopedCoverageScoreOccurrences(contents, everyScoreIsCoverage, initialCoverageSectionContext, budget).map(
+    (occurrence) => reportCoverageScoreDiagnostic(occurrence, artifactPath)
   );
 }
 
@@ -6907,6 +6980,15 @@ function reportCoverageScoreDiagnostic(
   occurrence: MarkdownCoverageScoreOccurrence,
   artifactPath: string
 ): RuntimeDiagnostic {
+  if (occurrence.overflow === true) {
+    return {
+      code: "COVERAGE_SCORE_SCAN_LIMIT_EXCEEDED",
+      message: `Published coverage text exceeds the ${MAX_PUBLISHED_COVERAGE_SCORE_CANDIDATES}-candidate scan limit`,
+      severity: "error",
+      source: "coverage-evidence",
+      path: `${artifactPath}:${occurrence.line}`
+    };
+  }
   const percentage = occurrence.kind === "percentage";
   return {
     code: percentage ? "UNSCOPED_COVERAGE_PERCENTAGE" : "UNSCOPED_COVERAGE_FRACTION",
@@ -6921,9 +7003,11 @@ function reportCoverageScoreDiagnostic(
 
 function unscopedCoverageScoreOccurrences(
   contents: string,
-  everyScoreIsCoverage: boolean
+  everyScoreIsCoverage: boolean,
+  initialCoverageSectionContext = false,
+  budget = coverageScoreScanBudget()
 ): MarkdownCoverageScoreOccurrence[] {
-  return markdownCoverageScoreOccurrences(contents).filter(
+  return markdownCoverageScoreOccurrences(contents, initialCoverageSectionContext, budget).filter(
     (occurrence) => coverageScoreHasContext(occurrence, everyScoreIsCoverage) && occurrence.scopes.length !== 1
   );
 }
@@ -6931,13 +7015,32 @@ function unscopedCoverageScoreOccurrences(
 function coverageScoreOccurrencesInRenderedLine(
   line: string,
   lineNumber: number,
-  coverageSectionContext: boolean
+  coverageSectionContext: boolean,
+  budget: CoverageScoreScanBudget
 ): MarkdownCoverageScoreOccurrence[] {
   const score = new RegExp(COVERAGE_SCORE_PATTERN_SOURCE, "giu");
   const namedScope = new RegExp(`\\b(?:${exactCoverageScopePatternSource})\\b`, "giu");
   const normalizedLine = normalizeCoverageScoreText(line);
-  const scores = [...normalizedLine.matchAll(score)];
-  const scopes = [...normalizedLine.matchAll(namedScope)];
+  const scores: RegExpMatchArray[] = [];
+  for (const match of normalizedLine.matchAll(score)) {
+    if (budget.remainingScoreCandidates === 0) {
+      budget.overflowed = true;
+      return [];
+    }
+    budget.remainingScoreCandidates -= 1;
+    if (coverageScoreUsesUnambiguousSyntax(normalizedLine, match)) scores.push(match);
+  }
+  if (scores.length === 0) return [];
+  const scopes: RegExpMatchArray[] = [];
+  for (const match of normalizedLine.matchAll(namedScope)) {
+    if (budget.remainingScopeCandidates === 0) {
+      budget.overflowed = true;
+      return [];
+    }
+    budget.remainingScopeCandidates -= 1;
+    scopes.push(match);
+  }
+  const scopesByScore = exactCoverageScopeBindings(normalizedLine, scopes, scores);
   const scoreHasCoverageContext: boolean[] = [];
   return scores.map((match, index) => {
     const previous = scores[index - 1];
@@ -6946,9 +7049,7 @@ function coverageScoreOccurrencesInRenderedLine(
       previous === undefined ? 0 : previous.index! + previous[0].length,
       next === undefined ? normalizedLine.length : next.index!
     );
-    const boundScopes = scopes
-      .filter((scope) => exactCoverageScopeBindsScore(normalizedLine, scope, match, scores))
-      .map((scope) => scope[0].toLowerCase() as ExactCoverageScope);
+    const boundScopes = scopesByScore[index]!;
     const hasCoverageContext =
       boundScopes.length > 0 ||
       coverageMetricScoreLanguageContext(contextRegion) ||
@@ -6958,7 +7059,7 @@ function coverageScoreOccurrencesInRenderedLine(
     return {
       line: lineNumber,
       score: match[0].replace(/\s+/gu, ""),
-      kind: /%|\bper[ -]?cent(?:age)?\b/iu.test(match[0]) ? "percentage" : "fraction",
+      kind: /%|\bpct\b\.?|\bper[ -]?cent(?:age)?\b/iu.test(match[0]) ? "percentage" : "fraction",
       scopes: boundScopes,
       hasCoverageContext
     };
@@ -6970,44 +7071,104 @@ function coverageScoreHasContext(occurrence: MarkdownCoverageScoreOccurrence, ev
 }
 
 function coverageContinuationScoreLanguageContext(value: string): boolean {
-  const qualifier = `(?:aggregate|branch|code|function|global|line|overall|range|source|test|total|unscoped|${exactCoverageScopePatternSource})`;
-  const determiner = "(?:(?:its|that|the|their|this)[ \\t]+)?";
-  const conjunction =
-    "(?:(?:(?:and|but|plus|versus|vs\\.?|whereas|while|with)[ \\t]+|compared[ \\t]+(?:to|with)[ \\t]+|[&+][ \\t]*))?";
-  const priorScope = `(?:(?:${exactCoverageScopePatternSource})[ \\t]+)?`;
-  const link =
-    "(?:(?:coverage|measurement|metric|percent(?:age)?|rate|result|score|value)[ \\t]+)?(?:(?::|=)|(?:is|was|measured|reached|remained|registered|reported|totaled|yielded|came[ \\t]+to|stood[ \\t]+at)\\b)?";
-  return (
-    new RegExp(
-      `^[\\s,;:()[\\]{}\\u2013\\u2014-]*${priorScope}${conjunction}${determiner}${qualifier}[ \\t]*${link}[ \\t]*${COVERAGE_SCORE_PATTERN_SOURCE}`,
-      "iu"
-    ).test(value) ||
-    new RegExp(
-      `^[\\s,;:()[\\]{}\\u2013\\u2014-]*${priorScope}${conjunction}${COVERAGE_SCORE_PATTERN_SOURCE}[ \\t]+(?:for[ \\t]+|of[ \\t]+|in[ \\t]+|at[ \\t]+)?(?:the[ \\t]+)?${qualifier}\\b`,
-      "iu"
-    ).test(value)
-  );
+  return COVERAGE_CONTINUATION_SCORE_CONTEXT_PATTERNS.some((pattern) => pattern.test(value));
 }
 
 function coverageSectionScoreLanguageContext(value: string): boolean {
-  const tableCellScore = new RegExp("(?:^|\\|)[ \\t]*" + COVERAGE_SCORE_PATTERN_SOURCE + "[ \\t]*(?:\\||$)", "iu");
-  const qualifier =
-    "(?:(?:aggregate|branch|code|function|global|line|overall|range|source|test|total|unscoped)[ \\t]+)?";
-  const label =
-    "(?:(?:coverage|measurement|metric|percent(?:age)?|rate|result|score|value)[ \\t]*(?::|=|is\\b|was\\b)?[ \\t]*)?";
-  const unit = "(?:branches?|code|covered|functions?|lines?|ranges?|source|tests?)?";
-  return (
-    new RegExp(
-      `^[\\s|*_\\x60()[\\]{}:;,.=\\u2013\\u2014-]*${qualifier}${label}${COVERAGE_SCORE_PATTERN_SOURCE}[ \\t]*${unit}[\\s|*_\\x60()[\\]{}:;,.!?=\\u2013\\u2014-]*$`,
-      "iu"
-    ).test(value) || tableCellScore.test(value)
-  );
+  return COVERAGE_SECTION_SCORE_CONTEXT_PATTERNS.some((pattern) => pattern.test(value));
 }
 
 const COVERAGE_PERCENT_VALUE_PATTERN_SOURCE =
-  "(?:(?:(?:\\d+(?:\\.\\d+)?|\\.\\d+)(?:e[+-]?\\d+)?)|(?:one[ -]+hundred|(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[ -]+(?:one|two|three|four|five|six|seven|eight|nine))?|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen))";
+  "(?:(?:(?:\\d+(?:\\.\\d+)?|\\.\\d+)(?:e[+-]?\\d+)?)|(?:(?:a|one)[ -]+hundred|(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[ -]+(?:one|two|three|four|five|six|seven|eight|nine))?|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen))";
 const COVERAGE_INTEGER_PATTERN_SOURCE = `(?:\\d{1,3}(?:,\\d{3})+|\\d+|${COVERAGE_PERCENT_VALUE_PATTERN_SOURCE})`;
-const COVERAGE_SCORE_PATTERN_SOURCE = `(?:(?<![\\p{L}\\p{N}_.])${COVERAGE_PERCENT_VALUE_PATTERN_SOURCE}\\s*%|(?<![\\p{L}\\p{N}_.])${COVERAGE_PERCENT_VALUE_PATTERN_SOURCE}\\s*per[ -]?cent(?:age)?\\b|(?<![\\p{L}\\p{N}_])${COVERAGE_INTEGER_PATTERN_SOURCE}\\s*(?:/|(?:out[ \\t]+)?of)\\s*${COVERAGE_INTEGER_PATTERN_SOURCE}(?![\\p{L}\\p{N}_]))`;
+const COVERAGE_SLASH_FRACTION_PATTERN_SOURCE = `(?<![\\p{L}\\p{N}_/\\\\])${COVERAGE_INTEGER_PATTERN_SOURCE}\\s*/\\s*${COVERAGE_INTEGER_PATTERN_SOURCE}(?![\\p{L}\\p{N}_/\\\\])`;
+const COVERAGE_WORD_FRACTION_PATTERN_SOURCE = `(?<![\\p{L}\\p{N}_])${COVERAGE_INTEGER_PATTERN_SOURCE}\\s*(?:out[ \\t]+)?of\\s*${COVERAGE_INTEGER_PATTERN_SOURCE}(?![\\p{L}\\p{N}_])`;
+const COVERAGE_COLON_FRACTION_PATTERN_SOURCE = `(?<![\\p{L}\\p{N}_:])${COVERAGE_INTEGER_PATTERN_SOURCE}\\s*:\\s*${COVERAGE_INTEGER_PATTERN_SOURCE}(?![\\p{L}\\p{N}_:])`;
+const COVERAGE_OVER_FRACTION_PATTERN_SOURCE = `(?<![\\p{L}\\p{N}_])${COVERAGE_INTEGER_PATTERN_SOURCE}\\s*over\\s*${COVERAGE_INTEGER_PATTERN_SOURCE}(?![\\p{L}\\p{N}_])`;
+const COVERAGE_RATIO_FRACTION_PATTERN_SOURCE = `(?:${COVERAGE_COLON_FRACTION_PATTERN_SOURCE}|${COVERAGE_OVER_FRACTION_PATTERN_SOURCE})`;
+const COVERAGE_SCORE_PATTERN_SOURCE = `(?:(?<![\\p{L}\\p{N}_.])${COVERAGE_PERCENT_VALUE_PATTERN_SOURCE}\\s*%|(?<![\\p{L}\\p{N}_.])${COVERAGE_PERCENT_VALUE_PATTERN_SOURCE}\\s*(?:pct\\b\\.?|per[ -]?cent(?:age)?\\b)|${COVERAGE_SLASH_FRACTION_PATTERN_SOURCE}|${COVERAGE_WORD_FRACTION_PATTERN_SOURCE}|${COVERAGE_RATIO_FRACTION_PATTERN_SOURCE})`;
+const COVERAGE_METRIC_QUALIFIER_PATTERN_SOURCE =
+  "(?:aggregate|blocks?|branch(?:es)?|class(?:es)?|code|conditions?|decisions?|functions?|global|instructions?|lines?|methods?|overall|paths?|ranges?|source|standardized|statements?|tests?|total|unscoped)";
+const COVERAGE_CONTINUATION_QUALIFIER_PATTERN_SOURCE = `(?:${COVERAGE_METRIC_QUALIFIER_PATTERN_SOURCE}|${exactCoverageScopePatternSource})`;
+const COVERAGE_CONTINUATION_DETERMINER_PATTERN_SOURCE = "(?:(?:its|that|the|their|this)[ \\t]+)?";
+const COVERAGE_CONTINUATION_CONJUNCTION_PATTERN_SOURCE =
+  "(?:(?:(?:and|but|plus|versus|vs\\.?|whereas|while|with)[ \\t]+|compared[ \\t]+(?:to|with)[ \\t]+|[&+][ \\t]*))?";
+const COVERAGE_CONTINUATION_PRIOR_SCOPE_PATTERN_SOURCE = `(?:(?:${exactCoverageScopePatternSource})[ \\t]+)?`;
+const COVERAGE_CONTINUATION_LINK_PATTERN_SOURCE =
+  "(?:(?:coverage|measurement|metric|percent(?:age)?|rate|result|score|value)[ \\t]+)?(?:(?::|=)|(?:is|was|measured|reached|remained|registered|reported|totaled|yielded|came[ \\t]+to|stood[ \\t]+at)\\b)?";
+const COVERAGE_CONTINUATION_SCORE_CONTEXT_PATTERNS = [
+  new RegExp(
+    `^[\\s,;:()[\\]{}\\u2013\\u2014-]*${COVERAGE_CONTINUATION_PRIOR_SCOPE_PATTERN_SOURCE}${COVERAGE_CONTINUATION_CONJUNCTION_PATTERN_SOURCE}${COVERAGE_CONTINUATION_DETERMINER_PATTERN_SOURCE}${COVERAGE_CONTINUATION_QUALIFIER_PATTERN_SOURCE}[ \\t]*${COVERAGE_CONTINUATION_LINK_PATTERN_SOURCE}[ \\t]*${COVERAGE_SCORE_PATTERN_SOURCE}`,
+    "iu"
+  ),
+  new RegExp(
+    `^[\\s,;:()[\\]{}\\u2013\\u2014-]*${COVERAGE_CONTINUATION_PRIOR_SCOPE_PATTERN_SOURCE}${COVERAGE_CONTINUATION_CONJUNCTION_PATTERN_SOURCE}${COVERAGE_SCORE_PATTERN_SOURCE}[ \\t]+(?:for[ \\t]+|of[ \\t]+|in[ \\t]+|at[ \\t]+)?(?:the[ \\t]+)?${COVERAGE_CONTINUATION_QUALIFIER_PATTERN_SOURCE}\\b`,
+    "iu"
+  ),
+  new RegExp(`^[\\s,;:()[\\]{}\\u2013\\u2014-]*(?:from|to)[ \\t]+${COVERAGE_SCORE_PATTERN_SOURCE}`, "iu")
+] as const;
+const COVERAGE_SECTION_QUALIFIER_PATTERN_SOURCE = `(?:${COVERAGE_METRIC_QUALIFIER_PATTERN_SOURCE}[ \\t]+)?`;
+const COVERAGE_SECTION_LABEL_PATTERN_SOURCE =
+  "(?:(?:coverage|measurement|metric|percent(?:age)?|rate|result|score|value)[ \\t]*(?::|=|is\\b|was\\b)?[ \\t]*)?";
+const COVERAGE_SECTION_UNIT_PATTERN_SOURCE =
+  "(?:(?:of[ \\t]+)?(?:branches?|code|covered|functions?|lines?|ranges?|source|tests?))?";
+const COVERAGE_SECTION_SCORE_CONTEXT_PATTERNS = [
+  new RegExp(
+    `^[\\s|*_\\x60()[\\]{}:;,.=\\u2013\\u2014-]*${COVERAGE_SECTION_QUALIFIER_PATTERN_SOURCE}${COVERAGE_SECTION_LABEL_PATTERN_SOURCE}${COVERAGE_SCORE_PATTERN_SOURCE}[ \\t]*${COVERAGE_SECTION_UNIT_PATTERN_SOURCE}[\\s|*_\\x60()[\\]{}:;,.!?=\\u2013\\u2014-]*$`,
+    "iu"
+  ),
+  new RegExp(`(?:^|\\|)[ \\t]*${COVERAGE_SCORE_PATTERN_SOURCE}[ \\t]*(?:\\||$)`, "iu")
+] as const;
+const COVERAGE_EXPLICIT_RATIO_LABEL_PATTERN_SOURCE =
+  "(?:\\b(?:fraction|ratio|score)\\b|\\bcoverage(?:[._ -]*(?:fraction|ratio|score))\\b|\\b(?:covg[-_ \\t]?eval|lcov)[._ -]+(?:fraction|ratio|score)\\b|\\bstandardized[._ -]+(?:fraction|ratio|score)\\b)";
+const COVERAGE_EXPLICIT_RATIO_BEFORE_PATTERN = new RegExp(
+  `${COVERAGE_EXPLICIT_RATIO_LABEL_PATTERN_SOURCE}[^.!?;\\r\\n]{0,64}$`,
+  "iu"
+);
+const COVERAGE_EXPLICIT_RATIO_AFTER_PATTERN = new RegExp(
+  `^[^.!?;\\r\\n]{0,64}${COVERAGE_EXPLICIT_RATIO_LABEL_PATTERN_SOURCE}`,
+  "iu"
+);
+const COVERAGE_METRIC_PATTERN_SOURCE =
+  "(?:coverage(?:[._-]?(?:fraction|measurement|metric|pct|percent(?:age)?|rate|ratio|result|score|summary|value))?|lcov|covg[-_ \\t]?eval|standardized[ \\t]+(?:measurement|metric|percent(?:age)?|rate|result|score|value))";
+const COVERAGE_APPROXIMATION_PATTERN_SOURCE = "(?:about|approximately|nearly|roughly)";
+const COVERAGE_CHANGE_VERB_PATTERN_SOURCE =
+  "(?:(?:has|had)[ \\t]+)?(?:averag(?:e|es|ed|ing)|decreas(?:e|es|ed|ing)|declin(?:e|es|ed|ing)|drop(?:s|ped|ping)?|fell|fall(?:s|ing)?|improv(?:e|es|ed|ing)|increas(?:e|es|ed|ing)|rose|risen|ris(?:e|es|ing)|grew|grown|grow(?:s|ing)?|climb(?:s|ed|ing)?|advanc(?:e|es|ed|ing)|jump(?:s|ed|ing)?|mov(?:e|es|ed|ing))";
+const COVERAGE_METRIC_LINK_PATTERN_SOURCE = `(?::+|=+>?|at\\b|of\\b|(?:is|was|measured|reached|remained|hit|registered|reported|totaled|yielded)\\b(?:[ \\t]+(?:${COVERAGE_APPROXIMATION_PATTERN_SOURCE}|above|below|over|under))?|${COVERAGE_CHANGE_VERB_PATTERN_SOURCE}\\b(?:[ \\t]+(?:by|from|to|at)\\b)?|(?:now[ \\t]+)?(?:shows?|showed|indicates?|indicated|exceeds?|exceeded|surpasses?|surpassed|tops?|topped)\\b|came[ \\t]+to\\b|accounted[ \\t]+for\\b|stood[ \\t]+at\\b|[\\p{L}-]+(?:[ \\t]+(?:up|down))?[ \\t]+(?:to|at)\\b)?`;
+const COVERAGE_METRIC_SCORE_CONTEXT_PATTERNS = [
+  new RegExp(
+    `(?:${COVERAGE_METRIC_PATTERN_SOURCE}[ \\t]*(?:(?:measurement|metric|percent(?:age)?|rate|result|score|value)[ \\t]*)?${COVERAGE_METRIC_LINK_PATTERN_SOURCE}[ \\t]*${COVERAGE_SCORE_PATTERN_SOURCE}|${COVERAGE_SCORE_PATTERN_SOURCE}[ \\t]*(?:${COVERAGE_METRIC_QUALIFIER_PATTERN_SOURCE}[ \\t]+)?${COVERAGE_METRIC_PATTERN_SOURCE})`,
+    "iu"
+  ),
+  new RegExp(
+    `\\b(?:branch(?:es)?|code|functions?|lines?|production|ranges?|source|tests?)(?:[ \\t]+[\\p{L}\\p{N}_-]+){0,4}[ \\t]+(?:is|are|was|were)[ \\t]+covered[ \\t]*\\(?[ \\t]*${COVERAGE_SCORE_PATTERN_SOURCE}`,
+    "iu"
+  ),
+  new RegExp(`\\bcoverage\\b[^.!?;\\r\\n]{0,160}${COVERAGE_SCORE_PATTERN_SOURCE}`, "iu"),
+  new RegExp(
+    `\\b(?:covered|exercised|tested)[ \\t]+${COVERAGE_SCORE_PATTERN_SOURCE}[ \\t]+of[ \\t]+(?:the[ \\t]+)?(?:production[ \\t]+)?(?:branches?|code|functions?|lines?|ranges?|source|tests?)\\b`,
+    "iu"
+  ),
+  new RegExp(
+    `\\b(?:branch|code|function|line|range|source|test)[ \\t]+(?:execution|measurement|result|score)[ \\t]*(?::|=|is\\b|was\\b)[ \\t]*${COVERAGE_SCORE_PATTERN_SOURCE}`,
+    "iu"
+  )
+] as const;
+const COVERAGE_HEADING_TEXT_PATTERN = new RegExp(
+  `^(?:${COVERAGE_METRIC_QUALIFIER_PATTERN_SOURCE}[ \\t]+)?coverage(?:[ \\t]+(?:evidence|overview|report|results?|summary))?\\s*$`,
+  "iu"
+);
+const COVERAGE_STANDALONE_LABEL_PATTERN = new RegExp(
+  `^(?:${COVERAGE_METRIC_QUALIFIER_PATTERN_SOURCE}[ \\t]+)?coverage(?:[ \\t]+(?:evidence|overview|report|results?|summary))?\\s*:?\\s*$`,
+  "iu"
+);
+
+function coverageScoreUsesUnambiguousSyntax(line: string, match: RegExpMatchArray): boolean {
+  if (!match[0].includes(":")) return true;
+  const before = line.slice(Math.max(0, match.index! - 96), match.index!);
+  const after = line.slice(match.index! + match[0].length, match.index! + match[0].length + 96);
+  return COVERAGE_EXPLICIT_RATIO_BEFORE_PATTERN.test(before) || COVERAGE_EXPLICIT_RATIO_AFTER_PATTERN.test(after);
+}
 
 const UNICODE_DECIMAL_ZERO_CODE_POINTS = [
   0x30, 0x660, 0x6f0, 0x7c0, 0x966, 0x9e6, 0xa66, 0xae6, 0xb66, 0xbe6, 0xc66, 0xce6, 0xd66, 0xde6, 0xe50, 0xed0, 0xf20,
@@ -7028,38 +7189,61 @@ function normalizeCoverageScoreText(value: string): string {
       return zero === undefined ? digit : String(codePoint - zero);
     })
     .replace(/\u066b/gu, ".")
+    .replace(/(\d),(?=\d{1,2}\s*(?:%|pct\b\.?|per[ -]?cent(?:age)?\b))/giu, "$1.")
     .replace(/[\u2044\u2215\u29f8]/gu, "/")
     .replace(/[\u066a\ufe6a]/gu, "%")
     .replace(/\p{Default_Ignorable_Code_Point}/gu, "");
 }
 
-function exactCoverageScopeBindsScore(
+type CoverageBindingToken =
+  { kind: "scope"; match: RegExpMatchArray } | { kind: "score"; match: RegExpMatchArray; scoreIndex: number };
+
+function exactCoverageScopeBindings(
   line: string,
-  scope: RegExpMatchArray,
-  score: RegExpMatchArray,
+  scopes: readonly RegExpMatchArray[],
   scores: readonly RegExpMatchArray[]
-): boolean {
-  const scopeMidpoint = scope.index! + scope[0].length / 2;
-  const scoreMidpoint = score.index! + score[0].length / 2;
-  if (!coverageScopeBindingIsSyntacticallyValid(line, scope, score, scores)) return false;
-  if (
-    scores.some(
-      (candidate) =>
-        candidate !== score &&
-        coverageScopeBindingIsSyntacticallyValid(line, scope, candidate, scores) &&
-        Math.abs(candidate.index! + candidate[0].length / 2 - scopeMidpoint) <= Math.abs(scoreMidpoint - scopeMidpoint)
-    )
-  ) {
-    return false;
+): ExactCoverageScope[][] {
+  const bindings = scores.map((): ExactCoverageScope[] => []);
+  const tokens: CoverageBindingToken[] = [];
+  let scopeIndex = 0;
+  let scoreIndex = 0;
+  while (scopeIndex < scopes.length || scoreIndex < scores.length) {
+    const scope = scopes[scopeIndex];
+    const score = scores[scoreIndex];
+    if (score === undefined || (scope !== undefined && scope.index! < score.index!)) {
+      tokens.push({ kind: "scope", match: scope! });
+      scopeIndex += 1;
+    } else {
+      tokens.push({ kind: "score", match: score, scoreIndex });
+      scoreIndex += 1;
+    }
   }
-  return true;
+
+  for (const [tokenIndex, token] of tokens.entries()) {
+    if (token.kind !== "scope") continue;
+    const scopeMidpoint = token.match.index! + token.match[0].length / 2;
+    const candidates = [tokens[tokenIndex - 1], tokens[tokenIndex + 1]].filter(
+      (candidate): candidate is Extract<CoverageBindingToken, { kind: "score" }> =>
+        candidate?.kind === "score" &&
+        coverageScopeBindingIsSyntacticallyValid(line, token.match, candidate.match, scores[candidate.scoreIndex + 1])
+    );
+    if (candidates.length === 0) continue;
+    const distances = candidates.map((candidate) =>
+      Math.abs(candidate.match.index! + candidate.match[0].length / 2 - scopeMidpoint)
+    );
+    const nearestDistance = Math.min(...distances);
+    const nearest = candidates.filter((_, index) => distances[index] === nearestDistance);
+    if (nearest.length !== 1) continue;
+    bindings[nearest[0]!.scoreIndex]!.push(token.match[0].toLowerCase() as ExactCoverageScope);
+  }
+  return bindings;
 }
 
 function coverageScopeBindingIsSyntacticallyValid(
   line: string,
   scope: RegExpMatchArray,
   score: RegExpMatchArray,
-  scores: readonly RegExpMatchArray[]
+  nextScore: RegExpMatchArray | undefined
 ): boolean {
   const scopeStart = scope.index!;
   const scopeEnd = scopeStart + scope[0].length;
@@ -7074,8 +7258,6 @@ function coverageScopeBindingIsSyntacticallyValid(
   if (scopeStart >= scoreEnd) {
     const binding = line.slice(scoreEnd, scopeStart);
     if (!/^\s*(?:(?:for|of|in|at)\s+(?:the\s+)?(?:exact\s+)?)?$/iu.test(binding)) return false;
-    const scoreIndex = scores.indexOf(score);
-    const nextScore = scores[scoreIndex + 1];
     const suffix = line.slice(scopeEnd, nextScore?.index ?? line.length);
     const metric = "(?:coverage|measurement|metric|percent(?:age)?|rate|result|score|value)";
     if (new RegExp(`^\\s*(?:${metric}\\s*)?[\\x60'"()[\\]{},.;:!?-]*\\s*$`, "iu").test(suffix)) return true;
@@ -7105,14 +7287,27 @@ interface MarkdownNode {
   position?: { start?: { line?: number } };
 }
 
-type HtmlVisibilityElement = { tagName: string; hidden: boolean; styled: boolean; flowContainer: boolean };
+type HtmlVisibilityElement = {
+  tagName: string;
+  hidden: boolean;
+  accessibilityHidden: boolean;
+  styled: boolean;
+  flowContainer: boolean;
+  closedDetails: boolean;
+  detailsSummarySeen: boolean;
+  revealsClosedDetails: boolean;
+};
 
 interface HtmlVisibilityState {
   elements: HtmlVisibilityElement[];
   elementIndexesByTag: Map<string, number[]>;
   nonFlowElementIndexes: number[];
   hiddenElementCount: number;
+  accessibilityHiddenElementCount: number;
   styledElementCount: number;
+  closedDetailsElementCount: number;
+  revealedClosedDetailsCount: number;
+  stylesheet: boolean;
 }
 
 const RENDERED_LINE_BREAK = "\uE000";
@@ -7132,6 +7327,72 @@ const HTML_VOID_ELEMENTS = new Set([
   "source",
   "track",
   "wbr"
+]);
+
+const HTML_HIDDEN_TEXT_ELEMENTS = new Set(["head", "script", "style", "template"]);
+const HTML_RAW_TEXT_ELEMENTS = new Set(["script", "style", "textarea", "xmp"]);
+const HTML_NON_TEXT_INPUT_TYPES = new Set([
+  "checkbox",
+  "color",
+  "date",
+  "datetime-local",
+  "file",
+  "hidden",
+  "month",
+  "number",
+  "password",
+  "radio",
+  "range",
+  "time",
+  "week"
+]);
+const HTML_HEADING_ELEMENTS = new Set(["h1", "h2", "h3", "h4", "h5", "h6"]);
+const HTML_DESCRIPTION_ELEMENTS = new Set(["dt", "dd"]);
+const HTML_RUBY_ANNOTATION_ELEMENTS = new Set(["rt", "rp"]);
+const HTML_TABLE_SECTION_ELEMENTS = new Set(["thead", "tbody", "tfoot"]);
+const HTML_TABLE_CELL_ELEMENTS = new Set(["td", "th"]);
+const HTML_P_IMPLICIT_CLOSE_START_ELEMENTS = new Set([
+  "address",
+  "article",
+  "aside",
+  "blockquote",
+  "center",
+  "dd",
+  "details",
+  "dialog",
+  "dir",
+  "div",
+  "dl",
+  "dt",
+  "fieldset",
+  "figcaption",
+  "figure",
+  "footer",
+  "form",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "header",
+  "hgroup",
+  "hr",
+  "li",
+  "listing",
+  "main",
+  "menu",
+  "nav",
+  "ol",
+  "p",
+  "pre",
+  "plaintext",
+  "search",
+  "section",
+  "summary",
+  "table",
+  "ul",
+  "xmp"
 ]);
 
 const HTML_FLOW_CONTAINER_ELEMENTS = new Set([
@@ -7191,15 +7452,64 @@ const HTML_RENDERED_LINE_BREAK_ELEMENTS = new Set([
   "pre"
 ]);
 
-function renderedMarkdownBlocks(contents: string): RenderedMarkdownBlock[] {
+function markdownContainsHtmlStylesheet(node: MarkdownNode): boolean {
+  return markdownContainsHtmlElement(node, "style");
+}
+
+function markdownContainsHtmlElement(node: MarkdownNode, elementName: string): boolean {
+  if (node.type === "html" && htmlContainsElement(node.value ?? "", elementName)) return true;
+  return node.children?.some((child) => markdownContainsHtmlElement(child, elementName)) ?? false;
+}
+
+function htmlContainsElement(html: string, elementName: string): boolean {
+  let index = 0;
+  while (index < html.length) {
+    if (html.startsWith("<!--", index)) {
+      const commentEnd = html.indexOf("-->", index + 4);
+      index = commentEnd === -1 ? html.length : commentEnd + 3;
+      continue;
+    }
+    const tagStart = html.indexOf("<", index);
+    if (tagStart === -1) return false;
+    const tagEnd = htmlTagEnd(html, tagStart + 1);
+    if (tagEnd === -1) return false;
+    const tag = html.slice(tagStart + 1, tagEnd);
+    const tagName = /^\s*\/?\s*([A-Za-z][A-Za-z0-9:-]*)/u.exec(tag)?.[1]?.toLowerCase();
+    const closingTag = /^\s*\//u.test(tag);
+    const selfClosingTag = /\/\s*$/u.test(tag);
+    if (tagName === elementName && !closingTag) return true;
+    if (tagName !== undefined && !closingTag && !selfClosingTag && HTML_RAW_TEXT_ELEMENTS.has(tagName)) {
+      const closingTagStart = rawTextClosingTagStart(html, tagEnd + 1, tagName);
+      if (closingTagStart === undefined) return false;
+      const closingTagEnd = htmlTagEnd(html, closingTagStart + 1);
+      if (closingTagEnd === -1) return false;
+      index = closingTagEnd + 1;
+      continue;
+    }
+    index = tagEnd + 1;
+  }
+  return false;
+}
+
+function renderedMarkdownDocument(contents: string): {
+  blocks: RenderedMarkdownBlock[];
+  stylesheet: boolean;
+  unsupportedSelect: boolean;
+} {
   const root = fromMarkdown(contents) as MarkdownNode;
   const blocks: RenderedMarkdownBlock[] = [];
+  const stylesheet = markdownContainsHtmlStylesheet(root);
+  const unsupportedSelect = markdownContainsHtmlElement(root, "select");
   const visibilityState: HtmlVisibilityState = {
     elements: [],
     elementIndexesByTag: new Map(),
     nonFlowElementIndexes: [],
     hiddenElementCount: 0,
-    styledElementCount: 0
+    accessibilityHiddenElementCount: 0,
+    styledElementCount: 0,
+    closedDetailsElementCount: 0,
+    revealedClosedDetailsCount: 0,
+    stylesheet
   };
   const visit = (node: MarkdownNode): void => {
     if (node.type === "definition" || node.type === "thematicBreak") return;
@@ -7231,7 +7541,11 @@ function renderedMarkdownBlocks(contents: string): RenderedMarkdownBlock[] {
     node.children?.forEach(visit);
   };
   visit(root);
-  return blocks;
+  return { blocks, stylesheet, unsupportedSelect };
+}
+
+function renderedMarkdownBlocks(contents: string): RenderedMarkdownBlock[] {
+  return renderedMarkdownDocument(contents).blocks;
 }
 
 function renderedMarkdownNodeText(node: MarkdownNode, state: HtmlVisibilityState): string {
@@ -7248,7 +7562,7 @@ function renderedMarkdownNodeText(node: MarkdownNode, state: HtmlVisibilityState
 
 function visibleMarkdownText(value: string, state: HtmlVisibilityState): string {
   if (htmlTextIsHidden(state)) return "";
-  return htmlScopeIsStyled(state) ? maskStyledCoverageScopes(value) : value;
+  return htmlScopeIsStyled(state) ? maskStyledCoverageScopeFragments(value) : value;
 }
 
 function pushHtmlVisibilityElement(state: HtmlVisibilityState, element: HtmlVisibilityElement): void {
@@ -7259,7 +7573,10 @@ function pushHtmlVisibilityElement(state: HtmlVisibilityState, element: HtmlVisi
   else tagIndexes.push(index);
   if (!element.flowContainer) state.nonFlowElementIndexes.push(index);
   if (element.hidden) state.hiddenElementCount += 1;
+  if (element.accessibilityHidden) state.accessibilityHiddenElementCount += 1;
   if (element.styled) state.styledElementCount += 1;
+  if (element.closedDetails) state.closedDetailsElementCount += 1;
+  if (element.revealsClosedDetails) state.revealedClosedDetailsCount += 1;
 }
 
 function truncateHtmlVisibilityElements(state: HtmlVisibilityState, firstRemovedIndex: number): void {
@@ -7270,7 +7587,10 @@ function truncateHtmlVisibilityElements(state: HtmlVisibilityState, firstRemoved
     if (tagIndexes.length === 0) state.elementIndexesByTag.delete(element.tagName);
     if (!element.flowContainer) state.nonFlowElementIndexes.pop();
     if (element.hidden) state.hiddenElementCount -= 1;
+    if (element.accessibilityHidden) state.accessibilityHiddenElementCount -= 1;
     if (element.styled) state.styledElementCount -= 1;
+    if (element.closedDetails) state.closedDetailsElementCount -= 1;
+    if (element.revealsClosedDetails) state.revealedClosedDetailsCount -= 1;
   }
   state.elements.length = firstRemovedIndex;
 }
@@ -7281,21 +7601,80 @@ function closeHtmlVisibilityElement(state: HtmlVisibilityState, tagName: string)
   if (matchingIndex !== undefined) truncateHtmlVisibilityElements(state, matchingIndex);
 }
 
+function closeLatestHtmlVisibilityElement(state: HtmlVisibilityState, tagNames: ReadonlySet<string>): void {
+  let latestIndex: number | undefined;
+  for (const tagName of tagNames) {
+    const indexes = state.elementIndexesByTag.get(tagName);
+    const candidate = indexes?.[indexes.length - 1];
+    if (candidate !== undefined && (latestIndex === undefined || candidate > latestIndex)) latestIndex = candidate;
+  }
+  if (latestIndex !== undefined) truncateHtmlVisibilityElements(state, latestIndex);
+}
+
+function closeImplicitHtmlElementsForStartTag(state: HtmlVisibilityState, tagName: string): void {
+  if (HTML_P_IMPLICIT_CLOSE_START_ELEMENTS.has(tagName)) closeHtmlVisibilityElement(state, "p");
+  if (HTML_HEADING_ELEMENTS.has(tagName)) closeLatestHtmlVisibilityElement(state, HTML_HEADING_ELEMENTS);
+  if (tagName === "li") closeHtmlVisibilityElement(state, "li");
+  if (tagName === "dt" || tagName === "dd") closeLatestHtmlVisibilityElement(state, HTML_DESCRIPTION_ELEMENTS);
+  if (tagName === "rt" || tagName === "rp") closeLatestHtmlVisibilityElement(state, HTML_RUBY_ANNOTATION_ELEMENTS);
+  if (tagName === "option") closeHtmlVisibilityElement(state, "option");
+  if (tagName === "optgroup") {
+    closeHtmlVisibilityElement(state, "option");
+    closeHtmlVisibilityElement(state, "optgroup");
+  }
+  if (tagName === "thead" || tagName === "tbody" || tagName === "tfoot") {
+    closeLatestHtmlVisibilityElement(state, HTML_TABLE_SECTION_ELEMENTS);
+  }
+  if (tagName === "tr") closeHtmlVisibilityElement(state, "tr");
+  if (tagName === "td" || tagName === "th") closeLatestHtmlVisibilityElement(state, HTML_TABLE_CELL_ELEMENTS);
+}
+
 function closeNonFlowHtmlElementsAtMarkdownBlockBoundary(state: HtmlVisibilityState): void {
   const firstNonFlowIndex = state.nonFlowElementIndexes[0];
   if (firstNonFlowIndex !== undefined) truncateHtmlVisibilityElements(state, firstNonFlowIndex);
 }
 
-function htmlTextIsHidden(state: HtmlVisibilityState): boolean {
-  return state.hiddenElementCount > 0;
+function htmlTextIsHidden(state: HtmlVisibilityState, prospectiveDetailsReveal = 0): boolean {
+  return (
+    state.hiddenElementCount > 0 ||
+    state.closedDetailsElementCount > state.revealedClosedDetailsCount + prospectiveDetailsReveal
+  );
+}
+
+function htmlAccessibilityTextIsHidden(state: HtmlVisibilityState): boolean {
+  return state.accessibilityHiddenElementCount > 0;
 }
 
 function htmlScopeIsStyled(state: HtmlVisibilityState): boolean {
   return state.styledElementCount > 0;
 }
 
-function maskStyledCoverageScopes(value: string): string {
-  return value.replace(new RegExp(`\\b(?:${exactCoverageScopePatternSource})\\b`, "giu"), "styled-scope");
+function maskStyledCoverageScopeFragments(value: string): string {
+  const scoreSpans = [...value.matchAll(new RegExp(COVERAGE_SCORE_PATTERN_SOURCE, "giu"))].map((match) => ({
+    start: match.index!,
+    end: match.index! + match[0].length
+  }));
+  let scoreSpanIndex = 0;
+  return value.replace(
+    /&(?:#(?:[xX][0-9A-Fa-f]+|\d+)|[A-Za-z][A-Za-z0-9]+);?|[\p{L}-]+/gu,
+    (fragment, offset: number) => {
+      while (scoreSpans[scoreSpanIndex] !== undefined && scoreSpans[scoreSpanIndex]!.end <= offset) {
+        scoreSpanIndex += 1;
+      }
+      const scoreSpan = scoreSpans[scoreSpanIndex];
+      if (scoreSpan !== undefined && offset < scoreSpan.end && offset + fragment.length > scoreSpan.start) {
+        return fragment;
+      }
+      const decodedFragment = fragment.startsWith("&") ? decodeHTML(fragment) : fragment;
+      const normalizedFragment = decodedFragment.normalize("NFKC").toLocaleLowerCase("en-US");
+      return normalizedFragment !== "" &&
+        normalizedCoverageScopeStrings.some(
+          (scope) => scope.includes(normalizedFragment) || normalizedFragment.includes(scope)
+        )
+        ? "styled-scope"
+        : fragment;
+    }
+  );
 }
 
 function rawHtmlHeadingDepth(html: string): number | undefined {
@@ -7304,13 +7683,11 @@ function rawHtmlHeadingDepth(html: string): number | undefined {
 }
 
 function coverageHeadingText(value: string): boolean {
-  return /^(?:(?:branch|code|function|line|overall|range|source|standardized|test)[ \t]+)?coverage(?:[ \t]+(?:evidence|report|results?|summary))?\s*$/iu.test(
-    value.trim()
-  );
+  return COVERAGE_HEADING_TEXT_PATTERN.test(value.trim());
 }
 
 function standaloneCoverageLabel(value: string): boolean {
-  return /^coverage\s*:?\s*$/iu.test(value.trim());
+  return COVERAGE_STANDALONE_LABEL_PATTERN.test(value.trim());
 }
 
 function coverageTableLabel(value: string): boolean {
@@ -7321,6 +7698,14 @@ function visibleHtmlText(html: string, state: HtmlVisibilityState): string {
   let visible = "";
   let index = 0;
   while (index < html.length) {
+    const currentElement = state.elements[state.elements.length - 1];
+    if (currentElement !== undefined && HTML_RAW_TEXT_ELEMENTS.has(currentElement.tagName)) {
+      const closingTagStart = rawTextClosingTagStart(html, index, currentElement.tagName);
+      const rawTextEnd = closingTagStart ?? html.length;
+      visible += visibleMarkdownText(html.slice(index, rawTextEnd).replace(/\r?\n/gu, RENDERED_LINE_BREAK), state);
+      if (closingTagStart === undefined) break;
+      index = rawTextEnd;
+    }
     if (html.startsWith("<!--", index)) {
       const commentEnd = html.indexOf("-->", index + 4);
       index = commentEnd === -1 ? html.length : commentEnd + 3;
@@ -7348,33 +7733,55 @@ function visibleHtmlText(html: string, state: HtmlVisibilityState): string {
     const tagName = /^\s*\/?\s*([A-Za-z][A-Za-z0-9:-]*)/u.exec(tag)?.[1]?.toLowerCase();
     const closingTag = /^\s*\//u.test(tag);
     const selfClosingTag = /\/\s*$/u.test(tag);
-    const style = htmlAttributeValue(tag, "style");
+    const attributes = htmlAttributes(tag);
+    const style = attributes.get("style");
+    const styledTag = state.stylesheet || style !== undefined || attributes.has("class") || attributes.has("id");
     const hiddenTag =
       tagName !== undefined &&
-      (/^(?:head|noscript|script|style|template|textarea|xmp)$/u.test(tagName) ||
-        /(?:^|\s)(?:hidden|inert)(?:\s|=|$)/iu.test(tag) ||
-        /(?:^|\s)aria-hidden\s*=\s*(?:["']?true\b)/iu.test(tag) ||
-        htmlStyleHidesText(tag));
+      (HTML_HIDDEN_TEXT_ELEMENTS.has(tagName) ||
+        attributes.has("hidden") ||
+        (tagName === "dialog" && !attributes.has("open")) ||
+        htmlStyleHidesText(style));
+    const accessibilityHiddenTag =
+      attributes.has("inert") || attributes.get("aria-hidden")?.trim().toLowerCase() === "true";
+    if (tagName !== undefined && !closingTag) closeImplicitHtmlElementsForStartTag(state, tagName);
+    const parentElement = state.elements[state.elements.length - 1];
+    const revealsClosedDetails =
+      tagName === "summary" &&
+      parentElement?.tagName === "details" &&
+      parentElement.closedDetails &&
+      !parentElement.detailsSummarySeen;
+    if (revealsClosedDetails) parentElement.detailsSummarySeen = true;
     if (tagName !== undefined && HTML_RENDERED_LINE_BREAK_ELEMENTS.has(tagName)) {
       visible += RENDERED_LINE_BREAK;
     }
-    if (tagName !== undefined && !closingTag && !hiddenTag && !htmlTextIsHidden(state)) {
-      const accessibleLabel =
-        htmlAttributeValue(tag, "aria-label") ?? (tagName === "img" ? htmlAttributeValue(tag, "alt") : undefined);
-      if (accessibleLabel !== undefined && accessibleLabel.trim() !== "") {
-        const label = decodeHTML(accessibleLabel);
-        visible += `. ${htmlScopeIsStyled(state) || style !== undefined ? maskStyledCoverageScopes(label) : label}.`;
+    if (tagName !== undefined && !closingTag && !hiddenTag && !htmlTextIsHidden(state, revealsClosedDetails ? 1 : 0)) {
+      const visibleLabels = [
+        !accessibilityHiddenTag && !htmlAccessibilityTextIsHidden(state) ? attributes.get("aria-label") : undefined,
+        tagName === "img" ? attributes.get("alt") : undefined,
+        tagName === "input" ? htmlVisibleInputText(attributes) : undefined
+      ].filter((label, index, labels): label is string => label !== undefined && labels.indexOf(label) === index);
+      for (const visibleLabel of visibleLabels) {
+        if (visibleLabel.trim() === "") continue;
+        visible += `. ${
+          htmlScopeIsStyled(state) || styledTag ? maskStyledCoverageScopeFragments(visibleLabel) : visibleLabel
+        }.`;
       }
     }
     if (tagName !== undefined) {
       if (closingTag) {
-        closeHtmlVisibilityElement(state, tagName);
+        if (HTML_HEADING_ELEMENTS.has(tagName)) closeLatestHtmlVisibilityElement(state, HTML_HEADING_ELEMENTS);
+        else closeHtmlVisibilityElement(state, tagName);
       } else if (!selfClosingTag && !HTML_VOID_ELEMENTS.has(tagName)) {
         pushHtmlVisibilityElement(state, {
           tagName,
           hidden: hiddenTag,
-          styled: style !== undefined,
-          flowContainer: HTML_FLOW_CONTAINER_ELEMENTS.has(tagName)
+          accessibilityHidden: accessibilityHiddenTag,
+          styled: styledTag,
+          flowContainer: HTML_FLOW_CONTAINER_ELEMENTS.has(tagName),
+          closedDetails: tagName === "details" && !attributes.has("open"),
+          detailsSummarySeen: false,
+          revealsClosedDetails
         });
       }
     }
@@ -7383,19 +7790,71 @@ function visibleHtmlText(html: string, state: HtmlVisibilityState): string {
   return decodeHTML(visible);
 }
 
-function htmlAttributeValue(tag: string, attribute: "alt" | "aria-label" | "style"): string | undefined {
-  const match = new RegExp(`(?:^|\\s)${attribute}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'=<>\\x60]+))`, "iu").exec(tag);
-  return match?.[1] ?? match?.[2] ?? match?.[3];
+function htmlAttributes(tag: string): Map<string, string | undefined> {
+  const attributes = new Map<string, string | undefined>();
+  let index = /^\s*\/?\s*[A-Za-z][A-Za-z0-9:-]*/u.exec(tag)?.[0].length ?? tag.length;
+  while (index < tag.length) {
+    while (/\s/u.test(tag[index] ?? "")) index += 1;
+    if (tag[index] === "/" || index >= tag.length) break;
+    const nameStart = index;
+    while (index < tag.length && !/[\s"'<>/=\x60]/u.test(tag[index]!)) index += 1;
+    if (index === nameStart) {
+      index += 1;
+      continue;
+    }
+    const name = tag.slice(nameStart, index).toLowerCase();
+    while (/\s/u.test(tag[index] ?? "")) index += 1;
+    let value: string | undefined;
+    if (tag[index] === "=") {
+      index += 1;
+      while (/\s/u.test(tag[index] ?? "")) index += 1;
+      const quote = tag[index];
+      if (quote === '"' || quote === "'") {
+        index += 1;
+        const valueStart = index;
+        while (index < tag.length && tag[index] !== quote) index += 1;
+        value = tag.slice(valueStart, index);
+        if (tag[index] === quote) index += 1;
+      } else {
+        const valueStart = index;
+        while (index < tag.length && !/[\s"'=<>\x60]/u.test(tag[index]!)) index += 1;
+        value = tag.slice(valueStart, index);
+      }
+    }
+    if (!attributes.has(name)) attributes.set(name, value);
+  }
+  return attributes;
 }
 
-function htmlStyleHidesText(tag: string): boolean {
-  const style = htmlAttributeValue(tag, "style");
+function htmlVisibleInputText(attributes: ReadonlyMap<string, string | undefined>): string | undefined {
+  const type = decodeHTML(attributes.get("type") ?? "text")
+    .trim()
+    .toLowerCase();
+  if (type === "image") return attributes.get("alt");
+  if (type === "button" || type === "reset" || type === "submit") return attributes.get("value");
+  if (HTML_NON_TEXT_INPUT_TYPES.has(type)) return undefined;
+  const value = attributes.get("value");
+  return value !== undefined && value !== "" ? value : attributes.get("placeholder");
+}
+
+function htmlStyleHidesText(style: string | undefined): boolean {
   if (style === undefined) return false;
-  return style.split(";").some((declaration) => {
-    const match = /^\s*([-A-Za-z]+)\s*:\s*(.*?)\s*(?:!important\s*)?$/iu.exec(declaration);
-    if (match === null) return false;
+  const effectiveDeclarations = new Map<string, { value: string; important: boolean }>();
+  for (const declaration of cssInlineDeclarations(style)) {
+    const match = /^\s*([-A-Za-z]+)\s*:\s*(.*?)\s*$/u.exec(declaration);
+    if (match === null) continue;
     const property = match[1]!.toLowerCase();
-    const value = match[2]!.trim().toLowerCase();
+    const important = /\s*!important\s*$/iu.test(match[2]!);
+    const value = match[2]!
+      .replace(/\s*!important\s*$/iu, "")
+      .trim()
+      .toLowerCase();
+    const current = effectiveDeclarations.get(property);
+    if (current?.important === true && !important) continue;
+    effectiveDeclarations.set(property, { value, important });
+  }
+  return [...effectiveDeclarations].some(([property, declaration]) => {
+    const { value } = declaration;
     if (property === "display") return value === "none";
     if (property === "visibility") return /^(?:hidden|collapse)$/u.test(value);
     if (property === "opacity") return /^0(?:\.0+)?%?$/u.test(value);
@@ -7410,6 +7869,80 @@ function htmlStyleHidesText(tag: string): boolean {
     }
     return property === "filter" && /^opacity\(\s*0(?:%|\.0+)?\s*\)$/u.test(value);
   });
+}
+
+function cssInlineDeclarations(style: string): string[] {
+  const declarations: string[] = [];
+  let declaration = "";
+  let quote: '"' | "'" | undefined;
+  let escaped = false;
+  let escapedOutsideQuote = false;
+  let comment = false;
+  const groups: string[] = [];
+  for (let index = 0; index < style.length; index += 1) {
+    const character = style[index]!;
+    const next = style[index + 1];
+    if (comment) {
+      if (character === "*" && next === "/") {
+        comment = false;
+        declaration += " ";
+        index += 1;
+      }
+      continue;
+    }
+    if (quote !== undefined) {
+      declaration += character;
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === quote) quote = undefined;
+      continue;
+    }
+    if (escapedOutsideQuote) {
+      declaration += character;
+      escapedOutsideQuote = false;
+      continue;
+    }
+    if (character === "\\") {
+      declaration += character;
+      escapedOutsideQuote = true;
+      continue;
+    }
+    if (character === "/" && next === "*") {
+      comment = true;
+      index += 1;
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+      declaration += character;
+      continue;
+    }
+    if (character === "(" || character === "[" || character === "{") {
+      groups.push(character);
+      declaration += character;
+      continue;
+    }
+    const expectedGroup = character === ")" ? "(" : character === "]" ? "[" : character === "}" ? "{" : undefined;
+    if (expectedGroup !== undefined && groups[groups.length - 1] === expectedGroup) {
+      groups.pop();
+      declaration += character;
+      continue;
+    }
+    if (character === ";" && groups.length === 0) {
+      declarations.push(declaration);
+      declaration = "";
+      continue;
+    }
+    declaration += character;
+  }
+  declarations.push(declaration);
+  return declarations;
+}
+
+function rawTextClosingTagStart(html: string, start: number, tagName: string): number | undefined {
+  const closingTag = new RegExp(`</\\s*${tagName}(?=[\\s/>])`, "giu");
+  closingTag.lastIndex = start;
+  return closingTag.exec(html)?.index;
 }
 
 function htmlTagEnd(html: string, start: number): number {
@@ -7431,24 +7964,14 @@ function coverageMetricScoreLanguageContext(value: string): boolean {
   const metricText = value
     .replace(/\binsurance(?:[ \t]+[\p{L}\p{N}_-]+){0,5}(?:['’]s)?[ \t]+coverage\b/giu, "insurance policy")
     .replace(
-      /\b(?:benefit|cellular|dental|geographic|health(?:care)?|medical|media|network|news|policy|press|service|signal|vision|warranty|wireless)(?:['’]s)?[ \t]+coverage\b/giu,
+      /\b(?:benefit|cellular|dental|geographic|health(?:care)?|insurance|medical|media|network|news|policy|press|service|signal|vision|warranty|wireless)(?:['’]s)?(?:[ \t]+[\p{L}\p{N}_-]+){0,4}[ \t]+coverage\b/giu,
+      "non-code protection"
+    )
+    .replace(
+      /\bcoverage\b(?=[^.!?\r\n]{0,80}\b(?:for|from|through|under)\s+(?:the\s+)?(?:insurance|policy|warranty)\b)/giu,
       "non-code protection"
     );
-  const score = COVERAGE_SCORE_PATTERN_SOURCE;
-  const coverageMetric =
-    "(?:coverage(?:[._-](?:fraction|measurement|metric|percent(?:age)?|rate|result|score|summary|value))?|lcov|covg[-_]eval|standardized[ \\t]+(?:measurement|metric|percent(?:age)?|rate|result|score|value))";
-  const metricQualifier = "(?:branch|code|function|line|overall|range|source|standardized|test)";
-  const approximation = "(?:about|approximately|nearly|roughly)";
-  const metricLink = `(?::|=|at\\b|of\\b|(?:is|was|measured|reached|remained|hit|registered|reported|totaled|yielded)\\b(?:[ \\t]+(?:${approximation}|above|below|over|under))?|(?:improved|increased|rose|grew|climbed|advanced|jumped|moved)[ \\t]+from\\b|(?:now[ \\t]+)?(?:shows?|showed|indicates?|indicated|exceeds?|exceeded|surpasses?|surpassed|tops?|topped)\\b|came[ \\t]+to\\b|accounted[ \\t]+for\\b|stood[ \\t]+at\\b|[\\p{L}-]+(?:[ \\t]+(?:up|down))?[ \\t]+(?:to|at)\\b)?`;
-  const directCoverageScore = new RegExp(
-    `(?:${coverageMetric}[ \\t]*(?:(?:measurement|metric|percent(?:age)?|rate|result|score|value)[ \\t]*)?${metricLink}[ \\t]*${score}|${score}[ \\t]*(?:${metricQualifier}[ \\t]+)?${coverageMetric})`,
-    "iu"
-  );
-  const coveredProductionScore = new RegExp(
-    `\\b(?:branch(?:es)?|code|functions?|lines?|production|ranges?|source|tests?)(?:[ \\t]+[\\p{L}\\p{N}_-]+){0,4}[ \\t]+(?:is|are|was|were)[ \\t]+covered[ \\t]*\\(?[ \\t]*${score}`,
-    "iu"
-  );
-  return directCoverageScore.test(metricText) || coveredProductionScore.test(metricText);
+  return COVERAGE_METRIC_SCORE_CONTEXT_PATTERNS.some((pattern) => pattern.test(metricText));
 }
 
 function markdownSectionOccurrences(contents: string, heading: string): string[][] {
@@ -7487,30 +8010,83 @@ function unscopedCoverageScoreDiagnosticsInJson(
   reportPath: string
 ): RuntimeDiagnostic[] {
   const diagnostics: RuntimeDiagnostic[] = [];
-  const visit = (value: unknown, jsonPath: string, directCoverageField: boolean): void => {
+  const budget = coverageScoreScanBudget();
+  const visit = (
+    value: unknown,
+    jsonPath: string,
+    directCoverageField: boolean,
+    inheritedCoverageLabelContext = false
+  ): void => {
+    if (budget.overflowed) return;
     if (typeof value === "string") {
-      if (directCoverageField || coverageMetricLanguageContext(value)) {
-        diagnostics.push(...reportCoverageScoreDiagnostics(value, `${reportPath}#${jsonPath}`, directCoverageField));
+      if (directCoverageField || inheritedCoverageLabelContext || coverageMetricLanguageContext(value)) {
+        const nextDiagnostics = reportCoverageScoreDiagnostics(
+          value,
+          `${reportPath}#${jsonPath}`,
+          directCoverageField,
+          inheritedCoverageLabelContext,
+          budget
+        );
+        if (budget.overflowed) diagnostics.length = 0;
+        diagnostics.push(...nextDiagnostics);
       }
       return;
     }
     if (Array.isArray(value)) {
-      value.forEach((entry, index) => visit(entry, `${jsonPath}[${index}]`, directCoverageField));
+      let coverageHeadingDepth: number | undefined;
+      let coverageLabelSection = inheritedCoverageLabelContext;
+      value.forEach((entry, index) => {
+        if (budget.overflowed) return;
+        visit(
+          entry,
+          `${jsonPath}[${index}]`,
+          directCoverageField,
+          coverageHeadingDepth !== undefined || coverageLabelSection
+        );
+        if (typeof entry !== "string") {
+          coverageHeadingDepth = undefined;
+          coverageLabelSection = false;
+          return;
+        }
+        for (const block of renderedMarkdownBlocks(entry)) {
+          if (block.headingDepth !== undefined) {
+            if (coverageHeadingText(block.text)) {
+              coverageHeadingDepth = block.headingDepth;
+            } else if (coverageHeadingDepth === undefined || block.headingDepth <= coverageHeadingDepth) {
+              coverageHeadingDepth = undefined;
+            }
+            coverageLabelSection = false;
+          }
+          if (standaloneCoverageLabel(block.text)) {
+            coverageLabelSection = true;
+          } else if (jsonArraySectionBoundaryLabel(block.text)) {
+            coverageHeadingDepth = undefined;
+            coverageLabelSection = false;
+          }
+        }
+      });
       return;
     }
     if (!isRecord(value)) return;
     for (const [key, entry] of Object.entries(value)) {
-      visit(entry, `${jsonPath}.${key}`, directCoverageField || coverageMetricFieldName(key));
+      if (budget.overflowed) break;
+      const lcovMetadata = /^lcov$/iu.test(key) && isRecord(entry);
+      visit(entry, `${jsonPath}.${key}`, lcovMetadata ? false : directCoverageField || coverageMetricFieldName(key));
     }
   };
   visit(report, "$", false);
   return diagnostics;
 }
 
+function jsonArraySectionBoundaryLabel(value: string): boolean {
+  const trimmed = value.trim();
+  return /^[\p{L}\p{N}][^:\r\n]{0,80}:$/u.test(trimmed) && !coverageMetricLanguageContext(trimmed);
+}
+
 function coverageMetricLanguageContext(value: string): boolean {
   const exactScope = exactCoverageScopePatternSource;
   return new RegExp(
-    `(?<![A-Za-z0-9_-])(?:coverage(?:[._-](?:fraction|measurement|metric|percent(?:age)?|rate|result|score|summary|value))?|lcov|${exactScope})(?![A-Za-z0-9_-])|(?<![A-Za-z0-9_-])covg[-_]eval(?![A-Za-z0-9_-])|\\bstandardized(?:[._ -]+)(?:coverage|measurement|metric|percent(?:age)?|rate|result|score|value)\\b`,
+    `(?<![A-Za-z0-9_-])(?:coverage(?:[._-]?(?:fraction|measurement|metric|pct|percent(?:age)?|rate|ratio|result|score|summary|value))?|lcov|${exactScope})(?![A-Za-z0-9_-])|(?<![A-Za-z0-9_-])covg[-_ \\t]?eval(?![A-Za-z0-9_-])|\\bstandardized(?:[._ -]+)(?:coverage|measurement|metric|percent(?:age)?|rate|result|score|value)\\b`,
     "iu"
   ).test(value);
 }
@@ -7519,7 +8095,7 @@ function coverageMetricFieldName(key: string): boolean {
   return (
     coverageMetricLanguageContext(key) &&
     new RegExp(
-      `^(?:coverage|coverage[._-](?:fraction|measurement|metric|percent(?:age)?|rate|result|score|summary|value)|covg[-_]eval|lcov|standardized[._-]coverage|${exactCoverageScopePatternSource})$`,
+      `^(?:coverage(?:[._-]?(?:fraction|measurement|metric|pct|percent(?:age)?|rate|ratio|result|score|summary|value))?|covg[-_ ]?eval|lcov|standardized[._-]coverage|${exactCoverageScopePatternSource})$`,
       "iu"
     ).test(key)
   );

@@ -240,7 +240,7 @@ test("canonical final-report projection renders unavailable coverage evidence an
     blockers: [
       {
         category: "coverage-tooling-blocked",
-        summary: "Recon could not produce an authenticated coverage map.",
+        summary: "Recon <span hidden>could not</span> ~~produce~~ an authenticated coverage map.",
         evidence_paths: ["logs/recon-coverage.log", "campaign-summary.json"]
       }
     ]
@@ -254,7 +254,7 @@ test("canonical final-report projection renders unavailable coverage evidence an
     "- Status: unavailable",
     "",
     "Blockers:",
-    "- coverage-tooling-blocked: Recon could not produce an authenticated coverage map.",
+    "- coverage-tooling-blocked: Recon &lt;span hidden&gt;could not&lt;/span&gt; \\~\\~produce\\~\\~ an authenticated coverage map.",
     "  - Evidence: `logs/recon-coverage.log`",
     "  - Evidence: `campaign-summary.json`"
   ]);
@@ -263,7 +263,40 @@ test("canonical final-report projection renders unavailable coverage evidence an
   assert.deepEqual(projection.report.coverage_evidence, coverageEvidence);
   assert.match(
     projection.markdown,
-    /## Scoped coverage evidence\n\n- Status: unavailable\n\nBlockers:\n- coverage-tooling-blocked: Recon could not produce an authenticated coverage map\.\n {2}- Evidence: `logs\/recon-coverage\.log`\n {2}- Evidence: `campaign-summary\.json`/u
+    /## Scoped coverage evidence\n\n- Status: unavailable\n\nBlockers:\n- coverage-tooling-blocked: Recon &lt;span hidden&gt;could not&lt;\/span&gt; \\~\\~produce\\~\\~ an authenticated coverage map\.\n {2}- Evidence: `logs\/recon-coverage\.log`\n {2}- Evidence: `campaign-summary\.json`/u
+  );
+});
+
+test("canonical coverage projection escapes exclusion-reason HTML as public prose", () => {
+  assert.deepEqual(
+    renderCoverageEvidenceMarkdownSection({
+      status: "measured",
+      views: [
+        { scope: "recon-selected-declaration-completeness", covered_ranges: 1, total_ranges: 1 },
+        { scope: "production-declaration-completeness", covered_ranges: 1, total_ranges: 2 }
+      ],
+      files: [
+        {
+          path: "src/Excluded.sol",
+          kind: "production",
+          included: false,
+          exclusion_reason: "Not <span hidden>selected</span> ~~by~~ Recon"
+        }
+      ],
+      zero_coverage_components: []
+    }),
+    [
+      "## Scoped coverage evidence",
+      "",
+      "- recon-selected-declaration-completeness: `1/1`",
+      "- production-declaration-completeness: `1/2`",
+      "",
+      "Excluded from Recon-selected scope:",
+      "- `src/Excluded.sol` (production): Not &lt;span hidden&gt;selected&lt;/span&gt; \\~\\~by\\~\\~ Recon",
+      "",
+      "Zero-coverage components:",
+      "- None"
+    ]
   );
 });
 

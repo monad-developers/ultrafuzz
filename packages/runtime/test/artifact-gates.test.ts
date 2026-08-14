@@ -50,9 +50,9 @@ function tempProject(): string {
 
 function writeCoverageLcov(
   workspace: string,
-  sources: Readonly<Record<string, Readonly<Record<number, number>>>>
+  sources: Readonly<Record<string, Readonly<Record<number, number>>>>,
+  relativePath = "coverage-input.lcov"
 ): { path: string; sha256: string } {
-  const relativePath = "coverage-input.lcov";
   const lcovPath = path.join(workspace, relativePath);
   fs.mkdirSync(path.dirname(lcovPath), { recursive: true });
   const lines = Object.entries(sources).flatMap(([source, hits]) => [
@@ -352,10 +352,14 @@ function writeMeasuredCoverageArtifacts(
   workspace: string,
   artifacts: { goal?: unknown; markdown: string; evidence: unknown }
 ): void {
+  const lcovPath = node.outputs.find(
+    (output) => output.contract === "ultrafuzz/text@1" && /\.lcov$/iu.test(output.path)
+  )?.path;
+  if (lcovPath === undefined) throw new Error("coverage fixture requires one declared LCOV text output");
   const contents: Record<string, string> = {
     "coverage-report.md": artifacts.markdown,
     "coverage-evidence.json": JSON.stringify(artifacts.evidence),
-    "coverage-input.lcov": fs.readFileSync(path.join(workspace, "coverage-input.lcov"), "utf8"),
+    [lcovPath]: fs.readFileSync(path.join(workspace, lcovPath), "utf8"),
     "recon-coverage.json": fs.readFileSync(path.join(workspace, "magic/recon-coverage.json"), "utf8")
   };
   if (artifacts.goal !== undefined) contents["coverage-goal.json"] = JSON.stringify(artifacts.goal);
@@ -10399,7 +10403,7 @@ test("coverage gate joins unavailable evidence to a blocked null goal and the ex
   const blockers = [
     {
       category: "coverage-tooling-blocked",
-      summary: "Recon could not produce an authenticated coverage map.",
+      summary: "Recon <span hidden>could not</span> produce an authenticated coverage map.",
       evidence_paths: ["logs/recon-coverage.log"]
     }
   ];
@@ -10421,7 +10425,7 @@ test("coverage gate joins unavailable evidence to a blocked null goal and the ex
   };
   const markdown =
     "# Coverage\n\n## Scoped coverage evidence\n\n- Status: unavailable\n\nBlockers:\n" +
-    "- coverage-tooling-blocked: Recon could not produce an authenticated coverage map.\n" +
+    "- coverage-tooling-blocked: Recon &lt;span hidden&gt;could not&lt;/span&gt; produce an authenticated coverage map.\n" +
     "  - Evidence: `logs/recon-coverage.log`\n";
   const publish = (goalValue: unknown): ReturnType<typeof verifyRequiredArtifactsForAttempt> => {
     writeDeclaredArtifactNode(layout, node.id, node.outputs, {
@@ -10536,7 +10540,7 @@ test("coverage goal parity derives 0/0 as below-target and ignores unsafe counts
     "# Coverage\n\n## Scoped coverage evidence\n\n" +
     "- recon-selected-declaration-completeness: `0/0`\n" +
     "- production-declaration-completeness: `0/0`\n\n" +
-    "Excluded components:\n- `src/Interfaces.sol` (production): contains no executable declarations\n\n" +
+    "Excluded from Recon-selected scope:\n- `src/Interfaces.sol` (production): contains no executable declarations\n\n" +
     "Zero-coverage components:\n- None\n";
   const publish = (
     goalValue: unknown,
@@ -10693,7 +10697,7 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
   };
   const scopedMarkdown =
     "# Coverage\n\n## Scoped coverage evidence\n\n- recon-selected-declaration-completeness: `1/1`\n- production-declaration-completeness: `1/6`\n\n" +
-    "Excluded components:\n- `src/Critical.sol` (production): not selected\n\n" +
+    "Excluded from Recon-selected scope:\n- `src/Critical.sol` (production): not selected\n\n" +
     "Zero-coverage components:\n- `src/Core.sol:3-3` (production)\n" +
     "- `src/Critical.sol:4-4` (production)\n- `src/Critical.sol:5-5` (production)\n" +
     "- `src/Critical.sol:6-6` (production)\n- `src/Critical.sol:7-7` (production)\n";
@@ -11155,7 +11159,7 @@ test("coverage gate rejects a selected declaration with any uncovered instrument
     goal,
     markdown:
       "# Coverage\n\n## Scoped coverage evidence\n\n- recon-selected-declaration-completeness: `1/1`\n- production-declaration-completeness: `1/1`\n\n" +
-      "Excluded components:\n- None\n\nZero-coverage components:\n- None\n",
+      "Excluded from Recon-selected scope:\n- None\n\nZero-coverage components:\n- None\n",
     evidence
   });
 
@@ -11176,7 +11180,7 @@ test("coverage gate rejects a selected declaration with any uncovered instrument
     goal,
     markdown:
       "# Coverage\n\n## Scoped coverage evidence\n\n- recon-selected-declaration-completeness: `0/1`\n- production-declaration-completeness: `0/1`\n\n" +
-      "Excluded components:\n- None\n\nZero-coverage components:\n- None\n",
+      "Excluded from Recon-selected scope:\n- None\n\nZero-coverage components:\n- None\n",
     evidence
   });
 
@@ -11193,7 +11197,7 @@ test("coverage gate rejects a selected declaration with any uncovered instrument
     goal,
     markdown:
       "# Coverage\n\n## Scoped coverage evidence\n\n- recon-selected-declaration-completeness: `0/1`\n- production-declaration-completeness: `0/1`\n\n" +
-      "Excluded components:\n- None\n\nZero-coverage components:\n- `src/Core.sol:2-5` (production)\n",
+      "Excluded from Recon-selected scope:\n- None\n\nZero-coverage components:\n- `src/Core.sol:2-5` (production)\n",
     evidence
   });
   const partialMislabeledAsZero = verifyRequiredArtifactsForAttempt(layout, node, node.id);
@@ -11206,11 +11210,11 @@ test("coverage gate rejects a selected declaration with any uncovered instrument
   );
 });
 
-test("coverage gate treats configured roots as production and classifies external source roots", () => {
+test("coverage gate excludes nested non-production directories from configured production roots", () => {
   const layout = createRunLayout({
     projectRoot: tempProject(),
     runId: "run-scoped-coverage-nested-roots",
-    resolvedConfigToml: '[permissions]\nproduction_source_roots = ["contracts"]\n'
+    resolvedConfigToml: '[permissions]\nproduction_source_roots = ["contracts", "test"]\n'
   });
   const node = {
     ...plannedMeasuredCoverageNode(),
@@ -11223,10 +11227,11 @@ test("coverage gate treats configured roots as production and classifies externa
   for (const relativePath of [
     "contracts/Core.sol",
     "contracts/lib/ProductionLibrary.sol",
-    "lib/Dep.sol",
-    "test/Test.sol",
-    "test/recon/Harness.sol",
-    "mocks/Mock.sol"
+    "test/ConfiguredProduction.sol",
+    "contracts/dependencies/Dep.sol",
+    "contracts/test/Test.sol",
+    "contracts/test/recon/Harness.sol",
+    "contracts/mocks/Mock.sol"
   ]) {
     const absolutePath = path.join(workspace, relativePath);
     fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
@@ -11236,10 +11241,11 @@ test("coverage gate treats configured roots as production and classifies externa
   const lcov = writeCoverageLcov(workspace, {
     "contracts/Core.sol": { 1: 1 },
     "contracts/lib/ProductionLibrary.sol": { 1: 1 },
-    "lib/Dep.sol": { 1: 1 },
-    "test/Test.sol": { 1: 1 },
-    "test/recon/Harness.sol": { 1: 1 },
-    "mocks/Mock.sol": { 1: 1 }
+    "test/ConfiguredProduction.sol": { 1: 1 },
+    "contracts/dependencies/Dep.sol": { 1: 1 },
+    "contracts/test/Test.sol": { 1: 1 },
+    "contracts/test/recon/Harness.sol": { 1: 1 },
+    "contracts/mocks/Mock.sol": { 1: 1 }
   });
   const evidence = {
     schema_version: "ultrafuzz.coverage-evidence.v1",
@@ -11248,7 +11254,7 @@ test("coverage gate treats configured roots as production and classifies externa
     recon_selection: reconSelection,
     views: [
       { scope: "recon-selected-declaration-completeness", covered_ranges: 1, total_ranges: 1 },
-      { scope: "production-declaration-completeness", covered_ranges: 2, total_ranges: 2 }
+      { scope: "production-declaration-completeness", covered_ranges: 3, total_ranges: 3 }
     ],
     files: [
       { path: "contracts/Core.sol", kind: "production", included: true, covered_ranges: 1, total_ranges: 1 },
@@ -11261,7 +11267,15 @@ test("coverage gate treats configured roots as production and classifies externa
         total_ranges: 1
       },
       {
-        path: "lib/Dep.sol",
+        path: "test/ConfiguredProduction.sol",
+        kind: "production",
+        included: false,
+        exclusion_reason: "configured root remains authoritative",
+        covered_ranges: 1,
+        total_ranges: 1
+      },
+      {
+        path: "contracts/dependencies/Dep.sol",
         kind: "dependency",
         included: false,
         exclusion_reason: "nested dependency source",
@@ -11269,7 +11283,7 @@ test("coverage gate treats configured roots as production and classifies externa
         total_ranges: 1
       },
       {
-        path: "test/Test.sol",
+        path: "contracts/test/Test.sol",
         kind: "test",
         included: false,
         exclusion_reason: "nested test source",
@@ -11277,7 +11291,7 @@ test("coverage gate treats configured roots as production and classifies externa
         total_ranges: 1
       },
       {
-        path: "test/recon/Harness.sol",
+        path: "contracts/test/recon/Harness.sol",
         kind: "harness",
         included: false,
         exclusion_reason: "nested harness source",
@@ -11285,7 +11299,7 @@ test("coverage gate treats configured roots as production and classifies externa
         total_ranges: 1
       },
       {
-        path: "mocks/Mock.sol",
+        path: "contracts/mocks/Mock.sol",
         kind: "harness",
         included: false,
         exclusion_reason: "mock harness source",
@@ -11311,7 +11325,15 @@ test("coverage gate treats configured roots as production and classifies externa
         covered: true
       },
       {
-        file: "lib/Dep.sol",
+        file: "test/ConfiguredProduction.sol",
+        kind: "production",
+        start_line: 1,
+        line_count: 1,
+        selected: false,
+        covered: true
+      },
+      {
+        file: "contracts/dependencies/Dep.sol",
         kind: "dependency",
         start_line: 1,
         line_count: 1,
@@ -11319,7 +11341,7 @@ test("coverage gate treats configured roots as production and classifies externa
         covered: true
       },
       {
-        file: "test/Test.sol",
+        file: "contracts/test/Test.sol",
         kind: "test",
         start_line: 1,
         line_count: 1,
@@ -11327,7 +11349,7 @@ test("coverage gate treats configured roots as production and classifies externa
         covered: true
       },
       {
-        file: "test/recon/Harness.sol",
+        file: "contracts/test/recon/Harness.sol",
         kind: "harness",
         start_line: 1,
         line_count: 1,
@@ -11335,7 +11357,7 @@ test("coverage gate treats configured roots as production and classifies externa
         covered: true
       },
       {
-        file: "mocks/Mock.sol",
+        file: "contracts/mocks/Mock.sol",
         kind: "harness",
         start_line: 1,
         line_count: 1,
@@ -11357,12 +11379,13 @@ test("coverage gate treats configured roots as production and classifies externa
     blockers: []
   };
   const markdown =
-    "# Coverage\n\n## Scoped coverage evidence\n\n- recon-selected-declaration-completeness: `1/1`\n- production-declaration-completeness: `2/2`\n\n" +
-    "Excluded components:\n- `contracts/lib/ProductionLibrary.sol` (production): not selected\n" +
-    "- `lib/Dep.sol` (dependency): nested dependency source\n" +
-    "- `test/Test.sol` (test): nested test source\n" +
-    "- `test/recon/Harness.sol` (harness): nested harness source\n" +
-    "- `mocks/Mock.sol` (harness): mock harness source\n\n" +
+    "# Coverage\n\n## Scoped coverage evidence\n\n- recon-selected-declaration-completeness: `1/1`\n- production-declaration-completeness: `3/3`\n\n" +
+    "Excluded from Recon-selected scope:\n- `contracts/lib/ProductionLibrary.sol` (production): not selected\n" +
+    "- `test/ConfiguredProduction.sol` (production): configured root remains authoritative\n" +
+    "- `contracts/dependencies/Dep.sol` (dependency): nested dependency source\n" +
+    "- `contracts/test/Test.sol` (test): nested test source\n" +
+    "- `contracts/test/recon/Harness.sol` (harness): nested harness source\n" +
+    "- `contracts/mocks/Mock.sol` (harness): mock harness source\n\n" +
     "Zero-coverage components:\n- None\n";
   writeMeasuredCoverageArtifacts(layout, node, workspace, { goal, markdown, evidence });
 
@@ -11370,8 +11393,8 @@ test("coverage gate treats configured roots as production and classifies externa
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
 
   const relabeled = structuredClone(evidence);
-  relabeled.files[2]!.kind = "production";
-  relabeled.counted_ranges[2]!.kind = "production";
+  relabeled.files[3]!.kind = "production";
+  relabeled.counted_ranges[3]!.kind = "production";
   writeMeasuredCoverageArtifacts(layout, node, workspace, { goal, markdown, evidence: relabeled });
   const spoofed = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(spoofed.ok, false);
@@ -11485,7 +11508,7 @@ test("coverage gate groups same-line Solidity declarations into one representabl
   };
   const markdown =
     "# Coverage\n\n## Scoped coverage evidence\n\n- recon-selected-declaration-completeness: `1/1`\n- production-declaration-completeness: `1/1`\n\n" +
-    "Excluded components:\n- `lib/Dependency.sol` (dependency): outside configured production roots\n" +
+    "Excluded from Recon-selected scope:\n- `lib/Dependency.sol` (dependency): outside configured production roots\n" +
     "- `src/Interfaces.sol` (production): contains no executable declarations\n\n" +
     "Zero-coverage components:\n- None\n";
   writeMeasuredCoverageArtifacts(layout, node, workspace, { goal, markdown, evidence });
@@ -11559,7 +11582,7 @@ test("coverage gate fails closed when every configured production root is missin
   };
   const markdown =
     "# Coverage\n\n## Scoped coverage evidence\n\n- recon-selected-declaration-completeness: `0/0`\n" +
-    "- production-declaration-completeness: `0/0`\n\nExcluded components:\n" +
+    "- production-declaration-completeness: `0/0`\n\nExcluded from Recon-selected scope:\n" +
     "- `test/Harness.sol` (harness): not a production source\n\nZero-coverage components:\n- None\n";
   writeMeasuredCoverageArtifacts(layout, node, workspace, { goal, markdown, evidence });
 
@@ -11690,7 +11713,7 @@ test("coverage gate authenticates Vyper declaration boundaries outside the Solid
   };
   const markdown =
     "# Coverage\n\n## Scoped coverage evidence\n\n- recon-selected-declaration-completeness: `0/0`\n" +
-    "- production-declaration-completeness: `0/4`\n\nExcluded components:\n" +
+    "- production-declaration-completeness: `0/4`\n\nExcluded from Recon-selected scope:\n" +
     "- `src/Module.vy` (production): Recon coverage-map generation is Solidity-only\n\n" +
     "Zero-coverage components:\n- `src/Module.vy:5-5` (production)\n" +
     "- `src/Module.vy:8-11` (production)\n- `src/Module.vy:15-16` (production)\n" +
@@ -11731,7 +11754,7 @@ test("coverage gate authenticates Vyper declaration boundaries outside the Solid
   publish(
     inventedSelection,
     "# Coverage\n\n## Scoped coverage evidence\n\n- recon-selected-declaration-completeness: `1/1`\n" +
-      "- production-declaration-completeness: `1/4`\n\nExcluded components:\n- None\n\nZero-coverage components:\n" +
+      "- production-declaration-completeness: `1/4`\n\nExcluded from Recon-selected scope:\n- None\n\nZero-coverage components:\n" +
       "- `src/Module.vy:5-5` (production)\n- `src/Module.vy:15-16` (production)\n" +
       "- `src/Module.vy:19-20` (production)\n"
   );
@@ -11744,6 +11767,7 @@ test("coverage gate authenticates Vyper declaration boundaries outside the Solid
 });
 
 test("final report preserves typed coverage evidence and its canonical Markdown projection", () => {
+  const lcovArtifactPath = "reports/2026/08/coverage-input.lcov";
   const layout = createRunLayout({
     projectRoot: tempProject(),
     runId: "run-final-scoped-coverage",
@@ -11755,6 +11779,9 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
     logical_id: "stateful-invariant-coverage",
     artifact_dir: "artifacts/stateful-invariant-coverage"
   };
+  coverageNode.outputs = coverageNode.outputs.map((output) =>
+    output.path === "coverage-input.lcov" ? boundOutput(lcovArtifactPath, "ultrafuzz/text@1", false) : output
+  );
   const reportNode = {
     ...plannedNode(["report.md", "report.json"]),
     id: "final-report",
@@ -11768,7 +11795,7 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
   fs.mkdirSync(workspace, { recursive: true });
   fs.writeFileSync(path.join(workspace, "Core.sol"), "contract Core { function core() external {} }\n");
   const reconSelection = writeReconCoverageSelection(coverageWorkspace, { "src/Core.sol": ["1"] });
-  const lcov = writeCoverageLcov(coverageWorkspace, { "src/Core.sol": { 1: 1 } });
+  const lcov = writeCoverageLcov(coverageWorkspace, { "src/Core.sol": { 1: 1 } }, lcovArtifactPath);
   const evidence = {
     schema_version: "ultrafuzz.coverage-evidence.v1",
     status: "measured",
@@ -11805,7 +11832,7 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
   });
   const scopedMarkdown =
     "# Ultrafuzz report\n\n## Scoped coverage evidence\n\n- recon-selected-declaration-completeness: `1/1`\n" +
-    "- production-declaration-completeness: `1/1`\n\nExcluded components:\n- None\n\n" +
+    "- production-declaration-completeness: `1/1`\n\nExcluded from Recon-selected scope:\n- None\n\n" +
     "Zero-coverage components:\n- None\n";
   writeArtifact(layout, reportNode.id, "report.md", scopedMarkdown);
   writeArtifact(
@@ -11817,6 +11844,66 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
 
   const valid = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
   assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
+
+  for (const stylesheetReport of [
+    `<style>h2,ul { display: none }</style>\n${scopedMarkdown}`,
+    `<style>.x::after { content: "Overall coverage was 100%" }</style>\n${scopedMarkdown}`
+  ]) {
+    writeArtifact(layout, reportNode.id, "report.md", stylesheetReport);
+    const stylesheet = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+    assert.equal(stylesheet.ok, false, stylesheetReport);
+    assert.ok(
+      stylesheet.diagnostics.some((diagnostic) => diagnostic.code === "COVERAGE_MARKDOWN_STYLESHEET_UNSUPPORTED"),
+      JSON.stringify(stylesheet.diagnostics)
+    );
+    assert.ok(
+      stylesheet.diagnostics.some((diagnostic) => diagnostic.code === "REPORT_COVERAGE_EVIDENCE_MARKDOWN_MISSING"),
+      JSON.stringify(stylesheet.diagnostics)
+    );
+  }
+
+  writeArtifact(
+    layout,
+    reportNode.id,
+    "report.md",
+    `${scopedMarkdown}\n## Notes\n\n<select><option selected>Overall coverage was 100%</option><option>for production-declaration-completeness</option></select>\n`
+  );
+  const selectControl = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+  assert.equal(selectControl.ok, false, JSON.stringify(selectControl.diagnostics));
+  assert.ok(
+    selectControl.diagnostics.some((diagnostic) => diagnostic.code === "COVERAGE_MARKDOWN_SELECT_UNSUPPORTED"),
+    JSON.stringify(selectControl.diagnostics)
+  );
+
+  for (const hiddenContainer of ["details", "dialog"]) {
+    writeArtifact(
+      layout,
+      reportNode.id,
+      "report.md",
+      `<${hiddenContainer}>\n\n${scopedMarkdown}\n## Container end\n\n</${hiddenContainer}>\n`
+    );
+    const hiddenCanonicalSection = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+    assert.equal(hiddenCanonicalSection.ok, false, hiddenContainer);
+    assert.ok(
+      hiddenCanonicalSection.diagnostics.some(
+        (diagnostic) => diagnostic.code === "REPORT_COVERAGE_EVIDENCE_MARKDOWN_MISSING"
+      ),
+      `${hiddenContainer}: ${JSON.stringify(hiddenCanonicalSection.diagnostics)}`
+    );
+
+    writeArtifact(
+      layout,
+      reportNode.id,
+      "report.md",
+      `<${hiddenContainer} open>\n\n${scopedMarkdown}\n## Container end\n\n</${hiddenContainer}>\n`
+    );
+    const visibleCanonicalSection = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+    assert.equal(
+      visibleCanonicalSection.ok,
+      true,
+      `${hiddenContainer}: ${JSON.stringify(visibleCanonicalSection.diagnostics)}`
+    );
+  }
 
   const commentedScopedMarkdown = scopedMarkdown
     .replace("## Scoped coverage evidence", "<!--\n## Scoped coverage evidence")
@@ -11899,6 +11986,10 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
     "Overall coverage hit 25%.",
     "Coverage climbed to 100%.",
     "Coverage improved from 25% to 100%.",
+    "Coverage decreased by 5% to 95%.",
+    "Coverage dropped to 95%.",
+    "Coverage averaged 95%.",
+    "Coverage has improved by 5% to 95%.",
     "Coverage exceeded 90%.",
     "Coverage is above 90%.",
     "Coverage now shows 100%.",
@@ -11906,9 +11997,14 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
     "coverage.percent=100%.",
     "Coverage percent was 100%.",
     "covg_eval=39/39.",
+    "coverage_ratio=39/39.",
+    "covgEval=39/39.",
+    "coveragePct=100%.",
     "Coverage was 100 percent.",
     "Coverage was 100 per cent.",
+    "Coverage was 100 pct.",
     "Coverage was one hundred percent.",
+    "Coverage was a hundred percent.",
     "Coverage was ninety-nine percent.",
     "Coverage was one hundred per cent.",
     "LCOV result was one hundred percent.",
@@ -11919,6 +12015,32 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
     "Coverage was 39 of 39 ranges.",
     "Coverage was 1,000/1,000 lines.",
     "Coverage was thirty-nine out of thirty-nine ranges.",
+    "Coverage was 39 over 39 ranges.",
+    "Coverage ratio was 39:39.",
+    "coverage_ratio=39:39.",
+    "Coverage was 99,5%.",
+    "Coverage (after normalization) was 100%.",
+    "Coverage reached a perfect 100%.",
+    "The coverage result after the campaign came in at 100%.",
+    "The campaign covered 100% of production code.",
+    "Line execution: 100%.",
+    "LCOV :: 100%.",
+    "covg eval: 39/39.",
+    "Coverage → 100%.",
+    "100% statement coverage.",
+    "100% path coverage.",
+    "100% condition coverage.",
+    "100% decision coverage.",
+    "100% instruction coverage.",
+    "100% block coverage.",
+    "100% method coverage.",
+    "100% class coverage.",
+    "100% aggregate coverage.",
+    "100% global coverage.",
+    "100% total coverage.",
+    "## Statement coverage\n\n100%.",
+    "## Global coverage\n\n100%.",
+    "<h2>Line coverage</h2><p>100%</p>",
     "Unlike recon-selected-declaration-completeness measurements: overall coverage was 25%.",
     "Coverage was **100%**.",
     "Coverage was *100%*.",
@@ -11950,7 +12072,6 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
     "Coverage was 100% <script>recon-selected-declaration-completeness</script>.",
     "Coverage was 100% <template>recon-selected-declaration-completeness</template>.",
     "Coverage was 100% <span hidden>recon-selected-declaration-completeness</span>.",
-    'Coverage was 100% <span aria-hidden="true">recon-selected-declaration-completeness</span>.',
     'Coverage was 100% <span style="display: none">recon-selected-declaration-completeness</span>.',
     'Coverage was 100% <span style="opacity: 0">recon-selected-declaration-completeness</span>.',
     'Coverage was 100% <span style="opacity: 0%">recon-selected-declaration-completeness</span>.',
@@ -11961,15 +12082,32 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
     'Coverage was 100% <span style="position:absolute;left:-9999px">recon-selected-declaration-completeness</span>.',
     'Coverage was 100% <span style="display:/**/none">recon-selected-declaration-completeness</span>.',
     'Coverage was 100% <span style="transform: scale(0)">recon-selected-declaration-completeness</span>.',
-    "Coverage was 100% <span inert>recon-selected-declaration-completeness</span>.",
+    'Coverage was 100% <span style="clip-path:inset(100%)">production-</span>declaration-completeness.',
+    'Coverage was 100% production-<span class="x">declaration</span>-completeness.',
+    'Coverage was 100% <span class="hidden-scope">production-declaration-completeness</span>.',
+    'Coverage was 100% <span id="hidden-scope">production-declaration-completeness</span>.',
+    "<style>span { display:none }</style>\nCoverage was 100% <span>production-declaration-completeness</span>.",
+    '<span class="metric">Overall coverage was 100%.</span>',
+    'Coverage was 100% production<span style="display:none">-</span>declaration-completeness.',
+    'Coverage was 100% prod<span style="display:none">&#117;</span>ction-declaration-completeness.',
+    "Coverage was 100% for recon-selected-declaration-completeness and production-declaration-completeness.",
     "Coverage was 100% ![recon-selected-declaration-completeness](https://example.invalid/chart.svg).",
     "![Coverage was 100%.](https://example.invalid/chart.svg)",
     '<img src="https://example.invalid/chart.svg" alt="Coverage was 100%.">',
     '<span aria-label="Coverage was 100%."></span>',
+    '<span aria-label="Coverage was 100% for production-&amp;#100;eclaration-completeness"></span>',
+    '<input type="button" value="Overall coverage was 100%">',
+    '<input type="text" value="Overall coverage was 100%">',
+    '<input type="text" placeholder="Overall coverage was 100%">',
+    '<input type="image" alt="Overall coverage was 100%">',
+    '<input type="&#116;ext" value="Overall coverage was 100%">',
+    '<input type="unknown" value="Overall coverage was 100%">',
     "Coverage was 10\uFE0F0%.",
     "Covera\u034Fge was 100%.",
     "<h2>Coverage</h2>\n\n100%.",
+    "<h2>Coverage overview</h2>\n\n100%.",
     "### Coverage\n\n100%.",
+    "## Coverage overview\n\n100%.",
     "| Coverage |\n| --- |\n| 100% |",
     "Coverage:\n\n- 100%.",
     "```text\nCoverage was 100%.\n```",
@@ -11997,13 +12135,45 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
       mixed.diagnostics.some(
         (diagnostic) =>
           diagnostic.code ===
-          (/%|٪|&(?:percnt|#0*37|#x0*25);|\bper[ -]?cent(?:age)?\b/iu.test(normalizedMixedScore)
+          (/%|٪|&(?:percnt|#0*37|#x0*25);|\bpct\b\.?|\bper[ -]?cent(?:age)?\b/iu.test(normalizedMixedScore)
             ? "UNSCOPED_COVERAGE_PERCENTAGE"
             : "UNSCOPED_COVERAGE_FRACTION")
       ),
       mixedScore
     );
   }
+
+  for (const visiblyScopedScore of [
+    'Coverage was 100% <span aria-hidden="true">production-declaration-completeness</span>.',
+    "Coverage was 100% <span inert>production-declaration-completeness</span>."
+  ]) {
+    writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\n${visiblyScopedScore}\n`);
+    const visibleScope = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+    assert.equal(visibleScope.ok, false, visiblyScopedScore);
+    assert.ok(
+      !visibleScope.diagnostics.some((diagnostic) => diagnostic.code.startsWith("UNSCOPED_")),
+      `${visiblyScopedScore}: ${JSON.stringify(visibleScope.diagnostics)}`
+    );
+  }
+
+  const denseScopedScores = Array.from({ length: 12_000 }, () => "production-declaration-completeness: 1/1").join("; ");
+  const denseBindingStartedAt = process.cpuUsage();
+  writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\n${denseScopedScores}\n`);
+  const denseBinding = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+  const denseBindingUsage = process.cpuUsage(denseBindingStartedAt);
+  const denseBindingElapsedMs = (denseBindingUsage.user + denseBindingUsage.system) / 1_000;
+  assert.equal(denseBinding.ok, false);
+  assert.ok(denseBindingElapsedMs < 5_000, `dense scope binding took ${denseBindingElapsedMs}ms`);
+  assert.equal(
+    denseBinding.diagnostics.filter((diagnostic) => diagnostic.code === "COVERAGE_SCORE_SCAN_LIMIT_EXCEEDED").length,
+    1,
+    JSON.stringify(denseBinding.diagnostics)
+  );
+  assert.ok(denseBinding.diagnostics.length < 10, JSON.stringify(denseBinding.diagnostics));
+  assert.ok(
+    !denseBinding.diagnostics.some((diagnostic) => diagnostic.code.startsWith("UNSCOPED_")),
+    JSON.stringify(denseBinding.diagnostics)
+  );
 
   for (const nonRenderedScore of [
     "<!--\nCoverage was 100%.\n-->",
@@ -12012,15 +12182,18 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
     "[details]: https://example.invalid/?coverage=100%",
     "<template>Coverage was 100%.</template>",
     "<span hidden>Coverage was 100%.</span>",
-    '<span aria-hidden="true">Coverage was 100%.</span>',
     '<span style="visibility: hidden">Coverage was 100%.</span>',
     '<span style="opacity: 0">Coverage was 100%.</span>',
     '<span style="opacity: 0%">Coverage was 100%.</span>',
     '<span style="font-size: 0">Coverage was 100%.</span>',
     '<span style="color: transparent">Coverage was 100%.</span>',
-    "<span inert>Coverage was 100%.</span>",
+    '<span style="display:inline;display:none">Overall coverage was 100%.</span>',
+    '<span style="display:none!important;display:inline">Overall coverage was 100%.</span>',
     '<img hidden alt="Coverage was 100%.">',
     '<span aria-hidden="true" aria-label="Coverage was 100%."></span>',
+    "<span title='fake aria-label=\"Coverage was 100%.\"'>No score is published.</span>",
+    '<script>if (a < b) { const score = "Coverage was 100%."; }</script>',
+    "<script>if (a < b) x()</scripted>Coverage was 100%.</script>",
     "<template>\n\nCoverage was 100%.\n\n</template>",
     "Coverage was 100&amp;#37;."
   ]) {
@@ -12083,13 +12256,62 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
     );
   }
 
-  for (const implicitlyVisibleScore of ["<p hidden>\n\nCoverage was 100%.", "<h1 hidden>\n\nCoverage was 100%."]) {
+  for (const implicitlyVisibleScore of [
+    "<p hidden>\n\nCoverage was 100%.",
+    "<h1 hidden>\n\nCoverage was 100%.",
+    "<p hidden>hidden<p>Coverage was 100%.</p>",
+    "<p hidden>hidden<div>Coverage was 100%.</div>",
+    "<h1 hidden>hidden<h2>Coverage was 100%.</h2>",
+    '<span style="display:none;display:inline">Overall coverage was 100%.</span>',
+    '<span style="display:none!important;display:inline!important">Overall coverage was 100%.</span>',
+    "<span style=\"--x:'foo;display:none;bar'\">Overall coverage was 100%.</span>",
+    '<span style="display:inline;/*;display:none;*/">Overall coverage was 100%.</span>',
+    '<span style="--x:foo\\;display:none">Overall coverage was 100%.</span>',
+    '<span aria-hidden="true">Coverage was 100%.</span>',
+    "<span inert>Coverage was 100%.</span>",
+    '<span title="foo hidden bar">Coverage was 100%.</span>',
+    "<span title=\"fake style='display:none'\">Coverage was 100%.</span>",
+    "<span data-note='aria-label=\"production-declaration-completeness\"'>Coverage was 100%.</span>",
+    "<script>if (a < b) x()</script>Coverage was 100%.",
+    "<script>hidden</script data-end=x>Overall coverage was 100%.",
+    '<script>hidden</script data-end=">">Overall coverage was 100%.',
+    "<style>hidden</style data-end=x>Overall coverage was 100%.",
+    "<textarea>hidden</textarea data-end=x>Overall coverage was 100%.",
+    "<xmp>hidden</xmp data-end=x>Overall coverage was 100%.",
+    "<style>.x { width: calc(1 < 2); }</style>Coverage was 100%.",
+    "<noscript>Coverage was 100%.</noscript>",
+    "<textarea>Coverage was 100%.</textarea>",
+    "<xmp>Coverage was 100%.</xmp>"
+  ]) {
     writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\n${implicitlyVisibleScore}\n`);
     const visibleAfterImplicitClose = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
     assert.equal(visibleAfterImplicitClose.ok, false, implicitlyVisibleScore);
     assert.ok(
       visibleAfterImplicitClose.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"),
       `${implicitlyVisibleScore}: ${JSON.stringify(visibleAfterImplicitClose.diagnostics)}`
+    );
+  }
+
+  for (const paragraphClosingTag of [
+    "center",
+    "details",
+    "dialog",
+    "dir",
+    "figcaption",
+    "figure",
+    "summary",
+    "li",
+    "dt",
+    "dd"
+  ]) {
+    const openAttribute = paragraphClosingTag === "details" || paragraphClosingTag === "dialog" ? " open" : "";
+    const implicitlyVisibleScore = `<p hidden>x<${paragraphClosingTag}${openAttribute}>Overall coverage was 100%.</${paragraphClosingTag}>`;
+    writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\n${implicitlyVisibleScore}\n`);
+    const visibleAfterParagraphClose = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+    assert.equal(visibleAfterParagraphClose.ok, false, implicitlyVisibleScore);
+    assert.ok(
+      visibleAfterParagraphClose.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"),
+      `${implicitlyVisibleScore}: ${JSON.stringify(visibleAfterParagraphClose.diagnostics)}`
     );
   }
 
@@ -12150,6 +12372,9 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
 
   for (const unrelatedPercentage of [
     "The insurance policy coverage was 25%.",
+    "Coverage for the insurance policy was 25%.",
+    "Coverage for the warranty was 25%.",
+    "Coverage was 25% under the insurance policy.",
     "The insurance policy coverage was twenty-five percent.",
     "The flood insurance's coverage was 25%.",
     "The warranty coverage was 25% of the repair cost."
@@ -12157,6 +12382,26 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
     writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\n${unrelatedPercentage}\n`);
     const unrelatedProse = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
     assert.equal(unrelatedProse.ok, true, `${unrelatedPercentage}: ${JSON.stringify(unrelatedProse.diagnostics)}`);
+  }
+
+  for (const numericArtifactPath of [
+    "Coverage artifacts are stored in logs/2026/08/result.json.",
+    "The LCOV path is reports/2026/08/coverage.lcov."
+  ]) {
+    writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\n${numericArtifactPath}\n`);
+    const numericPath = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+    assert.equal(numericPath.ok, true, `${numericArtifactPath}: ${JSON.stringify(numericPath.diagnostics)}`);
+  }
+
+  for (const coverageTimestamp of [
+    "Coverage report generated at 10:30.",
+    "Coverage ran for 1:30 before stopping.",
+    "Coverage report generated at 10:30:45 UTC.",
+    "LCOV generated at 10:30."
+  ]) {
+    writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\n${coverageTimestamp}\n`);
+    const timestamp = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+    assert.equal(timestamp.ok, true, `${coverageTimestamp}: ${JSON.stringify(timestamp.diagnostics)}`);
   }
 
   for (const coverageSectionProse of [
@@ -12306,6 +12551,90 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
     JSON.stringify(proseInTypedReport.diagnostics)
   );
 
+  for (const noteSequence of [["Coverage:\n\n100%."], ["Coverage overview:\n\n100%."], ["Coverage:", "100%."]]) {
+    const jsonBypassIssue = {
+      ...structuredClone(coverageProseIssue),
+      notes: ["triage_reason=public path is reachable", ...noteSequence]
+    };
+    writeArtifact(
+      layout,
+      reportNode.id,
+      "report.json",
+      JSON.stringify(currentReport(layout.runId, { coverage_evidence: evidence, issues: [jsonBypassIssue] }))
+    );
+    const jsonBypass = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+    assert.equal(jsonBypass.ok, false, JSON.stringify(noteSequence));
+    assert.ok(
+      jsonBypass.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"),
+      `${JSON.stringify(noteSequence)}: ${JSON.stringify(jsonBypass.diagnostics)}`
+    );
+  }
+
+  const persistentCoverageLabelIssue = {
+    ...structuredClone(coverageProseIssue),
+    notes: ["triage_reason=public path is reachable", "Coverage:", "100%.", "95%."]
+  };
+  writeArtifact(
+    layout,
+    reportNode.id,
+    "report.json",
+    JSON.stringify(currentReport(layout.runId, { coverage_evidence: evidence, issues: [persistentCoverageLabelIssue] }))
+  );
+  const persistentCoverageLabel = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+  const persistentPercentageDiagnostics = persistentCoverageLabel.diagnostics.filter(
+    (diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"
+  );
+  assert.equal(persistentPercentageDiagnostics.length, 2, JSON.stringify(persistentCoverageLabel.diagnostics));
+  assert.ok(
+    persistentPercentageDiagnostics.some((diagnostic) => diagnostic.path?.endsWith("#$.issues[0].notes[2]:1")),
+    JSON.stringify(persistentPercentageDiagnostics)
+  );
+  assert.ok(
+    persistentPercentageDiagnostics.some((diagnostic) => diagnostic.path?.endsWith("#$.issues[0].notes[3]:1")),
+    JSON.stringify(persistentPercentageDiagnostics)
+  );
+
+  for (const boundedCoverageNotes of [
+    ["Coverage:", "100%.", "## Timing", "95%."],
+    ["Coverage:", "100%.", "Timing:", "95%."]
+  ]) {
+    const boundedCoverageIssue = {
+      ...structuredClone(coverageProseIssue),
+      notes: ["triage_reason=public path is reachable", ...boundedCoverageNotes]
+    };
+    writeArtifact(
+      layout,
+      reportNode.id,
+      "report.json",
+      JSON.stringify(currentReport(layout.runId, { coverage_evidence: evidence, issues: [boundedCoverageIssue] }))
+    );
+    const boundedCoverage = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+    const boundedPercentageDiagnostics = boundedCoverage.diagnostics.filter(
+      (diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"
+    );
+    assert.equal(boundedPercentageDiagnostics.length, 1, JSON.stringify(boundedCoverage.diagnostics));
+    assert.ok(
+      boundedPercentageDiagnostics[0]?.path?.endsWith("#$.issues[0].notes[2]:1"),
+      JSON.stringify(boundedPercentageDiagnostics)
+    );
+  }
+
+  const headingBoundaryIssue = {
+    ...structuredClone(coverageProseIssue),
+    notes: ["triage_reason=public path is reachable", "Coverage:", "## Notes\n\n25% time used."]
+  };
+  writeArtifact(
+    layout,
+    reportNode.id,
+    "report.json",
+    JSON.stringify(currentReport(layout.runId, { coverage_evidence: evidence, issues: [headingBoundaryIssue] }))
+  );
+  const headingBoundary = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+  assert.ok(
+    !headingBoundary.diagnostics.some((diagnostic) => diagnostic.code.startsWith("UNSCOPED_")),
+    JSON.stringify(headingBoundary.diagnostics)
+  );
+
   const strategyRateIssue = {
     ...structuredClone(coverageProseIssue),
     notes: ["triage_reason=public path is reachable", "stateful-invariant-coverage detection rate was 1/1."]
@@ -12334,6 +12663,15 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
   assert.ok(
     evaluatorFraction.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_FRACTION"),
     JSON.stringify(evaluatorFraction.diagnostics)
+  );
+
+  const nestedCoverageReport = currentReport(layout.runId, { coverage_evidence: evidence }) as Record<string, unknown>;
+  nestedCoverageReport.coverage = { score: "100%" };
+  writeArtifact(layout, reportNode.id, "report.json", JSON.stringify(nestedCoverageReport));
+  const nestedCoverage = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+  assert.ok(
+    nestedCoverage.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"),
+    JSON.stringify(nestedCoverage.diagnostics)
   );
 
   writeArtifact(

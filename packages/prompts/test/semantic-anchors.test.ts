@@ -353,6 +353,9 @@ describe("prompt semantic anchors", () => {
     const coverage = prompt("strategies/invariants/coverage.md");
 
     expect(coverage).toContain("`recon-generate coverage`");
+    expect(coverage.split("\n").length).toBeLessThan(180);
+    expect(coverage.match(/official documentation or direct CLI `--help`/gu)).toHaveLength(1);
+    expect(coverage).not.toContain("The tool expects a Magic directory");
     expect(coverage).not.toContain("npx -y recon-generate");
     expect(coverage).not.toContain("recon-generate@latest");
   });
@@ -572,9 +575,9 @@ describe("prompt semantic anchors", () => {
       expect(invariantPrompt).toContain("machine-readable source of truth");
       expect(invariantPrompt).toContain("source-only properties");
     }
-    expect(coverage).toContain("Follow the pinned schemas, rendered validation commands");
-    expect(coverage).toContain("schema variant matching the evidence");
-    expect(coverage).toContain("never overstate an unmeasured, sub-target, or blocked result");
+    expect(coverage).toMatch(/Confirm their exact shapes and empty\s+forms with the rendered output contract/u);
+    expect(coverage).toContain("never overstate the result");
+    expect(coverage).not.toContain("it alone defines");
   });
 
   it("renders the canonical coverage projection into both portable prompts", () => {
@@ -593,6 +596,8 @@ describe("prompt semantic anchors", () => {
     const partial = readFileSync(partialPath, "utf8").trim();
     const docs = readFileSync(docsPath, "utf8");
 
+    expect(partial.match(/Raw `covg-eval` output is for iteration only/gu)).toHaveLength(1);
+    expect(partial).toMatch(/Apply public-prose\s+sanitization to `<summary>` and `<exclusion_reason>`/u);
     expect(docs).toContain(partial);
   });
 
