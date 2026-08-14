@@ -7,7 +7,7 @@ import type { FindingJudgeInput, FindingJudgeResult, GroundTruthBug } from "../t
  * Versioned adjudicator instructions. Bump this whenever any prompt content,
  * candidate aliasing, truncation, or structured-output contract changes.
  */
-export const EVAL_JUDGE_PROMPT_VERSION = "ultrafuzz-eval-judge-v12-complete-coverage-evidence";
+export const EVAL_JUDGE_PROMPT_VERSION = "ultrafuzz-eval-judge-v10-registered-result-schema";
 
 const SYSTEM_PROMPT = loadPrompt("adjudicator-system.mdx");
 const USER_PROMPT = loadPrompt("adjudicator-user.mdx");
@@ -51,8 +51,7 @@ export function buildAdjudicatorPrompt(input: FindingJudgeInput): AdjudicatorMes
         threshold: String(input.threshold),
         deterministic_result: boundedJson(aliasedDeterministicResult, 4000),
         ground_truth_candidates: boundedJson(aliasedBugs, 12000),
-        finding: boundedJson(input.finding, 12000),
-        coverage_evidence: input.coverageEvidence === undefined ? "unavailable" : completeJson(input.coverageEvidence)
+        finding: boundedJson(input.finding, 12000)
       })
     }
   ];
@@ -92,12 +91,6 @@ function boundedJson(value: unknown, maxLength: number): string {
     return rendered;
   }
   return `${rendered.slice(0, maxLength)}\n... truncated ...`;
-}
-
-function completeJson(value: unknown): string {
-  const rendered = JSON.stringify(value, null, 2);
-  if (rendered === undefined) throw new Error("coverage evidence is not JSON-serializable");
-  return rendered;
 }
 
 function loadPrompt(fileName: string): string {
