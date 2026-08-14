@@ -313,12 +313,19 @@ describe("prompt semantic anchors", () => {
     );
     expect(implementation).toContain("Audit inherited handlers before implementing properties");
     expect(implementation).toContain("Every assertion observes state after a directly invoked protocol action");
+    expect(implementation).toMatch(
+      /own canonical\s+observation identity and backend-admitted assertion\/invariant entrypoint/u
+    );
+    expect(implementation).toMatch(/never put several property IDs behind\s+one assertion entrypoint/u);
     expect(implementation).toContain("reference_expectations");
     expect(implementation).toContain("even when its priority is below the configured threshold");
     expect(campaign).toContain("Audit inherited handlers before the final Recon smoke");
     expect(campaign).toMatch(
       /Record every reached protocol revert, panic, or out-of-gas failure as a\s+raw backend failure/u
     );
+    expect(campaign).toContain("Build an intended-property-entrypoint set");
+    expect(campaign).toMatch(/record an independent terminal status for every implemented property/u);
+    expect(campaign).toContain("A campaign is not `complete` when any intended property entrypoint is");
     expect(corpus).toContain("documented valid preconditions");
   });
 

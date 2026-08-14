@@ -64,6 +64,16 @@ Use this configured invariant testing fuzzer timeout:
      protocol action uses a typed direct call with checked return values and a
      documented precondition; repair the handler and rerun the smoke when the
      audit cannot explain its failure behavior.
+   - Build an intended-property-entrypoint set from the selected implemented
+     records and the generated suite/ABI, and an admitted-entrypoint set from
+     the backend's discovered test names and result records. Every intended
+     entrypoint must identify exactly one canonical `property_id`; reject a
+     shared observation entrypoint that represents multiple properties even if
+     its action handler is shared. Preserve both sets in the campaign result,
+     and record an independent terminal status for every implemented property:
+     `executed`, `not-executed`, or `inconclusive`, with a typed reason when it
+     was not evaluated. A property must never inherit a sibling property's
+     pass, failure, or omission status.
    - Record every reached protocol revert, panic, or out-of-gas failure as a
      raw backend failure with its entrypoint, sequence, precondition evidence,
      and exact property IDs when the failure exercises an implemented catalog
@@ -267,6 +277,12 @@ Use this configured invariant testing fuzzer timeout:
      production bugs distinct.
 
 6. Determine the campaign outcome.
+   - A campaign is not `complete` when any intended property entrypoint is
+     absent from the admitted set, when an entrypoint maps to multiple property
+     IDs, or when any implemented property's terminal status is
+     `not-executed`/`inconclusive`. Mark the run `partial` or `blocked` as
+     appropriate, emit a precise diagnostic naming every omitted or ambiguous
+     property, and retain the independent `property_results` statuses.
    - `complete`: recon-fuzzer ran through the full configured fuzzing interval;
      the supervisor's expected `SIGINT` at that deadline counts as its expected
      terminal state.

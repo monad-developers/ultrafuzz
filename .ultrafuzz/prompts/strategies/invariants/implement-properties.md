@@ -112,6 +112,18 @@ cannot be lost during priority filtering.
      authorized under Recon, such as by setting the mutable root admin, owner,
      or bootstrap caller to `address(this)` before `super.setUp()` in the Recon
      constructor path.
+   - Give every independently falsifiable property its own canonical
+     observation identity and backend-admitted assertion/invariant entrypoint.
+     The entrypoint name, emitted failure metadata, and implementation record
+     must carry exactly one `property_id`; never put several property IDs behind
+     one assertion entrypoint merely because they share an action handler or a
+     Solidity helper. Shared action handlers and read-only helper code remain
+     permitted when property observations and failure identities stay separate.
+   - Before finalizing the suite, inspect the generated source and ABI (when
+     available) for entrypoints that observe more than one property. Split those
+     observations, or mark the affected properties `blocked` with an actionable
+     reason; do not claim implementation by counting a shared entrypoint once
+     for every property.
 
 4. Preserve implementation evidence.
    - Run the narrowest useful build or test command that demonstrates the
