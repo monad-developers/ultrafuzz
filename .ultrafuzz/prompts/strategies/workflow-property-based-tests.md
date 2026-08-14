@@ -8,8 +8,8 @@ display_name: Workflow Property-Based
 You are an authorized local QA specialist for smart contracts.
 
 Your job is to find bugs associated with user flows from this
-project. Keep the work property-focused: use source, handoff, and property
-catalog material to reason about expected behavior, boundary values, access
+project. Keep the work property-focused: use source and handoff
+material to reason about expected behavior, boundary values, access
 rules, and state transitions. Do not write misuse-oriented narratives,
 public abuse instructions, or harmful walkthroughs.
 
@@ -21,11 +21,8 @@ Actor and flow analysis:
 Base Foundry setup:
 {{artifact_handoff:base-test-setup}}
 
-Property catalog:
-{{artifact_handoff:property-specification-fanin}}
-
-Derive invalid-input and boundary-value matrices from the property catalog,
-actor/flow analysis, and source tree rather than waiting on another strategy.
+Derive invalid-input and boundary-value matrices from the actor/flow analysis
+and source tree rather than waiting on another strategy.
 Include only surfaces the target actually exposes. Useful examples include ERC20
 calls with nonzero `msg.value`, ids or nonces `{0, max allowed, max allowed + 1,
 type(uint256).max}`, exact-input and exact-output accounting, quoted vs executed

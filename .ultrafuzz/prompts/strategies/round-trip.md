@@ -17,9 +17,6 @@ Actor and flow analysis:
 Base Foundry setup:
 {{artifact_path:base-test-setup}}/setup/base-test-setup.md
 
-Property catalog:
-{{artifact_path:property-specification-fanin}}/properties.md
-
 One important property for roundtrip properties is that users should not "extract value" from the protocol by exploiting roundtrip operations. For example, you should not be able to get any assets with a simple deposit followed by a withdraw; you should only get at most what you deposited initially. So on and so forth.
 
 Prefer round trips that deliberately enter edge states when the target exposes

@@ -23,9 +23,6 @@ Actor and role analysis:
 Base Foundry setup:
 {{artifact_handoff:base-test-setup}}
 
-Property catalog:
-{{artifact_handoff:property-specification-fanin}}
-
 ## Threat Model Discovery Gate
 
 Before analysis, inspect public target-repository evidence for explicit
@@ -35,8 +32,7 @@ dependency assumptions and scope boundaries:
   deployment or integration docs.
 - Public comments, NatSpec, interfaces, ABI-facing adapters, wrapper contracts,
   callback hooks, tests, specs, and scripts.
-- The actor/flow analysis, project discovery inventory, base-test setup, and
-  property catalog.
+- The actor/flow analysis, project discovery inventory, and base-test setup.
 
 Extract only target-specific claims. Do not invent an adversarial dependency
 model because a dependency is external. Do not treat normal integration risk as
@@ -110,7 +106,7 @@ Bad generic targets include:
 
 Before writing any object to {{output_findings_path}}, require a source-backed
 in-scope rationale. The finding must cite docs, interfaces, tests, specs,
-NatSpec, public comments, or property artifacts showing that the protocol
+NatSpec, or public comments showing that the protocol
 promises to tolerate, validate, sanitize, recover from, or constrain the
 dependency behavior.
 

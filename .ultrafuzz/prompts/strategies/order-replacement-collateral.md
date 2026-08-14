@@ -15,9 +15,6 @@ Read these handoff artifacts before analysis:
 Base Foundry setup:
 {{artifact_handoff:base-test-setup}}
 
-Property catalog:
-{{artifact_handoff:property-specification-fanin}}
-
 When inspecting source for order ownership, collateral, or native-token helper
 terms, use the Read tool or one direct workspace-relative command at a time. Do
 not pipe `grep` into `head`, `tail`, `sort`, or `uniq`.

@@ -15,9 +15,6 @@ Inspect public interfaces, README/API docs, public tests, existing Foundry or de
 Base Foundry setup:
 {{artifact_handoff:base-test-setup}}
 
-Property catalog:
-{{artifact_handoff:property-specification-fanin}}
-
 Do not edit repository source files; write only the required artifacts. Do not inspect private or hidden sources. Treat production
 implementation behavior as observation, not as the oracle source. If public
 sources are insufficient for a strict oracle, mark the surface ambiguous or out

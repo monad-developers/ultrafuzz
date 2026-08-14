@@ -15,9 +15,6 @@ Read these handoff artifacts before analysis:
 Base Foundry setup:
 {{artifact_handoff:base-test-setup}}
 
-Property catalog:
-{{artifact_handoff:property-specification-fanin}}
-
 ## Focus
 
 - ERC20 deposit and router deposit calls with nonzero `msg.value`.

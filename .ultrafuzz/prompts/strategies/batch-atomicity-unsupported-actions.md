@@ -15,9 +15,6 @@ Read these handoff artifacts before analysis:
 Base Foundry setup:
 {{artifact_handoff:base-test-setup}}
 
-Property catalog:
-{{artifact_handoff:property-specification-fanin}}
-
 When listing or inspecting local source files, use a single simple
 workspace-relative command per Bash call. Do not combine inspection commands
 with `;`, `&&`, `||`, pipes, or stdout/stderr redirection.

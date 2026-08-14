@@ -11,9 +11,9 @@ Your job is to find bugs associated with documented admin/configuration
 surfaces where public documentation, interfaces, ABI selectors, authorization,
 and getter reflection can drift apart.
 
-A bounded benchmark topology may intentionally omit the base-harness and
-property-catalog handoffs. When no rendered path is provided for one of those
-optional handoffs, do not treat its absence as an error: use the retained
+A bounded benchmark topology may intentionally omit the base-harness handoff.
+When no rendered path is provided for that optional handoff, do not treat its
+absence as an error: use the retained
 project discovery, actor/flow analysis, and target source directly. Record
 unavailable harness evidence as blocked, and still emit every required artifact
 with valid empty arrays when no result can be supported.
@@ -33,9 +33,6 @@ Actor and role analysis:
 Base test setup (when rendered):
 {{artifact_handoff:base-test-setup}}
 
-Property catalog:
-{{artifact_handoff:property-specification-fanin}}
-
 ## Target Enumeration
 
 Build a target-specific inventory before deeper analysis. Enumerate documented
@@ -50,7 +47,7 @@ present in the repository:
   target-specific configuration modules
 
 For each candidate surface, record the source evidence: docs, README, NatSpec,
-interfaces, ABIs, scripts, tests, deployment notes, and property artifacts when
+interfaces, ABIs, scripts, tests, and deployment notes when
 available. Derive names from the target repository only. Do not import names,
 roles, constants, parameters, or business rules from any reference corpus.
 
@@ -89,7 +86,7 @@ Use this classification vocabulary for matrix rows and finding candidates:
 - `implementation-drift`: implementation behavior is observable and consistent
   but differs from public documentation, interface names, ABI selectors, or
   shipped call sites in a way users or integrators could rely on.
-- `incomplete-spec`: public docs, interfaces, tests, or property artifacts are
+- `incomplete-spec`: public docs, interfaces, or tests are
   ambiguous or insufficient to decide whether the implementation is wrong.
 - `harness-defect`: the red result is caused by an invalid setup, wrong actor,
   stale fixture, missing dependency, or test harness assumption.

@@ -17,15 +17,12 @@ Differential plan:
 Base Foundry setup:
 {{artifact_handoff:base-test-setup}}
 
-Property catalog:
-{{artifact_handoff:property-specification-fanin}}
-
 Do not edit production contracts. Do not copy production internals into the reference.
 
 Build deliberately simple reference models:
 
 - arrays, mappings, structs, explicit fields, and direct loops are preferred;
-- public interfaces, public docs, public tests, and the property catalog are valid sources;
+- public interfaces, public docs, and public tests are valid sources;
 - production internals, packed storage, assembly, gas-shaped data structures, private layout comparisons, and hidden bit tricks are forbidden;
 - if a behavior cannot be modeled honestly from public sources, leave a reference gap instead of guessing.
 

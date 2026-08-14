@@ -23,9 +23,6 @@ Actor and role analysis:
 Base Foundry setup:
 {{artifact_handoff:base-test-setup}}
 
-Property catalog:
-{{artifact_handoff:property-specification-fanin}}
-
 ## State Component Inventory
 
 Before analysis, inventory every state component that can affect economic

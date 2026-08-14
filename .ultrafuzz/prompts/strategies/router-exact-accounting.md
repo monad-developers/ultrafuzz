@@ -15,9 +15,6 @@ Read these handoff artifacts before analysis:
 Base Foundry setup:
 {{artifact_handoff:base-test-setup}}
 
-Property catalog:
-{{artifact_handoff:property-specification-fanin}}
-
 ## Focus
 
 - Exact-input swaps where execution must not pull more than the quoted input

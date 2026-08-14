@@ -16,9 +16,6 @@ Read these handoff artifacts before analysis:
 Base Foundry setup:
 {{artifact_handoff:base-test-setup}}
 
-Property catalog:
-{{artifact_handoff:property-specification-fanin}}
-
 ## Focus
 
 - Compact, packed-calldata, selectorless, fallback, receive, router-dispatched,

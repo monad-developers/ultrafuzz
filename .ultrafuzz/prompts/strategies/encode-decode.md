@@ -14,10 +14,7 @@ Read these handoff artifacts before selecting targets:
 Base Foundry setup:
 {{artifact_handoff:base-test-setup}}
 
-Property catalog:
-{{artifact_handoff:property-specification-fanin}}
-
-Derive deliberate boundary matrices from the property catalog and source tree
+Derive deliberate boundary matrices from the source tree
 instead of waiting on another strategy. Include zero, minimum, maximum allowed,
 maximum allowed plus one, `type(uint256).max`, unknown or unsupported action
 ids, compact id overflows, stale native-value sentinels, and exact

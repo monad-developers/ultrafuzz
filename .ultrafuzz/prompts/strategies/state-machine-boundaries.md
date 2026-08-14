@@ -15,9 +15,6 @@ Read these handoff artifacts before analysis:
 Base Foundry setup:
 {{artifact_handoff:base-test-setup}}
 
-Property catalog:
-{{artifact_handoff:property-specification-fanin}}
-
 ## Focus
 
 - Boundary states immediately before, at, and after graduation, activation,

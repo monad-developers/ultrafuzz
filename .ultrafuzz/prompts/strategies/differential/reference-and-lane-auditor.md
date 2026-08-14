@@ -21,9 +21,6 @@ Harness summary:
 Base Foundry setup:
 {{artifact_handoff:base-test-setup}}
 
-Property catalog:
-{{artifact_handoff:property-specification-fanin}}
-
 Do not edit repository source files; write only the required artifacts. Do not assume the reference, production, or tests are correct.
 Reject or narrow any lane whose strict oracle depends on guessed behavior,
 private layout, production internals, gas-shaped logic, or unstated

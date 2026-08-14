@@ -14,7 +14,7 @@ timeout.
 
 ## Objective
 
-Learn from this campaign's setup, property, and strategy artifacts, then create
+Learn from this campaign's setup and strategy artifacts, then create
 additional target-specific bug-search plans and finding candidates for remaining
 current-run property opportunities.
 
@@ -45,9 +45,6 @@ Actor and flow analysis:
 Base Foundry setup:
 {{artifact_handoff:base-test-setup}}
 
-Property catalog:
-{{artifact_handoff:property-specification-fanin}}
-
 Inspect current findings artifacts from the same strategies when deciding
 what is already covered. Use `findings.json` from each relevant strategy
 artifact directory. Treat missing useful evidence as a reason to record lower
@@ -69,7 +66,7 @@ graph. Prefer strategies grounded in:
 
 - protocol-specific actor or asset flows,
 - project-specific accounting or lifecycle transitions,
-- remaining high or medium priority properties,
+- high-value protocol properties surfaced by current-run source analysis,
 - repeated inconclusive current-run source-analysis results,
 - current-run dedupe, triage, or severity artifacts when present,
 - current-run report themes that can be evaluated from source and artifacts.

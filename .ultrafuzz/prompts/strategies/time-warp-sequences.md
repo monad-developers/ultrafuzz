@@ -15,9 +15,6 @@ Read these handoff artifacts before analysis:
 Base Foundry setup:
 {{artifact_handoff:base-test-setup}}
 
-Property catalog:
-{{artifact_handoff:property-specification-fanin}}
-
 ## Focus
 
 - Vesting cliffs, unlock schedules, linear vesting, and claimable-balance
@@ -38,8 +35,8 @@ Model time-sensitive sequences where time advances between protocol actions.
 Use meaningful elapsed-time deltas and compare immediate state plus accounting
 before and after the elapsed-time boundary.
 
-Build a stable zero-based list of time-sensitive surfaces from the source tree,
-property catalog, and setup artifacts. With this run's loop values, work only on
+Build a stable zero-based list of time-sensitive surfaces from the source tree
+and setup artifacts. With this run's loop values, work only on
 surfaces where `surface_index % {{strategy_loop_count}} == {{strategy_loop_index}}`.
 If the runtime Strategy loop count is 1, cover every surface in the stable list.
 

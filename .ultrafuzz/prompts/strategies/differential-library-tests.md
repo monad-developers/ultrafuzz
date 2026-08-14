@@ -31,9 +31,6 @@ Read these handoff artifacts before selecting targets:
 Base Foundry setup:
 {{artifact_handoff:base-test-setup}}
 
-Property catalog:
-{{artifact_handoff:property-specification-fanin}}
-
 Prefer public-surface boundary checks over valid-only input sampling: off-grid prices,
 minimum and maximum ids, maximum plus one, `type(uint256).max`, exact
 quote/execution equality, zero-fill reads, and `staticcall` read surfaces are
