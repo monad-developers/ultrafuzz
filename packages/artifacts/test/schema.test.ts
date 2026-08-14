@@ -49,6 +49,7 @@ import {
   derivePropertyImplementationCoverage,
   findingNoteAssignmentIssue,
   executeSemanticGate,
+  findingReportSemanticAssignment,
   findingJsonSchema,
   findingSchema,
   generatedTestsJsonSchema,
@@ -1175,6 +1176,39 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
   ]) {
     assertNoteParity(note, true);
   }
+
+  for (const evidenceAssignment of ["access_control=role-based", "access_token=redacted", "verification_hash=0xabc"]) {
+    assertNoteParity(evidenceAssignment, true);
+  }
+
+  for (const reportAlias of [
+    "access=internal",
+    "verification=summary",
+    "access: internal",
+    "verification: summary",
+    '"access": "internal"',
+    '"verification": "summary"',
+    "access -> internal",
+    "verification -> summary"
+  ]) {
+    assertNoteParity(reportAlias, false);
+  }
+
+  assert.deepEqual(findingReportSemanticAssignment("access: internal"), {
+    key: "access",
+    operator: "=",
+    value: "internal"
+  });
+  assert.deepEqual(findingReportSemanticAssignment('"verification": "summary"'), {
+    key: "verification",
+    operator: "=",
+    value: "summary"
+  });
+  assert.deepEqual(findingReportSemanticAssignment("access -> internal"), {
+    key: "access",
+    operator: "=",
+    value: "internal"
+  });
 
   for (const evidenceAssignment of [
     "Observed balance=0 after withdrawal; expected balance=1.",
