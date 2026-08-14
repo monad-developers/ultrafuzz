@@ -131,11 +131,16 @@ const explicitReportAliasKeyValues = [
   "triage_result",
   "verification"
 ] as const;
-const explicitReportAliasKeys = explicitReportAliasKeyValues.map(asciiCaseInsensitivePattern);
 const shortReportAliasKeys = ["access", "verification"].map(asciiCaseInsensitivePattern);
+const explicitReportAliasFragmentGroups = chunkPatternAlternatives(
+  explicitReportAliasKeyValues
+    .filter((key) => key !== "access" && key !== "verification")
+    .map(asciiCaseInsensitivePattern)
+).map((patterns) => `[-_0-9A-Za-z]*(?:${patterns.join("|")})[-_0-9A-Za-z]*`);
 const reportAliasPatternGroups = chunkPatternAlternatives([
   ...reportAliasCanonicalFragments.map((pattern) => `[-_0-9A-Za-z]*${pattern}[-_0-9A-Za-z]*`),
-  ...explicitReportAliasKeys
+  ...explicitReportAliasFragmentGroups,
+  ...shortReportAliasKeys
 ]);
 /*
  * Short aliases such as `access` and `verification` are report vocabulary
@@ -164,7 +169,7 @@ const riskAliasKeyPattern =
 const unsupportedRiskTypedAliasPattern = `${reportNoteSearchPrefixPattern}${assignmentBoundaryPattern}(${riskAliasKeyPattern})[ \\t]*${assignmentKeyTrailingWrapperPattern}${assignmentOperatorPrefixPattern}[ \\t]*${valueWrapperPattern}${riskValuePattern}${typedValueBoundaryPattern}`;
 const canonicalColonAssignmentPattern = `${assignmentBoundaryPattern}${valueWrapperPattern}(${globallyValidatedNoteKeyPattern})[ \\t]*${assignmentKeyTrailingWrapperPattern}${colonAssignmentOperatorPattern}${valueWrapperPattern}(?=\\S)`;
 const canonicalDirectMappingPattern = `${assignmentBoundaryPattern}[ \\t]*${valueWrapperPattern}(${globallyValidatedNoteKeyPattern})[ \\t]*${assignmentKeyTrailingWrapperPattern}(?::[ \\t]*\\r?\\n[ \\t]*|\\|[ \\t]*|(?:-|=)>[ \\t]*|→[ \\t]*)${valueWrapperPattern}(?=\\S)`;
-const explicitReportAliasVocabularyPattern = `${assignmentBoundaryPattern}[ \\t]*${valueWrapperPattern}((?:${shortReportAliasKeys.join("|")}))[ \\t]*${assignmentKeyTrailingWrapperPattern}(?::[ \\t]*|\\|[ \\t]*|(?:-|=)>[ \\t]*|→[ \\t]*)${valueWrapperPattern}(?=\\S)`;
+const explicitReportAliasVocabularyPattern = `${assignmentBoundaryPattern}[ \\t]*${valueWrapperPattern}((?:${shortReportAliasKeys.join("|")}))[ \\t]*${assignmentKeyTrailingWrapperPattern}(?::[ \\t]*\\r?\\n[ \\t]*|:[ \\t]*|\\|[ \\t]*|(?::=|(?:-|=)>|→|↦|⟶|≔)[ \\t]*)${valueWrapperPattern}(?=\\S)`;
 const canonicalReachabilityUnicodeMappingPattern = `${assignmentBoundaryPattern}[ \\t]*${valueWrapperPattern}(${asciiCaseInsensitivePattern("reachability")})[ \\t]*${assignmentKeyTrailingWrapperPattern}(?:↦|⟶|≔)[ \\t]*${valueWrapperPattern}(?=\\S)`;
 const canonicalReachabilityMappingPattern = `${assignmentBoundaryPattern}[ \\t]*${valueWrapperPattern}(${asciiCaseInsensitivePattern("reachability")})[ \\t]*${assignmentKeyTrailingWrapperPattern}[ \\t]+maps?[ \\t]+to[ \\t]+${valueWrapperPattern}(?=\\S)`;
 const obfuscatedReachabilityAssignmentPattern = `${assignmentBoundaryPattern}(${asciiCaseInsensitivePattern("reachability")})(?:<!--[\\s\\S]{0,256}?-->|\\u200B)+[ \\t]*={1,2}\\s*`;

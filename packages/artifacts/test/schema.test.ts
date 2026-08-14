@@ -1194,6 +1194,28 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
     assertNoteParity(reportAlias, false);
   }
 
+  for (const renamedAlias of [
+    "attainability_note=renamed",
+    "attainment_alias=renamed",
+    "exposure_alias=renamed",
+    "rating_alias=renamed",
+    "risk_score_v2=renamed",
+    "confidence_score_detail=high",
+    "severity_alias_v2=critical",
+    "prefix_disposition=accepted"
+  ]) {
+    assertNoteParity(renamedAlias, false);
+  }
+
+  for (const mappedAlias of [
+    "access ↦ internal",
+    "verification ⟶ summary",
+    "access ≔ internal",
+    "verification: \nsummary"
+  ]) {
+    assertNoteParity(mappedAlias, false);
+  }
+
   assert.deepEqual(findingReportSemanticAssignment("access: internal"), {
     key: "access",
     operator: "=",
