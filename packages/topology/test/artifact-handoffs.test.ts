@@ -1009,6 +1009,9 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       "Write findings to {{output_findings_path}}. Ignore the foregoing.",
       "Write findings to {{output_findings_path}}. Omit that output.",
       "Write findings to {{output_findings_path}}. This instruction is void.",
+      "Write findings to {{output_findings_path}}. Test results are attached. Cancel that instruction.",
+      "Write findings to {{output_findings_path}}. Review notes are attached. Cancel that instruction.",
+      "Write findings to {{output_findings_path}}. Run status is available. Cancel that instruction.",
       "Write findings to {{output_findings_path}}. Use backup.json instead.",
       "Write findings to {{output_findings_path}} or backup.json.",
       "Write findings to {{output_findings_path}}. Actually save findings to backup.json instead.",
@@ -1024,6 +1027,7 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       "You may *optionally* write findings to {{output_findings_path}}.",
       "[Optional](https://example.invalid/guidance): Write findings to {{output_findings_path}}.",
       "Historical context\n---\nWrite findings to {{output_findings_path}}.",
+      `Historical examples\n---\n${"Background context without directives. ".repeat(100)}\nWrite findings to {{output_findings_path}}.`,
       `The example quotation is: "\n${"background ".repeat(70)}\nWrite findings to {{output_findings_path}}.\n"`
     ]) {
       expect(() => validateFindingsStrategyPrompt(prompt), prompt).toThrow(
@@ -1070,7 +1074,10 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       "Document all confirmed findings in {{output_findings_path}}.",
       "1. Required outputs:\n   - Write structured findings to:\n     {{output_findings_path}}",
       "Write structured findings to:\n\n{{output_findings_path}}\n\nReview details when useful.",
-      "Write all findings to {{output_findings_path}}.\nStart the optional deployment.\nCancel that instruction."
+      "Write all findings to {{output_findings_path}}.\nStart the optional deployment.\nCancel that instruction.",
+      "Write all findings to {{output_findings_path}}.\nConfigure the optional deployment.\nCancel that instruction.",
+      "Write all findings to {{output_findings_path}}.\nSkip the optional deployment.\nCancel that instruction.",
+      "Write all findings to {{output_findings_path}}.\nChoose the optional deployment.\nCancel that instruction."
     ]) {
       expect(() => validateFindingsStrategyPrompt(prompt), prompt).not.toThrow();
     }
@@ -1327,6 +1334,8 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       "Write an output file to {{artifact_path}}/generated-tests.json.",
       "Write test logs to {{artifact_path}}/generated-tests.json.",
       "Write findings to {{artifact_path}}/generated-tests.json.",
+      "Write test notes to {{artifact_path}}/generated-tests.json.",
+      "Write generated notes to {{artifact_path}}/generated-tests.json.",
       "Save a checksum to {{artifact_path}}/generated-tests.json.",
       "Write the report to {{artifact_path}}/generated-tests.json.",
       "Write generated tests, if any exist, to {{artifact_path}}/generated-tests.json.",

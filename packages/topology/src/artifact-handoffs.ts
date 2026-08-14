@@ -574,6 +574,9 @@ function expectedOutputContentPattern(outputPath: string, contract: string): str
   ) {
     return "(?:findings?(?:\\.json)?|bugs?|defects?|flaws?|issues?|vulnerabilit(?:y|ies))";
   }
+  if (contract === "ultrafuzz/generated-tests@3") {
+    return "(?:generated[- ]tests?(?:[- ](?:bundle|manifest))?)";
+  }
   const contractName = contract.slice(contract.indexOf("/") + 1, contract.lastIndexOf("@"));
   const filename = outputPath.split("/").at(-1) ?? outputPath;
   const basename = filename.replace(/\.[^.]+$/u, "");
@@ -1244,11 +1247,22 @@ function explicitCancellationTargetsCurrentInstruction(following: string): boole
 
 function hasInterveningInstruction(value: string): boolean {
   const action =
-    "(?:add|analy[sz]e|build|check|close|compile|continue|copy|create|delete|deploy|document|emit|execute|export|generate|inspect|install|open|perform|prepare|publish|read|record|remove|render|report|review|run|save|send|start|stop|store|submit|test|update|validate|verify|write)";
-  return new RegExp(
-    `(?:^|[.!?;]\\s+)(?:(?:always|also|finally|immediately|next|now|please|then)\\s*,?\\s+)*(?:(?:you\\s+)?(?:must|shall|should|need\\s+to|are\\s+required\\s+to)\\s+)?${action}\\b`,
-    "iu"
-  ).test(value);
+    "(?:add|analy[sz]e|build|check|choose|close|compile|configure|continue|copy|create|delete|deploy|document|emit|execute|export|generate|inspect|install|open|perform|prepare|publish|read|record|remove|render|report|review|run|save|send|skip|start|stop|store|submit|test|update|validate|verify|write)";
+  const candidate = new RegExp(
+    `(?:^|[.!?;]\\s+)(?:(?:always|also|finally|immediately|next|now|please|then)\\s*,?\\s+)*(?:(?:you\\s+)?(?:must|shall|should|need\\s+to|are\\s+required\\s+to)\\s+)?(${action})\\b`,
+    "giu"
+  );
+  for (const match of value.matchAll(candidate)) {
+    const remainder = value.slice(match.index + match[0].length).split(/[.!?;]/u, 1)[0]!;
+    if (
+      /^(?:test|review|run)$/iu.test(match[1]!) &&
+      /^\s+(?:notes?|results?|status)\s+(?:are|is|was|were|has|have)\b/iu.test(remainder)
+    ) {
+      continue;
+    }
+    return true;
+  }
+  return false;
 }
 
 function hasNonRequiredDirectiveScope(
@@ -1330,12 +1344,24 @@ function inheritedNonRequiredDirectiveScopes(promptText: string): ReadonlyMap<nu
   let plainNonRequired = false;
   const markdownScopes: Array<{ level: number; nonRequired: boolean }> = [];
   let lineStart = 0;
+  let previousNonEmptyLine: string | undefined;
 
   for (const sourceLine of promptText.split(/(?<=\n)/u)) {
     inheritedScopes.set(lineStart, plainNonRequired || markdownScopes.some((scope) => scope.nonRequired));
     const line = sourceLine.replace(/\r?\n$/u, "").trim();
     lineStart += sourceLine.length;
     if (line === "") continue;
+    const precedingNonEmptyLine = previousNonEmptyLine;
+    previousNonEmptyLine = line;
+    if (/^(?:={3,}|-{3,})$/u.test(line) && precedingNonEmptyLine !== undefined) {
+      if (isRequiredDirectiveHeading(precedingNonEmptyLine)) {
+        plainNonRequired = false;
+        markdownScopes.length = 0;
+      } else {
+        plainNonRequired = isNonRequiredDirectiveHeading(precedingNonEmptyLine, true);
+      }
+      continue;
+    }
     const markdown = /^(#{1,6})\s+(.+?)(?:\s+#+)?$/u.exec(line);
     if (markdown !== null) {
       const level = markdown[1]!.length;
