@@ -2762,6 +2762,73 @@ test(
   }
 );
 
+test(
+  "generated OpenRouter adapter rethrows only the final 429 when its retry window is exhausted",
+  { skip: !runningUnderBun, timeout: 20_000 },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const configPath = path.join(project, "ultrafuzz.toml");
+    const fixture = installOpenRouterRetryCodexFixture(project);
+    const { createOpenRouterAgent } = await loadGeneratedOpenRouterAgent(project, {
+      retryWindowMs: 1_000,
+      initialDelayMs: 100,
+      maxDelayMs: 100,
+      jitterFraction: 0
+    });
+    const previous = {
+      config: process.env.ULTRAFUZZ_CONFIG_PATH,
+      key: process.env.OPENROUTER_API_KEY,
+      path: process.env.PATH,
+      counter: process.env.OPENROUTER_RETRY_FIXTURE_COUNTER,
+      mode: process.env.OPENROUTER_RETRY_FIXTURE_MODE,
+      failures: process.env.OPENROUTER_RETRY_FIXTURE_FAILURES
+    };
+    process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
+    process.env.OPENROUTER_API_KEY = "deterministic-openrouter-test-key";
+    process.env.PATH = `${fixture.bin}${path.delimiter}${previous.path ?? ""}`;
+    process.env.OPENROUTER_RETRY_FIXTURE_COUNTER = fixture.counter;
+    process.env.OPENROUTER_RETRY_FIXTURE_MODE = "initial";
+    process.env.OPENROUTER_RETRY_FIXTURE_FAILURES = "100";
+    try {
+      const finalEvents: Record<string, unknown>[] = [];
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Exhaust the bounded initial rate-limit window",
+          onEvent: (event) => finalEvents.push(event)
+        }),
+        (error: unknown) => {
+          const finalAttempt = Number(fs.readFileSync(fixture.counter, "utf8"));
+          assert.equal(finalAttempt > 4, true);
+          assert.match(String(error), new RegExp(`request id: fixture-${finalAttempt}\\b`, "u"));
+          const finalEventText = JSON.stringify(finalEvents);
+          for (let attempt = 1; attempt < finalAttempt; attempt += 1) {
+            assert.doesNotMatch(finalEventText, new RegExp(`fixture-${attempt}\\b`, "u"));
+          }
+          assert.match(finalEventText, new RegExp(`fixture-${finalAttempt}\\b`, "u"));
+          return true;
+        }
+      );
+      const settledAttemptCount = fs.readFileSync(fixture.counter, "utf8");
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), settledAttemptCount);
+    } finally {
+      for (const [name, value] of Object.entries({
+        ULTRAFUZZ_CONFIG_PATH: previous.config,
+        OPENROUTER_API_KEY: previous.key,
+        PATH: previous.path,
+        OPENROUTER_RETRY_FIXTURE_COUNTER: previous.counter,
+        OPENROUTER_RETRY_FIXTURE_MODE: previous.mode,
+        OPENROUTER_RETRY_FIXTURE_FAILURES: previous.failures
+      })) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  }
+);
+
 test("generated OpenRouter adapter fails before materializing config when its dedicated key is missing", async () => {
   if (!runningUnderBun) return;
   const project = tempProject();

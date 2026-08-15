@@ -209,10 +209,11 @@ must be non-empty, no longer than 256 characters, and contain no whitespace or
 control characters. Subscription auth is rejected.
 
 An initial OpenRouter HTTP 429 is retried for up to two minutes with
-exponential backoff, a 30-second delay cap, and jitter, while the caller's total
-timeout continues to bound the whole operation. The adapter permits those
-retries only before Codex emits a substantive model, tool, command, or file
-event; it never replays an attempt that may already have changed the workspace.
+exponential backoff, a 30-second base-delay cap, and up to 25% jitter, while the
+caller's total timeout continues to bound the whole operation. The adapter
+permits those retries only before Codex emits a substantive model, tool,
+command, or file event; it never replays an attempt that may already have
+changed the workspace.
 
 ## Retry Policy
 
