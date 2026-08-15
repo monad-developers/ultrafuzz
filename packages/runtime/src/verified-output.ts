@@ -4,6 +4,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import {
   ARTIFACT_MANIFEST_FILE,
+  assertArtifactPublicationsContainNoSecrets,
   assertArtifactVerificationMarkerSemantics,
   assertNoSymlinkComponents,
   assertPathInside,
@@ -1008,6 +1009,13 @@ function readAndBindPublications(
       throw invalidAuthority(`verification marker does not publish planned output ${output.path}`);
     }
   }
+  try {
+    assertArtifactPublicationsContainNoSecrets(
+      new Map([...snapshots].map(([relativePath, snapshot]) => [relativePath, snapshot.bytes] as const))
+    );
+  } catch (error) {
+    throw invalidOutput(`verified publications failed secret-safety validation for ${plannedNode.logical_id}`, error);
+  }
   return snapshots;
 }
 
@@ -1313,6 +1321,6 @@ function changedOutput(message: string): VerifiedOutputError {
   return new VerifiedOutputError("VERIFIED_OUTPUT_CHANGED", message);
 }
 
-function invalidOutput(message: string): VerifiedOutputError {
-  return new VerifiedOutputError("VERIFIED_OUTPUT_INVALID", message);
+function invalidOutput(message: string, cause?: unknown): VerifiedOutputError {
+  return new VerifiedOutputError("VERIFIED_OUTPUT_INVALID", message, cause === undefined ? undefined : { cause });
 }
