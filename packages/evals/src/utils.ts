@@ -8,7 +8,7 @@ import {
   parseStrictJsonBytes,
   readRegularFileSnapshot,
   safeResolveInside,
-  validateSafeId
+  validateSafeIdOrThrow
 } from "@ultrafuzz/artifacts";
 import type { RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
@@ -40,7 +40,7 @@ export function warningDiagnostic(code: string, message: string): RuntimeDiagnos
 
 export function assertSafeEvalId(value: string, label: string): string {
   try {
-    return validateSafeId(value, label);
+    return validateSafeIdOrThrow(value, label);
   } catch (error) {
     throw new EvalError("EVAL_ID_INVALID", error instanceof Error ? error.message : String(error), { label, value });
   }

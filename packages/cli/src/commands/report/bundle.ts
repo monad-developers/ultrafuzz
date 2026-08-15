@@ -17,7 +17,7 @@ import {
   validateStrictJsonlHistory,
   type EventRecord,
   type StrictJsonlCodec,
-  validateSafeId
+  validateSafeIdOrThrow
 } from "@ultrafuzz/artifacts";
 import {
   assertVerifiedRunOutputAuthorityRemainedCurrent,
@@ -102,7 +102,7 @@ export default class ReportBundle extends Command {
     const commandName = "report bundle";
     try {
       const runsRoot = await runsRootForProject(root);
-      const runId = validateSafeId(args.runId, "run ID");
+      const runId = validateSafeIdOrThrow(args.runId, "run ID");
       const layout = layoutForRunRoot(path.join(runsRoot, runId), runId);
       assertPathInside(runsRoot, layout.root, "run root");
       assertNoSymlinkComponents(runsRoot, layout.root, "run root");

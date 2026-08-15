@@ -4,7 +4,7 @@ import { z } from "zod/v4";
 
 import { hasAtMostCodePoints } from "./portable-json-primitives.js";
 import { type RunLayout } from "./run-layout.js";
-import { SAFE_ID_PATTERN, validateSafeId } from "./safe-paths.js";
+import { SAFE_ID_PATTERN, validateSafeIdOrThrow } from "./safe-paths.js";
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 import {
   appendStrictJsonlRecords,
@@ -193,7 +193,7 @@ export function createUsageLedgerEntry(
 ): UsageLedgerEntry {
   return assertUsageLedgerEntry({
     schema_version: USAGE_LEDGER_SCHEMA_VERSION,
-    run_id: validateSafeId(layout.runId, "run ID"),
+    run_id: validateSafeIdOrThrow(layout.runId, "run ID"),
     workflow_run_id: input.workflowRunId,
     control_generation: input.controlGeneration,
     source_event_sequence: input.sourceEventSequence,

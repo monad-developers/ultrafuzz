@@ -21,7 +21,7 @@ import {
   validateArtifactContractBytes,
   validateArtifactManifest,
   validateArtifactVerificationMarker,
-  validateSafeId,
+  validateSafeIdOrThrow,
   type ArtifactContractId,
   type ArtifactManifest,
   type ArtifactManifestOutputContract,
@@ -348,7 +348,7 @@ export function loadFinalizedNodeOutputSnapshot(input: LoadVerifiedNodeOutputInp
 }
 
 function loadFinalizedNodeOutputAuthority(input: LoadVerifiedNodeOutputInput): FinalizedNodeOutputAuthority {
-  const logicalNodeId = validateSafeId(input.logicalNodeId, "logical node ID");
+  const logicalNodeId = validateSafeIdOrThrow(input.logicalNodeId, "logical node ID");
   const root = path.resolve(input.runRoot);
   assertNoSymlinkComponents(root, root, "run root");
   const layout = layoutForRunRoot(root);
@@ -813,7 +813,8 @@ function selectFinalizedAttempt(
   logicalNodeId: string,
   requestedAttemptId: string | undefined
 ): { attemptId: string; state: NodeState } {
-  const attemptId = requestedAttemptId === undefined ? undefined : validateSafeId(requestedAttemptId, "attempt ID");
+  const attemptId =
+    requestedAttemptId === undefined ? undefined : validateSafeIdOrThrow(requestedAttemptId, "attempt ID");
   const graphNodeIds = new Set(graph.nodes.filter((node) => node.logical_id === logicalNodeId).map((node) => node.id));
   const candidates = Object.entries(state.nodes).filter(([nodeId, nodeState]) => {
     if (attemptId !== undefined && nodeId !== attemptId) return false;

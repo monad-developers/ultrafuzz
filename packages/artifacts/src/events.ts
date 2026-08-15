@@ -20,7 +20,7 @@ import {
   prepareSafeFilePath,
   readJsonFile,
   safeResolveInside,
-  validateSafeId
+  validateSafeIdOrThrow
 } from "./safe-paths.js";
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 import {
@@ -1095,10 +1095,10 @@ export function appendEvent(layout: RunLayout, input: AppendEventInput): EventRe
 }
 
 export function createEventRecord(layout: Pick<RunLayout, "runId">, input: AppendEventInput): EventRecord {
-  const runId = validateSafeId(input.runId ?? layout.runId, "run ID");
-  const nodeId = input.nodeId === undefined ? undefined : validateSafeId(input.nodeId, "node ID");
-  const eventType = validateSafeId(input.eventType, "event type");
-  const status = validateSafeId(input.status, "event status");
+  const runId = validateSafeIdOrThrow(input.runId ?? layout.runId, "run ID");
+  const nodeId = input.nodeId === undefined ? undefined : validateSafeIdOrThrow(input.nodeId, "node ID");
+  const eventType = validateSafeIdOrThrow(input.eventType, "event type");
+  const status = validateSafeIdOrThrow(input.status, "event status");
   const timestamp = input.timestamp ?? new Date().toISOString();
   const payload = redactValue(input.payload, input.forbiddenSecretValues);
   const seed = JSON.stringify([runId, nodeId, eventType, status, timestamp, payload]);

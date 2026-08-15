@@ -14,7 +14,7 @@ import {
   parseStrictJsonBytes,
   parseUsageLedgerBytes,
   readRegularFileSnapshot,
-  validateSafeId
+  validateSafeIdOrThrow
 } from "@ultrafuzz/artifacts";
 import { runsRootForProject, synchronizeLinkedWorkflowRun, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
 import AdmZip from "adm-zip";
@@ -127,7 +127,7 @@ async function loadLocalEvidence(
   requestedRunId: string,
   env: Record<string, string | undefined>
 ): Promise<{ evidence: StatisticsEvidence; diagnostics: RuntimeDiagnostic[] }> {
-  const runId = validateSafeId(requestedRunId, "run ID");
+  const runId = validateSafeIdOrThrow(requestedRunId, "run ID");
   const runsRoot = await runsRootForProject(project);
   const layout = layoutForRunRoot(path.join(runsRoot, runId), runId);
   assertPathInside(runsRoot, layout.root, "run root");
@@ -209,7 +209,7 @@ function loadBundleEvidence(bundlePath: string): { evidence: StatisticsEvidence;
     );
   }
 
-  const runId = validateSafeId(manifest.run_id, "bundle run ID");
+  const runId = validateSafeIdOrThrow(manifest.run_id, "bundle run ID");
   const metadataBytes = requiredZipBytes(zip, entriesByName, "run.json", MAX_JSON_BYTES, readBudget);
   const stateBytes = requiredZipBytes(zip, entriesByName, "state.json", MAX_JSON_BYTES, readBudget);
   const graphBytes = requiredZipBytes(zip, entriesByName, "graph.json", MAX_JSON_BYTES, readBudget);

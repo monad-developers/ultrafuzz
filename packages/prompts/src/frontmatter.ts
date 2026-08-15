@@ -72,7 +72,7 @@ export function parsePromptFrontmatter(
   if (parsed == null) {
     parsed = {};
   }
-  if (!isPlainObject(parsed)) {
+  if (!isPlainPromptFrontmatterObject(parsed)) {
     throw new PromptError("invalid-frontmatter", "prompt frontmatter must be a YAML mapping");
   }
 
@@ -208,6 +208,12 @@ function readFrontmatterBlock(markdown: string):
   };
 }
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+export function isPlainPromptFrontmatterObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  try {
+    const prototype = Object.getPrototypeOf(value) as object | null;
+    return prototype === Object.prototype || prototype === null;
+  } catch {
+    return false;
+  }
 }

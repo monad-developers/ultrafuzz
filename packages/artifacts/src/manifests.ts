@@ -10,7 +10,7 @@ import {
   prepareSafeFilePath,
   safeResolveInside,
   sha256File,
-  validateSafeId,
+  validateSafeIdOrThrow,
   writeFileDurable,
   writeJsonDurable
 } from "./safe-paths.js";
@@ -287,7 +287,7 @@ export function writeArtifact(
 }
 
 export function writeArtifactManifest(input: WriteArtifactManifestInput): ArtifactManifest {
-  const nodeId = validateSafeId(input.nodeId, "node ID");
+  const nodeId = validateSafeIdOrThrow(input.nodeId, "node ID");
   const nodeDir = getNodeArtifactDir(input.layout, nodeId, { create: true });
   const provenance = normalizeArtifactProvenance(input.layout, nodeId, input.provenance);
   const include = input.include?.map((entry) => normalizeSafeRelativePath(entry));
@@ -341,7 +341,7 @@ export function verifyArtifactManifestPrerequisites(
     visiting.add(currentNodeId);
     const manifest = readArtifactManifest(layout, currentNodeId);
     for (const prerequisite of manifest.prerequisite_manifests) {
-      const prerequisiteNodeId = validateSafeId(prerequisite.node_id, "prerequisite node ID");
+      const prerequisiteNodeId = validateSafeIdOrThrow(prerequisite.node_id, "prerequisite node ID");
       const manifestPath = path.join(getNodeArtifactDir(layout, prerequisiteNodeId), ARTIFACT_MANIFEST_FILE);
       if (!fs.existsSync(manifestPath)) {
         missing.add(prerequisiteNodeId);
@@ -358,7 +358,7 @@ export function verifyArtifactManifestPrerequisites(
     visited.add(currentNodeId);
   };
 
-  verifyNode(validateSafeId(nodeId, "node ID"));
+  verifyNode(validateSafeIdOrThrow(nodeId, "node ID"));
   const changedNodes = [...changed].sort();
   const missingNodes = [...missing].sort();
   return {
@@ -370,7 +370,7 @@ export function verifyArtifactManifestPrerequisites(
 
 function prerequisiteManifestDigests(layout: RunLayout, nodeIds: string[]): PrerequisiteManifestDigest[] {
   return [...new Set(nodeIds)].sort().map((nodeId) => {
-    const safeNodeId = validateSafeId(nodeId, "prerequisite node ID");
+    const safeNodeId = validateSafeIdOrThrow(nodeId, "prerequisite node ID");
     const manifestPath = path.join(getNodeArtifactDir(layout, safeNodeId), ARTIFACT_MANIFEST_FILE);
     assertRegularFileInside(layout.artifactsDir, manifestPath, "prerequisite artifact manifest path");
     return { node_id: safeNodeId, sha256: sha256File(manifestPath) };
@@ -405,7 +405,7 @@ export function buildRunArtifactIndex(layout: RunLayout): RunArtifactIndex {
     if (!dirent.isDirectory()) {
       continue;
     }
-    const nodeId = validateSafeId(dirent.name, "node ID");
+    const nodeId = validateSafeIdOrThrow(dirent.name, "node ID");
     const nodeDir = path.join(layout.artifactsDir, nodeId);
     const manifestPath = path.join(nodeDir, ARTIFACT_MANIFEST_FILE);
     if (!fs.existsSync(manifestPath)) {
@@ -443,7 +443,7 @@ export function normalizeArtifactProvenance(
   provenance: Partial<ArtifactProvenance> | undefined
 ): ArtifactProvenance {
   const normalized: ArtifactProvenance = {
-    producer_node_id: validateSafeId(provenance?.producer_node_id ?? nodeId, "producer node ID"),
+    producer_node_id: validateSafeIdOrThrow(provenance?.producer_node_id ?? nodeId, "producer node ID"),
     run_id: provenance?.run_id ?? layout.runId
   };
   assignOptional(normalized, "logical_node_id", provenance?.logical_node_id);

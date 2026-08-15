@@ -249,12 +249,20 @@ export function captureWorkspacePatch(
 function normalizeProductionSourceRoots(roots: readonly string[]): string[] {
   if (roots.length === 0) throw new Error("production source roots must not be empty");
   const normalized = roots.map((root) => normalizeWorkspacePatchPath(root, "production source root"));
-  if (new Set(normalized).size !== normalized.length) throw new Error("production source roots must be unique");
+  if (new Set(normalized.map(policyPathKey)).size !== normalized.length) {
+    throw new Error("production source roots must be unique after Unicode and case normalization");
+  }
   return normalized.sort((left, right) => left.localeCompare(right));
 }
 
 function pathIsInsideRoot(candidate: string, root: string): boolean {
-  return candidate === root || candidate.startsWith(`${root}/`);
+  const candidateKey = policyPathKey(candidate);
+  const rootKey = policyPathKey(root);
+  return candidateKey === rootKey || candidateKey.startsWith(`${rootKey}/`);
+}
+
+function policyPathKey(value: string): string {
+  return value.normalize("NFC").toLowerCase();
 }
 
 function assertProductionSourcePreserved(
@@ -924,6 +932,7 @@ function rejectSensitivePath(normalized: string): void {
   if (
     normalized
       .split("/")
+      .map(policyPathKey)
       .some((segment) => SENSITIVE_SEGMENTS.has(segment) || segment === ".env" || segment.startsWith(".env."))
   ) {
     throw new Error(`workspace patch cannot modify a sensitive path: ${normalized}`);
