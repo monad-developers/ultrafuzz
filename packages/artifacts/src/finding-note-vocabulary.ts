@@ -102,6 +102,22 @@ function asciiCaseInsensitiveAlternation(values: readonly string[]): string {
 
 const FINDING_REPORT_METADATA_TERM_PATTERNS = FINDING_REPORT_METADATA_TERM_GROUPS.map(asciiCaseInsensitiveAlternation);
 
+const FINDING_REPORT_RENAME_MARKER_PATTERN = `(?:${asciiCaseInsensitivePattern("alias")}|[vV][0-9]+)`;
+
+/** Bounded ASCII identifier fragments that pair report vocabulary with an
+ * explicit alias/version marker. The marker may be separated, camel-cased, or
+ * embedded in a longer producer-local key. Keeping the report term and marker
+ * in one rule closes families such as `classification_v3`, `accessAlias`, and
+ * `verification_v2` without reserving ordinary `access_control` or
+ * `verification_hash` evidence keys. Callers provide the 128-byte key bound. */
+export const FINDING_REPORT_RENAMED_ALIAS_KEY_PATTERNS = [
+  [...FINDING_REPORT_METADATA_TERM_GROUPS[0], ...FINDING_REPORT_METADATA_TERM_GROUPS[1], "access", "verification"],
+  [...FINDING_REPORT_METADATA_TERM_GROUPS[2], ...FINDING_REPORT_METADATA_TERM_GROUPS[3]]
+].map((terms) => {
+  const termPattern = asciiCaseInsensitiveAlternation(terms);
+  return `(?=[-_0-9A-Za-z]*${termPattern})(?=[-_0-9A-Za-z]*${FINDING_REPORT_RENAME_MARKER_PATTERN})[-_0-9A-Za-z]+`;
+});
+
 /** Bounded ASCII identifier fragments containing two report-metadata terms.
  * Each ordered group pair is a separate pattern so checked-in portable schemas
  * remain below their per-pattern complexity limit. Requiring two
@@ -133,14 +149,9 @@ export function isFindingReportMetadataAliasKey(key: string): boolean {
   if (!findingReportAssignmentKey.test(key)) return false;
   const normalized = key.replace(/[A-Z]/gu, (character) => character.toLowerCase());
   const terms = FINDING_REPORT_METADATA_TERMS.filter((term) => normalized.includes(term));
-  const segments = normalized.split(/[-_]+/u);
-  const hasRenameMarker = segments.some((segment) => segment === "alias" || /^v[0-9]+$/u.test(segment));
-  const hasShortAliasTerm = segments.some((segment) => segment === "access" || segment === "verification");
-  return (
-    new Set(terms).size >= 2 ||
-    (terms.length > 0 && (normalized.includes("alias") || hasRenameMarker)) ||
-    (hasShortAliasTerm && hasRenameMarker)
-  );
+  const hasRenameMarker = normalized.includes("alias") || /v[0-9]+/u.test(normalized);
+  const hasAliasBase = terms.length > 0 || normalized.includes("access") || normalized.includes("verification");
+  return new Set(terms).size >= 2 || (hasAliasBase && hasRenameMarker);
 }
 
 export function isFindingReportEvidenceAssignmentKey(key: string): boolean {

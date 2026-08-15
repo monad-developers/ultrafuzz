@@ -15,6 +15,7 @@ import {
   FINDING_REPORT_ASSIGNMENT_KEY_PATTERN,
   FINDING_REPORT_EVIDENCE_ASSIGNMENT_KEYS,
   FINDING_REPORT_MULTITERM_METADATA_KEY_PATTERNS,
+  FINDING_REPORT_RENAMED_ALIAS_KEY_PATTERNS,
   FINDING_RISK_VALUES,
   STATEFUL_FAILURE_CLASSIFICATION_VALUES,
   canonicalFindingNoteKey,
@@ -56,7 +57,7 @@ const assignmentKeyPattern = FINDING_REPORT_ASSIGNMENT_KEY_PATTERN;
 const assignmentBoundaryPattern = "(?:^|[^\\p{L}\\p{N}\\p{M}_%\\-])";
 const assignmentOperatorPrefixPattern = "[ \\t]*=(?!=)";
 const anyAssignmentOperatorPattern = "\\s*(?:={1,2}|[:|→↦⟶≔]|[-=]>)";
-const nonColonAssignmentOperatorPattern = "\\s*(?:={1,2}|[|→↦⟶≔]|[-=]>)";
+const nonColonAssignmentOperatorPattern = "\\s*(?:={1,2}|:=|[|→↦⟶≔]|[-=]>)";
 const assignmentKeyCloseWrapperPattern = "(?:(?:\\*{1,2}|~{1,2}|[\\x60\"'>)}\\]])[ \\t]*)*";
 const metadataKeyCloseWrapperPattern = "[`\"'>)}*~\\]]{0,4}";
 const htmlKeyCloseWrapperPattern = "(?:</(?:b|code|em|i|mark|span|strong|u)>\\s*)*";
@@ -96,14 +97,11 @@ const reportAliasCanonicalFragments = FINDING_NOTE_KEYS.filter((key) => key !== 
 );
 const explicitReportAliasKeyValues = [
   "access",
-  "access_alias",
   "attainability",
   "attainment",
   "audit_decision",
   "audit_status",
   "classification_evidence",
-  "classification_alias",
-  "classification_v2",
   "classification_note",
   "classification_notes",
   "classification_result",
@@ -128,10 +126,7 @@ const explicitReportAliasKeyValues = [
   "root_cause",
   "root_cause_reason",
   "scope_decision",
-  "severityAlias",
-  "severity_alias",
   "severity_guess",
-  "stateful_failure_alias",
   "triage_result",
   "verification"
 ] as const;
@@ -156,6 +151,10 @@ const unsupportedAliasAssignmentPatterns = reportAliasPatternGroups.map((pattern
   const aliasKeyPattern = `(?![-_0-9A-Za-z]{129})(?:[-_0-9A-Za-z]*(?:${patterns.join("|")})[-_0-9A-Za-z]*|${shortReportAliasKeyPatterns.join("|")})`;
   return `${assignmentBoundaryPattern}(?!(${supportedNoteKeyPattern})[ \\t]*${assignmentKeyTrailingWrapperPattern}[ \\t]*={1,2})(?:(${aliasKeyPattern}))[ \\t]*${assignmentKeyTrailingWrapperPattern}${nonColonAssignmentOperatorPattern}`;
 });
+const unsupportedRenamedAliasPatterns = FINDING_REPORT_RENAMED_ALIAS_KEY_PATTERNS.map(
+  (pattern) =>
+    `${assignmentBoundaryPattern}(?:((?![-_0-9A-Za-z]{129})${pattern}))[ \\t]*${assignmentKeyTrailingWrapperPattern}${anyAssignmentOperatorPattern}`
+);
 const unsupportedBareHelperAliasPattern = `${assignmentBoundaryPattern}(_*[hH][eE][lL][pP][eE][rR]_*)[ \\t]*${assignmentKeyTrailingWrapperPattern}${anyAssignmentOperatorPattern}`;
 const evidenceAssignmentKeyPattern = `(?:${FINDING_REPORT_EVIDENCE_ASSIGNMENT_KEYS.map((key) =>
   key.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")
@@ -171,7 +170,6 @@ const riskAliasKeyPattern =
 const unsupportedRiskTypedAliasPattern = `${reportNoteSearchPrefixPattern}${assignmentBoundaryPattern}(${riskAliasKeyPattern})[ \\t]*${assignmentKeyTrailingWrapperPattern}${assignmentOperatorPrefixPattern}[ \\t]*${valueWrapperPattern}${riskValuePattern}${typedValueBoundaryPattern}`;
 const canonicalColonAssignmentPattern = `${assignmentBoundaryPattern}${valueWrapperPattern}(${globallyValidatedNoteKeyPattern})[ \\t]*${assignmentKeyTrailingWrapperPattern}${colonAssignmentOperatorPattern}${valueWrapperPattern}(?=\\S)`;
 const canonicalDirectMappingPattern = `${assignmentBoundaryPattern}[ \\t]*${valueWrapperPattern}(${globallyValidatedNoteKeyPattern})[ \\t]*${assignmentKeyTrailingWrapperPattern}(?::[ \\t]*\\r?\\n[ \\t]*|:[ \\t]*|\\|[ \\t]*|(?::=|(?:-|=)>|→|↦|⟶|≔)[ \\t]*)${valueWrapperPattern}(?=\\S)`;
-const canonicalReachabilityUnicodeMappingPattern = `${assignmentBoundaryPattern}[ \\t]*${valueWrapperPattern}(${asciiCaseInsensitivePattern("reachability")})[ \\t]*${assignmentKeyTrailingWrapperPattern}(?:↦|⟶|≔)[ \\t]*${valueWrapperPattern}(?=\\S)`;
 const canonicalReachabilityMappingPattern = `${assignmentBoundaryPattern}[ \\t]*${valueWrapperPattern}(${asciiCaseInsensitivePattern("reachability")})[ \\t]*${assignmentKeyTrailingWrapperPattern}[ \\t]+maps?[ \\t]+to[ \\t]+${valueWrapperPattern}(?=\\S)`;
 const obfuscatedReachabilityAssignmentPattern = `${assignmentBoundaryPattern}(${asciiCaseInsensitivePattern("reachability")})(?:<!--[\\s\\S]{0,256}?-->|\\u200B)+[ \\t]*={1,2}\\s*`;
 const unsupportedMetadataPairColonPatterns = FINDING_REPORT_MULTITERM_METADATA_KEY_PATTERNS.map(
@@ -187,12 +185,16 @@ function invalidGlobalTypedAssignmentPattern(key: string, values: readonly strin
   return `${assignmentBoundaryPattern}(${key})[ \\t]*${assignmentKeyTrailingWrapperPattern}${assignmentOperatorPrefixPattern}(?![ \\t]*(?:${values.join("|")})${typedValueBoundaryPattern})[ \\t]*`;
 }
 
-function chunkPatternAlternatives(patterns: readonly string[], maxLength = 420): string[][] {
+function chunkPatternAlternatives(patterns: readonly string[], maxLength = 450): string[][] {
   const groups: string[][] = [];
-  for (const pattern of patterns) {
-    const current = groups.at(-1);
-    const nextLength = (current?.join("|").length ?? 0) + (current === undefined ? 0 : 1) + pattern.length;
-    if (current === undefined || nextLength > maxLength) groups.push([pattern]);
+  const largestFirst = [...patterns].sort(
+    (left, right) => right.length - left.length || (left < right ? -1 : left > right ? 1 : 0)
+  );
+  for (const pattern of largestFirst) {
+    const current = groups.find(
+      (group) => group.join("|").length + (group.length === 0 ? 0 : 1) + pattern.length <= maxLength
+    );
+    if (current === undefined) groups.push([pattern]);
     else current.push(pattern);
   }
   return groups;
@@ -238,6 +240,10 @@ const findingReportLooseAliasColonAssignment = new RegExp(
 );
 const findingReportLooseDirectMapping = new RegExp(
   `${assignmentBoundaryPattern}\\s*${promptVocabularyOpenWrapperPattern}(${assignmentKeyPattern})${promptVocabularyCloseWrapperPattern}\\s*(?:\\||:=|≔|(?:-|=)>|→|↦|⟶)\\s*${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})`,
+  "giu"
+);
+const findingReportWordMappingDirective = new RegExp(
+  `\\b${vocabularyDirectiveActionPattern}\\b\\s+(?:the\\s+)?${promptVocabularyOpenWrapperPattern}(${assignmentKeyPattern})${promptVocabularyCloseWrapperPattern}(?:\\s+(?:field|key|note(?:\\s+key)?))?\\s+(?:to|as|equals?(?:\\s+to)?|maps?\\s+to)\\s+${promptVocabularyOpenWrapperPattern}(${promptVocabularyIdentifierPattern})`,
   "giu"
 );
 const findingReportDirectMapping = new RegExp(
@@ -364,6 +370,15 @@ export function findingReportSemanticAssignment(text: string): FindingReportSema
     if (hasNonLiveDirectivePrefix(text, assignment.index)) continue;
     const key = assignment[1]!;
     if (isLoosePromptReportVocabularyKey(key, text, assignment.index)) {
+      return { key, operator: "=", value: assignment[2]! };
+    }
+  }
+
+  findingReportWordMappingDirective.lastIndex = 0;
+  for (const assignment of text.matchAll(findingReportWordMappingDirective)) {
+    if (hasNonLiveDirectivePrefix(text, assignment.index)) continue;
+    const key = assignment[1]!;
+    if (isPromptReportWordMappingKey(key)) {
       return { key, operator: "=", value: assignment[2]! };
     }
   }
@@ -537,6 +552,16 @@ function isPlainExplicitReportAliasKey(identifier: string): boolean {
   return /^[A-Za-z]+$/u.test(identifier) && explicitReportAliasKeySet.has(identifier.toLowerCase());
 }
 
+function isPromptReportWordMappingKey(identifier: string): boolean {
+  const normalized = identifier.toLowerCase();
+  const hasRenameMarker = normalized.includes("alias") || /v[0-9]+/u.test(normalized);
+  return (
+    normalized === "access" ||
+    normalized === "verification" ||
+    (hasRenameMarker && isFindingReportMetadataAliasKey(identifier))
+  );
+}
+
 function hasPromptReportWritingPrefix(text: string, index: number): boolean {
   return /\b(?:add|annotate|append|assign|define|emit|enforce|include|label|mandate|mark|populate|put|record|require|return|set|store|write)s?(?:\s+the)?\s*$/iu.test(
     text.slice(Math.max(0, index - 160), index)
@@ -579,6 +604,9 @@ function findingNoteConstraint(pattern: string, message: string): FindingNoteCon
 }
 
 const findingNoteConstraintRules = [
+  ...unsupportedRenamedAliasPatterns.map((pattern) =>
+    findingNoteConstraint(pattern, "Unsupported report-bound finding note key")
+  ),
   ...unsupportedAliasAssignmentPatterns.map((pattern) =>
     findingNoteConstraint(pattern, "Unsupported report-bound finding note key")
   ),
@@ -588,7 +616,6 @@ const findingNoteConstraintRules = [
   ),
   findingNoteConstraint(canonicalColonAssignmentPattern, "Unsupported report-bound finding note key"),
   findingNoteConstraint(canonicalDirectMappingPattern, "Unsupported report-bound finding note key"),
-  findingNoteConstraint(canonicalReachabilityUnicodeMappingPattern, "Unsupported report-bound finding note key"),
   findingNoteConstraint(canonicalReachabilityMappingPattern, "Unsupported report-bound finding note key"),
   findingNoteConstraint(obfuscatedReachabilityAssignmentPattern, "Unsupported report-bound finding note key"),
   ...unsupportedMetadataPairColonPatterns.map((pattern) =>

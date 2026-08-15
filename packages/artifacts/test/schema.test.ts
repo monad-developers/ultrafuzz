@@ -1181,6 +1181,7 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
     "access_control=role-based",
     "access_token=redacted",
     "verification_hash=0xabc",
+    "classification_vector=one-hot",
     "Verification: run forge test",
     "Resolution: use checks-effects-interactions",
     "Access: only invoke public entrypoints"
@@ -1209,13 +1210,26 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
     "confidence_score_detail=high",
     "severity_alias_v2=critical",
     "classification_v2=bug",
+    "classification_v3=bug",
+    "classificationAlias=bug",
+    "classificationV3=bug",
     "access_alias=internal",
+    "access_v2=internal",
+    "accessAlias=internal",
+    "accessV3=internal",
+    "verification_v2=summary",
+    "verification_alias=summary",
+    "verificationAlias=summary",
     "prefix_disposition=accepted"
   ]) {
     assertNoteParity(renamedAlias, false);
   }
 
   for (const mappedAlias of [
+    "access := internal",
+    "verification := summary",
+    "classification_v2 := bug",
+    "access_alias := internal",
     "access ↦ internal",
     "verification ⟶ summary",
     "access ≔ internal",
@@ -1275,6 +1289,24 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
     "Record access ≔ internal evidence on each finding."
   ]) {
     assert.notEqual(findingReportSemanticAssignment(proseMapping), undefined, proseMapping);
+  }
+
+  for (const wordMapping of [
+    "Set access to internal on every finding.",
+    "Write verification as summary on every finding.",
+    "Record verification maps to summary on every finding.",
+    "Record classification_v2 equals bug on every finding.",
+    "Record classification_v3 equal to bug on every finding."
+  ]) {
+    assert.notEqual(findingReportSemanticAssignment(wordMapping), undefined, wordMapping);
+  }
+
+  for (const benignDirectiveProse of [
+    "Set access controls to public before testing.",
+    "Write verification steps before summarizing the report.",
+    "Record classification vectors as evidence."
+  ]) {
+    assert.equal(findingReportSemanticAssignment(benignDirectiveProse), undefined, benignDirectiveProse);
   }
 
   for (const evidenceAssignment of [
