@@ -1,6 +1,7 @@
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
+import { SmithersErrorInstance } from "smthrs";
 import { CompatibleCodexAgent } from "./codex";
 import { workflowControlChildEnvironment, workflowControlCredentialValue } from "./environment";
 import { readStringTable, stringField } from "./toml";
@@ -8,9 +9,12 @@ import { readStringTable, stringField } from "./toml";
 type OpenRouterAuthConfig = { auth?: string; api_key_env?: string; config_dir?: string };
 export type OpenRouterTaskOptions = { model?: string; reasoningEffort?: string; addDir?: string[] };
 type OpenRouterCommandParams = Parameters<CompatibleCodexAgent["buildCommand"]>[0];
+type OpenRouterGenerateOptions = Parameters<CompatibleCodexAgent["generate"]>[0];
+type OpenRouterAgentEvent = Parameters<NonNullable<NonNullable<OpenRouterGenerateOptions>["onEvent"]>>[0];
 
 const OPENROUTER_API_BASE_URL = "https://openrouter.ai/api/v1";
 const OPENROUTER_CODEX_CONFIG_DIR = ".ultrafuzz/openrouter-codex";
+const OPENROUTER_INITIAL_429_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000] as const;
 const ENVIRONMENT_VARIABLE_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/u;
 
 /**
@@ -63,6 +67,14 @@ export function createOpenRouterAgent(options: OpenRouterTaskOptions = {}): Open
 }
 
 export class OpenRouterCodexAgent extends CompatibleCodexAgent {
+  override async generate(options?: OpenRouterGenerateOptions) {
+    return this.withInitialRateLimitRetries(options, (attemptOptions) => super.generate(attemptOptions));
+  }
+
+  override async stream(options?: OpenRouterGenerateOptions) {
+    return this.withInitialRateLimitRetries(options, (attemptOptions) => super.stream(attemptOptions));
+  }
+
   override async buildCommand(params: OpenRouterCommandParams) {
     const command = await super.buildCommand(params);
     return {
@@ -73,6 +85,181 @@ export class OpenRouterCodexAgent extends CompatibleCodexAgent {
       env: workflowControlChildEnvironment({ ...command.env, ...this.opts.env })
     };
   }
+
+  /**
+   * Codex's provider request retry setting does not retry an initial HTTP 429.
+   * Retry only while the CLI has emitted no model, tool, or file event, so an
+   * attempt that may have changed the workspace is never replayed.
+   */
+  private async withInitialRateLimitRetries<T>(
+    options: OpenRouterGenerateOptions | undefined,
+    operation: (attemptOptions: OpenRouterGenerateOptions) => Promise<T>
+  ): Promise<T> {
+    const totalTimeoutMs = resolveTotalTimeoutMs(options?.timeout, this.timeoutMs);
+    const deadline =
+      totalTimeoutMs !== undefined && totalTimeoutMs !== 0 && Number.isFinite(totalTimeoutMs)
+        ? performance.now() + Math.max(0, totalTimeoutMs)
+        : undefined;
+    for (let attempt = 0; ; attempt += 1) {
+      if (options?.abortSignal?.aborted === true) {
+        throw abortReason(options.abortSignal);
+      }
+      const remainingTimeoutMs = remainingUntil(deadline);
+      if (remainingTimeoutMs !== undefined && remainingTimeoutMs <= 0) {
+        throw this.retryTimeout(totalTimeoutMs, options);
+      }
+      const relay = new BufferedAttemptRelay(options);
+      let result: T;
+      try {
+        result = await operation(relay.options(remainingTimeoutMs));
+      } catch (error) {
+        const baseDelay = OPENROUTER_INITIAL_429_RETRY_DELAYS_MS[attempt];
+        if (options?.abortSignal?.aborted === true) {
+          throw abortReason(options.abortSignal);
+        }
+        if (baseDelay === undefined || relay.sawSubstantiveEvent || !isOpenRouterRateLimit(error)) {
+          relay.release();
+          throw error;
+        }
+        const delay = baseDelay + Math.floor(Math.random() * Math.max(1, Math.floor(baseDelay / 4)));
+        options?.onStderr?.(
+          `[ultrafuzz] OpenRouter returned HTTP 429 before model output; retrying in ${delay}ms ` +
+            `(${attempt + 1}/${OPENROUTER_INITIAL_429_RETRY_DELAYS_MS.length}).\n`
+        );
+        const remainingForBackoff = remainingUntil(deadline);
+        if (remainingForBackoff !== undefined && remainingForBackoff <= 0) {
+          throw this.retryTimeout(totalTimeoutMs, options);
+        }
+        const boundedDelay =
+          remainingForBackoff === undefined ? delay : Math.min(delay, Math.max(0, remainingForBackoff));
+        await waitForRetry(boundedDelay, options?.abortSignal);
+        if (boundedDelay < delay) {
+          throw this.retryTimeout(totalTimeoutMs, options);
+        }
+        continue;
+      }
+      // Keep caller callbacks outside the provider-error catch. A callback may
+      // throw synchronously, but that must never make us replay successful work.
+      relay.release();
+      return result;
+    }
+  }
+
+  private retryTimeout(totalTimeoutMs: number | undefined, options: OpenRouterGenerateOptions | undefined): Error {
+    return new SmithersErrorInstance(
+      "PROCESS_TIMEOUT",
+      `OpenRouter agent timed out after ${totalTimeoutMs ?? 0}ms while backing off an initial HTTP 429`,
+      {
+        command: "codex",
+        args: [],
+        cwd: this.cwd ?? options?.rootDir ?? process.cwd(),
+        timeoutMs: totalTimeoutMs
+      }
+    );
+  }
+}
+
+class BufferedAttemptRelay {
+  readonly #options: OpenRouterGenerateOptions | undefined;
+  readonly #pending: Array<() => void> = [];
+  #released = false;
+  sawSubstantiveEvent = false;
+
+  constructor(options: OpenRouterGenerateOptions | undefined) {
+    this.#options = options;
+  }
+
+  options(remainingTimeoutMs: number | undefined): OpenRouterGenerateOptions {
+    return {
+      ...this.#options,
+      ...(remainingTimeoutMs === undefined
+        ? {}
+        : { timeout: withRemainingTotalTimeout(this.#options?.timeout, remainingTimeoutMs) }),
+      onStdout: (text) => this.#emit(() => this.#options?.onStdout?.(text)),
+      onStderr: (text) => this.#emit(() => this.#options?.onStderr?.(text)),
+      onEvent: (event) => {
+        this.#emit(() => {
+          const result = this.#options?.onEvent?.(event);
+          void Promise.resolve(result).catch(() => undefined);
+        });
+        if (isSubstantiveCodexEvent(event)) {
+          this.sawSubstantiveEvent = true;
+          this.release();
+        }
+      }
+    } as OpenRouterGenerateOptions;
+  }
+
+  release(): void {
+    if (this.#released) return;
+    this.#released = true;
+    for (const callback of this.#pending.splice(0)) callback();
+  }
+
+  #emit(callback: () => void): void {
+    if (this.#released) callback();
+    else this.#pending.push(callback);
+  }
+}
+
+function isSubstantiveCodexEvent(event: OpenRouterAgentEvent): boolean {
+  return event.type === "action" && event.action.kind !== "turn" && event.action.kind !== "warning";
+}
+
+function isOpenRouterRateLimit(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /(?:\bHTTP(?:\s+status)?\s+429\b|\b429\s+Too Many Requests\b)/iu.test(message);
+}
+
+function resolveTotalTimeoutMs(timeout: unknown, fallback: number | undefined): number | undefined {
+  if (typeof timeout === "number") return timeout;
+  if (timeout !== null && typeof timeout === "object" && "totalMs" in timeout) {
+    const totalMs = (timeout as { totalMs?: unknown }).totalMs;
+    if (typeof totalMs === "number") return totalMs;
+  }
+  return fallback;
+}
+
+function remainingUntil(deadline: number | undefined): number | undefined {
+  return deadline === undefined ? undefined : Math.max(0, Math.ceil(deadline - performance.now()));
+}
+
+function withRemainingTotalTimeout(timeout: unknown, totalMs: number): number | Record<string, unknown> {
+  if (typeof timeout === "number") return totalMs;
+  return timeout !== null && typeof timeout === "object" ? { ...timeout, totalMs } : { totalMs };
+}
+
+function waitForRetry(delayMs: number, signal: AbortSignal | undefined): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = () => {
+      finish(() => reject(abortReason(signal)));
+    };
+    const timer = setTimeout(() => finish(resolve), delayMs);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    // Close the check-before-listener race if cancellation happened between
+    // entering this function and registering the listener.
+    if (signal?.aborted === true) onAbort();
+  });
+}
+
+function abortReason(signal: AbortSignal | undefined): Error {
+  if (signal?.reason instanceof SmithersErrorInstance && signal.reason.code === "PROCESS_ABORTED") {
+    return signal.reason;
+  }
+  return new SmithersErrorInstance(
+    "PROCESS_ABORTED",
+    "OpenRouter retry aborted during initial HTTP 429 backoff",
+    { command: "codex", args: [], cwd: process.cwd() },
+    { cause: signal?.reason }
+  );
 }
 
 function readOpenRouterAuthConfig(): OpenRouterAuthConfig {

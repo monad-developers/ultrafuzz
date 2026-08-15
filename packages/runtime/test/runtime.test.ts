@@ -318,6 +318,20 @@ async function loadGeneratedCodexAgent(project: string): Promise<{
 async function loadGeneratedOpenRouterAgent(project: string): Promise<{
   createOpenRouterAgent(options?: Record<string, unknown>): {
     opts: Record<string, unknown> & { env?: Record<string, string> };
+    generate(options?: {
+      prompt?: unknown;
+      onEvent?: (event: Record<string, unknown>) => unknown;
+      onStderr?: (text: string) => void;
+      abortSignal?: AbortSignal;
+      [key: string]: unknown;
+    }): Promise<{ text: string }>;
+    stream(options?: {
+      prompt?: unknown;
+      onEvent?: (event: Record<string, unknown>) => unknown;
+      onStderr?: (text: string) => void;
+      abortSignal?: AbortSignal;
+      [key: string]: unknown;
+    }): Promise<{ text: Promise<string>; textStream: ReadableStream<string> & AsyncIterable<string> }>;
     buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
       command?: string;
       args: string[];
@@ -348,6 +362,7 @@ async function loadGeneratedOpenRouterAgent(project: string): Promise<{
     .replace('from "./environment"', 'from "./environment.mjs"');
   const openRouterSource = fs
     .readFileSync(path.join(agentsDir, "openrouter.ts"), "utf8")
+    .replace('from "smthrs"', `from ${JSON.stringify(smithersUrl)}`)
     .replace('from "./codex"', 'from "./codex.mjs"')
     .replace('from "./toml"', 'from "./toml.mjs"')
     .replace('from "./environment"', 'from "./environment.mjs"');
@@ -366,6 +381,20 @@ async function loadGeneratedOpenRouterAgent(project: string): Promise<{
   return (await import(pathToFileURL(path.join(fixture, "openrouter.mjs")).href)) as {
     createOpenRouterAgent(options?: Record<string, unknown>): {
       opts: Record<string, unknown> & { env?: Record<string, string> };
+      generate(options?: {
+        prompt?: unknown;
+        onEvent?: (event: Record<string, unknown>) => unknown;
+        onStderr?: (text: string) => void;
+        abortSignal?: AbortSignal;
+        [key: string]: unknown;
+      }): Promise<{ text: string }>;
+      stream(options?: {
+        prompt?: unknown;
+        onEvent?: (event: Record<string, unknown>) => unknown;
+        onStderr?: (text: string) => void;
+        abortSignal?: AbortSignal;
+        [key: string]: unknown;
+      }): Promise<{ text: Promise<string>; textStream: ReadableStream<string> & AsyncIterable<string> }>;
       buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
         command?: string;
         args: string[];
@@ -375,6 +404,63 @@ async function loadGeneratedOpenRouterAgent(project: string): Promise<{
       }>;
     };
   };
+}
+
+function installOpenRouterRetryCodexFixture(project: string): { bin: string; counter: string } {
+  const bin = path.join(project, "openrouter-retry-bin");
+  const counter = path.join(project, "openrouter-retry-count");
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(counter, "0", "utf8");
+  const executable = path.join(bin, "codex");
+  fs.writeFileSync(
+    executable,
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+if (process.argv.includes("--version")) {
+  process.stdout.write("codex-cli 0.147.0\\n");
+  process.exit(0);
+}
+const counterPath = process.env.OPENROUTER_RETRY_FIXTURE_COUNTER;
+let count = 0;
+try { count = Number(fs.readFileSync(counterPath, "utf8")); } catch {}
+count += 1;
+fs.writeFileSync(counterPath, String(count), "utf8");
+process.stdin.resume();
+process.stdin.on("end", () => {
+  process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: "fixture-" + count }) + "\\n");
+  process.stdout.write(JSON.stringify({ type: "turn.started" }) + "\\n");
+  if (count === 1 && process.env.OPENROUTER_RETRY_FIXTURE_MODE !== "empty-success") {
+    if (process.env.OPENROUTER_RETRY_FIXTURE_MODE === "substantive") {
+      process.stdout.write(JSON.stringify({
+        type: "item.started",
+        item: { id: "command-1", type: "command_execution", command: "fixture-command", status: "in_progress" }
+      }) + "\\n");
+    }
+    const message = process.env.OPENROUTER_RETRY_FIXTURE_MODE === "unrelated"
+      ? "fixture path /tmp/job-429 is unavailable"
+      : "exceeded retry limit, last status: 429 Too Many Requests, request id: fixture-1";
+    process.stdout.write(JSON.stringify({ type: "error", message }) + "\\n");
+    process.stdout.write(JSON.stringify({ type: "turn.failed", error: { message } }) + "\\n");
+    process.exitCode = 1;
+    return;
+  }
+  const outputIndex = process.argv.indexOf("--output-last-message");
+  if (outputIndex >= 0) fs.writeFileSync(process.argv[outputIndex + 1], "OK", "utf8");
+  if (process.env.OPENROUTER_RETRY_FIXTURE_MODE !== "empty-success") {
+    process.stdout.write(JSON.stringify({
+      type: "item.completed",
+      item: { id: "message-1", type: "agent_message", text: "OK" }
+    }) + "\\n");
+  }
+  process.stdout.write(JSON.stringify({
+    type: "turn.completed",
+    usage: { input_tokens: 2, output_tokens: 1 }
+  }) + "\\n");
+});
+`,
+    { encoding: "utf8", mode: 0o755 }
+  );
+  return { bin, counter };
 }
 
 async function loadGeneratedDeepSeekAgent(project: string): Promise<{
@@ -2281,6 +2367,171 @@ test(
         OPENAI_API_KEY: previous.openai,
         ANTHROPIC_API_KEY: previous.anthropic,
         OPENAI_BASE_URL: previous.baseUrl
+      })) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  }
+);
+
+test(
+  "generated OpenRouter adapter retries an initial 429 but never replays substantive model work",
+  { skip: !runningUnderBun, timeout: 20_000 },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const configPath = path.join(project, "ultrafuzz.toml");
+    const fixture = installOpenRouterRetryCodexFixture(project);
+    const { createOpenRouterAgent } = await loadGeneratedOpenRouterAgent(project);
+    const previous = {
+      config: process.env.ULTRAFUZZ_CONFIG_PATH,
+      key: process.env.OPENROUTER_API_KEY,
+      path: process.env.PATH,
+      counter: process.env.OPENROUTER_RETRY_FIXTURE_COUNTER,
+      mode: process.env.OPENROUTER_RETRY_FIXTURE_MODE
+    };
+    process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
+    process.env.OPENROUTER_API_KEY = "deterministic-openrouter-test-key";
+    process.env.PATH = `${fixture.bin}${path.delimiter}${previous.path ?? ""}`;
+    process.env.OPENROUTER_RETRY_FIXTURE_COUNTER = fixture.counter;
+    process.env.OPENROUTER_RETRY_FIXTURE_MODE = "initial";
+    try {
+      const retryEvents: Record<string, unknown>[] = [];
+      let retryStderr = "";
+      const result = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Retry fixture",
+        onEvent: (event) => {
+          retryEvents.push(event);
+          return Promise.reject(new Error("fixture callback rejection"));
+        },
+        onStderr: (text) => {
+          retryStderr += text;
+        }
+      });
+      assert.equal(result.text, "OK");
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+      assert.match(retryStderr, /OpenRouter returned HTTP 429 before model output; retrying/u);
+      assert.doesNotMatch(JSON.stringify(retryEvents), /fixture-1/u);
+      assert.match(JSON.stringify(retryEvents), /fixture-2/u);
+
+      fs.writeFileSync(fixture.counter, "0", "utf8");
+      const streamResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).stream({
+        prompt: "Retry stream fixture"
+      });
+      assert.equal(await streamResult.text, "OK");
+      const streamedText = await streamResult.textStream.getReader().read();
+      assert.deepEqual(streamedText, { value: "OK", done: false });
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+
+      fs.writeFileSync(fixture.counter, "0", "utf8");
+      process.env.OPENROUTER_RETRY_FIXTURE_MODE = "substantive";
+      const substantiveEvents: Record<string, unknown>[] = [];
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Do not replay fixture",
+          onEvent: (event) => substantiveEvents.push(event)
+        }),
+        /429 Too Many Requests/u
+      );
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "1");
+      assert.match(JSON.stringify(substantiveEvents), /fixture-command/u);
+
+      fs.writeFileSync(fixture.counter, "0", "utf8");
+      process.env.OPENROUTER_RETRY_FIXTURE_MODE = "unrelated";
+      let unrelatedStderr = "";
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Unrelated numeric error fixture",
+          onStderr: (text) => {
+            unrelatedStderr += text;
+          }
+        }),
+        /job-429/u
+      );
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "1");
+      assert.doesNotMatch(unrelatedStderr, /retrying/u);
+
+      fs.writeFileSync(fixture.counter, "0", "utf8");
+      process.env.OPENROUTER_RETRY_FIXTURE_MODE = "empty-success";
+      let callbackStderr = "";
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Successful empty turn callback fixture",
+          onEvent: () => {
+            throw new Error("HTTP 429 from caller callback");
+          },
+          onStderr: (text) => {
+            callbackStderr += text;
+          }
+        }),
+        /HTTP 429 from caller callback/u
+      );
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "1");
+      assert.doesNotMatch(callbackStderr, /retrying/u);
+
+      fs.writeFileSync(fixture.counter, "0", "utf8");
+      process.env.OPENROUTER_RETRY_FIXTURE_MODE = "initial";
+      const preAbortedController = new AbortController();
+      preAbortedController.abort(new Error("fixture pre-aborted"));
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Pre-aborted fixture",
+          abortSignal: preAbortedController.signal
+        }),
+        (error: unknown) => {
+          assert.equal((error as { code?: unknown }).code, "PROCESS_ABORTED");
+          return true;
+        }
+      );
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "0");
+
+      const controller = new AbortController();
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Abort backoff fixture",
+          abortSignal: controller.signal,
+          onStderr: (text) => {
+            if (text.includes("OpenRouter returned HTTP 429")) {
+              controller.abort(new Error("fixture cancelled during backoff"));
+            }
+          }
+        }),
+        (error: unknown) => {
+          assert.equal((error as { code?: unknown }).code, "PROCESS_ABORTED");
+          assert.match(String(error), /OpenRouter retry aborted during initial HTTP 429 backoff/u);
+          return true;
+        }
+      );
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "1");
+
+      fs.writeFileSync(fixture.counter, "0", "utf8");
+      let timeoutStderr = "";
+      const timeoutStartedAt = performance.now();
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Bounded timeout fixture",
+          timeout: 500,
+          onStderr: (text) => {
+            timeoutStderr += text;
+          }
+        }),
+        (error: unknown) => {
+          assert.equal((error as { code?: unknown }).code, "PROCESS_TIMEOUT");
+          return true;
+        }
+      );
+      assert.match(timeoutStderr, /OpenRouter returned HTTP 429 before model output; retrying/u);
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "1");
+      assert.equal(performance.now() - timeoutStartedAt < 1_500, true);
+    } finally {
+      for (const [name, value] of Object.entries({
+        ULTRAFUZZ_CONFIG_PATH: previous.config,
+        OPENROUTER_API_KEY: previous.key,
+        PATH: previous.path,
+        OPENROUTER_RETRY_FIXTURE_COUNTER: previous.counter,
+        OPENROUTER_RETRY_FIXTURE_MODE: previous.mode
       })) {
         if (value === undefined) delete process.env[name];
         else process.env[name] = value;

@@ -208,6 +208,11 @@ start with `~` and suffix variants such as `:free` are valid. OpenRouter IDs
 must be non-empty, no longer than 256 characters, and contain no whitespace or
 control characters. Subscription auth is rejected.
 
+An initial OpenRouter HTTP 429 is retried up to four times with bounded
+exponential backoff and jitter. The adapter permits those retries only before
+Codex emits a substantive model, tool, command, or file event; it never replays
+an attempt that may already have changed the workspace.
+
 ## Retry Policy
 
 ```toml
