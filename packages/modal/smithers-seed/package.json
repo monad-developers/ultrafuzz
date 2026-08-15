@@ -1,0 +1,20 @@
+{
+  "name": "ultrafuzz-smithers",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@moonshot-ai/kimi-code": "0.29.1",
+    "smthrs": "0.34.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3"
+  },
+  "overrides": {
+    "effect": "4.0.0-beta.105",
+    "@effect/opentelemetry": "4.0.0-beta.105",
+    "@effect/platform-bun": "4.0.0-beta.105",
+    "@effect/platform-node-shared": "4.0.0-beta.105",
+    "@effect/sql-sqlite-bun": "4.0.0-beta.105"
+  }
+}

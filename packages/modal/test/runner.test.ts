@@ -1,10 +1,8 @@
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 import {
   NotFoundError,
@@ -13,7 +11,8 @@ import {
   type FileInfo,
   type Image,
   type Sandbox,
-  type SandboxCreateParams
+  type SandboxCreateParams,
+  type Volume
 } from "modal";
 import { describe, expect, it, vi } from "vitest";
 
@@ -36,12 +35,18 @@ import {
   writeModalLaunchState,
   type ModalWorkerStatus
 } from "../src/launch-state.js";
-import { REMOTE_CONFIG_PATH, REMOTE_LAUNCH_READY_PATH, REMOTE_LINEAGE_PATH, remoteAuthPath } from "../src/layout.js";
+import {
+  REMOTE_CONFIG_PATH,
+  REMOTE_KIMI_CREDENTIAL_ROOT,
+  REMOTE_LAUNCH_READY_PATH,
+  REMOTE_LINEAGE_PATH,
+  modalCredentialVolumeName,
+  remoteAuthPath
+} from "../src/layout.js";
 import { MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES } from "../src/public-bundle.js";
 import { createModalRecoveryLifecycleDocument } from "../src/recovery-lifecycle.js";
 import {
   CODEX_CLI_VERSION,
-  KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT,
   MODAL_COLLECT_RESULT_FILES,
   ModalTerminationError,
   assertPublicBenchmarkBundleDiagnosticsMatch,
@@ -55,6 +60,7 @@ import {
   finishReservedModalLaunch,
   hasExactPublicDiagnosticCollectionConfig,
   isModalRecoveryResultComplete,
+  kimiWorkerCredentialVolumeSecretValues,
   launchModalBenchmark,
   modalCanonicalRecoveryProbeCommand,
   modalImageBuildTags,
@@ -65,6 +71,7 @@ import {
   modalBenchmarkSecretValues,
   modalVolumeRelativeRoot,
   modalWorkerEntrypointCommand,
+  modalWorkerVolumeMounts,
   modalBenchmarkStatusRow,
   observeTerminalModalRecoveryLifecycle,
   publicBenchmarkCollectionSecretValues,
@@ -89,11 +96,6 @@ const MODEL: ModalModelSpec = {
   reasoning: "high",
   auth_mode: "api-key"
 };
-const ARTIFACTS_MODULE_PATH = fileURLToPath(new URL("../../artifacts/dist/index.js", import.meta.url));
-
-function stageKimiCredential(pending: string, destination: string, mode = "resume"): void {
-  execFileSync("node", ["-e", KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT, pending, destination, mode, ARTIFACTS_MODULE_PATH]);
-}
 
 describe("Modal benchmark capacity", () => {
   it("forwards the high-capacity resource profile to sandbox creation", async () => {
@@ -475,14 +477,18 @@ describe("Modal benchmark termination", () => {
 
 describe("Modal image source staging", () => {
   it("pins a Codex CLI release compatible with Smithers stdin prompts", () => {
-    const commands = modalSecurityToolchainCommands().join("\n");
-    const standaloneDockerfile = fs.readFileSync(new URL("../Dockerfile", import.meta.url), "utf8");
-    const expected = `@openai/codex@${CODEX_CLI_VERSION}`;
+    const modalPackage = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
+      dependencies: Record<string, string>;
+    };
+    const materials = JSON.parse(fs.readFileSync(new URL("../toolchain-materials.json", import.meta.url), "utf8")) as {
+      global_node_packages: Record<string, string>;
+    };
 
-    expect(commands).toContain(expected);
-    expect(standaloneDockerfile).toContain(expected);
-    expect(commands).not.toContain("@openai/codex@0.144.3");
-    expect(standaloneDockerfile).not.toContain("@openai/codex@0.144.3");
+    expect(modalPackage.dependencies["@openai/codex"]).toBe(CODEX_CLI_VERSION);
+    expect(materials.global_node_packages["@openai/codex"]).toBe(CODEX_CLI_VERSION);
+    expect(modalImageBuildCommand()).toContain("@openai/codex/bin/codex.js");
+    expect(modalImageBuildCommand()).not.toContain("node_modules/.bin/$tool");
+    expect(modalImageBuildCommand()).not.toContain("@openai/codex@0.144.3");
   });
 
   it("installs recon-fuzzer as the only fuzzing backend", () => {
@@ -495,7 +501,7 @@ describe("Modal image source staging", () => {
     expect(standaloneDockerfile).toContain("Recon-Fuzz/recon-fuzzer");
     expect(standaloneDockerfile).not.toContain("crytic/echidna");
     expect(standaloneDockerfile).not.toContain("crytic/medusa");
-    expect(standaloneDockerfile).toContain("@moonshot-ai/kimi-code@0.29.1");
+    expect(standaloneDockerfile).toContain("recon-generate/dist/index.js");
     expect(commands).toMatch(/apt-get install[^\n]*\bzstd\b/u);
     expect(standaloneDockerfile).toMatch(/apt-get install[\s\S]*\bzstd\b/u);
     expect(commands).toContain("RUN command -v zstd && zstd --version");
@@ -1050,7 +1056,7 @@ describe("Modal result collection", () => {
     ).toBe(false);
   });
 
-  it("retains pre- and post-reconciliation Kimi subscription secrets for public collection", async () => {
+  it("retains pre-exchange and current controller Kimi secrets for public collection", async () => {
     const config = publicCollectionLineage().config;
     const model: ModalModelSpec = {
       slug: "benchmark-smoke-kimi-k3-max",
@@ -1091,6 +1097,74 @@ describe("Modal result collection", () => {
         ["pre-access"]
       )
     ).resolves.toEqual({ files, forbiddenSecretValues: ["pre-access"] });
+  });
+
+  it("retains an earlier row token after another Kimi row rotates the controller credential", async () => {
+    const config = publicCollectionLineage().config;
+    const model: ModalModelSpec = {
+      slug: "benchmark-smoke-kimi-k3-max",
+      model: "kimi-k3",
+      provider: "kimi",
+      agent: "KimiAgent",
+      reasoning: "max",
+      auth_mode: "subscription"
+    };
+    const kimiAuthRoot = kimiSubscriptionAuthFixture("row-two-access", "controller-refresh");
+    const rowOneCredential = `${JSON.stringify({
+      access_token: "row-one-access",
+      expires_at: 2_010_000,
+      expires_in: 900
+    })}\n`;
+    const mountedCredentialVolume = {} as Volume;
+    const credentialVolume = {
+      withMountOptions: vi.fn(() => mountedCredentialVolume)
+    } as unknown as Volume;
+    const terminate = vi.fn(async () => undefined);
+    const modal = {
+      volumes: {
+        fromName: vi.fn(async () => credentialVolume)
+      },
+      sandboxes: {
+        create: vi.fn(async () => ({
+          filesystem: {
+            stat: vi.fn(async () => remoteFileInfo(Buffer.byteLength(rowOneCredential))),
+            readText: vi.fn(async (filePath: string) => {
+              expect(filePath).toBe("/data/credentials/kimi-code.json");
+              return rowOneCredential;
+            })
+          },
+          terminate
+        }))
+      }
+    } as unknown as Parameters<typeof kimiWorkerCredentialVolumeSecretValues>[0]["modal"];
+
+    const rowSecrets = await kimiWorkerCredentialVolumeSecretValues({
+      modal,
+      app: {} as App,
+      image: {} as Image,
+      logicalRunId: "public-eval",
+      model,
+      env: { KIMI_CODE_HOME: kimiAuthRoot }
+    });
+
+    expect(rowSecrets).toEqual(["row-one-access"]);
+    expect(modal.volumes.fromName).toHaveBeenCalledWith(modalCredentialVolumeName("public-eval", model.slug), {
+      createIfMissing: false
+    });
+    expect(credentialVolume.withMountOptions).toHaveBeenCalledWith({ readOnly: true });
+    expect(terminate).toHaveBeenCalledWith({ wait: true });
+    await expect(
+      publicBenchmarkCollectionSecretValues(
+        {
+          ...config,
+          models: [model],
+          public_benchmark: { ...config.public_benchmark, runner_model_profile: model.slug }
+        },
+        model,
+        { KIMI_CODE_HOME: kimiAuthRoot, OPENAI_API_KEY: "judge-secret" },
+        rowSecrets
+      )
+    ).resolves.toEqual(["row-one-access", "row-two-access", "controller-refresh", "judge-secret"]);
   });
 
   it("uses Moonshot API keys as Kimi public collection redaction secrets", async () => {
@@ -1562,14 +1636,20 @@ describe("Modal worker identity", () => {
   });
 
   it("keeps the validator toolchain root-owned and installs a trusted image entrypoint", () => {
-    expect(modalImageBuildCommand()).not.toContain("chown -R ubuntu:ubuntu /opt/ultrafuzz");
-    expect(modalImageBuildCommand()).toContain("install -m 0555 -o root -g root");
-    expect(modalImageBuildCommand()).toContain("/usr/local/bin/ultrafuzz json validate");
-    expect(modalImageBuildCommand()).toContain("validator-smoke.valid.json");
-    expect(modalImageBuildCommand()).toContain("chmod -R a+rX,go-w /opt/ultrafuzz");
-    expect(modalImageBuildCommand()).toContain("node packages/modal/scripts/prepare-smithers-seed.mjs");
-    expect(modalImageBuildCommand()).toContain("/opt/ultrafuzz-smithers-seed");
-    expect(modalImageBuildCommand()).toContain("@moonshot-ai/kimi-code@0.29.1");
+    const command = modalImageBuildCommand();
+    expect(command).not.toContain("chown -R ubuntu:ubuntu /opt/ultrafuzz");
+    expect(command).not.toMatch(/npm\s+install\s+(?:--global|-g)\b/u);
+    expect(command).toContain("corepack enable");
+    expect(command).toContain("pnpm install --frozen-lockfile");
+    expect(command).toContain("node scripts/ci/verify-modal-toolchain-materials.mjs");
+    expect(command).toContain("@moonshot-ai/kimi-code/dist/main.mjs");
+    expect(command).toContain("ln -sfn '/opt/ultrafuzz/packages/modal/node_modules/bun/bin/bun.exe'");
+    expect(command).toContain("install -m 0555 -o root -g root");
+    expect(command).toContain("/usr/local/bin/ultrafuzz json validate");
+    expect(command).toContain("validator-smoke.valid.json");
+    expect(command).toContain("chmod -R a+rX,go-w /opt/ultrafuzz");
+    expect(command).toContain("node packages/modal/scripts/prepare-smithers-seed.mjs");
+    expect(command).toContain("/opt/ultrafuzz-smithers-seed");
   });
 
   it("stages as root and executes the worker as the non-root image user", () => {
@@ -1590,282 +1670,24 @@ describe("Modal worker identity", () => {
     expect(kimi).toContain("chown -R ubuntu:ubuntu '/run/ultrafuzz-auth/kimi'");
     expect(kimi).toContain("wait_for_staged_input '/run/ultrafuzz-auth/kimi/config.toml'");
     expect(kimi).toContain("KIMI_CODE_HOME='/run/ultrafuzz-auth/kimi'");
-    expect(kimi).toContain('ULTRAFUZZ_KIMI_SHARED_AUTH_HOME="$data_root/kimi-code-auth"');
+    expect(kimi).toContain("chown -R ubuntu:ubuntu '/credentials'");
+    expect(kimi).toContain("ULTRAFUZZ_KIMI_SHARED_AUTH_HOME='/credentials'");
     expect(kimi).toContain('ULTRAFUZZ_KIMI_SESSION_HOME="$data_root/kimi-code-sessions"');
     expect(kimi).not.toContain("/run/ultrafuzz-auth/claude/.credentials.json");
     expect(() => execFileSync("bash", ["-n", "-c", kimi])).not.toThrow();
   });
 
-  it("preserves Kimi refresh tokens and refuses to replace newer shared Modal auth state", () => {
-    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-kimi-stage-"));
-    const pending = path.join(root, "kimi-code.json.pending");
-    const destination = path.join(root, "kimi-code.json");
-    const lineage = `${destination}.ultrafuzz-source-refresh-token.sha256`;
-    fs.writeFileSync(
-      pending,
-      `${JSON.stringify({
-        access_token: "fresh-access",
-        refresh_token: "older-refresh",
-        expires_at: 2_000_000,
-        expires_in: 900
-      })}\n`,
-      "utf8"
-    );
-    fs.writeFileSync(
-      destination,
-      `${JSON.stringify({
-        access_token: "newer-volume-access",
-        refresh_token: "newer-volume-refresh",
-        expires_at: 2_100_000,
-        expires_in: 900
-      })}\n`,
-      "utf8"
-    );
+  it("mounts a row-scoped credential volume separately from durable session data", () => {
+    const data = { volumeId: "durable-data" } as unknown as Volume;
+    const firstCredential = { volumeId: "row-one-credential" } as unknown as Volume;
+    const secondCredential = { volumeId: "row-two-credential" } as unknown as Volume;
 
-    stageKimiCredential(pending, destination);
-
-    const staged = JSON.parse(fs.readFileSync(destination, "utf8")) as {
-      access_token?: string;
-      refresh_token?: string;
-      expires_at?: number;
-    };
-    expect(staged).toMatchObject({
-      access_token: "newer-volume-access",
-      refresh_token: "newer-volume-refresh",
-      expires_at: 2_100_000
+    expect(modalWorkerVolumeMounts(data)).toEqual({ "/data": data });
+    expect(modalWorkerVolumeMounts(data, firstCredential)).toEqual({
+      "/data": data,
+      [REMOTE_KIMI_CREDENTIAL_ROOT]: firstCredential
     });
-    expect(fs.existsSync(pending)).toBe(false);
-    expect(fs.existsSync(lineage)).toBe(false);
-  });
-
-  it.each([
-    ["pending malformed", "pending", '{"access_token":"pending"'],
-    [
-      "pending duplicate",
-      "pending",
-      '{"access_token":"pending","refresh_token":"first","refresh_token":"shadow","expires_at":2100000,"expires_in":900}\n'
-    ],
-    ["destination malformed", "destination", '{"access_token":"destination"'],
-    [
-      "destination duplicate",
-      "destination",
-      '{"access_token":"destination","refresh_token":"first","refresh_token":"shadow","expires_at":2100000,"expires_in":900}\n'
-    ],
-    ["destination unsupported", "destination", "{}\n"]
-  ] as const)(
-    "rejects %s Kimi credential evidence without replacing or normalizing either file",
-    (_name, target, bytes) => {
-      const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-kimi-stage-invalid-"));
-      const pending = path.join(root, "kimi-code.json.pending");
-      const destination = path.join(root, "kimi-code.json");
-      const validPending =
-        '{"access_token":"pending-access","refresh_token":"pending-refresh","expires_at":2100000,"expires_in":900}\n';
-      const validDestination =
-        '{"access_token":"destination-access","refresh_token":"destination-refresh","expires_at":2200000,"expires_in":900}\n';
-      fs.writeFileSync(pending, target === "pending" ? bytes : validPending, { mode: 0o600 });
-      fs.writeFileSync(destination, target === "destination" ? bytes : validDestination, { mode: 0o600 });
-      const pendingBefore = fs.readFileSync(pending);
-      const destinationBefore = fs.readFileSync(destination);
-
-      expect(() => stageKimiCredential(pending, destination)).toThrow(/strict bounded JSON|unsupported shape/u);
-
-      expect(fs.readFileSync(pending)).toEqual(pendingBefore);
-      expect(fs.readFileSync(destination)).toEqual(destinationBefore);
-      expect(fs.existsSync(`${destination}.ultrafuzz-source-refresh-token.sha256`)).toBe(false);
-    }
-  );
-
-  it("moves a strict new Kimi provider envelope byte-for-byte without normalizing it", () => {
-    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-kimi-stage-new-"));
-    const pending = path.join(root, "kimi-code.json.pending");
-    const destination = path.join(root, "kimi-code.json");
-    const bytes = Buffer.from(
-      '{ "provider_state": { "generation": 2 }, "expires_in": 900, "expires_at": 2100000, "refresh_token": "fresh-refresh", "access_token": "fresh-access" }',
-      "utf8"
-    );
-    fs.writeFileSync(pending, bytes, { mode: 0o600 });
-
-    stageKimiCredential(pending, destination);
-
-    expect(fs.readFileSync(destination)).toEqual(bytes);
-    expect(fs.existsSync(pending)).toBe(false);
-  });
-
-  it("rejects symlinked Kimi credential evidence without following or replacing it", () => {
-    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-kimi-stage-symlink-"));
-    const pending = path.join(root, "kimi-code.json.pending");
-    const destination = path.join(root, "kimi-code.json");
-    const outside = path.join(root, "outside.json");
-    const pendingBytes = Buffer.from(
-      '{"access_token":"pending-access","refresh_token":"pending-refresh","expires_at":2100000,"expires_in":900}\n',
-      "utf8"
-    );
-    const outsideBytes = Buffer.from(
-      '{"access_token":"outside-access","refresh_token":"outside-refresh","expires_at":2200000,"expires_in":900}\n',
-      "utf8"
-    );
-    fs.writeFileSync(pending, pendingBytes, { mode: 0o600 });
-    fs.writeFileSync(outside, outsideBytes, { mode: 0o600 });
-    fs.symlinkSync(outside, destination);
-
-    expect(() => stageKimiCredential(pending, destination)).toThrow();
-
-    expect(fs.readFileSync(pending)).toEqual(pendingBytes);
-    expect(fs.lstatSync(destination).isSymbolicLink()).toBe(true);
-    expect(fs.readFileSync(outside)).toEqual(outsideBytes);
-  });
-
-  it("does not replace a rotated shared Modal Kimi credential with a stale ancestor", () => {
-    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-kimi-stage-"));
-    const pending = path.join(root, "kimi-code.json.pending");
-    const destination = path.join(root, "kimi-code.json");
-    const lineage = `${destination}.ultrafuzz-source-refresh-token.sha256`;
-    fs.writeFileSync(
-      pending,
-      `${JSON.stringify({
-        access_token: "ancestor-access",
-        refresh_token: "ancestor-refresh",
-        expires_at: 2_200_000,
-        expires_in: 900
-      })}\n`,
-      "utf8"
-    );
-    fs.writeFileSync(
-      destination,
-      `${JSON.stringify({
-        access_token: "rotated-volume-access",
-        refresh_token: "rotated-volume-refresh",
-        expires_at: 2_100_000,
-        expires_in: 900
-      })}\n`,
-      "utf8"
-    );
-    fs.writeFileSync(lineage, `${createHash("sha256").update("ancestor-refresh").digest("hex")}\n`, "utf8");
-
-    stageKimiCredential(pending, destination);
-
-    expect(JSON.parse(fs.readFileSync(destination, "utf8"))).toMatchObject({
-      access_token: "rotated-volume-access",
-      refresh_token: "rotated-volume-refresh",
-      expires_at: 2_100_000
-    });
-    expect(fs.readFileSync(lineage, "utf8")).toBe(`${createHash("sha256").update("ancestor-refresh").digest("hex")}\n`);
-    expect(fs.existsSync(pending)).toBe(false);
-  });
-
-  it("replaces stale shared Modal Kimi credentials on fresh host-token rotation", () => {
-    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-kimi-stage-"));
-    const pending = path.join(root, "kimi-code.json.pending");
-    const destination = path.join(root, "kimi-code.json");
-    const lineage = `${destination}.ultrafuzz-source-refresh-token.sha256`;
-    fs.writeFileSync(
-      pending,
-      `${JSON.stringify({
-        access_token: "current-host-access",
-        refresh_token: "current-host-refresh",
-        expires_at: 2_200_000,
-        expires_in: 900
-      })}\n`,
-      "utf8"
-    );
-    fs.writeFileSync(
-      destination,
-      `${JSON.stringify({
-        access_token: "previous-volume-access",
-        refresh_token: "previous-volume-refresh",
-        expires_at: 2_100_000,
-        expires_in: 900
-      })}\n`,
-      "utf8"
-    );
-    fs.writeFileSync(lineage, `${createHash("sha256").update("previous-host-refresh").digest("hex")}\n`, "utf8");
-
-    stageKimiCredential(pending, destination, "fresh");
-
-    expect(JSON.parse(fs.readFileSync(destination, "utf8"))).toMatchObject({
-      access_token: "current-host-access",
-      refresh_token: "current-host-refresh",
-      expires_at: 2_200_000
-    });
-    expect(fs.readFileSync(lineage, "utf8")).toBe(
-      `${createHash("sha256").update("current-host-refresh").digest("hex")}\n`
-    );
-    expect(fs.existsSync(pending)).toBe(false);
-  });
-
-  it("refuses fresh Kimi shared credential replacement without valid lineage", () => {
-    for (const lineageCase of ["missing", "corrupt", "unreadable"] as const) {
-      const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-kimi-stage-"));
-      const pending = path.join(root, "kimi-code.json.pending");
-      const destination = path.join(root, "kimi-code.json");
-      const lineage = `${destination}.ultrafuzz-source-refresh-token.sha256`;
-      fs.writeFileSync(
-        pending,
-        `${JSON.stringify({
-          access_token: "current-host-access",
-          refresh_token: "current-host-refresh",
-          expires_at: 2_200_000,
-          expires_in: 900
-        })}\n`,
-        "utf8"
-      );
-      fs.writeFileSync(
-        destination,
-        `${JSON.stringify({
-          access_token: "rotated-volume-access",
-          refresh_token: "rotated-volume-refresh",
-          expires_at: 2_100_000,
-          expires_in: 900
-        })}\n`,
-        "utf8"
-      );
-      if (lineageCase === "corrupt") fs.writeFileSync(lineage, "not-a-sha\n", "utf8");
-      if (lineageCase === "unreadable") fs.mkdirSync(lineage);
-
-      expect(() => stageKimiCredential(pending, destination, "fresh")).toThrow(
-        /Kimi credential lineage is missing or invalid/u
-      );
-      expect(JSON.parse(fs.readFileSync(destination, "utf8"))).toMatchObject({
-        access_token: "rotated-volume-access",
-        refresh_token: "rotated-volume-refresh",
-        expires_at: 2_100_000
-      });
-    }
-  });
-
-  it("stages a lineage sidecar when Kimi shared Modal auth is replaced", () => {
-    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-kimi-stage-"));
-    const pending = path.join(root, "kimi-code.json.pending");
-    const destination = path.join(root, "kimi-code.json");
-    const lineage = `${destination}.ultrafuzz-source-refresh-token.sha256`;
-    fs.writeFileSync(
-      pending,
-      `${JSON.stringify({
-        access_token: "fresh-access",
-        refresh_token: "fresh-refresh",
-        expires_at: 2_100_000,
-        expires_in: 900
-      })}\n`,
-      "utf8"
-    );
-    fs.writeFileSync(
-      destination,
-      `${JSON.stringify({
-        access_token: "access-only",
-        expires_at: 2_000_000,
-        expires_in: 900
-      })}\n`,
-      "utf8"
-    );
-
-    stageKimiCredential(pending, destination);
-
-    expect(JSON.parse(fs.readFileSync(destination, "utf8"))).toMatchObject({
-      access_token: "fresh-access",
-      refresh_token: "fresh-refresh",
-      expires_at: 2_100_000
-    });
-    expect(fs.readFileSync(lineage, "utf8")).toMatch(/^[a-f0-9]{64}\n$/u);
+    expect(modalWorkerVolumeMounts(data, secondCredential)[REMOTE_KIMI_CREDENTIAL_ROOT]).not.toBe(firstCredential);
   });
 
   it("publishes worker readiness only after launch state and all staged inputs are durable", async () => {
@@ -1879,7 +1701,6 @@ describe("Modal worker identity", () => {
       path.join(kimiAuthRoot, "credentials", "kimi-code.json"),
       `${JSON.stringify({
         access_token: "fresh-access",
-        refresh_token: "fresh-refresh",
         expires_at: 2_100_000,
         expires_in: 900
       })}\n`
@@ -1970,16 +1791,12 @@ describe("Modal worker identity", () => {
     expect(copiedRemotePaths[0]).toBe(REMOTE_CONFIG_PATH);
     expect(copiedRemotePaths[1]).toBe(REMOTE_LINEAGE_PATH);
     expect(copiedRemotePaths[2]).toBe("/run/ultrafuzz-auth/kimi/config.toml");
-    expect(copiedRemotePaths[3]).toMatch(
-      /^\/data\/logical-run\/model-one\/kimi-code-auth\/credentials\/kimi-code\.json\.pending-/u
-    );
+    expect(copiedRemotePaths[3]).toMatch(/^\/credentials\/credentials\/kimi-code\.json\.pending-/u);
     expect(copiedRemotePaths[4]).toBe("/run/ultrafuzz-auth/kimi/device_id");
     expect(copiedRemotePaths[5]).toBe(REMOTE_LAUNCH_READY_PATH);
     expect(copiedRemotePaths).toHaveLength(6);
     expect(copiedRemotePaths).not.toContain("/run/ultrafuzz-auth/kimi/credentials/kimi-code.json");
-    const shellScripts = execCalls
-      .filter((command) => command[0] === "bash" && command[1] === "-lc")
-      .map((command) => command[2] ?? "");
+    const pendingCredential = copiedRemotePaths[3]!;
     expect(execCalls).toContainEqual([
       "install",
       "-d",
@@ -1999,8 +1816,10 @@ describe("Modal worker identity", () => {
       "/run/ultrafuzz-config"
     ]);
     expect(execCalls).toContainEqual(["chown", "ubuntu:ubuntu", REMOTE_LAUNCH_READY_PATH]);
-    expect(shellScripts.join("\n")).toContain("kimi-code.lock");
-    expect(shellScripts.join("\n")).toContain("ultrafuzz-source-refresh-token.sha256");
+    expect(execCalls).toContainEqual(["chmod", "600", pendingCredential]);
+    expect(execCalls).toContainEqual(["mv", "-f", pendingCredential, "/credentials/credentials/kimi-code.json"]);
+    expect(execCalls).toContainEqual(["chmod", "-R", "go-rwx", REMOTE_KIMI_CREDENTIAL_ROOT]);
+    expect(execCalls.some((command) => command[0] === "bash" && command[1] === "-lc")).toBe(false);
     expect(copied.some((entry) => entry.localPath === path.join(kimiAuthRoot, "credentials"))).toBe(false);
     expect(readinessObservedDurableState).toBe(true);
     expect((await readModalLaunchState(statePath))?.launches[0]?.phase).toBe("launched");

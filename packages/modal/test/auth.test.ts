@@ -1,17 +1,16 @@
 import fs from "node:fs";
-import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
 import {
+  MAX_KIMI_WORKER_ACCESS_TTL_SECONDS,
   kimiSubscriptionAuthSecretValues,
   kimiSubscriptionAuthSecretValuesFromRoots,
-  kimiSubscriptionCredentialFileName,
+  kimiWorkerCredentialSecretValues,
   localSubscriptionAuthPath,
   prepareSubscriptionAuthCopy,
-  reconcileKimiSubscriptionAuthCredential,
   refreshKimiSubscriptionAuth,
   runnerApiKeySourceEnv,
   subscriptionAuthCopy
@@ -94,6 +93,7 @@ describe("runtime-only subscription auth", () => {
     const fetchImpl: typeof fetch = async (_input, init) => {
       refreshes += 1;
       expect(String(init?.body)).toContain("grant_type=refresh_token");
+      expect(init?.redirect).toBe("error");
       await new Promise((resolve) => setImmediate(resolve));
       return new Response(
         JSON.stringify({
@@ -346,37 +346,6 @@ describe("runtime-only subscription auth", () => {
     ).rejects.toThrow(/Kimi OAuth host must be an HTTPS URL without credentials, a query, or a fragment/u);
   });
 
-  it("ignores access-only Modal Kimi credentials during host reconciliation", async () => {
-    const source = kimiAuthFixture({ fresh: true });
-    const credentialFile = await kimiSubscriptionCredentialFileName("kimi-k3", { KIMI_CODE_HOME: source });
-
-    expect(credentialFile).toBe("kimi-code.json");
-    await expect(
-      reconcileKimiSubscriptionAuthCredential(
-        "kimi-k3",
-        `${JSON.stringify({
-          access_token: "remote-access",
-          expires_at: 2_020_000,
-          expires_in: 900,
-          token_type: "Bearer",
-          scope: "openid"
-        })}\n`,
-        { KIMI_CODE_HOME: source }
-      )
-    ).resolves.toBe(false);
-
-    const token = JSON.parse(fs.readFileSync(path.join(source, "credentials", credentialFile), "utf8")) as {
-      access_token?: string;
-      refresh_token?: string;
-      expires_at?: number;
-    };
-    expect(token).toMatchObject({
-      access_token: "old-access",
-      refresh_token: "old-refresh",
-      expires_at: 2_010_000
-    });
-  });
-
   it("returns selected Kimi subscription access and refresh tokens without unrelated credentials", async () => {
     const source = kimiAuthFixture({ oauthKey: "oauth/selected-kimi" });
     fs.writeFileSync(
@@ -415,73 +384,24 @@ describe("runtime-only subscription auth", () => {
     ]);
   });
 
-  it("does not overwrite a newer host Kimi refresh token with stale Modal state", async () => {
-    const source = kimiAuthFixture({ fresh: true });
-
-    await expect(
-      reconcileKimiSubscriptionAuthCredential(
-        "kimi-k3",
-        `${JSON.stringify({
-          access_token: "stale-remote-access",
-          refresh_token: "stale-remote-refresh",
-          expires_at: 2_009_970,
-          expires_in: 900
-        })}\n`,
-        { KIMI_CODE_HOME: source }
-      )
-    ).resolves.toBe(false);
-
-    const token = JSON.parse(fs.readFileSync(path.join(source, "credentials", "kimi-code.json"), "utf8")) as {
-      access_token?: string;
-      refresh_token?: string;
-    };
-    expect(token.access_token).toBe("old-access");
-    expect(token.refresh_token).toBe("old-refresh");
-  });
-
-  it("promotes a refreshed Modal Kimi token only when it descends from the staged host token", async () => {
-    const source = kimiAuthFixture({ fresh: true });
-    const sourceRefreshTokenSha256 = createHash("sha256").update("old-refresh").digest("hex");
-
-    await expect(
-      reconcileKimiSubscriptionAuthCredential(
-        "kimi-k3",
-        `${JSON.stringify({
-          access_token: "remote-successor-access",
-          refresh_token: "remote-successor-refresh",
-          expires_at: 2_020_000,
-          expires_in: 900
-        })}\n`,
-        { KIMI_CODE_HOME: source },
-        os.homedir(),
-        { sourceRefreshTokenSha256 }
-      )
-    ).resolves.toBe(true);
-    expect(JSON.parse(fs.readFileSync(path.join(source, "credentials", "kimi-code.json"), "utf8"))).toMatchObject({
-      access_token: "remote-successor-access",
-      refresh_token: "remote-successor-refresh",
-      expires_at: 2_020_000
+  it("strictly accepts only an access token from a worker credential snapshot", () => {
+    const accessOnly = JSON.stringify({
+      access_token: "row-access",
+      expires_at: 2_010_000,
+      expires_in: 900
     });
-
-    await expect(
-      reconcileKimiSubscriptionAuthCredential(
-        "kimi-k3",
-        `${JSON.stringify({
-          access_token: "unrelated-remote-access",
-          refresh_token: "unrelated-remote-refresh",
-          expires_at: 2_030_000,
+    expect(kimiWorkerCredentialSecretValues(accessOnly)).toEqual(["row-access"]);
+    expect(() =>
+      kimiWorkerCredentialSecretValues(
+        JSON.stringify({
+          access_token: "row-access",
+          refresh_token: "controller-refresh",
+          expires_at: 2_010_000,
           expires_in: 900
-        })}\n`,
-        { KIMI_CODE_HOME: source },
-        os.homedir(),
-        { sourceRefreshTokenSha256 }
+        })
       )
-    ).resolves.toBe(false);
-    expect(JSON.parse(fs.readFileSync(path.join(source, "credentials", "kimi-code.json"), "utf8"))).toMatchObject({
-      access_token: "remote-successor-access",
-      refresh_token: "remote-successor-refresh",
-      expires_at: 2_020_000
-    });
+    ).toThrow(/must not contain a refresh token/u);
+    expect(() => kimiWorkerCredentialSecretValues(`${accessOnly}\n${accessOnly}`)).toThrow(/strict bounded JSON/u);
   });
 
   it("snapshots only the Kimi Code files needed by a Modal worker", async () => {
@@ -512,7 +432,21 @@ model = "unrelated"
       { provider: "kimi", auth_mode: "subscription", model: "kimi-k3" },
       { KIMI_CODE_HOME: source },
       "/unused",
-      { now: () => 2_000_000_000 }
+      {
+        fetch: async () =>
+          new Response(
+            JSON.stringify({
+              access_token: "worker-access",
+              refresh_token: "rotated-controller-refresh",
+              expires_in: 900,
+              token_type: "Bearer",
+              scope: "openid",
+              provider_rotation: { generation: 2 }
+            }),
+            { status: 200 }
+          ),
+        now: () => 2_000_000_000
+      }
     );
     expect(prepared).toBeDefined();
     expect(prepared?.source).not.toBe(source);
@@ -524,14 +458,24 @@ model = "unrelated"
     expect(fs.existsSync(path.join(prepared!.source, "sessions"))).toBe(false);
     const snapshotCredentials = JSON.parse(
       fs.readFileSync(path.join(prepared!.source, "credentials", credentialFile), "utf8")
-    ) as { access_token?: string; refresh_token?: string; expires_at?: number; expires_in?: number };
-    expect(snapshotCredentials.access_token).toBe("old-access");
-    expect(snapshotCredentials.refresh_token).toBe("old-refresh");
-    expect(snapshotCredentials.expires_at).toBe(2_010_000);
+    ) as Record<string, unknown>;
+    expect(snapshotCredentials).toEqual({
+      access_token: "worker-access",
+      expires_at: 2_000_900,
+      expires_in: 900,
+      token_type: "Bearer",
+      scope: "openid"
+    });
     const sourceCredentials = JSON.parse(fs.readFileSync(path.join(source, "credentials", credentialFile), "utf8")) as {
+      access_token?: string;
       refresh_token?: string;
+      provider_rotation?: unknown;
     };
-    expect(sourceCredentials.refresh_token).toBe("old-refresh");
+    expect(sourceCredentials).toMatchObject({
+      access_token: "worker-access",
+      refresh_token: "rotated-controller-refresh",
+      provider_rotation: { generation: 2 }
+    });
     const snapshotConfig = fs.readFileSync(path.join(prepared!.source, "config.toml"), "utf8");
     expect(snapshotConfig).toContain('[providers."managed:kimi-code"]');
     expect(snapshotConfig).toContain('oauthHost = "https://auth.persisted.example"');
@@ -544,23 +488,43 @@ model = "unrelated"
     expect(fs.existsSync(snapshot)).toBe(false);
   });
 
-  it("keeps refreshable 15-minute Kimi worker snapshots for normal row durations", async () => {
+  it("exchanges even fresh controller credentials and omits the refresh token from the worker snapshot", async () => {
     const source = kimiAuthFixture({ fresh: true, expiresAt: 2_000_900, expiresIn: 900 });
+    let refreshes = 0;
 
     const prepared = await prepareSubscriptionAuthCopy(
       { provider: "kimi", auth_mode: "subscription", model: "kimi-k3" },
       { KIMI_CODE_HOME: source },
       "/unused",
-      { now: () => 2_000_000_000 }
+      {
+        fetch: async (_input, init) => {
+          refreshes += 1;
+          expect(String(init?.body)).toContain("refresh_token=old-refresh");
+          expect(init?.redirect).toBe("error");
+          return new Response(
+            JSON.stringify({
+              access_token: "worker-access",
+              refresh_token: "controller-only-refresh",
+              expires_in: 900
+            }),
+            { status: 200 }
+          );
+        },
+        now: () => 2_000_000_000
+      }
     );
 
     const snapshotCredentials = JSON.parse(
       fs.readFileSync(path.join(prepared!.source, "credentials", "kimi-code.json"), "utf8")
-    ) as { refresh_token?: string; expires_at?: number; expires_in?: number };
-    expect(snapshotCredentials).toMatchObject({
-      refresh_token: "old-refresh",
+    ) as { access_token?: string; refresh_token?: string; expires_at?: number; expires_in?: number };
+    expect(refreshes).toBe(1);
+    expect(snapshotCredentials).toEqual({
+      access_token: "worker-access",
       expires_at: 2_000_900,
       expires_in: 900
+    });
+    expect(JSON.parse(fs.readFileSync(path.join(source, "credentials", "kimi-code.json"), "utf8"))).toMatchObject({
+      refresh_token: "controller-only-refresh"
     });
     await prepared?.cleanup?.();
   });
@@ -595,15 +559,43 @@ model = "unrelated"
     ) as { access_token?: string; refresh_token?: string; expires_at?: number; expires_in?: number };
     expect(snapshotCredentials).toMatchObject({
       access_token: "refreshed-access",
-      refresh_token: "refreshed-refresh",
       expires_at: 2_000_900,
       expires_in: 900
     });
+    expect(snapshotCredentials.refresh_token).toBeUndefined();
     expect(JSON.parse(fs.readFileSync(path.join(source, "credentials", "kimi-code.json"), "utf8"))).toMatchObject({
       access_token: "refreshed-access",
       refresh_token: "refreshed-refresh"
     });
     await prepared?.cleanup?.();
+  });
+
+  it("rejects a worker exchange that exceeds the short-lived access-token ceiling", async () => {
+    const source = kimiAuthFixture({ fresh: true });
+    const credentialPath = path.join(source, "credentials", "kimi-code.json");
+    const before = fs.readFileSync(credentialPath);
+
+    await expect(
+      prepareSubscriptionAuthCopy(
+        { provider: "kimi", auth_mode: "subscription", model: "kimi-k3" },
+        { KIMI_CODE_HOME: source },
+        "/unused",
+        {
+          fetch: async () =>
+            new Response(
+              JSON.stringify({
+                access_token: "too-long-lived",
+                refresh_token: "rotated-refresh",
+                expires_in: MAX_KIMI_WORKER_ACCESS_TTL_SECONDS + 1
+              }),
+              { status: 200 }
+            ),
+          now: () => 2_000_000_000
+        }
+      )
+    ).rejects.toThrow(new RegExp(`${MAX_KIMI_WORKER_ACCESS_TTL_SECONDS}-second worker TTL`, "u"));
+
+    expect(fs.readFileSync(credentialPath)).toEqual(before);
   });
 
   it("materializes the default kimi-k3 alias from Kimi Code managed k3 config", async () => {
@@ -613,7 +605,18 @@ model = "unrelated"
       { provider: "kimi", auth_mode: "subscription", model: "kimi-k3" },
       { KIMI_CODE_HOME: source },
       "/unused",
-      { now: () => 2_000_000_000 }
+      {
+        fetch: async () =>
+          new Response(
+            JSON.stringify({
+              access_token: "worker-access",
+              refresh_token: "controller-only-refresh",
+              expires_in: 900
+            }),
+            { status: 200 }
+          ),
+        now: () => 2_000_000_000
+      }
     );
 
     const snapshotConfig = fs.readFileSync(path.join(prepared!.source, "config.toml"), "utf8");

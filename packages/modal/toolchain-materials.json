@@ -1,0 +1,91 @@
+{
+  "schema_version": "ultrafuzz.modal.toolchain-materials.v1",
+  "base_image": "ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea",
+  "evmbench_builder_image": "node:22-bookworm@sha256:0557ac14e0d45d02ed563067b82856ca5e7aa3437fa28d98d4350ea9c3d9494a",
+  "apt": {
+    "snapshot": "20250813T000000Z",
+    "packages": [
+      "bash",
+      "build-essential",
+      "ca-certificates",
+      "curl",
+      "git",
+      "jq",
+      "libssl3t64",
+      "python3",
+      "python3-pip",
+      "python3-venv",
+      "ripgrep",
+      "tar",
+      "unzip",
+      "xz-utils",
+      "zstd"
+    ]
+  },
+  "downloads": [
+    {
+      "name": "node",
+      "version": "22.23.1",
+      "url": "https://nodejs.org/dist/v22.23.1/node-v22.23.1-linux-x64.tar.xz",
+      "sha256": "9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578"
+    },
+    {
+      "name": "foundry",
+      "version": "1.7.1",
+      "url": "https://github.com/foundry-rs/foundry/releases/download/v1.7.1/foundry_v1.7.1_linux_amd64.tar.gz",
+      "sha256": "cf7e688ed0c4c48adffca788b496076e31060b67ac5afe1e43dbb5499c20c88b"
+    },
+    {
+      "name": "recon",
+      "version": "0.4.17",
+      "url": "https://github.com/Recon-Fuzz/recon-fuzzer/releases/download/v0.4.17/recon-linux-x86_64.tar.gz",
+      "sha256": "8b7c8bee2ff9da88ce5eada7f021b8c933f2c6c0d6c597e2171cef84cd9884de"
+    }
+  ],
+  "global_node_packages": {
+    "@anthropic-ai/claude-code": "2.1.207",
+    "@moonshot-ai/kimi-code": "0.29.1",
+    "@openai/codex": "0.146.0",
+    "bun": "1.3.14",
+    "pnpm": "11.1.1",
+    "recon-generate": "0.0.42"
+  },
+  "package_manager": "pnpm@11.1.1+sha512.d1fdf5f73c617b64fa1a56a81c3c8dfe0e966e33a6010aa256b517ae77be21d93e05affc0de1a83b0e4f29d569f68b446ae8f068cd7247c0bb3df0fb4d7bdf9a",
+  "lockfiles": [
+    {
+      "kind": "node-workspace",
+      "path": "pnpm-lock.yaml",
+      "sha256": "9173b3152eb1e40e1dfe2f11d19cc491ddcdae4f688650385c7bf4d6b7a1e57b"
+    },
+    {
+      "kind": "node-build-policy",
+      "path": "pnpm-workspace.yaml",
+      "sha256": "e7ca4d5af22e46f54eb614e3b0bd0814142ee9ccf5bf585d001767d469cf57bb"
+    },
+    {
+      "kind": "python-security",
+      "path": "packages/modal/security-requirements.lock",
+      "sha256": "9e2232f20092d3ab283357d1fa497b9cb5dc8abe5c1201509375691ddd4088cb"
+    },
+    {
+      "kind": "smithers-seed",
+      "path": "packages/modal/smithers-seed/package-lock.json",
+      "sha256": "b8962ee5b44ead8b43ce38c97268da7fcb3d00f64aeb4a214b992ae2f31c025a"
+    },
+    {
+      "kind": "smithers-manifest",
+      "path": "packages/modal/smithers-seed/package.json",
+      "sha256": "0ff8d3b24cec3090fba20f5131e3478a42f9186407e2904086bddf5ae8925012"
+    },
+    {
+      "kind": "modal-manifest",
+      "path": "packages/modal/package.json",
+      "sha256": "d72339727912c9a75db261a2efdd60cc3ff48bc7c245797354f0d8e478b49339"
+    },
+    {
+      "kind": "workspace-manifest",
+      "path": "package.json",
+      "sha256": "e14b477a97e3126b0e8c06aeafaeef96f2abc94fe583ce6ae3f224facbba5506"
+    }
+  ]
+}

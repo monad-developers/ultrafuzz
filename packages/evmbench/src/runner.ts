@@ -246,7 +246,7 @@ function buildImages(input: {
               "--file",
               path.join(contextRoot, "benchmarks", "evmbench", "overlay.Dockerfile"),
               "--build-arg",
-              `BASE_IMAGE=${sourceImage}`,
+              `BASE_IMAGE=${sourceDigest}`,
               "--build-arg",
               `PROFILE=${input.profile.id}`,
               "--build-arg",

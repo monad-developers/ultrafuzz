@@ -10,9 +10,11 @@ import {
   MODAL_SANDBOX_TIMEOUT_MS
 } from "../src/defaults.js";
 import {
+  REMOTE_KIMI_CREDENTIAL_ROOT,
   REMOTE_CONFIG_PATH,
   REMOTE_LAUNCH_READY_PATH,
   REMOTE_LINEAGE_PATH,
+  modalCredentialVolumeName,
   modalVolumeName,
   persistentWorkspaceRoot,
   remoteAuthPath,
@@ -26,6 +28,7 @@ describe("Modal storage layout", () => {
     expect(REMOTE_CONFIG_PATH).toBe("/run/ultrafuzz-config/benchmark.json");
     expect(REMOTE_LINEAGE_PATH).toBe("/run/ultrafuzz-config/lineage.json");
     expect(REMOTE_LAUNCH_READY_PATH).toBe("/run/ultrafuzz-config/launch-ready");
+    expect(REMOTE_KIMI_CREDENTIAL_ROOT).toBe("/credentials");
     expect(remoteAuthPath("openai")).toBe("/run/ultrafuzz-auth/codex/auth.json");
     expect(remoteAuthPath("anthropic")).toBe("/run/ultrafuzz-auth/claude/.credentials.json");
     expect(remoteAuthPath("deepseek")).toBe("/run/ultrafuzz-auth/deepseek/api-key");
@@ -41,6 +44,10 @@ describe("Modal storage layout", () => {
     expect(second).toHaveLength(63);
     expect(first).not.toBe(second);
     expect(modalVolumeName(`${sharedPrefix}-one`, "model")).toBe(first);
+    expect(modalCredentialVolumeName(`${sharedPrefix}-one`, "model")).not.toBe(first);
+    expect(modalCredentialVolumeName(`${sharedPrefix}-one`, "model")).toBe(
+      modalCredentialVolumeName(`${sharedPrefix}-one`, "model")
+    );
   });
 
   it("keeps the bounded eval watch below the sandbox maximum with a fixed completion margin", () => {

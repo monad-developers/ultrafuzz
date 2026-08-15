@@ -7,6 +7,7 @@ export const REMOTE_CONFIG_PATH = "/run/ultrafuzz-config/benchmark.json";
 export const REMOTE_CONFIG_DIR = path.posix.dirname(REMOTE_CONFIG_PATH);
 export const REMOTE_LINEAGE_PATH = path.posix.join(REMOTE_CONFIG_DIR, "lineage.json");
 export const REMOTE_LAUNCH_READY_PATH = path.posix.join(REMOTE_CONFIG_DIR, "launch-ready");
+export const REMOTE_KIMI_CREDENTIAL_ROOT = "/credentials";
 
 export const PERSISTED_LINEAGE_FILE = "lineage.json";
 
@@ -23,6 +24,10 @@ export function modalVolumeName(runId: string, slug: string): string {
   const suffix = createHash("sha256").update(identity).digest("hex").slice(0, 12);
   const prefix = `ultrafuzz-${runId}-${slug}`.slice(0, 63 - suffix.length - 1).replace(/[-.]+$/u, "");
   return `${prefix}-${suffix}`;
+}
+
+export function modalCredentialVolumeName(runId: string, slug: string): string {
+  return modalVolumeName(`${runId}-credential`, slug);
 }
 
 export function resolvePersistentRemoteRoot(remoteRoot: string, resolvedMountRoot: string): string {
