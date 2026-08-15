@@ -168,6 +168,9 @@ export const PROPERTY_CAMPAIGN_PROPERTY_RESULT_REASON_CODES = [
   "backend-unavailable",
   "execution-inconclusive"
 ] as const;
+export function propertyCampaignPropertyResultReasonCodePromptVocabulary(): string {
+  return PROPERTY_CAMPAIGN_PROPERTY_RESULT_REASON_CODES.map((code) => `\`${code}\``).join(", ");
+}
 export const PROPERTY_CAMPAIGN_COVERAGE_STATUSES = ["reported", "unavailable"] as const;
 export const PROPERTY_CAMPAIGN_COVERAGE_UNITS = [
   "count",
@@ -1127,16 +1130,32 @@ export const propertyCampaignSchema = z
             property_results: {
               type: "array",
               items: {
-                if: {
-                  type: "object",
-                  properties: { status: { enum: ["inconclusive", "not-executed"] } },
-                  required: ["status"]
-                },
-                then: {
-                  type: "object",
-                  properties: { reason_code: {}, reason: {} },
-                  required: ["reason_code", "reason"]
-                }
+                allOf: [
+                  {
+                    if: {
+                      type: "object",
+                      properties: { status: { enum: ["passed", "failed"] } },
+                      required: ["status"]
+                    },
+                    then: {
+                      type: "object",
+                      properties: { reason_code: {}, reason: {} },
+                      required: ["reason_code", "reason"]
+                    }
+                  },
+                  {
+                    if: {
+                      type: "object",
+                      properties: { status: { enum: ["inconclusive", "not-executed"] } },
+                      required: ["status"]
+                    },
+                    then: {
+                      type: "object",
+                      properties: { reason_code: {}, reason: {} },
+                      required: ["reason_code", "reason"]
+                    }
+                  }
+                ]
               }
             }
           }

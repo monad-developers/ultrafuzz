@@ -42,7 +42,6 @@ import {
 import { WORKFLOW_CONTROL_INTEGRITY_SCHEMA_VERSION } from "../src/runtime-contracts.js";
 
 const CAMPAIGN_EVIDENCE_BYTES = Buffer.from("x", "utf8");
-const CAMPAIGN_EVIDENCE_SHA256 = createHash("sha256").update(CAMPAIGN_EVIDENCE_BYTES).digest("hex");
 
 function tempProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-runtime-gates-"));
@@ -248,7 +247,18 @@ function materializeFixtureCampaignEvidence(
       for (const entry of evidenceFiles) {
         if (typeof entry === "object" && entry !== null && typeof (entry as { path?: unknown }).path === "string") {
           const evidencePath = (entry as { path: string }).path;
-          writeArtifactFile(layout, nodeId, evidencePath, CAMPAIGN_EVIDENCE_BYTES);
+          const typedEvidence =
+            evidencePath === (parsed as { paths: { log: string; raw_results: string } }).paths.log ||
+            evidencePath === (parsed as { paths: { log: string; raw_results: string } }).paths.raw_results
+              ? Buffer.from(
+                  JSON.stringify({
+                    generated_suite_entrypoints: (parsed as { intended_entrypoints: unknown }).intended_entrypoints,
+                    backend_result_entrypoints: (parsed as { admitted_entrypoints: unknown }).admitted_entrypoints
+                  }),
+                  "utf8"
+                )
+              : CAMPAIGN_EVIDENCE_BYTES;
+          writeArtifactFile(layout, nodeId, evidencePath, typedEvidence);
           materialized.push(evidencePath);
         }
       }
@@ -8160,6 +8170,20 @@ function currentCampaign(
     if (typeof failure.deterministic_reproducer_ref === "string")
       evidencePaths.add(failure.deterministic_reproducer_ref);
   }
+  const typedEvidenceBytes = Buffer.from(
+    JSON.stringify({
+      generated_suite_entrypoints: implementedPropertyIds.map((propertyId) => ({
+        entrypoint: `property_${propertyId}`,
+        property_id: propertyId
+      })),
+      backend_result_entrypoints: implementedPropertyIds.map((propertyId) => ({
+        entrypoint: `property_${propertyId}`,
+        property_id: propertyId
+      }))
+    }),
+    "utf8"
+  );
+  const typedEvidenceSha256 = createHash("sha256").update(typedEvidenceBytes).digest("hex");
   return {
     schema_version: "ultrafuzz.property-campaign.v3",
     property_provenance_version: 1,
@@ -8194,8 +8218,14 @@ function currentCampaign(
     paths: campaignFixturePaths,
     evidence_files: [...evidencePaths].map((evidencePath) => ({
       path: evidencePath,
-      size_bytes: 1,
-      sha256: CAMPAIGN_EVIDENCE_SHA256
+      size_bytes:
+        evidencePath === campaignFixturePaths.log || evidencePath === campaignFixturePaths.raw_results
+          ? typedEvidenceBytes.length
+          : 1,
+      sha256:
+        evidencePath === campaignFixturePaths.log || evidencePath === campaignFixturePaths.raw_results
+          ? typedEvidenceSha256
+          : createHash("sha256").update(CAMPAIGN_EVIDENCE_BYTES).digest("hex")
     })),
     coverage: {
       status: "reported",

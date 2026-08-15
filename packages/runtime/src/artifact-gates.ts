@@ -6298,7 +6298,7 @@ function verifyCampaignPropertyReferences(
     const seenEntrypoints = new Map<string, string>();
     // The explicit discriminator is authoritative. Legacy v3 records commonly
     // contain property_results and campaign_outcome, but predate this projection.
-    const provenanceIsCurrent = campaign.value.property_provenance_version !== undefined;
+    const provenanceIsCurrent = provenanceIsCurrentCampaign(campaign.value);
     const intendedEntrypoints = campaign.value.intended_entrypoints;
     const admittedEntrypoints = campaign.value.admitted_entrypoints;
     const propertyResults = campaign.value.property_results ?? [];
@@ -6382,15 +6382,17 @@ function verifyCampaignPropertyReferences(
         });
       }
     }
-    for (const propertyId of implementedIds) {
-      if (!resultIds.has(propertyId)) {
-        diagnostics.push({
-          code: "PROPERTY_CAMPAIGN_RESULT_MISSING",
-          message: `Campaign property_results must contain an independent terminal result for implemented property ${JSON.stringify(propertyId)}`,
-          severity: "error",
-          source: "property-provenance",
-          path: `${campaignPath}#$.property_results`
-        });
+    if (provenanceIsCurrent) {
+      for (const propertyId of implementedIds) {
+        if (!resultIds.has(propertyId)) {
+          diagnostics.push({
+            code: "PROPERTY_CAMPAIGN_RESULT_MISSING",
+            message: `Campaign property_results must contain an independent terminal result for implemented property ${JSON.stringify(propertyId)}`,
+            severity: "error",
+            source: "property-provenance",
+            path: `${campaignPath}#$.property_results`
+          });
+        }
       }
     }
     if (provenanceIsCurrent) {
@@ -6485,7 +6487,15 @@ function verifyCampaignPropertyReferences(
 }
 
 function provenanceIsCurrentCampaign(campaign: PropertyCampaignArtifact): boolean {
-  return campaign.property_provenance_version !== undefined;
+  // The version is a producer field, so it cannot be the host's sole
+  // discriminator. Any current projection opts into the current contract;
+  // only artifacts with none of the projection fields retain legacy reads.
+  return (
+    campaign.property_provenance_version !== undefined ||
+    campaign.intended_entrypoints !== undefined ||
+    campaign.admitted_entrypoints !== undefined ||
+    campaign.property_results !== undefined
+  );
 }
 
 /**
@@ -6509,7 +6519,8 @@ function authenticatedCampaignEntrypointDiagnostics(
   const expectedAdmitted = new Set(admitted.map(intendedKey));
   const observedIntended = new Set<string>();
   const observedAdmitted = new Set<string>();
-  let foundTypedEvidence = false;
+  let foundGeneratedEvidence = false;
+  let foundBackendEvidence = false;
   for (const evidence of campaign.evidence_files) {
     let bytes: Buffer | undefined;
     try {
@@ -6526,23 +6537,21 @@ function authenticatedCampaignEntrypointDiagnostics(
       continue;
     }
     if (!isRecord(value)) continue;
-    const readEntries = (field: string): void => {
+    const readEntries = (field: string, target: Set<string>, expectedPath: string): void => {
+      if (evidence.path !== expectedPath) return;
       const entries = value[field];
       if (!Array.isArray(entries)) return;
+      if (field === "generated_suite_entrypoints") foundGeneratedEvidence = true;
+      if (field === "backend_result_entrypoints") foundBackendEvidence = true;
       for (const entry of entries) {
         if (!isRecord(entry) || typeof entry.entrypoint !== "string" || typeof entry.property_id !== "string") continue;
-        foundTypedEvidence = true;
-        (field === "intended_entrypoints" ? observedIntended : observedAdmitted).add(
-          `${entry.entrypoint}\u0000${entry.property_id}`
-        );
+        target.add(`${entry.entrypoint}\u0000${entry.property_id}`);
       }
     };
-    readEntries("intended_entrypoints");
-    readEntries("admitted_entrypoints");
-    readEntries("discovered_entrypoints");
-    readEntries("result_entrypoints");
+    readEntries("generated_suite_entrypoints", observedIntended, campaign.paths.log);
+    readEntries("backend_result_entrypoints", observedAdmitted, campaign.paths.raw_results);
   }
-  if (!foundTypedEvidence) {
+  if (!foundGeneratedEvidence || !foundBackendEvidence) {
     return [
       {
         code: "PROPERTY_CAMPAIGN_PROVENANCE_EVIDENCE_MISSING",
@@ -6556,7 +6565,7 @@ function authenticatedCampaignEntrypointDiagnostics(
   const same = (left: Set<string>, right: Set<string>) =>
     left.size === right.size && [...left].every((entry) => right.has(entry));
   const diagnostics: RuntimeDiagnostic[] = [];
-  if (observedIntended.size > 0 && !same(observedIntended, expectedIntended)) {
+  if (!same(observedIntended, expectedIntended)) {
     diagnostics.push({
       code: "PROPERTY_CAMPAIGN_INTENDED_ENTRYPOINT_UNAUTHENTICATED",
       message: "intended_entrypoints must equal the authenticated generated-suite/ABI entrypoint projection",
@@ -6565,7 +6574,7 @@ function authenticatedCampaignEntrypointDiagnostics(
       path: `${campaignPath}#$.intended_entrypoints`
     });
   }
-  if (observedAdmitted.size > 0 && !same(observedAdmitted, expectedAdmitted)) {
+  if (!same(observedAdmitted, expectedAdmitted)) {
     diagnostics.push({
       code: "PROPERTY_CAMPAIGN_ADMITTED_ENTRYPOINT_UNAUTHENTICATED",
       message: "admitted_entrypoints must equal the authenticated backend discovery/result projection",

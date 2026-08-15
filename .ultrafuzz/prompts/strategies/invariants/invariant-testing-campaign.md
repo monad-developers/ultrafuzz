@@ -74,9 +74,8 @@ Use this configured invariant testing fuzzer timeout:
      Record an independent `property_results` record for every implemented
      property using only `passed`, `failed`, `inconclusive`, or `not-executed`.
      `failed` carries failure IDs; `passed` carries none; the latter two carry
-     both a schema-defined `reason_code` (`not-admitted`, `not-observed`,
-     `campaign-ended`, `ambiguous-entrypoint`, `backend-unavailable`, or
-     `execution-inconclusive`) and a precise reason. A property must never
+     both a schema-defined `reason_code` ({{property_campaign_property_result_reason_codes}})
+     and a precise reason. A property must never
      inherit a sibling property's pass, failure, or omission status.
      Set `property_provenance_version` to `1`. Preserve the generated suite/ABI
      identity and the backend's authenticated discovery/result records as

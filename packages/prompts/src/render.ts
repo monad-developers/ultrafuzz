@@ -2,7 +2,11 @@ import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { findingNoteKeyPromptVocabulary, findingReachabilityPromptVocabulary } from "@ultrafuzz/artifacts";
+import {
+  findingNoteKeyPromptVocabulary,
+  findingReachabilityPromptVocabulary,
+  propertyCampaignPropertyResultReasonCodePromptVocabulary
+} from "@ultrafuzz/artifacts";
 
 import { parsePromptFrontmatter, PromptError } from "./frontmatter.js";
 
@@ -36,6 +40,7 @@ export const SUPPORTED_TEMPLATE_VARIABLES = [
   "strategy_attempt_test_dir",
   "finding_reachability_vocabulary",
   "finding_note_key_vocabulary",
+  "property_campaign_property_result_reason_codes",
   "coverage_evidence_markdown_projection"
 ] as const;
 
@@ -1015,6 +1020,7 @@ function buildVariableContext(input: PromptRenderInput): Record<string, string> 
     strategy_attempt_test_dir: strategyAttemptTestDirectory(input),
     finding_reachability_vocabulary: findingReachabilityPromptVocabulary(),
     finding_note_key_vocabulary: findingNoteKeyPromptVocabulary(),
+    property_campaign_property_result_reason_codes: propertyCampaignPropertyResultReasonCodePromptVocabulary(),
     coverage_evidence_markdown_projection: renderOutputContractTemplate("coverage-evidence-markdown.mdx", {}),
     ...Object.fromEntries(Object.entries(input.variables ?? {}).map(([key, value]) => [key, String(value)]))
   };
@@ -1052,6 +1058,7 @@ function validateVariableOverrides(variables: PromptRenderInput["variables"]): v
     if (
       key === "finding_reachability_vocabulary" ||
       key === "finding_note_key_vocabulary" ||
+      key === "property_campaign_property_result_reason_codes" ||
       key === "coverage_evidence_markdown_projection"
     ) {
       throw new PromptError("invalid-render-input", `${key} is authoritative and cannot be overridden`);
