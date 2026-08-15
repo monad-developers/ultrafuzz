@@ -4571,6 +4571,19 @@ function verifyCoverageProductionInventory(
     });
   }
 
+  if (reconSelection.ranges !== undefined) {
+    const selectedRangeCount = [...reconSelection.ranges.values()].reduce((sum, ranges) => sum + ranges.length, 0);
+    if (selectedRangeCount === 0) {
+      diagnostics.push({
+        code: "COVERAGE_RECON_SELECTION_EMPTY",
+        message: "Measured coverage requires a nonempty Recon selection of production source ranges",
+        severity: "error",
+        source: "coverage-evidence",
+        path: `${evidencePath}#$.recon_selection`
+      });
+    }
+  }
+
   let lcovCoverage: TrustedLcovCoverage | undefined;
   try {
     const input = readCoverageInputSnapshot(artifactDir, node, evidence.lcov, "LCOV", authenticated);
@@ -4628,6 +4641,29 @@ function verifyCoverageProductionInventory(
         });
       }
     }
+
+    const hasProductionSource = [...lcovCoverage.hitsBySource.keys()].some((source) => inventory.has(source));
+    if (!hasProductionSource) {
+      diagnostics.push({
+        code: "COVERAGE_PRODUCTION_SOURCE_ATTRIBUTION_EMPTY",
+        message: "Measured coverage requires LCOV to attribute at least one source to configured production roots",
+        severity: "error",
+        source: "coverage-evidence",
+        path: `${evidencePath}#$.lcov`
+      });
+    }
+    const productionInstrumentedLineCount = [...lcovCoverage.instrumentedLinesBySource.entries()]
+      .filter(([source]) => inventory.has(source))
+      .reduce((sum, [, lines]) => sum + lines.length, 0);
+    if (productionInstrumentedLineCount === 0) {
+      diagnostics.push({
+        code: "COVERAGE_PRODUCTION_INSTRUMENTATION_EMPTY",
+        message: "Measured coverage requires a nonzero authenticated production instrumentation denominator",
+        severity: "error",
+        source: "coverage-evidence",
+        path: `${evidencePath}#$.lcov`
+      });
+    }
   }
 
   for (const [relativePath, expectedKind] of expectedSourceKinds) {
@@ -4649,6 +4685,22 @@ function verifyCoverageProductionInventory(
         path: `${evidencePath}#$.files`
       });
     }
+  }
+
+  const productionDenominator = evidence.files
+    .filter((entry): entry is Record<string, unknown> => isRecord(entry) && entry.kind === "production")
+    .reduce((sum, entry) => {
+      const total = entry.total_ranges;
+      return sum + (typeof total === "number" && Number.isSafeInteger(total) && total >= 0 ? total : 0);
+    }, 0);
+  if (productionDenominator === 0) {
+    diagnostics.push({
+      code: "COVERAGE_PRODUCTION_DENOMINATOR_EMPTY",
+      message: "Measured coverage requires a nonzero production-attributed declaration denominator",
+      severity: "error",
+      source: "coverage-evidence",
+      path: `${evidencePath}#$.files`
+    });
   }
   for (const [relativePath, declared] of declaredFiles) {
     if (expectedSourceKinds.has(relativePath)) continue;
@@ -4754,6 +4806,7 @@ function verifyCoverageProductionInventory(
   }
 
   let materialRangeCount = 0;
+  let selectedMaterialRangeCount = 0;
   for (const relativePath of inventory) {
     const sourceText = sourceSnapshot(relativePath, "production coverage source").text;
     let declarations: MaterialCoverageDeclaration[];
@@ -4817,6 +4870,7 @@ function verifyCoverageProductionInventory(
         declaration.line,
         declaration.endLine
       );
+      if (reconSelection.ranges !== undefined && selectedByRecon) selectedMaterialRangeCount += 1;
       if (reconSelection.ranges !== undefined && matching[0]!.selected !== selectedByRecon) {
         diagnostics.push({
           code: "COVERAGE_PRODUCTION_RANGE_SELECTION_MISMATCH",
@@ -4846,6 +4900,15 @@ function verifyCoverageProductionInventory(
         path: `${evidencePath}#$.counted_ranges`
       });
     }
+  }
+  if (reconSelection.ranges !== undefined && selectedMaterialRangeCount === 0) {
+    diagnostics.push({
+      code: "COVERAGE_RECON_SELECTED_DENOMINATOR_EMPTY",
+      message: "Measured coverage requires a nonzero authenticated Recon-selected material declaration denominator",
+      severity: "error",
+      source: "coverage-evidence",
+      path: `${evidencePath}#$.recon_selection`
+    });
   }
   return diagnostics;
 }
