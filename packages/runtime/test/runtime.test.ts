@@ -13076,6 +13076,69 @@ test("retry recovery stays failed when engine success has no durable submission 
   );
 });
 
+test("retry recovery rejects same-attempt success from a succeeded engine aggregate", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+  const workflowRunId = "ultrafuzz-recovery-same-attempt-success";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      error: { message: "Task failed: node:project-discovery" },
+      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
+    }),
+    events: ""
+  });
+  const run = await startRun({ projectRoot: project, runId: "recovery-same-attempt-success", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
+
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId: run.value!.run_id,
+    force: true,
+    retryFailed: true,
+    env
+  });
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+
+  const layout = layoutForRunRoot(run.value!.run_root);
+  const statePath = path.join(run.value!.run_root, "state.json");
+  const submitted = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
+  assert.equal(submitted.provenance?.recovery?.submission_status, "submitted");
+  assert.equal(submitted.provenance?.recovery?.failed_nodes[0]?.failed_attempt, 1);
+
+  const staleSuccess = workflowInspect({
+    workflowRunId,
+    status: "finished",
+    state: "succeeded",
+    steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+  });
+  fs.writeFileSync(env.SMITHERS_FAKE_INSPECT!, `${JSON.stringify(staleSuccess, null, 2)}\n`, "utf8");
+  fs.writeFileSync(
+    env.SMITHERS_FAKE_EVENTS!,
+    workflowEvents(workflowRunId, [{ type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 }]),
+    "utf8"
+  );
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const synchronized = await syncRun({ projectRoot: project, runId: run.value!.run_id, env });
+    assert.equal(synchronized.ok, true, JSON.stringify(synchronized.diagnostics));
+    assert.equal(synchronized.value?.status, "failed");
+  }
+
+  const finalState = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
+  assert.equal(finalState.status, "failed");
+  assert.equal(finalState.provenance?.recovery?.submission_status, "submitted");
+  assert.equal(finalState.provenance?.recovery?.recovered, false);
+  assert.equal(
+    replayEvents(layout, Number.MAX_SAFE_INTEGER).records.some((event) => event.event_type === "run-recovered"),
+    false
+  );
+});
+
 test("retry recovery cannot authorize a stale failed aggregate from a different workflow link", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

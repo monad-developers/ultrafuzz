@@ -568,7 +568,7 @@ export async function synchronizeLinkedWorkflowRun(
     controlGeneration: evidence.controlGeneration
   });
   const evidenceComplete = syncResult.syncedNodes >= loaded.tasks.length;
-  const recoveredAggregateAuthorized = recoveryAuthorizesFailedAggregate({
+  const recoveredAggregateAuthorized = recoveryAuthorizesTerminalAggregate({
     layout,
     state: recoveryState,
     inspect,
@@ -630,7 +630,6 @@ export async function synchronizeLinkedWorkflowRun(
   const finalStatus = finalRunStatus(inspect, syncResult.nodeStatuses, readRunState(layout).status, {
     evidenceComplete,
     recoveredAggregateAuthorized,
-    recoveryDispositionAuthorized,
     recoveryRequiresAuthorization: recovery?.prior_status === "failed" && recovery.recovered === false
   });
   const stateBeforeStatusUpdate = readRunState(layout);
@@ -795,7 +794,7 @@ export async function synchronizeLinkedWorkflowRun(
   };
 }
 
-function recoveryAuthorizesFailedAggregate(input: {
+function recoveryAuthorizesTerminalAggregate(input: {
   layout: RunLayout;
   state: ReturnType<typeof readRunState>;
   inspect: WorkflowInspect;
@@ -809,7 +808,7 @@ function recoveryAuthorizesFailedAggregate(input: {
   const recovery = input.state.provenance?.recovery;
   const statuses = [...input.nodeStatuses.values()];
   if (
-    input.inspect.runState !== "failed" ||
+    (input.inspect.runState !== "failed" && input.inspect.runState !== "succeeded") ||
     recovery === undefined ||
     !recoverySubmissionAuthorized({
       layout: input.layout,
@@ -4139,7 +4138,6 @@ function finalRunStatus(
   options: {
     evidenceComplete: boolean;
     recoveredAggregateAuthorized?: boolean;
-    recoveryDispositionAuthorized?: boolean;
     recoveryRequiresAuthorization?: boolean;
   } = { evidenceComplete: true }
 ): RunStatus {
@@ -4179,7 +4177,7 @@ function finalRunStatus(
     return "running";
   }
   if (workflowStatus === "succeeded") {
-    if (options.recoveryRequiresAuthorization === true && options.recoveryDispositionAuthorized !== true) {
+    if (options.recoveryRequiresAuthorization === true && options.recoveredAggregateAuthorized !== true) {
       return "failed";
     }
     return options.evidenceComplete &&
