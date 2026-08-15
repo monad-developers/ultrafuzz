@@ -1022,9 +1022,7 @@ function isCloudResourceBudgetExhaustion(
     Object.keys(record).every((key) => allowedKeys.has(key)) &&
     record.schema_version === "ultrafuzz.resource-budget-exhaustion.v1" &&
     record.ultrafuzz_run_id === input.run_id &&
-    typeof record.workflow_run_id === "string" &&
-    record.workflow_run_id.length > 0 &&
-    record.workflow_run_id.length <= 4_096 &&
+    record.workflow_run_id === `ultrafuzz-${input.run_id}` &&
     typeof record.resource === "string" &&
     RESOURCE_BUDGET_NAMES.has(record.resource) &&
     (record.scope === "run" || record.scope === "attempt") &&
@@ -1035,7 +1033,7 @@ function isCloudResourceBudgetExhaustion(
     typeof record.observed === "number" &&
     Number.isFinite(record.observed) &&
     record.observed > record.limit &&
-    record.observed <= Number.MAX_SAFE_INTEGER &&
+    record.observed <= Number.MAX_SAFE_INTEGER + 1 &&
     record.task_id === input.task_id &&
     typeof record.recorded_at === "string" &&
     Number.isFinite(Date.parse(record.recorded_at))

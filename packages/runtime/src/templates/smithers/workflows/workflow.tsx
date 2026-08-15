@@ -1302,19 +1302,20 @@ const RESOURCE_BUDGET_STATE_SCHEMA_VERSION = "ultrafuzz.resource-budget-state.v1
 const RESOURCE_BUDGET_STATE_DIRECTORY = "resource-budget-counters";
 const MAX_RESOURCE_BUDGET_STATE_FILES = 100_000;
 const MAX_RESOURCE_BUDGET_STATE_BYTES = 1024 * 1024;
+const MAX_BOUNDED_JSON_DEPTH = 128;
+const MAX_BOUNDED_JSON_NODES = 100_000;
+const RESOURCE_BUDGET_OVERFLOW_OBSERVED = Number.MAX_SAFE_INTEGER + 1;
 
 function isNormalizedAgentTurn(event: unknown): boolean {
   if (event === null || typeof event !== "object") return false;
   const candidate = event as Record<string, unknown>;
   if (candidate.type !== "action" || candidate.action === null || typeof candidate.action !== "object") return false;
   const action = candidate.action as Record<string, unknown>;
-  if (candidate.phase === "started" && action.kind === "turn") return true;
-  return (
-    candidate.phase === "updated" &&
-    candidate.entryType === "message" &&
-    action.kind === "note" &&
-    action.title === "assistant"
-  );
+  // Every supported adapter emits one controller-owned marker for each model
+  // response, including tool-only responses. Text/message events are display
+  // surfaces and are deliberately not counted: one response can contain more
+  // than one text block, while a tool-only response can contain none.
+  return candidate.phase === "started" && action.kind === "turn";
 }
 
 function resourceBudgetStateForTask(task: (typeof taskSpecs)[number]): BudgetState | undefined {
@@ -1540,7 +1541,7 @@ function parsePersistedResourceBudgetExhaustion(value: unknown): ResourceBudgetE
     typeof value.observed !== "number" ||
     !Number.isFinite(value.observed) ||
     value.observed <= value.limit ||
-    value.observed > Number.MAX_SAFE_INTEGER ||
+    value.observed > RESOURCE_BUDGET_OVERFLOW_OBSERVED ||
     typeof value.ultrafuzz_run_id !== "string" ||
     typeof value.workflow_run_id !== "string" ||
     typeof value.task_id !== "string" ||
@@ -1613,6 +1614,174 @@ function resourceBudgetExhaustionError(
   return error;
 }
 
+function exceededSerializedByteLimit(limit: number): number {
+  return Math.min(limit + 1, RESOURCE_BUDGET_OVERFLOW_OBSERVED);
+}
+
+function addSerializedBytes(total: number, amount: number, limit: number): number {
+  if (total > limit || amount > limit - total) return exceededSerializedByteLimit(limit);
+  return total + amount;
+}
+
+function boundedUtf8StringBytes(value: string, limit: number, quoted: boolean): number {
+  let total = quoted ? 2 : 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    let bytes: number;
+    if (quoted && (code === 0x22 || code === 0x5c)) {
+      bytes = 2;
+    } else if (quoted && code <= 0x1f) {
+      bytes = code === 0x08 || code === 0x09 || code === 0x0a || code === 0x0c || code === 0x0d ? 2 : 6;
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      const trailing = value.charCodeAt(index + 1);
+      if (trailing >= 0xdc00 && trailing <= 0xdfff) {
+        bytes = 4;
+        index += 1;
+      } else {
+        bytes = quoted ? 6 : 3;
+      }
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      bytes = quoted ? 6 : 3;
+    } else {
+      bytes = code <= 0x7f ? 1 : code <= 0x7ff ? 2 : 3;
+    }
+    total = addSerializedBytes(total, bytes, limit);
+    if (total > limit) return total;
+  }
+  return total;
+}
+
+function boundedSerializedBytes(value: unknown, limit: number): number {
+  if (!Number.isSafeInteger(limit) || limit < 0) throw new Error("serialized byte limit is invalid");
+  if (value === undefined) return 0;
+  // Preserve the existing boundary contract: a top-level string is measured as
+  // its payload, while strings nested in JSON include quotes and escapes.
+  if (typeof value === "string") return boundedUtf8StringBytes(value, limit, false);
+
+  const ancestors = new Set<object>();
+  let visitedNodes = 0;
+  const visit = (
+    candidate: unknown,
+    remaining: number,
+    location: "root" | "array" | "object",
+    depth: number
+  ): { included: boolean; bytes: number } => {
+    visitedNodes += 1;
+    if (visitedNodes > MAX_BOUNDED_JSON_NODES) {
+      throw new Error("resource budget JSON value exceeds the structural node limit");
+    }
+    if (candidate === null)
+      return { included: true, bytes: remaining < 4 ? exceededSerializedByteLimit(remaining) : 4 };
+    switch (typeof candidate) {
+      case "string":
+        return { included: true, bytes: boundedUtf8StringBytes(candidate, remaining, true) };
+      case "boolean": {
+        const bytes = candidate ? 4 : 5;
+        return { included: true, bytes: bytes > remaining ? exceededSerializedByteLimit(remaining) : bytes };
+      }
+      case "number": {
+        const serialized = Number.isFinite(candidate) ? JSON.stringify(candidate) : "null";
+        const bytes = serialized.length;
+        return { included: true, bytes: bytes > remaining ? exceededSerializedByteLimit(remaining) : bytes };
+      }
+      case "undefined":
+      case "function":
+      case "symbol":
+        return location === "array"
+          ? { included: true, bytes: remaining < 4 ? exceededSerializedByteLimit(remaining) : 4 }
+          : { included: false, bytes: 0 };
+      case "bigint":
+        throw new TypeError("resource budget JSON value cannot contain bigint");
+      case "object":
+        break;
+    }
+    if (depth >= MAX_BOUNDED_JSON_DEPTH) {
+      throw new Error("resource budget JSON value exceeds the structural depth limit");
+    }
+    const object = candidate as object;
+    if (ancestors.has(object)) throw new TypeError("resource budget JSON value contains a cycle");
+    const prototype = Object.getPrototypeOf(object);
+    if (
+      (Array.isArray(object) && prototype !== Array.prototype) ||
+      (!Array.isArray(object) && prototype !== Object.prototype && prototype !== null)
+    ) {
+      throw new TypeError("resource budget JSON value must contain only arrays and plain objects");
+    }
+    assertNoCustomJsonSerialization(object);
+    ancestors.add(object);
+    try {
+      if (Array.isArray(object)) {
+        const minimumBytes =
+          object.length === 0 ? 2 : object.length > (remaining - 1) / 2 ? remaining + 1 : 2 * object.length + 1;
+        if (minimumBytes > remaining) return { included: true, bytes: exceededSerializedByteLimit(remaining) };
+        let total = 1;
+        for (let index = 0; index < object.length; index += 1) {
+          if (index > 0) total = addSerializedBytes(total, 1, remaining);
+          if (total > remaining) return { included: true, bytes: total };
+          const descriptor = Object.getOwnPropertyDescriptor(object, String(index));
+          if (descriptor === undefined && String(index) in object) {
+            throw new TypeError("resource budget JSON arrays must not inherit indexed values");
+          }
+          if (descriptor !== undefined && !("value" in descriptor)) {
+            throw new TypeError("resource budget JSON value must not contain accessors");
+          }
+          const child = visit(descriptor?.value, remaining - total, "array", depth + 1);
+          total = addSerializedBytes(total, child.bytes, remaining);
+          if (total > remaining) return { included: true, bytes: total };
+        }
+        return { included: true, bytes: addSerializedBytes(total, 1, remaining) };
+      }
+
+      let total = 1;
+      let includedProperties = 0;
+      for (const key in object as Record<string, unknown>) {
+        if (!Object.hasOwn(object, key)) continue;
+        const descriptor = Object.getOwnPropertyDescriptor(object, key);
+        if (descriptor === undefined || descriptor.enumerable !== true) continue;
+        if (!("value" in descriptor)) {
+          throw new TypeError("resource budget JSON value must not contain accessors");
+        }
+        const child = visit(descriptor.value, Math.max(0, remaining - total), "object", depth + 1);
+        if (!child.included) continue;
+        if (includedProperties > 0) total = addSerializedBytes(total, 1, remaining);
+        const keyBytes = boundedUtf8StringBytes(key, Math.max(0, remaining - total), true);
+        total = addSerializedBytes(total, keyBytes, remaining);
+        total = addSerializedBytes(total, 1, remaining);
+        total = addSerializedBytes(total, child.bytes, remaining);
+        if (total > remaining) return { included: true, bytes: total };
+        includedProperties += 1;
+      }
+      return { included: true, bytes: addSerializedBytes(total, 1, remaining) };
+    } finally {
+      ancestors.delete(object);
+    }
+  };
+  const result = visit(value, limit, "root", 0);
+  return result.included ? result.bytes : 0;
+}
+
+function assertNoCustomJsonSerialization(value: object): void {
+  // JSON.stringify consults `toJSON` before walking arrays or objects. Counting
+  // the apparent structure while later serialization invokes an attacker-
+  // supplied hook would understate the actual byte surface (and could invoke an
+  // accessor). Only the ordinary array/plain-object traversal is admitted.
+  let current: object | null = value;
+  while (current !== null) {
+    const descriptor = Object.getOwnPropertyDescriptor(current, "toJSON");
+    if (descriptor !== undefined) {
+      if (!("value" in descriptor) || typeof descriptor.value === "function") {
+        throw new TypeError("resource budget JSON value must not define custom JSON serialization");
+      }
+      return;
+    }
+    current = Object.getPrototypeOf(current);
+  }
+}
+
+function boundedCounterObserved(current: number, amount: number): number {
+  return amount > Number.MAX_SAFE_INTEGER - current ? RESOURCE_BUDGET_OVERFLOW_OBSERVED : current + amount;
+}
+
 function artifactAwareAgent(
   task: (typeof taskSpecs)[number],
   chainIndex: number,
@@ -1625,12 +1794,6 @@ function artifactAwareAgent(
   const resourceBudgetState = resourceBudgetStateForTask(task);
   const resourceBudgetTaskState =
     resourceBudgetState === undefined ? undefined : resourceBudgetTaskStateForTask(task, resourceBudgetState);
-
-  function serializedBytes(value: unknown): number {
-    if (value === undefined) return 0;
-    const serialized = typeof value === "string" ? value : JSON.stringify(value);
-    return Buffer.byteLength(serialized ?? "", "utf8");
-  }
 
   return {
     id: smithersTaskAgentId(task, chainIndex),
@@ -1704,26 +1867,45 @@ function artifactAwareAgent(
         attemptLimit: number,
         resource: ResourceBudgetName
       ): void => {
-        if (!Number.isSafeInteger(amount) || amount < 0) {
+        if (!Number.isInteger(amount) || amount < 0 || amount > RESOURCE_BUDGET_OVERFLOW_OBSERVED) {
           throw new Error(`resource budget ${resource} increment is invalid`);
         }
         if (amount === 0) return;
-        const runObserved = runCounter[field] + amount;
-        const taskObserved = resourceBudgetTaskState[field] + amount;
-        const attemptObserved = attemptBudget[field] + amount;
-        if (!Number.isSafeInteger(runObserved) || runObserved > runLimit) {
+        const runObserved = boundedCounterObserved(runCounter[field], amount);
+        const attemptObserved = boundedCounterObserved(attemptBudget[field], amount);
+        if (runObserved > runLimit) {
           throw resourceBudgetExhaustionError(task, resource, "run", runLimit, runObserved);
         }
-        if (!Number.isSafeInteger(attemptObserved) || attemptObserved > attemptLimit) {
+        if (attemptObserved > attemptLimit) {
           throw resourceBudgetExhaustionError(task, resource, "attempt", attemptLimit, attemptObserved);
+        }
+        const taskObserved = boundedCounterObserved(resourceBudgetTaskState[field], amount);
+        if (!Number.isSafeInteger(taskObserved)) {
+          throw new Error(`resource budget ${resource} task counter exceeds the safe range`);
         }
         runCounter[field] = runObserved;
         resourceBudgetTaskState[field] = taskObserved;
         attemptBudget[field] = attemptObserved;
         persistResourceBudgetTaskState(task, resourceBudgetState);
       };
-      const contextBytes = serializedBytes(attemptArgs?.prompt) + serializedBytes(attemptArgs?.messages);
       addBounded("requests", 1, resourceBudget.maxRequests, resourceBudget.maxAttemptRequests, "requests");
+      let normalizedRequestPrecharged = true;
+      const contextBytesRemaining = Math.max(
+        0,
+        Math.min(
+          resourceBudget.maxContextBytes - runCounter.contextBytes,
+          resourceBudget.maxAttemptContextBytes - attemptBudget.contextBytes
+        )
+      );
+      const promptBytes = boundedSerializedBytes(attemptArgs?.prompt, contextBytesRemaining);
+      const contextBytes =
+        promptBytes > contextBytesRemaining
+          ? promptBytes
+          : addSerializedBytes(
+              promptBytes,
+              boundedSerializedBytes(attemptArgs?.messages, contextBytesRemaining - promptBytes),
+              contextBytesRemaining
+            );
       addBounded(
         "contextBytes",
         contextBytes,
@@ -1756,7 +1938,6 @@ function artifactAwareAgent(
       const callerOnEvent = attemptArgs?.onEvent;
       const callerOnStdout = attemptArgs?.onStdout;
       const callerOnStderr = attemptArgs?.onStderr;
-      let streamedOutputBytes = 0;
       const accountStreamedOutput = (text: string, callback: unknown): void => {
         if (resourceBudgetState.exhausted !== undefined || text.length === 0) return;
         const bytes = Buffer.byteLength(text, "utf8");
@@ -1768,7 +1949,6 @@ function artifactAwareAgent(
             resourceBudget.maxAttemptOutputBytes,
             "output_bytes"
           );
-          streamedOutputBytes += bytes;
           if (typeof callback === "function") callback(text);
         } catch (error) {
           // CLI stream callbacks are invoked from child-process listeners. Do
@@ -1787,10 +1967,17 @@ function artifactAwareAgent(
             : AbortSignal.any([attemptArgs.abortSignal, resourceBudgetState.abortController.signal]),
         onStdout: (text: string) => accountStreamedOutput(text, callerOnStdout),
         onStderr: (text: string) => accountStreamedOutput(text, callerOnStderr),
-        onProviderRetry: () =>
-          addBounded("requests", 1, resourceBudget.maxRequests, resourceBudget.maxAttemptRequests, "requests"),
+        onProviderRetry: () => {
+          addBounded("requests", 1, resourceBudget.maxRequests, resourceBudget.maxAttemptRequests, "requests");
+          normalizedRequestPrecharged = true;
+        },
         onEvent: async (event: unknown) => {
           if (isNormalizedAgentTurn(event)) {
+            if (normalizedRequestPrecharged) {
+              normalizedRequestPrecharged = false;
+            } else {
+              addBounded("requests", 1, resourceBudget.maxRequests, resourceBudget.maxAttemptRequests, "requests");
+            }
             addBounded("turns", 1, resourceBudget.maxTurns, resourceBudget.maxAttemptTurns, "turns");
           }
           if (typeof callerOnEvent === "function") await callerOnEvent(event);
@@ -1804,12 +1991,21 @@ function artifactAwareAgent(
         throw error;
       }
       if (resourceBudgetState.exhausted !== undefined) throw resourceBudgetState.exhausted;
-      const outputBytes = serializedBytes(result);
-      const unstreamedOutputBytes = Math.max(0, outputBytes - streamedOutputBytes);
-      if (unstreamedOutputBytes > 0) {
+      const postStreamOutputBytesRemaining = Math.max(
+        0,
+        Math.min(
+          resourceBudget.maxOutputBytes - runCounter.outputBytes,
+          resourceBudget.maxAttemptOutputBytes - attemptBudget.outputBytes
+        )
+      );
+      // Stdout/stderr and the returned value are independent output surfaces.
+      // Some adapters duplicate bytes between them, but without an authenticated
+      // equivalence marker subtraction would undercount an unrelated result.
+      const resultOutputBytes = boundedSerializedBytes(result, postStreamOutputBytesRemaining);
+      if (resultOutputBytes > 0) {
         addBounded(
           "outputBytes",
-          unstreamedOutputBytes,
+          resultOutputBytes,
           resourceBudget.maxOutputBytes,
           resourceBudget.maxAttemptOutputBytes,
           "output_bytes"

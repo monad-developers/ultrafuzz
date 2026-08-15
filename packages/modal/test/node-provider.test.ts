@@ -2014,7 +2014,7 @@ fs.writeFileSync(${JSON.stringify(observationPath)}, JSON.stringify({
     const evidence = {
       schema_version: "ultrafuzz.resource-budget-exhaustion.v1",
       ultrafuzz_run_id: fixture.input.run_id,
-      workflow_run_id: "ultrafuzz-cloud-budget",
+      workflow_run_id: `ultrafuzz-${fixture.input.run_id}`,
       resource: "requests",
       scope: "run",
       limit: 0,
@@ -2076,7 +2076,7 @@ fs.writeFileSync(${JSON.stringify(observationPath)}, JSON.stringify({
     const evidence = {
       schema_version: "ultrafuzz.resource-budget-exhaustion.v1",
       ultrafuzz_run_id: fixture.input.run_id,
-      workflow_run_id: "ultrafuzz-cloud-budget-recovered",
+      workflow_run_id: `ultrafuzz-${fixture.input.run_id}`,
       resource: "output_bytes",
       scope: "attempt",
       limit: 10,
@@ -2123,7 +2123,7 @@ fs.writeFileSync(${JSON.stringify(observationPath)}, JSON.stringify({
       scope: "attempt",
       limit: 1,
       observed: 2,
-      task_id: `${fixture.input.task_id}-other`,
+      task_id: fixture.input.task_id,
       recorded_at: "2026-08-15T00:00:00.000Z"
     };
     const defaultReadBytes = sandbox.filesystem.readBytes;

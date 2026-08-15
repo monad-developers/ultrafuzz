@@ -4911,6 +4911,12 @@ test("generated agent boundary counts only normalized adapter turns", async () =
   const nonTurns = [
     { type: "started", engine: "codex" },
     { type: "action", phase: "started", entryType: "thought", action: { kind: "command", title: "tool" } },
+    {
+      type: "action",
+      phase: "updated",
+      entryType: "message",
+      action: { kind: "note", title: "assistant" }
+    },
     { type: "action", phase: "completed", entryType: "thought", action: { kind: "warning", title: "stderr" } },
     { type: "completed", ok: true }
   ];
@@ -4943,12 +4949,7 @@ test("generated agent boundary counts only normalized adapter turns", async () =
         for (const event of nonTurns) await onEvent(event);
         await onEvent({ type: "action", phase: "started", entryType: "thought", action: { kind: "turn" } });
         for (const event of nonTurns) await onEvent(event);
-        await onEvent({
-          type: "action",
-          phase: "updated",
-          entryType: "message",
-          action: { kind: "note", title: "assistant" }
-        });
+        await onEvent({ type: "action", phase: "started", entryType: "thought", action: { kind: "turn" } });
         return "unreachable";
       }
     }
@@ -4958,6 +4959,110 @@ test("generated agent boundary counts only normalized adapter turns", async () =
     () => wrapped.generate({ prompt: "prompt", taskContext: { attempt: 1 } }),
     /ULTRAFUZZ_RESOURCE_BUDGET_EXHAUSTED.*"resource":"turns"/u
   );
+});
+
+test("generated agent boundary treats every normalized model turn as a request", async () => {
+  const budget = (maxRequests: number) => ({
+    maxCostUsd: 1,
+    maxTotalTokens: 100,
+    maxRequests,
+    maxTurns: 100,
+    maxContextBytes: 10_000,
+    maxOutputBytes: 10_000,
+    maxAttemptTokens: 100,
+    maxAttemptRequests: maxRequests,
+    maxAttemptTurns: 100,
+    maxAttemptContextBytes: 10_000,
+    maxAttemptOutputBytes: 10_000
+  });
+  const twoTurnAgent = {
+    async generate(args: unknown): Promise<unknown> {
+      const onEvent = (args as { onEvent: (event: unknown) => Promise<void> }).onEvent;
+      await onEvent({ type: "action", phase: "started", action: { kind: "turn" } });
+      await onEvent({ type: "action", phase: "started", action: { kind: "turn" } });
+      return "ok";
+    }
+  };
+
+  const exact = loadArtifactAwareAgent()(
+    {
+      id: "node:budget-request-exact",
+      smithersRunId: "ultrafuzz-generated-budget-request-exact",
+      runRoot: ".",
+      agentChain: [{}],
+      resourceBudget: budget(2),
+      metadata: { run: { ultrafuzzRunId: "generated-budget-request-exact" } }
+    },
+    0,
+    "prompt",
+    twoTurnAgent
+  );
+  assert.equal(await exact.generate({ prompt: "prompt", taskContext: { attempt: 1 } }), "ok");
+
+  const over = loadArtifactAwareAgent()(
+    {
+      id: "node:budget-request-over",
+      smithersRunId: "ultrafuzz-generated-budget-request-over",
+      runRoot: ".",
+      agentChain: [{}],
+      resourceBudget: budget(1),
+      metadata: { run: { ultrafuzzRunId: "generated-budget-request-over" } }
+    },
+    0,
+    "prompt",
+    twoTurnAgent
+  );
+  await assert.rejects(
+    () => over.generate({ prompt: "prompt", taskContext: { attempt: 1 } }),
+    /ULTRAFUZZ_RESOURCE_BUDGET_EXHAUSTED.*"resource":"requests"/u
+  );
+});
+
+test("generated agent boundary charges pre-turn failures and aggregates generation calls", async () => {
+  const artifactAwareAgent = loadArtifactAwareAgent();
+  let providerCalls = 0;
+  const wrapped = artifactAwareAgent(
+    {
+      id: "node:budget-request-attempts",
+      smithersRunId: "ultrafuzz-generated-budget-request-attempts",
+      runRoot: ".",
+      agentChain: [{}],
+      resourceBudget: {
+        maxCostUsd: 1,
+        maxTotalTokens: 100,
+        maxRequests: 2,
+        maxTurns: 100,
+        maxContextBytes: 10_000,
+        maxOutputBytes: 10_000,
+        maxAttemptTokens: 100,
+        maxAttemptRequests: 2,
+        maxAttemptTurns: 100,
+        maxAttemptContextBytes: 10_000,
+        maxAttemptOutputBytes: 10_000
+      },
+      metadata: { run: { ultrafuzzRunId: "generated-budget-request-attempts" } }
+    },
+    0,
+    "prompt",
+    {
+      async generate(): Promise<unknown> {
+        providerCalls += 1;
+        if (providerCalls === 1) throw new Error("provider failed before emitting a turn");
+        return "ok";
+      }
+    }
+  );
+
+  await assert.rejects(
+    () => wrapped.generate({ prompt: "prompt", taskContext: { attempt: 1 } }),
+    /provider failed before emitting a turn/u
+  );
+  assert.equal(await wrapped.generate({ prompt: "prompt", taskContext: { attempt: 1 } }), "ok");
+  await assert.rejects(
+    () => wrapped.generate({ prompt: "prompt", taskContext: { attempt: 1 } }),
+    /ULTRAFUZZ_RESOURCE_BUDGET_EXHAUSTED.*"resource":"requests"/u
+  );
+  assert.equal(providerCalls, 2, "the exhausted third request must be rejected before provider invocation");
 });
 
 test("generated agent boundary charges each adapter-internal provider retry", async () => {
@@ -5058,6 +5163,172 @@ test("generated agent boundary aborts incrementally on stdout and stderr bytes",
   );
   assert.equal(abortSignal?.aborted, true);
   assert.deepEqual(relayed, ["stdout:ab", "stderr:c"]);
+});
+
+test("generated agent boundary counts a returned value independently from streamed output", async () => {
+  const wrapped = loadArtifactAwareAgent()(
+    {
+      id: "node:budget-stream-and-result",
+      smithersRunId: "ultrafuzz-generated-budget-stream-and-result",
+      runRoot: ".",
+      agentChain: [{}],
+      resourceBudget: {
+        maxCostUsd: 1,
+        maxTotalTokens: 100,
+        maxRequests: 10,
+        maxTurns: 10,
+        maxContextBytes: 10_000,
+        maxOutputBytes: 5,
+        maxAttemptTokens: 100,
+        maxAttemptRequests: 10,
+        maxAttemptTurns: 10,
+        maxAttemptContextBytes: 10_000,
+        maxAttemptOutputBytes: 5
+      },
+      metadata: { run: { ultrafuzzRunId: "generated-budget-stream-and-result" } }
+    },
+    0,
+    "prompt",
+    {
+      async generate(args: unknown): Promise<unknown> {
+        (args as { onStdout: (text: string) => void }).onStdout("abc");
+        return "def";
+      }
+    }
+  );
+
+  await assert.rejects(
+    () => wrapped.generate({ prompt: "prompt", taskContext: { attempt: 1 } }),
+    /ULTRAFUZZ_RESOURCE_BUDGET_EXHAUSTED.*"resource":"output_bytes"/u
+  );
+});
+
+test("generated agent boundary counts nested JSON bytes without unbounded serialization", async () => {
+  const resourceBudget = {
+    maxCostUsd: 1,
+    maxTotalTokens: 100,
+    maxRequests: 10,
+    maxTurns: 10,
+    maxContextBytes: 32,
+    maxOutputBytes: 32,
+    maxAttemptTokens: 100,
+    maxAttemptRequests: 10,
+    maxAttemptTurns: 10,
+    maxAttemptContextBytes: 32,
+    maxAttemptOutputBytes: 32
+  };
+  const task = (id: string) => ({
+    id,
+    smithersRunId: `ultrafuzz-${id}`,
+    runRoot: ".",
+    agentChain: [{}],
+    resourceBudget,
+    metadata: { run: { ultrafuzzRunId: id } }
+  });
+
+  let contextProviderCalls = 0;
+  const oversizedContext = loadArtifactAwareAgent()(task("nested-context"), 0, "", {
+    async generate(): Promise<unknown> {
+      contextProviderCalls += 1;
+      return "unreachable";
+    }
+  });
+  await assert.rejects(
+    () =>
+      oversizedContext.generate({
+        messages: [{ role: "user", content: { nested: [{ value: "x".repeat(100_000) }] } }],
+        taskContext: { attempt: 1 }
+      }),
+    /ULTRAFUZZ_RESOURCE_BUDGET_EXHAUSTED.*"resource":"context_bytes"/u
+  );
+  assert.equal(contextProviderCalls, 0);
+
+  let resultProviderCalls = 0;
+  const oversizedResult = loadArtifactAwareAgent()(task("nested-result"), 0, "", {
+    async generate(): Promise<unknown> {
+      resultProviderCalls += 1;
+      return { nested: [{ value: "y".repeat(100_000) }] };
+    }
+  });
+  await assert.rejects(
+    () => oversizedResult.generate({ taskContext: { attempt: 1 } }),
+    /ULTRAFUZZ_RESOURCE_BUDGET_EXHAUSTED.*"resource":"output_bytes"/u
+  );
+  assert.equal(resultProviderCalls, 1);
+});
+
+test("generated agent boundary rejects cyclic and accessor-bearing context before provider invocation", async () => {
+  const artifactAwareAgent = loadArtifactAwareAgent();
+  const resourceBudget = {
+    maxCostUsd: 1,
+    maxTotalTokens: 100,
+    maxRequests: 10,
+    maxTurns: 10,
+    maxContextBytes: 10_000,
+    maxOutputBytes: 10_000,
+    maxAttemptTokens: 100,
+    maxAttemptRequests: 10,
+    maxAttemptTurns: 10,
+    maxAttemptContextBytes: 10_000,
+    maxAttemptOutputBytes: 10_000
+  };
+  let providerCalls = 0;
+  const wrapped = (id: string) =>
+    artifactAwareAgent(
+      {
+        id: `node:${id}`,
+        smithersRunId: "ultrafuzz-serialization-context",
+        runRoot: ".",
+        agentChain: [{}],
+        resourceBudget,
+        metadata: { run: { ultrafuzzRunId: "serialization-context" } }
+      },
+      0,
+      "",
+      {
+        async generate(): Promise<unknown> {
+          providerCalls += 1;
+          return "unreachable";
+        }
+      }
+    );
+
+  const cyclic: Record<string, unknown> = {};
+  cyclic.self = cyclic;
+  await assert.rejects(
+    () => wrapped("cyclic-context").generate({ messages: cyclic, taskContext: { attempt: 1 } }),
+    /contains a cycle/u
+  );
+
+  const accessor: Record<string, unknown> = {};
+  Object.defineProperty(accessor, "secret", {
+    enumerable: true,
+    get: () => "must not be invoked"
+  });
+  await assert.rejects(
+    () => wrapped("accessor-context").generate({ messages: accessor, taskContext: { attempt: 1 } }),
+    /must not contain accessors/u
+  );
+
+  const customJson = {
+    visible: "small",
+    toJSON: () => ({ hidden: "x".repeat(100_000) })
+  };
+  await assert.rejects(
+    () => wrapped("custom-json-context").generate({ messages: customJson, taskContext: { attempt: 1 } }),
+    /must not define custom JSON serialization/u
+  );
+
+  const inheritedArray: unknown[] = [];
+  const inheritedArrayPrototype = Object.create(Array.prototype) as unknown[];
+  inheritedArrayPrototype[0] = "inherited bytes JSON.stringify would read";
+  Object.setPrototypeOf(inheritedArray, inheritedArrayPrototype);
+  inheritedArray.length = 1;
+  await assert.rejects(
+    () => wrapped("inherited-array-context").generate({ messages: inheritedArray, taskContext: { attempt: 1 } }),
+    /only arrays and plain objects/u
+  );
+  assert.equal(providerCalls, 0);
 });
 
 test("generated agent boundary restores durable aggregate counters after a process restart", async () => {

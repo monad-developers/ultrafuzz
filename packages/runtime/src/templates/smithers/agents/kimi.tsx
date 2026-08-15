@@ -140,26 +140,44 @@ export class KimiCode029Agent extends SmithersKimiAgent {
       onStdoutLine: (line) => {
         this.captureKimiSession(line);
         const events = base.onStdoutLine?.(line) ?? [];
-        const assistantText = kimiAssistantTextFromJsonLine(line);
-        if (assistantText === undefined) return events;
+        const assistantTurn = kimiAssistantTurnFromJsonLine(line);
+        if (assistantTurn === undefined) return events;
         assistantTurnIndex += 1;
         return [
           ...events,
           {
             type: "action" as const,
             engine: this.cliEngine,
-            phase: "updated" as const,
-            entryType: "message" as const,
+            phase: "started" as const,
+            entryType: "thought" as const,
             action: {
-              id: `kimi-assistant-${assistantTurnIndex}`,
-              kind: "note" as const,
-              title: "assistant",
+              id: `kimi-turn-${assistantTurnIndex}`,
+              kind: "turn" as const,
+              title: `turn ${assistantTurnIndex}`,
               detail: {}
             },
-            message: assistantText,
-            ok: true,
+            message: `Turn ${assistantTurnIndex} started`,
             level: "info" as const
-          }
+          },
+          ...(assistantTurn.text === undefined
+            ? []
+            : [
+                {
+                  type: "action" as const,
+                  engine: this.cliEngine,
+                  phase: "updated" as const,
+                  entryType: "message" as const,
+                  action: {
+                    id: `kimi-assistant-${assistantTurnIndex}`,
+                    kind: "note" as const,
+                    title: "assistant",
+                    detail: {}
+                  },
+                  message: assistantTurn.text,
+                  ok: true,
+                  level: "info" as const
+                }
+              ])
         ];
       },
       onStderrLine: (line) => {
@@ -1482,7 +1500,7 @@ function sessionIdFromJsonLine(line: string): string | undefined {
   return sessionId;
 }
 
-function kimiAssistantTextFromJsonLine(line: string): string | undefined {
+function kimiAssistantTurnFromJsonLine(line: string): { text?: string } | undefined {
   const first = firstNonJsonWhitespace(line);
   if (first === undefined || first !== "{") return undefined;
   const value = parseStrictJson(line, {
@@ -1491,8 +1509,8 @@ function kimiAssistantTextFromJsonLine(line: string): string | undefined {
     maxItems: KIMI_JSON_MAX_ITEMS,
     maxProperties: KIMI_JSON_MAX_PROPERTIES
   });
-  if (!isRecord(value) || value.role !== "assistant" || typeof value.content !== "string") return undefined;
-  return value.content.length === 0 ? undefined : value.content;
+  if (!isRecord(value) || value.role !== "assistant") return undefined;
+  return typeof value.content === "string" && value.content.length > 0 ? { text: value.content } : {};
 }
 
 function firstNonJsonWhitespace(value: string): string | undefined {

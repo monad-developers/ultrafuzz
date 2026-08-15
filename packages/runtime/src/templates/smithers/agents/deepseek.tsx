@@ -80,15 +80,38 @@ export class DeepSeekClaudeCodeAgent extends SmithersClaudeCodeAgent {
 
   override createOutputInterpreter(): DeepSeekOutputInterpreter {
     const base = super.createOutputInterpreter();
+    let assistantTurnIndex = 0;
     return {
       ...base,
       onStdoutLine: (line) => {
         const usage = deepSeekUsageFromResultLine(line);
         if (usage !== undefined) this.pendingUsage = deepSeekSmithersUsage(usage);
         const events = base.onStdoutLine?.(line) ?? [];
-        if (usage === undefined) return events;
-        const completedUsage = deepSeekCompletedUsage(usage);
-        return events.map((event) => (event.type === "completed" ? { ...event, usage: completedUsage } : event));
+        const withUsage =
+          usage === undefined
+            ? events
+            : events.map((event) =>
+                event.type === "completed" ? { ...event, usage: deepSeekCompletedUsage(usage) } : event
+              );
+        if (!isDeepSeekAssistantTurnLine(line)) return withUsage;
+        assistantTurnIndex += 1;
+        return [
+          ...withUsage,
+          {
+            type: "action" as const,
+            engine: this.cliEngine,
+            phase: "started" as const,
+            entryType: "thought" as const,
+            action: {
+              id: `deepseek-turn-${assistantTurnIndex}`,
+              kind: "turn" as const,
+              title: `turn ${assistantTurnIndex}`,
+              detail: {}
+            },
+            message: `Turn ${assistantTurnIndex} started`,
+            level: "info" as const
+          }
+        ];
       }
     };
   }
@@ -254,6 +277,18 @@ function deepSeekUsageFromResultLine(line: string): DeepSeekUsage | undefined {
   const totalTokens = normalized.inputTokens + normalized.cacheReadTokens + normalized.outputTokens;
   if (!Number.isSafeInteger(totalTokens)) throw new Error("DeepSeek result usage exceeds the safe integer range");
   return { ...normalized, totalTokens };
+}
+
+function isDeepSeekAssistantTurnLine(line: string): boolean {
+  const first = firstNonJsonWhitespace(line);
+  if (first === undefined || first !== "{") return false;
+  const payload = parseStrictJson(line, {
+    maxBytes: DEEPSEEK_RESULT_MAX_BYTES,
+    maxDepth: DEEPSEEK_RESULT_MAX_DEPTH,
+    maxItems: DEEPSEEK_RESULT_MAX_ITEMS,
+    maxProperties: DEEPSEEK_RESULT_MAX_PROPERTIES
+  });
+  return isRecord(payload) && payload.type === "assistant";
 }
 
 function firstNonJsonWhitespace(value: string): string | undefined {
