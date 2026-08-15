@@ -430,12 +430,38 @@ process.stdin.on("end", () => {
   process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: "fixture-" + count }) + "\\n");
   process.stdout.write(JSON.stringify({ type: "turn.started" }) + "\\n");
   if (count === 1 && process.env.OPENROUTER_RETRY_FIXTURE_MODE !== "empty-success") {
-    if (process.env.OPENROUTER_RETRY_FIXTURE_MODE === "substantive") {
-      process.stdout.write(JSON.stringify({
+    const substantiveEvents = {
+      "substantive-command": {
         type: "item.started",
         item: { id: "command-1", type: "command_execution", command: "fixture-command", status: "in_progress" }
-      }) + "\\n");
-    }
+      },
+      "substantive-message": {
+        type: "item.completed",
+        item: { id: "message-1", type: "agent_message", text: "fixture model output" }
+      },
+      "substantive-reasoning": {
+        type: "item.started",
+        item: { id: "reasoning-1", type: "reasoning", text: "fixture reasoning" }
+      },
+      "substantive-file": {
+        type: "item.completed",
+        item: { id: "file-1", type: "file_change", changes: [{ path: "fixture.txt", kind: "update" }] }
+      },
+      "substantive-tool": {
+        type: "item.started",
+        item: { id: "tool-1", type: "mcp_tool_call", server: "fixture", tool: "probe", status: "in_progress" }
+      },
+      "substantive-web": {
+        type: "item.completed",
+        item: { id: "web-1", type: "web_search", query: "fixture query" }
+      },
+      "substantive-todo": {
+        type: "item.started",
+        item: { id: "todo-1", type: "todo_list", items: [{ text: "fixture task", completed: false }] }
+      }
+    };
+    const substantiveEvent = substantiveEvents[process.env.OPENROUTER_RETRY_FIXTURE_MODE];
+    if (substantiveEvent) process.stdout.write(JSON.stringify(substantiveEvent) + "\\n");
     const message = process.env.OPENROUTER_RETRY_FIXTURE_MODE === "unrelated"
       ? "fixture path /tmp/job-429 is unavailable"
       : "exceeded retry limit, last status: 429 Too Many Requests, request id: fixture-1";
@@ -2425,18 +2451,28 @@ test(
       assert.deepEqual(streamedText, { value: "OK", done: false });
       assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
 
-      fs.writeFileSync(fixture.counter, "0", "utf8");
-      process.env.OPENROUTER_RETRY_FIXTURE_MODE = "substantive";
-      const substantiveEvents: Record<string, unknown>[] = [];
-      await assert.rejects(
-        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
-          prompt: "Do not replay fixture",
-          onEvent: (event) => substantiveEvents.push(event)
-        }),
-        /429 Too Many Requests/u
-      );
-      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "1");
-      assert.match(JSON.stringify(substantiveEvents), /fixture-command/u);
+      for (const [mode, eventKind] of [
+        ["substantive-command", "command"],
+        ["substantive-message", "note"],
+        ["substantive-reasoning", "reasoning"],
+        ["substantive-file", "file_change"],
+        ["substantive-tool", "tool"],
+        ["substantive-web", "web_search"],
+        ["substantive-todo", "todo_list"]
+      ] as const) {
+        fs.writeFileSync(fixture.counter, "0", "utf8");
+        process.env.OPENROUTER_RETRY_FIXTURE_MODE = mode;
+        const substantiveEvents: Record<string, unknown>[] = [];
+        await assert.rejects(
+          createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+            prompt: `Do not replay ${eventKind} fixture`,
+            onEvent: (event) => substantiveEvents.push(event)
+          }),
+          /429 Too Many Requests/u
+        );
+        assert.equal(fs.readFileSync(fixture.counter, "utf8"), "1", eventKind);
+        assert.match(JSON.stringify(substantiveEvents), new RegExp(`"kind":"${eventKind}"`, "u"), eventKind);
+      }
 
       fs.writeFileSync(fixture.counter, "0", "utf8");
       process.env.OPENROUTER_RETRY_FIXTURE_MODE = "unrelated";
