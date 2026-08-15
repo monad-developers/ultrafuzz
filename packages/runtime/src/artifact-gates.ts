@@ -3559,7 +3559,7 @@ function constrainedShellTokens(command: string): string[] | undefined {
   let index = 0;
 
   const skipWhitespace = (): void => {
-    while (/[ \t\f\v]/u.test(command[index] ?? "")) index += 1;
+    while (command[index] === " " || command[index] === "\t") index += 1;
   };
 
   const readWord = (redirectOperand = false): string | undefined => {
@@ -3592,7 +3592,7 @@ function constrainedShellTokens(command: string): string[] | undefined {
         continue;
       }
       if (character === "\n" || character === "\r") return undefined;
-      if (/\s/u.test(character)) break;
+      if (character === " " || character === "\t") break;
       if (character === ">" || character === "&") break;
       if (
         character === "#" ||

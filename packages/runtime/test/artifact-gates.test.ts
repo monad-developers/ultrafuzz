@@ -9113,6 +9113,45 @@ test("current campaign timeout gate accepts safe output redirections", () => {
   }
 });
 
+test("current campaign timeout gate preserves the specific missing-flag diagnostic with output redirection", () => {
+  const result = runCampaignTimeoutGate((fixture) => {
+    const command = `${fixture.backend.exact_command.replace(" --timeout 3600", "")} > /tmp/recon.log 2>&1`;
+    fixture.backend.exact_command = command;
+    fixture.plan.backend.exact_shell_escaped_command = command;
+    fixture.plan.command_plan[0]!.command = command;
+  });
+  const commandDiagnostics = result.diagnostics.filter((diagnostic) =>
+    [
+      "CAMPAIGN_TIMEOUT_COMMAND_INVALID",
+      "CAMPAIGN_SEQUENCE_LENGTH_COMMAND_INVALID",
+      "CAMPAIGN_TIMEOUT_HOST_WRAPPER_INVALID"
+    ].includes(diagnostic.code)
+  );
+  assert.deepEqual(
+    commandDiagnostics.map((diagnostic) => [diagnostic.code, diagnostic.message]),
+    [["CAMPAIGN_TIMEOUT_COMMAND_INVALID", "Recon command must contain exactly one --timeout 3600 flag"]]
+  );
+});
+
+test("current campaign timeout gate does not treat non-shell whitespace as an argument boundary", () => {
+  for (const whitespace of ["\f", "\v", "\u00a0"]) {
+    const result = runCampaignTimeoutGate((fixture) => {
+      const command = fixture.backend.exact_command.replace("--timeout 3600", `--timeout${whitespace}3600`);
+      fixture.backend.exact_command = command;
+      fixture.plan.backend.exact_shell_escaped_command = command;
+      fixture.plan.command_plan[0]!.command = command;
+    });
+    assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+    assert.ok(
+      result.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code === "CAMPAIGN_TIMEOUT_COMMAND_INVALID" && diagnostic.message.includes("--timeout 3600")
+      ),
+      JSON.stringify(result.diagnostics)
+    );
+  }
+});
+
 test("current campaign timeout gate rejects shell operators after output redirection", () => {
   for (const operator of [";", "|", "&&", "&", "`", "$(echo unsafe)", "<"]) {
     const result = runCampaignTimeoutGate((fixture) => {
