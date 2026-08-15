@@ -16,7 +16,11 @@
   },
   "files": [
     "dist",
-    "Dockerfile"
+    "Dockerfile",
+    "security-requirements.lock",
+    "smithers-seed",
+    "toolchain-materials.json",
+    "toolchain-materials.sha256"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json && rm -rf dist/schema && cp -R schema dist/schema && node scripts/verify-schema-registry.mjs",
@@ -25,13 +29,19 @@
     "typecheck": "pnpm --filter @ultrafuzz/modal^... build && tsc -p tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {
+    "@anthropic-ai/claude-code": "2.1.207",
+    "@moonshot-ai/kimi-code": "0.29.1",
+    "@openai/codex": "0.146.0",
     "@ultrafuzz/artifacts": "workspace:*",
     "@ultrafuzz/config": "workspace:*",
     "@ultrafuzz/evals": "workspace:*",
     "@ultrafuzz/runtime": "workspace:*",
     "@ultrafuzz/security": "workspace:*",
+    "bun": "1.3.14",
     "modal": "0.9.0",
     "proper-lockfile": "4.1.2",
+    "pnpm": "11.1.1",
+    "recon-generate": "0.0.42",
     "smol-toml": "1.7.0",
     "tar-stream": "3.2.0",
     "yaml": "2.9.0",

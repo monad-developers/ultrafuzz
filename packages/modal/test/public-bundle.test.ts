@@ -16,7 +16,8 @@ import {
   extractPublicBenchmarkBundle,
   parsePublicBenchmarkBundle,
   parsePublicBenchmarkBundleBytes,
-  readPublicBenchmarkBundle
+  readPublicBenchmarkBundle,
+  writeStagedBundleFile
 } from "../src/public-bundle.js";
 import { PUBLIC_EVAL_DIAGNOSTICS_SCHEMA_VERSION } from "../src/public-eval-diagnostics.js";
 import { currentReportIssue, currentTerminalReport } from "./current-artifact-fixtures.js";
@@ -48,6 +49,26 @@ const TEST_BUNDLE_METADATA = {
 } as const;
 
 describe("public Modal benchmark bundles", () => {
+  it.each([
+    "",
+    ".",
+    "..",
+    "/absolute/report.json",
+    "C:/absolute/report.json",
+    String.raw`C:\absolute\report.json`,
+    String.raw`reports\row\report.json`,
+    "reports//report.json",
+    "reports/./report.json",
+    "reports/../report.json"
+  ])("rejects an unsafe staged writer path before mutating the destination: %j", (candidate) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-writer-"));
+
+    expect(() => writeStagedBundleFile(root, candidate, Buffer.from("sensitive\n"))).toThrow(
+      /not a safe relative path/u
+    );
+    expect(fs.readdirSync(root)).toEqual([]);
+  });
+
   it("hashes, validates, and extracts the scored generation and public reports", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-"));
     const rowIds = ["target-a-runner-trial-1", "target-b-runner-trial-1"];

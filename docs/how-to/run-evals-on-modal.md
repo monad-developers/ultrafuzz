@@ -14,10 +14,11 @@ committed.
 At launch time the runner copies the config to `/run/ultrafuzz-config` inside
 the sandbox. Subscription credentials are copied directly from the host to
 `/run/ultrafuzz-auth`; they are never placed in a Modal Secret, image,
-environment variable, launch-state file, or log. Kimi is the exception for
-same-volume resume: after the host token is refreshed, a refreshable snapshot of
-the selected Kimi Code credential is staged into a private per-row auth
-directory on the Modal Volume.
+environment variable, launch-state file, or log. For each Kimi row, the
+controller exchanges its refresh credential under Kimi Code's OAuth lock and
+places only the resulting access token, with a maximum one-hour lifetime, in a
+separate private credential volume mounted at `/credentials`. The refresh token
+never enters a worker volume.
 
 Non-secret run state is stored under `/data/<run-id>/<model>/workspace` on a
 private Modal Volume. This preserves Ultrafuzz state, generated tests, reports,
@@ -45,14 +46,14 @@ By default the runner reads `CODEX_HOME/auth.json` (normally
 `~/.claude/.credentials.json`). Kimi subscription auth reads the current Kimi
 Code home from `KIMI_CODE_HOME`, `KIMI_SHARE_DIR`, or `~/.kimi-code`, and stages
 only `config.toml`, the selected file-backed OAuth credential, and `device_id`
-for the worker. Before sandbox fan-out, the launcher refreshes a near-expiry
-token under Kimi Code's cross-process OAuth lock and atomically persists it on
-the host. Each worker then stages the selected credential into the row's durable
-`kimi-code-auth` directory, and Kimi invocations keep their session homes under
-the row's durable `kimi-code-sessions` directory while symlinking config and auth
-from runtime-only snapshots. Modal workers refresh one shared row credential
-under Kimi Code's OAuth lock; host reconciliation only promotes a refreshed
-Modal credential if it descends from the host token staged for that row.
+for the worker. Before sandbox fan-out, the launcher exchanges the
+controller-held refresh token under Kimi Code's cross-process OAuth lock and
+atomically persists any provider rotation on the host. Each worker receives an
+access-only snapshot in its own `/credentials` volume. Kimi invocations keep
+their session homes under the row's durable `kimi-code-sessions` directory while
+symlinking config and access-only auth from runtime snapshots. Multiple Kimi
+rows use distinct credential volumes and can launch together without sharing a
+refresh credential.
 API-key auth is also supported per model; Kimi accepts either
 `KIMI_API_KEY` or `MOONSHOT_API_KEY` on the launcher host, exposes the value to
 the worker as `KIMI_API_KEY`, and binds it through Kimi Code's provider
@@ -63,10 +64,6 @@ OpenRouter rows require `OPENROUTER_API_KEY`, always use `auth_mode =
 "api-key"`, and route the Codex CLI through `https://openrouter.ai/api/v1`.
 The selected OpenRouter catalogue ID is retained verbatim in the benchmark
 config and launch evidence.
-
-For subscription auth, launch at most one Kimi row at a time. Use Kimi API-key
-auth or serial launches when comparing multiple Kimi profiles, so OAuth
-refresh-token rotation remains single-writer.
 
 ## Create a private runtime config
 

@@ -811,7 +811,8 @@ function normalizedBundleOutputDirectory(candidate: string): string {
   return path.join(parent, path.basename(requested));
 }
 
-function writeStagedBundleFile(root: string, relativeFilePath: string, contents: Buffer): void {
+export function writeStagedBundleFile(root: string, relativeFilePath: string, contents: Buffer): void {
+  assertSafeStagedBundlePath(relativeFilePath);
   const parts = relativeFilePath.split("/");
   const fileName = parts.pop();
   if (fileName === undefined) throw new Error("public benchmark bundle file path is empty");
@@ -844,6 +845,21 @@ function writeStagedBundleFile(root: string, relativeFilePath: string, contents:
     fs.writeFileSync(descriptor, contents);
   } finally {
     fs.closeSync(descriptor);
+  }
+}
+
+function assertSafeStagedBundlePath(relativeFilePath: string): void {
+  const parts = relativeFilePath.split("/");
+  if (
+    relativeFilePath.length === 0 ||
+    relativeFilePath.includes("\\") ||
+    relativeFilePath.includes("\0") ||
+    path.posix.isAbsolute(relativeFilePath) ||
+    path.win32.isAbsolute(relativeFilePath) ||
+    parts.some((part) => part === "" || part === "." || part === "..") ||
+    path.posix.normalize(relativeFilePath) !== relativeFilePath
+  ) {
+    throw new Error(`public benchmark bundle staging path is not a safe relative path: ${relativeFilePath}`);
   }
 }
 

@@ -1,0 +1,2 @@
+slither-analyzer==0.11.5
+covg-eval @ https://github.com/Recon-Fuzz/recon-magic-framework/archive/f92ad26ff857526d221c3e8488c5aea2a20e8fdf.tar.gz#subdirectory=tools/covg_eval

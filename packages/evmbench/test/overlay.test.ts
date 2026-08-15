@@ -48,4 +48,17 @@ describe("EVMBench overlay build context", () => {
     expect(dockerfile).not.toContain('"${MODEL}"');
     expect(dockerfile).not.toContain('"${REASONING}"');
   });
+
+  it("pins the builder, consumes the locked dependency seed, and supplies the audit base by digest", () => {
+    const repoRoot = findUltrafuzzRepoRoot();
+    const dockerfile = fs.readFileSync(path.join(repoRoot, "benchmarks", "evmbench", "overlay.Dockerfile"), "utf8");
+    const runner = fs.readFileSync(path.join(repoRoot, "packages", "evmbench", "src", "runner.ts"), "utf8");
+
+    expect(dockerfile).toMatch(/^FROM node:[^\s]+@sha256:[a-f0-9]{64} AS builder$/mu);
+    expect(dockerfile).toContain("prepare-smithers-seed.mjs /opt/ultrafuzz-smithers");
+    expect(dockerfile).not.toContain("--package-lock=false");
+    expect(dockerfile).not.toMatch(/\bnpm\s+install\b/u);
+    expect(runner).toContain("`BASE_IMAGE=${sourceDigest}`");
+    expect(runner).not.toContain("`BASE_IMAGE=${sourceImage}`");
+  });
 });

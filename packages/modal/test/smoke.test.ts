@@ -1,10 +1,12 @@
 import fs from "node:fs";
+import { execFileSync } from "node:child_process";
 
 import { describe, expect, it } from "vitest";
 
 import { DEFAULT_MODAL_IMAGE, type ModelProvider } from "../src/defaults.js";
 import { remoteAuthDir, remoteAuthPath } from "../src/layout.js";
 import { ModalDocumentValidationError } from "../src/modal-documents.js";
+import { shellQuote } from "../src/shell.js";
 import { parseModalSmokeCheckpointBytes, parseModalSmokeCompletionBytes } from "../src/smoke-evidence.js";
 import {
   MODAL_SMOKE_ENTRY_PATH,
@@ -113,6 +115,24 @@ describe("provider-isolated smoke entrypoints", () => {
       expect(command).toContain("runuser -u ubuntu");
       expect(command).toContain(MODAL_SMOKE_ENTRY_PATH);
     }
+  });
+
+  it.each(["kimi; printf injected", "$(printf injected)", "openai' && printf injected", "anthropic\nfalse"])(
+    "quotes smoke values as one inert POSIX shell argument: %j",
+    (value) => {
+      expect(execFileSync("bash", ["-c", `printf '%s' ${shellQuote(value)}`], { encoding: "utf8" })).toBe(value);
+    }
+  );
+
+  it("uses the shared shell quoting helper for provider and phase interpolation", () => {
+    const provider = "kimi'; printf provider-injection; #'" as ModelProvider;
+    const phase = "fresh$(printf phase-injection)" as ModalSmokePhase;
+    const command = modalSmokeEntrypointCommand(provider, phase);
+
+    expect(command).toContain(`--provider ${shellQuote(provider)}`);
+    expect(command).toContain(`--phase ${shellQuote(phase)}`);
+    expect(command).not.toContain(`--provider ${provider}`);
+    expect(command).not.toContain(`--phase ${phase}`);
   });
 });
 
