@@ -207,6 +207,18 @@ describe("artifact handoff validation", () => {
       "Document reachability note edge-cases in the report.",
       "Reachability: internal functions require a cross-check before triage.",
       "Reachability: internal behavior must be documented.",
+      "Verification: run forge test.",
+      "Resolution: use checks-effects-interactions.",
+      "Access: only invoke public entrypoints.",
+      "## Verification: run forge test",
+      "### Access: only invoke public entrypoints",
+      "Set access to public before testing.",
+      "Use verification as evidence when classifying findings.",
+      "Write verification as a concise testing summary.",
+      "Require access to the source tree before triage.",
+      "Set access controls to public before testing.",
+      "Write verification steps before summarizing the report.",
+      "Record classification vectors as evidence.",
       "Do not set reachability to internal on every finding.",
       "The old prompt set reachability to internal on every finding.",
       "Do not set reachability=internal on every finding.",
@@ -287,6 +299,82 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
             "review/triage.md": `Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.\n${standalone}`
           }
         })
+      ).toThrow(expect.objectContaining({ code: "DUPLICATED_REPORT_VOCABULARY" }));
+    }
+    expect(() =>
+      validateTopology(topology, {
+        promptTexts: {
+          "review/triage.md":
+            "Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}. Record access: internal evidence on each finding."
+        }
+      })
+    ).toThrow(expect.objectContaining({ code: "DUPLICATED_REPORT_VOCABULARY" }));
+    for (const proseAlias of [
+      "### Access: internal",
+      "## Verification: summary ##",
+      "<h3>Access: internal</h3>",
+      "Access: internal\n---",
+      "## Rating: critical",
+      "Record access -> internal evidence on each finding.",
+      "Record the reachability -> helper-only evidence on each finding.",
+      "Record root_reason -> renamed evidence on each finding.",
+      "Record severity_alias_v2 -> critical evidence on each finding.",
+      "Record classification_v2 -> bug evidence on each finding.",
+      "Record access_alias -> internal evidence on each finding.",
+      "Record classification_v3 -> bug evidence on each finding.",
+      "Record classificationAlias -> bug evidence on each finding.",
+      "Record access_v2 -> internal evidence on each finding.",
+      "Record accessAlias -> internal evidence on each finding.",
+      "Record verification_v2 -> summary evidence on each finding.",
+      "Record verificationAlias -> summary evidence on each finding.",
+      "Record access | internal evidence on each finding.",
+      "Record root_cause: renamed evidence on each finding.",
+      "Record reachability -> helper-only evidence on each finding.",
+      "Record verification ↦ summary evidence on each finding.",
+      "Record root_cause ⟶ renamed evidence on each finding.",
+      "Record access ≔ internal evidence on each finding."
+    ]) {
+      expect(
+        () =>
+          validateTopology(topology, {
+            promptTexts: {
+              "review/triage.md": `Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.\n${proseAlias}`
+            }
+          }),
+        proseAlias
+      ).toThrow(expect.objectContaining({ code: "DUPLICATED_REPORT_VOCABULARY" }));
+    }
+    for (const wordMapping of [
+      "Set access to internal on every finding.",
+      "Write verification as summary on every finding.",
+      "Record verification maps to summary on every finding.",
+      "Set rating to critical on every finding.",
+      "Record classification_v2 equals bug on every finding.",
+      "Record classification_v3 equal to bug on every finding."
+    ]) {
+      expect(
+        () =>
+          validateTopology(topology, {
+            promptTexts: {
+              "review/triage.md": `Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}. ${wordMapping}`
+            }
+          }),
+        wordMapping
+      ).toThrow(expect.objectContaining({ code: "DUPLICATED_REPORT_VOCABULARY" }));
+    }
+    for (const proseAlias of [
+      "Record Verification: summary evidence on each finding.",
+      "Record Resolution: fixed evidence on each finding.",
+      "Record Access: internal evidence on each finding."
+    ]) {
+      expect(
+        () =>
+          validateTopology(topology, {
+            promptTexts: {
+              "review/triage.md": `Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}. ${proseAlias}`
+            }
+          }),
+        proseAlias
       ).toThrow(expect.objectContaining({ code: "DUPLICATED_REPORT_VOCABULARY" }));
     }
     for (const proseAlias of [
