@@ -185,13 +185,14 @@ function fakeInspectionEnv(project: string, fixtures: FakeInspectionFixtures): R
   if (fixtures.nodeWatchLines !== undefined) {
     fs.writeFileSync(nodeWatchPath, fixtures.nodeWatchLines, "utf8");
   }
+  const commandLogPath = path.join(project, "smithers-commands.log");
 
   const smithers = path.join(binDir, "smithers");
   fs.writeFileSync(
     smithers,
     [
       "#!/bin/sh",
-      'if [ -n "$SMITHERS_FAKE_LOG" ]; then printf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"; fi',
+      `printf '%s\\n' "$*" >> ${shellQuote(commandLogPath)}`,
       'case "$1" in',
       "  why)",
       `    cat ${shellQuote(files.why)}`,
@@ -203,11 +204,7 @@ function fakeInspectionEnv(project: string, fixtures: FakeInspectionFixtures): R
       `    cat ${shellQuote(files.snapshots)}`,
       "    ;;",
       "  node)",
-      '    if [ -n "$SMITHERS_FAKE_NODE_WATCH" ]; then',
-      '      cat "$SMITHERS_FAKE_NODE_WATCH"',
-      "    else",
-      `      cat ${shellQuote(files.node)}`,
-      "    fi",
+      `    cat ${shellQuote(fixtures.nodeWatchLines === undefined ? files.node : nodeWatchPath)}`,
       "    ;;",
       "  events)",
       `    cat ${shellQuote(files.events)}`,
@@ -227,10 +224,17 @@ function fakeInspectionEnv(project: string, fixtures: FakeInspectionFixtures): R
   fs.chmodSync(smithers, 0o755);
   return {
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
-    SMITHERS_BIN: smithers,
-    SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log"),
-    ...(fixtures.nodeWatchLines === undefined ? {} : { SMITHERS_FAKE_NODE_WATCH: nodeWatchPath })
+    SMITHERS_BIN: smithers
   };
+}
+
+async function startReviewedRun(input: Parameters<typeof startRun>[0]): ReturnType<typeof startRun> {
+  const review = await startRun(input);
+  const expectedDigest = review.diagnostics.find(
+    (diagnostic) => diagnostic.code === "RUN_REVIEW_ACKNOWLEDGEMENT_REQUIRED"
+  )?.details?.expected_digest;
+  assert.equal(typeof expectedDigest, "string", JSON.stringify(review.diagnostics));
+  return startRun({ ...input, reviewAcknowledgement: String(expectedDigest) });
 }
 
 async function launchedProject(
@@ -240,12 +244,15 @@ async function launchedProject(
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
   const env = fakeInspectionEnv(project, fixtures);
-  const run = await startRun({
+  const input = {
     projectRoot: project,
     runId: "inspect-run",
     env,
-    ultrafuzzCliEntrypoint: fakeUltrafuzzCliEntrypoint(project)
-  });
+    ultrafuzzCliEntrypoint: fakeUltrafuzzCliEntrypoint(project),
+    requiredCommandProbe: async (commands: readonly string[]) =>
+      commands.map((name) => ({ name, available: true, path: `/usr/bin/${name}`, version: null }))
+  };
+  const run = await startReviewedRun(input);
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   return { project, env, runRoot: run.value!.run_root };
 }
@@ -1170,7 +1177,7 @@ test("startRun rejects a missing required backend before creating a run", async 
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project, "recon");
 
-  const run = await startRun({
+  const run = await startReviewedRun({
     projectRoot: project,
     runId: "missing-recon",
     env: { PATH: path.join(project, "empty-bin") }
@@ -1232,7 +1239,7 @@ nodes:
   assert.deepEqual(validation.value?.topology?.required_commands, ["covg-eval"]);
 
   let probed: readonly string[] = [];
-  const run = await startRun({
+  const run = await startReviewedRun({
     projectRoot: project,
     runId: "transformed-command-requirements",
     topologyTransform: { excludedNodeIds: ["required-branch"] },
@@ -1267,7 +1274,7 @@ credential_env = ["UFZ_PROVIDER_ONE", "UFZ_PROVIDER_TWO"]
   );
   let probed: readonly string[] = [];
 
-  const run = await startRun({
+  const run = await startReviewedRun({
     projectRoot: project,
     runId: "missing-cloud-recon",
     env: {
