@@ -10,9 +10,10 @@ import fs from "node:fs";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as ts from "typescript";
+
+import { test } from "./runtime-test-shard.js";
 
 import {
   ARTIFACT_VERIFICATION_SCHEMA_VERSION,
