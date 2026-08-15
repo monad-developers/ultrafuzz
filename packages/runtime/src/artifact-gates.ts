@@ -5795,6 +5795,15 @@ function verifyLensReferenceExpectationAuthority(
   const suppliedExpectationIds = supplied.ids;
   const diagnostics: RuntimeDiagnostic[] = [...supplied.diagnostics];
   for (const [propertyIndex, property] of lens.value.properties.entries()) {
+    if (property.reference_expectations !== undefined && property.reference_expectations.length === 0) {
+      diagnostics.push({
+        code: "PROPERTY_REFERENCE_EXPECTATION_OMISSION_REQUIRED",
+        message: `Property lens ${JSON.stringify(property.id)} must omit reference_expectations when it carries no authorized identifiers`,
+        severity: "error",
+        source: "property-provenance",
+        path: `${lensPath}#$.properties[${propertyIndex}].reference_expectations`
+      });
+    }
     if (!supplied.catalogSupplied && property.reference_expectations !== undefined) {
       diagnostics.push({
         code: "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED",

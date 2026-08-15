@@ -1,15 +1,15 @@
-interface Issue531SourceLensFixture {
+interface SourceLensFixture {
   nodeId: string;
   propertyId: string;
   artifactPath: string;
 }
 
-interface Issue531ReferenceExpectationFixture {
+interface ReferenceExpectationAuthorityFixture {
   arm: "treatment" | "control";
   runId: string;
   canonicalPropertyId: string;
   fabricatedExpectationIds: readonly string[];
-  sources: readonly Issue531SourceLensFixture[];
+  sources: readonly SourceLensFixture[];
 }
 
 /**
@@ -18,7 +18,7 @@ interface Issue531ReferenceExpectationFixture {
  * fields irrelevant to the canonical-subset-of-lens gate. Every captured source
  * lens row omitted `reference_expectations` in the original run.
  */
-export const ISSUE_531_REFERENCE_EXPECTATION_FIXTURES = [
+export const REFERENCE_EXPECTATION_AUTHORITY_FIXTURES = [
   {
     arm: "treatment",
     runId: "aave-v4-v056-gpt55-xhigh-default-20260813-treatment",
@@ -100,4 +100,4 @@ export const ISSUE_531_REFERENCE_EXPECTATION_FIXTURES = [
       }
     ]
   }
-] as const satisfies readonly Issue531ReferenceExpectationFixture[];
+] as const satisfies readonly ReferenceExpectationAuthorityFixture[];

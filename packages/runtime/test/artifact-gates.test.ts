@@ -40,7 +40,7 @@ import {
   type PlannedGraphNode
 } from "../src/index.js";
 import { WORKFLOW_CONTROL_INTEGRITY_SCHEMA_VERSION } from "../src/runtime-contracts.js";
-import { ISSUE_531_REFERENCE_EXPECTATION_FIXTURES } from "./fixtures/issue-531-reference-expectations.js";
+import { REFERENCE_EXPECTATION_AUTHORITY_FIXTURES } from "./fixtures/reference-expectation-authority.js";
 
 const CAMPAIGN_EVIDENCE_BYTES = Buffer.from("x", "utf8");
 const CAMPAIGN_EVIDENCE_SHA256 = createHash("sha256").update(CAMPAIGN_EVIDENCE_BYTES).digest("hex");
@@ -5839,6 +5839,80 @@ test("property lens gate accepts a bound pinned expectation catalog without rewr
   );
 });
 
+test("property lens gate requires omission for an empty expectation array even when a catalog was supplied", () => {
+  const expectationId = "scfuzzbench:aave-v4:iSpoke_supply";
+  const catalog = JSON.stringify({
+    schema_version: "ultrafuzz.reference-expectations.v2",
+    expectations: [{ id: expectationId }]
+  });
+  const catalogDigest = createHash("sha256").update(catalog).digest("hex");
+  const catalogOutput = boundOutput("references/expectations.json", "ultrafuzz/reference-expectations@2");
+  const layout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-properties-reference-authority-empty-field",
+    stateNodes: [
+      {
+        id: "reference-properties-recon",
+        status: "succeeded",
+        outputs: [catalogOutput],
+        provenance: {
+          origin: "pinned-reference",
+          reference: "reference-properties-recon",
+          reference_expectations: {
+            source: "operator-supplied",
+            path: "reference-expectations.json",
+            sha256: catalogDigest
+          }
+        }
+      }
+    ]
+  });
+  const node = {
+    ...plannedNode(["properties/recon.json"]),
+    id: "property-specification-recon",
+    logical_id: "property-specification-recon",
+    depends_on: ["reference-properties-recon"]
+  };
+  const lensPath = writeDeclaredPropertyLens(
+    layout,
+    node.id,
+    "properties/recon.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v2",
+      properties: [
+        {
+          id: "iSpoke_supply",
+          description: "Supply completes for valid state.",
+          category: "dos-liveness",
+          priority: "high",
+          reference_expectations: []
+        }
+      ]
+    })
+  );
+  writeArtifact(layout, "reference-properties-recon", "references/expectations.json", catalog);
+  writeArtifactManifest({
+    layout,
+    nodeId: "reference-properties-recon",
+    outputs: [catalogOutput],
+    provenance: { origin: "pinned-reference" }
+  });
+  const before = fs.readFileSync(lensPath);
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+  assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_OMISSION_REQUIRED" &&
+        diagnostic.path?.endsWith("#$.properties[0].reference_expectations") === true
+    ),
+    JSON.stringify(result.diagnostics)
+  );
+  assert.deepEqual(fs.readFileSync(lensPath), before);
+});
+
 test("property lens gate rejects expectations when no pinned catalog was supplied without rewriting bytes", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-no-catalog" });
   const node = {
@@ -6286,7 +6360,7 @@ test("property fan-in gate rejects a lens reference expectation dropped from can
   );
 });
 
-for (const fixture of ISSUE_531_REFERENCE_EXPECTATION_FIXTURES) {
+for (const fixture of REFERENCE_EXPECTATION_AUTHORITY_FIXTURES) {
   test(`property fan-in gate rejects the issue 531 ${fixture.arm} reference expectation fabrication`, () => {
     const layout = createRunLayout({ projectRoot: tempProject(), runId: fixture.runId });
     for (const source of fixture.sources) {
