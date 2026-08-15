@@ -149,6 +149,26 @@ jobs:
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: timeout --signal=TERM --kill-after=30s 10m bun scripts/ci/probe-openrouter-agent.mjs
+      - name: Exercise a typed Smithers artifact task
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          probe_root="$RUNNER_TEMP/openrouter-smithers-probe"
+          mkdir -p "$probe_root/artifacts"
+          printf '%s\n' \
+            'version = 1' \
+            '' \
+            '[agents.OpenRouterAgent]' \
+            'auth = "api-key"' \
+            'api_key_env = "OPENROUTER_API_KEY"' \
+            > "$probe_root/ultrafuzz.toml"
+          chmod 600 "$probe_root/ultrafuzz.toml"
+          ULTRAFUZZ_CONFIG_PATH="$probe_root/ultrafuzz.toml" \
+            ULTRAFUZZ_PROBE_ARTIFACT_DIR="$probe_root/artifacts" \
+            timeout --signal=TERM --kill-after=30s 10m \
+            pnpm --filter @ultrafuzz/runtime exec smithers up openrouter-probe-workflow.tsx \
+              --input '{}' --run-id openrouter-probe --no-monitor
+          test -s "$probe_root/artifacts/smoke-context.md"
 
   launch:
     if: >-
