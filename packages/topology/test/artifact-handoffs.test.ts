@@ -210,6 +210,12 @@ describe("artifact handoff validation", () => {
       "Verification: run forge test.",
       "Resolution: use checks-effects-interactions.",
       "Access: only invoke public entrypoints.",
+      "## Verification: run forge test",
+      "### Access: only invoke public entrypoints",
+      "Set access to public before testing.",
+      "Use verification as evidence when classifying findings.",
+      "Write verification as a concise testing summary.",
+      "Require access to the source tree before triage.",
       "Set access controls to public before testing.",
       "Write verification steps before summarizing the report.",
       "Record classification vectors as evidence.",
@@ -304,6 +310,11 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       })
     ).toThrow(expect.objectContaining({ code: "DUPLICATED_REPORT_VOCABULARY" }));
     for (const proseAlias of [
+      "### Access: internal",
+      "## Verification: summary ##",
+      "<h3>Access: internal</h3>",
+      "Access: internal\n---",
+      "## Rating: critical",
       "Record access -> internal evidence on each finding.",
       "Record the reachability -> helper-only evidence on each finding.",
       "Record root_reason -> renamed evidence on each finding.",
@@ -327,7 +338,7 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
         () =>
           validateTopology(topology, {
             promptTexts: {
-              "review/triage.md": `Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}. ${proseAlias}`
+              "review/triage.md": `Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.\n${proseAlias}`
             }
           }),
         proseAlias
@@ -337,6 +348,7 @@ Use {{finding_reachability_vocabulary}} and {{finding_note_key_vocabulary}}.
       "Set access to internal on every finding.",
       "Write verification as summary on every finding.",
       "Record verification maps to summary on every finding.",
+      "Set rating to critical on every finding.",
       "Record classification_v2 equals bug on every finding.",
       "Record classification_v3 equal to bug on every finding."
     ]) {

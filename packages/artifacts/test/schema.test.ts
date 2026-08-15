@@ -1196,7 +1196,21 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
     "ACCESS=internal",
     "Verification=summary",
     "access -> internal",
-    "verification -> summary"
+    "verification -> summary",
+    "access: internal",
+    "verification: summary",
+    '"access": "internal"',
+    '"verification": "summary"',
+    "### access: internal",
+    "## verification: summary ##",
+    "<h3>access: internal</h3>",
+    "access: internal\n---",
+    "access:\ninternal",
+    "access maps to internal",
+    "verification maps to summary",
+    "rating: critical",
+    "attainability: helper-only",
+    "rating maps to critical"
   ]) {
     assertNoteParity(reportAlias, false);
   }
@@ -1248,19 +1262,17 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
     assertNoteParity(mappedMetadataAlias, false);
   }
 
-  for (const benignHeading of [
-    "rating: critical",
-    "attainability: helper-only",
-    "access: internal",
-    "verification: summary",
-    '"access": "internal"',
-    '"verification": "summary"'
-  ]) {
-    assertNoteParity(benignHeading, true);
-  }
-
   assert.equal(findingReportSemanticAssignment("access: internal"), undefined);
   assert.equal(findingReportSemanticAssignment('"verification": "summary"'), undefined);
+  for (const headingAlias of [
+    "### Access: internal",
+    "## Verification: summary ##",
+    "<h3>Access: internal</h3>",
+    "Access: internal\n---",
+    "## Rating: critical"
+  ]) {
+    assert.notEqual(findingReportSemanticAssignment(headingAlias), undefined, headingAlias);
+  }
   assert.deepEqual(findingReportSemanticAssignment("access -> internal"), {
     key: "access",
     operator: "=",
@@ -1295,6 +1307,7 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
     "Set access to internal on every finding.",
     "Write verification as summary on every finding.",
     "Record verification maps to summary on every finding.",
+    "Set rating to critical on every finding.",
     "Record classification_v2 equals bug on every finding.",
     "Record classification_v3 equal to bug on every finding."
   ]) {
@@ -1302,6 +1315,10 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
   }
 
   for (const benignDirectiveProse of [
+    "Set access to public before testing.",
+    "Use verification as evidence when classifying findings.",
+    "Write verification as a concise testing summary.",
+    "Require access to the source tree before triage.",
     "Set access controls to public before testing.",
     "Write verification steps before summarizing the report.",
     "Record classification vectors as evidence."
