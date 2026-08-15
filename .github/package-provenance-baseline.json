@@ -1,0 +1,71 @@
+{
+  "schema_version": "ultrafuzz.package-provenance-baseline.v1",
+  "packages": {
+    "@moonshot-ai/kimi-code": {
+      "version": "0.29.1",
+      "publisher": {
+        "name": "GitHub Actions",
+        "email": "npm-oidc-no-reply@github.com",
+        "trusted_publisher": {
+          "id": "github",
+          "oidc_config_id": "oidc:75ce9a80-63ac-490e-9c96-3a6aa04345cb"
+        }
+      },
+      "maintainers": [
+        { "name": "bigeagle", "email": "justin.w.xd@gmail.com" },
+        { "name": "chante", "email": "541149506@qq.com" },
+        { "name": "kaiyi", "email": "zhangkaiyi42@gmail.com" },
+        { "name": "tempurai", "email": "llcan1120@gmail.com" }
+      ],
+      "repository": "git+https://github.com/MoonshotAI/kimi-code.git",
+      "integrity": "sha512-c4/Ltsbc9ljEXdUB9EqCWka1raBg+PE0m/mfzcGrONcYghW7lSpG4N+ggfC1fAePwDexy9Dknnm/j3yxMuFtdw==",
+      "signature_key_ids": ["SHA256:DhQ8wR5APBvFHLF/+Tc+AYvPOdTpcIDqOhxsBHRwC7U"],
+      "provenance_predicate": "https://slsa.dev/provenance/v1"
+    },
+    "modal": {
+      "version": "0.9.0",
+      "publisher": {
+        "name": "GitHub Actions",
+        "email": "npm-oidc-no-reply@github.com",
+        "trusted_publisher": {
+          "id": "github",
+          "oidc_config_id": "oidc:f7b14146-9df3-4206-852d-feecebd82e10"
+        }
+      },
+      "maintainers": [
+        { "name": "ehdr", "email": "eric.hansander@modal.com" },
+        { "name": "thomasjpfan-modal", "email": "thomas@modal.com" }
+      ],
+      "repository": "git+https://github.com/modal-labs/modal-client.git",
+      "integrity": "sha512-kCXcdJkhbJorf/q/6T9Wdlg6in9JmRnCNQnV6rVBMyeqNV/iXI6BYk4IzY4cvZ6dbauNeDMjk/Q08cbxvoIaXg==",
+      "signature_key_ids": ["SHA256:DhQ8wR5APBvFHLF/+Tc+AYvPOdTpcIDqOhxsBHRwC7U"],
+      "provenance_predicate": null
+    },
+    "recon-generate": {
+      "version": "0.0.42",
+      "publisher": {
+        "name": "0kn0t",
+        "email": "terabase7@gmail.com",
+        "trusted_publisher": null
+      },
+      "maintainers": [{ "name": "0kn0t", "email": "terabase7@gmail.com" }],
+      "repository": null,
+      "integrity": "sha512-YlxEKJfwfEdax2lWTzrnS2Pc5qFmI794F0VFdnhTKVxBpdbZQEkPVlXEgS8Htwk3pGeH0jxFhQxOVlHXIFKGfw==",
+      "signature_key_ids": ["SHA256:DhQ8wR5APBvFHLF/+Tc+AYvPOdTpcIDqOhxsBHRwC7U"],
+      "provenance_predicate": null
+    },
+    "smthrs": {
+      "version": "0.34.0",
+      "publisher": {
+        "name": "fucory",
+        "email": "willcory10@gmail.com",
+        "trusted_publisher": null
+      },
+      "maintainers": [{ "name": "fucory", "email": "willcory10@gmail.com" }],
+      "repository": "git+https://github.com/smithersai/smithers.git",
+      "integrity": "sha512-TkkTazvfbMy5sWuQG5PhfdlJhSSSLHje7rBXYmW3DoaITCmAP6VQLTJYTvBxuMPo4620M7wwa7UKuifODEbtoA==",
+      "signature_key_ids": ["SHA256:DhQ8wR5APBvFHLF/+Tc+AYvPOdTpcIDqOhxsBHRwC7U"],
+      "provenance_predicate": null
+    }
+  }
+}

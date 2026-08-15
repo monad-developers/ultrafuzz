@@ -22,6 +22,7 @@
   },
   "dependencies": {
     "@ultrafuzz/artifacts": "workspace:*",
-    "yaml": "^2.8.0"
+    "@ultrafuzz/security": "workspace:*",
+    "yaml": "2.9.0"
   }
 }

@@ -182,7 +182,7 @@ async function loadLocalEvidence(
 
 function loadBundleEvidence(bundlePath: string): { evidence: StatisticsEvidence; diagnostics: RuntimeDiagnostic[] } {
   const bundleBytes = readRegularFileSnapshot(bundlePath, MAX_COMPRESSED_ZIP_BYTES);
-  const zip = new AdmZip(Buffer.from(bundleBytes));
+  const zip = new AdmZip(bundleBytes);
   const entries = zip.getEntries();
   if (entries.length > MAX_ZIP_ENTRIES) {
     throw new Error(`report bundle has too many ZIP entries: ${entries.length}/${MAX_ZIP_ENTRIES}`);

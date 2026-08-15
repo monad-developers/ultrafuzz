@@ -23,8 +23,8 @@
   "dependencies": {
     "@ultrafuzz/artifacts": "workspace:*",
     "@ultrafuzz/security": "workspace:*",
-    "smol-toml": "^1.7.0",
-    "yaml": "^2.8.0",
-    "zod": "^4.4.3"
+    "smol-toml": "1.7.0",
+    "yaml": "2.9.0",
+    "zod": "4.4.3"
   }
 }

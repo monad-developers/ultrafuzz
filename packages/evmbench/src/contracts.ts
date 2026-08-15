@@ -17,6 +17,12 @@ export const EVMBENCH_RESULT_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:evmbench:res
 export const evmbenchCommitSchema = z.string().regex(/^[0-9a-f]{40}$/u);
 export const evmbenchDigestSchema = z.string().regex(/^sha256:[0-9a-f]{64}$/u);
 export const evmbenchSafeIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u);
+export const evmbenchContainerImageSchema = z
+  .string()
+  .regex(
+    /^(?:[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?\/)*(?:[a-z0-9]+(?:[._-][a-z0-9]+)*)(?::[A-Za-z0-9_][A-Za-z0-9._-]{0,127}|@sha256:[0-9a-f]{64})(?![\s\S])/u,
+    { message: "base image must be a canonical tagged or digest-pinned OCI image reference" }
+  );
 const modelSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/u);
 const reasoningSchema = evmbenchSafeIdSchema;
 

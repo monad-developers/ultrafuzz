@@ -9,6 +9,7 @@ import {
   readGroundTruthDocument,
   type GroundTruthSubject
 } from "@ultrafuzz/evals";
+import { assertHttpsGitRemote, assertSafeGitRef, controllerGitArguments } from "@ultrafuzz/security";
 
 import { isPublicModalBenchmarkConfig, loadModalBenchmarkConfig, type PrivateModalBenchmarkConfig } from "./config.js";
 import { EVAL_WATCH_TIMEOUT_SECONDS } from "./defaults.js";
@@ -502,11 +503,16 @@ async function ephemeralJudgeCredential(sourceKey: string): Promise<string> {
 }
 
 async function cloneAtRef(repo: string, ref: string, destination: string, label: string): Promise<void> {
-  await runChecked(["git", "clone", "--quiet", repo, destination], {
+  const remote = assertHttpsGitRemote(repo, `${label} repository`);
+  const revision = assertSafeGitRef(ref, `${label} ref`);
+  await runChecked(["git", ...controllerGitArguments(["clone", "--quiet", "--", remote, destination])], {
     label: `${label} clone`,
     failureCategory: "unreachable"
   });
-  await runChecked(["git", "checkout", "--detach", ref], { label: `${label} checkout`, cwd: destination });
+  await runChecked(["git", "switch", "--detach", "--", revision], {
+    label: `${label} checkout`,
+    cwd: destination
+  });
 }
 
 async function configureTarget(target: string): Promise<void> {

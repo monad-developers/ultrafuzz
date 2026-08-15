@@ -9,6 +9,7 @@ import {
   fingerprintModalConfigFile,
   fingerprintModalModel,
   loadModalBenchmarkConfig,
+  MODAL_GIT_REF_PATTERN_SOURCE,
   MODAL_GIT_URL_PATTERN_SOURCE,
   MODAL_HTTPS_URL_PATTERN_SOURCE,
   modalBenchmarkConfigZodSchema,
@@ -125,6 +126,7 @@ describe("Modal benchmark config", () => {
   it("uses identical portable URL lexical rules in JSON Schema and retained Zod", () => {
     const definitions = modalBenchmarkConfigJsonSchema.$defs as Record<string, Record<string, unknown>>;
     expect(definitions.gitUrl?.pattern).toBe(MODAL_GIT_URL_PATTERN_SOURCE);
+    expect(definitions.gitRef?.pattern).toBe(MODAL_GIT_REF_PATTERN_SOURCE);
     expect(definitions.httpsUrl?.pattern).toBe(MODAL_HTTPS_URL_PATTERN_SOURCE);
     expect(definitions.gitUrl).not.toHaveProperty("format");
     expect(definitions.httpsUrl).not.toHaveProperty("format");
@@ -133,12 +135,32 @@ describe("Modal benchmark config", () => {
       {
         label: "an SSH repository URL",
         value: privateRepositoryVariant("target", "ssh://git@github.com/example/target.git"),
-        accepted: true
+        accepted: false
       },
       {
         label: "a git repository URL",
         value: privateRepositoryVariant("ground_truth", "git://git.example.invalid/reference-data.git"),
-        accepted: true
+        accepted: false
+      },
+      {
+        label: "a remote-helper repository URL",
+        value: privateRepositoryVariant("target", "ext::sh -c malware"),
+        accepted: false
+      },
+      {
+        label: "a file transport repository URL",
+        value: privateRepositoryVariant("ground_truth", "file:///tmp/reference-data.git"),
+        accepted: false
+      },
+      {
+        label: "an option-like repository operand",
+        value: privateRepositoryVariant("target", "-upload-pack=malware"),
+        accepted: false
+      },
+      {
+        label: "an HTTPS repository with trailing control data",
+        value: privateRepositoryVariant("target", "https://github.com/example/target.git\n"),
+        accepted: false
       },
       {
         label: "an encoded credential-free HTTPS endpoint",
@@ -208,6 +230,15 @@ describe("Modal benchmark config", () => {
       expect(retainedZod.success, `${label}: retained Zod`).toBe(accepted);
       if (retainedZod.success) expect(retainedZod.data).toEqual(value);
       expect(modalBenchmarkConfigValidatorsAgree(value), label).toBe(true);
+    }
+  });
+
+  it("rejects option-like and revision-expression Git refs in both config validators", () => {
+    for (const ref of ["--help", "HEAD^{tree}", "main..other", "topic.lock", "bad ref", "main\n"]) {
+      const value = minimalConfig();
+      value.target = { ...(value.target as Record<string, unknown>), ref };
+      expect(validateModalJsonSchema(MODAL_BENCHMARK_CONFIG_SCHEMA_ID, value).ok, `JSON Schema: ${ref}`).toBe(false);
+      expect(modalBenchmarkConfigZodSchema.safeParse(value).success, `Zod: ${ref}`).toBe(false);
     }
   });
 

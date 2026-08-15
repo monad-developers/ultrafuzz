@@ -26,10 +26,10 @@
     "@ultrafuzz/config": "workspace:*",
     "@ultrafuzz/runtime": "workspace:*",
     "proper-lockfile": "4.1.2",
-    "yaml": "^2.8.0",
-    "zod": "^4.4.3"
+    "yaml": "2.9.0",
+    "zod": "4.4.3"
   },
   "devDependencies": {
-    "@types/proper-lockfile": "^4.1.4"
+    "@types/proper-lockfile": "4.1.4"
   }
 }
