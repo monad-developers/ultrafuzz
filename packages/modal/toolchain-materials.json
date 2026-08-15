@@ -55,7 +55,7 @@
     {
       "kind": "node-workspace",
       "path": "pnpm-lock.yaml",
-      "sha256": "9084e643333bcc6bd59f2a026549634d76e8eecc39217042f40a8496fb308de3"
+      "sha256": "81ebae3e4ce59157462b1f29c4c76e953b8101d9a62f5b87632e3afda1022227"
     },
     {
       "kind": "node-build-policy",
@@ -80,12 +80,12 @@
     {
       "kind": "modal-manifest",
       "path": "packages/modal/package.json",
-      "sha256": "bb06e075801fb97ae6318e9ba821ad2db960bfa2df991145e94ac8829a9f0862"
+      "sha256": "fd0b53ae55be67ca633d47aa1a615efc7c6ea152c2b90730791048e3720170b6"
     },
     {
       "kind": "workspace-manifest",
       "path": "package.json",
-      "sha256": "f2315b015b292c47bffe768b1c9e69c6d351eb6ac64b467ece937336e88dd391"
+      "sha256": "531f7e3e61c1e0c6647d1a811635815541d7e0312263e851d0229bf7e780a948"
     }
   ]
 }
