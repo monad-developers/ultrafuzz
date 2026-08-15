@@ -17,6 +17,7 @@ import {
   parseStrictJsonBytes,
   readRegularFileSnapshot,
   readRunPlanDocument,
+  sha256Bytes,
   SMITHERS_NODE_STATES,
   SMITHERS_RUN_STATES,
   SMITHERS_RUN_STATUSES,
@@ -1350,6 +1351,12 @@ export async function smithersExecutionControlFiles(
   const planPath = path.join(layout.root, "plan.json");
   add(planPath, "controls/plan.json");
   const plan = readRunPlanDocument(planPath, layout.runId);
+  const governancePath = path.join(layout.root, plan.data_governance.path);
+  const governanceBytes = readRegularFileSnapshot(governancePath, 1024 * 1024);
+  if (sha256Bytes(governanceBytes) !== plan.data_governance.sha256) {
+    throw new Error("campaign data-governance provenance does not match the run-plan reference before sealing");
+  }
+  add(governancePath, "controls/data-governance.json");
   const plannedPrompts = new Map<string, Record<string, unknown>>();
   for (const value of plan.rendered_prompts) {
     if (isObjectRecord(value) && typeof value.attempt_id === "string") plannedPrompts.set(value.attempt_id, value);

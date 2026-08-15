@@ -257,7 +257,31 @@ function fakeSmithersEnv(
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
     SMITHERS_BIN: smithers,
     SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log"),
-    SMITHERS_FAKE_INSPECT_STATE: inspectStatePath
+    SMITHERS_FAKE_INSPECT_STATE: inspectStatePath,
+    ULTRAFUZZ_DATA_GOVERNANCE_POLICY: JSON.stringify({
+      schema_version: "ultrafuzz.data-governance-policy.v1",
+      sensitivity: "public",
+      source_destinations: ["model:openai"],
+      artifact_destinations: [],
+      destination_policies: [syntheticDestinationPolicy("model:openai")],
+      local_model_agents: [],
+      openrouter_model_allowlist: [],
+      production_source_roots: ["contracts", "src"],
+      review_signoff_keys: []
+    })
+  };
+}
+
+function syntheticDestinationPolicy(destination: string): Record<string, string> {
+  return {
+    destination,
+    processor: "synthetic test process",
+    region: "local test process",
+    retention_policy: "synthetic test fixtures only",
+    training_policy: "not used for training",
+    dpa_status: "not applicable to synthetic fixtures",
+    minimization_policy: "synthetic fixture content only",
+    data_handling_basis: "synthetic public test fixtures"
   };
 }
 
@@ -1245,12 +1269,79 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
     partialPricing: true,
     unpricedEventCount: 1
   });
-  const report = await cli(project, ["report", runData.run_id, "--json"]);
+  const forgedCopy = {
+    source: "artifacts/project-discovery/stdout.txt",
+    destination: "materialized/stdout.txt",
+    size_bytes: 17,
+    sha256: "e".repeat(64)
+  };
+  fs.writeFileSync(
+    path.join(project, ".ultrafuzz", "materialize-audit.jsonl"),
+    `${JSON.stringify({
+      schema_version: "ultrafuzz.materialize.audit.v1",
+      audit_id: crypto.randomUUID(),
+      run_id: runData.run_id,
+      timestamp: new Date().toISOString(),
+      operation: "materializeSelection",
+      mode: "unstaged-working-tree",
+      unstaged: true,
+      confirmed: true,
+      allow_overwrite: false,
+      copies: [forgedCopy],
+      patches: [],
+      review_signoff: {
+        schema_version: "ultrafuzz.materialize.review-signoff.v1",
+        decision: "accepted",
+        run_id: runData.run_id,
+        target_commit: "a".repeat(40),
+        target_tree: "b".repeat(40),
+        target_clean: true,
+        target_worktree_digest: "9".repeat(64),
+        graph_fingerprint: "c".repeat(64),
+        final_report_digest: "d".repeat(64),
+        selected_artifacts: [
+          { source: forgedCopy.source, destination: forgedCopy.destination, sha256: forgedCopy.sha256 }
+        ],
+        trusted_signers: [{ key_id: "attacker", algorithm: "ed25519", public_key_sha256: "f".repeat(64) }],
+        reviewer: "self-asserted-agent",
+        reviewed_at: new Date().toISOString(),
+        signing_key_id: "attacker",
+        signature: `${"A".repeat(86)}==`,
+        signoff_sha256: "0".repeat(64)
+      }
+    })}\n`,
+    "utf8"
+  );
+  const report = await cli(project, ["report", runData.run_id, "--json"], env);
   assert.equal(report.code, 0, report.stderr);
   const reportBody = parseJson(report);
   assertNoSmithersSurface(reportBody);
   assert.equal((reportBody.data as { json_path?: string }).json_path, path.join(reportDir, "report.json"));
   assert.equal(accountingMismatchCount(reportBody), 0);
+  const reportDiagnostics = JSON.stringify(reportBody.diagnostics);
+  for (const code of [
+    "REPORT_ASSURANCE_STRUCTURAL_VERIFICATION",
+    "REPORT_ASSURANCE_MODEL_CONSENSUS",
+    "REPORT_ASSURANCE_EXECUTABLE_REPRODUCTION",
+    "REPORT_ASSURANCE_HUMAN_ACCEPTANCE"
+  ]) {
+    assert.match(reportDiagnostics, new RegExp(code, "u"));
+  }
+  assert.match(reportDiagnostics, /human acceptance: unverified/u);
+  assert.match(reportDiagnostics, /REPORT_ASSURANCE_SIGNOFF_INVALID/u);
+  assert.deepEqual((reportBody.data as { assurance?: unknown }).assurance, {
+    structural_verification: "passed",
+    model_consensus: "agent-produced",
+    executable_reproduction: "not-replayed",
+    human_acceptance: "unverified",
+    review_signoff: "invalid"
+  });
+  assert.deepEqual(
+    (reportBody.diagnostics as Array<{ code: string; details?: unknown }>).find(
+      (diagnostic) => diagnostic.code === "REPORT_ASSURANCE_HUMAN_ACCEPTANCE"
+    )?.details,
+    undefined
+  );
   const reportMarkdown = fs.readFileSync(path.join(reportDir, "report.md"), "utf8");
   assert.match(reportMarkdown, /- Tokens used: `123`/u);
   assert.match(reportMarkdown, /- Estimated spend: `\$0\.46\+`/u);
@@ -1262,14 +1353,18 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   assertNoSmithersSurface(escapedReportBody);
   assert.match(JSON.stringify(escapedReportBody.diagnostics), /run ID/);
 
-  const materialize = await cli(project, [
-    "materialize",
-    runData.run_id,
-    "--copy",
-    "artifacts/project-discovery/stdout.txt:materialized/stdout.txt",
-    "--yes",
-    "--json"
-  ]);
+  const materialize = await cli(
+    project,
+    [
+      "materialize",
+      runData.run_id,
+      "--copy",
+      "artifacts/project-discovery/stdout.txt:materialized/stdout.txt",
+      "--yes",
+      "--json"
+    ],
+    env
+  );
   assert.equal(materialize.code, 0, `${materialize.stderr}\n${materialize.stdout}`);
   assertNoSmithersSurface(parseJson(materialize));
   assert.equal(fs.existsSync(path.join(project, "materialized", "stdout.txt")), true);

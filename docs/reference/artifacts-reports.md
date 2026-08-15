@@ -549,6 +549,13 @@ is absent rather than borrowing a same-named rate from another provider.
 The final report is a review artifact. It is not an automatic vulnerability
 submission, repository mutation, or patch application.
 
+`ultrafuzz report` presents four assurance levels separately: structural
+verification of the authenticated JSON/Markdown pair, agent-produced model
+consensus, executable-reproduction evidence (which the command does not replay),
+and durable human acceptance. Human acceptance is reported only when a current
+materialization audit signoff binds the exact final-report digest; schema-valid
+or quorum-supported model output is never labelled human-approved.
+
 ## Materialization
 
 Materialization copies reviewed run outputs into the target project:
@@ -563,6 +570,37 @@ Materialization requires explicit selections and confirmation unless
 `--dry-run` is used. Destinations are project-relative, must be path-safe, must
 not target `.git/`, `.ultrafuzz/`, or sensitive paths, and are left as unstaged
 working-tree changes.
+
+Final-report and production-source materialization also requires an external
+reviewer signoff. Configure one or more Ed25519 public keys in the operator-owned
+data-governance policy before launch; their key IDs and fingerprints are sealed
+into the run plan. Run `--dry-run` first to obtain the exact target, graph,
+report, selected-artifact, and trusted-signer bindings. Add `reviewer`,
+`reviewed_at`, and `signing_key_id`, sign the canonical JSON payload (without
+`signature`) using that key, then add the base64 signature. Store the completed
+JSON outside the project and run directories and pass its absolute path with
+`--review-signoff`. The retained audit digest is recomputed from the canonical
+signed content when reports evaluate human acceptance. Keep the private key
+off-host or hardware-backed and inaccessible for the entire YOLO execution;
+another path owned by the same host user is not a security boundary.
+
+Canonical signing bytes are UTF-8 JSON with object keys sorted
+lexicographically at every depth, arrays kept in the returned order, and no
+insignificant whitespace or trailing newline. `reviewed_at` must be the exact
+UTC form produced by `Date.prototype.toISOString()` (including milliseconds).
+The exported `materializeReviewSignoffSigningPayload` helper is the reference
+encoder.
+
+The target binding asserts a clean Git working tree and includes a clean
+worktree digest as well as the commit and tree. It must exactly match the target
+identity sealed before model execution; another clean checkout is not accepted.
+Materialization refuses tracked or untracked dirtiness and checks the same
+identity again immediately before writing. Both `materialize` and later
+`report` verification require the
+operator-owned data-governance policy to be supplied again; run-local public
+keys are never sufficient reviewer authority. Its authenticated
+`production_source_roots`—not a mutable run-local classification—determine
+whether a selected destination requires the reviewer signature.
 
 Patch artifacts may be produced as evidence, but patch application is rejected
 until a safe patch applier is implemented.

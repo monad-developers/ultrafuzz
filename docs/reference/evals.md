@@ -64,6 +64,31 @@ names/hashes, while payloads stay on disk unless the suite explicitly opts
 into `mode: upload`. Before an allowlisted payload is sent, its manifest and
 path containment, regular-file status, size, and SHA-256 digest are checked.
 
+An explicit suite upload mode is not sufficient for a private target. The
+operator must also set
+`ULTRAFUZZ_EVAL_PRIVATE_ARTIFACT_UPLOAD_ACKNOWLEDGEMENTS` to a JSON array of
+`ultrafuzz.eval.private-artifact-upload-acknowledgement.v1` objects. Each object
+names the target ID/repository/ref and exact resolved commit, the exact provider
+origin, the complete included-file allowlist, the printed upload-policy digest,
+a retention policy, reviewer identity, and timestamp. The digest also binds the
+destination, retention text, upload mode, and maximum file size, so changing any
+payload-policy input makes the acknowledgement stale. Private uploads are
+refused unless sealed provenance explicitly identifies a clean target; dirty
+targets, including model-readable untracked files, are refused because a
+commit alone cannot identify its source bytes. Retention is an operator-reviewed
+provider term recorded by the acknowledgement, not a deletion schedule
+Ultrafuzz can enforce.
+
+Before the first provider callback can receive payload bytes, accepted
+acknowledgements are normalized, assigned a canonical SHA-256, and durably
+written beside the telemetry cursor as
+`<cursor>.private-upload-approvals.json`. This document uses the registered
+`urn:ultrafuzz:schema:evals:private-artifact-upload-approval-provenance:1`
+contract; a missing, malformed, or digest-forged existing record blocks the
+upload rather than being overwritten.
+This acknowledgement is distinct from the private LLM-judge acknowledgement;
+neither one authorizes the other data path.
+
 ### Suite contract and workflow input
 
 The current suite version is exactly `ultrafuzz.eval.v2`, validated against

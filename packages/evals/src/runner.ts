@@ -496,12 +496,19 @@ export async function watchEvalRow(
   if (runRoot === undefined) {
     return { record: input.record, diagnostics };
   }
+  const targetProvenance = input.plan.provenance?.benchmark.targets.find(
+    (target) => target.id === input.row.target_id && target.repo === input.row.target.repo
+  );
   const pump = new NodeTelemetryPump({
     runRoot,
     row: input.row,
     reporters: input.reporters,
     policy: input.plan.suite.reporting,
-    cursorPath: path.join(input.evalRunRoot, "telemetry", `${input.row.id}.cursor.json`)
+    cursorPath: path.join(input.evalRunRoot, "telemetry", `${input.row.id}.cursor.json`),
+    ...(targetProvenance === undefined
+      ? {}
+      : { targetProvenance: { commit: targetProvenance.commit, dirty: targetProvenance.dirty } }),
+    env: input.env
   });
   const sync: RowSync = input.sync ?? defaultRowSync;
   const pollIntervalMs = input.pollIntervalMs ?? DEFAULT_EVAL_POLL_INTERVAL_MS;

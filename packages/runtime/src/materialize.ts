@@ -6,8 +6,9 @@ import {
   appendEvent,
   assertNoSymlinkComponents,
   layoutForRunRoot,
+  readRegularFileSnapshot,
   safeResolveInside,
-  sha256File,
+  sha256Bytes,
   type RunLayout
 } from "@ultrafuzz/artifacts";
 import { loadProjectConfig, resolveConfig } from "@ultrafuzz/config";
@@ -21,14 +22,28 @@ import {
 } from "./audit-contracts.js";
 import type { MaterializeInput, MaterializeValue, RuntimeDiagnostic, RuntimeResult } from "./types.js";
 import { hasRuntimeErrors, policyDiagnostics, runtimeError, runtimeFailure, runtimeResult } from "./utils.js";
+import {
+  loadOperatorAuthenticatedDataGovernancePolicy,
+  loadOperatorAuthenticatedMaterializeReviewAuthorities,
+  loadAndVerifyMaterializeReviewSignoff,
+  materializeReviewSignoffRequest,
+  assertMaterializeReviewTargetRemainedCurrent,
+  type MaterializeReviewSignoff,
+  type MaterializeReviewSigningAuthority,
+  type MaterializeReviewSignoffRequest
+} from "./review-signoff.js";
+import { loadVerifiedFinalReportSnapshot } from "./verified-output.js";
 
 interface PlannedMaterialization {
   selection: MaterializeCopySelection;
   sourcePath: string;
   destinationPath: string;
+  bytes: Buffer;
   sizeBytes: number;
   sha256: string;
 }
+
+const MAX_MATERIALIZE_SOURCE_BYTES = 64 * 1024 * 1024;
 
 export async function materializeSelection(input: MaterializeInput): Promise<RuntimeResult<MaterializeValue>> {
   const projectRoot = path.resolve(input.projectRoot);
@@ -77,6 +92,96 @@ export async function materializeSelection(input: MaterializeInput): Promise<Run
     return runtimeFailure(diagnostics);
   }
 
+  let productionSourceRoots: string[];
+  try {
+    productionSourceRoots = loadOperatorAuthenticatedDataGovernancePolicy({
+      projectRoot,
+      layout,
+      operatorPolicyJson: input.operatorDataGovernancePolicy
+    }).production_source_roots;
+  } catch (error) {
+    return runtimeFailure([
+      runtimeError(
+        "MATERIALIZE_GOVERNANCE_AUTHORITY_INVALID",
+        error instanceof Error ? error.message : String(error),
+        "materialize",
+        layout.root
+      )
+    ]);
+  }
+  const reviewSignoffRequired = publicationSensitiveMaterialization(layout, plannedCopies, productionSourceRoots);
+  let reviewSignoffRequest: MaterializeReviewSignoffRequest | undefined;
+  let reviewSignoff: MaterializeReviewSignoff | undefined;
+  let reviewAuthorities: MaterializeReviewSigningAuthority[];
+  if (reviewSignoffRequired) {
+    try {
+      reviewAuthorities = loadOperatorAuthenticatedMaterializeReviewAuthorities({
+        projectRoot,
+        layout,
+        operatorPolicyJson: input.operatorDataGovernancePolicy
+      });
+      reviewSignoffRequest = materializeReviewSignoffRequest({
+        projectRoot,
+        layout,
+        selections: plannedCopies.map((copy) => ({
+          source: copy.selection.source,
+          destination: copy.selection.destination,
+          sha256: copy.sha256
+        })),
+        authorities: reviewAuthorities
+      });
+    } catch (error) {
+      return runtimeFailure([
+        runtimeError(
+          "MATERIALIZE_REVIEW_AUTHORITY_INVALID",
+          error instanceof Error ? error.message : String(error),
+          "materialize",
+          layout.root
+        )
+      ]);
+    }
+    if (input.dryRun !== true) {
+      if (input.reviewSignoffPath === undefined) {
+        return runtimeFailure([
+          runtimeError(
+            "MATERIALIZE_REVIEW_SIGNOFF_REQUIRED",
+            "publication-sensitive materialization requires an operator-owned review signoff outside the project",
+            "materialize",
+            "reviewSignoffPath",
+            {
+              required_signoff: {
+                ...reviewSignoffRequest,
+                reviewer: "<reviewer identity>",
+                reviewed_at: "<ISO 8601 timestamp>",
+                signing_key_id: "<trusted_signers key_id>",
+                signature: "<canonical base64 Ed25519 signature>"
+              }
+            }
+          )
+        ]);
+      }
+      try {
+        reviewSignoff = loadAndVerifyMaterializeReviewSignoff({
+          signoffPath: input.reviewSignoffPath,
+          projectRoot,
+          layout,
+          expected: reviewSignoffRequest,
+          authorities: reviewAuthorities
+        });
+      } catch (error) {
+        return runtimeFailure([
+          runtimeError(
+            "MATERIALIZE_REVIEW_SIGNOFF_INVALID",
+            error instanceof Error ? error.message : String(error),
+            "materialize",
+            input.reviewSignoffPath,
+            { required_signoff: reviewSignoffRequest }
+          )
+        ]);
+      }
+    }
+  }
+
   const auditPath = path.join(projectRoot, ".ultrafuzz", "materialize-audit.jsonl");
   try {
     assertNoSymlinkComponents(projectRoot, auditPath, "materialize audit");
@@ -92,6 +197,20 @@ export async function materializeSelection(input: MaterializeInput): Promise<Run
     ]);
   }
   if (input.dryRun !== true) {
+    if (reviewSignoffRequest !== undefined) {
+      try {
+        assertMaterializeReviewTargetRemainedCurrent(projectRoot, reviewSignoffRequest);
+      } catch (error) {
+        return runtimeFailure([
+          runtimeError(
+            "MATERIALIZE_REVIEW_TARGET_CHANGED",
+            error instanceof Error ? error.message : String(error),
+            "materialize",
+            projectRoot
+          )
+        ]);
+      }
+    }
     for (const copy of plannedCopies) {
       fs.mkdirSync(path.dirname(copy.destinationPath), { recursive: true });
       const destinationCheck = resolveDestination(
@@ -111,11 +230,20 @@ export async function materializeSelection(input: MaterializeInput): Promise<Run
         );
         break;
       }
-      fs.copyFileSync(
-        copy.sourcePath,
-        copy.destinationPath,
-        input.allowOverwrite === true ? 0 : fs.constants.COPYFILE_EXCL
-      );
+      try {
+        writeMaterializationSnapshot(copy, projectRoot, input.allowOverwrite === true);
+      } catch (error) {
+        diagnostics.push(
+          runtimeError(
+            "MATERIALIZE_DESTINATION_RACE",
+            `destination ${copy.selection.destination} changed or could not be replaced safely`,
+            "materialize",
+            copy.selection.destination,
+            { error: error instanceof Error ? error.message : String(error) }
+          )
+        );
+        break;
+      }
     }
   }
   if (hasRuntimeErrors(diagnostics)) {
@@ -139,7 +267,8 @@ export async function materializeSelection(input: MaterializeInput): Promise<Run
       size_bytes: copy.sizeBytes,
       sha256: copy.sha256
     })),
-    patches: []
+    patches: [],
+    ...(reviewSignoff === undefined ? {} : { review_signoff: reviewSignoff })
   };
   appendMaterializeAuditRecord(auditPath, auditRecord, projectRoot);
   const event = appendEvent(layout, {
@@ -159,6 +288,8 @@ export async function materializeSelection(input: MaterializeInput): Promise<Run
     dry_run: input.dryRun === true,
     copied: plannedCopies.map((copy) => copy.selection),
     patches: [],
+    review_signoff_required: reviewSignoffRequired,
+    ...(reviewSignoffRequest === undefined ? {} : { review_signoff_request: reviewSignoffRequest }),
     audit: {
       schema_version: MATERIALIZE_AUDIT_SCHEMA_VERSION,
       audit_id: auditRecord.audit_id,
@@ -167,12 +298,75 @@ export async function materializeSelection(input: MaterializeInput): Promise<Run
       audit_path: auditPath,
       event_id: event.event_id,
       copies: auditRecord.copies,
-      patches: []
+      patches: [],
+      ...(reviewSignoff === undefined ? {} : { review_signoff: reviewSignoff })
     }
   });
 }
 
 export const materializeRun = materializeSelection;
+
+function publicationSensitiveMaterialization(
+  layout: RunLayout,
+  copies: PlannedMaterialization[],
+  productionSourceRoots: string[]
+): boolean {
+  if (
+    copies.some((copy) =>
+      productionSourceRoots.some(
+        (root) =>
+          root === "." || copy.selection.destination === root || copy.selection.destination.startsWith(`${root}/`)
+      )
+    )
+  ) {
+    return true;
+  }
+  try {
+    const report = loadVerifiedFinalReportSnapshot(layout.root);
+    const reportPaths = new Set(
+      [report.artifacts.json_path, report.artifacts.markdown_path].map((entry) => path.resolve(entry))
+    );
+    const reportDigests = new Set([sha256Bytes(report.json_bytes), sha256Bytes(report.markdown_bytes)]);
+    if (copies.some((copy) => reportPaths.has(path.resolve(copy.sourcePath)) || reportDigests.has(copy.sha256))) {
+      return true;
+    }
+  } catch {
+    // A conventional final-report selection still enters the review path; the
+    // request builder will then return the specific authenticated-report error.
+  }
+  return copies.some((copy) => /^artifacts\/[^/]*final-report(?:\/|$)/u.test(copy.selection.source));
+}
+
+function writeMaterializationSnapshot(
+  copy: PlannedMaterialization,
+  projectRoot: string,
+  allowOverwrite: boolean
+): void {
+  const destinationDirectory = path.dirname(copy.destinationPath);
+  assertNoSymlinkComponents(projectRoot, destinationDirectory, "materialize destination directory");
+  if (!allowOverwrite) {
+    fs.writeFileSync(copy.destinationPath, copy.bytes, { flag: "wx", mode: 0o600 });
+    return;
+  }
+  const temporaryPath = path.join(
+    destinationDirectory,
+    `.${path.basename(copy.destinationPath)}.ultrafuzz-materialize-${process.pid}-${crypto.randomUUID()}.tmp`
+  );
+  try {
+    fs.writeFileSync(temporaryPath, copy.bytes, { flag: "wx", mode: 0o600 });
+    const temporaryStat = fs.lstatSync(temporaryPath);
+    if (temporaryStat.isSymbolicLink() || !temporaryStat.isFile() || temporaryStat.nlink !== 1) {
+      throw new Error("temporary materialization is not a singly linked regular file");
+    }
+    if (temporaryStat.size !== copy.sizeBytes || !fs.readFileSync(temporaryPath).equals(copy.bytes)) {
+      throw new Error("temporary materialization does not match the reviewed source snapshot");
+    }
+    assertNoSymlinkComponents(projectRoot, destinationDirectory, "materialize destination directory");
+    fs.renameSync(temporaryPath, copy.destinationPath);
+  } finally {
+    fs.rmSync(temporaryPath, { force: true });
+  }
+}
 
 function planCopy(
   layout: RunLayout,
@@ -186,13 +380,28 @@ function planCopy(
   if (sourcePath === undefined || destinationPath === undefined) {
     return undefined;
   }
-  return {
-    selection: copy,
-    sourcePath,
-    destinationPath,
-    sizeBytes: fs.statSync(sourcePath).size,
-    sha256: sha256File(sourcePath)
-  };
+  try {
+    const bytes = readRegularFileSnapshot(sourcePath, MAX_MATERIALIZE_SOURCE_BYTES);
+    return {
+      selection: copy,
+      sourcePath,
+      destinationPath,
+      bytes,
+      sizeBytes: bytes.length,
+      sha256: sha256Bytes(bytes)
+    };
+  } catch (error) {
+    diagnostics.push(
+      runtimeError(
+        "MATERIALIZE_SOURCE_CHANGED",
+        `source ${copy.source} could not be captured as a stable bounded snapshot`,
+        "materialize",
+        copy.source,
+        { error: error instanceof Error ? error.message : String(error) }
+      )
+    );
+    return undefined;
+  }
 }
 
 function resolveSource(selection: string, layout: RunLayout, diagnostics: RuntimeDiagnostic[]): string | undefined {

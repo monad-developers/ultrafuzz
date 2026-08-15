@@ -20,6 +20,8 @@ import type {
 import type { PromptArtifactReference } from "@ultrafuzz/prompts";
 import type { MaterializeCopySelection } from "@ultrafuzz/security";
 import type { ExpandedGraph } from "@ultrafuzz/topology";
+import type { DataGovernanceProvenance } from "./data-governance.js";
+import type { MaterializeReviewSignoff, MaterializeReviewSignoffRequest } from "./review-signoff.js";
 
 export const RUNTIME_SCHEMA_VERSION = "ultrafuzz.runtime.v1" as const;
 
@@ -161,6 +163,8 @@ export interface PlanRunValue {
   config_fingerprint: string;
   redacted_config_fingerprint: string;
   prompt_digest: string;
+  data_governance: DataGovernanceProvenance;
+  data_governance_diagnostics: RuntimeDiagnostic[];
   output_root: string;
   state_nodes: NodeStateInput[];
   resolved_config: ResolvedConfig;
@@ -387,6 +391,10 @@ export interface MaterializeInput {
   confirmed?: boolean;
   dryRun?: boolean;
   allowOverwrite?: boolean;
+  /** Absolute path to an operator-owned review signoff for publication-sensitive selections. */
+  reviewSignoffPath?: string;
+  /** Operator-owned governance policy supplied again after model execution. */
+  operatorDataGovernancePolicy?: string;
 }
 
 export interface MaterializeValue {
@@ -394,6 +402,8 @@ export interface MaterializeValue {
   dry_run: boolean;
   copied: MaterializeCopySelection[];
   patches: string[];
+  review_signoff_required: boolean;
+  review_signoff_request?: MaterializeReviewSignoffRequest;
   audit: {
     schema_version: "ultrafuzz.materialize.audit.v1";
     audit_id: string;
@@ -412,6 +422,7 @@ export interface MaterializeValue {
       size_bytes: number;
       sha256: string;
     }>;
+    review_signoff?: MaterializeReviewSignoff;
   };
 }
 

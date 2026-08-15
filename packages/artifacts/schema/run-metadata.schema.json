@@ -136,6 +136,9 @@
           "type": "boolean"
         }
       }
+    },
+    "data_governance": {
+      "$ref": "#/$defs/dataGovernance"
     }
   },
   "dependentRequired": {
@@ -172,6 +175,70 @@
     }
   ],
   "$defs": {
+    "dataGovernance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "path",
+        "sha256",
+        "policy_digest",
+        "input_digest",
+        "sensitivity",
+        "acknowledgement_status",
+        "review_signoff_authorities"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "ultrafuzz.data-governance-provenance.v1"
+        },
+        "path": {
+          "const": "data-governance.json"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "policy_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "input_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "sensitivity": {
+          "enum": ["public", "private"]
+        },
+        "acknowledgement_status": {
+          "enum": ["approved", "not-required", "pending"]
+        },
+        "review_signoff_authorities": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["key_id", "algorithm", "public_key_spki_base64", "public_key_sha256"],
+            "properties": {
+              "key_id": {
+                "$ref": "#/$defs/safeId"
+              },
+              "algorithm": {
+                "const": "ed25519"
+              },
+              "public_key_spki_base64": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "pattern": "^[A-Za-z0-9+/]+={0,2}$"
+              },
+              "public_key_sha256": {
+                "$ref": "#/$defs/sha256"
+              }
+            }
+          }
+        }
+      }
+    },
     "safeId": {
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"

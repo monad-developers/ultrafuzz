@@ -534,6 +534,7 @@ ultrafuzz materialize <run-id> \
   [--yes | --confirm] \
   [--dry-run] \
   [--force] \
+  [--review-signoff </absolute/operator-owned/signoff.json>] \
   [--json]
 ```
 
@@ -541,6 +542,30 @@ Materialization is copy-only. Each `--copy` source is relative to the run root,
 and each destination is relative to the project root. Non-dry-run
 materialization requires `--yes` or `--confirm`. `--force` allows overwriting an
 existing file destination after path checks.
+
+Copying a final report or writing below a configured production-source root is
+publication-sensitive. A dry run returns the exact signoff request. The real
+copy additionally requires `--review-signoff` pointing to a regular file
+outside the project and run directories. The accepted decision is bound to the
+target commit/tree, graph fingerprint, canonical final-report digest, and every
+selected source/destination/content digest. It must be signed with Ed25519 by a
+reviewer key whose ID and public-key fingerprint were sealed into the run plan
+before model execution; changing any binding or signer makes it stale. The
+normalized signature and a recomputable SHA-256 of the canonical signed content
+are retained in the materialization audit journal.
+
+The request also binds `target_clean: true` and a clean-worktree digest.
+That identity must match the target sealed before model execution. Tracked or
+untracked target changes—and a switch to another clean commit—are refused, and
+the target is rechecked after signature verification immediately before the
+first destination write.
+Supply the same operator-owned `ULTRAFUZZ_DATA_GOVERNANCE_POLICY` environment
+value again to `materialize` and `report`; its digest and reviewer-key
+fingerprints must match the pre-execution snapshot. The command never treats a
+run-local key or hash journal as reviewer authority. The policy's
+`production_source_roots` must exactly match the resolved roots sealed before
+execution, and these externally re-authenticated roots drive publication
+classification.
 
 Patch artifacts may exist as evidence, but patch application is rejected until
 a safe patch applier exists.

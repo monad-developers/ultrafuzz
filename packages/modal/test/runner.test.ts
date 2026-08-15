@@ -1316,7 +1316,7 @@ function writeCanonicalRecoveryPlan(runRoot: string, runId: string, logicalNodes
   fs.writeFileSync(
     path.join(runRoot, "plan.json"),
     JSON.stringify({
-      schema_version: "ultrafuzz.run-plan.v2",
+      schema_version: "ultrafuzz.run-plan.v3",
       run_id: runId,
       mode: "run",
       graph_fingerprint: "a".repeat(64),

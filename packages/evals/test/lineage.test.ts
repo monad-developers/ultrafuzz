@@ -120,6 +120,18 @@ describe("versioned eval lineage", { timeout: 15_000 }, () => {
     expect(dirtyTarget.benchmark.cohort_fingerprint).not.toBe(changedTarget.benchmark.cohort_fingerprint);
     fs.writeFileSync(path.join(generated.targetRoot, "tracked.txt"), "target v2\n", "utf8");
 
+    fs.writeFileSync(
+      path.join(generated.targetRoot, "model-readable-untracked.txt"),
+      "untracked target bytes\n",
+      "utf8"
+    );
+    const untrackedTarget = buildEvalRunProvenance(generated.plan, policy);
+    expect(untrackedTarget.benchmark).toMatchObject({
+      availability: "available",
+      targets: [{ id: "target-a", dirty: true }]
+    });
+    fs.rmSync(path.join(generated.targetRoot, "model-readable-untracked.txt"));
+
     const changedPolicy = buildEvalRunProvenance(generated.plan, { ...policy, watchTimeoutSeconds: 121 });
     expect(changedPolicy.benchmark.execution_policy.fingerprint).not.toBe(first.benchmark.execution_policy.fingerprint);
     expect(changedPolicy.benchmark.cohort_fingerprint).not.toBe(changedTarget.benchmark.cohort_fingerprint);

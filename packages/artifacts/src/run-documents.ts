@@ -10,8 +10,8 @@ export const SOURCE_RUN_SCHEMA_VERSION = "ultrafuzz.source-run.v2" as const;
 export const SOURCE_RUN_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:source-run:2" as const;
 export const CONFIG_REDACTIONS_SCHEMA_VERSION = "ultrafuzz.config-redactions.v2" as const;
 export const CONFIG_REDACTIONS_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:config-redactions:2" as const;
-export const RUN_PLAN_SCHEMA_VERSION = "ultrafuzz.run-plan.v2" as const;
-export const RUN_PLAN_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:run-plan:2" as const;
+export const RUN_PLAN_SCHEMA_VERSION = "ultrafuzz.run-plan.v3" as const;
+export const RUN_PLAN_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:run-plan:3" as const;
 export const RUN_METADATA_SCHEMA_VERSION = "ultrafuzz.run-metadata.v2" as const;
 export const RUN_METADATA_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:run-metadata:2" as const;
 
@@ -107,6 +107,22 @@ export interface RunMetadataAuditProfile extends Omit<RunAuditProfileSummary, "i
   declared_topology_path?: string;
 }
 
+export interface RunDataGovernanceReference {
+  schema_version: "ultrafuzz.data-governance-provenance.v1";
+  path: "data-governance.json";
+  sha256: string;
+  policy_digest: string;
+  input_digest: string;
+  sensitivity: "public" | "private";
+  acknowledgement_status: "approved" | "not-required" | "pending";
+  review_signoff_authorities: Array<{
+    key_id: string;
+    algorithm: "ed25519";
+    public_key_spki_base64: string;
+    public_key_sha256: string;
+  }>;
+}
+
 export interface RunPlanDocument {
   schema_version: typeof RUN_PLAN_SCHEMA_VERSION;
   run_id: string;
@@ -117,6 +133,7 @@ export interface RunPlanDocument {
   redacted_config_fingerprint: string;
   prompt_digest: string;
   execution: RunPlanExecution;
+  production_source_roots: string[];
   topology: {
     path: string;
     origin?: "project-default" | "audit-profile" | "project-config" | "runtime-override";
@@ -126,6 +143,7 @@ export interface RunPlanDocument {
     required_commands: string[];
   };
   audit_profile: RunAuditProfileSummary;
+  data_governance: RunDataGovernanceReference;
   rendered_prompts: RunPlanRenderedPrompt[];
   policy_posture: Record<"config" | "topology" | "prompts" | "paths" | "agents" | "trust", "pass" | "warn" | "fail">;
 }
@@ -256,6 +274,7 @@ export interface RunMetadataDocument {
   // the plan document, which only planning writes, requires them.
   prompt_digest?: string;
   audit_profile?: RunMetadataAuditProfile;
+  data_governance?: RunDataGovernanceReference;
   forge_guard: {
     enabled: boolean;
     active: boolean;

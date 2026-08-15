@@ -88,6 +88,8 @@ export interface EvalArtifactUpload {
  */
 export interface EvalReporter {
   readonly name: string;
+  /** Canonical remote destination for disclosure approval; local reporters may omit it. */
+  readonly destination?: string;
   onPlan(plan: EvalPlan): Promise<void>;
   onRowStart(row: EvalMatrixRow, graph: EvalRowGraph): Promise<void>;
   onNodeEvent(envelope: EvalNodeEventEnvelope): Promise<void>;
@@ -169,6 +171,7 @@ export function guardReporter(
   };
   const guarded: EvalReporter = {
     name: reporter.name,
+    ...(reporter.destination === undefined ? {} : { destination: reporter.destination }),
     onPlan: (plan) => guard("onPlan", () => reporter.onPlan(plan)),
     onRowStart: (row, graph) => guard("onRowStart", () => reporter.onRowStart(row, graph)),
     onNodeEvent: (envelope) => guard("onNodeEvent", () => reporter.onNodeEvent(envelope)),

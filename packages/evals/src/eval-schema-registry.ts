@@ -51,6 +51,8 @@ export const EVAL_REVIEW_QUEUE_ITEM_SCHEMA_ID = "urn:ultrafuzz:schema:evals:revi
 export const EVAL_PUBLICATION_STATE_SCHEMA_ID = "urn:ultrafuzz:schema:evals:publication-state:1" as const;
 export const EVAL_PUBLIC_DIAGNOSTICS_SCHEMA_ID = "urn:ultrafuzz:schema:evals:public-eval-diagnostics:2" as const;
 export const EVAL_TELEMETRY_CURSOR_SCHEMA_ID = "urn:ultrafuzz:schema:evals:telemetry-cursor:1" as const;
+export const EVAL_PRIVATE_ARTIFACT_UPLOAD_APPROVAL_PROVENANCE_SCHEMA_ID =
+  "urn:ultrafuzz:schema:evals:private-artifact-upload-approval-provenance:1" as const;
 
 const MAX_EVAL_SCHEMA_BYTES = 2 * 1024 * 1024;
 
@@ -226,6 +228,11 @@ export const EVAL_SCHEMA_METADATA: Readonly<Record<string, EvalSchemaMetadata>> 
     typescriptExport: "evalInstanceClustersJsonSchema",
     semanticGates: ["eval-instance-clusters-identity-joins"]
   },
+  "private-artifact-upload-approval-provenance.schema.json": {
+    role: "runtime-state",
+    typescriptExport: "evalPrivateArtifactUploadApprovalProvenanceJsonSchema",
+    semanticGates: []
+  },
   "telemetry-cursor.schema.json": {
     role: "runtime-state",
     typescriptExport: "evalTelemetryCursorJsonSchema",
@@ -288,6 +295,9 @@ export const evalScoreSummaryJsonSchema = loadSchemaDocument("eval-score-summary
 export const evalStatusJsonSchema = loadSchemaDocument("eval-status.schema.json");
 export const evalSuiteJsonSchema = loadSchemaDocument("eval-suite.schema.json");
 export const evalEvmbenchCohortJsonSchema = loadSchemaDocument("evmbench-cohort.schema.json");
+export const evalPrivateArtifactUploadApprovalProvenanceJsonSchema = loadSchemaDocument(
+  "private-artifact-upload-approval-provenance.schema.json"
+);
 export const evalTelemetryCursorJsonSchema = loadSchemaDocument("telemetry-cursor.schema.json");
 
 export const EVAL_SCHEMA_EXPORTS = Object.freeze({
@@ -319,6 +329,7 @@ export const EVAL_SCHEMA_EXPORTS = Object.freeze({
   evalStatusJsonSchema,
   evalSuiteJsonSchema,
   evalEvmbenchCohortJsonSchema,
+  evalPrivateArtifactUploadApprovalProvenanceJsonSchema,
   evalTelemetryCursorJsonSchema
 });
 
@@ -351,6 +362,7 @@ const schemaExportsByFilename: Readonly<Record<string, Readonly<Record<string, u
   "ground-truth-credits.schema.json": evalGroundTruthCreditsJsonSchema,
   "instance-clusters.schema.json": evalInstanceClustersJsonSchema,
   "eval-llm-judge-result.schema.json": evalLlmJudgeResultJsonSchema,
+  "private-artifact-upload-approval-provenance.schema.json": evalPrivateArtifactUploadApprovalProvenanceJsonSchema,
   "telemetry-cursor.schema.json": evalTelemetryCursorJsonSchema
 });
 

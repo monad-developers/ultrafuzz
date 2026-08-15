@@ -149,6 +149,13 @@ export interface EvmbenchReportData {
   markdown_path: string;
   json_path: string;
   source: "verified-agent-report";
+  assurance: {
+    structural_verification: "passed";
+    model_consensus: "agent-produced";
+    executable_reproduction: "not-replayed";
+    human_acceptance: "accepted" | "not-recorded" | "unverified";
+    review_signoff: "verified" | "not-present" | "invalid" | "operator-policy-required" | "audit-unavailable";
+  };
 }
 
 export interface EvmbenchCliDataMap {

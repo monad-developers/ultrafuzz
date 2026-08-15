@@ -47,6 +47,7 @@ interface RowProgress {
  */
 export class BraintrustReporter implements EvalReporter {
   readonly name = "braintrust";
+  readonly destination: string;
   private readonly options: BraintrustReporterOptions;
   private readonly fetchImpl: typeof fetch;
   private readonly apiUrl: string;
@@ -64,6 +65,7 @@ export class BraintrustReporter implements EvalReporter {
     this.options = options;
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.apiUrl = trustedProviderOrigin(options.apiUrl, DEFAULT_API_URL, options.trustedApiUrl, "Braintrust");
+    this.destination = this.apiUrl;
   }
 
   async onPlan(plan: EvalPlan): Promise<void> {

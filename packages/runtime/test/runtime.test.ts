@@ -125,7 +125,15 @@ function withFakeCliEntrypoint<T extends { projectRoot: string; ultrafuzzCliEntr
 }
 
 function startRun(input: Parameters<typeof runtimeStartRun>[0]): ReturnType<typeof runtimeStartRun> {
-  return runtimeStartRun(withFakeCliEntrypoint(input));
+  return runtimeStartRun(
+    withFakeCliEntrypoint({
+      ...input,
+      env: {
+        ...input.env,
+        ULTRAFUZZ_DATA_GOVERNANCE_POLICY: input.env?.ULTRAFUZZ_DATA_GOVERNANCE_POLICY ?? syntheticDataGovernancePolicy()
+      }
+    })
+  );
 }
 
 function resumeRun(input: Parameters<typeof runtimeResumeRun>[0]): ReturnType<typeof runtimeResumeRun> {
@@ -769,7 +777,10 @@ function writeFakeNpmInstaller(
   return { binDir, npmLogPath, smithersLogPath };
 }
 
-function fakeSmithersEnv(project: string): Record<string, string | undefined> {
+function fakeSmithersEnv(
+  project: string,
+  options: { openRouterModelAllowlist?: string[] } = {}
+): Record<string, string | undefined> {
   const binDir = path.join(project, "fake-bin");
   fs.mkdirSync(binDir, { recursive: true });
   const smithers = path.join(binDir, "smithers");
@@ -880,8 +891,46 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
   return {
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
     SMITHERS_BIN: smithers,
-    SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log")
+    SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log"),
+    ULTRAFUZZ_DATA_GOVERNANCE_POLICY: syntheticDataGovernancePolicy(options.openRouterModelAllowlist)
   };
+}
+
+function syntheticDestinationPolicy(destination: string): Record<string, string> {
+  return {
+    destination,
+    processor: "synthetic test process",
+    region: "local test process",
+    retention_policy: "synthetic test fixtures only",
+    training_policy: "not used for training",
+    dpa_status: "not applicable to synthetic fixtures",
+    minimization_policy: "synthetic fixture content only",
+    data_handling_basis: "synthetic public test fixtures"
+  };
+}
+
+function syntheticDataGovernancePolicy(
+  openRouterModelAllowlist: string[] = ["~anthropic/claude-sonnet-latest:free"]
+): string {
+  const destinations = [
+    "cloud:modal",
+    "model:anthropic",
+    "model:deepseek",
+    "model:moonshot",
+    "model:openai",
+    "model:openrouter"
+  ];
+  return JSON.stringify({
+    schema_version: "ultrafuzz.data-governance-policy.v1",
+    sensitivity: "public",
+    source_destinations: destinations,
+    artifact_destinations: ["cloud:modal"],
+    destination_policies: destinations.map(syntheticDestinationPolicy),
+    local_model_agents: [],
+    openrouter_model_allowlist: [...openRouterModelAllowlist].sort(),
+    production_source_roots: ["contracts", "src"],
+    review_signoff_keys: []
+  });
 }
 
 function currentPsEnvelope(runs: unknown[]): unknown {
@@ -7159,6 +7208,57 @@ test("startRun forwards configured and explicitly allowed environment variables 
   assert.equal(fs.readFileSync(contextLog, "utf8"), "|||||\n");
 });
 
+test("startRun authenticates disclosure governance before execution-environment preflight", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  let preflightCalls = 0;
+
+  const run = await runtimeStartRun(
+    withFakeCliEntrypoint({
+      projectRoot: project,
+      runId: "governance-before-preflight",
+      env: {},
+      requiredCommandProbe: async () => {
+        preflightCalls += 1;
+        return [];
+      }
+    })
+  );
+
+  assert.equal(run.ok, false);
+  assert.ok(run.diagnostics.some((entry) => entry.code === "DATA_GOVERNANCE_DESTINATION_NOT_ALLOWED"));
+  assert.equal(preflightCalls, 0);
+  assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", "governance-before-preflight")), false);
+});
+
+test("startRun rechecks the acknowledged target after execution-environment preflight", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  fs.writeFileSync(path.join(project, "target.txt"), "reviewed target\n", "utf8");
+  const env = fakeSmithersEnv(project);
+  execFileSync("git", ["init", "-q"], { cwd: project });
+  execFileSync("git", ["config", "user.email", "tester@example.invalid"], { cwd: project });
+  execFileSync("git", ["config", "user.name", "Ultrafuzz Tester"], { cwd: project });
+  execFileSync("git", ["add", "."], { cwd: project });
+  execFileSync("git", ["commit", "-qm", "reviewed target"], { cwd: project });
+
+  const run = await startRun({
+    projectRoot: project,
+    runId: "governance-post-preflight-recheck",
+    env,
+    requiredCommandProbe: async (commands) => {
+      fs.writeFileSync(path.join(project, "target.txt"), "changed during preflight\n", "utf8");
+      return commands.map((name) => ({ name, available: true, path: `/usr/bin/${name}`, version: "test" }));
+    }
+  });
+
+  assert.equal(run.ok, false);
+  assert.equal(run.diagnostics[0]?.code, "DATA_GOVERNANCE_INPUT_CHANGED_DURING_PREFLIGHT");
+  assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", "governance-post-preflight-recheck")), false);
+});
+
 test("startRun rejects an untracked cwd executable before task worktrees or model work", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -7174,7 +7274,7 @@ test("startRun rejects an untracked cwd executable before task worktrees or mode
       ),
     "utf8"
   );
-  writeFakeInstalledSmithers(project);
+  const env = fakeSmithersEnv(project);
   const executable = path.join(project, "recon");
   fs.writeFileSync(executable, "#!/bin/sh\necho recon test\n", "utf8");
   fs.chmodSync(executable, 0o755);
@@ -7182,6 +7282,7 @@ test("startRun rejects an untracked cwd executable before task worktrees or mode
     projectRoot: project,
     runId: "empty-path-required-command",
     env: {
+      ...env,
       PATH: "",
       SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log")
     }
@@ -7192,7 +7293,7 @@ test("startRun rejects an untracked cwd executable before task worktrees or mode
   assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", "empty-path-required-command")), false);
 });
 
-test("startRun rejects controller-only paths as credential environment names", async () => {
+test("startRun rejects operator governance acknowledgements as credential environment names", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -7201,7 +7302,7 @@ test("startRun rejects controller-only paths as credential environment names", a
     configPath,
     fs
       .readFileSync(configPath, "utf8")
-      .replace('api_key_env = "OPENAI_API_KEY"', 'api_key_env = "ULTRAFUZZ_CONFIG_PATH"'),
+      .replace('api_key_env = "OPENAI_API_KEY"', 'api_key_env = "ULTRAFUZZ_DATA_DISCLOSURE_ACKNOWLEDGEMENTS"'),
     "utf8"
   );
 
@@ -7209,6 +7310,26 @@ test("startRun rejects controller-only paths as credential environment names", a
   const run = await startRun({
     projectRoot: project,
     runId: "controller-path-credential",
+    env
+  });
+
+  assert.equal(run.ok, false);
+  assert.match(run.diagnostics[0]?.message ?? "", /credential environment cannot name controller-only variable/u);
+  assert.equal(fs.existsSync(env.SMITHERS_FAKE_LOG!), false);
+});
+
+test("startRun rejects operator governance policy in the explicit agent environment allowlist", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env: Record<string, string | undefined> = {
+    ...fakeSmithersEnv(project),
+    ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "ULTRAFUZZ_DATA_GOVERNANCE_POLICY"
+  };
+
+  const run = await startRun({
+    projectRoot: project,
+    runId: "controller-policy-explicit-allowlist",
     env
   });
 
@@ -7340,7 +7461,7 @@ test("startRun preflights and isolates the dedicated OpenRouter credential while
     runId: "openrouter-missing-credential",
     agent: "OpenRouterAgent",
     model,
-    env: fakeSmithersEnv(project)
+    env: fakeSmithersEnv(project, { openRouterModelAllowlist: [model] })
   });
   assert.equal(missing.ok, false);
   assert.equal(missing.diagnostics[0]?.code, "RUN_AGENT_CREDENTIAL_MISSING");
@@ -7348,7 +7469,7 @@ test("startRun preflights and isolates the dedicated OpenRouter credential while
 
   const environmentLog = path.join(project, "smithers-openrouter-environment.log");
   const env = {
-    ...fakeSmithersEnv(project),
+    ...fakeSmithersEnv(project, { openRouterModelAllowlist: [model] }),
     SMITHERS_FAKE_OPENROUTER_ENV_LOG: environmentLog,
     OPENROUTER_API_KEY: "openrouter-agent-key",
     OPENAI_API_KEY: "unrelated-openai-key",
@@ -7479,7 +7600,8 @@ test("startRun submits the exact sealed redacted workflow input bytes", async ()
       PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
       SMITHERS_BIN: smithers,
       SMITHERS_FAKE_LOG: commandLog,
-      SMITHERS_FAKE_INPUT_LOG: inputLog
+      SMITHERS_FAKE_INPUT_LOG: inputLog,
+      ULTRAFUZZ_DATA_GOVERNANCE_POLICY: syntheticDataGovernancePolicy()
     }
   });
 
@@ -8049,7 +8171,11 @@ test("snapshot anchors close when executable acquisition rejects a replaced inte
   fs.chmodSync(interpreter, 0o755);
   fs.writeFileSync(installed.target, `#!${interpreter}\nprintf '%s\\n' '{"ok":true}'\n`, "utf8");
   fs.chmodSync(installed.target, 0o755);
-  const env = { PATH: "", SMITHERS_FAKE_LOG: path.join(project, "snapshot-anchor-cleanup.log") };
+  const env = {
+    PATH: "",
+    SMITHERS_FAKE_LOG: path.join(project, "snapshot-anchor-cleanup.log"),
+    ULTRAFUZZ_DATA_GOVERNANCE_POLICY: syntheticDataGovernancePolicy()
+  };
   const run = await startRun({ projectRoot: project, runId: "snapshot-anchor-cleanup", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   const evidence = await readLinkedWorkflowEvidence(project, "snapshot-anchor-cleanup");

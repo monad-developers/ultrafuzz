@@ -8,9 +8,18 @@ import {
   readRunMetadataDocument,
   validateSafeId
 } from "@ultrafuzz/artifacts";
-import { runsRootForProject, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
+import {
+  DATA_GOVERNANCE_POLICY_ENV,
+  loadOperatorAuthenticatedMaterializeReviewAuthorities,
+  recordedMaterializeReviewSignoffRequest,
+  readMaterializeAuditJournal,
+  runsRootForProject,
+  verifyRecordedMaterializeReviewSignoff,
+  type RuntimeDiagnostic
+} from "@ultrafuzz/runtime";
 
-import { commandFailure, emitCommandResult, globalFlags, projectRoot } from "../command-shared.js";
+import { cliIo, commandFailure, emitCommandResult, globalFlags, projectRoot } from "../command-shared.js";
+import type { CliReportAssurance } from "../cli-contracts.js";
 import { loadValidatedReportSnapshot, type ValidatedReportSnapshot } from "../report-artifacts.js";
 
 type AccountingField = "tokens_used" | "estimated_spend";
@@ -36,15 +45,21 @@ export default class Report extends Command {
       assertPathInside(runsRoot, layout.root, "run root");
       assertNoSymlinkComponents(runsRoot, layout.root, "run root");
       const loaded = loadValidatedReportSnapshot(layout.root);
-      const diagnostics = reportAccountingDiagnostics(layout.root, loaded);
+      const assurance = reportAssuranceDiagnostics(root, layout.root, runId, cliIo().env[DATA_GOVERNANCE_POLICY_ENV]);
+      const diagnostics = [...reportAccountingDiagnostics(layout.root, loaded), ...assurance.diagnostics];
       emitCommandResult(
         this,
         "report",
         {
           ok: true,
           command: "report",
-          data: loaded.artifacts,
-          text: `Report: ${loaded.artifacts.markdown_path}\nJSON: ${loaded.artifacts.json_path}\n`,
+          data: { ...loaded.artifacts, assurance: assurance.publicAssurance },
+          text:
+            `Report: ${loaded.artifacts.markdown_path}\nJSON: ${loaded.artifacts.json_path}\n` +
+            `Assurance — structural verification: passed\n` +
+            `Assurance — model consensus: agent-produced; not human acceptance\n` +
+            `Assurance — executable reproduction: evidence recorded; not replayed by this command\n` +
+            `Assurance — human acceptance: ${assurance.humanAcceptanceText}\n`,
           diagnostics
         },
         flags.json === true
@@ -58,6 +73,128 @@ export default class Report extends Command {
       );
     }
   }
+}
+
+function reportAssuranceDiagnostics(
+  projectRoot: string,
+  runRoot: string,
+  runId: string,
+  operatorPolicyJson: string | undefined
+): { diagnostics: RuntimeDiagnostic[]; publicAssurance: CliReportAssurance; humanAcceptanceText: string } {
+  let humanAcceptance: CliReportAssurance["human_acceptance"] = "not-recorded";
+  let reviewSignoff: CliReportAssurance["review_signoff"] = "not-present";
+  let invalidSignoff = false;
+  try {
+    const layout = layoutForRunRoot(runRoot, runId);
+    const audit = readMaterializeAuditJournal(path.join(projectRoot, ".ultrafuzz", "materialize-audit.jsonl"));
+    const candidates = audit.records.filter(
+      (record) =>
+        record.run_id === runId &&
+        record.mode === "unstaged-working-tree" &&
+        record.confirmed === true &&
+        record.review_signoff !== undefined
+    );
+    let authorities: ReturnType<typeof loadOperatorAuthenticatedMaterializeReviewAuthorities> = [];
+    if (candidates.length > 0) {
+      if (operatorPolicyJson === undefined || operatorPolicyJson.trim().length === 0) {
+        humanAcceptance = "unverified";
+        reviewSignoff = "operator-policy-required";
+      } else {
+        try {
+          authorities = loadOperatorAuthenticatedMaterializeReviewAuthorities({
+            projectRoot,
+            layout,
+            operatorPolicyJson
+          });
+        } catch {
+          humanAcceptance = "unverified";
+          reviewSignoff = "invalid";
+          invalidSignoff = true;
+        }
+      }
+    }
+    for (const record of candidates) {
+      if (authorities.length === 0) break;
+      try {
+        const expected = recordedMaterializeReviewSignoffRequest({
+          projectRoot,
+          layout,
+          selections: record.copies.map((copy) => ({
+            source: copy.source,
+            destination: copy.destination,
+            sha256: copy.sha256
+          })),
+          authorities,
+          signoff: record.review_signoff!
+        });
+        verifyRecordedMaterializeReviewSignoff({ signoff: record.review_signoff!, expected, authorities });
+        humanAcceptance = "accepted";
+        reviewSignoff = "verified";
+      } catch {
+        invalidSignoff = true;
+      }
+    }
+    if (invalidSignoff && humanAcceptance !== "accepted") {
+      humanAcceptance = "unverified";
+      reviewSignoff = "invalid";
+    }
+  } catch {
+    humanAcceptance = "unverified";
+    reviewSignoff = "audit-unavailable";
+  }
+  const publicAssurance: CliReportAssurance = {
+    structural_verification: "passed",
+    model_consensus: "agent-produced",
+    executable_reproduction: "not-replayed",
+    human_acceptance: humanAcceptance,
+    review_signoff: reviewSignoff
+  };
+  const humanAcceptanceText = humanAcceptance.replace("-", " ");
+  return {
+    publicAssurance,
+    humanAcceptanceText,
+    diagnostics: [
+      {
+        code: "REPORT_ASSURANCE_STRUCTURAL_VERIFICATION",
+        message: "structural verification passed for the authenticated final-report pair",
+        severity: "info",
+        source: "report",
+        details: { assurance_level: "structural-verification", status: "passed" }
+      },
+      {
+        code: "REPORT_ASSURANCE_MODEL_CONSENSUS",
+        message: "model consensus is agent-produced evidence and is not independent human acceptance",
+        severity: "info",
+        source: "report",
+        details: { assurance_level: "model-consensus", status: "agent-produced" }
+      },
+      {
+        code: "REPORT_ASSURANCE_EXECUTABLE_REPRODUCTION",
+        message: "executable reproduction is represented by report evidence; the report command does not replay it",
+        severity: "info",
+        source: "report",
+        details: { assurance_level: "executable-reproduction", status: "not-replayed" }
+      },
+      {
+        code: "REPORT_ASSURANCE_HUMAN_ACCEPTANCE",
+        message: `human acceptance: ${humanAcceptanceText}`,
+        severity: humanAcceptance === "unverified" ? "warning" : "info",
+        source: "report",
+        details: { assurance_level: "human-acceptance", status: humanAcceptance }
+      },
+      ...(invalidSignoff
+        ? [
+            {
+              code: "REPORT_ASSURANCE_SIGNOFF_INVALID",
+              message:
+                "a materialization audit claimed human acceptance but failed authority, binding, digest, or signature verification",
+              severity: "warning" as const,
+              source: "report"
+            }
+          ]
+        : [])
+    ]
+  };
 }
 
 function reportAccountingDiagnostics(runRoot: string, report: ValidatedReportSnapshot): RuntimeDiagnostic[] {

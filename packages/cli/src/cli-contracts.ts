@@ -3,6 +3,7 @@ import {
   type JsonFileValidationResult,
   type NodeState,
   type PlannedGraphDocument,
+  type RunDataGovernanceReference,
   type RunMetadataAccounting,
   type RunMetadataAuditProfile,
   type RunState,
@@ -173,6 +174,7 @@ export interface CliPublicRunMetadata {
   redacted_config_fingerprint: string;
   prompt_digest?: string;
   audit_profile?: RunMetadataAuditProfile;
+  data_governance?: RunDataGovernanceReference;
   forge_guard: {
     enabled: boolean;
     active: boolean;
@@ -220,6 +222,18 @@ export interface CliReportBundleData {
   entry_count: number;
   included_roots: string[];
   excluded_roots: string[];
+}
+
+export interface CliReportAssurance {
+  structural_verification: "passed";
+  model_consensus: "agent-produced";
+  executable_reproduction: "not-replayed";
+  human_acceptance: "accepted" | "not-recorded" | "unverified";
+  review_signoff: "verified" | "not-present" | "invalid" | "operator-policy-required" | "audit-unavailable";
+}
+
+export interface CliReportData extends ValidatedReportArtifacts {
+  assurance: CliReportAssurance;
 }
 
 export interface CliEvalPlanData {
@@ -348,7 +362,7 @@ export interface CliCommandDataMap {
   status: RunHealthValue;
   stats: RunStatisticsValue;
   inspect: CliInspectData;
-  report: ValidatedReportArtifacts;
+  report: CliReportData;
   "report render": {
     source_path: string;
     destination_path: string;

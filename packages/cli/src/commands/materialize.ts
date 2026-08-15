@@ -1,7 +1,7 @@
 import { Args, Command, Flags } from "@oclif/core";
-import { materializeRun } from "@ultrafuzz/runtime";
+import { DATA_GOVERNANCE_POLICY_ENV, materializeRun } from "@ultrafuzz/runtime";
 
-import { commandFromRuntime, emitCommandResult, globalFlags, projectRoot } from "../command-shared.js";
+import { cliIo, commandFromRuntime, emitCommandResult, globalFlags, projectRoot } from "../command-shared.js";
 
 export default class Materialize extends Command {
   static override summary = "Safely copy selected run outputs into the project";
@@ -12,7 +12,10 @@ export default class Materialize extends Command {
     yes: Flags.boolean({ summary: "Confirm materialization" }),
     confirm: Flags.boolean({ summary: "Confirm materialization" }),
     "dry-run": Flags.boolean({ summary: "Plan without writing" }),
-    force: Flags.boolean({ summary: "Allow overwriting destinations" })
+    force: Flags.boolean({ summary: "Allow overwriting destinations" }),
+    "review-signoff": Flags.string({
+      summary: "Absolute path to an operator-owned review signoff for publication-sensitive outputs"
+    })
   };
 
   async run(): Promise<void> {
@@ -30,7 +33,9 @@ export default class Materialize extends Command {
       copies,
       confirmed: flags.yes === true || flags.confirm === true,
       dryRun: flags["dry-run"],
-      allowOverwrite: flags.force
+      allowOverwrite: flags.force,
+      operatorDataGovernancePolicy: cliIo().env[DATA_GOVERNANCE_POLICY_ENV],
+      ...(flags["review-signoff"] === undefined ? {} : { reviewSignoffPath: flags["review-signoff"] })
     });
     emitCommandResult(
       this,

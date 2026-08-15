@@ -343,7 +343,18 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
   return {
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
     SMITHERS_BIN: smithers,
-    SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log")
+    SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log"),
+    ULTRAFUZZ_DATA_GOVERNANCE_POLICY: JSON.stringify({
+      schema_version: "ultrafuzz.data-governance-policy.v1",
+      sensitivity: "public",
+      source_destinations: ["model:openai"],
+      artifact_destinations: [],
+      destination_policies: [syntheticDestinationPolicy("model:openai")],
+      local_model_agents: [],
+      openrouter_model_allowlist: [],
+      production_source_roots: ["contracts", "src"],
+      review_signoff_keys: []
+    })
   };
 }
 
@@ -672,7 +683,18 @@ test("status recommends ultrafuzz why instead of the engine command", async () =
   fs.chmodSync(smithers, 0o755);
   const env = {
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
-    SMITHERS_BIN: smithers
+    SMITHERS_BIN: smithers,
+    ULTRAFUZZ_DATA_GOVERNANCE_POLICY: JSON.stringify({
+      schema_version: "ultrafuzz.data-governance-policy.v1",
+      sensitivity: "public",
+      source_destinations: ["model:openai"],
+      artifact_destinations: [],
+      destination_policies: [syntheticDestinationPolicy("model:openai")],
+      local_model_agents: [],
+      openrouter_model_allowlist: [],
+      production_source_roots: ["contracts", "src"],
+      review_signoff_keys: []
+    })
   };
   const init = await cli(project, ["init", "--json"], env);
   assert.equal(init.code, 0, init.stderr);
@@ -687,3 +709,16 @@ test("status recommends ultrafuzz why instead of the engine command", async () =
   assert.equal(data.reason, "run `ultrafuzz why` for the blocking node");
   assertNoEngineBranding(parseJson(status));
 });
+
+function syntheticDestinationPolicy(destination: string): Record<string, string> {
+  return {
+    destination,
+    processor: "synthetic test process",
+    region: "local test process",
+    retention_policy: "synthetic test fixtures only",
+    training_policy: "not used for training",
+    dpa_status: "not applicable to synthetic fixtures",
+    minimization_policy: "synthetic fixture content only",
+    data_handling_basis: "synthetic public test fixtures"
+  };
+}

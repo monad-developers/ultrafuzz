@@ -90,9 +90,128 @@
           }
         }
       }
+    },
+    "review_signoff": {
+      "$ref": "#/$defs/reviewSignoff"
     }
   },
   "$defs": {
+    "reviewSignoff": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "decision",
+        "run_id",
+        "target_commit",
+        "target_tree",
+        "target_clean",
+        "target_worktree_digest",
+        "graph_fingerprint",
+        "final_report_digest",
+        "selected_artifacts",
+        "trusted_signers",
+        "reviewer",
+        "reviewed_at",
+        "signing_key_id",
+        "signature",
+        "signoff_sha256"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "ultrafuzz.materialize.review-signoff.v1"
+        },
+        "decision": {
+          "const": "accepted"
+        },
+        "run_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        },
+        "target_commit": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40,64}$"
+        },
+        "target_tree": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40,64}$"
+        },
+        "target_clean": {
+          "const": true
+        },
+        "target_worktree_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "graph_fingerprint": {
+          "$ref": "#/$defs/sha256"
+        },
+        "final_report_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "selected_artifacts": {
+          "type": "array",
+          "maxItems": 4096,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["source", "destination", "sha256"],
+            "properties": {
+              "source": {
+                "$ref": "#/$defs/nonEmptyString"
+              },
+              "destination": {
+                "$ref": "#/$defs/nonEmptyString"
+              },
+              "sha256": {
+                "$ref": "#/$defs/sha256"
+              }
+            }
+          }
+        },
+        "trusted_signers": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["key_id", "algorithm", "public_key_sha256"],
+            "properties": {
+              "key_id": {
+                "$ref": "#/$defs/safeId"
+              },
+              "algorithm": {
+                "const": "ed25519"
+              },
+              "public_key_sha256": {
+                "$ref": "#/$defs/sha256"
+              }
+            }
+          }
+        },
+        "reviewer": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "reviewed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "signing_key_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "signature": {
+          "type": "string",
+          "minLength": 88,
+          "maxLength": 88,
+          "pattern": "^[A-Za-z0-9+/]{86}==$"
+        },
+        "signoff_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
     "nonEmptyString": {
       "type": "string",
       "minLength": 1
@@ -105,6 +224,10 @@
     "sha256": {
       "type": "string",
       "pattern": "^[a-f0-9]{64}$"
+    },
+    "safeId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
     }
   }
 }
