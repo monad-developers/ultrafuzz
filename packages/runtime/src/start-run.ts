@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -5,6 +6,7 @@ import {
   appendEvent,
   assertPlannedGraph,
   assertSmithersTaskManifestMatchesPlannedGraph,
+  NODE_PROVENANCE_FAILURE_CATEGORIES,
   assertNoSymlinkComponents,
   assertPathInside,
   layoutForRunRoot,
@@ -20,6 +22,7 @@ import {
   type RunMetadataDocument,
   type RunMetadataWorkflow,
   type RunWorkflowProvenance,
+  type RunRecoveryProvenance,
   type RunLayout,
   type AppendEventInput,
   type SmithersTaskManifestDocument,
@@ -427,7 +430,76 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
     if (preflightDiagnostics.length > 0) {
       return runtimeFailure<WorkflowLifecycleValue>(preflightDiagnostics);
     }
+    // Reconcile Smithers before retrying so a stale local running state cannot
+    // hide the failed run that this retry is recovering.
+    if (action === "resume" && input.retryFailed === true) {
+      const { syncRun } = await import("./workflow-sync.js");
+      const synchronization = await syncRun({ projectRoot: input.projectRoot, runId: input.runId, env: input.env });
+      if (!synchronization.ok) {
+        return runtimeFailure<WorkflowLifecycleValue>(synchronization.diagnostics);
+      }
+    }
     const requestedConcurrency = input.maxConcurrency ?? sealedConfig.run.maxParallelAgents;
+    const stateBeforeLifecycle = readRunState(evidence.layout);
+    let recoveryCandidate:
+      | {
+          failedNodes: RunRecoveryProvenance["failed_nodes"];
+          sourceWorkflowRunId: string;
+          sourceWorkflowLinkId: string;
+        }
+      | undefined;
+    if (action === "resume" && input.retryFailed === true && stateBeforeLifecycle.status === "failed") {
+      const failedNodes: RunRecoveryProvenance["failed_nodes"] = [];
+      let completeAttemptAuthority = true;
+      for (const node of Object.values(stateBeforeLifecycle.nodes).filter(
+        (candidate) => candidate.status === "failed" || candidate.status === "timed-out"
+      )) {
+        const provenance = node.provenance as Record<string, unknown> | undefined;
+        const workflow = provenance?.workflow as Record<string, unknown> | undefined;
+        const workflowTaskId = workflow?.task_id;
+        const failedAttempt = workflow?.attempt;
+        if (
+          typeof workflowTaskId !== "string" ||
+          workflowTaskId.length === 0 ||
+          typeof failedAttempt !== "number" ||
+          !Number.isSafeInteger(failedAttempt) ||
+          failedAttempt < 0
+        ) {
+          // A multi-attempt concrete node is only a projection over its
+          // authoritative task attempts. Any other missing task/attempt
+          // identity makes this recovery fail closed.
+          if (Array.isArray(workflow?.aggregate_attempt_statuses)) continue;
+          completeAttemptAuthority = false;
+          break;
+        }
+        const failure = provenance?.failure as Record<string, unknown> | undefined;
+        const category = failure?.category;
+        if (
+          typeof category !== "string" ||
+          !NODE_PROVENANCE_FAILURE_CATEGORIES.includes(
+            category as RunRecoveryProvenance["failed_nodes"][number]["failure_category"]
+          )
+        ) {
+          completeAttemptAuthority = false;
+          break;
+        }
+        const failureCategory = category as RunRecoveryProvenance["failed_nodes"][number]["failure_category"];
+        failedNodes.push({
+          node_id: node.node_id,
+          workflow_task_id: workflowTaskId,
+          failed_attempt: failedAttempt,
+          failure_category: failureCategory
+        });
+      }
+      if (completeAttemptAuthority && failedNodes.length > 0) {
+        recoveryCandidate = {
+          failedNodes,
+          sourceWorkflowRunId: evidence.smithersRunId,
+          sourceWorkflowLinkId: evidence.workflowLinkId
+        };
+      }
+    }
+    const retryFailedLifecycle = action === "resume" && input.retryFailed === true;
     const forgeGuard = prepareForgeGuardEnvironment({
       layout: evidence.layout,
       config: sealedConfig,
@@ -448,9 +520,38 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
         action,
         workflow_run_id: evidence.smithersRunId,
         control_generation: evidence.controlGeneration,
-        workflow_link_id: evidence.workflowLinkId
+        workflow_link_id: evidence.workflowLinkId,
+        ...(retryFailedLifecycle ? { retry_failed: true } : {})
       }
     });
+    let preparedRecovery: RunRecoveryProvenance | undefined;
+    if (recoveryCandidate !== undefined) {
+      const state = readRunState(evidence.layout);
+      const priorRecovery = state.provenance?.recovery;
+      preparedRecovery = {
+        recovery_id: crypto.randomUUID(),
+        submission_status: "prepared",
+        recovered: false,
+        prior_status: "failed",
+        failed_nodes: recoveryCandidate.failedNodes,
+        source_workflow_run_id: recoveryCandidate.sourceWorkflowRunId,
+        source_workflow_link_id: recoveryCandidate.sourceWorkflowLinkId,
+        control_generation: evidence.controlGeneration,
+        controller_invocation_id: controllerInvocation.event_id,
+        controller_invoked_at: controllerInvocation.timestamp
+      };
+      writeRunState(evidence.layout, {
+        ...state,
+        provenance: {
+          ...state.provenance!,
+          recovery_history: [
+            ...(state.provenance?.recovery_history ?? []),
+            ...(priorRecovery === undefined ? [] : [priorRecovery])
+          ],
+          recovery: preparedRecovery
+        }
+      });
+    }
     const lifecycleResult = await runSmithersLifecycleCommand({
       action,
       smithersRunId: evidence.smithersRunId,
@@ -490,7 +591,8 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
         workflow_run_id: workflowRunId,
         control_generation: evidence.controlGeneration,
         controller_invocation_id: controllerInvocation.event_id,
-        controller_invoked_at: controllerInvocation.timestamp
+        controller_invoked_at: controllerInvocation.timestamp,
+        ...(retryFailedLifecycle ? { retry_failed: true } : {})
       }
     });
     const linkedWorkflow = await updateLinkedWorkflowRunId(evidence.layout, workflowRunId, {
@@ -522,7 +624,7 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       writeRunState(evidence.layout, state);
     }
     updateRunStatus(evidence.layout, "running", submittedAt);
-    appendEvent(evidence.layout, {
+    const lifecycleSubmissionEvent = appendEvent(evidence.layout, {
       eventType: lifecycleResult.alreadyRunning ? "workflow-lifecycle-already-running" : "workflow-lifecycle-submitted",
       status: "running",
       payload: {
@@ -532,10 +634,37 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
         control_generation: evidence.controlGeneration,
         controller_invocation_id: controllerInvocation.event_id,
         controller_invoked_at: controllerInvocation.timestamp,
+        ...(retryFailedLifecycle ? { retry_failed: true } : {}),
         ...(input.resetNode !== undefined ? { reset_node: input.resetNode } : {}),
         ...(lifecycleResult.recoveredMissingRun ? { recovered_missing_workflow_run: true } : {})
       }
     });
+    if (preparedRecovery !== undefined && !lifecycleResult.alreadyRunning) {
+      const state = readRunState(evidence.layout);
+      if (
+        state.provenance?.recovery?.submission_status !== "prepared" ||
+        state.provenance.recovery.recovery_id !== preparedRecovery.recovery_id ||
+        state.provenance.recovery.controller_invocation_id !== controllerInvocation.event_id
+      ) {
+        throw new Error("prepared retry recovery authority changed before lifecycle submission completed");
+      }
+      writeRunState(evidence.layout, {
+        ...state,
+        provenance: {
+          ...state.provenance!,
+          recovery: {
+            ...preparedRecovery,
+            submission_status: "submitted",
+            workflow_run_id: workflowRunId,
+            workflow_link_id: linkedWorkflow.link_id,
+            lifecycle_result_event_id: lifecycleResultEvent.event_id,
+            lifecycle_result_at: lifecycleResultEvent.timestamp,
+            lifecycle_submission_event_id: lifecycleSubmissionEvent.event_id,
+            lifecycle_submitted_at: lifecycleSubmissionEvent.timestamp
+          }
+        }
+      });
+    }
     return runtimeResult(true, {
       run_id: input.runId,
       workflow_run_id: workflowRunId,
@@ -1096,6 +1225,7 @@ function writeLinkedWorkflowBinding(
   const existingProvenance = state.provenance;
   if (existingProvenance === undefined) throw new Error("workflow replacement requires existing state provenance");
   state.provenance = {
+    ...existingProvenance,
     workflow: {
       ...existingProvenance.workflow,
       inspection: { runId: link.workflow_run_id },

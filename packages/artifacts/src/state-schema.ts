@@ -46,7 +46,87 @@ const runWorkflowProvenanceSchema = z.strictObject({
   linkId: canonicalUuidSchema,
   executionSnapshot: z.string().regex(/^smithers\/execution-snapshots\/[0-9a-f]{64}$/u)
 });
-const runProvenanceSchema = z.strictObject({ workflow: runWorkflowProvenanceSchema });
+const runRecoveryProvenanceSchema = z
+  .strictObject({
+    recovery_id: canonicalUuidSchema,
+    submission_status: z.enum(["prepared", "submitted"]),
+    recovered: z.boolean(),
+    recovered_at: canonicalTimestampSchema.optional(),
+    prior_status: z.literal("failed"),
+    failed_nodes: z
+      .array(
+        z.strictObject({
+          node_id: nonEmptyString,
+          workflow_task_id: nonEmptyString,
+          failed_attempt: nonNegativeInteger,
+          failure_category: z.enum(NODE_PROVENANCE_FAILURE_CATEGORIES)
+        })
+      )
+      .min(1),
+    source_workflow_run_id: nonEmptyString,
+    source_workflow_link_id: canonicalUuidSchema,
+    workflow_run_id: nonEmptyString.optional(),
+    workflow_link_id: canonicalUuidSchema.optional(),
+    control_generation: sha256,
+    controller_invocation_id: nonEmptyString,
+    controller_invoked_at: canonicalTimestampSchema,
+    lifecycle_result_event_id: nonEmptyString.optional(),
+    lifecycle_result_at: canonicalTimestampSchema.optional(),
+    lifecycle_submission_event_id: nonEmptyString.optional(),
+    lifecycle_submitted_at: canonicalTimestampSchema.optional()
+  })
+  .superRefine((value, context) => {
+    if (value.recovered && value.recovered_at === undefined) {
+      context.addIssue({
+        code: "custom",
+        message: "completed recovery provenance requires its completion timestamp",
+        path: ["recovered_at"]
+      });
+    }
+    if (!value.recovered && value.recovered_at !== undefined) {
+      context.addIssue({
+        code: "custom",
+        message: "incomplete recovery provenance cannot carry a completion timestamp",
+        path: ["recovered_at"]
+      });
+    }
+    const submissionFields = [
+      "workflow_run_id",
+      "workflow_link_id",
+      "lifecycle_result_event_id",
+      "lifecycle_result_at",
+      "lifecycle_submission_event_id",
+      "lifecycle_submitted_at"
+    ] as const;
+    for (const field of submissionFields) {
+      if (value.submission_status === "submitted" && value[field] === undefined) {
+        context.addIssue({
+          code: "custom",
+          message: "submitted recovery provenance requires complete lifecycle evidence",
+          path: [field]
+        });
+      }
+      if (value.submission_status === "prepared" && value[field] !== undefined) {
+        context.addIssue({
+          code: "custom",
+          message: "prepared recovery provenance cannot claim lifecycle completion evidence",
+          path: [field]
+        });
+      }
+    }
+    if (value.submission_status === "prepared" && value.recovered) {
+      context.addIssue({
+        code: "custom",
+        message: "prepared recovery provenance cannot be completed",
+        path: ["recovered"]
+      });
+    }
+  });
+const runProvenanceSchema = z.strictObject({
+  workflow: runWorkflowProvenanceSchema,
+  recovery: runRecoveryProvenanceSchema.optional(),
+  recovery_history: z.array(runRecoveryProvenanceSchema).optional()
+});
 const taskWorkflowProvenanceSchema = z.strictObject({
   run_id: nonEmptyString,
   task_id: nonEmptyString,
@@ -434,7 +514,104 @@ export const runStateJsonSchema = {
       type: "object",
       required: ["workflow"],
       additionalProperties: false,
-      properties: { workflow: { $ref: "#/$defs/runWorkflowProvenance" } }
+      properties: {
+        workflow: { $ref: "#/$defs/runWorkflowProvenance" },
+        recovery: { $ref: "#/$defs/runRecoveryProvenance" },
+        recovery_history: { type: "array", items: { $ref: "#/$defs/runRecoveryProvenance" } }
+      }
+    },
+    runRecoveryProvenance: {
+      type: "object",
+      required: [
+        "recovery_id",
+        "submission_status",
+        "recovered",
+        "prior_status",
+        "failed_nodes",
+        "source_workflow_run_id",
+        "source_workflow_link_id",
+        "control_generation",
+        "controller_invocation_id",
+        "controller_invoked_at"
+      ],
+      additionalProperties: false,
+      properties: {
+        recovery_id: { $ref: "#/$defs/runWorkflowProvenance/properties/linkId" },
+        submission_status: { enum: ["prepared", "submitted"] },
+        recovered: { type: "boolean" },
+        recovered_at: { $ref: "#/properties/created_at" },
+        prior_status: { const: "failed" },
+        failed_nodes: {
+          type: "array",
+          minItems: 1,
+          items: {
+            type: "object",
+            required: ["node_id", "workflow_task_id", "failed_attempt", "failure_category"],
+            additionalProperties: false,
+            properties: {
+              node_id: { type: "string", minLength: 1 },
+              workflow_task_id: { type: "string", minLength: 1 },
+              failed_attempt: { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
+              failure_category: { enum: NODE_PROVENANCE_FAILURE_CATEGORIES }
+            }
+          }
+        },
+        source_workflow_run_id: { type: "string", minLength: 1 },
+        source_workflow_link_id: { $ref: "#/$defs/runWorkflowProvenance/properties/linkId" },
+        workflow_run_id: { type: "string", minLength: 1 },
+        workflow_link_id: { $ref: "#/$defs/runWorkflowProvenance/properties/linkId" },
+        control_generation: { $ref: "#/$defs/runWorkflowProvenance/properties/controlGeneration" },
+        controller_invocation_id: { type: "string", minLength: 1 },
+        controller_invoked_at: { $ref: "#/properties/created_at" },
+        lifecycle_result_event_id: { type: "string", minLength: 1 },
+        lifecycle_result_at: { $ref: "#/properties/created_at" },
+        lifecycle_submission_event_id: { type: "string", minLength: 1 },
+        lifecycle_submitted_at: { $ref: "#/properties/created_at" }
+      },
+      allOf: [
+        {
+          if: { properties: { submission_status: { const: "submitted" } }, required: ["submission_status"] },
+          then: {
+            properties: {
+              workflow_run_id: {},
+              workflow_link_id: {},
+              lifecycle_result_event_id: {},
+              lifecycle_result_at: {},
+              lifecycle_submission_event_id: {},
+              lifecycle_submitted_at: {}
+            },
+            required: [
+              "workflow_run_id",
+              "workflow_link_id",
+              "lifecycle_result_event_id",
+              "lifecycle_result_at",
+              "lifecycle_submission_event_id",
+              "lifecycle_submitted_at"
+            ]
+          },
+          else: {
+            not: {
+              anyOf: [
+                "workflow_run_id",
+                "workflow_link_id",
+                "lifecycle_result_event_id",
+                "lifecycle_result_at",
+                "lifecycle_submission_event_id",
+                "lifecycle_submitted_at"
+              ].map((field) => ({ required: [field] }))
+            }
+          }
+        },
+        {
+          if: { properties: { submission_status: { const: "prepared" } }, required: ["submission_status"] },
+          then: { properties: { recovered: { const: false } } }
+        },
+        {
+          if: { properties: { recovered: { const: true } }, required: ["recovered"] },
+          then: { properties: { recovered_at: {} }, required: ["recovered_at"] },
+          else: { not: { required: ["recovered_at"] } }
+        }
+      ]
     },
     runWorkflowProvenance: {
       type: "object",

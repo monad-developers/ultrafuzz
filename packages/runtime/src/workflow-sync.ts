@@ -297,6 +297,13 @@ interface AttemptWorkflowEvidence {
   taskId: string;
 }
 
+interface ObservedTaskEvidence {
+  status: NodeStatus;
+  taskId: string;
+  attempt?: number;
+  workflowState?: SmithersNodeState;
+}
+
 interface NodeFinalization {
   status: NodeStatus;
   diagnostics: RuntimeDiagnostic[];
@@ -550,6 +557,28 @@ export async function synchronizeLinkedWorkflowRun(
     throw error;
   }
   diagnostics.push(...syncResult.diagnostics);
+  reconcilePreparedRecoveryProvenance(layout);
+  const recoveryState = readRunState(layout);
+  const recovery = recoveryState.provenance?.recovery;
+  const recoveryDispositionAuthorized = recoverySubmissionAuthorized({
+    layout,
+    state: recoveryState,
+    workflowRunId: evidence.smithersRunId,
+    workflowLinkId: evidence.workflowLinkId,
+    controlGeneration: evidence.controlGeneration
+  });
+  const evidenceComplete = syncResult.syncedNodes >= loaded.tasks.length;
+  const recoveredAggregateAuthorized = recoveryAuthorizesTerminalAggregate({
+    layout,
+    state: recoveryState,
+    inspect,
+    nodeStatuses: syncResult.nodeStatuses,
+    observedTaskEvidence: syncResult.observedTaskEvidence,
+    evidenceComplete,
+    workflowRunId: evidence.smithersRunId,
+    workflowLinkId: evidence.workflowLinkId,
+    controlGeneration: evidence.controlGeneration
+  });
   if (workflowSucceeded(inspect) && syncResult.syncedNodes < loaded.tasks.length) {
     diagnostics.push({
       code: "WORKFLOW_TASK_EVIDENCE_MISSING",
@@ -567,7 +596,11 @@ export async function synchronizeLinkedWorkflowRun(
     Object.entries(readRunState(layout).nodes).map(([nodeId, node]) => [nodeId, node.status])
   );
   for (const [nodeId, status] of syncResult.nodeStatuses) attributionStatuses.set(nodeId, status);
-  const unattributedFailure = unattributedTerminalWorkflowFailure(inspect, attributionStatuses);
+  const unattributedFailure = unattributedTerminalWorkflowFailure(
+    inspect,
+    attributionStatuses,
+    recoveredAggregateAuthorized
+  );
   if (unattributedFailure !== undefined) {
     diagnostics.push(unattributedFailure);
   }
@@ -595,9 +628,12 @@ export async function synchronizeLinkedWorkflowRun(
   }
 
   const finalStatus = finalRunStatus(inspect, syncResult.nodeStatuses, readRunState(layout).status, {
-    evidenceComplete: syncResult.syncedNodes >= loaded.tasks.length
+    evidenceComplete,
+    recoveredAggregateAuthorized,
+    recoveryRequiresAuthorization: recovery?.prior_status === "failed" && recovery.recovered === false
   });
-  const previousRunStatus = readRunState(layout).status;
+  const stateBeforeStatusUpdate = readRunState(layout);
+  const previousRunStatus = stateBeforeStatusUpdate.status;
   const runStatusChanged = previousRunStatus !== finalStatus;
   if (runStatusChanged) {
     const preStatusWriteBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationClock(control));
@@ -605,6 +641,37 @@ export async function synchronizeLinkedWorkflowRun(
       return { ok: false, diagnostics: [preStatusWriteBudgetDiagnostic] };
     }
     updateRunStatus(layout, finalStatus);
+  }
+  const recoveryBeforeStatusUpdate = stateBeforeStatusUpdate.provenance?.recovery;
+  if (
+    finalStatus === "succeeded" &&
+    recoveryDispositionAuthorized &&
+    recoveryBeforeStatusUpdate?.prior_status === "failed" &&
+    recoveryBeforeStatusUpdate.recovered === false
+  ) {
+    if (
+      !replayEvents(layout).records.some(
+        (event) =>
+          event.event_type === "run-recovered" && event.payload.recovery_id === recoveryBeforeStatusUpdate.recovery_id
+      )
+    ) {
+      appendEvent(layout, {
+        eventType: "run-recovered",
+        status: "succeeded",
+        payload: {
+          recovery_id: recoveryBeforeStatusUpdate.recovery_id,
+          prior_status: "failed",
+          failed_nodes: recoveryBeforeStatusUpdate.failed_nodes
+        }
+      });
+    }
+    const state = readRunState(layout);
+    const recovered = {
+      ...recoveryBeforeStatusUpdate,
+      recovered: true,
+      recovered_at: new Date(synchronizationClock(control)).toISOString()
+    };
+    writeRunState(layout, { ...state, provenance: { ...state.provenance!, recovery: recovered } });
   }
   const observedAtMs = synchronizationClock(control);
   const workflowControl = projectWorkflowControlState({
@@ -725,6 +792,234 @@ export async function synchronizeLinkedWorkflowRun(
       synced_nodes: syncResult.syncedNodes
     }
   };
+}
+
+function recoveryAuthorizesTerminalAggregate(input: {
+  layout: RunLayout;
+  state: ReturnType<typeof readRunState>;
+  inspect: WorkflowInspect;
+  nodeStatuses: Map<string, NodeStatus>;
+  observedTaskEvidence: Map<string, ObservedTaskEvidence>;
+  evidenceComplete: boolean;
+  workflowRunId: string;
+  workflowLinkId: string;
+  controlGeneration: string;
+}): boolean {
+  const recovery = input.state.provenance?.recovery;
+  const statuses = [...input.nodeStatuses.values()];
+  if (
+    (input.inspect.runState !== "failed" && input.inspect.runState !== "succeeded") ||
+    recovery === undefined ||
+    !recoverySubmissionAuthorized({
+      layout: input.layout,
+      state: input.state,
+      workflowRunId: input.workflowRunId,
+      workflowLinkId: input.workflowLinkId,
+      controlGeneration: input.controlGeneration
+    }) ||
+    !input.evidenceComplete ||
+    statuses.length === 0 ||
+    !statuses.every((status) => status === "succeeded" || status === "reused-from-prior-run") ||
+    input.observedTaskEvidence.size === 0
+  ) {
+    return false;
+  }
+
+  for (const [nodeId, observed] of input.observedTaskEvidence) {
+    const node = input.state.nodes[nodeId];
+    const workflow = recordField(node?.provenance, "workflow");
+    if (
+      node === undefined ||
+      observed.status !== "succeeded" ||
+      observed.workflowState !== "finished" ||
+      observed.attempt === undefined ||
+      (node.status !== "succeeded" && node.status !== "reused-from-prior-run") ||
+      stringField(workflow, "run_id") !== recovery.workflow_run_id ||
+      stringField(workflow, "task_id") !== observed.taskId ||
+      numberField(workflow, "attempt") !== observed.attempt
+    ) {
+      return false;
+    }
+  }
+
+  for (const failedNode of recovery.failed_nodes) {
+    const node = input.state.nodes[failedNode.node_id];
+    const workflow = recordField(node?.provenance, "workflow");
+    const failedTask = input.inspect.steps.find((step) => step.id === failedNode.workflow_task_id);
+    if (
+      node === undefined ||
+      failedTask === undefined ||
+      failedTask.state !== "finished" ||
+      failedTask.attempt <= failedNode.failed_attempt ||
+      (node.status !== "succeeded" && node.status !== "reused-from-prior-run") ||
+      stringField(workflow, "run_id") !== recovery.workflow_run_id ||
+      (numberField(workflow, "attempt") ?? -1) <= failedNode.failed_attempt
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function recoverySubmissionAuthorized(input: {
+  layout: RunLayout;
+  state: ReturnType<typeof readRunState>;
+  workflowRunId: string;
+  workflowLinkId: string;
+  controlGeneration: string;
+}): boolean {
+  const recovery = input.state.provenance?.recovery;
+  if (
+    recovery?.submission_status !== "submitted" ||
+    recovery.prior_status !== "failed" ||
+    recovery.workflow_run_id !== input.workflowRunId ||
+    recovery.workflow_link_id !== input.workflowLinkId ||
+    recovery.control_generation !== input.controlGeneration ||
+    recovery.lifecycle_result_event_id === undefined ||
+    recovery.lifecycle_result_at === undefined ||
+    recovery.lifecycle_submission_event_id === undefined ||
+    recovery.lifecycle_submitted_at === undefined
+  ) {
+    return false;
+  }
+
+  const records = replayEvents(input.layout, Number.MAX_SAFE_INTEGER).records;
+  const uniqueRecord = (eventId: string) => {
+    const matches = records
+      .map((record, index) => ({ record, index }))
+      .filter(({ record }) => record.event_id === eventId);
+    return matches.length === 1 ? matches[0] : undefined;
+  };
+  const invocation = uniqueRecord(recovery.controller_invocation_id);
+  const result = uniqueRecord(recovery.lifecycle_result_event_id);
+  const submission = uniqueRecord(recovery.lifecycle_submission_event_id);
+  if (
+    invocation === undefined ||
+    result === undefined ||
+    submission === undefined ||
+    !(invocation.index < result.index && result.index < submission.index) ||
+    invocation.record.timestamp !== recovery.controller_invoked_at ||
+    result.record.timestamp !== recovery.lifecycle_result_at ||
+    submission.record.timestamp !== recovery.lifecycle_submitted_at
+  ) {
+    return false;
+  }
+
+  const invocationPayload = invocation.record.payload as Record<string, unknown>;
+  const resultPayload = result.record.payload as Record<string, unknown>;
+  const submissionPayload = submission.record.payload as Record<string, unknown>;
+  if (
+    invocation.record.event_type !== "workflow-lifecycle-invoking" ||
+    invocationPayload.action !== "resume" ||
+    invocationPayload.retry_failed !== true ||
+    invocationPayload.workflow_run_id !== recovery.source_workflow_run_id ||
+    invocationPayload.workflow_link_id !== recovery.source_workflow_link_id ||
+    invocationPayload.control_generation !== recovery.control_generation ||
+    result.record.event_type !== "workflow-lifecycle-result" ||
+    resultPayload.action !== "resume" ||
+    resultPayload.retry_failed !== true ||
+    resultPayload.source_workflow_run_id !== recovery.source_workflow_run_id ||
+    resultPayload.source_workflow_link_id !== recovery.source_workflow_link_id ||
+    resultPayload.workflow_run_id !== recovery.workflow_run_id ||
+    resultPayload.control_generation !== recovery.control_generation ||
+    resultPayload.controller_invocation_id !== recovery.controller_invocation_id ||
+    resultPayload.controller_invoked_at !== recovery.controller_invoked_at ||
+    submission.record.event_type !== "workflow-lifecycle-submitted" ||
+    submissionPayload.action !== "resume" ||
+    submissionPayload.retry_failed !== true ||
+    submissionPayload.workflow_run_id !== recovery.workflow_run_id ||
+    submissionPayload.workflow_link_id !== recovery.workflow_link_id ||
+    submissionPayload.control_generation !== recovery.control_generation ||
+    submissionPayload.controller_invocation_id !== recovery.controller_invocation_id ||
+    submissionPayload.controller_invoked_at !== recovery.controller_invoked_at
+  ) {
+    return false;
+  }
+
+  // A completed recovery remains stable across read-only synchronization, but
+  // any later lifecycle action consumes its authority. A new retry-failed
+  // action must establish a new exact recovery disposition of its own.
+  return !records.some(
+    (record, index) => index > invocation.index && record.event_type === "workflow-lifecycle-invoking"
+  );
+}
+
+function reconcilePreparedRecoveryProvenance(layout: RunLayout): void {
+  const state = readRunState(layout);
+  const recovery = state.provenance?.recovery;
+  if (recovery?.submission_status !== "prepared") return;
+
+  const records = replayEvents(layout, Number.MAX_SAFE_INTEGER).records.map((record, index) => ({ record, index }));
+  const invocationMatches = records.filter(({ record }) => record.event_id === recovery.controller_invocation_id);
+  if (invocationMatches.length !== 1) return;
+  const invocation = invocationMatches[0]!;
+  const invocationPayload = invocation.record.payload as Record<string, unknown>;
+  if (
+    invocation.record.event_type !== "workflow-lifecycle-invoking" ||
+    invocation.record.timestamp !== recovery.controller_invoked_at ||
+    invocationPayload.action !== "resume" ||
+    invocationPayload.retry_failed !== true ||
+    invocationPayload.workflow_run_id !== recovery.source_workflow_run_id ||
+    invocationPayload.workflow_link_id !== recovery.source_workflow_link_id ||
+    invocationPayload.control_generation !== recovery.control_generation
+  ) {
+    return;
+  }
+
+  const results = records.filter(({ record, index }) => {
+    if (index <= invocation.index || record.event_type !== "workflow-lifecycle-result") return false;
+    const payload = record.payload as Record<string, unknown>;
+    return (
+      payload.action === "resume" &&
+      payload.retry_failed === true &&
+      payload.source_workflow_run_id === recovery.source_workflow_run_id &&
+      payload.source_workflow_link_id === recovery.source_workflow_link_id &&
+      payload.control_generation === recovery.control_generation &&
+      payload.controller_invocation_id === recovery.controller_invocation_id &&
+      payload.controller_invoked_at === recovery.controller_invoked_at
+    );
+  });
+  if (results.length !== 1) return;
+  const result = results[0]!;
+  const resultPayload = result.record.payload as Record<string, unknown>;
+  const workflowRunId = stringField(resultPayload, "workflow_run_id");
+  if (workflowRunId === undefined) return;
+
+  const submissions = records.filter(({ record, index }) => {
+    if (index <= result.index || record.event_type !== "workflow-lifecycle-submitted") return false;
+    const payload = record.payload as Record<string, unknown>;
+    return (
+      payload.action === "resume" &&
+      payload.retry_failed === true &&
+      payload.workflow_run_id === workflowRunId &&
+      payload.control_generation === recovery.control_generation &&
+      payload.controller_invocation_id === recovery.controller_invocation_id &&
+      payload.controller_invoked_at === recovery.controller_invoked_at
+    );
+  });
+  if (submissions.length !== 1) return;
+  const submission = submissions[0]!;
+  const submissionPayload = submission.record.payload as Record<string, unknown>;
+  const workflowLinkId = stringField(submissionPayload, "workflow_link_id");
+  if (workflowLinkId === undefined) return;
+
+  writeRunState(layout, {
+    ...state,
+    provenance: {
+      ...state.provenance!,
+      recovery: {
+        ...recovery,
+        submission_status: "submitted",
+        workflow_run_id: workflowRunId,
+        workflow_link_id: workflowLinkId,
+        lifecycle_result_event_id: result.record.event_id,
+        lifecycle_result_at: result.record.timestamp,
+        lifecycle_submission_event_id: submission.record.event_id,
+        lifecycle_submitted_at: submission.record.timestamp
+      }
+    }
+  });
 }
 
 function synchronizationBudgetDiagnostic(
@@ -2449,12 +2744,14 @@ async function synchronizeTasks(input: {
 }): Promise<{
   diagnostics: RuntimeDiagnostic[];
   nodeStatuses: Map<string, NodeStatus>;
+  observedTaskEvidence: Map<string, ObservedTaskEvidence>;
   workflowStates: Map<string, SmithersNodeState>;
   syncedNodes: number;
   changed: boolean;
 }> {
   const diagnostics: RuntimeDiagnostic[] = [];
   const nodeStatuses = new Map<string, NodeStatus>();
+  const observedTaskEvidence = new Map<string, ObservedTaskEvidence>();
   const workflowStates = new Map<string, SmithersNodeState>();
   const steps = new Map(input.inspect.steps.map((step) => [step.id, step]));
   const eventsByNode = eventsByWorkflowNode(input.events);
@@ -2497,6 +2794,12 @@ async function synchronizeTasks(input: {
       continue;
     }
     const evidence = attemptEvidence.evidence;
+    observedTaskEvidence.set(task.attemptId, {
+      status: evidence.status,
+      taskId: attemptEvidence.taskId,
+      ...(evidence.attempt === undefined ? {} : { attempt: evidence.attempt }),
+      ...(evidence.workflowState === undefined ? {} : { workflowState: evidence.workflowState })
+    });
 
     const previousIsImmutable = immutableTerminalFinalization(previous);
     const needsFinalization =
@@ -2617,7 +2920,11 @@ async function synchronizeTasks(input: {
     }
     const aggregateStatus = aggregateAttemptStatuses(statuses);
     const previous = readRunState(input.layout).nodes[concreteNodeId];
-    if (previous !== undefined && terminalStatus(previous.status)) {
+    if (
+      previous !== undefined &&
+      terminalStatus(previous.status) &&
+      !(previous.status === "failed" && aggregateStatus === "succeeded")
+    ) {
       nodeStatuses.set(concreteNodeId, previous.status);
       continue;
     }
@@ -2642,7 +2949,7 @@ async function synchronizeTasks(input: {
     }
   }
 
-  return { diagnostics, nodeStatuses, workflowStates, syncedNodes, changed };
+  return { diagnostics, nodeStatuses, observedTaskEvidence, workflowStates, syncedNodes, changed };
 }
 
 async function finalizeTerminalTask(input: {
@@ -3828,7 +4135,11 @@ function finalRunStatus(
   inspect: WorkflowInspect,
   nodeStatuses: Map<string, NodeStatus>,
   currentStatus: RunStatus,
-  options: { evidenceComplete: boolean } = { evidenceComplete: true }
+  options: {
+    evidenceComplete: boolean;
+    recoveredAggregateAuthorized?: boolean;
+    recoveryRequiresAuthorization?: boolean;
+  } = { evidenceComplete: true }
 ): RunStatus {
   const statuses = [...nodeStatuses.values()];
   const workflowStatus = inspect.runState;
@@ -3854,7 +4165,7 @@ function finalRunStatus(
   }
   if (
     inspect.exhaustedLoops.length > 0 ||
-    workflowStatus === "failed" ||
+    (workflowStatus === "failed" && options.recoveredAggregateAuthorized !== true) ||
     statuses.some((status) => ["failed", "skipped", "invalidated"].includes(status))
   ) {
     return "failed";
@@ -3866,12 +4177,16 @@ function finalRunStatus(
     return "running";
   }
   if (workflowStatus === "succeeded") {
+    if (options.recoveryRequiresAuthorization === true && options.recoveredAggregateAuthorized !== true) {
+      return "failed";
+    }
     return options.evidenceComplete &&
       (statuses.length === 0 ||
         statuses.every((status) => status === "succeeded" || status === "reused-from-prior-run"))
       ? "succeeded"
       : "failed";
   }
+  if (workflowStatus === "failed" && options.recoveredAggregateAuthorized === true) return "succeeded";
   return currentStatus;
 }
 
@@ -3882,13 +4197,18 @@ function finalRunStatus(
 // leaving the run indistinguishable from an idle one.
 function unattributedTerminalWorkflowFailure(
   inspect: WorkflowInspect,
-  nodeStatuses: Map<string, NodeStatus>
+  nodeStatuses: Map<string, NodeStatus>,
+  recoveredAggregateAuthorized: boolean
 ): UnattributedWorkflowFailureDiagnostic | undefined {
   const workflowState = inspect.runState;
   if (workflowState !== "failed") {
     return undefined;
   }
-  if ([...nodeStatuses.values()].some((status) => ["failed", "timed-out", "skipped", "invalidated"].includes(status))) {
+  const statuses = [...nodeStatuses.values()];
+  if (statuses.some((status) => ["failed", "timed-out", "skipped", "invalidated"].includes(status))) {
+    return undefined;
+  }
+  if (recoveredAggregateAuthorized) {
     return undefined;
   }
   const failedWorkflowTasks = inspect.failedWorkflowTaskIds;

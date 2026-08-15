@@ -60,6 +60,18 @@ const validVariantFixtures: Record<string, Record<string, unknown>> = Object.fro
       },
       "reference-node"
     ),
+    event("run-recovered", "succeeded", {
+      recovery_id: LINK_ID,
+      prior_status: "failed",
+      failed_nodes: [
+        {
+          node_id: "node-1",
+          workflow_task_id: "node:node-1",
+          failed_attempt: 1,
+          failure_category: "agent-failure"
+        }
+      ]
+    }),
     event("workflow-deadline-exceeded", "timed-out", {
       workflow_run_id: "workflow-1",
       deadline_at: TIMESTAMP
@@ -202,7 +214,7 @@ function assertParity(value: unknown, expected: boolean, label: string): void {
 }
 
 test("event-record v2 enumerates every production event as a closed Ajv/Zod union", () => {
-  assert.equal(EVENT_RECORD_TYPES.length, 23);
+  assert.equal(EVENT_RECORD_TYPES.length, 24);
   assert.deepEqual(Object.keys(validVariantFixtures).sort(), [...EVENT_RECORD_TYPES].sort());
 
   for (const eventType of EVENT_RECORD_TYPES) {

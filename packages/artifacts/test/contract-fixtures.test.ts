@@ -1955,24 +1955,118 @@ test("run-state v5 JSON Schema and Zod agree on every closed provenance variant"
     state: "finished",
     attempt: 1
   };
+  const runWorkflow = {
+    inspection: { runId: "workflow-1" },
+    runId: "workflow-1",
+    compiledRunId: "workflow-1",
+    name: "workflow",
+    controlGeneration: "c".repeat(64),
+    linkId: "00000000-0000-4000-8000-000000000001",
+    executionSnapshot: `smithers/execution-snapshots/${"d".repeat(64)}`
+  };
+  const recovery = {
+    recovery_id: "00000000-0000-4000-8000-000000000002",
+    submission_status: "submitted",
+    recovered: true,
+    recovered_at: "2026-08-15T00:00:00.000Z",
+    prior_status: "failed",
+    failed_nodes: [
+      {
+        node_id: "node-1",
+        workflow_task_id: "node:node-1",
+        failed_attempt: 1,
+        failure_category: "agent-failure"
+      }
+    ],
+    source_workflow_run_id: "workflow-1",
+    source_workflow_link_id: "00000000-0000-4000-8000-000000000001",
+    workflow_run_id: "workflow-1",
+    workflow_link_id: "00000000-0000-4000-8000-000000000001",
+    control_generation: "c".repeat(64),
+    controller_invocation_id: "evt-111111111111111111111111",
+    controller_invoked_at: "2026-08-15T00:00:00.000Z",
+    lifecycle_result_event_id: "evt-222222222222222222222222",
+    lifecycle_result_at: "2026-08-15T00:00:01.000Z",
+    lifecycle_submission_event_id: "evt-333333333333333333333333",
+    lifecycle_submitted_at: "2026-08-15T00:00:02.000Z"
+  };
   const cases: Array<{ label: string; value: unknown; expected: boolean }> = [
     {
       label: "run-workflow",
       value: {
         ...base,
         provenance: {
-          workflow: {
-            inspection: { runId: "workflow-1" },
-            runId: "workflow-1",
-            compiledRunId: "workflow-1",
-            name: "workflow",
-            controlGeneration: "c".repeat(64),
-            linkId: "00000000-0000-4000-8000-000000000001",
-            executionSnapshot: `smithers/execution-snapshots/${"d".repeat(64)}`
+          workflow: runWorkflow
+        }
+      },
+      expected: true
+    },
+    {
+      label: "completed-run-recovery",
+      value: { ...base, provenance: { workflow: runWorkflow, recovery } },
+      expected: true
+    },
+    {
+      label: "pending-run-recovery",
+      value: {
+        ...base,
+        provenance: { workflow: runWorkflow, recovery: { ...recovery, recovered: false, recovered_at: undefined } }
+      },
+      expected: true
+    },
+    {
+      label: "prepared-run-recovery",
+      value: {
+        ...base,
+        provenance: {
+          workflow: runWorkflow,
+          recovery: {
+            ...recovery,
+            submission_status: "prepared",
+            recovered: false,
+            recovered_at: undefined,
+            workflow_run_id: undefined,
+            workflow_link_id: undefined,
+            lifecycle_result_event_id: undefined,
+            lifecycle_result_at: undefined,
+            lifecycle_submission_event_id: undefined,
+            lifecycle_submitted_at: undefined
           }
         }
       },
       expected: true
+    },
+    {
+      label: "completed-run-recovery-without-timestamp",
+      value: {
+        ...base,
+        provenance: { workflow: runWorkflow, recovery: { ...recovery, recovered_at: undefined } }
+      },
+      expected: false
+    },
+    {
+      label: "pending-run-recovery-with-timestamp",
+      value: {
+        ...base,
+        provenance: { workflow: runWorkflow, recovery: { ...recovery, recovered: false } }
+      },
+      expected: false
+    },
+    {
+      label: "run-recovery-without-workflow-authority",
+      value: {
+        ...base,
+        provenance: {
+          workflow: runWorkflow,
+          recovery: {
+            ...recovery,
+            workflow_run_id: undefined,
+            workflow_link_id: undefined,
+            control_generation: undefined
+          }
+        }
+      },
+      expected: false
     },
     {
       label: "execution-task",

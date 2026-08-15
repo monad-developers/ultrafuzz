@@ -34,7 +34,8 @@ import {
   RUN_STATE_STATUSES,
   SMITHERS_NODE_STATES,
   SMITHERS_RUN_STATES,
-  SMITHERS_RUN_STATUSES
+  SMITHERS_RUN_STATUSES,
+  NODE_PROVENANCE_FAILURE_CATEGORIES
 } from "./state.js";
 export { SMITHERS_NODE_STATES, SMITHERS_RUN_STATES, SMITHERS_RUN_STATUSES } from "./state.js";
 
@@ -54,6 +55,7 @@ export const EVENT_RECORD_TYPES = [
   "workflow-deadline-exceeded",
   "workflow-synced",
   "workflow-failure-unattributed",
+  "run-recovered",
   "node-synced",
   "node-artifacts-verified",
   "node-artifacts-missing",
@@ -210,6 +212,20 @@ const workflowFailureUnattributedPayloadSchema = z.strictObject({
   failed_workflow_tasks: z.array(nonEmptyStringSchema),
   durable_node_statuses: z.array(nodeStatusSchema)
 });
+const runRecoveredPayloadSchema = z.strictObject({
+  recovery_id: canonicalUuidSchema,
+  prior_status: z.literal("failed"),
+  failed_nodes: z
+    .array(
+      z.strictObject({
+        node_id: nonEmptyStringSchema,
+        workflow_task_id: nonEmptyStringSchema,
+        failed_attempt: nonNegativeSafeIntegerSchema,
+        failure_category: z.enum(NODE_PROVENANCE_FAILURE_CATEGORIES)
+      })
+    )
+    .min(1)
+});
 const nodeSyncedPayloadSchema = z.strictObject({
   workflow_run_id: nonEmptyStringSchema,
   workflow_task_id: nonEmptyStringSchema,
@@ -303,7 +319,8 @@ const workflowLifecycleInvokingPayloadSchema = z.strictObject({
   action: lifecycleActionSchema,
   workflow_run_id: nonEmptyStringSchema,
   control_generation: sha256Schema,
-  workflow_link_id: workflowLinkIdSchema
+  workflow_link_id: workflowLinkIdSchema,
+  retry_failed: z.literal(true).optional()
 });
 const workflowLifecycleResultPayloadSchema = z.strictObject({
   action: lifecycleActionSchema,
@@ -312,7 +329,8 @@ const workflowLifecycleResultPayloadSchema = z.strictObject({
   workflow_run_id: nonEmptyStringSchema,
   control_generation: sha256Schema,
   controller_invocation_id: eventIdSchema,
-  controller_invoked_at: timestampSchema
+  controller_invoked_at: timestampSchema,
+  retry_failed: z.literal(true).optional()
 });
 const workflowLifecycleSubmittedPayloadSchema = z.strictObject({
   action: lifecycleActionSchema,
@@ -321,6 +339,7 @@ const workflowLifecycleSubmittedPayloadSchema = z.strictObject({
   control_generation: sha256Schema,
   controller_invocation_id: eventIdSchema,
   controller_invoked_at: timestampSchema,
+  retry_failed: z.literal(true).optional(),
   reset_node: nonEmptyStringSchema.optional(),
   recovered_missing_workflow_run: z.literal(true).optional()
 });
@@ -368,6 +387,7 @@ export const eventRecordSchema = z.discriminatedUnion("event_type", [
     z.enum(["failed", "timed-out"]),
     workflowFailureUnattributedPayloadSchema
   ),
+  runEventVariant("run-recovered", z.literal("succeeded"), runRecoveredPayloadSchema),
   nodeEventVariant("node-synced", nodeStatusSchema, nodeSyncedPayloadSchema),
   nodeEventVariant("node-artifacts-verified", z.literal("succeeded"), nodeArtifactsPayloadSchema),
   nodeEventVariant("node-artifacts-missing", z.literal("failed"), nodeArtifactsPayloadSchema),
@@ -568,6 +588,30 @@ const eventRecordJsonSchemaDefinitions = {
       durable_node_statuses: { type: "array", items: { enum: NODE_STATE_STATUSES } }
     }
   },
+  runRecoveredPayload: {
+    type: "object",
+    additionalProperties: false,
+    required: ["recovery_id", "prior_status", "failed_nodes"],
+    properties: {
+      recovery_id: { $ref: "#/$defs/workflowLinkId" },
+      prior_status: { const: "failed" },
+      failed_nodes: {
+        type: "array",
+        minItems: 1,
+        items: {
+          type: "object",
+          required: ["node_id", "workflow_task_id", "failed_attempt", "failure_category"],
+          additionalProperties: false,
+          properties: {
+            node_id: { $ref: "#/$defs/nonEmptyString" },
+            workflow_task_id: { $ref: "#/$defs/nonEmptyString" },
+            failed_attempt: { $ref: "#/$defs/nonNegativeSafeInteger" },
+            failure_category: { enum: NODE_PROVENANCE_FAILURE_CATEGORIES }
+          }
+        }
+      }
+    }
+  },
   nodeSyncedPayload: {
     type: "object",
     additionalProperties: false,
@@ -758,7 +802,8 @@ const eventRecordJsonSchemaDefinitions = {
       action: { enum: ["resume", "replay", "fork"] },
       workflow_run_id: { $ref: "#/$defs/nonEmptyString" },
       control_generation: { $ref: "#/$defs/sha256" },
-      workflow_link_id: { $ref: "#/$defs/workflowLinkId" }
+      workflow_link_id: { $ref: "#/$defs/workflowLinkId" },
+      retry_failed: { const: true }
     }
   },
   workflowLifecycleResultPayload: {
@@ -780,7 +825,8 @@ const eventRecordJsonSchemaDefinitions = {
       workflow_run_id: { $ref: "#/$defs/nonEmptyString" },
       control_generation: { $ref: "#/$defs/sha256" },
       controller_invocation_id: { $ref: "#/$defs/eventId" },
-      controller_invoked_at: { $ref: "#/$defs/timestamp" }
+      controller_invoked_at: { $ref: "#/$defs/timestamp" },
+      retry_failed: { const: true }
     }
   },
   workflowLifecycleSubmittedPayload: {
@@ -801,6 +847,7 @@ const eventRecordJsonSchemaDefinitions = {
       control_generation: { $ref: "#/$defs/sha256" },
       controller_invocation_id: { $ref: "#/$defs/eventId" },
       controller_invoked_at: { $ref: "#/$defs/timestamp" },
+      retry_failed: { const: true },
       reset_node: { $ref: "#/$defs/nonEmptyString" },
       recovered_missing_workflow_run: { const: true }
     }
@@ -861,6 +908,7 @@ export const eventRecordJsonSchema = {
       { enum: ["failed", "timed-out"] },
       "workflowFailureUnattributedPayload"
     ),
+    eventRecordJsonSchemaVariant("run-recovered", { const: "succeeded" }, "runRecoveredPayload"),
     eventRecordJsonSchemaVariant("node-synced", { enum: NODE_STATE_STATUSES }, "nodeSyncedPayload", true),
     eventRecordJsonSchemaVariant("node-artifacts-verified", { const: "succeeded" }, "nodeArtifactsPayload", true),
     eventRecordJsonSchemaVariant("node-artifacts-missing", { const: "failed" }, "nodeArtifactsPayload", true),
