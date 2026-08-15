@@ -447,7 +447,15 @@
     },
     "runRecoveryProvenance": {
       "type": "object",
-      "required": ["recovery_id", "recovered", "prior_status", "failed_nodes"],
+      "required": [
+        "recovery_id",
+        "recovered",
+        "prior_status",
+        "failed_nodes",
+        "workflow_run_id",
+        "workflow_link_id",
+        "control_generation"
+      ],
       "additionalProperties": false,
       "properties": {
         "recovery_id": {
@@ -490,7 +498,30 @@
         "control_generation": {
           "$ref": "#/$defs/runWorkflowProvenance/properties/controlGeneration"
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "recovered": {
+                "const": true
+              }
+            },
+            "required": ["recovered"]
+          },
+          "then": {
+            "properties": {
+              "recovered_at": {}
+            },
+            "required": ["recovered_at"]
+          },
+          "else": {
+            "not": {
+              "required": ["recovered_at"]
+            }
+          }
+        }
+      ]
     },
     "runWorkflowProvenance": {
       "type": "object",

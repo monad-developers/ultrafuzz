@@ -173,9 +173,9 @@ export interface RunRecoveryProvenance {
   recovered_at?: string;
   prior_status: "failed";
   failed_nodes: Array<{ node_id: string; failure_category: (typeof NODE_PROVENANCE_FAILURE_CATEGORIES)[number] }>;
-  workflow_run_id?: string;
-  workflow_link_id?: string;
-  control_generation?: string;
+  workflow_run_id: string;
+  workflow_link_id: string;
+  control_generation: string;
 }
 
 export interface TaskNodeWorkflowProvenance {

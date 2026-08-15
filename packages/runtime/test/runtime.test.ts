@@ -53,6 +53,7 @@ import { isTransientNpmRegistryFailure } from "../src/npm-install-retry.js";
 
 import {
   forkRun as runtimeForkRun,
+  diagnoseRun,
   getRunHealth,
   getRunStatus,
   initProject,
@@ -724,6 +725,8 @@ function fakeLifecycleSmithersEnv(
     inspectMarkerPath?: string;
     timeline?: unknown;
     statusEvents?: unknown;
+    status?: unknown;
+    why?: unknown;
     attemptSelections?: Record<string, Record<number, { chainIndex: number; profileId: string; model: string | null }>>;
   }
 ): Record<string, string | undefined> {
@@ -735,6 +738,8 @@ function fakeLifecycleSmithersEnv(
     input.tokenEvents === undefined ? eventsPath : path.join(project, "fake-smithers-token-events.ndjson");
   const timelinePath = path.join(project, "fake-smithers-timeline.json");
   const statusEventsPath = path.join(project, "fake-smithers-status-events.json");
+  const statusPath = path.join(project, "fake-smithers-status.json");
+  const whyPath = path.join(project, "fake-smithers-why.json");
   const nodeDetailsDirectory = path.join(project, "fake-smithers-node-details");
   fs.writeFileSync(inspectPath, `${JSON.stringify(input.inspect, null, 2)}\n`, "utf8");
   fs.writeFileSync(eventsPath, input.events ?? "", "utf8");
@@ -748,6 +753,28 @@ function fakeLifecycleSmithersEnv(
     statusEventsPath,
     `${JSON.stringify(
       input.statusEvents ?? { ok: true, data: [], meta: { command: "events", duration: "1ms" } },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+  fs.writeFileSync(statusPath, `${JSON.stringify(input.status ?? currentStatusEnvelope(), null, 2)}\n`, "utf8");
+  fs.writeFileSync(
+    whyPath,
+    `${JSON.stringify(
+      input.why ?? {
+        ok: true,
+        data: {
+          runId: "unconfigured-run",
+          status: "running",
+          summary: "run is active",
+          generatedAtMs: 1,
+          blockers: [],
+          information: [],
+          currentNodeId: null
+        },
+        meta: { command: "why", duration: "1ms" }
+      },
       null,
       2
     )}\n`,
@@ -823,6 +850,12 @@ function fakeLifecycleSmithersEnv(
       "  timeline)",
       '    cat "$SMITHERS_FAKE_TIMELINE"',
       "    ;;",
+      "  status)",
+      '    cat "$SMITHERS_FAKE_STATUS"',
+      "    ;;",
+      "  why)",
+      '    cat "$SMITHERS_FAKE_WHY"',
+      "    ;;",
       "  rewind)",
       "    printf '%s\\n' '{\"ok\":true}'",
       "    ;;",
@@ -866,6 +899,8 @@ function fakeLifecycleSmithersEnv(
     SMITHERS_FAKE_EVENTS: eventsPath,
     SMITHERS_FAKE_TOKEN_EVENTS: tokenEventsPath,
     SMITHERS_FAKE_STATUS_EVENTS: statusEventsPath,
+    SMITHERS_FAKE_STATUS: statusPath,
+    SMITHERS_FAKE_WHY: whyPath,
     SMITHERS_FAKE_TIMELINE: timelinePath,
     SMITHERS_FAKE_NODE_DETAILS: nodeDetailsDirectory,
     ULTRAFUZZ_PRICING_CATALOG_URL: "off"
@@ -12532,6 +12567,36 @@ test("retry recovery remains stable across repeated syncs and records durable pr
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
   const workflowRunId = "ultrafuzz-recovery-stable-status";
+  const staleTerminalHealth = structuredClone(currentStatusEnvelope(workflowRunId)) as {
+    data: Record<string, unknown> & {
+      counts: Record<string, number>;
+      throughput: Record<string, number | null>;
+    };
+  };
+  staleTerminalHealth.data.status = "failed";
+  staleTerminalHealth.data.verdict = "done";
+  staleTerminalHealth.data.reason = "run finished";
+  staleTerminalHealth.data.counts = {
+    finished: 1,
+    inProgress: 0,
+    pending: 0,
+    failed: 0,
+    waitingApproval: 0,
+    waitingEvent: 0,
+    waitingTimer: 0,
+    skipped: 0,
+    other: 0,
+    total: 1
+  };
+  staleTerminalHealth.data.throughput = {
+    recentFinished: 1,
+    windowMs: 600_000,
+    totalFinished: 1,
+    lastFinishedAtMs: 2_000
+  };
+  staleTerminalHealth.data.bottleneck = [];
+  staleTerminalHealth.data.liveness = { state: "failed" };
+  staleTerminalHealth.data.finishedAtMs = 2_000;
   const env = fakeLifecycleSmithersEnv(project, {
     inspect: workflowInspect({
       workflowRunId,
@@ -12540,7 +12605,21 @@ test("retry recovery remains stable across repeated syncs and records durable pr
       error: { message: "Task failed: node:project-discovery" },
       steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
     }),
-    events: ""
+    events: "",
+    status: staleTerminalHealth,
+    why: {
+      ok: true,
+      data: {
+        runId: workflowRunId,
+        status: "failed",
+        summary: "Run is finished, nothing is blocked.",
+        generatedAtMs: 2_000,
+        blockers: [],
+        information: [],
+        currentNodeId: null
+      },
+      meta: { command: "why", duration: "1ms" }
+    }
   });
   const run = await startRun({ projectRoot: project, runId: "recovery-stable-status", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
@@ -12585,6 +12664,20 @@ test("retry recovery remains stable across repeated syncs and records durable pr
   );
   assert.equal(recoveredEvents.length, 1);
   assert.equal(recoveredEvents[0]?.payload.recovery_id, state.provenance?.recovery?.recovery_id);
+
+  const health = await getRunHealth({ projectRoot: project, runId: run.value!.run_id, env });
+  assert.equal(health.ok, true, JSON.stringify(health.diagnostics));
+  assert.equal(health.value?.status, "succeeded");
+  assert.equal(health.value?.verdict, "done");
+  assert.equal(health.value?.progress.failed, 0);
+  assert.equal(health.value?.eta.seconds, 0);
+
+  const diagnosis = await diagnoseRun({ projectRoot: project, runId: run.value!.run_id, env });
+  assert.equal(diagnosis.ok, true, JSON.stringify(diagnosis.diagnostics));
+  assert.equal(diagnosis.value?.run_status, "succeeded");
+  assert.equal(diagnosis.value?.workflow_status, "failed");
+  assert.equal(diagnosis.value?.summary, "Run is finished, nothing is blocked.");
+  assert.deepEqual(diagnosis.value?.blockers, []);
 });
 
 test("resume retries failed tasks reported inside a successful terminal workflow", async () => {

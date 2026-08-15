@@ -46,18 +46,35 @@ const runWorkflowProvenanceSchema = z.strictObject({
   linkId: canonicalUuidSchema,
   executionSnapshot: z.string().regex(/^smithers\/execution-snapshots\/[0-9a-f]{64}$/u)
 });
-const runRecoveryProvenanceSchema = z.strictObject({
-  recovery_id: canonicalUuidSchema,
-  recovered: z.boolean(),
-  recovered_at: canonicalTimestampSchema.optional(),
-  prior_status: z.literal("failed"),
-  failed_nodes: z
-    .array(z.strictObject({ node_id: nonEmptyString, failure_category: z.enum(NODE_PROVENANCE_FAILURE_CATEGORIES) }))
-    .min(1),
-  workflow_run_id: nonEmptyString.optional(),
-  workflow_link_id: canonicalUuidSchema.optional(),
-  control_generation: sha256.optional()
-});
+const runRecoveryProvenanceSchema = z
+  .strictObject({
+    recovery_id: canonicalUuidSchema,
+    recovered: z.boolean(),
+    recovered_at: canonicalTimestampSchema.optional(),
+    prior_status: z.literal("failed"),
+    failed_nodes: z
+      .array(z.strictObject({ node_id: nonEmptyString, failure_category: z.enum(NODE_PROVENANCE_FAILURE_CATEGORIES) }))
+      .min(1),
+    workflow_run_id: nonEmptyString,
+    workflow_link_id: canonicalUuidSchema,
+    control_generation: sha256
+  })
+  .superRefine((value, context) => {
+    if (value.recovered && value.recovered_at === undefined) {
+      context.addIssue({
+        code: "custom",
+        message: "completed recovery provenance requires its completion timestamp",
+        path: ["recovered_at"]
+      });
+    }
+    if (!value.recovered && value.recovered_at !== undefined) {
+      context.addIssue({
+        code: "custom",
+        message: "incomplete recovery provenance cannot carry a completion timestamp",
+        path: ["recovered_at"]
+      });
+    }
+  });
 const runProvenanceSchema = z.strictObject({
   workflow: runWorkflowProvenanceSchema,
   recovery: runRecoveryProvenanceSchema.optional(),
@@ -458,7 +475,15 @@ export const runStateJsonSchema = {
     },
     runRecoveryProvenance: {
       type: "object",
-      required: ["recovery_id", "recovered", "prior_status", "failed_nodes"],
+      required: [
+        "recovery_id",
+        "recovered",
+        "prior_status",
+        "failed_nodes",
+        "workflow_run_id",
+        "workflow_link_id",
+        "control_generation"
+      ],
       additionalProperties: false,
       properties: {
         recovery_id: { $ref: "#/$defs/runWorkflowProvenance/properties/linkId" },
@@ -481,7 +506,14 @@ export const runStateJsonSchema = {
         workflow_run_id: { type: "string", minLength: 1 },
         workflow_link_id: { $ref: "#/$defs/runWorkflowProvenance/properties/linkId" },
         control_generation: { $ref: "#/$defs/runWorkflowProvenance/properties/controlGeneration" }
-      }
+      },
+      allOf: [
+        {
+          if: { properties: { recovered: { const: true } }, required: ["recovered"] },
+          then: { properties: { recovered_at: {} }, required: ["recovered_at"] },
+          else: { not: { required: ["recovered_at"] } }
+        }
+      ]
     },
     runWorkflowProvenance: {
       type: "object",
