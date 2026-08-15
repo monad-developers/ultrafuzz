@@ -429,7 +429,10 @@ type AppendEventInputFor<RecordType extends EventRecord> = RecordType extends Ev
     } & (RecordType extends { node_id: string } ? { nodeId: string } : { nodeId?: never })
   : never;
 
-export type AppendEventInput = AppendEventInputFor<EventRecord>;
+export type AppendEventInput = AppendEventInputFor<EventRecord> & {
+  /** Exact in-memory secrets to redact from persisted event payloads. */
+  forbiddenSecretValues?: readonly string[];
+};
 
 const eventQuerySchema = z.strictObject({
   runId: safeIdSchema.optional(),
@@ -1097,7 +1100,7 @@ export function createEventRecord(layout: Pick<RunLayout, "runId">, input: Appen
   const eventType = validateSafeId(input.eventType, "event type");
   const status = validateSafeId(input.status, "event status");
   const timestamp = input.timestamp ?? new Date().toISOString();
-  const payload = redactValue(input.payload);
+  const payload = redactValue(input.payload, input.forbiddenSecretValues);
   const seed = JSON.stringify([runId, nodeId, eventType, status, timestamp, payload]);
   return assertEventRecord({
     schema_version: EVENT_SCHEMA_VERSION,
@@ -1194,8 +1197,8 @@ export function createEventQueryFacadeInputs(layout: RunLayout): EventQueryFacad
   });
 }
 
-export function redactValue(value: unknown): unknown {
-  return redactSecretsInValue(value);
+export function redactValue(value: unknown, forbiddenSecretValues: readonly string[] = []): unknown {
+  return redactSecretsInValue(value, undefined, forbiddenSecretValues);
 }
 
 function eventIndexPaths(layout: RunLayout, record: EventRecord): string[] {

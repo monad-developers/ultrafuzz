@@ -327,7 +327,11 @@ importers:
         specifier: 0.34.0
         version: 0.34.0(58d79a073fab4aa1d549c4cefd132c73)
 
-  packages/security: {}
+  packages/security:
+    dependencies:
+      '@scure/bip39':
+        specifier: 2.3.0
+        version: 2.3.0
 
   packages/topology:
     dependencies:
@@ -1230,6 +1234,10 @@ packages:
     resolution: {integrity: sha512-CmCXPQrkbwExx3j946/PtHWHbYJiCRBRDl4BlkRQcJB/YOwQxJRTpoo7aTsortjgoJ1x7opzTSxn7C+ASSLVjQ==}
     cpu: [x64]
     os: [win32]
+
+  '@noble/hashes@2.3.0':
+    resolution: {integrity: sha512-oN+QwyX7VSHotibwubG3kpzbwKrfnyR6OOO+3Nk/53ADL7FmgHHz4TgrbaYKvvOw09u6QTx0oiH1cNCIOuN0CQ==}
+    engines: {node: '>= 20.19.0'}
 
   '@ocavue/utils@1.7.0':
     resolution: {integrity: sha512-yEk9ATNBjTZTtuVFMB/MAIF6zJBvJ2+lVNQvK2+O+ggEBGTgx2tp27d4FPgmD5bRsNHHP3D0SleQia/bvIeV8w==}
@@ -2278,6 +2286,9 @@ packages:
   '@scalar/openapi-types@0.8.0':
     resolution: {integrity: sha512-WmaxVSfvY5K/TwcG2B2TU1WOe1As1uc2s7myswtP6dBlcjU3hM08SApxv/jmyGaCE8t4gO5BBhmHY4pDUfmr2g==}
     engines: {node: '>=22'}
+
+  '@scure/bip39@2.3.0':
+    resolution: {integrity: sha512-qdyWuxoYwi3+YmqIsfkpz1I029m980WkVPilj+kG7VxSm+gKQ2BmQru3nv3LbMtpSUXuyZwdFT65JkpKu5OHOQ==}
 
   '@shikijs/core@4.3.1':
     resolution: {integrity: sha512-ANMDxuaPsNMdDC1m4vfvhlDmJweMwkE5XitTwrq2rWHx5jM+dlm4MmHt2PP6t0uejfR77SuhrhJ0zEijIF/uhA==}
@@ -6604,6 +6615,8 @@ snapshots:
   '@msgpackr-extract/msgpackr-extract-win32-x64@3.0.4':
     optional: true
 
+  '@noble/hashes@2.3.0': {}
+
   '@ocavue/utils@1.7.0': {}
 
   '@oclif/core@4.11.11':
@@ -7616,6 +7629,10 @@ snapshots:
     optional: true
 
   '@scalar/openapi-types@0.8.0': {}
+
+  '@scure/bip39@2.3.0':
+    dependencies:
+      '@noble/hashes': 2.3.0
 
   '@shikijs/core@4.3.1':
     dependencies:
