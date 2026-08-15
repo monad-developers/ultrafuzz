@@ -739,15 +739,45 @@ describe("public Modal benchmark configuration", () => {
     expect(releaseValidation?.if).toBe(fullLane);
     expect(releaseValidation?.strategy).toEqual({
       "fail-fast": false,
-      "max-parallel": 3,
+      "max-parallel": 7,
       matrix: {
         include: [
           {
             lane: "package-gates",
             gates: "docs,config,audit-profile-package,security,topology,prompts,artifacts,evals,modal",
-            timeout_minutes: 30
+            timeout_minutes: 30,
+            build_modal_dependencies: true
           },
-          { lane: "runtime", gates: "runtime", timeout_minutes: 75 },
+          {
+            lane: "runtime-supporting",
+            gates: "runtime-supporting",
+            timeout_minutes: 75,
+            build_modal_dependencies: true
+          },
+          {
+            lane: "runtime-1",
+            gates: "runtime-1",
+            timeout_minutes: 75,
+            build_modal_dependencies: true
+          },
+          {
+            lane: "runtime-2",
+            gates: "runtime-2",
+            timeout_minutes: 75,
+            build_modal_dependencies: true
+          },
+          {
+            lane: "runtime-3",
+            gates: "runtime-3",
+            timeout_minutes: 75,
+            build_modal_dependencies: true
+          },
+          {
+            lane: "runtime-4",
+            gates: "runtime-4",
+            timeout_minutes: 75,
+            build_modal_dependencies: true
+          },
           {
             lane: "cli-typecheck",
             gates: "cli,benchmark-history,workspace-typecheck",
@@ -761,7 +791,7 @@ describe("public Modal benchmark configuration", () => {
     const modalDependentLaneBuild = releaseValidation?.steps.find(
       (step) => step.name === "Build Modal-dependent lane dependencies"
     );
-    expect(modalDependentLaneBuild?.if).toBe("matrix.lane == 'package-gates' || matrix.lane == 'runtime'");
+    expect(modalDependentLaneBuild?.if).toBe("matrix.build_modal_dependencies == true");
     expect(modalDependentLaneBuild?.run).toBe("pnpm --filter @ultrafuzz/modal... build");
     const releaseReporterBuild = releaseValidation?.steps.find(
       (step) => step.name === "Build release reporter dependencies"
