@@ -85,7 +85,13 @@ Useful run flags include:
 ultrafuzz run --project /path/to/target-protocol --run-id first-campaign
 ultrafuzz run --project /path/to/target-protocol --max-concurrency 4
 ultrafuzz run --project /path/to/target-protocol --agent CodexAgent --model gpt-5.5
+OPENROUTER_API_KEY=... ultrafuzz run --project /path/to/target-protocol \
+  --agent OpenRouterAgent --model '~anthropic/claude-sonnet-latest:free'
 ```
+
+The OpenRouter model string is a catalogue ID and is preserved exactly; keep
+the key in `OPENROUTER_API_KEY` (or the variable named by
+`agents.OpenRouterAgent.api_key_env`), never in `ultrafuzz.toml`.
 
 Loops, dependencies, contracted outputs, reference bindings, and model-profile
 fan-out belong in `.ultrafuzz/topology.yml`.

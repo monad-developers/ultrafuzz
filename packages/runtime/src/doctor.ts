@@ -14,7 +14,7 @@ import type {
   ValidateProjectResult
 } from "./types.js";
 import { runtimeResult } from "./utils.js";
-import { loadResolvedProject, validateProject } from "./validate.js";
+import { activeTopologyAgentRefs, loadResolvedProject, validateProject } from "./validate.js";
 import { probeCommandsForExecution } from "./required-commands.js";
 
 const execFileAsync = promisify(execFile);
@@ -29,7 +29,8 @@ const AGENT_EXECUTABLES: Record<string, string> = {
   ClaudeAgent: "claude",
   CodexAgent: "codex",
   DeepSeekAgent: "claude",
-  KimiAgent: "kimi"
+  KimiAgent: "kimi",
+  OpenRouterAgent: "codex"
 };
 
 /**
@@ -60,6 +61,28 @@ export async function diagnoseProject(input: DoctorInput) {
       : "configuration validation reported errors; run ultrafuzz validate for detail"
   });
   diagnostics.push(...validation.diagnostics);
+
+  const openRouterSelected =
+    resolved.config !== undefined && activeTopologyAgentRefs(projectRoot, resolved.config).includes("OpenRouterAgent");
+  const openRouterCredential = openRouterSelected ? resolved.config?.agents.OpenRouterAgent?.apiKeyEnv : undefined;
+  const openRouterCredentialReady =
+    !openRouterSelected || (openRouterCredential !== undefined && (env[openRouterCredential] ?? "").trim() !== "");
+  checks.push({
+    name: "agent-credentials",
+    status: openRouterCredentialReady ? "ok" : "error",
+    summary: openRouterCredentialReady
+      ? "selected agent credential posture passes"
+      : "the selected OpenRouter agent API-key environment variable is not set"
+  });
+  if (!openRouterCredentialReady) {
+    diagnostics.push({
+      code: "DOCTOR_AGENT_CREDENTIAL_MISSING",
+      message: `OpenRouterAgent requires ${openRouterCredential} to be set`,
+      severity: "error",
+      source: "doctor",
+      path: "agents.OpenRouterAgent.api_key_env"
+    });
+  }
 
   checks.push({
     name: "references",

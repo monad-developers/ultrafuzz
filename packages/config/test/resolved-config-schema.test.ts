@@ -24,8 +24,8 @@ import {
   validateResolvedConfigJson
 } from "../src/index.js";
 
-const EXPECTED_SCHEMA_SHA256 = "45c15e58a8dee6a56e4c38034ffeefab0b91f3a84fd427421ebfa2410de6ab11";
-const EXPECTED_BUNDLE_SHA256 = "a894f3810e3f138189f6acb78e104532e15dd70ce1b1155031ad427936ed9870";
+const EXPECTED_SCHEMA_SHA256 = "694bfb866468a09209296041ce404933927d4ddeaa5b44b4ae0b57ba71f58843";
+const EXPECTED_BUNDLE_SHA256 = "71f90f2b5f4c21ec45dba4a4afa1efcb5d521ed36a2747727b466f32ea9f7dda";
 
 describe("resolved config JSON contract", () => {
   it("registers the exact checked-in Draft 2020-12 schema and stable digests", () => {
@@ -131,6 +131,18 @@ describe("resolved config JSON contract", () => {
         mutate: (value) => void (record(record(value.agents).DeepSeekAgent).auth = "subscription")
       },
       {
+        label: "OpenRouter subscription",
+        mutate: (value) => void (record(record(value.agents).OpenRouterAgent).auth = "subscription")
+      },
+      {
+        label: "OpenRouter model whitespace",
+        mutate: (value) => void (profile(value, "openrouter").model = "vendor/model bad")
+      },
+      {
+        label: "OpenRouter model control character",
+        mutate: (value) => void (profile(value, "openrouter").model = "vendor/model\u0080control")
+      },
+      {
         label: "missing api key env",
         mutate: (value) => void delete record(record(value.agents).CodexAgent).apiKeyEnv
       },
@@ -187,6 +199,18 @@ describe("resolved config JSON contract", () => {
     expect(validateResolvedConfigJson(value).ok).toBe(true);
     expect(resolvedConfigZodSchema.safeParse(value).success).toBe(true);
     expect(resolvedConfigValidatorsAgree(value)).toBe(true);
+  });
+
+  it("accepts punctuation-rich opaque OpenRouter catalogue IDs without transforming them", () => {
+    const value = validFixture();
+    const model = "~vendor/model.latest:free+preview@2026";
+    profile(value, "openrouter").model = model;
+
+    expect(validateResolvedConfigJson(value).ok).toBe(true);
+    const zod = resolvedConfigZodSchema.safeParse(value);
+    expect(zod.success).toBe(true);
+    if (zod.success) expect(zod.data.models.profiles.openrouter?.model).toBe(model);
+    expect(profile(value, "openrouter").model).toBe(model);
   });
 
   it("enforces the 100-attempt expanded retry-chain boundary in both resolved validators", () => {

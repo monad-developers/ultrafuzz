@@ -312,6 +312,68 @@ async function loadGeneratedCodexAgent(project: string): Promise<{
   };
 }
 
+async function loadGeneratedOpenRouterAgent(project: string): Promise<{
+  createOpenRouterAgent(options?: Record<string, unknown>): {
+    opts: Record<string, unknown> & { env?: Record<string, string> };
+    buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+      command?: string;
+      args: string[];
+      env?: Record<string, string>;
+      outputFormat?: string;
+      cleanup?: () => Promise<void>;
+    }>;
+  };
+}> {
+  const fixture = path.join(project, "openrouter-agent-executable-test");
+  fs.mkdirSync(fixture, { recursive: true });
+  const agentsDir = path.join(project, ".smithers", "agents");
+  const smithersUrl = pathToFileURL(
+    fs.realpathSync(path.join(process.cwd(), "node_modules", "smthrs", "src", "index.js"))
+  ).href;
+  const transpile = (source: string): string =>
+    ts.transpileModule(source, {
+      compilerOptions: {
+        module: ts.ModuleKind.ESNext,
+        target: ts.ScriptTarget.ES2022,
+        verbatimModuleSyntax: true
+      }
+    }).outputText;
+  const codexSource = fs
+    .readFileSync(path.join(agentsDir, "codex.ts"), "utf8")
+    .replace('from "smthrs"', `from ${JSON.stringify(smithersUrl)}`)
+    .replace('from "./toml"', 'from "./toml.mjs"')
+    .replace('from "./environment"', 'from "./environment.mjs"');
+  const openRouterSource = fs
+    .readFileSync(path.join(agentsDir, "openrouter.ts"), "utf8")
+    .replace('from "./codex"', 'from "./codex.mjs"')
+    .replace('from "./toml"', 'from "./toml.mjs"')
+    .replace('from "./environment"', 'from "./environment.mjs"');
+  fs.writeFileSync(path.join(fixture, "codex.mjs"), transpile(codexSource), "utf8");
+  fs.writeFileSync(path.join(fixture, "openrouter.mjs"), transpile(openRouterSource), "utf8");
+  fs.writeFileSync(
+    path.join(fixture, "environment.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "environment.ts"), "utf8")),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(fixture, "toml.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "toml.ts"), "utf8")),
+    "utf8"
+  );
+  return (await import(pathToFileURL(path.join(fixture, "openrouter.mjs")).href)) as {
+    createOpenRouterAgent(options?: Record<string, unknown>): {
+      opts: Record<string, unknown> & { env?: Record<string, string> };
+      buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+        command?: string;
+        args: string[];
+        env?: Record<string, string>;
+        outputFormat?: string;
+        cleanup?: () => Promise<void>;
+      }>;
+    };
+  };
+}
+
 async function loadGeneratedDeepSeekAgent(project: string): Promise<{
   DeepSeekClaudeCodeAgent: new (options: Record<string, unknown>) => {
     generate(options: Record<string, unknown>): Promise<{ usage?: Record<string, unknown> }>;
@@ -575,6 +637,9 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       "fi",
       'if [ -n "$SMITHERS_FAKE_DEEPSEEK_ENV_LOG" ]; then',
       '  printf \'%s|%s\\n\' "$DEEPSEEK_API_KEY" "$ANTHROPIC_API_KEY" > "$SMITHERS_FAKE_DEEPSEEK_ENV_LOG"',
+      "fi",
+      'if [ -n "$SMITHERS_FAKE_OPENROUTER_ENV_LOG" ]; then',
+      '  printf \'%s|%s|%s\\n\' "$OPENROUTER_API_KEY" "$OPENAI_API_KEY" "$ANTHROPIC_API_KEY" > "$SMITHERS_FAKE_OPENROUTER_ENV_LOG"',
       "fi",
       'if [ -n "$SMITHERS_FAKE_RETRY_CREDENTIAL_ENV_LOG" ]; then',
       '  printf \'%s|%s\\n\' "$OPENAI_API_KEY" "$DEEPSEEK_API_KEY" > "$SMITHERS_FAKE_RETRY_CREDENTIAL_ENV_LOG"',
@@ -1393,7 +1458,8 @@ function writeFanoutProject(project: string, discoveryMarkdownPath = "setup/proj
       "  ClaudeAgent: createAgent,\n" +
       "  CodexAgent: createAgent,\n" +
       "  DeepSeekAgent: createAgent,\n" +
-      "  KimiAgent: createAgent\n" +
+      "  KimiAgent: createAgent,\n" +
+      "  OpenRouterAgent: createAgent\n" +
       "};\n",
     "utf8"
   );
@@ -1640,18 +1706,21 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.equal(fs.existsSync(path.join(project, ".smithers/agents/claude.ts")), true);
   assert.equal(fs.existsSync(path.join(project, ".smithers/agents/deepseek.ts")), true);
   assert.equal(fs.existsSync(path.join(project, ".smithers/agents/kimi.ts")), true);
+  assert.equal(fs.existsSync(path.join(project, ".smithers/agents/openrouter.ts")), true);
   const agentsIndexText = fs.readFileSync(path.join(project, ".smithers/agents/index.ts"), "utf8");
   assert.match(agentsIndexText, /export \{ createCodexAgent \} from ".\/codex";/);
   assert.match(agentsIndexText, /export \{ createClaudeAgent \} from ".\/claude";/);
   assert.match(agentsIndexText, /export \{ createDeepSeekAgent \} from ".\/deepseek";/);
   assert.match(agentsIndexText, /export \{ createKimiAgent \} from ".\/kimi";/);
+  assert.match(agentsIndexText, /export \{ createOpenRouterAgent \} from ".\/openrouter";/);
   assert.match(agentsIndexText, /agentFactories = \{[^}]*ClaudeAgent: createClaudeAgent/);
   assert.match(agentsIndexText, /agentFactories = \{[^}]*CodexAgent: createCodexAgent/);
   assert.match(agentsIndexText, /agentFactories = \{[^}]*DeepSeekAgent: createDeepSeekAgent/);
   assert.match(agentsIndexText, /agentFactories = \{[^}]*KimiAgent: createKimiAgent/);
+  assert.match(agentsIndexText, /agentFactories = \{[^}]*OpenRouterAgent: createOpenRouterAgent/);
   // Importing the registry must not construct any agent: doing so reads that
   // agent's auth and fails a project that only uses the other backend.
-  assert.doesNotMatch(agentsIndexText, /=\s*create(Codex|Claude|DeepSeek|Kimi)Agent\(\)/);
+  assert.doesNotMatch(agentsIndexText, /=\s*create(Codex|Claude|DeepSeek|Kimi|OpenRouter)Agent\(\)/);
   assert.doesNotMatch(codexAgentText, /=\s*createCodexAgent\(\)/);
   const claudeAgentText = fs.readFileSync(path.join(project, ".smithers/agents/claude.ts"), "utf8");
   assert.match(claudeAgentText, /ClaudeCodeAgent/);
@@ -2081,6 +2150,128 @@ test(
     }
   }
 );
+
+test(
+  "generated OpenRouter adapter preserves opaque model IDs and enables the authenticated provider catalogue",
+  { skip: !runningUnderBun },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const configPath = path.join(project, "ultrafuzz.toml");
+    const codexHome = path.join(project, ".ultrafuzz", "openrouter-test-codex");
+    fs.writeFileSync(
+      configPath,
+      fs
+        .readFileSync(configPath, "utf8")
+        .replace(
+          '[agents.OpenRouterAgent]\nauth = "api-key"\napi_key_env = "OPENROUTER_API_KEY"',
+          `[agents.OpenRouterAgent]\nauth = "api-key"\napi_key_env = "ROUTER_ALIAS"\nconfig_dir = ${JSON.stringify(codexHome)}`
+        ),
+      "utf8"
+    );
+    const { createOpenRouterAgent } = await loadGeneratedOpenRouterAgent(project);
+    const model = "~vendor/model.latest:free+preview@2026";
+    const previous = {
+      config: process.env.ULTRAFUZZ_CONFIG_PATH,
+      alias: process.env.ROUTER_ALIAS,
+      openrouter: process.env.OPENROUTER_API_KEY,
+      openai: process.env.OPENAI_API_KEY,
+      anthropic: process.env.ANTHROPIC_API_KEY,
+      baseUrl: process.env.OPENAI_BASE_URL
+    };
+    process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
+    process.env.ROUTER_ALIAS = "deterministic-openrouter-test-key";
+    process.env.OPENROUTER_API_KEY = "unselected-openrouter-key";
+    process.env.OPENAI_API_KEY = "unrelated-openai-key";
+    process.env.ANTHROPIC_API_KEY = "unrelated-anthropic-key";
+    process.env.OPENAI_BASE_URL = "https://ambient-route.invalid/v1";
+    try {
+      const agent = createOpenRouterAgent({
+        model,
+        reasoningEffort: "high",
+        addDir: ["/tmp/artifacts", "/tmp/dependency artifacts"]
+      });
+      assert.deepEqual(agent.opts.config, { model_reasoning_effort: "high" });
+      const command = await agent.buildCommand({ prompt: "Contract only", cwd: project, options: {} });
+      assert.equal(command.command, "codex");
+      const modelIndex = command.args.indexOf("--model");
+      assert.equal(modelIndex >= 0, true);
+      assert.equal(command.args[modelIndex + 1], model);
+      assert.equal(command.args.filter((value) => value === model).length, 1);
+      const firstAddDir = command.args.indexOf("--add-dir");
+      assert.deepEqual(command.args.slice(firstAddDir, firstAddDir + 4), [
+        "--add-dir",
+        "/tmp/artifacts",
+        "--add-dir",
+        "/tmp/dependency artifacts"
+      ]);
+      assert.equal(command.outputFormat, "stream-json");
+      assert.equal(command.env?.ROUTER_ALIAS, "deterministic-openrouter-test-key");
+      assert.equal(command.env?.OPENROUTER_API_KEY, "");
+      assert.equal(command.env?.OPENAI_API_KEY, "deterministic-openrouter-test-key");
+      assert.equal(command.env?.CODEX_API_KEY, "");
+      assert.equal(command.env?.OPENAI_BASE_URL, "https://openrouter.ai/api/v1");
+      assert.equal(command.env?.ANTHROPIC_API_KEY, "");
+      assert.equal(command.env?.CODEX_HOME, codexHome);
+      await command.cleanup?.();
+
+      const providerConfig = fs.readFileSync(path.join(codexHome, "config.toml"), "utf8");
+      assert.equal(
+        providerConfig,
+        [
+          'model_provider = "openrouter"',
+          "",
+          "[model_providers.openrouter]",
+          'name = "OpenRouter"',
+          'base_url = "https://openrouter.ai/api/v1"',
+          'wire_api = "responses"',
+          "",
+          "[model_providers.openrouter.auth]",
+          'command = "node"',
+          'args = ["-e", "process.stdout.write(process.env[process.argv[1]] ?? \'\')", "ROUTER_ALIAS"]',
+          ""
+        ].join("\n")
+      );
+      assert.equal(providerConfig.includes("deterministic-openrouter-test-key"), false);
+      assert.equal(fs.statSync(codexHome).mode & 0o777, 0o700);
+      assert.equal(fs.statSync(path.join(codexHome, "config.toml")).mode & 0o777, 0o600);
+    } finally {
+      for (const [name, value] of Object.entries({
+        ULTRAFUZZ_CONFIG_PATH: previous.config,
+        ROUTER_ALIAS: previous.alias,
+        OPENROUTER_API_KEY: previous.openrouter,
+        OPENAI_API_KEY: previous.openai,
+        ANTHROPIC_API_KEY: previous.anthropic,
+        OPENAI_BASE_URL: previous.baseUrl
+      })) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  }
+);
+
+test("generated OpenRouter adapter fails before materializing config when its dedicated key is missing", async () => {
+  if (!runningUnderBun) return;
+  const project = tempProject();
+  const init = initProject({ projectRoot: project, force: true });
+  assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+  const configPath = path.join(project, "ultrafuzz.toml");
+  const { createOpenRouterAgent } = await loadGeneratedOpenRouterAgent(project);
+  const previousConfig = process.env.ULTRAFUZZ_CONFIG_PATH;
+  const previousKey = process.env.OPENROUTER_API_KEY;
+  process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
+  delete process.env.OPENROUTER_API_KEY;
+  try {
+    assert.throws(() => createOpenRouterAgent(), /OPENROUTER_API_KEY is not set/u);
+  } finally {
+    if (previousConfig === undefined) delete process.env.ULTRAFUZZ_CONFIG_PATH;
+    else process.env.ULTRAFUZZ_CONFIG_PATH = previousConfig;
+    if (previousKey === undefined) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = previousKey;
+  }
+});
 
 test(
   "generated agents cannot relabel an aliased execution-snapshot path as a credential",
@@ -4036,10 +4227,11 @@ test("validate requires agentFactories entries for every configured model profil
   const unknownAgents = validate.diagnostics
     .filter((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN")
     .map((diagnostic) => diagnostic.message);
-  assert.equal(unknownAgents.length, 3, JSON.stringify(validate.diagnostics));
+  assert.equal(unknownAgents.length, 4, JSON.stringify(validate.diagnostics));
   assert.match(unknownAgents.join("\n"), /ClaudeAgent/u);
   assert.match(unknownAgents.join("\n"), /DeepSeekAgent/u);
   assert.match(unknownAgents.join("\n"), /KimiAgent/u);
+  assert.match(unknownAgents.join("\n"), /OpenRouterAgent/u);
 
   const kimiRun = await startRun({
     projectRoot: project,
@@ -4091,7 +4283,8 @@ test("validate accepts a typed aliased registry composed from static spreads", a
       "} as const);\n" +
       "const optIn = {\n" +
       '  "DeepSeekAgent": createAgent,\n' +
-      "  KimiAgent: createAgent\n" +
+      "  KimiAgent: createAgent,\n" +
+      "  OpenRouterAgent: createAgent\n" +
       "};\n" +
       "const registry: Record<string, Factory> = { ...core, ...optIn };\n" +
       "export { registry as agentFactories };\n",
@@ -4117,7 +4310,7 @@ test("validate applies registry overwrite order and rejects nullish or shadowed 
   const registryPath = path.join(project, ".smithers/agents/index.ts");
   const factories =
     "const factory = () => ({ id: 'agent' });\n" +
-    "const core = { ClaudeAgent: factory, CodexAgent: factory, DeepSeekAgent: factory, KimiAgent: factory };\n";
+    "const core = { ClaudeAgent: factory, CodexAgent: factory, DeepSeekAgent: factory, KimiAgent: factory, OpenRouterAgent: factory };\n";
 
   fs.writeFileSync(
     registryPath,
@@ -4143,7 +4336,7 @@ test("validate applies registry overwrite order and rejects nullish or shadowed 
   assert.equal(unknownOverride.ok, false);
   assert.equal(
     unknownOverride.diagnostics.filter((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN").length,
-    4
+    5
   );
 
   fs.writeFileSync(
@@ -4194,7 +4387,7 @@ test("validate ignores textual, type-only, and cyclic agentFactories lookalikes"
   writeSmallTopology(project);
   fs.writeFileSync(
     path.join(project, ".smithers/agents/index.ts"),
-    'export const decoy = "export const agentFactories = { ClaudeAgent: fake, CodexAgent: fake, DeepSeekAgent: fake, KimiAgent: fake }";\n' +
+    'export const decoy = "export const agentFactories = { ClaudeAgent: fake, CodexAgent: fake, DeepSeekAgent: fake, KimiAgent: fake, OpenRouterAgent: fake }";\n' +
       "const first = { ...second };\n" +
       "const second = { ...first };\n" +
       "export type { first as agentFactories };\n",
@@ -4208,7 +4401,7 @@ test("validate ignores textual, type-only, and cyclic agentFactories lookalikes"
     validate.diagnostics
       .filter((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN")
       .map((diagnostic) => diagnostic.message.match(/agent reference (\w+)/u)?.[1]),
-    ["ClaudeAgent", "CodexAgent", "DeepSeekAgent", "KimiAgent"]
+    ["ClaudeAgent", "CodexAgent", "DeepSeekAgent", "KimiAgent", "OpenRouterAgent"]
   );
 
   fs.writeFileSync(
@@ -4220,13 +4413,13 @@ test("validate ignores textual, type-only, and cyclic agentFactories lookalikes"
   assert.equal(cyclic.ok, false);
   assert.equal(
     cyclic.diagnostics.filter((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN").length,
-    4,
+    5,
     JSON.stringify(cyclic.diagnostics)
   );
 
   fs.writeFileSync(
     path.join(project, ".smithers/agents/index.ts"),
-    "const registry = { ClaudeAgent: factory, CodexAgent: factory, DeepSeekAgent: factory, KimiAgent: factory };\n" +
+    "const registry = { ClaudeAgent: factory, CodexAgent: factory, DeepSeekAgent: factory, KimiAgent: factory, OpenRouterAgent: factory };\n" +
       "export { type registry as agentFactories };\n",
     "utf8"
   );
@@ -4234,7 +4427,7 @@ test("validate ignores textual, type-only, and cyclic agentFactories lookalikes"
   assert.equal(typeSpecifier.ok, false);
   assert.equal(
     typeSpecifier.diagnostics.filter((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN").length,
-    4,
+    5,
     JSON.stringify(typeSpecifier.diagnostics)
   );
 });
@@ -4256,8 +4449,8 @@ test("validate accepts quoted factory keys for current custom agent IDs", async 
     fs
       .readFileSync(registryPath, "utf8")
       .replace(
-        "  KimiAgent: createKimiAgent\n",
-        '  KimiAgent: createKimiAgent,\n  "custom.agent:v1-beta": createCodexAgent\n'
+        "  OpenRouterAgent: createOpenRouterAgent\n",
+        '  OpenRouterAgent: createOpenRouterAgent,\n  "custom.agent:v1-beta": createCodexAgent\n'
       ),
     "utf8"
   );
@@ -5472,8 +5665,9 @@ test("init reports an agent registry that does not export a generated agent", as
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
 
-  // Simulate a project scaffolded before ClaudeAgent, DeepSeekAgent, and KimiAgent
-  // existed: the registry predates the adapters, and init preserves project-owned files.
+  // Simulate a project scaffolded before ClaudeAgent, DeepSeekAgent, KimiAgent,
+  // and OpenRouterAgent existed: the registry predates the adapters, and init
+  // preserves project-owned files.
   const registryPath = path.join(project, ".smithers/agents/index.ts");
   fs.writeFileSync(
     registryPath,
@@ -5486,15 +5680,16 @@ test("init reports an agent registry that does not export a generated agent", as
   const upgraded = initProject({ projectRoot: project });
   assert.equal(upgraded.ok, true);
   const stale = upgraded.diagnostics.filter((entry) => entry.code === "INIT_AGENT_REGISTRY_STALE");
-  assert.equal(stale.length, 3, JSON.stringify(upgraded.diagnostics));
+  assert.equal(stale.length, 4, JSON.stringify(upgraded.diagnostics));
   assert.equal(stale[0]?.severity, "warning");
   assert.match(stale.map((entry) => entry.message).join("\n"), /ClaudeAgent/);
   assert.match(stale.map((entry) => entry.message).join("\n"), /DeepSeekAgent/);
   assert.match(stale.map((entry) => entry.message).join("\n"), /KimiAgent/);
+  assert.match(stale.map((entry) => entry.message).join("\n"), /OpenRouterAgent/);
 
-  // A registry that names Claude, DeepSeek, and Kimi without registering their
-  // factories is still stale: nothing resolves it, since generated adapters export
-  // only factories.
+  // A registry that names providers without registering their factories is
+  // still stale: nothing resolves them, since generated adapters export only
+  // factories.
   fs.writeFileSync(
     registryPath,
     'import { createCodexAgent } from "./codex";\n' +
@@ -5505,10 +5700,11 @@ test("init reports an agent registry that does not export a generated agent", as
   );
   const named = initProject({ projectRoot: project });
   const namedStale = named.diagnostics.filter((entry) => entry.code === "INIT_AGENT_REGISTRY_STALE");
-  assert.equal(namedStale.length, 3, JSON.stringify(named.diagnostics));
+  assert.equal(namedStale.length, 4, JSON.stringify(named.diagnostics));
   assert.match(namedStale.map((entry) => entry.message).join("\n"), /ClaudeAgent/);
   assert.match(namedStale.map((entry) => entry.message).join("\n"), /DeepSeekAgent/);
   assert.match(namedStale.map((entry) => entry.message).join("\n"), /KimiAgent/);
+  assert.match(namedStale.map((entry) => entry.message).join("\n"), /OpenRouterAgent/);
 
   // A registry that exports every generated agent stays quiet.
   const regenerated = initProject({ projectRoot: project, force: true });
@@ -6522,6 +6718,47 @@ test("startRun forwards only the configured DeepSeek API key for DeepSeek runs",
 
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   assert.equal(fs.readFileSync(deepSeekEnvironmentLog, "utf8"), "deepseek-agent-key|\n");
+});
+
+test("startRun preflights and isolates the dedicated OpenRouter credential while preserving the model ID", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const model = "~vendor/model.latest:free+preview@2026";
+
+  const missing = await startRun({
+    projectRoot: project,
+    runId: "openrouter-missing-credential",
+    agent: "OpenRouterAgent",
+    model,
+    env: fakeSmithersEnv(project)
+  });
+  assert.equal(missing.ok, false);
+  assert.equal(missing.diagnostics[0]?.code, "RUN_AGENT_CREDENTIAL_MISSING");
+  assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", "openrouter-missing-credential")), false);
+
+  const environmentLog = path.join(project, "smithers-openrouter-environment.log");
+  const env = {
+    ...fakeSmithersEnv(project),
+    SMITHERS_FAKE_OPENROUTER_ENV_LOG: environmentLog,
+    OPENROUTER_API_KEY: "openrouter-agent-key",
+    OPENAI_API_KEY: "unrelated-openai-key",
+    ANTHROPIC_API_KEY: "unrelated-anthropic-key"
+  };
+  const run = await startRun({
+    projectRoot: project,
+    runId: "openrouter-api-environment",
+    agent: "OpenRouterAgent",
+    model,
+    env
+  });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.equal(fs.readFileSync(environmentLog, "utf8"), "openrouter-agent-key||\n");
+  const taskManifest = JSON.parse(
+    fs.readFileSync(path.join(run.value!.run_root, "smithers", "tasks.json"), "utf8")
+  ) as { tasks: Array<{ agent_ref?: string; model_name?: string; agentRef?: string; modelName?: string }> };
+  const task = taskManifest.tasks.find((entry) => (entry.agent_ref ?? entry.agentRef) === "OpenRouterAgent");
+  assert.equal(task?.model_name ?? task?.modelName, model);
 });
 
 test("startRun rejects cross-agent API-key retry chains before submission", async () => {

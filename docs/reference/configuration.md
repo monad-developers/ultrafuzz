@@ -190,6 +190,28 @@ topology node or group default.
 Generated defaults may include `[models] synthesized_default = true` when the
 default profile was synthesized by the scaffold.
 
+### OpenRouter profiles
+
+Use `OpenRouterAgent` with API-key auth to route Codex model work through
+OpenRouter:
+
+```toml
+[models.openrouter]
+agent = "OpenRouterAgent"
+model = "openai/gpt-5.4"
+reasoning = "high"
+
+[agents.OpenRouterAgent]
+auth = "api-key"
+api_key_env = "OPENROUTER_API_KEY"
+```
+
+The endpoint is fixed to `https://openrouter.ai/api/v1`. Catalogue model IDs
+are passed unchanged and are not checked against a static list; aliases that
+start with `~` and suffix variants such as `:free` are valid. OpenRouter IDs
+must be non-empty, no longer than 256 characters, and contain no whitespace or
+control characters. Subscription auth is rejected.
+
 ## Retry Policy
 
 ```toml

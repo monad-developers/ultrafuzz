@@ -415,6 +415,29 @@ describe("Modal benchmark config", () => {
     ).toThrow();
   });
 
+  it("accepts opaque OpenRouter catalogue IDs without rewriting them", () => {
+    const model = "~vendor/model.latest:free+preview@2026";
+    const routed = {
+      slug: "openrouter-smoke",
+      model,
+      provider: "openrouter",
+      agent: "OpenRouterAgent",
+      reasoning: "high",
+      auth_mode: "api-key"
+    } as const;
+    const config = parseModalBenchmarkConfig({ ...minimalConfig(), models: [routed] });
+    expect(config.models[0]).toEqual(routed);
+    expect(() =>
+      parseModalBenchmarkConfig({ ...minimalConfig(), models: [{ ...routed, auth_mode: "subscription" }] })
+    ).toThrow();
+    expect(() =>
+      parseModalBenchmarkConfig({ ...minimalConfig(), models: [{ ...routed, model: "vendor/model bad" }] })
+    ).toThrow();
+    expect(() =>
+      parseModalBenchmarkConfig({ ...minimalConfig(), models: [{ ...routed, model: "vendor/model\u0080control" }] })
+    ).toThrow();
+  });
+
   it("accepts audit Markdown conversion and temporary judge credentials", () => {
     const config = parseModalBenchmarkConfig({
       ...minimalConfig(),

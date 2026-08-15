@@ -36,15 +36,28 @@ export function validateAgentConfigs(agents: Record<string, AgentConfig>): Confi
 }
 
 function validateProviderAgentConfigs(agents: Record<string, AgentConfig>): ConfigDiagnostic[] {
-  if (agents.DeepSeekAgent?.auth !== "subscription") return [];
-  return [
-    diagnostic(
-      "CONFIG_AGENT_DEEPSEEK_AUTH_UNSUPPORTED",
-      "DeepSeekAgent supports only api-key authentication",
-      ["agents", "DeepSeekAgent", "auth"],
-      "validation"
-    )
-  ];
+  const diagnostics: ConfigDiagnostic[] = [];
+  if (agents.DeepSeekAgent?.auth === "subscription") {
+    diagnostics.push(
+      diagnostic(
+        "CONFIG_AGENT_DEEPSEEK_AUTH_UNSUPPORTED",
+        "DeepSeekAgent supports only api-key authentication",
+        ["agents", "DeepSeekAgent", "auth"],
+        "validation"
+      )
+    );
+  }
+  if (agents.OpenRouterAgent?.auth === "subscription") {
+    diagnostics.push(
+      diagnostic(
+        "CONFIG_AGENT_OPENROUTER_AUTH_UNSUPPORTED",
+        "OpenRouterAgent supports only api-key authentication",
+        ["agents", "OpenRouterAgent", "auth"],
+        "validation"
+      )
+    );
+  }
+  return diagnostics;
 }
 
 function agentConfigDiagnostic(issue: ZodIssue): ConfigDiagnostic {
