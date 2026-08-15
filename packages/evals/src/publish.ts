@@ -157,13 +157,20 @@ export async function publishEvalRun(input: PublishEvalRunInput): Promise<Publis
       await reporter.onRowStart(row, graphFromPlannedGraph(graph, row.id));
     }
     const cursorPath = path.join(root, "telemetry", "publish", resolved.provider, `${row.id}.cursor.json`);
+    const targetProvenance = manifest.provenance.benchmark.targets.find(
+      (target) => target.id === row.target_id && target.repo === row.target.repo
+    );
     const pump = new NodeTelemetryPump({
       runRoot,
       row,
       reporters,
       policy: suite.reporting,
       cursorPath,
-      requiredFinalReportSnapshot: requiredReport.snapshot
+      requiredFinalReportSnapshot: requiredReport.snapshot,
+      ...(targetProvenance === undefined
+        ? {}
+        : { targetProvenance: { commit: targetProvenance.commit, dirty: targetProvenance.dirty } }),
+      env: input.env
     });
     let drained: Awaited<ReturnType<NodeTelemetryPump["drain"]>>;
     try {

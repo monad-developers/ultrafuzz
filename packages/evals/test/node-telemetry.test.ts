@@ -8,7 +8,21 @@ import { describe, expect, it } from "vitest";
 
 import { EVENT_SCHEMA_VERSION } from "@ultrafuzz/artifacts";
 
-import { NodeTelemetryPump, loadTelemetryCursor } from "../src/node-telemetry.js";
+import {
+  NodeTelemetryPump,
+  loadTelemetryCursor,
+  privateArtifactUploadApprovalProvenancePath
+} from "../src/node-telemetry.js";
+import {
+  PRIVATE_ARTIFACT_UPLOAD_ACKNOWLEDGEMENTS_ENV,
+  PRIVATE_ARTIFACT_UPLOAD_ACKNOWLEDGEMENT_SCHEMA_VERSION,
+  parsePrivateArtifactUploadApprovalProvenance,
+  privateArtifactUploadPolicyDigest
+} from "../src/private-upload-approval.js";
+import {
+  EVAL_PRIVATE_ARTIFACT_UPLOAD_APPROVAL_PROVENANCE_SCHEMA_ID,
+  validateEvalJsonSchema
+} from "../src/eval-schema-registry.js";
 import { guardReporter, type EvalNodeEventEnvelope } from "../src/reporter.js";
 import {
   currentPlannedGraph,
@@ -22,7 +36,12 @@ import {
   type JournalEventInput
 } from "./helpers.js";
 
-function setup(overrides: { policy?: ReturnType<typeof testReportingPolicy> } = {}) {
+function setup(
+  overrides: {
+    policy?: ReturnType<typeof testReportingPolicy>;
+    env?: Record<string, string | undefined>;
+  } = {}
+) {
   const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-pump-"));
   const runRoot = path.join(base, "run-1");
   const cursorPath = path.join(base, "cursor.json");
@@ -37,6 +56,8 @@ function setup(overrides: { policy?: ReturnType<typeof testReportingPolicy> } = 
       reporters: [reporter],
       policy,
       cursorPath,
+      targetProvenance: { commit: "0".repeat(40), dirty: false },
+      env: overrides.env,
       retryDelayMs: 0,
       now: () => new Date("2026-07-09T00:10:00.000Z")
     });
@@ -298,6 +319,197 @@ describe("NodeTelemetryPump", () => {
     await pump().drain();
     // Row target is sensitivity: private in the fixture suite.
     expect(reporter.artifacts()[0]?.read).toBeUndefined();
+  });
+
+  it("requires a separate operator-owned acknowledgement before private payload upload", async () => {
+    const policy = testReportingPolicy({
+      artifacts: { mode: "upload", include: ["report.md"], max_file_bytes: 5_000_000, mode_explicit: true }
+    });
+    const denied = setup({ policy, env: {} });
+    denied.row.target.sensitivity = "private";
+
+    expect(() => denied.pump()).toThrowError(/private artifact payload upload requires a separate operator/iu);
+
+    const acknowledgement = {
+      schema_version: PRIVATE_ARTIFACT_UPLOAD_ACKNOWLEDGEMENT_SCHEMA_VERSION,
+      target_id: denied.row.target_id,
+      target_repo: denied.row.target.repo,
+      target_ref: denied.row.target.ref,
+      target_commit: "0".repeat(40),
+      destination: "recording",
+      included_files: ["report.md"],
+      upload_policy_digest: privateArtifactUploadPolicyDigest({
+        row: denied.row,
+        policy,
+        targetCommit: "0".repeat(40),
+        destination: "recording",
+        retentionPolicy: "delete from the provider after 30 days"
+      }),
+      retention_policy: "delete from the provider after 30 days",
+      acknowledged_by: "security-reviewer@example.test",
+      acknowledged_at: "2026-07-09T00:00:00.000Z"
+    };
+    const noncanonicalTimestamp = setup({
+      policy,
+      env: {
+        [PRIVATE_ARTIFACT_UPLOAD_ACKNOWLEDGEMENTS_ENV]: JSON.stringify([
+          { ...acknowledgement, acknowledged_at: "2026-07-09T00:00:00Z" }
+        ])
+      }
+    });
+    noncanonicalTimestamp.row.target.sensitivity = "private";
+    expect(() => noncanonicalTimestamp.pump()).toThrowError(/acknowledged_at must be a canonical UTC timestamp/u);
+
+    const approved = setup({
+      policy,
+      env: { [PRIVATE_ARTIFACT_UPLOAD_ACKNOWLEDGEMENTS_ENV]: JSON.stringify([acknowledgement]) }
+    });
+    approved.row.target.sensitivity = "private";
+    writeRunFixture({
+      runRoot: approved.runRoot,
+      events: [manifestWrittenEvent("private-approved", T1)],
+      artifacts: { "setup-1": { "report.md": "# approved" } }
+    });
+
+    await approved.pump().drain();
+    expect(approved.reporter.artifacts()[0]?.read).toBeTypeOf("function");
+    const approvalPath = privateArtifactUploadApprovalProvenancePath(approved.cursorPath);
+    const approvalDocument = parsePrivateArtifactUploadApprovalProvenance(
+      JSON.parse(fs.readFileSync(approvalPath, "utf8")) as unknown
+    );
+    expect(
+      validateEvalJsonSchema(EVAL_PRIVATE_ARTIFACT_UPLOAD_APPROVAL_PROVENANCE_SCHEMA_ID, approvalDocument)
+    ).toMatchObject({ ok: true });
+    expect(approvalDocument.approvals).toEqual([
+      expect.objectContaining({
+        destination: "recording",
+        retention_policy: "delete from the provider after 30 days",
+        approval_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u)
+      })
+    ]);
+
+    const stalePolicy = testReportingPolicy({
+      artifacts: { ...policy.artifacts, max_file_bytes: policy.artifacts.max_file_bytes + 1 }
+    });
+    const stale = setup({
+      policy: stalePolicy,
+      env: { [PRIVATE_ARTIFACT_UPLOAD_ACKNOWLEDGEMENTS_ENV]: JSON.stringify([acknowledgement]) }
+    });
+    stale.row.target.sensitivity = "private";
+    expect(() => stale.pump()).toThrowError(/private artifact payload upload requires a separate operator/iu);
+
+    const staleTarget = setup({
+      policy,
+      env: {
+        [PRIVATE_ARTIFACT_UPLOAD_ACKNOWLEDGEMENTS_ENV]: JSON.stringify([
+          { ...acknowledgement, target_commit: "1".repeat(40) }
+        ])
+      }
+    });
+    staleTarget.row.target.sensitivity = "private";
+    expect(() => staleTarget.pump()).toThrowError(/private artifact payload upload requires a separate operator/iu);
+
+    const staleRetention = setup({
+      policy,
+      env: {
+        [PRIVATE_ARTIFACT_UPLOAD_ACKNOWLEDGEMENTS_ENV]: JSON.stringify([
+          { ...acknowledgement, retention_policy: "retain indefinitely" }
+        ])
+      }
+    });
+    staleRetention.row.target.sensitivity = "private";
+    expect(() => staleRetention.pump()).toThrowError(/private artifact payload upload requires a separate operator/iu);
+  });
+
+  it("persists authenticated approval provenance before private bytes reach a reporter", async () => {
+    const policy = testReportingPolicy({
+      artifacts: { mode: "upload", include: ["report.md"], max_file_bytes: 5_000_000, mode_explicit: true }
+    });
+    const seed = setup({ policy });
+    seed.row.target.sensitivity = "private";
+    const retentionPolicy = "delete from the provider after 30 days";
+    const acknowledgement = {
+      schema_version: PRIVATE_ARTIFACT_UPLOAD_ACKNOWLEDGEMENT_SCHEMA_VERSION,
+      target_id: seed.row.target_id,
+      target_repo: seed.row.target.repo,
+      target_ref: seed.row.target.ref,
+      target_commit: "0".repeat(40),
+      destination: "recording",
+      included_files: ["report.md"],
+      upload_policy_digest: privateArtifactUploadPolicyDigest({
+        row: seed.row,
+        policy,
+        targetCommit: "0".repeat(40),
+        destination: "recording",
+        retentionPolicy
+      }),
+      retention_policy: retentionPolicy,
+      acknowledged_by: "security-reviewer@example.test",
+      acknowledged_at: "2026-07-09T00:00:00.000Z"
+    };
+    const fixture = setup({
+      policy,
+      env: { [PRIVATE_ARTIFACT_UPLOAD_ACKNOWLEDGEMENTS_ENV]: JSON.stringify([acknowledgement]) }
+    });
+    fixture.row.target.sensitivity = "private";
+    writeRunFixture({
+      runRoot: fixture.runRoot,
+      events: [manifestWrittenEvent("private-provenance-before-upload", T1)],
+      artifacts: { "setup-1": { "report.md": "# approved" } }
+    });
+    let observedBeforeUpload = false;
+    fixture.reporter.onArtifact = async (artifact) => {
+      const provenancePath = privateArtifactUploadApprovalProvenancePath(fixture.cursorPath);
+      const persisted = parsePrivateArtifactUploadApprovalProvenance(
+        JSON.parse(fs.readFileSync(provenancePath, "utf8")) as unknown
+      );
+      expect(persisted.approvals[0]?.approval_sha256).toMatch(/^[a-f0-9]{64}$/u);
+      expect(artifact.read).toBeTypeOf("function");
+      observedBeforeUpload = true;
+    };
+
+    await fixture.pump().drain();
+    expect(observedBeforeUpload).toBe(true);
+
+    const provenancePath = privateArtifactUploadApprovalProvenancePath(fixture.cursorPath);
+    const forged = JSON.parse(fs.readFileSync(provenancePath, "utf8")) as {
+      approvals: Array<{ approval_sha256: string }>;
+    };
+    forged.approvals[0]!.approval_sha256 = "f".repeat(64);
+    fs.writeFileSync(provenancePath, `${JSON.stringify(forged)}\n`, "utf8");
+    await expect(fixture.pump().drain()).rejects.toMatchObject({
+      code: "EVAL_PRIVATE_ARTIFACT_UPLOAD_APPROVAL_PROVENANCE_FAILED"
+    });
+  });
+
+  it("refuses private payload upload unless sealed target provenance is explicitly clean", () => {
+    const policy = testReportingPolicy({
+      artifacts: { mode: "upload", include: ["report.md"], max_file_bytes: 5_000_000, mode_explicit: true }
+    });
+    const fixture = setup({ policy, env: {} });
+    fixture.row.target.sensitivity = "private";
+    expect(
+      () =>
+        new NodeTelemetryPump({
+          runRoot: fixture.runRoot,
+          row: fixture.row,
+          reporters: [fixture.reporter],
+          policy,
+          cursorPath: fixture.cursorPath,
+          targetProvenance: { commit: "0".repeat(40), dirty: true }
+        })
+    ).toThrowError(/explicit clean-target provenance/iu);
+    expect(
+      () =>
+        new NodeTelemetryPump({
+          runRoot: fixture.runRoot,
+          row: fixture.row,
+          reporters: [fixture.reporter],
+          policy,
+          cursorPath: fixture.cursorPath,
+          targetProvenance: { commit: "0".repeat(40) } as { commit: string; dirty: boolean }
+        })
+    ).toThrowError(/explicit clean-target provenance/iu);
   });
 
   it("does not double-publish across a simulated crash/resume", async () => {

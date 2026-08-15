@@ -10,6 +10,7 @@ import {
   CLEAN_AUDIT_JSON_SCHEMA_ID,
   MATERIALIZE_AUDIT_JSON_SCHEMA_ID
 } from "./schema-registry.js";
+import type { MaterializeReviewSignoff } from "./review-signoff.js";
 
 export const MATERIALIZE_AUDIT_SCHEMA_VERSION = "ultrafuzz.materialize.audit.v1" as const;
 export const CLEAN_AUDIT_SCHEMA_VERSION = "ultrafuzz.clean.audit.v1" as const;
@@ -39,6 +40,7 @@ export interface MaterializeAuditRecord {
   allow_overwrite: boolean;
   copies: MaterializeAuditCopy[];
   patches: MaterializeAuditPatch[];
+  review_signoff?: MaterializeReviewSignoff;
 }
 
 export interface CleanAuditSelection {

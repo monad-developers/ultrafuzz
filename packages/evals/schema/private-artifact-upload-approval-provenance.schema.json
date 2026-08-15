@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:evals:private-artifact-upload-approval-provenance:1",
+  "title": "Ultrafuzz private artifact upload approval provenance",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "approvals"],
+  "properties": {
+    "schema_version": {
+      "const": "ultrafuzz.eval.private-artifact-upload-approval-provenance.v1"
+    },
+    "approvals": {
+      "type": "array",
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/approval"
+      }
+    }
+  },
+  "$defs": {
+    "approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "target_id",
+        "target_repo",
+        "target_ref",
+        "target_commit",
+        "destination",
+        "included_files",
+        "upload_policy_digest",
+        "retention_policy",
+        "acknowledged_by",
+        "acknowledged_at",
+        "approval_sha256"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "ultrafuzz.eval.private-artifact-upload-acknowledgement.v1"
+        },
+        "target_id": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "target_repo": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "target_ref": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "target_commit": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        },
+        "destination": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "included_files": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/boundedString"
+          }
+        },
+        "upload_policy_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "retention_policy": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "acknowledged_by": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "acknowledged_at": {
+          "type": "string",
+          "format": "date-time",
+          "maxLength": 4096
+        },
+        "approval_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "boundedString": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  }
+}

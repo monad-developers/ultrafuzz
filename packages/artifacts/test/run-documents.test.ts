@@ -63,7 +63,7 @@ function canonicalConfigRedactions(): ConfigRedactionsDocument {
 
 function canonicalRunPlan(): RunPlanDocument {
   return {
-    schema_version: "ultrafuzz.run-plan.v2",
+    schema_version: "ultrafuzz.run-plan.v3",
     run_id: "run-child",
     mode: "run",
     graph_fingerprint: DIGEST_A,
@@ -77,6 +77,7 @@ function canonicalRunPlan(): RunPlanDocument {
       nodes: { node_a: { resources: { memoryMiB: 1_024 } } },
       providers: {}
     },
+    production_source_roots: ["contracts", "src"],
     topology: { path: "topology.json", logical_nodes: 1, expanded_nodes: 1, required_commands: [] },
     audit_profile: {
       id: "full",
@@ -90,6 +91,16 @@ function canonicalRunPlan(): RunPlanDocument {
       setting_origins: {},
       overridden_settings: [],
       topology_overridden: false
+    },
+    data_governance: {
+      schema_version: "ultrafuzz.data-governance-provenance.v1",
+      path: "data-governance.json",
+      sha256: DIGEST_A,
+      policy_digest: DIGEST_B,
+      input_digest: DIGEST_A,
+      sensitivity: "private",
+      acknowledgement_status: "approved",
+      review_signoff_authorities: []
     },
     rendered_prompts: [
       {

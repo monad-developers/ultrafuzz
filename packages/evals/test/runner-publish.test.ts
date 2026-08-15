@@ -524,7 +524,31 @@ describe("runner", () => {
       evalRunId: "missing-backend-eval",
       row,
       suite,
-      env: { PATH: path.join(project, "empty-bin") }
+      env: {
+        PATH: path.join(project, "empty-bin"),
+        ULTRAFUZZ_DATA_GOVERNANCE_POLICY: JSON.stringify({
+          schema_version: "ultrafuzz.data-governance-policy.v1",
+          sensitivity: "public",
+          source_destinations: ["model:openai"],
+          artifact_destinations: [],
+          destination_policies: [
+            {
+              destination: "model:openai",
+              processor: "synthetic test process",
+              region: "local test process",
+              retention_policy: "synthetic test fixtures only",
+              training_policy: "not used for training",
+              dpa_status: "not applicable to synthetic fixtures",
+              minimization_policy: "synthetic fixture content only",
+              data_handling_basis: "synthetic public test fixtures"
+            }
+          ],
+          local_model_agents: [],
+          openrouter_model_allowlist: [],
+          production_source_roots: ["contracts", "src"],
+          review_signoff_keys: []
+        })
+      }
     });
 
     expect(record.status).toBe("failed");

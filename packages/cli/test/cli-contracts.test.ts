@@ -314,7 +314,14 @@ test("EVMBench consumes the same registered CLI v2 definitions without a paralle
     report: {
       markdown_path: "",
       json_path: "",
-      source: "verified-agent-report"
+      source: "verified-agent-report",
+      assurance: {
+        structural_verification: "passed",
+        model_consensus: "agent-produced",
+        executable_reproduction: "not-replayed",
+        human_acceptance: "not-recorded",
+        review_signoff: "not-present"
+      }
     }
   };
 

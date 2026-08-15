@@ -665,7 +665,7 @@
     "reportData": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["markdown_path", "json_path", "source"],
+      "required": ["markdown_path", "json_path", "source", "assurance"],
       "properties": {
         "markdown_path": {
           "type": "string"
@@ -675,6 +675,29 @@
         },
         "source": {
           "const": "verified-agent-report"
+        },
+        "assurance": {
+          "$ref": "#/$defs/reportAssurance"
+        }
+      }
+    },
+    "reportAssurance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "structural_verification",
+        "model_consensus",
+        "executable_reproduction",
+        "human_acceptance",
+        "review_signoff"
+      ],
+      "properties": {
+        "structural_verification": { "const": "passed" },
+        "model_consensus": { "const": "agent-produced" },
+        "executable_reproduction": { "const": "not-replayed" },
+        "human_acceptance": { "enum": ["accepted", "not-recorded", "unverified"] },
+        "review_signoff": {
+          "enum": ["verified", "not-present", "invalid", "operator-policy-required", "audit-unavailable"]
         }
       }
     }

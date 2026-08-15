@@ -224,7 +224,10 @@ function fakeInspectionEnv(project: string, fixtures: FakeInspectionFixtures): R
   fs.chmodSync(smithers, 0o755);
   return {
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
-    SMITHERS_BIN: smithers
+    SMITHERS_BIN: smithers,
+    SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log"),
+    ULTRAFUZZ_DATA_GOVERNANCE_POLICY: syntheticDataGovernancePolicy(["model:openai"]),
+    ...(fixtures.nodeWatchLines === undefined ? {} : { SMITHERS_FAKE_NODE_WATCH: nodeWatchPath })
   };
 }
 
@@ -235,6 +238,34 @@ async function startReviewedRun(input: Parameters<typeof startRun>[0]): ReturnTy
   )?.details?.expected_digest;
   assert.equal(typeof expectedDigest, "string", JSON.stringify(review.diagnostics));
   return startRun({ ...input, reviewAcknowledgement: String(expectedDigest) });
+}
+
+function syntheticDestinationPolicy(destination: string): Record<string, string> {
+  return {
+    destination,
+    processor: "synthetic test process",
+    region: "local test process",
+    retention_policy: "synthetic test fixtures only",
+    training_policy: "not used for training",
+    dpa_status: "not applicable to synthetic fixtures",
+    minimization_policy: "synthetic fixture content only",
+    data_handling_basis: "synthetic public test fixtures"
+  };
+}
+
+function syntheticDataGovernancePolicy(sourceDestinations: string[], artifactDestinations: string[] = []): string {
+  const destinations = [...new Set([...sourceDestinations, ...artifactDestinations])].sort();
+  return JSON.stringify({
+    schema_version: "ultrafuzz.data-governance-policy.v1",
+    sensitivity: "public",
+    source_destinations: [...sourceDestinations].sort(),
+    artifact_destinations: [...artifactDestinations].sort(),
+    destination_policies: destinations.map(syntheticDestinationPolicy),
+    local_model_agents: [],
+    openrouter_model_allowlist: [],
+    production_source_roots: ["contracts", "src"],
+    review_signoff_keys: []
+  });
 }
 
 async function launchedProject(
@@ -1180,7 +1211,10 @@ test("startRun rejects a missing required backend before creating a run", async 
   const run = await startReviewedRun({
     projectRoot: project,
     runId: "missing-recon",
-    env: { PATH: path.join(project, "empty-bin") }
+    env: {
+      PATH: path.join(project, "empty-bin"),
+      ULTRAFUZZ_DATA_GOVERNANCE_POLICY: syntheticDataGovernancePolicy(["model:openai"])
+    }
   });
 
   assert.equal(run.ok, false);
@@ -1243,6 +1277,9 @@ nodes:
     projectRoot: project,
     runId: "transformed-command-requirements",
     topologyTransform: { excludedNodeIds: ["required-branch"] },
+    env: {
+      ULTRAFUZZ_DATA_GOVERNANCE_POLICY: syntheticDataGovernancePolicy(["model:openai"])
+    },
     requiredCommandProbe: async (commands) => {
       probed = commands;
       return commands.map((name) => ({ name, available: false, path: null, version: null }));
@@ -1280,7 +1317,8 @@ credential_env = ["UFZ_PROVIDER_ONE", "UFZ_PROVIDER_TWO"]
     env: {
       PATH: path.join(project, "controller-empty-bin"),
       UFZ_PROVIDER_ONE: "provider-one",
-      UFZ_PROVIDER_TWO: "provider-two"
+      UFZ_PROVIDER_TWO: "provider-two",
+      ULTRAFUZZ_DATA_GOVERNANCE_POLICY: syntheticDataGovernancePolicy(["cloud:modal", "model:openai"], ["cloud:modal"])
     },
     requiredCommandProbe: async (commands) => {
       probed = commands;

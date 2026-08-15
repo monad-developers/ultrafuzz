@@ -96,6 +96,9 @@ const WORKFLOW_CONTROLLER_ONLY_ENVIRONMENT_VARIABLES = new Set([
   "SMITHERS_CLI_SRC_DIR",
   "ULTRAFUZZ_ARTIFACTS_MODULE",
   "ULTRAFUZZ_CONFIG_PATH",
+  "ULTRAFUZZ_DATA_DISCLOSURE_ACKNOWLEDGEMENTS",
+  "ULTRAFUZZ_DATA_GOVERNANCE_POLICY",
+  "ULTRAFUZZ_EVAL_PRIVATE_ARTIFACT_UPLOAD_ACKNOWLEDGEMENTS",
   "ULTRAFUZZ_MODAL_MODULE",
   "ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES",
   "ULTRAFUZZ_PROVIDER_HOME_ROOT",
@@ -112,6 +115,7 @@ const WORKFLOW_CONTROLLER_ONLY_ENVIRONMENT_VARIABLES = new Set([
 
 export async function startRun(input: StartRunInput) {
   const planned = await planRun(input, {
+    enforceDataGovernance: true,
     beforeMaterialize: async ({
       resolvedConfig,
       expandedGraph,
@@ -1489,6 +1493,7 @@ function agentEnvironmentVariableNames(
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name)) {
         throw new Error("ULTRAFUZZ_AGENT_ENV_ALLOWLIST must be a comma-separated list of environment variable names");
       }
+      assertCredentialEnvironmentVariableName(name);
       names.push(name);
     }
   }

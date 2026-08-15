@@ -16,10 +16,13 @@ import {
   layoutForRunRoot,
   normalizeSafeRelativePath,
   parseStrictJson,
+  parseStrictJsonBytes,
+  readRegularFileSnapshot,
   readArtifactManifest,
   readRunState,
   safeResolveInside,
   sha256Bytes,
+  writeJsonDurable,
   validateStrictJsonlHistory,
   validateSafeIdOrThrow,
   type ArtifactManifest,
@@ -46,6 +49,12 @@ import {
 import type { EvalMatrixRow, EvalReportingPolicy } from "./types.js";
 import { readTelemetryCursor, writeTelemetryCursor } from "./eval-durable.js";
 import { contentTypeForArtifact, EvalError, isRecord, warningDiagnostic } from "./utils.js";
+import {
+  assertPrivateArtifactUploadAcknowledged,
+  parsePrivateArtifactUploadApprovalProvenance,
+  privateArtifactUploadApprovalProvenanceDocument,
+  type PrivateArtifactUploadApprovalProvenance
+} from "./private-upload-approval.js";
 
 export const TELEMETRY_CURSOR_SCHEMA_VERSION = "ultrafuzz.eval.telemetry-cursor.v1" as const;
 const DELIVERED_EVENT_RING_SIZE = 4096;
@@ -88,6 +97,10 @@ export interface NodeTelemetryPumpInput {
   cursorPath: string;
   /** Exact preflight authority required by post-hoc publication. Live telemetry may omit it. */
   requiredFinalReportSnapshot?: VerifiedFinalReportSnapshot;
+  /** Sealed target identity from eval-run provenance; required for private payload upload. */
+  targetProvenance?: { commit: string; dirty: boolean };
+  /** Operator-owned environment carrying private-upload acknowledgements. */
+  env?: Record<string, string | undefined>;
   now?: () => Date;
   maxDeliveryAttempts?: number;
   retryDelayMs?: number;
@@ -151,9 +164,21 @@ export class NodeTelemetryPump {
   private readonly now: () => Date;
   private readonly maxAttempts: number;
   private readonly retryDelayMs: number;
+  private readonly privateUploadApprovals: PrivateArtifactUploadApprovalProvenance[];
 
   constructor(input: NodeTelemetryPumpInput) {
     this.input = input;
+    this.privateUploadApprovals = assertPrivateArtifactUploadAcknowledged({
+      row: input.row,
+      policy: input.policy,
+      destinations: input.reporters.map((reporter) => {
+        const target = reporterForReliableDelivery(reporter);
+        return target.destination ?? target.name;
+      }),
+      targetCommit: input.targetProvenance?.commit,
+      targetDirty: input.targetProvenance?.dirty,
+      env: input.env
+    });
     this.now = input.now ?? (() => new Date());
     this.maxAttempts = Math.max(1, input.maxDeliveryAttempts ?? 3);
     this.retryDelayMs = input.retryDelayMs ?? 250;
@@ -163,6 +188,7 @@ export class NodeTelemetryPump {
   async drain(options: TelemetryDrainOptions = {}): Promise<TelemetryDrainResult> {
     const release = await acquireTelemetryCursorLock(this.input.cursorPath);
     try {
+      persistPrivateUploadApprovalProvenance(this.input.cursorPath, this.privateUploadApprovals);
       if (options.resetCursor === true) {
         persistTelemetryCursor(this.input.cursorPath, createTelemetryCursor());
       }
@@ -918,6 +944,38 @@ function persistTelemetryCursor(cursorPath: string, cursor: TelemetryCursorState
       "EVAL_TELEMETRY_CURSOR_WRITE_FAILED",
       `failed to persist telemetry cursor ${cursorPath}: ${error instanceof Error ? error.message : String(error)}`,
       { path: cursorPath }
+    );
+  }
+}
+
+export function privateArtifactUploadApprovalProvenancePath(cursorPath: string): string {
+  return `${path.resolve(cursorPath)}.private-upload-approvals.json`;
+}
+
+function persistPrivateUploadApprovalProvenance(
+  cursorPath: string,
+  accepted: readonly PrivateArtifactUploadApprovalProvenance[]
+): void {
+  if (accepted.length === 0) return;
+  const provenancePath = privateArtifactUploadApprovalProvenancePath(cursorPath);
+  try {
+    assertNoSymlinkComponents(path.parse(provenancePath).root, provenancePath, "private upload approval provenance");
+    const existing = fs.existsSync(provenancePath)
+      ? parsePrivateArtifactUploadApprovalProvenance(
+          parseStrictJsonBytes(readRegularFileSnapshot(provenancePath, 1024 * 1024))
+        ).approvals
+      : [];
+    const byDigest = new Map(
+      [...existing, ...accepted].map((approval) => [approval.approval_sha256, approval] as const)
+    );
+    writeJsonDurable(provenancePath, privateArtifactUploadApprovalProvenanceDocument([...byDigest.values()]));
+  } catch (error) {
+    throw new EvalError(
+      "EVAL_PRIVATE_ARTIFACT_UPLOAD_APPROVAL_PROVENANCE_FAILED",
+      `failed to persist private artifact upload approval provenance: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+      { path: provenancePath }
     );
   }
 }

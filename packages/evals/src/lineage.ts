@@ -239,7 +239,10 @@ function resolveTargetProvenance(targetPath: string | undefined, ref: string): {
     try {
       return {
         commit: git(targetPath, ["rev-parse", "HEAD"]).toLowerCase(),
-        dirty: git(targetPath, ["status", "--porcelain", "--untracked-files=no"]).length > 0
+        // Private-upload acknowledgements use this bit to claim that a commit
+        // identifies the exact target bytes. Untracked files are model-readable
+        // in YOLO mode, so excluding them would make that claim false.
+        dirty: git(targetPath, ["status", "--porcelain", "--untracked-files=all"]).length > 0
       };
     } catch {
       throw new EvalError(

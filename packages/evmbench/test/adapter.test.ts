@@ -362,7 +362,18 @@ function reportData(markdownPath: string): Record<string, unknown> {
   return {
     markdown_path: markdownPath,
     json_path: path.join(path.dirname(markdownPath), "report.json"),
-    source: "verified-agent-report"
+    source: "verified-agent-report",
+    assurance: reportAssurance()
+  };
+}
+
+function reportAssurance(): Record<string, string> {
+  return {
+    structural_verification: "passed",
+    model_consensus: "agent-produced",
+    executable_reproduction: "not-replayed",
+    human_acceptance: "not-recorded",
+    review_signoff: "not-present"
   };
 }
 

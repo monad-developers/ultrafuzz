@@ -595,6 +595,9 @@
         "audit_profile": {
           "$ref": "urn:ultrafuzz:schema:artifacts:run-metadata:2#/properties/audit_profile"
         },
+        "data_governance": {
+          "$ref": "urn:ultrafuzz:schema:artifacts:run-metadata:2#/properties/data_governance"
+        },
         "forge_guard": { "$ref": "urn:ultrafuzz:schema:artifacts:run-metadata:2#/$defs/forgeGuard" },
         "workflow": {
           "type": "object",
@@ -636,12 +639,14 @@
     "materializeData": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["run_id", "dry_run", "copied", "patches", "audit"],
+      "required": ["run_id", "dry_run", "copied", "patches", "review_signoff_required", "audit"],
       "properties": {
         "run_id": { "type": "string" },
         "dry_run": { "type": "boolean" },
         "copied": { "type": "array", "items": { "$ref": "#/$defs/copySelection" } },
         "patches": { "$ref": "#/$defs/stringArray" },
+        "review_signoff_required": { "type": "boolean" },
+        "review_signoff_request": { "$ref": "#/$defs/materializeReviewSignoffRequest" },
         "audit": {
           "type": "object",
           "additionalProperties": false,
@@ -679,6 +684,68 @@
                   "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
                 }
               }
+            },
+            "review_signoff": {
+              "$ref": "urn:ultrafuzz:schema:runtime:materialize-audit:1#/$defs/reviewSignoff"
+            }
+          }
+        }
+      }
+    },
+    "materializeReviewSignoffRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "decision",
+        "run_id",
+        "target_commit",
+        "target_tree",
+        "target_clean",
+        "target_worktree_digest",
+        "graph_fingerprint",
+        "final_report_digest",
+        "selected_artifacts",
+        "trusted_signers"
+      ],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.materialize.review-signoff.v1" },
+        "decision": { "const": "accepted" },
+        "run_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+        "target_commit": { "type": "string", "pattern": "^[a-f0-9]{40,64}$" },
+        "target_tree": { "type": "string", "pattern": "^[a-f0-9]{40,64}$" },
+        "target_clean": { "const": true },
+        "target_worktree_digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "graph_fingerprint": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "final_report_digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "selected_artifacts": {
+          "type": "array",
+          "maxItems": 4096,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["source", "destination", "sha256"],
+            "properties": {
+              "source": { "type": "string", "minLength": 1 },
+              "destination": { "type": "string", "minLength": 1 },
+              "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+            }
+          }
+        },
+        "trusted_signers": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["key_id", "algorithm", "public_key_sha256"],
+            "properties": {
+              "key_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+              "algorithm": { "const": "ed25519" },
+              "public_key_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
             }
           }
         }

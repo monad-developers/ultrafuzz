@@ -6,7 +6,23 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { initProject, materializeSelection, planRun } from "../src/index.js";
+import {
+  initProject,
+  materializeSelection as runtimeMaterializeSelection,
+  planRun,
+  sealWorkflowControlFiles,
+  type MaterializeInput
+} from "../src/index.js";
+import { compileSmithersWorkflow, smithersExecutionControlFiles } from "../src/smithers.js";
+
+const materializePolicies = new Map<string, string>();
+
+function materializeSelection(input: MaterializeInput) {
+  return runtimeMaterializeSelection({
+    ...input,
+    operatorDataGovernancePolicy: materializePolicies.get(path.resolve(input.projectRoot))
+  });
+}
 
 function tempProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-runtime-materialize-"));
@@ -46,11 +62,81 @@ nodes:
   );
 }
 
-async function plannedRunWithArtifact(project: string): Promise<{ runId: string; runRoot: string; nodeId: string }> {
+async function plannedRunWithArtifact(
+  project: string,
+  options: { productionSourceRoots?: string[] } = {}
+): Promise<{ runId: string; runRoot: string; nodeId: string }> {
   initProject({ projectRoot: project, force: true });
+  if (options.productionSourceRoots !== undefined) {
+    const configPath = path.join(project, "ultrafuzz.toml");
+    const config = fs
+      .readFileSync(configPath, "utf8")
+      .replace(
+        'production_source_roots = ["src", "contracts"]',
+        `production_source_roots = ${JSON.stringify(options.productionSourceRoots)}`
+      );
+    fs.writeFileSync(configPath, config, "utf8");
+  }
   writeSmallTopology(project);
-  const plan = await planRun({ projectRoot: project, runId: `mat-${crypto.randomBytes(4).toString("hex")}`, env: {} });
+  const productionSourceRoots = [...(options.productionSourceRoots ?? ["src", "contracts"])].sort();
+  const operatorPolicy = JSON.stringify({
+    schema_version: "ultrafuzz.data-governance-policy.v1",
+    sensitivity: "public",
+    source_destinations: ["model:openai"],
+    artifact_destinations: [],
+    destination_policies: [
+      {
+        destination: "model:openai",
+        processor: "synthetic test process",
+        region: "local test process",
+        retention_policy: "synthetic test fixtures only",
+        training_policy: "not used for training",
+        dpa_status: "not applicable to synthetic fixtures",
+        minimization_policy: "synthetic fixture content only",
+        data_handling_basis: "synthetic public test fixtures"
+      }
+    ],
+    local_model_agents: [],
+    openrouter_model_allowlist: [],
+    production_source_roots: productionSourceRoots,
+    review_signoff_keys: []
+  });
+  const plan = await planRun({
+    projectRoot: project,
+    runId: `mat-${crypto.randomBytes(4).toString("hex")}`,
+    env: { ULTRAFUZZ_DATA_GOVERNANCE_POLICY: operatorPolicy }
+  });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  const compiled = compileSmithersWorkflow({
+    projectRoot: project,
+    config: plan.value!.resolved_config,
+    graph: plan.value!.expanded_graph,
+    runLayout: plan.value!.layout,
+    workflowName: `ultrafuzz-${plan.value!.run_id}`,
+    renderedPrompts: plan.value!.rendered_prompts
+  });
+  const executionFiles = await smithersExecutionControlFiles(compiled, plan.value!.layout, {
+    SMITHERS_BIN: "/bin/true"
+  });
+  for (const node of plan.value!.graph.nodes) {
+    const taskNodeIds = compiled.tasks
+      .filter((task) => task.concreteNodeId === node.id)
+      .map((task) => task.smithersNodeId);
+    if (taskNodeIds.length > 0) node.workflow = { node_id: taskNodeIds[0]!, task_node_ids: taskNodeIds };
+  }
+  fs.writeFileSync(plan.value!.layout.graphPath, `${JSON.stringify(plan.value!.graph, null, 2)}\n`, "utf8");
+  sealWorkflowControlFiles({
+    projectRoot: project,
+    layout: plan.value!.layout,
+    workflowPath: compiled.workflowPath,
+    expandedGraphPath: compiled.expandedGraphPath,
+    configPath: compiled.configPath,
+    evidenceWorkflowPath: compiled.evidenceWorkflowPath,
+    tasksPath: compiled.tasksPath,
+    inputPath: compiled.inputPath,
+    executionFiles
+  });
+  materializePolicies.set(path.resolve(project), operatorPolicy);
   const nodeId = plan.value!.graph.nodes[0]!.id;
   assert.ok(nodeId);
   const artifactDir = path.join(plan.value!.run_root, "artifacts", nodeId);
@@ -133,6 +219,62 @@ test("overwrite materialization atomically replaces a raced destination symlink 
     fs.renameSync = originalRenameSync;
     fs.rmSync(outsideRoot, { recursive: true, force: true });
   }
+});
+
+test("materialization writes the exact reviewed snapshot if the source changes before destination creation", async () => {
+  const project = tempProject();
+  const { runId, runRoot, nodeId } = await plannedRunWithArtifact(project);
+  const sourcePath = path.join(runRoot, "artifacts", nodeId, "stdout.txt");
+  const destinationPath = path.join(project, "test", "snapshot.txt");
+  const originalWriteFileSync = fs.writeFileSync;
+  let changed = false;
+  fs.writeFileSync = ((filePath, data, options) => {
+    if (!changed && path.resolve(String(filePath)) === destinationPath) {
+      changed = true;
+      originalWriteFileSync(sourcePath, "raced source bytes\n", "utf8");
+    }
+    return originalWriteFileSync(filePath, data, options as never);
+  }) as typeof fs.writeFileSync;
+  try {
+    const result = await materializeSelection({
+      projectRoot: project,
+      runId,
+      confirmed: true,
+      copies: [{ source: `artifacts/${nodeId}/stdout.txt`, destination: "test/snapshot.txt" }]
+    });
+    assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+    assert.equal(changed, true);
+    assert.equal(fs.readFileSync(sourcePath, "utf8"), "raced source bytes\n");
+    assert.equal(fs.readFileSync(destinationPath, "utf8"), "generated output\n");
+  } finally {
+    fs.writeFileSync = originalWriteFileSync;
+  }
+});
+
+test("publication classification uses authenticated policy roots and treats the dot root as every destination", async () => {
+  const changedConfigProject = tempProject();
+  const changed = await plannedRunWithArtifact(changedConfigProject);
+  const changedResult = await materializeSelection({
+    projectRoot: changedConfigProject,
+    runId: changed.runId,
+    confirmed: true,
+    copies: [{ source: `artifacts/${changed.nodeId}/stdout.txt`, destination: "src/generated.txt" }]
+  });
+  assert.equal(changedResult.ok, false);
+  assert.ok(changedResult.diagnostics.some((entry) => entry.code === "MATERIALIZE_REVIEW_AUTHORITY_INVALID"));
+  assert.equal(fs.existsSync(path.join(changedConfigProject, "src", "generated.txt")), false);
+
+  const dotRootProject = tempProject();
+  const dot = await plannedRunWithArtifact(dotRootProject, { productionSourceRoots: ["."] });
+  const dotResult = await materializeSelection({
+    projectRoot: dotRootProject,
+    runId: dot.runId,
+    confirmed: true,
+    copies: [{ source: `artifacts/${dot.nodeId}/stdout.txt`, destination: "test/generated.txt" }]
+  });
+  assert.equal(dotResult.ok, false);
+  assert.ok(dotResult.diagnostics.some((entry) => entry.code === "MATERIALIZE_REVIEW_AUTHORITY_INVALID"));
+  assert.equal(fs.existsSync(path.join(dotRootProject, "test", "generated.txt")), false);
 });
 
 test("materializeSelection rejects conflicts, denied destinations, source symlinks, and destination symlink escapes", async () => {

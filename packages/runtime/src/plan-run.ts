@@ -50,6 +50,7 @@ import {
   PROJECT_REFERENCES_FILE,
   type ReferenceCatalog
 } from "@ultrafuzz/references";
+import { normalizeRelativePath } from "@ultrafuzz/security";
 import {
   expandTopology,
   fingerprintGraph,
@@ -91,10 +92,12 @@ import {
   inspectControllerSource,
   type ControllerSourceInspection
 } from "./controller-source.js";
+import { dataGovernanceReviewSignoffAuthorities, prepareDataGovernance } from "./data-governance.js";
 
 const RENDERED_PROMPT_SNAPSHOT_DIR = "prompt-snapshots";
 
 interface PlanRunHooks {
+  enforceDataGovernance?: boolean;
   beforeMaterialize?(context: {
     resolvedConfig: PlanRunValue["resolved_config"];
     expandedGraph: ExpandedGraph;
@@ -312,6 +315,36 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
   if (hasRuntimeErrors(graphDiagnostics)) {
     return runtimeFailure<PlanRunValue>(graphDiagnostics);
   }
+  const graphFingerprint = fingerprintGraph(expandedGraph);
+  const governanceConfig = resolved.config;
+  const prepareCampaignDataGovernance = () =>
+    prepareDataGovernance({
+      projectRoot,
+      config: governanceConfig,
+      graph,
+      graphFingerprint,
+      configFingerprint,
+      promptDigest,
+      ...(input.sourceRunId === undefined ? {} : { sourceRunId: input.sourceRunId }),
+      ...(referenceExpectationsSource === undefined
+        ? {}
+        : { referenceExpectationsDigest: referenceExpectationsSource.sourceDigest }),
+      ...(input.prompt === undefined ? {} : { operatorPrompt: input.prompt }),
+      ...(input.workflowInput === undefined ? {} : { workflowInput: input.workflowInput }),
+      env: input.env
+    });
+  let dataGovernance: ReturnType<typeof prepareDataGovernance>;
+  try {
+    dataGovernance = prepareCampaignDataGovernance();
+  } catch (error) {
+    return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "governance", "DATA_GOVERNANCE_POLICY_INVALID")]);
+  }
+  if (hooks.enforceDataGovernance === true && hasRuntimeErrors(dataGovernance.diagnostics)) {
+    return runtimeFailure<PlanRunValue>(dataGovernance.diagnostics);
+  }
+  // Provider/command preflight may create a cloud app or inspect a remote
+  // execution image. Authenticate the exact disclosure policy and campaign
+  // acknowledgement before allowing that external side effect.
   let preMaterializeDiagnostics: RuntimeDiagnostic[];
   try {
     preMaterializeDiagnostics =
@@ -336,7 +369,52 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
   } catch (error) {
     return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "RUN_REVIEW_INPUT_CHANGED")]);
   }
-  const graphFingerprint = fingerprintGraph(expandedGraph);
+  if (hooks.enforceDataGovernance === true && hooks.beforeMaterialize !== undefined) {
+    let currentDataGovernance: ReturnType<typeof prepareDataGovernance>;
+    try {
+      currentDataGovernance = prepareCampaignDataGovernance();
+    } catch (error) {
+      return runtimeFailure<PlanRunValue>([
+        diagnosticFromError(error, "governance", "DATA_GOVERNANCE_POST_PREFLIGHT_INVALID")
+      ]);
+    }
+    if (
+      currentDataGovernance.provenance.policy_digest !== dataGovernance.provenance.policy_digest ||
+      currentDataGovernance.provenance.input_digest !== dataGovernance.provenance.input_digest
+    ) {
+      return runtimeFailure<PlanRunValue>([
+        {
+          code: "DATA_GOVERNANCE_INPUT_CHANGED_DURING_PREFLIGHT",
+          message:
+            "campaign policy or effective input changed during execution-environment preflight; review and acknowledge the new digests before launch",
+          severity: "error",
+          source: "governance",
+          path: projectRoot,
+          details: {
+            previous_policy_digest: dataGovernance.provenance.policy_digest,
+            current_policy_digest: currentDataGovernance.provenance.policy_digest,
+            previous_input_digest: dataGovernance.provenance.input_digest,
+            current_input_digest: currentDataGovernance.provenance.input_digest
+          }
+        }
+      ]);
+    }
+    if (hasRuntimeErrors(currentDataGovernance.diagnostics)) {
+      return runtimeFailure<PlanRunValue>(currentDataGovernance.diagnostics);
+    }
+    dataGovernance = currentDataGovernance;
+  }
+  const dataGovernanceBytes = Buffer.from(`${JSON.stringify(dataGovernance.provenance, null, 2)}\n`, "utf8");
+  const dataGovernanceReference = {
+    schema_version: dataGovernance.provenance.schema_version,
+    path: "data-governance.json" as const,
+    sha256: sha256Bytes(dataGovernanceBytes),
+    policy_digest: dataGovernance.provenance.policy_digest,
+    input_digest: dataGovernance.provenance.input_digest,
+    sensitivity: dataGovernance.provenance.policy.sensitivity,
+    acknowledgement_status: dataGovernance.provenance.acknowledgement_status,
+    review_signoff_authorities: dataGovernanceReviewSignoffAuthorities(dataGovernance.provenance.policy)
+  };
   const createdAt = new Date().toISOString();
   const stateNodes = graph.nodes.map<NodeStateInput>((node) => ({
     id: node.id,
@@ -402,9 +480,11 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
           prompt_digest: promptDigest,
           expanded_graph_fingerprint: graphFingerprint
         },
+        data_governance: dataGovernanceReference,
         forge_guard: forgeGuardMetadata(resolved.config, false)
       }
     });
+    writeFileDurable(path.join(layout.root, dataGovernanceReference.path), dataGovernanceBytes);
   } catch (error) {
     return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "RUN_LAYOUT_INVALID")]);
   }
@@ -453,6 +533,9 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
     redacted_config_fingerprint: redactedConfigFingerprint,
     prompt_digest: promptDigest,
     execution: resolved.config.execution,
+    production_source_roots: [...resolved.config.permissions.productionSourceRoots]
+      .map((root) => (root === "." ? root : normalizeRelativePath(root)))
+      .sort(),
     topology: validation.value.topology,
     audit_profile: {
       id: auditPolicy.auditProfile,
@@ -467,6 +550,7 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
       overridden_settings: auditPolicy.overriddenSettings,
       topology_overridden: auditPolicy.topologyOverridden
     },
+    data_governance: dataGovernanceReference,
     rendered_prompts: persistedRenderedPrompts,
     policy_posture: Object.fromEntries(
       Object.entries(validation.value.policy_posture).map(([key, value]) => [key, value.status])
@@ -487,6 +571,8 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
     controller_source_digest: controllerSource.digest,
     controller_source_stock: controllerSource.stock,
     target_commit: targetCommit,
+    data_governance: dataGovernance.provenance,
+    data_governance_diagnostics: dataGovernance.diagnostics,
     output_root: outputRoot,
     state_nodes: stateNodes,
     resolved_config: resolved.config,
