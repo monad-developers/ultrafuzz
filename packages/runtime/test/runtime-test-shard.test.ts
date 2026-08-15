@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import test from "node:test";
 
 import { parseRuntimeTestShard, runtimeTestShardForName } from "./runtime-test-shard.js";
@@ -28,4 +30,10 @@ test("every runtime test name belongs to exactly one deterministic shard", () =>
       name
     );
   }
+});
+
+test("the monolithic runtime suite registers exclusively through the shard wrapper", () => {
+  const source = fs.readFileSync(path.resolve("test/runtime.test.ts"), "utf8");
+  assert.match(source, /import \{ test \} from "\.\/runtime-test-shard\.js";/u);
+  assert.doesNotMatch(source, /from ["']node:test["']/u);
 });

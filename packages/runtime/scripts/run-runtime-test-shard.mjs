@@ -1,7 +1,8 @@
 import { spawnSync } from "node:child_process";
 
-const shard = process.argv[2];
-if (process.argv.length !== 3 || !/^[1-9][0-9]*\/[1-9][0-9]*$/u.test(shard ?? "")) {
+const args = process.argv.slice(2).filter((argument) => argument !== "--");
+const shard = args[0];
+if (args.length !== 1 || !/^[1-9][0-9]*\/[1-9][0-9]*$/u.test(shard ?? "")) {
   throw new Error("run-runtime-test-shard.mjs requires exactly one index/total argument");
 }
 
