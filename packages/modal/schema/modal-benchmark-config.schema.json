@@ -105,8 +105,8 @@
       "properties": {
         "slug": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/safeId" },
         "model": { "type": "string", "minLength": 1, "maxLength": 256 },
-        "provider": { "enum": ["openai", "anthropic", "deepseek", "kimi"] },
-        "agent": { "enum": ["CodexAgent", "ClaudeAgent", "DeepSeekAgent", "KimiAgent"] },
+        "provider": { "enum": ["openai", "anthropic", "deepseek", "kimi", "openrouter"] },
+        "agent": { "enum": ["CodexAgent", "ClaudeAgent", "DeepSeekAgent", "KimiAgent", "OpenRouterAgent"] },
         "reasoning": { "type": "string", "minLength": 1, "maxLength": 64 },
         "auth_mode": { "enum": ["api-key", "subscription"] }
       },
@@ -135,6 +135,20 @@
             "auth_mode": { "const": "api-key" }
           },
           "required": ["provider", "agent", "reasoning", "auth_mode"]
+        },
+        {
+          "properties": {
+            "provider": { "const": "openrouter" },
+            "agent": { "const": "OpenRouterAgent" },
+            "model": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "pattern": "^[^\\s\\p{Cc}]+$"
+            },
+            "auth_mode": { "const": "api-key" }
+          },
+          "required": ["provider", "agent", "model", "auth_mode"]
         }
       ]
     },

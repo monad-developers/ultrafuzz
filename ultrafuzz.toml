@@ -57,6 +57,14 @@ agent = "DeepSeekAgent"
 model = "deepseek-v4-pro"
 reasoning = "max"
 
+# Opt-in OpenRouter profile. The model is an OpenRouter catalogue ID and is
+# passed to OpenRouter unchanged; aliases and variants such as `~...:free` are
+# supported without a built-in catalogue allowlist.
+[models.openrouter]
+agent = "OpenRouterAgent"
+model = "anthropic/claude-sonnet-4.6"
+reasoning = "high"
+
 # Automatic agent retries are error-agnostic and resend the same effective task
 # prompt in a fresh session. The count includes the first primary attempt. Set `agents`
 # to an ordered list of model profile IDs to opt into model fallback.
@@ -91,6 +99,12 @@ auth = "subscription"
 # routes Claude Code to DeepSeek's official Anthropic-compatible endpoint.
 auth = "api-key"
 api_key_env = "DEEPSEEK_API_KEY"
+
+[agents.OpenRouterAgent]
+# OpenRouter is API-key only. The generated Codex adapter reads this variable
+# through Codex's native provider env_key and routes to https://openrouter.ai/api/v1.
+auth = "api-key"
+api_key_env = "OPENROUTER_API_KEY"
 
 [permissions]
 trust_model = "skip-permissions"

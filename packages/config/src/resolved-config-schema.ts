@@ -17,6 +17,7 @@ const HTTPS_ENDPOINT_PATTERN = /^https:\/\/\S+$/u;
 const SHA256_DIGEST_PATTERN = /^[0-9a-f]{64}$/u;
 const AUDIT_PROFILE_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/u;
 const PACKAGED_TOPOLOGY_PATH_PATTERN = /^topologies\/[a-z0-9][a-z0-9-]*\.ya?ml$/u;
+const OPENROUTER_MODEL_ID_PATTERN = /^[^\s\p{Cc}]+$/u;
 const PROJECT_LOCAL_PATH_PATTERN =
   /^(?:\.|(?![A-Za-z]:[\\/])(?![\\/])(?!.*[\\/]$)(?!.*(?:^|[\\/])\.{1,2}(?:[\\/]|$))(?!.*[\\/]{2})[^\r\n]+)$/u;
 
@@ -137,6 +138,16 @@ const modelProfileSchema = z
             : "CONFIG_MODEL_DEEPSEEK_REASONING_UNSUPPORTED"
       });
     }
+    if (
+      profile.agent === "OpenRouterAgent" &&
+      (profile.model === undefined || profile.model.length > 256 || !OPENROUTER_MODEL_ID_PATTERN.test(profile.model))
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["model"],
+        message: "CONFIG_MODEL_OPENROUTER_ID_INVALID"
+      });
+    }
   });
 
 const agentConfigSchema = z.discriminatedUnion("auth", [
@@ -217,6 +228,13 @@ const agentConfigsSchema = z
         code: "custom",
         path: ["DeepSeekAgent", "auth"],
         message: "CONFIG_AGENT_DEEPSEEK_AUTH_UNSUPPORTED"
+      });
+    }
+    if (agents.OpenRouterAgent?.auth === "subscription") {
+      context.addIssue({
+        code: "custom",
+        path: ["OpenRouterAgent", "auth"],
+        message: "CONFIG_AGENT_OPENROUTER_AUTH_UNSUPPORTED"
       });
     }
   });

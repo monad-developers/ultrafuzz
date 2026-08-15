@@ -90,8 +90,8 @@
       "properties": {
         "slug": { "$ref": "#/$defs/safeId" },
         "model": { "$ref": "#/$defs/nonEmptyString" },
-        "provider": { "enum": ["openai", "anthropic", "deepseek", "kimi"] },
-        "agent": { "enum": ["CodexAgent", "ClaudeAgent", "DeepSeekAgent", "KimiAgent"] },
+        "provider": { "enum": ["openai", "anthropic", "deepseek", "kimi", "openrouter"] },
+        "agent": { "enum": ["CodexAgent", "ClaudeAgent", "DeepSeekAgent", "KimiAgent", "OpenRouterAgent"] },
         "reasoning": { "$ref": "#/$defs/nonEmptyString" },
         "auth_mode": { "enum": ["api-key", "subscription"] }
       }
@@ -474,8 +474,8 @@
       "properties": {
         "slug": { "$ref": "#/$defs/safeId" },
         "model": { "$ref": "#/$defs/nonEmptyString" },
-        "provider": { "enum": ["openai", "anthropic", "deepseek", "kimi"] },
-        "agent": { "enum": ["CodexAgent", "ClaudeAgent", "DeepSeekAgent", "KimiAgent"] },
+        "provider": { "enum": ["openai", "anthropic", "deepseek", "kimi", "openrouter"] },
+        "agent": { "enum": ["CodexAgent", "ClaudeAgent", "DeepSeekAgent", "KimiAgent", "OpenRouterAgent"] },
         "reasoning": { "$ref": "#/$defs/nonEmptyString" },
         "auth_mode": { "enum": ["api-key", "subscription"] },
         "generation": { "$ref": "#/$defs/positiveInteger" },

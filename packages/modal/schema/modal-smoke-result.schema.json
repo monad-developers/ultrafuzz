@@ -8,7 +8,7 @@
   "properties": {
     "schema_version": { "const": "ultrafuzz.modal.smoke-result.v1" },
     "status": { "enum": ["passed", "failed"] },
-    "provider": { "enum": ["openai", "anthropic", "deepseek", "kimi"] },
+    "provider": { "enum": ["openai", "anthropic", "deepseek", "kimi", "openrouter"] },
     "checks": {
       "type": "object",
       "additionalProperties": false,

@@ -59,6 +59,10 @@ the worker as `KIMI_API_KEY`, and binds it through Kimi Code's provider
 `api_key` config field. DeepSeek V4 Pro requires `DEEPSEEK_API_KEY`; the worker
 forwards it only to the selected DeepSeek pair, whose generated adapter routes
 Claude Code to DeepSeek's Anthropic-compatible endpoint.
+OpenRouter rows require `OPENROUTER_API_KEY`, always use `auth_mode =
+"api-key"`, and route the Codex CLI through `https://openrouter.ai/api/v1`.
+The selected OpenRouter catalogue ID is retained verbatim in the benchmark
+config and launch evidence.
 
 For subscription auth, launch at most one Kimi row at a time. Use Kimi API-key
 auth or serial launches when comparing multiple Kimi profiles, so OAuth
@@ -220,6 +224,12 @@ production strategy set, including invariant, differential, and dynamic
 strategies, with all three disable flags set to `false`. Push events can never
 select the full lane.
 
+For an ad hoc OpenRouter smoke, select `openrouter` as `smoke_provider`, enter
+any current OpenRouter catalogue ID in `smoke_model`, and configure the
+`OPENROUTER_API_KEY` Actions secret. The workflow does not validate the ID
+against a static catalogue and does not add OpenRouter to the historical
+four-provider full lane automatically.
+
 Both lanes use the standard Modal benchmark resources described above. Each
 smoke target row has a 15,000-second model-work watchdog: the smoke graph's four
 sequential agent stages may each use two 1,800-second attempts, with ten minutes
@@ -239,6 +249,7 @@ Configure `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, and `OPENAI_API_KEY` as
 Actions secrets. Full dispatches additionally require `ANTHROPIC_API_KEY` and
 either `KIMI_API_KEY` or `MOONSHOT_API_KEY`, plus `DEEPSEEK_API_KEY`; automatic
 smoke runs do not.
+An OpenRouter manual smoke additionally requires `OPENROUTER_API_KEY`.
 Set `KIMI_BASE_URL` as an Actions secret or variable only when the Kimi run
 should use a compatible non-default HTTPS endpoint.
 Public rows score from their local artifacts and do not require a Braintrust

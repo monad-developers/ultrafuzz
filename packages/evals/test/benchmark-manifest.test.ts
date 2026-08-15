@@ -134,11 +134,12 @@ describe("public benchmark manifests", () => {
     expect(cohort.targets.every((target) => /^[0-9a-f]{40}$/u.test(target.revision))).toBe(true);
     expect(new Set(cohort.targets.map((target) => target.revision)).has("latest")).toBe(false);
 
+    const lanes = loadBenchmarkLanesManifest(LANES_PATH);
     const suite = adaptBenchmarkManifestToEvalSuite({
       benchmark: "ultrafuzz-bench",
       lane: "smoke",
       cohort,
-      lanes: loadBenchmarkLanesManifest(LANES_PATH)
+      lanes
     });
     expect(suite.targets.map((target) => target.id)).toEqual(cohort.smoke_targets);
     expect(suite.targets.every((target) => target.sensitivity === "public")).toBe(true);
@@ -199,6 +200,26 @@ describe("public benchmark manifests", () => {
         auditProfile: "smoke",
         forbidModelFallback: true
       }
+    });
+
+    const openRouterModel = "~anthropic/claude-sonnet-latest:free";
+    const smokeOpenRouterOverride = {
+      id: "workflow-smoke-openrouter-high",
+      agent: "OpenRouterAgent" as const,
+      model: openRouterModel,
+      reasoning: "high"
+    };
+    const smokeOpenRouterSuite = adaptBenchmarkManifestToEvalSuite({
+      benchmark: "ultrafuzz-bench",
+      lane: "smoke",
+      cohort,
+      lanes,
+      runnerModelProfileOverride: smokeOpenRouterOverride
+    });
+    expect(smokeOpenRouterSuite.model_profiles[smokeOpenRouterOverride.id]).toEqual({
+      agent: "OpenRouterAgent",
+      model: openRouterModel,
+      reasoning: "high"
     });
   });
 

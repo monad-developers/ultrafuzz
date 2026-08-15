@@ -138,6 +138,68 @@ describe("trusted automatic eval-history publication handoff", () => {
     ).toBeUndefined();
   });
 
+  it("accepts an opaque OpenRouter catalogue model without rewriting it", () => {
+    const modelId = "~vendor/model.latest:free+preview@2026";
+    const modelSlug = "benchmark-smoke-vendor-model-latest-free-preview-2026-high";
+    const pair = {
+      pair: `ultrafuzz-bench-${modelSlug}`,
+      benchmark: "ultrafuzz-bench",
+      mode: "smoke",
+      lane: "smoke",
+      model_slug: modelSlug,
+      provider: "openrouter",
+      config_path: `ultrafuzz-bench-${modelSlug}.json`,
+      state_path: `ultrafuzz-bench-${modelSlug}.state.json`
+    };
+    const model = {
+      slug: modelSlug,
+      model: modelId,
+      provider: "openrouter",
+      agent: "OpenRouterAgent",
+      reasoning: "high",
+      auth_mode: "api-key"
+    };
+    const config = {
+      schema_version: "ultrafuzz.modal.benchmark.v2",
+      run_id: "ci-12345-2-smoke-ultrafuzz-bench-openrouter",
+      app_name: "ultrafuzz-evals",
+      image_name: `ufz-runner-${"a".repeat(40)}`,
+      node_timeout_seconds: 1800,
+      loops: 1,
+      braintrust: {
+        project: "ultrafuzz-public-benchmarks",
+        api_key_env: "BRAINTRUST_API_KEY",
+        judge_api_key_env: "OPENAI_API_KEY",
+        judge_url: "https://api.openai.com/v1/chat/completions"
+      },
+      public_benchmark: {
+        benchmark: "ultrafuzz-bench",
+        lane: "smoke",
+        runner_model_profile: modelSlug,
+        candidate_repository: context.repository,
+        candidate_commit: context.candidateCommit,
+        targets: smokeTargets(),
+        max_runtime_seconds: 15_000
+      }
+    };
+
+    expect(model.model).toBe(modelId);
+    expect(
+      validateAutomaticPairConfig(
+        config,
+        model,
+        pair,
+        {
+          ...context,
+          generation: "12345-2",
+          benchmark: "ultrafuzz-bench",
+          targets: smokeTargets()
+        },
+        new Set()
+      )
+    ).toBeUndefined();
+  });
+
   it("rejects untrusted identity, topology, provider, and path mutations", () => {
     const cases: Array<[string, (manifest: ReturnType<typeof smokeManifest>) => void]> = [
       ["schema version", (manifest) => (manifest.schema_version = "ultrafuzz.modal.benchmark-control-manifest.v0")],
@@ -174,7 +236,7 @@ describe("trusted automatic eval-history publication handoff", () => {
     // `smoke_provider` lets a dispatch point the one-runner smoke lane at a provider
     // other than the openai control pair. The lane pinned that provider to openai, so
     // every non-openai dispatch died in pre-flight and no such pair could ever score.
-    for (const provider of ["deepseek", "anthropic", "kimi"]) {
+    for (const provider of ["deepseek", "anthropic", "kimi", "openrouter"]) {
       const manifest = smokeProviderManifest(provider);
       expect(
         validateAutomaticPublicationManifest(manifest, smokeContext()).pairs.map((pair) => pair.provider),
@@ -295,6 +357,7 @@ describe("trusted automatic eval-history publication handoff", () => {
     expect(trustedCandidateRuntimePolicyDimensions(process.cwd(), "smoke")).toEqual({
       maxParallelEvalRows: 3,
       maxParallelWorkflowNodes: 4,
+      openRouterMaxParallel: 1,
       maxRuntimeSeconds: 15_000,
       evalCleanupSeconds: 300,
       scorePerWaveTimeoutSeconds: 2_700,
@@ -327,6 +390,7 @@ describe("trusted automatic eval-history publication handoff", () => {
       [
         "const decoy = `export const PUBLIC_BENCHMARK_SMOKE_MAX_RUNTIME_SECONDS = 99;`;",
         "/* export const PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS = 98; */",
+        "export const PUBLIC_BENCHMARK_OPENROUTER_MAX_PARALLEL = 1;",
         "export const PUBLIC_BENCHMARK_SMOKE_MAX_RUNTIME_SECONDS = 2 * 60 * 60;",
         "export const PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS = 5 * 60;",
         "export const PUBLIC_BENCHMARK_SCORE_PER_WAVE_TIMEOUT_SECONDS = 45 * 60;",
@@ -345,6 +409,7 @@ describe("trusted automatic eval-history publication handoff", () => {
     expect(trustedCandidateRuntimePolicyDimensions(root, "smoke")).toEqual({
       maxParallelEvalRows: 3,
       maxParallelWorkflowNodes: 4,
+      openRouterMaxParallel: 1,
       maxRuntimeSeconds: 7_200,
       evalCleanupSeconds: 300,
       scorePerWaveTimeoutSeconds: 2_700,
