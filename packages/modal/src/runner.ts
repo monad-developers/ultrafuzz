@@ -2931,7 +2931,7 @@ export function modalSecurityToolchainCommands(): string[] {
     "RUN apt-get update && apt-get install -y --no-install-recommends bash build-essential ca-certificates curl git jq libssl3t64 python3 python3-pip python3-venv ripgrep tar unzip xz-utils zstd && rm -rf /var/lib/apt/lists/*",
     "RUN command -v zstd && zstd --version",
     "RUN curl -fsSL https://nodejs.org/dist/v22.23.1/node-v22.23.1-linux-x64.tar.xz -o /tmp/node.tar.xz && tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 && rm /tmp/node.tar.xz",
-    `RUN npm install -g pnpm@11.1.1 bun@1.3.14 @openai/codex@${CODEX_CLI_VERSION} @anthropic-ai/claude-code@2.1.207 recon-generate@0.0.42`,
+    `RUN npm install -g pnpm@11.21.0 bun@1.3.14 @openai/codex@${CODEX_CLI_VERSION} @anthropic-ai/claude-code@2.1.207 recon-generate@0.0.42`,
     "RUN curl -fsSL https://github.com/foundry-rs/foundry/releases/download/v1.7.1/foundry_v1.7.1_linux_amd64.tar.gz -o /tmp/foundry.tar.gz && tar -xzf /tmp/foundry.tar.gz -C /usr/local/bin && rm /tmp/foundry.tar.gz",
     "RUN curl -fsSL https://github.com/Recon-Fuzz/recon-fuzzer/releases/download/v0.4.17/recon-linux-x86_64.tar.gz -o /tmp/recon.tar.gz && tar -xzf /tmp/recon.tar.gz -C /usr/local/bin && rm /tmp/recon.tar.gz",
     "RUN python3 -m venv /opt/security-venv && /opt/security-venv/bin/pip install --no-cache-dir slither-analyzer==0.11.5 'covg-eval @ git+https://github.com/Recon-Fuzz/recon-magic-framework.git@f92ad26ff857526d221c3e8488c5aea2a20e8fdf#subdirectory=tools/covg_eval'",
