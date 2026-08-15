@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import http from "node:http";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -33,9 +34,11 @@ import {
   assertDashboardSseDocument,
   dashboardFlowAuthorityProjection,
   DASHBOARD_HTTP_SCHEMA_VERSION,
+  readDashboardAuditJournal,
   serveDashboard,
   verifiedDeclaredFindingsFromAuthoritySnapshot,
   type DashboardHttpDefinition,
+  type DashboardServerDiagnostic,
   type DashboardSseDefinition
 } from "../src/index.js";
 
@@ -64,11 +67,16 @@ interface TopologyResponse {
   };
 }
 
+interface DashboardTestHandle {
+  url: string;
+  sessionToken: string;
+}
+
 test("serves logical topology flow with expanded attempt details", async () => {
   const projectRoot = makeProject();
   const handle = await serveDashboard({ projectRoot, port: 0 });
   try {
-    const flow = await getJson<FlowResponse>(apiUrl(handle.url, "/api/flow"), "flowResponse");
+    const flow = await getJson<FlowResponse>(handle, "/api/flow", "flowResponse");
     assert.equal(flow.run.run_id, "preview");
     assert.ok(flow.nodes.length > 0);
     assert.ok(flow.run.expanded_nodes > flow.nodes.length);
@@ -85,11 +93,12 @@ test("serves logical topology flow with expanded attempt details", async () => {
 test("does not replace a malformed present topology with an empty preview", async () => {
   const projectRoot = makeProject();
   fs.writeFileSync(path.join(projectRoot, ".ultrafuzz", "topology.yml"), "version: [\n", "utf8");
-  const handle = await serveDashboard({ projectRoot, port: 0 });
+  const diagnostics: DashboardServerDiagnostic[] = [];
+  const handle = await serveDashboard({ projectRoot, port: 0, onDiagnostic: (entry) => diagnostics.push(entry) });
   try {
-    const response = await fetch(apiUrl(handle.url, "/api/flow"));
+    const response = await dashboardFetch(handle, "/api/flow");
     assert.equal(response.status, 500);
-    assert.match(await response.text(), /topology/u);
+    await assertGenericUnexpectedError(response, diagnostics, /topology/u);
   } finally {
     await handle.close();
   }
@@ -102,7 +111,7 @@ test("creates a topology node prompt as terminal work before finish", async () =
     "{{finding_reachability_vocabulary}}\n\n{{finding_note_key_vocabulary}}\n";
   const handle = await serveDashboard({ projectRoot, port: 0 });
   try {
-    const response = await fetch(apiUrl(handle.url, "/api/prompts/nodes"), {
+    const response = await dashboardFetch(handle, "/api/prompts/nodes", {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -127,7 +136,7 @@ test("creates a topology node prompt as terminal work before finish", async () =
       prompt
     );
 
-    const topology = await getJson<TopologyResponse>(apiUrl(handle.url, "/api/topology"), "topologyDetailResponse");
+    const topology = await getJson<TopologyResponse>(handle, "/api/topology", "topologyDetailResponse");
     const added = topology.topology.nodes.find((node) => node.id === "added-check");
     const finish = topology.topology.nodes.find((node) => node.id === "__finish__");
     assert.deepEqual(added?.depends_on, ["__start__"]);
@@ -146,7 +155,7 @@ test("rejects prompt identity changes instead of converting them into topology r
   const originalTopology = fs.readFileSync(topologyPath);
   const handle = await serveDashboard({ projectRoot, port: 0 });
   try {
-    const response = await fetch(apiUrl(handle.url, "/api/prompts/nodes/project-discovery"), {
+    const response = await dashboardFetch(handle, "/api/prompts/nodes/project-discovery", {
       method: "PUT",
       headers: {
         "content-type": "application/json",
@@ -184,7 +193,7 @@ test("mutating APIs require the session token and reject invalid saves without w
     });
     assert.equal(denied.status, 401);
 
-    const invalid = await fetch(apiUrl(handle.url, "/api/config"), {
+    const invalid = await dashboardFetch(handle, "/api/config", {
       method: "PUT",
       headers: {
         "content-type": "application/json",
@@ -199,12 +208,170 @@ test("mutating APIs require the session token and reject invalid saves without w
   }
 });
 
+test("every dashboard API read, mutation, job route, unknown route, and SSE stream requires the session token", async () => {
+  const projectRoot = makeProject();
+  const handle = await serveDashboard({ projectRoot, port: 0 });
+  try {
+    const cases: Array<{ path: string; init?: RequestInit }> = [
+      { path: "/api" },
+      { path: "/api/session" },
+      { path: "/api/flow" },
+      {
+        path: "/api/config",
+        init: {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(dashboardRequest("config-save", { content: "" }))
+        }
+      },
+      { path: "/api/commands/missing-job" },
+      { path: "/api/not-a-route" },
+      { path: "/api/events/stream", init: { headers: { accept: "text/event-stream" } } },
+      { path: "/api/commands/stream", init: { headers: { accept: "text/event-stream" } } }
+    ];
+    for (const entry of cases) {
+      const response = await fetch(apiUrl(handle.url, entry.path), entry.init);
+      assert.equal(response.status, 401, entry.path);
+      const error = await parseHttpResponse(response, "errorResponse");
+      assert.match(String(error.error), /session token/u, entry.path);
+      assert.match(String(error.correlationId), /^[a-f0-9-]{36}$/u, entry.path);
+    }
+  } finally {
+    await handle.close();
+  }
+});
+
+test("dashboard session credentials are disclosed only through the launch fragment", async () => {
+  const projectRoot = makeProject();
+  const handle = await serveDashboard({ projectRoot, port: 0 });
+  try {
+    const launchUrl = new URL(handle.url);
+    assert.equal(launchUrl.pathname, "/dashboard");
+    assert.equal(launchUrl.search, "");
+    assert.equal(new URLSearchParams(launchUrl.hash.slice(1)).get("session"), handle.sessionToken);
+    assert.doesNotMatch(launchUrl.origin + launchUrl.pathname + launchUrl.search, new RegExp(handle.sessionToken, "u"));
+
+    const response = await dashboardFetch(handle, "/api/session");
+    const bytes = await response.clone().text();
+    assert.doesNotMatch(bytes, new RegExp(handle.sessionToken, "u"));
+    const session = await parseHttpResponse(response, "sessionResponse");
+    assert.equal(Object.prototype.hasOwnProperty.call(session, "sessionToken"), false);
+  } finally {
+    await handle.close();
+  }
+});
+
 test("API requests reject non-loopback host headers", async () => {
   const projectRoot = makeProject();
   const handle = await serveDashboard({ projectRoot, port: 0 });
   try {
     const status = await requestStatusWithHost(apiUrl(handle.url, "/api/session"), "example.com");
     assert.equal(status, 403);
+    const malformed = await requestStatusWithHost(apiUrl(handle.url, "/api/session"), "127.0.0.1:");
+    assert.equal(malformed, 403);
+  } finally {
+    await handle.close();
+  }
+});
+
+test("dashboard request provenance fails closed for missing Host, invalid Origin, and non-same-origin fetches", async () => {
+  const projectRoot = makeProject();
+  const handle = await serveDashboard({ projectRoot, port: 0 });
+  try {
+    assert.equal(
+      await requestStatusWithoutHost(apiUrl(handle.url, "/api/session"), {
+        "x-ultrafuzz-session": handle.sessionToken
+      }),
+      403
+    );
+    for (const origin of ["https://127.0.0.1", "http://example.com", "not-an-origin"]) {
+      assert.equal(
+        await requestStatus(apiUrl(handle.url, "/api/session"), {
+          headers: { origin, "x-ultrafuzz-session": handle.sessionToken }
+        }),
+        403,
+        origin
+      );
+    }
+    for (const fetchSite of ["same-site", "cross-site"]) {
+      assert.equal(
+        await requestStatus(apiUrl(handle.url, "/api/session"), {
+          headers: { "sec-fetch-site": fetchSite, "x-ultrafuzz-session": handle.sessionToken }
+        }),
+        403,
+        fetchSite
+      );
+    }
+
+    const parsed = new URL(handle.url);
+    assert.equal(
+      await requestStatus(apiUrl(handle.url, "/api/session"), {
+        headers: {
+          origin: parsed.origin,
+          "sec-fetch-site": "same-origin",
+          "x-ultrafuzz-session": handle.sessionToken
+        }
+      }),
+      200
+    );
+  } finally {
+    await handle.close();
+  }
+});
+
+test("dashboard redacts stdout, stderr, and rendered prompts before publishing node evidence", async () => {
+  const projectRoot = makeProject();
+  writeSmallTopology(projectRoot);
+  const runId = "dashboard-redaction";
+  const plan = await planRun({ projectRoot, runId, env: {} });
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  assert.ok(plan.value);
+  const attempt = plan.value.expanded_graph.nodes.find((node) => node.logicalId === "project-discovery");
+  assert.ok(attempt);
+  const artifactDir = path.join(plan.value.layout.root, attempt.artifactDir);
+  const secret = "dashboard-secret-value-12345";
+  fs.mkdirSync(artifactDir, { recursive: true });
+  fs.writeFileSync(path.join(artifactDir, "stdout.log"), `stdout ${secret}\n`, "utf8");
+  fs.writeFileSync(path.join(artifactDir, "stderr.log"), `stderr ${secret}\n`, "utf8");
+  fs.writeFileSync(path.join(artifactDir, "prompt.rendered.md"), `prompt ${secret}\n`, "utf8");
+
+  const handle = await serveDashboard({
+    projectRoot,
+    runId,
+    port: 0,
+    env: { DASHBOARD_TEST_SECRET: secret }
+  });
+  try {
+    const response = await dashboardFetch(handle, "/api/nodes/project-discovery");
+    const serialized = await response.clone().text();
+    assert.doesNotMatch(serialized, new RegExp(secret, "u"));
+    const node = await parseHttpResponse(response, "nodeDetailResponse");
+    assert.match(String(node.stdout), /stdout <redacted>/u);
+    assert.match(String(node.stderr), /stderr <redacted>/u);
+    assert.match(String(node.rendered_prompt), /prompt <redacted>/u);
+    assert.match(fs.readFileSync(path.join(artifactDir, "stdout.log"), "utf8"), new RegExp(secret, "u"));
+  } finally {
+    await handle.close();
+  }
+});
+
+test("unexpected dashboard failures return a correlation ID while server diagnostics are redacted", async () => {
+  const projectRoot = makeProject();
+  const secret = path.basename(projectRoot);
+  fs.writeFileSync(path.join(projectRoot, ".ultrafuzz", "topology.yml"), "version: [\n", "utf8");
+  const diagnostics: DashboardServerDiagnostic[] = [];
+  const handle = await serveDashboard({
+    projectRoot,
+    port: 0,
+    env: { DASHBOARD_TEST_SECRET: secret },
+    onDiagnostic: (entry) => diagnostics.push(entry)
+  });
+  try {
+    const response = await dashboardFetch(handle, "/api/flow");
+    assert.equal(response.status, 500);
+    await assertGenericUnexpectedError(response, diagnostics, /<redacted>/u);
+    assert.equal(diagnostics.length, 1);
+    assert.doesNotMatch(diagnostics[0]!.message, new RegExp(secret, "u"));
   } finally {
     await handle.close();
   }
@@ -224,6 +391,8 @@ test("dashboard serves external theme bootstrap with restrictive security and ca
     assert.match(scriptPolicy, /script-src 'self'/u);
     assert.doesNotMatch(scriptPolicy, /'unsafe-inline'/u);
     assert.match(csp, /frame-ancestors 'none'/u);
+    assert.match(csp, /img-src 'self'/u);
+    assert.doesNotMatch(csp, /img-src[^;]*data:/u);
     assert.equal(documentResponse.headers.get("x-content-type-options"), "nosniff");
     assert.equal(documentResponse.headers.get("x-frame-options"), "DENY");
     assert.equal(documentResponse.headers.get("referrer-policy"), "no-referrer");
@@ -245,7 +414,7 @@ test("dashboard serves external theme bootstrap with restrictive security and ca
     assert.equal(scriptResponse.headers.get("cache-control"), "no-cache");
     await scriptResponse.body?.cancel();
 
-    const apiResponse = await fetch(apiUrl(handle.url, "/api/session"));
+    const apiResponse = await dashboardFetch(handle, "/api/session");
     assert.equal(apiResponse.status, 200);
     assert.equal(apiResponse.headers.get("x-content-type-options"), "nosniff");
   } finally {
@@ -254,11 +423,121 @@ test("dashboard serves external theme bootstrap with restrictive security and ca
   }
 });
 
+test("dashboard records authenticated CSP violations for development and CI visibility", async () => {
+  const projectRoot = makeProject();
+  const secret = "csp-secret-value-12345";
+  const diagnostics: DashboardServerDiagnostic[] = [];
+  const handle = await serveDashboard({
+    projectRoot,
+    port: 0,
+    env: { DASHBOARD_CSP_SECRET: secret },
+    onDiagnostic: (entry) => diagnostics.push(entry)
+  });
+  try {
+    const response = await dashboardFetch(handle, "/api/csp-violations", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(
+        dashboardRequest("csp-violation", {
+          blockedURI: `https://example.invalid/${secret}`,
+          violatedDirective: "img-src-elem",
+          effectiveDirective: "img-src",
+          sourceFile: `http://127.0.0.1/dashboard/${secret}`,
+          lineNumber: 12,
+          columnNumber: 34,
+          disposition: "enforce"
+        })
+      )
+    });
+    assert.equal(response.status, 202);
+    const reported = await parseHttpResponse(response, "cspViolationsResponse");
+    assert.ok(Array.isArray(reported.violations));
+    const violation = reported.violations[0] as Record<string, unknown>;
+    assert.equal(violation.blockedURI, "https://example.invalid/<redacted>");
+    assert.equal(violation.sourceFile, "http://127.0.0.1/dashboard/<redacted>");
+    assert.equal(violation.effectiveDirective, "img-src");
+    assert.equal(violation.lineNumber, 12);
+    assert.match(String(violation.correlationId), /^[a-f0-9-]{36}$/u);
+
+    const visible = await getJson<{ violations: unknown[] }>(handle, "/api/csp-violations", "cspViolationsResponse");
+    assert.deepEqual(visible.violations, reported.violations);
+    assert.equal(diagnostics.length, 1);
+    assert.equal(diagnostics[0]!.kind, "csp-violation");
+    assert.equal(diagnostics[0]!.correlationId, violation.correlationId);
+    assert.doesNotMatch(diagnostics[0]!.message, new RegExp(secret, "u"));
+    assert.match(diagnostics[0]!.message, /<redacted>/u);
+  } finally {
+    await handle.close();
+  }
+});
+
+test("dashboard run launch requires a matching preview confirmation and appends an audit record", async () => {
+  const projectRoot = makeProject();
+  const handle = await serveDashboard({ projectRoot, port: 0 });
+  try {
+    const commandRequest = (argumentsValue: Record<string, unknown>) =>
+      dashboardRequest("command", { command: "run", arguments: argumentsValue });
+    const unconfirmed = await dashboardFetch(handle, "/api/commands/run", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(commandRequest({}))
+    });
+    assert.equal(unconfirmed.status, 400);
+    assert.match(String((await parseHttpResponse(unconfirmed, "errorResponse")).error), /explicit pre-launch/u);
+
+    const previewResponse = await dashboardFetch(handle, "/api/commands/run/preview", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(commandRequest({ maxConcurrency: 2 }))
+    });
+    assert.equal(previewResponse.status, 200);
+    const preview = await parseHttpResponse(previewResponse, "launchPreviewResponse");
+    assert.equal(preview.document_type, "launch-preview");
+    assert.equal(typeof preview.target, "string");
+    assert.ok(Array.isArray(preview.providers));
+    assert.ok(preview.providers.length > 0);
+    assert.equal((preview.configuredBudget as Record<string, unknown>).maxParallelAgents, 2);
+    assert.match(String(preview.confirmationDigest), /^[a-f0-9]{64}$/u);
+
+    const stale = await dashboardFetch(handle, "/api/commands/run", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(commandRequest({ confirmed: true, confirmationDigest: "0".repeat(64), maxConcurrency: 2 }))
+    });
+    assert.equal(stale.status, 409);
+    assert.match(String((await parseHttpResponse(stale, "errorResponse")).error), /stale|does not match/u);
+
+    const accepted = await dashboardFetch(handle, "/api/commands/run", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(
+        commandRequest({
+          confirmed: true,
+          confirmationDigest: preview.confirmationDigest,
+          maxConcurrency: 2
+        })
+      )
+    });
+    assert.equal(accepted.status, 202, await accepted.text());
+
+    const audit = readDashboardAuditJournal(path.join(projectRoot, ".ultrafuzz", "dashboard-audit.jsonl"));
+    const launch = audit.records.at(-1);
+    assert.equal(launch?.kind, "run-launch");
+    if (launch?.kind !== "run-launch") assert.fail("expected a run-launch audit record");
+    assert.equal(launch.target, preview.target);
+    assert.deepEqual(launch.providers, preview.providers);
+    assert.equal(launch.configured_budget.max_parallel_agents, 2);
+    assert.equal(launch.confirmation_digest, preview.confirmationDigest);
+  } finally {
+    await handle.close();
+  }
+});
+
 test("dashboard rejects oversized JSON request bodies", async () => {
   const projectRoot = makeProject();
   const handle = await serveDashboard({ projectRoot, port: 0 });
   try {
-    const response = await fetch(apiUrl(handle.url, "/api/config"), {
+    const response = await dashboardFetch(handle, "/api/config", {
       method: "PUT",
       headers: {
         "content-type": "application/json",
@@ -278,7 +557,7 @@ test("dashboard rejects duplicate JSON request keys before handling a mutation",
   const originalConfig = fs.readFileSync(configPath, "utf8");
   const handle = await serveDashboard({ projectRoot, port: 0 });
   try {
-    const response = await fetch(apiUrl(handle.url, "/api/config"), {
+    const response = await dashboardFetch(handle, "/api/config", {
       method: "PUT",
       headers: {
         "content-type": "application/json",
@@ -354,7 +633,7 @@ test("dashboard audit append refuses a final-component symlink", async () => {
 
   const handle = await serveDashboard({ projectRoot, port: 0 });
   try {
-    const response = await fetch(apiUrl(handle.url, "/api/config"), {
+    const response = await dashboardFetch(handle, "/api/config", {
       method: "PUT",
       headers: {
         "content-type": "application/json",
@@ -384,20 +663,21 @@ test("dashboard validates the serialized bytes and identities of every preview A
       ["/api/findings", "findingsResponse", "findings"],
       ["/api/report", "reportResponse", "report"],
       ["/api/events", "eventsResponse", "events"],
+      ["/api/csp-violations", "cspViolationsResponse", "csp-violations"],
       ["/api/config", "configDetailResponse", "config-detail"],
       ["/api/topology", "topologyDetailResponse", "topology-detail"],
       ["/api/prompts/strategies", "promptListResponse", "prompt-list"],
       ["/api/prompts/nodes/project-discovery", "promptDetailResponse", "prompt-detail"]
     ];
     for (const [route, definition, documentType] of routes) {
-      const response = await fetch(apiUrl(handle.url, route));
+      const response = await dashboardFetch(handle, route);
       if (response.status !== 200) assert.fail(`${route}: ${await response.text()}`);
       const document = await parseHttpResponse(response, definition);
       assert.equal(document.schema_version, DASHBOARD_HTTP_SCHEMA_VERSION, route);
       assert.equal(document.document_type, documentType, route);
     }
 
-    const missing = await fetch(apiUrl(handle.url, "/api/not-a-route"));
+    const missing = await dashboardFetch(handle, "/api/not-a-route");
     assert.equal(missing.status, 404);
     const error = await parseHttpResponse(missing, "errorResponse");
     assert.equal(error.document_type, "error");
@@ -424,7 +704,7 @@ test("dashboard validates persisted run-state v5 documents through the composed 
       ["/api/events", "eventsResponse", "events"]
     ];
     for (const [route, definition, documentType] of routes) {
-      const response = await fetch(apiUrl(handle.url, route));
+      const response = await dashboardFetch(handle, route);
       if (response.status !== 200) assert.fail(`${route}: ${await response.text()}`);
       const document = await parseHttpResponse(response, definition);
       assert.equal(document.schema_version, DASHBOARD_HTTP_SCHEMA_VERSION, route);
@@ -502,7 +782,7 @@ test("dashboard events returns one captured journal epoch when the path is repla
       events: Array<{ event_id: string }>;
       malformed_records: number;
       truncated_records: number;
-    }>(apiUrl(handle.url, "/api/events"), "eventsResponse");
+    }>(handle, "/api/events", "eventsResponse");
     assert.equal(replaced, true);
     assert.equal(eventJournalOpens, 1);
     assert.deepEqual(
@@ -526,16 +806,14 @@ test("dashboard discovers verified findings from exact renamed graph declaration
   const handle = await serveDashboard({ projectRoot: fixture.projectRoot, runId: fixture.runId, port: 0 });
   try {
     const findings = await getJson<{ source: string; findings: unknown[] }>(
-      apiUrl(handle.url, "/api/findings"),
+      handle,
+      "/api/findings",
       "findingsResponse"
     );
     assert.equal(findings.source, `artifacts/${fixture.attemptId}/custom/nested/review-findings.json`);
     assert.deepEqual(findings.findings, [fixture.finding]);
 
-    const node = await getJson<{ findings: unknown[] }>(
-      apiUrl(handle.url, "/api/nodes/renamed-review"),
-      "nodeDetailResponse"
-    );
+    const node = await getJson<{ findings: unknown[] }>(handle, "/api/nodes/renamed-review", "nodeDetailResponse");
     assert.deepEqual(node.findings, [fixture.finding]);
   } finally {
     await handle.close();
@@ -548,12 +826,21 @@ test("dashboard fails closed when run-state outputs disagree with a planned find
   assert.ok(textOutput);
   updateNodeState(fixture.layout, fixture.attemptId, { outputs: [{ ...textOutput, primary: true }] });
 
-  const handle = await serveDashboard({ projectRoot: fixture.projectRoot, runId: fixture.runId, port: 0 });
+  const diagnostics: DashboardServerDiagnostic[] = [];
+  const handle = await serveDashboard({
+    projectRoot: fixture.projectRoot,
+    runId: fixture.runId,
+    port: 0,
+    onDiagnostic: (entry) => diagnostics.push(entry)
+  });
   try {
-    const response = await fetch(apiUrl(handle.url, "/api/findings"));
+    const response = await dashboardFetch(handle, "/api/findings");
     assert.equal(response.status, 500);
-    const error = await parseHttpResponse(response, "errorResponse");
-    assert.match(String(error.error), /run-state output contracts do not match the current planned node/u);
+    await assertGenericUnexpectedError(
+      response,
+      diagnostics,
+      /run-state output contracts do not match the current planned node/u
+    );
   } finally {
     await handle.close();
   }
@@ -561,12 +848,17 @@ test("dashboard fails closed when run-state outputs disagree with a planned find
 
 test("dashboard rejects duplicate typed findings declarations on one planned producer", async () => {
   const fixture = await createDashboardFindingsFixture({ duplicateFindingsDeclaration: true });
-  const handle = await serveDashboard({ projectRoot: fixture.projectRoot, runId: fixture.runId, port: 0 });
+  const diagnostics: DashboardServerDiagnostic[] = [];
+  const handle = await serveDashboard({
+    projectRoot: fixture.projectRoot,
+    runId: fixture.runId,
+    port: 0,
+    onDiagnostic: (entry) => diagnostics.push(entry)
+  });
   try {
-    const response = await fetch(apiUrl(handle.url, "/api/findings"));
+    const response = await dashboardFetch(handle, "/api/findings");
     assert.equal(response.status, 500);
-    const error = await parseHttpResponse(response, "errorResponse");
-    assert.match(String(error.error), /declares 2 ultrafuzz\/findings@2 outputs/u);
+    await assertGenericUnexpectedError(response, diagnostics, /declares 2 ultrafuzz\/findings@2 outputs/u);
   } finally {
     await handle.close();
   }
@@ -578,7 +870,8 @@ test("dashboard prefers a completed declared report over raw findings without a 
   const handle = await serveDashboard({ projectRoot: fixture.projectRoot, runId: fixture.runId, port: 0 });
   try {
     const findings = await getJson<{ source: string; findings: unknown[] }>(
-      apiUrl(handle.url, "/api/findings"),
+      handle,
+      "/api/findings",
       "findingsResponse"
     );
     assert.equal(findings.source, `artifacts/${fixture.reportAttemptId}/deliverables/current-report.json`);
@@ -589,13 +882,13 @@ test("dashboard prefers a completed declared report over raw findings without a 
       json_path: string;
       markdown: string;
       json: unknown;
-    }>(apiUrl(handle.url, "/api/report"), "reportResponse");
+    }>(handle, "/api/report", "reportResponse");
     assert.equal(report.markdown_path, `artifacts/${fixture.reportAttemptId}/deliverables/current-report.md`);
     assert.equal(report.json_path, `artifacts/${fixture.reportAttemptId}/deliverables/current-report.json`);
     assert.match(report.markdown, /^# Ultrafuzz report/mu);
     assert.ok(report.json);
 
-    const flow = await getJson<FlowResponse>(apiUrl(handle.url, "/api/flow"), "flowResponse");
+    const flow = await getJson<FlowResponse>(handle, "/api/flow", "flowResponse");
     const reportNode = flow.nodes.find((node) => node.id === "summary-review");
     assert.equal(reportNode?.data.artifacts?.report, true);
     assert.equal(reportNode?.data.artifacts?.findings, true);
@@ -612,13 +905,19 @@ test("dashboard does not hide unavailable custom report authority after the rena
   fs.rmSync(path.join(reportDir, "current-report.json"));
   updateNodeState(fixture.layout, fixture.reportAttemptId, { provenance: undefined });
 
-  const handle = await serveDashboard({ projectRoot: fixture.projectRoot, runId: fixture.runId, port: 0 });
+  const diagnostics: DashboardServerDiagnostic[] = [];
+  const handle = await serveDashboard({
+    projectRoot: fixture.projectRoot,
+    runId: fixture.runId,
+    port: 0,
+    onDiagnostic: (entry) => diagnostics.push(entry)
+  });
   try {
-    const response = await fetch(apiUrl(handle.url, "/api/report"));
+    const response = await dashboardFetch(handle, "/api/report");
     assert.equal(response.status, 500);
-    const error = await parseHttpResponse(response, "errorResponse");
-    assert.match(
-      String(error.error),
+    await assertGenericUnexpectedError(
+      response,
+      diagnostics,
       /claims succeeded without complete current verification\/finalization authority/iu
     );
   } finally {
@@ -630,7 +929,7 @@ test("dashboard report rejects malformed present task-manifest and control-seal 
   const fixture = await createDashboardFindingsFixture({ includeFinalReport: true, emptyFindings: true });
   const handle = await serveDashboard({ projectRoot: fixture.projectRoot, runId: fixture.runId, port: 0 });
   try {
-    const valid = await fetch(apiUrl(handle.url, "/api/report"));
+    const valid = await dashboardFetch(handle, "/api/report");
     assert.equal(valid.status, 200, await valid.text());
 
     for (const [label, authorityPath] of [
@@ -640,7 +939,7 @@ test("dashboard report rejects malformed present task-manifest and control-seal 
       const original = fs.readFileSync(authorityPath);
       fs.writeFileSync(authorityPath, "{", "utf8");
       try {
-        const response = await fetch(apiUrl(handle.url, "/api/report"));
+        const response = await dashboardFetch(handle, "/api/report");
         assert.equal(response.status, 500, label);
         const error = await parseHttpResponse(response, "errorResponse");
         assert.ok(String(error.error).length > 0, label);
@@ -670,7 +969,7 @@ test("dashboard overview does not infer findings availability from a lookalike f
   });
   const handle = await serveDashboard({ projectRoot: fixture.projectRoot, runId: fixture.runId, port: 0 });
   try {
-    const flow = await getJson<FlowResponse>(apiUrl(handle.url, "/api/flow"), "flowResponse");
+    const flow = await getJson<FlowResponse>(handle, "/api/flow", "flowResponse");
     const reviewNode = flow.nodes.find((node) => node.id === "renamed-review");
     assert.equal(reviewNode?.data.artifacts?.findings, false);
     assert.equal(reviewNode?.data.artifacts?.report, false);
@@ -720,15 +1019,25 @@ test("dashboard emits typed SSE envelopes with monotonic per-stream sequences", 
   const projectRoot = makeProject();
   const handle = await serveDashboard({ projectRoot, port: 0 });
   try {
-    const eventFrames = await readSseFrames(apiUrl(handle.url, "/api/events/stream"), 1);
+    const eventFrames = await readSseFrames(handle, "/api/events/stream", 1);
     assertSseFrame(eventFrames[0]!, "eventsEnvelope", "ultrafuzz-event", 0);
 
-    const commandFrames = await readSseFrames(apiUrl(handle.url, "/api/commands/stream"), 2);
+    const commandFrames = await readSseFrames(handle, "/api/commands/stream", 2);
     assertSseFrame(commandFrames[0]!, "commandJobsEnvelope", "ultrafuzz-command-jobs", 0);
     assertSseFrame(commandFrames[1]!, "commandJobsEnvelope", "ultrafuzz-command-jobs", 1);
   } finally {
     await handle.close();
   }
+});
+
+test("dashboard frontend does not use native EventSource for authenticated streams", () => {
+  const source = fs.readFileSync(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "frontend", "src", "main.tsx"),
+    "utf8"
+  );
+  assert.doesNotMatch(source, /\bEventSource\b/u);
+  assert.match(source, /connectAuthenticatedEventStream/u);
+  assert.match(source, /window\.confirm\(launchConfirmationMessage\(preview\)\)/u);
 });
 
 test("dashboard refuses malformed historical audit data before changing project files", async () => {
@@ -744,7 +1053,7 @@ test("dashboard refuses malformed historical audit data before changing project 
 
   const handle = await serveDashboard({ projectRoot, port: 0 });
   try {
-    const response = await fetch(apiUrl(handle.url, "/api/config"), {
+    const response = await dashboardFetch(handle, "/api/config", {
       method: "PUT",
       headers: {
         "content-type": "application/json",
@@ -1135,8 +1444,12 @@ nodes:
   );
 }
 
-async function getJson<T>(url: string, definition: DashboardHttpDefinition): Promise<T> {
-  const response = await fetch(url);
+async function getJson<T>(
+  handle: DashboardTestHandle,
+  apiPath: string,
+  definition: DashboardHttpDefinition
+): Promise<T> {
+  const response = await dashboardFetch(handle, apiPath);
   if (!response.ok) {
     assert.fail(await response.text());
   }
@@ -1156,13 +1469,29 @@ async function parseHttpResponse(
   return document;
 }
 
+async function assertGenericUnexpectedError(
+  response: Response,
+  diagnostics: readonly DashboardServerDiagnostic[],
+  diagnosticPattern: RegExp
+): Promise<void> {
+  const error = await parseHttpResponse(response, "errorResponse");
+  assert.equal(error.error, "Unexpected dashboard error. Use the correlation ID to inspect the server diagnostic.");
+  const correlationId = String(error.correlationId);
+  assert.match(correlationId, /^[a-f0-9-]{36}$/u);
+  const diagnostic = diagnostics.find((entry) => entry.correlationId === correlationId);
+  assert.ok(diagnostic);
+  assert.equal(diagnostic.kind, "unexpected-error");
+  assert.match(diagnostic.message, diagnosticPattern);
+  assert.doesNotMatch(String(error.error), diagnosticPattern);
+}
+
 interface SseFrame {
   event: string;
   data: string;
 }
 
-async function readSseFrames(url: string, count: number): Promise<SseFrame[]> {
-  const response = await fetch(url);
+async function readSseFrames(handle: DashboardTestHandle, apiPath: string, count: number): Promise<SseFrame[]> {
+  const response = await dashboardFetch(handle, apiPath, { headers: { accept: "text/event-stream" } });
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("content-type"), "text/event-stream; charset=utf-8");
   assert.ok(response.body);
@@ -1229,10 +1558,23 @@ function dashboardRequest(requestType: string, fields: Record<string, unknown>):
 }
 
 function apiUrl(dashboardUrl: string, apiPath: string): string {
-  return dashboardUrl.replace(/\/dashboard$/u, apiPath);
+  return new URL(apiPath, new URL(dashboardUrl).origin).toString();
+}
+
+function dashboardFetch(handle: DashboardTestHandle, apiPath: string, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(init.headers);
+  headers.set("x-ultrafuzz-session", handle.sessionToken);
+  return fetch(apiUrl(handle.url, apiPath), { ...init, headers });
 }
 
 function requestStatusWithHost(url: string, host: string): Promise<number> {
+  return requestStatus(url, { headers: { host } });
+}
+
+function requestStatus(
+  url: string,
+  options: { headers?: Record<string, string>; setHost?: boolean } = {}
+): Promise<number> {
   const parsed = new URL(url);
   return new Promise((resolve, reject) => {
     const request = http.request(
@@ -1241,7 +1583,8 @@ function requestStatusWithHost(url: string, host: string): Promise<number> {
         port: parsed.port,
         path: `${parsed.pathname}${parsed.search}`,
         method: "GET",
-        headers: { host }
+        headers: options.headers,
+        setHost: options.setHost
       },
       (response) => {
         response.resume();
@@ -1250,5 +1593,30 @@ function requestStatusWithHost(url: string, host: string): Promise<number> {
     );
     request.on("error", reject);
     request.end();
+  });
+}
+
+function requestStatusWithoutHost(url: string, headers: Record<string, string>): Promise<number> {
+  const parsed = new URL(url);
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(Number(parsed.port), parsed.hostname);
+    let response = "";
+    socket.setEncoding("utf8");
+    socket.on("connect", () => {
+      const headerLines = Object.entries(headers).map(([name, value]) => `${name}: ${value}`);
+      socket.end([`GET ${parsed.pathname}${parsed.search} HTTP/1.0`, ...headerLines, "", ""].join("\r\n"));
+    });
+    socket.on("data", (chunk: string) => {
+      response += chunk;
+    });
+    socket.on("error", reject);
+    socket.on("end", () => {
+      const status = /^HTTP\/1\.[01] (\d{3})/u.exec(response)?.[1];
+      if (status === undefined) {
+        reject(new Error("dashboard returned no HTTP status for a Host-free request"));
+        return;
+      }
+      resolve(Number(status));
+    });
   });
 }

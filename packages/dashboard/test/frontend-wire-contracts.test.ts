@@ -19,7 +19,8 @@ test("frontend HTTP readers strictly parse bounded current dashboard bytes", asy
   const valid = {
     schema_version: DASHBOARD_HTTP_SCHEMA_VERSION,
     document_type: "error",
-    error: "example"
+    error: "example",
+    correlationId: "00000000-0000-4000-8000-000000000001"
   };
   assert.deepEqual(await parseDashboardHttpResponse(jsonResponse(JSON.stringify(valid)), "error"), valid);
 
@@ -93,6 +94,22 @@ test("frontend request builders and non-success responses use the canonical HTTP
     () => dashboardCommandRequest("run", { maxConcurrency: 0 }),
     /does not match its registered JSON Schema/u
   );
+  assert.deepEqual(
+    dashboardRequest("csp-violation", {
+      blockedURI: "data:image/svg+xml",
+      violatedDirective: "img-src-elem",
+      effectiveDirective: "img-src",
+      disposition: "enforce"
+    }),
+    {
+      schema_version: DASHBOARD_HTTP_SCHEMA_VERSION,
+      request_type: "csp-violation",
+      blockedURI: "data:image/svg+xml",
+      violatedDirective: "img-src-elem",
+      effectiveDirective: "img-src",
+      disposition: "enforce"
+    }
+  );
 
   await assert.rejects(
     throwDashboardHttpError(
@@ -100,11 +117,12 @@ test("frontend request builders and non-success responses use the canonical HTTP
         JSON.stringify({
           schema_version: DASHBOARD_HTTP_SCHEMA_VERSION,
           document_type: "error",
-          error: "canonical failure"
+          error: "canonical failure",
+          correlationId: "00000000-0000-4000-8000-000000000001"
         })
       )
     ),
-    /canonical failure/u
+    /canonical failure.*00000000-0000-4000-8000-000000000001/u
   );
   await assert.rejects(
     throwDashboardHttpError(jsonResponse("unbounded-do-not-echo")),

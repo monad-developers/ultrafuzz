@@ -7,7 +7,12 @@ state used by the CLI. Start it with:
 ultrafuzz dashboard --project <project>
 ```
 
-Open the printed `/dashboard` URL in a local browser.
+Open the complete printed `/dashboard#session=...` URL in a local browser. The
+fragment is a bearer credential: do not paste it into logs, tickets, or chat.
+The browser removes it from the address and history after bootstrap and keeps
+it only in that tab's `sessionStorage`, so refreshes continue to work. Reopen
+the newly printed URL after restarting the dashboard or when the page reports
+that its session token is unavailable.
 
 ## Prepare A Run
 
@@ -80,8 +85,14 @@ materialize
 clean
 ```
 
-Destructive or target-repository-mutating jobs require confirmation. In the
-CLI, materialization requires explicit reviewed copies:
+Starting a run from the dashboard first shows a confirmation containing the
+resolved target, providers, and configured budget. Confirming appends a launch
+record to `.ultrafuzz/dashboard-audit.jsonl` before dispatch. This does not
+pause or constrain agents after dispatch; agents retain the configured
+bypass-permissions/YOLO execution mode.
+
+Other destructive or target-repository-mutating jobs require confirmation. In
+the CLI, materialization requires explicit reviewed copies:
 
 ```bash
 ultrafuzz materialize --project <project> <run-id> \
@@ -94,3 +105,21 @@ Cleanup removes only selected generated `.ultrafuzz/**` paths:
 ```bash
 ultrafuzz clean --project <project> <run-id> --select runs/<run-id> --yes
 ```
+
+## Troubleshoot Security Diagnostics
+
+Every dashboard API and live-event request is authenticated, including reads.
+If a browser tab loses its credential, use the launch URL printed by the
+currently running dashboard instead of trying to recover a token from
+`/api/session`.
+
+Unexpected API failures display a correlation ID without internal paths,
+stacks, command output, or secrets. Match that ID against the dashboard
+process's redacted server diagnostic. Raw stdout, stderr, and rendered prompts
+are likewise redacted in API responses; their immutable run artifacts are not
+rewritten.
+
+The dashboard also reports Content Security Policy violations through its
+authenticated, bounded `/api/csp-violations` view. Any unexpected entry during
+local development or dashboard CI should be treated as a regression, rather
+than weakening the `img-src 'self'` policy to make it disappear.

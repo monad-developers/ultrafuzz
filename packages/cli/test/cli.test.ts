@@ -1893,9 +1893,10 @@ test("agent-owned bytes stay identical across validation, sync, aggregation, rep
 
   const dashboard = await serveDashboard({ projectRoot: project, runId: runData.run_id, port: 0 });
   try {
-    const reportResponse = await fetch(new URL("/api/report", dashboard.url));
+    const dashboardHeaders = { "x-ultrafuzz-session": dashboard.sessionToken };
+    const reportResponse = await fetch(new URL("/api/report", dashboard.url), { headers: dashboardHeaders });
     assert.equal(reportResponse.status, 200, await reportResponse.text());
-    const findingsResponse = await fetch(new URL("/api/findings", dashboard.url));
+    const findingsResponse = await fetch(new URL("/api/findings", dashboard.url), { headers: dashboardHeaders });
     const findingsBody = await findingsResponse.text();
     assert.equal(findingsResponse.status, 200, findingsBody);
     assert.deepEqual(JSON.parse(findingsBody), {

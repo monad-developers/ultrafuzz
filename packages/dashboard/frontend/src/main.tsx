@@ -76,6 +76,8 @@ import {
 } from "./theme";
 import { mergeStableGraphEdges, mergeStableGraphNodes } from "./graphMerge";
 import { createLiveRefreshGate, shouldPauseLiveRefresh } from "./liveRefreshGate";
+import { connectAuthenticatedEventStream } from "./authenticatedSse";
+import { bootstrapDashboardSessionToken, dashboardAuthenticatedHeaders } from "./dashboardSession";
 import { useManagedConfigEditor } from "./useManagedConfigEditor";
 import { useManagedPromptEditor } from "./useManagedPromptEditor";
 import {
@@ -269,8 +271,21 @@ type TopologyEdgeEndpoints = {
 type DashboardSession = {
   runId: string;
   liveUpdates: boolean;
-  sessionToken: string;
   templateVariables: string[];
+};
+
+type LaunchPreview = {
+  target: string;
+  providers: string[];
+  configuredBudget: {
+    maxParallelAgents: number;
+    maxParallelNodes: number;
+    defaultTimeoutSeconds: number;
+    workflowDeadlineSeconds: number;
+    sameAgentAttempts: number;
+    expandedAttempts: number;
+  };
+  confirmationDigest: string;
 };
 
 type NodeSummary = {
@@ -666,6 +681,7 @@ function PhaseGroupNode({ data }: NodeProps<DashboardPhaseNode>) {
 }
 
 function App() {
+  const [sessionToken] = useState<string | null>(() => bootstrapDashboardSessionToken());
   const [session, setSession] = useState<DashboardSession | null>(null);
   const [flow, setFlow] = useState<FlowData | null>(null);
   const [nodes, setNodes, onNodesChange] = useNodesState<DashboardGraphNode>([]);
@@ -727,8 +743,9 @@ function App() {
     });
   }, [themePreference]);
   const loadFlow = useCallback(async () => {
+    if (!sessionToken) throw new Error("Dashboard session token is unavailable.");
     try {
-      const data = await getJson<FlowData>("/api/flow", "flow");
+      const data = await getJson<FlowData>("/api/flow", "flow", sessionToken);
       setFlow(data);
       setFlowError("");
       return data;
@@ -737,11 +754,12 @@ function App() {
       setFlowError(`Run graph failed to load: ${message}`);
       throw error;
     }
-  }, []);
+  }, [sessionToken]);
 
   const loadTopology = useCallback(async () => {
+    if (!sessionToken) throw new Error("Dashboard session token is unavailable.");
     try {
-      const detail = await getJson<TopologyDetail>("/api/topology", "topology-detail");
+      const detail = await getJson<TopologyDetail>("/api/topology", "topology-detail", sessionToken);
       setTopology(detail);
       setTopologyError(detail.validation.valid ? "" : detail.validation.message);
       return detail;
@@ -750,19 +768,16 @@ function App() {
       setTopologyError(message);
       throw error;
     }
-  }, []);
+  }, [sessionToken]);
 
   const saveTopology = useCallback(
     async (nextTopology: ProjectTopology) => {
-      if (!session) {
+      if (!sessionToken) {
         throw new Error("Dashboard session is not ready.");
       }
       const response = await fetch("/api/topology", {
         method: "PUT",
-        headers: {
-          "content-type": "application/json",
-          "x-ultrafuzz-session": session.sessionToken
-        },
+        headers: dashboardAuthenticatedHeaders(sessionToken, { "content-type": "application/json" }),
         body: JSON.stringify(dashboardRequest("topology-save", { topology: nextTopology }))
       });
       if (!response.ok) {
@@ -773,7 +788,7 @@ function App() {
       await loadTopology();
       return await loadFlow();
     },
-    [loadFlow, loadTopology, session]
+    [loadFlow, loadTopology, sessionToken]
   );
 
   const mutateTopology = useCallback(
@@ -849,8 +864,9 @@ function App() {
   }, [flowInstance, graphViewMode, nodes.length]);
 
   const openConfig = useCallback(async () => {
+    if (!sessionToken) throw new Error("Dashboard session token is unavailable.");
     try {
-      const detail = await getJson<ConfigDetail>("/api/config", "config-detail");
+      const detail = await getJson<ConfigDetail>("/api/config", "config-detail", sessionToken);
       setSelectedNodeId(null);
       setSelectedEdgeId(null);
       setConnectSourceNodeId(null);
@@ -867,11 +883,12 @@ function App() {
       setMessage(`Config failed to load: ${message}`);
       throw error;
     }
-  }, []);
+  }, [sessionToken]);
 
   const loadEvents = useCallback(async () => {
+    if (!sessionToken) throw new Error("Dashboard session token is unavailable.");
     try {
-      const data = await getJson<{ events: EventRecord[] }>("/api/events", "events");
+      const data = await getJson<{ events: EventRecord[] }>("/api/events", "events", sessionToken);
       setEvents(data.events.slice(-80).reverse());
       setEventsError("");
     } catch (error) {
@@ -879,7 +896,7 @@ function App() {
       setEventsError(`Activity events failed to load: ${message}`);
       throw error;
     }
-  }, []);
+  }, [sessionToken]);
 
   const flushDeferredLiveRefresh = useCallback(() => {
     if (!pendingLiveRefreshRef.current || shouldPauseLiveRefresh(liveRefreshGateRef.current)) {
@@ -915,7 +932,11 @@ function App() {
   }, [sidePanelOpen]);
 
   useEffect(() => {
-    getJson<DashboardSession>("/api/session", "session")
+    if (!sessionToken) {
+      setSessionError("Dashboard session token is unavailable. Reopen the URL printed by ultrafuzz dashboard.");
+      return;
+    }
+    getJson<DashboardSession>("/api/session", "session", sessionToken)
       .then((sessionData) => {
         setSession(sessionData);
         setSessionError("");
@@ -924,10 +945,33 @@ function App() {
     loadFlow().catch(() => undefined);
     loadTopology().catch(() => undefined);
     loadEvents().catch(() => undefined);
-  }, [loadEvents, loadFlow, loadTopology]);
+  }, [loadEvents, loadFlow, loadTopology, sessionToken]);
 
   useEffect(() => {
-    if (!session) {
+    if (!sessionToken) return undefined;
+    const onViolation = (event: SecurityPolicyViolationEvent) => {
+      const body = dashboardRequest("csp-violation", {
+        blockedURI: event.blockedURI,
+        violatedDirective: event.violatedDirective,
+        effectiveDirective: event.effectiveDirective,
+        sourceFile: event.sourceFile,
+        lineNumber: event.lineNumber,
+        columnNumber: event.columnNumber,
+        disposition: event.disposition
+      });
+      fetch("/api/csp-violations", {
+        method: "POST",
+        headers: dashboardAuthenticatedHeaders(sessionToken, { "content-type": "application/json" }),
+        body: JSON.stringify(body),
+        keepalive: true
+      }).catch(() => undefined);
+    };
+    document.addEventListener("securitypolicyviolation", onViolation);
+    return () => document.removeEventListener("securitypolicyviolation", onViolation);
+  }, [sessionToken]);
+
+  useEffect(() => {
+    if (!session || !sessionToken) {
       setLiveState("loading");
       return;
     }
@@ -937,7 +981,6 @@ function App() {
     }
 
     setLiveState("connecting");
-    const stream = new EventSource("/api/events/stream");
     let refreshTimer: number | undefined;
     let refreshInFlight = false;
     let refreshQueued = false;
@@ -983,35 +1026,41 @@ function App() {
       }, 300);
     };
 
-    stream.onopen = () => {
-      setLiveState("live");
-      setLiveError("");
-    };
-    stream.onerror = () => {
-      if (!closed) {
-        setLiveState("disconnected");
-        setLiveError("Live event stream disconnected. The browser will retry automatically.");
-      }
-    };
-    stream.addEventListener("ultrafuzz-event", (event) => {
-      try {
-        dashboardSseEvents(event.data);
+    const stream = connectAuthenticatedEventStream({
+      url: "/api/events/stream",
+      sessionToken,
+      onOpen: () => {
         setLiveState("live");
         setLiveError("");
-        scheduleRefresh();
-      } catch (error) {
-        setLiveState("degraded");
-        setLiveError(`Live event update failed to parse: ${errorMessage(error)}`);
-      }
-    });
-    stream.addEventListener("ultrafuzz-error", (event) => {
-      setLiveState("degraded");
-      try {
-        const message = dashboardSseErrorMessage(event.data);
-        setLiveError(message);
-        setMessage(message);
-      } catch (error) {
-        setLiveError(`Live event error failed to parse: ${errorMessage(error)}`);
+      },
+      onError: () => {
+        if (!closed) {
+          setLiveState("disconnected");
+          setLiveError("Live event stream disconnected. The browser will retry automatically.");
+        }
+      },
+      onEvent: (event) => {
+        if (event.event === "ultrafuzz-event") {
+          try {
+            dashboardSseEvents(event.data);
+            setLiveState("live");
+            setLiveError("");
+            scheduleRefresh();
+          } catch (error) {
+            setLiveState("degraded");
+            setLiveError(`Live event update failed to parse: ${errorMessage(error)}`);
+          }
+        }
+        if (event.event === "ultrafuzz-error") {
+          setLiveState("degraded");
+          try {
+            const message = dashboardSseErrorMessage(event.data);
+            setLiveError(message);
+            setMessage(message);
+          } catch (error) {
+            setLiveError(`Live event error failed to parse: ${errorMessage(error)}`);
+          }
+        }
       }
     });
     return () => {
@@ -1021,24 +1070,29 @@ function App() {
         window.clearTimeout(refreshTimer);
       }
     };
-  }, [loadEvents, loadFlow, session]);
+  }, [loadEvents, loadFlow, session, sessionToken]);
 
   useEffect(() => {
-    const stream = new EventSource("/api/commands/stream");
-    stream.onopen = () => setCommandStreamError("");
-    stream.onerror = () => {
-      setCommandStreamError("Command job stream disconnected. The browser will retry automatically.");
-    };
-    stream.addEventListener("ultrafuzz-command-jobs", (event) => {
-      try {
-        setJobs(dashboardSseCommandJobs(event.data));
-        setCommandStreamError("");
-      } catch (error) {
-        setCommandStreamError(`Command job update failed to parse: ${errorMessage(error)}`);
+    if (!sessionToken) return undefined;
+    const stream = connectAuthenticatedEventStream({
+      url: "/api/commands/stream",
+      sessionToken,
+      onOpen: () => setCommandStreamError(""),
+      onError: () => {
+        setCommandStreamError("Command job stream disconnected. The browser will retry automatically.");
+      },
+      onEvent: (event) => {
+        if (event.event !== "ultrafuzz-command-jobs") return;
+        try {
+          setJobs(dashboardSseCommandJobs(event.data));
+          setCommandStreamError("");
+        } catch (error) {
+          setCommandStreamError(`Command job update failed to parse: ${errorMessage(error)}`);
+        }
       }
     });
     return () => stream.close();
-  }, []);
+  }, [sessionToken]);
 
   const selectedFlowNode = useMemo<DashboardFlowNode | undefined>(() => {
     const selected = nodes.find((node) => node.id === selectedNodeId);
@@ -1088,7 +1142,12 @@ function App() {
       };
     }
 
-    getJson<NodeDetail>(`/api/nodes/${encodeURIComponent(selectedNodeId)}`, "node-detail")
+    if (!sessionToken) {
+      setNodeError("Dashboard session token is unavailable.");
+      return undefined;
+    }
+
+    getJson<NodeDetail>(`/api/nodes/${encodeURIComponent(selectedNodeId)}`, "node-detail", sessionToken)
       .then((detail) => {
         if (cancelled) {
           return;
@@ -1104,11 +1163,11 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [selectedFlowNodeExists, selectedIsStrategyAggregate, selectedNodeId]);
+  }, [selectedFlowNodeExists, selectedIsStrategyAggregate, selectedNodeId, sessionToken]);
 
   const runCommand = useCallback(
     (command: DashboardCommandName, body: Record<string, unknown> = {}) => {
-      if (!session) {
+      if (!sessionToken) {
         setMessage("Dashboard session is not ready.");
         return;
       }
@@ -1121,6 +1180,15 @@ function App() {
         }
 
         const commandBody = { ...body };
+        if (command === "run") {
+          const preview = await postLaunchPreview(commandBody, sessionToken);
+          if (!window.confirm(launchConfirmationMessage(preview))) {
+            setMessage("Run launch canceled before submission.");
+            return;
+          }
+          commandBody.confirmed = true;
+          commandBody.confirmationDigest = preview.confirmationDigest;
+        }
         if ((command === "clean" || command === "materialize") && commandBody.confirmed !== true) {
           if (commandBody.dryRun === true) {
             commandBody.confirmed = true;
@@ -1130,12 +1198,7 @@ function App() {
           }
         }
 
-        const job = await postCommandJson<CommandJob>(
-          `/api/commands/${command}`,
-          command,
-          commandBody,
-          session.sessionToken
-        );
+        const job = await postCommandJson<CommandJob>(`/api/commands/${command}`, command, commandBody, sessionToken);
         setJobs((current) => [job, ...current.filter((item) => item.jobId !== job.jobId)]);
         setActivityConsoleOpen(true);
         setMessage(`Started ${command}`);
@@ -1143,22 +1206,19 @@ function App() {
 
       run().catch((error) => setMessage(`Command failed to start: ${errorMessage(error)}`));
     },
-    [flow, session]
+    [flow, sessionToken]
   );
 
   const saveConfig = useCallback(
     async (content: string) => {
-      if (!session || !config) {
+      if (!sessionToken || !config) {
         return;
       }
       setMessage("");
       try {
         const response = await fetch("/api/config", {
           method: "PUT",
-          headers: {
-            "content-type": "application/json",
-            "x-ultrafuzz-session": session.sessionToken
-          },
+          headers: dashboardAuthenticatedHeaders(sessionToken, { "content-type": "application/json" }),
           body: JSON.stringify(dashboardRequest("config-save", { content }))
         });
         if (!response.ok) {
@@ -1166,7 +1226,7 @@ function App() {
         }
         const saved = await parseDashboardHttpResponse<SaveConfigResponse>(response, "config-save");
         setMessage(`Saved ${saved.path}: ${saved.validation.message}`);
-        const refreshed = await getJson<ConfigDetail>("/api/config", "config-detail");
+        const refreshed = await getJson<ConfigDetail>("/api/config", "config-detail", sessionToken);
         setConfig(refreshed);
         setConfigError("");
         await loadFlow();
@@ -1177,7 +1237,7 @@ function App() {
         throw error;
       }
     },
-    [config, loadFlow, session]
+    [config, loadFlow, sessionToken]
   );
 
   const connectTopologyNodesByFlowId = useCallback(
@@ -1430,17 +1490,14 @@ function App() {
         setNewPromptError("Choose a group from the topology.");
         return;
       }
-      if (!session) {
+      if (!sessionToken) {
         setNewPromptError("Dashboard session is not ready.");
         return;
       }
       try {
         const response = await fetch("/api/prompts/nodes", {
           method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "x-ultrafuzz-session": session.sessionToken
-          },
+          headers: dashboardAuthenticatedHeaders(sessionToken, { "content-type": "application/json" }),
           body: JSON.stringify(
             dashboardRequest("prompt-create", {
               content: draft.content,
@@ -1469,7 +1526,7 @@ function App() {
         setMessage(message);
       }
     },
-    [loadFlow, loadTopology, session, topology]
+    [loadFlow, loadTopology, sessionToken, topology]
   );
 
   const cancelNewPrompt = useCallback(() => {
@@ -1734,7 +1791,7 @@ function App() {
                 nodeError={nodeError}
                 onPendingEditChange={reportPendingPromptEdit}
                 onPromptMessage={setMessage}
-                sessionToken={session?.sessionToken ?? null}
+                sessionToken={sessionToken}
                 startTopologyEdgeFrom={startTopologyEdgeFrom}
                 templateVariables={templateVariables}
               />
@@ -2958,8 +3015,11 @@ function diffLines(beforeLines: string[], afterLines: string[]): DiffRow[] {
   return rows;
 }
 
-async function getJson<T>(url: string, documentType: DashboardHttpDocumentType): Promise<T> {
-  const response = await fetch(url);
+async function getJson<T>(url: string, documentType: DashboardHttpDocumentType, token: string): Promise<T> {
+  const response = await fetch(url, {
+    headers: dashboardAuthenticatedHeaders(token),
+    credentials: "same-origin"
+  });
   if (!response.ok) {
     await throwDashboardHttpError(response);
   }
@@ -2974,16 +3034,42 @@ async function postCommandJson<T>(
 ): Promise<T> {
   const response = await fetch(url, {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-ultrafuzz-session": token
-    },
+    headers: dashboardAuthenticatedHeaders(token, { "content-type": "application/json" }),
     body: JSON.stringify(dashboardCommandRequest(command, commandArguments))
   });
   if (!response.ok) {
     await throwDashboardHttpError(response);
   }
   return parseDashboardHttpResponse<T>(response, "command-job");
+}
+
+async function postLaunchPreview(commandArguments: Record<string, unknown>, token: string): Promise<LaunchPreview> {
+  const response = await fetch("/api/commands/run/preview", {
+    method: "POST",
+    headers: dashboardAuthenticatedHeaders(token, { "content-type": "application/json" }),
+    body: JSON.stringify(dashboardCommandRequest("run", commandArguments))
+  });
+  if (!response.ok) await throwDashboardHttpError(response);
+  return parseDashboardHttpResponse<LaunchPreview>(response, "launch-preview");
+}
+
+export function launchConfirmationMessage(preview: LaunchPreview): string {
+  const budget = preview.configuredBudget;
+  return [
+    "Confirm Ultrafuzz run launch",
+    "",
+    `Target: ${preview.target}`,
+    `Providers: ${preview.providers.join(", ")}`,
+    "Configured budget:",
+    `- Parallel agents: ${budget.maxParallelAgents}`,
+    `- Parallel nodes: ${budget.maxParallelNodes}`,
+    `- Default node timeout: ${budget.defaultTimeoutSeconds}s`,
+    `- Workflow deadline: ${budget.workflowDeadlineSeconds}s`,
+    `- Attempts per agent: ${budget.sameAgentAttempts}`,
+    `- Expanded attempts: ${budget.expandedAttempts}`,
+    "",
+    "Launch this run?"
+  ].join("\n");
 }
 
 function promptEndpointForNode(node: DashboardFlowNode): string | null {

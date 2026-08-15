@@ -568,9 +568,20 @@ original Ultrafuzz direction: a local operator UI for graph inspection, run
 status, evidence, prompt editing, topology editing, config review, report
 review, materialization, and cleanup.
 
-Dashboard/API servers MUST bind to loopback by default. Mutating APIs MUST use
-local request protections and a cryptographically random session token. Path
-and run-ID inputs MUST use the same safe-path and safe-ID validation as the CLI.
+Dashboard/API servers MUST bind to loopback by default. Every API read,
+mutation, command-job route, and SSE stream MUST use local request protections
+and a cryptographically random session token. The token MUST be delivered in
+the launch URL fragment, MUST NOT be returned by `/api/session`, and MUST be
+sent in a request header after browser bootstrap. API requests without a
+present loopback `Host`, with an invalid or non-loopback `Origin`, or with a
+cross-site fetch context MUST fail closed. Path and run-ID inputs MUST use the
+same safe-path and safe-ID validation as the CLI.
+
+Raw stdout, stderr, and rendered prompts MUST be redacted before dashboard
+publication. Unexpected errors MUST return only a generic message and
+correlation ID while retaining bounded, redacted server-side diagnostics. The
+browser CSP MUST avoid unused source allowances, and unexpected violations
+MUST be observable in development and CI.
 
 The dashboard SHOULD show logical topology nodes by default. Expanded attempts
 and model fan-out MAY be shown in technical details, but edits SHOULD map back
@@ -579,6 +590,9 @@ validate changes before accepting them and MUST NOT leave partial writes after a
 failed validation.
 
 Dashboard command jobs MUST map only to supported Ultrafuzz product operations.
+Run launch MUST require an audited, digest-bound confirmation showing the
+target, providers, and configured budget. This pre-dispatch confirmation MUST
+NOT add in-run agent approvals or change bypass-permissions execution.
 Destructive or target-repo-mutating jobs such as clean and materialize MUST
 require confirmation.
 
