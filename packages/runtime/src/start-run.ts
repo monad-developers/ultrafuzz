@@ -6,6 +6,7 @@ import {
   appendEvent,
   assertPlannedGraph,
   assertSmithersTaskManifestMatchesPlannedGraph,
+  NODE_PROVENANCE_FAILURE_CATEGORIES,
   assertNoSymlinkComponents,
   assertPathInside,
   layoutForRunRoot,
@@ -473,14 +474,16 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
         }
         const failure = provenance?.failure as Record<string, unknown> | undefined;
         const category = failure?.category;
-        const failureCategory: RunRecoveryProvenance["failed_nodes"][number]["failure_category"] =
-          category === "dependency-cascade"
-            ? "dependency-cascade"
-            : category === "artifact-contract"
-              ? "artifact-contract"
-              : category === "provider-interruption" || node.status === "timed-out"
-                ? "provider-interruption"
-                : "agent-failure";
+        if (
+          typeof category !== "string" ||
+          !NODE_PROVENANCE_FAILURE_CATEGORIES.includes(
+            category as RunRecoveryProvenance["failed_nodes"][number]["failure_category"]
+          )
+        ) {
+          completeAttemptAuthority = false;
+          break;
+        }
+        const failureCategory = category as RunRecoveryProvenance["failed_nodes"][number]["failure_category"];
         failedNodes.push({
           node_id: node.node_id,
           workflow_task_id: workflowTaskId,
@@ -521,6 +524,34 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
         ...(retryFailedLifecycle ? { retry_failed: true } : {})
       }
     });
+    let preparedRecovery: RunRecoveryProvenance | undefined;
+    if (recoveryCandidate !== undefined) {
+      const state = readRunState(evidence.layout);
+      const priorRecovery = state.provenance?.recovery;
+      preparedRecovery = {
+        recovery_id: crypto.randomUUID(),
+        submission_status: "prepared",
+        recovered: false,
+        prior_status: "failed",
+        failed_nodes: recoveryCandidate.failedNodes,
+        source_workflow_run_id: recoveryCandidate.sourceWorkflowRunId,
+        source_workflow_link_id: recoveryCandidate.sourceWorkflowLinkId,
+        control_generation: evidence.controlGeneration,
+        controller_invocation_id: controllerInvocation.event_id,
+        controller_invoked_at: controllerInvocation.timestamp
+      };
+      writeRunState(evidence.layout, {
+        ...state,
+        provenance: {
+          ...state.provenance!,
+          recovery_history: [
+            ...(state.provenance?.recovery_history ?? []),
+            ...(priorRecovery === undefined ? [] : [priorRecovery])
+          ],
+          recovery: preparedRecovery
+        }
+      });
+    }
     const lifecycleResult = await runSmithersLifecycleCommand({
       action,
       smithersRunId: evidence.smithersRunId,
@@ -608,29 +639,24 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
         ...(lifecycleResult.recoveredMissingRun ? { recovered_missing_workflow_run: true } : {})
       }
     });
-    if (recoveryCandidate !== undefined && !lifecycleResult.alreadyRunning) {
+    if (preparedRecovery !== undefined && !lifecycleResult.alreadyRunning) {
       const state = readRunState(evidence.layout);
-      const priorRecovery = state.provenance?.recovery;
+      if (
+        state.provenance?.recovery?.submission_status !== "prepared" ||
+        state.provenance.recovery.recovery_id !== preparedRecovery.recovery_id ||
+        state.provenance.recovery.controller_invocation_id !== controllerInvocation.event_id
+      ) {
+        throw new Error("prepared retry recovery authority changed before lifecycle submission completed");
+      }
       writeRunState(evidence.layout, {
         ...state,
         provenance: {
           ...state.provenance!,
-          recovery_history: [
-            ...(state.provenance?.recovery_history ?? []),
-            ...(priorRecovery === undefined ? [] : [priorRecovery])
-          ],
           recovery: {
-            recovery_id: crypto.randomUUID(),
-            recovered: false,
-            prior_status: "failed",
-            failed_nodes: recoveryCandidate.failedNodes,
-            source_workflow_run_id: recoveryCandidate.sourceWorkflowRunId,
-            source_workflow_link_id: recoveryCandidate.sourceWorkflowLinkId,
+            ...preparedRecovery,
+            submission_status: "submitted",
             workflow_run_id: workflowRunId,
             workflow_link_id: linkedWorkflow.link_id,
-            control_generation: evidence.controlGeneration,
-            controller_invocation_id: controllerInvocation.event_id,
-            controller_invoked_at: controllerInvocation.timestamp,
             lifecycle_result_event_id: lifecycleResultEvent.event_id,
             lifecycle_result_at: lifecycleResultEvent.timestamp,
             lifecycle_submission_event_id: lifecycleSubmissionEvent.event_id,

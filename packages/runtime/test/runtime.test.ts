@@ -12799,7 +12799,7 @@ test("resume derives reset identities from the canonical nodes of a failed workf
   );
 });
 
-test("retry recovery remains stable across repeated syncs and records durable provenance", async () => {
+test("retry recovery survives an interrupted submission projection and rejects superseding same-link attempts", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
@@ -12871,6 +12871,22 @@ test("retry recovery remains stable across repeated syncs and records durable pr
   });
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
 
+  // Model a controller interruption after the authenticated lifecycle result
+  // and submission events were durable but before their projection reached
+  // state.json. Synchronization must reconstruct only from that exact event trio.
+  const statePath = path.join(run.value!.run_root, "state.json");
+  const interrupted = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
+  assert.equal(interrupted.provenance?.recovery?.submission_status, "submitted");
+  const interruptedRecovery = interrupted.provenance!.recovery!;
+  interruptedRecovery.submission_status = "prepared";
+  delete interruptedRecovery.workflow_run_id;
+  delete interruptedRecovery.workflow_link_id;
+  delete interruptedRecovery.lifecycle_result_event_id;
+  delete interruptedRecovery.lifecycle_result_at;
+  delete interruptedRecovery.lifecycle_submission_event_id;
+  delete interruptedRecovery.lifecycle_submitted_at;
+  fs.writeFileSync(statePath, `${JSON.stringify(interrupted, null, 2)}\n`, "utf8");
+
   const successfulInspect = workflowInspect({
     workflowRunId,
     status: "failed",
@@ -12892,8 +12908,9 @@ test("retry recovery remains stable across repeated syncs and records durable pr
   assert.equal(second.ok, true, JSON.stringify(second.diagnostics));
   assert.equal(second.value?.status, "succeeded");
 
-  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as RunState;
+  const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
   assert.equal(state.status, "succeeded");
+  assert.equal(state.provenance?.recovery?.submission_status, "submitted");
   assert.equal(state.provenance?.recovery?.recovered, true);
   assert.equal(state.provenance?.recovery?.failed_nodes.length, 1);
   const recoveredEvents = replayEvents(layoutForRunRoot(run.value!.run_root)).records.filter(
@@ -12915,6 +12932,34 @@ test("retry recovery remains stable across repeated syncs and records durable pr
   assert.equal(diagnosis.value?.workflow_status, "failed");
   assert.equal(diagnosis.value?.summary, "Run is finished, nothing is blocked.");
   assert.deepEqual(diagnosis.value?.blockers, []);
+
+  // A successful publication is immutable, but that cannot let its frozen
+  // state projection authenticate a newer failed or successful Smithers
+  // attempt on the same task/link.
+  const laterFailureInspect = workflowInspect({
+    workflowRunId,
+    status: "failed",
+    state: "failed",
+    error: { message: "same-link task failed after recovery" },
+    steps: [{ id: "node:project-discovery", state: "failed", attempt: 3 }]
+  });
+  fs.writeFileSync(env.SMITHERS_FAKE_INSPECT!, `${JSON.stringify(laterFailureInspect, null, 2)}\n`, "utf8");
+  fs.writeFileSync(env.SMITHERS_FAKE_EVENTS!, "", "utf8");
+  const afterLaterFailure = await syncRun({ projectRoot: project, runId: run.value!.run_id, env });
+  assert.equal(afterLaterFailure.ok, true, JSON.stringify(afterLaterFailure.diagnostics));
+  assert.equal(afterLaterFailure.value?.status, "failed");
+
+  const laterSuccessInspect = workflowInspect({
+    workflowRunId,
+    status: "failed",
+    state: "failed",
+    error: { message: "same-link aggregate remains failed" },
+    steps: [{ id: "node:project-discovery", state: "finished", attempt: 4 }]
+  });
+  fs.writeFileSync(env.SMITHERS_FAKE_INSPECT!, `${JSON.stringify(laterSuccessInspect, null, 2)}\n`, "utf8");
+  const afterLaterSuccess = await syncRun({ projectRoot: project, runId: run.value!.run_id, env });
+  assert.equal(afterLaterSuccess.ok, true, JSON.stringify(afterLaterSuccess.diagnostics));
+  assert.equal(afterLaterSuccess.value?.status, "failed");
 
   const laterLifecycle = await resumeRun({
     projectRoot: project,
@@ -13027,6 +13072,50 @@ test("retry recovery cannot authorize a stale failed aggregate from a different 
   assert.equal(forgedBackfill.value?.status, "failed");
   const afterForgedBackfill = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
   assert.equal(afterForgedBackfill.provenance?.recovery, undefined);
+});
+
+test("retry recovery fails closed when durable failure provenance has no exact category", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+  const workflowRunId = "ultrafuzz-recovery-missing-failure-category";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      error: { message: "Task failed: node:project-discovery" },
+      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
+    }),
+    events: ""
+  });
+  const run = await startRun({ projectRoot: project, runId: "recovery-missing-failure-category", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const firstSync = await syncRun({ projectRoot: project, runId: run.value!.run_id, env });
+  assert.equal(firstSync.ok, true, JSON.stringify(firstSync.diagnostics));
+  assert.equal(firstSync.value?.status, "failed");
+  const statePath = path.join(run.value!.run_root, "state.json");
+  const missingCategory = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
+  const node = missingCategory.nodes["project-discovery"]!;
+  assert.ok(node.provenance && "failure" in node.provenance);
+  delete (node.provenance as { failure?: unknown }).failure;
+  fs.writeFileSync(statePath, `${JSON.stringify(missingCategory, null, 2)}\n`, "utf8");
+
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId: run.value!.run_id,
+    force: true,
+    retryFailed: true,
+    env
+  });
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
+  assert.equal(state.provenance?.recovery, undefined);
+  const retryInvocations = replayEvents(layoutForRunRoot(run.value!.run_root)).records.filter(
+    (event) => event.event_type === "workflow-lifecycle-invoking" && event.payload.retry_failed === true
+  );
+  assert.equal(retryInvocations.length, 1, "retry may proceed but cannot claim recovery authority");
 });
 
 test("an unrelated replacement link cannot retarget a pending retry recovery", async () => {

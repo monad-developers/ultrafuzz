@@ -1966,6 +1966,7 @@ test("run-state v5 JSON Schema and Zod agree on every closed provenance variant"
   };
   const recovery = {
     recovery_id: "00000000-0000-4000-8000-000000000002",
+    submission_status: "submitted",
     recovered: true,
     recovered_at: "2026-08-15T00:00:00.000Z",
     prior_status: "failed",
@@ -2010,6 +2011,28 @@ test("run-state v5 JSON Schema and Zod agree on every closed provenance variant"
       value: {
         ...base,
         provenance: { workflow: runWorkflow, recovery: { ...recovery, recovered: false, recovered_at: undefined } }
+      },
+      expected: true
+    },
+    {
+      label: "prepared-run-recovery",
+      value: {
+        ...base,
+        provenance: {
+          workflow: runWorkflow,
+          recovery: {
+            ...recovery,
+            submission_status: "prepared",
+            recovered: false,
+            recovered_at: undefined,
+            workflow_run_id: undefined,
+            workflow_link_id: undefined,
+            lifecycle_result_event_id: undefined,
+            lifecycle_result_at: undefined,
+            lifecycle_submission_event_id: undefined,
+            lifecycle_submitted_at: undefined
+          }
+        }
       },
       expected: true
     },

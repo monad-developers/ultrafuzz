@@ -297,6 +297,13 @@ interface AttemptWorkflowEvidence {
   taskId: string;
 }
 
+interface ObservedTaskEvidence {
+  status: NodeStatus;
+  taskId: string;
+  attempt?: number;
+  workflowState?: SmithersNodeState;
+}
+
 interface NodeFinalization {
   status: NodeStatus;
   diagnostics: RuntimeDiagnostic[];
@@ -550,12 +557,14 @@ export async function synchronizeLinkedWorkflowRun(
     throw error;
   }
   diagnostics.push(...syncResult.diagnostics);
+  reconcilePreparedRecoveryProvenance(layout);
   const evidenceComplete = syncResult.syncedNodes >= loaded.tasks.length;
   const recoveredAggregateAuthorized = recoveryAuthorizesFailedAggregate({
     layout,
     state: readRunState(layout),
     inspect,
     nodeStatuses: syncResult.nodeStatuses,
+    observedTaskEvidence: syncResult.observedTaskEvidence,
     evidenceComplete,
     workflowRunId: evidence.smithersRunId,
     workflowLinkId: evidence.workflowLinkId,
@@ -770,6 +779,7 @@ function recoveryAuthorizesFailedAggregate(input: {
   state: ReturnType<typeof readRunState>;
   inspect: WorkflowInspect;
   nodeStatuses: Map<string, NodeStatus>;
+  observedTaskEvidence: Map<string, ObservedTaskEvidence>;
   evidenceComplete: boolean;
   workflowRunId: string;
   workflowLinkId: string;
@@ -779,22 +789,49 @@ function recoveryAuthorizesFailedAggregate(input: {
   const statuses = [...input.nodeStatuses.values()];
   if (
     input.inspect.runState !== "failed" ||
+    recovery?.submission_status !== "submitted" ||
     recovery?.prior_status !== "failed" ||
     recovery.workflow_run_id !== input.workflowRunId ||
     recovery.workflow_link_id !== input.workflowLinkId ||
     recovery.control_generation !== input.controlGeneration ||
+    recovery.lifecycle_result_event_id === undefined ||
+    recovery.lifecycle_result_at === undefined ||
+    recovery.lifecycle_submission_event_id === undefined ||
+    recovery.lifecycle_submitted_at === undefined ||
     !input.evidenceComplete ||
     statuses.length === 0 ||
-    !statuses.every((status) => status === "succeeded" || status === "reused-from-prior-run")
+    !statuses.every((status) => status === "succeeded" || status === "reused-from-prior-run") ||
+    input.observedTaskEvidence.size === 0
   ) {
     return false;
+  }
+
+  for (const [nodeId, observed] of input.observedTaskEvidence) {
+    const node = input.state.nodes[nodeId];
+    const workflow = recordField(node?.provenance, "workflow");
+    if (
+      node === undefined ||
+      observed.status !== "succeeded" ||
+      observed.workflowState !== "finished" ||
+      observed.attempt === undefined ||
+      (node.status !== "succeeded" && node.status !== "reused-from-prior-run") ||
+      stringField(workflow, "run_id") !== recovery.workflow_run_id ||
+      stringField(workflow, "task_id") !== observed.taskId ||
+      numberField(workflow, "attempt") !== observed.attempt
+    ) {
+      return false;
+    }
   }
 
   for (const failedNode of recovery.failed_nodes) {
     const node = input.state.nodes[failedNode.node_id];
     const workflow = recordField(node?.provenance, "workflow");
+    const failedTask = input.inspect.steps.find((step) => step.id === failedNode.workflow_task_id);
     if (
       node === undefined ||
+      failedTask === undefined ||
+      failedTask.state !== "finished" ||
+      failedTask.attempt <= failedNode.failed_attempt ||
       (node.status !== "succeeded" && node.status !== "reused-from-prior-run") ||
       stringField(workflow, "run_id") !== recovery.workflow_run_id ||
       (numberField(workflow, "attempt") ?? -1) <= failedNode.failed_attempt
@@ -862,6 +899,83 @@ function recoveryAuthorizesFailedAggregate(input: {
   return !records.some(
     (record, index) => index > invocation.index && record.event_type === "workflow-lifecycle-invoking"
   );
+}
+
+function reconcilePreparedRecoveryProvenance(layout: RunLayout): void {
+  const state = readRunState(layout);
+  const recovery = state.provenance?.recovery;
+  if (recovery?.submission_status !== "prepared") return;
+
+  const records = replayEvents(layout, Number.MAX_SAFE_INTEGER).records.map((record, index) => ({ record, index }));
+  const invocationMatches = records.filter(({ record }) => record.event_id === recovery.controller_invocation_id);
+  if (invocationMatches.length !== 1) return;
+  const invocation = invocationMatches[0]!;
+  const invocationPayload = invocation.record.payload as Record<string, unknown>;
+  if (
+    invocation.record.event_type !== "workflow-lifecycle-invoking" ||
+    invocation.record.timestamp !== recovery.controller_invoked_at ||
+    invocationPayload.action !== "resume" ||
+    invocationPayload.retry_failed !== true ||
+    invocationPayload.workflow_run_id !== recovery.source_workflow_run_id ||
+    invocationPayload.workflow_link_id !== recovery.source_workflow_link_id ||
+    invocationPayload.control_generation !== recovery.control_generation
+  ) {
+    return;
+  }
+
+  const results = records.filter(({ record, index }) => {
+    if (index <= invocation.index || record.event_type !== "workflow-lifecycle-result") return false;
+    const payload = record.payload as Record<string, unknown>;
+    return (
+      payload.action === "resume" &&
+      payload.retry_failed === true &&
+      payload.source_workflow_run_id === recovery.source_workflow_run_id &&
+      payload.source_workflow_link_id === recovery.source_workflow_link_id &&
+      payload.control_generation === recovery.control_generation &&
+      payload.controller_invocation_id === recovery.controller_invocation_id &&
+      payload.controller_invoked_at === recovery.controller_invoked_at
+    );
+  });
+  if (results.length !== 1) return;
+  const result = results[0]!;
+  const resultPayload = result.record.payload as Record<string, unknown>;
+  const workflowRunId = stringField(resultPayload, "workflow_run_id");
+  if (workflowRunId === undefined) return;
+
+  const submissions = records.filter(({ record, index }) => {
+    if (index <= result.index || record.event_type !== "workflow-lifecycle-submitted") return false;
+    const payload = record.payload as Record<string, unknown>;
+    return (
+      payload.action === "resume" &&
+      payload.retry_failed === true &&
+      payload.workflow_run_id === workflowRunId &&
+      payload.control_generation === recovery.control_generation &&
+      payload.controller_invocation_id === recovery.controller_invocation_id &&
+      payload.controller_invoked_at === recovery.controller_invoked_at
+    );
+  });
+  if (submissions.length !== 1) return;
+  const submission = submissions[0]!;
+  const submissionPayload = submission.record.payload as Record<string, unknown>;
+  const workflowLinkId = stringField(submissionPayload, "workflow_link_id");
+  if (workflowLinkId === undefined) return;
+
+  writeRunState(layout, {
+    ...state,
+    provenance: {
+      ...state.provenance!,
+      recovery: {
+        ...recovery,
+        submission_status: "submitted",
+        workflow_run_id: workflowRunId,
+        workflow_link_id: workflowLinkId,
+        lifecycle_result_event_id: result.record.event_id,
+        lifecycle_result_at: result.record.timestamp,
+        lifecycle_submission_event_id: submission.record.event_id,
+        lifecycle_submitted_at: submission.record.timestamp
+      }
+    }
+  });
 }
 
 function synchronizationBudgetDiagnostic(
@@ -2586,12 +2700,14 @@ async function synchronizeTasks(input: {
 }): Promise<{
   diagnostics: RuntimeDiagnostic[];
   nodeStatuses: Map<string, NodeStatus>;
+  observedTaskEvidence: Map<string, ObservedTaskEvidence>;
   workflowStates: Map<string, SmithersNodeState>;
   syncedNodes: number;
   changed: boolean;
 }> {
   const diagnostics: RuntimeDiagnostic[] = [];
   const nodeStatuses = new Map<string, NodeStatus>();
+  const observedTaskEvidence = new Map<string, ObservedTaskEvidence>();
   const workflowStates = new Map<string, SmithersNodeState>();
   const steps = new Map(input.inspect.steps.map((step) => [step.id, step]));
   const eventsByNode = eventsByWorkflowNode(input.events);
@@ -2634,6 +2750,12 @@ async function synchronizeTasks(input: {
       continue;
     }
     const evidence = attemptEvidence.evidence;
+    observedTaskEvidence.set(task.attemptId, {
+      status: evidence.status,
+      taskId: attemptEvidence.taskId,
+      ...(evidence.attempt === undefined ? {} : { attempt: evidence.attempt }),
+      ...(evidence.workflowState === undefined ? {} : { workflowState: evidence.workflowState })
+    });
 
     const previousIsImmutable = immutableTerminalFinalization(previous);
     const needsFinalization =
@@ -2783,7 +2905,7 @@ async function synchronizeTasks(input: {
     }
   }
 
-  return { diagnostics, nodeStatuses, workflowStates, syncedNodes, changed };
+  return { diagnostics, nodeStatuses, observedTaskEvidence, workflowStates, syncedNodes, changed };
 }
 
 async function finalizeTerminalTask(input: {

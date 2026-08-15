@@ -169,6 +169,7 @@ export interface RunProvenance {
 
 export interface RunRecoveryProvenance {
   recovery_id: string;
+  submission_status: "prepared" | "submitted";
   recovered: boolean;
   recovered_at?: string;
   prior_status: "failed";
@@ -180,15 +181,15 @@ export interface RunRecoveryProvenance {
   }>;
   source_workflow_run_id: string;
   source_workflow_link_id: string;
-  workflow_run_id: string;
-  workflow_link_id: string;
+  workflow_run_id?: string;
+  workflow_link_id?: string;
   control_generation: string;
   controller_invocation_id: string;
   controller_invoked_at: string;
-  lifecycle_result_event_id: string;
-  lifecycle_result_at: string;
-  lifecycle_submission_event_id: string;
-  lifecycle_submitted_at: string;
+  lifecycle_result_event_id?: string;
+  lifecycle_result_at?: string;
+  lifecycle_submission_event_id?: string;
+  lifecycle_submitted_at?: string;
 }
 
 export interface TaskNodeWorkflowProvenance {

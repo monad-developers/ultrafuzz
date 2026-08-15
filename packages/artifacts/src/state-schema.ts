@@ -49,6 +49,7 @@ const runWorkflowProvenanceSchema = z.strictObject({
 const runRecoveryProvenanceSchema = z
   .strictObject({
     recovery_id: canonicalUuidSchema,
+    submission_status: z.enum(["prepared", "submitted"]),
     recovered: z.boolean(),
     recovered_at: canonicalTimestampSchema.optional(),
     prior_status: z.literal("failed"),
@@ -64,15 +65,15 @@ const runRecoveryProvenanceSchema = z
       .min(1),
     source_workflow_run_id: nonEmptyString,
     source_workflow_link_id: canonicalUuidSchema,
-    workflow_run_id: nonEmptyString,
-    workflow_link_id: canonicalUuidSchema,
+    workflow_run_id: nonEmptyString.optional(),
+    workflow_link_id: canonicalUuidSchema.optional(),
     control_generation: sha256,
     controller_invocation_id: nonEmptyString,
     controller_invoked_at: canonicalTimestampSchema,
-    lifecycle_result_event_id: nonEmptyString,
-    lifecycle_result_at: canonicalTimestampSchema,
-    lifecycle_submission_event_id: nonEmptyString,
-    lifecycle_submitted_at: canonicalTimestampSchema
+    lifecycle_result_event_id: nonEmptyString.optional(),
+    lifecycle_result_at: canonicalTimestampSchema.optional(),
+    lifecycle_submission_event_id: nonEmptyString.optional(),
+    lifecycle_submitted_at: canonicalTimestampSchema.optional()
   })
   .superRefine((value, context) => {
     if (value.recovered && value.recovered_at === undefined) {
@@ -87,6 +88,37 @@ const runRecoveryProvenanceSchema = z
         code: "custom",
         message: "incomplete recovery provenance cannot carry a completion timestamp",
         path: ["recovered_at"]
+      });
+    }
+    const submissionFields = [
+      "workflow_run_id",
+      "workflow_link_id",
+      "lifecycle_result_event_id",
+      "lifecycle_result_at",
+      "lifecycle_submission_event_id",
+      "lifecycle_submitted_at"
+    ] as const;
+    for (const field of submissionFields) {
+      if (value.submission_status === "submitted" && value[field] === undefined) {
+        context.addIssue({
+          code: "custom",
+          message: "submitted recovery provenance requires complete lifecycle evidence",
+          path: [field]
+        });
+      }
+      if (value.submission_status === "prepared" && value[field] !== undefined) {
+        context.addIssue({
+          code: "custom",
+          message: "prepared recovery provenance cannot claim lifecycle completion evidence",
+          path: [field]
+        });
+      }
+    }
+    if (value.submission_status === "prepared" && value.recovered) {
+      context.addIssue({
+        code: "custom",
+        message: "prepared recovery provenance cannot be completed",
+        path: ["recovered"]
       });
     }
   });
@@ -492,24 +524,20 @@ export const runStateJsonSchema = {
       type: "object",
       required: [
         "recovery_id",
+        "submission_status",
         "recovered",
         "prior_status",
         "failed_nodes",
         "source_workflow_run_id",
         "source_workflow_link_id",
-        "workflow_run_id",
-        "workflow_link_id",
         "control_generation",
         "controller_invocation_id",
-        "controller_invoked_at",
-        "lifecycle_result_event_id",
-        "lifecycle_result_at",
-        "lifecycle_submission_event_id",
-        "lifecycle_submitted_at"
+        "controller_invoked_at"
       ],
       additionalProperties: false,
       properties: {
         recovery_id: { $ref: "#/$defs/runWorkflowProvenance/properties/linkId" },
+        submission_status: { enum: ["prepared", "submitted"] },
         recovered: { type: "boolean" },
         recovered_at: { $ref: "#/properties/created_at" },
         prior_status: { const: "failed" },
@@ -541,6 +569,43 @@ export const runStateJsonSchema = {
         lifecycle_submitted_at: { $ref: "#/properties/created_at" }
       },
       allOf: [
+        {
+          if: { properties: { submission_status: { const: "submitted" } }, required: ["submission_status"] },
+          then: {
+            properties: {
+              workflow_run_id: {},
+              workflow_link_id: {},
+              lifecycle_result_event_id: {},
+              lifecycle_result_at: {},
+              lifecycle_submission_event_id: {},
+              lifecycle_submitted_at: {}
+            },
+            required: [
+              "workflow_run_id",
+              "workflow_link_id",
+              "lifecycle_result_event_id",
+              "lifecycle_result_at",
+              "lifecycle_submission_event_id",
+              "lifecycle_submitted_at"
+            ]
+          },
+          else: {
+            not: {
+              anyOf: [
+                "workflow_run_id",
+                "workflow_link_id",
+                "lifecycle_result_event_id",
+                "lifecycle_result_at",
+                "lifecycle_submission_event_id",
+                "lifecycle_submitted_at"
+              ].map((field) => ({ required: [field] }))
+            }
+          }
+        },
+        {
+          if: { properties: { submission_status: { const: "prepared" } }, required: ["submission_status"] },
+          then: { properties: { recovered: { const: false } } }
+        },
         {
           if: { properties: { recovered: { const: true } }, required: ["recovered"] },
           then: { properties: { recovered_at: {} }, required: ["recovered_at"] },

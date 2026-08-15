@@ -449,25 +449,23 @@
       "type": "object",
       "required": [
         "recovery_id",
+        "submission_status",
         "recovered",
         "prior_status",
         "failed_nodes",
         "source_workflow_run_id",
         "source_workflow_link_id",
-        "workflow_run_id",
-        "workflow_link_id",
         "control_generation",
         "controller_invocation_id",
-        "controller_invoked_at",
-        "lifecycle_result_event_id",
-        "lifecycle_result_at",
-        "lifecycle_submission_event_id",
-        "lifecycle_submitted_at"
+        "controller_invoked_at"
       ],
       "additionalProperties": false,
       "properties": {
         "recovery_id": {
           "$ref": "#/$defs/runWorkflowProvenance/properties/linkId"
+        },
+        "submission_status": {
+          "enum": ["prepared", "submitted"]
         },
         "recovered": {
           "type": "boolean"
@@ -545,6 +543,63 @@
         }
       },
       "allOf": [
+        {
+          "if": {
+            "properties": {
+              "submission_status": {
+                "const": "submitted"
+              }
+            },
+            "required": ["submission_status"]
+          },
+          "then": {
+            "properties": {
+              "workflow_run_id": {},
+              "workflow_link_id": {},
+              "lifecycle_result_event_id": {},
+              "lifecycle_result_at": {},
+              "lifecycle_submission_event_id": {},
+              "lifecycle_submitted_at": {}
+            },
+            "required": [
+              "workflow_run_id",
+              "workflow_link_id",
+              "lifecycle_result_event_id",
+              "lifecycle_result_at",
+              "lifecycle_submission_event_id",
+              "lifecycle_submitted_at"
+            ]
+          },
+          "else": {
+            "not": {
+              "anyOf": [
+                { "required": ["workflow_run_id"] },
+                { "required": ["workflow_link_id"] },
+                { "required": ["lifecycle_result_event_id"] },
+                { "required": ["lifecycle_result_at"] },
+                { "required": ["lifecycle_submission_event_id"] },
+                { "required": ["lifecycle_submitted_at"] }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "submission_status": {
+                "const": "prepared"
+              }
+            },
+            "required": ["submission_status"]
+          },
+          "then": {
+            "properties": {
+              "recovered": {
+                "const": false
+              }
+            }
+          }
+        },
         {
           "if": {
             "properties": {
