@@ -3,10 +3,12 @@ import path from "node:path";
 
 import {
   applyModelProfileOverrides,
+  hasErrors,
   loadProjectConfig,
   redactDiagnostics,
   resolveConfig,
   validateExecutionNodeOverrides,
+  validateModelProfiles,
   type ResolvedConfig
 } from "@ultrafuzz/config";
 import { loadPromptCatalog, projectPromptDir } from "@ultrafuzz/prompts";
@@ -103,15 +105,27 @@ export async function loadResolvedProject(input: ValidateProjectInput): Promise<
       diagnostics: configDiagnostics(redactDiagnostics([...loaded.diagnostics, ...resolved.diagnostics]))
     };
   }
+  // Agent references are collected before the overrides land so a run that
+  // switches the default profile still has to satisfy every agent the project
+  // config declares.
   const configuredAgentRefs = [
     ...new Set(Object.values(resolved.value.models.profiles).map((profile) => profile.agent))
   ];
   applyAgentOverrides(resolved.value, input);
+  // resolveConfig validated the pre-override profiles, so the effective config
+  // an override produces must be revalidated before anything consumes it.
+  const overrideDiagnostics = validateModelProfiles(resolved.value);
+  const diagnostics = configDiagnostics(
+    redactDiagnostics([...loaded.diagnostics, ...resolved.diagnostics, ...overrideDiagnostics])
+  );
+  if (hasErrors(overrideDiagnostics)) {
+    return { configPath: loaded.value.path, diagnostics };
+  }
   return {
     config: resolved.value,
     configPath: loaded.value.path,
     configuredAgentRefs,
-    diagnostics: configDiagnostics(redactDiagnostics([...loaded.diagnostics, ...resolved.diagnostics]))
+    diagnostics
   };
 }
 
@@ -306,8 +320,8 @@ function validateTopologySurface(
   }
 }
 
-export function activeTopologyAgentRefs(projectRoot: string, config: ResolvedConfig): string[] {
-  return validateTopologySurface(projectRoot, config).selectedAgentRefs;
+export function activeTopologyAgentRefs(projectRoot: string, config: ResolvedConfig, topologyPath?: string): string[] {
+  return validateTopologySurface(projectRoot, config, topologyPath).selectedAgentRefs;
 }
 
 function evaluatePolicies(
