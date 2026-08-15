@@ -157,18 +157,16 @@ HTTPS endpoint. Its `kimi-k3` alias maps to upstream model `k3`.
 
 In subscription mode Ultrafuzz gives each Kimi invocation a separate runtime
 Kimi Code home with symlinked `config.toml`, `device_id`, and auth entries,
-while Kimi session files live under a durable session home. Modal launchers
-first refresh and atomically persist a near-expiry host OAuth token under the
-same `.kimi-code/oauth/kimi-code.lock` used by Kimi Code. Workers then stage a
-refreshable snapshot into a durable per-row auth home and point each invocation
-at that home, so long rows refresh one shared Modal credential instead of racing
-independent copies. If the selected provider persists a scoped `oauthHost`,
-Ultrafuzz refreshes against that host unless
-`KIMI_CODE_OAUTH_HOST` or `KIMI_OAUTH_HOST` overrides it. When collection or
-resume inspects the row, Ultrafuzz only promotes a refreshed Modal credential
-back to the host if it descends from the token staged for that row.
-Subscription launches intentionally allow only one Kimi row at a time; use
-API-key auth or serial launches for multi-Kimi comparisons.
+while Kimi session files live under a durable session home. For every Modal row,
+the launcher exchanges the controller-held refresh token under the same
+`.kimi-code/oauth/kimi-code.lock` used by Kimi Code and atomically persists any
+provider rotation on the host. The worker receives only the resulting access
+token, capped at a one-hour lifetime, in a credential volume scoped to that row;
+the refresh token and provider envelope stay on the controller. If the selected
+provider persists a scoped `oauthHost`, Ultrafuzz exchanges against that host
+unless `KIMI_CODE_OAUTH_HOST` or `KIMI_OAUTH_HOST` overrides it. Multiple Kimi
+subscription rows may run together because they do not share credential
+volumes.
 
 Kimi Code CLI 0.29.1 uses prompt mode (`--prompt`) and does not accept the
 older Smithers adapter flags `--print`, `--work-dir`, `--thinking`,

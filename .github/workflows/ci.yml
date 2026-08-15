@@ -45,6 +45,9 @@ jobs:
       - name: Enforce production dependency policy
         run: pnpm -w security:dependencies
 
+      - name: Verify Modal toolchain materials
+        run: node scripts/ci/verify-modal-toolchain-materials.mjs
+
       - name: Check formatting
         run: pnpm -w format:check
 

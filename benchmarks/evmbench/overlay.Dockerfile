@@ -1,15 +1,13 @@
 ARG BASE_IMAGE
-FROM node:22-bookworm AS builder
+FROM node:22-bookworm@sha256:0557ac14e0d45d02ed563067b82856ca5e7aa3437fa28d98d4350ea9c3d9494a AS builder
 
 WORKDIR /opt/ultrafuzz
 COPY . .
-RUN corepack enable && corepack prepare pnpm@11.21.0 --activate && \
+RUN corepack enable && \
     pnpm install --frozen-lockfile && \
     pnpm --filter @ultrafuzz/cli... build && \
     pnpm --filter @ultrafuzz/evmbench build
-RUN mkdir -p /opt/ultrafuzz-smithers && \
-    node --input-type=module -e 'import { writeFileSync } from "node:fs"; import { renderSmithersPackageJson } from "./packages/runtime/dist/smithers-package.js"; writeFileSync("/opt/ultrafuzz-smithers/package.json", renderSmithersPackageJson())' && \
-    npm install --prefix /opt/ultrafuzz-smithers --ignore-scripts --package-lock=false --no-audit --no-fund --loglevel=error
+RUN node packages/modal/scripts/prepare-smithers-seed.mjs /opt/ultrafuzz-smithers
 
 FROM ${BASE_IMAGE}
 ARG PROFILE

@@ -31,7 +31,7 @@ import { kimiSubscriptionAuthSecretValuesFromRoots, runnerApiKeyEnv } from "./au
 import type { PublicModalBenchmarkConfig } from "./config.js";
 import type { ModalModelSpec } from "./defaults.js";
 import { convertAuditMarkdownGroundTruth } from "./ground-truth.js";
-import { remoteAuthDir } from "./layout.js";
+import { REMOTE_KIMI_CREDENTIAL_ROOT, remoteAuthDir } from "./layout.js";
 import type { ModalWorkerLineage } from "./launch-state.js";
 import {
   createPublicBenchmarkBundle,
@@ -222,7 +222,7 @@ export async function runPublicBenchmarkWorker(input: {
       assertPublicWorkerInput(input.config, input.model);
       const retainedForbiddenSecretValues = new Set<string>();
       const resolveForbiddenSecretValues = async (): Promise<string[]> => {
-        for (const value of await publicBenchmarkWorkerSecretValues(input.config, input.model, input.dataRoot)) {
+        for (const value of await publicBenchmarkWorkerSecretValues(input.config, input.model)) {
           retainedForbiddenSecretValues.add(value);
         }
         return [...retainedForbiddenSecretValues];
@@ -698,7 +698,6 @@ export function assertPublicWorkerInput(config: PublicModalBenchmarkConfig, mode
 export async function publicBenchmarkWorkerSecretValues(
   config: PublicModalBenchmarkConfig,
   model: ModalModelSpec,
-  dataRoot: string,
   env: Record<string, string | undefined> = process.env
 ): Promise<string[]> {
   const runnerSecretValues =
@@ -707,7 +706,7 @@ export async function publicBenchmarkWorkerSecretValues(
       : await kimiSubscriptionAuthSecretValuesFromRoots(
           model.model,
           remoteAuthDir("kimi"),
-          path.join(dataRoot, "kimi-code-auth")
+          REMOTE_KIMI_CREDENTIAL_ROOT
         );
   return [...new Set([...runnerSecretValues, requiredEnv(config.braintrust.judge_api_key_env, env)])];
 }

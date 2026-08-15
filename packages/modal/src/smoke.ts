@@ -1,5 +1,6 @@
 import { DEFAULT_MODAL_IMAGE, type ModelProvider } from "./defaults.js";
 import { remoteAuthDir, remoteAuthPath } from "./layout.js";
+import { shellQuote } from "./shell.js";
 
 export const MODAL_SMOKE_RESULT_SCHEMA_VERSION = "ultrafuzz.modal.smoke-result.v1" as const;
 export const MODAL_SMOKE_ENTRY_PATH = "/opt/ultrafuzz/packages/modal/dist/smoke-worker.js";
@@ -69,10 +70,10 @@ export function modalSmokeEntrypointCommand(provider: ModelProvider, phase: Moda
   const authDir = remoteAuthDir(provider);
   return [
     "set -euo pipefail",
-    ...modalSmokeAuthPaths(provider).map((authPath) => `until test -s '${authPath}'; do sleep 1; done`),
-    `install -d -m 700 -o ubuntu -g ubuntu '${MODAL_SMOKE_DATA_ROOT}'`,
-    `chown -R ubuntu:ubuntu '${MODAL_SMOKE_DATA_ROOT}' '${authDir}'`,
-    `exec runuser -u ubuntu -- env HOME='/home/ubuntu' USER='ubuntu' LOGNAME='ubuntu' node '${MODAL_SMOKE_ENTRY_PATH}' --provider '${provider}' --phase '${phase}' --data-root '${MODAL_SMOKE_DATA_ROOT}'`
+    ...modalSmokeAuthPaths(provider).map((authPath) => `until test -s ${shellQuote(authPath)}; do sleep 1; done`),
+    `install -d -m 700 -o ubuntu -g ubuntu ${shellQuote(MODAL_SMOKE_DATA_ROOT)}`,
+    `chown -R ubuntu:ubuntu ${shellQuote(MODAL_SMOKE_DATA_ROOT)} ${shellQuote(authDir)}`,
+    `exec runuser -u ubuntu -- env HOME=${shellQuote("/home/ubuntu")} USER=${shellQuote("ubuntu")} LOGNAME=${shellQuote("ubuntu")} node ${shellQuote(MODAL_SMOKE_ENTRY_PATH)} --provider ${shellQuote(provider)} --phase ${shellQuote(phase)} --data-root ${shellQuote(MODAL_SMOKE_DATA_ROOT)}`
   ].join("; ");
 }
 

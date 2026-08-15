@@ -25,10 +25,13 @@ overrides:
   "@effect/sql-sqlite-bun": "4.0.0-beta.105"
   tmp: "0.2.7"
 allowBuilds:
+  "@anthropic-ai/claude-code": true
   "@moonshot-ai/kimi-code": false
   "@parcel/watcher": false
   "@smthrs/jj-linux-arm64": false
   "@smthrs/jj-linux-x64": false
+  better-sqlite3: true
+  bun: true
   cbor-extract: true
   esbuild: true
   koffi: false

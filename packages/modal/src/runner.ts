@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, closeSync, mkdtempSync, openSync, rmSync } from "node:fs";
+import { chmodSync, closeSync, mkdtempSync, openSync, readFileSync, rmSync } from "node:fs";
 import { access, chmod, lstat, mkdir, mkdtemp, open, rename, rm, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -26,10 +26,12 @@ import { boundedEvalId } from "@ultrafuzz/evals";
 import { redactSecretsInText } from "@ultrafuzz/security";
 
 import {
-  kimiSubscriptionCredentialFileName,
+  MAX_KIMI_OAUTH_JSON_BYTES,
+  assertKimiWorkerCredentialFile,
   kimiSubscriptionAuthSecretValues,
+  kimiSubscriptionCredentialFileName,
+  kimiWorkerCredentialSecretValues,
   prepareSubscriptionAuthCopy,
-  reconcileKimiSubscriptionAuthCredential,
   runnerApiKeyEnv,
   runnerApiKeySourceEnv,
   subscriptionAuthCopy,
@@ -103,6 +105,8 @@ import {
   REMOTE_CONFIG_PATH,
   REMOTE_LAUNCH_READY_PATH,
   REMOTE_LINEAGE_PATH,
+  REMOTE_KIMI_CREDENTIAL_ROOT,
+  modalCredentialVolumeName,
   modalVolumeName,
   persistentDataRoot,
   remoteAuthDir,
@@ -151,14 +155,43 @@ import {
   type ModalRecoveryState,
   type ModalRecoveryWorker
 } from "./recovery.js";
+import { shellQuote } from "./shell.js";
 import { getOrCreateModalV2Volume } from "./volume.js";
 
 const DEFAULT_TOOLCHAIN_IMAGE = "ultrafuzz-security-toolchain:latest";
+const MODAL_TOOLCHAIN_MATERIALS_SCHEMA_VERSION = "ultrafuzz.modal.toolchain-materials.v1";
 // The pinned Smithers release supplies Codex prompts over stdin and uses the `-`
 // stdin sentinel, still true in 0.34.0. Codex CLI 0.144.3 rejects that form; keep
 // the image pin explicit so the runner and standalone Dockerfile cannot silently
 // drift back to it.
 export const CODEX_CLI_VERSION = "0.146.0";
+
+export interface ModalToolchainDownloadMaterial {
+  name: "node" | "foundry" | "recon";
+  version: string;
+  url: string;
+  sha256: string;
+}
+
+export interface ModalToolchainMaterials {
+  schema_version: typeof MODAL_TOOLCHAIN_MATERIALS_SCHEMA_VERSION;
+  base_image: string;
+  evmbench_builder_image: string;
+  apt: { snapshot: string; packages: string[] };
+  downloads: ModalToolchainDownloadMaterial[];
+}
+const MODAL_LOCKED_NODE_BINARIES = [
+  ["claude", "@anthropic-ai/claude-code/bin/claude.exe"],
+  ["kimi", "@moonshot-ai/kimi-code/dist/main.mjs"],
+  ["codex", "@openai/codex/bin/codex.js"],
+  ["bun", "bun/bin/bun.exe"],
+  ["bunx", "bun/bin/bunx.exe"],
+  ["pn", "pnpm/bin/pnpm.mjs"],
+  ["pnx", "pnpm/bin/pnpx.mjs"],
+  ["pnpm", "pnpm/bin/pnpm.mjs"],
+  ["pnpx", "pnpm/bin/pnpx.mjs"],
+  ["recon-generate", "recon-generate/dist/index.js"]
+] as const;
 const MODAL_RUNTIME_USER = "ubuntu";
 const MODAL_RUNTIME_HOME = "/home/ubuntu";
 const MAX_GENERIC_WORKER_LOG_BYTES = 1024 * 1024;
@@ -178,137 +211,6 @@ const CANONICAL_RUN_STATUSES = new Set([
   "timed-out",
   "canceled"
 ]);
-const KIMI_SHARED_CREDENTIAL_SOURCE_SHA256_SUFFIX = ".ultrafuzz-source-refresh-token.sha256";
-export const KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT = `
-const fs = require("node:fs");
-const crypto = require("node:crypto");
-const { pathToFileURL } = require("node:url");
-const [pending, destination, mode, artifactsModulePath] = process.argv.slice(1);
-if (mode !== "fresh" && mode !== "resume") {
-  throw new Error("Kimi credential staging mode must be fresh or resume");
-}
-if (typeof artifactsModulePath !== "string" || artifactsModulePath === "") {
-  throw new Error("Kimi credential staging requires the Ultrafuzz artifact reader");
-}
-const sourceHashPath = destination + ${JSON.stringify(KIMI_SHARED_CREDENTIAL_SOURCE_SHA256_SUFFIX)};
-const sha256 = (value) => crypto.createHash("sha256").update(value).digest("hex");
-const sourceHash = () => {
-  try {
-    const value = fs.readFileSync(sourceHashPath, "utf8").trim();
-    return /^[a-f0-9]{64}$/.test(value) ? { ok: true, value } : { ok: false };
-  } catch {
-    return { ok: false };
-  }
-};
-const isOpaqueCredential = (value) =>
-  typeof value === "string" && value !== "" && value === value.trim();
-const isPositiveSafeInteger = (value) =>
-  typeof value === "number" && Number.isSafeInteger(value) && value > 0;
-const readBoundedFile = (file, allowAbsent) => {
-  let handle;
-  try {
-    const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0);
-    handle = fs.openSync(file, flags);
-  } catch (error) {
-    if (allowAbsent && error !== null && typeof error === "object" && error.code === "ENOENT") {
-      return undefined;
-    }
-    throw error;
-  }
-  try {
-    const before = fs.fstatSync(handle, { bigint: true });
-    if (!before.isFile()) throw new Error("Kimi credential evidence must be a regular file: " + file);
-    if (before.size > BigInt(64 * 1024)) {
-      throw new Error("Kimi credential evidence exceeds the 65536-byte limit: " + file);
-    }
-    const contents = fs.readFileSync(handle);
-    const after = fs.fstatSync(handle, { bigint: true });
-    if (
-      before.dev !== after.dev ||
-      before.ino !== after.ino ||
-      before.size !== after.size ||
-      before.mtimeNs !== after.mtimeNs ||
-      before.ctimeNs !== after.ctimeNs ||
-      after.size !== BigInt(contents.byteLength)
-    ) {
-      throw new Error("Kimi credential evidence changed while it was read: " + file);
-    }
-    return contents;
-  } finally {
-    fs.closeSync(handle);
-  }
-};
-async function main() {
-  const artifacts = await import(pathToFileURL(artifactsModulePath).href);
-  if (typeof artifacts.parseStrictJsonBytes !== "function") {
-    throw new Error("Ultrafuzz strict JSON reader is unavailable for Kimi credential staging");
-  }
-  // Kimi owns this credential envelope. Ultrafuzz preserves provider-defined
-  // fields but validates every field used for staging decisions.
-  const token = (file, allowAbsent) => {
-    const contents = readBoundedFile(file, allowAbsent);
-    if (contents === undefined) return undefined;
-    let value;
-    try {
-      value = artifacts.parseStrictJsonBytes(contents, {
-        maxBytes: 64 * 1024,
-        maxDepth: 16,
-        maxItems: 1024,
-        maxProperties: 1024
-      });
-    } catch (error) {
-      throw new Error("Kimi credential evidence is not strict bounded JSON: " + file, { cause: error });
-    }
-    if (
-      typeof value !== "object" ||
-      value === null ||
-      Array.isArray(value) ||
-      !isOpaqueCredential(value.access_token) ||
-      !isPositiveSafeInteger(value.expires_at) ||
-      !isPositiveSafeInteger(value.expires_in) ||
-      (value.refresh_token !== undefined && !isOpaqueCredential(value.refresh_token)) ||
-      (value.token_type !== undefined && !isOpaqueCredential(value.token_type)) ||
-      (value.scope !== undefined && typeof value.scope !== "string")
-    ) {
-      throw new Error("Kimi credential evidence has an unsupported shape: " + file);
-    }
-    return { value, expiresAt: value.expires_at, refreshToken: value.refresh_token };
-  };
-  const pendingToken = token(pending, false);
-  if (pendingToken.refreshToken === undefined) {
-    throw new Error("Kimi credential snapshot must include a refresh token");
-  }
-  const destinationToken = token(destination, true);
-  const pendingRefreshTokenHash = sha256(pendingToken.refreshToken);
-  const stagedSourceHash = sourceHash();
-  let replace = destinationToken === undefined;
-  if (destinationToken !== undefined) {
-    if (destinationToken.refreshToken === undefined) {
-      replace = true;
-    } else if (pendingToken.refreshToken === destinationToken.refreshToken) {
-      replace = pendingToken.expiresAt > destinationToken.expiresAt;
-    } else {
-      if (mode === "fresh" && !stagedSourceHash.ok) {
-        throw new Error("Kimi credential lineage is missing or invalid; refusing to replace shared credential");
-      }
-      replace = mode === "fresh" && stagedSourceHash.ok && stagedSourceHash.value !== pendingRefreshTokenHash;
-    }
-  }
-  if (replace) {
-    fs.renameSync(pending, destination);
-    fs.writeFileSync(sourceHashPath, pendingRefreshTokenHash + "\\n", { mode: 0o600 });
-  } else {
-    fs.rmSync(pending, { force: true });
-    if (
-      destinationToken.refreshToken === pendingToken.refreshToken ||
-      (stagedSourceHash.ok && stagedSourceHash.value === pendingRefreshTokenHash)
-    ) {
-      fs.writeFileSync(sourceHashPath, pendingRefreshTokenHash + "\\n", { mode: 0o600 });
-    }
-  }
-}
-void main();
-`;
 const LEGACY_UNSAFE_COLLECT_FILES = ["failure-details.json"] as const;
 export const MODAL_COLLECT_RESULT_FILES = [
   "status.json",
@@ -478,15 +380,6 @@ export async function launchModalBenchmark(input: {
           throw new Error(`launch state belongs to ${state.logical_run_id}, not ${config.run_id}`);
         }
         await assertNoLiveGeneration(activeModal, app, state);
-        await reconcileKimiSubscriptionCredentialsFromLaunchState({
-          modal: activeModal,
-          app,
-          image,
-          state,
-          config,
-          models: selected,
-          env
-        });
         const generationStartReason: ModalRecoveryStartReason =
           state.fingerprints.image === fingerprints.image ? "operator-restart" : "image-rollout";
         const terminalReason: ModalRecoveryTerminalReason =
@@ -569,25 +462,17 @@ async function prepareSelectedModelAuthCopies(
     secrets: Record<string, string>;
   }>
 > {
-  assertSingleKimiSubscriptionRow(selected);
   const prepared: Array<{
     model: ModalModelSpec;
     auth: SubscriptionAuthCopy | undefined;
     secrets: Record<string, string>;
   }> = [];
-  const preparedKimiAuth = new Map<string, SubscriptionAuthCopy>();
   try {
     for (const model of selected) {
-      let auth: SubscriptionAuthCopy | undefined;
-      if (model.provider === "kimi" && model.auth_mode === "subscription") {
-        auth = preparedKimiAuth.get(model.model);
-        if (auth === undefined) {
-          auth = await prepareSubscriptionAuthCopy(model, env);
-          if (auth !== undefined) preparedKimiAuth.set(model.model, auth);
-        }
-      } else {
-        auth = subscriptionAuthCopy(model, env);
-      }
+      const auth =
+        model.provider === "kimi" && model.auth_mode === "subscription"
+          ? await prepareSubscriptionAuthCopy(model, env)
+          : subscriptionAuthCopy(model, env);
       if (auth !== undefined) {
         preparedAuthCopies.add(auth);
         for (const entry of subscriptionAuthEntries(auth)) await access(entry.source);
@@ -598,67 +483,6 @@ async function prepareSelectedModelAuthCopies(
   } catch (error) {
     await cleanupSubscriptionAuthCopies(preparedAuthCopies);
     throw error;
-  }
-}
-
-function assertSingleKimiSubscriptionRow(selected: readonly ModalModelSpec[]): void {
-  const kimiSubscriptionRows = selected.filter(
-    (model) => model.provider === "kimi" && model.auth_mode === "subscription"
-  );
-  if (kimiSubscriptionRows.length > 1) {
-    throw new Error(
-      "Kimi subscription auth supports one Modal Kimi row per launch; use Kimi API-key auth or launch Kimi rows serially"
-    );
-  }
-}
-
-async function reconcileKimiSubscriptionCredentialsFromLaunchState(input: {
-  modal: ModalClient;
-  app: App;
-  image: Image;
-  state: ModalLaunchState;
-  config: ModalBenchmarkConfig;
-  models: readonly ModalModelSpec[];
-  env: Record<string, string | undefined>;
-}): Promise<void> {
-  const selectedSlugs = new Set(input.models.map((model) => model.slug));
-  for (const launch of input.state.launches) {
-    if (!selectedSlugs.has(launch.slug)) continue;
-    const model = input.config.models.find((candidate) => candidate.slug === launch.slug);
-    if (model === undefined || fingerprintModalModel(model) !== launch.model_fingerprint) continue;
-    await reconcileKimiSubscriptionCredentialFromLaunchVolume({ ...input, launch, model });
-  }
-}
-
-async function reconcileKimiSubscriptionCredentialFromLaunchVolume(input: {
-  modal: ModalClient;
-  app: App;
-  image: Image;
-  launch: Pick<ModalLaunchRecord, "volume_name" | "remote_root">;
-  model: ModalModelSpec;
-  env: Record<string, string | undefined>;
-}): Promise<void> {
-  if (input.model.provider !== "kimi" || input.model.auth_mode !== "subscription") return;
-  const credentialFile = await kimiSubscriptionCredentialFileName(input.model.model, input.env);
-  let volume: Volume;
-  try {
-    volume = await input.modal.volumes.fromName(input.launch.volume_name, { createIfMissing: false });
-  } catch (error) {
-    if (error instanceof NotFoundError) return;
-    throw error;
-  }
-  const remoteCredential = path.posix.join("kimi-code-auth", "credentials", credentialFile);
-  const remoteLineage = `${remoteCredential}${KIMI_SHARED_CREDENTIAL_SOURCE_SHA256_SUFFIX}`;
-  const files = await readVolumeFiles(input.modal, input.app, input.image, volume, input.launch.remote_root, [
-    remoteCredential,
-    remoteLineage
-  ]);
-  const credential = files[remoteCredential];
-  if (credential !== undefined) {
-    const sourceRefreshTokenSha256 = normalizedSha256(files[remoteLineage]);
-    await reconcileKimiSubscriptionAuthCredential(input.model.model, credential, input.env, os.homedir(), {
-      ...(sourceRefreshTokenSha256 === undefined ? {} : { sourceRefreshTokenSha256 })
-    });
   }
 }
 
@@ -697,6 +521,7 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
   const volume = await getOrCreateModalV2Volume(input.modal, volumeName, {
     createIfMissing: record === undefined || input.state.generation_mode === "fresh"
   });
+  const credentialVolume = await kimiCredentialVolumeForRow(input.modal, input.state.logical_run_id, input.model);
 
   if (record !== undefined) {
     if (record.phase === "reserved" && record.sandbox_id === undefined) {
@@ -796,17 +621,6 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
     if (runnerStatus.retry_after_ms > 0) await sleep(runnerStatus.retry_after_ms);
   }
 
-  if (record !== undefined) {
-    await reconcileKimiSubscriptionCredentialFromLaunchVolume({
-      modal: input.modal,
-      app: input.app,
-      image: input.image,
-      launch: record,
-      model: input.model,
-      env: input.env
-    });
-  }
-
   const secret = await input.modal.secrets.fromObject(input.secrets);
   for (;;) {
     record = reserveModalLaunchAttempt({
@@ -844,7 +658,7 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
             ULTRAFUZZ_MODAL_VOLUME_RELATIVE_ROOT: modalVolumeRelativeRoot(remoteRoot)
           },
           secrets: [secret],
-          volumes: { "/data": volume },
+          volumes: modalWorkerVolumeMounts(volume, credentialVolume),
           tags: modalLaunchTags(input.state, record)
         });
       }
@@ -922,6 +736,24 @@ export function createModalLaunchSandbox(
   return createModalBenchmarkSandbox(sandboxes, app, image, { ...params, timeoutMs: state.timeout_ms });
 }
 
+async function kimiCredentialVolumeForRow(
+  modal: ModalClient,
+  logicalRunId: string,
+  model: ModalModelSpec
+): Promise<Volume | undefined> {
+  if (model.provider !== "kimi" || model.auth_mode !== "subscription") return undefined;
+  return getOrCreateModalV2Volume(modal, modalCredentialVolumeName(logicalRunId, model.slug), {
+    createIfMissing: true
+  });
+}
+
+export function modalWorkerVolumeMounts(data: Volume, credential?: Volume): Record<string, Volume> {
+  return {
+    "/data": data,
+    ...(credential === undefined ? {} : { [REMOTE_KIMI_CREDENTIAL_ROOT]: credential })
+  };
+}
+
 async function recoverExistingSandboxLaunch(
   input: LaunchModelInput,
   record: ModalLaunchRecord,
@@ -972,13 +804,7 @@ export async function finishReservedModalLaunch(
   }
 
   if (record.phase === "sandbox-created") {
-    await stageLaunchFiles(
-      sandbox,
-      input.configPath,
-      modalWorkerLineage(input.state, record),
-      input.auth,
-      record.remote_root
-    );
+    await stageLaunchFiles(sandbox, input.configPath, modalWorkerLineage(input.state, record), input.auth);
     markModalLaunchReady(record);
     await writeModalLaunchState(input.statePath, input.state);
   } else if (record.phase !== "launched") {
@@ -992,8 +818,7 @@ async function stageLaunchFiles(
   sandbox: Sandbox,
   configPath: string,
   lineage: ReturnType<typeof modalWorkerLineage>,
-  auth: SubscriptionAuthCopy | undefined,
-  remoteRoot?: string
+  auth: SubscriptionAuthCopy | undefined
 ): Promise<void> {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "ultrafuzz-modal-lineage-"));
   const lineagePath = path.join(temporary, "lineage.json");
@@ -1022,7 +847,7 @@ async function stageLaunchFiles(
     ]);
     if (auth !== undefined) {
       for (const entry of subscriptionAuthEntries(auth)) {
-        await stageSubscriptionAuthEntry(sandbox, entry, remoteRoot, lineage.workspace_mode);
+        await stageSubscriptionAuthEntry(sandbox, entry);
       }
     }
   } finally {
@@ -1038,18 +863,14 @@ async function cleanupSubscriptionAuthCopies(copies: Iterable<SubscriptionAuthCo
   await Promise.all([...copies].map(async (auth) => auth.cleanup?.()));
 }
 
-async function stageSubscriptionAuthEntry(
-  sandbox: Sandbox,
-  entry: SubscriptionAuthCopyEntry,
-  remoteRoot: string | undefined,
-  workspaceMode: ModalLaunchMode
-): Promise<void> {
+async function stageSubscriptionAuthEntry(sandbox: Sandbox, entry: SubscriptionAuthCopyEntry): Promise<void> {
   await access(entry.source);
   const source = await lstat(entry.source);
-  const kimiSharedCredential = kimiSharedAuthCredentialDestination(entry.destination, remoteRoot);
-  if (kimiSharedCredential !== undefined) {
+  const kimiCredential = kimiRowCredentialDestination(entry.destination);
+  if (kimiCredential !== undefined) {
     if (!source.isFile()) throw new Error(`Kimi subscription credential source must be a file: ${entry.source}`);
-    await stageKimiSharedCredential(sandbox, entry.source, kimiSharedCredential, workspaceMode);
+    assertKimiWorkerCredentialFile(entry.source);
+    await stageKimiRowCredential(sandbox, entry.source, kimiCredential);
     return;
   }
   await runChecked(sandbox, ["install", "-d", "-m", "700", path.posix.dirname(entry.destination)]);
@@ -1063,55 +884,24 @@ async function stageSubscriptionAuthEntry(
   await runChecked(sandbox, ["chmod", "-R", "go-rwx", entry.destination]);
 }
 
-function kimiSharedAuthCredentialDestination(destination: string, remoteRoot: string | undefined): string | undefined {
-  if (remoteRoot === undefined) return undefined;
+function kimiRowCredentialDestination(destination: string): string | undefined {
   const credentialRoot = path.posix.join(remoteAuthDir("kimi"), "credentials");
   const relative = path.posix.relative(credentialRoot, destination);
   if (relative === "" || relative.startsWith("../") || path.posix.isAbsolute(relative)) return undefined;
-  return path.posix.join(resolvePersistentRemoteRoot(remoteRoot, "/data"), "kimi-code-auth", "credentials", relative);
+  return path.posix.join(REMOTE_KIMI_CREDENTIAL_ROOT, "credentials", relative);
 }
 
-async function stageKimiSharedCredential(
-  sandbox: Sandbox,
-  source: string,
-  destination: string,
-  workspaceMode: ModalLaunchMode
-): Promise<void> {
-  const sharedHome = path.posix.dirname(path.posix.dirname(destination));
+async function stageKimiRowCredential(sandbox: Sandbox, source: string, destination: string): Promise<void> {
   const pending = `${destination}.pending-${randomUUID()}`;
-  const oauthName = path.posix.basename(destination).replace(/\.json$/u, "");
-  const oauthLockDir = path.posix.join(sharedHome, "oauth", `${oauthName}.lock`);
-  const oauthLockTarget = path.posix.join(sharedHome, "oauth", oauthName);
   try {
     await runChecked(sandbox, ["install", "-d", "-m", "700", path.posix.dirname(destination)]);
-    await runChecked(sandbox, ["install", "-d", "-m", "700", path.posix.join(sharedHome, "oauth")]);
     await sandbox.filesystem.copyFromLocal(source, pending);
-    await runChecked(sandbox, [
-      "bash",
-      "-lc",
-      [
-        "set -euo pipefail",
-        `touch ${shellQuote(oauthLockTarget)}`,
-        `lock=${shellQuote(oauthLockDir)}`,
-        "deadline=$((SECONDS + 120))",
-        'until mkdir "$lock"; do if (( SECONDS >= deadline )); then echo "Kimi credential stage lock timed out" >&2; exit 70; fi; sleep 1; done',
-        "trap 'rmdir \"$lock\"' EXIT",
-        `node -e ${shellQuote(KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT)} ${shellQuote(pending)} ${shellQuote(destination)} ${shellQuote(workspaceMode)} ${shellQuote(MODAL_ARTIFACTS_MODULE_PATH)}`,
-        `chmod -R go-rwx ${shellQuote(sharedHome)}`
-      ].join("; ")
-    ]);
+    await runChecked(sandbox, ["chmod", "600", pending]);
+    await runChecked(sandbox, ["mv", "-f", pending, destination]);
+    await runChecked(sandbox, ["chmod", "-R", "go-rwx", REMOTE_KIMI_CREDENTIAL_ROOT]);
   } finally {
     await runChecked(sandbox, ["rm", "-f", pending]).catch(() => undefined);
   }
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", `'"'"'`)}'`;
-}
-
-function normalizedSha256(value: string | undefined): string | undefined {
-  const trimmed = value?.trim();
-  return trimmed !== undefined && /^[a-f0-9]{64}$/u.test(trimmed) ? trimmed : undefined;
 }
 
 async function stageSubscriptionAuthDirectory(sandbox: Sandbox, entry: SubscriptionAuthCopyEntry): Promise<void> {
@@ -1375,20 +1165,41 @@ function modalRecoveryAnalysisSummary(summary: ModalRecoveryLifecycleSummary): A
 }
 
 export function modalImageBuildCommand(): string {
-  return "install -m 0444 -o root -g root /tmp/ultrafuzz-source.tgz /opt/ultrafuzz-source.tgz && rm -rf /opt/ultrafuzz && mkdir -p /opt/ultrafuzz && tar --no-same-owner --no-same-permissions -xzf /opt/ultrafuzz-source.tgz -C /opt/ultrafuzz && npm install -g @moonshot-ai/kimi-code@0.29.1 && cd /opt/ultrafuzz && pnpm install --frozen-lockfile && pnpm --filter @ultrafuzz/cli... build && node packages/modal/scripts/prepare-smithers-seed.mjs && pnpm --filter @ultrafuzz/modal build && install -m 0555 -o root -g root packages/modal/scripts/ultrafuzz-launcher /usr/local/bin/ultrafuzz && /usr/local/bin/ultrafuzz json validate --schema /opt/ultrafuzz/packages/artifacts/schema/findings.schema.json --file /opt/ultrafuzz/packages/artifacts/schema/validator-smoke.valid.json --json >/dev/null && chmod -R a+rX,go-w /opt/ultrafuzz /opt/ultrafuzz-smithers-seed";
+  return [
+    "set -euo pipefail",
+    "install -m 0444 -o root -g root /tmp/ultrafuzz-source.tgz /opt/ultrafuzz-source.tgz",
+    "rm -rf /opt/ultrafuzz",
+    "mkdir -p /opt/ultrafuzz",
+    "tar --no-same-owner --no-same-permissions -xzf /opt/ultrafuzz-source.tgz -C /opt/ultrafuzz",
+    "cd /opt/ultrafuzz",
+    "corepack enable",
+    "pnpm install --frozen-lockfile",
+    "node scripts/ci/verify-modal-toolchain-materials.mjs",
+    ...MODAL_LOCKED_NODE_BINARIES.flatMap(([name, target]) => {
+      const source = `/opt/ultrafuzz/packages/modal/node_modules/${target}`;
+      return [`test -x ${shellQuote(source)}`, `ln -sfn ${shellQuote(source)} ${shellQuote(`/usr/local/bin/${name}`)}`];
+    }),
+    "pnpm --filter @ultrafuzz/cli... build",
+    "node packages/modal/scripts/prepare-smithers-seed.mjs",
+    "pnpm --filter @ultrafuzz/modal build",
+    "install -m 0555 -o root -g root packages/modal/scripts/ultrafuzz-launcher /usr/local/bin/ultrafuzz",
+    "/usr/local/bin/ultrafuzz json validate --schema /opt/ultrafuzz/packages/artifacts/schema/findings.schema.json --file /opt/ultrafuzz/packages/artifacts/schema/validator-smoke.valid.json --json >/dev/null",
+    "chmod -R a+rX,go-w /opt/ultrafuzz /opt/ultrafuzz-smithers-seed"
+  ].join(" && ");
 }
 
 export function modalWorkerEntrypointCommand(subscriptionProvider?: ModelProvider): string {
   const authPath = subscriptionProvider === undefined ? undefined : remoteAuthPath(subscriptionProvider);
   const ownedRuntimeDirectories = [
     REMOTE_CONFIG_DIR,
-    ...(subscriptionProvider === undefined ? [] : [remoteAuthDir(subscriptionProvider)])
+    ...(subscriptionProvider === undefined ? [] : [remoteAuthDir(subscriptionProvider)]),
+    ...(subscriptionProvider === "kimi" ? [REMOTE_KIMI_CREDENTIAL_ROOT] : [])
   ];
   const kimiRuntimeEnv =
     subscriptionProvider === "kimi"
       ? [
           "KIMI_CODE_HOME='/run/ultrafuzz-auth/kimi'",
-          'ULTRAFUZZ_KIMI_SHARED_AUTH_HOME="$data_root/kimi-code-auth"',
+          `ULTRAFUZZ_KIMI_SHARED_AUTH_HOME='${REMOTE_KIMI_CREDENTIAL_ROOT}'`,
           'ULTRAFUZZ_KIMI_SESSION_HOME="$data_root/kimi-code-sessions"'
         ]
       : [];
@@ -1666,7 +1477,6 @@ export async function overseeModalBenchmarkOnce(
               throw new Error("Modal recovery worker does not match the current launch attempt");
             }
             const resolutionChanged = resolution.changed;
-            await reconcileKimiSubscriptionCredentialFromLaunchVolume({ modal, app, image, launch, model, env });
             const auth = await prepareSubscriptionAuthCopy(model, env);
             try {
               row = await finishReservedModalRecoveryWorker({
@@ -1934,8 +1744,7 @@ async function finishReservedModalRecoveryWorker(input: {
       input.sandbox,
       input.configPath,
       modalWorkerLineage(input.launchState, input.launch),
-      input.auth,
-      input.launch.remote_root
+      input.auth
     );
   }
   const now = new Date(input.now()).toISOString();
@@ -1977,19 +1786,16 @@ async function launchModalRecoveryWorker(input: {
   /** The outgoing attempt's durable worker status, if the volume had a readable one. */
   workerStatus?: ModalWorkerStatus;
 }): Promise<ModalRecoveryRowState> {
-  await reconcileKimiSubscriptionCredentialFromLaunchVolume({
-    modal: input.modal,
-    app: input.app,
-    image: input.image,
-    launch: input.launch,
-    model: input.model,
-    env: input.env
-  });
   const auth = await prepareSubscriptionAuthCopy(input.model, input.env);
   if (auth !== undefined) await access(auth.source);
   try {
     const secret = await input.modal.secrets.fromObject(
       modalBenchmarkSecretValues(input.config, input.model, input.env)
+    );
+    const credentialVolume = await kimiCredentialVolumeForRow(
+      input.modal,
+      input.launchState.logical_run_id,
+      input.model
     );
     const attemptId = randomUUID();
     const record = reserveModalLaunchAttempt({
@@ -2044,7 +1850,7 @@ async function launchModalRecoveryWorker(input: {
           ULTRAFUZZ_MODAL_VOLUME_RELATIVE_ROOT: modalVolumeRelativeRoot(record.remote_root)
         },
         secrets: [secret],
-        volumes: { "/data": input.volume },
+        volumes: modalWorkerVolumeMounts(input.volume, credentialVolume),
         tags: modalLaunchTags(input.launchState, record)
       });
       markModalSandboxCreated(record, sandbox.sandboxId);
@@ -2669,33 +2475,26 @@ export async function collectModalBenchmark(input: {
           collectionConfig !== undefined && isPublicModalBenchmarkConfig(collectionConfig)
             ? collectionConfig
             : undefined;
-        const locallyRetainedSecretValues =
+        const workerCredentialSecretValues =
           collectionPublicConfig !== undefined && configuredModel !== undefined
-            ? await safePublicBenchmarkCollectionSecretValues(collectionPublicConfig, configuredModel, collectionEnv)
+            ? await kimiWorkerCredentialVolumeSecretValues({
+                modal,
+                app,
+                image,
+                logicalRunId: state.logical_run_id,
+                model: configuredModel,
+                env: collectionEnv
+              })
             : [];
-        if (
-          isModalWorkerStatusTerminal(persistedStatus) &&
-          configuredModel !== undefined &&
-          fingerprintModalModel(configuredModel) === launch.model_fingerprint
-        ) {
-          await reconcileKimiSubscriptionCredentialFromLaunchVolume({
-            modal,
-            app,
-            image,
-            launch,
-            model: configuredModel,
-            env: collectionEnv
-          });
-        }
         const retainedCollectionSecretValues =
           collectionPublicConfig !== undefined && configuredModel !== undefined
             ? await safePublicBenchmarkCollectionSecretValues(
                 collectionPublicConfig,
                 configuredModel,
                 collectionEnv,
-                locallyRetainedSecretValues
+                workerCredentialSecretValues
               )
-            : locallyRetainedSecretValues;
+            : workerCredentialSecretValues;
         const exactDiagnosticConfig =
           collectionConfig !== undefined &&
           collectionConfigFingerprint !== undefined &&
@@ -2792,6 +2591,33 @@ export async function collectModalBenchmark(input: {
   } finally {
     modal.close();
   }
+}
+
+export async function kimiWorkerCredentialVolumeSecretValues(input: {
+  modal: ModalClient;
+  app: App;
+  image: Image;
+  logicalRunId: string;
+  model: ModalModelSpec;
+  env: Record<string, string | undefined>;
+}): Promise<string[]> {
+  if (input.model.provider !== "kimi" || input.model.auth_mode !== "subscription") return [];
+  const credentialFile = await kimiSubscriptionCredentialFileName(input.model.model, input.env);
+  const relativeCredentialPath = path.posix.join("credentials", credentialFile);
+  const volume = await input.modal.volumes.fromName(modalCredentialVolumeName(input.logicalRunId, input.model.slug), {
+    createIfMissing: false
+  });
+  const files = await readVolumeFiles(input.modal, input.app, input.image, volume, "/data", [relativeCredentialPath], {
+    [relativeCredentialPath]: MAX_KIMI_OAUTH_JSON_BYTES
+  });
+  const credential = files[relativeCredentialPath];
+  if (credential === undefined) {
+    throw new Error(`Kimi worker credential is not ready for ${input.model.slug}`);
+  }
+  return kimiWorkerCredentialSecretValues(
+    credential,
+    path.posix.join(REMOTE_KIMI_CREDENTIAL_ROOT, relativeCredentialPath)
+  );
 }
 
 export async function publicBenchmarkCollectionSecretValues(
@@ -2921,24 +2747,100 @@ async function writeCollectedPublicBundle(output: string, contents: string): Pro
 }
 
 function securityToolchainImage(modal: ModalClient): Image {
-  return modal.images.fromRegistry("ubuntu:24.04").dockerfileCommands(modalSecurityToolchainCommands());
+  const materials = loadModalToolchainMaterials();
+  return modal.images.fromRegistry(materials.base_image).dockerfileCommands(modalSecurityToolchainCommands(materials));
 }
 
-export function modalSecurityToolchainCommands(): string[] {
+export function modalSecurityToolchainCommands(
+  materials: ModalToolchainMaterials = loadModalToolchainMaterials()
+): string[] {
+  const node = requiredToolchainDownload(materials, "node");
+  const foundry = requiredToolchainDownload(materials, "foundry");
+  const recon = requiredToolchainDownload(materials, "recon");
+  const requirements = readFileSync(new URL("../security-requirements.lock", import.meta.url));
+  const materialManifest = readFileSync(new URL("../toolchain-materials.json", import.meta.url));
+  const materialFingerprint = readFileSync(new URL("../toolchain-materials.sha256", import.meta.url));
+  const aptSources = [
+    "Types: deb",
+    `URIs: https://snapshot.ubuntu.com/ubuntu/${materials.apt.snapshot}/`,
+    "Suites: noble noble-updates noble-security",
+    "Components: main universe",
+    "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg",
+    ""
+  ].join("\n");
   return [
     "ENV DEBIAN_FRONTEND=noninteractive",
     "ENV PATH=/usr/local/bin:/opt/security-venv/bin:/root/.local/bin:$PATH",
-    "RUN apt-get update && apt-get install -y --no-install-recommends bash build-essential ca-certificates curl git jq libssl3t64 python3 python3-pip python3-venv ripgrep tar unzip xz-utils zstd && rm -rf /var/lib/apt/lists/*",
+    inlineModalBuildFile("/etc/apt/sources.list.d/ubuntu.sources", Buffer.from(aptSources, "utf8")),
+    `RUN rm -f /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources.dpkg-dist && printf '%s\\n' ${shellQuote('Acquire::Check-Valid-Until "false";')} > /etc/apt/apt.conf.d/99ultrafuzz-snapshot`,
+    `RUN apt-get update && apt-get install -y --no-install-recommends ${materials.apt.packages.join(" ")} && rm -rf /var/lib/apt/lists/*`,
     "RUN command -v zstd && zstd --version",
-    "RUN curl -fsSL https://nodejs.org/dist/v22.23.1/node-v22.23.1-linux-x64.tar.xz -o /tmp/node.tar.xz && tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 && rm /tmp/node.tar.xz",
-    `RUN npm install -g pnpm@11.21.0 bun@1.3.14 @openai/codex@${CODEX_CLI_VERSION} @anthropic-ai/claude-code@2.1.207 recon-generate@0.0.42`,
-    "RUN curl -fsSL https://github.com/foundry-rs/foundry/releases/download/v1.7.1/foundry_v1.7.1_linux_amd64.tar.gz -o /tmp/foundry.tar.gz && tar -xzf /tmp/foundry.tar.gz -C /usr/local/bin && rm /tmp/foundry.tar.gz",
-    "RUN curl -fsSL https://github.com/Recon-Fuzz/recon-fuzzer/releases/download/v0.4.17/recon-linux-x86_64.tar.gz -o /tmp/recon.tar.gz && tar -xzf /tmp/recon.tar.gz -C /usr/local/bin && rm /tmp/recon.tar.gz",
-    "RUN python3 -m venv /opt/security-venv && /opt/security-venv/bin/pip install --no-cache-dir slither-analyzer==0.11.5 'covg-eval @ git+https://github.com/Recon-Fuzz/recon-magic-framework.git@f92ad26ff857526d221c3e8488c5aea2a20e8fdf#subdirectory=tools/covg_eval'",
+    verifiedModalDownloadCommand(
+      node,
+      "/tmp/node.tar.xz",
+      "tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1"
+    ),
+    verifiedModalDownloadCommand(foundry, "/tmp/foundry.tar.gz", "tar -xzf /tmp/foundry.tar.gz -C /usr/local/bin"),
+    verifiedModalDownloadCommand(recon, "/tmp/recon.tar.gz", "tar -xzf /tmp/recon.tar.gz -C /usr/local/bin"),
+    inlineModalBuildFile("/tmp/security-requirements.lock", requirements),
+    "RUN python3 -m venv /opt/security-venv && /opt/security-venv/bin/pip install --no-cache-dir --require-hashes -r /tmp/security-requirements.lock && rm /tmp/security-requirements.lock",
+    inlineModalBuildFile("/usr/share/ultrafuzz/toolchain-materials.json", materialManifest),
+    inlineModalBuildFile("/usr/share/ultrafuzz/toolchain-materials.sha256", materialFingerprint),
+    "RUN cd /usr/share/ultrafuzz && sha256sum -c toolchain-materials.sha256",
     "ENV DISABLE_AUTOUPDATER=1",
     "RUN install -d -m 0755 -o ubuntu -g ubuntu /workspace",
     "WORKDIR /workspace"
   ];
+}
+
+function loadModalToolchainMaterials(): ModalToolchainMaterials {
+  const manifest = readFileSync(new URL("../toolchain-materials.json", import.meta.url));
+  const fingerprint = readFileSync(new URL("../toolchain-materials.sha256", import.meta.url), "utf8");
+  const expectedFingerprint = `${createHash("sha256").update(manifest).digest("hex")}  toolchain-materials.json\n`;
+  if (fingerprint !== expectedFingerprint) throw new Error("Modal toolchain material fingerprint does not match");
+  const value = JSON.parse(manifest.toString("utf8")) as Partial<ModalToolchainMaterials>;
+  if (
+    value.schema_version !== MODAL_TOOLCHAIN_MATERIALS_SCHEMA_VERSION ||
+    typeof value.base_image !== "string" ||
+    !/^[a-z0-9./_-]+:[A-Za-z0-9._-]+@sha256:[a-f0-9]{64}$/u.test(value.base_image) ||
+    typeof value.evmbench_builder_image !== "string" ||
+    !/^[a-z0-9./_-]+:[A-Za-z0-9._-]+@sha256:[a-f0-9]{64}$/u.test(value.evmbench_builder_image) ||
+    typeof value.apt?.snapshot !== "string" ||
+    !/^20[0-9]{6}T[0-9]{6}Z$/u.test(value.apt.snapshot) ||
+    !Array.isArray(value.apt.packages) ||
+    value.apt.packages.length === 0 ||
+    value.apt.packages.some((entry) => typeof entry !== "string" || !/^[a-z0-9][a-z0-9+.-]*$/u.test(entry)) ||
+    new Set(value.apt.packages).size !== value.apt.packages.length ||
+    !Array.isArray(value.downloads) ||
+    value.downloads.length !== 3
+  ) {
+    throw new Error("Modal toolchain material manifest has an unsupported shape");
+  }
+  return value as ModalToolchainMaterials;
+}
+
+function requiredToolchainDownload(
+  materials: ModalToolchainMaterials,
+  name: ModalToolchainDownloadMaterial["name"]
+): ModalToolchainDownloadMaterial {
+  const match = materials.downloads.filter((download) => download.name === name);
+  if (match.length !== 1 || !/^https:\/\//u.test(match[0]!.url) || !/^[a-f0-9]{64}$/u.test(match[0]!.sha256)) {
+    throw new Error(`Modal toolchain ${name} download material is missing or invalid`);
+  }
+  return match[0]!;
+}
+
+function verifiedModalDownloadCommand(
+  material: ModalToolchainDownloadMaterial,
+  destination: string,
+  extraction: string
+): string {
+  return `RUN curl --proto '=https' --tlsv1.2 -fsSL ${shellQuote(material.url)} -o ${shellQuote(destination)} && printf '%s  %s\\n' ${shellQuote(material.sha256)} ${shellQuote(destination)} | sha256sum -c - && ${extraction} && rm ${shellQuote(destination)}`;
+}
+
+function inlineModalBuildFile(destination: string, contents: Uint8Array): string {
+  const encoded = Buffer.from(contents).toString("base64");
+  return `RUN install -d -m 0755 ${shellQuote(path.posix.dirname(destination))} && printf '%s' ${shellQuote(encoded)} | base64 -d > ${shellQuote(destination)} && chmod 0444 ${shellQuote(destination)}`;
 }
 
 export function createTrackedSourceArchive(
@@ -3212,7 +3114,8 @@ async function readVolumeFiles(
   image: Image,
   volume: Volume,
   root: string,
-  names: string[]
+  names: string[],
+  maxBytesByName: Readonly<Record<string, number>> = {}
 ): Promise<Record<string, string>> {
   const inspector = await modal.sandboxes.create(app, image, {
     command: ["sleep", "300"],
@@ -3228,11 +3131,12 @@ async function readVolumeFiles(
       const contents = await readOptionalModalSandboxText(
         inspector.filesystem,
         path.posix.join(root, name),
-        name === MODAL_PUBLIC_RESULT_FILE
-          ? MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES
-          : name === PUBLIC_EVAL_DIAGNOSTICS_FILE
-            ? MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES
-            : undefined
+        maxBytesByName[name] ??
+          (name === MODAL_PUBLIC_RESULT_FILE
+            ? MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES
+            : name === PUBLIC_EVAL_DIAGNOSTICS_FILE
+              ? MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES
+              : undefined)
       );
       if (contents !== undefined) files[name] = contents;
     }
