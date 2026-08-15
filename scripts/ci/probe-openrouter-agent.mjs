@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { createOpenRouterAgent } from "../../packages/runtime/dist/templates/smithers/agents/openrouter.js";
+import { createOpenRouterAgent } from "../../packages/runtime/dist/templates/smithers/agents/openrouter.tsx";
 
 const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-openrouter-agent-probe-"));
 try {
