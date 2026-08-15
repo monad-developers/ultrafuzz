@@ -136,11 +136,17 @@ describe("resolved config JSON contract", () => {
       },
       {
         label: "OpenRouter model whitespace",
-        mutate: (value) => void (profile(value, "openrouter").model = "vendor/model bad")
+        mutate: (value) => {
+          addOpenRouterProfile(value);
+          profile(value, "openrouter").model = "vendor/model bad";
+        }
       },
       {
         label: "OpenRouter model control character",
-        mutate: (value) => void (profile(value, "openrouter").model = "vendor/model\u0080control")
+        mutate: (value) => {
+          addOpenRouterProfile(value);
+          profile(value, "openrouter").model = "vendor/model\u0080control";
+        }
       },
       {
         label: "missing api key env",
@@ -204,7 +210,7 @@ describe("resolved config JSON contract", () => {
   it("accepts punctuation-rich opaque OpenRouter catalogue IDs without transforming them", () => {
     const value = validFixture();
     const model = "~vendor/model.latest:free+preview@2026";
-    profile(value, "openrouter").model = model;
+    addOpenRouterProfile(value, model);
 
     expect(validateResolvedConfigJson(value).ok).toBe(true);
     const zod = resolvedConfigZodSchema.safeParse(value);
@@ -285,6 +291,15 @@ function record(value: unknown): Record<string, unknown> {
 
 function profile(value: Record<string, unknown>, id: string): Record<string, unknown> {
   return record(record(record(value.models).profiles)[id]);
+}
+
+function addOpenRouterProfile(value: Record<string, unknown>, model = "anthropic/claude-sonnet-4.6"): void {
+  record(record(value.models).profiles).openrouter = {
+    id: "openrouter",
+    agent: "OpenRouterAgent",
+    model,
+    reasoning: "high"
+  };
 }
 
 function evalProvider(value: Record<string, unknown>, id: string): Record<string, unknown> {

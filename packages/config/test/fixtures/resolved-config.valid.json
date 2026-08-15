@@ -85,12 +85,6 @@
         "agent": "KimiAgent",
         "model": "kimi-k3",
         "reasoning": "max"
-      },
-      "openrouter": {
-        "id": "openrouter",
-        "agent": "OpenRouterAgent",
-        "model": "anthropic/claude-sonnet-4.6",
-        "reasoning": "high"
       }
     }
   },

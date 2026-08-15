@@ -1459,6 +1459,31 @@ test("runtime command failures emit a failing exit code with JSON", async () => 
   assert.match(JSON.stringify(body.diagnostics), /AGENT_REFERENCE_UNKNOWN/);
 });
 
+test("run rejects an OpenRouter override whose effective model is invalid", async () => {
+  const project = tempProject();
+  assert.equal((await cli(project, ["init", "--force"])).code, 0);
+  writeSmallTopology(project);
+
+  const failed = await cli(project, [
+    "run",
+    "--run-id",
+    "invalid-openrouter-model",
+    "--agent",
+    "OpenRouterAgent",
+    "--model",
+    "vendor/model bad",
+    "--json"
+  ]);
+
+  assert.equal(failed.code, 1);
+  assert.equal(failed.stderr, "");
+  const body = parseJson(failed);
+  assert.equal(body.ok, false, JSON.stringify(body));
+  assertNoSmithersSurface(body);
+  assert.match(JSON.stringify(body.diagnostics), /CONFIG_MODEL_OPENROUTER_ID_INVALID/u);
+  assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", "invalid-openrouter-model")), false);
+});
+
 test("report accepts populated accounting snapshots and preserves partial-pricing marker", async () => {
   const project = tempProject();
   assert.equal((await cli(project, ["init", "--force"])).code, 0);

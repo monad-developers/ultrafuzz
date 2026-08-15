@@ -751,6 +751,8 @@ export interface DoctorValue {
 
 export interface DoctorInput {
   projectRoot: string;
+  /** Optional candidate-owned topology override, matching validate and run. */
+  topologyPath?: string;
   env?: Record<string, string | undefined>;
   /** Skips the registry lookup; the latest version is reported as `unknown`. */
   offline?: boolean;
