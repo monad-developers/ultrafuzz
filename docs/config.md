@@ -267,6 +267,12 @@ different adapter-managed Codex home; its `config.toml` is owned by this route.
 Competing provider credentials and ambient endpoint overrides are cleared from
 the model subprocess.
 
+Codex does not apply its provider request retry count to an HTTP 429 response.
+The adapter therefore retries an initial OpenRouter 429 up to four times with
+bounded exponential backoff and jitter. It stops retrying as soon as Codex
+emits any substantive model, tool, command, or file event, so work that may
+have changed the workspace is never replayed.
+
 The `model` value is an opaque OpenRouter catalogue ID. Ultrafuzz preserves it
 exactly through CLI overrides, resolved config, Codex `--model`, Modal launch
 state, and benchmark provenance. It does not download or ship a model
