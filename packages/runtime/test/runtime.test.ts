@@ -7283,7 +7283,18 @@ test("startRun requires a launch acknowledgement bound to prompts, config, topol
   writeSmallTopology(project);
   const firstCommit = commitProjectForLaunchReview(project, "review baseline");
   const runId = "launch-review-binding";
-  const input = withFakeCliEntrypoint({ projectRoot: project, runId, env: fakeSmithersEnv(project) });
+  let preflightAllowed = false;
+  let preflightCalls = 0;
+  const input = withFakeCliEntrypoint({
+    projectRoot: project,
+    runId,
+    env: fakeSmithersEnv(project),
+    requiredCommandProbe: async (commands: readonly string[]) => {
+      preflightCalls += 1;
+      assert.equal(preflightAllowed, true, "provider and command preflight ran before launch review");
+      return commands.map((name) => ({ name, available: true, path: `/usr/bin/${name}`, version: null }));
+    }
+  });
 
   const missing = await runtimeStartRun(input);
   assert.equal(missing.ok, false);
@@ -7292,6 +7303,7 @@ test("startRun requires a launch acknowledgement bound to prompts, config, topol
   const firstDigest = missing.diagnostics[0]?.details?.expected_digest;
   assert.equal(typeof firstDigest, "string");
   assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", runId)), false);
+  assert.equal(preflightCalls, 0);
 
   fs.appendFileSync(
     path.join(project, ".ultrafuzz", "prompts", "setup", "project-discovery.md"),
@@ -7308,9 +7320,12 @@ test("startRun requires a launch acknowledgement bound to prompts, config, topol
   assert.equal(typeof secondDigest, "string");
   assert.notEqual(secondDigest, firstDigest);
   assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", runId)), false);
+  assert.equal(preflightCalls, 0);
 
+  preflightAllowed = true;
   const accepted = await runtimeStartRun({ ...input, reviewAcknowledgement: String(secondDigest) });
   assert.equal(accepted.ok, true, JSON.stringify(accepted.diagnostics));
+  assert.equal(preflightCalls, 1);
 });
 
 test("startRun rejects a target commit changed after launch acknowledgement and before materialization", async () => {

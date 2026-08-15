@@ -118,12 +118,17 @@ export async function startRun(input: StartRunInput) {
       controllerSource,
       targetCommit
     }) => {
+      const reviewDiagnostics = launchReviewDiagnostics(
+        input,
+        resolvedConfig,
+        launchReviewDigest,
+        controllerSource,
+        targetCommit
+      );
+      if (reviewDiagnostics.length > 0) return reviewDiagnostics;
       const credentialDiagnostics = credentialEnvironmentPolicyDiagnostics(resolvedConfig);
       if (credentialDiagnostics.length > 0) return credentialDiagnostics;
-      return [
-        ...(await requiredCommandPreflightDiagnostics(input, resolvedConfig, expandedGraph)),
-        ...launchReviewDiagnostics(input, resolvedConfig, launchReviewDigest, controllerSource, targetCommit)
-      ];
+      return requiredCommandPreflightDiagnostics(input, resolvedConfig, expandedGraph);
     }
   });
   if (!planned.ok || !planned.value) {
