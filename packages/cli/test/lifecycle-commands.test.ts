@@ -586,6 +586,26 @@ test("doctor reports install posture in human and JSON output", async () => {
   assert.equal(data.toolchain.find((entry) => entry.name === "recon")?.available, false);
   assert.match(data.workflow_engine.required_version, /^\d+\.\d+\.\d+$/u);
   assert.equal(typeof data.workflow_engine.latest_published_version, "string");
+
+  const topologyOverride = path.join(project, ".ultrafuzz", "openrouter-topology.yml");
+  fs.writeFileSync(
+    topologyOverride,
+    fs
+      .readFileSync(path.join(project, ".ultrafuzz", "topology.yml"), "utf8")
+      .replace(
+        "    prompt: setup/project-discovery.md\n",
+        "    prompt: setup/project-discovery.md\n    model_profiles:\n      - openrouter\n"
+      ),
+    "utf8"
+  );
+  const override = await cli(
+    project,
+    ["doctor", "--topology-path", ".ultrafuzz/openrouter-topology.yml", "--json"],
+    doctorEnv
+  );
+  const overrideBody = parseJson(override) as { diagnostics: Array<{ code?: string }> };
+  assert.equal(override.code, 1);
+  assert.ok(overrideBody.diagnostics.some((diagnostic) => diagnostic.code === "DOCTOR_AGENT_CREDENTIAL_MISSING"));
 });
 
 test("status recommends ultrafuzz why instead of the engine command", async () => {

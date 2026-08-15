@@ -306,8 +306,8 @@ function validateTopologySurface(
   }
 }
 
-export function activeTopologyAgentRefs(projectRoot: string, config: ResolvedConfig): string[] {
-  return validateTopologySurface(projectRoot, config).selectedAgentRefs;
+export function activeTopologyAgentRefs(projectRoot: string, config: ResolvedConfig, topologyPath?: string): string[] {
+  return validateTopologySurface(projectRoot, config, topologyPath).selectedAgentRefs;
 }
 
 function evaluatePolicies(
