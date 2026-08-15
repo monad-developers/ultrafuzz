@@ -4,6 +4,7 @@ import path from "node:path";
 import { SmithersErrorInstance } from "smthrs";
 import { CompatibleCodexAgent } from "./codex";
 import { workflowControlChildEnvironment, workflowControlCredentialValue } from "./environment";
+import { resolveProviderHome } from "./provider-home";
 import { readStringTable, stringField } from "./toml";
 
 type OpenRouterAuthConfig = { auth?: string; api_key_env?: string; config_dir?: string };
@@ -13,7 +14,6 @@ type OpenRouterGenerateOptions = Parameters<CompatibleCodexAgent["generate"]>[0]
 type OpenRouterAgentEvent = Parameters<NonNullable<NonNullable<OpenRouterGenerateOptions>["onEvent"]>>[0];
 
 const OPENROUTER_API_BASE_URL = "https://openrouter.ai/api/v1";
-const OPENROUTER_CODEX_CONFIG_DIR = ".ultrafuzz/openrouter-codex";
 const OPENROUTER_INITIAL_429_RETRY_WINDOW_MS = 120_000;
 const OPENROUTER_INITIAL_429_INITIAL_DELAY_MS = 1_000;
 const OPENROUTER_INITIAL_429_MAX_DELAY_MS = 30_000;
@@ -42,7 +42,7 @@ export function createOpenRouterAgent(options: OpenRouterTaskOptions = {}): Open
     throw new Error("agents.OpenRouterAgent.api_key_env must be an environment variable name");
   }
   const apiKey = requiredEnv(credentialEnv);
-  const configDir = resolveConfigDir(config.config_dir ?? OPENROUTER_CODEX_CONFIG_DIR);
+  const configDir = resolveProviderHome("openrouter", config.config_dir);
   materializeOpenRouterCodexConfig(configDir, credentialEnv);
 
   const isolatedEnvironment = workflowControlChildEnvironment({
@@ -332,13 +332,6 @@ function requiredEnv(name: string): string {
     throw new Error(`agents.OpenRouterAgent auth is api-key, but ${name} is not set`);
   }
   return workflowControlCredentialValue(value, name);
-}
-
-function resolveConfigDir(value: string): string {
-  if (value.trim() === "") {
-    throw new Error("agents.OpenRouterAgent.config_dir cannot be empty");
-  }
-  return path.isAbsolute(value) ? value : path.resolve(process.cwd(), value);
 }
 
 function materializeOpenRouterCodexConfig(configDir: string, credentialEnv: string): void {

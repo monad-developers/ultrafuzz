@@ -96,8 +96,10 @@ function fakeWorkflowEventPrintf(event: Record<string, unknown>): string {
 function fakeSmithersEnv(
   project: string,
   includeFinalReport = false,
-  additionalTerminalNodeIds: readonly string[] = []
+  additionalTerminalNodeIds: readonly string[] = [],
+  options: { preservePromptReview?: boolean } = {}
 ): Record<string, string | undefined> {
+  if (options.preservePromptReview !== true) disablePromptReview(project);
   const binDir = path.join(project, "fake-bin");
   fs.mkdirSync(binDir, { recursive: true });
   const inspectStatePath = path.join(project, "fake-smithers-inspect-state");
@@ -257,8 +259,21 @@ function fakeSmithersEnv(
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
     SMITHERS_BIN: smithers,
     SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log"),
-    SMITHERS_FAKE_INSPECT_STATE: inspectStatePath
+    SMITHERS_FAKE_INSPECT_STATE: inspectStatePath,
+    ULTRAFUZZ_AGENT_ENV_ALLOWLIST: [
+      "SMITHERS_FAKE_INSPECT_STATE",
+      "SMITHERS_FAKE_INVALID_EVENT_STREAM",
+      "SMITHERS_FAKE_LOG",
+      "SMITHERS_FAKE_STATUS_JSON"
+    ].join(",")
   };
+}
+
+function disablePromptReview(project: string): void {
+  const configPath = path.join(project, "ultrafuzz.toml");
+  const config = fs.readFileSync(configPath, "utf8");
+  const withoutReview = config.replace("prompt_review_required = true", "prompt_review_required = false");
+  if (withoutReview !== config) fs.writeFileSync(configPath, withoutReview, "utf8");
 }
 
 function writeSmallTopology(project: string): void {
@@ -973,6 +988,34 @@ test("run exposes the trusted reference expectation catalog option", async () =>
     ),
     true
   );
+});
+
+test("run accepts only the exact launch-review digest through --acknowledge-review", async () => {
+  const project = tempProject();
+  assert.equal((await cli(project, ["init", "--force"])).code, 0);
+  writeSmallTopology(project);
+  const env = fakeSmithersEnv(project, false, [], { preservePromptReview: true });
+  const runId = "cli-launch-review";
+
+  const missing = await cli(project, ["run", "--run-id", runId, "--json"], env);
+  assert.equal(missing.code, 1);
+  const missingDiagnostics = JSON.stringify(parseJson(missing).diagnostics);
+  assert.match(missingDiagnostics, /RUN_REVIEW_ACKNOWLEDGEMENT_REQUIRED/u);
+  const digestMatch = /--acknowledge-review ([0-9a-f]{64})/u.exec(missingDiagnostics);
+  assert.ok(digestMatch);
+  assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", runId)), false);
+
+  const stale = await cli(project, ["run", "--run-id", runId, "--acknowledge-review", "0".repeat(64), "--json"], env);
+  assert.equal(stale.code, 1);
+  assert.match(JSON.stringify(parseJson(stale).diagnostics), /RUN_REVIEW_ACKNOWLEDGEMENT_STALE/u);
+  assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", runId)), false);
+
+  const accepted = await cli(
+    project,
+    ["run", "--run-id", runId, "--acknowledge-review", digestMatch[1]!, "--json"],
+    env
+  );
+  assert.equal(accepted.code, 0, `${accepted.stderr}\n${accepted.stdout}`);
 });
 
 test("run input flags are explicit, strict, and never reinterpret malformed inline JSON as a path", async () => {

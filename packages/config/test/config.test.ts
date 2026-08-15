@@ -444,7 +444,7 @@ reasoning = "max"
 
 [agents.CodexAgent]
 auth = "subscription"
-config_dir = ".codex/team"
+config_dir = "teams/codex"
 `);
     expect(project.ok).toBe(true);
     if (!project.ok) return;
@@ -486,7 +486,7 @@ config_dir = ".codex/team"
     expect(resolved.value.agents.CodexAgent).toEqual({
       auth: "subscription",
       apiKeyEnv: "OPENAI_API_KEY",
-      configDir: ".codex/team"
+      configDir: "teams/codex"
     });
   });
 
@@ -513,8 +513,8 @@ api_key_env = "OPENAI_API_KEY"
 
 [agents.KimiAgent]
 auth = "api-key"
-api_key_env = "MOONSHOT_API_KEY"
-config_dir = ".kimi-code"
+api_key_env = "KIMI_API_KEY"
+config_dir = "teams/kimi"
 `);
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
@@ -522,8 +522,8 @@ config_dir = ".kimi-code"
     expect(parsed.value.agents?.CodexAgent?.apiKeyEnv).toBe("OPENAI_API_KEY");
     expect(parsed.value.agents?.KimiAgent).toEqual({
       auth: "api-key",
-      apiKeyEnv: "MOONSHOT_API_KEY",
-      configDir: ".kimi-code"
+      apiKeyEnv: "KIMI_API_KEY",
+      configDir: "teams/kimi"
     });
 
     const invalid = resolveConfig({
@@ -540,6 +540,31 @@ config_dir = ".kimi-code"
     expect(invalid.ok).toBe(false);
     if (invalid.ok) return;
     expect(invalid.diagnostics.map((entry) => entry.code)).toContain("CONFIG_AGENT_API_KEY_ENV_INVALID");
+
+    const repositorySelectedCredential = resolveConfig({
+      env: {},
+      projectConfig: {
+        agents: {
+          KimiAgent: { auth: "api-key", apiKeyEnv: "AWS_SECRET_ACCESS_KEY" }
+        }
+      }
+    });
+    expect(repositorySelectedCredential.ok).toBe(false);
+    if (repositorySelectedCredential.ok) return;
+    expect(repositorySelectedCredential.diagnostics.map((entry) => entry.code)).toContain(
+      "CONFIG_AGENT_API_KEY_ENV_NONCANONICAL"
+    );
+
+    for (const configDir of ["/tmp/provider", "../provider", ".codex", "team\\codex"]) {
+      const unsafeHome = resolveConfig({
+        env: {},
+        projectConfig: { agents: { CodexAgent: { auth: "subscription", configDir } } }
+      });
+      expect(unsafeHome.ok).toBe(false);
+      if (!unsafeHome.ok) {
+        expect(unsafeHome.diagnostics.map((entry) => entry.code)).toContain("CONFIG_AGENT_CONFIG_DIR_UNSAFE");
+      }
+    }
 
     const defaultResolved = resolveConfig({ env: {} });
     expect(defaultResolved.ok).toBe(true);

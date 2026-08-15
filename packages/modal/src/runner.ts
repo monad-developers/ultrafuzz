@@ -1203,6 +1203,7 @@ export function modalWorkerEntrypointCommand(subscriptionProvider?: ModelProvide
           'ULTRAFUZZ_KIMI_SESSION_HOME="$data_root/kimi-code-sessions"'
         ]
       : [];
+  const providerHomeEnv = ["ULTRAFUZZ_PROVIDER_HOME_ROOT='/run/ultrafuzz-auth'"];
   return [
     "set -euo pipefail",
     `staging_deadline=$((SECONDS + ${MODAL_LAUNCH_STAGING_TIMEOUT_SECONDS}))`,
@@ -1218,7 +1219,7 @@ export function modalWorkerEntrypointCommand(subscriptionProvider?: ModelProvide
     ...ownedRuntimeDirectories.map(
       (directory) => `chown -R ${MODAL_RUNTIME_USER}:${MODAL_RUNTIME_USER} '${directory}'`
     ),
-    `exec runuser -u ${MODAL_RUNTIME_USER} -- env HOME='${MODAL_RUNTIME_HOME}' USER='${MODAL_RUNTIME_USER}' LOGNAME='${MODAL_RUNTIME_USER}' ${kimiRuntimeEnv.join(" ")} node /opt/ultrafuzz/packages/modal/dist/worker.js`
+    `exec runuser -u ${MODAL_RUNTIME_USER} -- env HOME='${MODAL_RUNTIME_HOME}' USER='${MODAL_RUNTIME_USER}' LOGNAME='${MODAL_RUNTIME_USER}' ${providerHomeEnv.join(" ")} ${kimiRuntimeEnv.join(" ")} node /opt/ultrafuzz/packages/modal/dist/worker.js`
   ].join("; ");
 }
 

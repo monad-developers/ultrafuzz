@@ -42,7 +42,8 @@ import {
   type WorkflowLifecycleInput,
   type WorkflowLifecycleValue
 } from "./types.js";
-import { planRun } from "./plan-run.js";
+import { assertTargetCommitForReview, planRun } from "./plan-run.js";
+import { assertControllerExecutionSnapshotDigest } from "./controller-source.js";
 import { probeCommandsForExecution } from "./required-commands.js";
 import { forgeGuardMetadata, prepareForgeGuardEnvironment } from "./forge-guard.js";
 import { prepareTrustedCliEnvironment, runTrustedJsonValidatorPreflight } from "./trusted-cli.js";
@@ -95,6 +96,8 @@ const WORKFLOW_CONTROLLER_ONLY_ENVIRONMENT_VARIABLES = new Set([
   "ULTRAFUZZ_ARTIFACTS_MODULE",
   "ULTRAFUZZ_CONFIG_PATH",
   "ULTRAFUZZ_MODAL_MODULE",
+  "ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES",
+  "ULTRAFUZZ_PROVIDER_HOME_ROOT",
   "ULTRAFUZZ_RUNTIME_MODULE",
   "ULTRAFUZZ_SCHEMA_BUNDLE_SHA256",
   "ULTRAFUZZ_TRUSTED_BIN",
@@ -108,8 +111,20 @@ const WORKFLOW_CONTROLLER_ONLY_ENVIRONMENT_VARIABLES = new Set([
 
 export async function startRun(input: StartRunInput) {
   const planned = await planRun(input, {
-    beforeMaterialize: async ({ resolvedConfig, expandedGraph }) =>
-      requiredCommandPreflightDiagnostics(input, resolvedConfig, expandedGraph)
+    beforeMaterialize: async ({
+      resolvedConfig,
+      expandedGraph,
+      launchReviewDigest,
+      controllerSource,
+      targetCommit
+    }) => {
+      const credentialDiagnostics = credentialEnvironmentPolicyDiagnostics(resolvedConfig);
+      if (credentialDiagnostics.length > 0) return credentialDiagnostics;
+      return [
+        ...(await requiredCommandPreflightDiagnostics(input, resolvedConfig, expandedGraph)),
+        ...launchReviewDiagnostics(input, resolvedConfig, launchReviewDigest, controllerSource, targetCommit)
+      ];
+    }
   });
   if (!planned.ok || !planned.value) {
     return runtimeFailure<StartRunValue>(planned.diagnostics);
@@ -136,6 +151,7 @@ export async function startRun(input: StartRunInput) {
       projectRoot: plan.validation.project_root,
       workflowName: `ultrafuzz-${plan.run_id}`,
       renderedPrompts: plan.rendered_prompts,
+      controllerSourceDigest: plan.controller_source_digest,
       operatorPrompt: input.prompt,
       operatorInput: input.workflowInput
     });
@@ -183,6 +199,12 @@ export async function startRun(input: StartRunInput) {
       )
     });
     runTrustedJsonValidatorPreflight({ layout: plan.layout, trusted: trustedCli });
+    assertTargetCommitForReview(
+      path.resolve(plan.validation.project_root, plan.resolved_config.project.repo),
+      plan.target_commit
+    );
+    const activeAgentRefs = compiled.tasks.flatMap((task) => task.agentChain.map((profile) => profile.agentRef));
+    const providerCredentialNames = agentCredentialEnvironmentVariableNames(plan.resolved_config, activeAgentRefs);
     const submission = await submitSmithersWorkflow({
       compiled,
       projectRoot: plan.validation.project_root,
@@ -190,13 +212,13 @@ export async function startRun(input: StartRunInput) {
       keepWorkspaces: plan.resolved_config.run.keepWorkspaces,
       controllerLeaseSeconds: plan.resolved_config.run.controllerLeaseSeconds,
       workflowPath: prepared.executionSnapshot.workflowPath,
-      env: { ...trustedCli.env, ...prepared.executionSnapshot.env },
+      env: providerScopedControllerEnvironment(
+        { ...trustedCli.env, ...prepared.executionSnapshot.env },
+        providerCredentialNames
+      ),
       environmentVariableNames: mergeEnvironmentVariableNames(
-        agentEnvironmentVariableNames(
-          plan.resolved_config,
-          compiled.tasks.flatMap((task) => task.agentChain.map((profile) => profile.agentRef)),
-          forgeGuard.env
-        ),
+        agentEnvironmentVariableNames(plan.resolved_config, activeAgentRefs, forgeGuard.env),
+        ["ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES", "ULTRAFUZZ_PROVIDER_HOME_ROOT"],
         forgeGuard.environmentVariableNames,
         trustedCli.environmentVariableNames
       ),
@@ -235,6 +257,54 @@ export async function startRun(input: StartRunInput) {
     return runtimeFailure<StartRunValue>([diagnostic]);
   } finally {
     await releaseControlLock();
+  }
+}
+
+function launchReviewDiagnostics(
+  input: StartRunInput,
+  config: ResolvedConfig,
+  expectedDigest: string,
+  controllerSource: { stock: boolean; overrides: readonly string[] },
+  targetCommit: string | null
+): RuntimeDiagnostic[] {
+  const required = config.permissions.promptReviewRequired || !controllerSource.stock;
+  if (!required) return [];
+  const provided = input.reviewAcknowledgement?.trim().toLowerCase();
+  if (provided === expectedDigest) return [];
+  const stale = provided !== undefined && provided.length > 0;
+  return [
+    {
+      code: stale ? "RUN_REVIEW_ACKNOWLEDGEMENT_STALE" : "RUN_REVIEW_ACKNOWLEDGEMENT_REQUIRED",
+      message:
+        `${stale ? "launch review acknowledgement is stale" : "launch review acknowledgement is required"}; ` +
+        `review the effective prompts, configuration, topology, references, target commit, and controller source, then rerun with --acknowledge-review ${expectedDigest}`,
+      severity: "error",
+      source: "runtime",
+      path: "permissions.prompt_review_required",
+      details: {
+        expected_digest: expectedDigest,
+        target_commit: targetCommit,
+        prompt_review_required: config.permissions.promptReviewRequired,
+        controller_source_stock: controllerSource.stock,
+        controller_source_overrides: [...controllerSource.overrides]
+      }
+    }
+  ];
+}
+
+function credentialEnvironmentPolicyDiagnostics(config: ResolvedConfig): RuntimeDiagnostic[] {
+  try {
+    agentCredentialEnvironmentVariableNames(config, Object.keys(config.agents));
+    return [];
+  } catch (error) {
+    return [
+      {
+        code: "RUN_CREDENTIAL_ENVIRONMENT_UNSAFE",
+        message: error instanceof Error ? error.message : String(error),
+        severity: "error",
+        source: "runtime"
+      }
+    ];
   }
 }
 
@@ -524,6 +594,9 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       required: sealedTasksRequireTrustedCli(evidence.verifiedControl.contents.tasks)
     });
     runTrustedJsonValidatorPreflight({ layout: evidence.layout, trusted: trustedCli });
+    const linkedTasks = linkedWorkflowTasks(evidence.verifiedControl.contents.tasks);
+    const linkedAgentRefs = linkedTasks.flatMap((task) => task.agentChain.map((profile) => profile.agentRef));
+    const providerCredentialNames = agentCredentialEnvironmentVariableNames(sealedConfig, linkedAgentRefs);
     const controllerInvocation = appendEvent(evidence.layout, {
       eventType: "workflow-lifecycle-invoking",
       status: "running",
@@ -584,9 +657,10 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       },
       keepWorkspaces: sealedConfig.run.keepWorkspaces,
       controllerLeaseSeconds: sealedConfig.run.controllerLeaseSeconds,
-      env: linkedWorkflowExecutionEnvironment(evidence, trustedCli.env),
+      env: linkedWorkflowExecutionEnvironment(evidence, trustedCli.env, providerCredentialNames),
       environmentVariableNames: mergeEnvironmentVariableNames(
         linkedWorkflowEnvironmentVariableNames(sealedConfig, evidence.verifiedControl.contents.tasks, forgeGuard.env),
+        ["ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES", "ULTRAFUZZ_PROVIDER_HOME_ROOT"],
         forgeGuard.environmentVariableNames,
         trustedCli.environmentVariableNames
       )
@@ -744,6 +818,7 @@ async function persistSmithersEvidence(
     executionFiles
   });
   const verifiedControl = verifyWorkflowControlSnapshot(compiled.projectRoot, layout);
+  assertControllerExecutionSnapshotDigest(verifiedControl.executionFiles, compiled.controllerSourceDigest);
   const executionSnapshot = materializeWorkflowExecutionSnapshot({
     projectRoot: compiled.projectRoot,
     layout,
@@ -1317,11 +1392,46 @@ function mergeEnvironmentVariableNames(...groups: readonly (readonly string[])[]
 
 export function linkedWorkflowExecutionEnvironment(
   evidence: LinkedWorkflowEvidence,
-  credentials: Record<string, string | undefined> | undefined
+  credentials: Record<string, string | undefined> | undefined,
+  providerCredentialNames: readonly string[] = []
 ): Record<string, string | undefined> {
   // Snapshot-controlled paths are applied last so caller credentials can add
   // secrets but cannot redirect any verified workflow input.
-  return { ...(credentials ?? {}), ...evidence.executionSnapshot.env };
+  return providerScopedControllerEnvironment(
+    { ...(credentials ?? {}), ...evidence.executionSnapshot.env },
+    providerCredentialNames
+  );
+}
+
+function providerScopedControllerEnvironment(
+  source: Record<string, string | undefined>,
+  providerCredentialNames: readonly string[]
+): Record<string, string | undefined> {
+  return {
+    ...source,
+    ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES: [...new Set(providerCredentialNames)].sort().join(",")
+  };
+}
+
+function agentCredentialEnvironmentVariableNames(config: ResolvedConfig, agentRefs: readonly string[]): string[] {
+  const activeAgentRefs = new Set(agentRefs);
+  const names: string[] = [];
+  for (const [agentRef, agent] of Object.entries(config.agents)) {
+    if (!activeAgentRefs.has(agentRef) || agent.auth !== "api-key" || agent.apiKeyEnv === undefined) continue;
+    assertCredentialEnvironmentVariableName(agent.apiKeyEnv);
+    names.push(agent.apiKeyEnv);
+    if (agentRef === "KimiAgent" && agent.apiKeyEnv === "KIMI_API_KEY") names.push("MOONSHOT_API_KEY");
+  }
+  if (config.execution.mode === "cloud" && config.execution.provider !== undefined) {
+    const provider = config.execution.providers[config.execution.provider];
+    if (provider !== undefined) {
+      for (const name of provider.credentialEnv) {
+        assertCredentialEnvironmentVariableName(name);
+        names.push(name);
+      }
+    }
+  }
+  return [...new Set(names)].sort();
 }
 
 function agentEnvironmentVariableNames(
@@ -1331,6 +1441,7 @@ function agentEnvironmentVariableNames(
 ): string[] {
   const activeAgentRefs = new Set(agentRefs);
   const names: string[] = [];
+  if (activeAgentRefs.size > 0) names.push("ULTRAFUZZ_PROVIDER_HOME_ROOT");
   for (const [agentRef, agent] of Object.entries(config.agents)) {
     if (!activeAgentRefs.has(agentRef)) continue;
     if (agent.auth === "api-key" && agent.apiKeyEnv !== undefined) {

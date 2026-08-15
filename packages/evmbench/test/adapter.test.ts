@@ -42,6 +42,7 @@ describe("EVMBench adapter", () => {
     expect(updated).toContain('model = "synthetic-model"');
     expect(updated).toContain('reasoning = "high"');
     expect(updated).toContain('auth = "subscription"');
+    expect(updated).not.toContain("config_dir");
   });
 
   it("caps explicit topology timeouts at the named profile limit", () => {

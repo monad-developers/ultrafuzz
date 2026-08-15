@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { ClaudeCodeAgent as SmithersClaudeCodeAgent } from "smthrs";
 import { workflowControlChildEnvironment, workflowControlCredentialValue } from "./environment";
+import { resolveProviderHome } from "./provider-home";
 import { parseStrictJson } from "./strict-json";
 import { readStringTable, stringField } from "./toml";
 
@@ -30,7 +31,6 @@ type DeepSeekSmithersUsage = {
 
 const DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic";
 const DEEPSEEK_REASONING_EFFORTS = ["low", "high", "max"] as const;
-const DEEPSEEK_CLAUDE_CONFIG_DIR = ".ultrafuzz/deepseek-claude";
 const DEEPSEEK_RESULT_MAX_BYTES = 1024 * 1024;
 const DEEPSEEK_RESULT_MAX_DEPTH = 32;
 const DEEPSEEK_RESULT_MAX_ITEMS = 10_000;
@@ -171,7 +171,7 @@ function deepSeekAuthOptions(): DeepSeekAuthOptions {
   }
   return {
     ultrafuzzApiKey: requiredEnv(config.api_key_env ?? "DEEPSEEK_API_KEY"),
-    configDir: resolveConfigDir(config.config_dir ?? DEEPSEEK_CLAUDE_CONFIG_DIR)
+    configDir: resolveProviderHome("deepseek", config.config_dir)
   };
 }
 
@@ -191,13 +191,6 @@ function requiredEnv(name: string): string {
     throw new Error(`agents.DeepSeekAgent auth is api-key, but ${name} is not set`);
   }
   return workflowControlCredentialValue(value, name);
-}
-
-function resolveConfigDir(value: string): string {
-  if (value.trim() === "") {
-    throw new Error("agents.DeepSeekAgent.config_dir cannot be empty");
-  }
-  return path.isAbsolute(value) ? value : path.resolve(process.cwd(), value);
 }
 
 function deepSeekReasoningEffort(value: string | undefined): DeepSeekReasoningEffort | undefined {
