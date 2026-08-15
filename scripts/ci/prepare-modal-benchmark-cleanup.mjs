@@ -3,13 +3,18 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { isPublicModalBenchmarkConfig, loadModalBenchmarkConfig } from "../../packages/modal/dist/config.js";
+import { MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID } from "../../packages/modal/dist/modal-contracts.js";
+import { readModalDocument } from "../../packages/modal/dist/modal-documents.js";
 
 import {
   readBenchmarkControlManifest,
   validateAutomaticPairConfig,
   validateBenchmarkPolicyFiles
 } from "./prepare-eval-history-publication.mjs";
-import { modalBenchmarkPolicyDimensions } from "./validate-modal-benchmark-launch.mjs";
+import {
+  benchmarkRunnerProviderFromManifest,
+  modalBenchmarkPolicyDimensions
+} from "./validate-modal-benchmark-launch.mjs";
 
 const FULL_COMMIT = /^[0-9a-f]{40}$/u;
 const GENERATION = /^[1-9][0-9]*-[1-9][0-9]*$/u;
@@ -33,7 +38,18 @@ export function prepareModalBenchmarkCleanup(input) {
   }
 
   const [producerRunId, producerRunAttempt] = input.expectedGeneration.split("-");
-  const dimensions = input.policyDimensions;
+  // Provider-specific lane concurrency (OpenRouter serializes rows and nodes) is only
+  // knowable from the manifest's single smoke runner pair, so callers pass a resolver and
+  // cleanup derives the same trusted dimensions the launch guardrail derived.
+  const dimensions =
+    typeof input.policyDimensions === "function"
+      ? input.policyDimensions(
+          benchmarkRunnerProviderFromManifest(
+            readModalDocument(manifestPath, MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID).value,
+            input.expectedMode
+          )
+        )
+      : input.policyDimensions;
   if (dimensions === undefined) throw new Error("cleanup policy dimensions are required");
   const manifest = readBenchmarkControlManifest(manifestPath, {
     candidateCommit: input.expectedCandidate,
@@ -136,7 +152,8 @@ function main(args) {
     expectedRepository,
     expectedGeneration,
     expectedMode,
-    policyDimensions: modalBenchmarkPolicyDimensions(trustedPolicyRoot, expectedMode)
+    policyDimensions: (runnerProvider) =>
+      modalBenchmarkPolicyDimensions(trustedPolicyRoot, expectedMode, runnerProvider)
   });
 }
 

@@ -120,7 +120,7 @@
         "max_live_runner_workflows_by_provider": {
           "type": "object",
           "minProperties": 1,
-          "maxProperties": 4,
+          "maxProperties": 5,
           "additionalProperties": false,
           "properties": {
             "openai": {
@@ -139,6 +139,11 @@
               "maximum": 9007199254740991
             },
             "kimi": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "openrouter": {
               "type": "integer",
               "minimum": 1,
               "maximum": 9007199254740991
@@ -180,7 +185,7 @@
             "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
           },
           "provider": {
-            "enum": ["openai", "anthropic", "deepseek", "kimi"]
+            "enum": ["openai", "anthropic", "deepseek", "kimi", "openrouter"]
           },
           "config_path": {
             "type": "string",

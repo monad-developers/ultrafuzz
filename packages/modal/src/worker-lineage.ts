@@ -183,6 +183,7 @@ export function guardCurrentPersistentWorkerLineage(
 
 async function acquireLineageLock(lineagePath: string): Promise<() => Promise<void>> {
   return lockfile.lock(path.dirname(lineagePath), {
+    lockfilePath: `${lineagePath}.lock`,
     realpath: false,
     stale: 30_000,
     retries: { retries: 120, factor: 1, minTimeout: 250, maxTimeout: 500 }

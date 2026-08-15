@@ -25,6 +25,45 @@ describe("cancelled Modal benchmark cleanup preparation", () => {
     expect(fs.readFileSync(fixture.outputPath, "utf8")).toBe(`${pairId}.json\t${pairId}.state.json\n`);
   });
 
+  it("resolves policy dimensions from the manifest's own smoke runner provider", () => {
+    const fixture = cleanupFixture();
+    const manifest = readJson<CleanupManifest>(fixture.manifestPath);
+    manifest.concurrency.max_parallel_eval_rows_per_sandbox = 1;
+    manifest.concurrency.max_parallel_workflow_nodes_per_row = 1;
+    manifest.concurrency.max_live_runner_workflows_by_provider = { openrouter: 1 };
+    manifest.concurrency.max_live_judge_rows = 1;
+    manifest.control_timeout_seconds = 55_200;
+    manifest.pairs[0]!.provider = "openrouter";
+    writeJson(fixture.manifestPath, manifest);
+    const config = readJson<CleanupConfig>(path.join(fixture.root, `${pairId}.json`));
+    config.models[0]!.provider = "openrouter";
+    config.models[0]!.agent = "OpenRouterAgent";
+    config.run_id = "ci-12345-2-smoke-ultrafuzz-bench-openrouter";
+    config.public_benchmark.max_runtime_seconds = 15_000;
+    writeJson(path.join(fixture.root, `${pairId}.json`), config);
+
+    const observed: Array<string | undefined> = [];
+    expect(
+      prepareModalBenchmarkCleanup({
+        ...fixture.input,
+        policyDimensions: (runnerProvider: string | undefined) => {
+          observed.push(runnerProvider);
+          return {
+            ...fixture.input.policyDimensions,
+            maxParallelEvalRows: runnerProvider === "openrouter" ? 1 : 3,
+            maxParallelWorkflowNodes: runnerProvider === "openrouter" ? 1 : 4,
+            maxRuntimeSeconds: 15_000,
+            controlTimeoutSeconds: 55_200
+          };
+        }
+      })
+    ).toEqual({
+      imageName: `ufz-runner-${candidate}`,
+      rows: [`${pairId}.json\t${pairId}.state.json`]
+    });
+    expect(observed).toEqual(["openrouter"]);
+  });
+
   it("rejects the removed threat-model control mode instead of converting or tolerating it", () => {
     const fixture = cleanupFixture();
     const manifest = readJson<CleanupManifest>(fixture.manifestPath);

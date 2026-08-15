@@ -21,20 +21,23 @@ import {
 const PUBLIC_NODE_TIMEOUT_SECONDS = 1800;
 const PUBLIC_CONTROL_POLLING_GRACE_SECONDS = 5 * 60;
 const MAX_BENCHMARK_MODELS_JSON_BYTES = 64 * 1024;
-const SAFE_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
+const OPAQUE_MODEL = /^[^\s\p{Cc}]+$/u;
+const LEGACY_SAFE_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const SAFE_REASONING = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
 const MODEL_KEYS = ["model", "provider", "reasoning"];
 const PROVIDER_AGENT = {
   openai: "CodexAgent",
   anthropic: "ClaudeAgent",
   deepseek: "DeepSeekAgent",
-  kimi: "KimiAgent"
+  kimi: "KimiAgent",
+  openrouter: "OpenRouterAgent"
 };
 const AGENT_PROVIDER = {
   CodexAgent: "openai",
   ClaudeAgent: "anthropic",
   DeepSeekAgent: "deepseek",
-  KimiAgent: "kimi"
+  KimiAgent: "kimi",
+  OpenRouterAgent: "openrouter"
 };
 
 const [candidateCommit, repository, generation, outputDirectory, mode] = process.argv.slice(2);
@@ -75,7 +78,8 @@ const targets = selectedTargets.map((target) => ({
 }));
 
 const models = benchmarkModels(mode, lane.model_profiles);
-const maxParallelEvalRows = publicBenchmarkMaxParallelEvalRows(mode);
+const runnerProvider = mode === "smoke" ? models[0]?.provider : undefined;
+const maxParallelEvalRows = publicBenchmarkMaxParallelEvalRows(mode, runnerProvider);
 const maxRuntimeSeconds = publicBenchmarkMaxRuntimeSeconds(mode);
 if (!Number.isSafeInteger(maxParallelEvalRows) || maxParallelEvalRows <= 0) {
   throw new Error(`invalid ${mode} maximum parallel eval rows`);
@@ -158,7 +162,7 @@ const manifest = {
   control_timeout_seconds: controlTimeoutSeconds,
   concurrency: {
     max_parallel_eval_rows_per_sandbox: maxParallelEvalRows,
-    max_parallel_workflow_nodes_per_row: publicBenchmarkMaxParallelWorkflowNodes(mode),
+    max_parallel_workflow_nodes_per_row: publicBenchmarkMaxParallelWorkflowNodes(mode, runnerProvider),
     max_live_runner_workflows_by_provider: Object.fromEntries(
       models.map((model) => [
         model.provider,
@@ -252,7 +256,14 @@ function validateModelEntry(entry, index) {
   if (!(entry.provider in PROVIDER_AGENT)) {
     throw new Error(`BENCHMARK_MODELS_JSON[${index}].provider is invalid`);
   }
-  if (typeof entry.model !== "string" || !SAFE_MODEL.test(entry.model) || /(?:^|[-_.:/])latest$/iu.test(entry.model)) {
+  if (
+    typeof entry.model !== "string" ||
+    entry.model.length === 0 ||
+    entry.model.length > 256 ||
+    !OPAQUE_MODEL.test(entry.model) ||
+    (entry.provider !== "openrouter" &&
+      (!LEGACY_SAFE_MODEL.test(entry.model) || /(?:^|[-_.:/])latest$/iu.test(entry.model)))
+  ) {
     throw new Error(`BENCHMARK_MODELS_JSON[${index}].model is unsafe or unpinned`);
   }
   if (typeof entry.reasoning !== "string" || !SAFE_REASONING.test(entry.reasoning)) {

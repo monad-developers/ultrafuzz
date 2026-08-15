@@ -240,15 +240,19 @@ export function localSubscriptionAuthPath(
   if (provider === "deepseek") {
     throw new Error("DeepSeek does not support subscription authentication");
   }
+  if (provider === "openrouter") {
+    throw new Error("OpenRouter does not support subscription authentication");
+  }
   return env.KIMI_CODE_HOME ?? env.KIMI_SHARE_DIR ?? path.join(home, ".kimi-code");
 }
 
 export function runnerApiKeyEnv(
   provider: ModelProvider
-): "OPENAI_API_KEY" | "ANTHROPIC_API_KEY" | "DEEPSEEK_API_KEY" | "KIMI_API_KEY" {
+): "OPENAI_API_KEY" | "ANTHROPIC_API_KEY" | "DEEPSEEK_API_KEY" | "KIMI_API_KEY" | "OPENROUTER_API_KEY" {
   if (provider === "openai") return "OPENAI_API_KEY";
   if (provider === "anthropic") return "ANTHROPIC_API_KEY";
   if (provider === "deepseek") return "DEEPSEEK_API_KEY";
+  if (provider === "openrouter") return "OPENROUTER_API_KEY";
   return "KIMI_API_KEY";
 }
 

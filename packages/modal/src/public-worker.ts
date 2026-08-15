@@ -74,6 +74,11 @@ export const PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS = 5 * 60;
 export const PUBLIC_BENCHMARK_SCORE_PER_WAVE_TIMEOUT_SECONDS = 45 * 60;
 export const PUBLIC_BENCHMARK_REPORT_TIMEOUT_SECONDS = 5 * 60;
 export const PUBLIC_BENCHMARK_PREPARATION_TIMEOUT_SECONDS = 20 * 60;
+// OpenRouter applies a strict request-rate limit to the routed Codex model, so a lane
+// whose runner is OpenRouter runs one eval row at a time and one workflow node inside it.
+// Every trusted policy re-derivation reads this constant, so the launch, cleanup, and
+// publication guardrails agree with the suite the Modal worker actually runs.
+export const PUBLIC_BENCHMARK_OPENROUTER_MAX_PARALLEL = 1;
 // The smoke graph has four sequential agent stages. Each stage may use both of
 // its 1,800-second attempts, so retain ten minutes beyond the four-hour
 // topology bound for workflow transitions and final synchronization.
@@ -404,11 +409,19 @@ export function publicEvalRunErrorCanBePublished(diagnostics: PublicEvalDiagnost
   return diagnostics.summary.scoring_ready && publicEvalDiagnosticsFailedTargetCount(diagnostics.rows) === 1;
 }
 
-export function publicBenchmarkMaxParallelEvalRows(lane: "smoke" | "full"): number {
+export function publicBenchmarkMaxParallelEvalRows(
+  lane: "smoke" | "full",
+  provider?: ModalModelSpec["provider"]
+): number {
+  if (provider === "openrouter") return PUBLIC_BENCHMARK_OPENROUTER_MAX_PARALLEL;
   return benchmarkLaneConcurrency(lane).max_parallel_runs;
 }
 
-export function publicBenchmarkMaxParallelWorkflowNodes(lane: "smoke" | "full"): number {
+export function publicBenchmarkMaxParallelWorkflowNodes(
+  lane: "smoke" | "full",
+  provider?: ModalModelSpec["provider"]
+): number {
+  if (provider === "openrouter") return PUBLIC_BENCHMARK_OPENROUTER_MAX_PARALLEL;
   return benchmarkLaneConcurrency(lane).max_parallel_targets;
 }
 
@@ -739,7 +752,7 @@ async function preparePublicBenchmark(
       reasoning: model.reasoning
     }
   });
-  const suite = preparePublicEvalSuite(baseSuite, scope.lane);
+  const suite = preparePublicEvalSuite(baseSuite, scope.lane, model.provider);
   const profile = suite.model_profiles[scope.runner_model_profile];
   if (profile?.model !== model.model || profile.agent !== model.agent || profile.reasoning !== model.reasoning) {
     throw new Error("public benchmark config and checked-in runner profile disagree");
@@ -930,7 +943,11 @@ export async function materializeBakedCandidate(
   }
 }
 
-export function preparePublicEvalSuite(baseSuite: EvalSuiteSpec, lane: "smoke" | "full"): EvalSuiteSpec {
+export function preparePublicEvalSuite(
+  baseSuite: EvalSuiteSpec,
+  lane: "smoke" | "full",
+  provider?: ModalModelSpec["provider"]
+): EvalSuiteSpec {
   return {
     ...baseSuite,
     run: {
@@ -938,9 +955,12 @@ export function preparePublicEvalSuite(baseSuite: EvalSuiteSpec, lane: "smoke" |
       // Smoke runs all three pinned target rows together, with one four-way
       // strategy wave inside each bounded workflow. Full mode uses two target
       // waves for the 40-target EVMbench cohort and eight-way concurrency
-      // within each production workflow.
-      max_parallel_runs: publicBenchmarkMaxParallelEvalRows(lane),
-      max_parallel_targets: publicBenchmarkMaxParallelWorkflowNodes(lane)
+      // within each production workflow. An OpenRouter runner instead
+      // serializes both rows and nodes: its routed Codex model rate-limits
+      // hard enough that simultaneous agents exhaust Codex's HTTP retries
+      // with 429 responses.
+      max_parallel_runs: publicBenchmarkMaxParallelEvalRows(lane, provider),
+      max_parallel_targets: publicBenchmarkMaxParallelWorkflowNodes(lane, provider)
     }
   };
 }

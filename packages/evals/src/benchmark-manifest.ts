@@ -324,12 +324,14 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
     const parsedOverride = modelProfileSchema.safeParse(input.runnerModelProfileOverride);
     if (
       !parsedOverride.success ||
-      !["CodexAgent", "ClaudeAgent", "DeepSeekAgent", "KimiAgent"].includes(parsedOverride.data.agent) ||
+      !["CodexAgent", "ClaudeAgent", "DeepSeekAgent", "KimiAgent", "OpenRouterAgent"].includes(
+        parsedOverride.data.agent
+      ) ||
       parsedOverride.data.id === lane.judge_profile.id
     ) {
       throw new EvalError(
         "EVAL_BENCHMARK_MODEL_PROFILE_INVALID",
-        "runner model profile override must be a safe explicit CodexAgent, ClaudeAgent, DeepSeekAgent, or KimiAgent profile distinct from the judge"
+        "runner model profile override must be a safe explicit CodexAgent, ClaudeAgent, DeepSeekAgent, KimiAgent, or OpenRouterAgent profile distinct from the judge"
       );
     }
     runnerModelProfileOverride = parsedOverride.data;

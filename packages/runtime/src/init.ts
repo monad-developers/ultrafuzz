@@ -44,6 +44,12 @@ const AGENT_TEMPLATES = [
     template: "smithers/agents/kimi.tsx",
     ref: "KimiAgent",
     stock032Sha256: "8e9c9fee048d2ac7a04669d8999647ba460c27855959bb77cd2b7eb0ea1ac940"
+  },
+  {
+    file: "openrouter.ts",
+    template: "smithers/agents/openrouter.tsx",
+    ref: "OpenRouterAgent",
+    stock032Sha256: null
   }
 ] as const;
 
@@ -281,7 +287,7 @@ function upgradeStockSmithers032Adapters(
       continue;
     }
     const digest = crypto.createHash("sha256").update(bytes).digest("hex");
-    if (digest !== agent.stock032Sha256) continue;
+    if (agent.stock032Sha256 === null || digest !== agent.stock032Sha256) continue;
     writeProjectFile(
       projectRoot,
       relativePath,

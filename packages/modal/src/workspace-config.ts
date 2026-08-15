@@ -17,6 +17,7 @@ export function modalTargetToml(model: ModalModelSpec, nodeTimeoutSeconds: numbe
   const claude = agentToml(model, "ClaudeAgent", "anthropic");
   const deepseek = agentToml(model, "DeepSeekAgent", "deepseek");
   const kimi = agentToml(model, "KimiAgent", "kimi");
+  const openrouter = agentToml(model, "OpenRouterAgent", "openrouter");
   return `schema_version = "${PROJECT_CONFIG_SCHEMA_VERSION}"
 audit_profile = ${tomlString(auditProfile)}
 ${dynamicStrategiesEnumerator}
@@ -47,6 +48,8 @@ ${claude}
 ${deepseek}
 
 ${kimi}
+
+${openrouter}
 
 [permissions]
 trust_model = "skip-permissions"
@@ -87,7 +90,11 @@ reasoning = ${tomlString(model.reasoning)}`;
 
 function agentToml(selectedModel: ModalModelSpec, agent: ModalModelSpec["agent"], provider: ModelProvider): string {
   const selected = selectedModel.agent === agent;
-  const auth = selected ? selectedModel.auth_mode : provider === "deepseek" ? "api-key" : "subscription";
+  const auth = selected
+    ? selectedModel.auth_mode
+    : provider === "deepseek" || provider === "openrouter"
+      ? "api-key"
+      : "subscription";
   if (auth === "api-key") {
     return `[agents.${agent}]\nauth = "api-key"\napi_key_env = ${tomlString(apiKeyEnv(provider))}`;
   }
@@ -98,6 +105,7 @@ function apiKeyEnv(provider: ModelProvider): string {
   if (provider === "openai") return "OPENAI_API_KEY";
   if (provider === "anthropic") return "ANTHROPIC_API_KEY";
   if (provider === "deepseek") return "DEEPSEEK_API_KEY";
+  if (provider === "openrouter") return "OPENROUTER_API_KEY";
   return "KIMI_API_KEY";
 }
 

@@ -174,7 +174,7 @@ describe("Modal node sandbox provider", { timeout: 30_000 }, () => {
       expect(entries).toContain("./source.txt");
       expect(entries).toContain(`./${fixture.input.workflow_path}`);
       expect(entries).toContain(`./${fixture.input.prompt_path}`);
-      for (const helper of ["index", "codex", "claude", "kimi", "deepseek", "environment", "toml"]) {
+      for (const helper of ["index", "codex", "claude", "kimi", "deepseek", "openrouter", "environment", "toml"]) {
         expect(entries).toContain(`./${fixture.input.execution_snapshot_root}/.smithers/agents/${helper}.ts`);
       }
       expect(entries).toContain(`./${fixture.input.execution_snapshot_root}/dependencies/packages/000001/dist/cli.js`);
@@ -299,7 +299,7 @@ describe("Modal node sandbox provider", { timeout: 30_000 }, () => {
     const fixture = createProjectFixture();
     fs.writeFileSync(path.join(fixture.root, fixture.mutableWorkflowPath), "hostile mutable workflow\n");
     fs.writeFileSync(path.join(fixture.root, fixture.mutablePromptPath), "hostile mutable prompt\n");
-    for (const helper of ["kimi", "deepseek", "environment"]) {
+    for (const helper of ["kimi", "deepseek", "openrouter", "environment"]) {
       fs.writeFileSync(path.join(fixture.root, ".smithers", "agents", `${helper}.ts`), `hostile ${helper}\n`);
     }
     const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
@@ -318,6 +318,12 @@ describe("Modal node sandbox provider", { timeout: 30_000 }, () => {
           "utf8"
         )
       ).toBe("export const sealedDeepSeek = true;\n");
+      expect(
+        fs.readFileSync(
+          path.join(extracted, fixture.input.execution_snapshot_root, ".smithers", "agents", "openrouter.ts"),
+          "utf8"
+        )
+      ).toBe("export const sealedOpenRouter = true;\n");
       expect(
         fs.readFileSync(
           path.join(extracted, fixture.input.execution_snapshot_root, ".smithers", "agents", "environment.ts"),
@@ -2374,6 +2380,7 @@ function createProjectFixture(options: { smithersCli?: string; pinnedSubmodules?
   fs.writeFileSync(path.join(root, "source.txt"), "committed source\n");
   fs.writeFileSync(path.join(root, ".smithers", "agents", "kimi.ts"), "export const mutableKimi = true;\n");
   fs.writeFileSync(path.join(root, ".smithers", "agents", "deepseek.ts"), "export const mutableDeepSeek = true;\n");
+  fs.writeFileSync(path.join(root, ".smithers", "agents", "openrouter.ts"), "export const mutableOpenRouter = true;\n");
   fs.writeFileSync(path.join(root, ".smithers", "agents", "environment.ts"), "export const mutableEnv = true;\n");
   fs.writeFileSync(path.join(root, mutableWorkflowPath), "export default { mutable: true };\n");
   fs.writeFileSync(path.join(root, mutablePromptPath), "mutable rendered prompt\n");
@@ -2403,6 +2410,7 @@ function createProjectFixture(options: { smithersCli?: string; pinnedSubmodules?
     [".smithers/agents/claude.ts", "export const sealedClaude = true;\n"],
     [".smithers/agents/kimi.ts", "export const sealedKimi = true;\n"],
     [".smithers/agents/deepseek.ts", "export const sealedDeepSeek = true;\n"],
+    [".smithers/agents/openrouter.ts", "export const sealedOpenRouter = true;\n"],
     [".smithers/agents/environment.ts", "export const sealedEnvironment = true;\n"],
     [".smithers/agents/toml.ts", "export const sealedToml = true;\n"],
     ["modules/@ultrafuzz/artifacts/package.json", '{"name":"@ultrafuzz/artifacts"}\n'],

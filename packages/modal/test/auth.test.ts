@@ -30,6 +30,9 @@ describe("runtime-only subscription auth", () => {
     expect(() => localSubscriptionAuthPath("deepseek", {}, "/home/example")).toThrow(
       /does not support subscription authentication/u
     );
+    expect(() => localSubscriptionAuthPath("openrouter", {}, "/home/example")).toThrow(
+      /does not support subscription authentication/u
+    );
   });
 
   it("copies subscription credentials to ephemeral run paths only", () => {
@@ -74,12 +77,14 @@ describe("runtime-only subscription auth", () => {
   it("does not stage auth files for API-key models", () => {
     expect(subscriptionAuthCopy({ provider: "openai", auth_mode: "api-key" }, {}, "/home/example")).toBeUndefined();
     expect(subscriptionAuthCopy({ provider: "deepseek", auth_mode: "api-key" }, {}, "/home/example")).toBeUndefined();
+    expect(subscriptionAuthCopy({ provider: "openrouter", auth_mode: "api-key" }, {}, "/home/example")).toBeUndefined();
     expect(subscriptionAuthCopy({ provider: "kimi", auth_mode: "api-key" }, {}, "/home/example")).toBeUndefined();
   });
 
   it("accepts Kimi or Moonshot API keys for Kimi workers", () => {
     expect(runnerApiKeySourceEnv("openai")).toEqual(["OPENAI_API_KEY"]);
     expect(runnerApiKeySourceEnv("deepseek")).toEqual(["DEEPSEEK_API_KEY"]);
+    expect(runnerApiKeySourceEnv("openrouter")).toEqual(["OPENROUTER_API_KEY"]);
     expect(runnerApiKeySourceEnv("kimi")).toEqual(["KIMI_API_KEY", "MOONSHOT_API_KEY"]);
   });
 

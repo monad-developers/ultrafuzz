@@ -250,6 +250,21 @@
               }
             }
           ]
+        },
+        "OpenRouterAgent": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/agentConfig"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "auth": {
+                  "const": "api-key"
+                }
+              }
+            }
+          ]
         }
       },
       "additionalProperties": {
@@ -634,6 +649,28 @@
         }
       },
       "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "agent": {
+                "const": "OpenRouterAgent"
+              }
+            },
+            "required": ["agent"]
+          },
+          "then": {
+            "required": ["model"],
+            "properties": {
+              "model": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[^\\s\\p{Cc}]+$"
+              }
+            }
+          }
+        },
         {
           "if": {
             "type": "object",
