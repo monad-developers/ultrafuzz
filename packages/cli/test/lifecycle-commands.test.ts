@@ -86,6 +86,14 @@ ${requiredCommand === undefined ? "" : `    required_commands: [${requiredComman
   );
 }
 
+function addOpenRouterProfile(project: string): void {
+  fs.appendFileSync(
+    path.join(project, "ultrafuzz.toml"),
+    '\n[models.openrouter]\nagent = "OpenRouterAgent"\nmodel = "~anthropic/claude-sonnet-latest:free"\nreasoning = "high"\n',
+    "utf8"
+  );
+}
+
 function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Record<string, string | undefined> {
   const binDir = path.join(project, "fake-bin");
   fs.mkdirSync(binDir, { recursive: true });
@@ -587,6 +595,7 @@ test("doctor reports install posture in human and JSON output", async () => {
   assert.match(data.workflow_engine.required_version, /^\d+\.\d+\.\d+$/u);
   assert.equal(typeof data.workflow_engine.latest_published_version, "string");
 
+  addOpenRouterProfile(project);
   const topologyOverride = path.join(project, ".ultrafuzz", "openrouter-topology.yml");
   fs.writeFileSync(
     topologyOverride,

@@ -4227,11 +4227,11 @@ test("validate requires agentFactories entries for every configured model profil
   const unknownAgents = validate.diagnostics
     .filter((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN")
     .map((diagnostic) => diagnostic.message);
-  assert.equal(unknownAgents.length, 4, JSON.stringify(validate.diagnostics));
+  assert.equal(unknownAgents.length, 3, JSON.stringify(validate.diagnostics));
   assert.match(unknownAgents.join("\n"), /ClaudeAgent/u);
   assert.match(unknownAgents.join("\n"), /DeepSeekAgent/u);
   assert.match(unknownAgents.join("\n"), /KimiAgent/u);
-  assert.match(unknownAgents.join("\n"), /OpenRouterAgent/u);
+  assert.doesNotMatch(unknownAgents.join("\n"), /OpenRouterAgent/u);
 
   const kimiRun = await startRun({
     projectRoot: project,
@@ -4264,6 +4264,36 @@ test("validate requires every configured agent factory after a default agent ove
       .map((diagnostic) => diagnostic.message.match(/agent reference (\w+)/u)?.[1]),
     ["CodexAgent"]
   );
+});
+
+test("legacy projects do not require newly added opt-in agent factories", async () => {
+  const project = tempProject();
+  const initialized = initProject({ projectRoot: project, force: true });
+  assert.equal(initialized.ok, true, JSON.stringify(initialized.diagnostics));
+  writeSmallTopology(project);
+
+  const configPath = path.join(project, "ultrafuzz.toml");
+  fs.writeFileSync(
+    configPath,
+    fs.readFileSync(configPath, "utf8").replace(/\n\[agents\.OpenRouterAgent\][\s\S]*?(?=\n\[permissions\])/u, ""),
+    "utf8"
+  );
+  const registryPath = path.join(project, ".smithers", "agents", "index.ts");
+  const legacyRegistry = fs
+    .readFileSync(registryPath, "utf8")
+    .replace('import { createOpenRouterAgent } from "./openrouter";\n', "")
+    .replace('export { createOpenRouterAgent } from "./openrouter";\n', "")
+    .replace("  OpenRouterAgent: createOpenRouterAgent\n", "");
+  assert.doesNotMatch(legacyRegistry, /OpenRouterAgent/u);
+  fs.writeFileSync(registryPath, legacyRegistry, "utf8");
+  fs.unlinkSync(path.join(project, ".smithers", "agents", "openrouter.ts"));
+
+  const preserved = initProject({ projectRoot: project });
+  const validate = await validateProject({ projectRoot: project, env: {} });
+
+  assert.equal(preserved.ok, true, JSON.stringify(preserved.diagnostics));
+  assert.equal(fs.readFileSync(registryPath, "utf8"), legacyRegistry);
+  assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
 });
 
 test("validate accepts a typed aliased registry composed from static spreads", async () => {

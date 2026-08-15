@@ -105,6 +105,14 @@ ${requiredCommand === undefined ? "" : `    required_commands:\n      - ${requir
   );
 }
 
+function addOpenRouterProfile(project: string): void {
+  fs.appendFileSync(
+    path.join(project, "ultrafuzz.toml"),
+    '\n[models.openrouter]\nagent = "OpenRouterAgent"\nmodel = "~anthropic/claude-sonnet-latest:free"\nreasoning = "high"\n',
+    "utf8"
+  );
+}
+
 interface FakeInspectionFixtures {
   why?: unknown;
   nodeWatchLines?: string;
@@ -1044,6 +1052,7 @@ test("diagnoseProject reports a missing credential for a selected OpenRouter pro
 test("diagnoseProject checks an OpenRouter profile selected only by topology", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
+  addOpenRouterProfile(project);
   writeSmallTopology(project);
   const topologyPath = path.join(project, ".ultrafuzz", "topology.yml");
   fs.writeFileSync(
@@ -1074,6 +1083,7 @@ test("diagnoseProject checks an OpenRouter profile selected only by topology", a
 test("diagnoseProject checks an OpenRouter profile selected by a runtime topology override", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
+  addOpenRouterProfile(project);
   writeSmallTopology(project);
   const configuredTopologyPath = path.join(project, ".ultrafuzz", "topology.yml");
   const overrideTopologyPath = path.join(project, ".ultrafuzz", "openrouter-topology.yml");

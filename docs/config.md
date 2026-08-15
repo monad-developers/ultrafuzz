@@ -239,18 +239,14 @@ million cache-hit input tokens, and $0.87 per million output tokens.
 ## OpenRouter agent
 
 `ultrafuzz init` generates a dedicated `OpenRouterAgent` backed by the Codex
-CLI. Select the included opt-in profile or create another profile with any
-OpenRouter catalogue ID:
+CLI and its API-key configuration. Add a profile with any OpenRouter catalogue
+ID:
 
 ```toml
 [models.openrouter]
 agent = "OpenRouterAgent"
 model = "~anthropic/claude-sonnet-latest:free"
 reasoning = "high"
-
-[agents.OpenRouterAgent]
-auth = "api-key"
-api_key_env = "OPENROUTER_API_KEY"
 ```
 
 Set the key outside TOML, then select the profile in topology or use a one-off
