@@ -21,7 +21,7 @@ import {
   replayEvents,
   safeResolveInside,
   sha256Bytes,
-  validateSafeId,
+  validateSafeIdOrThrow,
   writeFileDurable,
   type ArtifactContractId,
   type NodeStatus,
@@ -318,7 +318,7 @@ class DashboardApp {
   static async create(config: DashboardServerConfig): Promise<DashboardApp> {
     const host = config.host ?? DEFAULT_HOST;
     validateLoopbackHost(host);
-    const runId = config.runId === undefined ? undefined : validateSafeId(config.runId, "run ID");
+    const runId = config.runId === undefined ? undefined : validateSafeIdOrThrow(config.runId, "run ID");
     const app = new DashboardApp({
       projectRoot: path.resolve(config.projectRoot ?? process.cwd()),
       host,
@@ -684,7 +684,7 @@ class DashboardApp {
       .readdirSync(runsRoot, { withFileTypes: true })
       .filter((entry) => entry.isDirectory())
       .map((entry) => {
-        const runId = validateSafeId(entry.name, "run ID");
+        const runId = validateSafeIdOrThrow(entry.name, "run ID");
         const root = path.join(runsRoot, runId);
         const metadata = readRunMetadataDocument(path.join(root, "run.json"), runId);
         return { runId, createdAt: metadata.created_at, mtimeMs: fs.statSync(root).mtimeMs };
@@ -881,7 +881,7 @@ class DashboardApp {
   }
 
   async nodeDetail(nodeId: string): Promise<JsonObject> {
-    const safeNodeId = validateSafeId(nodeId, "node ID");
+    const safeNodeId = validateSafeIdOrThrow(nodeId, "node ID");
     const topology = this.loadTopologyForDisplay();
     const node = topology.nodes.find((candidate) => candidate.id === safeNodeId);
     if (!node) {
@@ -1267,7 +1267,7 @@ class DashboardApp {
     const content = stringField(body, "content");
     const document = parsePromptFrontmatter(content);
     const nextId = document.frontmatter.id ?? node.id;
-    validateSafeId(nextId, "prompt ID");
+    validateSafeIdOrThrow(nextId, "prompt ID");
     validatePromptVariables(document.body);
 
     if (nextId !== node.id) {
@@ -1328,10 +1328,11 @@ class DashboardApp {
     const content = stringField(body, "content");
     const document = parsePromptFrontmatter(content);
     validatePromptVariables(document.body);
-    const nodeId = validateSafeId(document.frontmatter.id ?? "", "prompt frontmatter id");
-    const group = typeof body.group === "string" && body.group.trim() ? validateSafeId(body.group, "group") : undefined;
+    const nodeId = validateSafeIdOrThrow(document.frontmatter.id ?? "", "prompt frontmatter id");
+    const group =
+      typeof body.group === "string" && body.group.trim() ? validateSafeIdOrThrow(body.group, "group") : undefined;
     const requestedDependsOn = stringArrayField(body, "dependsOn").map((dependency) =>
-      validateSafeId(dependency, "dependency")
+      validateSafeIdOrThrow(dependency, "dependency")
     );
     const dependsOn = requestedDependsOn.length > 0 ? requestedDependsOn : [START_NODE_ID];
     const topology = this.loadTopologyForDisplay();
@@ -1640,7 +1641,7 @@ class DashboardApp {
     if (runId === PREVIEW_RUN_ID) {
       throw new HttpError(400, "this command requires a persisted run");
     }
-    return validateSafeId(runId, "run ID");
+    return validateSafeIdOrThrow(runId, "run ID");
   }
 
   commandCapabilities(): JsonObject {
@@ -1764,7 +1765,7 @@ class DashboardApp {
   }
 
   topologyNode(nodeId: string): TopologyNode {
-    const safeNodeId = validateSafeId(nodeId, "node ID");
+    const safeNodeId = validateSafeIdOrThrow(nodeId, "node ID");
     const node = this.loadTopologyForDisplay().nodes.find((candidate) => candidate.id === safeNodeId);
     if (!node) {
       throw new HttpError(404, `topology node ${safeNodeId} not found`);
@@ -2349,7 +2350,9 @@ function dashboardDeclaredReportAvailability(runRoot: string): DashboardReportAv
     );
     const candidateArtifactDirs = new Set([producer.artifact_dir]);
     for (const task of producerTasks) {
-      candidateArtifactDirs.add(path.posix.join("artifacts", validateSafeId(task.attemptId, "report attempt ID")));
+      candidateArtifactDirs.add(
+        path.posix.join("artifacts", validateSafeIdOrThrow(task.attemptId, "report attempt ID"))
+      );
       if (state.nodes[task.attemptId]?.status === "succeeded") claimedSuccess = true;
     }
     claimedSuccess ||= Object.entries(state.nodes).some(

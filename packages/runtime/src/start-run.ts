@@ -16,7 +16,7 @@ import {
   readRunState,
   sensitiveEnvironmentValues,
   updateRunStatus,
-  validateSafeId,
+  validateSafeIdOrThrow,
   writeJsonDurable,
   writeRunMetadataDocument,
   writeRunState,
@@ -804,7 +804,7 @@ export async function readLinkedWorkflowEvidence(
   let metadataPath: string;
   let layout: RunLayout;
   try {
-    const safeRunId = validateSafeId(runId, "run ID");
+    const safeRunId = validateSafeIdOrThrow(runId, "run ID");
     layout = layoutForRunRoot(path.join(runsRoot, safeRunId), safeRunId);
     assertPathInside(runsRoot, layout.root, "run root");
     if (fs.existsSync(runsRoot)) {

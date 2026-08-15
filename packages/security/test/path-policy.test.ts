@@ -3,7 +3,7 @@ import { mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { resolvePathInside, validateSafeId, validateSafeRelativePath } from "../src/index.js";
+import { resolvePathInside, validateSafeIdResult, validateSafeRelativePath } from "../src/index.js";
 
 test("safe relative path policy rejects traversal and absolute injection", () => {
   assert.equal(validateSafeRelativePath("src/Test.sol").ok, true);
@@ -27,10 +27,10 @@ test("shared path policy rejects backslash paths before normalization", () => {
 });
 
 test("safe IDs reject traversal, slashes, and dot edges", () => {
-  assert.equal(validateSafeId("node id", "setup-1").ok, true);
-  assert.equal(validateSafeId("node id", "../setup").ok, false);
-  assert.equal(validateSafeId("node id", "bad/node").ok, false);
-  assert.equal(validateSafeId("node id", ".hidden").ok, false);
+  assert.equal(validateSafeIdResult("node id", "setup-1").ok, true);
+  assert.equal(validateSafeIdResult("node id", "../setup").ok, false);
+  assert.equal(validateSafeIdResult("node id", "bad/node").ok, false);
+  assert.equal(validateSafeIdResult("node id", ".hidden").ok, false);
 });
 
 test("resolvePathInside rejects symlink escapes after canonicalization", () => {

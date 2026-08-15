@@ -13,7 +13,7 @@ export interface ResolvedPathPolicy {
   relativePath: string;
 }
 
-export function validateSafeId(label: string, id: string): PolicyResult<string> {
+export function validateSafeIdResult(label: string, id: string): PolicyResult<string> {
   const diagnostics: PolicyDiagnostic[] = [];
   if (id.length === 0) {
     diagnostics.push(policyError("ID_EMPTY", `${label} cannot be empty`));

@@ -18,7 +18,7 @@ import {
   type RunMetadataDocument,
   type RunMetadataWorkflow,
   type RunState,
-  validateSafeId
+  validateSafeIdOrThrow
 } from "@ultrafuzz/artifacts";
 
 import type {
@@ -266,7 +266,7 @@ export async function queryRunEvents(input: {
 
 function checkedRunLayout(runsRoot: string, runId: string) {
   try {
-    const safeRunId = validateSafeId(runId, "run ID");
+    const safeRunId = validateSafeIdOrThrow(runId, "run ID");
     const layout = layoutForRunRoot(path.join(runsRoot, safeRunId), safeRunId);
     assertPathInside(runsRoot, layout.root, "run root");
     if (lstatIfPresent(runsRoot) !== undefined) {

@@ -1,4 +1,9 @@
-import { normalizeRelativePath, splitPathComponents, validateSafeId, validateSafeRelativePath } from "./path-policy.js";
+import {
+  normalizeRelativePath,
+  splitPathComponents,
+  validateSafeIdResult,
+  validateSafeRelativePath
+} from "./path-policy.js";
 import { type PolicyDiagnostic, type PolicyResult, policyError, policyResult } from "./types.js";
 
 export interface MaterializeCopySelection {
@@ -224,7 +229,7 @@ function validateMaterializePathSegments(label: string, selectedPath: string): P
   const normalized = normalizeRelativePath(selectedPath);
   const diagnostics: PolicyDiagnostic[] = [];
   for (const component of splitPathComponents(normalized)) {
-    diagnostics.push(...validateSafeId(`${label} path segment`, component).diagnostics);
+    diagnostics.push(...validateSafeIdResult(`${label} path segment`, component).diagnostics);
   }
   return policyResult(diagnostics, normalized);
 }
@@ -236,7 +241,7 @@ function validateCleanSelectionShape(selection: string): PolicyResult<string> {
   const [root, firstId, scope, scopedId] = components;
   if (root === "runs") {
     if (firstId !== undefined) {
-      diagnostics.push(...validateSafeId("clean run ID", firstId).diagnostics);
+      diagnostics.push(...validateSafeIdResult("clean run ID", firstId).diagnostics);
     }
     if (scope !== undefined && scope !== "artifacts" && scope !== "workspaces") {
       diagnostics.push(
@@ -247,11 +252,11 @@ function validateCleanSelectionShape(selection: string): PolicyResult<string> {
       );
     }
     if (scopedId !== undefined) {
-      diagnostics.push(...validateSafeId("clean generated selection ID", scopedId).diagnostics);
+      diagnostics.push(...validateSafeIdResult("clean generated selection ID", scopedId).diagnostics);
     }
   } else if (root === "artifacts" || root === "workspaces") {
     if (firstId !== undefined) {
-      diagnostics.push(...validateSafeId("clean generated selection ID", firstId).diagnostics);
+      diagnostics.push(...validateSafeIdResult("clean generated selection ID", firstId).diagnostics);
     }
   }
   return policyResult(diagnostics, normalized);

@@ -11,6 +11,13 @@ export const WORKSPACE_PATCH_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:wo
 const gitObjectId = z.string().regex(/^[0-9a-f]{40,64}$/u);
 const sha256 = z.string().regex(/^[0-9a-f]{64}$/u);
 const WORKSPACE_PATCH_SEGMENT = /^[A-Za-z0-9._-]{1,128}$/u;
+const SENSITIVE_WORKSPACE_PATCH_SEGMENTS = new Set(
+  [".git", ".ultrafuzz", ".smithers", "node_modules", "artifacts", ".envrc", ".npmrc"].map(policyPathSegmentKey)
+);
+const SENSITIVE_ROOT_JSON_PATTERN =
+  "(^|/)(?:\\.[gG][iI][tT]|\\.[uU][lL][tT][rR][aA][fF][uU][zZ][zZ]|\\.[sS][mM][iI][tT][hH][eE][rR][sS]|[nN][oO][dD][eE]_[mM][oO][dD][uU][lL][eE][sS]|[aA][rR][tT][iI][fF][aA][cC][tT][sS])(?:/|$)";
+const SENSITIVE_ENV_JSON_PATTERN = "(^|/)\\.[eE][nN][vV](?:\\.|/|$)";
+const SENSITIVE_CONFIG_JSON_PATTERN = "(^|/)(?:\\.[eE][nN][vV][rR][cC]|\\.[nN][pP][mM][rR][cC])(?:/|$)";
 
 /** Normalize a target-relative Git path while allowing ordinary dotfiles. */
 export function normalizeWorkspacePatchPath(value: string, label = "workspace patch file path"): string {
@@ -52,14 +59,17 @@ const workspacePatchPath = z
 
 function isSafeWorkspacePatchPath(value: string): boolean {
   return !value.split("/").some((segment) => {
+    const policySegment = policyPathSegmentKey(segment);
     return (
-      [".git", ".ultrafuzz", ".smithers", "node_modules", "artifacts"].includes(segment) ||
-      segment === ".env" ||
-      segment.startsWith(".env.") ||
-      segment === ".envrc" ||
-      segment === ".npmrc"
+      SENSITIVE_WORKSPACE_PATCH_SEGMENTS.has(policySegment) ||
+      policySegment === ".env" ||
+      policySegment.startsWith(".env.")
     );
   });
+}
+
+function policyPathSegmentKey(segment: string): string {
+  return segment.normalize("NFC").toLowerCase();
 }
 
 export const workspacePatchFileSchema = z.strictObject({ path: workspacePatchPath });
@@ -153,9 +163,9 @@ export const workspacePatchJsonSchema = {
               { not: { pattern: "^[A-Za-z]:" } },
               { not: { pattern: "(^|/)\\.(?:/|$)" } },
               { not: { pattern: "(^|/)\\.\\.(?:/|$)" } },
-              { not: { pattern: "(^|/)(?:\\.git|\\.ultrafuzz|\\.smithers|node_modules|artifacts)(?:/|$)" } },
-              { not: { pattern: "(^|/)\\.env(?:\\.|/|$)" } },
-              { not: { pattern: "(^|/)(?:\\.envrc|\\.npmrc)(?:/|$)" } }
+              { not: { pattern: SENSITIVE_ROOT_JSON_PATTERN } },
+              { not: { pattern: SENSITIVE_ENV_JSON_PATTERN } },
+              { not: { pattern: SENSITIVE_CONFIG_JSON_PATTERN } }
             ]
           },
           diff_bytes_at_least: { type: "integer", minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
@@ -179,9 +189,9 @@ export const workspacePatchJsonSchema = {
               { not: { pattern: "^[A-Za-z]:" } },
               { not: { pattern: "(^|/)\\.(?:/|$)" } },
               { not: { pattern: "(^|/)\\.\\.(?:/|$)" } },
-              { not: { pattern: "(^|/)(?:\\.git|\\.ultrafuzz|\\.smithers|node_modules|artifacts)(?:/|$)" } },
-              { not: { pattern: "(^|/)\\.env(?:\\.|/|$)" } },
-              { not: { pattern: "(^|/)(?:\\.envrc|\\.npmrc)(?:/|$)" } }
+              { not: { pattern: SENSITIVE_ROOT_JSON_PATTERN } },
+              { not: { pattern: SENSITIVE_ENV_JSON_PATTERN } },
+              { not: { pattern: SENSITIVE_CONFIG_JSON_PATTERN } }
             ]
           }
         }

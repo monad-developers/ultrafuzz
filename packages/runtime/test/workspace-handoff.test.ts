@@ -81,6 +81,26 @@ test("rejects a workspace handoff that mutates declared production source", () =
   }
 });
 
+test("matches protected roots after Unicode and case normalization", () => {
+  const root = fixture();
+  try {
+    const baseline = captureWorkspaceTree(root);
+    mkdirSync(path.join(root, "SRC"), { recursive: true });
+    writeFileSync(path.join(root, "SRC", "Injected.sol"), "contract Injected {}\n");
+
+    assert.throws(
+      () => captureWorkspacePatch(root, baseline, ["src"]),
+      /source-snapshot violation: workspace patch modifies protected production source: SRC\/Injected\.sol/u
+    );
+    assert.throws(
+      () => captureWorkspacePatch(root, baseline, ["src", "SRC"]),
+      /production source roots must be unique after Unicode and case normalization/u
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("records source preservation while allowing harness and runtime artifact writes", () => {
   const root = fixture();
   try {
