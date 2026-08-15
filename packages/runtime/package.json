@@ -37,7 +37,7 @@
   },
   "devDependencies": {
     "@moonshot-ai/kimi-code": "0.29.1",
-    "@types/proper-lockfile": "^4.1.4",
+    "@types/proper-lockfile": "4.1.4",
     "smthrs": "0.34.0"
   }
 }

@@ -10,6 +10,7 @@ import {
   GITHUB_HTTPS_SUBMODULE_CONFIG,
   inspectPinnedSource,
   materializePinnedSource,
+  materializePinnedSourceFromLocalFixtureForTest,
   PINNED_SOURCE_BRANCH,
   PINNED_SOURCE_REF,
   readPinnedSourceProof,
@@ -84,7 +85,7 @@ describe("pinned benchmark source", () => {
     const destination = path.join(fixture.root, "sanitized");
     const proofPath = path.join(fixture.root, "proof.json");
 
-    const proof = await materializePinnedSource({
+    const proof = await materializePinnedSourceFromLocalFixtureForTest({
       repository: fixture.repository,
       revision: fixture.pinned,
       destination,
@@ -127,7 +128,7 @@ describe("pinned benchmark source", () => {
   it("rejects a pinned checkout with hidden unreachable commit objects", async () => {
     const fixture = sourceRepository();
     const destination = path.join(fixture.root, "hidden-commit");
-    await materializePinnedSource({
+    await materializePinnedSourceFromLocalFixtureForTest({
       repository: fixture.repository,
       revision: fixture.pinned,
       destination
@@ -156,9 +157,9 @@ describe("pinned benchmark source", () => {
     const gitProbe = installGitInvocationProbe(fixture.root);
     process.env.GIT_ALLOW_PROTOCOL = "file";
     process.env.PATH = `${gitProbe.bin}${path.delimiter}${previousPath ?? ""}`;
-    let proof: Awaited<ReturnType<typeof materializePinnedSource>>;
+    let proof: Awaited<ReturnType<typeof materializePinnedSourceFromLocalFixtureForTest>>;
     try {
-      proof = await materializePinnedSource({
+      proof = await materializePinnedSourceFromLocalFixtureForTest({
         repository: fixture.repository,
         revision: fixture.pinned,
         destination
@@ -232,7 +233,7 @@ describe("pinned benchmark source", () => {
     const fixture = sourceRepository();
 
     await expect(
-      materializePinnedSource({
+      materializePinnedSourceFromLocalFixtureForTest({
         repository: fixture.repository,
         revision: "main",
         destination: path.join(fixture.root, "symbolic")
@@ -240,12 +241,32 @@ describe("pinned benchmark source", () => {
     ).rejects.toThrow(/full 40-character commit/u);
   });
 
+  it("rejects unsafe controller repository transports and option operands", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-pinned-unsafe-remote-"));
+    roots.push(root);
+    for (const repository of [
+      "ext::sh -c malware",
+      "file::/etc/passwd",
+      "file:///etc/passwd",
+      "/tmp/local-repository",
+      "--upload-pack=x"
+    ]) {
+      await expect(
+        materializePinnedSource({
+          repository,
+          revision: "a".repeat(40),
+          destination: path.join(root, crypto.createHash("sha256").update(repository).digest("hex"))
+        })
+      ).rejects.toThrow(/safe Git operand|HTTPS URL/u);
+    }
+  });
+
   it("removes a partial destination when source verification fails", async () => {
     const fixture = sourceRepository();
     const destination = path.join(fixture.root, "mismatch");
 
     await expect(
-      materializePinnedSource({
+      materializePinnedSourceFromLocalFixtureForTest({
         repository: fixture.repository,
         revision: "f".repeat(40),
         destination
@@ -269,9 +290,9 @@ describe("pinned benchmark source", () => {
     process.env.GIT_CONFIG_GLOBAL = "/dev/null";
     process.env.GIT_CONFIG_SYSTEM = "/dev/null";
     process.env.GIT_CONFIG_NOSYSTEM = "1";
-    let proof: Awaited<ReturnType<typeof materializePinnedSource>>;
+    let proof: Awaited<ReturnType<typeof materializePinnedSourceFromLocalFixtureForTest>>;
     try {
-      proof = await materializePinnedSource({
+      proof = await materializePinnedSourceFromLocalFixtureForTest({
         repository: fixture.repository,
         revision: fixture.pinned,
         destination,
@@ -335,7 +356,7 @@ describe("pinned benchmark source", () => {
     const fixture = referenceSourceRepository();
     const destination = path.join(fixture.root, "intact");
 
-    const proof = await materializePinnedSource({
+    const proof = await materializePinnedSourceFromLocalFixtureForTest({
       repository: fixture.repository,
       revision: fixture.pinned,
       destination
@@ -352,7 +373,7 @@ describe("pinned benchmark source", () => {
     const destination = path.join(fixture.root, "absent");
 
     await expect(
-      materializePinnedSource({
+      materializePinnedSourceFromLocalFixtureForTest({
         repository: fixture.repository,
         revision: fixture.pinned,
         destination,
@@ -367,7 +388,7 @@ describe("pinned benchmark source", () => {
 
     for (const heldOut of [["../outside"], ["/etc"], [".git"], ["reference/../../escape"]]) {
       await expect(
-        materializePinnedSource({
+        materializePinnedSourceFromLocalFixtureForTest({
           repository: fixture.repository,
           revision: fixture.pinned,
           destination: path.join(fixture.root, "escape"),
@@ -381,7 +402,7 @@ describe("pinned benchmark source", () => {
     const fixture = referenceSourceRepository();
     const destination = path.join(fixture.root, "widened");
 
-    await materializePinnedSource({
+    await materializePinnedSourceFromLocalFixtureForTest({
       repository: fixture.repository,
       revision: fixture.pinned,
       destination,
@@ -403,7 +424,7 @@ describe("pinned benchmark source", () => {
     const fixture = referenceSourceRepository();
     const destination = path.join(fixture.root, "tampered");
 
-    await materializePinnedSource({
+    await materializePinnedSourceFromLocalFixtureForTest({
       repository: fixture.repository,
       revision: fixture.pinned,
       destination,
@@ -544,14 +565,24 @@ function installGitInvocationProbe(root: string): { bin: string; log: string } {
   fs.mkdirSync(bin);
   fs.writeFileSync(
     wrapper,
-    ["#!/bin/sh", `printf '%s\\n' "$*" >> ${shellQuote(log)}`, `exec ${shellQuote(realGit)} "$@"`, ""].join("\n"),
+    [
+      "#!/usr/bin/env node",
+      'import { appendFileSync } from "node:fs";',
+      'import { spawnSync } from "node:child_process";',
+      `const args = process.argv.slice(2);`,
+      `appendFileSync(${JSON.stringify(log)}, args.join(" ") + "\\n");`,
+      // The production invocation remains logged exactly as issued. This
+      // integration fixture alone rewrites the explicit denial so local
+      // on-disk test repositories can stand in for HTTPS remotes.
+      'const fixtureArgs = args.map((arg) => arg === "protocol.file.allow=never" ? "protocol.file.allow=always" : arg);',
+      `const result = spawnSync(${JSON.stringify(realGit)}, fixtureArgs, { stdio: "inherit" });`,
+      "if (result.error !== undefined) throw result.error;",
+      "process.exit(result.status ?? 1);",
+      ""
+    ].join("\n"),
     { mode: 0o700 }
   );
   return { bin, log };
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
 function executableOnPath(name: string): string {

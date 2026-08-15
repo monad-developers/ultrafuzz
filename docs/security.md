@@ -33,6 +33,57 @@ Ultrafuzz does not maintain an agent command allowlist, network allowlist, or
 sandbox approval flow. Treat agent execution as trusted local execution, not as
 an isolation boundary.
 
+## Controller-owned Git operations
+
+Git operations performed by Ultrafuzz controllers use an explicit transport
+policy: the default, `ext`, and `file` protocols are denied and credential-free
+HTTPS is allowed. Target-controlled remotes and refs are validated before they
+become Git operands, and option separators are used where Git supports them.
+Recursive submodule hydration uses the same protocol policy.
+
+This policy is intentionally limited to controller fetch, clone, and submodule
+helpers. It is not an agent command allowlist or network allowlist and does not
+change the unrestricted execution modes described above.
+
+## Dependency supply-chain policy
+
+Every external direct dependency in a workspace manifest is pinned to one exact
+registry version. Internal workspace packages use `workspace:*`. The committed
+`pnpm-lock.yaml` and its integrity hashes remain the primary reproducibility
+control; exact manifest pins make the intended update boundary unambiguous when
+that lockfile is regenerated.
+
+Run `pnpm security:dependencies` after changing a manifest or lockfile. CI and
+release validation run the same gate. It executes `pnpm audit --prod --json`
+and blocks High or Critical production advisories unless they have a current
+entry in `.github/dependency-advisory-exceptions.json`. An exception must name
+the GHSA and package, severity, accountable GitHub owner, tracking issue,
+reachability analysis, rationale, disposition, and expiry. Exceptions expire
+within 90 days, fail closed when stale, and must be removed when the advisory no
+longer appears.
+
+Security owners triage new High or Critical advisories within two business
+days. Critical findings target remediation within seven days and High findings
+within 30 days. When that is not possible, the tracking issue records the
+reason, compensating controls, and a time-bounded renewal decision; exceptions
+are never a permanent suppression mechanism.
+
+Benchmark ZIP input is parsed with `adm-zip` 0.6.0 or newer through a bounded,
+regular-file snapshot. The 256 MiB compressed-input ceiling matches the existing
+report ZIP and public benchmark bundle compatibility envelope while staying far
+below Node's maximum `Buffer` allocation. Canonical-member, duplicate/alias,
+entry-count, selected-entry expansion, and strict JSON limits remain layered
+behind the patched parser.
+
+The weekly Package Provenance Drift workflow separately observes publisher,
+maintainer, repository, integrity, signing-key, and SLSA provenance metadata
+for the four security-sensitive packages recorded in
+`.github/package-provenance-baseline.json`. Its report is retained as a workflow
+artifact and drift fails only the standalone scheduled workflow, so it does not
+become a pull-request merge gate. Review drift against the package's official
+repository and npm ownership history; update the baseline only in a reviewed
+pull request after the ownership or release change is independently verified.
+
 ## Agent process environment
 
 Workflow processes receive the active agents' configured API-key variables,

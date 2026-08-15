@@ -1,0 +1,43 @@
+name: Package Provenance Drift
+
+on:
+  schedule:
+    - cron: "17 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-critical-packages:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Record and compare registry provenance
+        id: provenance
+        continue-on-error: true
+        run: node scripts/check-package-provenance.mjs --report .ultrafuzz/package-provenance.report.json
+
+      - name: Upload provenance observation
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: package-provenance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .ultrafuzz/package-provenance.report.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Escalate publisher or provenance drift
+        if: steps.provenance.outcome == 'failure'
+        run: |
+          echo "::error title=Critical package provenance drift::Review the uploaded provenance report and update or reject the baseline change."
+          exit 1

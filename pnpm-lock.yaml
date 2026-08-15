@@ -16,37 +16,37 @@ importers:
   .:
     devDependencies:
       '@eslint/js':
-        specifier: ^10.0.1
+        specifier: 10.0.1
         version: 10.0.1(eslint@10.6.0)
       '@types/node':
-        specifier: ^24.0.0
+        specifier: 24.13.2
         version: 24.13.2
       '@ultrafuzz/modal':
         specifier: workspace:*
         version: link:packages/modal
       eslint:
-        specifier: ^10.6.0
+        specifier: 10.6.0
         version: 10.6.0
       eslint-config-prettier:
-        specifier: ^10.1.8
+        specifier: 10.1.8
         version: 10.1.8(eslint@10.6.0)
       globals:
-        specifier: ^17.7.0
+        specifier: 17.7.0
         version: 17.7.0
       prettier:
-        specifier: ^3.9.4
+        specifier: 3.9.4
         version: 3.9.4
       typescript:
-        specifier: ^5.8.3
+        specifier: 5.9.3
         version: 5.9.3
       typescript-eslint:
-        specifier: ^8.62.1
+        specifier: 8.62.1
         version: 8.62.1(eslint@10.6.0)(typescript@5.9.3)
       vitest:
-        specifier: ^3.2.4
+        specifier: 3.2.6
         version: 3.2.6(@types/debug@4.1.13)(@types/node@24.13.2)(yaml@2.9.0)
       yaml:
-        specifier: ^2.8.0
+        specifier: 2.9.0
         version: 2.9.0
 
   packages/artifacts:
@@ -55,22 +55,22 @@ importers:
         specifier: workspace:*
         version: link:../security
       ajv:
-        specifier: ^8.20.0
+        specifier: 8.20.0
         version: 8.20.0
       ajv-formats:
-        specifier: ^3.0.1
+        specifier: 3.0.1
         version: 3.0.1(ajv@8.20.0)
       zod:
-        specifier: ^4.4.3
+        specifier: 4.4.3
         version: 4.4.3
 
   packages/cli:
     dependencies:
       '@oclif/core':
-        specifier: ^4.11.11
+        specifier: 4.11.11
         version: 4.11.11
       '@resvg/resvg-js':
-        specifier: ^2.6.2
+        specifier: 2.6.2
         version: 2.6.2
       '@ultrafuzz/artifacts':
         specifier: workspace:*
@@ -100,17 +100,17 @@ importers:
         specifier: workspace:*
         version: link:../topology
       adm-zip:
-        specifier: ^0.5.18
-        version: 0.5.18
+        specifier: 0.6.0
+        version: 0.6.0
       tar-stream:
-        specifier: ^3.2.0
+        specifier: 3.2.0
         version: 3.2.0
     devDependencies:
       '@types/adm-zip':
-        specifier: ^0.5.8
+        specifier: 0.5.8
         version: 0.5.8
       '@types/tar-stream':
-        specifier: ^3.1.4
+        specifier: 3.1.4
         version: 3.1.4
 
   packages/config:
@@ -122,13 +122,13 @@ importers:
         specifier: workspace:*
         version: link:../security
       smol-toml:
-        specifier: ^1.7.0
+        specifier: 1.7.0
         version: 1.7.0
       yaml:
-        specifier: ^2.8.0
+        specifier: 2.9.0
         version: 2.9.0
       zod:
-        specifier: ^4.4.3
+        specifier: 4.4.3
         version: 4.4.3
 
   packages/dashboard:
@@ -152,35 +152,35 @@ importers:
         specifier: workspace:*
         version: link:../topology
       yaml:
-        specifier: ^2.8.0
+        specifier: 2.9.0
         version: 2.9.0
     devDependencies:
       '@types/react':
-        specifier: ^19.1.8
+        specifier: 19.2.17
         version: 19.2.17
       '@types/react-dom':
-        specifier: ^19.1.6
+        specifier: 19.2.3
         version: 19.2.3(@types/react@19.2.17)
       '@vitejs/plugin-react':
-        specifier: ^5.0.0
+        specifier: 5.2.0
         version: 5.2.0(vite@7.3.6(@types/node@24.13.2)(yaml@2.9.0))
       '@xyflow/react':
-        specifier: ^12.8.4
+        specifier: 12.11.1
         version: 12.11.1(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(immer@11.1.15)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       ajv:
-        specifier: ^8.20.0
+        specifier: 8.20.0
         version: 8.20.0
       ajv-formats:
-        specifier: ^3.0.1
+        specifier: 3.0.1
         version: 3.0.1(ajv@8.20.0)
       react:
-        specifier: ^19.1.0
+        specifier: 19.2.7
         version: 19.2.7
       react-dom:
-        specifier: ^19.1.0
+        specifier: 19.2.7
         version: 19.2.7(react@19.2.7)
       vite:
-        specifier: ^7.0.0
+        specifier: 7.3.6
         version: 7.3.6(@types/node@24.13.2)(yaml@2.9.0)
 
   packages/evals:
@@ -198,14 +198,14 @@ importers:
         specifier: 4.1.2
         version: 4.1.2
       yaml:
-        specifier: ^2.8.0
+        specifier: 2.9.0
         version: 2.9.0
       zod:
-        specifier: ^4.4.3
+        specifier: 4.4.3
         version: 4.4.3
     devDependencies:
       '@types/proper-lockfile':
-        specifier: ^4.1.4
+        specifier: 4.1.4
         version: 4.1.4
 
   packages/evmbench:
@@ -213,11 +213,14 @@ importers:
       '@ultrafuzz/artifacts':
         specifier: workspace:*
         version: link:../artifacts
+      '@ultrafuzz/security':
+        specifier: workspace:*
+        version: link:../security
       yaml:
-        specifier: ^2.8.0
+        specifier: 2.9.0
         version: 2.9.0
       zod:
-        specifier: ^4.4.3
+        specifier: 4.4.3
         version: 4.4.3
 
   packages/modal:
@@ -244,23 +247,23 @@ importers:
         specifier: 4.1.2
         version: 4.1.2
       smol-toml:
-        specifier: ^1.7.0
+        specifier: 1.7.0
         version: 1.7.0
       tar-stream:
-        specifier: ^3.2.0
+        specifier: 3.2.0
         version: 3.2.0
       yaml:
-        specifier: ^2.9.0
+        specifier: 2.9.0
         version: 2.9.0
       zod:
-        specifier: ^4.4.3
+        specifier: 4.4.3
         version: 4.4.3
     devDependencies:
       '@types/proper-lockfile':
-        specifier: ^4.1.4
+        specifier: 4.1.4
         version: 4.1.4
       '@types/tar-stream':
-        specifier: ^3.1.4
+        specifier: 3.1.4
         version: 3.1.4
 
   packages/prompts:
@@ -269,7 +272,7 @@ importers:
         specifier: workspace:*
         version: link:../artifacts
       yaml:
-        specifier: ^2.8.0
+        specifier: 2.9.0
         version: 2.9.0
 
   packages/references:
@@ -277,8 +280,11 @@ importers:
       '@ultrafuzz/artifacts':
         specifier: workspace:*
         version: link:../artifacts
+      '@ultrafuzz/security':
+        specifier: workspace:*
+        version: link:../security
       yaml:
-        specifier: ^2.8.0
+        specifier: 2.9.0
         version: 2.9.0
 
   packages/runtime:
@@ -321,7 +327,7 @@ importers:
         specifier: 0.29.1
         version: 0.29.1
       '@types/proper-lockfile':
-        specifier: ^4.1.4
+        specifier: 4.1.4
         version: 4.1.4
       smthrs:
         specifier: 0.34.0
@@ -341,7 +347,7 @@ importers:
         specifier: workspace:*
         version: link:../references
       yaml:
-        specifier: ^2.8.0
+        specifier: 2.9.0
         version: 2.9.0
 
 packages:
@@ -2976,9 +2982,9 @@ packages:
     engines: {node: '>=0.4.0'}
     hasBin: true
 
-  adm-zip@0.5.18:
-    resolution: {integrity: sha512-ufJnssQGbxzLNS1Ho9bCtX4rQKCCvoVuDLHoJyc3F9dOGDB4BkWs2Ci0kv53lqocAEQ/Cbi+I2XCsNYGqVYqng==}
-    engines: {node: '>=12.0'}
+  adm-zip@0.6.0:
+    resolution: {integrity: sha512-XleryMhbuksdKtofnWZ9Sk+4CUTbms4Mb/EU32SZwToAyZ5RgVos/ki8n+yr0LWHOGKuakbXTuuYNHLQjhddgg==}
+    engines: {node: '>=14.0'}
 
   ai@7.0.37:
     resolution: {integrity: sha512-stF+SEQJgKY3Qfe3FwNzqUrehHviOp2l7LemoI8YMOa0Zk5PxKsRNgUk3cHXz0RAue9RRyCAis2fz6LSCP6EKw==}
@@ -3104,12 +3110,12 @@ packages:
     resolution: {integrity: sha512-2cGmJupaNgg+QUwVLAucDuWuoMZ6EX9iHDRswZ5lsNYEmwPaRknMPCLZz07yTzVq/83p4o/wzbDZbBrTvGGTIw==}
     engines: {node: '>=18'}
 
-  brace-expansion@2.1.1:
-    resolution: {integrity: sha512-WR1cURNjuvBLMZBMbqM0UoE+WAfdUcEV1ccD8PVBVOI+Z3ND4+SZbN8RsfT2bMuG1qwz5RFvPukSZm5fF2D5eA==}
+  brace-expansion@2.1.4:
+    resolution: {integrity: sha512-hGfVzPxthbf3+2yjg/RBs60cB0FhqBS/zvdV/4wn4/BmN0bNMMHPc4V/BbFieqf1TKAGGAHnY4eSjajCl0f2Xg==}
 
-  brace-expansion@5.0.7:
-    resolution: {integrity: sha512-7oFy703dxfY3/NLxC1fh2SUCQ0H9rmAY+5EpDVfXjUTTs+HEwR2nYaqLv+GWcTsumwxPfiz6CzCNkwXwBUwqCA==}
-    engines: {node: 18 || 20 || >=22}
+  brace-expansion@5.0.9:
+    resolution: {integrity: sha512-ScQ4IuvIEF1TMlP7Zt+vjJ//9zlPb2SDcxWxM3bk8s6t6GGdJ7KO1dCcTidOPJKePW30LE/2cT7wCyPho9/Wxg==}
+    engines: {node: 20 || >=22}
 
   browserslist@4.28.4:
     resolution: {integrity: sha512-MTc8i/x9jBQd1iMw2CFGS+rwMa07eYjLR0CCTLDACl9xhxy+nIs3KeML/biicXtk9JrZ6dnnTatmc7ErPXIxqw==}
@@ -3779,8 +3785,8 @@ packages:
   fast-string-width@3.0.2:
     resolution: {integrity: sha512-gX8LrtNEI5hq8DVUfRQMbr5lpaS4nMIWV+7XEbXk2b8kiQIizgnlr12B4dA3ZEx3308ze0O4Q1R+cHts8kyUJg==}
 
-  fast-uri@3.1.4:
-    resolution: {integrity: sha512-8JnbkQ4juDyvYs4mgFGQqg4yCYtFDtUtmp2QIQq11ZZe5CFQ5wcqm1rqDgAh/QdMySuBnPzMUiJUNZG5N/AiQw==}
+  fast-uri@3.1.5:
+    resolution: {integrity: sha512-gHwA1O9LDIcKunMKhObS/HimwtehO1nPUECKAu5TpKgaO19fcWEl4bliWe1jWxVFvIXztJjjQ4L8XQ1EU9f7Jw==}
 
   fast-wrap-ansi@0.2.2:
     resolution: {integrity: sha512-7F2Fl+TjRSenLqlU3UjSH0iyqopqoZIu7eZVpEirP2g1GtWa2G/ecEmBdgz31+Mxr+ELclgg6sokpSFIQiZ02Q==}
@@ -4350,11 +4356,6 @@ packages:
   msgpackr@2.0.5:
     resolution: {integrity: sha512-cef05H/dSYpLpqp3sj/qyZh5vhUYCalnaLO7j1yOmpsR0y/XwLVtK7r5gn+U/F7CTEfMowcGhlUQJDLcLf7jcA==}
 
-  nanoid@3.3.15:
-    resolution: {integrity: sha512-y7Wygv/7mEOvxTuEQDB8StXdMRBWf1kR/tlhAzBRUFkB2jfcLOAxO/SHmOO2zgz1pVgK29/kyupn059/bCHdjA==}
-    engines: {node: ^10 || ^12 || ^13.7 || ^14 || >=15.0.1}
-    hasBin: true
-
   nanoid@3.3.16:
     resolution: {integrity: sha512-bzlKTyNJ7+LdGIIwy8ijFpIqEQIvafahV7eYykJ8Cvh42EdJeODoJ6gUJXpQJvej1BddH8OqTXZNE/KfbWAu8Q==}
     engines: {node: ^10 || ^12 || ^13.7 || ^14 || >=15.0.1}
@@ -4513,10 +4514,6 @@ packages:
 
   points-on-path@0.2.1:
     resolution: {integrity: sha512-25ClnWWuw7JbWZcgqY/gJ4FQWadKxGWk+3kR/7kD0tCaDtPPMj7oHu2ToLaVhfpnHrZzYby2w6tUA0eOIuUg8g==}
-
-  postcss@8.5.16:
-    resolution: {integrity: sha512-vuwillviilfKZsg0VGj5R/YwwcHx4SLsIOI/7K6mQkWx+l5cUHTjj5g0AasTBcyXsbfTgrwsUNmVUb5xVwyPwg==}
-    engines: {node: ^10 || ^12 || >=14}
 
   postcss@8.5.23:
     resolution: {integrity: sha512-g50586zr4bZmwFiTlflMu8E0bDTb5I5gertgwAKmsdUlTQIhZtunzUlD1WSzwcVWPoAVpsrA6vlfCD7oXvRwgg==}
@@ -9839,7 +9836,7 @@ snapshots:
 
   acorn@8.17.0: {}
 
-  adm-zip@0.5.18: {}
+  adm-zip@0.6.0: {}
 
   ai@7.0.37(zod@4.4.3):
     dependencies:
@@ -9862,7 +9859,7 @@ snapshots:
   ajv@8.20.0:
     dependencies:
       fast-deep-equal: 3.1.3
-      fast-uri: 3.1.4
+      fast-uri: 3.1.5
       json-schema-traverse: 1.0.0
       require-from-string: 2.0.2
 
@@ -9947,11 +9944,11 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  brace-expansion@2.1.1:
+  brace-expansion@2.1.4:
     dependencies:
       balanced-match: 1.0.2
 
-  brace-expansion@5.0.7:
+  brace-expansion@5.0.9:
     dependencies:
       balanced-match: 4.0.4
 
@@ -10617,7 +10614,7 @@ snapshots:
     dependencies:
       fast-string-truncated-width: 3.0.3
 
-  fast-uri@3.1.4: {}
+  fast-uri@3.1.5: {}
 
   fast-wrap-ansi@0.2.2:
     dependencies:
@@ -11449,11 +11446,11 @@ snapshots:
 
   minimatch@10.2.5:
     dependencies:
-      brace-expansion: 5.0.7
+      brace-expansion: 5.0.9
 
   minimatch@5.1.9:
     dependencies:
-      brace-expansion: 2.1.1
+      brace-expansion: 2.1.4
 
   modal@0.9.0:
     dependencies:
@@ -11481,8 +11478,6 @@ snapshots:
   msgpackr@2.0.5:
     optionalDependencies:
       msgpackr-extract: 3.0.4
-
-  nanoid@3.3.15: {}
 
   nanoid@3.3.16: {}
 
@@ -11641,12 +11636,6 @@ snapshots:
     dependencies:
       path-data-parser: 0.1.0
       points-on-curve: 0.2.0
-
-  postcss@8.5.16:
-    dependencies:
-      nanoid: 3.3.15
-      picocolors: 1.1.1
-      source-map-js: 1.2.1
 
   postcss@8.5.23:
     dependencies:
@@ -12648,7 +12637,7 @@ snapshots:
       esbuild: 0.28.1
       fdir: 6.5.0(picomatch@4.0.4)
       picomatch: 4.0.4
-      postcss: 8.5.16
+      postcss: 8.5.23
       rollup: 4.62.2
       tinyglobby: 0.2.17
     optionalDependencies:

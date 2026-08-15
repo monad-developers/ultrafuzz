@@ -11,6 +11,7 @@ import {
   readPinnedSubmoduleSnapshot,
   writePinnedSubmoduleSnapshot
 } from "@ultrafuzz/runtime";
+import { assertHttpsGitRemote, assertSafeGitOperand, CONTROLLER_GIT_PROTOCOL_CONFIG } from "@ultrafuzz/security";
 
 import {
   MODAL_PINNED_HOLDOUT_SCHEMA_ID,
@@ -31,6 +32,7 @@ export const PINNED_SOURCE_PROOF_SCHEMA_VERSION = "ultrafuzz.pinned-source-proof
  * or credential-bearing remote in the materialized checkout.
  */
 export const GITHUB_HTTPS_SUBMODULE_CONFIG = [
+  ...CONTROLLER_GIT_PROTOCOL_CONFIG,
   "-c",
   "url.https://github.com/.insteadOf=git@github.com:",
   "-c",
@@ -57,14 +59,7 @@ const HOLDOUT_COMMIT_MESSAGE = "Withhold benchmark reference paths";
 export type PinnedHoldoutEntry = StrictModalPinnedHoldoutEntry;
 export type PinnedHoldout = StrictModalPinnedHoldoutDocument;
 export type PinnedSourceProof = StrictModalPinnedSourceProofDocument;
-
-/**
- * Fetch exactly one pinned commit into a newly initialized repository. Unlike
- * `git clone`, this never imports the remote's default branch, tags, reflogs,
- * or remote-tracking refs. The fetch-only metadata is removed before the
- * checkout is made available to Ultrafuzz or Smithers.
- */
-export async function materializePinnedSource(input: {
+export interface MaterializePinnedSourceInput {
   repository: string;
   revision: string;
   destination: string;
@@ -76,7 +71,36 @@ export async function materializePinnedSource(input: {
    */
   heldOutPaths?: readonly string[];
   signal?: AbortSignal;
-}): Promise<PinnedSourceProof> {
+}
+
+/**
+ * Fetch exactly one pinned commit into a newly initialized repository. Unlike
+ * `git clone`, this never imports the remote's default branch, tags, reflogs,
+ * or remote-tracking refs. The fetch-only metadata is removed before the
+ * checkout is made available to Ultrafuzz or Smithers.
+ */
+export async function materializePinnedSource(input: MaterializePinnedSourceInput): Promise<PinnedSourceProof> {
+  const repository = assertHttpsGitRemote(input.repository, "pinned benchmark repository");
+  return materializePinnedSourceWithGitConfig({ ...input, repository }, CONTROLLER_GIT_PROTOCOL_CONFIG);
+}
+
+/**
+ * @internal Test-only seam for deterministic, host-owned Git fixtures. It is
+ * deliberately omitted from the package's public index; production callers
+ * have no local/file transport path through `materializePinnedSource`.
+ */
+export async function materializePinnedSourceFromLocalFixtureForTest(
+  input: MaterializePinnedSourceInput
+): Promise<PinnedSourceProof> {
+  assertSafeGitOperand(input.repository, "local pinned-source test fixture");
+  if (!path.isAbsolute(input.repository)) throw new Error("local pinned-source test fixture must be an absolute path");
+  return materializePinnedSourceWithGitConfig(input, ["-c", "protocol.file.allow=always"]);
+}
+
+async function materializePinnedSourceWithGitConfig(
+  input: MaterializePinnedSourceInput,
+  remoteGitConfig: readonly string[]
+): Promise<PinnedSourceProof> {
   const revision = input.revision.toLowerCase();
   if (!fullSha.test(revision)) {
     throw new Error("pinned benchmark source revision must be a full 40-character commit");
@@ -90,6 +114,7 @@ export async function materializePinnedSource(input: {
     await git(
       destination,
       [
+        ...remoteGitConfig,
         "-c",
         "fetch.writeCommitGraph=false",
         "fetch",
@@ -97,6 +122,7 @@ export async function materializePinnedSource(input: {
         "--depth",
         "1",
         "--no-tags",
+        "--",
         input.repository,
         revision
       ],

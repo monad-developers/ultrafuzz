@@ -1,11 +1,11 @@
 import { z } from "zod/v4";
 
-import { MODAL_GIT_URL_PATTERN, MODAL_HTTPS_URL_PATTERN } from "./benchmark-config-patterns.js";
+import { MODAL_GIT_REF_PATTERN, MODAL_GIT_URL_PATTERN, MODAL_HTTPS_URL_PATTERN } from "./benchmark-config-patterns.js";
 import { MODAL_BENCHMARK_CONFIG_SCHEMA_ID, type StrictModalBenchmarkConfigDocument } from "./modal-contracts.js";
 import { MODAL_BENCHMARK_SCHEMA_VERSION } from "./defaults.js";
 
 const safeId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u);
-const gitRef = z.string().min(1).max(256);
+const gitRef = z.string().regex(MODAL_GIT_REF_PATTERN);
 const gitUrl = z.string().min(1).max(2048).regex(MODAL_GIT_URL_PATTERN);
 const fullSha = z.string().regex(/^[0-9a-f]{40}$/u);
 const relativeFile = z.string().regex(/^(?!\/)(?![A-Za-z]:[\\/])(?!.*(?:^|[\\/])\.\.(?:[\\/]|$)).+$/u);

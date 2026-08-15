@@ -7,7 +7,23 @@ export * from "./modal-documents.js";
 export * from "./modal-schema-registry.js";
 export * from "./modal-semantic-gates.js";
 export * from "./node-provider.js";
-export * from "./pinned-source.js";
+export {
+  GITHUB_HTTPS_SUBMODULE_CONFIG,
+  inspectPinnedSource,
+  materializePinnedSource,
+  normalizeHeldOutPaths,
+  PINNED_HOLDOUT_SCHEMA_VERSION,
+  PINNED_SOURCE_BRANCH,
+  PINNED_SOURCE_PROOF_SCHEMA_VERSION,
+  PINNED_SOURCE_REF,
+  readPinnedSourceProof
+} from "./pinned-source.js";
+export type {
+  MaterializePinnedSourceInput,
+  PinnedHoldout,
+  PinnedHoldoutEntry,
+  PinnedSourceProof
+} from "./pinned-source.js";
 export * from "./launch-state.js";
 export * from "./public-bundle.js";
 export * from "./public-eval-diagnostics.js";

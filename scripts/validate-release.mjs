@@ -14,6 +14,7 @@ const root = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const reportPath = releaseReportPath(readOption("--report") ?? ".ultrafuzz/release-validation.report.json");
 
 const gates = [
+  gate("dependency-policy", "Production dependency policy", "pnpm", ["-w", "security:dependencies"], ["G-SECURITY"]),
   gate("docs", "Documentation inventory", "pnpm", ["-w", "docs:check"], ["G-DOCS"]),
   gate("config", "Config package tests", "pnpm", ["--filter", "@ultrafuzz/config", "test"], ["G-CONFIG"]),
   gate(

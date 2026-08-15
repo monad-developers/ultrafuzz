@@ -2,26 +2,36 @@ import { Readable } from "node:stream";
 import { createGunzip } from "node:zlib";
 
 import AdmZip from "adm-zip";
-import { parseStrictJsonBytes } from "@ultrafuzz/artifacts";
+import { parseStrictJsonBytes, readRegularFileSnapshot } from "@ultrafuzz/artifacts";
 import tar from "tar-stream";
 
 const HANDOFF_PATH = "handoff/current-state.json";
 const MAX_JSON_BYTES = 64 * 1024 * 1024;
-const MAX_NESTED_ARCHIVE_BYTES = 512 * 1024 * 1024;
+// Keep whole-file ZIP parsing within the same 256 MiB compatibility envelope
+// already enforced for report ZIPs and public benchmark bundles elsewhere in
+// the product. adm-zip retains the compressed input, so a near-Buffer-max cap
+// would not be a meaningful memory boundary.
+export const MAX_BUNDLE_ARCHIVE_BYTES = 256 * 1024 * 1024;
+const MAX_NESTED_ARCHIVE_BYTES = MAX_BUNDLE_ARCHIVE_BYTES;
 const MAX_NESTED_UNCOMPRESSED_BYTES = 8 * 1024 * 1024 * 1024;
 const MAX_ZIP_ENTRIES = 10_000;
 
 export class BundleArchive {
   private readonly zip: AdmZip;
+  private readonly entriesByName: ReadonlyMap<string, AdmZip.IZipEntry>;
   readonly root: string;
 
   constructor(readonly archivePath: string) {
-    this.zip = new AdmZip(archivePath);
+    // Read through the regular-file snapshot boundary before the ZIP parser.
+    // Besides rejecting symlinks and concurrent replacement, this caps the
+    // compressed input the parser can retain in memory.
+    this.zip = new AdmZip(readRegularFileSnapshot(archivePath, MAX_BUNDLE_ARCHIVE_BYTES));
     const entries = this.zip.getEntries();
     if (entries.length > MAX_ZIP_ENTRIES) {
       throw new Error(`Benchmark handoff has too many ZIP entries: ${entries.length}/${MAX_ZIP_ENTRIES}`);
     }
-    const matches = entries.filter(
+    this.entriesByName = validateZipEntryNames(entries);
+    const matches = [...this.entriesByName.values()].filter(
       (entry) =>
         !entry.isDirectory &&
         (entry.entryName === HANDOFF_PATH || /^[A-Za-z0-9_.-]+\/handoff\/current-state\.json$/u.test(entry.entryName))
@@ -35,10 +45,8 @@ export class BundleArchive {
 
   readBuffer(relativePath: string, maximumBytes = MAX_JSON_BYTES): Buffer {
     const entryName = this.entryName(relativePath);
-    const matches = this.zip.getEntries().filter((entry) => !entry.isDirectory && entry.entryName === entryName);
-    if (matches.length !== 1)
-      throw new Error(`Expected exactly one archive member ${entryName}, found ${matches.length}`);
-    const entry = matches[0]!;
+    const entry = this.entriesByName.get(entryName);
+    if (entry === undefined || entry.isDirectory) throw new Error(`Expected exactly one archive member ${entryName}`);
     if (entry.header.size > maximumBytes) {
       throw new Error(`Archive member exceeds ${maximumBytes} bytes: ${entryName}`);
     }
@@ -68,6 +76,38 @@ export class BundleArchive {
     assertCanonicalRelativePath(relativePath);
     return this.root + relativePath;
   }
+}
+
+function validateZipEntryNames(entries: readonly AdmZip.IZipEntry[]): ReadonlyMap<string, AdmZip.IZipEntry> {
+  const byName = new Map<string, AdmZip.IZipEntry>();
+  const aliases = new Set<string>();
+  for (const entry of entries) {
+    const name = entry.entryName;
+    const withoutDirectorySlash = entry.isDirectory && name.endsWith("/") ? name.slice(0, -1) : name;
+    const segments = withoutDirectorySlash.split("/");
+    const canonical = segments.join("/") + (entry.isDirectory ? "/" : "");
+    if (
+      withoutDirectorySlash.length === 0 ||
+      name.includes("\\") ||
+      name.includes("\0") ||
+      [...name].some((character) => {
+        const code = character.codePointAt(0)!;
+        return code < 0x20 || code === 0x7f;
+      }) ||
+      name.startsWith("/") ||
+      segments.some((segment) => segment === "" || segment === "." || segment === ".." || segment.includes(":")) ||
+      canonical !== name
+    ) {
+      throw new Error(`Benchmark handoff contains a non-canonical ZIP member name: ${JSON.stringify(name)}`);
+    }
+    if (byName.has(name)) throw new Error(`Benchmark handoff contains duplicate ZIP member ${JSON.stringify(name)}`);
+    if (aliases.has(withoutDirectorySlash)) {
+      throw new Error(`Benchmark handoff contains aliased ZIP members at ${JSON.stringify(withoutDirectorySlash)}`);
+    }
+    byName.set(name, entry);
+    aliases.add(withoutDirectorySlash);
+  }
+  return byName;
 }
 
 export function assertCanonicalRelativePath(value: string): void {
