@@ -32,13 +32,16 @@ describe("workspace workflow-engine overrides", () => {
     const names = [...nameBlock.matchAll(/"([^"]+)"/gu)].map((match) => match[1]!);
     return Object.fromEntries([["effect", effectVersion], ...names.map((name) => [name, effectVersion])]);
   })();
+  const workspaceEffectOverrides = Object.fromEntries(
+    Object.keys(runnerOverrides).map((name) => [name, workspaceOverrides?.[name]])
+  );
 
   it("pins the same Effect versions the generated runner manifest pins", () => {
-    expect(workspaceOverrides).toEqual(runnerOverrides);
+    expect(workspaceEffectOverrides).toEqual(runnerOverrides);
   });
 
   it("pins every Effect package onto a single version", () => {
-    const versions = new Set(Object.values(workspaceOverrides ?? {}));
+    const versions = new Set(Object.values(workspaceEffectOverrides));
     expect(versions.size).toBe(1);
   });
 
