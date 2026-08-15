@@ -319,7 +319,7 @@ describe("prompt semantic anchors", () => {
     expect(implementation).toContain("Each entrypoint must test exactly one");
     expect(implementation).toContain("compare the public property entrypoints");
     expect(implementation).toContain("Recon's discovered/admitted test list");
-    expect(implementation).toContain("never report an omitted property as implemented");
+    expect(implementation).toMatch(/never\s+report an omitted property as implemented/u);
     expect(implementation).toContain("reference_expectations");
     expect(implementation).toContain("even when its priority is below the configured threshold");
     expect(campaign).toContain("Audit inherited handlers before the final Recon smoke");
