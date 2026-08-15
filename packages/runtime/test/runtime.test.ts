@@ -12530,7 +12530,7 @@ test("resume derives reset identities from the canonical nodes of a failed workf
 test("retry recovery remains stable across repeated syncs and records durable provenance", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
   const workflowRunId = "ultrafuzz-recovery-stable-status";
   const env = fakeLifecycleSmithersEnv(project, {
     inspect: workflowInspect({
@@ -12544,7 +12544,7 @@ test("retry recovery remains stable across repeated syncs and records durable pr
   });
   const run = await startRun({ projectRoot: project, runId: "recovery-stable-status", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
 
   const resumed = await resumeRun({
     projectRoot: project,
