@@ -812,7 +812,93 @@ describe("prompt rendering", () => {
     expect(result.renderedMarkdown).toContain("Do not add Markdown fences");
   });
 
-  it("derives generated-test manifests from every matching ancestor output contract", () => {
+  it("derives generated-test manifests only from matching transitive ancestor output contracts", () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    tmpDirs.push(tmp);
+    const input = baseRenderInput(tmp);
+    const boundaryTests = input.graph.logicalNodes.find((node) => node.id === "boundary-tests")!;
+    delete boundaryTests.artifactDir;
+    input.graph.concreteNodes = [
+      {
+        id: "boundary-tests-1",
+        logicalId: "boundary-tests",
+        artifactDir: path.join(input.run.artifactsDir, "boundary-tests-1")
+      },
+      {
+        id: "boundary-tests-0",
+        logicalId: "boundary-tests",
+        artifactDir: path.join(input.run.artifactsDir, "boundary-tests-0")
+      }
+    ];
+    input.graph.logicalNodes.push(
+      {
+        id: "findings-only",
+        dependsOn: ["boundary-tests"],
+        outputs: [
+          {
+            path: "findings.json",
+            contract: "ultrafuzz/findings@2",
+            primary: true,
+            description: "A findings-only ancestor."
+          }
+        ],
+        artifactDir: path.join(input.run.artifactsDir, "findings-only")
+      },
+      {
+        id: "secondary-tests",
+        dependsOn: ["findings-only"],
+        outputs: [
+          {
+            path: "manifests/generated-tests.json",
+            contract: "ultrafuzz/generated-tests@3",
+            primary: true,
+            description: "A generated-test manifest at a nonstandard declared path."
+          }
+        ],
+        artifactDir: path.join(input.run.artifactsDir, "secondary-tests")
+      },
+      {
+        id: "unrelated-tests",
+        dependsOn: ["project-discovery"],
+        outputs: [
+          {
+            path: "generated-tests.json",
+            contract: "ultrafuzz/generated-tests@3",
+            primary: true,
+            description: "A matching output from a non-ancestor."
+          }
+        ],
+        artifactDir: path.join(input.run.artifactsDir, "unrelated-tests")
+      },
+      {
+        id: "aggregate-test-files",
+        dependsOn: ["secondary-tests"],
+        outputs: [],
+        artifactDir: path.join(input.run.artifactsDir, "aggregate-test-files")
+      }
+    );
+    input.node.logicalId = "aggregate-test-files";
+    input.node.concreteId = "aggregate-test-files";
+    input.node.artifactDir = path.join(input.run.artifactsDir, "aggregate-test-files");
+    input.outputs.patchPath = path.join(input.node.artifactDir, "patch.diff");
+    input.prompt = "Generated tests:\n{{ancestor_generated_test_manifests}}";
+
+    const result = renderPrompt(input);
+    const manifestPaths = [
+      path.join(input.run.artifactsDir, "boundary-tests-0", "generated-tests.json"),
+      path.join(input.run.artifactsDir, "boundary-tests-1", "generated-tests.json"),
+      path.join(input.run.artifactsDir, "secondary-tests", "manifests", "generated-tests.json")
+    ].sort();
+
+    expect(result.renderedMarkdown).toBe(`Generated tests:\n${manifestPaths.map((entry) => `- ${entry}`).join("\n")}`);
+    expect(result.artifactReferences).toContainEqual({
+      kind: "ancestor_artifacts_by_contract",
+      logicalIds: ["boundary-tests", "secondary-tests"],
+      contract: "ultrafuzz/generated-tests@3"
+    });
+  });
+
+  it("renders one generated-test manifest as a plain path and rejects an empty contract match", () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
@@ -825,19 +911,18 @@ describe("prompt rendering", () => {
     input.node.logicalId = "aggregate-test-files";
     input.node.concreteId = "aggregate-test-files";
     input.node.artifactDir = path.join(input.run.artifactsDir, "aggregate-test-files");
-    input.outputs.findingsPath = path.join(input.node.artifactDir, "findings.json");
     input.outputs.patchPath = path.join(input.node.artifactDir, "patch.diff");
     input.prompt = "Generated tests:\n{{ancestor_generated_test_manifests}}";
 
-    const result = renderPrompt(input);
+    expect(renderPrompt(input).renderedMarkdown).toBe(
+      `Generated tests:\n${path.join(input.run.artifactsDir, "boundary-tests", "generated-tests.json")}`
+    );
 
-    expect(result.renderedMarkdown).toContain(path.join("boundary-tests", "generated-tests.json"));
-    expect(result.renderedMarkdown).not.toContain(path.join("base-test-setup", "setup", "base-test-setup.md"));
-    expect(result.artifactReferences).toContainEqual({
-      kind: "ancestor_artifacts_by_contract",
-      logicalIds: ["boundary-tests"],
-      contract: "ultrafuzz/generated-tests@3"
-    });
+    const boundaryTests = input.graph.logicalNodes.find((node) => node.id === "boundary-tests")!;
+    boundaryTests.outputs = boundaryTests.outputs?.filter(
+      (output) => output.contract !== "ultrafuzz/generated-tests@3"
+    );
+    expect(() => renderPrompt(input)).toThrow(/no ancestor artifacts use contract ultrafuzz\/generated-tests@3/u);
   });
 
   it("filters optional ancestor handoffs by exact declared output path", () => {

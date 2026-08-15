@@ -45,6 +45,32 @@ Assert order owner or maker balances, unrelated caller balances,
 router/internal balances, resting order state, and public order ids. Do not
 assume zero-size replacement is a no-op unless a public source says so.
 
+## Semantics and Finding Gate
+
+Before choosing an oracle, establish the expected semantics from public
+documentation, README material, interfaces, public NatSpec, repository tests,
+or unambiguous externally visible behavior. Record the source-backed collateral
+owner and release recipient; gross and net fee treatment, timing, and
+beneficiary; whether custody is per-order or intentionally pooled behind an
+owner-specific ledger; and whether amendment is in-place or cancel-and-recreate,
+including its documented authorization, priority, identifier, partial-fill,
+and zero-size behavior. Implementation comments alone do not establish those
+public semantics.
+
+If public sources do not define an applicable ownership, fee, pooling,
+collateral-release, or amendment rule, preserve the test and evidence as
+`incomplete-spec`, not as a confirmed production finding. Treat behavior as a
+false-positive candidate when the oracle ignored documented fees, pooled
+custody with correct owner accounting, amendment priority or identifier rules,
+partial-fill state, rounding, or an intentionally rejected unsupported form.
+
+A property that holds is not a finding.
+
+Emit a production finding only when a reproducible target behavior contradicts
+the source-backed rule and the mismatch has a demonstrated safety impact.
+Compilation, dependency, fixture, or harness failures are not production
+findings.
+
 Write structured findings to {{output_findings_path}}. If no finding is
 confirmed, use only the empty form defined by the exact pinned schema in the
 central output contract.

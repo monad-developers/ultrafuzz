@@ -13,6 +13,21 @@ import { loadTopology } from "../src/index.js";
 
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const TOPOLOGY_ROOT = path.join(REPOSITORY_ROOT, "packages", "config", "topologies");
+const ISSUE_5_NO_GENERATED_TEST_STRATEGIES = [
+  "externalized-state-accounting",
+  "rounding-direction-audit",
+  "state-machine-boundaries",
+  "market-exhaustion-boundaries",
+  "lifecycle-view-boundaries",
+  "round-trip",
+  "packed-action-parity"
+] as const;
+const ISSUE_5_REFINED_TEST_PRODUCERS = [
+  "admin-config-boundaries",
+  "payable-fallback-accounting",
+  "order-replacement-collateral",
+  "dynamic-strategy-generator"
+] as const;
 
 describe("packaged topology collection", () => {
   it("validates every shipped topology directly with the built-in prompt catalog", () => {
@@ -70,6 +85,64 @@ describe("packaged topology collection", () => {
           .sort(([left], [right]) => left.localeCompare(right));
         expect(actual, `${name}:${node.id}`).toEqual(expected);
       }
+    }
+  });
+
+  it("keeps issue 5 strategy output roles aligned in the canonical and packaged full topologies", () => {
+    for (const [name, topologyPath] of [
+      ["canonical", path.join(REPOSITORY_ROOT, ".ultrafuzz", "topology.yml")],
+      ["full", path.join(TOPOLOGY_ROOT, "full.yml")]
+    ] as const) {
+      const topology = loadTopology(REPOSITORY_ROOT, {
+        topologyPath,
+        requirePromptFiles: true
+      });
+      const nodeById = new Map(topology.nodes.map((node) => [node.id, node]));
+      const contractsFor = (id: string): string[] => (nodeById.get(id)?.outputs ?? []).map((output) => output.contract);
+
+      for (const id of ISSUE_5_NO_GENERATED_TEST_STRATEGIES) {
+        const contracts = contractsFor(id);
+        expect(
+          contracts.filter((contract) => contract === "ultrafuzz/findings@2"),
+          `${name}:${id} findings`
+        ).toHaveLength(1);
+        expect(contracts, `${name}:${id} generated tests`).not.toContain("ultrafuzz/generated-tests@3");
+      }
+
+      expect(
+        (nodeById.get("boundary-tests")?.outputs ?? []).map((output) => [
+          output.path,
+          output.contract,
+          output.primary === true
+        ]),
+        `${name}:boundary-tests`
+      ).toEqual([
+        ["boundary-recipes.md", "ultrafuzz/nonempty-markdown@1", true],
+        ["boundary-recipes.json", "ultrafuzz/boundary-recipes@1", false]
+      ]);
+      expect(contractsFor("stateful-invariant-handlers"), `${name}:stateful-invariant-handlers`).not.toContain(
+        "ultrafuzz/findings@2"
+      );
+      expect(contractsFor("stateful-invariant-handlers"), `${name}:stateful-invariant-handlers`).not.toContain(
+        "ultrafuzz/generated-tests@3"
+      );
+
+      for (const id of ISSUE_5_REFINED_TEST_PRODUCERS) {
+        const contracts = contractsFor(id);
+        expect(
+          contracts.filter((contract) => contract === "ultrafuzz/findings@2"),
+          `${name}:${id} findings`
+        ).toHaveLength(1);
+        expect(
+          contracts.filter((contract) => contract === "ultrafuzz/generated-tests@3"),
+          `${name}:${id} generated tests`
+        ).toHaveLength(1);
+      }
+
+      expect(contractsFor("time-warp-sequences"), `${name}:time-warp-sequences`).toEqual([
+        "ultrafuzz/findings@2",
+        "ultrafuzz/generated-tests@3"
+      ]);
     }
   });
 

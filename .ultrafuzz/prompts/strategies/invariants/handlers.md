@@ -119,13 +119,20 @@ unclassified entry, and rerun the bounded Recon smoke.
    - Use shortcut handlers only when the shortcut is the behavior being tested.
 
 4. Preserve failures:
-   - If a handler reveals a production bug, record a finding with the raw
-     sequence and the reached protocol entrypoint.
-   - Every reached protocol failure remains visible to Recon and is classified
-     from the observed target behavior.
+   - Preserve an observed protocol failure in the declared handler coverage
+     inventory with its raw sequence, reached protocol entrypoint, oracle, and
+     available source support.
+   - This is a handler-construction node. Later invariant coverage or campaign
+     nodes own reproduction, final classification, and output of potential
+     production findings.
+   - Every reached protocol failure remains visible to Recon and receives only
+     an observational classification in the inventory.
 
 ## Required Outputs
 
 Write the handler coverage inventory to:
 
 {{artifact_dir}}/handler-coverage-inventory.md
+
+Preserve handler observations only in this declared inventory and the declared
+workspace patch artifacts. This node declares no findings output.

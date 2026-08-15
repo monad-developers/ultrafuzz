@@ -55,83 +55,32 @@ Base Foundry setup:
 Property catalog:
 {{artifact_handoff:property-specification-fanin}}
 
-Current strategy generated-test manifests:
+Generated-test manifests declared by every ancestor producer in the effective
+topology:
 
-Boundary tests:
-{{artifact_path:boundary-tests}}/generated-tests.json
+{{ancestor_generated_test_manifests}}
 
-Encode/decode:
-{{artifact_path:encode-decode}}/generated-tests.json
+Read every manifest listed above, including schema-defined empty manifests.
+The rendered list is contract-derived; do not substitute a hardcoded strategy
+list or assume that every findings producer declares generated tests.
 
-Differential library tests:
-{{artifact_path:differential-library-tests}}/generated-tests.json
+Findings artifacts declared by every ancestor producer in the effective
+topology:
 
-Differential lane authors:
-{{artifact_path:differential-lane-author}}/generated-tests.json
+{{ancestor_artifacts_by_path:findings.json}}
 
-Round trip:
-{{artifact_path:round-trip}}/generated-tests.json
+Read every declared findings artifact listed above when deciding what is
+already covered, including schema-defined empty findings artifacts. The two
+ancestor macros above are the complete declared producer intake for those
+artifact types.
 
-Workflow property tests:
-{{artifact_path:workflow-property-based-tests}}/generated-tests.json
+Boundary recipe artifacts declared by ancestor producers in the effective
+topology:
 
-Time-warp sequences:
-{{artifact_path:time-warp-sequences}}/generated-tests.json
+{{ancestor_artifacts_by_path:boundary-recipes.md,boundary-recipes.json}}
 
-Stateful invariant coverage:
-{{artifact_path:stateful-invariant-coverage}}/generated-tests.json
-
-Implemented invariant properties:
-{{artifact_path:stateful-invariant-implement-properties}}/generated-tests.json
-
-Invariant campaign:
-{{artifact_path:stateful-invariant-campaign}}/generated-tests.json
-
-Expand coverage:
-{{artifact_path:expand-coverage}}/generated-tests.json
-
-Admin/config boundaries:
-{{artifact_path:admin-config-boundaries}}/generated-tests.json
-
-External dependency boundaries:
-{{artifact_path:external-dependency-boundaries}}/generated-tests.json
-
-AMM boundary liquidity:
-{{artifact_path:amm-boundary-liquidity}}/generated-tests.json
-
-Payable/fallback accounting:
-{{artifact_path:payable-fallback-accounting}}/generated-tests.json
-
-Externalized-state accounting:
-{{artifact_path:externalized-state-accounting}}/generated-tests.json
-
-Packed action parity:
-{{artifact_path:packed-action-parity}}/generated-tests.json
-
-Batch atomicity unsupported actions:
-{{artifact_path:batch-atomicity-unsupported-actions}}/generated-tests.json
-
-Router exact accounting:
-{{artifact_path:router-exact-accounting}}/generated-tests.json
-
-Rounding direction audit:
-{{artifact_path:rounding-direction-audit}}/generated-tests.json
-
-Market exhaustion boundaries:
-{{artifact_path:market-exhaustion-boundaries}}/generated-tests.json
-
-Order replacement collateral:
-{{artifact_path:order-replacement-collateral}}/generated-tests.json
-
-State machine boundaries:
-{{artifact_path:state-machine-boundaries}}/generated-tests.json
-
-Lifecycle view boundaries:
-{{artifact_path:lifecycle-view-boundaries}}/generated-tests.json
-
-Also inspect current findings artifacts from the same strategies when deciding
-what is already covered. Use `findings.json` from each relevant strategy
-artifact directory. Treat missing useful evidence as a reason to record lower
+Read every declared boundary recipe artifact listed above as downstream
+coverage input. Treat missing useful evidence as a reason to record lower
 confidence, not as permission to invent behavior.
 
 ## Context boundary
@@ -158,6 +107,27 @@ graph. Prefer strategies grounded in:
 Reject recommendations that require changing production contracts, depending
 on live network access, downloading packages, or making guesses not supported
 by repository files or artifacts.
+
+## Finding Confirmation Gate
+
+Confirm a finding only when an executed reproducer demonstrates that a
+source-backed safety oracle fails because of reachable target behavior. Tie the
+expected behavior to public documentation, README material, interfaces, public
+NatSpec, repository tests, or unambiguous externally visible semantics, and
+record the exact conflicting observation. Implementation comments alone do not
+establish the expected public behavior.
+
+A property that holds is not a finding.
+
+Do not promote a recommendation, suspicious code pattern, unexecuted
+hypothesis, satisfied assertion, expected revert, compilation error, missing
+dependency, fixture failure, or harness defect as a production finding. The
+overall test process may pass when a deterministic reproducer asserts the
+observed violation, but the evidence must still identify the failed
+source-backed safety oracle and unsafe before/after state. When the reproducer
+cannot run or the expected semantics are ambiguous, preserve the limitation in
+the plan and provenance and use the schema-defined empty findings form rather
+than claiming confirmation.
 
 ## Generated tests
 

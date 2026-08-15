@@ -17,7 +17,92 @@ function generatedTestManifestSources(markdown: string): string[] {
   return [...markdown.matchAll(/\{\{artifact_path:([^}]+)\}\}\/generated-tests\.json/gu)].map((match) => match[1]!);
 }
 
+const BUG_SEARCH_STRATEGIES = [
+  ["round-trip", "strategies/round-trip.md"],
+  ["externalized-state-accounting", "strategies/externalized-state-accounting.md"],
+  ["packed-action-parity", "strategies/packed-action-parity.md"],
+  ["rounding-direction-audit", "strategies/rounding-direction-audit.md"],
+  ["market-exhaustion-boundaries", "strategies/market-exhaustion-boundaries.md"],
+  ["state-machine-boundaries", "strategies/state-machine-boundaries.md"],
+  ["lifecycle-view-boundaries", "strategies/lifecycle-view-boundaries.md"]
+] as const;
+
+const DIRECT_TEST_CONSTRUCTION_STRATEGIES = [
+  "encode-decode",
+  "differential-library-tests",
+  "workflow-property-based-tests",
+  "time-warp-sequences",
+  "expand-coverage",
+  "admin-config-boundaries",
+  "external-dependency-boundaries",
+  "amm-boundary-liquidity",
+  "payable-fallback-accounting",
+  "batch-atomicity-unsupported-actions",
+  "router-exact-accounting",
+  "order-replacement-collateral"
+] as const;
+
 describe("prompt semantic anchors", () => {
+  it("keeps approved bug-search strategies findings-only while protecting construction strategies", () => {
+    const topologyPath = fileURLToPath(new URL("../../../.ultrafuzz/topology.yml", import.meta.url));
+    const topology = YAML.parse(readFileSync(topologyPath, "utf8")) as {
+      nodes: { id: string; outputs?: Array<{ path: string; contract: string }> }[];
+    };
+    const nodeById = new Map(topology.nodes.map((node) => [node.id, node]));
+
+    for (const [id, relativePath] of BUG_SEARCH_STRATEGIES) {
+      const markdown = prompt(relativePath);
+      const outputs = nodeById.get(id)?.outputs ?? [];
+      expect(markdown, id).toMatch(/\bfind concrete, source-backed bugs associated with\b/u);
+      expect(markdown, id).toContain("A property that holds is not a finding.");
+      expect(markdown, id).toMatch(
+        /(?:optional[\s\S]{0,200}(?:test|proof of concept|PoC|evidence)|(?:test|proof of concept|PoC)[\s\S]{0,200}optional)/iu
+      );
+      expect(markdown, id).toContain("{{output_findings_path}}");
+      expect(markdown, id).not.toContain("{{strategy_attempt_test_dir}}");
+      expect(markdown, id).not.toMatch(/Your job is to author/u);
+      expect(
+        outputs.filter((output) => output.contract === "ultrafuzz/findings@2"),
+        id
+      ).toHaveLength(1);
+      expect(
+        outputs.some((output) => output.contract === "ultrafuzz/generated-tests@3"),
+        id
+      ).toBe(false);
+    }
+
+    const boundaryOutputs = nodeById.get("boundary-tests")?.outputs ?? [];
+    expect(boundaryOutputs.map((output) => output.path)).toEqual(["boundary-recipes.md", "boundary-recipes.json"]);
+    for (const id of DIRECT_TEST_CONSTRUCTION_STRATEGIES) {
+      expect(
+        nodeById.get(id)?.outputs?.some((output) => output.contract === "ultrafuzz/generated-tests@3"),
+        id
+      ).toBe(true);
+    }
+  });
+
+  it("keeps issue 5 refinements aligned with their topology roles", () => {
+    const dynamic = prompt("strategies/dynamic-strategy-generator.md");
+    const boundary = prompt("strategies/boundary-tests.md");
+    const handlers = prompt("strategies/invariants/handlers.md");
+
+    for (const relativePath of [
+      "strategies/admin-config-boundaries.md",
+      "strategies/payable-fallback-accounting.md",
+      "strategies/order-replacement-collateral.md",
+      "strategies/dynamic-strategy-generator.md"
+    ]) {
+      expect(prompt(relativePath), relativePath).toContain("A property that holds is not a finding.");
+    }
+    expect(dynamic).toContain("{{ancestor_generated_test_manifests}}");
+    expect(dynamic).toContain("{{ancestor_artifacts_by_path:findings.json}}");
+    expect(dynamic).toContain("{{ancestor_artifacts_by_path:boundary-recipes.md,boundary-recipes.json}}");
+    expect(generatedTestManifestSources(dynamic)).toEqual([]);
+    expect(boundary).not.toContain("{{output_findings_path}}");
+    expect(boundary).not.toContain("{{strategy_attempt_test_dir}}");
+    expect(handlers).not.toMatch(/record a finding/iu);
+  });
+
   it("keeps pinned schemas as the sole producer-side JSON shape authority", () => {
     const deliberateCorrectionFixture = "smoke/json-validation-correction.md";
     const forbiddenShapeAuthority = [
@@ -464,7 +549,8 @@ describe("prompt semantic anchors", () => {
     );
     expect(`${topologySource}\n${aggregate}\n${dynamic}`).not.toContain("stateful-invariant-recon-campaign");
     expect(aggregate).toContain("{{ancestor_generated_test_manifests}}");
-    expect(dynamic).toContain("{{artifact_path:stateful-invariant-campaign}}/generated-tests.json");
+    expect(dynamic).toContain("{{ancestor_generated_test_manifests}}");
+    expect(dynamic).not.toContain("{{artifact_path:stateful-invariant-campaign}}/generated-tests.json");
 
     expect(campaign).toContain("final recon-fuzzer campaign");
     expect(campaign).toContain("one implemented Chimera property suite");

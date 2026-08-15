@@ -126,6 +126,14 @@ Do not silently drop ambiguous public-docs-versus-implementation behavior.
 Classify it as `incomplete-spec` or `implementation-drift` and preserve the
 evidence path that made it ambiguous.
 
+Non-safety implementation drift belongs to documentation, interface,
+configuration, or integration maintenance. Keep it in the matrix as
+`implementation-drift`; do not emit it as a production finding unless a
+source-backed safety impact is reproduced, in which case classify the
+confirmed issue as `production-bug`.
+
+A property that holds is not a finding.
+
 ## Required Outputs
 
 Write a human-readable matrix to:
@@ -151,6 +159,7 @@ specification questions, and coverage gaps. Every referenced generated test
 must be one this node actually authored. These source, test, and cross-artifact
 relationships are contextual requirements beyond JSON Schema.
 
-Write structured findings to {{output_findings_path}}. If no finding is
-confirmed, use only the empty form defined by the exact pinned schema in the
-central output contract.
+Write structured findings to {{output_findings_path}}. Do not emit a non-safety
+`implementation-drift` matrix row as a finding. If no source-backed,
+safety-relevant finding is confirmed, use only the empty form defined by the
+exact pinned schema in the central output contract.

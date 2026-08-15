@@ -3031,6 +3031,22 @@ test("artifact contracts reject malformed outputs and accept canonical empty out
   assert.equal(verifyRequiredArtifactsForAttempt(layout, node, "strategy-a").ok, true);
 });
 
+test("findings-only strategies do not require a generated-test manifest", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-findings-only" });
+  const artifactDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
+  const node = plannedNode(["findings.json"]);
+
+  fs.writeFileSync(path.join(artifactDir, "findings.json"), "[]", "utf8");
+  const result = verifyRequiredArtifactsForAttempt(layout, node, "strategy-a");
+
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+  assert.deepEqual(result.missing, []);
+  assert.equal(
+    result.diagnostics.some((diagnostic) => diagnostic.path === "generated-tests.json"),
+    false
+  );
+});
+
 test("project discovery gate accepts custom exact typed paths under a noncanonical logical ID", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-renamed-discovery-contract" });
   const nodeId = "renamed-discovery-attempt";

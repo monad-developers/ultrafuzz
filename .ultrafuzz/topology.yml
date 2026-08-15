@@ -351,10 +351,6 @@ nodes:
         primary: true
       - path: boundary-recipes.json
         contract: ultrafuzz/boundary-recipes@1
-      - path: findings.json
-        contract: ultrafuzz/findings@2
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@3
   - id: encode-decode
     kind: agentic
     prompt: strategies/encode-decode.md
@@ -390,8 +386,6 @@ nodes:
       - path: findings.json
         contract: ultrafuzz/findings@2
         primary: true
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@3
   - id: workflow-property-based-tests
     kind: agentic
     prompt: strategies/workflow-property-based-tests.md
@@ -477,8 +471,6 @@ nodes:
         contract: ultrafuzz/externalized-state-accounting@1
       - path: findings.json
         contract: ultrafuzz/findings@2
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@3
   - id: amm-boundary-liquidity
     kind: agentic
     prompt: strategies/amm-boundary-liquidity.md
@@ -513,8 +505,6 @@ nodes:
       - path: findings.json
         contract: ultrafuzz/findings@2
         primary: true
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@3
   - id: batch-atomicity-unsupported-actions
     kind: agentic
     prompt: strategies/batch-atomicity-unsupported-actions.md
@@ -549,8 +539,6 @@ nodes:
       - path: findings.json
         contract: ultrafuzz/findings@2
         primary: true
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@3
   - id: market-exhaustion-boundaries
     kind: agentic
     prompt: strategies/market-exhaustion-boundaries.md
@@ -561,8 +549,6 @@ nodes:
       - path: findings.json
         contract: ultrafuzz/findings@2
         primary: true
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@3
   - id: order-replacement-collateral
     kind: agentic
     prompt: strategies/order-replacement-collateral.md
@@ -585,8 +571,6 @@ nodes:
       - path: findings.json
         contract: ultrafuzz/findings@2
         primary: true
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@3
   - id: lifecycle-view-boundaries
     kind: agentic
     prompt: strategies/lifecycle-view-boundaries.md
@@ -597,8 +581,6 @@ nodes:
       - path: findings.json
         contract: ultrafuzz/findings@2
         primary: true
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@3
   - id: stateful-invariant-setup
     kind: agentic
     prompt: strategies/invariants/setup.md

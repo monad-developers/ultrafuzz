@@ -298,6 +298,7 @@ The prompt variable set includes:
 - `artifact_handoff:<logical-node-id>`
 - `ancestor_artifacts:<logical-node-id>[,<logical-node-id>...]`
 - `ancestor_artifacts_by_path:<path>[,<path>...]`
+- `ancestor_generated_test_manifests`
 
 Artifact handoff variables MUST resolve only to ancestor nodes. Handoff
 producers MUST declare a primary contracted output. Exact artifact paths MUST
@@ -305,6 +306,16 @@ resolve to declared producer outputs. Ancestor artifact lists MUST use declared
 outputs. Path-filtered ancestor artifact lists MUST resolve only exact declared
 ancestor output paths and MUST render an explicit no-match sentinel when none
 are declared.
+
+`ancestor_generated_test_manifests` MUST take no argument, walk the full
+transitive ancestor graph, and select outputs by the exact
+`ultrafuzz/generated-tests@3` contract. It MUST render the sorted absolute
+declared output paths for every artifact directory associated with each
+matching logical producer: one path directly or multiple paths as a Markdown
+bullet list. It MUST exclude findings-only producers and non-ancestors, MUST NOT
+infer manifests from output filenames or a hardcoded strategy list, and MUST
+fail topology validation or rendering when no ancestor declares a matching
+output.
 
 For every agent-authored JSON output, the centrally rendered output contract
 MUST include both safely shell-quoted commands using the exact resolved paths
@@ -523,6 +534,13 @@ positive integer `line` and `end_line` metadata. Disjoint spans MUST use at leas
 two ordered `line_ranges` objects with a required positive integer `line` and an
 optional `end_line` that does not precede it. Independent explanatory `detail`
 MUST remain separate from structural range metadata.
+
+Generated-test production is opt-in per topology node. A findings producer MAY
+omit `ultrafuzz/generated-tests@3` when tests or proofs of concept are optional
+supporting evidence rather than a required artifact. Only a node that declares
+that contract receives generated-test bundle instructions, and downstream
+consumers MUST use contract-derived manifest intake instead of assuming that
+every strategy or findings producer emits `generated-tests.json`.
 
 Default review flows SHOULD deduplicate findings, classify severity, aggregate
 generated tests, and write final report artifacts. `ultrafuzz report` MUST read

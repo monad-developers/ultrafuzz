@@ -78,13 +78,14 @@ is required.
 
 ## Artifact Variables
 
-| Variable                                                      | Meaning                                                                     |
-| ------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| `ancestor_artifacts`                                          | Markdown list of required artifact files from direct topology dependencies. |
-| `artifact_path:<logical-node-id>`                             | Absolute artifact directory path for an ancestor producer.                  |
-| `artifact_handoff:<logical-node-id>`                          | Absolute path to an ancestor producer's primary contracted output.          |
-| `ancestor_artifacts:<logical-node-id>[,<logical-node-id>...]` | Markdown list of required artifact files from selected ancestor producers.  |
-| `ancestor_artifacts_by_path:<path>[,<path>...]`               | Markdown list of matching declared outputs from any ancestor producer.      |
+| Variable                                                      | Meaning                                                                        |
+| ------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `ancestor_artifacts`                                          | Markdown list of required artifact files from direct topology dependencies.    |
+| `artifact_path:<logical-node-id>`                             | Absolute artifact directory path for an ancestor producer.                     |
+| `artifact_handoff:<logical-node-id>`                          | Absolute path to an ancestor producer's primary contracted output.             |
+| `ancestor_artifacts:<logical-node-id>[,<logical-node-id>...]` | Markdown list of required artifact files from selected ancestor producers.     |
+| `ancestor_artifacts_by_path:<path>[,<path>...]`               | Markdown list of matching declared outputs from any ancestor producer.         |
+| `ancestor_generated_test_manifests`                           | Contract-derived list of generated-test manifests from all ancestor producers. |
 
 Artifact variables may reference only ancestor nodes. Handoff producers must
 declare exactly one `outputs` entry with `primary: true`.
@@ -101,6 +102,18 @@ accept a suffix.
 `ancestor_artifacts_by_path` accepts safe, exact output-relative paths and
 renders `None declared by this topology.` when no ancestor declares a match.
 This makes optional handoffs explicit without rendering unrelated outputs.
+
+`ancestor_generated_test_manifests` takes no argument. It walks the full
+transitive ancestor graph and selects only outputs declared with the exact
+`ultrafuzz/generated-tests@3` contract. For each matching logical producer, it
+renders the absolute declared output path under every producer artifact
+directory represented in the render graph. Paths are sorted; one match renders
+as a plain path and multiple matches render as a Markdown bullet list.
+Findings-only ancestors and non-ancestor generated-test producers are excluded,
+and paths are never inferred from a filename or hardcoded strategy list.
+Topology validation and prompt rendering fail when the variable has no matching
+ancestor output; unlike `ancestor_artifacts_by_path`, it has no no-match
+sentinel.
 
 Looped producers render as a Markdown bullet list of concrete attempt paths.
 Use deterministic split-work assignment for looped strategies:

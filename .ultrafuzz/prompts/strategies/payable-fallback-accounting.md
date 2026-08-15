@@ -45,8 +45,30 @@ redirection. Let Ultrafuzz capture stdout and stderr from each command.
 - Required reverts when payable value is unexpected or insufficient.
 
 Assert internal balances, wallet balances, contract ETH balance, order state,
-and refund recipients before and after each call. Preserve red tests that show
-stale value can be spent or refunded by the wrong caller.
+and refund recipients before and after each call.
+
+## Semantics and Finding Gate
+
+Before choosing an ownership or refund oracle, establish the expected semantics
+from public documentation, README material, interfaces, public NatSpec,
+repository tests, or unambiguous externally visible behavior. Identify the
+payer, funded beneficiary, owner of any pre-existing balance, authorized refund
+recipient, whether value is call-scoped or intentionally pooled, and any
+documented sweep or recovery policy. Implementation comments alone do not
+establish a public ownership or refund policy.
+
+Preserve red tests that show stale value can be spent or refunded by the wrong
+caller only when the expected owner and refund scope are source-backed. If
+public sources do not define ownership or refund scope, preserve the test and
+evidence as `incomplete-spec`, not as a confirmed production finding. Do not
+misclassify documented pooled, donated, sweepable, fee-owned, or recovery-held
+value merely because it predates the current call.
+
+A property that holds is not a finding.
+
+Emit a production finding only for a reproducible target behavior that
+contradicts the source-backed ownership or refund semantics. Compilation,
+dependency, fixture, or harness failures are not production findings.
 
 Write structured findings to {{output_findings_path}}. If no finding is
 confirmed, use only the empty form defined by the exact pinned schema in the

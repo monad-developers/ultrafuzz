@@ -14,7 +14,7 @@ describe("artifact handoff validation", () => {
     ).not.toThrow();
   });
 
-  it("requires an ancestor generated-test manifest for the contract-derived handoff", () => {
+  it("derives generated-test handoffs from matching contracts while allowing findings-only ancestors", () => {
     const topology = validTopology();
     topology.nodes[2] = {
       ...topology.nodes[2]!,
@@ -22,6 +22,17 @@ describe("artifact handoff validation", () => {
         ...topology.nodes[2]!.outputs!,
         { path: "generated-tests.json", contract: "ultrafuzz/generated-tests@3", primary: false }
       ]
+    };
+    topology.nodes.splice(3, 0, {
+      id: "findings-only-strategy",
+      prompt: "strategies/findings-only.md",
+      group: "strategies",
+      depends_on: ["setup"],
+      outputs: [{ path: "findings.json", contract: "ultrafuzz/findings@2", primary: true }]
+    });
+    topology.nodes[4] = {
+      ...topology.nodes[4]!,
+      depends_on: ["strategy", "findings-only-strategy"]
     };
     expect(() =>
       validateTopology(topology, {
