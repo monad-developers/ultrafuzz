@@ -1301,7 +1301,6 @@ function verifyLensReferenceExpectationPreservation(
 
   for (const [propertyIndex, property] of catalog.properties.entries()) {
     const expectedReferenceIds = property.reference_expectations ?? [];
-    if (expectedReferenceIds.length === 0) continue;
     const sourcePairs = new Set(
       property.sources.map((source) => `${source.source_node_id}\u0000${source.source_property_id}`)
     );
@@ -1310,6 +1309,20 @@ function verifyLensReferenceExpectationPreservation(
         .filter((row) => sourcePairs.has(`${row.sourceNodeId}\u0000${row.propertyId}`))
         .flatMap((row) => row.expectationIds)
     );
+    if (
+      property.reference_expectations !== undefined &&
+      expectedReferenceIds.length === 0 &&
+      lensReferenceIds.size === 0
+    ) {
+      diagnostics.push({
+        code: "PROPERTY_REFERENCE_EXPECTATION_OMISSION_REQUIRED",
+        message: `Canonical property ${JSON.stringify(property.id)} must omit reference_expectations when no authorized identifier is carried from its source lens artifacts`,
+        severity: "error",
+        source: "property-fanin",
+        path: `${catalogPath}#$.properties[${propertyIndex}].reference_expectations`
+      });
+    }
+    if (expectedReferenceIds.length === 0) continue;
     const missingReferenceIds = expectedReferenceIds.filter((expectationId) => !lensReferenceIds.has(expectationId));
     if (missingReferenceIds.length > 0) {
       diagnostics.push({
@@ -5809,9 +5822,9 @@ function verifyImplementationPropertyReferences(
 
 /**
  * A reference expectation is provenance, not free-form model metadata. A lens
- * may copy an ID only when the exact token is present in a declared pinned
- * reference input artifact. This keeps illustrative prompt text from becoming
- * an apparently authorized benchmark mapping.
+ * may copy an ID only when the exact token is present in a declared structured
+ * reference expectation catalog. Without such a catalog the field must be
+ * absent, keeping prose and code listings from becoming apparent authority.
  */
 function verifyLensReferenceExpectationAuthority(
   layout: RunLayout,
@@ -5883,6 +5896,25 @@ function verifyLensReferenceExpectationAuthority(
   const suppliedExpectationIds = supplied.ids;
   const diagnostics: RuntimeDiagnostic[] = [...supplied.diagnostics];
   for (const [propertyIndex, property] of lens.value.properties.entries()) {
+    if (property.reference_expectations !== undefined && property.reference_expectations.length === 0) {
+      diagnostics.push({
+        code: "PROPERTY_REFERENCE_EXPECTATION_OMISSION_REQUIRED",
+        message: `Property lens ${JSON.stringify(property.id)} must omit reference_expectations when it carries no authorized identifiers`,
+        severity: "error",
+        source: "property-provenance",
+        path: `${lensPath}#$.properties[${propertyIndex}].reference_expectations`
+      });
+    }
+    if (!supplied.catalogSupplied && property.reference_expectations !== undefined) {
+      diagnostics.push({
+        code: "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED",
+        message: `Property lens ${JSON.stringify(property.id)} must omit reference_expectations because no structured catalog was supplied`,
+        severity: "error",
+        source: "property-provenance",
+        path: `${lensPath}#$.properties[${propertyIndex}].reference_expectations`
+      });
+      continue;
+    }
     for (const [expectationIndex, expectationId] of (property.reference_expectations ?? []).entries()) {
       if (suppliedExpectationIds.has(expectationId)) continue;
       diagnostics.push({
@@ -5947,16 +5979,13 @@ function readLensSuppliedExpectationIds(
     }
   }
   if (!catalogSupplied) {
-    // Issue #285, part (a): say so. This path used to return an empty id set in silence, which made
-    // EVERY citation a lens emitted unauthorized and every reference-expectation check downstream
-    // inert — including `verifyImplementationSelectionCoverage`, whose expectation-forced selection
-    // can never fire when no property is allowed to keep an expectation. On a benchmark run with no
-    // `--reference-expectations` catalogue that is the normal case, not the exceptional one, so the
-    // gate was quietly doing nothing exactly where it was supposed to be doing the most.
+    // Issue #285: structured catalogs are the sole authority. Most benchmark
+    // runs intentionally supply none, so record that expectation-backed
+    // coverage is unavailable while requiring every lens row to omit the field.
     diagnostics.push({
       code: "PROPERTY_REFERENCE_EXPECTATION_CATALOG_ABSENT",
       message:
-        "No pinned-reference dependency supplies a reference expectation catalog, so every lens reference expectation is unauthorized and the provenance gate is inert",
+        "No pinned-reference dependency supplies a structured reference expectation catalog, so lens artifacts must omit reference_expectations",
       severity: "warning",
       source: "property-provenance",
       path: `state.nodes.${node.id}.depends_on`

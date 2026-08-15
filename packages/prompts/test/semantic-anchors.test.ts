@@ -89,14 +89,22 @@ describe("prompt semantic anchors", () => {
     );
     expect(propertyPrompts).toHaveLength(8);
     for (const asset of propertyPrompts) {
-      expect(asset.markdown, asset.relativePath).toContain("exact identifiers present in the");
-      expect(asset.markdown, asset.relativePath).toContain("{{schema_path}}/reference-expectations.schema.json");
-      expect(asset.markdown, asset.relativePath).toContain("do not invent expectation IDs");
-      expect(asset.markdown, asset.relativePath).toContain("schema's no-expectation representation");
-      expect(asset.markdown, asset.relativePath).not.toContain("scfuzzbench:aave-v4:iSpoke_supply");
+      const markdown = asset.markdown.replace(/\s+/gu, " ");
+      expect(markdown, asset.relativePath).toContain("is the sole authority for `reference_expectations`");
+      expect(markdown, asset.relativePath).toContain("{{schema_path}}/reference-expectations.schema.json");
+      expect(markdown, asset.relativePath).toContain(
+        "Never derive identifiers from Markdown, prose, code listings, or model knowledge"
+      );
+      expect(markdown, asset.relativePath).toContain("omit `reference_expectations` entirely");
+      expect(markdown, asset.relativePath).toContain("an empty array is not omission");
+      expect(markdown, asset.relativePath).not.toContain("scfuzzbench:aave-v4:iSpoke_supply");
     }
     const fanin = prompt("properties/property-specification-fanin.md");
-    expect(fanin).toContain("{{schema_path}}/reference-expectations.schema.json");
+    expect(fanin).toContain("preserve only exact identifiers already carried by");
+    expect(fanin).toContain("the lens gate has authorized those identifiers");
+    expect(fanin).toContain("omit the field entirely; an empty array is not");
+    expect(fanin).not.toContain("identifiers are supplied by the reference artifacts");
+    expect(fanin).not.toContain("read its declared artifact");
     expect(fanin).not.toContain("scfuzzbench:aave-v4:iSpoke_supply");
     expect(prompt("strategies/invariants/implement-properties.md")).not.toContain("scfuzzbench:aave-v4:iSpoke_supply");
   });
