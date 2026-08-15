@@ -11133,6 +11133,131 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
   );
 });
 
+test("coverage gate rejects full-coverage claims with zero authenticated production instrumentation", () => {
+  const layout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-zero-instrumentation-coverage",
+    resolvedConfigToml: '[permissions]\nproduction_source_roots = ["src"]\n'
+  });
+  const node = {
+    ...plannedMeasuredCoverageNode(),
+    id: "stateful-invariant-coverage",
+    logical_id: "stateful-invariant-coverage",
+    artifact_dir: "artifacts/stateful-invariant-coverage"
+  };
+  writePlannedGraph(layout, [node]);
+  const workspace = path.join(layout.workspacesDir, node.id);
+  fs.mkdirSync(path.join(workspace, "src"), { recursive: true });
+  fs.writeFileSync(path.join(workspace, "src/Core.sol"), "contract Core {\n  function core() external {}\n}\n");
+  const reconSelection = writeReconCoverageSelection(workspace, { "src/Core.sol": ["2"] });
+  const lcov = writeCoverageLcov(workspace, { "src/Core.sol": {} });
+  const evidence = {
+    schema_version: "ultrafuzz.coverage-evidence.v1",
+    status: "measured",
+    lcov,
+    recon_selection: reconSelection,
+    views: [
+      { scope: "recon-selected-declaration-completeness", covered_ranges: 0, total_ranges: 1 },
+      { scope: "production-declaration-completeness", covered_ranges: 0, total_ranges: 1 }
+    ],
+    files: [{ path: "src/Core.sol", kind: "production", included: true, covered_ranges: 0, total_ranges: 1 }],
+    counted_ranges: [
+      { file: "src/Core.sol", kind: "production", start_line: 2, line_count: 1, selected: true, covered: false }
+    ],
+    zero_coverage_components: [{ path: "src/Core.sol", kind: "production", start_line: 2, line_count: 1 }]
+  };
+  const goal = {
+    schema_version: "ultrafuzz.coverage-goal.v2",
+    target: { scope: "recon-selected-declaration-completeness", minimum_percent: 90 },
+    current_measurement: { scope: "recon-selected-declaration-completeness", covered_ranges: 0, total_ranges: 1 },
+    current_status: "below-target",
+    planned_commands: [],
+    stop_conditions: ["reserve time for finalization"],
+    timeout_seconds: 60,
+    finalization_reserve_seconds: 10,
+    blockers: []
+  };
+  writeMeasuredCoverageArtifacts(layout, node, workspace, {
+    goal,
+    markdown:
+      "# Coverage\n\n## Scoped coverage evidence\n\n- recon-selected-declaration-completeness: `0/1`\n- production-declaration-completeness: `0/1`\n\nExcluded from Recon-selected scope:\n- None\n\nZero-coverage components:\n- `src/Core.sol:2-2` (production)\n",
+    evidence
+  });
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "COVERAGE_PRODUCTION_INSTRUMENTATION_EMPTY"),
+    JSON.stringify(result.diagnostics)
+  );
+});
+
+test("coverage gate rejects a nonempty Recon map with no material production declaration", () => {
+  const layout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-nonmaterial-recon-coverage",
+    resolvedConfigToml: '[permissions]\nproduction_source_roots = ["src"]\n'
+  });
+  const node = {
+    ...plannedMeasuredCoverageNode(),
+    id: "stateful-invariant-coverage",
+    logical_id: "stateful-invariant-coverage",
+    artifact_dir: "artifacts/stateful-invariant-coverage"
+  };
+  writePlannedGraph(layout, [node]);
+  const workspace = path.join(layout.workspacesDir, node.id);
+  fs.mkdirSync(path.join(workspace, "src"), { recursive: true });
+  fs.writeFileSync(path.join(workspace, "src/Core.sol"), "contract Core {\n  function core() external {}\n}\n");
+  const reconSelection = writeReconCoverageSelection(workspace, { "src/Core.sol": ["1"] });
+  const lcov = writeCoverageLcov(workspace, { "src/Core.sol": { 2: 1 } });
+  const evidence = {
+    schema_version: "ultrafuzz.coverage-evidence.v1",
+    status: "measured",
+    lcov,
+    recon_selection: reconSelection,
+    views: [
+      { scope: "recon-selected-declaration-completeness", covered_ranges: 0, total_ranges: 0 },
+      { scope: "production-declaration-completeness", covered_ranges: 1, total_ranges: 1 }
+    ],
+    files: [
+      {
+        path: "src/Core.sol",
+        kind: "production",
+        included: false,
+        exclusion_reason: "not selected",
+        covered_ranges: 0,
+        total_ranges: 1
+      }
+    ],
+    counted_ranges: [
+      { file: "src/Core.sol", kind: "production", start_line: 2, line_count: 1, selected: false, covered: true }
+    ],
+    zero_coverage_components: []
+  };
+  const goal = {
+    schema_version: "ultrafuzz.coverage-goal.v2",
+    target: { scope: "recon-selected-declaration-completeness", minimum_percent: 90 },
+    current_measurement: { scope: "recon-selected-declaration-completeness", covered_ranges: 0, total_ranges: 0 },
+    current_status: "below-target",
+    planned_commands: [],
+    stop_conditions: ["reserve time for finalization"],
+    timeout_seconds: 60,
+    finalization_reserve_seconds: 10,
+    blockers: []
+  };
+  writeMeasuredCoverageArtifacts(layout, node, workspace, {
+    goal,
+    markdown:
+      "# Coverage\n\n## Scoped coverage evidence\n\n- recon-selected-declaration-completeness: `0/0`\n- production-declaration-completeness: `1/1`\n\nExcluded from Recon-selected scope:\n- `src/Core.sol` (production): not selected\n\nZero-coverage components:\n- None\n",
+    evidence
+  });
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "COVERAGE_RECON_SELECTED_DENOMINATOR_EMPTY"),
+    JSON.stringify(result.diagnostics)
+  );
+});
+
 test("coverage gate rejects a selected declaration with any uncovered instrumented line", () => {
   const layout = createRunLayout({
     projectRoot: tempProject(),

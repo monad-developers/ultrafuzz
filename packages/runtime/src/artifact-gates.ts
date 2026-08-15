@@ -4652,6 +4652,18 @@ function verifyCoverageProductionInventory(
         path: `${evidencePath}#$.lcov`
       });
     }
+    const productionInstrumentedLineCount = [...lcovCoverage.instrumentedLinesBySource.entries()]
+      .filter(([source]) => inventory.has(source))
+      .reduce((sum, [, lines]) => sum + lines.length, 0);
+    if (productionInstrumentedLineCount === 0) {
+      diagnostics.push({
+        code: "COVERAGE_PRODUCTION_INSTRUMENTATION_EMPTY",
+        message: "Measured coverage requires a nonzero authenticated production instrumentation denominator",
+        severity: "error",
+        source: "coverage-evidence",
+        path: `${evidencePath}#$.lcov`
+      });
+    }
   }
 
   for (const [relativePath, expectedKind] of expectedSourceKinds) {
@@ -4794,6 +4806,7 @@ function verifyCoverageProductionInventory(
   }
 
   let materialRangeCount = 0;
+  let selectedMaterialRangeCount = 0;
   for (const relativePath of inventory) {
     const sourceText = sourceSnapshot(relativePath, "production coverage source").text;
     let declarations: MaterialCoverageDeclaration[];
@@ -4857,6 +4870,7 @@ function verifyCoverageProductionInventory(
         declaration.line,
         declaration.endLine
       );
+      if (reconSelection.ranges !== undefined && selectedByRecon) selectedMaterialRangeCount += 1;
       if (reconSelection.ranges !== undefined && matching[0]!.selected !== selectedByRecon) {
         diagnostics.push({
           code: "COVERAGE_PRODUCTION_RANGE_SELECTION_MISMATCH",
@@ -4886,6 +4900,15 @@ function verifyCoverageProductionInventory(
         path: `${evidencePath}#$.counted_ranges`
       });
     }
+  }
+  if (reconSelection.ranges !== undefined && selectedMaterialRangeCount === 0) {
+    diagnostics.push({
+      code: "COVERAGE_RECON_SELECTED_DENOMINATOR_EMPTY",
+      message: "Measured coverage requires a nonzero authenticated Recon-selected material declaration denominator",
+      severity: "error",
+      source: "coverage-evidence",
+      path: `${evidencePath}#$.recon_selection`
+    });
   }
   return diagnostics;
 }
