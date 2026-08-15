@@ -7,10 +7,12 @@ import test from "node:test";
 
 import {
   ArtifactPathError,
+  ArtifactSecretGateError,
   GENERATED_TESTS_SCHEMA_VERSION,
   MAX_GENERATED_TEST_BUNDLE_BYTES,
   MAX_GENERATED_TEST_BUNDLE_ENTRIES,
   appendUsageEvents,
+  assertArtifactPublicationsContainNoSecrets,
   appendNodeAttempt,
   appendEvent,
   appendLineDurable,
@@ -761,6 +763,141 @@ test("run state redacts secret-looking node errors before persistence", () => {
   const serialized = fs.readFileSync(layout.statePath, "utf8");
   assert.doesNotMatch(serialized, /sk-state-secret/);
   assert.match(readRunState(layout).nodes["node-a"]?.last_error ?? "", /<redacted>/);
+});
+
+const exactAtRestSecret = "exact unknown run credential";
+const mnemonicAtRestSecret =
+  "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+const entropyAtRestSecret = "aB3dE5fG7hJ9kL2mN4pQ6rS8tV0wXyZ1_cD3eF5gH7jK9mP2q";
+
+function atRestSecretFixture(): string {
+  return [
+    `private-key=0x${"1a".repeat(32)}`,
+    "token npm_0123456789abcdefghijklmnopqrstuv",
+    `mnemonic ${mnemonicAtRestSecret}`,
+    "rpc https://eth-mainnet.g.alchemy.com/v2/0123456789abcdefghijklmnopqrstuv",
+    `opaque ${entropyAtRestSecret}`,
+    `exact ${exactAtRestSecret}`
+  ].join("\n");
+}
+
+test("state diagnostics redact key, token, mnemonic, URL, entropy, and exact run secrets", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-state-expanded-redaction" });
+  updateNodeState(
+    layout,
+    "node-a",
+    { status: "failed", last_error: atRestSecretFixture() },
+    "2026-08-15T00:00:00.000Z",
+    { forbiddenSecretValues: [exactAtRestSecret] }
+  );
+
+  const serialized = fs.readFileSync(layout.statePath, "utf8");
+  for (const secret of ["0x1a", "npm_", "alchemy.com", entropyAtRestSecret, exactAtRestSecret, "abandon abandon"]) {
+    assert.doesNotMatch(serialized, new RegExp(secret.replaceAll(".", "\\."), "u"));
+  }
+  assert.match(readRunState(layout).nodes["node-a"]?.last_error ?? "", /<redacted>/u);
+});
+
+test("event payloads redact key, token, mnemonic, URL, entropy, and exact run secrets", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-event-expanded-redaction" });
+  appendEvent(layout, {
+    eventType: "workflow-submit-failed",
+    status: "failed",
+    payload: {
+      code: "WORKFLOW_SUBMISSION_FAILED",
+      message: atRestSecretFixture(),
+      severity: "error",
+      source: "workflow",
+      details: {}
+    },
+    forbiddenSecretValues: [exactAtRestSecret]
+  });
+
+  const serialized = fs.readFileSync(layout.eventsPath, "utf8");
+  for (const secret of ["0x1a", "npm_", "alchemy.com", entropyAtRestSecret, exactAtRestSecret, "abandon abandon"]) {
+    assert.doesNotMatch(serialized, new RegExp(secret.replaceAll(".", "\\."), "u"));
+  }
+  assert.match(serialized, /<redacted>/u);
+});
+
+test("attempt failures redact key, token, mnemonic, URL, entropy, and exact run secrets", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-attempt-expanded-redaction" });
+  const result = appendNodeAttempt(layout, {
+    workflowRunId: "workflow-run-expanded-redaction",
+    controlGeneration: "c".repeat(64),
+    nodeId: "strategy-a",
+    strategyAttemptId: "strategy-a",
+    iteration: 0,
+    attempt: 1,
+    startedEventSequence: 1,
+    sourceEventSequence: 2,
+    startedAt: "2026-08-15T00:00:00.000Z",
+    finishedAt: "2026-08-15T00:01:00.000Z",
+    outcome: "failed",
+    inputManifestDigest: manifestDigest("expanded redaction input"),
+    failureCategory: "executor-error",
+    failureMessage: atRestSecretFixture(),
+    forbiddenSecretValues: [exactAtRestSecret]
+  });
+
+  const persisted = result.entry.failure_message ?? "";
+  for (const secret of ["0x1a", "npm_", "alchemy.com", entropyAtRestSecret, exactAtRestSecret, "abandon abandon"]) {
+    assert.doesNotMatch(persisted, new RegExp(secret.replaceAll(".", "\\."), "u"));
+  }
+  assert.match(persisted, /<redacted>/u);
+});
+
+test("canonical publication secret gate fails closed without rewriting bytes", () => {
+  const maintainedFixtures = new Map<string, Buffer>([
+    ["report.md", Buffer.from(`wallet ${mnemonicAtRestSecret}`, "utf8")],
+    ["generated/Exploit.t.sol", Buffer.from(`constant TOKEN = "${entropyAtRestSecret}";`, "utf8")]
+  ]);
+  const original = new Map([...maintainedFixtures].map(([artifactPath, bytes]) => [artifactPath, Buffer.from(bytes)]));
+  assert.throws(
+    () => assertArtifactPublicationsContainNoSecrets(maintainedFixtures),
+    (error: unknown) => error instanceof ArtifactSecretGateError && error.artifactPath === "generated/Exploit.t.sol"
+  );
+  for (const [artifactPath, bytes] of maintainedFixtures) assert.deepEqual(bytes, original.get(artifactPath));
+
+  assert.throws(
+    () =>
+      assertArtifactPublicationsContainNoSecrets(
+        new Map([["raw-key.txt", Buffer.from(`signing key: ${"2b".repeat(32)}\n`, "utf8")]])
+      ),
+    /raw-key\.txt/u
+  );
+
+  const exactBytes = Buffer.from(`otherwise safe ${exactAtRestSecret}`, "utf8");
+  assert.throws(
+    () => assertArtifactPublicationsContainNoSecrets(new Map([["evidence.json", exactBytes]]), [exactAtRestSecret]),
+    /evidence\.json/u
+  );
+  assert.equal(exactBytes.toString("utf8"), `otherwise safe ${exactAtRestSecret}`);
+  assert.throws(
+    () => assertArtifactPublicationsContainNoSecrets(new Map([["invalid.bin", Buffer.from([0xff])]])),
+    /strict UTF-8/u
+  );
+  assert.doesNotThrow(() =>
+    assertArtifactPublicationsContainNoSecrets(
+      new Map([["short-exact.txt", Buffer.from("safe prose contains e", "utf8")]]),
+      ["e"]
+    )
+  );
+  assert.doesNotThrow(() =>
+    assertArtifactPublicationsContainNoSecrets(
+      new Map([
+        [
+          "report.md",
+          Buffer.from(`Reproducer transaction hash: 0x${"56".repeat(32)}\nNo sensitive values here.\n`, "utf8")
+        ],
+        [
+          "generated-tests/HashFixture.t.sol",
+          Buffer.from(`contract HashFixture { bytes32 public constant DOMAIN = 0x${"34".repeat(32)}; }\n`, "utf8")
+        ],
+        ["manifest.json", Buffer.from(`{"sha256":"${"a".repeat(64)}"}\n`, "utf8")]
+      ])
+    )
+  );
 });
 
 test("updateNodeState accepts an explicit transition timestamp", () => {

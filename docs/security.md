@@ -16,7 +16,16 @@ The product still enforces deterministic boundaries around files it writes
 itself:
 
 - Project paths must be relative, non-traversing, and non-symlink escapes.
-- Run artifacts redact secret-looking values before persistence.
+- Run-state diagnostics, events, and attempt-ledger failures redact known and
+  secret-looking values before persistence. This is a best-effort,
+  defense-in-depth control, not a guarantee that every possible secret format
+  will be recognized.
+- Canonical agent outputs and their companion publications are scanned against
+  maintained secret patterns and exact in-memory run credentials before they
+  are published. A match fails artifact verification without rewriting the
+  agent's immutable bytes; the output must be regenerated without the secret.
+  Exact-value substring matching ignores credentials shorter than eight
+  characters to avoid rejecting unrelated content on collision-prone values.
 - Materialization requires explicit selected copies and confirmation. Patch
   artifacts are rejected until safe patch application is implemented, and
   materialized copies are left as ordinary unstaged working-tree changes.

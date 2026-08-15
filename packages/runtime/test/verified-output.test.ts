@@ -88,6 +88,26 @@ test("verified final-report reader binds immutable current bytes to verifier and
   );
 });
 
+test("verified output readers reject authenticated historical publications containing secrets", () => {
+  const issue = currentIssue();
+  issue.description = "Executor leaked token=otherwise-unknown-historical-secret";
+  const fixture = createVerifiedReportFixture("verified-report-secret-contamination", {
+    report: currentReport("verified-report-secret-contamination", [issue])
+  });
+  const reportBefore = fs.readFileSync(fixture.reportPath);
+  const markdownBefore = fs.readFileSync(fixture.markdownPath);
+
+  assert.throws(
+    () => loadVerifiedNodeOutputSnapshot({ runRoot: fixture.layout.root, logicalNodeId: REPORT_LOGICAL_ID }),
+    (error: unknown) =>
+      error instanceof VerifiedOutputError &&
+      error.code === "VERIFIED_OUTPUT_INVALID" &&
+      /secret-safety validation/iu.test(error.message)
+  );
+  assert.deepEqual(fs.readFileSync(fixture.reportPath), reportBefore);
+  assert.deepEqual(fs.readFileSync(fixture.markdownPath), markdownBefore);
+});
+
 test("verified final-report reader rejects a schema-valid report that claims another run", () => {
   const fixture = createVerifiedReportFixture("verified-report-run-identity", {
     report: currentReport("different-run")
