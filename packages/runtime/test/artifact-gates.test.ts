@@ -9101,6 +9101,107 @@ test("current campaign timeout gate rejects reserve subtraction and ambiguous Re
   }
 });
 
+test("current campaign timeout gate accepts safe output redirections", () => {
+  for (const redirection of ["> /tmp/recon.log 2>&1", ">> /tmp/recon.log", "1> /tmp/recon.log", "&> /tmp/recon.log"]) {
+    const result = runCampaignTimeoutGate((fixture) => {
+      const command = `${fixture.backend.exact_command} ${redirection}`;
+      fixture.backend.exact_command = command;
+      fixture.plan.backend.exact_shell_escaped_command = command;
+      fixture.plan.command_plan[0]!.command = command;
+    });
+    assert.equal(result.ok, true, `${redirection}: ${JSON.stringify(result.diagnostics)}`);
+  }
+});
+
+test("current campaign timeout gate preserves the specific missing-flag diagnostic with output redirection", () => {
+  const result = runCampaignTimeoutGate((fixture) => {
+    const command = `${fixture.backend.exact_command.replace(" --timeout 3600", "")} > /tmp/recon.log 2>&1`;
+    fixture.backend.exact_command = command;
+    fixture.plan.backend.exact_shell_escaped_command = command;
+    fixture.plan.command_plan[0]!.command = command;
+  });
+  const commandDiagnostics = result.diagnostics.filter((diagnostic) =>
+    [
+      "CAMPAIGN_TIMEOUT_COMMAND_INVALID",
+      "CAMPAIGN_SEQUENCE_LENGTH_COMMAND_INVALID",
+      "CAMPAIGN_TIMEOUT_HOST_WRAPPER_INVALID"
+    ].includes(diagnostic.code)
+  );
+  assert.deepEqual(
+    commandDiagnostics.map((diagnostic) => [diagnostic.code, diagnostic.message]),
+    [["CAMPAIGN_TIMEOUT_COMMAND_INVALID", "Recon command must contain exactly one --timeout 3600 flag"]]
+  );
+});
+
+test("current campaign timeout gate does not treat non-shell whitespace as an argument boundary", () => {
+  for (const whitespace of ["\f", "\v", "\u00a0"]) {
+    const result = runCampaignTimeoutGate((fixture) => {
+      const command = fixture.backend.exact_command.replace("--timeout 3600", `--timeout${whitespace}3600`);
+      fixture.backend.exact_command = command;
+      fixture.plan.backend.exact_shell_escaped_command = command;
+      fixture.plan.command_plan[0]!.command = command;
+    });
+    assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+    assert.ok(
+      result.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code === "CAMPAIGN_TIMEOUT_COMMAND_INVALID" && diagnostic.message.includes("--timeout 3600")
+      ),
+      JSON.stringify(result.diagnostics)
+    );
+  }
+});
+
+test("current campaign timeout gate rejects shell operators after output redirection", () => {
+  for (const operator of [";", "|", "&&", "&", "`", "$(echo unsafe)", "<"]) {
+    const result = runCampaignTimeoutGate((fixture) => {
+      const command = `${fixture.backend.exact_command} > /tmp/recon.log 2>&1${operator} echo unsafe`;
+      fixture.backend.exact_command = command;
+      fixture.plan.backend.exact_shell_escaped_command = command;
+    });
+    assert.equal(result.ok, false, operator);
+    assert.ok(
+      result.diagnostics.some((diagnostic) => diagnostic.code === "CAMPAIGN_TIMEOUT_COMMAND_INVALID"),
+      `${operator}: ${JSON.stringify(result.diagnostics)}`
+    );
+  }
+});
+
+test("current campaign timeout gate accepts the reported #582 command shape and rejects hostile redirect operands", () => {
+  const reportedCommand =
+    "FOUNDRY_CACHE_PATH=/tmp/foundry-cache timeout --preserve-status --signal=INT --kill-after=300s 3600s recon fuzz . " +
+    "--contract CryticTester --test-mode assertion --workers 32 " +
+    `--test-limit ${RECON_TIMEOUT_TEST_LIMIT} --seq-len 100 --timeout 3600 ` +
+    "--corpus-dir /tmp/corpus --recon-corpus-dir /tmp/recon-corpus --repro /tmp/repro.t.sol > /tmp/recon-fuzzer-attempt2.log 2>&1";
+  const withCommand = (command: string) => {
+    const result = runCampaignTimeoutGate((fixture) => {
+      fixture.backend.exact_command = command;
+      fixture.plan.backend.exact_shell_escaped_command = command;
+      fixture.plan.command_plan[0]!.command = command;
+    });
+    return result;
+  };
+
+  assert.equal(withCommand(reportedCommand).ok, true);
+  for (const redirect of [
+    '> "$(touch /tmp/recon-pwned)"',
+    '> "`touch /tmp/recon-pwned`"',
+    "> \"${X:=$'$(touch /tmp/recon-pwned)'}\"",
+    "> \"$'\\x24\\x28touch /tmp/recon-pwned\\x29'\"",
+    '> "$RECON_REDIRECT_TARGET"',
+    ">(touch /tmp/recon-pwned)",
+    "2&> /tmp/recon-pwned",
+    "2>&1foo"
+  ]) {
+    const result = withCommand(`${reportedCommand.slice(0, reportedCommand.indexOf(" > "))} ${redirect}`);
+    assert.equal(result.ok, false, redirect);
+    assert.ok(
+      result.diagnostics.some((diagnostic) => diagnostic.code === "CAMPAIGN_TIMEOUT_COMMAND_INVALID"),
+      `${redirect}: ${JSON.stringify(result.diagnostics)}`
+    );
+  }
+});
+
 test("current campaign timeout gate verifies deadline arithmetic", () => {
   for (const field of ["fuzzing_deadline_utc", "force_kill_deadline_utc", "final_artifact_deadline_utc"] as const) {
     const result = runCampaignTimeoutGate((fixture) => {
