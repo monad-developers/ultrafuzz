@@ -9147,7 +9147,11 @@ test("current campaign timeout gate accepts the reported #582 command shape and 
   for (const redirect of [
     '> "$(touch /tmp/recon-pwned)"',
     '> "`touch /tmp/recon-pwned`"',
+    "> \"${X:=$'$(touch /tmp/recon-pwned)'}\"",
+    "> \"$'\\x24\\x28touch /tmp/recon-pwned\\x29'\"",
+    '> "$RECON_REDIRECT_TARGET"',
     ">(touch /tmp/recon-pwned)",
+    "2&> /tmp/recon-pwned",
     "2>&1foo"
   ]) {
     const result = withCommand(`${reportedCommand.slice(0, reportedCommand.indexOf(" > "))} ${redirect}`);

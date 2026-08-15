@@ -3562,7 +3562,7 @@ function constrainedShellTokens(command: string): string[] | undefined {
     while (/[ \t\f\v]/u.test(command[index] ?? "")) index += 1;
   };
 
-  const readWord = (): string | undefined => {
+  const readWord = (redirectOperand = false): string | undefined => {
     const start = index;
     let quote: "'" | '"' | undefined;
     let escaped = false;
@@ -3578,7 +3578,7 @@ function constrainedShellTokens(command: string): string[] | undefined {
         index += 1;
         continue;
       }
-      if (character === "`" || (character === "$" && command[index + 1] === "(")) {
+      if (character === "`" || (character === "$" && (redirectOperand || command[index + 1] === "("))) {
         return undefined;
       }
       if (quote !== undefined) {
@@ -3613,13 +3613,13 @@ function constrainedShellTokens(command: string): string[] | undefined {
   skipWhitespace();
   while (index < command.length) {
     const duplication = command.slice(index).match(/^[0-9]+>&[0-9]+(?=$|[\s>])/u);
-    const redirection = duplication === null ? command.slice(index).match(/^(?:[0-9]+)?(?:>>|>|&>)/u) : null;
+    const redirection = duplication === null ? command.slice(index).match(/^(?:(?:[0-9]+)?(?:>>|>)|&>)/u) : null;
     if (redirection !== null || duplication !== null) {
       index += (redirection ?? duplication)![0].length;
       if (redirection !== null) {
         if (command[index] === "(") return undefined;
         skipWhitespace();
-        if (readWord() === undefined) return undefined;
+        if (readWord(true) === undefined) return undefined;
       }
       skipWhitespace();
       continue;
@@ -3627,6 +3627,7 @@ function constrainedShellTokens(command: string): string[] | undefined {
     const token = readWord();
     if (token === undefined) return undefined;
     tokens.push(token);
+    if (/^[0-9]+$/u.test(token) && command.slice(index).startsWith("&>")) return undefined;
     skipWhitespace();
   }
   return tokens.length > 0 ? tokens : undefined;
