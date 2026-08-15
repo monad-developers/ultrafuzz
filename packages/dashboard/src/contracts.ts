@@ -24,6 +24,8 @@ const MAX_DASHBOARD_SSE_BYTES = 64 * 1024 * 1024;
 
 export type DashboardHttpDefinition =
   | "sessionResponse"
+  | "launchPreviewResponse"
+  | "cspViolationsResponse"
   | "runOverviewResponse"
   | "flowResponse"
   | "graphResponse"
@@ -45,26 +47,44 @@ export type DashboardHttpDefinition =
   | "topologySaveRequest"
   | "promptSaveRequest"
   | "promptCreateRequest"
+  | "cspViolationRequest"
   | "commandRequest";
 
 export type DashboardSseDefinition = "eventsEnvelope" | "errorEnvelope" | "commandJobsEnvelope";
 
-export type DashboardAuditKind = "config-edit" | "topology-edit" | "prompt-edit";
+export type DashboardAuditKind = "config-edit" | "topology-edit" | "prompt-edit" | "run-launch";
 
-export interface DashboardAuditRecord {
+interface DashboardAuditRecordBase {
   schema_version: typeof DASHBOARD_AUDIT_SCHEMA_VERSION;
   audit_id: string;
   timestamp: string;
-  kind: DashboardAuditKind;
-  path: string;
-  content_hash: string;
 }
 
-export interface DashboardAuditInput {
-  kind: DashboardAuditKind;
+export interface DashboardLaunchBudgetAudit {
+  max_parallel_agents: number;
+  max_parallel_nodes: number;
+  default_timeout_seconds: number;
+  workflow_deadline_seconds: number;
+  same_agent_attempts: number;
+  expanded_attempts: number;
+}
+
+type DashboardEditAuditInput = {
+  kind: "config-edit" | "topology-edit" | "prompt-edit";
   path: string;
   content_hash: string;
-}
+};
+
+type DashboardRunLaunchAuditInput = {
+  kind: "run-launch";
+  target: string;
+  providers: string[];
+  configured_budget: DashboardLaunchBudgetAudit;
+  confirmation_digest: string;
+};
+
+export type DashboardAuditInput = DashboardEditAuditInput | DashboardRunLaunchAuditInput;
+export type DashboardAuditRecord = DashboardAuditRecordBase & DashboardAuditInput;
 
 export const dashboardAuditCodec: StrictJsonlCodec<DashboardAuditRecord> = Object.freeze({
   label: "dashboard audit journal",

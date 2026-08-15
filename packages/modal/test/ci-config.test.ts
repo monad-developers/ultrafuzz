@@ -745,7 +745,7 @@ describe("public Modal benchmark configuration", () => {
           {
             lane: "package-gates",
             gates:
-              "dependency-policy,docs,config,audit-profile-package,security,topology,prompts,artifacts,evals,modal",
+              "dependency-policy,docs,config,audit-profile-package,security,topology,prompts,artifacts,evals,modal,dashboard",
             timeout_minutes: 30,
             build_modal_dependencies: true
           },

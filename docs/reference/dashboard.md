@@ -40,8 +40,10 @@ bytes, rejects invalid UTF-8, duplicate object keys, malformed or oversized
 JSON, and only then checks the expected document identity. SSE data follows the
 same bounded duplicate-key-safe parsing path after the browser decodes the
 event stream. The frontend does not convert historical versions or use
-last-key-wins `JSON.parse` behavior. Non-success HTTP bodies remain
-operator-facing text errors rather than JSON documents.
+last-key-wins `JSON.parse` behavior. Non-success HTTP bodies use the registered
+error document. Unexpected failures contain only a generic message and a UUID
+correlation ID; bounded, secret-redacted detail remains in the server
+diagnostic sink.
 
 ## Command Jobs
 
@@ -63,15 +65,38 @@ materialize
 clean
 ```
 
-`materialize` and `clean` require explicit confirmation. Materialization copies
-only selected reviewed outputs into the target project; patch application is
-not exposed until safe patch handling exists. Cleanup removes only selected
-generated `.ultrafuzz/**` paths.
+`run`, `materialize`, and `clean` require explicit confirmation. Before a run
+is submitted, the server recomputes and displays its target, selected
+providers, and configured execution budget. Submission must carry the matching
+confirmation digest, and the launch is appended to
+`.ultrafuzz/dashboard-audit.jsonl`. This is a pre-dispatch operator check; it
+does not add an approval inside an agent run or change agent bypass-permissions
+behavior. Materialization copies only selected reviewed outputs into the target
+project; patch application is not exposed until safe patch handling exists.
+Cleanup removes only selected generated `.ultrafuzz/**` paths.
 
 ## Local Security
 
-Dashboard/API servers must bind to loopback by default. Mutating APIs must use
-local request protections and a cryptographically random session token.
+Dashboard/API servers must bind to loopback by default. Every `/api/**`
+request—including reads, mutations, command-job reads, errors for unknown
+routes, and both SSE streams—requires a cryptographically random session token
+in the `x-ultrafuzz-session` header. `/api/session` never returns this token.
+The printed launch URL delivers it in the URL fragment, which browsers do not
+send in HTTP requests. The frontend consumes and clears that fragment, then
+keeps the token in tab-scoped `sessionStorage` for refreshes.
+
+Requests fail closed unless `Host` is present and names a loopback authority.
+When supplied, `Origin` must be a canonical HTTP loopback origin and
+`Sec-Fetch-Site` must be `same-origin` or `none`. These checks do not authorize
+binding the server to a non-loopback interface.
+
+Raw stdout, stderr, and rendered prompts can contain provider credentials or
+operator secrets. They are redacted before dashboard publication while the
+immutable run artifacts remain unchanged. Command output, command failures,
+server diagnostics, and recorded CSP violation details use the same redaction
+path. CSP limits images to `img-src 'self'`; authenticated violation reports
+are retained in a bounded in-memory view at `/api/csp-violations` and sent to
+the diagnostic sink for development and CI visibility.
 
 Path and run-ID inputs must use the same safe-path and safe-ID validation as
 the CLI, including rejection of traversal, absolute-path injection, unsafe

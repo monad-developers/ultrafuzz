@@ -66,6 +66,7 @@ import {
   type VerifiedNodeOutputSnapshot,
   type VerifiedRunOutputAuthoritySnapshot
 } from "@ultrafuzz/runtime";
+import { isSensitiveKeyName, redactSecretsInText } from "@ultrafuzz/security";
 import {
   expandTopology,
   FINISH_NODE_ID,
@@ -91,6 +92,7 @@ import {
   serializeDashboardSseDocument,
   type DashboardAuditInput,
   type DashboardHttpDefinition,
+  type DashboardLaunchBudgetAudit,
   type DashboardSseDefinition
 } from "./contracts.js";
 
@@ -110,6 +112,14 @@ export interface DashboardServerConfig {
    * the CLI identity must supply it.
    */
   ultrafuzzCliEntrypoint?: string;
+  /** Receives bounded, redacted server-side security and failure diagnostics. */
+  onDiagnostic?: (diagnostic: DashboardServerDiagnostic) => void;
+}
+
+export interface DashboardServerDiagnostic {
+  correlationId: string;
+  kind: "unexpected-error" | "csp-violation";
+  message: string;
 }
 
 export interface DashboardHandle {
@@ -153,6 +163,32 @@ interface DashboardCapturedRunAuthority {
   authorityProjection: DashboardFlowAuthorityProjection | undefined;
 }
 
+interface DashboardLaunchPreview {
+  target: string;
+  providers: string[];
+  configuredBudget: {
+    maxParallelAgents: number;
+    maxParallelNodes: number;
+    defaultTimeoutSeconds: number;
+    workflowDeadlineSeconds: number;
+    sameAgentAttempts: number;
+    expandedAttempts: number;
+  };
+  confirmationDigest: string;
+}
+
+interface DashboardCspViolation {
+  correlationId: string;
+  timestamp: string;
+  blockedURI: string;
+  violatedDirective: string;
+  effectiveDirective: string;
+  sourceFile?: string;
+  lineNumber?: number;
+  columnNumber?: number;
+  disposition: "enforce" | "report";
+}
+
 const DASHBOARD_FINDINGS_CONTRACTS = [
   "ultrafuzz/severity-classified-findings@1",
   "ultrafuzz/triaged-findings@1",
@@ -170,6 +206,7 @@ const SESSION_HEADER = "x-ultrafuzz-session";
 const MAX_COMMAND_JOBS = 20;
 const MAX_COMMAND_OUTPUT_BYTES = 32 * 1024;
 const MAX_REQUEST_BODY_BYTES = 1024 * 1024;
+const MAX_CSP_VIOLATIONS = 20;
 const FINDINGS_CONTRACT = "ultrafuzz/findings@2" as ArtifactContractId;
 const SECURITY_HEADERS = {
   "content-security-policy": [
@@ -179,7 +216,7 @@ const SECURITY_HEADERS = {
     "font-src 'self'",
     "form-action 'none'",
     "frame-ancestors 'none'",
-    "img-src 'self' data:",
+    "img-src 'self'",
     "object-src 'none'",
     "script-src 'self'",
     "style-src 'self'",
@@ -221,10 +258,10 @@ export async function serveDashboard(config: DashboardServerConfig = {}): Promis
   const app = await DashboardApp.create(config);
   const server = http.createServer((request, response) => {
     applySecurityHeaders(response);
-    app.handle(request, response).catch((error) => sendError(response, error));
+    app.handle(request, response).catch((error) => app.sendError(response, error));
   });
   const bindAddr = await listen(server, app.host, app.port);
-  const url = `http://${bindAddr}/dashboard`;
+  const url = `http://${bindAddr}/dashboard#session=${encodeURIComponent(app.sessionToken)}`;
   return {
     bindAddr,
     url,
@@ -252,8 +289,10 @@ class DashboardApp {
   readonly liveUpdates: boolean;
   readonly env: Record<string, string | undefined>;
   readonly ultrafuzzCliEntrypoint?: string;
+  readonly onDiagnostic: (diagnostic: DashboardServerDiagnostic) => void;
   readonly sessionToken = crypto.randomBytes(32).toString("hex");
   readonly jobs = new Map<string, CommandJob>();
+  readonly cspViolations: DashboardCspViolation[] = [];
   private requestedRunId?: string;
   private currentRunId?: string;
 
@@ -263,6 +302,7 @@ class DashboardApp {
       runId?: string;
       env: Record<string, string | undefined>;
       ultrafuzzCliEntrypoint?: string;
+      onDiagnostic: (diagnostic: DashboardServerDiagnostic) => void;
     }
   ) {
     this.projectRoot = config.projectRoot;
@@ -272,6 +312,7 @@ class DashboardApp {
     this.liveUpdates = config.liveUpdates;
     this.requestedRunId = config.runId;
     this.env = config.env;
+    this.onDiagnostic = config.onDiagnostic;
   }
 
   static async create(config: DashboardServerConfig): Promise<DashboardApp> {
@@ -285,6 +326,7 @@ class DashboardApp {
       runId,
       liveUpdates: config.liveUpdates ?? true,
       env: config.env ?? process.env,
+      onDiagnostic: config.onDiagnostic ?? defaultDashboardDiagnosticSink,
       ...(config.ultrafuzzCliEntrypoint === undefined ? {} : { ultrafuzzCliEntrypoint: config.ultrafuzzCliEntrypoint })
     });
     app.currentRunId = runId ?? (await app.latestRunId()) ?? PREVIEW_RUN_ID;
@@ -292,13 +334,64 @@ class DashboardApp {
   }
 
   async handle(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
-    const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
-    if (url.pathname.startsWith("/api/")) {
-      requireLocalRequest(request);
+    requireLocalRequest(request);
+    const url = new URL(request.url ?? "/", `http://${request.headers.host}`);
+    if (url.pathname === "/api" || url.pathname.startsWith("/api/")) {
+      requireSessionToken(request, this.sessionToken);
       await this.handleApi(request, response, url);
       return;
     }
     await this.handleStatic(request, response, url);
+  }
+
+  sendError(response: http.ServerResponse, error: unknown): void {
+    const correlationId = crypto.randomUUID();
+    const status = error instanceof HttpError ? error.status : 500;
+    if (!(error instanceof HttpError)) {
+      this.reportDiagnostic("unexpected-error", correlationId, diagnosticErrorText(error));
+    }
+    if (response.headersSent) {
+      response.destroy();
+      return;
+    }
+    if (error instanceof HttpError && error.closeConnection) {
+      response.shouldKeepAlive = false;
+      response.setHeader("connection", "close");
+    }
+    const message =
+      status === 500
+        ? "Unexpected dashboard error. Use the correlation ID to inspect the server diagnostic."
+        : this.redactText(errorMessage(error));
+    sendJson(response, dashboardHttpDocument("error", { error: message, correlationId }), "errorResponse", status);
+  }
+
+  reportDiagnostic(kind: DashboardServerDiagnostic["kind"], correlationId: string, message: string): void {
+    const diagnostic = {
+      correlationId,
+      kind,
+      message: capOutput(this.redactText(message))
+    } satisfies DashboardServerDiagnostic;
+    try {
+      this.onDiagnostic(diagnostic);
+    } catch {
+      try {
+        defaultDashboardDiagnosticSink(diagnostic);
+      } catch {
+        // Diagnostics must never replace or suppress the bounded client error.
+      }
+    }
+  }
+
+  redactText(value: string): string {
+    return redactDashboardText(value.split(this.sessionToken).join("<redacted>"), this.env);
+  }
+
+  redactOptionalText(value: string | undefined): string | undefined {
+    return value === undefined ? undefined : this.redactText(value);
+  }
+
+  redactBoundedText(value: string, maxLength: number): string {
+    return [...this.redactText(value)].slice(0, maxLength).join("");
   }
 
   async selectedRunId(): Promise<string> {
@@ -352,6 +445,25 @@ class DashboardApp {
     if (method === "GET" && segments.length === 2 && segments[0] === "events" && segments[1] === "stream") {
       await this.streamEvents(request, response);
       return;
+    }
+    if (segments.length === 1 && segments[0] === "csp-violations") {
+      if (method === "GET") {
+        sendJson(
+          response,
+          dashboardHttpDocument("csp-violations", { violations: this.cspViolations }),
+          "cspViolationsResponse"
+        );
+        return;
+      }
+      if (method === "POST") {
+        sendJson(
+          response,
+          await this.recordCspViolation(await readDashboardRequest(request, "cspViolationRequest")),
+          "cspViolationsResponse",
+          202
+        );
+        return;
+      }
     }
     if (segments[0] === "config") {
       if (method === "GET" && segments.length === 1) {
@@ -463,8 +575,19 @@ class DashboardApp {
       await this.streamCommandJobs(request, response);
       return;
     }
+    if (method === "POST" && segments.length === 3 && segments[1] === "run" && segments[2] === "preview") {
+      const body = await readDashboardRequest(request, "commandRequest");
+      if (stringField(body, "command") !== "run") {
+        throw new HttpError(400, "launch preview requires the run command");
+      }
+      sendJson(
+        response,
+        dashboardHttpDocument("launch-preview", await this.launchPreview(recordField(body, "arguments"))),
+        "launchPreviewResponse"
+      );
+      return;
+    }
     if (method === "POST" && segments.length === 2) {
-      requireMutation(request, this.sessionToken);
       const command = decodeURIComponent(segments[1]!);
       const body = await readDashboardRequest(request, "commandRequest");
       if (stringField(body, "command") !== command) {
@@ -511,7 +634,6 @@ class DashboardApp {
     return dashboardHttpDocument("session", {
       runId: await this.selectedRunId(),
       liveUpdates: this.liveUpdates,
-      sessionToken: this.sessionToken,
       templateVariables: [...SUPPORTED_TEMPLATE_VARIABLES]
     });
   }
@@ -841,9 +963,9 @@ class DashboardApp {
       return {
         attemptId: attempt.id,
         artifacts: files,
-        stdout: readTextIfExists(path.join(dir, "stdout.log")),
-        stderr: readTextIfExists(path.join(dir, "stderr.log")),
-        renderedPrompt: readTextIfExists(path.join(dir, "prompt.rendered.md"))
+        stdout: this.redactOptionalText(readTextIfExists(path.join(dir, "stdout.log"))),
+        stderr: this.redactOptionalText(readTextIfExists(path.join(dir, "stderr.log"))),
+        renderedPrompt: this.redactOptionalText(readTextIfExists(path.join(dir, "prompt.rendered.md")))
       };
     });
   }
@@ -1272,12 +1394,104 @@ class DashboardApp {
     }
   }
 
+  async launchPreview(body: JsonObject): Promise<DashboardLaunchPreview> {
+    const resolved = await this.resolvedConfig();
+    if (resolved === undefined) {
+      throw new HttpError(400, "project configuration must validate before a run can launch");
+    }
+    const expanded = await this.expandCurrentTopology(this.loadTopologyForDisplay());
+    const requestedAgent = optionalStringField(body, "agent");
+    const defaultProfileId = resolved.retry.agents[0] ?? resolved.models.default;
+    const profileIds = uniqueStrings([
+      ...expanded.nodes.flatMap((node) => node.modelFanout.map((selection) => selection.modelProfileId)),
+      ...resolved.retry.agents,
+      defaultProfileId
+    ]);
+    const providers = uniqueStrings([
+      ...profileIds.map((profileId) =>
+        requestedAgent !== undefined && profileId === defaultProfileId
+          ? requestedAgent
+          : (resolved.models.profiles[profileId]?.agent ?? profileId)
+      ),
+      ...(resolved.execution.mode === "cloud" && resolved.execution.provider !== undefined
+        ? [`execution:${resolved.execution.provider}`]
+        : [])
+    ]);
+    if (providers.length === 0) {
+      throw new HttpError(400, "project configuration does not select a launch provider");
+    }
+    const unsigned = {
+      target: resolved.project.repo,
+      providers,
+      configuredBudget: {
+        maxParallelAgents: optionalNumberField(body, "maxConcurrency") ?? resolved.run.maxParallelAgents,
+        maxParallelNodes: resolved.run.maxParallelNodes,
+        defaultTimeoutSeconds: resolved.run.defaultTimeoutSeconds,
+        workflowDeadlineSeconds: resolved.run.workflowDeadlineSeconds,
+        sameAgentAttempts: resolved.retry.sameAgentAttempts,
+        expandedAttempts: expanded.nodes.length
+      }
+    };
+    return {
+      ...unsigned,
+      confirmationDigest: sha256Bytes(JSON.stringify(unsigned))
+    };
+  }
+
+  async validateRunLaunchConfirmation(body: JsonObject): Promise<void> {
+    if (body.confirmed !== true) {
+      throw new HttpError(400, "run requires explicit pre-launch confirmation");
+    }
+    const suppliedDigest = optionalStringField(body, "confirmationDigest");
+    const preview = await this.launchPreview(body);
+    if (suppliedDigest === undefined || !constantTimeEqual(suppliedDigest, preview.confirmationDigest)) {
+      throw new HttpError(409, "run launch confirmation is missing, stale, or does not match current configuration");
+    }
+    preflightDashboardAudit(this.projectRoot);
+    appendAudit(this.projectRoot, {
+      kind: "run-launch",
+      target: preview.target,
+      providers: preview.providers,
+      configured_budget: launchBudgetAudit(preview.configuredBudget),
+      confirmation_digest: preview.confirmationDigest
+    });
+  }
+
+  async recordCspViolation(body: JsonObject): Promise<JsonObject> {
+    const correlationId = crypto.randomUUID();
+    const sourceFile = optionalStringField(body, "sourceFile");
+    const lineNumber = optionalNumberField(body, "lineNumber");
+    const columnNumber = optionalNumberField(body, "columnNumber");
+    const violation: DashboardCspViolation = {
+      correlationId,
+      timestamp: new Date().toISOString(),
+      blockedURI: this.redactBoundedText(stringField(body, "blockedURI"), 2048),
+      violatedDirective: this.redactBoundedText(stringField(body, "violatedDirective"), 512),
+      effectiveDirective: this.redactBoundedText(stringField(body, "effectiveDirective"), 512),
+      ...(sourceFile === undefined ? {} : { sourceFile: this.redactBoundedText(sourceFile, 2048) }),
+      ...(lineNumber === undefined ? {} : { lineNumber }),
+      ...(columnNumber === undefined ? {} : { columnNumber }),
+      disposition: stringField(body, "disposition") === "report" ? "report" : "enforce"
+    };
+    this.cspViolations.unshift(violation);
+    this.cspViolations.length = Math.min(this.cspViolations.length, MAX_CSP_VIOLATIONS);
+    this.reportDiagnostic(
+      "csp-violation",
+      correlationId,
+      `CSP ${violation.disposition} violation: ${violation.effectiveDirective} blocked ${violation.blockedURI}`
+    );
+    return dashboardHttpDocument("csp-violations", { violations: this.cspViolations });
+  }
+
   async startCommand(command: string, body: JsonObject): Promise<CommandJob> {
     if (!isDashboardCommand(command)) {
       throw new HttpError(404, `unsupported dashboard command: ${command}`);
     }
     if ((command === "materialize" || command === "clean") && body.confirmed !== true) {
       throw new HttpError(400, `${command} requires explicit confirmation`);
+    }
+    if (command === "run") {
+      await this.validateRunLaunchConfirmation(body);
     }
     const job: CommandJob = {
       schema_version: DASHBOARD_HTTP_SCHEMA_VERSION,
@@ -1294,7 +1508,7 @@ class DashboardApp {
     this.executeCommand(job, body).catch((error) => {
       updateJob(job, {
         status: "failed",
-        error: errorMessage(error),
+        error: this.redactText(errorMessage(error)),
         exitCode: 1,
         finishedAtUnixSeconds: unixSeconds()
       });
@@ -1415,7 +1629,7 @@ class DashboardApp {
     const ok = isRuntimeOk(result);
     updateJob(job, {
       status: ok ? "succeeded" : "failed",
-      output: capOutput(JSON.stringify(result, null, 2)),
+      output: capOutput(this.redactText(JSON.stringify(result, null, 2))),
       exitCode: ok ? 0 : 1,
       finishedAtUnixSeconds: unixSeconds()
     });
@@ -1470,10 +1684,14 @@ class DashboardApp {
           "eventsEnvelope"
         );
       } catch (error) {
+        const correlationId = crypto.randomUUID();
+        this.reportDiagnostic("unexpected-error", correlationId, diagnosticErrorText(error));
         writeSse(
           response,
           "ultrafuzz-error",
-          dashboardSseDocument("ultrafuzz-error", sequence++, { message: errorMessage(error) }),
+          dashboardSseDocument("ultrafuzz-error", sequence++, {
+            message: `Live update failed. Correlation ID: ${correlationId}`
+          }),
           "errorEnvelope"
         );
       }
@@ -1657,38 +1875,62 @@ function validateLoopbackHost(host: string): void {
 
 function requireLocalRequest(request: http.IncomingMessage): void {
   const host = request.headers.host;
-  if (host && !isLoopbackAuthority(host)) {
-    throw new HttpError(403, "dashboard API requires a loopback Host header");
+  if (typeof host !== "string" || !isLoopbackAuthority(host)) {
+    throw new HttpError(403, "dashboard requires a present loopback Host header");
   }
   const origin = request.headers.origin;
   if (typeof origin === "string" && !isLoopbackOrigin(origin)) {
-    throw new HttpError(403, "dashboard API rejects non-loopback Origin headers");
+    throw new HttpError(403, "dashboard rejects invalid or non-loopback Origin headers");
   }
   const fetchSite = request.headers["sec-fetch-site"];
-  if (fetchSite === "cross-site") {
-    throw new HttpError(403, "dashboard API rejects cross-site browser requests");
+  if (fetchSite !== undefined && fetchSite !== "same-origin" && fetchSite !== "none") {
+    throw new HttpError(403, "dashboard rejects cross-site browser requests");
   }
 }
 
-function requireMutation(request: http.IncomingMessage, sessionToken: string): void {
-  requireLocalRequest(request);
+function requireSessionToken(request: http.IncomingMessage, sessionToken: string): void {
   const token = request.headers[SESSION_HEADER];
   if (typeof token !== "string" || !constantTimeEqual(token, sessionToken)) {
     throw new HttpError(401, "missing or invalid dashboard session token");
   }
 }
 
+function requireMutation(request: http.IncomingMessage, sessionToken: string): void {
+  requireSessionToken(request, sessionToken);
+}
+
 function isLoopbackOrigin(origin: string): boolean {
   try {
-    return isLoopbackAuthority(new URL(origin).host);
+    const parsed = new URL(origin);
+    return (
+      parsed.protocol === "http:" &&
+      parsed.username === "" &&
+      parsed.password === "" &&
+      parsed.origin === origin &&
+      isLoopbackAuthority(parsed.host)
+    );
   } catch {
     return false;
   }
 }
 
 function isLoopbackAuthority(authority: string): boolean {
-  const host = authority.startsWith("[") ? authority.slice(1, authority.indexOf("]")) : (authority.split(":")[0] ?? "");
-  return host === "localhost" || host === "127.0.0.1" || host === "::1";
+  if (authority.length === 0 || authority.trim() !== authority || /[/?#]/u.test(authority)) return false;
+  try {
+    const parsed = new URL(`http://${authority}`);
+    const host = parsed.hostname.startsWith("[") ? parsed.hostname.slice(1, -1) : parsed.hostname;
+    return (
+      parsed.username === "" &&
+      parsed.password === "" &&
+      parsed.pathname === "/" &&
+      parsed.search === "" &&
+      parsed.hash === "" &&
+      parsed.host.toLowerCase() === authority.toLowerCase() &&
+      (host === "localhost" || host === "127.0.0.1" || host === "::1")
+    );
+  } catch {
+    return false;
+  }
 }
 
 function constantTimeEqual(left: string, right: string): boolean {
@@ -1768,15 +2010,6 @@ function sendJson(
   response.end(body);
 }
 
-function sendError(response: http.ServerResponse, error: unknown): void {
-  const status = error instanceof HttpError ? error.status : 500;
-  if (error instanceof HttpError && error.closeConnection) {
-    response.shouldKeepAlive = false;
-    response.setHeader("connection", "close");
-  }
-  sendJson(response, dashboardHttpDocument("error", { error: errorMessage(error) }), "errorResponse", status);
-}
-
 function applySecurityHeaders(response: http.ServerResponse): void {
   for (const [name, value] of Object.entries(SECURITY_HEADERS)) {
     response.setHeader(name, value);
@@ -1824,7 +2057,7 @@ function writeSse(
   response.write(`data: ${serialized}\n\n`);
 }
 
-function dashboardHttpDocument(documentType: string, value: JsonObject): JsonObject {
+function dashboardHttpDocument(documentType: string, value: object): JsonObject {
   return {
     schema_version: DASHBOARD_HTTP_SCHEMA_VERSION,
     document_type: documentType,
@@ -2422,6 +2655,41 @@ function capOutput(output: string): string {
   }
   const buffer = Buffer.from(output);
   return `[output truncated]\n${buffer.subarray(buffer.length - MAX_COMMAND_OUTPUT_BYTES).toString("utf8")}`;
+}
+
+function redactDashboardText(value: string, env: Readonly<Record<string, string | undefined>>): string {
+  let redacted = value;
+  const exactSecrets = [
+    ...new Set(
+      Object.entries(env)
+        .filter(([name, secret]) => isSensitiveKeyName(name) && typeof secret === "string" && secret.length >= 8)
+        .map(([, secret]) => secret!)
+    )
+  ].sort((left, right) => right.length - left.length || left.localeCompare(right));
+  for (const secret of exactSecrets) {
+    redacted = redacted.split(secret).join("<redacted>");
+  }
+  return redactSecretsInText(redacted);
+}
+
+function diagnosticErrorText(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+  return error.stack === undefined ? `${error.name}: ${error.message}` : error.stack;
+}
+
+function defaultDashboardDiagnosticSink(diagnostic: DashboardServerDiagnostic): void {
+  console.error(`[ultrafuzz dashboard ${diagnostic.kind} ${diagnostic.correlationId}] ${diagnostic.message}`);
+}
+
+function launchBudgetAudit(budget: DashboardLaunchPreview["configuredBudget"]): DashboardLaunchBudgetAudit {
+  return {
+    max_parallel_agents: budget.maxParallelAgents,
+    max_parallel_nodes: budget.maxParallelNodes,
+    default_timeout_seconds: budget.defaultTimeoutSeconds,
+    workflow_deadline_seconds: budget.workflowDeadlineSeconds,
+    same_agent_attempts: budget.sameAgentAttempts,
+    expanded_attempts: budget.expandedAttempts
+  };
 }
 
 function updateJob(job: CommandJob, patch: Partial<CommandJob>): void {

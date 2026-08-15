@@ -23,6 +23,7 @@ const gateIds = [
   "runtime-4",
   "evals",
   "modal",
+  "dashboard",
   "cli",
   "benchmark-history",
   "workspace-typecheck"

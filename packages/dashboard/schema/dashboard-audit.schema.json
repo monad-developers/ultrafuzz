@@ -11,6 +11,9 @@
     },
     {
       "$ref": "#/$defs/promptEdit"
+    },
+    {
+      "$ref": "#/$defs/runLaunch"
     }
   ],
   "$defs": {
@@ -94,6 +97,73 @@
           "pattern": "^\\.ultrafuzz/prompts/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+\\.mdx?$"
         },
         "content_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "runLaunch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "audit_id",
+        "timestamp",
+        "kind",
+        "target",
+        "providers",
+        "configured_budget",
+        "confirmation_digest"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "ultrafuzz.dashboard.audit.v1"
+        },
+        "audit_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "kind": {
+          "const": "run-launch"
+        },
+        "target": {
+          "type": "string",
+          "minLength": 1
+        },
+        "providers": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "configured_budget": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "max_parallel_agents",
+            "max_parallel_nodes",
+            "default_timeout_seconds",
+            "workflow_deadline_seconds",
+            "same_agent_attempts",
+            "expanded_attempts"
+          ],
+          "properties": {
+            "max_parallel_agents": { "type": "integer", "minimum": 1 },
+            "max_parallel_nodes": { "type": "integer", "minimum": 1 },
+            "default_timeout_seconds": { "type": "integer", "minimum": 1 },
+            "workflow_deadline_seconds": { "type": "integer", "minimum": 1 },
+            "same_agent_attempts": { "type": "integer", "minimum": 1 },
+            "expanded_attempts": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "confirmation_digest": {
           "type": "string",
           "pattern": "^[a-f0-9]{64}$"
         }

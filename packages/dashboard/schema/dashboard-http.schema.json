@@ -4,6 +4,8 @@
   "title": "Ultrafuzz dashboard HTTP JSON document",
   "oneOf": [
     { "$ref": "#/$defs/sessionResponse" },
+    { "$ref": "#/$defs/launchPreviewResponse" },
+    { "$ref": "#/$defs/cspViolationsResponse" },
     { "$ref": "#/$defs/runOverviewResponse" },
     { "$ref": "#/$defs/flowResponse" },
     { "$ref": "#/$defs/graphResponse" },
@@ -25,6 +27,7 @@
     { "$ref": "#/$defs/topologySaveRequest" },
     { "$ref": "#/$defs/promptSaveRequest" },
     { "$ref": "#/$defs/promptCreateRequest" },
+    { "$ref": "#/$defs/cspViolationRequest" },
     { "$ref": "#/$defs/commandRequest" }
   ],
   "$defs": {
@@ -505,17 +508,91 @@
     "sessionResponse": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema_version", "document_type", "runId", "liveUpdates", "sessionToken", "templateVariables"],
+      "required": ["schema_version", "document_type", "runId", "liveUpdates", "templateVariables"],
       "properties": {
         "schema_version": { "const": "ultrafuzz.dashboard.http.v1" },
         "document_type": { "const": "session" },
         "runId": { "$ref": "#/$defs/safeId" },
         "liveUpdates": { "type": "boolean" },
-        "sessionToken": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
         "templateVariables": {
           "type": "array",
           "uniqueItems": true,
           "items": { "$ref": "#/$defs/nonEmptyString" }
+        }
+      }
+    },
+    "configuredLaunchBudget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "maxParallelAgents",
+        "maxParallelNodes",
+        "defaultTimeoutSeconds",
+        "workflowDeadlineSeconds",
+        "sameAgentAttempts",
+        "expandedAttempts"
+      ],
+      "properties": {
+        "maxParallelAgents": { "$ref": "#/$defs/positiveSafeInteger" },
+        "maxParallelNodes": { "$ref": "#/$defs/positiveSafeInteger" },
+        "defaultTimeoutSeconds": { "$ref": "#/$defs/positiveSafeInteger" },
+        "workflowDeadlineSeconds": { "$ref": "#/$defs/positiveSafeInteger" },
+        "sameAgentAttempts": { "$ref": "#/$defs/positiveSafeInteger" },
+        "expandedAttempts": { "$ref": "#/$defs/nonNegativeSafeInteger" }
+      }
+    },
+    "launchPreviewResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "document_type", "target", "providers", "configuredBudget", "confirmationDigest"],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.dashboard.http.v1" },
+        "document_type": { "const": "launch-preview" },
+        "target": { "$ref": "#/$defs/nonEmptyString" },
+        "providers": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonEmptyString" }
+        },
+        "configuredBudget": { "$ref": "#/$defs/configuredLaunchBudget" },
+        "confirmationDigest": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "cspViolation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "correlationId",
+        "timestamp",
+        "blockedURI",
+        "violatedDirective",
+        "effectiveDirective",
+        "disposition"
+      ],
+      "properties": {
+        "correlationId": { "type": "string", "format": "uuid" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "blockedURI": { "type": "string", "maxLength": 2048 },
+        "violatedDirective": { "type": "string", "maxLength": 512 },
+        "effectiveDirective": { "type": "string", "maxLength": 512 },
+        "sourceFile": { "type": "string", "maxLength": 2048 },
+        "lineNumber": { "$ref": "#/$defs/nonNegativeSafeInteger" },
+        "columnNumber": { "$ref": "#/$defs/nonNegativeSafeInteger" },
+        "disposition": { "enum": ["enforce", "report"] }
+      }
+    },
+    "cspViolationsResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "document_type", "violations"],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.dashboard.http.v1" },
+        "document_type": { "const": "csp-violations" },
+        "violations": {
+          "type": "array",
+          "maxItems": 20,
+          "items": { "$ref": "#/$defs/cspViolation" }
         }
       }
     },
@@ -981,11 +1058,12 @@
     "errorResponse": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema_version", "document_type", "error"],
+      "required": ["schema_version", "document_type", "error", "correlationId"],
       "properties": {
         "schema_version": { "const": "ultrafuzz.dashboard.http.v1" },
         "document_type": { "const": "error" },
-        "error": { "$ref": "#/$defs/nonEmptyString" }
+        "error": { "$ref": "#/$defs/nonEmptyString" },
+        "correlationId": { "type": "string", "format": "uuid" }
       }
     },
     "configSaveRequest": {
@@ -1034,6 +1112,29 @@
         }
       }
     },
+    "cspViolationRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "request_type",
+        "blockedURI",
+        "violatedDirective",
+        "effectiveDirective",
+        "disposition"
+      ],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.dashboard.http.v1" },
+        "request_type": { "const": "csp-violation" },
+        "blockedURI": { "type": "string", "maxLength": 2048 },
+        "violatedDirective": { "type": "string", "maxLength": 512 },
+        "effectiveDirective": { "type": "string", "maxLength": 512 },
+        "sourceFile": { "type": "string", "maxLength": 2048 },
+        "lineNumber": { "$ref": "#/$defs/nonNegativeSafeInteger" },
+        "columnNumber": { "$ref": "#/$defs/nonNegativeSafeInteger" },
+        "disposition": { "enum": ["enforce", "report"] }
+      }
+    },
     "emptyCommandArguments": {
       "type": "object",
       "additionalProperties": false
@@ -1047,7 +1148,9 @@
         "agent": { "$ref": "#/$defs/nonEmptyString" },
         "model": { "$ref": "#/$defs/nonEmptyString" },
         "maxConcurrency": { "$ref": "#/$defs/positiveSafeInteger" },
-        "workflowInput": { "$ref": "#/$defs/operatorWorkflowInput" }
+        "workflowInput": { "$ref": "#/$defs/operatorWorkflowInput" },
+        "confirmed": { "const": true },
+        "confirmationDigest": { "$ref": "#/$defs/sha256" }
       }
     },
     "runIdCommandArguments": {
