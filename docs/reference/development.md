@@ -40,7 +40,9 @@ event, avoiding a duplicate push run; pushes to `main` run the full lane.
 Release validation uses seven isolated CI lanes with a maximum of seven jobs in
 parallel: package and CLI/typecheck lanes, one runtime-supporting lane, and four
 deterministic runtime integration shards. It then records their results in
-stable gate order in the JSON report.
+stable gate order in the JSON report. The package lane includes the dashboard
+suite so authentication, CSP policy, and violation-reporting regressions block
+release validation.
 
 ## Package Checks
 

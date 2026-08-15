@@ -45,6 +45,7 @@ const gates = [
   ),
   gate("evals", "Evals package tests", "pnpm", ["--filter", "@ultrafuzz/evals", "test"], ["G-EVALS"]),
   gate("modal", "Modal package tests", "pnpm", ["--filter", "@ultrafuzz/modal", "test"], ["G-MODAL"]),
+  gate("dashboard", "Dashboard package tests", "pnpm", ["--filter", "@ultrafuzz/dashboard", "test"], ["G-DASHBOARD"]),
   gate("cli", "CLI package tests", "pnpm", ["--filter", "@ultrafuzz/cli", "test"], ["G-CLI"]),
   gate("benchmark-history", "Benchmark history charts", "pnpm", ["-w", "benchmark:check:prebuilt"], ["G-CLI"]),
   gate("workspace-typecheck", "Workspace typecheck", "pnpm", ["-w", "typecheck"], ["G-WORKSPACE-TYPECHECK"])

@@ -3,7 +3,15 @@
   "compilerOptions": {
     "rootDir": ".",
     "outDir": "dist-test",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "types": ["node"]
   },
-  "include": ["src/**/*.ts", "frontend/.generated/**/*.ts", "frontend/src/wireContracts.ts", "test/**/*.test.ts"]
+  "include": [
+    "src/**/*.ts",
+    "frontend/.generated/**/*.ts",
+    "frontend/src/authenticatedSse.ts",
+    "frontend/src/dashboardSession.ts",
+    "frontend/src/wireContracts.ts",
+    "test/**/*.test.ts"
+  ]
 }
