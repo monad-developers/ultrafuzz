@@ -1177,7 +1177,14 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
     assertNoteParity(note, true);
   }
 
-  for (const evidenceAssignment of ["access_control=role-based", "access_token=redacted", "verification_hash=0xabc"]) {
+  for (const evidenceAssignment of [
+    "access_control=role-based",
+    "access_token=redacted",
+    "verification_hash=0xabc",
+    "Verification: run forge test",
+    "Resolution: use checks-effects-interactions",
+    "Access: only invoke public entrypoints"
+  ]) {
     assertNoteParity(evidenceAssignment, true);
   }
 
@@ -1187,10 +1194,6 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
     "Access=internal",
     "ACCESS=internal",
     "Verification=summary",
-    "access: internal",
-    "verification: summary",
-    '"access": "internal"',
-    '"verification": "summary"',
     "access -> internal",
     "verification -> summary"
   ]) {
@@ -1205,6 +1208,8 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
     "risk_score_v2=renamed",
     "confidence_score_detail=high",
     "severity_alias_v2=critical",
+    "classification_v2=bug",
+    "access_alias=internal",
     "prefix_disposition=accepted"
   ]) {
     assertNoteParity(renamedAlias, false);
@@ -1214,7 +1219,6 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
     "access ↦ internal",
     "verification ⟶ summary",
     "access ≔ internal",
-    "verification: \nsummary",
     "attainability ↦ helper-only",
     "severity_alias -> critical"
   ]) {
@@ -1230,20 +1234,19 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
     assertNoteParity(mappedMetadataAlias, false);
   }
 
-  for (const colonAlias of ["rating: critical", "attainability: helper-only"]) {
-    assertNoteParity(colonAlias, false);
+  for (const benignHeading of [
+    "rating: critical",
+    "attainability: helper-only",
+    "access: internal",
+    "verification: summary",
+    '"access": "internal"',
+    '"verification": "summary"'
+  ]) {
+    assertNoteParity(benignHeading, true);
   }
 
-  assert.deepEqual(findingReportSemanticAssignment("access: internal"), {
-    key: "access",
-    operator: "=",
-    value: "internal"
-  });
-  assert.deepEqual(findingReportSemanticAssignment('"verification": "summary"'), {
-    key: "verification",
-    operator: "=",
-    value: "summary"
-  });
+  assert.equal(findingReportSemanticAssignment("access: internal"), undefined);
+  assert.equal(findingReportSemanticAssignment('"verification": "summary"'), undefined);
   assert.deepEqual(findingReportSemanticAssignment("access -> internal"), {
     key: "access",
     operator: "=",
@@ -1253,6 +1256,11 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
     key: "access",
     operator: "=",
     value: "internal"
+  });
+  assert.deepEqual(findingReportSemanticAssignment("Record verification: summary evidence on each finding."), {
+    key: "verification",
+    operator: "=",
+    value: "summary"
   });
   for (const proseMapping of [
     "Record access -> internal evidence on each finding.",

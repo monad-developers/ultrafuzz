@@ -128,12 +128,19 @@ export function isFindingReportMetadataKey(key: string): boolean {
 }
 
 /** Unenumerated producer-local report aliases contain multiple metadata terms,
- * or a metadata term paired with the conventional alias marker. */
+ * or a report term paired with an explicit alias/version marker. */
 export function isFindingReportMetadataAliasKey(key: string): boolean {
   if (!findingReportAssignmentKey.test(key)) return false;
   const normalized = key.replace(/[A-Z]/gu, (character) => character.toLowerCase());
   const terms = FINDING_REPORT_METADATA_TERMS.filter((term) => normalized.includes(term));
-  return new Set(terms).size >= 2 || (terms.length > 0 && normalized.includes("alias"));
+  const segments = normalized.split(/[-_]+/u);
+  const hasRenameMarker = segments.some((segment) => segment === "alias" || /^v[0-9]+$/u.test(segment));
+  const hasShortAliasTerm = segments.some((segment) => segment === "access" || segment === "verification");
+  return (
+    new Set(terms).size >= 2 ||
+    (terms.length > 0 && (normalized.includes("alias") || hasRenameMarker)) ||
+    (hasShortAliasTerm && hasRenameMarker)
+  );
 }
 
 export function isFindingReportEvidenceAssignmentKey(key: string): boolean {
