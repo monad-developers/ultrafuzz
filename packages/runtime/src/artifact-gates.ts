@@ -6383,6 +6383,43 @@ function verifyCampaignPropertyReferences(
       }
     }
     if (provenanceIsCurrent) {
+      const admittedByEntrypoint = new Map(
+        (admittedEntrypoints ?? []).map((entry) => [entry.entrypoint, entry.property_id])
+      );
+      for (const [failureIndex, failure] of campaign.value.failures.entries()) {
+        if (failure.property_ids.length === 0) continue;
+        const failurePath = `${campaignPath}#$.failures[${failureIndex}]`;
+        if (failure.entrypoint === null) {
+          diagnostics.push({
+            code: "PROPERTY_CAMPAIGN_FAILURE_ENTRYPOINT_MISSING",
+            message: "A property-derived failure must identify its admitted entrypoint",
+            severity: "error",
+            source: "property-provenance",
+            path: `${failurePath}.entrypoint`
+          });
+          continue;
+        }
+        const admittedPropertyId = admittedByEntrypoint.get(failure.entrypoint);
+        if (admittedPropertyId === undefined) {
+          diagnostics.push({
+            code: "PROPERTY_CAMPAIGN_FAILURE_ENTRYPOINT_UNADMITTED",
+            message: `Failure entrypoint ${JSON.stringify(failure.entrypoint)} is not in the admitted entrypoint set`,
+            severity: "error",
+            source: "property-provenance",
+            path: `${failurePath}.entrypoint`
+          });
+          continue;
+        }
+        if (failure.property_ids.length !== 1 || failure.property_ids[0] !== admittedPropertyId) {
+          diagnostics.push({
+            code: "PROPERTY_CAMPAIGN_FAILURE_PROPERTY_MISMATCH",
+            message: `Failure property_ids must contain exactly the canonical property admitted for entrypoint ${JSON.stringify(failure.entrypoint)}`,
+            severity: "error",
+            source: "property-provenance",
+            path: `${failurePath}.property_ids`
+          });
+        }
+      }
       for (const propertyId of implementedIds) {
         if (!resultIds.has(propertyId)) {
           diagnostics.push({
@@ -6487,15 +6524,9 @@ function verifyCampaignPropertyReferences(
 }
 
 function provenanceIsCurrentCampaign(campaign: PropertyCampaignArtifact): boolean {
-  // The version is a producer field, so it cannot be the host's sole
-  // discriminator. Any current projection opts into the current contract;
-  // only artifacts with none of the projection fields retain legacy reads.
-  return (
-    campaign.property_provenance_version !== undefined ||
-    campaign.intended_entrypoints !== undefined ||
-    campaign.admitted_entrypoints !== undefined ||
-    campaign.property_results !== undefined
-  );
+  // property_results was required by the historical v3 contract, so it is
+  // not an opt-in marker. The version is the only compatible discriminator.
+  return campaign.property_provenance_version !== undefined;
 }
 
 /**
@@ -6511,6 +6542,10 @@ function authenticatedCampaignEntrypointDiagnostics(
   campaignPath: string,
   authenticated?: AuthenticatedArtifactGateSnapshots
 ): RuntimeDiagnostic[] {
+  // A backend that never started has no independently-produced discovery or
+  // result stream. The lifecycle/coverage contracts already require the
+  // empty fallback form; do not manufacture evidence requirements for it.
+  if (campaign.execution.started_at === null && campaign.execution.usable_results === false) return [];
   const intended = campaign.intended_entrypoints ?? [];
   const admitted = campaign.admitted_entrypoints ?? [];
   const intendedKey = (entry: { entrypoint: string; property_id: string }) =>
