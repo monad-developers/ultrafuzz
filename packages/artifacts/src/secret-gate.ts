@@ -42,12 +42,11 @@ export function assertArtifactPublicationsContainNoSecrets(
     if (exactSecretBytes.some((secret) => bytes.indexOf(secret) !== -1)) {
       throw new ArtifactSecretGateError(artifactPath, "secret-detected");
     }
-    let text: string;
-    try {
-      text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-    } catch (error) {
-      throw new ArtifactSecretGateError(artifactPath, "invalid-utf8", { cause: error });
-    }
+    // Campaign evidence may be an arbitrary binary corpus. Decode invalid
+    // sequences with replacement so printable UTF-8/ASCII secret signatures
+    // are still scanned, while exact active credentials remain protected by
+    // the byte-level check above.
+    const text = new TextDecoder("utf-8").decode(bytes);
     if (containsSensitiveSecrets(text)) {
       throw new ArtifactSecretGateError(artifactPath, "secret-detected");
     }
