@@ -40,6 +40,7 @@ import {
   type PlannedGraphNode
 } from "../src/index.js";
 import { WORKFLOW_CONTROL_INTEGRITY_SCHEMA_VERSION } from "../src/runtime-contracts.js";
+import { REFERENCE_EXPECTATION_AUTHORITY_FIXTURES } from "./fixtures/reference-expectation-authority.js";
 
 const CAMPAIGN_EVIDENCE_BYTES = Buffer.from("x", "utf8");
 const CAMPAIGN_EVIDENCE_SHA256 = createHash("sha256").update(CAMPAIGN_EVIDENCE_BYTES).digest("hex");
@@ -369,14 +370,17 @@ function writeMeasuredCoverageArtifacts(
 function writeMinimalPropertyFaninFixture(
   layout: ReturnType<typeof createRunLayout>,
   options: {
+    canonicalPropertyId?: string;
     sourceNodeId?: string;
     sourcePropertyId?: string;
+    sources?: readonly { source_node_id: string; source_property_id: string }[];
     dependsOn?: readonly string[];
-    referenceExpectation?: string;
+    referenceExpectations?: readonly string[];
   } = {}
 ): PlannedGraphNode {
   const sourceNodeId = options.sourceNodeId ?? "property-specification-recon";
   const sourcePropertyId = options.sourcePropertyId ?? "recon-1";
+  const sources = options.sources ?? [{ source_node_id: sourceNodeId, source_property_id: sourcePropertyId }];
   writeArtifact(
     layout,
     "project-discovery",
@@ -403,15 +407,15 @@ function writeMinimalPropertyFaninFixture(
     schema_version: "ultrafuzz.properties.v2",
     properties: [
       {
-        id: "property-1",
+        id: options.canonicalPropertyId ?? "property-1",
         description: "Supply accounting remains consistent.",
         category: "accounting",
         priority: "high",
-        sources: [{ source_node_id: sourceNodeId, source_property_id: sourcePropertyId }],
+        sources,
         ledger_ids: ["evidence-1"],
-        ...(options.referenceExpectation === undefined
+        ...(options.referenceExpectations === undefined
           ? {}
-          : { reference_expectations: [options.referenceExpectation] })
+          : { reference_expectations: options.referenceExpectations })
       }
     ]
   });
@@ -5835,6 +5839,80 @@ test("property lens gate accepts a bound pinned expectation catalog without rewr
   );
 });
 
+test("property lens gate requires omission for an empty expectation array even when a catalog was supplied", () => {
+  const expectationId = "scfuzzbench:aave-v4:iSpoke_supply";
+  const catalog = JSON.stringify({
+    schema_version: "ultrafuzz.reference-expectations.v2",
+    expectations: [{ id: expectationId }]
+  });
+  const catalogDigest = createHash("sha256").update(catalog).digest("hex");
+  const catalogOutput = boundOutput("references/expectations.json", "ultrafuzz/reference-expectations@2");
+  const layout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-properties-reference-authority-empty-field",
+    stateNodes: [
+      {
+        id: "reference-properties-recon",
+        status: "succeeded",
+        outputs: [catalogOutput],
+        provenance: {
+          origin: "pinned-reference",
+          reference: "reference-properties-recon",
+          reference_expectations: {
+            source: "operator-supplied",
+            path: "reference-expectations.json",
+            sha256: catalogDigest
+          }
+        }
+      }
+    ]
+  });
+  const node = {
+    ...plannedNode(["properties/recon.json"]),
+    id: "property-specification-recon",
+    logical_id: "property-specification-recon",
+    depends_on: ["reference-properties-recon"]
+  };
+  const lensPath = writeDeclaredPropertyLens(
+    layout,
+    node.id,
+    "properties/recon.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v2",
+      properties: [
+        {
+          id: "iSpoke_supply",
+          description: "Supply completes for valid state.",
+          category: "dos-liveness",
+          priority: "high",
+          reference_expectations: []
+        }
+      ]
+    })
+  );
+  writeArtifact(layout, "reference-properties-recon", "references/expectations.json", catalog);
+  writeArtifactManifest({
+    layout,
+    nodeId: "reference-properties-recon",
+    outputs: [catalogOutput],
+    provenance: { origin: "pinned-reference" }
+  });
+  const before = fs.readFileSync(lensPath);
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+  assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_OMISSION_REQUIRED" &&
+        diagnostic.path?.endsWith("#$.properties[0].reference_expectations") === true
+    ),
+    JSON.stringify(result.diagnostics)
+  );
+  assert.deepEqual(fs.readFileSync(lensPath), before);
+});
+
 test("property lens gate rejects expectations when no pinned catalog was supplied without rewriting bytes", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-no-catalog" });
   const node = {
@@ -5868,6 +5946,49 @@ test("property lens gate rejects expectations when no pinned catalog was supplie
     result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_CATALOG_ABSENT")
   );
   assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED"));
+  assert.deepEqual(fs.readFileSync(lensPath), before);
+});
+
+test("property lens gate requires true reference expectation omission when no catalog was supplied", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-no-catalog-empty-field" });
+  const node = {
+    ...plannedNode(["properties/recon.json"]),
+    id: "property-specification-recon",
+    logical_id: "property-specification-recon"
+  };
+  const lensPath = writeDeclaredPropertyLens(
+    layout,
+    node.id,
+    "properties/recon.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v2",
+      properties: [
+        {
+          id: "iSpoke_supply",
+          description: "Supply completes for valid state.",
+          category: "dos-liveness",
+          priority: "high",
+          reference_expectations: []
+        }
+      ]
+    })
+  );
+  const before = fs.readFileSync(lensPath);
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+  assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_CATALOG_ABSENT")
+  );
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED" &&
+        diagnostic.path?.endsWith("#$.properties[0].reference_expectations") === true
+    ),
+    JSON.stringify(result.diagnostics)
+  );
   assert.deepEqual(fs.readFileSync(lensPath), before);
 });
 
@@ -6236,6 +6357,103 @@ test("property fan-in gate rejects a lens reference expectation dropped from can
   assert.ok(
     result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_DROPPED"),
     JSON.stringify(result.diagnostics)
+  );
+});
+
+for (const fixture of REFERENCE_EXPECTATION_AUTHORITY_FIXTURES) {
+  test(`property fan-in gate rejects the issue 531 ${fixture.arm} reference expectation fabrication`, () => {
+    const layout = createRunLayout({ projectRoot: tempProject(), runId: fixture.runId });
+    for (const source of fixture.sources) {
+      writeDeclaredPropertyLens(
+        layout,
+        source.nodeId,
+        source.artifactPath,
+        JSON.stringify({
+          schema_version: "ultrafuzz.property-lens.v2",
+          properties: [
+            {
+              id: source.propertyId,
+              description: "Supply accounting remains consistent.",
+              category: "accounting",
+              priority: "high"
+            }
+          ]
+        })
+      );
+    }
+    const node = writeMinimalPropertyFaninFixture(layout, {
+      canonicalPropertyId: fixture.canonicalPropertyId,
+      sources: fixture.sources.map((source) => ({
+        source_node_id: source.nodeId,
+        source_property_id: source.propertyId
+      })),
+      dependsOn: fixture.sources.map((source) => source.nodeId),
+      referenceExpectations: fixture.fabricatedExpectationIds
+    });
+
+    const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+    assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+    const authorityDiagnostics = result.diagnostics.filter(
+      (diagnostic) =>
+        diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_DROPPED" &&
+        diagnostic.path?.endsWith("properties.json#$.properties[0].reference_expectations") === true
+    );
+    assert.equal(authorityDiagnostics.length, 1, JSON.stringify(result.diagnostics));
+    assert.ok(authorityDiagnostics[0]!.message.includes(fixture.canonicalPropertyId), authorityDiagnostics[0]!.message);
+    for (const expectationId of fixture.fabricatedExpectationIds) {
+      assert.ok(authorityDiagnostics[0]!.message.includes(expectationId), authorityDiagnostics[0]!.message);
+    }
+  });
+}
+
+test("property fan-in gate requires true omission when source lenses carry no authorized expectations", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-empty-fanin-expectations" });
+  writeDeclaredPropertyLens(
+    layout,
+    "property-specification-recon",
+    "properties/recon.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v2",
+      properties: [
+        {
+          id: "recon-1",
+          description: "Supply accounting remains consistent.",
+          category: "accounting",
+          priority: "high"
+        }
+      ]
+    })
+  );
+  const node = writeMinimalPropertyFaninFixture(layout);
+  const absent = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(absent.ok, true, JSON.stringify(absent.diagnostics));
+
+  const catalog = JSON.stringify({
+    schema_version: "ultrafuzz.properties.v2",
+    properties: [
+      {
+        id: "property-1",
+        description: "Supply accounting remains consistent.",
+        category: "accounting",
+        priority: "high",
+        sources: [{ source_node_id: "property-specification-recon", source_property_id: "recon-1" }],
+        ledger_ids: ["evidence-1"],
+        reference_expectations: []
+      }
+    ]
+  });
+  writeArtifact(layout, node.id, "properties.json", catalog);
+  writeArtifact(layout, node.id, "properties.md", fixtureCanonicalPropertiesMarkdown(catalog));
+
+  const explicitEmpty = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+  assert.equal(explicitEmpty.ok, false, JSON.stringify(explicitEmpty.diagnostics));
+  assert.ok(
+    explicitEmpty.diagnostics.some(
+      (diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_OMISSION_REQUIRED"
+    ),
+    JSON.stringify(explicitEmpty.diagnostics)
   );
 });
 

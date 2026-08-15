@@ -46,16 +46,14 @@ source row, preserve:
   table, such as `property-specification-certora`;
 - `source_property_id`: the prefixed property ID copied exactly from that
   source table.
-- `reference_expectations`: copy the exact identifiers present on contributing
-  source rows when those identifiers are supplied by the reference artifacts or
-  pinned-reference artifacts. Merge equivalent rows by taking the union
-  of supplied expectation identifiers, preserving each identifier unchanged.
-  When source rows carry no supplied expectation identifier, leave the field
-  absent.
-
-When a pinned-reference node declares a catalog with
-`ultrafuzz/reference-expectations@2`, read its declared artifact and validate it
-with `{{schema_path}}/reference-expectations.schema.json`.
+- `reference_expectations`: preserve only exact identifiers already carried by
+  contributing source rows; the lens gate has authorized those identifiers
+  against a structured `ultrafuzz/reference-expectations@2` catalog. Merge
+  equivalent rows by taking their union, preserving each identifier unchanged.
+  Never add identifiers from Markdown, prose, code listings, pinned-reference
+  artifacts, or model knowledge. When no contributing source row carries an
+  authorized identifier, omit the field entirely; an empty array is not
+  omission.
 
 When several source rows describe one equivalent property, emit one canonical
 property with every distinct contributing source in `sources`. Never keep only
