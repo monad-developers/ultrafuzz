@@ -3579,9 +3579,11 @@ default_effort = "high"
     const apiKeyConfigDir = apiKeyCommand.env?.KIMI_SHARE_DIR;
     assert.ok(apiKeyConfigDir);
     assert.equal(apiKeyCommand.env?.KIMI_CODE_HOME, apiKeyConfigDir);
+    assert.equal(apiKeyCommand.env?.KIMI_API_KEY, "test-key");
     const apiKeyConfig = fs.readFileSync(path.join(apiKeyConfigDir, "config.toml"), "utf8");
     assert.match(apiKeyConfig, /default_model = "kimi-k3"/);
-    assert.match(apiKeyConfig, /\[providers\."ultrafuzz-kimi-api"\]\ntype = "kimi"\napi_key = "test-key"/);
+    assert.match(apiKeyConfig, /\[providers\."ultrafuzz-kimi-api"\]\ntype = "kimi"/);
+    assert.doesNotMatch(apiKeyConfig, /api_key|test-key/u);
     assert.match(apiKeyConfig, /base_url = "https:\/\/api\.moonshot\.ai\/v1"/);
     assert.match(apiKeyConfig, /\[models\."kimi-k3"\]/);
     assert.match(apiKeyConfig, /model = "k3"/);
@@ -3685,8 +3687,12 @@ test(
       else process.env.KIMI_BASE_URL = previousBaseUrl;
     }
     assert.ok(command.env?.KIMI_CODE_HOME);
+    assert.equal(command.env?.KIMI_API_KEY, "contract-test-key");
+    const configPath = path.join(command.env.KIMI_CODE_HOME, "config.toml");
+    assert.doesNotMatch(fs.readFileSync(configPath, "utf8"), /api_key|contract-test-key/u);
     execFileSync(localKimiCode, ["doctor", "config", path.join(command.env.KIMI_CODE_HOME, "config.toml")], {
-      encoding: "utf8"
+      encoding: "utf8",
+      env: { ...process.env, ...command.env }
     });
     const parserArgs = [...command.args];
     const modelIndex = parserArgs.indexOf("--model");
@@ -3696,8 +3702,7 @@ test(
       cwd: project,
       env: {
         ...process.env,
-        KIMI_CODE_HOME: command.env.KIMI_CODE_HOME,
-        KIMI_SHARE_DIR: command.env.KIMI_CODE_HOME,
+        ...command.env,
         NO_PROXY: "127.0.0.1,localhost"
       },
       encoding: "utf8",
@@ -3714,7 +3719,9 @@ test(
       `${parsed.stdout}\n${parsed.stderr}`,
       /Cannot combine|unknown option|--final-message-only|--print|--work-dir|--thinking|--no-thinking/u
     );
+    const runtimeHome = command.env.KIMI_CODE_HOME;
     await command.cleanup?.();
+    assert.equal(fs.existsSync(runtimeHome), false);
   }
 );
 

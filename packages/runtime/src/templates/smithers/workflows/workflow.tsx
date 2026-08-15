@@ -24,6 +24,7 @@ const {
   artifactContractSchemaBinding,
   artifactSchemaRegistry,
   artifactValidatorSmokeFixturePath,
+  assertArtifactPublicationsContainNoSecrets,
   assertValidInvariantSuiteManifest,
   assertArtifactVerificationMarkerSemantics,
   assertRegularFileInside,
@@ -48,6 +49,7 @@ const {
   PROPERTIES_SCHEMA_VERSION,
   publishFileDurableExclusive,
   readRegularFileSnapshot,
+  sensitiveEnvironmentValues,
   validateArtifactContractBytes,
   validateArtifactVerificationMarker,
   validateImplementedPropertiesSchema,
@@ -5930,6 +5932,13 @@ function verifyArtifacts(
     if (primary === undefined) {
       throw new Error("artifact-contract failure: primary artifact is missing");
     }
+    assertArtifactPublicationsContainNoSecrets(
+      publications,
+      sensitiveEnvironmentValues(process.env, [
+        ...(task.execution?.agentCredentialEnv ?? []),
+        ...(task.execution?.modal?.credentialEnv ?? [])
+      ])
+    );
     publishVerifiedArtifacts(artifactDir, publications);
     assertVerifiedDependencySnapshotEpochRemainedCurrent(task, dependencySnapshotEpoch);
     writeArtifactVerificationMarker(task, artifacts, publications);

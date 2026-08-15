@@ -11,6 +11,7 @@ import { isDeepStrictEqual } from "node:util";
 import * as ts from "typescript";
 
 import {
+  assertArtifactPublicationsContainNoSecrets,
   assertRegularFileInside,
   executeSchemaSemanticGates,
   IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
@@ -1170,6 +1171,8 @@ function loadVerifyArtifactsHarness(
     "invariantSuiteNodeIds",
     "rememberInvariantSuitePublications",
     "createHash",
+    "assertArtifactPublicationsContainNoSecrets",
+    "sensitiveEnvironmentValues",
     "publishVerifiedArtifacts",
     "writeArtifactVerificationMarker",
     "taskPublishesWorkspacePatch",
@@ -1340,6 +1343,8 @@ function loadVerifyArtifactsHarness(
     new Set<string>(),
     () => undefined,
     createHash,
+    assertArtifactPublicationsContainNoSecrets,
+    () => [],
     (_artifactDir: string, values: ReadonlyMap<string, Buffer>) => {
       for (const [relativePath, bytes] of values) publications.set(relativePath, Buffer.from(bytes));
       options.onPublishArtifacts?.();
@@ -1680,6 +1685,25 @@ test("generated Smithers verifier rejects invalid UTF-8 and duplicate JSON keys 
     const duplicate = duplicateHarness.captureTaskOutputs(jsonTask);
     assert.throws(() => duplicateHarness.verifyArtifacts(jsonTask, duplicate), /not strict JSON/u);
     assert.equal(duplicateHarness.publications.size, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("generated Smithers verifier rejects secret-bearing captured bytes before publication", () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-secret-output-")));
+  try {
+    const outputPath = path.join(root, "result.json");
+    const contaminated = Buffer.from("analysis token=otherwise-unknown-secret\n", "utf8");
+    fs.writeFileSync(outputPath, contaminated);
+    const task = singleOutputVerificationTask(root, "ultrafuzz/text@1");
+    const harness = loadVerifyArtifactsHarness();
+    const captured = harness.captureTaskOutputs(task);
+
+    assert.throws(() => harness.verifyArtifacts(task, captured), /contains sensitive data/u);
+    assert.deepEqual(fs.readFileSync(outputPath), contaminated);
+    assert.equal(harness.publications.size, 0);
+    assert.equal(harness.markerWrites.length, 0);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -5598,6 +5622,16 @@ test("generated Smithers verifier publishes the complete validated set before ta
     verifier.indexOf("verifyOutputSemanticGates(task, verifiedOutputs, campaignEvidence)") <
       verifier.indexOf("const publications = new Map<string, Buffer>()")
   );
+  assert.ok(
+    verifier.indexOf("assertArtifactPublicationsContainNoSecrets(") > verifier.indexOf("primary === undefined")
+  );
+  assert.ok(
+    verifier.indexOf("assertArtifactPublicationsContainNoSecrets(") <
+      verifier.indexOf("publishVerifiedArtifacts(artifactDir, publications)")
+  );
+  assert.match(verifier, /sensitiveEnvironmentValues\(process\.env/u);
+  assert.match(verifier, /task\.execution\?\.agentCredentialEnv/u);
+  assert.match(verifier, /task\.execution\?\.modal\?\.credentialEnv/u);
   assert.ok(
     verifier.indexOf("publishVerifiedArtifacts(artifactDir, publications)") > verifier.indexOf("primary === undefined")
   );
