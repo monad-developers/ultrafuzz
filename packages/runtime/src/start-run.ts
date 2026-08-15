@@ -1129,7 +1129,7 @@ function writeLinkedWorkflowBinding(
       controlGeneration: link.control_generation,
       linkId: link.link_id
     },
-    ...(existingProvenance.recovery === undefined
+    ...(existingProvenance.recovery === undefined || existingProvenance.recovery.recovered
       ? {}
       : {
           recovery: {
