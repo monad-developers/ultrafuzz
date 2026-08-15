@@ -126,6 +126,7 @@ export async function startRun(input: StartRunInput) {
         targetCommit
       );
       if (reviewDiagnostics.length > 0) return reviewDiagnostics;
+      await input.verifyLaunchPlan?.({ resolvedConfig, expandedGraph });
       const credentialDiagnostics = credentialEnvironmentPolicyDiagnostics(resolvedConfig);
       if (credentialDiagnostics.length > 0) return credentialDiagnostics;
       return requiredCommandPreflightDiagnostics(input, resolvedConfig, expandedGraph);

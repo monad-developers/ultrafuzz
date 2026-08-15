@@ -7545,6 +7545,31 @@ test("startRun forwards configured and explicitly allowed environment variables 
   assert.equal(fs.readFileSync(contextLog, "utf8"), "|||||\n");
 });
 
+test("startRun lets a trusted embedder reject the exact plan before run materialization", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  let inspected = false;
+
+  const run = await startRun({
+    projectRoot: project,
+    runId: "embedder-plan-rejected",
+    env: fakeSmithersEnv(project),
+    verifyLaunchPlan: ({ resolvedConfig, expandedGraph }) => {
+      inspected = true;
+      assert.equal(resolvedConfig.project.repo, ".");
+      assert.ok(expandedGraph.nodes.length > 0);
+      throw new Error("confirmed launch snapshot changed");
+    }
+  });
+
+  assert.equal(inspected, true);
+  assert.equal(run.ok, false);
+  assert.equal(run.diagnostics[0]?.code, "RUN_PREFLIGHT_FAILED");
+  assert.match(run.diagnostics[0]?.message ?? "", /confirmed launch snapshot changed/u);
+  assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", "embedder-plan-rejected")), false);
+});
+
 test("startRun rejects an untracked cwd executable before task worktrees or model work", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
