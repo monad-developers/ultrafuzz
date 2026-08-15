@@ -14,8 +14,16 @@ type OpenRouterAgentEvent = Parameters<NonNullable<NonNullable<OpenRouterGenerat
 
 const OPENROUTER_API_BASE_URL = "https://openrouter.ai/api/v1";
 const OPENROUTER_CODEX_CONFIG_DIR = ".ultrafuzz/openrouter-codex";
-const OPENROUTER_INITIAL_429_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000] as const;
+const OPENROUTER_INITIAL_429_RETRY_WINDOW_MS = 120_000;
+const OPENROUTER_INITIAL_429_INITIAL_DELAY_MS = 1_000;
+const OPENROUTER_INITIAL_429_MAX_DELAY_MS = 30_000;
+const OPENROUTER_INITIAL_429_JITTER_FRACTION = 0.25;
 const ENVIRONMENT_VARIABLE_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/u;
+
+type OpenRouterInitial429RetryDecision =
+  | { kind: "rate-limit-exhausted" }
+  | { kind: "total-timeout" }
+  | { kind: "backoff"; delayMs: number; afterDelay: "retry" | "final-retry" | "total-timeout" };
 
 /**
  * Route Codex's Responses client through OpenRouter while retaining Codex's
@@ -95,16 +103,18 @@ export class OpenRouterCodexAgent extends CompatibleCodexAgent {
     options: OpenRouterGenerateOptions | undefined,
     operation: (attemptOptions: OpenRouterGenerateOptions) => Promise<T>
   ): Promise<T> {
+    const retryDeadline = performance.now() + OPENROUTER_INITIAL_429_RETRY_WINDOW_MS;
     const totalTimeoutMs = resolveTotalTimeoutMs(options?.timeout, this.timeoutMs);
-    const deadline =
+    const totalDeadline =
       totalTimeoutMs !== undefined && totalTimeoutMs !== 0 && Number.isFinite(totalTimeoutMs)
         ? performance.now() + Math.max(0, totalTimeoutMs)
         : undefined;
+    let finalRetry = false;
     for (let attempt = 0; ; attempt += 1) {
       if (options?.abortSignal?.aborted === true) {
         throw abortReason(options.abortSignal);
       }
-      const remainingTimeoutMs = remainingUntil(deadline);
+      const remainingTimeoutMs = remainingUntil(totalDeadline);
       if (remainingTimeoutMs !== undefined && remainingTimeoutMs <= 0) {
         throw this.retryTimeout(totalTimeoutMs, options);
       }
@@ -113,29 +123,36 @@ export class OpenRouterCodexAgent extends CompatibleCodexAgent {
       try {
         result = await operation(relay.options(remainingTimeoutMs));
       } catch (error) {
-        const baseDelay = OPENROUTER_INITIAL_429_RETRY_DELAYS_MS[attempt];
         if (options?.abortSignal?.aborted === true) {
           throw abortReason(options.abortSignal);
         }
-        if (baseDelay === undefined || relay.sawSubstantiveEvent || !isOpenRouterRateLimit(error)) {
+        if (finalRetry || relay.sawSubstantiveEvent || !isOpenRouterRateLimit(error)) {
           relay.release();
           throw error;
         }
-        const delay = baseDelay + Math.floor(Math.random() * Math.max(1, Math.floor(baseDelay / 4)));
+        const decision = decideOpenRouterInitial429Retry({
+          retryAttempt: attempt,
+          nowMs: performance.now(),
+          retryDeadlineMs: retryDeadline,
+          totalDeadlineMs: totalDeadline,
+          random: Math.random()
+        });
+        if (decision.kind === "rate-limit-exhausted") {
+          relay.release();
+          throw error;
+        }
+        if (decision.kind === "total-timeout") {
+          throw this.retryTimeout(totalTimeoutMs, options);
+        }
         options?.onStderr?.(
-          `[ultrafuzz] OpenRouter returned HTTP 429 before model output; retrying in ${delay}ms ` +
-            `(${attempt + 1}/${OPENROUTER_INITIAL_429_RETRY_DELAYS_MS.length}).\n`
+          `[ultrafuzz] OpenRouter returned HTTP 429 before model output; retrying in ${decision.delayMs}ms ` +
+            `(attempt ${attempt + 2}, ${OPENROUTER_INITIAL_429_RETRY_WINDOW_MS}ms retry window).\n`
         );
-        const remainingForBackoff = remainingUntil(deadline);
-        if (remainingForBackoff !== undefined && remainingForBackoff <= 0) {
+        await waitForRetry(decision.delayMs, options?.abortSignal);
+        if (decision.afterDelay === "total-timeout") {
           throw this.retryTimeout(totalTimeoutMs, options);
         }
-        const boundedDelay =
-          remainingForBackoff === undefined ? delay : Math.min(delay, Math.max(0, remainingForBackoff));
-        await waitForRetry(boundedDelay, options?.abortSignal);
-        if (boundedDelay < delay) {
-          throw this.retryTimeout(totalTimeoutMs, options);
-        }
+        finalRetry = decision.afterDelay === "final-retry";
         continue;
       }
       // Keep caller callbacks outside the provider-error catch. A callback may
@@ -157,6 +174,34 @@ export class OpenRouterCodexAgent extends CompatibleCodexAgent {
       }
     );
   }
+}
+
+export function decideOpenRouterInitial429Retry(input: {
+  retryAttempt: number;
+  nowMs: number;
+  retryDeadlineMs: number;
+  totalDeadlineMs?: number;
+  random: number;
+}): OpenRouterInitial429RetryDecision {
+  const retryRemainingMs = remainingFrom(input.retryDeadlineMs, input.nowMs);
+  const totalRemainingMs =
+    input.totalDeadlineMs === undefined ? undefined : remainingFrom(input.totalDeadlineMs, input.nowMs);
+  if (totalRemainingMs !== undefined && totalRemainingMs <= 0) return { kind: "total-timeout" };
+  if (retryRemainingMs <= 0) return { kind: "rate-limit-exhausted" };
+
+  const exponentialDelay = OPENROUTER_INITIAL_429_INITIAL_DELAY_MS * Math.pow(2, Math.max(0, input.retryAttempt));
+  const baseDelay = Math.min(exponentialDelay, OPENROUTER_INITIAL_429_MAX_DELAY_MS);
+  const jitterRange = Math.max(1, Math.floor(baseDelay * OPENROUTER_INITIAL_429_JITTER_FRACTION));
+  const jitteredDelay = baseDelay + Math.floor(clampRandom(input.random) * jitterRange);
+  const retryBoundedDelay = Math.min(jitteredDelay, retryRemainingMs);
+  const delayMs = totalRemainingMs === undefined ? retryBoundedDelay : Math.min(retryBoundedDelay, totalRemainingMs);
+  const afterDelay =
+    totalRemainingMs !== undefined && totalRemainingMs <= retryBoundedDelay
+      ? "total-timeout"
+      : retryRemainingMs <= jitteredDelay
+        ? "final-retry"
+        : "retry";
+  return { kind: "backoff", delayMs, afterDelay };
 }
 
 class BufferedAttemptRelay {
@@ -221,7 +266,16 @@ function resolveTotalTimeoutMs(timeout: unknown, fallback: number | undefined): 
 }
 
 function remainingUntil(deadline: number | undefined): number | undefined {
-  return deadline === undefined ? undefined : Math.max(0, Math.ceil(deadline - performance.now()));
+  return deadline === undefined ? undefined : remainingFrom(deadline, performance.now());
+}
+
+function remainingFrom(deadline: number, now: number): number {
+  return Math.max(0, Math.ceil(deadline - now));
+}
+
+function clampRandom(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(Math.max(value, 0), 1 - Number.EPSILON);
 }
 
 function withRemainingTotalTimeout(timeout: unknown, totalMs: number): number | Record<string, unknown> {

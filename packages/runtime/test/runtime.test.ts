@@ -315,7 +315,25 @@ async function loadGeneratedCodexAgent(project: string): Promise<{
   };
 }
 
-async function loadGeneratedOpenRouterAgent(project: string): Promise<{
+async function loadGeneratedOpenRouterAgent(
+  project: string,
+  retryPolicy?: {
+    retryWindowMs: number;
+    initialDelayMs: number;
+    maxDelayMs: number;
+    jitterFraction: number;
+  }
+): Promise<{
+  decideOpenRouterInitial429Retry(input: {
+    retryAttempt: number;
+    nowMs: number;
+    retryDeadlineMs: number;
+    totalDeadlineMs?: number;
+    random: number;
+  }):
+    | { kind: "rate-limit-exhausted" }
+    | { kind: "total-timeout" }
+    | { kind: "backoff"; delayMs: number; afterDelay: "retry" | "final-retry" | "total-timeout" };
   createOpenRouterAgent(options?: Record<string, unknown>): {
     opts: Record<string, unknown> & { env?: Record<string, string> };
     generate(options?: {
@@ -360,12 +378,36 @@ async function loadGeneratedOpenRouterAgent(project: string): Promise<{
     .replace('from "smthrs"', `from ${JSON.stringify(smithersUrl)}`)
     .replace('from "./toml"', 'from "./toml.mjs"')
     .replace('from "./environment"', 'from "./environment.mjs"');
-  const openRouterSource = fs
+  let openRouterSource = fs
     .readFileSync(path.join(agentsDir, "openrouter.ts"), "utf8")
     .replace('from "smthrs"', `from ${JSON.stringify(smithersUrl)}`)
     .replace('from "./codex"', 'from "./codex.mjs"')
     .replace('from "./toml"', 'from "./toml.mjs"')
     .replace('from "./environment"', 'from "./environment.mjs"');
+  if (retryPolicy !== undefined) {
+    for (const [from, to] of [
+      [
+        "const OPENROUTER_INITIAL_429_RETRY_WINDOW_MS = 120_000;",
+        `const OPENROUTER_INITIAL_429_RETRY_WINDOW_MS = ${retryPolicy.retryWindowMs};`
+      ],
+      [
+        "const OPENROUTER_INITIAL_429_INITIAL_DELAY_MS = 1_000;",
+        `const OPENROUTER_INITIAL_429_INITIAL_DELAY_MS = ${retryPolicy.initialDelayMs};`
+      ],
+      [
+        "const OPENROUTER_INITIAL_429_MAX_DELAY_MS = 30_000;",
+        `const OPENROUTER_INITIAL_429_MAX_DELAY_MS = ${retryPolicy.maxDelayMs};`
+      ],
+      [
+        "const OPENROUTER_INITIAL_429_JITTER_FRACTION = 0.25;",
+        `const OPENROUTER_INITIAL_429_JITTER_FRACTION = ${retryPolicy.jitterFraction};`
+      ]
+    ] as const) {
+      const replaced = openRouterSource.replace(from, to);
+      assert.notEqual(replaced, openRouterSource, `missing generated OpenRouter retry policy source: ${from}`);
+      openRouterSource = replaced;
+    }
+  }
   fs.writeFileSync(path.join(fixture, "codex.mjs"), transpile(codexSource), "utf8");
   fs.writeFileSync(path.join(fixture, "openrouter.mjs"), transpile(openRouterSource), "utf8");
   fs.writeFileSync(
@@ -379,6 +421,16 @@ async function loadGeneratedOpenRouterAgent(project: string): Promise<{
     "utf8"
   );
   return (await import(pathToFileURL(path.join(fixture, "openrouter.mjs")).href)) as {
+    decideOpenRouterInitial429Retry(input: {
+      retryAttempt: number;
+      nowMs: number;
+      retryDeadlineMs: number;
+      totalDeadlineMs?: number;
+      random: number;
+    }):
+      | { kind: "rate-limit-exhausted" }
+      | { kind: "total-timeout" }
+      | { kind: "backoff"; delayMs: number; afterDelay: "retry" | "final-retry" | "total-timeout" };
     createOpenRouterAgent(options?: Record<string, unknown>): {
       opts: Record<string, unknown> & { env?: Record<string, string> };
       generate(options?: {
@@ -425,11 +477,12 @@ let count = 0;
 try { count = Number(fs.readFileSync(counterPath, "utf8")); } catch {}
 count += 1;
 fs.writeFileSync(counterPath, String(count), "utf8");
+const failureCount = Number(process.env.OPENROUTER_RETRY_FIXTURE_FAILURES ?? "1");
 process.stdin.resume();
 process.stdin.on("end", () => {
   process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: "fixture-" + count }) + "\\n");
   process.stdout.write(JSON.stringify({ type: "turn.started" }) + "\\n");
-  if (count === 1 && process.env.OPENROUTER_RETRY_FIXTURE_MODE !== "empty-success") {
+  if (count <= failureCount && process.env.OPENROUTER_RETRY_FIXTURE_MODE !== "empty-success") {
     const substantiveEvents = {
       "substantive-command": {
         type: "item.started",
@@ -460,11 +513,11 @@ process.stdin.on("end", () => {
         item: { id: "todo-1", type: "todo_list", items: [{ text: "fixture task", completed: false }] }
       }
     };
-    const substantiveEvent = substantiveEvents[process.env.OPENROUTER_RETRY_FIXTURE_MODE];
+    const substantiveEvent = count === 1 ? substantiveEvents[process.env.OPENROUTER_RETRY_FIXTURE_MODE] : undefined;
     if (substantiveEvent) process.stdout.write(JSON.stringify(substantiveEvent) + "\\n");
     const message = process.env.OPENROUTER_RETRY_FIXTURE_MODE === "unrelated"
       ? "fixture path /tmp/job-429 is unavailable"
-      : "exceeded retry limit, last status: 429 Too Many Requests, request id: fixture-1";
+      : "exceeded retry limit, last status: 429 Too Many Requests, request id: fixture-" + count;
     process.stdout.write(JSON.stringify({ type: "error", message }) + "\\n");
     process.stdout.write(JSON.stringify({ type: "turn.failed", error: { message } }) + "\\n");
     process.exitCode = 1;
@@ -2401,6 +2454,74 @@ test(
   }
 );
 
+test("generated OpenRouter adapter bounds its initial 429 retry policy independently from caller timeout", async () => {
+  if (!runningUnderBun) return;
+  const project = tempProject();
+  const init = initProject({ projectRoot: project, force: true });
+  assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+  const { decideOpenRouterInitial429Retry } = await loadGeneratedOpenRouterAgent(project);
+
+  const baseDelays = [0, 1, 2, 3, 4, 5, 6].map((retryAttempt) =>
+    decideOpenRouterInitial429Retry({
+      retryAttempt,
+      nowMs: 0,
+      retryDeadlineMs: 120_000,
+      random: 0
+    })
+  );
+  assert.deepEqual(
+    baseDelays.map((decision) => (decision.kind === "backoff" ? decision.delayMs : decision.kind)),
+    [1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000]
+  );
+  assert.deepEqual(
+    decideOpenRouterInitial429Retry({
+      retryAttempt: 5,
+      nowMs: 0,
+      retryDeadlineMs: 120_000,
+      random: 1
+    }),
+    { kind: "backoff", delayMs: 37_499, afterDelay: "retry" }
+  );
+  assert.deepEqual(
+    decideOpenRouterInitial429Retry({
+      retryAttempt: 8,
+      nowMs: 119_500,
+      retryDeadlineMs: 120_000,
+      random: 0
+    }),
+    { kind: "backoff", delayMs: 500, afterDelay: "final-retry" }
+  );
+  assert.deepEqual(
+    decideOpenRouterInitial429Retry({
+      retryAttempt: 0,
+      nowMs: 0,
+      retryDeadlineMs: 500,
+      totalDeadlineMs: 500,
+      random: 0
+    }),
+    { kind: "backoff", delayMs: 500, afterDelay: "total-timeout" }
+  );
+  assert.deepEqual(
+    decideOpenRouterInitial429Retry({
+      retryAttempt: 0,
+      nowMs: 120_000,
+      retryDeadlineMs: 120_000,
+      random: 0
+    }),
+    { kind: "rate-limit-exhausted" }
+  );
+  assert.deepEqual(
+    decideOpenRouterInitial429Retry({
+      retryAttempt: 0,
+      nowMs: 1,
+      retryDeadlineMs: 120_000,
+      totalDeadlineMs: 1,
+      random: 0
+    }),
+    { kind: "total-timeout" }
+  );
+});
+
 test(
   "generated OpenRouter adapter retries an initial 429 but never replays substantive model work",
   { skip: !runningUnderBun, timeout: 20_000 },
@@ -2416,13 +2537,15 @@ test(
       key: process.env.OPENROUTER_API_KEY,
       path: process.env.PATH,
       counter: process.env.OPENROUTER_RETRY_FIXTURE_COUNTER,
-      mode: process.env.OPENROUTER_RETRY_FIXTURE_MODE
+      mode: process.env.OPENROUTER_RETRY_FIXTURE_MODE,
+      failures: process.env.OPENROUTER_RETRY_FIXTURE_FAILURES
     };
     process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
     process.env.OPENROUTER_API_KEY = "deterministic-openrouter-test-key";
     process.env.PATH = `${fixture.bin}${path.delimiter}${previous.path ?? ""}`;
     process.env.OPENROUTER_RETRY_FIXTURE_COUNTER = fixture.counter;
     process.env.OPENROUTER_RETRY_FIXTURE_MODE = "initial";
+    process.env.OPENROUTER_RETRY_FIXTURE_FAILURES = "1";
     try {
       const retryEvents: Record<string, unknown>[] = [];
       let retryStderr = "";
@@ -2567,7 +2690,70 @@ test(
         OPENROUTER_API_KEY: previous.key,
         PATH: previous.path,
         OPENROUTER_RETRY_FIXTURE_COUNTER: previous.counter,
-        OPENROUTER_RETRY_FIXTURE_MODE: previous.mode
+        OPENROUTER_RETRY_FIXTURE_MODE: previous.mode,
+        OPENROUTER_RETRY_FIXTURE_FAILURES: previous.failures
+      })) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  }
+);
+
+test(
+  "generated OpenRouter adapter recovers generate and stream after more than four initial 429s",
+  { skip: !runningUnderBun, timeout: 20_000 },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const configPath = path.join(project, "ultrafuzz.toml");
+    const fixture = installOpenRouterRetryCodexFixture(project);
+    const { createOpenRouterAgent } = await loadGeneratedOpenRouterAgent(project, {
+      retryWindowMs: 5_000,
+      initialDelayMs: 1,
+      maxDelayMs: 2,
+      jitterFraction: 0
+    });
+    const previous = {
+      config: process.env.ULTRAFUZZ_CONFIG_PATH,
+      key: process.env.OPENROUTER_API_KEY,
+      path: process.env.PATH,
+      counter: process.env.OPENROUTER_RETRY_FIXTURE_COUNTER,
+      mode: process.env.OPENROUTER_RETRY_FIXTURE_MODE,
+      failures: process.env.OPENROUTER_RETRY_FIXTURE_FAILURES
+    };
+    process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
+    process.env.OPENROUTER_API_KEY = "deterministic-openrouter-test-key";
+    process.env.PATH = `${fixture.bin}${path.delimiter}${previous.path ?? ""}`;
+    process.env.OPENROUTER_RETRY_FIXTURE_COUNTER = fixture.counter;
+    process.env.OPENROUTER_RETRY_FIXTURE_MODE = "initial";
+    process.env.OPENROUTER_RETRY_FIXTURE_FAILURES = "7";
+    try {
+      const longRetryEvents: Record<string, unknown>[] = [];
+      const result = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Recover after more than four consecutive initial rate limits",
+        onEvent: (event) => longRetryEvents.push(event)
+      });
+      assert.equal(result.text, "OK");
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "8");
+      assert.doesNotMatch(JSON.stringify(longRetryEvents), /fixture-[1-7]/u);
+      assert.match(JSON.stringify(longRetryEvents), /fixture-8/u);
+
+      fs.writeFileSync(fixture.counter, "0", "utf8");
+      const streamResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).stream({
+        prompt: "Stream after more than four consecutive initial rate limits"
+      });
+      assert.equal(await streamResult.text, "OK");
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "8");
+    } finally {
+      for (const [name, value] of Object.entries({
+        ULTRAFUZZ_CONFIG_PATH: previous.config,
+        OPENROUTER_API_KEY: previous.key,
+        PATH: previous.path,
+        OPENROUTER_RETRY_FIXTURE_COUNTER: previous.counter,
+        OPENROUTER_RETRY_FIXTURE_MODE: previous.mode,
+        OPENROUTER_RETRY_FIXTURE_FAILURES: previous.failures
       })) {
         if (value === undefined) delete process.env[name];
         else process.env[name] = value;
