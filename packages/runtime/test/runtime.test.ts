@@ -2152,7 +2152,7 @@ test(
 );
 
 test(
-  "generated OpenRouter adapter preserves opaque model IDs and isolates the official provider route",
+  "generated OpenRouter adapter preserves opaque model IDs and enables the authenticated provider catalogue",
   { skip: !runningUnderBun },
   async () => {
     const project = tempProject();
@@ -2225,8 +2225,11 @@ test(
           "[model_providers.openrouter]",
           'name = "OpenRouter"',
           'base_url = "https://openrouter.ai/api/v1"',
-          'env_key = "ROUTER_ALIAS"',
           'wire_api = "responses"',
+          "",
+          "[model_providers.openrouter.auth]",
+          'command = "node"',
+          'args = ["-e", "process.stdout.write(process.env[process.argv[1]] ?? \'\')", "ROUTER_ALIAS"]',
           ""
         ].join("\n")
       );

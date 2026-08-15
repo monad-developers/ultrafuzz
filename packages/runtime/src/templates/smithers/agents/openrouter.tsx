@@ -136,8 +136,11 @@ function openRouterCodexConfig(credentialEnv: string): string {
     "[model_providers.openrouter]",
     'name = "OpenRouter"',
     `base_url = "${OPENROUTER_API_BASE_URL}"`,
-    `env_key = "${credentialEnv}"`,
     'wire_api = "responses"',
+    "",
+    "[model_providers.openrouter.auth]",
+    'command = "node"',
+    `args = ["-e", "process.stdout.write(process.env[process.argv[1]] ?? '')", ${JSON.stringify(credentialEnv)}]`,
     ""
   ].join("\n");
 }
