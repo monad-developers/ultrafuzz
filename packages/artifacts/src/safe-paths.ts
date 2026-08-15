@@ -19,7 +19,7 @@ export class ArtifactPathError extends Error {
   }
 }
 
-export function validateSafeId(value: string, label = "id"): string {
+export function validateSafeIdOrThrow(value: string, label = "id"): string {
   if (!SAFE_ID_PATTERN.test(value)) {
     throw new ArtifactPathError(
       "unsafe-id",

@@ -41,7 +41,7 @@ import {
   validateArtifactManifest,
   validateArtifactVerificationMarker,
   validateFindingsSchema,
-  validateSafeId,
+  validateSafeIdOrThrow,
   writeArtifactManifest,
   writeRunMetadataDocument,
   writeRunState,
@@ -2111,7 +2111,7 @@ function cumulativeAccountingForSourceRun(
   layout: RunLayout,
   sourceRunId: string
 ): { summary: AccountingSummary; sourceRunIds: string[] } {
-  const safeSourceRunId = validateSafeId(sourceRunId, "source run ID");
+  const safeSourceRunId = validateSafeIdOrThrow(sourceRunId, "source run ID");
   if (safeSourceRunId === layout.runId) {
     throw new Error("source run ID cannot refer to the current run");
   }
@@ -3896,7 +3896,7 @@ function sourceNodeAttempts(
   if (sourceRunId === undefined) {
     return [];
   }
-  const safeSourceRunId = validateSafeId(sourceRunId, "source run ID");
+  const safeSourceRunId = validateSafeIdOrThrow(sourceRunId, "source run ID");
   if (safeSourceRunId === layout.runId) {
     return [];
   }
@@ -4555,7 +4555,7 @@ async function checkedRunLayout(
 ): Promise<{ ok: true; layout: RunLayout } | { ok: false; diagnostics: RuntimeDiagnostic[] }> {
   const runsRoot = await runsRootForProject(projectRoot);
   try {
-    const safeRunId = validateSafeId(runId, "run ID");
+    const safeRunId = validateSafeIdOrThrow(runId, "run ID");
     const layout = layoutForRunRoot(path.join(runsRoot, safeRunId), safeRunId);
     assertPathInside(runsRoot, layout.root, "run root");
     if (fs.existsSync(runsRoot)) {

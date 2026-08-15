@@ -13,7 +13,7 @@ import {
   hasAtMostCodePoints
 } from "./portable-json-primitives.js";
 import { type RunLayout } from "./run-layout.js";
-import { SAFE_ID_PATTERN, sha256Bytes, validateSafeId } from "./safe-paths.js";
+import { SAFE_ID_PATTERN, sha256Bytes, validateSafeIdOrThrow } from "./safe-paths.js";
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 import {
   appendStrictJsonlRecords,
@@ -480,7 +480,7 @@ export function createNodeAttemptLedgerEntry(
     input.failureMessage === undefined ? undefined : normalizeNodeAttemptFailureMessage(input.failureMessage);
   return assertNodeAttemptLedgerEntry({
     schema_version: NODE_ATTEMPT_LEDGER_SCHEMA_VERSION,
-    run_id: validateSafeId(input.runId ?? layout.runId, "run ID"),
+    run_id: validateSafeIdOrThrow(input.runId ?? layout.runId, "run ID"),
     workflow_run_id: input.workflowRunId,
     control_generation: input.controlGeneration,
     node_id: input.nodeId,

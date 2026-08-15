@@ -21,7 +21,7 @@ import {
   safeResolveInside,
   sha256Bytes,
   validateStrictJsonlHistory,
-  validateSafeId,
+  validateSafeIdOrThrow,
   type ArtifactManifest,
   type ArtifactManifestEntry,
   type ArtifactManifestOutputContract,
@@ -480,7 +480,7 @@ export class NodeTelemetryPump {
     let layout: ReturnType<typeof layoutForRunRoot>;
     try {
       layout = layoutForRunRoot(this.input.runRoot);
-      nodeDir = getNodeArtifactDir(layout, validateSafeId(nodeId, "node ID"));
+      nodeDir = getNodeArtifactDir(layout, validateSafeIdOrThrow(nodeId, "node ID"));
       manifestPath = safeResolveInside(nodeDir, ARTIFACT_MANIFEST_FILE, "artifact manifest path");
     } catch {
       warnings.push(warningDiagnostic("EVAL_TELEMETRY_MANIFEST_UNSAFE", "skipped unsafe artifact manifest path"));

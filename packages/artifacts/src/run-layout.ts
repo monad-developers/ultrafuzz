@@ -20,7 +20,7 @@ import {
   assertPathInside,
   ensureSafeDirectory,
   safeResolveInside,
-  validateSafeId,
+  validateSafeIdOrThrow,
   writeFileDurable,
   writeJsonDurable
 } from "./safe-paths.js";
@@ -65,7 +65,7 @@ export interface CreateRunLayoutInput {
 }
 
 export function createRunLayout(input: CreateRunLayoutInput): RunLayout {
-  const runId = validateSafeId(input.runId, "run ID");
+  const runId = validateSafeIdOrThrow(input.runId, "run ID");
   const runsRoot =
     input.outputRoot === undefined
       ? path.resolve(input.projectRoot ?? process.cwd(), ".ultrafuzz", "runs")
@@ -91,7 +91,8 @@ export function createRunLayout(input: CreateRunLayoutInput): RunLayout {
   }
 
   const createdAt = input.createdAt ?? new Date().toISOString();
-  const sourceRunId = input.sourceRunId === undefined ? undefined : validateSafeId(input.sourceRunId, "source run ID");
+  const sourceRunId =
+    input.sourceRunId === undefined ? undefined : validateSafeIdOrThrow(input.sourceRunId, "source run ID");
   const state =
     input.state ??
     createInitialRunState({
@@ -175,7 +176,7 @@ export function createRunLayout(input: CreateRunLayoutInput): RunLayout {
 }
 
 export function layoutForRunRoot(root: string, runId = path.basename(root)): RunLayout {
-  const safeRunId = validateSafeId(runId, "run ID");
+  const safeRunId = validateSafeIdOrThrow(runId, "run ID");
   const absoluteRoot = path.resolve(root);
   return {
     schemaVersion: RUN_LAYOUT_VERSION,
@@ -203,7 +204,7 @@ export function getNodeArtifactDir(
   concreteNodeId: string,
   options: { create?: boolean } = {}
 ): string {
-  const nodeId = validateSafeId(concreteNodeId, "concrete node ID");
+  const nodeId = validateSafeIdOrThrow(concreteNodeId, "concrete node ID");
   if (options.create === true) {
     return ensureSafeDirectory(layout.artifactsDir, nodeId);
   }
@@ -215,7 +216,7 @@ export function getNodeWorkspaceDir(
   concreteNodeId: string,
   options: { create?: boolean } = {}
 ): string {
-  const nodeId = validateSafeId(concreteNodeId, "concrete node ID");
+  const nodeId = validateSafeIdOrThrow(concreteNodeId, "concrete node ID");
   if (options.create === true) {
     return ensureSafeDirectory(layout.workspacesDir, nodeId);
   }

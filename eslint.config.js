@@ -44,6 +44,18 @@ export default tseslint.config(
           caughtErrorsIgnorePattern: "^_",
           varsIgnorePattern: "^_"
         }
+      ],
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector: "ExpressionStatement > CallExpression[callee.name='validateSafeIdResult']",
+          message: "validateSafeIdResult returns policy diagnostics; consume the result instead of discarding it."
+        },
+        {
+          selector:
+            "ExpressionStatement > CallExpression[callee.type='MemberExpression'][callee.property.name='validateSafeIdResult']",
+          message: "validateSafeIdResult returns policy diagnostics; consume the result instead of discarding it."
+        }
       ]
     }
   },

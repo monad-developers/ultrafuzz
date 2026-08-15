@@ -111,11 +111,20 @@ export async function materializeSelection(input: MaterializeInput): Promise<Run
         );
         break;
       }
-      fs.copyFileSync(
-        copy.sourcePath,
-        copy.destinationPath,
-        input.allowOverwrite === true ? 0 : fs.constants.COPYFILE_EXCL
-      );
+      try {
+        copyMaterializationWithoutFollowingDestination(copy, projectRoot, input.allowOverwrite === true);
+      } catch (error) {
+        diagnostics.push(
+          runtimeError(
+            "MATERIALIZE_DESTINATION_RACE",
+            `destination ${copy.selection.destination} changed or could not be replaced safely`,
+            "materialize",
+            copy.selection.destination,
+            { error: error instanceof Error ? error.message : String(error) }
+          )
+        );
+        break;
+      }
     }
   }
   if (hasRuntimeErrors(diagnostics)) {
@@ -173,6 +182,43 @@ export async function materializeSelection(input: MaterializeInput): Promise<Run
 }
 
 export const materializeRun = materializeSelection;
+
+function copyMaterializationWithoutFollowingDestination(
+  copy: PlannedMaterialization,
+  projectRoot: string,
+  allowOverwrite: boolean
+): void {
+  if (!allowOverwrite) {
+    fs.copyFileSync(copy.sourcePath, copy.destinationPath, fs.constants.COPYFILE_EXCL);
+    return;
+  }
+
+  const destinationDirectory = path.dirname(copy.destinationPath);
+  assertNoSymlinkComponents(projectRoot, destinationDirectory, "materialize destination directory");
+  const temporaryPath = path.join(
+    destinationDirectory,
+    `.${path.basename(copy.destinationPath)}.ultrafuzz-materialize-${process.pid}-${crypto.randomUUID()}.tmp`
+  );
+  try {
+    fs.copyFileSync(copy.sourcePath, temporaryPath, fs.constants.COPYFILE_EXCL);
+    const temporaryStat = fs.lstatSync(temporaryPath);
+    if (temporaryStat.isSymbolicLink() || !temporaryStat.isFile() || temporaryStat.nlink !== 1) {
+      throw new Error("temporary materialization is not a singly linked regular file");
+    }
+    if (sha256File(temporaryPath) !== copy.sha256) {
+      throw new Error("temporary materialization digest does not match the planned source");
+    }
+    assertNoSymlinkComponents(projectRoot, destinationDirectory, "materialize destination directory");
+
+    // POSIX rename replaces the destination directory entry itself. If an attacker swaps the checked
+    // destination for a symlink, the symlink is replaced rather than followed, so its target is never
+    // opened for writing. Keeping the temporary file in the same directory also makes the replacement
+    // atomic and avoids an EXDEV fallback with weaker semantics.
+    fs.renameSync(temporaryPath, copy.destinationPath);
+  } finally {
+    fs.rmSync(temporaryPath, { force: true });
+  }
+}
 
 function planCopy(
   layout: RunLayout,

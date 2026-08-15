@@ -4,7 +4,7 @@ import { redactSecretsInText } from "@ultrafuzz/security";
 
 import type { ArtifactContractId } from "./artifact-contract-ids.js";
 import { validateRegisteredJsonSchema } from "./json-schema-validator.js";
-import { validateSafeId, writeJsonDurable } from "./safe-paths.js";
+import { validateSafeIdOrThrow, writeJsonDurable } from "./safe-paths.js";
 import { readRegularFileSnapshot } from "./schema-registry.js";
 import { executeSemanticGate } from "./semantic-gates.js";
 import { parseStrictJsonBytes } from "./strict-json.js";
@@ -359,7 +359,7 @@ export interface RunLayoutStateLike {
 }
 
 export function createInitialRunState(input: CreateInitialRunStateInput): RunState {
-  const runId = validateSafeId(input.runId, "run ID");
+  const runId = validateSafeIdOrThrow(input.runId, "run ID");
   const createdAt = input.createdAt ?? new Date().toISOString();
   const createdAtMs = Date.parse(createdAt);
   const controllerLeaseSeconds = positiveInteger(input.controllerLeaseSeconds ?? 30, "controller lease seconds");
@@ -367,7 +367,7 @@ export function createInitialRunState(input: CreateInitialRunStateInput): RunSta
   const requestedConcurrency = positiveInteger(input.requestedConcurrency ?? 1, "requested concurrency");
   const nodes: Record<string, NodeState> = {};
   for (const node of input.nodes ?? []) {
-    const nodeId = validateSafeId(node.id, "node ID");
+    const nodeId = validateSafeIdOrThrow(node.id, "node ID");
     nodes[nodeId] = createNodeState({ ...node, waitSince: node.waitSince ?? createdAt });
   }
 
@@ -405,7 +405,7 @@ export function createInitialRunState(input: CreateInitialRunStateInput): RunSta
     );
   }
   if (input.sourceRunId !== undefined) {
-    state.source_run_id = validateSafeId(input.sourceRunId, "source run ID");
+    state.source_run_id = validateSafeIdOrThrow(input.sourceRunId, "source run ID");
   }
   if (input.provenance !== undefined) {
     state.provenance = input.provenance;
@@ -414,7 +414,7 @@ export function createInitialRunState(input: CreateInitialRunStateInput): RunSta
 }
 
 export function createNodeState(input: NodeStateInput): NodeState {
-  const nodeId = validateSafeId(input.id, "node ID");
+  const nodeId = validateSafeIdOrThrow(input.id, "node ID");
   const state: NodeState = {
     node_id: nodeId,
     status: input.status ?? "pending",
@@ -422,7 +422,7 @@ export function createNodeState(input: NodeStateInput): NodeState {
     timed_out: false
   };
   if (input.logicalNodeId !== undefined) {
-    state.logical_node_id = validateSafeId(input.logicalNodeId, "logical node ID");
+    state.logical_node_id = validateSafeIdOrThrow(input.logicalNodeId, "logical node ID");
   }
   if (input.artifactDir !== undefined) {
     state.artifact_dir = input.artifactDir;
@@ -553,7 +553,7 @@ export function updateNodeState(
   patch: Partial<Omit<NodeState, "node_id">>,
   timestamp = new Date().toISOString()
 ): RunState {
-  const safeNodeId = validateSafeId(nodeId, "node ID");
+  const safeNodeId = validateSafeIdOrThrow(nodeId, "node ID");
   const state = readRunState(target);
   const previous = state.nodes[safeNodeId] ?? createNodeState({ id: safeNodeId });
   const definedPatch = Object.fromEntries(Object.entries(patch).filter(([, value]) => value !== undefined)) as Partial<

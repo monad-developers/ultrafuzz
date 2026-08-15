@@ -95,6 +95,46 @@ test("materializeSelection copies only explicit outputs, leaves git changes unst
   assert.doesNotMatch(audit, /"mutation_policy"/u);
 });
 
+test("overwrite materialization atomically replaces a raced destination symlink without following it", async () => {
+  const project = tempProject();
+  const { runId, nodeId } = await plannedRunWithArtifact(project);
+  const destinationPath = path.join(project, "test", "Generated.t.sol");
+  const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-materialize-race-target-"));
+  const outsidePath = path.join(outsideRoot, "outside.txt");
+  fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
+  fs.writeFileSync(destinationPath, "old generated output\n", "utf8");
+  fs.writeFileSync(outsidePath, "must remain unchanged\n", "utf8");
+
+  const originalRenameSync = fs.renameSync;
+  let swapped = false;
+  fs.renameSync = ((oldPath, newPath) => {
+    if (!swapped && path.resolve(String(newPath)) === destinationPath) {
+      swapped = true;
+      fs.unlinkSync(destinationPath);
+      fs.symlinkSync(outsidePath, destinationPath);
+    }
+    originalRenameSync(oldPath, newPath);
+  }) as typeof fs.renameSync;
+  try {
+    const result = await materializeSelection({
+      projectRoot: project,
+      runId,
+      confirmed: true,
+      allowOverwrite: true,
+      copies: [{ source: `artifacts/${nodeId}/stdout.txt`, destination: "test/Generated.t.sol" }]
+    });
+
+    assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+    assert.equal(swapped, true);
+    assert.equal(fs.lstatSync(destinationPath).isSymbolicLink(), false);
+    assert.equal(fs.readFileSync(destinationPath, "utf8"), "generated output\n");
+    assert.equal(fs.readFileSync(outsidePath, "utf8"), "must remain unchanged\n");
+  } finally {
+    fs.renameSync = originalRenameSync;
+    fs.rmSync(outsideRoot, { recursive: true, force: true });
+  }
+});
+
 test("materializeSelection rejects conflicts, denied destinations, source symlinks, and destination symlink escapes", async () => {
   const project = tempProject();
   const { runId, runRoot, nodeId } = await plannedRunWithArtifact(project);

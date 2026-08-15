@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { diffPromptIdentity, parsePromptFrontmatter, PromptError } from "../src/index.js";
+import {
+  diffPromptIdentity,
+  isPlainPromptFrontmatterObject,
+  parsePromptFrontmatter,
+  PromptError
+} from "../src/index.js";
 
 describe("prompt frontmatter", () => {
   it("parses Markdown-compatible prompt frontmatter", () => {
@@ -26,6 +31,26 @@ describe("prompt frontmatter", () => {
 
   it("rejects removed category frontmatter", () => {
     expect(() => parsePromptFrontmatter("---\nid: x\ncategory: custom\n---\nBody")).toThrow(/category/);
+  });
+
+  it("accepts only prototype-safe plain frontmatter mappings", () => {
+    expect(isPlainPromptFrontmatterObject({ id: "plain" })).toBe(true);
+    expect(isPlainPromptFrontmatterObject(Object.assign(Object.create(null) as object, { id: "null-prototype" }))).toBe(
+      true
+    );
+    expect(isPlainPromptFrontmatterObject(Object.create({ inherited: "value" }) as object)).toBe(false);
+    expect(
+      isPlainPromptFrontmatterObject(
+        new Proxy(
+          {},
+          {
+            getPrototypeOf() {
+              throw new Error("prototype trap");
+            }
+          }
+        )
+      )
+    ).toBe(false);
   });
 
   it("treats display_name changes as labels only", () => {

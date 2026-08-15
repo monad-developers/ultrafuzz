@@ -6,7 +6,7 @@ import {
   assertPathInside,
   layoutForRunRoot,
   readRunMetadataDocument,
-  validateSafeId
+  validateSafeIdOrThrow
 } from "@ultrafuzz/artifacts";
 import { runsRootForProject, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
@@ -31,7 +31,7 @@ export default class Report extends Command {
     const root = projectRoot(flags);
     try {
       const runsRoot = await runsRootForProject(root);
-      const runId = validateSafeId(args.runId, "run ID");
+      const runId = validateSafeIdOrThrow(args.runId, "run ID");
       const layout = layoutForRunRoot(path.join(runsRoot, runId), runId);
       assertPathInside(runsRoot, layout.root, "run root");
       assertNoSymlinkComponents(runsRoot, layout.root, "run root");

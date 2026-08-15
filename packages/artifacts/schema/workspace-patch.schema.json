@@ -78,17 +78,17 @@
               },
               {
                 "not": {
-                  "pattern": "(^|/)(?:\\.git|\\.ultrafuzz|\\.smithers|node_modules|artifacts)(?:/|$)"
+                  "pattern": "(^|/)(?:\\.[gG][iI][tT]|\\.[uU][lL][tT][rR][aA][fF][uU][zZ][zZ]|\\.[sS][mM][iI][tT][hH][eE][rR][sS]|[nN][oO][dD][eE]_[mM][oO][dD][uU][lL][eE][sS]|[aA][rR][tT][iI][fF][aA][cC][tT][sS])(?:/|$)"
                 }
               },
               {
                 "not": {
-                  "pattern": "(^|/)\\.env(?:\\.|/|$)"
+                  "pattern": "(^|/)\\.[eE][nN][vV](?:\\.|/|$)"
                 }
               },
               {
                 "not": {
-                  "pattern": "(^|/)(?:\\.envrc|\\.npmrc)(?:/|$)"
+                  "pattern": "(^|/)(?:\\.[eE][nN][vV][rR][cC]|\\.[nN][pP][mM][rR][cC])(?:/|$)"
                 }
               }
             ]
@@ -138,17 +138,17 @@
               },
               {
                 "not": {
-                  "pattern": "(^|/)(?:\\.git|\\.ultrafuzz|\\.smithers|node_modules|artifacts)(?:/|$)"
+                  "pattern": "(^|/)(?:\\.[gG][iI][tT]|\\.[uU][lL][tT][rR][aA][fF][uU][zZ][zZ]|\\.[sS][mM][iI][tT][hH][eE][rR][sS]|[nN][oO][dD][eE]_[mM][oO][dD][uU][lL][eE][sS]|[aA][rR][tT][iI][fF][aA][cC][tT][sS])(?:/|$)"
                 }
               },
               {
                 "not": {
-                  "pattern": "(^|/)\\.env(?:\\.|/|$)"
+                  "pattern": "(^|/)\\.[eE][nN][vV](?:\\.|/|$)"
                 }
               },
               {
                 "not": {
-                  "pattern": "(^|/)(?:\\.envrc|\\.npmrc)(?:/|$)"
+                  "pattern": "(^|/)(?:\\.[eE][nN][vV][rR][cC]|\\.[nN][pP][mM][rR][cC])(?:/|$)"
                 }
               }
             ]
