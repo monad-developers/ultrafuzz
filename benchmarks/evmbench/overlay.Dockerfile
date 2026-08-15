@@ -3,7 +3,7 @@ FROM node:22-bookworm AS builder
 
 WORKDIR /opt/ultrafuzz
 COPY . .
-RUN corepack enable && corepack prepare pnpm@11.1.1 --activate && \
+RUN corepack enable && corepack prepare pnpm@11.21.0 --activate && \
     pnpm install --frozen-lockfile && \
     pnpm --filter @ultrafuzz/cli... build && \
     pnpm --filter @ultrafuzz/evmbench build
