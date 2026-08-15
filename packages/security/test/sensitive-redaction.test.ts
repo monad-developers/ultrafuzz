@@ -94,6 +94,7 @@ test("ordinary prose, source identifiers, addresses, and checksums remain unchan
   const safe = [
     "Agent YOLO execution remains enabled.",
     "function aReasonablyLongButNotRandomIdentifierForCoverage() {}",
+    "read process.env.ULTRAFUZZ_CONFIG_PATH before launch",
     `address 0x${"12".repeat(20)}`,
     `bytes32 public constant DOMAIN = 0x${"34".repeat(32)};`,
     `transaction hash: 0x${"56".repeat(32)}`,
