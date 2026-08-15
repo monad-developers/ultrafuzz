@@ -70,12 +70,47 @@ import {
   validateProject
 } from "../src/index.js";
 import { inspectSmithersInstallation, runSmithersInspectionCommand } from "../src/smithers.js";
+import { assertControllerExecutionSnapshotDigest, inspectControllerSource } from "../src/controller-source.js";
 import { acquireWorkflowExecutionSnapshotAnchor } from "../src/workflow-execution-snapshot-capability.js";
 import { materializeWorkflowExecutionSnapshot } from "../src/workflow-integrity.js";
 import { linkedWorkflowExecutionEnvironment } from "../src/start-run.js";
 import { addOpenRouterProfile } from "./openrouter-profile-fixture.js";
 
 const runningUnderBun = typeof process.versions.bun === "string";
+const SMITHERS_TEST_ENVIRONMENT_ALLOWLIST = [
+  "SMITHERS_FAKE_ADMISSION_TIMEOUT_LOG",
+  "SMITHERS_FAKE_ALREADY_PAUSED",
+  "SMITHERS_FAKE_CLOUD_ENV_LOG",
+  "SMITHERS_FAKE_CONTEXT_LOG",
+  "SMITHERS_FAKE_DEEPSEEK_ENV_LOG",
+  "SMITHERS_FAKE_ENV_LOG",
+  "SMITHERS_FAKE_EVENTS",
+  "SMITHERS_FAKE_EXECUTED_AS_LOG",
+  "SMITHERS_FAKE_FAIL_UP",
+  "SMITHERS_FAKE_FORGE_GUARD_LOG",
+  "SMITHERS_FAKE_FORKED_RUN_ID",
+  "SMITHERS_FAKE_INPUT_LOG",
+  "SMITHERS_FAKE_INSPECT",
+  "SMITHERS_FAKE_KEEP_WORKTREES_LOG",
+  "SMITHERS_FAKE_KIMI_ENV_LOG",
+  "SMITHERS_FAKE_LOG",
+  "SMITHERS_FAKE_MARKER",
+  "SMITHERS_FAKE_NODE_DETAILS",
+  "SMITHERS_FAKE_OPENROUTER_ENV_LOG",
+  "SMITHERS_FAKE_PATH_LOG",
+  "SMITHERS_FAKE_PAUSE_EMPTY_SUCCESS",
+  "SMITHERS_FAKE_PS",
+  "SMITHERS_FAKE_RETRY_CREDENTIAL_ENV_LOG",
+  "SMITHERS_FAKE_RUN_EXISTS",
+  "SMITHERS_FAKE_SNAPSHOT_ATTEMPT",
+  "SMITHERS_FAKE_SNAPSHOT_BYTES_LOG",
+  "SMITHERS_FAKE_STATUS",
+  "SMITHERS_FAKE_STATUS_EVENTS",
+  "SMITHERS_FAKE_STATUS_JSON",
+  "SMITHERS_FAKE_TIMELINE",
+  "SMITHERS_FAKE_TOKEN_EVENTS",
+  "SMITHERS_FAKE_WHY"
+].join(",");
 
 function tempProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-runtime-"));
@@ -124,8 +159,26 @@ function withFakeCliEntrypoint<T extends { projectRoot: string; ultrafuzzCliEntr
   };
 }
 
-function startRun(input: Parameters<typeof runtimeStartRun>[0]): ReturnType<typeof runtimeStartRun> {
-  return runtimeStartRun(withFakeCliEntrypoint(input));
+async function startRun(input: Parameters<typeof runtimeStartRun>[0]): ReturnType<typeof runtimeStartRun> {
+  // Existing integration tests exercise post-review launch behavior. Keep
+  // their fixtures single-pass; dedicated tests below call runtimeStartRun
+  // directly with the production default to cover the acknowledgement gate.
+  const configPath = path.join(input.projectRoot, "ultrafuzz.toml");
+  if (fs.existsSync(configPath)) {
+    const config = fs.readFileSync(configPath, "utf8");
+    const withoutReviewGate = config.replace("prompt_review_required = true", "prompt_review_required = false");
+    if (withoutReviewGate !== config) fs.writeFileSync(configPath, withoutReviewGate, "utf8");
+  }
+  const prepared = withFakeCliEntrypoint(input);
+  const first = await runtimeStartRun(prepared);
+  const review = first.diagnostics.find(
+    (diagnostic) =>
+      diagnostic.code === "RUN_REVIEW_ACKNOWLEDGEMENT_REQUIRED" ||
+      diagnostic.code === "RUN_REVIEW_ACKNOWLEDGEMENT_STALE"
+  );
+  const expected = review?.details?.expected_digest;
+  if (typeof expected !== "string") return first;
+  return runtimeStartRun({ ...prepared, reviewAcknowledgement: expected });
 }
 
 function resumeRun(input: Parameters<typeof runtimeResumeRun>[0]): ReturnType<typeof runtimeResumeRun> {
@@ -208,7 +261,8 @@ async function loadGeneratedKimiAgent(project: string): Promise<{
     .replace('from "smthrs"', `from ${JSON.stringify(smithersUrl)}`)
     .replace('from "./toml"', 'from "./toml.mjs"')
     .replace('from "./strict-json"', 'from "./strict-json.mjs"')
-    .replace('from "./environment"', 'from "./environment.mjs"');
+    .replace('from "./environment"', 'from "./environment.mjs"')
+    .replace('from "./provider-home"', 'from "./provider-home.mjs"');
   fs.writeFileSync(path.join(fixture, "kimi.mjs"), transpile(kimiSource), "utf8");
   fs.writeFileSync(
     path.join(fixture, "environment.mjs"),
@@ -218,6 +272,11 @@ async function loadGeneratedKimiAgent(project: string): Promise<{
   fs.writeFileSync(
     path.join(fixture, "toml.mjs"),
     transpile(fs.readFileSync(path.join(agentsDir, "toml.ts"), "utf8")),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(fixture, "provider-home.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "provider-home.ts"), "utf8")),
     "utf8"
   );
   fs.writeFileSync(
@@ -280,11 +339,17 @@ async function loadGeneratedCodexAgent(project: string): Promise<{
     .readFileSync(path.join(agentsDir, "codex.ts"), "utf8")
     .replace('from "smthrs"', `from ${JSON.stringify(smithersUrl)}`)
     .replace('from "./toml"', 'from "./toml.mjs"')
-    .replace('from "./environment"', 'from "./environment.mjs"');
+    .replace('from "./environment"', 'from "./environment.mjs"')
+    .replace('from "./provider-home"', 'from "./provider-home.mjs"');
   fs.writeFileSync(path.join(fixture, "codex.mjs"), transpile(codexSource), "utf8");
   fs.writeFileSync(
     path.join(fixture, "environment.mjs"),
     transpile(fs.readFileSync(path.join(agentsDir, "environment.ts"), "utf8")),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(fixture, "provider-home.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "provider-home.ts"), "utf8")),
     "utf8"
   );
   fs.writeFileSync(
@@ -377,13 +442,15 @@ async function loadGeneratedOpenRouterAgent(
     .readFileSync(path.join(agentsDir, "codex.ts"), "utf8")
     .replace('from "smthrs"', `from ${JSON.stringify(smithersUrl)}`)
     .replace('from "./toml"', 'from "./toml.mjs"')
-    .replace('from "./environment"', 'from "./environment.mjs"');
+    .replace('from "./environment"', 'from "./environment.mjs"')
+    .replace('from "./provider-home"', 'from "./provider-home.mjs"');
   let openRouterSource = fs
     .readFileSync(path.join(agentsDir, "openrouter.ts"), "utf8")
     .replace('from "smthrs"', `from ${JSON.stringify(smithersUrl)}`)
     .replace('from "./codex"', 'from "./codex.mjs"')
     .replace('from "./toml"', 'from "./toml.mjs"')
-    .replace('from "./environment"', 'from "./environment.mjs"');
+    .replace('from "./environment"', 'from "./environment.mjs"')
+    .replace('from "./provider-home"', 'from "./provider-home.mjs"');
   if (retryPolicy !== undefined) {
     for (const [from, to] of [
       [
@@ -413,6 +480,11 @@ async function loadGeneratedOpenRouterAgent(
   fs.writeFileSync(
     path.join(fixture, "environment.mjs"),
     transpile(fs.readFileSync(path.join(agentsDir, "environment.ts"), "utf8")),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(fixture, "provider-home.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "provider-home.ts"), "utf8")),
     "utf8"
   );
   fs.writeFileSync(
@@ -580,7 +652,8 @@ async function loadGeneratedDeepSeekAgent(project: string): Promise<{
     .replace('from "smthrs"', `from ${JSON.stringify(smithersUrl)}`)
     .replace('from "./toml"', 'from "./toml.mjs"')
     .replace('from "./strict-json"', 'from "./strict-json.mjs"')
-    .replace('from "./environment"', 'from "./environment.mjs"');
+    .replace('from "./environment"', 'from "./environment.mjs"')
+    .replace('from "./provider-home"', 'from "./provider-home.mjs"');
   fs.writeFileSync(path.join(fixture, "deepseek.mjs"), transpile(deepSeekSource), "utf8");
   fs.writeFileSync(
     path.join(fixture, "environment.mjs"),
@@ -590,6 +663,11 @@ async function loadGeneratedDeepSeekAgent(project: string): Promise<{
   fs.writeFileSync(
     path.join(fixture, "toml.mjs"),
     transpile(fs.readFileSync(path.join(agentsDir, "toml.ts"), "utf8")),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(fixture, "provider-home.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "provider-home.ts"), "utf8")),
     "utf8"
   );
   fs.writeFileSync(
@@ -795,7 +873,7 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       "  esac",
       "fi",
       'if [ -n "$SMITHERS_FAKE_ENV_LOG" ]; then',
-      '  printf \'%s|%s|%s\\n\' "$OPENAI_API_KEY" "$AWS_SECRET_ACCESS_KEY" "$FOUNDRY_PROFILE" > "$SMITHERS_FAKE_ENV_LOG"',
+      '  printf \'%s|%s|%s|%s\\n\' "$OPENAI_API_KEY" "$AWS_SECRET_ACCESS_KEY" "$FOUNDRY_PROFILE" "$SMITHERS_UNDOCUMENTED_SECRET" > "$SMITHERS_FAKE_ENV_LOG"',
       "fi",
       'if [ -n "$SMITHERS_FAKE_CLOUD_ENV_LOG" ]; then',
       '  printf \'%s|%s\\n\' "$UFZ_PROVIDER_ONE" "$UFZ_PROVIDER_TWO" > "$SMITHERS_FAKE_CLOUD_ENV_LOG"',
@@ -880,7 +958,8 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
   return {
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
     SMITHERS_BIN: smithers,
-    SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log")
+    SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log"),
+    ULTRAFUZZ_AGENT_ENV_ALLOWLIST: SMITHERS_TEST_ENVIRONMENT_ALLOWLIST
   };
 }
 
@@ -1135,7 +1214,8 @@ function fakeLifecycleSmithersEnv(
     SMITHERS_FAKE_WHY: whyPath,
     SMITHERS_FAKE_TIMELINE: timelinePath,
     SMITHERS_FAKE_NODE_DETAILS: nodeDetailsDirectory,
-    ULTRAFUZZ_PRICING_CATALOG_URL: "off"
+    ULTRAFUZZ_PRICING_CATALOG_URL: "off",
+    ULTRAFUZZ_AGENT_ENV_ALLOWLIST: SMITHERS_TEST_ENVIRONMENT_ALLOWLIST
   };
 }
 
@@ -1423,6 +1503,26 @@ nodes:
     REPORT_VOCABULARY_PROMPT_REFERENCES,
     "utf8"
   );
+}
+
+function commitProjectForLaunchReview(project: string, message: string): string {
+  if (!fs.existsSync(path.join(project, ".git"))) execFileSync("git", ["init", "--quiet"], { cwd: project });
+  execFileSync("git", ["add", "--all"], { cwd: project });
+  execFileSync(
+    "git",
+    [
+      "-c",
+      "user.name=Ultrafuzz Test",
+      "-c",
+      "user.email=ultrafuzz@example.invalid",
+      "commit",
+      "--quiet",
+      "-m",
+      message
+    ],
+    { cwd: project }
+  );
+  return execFileSync("git", ["rev-parse", "HEAD"], { cwd: project, encoding: "utf8" }).trim();
 }
 
 async function compileInvariantCampaignBudgetFixture(input: {
@@ -1891,7 +1991,7 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.doesNotMatch(tomlHelperText, /JSON\.parse/);
   assert.match(tomlHelperText, /escape !== "u" && escape !== "U"/);
   assert.match(codexAgentText, /const apiKey = requiredEnv/);
-  assert.match(codexAgentText, /return { apiKey, env: { CODEX_API_KEY: apiKey } }/);
+  assert.match(codexAgentText, /return { apiKey, configDir, env: { CODEX_API_KEY: apiKey } }/);
   assert.match(codexAgentText, /const env: Record<string, string> = { OPENAI_API_KEY: "", CODEX_API_KEY: "" };/);
   assert.match(codexAgentText, /function codexProviderBaseUrl/);
   assert.match(codexAgentText, /process\.env\.OPENAI_BASE_URL/);
@@ -1909,6 +2009,10 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.equal(fs.existsSync(path.join(project, ".smithers/agents/deepseek.ts")), true);
   assert.equal(fs.existsSync(path.join(project, ".smithers/agents/kimi.ts")), true);
   assert.equal(fs.existsSync(path.join(project, ".smithers/agents/openrouter.ts")), true);
+  assert.equal(fs.existsSync(path.join(project, ".smithers/agents/provider-home.ts")), true);
+  const providerHomeText = fs.readFileSync(path.join(project, ".smithers/agents/provider-home.ts"), "utf8");
+  assert.match(providerHomeText, /ULTRAFUZZ_PROVIDER_HOME_ROOT/u);
+  assert.match(providerHomeText, /agent config_dir must be a safe relative path/u);
   const agentsIndexText = fs.readFileSync(path.join(project, ".smithers/agents/index.ts"), "utf8");
   assert.match(agentsIndexText, /export \{ createCodexAgent \} from ".\/codex";/);
   assert.match(agentsIndexText, /export \{ createClaudeAgent \} from ".\/claude";/);
@@ -1981,6 +2085,31 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.equal(validate.value?.resolved_config?.default_reasoning, "xhigh");
 });
 
+test("controller review binds the sealed execution bytes and rejects linked closure entries", () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  const inspected = inspectControllerSource(project);
+  const executionFiles = inspected.files.map((relativePath) => ({
+    snapshotPath: `.smithers/agents/${relativePath}`,
+    contents: fs.readFileSync(path.join(project, ".smithers", "agents", relativePath))
+  }));
+  assert.doesNotThrow(() => assertControllerExecutionSnapshotDigest(executionFiles, inspected.digest));
+  const changed = executionFiles.map((file) =>
+    file.snapshotPath.endsWith("/codex.ts")
+      ? { ...file, contents: Buffer.concat([file.contents, Buffer.from("\n")]) }
+      : file
+  );
+  assert.throws(
+    () => assertControllerExecutionSnapshotDigest(changed, inspected.digest),
+    /controller adapter source changed after launch review/u
+  );
+
+  const environmentPath = path.join(project, ".smithers", "agents", "environment.ts");
+  fs.unlinkSync(environmentPath);
+  fs.symlinkSync("codex.ts", environmentPath);
+  assert.throws(() => inspectControllerSource(project), /cannot contain symbolic links|ELOOP/u);
+});
+
 test("non-force init preserves historical stock agent adapters and force replaces them", () => {
   assert.equal(
     crypto.createHash("sha256").update(V0_0_2_STOCK_CODEX_ADAPTER).digest("hex"),
@@ -2034,7 +2163,7 @@ test("non-force init migrates the exact generated 0.32 package and immediately p
     .replaceAll('from "smthrs"', 'from "smithers-orchestrator"');
   assert.equal(
     crypto.createHash("sha256").update(stock032Source).digest("hex"),
-    "b932fb7da3c05fdc662f60359e8a751aaabd236ca4072dfeaade1a7bb25a01b5"
+    "e7e845b2bccf5b7d41a3f0cedfaec7a1457580126513ff96f282a36307c7da98"
   );
   fs.writeFileSync(codexPath, stock032Source, "utf8");
 
@@ -2271,7 +2400,8 @@ test(
       "utf8"
     );
     const { createCodexAgent } = await loadGeneratedCodexAgent(project);
-    const codexHome = path.join(project, "codex-home");
+    const providerHomeRoot = path.join(project, "operator-provider-homes");
+    const codexHome = path.join(providerHomeRoot, "codex");
     fs.mkdirSync(codexHome, { recursive: true });
 
     const agentEnvironment = (): Record<string, string> =>
@@ -2279,11 +2409,11 @@ test(
 
     const previous = {
       config: process.env.ULTRAFUZZ_CONFIG_PATH,
-      codexHome: process.env.CODEX_HOME,
+      providerHomeRoot: process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT,
       baseUrl: process.env.OPENAI_BASE_URL
     };
     process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
-    process.env.CODEX_HOME = codexHome;
+    process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT = providerHomeRoot;
     delete process.env.OPENAI_BASE_URL;
     try {
       // No config.toml at all: unchanged behaviour, no route asserted.
@@ -2345,10 +2475,55 @@ test(
     } finally {
       if (previous.config === undefined) delete process.env.ULTRAFUZZ_CONFIG_PATH;
       else process.env.ULTRAFUZZ_CONFIG_PATH = previous.config;
-      if (previous.codexHome === undefined) delete process.env.CODEX_HOME;
-      else process.env.CODEX_HOME = previous.codexHome;
+      if (previous.providerHomeRoot === undefined) delete process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT;
+      else process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT = previous.providerHomeRoot;
       if (previous.baseUrl === undefined) delete process.env.OPENAI_BASE_URL;
       else process.env.OPENAI_BASE_URL = previous.baseUrl;
+    }
+  }
+);
+
+test(
+  "generated CodexAgent preserves the operator's canonical subscription home when config_dir is absent",
+  { skip: !runningUnderBun },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const configPath = path.join(project, "ultrafuzz.toml");
+    fs.writeFileSync(
+      configPath,
+      fs
+        .readFileSync(configPath, "utf8")
+        .replace(
+          /\[agents\.CodexAgent\]\nauth = "api-key"\napi_key_env = "OPENAI_API_KEY"/u,
+          '[agents.CodexAgent]\nauth = "subscription"'
+        ),
+      "utf8"
+    );
+    const canonicalHome = path.join(project, ".codex-operator-home");
+    fs.mkdirSync(canonicalHome, { mode: 0o700 });
+    const { createCodexAgent } = await loadGeneratedCodexAgent(project);
+    const previous = {
+      config: process.env.ULTRAFUZZ_CONFIG_PATH,
+      providerHomeRoot: process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT,
+      codexHome: process.env.CODEX_HOME
+    };
+    process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
+    delete process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT;
+    process.env.CODEX_HOME = canonicalHome;
+    try {
+      const agent = createCodexAgent() as { opts: { configDir?: string } };
+      assert.equal(agent.opts.configDir, canonicalHome);
+    } finally {
+      for (const [name, value] of Object.entries({
+        ULTRAFUZZ_CONFIG_PATH: previous.config,
+        ULTRAFUZZ_PROVIDER_HOME_ROOT: previous.providerHomeRoot,
+        CODEX_HOME: previous.codexHome
+      })) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
     }
   }
 );
@@ -2361,14 +2536,15 @@ test(
     const init = initProject({ projectRoot: project, force: true });
     assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
     const configPath = path.join(project, "ultrafuzz.toml");
-    const codexHome = path.join(project, ".ultrafuzz", "openrouter-test-codex");
+    const providerHomeRoot = path.join(project, "operator-provider-homes");
+    const codexHome = path.join(providerHomeRoot, "openrouter-test-codex");
     fs.writeFileSync(
       configPath,
       fs
         .readFileSync(configPath, "utf8")
         .replace(
           '[agents.OpenRouterAgent]\nauth = "api-key"\napi_key_env = "OPENROUTER_API_KEY"',
-          `[agents.OpenRouterAgent]\nauth = "api-key"\napi_key_env = "ROUTER_ALIAS"\nconfig_dir = ${JSON.stringify(codexHome)}`
+          '[agents.OpenRouterAgent]\nauth = "api-key"\napi_key_env = "ROUTER_ALIAS"\nconfig_dir = "openrouter-test-codex"'
         ),
       "utf8"
     );
@@ -2380,7 +2556,8 @@ test(
       openrouter: process.env.OPENROUTER_API_KEY,
       openai: process.env.OPENAI_API_KEY,
       anthropic: process.env.ANTHROPIC_API_KEY,
-      baseUrl: process.env.OPENAI_BASE_URL
+      baseUrl: process.env.OPENAI_BASE_URL,
+      providerHomeRoot: process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT
     };
     process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
     process.env.ROUTER_ALIAS = "deterministic-openrouter-test-key";
@@ -2388,6 +2565,7 @@ test(
     process.env.OPENAI_API_KEY = "unrelated-openai-key";
     process.env.ANTHROPIC_API_KEY = "unrelated-anthropic-key";
     process.env.OPENAI_BASE_URL = "https://ambient-route.invalid/v1";
+    process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT = providerHomeRoot;
     try {
       const agent = createOpenRouterAgent({
         model,
@@ -2445,7 +2623,8 @@ test(
         OPENROUTER_API_KEY: previous.openrouter,
         OPENAI_API_KEY: previous.openai,
         ANTHROPIC_API_KEY: previous.anthropic,
-        OPENAI_BASE_URL: previous.baseUrl
+        OPENAI_BASE_URL: previous.baseUrl,
+        ULTRAFUZZ_PROVIDER_HOME_ROOT: previous.providerHomeRoot
       })) {
         if (value === undefined) delete process.env[name];
         else process.env[name] = value;
@@ -2906,6 +3085,24 @@ test(
     ]) {
       assert.equal(sanitized[name], "", `${name} escaped into a model child environment`);
     }
+
+    const providerScoped = workflowControlChildEnvironment(
+      { OPENAI_API_KEY: "active-openai-key" },
+      {
+        OPENAI_API_KEY: "ambient-openai-key",
+        ANTHROPIC_API_KEY: "ambient-anthropic-key",
+        DEEPSEEK_API_KEY: "ambient-deepseek-key",
+        OPENROUTER_API_KEY: "ambient-openrouter-key",
+        CUSTOM_PROVIDER_KEY: "ambient-custom-key",
+        ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES:
+          "OPENAI_API_KEY,ANTHROPIC_API_KEY,DEEPSEEK_API_KEY,OPENROUTER_API_KEY,CUSTOM_PROVIDER_KEY"
+      }
+    );
+    assert.equal(providerScoped.OPENAI_API_KEY, "active-openai-key");
+    for (const name of ["ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "OPENROUTER_API_KEY", "CUSTOM_PROVIDER_KEY"]) {
+      assert.equal(providerScoped[name], "", `${name} leaked into the OpenAI child`);
+    }
+    assert.equal(providerScoped.ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES, "");
 
     const previous = {
       config: process.env.ULTRAFUZZ_CONFIG_PATH,
@@ -5463,6 +5660,40 @@ test("plan materializes pinned reference nodes before rendering dependent prompt
   }
 });
 
+test("plan materializes the exact reference catalog snapshot bound by launch review", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeReferenceTopology(project);
+  const xdgCacheHome = path.join(project, "xdg-cache");
+  writeReferenceCache(xdgCacheHome);
+  const previousXdgCacheHome = process.env.XDG_CACHE_HOME;
+  process.env.XDG_CACHE_HOME = xdgCacheHome;
+  try {
+    const plan = await planRun(
+      { projectRoot: project, runId: "reference-review-snapshot", env: {} },
+      {
+        beforeMaterialize: async () => {
+          fs.writeFileSync(path.join(project, ".ultrafuzz", "references.yml"), "version: hostile-replacement\n");
+          return [];
+        }
+      }
+    );
+
+    assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+    const manifest = JSON.parse(
+      fs.readFileSync(
+        path.join(plan.value!.run_root, "artifacts", "reference-properties-example", RUN_REFERENCE_MANIFEST_FILE),
+        "utf8"
+      )
+    ) as { repo?: string; commit?: string };
+    assert.equal(manifest.repo, "example/repo");
+    assert.equal(manifest.commit, "a".repeat(40));
+  } finally {
+    if (previousXdgCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = previousXdgCacheHome;
+  }
+});
+
 test("plan provisions a validated trusted expectation catalog through pinned reference handoffs", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -5859,7 +6090,8 @@ test("compileSmithersWorkflow escapes the evidence workflow import", async () =>
     graph: plan.value!.expanded_graph,
     runLayout: plan.value!.layout,
     workflowName: "ultrafuzz-escaped-import",
-    renderedPrompts: plan.value!.rendered_prompts
+    renderedPrompts: plan.value!.rendered_prompts,
+    controllerSourceDigest: plan.value!.controller_source_digest
   });
 
   let importPath = path
@@ -7038,6 +7270,137 @@ test("workflow synchronization preserves a quota-waiting run with parked tasks",
   assert.equal(status.value?.workflow?.status, "waiting-quota");
 });
 
+test("startRun requires a launch acknowledgement bound to prompts, config, topology, references, and commit", async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  writeSmallTopology(project);
+  const firstCommit = commitProjectForLaunchReview(project, "review baseline");
+  const runId = "launch-review-binding";
+  const input = withFakeCliEntrypoint({ projectRoot: project, runId, env: fakeSmithersEnv(project) });
+
+  const missing = await runtimeStartRun(input);
+  assert.equal(missing.ok, false);
+  assert.equal(missing.diagnostics[0]?.code, "RUN_REVIEW_ACKNOWLEDGEMENT_REQUIRED");
+  assert.equal(missing.diagnostics[0]?.details?.target_commit, firstCommit);
+  const firstDigest = missing.diagnostics[0]?.details?.expected_digest;
+  assert.equal(typeof firstDigest, "string");
+  assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", runId)), false);
+
+  fs.appendFileSync(
+    path.join(project, ".ultrafuzz", "prompts", "setup", "project-discovery.md"),
+    "\nReview-bound prompt update.\n",
+    "utf8"
+  );
+  const secondCommit = commitProjectForLaunchReview(project, "review input changed");
+  assert.notEqual(secondCommit, firstCommit);
+  const stale = await runtimeStartRun({ ...input, reviewAcknowledgement: String(firstDigest) });
+  assert.equal(stale.ok, false);
+  assert.equal(stale.diagnostics[0]?.code, "RUN_REVIEW_ACKNOWLEDGEMENT_STALE");
+  assert.equal(stale.diagnostics[0]?.details?.target_commit, secondCommit);
+  const secondDigest = stale.diagnostics[0]?.details?.expected_digest;
+  assert.equal(typeof secondDigest, "string");
+  assert.notEqual(secondDigest, firstDigest);
+  assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", runId)), false);
+
+  const accepted = await runtimeStartRun({ ...input, reviewAcknowledgement: String(secondDigest) });
+  assert.equal(accepted.ok, true, JSON.stringify(accepted.diagnostics));
+});
+
+test("startRun rejects a target commit changed after launch acknowledgement and before materialization", async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  writeSmallTopology(project);
+  commitProjectForLaunchReview(project, "target review baseline");
+  const runId = "target-commit-recheck";
+  const input = withFakeCliEntrypoint({ projectRoot: project, runId, env: fakeSmithersEnv(project) });
+  const missing = await runtimeStartRun(input);
+  const digest = missing.diagnostics[0]?.details?.expected_digest;
+  assert.equal(typeof digest, "string");
+
+  let changed = false;
+  const result = await runtimeStartRun({
+    ...input,
+    reviewAcknowledgement: String(digest),
+    requiredCommandProbe: async (commands) => {
+      if (!changed) {
+        fs.writeFileSync(path.join(project, "target-input.txt"), "changed after review\n", "utf8");
+        commitProjectForLaunchReview(project, "target changed after review");
+        changed = true;
+      }
+      return commands.map((name) => ({ name, available: true, path: `/usr/bin/${name}`, version: null }));
+    }
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.diagnostics[0]?.code, "RUN_REVIEW_INPUT_CHANGED");
+  assert.match(result.diagnostics[0]?.message ?? "", /target repository commit changed after launch review/u);
+  assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", runId)), false);
+  assert.equal(fs.existsSync(input.env?.SMITHERS_FAKE_LOG ?? ""), false);
+});
+
+test("startRun fails closed when a configured Git target has no resolvable commit", async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  writeSmallTopology(project);
+  execFileSync("git", ["init", "--quiet"], { cwd: project });
+  const runId = "launch-review-unborn-git";
+
+  const result = await runtimeStartRun(
+    withFakeCliEntrypoint({ projectRoot: project, runId, env: fakeSmithersEnv(project) })
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.diagnostics[0]?.code, "RUN_REVIEW_INPUT_INVALID");
+  assert.match(result.diagnostics[0]?.message ?? "", /cannot resolve the configured target repository commit/u);
+  assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", runId)), false);
+});
+
+test("startRun rechecks an acknowledged custom controller closure before importing it", async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  writeSmallTopology(project);
+  const configPath = path.join(project, "ultrafuzz.toml");
+  fs.writeFileSync(
+    configPath,
+    fs.readFileSync(configPath, "utf8").replace("prompt_review_required = true", "prompt_review_required = false"),
+    "utf8"
+  );
+  const adapterPath = path.join(project, ".smithers", "agents", "codex.ts");
+  fs.appendFileSync(adapterPath, "\n// operator-reviewed custom adapter\n", "utf8");
+  commitProjectForLaunchReview(project, "custom controller closure");
+  const runId = "controller-source-recheck";
+  const input = withFakeCliEntrypoint({ projectRoot: project, runId, env: fakeSmithersEnv(project) });
+
+  const missing = await runtimeStartRun(input);
+  assert.equal(missing.ok, false);
+  assert.equal(missing.diagnostics[0]?.code, "RUN_REVIEW_ACKNOWLEDGEMENT_REQUIRED");
+  assert.equal(missing.diagnostics[0]?.details?.controller_source_stock, false);
+  assert.deepEqual(missing.diagnostics[0]?.details?.controller_source_overrides, ["codex.ts"]);
+  const digest = missing.diagnostics[0]?.details?.expected_digest;
+  assert.equal(typeof digest, "string");
+
+  let mutated = false;
+  const changedAtBoundary = await runtimeStartRun({
+    ...input,
+    reviewAcknowledgement: String(digest),
+    requiredCommandProbe: async (commands) => {
+      if (!mutated) {
+        fs.appendFileSync(adapterPath, "// target mutation after review\n", "utf8");
+        mutated = true;
+      }
+      return commands.map((name) => ({ name, available: true, path: `/usr/bin/${name}`, version: null }));
+    }
+  });
+  assert.equal(changedAtBoundary.ok, false);
+  assert.equal(changedAtBoundary.diagnostics[0]?.code, "RUN_REVIEW_INPUT_CHANGED");
+  assert.match(
+    changedAtBoundary.diagnostics[0]?.message ?? "",
+    /controller adapter source changed after launch review/u
+  );
+  assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", runId)), false);
+  assert.equal(fs.existsSync(input.env?.SMITHERS_FAKE_LOG ?? ""), false);
+});
+
 test("startRun maps keep_workspaces to the Smithers worktree retention environment", async () => {
   for (const keepWorkspaces of [false, true]) {
     const project = tempProject();
@@ -7148,14 +7511,15 @@ test("startRun forwards configured and explicitly allowed environment variables 
     SMITHERS_SNAPSHOT_SOCK: "/outer/snapshot.sock",
     OPENAI_API_KEY: "configured-agent-key",
     AWS_SECRET_ACCESS_KEY: "unrelated-host-key",
+    SMITHERS_UNDOCUMENTED_SECRET: "must-not-forward",
     FOUNDRY_PROFILE: "ci",
-    ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "FOUNDRY_PROFILE"
+    ULTRAFUZZ_AGENT_ENV_ALLOWLIST: `${SMITHERS_TEST_ENVIRONMENT_ALLOWLIST},FOUNDRY_PROFILE`
   };
 
   const run = await startRun({ projectRoot: project, runId: "filtered-environment", env });
 
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  assert.equal(fs.readFileSync(environmentLog, "utf8"), "configured-agent-key||ci\n");
+  assert.equal(fs.readFileSync(environmentLog, "utf8"), "configured-agent-key||ci|\n");
   assert.equal(fs.readFileSync(contextLog, "utf8"), "|||||\n");
 });
 
@@ -7199,13 +7563,23 @@ test("startRun rejects controller-only paths as credential environment names", a
   const configPath = path.join(project, "ultrafuzz.toml");
   fs.writeFileSync(
     configPath,
-    fs
+    `${fs
       .readFileSync(configPath, "utf8")
-      .replace('api_key_env = "OPENAI_API_KEY"', 'api_key_env = "ULTRAFUZZ_CONFIG_PATH"'),
+      .replace('[execution]\nmode = "local"', '[execution]\nmode = "cloud"\nprovider = "modal"')}
+
+[execution.providers.modal]
+app = "ultrafuzz-test"
+image = "ultrafuzz-test"
+credential_env = ["UFZ_PROVIDER_ID", "ULTRAFUZZ_CONFIG_PATH"]
+`,
     "utf8"
   );
 
-  const env = fakeSmithersEnv(project);
+  const env: Record<string, string | undefined> = {
+    ...fakeSmithersEnv(project),
+    UFZ_PROVIDER_ID: "provider-id",
+    ULTRAFUZZ_CONFIG_PATH: configPath
+  };
   const run = await startRun({
     projectRoot: project,
     runId: "controller-path-credential",

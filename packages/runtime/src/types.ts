@@ -161,6 +161,10 @@ export interface PlanRunValue {
   config_fingerprint: string;
   redacted_config_fingerprint: string;
   prompt_digest: string;
+  launch_review_digest: string;
+  controller_source_digest: string;
+  controller_source_stock: boolean;
+  target_commit: string | null;
   output_root: string;
   state_nodes: NodeStateInput[];
   resolved_config: ResolvedConfig;
@@ -170,6 +174,8 @@ export interface PlanRunValue {
 }
 
 export interface StartRunInput extends PlanRunInput {
+  /** SHA-256 printed by a prior pre-launch review diagnostic. */
+  reviewAcknowledgement?: string;
   /** Execution-provider probe override for embedders and isolated tests. */
   requiredCommandProbe?: (
     commands: readonly string[]

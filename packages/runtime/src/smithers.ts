@@ -80,6 +80,7 @@ import {
   ULTRAFUZZ_VALIDATOR_BUILD_ENV
 } from "./trusted-cli.js";
 import { stableJson } from "./utils.js";
+import { assertControllerSourceDigest, inspectControllerSource } from "./controller-source.js";
 
 const execFileAsync = promisify(execFile);
 const SMITHERS_CLI_MAX_BUFFER_BYTES = 1024 * 1024 * 128;
@@ -1008,6 +1009,11 @@ const SMITHERS_EXECUTION_CONTEXT_ENVIRONMENT_VARIABLES = new Set([
   "SMITHERS_RUN_ID",
   "SMITHERS_SNAPSHOT_SOCK"
 ]);
+const SMITHERS_CONTROLLER_ENVIRONMENT_VARIABLES = new Set([
+  "SMITHERS_DETACHED_ADMISSION_TIMEOUT_MS",
+  "SMITHERS_KEEP_WORKTREES",
+  "SMITHERS_MONITOR_SUPPRESS"
+]);
 export type SmithersRunStatus = (typeof SMITHERS_RUN_STATUSES)[number];
 export type SmithersRunState = Exclude<(typeof SMITHERS_RUN_STATES)[number], "unknown">;
 export type SmithersNodeState = (typeof SMITHERS_NODE_STATES)[number];
@@ -1055,6 +1061,8 @@ export interface SmithersCompileInput {
   renderedPrompts: readonly RenderedPromptPlan[];
   operatorPrompt?: string;
   operatorInput?: unknown;
+  /** Controller adapter digest already bound by the pre-launch review. */
+  controllerSourceDigest?: string;
 }
 
 export interface NodeAttemptProvenance {
@@ -1087,6 +1095,7 @@ export interface CompiledSmithersWorkflow {
   logsDir: string;
   pinnedSubmodules?: PinnedSubmoduleExpectation;
   productionSourceRoots?: string[];
+  controllerSourceDigest: string;
 }
 
 export interface SubmitSmithersInput {
@@ -1247,6 +1256,7 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     inputPath,
     tasksPath,
     logsDir,
+    controllerSourceDigest: input.controllerSourceDigest ?? inspectControllerSource(projectRoot).digest,
     productionSourceRoots: input.config.permissions.productionSourceRoots,
     ...(pinnedSubmodules === undefined ? {} : { pinnedSubmodules })
   };
@@ -1375,6 +1385,7 @@ export async function smithersExecutionControlFiles(
   if (fs.existsSync(projectConfigPath)) add(projectConfigPath, "controls/ultrafuzz.toml");
   add(compiled.resolvedConfigPath, "controls/resolved-config.json");
   const agentsRoot = path.join(compiled.projectRoot, ".smithers", "agents");
+  assertControllerSourceDigest(compiled.projectRoot, compiled.controllerSourceDigest);
   for (const sourcePath of walkExecutionFiles(agentsRoot)) {
     const source = fs.readFileSync(sourcePath, "utf8");
     if (source.includes("ultrafuzz.toml") && !source.includes("ULTRAFUZZ_CONFIG_PATH")) {
@@ -3743,6 +3754,15 @@ function smithersCommandEnv(
     source.SMITHERS_KEEP_WORKTREES = keepWorkspaces ? "1" : undefined;
   }
   const forwarded = new Set(environmentVariableNames.map((name) => name.toUpperCase()));
+  const explicit = source.ULTRAFUZZ_AGENT_ENV_ALLOWLIST;
+  if (explicit !== undefined && explicit.trim() !== "") {
+    for (const name of explicit.split(",").map((value) => value.trim())) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name)) {
+        throw new Error("ULTRAFUZZ_AGENT_ENV_ALLOWLIST must be a comma-separated list of environment variable names");
+      }
+      forwarded.add(name.toUpperCase());
+    }
+  }
   const merged: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(source)) {
     const normalizedKey = key.toUpperCase();
@@ -3752,7 +3772,7 @@ function smithersCommandEnv(
     if (
       value !== undefined &&
       (SMITHERS_BASE_ENVIRONMENT_VARIABLES.has(normalizedKey) ||
-        (normalizedKey.startsWith("SMITHERS_") &&
+        (SMITHERS_CONTROLLER_ENVIRONMENT_VARIABLES.has(normalizedKey) &&
           !SMITHERS_EXECUTION_CONTEXT_ENVIRONMENT_VARIABLES.has(normalizedKey)) ||
         forwarded.has(normalizedKey))
     ) {

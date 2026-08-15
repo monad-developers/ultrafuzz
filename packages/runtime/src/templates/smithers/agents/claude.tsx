@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { ClaudeCodeAgent as SmithersClaudeCodeAgent } from "smthrs";
 import { workflowControlChildEnvironment, workflowControlCredentialValue } from "./environment";
+import { resolveProviderHome } from "./provider-home";
 import { readStringTable, stringField } from "./toml";
 
 type ClaudeAuthConfig = { auth?: string; api_key_env?: string; config_dir?: string };
@@ -38,14 +39,15 @@ export function createClaudeAgent(options: ClaudeTaskOptions = {}): SmithersClau
 function claudeAuthOptions(): ClaudeAuthOptions {
   const config = readClaudeAuthConfig();
   const auth = config.auth ?? "subscription";
+  const configDir = resolveProviderHome("claude", config.config_dir);
   if (auth === "api-key") {
-    return { apiKey: requiredEnv(config.api_key_env ?? "ANTHROPIC_API_KEY") };
+    return { apiKey: requiredEnv(config.api_key_env ?? "ANTHROPIC_API_KEY"), configDir };
   }
   if (auth === "subscription") {
     // ClaudeCodeAgent clears ANTHROPIC_API_KEY itself so the logged-in
     // Claude subscription (`claude -p`) is used; we only forward an
     // isolated config directory when one is configured.
-    return config.config_dir === undefined ? {} : { configDir: resolveConfigDir(config.config_dir) };
+    return { configDir };
   }
   throw new Error(`unsupported ClaudeAgent auth mode in ultrafuzz.toml: ${auth}`);
 }
@@ -66,11 +68,4 @@ function requiredEnv(name: string): string {
     throw new Error(`agents.ClaudeAgent auth is api-key, but ${name} is not set`);
   }
   return workflowControlCredentialValue(value, name);
-}
-
-function resolveConfigDir(value: string): string {
-  if (value.trim() === "") {
-    throw new Error("agents.ClaudeAgent.config_dir cannot be empty");
-  }
-  return path.isAbsolute(value) ? value : path.resolve(process.cwd(), value);
 }

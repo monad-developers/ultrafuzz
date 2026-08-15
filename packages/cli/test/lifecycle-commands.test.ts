@@ -86,6 +86,13 @@ ${requiredCommand === undefined ? "" : `    required_commands: [${requiredComman
   );
 }
 
+function disablePromptReview(project: string): void {
+  const configPath = path.join(project, "ultrafuzz.toml");
+  const config = fs.readFileSync(configPath, "utf8");
+  const withoutReview = config.replace("prompt_review_required = true", "prompt_review_required = false");
+  if (withoutReview !== config) fs.writeFileSync(configPath, withoutReview, "utf8");
+}
+
 function addOpenRouterProfile(project: string): void {
   fs.appendFileSync(
     path.join(project, "ultrafuzz.toml"),
@@ -343,7 +350,8 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
   return {
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
     SMITHERS_BIN: smithers,
-    SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log")
+    SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log"),
+    ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "SMITHERS_FAKE_LOG"
   };
 }
 
@@ -354,6 +362,7 @@ async function launchedProject(
   const env = fakeEnv(project, options);
   const init = await cli(project, ["init", "--json"], env);
   assert.equal(init.code, 0, init.stderr);
+  disablePromptReview(project);
   writeSmallTopology(project);
   const run = await cli(project, ["run", "--run-id", RUN_ID, "--json"], env);
   assert.equal(run.code, 0, run.stderr);
@@ -676,6 +685,7 @@ test("status recommends ultrafuzz why instead of the engine command", async () =
   };
   const init = await cli(project, ["init", "--json"], env);
   assert.equal(init.code, 0, init.stderr);
+  disablePromptReview(project);
   writeSmallTopology(project);
   const run = await cli(project, ["run", "--run-id", RUN_ID, "--json"], env);
   assert.equal(run.code, 0, run.stderr);

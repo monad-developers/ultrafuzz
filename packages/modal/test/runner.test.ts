@@ -1578,6 +1578,7 @@ describe("Modal worker identity", () => {
     expect(command).toContain('chown -R ubuntu:ubuntu "$data_root"');
     expect(command).toContain("chown -R ubuntu:ubuntu '/run/ultrafuzz-auth/claude'");
     expect(command).toContain("runuser -u ubuntu -- env HOME='/home/ubuntu'");
+    expect(command).toContain("ULTRAFUZZ_PROVIDER_HOME_ROOT='/run/ultrafuzz-auth'");
     expect(command).toContain("/opt/ultrafuzz/packages/modal/dist/worker.js");
     expect(command).toContain("/run/ultrafuzz-config/lineage.json");
     expect(command).toContain("/run/ultrafuzz-config/launch-ready");

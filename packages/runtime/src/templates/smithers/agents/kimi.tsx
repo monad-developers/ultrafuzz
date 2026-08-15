@@ -25,6 +25,7 @@ import type { Dirent } from "node:fs";
 import path from "node:path";
 import { KimiAgent as SmithersKimiAgent } from "smthrs";
 import { workflowControlChildEnvironment, workflowControlCredentialValue } from "./environment";
+import { resolveProviderHome } from "./provider-home";
 import { parseStrictJson, parseStrictJsonBytes, readRegularFileSnapshot } from "./strict-json";
 import { readStringTable, stringField } from "./toml";
 
@@ -281,12 +282,13 @@ function kimiAuthOptions(reasoningEffort: KimiReasoningEffort): KimiAuthOptions 
     const apiKey = requiredEnv(config.api_key_env ?? "KIMI_API_KEY");
     return {
       apiKey,
+      configDir: resolveProviderHome("kimi", config.config_dir),
       ultrafuzzAuthMode: "api-key",
       ultrafuzzReasoningEffort: reasoningEffort
     };
   }
   if (auth === "subscription") {
-    const configDir = resolveConfigDir(config.config_dir ?? defaultKimiConfigDir());
+    const configDir = resolveProviderHome("kimi", config.config_dir);
     return {
       ultrafuzzAuthMode: "subscription",
       configDir,
@@ -313,17 +315,6 @@ function requiredEnv(name: string): string {
     if (value !== undefined && value.trim() !== "") return workflowControlCredentialValue(value, candidate);
   }
   throw new Error(`agents.KimiAgent auth is api-key, but none of ${names.join(", ")} are set`);
-}
-
-function resolveConfigDir(value: string): string {
-  if (value.trim() === "") {
-    throw new Error("agents.KimiAgent.config_dir cannot be empty");
-  }
-  return path.isAbsolute(value) ? value : path.resolve(process.cwd(), value);
-}
-
-function defaultKimiConfigDir(): string {
-  return process.env.KIMI_CODE_HOME ?? process.env.KIMI_SHARE_DIR ?? path.join(os.homedir(), ".kimi-code");
 }
 
 function kimiExtraArgs(options: KimiTaskOptions): string[] {
@@ -418,7 +409,7 @@ function tomlArray(values: readonly string[]): string {
 function materializeKimiSharedAuthHome(source: string): string {
   const explicit = process.env.ULTRAFUZZ_KIMI_SHARED_AUTH_HOME?.trim();
   if (explicit === undefined || explicit === "") return source;
-  const shared = resolveConfigDir(explicit);
+  const shared = resolveOperatorProviderPath(explicit);
   if (path.resolve(shared) === path.resolve(source)) return source;
   return withKimiSharedAuthLock(shared, () => {
     mkdirSync(shared, { recursive: true, mode: 0o700 });
@@ -647,11 +638,19 @@ function kimiSessionStoreDir(
   apiKeyConfigDir: string | undefined
 ): string | undefined {
   const explicit = process.env.ULTRAFUZZ_KIMI_SESSION_HOME?.trim();
-  if (explicit !== undefined && explicit !== "") return resolveConfigDir(explicit);
+  if (explicit !== undefined && explicit !== "") return resolveOperatorProviderPath(explicit);
   const modalRoot = process.env.ULTRAFUZZ_MODAL_REMOTE_ROOT?.trim();
-  if (modalRoot !== undefined && modalRoot !== "") return path.join(resolveConfigDir(modalRoot), "kimi-code");
+  if (modalRoot !== undefined && modalRoot !== "")
+    return path.join(resolveOperatorProviderPath(modalRoot), "kimi-code");
   if (apiKeyConfigDir !== undefined) return path.resolve(process.cwd(), ".ultrafuzz", "kimi-code");
   return configuredSourceDir;
+}
+
+function resolveOperatorProviderPath(value: string): string {
+  if (value.trim() === "" || !path.isAbsolute(value)) {
+    throw new Error("operator-supplied Kimi provider paths must be absolute");
+  }
+  return path.resolve(value);
 }
 
 interface KimiSessionIndexEntry {

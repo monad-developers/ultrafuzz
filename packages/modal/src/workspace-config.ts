@@ -98,7 +98,7 @@ function agentToml(selectedModel: ModalModelSpec, agent: ModalModelSpec["agent"]
   if (auth === "api-key") {
     return `[agents.${agent}]\nauth = "api-key"\napi_key_env = ${tomlString(apiKeyEnv(provider))}`;
   }
-  return `[agents.${agent}]\nauth = "subscription"\nconfig_dir = ${tomlString(remoteAuthDir(provider))}`;
+  return `[agents.${agent}]\nauth = "subscription"\nconfig_dir = ${tomlString(remoteAuthDir(provider).split("/").at(-1)!)}`;
 }
 
 function apiKeyEnv(provider: ModelProvider): string {

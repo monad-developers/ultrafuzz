@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 
 import {
   appendEvent,
@@ -43,7 +44,12 @@ import {
   type PromptConcreteNode,
   type PromptGraphNode
 } from "@ultrafuzz/prompts";
-import { loadReferenceCatalog, materializeReferenceArtifacts } from "@ultrafuzz/references";
+import {
+  loadReferenceCatalog,
+  materializeReferenceArtifacts,
+  PROJECT_REFERENCES_FILE,
+  type ReferenceCatalog
+} from "@ultrafuzz/references";
 import {
   expandTopology,
   fingerprintGraph,
@@ -77,6 +83,11 @@ import { effectiveAuditPolicy } from "./audit-profile-policy.js";
 import { forgeGuardMetadata } from "./forge-guard.js";
 import { assertExpandedGraphRetryChains } from "./retry-chain.js";
 import { transformTopologyForRun } from "./topology-transform.js";
+import {
+  assertControllerSourceDigest,
+  inspectControllerSource,
+  type ControllerSourceInspection
+} from "./controller-source.js";
 
 const RENDERED_PROMPT_SNAPSHOT_DIR = "prompt-snapshots";
 
@@ -84,6 +95,9 @@ interface PlanRunHooks {
   beforeMaterialize?(context: {
     resolvedConfig: PlanRunValue["resolved_config"];
     expandedGraph: ExpandedGraph;
+    launchReviewDigest: string;
+    controllerSource: ControllerSourceInspection;
+    targetCommit: string | null;
   }): Promise<RuntimeDiagnostic[]>;
 }
 
@@ -188,6 +202,40 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
   } catch (error) {
     return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "references", "REFERENCE_EXPECTATIONS_INVALID")]);
   }
+  let controllerSource: ControllerSourceInspection;
+  let referenceCatalog: ReferenceCatalog | undefined;
+  let referenceCatalogDigest: string | null;
+  let targetCommit: string | null;
+  try {
+    controllerSource = inspectControllerSource(projectRoot);
+    referenceCatalog = referenceCatalogForReview(
+      projectRoot,
+      graph.nodes.some((node) => node.kind === "reference")
+    );
+    referenceCatalogDigest = referenceCatalog === undefined ? null : sha256Stable(referenceCatalog);
+    targetCommit = targetCommitForReview(path.resolve(projectRoot, resolved.config.project.repo));
+  } catch (error) {
+    return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "RUN_REVIEW_INPUT_INVALID")]);
+  }
+  const launchReviewDigest = sha256Stable({
+    schema_version: "ultrafuzz.launch-review.v1",
+    config_fingerprint: configFingerprint,
+    prompt_digest: promptDigest,
+    topology_digest: auditPolicy.topologyDigest,
+    reference_catalog_digest: referenceCatalogDigest,
+    reference_expectations_digest: referenceExpectationsSource?.sourceDigest ?? null,
+    target_commit: targetCommit,
+    controller_source_digest: controllerSource.digest,
+    controller_source_stock: controllerSource.stock,
+    controller_source_overrides: controllerSource.overrides,
+    project_prompt_overrides: [...catalog.entries.values()]
+      .filter((entry) => entry.source === "project")
+      .map((entry) => entry.relativePath)
+      .sort(),
+    runtime_overrides: launchReviewOverrides(input),
+    operator_prompt_digest: input.prompt === undefined ? null : sha256Stable(input.prompt),
+    workflow_input_digest: input.workflowInput === undefined ? null : sha256Stable(input.workflowInput)
+  });
   const graphDiagnostics = checkDependencyLegality(graph);
   if (hasRuntimeErrors(graphDiagnostics)) {
     return runtimeFailure<PlanRunValue>(graphDiagnostics);
@@ -195,12 +243,24 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
   let preMaterializeDiagnostics: RuntimeDiagnostic[];
   try {
     preMaterializeDiagnostics =
-      (await hooks.beforeMaterialize?.({ resolvedConfig: resolved.config, expandedGraph })) ?? [];
+      (await hooks.beforeMaterialize?.({
+        resolvedConfig: resolved.config,
+        expandedGraph,
+        launchReviewDigest,
+        controllerSource,
+        targetCommit
+      })) ?? [];
   } catch (error) {
     preMaterializeDiagnostics = [diagnosticFromError(error, "runtime", "RUN_PREFLIGHT_FAILED")];
   }
   if (hasRuntimeErrors(preMaterializeDiagnostics)) {
     return runtimeFailure<PlanRunValue>(preMaterializeDiagnostics);
+  }
+  try {
+    assertControllerSourceDigest(projectRoot, controllerSource.digest);
+    assertTargetCommitForReview(path.resolve(projectRoot, resolved.config.project.repo), targetCommit);
+  } catch (error) {
+    return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "RUN_REVIEW_INPUT_CHANGED")]);
   }
   const graphFingerprint = fingerprintGraph(expandedGraph);
   const createdAt = new Date().toISOString();
@@ -277,7 +337,12 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
 
   try {
     provisionReferenceExpectationArtifacts({ graph, layout, provision: referenceExpectationsSource });
-    materializeReferenceNodesForPlan({ projectRoot, graph, layout, provision: referenceExpectationsSource });
+    materializeReferenceNodesForPlan({
+      graph,
+      layout,
+      catalog: referenceCatalog,
+      provision: referenceExpectationsSource
+    });
   } catch (error) {
     return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "references", "REFERENCE_MATERIALIZE_FAILED")]);
   }
@@ -340,6 +405,10 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
     config_fingerprint: configFingerprint,
     redacted_config_fingerprint: redactedConfigFingerprint,
     prompt_digest: promptDigest,
+    launch_review_digest: launchReviewDigest,
+    controller_source_digest: controllerSource.digest,
+    controller_source_stock: controllerSource.stock,
+    target_commit: targetCommit,
     output_root: outputRoot,
     state_nodes: stateNodes,
     resolved_config: resolved.config,
@@ -347,6 +416,94 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
     layout,
     rendered_prompts: renderedPrompts
   });
+}
+
+export function targetCommitForReview(targetRoot: string): string | null {
+  const hasGitControlMarker = targetHasGitControlMarker(targetRoot);
+  try {
+    const commit = execFileSync("git", ["rev-parse", "--verify", "HEAD^{commit}"], {
+      cwd: targetRoot,
+      encoding: "utf8",
+      env: targetReviewGitEnvironment(),
+      stdio: ["ignore", "pipe", "ignore"],
+      maxBuffer: 1024 * 1024
+    }).trim();
+    if (!/^[0-9a-f]{40,64}$/u.test(commit)) throw new Error("target repository returned an invalid commit id");
+    return commit;
+  } catch (error) {
+    if (error instanceof Error && /invalid commit id/u.test(error.message)) {
+      throw new Error("cannot resolve the configured target repository commit for launch review", { cause: error });
+    }
+    if (!(isNodeError(error) && error.code === "ENOENT") && !hasGitControlMarker) return null;
+    throw new Error("cannot resolve the configured target repository commit for launch review", { cause: error });
+  }
+}
+
+export function assertTargetCommitForReview(targetRoot: string, expectedCommit: string | null): void {
+  const observed = targetCommitForReview(targetRoot);
+  if (observed !== expectedCommit) {
+    throw new Error("configured target repository commit changed after launch review");
+  }
+}
+
+function referenceCatalogForReview(projectRoot: string, required: boolean): ReferenceCatalog | undefined {
+  const catalogPath = path.join(projectRoot, PROJECT_REFERENCES_FILE);
+  try {
+    fs.lstatSync(catalogPath);
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT" && !required) return undefined;
+    throw error;
+  }
+  return loadReferenceCatalog(projectRoot);
+}
+
+function targetHasGitControlMarker(targetRoot: string): boolean {
+  let current = path.resolve(targetRoot);
+  const target = fs.lstatSync(current);
+  if (target.isSymbolicLink() || !target.isDirectory()) {
+    throw new Error("configured target repository root must be a physical directory");
+  }
+  for (;;) {
+    const marker = path.join(current, ".git");
+    try {
+      const stat = fs.lstatSync(marker);
+      if (stat.isSymbolicLink() || (!stat.isDirectory() && !stat.isFile())) {
+        throw new Error("configured target repository has an unsafe Git control marker");
+      }
+      return true;
+    } catch (error) {
+      if (!(isNodeError(error) && error.code === "ENOENT")) throw error;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) return false;
+    current = parent;
+  }
+}
+
+function targetReviewGitEnvironment(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  for (const name of Object.keys(env)) {
+    if (name.startsWith("GIT_")) delete env[name];
+  }
+  return env;
+}
+
+function isNodeError(value: unknown): value is NodeJS.ErrnoException {
+  return value instanceof Error && "code" in value;
+}
+
+function launchReviewOverrides(input: PlanRunInput): Record<string, unknown> {
+  return {
+    ...(input.agent === undefined ? {} : { agent: input.agent }),
+    ...(input.model === undefined ? {} : { model: input.model }),
+    ...(input.reasoning === undefined ? {} : { reasoning: input.reasoning }),
+    ...(input.topologyPath === undefined ? {} : { topology_path: input.topologyPath }),
+    ...(input.topologyTransform === undefined ? {} : { topology_transform: input.topologyTransform }),
+    ...(input.runtimeOverrides === undefined ? {} : { runtime_config: input.runtimeOverrides }),
+    ...(input.referenceExpectationsPath === undefined
+      ? {}
+      : { reference_expectations_path: input.referenceExpectationsPath })
+  };
 }
 
 function promptDigestForGraph(graph: PlannedGraph, catalog: PromptCatalog): string {
@@ -555,16 +712,18 @@ function provisionReferenceExpectationArtifacts(input: {
 }
 
 function materializeReferenceNodesForPlan(input: {
-  projectRoot: string;
   graph: PlannedGraph;
   layout: RunLayout;
+  catalog?: ReferenceCatalog;
   provision?: ReferenceExpectationProvision;
 }): void {
   const referenceNodes = input.graph.nodes.filter((node) => node.kind === "reference");
   if (referenceNodes.length === 0) {
     return;
   }
-  const catalog = loadReferenceCatalog(input.projectRoot);
+  if (input.catalog === undefined) {
+    throw new Error("reference graph requires the launch-reviewed reference catalog");
+  }
   for (const node of referenceNodes) {
     if (!node.reference) {
       throw new Error(`reference graph node ${node.id} is missing reference id`);
@@ -572,7 +731,7 @@ function materializeReferenceNodesForPlan(input: {
     const startedAt = new Date().toISOString();
     const artifactDir = getNodeArtifactDir(input.layout, node.id, { create: true });
     const materialized = materializeReferenceArtifacts({
-      catalog,
+      catalog: input.catalog,
       id: node.reference,
       artifactDir,
       outputs: node.outputs

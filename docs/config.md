@@ -80,10 +80,13 @@ auth = "api-key"
 api_key_env = "OPENAI_API_KEY"
 ```
 
-Set `auth = "api-key"` to bill through an OpenAI API key read from
-`api_key_env`. Set `auth = "subscription"` to use Codex CLI subscription auth
-from `CODEX_HOME/auth.json`; optional `config_dir` points one generated agent
-at a specific Codex config directory.
+Set `auth = "api-key"` to bill through an OpenAI API key read from the
+canonical `OPENAI_API_KEY` name. Set `auth = "subscription"` to use Codex CLI
+subscription auth from `CODEX_HOME/auth.json` (or `~/.codex/auth.json`). An
+optional `config_dir` is a safe relative path beneath the operator-owned
+`ULTRAFUZZ_PROVIDER_HOME_ROOT`, or beneath the dedicated Ultrafuzz provider
+state root when that environment variable is unset. Absolute paths, traversal,
+and symlink crossings are rejected before launch.
 
 ## Claude agent
 
@@ -111,9 +114,10 @@ used.
 Set `auth = "subscription"` to run against your logged-in Claude Code CLI
 session with no API key — `ClaudeAgent` clears `ANTHROPIC_API_KEY` so the
 subscription is used; optional `config_dir` sets an isolated `CLAUDE_CONFIG_DIR`
-for running multiple Claude subscriptions side by side. Set `auth = "api-key"`
-to bill against the Anthropic API using the key read from `api_key_env`
-(default `ANTHROPIC_API_KEY`). Both modes drive the `claude` CLI, so it must be
+under the operator-owned provider-home root. Without `config_dir`, the
+canonical `CLAUDE_CONFIG_DIR` or `~/.claude` home is preserved. Set `auth =
+"api-key"` to bill against the Anthropic API using the canonical
+`ANTHROPIC_API_KEY` name. Both modes drive the `claude` CLI, so it must be
 installed either way; `auth` only changes how that CLI authenticates.
 
 When a Claude profile sets `reasoning`, the generated adapter passes it to the
@@ -147,8 +151,8 @@ auth = "subscription"
 Set `auth = "subscription"` to use the logged-in Kimi Code layout from
 `KIMI_CODE_HOME`, `KIMI_SHARE_DIR`, or `~/.kimi-code`. Set `auth = "api-key"` to
 bill against Kimi/Moonshot-compatible API credentials; the default key name is
-`KIMI_API_KEY`; `MOONSHOT_API_KEY` is its automatic fallback, and
-`api_key_env = "MOONSHOT_API_KEY"` can select it explicitly. API-key mode writes
+the canonical `KIMI_API_KEY`; `MOONSHOT_API_KEY` remains its automatic
+compatibility fallback. API-key mode writes
 the selected value into the supported Kimi provider `api_key` field in an
 isolated mode-`0600` config, rather than relying on an unused environment
 variable. The provider uses Kimi Code's open-platform default
@@ -217,10 +221,11 @@ DeepSeek V4 Pro is API-key only. The adapter runs the installed Claude Code CLI
 against DeepSeek's documented Anthropic-compatible endpoint,
 `https://api.deepseek.com/anthropic`, using `ANTHROPIC_AUTH_TOKEN`; it clears
 competing Claude credentials and provider selectors, and uses an isolated
-`CLAUDE_CONFIG_DIR` (default `.ultrafuzz/deepseek-claude`) so unrelated Anthropic
-credentials, routing, and session storage cannot take precedence. Project and
-managed Claude settings remain separate policy layers. Set `config_dir` under
-`[agents.DeepSeekAgent]` to choose another isolated directory.
+`CLAUDE_CONFIG_DIR` under the operator-owned Ultrafuzz provider state root so
+unrelated Anthropic credentials, routing, and session storage cannot take
+precedence. Project and managed Claude settings remain separate policy layers.
+Set relative `config_dir` under `[agents.DeepSeekAgent]` to choose another
+isolated child of that root.
 The supported reasoning efforts are `low`, `high`, and `max`, and any other
 value is rejected before execution. See DeepSeek's
 [Claude Code integration](https://api-docs.deepseek.com/quick_start/agent_integrations/claude_code)
@@ -257,13 +262,14 @@ export OPENROUTER_API_KEY=...
 ultrafuzz run --agent OpenRouterAgent --model '~anthropic/claude-sonnet-latest:free'
 ```
 
-OpenRouter authentication is API-key only. `api_key_env` may name another
-environment variable, but the credential value is never written to config or
-run provenance. The generated adapter creates a mode-`0700` Codex home at
-`.ultrafuzz/openrouter-codex` by default, writes a mode-`0600` provider config
-that names the credential environment variable, and fixes its route to the official
+OpenRouter authentication is API-key only and uses the canonical
+`OPENROUTER_API_KEY` name; the credential value is never written to config or
+run provenance. The generated adapter creates a mode-`0700` Codex home under
+the operator-owned Ultrafuzz provider state root, writes a mode-`0600` provider
+config that names the credential environment variable, and fixes its route to the official
 `https://openrouter.ai/api/v1` base URL. A configured `config_dir` selects a
-different adapter-managed Codex home; its `config.toml` is owned by this route.
+different safe relative adapter-managed Codex home beneath that root; its
+`config.toml` is owned by this route.
 Competing provider credentials and ambient endpoint overrides are cleared from
 the model subprocess.
 

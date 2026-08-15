@@ -3,6 +3,14 @@ import { diagnostic, type AgentConfig, type ConfigDiagnostic } from "./types.js"
 
 const SAFE_AGENT_REF_PATTERN = /^[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/;
 const ENVIRONMENT_VARIABLE_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const PROVIDER_HOME_COMPONENT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const BUILT_IN_CREDENTIAL_ENVIRONMENT_VARIABLES: Readonly<Record<string, string>> = {
+  ClaudeAgent: "ANTHROPIC_API_KEY",
+  CodexAgent: "OPENAI_API_KEY",
+  DeepSeekAgent: "DEEPSEEK_API_KEY",
+  KimiAgent: "KIMI_API_KEY",
+  OpenRouterAgent: "OPENROUTER_API_KEY"
+};
 
 const agentIdSchema = z
   .string()
@@ -10,7 +18,7 @@ const agentIdSchema = z
   .refine((value) => !value.includes(".."));
 
 const apiKeyEnvSchema = z.string().regex(ENVIRONMENT_VARIABLE_PATTERN);
-const configDirSchema = z.string().refine((value) => value.trim().length > 0);
+const configDirSchema = z.string().refine(safeProviderHomeRelativePath);
 
 const agentConfigSchema = z.discriminatedUnion("auth", [
   z.strictObject({
@@ -37,6 +45,19 @@ export function validateAgentConfigs(agents: Record<string, AgentConfig>): Confi
 
 function validateProviderAgentConfigs(agents: Record<string, AgentConfig>): ConfigDiagnostic[] {
   const diagnostics: ConfigDiagnostic[] = [];
+  for (const [agentRef, canonicalName] of Object.entries(BUILT_IN_CREDENTIAL_ENVIRONMENT_VARIABLES)) {
+    const configured = agents[agentRef]?.apiKeyEnv;
+    if (configured !== undefined && configured !== canonicalName) {
+      diagnostics.push(
+        diagnostic(
+          "CONFIG_AGENT_API_KEY_ENV_NONCANONICAL",
+          `${agentRef}.api_key_env must use the canonical operator-owned credential name ${canonicalName}`,
+          ["agents", agentRef, "api_key_env"],
+          "validation"
+        )
+      );
+    }
+  }
   if (agents.DeepSeekAgent?.auth === "subscription") {
     diagnostics.push(
       diagnostic(
@@ -80,7 +101,7 @@ function agentConfigDiagnosticCode(issue: ZodIssue): string {
     return issue.code === "invalid_type" ? "CONFIG_AGENT_API_KEY_ENV_REQUIRED" : "CONFIG_AGENT_API_KEY_ENV_INVALID";
   }
   if (field === "configDir") {
-    return "CONFIG_AGENT_CONFIG_DIR_EMPTY";
+    return "CONFIG_AGENT_CONFIG_DIR_UNSAFE";
   }
   return "CONFIG_AGENT_AUTH_INVALID";
 }
@@ -93,13 +114,21 @@ function agentConfigDiagnosticMessage(code: string, issue: ZodIssue): string {
       return "agent api-key auth requires api_key_env";
     case "CONFIG_AGENT_API_KEY_ENV_INVALID":
       return "agent api_key_env must be an environment variable name";
-    case "CONFIG_AGENT_CONFIG_DIR_EMPTY":
-      return "agent config_dir cannot be empty";
+    case "CONFIG_AGENT_CONFIG_DIR_UNSAFE":
+      return "agent config_dir must be a safe relative path beneath the operator-owned Ultrafuzz provider-home root";
     case "CONFIG_AGENT_FIELD_UNKNOWN":
       return `agent config contains unknown field \`${issue.code === "unrecognized_keys" ? (issue.keys[0] ?? "") : ""}\``;
     default:
       return "agent auth must be api-key or subscription";
   }
+}
+
+function safeProviderHomeRelativePath(value: string): boolean {
+  if (value.length === 0 || value.trim() !== value || value.includes("\\") || value.startsWith("/")) return false;
+  const components = value.split("/");
+  return components.every(
+    (component) => component !== "." && component !== ".." && PROVIDER_HOME_COMPONENT_PATTERN.test(component)
+  );
 }
 
 function agentConfigPath(issue: ZodIssue): string[] {

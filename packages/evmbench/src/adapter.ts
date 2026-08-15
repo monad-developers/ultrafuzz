@@ -221,9 +221,7 @@ function rewriteAgentForSubscription(config: string): string {
     .filter((line) => !/^\s*(auth|api_key_env|config_dir)\s*=/u.test(line))
     .filter((line) => line.trim() !== "")
     .join("\n");
-  const replacement = `${match[1]}auth = "subscription"\nconfig_dir = "/home/agent/.codex"${
-    body === "" ? "" : `\n${body}`
-  }\n`;
+  const replacement = `${match[1]}auth = "subscription"${body === "" ? "" : `\n${body}`}\n`;
   return `${config.slice(0, match.index)}${replacement}${config.slice(match.index + match[0].length)}`;
 }
 
