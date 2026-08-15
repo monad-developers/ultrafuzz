@@ -57,14 +57,6 @@ agent = "DeepSeekAgent"
 model = "deepseek-v4-pro"
 reasoning = "max"
 
-# Opt-in OpenRouter profile. The model is an OpenRouter catalogue ID and is
-# passed to OpenRouter unchanged; aliases and variants such as `~...:free` are
-# supported without a built-in catalogue allowlist.
-[models.openrouter]
-agent = "OpenRouterAgent"
-model = "anthropic/claude-sonnet-4.6"
-reasoning = "high"
-
 # Automatic agent retries are error-agnostic and resend the same effective task
 # prompt in a fresh session. The count includes the first primary attempt. Set `agents`
 # to an ordered list of model profile IDs to opt into model fallback.

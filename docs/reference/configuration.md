@@ -192,18 +192,14 @@ default profile was synthesized by the scaffold.
 
 ### OpenRouter profiles
 
-Use `OpenRouterAgent` with API-key auth to route Codex model work through
-OpenRouter:
+The generated `OpenRouterAgent` table already configures API-key auth. Add a
+model profile to route Codex model work through OpenRouter:
 
 ```toml
 [models.openrouter]
 agent = "OpenRouterAgent"
 model = "openai/gpt-5.4"
 reasoning = "high"
-
-[agents.OpenRouterAgent]
-auth = "api-key"
-api_key_env = "OPENROUTER_API_KEY"
 ```
 
 The endpoint is fixed to `https://openrouter.ai/api/v1`. Catalogue model IDs

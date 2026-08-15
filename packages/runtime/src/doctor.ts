@@ -43,7 +43,7 @@ const AGENT_EXECUTABLES: Record<string, string> = {
 export async function diagnoseProject(input: DoctorInput) {
   const projectRoot = path.resolve(input.projectRoot);
   const env = input.env ?? process.env;
-  const validation = await validateProject({ projectRoot, env });
+  const validation = await validateProject({ projectRoot, env, topologyPath: input.topologyPath });
   const resolved = await loadResolvedProject({ projectRoot, env });
   const references = referencesStatus({ projectRoot });
   const installation = inspectSmithersInstallation(projectRoot);
@@ -63,7 +63,8 @@ export async function diagnoseProject(input: DoctorInput) {
   diagnostics.push(...validation.diagnostics);
 
   const openRouterSelected =
-    resolved.config !== undefined && activeTopologyAgentRefs(projectRoot, resolved.config).includes("OpenRouterAgent");
+    resolved.config !== undefined &&
+    activeTopologyAgentRefs(projectRoot, resolved.config, input.topologyPath).includes("OpenRouterAgent");
   const openRouterCredential = openRouterSelected ? resolved.config?.agents.OpenRouterAgent?.apiKeyEnv : undefined;
   const openRouterCredentialReady =
     !openRouterSelected || (openRouterCredential !== undefined && (env[openRouterCredential] ?? "").trim() !== "");
