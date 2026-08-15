@@ -6284,23 +6284,40 @@ test("property fan-in gate rejects a lens reference expectation dropped from can
 
 test("property fan-in gate rejects the issue 531 LEND_ACC_03 fabrication when every source lens omits expectations", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-issue-531-fabrication" });
-  writeDeclaredPropertyLens(
-    layout,
-    "property-specification-recon",
-    "properties/recon.json",
-    JSON.stringify({
-      schema_version: "ultrafuzz.property-lens.v2",
-      properties: [
-        {
-          id: "recon-1",
-          description: "Supply accounting remains consistent.",
-          category: "accounting",
-          priority: "high"
-        }
-      ]
-    })
-  );
-  const node = writeMinimalPropertyFaninFixture(layout, { referenceExpectation: "LEND_ACC_03" });
+  const sourceLenses = [
+    ["property-specification-0kn0t", "0kn0t-1"],
+    ["property-specification-a16z", "a16z-1"],
+    ["property-specification-aviggiano", "aviggiano-1"],
+    ["property-specification-certora-thinking", "certora-thinking-1"],
+    ["property-specification-crytic", "crytic-1"],
+    ["property-specification-josselin-feist", "josselin-feist-1"],
+    ["property-specification-recon", "recon-1"],
+    ["property-specification-runtime-verification", "runtime-verification-1"]
+  ] as const;
+  for (const [sourceNodeId, sourcePropertyId] of sourceLenses) {
+    writeDeclaredPropertyLens(
+      layout,
+      sourceNodeId,
+      `properties/${sourcePropertyId}.json`,
+      JSON.stringify({
+        schema_version: "ultrafuzz.property-lens.v2",
+        properties: [
+          {
+            id: sourcePropertyId,
+            description: "Supply accounting remains consistent.",
+            category: "accounting",
+            priority: "high"
+          }
+        ]
+      })
+    );
+  }
+  const node = writeMinimalPropertyFaninFixture(layout, {
+    sourceNodeId: "property-specification-recon",
+    sourcePropertyId: "recon-1",
+    dependsOn: sourceLenses.map(([sourceNodeId]) => sourceNodeId),
+    referenceExpectation: "LEND_ACC_03"
+  });
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
 
