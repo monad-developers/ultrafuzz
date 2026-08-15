@@ -58,15 +58,33 @@ jobs:
     timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
       fail-fast: false
-      max-parallel: 3
+      max-parallel: 7
       matrix:
         include:
           - lane: package-gates
             gates: docs,config,audit-profile-package,security,topology,prompts,artifacts,evals,modal
             timeout_minutes: 30
-          - lane: runtime
-            gates: runtime
+            build_modal_dependencies: true
+          - lane: runtime-supporting
+            gates: runtime-supporting
             timeout_minutes: 75
+            build_modal_dependencies: true
+          - lane: runtime-1
+            gates: runtime-1
+            timeout_minutes: 75
+            build_modal_dependencies: true
+          - lane: runtime-2
+            gates: runtime-2
+            timeout_minutes: 75
+            build_modal_dependencies: true
+          - lane: runtime-3
+            gates: runtime-3
+            timeout_minutes: 75
+            build_modal_dependencies: true
+          - lane: runtime-4
+            gates: runtime-4
+            timeout_minutes: 75
+            build_modal_dependencies: true
           - lane: cli-typecheck
             gates: cli,benchmark-history,workspace-typecheck
             timeout_minutes: 30
@@ -98,7 +116,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build Modal-dependent lane dependencies
-        if: matrix.lane == 'package-gates' || matrix.lane == 'runtime'
+        if: matrix.build_modal_dependencies == true
         run: pnpm --filter @ultrafuzz/modal... build
 
       - name: Build release reporter dependencies

@@ -3568,44 +3568,82 @@ function timestampField(
 }
 
 function constrainedShellTokens(command: string): string[] | undefined {
-  let quote: "'" | '"' | undefined;
-  let escaped = false;
-  for (let index = 0; index < command.length; index += 1) {
-    const character = command[index]!;
-    if (escaped) {
-      escaped = false;
+  const tokens: string[] = [];
+  let index = 0;
+
+  const skipWhitespace = (): void => {
+    while (command[index] === " " || command[index] === "\t") index += 1;
+  };
+
+  const readWord = (redirectOperand = false): string | undefined => {
+    const start = index;
+    let quote: "'" | '"' | undefined;
+    let escaped = false;
+    while (index < command.length) {
+      const character = command[index]!;
+      if (escaped) {
+        escaped = false;
+        index += 1;
+        continue;
+      }
+      if (character === "\\" && quote !== "'") {
+        escaped = true;
+        index += 1;
+        continue;
+      }
+      if (character === "`" || (character === "$" && (redirectOperand || command[index + 1] === "("))) {
+        return undefined;
+      }
+      if (quote !== undefined) {
+        if (character === quote) quote = undefined;
+        index += 1;
+        continue;
+      }
+      if (character === "'" || character === '"') {
+        quote = character;
+        index += 1;
+        continue;
+      }
+      if (character === "\n" || character === "\r") return undefined;
+      if (character === " " || character === "\t") break;
+      if (character === ">" || character === "&") break;
+      if (
+        character === "#" ||
+        character === ";" ||
+        character === "|" ||
+        character === "<" ||
+        character === "`" ||
+        (character === "$" && command[index + 1] === "(")
+      ) {
+        return undefined;
+      }
+      index += 1;
+    }
+    if (quote !== undefined || escaped || index === start) return undefined;
+    return command.slice(start, index);
+  };
+
+  skipWhitespace();
+  while (index < command.length) {
+    const duplication = command.slice(index).match(/^[0-9]+>&[0-9]+(?=$|[\s>])/u);
+    const redirection = duplication === null ? command.slice(index).match(/^(?:(?:[0-9]+)?(?:>>|>)|&>)/u) : null;
+    if (redirection !== null || duplication !== null) {
+      index += (redirection ?? duplication)![0].length;
+      if (redirection !== null) {
+        if (command[index] === "(") return undefined;
+        skipWhitespace();
+        if (readWord(true) === undefined) return undefined;
+      }
+      skipWhitespace();
       continue;
     }
-    if (character === "\\" && quote !== "'") {
-      escaped = true;
-      continue;
-    }
-    if (quote !== undefined) {
-      if (character === quote) quote = undefined;
-      continue;
-    }
-    if (character === "'" || character === '"') {
-      quote = character;
-      continue;
-    }
-    if (
-      character === "#" ||
-      character === ";" ||
-      character === "&" ||
-      character === "|" ||
-      character === "<" ||
-      character === ">" ||
-      character === "`" ||
-      character === "\n" ||
-      character === "\r" ||
-      (character === "$" && command[index + 1] === "(")
-    ) {
-      return undefined;
-    }
+    const token = readWord();
+    if (token === undefined) return undefined;
+    tokens.push(token);
+    if (/^[0-9]+$/u.test(token) && command.slice(index).startsWith("&>")) return undefined;
+    skipWhitespace();
   }
-  if (quote !== undefined || escaped) return undefined;
-  const tokens = command.trim().split(/\s+/u);
-  return tokens;
+  return tokens.length > 0 ? tokens : undefined;
 }
 
 function exactReconCommandFlagValues(command: string, flag: "--timeout" | "--test-limit" | "--seq-len"): string[] {
@@ -4584,6 +4622,19 @@ function verifyCoverageProductionInventory(
     });
   }
 
+  if (reconSelection.ranges !== undefined) {
+    const selectedRangeCount = [...reconSelection.ranges.values()].reduce((sum, ranges) => sum + ranges.length, 0);
+    if (selectedRangeCount === 0) {
+      diagnostics.push({
+        code: "COVERAGE_RECON_SELECTION_EMPTY",
+        message: "Measured coverage requires a nonempty Recon selection of production source ranges",
+        severity: "error",
+        source: "coverage-evidence",
+        path: `${evidencePath}#$.recon_selection`
+      });
+    }
+  }
+
   let lcovCoverage: TrustedLcovCoverage | undefined;
   try {
     const input = readCoverageInputSnapshot(artifactDir, node, evidence.lcov, "LCOV", authenticated);
@@ -4641,6 +4692,29 @@ function verifyCoverageProductionInventory(
         });
       }
     }
+
+    const hasProductionSource = [...lcovCoverage.hitsBySource.keys()].some((source) => inventory.has(source));
+    if (!hasProductionSource) {
+      diagnostics.push({
+        code: "COVERAGE_PRODUCTION_SOURCE_ATTRIBUTION_EMPTY",
+        message: "Measured coverage requires LCOV to attribute at least one source to configured production roots",
+        severity: "error",
+        source: "coverage-evidence",
+        path: `${evidencePath}#$.lcov`
+      });
+    }
+    const productionInstrumentedLineCount = [...lcovCoverage.instrumentedLinesBySource.entries()]
+      .filter(([source]) => inventory.has(source))
+      .reduce((sum, [, lines]) => sum + lines.length, 0);
+    if (productionInstrumentedLineCount === 0) {
+      diagnostics.push({
+        code: "COVERAGE_PRODUCTION_INSTRUMENTATION_EMPTY",
+        message: "Measured coverage requires a nonzero authenticated production instrumentation denominator",
+        severity: "error",
+        source: "coverage-evidence",
+        path: `${evidencePath}#$.lcov`
+      });
+    }
   }
 
   for (const [relativePath, expectedKind] of expectedSourceKinds) {
@@ -4662,6 +4736,22 @@ function verifyCoverageProductionInventory(
         path: `${evidencePath}#$.files`
       });
     }
+  }
+
+  const productionDenominator = evidence.files
+    .filter((entry): entry is Record<string, unknown> => isRecord(entry) && entry.kind === "production")
+    .reduce((sum, entry) => {
+      const total = entry.total_ranges;
+      return sum + (typeof total === "number" && Number.isSafeInteger(total) && total >= 0 ? total : 0);
+    }, 0);
+  if (productionDenominator === 0) {
+    diagnostics.push({
+      code: "COVERAGE_PRODUCTION_DENOMINATOR_EMPTY",
+      message: "Measured coverage requires a nonzero production-attributed declaration denominator",
+      severity: "error",
+      source: "coverage-evidence",
+      path: `${evidencePath}#$.files`
+    });
   }
   for (const [relativePath, declared] of declaredFiles) {
     if (expectedSourceKinds.has(relativePath)) continue;
@@ -4767,6 +4857,7 @@ function verifyCoverageProductionInventory(
   }
 
   let materialRangeCount = 0;
+  let selectedMaterialRangeCount = 0;
   for (const relativePath of inventory) {
     const sourceText = sourceSnapshot(relativePath, "production coverage source").text;
     let declarations: MaterialCoverageDeclaration[];
@@ -4830,6 +4921,7 @@ function verifyCoverageProductionInventory(
         declaration.line,
         declaration.endLine
       );
+      if (reconSelection.ranges !== undefined && selectedByRecon) selectedMaterialRangeCount += 1;
       if (reconSelection.ranges !== undefined && matching[0]!.selected !== selectedByRecon) {
         diagnostics.push({
           code: "COVERAGE_PRODUCTION_RANGE_SELECTION_MISMATCH",
@@ -4859,6 +4951,15 @@ function verifyCoverageProductionInventory(
         path: `${evidencePath}#$.counted_ranges`
       });
     }
+  }
+  if (reconSelection.ranges !== undefined && selectedMaterialRangeCount === 0) {
+    diagnostics.push({
+      code: "COVERAGE_RECON_SELECTED_DENOMINATOR_EMPTY",
+      message: "Measured coverage requires a nonzero authenticated Recon-selected material declaration denominator",
+      severity: "error",
+      source: "coverage-evidence",
+      path: `${evidencePath}#$.recon_selection`
+    });
   }
   return diagnostics;
 }
