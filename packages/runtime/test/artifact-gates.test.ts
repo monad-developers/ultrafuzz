@@ -40,6 +40,7 @@ import {
   type PlannedGraphNode
 } from "../src/index.js";
 import { WORKFLOW_CONTROL_INTEGRITY_SCHEMA_VERSION } from "../src/runtime-contracts.js";
+import { ISSUE_531_REFERENCE_EXPECTATION_FIXTURES } from "./fixtures/issue-531-reference-expectations.js";
 
 const CAMPAIGN_EVIDENCE_BYTES = Buffer.from("x", "utf8");
 const CAMPAIGN_EVIDENCE_SHA256 = createHash("sha256").update(CAMPAIGN_EVIDENCE_BYTES).digest("hex");
@@ -369,14 +370,17 @@ function writeMeasuredCoverageArtifacts(
 function writeMinimalPropertyFaninFixture(
   layout: ReturnType<typeof createRunLayout>,
   options: {
+    canonicalPropertyId?: string;
     sourceNodeId?: string;
     sourcePropertyId?: string;
+    sources?: readonly { source_node_id: string; source_property_id: string }[];
     dependsOn?: readonly string[];
-    referenceExpectation?: string;
+    referenceExpectations?: readonly string[];
   } = {}
 ): PlannedGraphNode {
   const sourceNodeId = options.sourceNodeId ?? "property-specification-recon";
   const sourcePropertyId = options.sourcePropertyId ?? "recon-1";
+  const sources = options.sources ?? [{ source_node_id: sourceNodeId, source_property_id: sourcePropertyId }];
   writeArtifact(
     layout,
     "project-discovery",
@@ -403,15 +407,15 @@ function writeMinimalPropertyFaninFixture(
     schema_version: "ultrafuzz.properties.v2",
     properties: [
       {
-        id: "property-1",
+        id: options.canonicalPropertyId ?? "property-1",
         description: "Supply accounting remains consistent.",
         category: "accounting",
         priority: "high",
-        sources: [{ source_node_id: sourceNodeId, source_property_id: sourcePropertyId }],
+        sources,
         ledger_ids: ["evidence-1"],
-        ...(options.referenceExpectation === undefined
+        ...(options.referenceExpectations === undefined
           ? {}
-          : { reference_expectations: [options.referenceExpectation] })
+          : { reference_expectations: options.referenceExpectations })
       }
     ]
   });
@@ -6282,54 +6286,52 @@ test("property fan-in gate rejects a lens reference expectation dropped from can
   );
 });
 
-test("property fan-in gate rejects the issue 531 LEND_ACC_03 fabrication when every source lens omits expectations", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-issue-531-fabrication" });
-  const sourceLenses = [
-    ["property-specification-0kn0t", "0kn0t-1"],
-    ["property-specification-a16z", "a16z-1"],
-    ["property-specification-aviggiano", "aviggiano-1"],
-    ["property-specification-certora-thinking", "certora-thinking-1"],
-    ["property-specification-crytic", "crytic-1"],
-    ["property-specification-josselin-feist", "josselin-feist-1"],
-    ["property-specification-recon", "recon-1"],
-    ["property-specification-runtime-verification", "runtime-verification-1"]
-  ] as const;
-  for (const [sourceNodeId, sourcePropertyId] of sourceLenses) {
-    writeDeclaredPropertyLens(
-      layout,
-      sourceNodeId,
-      `properties/${sourcePropertyId}.json`,
-      JSON.stringify({
-        schema_version: "ultrafuzz.property-lens.v2",
-        properties: [
-          {
-            id: sourcePropertyId,
-            description: "Supply accounting remains consistent.",
-            category: "accounting",
-            priority: "high"
-          }
-        ]
-      })
-    );
-  }
-  const node = writeMinimalPropertyFaninFixture(layout, {
-    sourceNodeId: "property-specification-recon",
-    sourcePropertyId: "recon-1",
-    dependsOn: sourceLenses.map(([sourceNodeId]) => sourceNodeId),
-    referenceExpectation: "LEND_ACC_03"
-  });
+for (const fixture of ISSUE_531_REFERENCE_EXPECTATION_FIXTURES) {
+  test(`property fan-in gate rejects the issue 531 ${fixture.arm} reference expectation fabrication`, () => {
+    const layout = createRunLayout({ projectRoot: tempProject(), runId: fixture.runId });
+    for (const source of fixture.sources) {
+      writeDeclaredPropertyLens(
+        layout,
+        source.nodeId,
+        source.artifactPath,
+        JSON.stringify({
+          schema_version: "ultrafuzz.property-lens.v2",
+          properties: [
+            {
+              id: source.propertyId,
+              description: "Supply accounting remains consistent.",
+              category: "accounting",
+              priority: "high"
+            }
+          ]
+        })
+      );
+    }
+    const node = writeMinimalPropertyFaninFixture(layout, {
+      canonicalPropertyId: fixture.canonicalPropertyId,
+      sources: fixture.sources.map((source) => ({
+        source_node_id: source.nodeId,
+        source_property_id: source.propertyId
+      })),
+      dependsOn: fixture.sources.map((source) => source.nodeId),
+      referenceExpectations: fixture.fabricatedExpectationIds
+    });
 
-  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+    const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
 
-  assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
-  assert.ok(
-    result.diagnostics.some(
+    assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
+    const authorityDiagnostics = result.diagnostics.filter(
       (diagnostic) =>
-        diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_DROPPED" && diagnostic.message.includes("LEND_ACC_03")
-    ),
-    JSON.stringify(result.diagnostics)
-  );
-});
+        diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_DROPPED" &&
+        diagnostic.path?.endsWith("properties.json#$.properties[0].reference_expectations") === true
+    );
+    assert.equal(authorityDiagnostics.length, 1, JSON.stringify(result.diagnostics));
+    assert.ok(authorityDiagnostics[0]!.message.includes(fixture.canonicalPropertyId), authorityDiagnostics[0]!.message);
+    for (const expectationId of fixture.fabricatedExpectationIds) {
+      assert.ok(authorityDiagnostics[0]!.message.includes(expectationId), authorityDiagnostics[0]!.message);
+    }
+  });
+}
 
 test("property fan-in gate requires true omission when source lenses carry no authorized expectations", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-empty-fanin-expectations" });
