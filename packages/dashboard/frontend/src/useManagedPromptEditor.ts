@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { validatePromptTemplateVariables } from "./templateValidation";
 import type { TemplateValidation } from "./templateValidation";
+import { dashboardAuthenticatedHeaders } from "./dashboardSession";
 import { dashboardRequest, parseDashboardHttpResponse, throwDashboardHttpError } from "./wireContracts";
 
 export const promptAutosaveDelayMs = 1500;
@@ -39,8 +40,8 @@ type UseManagedPromptEditorOptions = {
   onPendingEditChange?: (pending: boolean) => void;
 };
 
-async function getPromptDetail<T>(url: string): Promise<T> {
-  const response = await fetch(url);
+async function getPromptDetail<T>(url: string, sessionToken: string): Promise<T> {
+  const response = await fetch(url, { headers: dashboardAuthenticatedHeaders(sessionToken) });
   if (!response.ok) {
     await throwDashboardHttpError(response);
   }
@@ -95,7 +96,7 @@ export function useManagedPromptEditor({
   }, [onPendingEditChange, prompt, promptDraft]);
 
   useEffect(() => {
-    if (!promptEndpoint) {
+    if (!promptEndpoint || !sessionToken) {
       setPrompt(null);
       setPromptDraft("");
       setPromptError("");
@@ -107,7 +108,7 @@ export function useManagedPromptEditor({
     setPromptDraft("");
     setPromptError("");
 
-    getPromptDetail<Omit<ManagedPromptDetail, "endpoint">>(promptEndpoint)
+    getPromptDetail<Omit<ManagedPromptDetail, "endpoint">>(promptEndpoint, sessionToken)
       .then((promptDetail) => {
         if (cancelled) {
           return;
@@ -128,7 +129,7 @@ export function useManagedPromptEditor({
     return () => {
       cancelled = true;
     };
-  }, [isStrategyAggregate, promptEndpoint]);
+  }, [isStrategyAggregate, promptEndpoint, sessionToken]);
 
   const savePromptNow = useCallback(
     async (endpoint: string, content: string) => {
@@ -140,17 +141,14 @@ export function useManagedPromptEditor({
       try {
         const response = await fetch(endpoint, {
           method: "PUT",
-          headers: {
-            "content-type": "application/json",
-            "x-ultrafuzz-session": sessionToken
-          },
+          headers: dashboardAuthenticatedHeaders(sessionToken, { "content-type": "application/json" }),
           body: JSON.stringify(dashboardRequest("prompt-save", { content }))
         });
         if (!response.ok) {
           await throwDashboardHttpError(response);
         }
         await parseDashboardHttpResponse(response, "prompt-save");
-        const refreshed = await getPromptDetail<Omit<ManagedPromptDetail, "endpoint">>(endpoint);
+        const refreshed = await getPromptDetail<Omit<ManagedPromptDetail, "endpoint">>(endpoint, sessionToken);
         if (promptEndpointRef.current !== endpoint) {
           return;
         }

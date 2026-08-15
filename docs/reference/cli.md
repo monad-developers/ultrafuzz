@@ -570,9 +570,12 @@ ultrafuzz dashboard \
   [--no-live]
 ```
 
-`dashboard` starts a local loopback server and prints the `/dashboard` URL. The
-API reads and edits only beta product surfaces, validates mutating saves before
-writing, and guards mutating requests with a per-session token.
+`dashboard` starts a local loopback server and prints a
+`/dashboard#session=...` launch URL. Treat the fragment as a bearer credential.
+The browser consumes it into tab-scoped storage; `/api/session` does not return
+it, and every API read, mutation, and SSE stream requires it in the dashboard
+session header. The API reads and edits only beta product surfaces and
+validates mutating saves before writing.
 
 ## Eval
 

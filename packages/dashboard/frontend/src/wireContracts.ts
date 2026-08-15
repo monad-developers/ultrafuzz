@@ -12,7 +12,7 @@ const DASHBOARD_FRONTEND_JSON_LIMITS = Object.freeze({
   maxProperties: 250_000
 });
 
-export type DashboardRequestType = "config-save" | "topology-save" | "prompt-save" | "prompt-create";
+export type DashboardRequestType = "config-save" | "topology-save" | "prompt-save" | "prompt-create" | "csp-violation";
 export type DashboardCommandName =
   | "validate"
   | "run"
@@ -29,6 +29,8 @@ export type DashboardCommandName =
   | "clean";
 export type DashboardHttpDocumentType =
   | "session"
+  | "launch-preview"
+  | "csp-violations"
   | "run-overview"
   | "flow"
   | "graph"
@@ -65,6 +67,7 @@ interface DashboardErrorDocument {
   schema_version: typeof DASHBOARD_HTTP_SCHEMA_VERSION;
   document_type: "error";
   error: string;
+  correlationId: string;
 }
 
 export function dashboardRequest(
@@ -118,7 +121,7 @@ export async function parseDashboardHttpResponse<T>(
 
 export async function throwDashboardHttpError(response: Response): Promise<never> {
   const document = await parseDashboardHttpResponse<DashboardErrorDocument>(response, "error");
-  throw new Error(document.error);
+  throw new Error(`${document.error} Correlation ID: ${document.correlationId}`);
 }
 
 export function dashboardSseEvents(serialized: string): Record<string, unknown> {

@@ -45,7 +45,8 @@ test("dashboard schemas are complete, closed, and reference only current compose
   const errorDocument = {
     schema_version: DASHBOARD_HTTP_SCHEMA_VERSION,
     document_type: "error",
-    error: "example"
+    error: "example",
+    correlationId: "00000000-0000-4000-8000-000000000001"
   };
   assert.doesNotThrow(() => assertDashboardHttpDocument(errorDocument, "errorResponse", "test error response"));
   assert.throws(
@@ -155,13 +156,50 @@ test("dashboard exposes only the bounded operator-defined JSON extension point",
       ),
     /additionalProperties|anyOf/u
   );
+
+  const launchPreview = {
+    schema_version: DASHBOARD_HTTP_SCHEMA_VERSION,
+    document_type: "launch-preview",
+    target: "monad-developers/ultrafuzz",
+    providers: ["claude", "codex"],
+    configuredBudget: {
+      maxParallelAgents: 4,
+      maxParallelNodes: 3,
+      defaultTimeoutSeconds: 900,
+      workflowDeadlineSeconds: 7200,
+      sameAgentAttempts: 2,
+      expandedAttempts: 12
+    },
+    confirmationDigest: "d".repeat(64)
+  };
+  assert.doesNotThrow(() => assertDashboardHttpDocument(launchPreview, "launchPreviewResponse", "launch preview"));
+  assert.throws(
+    () =>
+      assertDashboardHttpDocument(
+        { ...launchPreview, providers: [] },
+        "launchPreviewResponse",
+        "provider-free launch preview"
+      ),
+    /minItems/u
+  );
+
+  const cspRequest = {
+    schema_version: DASHBOARD_HTTP_SCHEMA_VERSION,
+    request_type: "csp-violation",
+    blockedURI: "data:image/svg+xml",
+    violatedDirective: "img-src-elem",
+    effectiveDirective: "img-src",
+    disposition: "enforce"
+  };
+  assert.doesNotThrow(() => assertDashboardHttpDocument(cspRequest, "cspViolationRequest", "CSP report"));
 });
 
 test("dashboard HTTP and SSE serializers validate the exact bytes they return", () => {
   const errorDocument = {
     schema_version: DASHBOARD_HTTP_SCHEMA_VERSION,
     document_type: "error",
-    error: "example"
+    error: "example",
+    correlationId: "00000000-0000-4000-8000-000000000001"
   };
   const httpBytes = serializeDashboardHttpDocument(errorDocument, "errorResponse");
   assert.equal(httpBytes.at(-1), 0x0a);
@@ -217,6 +255,30 @@ test("dashboard audit journals reject malformed history without changing its byt
     root
   );
   assert.equal(readDashboardAuditJournal(auditPath).records[0]?.schema_version, DASHBOARD_AUDIT_SCHEMA_VERSION);
+  appendDashboardAuditRecord(
+    auditPath,
+    {
+      kind: "run-launch",
+      target: "monad-developers/ultrafuzz",
+      providers: ["codex"],
+      configured_budget: {
+        max_parallel_agents: 4,
+        max_parallel_nodes: 3,
+        default_timeout_seconds: 900,
+        workflow_deadline_seconds: 7200,
+        same_agent_attempts: 2,
+        expanded_attempts: 12
+      },
+      confirmation_digest: "d".repeat(64)
+    },
+    root
+  );
+  const launch = readDashboardAuditJournal(auditPath).records[1];
+  assert.equal(launch?.kind, "run-launch");
+  if (launch?.kind !== "run-launch") assert.fail("expected run-launch audit record");
+  assert.equal(launch.target, "monad-developers/ultrafuzz");
+  assert.deepEqual(launch.providers, ["codex"]);
+  assert.equal(launch.configured_budget.expanded_attempts, 12);
 
   const malformedBytes = Buffer.from(
     `${JSON.stringify({
@@ -230,7 +292,7 @@ test("dashboard audit journals reject malformed history without changing its byt
     "utf8"
   );
   fs.writeFileSync(auditPath, malformedBytes);
-  assert.throws(() => readDashboardAuditJournal(auditPath), /schema_version/u);
+  assert.throws(() => readDashboardAuditJournal(auditPath), /does not match|oneOf/u);
   assert.throws(
     () =>
       appendDashboardAuditRecord(
@@ -242,7 +304,7 @@ test("dashboard audit journals reject malformed history without changing its byt
         },
         root
       ),
-    /schema_version/u
+    /does not match|oneOf/u
   );
   assert.deepEqual(fs.readFileSync(auditPath), malformedBytes);
 });
