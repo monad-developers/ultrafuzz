@@ -558,10 +558,19 @@ export async function synchronizeLinkedWorkflowRun(
   }
   diagnostics.push(...syncResult.diagnostics);
   reconcilePreparedRecoveryProvenance(layout);
+  const recoveryState = readRunState(layout);
+  const recovery = recoveryState.provenance?.recovery;
+  const recoveryDispositionAuthorized = recoverySubmissionAuthorized({
+    layout,
+    state: recoveryState,
+    workflowRunId: evidence.smithersRunId,
+    workflowLinkId: evidence.workflowLinkId,
+    controlGeneration: evidence.controlGeneration
+  });
   const evidenceComplete = syncResult.syncedNodes >= loaded.tasks.length;
   const recoveredAggregateAuthorized = recoveryAuthorizesFailedAggregate({
     layout,
-    state: readRunState(layout),
+    state: recoveryState,
     inspect,
     nodeStatuses: syncResult.nodeStatuses,
     observedTaskEvidence: syncResult.observedTaskEvidence,
@@ -620,7 +629,9 @@ export async function synchronizeLinkedWorkflowRun(
 
   const finalStatus = finalRunStatus(inspect, syncResult.nodeStatuses, readRunState(layout).status, {
     evidenceComplete,
-    recoveredAggregateAuthorized
+    recoveredAggregateAuthorized,
+    recoveryDispositionAuthorized,
+    recoveryRequiresAuthorization: recovery?.prior_status === "failed" && recovery.recovered === false
   });
   const stateBeforeStatusUpdate = readRunState(layout);
   const previousRunStatus = stateBeforeStatusUpdate.status;
@@ -632,22 +643,32 @@ export async function synchronizeLinkedWorkflowRun(
     }
     updateRunStatus(layout, finalStatus);
   }
-  const recovery = stateBeforeStatusUpdate.provenance?.recovery;
-  if (finalStatus === "succeeded" && recovery?.prior_status === "failed" && recovery.recovered === false) {
+  const recoveryBeforeStatusUpdate = stateBeforeStatusUpdate.provenance?.recovery;
+  if (
+    finalStatus === "succeeded" &&
+    recoveryDispositionAuthorized &&
+    recoveryBeforeStatusUpdate?.prior_status === "failed" &&
+    recoveryBeforeStatusUpdate.recovered === false
+  ) {
     if (
       !replayEvents(layout).records.some(
-        (event) => event.event_type === "run-recovered" && event.payload.recovery_id === recovery.recovery_id
+        (event) =>
+          event.event_type === "run-recovered" && event.payload.recovery_id === recoveryBeforeStatusUpdate.recovery_id
       )
     ) {
       appendEvent(layout, {
         eventType: "run-recovered",
         status: "succeeded",
-        payload: { recovery_id: recovery.recovery_id, prior_status: "failed", failed_nodes: recovery.failed_nodes }
+        payload: {
+          recovery_id: recoveryBeforeStatusUpdate.recovery_id,
+          prior_status: "failed",
+          failed_nodes: recoveryBeforeStatusUpdate.failed_nodes
+        }
       });
     }
     const state = readRunState(layout);
     const recovered = {
-      ...recovery,
+      ...recoveryBeforeStatusUpdate,
       recovered: true,
       recovered_at: new Date(synchronizationClock(control)).toISOString()
     };
@@ -789,15 +810,14 @@ function recoveryAuthorizesFailedAggregate(input: {
   const statuses = [...input.nodeStatuses.values()];
   if (
     input.inspect.runState !== "failed" ||
-    recovery?.submission_status !== "submitted" ||
-    recovery?.prior_status !== "failed" ||
-    recovery.workflow_run_id !== input.workflowRunId ||
-    recovery.workflow_link_id !== input.workflowLinkId ||
-    recovery.control_generation !== input.controlGeneration ||
-    recovery.lifecycle_result_event_id === undefined ||
-    recovery.lifecycle_result_at === undefined ||
-    recovery.lifecycle_submission_event_id === undefined ||
-    recovery.lifecycle_submitted_at === undefined ||
+    recovery === undefined ||
+    !recoverySubmissionAuthorized({
+      layout: input.layout,
+      state: input.state,
+      workflowRunId: input.workflowRunId,
+      workflowLinkId: input.workflowLinkId,
+      controlGeneration: input.controlGeneration
+    }) ||
     !input.evidenceComplete ||
     statuses.length === 0 ||
     !statuses.every((status) => status === "succeeded" || status === "reused-from-prior-run") ||
@@ -838,6 +858,31 @@ function recoveryAuthorizesFailedAggregate(input: {
     ) {
       return false;
     }
+  }
+
+  return true;
+}
+
+function recoverySubmissionAuthorized(input: {
+  layout: RunLayout;
+  state: ReturnType<typeof readRunState>;
+  workflowRunId: string;
+  workflowLinkId: string;
+  controlGeneration: string;
+}): boolean {
+  const recovery = input.state.provenance?.recovery;
+  if (
+    recovery?.submission_status !== "submitted" ||
+    recovery.prior_status !== "failed" ||
+    recovery.workflow_run_id !== input.workflowRunId ||
+    recovery.workflow_link_id !== input.workflowLinkId ||
+    recovery.control_generation !== input.controlGeneration ||
+    recovery.lifecycle_result_event_id === undefined ||
+    recovery.lifecycle_result_at === undefined ||
+    recovery.lifecycle_submission_event_id === undefined ||
+    recovery.lifecycle_submitted_at === undefined
+  ) {
+    return false;
   }
 
   const records = replayEvents(input.layout, Number.MAX_SAFE_INTEGER).records;
@@ -4094,6 +4139,8 @@ function finalRunStatus(
   options: {
     evidenceComplete: boolean;
     recoveredAggregateAuthorized?: boolean;
+    recoveryDispositionAuthorized?: boolean;
+    recoveryRequiresAuthorization?: boolean;
   } = { evidenceComplete: true }
 ): RunStatus {
   const statuses = [...nodeStatuses.values()];
@@ -4132,6 +4179,9 @@ function finalRunStatus(
     return "running";
   }
   if (workflowStatus === "succeeded") {
+    if (options.recoveryRequiresAuthorization === true && options.recoveryDispositionAuthorized !== true) {
+      return "failed";
+    }
     return options.evidenceComplete &&
       (statuses.length === 0 ||
         statuses.every((status) => status === "succeeded" || status === "reused-from-prior-run"))

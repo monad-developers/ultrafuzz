@@ -12977,6 +12977,104 @@ test("retry recovery survives an interrupted submission projection and rejects s
   );
 });
 
+test("retry recovery stays failed when engine success has no durable submission disposition", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+  const workflowRunId = "ultrafuzz-recovery-missing-disposition";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      error: { message: "Task failed: node:project-discovery" },
+      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
+    }),
+    events: ""
+  });
+  const run = await startRun({ projectRoot: project, runId: "recovery-missing-disposition", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
+
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId: run.value!.run_id,
+    force: true,
+    retryFailed: true,
+    env
+  });
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+
+  const layout = layoutForRunRoot(run.value!.run_root);
+  const statePath = path.join(run.value!.run_root, "state.json");
+  const interrupted = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
+  const recovery = interrupted.provenance?.recovery;
+  assert.equal(recovery?.submission_status, "submitted");
+  const records = replayEvents(layout, Number.MAX_SAFE_INTEGER).records;
+  const invocationIndex = records.findIndex((event) => event.event_id === recovery?.controller_invocation_id);
+  assert.notEqual(invocationIndex, -1);
+  assert.ok(records.slice(invocationIndex + 1).some((event) => event.event_type === "workflow-lifecycle-result"));
+  assert.ok(records.slice(invocationIndex + 1).some((event) => event.event_type === "workflow-lifecycle-submitted"));
+
+  // Model process death after the external command took effect but before its
+  // result/submission disposition was appended. The invocation and prepared
+  // intent survive, so a successful inspect must not invent authorization.
+  fs.writeFileSync(
+    layout.eventsPath,
+    `${records
+      .slice(0, invocationIndex + 1)
+      .map((event) => JSON.stringify(event))
+      .join("\n")}\n`,
+    "utf8"
+  );
+  recovery!.submission_status = "prepared";
+  delete recovery!.workflow_run_id;
+  delete recovery!.workflow_link_id;
+  delete recovery!.lifecycle_result_event_id;
+  delete recovery!.lifecycle_result_at;
+  delete recovery!.lifecycle_submission_event_id;
+  delete recovery!.lifecycle_submitted_at;
+  fs.writeFileSync(statePath, `${JSON.stringify(interrupted, null, 2)}\n`, "utf8");
+
+  const successfulInspect = workflowInspect({
+    workflowRunId,
+    status: "finished",
+    state: "succeeded",
+    steps: [{ id: "node:project-discovery", state: "finished", attempt: 2 }]
+  });
+  fs.writeFileSync(env.SMITHERS_FAKE_INSPECT!, `${JSON.stringify(successfulInspect, null, 2)}\n`, "utf8");
+  fs.writeFileSync(
+    env.SMITHERS_FAKE_EVENTS!,
+    workflowEvents(workflowRunId, [{ type: "NodeFinished", nodeId: "node:project-discovery", attempt: 2 }]),
+    "utf8"
+  );
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const synchronized = await syncRun({ projectRoot: project, runId: run.value!.run_id, env });
+    assert.equal(synchronized.ok, true, JSON.stringify(synchronized.diagnostics));
+    assert.equal(synchronized.value?.status, "failed");
+  }
+
+  const finalState = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
+  assert.equal(finalState.status, "failed");
+  assert.equal(finalState.nodes["project-discovery"]?.status, "succeeded");
+  assert.equal(finalState.provenance?.recovery?.submission_status, "prepared");
+  assert.equal(finalState.provenance?.recovery?.recovered, false);
+  const finalEvents = replayEvents(layout, Number.MAX_SAFE_INTEGER).records;
+  assert.equal(
+    finalEvents.some((event) => event.event_type === "workflow-lifecycle-result"),
+    false
+  );
+  assert.equal(
+    finalEvents.some((event) => event.event_type === "workflow-lifecycle-submitted"),
+    false
+  );
+  assert.equal(
+    finalEvents.some((event) => event.event_type === "run-recovered"),
+    false
+  );
+});
+
 test("retry recovery cannot authorize a stale failed aggregate from a different workflow link", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
