@@ -6296,15 +6296,17 @@ function verifyCampaignPropertyReferences(
   for (const campaign of campaigns) {
     const campaignPath = campaign.path;
     const seenEntrypoints = new Map<string, string>();
-    const provenanceIsCurrent =
-      campaign.value.property_provenance_version !== undefined ||
-      campaign.value.intended_entrypoints !== undefined ||
-      campaign.value.admitted_entrypoints !== undefined ||
-      campaign.value.property_results !== undefined ||
-      campaign.value.campaign_outcome !== undefined;
+    // The explicit discriminator is authoritative. Legacy v3 records commonly
+    // contain property_results and campaign_outcome, but predate this projection.
+    const provenanceIsCurrent = campaign.value.property_provenance_version !== undefined;
     const intendedEntrypoints = campaign.value.intended_entrypoints;
     const admittedEntrypoints = campaign.value.admitted_entrypoints;
     const propertyResults = campaign.value.property_results ?? [];
+    if (provenanceIsCurrentCampaign(campaign.value)) {
+      diagnostics.push(
+        ...authenticatedCampaignEntrypointDiagnostics(artifactDir, campaign.value, campaign.path, authenticated)
+      );
+    }
     if (provenanceIsCurrent && (intendedEntrypoints === undefined || admittedEntrypoints === undefined)) {
       diagnostics.push({
         code: "PROPERTY_CAMPAIGN_PROVENANCE_MISSING",
@@ -6391,7 +6393,7 @@ function verifyCampaignPropertyReferences(
         });
       }
     }
-    if (provenanceIsCurrent || intendedEntrypoints !== undefined || admittedEntrypoints !== undefined) {
+    if (provenanceIsCurrent) {
       const intendedIds = new Set((intendedEntrypoints ?? []).map((entry) => entry.property_id));
       const admittedIds = new Set((admittedEntrypoints ?? []).map((entry) => entry.property_id));
       for (const [index, entry] of (admittedEntrypoints ?? []).entries()) {
@@ -6418,10 +6420,13 @@ function verifyCampaignPropertyReferences(
           path: `${campaignPath}#$.intended_entrypoints`
         });
       }
-      if (admittedEntrypoints !== undefined && admittedIds.size !== admittedEntrypoints.length) {
+      if (
+        admittedEntrypoints !== undefined &&
+        new Set(admittedEntrypoints.map((entry) => entry.entrypoint)).size !== admittedEntrypoints.length
+      ) {
         diagnostics.push({
           code: "PROPERTY_CAMPAIGN_ENTRYPOINT_DUPLICATE",
-          message: "admitted_entrypoints must not contain duplicate property observations",
+          message: "admitted_entrypoints must not map one backend entrypoint to multiple observations",
           severity: "error",
           source: "property-provenance",
           path: `${campaignPath}#$.admitted_entrypoints`
@@ -6475,6 +6480,99 @@ function verifyCampaignPropertyReferences(
         });
       }
     }
+  }
+  return diagnostics;
+}
+
+function provenanceIsCurrentCampaign(campaign: PropertyCampaignArtifact): boolean {
+  return campaign.property_provenance_version !== undefined;
+}
+
+/**
+ * Entrypoint projections are only meaningful when they are tied to the bytes
+ * emitted by discovery/result generation. Hashing an arbitrary evidence file
+ * does not authenticate the claims inside it, so inspect JSON evidence when it
+ * carries the backend's typed entrypoint records and compare the projections
+ * host-side.
+ */
+function authenticatedCampaignEntrypointDiagnostics(
+  artifactDir: string,
+  campaign: PropertyCampaignArtifact,
+  campaignPath: string,
+  authenticated?: AuthenticatedArtifactGateSnapshots
+): RuntimeDiagnostic[] {
+  const intended = campaign.intended_entrypoints ?? [];
+  const admitted = campaign.admitted_entrypoints ?? [];
+  const intendedKey = (entry: { entrypoint: string; property_id: string }) =>
+    `${entry.entrypoint}\u0000${entry.property_id}`;
+  const expectedIntended = new Set(intended.map(intendedKey));
+  const expectedAdmitted = new Set(admitted.map(intendedKey));
+  const observedIntended = new Set<string>();
+  const observedAdmitted = new Set<string>();
+  let foundTypedEvidence = false;
+  for (const evidence of campaign.evidence_files) {
+    let bytes: Buffer | undefined;
+    try {
+      const evidencePath = safeResolveInside(artifactDir, evidence.path, "property campaign provenance evidence");
+      bytes = readCurrentArtifactSnapshot(artifactDir, evidencePath, authenticated);
+    } catch {
+      continue;
+    }
+    if (bytes === undefined) continue;
+    let value: unknown;
+    try {
+      value = parseStrictJsonBytes(bytes);
+    } catch {
+      continue;
+    }
+    if (!isRecord(value)) continue;
+    const readEntries = (field: string): void => {
+      const entries = value[field];
+      if (!Array.isArray(entries)) return;
+      for (const entry of entries) {
+        if (!isRecord(entry) || typeof entry.entrypoint !== "string" || typeof entry.property_id !== "string") continue;
+        foundTypedEvidence = true;
+        (field === "intended_entrypoints" ? observedIntended : observedAdmitted).add(
+          `${entry.entrypoint}\u0000${entry.property_id}`
+        );
+      }
+    };
+    readEntries("intended_entrypoints");
+    readEntries("admitted_entrypoints");
+    readEntries("discovered_entrypoints");
+    readEntries("result_entrypoints");
+  }
+  if (!foundTypedEvidence) {
+    return [
+      {
+        code: "PROPERTY_CAMPAIGN_PROVENANCE_EVIDENCE_MISSING",
+        message: "Current property provenance must include typed discovery/result entrypoint evidence",
+        severity: "error",
+        source: "property-provenance",
+        path: `${campaignPath}#$.evidence_files`
+      }
+    ];
+  }
+  const same = (left: Set<string>, right: Set<string>) =>
+    left.size === right.size && [...left].every((entry) => right.has(entry));
+  const diagnostics: RuntimeDiagnostic[] = [];
+  if (observedIntended.size > 0 && !same(observedIntended, expectedIntended)) {
+    diagnostics.push({
+      code: "PROPERTY_CAMPAIGN_INTENDED_ENTRYPOINT_UNAUTHENTICATED",
+      message: "intended_entrypoints must equal the authenticated generated-suite/ABI entrypoint projection",
+      severity: "error",
+      source: "property-provenance",
+      path: `${campaignPath}#$.intended_entrypoints`
+    });
+  }
+  if (observedAdmitted.size > 0 && !same(observedAdmitted, expectedAdmitted)) {
+    diagnostics.push({
+      code: "PROPERTY_CAMPAIGN_ADMITTED_ENTRYPOINT_UNAUTHENTICATED",
+      message: "admitted_entrypoints must equal the authenticated backend discovery/result projection",
+      severity: "error",
+      source: "property-provenance",
+      path: `${campaignPath}#$.admitted_entrypoints`
+    });
   }
   return diagnostics;
 }

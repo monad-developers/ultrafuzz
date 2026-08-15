@@ -1090,6 +1090,15 @@ export const propertyCampaignSchema = z
   })
   .superRefine((campaign, context) => {
     if (campaign.property_provenance_version === undefined) return;
+    for (const field of ["intended_entrypoints", "admitted_entrypoints", "property_results"] as const) {
+      if (campaign[field] === undefined) {
+        context.addIssue({
+          code: "custom",
+          path: [field],
+          message: `Current property campaign requires ${field}`
+        });
+      }
+    }
     for (const [index, result] of (campaign.property_results ?? []).entries()) {
       const terminal = result.status === "passed" || result.status === "failed";
       const valid = terminal
@@ -1111,7 +1120,10 @@ export const propertyCampaignSchema = z
       {
         if: { properties: { property_provenance_version: {} }, required: ["property_provenance_version"] },
         then: {
+          required: ["intended_entrypoints", "admitted_entrypoints", "property_results"],
           properties: {
+            intended_entrypoints: {},
+            admitted_entrypoints: {},
             property_results: {
               type: "array",
               items: {

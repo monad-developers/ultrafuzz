@@ -686,7 +686,8 @@
                 "reason": {
                   "type": "null"
                 }
-              }
+              },
+              "required": ["reason_code", "reason"]
             }
           },
           {
@@ -708,7 +709,8 @@
                 "reason": {
                   "type": "null"
                 }
-              }
+              },
+              "required": ["reason_code", "reason"]
             }
           },
           {
@@ -890,14 +892,17 @@
         "required": ["property_provenance_version"]
       },
       "then": {
+        "required": ["intended_entrypoints", "admitted_entrypoints", "property_results"],
         "properties": {
+          "intended_entrypoints": {},
+          "admitted_entrypoints": {},
           "property_results": {
             "type": "array",
             "items": {
               "if": {
                 "type": "object",
                 "properties": {
-                  "status": {"enum": ["inconclusive", "not-executed"]}
+                  "status": { "enum": ["inconclusive", "not-executed"] }
                 },
                 "required": ["status"]
               },
