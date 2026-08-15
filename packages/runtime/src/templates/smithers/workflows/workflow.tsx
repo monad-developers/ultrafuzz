@@ -113,8 +113,11 @@ const CANONICAL_PROPERTIES_MARKDOWN_CONVENTIONAL_PATH = "properties.md";
 
 const inputTaskSchema = z.strictObject({
   id: z.string().min(1).max(4_096),
-  prompt: z.string().optional(),
-  prompt_path: z.string().optional()
+  prompt: z
+    .string()
+    .max(16 * 1024 * 1024)
+    .optional(),
+  prompt_path: z.string().min(1).max(4_096).optional()
 });
 
 const MAX_WORKFLOW_INPUT_TASKS = 100_000;
@@ -177,7 +180,10 @@ const inputSchema = z
     tasks: z.array(inputTaskSchema).max(MAX_WORKFLOW_INPUT_TASKS).optional(),
     cloud_worker: z.literal(true).optional(),
     task_id: z.string().min(1).max(4_096).optional(),
-    operator_prompt: z.string().optional(),
+    operator_prompt: z
+      .string()
+      .max(16 * 1024 * 1024)
+      .optional(),
     operator_input: operatorInputSchema.optional()
   })
   .superRefine((value, ctx) => {
@@ -471,6 +477,17 @@ function readCloudExecutionGeneration(): string {
   return parsed.generation;
 }
 
+function boundedPromptText(task: (typeof taskSpecs)[number], value: string, label: string): string {
+  const observed = Buffer.byteLength(value, "utf8");
+  const limit = task.resourceBudget.maxAttemptContextBytes;
+  if (observed > limit) {
+    const error = resourceBudgetExhaustionError(task, "context_bytes", "attempt", limit, observed);
+    error.message = `${error.message} (${label})`;
+    throw error;
+  }
+  return value;
+}
+
 function promptForTask(
   task: (typeof taskSpecs)[number],
   inputTask?: { prompt?: string; prompt_path?: string }
@@ -482,10 +499,43 @@ function promptForTask(
     prompt = task.prompt;
   } else {
     const promptPath = task.promptPath ?? inputTask?.prompt_path;
-    prompt = promptPath ? readFileSync(promptPath, "utf8") : "";
+    if (promptPath === undefined) {
+      prompt = "";
+    } else {
+      const promptStat = lstatSync(promptPath);
+      if (promptStat.size > task.resourceBudget.maxAttemptContextBytes) {
+        throw resourceBudgetExhaustionError(
+          task,
+          "context_bytes",
+          "attempt",
+          task.resourceBudget.maxAttemptContextBytes,
+          promptStat.size
+        );
+      }
+      prompt = new TextDecoder("utf-8", { fatal: true }).decode(
+        readRegularFileSnapshot(promptPath, task.resourceBudget.maxAttemptContextBytes)
+      );
+    }
   }
+  boundedPromptText(task, prompt, "task prompt");
   prompt = relocatePromptPath(prompt, task.artifactDir, mirroredArtifactDir(task));
-  return relocatePromptPath(prompt, task.sourceProjectRoot, process.cwd());
+  return boundedPromptText(
+    task,
+    relocatePromptPath(prompt, task.sourceProjectRoot, process.cwd()),
+    "relocated task prompt"
+  );
+}
+
+function boundedFullTaskPrompt(task: (typeof taskSpecs)[number], parts: readonly string[]): string {
+  const limit = task.resourceBudget.maxAttemptContextBytes;
+  let observed = 0;
+  for (const part of parts) {
+    observed += Buffer.byteLength(part, "utf8");
+    if (!Number.isSafeInteger(observed) || observed > limit) {
+      throw resourceBudgetExhaustionError(task, "context_bytes", "attempt", limit, observed);
+    }
+  }
+  return parts.join("");
 }
 
 function relocatePromptPath(prompt: string, sourcePath: string, destinationPath: string): string {
@@ -1215,6 +1265,354 @@ function agentForTask(task: (typeof taskSpecs)[number], originalPrompt: string):
   return selected.length === 1 ? selected[0] : selected;
 }
 
+type BudgetCounter = { requests: number; turns: number; contextBytes: number; outputBytes: number };
+type ResourceBudgetExhaustionEvidence = {
+  schema_version: "ultrafuzz.resource-budget-exhaustion.v1";
+  ultrafuzz_run_id: string;
+  workflow_run_id: string;
+  resource: ResourceBudgetName;
+  scope: "run" | "attempt";
+  limit: number;
+  observed: number;
+  task_id: string;
+  recorded_at: string;
+};
+type BudgetTaskState = BudgetCounter & {
+  taskId: string;
+  attempts: Map<string, BudgetCounter>;
+  exhaustion?: ResourceBudgetExhaustionEvidence;
+};
+type BudgetState = BudgetCounter & {
+  taskStates: Map<string, BudgetTaskState>;
+  stateRoot: string;
+  abortController: AbortController;
+  exhausted?: Error;
+};
+type ResourceBudgetName =
+  | "cost_usd"
+  | "total_tokens"
+  | "requests"
+  | "turns"
+  | "context_bytes"
+  | "output_bytes"
+  | "attempt_tokens"
+  | "attempt_requests";
+const resourceBudgetStates = new Map<string, BudgetState>();
+const RESOURCE_BUDGET_STATE_SCHEMA_VERSION = "ultrafuzz.resource-budget-state.v1";
+const RESOURCE_BUDGET_STATE_DIRECTORY = "resource-budget-counters";
+const MAX_RESOURCE_BUDGET_STATE_FILES = 100_000;
+const MAX_RESOURCE_BUDGET_STATE_BYTES = 1024 * 1024;
+
+function isNormalizedAgentTurn(event: unknown): boolean {
+  if (event === null || typeof event !== "object") return false;
+  const candidate = event as Record<string, unknown>;
+  if (candidate.type !== "action" || candidate.action === null || typeof candidate.action !== "object") return false;
+  const action = candidate.action as Record<string, unknown>;
+  if (candidate.phase === "started" && action.kind === "turn") return true;
+  return (
+    candidate.phase === "updated" &&
+    candidate.entryType === "message" &&
+    action.kind === "note" &&
+    action.title === "assistant"
+  );
+}
+
+function resourceBudgetStateForTask(task: (typeof taskSpecs)[number]): BudgetState | undefined {
+  if (task.resourceBudget === undefined) return undefined;
+  const stateRoot = resourceBudgetStateRoot(task);
+  const runBudgetKey = JSON.stringify([task.metadata.run.ultrafuzzRunId, task.smithersRunId, stateRoot]);
+  const current = resourceBudgetStates.get(runBudgetKey);
+  if (current !== undefined) return current;
+  const created: BudgetState = {
+    requests: 0,
+    turns: 0,
+    contextBytes: 0,
+    outputBytes: 0,
+    taskStates: new Map(),
+    stateRoot,
+    abortController: new AbortController()
+  };
+  const names = readdirSync(stateRoot);
+  if (names.length > MAX_RESOURCE_BUDGET_STATE_FILES) {
+    throw new Error("resource budget state has too many task files");
+  }
+  for (const name of names.sort()) {
+    if (!/^[a-f0-9]{64}\.json$/u.test(name)) {
+      throw new Error(`resource budget state contains an unexpected entry: ${name}`);
+    }
+    const taskState = parsePersistedResourceBudgetTaskState(
+      readRegularFileSnapshot(path.join(stateRoot, name), MAX_RESOURCE_BUDGET_STATE_BYTES),
+      task.metadata.run.ultrafuzzRunId,
+      task.smithersRunId
+    );
+    if (`${createHash("sha256").update(taskState.taskId).digest("hex")}.json` !== name) {
+      throw new Error("resource budget state task identity does not match its file name");
+    }
+    if (created.taskStates.has(taskState.taskId)) {
+      throw new Error(`resource budget state repeats task ${taskState.taskId}`);
+    }
+    created.taskStates.set(taskState.taskId, taskState);
+    for (const field of ["requests", "turns", "contextBytes", "outputBytes"] as const) {
+      const total = created[field] + taskState[field];
+      if (!Number.isSafeInteger(total)) throw new Error(`resource budget ${field} total exceeds the safe range`);
+      created[field] = total;
+    }
+    if (taskState.exhaustion !== undefined && created.exhausted === undefined) {
+      created.exhausted = resourceBudgetError(taskState.exhaustion);
+      created.abortController.abort(created.exhausted);
+    }
+  }
+  resourceBudgetStates.set(runBudgetKey, created);
+  return created;
+}
+
+function resourceBudgetStateRoot(task: (typeof taskSpecs)[number]): string {
+  const runRootCandidate = path.resolve(process.cwd(), task.runRoot);
+  const runRoot = realpathSync(runRootCandidate);
+  if (runRoot !== runRootCandidate) throw new Error("resource budget run root is not canonical");
+  const stateRootCandidate = path.join(runRoot, RESOURCE_BUDGET_STATE_DIRECTORY);
+  mkdirSync(stateRootCandidate, { recursive: true, mode: 0o700 });
+  const stateRoot = realpathSync(stateRootCandidate);
+  if (stateRoot !== stateRootCandidate || !stateRoot.startsWith(`${runRoot}${path.sep}`)) {
+    throw new Error("resource budget state root escapes the run root");
+  }
+  return stateRoot;
+}
+
+function emptyBudgetCounter(): BudgetCounter {
+  return { requests: 0, turns: 0, contextBytes: 0, outputBytes: 0 };
+}
+
+function resourceBudgetTaskStateForTask(task: (typeof taskSpecs)[number], state: BudgetState): BudgetTaskState {
+  const current = state.taskStates.get(task.id);
+  if (current !== undefined) return current;
+  const created: BudgetTaskState = { taskId: task.id, ...emptyBudgetCounter(), attempts: new Map() };
+  state.taskStates.set(task.id, created);
+  return created;
+}
+
+function persistResourceBudgetTaskState(task: (typeof taskSpecs)[number], state: BudgetState): void {
+  const taskState = resourceBudgetTaskStateForTask(task, state);
+  const value = {
+    schema_version: RESOURCE_BUDGET_STATE_SCHEMA_VERSION,
+    ultrafuzz_run_id: task.metadata.run.ultrafuzzRunId,
+    workflow_run_id: task.smithersRunId,
+    task_id: task.id,
+    counters: persistedBudgetCounter(taskState),
+    attempts: [...taskState.attempts]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([attempt_key, counter]) => ({ attempt_key, counters: persistedBudgetCounter(counter) })),
+    ...(taskState.exhaustion === undefined ? {} : { exhaustion: taskState.exhaustion })
+  };
+  const name = `${createHash("sha256").update(task.id).digest("hex")}.json`;
+  writeFileDurable(prepareSafeFilePath(state.stateRoot, name), `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function persistedBudgetCounter(counter: BudgetCounter): Record<string, number> {
+  return {
+    requests: counter.requests,
+    turns: counter.turns,
+    context_bytes: counter.contextBytes,
+    output_bytes: counter.outputBytes
+  };
+}
+
+function parsePersistedResourceBudgetTaskState(
+  bytes: Buffer,
+  ultrafuzzRunId: string,
+  workflowRunId: string
+): BudgetTaskState {
+  const value = parseStrictJsonBytes(bytes, {
+    maxBytes: MAX_RESOURCE_BUDGET_STATE_BYTES,
+    maxDepth: 8,
+    maxItems: 100_000,
+    maxProperties: 100_000
+  });
+  if (
+    !plainRecordWithKeys(value, [
+      "schema_version",
+      "ultrafuzz_run_id",
+      "workflow_run_id",
+      "task_id",
+      "counters",
+      "attempts",
+      "exhaustion"
+    ])
+  ) {
+    throw new Error("resource budget task state is not a closed object");
+  }
+  if (
+    value.schema_version !== RESOURCE_BUDGET_STATE_SCHEMA_VERSION ||
+    value.ultrafuzz_run_id !== ultrafuzzRunId ||
+    value.workflow_run_id !== workflowRunId ||
+    typeof value.task_id !== "string" ||
+    value.task_id.length < 1 ||
+    value.task_id.length > 4_096 ||
+    !Array.isArray(value.attempts) ||
+    value.attempts.length > 10_000
+  ) {
+    throw new Error("resource budget task state identity is invalid");
+  }
+  const counter = parsePersistedBudgetCounter(value.counters);
+  const attempts = new Map<string, BudgetCounter>();
+  for (const entry of value.attempts) {
+    if (
+      !plainRecordWithKeys(entry, ["attempt_key", "counters"]) ||
+      typeof entry.attempt_key !== "string" ||
+      entry.attempt_key.length < 1 ||
+      entry.attempt_key.length > 8_192 ||
+      attempts.has(entry.attempt_key)
+    ) {
+      throw new Error("resource budget attempt state is invalid");
+    }
+    attempts.set(entry.attempt_key, parsePersistedBudgetCounter(entry.counters));
+  }
+  const exhaustion =
+    value.exhaustion === undefined ? undefined : parsePersistedResourceBudgetExhaustion(value.exhaustion);
+  if (
+    exhaustion !== undefined &&
+    (exhaustion.ultrafuzz_run_id !== ultrafuzzRunId ||
+      exhaustion.workflow_run_id !== workflowRunId ||
+      exhaustion.task_id !== value.task_id)
+  ) {
+    throw new Error("resource budget exhaustion identity disagrees with its task state");
+  }
+  const attemptTotals = emptyBudgetCounter();
+  for (const attempt of attempts.values()) {
+    for (const field of ["requests", "turns", "contextBytes", "outputBytes"] as const) {
+      const total = attemptTotals[field] + attempt[field];
+      if (!Number.isSafeInteger(total)) throw new Error(`resource budget attempt ${field} exceeds the safe range`);
+      attemptTotals[field] = total;
+    }
+  }
+  if (
+    attemptTotals.requests !== counter.requests ||
+    attemptTotals.turns !== counter.turns ||
+    attemptTotals.contextBytes !== counter.contextBytes ||
+    attemptTotals.outputBytes !== counter.outputBytes
+  ) {
+    throw new Error("resource budget task counters disagree with their attempt totals");
+  }
+  return { taskId: value.task_id, ...counter, attempts, ...(exhaustion === undefined ? {} : { exhaustion }) };
+}
+
+function parsePersistedBudgetCounter(value: unknown): BudgetCounter {
+  if (!plainRecordWithKeys(value, ["requests", "turns", "context_bytes", "output_bytes"])) {
+    throw new Error("resource budget counter is not a closed object");
+  }
+  for (const field of ["requests", "turns", "context_bytes", "output_bytes"] as const) {
+    if (!Number.isSafeInteger(value[field]) || Number(value[field]) < 0) {
+      throw new Error(`resource budget counter ${field} is invalid`);
+    }
+  }
+  return {
+    requests: Number(value.requests),
+    turns: Number(value.turns),
+    contextBytes: Number(value.context_bytes),
+    outputBytes: Number(value.output_bytes)
+  };
+}
+
+function parsePersistedResourceBudgetExhaustion(value: unknown): ResourceBudgetExhaustionEvidence {
+  if (
+    !plainRecordWithKeys(value, [
+      "schema_version",
+      "ultrafuzz_run_id",
+      "workflow_run_id",
+      "resource",
+      "scope",
+      "limit",
+      "observed",
+      "task_id",
+      "recorded_at"
+    ])
+  ) {
+    throw new Error("resource budget exhaustion state is not a closed object");
+  }
+  if (
+    value.schema_version !== "ultrafuzz.resource-budget-exhaustion.v1" ||
+    !RESOURCE_BUDGET_NAMES_FOR_STATE.has(value.resource) ||
+    (value.scope !== "run" && value.scope !== "attempt") ||
+    typeof value.limit !== "number" ||
+    !Number.isFinite(value.limit) ||
+    value.limit < 0 ||
+    value.limit > Number.MAX_SAFE_INTEGER ||
+    typeof value.observed !== "number" ||
+    !Number.isFinite(value.observed) ||
+    value.observed <= value.limit ||
+    value.observed > Number.MAX_SAFE_INTEGER ||
+    typeof value.ultrafuzz_run_id !== "string" ||
+    typeof value.workflow_run_id !== "string" ||
+    typeof value.task_id !== "string" ||
+    typeof value.recorded_at !== "string"
+  ) {
+    throw new Error("resource budget exhaustion state is invalid");
+  }
+  return value as unknown as ResourceBudgetExhaustionEvidence;
+}
+
+function plainRecordWithKeys(value: unknown, allowed: readonly string[]): value is Record<string, unknown> {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Object.keys(value).every((key) => allowed.includes(key)) &&
+    allowed.filter((key) => key !== "exhaustion").every((key) => Object.hasOwn(value, key))
+  );
+}
+
+const RESOURCE_BUDGET_NAMES_FOR_STATE = new Set<ResourceBudgetName>([
+  "cost_usd",
+  "total_tokens",
+  "requests",
+  "turns",
+  "context_bytes",
+  "output_bytes",
+  "attempt_tokens",
+  "attempt_requests"
+]);
+
+function resourceBudgetError(evidence: ResourceBudgetExhaustionEvidence): Error {
+  const error = new Error(`ULTRAFUZZ_RESOURCE_BUDGET_EXHAUSTED ${JSON.stringify(evidence)}`);
+  error.name = "UltrafuzzResourceBudgetExhaustedError";
+  return error;
+}
+
+function resourceBudgetExhaustionError(
+  task: (typeof taskSpecs)[number],
+  resource: ResourceBudgetName,
+  scope: "run" | "attempt",
+  limit: number,
+  observed: number
+): Error {
+  const state = resourceBudgetStateForTask(task);
+  if (state?.exhausted !== undefined) return state.exhausted;
+  const evidence: ResourceBudgetExhaustionEvidence = {
+    schema_version: "ultrafuzz.resource-budget-exhaustion.v1",
+    ultrafuzz_run_id: task.metadata.run.ultrafuzzRunId,
+    workflow_run_id: task.smithersRunId,
+    resource,
+    scope,
+    limit,
+    observed,
+    task_id: task.id,
+    recorded_at: new Date().toISOString()
+  };
+  const error = resourceBudgetError(evidence);
+  if (state !== undefined) {
+    state.exhausted = error;
+    state.abortController.abort(error);
+    const taskState = resourceBudgetTaskStateForTask(task, state);
+    taskState.exhaustion = evidence;
+    persistResourceBudgetTaskState(task, state);
+    writeFileDurable(
+      path.resolve(process.cwd(), task.runRoot, "resource-budget-exhausted.json"),
+      `${JSON.stringify(evidence, null, 2)}\n`
+    );
+  }
+  return error;
+}
+
 function artifactAwareAgent(
   task: (typeof taskSpecs)[number],
   chainIndex: number,
@@ -1223,6 +1621,17 @@ function artifactAwareAgent(
 ): AgentLike {
   const attemptedGenerations = new Set<number>();
   const configuredModel = task.agentChain[chainIndex]?.modelName;
+  const resourceBudget = task.resourceBudget;
+  const resourceBudgetState = resourceBudgetStateForTask(task);
+  const resourceBudgetTaskState =
+    resourceBudgetState === undefined ? undefined : resourceBudgetTaskStateForTask(task, resourceBudgetState);
+
+  function serializedBytes(value: unknown): number {
+    if (value === undefined) return 0;
+    const serialized = typeof value === "string" ? value : JSON.stringify(value);
+    return Buffer.byteLength(serialized ?? "", "utf8");
+  }
+
   return {
     id: smithersTaskAgentId(task, chainIndex),
     ...(configuredModel === undefined ? {} : { model: configuredModel }),
@@ -1233,6 +1642,7 @@ function artifactAwareAgent(
       : { supportsNativeStructuredOutput: agent.supportsNativeStructuredOutput }),
     ...(agent.preflight === undefined ? {} : { preflight: (args) => agent.preflight!(args) }),
     generate: async (args) => {
+      if (resourceBudgetState?.exhausted !== undefined) throw resourceBudgetState.exhausted;
       const smithersAttempt = args?.taskContext?.attempt ?? 1;
       const firstGenerationForAttempt = !attemptedGenerations.has(smithersAttempt);
       attemptedGenerations.add(smithersAttempt);
@@ -1247,7 +1657,8 @@ function artifactAwareAgent(
       // failed session or injecting its error text into the next prompt.
       const retryArgs = (() => {
         if (smithersAttempt <= 1 || !firstGenerationForAttempt) return args;
-        const { messages: _priorMessages, ...freshArgs } = args ?? {};
+        const freshArgs = { ...(args ?? {}) };
+        delete freshArgs.messages;
         return {
           ...freshArgs,
           // Smithers 0.34 adds worktree-isolation and structured-output
@@ -1278,7 +1689,133 @@ function artifactAwareAgent(
             execution
           )
         : retryArgs;
-      return await agent.generate(attemptArgs);
+      if (resourceBudgetState === undefined || resourceBudgetTaskState === undefined || resourceBudget === undefined) {
+        return await agent.generate(attemptArgs);
+      }
+
+      const attemptKey = `${task.id}:${smithersAttempt}`;
+      const attemptBudget = resourceBudgetTaskState.attempts.get(attemptKey) ?? emptyBudgetCounter();
+      resourceBudgetTaskState.attempts.set(attemptKey, attemptBudget);
+      const runCounter: BudgetCounter = task.resourceBudgetPartitioned ? resourceBudgetTaskState : resourceBudgetState;
+      const addBounded = (
+        field: keyof BudgetCounter,
+        amount: number,
+        runLimit: number,
+        attemptLimit: number,
+        resource: ResourceBudgetName
+      ): void => {
+        if (!Number.isSafeInteger(amount) || amount < 0) {
+          throw new Error(`resource budget ${resource} increment is invalid`);
+        }
+        if (amount === 0) return;
+        const runObserved = runCounter[field] + amount;
+        const taskObserved = resourceBudgetTaskState[field] + amount;
+        const attemptObserved = attemptBudget[field] + amount;
+        if (!Number.isSafeInteger(runObserved) || runObserved > runLimit) {
+          throw resourceBudgetExhaustionError(task, resource, "run", runLimit, runObserved);
+        }
+        if (!Number.isSafeInteger(attemptObserved) || attemptObserved > attemptLimit) {
+          throw resourceBudgetExhaustionError(task, resource, "attempt", attemptLimit, attemptObserved);
+        }
+        runCounter[field] = runObserved;
+        resourceBudgetTaskState[field] = taskObserved;
+        attemptBudget[field] = attemptObserved;
+        persistResourceBudgetTaskState(task, resourceBudgetState);
+      };
+      const contextBytes = serializedBytes(attemptArgs?.prompt) + serializedBytes(attemptArgs?.messages);
+      addBounded("requests", 1, resourceBudget.maxRequests, resourceBudget.maxAttemptRequests, "requests");
+      addBounded(
+        "contextBytes",
+        contextBytes,
+        resourceBudget.maxContextBytes,
+        resourceBudget.maxAttemptContextBytes,
+        "context_bytes"
+      );
+
+      const runOutputBytesRemaining = resourceBudget.maxOutputBytes - runCounter.outputBytes;
+      const attemptOutputBytesRemaining = resourceBudget.maxAttemptOutputBytes - attemptBudget.outputBytes;
+      if (runOutputBytesRemaining < 1) {
+        throw resourceBudgetExhaustionError(
+          task,
+          "output_bytes",
+          "run",
+          resourceBudget.maxOutputBytes,
+          runCounter.outputBytes + 1
+        );
+      }
+      if (attemptOutputBytesRemaining < 1) {
+        throw resourceBudgetExhaustionError(
+          task,
+          "output_bytes",
+          "attempt",
+          resourceBudget.maxAttemptOutputBytes,
+          attemptBudget.outputBytes + 1
+        );
+      }
+      const outputBytesRemaining = Math.min(runOutputBytesRemaining, attemptOutputBytesRemaining);
+      const callerOnEvent = attemptArgs?.onEvent;
+      const callerOnStdout = attemptArgs?.onStdout;
+      const callerOnStderr = attemptArgs?.onStderr;
+      let streamedOutputBytes = 0;
+      const accountStreamedOutput = (text: string, callback: unknown): void => {
+        if (resourceBudgetState.exhausted !== undefined || text.length === 0) return;
+        const bytes = Buffer.byteLength(text, "utf8");
+        try {
+          addBounded(
+            "outputBytes",
+            bytes,
+            resourceBudget.maxOutputBytes,
+            resourceBudget.maxAttemptOutputBytes,
+            "output_bytes"
+          );
+          streamedOutputBytes += bytes;
+          if (typeof callback === "function") callback(text);
+        } catch (error) {
+          // CLI stream callbacks are invoked from child-process listeners. Do
+          // not let a callback throw escape that listener; exhaustion already
+          // aborted the composed signal and is surfaced below as the canonical
+          // durable error.
+          if (resourceBudgetState.exhausted === undefined) throw error;
+        }
+      };
+      const boundedArgs = {
+        ...attemptArgs,
+        maxOutputBytes: Math.min(attemptArgs?.maxOutputBytes ?? outputBytesRemaining, outputBytesRemaining),
+        abortSignal:
+          attemptArgs?.abortSignal === undefined
+            ? resourceBudgetState.abortController.signal
+            : AbortSignal.any([attemptArgs.abortSignal, resourceBudgetState.abortController.signal]),
+        onStdout: (text: string) => accountStreamedOutput(text, callerOnStdout),
+        onStderr: (text: string) => accountStreamedOutput(text, callerOnStderr),
+        onProviderRetry: () =>
+          addBounded("requests", 1, resourceBudget.maxRequests, resourceBudget.maxAttemptRequests, "requests"),
+        onEvent: async (event: unknown) => {
+          if (isNormalizedAgentTurn(event)) {
+            addBounded("turns", 1, resourceBudget.maxTurns, resourceBudget.maxAttemptTurns, "turns");
+          }
+          if (typeof callerOnEvent === "function") await callerOnEvent(event);
+        }
+      };
+      let result: unknown;
+      try {
+        result = await agent.generate(boundedArgs);
+      } catch (error) {
+        if (resourceBudgetState.exhausted !== undefined) throw resourceBudgetState.exhausted;
+        throw error;
+      }
+      if (resourceBudgetState.exhausted !== undefined) throw resourceBudgetState.exhausted;
+      const outputBytes = serializedBytes(result);
+      const unstreamedOutputBytes = Math.max(0, outputBytes - streamedOutputBytes);
+      if (unstreamedOutputBytes > 0) {
+        addBounded(
+          "outputBytes",
+          unstreamedOutputBytes,
+          resourceBudget.maxOutputBytes,
+          resourceBudget.maxAttemptOutputBytes,
+          "output_bytes"
+        );
+      }
+      return result;
     }
   };
 }
@@ -6508,7 +7045,7 @@ export default smithers((ctx) => {
     typeof ctx.input.operator_prompt === "string" && ctx.input.operator_prompt.length > 0
       ? ctx.input.operator_prompt
       : undefined;
-  const operatorPrompt = operatorPromptInput === undefined ? "" : `${operatorPromptInput}\n\n`;
+  const operatorPrompt = operatorPromptInput ?? "";
   const selectedTaskSpecs = cloudWorker ? taskSpecs.filter((task) => task.id === ctx.input.task_id) : taskSpecs;
   if (cloudWorker && selectedTaskSpecs.length !== 1) {
     throw new Error("cloud worker task selection must identify exactly one concrete attempt");
@@ -6518,7 +7055,17 @@ export default smithers((ctx) => {
       <Parallel id="ultrafuzz-agent-tasks">
         {selectedTaskSpecs.map((task) => {
           const inputTask = inputTasks.get(task.id);
-          const fullTaskPrompt = `${authorizedDefensiveSecurityContext}\n\n${untrustedContentBoundary}\n\n${task.runtimeContext}\n\n${operatorPrompt}${promptForTask(task, inputTask)}`;
+          const fullTaskPrompt = boundedFullTaskPrompt(task, [
+            authorizedDefensiveSecurityContext,
+            "\n\n",
+            untrustedContentBoundary,
+            "\n\n",
+            task.runtimeContext,
+            "\n\n",
+            operatorPrompt,
+            operatorPrompt === "" ? "" : "\n\n",
+            promptForTask(task, inputTask)
+          ]);
           if (task.execution.mode === "cloud" && !cloudWorker) {
             if (cloudProvider === undefined || task.execution.provider !== "modal") {
               throw new Error("cloud execution provider is unavailable");

@@ -158,7 +158,13 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
       }),
       effectiveTopologyTransform
     );
-    catalog = transformPromptCatalogForRun(loadPromptCatalog({ projectRoot }), effectiveTopologyTransform);
+    catalog = transformPromptCatalogForRun(
+      loadPromptCatalog({
+        projectRoot,
+        maxProjectPromptBytes: resolved.config.run.resourceBudget.maxAttemptContextBytes
+      }),
+      effectiveTopologyTransform
+    );
     expandedGraph = expandTopology(topology, {
       projectRoot,
       runId,
@@ -296,7 +302,11 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
     return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "prompts", "PROMPT_RENDER_FAILED")]);
   }
 
-  const persistedRenderedPrompts = persistRenderedPromptSnapshots(layout, renderedPrompts);
+  const persistedRenderedPrompts = persistRenderedPromptSnapshots(
+    layout,
+    renderedPrompts,
+    resolved.config.run.resourceBudget.maxAttemptContextBytes
+  );
   if (validation.value.topology === undefined) {
     throw new Error("validated run plan is missing its topology summary");
   }
@@ -369,10 +379,11 @@ function promptDigestForGraph(graph: PlannedGraph, catalog: PromptCatalog): stri
 
 function persistRenderedPromptSnapshots(
   layout: RunLayout,
-  renderedPrompts: readonly RenderedPromptPlan[]
+  renderedPrompts: readonly RenderedPromptPlan[],
+  maxPromptBytes: number
 ): Array<RenderedPromptPlan & { rendered_prompt_snapshot_path: string }> {
   return renderedPrompts.map((entry) => {
-    const contents = fs.readFileSync(entry.rendered_prompt_path, "utf8");
+    const contents = readRegularFileSnapshot(entry.rendered_prompt_path, maxPromptBytes).toString("utf8");
     if (sha256Stable(contents) !== entry.rendered_prompt_digest) {
       throw new Error(`rendered prompt changed before its immutable snapshot was persisted for ${entry.attempt_id}`);
     }
@@ -380,7 +391,10 @@ function persistRenderedPromptSnapshots(
     const snapshotPath = safeResolveInside(layout.root, relativeSnapshotPath, "rendered prompt snapshot");
     if (fs.existsSync(snapshotPath)) {
       assertRegularFileInside(layout.root, snapshotPath, "rendered prompt snapshot");
-      if (sha256Stable(fs.readFileSync(snapshotPath, "utf8")) !== entry.rendered_prompt_digest) {
+      if (
+        sha256Stable(readRegularFileSnapshot(snapshotPath, maxPromptBytes).toString("utf8")) !==
+        entry.rendered_prompt_digest
+      ) {
         throw new Error(`immutable rendered prompt snapshot digest collision for ${entry.attempt_id}`);
       }
     } else {
@@ -795,6 +809,12 @@ function renderPromptsForPlan(input: {
           invariantTestingFuzzerTimeout: input.resolvedConfig.invariants.invariantTestingFuzzerTimeoutSeconds
         }
       });
+      const renderedPromptBytes = Buffer.byteLength(result.renderedMarkdown, "utf8");
+      if (renderedPromptBytes > input.resolvedConfig.run.resourceBudget.maxAttemptContextBytes) {
+        throw new Error(
+          `rendered prompt exceeds the ${input.resolvedConfig.run.resourceBudget.maxAttemptContextBytes}-byte attempt context limit for ${attempt.attemptId}`
+        );
+      }
       writeRenderedPrompt(result);
       rendered.push({
         node_id: node.id,

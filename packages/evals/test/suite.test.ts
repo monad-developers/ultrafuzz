@@ -10,6 +10,8 @@ import { EVAL_SUITE_SCHEMA_ID, validateEvalJsonSchema } from "../src/eval-schema
 import { assertHeldOutPathsAbsent } from "../src/runner.js";
 import {
   DEFAULT_EVAL_JUDGE_PANEL,
+  MAX_EVAL_MATRIX_ROWS,
+  assertEvalMatrixWithinLimit,
   evalSuiteInputSchema,
   loadEvalSuite,
   planEvalSuite,
@@ -112,6 +114,33 @@ function expectSchemaParity(document: unknown, expected: boolean): void {
 }
 
 describe("eval suite loading and planning", () => {
+  it("accepts the exact eval-matrix limit and rejects one row over without unsafe multiplication", () => {
+    const suite = loadEvalSuite(setup()).suite;
+    suite.targets = [suite.targets[0]!];
+    suite.variants = [suite.variants[0]!];
+    suite.run.trials_per_variant = MAX_EVAL_MATRIX_ROWS;
+    expect(assertEvalMatrixWithinLimit(suite)).toBe(MAX_EVAL_MATRIX_ROWS);
+
+    suite.targets = [suite.targets[0]!, { ...suite.targets[0]!, id: "second" }];
+    suite.run.trials_per_variant = MAX_EVAL_MATRIX_ROWS / 2 + 1;
+    expect(() => assertEvalMatrixWithinLimit(suite)).toThrowError(
+      expect.objectContaining({ code: "EVAL_MATRIX_LIMIT_EXCEEDED" })
+    );
+
+    suite.run.trials_per_variant = Number.MAX_SAFE_INTEGER;
+    expect(() => assertEvalMatrixWithinLimit(suite)).toThrowError(
+      expect.objectContaining({ code: "EVAL_MATRIX_LIMIT_EXCEEDED" })
+    );
+  });
+
+  it("rejects an oversized matrix before resolving target paths", () => {
+    const { projectRoot, suitePath } = setup();
+    fs.writeFileSync(suitePath, SUITE_YAML.replace("trials_per_variant: 10", "trials_per_variant: 50001"), "utf8");
+
+    expect(() => planEvalSuite({ projectRoot, suitePath, validateTargets: true })).toThrowError(
+      expect.objectContaining({ code: "EVAL_MATRIX_LIMIT_EXCEEDED" })
+    );
+  });
   it("loads the issue-shaped suite YAML with no provider references", () => {
     const { projectRoot, suitePath } = setup();
     const { suite } = loadEvalSuite({ projectRoot, suitePath });

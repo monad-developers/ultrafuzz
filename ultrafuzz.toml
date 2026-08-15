@@ -18,6 +18,25 @@ default_timeout_seconds = 1800
 workflow_deadline_seconds = 86400
 controller_lease_seconds = 30
 
+[run.resource_budget]
+# Hard ceilings remain active while agents run unattended. These limits bound
+# consumption; they do not restrict agent tools, commands, or permission mode.
+max_cost_usd = 1000
+# Fail-closed upper-bound basis used whenever live catalog pricing is absent or
+# incomplete. Keep this operator-owned ceiling above every permitted model's
+# worst-case per-million-token rate.
+unpriced_token_usd_per_million = 1000
+max_total_tokens = 100000000
+max_requests = 10000
+max_turns = 100000
+max_context_bytes = 1073741824
+max_output_bytes = 1073741824
+max_attempt_tokens = 10000000
+max_attempt_requests = 100
+max_attempt_turns = 1000
+max_attempt_context_bytes = 67108864
+max_attempt_output_bytes = 67108864
+
 [execution]
 mode = "local"
 retention_days = 30

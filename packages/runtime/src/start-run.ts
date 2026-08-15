@@ -28,7 +28,7 @@ import {
   type SmithersTaskManifestDocument,
   type SmithersTaskManifestTask
 } from "@ultrafuzz/artifacts";
-import { parseResolvedConfigJsonBytes, type ResolvedConfig } from "@ultrafuzz/config";
+import { type ResolvedConfig } from "@ultrafuzz/config";
 import { assertExpandedGraphSchema, type ExpandedGraph } from "@ultrafuzz/topology";
 
 import {
@@ -43,6 +43,7 @@ import {
 } from "./types.js";
 import { planRun } from "./plan-run.js";
 import { probeCommandsForExecution } from "./required-commands.js";
+import { parseExecutionResolvedConfigJsonBytes } from "./resolved-config-compat.js";
 import { forgeGuardMetadata, prepareForgeGuardEnvironment } from "./forge-guard.js";
 import { prepareTrustedCliEnvironment, runTrustedJsonValidatorPreflight } from "./trusted-cli.js";
 import { runtimeFailure, runtimeResult } from "./utils.js";
@@ -1387,7 +1388,7 @@ function parseSealedResolvedConfig(
   if (sealedConfig === undefined) {
     throw new Error("sealed workflow execution snapshot is missing its resolved configuration");
   }
-  return parseResolvedConfigJsonBytes(sealedConfig.contents);
+  return parseExecutionResolvedConfigJsonBytes(sealedConfig.contents);
 }
 
 function parseSealedExpandedGraph(contents: Buffer): ExpandedGraph {

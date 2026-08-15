@@ -188,6 +188,27 @@ const workflowDeadlineExceededPayloadSchema = z.strictObject({
   workflow_run_id: nonEmptyStringSchema,
   deadline_at: timestampSchema
 });
+const resourceBudgetExhaustionSchema = z.strictObject({
+  resource: z.enum([
+    "cost_usd",
+    "total_tokens",
+    "requests",
+    "turns",
+    "context_bytes",
+    "output_bytes",
+    "attempt_tokens",
+    "attempt_requests"
+  ]),
+  scope: z.enum(["run", "attempt"]),
+  // Cloud run ceilings are partitioned across tasks. A valid positive run
+  // ceiling can therefore give a task a zero allocation, which is represented
+  // explicitly in exhaustion evidence.
+  limit: z.number().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  observed: z.number().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  node_id: nonEmptyStringSchema.optional(),
+  iteration: nonNegativeSafeIntegerSchema.optional(),
+  attempt: nonNegativeSafeIntegerSchema.optional()
+});
 const workflowSyncedPayloadSchema = z.strictObject({
   workflow_run_id: nonEmptyStringSchema,
   workflow_status: smithersRunStatusSchema,
@@ -204,7 +225,8 @@ const workflowSyncedPayloadSchema = z.strictObject({
   synced_nodes: nonNegativeSafeIntegerSchema,
   accounting_available: z.boolean(),
   recovery_due: z.boolean(),
-  deadline_exceeded: z.boolean()
+  deadline_exceeded: z.boolean(),
+  resource_budget_exhausted: resourceBudgetExhaustionSchema.optional()
 });
 const workflowFailureUnattributedPayloadSchema = z.strictObject({
   workflow_run_id: nonEmptyStringSchema,
@@ -574,7 +596,32 @@ const eventRecordJsonSchemaDefinitions = {
       synced_nodes: { $ref: "#/$defs/nonNegativeSafeInteger" },
       accounting_available: { type: "boolean" },
       recovery_due: { type: "boolean" },
-      deadline_exceeded: { type: "boolean" }
+      deadline_exceeded: { type: "boolean" },
+      resource_budget_exhausted: {
+        type: "object",
+        additionalProperties: false,
+        required: ["resource", "scope", "limit", "observed"],
+        properties: {
+          resource: {
+            enum: [
+              "cost_usd",
+              "total_tokens",
+              "requests",
+              "turns",
+              "context_bytes",
+              "output_bytes",
+              "attempt_tokens",
+              "attempt_requests"
+            ]
+          },
+          scope: { enum: ["run", "attempt"] },
+          limit: { type: "number", minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
+          observed: { type: "number", minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
+          node_id: { $ref: "#/$defs/nonEmptyString" },
+          iteration: { $ref: "#/$defs/nonNegativeSafeInteger" },
+          attempt: { $ref: "#/$defs/nonNegativeSafeInteger" }
+        }
+      }
     }
   },
   workflowFailureUnattributedPayload: {

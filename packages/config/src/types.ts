@@ -75,7 +75,7 @@ export type AgentAuthMode = "api-key" | "subscription";
 export const PROJECT_CONFIG_SCHEMA_VERSION = "ultrafuzz.config.v2" as const;
 
 /** Closed persisted resolved-config JSON contract. */
-export const RESOLVED_CONFIG_SCHEMA_VERSION = "ultrafuzz.resolved-config.v3" as const;
+export const RESOLVED_CONFIG_SCHEMA_VERSION = "ultrafuzz.resolved-config.v4" as const;
 
 export interface ProjectConfig {
   repo: string;
@@ -94,7 +94,27 @@ export interface RunConfig {
   defaultTimeoutSeconds: number;
   workflowDeadlineSeconds: number;
   controllerLeaseSeconds: number;
+  resourceBudget: ResourceBudgetConfig;
 }
+
+export interface ResourceBudgetConfig {
+  maxCostUsd: number;
+  unpricedTokenUsdPerMillion: number;
+  maxTotalTokens: number;
+  maxRequests: number;
+  maxTurns: number;
+  maxContextBytes: number;
+  maxOutputBytes: number;
+  maxAttemptTokens: number;
+  maxAttemptRequests: number;
+  maxAttemptTurns: number;
+  maxAttemptContextBytes: number;
+  maxAttemptOutputBytes: number;
+}
+
+export type RunConfigInput = Partial<Omit<RunConfig, "resourceBudget">> & {
+  resourceBudget?: Partial<ResourceBudgetConfig>;
+};
 
 export type ExecutionMode = "local" | "cloud";
 
@@ -234,7 +254,7 @@ export type AuditProfileSettingOrigin =
 
 export interface PromptMetadataLayer {
   models?: Record<string, Partial<ModelProfile> & { id?: string }>;
-  run?: Partial<RunConfig>;
+  run?: RunConfigInput;
 }
 
 export interface ProjectConfigInput {
@@ -244,7 +264,7 @@ export interface ProjectConfigInput {
   strategyLoops?: number;
   dynamicStrategiesEnumerator?: DynamicStrategiesEnumerator;
   project?: Partial<ProjectConfig>;
-  run?: Partial<RunConfig>;
+  run?: RunConfigInput;
   execution?: ExecutionConfigInput;
   models?: {
     default?: string;

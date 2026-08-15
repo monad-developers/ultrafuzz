@@ -9,7 +9,10 @@ import { readStringTable, stringField } from "./toml";
 type OpenRouterAuthConfig = { auth?: string; api_key_env?: string; config_dir?: string };
 export type OpenRouterTaskOptions = { model?: string; reasoningEffort?: string; addDir?: string[] };
 type OpenRouterCommandParams = Parameters<CompatibleCodexAgent["buildCommand"]>[0];
-type OpenRouterGenerateOptions = Parameters<CompatibleCodexAgent["generate"]>[0];
+type OpenRouterGenerateOptions = NonNullable<Parameters<CompatibleCodexAgent["generate"]>[0]> & {
+  /** Controller-owned accounting hook for an actual provider retry. */
+  onProviderRetry?: () => void;
+};
 type OpenRouterAgentEvent = Parameters<NonNullable<NonNullable<OpenRouterGenerateOptions>["onEvent"]>>[0];
 
 const OPENROUTER_API_BASE_URL = "https://openrouter.ai/api/v1";
@@ -119,6 +122,10 @@ export class OpenRouterCodexAgent extends CompatibleCodexAgent {
         throw this.retryTimeout(totalTimeoutMs, options);
       }
       const relay = new BufferedAttemptRelay(options);
+      // The outer workflow wrapper already charges the first provider request.
+      // Charge each later invocation immediately before it can reach Codex so
+      // an exhausted request budget prevents the retry itself.
+      if (attempt > 0) options?.onProviderRetry?.();
       let result: T;
       try {
         result = await operation(relay.options(remainingTimeoutMs));

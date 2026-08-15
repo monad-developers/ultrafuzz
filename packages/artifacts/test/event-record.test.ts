@@ -83,7 +83,13 @@ const validVariantFixtures: Record<string, Record<string, unknown>> = Object.fro
       synced_nodes: 2,
       accounting_available: true,
       recovery_due: false,
-      deadline_exceeded: false
+      deadline_exceeded: false,
+      resource_budget_exhausted: {
+        resource: "requests",
+        scope: "run",
+        limit: 0,
+        observed: 1
+      }
     }),
     event("workflow-failure-unattributed", "failed", {
       workflow_run_id: "workflow-1",

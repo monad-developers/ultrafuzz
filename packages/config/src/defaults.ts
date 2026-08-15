@@ -18,7 +18,8 @@ import {
   type PromptMetadataLayer,
   type RetryConfig,
   type ResolvedConfig,
-  type RunConfig
+  type RunConfig,
+  type RunConfigInput
 } from "./types.js";
 
 export { CONFIG_FILE_NAME } from "./constants.js";
@@ -232,7 +233,8 @@ function normalizeAgentConfig(id: string, agent: Partial<AgentConfig>, filePath:
   };
 }
 
-function normalizeRunConfig(run: Partial<RunConfig>, filePath: string): RunConfig {
+function normalizeRunConfig(run: RunConfigInput, filePath: string): RunConfig {
+  const resourceBudget = requiredRecord(run.resourceBudget, "run.resource_budget", filePath);
   return {
     outputDir: required(run.outputDir, "run.output_dir", filePath),
     maxParallelAgents: required(run.maxParallelAgents, "run.max_parallel_agents", filePath),
@@ -244,7 +246,37 @@ function normalizeRunConfig(run: Partial<RunConfig>, filePath: string): RunConfi
     workspaceMode: required(run.workspaceMode, "run.workspace_mode", filePath),
     defaultTimeoutSeconds: required(run.defaultTimeoutSeconds, "run.default_timeout_seconds", filePath),
     workflowDeadlineSeconds: required(run.workflowDeadlineSeconds, "run.workflow_deadline_seconds", filePath),
-    controllerLeaseSeconds: required(run.controllerLeaseSeconds, "run.controller_lease_seconds", filePath)
+    controllerLeaseSeconds: required(run.controllerLeaseSeconds, "run.controller_lease_seconds", filePath),
+    resourceBudget: {
+      maxCostUsd: required(resourceBudget.maxCostUsd, "run.resource_budget.max_cost_usd", filePath),
+      unpricedTokenUsdPerMillion: required(
+        resourceBudget.unpricedTokenUsdPerMillion,
+        "run.resource_budget.unpriced_token_usd_per_million",
+        filePath
+      ),
+      maxTotalTokens: required(resourceBudget.maxTotalTokens, "run.resource_budget.max_total_tokens", filePath),
+      maxRequests: required(resourceBudget.maxRequests, "run.resource_budget.max_requests", filePath),
+      maxTurns: required(resourceBudget.maxTurns, "run.resource_budget.max_turns", filePath),
+      maxContextBytes: required(resourceBudget.maxContextBytes, "run.resource_budget.max_context_bytes", filePath),
+      maxOutputBytes: required(resourceBudget.maxOutputBytes, "run.resource_budget.max_output_bytes", filePath),
+      maxAttemptTokens: required(resourceBudget.maxAttemptTokens, "run.resource_budget.max_attempt_tokens", filePath),
+      maxAttemptRequests: required(
+        resourceBudget.maxAttemptRequests,
+        "run.resource_budget.max_attempt_requests",
+        filePath
+      ),
+      maxAttemptTurns: required(resourceBudget.maxAttemptTurns, "run.resource_budget.max_attempt_turns", filePath),
+      maxAttemptContextBytes: required(
+        resourceBudget.maxAttemptContextBytes,
+        "run.resource_budget.max_attempt_context_bytes",
+        filePath
+      ),
+      maxAttemptOutputBytes: required(
+        resourceBudget.maxAttemptOutputBytes,
+        "run.resource_budget.max_attempt_output_bytes",
+        filePath
+      )
+    }
   };
 }
 

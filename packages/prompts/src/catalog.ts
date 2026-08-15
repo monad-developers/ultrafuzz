@@ -1,8 +1,11 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { readRegularFileSnapshot } from "@ultrafuzz/artifacts";
 import { parsePromptFrontmatter, PromptError, type ParsedPromptDocument, titleFromId } from "./frontmatter.js";
 import { validatePromptVariables } from "./render.js";
+
+export const DEFAULT_MAX_PROJECT_PROMPT_BYTES = 64 * 1024 * 1024;
 
 export type PromptSourceKind = "built-in" | "project";
 
@@ -32,6 +35,7 @@ export interface LoadPromptCatalogOptions {
   promptDir?: string;
   builtIns?: BuiltInPromptAsset[];
   validateVariables?: boolean;
+  maxProjectPromptBytes?: number;
 }
 
 export function loadBuiltInPromptAssets(): BuiltInPromptAsset[] {
@@ -44,6 +48,10 @@ export function loadBuiltInPromptAssets(): BuiltInPromptAsset[] {
 
 export function loadPromptCatalog(options: LoadPromptCatalogOptions = {}): PromptCatalog {
   const validateVariables = options.validateVariables ?? true;
+  const maxProjectPromptBytes = options.maxProjectPromptBytes ?? DEFAULT_MAX_PROJECT_PROMPT_BYTES;
+  if (!Number.isSafeInteger(maxProjectPromptBytes) || maxProjectPromptBytes < 1) {
+    throw new PromptError("invalid-prompt-size-limit", "project prompt byte limit must be a positive safe integer");
+  }
   const entries = new Map<string, PromptCatalogEntry>();
   for (const asset of options.builtIns ?? loadBuiltInPromptAssets()) {
     const entry = parseCatalogEntry(asset.markdown, {
@@ -62,7 +70,7 @@ export function loadPromptCatalog(options: LoadPromptCatalogOptions = {}): Promp
   if (projectPromptDir) {
     for (const absolutePath of discoverPromptFiles(projectPromptDir)) {
       const relativePath = normalizePromptRelativePath(path.relative(projectPromptDir, absolutePath));
-      const markdown = readFileSync(absolutePath, "utf8");
+      const markdown = readRegularFileSnapshot(absolutePath, maxProjectPromptBytes).toString("utf8");
       const entry = parseCatalogEntry(markdown, {
         relativePath,
         source: "project",

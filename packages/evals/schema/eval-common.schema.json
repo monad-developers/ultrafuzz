@@ -403,11 +403,13 @@
         "targets": {
           "type": "array",
           "minItems": 1,
+          "maxItems": 100000,
           "items": { "$ref": "#/$defs/target" }
         },
         "variants": {
           "type": "array",
           "minItems": 1,
+          "maxItems": 100000,
           "items": { "$ref": "#/$defs/variant" }
         },
         "run": {
@@ -417,7 +419,11 @@
           "properties": {
             "runner_model_profile": { "$ref": "#/$defs/nonEmptyString" },
             "judge_model_profile": { "$ref": "#/$defs/nonEmptyString" },
-            "trials_per_variant": { "$ref": "#/$defs/positiveInteger" },
+            "trials_per_variant": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100000
+            },
             "max_parallel_targets": { "$ref": "#/$defs/positiveInteger" },
             "max_parallel_runs": { "$ref": "#/$defs/positiveInteger" }
           }
@@ -455,11 +461,13 @@
         "targets": {
           "type": "array",
           "minItems": 1,
+          "maxItems": 100000,
           "items": { "$ref": "#/$defs/target" }
         },
         "variants": {
           "type": "array",
           "minItems": 1,
+          "maxItems": 100000,
           "items": { "$ref": "#/$defs/variant" }
         },
         "run": {
@@ -469,7 +477,11 @@
           "properties": {
             "runner_model_profile": { "$ref": "#/$defs/nonEmptyString" },
             "judge_model_profile": { "$ref": "#/$defs/nonEmptyString" },
-            "trials_per_variant": { "$ref": "#/$defs/positiveInteger" },
+            "trials_per_variant": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100000
+            },
             "max_parallel_targets": { "$ref": "#/$defs/positiveInteger" },
             "max_parallel_runs": { "$ref": "#/$defs/positiveInteger" }
           }

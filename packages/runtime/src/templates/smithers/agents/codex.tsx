@@ -20,12 +20,26 @@ type CodexCommand = Awaited<ReturnType<SmithersCodexAgent["buildCommand"]>>;
 export class CompatibleCodexAgent extends SmithersCodexAgent {
   override async buildCommand(params: CodexCommandParams): Promise<CodexCommand> {
     const command = await super.buildCommand(params);
-    const sanitizedCommand = { ...command, env: workflowControlChildEnvironment(command.env) };
+    const outputFlagIndex = command.args.indexOf("--output-last-message");
+    const boundedArgs =
+      outputFlagIndex < 0
+        ? command.args
+        : [...command.args.slice(0, outputFlagIndex), ...command.args.slice(outputFlagIndex + 2)];
+    const sanitizedCommand = {
+      ...command,
+      args: boundedArgs,
+      // Smithers reads Codex's output-last-message file without a byte bound.
+      // The JSONL interpreter already supplies the final assistant message and
+      // usage, so disable that duplicate authority and keep all output on the
+      // incrementally bounded stdout channel.
+      outputFile: undefined,
+      env: workflowControlChildEnvironment(command.env)
+    };
     const directories = this.opts.addDir ?? [];
     if (typeof params.options?.resumeSession === "string" || directories.length <= 1) {
       return sanitizedCommand;
     }
-    const addDirIndex = command.args.indexOf("--add-dir");
+    const addDirIndex = sanitizedCommand.args.indexOf("--add-dir");
     if (addDirIndex < 0) {
       return sanitizedCommand;
     }
@@ -33,9 +47,9 @@ export class CompatibleCodexAgent extends SmithersCodexAgent {
     return {
       ...sanitizedCommand,
       args: [
-        ...command.args.slice(0, addDirIndex),
+        ...sanitizedCommand.args.slice(0, addDirIndex),
         ...replacement,
-        ...command.args.slice(addDirIndex + 1 + directories.length)
+        ...sanitizedCommand.args.slice(addDirIndex + 1 + directories.length)
       ]
     };
   }
