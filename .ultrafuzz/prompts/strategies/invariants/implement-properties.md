@@ -112,6 +112,12 @@ cannot be lost during priority filtering.
      authorized under Recon, such as by setting the mutable root admin, owner,
      or bootstrap caller to `address(this)` before `super.setUp()` in the Recon
      constructor path.
+   - Give every independently falsifiable property its own public
+     assertion/invariant entrypoint. Each entrypoint must test exactly one
+     canonical `property_id`, so one failing property cannot retire unrelated
+     properties from the backend campaign. Shared action handlers and read-only
+     helpers remain permitted; only the property observation entrypoints must
+     be separate.
 
 4. Preserve implementation evidence.
    - Run the narrowest useful build or test command that demonstrates the
@@ -123,6 +129,12 @@ cannot be lost during priority filtering.
      requires it. If the smoke reverts before fuzzing, repair the harness before
      writing a successful implementation handoff; if tooling or dependencies
      are absent, record the blocker.
+   - Before accepting the suite, compare the public property entrypoints in its
+     compiled target ABI with Recon's discovered/admitted test list from the
+     smoke. If Recon omits an entrypoint, make its assertion directly
+     discoverable and rerun the smoke. If it still cannot be admitted, mark
+     that property `blocked` with the omitted entrypoint and diagnostic; never
+     report an omitted property as implemented.
    - If dependencies or repository layout block compilation, record the exact
      blocker and leave the implemented files and artifacts in a reviewable
      state.

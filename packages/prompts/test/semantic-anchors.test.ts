@@ -313,6 +313,13 @@ describe("prompt semantic anchors", () => {
     );
     expect(implementation).toContain("Audit inherited handlers before implementing properties");
     expect(implementation).toContain("Every assertion observes state after a directly invoked protocol action");
+    expect(implementation).toMatch(
+      /every independently falsifiable property its own public\s+assertion\/invariant entrypoint/u
+    );
+    expect(implementation).toContain("Each entrypoint must test exactly one");
+    expect(implementation).toContain("compare the public property entrypoints");
+    expect(implementation).toContain("Recon's discovered/admitted test list");
+    expect(implementation).toMatch(/never\s+report an omitted property as implemented/u);
     expect(implementation).toContain("reference_expectations");
     expect(implementation).toContain("even when its priority is below the configured threshold");
     expect(campaign).toContain("Audit inherited handlers before the final Recon smoke");
