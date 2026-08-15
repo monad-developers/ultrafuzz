@@ -35,13 +35,12 @@ You must produce a typed JSON catalog and a matching Markdown companion. Use
 the catalog, and set every property priority to `high`, `medium`, or `low`.
 The JSON catalog is the machine-readable source of truth.
 
-Populate `reference_expectations` only from exact identifiers present in the
-supplied pinned-reference artifacts. Preserve one identifier per named
-expectation and carry the supplied identifier unchanged. When the supplied
-inputs contain no named expectation, do not invent expectation IDs; use the
-pinned property-lens schema's no-expectation representation.
-
-When a pinned-reference node declares a catalog with the `ultrafuzz/reference-expectations@2` contract, read its declared artifact and validate it with `{{schema_path}}/reference-expectations.schema.json` before copying identifiers.
+A structured catalog declared with the `ultrafuzz/reference-expectations@2`
+contract is the sole authority for `reference_expectations`. Validate that
+catalog with `{{schema_path}}/reference-expectations.schema.json`, and copy only
+its exact identifiers. Never derive identifiers from Markdown, prose, code
+listings, or model knowledge. When no structured catalog is supplied, omit
+`reference_expectations` entirely; an empty array is not omission.
 
 ## Target-derived invariant extraction
 
