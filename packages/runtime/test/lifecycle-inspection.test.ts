@@ -1071,6 +1071,46 @@ test("diagnoseProject checks an OpenRouter profile selected only by topology", a
   assert.ok(missing.diagnostics.some((entry) => entry.code === "DOCTOR_AGENT_CREDENTIAL_MISSING"));
 });
 
+test("diagnoseProject checks an OpenRouter profile selected by a runtime topology override", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const configuredTopologyPath = path.join(project, ".ultrafuzz", "topology.yml");
+  const overrideTopologyPath = path.join(project, ".ultrafuzz", "openrouter-topology.yml");
+  fs.writeFileSync(
+    overrideTopologyPath,
+    fs
+      .readFileSync(configuredTopologyPath, "utf8")
+      .replace(
+        "    prompt: setup/project-discovery.md\n",
+        "    prompt: setup/project-discovery.md\n    model_profiles:\n      - openrouter\n"
+      ),
+    "utf8"
+  );
+  writeFakeInstalledEngine(project, { version: SMITHERS_VERSION });
+  const probe = async (names: readonly string[]) =>
+    names.map((name) => ({ name, available: true, path: `/usr/bin/${name}`, version: "test" }));
+
+  const configured = await diagnoseProject({
+    projectRoot: project,
+    env: { PATH: "/usr/bin" },
+    offline: true,
+    requiredCommandProbe: probe
+  });
+  assert.equal(configured.value?.checks.find((check) => check.name === "agent-credentials")?.status, "ok");
+
+  const overridden = await diagnoseProject({
+    projectRoot: project,
+    topologyPath: overrideTopologyPath,
+    env: { PATH: "/usr/bin" },
+    offline: true,
+    requiredCommandProbe: probe
+  });
+  assert.equal(overridden.value?.validation.policy_posture.topology?.status, "pass");
+  assert.equal(overridden.value?.checks.find((check) => check.name === "agent-credentials")?.status, "error");
+  assert.ok(overridden.diagnostics.some((entry) => entry.code === "DOCTOR_AGENT_CREDENTIAL_MISSING"));
+});
+
 test("diagnoseProject reports commands required by the active topology", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
