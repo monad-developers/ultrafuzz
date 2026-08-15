@@ -224,6 +224,9 @@ function redactContextLabeledPrivateKeys(value: string, placeholder: string): st
 function isHighEntropySecretCandidate(source: string, candidate: string, offset: number): boolean {
   const unpadded = candidate.replace(/=+$/u, "");
   if (unpadded.length < 32 || /^[0-9a-f]+$/iu.test(unpadded)) return false;
+  // A diagnostic may quote the name of a controller variable. The reference
+  // is guidance, not the variable's value, and must remain readable.
+  if (/^process\.env\.[A-Z][A-Z0-9_]*$/u.test(unpadded)) return false;
   if (isClearlyLabeledDigestContext(source.slice(Math.max(0, offset - 96), offset))) return false;
   const characterClasses = [/[a-z]/u, /[A-Z]/u, /[0-9]/u, /[._~+/=-]/u].filter((pattern) =>
     pattern.test(unpadded)

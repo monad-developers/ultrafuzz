@@ -873,9 +873,17 @@ test("canonical publication secret gate fails closed without rewriting bytes", (
     /evidence\.json/u
   );
   assert.equal(exactBytes.toString("utf8"), `otherwise safe ${exactAtRestSecret}`);
+  assert.doesNotThrow(() =>
+    assertArtifactPublicationsContainNoSecrets(new Map([["binary-corpus.bin", Buffer.from([0xff, 0x00, 0xfe])]]))
+  );
   assert.throws(
-    () => assertArtifactPublicationsContainNoSecrets(new Map([["invalid.bin", Buffer.from([0xff])]])),
-    /strict UTF-8/u
+    () =>
+      assertArtifactPublicationsContainNoSecrets(
+        new Map([
+          ["binary-leak.bin", Buffer.concat([Buffer.from([0xff]), Buffer.from("sk-ant-binaryLeak123", "utf8")])]
+        ])
+      ),
+    /binary-leak\.bin/u
   );
   assert.doesNotThrow(() =>
     assertArtifactPublicationsContainNoSecrets(
