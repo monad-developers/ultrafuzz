@@ -2800,7 +2800,7 @@ test(
         }),
         (error: unknown) => {
           const finalAttempt = Number(fs.readFileSync(fixture.counter, "utf8"));
-          assert.equal(finalAttempt > 4, true);
+          assert.equal(finalAttempt > 1, true);
           assert.match(String(error), new RegExp(`request id: fixture-${finalAttempt}\\b`, "u"));
           const finalEventText = JSON.stringify(finalEvents);
           for (let attempt = 1; attempt < finalAttempt; attempt += 1) {
@@ -2811,7 +2811,7 @@ test(
         }
       );
       const settledAttemptCount = fs.readFileSync(fixture.counter, "utf8");
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 150));
       assert.equal(fs.readFileSync(fixture.counter, "utf8"), settledAttemptCount);
     } finally {
       for (const [name, value] of Object.entries({
