@@ -17,10 +17,10 @@ COPY packages/modal/smithers-seed/package-lock.json /usr/share/ultrafuzz/materia
 RUN cd /usr/share/ultrafuzz \
     && sha256sum -c toolchain-materials.sha256 \
     && printf '%s  %s\n' \
-      9173b3152eb1e40e1dfe2f11d19cc491ddcdae4f688650385c7bf4d6b7a1e57b material-inputs/pnpm-lock.yaml \
-      e7ca4d5af22e46f54eb614e3b0bd0814142ee9ccf5bf585d001767d469cf57bb material-inputs/pnpm-workspace.yaml \
-      e14b477a97e3126b0e8c06aeafaeef96f2abc94fe583ce6ae3f224facbba5506 material-inputs/package.json \
-      d72339727912c9a75db261a2efdd60cc3ff48bc7c245797354f0d8e478b49339 material-inputs/modal-package.json \
+      81ebae3e4ce59157462b1f29c4c76e953b8101d9a62f5b87632e3afda1022227 material-inputs/pnpm-lock.yaml \
+      d866b21b55d75821a8c35c422a1130218efb613bd4283cf3fd1115d80699e856 material-inputs/pnpm-workspace.yaml \
+      531f7e3e61c1e0c6647d1a811635815541d7e0312263e851d0229bf7e780a948 material-inputs/package.json \
+      fd0b53ae55be67ca633d47aa1a615efc7c6ea152c2b90730791048e3720170b6 material-inputs/modal-package.json \
       9e2232f20092d3ab283357d1fa497b9cb5dc8abe5c1201509375691ddd4088cb material-inputs/security-requirements.lock \
       0ff8d3b24cec3090fba20f5131e3478a42f9186407e2904086bddf5ae8925012 material-inputs/smithers-package.json \
       b8962ee5b44ead8b43ce38c97268da7fcb3d00f64aeb4a214b992ae2f31c025a material-inputs/smithers-package-lock.json \
