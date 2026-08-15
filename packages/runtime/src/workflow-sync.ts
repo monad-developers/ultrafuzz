@@ -262,6 +262,35 @@ interface AccountingTotals {
   unpricedEventCount: number;
   models: Set<string>;
   agents: Set<string>;
+  tokenOverflow: boolean;
+  costOverflow: boolean;
+  requestOverflow: boolean;
+}
+
+interface AccountingOverflow {
+  tokens: boolean;
+  costUsd: boolean;
+  requests: boolean;
+}
+
+interface AccountingComputation {
+  summary?: AccountingSummary;
+  overflow: AccountingOverflow;
+}
+
+interface AccountingSegmentsComputation {
+  segments: AccountingSegment[];
+  overflow: AccountingOverflow;
+}
+
+interface CumulativeAccountingComputation {
+  summary: CumulativeAccountingSummary;
+  overflow: AccountingOverflow;
+}
+
+interface BoundedAccountingNumber {
+  value: number;
+  overflow: boolean;
 }
 
 export type UsageComponent = "uncached_input" | "cache_read" | "cache_write" | "output" | "reasoning";
@@ -664,19 +693,26 @@ export async function synchronizeLinkedWorkflowRun(
   }
 
   const resourceBudgetExhausted =
-    readGeneratedResourceBudgetExhaustion(layout) ?? accountingResult.resourceBudgetExhaustion;
+    readGeneratedResourceBudgetExhaustion(
+      layout,
+      evidence.smithersRunId,
+      new Set(loaded.tasks.map((task) => task.smithersNodeId))
+    ) ?? accountingResult.resourceBudgetExhaustion;
+  let resourceBudgetCancellationConfirmed = false;
   if (resourceBudgetExhausted !== undefined) {
     try {
-      await requestSmithersCancel({
+      const cancellation = await requestSmithersCancel({
         smithersRunId: evidence.smithersRunId,
         projectRoot,
         env: linkedWorkflowExecutionEnvironment(evidence, input.env)
       });
+      resourceBudgetCancellationConfirmed = cancellation.status === "cancelled";
     } catch (error) {
       diagnostics.push(smithersDiagnostic(error, "WORKFLOW_RESOURCE_BUDGET_CANCEL_FAILED"));
     }
   }
 
+  const stateBeforeStatusUpdate = readRunState(layout);
   const finalStatus =
     resourceBudgetExhausted === undefined
       ? finalRunStatus(inspect, syncResult.nodeStatuses, readRunState(layout).status, {
@@ -684,8 +720,9 @@ export async function synchronizeLinkedWorkflowRun(
           recoveredAggregateAuthorized,
           recoveryRequiresAuthorization: recovery?.prior_status === "failed" && recovery.recovered === false
         })
-      : "canceled";
-  const stateBeforeStatusUpdate = readRunState(layout);
+      : resourceBudgetCancellationConfirmed
+        ? "canceled"
+        : stateBeforeStatusUpdate.status;
   const previousRunStatus = stateBeforeStatusUpdate.status;
   const runStatusChanged = previousRunStatus !== finalStatus;
   if (runStatusChanged) {
@@ -1294,7 +1331,26 @@ async function synchronizeWorkflowAccounting(input: {
     live: livePricing?.metadata
   });
   const cacheReadRatio = configuredCacheReadRatio(input.env?.ULTRAFUZZ_CACHE_READ_RATIO);
-  const accountingSegments = accountingSegmentsFromUsageLedger(preparedUsage.entries, resolvedPricing, cacheReadRatio);
+  const accountingSegmentsResult = accountingSegmentsFromUsageLedger(
+    preparedUsage.entries,
+    resolvedPricing,
+    cacheReadRatio
+  );
+  const segmentOverflowExhaustion = overflowAccountingBudgetExhaustion(
+    input.resourceBudget,
+    accountingSegmentsResult.overflow
+  );
+  if (segmentOverflowExhaustion !== undefined) {
+    // Do not append the triggering usage entry or construct an accounting
+    // document whose totals cannot be represented exactly. The typed workflow
+    // event written by the caller is the durable exhaustion evidence.
+    return {
+      changed: false,
+      available: true,
+      resourceBudgetExhaustion: segmentOverflowExhaustion
+    };
+  }
+  const accountingSegments = accountingSegmentsResult.segments;
   const current = accountingSegments.at(-1);
   if (current === undefined) throw new Error("non-empty usage ledger produced no accounting segment");
 
@@ -1302,10 +1358,22 @@ async function synchronizeWorkflowAccounting(input: {
   const sourceAccounting =
     sourceRunId === undefined ? undefined : cumulativeAccountingForSourceRun(input.layout, sourceRunId);
   const sourceSummaries = sourceAccounting === undefined ? [] : [sourceAccounting.summary];
-  const cumulative = cumulativeAccountingSummary(
+  const cumulativeResult = cumulativeAccountingSummary(
     [...sourceSummaries, ...accountingSegments],
     sourceAccounting?.sourceRunIds ?? []
   );
+  const cumulativeOverflowExhaustion = overflowAccountingBudgetExhaustion(
+    input.resourceBudget,
+    cumulativeResult.overflow
+  );
+  if (cumulativeOverflowExhaustion !== undefined) {
+    return {
+      changed: false,
+      available: true,
+      resourceBudgetExhaustion: cumulativeOverflowExhaustion
+    };
+  }
+  const cumulative = cumulativeResult.summary;
   const resourceBudgetExhaustion = exhaustedAccountingBudget({
     budget: input.resourceBudget,
     cumulative,
@@ -1394,12 +1462,15 @@ function exhaustedAccountingBudget(input: {
     input.cumulative.pricing_complete && input.cumulative.estimated_spend_usd !== undefined
       ? input.cumulative.estimated_spend_usd
       : (input.cumulative.total_tokens / 1_000_000) * input.budget.unpricedTokenUsdPerMillion;
-  if (observedCostUsd > input.budget.maxCostUsd) {
+  if (!Number.isFinite(observedCostUsd) || observedCostUsd > input.budget.maxCostUsd) {
     return {
       resource: "cost_usd",
       scope: "run",
       limit: input.budget.maxCostUsd,
-      observed: observedCostUsd
+      observed:
+        !Number.isFinite(observedCostUsd) || observedCostUsd > RESOURCE_BUDGET_OVERFLOW_OBSERVED
+          ? RESOURCE_BUDGET_OVERFLOW_OBSERVED
+          : observedCostUsd
     };
   }
   if (input.cumulative.event_count > input.budget.maxRequests) {
@@ -1420,18 +1491,18 @@ function exhaustedAccountingBudget(input: {
   }
   for (const group of attempts.values()) {
     const first = group[0]!;
-    const summary = accountingFromWorkflowEvents(
+    const accounting = accountingFromWorkflowEvents(
       workflowEventsFromUsageLedger(group),
       input.modelPricing,
       input.cacheReadRatio
     );
-    const totalTokens = summary?.total_tokens ?? 0;
-    if (totalTokens > input.budget.maxAttemptTokens) {
+    const totalTokens = accounting.summary?.total_tokens ?? 0;
+    if (accounting.overflow.tokens || totalTokens > input.budget.maxAttemptTokens) {
       return {
         resource: "attempt_tokens",
         scope: "attempt",
         limit: input.budget.maxAttemptTokens,
-        observed: totalTokens,
+        observed: accounting.overflow.tokens ? RESOURCE_BUDGET_OVERFLOW_OBSERVED : totalTokens,
         node_id: first.node_id,
         iteration: first.iteration,
         attempt: first.attempt
@@ -1452,6 +1523,37 @@ function exhaustedAccountingBudget(input: {
   return undefined;
 }
 
+function overflowAccountingBudgetExhaustion(
+  budget: ResourceBudgetConfig,
+  overflow: AccountingOverflow
+): ResourceBudgetExhaustion | undefined {
+  if (overflow.tokens) {
+    return {
+      resource: "total_tokens",
+      scope: "run",
+      limit: budget.maxTotalTokens,
+      observed: RESOURCE_BUDGET_OVERFLOW_OBSERVED
+    };
+  }
+  if (overflow.costUsd) {
+    return {
+      resource: "cost_usd",
+      scope: "run",
+      limit: budget.maxCostUsd,
+      observed: RESOURCE_BUDGET_OVERFLOW_OBSERVED
+    };
+  }
+  if (overflow.requests) {
+    return {
+      resource: "requests",
+      scope: "run",
+      limit: budget.maxRequests,
+      observed: RESOURCE_BUDGET_OVERFLOW_OBSERVED
+    };
+  }
+  return undefined;
+}
+
 function sealedResourceBudget(
   executionFiles: readonly { snapshotPath: string; contents: Buffer }[]
 ): ResourceBudgetConfig {
@@ -1463,6 +1565,7 @@ function sealedResourceBudget(
 }
 
 const RESOURCE_BUDGET_EVIDENCE_FILE = "resource-budget-exhausted.json";
+const RESOURCE_BUDGET_OVERFLOW_OBSERVED = Number.MAX_SAFE_INTEGER + 1;
 const RESOURCE_BUDGET_NAMES = new Set<ResourceBudgetExhaustion["resource"]>([
   "cost_usd",
   "total_tokens",
@@ -1474,7 +1577,11 @@ const RESOURCE_BUDGET_NAMES = new Set<ResourceBudgetExhaustion["resource"]>([
   "attempt_requests"
 ]);
 
-function readGeneratedResourceBudgetExhaustion(layout: RunLayout): ResourceBudgetExhaustion | undefined {
+function readGeneratedResourceBudgetExhaustion(
+  layout: RunLayout,
+  workflowRunId: string,
+  plannedTaskIds: ReadonlySet<string>
+): ResourceBudgetExhaustion | undefined {
   const evidencePath = safeResolveInside(layout.root, RESOURCE_BUDGET_EVIDENCE_FILE, "resource budget evidence");
   if (!fs.existsSync(evidencePath)) return undefined;
   const value = parseStrictJsonBytes(readRegularFileSnapshot(evidencePath, 64 * 1024));
@@ -1496,8 +1603,7 @@ function readGeneratedResourceBudgetExhaustion(layout: RunLayout): ResourceBudge
   if (
     value.schema_version !== "ultrafuzz.resource-budget-exhaustion.v1" ||
     value.ultrafuzz_run_id !== layout.runId ||
-    typeof value.workflow_run_id !== "string" ||
-    value.workflow_run_id.length === 0 ||
+    value.workflow_run_id !== workflowRunId ||
     typeof value.resource !== "string" ||
     !RESOURCE_BUDGET_NAMES.has(value.resource as ResourceBudgetExhaustion["resource"]) ||
     (value.scope !== "run" && value.scope !== "attempt") ||
@@ -1508,9 +1614,9 @@ function readGeneratedResourceBudgetExhaustion(layout: RunLayout): ResourceBudge
     typeof value.observed !== "number" ||
     !Number.isFinite(value.observed) ||
     value.observed <= value.limit ||
-    value.observed > Number.MAX_SAFE_INTEGER ||
+    value.observed > RESOURCE_BUDGET_OVERFLOW_OBSERVED ||
     typeof value.task_id !== "string" ||
-    value.task_id.length === 0 ||
+    !plannedTaskIds.has(value.task_id) ||
     typeof value.recorded_at !== "string" ||
     !Number.isFinite(Date.parse(value.recorded_at))
   ) {
@@ -1529,7 +1635,7 @@ function accountingFromWorkflowEvents(
   events: WorkflowEvent[],
   modelPricing: ReadonlyMap<string, ModelPricing>,
   cacheReadRatio: number | undefined
-): AccountingSummary | undefined {
+): AccountingComputation {
   const totals = emptyAccountingTotals();
   for (const event of events) {
     if (event.type !== "TokenUsageReported") {
@@ -1561,7 +1667,7 @@ function accountingFromWorkflowEvents(
       cacheReadRatio
     });
     const componentTokenCount = sumUsageComponents(normalizedUsage.components);
-    const tokenCount = componentTokenCount;
+    const tokenCount = componentTokenCount.value;
     const usageIncompleteReasons = [...normalizedUsage.incompleteReasons];
     const componentPricing = priceUsageComponents({
       model,
@@ -1575,22 +1681,32 @@ function accountingFromWorkflowEvents(
       continue;
     }
 
-    totals.inputTokens += normalizedUsage.components.uncached_input;
-    totals.outputTokens += normalizedUsage.components.output;
-    totals.cacheReadTokens += normalizedUsage.components.cache_read;
-    totals.cacheWriteTokens += normalizedUsage.components.cache_write;
-    totals.reasoningTokens += normalizedUsage.components.reasoning;
-    totals.totalTokens += tokenCount;
-    totals.billableTokens += componentPricing.billableTokens;
-    totals.eventCount += 1;
+    totals.inputTokens = addAccountingCount(totals, totals.inputTokens, normalizedUsage.components.uncached_input);
+    totals.outputTokens = addAccountingCount(totals, totals.outputTokens, normalizedUsage.components.output);
+    totals.cacheReadTokens = addAccountingCount(totals, totals.cacheReadTokens, normalizedUsage.components.cache_read);
+    totals.cacheWriteTokens = addAccountingCount(
+      totals,
+      totals.cacheWriteTokens,
+      normalizedUsage.components.cache_write
+    );
+    totals.reasoningTokens = addAccountingCount(totals, totals.reasoningTokens, normalizedUsage.components.reasoning);
+    totals.totalTokens = addAccountingCount(totals, totals.totalTokens, tokenCount);
+    totals.billableTokens = addAccountingCount(totals, totals.billableTokens, componentPricing.billableTokens);
+    totals.tokenOverflow = totals.tokenOverflow || componentTokenCount.overflow || componentPricing.tokenOverflow;
+    totals.eventCount = addAccountingRequestCount(totals, totals.eventCount, 1);
     if (pricingIncompleteReasons.length === 0) {
-      totals.pricedEventCount += 1;
+      totals.pricedEventCount = addAccountingRequestCount(totals, totals.pricedEventCount, 1);
     } else {
-      totals.unpricedEventCount += 1;
+      totals.unpricedEventCount = addAccountingRequestCount(totals, totals.unpricedEventCount, 1);
     }
     if (estimatedCostUsd !== undefined) {
+      totals.costOverflow =
+        totals.costOverflow ||
+        componentPricing.costOverflow ||
+        usdAdditionOverflows(totals.estimatedSpendUsd, estimatedCostUsd);
       totals.estimatedSpendUsd = addUsd(totals.estimatedSpendUsd, estimatedCostUsd);
-      addComponentCosts(totals.componentCostsUsd, componentPricing.componentCostsUsd);
+      totals.costOverflow =
+        addComponentCosts(totals.componentCostsUsd, componentPricing.componentCostsUsd) || totals.costOverflow;
     }
     totals.usageIncompleteReasons.push(...usageIncompleteReasons);
     totals.pricingIncompleteReasons.push(...pricingIncompleteReasons);
@@ -1602,7 +1718,11 @@ function accountingFromWorkflowEvents(
     totals.models.add(model);
     totals.agents.add(requiredWorkflowEventString(payload.agent, "TokenUsageReported agent"));
   }
-  return accountingSummaryFromTotals(totals);
+  const overflow = accountingOverflowFromTotals(totals);
+  return {
+    summary: hasAccountingOverflow(overflow) ? undefined : accountingSummaryFromTotals(totals),
+    overflow
+  };
 }
 
 function prepareWorkflowUsageEvents(
@@ -1747,7 +1867,7 @@ function accountingSegmentsFromUsageLedger(
   entries: readonly UsageLedgerEntry[],
   modelPricing: ReadonlyMap<string, ModelPricing>,
   cacheReadRatio: number | undefined
-): AccountingSegment[] {
+): AccountingSegmentsComputation {
   const grouped = new Map<string, { entries: UsageLedgerEntry[]; lastLedgerIndex: number }>();
   for (const [ledgerIndex, entry] of entries.entries()) {
     const key = JSON.stringify([entry.workflow_run_id, entry.control_generation]);
@@ -1757,18 +1877,26 @@ function accountingSegmentsFromUsageLedger(
     grouped.set(key, generation);
   }
   const groups = [...grouped.values()].sort((left, right) => left.lastLedgerIndex - right.lastLedgerIndex);
-  return groups.map((generation) => {
+  const segments: AccountingSegment[] = [];
+  const overflow = emptyAccountingOverflow();
+  for (const generation of groups) {
     const generationEntries = generation.entries;
     const firstEntry = generationEntries[0]!;
-    return accountingSummaryWithCompleteness(
-      accountingFromWorkflowEvents(workflowEventsFromUsageLedger(generationEntries), modelPricing, cacheReadRatio),
-      generationEntries,
-      {
+    const accounting = accountingFromWorkflowEvents(
+      workflowEventsFromUsageLedger(generationEntries),
+      modelPricing,
+      cacheReadRatio
+    );
+    mergeAccountingOverflow(overflow, accounting.overflow);
+    if (accounting.summary === undefined && hasAccountingOverflow(accounting.overflow)) continue;
+    segments.push(
+      accountingSummaryWithCompleteness(accounting.summary, generationEntries, {
         controlGeneration: firstEntry.control_generation,
         workflowRunId: firstEntry.workflow_run_id
-      }
+      })
     );
-  });
+  }
+  return { segments, overflow };
 }
 
 function accountingSummaryWithCompleteness(
@@ -2077,9 +2205,12 @@ function assertAccountingMatchesUsageLedger(
   if (cacheReadRatios.length > 1) {
     throw new Error(`${label}.segments use inconsistent cache-read ratios`);
   }
-  const recomputedSegments = accountingSegmentsFromUsageLedger(entries, accounting.pricing, cacheReadRatios[0]);
-  for (const [index, recomputed] of recomputedSegments.entries()) {
-    if (!isDeepStrictEqual(accounting.segments[index], recomputed)) {
+  const recomputed = accountingSegmentsFromUsageLedger(entries, accounting.pricing, cacheReadRatios[0]);
+  if (hasAccountingOverflow(recomputed.overflow)) {
+    throw new Error(`${label}.segments cannot represent overflowed usage-ledger accounting`);
+  }
+  for (const [index, recomputedSegment] of recomputed.segments.entries()) {
+    if (!isDeepStrictEqual(accounting.segments[index], recomputedSegment)) {
       throw new Error(`${label}.segments[${index}] does not exactly match usage-ledger accounting`);
     }
   }
@@ -2117,7 +2248,11 @@ export function assertRunMetadataAccountingUsageAuthority(
     throw new Error(`${label}.cumulative.source_run_ids cannot contain the current run ID`);
   }
 
-  const currentRunCumulative = cumulativeAccountingSummary(accounting.segments, []);
+  const currentRunAggregation = cumulativeAccountingSummary(accounting.segments, []);
+  if (hasAccountingOverflow(currentRunAggregation.overflow)) {
+    throw new Error(`${label}.cumulative cannot represent overflowed current-run accounting`);
+  }
+  const currentRunCumulative = currentRunAggregation.summary;
   if (metadata.source_run_id === undefined) {
     if (accounting.cumulative.source_run_ids.length !== 0) {
       throw new Error(`${label}.cumulative.source_run_ids requires a direct source run`);
@@ -2400,26 +2535,31 @@ function cumulativeAccountingForSourceRun(
 function cumulativeAccountingSummary(
   summaries: AccountingSummary[],
   sourceRunIds: string[]
-): CumulativeAccountingSummary {
+): CumulativeAccountingComputation {
   const totals = emptyAccountingTotals();
   const usageIncompleteReasons: UsageCompletenessMarker[] = [];
   const pricingIncompleteReasons: PricingCompletenessMarker[] = [];
   for (const summary of summaries) {
-    totals.inputTokens += summary.input_tokens;
-    totals.outputTokens += summary.output_tokens;
-    totals.cacheReadTokens += summary.cache_read_tokens;
-    totals.cacheWriteTokens += summary.cache_write_tokens;
-    totals.reasoningTokens += summary.reasoning_tokens;
-    totals.totalTokens += summary.total_tokens;
-    totals.billableTokens += summary.billable_token_total;
-    totals.eventCount += summary.event_count;
-    totals.pricedEventCount += summary.priced_event_count;
-    totals.unpricedEventCount += summary.unpriced_event_count;
+    totals.inputTokens = addAccountingCount(totals, totals.inputTokens, summary.input_tokens);
+    totals.outputTokens = addAccountingCount(totals, totals.outputTokens, summary.output_tokens);
+    totals.cacheReadTokens = addAccountingCount(totals, totals.cacheReadTokens, summary.cache_read_tokens);
+    totals.cacheWriteTokens = addAccountingCount(totals, totals.cacheWriteTokens, summary.cache_write_tokens);
+    totals.reasoningTokens = addAccountingCount(totals, totals.reasoningTokens, summary.reasoning_tokens);
+    totals.totalTokens = addAccountingCount(totals, totals.totalTokens, summary.total_tokens);
+    totals.billableTokens = addAccountingCount(totals, totals.billableTokens, summary.billable_token_total);
+    totals.eventCount = addAccountingRequestCount(totals, totals.eventCount, summary.event_count);
+    totals.pricedEventCount = addAccountingRequestCount(totals, totals.pricedEventCount, summary.priced_event_count);
+    totals.unpricedEventCount = addAccountingRequestCount(
+      totals,
+      totals.unpricedEventCount,
+      summary.unpriced_event_count
+    );
     totals.partialPricing =
       totals.partialPricing ||
       summary.partial_pricing ||
       (summary.total_tokens > 0 && summary.estimated_spend === "unavailable");
-    addComponentCosts(totals.componentCostsUsd, summary.component_costs_usd);
+    totals.costOverflow =
+      addComponentCosts(totals.componentCostsUsd, summary.component_costs_usd) || totals.costOverflow;
     usageIncompleteReasons.push(...summary.usage_incomplete_reasons);
     pricingIncompleteReasons.push(...summary.pricing_incomplete_reasons);
     totals.cacheReadPricingEstimated = totals.cacheReadPricingEstimated || summary.cache_read_pricing_estimated;
@@ -2430,6 +2570,8 @@ function cumulativeAccountingSummary(
           : undefined;
     }
     if (summary.estimated_spend_usd !== undefined) {
+      totals.costOverflow =
+        totals.costOverflow || usdAdditionOverflows(totals.estimatedSpendUsd, summary.estimated_spend_usd);
       totals.estimatedSpendUsd = addUsd(totals.estimatedSpendUsd, summary.estimated_spend_usd);
     }
     for (const model of summary.models) {
@@ -2441,12 +2583,15 @@ function cumulativeAccountingSummary(
   }
   const summary = accountingSummaryFromTotals(totals) ?? emptyAccountingSummary();
   return {
-    ...summary,
-    usage_complete: usageIncompleteReasons.length === 0,
-    usage_incomplete_reasons: uniqueUsageCompletenessMarkers(usageIncompleteReasons),
-    pricing_complete: pricingIncompleteReasons.length === 0,
-    pricing_incomplete_reasons: uniquePricingCompletenessMarkers(pricingIncompleteReasons),
-    source_run_ids: uniqueStrings(sourceRunIds)
+    summary: {
+      ...summary,
+      usage_complete: usageIncompleteReasons.length === 0,
+      usage_incomplete_reasons: uniqueUsageCompletenessMarkers(usageIncompleteReasons),
+      pricing_complete: pricingIncompleteReasons.length === 0,
+      pricing_incomplete_reasons: uniquePricingCompletenessMarkers(pricingIncompleteReasons),
+      source_run_ids: uniqueStrings(sourceRunIds)
+    },
+    overflow: accountingOverflowFromTotals(totals)
   };
 }
 
@@ -2641,8 +2786,54 @@ function emptyAccountingTotals(): AccountingTotals {
     pricedEventCount: 0,
     unpricedEventCount: 0,
     models: new Set(),
-    agents: new Set()
+    agents: new Set(),
+    tokenOverflow: false,
+    costOverflow: false,
+    requestOverflow: false
   };
+}
+
+function emptyAccountingOverflow(): AccountingOverflow {
+  return { tokens: false, costUsd: false, requests: false };
+}
+
+function accountingOverflowFromTotals(totals: AccountingTotals): AccountingOverflow {
+  return {
+    tokens: totals.tokenOverflow,
+    costUsd: totals.costOverflow,
+    requests: totals.requestOverflow
+  };
+}
+
+function mergeAccountingOverflow(target: AccountingOverflow, source: AccountingOverflow): void {
+  target.tokens = target.tokens || source.tokens;
+  target.costUsd = target.costUsd || source.costUsd;
+  target.requests = target.requests || source.requests;
+}
+
+function hasAccountingOverflow(overflow: AccountingOverflow): boolean {
+  return overflow.tokens || overflow.costUsd || overflow.requests;
+}
+
+function boundedAccountingAddition(current: number, amount: number): BoundedAccountingNumber {
+  if (!Number.isSafeInteger(current) || current < 0 || !Number.isSafeInteger(amount) || amount < 0) {
+    throw new Error("accounting count must be a non-negative safe integer");
+  }
+  return amount > Number.MAX_SAFE_INTEGER - current
+    ? { value: Number.MAX_SAFE_INTEGER, overflow: true }
+    : { value: current + amount, overflow: false };
+}
+
+function addAccountingCount(totals: AccountingTotals, current: number, amount: number): number {
+  const addition = boundedAccountingAddition(current, amount);
+  totals.tokenOverflow = totals.tokenOverflow || addition.overflow;
+  return addition.value;
+}
+
+function addAccountingRequestCount(totals: AccountingTotals, current: number, amount: number): number {
+  const addition = boundedAccountingAddition(current, amount);
+  totals.requestOverflow = totals.requestOverflow || addition.overflow;
+  return addition.value;
 }
 
 function normalizeUsageComponents(input: {
@@ -2698,6 +2889,8 @@ function priceUsageComponents(input: {
   componentCostsUsd: UsageComponentCosts;
   billableTokens: number;
   incompleteReasons: PricingIncompleteReason[];
+  tokenOverflow: boolean;
+  costOverflow: boolean;
 } {
   const componentCostsUsd = emptyComponentCosts();
   const incompleteReasons: PricingIncompleteReason[] = [];
@@ -2713,13 +2906,21 @@ function priceUsageComponents(input: {
         });
       }
     }
-    return { componentCostsUsd, billableTokens: 0, incompleteReasons };
+    return {
+      componentCostsUsd,
+      billableTokens: 0,
+      incompleteReasons,
+      tokenOverflow: false,
+      costOverflow: false
+    };
   }
 
-  const pricing = pricingForContext(
-    basePricing,
-    input.components.uncached_input + input.components.cache_read + input.components.cache_write
-  );
+  const contextTokenCount = boundedAccountingValues([
+    input.components.uncached_input,
+    input.components.cache_read,
+    input.components.cache_write
+  ]);
+  const pricing = pricingForContext(basePricing, contextTokenCount.value);
   const rates: Record<UsageComponent, number | undefined> = {
     uncached_input: pricing.inputUsdPerMillion,
     cache_read: pricing.cachedInputUsdPerMillion,
@@ -2729,6 +2930,8 @@ function priceUsageComponents(input: {
   };
   let billableTokens = 0;
   let pricedComponents = 0;
+  let tokenOverflow = contextTokenCount.overflow;
+  let costOverflow = false;
   for (const [component, tokens] of componentEntries) {
     if (tokens <= 0) {
       continue;
@@ -2742,17 +2945,23 @@ function priceUsageComponents(input: {
       });
       continue;
     }
-    componentCostsUsd[component] = roundAccountingUsd((tokens * rate) / 1_000_000);
+    const componentCost = boundedUsdProduct(tokens, rate);
+    componentCostsUsd[component] = componentCost.value;
+    costOverflow = costOverflow || componentCost.overflow;
     if (rate > 0) {
-      billableTokens += tokens;
+      const billableAddition = boundedAccountingAddition(billableTokens, tokens);
+      billableTokens = billableAddition.value;
+      tokenOverflow = tokenOverflow || billableAddition.overflow;
     }
     pricedComponents += 1;
   }
   return {
-    ...(pricedComponents === 0 ? {} : { costUsd: sumComponentCosts(componentCostsUsd) }),
+    ...(pricedComponents === 0 ? {} : { costUsd: boundedSumComponentCosts(componentCostsUsd).value }),
     componentCostsUsd,
     billableTokens,
-    incompleteReasons
+    incompleteReasons,
+    tokenOverflow,
+    costOverflow: costOverflow || boundedSumComponentCosts(componentCostsUsd).overflow
   };
 }
 
@@ -2783,6 +2992,9 @@ export function projectNormalizedUsageAccounting(input: {
     components: normalized.components,
     modelPricing: input.modelPricing
   });
+  if (componentTotal.overflow || pricing.tokenOverflow || pricing.costOverflow) {
+    throw new Error("normalized usage accounting exceeds the safe numeric range");
+  }
   const estimatedSpendUsd = usageUnavailable ? undefined : pricing.costUsd;
   const cacheReadUnavailable = componentReasons.some(
     (reason) => reason.code === "component-usage-unavailable" && reason.component === "cache_read"
@@ -2798,7 +3010,7 @@ export function projectNormalizedUsageAccounting(input: {
       output_tokens: normalized.components.output,
       reasoning_tokens: normalized.components.reasoning
     },
-    total_tokens: usageUnavailable ? null : componentTotal,
+    total_tokens: usageUnavailable ? null : componentTotal.value,
     estimated_spend_usd: estimatedSpendUsd ?? null,
     usage_complete: componentReasons.length === 0,
     usage_incomplete_reasons: componentReasons,
@@ -2807,8 +3019,19 @@ export function projectNormalizedUsageAccounting(input: {
   };
 }
 
-function sumUsageComponents(components: NormalizedUsageComponents): number {
-  return Object.values(components).reduce((total, tokens) => total + tokens, 0);
+function sumUsageComponents(components: NormalizedUsageComponents): BoundedAccountingNumber {
+  return boundedAccountingValues(Object.values(components));
+}
+
+function boundedAccountingValues(values: readonly number[]): BoundedAccountingNumber {
+  let value = 0;
+  let overflow = false;
+  for (const amount of values) {
+    const addition = boundedAccountingAddition(value, amount);
+    value = addition.value;
+    overflow = overflow || addition.overflow;
+  }
+  return { value, overflow };
 }
 
 function emptyComponentCosts(): UsageComponentCosts {
@@ -2821,10 +3044,13 @@ function emptyComponentCosts(): UsageComponentCosts {
   };
 }
 
-function addComponentCosts(target: UsageComponentCosts, source: UsageComponentCosts): void {
+function addComponentCosts(target: UsageComponentCosts, source: UsageComponentCosts): boolean {
+  let overflow = false;
   for (const component of Object.keys(target) as UsageComponent[]) {
+    overflow = overflow || usdAdditionOverflows(target[component], source[component]);
     target[component] = addUsd(target[component], source[component]);
   }
+  return overflow;
 }
 
 function roundedComponentCosts(costs: UsageComponentCosts): UsageComponentCosts {
@@ -2840,8 +3066,43 @@ function sumComponentCosts(costs: UsageComponentCosts): number {
   return Object.values(costs).reduce((total, cost) => addUsd(total, cost), 0);
 }
 
+function boundedSumComponentCosts(costs: UsageComponentCosts): BoundedAccountingNumber {
+  let value = 0;
+  let overflow = false;
+  for (const cost of Object.values(costs)) {
+    overflow = overflow || usdAdditionOverflows(value, cost);
+    value = addUsd(value, cost);
+  }
+  return { value, overflow };
+}
+
+function boundedUsdProduct(tokens: number, rate: number): BoundedAccountingNumber {
+  if (!Number.isSafeInteger(tokens) || tokens < 0 || !Number.isFinite(rate) || rate < 0) {
+    throw new Error("pricing inputs are outside the supported numeric range");
+  }
+  if (tokens === 0 || rate === 0) return { value: 0, overflow: false };
+  if (rate > (Number.MAX_SAFE_INTEGER * 1_000_000) / tokens) {
+    return { value: Number.MAX_SAFE_INTEGER, overflow: true };
+  }
+  const value = roundAccountingUsd((tokens * rate) / 1_000_000);
+  return Number.isFinite(value) && value <= Number.MAX_SAFE_INTEGER
+    ? { value, overflow: false }
+    : { value: Number.MAX_SAFE_INTEGER, overflow: true };
+}
+
+function usdAdditionOverflows(current: number | undefined, amount: number): boolean {
+  const base = current ?? 0;
+  return (
+    !Number.isFinite(base) ||
+    base < 0 ||
+    !Number.isFinite(amount) ||
+    amount < 0 ||
+    amount > Number.MAX_SAFE_INTEGER - base
+  );
+}
+
 function addUsd(current: number | undefined, amount: number): number {
-  return roundAccountingUsd((current ?? 0) + amount);
+  return usdAdditionOverflows(current, amount) ? Number.MAX_SAFE_INTEGER : roundAccountingUsd((current ?? 0) + amount);
 }
 
 export function roundAccountingUsd(value: number): number {

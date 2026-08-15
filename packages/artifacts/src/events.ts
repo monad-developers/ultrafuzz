@@ -204,7 +204,12 @@ const resourceBudgetExhaustionSchema = z.strictObject({
   // ceiling can therefore give a task a zero allocation, which is represented
   // explicitly in exhaustion evidence.
   limit: z.number().nonnegative().max(Number.MAX_SAFE_INTEGER),
-  observed: z.number().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  // MAX_SAFE_INTEGER + 1 is an exact, bounded sentinel meaning the observed
+  // value overflowed the largest configurable budget.
+  observed: z
+    .number()
+    .nonnegative()
+    .max(Number.MAX_SAFE_INTEGER + 1),
   node_id: nonEmptyStringSchema.optional(),
   iteration: nonNegativeSafeIntegerSchema.optional(),
   attempt: nonNegativeSafeIntegerSchema.optional()
@@ -619,7 +624,7 @@ const eventRecordJsonSchemaDefinitions = {
           },
           scope: { enum: ["run", "attempt"] },
           limit: { type: "number", minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
-          observed: { type: "number", minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
+          observed: { type: "number", minimum: 0, maximum: Number.MAX_SAFE_INTEGER + 1 },
           node_id: { $ref: "#/$defs/nonEmptyString" },
           iteration: { $ref: "#/$defs/nonNegativeSafeInteger" },
           attempt: { $ref: "#/$defs/nonNegativeSafeInteger" }

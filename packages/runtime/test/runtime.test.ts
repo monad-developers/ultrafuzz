@@ -1074,6 +1074,7 @@ function fakeLifecycleSmithersEnv(
     inspect: unknown;
     events?: string;
     tokenEvents?: string;
+    cancelStatus?: "cancelled" | "cancel-requested" | "failure";
     inspectMarkerPath?: string;
     timeline?: unknown;
     statusEvents?: unknown;
@@ -1186,8 +1187,15 @@ function fakeLifecycleSmithersEnv(
       '    cat "$SMITHERS_FAKE_NODE_DETAILS/$2.json"',
       "    ;;",
       "  cancel)",
-      '    printf \'%s\\n\' \'{"ok":true,"data":{"status":"cancel-requested"}}\'',
-      "    exit 2",
+      '    case "${SMITHERS_FAKE_CANCEL_STATUS:-cancel-requested}" in',
+      '      cancelled) printf \'%s\\n\' \'{"ok":true,"data":{"status":"cancelled"}}\' ;;',
+      "      cancel-requested)",
+      '        printf \'%s\\n\' \'{"ok":true,"data":{"status":"cancel-requested"}}\'',
+      "        exit 2",
+      "        ;;",
+      "      failure) printf '%s\\n' 'fake cancel failure' >&2; exit 1 ;;",
+      "      *) printf '%s\\n' 'invalid fake cancel status' >&2; exit 1 ;;",
+      "    esac",
       "    ;;",
       "  events)",
       '    case "$*" in',
@@ -1255,6 +1263,7 @@ function fakeLifecycleSmithersEnv(
     SMITHERS_FAKE_WHY: whyPath,
     SMITHERS_FAKE_TIMELINE: timelinePath,
     SMITHERS_FAKE_NODE_DETAILS: nodeDetailsDirectory,
+    SMITHERS_FAKE_CANCEL_STATUS: input.cancelStatus,
     ULTRAFUZZ_PRICING_CATALOG_URL: "off",
     ULTRAFUZZ_AGENT_ENV_ALLOWLIST: SMITHERS_TEST_ENVIRONMENT_ALLOWLIST
   };
@@ -3270,6 +3279,20 @@ test(
       cache_creation_input_tokens: 0,
       total_tokens: 550
     });
+
+    const turnEvents = agent.createOutputInterpreter().onStdoutLine?.(
+      JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "tool_use", id: "tool-1", name: "Read", input: { file_path: "x" } }] }
+      })
+    ) as Array<{ type?: string; phase?: string; action?: { kind?: string } }>;
+    assert.equal(
+      turnEvents.filter(
+        (event) => event.type === "action" && event.phase === "started" && event.action?.kind === "turn"
+      ).length,
+      1,
+      "a tool-only DeepSeek assistant response must expose one normalized turn event"
+    );
   }
 );
 
@@ -4353,13 +4376,26 @@ test(
       assistantEvents.filter(
         (event) =>
           event.type === "action" &&
-          event.phase === "updated" &&
-          event.entryType === "message" &&
-          event.action?.kind === "note" &&
-          event.action.title === "assistant"
+          event.phase === "started" &&
+          event.entryType === "thought" &&
+          event.action?.kind === "turn"
       ).length,
       1,
       "a pure Kimi assistant response must expose one normalized turn event"
+    );
+    const toolOnlyAssistantEvents = hintInterpreter.onStdoutLine?.(
+      JSON.stringify({
+        role: "assistant",
+        content: "",
+        tool_calls: [{ id: "tool-1", function: { name: "ReadFile", arguments: "{}" } }]
+      })
+    ) as Array<{ type?: string; phase?: string; action?: { kind?: string } }>;
+    assert.equal(
+      toolOnlyAssistantEvents.filter(
+        (event) => event.type === "action" && event.phase === "started" && event.action?.kind === "turn"
+      ).length,
+      1,
+      "a tool-only Kimi assistant response must expose one normalized turn event"
     );
     const session = "00000000-0000-0000-0000-000000000301";
     assert.throws(
@@ -10924,6 +10960,7 @@ test("syncRun preserves exact resource boundaries and durably cancels token/cost
     configureResourceBudget(project, scenario.budget);
     const workflowRunId = `ultrafuzz-${scenario.runId}`;
     const env = fakeLifecycleSmithersEnv(project, {
+      cancelStatus: "cancelled",
       inspect: workflowInspect({
         workflowRunId,
         steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
@@ -10982,6 +11019,90 @@ test("syncRun preserves exact resource boundaries and durably cancels token/cost
   }
 });
 
+test("syncRun converts token and pricing arithmetic overflow into bounded cancellation evidence", async () => {
+  for (const scenario of [
+    {
+      runId: "resource-token-overflow",
+      usages: [Number.MAX_SAFE_INTEGER, 1],
+      catalog: "disabled" as const,
+      expectedResource: "total_tokens"
+    },
+    {
+      runId: "resource-cost-overflow",
+      usages: [Number.MAX_SAFE_INTEGER],
+      catalog: {
+        openai: {
+          models: {
+            "gpt-overflow": {
+              cost: { input: Number.MAX_SAFE_INTEGER, output: Number.MAX_SAFE_INTEGER }
+            }
+          }
+        }
+      },
+      expectedResource: "cost_usd"
+    }
+  ] as const) {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project);
+    configureResourceBudget(project, {
+      max_cost_usd: Number.MAX_SAFE_INTEGER,
+      max_total_tokens: Number.MAX_SAFE_INTEGER,
+      max_attempt_tokens: Number.MAX_SAFE_INTEGER
+    });
+    const workflowRunId = `ultrafuzz-${scenario.runId}`;
+    const usageEvents = scenario.usages.map((inputTokens) => ({
+      type: "TokenUsageReported",
+      nodeId: "node:project-discovery",
+      attempt: 1,
+      extra: {
+        iteration: 0,
+        inputTokens,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        model: "gpt-overflow",
+        agent: "codex"
+      }
+    }));
+    const env = fakeLifecycleSmithersEnv(project, {
+      cancelStatus: "cancelled",
+      inspect: workflowInspect({
+        workflowRunId,
+        steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+      }),
+      events: workflowEvents(workflowRunId, [
+        { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+        ...usageEvents,
+        { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+        { type: "RunFinished" }
+      ])
+    });
+    env.ULTRAFUZZ_PRICING_CATALOG_URL =
+      scenario.catalog === "disabled" ? "disabled" : pricingCatalogDataUrl(scenario.catalog);
+    const run = await startRun({ projectRoot: project, runId: scenario.runId, env });
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+    const sync = await syncRun({ projectRoot: project, runId: scenario.runId, env });
+    assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+    const layout = layoutForRunRoot(run.value!.run_root);
+    assert.equal(readRunState(layout).status, "canceled");
+    const evidence = replayEvents(layout, Number.MAX_SAFE_INTEGER)
+      .records.filter((event) => event.event_type === "workflow-synced")
+      .at(-1)?.payload.resource_budget_exhausted;
+    assert.equal(evidence?.resource, scenario.expectedResource);
+    assert.equal(evidence?.observed, Number.MAX_SAFE_INTEGER + 1);
+    assert.equal(
+      fs.readFileSync(layout.usageLedgerPath, "utf8").trim(),
+      "",
+      "overflowing usage must not append an invalid ledger entry"
+    );
+    const metadata = JSON.parse(fs.readFileSync(layout.runMetadataPath, "utf8")) as { accounting?: unknown };
+    assert.equal(metadata.accounting, undefined, "overflowing usage must not publish invalid accounting totals");
+  }
+});
+
 test("syncRun projects generated exhaustion, including zero cloud allocations, into typed evidence", async () => {
   for (const { resource, limit } of [
     { resource: "turns", limit: 10 },
@@ -10995,6 +11116,7 @@ test("syncRun projects generated exhaustion, including zero cloud allocations, i
     const runId = `generated-${resource.replace("_", "-")}-budget`;
     const workflowRunId = `ultrafuzz-${runId}`;
     const env = fakeLifecycleSmithersEnv(project, {
+      cancelStatus: "cancelled",
       inspect: workflowInspect({
         workflowRunId,
         status: "running",
@@ -11033,6 +11155,116 @@ test("syncRun projects generated exhaustion, including zero cloud allocations, i
     assert.equal(evidence?.limit, limit);
     assert.equal(evidence?.observed, limit + 1);
   }
+});
+
+test("syncRun rejects resource exhaustion evidence for a foreign workflow or task", async () => {
+  for (const mismatch of ["workflow", "task"] as const) {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project);
+    const runId = `budget-foreign-${mismatch}`;
+    const workflowRunId = `ultrafuzz-${runId}`;
+    const env = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId,
+        status: "running",
+        state: "running",
+        steps: [{ id: "node:project-discovery", state: "in-progress", attempt: 1 }]
+      }),
+      events: workflowEvents(workflowRunId, [{ type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 }])
+    });
+    const run = await startRun({ projectRoot: project, runId, env });
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    fs.writeFileSync(
+      path.join(run.value!.run_root, "resource-budget-exhausted.json"),
+      `${JSON.stringify({
+        schema_version: "ultrafuzz.resource-budget-exhaustion.v1",
+        ultrafuzz_run_id: runId,
+        workflow_run_id: mismatch === "workflow" ? `${workflowRunId}-foreign` : workflowRunId,
+        resource: "requests",
+        scope: "run",
+        limit: 1,
+        observed: 2,
+        task_id: mismatch === "task" ? "node:foreign" : "node:project-discovery",
+        recorded_at: "2026-08-15T00:00:00.000Z"
+      })}\n`,
+      "utf8"
+    );
+
+    await assert.rejects(
+      () => syncRun({ projectRoot: project, runId, env }),
+      /resource budget evidence is invalid/u,
+      mismatch
+    );
+    assert.doesNotMatch(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), /^cancel /mu);
+  }
+});
+
+test("syncRun keeps resource exhaustion nonterminal until cancellation is confirmed", async () => {
+  const exhaustedRun = async (runId: string, cancelStatus: "cancel-requested" | "failure") => {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project);
+    const workflowRunId = `ultrafuzz-${runId}`;
+    const env = fakeLifecycleSmithersEnv(project, {
+      cancelStatus,
+      inspect: workflowInspect({
+        workflowRunId,
+        status: "running",
+        state: "running",
+        steps: [{ id: "node:project-discovery", state: "in-progress", attempt: 1 }]
+      }),
+      events: workflowEvents(workflowRunId, [{ type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 }])
+    });
+    const run = await startRun({ projectRoot: project, runId, env });
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    fs.writeFileSync(
+      path.join(run.value!.run_root, "resource-budget-exhausted.json"),
+      `${JSON.stringify({
+        schema_version: "ultrafuzz.resource-budget-exhaustion.v1",
+        ultrafuzz_run_id: runId,
+        workflow_run_id: workflowRunId,
+        resource: "requests",
+        scope: "run",
+        limit: 1,
+        observed: 2,
+        task_id: "node:project-discovery",
+        recorded_at: "2026-08-15T00:00:00.000Z"
+      })}\n`,
+      "utf8"
+    );
+    return { projectRoot: project, runId, env, layout: layoutForRunRoot(run.value!.run_root) };
+  };
+
+  const requested = await exhaustedRun("budget-cancel-requested", "cancel-requested");
+  const first = await syncRun(requested);
+  assert.equal(first.ok, true, JSON.stringify(first.diagnostics));
+  assert.equal(readRunState(requested.layout).status, "running");
+  assert.equal(
+    replayEvents(requested.layout, Number.MAX_SAFE_INTEGER)
+      .records.filter((event) => event.event_type === "workflow-synced")
+      .at(-1)?.payload.resource_budget_exhausted?.resource,
+    "requests"
+  );
+
+  requested.env.SMITHERS_FAKE_CANCEL_STATUS = "cancelled";
+  const confirmed = await syncRun(requested);
+  assert.equal(confirmed.ok, true, JSON.stringify(confirmed.diagnostics));
+  assert.equal(readRunState(requested.layout).status, "canceled");
+  assert.equal(
+    fs.readFileSync(requested.env.SMITHERS_FAKE_LOG!, "utf8").match(/^cancel /gmu)?.length,
+    2,
+    "the next sync must retry the durable cancellation request"
+  );
+
+  const failed = await exhaustedRun("budget-cancel-failed", "failure");
+  const failure = await syncRun(failed);
+  assert.equal(failure.ok, true, JSON.stringify(failure.diagnostics));
+  assert.equal(readRunState(failed.layout).status, "running");
+  assert.ok(
+    failure.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_RESOURCE_BUDGET_CANCEL_FAILED"),
+    JSON.stringify(failure.diagnostics)
+  );
 });
 
 test("syncRun uses durable event sequence for the current accounting segment", async () => {

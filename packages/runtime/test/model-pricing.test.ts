@@ -14,15 +14,18 @@ const publicLookup = async () => [{ address: "93.184.216.34", family: 4 }];
 
 function streamResponse(
   chunks: Uint8Array[],
-  options: { contentLength?: number; onCancel?: () => void; status?: number } = {}
+  options: { contentLength?: number; onCancel?: () => void; status?: number; stayOpen?: boolean } = {}
 ): Response {
   let index = 0;
   return new Response(
     new ReadableStream<Uint8Array>({
       pull(controller) {
         const chunk = chunks[index++];
-        if (chunk === undefined) controller.close();
-        else controller.enqueue(chunk);
+        if (chunk === undefined) {
+          if (options.stayOpen !== true) controller.close();
+          return;
+        }
+        controller.enqueue(chunk);
       },
       cancel() {
         options.onCancel?.();
@@ -46,6 +49,9 @@ test("pricing catalog URL validation permits only public HTTPS destinations", as
     "https://user:secret@pricing.example/catalog.json",
     "https://pricing.example/catalog.json?version=1",
     "https://pricing.example/catalog.json#latest",
+    "https://pricing.example/catalog.json?",
+    "https://pricing.example/catalog.json#",
+    "https://pricing.example/catalog.json?#",
     "https://localhost/catalog.json",
     "https://metadata.google.internal/computeMetadata/v1/",
     "https://127.0.0.1/catalog.json",
@@ -77,12 +83,23 @@ test("pricing catalog body accepts the exact limit and cancels one byte over", a
   let cancelled = false;
   await assert.rejects(
     readBoundedPricingCatalogResponse(
-      streamResponse([new Uint8Array(8), new Uint8Array(1)], { onCancel: () => (cancelled = true) }),
+      streamResponse([new Uint8Array(8), new Uint8Array(1)], {
+        onCancel: () => (cancelled = true),
+        stayOpen: true
+      }),
       8
     ),
     /maximum response size/u
   );
   assert.equal(cancelled, true);
+});
+
+test("pricing catalog body ignores empty chunks without retaining them", async () => {
+  const chunks = Array.from({ length: 70_000 }, () => new Uint8Array());
+  chunks.push(new TextEncoder().encode("{}"));
+
+  const result = await readBoundedPricingCatalogResponse(streamResponse(chunks), 2);
+  assert.equal(result.toString("utf8"), "{}");
 });
 
 test("pricing catalog body cancels oversized declared and dishonest-length responses", async () => {
@@ -99,7 +116,11 @@ test("pricing catalog body cancels oversized declared and dishonest-length respo
   let dishonestCancelled = false;
   await assert.rejects(
     readBoundedPricingCatalogResponse(
-      streamResponse([new Uint8Array(9)], { contentLength: 1, onCancel: () => (dishonestCancelled = true) }),
+      streamResponse([new Uint8Array(9)], {
+        contentLength: 1,
+        onCancel: () => (dishonestCancelled = true),
+        stayOpen: true
+      }),
       8
     ),
     /maximum response size/u
@@ -170,6 +191,35 @@ test("live pricing timeout aborts a stalled fetch", async () => {
       })
   });
   assert.equal(result.metadata.status, "unavailable");
+});
+
+test("live pricing timeout aborts a stalled response body", async () => {
+  let cancelled = false;
+  const started = performance.now();
+  const keepAlive = setTimeout(() => undefined, 100);
+  const result = await resolveLiveModelPricing({
+    models: ["gpt-test"],
+    env: { ULTRAFUZZ_PRICING_CATALOG_URL: "https://pricing.example/catalog.json" },
+    lookupHostname: publicLookup,
+    timeoutMs: 5,
+    fetchImpl: async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          pull() {
+            // Deliberately neither enqueue nor close: the response has arrived,
+            // but its first body chunk never does.
+          },
+          cancel: () => {
+            cancelled = true;
+          }
+        })
+      )
+  });
+  clearTimeout(keepAlive);
+
+  assert.equal(result.metadata.status, "unavailable");
+  assert.equal(cancelled, true);
+  assert.ok(performance.now() - started < 100, "body timeout should use the request deadline");
 });
 
 test("live pricing bounds DNS and pins the validated answer against rebinding", async () => {

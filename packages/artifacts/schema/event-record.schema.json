@@ -1020,7 +1020,7 @@
             "observed": {
               "type": "number",
               "minimum": 0,
-              "maximum": 9007199254740991
+              "maximum": 9007199254740992
             },
             "node_id": {
               "$ref": "#/$defs/nonEmptyString"

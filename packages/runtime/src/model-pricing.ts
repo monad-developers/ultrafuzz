@@ -9,6 +9,7 @@ import { parseStrictJsonBytes } from "@ultrafuzz/artifacts";
 const DEFAULT_PRICING_CATALOG_URL = "https://models.dev/api.json";
 const DEFAULT_PRICING_TIMEOUT_MS = 5_000;
 export const MAX_PRICING_CATALOG_BYTES = 25 * 1024 * 1024;
+const MAX_PRICING_CATALOG_CHUNKS = 65_536;
 const MOONSHOT_PROVIDER_ID = "moonshotai";
 const DEEPSEEK_PROVIDER_ID = "deepseek";
 
@@ -181,10 +182,15 @@ export async function resolveLiveModelPricing(input: {
       destination.addresses
     );
     if (!response.ok) {
-      await response.body?.cancel(`pricing catalog returned HTTP ${response.status}`);
+      if (response.body !== null) {
+        await settlePricingCancellation(
+          () => response.body!.cancel(`pricing catalog returned HTTP ${response.status}`),
+          signal
+        );
+      }
       throw new Error(`pricing catalog returned HTTP ${response.status}`);
     }
-    const bytes = await readBoundedPricingCatalogResponse(response);
+    const bytes = await readBoundedPricingCatalogResponse(response, MAX_PRICING_CATALOG_BYTES, signal);
     // models.dev is a transient third-party envelope, not retained Ultrafuzz
     // evidence. Its provider/model keys are intentionally dynamic, but its
     // bytes must still meet the shared strict JSON and UTF-8 contract.
@@ -232,6 +238,12 @@ async function validatePricingCatalogDestination(
   lookupHostname: PricingHostnameLookup = async (hostname) => dnsLookup(hostname, { all: true, verbatim: true }),
   signal?: AbortSignal
 ): Promise<ValidatedPricingCatalogDestination> {
+  // URL normalisation erases empty delimiters (`https://host/path?` becomes a
+  // URL with an empty search value). Reject the raw delimiters first so empty
+  // queries/fragments have the same policy as non-empty ones.
+  if (value.includes("?") || value.includes("#")) {
+    throw new Error("pricing catalog URL must not contain a query or fragment");
+  }
   let parsed: URL;
   try {
     parsed = new URL(value);
@@ -365,14 +377,20 @@ export function pricingCatalogResponseFromIncoming(incoming: IncomingMessage): R
 
 export async function readBoundedPricingCatalogResponse(
   response: Response,
-  maxBytes = MAX_PRICING_CATALOG_BYTES
+  maxBytes = MAX_PRICING_CATALOG_BYTES,
+  signal?: AbortSignal
 ): Promise<Buffer> {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_PRICING_CATALOG_BYTES) {
     throw new Error("pricing catalog response limit is invalid");
   }
   const declaredLength = response.headers.get("content-length");
   if (declaredLength !== null && /^\d+$/u.test(declaredLength) && Number(declaredLength) > maxBytes) {
-    await response.body?.cancel("pricing catalog exceeded the maximum response size");
+    if (response.body !== null) {
+      await settlePricingCancellation(
+        () => response.body!.cancel("pricing catalog exceeded the maximum response size"),
+        signal
+      );
+    }
     throw new Error("pricing catalog exceeded the maximum response size");
   }
   if (response.body === null) return Buffer.alloc(0);
@@ -382,20 +400,87 @@ export async function readBoundedPricingCatalogResponse(
   let totalBytes = 0;
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await readPricingCatalogChunk(reader, signal);
       if (done) break;
-      if (value === undefined) continue;
-      totalBytes += value.byteLength;
-      if (totalBytes > maxBytes) {
-        await reader.cancel("pricing catalog exceeded the maximum response size");
+      if (value === undefined || value.byteLength === 0) continue;
+      if (value.byteLength > maxBytes - totalBytes) {
+        await settlePricingCancellation(
+          () => reader.cancel("pricing catalog exceeded the maximum response size"),
+          signal
+        );
         throw new Error("pricing catalog exceeded the maximum response size");
       }
+      if (chunks.length >= MAX_PRICING_CATALOG_CHUNKS) {
+        await settlePricingCancellation(() => reader.cancel("pricing catalog response is too fragmented"), signal);
+        throw new Error("pricing catalog response is too fragmented");
+      }
+      totalBytes += value.byteLength;
       chunks.push(value);
     }
   } finally {
-    reader.releaseLock();
+    try {
+      reader.releaseLock();
+    } catch {
+      // An adversarial stream may keep its read promise pending after the
+      // request deadline. It is already cancelled by the abort handler and is
+      // never reused; retaining the lock is safer than extending the deadline.
+    }
   }
   return Buffer.concat(chunks, totalBytes);
+}
+
+async function settlePricingCancellation(cancel: () => Promise<void>, signal: AbortSignal | undefined): Promise<void> {
+  const cancellation = cancel().catch(() => undefined);
+  if (signal === undefined) {
+    await cancellation;
+    return;
+  }
+  if (signal.aborted) return;
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", finish);
+      resolve();
+    };
+    signal.addEventListener("abort", finish, { once: true });
+    void cancellation.then(finish);
+    if (signal.aborted) finish();
+  });
+}
+
+async function readPricingCatalogChunk(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  signal: AbortSignal | undefined
+): Promise<{ done: boolean; value?: Uint8Array }> {
+  if (signal === undefined) return await reader.read();
+  if (signal.aborted) {
+    void reader.cancel(signal.reason).catch(() => undefined);
+    throw signal.reason;
+  }
+  return await new Promise<{ done: boolean; value?: Uint8Array }>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = (): void => {
+      void reader.cancel(signal.reason).catch(() => undefined);
+      finish(() => reject(signal.reason));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    void reader.read().then(
+      (result) => finish(() => resolve(result)),
+      (error) => finish(() => reject(error))
+    );
+  });
 }
 
 function pricesForModels(catalog: unknown, models: string[]): Map<string, ModelPricing> {
@@ -414,8 +499,8 @@ function pricesForModels(catalog: unknown, models: string[]): Map<string, ModelP
       if (!isRecord(provider.models)) {
         continue;
       }
-      const match = Object.entries(provider.models).find(([id]) => id === model);
-      const pricing = pricingFromCatalogModel(match?.[1]);
+      const match = Object.hasOwn(provider.models, model) ? provider.models[model] : undefined;
+      const pricing = pricingFromCatalogModel(match);
       if (pricing !== undefined) {
         result.set(model, pricing);
         break;
