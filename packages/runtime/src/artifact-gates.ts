@@ -3555,44 +3555,82 @@ function timestampField(
 }
 
 function constrainedShellTokens(command: string): string[] | undefined {
-  let quote: "'" | '"' | undefined;
-  let escaped = false;
-  for (let index = 0; index < command.length; index += 1) {
-    const character = command[index]!;
-    if (escaped) {
-      escaped = false;
+  const tokens: string[] = [];
+  let index = 0;
+
+  const skipWhitespace = (): void => {
+    while (command[index] === " " || command[index] === "\t") index += 1;
+  };
+
+  const readWord = (redirectOperand = false): string | undefined => {
+    const start = index;
+    let quote: "'" | '"' | undefined;
+    let escaped = false;
+    while (index < command.length) {
+      const character = command[index]!;
+      if (escaped) {
+        escaped = false;
+        index += 1;
+        continue;
+      }
+      if (character === "\\" && quote !== "'") {
+        escaped = true;
+        index += 1;
+        continue;
+      }
+      if (character === "`" || (character === "$" && (redirectOperand || command[index + 1] === "("))) {
+        return undefined;
+      }
+      if (quote !== undefined) {
+        if (character === quote) quote = undefined;
+        index += 1;
+        continue;
+      }
+      if (character === "'" || character === '"') {
+        quote = character;
+        index += 1;
+        continue;
+      }
+      if (character === "\n" || character === "\r") return undefined;
+      if (character === " " || character === "\t") break;
+      if (character === ">" || character === "&") break;
+      if (
+        character === "#" ||
+        character === ";" ||
+        character === "|" ||
+        character === "<" ||
+        character === "`" ||
+        (character === "$" && command[index + 1] === "(")
+      ) {
+        return undefined;
+      }
+      index += 1;
+    }
+    if (quote !== undefined || escaped || index === start) return undefined;
+    return command.slice(start, index);
+  };
+
+  skipWhitespace();
+  while (index < command.length) {
+    const duplication = command.slice(index).match(/^[0-9]+>&[0-9]+(?=$|[\s>])/u);
+    const redirection = duplication === null ? command.slice(index).match(/^(?:(?:[0-9]+)?(?:>>|>)|&>)/u) : null;
+    if (redirection !== null || duplication !== null) {
+      index += (redirection ?? duplication)![0].length;
+      if (redirection !== null) {
+        if (command[index] === "(") return undefined;
+        skipWhitespace();
+        if (readWord(true) === undefined) return undefined;
+      }
+      skipWhitespace();
       continue;
     }
-    if (character === "\\" && quote !== "'") {
-      escaped = true;
-      continue;
-    }
-    if (quote !== undefined) {
-      if (character === quote) quote = undefined;
-      continue;
-    }
-    if (character === "'" || character === '"') {
-      quote = character;
-      continue;
-    }
-    if (
-      character === "#" ||
-      character === ";" ||
-      character === "&" ||
-      character === "|" ||
-      character === "<" ||
-      character === ">" ||
-      character === "`" ||
-      character === "\n" ||
-      character === "\r" ||
-      (character === "$" && command[index + 1] === "(")
-    ) {
-      return undefined;
-    }
+    const token = readWord();
+    if (token === undefined) return undefined;
+    tokens.push(token);
+    if (/^[0-9]+$/u.test(token) && command.slice(index).startsWith("&>")) return undefined;
+    skipWhitespace();
   }
-  if (quote !== undefined || escaped) return undefined;
-  const tokens = command.trim().split(/\s+/u);
-  return tokens;
+  return tokens.length > 0 ? tokens : undefined;
 }
 
 function exactReconCommandFlagValues(command: string, flag: "--timeout" | "--test-limit" | "--seq-len"): string[] {
