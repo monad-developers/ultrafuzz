@@ -71,6 +71,7 @@ import { inspectSmithersInstallation, runSmithersInspectionCommand } from "../sr
 import { acquireWorkflowExecutionSnapshotAnchor } from "../src/workflow-execution-snapshot-capability.js";
 import { materializeWorkflowExecutionSnapshot } from "../src/workflow-integrity.js";
 import { linkedWorkflowExecutionEnvironment } from "../src/start-run.js";
+import { addOpenRouterProfile } from "./openrouter-profile-fixture.js";
 
 const runningUnderBun = typeof process.versions.bun === "string";
 
@@ -4336,6 +4337,7 @@ test("validate applies registry overwrite order and rejects nullish or shadowed 
   const project = tempProject();
   const init = initProject({ projectRoot: project, force: true });
   assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+  addOpenRouterProfile(project);
   writeSmallTopology(project);
   const registryPath = path.join(project, ".smithers/agents/index.ts");
   const factories =
@@ -4414,6 +4416,7 @@ test("validate ignores textual, type-only, and cyclic agentFactories lookalikes"
   const project = tempProject();
   const init = initProject({ projectRoot: project, force: true });
   assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+  addOpenRouterProfile(project);
   writeSmallTopology(project);
   fs.writeFileSync(
     path.join(project, ".smithers/agents/index.ts"),

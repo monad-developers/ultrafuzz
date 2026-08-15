@@ -28,6 +28,7 @@ import {
 } from "../src/index.js";
 import { SMITHERS_COMPATIBILITY_PATCHES } from "../src/smithers.js";
 import { SMITHERS_BIN_PATH, SMITHERS_VERSION } from "../src/smithers-package.js";
+import { addOpenRouterProfile } from "./openrouter-profile-fixture.js";
 
 const WORKFLOW_RUN_ID = "ultrafuzz-inspect-run";
 
@@ -101,14 +102,6 @@ ${requiredCommand === undefined ? "" : `    required_commands:\n      - ${requir
   fs.appendFileSync(
     path.join(project, ".ultrafuzz", "prompts", "setup", "project-discovery.md"),
     "\n{{finding_reachability_vocabulary}}\n{{finding_note_key_vocabulary}}\n",
-    "utf8"
-  );
-}
-
-function addOpenRouterProfile(project: string): void {
-  fs.appendFileSync(
-    path.join(project, "ultrafuzz.toml"),
-    '\n[models.openrouter]\nagent = "OpenRouterAgent"\nmodel = "~anthropic/claude-sonnet-latest:free"\nreasoning = "high"\n',
     "utf8"
   );
 }
