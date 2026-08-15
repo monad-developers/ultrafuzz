@@ -1301,7 +1301,19 @@ function verifyLensReferenceExpectationPreservation(
 
   for (const [propertyIndex, property] of catalog.properties.entries()) {
     const expectedReferenceIds = property.reference_expectations ?? [];
-    if (property.reference_expectations !== undefined && expectedReferenceIds.length === 0) {
+    const sourcePairs = new Set(
+      property.sources.map((source) => `${source.source_node_id}\u0000${source.source_property_id}`)
+    );
+    const lensReferenceIds = new Set(
+      [...lensRows.values()]
+        .filter((row) => sourcePairs.has(`${row.sourceNodeId}\u0000${row.propertyId}`))
+        .flatMap((row) => row.expectationIds)
+    );
+    if (
+      property.reference_expectations !== undefined &&
+      expectedReferenceIds.length === 0 &&
+      lensReferenceIds.size === 0
+    ) {
       diagnostics.push({
         code: "PROPERTY_REFERENCE_EXPECTATION_OMISSION_REQUIRED",
         message: `Canonical property ${JSON.stringify(property.id)} must omit reference_expectations when no authorized identifier is carried from its source lens artifacts`,
@@ -1311,14 +1323,6 @@ function verifyLensReferenceExpectationPreservation(
       });
     }
     if (expectedReferenceIds.length === 0) continue;
-    const sourcePairs = new Set(
-      property.sources.map((source) => `${source.source_node_id}\u0000${source.source_property_id}`)
-    );
-    const lensReferenceIds = new Set(
-      [...lensRows.values()]
-        .filter((row) => sourcePairs.has(`${row.sourceNodeId}\u0000${row.propertyId}`))
-        .flatMap((row) => row.expectationIds)
-    );
     const missingReferenceIds = expectedReferenceIds.filter((expectationId) => !lensReferenceIds.has(expectationId));
     if (missingReferenceIds.length > 0) {
       diagnostics.push({
