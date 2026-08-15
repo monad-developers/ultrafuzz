@@ -76,10 +76,6 @@
       "type": "string",
       "enum": ["complete", "partial", "blocked"]
     },
-    "property_provenance_version": {
-      "type": "number",
-      "const": 1
-    },
     "usable_results": {
       "type": "boolean"
     },
@@ -564,48 +560,6 @@
         }
       ]
     },
-    "intended_entrypoints": {
-      "maxItems": 10000,
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "entrypoint": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 65536
-          },
-          "property_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 65536
-          }
-        },
-        "required": ["entrypoint", "property_id"],
-        "additionalProperties": false
-      }
-    },
-    "admitted_entrypoints": {
-      "maxItems": 10000,
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "entrypoint": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 65536
-          },
-          "property_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 65536
-          }
-        },
-        "required": ["entrypoint", "property_id"],
-        "additionalProperties": false
-      }
-    },
     "property_results": {
       "maxItems": 10000,
       "type": "array",
@@ -651,24 +605,6 @@
             },
             "uniqueItems": true
           },
-          "reason_code": {
-            "anyOf": [
-              {
-                "type": "string",
-                "enum": [
-                  "not-admitted",
-                  "not-observed",
-                  "campaign-ended",
-                  "ambiguous-entrypoint",
-                  "backend-unavailable",
-                  "execution-inconclusive"
-                ]
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
           "reason": {
             "anyOf": [
               {
@@ -682,7 +618,7 @@
             ]
           }
         },
-        "required": ["property_id", "status", "failure_ids", "coverage_metric_names", "evidence_refs"],
+        "required": ["property_id", "status", "failure_ids", "coverage_metric_names", "evidence_refs", "reason"],
         "additionalProperties": false,
         "allOf": [
           {
@@ -699,9 +635,6 @@
                 "failure_ids": {
                   "type": "array",
                   "minItems": 1
-                },
-                "reason_code": {
-                  "type": "null"
                 },
                 "reason": {
                   "type": "null"
@@ -724,9 +657,6 @@
                   "type": "array",
                   "maxItems": 0
                 },
-                "reason_code": {
-                  "type": "null"
-                },
                 "reason": {
                   "type": "null"
                 }
@@ -747,10 +677,6 @@
                 "failure_ids": {
                   "type": "array",
                   "maxItems": 0
-                },
-                "reason_code": {
-                  "type": "string",
-                  "minLength": 1
                 },
                 "reason": {
                   "type": "string",
@@ -918,71 +844,10 @@
     "paths",
     "evidence_files",
     "coverage",
+    "property_results",
     "failures"
   ],
   "additionalProperties": false,
   "$id": "urn:ultrafuzz:schema:artifacts:property-campaign:3",
-  "title": "Ultrafuzz property campaign result",
-  "allOf": [
-    {
-      "if": {
-        "properties": {
-          "property_provenance_version": {}
-        },
-        "required": ["property_provenance_version"]
-      },
-      "then": {
-        "required": ["intended_entrypoints", "admitted_entrypoints", "property_results"],
-        "properties": {
-          "intended_entrypoints": {},
-          "admitted_entrypoints": {},
-          "property_results": {
-            "type": "array",
-            "items": {
-              "allOf": [
-                {
-                  "if": {
-                    "type": "object",
-                    "properties": {
-                      "status": {
-                        "enum": ["passed", "failed"]
-                      }
-                    },
-                    "required": ["status"]
-                  },
-                  "then": {
-                    "type": "object",
-                    "properties": {
-                      "reason_code": {},
-                      "reason": {}
-                    },
-                    "required": ["reason_code", "reason"]
-                  }
-                },
-                {
-                  "if": {
-                    "type": "object",
-                    "properties": {
-                      "status": {
-                        "enum": ["inconclusive", "not-executed"]
-                      }
-                    },
-                    "required": ["status"]
-                  },
-                  "then": {
-                    "type": "object",
-                    "properties": {
-                      "reason_code": {},
-                      "reason": {}
-                    },
-                    "required": ["reason_code", "reason"]
-                  }
-                }
-              ]
-            }
-          }
-        }
-      }
-    }
-  ]
+  "title": "Ultrafuzz property campaign result"
 }

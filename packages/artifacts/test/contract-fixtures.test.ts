@@ -481,7 +481,6 @@ test("property-campaign v3 JSON Schema and Zod agree on every portable status co
     failure_ids: failureIds,
     coverage_metric_names: [],
     evidence_refs: [],
-    reason_code: status === "inconclusive" || status === "not-executed" ? "execution-inconclusive" : null,
     reason
   });
   const failure = (
@@ -961,7 +960,6 @@ test("finding-derived and property-campaign resource bounds agree in Ajv and Zod
     failure_ids: [],
     coverage_metric_names: [],
     evidence_refs: [],
-    reason_code: null,
     reason: null
   };
   const campaignRecords = {

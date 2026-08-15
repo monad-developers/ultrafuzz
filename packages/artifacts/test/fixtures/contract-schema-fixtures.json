@@ -836,8 +836,6 @@
         "metrics": [],
         "unavailable_reason": "The backend did not start."
       },
-      "intended_entrypoints": [],
-      "admitted_entrypoints": [],
       "property_results": [],
       "failures": []
     },

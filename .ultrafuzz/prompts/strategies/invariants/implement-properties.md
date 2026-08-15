@@ -112,18 +112,12 @@ cannot be lost during priority filtering.
      authorized under Recon, such as by setting the mutable root admin, owner,
      or bootstrap caller to `address(this)` before `super.setUp()` in the Recon
      constructor path.
-   - Give every independently falsifiable property its own canonical
-     observation identity and backend-admitted assertion/invariant entrypoint.
-     The entrypoint name, emitted failure metadata, and implementation record
-     must carry exactly one `property_id`; never put several property IDs behind
-     one assertion entrypoint merely because they share an action handler or a
-     Solidity helper. Shared action handlers and read-only helper code remain
-     permitted when property observations and failure identities stay separate.
-   - Before finalizing the suite, inspect the generated source and ABI (when
-     available) for entrypoints that observe more than one property. Split those
-     observations, or mark the affected properties `blocked` with an actionable
-     reason; do not claim implementation by counting a shared entrypoint once
-     for every property.
+   - Give every independently falsifiable property its own public
+     assertion/invariant entrypoint. Each entrypoint must test exactly one
+     canonical `property_id`, so one failing property cannot retire unrelated
+     properties from the backend campaign. Shared action handlers and read-only
+     helpers remain permitted; only the property observation entrypoints must
+     be separate.
 
 4. Preserve implementation evidence.
    - Run the narrowest useful build or test command that demonstrates the
@@ -135,6 +129,12 @@ cannot be lost during priority filtering.
      requires it. If the smoke reverts before fuzzing, repair the harness before
      writing a successful implementation handoff; if tooling or dependencies
      are absent, record the blocker.
+   - Before accepting the suite, compare the public property entrypoints in its
+     compiled target ABI with Recon's discovered/admitted test list from the
+     smoke. If Recon omits an entrypoint, make its assertion directly
+     discoverable and rerun the smoke. If it still cannot be admitted, mark
+     that property `blocked` with the omitted entrypoint and diagnostic; never
+     report an omitted property as implemented.
    - If dependencies or repository layout block compilation, record the exact
      blocker and leave the implemented files and artifacts in a reviewable
      state.

@@ -42,6 +42,7 @@ import {
 import { WORKFLOW_CONTROL_INTEGRITY_SCHEMA_VERSION } from "../src/runtime-contracts.js";
 
 const CAMPAIGN_EVIDENCE_BYTES = Buffer.from("x", "utf8");
+const CAMPAIGN_EVIDENCE_SHA256 = createHash("sha256").update(CAMPAIGN_EVIDENCE_BYTES).digest("hex");
 
 function tempProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-runtime-gates-"));
@@ -247,18 +248,7 @@ function materializeFixtureCampaignEvidence(
       for (const entry of evidenceFiles) {
         if (typeof entry === "object" && entry !== null && typeof (entry as { path?: unknown }).path === "string") {
           const evidencePath = (entry as { path: string }).path;
-          const typedEvidence =
-            evidencePath === (parsed as { paths: { log: string; raw_results: string } }).paths.log ||
-            evidencePath === (parsed as { paths: { log: string; raw_results: string } }).paths.raw_results
-              ? Buffer.from(
-                  JSON.stringify({
-                    generated_suite_entrypoints: (parsed as { intended_entrypoints: unknown }).intended_entrypoints,
-                    backend_result_entrypoints: (parsed as { admitted_entrypoints: unknown }).admitted_entrypoints
-                  }),
-                  "utf8"
-                )
-              : CAMPAIGN_EVIDENCE_BYTES;
-          writeArtifactFile(layout, nodeId, evidencePath, typedEvidence);
+          writeArtifactFile(layout, nodeId, evidencePath, CAMPAIGN_EVIDENCE_BYTES);
           materialized.push(evidencePath);
         }
       }
@@ -8136,13 +8126,11 @@ type CampaignFailureFixture = {
 
 function currentCampaignFailure(failure: CampaignFailureFixture): Record<string, unknown> {
   const status = failure.status ?? "reproduced";
-  const propertyEntrypoint =
-    failure.property_ids?.length === 1 ? `property_${failure.property_ids[0]}` : `handler_${failure.id}()`;
   return {
     id: failure.id,
     status,
     property_ids: failure.property_ids ?? [],
-    entrypoint: failure.entrypoint ?? propertyEntrypoint,
+    entrypoint: failure.entrypoint ?? `handler_${failure.id}()`,
     sequence: failure.sequence ?? [`call ${failure.id}`],
     precondition_evidence: failure.precondition_evidence ?? ["fixture precondition held"],
     raw_reproducer_ref: failure.raw_reproducer_ref ?? campaignFixturePaths.raw_results,
@@ -8172,23 +8160,8 @@ function currentCampaign(
     if (typeof failure.deterministic_reproducer_ref === "string")
       evidencePaths.add(failure.deterministic_reproducer_ref);
   }
-  const typedEvidenceBytes = Buffer.from(
-    JSON.stringify({
-      generated_suite_entrypoints: implementedPropertyIds.map((propertyId) => ({
-        entrypoint: `property_${propertyId}`,
-        property_id: propertyId
-      })),
-      backend_result_entrypoints: implementedPropertyIds.map((propertyId) => ({
-        entrypoint: `property_${propertyId}`,
-        property_id: propertyId
-      }))
-    }),
-    "utf8"
-  );
-  const typedEvidenceSha256 = createHash("sha256").update(typedEvidenceBytes).digest("hex");
   return {
     schema_version: "ultrafuzz.property-campaign.v3",
-    property_provenance_version: 1,
     campaign_plan_ref: "campaign-plan.json",
     implemented_properties_ref: "implemented-properties.json",
     findings_ref: "findings.json",
@@ -8220,28 +8193,14 @@ function currentCampaign(
     paths: campaignFixturePaths,
     evidence_files: [...evidencePaths].map((evidencePath) => ({
       path: evidencePath,
-      size_bytes:
-        evidencePath === campaignFixturePaths.log || evidencePath === campaignFixturePaths.raw_results
-          ? typedEvidenceBytes.length
-          : 1,
-      sha256:
-        evidencePath === campaignFixturePaths.log || evidencePath === campaignFixturePaths.raw_results
-          ? typedEvidenceSha256
-          : createHash("sha256").update(CAMPAIGN_EVIDENCE_BYTES).digest("hex")
+      size_bytes: 1,
+      sha256: CAMPAIGN_EVIDENCE_SHA256
     })),
     coverage: {
       status: "reported",
       metrics: [{ name: "executions", value: 1, unit: "count", source_ref: campaignFixturePaths.raw_results }],
       unavailable_reason: null
     },
-    intended_entrypoints: implementedPropertyIds.map((propertyId) => ({
-      entrypoint: `property_${propertyId}`,
-      property_id: propertyId
-    })),
-    admitted_entrypoints: implementedPropertyIds.map((propertyId) => ({
-      entrypoint: `property_${propertyId}`,
-      property_id: propertyId
-    })),
     property_results: implementedPropertyIds.map((propertyId) => {
       const failureIds = failures.flatMap((failure) =>
         Array.isArray(failure.property_ids) &&
@@ -8257,7 +8216,6 @@ function currentCampaign(
             failure_ids: failureIds,
             coverage_metric_names: ["executions"],
             evidence_refs: [campaignFixturePaths.raw_results],
-            reason_code: null,
             reason: null
           }
         : executionStatus === "complete"
@@ -8267,7 +8225,6 @@ function currentCampaign(
               failure_ids: [],
               coverage_metric_names: ["executions"],
               evidence_refs: [campaignFixturePaths.raw_results],
-              reason_code: null,
               reason: null
             }
           : {
@@ -8276,7 +8233,6 @@ function currentCampaign(
               failure_ids: [],
               coverage_metric_names: ["executions"],
               evidence_refs: [campaignFixturePaths.raw_results],
-              reason_code: "execution-inconclusive",
               reason: "The partial fixture campaign did not establish a pass."
             };
     }),
@@ -8604,7 +8560,6 @@ function synchronizeStrictCampaignTimeoutFixture(fixture: CampaignTimeoutFixture
       failure_ids: [],
       coverage_metric_names: [],
       evidence_refs: [],
-      reason_code: "backend-unavailable",
       reason: "The timeout-evidence fixture produced no usable results."
     }));
     fixture.backend.evidence_files = fixture.backend.evidence_files.filter(
@@ -8615,7 +8570,6 @@ function synchronizeStrictCampaignTimeoutFixture(fixture: CampaignTimeoutFixture
       ...result,
       status: "inconclusive",
       failure_ids: [],
-      reason_code: "execution-inconclusive",
       reason: "The timeout-evidence fixture ended before establishing a pass."
     }));
   }
@@ -9195,15 +9149,11 @@ test("current campaign timeout gate derives early-exit outcome from recorded dur
   const fullConfiguredPartial = runCampaignTimeoutGate((fixture) => {
     fixture.backend.campaign_outcome = "partial";
     fixture.summary.outcome = "partial";
-    fixture.backend.property_results[0] = {
-      ...fixture.backend.property_results[0],
-      status: "inconclusive",
-      failure_ids: [],
-      reason_code: "execution-inconclusive",
-      reason: "The campaign did not establish a pass."
-    };
   });
-  assert.equal(fullConfiguredPartial.ok, true, JSON.stringify(fullConfiguredPartial.diagnostics));
+  assert.equal(fullConfiguredPartial.ok, false);
+  assert.ok(
+    fullConfiguredPartial.diagnostics.some((diagnostic) => diagnostic.code === "CAMPAIGN_TIMEOUT_OUTCOME_MISMATCH")
+  );
 
   const fullDurationProcessExit = runCampaignTimeoutGate((fixture) => {
     fixture.backend.termination_reason = "process-exit";
