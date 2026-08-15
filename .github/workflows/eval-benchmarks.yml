@@ -124,7 +124,7 @@ jobs:
             '' \
             '[model_providers.openrouter.auth]' \
             'command = "node"' \
-            'args = ["-e", "process.stdout.write(process.env[process.argv[1]] ?? '\''\'')", "OPENROUTER_API_KEY"]' \
+            'args = ["-e", "process.stdout.write(process.env[process.argv[1]] || String())", "OPENROUTER_API_KEY"]' \
             > "$probe_home/config.toml"
           chmod 600 "$probe_home/config.toml"
           CODEX_HOME="$probe_home" timeout --signal=TERM --kill-after=30s 10m \
