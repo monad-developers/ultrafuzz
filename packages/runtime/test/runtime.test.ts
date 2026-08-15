@@ -1939,6 +1939,11 @@ const V0_0_2_STOCK_CODEX_ADAPTER = [
   ""
 ].join("\n");
 
+const V0_32_STOCK_CODEX_ADAPTER = fs.readFileSync(
+  path.resolve("test/fixtures/stock-smithers-0.32-codex.ts.txt"),
+  "utf8"
+);
+
 test(
   "init supports Modal-style directory and child device splits without weakening file identity checks",
   { concurrency: false, skip: process.platform === "win32" || !fs.existsSync("/proc/self/fd") },
@@ -2220,15 +2225,11 @@ test("non-force init migrates the exact generated 0.32 package and immediately p
   };
   fs.writeFileSync(manifestPath, `${JSON.stringify(oldManifest, null, 2)}\n`, "utf8");
   const codexPath = path.join(project, ".smithers", "agents", "codex.ts");
-  const stock032Source = fs
-    .readFileSync(codexPath, "utf8")
-    .replaceAll("@smthrs/agents", "@smithers-orchestrator/agents")
-    .replaceAll('from "smthrs"', 'from "smithers-orchestrator"');
   assert.equal(
-    crypto.createHash("sha256").update(stock032Source).digest("hex"),
-    "e7e845b2bccf5b7d41a3f0cedfaec7a1457580126513ff96f282a36307c7da98"
+    crypto.createHash("sha256").update(V0_32_STOCK_CODEX_ADAPTER).digest("hex"),
+    "b932fb7da3c05fdc662f60359e8a751aaabd236ca4072dfeaade1a7bb25a01b5"
   );
-  fs.writeFileSync(codexPath, stock032Source, "utf8");
+  fs.writeFileSync(codexPath, V0_32_STOCK_CODEX_ADAPTER, "utf8");
 
   const upgraded = initProject({ projectRoot: project });
 
@@ -6360,7 +6361,7 @@ nodes:
     true,
     workflowSource
   );
-  assert.match(workflowSource, /\$\{task\.runtimeContext\}\\n\\n\$\{operatorPrompt\}/u);
+  assert.match(workflowSource, /task\.runtimeContext,\s*"\\n\\n",\s*operatorPrompt/u);
 });
 
 test("compileSmithersWorkflow exhausts same-profile retries before ordered fallback", async () => {
