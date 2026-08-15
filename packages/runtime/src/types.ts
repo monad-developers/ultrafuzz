@@ -170,6 +170,14 @@ export interface PlanRunValue {
 }
 
 export interface StartRunInput extends PlanRunInput {
+  /**
+   * Trusted embedder guard over the exact in-memory plan that will execute.
+   * Runs after configuration/topology resolution and before run materialization.
+   */
+  verifyLaunchPlan?: (plan: {
+    resolvedConfig: Readonly<ResolvedConfig>;
+    expandedGraph: Readonly<ExpandedGraph>;
+  }) => void | Promise<void>;
   /** Execution-provider probe override for embedders and isolated tests. */
   requiredCommandProbe?: (
     commands: readonly string[]

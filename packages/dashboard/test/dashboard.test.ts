@@ -499,6 +499,24 @@ test("dashboard run launch requires a matching preview confirmation and appends 
     assert.equal((preview.configuredBudget as Record<string, unknown>).maxParallelAgents, 2);
     assert.match(String(preview.confirmationDigest), /^[a-f0-9]{64}$/u);
 
+    const configPath = path.join(projectRoot, "ultrafuzz.toml");
+    const confirmedConfig = fs.readFileSync(configPath, "utf8");
+    const changedConfig = confirmedConfig.replace(
+      "controller_lease_seconds = 30",
+      "controller_lease_seconds = 30\nmax_parallel_nodes = 7"
+    );
+    assert.notEqual(changedConfig, confirmedConfig);
+    fs.writeFileSync(configPath, changedConfig, "utf8");
+    const changedAfterPreview = await dashboardFetch(handle, "/api/commands/run", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(
+        commandRequest({ confirmed: true, confirmationDigest: preview.confirmationDigest, maxConcurrency: 2 })
+      )
+    });
+    assert.equal(changedAfterPreview.status, 409);
+    fs.writeFileSync(configPath, confirmedConfig, "utf8");
+
     const stale = await dashboardFetch(handle, "/api/commands/run", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -520,7 +538,8 @@ test("dashboard run launch requires a matching preview confirmation and appends 
     });
     assert.equal(accepted.status, 202, await accepted.text());
 
-    const audit = readDashboardAuditJournal(path.join(projectRoot, ".ultrafuzz", "dashboard-audit.jsonl"));
+    const auditPath = path.join(projectRoot, ".ultrafuzz", "dashboard-audit.jsonl");
+    const audit = await waitForDashboardAuditRecord(auditPath, "run-launch");
     const launch = audit.records.at(-1);
     assert.equal(launch?.kind, "run-launch");
     if (launch?.kind !== "run-launch") assert.fail("expected a run-launch audit record");
@@ -1442,6 +1461,22 @@ nodes:
 `,
     "utf8"
   );
+}
+
+async function waitForDashboardAuditRecord(
+  auditPath: string,
+  kind: "run-launch",
+  timeoutMs = 5000
+): Promise<ReturnType<typeof readDashboardAuditJournal>> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (fs.existsSync(auditPath)) {
+      const audit = readDashboardAuditJournal(auditPath);
+      if (audit.records.some((record) => record.kind === kind)) return audit;
+    }
+    if (Date.now() >= deadline) assert.fail(`dashboard audit record ${kind} was not written`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
 
 async function getJson<T>(

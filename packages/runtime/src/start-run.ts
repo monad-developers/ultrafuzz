@@ -107,8 +107,10 @@ const WORKFLOW_CONTROLLER_ONLY_ENVIRONMENT_VARIABLES = new Set([
 
 export async function startRun(input: StartRunInput) {
   const planned = await planRun(input, {
-    beforeMaterialize: async ({ resolvedConfig, expandedGraph }) =>
-      requiredCommandPreflightDiagnostics(input, resolvedConfig, expandedGraph)
+    beforeMaterialize: async ({ resolvedConfig, expandedGraph }) => {
+      await input.verifyLaunchPlan?.({ resolvedConfig, expandedGraph });
+      return requiredCommandPreflightDiagnostics(input, resolvedConfig, expandedGraph);
+    }
   });
   if (!planned.ok || !planned.value) {
     return runtimeFailure<StartRunValue>(planned.diagnostics);

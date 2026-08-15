@@ -68,7 +68,9 @@ import {
 } from "@ultrafuzz/runtime";
 import { isSensitiveKeyName, redactSecretsInText } from "@ultrafuzz/security";
 import {
+  canonicalJson,
   expandTopology,
+  fingerprintGraph,
   FINISH_NODE_ID,
   loadTopology,
   resolveTopologyPath,
@@ -1400,6 +1402,14 @@ class DashboardApp {
       throw new HttpError(400, "project configuration must validate before a run can launch");
     }
     const expanded = await this.expandCurrentTopology(this.loadTopologyForDisplay());
+    return this.launchPreviewForPlan(body, resolved, expanded);
+  }
+
+  private launchPreviewForPlan(
+    body: JsonObject,
+    resolved: ResolvedConfig,
+    expanded: ExpandedGraph
+  ): DashboardLaunchPreview {
     const requestedAgent = optionalStringField(body, "agent");
     const defaultProfileId = resolved.retry.agents[0] ?? resolved.models.default;
     const profileIds = uniqueStrings([
@@ -1432,9 +1442,17 @@ class DashboardApp {
         expandedAttempts: expanded.nodes.length
       }
     };
+    const confirmationDigest = sha256Bytes(
+      JSON.stringify({
+        schema_version: "ultrafuzz.dashboard-launch-confirmation.v2",
+        preview: unsigned,
+        resolved_config_sha256: sha256Bytes(canonicalJson(resolved)),
+        expanded_graph_sha256: fingerprintGraph({ ...expanded, fingerprintInputs: undefined })
+      })
+    );
     return {
       ...unsigned,
-      confirmationDigest: sha256Bytes(JSON.stringify(unsigned))
+      confirmationDigest
     };
   }
 
@@ -1446,6 +1464,22 @@ class DashboardApp {
     const preview = await this.launchPreview(body);
     if (suppliedDigest === undefined || !constantTimeEqual(suppliedDigest, preview.confirmationDigest)) {
       throw new HttpError(409, "run launch confirmation is missing, stale, or does not match current configuration");
+    }
+    preflightDashboardAudit(this.projectRoot);
+  }
+
+  private validatePlannedRunLaunchConfirmation(
+    body: JsonObject,
+    resolved: ResolvedConfig,
+    expanded: ExpandedGraph
+  ): void {
+    if (body.confirmed !== true) {
+      throw new HttpError(400, "run requires explicit pre-launch confirmation");
+    }
+    const suppliedDigest = optionalStringField(body, "confirmationDigest");
+    const preview = this.launchPreviewForPlan(body, resolved, expanded);
+    if (suppliedDigest === undefined || !constantTimeEqual(suppliedDigest, preview.confirmationDigest)) {
+      throw new HttpError(409, "run launch confirmation is stale and does not match the execution snapshot");
     }
     preflightDashboardAudit(this.projectRoot);
     appendAudit(this.projectRoot, {
@@ -1555,6 +1589,8 @@ class DashboardApp {
           model: optionalStringField(body, "model"),
           maxConcurrency: optionalNumberField(body, "maxConcurrency"),
           workflowInput: body.workflowInput,
+          verifyLaunchPlan: ({ resolvedConfig, expandedGraph }) =>
+            this.validatePlannedRunLaunchConfirmation(body, resolvedConfig, expandedGraph),
           ...trustedCli,
           env: this.env
         });
