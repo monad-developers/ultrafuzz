@@ -142,12 +142,43 @@ describe("EVMBench definition", () => {
       baseImage: "ultrafuzz/evmbench-base:pinned"
     });
 
-    expect(pinned).toContain(`fetch --depth 1 origin ${"b".repeat(40)}`);
+    const runLine = pinned.split("\n").find((line) => line.startsWith("RUN ["));
+    expect(runLine).toBeDefined();
+    const argv = JSON.parse(runLine!.slice("RUN ".length)) as string[];
+    expect(argv.slice(0, 4)).toEqual(["sh", "-euc", expect.any(String), "ultrafuzz-pin"]);
+    expect(argv.slice(4)).toEqual([repository, "b".repeat(40)]);
+    expect(argv[2]).toContain('remote add origin "$1"');
+    expect(argv[2]).toContain('fetch --depth 1 --no-tags -- origin "$2"');
+    expect(argv[2]).toContain("protocol.allow=never");
+    expect(argv[2]).toContain("protocol.https.allow=always");
+    expect(argv[2]).toContain("protocol.ext.allow=never");
+    expect(argv[2]).toContain("protocol.file.allow=never");
+    expect(argv[2]).not.toContain(repository);
+    expect(argv[2]).not.toContain("b".repeat(40));
     expect(pinned).not.toContain("git clone");
     expect(localDockerContextFiles(source)).toEqual(["hardhat.config.js"]);
     expect(() => localDockerContextFiles("COPY findings/report.md /tmp/report.md")).toThrow(
       "unsafe audit build context source"
     );
+
+    for (const baseImage of ["safe/image:pinned\nRUN touch /tmp/pwned", "safe/image:$(touch-pwned)"]) {
+      expect(() =>
+        buildPinnedAuditDockerfile({
+          dockerfile: source,
+          repository,
+          targetCommit: "b".repeat(40),
+          baseImage
+        })
+      ).toThrow(/base image/u);
+    }
+    expect(() =>
+      buildPinnedAuditDockerfile({
+        dockerfile: source,
+        repository: "https://github.com/evmbench-org/synthetic-audit.git;touch-pwned",
+        targetCommit: "b".repeat(40),
+        baseImage: "ultrafuzz/evmbench-base:pinned"
+      })
+    ).toThrow(/public EVMBench snapshot/u);
   });
 });
 

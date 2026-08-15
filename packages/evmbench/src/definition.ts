@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { parseStrictJsonBytes, readRegularFileSnapshot, writeFileDurable } from "@ultrafuzz/artifacts";
+import { assertHttpsGitRemote, CONTROLLER_GIT_PROTOCOL_CONFIG, controllerGitArguments } from "@ultrafuzz/security";
 import { parse as parseYaml } from "yaml";
 
 import {
@@ -12,6 +13,7 @@ import {
   evmbenchCatalogAuditSchema,
   evmbenchCatalogSchema,
   evmbenchCommitSchema,
+  evmbenchContainerImageSchema,
   evmbenchLockSchema,
   evmbenchPublicSnapshotRepositorySchema,
   evmbenchSafeIdSchema,
@@ -120,8 +122,11 @@ export function writeEvmbenchDefinition(benchmarkDir: string, definition: Evmben
 }
 
 export async function resolvePublicTargetHead(repository: string): Promise<string> {
-  evmbenchPublicSnapshotRepositorySchema.parse(repository);
-  const output = execFileSync("git", ["ls-remote", repository, "HEAD"], {
+  const remote = assertHttpsGitRemote(
+    evmbenchPublicSnapshotRepositorySchema.parse(repository),
+    "EVMBench target repository"
+  );
+  const output = execFileSync("git", controllerGitArguments(["ls-remote", "--", remote, "HEAD"]), {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"]
   }).trim();
@@ -135,30 +140,40 @@ export function buildPinnedAuditDockerfile(input: {
   targetCommit: string;
   baseImage: string;
 }): string {
-  evmbenchPublicSnapshotRepositorySchema.parse(input.repository);
-  evmbenchCommitSchema.parse(input.targetCommit);
-  if (!/^[A-Za-z0-9][A-Za-z0-9./:@_-]+$/u.test(input.baseImage)) throw new Error("unsafe base image reference");
+  const repository = assertHttpsGitRemote(
+    evmbenchPublicSnapshotRepositorySchema.parse(input.repository),
+    "EVMBench target repository"
+  );
+  const targetCommit = evmbenchCommitSchema.parse(input.targetCommit);
+  const baseImage = evmbenchContainerImageSchema.parse(input.baseImage);
   const lines = input.dockerfile.split(/\r?\n/u);
   const cloneIndexes = lines.flatMap((line, index) => (line.includes("git clone") ? [index] : []));
   if (cloneIndexes.length !== 1) throw new Error(`expected one target clone instruction, found ${cloneIndexes.length}`);
   const cloneIndex = cloneIndexes[0]!;
-  const repositoryWithoutSuffix = input.repository.slice(0, -".git".length);
-  if (!lines[cloneIndex]!.includes(input.repository) && !lines[cloneIndex]!.includes(repositoryWithoutSuffix)) {
+  const repositoryWithoutSuffix = repository.slice(0, -".git".length);
+  if (!lines[cloneIndex]!.includes(repository) && !lines[cloneIndex]!.includes(repositoryWithoutSuffix)) {
     throw new Error("target clone instruction does not match the catalog repository");
   }
-  lines[cloneIndex] = [
-    "RUN git init $AUDIT_DIR && \\",
-    `    git -C $AUDIT_DIR remote add origin ${input.repository} && \\`,
-    `    git -C $AUDIT_DIR fetch --depth 1 origin ${input.targetCommit} && \\`,
-    "    git -C $AUDIT_DIR checkout --detach FETCH_HEAD && \\",
-    "    git -C $AUDIT_DIR submodule update --init --recursive"
-  ].join("\n");
+  // Dynamic values are argv entries in Docker's exec form, never source text
+  // in the shell program. The shell sees them only as quoted positional
+  // parameters. AUDIT_DIR is owned by the trusted EVMBench base image.
+  const gitPolicy = CONTROLLER_GIT_PROTOCOL_CONFIG.join(" ");
+  const submodulePolicy = `${gitPolicy} -c url.https://github.com/.insteadOf=git@github.com: -c url.https://github.com/.insteadOf=ssh://git@github.com/`;
+  const pinScript = [
+    'git init -- "$AUDIT_DIR"',
+    'git -C "$AUDIT_DIR" remote add origin "$1"',
+    `git -C "$AUDIT_DIR" ${gitPolicy} fetch --depth 1 --no-tags -- origin "$2"`,
+    'git -C "$AUDIT_DIR" switch --detach -- FETCH_HEAD',
+    `git -C "$AUDIT_DIR" ${submodulePolicy} submodule sync --recursive`,
+    `git -C "$AUDIT_DIR" ${submodulePolicy} submodule update --init --recursive --depth 1`
+  ].join(" && ");
+  lines[cloneIndex] = `RUN ${JSON.stringify(["sh", "-euc", pinScript, "ultrafuzz-pin", repository, targetCommit])}`;
 
   let baseReplacements = 0;
   const pinned = lines.map((line) => {
     if (/^\s*FROM\s+evmbench\/base(?::latest)?\s*$/u.test(line)) {
       baseReplacements += 1;
-      return `FROM ${input.baseImage}`;
+      return `FROM ${baseImage}`;
     }
     return line;
   });

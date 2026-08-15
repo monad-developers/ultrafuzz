@@ -16,6 +16,7 @@ import {
   validateRegisteredJsonBytesSync,
   writeFileDurable
 } from "@ultrafuzz/artifacts";
+import { assertHttpsGitRemote, controllerGitArguments } from "@ultrafuzz/security";
 import { parse, stringify } from "yaml";
 
 import {
@@ -706,14 +707,14 @@ function referenceCacheGroups(catalog: ReferenceCatalog): ReferenceCacheGroup[] 
 
 function fetchReference(id: string, reference: ReferenceEntry, cacheDir: string): boolean {
   const { owner, repo } = githubRepoParts(reference, id);
-  const remote = `https://github.com/${owner}/${repo}.git`;
+  const remote = assertHttpsGitRemote(`https://github.com/${owner}/${repo}.git`, "reference repository");
   const cacheParent = path.dirname(cacheDir);
   fs.mkdirSync(cacheParent, { recursive: true });
   const tempRoot = fs.mkdtempSync(path.join(cacheParent, ".sync-"));
   try {
     runGit(tempRoot, ["init"]);
     runGit(tempRoot, ["remote", "add", "origin", remote]);
-    runGit(tempRoot, ["fetch", "--depth=1", "--filter=blob:none", "origin", reference.commit]);
+    runGit(tempRoot, ["fetch", "--depth=1", "--filter=blob:none", "--", "origin", reference.commit]);
 
     const staging = path.join(tempRoot, "cache");
     fs.mkdirSync(staging, { recursive: true });
@@ -766,10 +767,10 @@ function resolveGithubDefaultBranchSha(repo: string): string {
     resolved_at: ""
   };
   const { owner, repo: repoName } = githubRepoParts(reference, "update-latest");
-  const remote = `https://github.com/${owner}/${repoName}.git`;
+  const remote = assertHttpsGitRemote(`https://github.com/${owner}/${repoName}.git`, "reference repository");
   let stdout: string;
   try {
-    stdout = execFileSync("git", ["ls-remote", "--symref", remote, "HEAD"], {
+    stdout = execFileSync("git", controllerGitArguments(["ls-remote", "--symref", "--", remote, "HEAD"]), {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"]
     });
@@ -790,7 +791,7 @@ function resolveGithubDefaultBranchSha(repo: string): string {
 
 function runGit(cwd: string, args: string[]): void {
   try {
-    execFileSync("git", args, { cwd, stdio: ["ignore", "ignore", "pipe"] });
+    execFileSync("git", controllerGitArguments(args), { cwd, stdio: ["ignore", "ignore", "pipe"] });
   } catch (error) {
     throw referenceError("GIT_FAILED", `git command failed: git ${args.join(" ")}: ${stderrFor(error)}`, {
       command: ["git", ...args]
@@ -809,7 +810,10 @@ function gitBlob(id: string, cwd: string, commit: string, referencePath: string)
     );
   }
   try {
-    return execFileSync("git", ["show", object], { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    return execFileSync("git", controllerGitArguments(["show", object]), {
+      cwd,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
   } catch (error) {
     throw referenceError("GIT_FAILED", `git command failed: git show ${object}: ${stderrFor(error)}`, {
       command: ["git", "show", object]
@@ -819,7 +823,11 @@ function gitBlob(id: string, cwd: string, commit: string, referencePath: string)
 
 function gitOutput(cwd: string, args: string[]): string {
   try {
-    return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    return execFileSync("git", controllerGitArguments(args), {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"]
+    });
   } catch (error) {
     throw referenceError("GIT_FAILED", `git command failed: git ${args.join(" ")}: ${stderrFor(error)}`, {
       command: ["git", ...args]

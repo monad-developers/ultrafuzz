@@ -12,7 +12,11 @@ import {
 } from "./defaults.js";
 
 export { assertModalBenchmarkConfigZod, modalBenchmarkConfigZodSchema } from "./benchmark-config-zod.js";
-export { MODAL_GIT_URL_PATTERN_SOURCE, MODAL_HTTPS_URL_PATTERN_SOURCE } from "./benchmark-config-patterns.js";
+export {
+  MODAL_GIT_REF_PATTERN_SOURCE,
+  MODAL_GIT_URL_PATTERN_SOURCE,
+  MODAL_HTTPS_URL_PATTERN_SOURCE
+} from "./benchmark-config-patterns.js";
 
 export type ModalBenchmarkConfig = StrictModalBenchmarkConfigDocument;
 
