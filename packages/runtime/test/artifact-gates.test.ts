@@ -8136,11 +8136,13 @@ type CampaignFailureFixture = {
 
 function currentCampaignFailure(failure: CampaignFailureFixture): Record<string, unknown> {
   const status = failure.status ?? "reproduced";
+  const propertyEntrypoint =
+    failure.property_ids?.length === 1 ? `property_${failure.property_ids[0]}` : `handler_${failure.id}()`;
   return {
     id: failure.id,
     status,
     property_ids: failure.property_ids ?? [],
-    entrypoint: failure.entrypoint ?? `handler_${failure.id}()`,
+    entrypoint: failure.entrypoint ?? propertyEntrypoint,
     sequence: failure.sequence ?? [`call ${failure.id}`],
     precondition_evidence: failure.precondition_evidence ?? ["fixture precondition held"],
     raw_reproducer_ref: failure.raw_reproducer_ref ?? campaignFixturePaths.raw_results,
