@@ -49,6 +49,7 @@ import {
   derivePropertyImplementationCoverage,
   findingNoteAssignmentIssue,
   executeSemanticGate,
+  findingReportSemanticAssignment,
   findingJsonSchema,
   findingSchema,
   generatedTestsJsonSchema,
@@ -1177,6 +1178,155 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
   }
 
   for (const evidenceAssignment of [
+    "access_control=role-based",
+    "access_token=redacted",
+    "verification_hash=0xabc",
+    "classification_vector=one-hot",
+    "Verification: run forge test",
+    "Resolution: use checks-effects-interactions",
+    "Access: only invoke public entrypoints"
+  ]) {
+    assertNoteParity(evidenceAssignment, true);
+  }
+
+  for (const reportAlias of [
+    "access=internal",
+    "verification=summary",
+    "Access=internal",
+    "ACCESS=internal",
+    "Verification=summary",
+    "access -> internal",
+    "verification -> summary",
+    "access: internal",
+    "verification: summary",
+    '"access": "internal"',
+    '"verification": "summary"',
+    "### access: internal",
+    "## verification: summary ##",
+    "<h3>access: internal</h3>",
+    "access: internal\n---",
+    "access:\ninternal",
+    "access maps to internal",
+    "verification maps to summary",
+    "rating: critical",
+    "attainability: helper-only",
+    "rating maps to critical"
+  ]) {
+    assertNoteParity(reportAlias, false);
+  }
+
+  for (const renamedAlias of [
+    "attainability_note=renamed",
+    "attainment_alias=renamed",
+    "exposure_alias=renamed",
+    "rating_alias=renamed",
+    "risk_score_v2=renamed",
+    "confidence_score_detail=high",
+    "severity_alias_v2=critical",
+    "classification_v2=bug",
+    "classification_v3=bug",
+    "classificationAlias=bug",
+    "classificationV3=bug",
+    "access_alias=internal",
+    "access_v2=internal",
+    "accessAlias=internal",
+    "accessV3=internal",
+    "verification_v2=summary",
+    "verification_alias=summary",
+    "verificationAlias=summary",
+    "prefix_disposition=accepted"
+  ]) {
+    assertNoteParity(renamedAlias, false);
+  }
+
+  for (const mappedAlias of [
+    "access := internal",
+    "verification := summary",
+    "classification_v2 := bug",
+    "access_alias := internal",
+    "access ↦ internal",
+    "verification ⟶ summary",
+    "access ≔ internal",
+    "attainability ↦ helper-only",
+    "severity_alias -> critical"
+  ]) {
+    assertNoteParity(mappedAlias, false);
+  }
+
+  for (const mappedMetadataAlias of [
+    "root_reason -> renamed",
+    "root_reason ↦ renamed",
+    "helper_verdict -> renamed",
+    "HELPER_VERDICT ↦ renamed"
+  ]) {
+    assertNoteParity(mappedMetadataAlias, false);
+  }
+
+  assert.equal(findingReportSemanticAssignment("access: internal"), undefined);
+  assert.equal(findingReportSemanticAssignment('"verification": "summary"'), undefined);
+  for (const headingAlias of [
+    "### Access: internal",
+    "## Verification: summary ##",
+    "<h3>Access: internal</h3>",
+    "Access: internal\n---",
+    "## Rating: critical"
+  ]) {
+    assert.notEqual(findingReportSemanticAssignment(headingAlias), undefined, headingAlias);
+  }
+  assert.deepEqual(findingReportSemanticAssignment("access -> internal"), {
+    key: "access",
+    operator: "=",
+    value: "internal"
+  });
+  assert.deepEqual(findingReportSemanticAssignment("Record access: internal evidence on each finding."), {
+    key: "access",
+    operator: "=",
+    value: "internal"
+  });
+  assert.deepEqual(findingReportSemanticAssignment("Record verification: summary evidence on each finding."), {
+    key: "verification",
+    operator: "=",
+    value: "summary"
+  });
+  for (const proseMapping of [
+    "Record access -> internal evidence on each finding.",
+    "Record the reachability -> helper-only evidence on each finding.",
+    "Record root_reason -> renamed evidence on each finding.",
+    "Record severity_alias_v2 -> critical evidence on each finding.",
+    "Record access | internal evidence on each finding.",
+    "Record root_cause: renamed evidence on each finding.",
+    "Record reachability -> helper-only evidence on each finding.",
+    "Record verification ↦ summary evidence on each finding.",
+    "Record root_cause ⟶ renamed evidence on each finding.",
+    "Record access ≔ internal evidence on each finding."
+  ]) {
+    assert.notEqual(findingReportSemanticAssignment(proseMapping), undefined, proseMapping);
+  }
+
+  for (const wordMapping of [
+    "Set access to internal on every finding.",
+    "Write verification as summary on every finding.",
+    "Record verification maps to summary on every finding.",
+    "Set rating to critical on every finding.",
+    "Record classification_v2 equals bug on every finding.",
+    "Record classification_v3 equal to bug on every finding."
+  ]) {
+    assert.notEqual(findingReportSemanticAssignment(wordMapping), undefined, wordMapping);
+  }
+
+  for (const benignDirectiveProse of [
+    "Set access to public before testing.",
+    "Use verification as evidence when classifying findings.",
+    "Write verification as a concise testing summary.",
+    "Require access to the source tree before triage.",
+    "Set access controls to public before testing.",
+    "Write verification steps before summarizing the report.",
+    "Record classification vectors as evidence."
+  ]) {
+    assert.equal(findingReportSemanticAssignment(benignDirectiveProse), undefined, benignDirectiveProse);
+  }
+
+  for (const evidenceAssignment of [
     "Observed balance=0 after withdrawal; expected balance=1.",
     "Evidence: https://example.test/trace?block=latest",
     "The invariant was amount == expectedAmount.",
@@ -1345,6 +1495,8 @@ test("the findings v2 schema enforces one authoritative report-note vocabulary w
     "call_path=helper-only",
     "production_path=public-entrypoint-trace",
     "exploit_path=public-wrapper-required",
+    "verification=summary",
+    "access=internal",
     "helper_address=helper-only",
     "`call_path=<helper-only>`",
     "((production_path=(public-entrypoint-trace)))",

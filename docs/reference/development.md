@@ -37,8 +37,10 @@ Pull requests run formatting, lint, and the workspace build while they are
 drafts. Marking a pull request ready for review adds benchmark-history and full
 release validation. Feature branches are validated only by the pull-request
 event, avoiding a duplicate push run; pushes to `main` run the full lane.
-Release validation uses three isolated CI lanes with a maximum of three jobs in
-parallel, then records their results in stable gate order in the JSON report.
+Release validation uses seven isolated CI lanes with a maximum of seven jobs in
+parallel: package and CLI/typecheck lanes, one runtime-supporting lane, and four
+deterministic runtime integration shards. It then records their results in
+stable gate order in the JSON report.
 
 ## Package Checks
 

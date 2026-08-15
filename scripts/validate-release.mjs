@@ -27,7 +27,22 @@ const gates = [
   gate("topology", "Topology package tests", "pnpm", ["--filter", "@ultrafuzz/topology", "test"], ["G-TOPOLOGY"]),
   gate("prompts", "Prompt package tests", "pnpm", ["--filter", "@ultrafuzz/prompts", "test"], ["G-PROMPTS"]),
   gate("artifacts", "Artifacts package tests", "pnpm", ["--filter", "@ultrafuzz/artifacts", "test"], ["G-ARTIFACTS"]),
-  gate("runtime", "Runtime package tests", "pnpm", ["--filter", "@ultrafuzz/runtime", "test"], ["G-RUNTIME"]),
+  gate(
+    "runtime-supporting",
+    "Runtime supporting test files",
+    "pnpm",
+    ["--filter", "@ultrafuzz/runtime", "test:release:supporting"],
+    ["G-RUNTIME"]
+  ),
+  ...[1, 2, 3, 4].map((index) =>
+    gate(
+      `runtime-${index}`,
+      `Runtime integration tests (shard ${index}/4)`,
+      "pnpm",
+      ["--filter", "@ultrafuzz/runtime", "test:release:runtime-shard", "--", `${index}/4`],
+      ["G-RUNTIME"]
+    )
+  ),
   gate("evals", "Evals package tests", "pnpm", ["--filter", "@ultrafuzz/evals", "test"], ["G-EVALS"]),
   gate("modal", "Modal package tests", "pnpm", ["--filter", "@ultrafuzz/modal", "test"], ["G-MODAL"]),
   gate("cli", "CLI package tests", "pnpm", ["--filter", "@ultrafuzz/cli", "test"], ["G-CLI"]),

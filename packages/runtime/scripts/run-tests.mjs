@@ -7,6 +7,13 @@ const passThrough = process.argv.slice(2).filter((argument) => argument.startsWi
 
 const selectorFiles = new Map([
   [
+    "supporting",
+    readdirSync("dist-test/test")
+      .filter((entry) => entry.endsWith(".test.js") && entry !== "runtime.test.js")
+      .sort()
+      .map((entry) => path.join("dist-test/test", entry))
+  ],
+  [
     "materialize",
     ["dist-test/test/materialize.test.js", "dist-test/test/clean.test.js", "dist-test/test/runtime.test.js"]
   ],
