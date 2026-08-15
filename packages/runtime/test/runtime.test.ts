@@ -185,7 +185,16 @@ async function startRun(input: Parameters<typeof runtimeStartRun>[0]): ReturnTyp
     const withoutReviewGate = config.replace("prompt_review_required = true", "prompt_review_required = false");
     if (withoutReviewGate !== config) fs.writeFileSync(configPath, withoutReviewGate, "utf8");
   }
-  const prepared = withFakeCliEntrypoint(input);
+  const prepared = withFakeCliEntrypoint({
+    ...input,
+    env: {
+      // Fixture-only controls are not part of the production controller
+      // environment. Tests that launch the fake runner must opt them in
+      // explicitly now that launch forwarding is allowlist-only.
+      ULTRAFUZZ_AGENT_ENV_ALLOWLIST: SMITHERS_TEST_ENVIRONMENT_ALLOWLIST,
+      ...input.env
+    }
+  });
   const first = await runtimeStartRun(prepared);
   const review = first.diagnostics.find(
     (diagnostic) =>
