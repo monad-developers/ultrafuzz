@@ -401,9 +401,17 @@ describe("public Modal benchmark configuration", () => {
     );
     const manifest = JSON.parse(fs.readFileSync(path.join(output, "manifest.json"), "utf8")) as {
       pairs: Array<{ provider: string; config_path: string }>;
+      concurrency: {
+        max_parallel_eval_rows_per_sandbox: number;
+        max_parallel_workflow_nodes_per_row: number;
+        max_live_runner_workflows_by_provider: Record<string, number>;
+      };
     };
     expect(manifest.pairs).toHaveLength(1);
     expect(manifest.pairs[0]?.provider).toBe("openrouter");
+    expect(manifest.concurrency.max_parallel_eval_rows_per_sandbox).toBe(1);
+    expect(manifest.concurrency.max_parallel_workflow_nodes_per_row).toBe(1);
+    expect(manifest.concurrency.max_live_runner_workflows_by_provider).toEqual({ openrouter: 1 });
     const config = JSON.parse(fs.readFileSync(path.join(output, manifest.pairs[0]!.config_path), "utf8")) as {
       models: Array<Record<string, string>>;
     };

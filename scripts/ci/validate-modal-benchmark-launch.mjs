@@ -49,7 +49,11 @@ export function validateModalBenchmarkLaunch(input) {
       `Modal benchmark launch manifest ${manifestPath} candidate commit does not match the checked-out benchmark candidate`
     );
   }
-  const dimensions = modalBenchmarkPolicyDimensions(policyRoot, mode);
+  const dimensions = modalBenchmarkPolicyDimensions(
+    policyRoot,
+    mode,
+    benchmarkRunnerProviderFromManifest(rawManifest, mode)
+  );
   assertConfiguredTargetCoverage(rawManifest, manifestPath, dimensions);
   const [producerRunId, producerRunAttempt] = generationParts(rawManifest.generation, manifestPath);
   const manifest = validateAutomaticPublicationManifest(rawManifest, {
@@ -158,7 +162,22 @@ function validatePairConfigs(manifest, controlRoot, manifestPath, dimensions) {
   }
 }
 
-export function modalBenchmarkPolicyDimensions(policyRoot, mode) {
+/**
+ * Read the dispatched smoke runner provider back off a control manifest. The smoke lane
+ * carries exactly one runner pair, and provider-specific request-rate limits (OpenRouter)
+ * change how many eval rows and workflow nodes the lane may run at once. Every consumer of
+ * `modalBenchmarkPolicyDimensions` has to derive that provider the same way, or a lane's
+ * launch, cleanup, and publication guardrails would disagree about the trusted concurrency.
+ */
+export function benchmarkRunnerProviderFromManifest(rawManifest, mode) {
+  if (mode !== "smoke") return undefined;
+  const pairs = rawManifest?.pairs;
+  if (!Array.isArray(pairs) || pairs.length !== 1) return undefined;
+  const provider = pairs[0]?.provider;
+  return typeof provider === "string" ? provider : undefined;
+}
+
+export function modalBenchmarkPolicyDimensions(policyRoot, mode, runnerProvider) {
   const benchmark = mode === "smoke" ? "ultrafuzz-bench" : "evmbench";
   const cohortPath = path.join(
     policyRoot,
@@ -180,7 +199,7 @@ export function modalBenchmarkPolicyDimensions(policyRoot, mode) {
   const targetCount = selectedTargets.length;
   const trialsPerVariant = lane.trials_per_variant;
   const expectedMatrixRowsPerPair = checkedProduct(targetCount, trialsPerVariant, "benchmark matrix row count");
-  const maxParallelEvalRows = publicBenchmarkMaxParallelEvalRows(mode);
+  const maxParallelEvalRows = publicBenchmarkMaxParallelEvalRows(mode, runnerProvider);
   const maxRuntimeSeconds = publicBenchmarkMaxRuntimeSeconds(mode);
   const matrixWaves = Math.ceil(expectedMatrixRowsPerPair / maxParallelEvalRows);
   const targets = selectedTargets.map((target) => ({
@@ -200,7 +219,7 @@ export function modalBenchmarkPolicyDimensions(policyRoot, mode) {
     trialsPerVariant,
     expectedMatrixRowsPerPair,
     maxParallelEvalRows,
-    maxParallelWorkflowNodes: publicBenchmarkMaxParallelWorkflowNodes(mode),
+    maxParallelWorkflowNodes: publicBenchmarkMaxParallelWorkflowNodes(mode, runnerProvider),
     maxRuntimeSeconds,
     controlTimeoutSeconds:
       matrixWaves * maxRuntimeSeconds +

@@ -75,8 +75,10 @@ const PROVIDER_AGENT = {
  * workflow's `smoke_provider` input builds a one-entry matrix from any known provider.
  * The trusted lane therefore pins how many runners a smoke manifest may declare, and
  * that the runner is a provider this repository knows how to score — not which one it
- * is. Reading that one field back off the manifest keeps every other dimension
- * (targets, trials, concurrency numbers, timeouts) pinned to policy.
+ * is. Reading that one field back off the manifest keeps every other dimension (targets,
+ * trials, timeouts) pinned to policy. The provider selects between two checked-in
+ * concurrency bounds — the lane's own numbers, or the candidate's declared OpenRouter
+ * serialization — so it can only ever narrow the lane, never widen it.
  */
 function smokeProviderFromManifest(manifest) {
   if (!Array.isArray(manifest.pairs) || manifest.pairs.length !== 1) return undefined;
@@ -218,9 +220,10 @@ export async function prepareAutomaticPublication(input) {
   const manifestPath = regularFileInside(controlRoot, "manifest.json", MAX_MANIFEST_BYTES, "benchmark manifest");
   const manifestDocument = readBenchmarkControlManifestDocument(manifestPath);
   const producerPolicy = automaticProducerPolicyDimensions(manifestDocument, controlRoot);
+  const smokeProvider = identity.mode === "smoke" ? smokeProviderFromManifest(manifestDocument) : undefined;
   const context = publicationExpectations({
     ...input,
-    ...benchmarkPolicyDimensions(policyRoot, identity, evalModule, producerPolicy)
+    ...benchmarkPolicyDimensions(policyRoot, identity, evalModule, producerPolicy, smokeProvider)
   });
   const manifest = validateAutomaticPublicationManifest(manifestDocument, context);
   const { loadModalBenchmarkConfig, fingerprintModalConfigFile, fingerprintModalModel } = configModule;
@@ -476,7 +479,7 @@ function validateConcurrency(value, expected) {
   }
 }
 
-function benchmarkPolicyDimensions(policyRoot, identity, evalModule, producerPolicy) {
+function benchmarkPolicyDimensions(policyRoot, identity, evalModule, producerPolicy, smokeProvider) {
   const cohortPath = path.join(
     policyRoot,
     "benchmarks",
@@ -513,8 +516,16 @@ function benchmarkPolicyDimensions(policyRoot, identity, evalModule, producerPol
   const trialsPerVariant = lane.trials_per_variant;
   const matrixRowsPerPair = checkedProduct(targetCount, trialsPerVariant, "benchmark matrix row count");
   const candidatePolicy = trustedCandidateRuntimePolicyDimensions(policyRoot, identity.mode);
-  const maxParallelEvalRows = candidatePolicy.maxParallelEvalRows;
-  const maxParallelWorkflowNodes = candidatePolicy.maxParallelWorkflowNodes;
+  // A smoke lane dispatched onto OpenRouter serializes rows and nodes, so the trusted
+  // re-derivation has to apply the candidate's own declared OpenRouter bound. Every other
+  // provider keeps the lane's checked-in concurrency.
+  const serializedForOpenRouter = identity.mode === "smoke" && smokeProvider === "openrouter";
+  const maxParallelEvalRows = serializedForOpenRouter
+    ? candidatePolicy.openRouterMaxParallel
+    : candidatePolicy.maxParallelEvalRows;
+  const maxParallelWorkflowNodes = serializedForOpenRouter
+    ? candidatePolicy.openRouterMaxParallel
+    : candidatePolicy.maxParallelWorkflowNodes;
   const maxRuntimeSeconds = candidatePolicy.maxRuntimeSeconds;
   const waves = Math.ceil(matrixRowsPerPair / maxParallelEvalRows);
   const controlTimeoutSeconds =
@@ -605,6 +616,12 @@ export function trustedCandidateRuntimePolicyDimensions(policyRoot, mode) {
   return {
     maxParallelEvalRows: concurrency[concurrencyNames[0]],
     maxParallelWorkflowNodes: concurrency[concurrencyNames[1]],
+    openRouterMaxParallel: readNumericSourceConstant(
+      workerSource,
+      "PUBLIC_BENCHMARK_OPENROUTER_MAX_PARALLEL",
+      concurrency,
+      "benchmark OpenRouter concurrency"
+    ),
     maxRuntimeSeconds: readNumericSourceConstant(workerSource, runtimeName, concurrency, runtimeName),
     evalCleanupSeconds: readNumericSourceConstant(
       workerSource,

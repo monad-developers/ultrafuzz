@@ -78,7 +78,8 @@ const targets = selectedTargets.map((target) => ({
 }));
 
 const models = benchmarkModels(mode, lane.model_profiles);
-const maxParallelEvalRows = publicBenchmarkMaxParallelEvalRows(mode);
+const runnerProvider = mode === "smoke" ? models[0]?.provider : undefined;
+const maxParallelEvalRows = publicBenchmarkMaxParallelEvalRows(mode, runnerProvider);
 const maxRuntimeSeconds = publicBenchmarkMaxRuntimeSeconds(mode);
 if (!Number.isSafeInteger(maxParallelEvalRows) || maxParallelEvalRows <= 0) {
   throw new Error(`invalid ${mode} maximum parallel eval rows`);
@@ -161,7 +162,7 @@ const manifest = {
   control_timeout_seconds: controlTimeoutSeconds,
   concurrency: {
     max_parallel_eval_rows_per_sandbox: maxParallelEvalRows,
-    max_parallel_workflow_nodes_per_row: publicBenchmarkMaxParallelWorkflowNodes(mode),
+    max_parallel_workflow_nodes_per_row: publicBenchmarkMaxParallelWorkflowNodes(mode, runnerProvider),
     max_live_runner_workflows_by_provider: Object.fromEntries(
       models.map((model) => [
         model.provider,

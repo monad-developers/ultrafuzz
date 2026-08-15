@@ -357,6 +357,7 @@ describe("trusted automatic eval-history publication handoff", () => {
     expect(trustedCandidateRuntimePolicyDimensions(process.cwd(), "smoke")).toEqual({
       maxParallelEvalRows: 3,
       maxParallelWorkflowNodes: 4,
+      openRouterMaxParallel: 1,
       maxRuntimeSeconds: 15_000,
       evalCleanupSeconds: 300,
       scorePerWaveTimeoutSeconds: 2_700,
@@ -389,6 +390,7 @@ describe("trusted automatic eval-history publication handoff", () => {
       [
         "const decoy = `export const PUBLIC_BENCHMARK_SMOKE_MAX_RUNTIME_SECONDS = 99;`;",
         "/* export const PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS = 98; */",
+        "export const PUBLIC_BENCHMARK_OPENROUTER_MAX_PARALLEL = 1;",
         "export const PUBLIC_BENCHMARK_SMOKE_MAX_RUNTIME_SECONDS = 2 * 60 * 60;",
         "export const PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS = 5 * 60;",
         "export const PUBLIC_BENCHMARK_SCORE_PER_WAVE_TIMEOUT_SECONDS = 45 * 60;",
@@ -407,6 +409,7 @@ describe("trusted automatic eval-history publication handoff", () => {
     expect(trustedCandidateRuntimePolicyDimensions(root, "smoke")).toEqual({
       maxParallelEvalRows: 3,
       maxParallelWorkflowNodes: 4,
+      openRouterMaxParallel: 1,
       maxRuntimeSeconds: 7_200,
       evalCleanupSeconds: 300,
       scorePerWaveTimeoutSeconds: 2_700,

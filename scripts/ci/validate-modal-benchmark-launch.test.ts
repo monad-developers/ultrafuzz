@@ -30,6 +30,39 @@ describe("Modal benchmark launch guardrails", () => {
     });
   });
 
+  it("accepts a serialized OpenRouter smoke manifest before dispatch", () => {
+    const fixture = preparedSmokeFixture({
+      BENCHMARK_MODELS_JSON: JSON.stringify([
+        { provider: "openrouter", model: "openai/gpt-5.6-luna", reasoning: "xhigh" }
+      ])
+    });
+    const manifest = readJson<LaunchManifest>(fixture.manifestPath);
+    expect(manifest.concurrency.max_parallel_eval_rows_per_sandbox).toBe(1);
+    expect(manifest.concurrency.max_parallel_workflow_nodes_per_row).toBe(1);
+    expect(validateModalBenchmarkLaunch(fixture.input)).toEqual({
+      mode: "smoke",
+      benchmark: "ultrafuzz-bench",
+      execution: { mode: "modal", dry_run: false },
+      target_count: 3,
+      matrix_rows_per_pair: 3,
+      pair_count: 1
+    });
+  });
+
+  it("rejects an OpenRouter smoke manifest that keeps the lane's parallel concurrency", () => {
+    const fixture = preparedSmokeFixture({
+      BENCHMARK_MODELS_JSON: JSON.stringify([
+        { provider: "openrouter", model: "openai/gpt-5.6-luna", reasoning: "xhigh" }
+      ])
+    });
+    const manifest = readJson<LaunchManifest>(fixture.manifestPath);
+    manifest.concurrency.max_parallel_eval_rows_per_sandbox = 3;
+    manifest.concurrency.max_parallel_workflow_nodes_per_row = 4;
+    writeJson(fixture.manifestPath, manifest);
+
+    expect(() => validateModalBenchmarkLaunch(fixture.input)).toThrow(/concurrency does not match the trusted lane/u);
+  });
+
   it("rejects one-target canonical smoke manifests before dispatch", () => {
     const fixture = preparedSmokeFixture();
     const manifest = readJson<LaunchManifest>(fixture.manifestPath);
@@ -165,6 +198,10 @@ interface LaunchManifest {
   execution: { mode: string; dry_run: boolean };
   targets: LaunchTarget[];
   matrix_rows_per_pair: number;
+  concurrency: {
+    max_parallel_eval_rows_per_sandbox: number;
+    max_parallel_workflow_nodes_per_row: number;
+  };
   pairs: Array<{ config_path: string }>;
 }
 
@@ -172,7 +209,7 @@ interface LaunchConfig {
   public_benchmark: { targets: LaunchTarget[] };
 }
 
-function preparedSmokeFixture() {
+function preparedSmokeFixture(env: Record<string, string> = {}) {
   const workspace = path.resolve(".");
   const output = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-launch-"));
   roots.push(output);
@@ -186,7 +223,7 @@ function preparedSmokeFixture() {
       output,
       "smoke"
     ],
-    { cwd: workspace }
+    { cwd: workspace, env: { ...process.env, ...env } }
   );
   const manifestPath = path.join(output, "manifest.json");
   const manifest = readJson<LaunchManifest>(manifestPath);

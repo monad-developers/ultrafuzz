@@ -41,6 +41,7 @@ import {
   PublicEvalDiagnosticsBuildError,
   PublicWorkerCommandInterruptedError,
   publicBenchmarkMaxParallelEvalRows,
+  publicBenchmarkMaxParallelWorkflowNodes,
   publicBenchmarkWorkRoot,
   publicBundleSources,
   optionalRowArtifactSources,
@@ -1442,6 +1443,15 @@ it("bounds public provider fan-out by mode", () => {
   });
   expect(publicBenchmarkMaxParallelEvalRows("smoke")).toBe(3);
   expect(publicBenchmarkMaxParallelEvalRows("full")).toBe(20);
+  expect(publicBenchmarkMaxParallelEvalRows("smoke", "openrouter")).toBe(1);
+  expect(publicBenchmarkMaxParallelWorkflowNodes("smoke", "openrouter")).toBe(1);
+
+  const openRouterSuite = preparePublicEvalSuite(smokeBaseSuite, "smoke", "openrouter");
+  expect(openRouterSuite.run).toEqual({
+    ...smokeBaseSuite.run,
+    max_parallel_runs: 1,
+    max_parallel_targets: 1
+  });
 });
 
 it("budgets the public eval subprocess for every queued matrix wave plus cleanup", () => {
